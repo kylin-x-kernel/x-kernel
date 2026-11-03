@@ -110,9 +110,10 @@ keyboard.c::kbd_init selects VC_UNICODE when that setting is true. Other Linux
 configurations can select XLATE; this headless interface does not implement it.
 
 All VT/KD setters, activation/wait and VT_RELDISP share authorization:
-current controlling-terminal object equality OR has_sys_tty_config authority,
-following Linux vt_ioctl.c. kcred currently approximates that capability with
-EUID 0; full capability sets/user-namespace semantics remain outside this PR.
+current controlling-terminal object equality OR effective `CAP_SYS_TTY_CONFIG`,
+following Linux vt_ioctl.c. `has_sys_tty_config()` tests that capability in the
+effective set; user namespaces and capability namespacing remain outside this
+interface.
 User memory copies occur outside the mode-state mutex. Lock order for output
 is output discipline -> VT state -> native byte connection; no path acquires
 the output or terminal association locks under VT state. Native initialization is deferred

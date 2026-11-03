@@ -106,7 +106,7 @@ pub use kidentity::PidHandle as PidIdentity;
 pub use pidfd::PidFd;
 pub use posix_types::{Pid, Tid};
 pub use process::{
-    LiveAddressSpace, Process, ProcessExecUpdate, ProcessExitPublication, init_proc,
+    ExecFsGuard, LiveAddressSpace, Process, ProcessExecUpdate, ProcessExitPublication, init_proc,
 };
 pub use process_group::ProcessGroup;
 pub(crate) use process_group::ProcessGroupMemberSlot;
@@ -287,6 +287,6 @@ pub(crate) fn build_process_thread_with_config(
         fs_context,
         signal_actions,
         config,
-    );
+    )?;
     Thread::new(process, runtime, task_number, credentials)
 }

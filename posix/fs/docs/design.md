@@ -294,7 +294,7 @@ VFS errno。规范化后的 mode、`FsStruct` umask 和 credential snapshot 传�
 5. regular file 使用 exclusive create callback，FIFO/socket 清零 device，
    character/block device 保留 ABI device。
 
-当前 capability 模型仍以 `euid == 0` 近似 Linux `CAP_MKNOD`。
+Creating a character or block device requires effective `CAP_MKNOD`.
 
 ### `linkat`、`symlinkat`、`unlinkat`
 
@@ -492,13 +492,17 @@ dispatch 前返回 `InvalidInput`；
 `sys_umount2` 对 force、detach、expire、nofollow 返回 `InvalidInput`。
 显式拒绝比静默忽略更安全，
 因为静默忽略会让用户态误以为已经获得异步卸载或 bind mount 等语义。
-mount privilege 在 syscall 边界用本次调用捕获的 credential snapshot 判定：`path_mount()`
-在 `MS_NOUSER` 之后、operation dispatch 之前校验，`sys_umount2()` 在 target lookup 之后、
-namespace detach 之前校验。因此不可解析的 target 仍优先返回查找错误，非特权调用者能解析到
-的 target 一律得到 `EPERM`，`MS_MOVE` 这类未实现操作对非特权调用者也先得到 `EPERM`。
-当前模型以 `euid == 0` 代表 Linux mount namespace user namespace 中的 `CAP_SYS_ADMIN`，
-尚未实现 capability 与 user namespace 授权；`MntNamespace` 的 `mount_new`、`attach_bind`、
-`remount`、`reconfigure_mount` 和 `detach` 保留显式调用契约，授权由调用方负责。
+`mount` privilege is decided at the syscall boundary from the credential
+snapshot captured for that call: `path_mount()` checks after `MS_NOUSER` and
+before operation dispatch, while `sys_umount2()` checks after target lookup and
+before namespace detach. An unresolvable target therefore still reports the
+lookup error first; any target a non-privileged caller can resolve yields
+`EPERM`, and unimplemented operations such as `MS_MOVE` also yield `EPERM` for
+non-privileged callers before dispatch. The current requirement is effective
+`CAP_SYS_ADMIN`; user-namespace and idmapped-mount authorization semantics are
+not implemented. `MntNamespace::{mount_new, attach_bind, remount,
+reconfigure_mount, detach}` retain explicit caller contracts, with authorization
+owned by the caller.
 
 ### 文件锁
 
@@ -548,13 +552,19 @@ sys_fcntl(F_GET_SEALS/F_ADD_SEALS)
 新 inode 由文件系统创建回调使用 `kvfs::inode_init_owner()` 初始化：UID 为 `fsuid`，
 GID 通常为 `fsgid`，setgid 父目录下继承父 GID，且新子目录传播 setgid 位。
 
-`faccessat2` 在解析路径之前选择检查身份：默认由 `Cred::for_access()` 使用 real IDs，
-`AT_EACCESS` 直接使用当前 committed credential，保留其 `fsuid/fsgid`。所选对象同时
-用于中间目录 search 和最终 inode 检查，补充组保持不变。
+`faccessat2` selects the checking identity before path resolution. By default,
+`Cred::for_access()` uses the real IDs and adjusts the effective capability set
+according to the Linux `access_override_creds` rules (unless
+`SECURE_NO_SETUID_FIXUP`: a nonzero real UID clears effective capabilities,
+while a zero real UID sets effective equal to permitted). `AT_EACCESS` uses the
+current committed credential directly and preserves its `fsuid`/`fsgid` and
+capabilities. The selected object is used for both intermediate-directory search
+and the final inode check; supplementary groups remain unchanged.
 
-`chown/chmod/utimensat` 同样在入口取得一次凭据快照，再由 `Path` 执行 Linux 风格的
-owner、group、write-permission 和显式时间授权。`chroot` 在目标目录 search 检查之后
-还要求特权；当前无 capability 模型，因此用 `euid == 0` 近似 `CAP_SYS_CHROOT`。
+`chown/chmod/utimensat` also capture a single credential snapshot at entry,
+then `Path` performs Linux-style owner, group, write-permission, and
+explicit-time authorization. `chroot` additionally requires effective
+`CAP_SYS_CHROOT` after the target-directory search check.
 
 `truncate(path)` 使用调用时凭据进行 pathname write DAC；`ftruncate(fd)` 验证打开文件
 具有 write mode 后直接使用 open file authority，不因调用者随后改变 UID 而重复执行
@@ -583,7 +593,8 @@ KVFS 传输层的检查阶段完成（见 `fs/kvfs/docs/design.md`）。
 
 ## 已知限制
 
-1. 凭据 DAC 尚无 capability、LSM、ACL、user namespace ID 映射或 idmapped mount。
+1. Credential DAC uses effective capabilities and Linux mode semantics, but
+   LSM, ACL, user-namespace ID mapping, and idmapped mounts are not implemented.
 2. FAT 等不能表达 Unix UID/GID 的后端无法完整持久化创建者身份。
 3. 文件锁提供本地 advisory 语义，不实现 lease 或网络文件系统锁协议。
 4. `copy_file_range` 没有零拷贝路径；跨超级块配对只能由目标端的原生拷贝原语

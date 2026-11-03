@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kcred::Cred;
+use kcred::{CAP_SYS_NICE, CapSet, CapSets, Cred};
 use kerrno::KError;
 use kprocess::NiceValue;
 use ktask::{KCpuMask, current};
@@ -19,6 +19,14 @@ fn assert_affinity_err<T>(result: Result<T, KError>, expected: KError) {
         Err(err) => panic!("expected {expected:?}, got {err:?}"),
         Ok(_) => panic!("expected {expected:?}, got Ok"),
     }
+}
+
+fn root_with_capabilities(effective: CapSet, permitted: CapSet) -> Cred {
+    let mut credentials = Cred::root();
+    credentials
+        .set_capabilities(CapSets::new(effective, permitted, CapSet::EMPTY))
+        .unwrap();
+    credentials
 }
 
 #[def_test]
@@ -78,6 +86,7 @@ fn setaffinity_requires_matching_effective_uid() {
     target
         .set_resuid(Some(1000), Some(2000), Some(1000))
         .unwrap();
+    target.set_capabilities(CapSets::EMPTY).unwrap();
 
     assert!(check_scheduler_owner_permission(&Cred::new(1000, 1), &target).is_ok());
     assert!(check_scheduler_owner_permission(&Cred::new(2000, 1), &target).is_ok());
@@ -89,11 +98,68 @@ fn setaffinity_requires_matching_effective_uid() {
 }
 
 #[def_test]
+fn scheduler_owner_must_contain_target_permitted_capabilities() {
+    let caller = root_with_capabilities(CapSet::EMPTY, CapSet::EMPTY);
+    let target = root_with_capabilities(CapSet::EMPTY, CapSet::from_bits(1 << CAP_SYS_NICE));
+
+    assert_eq!(
+        check_scheduler_owner_permission(&caller, &target),
+        Err(KError::OperationNotPermitted)
+    );
+    assert_eq!(
+        check_setpriority_permission(
+            &caller,
+            &target,
+            NiceValue::DEFAULT,
+            NiceValue::new_clamped(1),
+        ),
+        Err(KError::OperationNotPermitted)
+    );
+}
+
+#[def_test]
+fn effective_cap_sys_nice_allows_scheduling_privileged_target() {
+    let caller = root_with_capabilities(
+        CapSet::from_bits(1 << CAP_SYS_NICE),
+        CapSet::from_bits(1 << CAP_SYS_NICE),
+    );
+    let target = Cred::root();
+
+    assert!(check_scheduler_owner_permission(&caller, &target).is_ok());
+    assert!(
+        check_setpriority_permission(
+            &caller,
+            &target,
+            NiceValue::DEFAULT,
+            NiceValue::new_clamped(1),
+        )
+        .is_ok()
+    );
+}
+
+#[def_test]
+fn setpriority_reports_nice_limit_before_capability_subset() {
+    let caller = root_with_capabilities(CapSet::EMPTY, CapSet::EMPTY);
+    let target = root_with_capabilities(CapSet::EMPTY, CapSet::from_bits(1 << CAP_SYS_NICE));
+
+    assert_eq!(
+        check_setpriority_permission(
+            &caller,
+            &target,
+            NiceValue::new_clamped(5),
+            NiceValue::DEFAULT,
+        ),
+        Err(KError::PermissionDenied)
+    );
+}
+
+#[def_test]
 fn setpriority_requires_matching_effective_uid() {
     let mut target = Cred::root();
     target
         .set_resuid(Some(1000), Some(2000), Some(1000))
         .unwrap();
+    target.set_capabilities(CapSets::EMPTY).unwrap();
 
     assert!(
         check_setpriority_permission(

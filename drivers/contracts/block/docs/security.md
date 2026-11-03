@@ -169,9 +169,10 @@ before raising terminal notification.
 Generic ioctls copy values using their actual Linux ABI widths, not the size
 bits in the command encoding. Copy faults propagate unchanged. A failed
 `BLKROSET` argument read does not change state, and unknown commands do not access
-arguments before driver dispatch. The block dispatcher checks administrative
-authorization using the host-supplied `has_sys_admin` value before copy-in; the current effective-UID-zero check does not
-implement the full capability/user-namespace model. The disk sequence is neither
+arguments before driver dispatch. The block dispatcher requires the host-supplied
+`has_sys_admin` authorization before copy-in; the host derives that value from
+the caller's effective `CAP_SYS_ADMIN`, and this layer does not implement the
+full user-namespace ownership model. The disk sequence is neither
 an access token nor an I/O barrier, and queries do not provide an atomic state
 snapshot across multiple ioctls.
 

@@ -8,7 +8,7 @@ use core::{
     task::{Context, RawWaker, RawWakerVTable, Waker},
 };
 
-use kcred::initial_cred;
+use kcred::{CAP_CHOWN, CapSets, Cred, initial_cred};
 use khal::{
     mem::{PAGE_SIZE_4K, VirtAddr},
     paging::MappingFlags,
@@ -1081,6 +1081,10 @@ fn test_child_exit_si_pid_projected_into_parent_namespace() {
         .pid_ns_for_children()
         .expect("nested runtime exposes the pid namespace");
     assert_eq!(nested_number.number_in(&nested_pid_ns), Some(1));
+    // `active_nr()` is the number this task reports in its own active PID
+    // namespace. `capset(2)` compares its target PID against this projection,
+    // so a nested leader can pass the `1` returned by `getpid(2)`.
+    assert_eq!(nested_number.active_nr(), 1);
 
     // The nested child forks a grandchild WITHOUT CLONE_NEWPID: the
     // grandchild is allocated inside the inherited child namespace.
@@ -1389,6 +1393,7 @@ fn test_exit_owners_detach_before_process_exit_publication() {
     let (proc, task) = process_with_address_space(8_137, mapped_test_address_space());
     let resources = task.as_thread().files();
     let signals = proc.signal_manager().unwrap();
+    let fs_context = proc.fs_context().unwrap();
 
     assert!(proc.address_space().is_ok());
     assert!(resources.fd_table().is_ok());
@@ -1405,6 +1410,7 @@ fn test_exit_owners_detach_before_process_exit_publication() {
     proc.exit_mm().expect("runtime must be attached");
     task.as_thread().files().exit_files();
     proc.exit_fs().expect("runtime must be attached");
+    assert_eq!(fs_context.lock().process_user_count(), 0);
     proc.exit_namespaces().expect("runtime must be attached");
 
     assert!(!proc.is_exited());
@@ -1589,6 +1595,19 @@ fn test_clone_fs_shares_the_filesystem_context_umask() {
         0,
         "FsStruct must truncate umask to permission bits"
     );
+    assert_eq!(
+        parent
+            .fs_context()
+            .expect("parent runtime must own its filesystem context")
+            .lock()
+            .process_user_count(),
+        1
+    );
+    assert!(
+        !parent
+            .fs_is_shared_across_processes()
+            .expect("parent runtime must own its filesystem context")
+    );
 
     let child = parent_task
         .as_thread()
@@ -1603,6 +1622,24 @@ fn test_clone_fs_shares_the_filesystem_context_umask() {
         })
         .expect("CLONE_FS test child should prepare");
     let child_process = child.process().clone();
+    assert_eq!(
+        parent
+            .fs_context()
+            .expect("parent runtime must own its filesystem context")
+            .lock()
+            .process_user_count(),
+        2
+    );
+    assert!(
+        parent
+            .fs_is_shared_across_processes()
+            .expect("parent runtime must own its filesystem context")
+    );
+    assert!(
+        child_process
+            .fs_is_shared_across_processes()
+            .expect("child runtime must own its filesystem context")
+    );
     assert_eq!(child_process.address_space().unwrap().heap_top(), 0x6000);
     child_process.set_heap_top(0x7000).unwrap();
     assert_eq!(parent.address_space().unwrap().heap_top(), 0x6000);
@@ -1619,6 +1656,144 @@ fn test_clone_fs_shares_the_filesystem_context_umask() {
     );
 
     child_process.discard_unpublished();
+    drop(child);
+    drop(child_process);
+    assert_eq!(
+        parent
+            .fs_context()
+            .expect("parent runtime must still own its filesystem context")
+            .lock()
+            .process_user_count(),
+        1,
+        "dropping an unpublished CLONE_FS child must release its owner"
+    );
+    process_exit::finalize_process_exit(&parent);
+    wait_reap::assert_reap_zombie_process(&parent);
+}
+
+#[def_test(serial)]
+fn test_fs_snapshot_has_independent_process_ownership() {
+    let (parent, _task) = process_with_address_space(8_601, mapped_test_address_space());
+    let fs_context = parent
+        .fs_context()
+        .expect("parent runtime must own its filesystem context");
+    let mut snapshot = fs_context.lock().snapshot();
+    assert_eq!(
+        snapshot.process_user_count(),
+        0,
+        "a snapshot must not inherit process ownership"
+    );
+
+    let owner = snapshot.add_process_user();
+    assert_eq!(snapshot.process_user_count(), 1);
+    assert_eq!(
+        fs_context.lock().process_user_count(),
+        1,
+        "adopting a snapshot must not affect the source context"
+    );
+    drop(owner);
+    assert_eq!(snapshot.process_user_count(), 0);
+    drop(snapshot);
+    assert_eq!(fs_context.lock().process_user_count(), 1);
+
+    process_exit::finalize_process_exit(&parent);
+    wait_reap::assert_reap_zombie_process(&parent);
+}
+
+#[def_test(serial)]
+fn test_clone_fs_adoption_is_rejected_during_exec() {
+    let (parent, parent_task) = process_with_address_space(8_152, mapped_test_address_space());
+    parent.set_heap_top(0x6000).unwrap();
+    let fs_context = parent
+        .fs_context()
+        .expect("parent runtime must own its filesystem context");
+    let exec_fs = parent.begin_exec().expect("exec admission must succeed");
+    assert!(
+        !exec_fs.is_shared_with_other_process(),
+        "a sole process owner is not cross-process shared"
+    );
+    assert!(fs_context.lock().in_exec());
+
+    let err = match parent_task.as_thread().prepare_process_fork(ProcessForkConfig {
+        parent: ForkParent::Caller,
+        address_space: ForkAddressSpace::Private,
+        fs: ForkFs::Shared,
+        signal_actions: ForkSignalActions::Private,
+        fd_table: ForkFdTable::Private,
+        namespace_flags: kns::NamespaceFlags::empty(),
+        exit_signal: Some(ksignal::Signo::SIGCHLD),
+    }) {
+        Ok(_) => panic!("CLONE_FS must not attach during an exclusive exec"),
+        Err(err) => err,
+    };
+    assert_eq!(err, kerrno::KError::WouldBlock);
+    assert_eq!(
+        fs_context.lock().process_user_count(),
+        1,
+        "a rejected CLONE_FS child must not leak an owner"
+    );
+
+    drop(exec_fs);
+    assert!(
+        !fs_context.lock().in_exec(),
+        "dropping the exec guard must reopen CLONE_FS adoption"
+    );
+    let child = parent_task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Shared,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("CLONE_FS must succeed after exec admission ends");
+    let child_process = child.process().clone();
+    assert_eq!(fs_context.lock().process_user_count(), 2);
+    child_process.discard_unpublished();
+    drop(child);
+    drop(child_process);
+    assert_eq!(fs_context.lock().process_user_count(), 1);
+    process_exit::finalize_process_exit(&parent);
+    wait_reap::assert_reap_zombie_process(&parent);
+}
+
+#[def_test(serial)]
+fn test_exec_admission_marks_cross_process_shared_context() {
+    let (parent, parent_task) = process_with_address_space(8_153, mapped_test_address_space());
+    parent.set_heap_top(0x6000).unwrap();
+    let child = parent_task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Shared,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("CLONE_FS test child should prepare");
+    let child_process = child.process().clone();
+    let exec_fs = parent.begin_exec().expect("exec admission must succeed");
+    assert!(
+        exec_fs.is_shared_with_other_process(),
+        "a CLONE_FS child makes exec unsafe across processes"
+    );
+    assert!(
+        !parent
+            .fs_context()
+            .expect("parent runtime must own its filesystem context")
+            .lock()
+            .in_exec(),
+        "a shared exec must not publish an exclusive in_exec transition"
+    );
+    drop(exec_fs);
+    child_process.discard_unpublished();
+    drop(child);
+    drop(child_process);
     process_exit::finalize_process_exit(&parent);
     wait_reap::assert_reap_zombie_process(&parent);
 }
@@ -2957,6 +3132,137 @@ fn test_unpublish_task_if_matches_preserves_reused_tid_identity() {
     let _ = publication.unpublish_process_if_matches(&process);
     drop(first);
     drop(second);
+}
+
+#[def_test(user, serial)]
+fn test_capget_reports_exited_group_leader_credentials() {
+    let (process, leader_task) = build_prepared_test_user_task();
+    let published_leader = prepare_user_task(leader_task).publish().unwrap();
+    let leader = published_leader.task().clone();
+    let survivor = publish_test_thread(&process, 1_178);
+
+    // Linux keeps the zombie group leader, so `capget(tgid)` reads its frozen
+    // objective credentials rather than the surviving sibling's per-thread
+    // credentials. Give the two tasks distinguishable capability sets.
+    leader
+        .as_thread()
+        .replace_cred_for_test(Cred::new(1_234, 1_234));
+    assert!(
+        survivor
+            .as_thread()
+            .real_cred()
+            .capabilities()
+            .has_effective(CAP_CHOWN),
+        "the test requires the sibling to retain root credentials"
+    );
+
+    assert!(!process.exit_thread(&leader, 0));
+    assert_eq!(
+        crate::capability::target_capabilities(process.pid(), kidentity::root_pid_namespace()).unwrap(),
+        CapSets::EMPTY,
+        "the exited leader's empty capability sets must win over the live sibling"
+    );
+
+    assert!(process.exit_thread(&survivor, 0));
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert_eq!(
+        crate::capability::target_capabilities(process.pid(), kidentity::root_pid_namespace()).unwrap(),
+        CapSets::EMPTY,
+        "an unreaped zombie must remain observable through its retained leader"
+    );
+
+    process.free();
+    let _ = process_publication().unpublish_process_if_matches(&process);
+    assert!(
+        crate::capability::target_capabilities(process.pid(), kidentity::root_pid_namespace()).is_err(),
+        "reaping must remove the retained leader credential from PID lookup"
+    );
+    drop(published_leader);
+    process_publication().cleanup();
+}
+
+#[def_test(user, serial)]
+fn test_capget_target_resolves_pid_in_observer_namespace() {
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_820);
+    let parent =
+        init.fork_with_task_number(parent_task_number.clone(), Some(ksignal::Signo::SIGCHLD));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[capget-ns-parent]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context::copy_init_fs_struct(),
+        ksignal::api::SignalActions::default(),
+        initial_cred(),
+    )
+    .expect("test thread preparation");
+    let task = TaskInner::new_user(
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
+        String::from("capget-ns-parent"),
+        parent_task_number,
+        thread,
+    );
+
+    let prepared = task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::NEWPID,
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("CLONE_NEWPID fork should prepare");
+    let nested = prepared.process().clone();
+    let nested_ns = nested
+        .pid_ns_for_children()
+        .expect("nested runtime exposes the pid namespace");
+    let (nested_thread, nested_number) = prepared.into_parts();
+    let nested_ns_nr = nested_number
+        .number_in(&nested_ns)
+        .expect("nested leader has a number in its own namespace");
+    assert_eq!(nested_ns_nr, 1);
+    let nested_task = TaskInner::new_user(
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
+        String::from("capget-ns-child"),
+        nested_number,
+        nested_thread,
+    );
+
+    nested_task
+        .as_thread()
+        .replace_cred_for_test(Cred::new(4_321, 4_321));
+    let published = prepare_user_task(nested_task).publish().unwrap();
+    let expected = CapSets::EMPTY;
+
+    assert_eq!(
+        crate::capability::target_capabilities(nested_ns_nr, &nested_ns),
+        Ok(expected),
+        "a namespace number must resolve to the task carrying that projection"
+    );
+    assert_eq!(
+        crate::capability::target_capabilities(nested.pid(), kidentity::root_pid_namespace()),
+        Ok(expected),
+        "the root namespace must still resolve the same process by its root number"
+    );
+    assert_eq!(
+        crate::capability::target_capabilities(parent.pid(), &nested_ns),
+        Err(kerrno::KError::NoSuchProcess),
+        "a root number outside the observer's namespace must not resolve"
+    );
+
+    nested.exit_thread(published.task(), 0);
+    nested.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    nested.free();
+    let _ = process_publication().unpublish_process_if_matches(&nested);
+    drop(published);
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+    process_publication().cleanup();
 }
 
 #[def_test(serial)]

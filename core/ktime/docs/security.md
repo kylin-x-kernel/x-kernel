@@ -46,7 +46,7 @@ sample 执行内置范围校验：墙钟不得早于 `CLOCK_MONOTONIC` 当前值
 
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
-| T-01 | 非特权进程修改墙钟 | 高 | 直接调用 `set_realtime_checked` | syscall 层检查 privileged credential；`set_realtime_checked` 内置范围校验（墙钟不得早于 `CLOCK_MONOTONIC` 或超过 `MAX_SETTABLE_UNIX_SECONDS`），失败返回 `RealtimeOutOfRange`，syscall 层将其映射为 `EINVAL` |
+| T-01 | Unprivileged process modifies wall-clock time | High | Direct call to `set_realtime_checked` | The syscall layer requires effective `CAP_SYS_TIME`; `set_realtime_checked` performs range validation (the wall clock must not precede `CLOCK_MONOTONIC` or exceed `MAX_SETTABLE_UNIX_SECONDS`) and returns `RealtimeOutOfRange`, which the syscall layer maps to `EINVAL` |
 | T-02 | 初始化输入超范围 | 中 | 越界 SystemTime sample | `SystemTime` 构造规范化分量；读取路径 checked/saturating 兜底 |
 | T-03 | IRQ 上下文死锁 | 高 | 中断读取 realtime 时写者持锁 | 读写均使用 `SpinRwNoIrq`（关中断），写临界区极短 |
 | T-04 | 墙钟回拨导致负 duration | 中 | realtime 被设置到过去 | `duration_since` 返回错误而非下溢，deadline 换算按已过期处理 |

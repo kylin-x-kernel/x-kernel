@@ -648,6 +648,14 @@ fn run_child(
             );
             assert_eq!(probe.after_exchange, 0);
             assert_eq!(process.mm_id().unwrap(), mm_id);
+            assert!(
+                !process
+                    .fs_context()
+                    .expect("the process owns its filesystem context")
+                    .lock()
+                    .in_exec(),
+                "a failed exec must clear the CLONE_FS admission flag"
+            );
             assert_eq!(check_current_root(None), old_root);
             assert_eq!(process.heap_top().unwrap(), old_heap);
             assert_eq!((sentinel_addr as *const u64).read_vm().unwrap(), 0x5678);
@@ -664,6 +672,14 @@ fn run_child(
         Case::Success | Case::RetainedSuccess | Case::Unrelated => {
             assert_eq!(result, Ok(0));
             assert_eq!(probe.after_exchange, usize::from(case != Case::Unrelated));
+            assert!(
+                !process
+                    .fs_context()
+                    .expect("the process owns its filesystem context")
+                    .lock()
+                    .in_exec(),
+                "a successful exec must clear the CLONE_FS admission flag"
+            );
             assert!(!thread.is_exiting());
             assert_ne!(uctx.ip(), 0x1234);
             assert_ne!(uctx.sp(), 0x8000);

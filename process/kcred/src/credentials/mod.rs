@@ -4,11 +4,13 @@
 
 //! POSIX process credentials.
 
+mod caps;
 mod group;
 mod model;
 mod securebits;
 mod user;
 
-pub use group::Gid;
-pub use model::Cred;
-pub use user::Uid;
+pub use caps::*;
+pub use group::{Gid, INVALID_GID, is_valid_gid};
+pub use model::{Cred, PtraceAccessMode};
+pub use user::{INVALID_UID, Uid, is_valid_uid};

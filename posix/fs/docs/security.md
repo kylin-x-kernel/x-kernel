@@ -153,7 +153,8 @@ kfd resources / kvfs / device and pipe implementations
    `/proc/filesystems` 分离的构造分支。
 8. 创建文件和目录时应应用 `FsStruct` 中的当前 umask；写入 umask 必须截断为
    `0777`，`CLONE_FS` 必须与 root/pwd 一起共享它。
-9. `chroot` 目标必须是目录，且当前 capability 模型下调用者必须满足 `euid == 0`。
+9. A `chroot` target must be a directory, and the caller must hold effective
+   `CAP_SYS_CHROOT`.
 10. `chown/chmod/utimensat` 必须把同一个 credential snapshot 传给 VFS metadata
    授权，不能直接调用后端 `setattr`。
 11. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
@@ -217,8 +218,8 @@ kfd resources / kvfs / device and pipe implementations
 | T-14 | 同一 pathname 操作混用多个凭据快照 | syscall/VFS | 高 | 路径组件逐次查询 current task，期间 credential 被提交 | syscall 入口只取得一次 `Arc<Cred>` 并沿完整操作传递 |
 | T-15 | `ftruncate` 在 UID 改变后错误重做 pathname DAC | fd/VFS | 中 | fd 操作调用 `Path::truncate(cred)` | `VfsFile::truncate()` 只验证 open write mode，再使用 opened-file authority |
 | T-16 | 非 owner 绕过 VFS 直接修改 mode、owner 或时间 | metadata | 高 | syscall 直接调用后端 `setattr` | syscall 只做 ABI 转换，`Path::chown/chmod/set_times` 统一执行 owner、group 和 write authorization |
-| T-17 | 普通用户改变进程 root | chroot | 高 | 只验证目标目录可搜索 | 完成目录 DAC 后额外要求 `euid == 0`，近似 Linux `CAP_SYS_CHROOT` |
-| T-18 | 普通用户通过 `mknodat` 创建设备节点 | namespace / device | 高 | 仅按 mode 创建 special inode | character/block device 要求 privileged credential；其它节点类型仍应用 umask 与 VFS 目录授权 |
+| T-17 | Unprivileged user changes the process root | chroot | High | Only target-directory searchability is checked | After directory DAC, additionally require effective `CAP_SYS_CHROOT` |
+| T-18 | Unprivileged user creates a device node through `mknodat` | namespace / device | High | The special inode is created from the mode alone | Character/block devices require effective `CAP_MKNOD`; other node types still apply umask and VFS directory authorization |
 | T-19 | 绝对 `*at` 路径错误访问无效 `dirfd` | pathname / fd | 中 | 在判断 pathname 是否绝对之前解析 `dirfd` | 所有非空 pathname 入口复用 `with_fs_at`；绝对路径强制选择进程 cwd snapshot 并由 KVFS 从 root 开始 |
 | T-20 | `mknodat` 锁外授权与最终名称状态竞争 | namespace / device | 高 | syscall 先做特权/DAC，再由 VFS 查找或创建 | syscall 只转换 ABI；KVFS 在父目录 exclusive lock 内按 positive-first 顺序执行最终 lookup、授权、mode 准备和 callback |
 | T-21 | 非法 mknod 类型被无效 dirfd 错误遮蔽 | syscall / fd | 中 | 进入 `with_fs_at` 后才执行 `may_mknod` | 复制 pathname 后立即调用 namei 层 `may_mknod()`，验证成功后才允许解析相对路径的 `dirfd` |
@@ -288,7 +289,8 @@ kfd resources / kvfs / device and pipe implementations
 
 ## 已知限制
 
-1. 凭据 DAC 尚无 capability、LSM、ACL、user namespace ID 映射和 idmapped mount。
+1. Credential DAC uses effective capabilities and Linux mode semantics, but
+   LSM, ACL, user-namespace ID mapping, and idmapped mounts are not implemented.
 2. FAT 等不能表达 Unix owner 的后端无法完整保存创建者 UID/GID。
 3. 文件锁是 advisory 锁；不阻止未参与加锁的读写，不实现 lease 或网络锁协议。
 4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
@@ -303,9 +305,11 @@ kfd resources / kvfs / device and pipe implementations
    非零 flags 返回 `Unsupported`。
 7. memfd `F_ADD_SEALS` / `F_GET_SEALS` 已接入；shared writable mmap 和
    `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap` 执行。
-8. POSIX ACL 与 LSM 尚未实现；`security.*`/`system.*` 的最终安全策略受这一限制。
-   KExt4 当前只对外暴露普通 `user.*`、`trusted.*` 和 `security.*` xattr，KVFS 在完整
-   LSM/capability hook 接入前要求 privileged credential 才能 set/remove `security.*`。
+8. POSIX ACLs and LSMs are not implemented; the final security policy for
+   `security.*`/`system.*` is constrained by this gap. KExt4 currently exposes
+   only ordinary `user.*`, `trusted.*`, and `security.*` xattrs, and KVFS
+   requires effective `CAP_SYS_ADMIN` to set/remove `security.*` until complete
+   concrete LSM hooks are connected.
 
 ## 审计清单
 
@@ -336,9 +340,9 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] 若修复当前已知限制，同步更新本文和 `design.md`。
 
 The ioctl entry passes the current caller's credential snapshot through KVFS.
-The block dispatcher authorizes `BLKROSET` using that effective UID (zero
-stands in for CAP_SYS_ADMIN) before copying the argument, returning EACCES on
-failure. The opening credential does not authorize later ioctl callers.
+The block dispatcher authorizes `BLKROSET` using effective `CAP_SYS_ADMIN`
+before copying the argument, returning EACCES on failure. The opening credential
+does not authorize later ioctl callers.
 
 Content-change notification uses inode event masks only to avoid unnecessary
 routing work. Permissions remain checked at registration and the notifier

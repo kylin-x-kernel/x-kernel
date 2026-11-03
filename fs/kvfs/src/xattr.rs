@@ -116,12 +116,12 @@ pub trait XattrNameSink {
 
 struct CredentialFilteringSink<'a> {
     inner: &'a mut dyn XattrNameSink,
-    is_privileged: bool,
+    can_read_trusted: bool,
 }
 
 impl XattrNameSink for CredentialFilteringSink<'_> {
     fn emit(&mut self, name: XattrNameRef<'_>) -> VfsResult<()> {
-        if !self.is_privileged && name.is_trusted() {
+        if !self.can_read_trusted && name.is_trusted() {
             return Ok(());
         }
         self.inner.emit(name)
@@ -167,10 +167,10 @@ fn check_xattr_permission(
     let name = name.as_bytes();
 
     // Linux delegates security.* authorization to LSM hooks. Until KVFS has
-    // that hook boundary, require the privileged-credential approximation for
-    // mutations instead of letting an unprivileged caller forge security data.
+    // that hook boundary, require `CAP_SYS_ADMIN` for mutations instead of
+    // letting a caller without that authority forge security data.
     if name.starts_with(SECURITY_PREFIX) {
-        return if matches!(access, XattrAccess::Write) && !cred.is_privileged() {
+        return if matches!(access, XattrAccess::Write) && !cred.has_sys_admin() {
             Err(VfsError::OperationNotPermitted)
         } else {
             Ok(())
@@ -184,7 +184,7 @@ fn check_xattr_permission(
     }
 
     if name.starts_with(TRUSTED_PREFIX) {
-        return if cred.is_privileged() {
+        return if cred.has_sys_admin() {
             Ok(())
         } else {
             Err(access.namespace_error())
@@ -199,7 +199,7 @@ fn check_xattr_permission(
                 if matches!(access, XattrAccess::Write)
                     && metadata.mode.permission().contains(NodePermission::STICKY)
                     && cred.fsuid() != metadata.uid
-                    && !cred.is_privileged()
+                    && !cred.has_cap(kcred::CAP_FOWNER)
                 {
                     return Err(VfsError::OperationNotPermitted);
                 }
@@ -221,20 +221,20 @@ impl Path {
 
     /// Streams complete names of extended attributes visible to `cred`.
     ///
-    /// `trusted.*` names are filtered before reaching `sink` for
-    /// unprivileged credentials.
+    /// `trusted.*` names are filtered before reaching `sink` unless `cred`
+    /// holds effective `CAP_SYS_ADMIN`.
     pub fn list_xattrs(&self, cred: &Cred, sink: &mut dyn XattrNameSink) -> VfsResult<()> {
         let inode = self.inode();
         let mut filtering_sink = CredentialFilteringSink {
             inner: sink,
-            is_privileged: cred.is_privileged(),
+            can_read_trusted: cred.has_sys_admin(),
         };
         inode.list_xattrs(self.dentry(), &mut filtering_sink)
     }
 
     /// Creates or replaces one extended attribute.
     ///
-    /// Mutating `security.*` requires a privileged credential until KVFS has
+    /// Mutating `security.*` requires effective `CAP_SYS_ADMIN` until KVFS has
     /// an LSM authorization hook.
     pub fn set_xattr(
         &self,
@@ -252,7 +252,7 @@ impl Path {
 
     /// Removes one extended attribute.
     ///
-    /// Removing `security.*` requires a privileged credential until KVFS has
+    /// Removing `security.*` requires effective `CAP_SYS_ADMIN` until KVFS has
     /// an LSM authorization hook.
     pub fn remove_xattr(&self, name: &XattrName, cred: &Cred) -> VfsResult<()> {
         self.check_writable_mount()?;

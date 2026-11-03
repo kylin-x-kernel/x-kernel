@@ -94,8 +94,8 @@ impl SocketFileOps {
         }
         match socket.as_ref() {
             Socket::Netlink(_) => {
-                let cred = kprocess::current_cred();
-                socket.send_with_cred(src, options, &cred)
+                let sender = kprocess::current_cred();
+                socket.send_with_cred(src, options, &sender)
             }
             Socket::Unix(unix) if unix.should_attach_sender_credentials() => {
                 options.unix_sender_credentials = Some(current_sender_credentials());

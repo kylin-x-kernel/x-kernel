@@ -112,7 +112,7 @@ pub fn handle_net_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<Option<isize>>
     if sock_from_file(&file).is_err() {
         return Err(KError::NotATty);
     }
-    if is_net_ioctl_write(cmd) && !kprocess::current_cred().is_privileged() {
+    if is_net_ioctl_write(cmd) && !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN) {
         return Err(KError::from(LinuxError::EPERM));
     }
 

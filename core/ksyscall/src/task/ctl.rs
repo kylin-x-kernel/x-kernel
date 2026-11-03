@@ -11,50 +11,189 @@
 
 use core::ffi::c_char;
 
+use kcred::{CAP_LAST_CAP, CapSet, CapSets};
 use kerrno::{KError, KResult};
 use ksignal::MAX_SIGNALS;
 use ktask::current;
 use kuaccess::vm_load_string;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
 use osvm::write_vm_mem;
-use posix_types::UserPtr;
-
-const CAPABILITY_VERSION_3: u32 = 0x20080522;
-const CAP_LAST_CAP: usize = 40;
+use posix_types::{UserPtr, task::CapUserData};
 const SECCOMP_MODE_STRICT: usize = 1;
 const SECCOMP_MODE_FILTER: usize = 2;
 
-fn validate_cap_header(header_ptr: UserPtr<__user_cap_header_struct>) -> KResult<()> {
-    let mut header = header_ptr.read_vm()?;
-    if header.version != CAPABILITY_VERSION_3 {
-        header.version = CAPABILITY_VERSION_3;
-        header_ptr.write_vm(header)?;
-        return Err(KError::InvalidInput);
+const CAPABILITY_VERSION_1: u32 = 0x19980330;
+const CAPABILITY_VERSION_2: u32 = 0x20071026;
+const CAPABILITY_VERSION_3: u32 = 0x20080522;
+
+/// The capability data layout selected by the caller's header version.
+///
+/// Linux keeps accepting the two legacy versions: version 1 carries a single
+/// 32-bit data word, while version 2 already uses the two-word layout and is
+/// otherwise equivalent to version 3. Only version 1 needs a narrower copy;
+/// Linux merely warns about the deprecated version-2 spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CapabilityVersion {
+    /// One `__user_cap_data_struct` word (capabilities `0..31`).
+    V1,
+    /// Two `__user_cap_data_struct` words (capabilities `0..63`).
+    V2,
+}
+
+/// Reads and validates the version word of a `capget(2)`/`capset(2)` header.
+///
+/// A version mismatch rewrites only the version word with the version this
+/// kernel implements and fails with `EINVAL`, matching Linux
+/// `cap_validate_magic()`. The data array and the header's PID word are
+/// deliberately not touched on that path.
+fn validate_cap_version(
+    header_ptr: UserPtr<__user_cap_header_struct>,
+) -> KResult<CapabilityVersion> {
+    let version = header_ptr.cast::<u32>().read_vm()?;
+    match version {
+        CAPABILITY_VERSION_1 => Ok(CapabilityVersion::V1),
+        CAPABILITY_VERSION_2 | CAPABILITY_VERSION_3 => Ok(CapabilityVersion::V2),
+        _ => {
+            // Linux `cap_validate_magic()` uses `put_user()` on the version
+            // field, so a concurrent PID update in the second word is not
+            // overwritten.
+            header_ptr.cast::<u32>().write_vm(CAPABILITY_VERSION_3)?;
+            Err(KError::InvalidInput)
+        }
     }
-    kprocess::capability::validate_target_pid(header.pid as u32)?;
-    Ok(())
+}
+
+/// Reads a complete capability header after validating its version.
+///
+/// The header carries the caller's target PID for the syscall-specific target
+/// policy. `capget` splits this into a version probe and a later full read when
+/// its data pointer is null, matching Linux's early return for that legacy
+/// probe.
+fn read_cap_header(
+    header_ptr: UserPtr<__user_cap_header_struct>,
+) -> KResult<(__user_cap_header_struct, CapabilityVersion)> {
+    let version = validate_cap_version(header_ptr)?;
+    Ok((header_ptr.read_vm()?, version))
+}
+
+fn cap_data_from_sets(caps: CapSets) -> CapUserData {
+    CapUserData {
+        low: __user_cap_data_struct {
+            effective: caps.effective().low_word(),
+            permitted: caps.permitted().low_word(),
+            inheritable: caps.inheritable().low_word(),
+        },
+        high: __user_cap_data_struct {
+            effective: caps.effective().high_word(),
+            permitted: caps.permitted().high_word(),
+            inheritable: caps.inheritable().high_word(),
+        },
+    }
+}
+
+fn cap_set_from_words(low: u32, high: u32) -> CapSet {
+    CapSet::from_words(low, high).intersection(CapSet::FULL)
+}
+
+fn cap_sets_from_data(data: CapUserData) -> CapSets {
+    // Linux `mk_kernel_cap()` masks each incoming word with `CAP_VALID_MASK`
+    // before `security_capset()` validates the transition. Do the same here so
+    // unknown bits neither enter the credential nor make an otherwise valid
+    // `capset` fail the permitted-set subset rule.
+    CapSets::new(
+        cap_set_from_words(data.low.effective, data.high.effective),
+        cap_set_from_words(data.low.permitted, data.high.permitted),
+        cap_set_from_words(data.low.inheritable, data.high.inheritable),
+    )
 }
 
 pub(crate) fn sys_capget(
     header: UserPtr<__user_cap_header_struct>,
     data: UserPtr<__user_cap_data_struct>,
 ) -> KResult<isize> {
-    validate_cap_header(header)?;
+    let version = match validate_cap_version(header) {
+        Ok(version) => version,
+        // Linux returns success for a null-data version probe even when the
+        // version was unknown; it has already rewritten the version word.
+        Err(err) => {
+            return if data.is_null() && err == KError::InvalidInput {
+                Ok(0)
+            } else {
+                Err(err)
+            };
+        }
+    };
+    // A null data pointer is Linux's legacy "which version do you implement?"
+    // probe. It returns after version validation without reading the PID.
+    if data.is_null() {
+        return Ok(0);
+    }
 
-    data.write_vm(__user_cap_data_struct {
-        effective: u32::MAX,
-        permitted: u32::MAX,
-        inheritable: u32::MAX,
-    })?;
+    let header = header.read_vm()?;
+    if header.pid < 0 {
+        return Err(KError::InvalidInput);
+    }
+    // PID zero and the caller's own TID both select the caller. All targets are
+    // reported from objective credentials, matching Linux `cap_capget()`, which
+    // reads `__task_cred()` even for the `current` special case.
+    let observer = kprocess::current_user_thread()
+        .process()
+        .active_pid_namespace();
+    let caps = kprocess::capability::target_capabilities(header.pid as u32, &observer)?;
+
+    let caps = cap_data_from_sets(caps);
+    match version {
+        CapabilityVersion::V1 => data.write_vm(caps.low)?,
+        CapabilityVersion::V2 => data.cast::<CapUserData>().write_vm(caps)?,
+    }
     Ok(0)
+}
+
+/// Returns whether a `capset` target names the calling thread.
+///
+/// Linux compares the target with `task_pid_vnr(current)`. This kernel gives
+/// process leaders a full projection in their active PID namespace but
+/// allocates member-thread identities with only a root projection, so
+/// `gettid(2)` reports the root TID even inside a nested PID namespace.
+/// Both that reported TID and the active-namespace leader number reported by
+/// `getpid(2)` name the caller and must be accepted. No other task's PID is
+/// ever accepted because the comparison uses only the caller's own numbers.
+fn capset_targets_caller(pid: i32, active_nr: u32, reported_tid: u32) -> bool {
+    pid == 0 || (pid >= 0 && (pid as u32 == active_nr || pid as u32 == reported_tid))
 }
 
 pub(crate) fn sys_capset(
     header: UserPtr<__user_cap_header_struct>,
-    _data: UserPtr<__user_cap_data_struct>,
+    data: UserPtr<__user_cap_data_struct>,
 ) -> KResult<isize> {
-    validate_cap_header(header)?;
+    let (header, version) = read_cap_header(header)?;
 
+    // Linux credentials are per-thread and `capset` may modify only the
+    // calling thread, not its whole thread group. The target check precedes
+    // the data copy so every foreign PID, including a negative one, is
+    // rejected with `EPERM` regardless of the caller's data pointer.
+    let current_thread = kprocess::current_user_thread();
+    if !capset_targets_caller(
+        header.pid,
+        current_thread.task_number().active_nr(),
+        current_thread.tid(),
+    ) {
+        return Err(KError::OperationNotPermitted);
+    }
+
+    let caps = match version {
+        CapabilityVersion::V1 => CapUserData {
+            low: data.read_vm()?,
+            high: __user_cap_data_struct {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+        },
+        CapabilityVersion::V2 => data.cast::<CapUserData>().read_vm()?,
+    };
+    let caps = cap_sets_from_data(caps);
+    super::credentials::update_current_cred(|cred| cred.set_capabilities(caps))?;
     Ok(0)
 }
 
@@ -75,17 +214,19 @@ pub(crate) fn sys_get_mempolicy(
 /// - PR_SET_NAME: set the name of the calling thread, using the value pointed to by `arg2`
 /// - PR_GET_NAME: get the name of the calling
 /// - PR_SET_SECCOMP: install strict/filter mode through the `seccomp(2)` path
-/// - PR_CAPBSET_READ: return whether a capability is in the bounding set
+/// - PR_CAPBSET_READ / PR_CAPBSET_DROP: query or drop a bounding capability
+/// - PR_CAP_AMBIENT: inspect or modify the calling credential's ambient set
 /// - PR_GET_KEEPCAPS / PR_SET_KEEPCAPS: query or set the keep-capabilities flag
+/// - PR_GET_SECUREBITS / PR_SET_SECUREBITS: query or replace Linux secure-bits
 /// - PR_MCE_KILL: set the machine check exception policy
 /// - PR_SET_MM options: set various memory management options (start/end code/data/brk/stack)
 ///
 /// Many options below are answered with static defaults: this kernel has no
-/// dumpable flag, no securebits, and runs every task with full capabilities, so
-/// getters return their "fully privileged, nothing set" value while setters are
-/// accepted as no-ops. This matches the behavior user space expects from a
-/// Linux-like kernel on these (often merely probed) options, and avoids noisy
-/// warnings for each unimplemented option.
+/// dumpable flag. Capability, ambient-capability and secure-bits state is
+/// tracked per credential. Getters for unimplemented state return their
+/// Linux default while setters are accepted as no-ops. This matches the behavior
+/// user space expects from a Linux-like kernel on these (often merely probed)
+/// options, and avoids noisy warnings for each unimplemented option.
 ///
 /// Security restrictions are not successful no-ops: `PR_SET_SECCOMP` is the
 /// `prctl` spelling of the `seccomp(2)` install path (`arg2` is the mode with
@@ -175,12 +316,19 @@ pub(crate) fn sys_prctl(
             return Ok(kprocess::current_user_thread().no_new_privileges() as isize);
         }
         PR_CAPBSET_READ => {
-            if arg2 > CAP_LAST_CAP {
+            if arg2 > CAP_LAST_CAP as usize {
                 return Err(KError::InvalidInput);
             }
-            return Ok(1);
+            let held = kprocess::current_cred()
+                .cap_bounding()
+                .contains(arg2 as u32);
+            return Ok(isize::from(held));
         }
-        PR_CAPBSET_DROP => {}
+        PR_CAPBSET_DROP => {
+            // `drop_bounding_cap()` owns the `CAP_SETPCAP` check and its order
+            // relative to Linux's capability-number range validation.
+            super::credentials::update_current_cred(|cred| cred.drop_bounding_cap(arg2))?;
+        }
         PR_GET_KEEPCAPS => {
             return Ok(isize::from(kprocess::current_cred().keep_caps()));
         }
@@ -200,9 +348,10 @@ pub(crate) fn sys_prctl(
         // (`SUID_DUMP_USER` semantics observed by user space as dumpable=1).
         PR_GET_DUMPABLE => return Ok(1),
         PR_SET_DUMPABLE => {}
-        // securebits are not tracked; nothing is set.
-        PR_GET_SECUREBITS => return Ok(0),
-        PR_SET_SECUREBITS => {}
+        PR_GET_SECUREBITS => return Ok(kprocess::current_cred().securebits() as isize),
+        PR_SET_SECUREBITS => {
+            super::credentials::update_current_cred(|cred| cred.set_securebits(arg2))?;
+        }
         // Child subreaper: orphaned descendants reparent to the nearest
         // subreaper ancestor instead of the child reaper; container runtimes
         // (containerd shims) rely on this to observe container process exits.
@@ -228,12 +377,35 @@ pub(crate) fn sys_prctl(
         PR_GET_TIMERSLACK => return Ok(50_000),
         PR_SET_TIMERSLACK => {}
         PR_CAP_AMBIENT => {
-            // The ambient capability set is not tracked. Only the read
-            // sub-action produces a value; raise/lower/clear are accepted as
-            // no-ops since we always operate with full effective capabilities.
-            match arg2 as u32 {
-                PR_CAP_AMBIENT_IS_SET => return Ok(0),
-                PR_CAP_AMBIENT_RAISE | PR_CAP_AMBIENT_LOWER | PR_CAP_AMBIENT_CLEAR_ALL => {}
+            let subcommand = u32::try_from(arg2).map_err(|_| KError::InvalidInput)?;
+            if subcommand == PR_CAP_AMBIENT_CLEAR_ALL {
+                if arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                    return Err(KError::InvalidInput);
+                }
+                super::credentials::update_current_cred(|cred| {
+                    cred.clear_cap_ambient();
+                    Ok(())
+                })?;
+                return Ok(0);
+            }
+            if arg3 > CAP_LAST_CAP as usize || arg4 != 0 || arg5 != 0 {
+                return Err(KError::InvalidInput);
+            }
+            match subcommand {
+                PR_CAP_AMBIENT_IS_SET => {
+                    let held = kprocess::current_cred().has_ambient_cap(arg3 as u32);
+                    return Ok(isize::from(held));
+                }
+                PR_CAP_AMBIENT_RAISE => {
+                    super::credentials::update_current_cred(|cred| {
+                        cred.raise_cap_ambient(arg3 as u32)
+                    })?;
+                }
+                PR_CAP_AMBIENT_LOWER => {
+                    super::credentials::update_current_cred(|cred| {
+                        cred.lower_cap_ambient(arg3 as u32)
+                    })?;
+                }
                 _ => return Err(KError::InvalidInput),
             }
         }

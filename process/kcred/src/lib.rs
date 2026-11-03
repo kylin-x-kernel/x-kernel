@@ -53,8 +53,9 @@ use klazy::Once;
 mod credentials;
 mod namespace;
 
-/// Credential snapshots and the user/group identifier types used by their APIs.
-pub use credentials::{Cred, Gid, Uid};
+/// Credential snapshots, capability sets, and the user/group identifier types
+/// used by their APIs.
+pub use credentials::*;
 /// Namespace identities, parentage, and access to the shared initial user namespace.
 pub use namespace::{NamespaceId, UserNamespace, initial_user_namespace};
 

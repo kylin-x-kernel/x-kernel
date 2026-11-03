@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 //! Process structure and lifecycle management.
+mod exec_fs;
 mod exec_gate;
 pub(crate) mod exit;
 mod runtime_access;
@@ -15,6 +16,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
+pub use exec_fs::ExecFsGuard;
 use exit::{AtomicProcessExitState, ProcessExitState};
 pub use exit::{
     ProcessExitPublication, WaitChildKind, WaitChildScan, WaitChildSelector, WaitReapMode,

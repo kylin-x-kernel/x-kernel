@@ -4,7 +4,9 @@
 
 use alloc::vec::Vec;
 
-use kcred::Cred;
+use kcred::{
+    CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_SETUID, CapSet, CapSets, Cred,
+};
 use ktime_types::SystemTime;
 use unittest::def_test;
 
@@ -14,6 +16,28 @@ use crate::{DeviceId, Metadata, NodePermission, NodeType, Umode};
 fn creds(uid: u32, gid: u32, groups: &[u32]) -> Cred {
     let mut cred = Cred::new(uid, gid);
     cred.set_supplementary_groups(Vec::from(groups));
+    cred
+}
+
+/// Builds a non-root credential whose effective set contains exactly `caps`.
+///
+/// The temporary `CAP_SETUID` grant only exists to leave UID zero; the final
+/// transition drops it again so the caller observes the requested set.
+fn capped(caps: &[u32]) -> Cred {
+    let bits = caps
+        .iter()
+        .fold(0, |bits, &capability| bits | (1u64 << capability));
+    let setup = CapSet::from_bits(bits | (1u64 << CAP_SETUID));
+    let effective = CapSet::from_bits(bits);
+
+    let mut cred = Cred::root();
+    cred.keep_caps_enable().unwrap();
+    cred.set_capabilities(CapSets::new(setup, setup, CapSet::EMPTY))
+        .unwrap();
+    cred.set_uid(1000).unwrap();
+    cred.set_capabilities(CapSets::new(effective, effective, CapSet::EMPTY))
+        .unwrap();
+    assert_eq!(cred.fsuid(), 1000);
     cred
 }
 
@@ -184,4 +208,47 @@ fn test_dir_search_denied_when_exec_bit_clear() {
 fn test_owner_bits_used_when_uid_matches_even_if_group_denies() {
     let m = meta(1000, 1000, 0o040);
     assert!(check_dac_permission(&m, Permission::MAY_READ, &creds(1000, 1000, &[])).is_err());
+}
+
+#[def_test]
+fn cap_dac_override_bypasses_read_and_write_but_not_missing_execute_bits() {
+    let cred = capped(&[CAP_DAC_OVERRIDE]);
+    let mode_zero = meta(2000, 2000, 0o000);
+
+    assert!(check_dac_permission(&mode_zero, Permission::MAY_READ, &cred).is_ok());
+    assert!(check_dac_permission(&mode_zero, Permission::MAY_WRITE, &cred).is_ok());
+    assert!(
+        check_dac_permission(&mode_zero, Permission::MAY_EXEC, &cred).is_err(),
+        "CAP_DAC_OVERRIDE cannot execute a file with no execute bit"
+    );
+
+    let executable = meta(2000, 2000, 0o0100);
+    assert!(check_dac_permission(&executable, Permission::MAY_EXEC, &cred).is_ok());
+}
+
+#[def_test]
+fn cap_dac_read_search_grants_read_and_directory_search_but_not_write() {
+    let cred = capped(&[CAP_DAC_READ_SEARCH]);
+    let file = meta(2000, 2000, 0o000);
+
+    assert!(check_dac_permission(&file, Permission::MAY_READ, &cred).is_ok());
+    assert!(check_dac_permission(&file, Permission::MAY_WRITE, &cred).is_err());
+
+    assert!(
+        check_dac_permission(&file, Permission::MAY_EXEC, &cred).is_err(),
+        "CAP_DAC_READ_SEARCH does not grant execute on regular files"
+    );
+
+    let mut directory = meta(2000, 2000, 0o000);
+    directory.mode = directory.mode.with_node_type(NodeType::Directory);
+    assert!(check_dac_permission(&directory, Permission::MAY_READ, &cred).is_ok());
+    assert!(check_dac_permission(&directory, Permission::MAY_EXEC, &cred).is_ok());
+    assert!(check_dac_permission(&directory, Permission::MAY_WRITE, &cred).is_err());
+}
+
+#[def_test]
+fn non_root_credential_without_capabilities_does_not_bypass_zero_mode() {
+    let m = meta(2000, 2000, 0o000);
+    assert!(check_dac_permission(&m, Permission::MAY_READ, &creds(1000, 1000, &[])).is_err());
+    assert!(check_dac_permission(&m, Permission::MAY_WRITE, &creds(1000, 1000, &[])).is_err());
 }

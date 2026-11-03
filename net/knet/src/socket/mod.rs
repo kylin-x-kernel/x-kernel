@@ -427,10 +427,11 @@ pub enum Socket {
 }
 
 impl Socket {
-    /// Sends data using the credential active at the syscall boundary.
+    /// Sends data using the sending task's credential.
     ///
-    /// The credential is required by protocols such as rtnetlink whose
-    /// authorization depends on the caller performing each send.
+    /// Netlink authorization depends on the process performing each send, not
+    /// on the process that opened the socket. Other protocols use the normal
+    /// socket path.
     ///
     /// # Errors
     ///
@@ -440,10 +441,10 @@ impl Socket {
         &self,
         src: impl Read + IoBuf,
         options: SendOptions,
-        cred: &Cred,
+        sender_cred: &Cred,
     ) -> KResult<usize> {
         match self {
-            Self::Netlink(socket) => socket.send_with_cred(src, options, cred),
+            Self::Netlink(socket) => socket.send_with_cred(src, options, sender_cred),
             _ => <Self as SocketOps>::send(self, src, options),
         }
     }

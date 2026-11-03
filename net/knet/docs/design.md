@@ -481,7 +481,7 @@ Table layout and publication remain separate from entry encoding.
 
   Shared access to `SERVICE`, `SOCKET_SET`, and Router state is mainly protected by global locks and atomic state. Syscall-specific semantics are still provided by `posix/net`, which supplies the process file-descriptor context and caller credentials.
 
-  Netlink sends and Unix datagram sends take a snapshot of the current caller credentials when the operation begins. Credentials are not cached in the socket itself.
+  Netlink sends authorize the caller snapshot taken when the operation begins; the immutable `VfsFile` open credential does not participate in rtnetlink authorization. Unix datagram sends also take only the caller snapshot. Credentials are not cached in the socket itself.
 
 * **Pathname Unix sockets require filesystem and credential context**
 
@@ -1189,7 +1189,7 @@ Credentials follow the call path, keeping their lifetime separate from Unix sock
 
 ### Credentials for rtnetlink Sends
 
-Netlink sockets can be passed between processes, so permission checks use the credentials of each sender. POSIX send and socket-file write identify the protocol at entry. The netlink branch takes one current-credential snapshot and passes it through `Socket::send_with_cred` to rtnetlink permission checks. Kernel callers outside a user-task context specify credentials explicitly through `send_with_cred`.
+Netlink sockets can be passed between processes, so route mutation authorization follows Linux `netlink_net_capable()` and requires effective `CAP_NET_ADMIN` in the process performing the send. The socket's open credential does not participate: Linux authorizes the current sender, and transferring a socket neither transfers nor suppresses mutation authority. POSIX send and socket-file write take a current-sender snapshot at entry and pass it through `Socket::send_with_cred` to rtnetlink permission checks. Kernel callers outside a user-task context specify that credential explicitly through `send_with_cred`.
 
 ### Credentials for Unix Messages and Peer Queries
 

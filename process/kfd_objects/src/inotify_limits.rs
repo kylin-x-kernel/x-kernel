@@ -222,7 +222,7 @@ impl Resources {
         // through `sysctl_perm` on every write. Matching that check means a
         // root-opened descriptor passed to an unprivileged task cannot change
         // a system-wide limit.
-        if !cred.is_privileged() {
+        if !cred.has_root_euid() {
             return Err(KError::OperationNotPermitted);
         }
         // Linux's `proc_get_long` works on raw bytes: the first

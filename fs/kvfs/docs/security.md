@@ -196,6 +196,16 @@ model 由 safe Rust lock、`Arc` ownership 和 operation trait 约束维护内�
   setgid 状态导出，不能使用固定 root owner。
 - `mkdir` 必须先清除用户 mode 中的 set-user-ID/set-group-ID 位；只有 setgid 父目录可由
   `inode_init_owner()` 给新子目录重新添加 set-group-ID。
+- `Path::chown` authorization includes Linux `chown_common()` set-ID cleanup:
+  non-directory set-UID is always removed and set-GID is removed when group
+  execute is set, or when the caller is not in the pre-chown GID and lacks
+  effective `CAP_FSETID`. When cleanup clears a bit and therefore generates a
+  mode update, set-GID is also removed unless the caller belongs to the new GID
+  or has effective `CAP_FSETID`; a GID-only change that clears no set-ID bit does
+  not trigger that extra check. A generated mode change requires inode
+  ownership or effective `CAP_FOWNER`; `CAP_CHOWN`/`CAP_FSETID` alone do not
+  authorize it. Directories preserve their set-ID bits, and a `chown(-1, -1)`
+  that changes no mode bit remains an authorized no-op.
 - metadata 更新必须先通过 `Path::chown/chmod/set_times` 授权；后端 `setattr` callback
   只执行已授权的 mutation，不能作为 syscall 层的公开绕过入口。默认实现是公共回退层，
   只接受 owner/mode/时间并原样发布，size 一律拒绝：未安装专属表的 inode 不得通过回退
@@ -419,7 +429,7 @@ KVFS 返回映射后的错误，不伪造成功字节数，也不重试可能已
 | T-34 | 最后一个 mount 释放时丢失 dirty page、inode metadata 或 journal checkpoint | 高 | topology detach 后 superblock 没有 active 生命周期，Weak registry 也无法保活 | `VfsMount` 获取/释放 superblock active 引用；最后一个引用在 umount lock 下执行 writeback、dcache eviction 和最终 filesystem/device sync；错误记录后仍完成 teardown |
 | T-35 | 递归卸载 overmount 子树留下 registry 中不可达 mount | 高 | 只遍历 visible children，或边遍历边修改 topology | 收集每个 child mountpoint 的完整 covers 链，先验证全部 registry membership，再执行无失败分支的 topology commit |
 | T-36 | 文件系统输出畸形 extent 导致范围溢出或 ABI 层错误解释 | 中 | 后端返回零长度或 logical/physical 末端越界 | `FiemapExtentInfo::fill_next_extent()` 集中检查非零长度和两个范围的 `checked_add`；ABI writer 只接收校验后的字段 |
-| T-37 | 非特权调用者伪造 `security.*` xattr | 高 | VFS 按 Linux 语义把授权委托给尚未实现的 LSM hook，后端直接接受该 namespace | KVFS 在 LSM/capability hook 接入前要求 privileged credential 才能 set/remove `security.*`；读操作仍保留委托语义，残余风险是缺少具体 LSM 的读取策略 |
+| T-37 | Unprivileged caller forges a `security.*` xattr | High | VFS delegates authorization to an unimplemented LSM hook, and the backend accepts that namespace directly | KVFS requires effective `CAP_SYS_ADMIN` to set/remove `security.*` until concrete LSM hooks are connected; reads retain the delegation semantics, and the residual risk is the missing concrete LSM read policy |
 | T-38 | `listxattr` 为不可见名称或属性值建立中间副本，造成不必要的内存放大 | 中 | 后端先返回拥有 value 的属性向量，KVFS 再过滤 `trusted.*` | `InodeOperations::list_xattrs` 通过 borrowed name sink 输出；`Path` 在流中先过滤 `trusted.*`，调用者只接收可见名称 |
 | T-39 | immutable 或 append-only inode 的 xattr 仍可被修改 | 中 | namespace 特例在通用 inode 状态检查前直接授权，或文件系统未把磁盘 inode flags 映射到 KVFS | `check_xattr_permission()` 在所有 namespace 分支前检查 `NodeFlags::IMMUTABLE/APPEND_ONLY`，set/remove 统一返回 `EPERM`；具体 bridge 必须在建立 VFS inode identity 时映射后端 flags |
 | T-40 | inode 初始化或驱逐竞争产生第二个 resident identity，或全 cache 唤醒形成惊群 | 高 | cache miss 在构造后才占 slot、Weak upgrade 失败立即重建，或所有 inode 共用一个等待队列 | cache 先发布 `New`；并发 initializer 在该 slot 等待；最后引用 drop 发布 `Freeing` 后再调用 hook；同号 lookup 等待 entry 删除并重试；每 slot 队列只唤醒同号等待者，后端不接收 `EINVAL` 风格的竞争错误 |
@@ -469,8 +479,13 @@ waker 调用和销毁均在锁外，关闭清理无需通知分配。关闭清�
   通用默认同步仍为兼容性成功空操作；FAT、9p 等后端的成功返回不构成持久化保证，
   必须由后续后端同步实现及持久化验证补齐。
 
-- 尚无完整 capability、LSM、POSIX ACL、user namespace ID 映射和 idmapped mount DAC；
-  `trusted.*` 访问和 `security.*` mutation 当前使用 `euid == 0` 近似相应 capability。
+- Effective process capabilities now cover file permissions, sticky directories,
+  xattr, chown/chmod, and related checks; LSM, POSIX ACL, user-namespace ID
+  mapping, idmapped mounts, and file capabilities are not supported. Ambient
+  capabilities are not a separate filesystem input; they affect a check only
+  after becoming effective. `trusted.*` access and `security.*` mutation require
+  effective `CAP_SYS_ADMIN`; user xattr modification in a sticky directory
+  requires directory ownership or effective `CAP_FOWNER`.
 - FAT 等后端不能完整表达 Unix UID/GID owner。
 - 当前 POSIX rename 路径不支持 `RENAME_WHITEOUT`。inode lookup 和 getattr 的类型已
   建立，但尚未定义额外语义位；当前调用使用 empty flags。

@@ -221,11 +221,10 @@ fn lookup_mount_path_in(fs: &FsStruct, name: &str, cred: &kcred::Cred) -> KResul
 
 /// Rejects mount namespace mutations from callers without mount privilege.
 ///
-/// x-kernel models the mount privilege as effective UID 0, standing in for
-/// Linux `CAP_SYS_ADMIN` in the mount namespace's user namespace; the check
-/// reports `EPERM` like Linux `may_mount()`.
+/// This is Linux `CAP_SYS_ADMIN` authority in the mount namespace's user
+/// namespace; failure reports `EPERM` like `may_mount()`.
 fn require_mount_privilege(cred: &kcred::Cred) -> KResult<()> {
-    if cred.is_privileged() {
+    if cred.has_sys_admin() {
         Ok(())
     } else {
         Err(KError::OperationNotPermitted)

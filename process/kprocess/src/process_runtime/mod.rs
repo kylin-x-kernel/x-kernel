@@ -9,7 +9,7 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 #[cfg(feature = "tee")]
 use core::any::Any;
 
-use fs_context::FsStruct;
+use fs_context::{FsStruct, ProcessUserGuard};
 use kerrno::{KError, KResult};
 use kns::{NamespaceFsContext, NsProxy};
 use kresources::ProcessResources;
@@ -122,7 +122,7 @@ pub enum ForkFdTable {
 pub(crate) struct ProcessRuntime {
     process: Arc<Process>,
     resources: Arc<ProcessResources>,
-    fs_context: RwLock<Option<Arc<Mutex<FsStruct>>>>,
+    fs_context: RwLock<Option<FsBinding>>,
     posix_state: ProcessPosixState,
     runtime_state: ProcessRuntimeState,
     nsproxy: RwLock<Option<Arc<NsProxy>>>,
@@ -141,6 +141,31 @@ pub(crate) struct ProcessRuntime {
 /// unpublished child relation so no hidden process object remains linked.
 struct AttachedForkProcess {
     process: Option<Arc<Process>>,
+}
+
+/// A filesystem context and this process's ownership of it.
+///
+/// The guard is kept in the same slot as the context so replacing or exiting
+/// the filesystem updates both atomically. Releasing the guard only touches an
+/// atomic counter; in particular, deferred runtime destruction can release the
+/// owner without taking the sleepable `FsStruct` mutex.
+struct FsBinding {
+    // Release the process owner before dropping the context it refers to.
+    _owner: ProcessUserGuard,
+    context: Arc<Mutex<FsStruct>>,
+}
+
+impl FsBinding {
+    fn new(context: Arc<Mutex<FsStruct>>) -> KResult<Self> {
+        let owner = context
+            .lock()
+            .try_add_process_user()
+            .ok_or(KError::WouldBlock)?;
+        Ok(Self {
+            _owner: owner,
+            context,
+        })
+    }
 }
 
 struct ForkFsNamespaces {
@@ -185,6 +210,12 @@ impl Drop for AttachedForkProcess {
 
 impl ProcessRuntime {
     /// Creates a new [`ProcessRuntime`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the address space has no live user
+    /// owner, or [`KError::WouldBlock`] when a shared filesystem context is
+    /// currently in an exclusive exec transition.
     pub(crate) fn new(
         process: Arc<Process>,
         exe_path: String,
@@ -193,7 +224,7 @@ impl ProcessRuntime {
         fs_context: Arc<Mutex<FsStruct>>,
         signal_actions: SignalActions,
         config: ProcessRuntimeConfig,
-    ) -> Arc<Self> {
+    ) -> KResult<Arc<Self>> {
         let nsproxy = NsProxy::new_initial();
         Self::new_with_nsproxy(
             process,
@@ -223,9 +254,9 @@ impl ProcessRuntime {
         signal_actions: SignalActions,
         config: ProcessRuntimeConfig,
         nsproxy: Arc<NsProxy>,
-    ) -> Arc<Self> {
-        let mm_user = memspace::MmSpace::acquire_user(address_space)
-            .expect("new process runtime requires a live user address space");
+    ) -> KResult<Arc<Self>> {
+        let mm_user =
+            memspace::MmSpace::acquire_user(address_space).ok_or(KError::NoSuchProcess)?;
         Self::new_with_nsproxy_and_mm_user(
             process,
             exe_path,
@@ -253,11 +284,12 @@ impl ProcessRuntime {
         signal_manager: ProcessSignalManager,
         config: ProcessRuntimeConfig,
         nsproxy: Arc<NsProxy>,
-    ) -> Arc<Self> {
+    ) -> KResult<Arc<Self>> {
         #[cfg(feature = "tee")]
         let tee_ta_ctx = RwLock::new(TeeTaCtx::new(&exe_path));
         let posix_state = ProcessPosixState::new(exe_path, cmdline);
         let runtime_state = ProcessRuntimeState::new(process.pid(), mm_user, config.user_heap_base);
+        let fs_binding = FsBinding::new(fs_context)?;
         let runtime = Arc::new(Self {
             process,
             #[cfg(feature = "tee")]
@@ -267,14 +299,14 @@ impl ProcessRuntime {
             #[cfg(feature = "tipc")]
             tipc_handles: RwLock::new(TipcHandleTable::new()),
             resources: ProcessResources::new(config.user_stack_size),
-            fs_context: RwLock::new(Some(fs_context)),
+            fs_context: RwLock::new(Some(fs_binding)),
             posix_state,
             runtime_state,
             nsproxy: RwLock::new(Some(nsproxy)),
             signal_manager: Arc::new(signal_manager),
         });
         runtime.process.set_runtime_ref(&runtime);
-        runtime
+        Ok(runtime)
     }
 
     /// Returns the stable process identity that owns this runtime.
@@ -377,7 +409,10 @@ impl ProcessRuntime {
 
     /// Returns the process-owned filesystem context while it remains attached.
     pub(crate) fn fs_context(&self) -> Option<Arc<Mutex<FsStruct>>> {
-        self.fs_context.read().clone()
+        self.fs_context
+            .read()
+            .as_ref()
+            .map(|binding| Arc::clone(&binding.context))
     }
 
     /// Returns the namespace proxy while it remains attached.
@@ -399,8 +434,21 @@ impl ProcessRuntime {
     }
 
     /// Replaces the process filesystem context installed in this runtime.
+    ///
+    /// The previous binding is released after the write guard is dropped. Its
+    /// owner guard decrements the old context's atomic user count, so no
+    /// sleepable filesystem lock is taken while the runtime lock is held.
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: callers install a private filesystem \
+                  context produced by clone_for_process, which clears in_exec, so exclusive exec \
+                  admission cannot reject the replacement"
+    )]
     pub(crate) fn set_fs_context(&self, fs_context: Arc<Mutex<FsStruct>>) {
-        *self.fs_context.write() = Some(fs_context);
+        let binding = FsBinding::new(fs_context)
+            .expect("replacing the filesystem context must accept its new owner");
+        let previous = self.fs_context.write().replace(binding);
+        drop(previous);
     }
 
     /// Returns the UTS namespace while the namespace proxy remains attached.
@@ -409,8 +457,8 @@ impl ProcessRuntime {
     }
 
     pub(crate) fn exit_fs(&self) {
-        let fs_context = self.fs_context.write().take();
-        drop(fs_context);
+        let binding = self.fs_context.write().take();
+        drop(binding);
     }
 
     pub(crate) fn exit_namespaces(&self) {
@@ -476,8 +524,11 @@ impl ProcessRuntime {
 
 impl Drop for ProcessRuntime {
     fn drop(&mut self) {
-        // Unpublished fork rollback must release ownership even when an
-        // observer retains the signal manager. Normal exit already did this.
+        // Deferred finalization can run where sleeping is forbidden, so release
+        // the filesystem owner through its atomic count instead of `exit_fs`,
+        // which takes the runtime and filesystem locks.
+        let binding = self.fs_context.get_mut().take();
+        drop(binding);
         self.signal_manager.release_handlers();
     }
 }
@@ -544,9 +595,6 @@ fn prepare_fork_fs_and_namespaces(
 ) -> KResult<ForkFsNamespaces> {
     let parent_fs_context = parent.fs_context().ok_or(KError::NoSuchProcess)?;
     let fs_context = if matches!(config.fs, ForkFs::Shared) {
-        if parent_fs_context.lock().in_exec() {
-            return Err(KError::WouldBlock);
-        }
         parent_fs_context
     } else {
         Arc::new(Mutex::new(parent_fs_context.lock().clone_for_process()))
@@ -607,7 +655,7 @@ fn finish_fork_runtime(
         signal_manager,
         ProcessRuntimeConfig::default(),
         fs_namespaces.nsproxy,
-    );
+    )?;
     process_runtime.set_oom_score_adj(parent.oom_score_adj());
     process_runtime.set_heap_top(parent.heap_top());
     // Inherit the opened backing executable so `/proc/<pid>/exe` resolves in

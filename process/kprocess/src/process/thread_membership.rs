@@ -5,6 +5,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
+use kcred::Cred;
 use kerrno::{KError, KResult};
 use kidentity::TaskIdentityToken;
 use kspin::SpinNoIrq;
@@ -35,11 +36,11 @@ impl ThreadMembership {
             .clone()
     }
 
-    fn exit_task(&mut self, task: &KtaskRef, is_leader: bool) -> bool {
+    fn exit_task(&mut self, task: &KtaskRef, leader_cred: Option<Arc<Cred>>) -> bool {
         let did_exit = self
             .members
             .get(&task.as_thread().identity_token())
-            .is_some_and(|slot| slot.exit_task(task, is_leader));
+            .is_some_and(|slot| slot.exit_task(task, leader_cred));
         self.prune_stale();
         did_exit
     }
@@ -57,6 +58,12 @@ impl ThreadMembership {
 
     fn release_exited_leader(&mut self) {
         self.members.retain(|_, slot| !slot.is_exited_leader());
+    }
+
+    fn exited_leader_cred(&self) -> Option<Arc<Cred>> {
+        self.members
+            .values()
+            .find_map(|slot| slot.exited_leader_cred())
     }
 
     fn thread_ids(&self) -> Vec<Tid> {
@@ -119,8 +126,11 @@ enum ThreadMemberState {
     Vacant,
     Published(WeakKtaskRef),
     // A leader exits before its parent consumes the process identity. Keep
-    // membership without retaining a task/runtime or allowing TID lookup.
-    ExitedLeader,
+    // membership without retaining a task/runtime or allowing TID lookup, but
+    // retain the leader's objective credentials: Linux keeps the zombie leader
+    // and `capget()` on the thread-group ID observes those credentials even
+    // after sibling threads have replaced it in every live-task lookup.
+    ExitedLeader(Arc<Cred>),
 }
 
 pub(crate) struct ThreadMemberSlot {
@@ -142,20 +152,19 @@ impl ThreadMemberSlot {
         *self.state.lock() = ThreadMemberState::Vacant;
     }
 
-    fn exit_task(&self, task: &KtaskRef, is_leader: bool) -> bool {
+    fn exit_task(&self, task: &KtaskRef, leader_cred: Option<Arc<Cred>>) -> bool {
         let mut state = self.state.lock();
         let published = match &*state {
             ThreadMemberState::Published(published) => published,
-            ThreadMemberState::Vacant | ThreadMemberState::ExitedLeader => return false,
+            ThreadMemberState::Vacant | ThreadMemberState::ExitedLeader(_) => return false,
         };
         // Do not retire a replacement task that reused this numeric TID.
         if !WeakKtaskRef::ptr_eq(published, &KtaskRef::downgrade(task)) {
             return false;
         }
-        *state = if is_leader {
-            ThreadMemberState::ExitedLeader
-        } else {
-            ThreadMemberState::Vacant
+        *state = match leader_cred {
+            Some(cred) => ThreadMemberState::ExitedLeader(cred),
+            None => ThreadMemberState::Vacant,
         };
         true
     }
@@ -164,18 +173,25 @@ impl ThreadMemberSlot {
         match &*self.state.lock() {
             ThreadMemberState::Vacant => false,
             ThreadMemberState::Published(task) => task.strong_count() != 0,
-            ThreadMemberState::ExitedLeader => true,
+            ThreadMemberState::ExitedLeader(_) => true,
         }
     }
 
     fn is_exited_leader(&self) -> bool {
-        matches!(*self.state.lock(), ThreadMemberState::ExitedLeader)
+        matches!(*self.state.lock(), ThreadMemberState::ExitedLeader(_))
+    }
+
+    fn exited_leader_cred(&self) -> Option<Arc<Cred>> {
+        match &*self.state.lock() {
+            ThreadMemberState::ExitedLeader(cred) => Some(cred.clone()),
+            ThreadMemberState::Vacant | ThreadMemberState::Published(_) => None,
+        }
     }
 
     pub(super) fn snapshot(&self) -> Option<KtaskRef> {
         match &*self.state.lock() {
             ThreadMemberState::Published(task) => task.upgrade(),
-            ThreadMemberState::Vacant | ThreadMemberState::ExitedLeader => None,
+            ThreadMemberState::Vacant | ThreadMemberState::ExitedLeader(_) => None,
         }
     }
 }
@@ -274,6 +290,11 @@ impl Process {
             }
         }
 
+        // `real_cred()` takes a sleepable lock, so snapshot the leader credential
+        // before entering the IRQ-safe membership table. The slot still decides
+        // whether this task currently owns the leader identity before storing it.
+        let leader_cred = (tid == self.pid()).then(|| task.as_thread().real_cred());
+
         let is_last = {
             let mut thread_membership = self.thread_membership.lock();
             // Check the real boundary, including direct kprocess test callers.
@@ -282,7 +303,7 @@ impl Process {
             // Signal eligibility ends with live membership, not with the last
             // external reference to the exiting task or a later sibling exec.
             task.as_thread().signal_manager().exit();
-            let did_exit = thread_membership.exit_task(task, tid == self.pid());
+            let did_exit = thread_membership.exit_task(task, leader_cred);
             let is_last = did_exit && thread_membership.has_no_published_tasks();
             if is_last {
                 thread_membership.is_last_thread_exit_reserved = true;
@@ -314,6 +335,16 @@ impl Process {
     /// Counts published members plus an exited leader not yet released by reap.
     pub(crate) fn unreleased_thread_count(&self) -> usize {
         self.thread_membership.lock().unreleased_count()
+    }
+
+    /// Returns the exited group leader's objective credentials while its
+    /// retained membership slot still names this process.
+    ///
+    /// Linux resolves `capget(2)` for the thread-group ID through the zombie
+    /// leader, not through a surviving sibling. The slot disappears when the
+    /// process is reaped or a non-leader `exec` takes over the group identity.
+    pub(crate) fn exited_leader_cred(&self) -> Option<Arc<Cred>> {
+        self.thread_membership.lock().exited_leader_cred()
     }
 
     /// Releases retained leader membership at the process identity boundary.

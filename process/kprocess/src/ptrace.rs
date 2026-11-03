@@ -6,7 +6,7 @@
 
 use alloc::sync::Arc;
 
-use kcred::Cred;
+use kcred::{Cred, PtraceAccessMode};
 use kerrno::{KError, KResult};
 
 use crate::Thread;
@@ -16,13 +16,14 @@ use crate::Thread;
 ///
 /// Threads in the same thread group may inspect each other. For a different
 /// thread group, the caller's real UID/GID must match all of the target's
-/// real, effective, and saved IDs. Until capability sets are modeled, an
-/// effective UID of 0 stands in for `CAP_SYS_PTRACE`.
+/// real, effective, and saved IDs, and the target's permitted capability set
+/// must be a subset of the caller's permitted set. Effective `CAP_SYS_PTRACE`
+/// overrides both checks for a different thread group.
 ///
 /// # Errors
 ///
-/// Returns [`KError::OperationNotPermitted`] when neither the identity match
-/// nor the privileged override permits access.
+/// Returns [`KError::OperationNotPermitted`] when neither the identity and
+/// capability check nor the privileged override permits access.
 pub fn check_read_real_creds_access(caller: &Thread, target: &Thread) -> KResult<()> {
     if Arc::ptr_eq(caller.process(), target.process()) {
         return Ok(());
@@ -30,19 +31,21 @@ pub fn check_read_real_creds_access(caller: &Thread, target: &Thread) -> KResult
 
     let caller_cred = caller.real_cred();
     let target_cred = target.real_cred();
-    check_cross_process_read_real_creds_access(&caller_cred, &target_cred)
+    check_cross_process_read_access(&caller_cred, &target_cred, PtraceAccessMode::RealCreds)
 }
 
 /// `PTRACE_MODE_READ_FSCREDS` semantics -- what Linux's `/proc/<pid>/fdinfo`
 /// permission hook uses. Threads in the same thread group may inspect each
 /// other; for a different thread group the caller's filesystem UID/GID must
-/// match all of the target's real, effective, and saved IDs. Until capability
-/// sets are modeled, an effective UID of 0 stands in for `CAP_SYS_PTRACE`.
+/// match all of the target's real, effective, and saved IDs, and the target's
+/// permitted capability set must be a subset of the caller's effective set.
+/// Effective `CAP_SYS_PTRACE` overrides both checks for a different thread
+/// group.
 ///
 /// # Errors
 ///
-/// Returns [`KError::OperationNotPermitted`] when neither the identity match
-/// nor the privileged override permits access.
+/// Returns [`KError::OperationNotPermitted`] when neither the identity and
+/// capability check nor the privileged override permits access.
 pub fn check_read_fs_creds_access(caller: &Thread, target: &Thread) -> KResult<()> {
     if Arc::ptr_eq(caller.process(), target.process()) {
         return Ok(());
@@ -50,24 +53,15 @@ pub fn check_read_fs_creds_access(caller: &Thread, target: &Thread) -> KResult<(
 
     let caller_cred = caller.real_cred();
     let target_cred = target.real_cred();
-    if caller_cred.is_privileged() {
-        return Ok(());
-    }
-    let ids_match = target_cred.ruid() == caller_cred.fsuid()
-        && target_cred.euid() == caller_cred.fsuid()
-        && target_cred.suid() == caller_cred.fsuid()
-        && target_cred.rgid() == caller_cred.fsgid()
-        && target_cred.egid() == caller_cred.fsgid()
-        && target_cred.sgid() == caller_cred.fsgid();
-    if ids_match {
-        Ok(())
-    } else {
-        Err(KError::OperationNotPermitted)
-    }
+    check_cross_process_read_access(&caller_cred, &target_cred, PtraceAccessMode::FsCreds)
 }
 
-fn check_cross_process_read_real_creds_access(caller: &Cred, target: &Cred) -> KResult<()> {
-    if caller.is_privileged() || target.matches_real_credential_ids(caller) {
+fn check_cross_process_read_access(
+    caller: &Cred,
+    target: &Cred,
+    mode: PtraceAccessMode,
+) -> KResult<()> {
+    if caller.can_read_ptrace(target, mode) {
         Ok(())
     } else {
         Err(KError::OperationNotPermitted)

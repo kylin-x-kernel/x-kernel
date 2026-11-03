@@ -8,10 +8,10 @@ buffers (`io/`), multiplexing bitsets and sized argument wrappers (`io_mpx.rs`),
 System V IPC structures (`ipc.rs`), signal ABI carriers (`signal.rs`), time
 conversion traits and structures (`time/`), netlink/vsock socket addresses
 and message-header trait attachments (`net/`), the robust futex list layout
-(`sync.rs`), and `UserRead`/`UserWrite` trait attachments for
-`linux_raw_sys` structures (`fs.rs`, `process.rs`,
-`system.rs`, `task.rs`). `lib.rs` re-exports the domain modules and the derive
-macros, and defines the `Pid`/`Tid` scalar carriers.
+(`sync.rs`), `UserRead`/`UserWrite` trait attachments for `linux_raw_sys`
+structures (`fs.rs`, `process.rs`, `system.rs`, and `task.rs`), and the locally
+defined `CapUserData` carrier (`task.rs`). `lib.rs` re-exports the domain modules
+and the derive macros, and defines the `Pid`/`Tid` scalar carriers.
 
 The crate owns temporary buffers and carriers only. It does not own processes,
 file objects, namespaces, or timers; identity semantics for the scalar carriers

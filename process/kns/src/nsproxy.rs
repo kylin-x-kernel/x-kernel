@@ -72,8 +72,7 @@ pub enum UnshareError {
 /// [`unshare`]: NsProxy::prepare_unshare
 #[derive(Clone, Copy, Debug)]
 pub struct UnshareContext {
-    /// Whether the caller holds `CAP_SYS_ADMIN`. X-Kernel currently uses
-    /// effective-uid-zero as the capability proxy (see `kcred::Cred::is_privileged`).
+    /// Whether the caller holds `CAP_SYS_ADMIN`.
     pub privileged: bool,
     /// Whether the current `fs_struct` is shared with another task (a thread of
     /// the same process or another process forked with `CLONE_FS`).
@@ -115,6 +114,18 @@ impl PreparedUnshare {
     /// Returns whether the commit must also unshare the file-descriptor table.
     pub fn unshare_files(&self) -> bool {
         self.unshare_files
+    }
+
+    /// Consumes the bundle into the state the process layer installs.
+    ///
+    /// The prepared filesystem context is already private
+    /// ([`FsStruct::clone_for_process`]), so the commit must install it
+    /// directly instead of snapshotting it again: a snapshot would copy the
+    /// inherited `in_exec` marker and leave the new context permanently
+    /// unavailable for `CLONE_FS`.
+    #[doc(hidden)]
+    pub fn into_parts(self) -> (Arc<NsProxy>, Option<FsStruct>, bool) {
+        (self.nsproxy, self.new_fs, self.unshare_files)
     }
 }
 

@@ -69,7 +69,7 @@ impl InodeOperations for InotifySysctlFile {
         // read it, only euid 0 may write it, and it is not executable. Linux
         // derives those decisions from euid, unlike generic DAC's fsuid.
         if access.contains(Permission::MAY_EXEC)
-            || (access.contains(Permission::MAY_WRITE) && cred.euid() != 0)
+            || (access.contains(Permission::MAY_WRITE) && !cred.has_root_euid())
         {
             return Err(VfsError::PermissionDenied);
         }
@@ -212,7 +212,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                             klogger::level_number(klogger::current_log_level())
                         ))),
                         SimpleFileOperation::Write { file, data } => {
-                            if !file.cred().is_privileged() {
+                            if !file.cred().has_root_euid() {
                                 return Err(VfsError::OperationNotPermitted);
                             }
                             let text =
@@ -250,7 +250,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                             Ok(Some(format!("{spec}\n")))
                         }
                         SimpleFileOperation::Write { file, data } => {
-                            if !file.cred().is_privileged() {
+                            if !file.cred().has_root_euid() {
                                 return Err(VfsError::OperationNotPermitted);
                             }
                             let text =

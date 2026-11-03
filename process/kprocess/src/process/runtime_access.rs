@@ -323,12 +323,29 @@ impl Process {
     /// Returns whether the process `fs_struct` is shared with at least one
     /// other task.
     ///
-    /// Threads of the same process always share the filesystem context, and
-    /// `CLONE_FS` forks share it across processes. X-Kernel cannot count the
-    /// latter without a user counter, so the check covers published threads of
-    /// this process as the conservative in-range subset of Linux's `fs->users`.
+    /// Threads of the same process always share the filesystem context, and a
+    /// `CLONE_FS` child shares it across processes. Both cases must prevent an
+    /// `unshare(CLONE_NEWNS)` without `CLONE_FS` from silently detaching the
+    /// caller while its filesystem context remains shared.
     pub fn fs_is_shared(&self) -> bool {
-        self.threads().len() > 1
+        self.threads().len() > 1 || self.fs_is_shared_across_processes().unwrap_or(true)
+    }
+
+    /// Returns whether another process owns this process's filesystem context.
+    ///
+    /// Linux's `check_unsafe_exec()` compares `fs->users` with the number of
+    /// threads in the current thread group. X-Kernel counts process owners in
+    /// [`FsStruct`], not tasks: all threads of a thread group share one owner,
+    /// while every `CLONE_FS` process adds another. Thus a count greater than
+    /// one means the context is shared across a process boundary, which is
+    /// exactly the condition that sets `LSM_UNSAFE_SHARE`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the filesystem context has
+    /// already been released.
+    pub fn fs_is_shared_across_processes(&self) -> KResult<bool> {
+        Ok(self.fs_context()?.lock().process_user_count() > 1)
     }
 
     /// Applies a validated [`kns::PreparedUnshare`] bundle to this process.
@@ -345,9 +362,10 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime is gone.
     pub fn apply_prepared_unshare(&self, prepared: kns::PreparedUnshare) -> KResult<()> {
         let runtime = self.runtime()?;
-        runtime.set_nsproxy(prepared.nsproxy().clone());
-        if let Some(new_fs) = prepared.new_fs() {
-            runtime.set_fs_context(Arc::new(Mutex::new(new_fs.snapshot())));
+        let (nsproxy, new_fs, _) = prepared.into_parts();
+        runtime.set_nsproxy(nsproxy);
+        if let Some(new_fs) = new_fs {
+            runtime.set_fs_context(Arc::new(Mutex::new(new_fs)));
         }
         Ok(())
     }
@@ -404,7 +422,9 @@ impl Process {
         let new_fs = match target_mnt {
             Some(mnt_ns) => {
                 let current_fs = runtime.fs_context().ok_or(KError::NoSuchProcess)?;
-                let mut fs = current_fs.lock().snapshot();
+                // `setns` installs a new private fs context, so it must not
+                // inherit an exclusive-exec marker from the context it leaves.
+                let mut fs = current_fs.lock().clone_for_process();
                 // kvfs::Path carries dentry/mount identity rather than a comparable
                 // value, so the fs root and pwd are both retargeted to the target
                 // namespace's visible root. This mirrors the same-namespace reentry

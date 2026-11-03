@@ -7,6 +7,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::mem::size_of;
 
+use kcred::{CAP_SYS_RESOURCE, Cred, INVALID_GID, INVALID_UID};
 use kerrno::{KError, KResult, LinuxError};
 use kprocess::{Pid, current_user_process};
 use ksync::{Mutex, static_lock};
@@ -15,9 +16,32 @@ use osvm::VirtPtr;
 use posix_types::{IpcPerm, UserConstPtr, UserPtr, msgbuf, msginfo, msqid_ds};
 
 use super::{
-    IPC_CREAT, IPC_EXCL, IPC_INFO, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, MSG_INFO, MSG_STAT,
-    current_unix_seconds, has_ipc_permission, next_ipc_id,
+    IPC_CREAT, IPC_EXCL, IPC_INFO, IPC_PRIVATE, IPC_READ, IPC_RMID, IPC_SET, IPC_STAT, IPC_WRITE,
+    MSG_INFO, MSG_STAT, current_unix_seconds, has_ipc_control_permission, has_ipc_permission,
+    next_ipc_id,
 };
+
+/// Rejects IDs that `ipc_update_perm()` cannot represent.
+fn validate_set_perm(perm: &IpcPerm) -> KResult<()> {
+    if perm.uid == INVALID_UID || perm.gid == INVALID_GID {
+        return Err(KError::from(LinuxError::EINVAL));
+    }
+    Ok(())
+}
+
+/// Applies the access order shared by `do_msgsnd()` and `do_msgrcv()`.
+///
+/// Linux checks `ipcperms()` before the `ipc_valid_object()` race check, so a
+/// removed queue reports EACCES to a caller without access instead of EIDRM.
+fn check_queue_access(queue: &MessageQueue, cred: &Cred, flag: u32) -> KResult<()> {
+    if !has_ipc_permission(&queue.msqid_ds.msg_perm, cred, flag) {
+        return Err(KError::from(LinuxError::EACCES));
+    }
+    if queue.mark_removed {
+        return Err(KError::from(LinuxError::EIDRM));
+    }
+    Ok(())
+}
 
 /// A queued message type and owned payload.
 pub struct Message {
@@ -276,11 +300,11 @@ bitflags::bitflags! {
 ///
 /// Returns ENOSPC at the queue limit, ENOENT for an absent key without create
 /// or a missing mapped queue, EEXIST for create/exclusive collision, and EIDRM
-/// for a removed queue. The permission branch returns EACCES, but currently
-/// uses UID/GID zero rather than the current credentials.
+/// for a removed queue. The permission branch returns EACCES.
 pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
-    let current_uid: u32 = 0;
-    let current_gid: u32 = 0;
+    let cred = kprocess::current_cred();
+    let current_uid = cred.euid();
+    let current_gid = cred.egid();
     let current_pid = current_user_process().pid();
 
     let mut msg_manager = MSG_MANAGER.lock();
@@ -310,21 +334,16 @@ pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
 
         let msg_queue = msg_queue.lock();
 
-        if !has_ipc_permission(
-            &msg_queue.msqid_ds.msg_perm,
-            current_uid,
-            current_gid,
-            false,
-        ) {
-            return Err(KError::from(LinuxError::EACCES));
-        }
-
         if msg_queue.mark_removed {
             return Err(KError::from(LinuxError::EIDRM));
         }
 
         if (msgflg & IPC_EXCL) != 0 && (msgflg & IPC_CREAT) != 0 {
             return Err(KError::from(LinuxError::EEXIST));
+        }
+
+        if !has_ipc_permission(&msg_queue.msqid_ds.msg_perm, &cred, msgflg as u32) {
+            return Err(KError::from(LinuxError::EACCES));
         }
 
         return Ok(msqid as isize);
@@ -356,23 +375,37 @@ pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
 ///
 /// # Errors
 ///
-/// Returns EINVAL for excessive size, an unknown ID or nonpositive type;
-/// EAGAIN when byte/message capacity is exceeded; and forwards user-copy
-/// errors and `MessageQueue::enqueue_message` errors. The permission branch
-/// returns EACCES, but currently evaluates hard-coded UID/GID zero.
+/// Returns type-header copy errors before validation; EINVAL for excessive
+/// size, a negative queue ID or a nonpositive type; payload-copy errors before
+/// any queue lookup; EACCES when the caller lacks write permission; EIDRM if
+/// the queue was removed after that check; EAGAIN when byte/message capacity
+/// is exceeded; and forwards `MessageQueue::enqueue_message` errors.
 pub fn sys_msgsnd(
     msqid: i32,
     msgp: UserConstPtr<msgbuf>,
     msgsz: usize,
     msgflg: i32,
 ) -> KResult<isize> {
-    if msgsz > MSGMAX {
+    let flags = MsgSndFlags::from_bits_truncate(msgflg);
+
+    // Linux `ksys_msgsnd()` reads the type header first; `do_msgsnd()` then
+    // rejects an oversized message, a negative queue ID and a nonpositive type
+    // before it loads the payload or resolves the queue.
+    let mtype: i64 = msgp.cast::<i64>().read_vm()?;
+
+    if msgsz > MSGMAX || msqid < 0 {
         return Err(KError::from(LinuxError::EINVAL));
     }
-    let current_uid: u32 = 0;
-    let current_gid: u32 = 0;
+
+    if mtype <= 0 {
+        return Err(KError::from(LinuxError::EINVAL));
+    }
+
+    let data_ptr = UserConstPtr::<u8>::from(msgp.as_ptr() as usize + size_of::<i64>());
+    let data_vec = data_ptr.load_vm_vec(msgsz)?;
+
+    let cred = kprocess::current_cred();
     let current_pid = current_user_process().pid();
-    let flags = MsgSndFlags::from_bits_truncate(msgflg);
 
     let msg_queue = {
         let msg_manager = MSG_MANAGER.lock();
@@ -383,24 +416,7 @@ pub fn sys_msgsnd(
 
     let mut msg_queue = msg_queue.lock();
 
-    if !has_ipc_permission(
-        &msg_queue.msqid_ds.msg_perm,
-        current_uid as _,
-        current_gid as _,
-        true,
-    ) {
-        return Err(KError::from(LinuxError::EACCES));
-    }
-
-    let mtype_ptr = msgp.cast::<i64>();
-    let mtype: i64 = mtype_ptr.read_vm()?;
-
-    if mtype <= 0 {
-        return Err(KError::from(LinuxError::EINVAL));
-    }
-
-    let data_ptr = UserConstPtr::<u8>::from(msgp.as_ptr() as usize + size_of::<i64>());
-    let data_vec = data_ptr.load_vm_vec(msgsz)?;
+    check_queue_access(&msg_queue, &cred, IPC_WRITE)?;
 
     let would_exceed_bytes =
         msg_queue.total_bytes + data_vec.len() > msg_queue.msqid_ds.msg_qbytes as usize;
@@ -435,10 +451,10 @@ pub fn sys_msgsnd(
 ///
 /// # Errors
 ///
-/// Returns EINVAL for unsupported MSG_COPY combinations or an unknown ID,
-/// EIDRM for a removed queue, ENOMSG for no match/index, and E2BIG when the
-/// message exceeds `msgsz` without MSG_NOERROR. Forwards user-copy and indexed
-/// removal errors. EACCES is a permission branch using hard-coded zero IDs.
+/// Returns EINVAL for unsupported MSG_COPY combinations or an unknown ID;
+/// EACCES on a failed permission check; EIDRM if the queue was removed after
+/// that check; ENOMSG for no match/index; and E2BIG when the message exceeds
+/// `msgsz` without MSG_NOERROR. Forwards user-copy and indexed removal errors.
 pub fn sys_msgrcv(
     msqid: i32,
     msgp: UserPtr<msgbuf>,
@@ -447,8 +463,7 @@ pub fn sys_msgrcv(
     msgflg: i32,
 ) -> KResult<isize> {
     let flags = MsgRcvFlags::from_bits_truncate(msgflg);
-    let current_uid: u32 = 0;
-    let current_gid: u32 = 0;
+    let cred = kprocess::current_cred();
     let current_pid = current_user_process().pid();
 
     if flags.contains(MsgRcvFlags::MSG_COPY) {
@@ -469,18 +484,7 @@ pub fn sys_msgrcv(
 
     let mut msg_queue = msg_queue.lock();
 
-    if !has_ipc_permission(
-        &msg_queue.msqid_ds.msg_perm,
-        current_uid as _,
-        current_gid as _,
-        false,
-    ) {
-        return Err(KError::from(LinuxError::EACCES));
-    }
-
-    if msg_queue.mark_removed {
-        return Err(KError::from(LinuxError::EIDRM));
-    }
+    check_queue_access(&msg_queue, &cred, IPC_READ)?;
 
     let (mtype, data_slice, index, should_remove) = if flags.contains(MsgRcvFlags::MSG_COPY) {
         let index = msgtyp as usize;
@@ -559,22 +563,22 @@ pub fn sys_msgrcv(
 /// Queries, updates or marks queue metadata for removal.
 ///
 /// `buf` points to the ABI structure selected by `cmd`; metadata copying may
-/// block. Permission checks currently treat the caller as UID/GID zero.
+/// block. Read operations use Linux's folded IPC permission check, including
+/// the creator/current owner IDs, group class, and `CAP_IPC_OWNER` override.
+/// Control operations require the effective UID to match the queue owner or
+/// creator, or effective `CAP_SYS_ADMIN`; raising `msg_qbytes` above the system
+/// limit additionally requires `CAP_SYS_RESOURCE`.
 ///
 /// # Errors
 ///
 /// Returns EINVAL for unsupported commands/IDs/stat indices, EIDRM for a
 /// removed queue, EACCES on a failed read permission check, and EPERM for
-/// failed owner/creator/privilege or byte-limit checks. Forwards ABI copy errors.
+/// failed control authority or byte-limit checks. Forwards ABI copy errors.
 #[expect(
     clippy::too_many_lines,
     reason = "CG-028-focused-functions: TODO(cg): legacy msgctl; split per command"
 )]
 pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
-    let current_uid: u32 = 0;
-    let current_gid: u32 = 0;
-    let is_privileged = current_uid == 0;
-
     if cmd != IPC_STAT
         && cmd != IPC_SET
         && cmd != IPC_RMID
@@ -584,6 +588,21 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
     {
         return Err(KError::from(LinuxError::EINVAL));
     }
+    // Linux rejects a negative ID before dispatching any command, including
+    // `IPC_SET`, so `msqid < 0` must win over a bad user buffer.
+    if msqid < 0 {
+        return Err(KError::from(LinuxError::EINVAL));
+    }
+
+    // Linux `ksys_msgctl()` copies the whole `msqid_ds` for `IPC_SET` before
+    // looking up the queue or checking control authority. Preserve that
+    // ordering: a bad user pointer is `EFAULT` even when the queue is missing,
+    // removed, or controlled by another user.
+    let ipc_set_data = if cmd == IPC_SET {
+        Some(buf.cast::<msqid_ds>().read_vm()?)
+    } else {
+        None
+    };
 
     if cmd == IPC_INFO {
         let info = msginfo {
@@ -602,6 +621,10 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
         ptr.write_vm(info)?;
         return Ok(0);
     }
+
+    let cred = kprocess::current_cred();
+    let current_uid = cred.euid();
+    let current_gid = cred.egid();
 
     if cmd == MSG_INFO {
         let msg_manager = MSG_MANAGER.lock();
@@ -647,7 +670,7 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
             .and_then(|(actual_msqid, queue)| {
                 let guard = queue.lock();
 
-                if !has_ipc_permission(&guard.msqid_ds.msg_perm, current_uid, current_gid, false) {
+                if !has_ipc_permission(&guard.msqid_ds.msg_perm, &cred, IPC_READ) {
                     return Err(KError::from(LinuxError::EACCES));
                 }
 
@@ -671,12 +694,7 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
         return Err(KError::from(LinuxError::EIDRM));
     }
     if cmd == IPC_STAT {
-        if !has_ipc_permission(
-            &msg_queue.msqid_ds.msg_perm,
-            current_uid,
-            current_gid,
-            false,
-        ) {
+        if !has_ipc_permission(&msg_queue.msqid_ds.msg_perm, &cred, IPC_READ) {
             return Err(KError::from(LinuxError::EACCES));
         }
 
@@ -686,27 +704,21 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
         return Ok(0);
     }
 
-    let is_owner = current_uid == msg_queue.msqid_ds.msg_perm.uid;
-    let is_creator = current_uid == msg_queue.msqid_ds.msg_perm.cuid;
-
-    if !is_privileged && !is_owner && !is_creator {
+    if !has_ipc_control_permission(&msg_queue.msqid_ds.msg_perm, &cred) {
         return Err(KError::from(LinuxError::EPERM));
     }
 
-    if cmd == IPC_SET {
-        let user_buf = buf.cast::<msqid_ds>().read_vm()?;
+    if let Some(user_buf) = ipc_set_data {
+        if user_buf.msg_qbytes > MSGMNB as _ && !cred.has_cap(CAP_SYS_RESOURCE) {
+            return Err(KError::from(LinuxError::EPERM));
+        }
+        validate_set_perm(&user_buf.msg_perm)?;
 
         msg_queue.msqid_ds.msg_perm.uid = user_buf.msg_perm.uid;
         msg_queue.msqid_ds.msg_perm.gid = user_buf.msg_perm.gid;
-        msg_queue.msqid_ds.msg_perm.mode = user_buf.msg_perm.mode & 0o777;
-
-        if user_buf.msg_qbytes != msg_queue.msqid_ds.msg_qbytes {
-            if user_buf.msg_qbytes > MSGMNB as _ && !is_privileged {
-                return Err(KError::from(LinuxError::EPERM));
-            }
-            msg_queue.msqid_ds.msg_qbytes = user_buf.msg_qbytes;
-        }
-
+        msg_queue.msqid_ds.msg_perm.mode =
+            (msg_queue.msqid_ds.msg_perm.mode & !0o777) | (user_buf.msg_perm.mode & 0o777);
+        msg_queue.msqid_ds.msg_qbytes = user_buf.msg_qbytes;
         msg_queue.msqid_ds.msg_ctime = current_unix_seconds();
 
         return Ok(0);

@@ -2226,7 +2226,7 @@ impl VfsInode {
             && permission.contains(NodePermission::SET_GID | NodePermission::GROUP_EXEC)
             && parent_permission.contains(NodePermission::SET_GID)
             && !cred.in_group(parent_gid)
-            && !cred.is_privileged();
+            && !cred.has_cap(kcred::CAP_FSETID);
         if should_strip_set_gid {
             permission.remove(NodePermission::SET_GID);
         }

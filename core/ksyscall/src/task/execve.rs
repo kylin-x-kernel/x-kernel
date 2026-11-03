@@ -272,6 +272,19 @@ fn exec_resolved(
     )
 }
 
+/// Applies the post-exec credential transition while the fs admission is live.
+///
+/// The admission guard must remain alive across the transition so no
+/// `CLONE_FS` child can attach between the unsafe-share sample and commit.
+fn commit_exec_credentials(thread: &kprocess::CurrentThread, exec_fs: &kprocess::ExecFsGuard) {
+    let mut exec_cred = thread.prepare_creds();
+    exec_cred.apply_exec(
+        thread.no_new_privileges(),
+        exec_fs.is_shared_with_other_process(),
+    );
+    thread.commit_creds(exec_cred);
+}
+
 /// Executes a prepared request by swapping the caller's address space and
 /// register context for the new program.
 ///
@@ -318,6 +331,12 @@ fn exec_request(
         // to the fatal path and run the thread teardown a second time.
         return Ok(0);
     }
+    // Linux's `check_unsafe_exec()` samples the filesystem sharing state and
+    // sets `in_exec` in one step after `de_thread()`. Keeping the guard in
+    // scope until credentials are committed blocks a concurrent `CLONE_FS`
+    // child from attaching after the unsafe-share sample. The guard also
+    // clears `in_exec` on every error path below.
+    let exec_fs = process.begin_exec()?;
     // Pin the backing executable for `/proc/<pid>/exe` before `prepared` is
     // consumed by installation.
     let exe_file = prepared.executable_file();
@@ -403,9 +422,7 @@ fn exec_request(
             return Ok(0);
         }
     };
-    let mut exec_cred = thread.prepare_creds();
-    exec_cred.apply_exec(thread.no_new_privileges());
-    thread.commit_creds(exec_cred);
+    commit_exec_credentials(&thread, &exec_fs);
     #[cfg(feature = "tee")]
     thread.reset_tee_session_after_exec();
 

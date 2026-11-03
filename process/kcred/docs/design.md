@@ -2,19 +2,23 @@
 
 ## Purpose and boundaries
 
-`kcred` owns credential values and their checked UID/GID transitions for
-X-Kernel. `Cred` stores real, effective, saved and filesystem IDs, supplementary
-groups, and the supported keep-capabilities flags. `NamespaceId` and
-`UserNamespace` separately model namespace identity and parentage.
+`kcred` owns credential values, their checked UID/GID transitions, and Linux
+capability state for X-Kernel. `Cred` stores real, effective, saved and
+filesystem IDs, supplementary groups, effective/permitted/inheritable and
+ambient capability sets, a bounding set, and the supported keep-capabilities
+flags. `NamespaceId` and `UserNamespace` separately model namespace identity and
+parentage.
 
 The crate does not locate a current task, commit credentials, authorize file
 access, read syscall pointers, or load executable metadata. `kprocess` owns task
-credential snapshots and publication; `ksyscall` translates and validates user
-arguments; `kvfs` consumes explicit credentials for discretionary access checks.
-The namespace types do not currently participate in `Cred` privilege decisions.
-`Cred::has_sys_admin` supplies the administrative capability decision separately
-from the set-ID `is_privileged` predicate. Both currently use effective UID zero;
-capability-set support must implement their respective semantics in this layer.
+credential snapshots and publication; `ksyscall` translates wire arguments and
+applies syscall-target policy; `kvfs` consumes explicit credentials for
+discretionary access checks. Capability authority is the effective set:
+`Cred::has_cap` is the primitive, and named predicates such as
+`has_sys_admin` and `has_sys_tty_config` are thin aliases for it. Set-ID
+transitions test `CAP_SETUID`/`CAP_SETGID`; filesystem access checks in `kvfs`
+test `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH`. The namespace types do not scope
+capability sets.
 
 ```text
 ksyscall -> kprocess: prepare / commit task snapshot
@@ -31,17 +35,21 @@ This document covers the entire crate, including its namespace module and tests.
 | --- | --- |
 | `src/lib.rs` | Root re-exports and `INITIAL_CRED` / `initial_cred` |
 | `src/credentials/mod.rs` | Private credential module and type re-exports |
-| `src/credentials/model.rs` | `Cred` storage, queries and transitions |
-| `src/credentials/user.rs`, `src/credentials/group.rs` | `Uid` and `Gid`, both `u32` aliases |
+| `src/credentials/caps.rs` | `CapSet`, `CapSets`, capability constants, Linux transition validation |
+| `src/credentials/model.rs` | `Cred` storage, queries, capability and ID transitions |
+| `src/credentials/user.rs`, `src/credentials/group.rs` | `Uid` and `Gid`, both `u32` aliases, `INVALID_UID`/`INVALID_GID` sentinels, and `is_valid_uid`/`is_valid_gid` predicates |
 | `src/credentials/securebits.rs` | Crate-private `SecureBits` bitflags |
 | `src/namespace.rs` | IDs, namespace parentage and initial namespace |
 | `ut-tests/kcred_unittest.rs`, `ut-tests/namespace_unittest.rs` | Credential and namespace tests under `cfg(unittest)` |
 | `Cargo.toml` | Dependency declarations; no crate-specific features |
 
 `credentials` and `namespace` are private modules. The root exports `Cred`,
-`Uid`, `Gid`, `NamespaceId`, `UserNamespace`, `initial_cred`, and
+`Uid`, `Gid`, `INVALID_UID`, `INVALID_GID`, `is_valid_uid`, `is_valid_gid`,
+`CapSet`, `CapSets`, the `CAP_*` constants including `CAP_LAST_CAP` and
+`CAP_FS_MASK`, `NamespaceId`, `UserNamespace`, `initial_cred`, and
 `initial_user_namespace`; there are no publicly named submodules or exported
-macros. Internal securebits are not part of the public API.
+macros. Securebits themselves remain crate-private and are exposed to user space
+only through the `prctl(2)` adapter.
 
 The crate is `no_std` and always uses `alloc` for `Arc` and `Vec`.
 Its workspace dependencies are `bitflags`, `kerrno`, `klazy`, and `unittest`.
@@ -52,10 +60,14 @@ on `kprocess`, `ksyscall`, or `kvfs`, and no build script or optional alloc feat
 ## Objects and interface roles
 
 `Cred` has private `ruid/euid/suid/fsuid: Uid` and `rgid/egid/sgid/fsgid: Gid`
-fields, a sorted `supplementary_groups: Arc<[Gid]>`, and `securebits: SecureBits`.
-The private layout keeps direct field mutation within the credential model.
-`Clone`/`prepare` copy scalar fields and clone the shared group array.
-Queries borrow state; mutation requires exclusive `&mut Cred` access.
+fields, a sorted `supplementary_groups: Arc<[Gid]>`, `capabilities: CapSets`,
+`cap_ambient: CapSet`, `cap_bounding: CapSet`, and `securebits: SecureBits`.
+The private layout keeps direct field mutation and capability validation within
+the credential model.
+`CapSets` also keeps its three sets private behind getters so callers cannot
+construct a state that bypasses `validate_transition`. `Clone`/`prepare` copy
+all scalar and capability fields and clone the shared group array. Queries
+borrow state; mutation requires exclusive `&mut Cred` access.
 
 Callers use constructors to create trusted credentials, checked setters to apply
 identity policy, and `prepare` to obtain independently mutable values.
@@ -63,16 +75,24 @@ Construction and group replacement deliberately do not authorize publication.
 `Cred::root` delegates to `Cred::new(0, 0)`; `initial_cred` initializes and clones
 a shared `Arc<Cred>`. It is not a current-task lookup.
 
-`for_access` clones a credential and substitutes only filesystem IDs with real
-IDs. The caller still performs the access check. A caller implementing
-`AT_EACCESS` can use its existing committed credential without this real-ID
-substitution. Normal `kvfs` operations inspect
+`for_access` clones a credential and substitutes filesystem IDs with real IDs.
+Unless `SECURE_NO_SETUID_FIXUP` is set, it also applies Linux's access-override
+effective-set rule: nonzero real UID clears effective, while real UID zero sets
+effective equal to permitted. Permitted, inheritable, ambient, bounding and
+securebits are preserved. The caller still performs the access check. A caller
+implementing `AT_EACCESS` can use its existing committed credential without this
+real-ID substitution. Normal `kvfs` operations inspect
 filesystem IDs and supplementary groups. Keeping identity selection in `Cred`
 avoids a duplicate access-only credential type and keeps VFS independent of task
-lookup. `matches_real_credential_ids` compares the caller's real UID/GID against
-all three real/effective/saved IDs of the target (`self`). This asymmetric
-predicate excludes filesystem IDs, groups, task identity and capability bypass;
-`kprocess` composes it into its own cross-task access policy.
+lookup. `can_read_ptrace` selects the caller's real or filesystem IDs with
+`PtraceAccessMode`, requires all target real/effective/saved IDs to equal the
+chosen caller ID, and then requires the target's permitted set to be a subset
+of the caller's permitted set in real-credentials mode or effective set in
+filesystem-credentials mode. An effective `CAP_SYS_PTRACE` overrides both
+conditions. `has_scheduler_capability_over` similarly requires an effective
+`CAP_SYS_NICE` or target-permitted containment in caller-permitted.
+`kprocess` and `ksyscall` compose these predicates with same-thread-group and
+operation-specific policy; identity alone is not permission.
 
 `UserNamespace` stores `id: NamespaceId` and `parent: Option<Arc<UserNamespace>>`.
 Only the initial namespace can currently be constructed through public APIs;
@@ -105,20 +125,64 @@ for the file's lifetime; that lifetime policy also belongs to the consumer.
 
 ## Transition flows
 
-There is no enum state machine; private scalar fields and securebits represent
-the state. `is_privileged` is exactly `euid == 0`, standing in for the not-yet
-implemented capability policy for set-ID operations.
+There is no enum state machine; private scalar fields, capability sets, and
+securebits represent the state. There is no generic `is_privileged` predicate
+that treats EUID zero as a capability proxy: privileged operations test the
+effective capability named by Linux. The sysctl/procfs compatibility paths that
+Linux itself gates on EUID zero remain deliberate exceptions; they spell that
+identity check as `Cred::has_root_euid`, which does not consult capabilities or
+the filesystem UID.
+
+Cross-process policies over two supplied credentials live here so that
+capability-set containment has one implementation. `Cred::can_read_ptrace`
+implements the Linux read-side ptrace check for `PTRACE_MODE_READ_REALCREDS` or
+`PTRACE_MODE_READ_FSCREDS`: identity is compared against the caller's real or
+filesystem IDs respectively, the target's permitted set must be contained in
+the caller's permitted or effective set, and effective `CAP_SYS_PTRACE`
+overrides both checks. `Cred::has_scheduler_capability_over` implements
+`cap_safe_nice()`'s target-permitted containment. Neither method resolves a
+task, applies the same-thread-group exemption, or supplies the separate
+scheduler ownership test; those remain process/syscall responsibilities.
+
+`set_capabilities` delegates all transition policy to
+`CapSets::validate_transition`, passing the pre-transition capability and
+bounding sets. The checks run in Linux `cap_capset()` order: without effective
+`CAP_SETPCAP`, inheritable must be a subset of the old inheritable union old
+permitted; inheritable must always be a subset of the old inheritable union the
+bounding set; permitted must never grow; and effective must be a subset of the
+new permitted set. Effective `CAP_SETPCAP` relaxes only the first rule. Ambient
+is not a `CapSets` member but is maintained separately under the invariant
+`ambient ⊆ permitted ∩ inheritable`; the transition code enforces it after
+validation rather than passing it through `validate_transition`. Every
+check precedes assignment, so rejection leaves the credential unchanged.
+After a successful transition the ambient set is intersected with the new
+permitted and inheritable sets, matching Linux `cap_capset()`, so capabilities
+that the new sets no longer authorize are silently dropped.
+
+`CapSet` can represent all 64 ABI bits, but `capset(2)` applies Linux's
+`CAP_VALID_MASK` before calling this model, so unknown bits never enter a
+credential through the syscall. The model's subset rules still operate on the
+raw represented bits for trusted constructors. `drop_bounding_cap` takes the
+full syscall argument width, checks `CAP_SETPCAP` before Linux's
+`cap > CAP_LAST_CAP` range test, and only then removes the bit, so an oversized
+value cannot truncate to a removable capability. Constructors are trusted:
+`Cred::root()` gets full effective/permitted sets, empty inheritable and
+ambient sets, and a full bounding set; `Cred::new(nonzero, ...)` gets empty
+effective/permitted/inheritable/ambient sets and the same full bounding set.
 
 Checked set-ID functions validate all requested IDs before mutating any fields.
-Disallowed changes return `KError::OperationNotPermitted` with the value unchanged.
+`set_uid` and `set_gid` reject the invalid ID sentinel (`u32::MAX`) with
+`KError::InvalidInput`. Disallowed changes return
+`KError::OperationNotPermitted` with the value unchanged.
 The crate-private `set_resuid_unchecked` and `set_resgid_unchecked` skip policy
 checks and synchronize filesystem IDs with final effective IDs. They are safe
 Rust functions; “unchecked” describes authorization, not raw-memory operations.
 Public checked transitions call these internal helpers only after policy checks
 or a privileged-path decision.
 
-- `set_uid`/`set_gid` replace all four corresponding IDs for a privileged value;
-  otherwise they update only effective/filesystem IDs to a real or saved ID.
+- `set_uid`/`set_gid` replace all four corresponding IDs when the effective set
+  holds `CAP_SETUID`/`CAP_SETGID`; otherwise they update only effective/filesystem
+  IDs to a real or saved ID.
 - `set_reuid`/`set_regid` accept optional real/effective IDs. Their allowed sets
   and saved-ID update conditions are documented on the methods. Every successful
   call synchronizes filesystem IDs, even if both arguments are `None`.
@@ -132,10 +196,58 @@ or a privileged-path decision.
   replaces shared storage with `Arc::from(groups)`. `in_group` compares `fsgid`
   and binary-searches that sorted array. Caller privilege and count limits are
   not checked by this setter.
+- `set_uid`, `set_reuid`, and `set_resuid` snapshot the old value and apply
+  Linux's `cap_emulate_setxuid` fixup after a successful user-ID transition.
+  When any old real/effective/saved ID was root and all new IDs are nonzero,
+  effective and permitted are cleared unless `KEEP_CAPS` is set, and ambient is
+  always cleared even when `KEEP_CAPS` is set; independently, leaving effective
+  UID 0 clears effective, and entering
+  effective UID 0 restores effective from permitted. `SECURE_NO_SETUID_FIXUP` suppresses the fixup. Inheritable and
+  bounding sets are unchanged.
+- `set_fsuid` applies only the `CAP_FS_MASK` half of Linux's setfsuid fixup:
+  leaving filesystem UID 0 removes those bits from effective, and entering it
+  restores them from permitted. Permitted/inheritable sets are unchanged and
+  `KEEP_CAPS` does not affect this path. `SECURE_NO_SETUID_FIXUP` suppresses it.
+  `set_fsgid` has no capability effect.
+- `set_securebits` accepts the full syscall-width word, rejects any bit outside
+  the supported mask before narrowing, and replaces the whole word only when no
+  locked bit changes and no lock is cleared. Without effective `CAP_SETPCAP`, it
+  additionally requires a real change confined to the modern
+  `SECURE_EXEC_RESTRICT_FILE`/`SECURE_EXEC_DENY_INTERACTIVE` bits and their locks.
+  These exec-check bits are stored and validated but not enforced by the kernel;
+  the executing user-space checker interprets them. This method owns the width
+  and lock policy; `ksyscall` only adapts the ABI.
+- `raise_cap_ambient` validates the capability number, requires membership in
+  both permitted and inheritable and requires `SECURE_NO_CAP_AMBIENT_RAISE` to
+  be clear, then adds the bit. It deliberately does not test the bounding set,
+  matching the inspected Linux implementations. `lower_cap_ambient` validates
+  the number and removes the bit even when absent; `clear_cap_ambient` empties
+  the set without a capability check. `ksyscall` validates `prctl(2)` argument
+  width and unused arguments before calling these methods.
 - `keep_caps_enable`/`keep_caps_disable` test `KEEP_CAPS_LOCKED` before changing
-  `KEEP_CAPS`. `apply_exec` resets saved/filesystem IDs to effective IDs and
-  clears `KEEP_CAPS`, preserving its lock. It does not inspect file mode bits or
-  implement capability-set side effects. Lock insertion is currently test-only.
+  `KEEP_CAPS`. `apply_exec(no_new_privs, fs_shared_with_other_process)` resets
+  saved/filesystem IDs to the final effective IDs and applies Linux's
+  no-file-capability exec transition: permitted starts empty, privileged root
+  reconstructs it from the bounding and inheritable sets when `SECURE_NOROOT`
+  is clear and the real or effective UID is 0, and effective is that permitted
+  set only when the effective UID was 0 before any downgrade. Ambient is then
+  merged into permitted after the growth clamp; when privileged root does not
+  grant effective, ambient itself becomes effective. The transition clears
+  ambient when the prospective effective GID is outside the old
+  filesystem/supplementary group set, mirroring Linux's group half of
+  `id_changed`; that condition is reachable because `setfsgid` can diverge from
+  `egid` even though exec changes no ID. Linux's downgrade path runs when
+  permitted would grow or the group identity changed, under either
+  `no_new_privs` or cross-process `CLONE_FS` sharing. It intersects a growing
+  set with the pre-exec permitted set, and resets effective/group IDs to the
+  real IDs when `no_new_privs` is set or the pre-exec credential lacks effective
+  `CAP_SETUID`. A pre-existing effective/real-UID mismatch alone is not a
+  trigger, because exec does not change euid. It clears `KEEP_CAPS` even when
+  locked, preserves every other securebit and the inheritable/bounding sets,
+  and clears ambient when the group check fires. Adding set-ID executables or
+  file capabilities must model their ID changes and ambient clearing as well.
+  It does not inspect executable metadata. Lock insertion is currently
+  test-only.
 
 ## Execution context and concurrency
 
@@ -169,12 +281,23 @@ need them. This trades allocation at replacement time for cheap cloned snapshots
 A relaxed ID counter is sufficient for numeric allocation because namespace
 publication is handled separately by ownership and `Once`.
 
-There are no capability sets, LSM hooks, file capabilities, user-ID mappings,
-idmapped mount rules, or setuid/setgid executable handling in this crate.
-`UserNamespace` is not stored in `Cred`. The root privilege approximation is
-therefore not namespace-scoped authority. Supplementary-group bounds and syscall
-sentinel decoding belong to `ksyscall`. Allocations are infallible API calls and
-are not mapped to a recoverable `NoMemory` result. ID exhaustion is unchecked.
+Capability sets, including ambient, exist, but there are no LSM hooks, file
+capabilities, capability-aware exec elevation, user-ID mappings, idmapped mount
+rules, or setuid/setgid executable handling in this crate. Exec therefore
+models Linux's no-file-capability transition: an ordinary non-root exec clears
+the effective and permitted sets, privileged root reconstructs permitted from
+the bounding and inheritable sets and gains effective only with effective UID 0,
+and ambient is merged into permitted and becomes effective when privileged root
+does not grant the full set. `UserNamespace` is not stored in `Cred`, so
+capability authority is global rather than namespace-scoped.
+`PR_SET_NO_NEW_PRIVS` gates seccomp install and subjects privileged-root
+reconstruction growth and group identity changes to the downgrade path; it
+cannot suppress a nonexistent setuid/file-capability elevation. Set-ID and file-cap
+support must extend the transition, including ambient clearing for every
+identity-changing exec.
+Supplementary-group bounds and syscall sentinel decoding belong to `ksyscall`.
+Allocations are infallible API calls and are not mapped to a recoverable
+`NoMemory` result. ID exhaustion is unchecked.
 
 There is no custom `Drop`. Group replacement releases the old array reference;
 the array is freed when the final owning credential releases it. Dropping a
@@ -182,7 +305,7 @@ namespace releases its parent reference. The two singleton statics retain their
 initial `Arc`s for the kernel lifetime. `Once` poisoning after an unwinding
 initializer is not recovered here. No credential or group data is securely erased.
 
-`Cred::has_sys_tty_config` separately names VT configuration authority and uses
-current effective UID 0 until capability sets exist, consistent with the existing
-has_sys_admin model. TTY combines it with controlling-terminal object identity;
-real/saved/filesystem UID zero and file-open credentials do not grant authority.
+`Cred::has_sys_tty_config` names VT configuration authority and tests
+`CAP_SYS_TTY_CONFIG` in the effective set. TTY combines it with
+controlling-terminal object identity; real/saved/filesystem UID zero and
+file-open credentials do not grant authority.

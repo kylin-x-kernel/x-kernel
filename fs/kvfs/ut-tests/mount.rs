@@ -108,8 +108,13 @@ fn context_private_state_replacement_drops_erased_values() {
     }
     let cred = kcred::initial_cred();
     let mut context = FsContext::new(
-        &MOCK_FILE_SYSTEM_TYPE, None, None, SuperBlockFlags::empty(), &cred,
-    ).unwrap();
+        &MOCK_FILE_SYSTEM_TYPE,
+        None,
+        None,
+        SuperBlockFlags::empty(),
+        &cred,
+    )
+    .unwrap();
     let before = DROPS.load(Ordering::Relaxed);
     context.set_private(PrivateState(1)).unwrap();
     context.set_super_private(PrivateState(2)).unwrap();
@@ -315,10 +320,7 @@ impl FileDirOperations for MockDirOps {
     }
 }
 
-fn mock_filesystem(mount_flags: StatFsFlags) -> Arc<SuperBlock> {
-    let inode =
-        VfsInode::new_openable_dir(Arc::new(MockDirOps::new(mount_flags, 1)), inode_init(1));
-    let root = Dentry::new_dir_from_inode(inode, None, String::new());
+fn mock_superblock(root: Dentry, mount_flags: StatFsFlags) -> Arc<SuperBlock> {
     let mut superblock_flags = SuperBlockFlags::empty();
     if mount_flags.contains(StatFsFlags::RDONLY) {
         superblock_flags.insert(SuperBlockFlags::RDONLY);
@@ -332,6 +334,37 @@ fn mock_filesystem(mount_flags: StatFsFlags) -> Arc<SuperBlock> {
         crate::MAX_LFS_FILESIZE,
         |_| root,
     )
+}
+
+fn mock_filesystem(mount_flags: StatFsFlags) -> Arc<SuperBlock> {
+    let inode =
+        VfsInode::new_openable_dir(Arc::new(MockDirOps::new(mount_flags, 1)), inode_init(1));
+    let root = Dentry::new_dir_from_inode(inode, None, String::new());
+    mock_superblock(root, mount_flags)
+}
+
+fn mock_regular_file_filesystem(mode: NodePermission) -> Arc<SuperBlock> {
+    let init = VfsInodeInit::new(
+        1,
+        0,
+        Umode::new(NodeType::RegularFile, NodePermission::default()),
+    )
+    .with_owner_links_and_rdev(1000, 100, 1, Default::default())
+    .with_stat_data(
+        512,
+        1,
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH,
+    );
+    let inode = VfsInode::new_file(Arc::new(MockDirOps::new(StatFsFlags::empty(), 1)), init);
+    let root = Dentry::new_file_from_inode(inode, None, String::new());
+    root.update_metadata(MetadataUpdate {
+        mode: Some(mode),
+        ..Default::default()
+    })
+    .unwrap();
+    mock_superblock(root, StatFsFlags::empty())
 }
 
 fn statfs() -> VfsResult<StatFs> {
@@ -1205,6 +1238,20 @@ fn test_sticky_directory_rejects_unrelated_user_delete() {
         root.rmdir("mnt", &kcred::Cred::new(3000, 3000)),
         Err(VfsError::OperationNotPermitted)
     );
+    assert_eq!(
+        root.check_sticky(&victim, &kcred::Cred::new(3000, 3000)),
+        Err(VfsError::OperationNotPermitted)
+    );
+    // Linux exempts the victim owner, the directory owner, and `CAP_FOWNER`.
+    assert_eq!(
+        root.check_sticky(&victim, &kcred::Cred::new(2000, 2000)),
+        Ok(())
+    );
+    assert_eq!(
+        root.check_sticky(&victim, &kcred::Cred::new(1000, 1000)),
+        Ok(())
+    );
+    assert_eq!(root.check_sticky(&victim, &kcred::Cred::new(0, 0)), Ok(()));
 }
 
 #[def_test]
@@ -1246,6 +1293,229 @@ fn test_metadata_owner_and_group_authorization() {
             .permission()
             .contains(NodePermission::SET_GID)
     );
+}
+
+#[def_test]
+fn test_chmod_setgid_retention_requires_fsetid_not_fowner() {
+    let fs = mock_filesystem(StatFsFlags::empty());
+    let root = Mount::new_root(&fs).root_path();
+    root.dentry
+        .update_metadata(MetadataUpdate {
+            mode: Some(NodePermission::from_bits_truncate(0o666)),
+            owner: Some((1000, 100)),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let cred_with = |capability: u32| {
+        let mut cred = Cred::new(0, 0);
+        cred.set_securebits(0x4).unwrap();
+        cred.set_fsuid(1000);
+        let set = kcred::CapSet::from_bits(1u64 << capability);
+        cred.set_capabilities(kcred::CapSets::new(set, set, kcred::CapSet::EMPTY))
+            .unwrap();
+        cred
+    };
+
+    let fsetid = cred_with(kcred::CAP_FSETID);
+    root.chmod(NodePermission::from_bits_truncate(0o2660), &fsetid)
+        .unwrap();
+    assert!(
+        root.metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_GID)
+    );
+
+    let fowner = cred_with(kcred::CAP_FOWNER);
+    root.chmod(NodePermission::from_bits_truncate(0o2660), &fowner)
+        .unwrap();
+    assert!(
+        !root
+            .metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_GID)
+    );
+}
+
+#[def_test]
+fn test_chown_setid_cleanup_matches_linux() {
+    let regular = |mode| {
+        Umode::new(
+            NodeType::RegularFile,
+            NodePermission::from_bits_truncate(mode),
+        )
+    };
+    let directory = |mode| {
+        Umode::new(
+            NodeType::Directory,
+            NodePermission::from_bits_truncate(mode),
+        )
+    };
+    let owner = Cred::new(1000, 100);
+
+    // chown_common() excludes directories from set-ID cleanup entirely.
+    assert_eq!(
+        Path::chown_mode(directory(0o6666), 100, None, &owner).bits(),
+        0o6666
+    );
+
+    // Set-UID is always cleared for non-directories. Without a GID argument,
+    // set-GID depends only on the old GID, group-execute, and CAP_FSETID.
+    assert_eq!(
+        Path::chown_mode(regular(0o6666), 100, None, &owner).bits(),
+        0o2666
+    );
+    assert_eq!(
+        Path::chown_mode(regular(0o2666), 100, None, &owner).bits(),
+        0o2666
+    );
+    // A pre-chown non-member group or group-execute clears set-GID.
+    assert_eq!(
+        Path::chown_mode(regular(0o2666), 200, None, &owner).bits(),
+        0o666
+    );
+    assert_eq!(
+        Path::chown_mode(regular(0o2670), 100, None, &owner).bits(),
+        0o670
+    );
+
+    let mut fsetid = Cred::new(0, 0);
+    fsetid.set_securebits(0x4).unwrap();
+    fsetid.set_fsuid(1000);
+    let set = kcred::CapSet::from_bits(1u64 << kcred::CAP_FSETID);
+    fsetid
+        .set_capabilities(kcred::CapSets::new(set, set, kcred::CapSet::EMPTY))
+        .unwrap();
+    assert_eq!(
+        Path::chown_mode(regular(0o6666), 100, None, &fsetid).bits(),
+        0o2666
+    );
+}
+
+#[def_test]
+fn test_chown_without_new_ids_still_cleans_setid() {
+    let fs = mock_regular_file_filesystem(NodePermission::from_bits_truncate(0o6666));
+    let root = Mount::new_root(&fs).root_path();
+
+    root.chown(None, None, &Cred::new(1000, 100)).unwrap();
+
+    let metadata = root.metadata();
+    assert_eq!((metadata.uid, metadata.gid), (1000, 100));
+    assert_eq!(metadata.mode.permission().bits(), 0o2666);
+}
+
+#[def_test]
+fn test_chown_without_new_ids_is_a_noop_when_mode_does_not_change() {
+    let fs = mock_regular_file_filesystem(NodePermission::from_bits_truncate(0o666));
+    let root = Mount::new_root(&fs).root_path();
+
+    // Linux turns chown's set-ID cleanup into ATTR_MODE only when a bit must
+    // actually be cleared. An unrelated caller may therefore chown(-1, -1) on
+    // a file without set-ID bits.
+    root.chown(None, None, &Cred::new(2000, 200)).unwrap();
+
+    let metadata = root.metadata();
+    assert_eq!((metadata.uid, metadata.gid), (1000, 100));
+    assert_eq!(metadata.mode.permission().bits(), 0o666);
+}
+
+#[def_test]
+fn test_chown_new_group_drops_sgid_on_generated_mode_change() {
+    let regular = || {
+        let fs = mock_regular_file_filesystem(NodePermission::from_bits_truncate(0o6666));
+        Mount::new_root(&fs).root_path()
+    };
+    let mut cap_chown = Cred::root();
+    cap_chown.set_fsuid(2000);
+    cap_chown.set_fsgid(100);
+    let chown_set =
+        kcred::CapSet::from_bits((1u64 << kcred::CAP_CHOWN) | (1u64 << kcred::CAP_FOWNER));
+    cap_chown
+        .set_capabilities(kcred::CapSets::new(
+            chown_set,
+            chown_set,
+            kcred::CapSet::EMPTY,
+        ))
+        .unwrap();
+
+    // CAP_CHOWN allows an arbitrary new GID and CAP_FOWNER authorizes the
+    // generated mode update. Removing set-UID then also drops set-GID because
+    // the caller is not a member of the new group and lacks CAP_FSETID.
+    let changed = regular();
+    changed.chown(None, Some(300), &cap_chown).unwrap();
+    let metadata = changed.metadata();
+    assert_eq!(metadata.gid, 300);
+    assert_eq!(metadata.mode.permission().bits(), 0o666);
+
+    // Membership in the new group satisfies setattr_prepare()/setattr_copy(),
+    // so set-GID survives the same generated mode change.
+    let mut member = Cred::root();
+    member.set_fsuid(2000);
+    member.set_fsgid(100);
+    member.set_supplementary_groups(vec![300]);
+    member
+        .set_capabilities(kcred::CapSets::new(
+            chown_set,
+            chown_set,
+            kcred::CapSet::EMPTY,
+        ))
+        .unwrap();
+    let retained = regular();
+    retained.chown(None, Some(300), &member).unwrap();
+    let metadata = retained.metadata();
+    assert_eq!(metadata.gid, 300);
+    assert_eq!(metadata.mode.permission().bits(), 0o2666);
+}
+
+#[def_test]
+fn test_chown_without_new_ids_requires_fowner_to_clear_setid() {
+    let regular = || {
+        let fs = mock_regular_file_filesystem(NodePermission::from_bits_truncate(0o6666));
+        Mount::new_root(&fs).root_path()
+    };
+    let unprivileged = Cred::new(2000, 200);
+
+    let denied = regular();
+    assert_eq!(
+        denied.chown(None, None, &unprivileged),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(denied.metadata().mode.permission().bits(), 0o6666);
+
+    let mut fowner = Cred::root();
+    fowner.set_fsuid(2000);
+    let fowner_set = kcred::CapSet::from_bits(1u64 << kcred::CAP_FOWNER);
+    fowner
+        .set_capabilities(kcred::CapSets::new(
+            fowner_set,
+            fowner_set,
+            kcred::CapSet::EMPTY,
+        ))
+        .unwrap();
+    let allowed = regular();
+    allowed.chown(None, None, &fowner).unwrap();
+    // The caller is neither in the file's group nor holds CAP_FSETID, so the
+    // SGID bit is dropped together with the always-dropped SUID bit.
+    assert_eq!(allowed.metadata().mode.permission().bits(), 0o666);
+
+    let mut chown_only = Cred::root();
+    chown_only.set_fsuid(2000);
+    let chown_set = kcred::CapSet::from_bits(1u64 << kcred::CAP_CHOWN);
+    chown_only
+        .set_capabilities(kcred::CapSets::new(
+            chown_set,
+            chown_set,
+            kcred::CapSet::EMPTY,
+        ))
+        .unwrap();
+    let denied = regular();
+    assert_eq!(
+        denied.chown(None, None, &chown_only),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(denied.metadata().mode.permission().bits(), 0o6666);
 }
 
 #[def_test]

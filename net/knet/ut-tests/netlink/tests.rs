@@ -1460,6 +1460,8 @@ fn test_route_mutation_checks_each_send_credential() {
         .unwrap();
     let mutation = build_nlmsg(RTM_NEWLINK, 41, NLM_F_REQUEST | NLM_F_ACK, Vec::new());
     let unprivileged = Cred::new(1000, 1000);
+    let privileged = Cred::root();
+
     assert_eq!(
         socket.send_with_cred(
             Cursor::new(mutation.as_slice()),
@@ -1474,6 +1476,7 @@ fn test_route_mutation_checks_each_send_credential() {
         Some(-(LinuxError::EPERM.into_raw()))
     );
 
+    // Queries need no capability.
     let query = build_nlmsg(RTM_GETLINK, 42, NLM_F_REQUEST, Vec::new());
     assert_eq!(
         socket.send_with_cred(
@@ -1484,11 +1487,12 @@ fn test_route_mutation_checks_each_send_credential() {
         Ok(query.len())
     );
     while socket.inner.rx_queue.lock().pop_front().is_some() {}
+
     assert_eq!(
         socket.send_with_cred(
             Cursor::new(mutation.as_slice()),
             SendOptions::default(),
-            &Cred::root(),
+            &privileged,
         ),
         Ok(mutation.len())
     );

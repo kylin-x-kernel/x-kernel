@@ -97,7 +97,7 @@ pub fn sys_chroot(path: UserConstPtr<c_char>) -> KResult<isize> {
         return Err(KError::NotADirectory);
     }
     loc.permission(Permission::MAY_EXEC, &cred)?;
-    if !cred.is_privileged() {
+    if !cred.has_cap(kcred::CAP_SYS_CHROOT) {
         return Err(KError::OperationNotPermitted);
     }
     kprocess::current_user_process()

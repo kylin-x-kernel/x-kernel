@@ -51,13 +51,16 @@ gets its own superblock and instance record, and only pairs created through
 that instance's `ptmx` are listed. Pty **allocation** itself is global
 (`io/ktty`'s allocator with capacity `pty_limit()`), so containers share the
 host pty budget; `max=` is rejected rather than pretending per-instance
-bounds exist. Device access behind a loaded bpf program is not enforced
-anywhere in the kernel today (see `core/ksyscall/src/bpf.rs`).
+bounds exist. Device access is not special-cased by devpts: character-device
+opens and device-node creation consult the generic KVFS device policy, which the
+cgroup-v2 BPF device controller installs, so an attached program can deny pty
+access with `EPERM`. With no controller policy installed, access is unrestricted.
 
 ## Residual risks
 
 - `ptmxmode=` defaults to `0000` like Linux; a mount that does not set it
   leaves `ptmx` inaccessible to non-root callers by design.
-- Ownership falls back to the acting task's fsuid/fsgid; the credential
-  model has no capability sets yet, so euid-0 proxies apply as elsewhere in
-  the kernel.
+- Ownership falls back to the acting task's fsuid/fsgid. Access to the
+  resulting inodes is enforced by KVFS against the same capability-aware
+  `Cred` used by the rest of the filesystem layer; devpts keeps no separate
+  euid-0 proxy.

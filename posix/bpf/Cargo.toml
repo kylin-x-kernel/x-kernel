@@ -11,6 +11,10 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[package.metadata.cargo-shear]
+# Used by cfg(unittest) regressions under ut-tests, which cargo-shear does not scan.
+ignored = ["unittest_support"]
+
 [features]
 cgroup2 = ["dep:cgroup2fs", "dep:kcgroup"]
 
@@ -19,12 +23,15 @@ cgroup2fs = { workspace = true, optional = true }
 kcgroup = { workspace = true, optional = true }
 bpffs.workspace = true
 kbpf.workspace = true
+kcred.workspace = true
 kerrno.workspace = true
 klogger.workspace = true
 kvfs.workspace = true
 kuaccess.workspace = true
 kprocess.workspace = true
 posix-types.workspace = true
+unittest.workspace = true
+unittest_support.workspace = true
 
 [lints]
 workspace = true

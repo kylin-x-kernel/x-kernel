@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use kcred::{Cred, Gid, Uid};
+use kcred::{Cred, Gid, Uid, is_valid_gid};
 use kerrno::{KError, KResult};
 use posix_types::{UserConstPtr, UserPtr};
 
@@ -187,7 +187,7 @@ pub(crate) fn sys_getgroups(size: i32, list: UserPtr<Gid>) -> KResult<isize> {
 /// Set the supplementary group IDs of the current process.
 pub(crate) fn sys_setgroups(size: i32, list: UserConstPtr<Gid>) -> KResult<isize> {
     debug!("sys_setgroups <= size: {size}");
-    if !kprocess::current_cred().is_privileged() {
+    if !kprocess::current_cred().has_cap(kcred::CAP_SETGID) {
         return Err(KError::OperationNotPermitted);
     }
 
@@ -201,6 +201,9 @@ pub(crate) fn sys_setgroups(size: i32, list: UserConstPtr<Gid>) -> KResult<isize
         list.check_non_null().ok_or(KError::BadAddress)?;
         list.load_vm_vec(size as usize)?
     };
+    if groups.iter().any(|&gid| !is_valid_gid(gid)) {
+        return Err(KError::InvalidInput);
+    }
 
     update_current_cred(|cred| {
         cred.set_supplementary_groups(groups);

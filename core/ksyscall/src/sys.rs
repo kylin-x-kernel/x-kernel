@@ -140,7 +140,7 @@ pub(crate) fn sys_syslog(_type: i32, _buf: *mut c_char, _len: usize) -> KResult<
 
 /// Sets the hostname in the calling process's UTS namespace.
 pub(crate) fn sys_sethostname(name: UserConstPtr<u8>, len: usize) -> KResult<isize> {
-    if !kprocess::current_cred().is_privileged() {
+    if !kprocess::current_cred().has_sys_admin() {
         return Err(KError::OperationNotPermitted);
     }
     if len > MAX_HOSTNAME_LEN {
@@ -165,7 +165,7 @@ pub(crate) fn sys_sethostname(name: UserConstPtr<u8>, len: usize) -> KResult<isi
 
 /// Applies a Linux reboot control command supported by the current platform.
 ///
-/// Requires a privileged credential and a valid reboot magic pair
+/// Requires `CAP_SYS_BOOT` and a valid reboot magic pair
 /// (`LINUX_REBOOT_MAGIC1` plus one of the `MAGIC2*` values), matching the
 /// `reboot(2)` ABI. `HALT`, `POWER_OFF`, the `CAD_ON`/`CAD_OFF` toggles,
 /// and `SW_SUSPEND` are handled here; `HALT` stops all CPUs and keeps the
@@ -181,7 +181,7 @@ pub(crate) fn sys_reboot(
     command: u32,
     _argument: UserConstPtr<c_char>,
 ) -> KResult<isize> {
-    if !kprocess::current_cred().is_privileged() {
+    if !kprocess::current_cred().has_cap(kcred::CAP_SYS_BOOT) {
         return Err(KError::OperationNotPermitted);
     }
     if magic1 != LINUX_REBOOT_MAGIC1

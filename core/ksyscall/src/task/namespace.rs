@@ -11,8 +11,10 @@
 //! resolves the fd through one of two channels: an [`NsFd`] that pins the
 //! namespace directly, or a pidfd whose target process's namespace is entered
 //! (Linux 5.8+ semantics). Both channels sit behind one authorization gate:
-//! joining a namespace requires the privileged-credential proxy of Linux's
-//! per-type `CAP_SYS_ADMIN` checks.
+//! joining a namespace requires effective `CAP_SYS_ADMIN` in the initial user
+//! namespace, standing in for Linux's per-type checks. The only per-type
+//! difference would be the time namespace's `CAP_SYS_TIME`, and this kernel
+//! rejects time-namespace creation and entry as unsupported.
 
 use alloc::{sync::Arc, vec::Vec};
 
@@ -143,9 +145,9 @@ pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
 
 /// Join a namespace referenced by a namespace fd or a pidfd (`setns(2)`).
 ///
-/// The caller must hold `CAP_SYS_ADMIN` authority (the euid-0 proxy standing
-/// in for Linux's per-type install checks); joining any namespace without
-/// it is `EPERM`. The bad-fd error keeps priority by resolving the fd first.
+/// The caller must hold effective `CAP_SYS_ADMIN` (standing in for Linux's
+/// per-type install checks); joining any namespace without it is `EPERM`. The
+/// bad-fd error keeps priority by resolving the fd first.
 ///
 /// The `NsFd` channel requires `nstype` to be zero or to match the fd's
 /// namespace type (`EINVAL` otherwise). The `PidFd` channel implements the

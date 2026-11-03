@@ -57,7 +57,7 @@ pub(crate) fn sys_time(tloc: UserPtr<linux_raw_sys::general::__kernel_time_t>) -
 }
 
 fn set_wall_time(value: SystemTime) -> KResult<isize> {
-    if !kprocess::current_cred().is_privileged() {
+    if !kprocess::current_cred().has_cap(kcred::CAP_SYS_TIME) {
         return Err(KError::OperationNotPermitted);
     }
     // Range validation (the Linux rule that the wall clock may not move before

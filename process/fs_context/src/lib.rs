@@ -11,13 +11,15 @@
 //! # Example
 //!
 //! ```
-//! use fs_context::FsStruct;
+//! use fs_context::{ExecAdmission, FsStruct};
 //! let mut fs = FsStruct::for_init_task();
 //! assert_eq!(fs.replace_umask(0o077), 0o022);
-//! fs.set_in_exec(true);
+//! assert_eq!(fs.begin_exec(), ExecAdmission::Exclusive);
 //! let child = fs.clone_for_process();
 //! assert_eq!(child.umask(), 0o077);
 //! assert!(!child.in_exec());
+//! fs.end_exec();
+//! assert!(!fs.in_exec());
 //! ```
 
 #![cfg_attr(any(not(test), doc), no_std)]
@@ -25,6 +27,7 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use klazy::Lazy;
 use ksync::Mutex;
@@ -56,16 +59,58 @@ pub struct FsStruct {
     in_exec: bool,
     root: Option<Path>,
     pwd: Option<Path>,
+    /// Lazily allocated so read-only snapshots do not allocate an owner count
+    /// they can never use.
+    process_users: Option<Arc<AtomicUsize>>,
+}
+
+/// One process's adoption of a filesystem context.
+///
+/// The count lives behind an `Arc<AtomicUsize>` rather than inside the state
+/// protected by the context mutex. Process finalization may run in a
+/// non-sleeping deferred context, so releasing the last owner must not need to
+/// take the sleepable filesystem mutex. Dropping this guard is that release.
+#[derive(Debug)]
+#[must_use = "dropping the guard releases the process owner"]
+pub struct ProcessUserGuard {
+    process_users: Arc<AtomicUsize>,
+}
+
+impl Drop for ProcessUserGuard {
+    fn drop(&mut self) {
+        let released =
+            self.process_users
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    count.checked_sub(1)
+                });
+        assert!(
+            released.is_ok(),
+            "filesystem-context process user count underflow"
+        );
+    }
+}
+
+/// Result of starting an exec transition on a filesystem context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecAdmission {
+    /// The caller exclusively owns the context. It has set `in_exec`, so new
+    /// `CLONE_FS` adopters are rejected until [`FsStruct::end_exec`].
+    Exclusive,
+    /// Another process owns the context, so it is already shared. The exec
+    /// transition does not set `in_exec`; the caller must treat the exec as
+    /// unsafe, matching Linux `check_unsafe_exec`.
+    Shared,
 }
 
 impl FsStruct {
     /// Creates the static init-task filesystem context.
-    pub const fn for_init_task() -> Self {
+    pub fn for_init_task() -> Self {
         Self {
             umask: 0o022,
             in_exec: false,
             root: None,
             pwd: None,
+            process_users: None,
         }
     }
 
@@ -98,6 +143,7 @@ impl FsStruct {
             in_exec: false,
             root: Some(root),
             pwd: Some(pwd),
+            process_users: None,
         })
     }
 
@@ -108,14 +154,68 @@ impl FsStruct {
         clone
     }
 
-    /// Takes a complete snapshot of this filesystem context.
+    /// Takes a snapshot of the path, umask, and exec state.
+    ///
+    /// Process ownership is deliberately not copied: the snapshot is not yet
+    /// adopted by any process and has no owner count. Adoption allocates a
+    /// fresh counter, so temporary snapshots never allocate or alias the source
+    /// context's ownership.
     pub fn snapshot(&self) -> Self {
         Self {
             umask: self.umask,
             in_exec: self.in_exec,
             root: self.root.clone(),
             pwd: self.pwd.clone(),
+            process_users: None,
         }
+    }
+
+    /// Records that one more process owns this shared filesystem context.
+    ///
+    /// This is the X-Kernel counterpart of Linux's `fs_struct.users`, but it
+    /// counts processes rather than tasks: all threads of a thread group share
+    /// one process runtime and therefore one owner. A `CLONE_FS` child adds
+    /// another owner, which is what makes cross-process sharing observable.
+    /// The returned guard releases that owner when dropped.
+    #[doc(hidden)]
+    pub fn add_process_user(&mut self) -> ProcessUserGuard {
+        let process_users = self
+            .process_users
+            .get_or_insert_with(|| Arc::new(AtomicUsize::new(0)));
+        let added = process_users.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            count.checked_add(1)
+        });
+        assert!(
+            added.is_ok(),
+            "filesystem-context process user count overflow"
+        );
+        ProcessUserGuard {
+            process_users: Arc::clone(process_users),
+        }
+    }
+
+    /// Tries to adopt this shared context for a process created with `CLONE_FS`.
+    ///
+    /// Returns `None` without changing the owner count while an exclusive exec
+    /// transition is in progress. The ownership check and increment happen
+    /// under one lock, so a `CLONE_FS` child cannot attach after the execing
+    /// process sampled the sharing state and before it commits credentials.
+    #[doc(hidden)]
+    pub fn try_add_process_user(&mut self) -> Option<ProcessUserGuard> {
+        if self.in_exec {
+            return None;
+        }
+        Some(self.add_process_user())
+    }
+
+    /// Returns how many processes currently own this filesystem context.
+    ///
+    /// A context that has never been adopted has no owner count and reports
+    /// zero.
+    pub fn process_user_count(&self) -> usize {
+        self.process_users
+            .as_ref()
+            .map_or(0, |count| count.load(Ordering::Acquire))
     }
 
     /// Attaches the first mounted root to this context.
@@ -207,14 +307,33 @@ impl FsStruct {
         core::mem::replace(&mut self.umask, umask & UMASK_BITS)
     }
 
-    /// Returns whether this context is in exec transition.
+    /// Returns whether this context is in an exclusive exec transition.
     pub const fn in_exec(&self) -> bool {
         self.in_exec
     }
 
-    /// Sets exec transition state.
-    pub fn set_in_exec(&mut self, in_exec: bool) {
-        self.in_exec = in_exec;
+    /// Starts an exec transition while checking cross-process sharing.
+    ///
+    /// This is the atomic counterpart of Linux `check_unsafe_exec()`: under one
+    /// lock it decides whether another process owns the context and, only when
+    /// it does not, sets `in_exec` so later `CLONE_FS` adoption fails. A shared
+    /// result leaves `in_exec` clear, matching Linux, because the exec is
+    /// already unsafe for an unrelated reason.
+    ///
+    /// Call [`Self::end_exec`] on every path after an [`ExecAdmission::Exclusive`]
+    /// result, including failures.
+    pub fn begin_exec(&mut self) -> ExecAdmission {
+        if self.process_user_count() > 1 {
+            ExecAdmission::Shared
+        } else {
+            self.in_exec = true;
+            ExecAdmission::Exclusive
+        }
+    }
+
+    /// Ends an exec transition and permits `CLONE_FS` adoption again.
+    pub fn end_exec(&mut self) {
+        self.in_exec = false;
     }
 
     /// Changes this context's root.

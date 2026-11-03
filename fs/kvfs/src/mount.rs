@@ -1168,33 +1168,74 @@ impl Path {
         inode.update_time(self.dentry(), now, InodeUpdateTime::ChangeAndModification)
     }
 
-    /// Changes this inode's owner after applying Linux chown/chgrp authorization.
-    pub fn chown(&self, uid: Option<u32>, gid: Option<u32>, cred: &Cred) -> VfsResult<()> {
-        if uid.is_none() && gid.is_none() {
-            return Ok(());
+    /// Computes the mode bits Linux leaves after changing a node's owner.
+    ///
+    /// `chown_common()` excludes directories from the set-ID cleanup. For
+    /// other node types it always clears set-UID and asks
+    /// `setattr_should_drop_sgid()` whether set-GID must also go: set-GID is
+    /// dropped when group-execute is set or when the pre-chown GID is not a
+    /// member group and the caller lacks effective `CAP_FSETID`.
+    ///
+    /// When that cleanup actually changes a bit, Linux generates an
+    /// `ATTR_MODE` update. `setattr_prepare()` then clears set-GID if the
+    /// caller is not in the *new* GID and lacks `CAP_FSETID`; `setattr_copy()`
+    /// repeats that check against the updated inode. Apply the same condition
+    /// only on a generated mode change: a GID-only chown that leaves both
+    /// set-ID bits untouched does not pass through the mode path.
+    fn chown_mode(mode: Umode, old_gid: u32, new_gid: Option<u32>, cred: &Cred) -> NodePermission {
+        let permission = mode.permission();
+        if mode.node_type() == NodeType::Directory {
+            return permission;
         }
 
+        let mut result = permission;
+        result.remove(NodePermission::SET_UID);
+        if permission.contains(NodePermission::SET_GID) {
+            let old_group_ok = cred.has_cap(kcred::CAP_FSETID) || cred.in_group(old_gid);
+            if permission.contains(NodePermission::GROUP_EXEC) || !old_group_ok {
+                result.remove(NodePermission::SET_GID);
+            }
+        }
+        if result.bits() != permission.bits()
+            && new_gid.is_some_and(|gid| !cred.has_cap(kcred::CAP_FSETID) && !cred.in_group(gid))
+        {
+            result.remove(NodePermission::SET_GID);
+        }
+        result
+    }
+
+    /// Changes this inode's owner after applying Linux chown/chgrp authorization.
+    pub fn chown(&self, uid: Option<u32>, gid: Option<u32>, cred: &Cred) -> VfsResult<()> {
         self.check_writable_mount()?;
         let metadata = self.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
-        let is_privileged = cred.has_cap_chown();
+        let can_chown = cred.has_cap_chown();
 
-        if uid.is_some_and(|uid| !is_privileged && (!is_owner || uid != metadata.uid)) {
+        if uid.is_some_and(|uid| !can_chown && (!is_owner || uid != metadata.uid)) {
             return Err(VfsError::OperationNotPermitted);
         }
         if gid.is_some_and(|gid| {
-            !is_privileged && (!is_owner || (gid != metadata.gid && !cred.in_group(gid)))
+            !can_chown && (!is_owner || (gid != metadata.gid && !cred.in_group(gid)))
         }) {
             return Err(VfsError::OperationNotPermitted);
         }
 
-        let mut mode = metadata.mode.permission();
-        mode.remove(NodePermission::SET_UID);
-        if mode.contains(NodePermission::GROUP_EXEC) {
-            mode.remove(NodePermission::SET_GID);
+        let new_gid = gid.unwrap_or(metadata.gid);
+        let mode = Self::chown_mode(metadata.mode, metadata.gid, gid, cred);
+        // Linux `chown_common()` turns the set-ID cleanup into an `ATTR_MODE`
+        // update, and `setattr_prepare()` authorizes that generated mode change
+        // through inode ownership or effective `CAP_FOWNER` — not through
+        // `CAP_CHOWN`/`CAP_FSETID`. `chown(-1, -1)` therefore remains a
+        // successful no-op for an unrelated caller unless it would actually
+        // clear a set-ID bit.
+        if mode.bits() != metadata.mode.permission().bits()
+            && cred.fsuid() != metadata.uid
+            && !cred.has_cap_fowner()
+        {
+            return Err(VfsError::OperationNotPermitted);
         }
         self.dentry.update_metadata(MetadataUpdate {
-            owner: Some((uid.unwrap_or(metadata.uid), gid.unwrap_or(metadata.gid))),
+            owner: Some((uid.unwrap_or(metadata.uid), new_gid)),
             mode: Some(mode),
             ..Default::default()
         })
@@ -1209,7 +1250,7 @@ impl Path {
         }
         if mode.contains(NodePermission::SET_GID)
             && !cred.in_group(metadata.gid)
-            && !cred.has_cap_fowner()
+            && !cred.has_cap(kcred::CAP_FSETID)
         {
             mode.remove(NodePermission::SET_GID);
         }
@@ -1343,7 +1384,7 @@ impl Path {
                         _ => crate::node::DeviceAccess::TYPE_BLOCK,
                     },
             )?;
-            if !cred.is_privileged() {
+            if !cred.has_cap(kcred::CAP_MKNOD) {
                 return Err(VfsError::OperationNotPermitted);
             }
         }
@@ -1406,8 +1447,12 @@ impl Path {
             return Ok(());
         }
 
-        let fsuid = cred.fsuid();
-        if fsuid == 0 || fsuid == dir.uid || fsuid == victim.metadata().uid {
+        // Linux `__check_sticky()` exempts the victim owner, the directory
+        // owner, and `CAP_FOWNER`.
+        if cred.has_cap(kcred::CAP_FOWNER)
+            || cred.fsuid() == dir.uid
+            || cred.fsuid() == victim.metadata().uid
+        {
             Ok(())
         } else {
             Err(VfsError::OperationNotPermitted)
@@ -1441,7 +1486,7 @@ impl Path {
 
     /// Creates a non-regular filesystem node under this directory path.
     ///
-    /// Character and block device creation requires a privileged credential.
+    /// Character and block device creation requires effective `CAP_MKNOD`.
     /// The existence check takes precedence over create-only authorization
     /// failures.
     pub fn mknod(

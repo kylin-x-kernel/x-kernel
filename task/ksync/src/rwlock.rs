@@ -376,6 +376,15 @@ impl<T: core::fmt::Debug> core::fmt::Debug for RwLock<T> {
 }
 
 impl<T> RwLock<T> {
+    /// Returns exclusive access to the protected value without locking.
+    ///
+    /// The caller must already have exclusive ownership of the lock, such as
+    /// during destruction when no other thread can still reference it.
+    #[inline(always)]
+    pub fn get_mut(&mut self) -> &mut T {
+        self.0.get_mut()
+    }
+
     /// Creates a new [`RwLock`].
     #[inline(always)]
     #[cfg(not(feature = "stats"))]

@@ -34,6 +34,7 @@ mod shm;
 
 use core::sync::atomic::{AtomicI32, Ordering};
 
+use kcred::{CAP_IPC_OWNER, Cred};
 use linux_raw_sys::general::__kernel_time_t;
 use posix_types::IpcPerm;
 
@@ -61,24 +62,42 @@ const IPC_INFO: i32 = 3;
 const MSG_STAT: i32 = 11;
 const MSG_INFO: i32 = 12;
 
-// Permission bits
-const USER_READ: u32 = 0o400;
-const USER_WRITE: u32 = 0o200;
-const GROUP_READ: u32 = 0o040;
-const GROUP_WRITE: u32 = 0o020;
-const OTHER_READ: u32 = 0o004;
-const OTHER_WRITE: u32 = 0o002;
+/// Owner, group, and other read bits for an IPC permission check.
+pub(crate) const IPC_READ: u32 = 0o444;
+/// Owner, group, and other write bits for an IPC permission check.
+pub(crate) const IPC_WRITE: u32 = 0o222;
 
-fn has_ipc_permission(perm: &IpcPerm, current_uid: u32, current_gid: u32, is_write: bool) -> bool {
-    if current_uid == 0 {
+/// Applies Linux `ipcperms()` to `perm` for the requested access bits in `flag`.
+///
+/// Both the creator and current owner IDs select the owner class; both creator
+/// and current group IDs select the group class through the filesystem GID and
+/// supplementary groups. The requested class bits are folded out of `flag`, so
+/// callers pass the raw operation flags (including `msgget` mode bits). Effective
+/// `CAP_IPC_OWNER` overrides a denial; UID zero alone grants no authority.
+fn has_ipc_permission(perm: &IpcPerm, cred: &Cred, flag: u32) -> bool {
+    let requested = (flag >> 6) | (flag >> 3) | flag;
+    let euid = cred.euid();
+    let granted = if euid == perm.cuid || euid == perm.uid {
+        perm.mode >> 6
+    } else if cred.in_group(perm.cgid) || cred.in_group(perm.gid) {
+        perm.mode >> 3
+    } else {
+        perm.mode
+    };
+
+    if requested & !granted & 0o7 == 0 {
         return true;
     }
 
-    if perm.uid == current_uid {
-        (perm.mode & if is_write { USER_WRITE } else { USER_READ }) != 0
-    } else if perm.gid == current_gid {
-        (perm.mode & if is_write { GROUP_WRITE } else { GROUP_READ }) != 0
-    } else {
-        (perm.mode & if is_write { OTHER_WRITE } else { OTHER_READ }) != 0
-    }
+    cred.has_cap(CAP_IPC_OWNER)
+}
+
+/// Applies Linux `ipcctl_obtain_check()` control authority to `perm`.
+///
+/// Queue control is reserved for the effective UID that matches the current
+/// owner or creator, with effective `CAP_SYS_ADMIN` as the privileged override.
+/// `CAP_IPC_OWNER` only overrides read/write access and is deliberately absent.
+fn has_ipc_control_permission(perm: &IpcPerm, cred: &Cred) -> bool {
+    let euid = cred.euid();
+    euid == perm.cuid || euid == perm.uid || cred.has_cap(kcred::CAP_SYS_ADMIN)
 }

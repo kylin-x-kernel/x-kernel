@@ -161,9 +161,8 @@ but not yet data-plane isolation.
 
 ## setns semantics
 
-`setns(2)` in `core/ksyscall` requires the privileged credential (the euid-0
-`CAP_SYS_ADMIN` proxy standing in for Linux's per-type install checks) and
-resolves an fd through two channels:
+`setns(2)` in `core/ksyscall` requires effective `CAP_SYS_ADMIN` (standing in
+for Linux's per-type install checks) and resolves an fd through two channels:
 
 - `NsFd` channel: `nstype` must be zero or match the fd's namespace type
   (`EINVAL` otherwise).
@@ -174,8 +173,8 @@ resolves an fd through two channels:
 Both channels build the replacement proxy with `with_namespace` (the pidfd
 channel once per requested slot) and commit through `Process::apply_setns`;
 `CLONE_NEWNS` additionally retargets the fs root/pwd into the target mount
-namespace's visible root, drafted on a snapshot so a failed retarget commits
-nothing.
+namespace's visible root, drafted on a private `clone_for_process` clone so a
+failed retarget commits nothing and no exec-transition marker is inherited.
 
 ## UTS data flow and concurrency
 
@@ -220,15 +219,16 @@ the tgoskits gaps):
   lifecycle are implemented (see the net namespace lifecycle section), while
   net *data-plane* routing stays global in knet as the documented follow-up.
 - **fs-sharing counting**: the shared-`fs_struct` (`NEWNS` without `CLONE_FS`)
-  check covers published threads of the caller; cross-process `CLONE_FS`
-  sharing is not counted (no `fs->users` counter yet).
-- **setns PID reachability**: the syscall boundary enforces the euid-0
-  `CAP_SYS_ADMIN` gate and Linux's `pidns_install` ancestor rule — the target
-  PID namespace must be the caller's active namespace or one of its
-  descendants — which also keeps plain-fork allocation keyed on
-  `pid_ns_for_children` resolvable in the caller's namespace. What remains
-  approximate is the credential side: one euid-0 gate stands in for the
-  per-type `CAP_SYS_ADMIN` checks against each target's owner namespace.
+  check counts both the caller's published threads and other processes that
+  adopted the same context through `CLONE_FS`; kernel threads do not own a
+  filesystem context.
+- **setns PID reachability**: the syscall boundary enforces effective
+  `CAP_SYS_ADMIN` and Linux's `pidns_install` ancestor rule — the target PID
+  namespace must be the caller's active namespace or one of its descendants —
+  which also keeps plain-fork allocation keyed on `pid_ns_for_children`
+  resolvable in the caller's namespace. User namespaces are not implemented,
+  so one capability gate stands in for Linux's per-target owner-namespace
+  `CAP_SYS_ADMIN` checks.
 - **bind-mount lifecycle**: namespace files keep identity in their inode and
   can be bound, but re-opening a bound file after the owning process exits
   fails with `ESRCH`; a namespace registry (nsfs-style) is needed for the

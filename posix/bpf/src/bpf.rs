@@ -21,16 +21,26 @@ use kbpf::uapi::bpf_attach_type::BPF_CGROUP_DEVICE as BPF_CGROUP_DEVICE_ATTACH_T
 use kbpf::uapi::bpf_cmd::{
     BPF_LINK_CREATE, BPF_MAP_CREATE, BPF_MAP_FREEZE, BPF_MAP_LOOKUP_ELEM, BPF_MAP_UPDATE_ELEM,
     BPF_OBJ_GET, BPF_OBJ_GET_INFO_BY_FD, BPF_OBJ_PIN, BPF_PROG_GET_FD_BY_ID, BPF_PROG_GET_NEXT_ID,
-    BPF_PROG_LOAD, BPF_PROG_QUERY, BPF_PROG_TEST_RUN,
+    BPF_PROG_LOAD, BPF_PROG_TEST_RUN,
 };
 #[cfg(feature = "cgroup2")]
-use kbpf::uapi::bpf_cmd::{BPF_PROG_ATTACH, BPF_PROG_DETACH};
+use kbpf::uapi::bpf_cmd::{BPF_PROG_ATTACH, BPF_PROG_DETACH, BPF_PROG_QUERY};
 #[cfg(feature = "cgroup2")]
 use kbpf::uapi::defines::{BPF_F_ALLOW_MULTI, BPF_F_ALLOW_OVERRIDE, BPF_F_QUERY_EFFECTIVE};
 use kbpf::uapi::{
     bpf_map_type::BPF_MAP_TYPE_ARRAY,
     bpf_map_update_flags::BPF_ANY as BPF_ANY_FLAG,
-    bpf_prog_type::BPF_PROG_TYPE_CGROUP_DEVICE,
+    bpf_prog_type::{
+        BPF_PROG_TYPE_CGROUP_DEVICE, BPF_PROG_TYPE_CGROUP_SOCK, BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+        BPF_PROG_TYPE_CGROUP_SOCKOPT, BPF_PROG_TYPE_CGROUP_SYSCTL, BPF_PROG_TYPE_EXT,
+        BPF_PROG_TYPE_FLOW_DISSECTOR, BPF_PROG_TYPE_KPROBE, BPF_PROG_TYPE_LSM,
+        BPF_PROG_TYPE_LWT_IN, BPF_PROG_TYPE_LWT_OUT, BPF_PROG_TYPE_LWT_SEG6LOCAL,
+        BPF_PROG_TYPE_LWT_XMIT, BPF_PROG_TYPE_NETFILTER, BPF_PROG_TYPE_PERF_EVENT,
+        BPF_PROG_TYPE_RAW_TRACEPOINT, BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE,
+        BPF_PROG_TYPE_SCHED_ACT, BPF_PROG_TYPE_SCHED_CLS, BPF_PROG_TYPE_SK_MSG,
+        BPF_PROG_TYPE_SK_SKB, BPF_PROG_TYPE_SOCK_OPS, BPF_PROG_TYPE_STRUCT_OPS,
+        BPF_PROG_TYPE_TRACEPOINT, BPF_PROG_TYPE_TRACING, BPF_PROG_TYPE_XDP,
+    },
     defines::{BPF_DW, BPF_IMM, BPF_LD, BPF_PSEUDO_MAP_VALUE},
 };
 use kerrno::{KError, KResult};
@@ -169,18 +179,78 @@ const BPF_PROG_INFO_PREFIX_SIZE: usize = 24;
 const BPF_PROG_INFO_TYPE_OFFSET: usize = 0;
 const BPF_PROG_INFO_XLATED_PROG_LEN_OFFSET: usize = 20;
 
+/// Returns whether loading `prog_type` additionally requires
+/// `CAP_NET_ADMIN` or `CAP_SYS_ADMIN`.
+///
+/// This mirrors Linux `is_net_admin_prog_type()`. The check is kept separate
+/// from `bpf_capable()` so a network administrator can load the program types
+/// that attach to network and cgroup hooks without holding `CAP_BPF`.
+fn is_net_admin_prog_type(prog_type: u32) -> bool {
+    matches!(
+        prog_type,
+        BPF_PROG_TYPE_SCHED_CLS
+            | BPF_PROG_TYPE_SCHED_ACT
+            | BPF_PROG_TYPE_XDP
+            | BPF_PROG_TYPE_LWT_IN
+            | BPF_PROG_TYPE_LWT_OUT
+            | BPF_PROG_TYPE_LWT_XMIT
+            | BPF_PROG_TYPE_LWT_SEG6LOCAL
+            | BPF_PROG_TYPE_SK_SKB
+            | BPF_PROG_TYPE_SK_MSG
+            | BPF_PROG_TYPE_FLOW_DISSECTOR
+            | BPF_PROG_TYPE_CGROUP_DEVICE
+            | BPF_PROG_TYPE_CGROUP_SOCK
+            | BPF_PROG_TYPE_CGROUP_SOCK_ADDR
+            | BPF_PROG_TYPE_CGROUP_SOCKOPT
+            | BPF_PROG_TYPE_CGROUP_SYSCTL
+            | BPF_PROG_TYPE_SOCK_OPS
+            | BPF_PROG_TYPE_EXT
+            | BPF_PROG_TYPE_NETFILTER
+    )
+}
+
+/// Returns whether Linux requires `perfmon_capable()` for this program type.
+///
+/// Linux's `is_perfmon_prog_type()` covers the tracing/perf program families.
+/// `BPF_PROG_TYPE_EXT` is also in Linux's list (and in `is_net_admin_prog_type`),
+/// so either gate is enough for it.
+fn is_perfmon_prog_type(prog_type: u32) -> bool {
+    matches!(
+        prog_type,
+        BPF_PROG_TYPE_KPROBE
+            | BPF_PROG_TYPE_TRACEPOINT
+            | BPF_PROG_TYPE_PERF_EVENT
+            | BPF_PROG_TYPE_RAW_TRACEPOINT
+            | BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE
+            | BPF_PROG_TYPE_TRACING
+            | BPF_PROG_TYPE_LSM
+            | BPF_PROG_TYPE_STRUCT_OPS
+            | BPF_PROG_TYPE_EXT
+    )
+}
+
 /// Linux `bpf(cmd, attr, size)` — see `man 2 bpf`.
 pub fn sys_bpf(cmd: i32, attr_ptr: usize, size: u32) -> KResult<isize> {
-    // Every implemented command sits behind Linux's `bpf_capable()` gate;
-    // this kernel has no unprivileged-bpf configuration, so the check is
-    // uniform at the entry.
-    if !kprocess::current_cred().has_sys_admin() {
-        return Err(KError::OperationNotPermitted);
-    }
     if cmd < 0 {
         return Err(KError::InvalidInput);
     }
     let cmd_u = cmd as u32;
+
+    // `BPF_PROG_QUERY` is gated by Linux `bpf_net_capable()`
+    // (`CAP_NET_ADMIN || CAP_SYS_ADMIN`), not by `bpf_capable()`. Handle it
+    // before the general gate so either network authority can inspect the
+    // cgroup-device attachments it manages.
+    #[cfg(feature = "cgroup2")]
+    if cmd_u == BPF_PROG_QUERY {
+        return bpf_prog_query(attr_ptr, size).map(|()| 0);
+    }
+
+    // The remaining implemented commands sit behind Linux's `bpf_capable()`
+    // gate; this kernel has no unprivileged-bpf configuration.
+    let cred = kprocess::current_cred();
+    if !cred.has_cap(kcred::CAP_BPF) && !cred.has_sys_admin() {
+        return Err(KError::OperationNotPermitted);
+    }
     match cmd_u {
         BPF_MAP_CREATE => bpf_map_create(attr_ptr, size),
         BPF_MAP_LOOKUP_ELEM => bpf_map_lookup_elem(attr_ptr, size),
@@ -197,8 +267,6 @@ pub fn sys_bpf(cmd: i32, attr_ptr: usize, size: u32) -> KResult<isize> {
         BPF_PROG_DETACH => bpf_prog_detach(attr_ptr, size).map(|()| 0),
         #[cfg(feature = "cgroup2")]
         BPF_LINK_CREATE => bpf_link_create(attr_ptr, size),
-        #[cfg(feature = "cgroup2")]
-        BPF_PROG_QUERY => bpf_prog_query(attr_ptr, size).map(|()| 0),
         BPF_PROG_GET_NEXT_ID => bpf_prog_get_next_id(attr_ptr, size),
         BPF_PROG_GET_FD_BY_ID => bpf_prog_get_fd_by_id(attr_ptr, size),
         _ => {
@@ -318,6 +386,21 @@ fn bpf_prog_load(attr_ptr: usize, size: u32) -> KResult<isize> {
     }
 
     let prefix = UserConstPtr::<BpfProgLoadAttrPrefix>::from(attr_ptr).read_vm()?;
+    let cred = kprocess::current_cred();
+    if is_net_admin_prog_type(prefix.prog_type)
+        && !cred.has_cap(kcred::CAP_NET_ADMIN)
+        && !cred.has_sys_admin()
+    {
+        return Err(KError::OperationNotPermitted);
+    }
+    // Linux `perfmon_capable()` admits `CAP_PERFMON || CAP_SYS_ADMIN`; the
+    // general `bpf_capable()` entry gate above does not imply it.
+    if is_perfmon_prog_type(prefix.prog_type)
+        && !cred.has_cap(kcred::CAP_PERFMON)
+        && !cred.has_sys_admin()
+    {
+        return Err(KError::OperationNotPermitted);
+    }
 
     let prog_bytes = (prefix.insn_cnt as usize)
         .checked_mul(8)
@@ -334,12 +417,7 @@ fn bpf_prog_load(attr_ptr: usize, size: u32) -> KResult<isize> {
         // binding (load-time only) does not apply.
         let arc_insns: Arc<[u8]> = insns.into_boxed_slice().into();
         let fd = kprocess::current_files().add_file(
-            BpfProgram::new_file(
-                arc_insns,
-                prefix.prog_type,
-                Arc::from(Vec::new()),
-                kprocess::current_cred(),
-            )?,
+            BpfProgram::new_file(arc_insns, prefix.prog_type, Arc::from(Vec::new()), cred)?,
             true,
         )?;
         return Ok(fd as isize);
@@ -349,12 +427,7 @@ fn bpf_prog_load(attr_ptr: usize, size: u32) -> KResult<isize> {
 
     let arc_insns: Arc<[u8]> = insns.into_boxed_slice().into();
     let fd = kprocess::current_files().add_file(
-        BpfProgram::new_file(
-            arc_insns,
-            prefix.prog_type,
-            map_values,
-            kprocess::current_cred(),
-        )?,
+        BpfProgram::new_file(arc_insns, prefix.prog_type, map_values, cred)?,
         true,
     )?;
     Ok(fd as isize)
@@ -721,6 +794,10 @@ fn bpf_link_create(attr_ptr: usize, size: u32) -> KResult<isize> {
 /// or an empty result end there (the count-only path libbpf uses); otherwise
 /// up to `prog_cnt` ids are copied and a shortfall answers `ENOSPC`.
 fn bpf_prog_query(attr_ptr: usize, size: u32) -> KResult<()> {
+    let cred = kprocess::current_cred();
+    if !cred.has_cap(kcred::CAP_NET_ADMIN) && !cred.has_sys_admin() {
+        return Err(KError::OperationNotPermitted);
+    }
     let attr = read_attr_bounded::<BpfProgQueryAttr>(attr_ptr, size)?;
     if !is_cgroup_device_attach_type(attr.attach_type) {
         return Err(KError::InvalidInput);
@@ -762,6 +839,9 @@ fn bpf_prog_query(attr_ptr: usize, size: u32) -> KResult<()> {
 
 /// `BPF_PROG_GET_NEXT_ID`: enumerates live program ids.
 fn bpf_prog_get_next_id(attr_ptr: usize, size: u32) -> KResult<isize> {
+    if !kprocess::current_cred().has_sys_admin() {
+        return Err(KError::OperationNotPermitted);
+    }
     let start = read_attr_bounded::<u32>(attr_ptr, size)?;
     if start >= i32::MAX as u32 {
         return Err(KError::InvalidInput);
@@ -776,9 +856,14 @@ fn bpf_prog_get_next_id(attr_ptr: usize, size: u32) -> KResult<isize> {
 /// Requires a current process thread: the new descriptor installs into the
 /// current files table (may sleep); never call from IRQ context.
 fn bpf_prog_get_fd_by_id(attr_ptr: usize, size: u32) -> KResult<isize> {
+    if !kprocess::current_cred().has_sys_admin() {
+        return Err(KError::OperationNotPermitted);
+    }
     let id = read_attr_bounded::<u32>(attr_ptr, size)?;
     let program = BpfProgram::from_id(id)?;
     let fd = kprocess::current_files()
         .add_file(program.clone().into_file(kprocess::current_cred())?, true)?;
     Ok(fd as isize)
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/bpf.rs");

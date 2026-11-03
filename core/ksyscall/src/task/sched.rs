@@ -113,15 +113,40 @@ fn prepare_setaffinity_target(pid: i32, cpu_mask: &KCpuMask) -> KResult<KtaskRef
     Ok(task)
 }
 
-/// Shared owner gate for scheduling setters and `sched_setaffinity`.
+/// Shared scheduler authorization gate for scheduling setters and
+/// `sched_setaffinity`.
 ///
-/// Caller euid must match the target's ruid or euid, or the caller must be
-/// privileged (`euid == 0`, standing in for `CAP_SYS_NICE`).
+/// Linux applies two independent checks: the caller's euid must match the
+/// target's ruid or euid, or the caller must hold effective `CAP_SYS_NICE`;
+/// then `cap_safe_nice()` requires the target's permitted capabilities to be a
+/// subset of the caller's permitted set, unless `CAP_SYS_NICE` overrides it.
 fn check_scheduler_owner_permission(caller: &Cred, target: &Cred) -> KResult<()> {
-    if !caller.is_privileged() && caller.euid() != target.ruid() && caller.euid() != target.euid() {
+    check_scheduler_identity_or_privilege(caller, target)?;
+    check_scheduler_capability_permission(caller, target)
+}
+
+/// The ownership/privilege half of Linux scheduler authorization.
+///
+/// This intentionally excludes `cap_safe_nice()` so `setpriority` can insert
+/// its Linux `EACCES` nice-limit check before the capability check.
+fn check_scheduler_identity_or_privilege(caller: &Cred, target: &Cred) -> KResult<()> {
+    if !caller.has_cap(kcred::CAP_SYS_NICE)
+        && caller.euid() != target.ruid()
+        && caller.euid() != target.euid()
+    {
         return Err(KError::OperationNotPermitted);
     }
     Ok(())
+}
+
+/// Linux `cap_safe_nice()`: permit the operation when the caller has effective
+/// `CAP_SYS_NICE` or its permitted set contains the target's permitted set.
+fn check_scheduler_capability_permission(caller: &Cred, target: &Cred) -> KResult<()> {
+    if caller.has_scheduler_capability_over(target) {
+        Ok(())
+    } else {
+        Err(KError::OperationNotPermitted)
+    }
 }
 
 fn affinity_target(pid: i32) -> KResult<KtaskRef> {
@@ -234,8 +259,9 @@ pub(crate) fn sys_sched_getscheduler(pid: i32) -> KResult<isize> {
 /// rather than `ESRCH`. Fair policies stay on EEVDF. `SCHED_FIFO` / `SCHED_RR`
 /// move the task onto the RT class. `SCHED_DEADLINE` is rejected here;
 /// [`sys_sched_setattr`] admits it. Unprivileged callers may not select a
-/// realtime policy or clear `SCHED_RESET_ON_FORK` (`EPERM`; `euid == 0`
-/// stands in for `CAP_SYS_NICE`). Setting that flag needs no extra privilege.
+/// realtime policy or clear an already-set `SCHED_RESET_ON_FORK` (`EPERM`;
+/// effective `CAP_SYS_NICE` overrides those gates). Setting that flag needs no
+/// extra privilege.
 ///
 /// # Errors
 ///
@@ -432,7 +458,7 @@ pub(crate) fn sys_sched_setattr(pid: i32, uattr: UserConstPtr<u8>, flags: u32) -
                 // sched_setattr(2) reports EPERM here. setpriority keeps EACCES.
                 let current_nice = NiceValue::new_clamped(live.nice.as_i32());
                 let requested_nice = NiceValue::new_clamped(nice.as_i32());
-                if requested_nice < current_nice && !caller.is_privileged() {
+                if requested_nice < current_nice && !caller.has_cap(kcred::CAP_SYS_NICE) {
                     return Err(KError::OperationNotPermitted);
                 }
                 live.nice = nice;
@@ -631,7 +657,9 @@ fn scheduler_target(pid: i32) -> KResult<ktask::KtaskRef> {
 /// not carry the flag and must leave it unchanged.
 fn check_setscheduler_permission(caller: &Cred, target: &Cred, policy: u32) -> KResult<()> {
     check_scheduler_owner_permission(caller, target)?;
-    if matches!(policy, SCHED_FIFO | SCHED_RR | SCHED_DEADLINE) && !caller.is_privileged() {
+    if matches!(policy, SCHED_FIFO | SCHED_RR | SCHED_DEADLINE)
+        && !caller.has_cap(kcred::CAP_SYS_NICE)
+    {
         return Err(KError::OperationNotPermitted);
     }
     Ok(())
@@ -654,10 +682,10 @@ fn update_live_sched_attr(
 /// `SCHED_RESET_ON_FORK` is sticky.
 ///
 /// An unprivileged owner may set the flag. Clearing one that is already set
-/// requires `CAP_SYS_NICE`, which `euid == 0` approximates. Linux
+/// requires `CAP_SYS_NICE`. Linux
 /// `sched_setscheduler(2)` and `sched_setattr(2)` return `EPERM` for that clear.
 fn check_reset_on_fork_permission(caller: &Cred, current: bool, requested: bool) -> KResult<()> {
-    if current && !requested && !caller.is_privileged() {
+    if current && !requested && !caller.has_cap(kcred::CAP_SYS_NICE) {
         return Err(KError::OperationNotPermitted);
     }
     Ok(())
@@ -869,13 +897,11 @@ fn check_setpriority_permission(
     current_nice: NiceValue,
     requested_nice: NiceValue,
 ) -> KResult<()> {
-    if !caller.is_privileged() && caller.euid() != target.ruid() && caller.euid() != target.euid() {
-        return Err(KError::OperationNotPermitted);
-    }
-    if requested_nice < current_nice && !caller.is_privileged() {
+    check_scheduler_identity_or_privilege(caller, target)?;
+    if requested_nice < current_nice && !caller.has_cap(kcred::CAP_SYS_NICE) {
         return Err(KError::PermissionDenied);
     }
-    Ok(())
+    check_scheduler_capability_permission(caller, target)
 }
 
 fn set_task_nice(task: &KtaskRef, nice: NiceValue, caller: &Cred) -> KResult<()> {

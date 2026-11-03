@@ -93,8 +93,10 @@ retains init identity; orphan reparenting reserves an init relation slot.
   references and expose timer/exec/teardown operations. `LiveAddressSpace` owns
   an active mm-user handle; its mapping closure supplies both the locked space
   and observer/invalidation handles required by mapping runtimes.
-- `scheduler`, `resource_limits`, `capability` and job-control mutation queries
-  resolve non-exited processes. Query/pidfd views may retain published zombies.
+- `scheduler`, `resource_limits` and job-control mutation queries resolve
+  non-exited processes. `capability::target_capabilities` is a read query: it
+  resolves live tasks but deliberately reports an unreaped exited leader's
+  retained real credentials. Query/pidfd views may retain published zombies.
   `procfs` additionally requires a representative published task for listing.
 - `process_signals` resolves process/group/thread targets and calls `ksignal`,
   then calls `ktask::signal_task` after signal-state locks are released.
@@ -120,12 +122,14 @@ retains init identity; orphan reparenting reserves an init relation slot.
   process-wide migration; `scheduler` coordinates published task memberships.
   `CurrentThread` credential preparation/commit replaces only the calling
   thread's pointers; `ptrace::check_read_real_creds_access` checks cross-task
-  real-credential reads.
+  real-credential reads, including permitted-set containment.
 - `ptrace::check_read_fs_creds_access` supplies the `/proc/<pid>/fdinfo/<fd>`
   access decision (`PTRACE_MODE_READ_FSCREDS` semantics): provider kprocess,
   consumer procfs, direction kprocess -> consumer. It passes same-thread-group
   callers, otherwise compares the caller's filesystem UID/GID with all target
-  real/effective/saved IDs and allows the effective-UID-zero privilege override.
+  real/effective/saved IDs and the target's permitted capabilities with the
+  caller's effective set, and allows effective `CAP_SYS_PTRACE` to override
+  both checks.
 - `timer_delivery` registers `ktimer` expiry and `ksignal` dequeue observers;
   CPU timers run on current-user-thread return and wall timers on the alarm task.
   `UserTaskRuntime for Thread` supplies CPU residency, pending-fatal-signal
@@ -481,13 +485,24 @@ filesystem context for `NEWNS`/`CLONE_FS`) and unshares the fd table for
 root/pwd into a mount namespace for `CLONE_NEWNS`. Both paths only install
 state validated by `kns`, so the commit surface is small. `Process::nsproxy` and
 the per-namespace accessors expose the bundle to `setns` and `/proc/<pid>/ns`.
-Known limits include the fs-sharing check covering only the caller's published
-threads (cross-process `CLONE_FS` sharing is not counted), signal PID arguments
-carrying only caller-namespace translation with a root fallback while lookup
-tables stay root-keyed, no child-subreaper implementation, representative-thread
-credential snapshots, simplified ptrace privilege checks (effective UID zero
-substitutes for CAP_SYS_PTRACE), and no full authorization policy in
-signal/job-control facade helpers. `PR_SET_PDEATHSIG` records the
+Known limits include signal PID arguments carrying only caller-namespace
+translation with a root fallback while lookup tables stay root-keyed, no
+child-subreaper implementation, representative-thread credential snapshots,
+read-credential ptrace checks backed by effective `CAP_SYS_PTRACE` but not a
+complete ptrace access policy, and no full authorization policy in
+signal/job-control facade helpers. The filesystem context counts process
+owners: a `CLONE_FS` fork adds an owner and process exit releases it, so the
+sharing check distinguishes cross-process sharing from the normal sharing
+among threads of one thread group. Runtime construction adopts the owner
+through `try_add_process_user`, which fails with `EAGAIN` while another process
+is in an exclusive exec transition. The returned `ProcessUserGuard` is stored in
+the same runtime slot as the context and released by a lock-free atomic
+decrement, including during deferred runtime destruction. `Process::begin_exec`
+performs the sharing test and sets `in_exec` atomically, and its `ExecFsGuard`
+clears the flag on every exit path. `unshare` and `setns` install private fs
+clones from
+`clone_for_process`, so replacing a context never carries an exclusive-exec
+marker into the replacement. `PR_SET_PDEATHSIG` records the
 signal on the identity but delivery at parent-death reparenting is not yet
 wired. The init process is bootstrapped through the low-level
 `build_process_thread` path, so its backing `exe_file` is not stashed for
@@ -499,13 +514,16 @@ only with its Cargo feature enabled.
 `scheduler::process_task_count(&Process)` retains the published-task view:
 exit unpublishes a TID immediately, so external targeting cannot reach teardown.
 `procfs::thread_group_member_count(&Process)` has a different lifetime contract.
-The member-slot state is Vacant, Published(Weak task), or ExitedLeader.
+The member-slot state is Vacant, Published(Weak task), or
+ExitedLeader(Arc<Cred>).
 A published numeric group leader exits into ExitedLeader; nonleaders release
 their slot at exit. Last-task detection, task enumeration and lookup ignore
 ExitedLeader. The retained state
-owns no task, runtime or mm and cannot be scheduled. Wait consumption/autoreap
-clears it when the process identity is retired, even if other Arc<Process>
-observers remain. Failed publication uses Vacant and contributes no membership.
+owns no task, runtime or mm and cannot be scheduled; it keeps the leader's
+objective credential snapshot so `capget` on the thread-group number observes
+the unreaped zombie leader's frozen capability sets instead of a surviving sibling's
+per-thread sets. Wait consumption/autoreap clears it when the process identity
+is retired, even if other Arc<Process> observers remain. Failed publication uses Vacant and contributes no membership.
 
 A successful non-leader `exec` takeover is a real identity transition, not an
 accounting-only alias. Once the survivor has moved the number directory, adopted

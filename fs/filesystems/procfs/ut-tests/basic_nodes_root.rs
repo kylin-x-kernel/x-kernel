@@ -38,7 +38,7 @@ fn pty_nodes_report_limits_and_reject_root_writes() {
                 kcred::initial_cred(),
             )
             .unwrap();
-        assert!(file.cred().is_privileged());
+        assert!(file.cred().has_sys_admin());
         assert_eq!(
             file.path().getattr().unwrap().mode.permission().bits(),
             0o444

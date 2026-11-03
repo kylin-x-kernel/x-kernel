@@ -43,7 +43,8 @@ kernel objects in `kprocess`.
 
 The fixed VT owns a separate terminal and real session binding. Configuration
 checks use current ioctl Cred and exact controlling-terminal object equality,
-with kcred's documented EUID 0 approximation for CAP_SYS_TTY_CONFIG. O_NOCTTY
+with effective `CAP_SYS_TTY_CONFIG` for configuration outside the current
+controlling terminal. O_NOCTTY
 and node DAC alone do not grant configuration authority.
 
 PROCESS captures a weak actual Process identity before commit; fd close does

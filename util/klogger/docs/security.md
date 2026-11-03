@@ -11,7 +11,9 @@ privileged user ──/proc/sys/kernel/log_filter──► set_filter_spec
 ```
 
 `klogger` does not check privileges itself: the console-filter write paths are
-gated by `procfs` (`cred().is_privileged()`). The module's own security goal is
+gated by `procfs`, whose 0644 node requires VFS write access and whose write
+closure additionally requires the opened file credential's effective UID to be
+zero (Linux `test_perm` sysctl semantics). The module's own security goal is
 that no input it is fed can corrupt its state or its memory.
 
 ## External boundary / attack surface
@@ -57,7 +59,7 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 | T-01 | An invalid filter spec destroys logging availability (silent kernel) | Medium | Malformed spec from the device tree, the command line, a privileged write, or the compiled-in `LOG_FILTER` | The spec is validated as a whole before it is installed and a rejected one keeps the previous filter; every boot source reports its rejection through the unfiltered `kprintln!` path, `procfs` returns `VfsError::InvalidInput`, and empty specs are rejected as well |
 | T-02 | A runtime spec raises the ceiling and makes hot-path sites pay | Low | `echo 'trace' > /proc/sys/kernel/log_filter`, or `loglevel=trace` on the command line | Raising is intentional — the sites are compiled in and the operator asked for them — but it is the only way the higher levels cost anything. The write is privilege-gated |
 | T-03 | A log call from NMI context spins on `FILTER` held by the interrupted context | High | An NMI claims a hwirq with no registered handler while the same CPU is inside a `FILTER` holder, and the dispatch path logs that fact | `Log::log` asks `LogContextIf::in_nmi()` before taking any lock and drops the record; NMI/panic paths that need output use the platform's atomic console path. The unhandled-NMI log call that triggers this predates the filter, but the filter is never added to that path |
-| T-05 | A privileged write is not the only path to the level | Medium | Non-privileged writes to the console nodes | `procfs` requires `cred().is_privileged()` on write; both nodes are owner-write, world-read |
+| T-05 | A privileged write is not the only path to the level | Medium | Non-privileged writes to the console nodes | `procfs` requires VFS write access and effective UID zero on the opened file credential; both nodes are owner-write, world-read, and the write closure rejects other writers with `EPERM` |
 
 ## Failure mode and effects analysis (FMEA)
 

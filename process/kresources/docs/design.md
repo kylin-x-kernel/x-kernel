@@ -68,7 +68,7 @@ Repeated exit is harmless. Fork and unsharing reject `None` with
   discard the old value; the authorization origin is explicit in the
   signature. Hard-limit increases are applied only when
   `may_raise_hard_limit = true`; the syscall layer sets that flag from its
-  `CAP_SYS_RESOURCE` decision (euid-0 proxy) and the comparison runs inside
+  `CAP_SYS_RESOURCE` decision and the comparison runs inside
   the same write guard against the current limit, so `OperationNotPermitted`
   is returned there and not in this crate.
 - Insertion passes `RLIMIT_NOFILE.current` to `FdTable::add_file`. Fixed-slot

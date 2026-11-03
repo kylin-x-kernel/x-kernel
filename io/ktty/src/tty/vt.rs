@@ -200,7 +200,6 @@ fn configuration_permission(
     current_terminal: Option<&Arc<dyn ControllingTerminal>>,
 ) -> KResult<()> {
     // Linux vt_ioctl.c: current->signal->tty == tty || CAP_SYS_TTY_CONFIG.
-    // kcred explicitly documents its current pre-capabilities approximation.
     if cred.has_sys_tty_config()
         || current_terminal.is_some_and(|current| Arc::ptr_eq(current, target))
     {

@@ -91,21 +91,21 @@ and NUMA-node output pointers still go through `UserPtr` and retain copyout erro
 | T-03 | Adapter duplicates an owner state machine, creating a second source of semantics | High | convenience copying | Docs state that `ksyscall` owns no long-term state; ABI adaptation only |
 | T-04 | Current-thread/process helpers called in the wrong context | Medium | helper misuse | Reuse `kprocess` constraints; syscall entry maintains the task-context assumption |
 | T-05 | Historically misleading directories keep collecting syscalls of the wrong owner | Medium | new additions | This crate-local design doc fixes the `vfs`/`ipc`/`time`/`task` adapter semantics |
-| T-06 | `setpriority` authorizes only a process representative and misses target identity | High | per-thread credentials | `PRIO_*` selection and scanning both resolve to concrete tasks; per task, caller euid is compared with target real/effective UID, and priority-raising permission is checked separately |
-| T-06a | Unprivileged process rewrites arbitrary task affinity | High | `sched_setaffinity` calling `set_cpumask` on non-current targets | After target resolution, caller euid is compared with target ruid/euid under `check_same_owner` semantics; root (approximating `CAP_SYS_NICE`) may bypass, otherwise `EPERM` |
-| T-06b | Unprivileged owner clears `SCHED_RESET_ON_FORK` and forks past a root-installed reset | High | `sched_setscheduler` / `sched_setattr` when the target already has the flag | Setting the flag needs no extra privilege. Clearing it compares the live flag with the request and returns `EPERM` unless `euid == 0` (the `CAP_SYS_NICE` approximation). `sched_setparam` does not carry the flag and leaves it unchanged |
-| T-07 | Unprivileged process renames the host | High | `sethostname` writing the UTS namespace directly | The syscall boundary checks a privileged credential and bounds nodename length and the user buffer access |
-| T-08 | Unprivileged process changes power state | High | `reboot` reaching platform power interfaces directly | Privileged credential, Linux magic, and the supported command set are checked |
-| T-09 | Unprivileged process shifts the wall clock | High | wall-clock setters updating the realtime association directly | `settimeofday` and `clock_settime` check a privileged credential in the shared setter and reject moving the wall clock before `CLOCK_MONOTONIC` |
+| T-06 | `setpriority` authorizes only a process representative and misses target identity | High | per-thread credentials | `PRIO_*` selection and scanning both resolve to concrete tasks; per task, caller euid is compared with target real/effective UID, priority-raising permission is checked separately, and `cap_safe_nice()` then requires the target's permitted set to be contained in the caller's permitted set unless the caller has effective `CAP_SYS_NICE` |
+| T-06a | Unprivileged process rewrites arbitrary task affinity | High | `sched_setaffinity` calling `set_cpumask` on non-current targets | After target resolution, caller euid is compared with target ruid/euid under `check_same_owner` semantics; effective `CAP_SYS_NICE` may bypass. The same gate then applies `cap_safe_nice()` permitted-set containment, otherwise `EPERM` |
+| T-06b | Unprivileged owner clears `SCHED_RESET_ON_FORK` and forks past a root-installed reset | High | `sched_setscheduler` / `sched_setattr` when the target already has the flag | Setting the flag needs no extra privilege. Clearing it compares the live flag with the request and returns `EPERM` unless the caller has effective `CAP_SYS_NICE`. `sched_setparam` does not carry the flag and leaves it unchanged |
+| T-07 | Unprivileged process renames the host | High | `sethostname` writing the UTS namespace directly | The syscall boundary requires effective `CAP_SYS_ADMIN` and bounds nodename length and the user buffer access |
+| T-08 | Unprivileged process changes power state | High | `reboot` reaching platform power interfaces directly | Effective `CAP_SYS_BOOT`, Linux magic, and the supported command set are checked |
+| T-09 | Unprivileged process shifts the wall clock | High | wall-clock setters updating the realtime association directly | `settimeofday` and `clock_settime` require effective `CAP_SYS_TIME` in the shared setter and reject moving the wall clock before `CLOCK_MONOTONIC` |
 | T-10 | `PR_SET_KEEPCAPS` receives an invalid value or bypasses the lock bit | Medium | `ctl.rs` | Values greater than 1 are rejected; `kcred::Cred::keep_caps_enable()` / `keep_caps_disable()` validate the lock bit and commit once through a prepared credential |
 | T-11 | `riscv_hwprobe` consumes unvalidated user cpusets/pairs | Medium | bad pointers, oversized masks or pair counts causing huge kernel allocations (DoS) or corrupt ABI results | Pairs stream one by one (`read_vm`/`write_vm`, no bulk `Vec` allocation; an oversized `pair_count` only walks into unmapped pages and returns `EFAULT`); `cpusetsize` is clamped to `cpumask_size()` on both load and write; non-`0`/`WHICH_CPUS` `flags` return `EINVAL`; in value mode an empty intersection of the user cpuset with online CPUs returns `EINVAL`; `cpus == NULL && cpusetsize != 0` returns `EFAULT`; in WHICH_CPUS mode an empty cpuset means all online CPUs, unknown keys write `key=-1,value=0` and clear the output cpuset; key semantics live in the `kcpu` hwprobe helper |
 | T-12 | Syscall hot path reads unreliable RISC-V hardware state | Medium | S-mode reads of M-mode CSRs faulting, or capability divergence across CPUs | The source of truth is the FDT-initialized snapshot in `kcpu`; `ksyscall` only aggregates over the selected CPU mask |
-| T-13 | `get_robust_list` leaks another process's user addresses | High | target resolution | After resolving the target thread, `kprocess::ptrace::check_read_real_creds_access()` applies the uniform policy: same-thread-group exemption, asymmetric matching of caller real UID/GID against target real/effective/saved IDs, and the euid-0 approximation of `CAP_SYS_PTRACE`; otherwise `EPERM` |
+| T-13 | `get_robust_list` leaks another process's user addresses | High | target resolution | After resolving the target thread, `kprocess::ptrace::check_read_real_creds_access()` applies the uniform policy: same-thread-group exemption, caller real UID/GID matching all target real/effective/saved IDs, target permitted capabilities contained in the caller's permitted set, and effective `CAP_SYS_PTRACE` as an override; otherwise `EPERM` |
 | T-14 | `waitid` copies signals across a raw `siginfo_t`-shaped buffer | Medium | `waitid(P_PID, ...)` status reporting | `siginfo_t` is registered as `posix_types::UserWrite` and written via `write_vm`; the payload is built by `ksignal::ChildExitSignalInfo`, the same source used for real SIGCHLD delivery |
 | T-15 | `execveat(AT_EMPTY_PATH)` execs an fd the caller cannot name | Medium | runc/crun self-reexec from a sealed memfd | The fd must reference an already-open file the caller owns; the image still goes through `kexec`'s execute-permission and ELF validation, and the resulting `/proc/self/exe` follows to the same opened backing file |
-| T-16 | Unprivileged caller creates namespaces | High | `unshare` with any `NEW*` bit | The ns owner checks `UnshareContext::privileged` (euid-0 `CAP_SYS_ADMIN` approximation) and returns `EPERM`; plain `CLONE_FS`/`CLONE_FILES` need no privilege |
-| T-17 | `setns` enters a namespace without authorization, a mismatched one, or an unsupported one | High | any fd without privilege; fd type / `nstype` mismatch; net/user/cgroup/time swap | Both channels sit behind the same euid-0 `CAP_SYS_ADMIN` proxy gate (`EPERM`), standing in for Linux's per-type install checks; NsFd channel rejects type mismatches with `EINVAL` and answers `EOPNOTSUPP` for user/cgroup swaps whose backing tables are not isolated (a net swap materializes the target namespace's protocol stack via `knet::netns::ensure_stack` and succeeds); pidfd channel validates the whole `nstype` mask against the target before committing and answers `EOPNOTSUPP` for user/cgroup/time swaps (net swaps are supported and materialize the target stack); PID-namespace targets must be the caller's active namespace or a descendant (the `pidns_install` ancestor rule) |
-| T-18 | Seccomp filter install silently accepts unsupported flags or skips privilege gating | High | `seccomp(2)` flags / privilege check | `SECCOMP_ALLOWED_FLAGS` whitelist rejects unknown flags with `EINVAL`; both strict and filter install require `no_new_privileges` or an effective root credential, otherwise `EACCES` (Linux `seccomp_prepare_filter`) |
+| T-16 | Unprivileged caller creates namespaces | High | `unshare` with any `NEW*` bit | The ns owner checks that `UnshareContext::privileged` was set from effective `CAP_SYS_ADMIN` and returns `EPERM` otherwise; plain `CLONE_FS`/`CLONE_FILES` need no privilege |
+| T-17 | `setns` enters a namespace without authorization, a mismatched one, or an unsupported one | High | any fd without privilege; fd type / `nstype` mismatch; net/user/cgroup/time swap | Both channels require effective `CAP_SYS_ADMIN` (`EPERM`), standing in for Linux's per-type install checks; NsFd channel rejects type mismatches with `EINVAL` and answers `EOPNOTSUPP` for user/cgroup swaps whose backing tables are not isolated (a net swap materializes the target namespace's protocol stack via `knet::netns::ensure_stack` and succeeds); pidfd channel validates the whole `nstype` mask against the target before committing and answers `EOPNOTSUPP` for user/cgroup/time swaps (net swaps are supported and materialize the target stack); PID-namespace targets must be the caller's active namespace or a descendant (the `pidns_install` ancestor rule) |
+| T-18 | Seccomp filter install silently accepts unsupported flags or skips privilege gating | High | `seccomp(2)` flags / privilege check | `SECCOMP_ALLOWED_FLAGS` whitelist rejects unknown flags with `EINVAL`; both strict and filter install require `no_new_privileges` or effective `CAP_SYS_ADMIN`, otherwise `EACCES` (Linux `seccomp_prepare_filter`) |
 | T-19 | A seccomp filter is not evaluated before dispatch, letting a denied syscall run | High | any syscall | `dispatch_irq_syscall` runs `evaluate_seccomp` before the `Sysno` match; the decision is applied to the context (`Errno` → retval, `KILL_PROCESS`/`KILL_THREAD`/`TRAP`/unrecognised → `do_exit(SIGSYS)`, a strict-mode violation → `do_exit(SIGKILL)` as Linux does, `USER_NOTIF`/`TRACE` → `ENOSYS`) before any handler runs |
 | T-20 | A malformed filter is installed and later kills the task, or a `TSYNC` drops a sibling's restriction | High | `seccomp(2)` program/flags | `SeccompFilter::new` validates instruction encoding and jump targets at install time (`EINVAL`); `TSYNC` refuses when a sibling's chain is not a prefix of the caller's (blocking TID / `ESRCH` with `TSYNC_ESRCH`), re-validates under each sibling's own lock before replacing its chain, and a mode change is refused (`EINVAL`) |
 | T-21 | User `sock_fprog`/`sock_filter` copy garbles the kernel or over-allocates | Medium | `seccomp(2)` buffer handling | The header and each instruction are decoded field-wise through the unaligned-safe `osvm` byte-copy path with a `BPF_MAXINSNS` bound checked before allocation, so no `#[repr(C)]` image or alignment requirement is imposed |
@@ -131,11 +131,12 @@ registered wakeups rather than polling or a timer.
 - `sched_setscheduler`, `sched_setparam`, and `sched_setattr` accept published
   worker TIDs and submit the live class through `ktask::sched_update_attr`
   under one run-queue lock.
-  Setters enforce caller-euid vs target ruid/euid ownership, and realtime or
-  Deadline policies also require privileged euid 0, before mutating the task.
-  Full capability and `RLIMIT_RTPRIO` authorization remains unimplemented.
+  Setters enforce caller-euid vs target ruid/euid ownership, `cap_safe_nice()`
+  permitted-set containment, and the effective `CAP_SYS_NICE` requirement for
+  realtime or Deadline policies before mutating the task. `RLIMIT_RTPRIO`
+  authorization remains unimplemented.
   `SCHED_RESET_ON_FORK` is sticky: an unprivileged owner may set it, and
-  clearing it requires privileged euid 0. Clone applies the flag. An RT or
+  clearing it requires effective `CAP_SYS_NICE`. Clone applies the flag. An RT or
   Deadline parent becomes a `SCHED_NORMAL` child at nice 0; a Fair parent
   drops only a negative nice. A Deadline parent without the flag fails the
   clone with `EAGAIN`.
@@ -147,28 +148,36 @@ registered wakeups rather than polling or a timer.
   `sock_ioctl` shape.
 - Capability, seccomp, and `no_new_privileges` security ABIs must not
   return success inconsistent with actual enforcement. `PR_SET_NO_NEW_PRIVS`
-  records the flag on the calling thread and returns success: the exec
-  credential path consumes the flag
-  (`Cred::apply_exec`), and since exec never elevates identity today the
-  promised "exec grants no privileges" holds unconditionally. Future
-  setuid/setgid or file-capability support must consult the flag at the
-  credential reset and refuse elevation instead of silently dropping the
-  guarantee.
-- `unshare`'s and `setns`'s privilege checks are the euid-0 /
-  published-thread approximations documented in `kns`: both syscalls refuse
-  namespace creation or entry without the credential proxy, standing in for
-  Linux's per-type `CAP_SYS_ADMIN` install checks. Cross-process `CLONE_FS`
-  sharing is not counted, and PID-namespace setns does not model the Linux
-  ancestor-reachability rule.
+  records the flag on the calling thread and returns success; seccomp install
+  consults it. Exec applies Linux's no-file-capability transition, merges
+  ambient capabilities into permitted after the growth clamp, and clears
+  ambient when the effective GID leaves the old filesystem/supplementary
+  groups. When privileged-root reconstruction would grow permitted or the
+  group identity changes under `no_new_privs` or cross-process `CLONE_FS`
+  sharing, a growing set is intersected with the pre-exec set; effective/group
+  IDs reset to real IDs when `no_new_privs` is set or the pre-exec credential
+  lacks effective `CAP_SETUID`. The cross-process
+  `CLONE_FS` sharing sample and `in_exec` admission are atomic with runtime
+  adoption, so a child cannot attach after the sample and before credentials
+  are committed. There is no setuid/setgid or file-capability elevation today;
+  adding one must extend this transition and refuse elevation under the flag
+  instead of silently dropping the guarantee.
+- `unshare` and `setns` require effective `CAP_SYS_ADMIN`, matching the
+  `UnshareContext::privileged` input documented in `kns`: both syscalls refuse
+  namespace creation or entry without that capability, standing in for
+  Linux's per-type install checks. PID-namespace setns enforces Linux's
+  `pidns_install` ancestor rule (the target must be the caller's active
+  namespace or a descendant).
 
 - seccomp supports `STRICT` and `FILTER` (with `TSYNC`) plus action queries.
   A `TRAP` or unrecognised filter return fails closed (`do_exit(SIGSYS)`), and
   `USER_NOTIF`/`TRACE` fail closed with `ENOSYS`; neither is silently allowed.
   A filter that the interpreter cannot execute is rejected at install time, and
   a `TSYNC` never removes an existing restriction from a sibling.
-- `no_new_privileges` gates seccomp install; the full file-capability exec
-  transition semantics are still a `${kcred}` future step. The mount path
-  now requires the root-credential approximation of `CAP_SYS_ADMIN`.
+- `no_new_privileges` gates seccomp install and bounds privileged-root exec
+  reconstruction. Exec has no setuid/setgid or file-capability semantics;
+  adding those requires consulting the flag at the transition. The mount path
+  requires effective `CAP_SYS_ADMIN`.
 
 - `PR_SET_PDEATHSIG` records the signal on the process identity but does not
   yet deliver it at parent-death reparenting, and — unlike Linux — does not

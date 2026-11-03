@@ -9,6 +9,10 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[package.metadata.cargo-shear]
+# `unittest_support` is used only by `cfg(unittest)` fixtures under `ut-tests`.
+ignored = ["unittest_support"]
+
 [dependencies]
 filemap = { workspace = true }
 kcred = { workspace = true }
@@ -26,6 +30,7 @@ osvm = { workspace = true }
 posix-types = { workspace = true }
 bitflags = { workspace = true }
 unittest.workspace = true
+unittest_support.workspace = true
 
 [lints]
 workspace = true

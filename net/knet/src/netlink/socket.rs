@@ -71,9 +71,9 @@ impl NetlinkSocket {
         (*self.inner.local_addr.read()).ok_or(KError::NotConnected)
     }
 
-    fn handle_request(&self, request: &[u8], is_privileged: bool) -> Vec<NetlinkPacket> {
+    fn handle_request(&self, request: &[u8], can_route_mutate: bool) -> Vec<NetlinkPacket> {
         match self.inner.protocol {
-            NETLINK_ROUTE if route_request_requires_privilege(request) && !is_privileged => {
+            NETLINK_ROUTE if route_request_requires_privilege(request) && !can_route_mutate => {
                 vec![NetlinkPacket {
                     from: NetlinkAddr { pid: 0, groups: 0 },
                     data: build_error_response(request, LinuxError::EPERM),
@@ -88,20 +88,27 @@ impl NetlinkSocket {
         }
     }
 
+    /// Sends through a netlink socket using the sending task's credential.
+    ///
+    /// Route mutations require the effective `CAP_NET_ADMIN` capability of the
+    /// task performing the send, matching Linux's `netlink_net_capable()`.
+    /// The socket's opener identity is irrelevant: Linux authorizes the
+    /// current sender, so a socket may be delegated in either direction
+    /// without transferring or blocking route-mutation authority.
     pub(crate) fn send_with_cred(
         &self,
         src: impl Read + IoBuf,
         options: SendOptions,
-        cred: &Cred,
+        sender_cred: &Cred,
     ) -> KResult<usize> {
-        self.send_inner(src, options, cred.is_privileged())
+        self.send_inner(src, options, sender_cred.has_cap(kcred::CAP_NET_ADMIN))
     }
 
     fn send_inner(
         &self,
         mut src: impl Read + IoBuf,
         options: SendOptions,
-        is_privileged: bool,
+        can_route_mutate: bool,
     ) -> KResult<usize> {
         self.local_addr_inner()?;
         let mut request = Vec::with_capacity(src.remaining());
@@ -154,11 +161,11 @@ impl NetlinkSocket {
 
             let mut responses = Vec::new();
             for request in requests {
-                responses.extend(self.handle_request(request, is_privileged));
+                responses.extend(self.handle_request(request, can_route_mutate));
             }
             self.push_responses(responses)?;
         } else {
-            let responses = self.handle_request(&request, is_privileged);
+            let responses = self.handle_request(&request, can_route_mutate);
             self.push_responses(responses)?;
         }
 

@@ -663,23 +663,41 @@ unlink 和 rmdir 同样由 `Filename::unlink_at()` / `Filename::rmdir_at()` 先�
 namei 在进入每个目录并查找下一组件前检查目录 search permission (`MAY_EXEC`)；最终
 open 再按访问模式检查目标 inode。默认 `InodeOperations::permission` 进入
 `generic_permission()`，依次选择 owner、group（包括补充组）或 other 权限位。
-`fsuid == 0` 当前近似 Linux DAC override：读写可以越过普通 mode 位，普通文件执行
-仍要求至少一个 execute bit，目录 search 可越过 execute bit。
+effective `CAP_DAC_OVERRIDE` overrides ordinary mode bits; effective
+`CAP_DAC_READ_SEARCH` additionally grants exact read (and search for
+directories). Neither grants execute permission on a regular file with no
+execute bit set, matching Linux `generic_permission()`.
 
 namespace 修改由 `Path` 或 `Filename` 在调用文件系统回调前统一检查：
 create、mkdir、mknod、symlink、link、unlink、rmdir 和 rename 要求父目录
 `MAY_WRITE | MAY_EXEC`。所有 create-like 操作由锁内 callback 调用共同的 `Path::vfs_*`
 能力；unlink、rmdir 和 rename 把 Path policy 作为 validator 传入 Dentry 操作。
 这些 policy 在父目录锁、所需 participant lock 和最终 lookup 结果仍然有效时执行。
-sticky 目录中的删除和替换还要求 root、目录所有者或该最终 victim 的所有者身份之一，
-mountpoint 检查也针对同一个 dentry。
+Deletion and replacement in a sticky directory require effective
+`CAP_FOWNER`, directory ownership, or ownership of the final victim; the
+mountpoint check applies to that same dentry.
 
 inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `setattr` callback：
 
-- `chown` 只允许特权调用者改变 UID；owner 可保留原 UID，并把 GID 改为当前组或补充组；
-- `chmod` 要求 inode owner 或特权，非所属组调用者请求的 setgid 位会被清除；
-- `set_times` 区分 touch 与显式 times 数组。空 times 或两个当前时间允许 owner、特权或
-  对 inode 有写权限的调用者；显式值以及 `UTIME_NOW/UTIME_OMIT` 混合只允许 owner/特权。
+- `chown` requires effective `CAP_CHOWN` to change the UID; the owner may
+  preserve the current UID and change the GID to a current or supplementary
+  group;
+- `chown` also applies Linux `chown_common()` set-ID cleanup. Directories keep
+  their mode. Other nodes always lose set-UID, and lose set-GID when group
+  execute is set or the caller is not in the pre-chown GID and lacks effective
+  `CAP_FSETID`. If cleanup changes the mode, Linux additionally drops set-GID
+  unless the caller is in the new GID or holds effective `CAP_FSETID`; that
+  new-GID condition does not apply when a GID change leaves both set-ID bits
+  untouched. The generated mode update requires inode ownership or effective
+  `CAP_FOWNER`, so `CAP_CHOWN`/`CAP_FSETID` alone do not authorize it and
+  `chown(-1, -1)` stays a no-op when no set-ID bit changes;
+- `chmod` requires inode ownership or effective `CAP_FOWNER`; retaining a
+  requested setgid bit additionally requires the target GID to belong to the
+  caller or effective `CAP_FSETID`;
+- `set_times` distinguishes touch from an explicit times array. Empty times or
+  two current-time values permit the owner, effective `CAP_FOWNER`, or a caller
+  with write permission on the inode; explicit values and mixed
+  `UTIME_NOW`/`UTIME_OMIT` permit only the owner or effective `CAP_FOWNER`.
 
 `SetattrTime` 只承载单次调用中“当前值/显式值”的授权信息，落盘的 `MetadataUpdate`
 只包含解析后的 atime/mtime/ctime 值，不在 inode 或 namei 状态中保存调用上下文。
@@ -705,19 +723,27 @@ singleton 即此策略，它被所有进程的 eventfd/epoll/timerfd/signalfd/pi
 `EINVAL` 的可达行为一致，而自带存储的文件系统（memfs、kext4、fat、9p 等）各自实现的
 `setattr` 不受影响。授权仍然只发生在 `Path` 层，回退表不重复执行 policy。
 
-Xattr 也由 `Path` 统一承载 mount、namespace 和 DAC 策略，再进入
-`InodeOperations::{get,list,set,remove}_xattr`。get/set/remove 输入名称以受检的内核
-`Vec<u8>` 保存；list 通过 `XattrNameRef` 与 `XattrNameSink` 逐项传递可分片借用的完整名称，
-从而允许后端零拷贝添加 namespace prefix，并在 `Path` 层把 `trusted.*` 过滤后才交给调用者。
-两种表示都完整保留非 UTF-8 suffix；`XattrSetFlags` 在进入后端前已从 ABI raw bits 转换，
-`CREATE|REPLACE` 组合保持为两个同时置位的约束交给后端。`user.*` 仅允许
-regular file、directory 和 socket，并对 sticky directory 写入执行 owner/privileged 检查；
-`trusted.*` 只对 privileged credential 可见；`security.*` 读操作保留 Linux VFS 的 LSM
-委托模型，但在 LSM/capability hook 尚未接入时，set/remove 使用 privileged credential
-近似阻止非特权调用者伪造安全属性；`system.*` 留给 filesystem 或 ACL 层授权。所有 namespace
-分支之前先执行通用写入检查：带 `NodeFlags::IMMUTABLE` 或 `NodeFlags::APPEND_ONLY` 的 inode
-拒绝 set/remove 并返回 `EPERM`，读取不受影响。Set/remove 在 inode data lock 内调用后端，
-具体文件系统必须在自己的事务或锁内原子完成四种 `CREATE`/`REPLACE` 组合的存在性判断。
+Xattr policy also flows through `Path`, which applies mount, namespace, and DAC
+policy before entering `InodeOperations::{get,list,set,remove}_xattr`.
+get/set/remove inputs keep names in a checked kernel `Vec<u8>`; list passes
+complete names incrementally through `XattrNameRef` and `XattrNameSink`,
+allowing backends to add namespace prefixes without copying and letting `Path`
+filter `trusted.*` before returning names to the caller. Both representations
+preserve non-UTF-8 suffixes intact. `XattrSetFlags` is converted from ABI raw
+bits before reaching a backend, and the `CREATE|REPLACE` combination remains a
+constraint requiring both flags to be set. `user.*` is allowed only on regular
+files, directories, and sockets, and writes to a sticky directory require
+directory ownership or effective `CAP_FOWNER`. `trusted.*` is visible only to
+callers holding effective `CAP_SYS_ADMIN`. Reads of `security.*` retain the
+Linux VFS LSM delegation model, but until concrete LSM hooks are connected,
+set/remove require effective `CAP_SYS_ADMIN`, which approximately prevents
+unprivileged callers from forging security attributes; `system.*` remains
+delegated to the filesystem or ACL layer. Before any namespace branch, the
+common write check rejects set/remove on inodes carrying
+`NodeFlags::IMMUTABLE` or `NodeFlags::APPEND_ONLY` with `EPERM`; reads are
+unaffected. Set/remove call the backend under the inode data lock, and each
+filesystem must atomically resolve all four `CREATE`/`REPLACE` combinations
+inside its own transaction or lock.
 
 ### 新 inode 所有者
 
@@ -1167,8 +1193,13 @@ FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 
 
 ## 已知限制
 
-- 尚无完整 capability、LSM、ACL、user namespace ID 映射或 idmapped mount 权限语义；
-  `trusted.*` 访问和 `security.*` mutation 暂以 `euid == 0` 近似相应 capability。
+- The effective process capability set now covers DAC, sticky directories,
+  xattr, chown/chmod, and related checks; LSM, ACL, user-namespace ID mapping,
+  idmapped mounts, and file capabilities are not supported. Ambient
+  capabilities are not a separate filesystem input; they affect a check only
+  after becoming effective. `trusted.*` access and `security.*` mutation require
+  effective `CAP_SYS_ADMIN`; user xattr modification in a sticky directory also
+  requires directory ownership or effective `CAP_FOWNER`.
 - FAT 等不能原生表达 Unix UID/GID 的后端不能完整持久化创建者身份。
 - 当前 POSIX rename 路径不支持 `RENAME_WHITEOUT`。
 - superblock dentry cache 尚无 Linux 风格 LRU/shrinker。

@@ -46,7 +46,7 @@ All unsafe sites carry inline `SAFETY:` justifications.
 | `ptr.rs` `write_vm_slice` | byte-view of a live slice | same allocation and length; layout-preserving reinterpretation |
 | `ptr.rs` `read_vm`/`load_vm_vec`/`load_bytes_with_max_len` | `assume_init` | exactly the copied bytes were initialized by the preceding `osvm` call; `T: UserRead`/element-by-element init makes them valid |
 | `ptr.rs` `bytemuck::Zeroable`/`AnyBitPattern` for `UserPtr` | auto-trait override | `repr(transparent)` over a raw pointer; all bit patterns are plain addresses |
-| domain modules `unsafe impl User{Read,Write}` | trait attachment | each listed `linux_raw_sys` struct is plain-old-data with explicit ABI fields (no implicit padding for write side) |
+| domain modules `unsafe impl User{Read,Write}` | trait attachment | each listed carrier is plain-old-data with explicit ABI fields and no implicit padding on the write side; this includes `linux_raw_sys` structs and the locally defined `CapUserData` |
 
 The crate never dereferences a user pointer itself; every access goes through
 `osvm`, whose provider owns the fault-checked copy.

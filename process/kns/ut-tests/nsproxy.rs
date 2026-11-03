@@ -317,7 +317,11 @@ fn test_unshare_prepare_copies_requested_namespaces() {
 #[def_test]
 fn test_unshare_prepare_clone_fs_without_newns_detaches_fs_struct() {
     let proxy = make_nsproxy();
-    let fs = make_fs(&proxy);
+    let mut fs = make_fs(&proxy);
+    assert!(matches!(
+        fs.begin_exec(),
+        fs_context::ExecAdmission::Exclusive
+    ));
     let prepared = proxy
         .prepare_unshare(
             NamespaceFlags::empty(),
@@ -333,7 +337,12 @@ fn test_unshare_prepare_clone_fs_without_newns_detaches_fs_struct() {
 
     // The mount namespace is shared; a private fs copy is drafted.
     assert!(Arc::ptr_eq(&proxy.mnt_ns, &prepared.nsproxy.mnt_ns));
-    assert!(prepared.new_fs().is_some());
+    let new_fs = prepared.new_fs().expect("CLONE_FS drafts a private fs");
+    assert!(
+        !new_fs.in_exec(),
+        "a private fs copy must not inherit the parent's exec admission"
+    );
+    fs.end_exec();
 }
 
 #[def_test]

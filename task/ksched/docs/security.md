@@ -22,9 +22,8 @@ Stop (one slot per RQ) -> Deadline CBS+EDF -> RT FIFO/RR -> Fair EEVDF -> Idle
   it passes in. This crate checks structure only through
   `SchedAttr::validate`: a FIFO/RR priority must be in `1..=99`. Credential
   checks are not done here. Before `set_attr` places a task in RT or
-  Deadline, the caller must already have confirmed realtime scheduling
-  privilege (Linux `CAP_SYS_NICE`; this kernel approximates it with
-  `euid == 0`). `sys_sched_setscheduler` / `sys_sched_setattr` submit through
+  Deadline, the caller must already have confirmed effective
+  `CAP_SYS_NICE`. `sys_sched_setscheduler` / `sys_sched_setattr` submit through
   `ktask::sched_update_attr`. The owner check, and the privilege check for
   FIFO/RR/Deadline, finish before `Scheduler::set_attr` changes the
   attribute. If that check is skipped, FIFO 99 stays ahead of every Fair
@@ -265,9 +264,8 @@ No user data. The crate operates only on kernel task scheduling metadata.
   `DlParams`, or `SchedAttr::validate` rejects it with `InvalidPolicy`. A
   per-RQ admission failure is `AdmissionFull`, not a permission check.
 - `sched_setscheduler` / `sched_setattr` move FIFO/RR into `RtClass` and
-  `SCHED_DEADLINE` into Deadline. Realtime and Deadline policies require a
-  privileged caller (`euid == 0`, standing in for `CAP_SYS_NICE`). This is
-  still not a full capability or `RLIMIT_RTPRIO` check.
+  `SCHED_DEADLINE` into Deadline. Realtime and Deadline policies require
+  effective `CAP_SYS_NICE`. `RLIMIT_RTPRIO` is still not consulted.
 - `SCHED_RESET_ON_FORK` is stored on `SchedAttr`. On clone, an RT or Deadline
   child returns to `SCHED_NORMAL` at nice 0. A Fair child zeros only a
   negative nice. A Deadline parent without the flag cannot fork (`EAGAIN`).

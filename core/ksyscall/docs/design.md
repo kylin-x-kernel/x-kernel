@@ -207,8 +207,11 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 - `task/pidfd.rs`: `pidfd_*`; owner `kprocess::PidFd`.
 - `task/credentials.rs`: `get*id` / `set*id` / `getgroups` / `setgroups`;
   owners in `kprocess` current-credential helpers and the `kcred` model.
-- `task/ctl.rs`: `prctl` `PR_GET_KEEPCAPS` / `PR_SET_KEEPCAPS`; owners in
-  the `kprocess` credential publication path and `kcred` securebits.
+- `task/ctl.rs`: `capget` / `capset`, `prctl` `PR_GET_KEEPCAPS` /
+  `PR_SET_KEEPCAPS`, `PR_CAPBSET_READ` / `PR_CAPBSET_DROP`, and the
+  `PR_CAP_AMBIENT` subcommands; owners in the `kprocess` credential
+  publication path, `kprocess::capability` target resolution, and `kcred`
+  capability sets, bounding set, transition validation and securebits.
 - `task/ids.rs`: `getpid` / `getppid`; owner `kprocess` current thread and
   parent relations.
 - `task/job.rs`: `getsid` / `setsid` / `getpgid` / `getpgrp` / `setpgid`;
@@ -257,13 +260,15 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   one critical section.
   `sched_setscheduler` admits Fair, FIFO, and RR. `sched_setattr` also admits
   `SCHED_DEADLINE` (a zero period is stored as the deadline). Realtime and
-  Deadline policies require root (`euid == 0`, the current `CAP_SYS_NICE`
-  approximation) in addition to the owner match; otherwise the call returns
-  EPERM before changing the task. An illegal priority or deadline triple is
+  Deadline policies require effective `CAP_SYS_NICE` in addition to the owner
+  match. Every setter applies Linux `cap_safe_nice()`: unless the caller has
+  effective `CAP_SYS_NICE`, the target's permitted capability set must be a
+  subset of the caller's permitted set. Otherwise the call returns EPERM before
+  changing the task. An illegal priority or deadline triple is
   EINVAL before that EPERM. `SCHED_RESET_ON_FORK` is stored on the live
   attribute and returned in `sched_getscheduler` / `sched_getattr`. An
-  unprivileged owner may set the flag; clearing it requires the same root
-  privilege and otherwise returns EPERM without changing the attribute.
+  unprivileged owner may set the flag; clearing it requires effective
+  `CAP_SYS_NICE` and otherwise returns EPERM without changing the attribute.
   `sched_setparam` does not carry the flag and leaves it unchanged. Clone
   copies that attribute with `SchedAttr::for_fork` and installs it before the
   child is published. An RT or Deadline parent with the flag produces a
@@ -277,11 +282,13 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   `PRIO_PROCESS` selects one task by TID; `PRIO_PGRP` and `PRIO_USER`
   iterate every published task — a process representative thread must not
   stand in for per-thread nice or real UID. `setpriority` compares the
-  caller's effective UID with the target's real/effective UIDs; root
-  currently approximates `CAP_SYS_NICE`, and unprivileged callers cannot
-  lower nice (raise priority). `sched_setaffinity` requires the same
-  caller-euid vs target ruid/euid match or root (`CAP_SYS_NICE`
-  approximation); the error order is ESRCH → EPERM → EINVAL (empty mask);
+  caller's effective UID with the target's real/effective UIDs; effective
+  `CAP_SYS_NICE` bypasses the owner match, and callers without it cannot
+  lower nice (raise priority). After that EACCES check, unprivileged callers
+  must also satisfy `cap_safe_nice()` against the target's permitted set.
+  `sched_setaffinity` requires the same caller-euid vs target ruid/euid match
+  or effective `CAP_SYS_NICE`, plus the same permitted-set containment;
+  the error order is ESRCH → EPERM → EINVAL (empty mask);
   `ktask::set_task_affinity` then migrates a queued task off its CPU,
   only changes the mask when no CPU is occupied, and returns EBUSY when
   the task cannot migrate.
@@ -327,9 +334,8 @@ creation without isolation. A thread clone cannot switch namespaces — the name
 bundle hangs off the process — so `CLONE_THREAD` combined with any namespace
 flag is rejected with `EINVAL` (Linux `copy_process()`), and every namespace
 flag on any clone is gated on the caller's privilege before the thread or
-process branch is chosen. Until unified user-namespace capability authorization
-exists, both syscalls gate on the caller's privilege flag (effective UID zero
-as the `CAP_SYS_ADMIN` proxy): `unshare` through
+process branch is chosen. User namespaces are not implemented, so both syscalls
+require effective `CAP_SYS_ADMIN`: `unshare` through
 `UnshareContext::privileged`, and `setns` before either channel dispatches —
 joining any namespace without it is `EPERM`, standing in for Linux's per-type
 `ns_install` capability checks. The unshare flag gate follows
@@ -348,11 +354,20 @@ namespace with a root-number fallback for root-keyed sources such as
 /proc. Kernel-internal lookup stays root-keyed (see the known-limits note
 in `process/kns/docs/design.md`).
 `PR_SET_NO_NEW_PRIVS`
-records the flag on the calling thread and `PR_GET_NO_NEW_PRIVS` reports
-it back; the exec credential path consumes the flag via
-`Cred::apply_exec`, and because exec never elevates identity today the
-no-elevation contract holds unconditionally — future setuid/setgid or
-file-capability support must consult the flag there.
+records the flag on the calling thread and `PR_GET_NO_NEW_PRIVS` reports it
+back; seccomp install consults it. Exec models only the no-file-capability
+credential transition: ordinary non-root exec clears effective/permitted, while
+privileged root reconstructs permitted from the bounding/inheritable sets. With
+`no_new_privs` or a filesystem context shared with another process, a growing
+reconstruction or a group identity change enters the downgrade: a growing set is
+intersected with the pre-exec permitted set and effective/group IDs are reset to
+the real IDs (the latter requires `no_new_privs` or no pre-exec effective
+`CAP_SETUID`). Exec admission samples
+the cross-process `CLONE_FS` owner count and, when exclusive, sets `in_exec`
+under the same filesystem lock; runtime adoption checks that flag atomically and
+returns `EAGAIN`, so a child cannot attach between the sample and the credential
+transition. There is no setuid/setgid or file-capability elevation; adding one
+requires extending both the credential transition and this flag handling.
 
 `seccomp(2)` is implemented: `SECCOMP_SET_MODE_STRICT` installs the fixed
 `read`/`write`/`_exit`/`rt_sigreturn` allowlist, `SECCOMP_SET_MODE_FILTER`
@@ -431,6 +446,75 @@ The scheduler gate must then use the concrete target credentials, without a
 same-group exemption. The published-worker regression invokes actual
 `sys_setuid`, verifies the caller changed while its peer retained its IDs, and
 checks both setters return EPERM without modifying the peer's metadata.
+
+## Capability syscall ABI and ownership
+
+`capget` and `capset` accept Linux capability ABI versions 1 (`0x19980330`),
+2 (`0x20071026`) and 3 (`0x20080522`). Versions 2 and 3 use two consecutive
+`__user_cap_data_struct` objects: the low word covers capabilities 0–31 and the
+high word covers 32–63. Version 1 predates the upper word and copies exactly one
+12-byte `__user_cap_data_struct`; capabilities above 31 are invisible to a v1
+caller. `posix-types` supplies the fixed `CapUserData` representation and its
+`UserRead`/`UserWrite` implementations; `ksyscall` converts each word through
+`CapSet::from_words`/`low_word`/`high_word` without reimplementing bit ranges
+and narrows only the user copy for version 1.
+
+The version word is read and validated before the data pointer is touched. An
+unknown version rewrites only the version word with version 3 and returns
+`EINVAL`; the header PID and data array are not accessed. `capget` alone keeps
+Linux's legacy null-data probe: after version validation it returns 0 without
+reading the PID, and a null-data request with an unknown version still rewrites
+the version and returns 0 rather than `EINVAL`.
+
+For a non-null `capget` request, a negative PID returns `EINVAL`. PID 0 and
+every positive PID, including the caller's own thread ID, are resolved by
+`kprocess::capability::target_capabilities` through the caller's PID namespace.
+The reported state is always the target task's objective real credential, which
+matches Linux `cap_capget()` reading `__task_cred()` even when the target is
+`current`. A positive PID may be a thread ID or thread-group ID, matching Linux
+`find_task_by_vpid()`; a missing target returns `ESRCH`. If a thread-group
+leader has exited while siblings remain, the group ID still reports the
+leader's retained objective credentials, matching Linux's unreaped zombie leader,
+rather than a sibling thread's per-thread credentials.
+
+For `capset`, only PID 0 or the caller's current thread ID is accepted; every
+other target, including a negative PID, returns `EPERM` before the data pointer
+is read. "Current thread ID" covers both numbers that identify the caller in
+this kernel's PID model: the active-namespace number reported by `getpid(2)` for
+a namespace leader and the root-projected number currently reported by
+`gettid(2)`. Member-thread identities are allocated with only a root projection,
+so accepting both spellings of the caller is required until those identities
+carry a full namespace chain; neither spelling can select another task. The
+data words are masked with Linux `CAP_VALID_MASK` (represented by
+`CapSet::FULL`) before transition validation, so unknown bits are dropped rather
+than installed or used to reject an otherwise valid request. A successful
+`capset` always updates only the current task and relies on
+`Cred::set_capabilities` for the Linux transition rules: inheritable growth is
+bounded by old inheritable union old permitted unless effective `CAP_SETPCAP`,
+and always by old inheritable union the bounding set; permitted never grows; and
+effective must remain within permitted.
+
+`PR_CAPBSET_READ` validates the capability number and queries the same
+`Cred::cap_bounding` set returned by the capability APIs. `PR_CAPBSET_DROP`
+passes the full-width argument to `Cred::drop_bounding_cap`, which applies the
+`CAP_SETPCAP`-before-range policy so an oversized value cannot truncate to a
+valid capability. `PR_CAP_AMBIENT` validates the subcommand and reserved
+arguments, then delegates to the credential model: `IS_SET` reports membership,
+`RAISE` requires the capability in both permitted and inheritable and
+`SECURE_NO_CAP_AMBIENT_RAISE` clear, and `LOWER`/`CLEAR_ALL` remove membership.
+A successful `capset` masks ambient with the new permitted and inheritable sets.
+File capabilities and setuid/setgid executable transitions are not implemented,
+so `capget` never invents executable-derived privilege. Exec still applies
+Linux's no-file-capability rule: permitted starts empty, privileged root
+reconstructs it from the bounding and inheritable sets when `SECURE_NOROOT` is
+clear and the real or effective UID is 0; ambient is merged into permitted after
+the growth clamp and supplies effective when privileged root does not. An
+effective GID outside the old filesystem/supplementary groups clears ambient.
+When `no_new_privs` is set or another process shares the caller's filesystem
+context and reconstruction would grow permitted or the group identity changed,
+a growing permitted set is intersected with the pre-exec set; effective/group
+IDs reset to real IDs when `no_new_privs` is set or the pre-exec credential
+lacks effective `CAP_SETUID`.
 
 ## Resource-limit syscall copy ordering
 

@@ -4,7 +4,7 @@
 
 //! VFS permission request and DAC checks.
 
-use kcred::Cred;
+use kcred::{CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, Cred};
 use kerrno::{KError, KResult};
 
 use crate::{Metadata, NodePermission, NodeType, VfsInode};
@@ -46,14 +46,30 @@ fn check_dac_permission(metadata: &Metadata, permission: Permission, cred: &Cred
         return Ok(());
     }
 
-    if cred.fsuid() == 0 {
-        if permission.contains(Permission::MAY_EXEC)
-            && metadata.mode.node_type() != NodeType::Directory
-            && !has_any_exec_bit(metadata)
-        {
-            return Err(KError::PermissionDenied);
-        }
+    // A regular file without any execute bit remains non-executable even for
+    // `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH`; Linux rejects that case before
+    // considering either capability.
+    if permission.contains(Permission::MAY_EXEC)
+        && metadata.mode.node_type() != NodeType::Directory
+        && !has_any_exec_bit(metadata)
+    {
+        return Err(KError::PermissionDenied);
+    }
+
+    if cred.has_cap(CAP_DAC_OVERRIDE) {
         return Ok(());
+    }
+
+    if cred.has_cap(CAP_DAC_READ_SEARCH) {
+        let readable = Permission::MAY_READ
+            | if metadata.mode.node_type() == NodeType::Directory {
+                Permission::MAY_EXEC
+            } else {
+                Permission::empty()
+            };
+        if permission.difference(readable).is_empty() {
+            return Ok(());
+        }
     }
 
     let is_allowed = if cred.fsuid() == metadata.uid {

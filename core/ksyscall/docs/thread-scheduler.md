@@ -25,13 +25,15 @@ read and write the live SchedAttr, not the thread snapshot.
 The three setters copy user memory first, then read and store that attribute
 under one run-queue lock.
 Policy/parameter writes require the caller effective UID to match the target
-real/effective UID or a privileged caller (euid 0, the current CAP_SYS_NICE
-approximation). Realtime and Deadline policies also require that privilege.
+real/effective UID or effective `CAP_SYS_NICE`. Independently, Linux
+`cap_safe_nice()` requires the target's permitted capability set to be a subset
+of the caller's permitted set unless the caller has effective `CAP_SYS_NICE`.
+Realtime and Deadline policies also require that capability.
 Otherwise they return EPERM and leave the live class unchanged. An illegal
 priority or deadline triple is EINVAL before that EPERM.
 SCHED_RESET_ON_FORK is sticky: an unprivileged owner may set it, but clearing
-it requires the same privilege and otherwise returns EPERM with the flag left
-set. sched_setparam does not carry the flag and leaves it unchanged.
+it requires effective `CAP_SYS_NICE` and otherwise returns EPERM with the flag
+left set. sched_setparam does not carry the flag and leaves it unchanged.
 This owner gate does not implement RT resource limits. FIFO/RR and Deadline
 do enter the scheduler class that sched_setattr submits.
 

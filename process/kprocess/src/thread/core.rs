@@ -643,6 +643,16 @@ impl Thread {
         *cred = new;
     }
 
+    /// Replaces both credential pointers on a non-current task for tests.
+    ///
+    /// Production credential changes run on the current task. Tests need to
+    /// give a published fixture distinct objective credentials before checking
+    /// lookups that intentionally read another task's `real_cred`.
+    #[cfg(unittest)]
+    pub(crate) fn replace_cred_for_test(&self, cred: Cred) {
+        self.commit_cred(cred);
+    }
+
     /// Returns the thread-level signal manager.
     pub fn signal_manager(&self) -> &Arc<ThreadSignalManager> {
         &self.signal

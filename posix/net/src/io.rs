@@ -352,8 +352,8 @@ fn send_impl(
     };
     let sent = match socket.as_ref() {
         Socket::Netlink(_) => {
-            let cred = kprocess::current_cred();
-            socket.send_with_cred(&mut src, options, &cred)?
+            let sender = kprocess::current_cred();
+            socket.send_with_cred(&mut src, options, &sender)?
         }
         _ => socket.send(&mut src, options)?,
     };

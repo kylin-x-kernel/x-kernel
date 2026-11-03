@@ -4359,12 +4359,15 @@ dependencies = [
  "cgroup2fs",
  "kbpf",
  "kcgroup",
+ "kcred",
  "kerrno",
  "klogger",
  "kprocess",
  "kuaccess",
  "kvfs",
  "posix-types",
+ "unittest",
+ "unittest_support",
 ]
 
 [[package]]
@@ -4415,6 +4418,7 @@ dependencies = [
  "osvm",
  "posix-types",
  "unittest",
+ "unittest_support",
 ]
 
 [[package]]

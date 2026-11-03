@@ -249,7 +249,7 @@ queue limits, capacity from the sector view, and the disk sequence from
 commands reach the driver; errors from generic commands do not trigger fallback.
 `BLKROSET` accepts any nonzero int as read-only. The block dispatcher checks that capability before copying its argument.
 The POSIX entry point passes the current caller's credential snapshot through KVFS,
-which calls `Cred::has_sys_admin()` (currently effective UID 0) for `CAP_SYS_ADMIN`. Driver dispatch
+which calls `Cred::has_sys_admin()` to test effective `CAP_SYS_ADMIN`. Driver dispatch
 receives the same capability value and open mode for its own command checks.
 Readahead ioctls read and update `Gendisk::bdi` (`BackingDevInfo::ra_pages`).
 Setters take an immediate sector count and round down to base pages; getters

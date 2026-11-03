@@ -312,8 +312,7 @@ fn parse_rights_fds(body: &[u8]) -> KResult<Vec<i32>> {
 /// The claimed pid must be the sender's own TGID unless the caller is
 /// privileged in the PID namespace, and each claimed id must be one the caller
 /// could adopt with `setuid`/`setgid` unless it holds `CAP_SETUID`/
-/// `CAP_SETGID` (proxied by effective UID 0 in x-kernel's pre-capability
-/// model).
+/// `CAP_SETGID`.
 fn check_creds(body: &[u8], sender: &ScmSenderContext) -> KResult<knet::SenderCredentials> {
     if body.len() != size_of::<ucred>() {
         return Err(KError::InvalidInput);
@@ -329,10 +328,10 @@ fn check_creds(body: &[u8], sender: &ScmSenderContext) -> KResult<knet::SenderCr
     }
     let cred = &sender.cred;
     let pid_ok = claim.pid == sender.pid || cred.has_sys_admin();
-    let uid_ok =
-        [cred.ruid(), cred.euid(), cred.suid()].contains(&claim.uid) || cred.is_privileged();
-    let gid_ok =
-        [cred.rgid(), cred.egid(), cred.sgid()].contains(&claim.gid) || cred.is_privileged();
+    let uid_ok = [cred.ruid(), cred.euid(), cred.suid()].contains(&claim.uid)
+        || cred.has_cap(kcred::CAP_SETUID);
+    let gid_ok = [cred.rgid(), cred.egid(), cred.sgid()].contains(&claim.gid)
+        || cred.has_cap(kcred::CAP_SETGID);
     if !(pid_ok && uid_ok && gid_ok) {
         return Err(KError::from(LinuxError::EPERM));
     }

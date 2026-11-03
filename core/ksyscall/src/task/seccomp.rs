@@ -130,7 +130,7 @@ fn map_filter_error(_error: SeccompFilterError) -> KError {
 }
 
 fn current_cred_privileged() -> bool {
-    kprocess::current_cred().is_privileged()
+    kprocess::current_cred().has_sys_admin()
 }
 
 /// Copies `N` bytes from user memory into an initialised array.

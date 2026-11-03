@@ -6,7 +6,8 @@ This crate implements System V message-queue and shared-memory syscall adapters.
 The complete source scope is `src/lib.rs` (common IPC constants, ID allocation,
 time and permission helper), `src/msg.rs` (messages) and `src/shm.rs` (segments).
 All public items in the latter modules are re-exported at the crate root.
-`kprocess` provides current identity/address spaces, `osvm` provides user copying,
+`kcred` owns the `Cred` identity and capability constants, `kprocess` provides
+current identity/address spaces, `osvm` provides user copying,
 `memfs::shmem` owns segment backing files, and `filemap`/`memspace` own VMAs and
 page mappings. IPC metadata and attachment bookkeeping belong here; page frames,
 filesystem namespace objects and process lifecycle orchestration do not.
@@ -28,14 +29,17 @@ Both IPC object classes allocate IDs from the shared relaxed `AtomicI32`
 ## Message flow
 
 `sys_msgget` checks the queue limit, resolves a key, handles create/exclusive
-flags and publishes a new queue when required. `sys_msgsnd` copies the type and
-payload from userspace, checks positive type, `MSGMAX`, byte and message limits,
-then appends and updates sender/time metadata. `sys_msgrcv` chooses FIFO, exact
-type, first nonmatching type, smallest qualifying type, or indexed `MSG_COPY`;
-it copies type/payload out before removing a consumed message. `MSG_NOERROR`
-permits truncation. Control operations query metadata/statistics, change selected
-metadata or mark removal. An empty removed queue is removed from the manager;
-nonempty removed queues remain stored. Blocking send/receive and wakeups are
+flags and publishes a new queue when required. `sys_msgsnd` reads the type
+header, rejects payloads above `MSGMAX`, a negative queue ID and a nonpositive
+type, copies the payload, then resolves the queue, checks write permission and
+removal, applies byte and message limits, and appends while updating
+sender/time metadata.
+`sys_msgrcv` chooses FIFO, exact type, first nonmatching type, smallest
+qualifying type, or indexed `MSG_COPY`; it copies type/payload out before
+removing a consumed message. `MSG_NOERROR` permits truncation. Control
+operations query metadata/statistics, change selected metadata or mark removal.
+An empty removed queue is removed from the manager; nonempty removed queues
+remain stored. Blocking send/receive and wakeups are
 not implemented: full queues return EAGAIN and no match returns ENOMSG.
 
 ## Shared-memory flow and state
@@ -86,11 +90,17 @@ creating another physical-page owner. Unlinking the backing file makes final
 file/mapping references determine its lifetime. Removing global IPC metadata
 only releases this crate's references; mappings may still keep file state alive.
 
-Message permission helpers are called with hard-coded UID/GID zero, so they do
-not enforce real per-user isolation. Shared-memory authorization and Linux flag
-semantics are incomplete: nonzero-address `SHM_REMAP` replacement is not
-implemented, unknown bits are truncated, and creation/exclusive/huge-page
-semantics are not fully checked.
+Message permission checks mirror Linux `ipcperms()`: the creator and current
+owner UIDs select the owner class, the creator and current owner GIDs select the
+group class through the filesystem GID plus supplementary groups, and the raw
+operation flags are folded into the requested read/write bits. Effective
+`CAP_IPC_OWNER` is the read/write override. Control operations use the separate
+Linux rule: effective UID equal to the owner or creator, or effective
+`CAP_SYS_ADMIN`. Raising `msg_qbytes` above `MSGMNB` additionally requires
+`CAP_SYS_RESOURCE` and is validated before mutation.
+Shared-memory authorization and Linux flag semantics remain incomplete:
+nonzero-address `SHM_REMAP` replacement is not implemented, unknown bits are
+truncated, and creation/exclusive/huge-page semantics are not fully checked.
 `IPC_SET` for shm replaces the user-supplied ABI structure, including fields
 normally maintained by the kernel. IPC namespaces, full Linux accounting and
 robust global ID exhaustion handling are not provided here.
