@@ -1471,6 +1471,142 @@ fn execution_runtime_ignores_stale_clock_samples() {
 }
 
 // ============================================================================
+// Inheritance boost
+// ============================================================================
+
+fn boost(priority: u8) -> RtPrio {
+    RtPrio::new(i32::from(priority)).unwrap()
+}
+
+#[def_test]
+fn pi_boost_fair_runs_as_fifo_rt_without_changing_user_attr() {
+    let mut s = sched();
+    let runner = task(1);
+    let boosted = task(2);
+    s.set_attr(&runner, rt_attr(SchedPolicy::Fifo, 5), 0)
+        .unwrap();
+    enqueue_new(&mut s, runner);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    s.set_pi_boost(&boosted, boost(8), 0);
+    assert_eq!(s.attr(&boosted).policy, SchedPolicy::Normal);
+    assert_eq!(s.attr(&boosted).rt_priority, RtPrio::NONE);
+    assert_eq!(boosted.sched_class(), SchedClass::Rt);
+    assert_eq!(boosted.rt_priority_snapshot(), 8);
+    // An unboosted Fair wake leaves this RT runner in place. Resched here is
+    // the same-class probe seeing priority 8 above the runner's 5.
+    let woke = s.enqueue(boosted, EnqueueKind::Wake { sync: false }, 0);
+    assert!(woke.resched);
+    assert_eq!(leave_pick(&mut s, 0), 2);
+    assert_eq!(s.rt_preempt_rank(), 8);
+    let fair = s.enqueue(task(3), EnqueueKind::Wake { sync: false }, 0);
+    assert!(!fair.resched);
+}
+
+#[def_test]
+fn pi_boost_fair_does_not_rotate_on_rr_slice() {
+    let mut s = sched();
+    let boosted = task(1);
+    let rr = task(2);
+    s.set_pi_boost(&boosted, boost(4), 0);
+    s.set_attr(&rr, rt_attr(SchedPolicy::Rr, 4), 0).unwrap();
+    enqueue_new(&mut s, boosted);
+    enqueue_new(&mut s, rr);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let tick = s.update(DEFAULT_RR_SLICE_NS, UpdateKind::Account);
+    assert!(!tick.resched);
+    assert_eq!(s.rt_preempt_rank(), 4);
+}
+
+#[def_test]
+fn pi_boost_does_not_lower_user_rt_priority() {
+    let mut s = sched();
+    let high = task(1);
+    let mid = task(2);
+    s.set_attr(&high, rt_attr(SchedPolicy::Fifo, 8), 0).unwrap();
+    s.set_pi_boost(&high, boost(3), 0);
+    s.set_attr(&mid, rt_attr(SchedPolicy::Fifo, 5), 0).unwrap();
+    assert_eq!(s.attr(&high).rt_priority.get(), 8);
+    assert_eq!(high.rt_priority_snapshot(), 8);
+    enqueue_new(&mut s, mid);
+    enqueue_new(&mut s, high);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    assert_eq!(s.rt_preempt_rank(), 8);
+}
+
+#[def_test]
+fn pi_boost_raises_queued_rt_priority() {
+    let mut s = sched();
+    let low = task(1);
+    let raised = task(2);
+    s.set_attr(&low, rt_attr(SchedPolicy::Fifo, 4), 0).unwrap();
+    s.set_attr(&raised, rt_attr(SchedPolicy::Fifo, 2), 0)
+        .unwrap();
+    enqueue_new(&mut s, low);
+    enqueue_new(&mut s, raised.clone());
+    s.set_pi_boost(&raised, boost(9), 0);
+    assert_eq!(s.attr(&raised).rt_priority.get(), 2);
+    assert_eq!(raised.rt_priority_snapshot(), 9);
+    assert_eq!(pick_id(&mut s, 0), 2);
+}
+
+#[def_test]
+fn pi_clear_restores_user_attr_changed_while_boosted() {
+    let mut s = sched();
+    let t = task(1);
+    s.set_pi_boost(&t, boost(10), 0);
+    s.set_attr(&t, nice_attr(7), 0).unwrap();
+    assert_eq!(t.sched_class(), SchedClass::Rt);
+    assert_eq!(t.rt_priority_snapshot(), 10);
+    assert_eq!(s.attr(&t).policy, SchedPolicy::Normal);
+    assert_eq!(s.attr(&t).nice, Nice::new(7).unwrap());
+    s.set_pi_boost(&t, RtPrio::NONE, 0);
+    assert_eq!(t.sched_class(), SchedClass::Fair);
+    assert_eq!(t.rt_priority_snapshot(), 0);
+    assert_eq!(s.attr(&t).nice, Nice::new(7).unwrap());
+}
+
+#[def_test]
+fn pi_deadline_keeps_its_class_until_set_attr_leaves() {
+    let mut s = sched();
+    let t = task(1);
+    s.set_attr(&t, dl_attr(), 0).unwrap();
+    s.set_pi_boost(&t, boost(99), 0);
+    assert_eq!(t.sched_class(), SchedClass::Deadline);
+    assert_eq!(t.rt_priority_snapshot(), 0);
+    assert_eq!(s.attr(&t).policy, SchedPolicy::Deadline);
+    s.set_attr(&t, SchedAttr::DEFAULT, 0).unwrap();
+    assert_eq!(s.attr(&t).policy, SchedPolicy::Normal);
+    assert_eq!(t.sched_class(), SchedClass::Rt);
+    assert_eq!(t.rt_priority_snapshot(), 99);
+}
+
+#[def_test]
+fn pi_fork_inherits_user_attr_not_the_boost() {
+    let mut s = sched();
+    let parent = task(1);
+    s.set_pi_boost(&parent, boost(8), 0);
+    assert_eq!(parent.sched_class(), SchedClass::Rt);
+    let child = task(2);
+    child
+        .init_attr_unpublished(s.attr(&parent).for_fork().unwrap())
+        .unwrap();
+    assert_eq!(s.attr(&child).policy, SchedPolicy::Normal);
+    assert_eq!(child.sched_class(), SchedClass::Fair);
+    assert_eq!(child.rt_priority_snapshot(), 0);
+    assert_eq!(parent.sched_class(), SchedClass::Rt);
+    assert_eq!(parent.rt_priority_snapshot(), 8);
+}
+
+#[def_test]
+fn pi_boost_ignores_idle() {
+    let mut s = sched();
+    let idle_task = s.idle_task().clone();
+    s.set_pi_boost(&idle_task, boost(9), 0);
+    assert!(idle_task.is_idle_class());
+    assert_eq!(idle_task.rt_priority_snapshot(), 0);
+}
+
+// ============================================================================
 // Stop
 // ============================================================================
 

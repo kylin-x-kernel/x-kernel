@@ -266,6 +266,9 @@ pub struct SchedTask<T> {
     sum_exec_runtime_ns: AtomicU64,
     seat: RqCell<QueueSeat>,
     attr: RqCell<SchedAttr>,
+    /// Inheritance boost. [`RtPrio::NONE`] leaves the user class in place.
+    /// Deadline dispatch ignores it until the user policy leaves Deadline.
+    pi_prio: RqCell<RtPrio>,
     /// `fair.rs` names this field in `offset_of!`. Other reads go through [`Self::fair`].
     pub(crate) fair: FairEntity,
     rt: RtEntity,
@@ -294,6 +297,7 @@ impl<T> SchedTask<T> {
             sum_exec_runtime_ns: AtomicU64::new(0),
             seat: RqCell::new(QueueSeat::Detached),
             attr: RqCell::new(attr),
+            pi_prio: RqCell::new(RtPrio::NONE),
             fair: FairEntity::new(crate::DEFAULT_SLICE_NS),
             rt: RtEntity::new(crate::DEFAULT_RR_SLICE_NS),
             rt_links: ReadyLinks::new(),
@@ -336,11 +340,12 @@ impl<T> SchedTask<T> {
         SchedClass::from_u8(self.class.load(Ordering::Acquire))
     }
 
-    /// Live FIFO/RR priority, or `0` when this task is not RT.
+    /// Effective RT priority, or `0` when this task is not dispatched as RT.
     ///
-    /// Acquire pairs with the Release store in [`Self::set_attr`] /
-    /// [`Self::init_attr_unpublished`] so CPU selection can compare against a
-    /// remote run queue without that scheduler lock.
+    /// This is the inheritance-adjusted value, not [`SchedAttr::rt_priority`].
+    /// Acquire pairs with the Release store in `publish_dispatch` so CPU
+    /// selection can compare against a remote run queue without that
+    /// scheduler lock.
     pub fn rt_priority_snapshot(&self) -> u8 {
         self.rt_prio.load(Ordering::Acquire)
     }
@@ -364,10 +369,10 @@ impl<T> SchedTask<T> {
         // SAFETY: the creator still exclusively owns this unpublished task;
         // it is not on any run queue and no other CPU can observe it.
         let tok = unsafe { RqLocked::assume() };
+        self.pi_prio.set(RtPrio::NONE, tok);
         self.attr.set(attr, tok);
         self.fair.weight.set(attr.nice.weight(), tok);
-        self.store_rt_prio(attr);
-        self.class.store(attr.class().as_u8(), Ordering::Release);
+        self.publish_dispatch(attr, RtPrio::NONE, tok);
         Ok(())
     }
 
@@ -375,23 +380,68 @@ impl<T> SchedTask<T> {
         self.attr.get(tok)
     }
 
-    /// Store `attr` and the nice weight Fair uses for vruntime.
+    pub(crate) fn pi_prio(&self, tok: RqLocked) -> RtPrio {
+        self.pi_prio.get(tok)
+    }
+
+    pub(crate) fn set_pi_prio(&self, prio: RtPrio, tok: RqLocked) {
+        self.pi_prio.set(prio, tok);
+    }
+
+    /// Store the user attribute and the nice weight Fair uses for vruntime.
     ///
-    /// Fair rescale reads [`FairEntity::weight`], so this must run before
-    /// `attr_changed`.
+    /// Does not publish the dispatch class. Fair rescale reads
+    /// [`FairEntity::weight`], so this must run before `attr_changed`.
     pub(crate) fn set_attr(&self, attr: SchedAttr, tok: RqLocked) {
         self.attr.set(attr, tok);
         self.fair.weight.set(attr.nice.weight(), tok);
-        self.store_rt_prio(attr);
     }
 
-    fn store_rt_prio(&self, attr: SchedAttr) {
-        let prio = if attr.policy.is_realtime() {
-            attr.rt_priority.get()
+    /// Class the arbiter runs. A Fair user policy with a boost runs as RT.
+    /// Deadline and kernel policies keep their own class.
+    pub(crate) fn dispatch_class(user: SchedAttr, pi: RtPrio) -> SchedClass {
+        let class = user.class();
+        if class == SchedClass::Fair && pi != RtPrio::NONE {
+            SchedClass::Rt
+        } else {
+            class
+        }
+    }
+
+    /// RT queue priority for [`Self::dispatch_class`].
+    ///
+    /// An RT user policy keeps the greater of its own priority and `pi`.
+    /// A boosted Fair policy uses `pi` alone. Deadline does not donate its
+    /// parameters; the returned priority is unused while that class runs.
+    pub(crate) fn dispatch_rt_priority(user: SchedAttr, pi: RtPrio) -> RtPrio {
+        match user.class() {
+            SchedClass::Rt => {
+                if pi > user.rt_priority {
+                    pi
+                } else {
+                    user.rt_priority
+                }
+            }
+            SchedClass::Fair if pi != RtPrio::NONE => pi,
+            _ => user.rt_priority,
+        }
+    }
+
+    /// Publish the lock-free RT priority, then the dispatch class.
+    ///
+    /// `select_run_queue` loads the class with Acquire and only then the
+    /// priority. The class store is the release that makes the priority
+    /// visible, so a reader that observes `Rt` also observes this priority.
+    /// Storing the class first lets that reader pair `Rt` with a stale `0`.
+    pub(crate) fn publish_dispatch(&self, user: SchedAttr, pi: RtPrio, tok: RqLocked) {
+        let class = Self::dispatch_class(user, pi);
+        let prio = if class == SchedClass::Rt {
+            Self::dispatch_rt_priority(user, pi).get()
         } else {
             0
         };
         self.rt_prio.store(prio, Ordering::Release);
+        self.set_class(class, tok);
     }
 
     pub(crate) fn set_class(&self, class: SchedClass, _tok: RqLocked) {
@@ -423,8 +473,11 @@ impl<T> SchedTask<T> {
         self.attr.get(tok).policy
     }
 
+    /// Effective RT queue priority, including an inheritance boost.
+    ///
+    /// The user value stays on [`Self::attr`].
     pub(crate) fn rt_priority(&self, tok: RqLocked) -> RtPrio {
-        self.attr.get(tok).rt_priority
+        Self::dispatch_rt_priority(self.attr.get(tok), self.pi_prio.get(tok))
     }
 }
 

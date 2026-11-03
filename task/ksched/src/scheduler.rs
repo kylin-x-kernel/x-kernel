@@ -20,7 +20,7 @@ use crate::{
     clock::RqClock,
     entity::{QueueSeat, RqLocked, SchedTask},
     owner::SharedOwner,
-    policy::{SchedAttr, SchedClass, SchedError},
+    policy::{RtPrio, SchedAttr, SchedClass, SchedError},
 };
 
 /// Stop, Deadline, RT, Fair, then Idle. `curr` and `clock` stay outside so a
@@ -447,36 +447,99 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
             return Err(SchedError::KernelClassImmutable);
         }
         let _ = self.charge(now_ns, tok);
-        let old = task.attr(tok);
+        let pi = task.pi_prio(tok);
+        // Admission follows the user class. A boost into RT has no bandwidth
+        // cap, and a Deadline reservation is the user's, not the boost's.
+        self.classes.get(attr.class()).can_admit(task, attr, tok)?;
+        Ok(self.reseat(task, attr, pi, tok))
+    }
+
+    /// Set or clear the inheritance boost and apply the resulting dispatch.
+    ///
+    /// `RtPrio::NONE` clears the boost. The user [`SchedAttr`] is left as
+    /// [`Self::attr`] reports it. Stop and Idle are unchanged. Deadline keeps
+    /// its class; the boost is stored and takes effect if a later
+    /// [`Self::set_attr`] leaves Deadline. This does not admit bandwidth.
+    pub fn set_pi_boost(&mut self, task: &Owner, prio: RtPrio, now_ns: u64) -> Decision {
+        let tok = Self::token();
+        let _ = self.charge(now_ns, tok);
+        if task.sched_class().is_kernel_only() {
+            return Decision {
+                resched: false,
+                next_event_ns: self.compute_next_event(tok),
+            };
+        }
+        let user = task.attr(tok);
+        let old_pi = task.pi_prio(tok);
+        let same_dispatch = SchedTask::<T>::dispatch_class(user, old_pi)
+            == SchedTask::<T>::dispatch_class(user, prio)
+            && SchedTask::<T>::dispatch_rt_priority(user, old_pi)
+                == SchedTask::<T>::dispatch_rt_priority(user, prio);
+        if same_dispatch {
+            task.set_pi_prio(prio, tok);
+            task.publish_dispatch(user, prio, tok);
+            return Decision {
+                resched: false,
+                next_event_ns: self.compute_next_event(tok),
+            };
+        }
+        self.reseat(task, user, prio, tok)
+    }
+
+    /// Apply `new_user` together with `new_pi`, moving `task` between classes
+    /// when the effective dispatch changes.
+    ///
+    /// Dequeue uses the priority still stored on `task`. The new user
+    /// attribute and boost are published after that removal. A class change
+    /// dequeues, switches, then enqueues. Admission is the caller's job:
+    /// [`Self::set_attr`] checks the user class, and [`Self::set_pi_boost`]
+    /// does not admit.
+    fn reseat(
+        &mut self,
+        task: &Owner,
+        new_user: SchedAttr,
+        new_pi: RtPrio,
+        tok: RqLocked,
+    ) -> Decision {
+        let old_user = task.attr(tok);
+        let old_pi = task.pi_prio(tok);
+        let old_class = SchedTask::<T>::dispatch_class(old_user, old_pi);
+        let new_class = SchedTask::<T>::dispatch_class(new_user, new_pi);
         let is_curr = self
             .curr
             .as_ref()
             .is_some_and(|curr| Owner::ptr_eq(curr, task));
-        let new_class = attr.class();
         let clock = self.clock;
-        self.classes.get(new_class).can_admit(task, attr, tok)?;
-        if old.class() == new_class {
-            task.set_attr(attr, tok);
+        // `attr_changed` requeues by `old.rt_priority` and reads `old.policy`
+        // for the RR slice. The queue key is the effective priority; the
+        // policy stays the user's.
+        let mut old_for_hooks = old_user;
+        old_for_hooks.rt_priority = SchedTask::<T>::dispatch_rt_priority(old_user, old_pi);
+        if old_class == new_class {
+            task.set_pi_prio(new_pi, tok);
+            task.set_attr(new_user, tok);
+            task.publish_dispatch(new_user, new_pi, tok);
             self.classes
                 .get_mut(new_class)
-                .attr_changed(task, old, is_curr, &clock, tok);
+                .attr_changed(task, old_for_hooks, is_curr, &clock, tok);
         } else {
             let was_queued = task.seat(tok) != QueueSeat::Detached;
             if !is_curr && was_queued {
-                let curr = Self::curr_for(&self.curr, old.class());
+                let curr = Self::curr_for(&self.curr, old_class);
                 assert!(
                     self.classes
-                        .get_mut(old.class())
+                        .get_mut(old_class)
                         .dequeue(task, curr, &clock, tok)
                         .is_some(),
                     "queued task missing from its class tree"
                 );
             }
             self.classes
-                .get_mut(old.class())
+                .get_mut(old_class)
                 .switched_from(task, is_curr, &clock, tok);
-            task.set_attr(attr, tok);
-            task.set_class(new_class, tok);
+            task.set_pi_prio(new_pi, tok);
+            task.set_attr(new_user, tok);
+            task.publish_dispatch(new_user, new_pi, tok);
             self.classes
                 .get_mut(new_class)
                 .switched_to(task, is_curr, &clock, tok);
@@ -492,10 +555,10 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
             }
         }
         let resched = self.resched_needed(UpdateKind::WakeProbe, false, tok);
-        Ok(Decision {
+        Decision {
             resched,
             next_event_ns: self.compute_next_event(tok),
-        })
+        }
     }
 
     /// Read the task's stored attributes under the RQ lock.

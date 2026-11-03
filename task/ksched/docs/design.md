@@ -116,7 +116,7 @@ pick_next: Stop -> Deadline -> RT -> Fair -> Idle
 
 | Component | Responsibility |
 |------|------|
-| `SchedTask` | Caller payload, class, seat, attr, and one `FairEntity`, `RtEntity`, and `DeadlineEntity` per task |
+| `SchedTask` | Caller payload, class, seat, user attr, `pi_prio`, and one `FairEntity`, `RtEntity`, and `DeadlineEntity` per task |
 | `StopClass` | At most one waiter per RQ; no time slice; not stealable |
 | `DeadlineClass` | Two intrusive RB trees (ready / throttled); CBS budget; EDF selection; per-RQ bandwidth admission |
 | `RtClass` | Intrusive FIFO at priorities `1..=99`; RR slice; RT bandwidth throttle |
@@ -146,6 +146,26 @@ Deadline must carry a valid `DlParams`. FIFO/RR require a priority in
 `1..=99`. A Fair policy must carry `RtPrio::NONE`. Any non-Deadline policy
 must not carry `dl_params`. Stop and Idle are kernel classes. `set_attr`
 returns `KernelClassImmutable` for them. The user policy word has no Stop.
+
+`SchedAttr` stays the user policy. `pi_prio` is the inheritance boost, and
+`RtPrio::NONE` means there is none. Dispatch uses both. A Fair policy with a
+boost runs as RT at `pi_prio` and is not an RR task, so it has no RR slice.
+An RT policy runs at the greater of its own priority and `pi_prio`. Deadline
+keeps its class; a stored boost is applied only after `set_attr` leaves
+Deadline. `publish_dispatch` stores `rt_priority_snapshot` and then
+`class`, both with Release, so a remote reader that observes the new class
+also observes the new priority.
+`Scheduler::attr` and `SchedAttr::for_fork` read the user attribute, so
+`sched_getattr` and fork do not observe the boost. `init_attr_unpublished`
+clears it.
+
+`set_attr` validates, rejects Stop and Idle, charges the runner, and runs
+`can_admit` on the user class. Failure returns before either stored value
+changes. It then keeps the current boost and calls `reseat`. `set_pi_boost`
+writes only `pi_prio` and calls `reseat`; it does not admit bandwidth. Stop
+and Idle ignore it. A same-class update calls `attr_changed` with the
+previous effective RT priority as the queue key and the user policy for the
+RR slice. A class change dequeues, switches, and enqueues.
 
 ### Stop class
 
@@ -230,7 +250,9 @@ boundary `advance` clears the counter.
 `rt_priority_snapshot` is the lock-free priority published with
 Release/Acquire, for `ktask` CPU selection. `Scheduler::rt_preempt_rank`
 reads this CPU under the RQ lock. It is 0 when the runner is Fair or Idle and
-the RT class can still be picked, the running RT priority when RT is current,
+the RT class can still be picked, the runner's effective RT priority
+(the user priority raised by `pi_prio` when that is greater) when RT is
+current,
 and 255 for Stop or Deadline. Bandwidth throttle also records 255
 (`is_throttled_at`) while this RQ's clock has not passed
 `period_start_ns + rt_period_ns`, because `pick_next` will not select RT

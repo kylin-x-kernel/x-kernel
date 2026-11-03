@@ -160,10 +160,12 @@ requires exclusive access. `RqLocked` plus a complete `Copy` value from
 `new` and `set` provide all three. `seat`, `attr`, Fair virtual time, and
 `rr_left_ns` use the same token.
 
-`class` and `rt_prio` are `AtomicU8`. `sched_class()` and
-`rt_priority_snapshot()` load with Acquire, paired with the Release of
-`set_class` and `store_rt_prio`, so CPU selection can read them without the
-RQ lock. `seat` stays in an `RqCell` and is read only under the lock.
+`class` and `rt_prio` are `AtomicU8`. `publish_dispatch` stores `rt_prio`
+with Release and then `class` with Release. `sched_class()` and
+`rt_priority_snapshot()` load with Acquire, so a CPU-selection read that
+observes the new class also observes the priority stored before it. The
+reverse order would let `select_run_queue` observe `Rt` and then a stale
+`0`. `seat` stays in an `RqCell` and is read only under the lock.
 
 RT removal by address lives in `ready_list`. `ReadyItem` gives the field
 offset of `ReadyLinks`. `ReadyAdapter` projects both ways with that offset.
@@ -266,6 +268,13 @@ No user data. The crate operates only on kernel task scheduling metadata.
 - `sched_setscheduler` / `sched_setattr` move FIFO/RR into `RtClass` and
   `SCHED_DEADLINE` into Deadline. Realtime and Deadline policies require
   effective `CAP_SYS_NICE`. `RLIMIT_RTPRIO` is still not consulted.
+- `set_pi_boost` changes the effective class and RT priority without
+  changing `Scheduler::attr`. Fork copies that user attribute and clears the
+  boost. This crate does not authenticate the caller; a boost is trusted the
+  same way a user attribute is trusted after the syscall layer has checked
+  it. A boosted Fair task is charged to this RQ's RT bandwidth and does not
+  rotate as `SCHED_RR`. Deadline dispatch ignores the boost. No production
+  caller invokes `set_pi_boost` yet.
 - `SCHED_RESET_ON_FORK` is stored on `SchedAttr`. On clone, an RT or Deadline
   child returns to `SCHED_NORMAL` at nice 0. A Fair child zeros only a
   negative nice. A Deadline parent without the flag cannot fork (`EAGAIN`).
