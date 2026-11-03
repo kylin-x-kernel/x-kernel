@@ -23,7 +23,7 @@ struct Datagram {
     data: Vec<u8>,
     ancillary: Vec<AncillaryData>,
     sender: UnixAddr,
-    unix_sender_credentials: Option<crate::SenderCredentials>,
+    sender_credentials: Option<crate::SenderCredentials>,
 }
 
 struct Channel {
@@ -210,7 +210,7 @@ impl UnixTransportOps for DgramTransport {
             data: message,
             ancillary: options.ancillary,
             sender: self.local_addr.read().clone(),
-            unix_sender_credentials: options.unix_sender_credentials,
+            sender_credentials: options.sender_credentials,
         };
 
         let connected = self.peer.read();
@@ -247,7 +247,7 @@ impl UnixTransportOps for DgramTransport {
                     data,
                     ancillary,
                     sender,
-                    unix_sender_credentials,
+                    sender_credentials,
                 } = match rx.try_recv() {
                     Ok(packet) => packet,
                     Err(TryRecvError::Empty) => {
@@ -270,7 +270,7 @@ impl UnixTransportOps for DgramTransport {
                         // Deliver identity before passed files so a short control
                         // buffer cannot spend the credential space on descriptors.
                         if self.options.pass_credentials()
-                            && let Some(credentials) = unix_sender_credentials
+                            && let Some(credentials) = sender_credentials
                         {
                             dst.push(Arc::new(crate::KernelAncillaryData::Credentials(
                                 credentials,
@@ -285,7 +285,7 @@ impl UnixTransportOps for DgramTransport {
                     // credentials and not only passed file descriptions.
                     None => {
                         let exposes_credentials =
-                            self.options.pass_credentials() && unix_sender_credentials.is_some();
+                            self.options.pass_credentials() && sender_credentials.is_some();
                         if (!ancillary.is_empty() || exposes_credentials)
                             && let Some(discarded) = options.ancillary_discarded.as_deref_mut()
                         {

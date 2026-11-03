@@ -12,6 +12,7 @@ use kcred::Cred;
 use kerrno::{KError, KResult};
 use kio::{IoBuf, IoBufMut, Read, Write};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
+use kprocess::AsThread;
 use kvfs::{FMode, FileOperations, Kiocb, OpenFlags, VfsFile, VfsResult};
 
 use crate::{
@@ -88,17 +89,24 @@ impl SocketFileOps {
 
     fn send(file: &VfsFile, src: impl Read + IoBuf) -> VfsResult<usize> {
         let socket = Self::socket(file)?;
-        let mut options = SendOptions::default();
+        let mut options = SendOptions {
+            opener_cred: Some(file.cred().as_ref().clone()),
+            ..SendOptions::default()
+        };
         if file.is_nonblocking() {
             options.flags |= SendFlags::DONT_WAIT;
         }
         match socket.as_ref() {
-            Socket::Netlink(_) => {
-                let sender = kprocess::current_cred();
-                socket.send_with_cred(src, options, &sender)
-            }
+            Socket::Netlink(_) => match ktask::current().try_as_thread() {
+                Some(_) => {
+                    options.sender_credentials = current_sender_credentials();
+                    let cred = kprocess::current_cred();
+                    socket.send_with_cred(src, options, &cred)
+                }
+                None => socket.send(src, options),
+            },
             Socket::Unix(unix) if unix.should_attach_sender_credentials() => {
-                options.unix_sender_credentials = Some(current_sender_credentials());
+                options.sender_credentials = current_sender_credentials();
                 socket.send(src, options)
             }
             _ => socket.send(src, options),

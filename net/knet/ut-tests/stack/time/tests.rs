@@ -47,5 +47,10 @@ fn deferred_close_deadline_can_precede_protocol_deadline() {
     let close = SmoltcpInstant::from_millis(10);
     let protocol = SmoltcpInstant::from_millis(20);
 
-    assert!(earliest_poll_deadline(Some(protocol), Some(close)) == Some(close));
+    let neighbor = SmoltcpInstant::from_millis(5);
+
+    assert!(earliest_poll_deadline(Some(protocol), Some(close), None) == Some(close));
+    assert!(earliest_poll_deadline(None, None, Some(protocol)) == Some(protocol));
+    assert!(earliest_poll_deadline(Some(close), None, Some(protocol)) == Some(close));
+    assert!(earliest_poll_deadline(Some(protocol), Some(close), Some(neighbor)) == Some(neighbor));
 }

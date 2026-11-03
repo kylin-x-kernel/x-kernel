@@ -22,7 +22,7 @@ use knet::{
 };
 use linux_raw_sys::net::{
     SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SO_DOMAIN, SO_PEERCRED, SO_PROTOCOL,
-    SO_TYPE, SOL_SOCKET, socklen_t,
+    SO_TYPE, SOL_NETLINK, SOL_SOCKET, socklen_t,
 };
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
@@ -30,6 +30,9 @@ use posix_types::{UserConstPtr, UserPtr, UserRead};
 const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
 const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
+
+/// `NETLINK_CAP_ACK` is not exposed by `linux_raw_sys` on every target.
+const NETLINK_CAP_ACK: u32 = 10;
 
 const PACKET_ADD_MEMBERSHIP: u32 = 1;
 const PACKET_DROP_MEMBERSHIP: u32 = 2;
@@ -241,6 +244,8 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_RCVTIMEO) => ReceiveTimeout as SocketTimeout,
             (SOL_SOCKET, SO_SNDTIMEO) => SendTimeout as SocketTimeout,
             (SOL_SOCKET, SO_PASSCRED) => PassCredentials as IntBool,
+
+            (SOL_NETLINK, NETLINK_CAP_ACK) => NetlinkCapAck as IntBool,
 
             (PROTO_TCP, TCP_NODELAY) => NoDelay as IntBool,
             (PROTO_TCP, TCP_MAXSEG) => MaxSegment as Int<usize>,
@@ -494,6 +499,22 @@ pub fn sys_setsockopt(
         };
     }
 
+    if level == SOL_NETLINK && optname == NETLINK_CAP_ACK {
+        // Linux `netlink_setsockopt()` treats a short option length as a zero
+        // value for NETLINK_CAP_ACK rather than rejecting it: it only reads
+        // the integer when `optlen >= sizeof(int)`.  A negative length is
+        // still invalid.
+        if (optlen as i32) < 0 {
+            return Err(LinuxError::EINVAL.into());
+        }
+        let enabled = if optlen >= size_of::<i32>() as socklen_t {
+            optval.cast::<i32>().read_vm().map_err(KError::from)? != 0
+        } else {
+            false
+        };
+        socket.set_option(SetSocketOption::NetlinkCapAck(&enabled))?;
+        return Ok(0);
+    }
     if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
         if optlen == 0 {
             socket.set_option(SetSocketOption::BindToDevice(&None))?;

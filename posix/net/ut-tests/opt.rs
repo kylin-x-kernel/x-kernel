@@ -6,12 +6,14 @@ use alloc::{vec, vec::Vec};
 use core::mem::size_of;
 
 use kerrno::{KError, LinuxError};
+use knet::netlink::NETLINK_ROUTE;
 use ktime_types::{NANOS_PER_SEC, TimeSpan};
 use linux_raw_sys::{
     general::timeval,
     net::{
-        AF_INET, AF_UNIX, IPPROTO_TCP, SO_DOMAIN, SO_PEERCRED, SO_PROTOCOL, SO_TYPE, SOCK_DGRAM,
-        SOCK_STREAM, SOL_SOCKET, TCP_KEEPCNT, TCP_KEEPIDLE, TCP_KEEPINTVL, socklen_t,
+        AF_INET, AF_NETLINK, AF_UNIX, IPPROTO_TCP, SO_DOMAIN, SO_PEERCRED, SO_PROTOCOL, SO_TYPE,
+        SOCK_DGRAM, SOCK_RAW, SOCK_STREAM, SOL_SOCKET, TCP_KEEPCNT, TCP_KEEPIDLE, TCP_KEEPINTVL,
+        socklen_t,
     },
 };
 use posix_types::UserPtr;
@@ -421,4 +423,91 @@ fn peer_credentials_report_the_socketpair_creator_and_truncate_short_buffers() {
 
     close_socket(first);
     close_socket(second);
+}
+#[def_test(user)]
+fn netlink_cap_ack_option_round_trips_through_the_syscall_layer() {
+    const SOL_NETLINK: u32 = 270;
+    const NETLINK_CAP_ACK: u32 = 10;
+
+    let fd = sys_socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE as u32).unwrap() as i32;
+    let value = TestUserValue::<i32>::new().unwrap();
+    let mut optlen = TestUserValue::from_value(size_of::<i32>() as socklen_t).unwrap();
+    let optlen_ptr = UserPtr::from(optlen.as_user_ptr());
+    let value_ptr = UserPtr::from(value.as_user_ptr().cast::<u8>());
+
+    assert_eq!(
+        sys_getsockopt(fd, SOL_NETLINK, NETLINK_CAP_ACK, value_ptr, optlen_ptr),
+        Ok(0)
+    );
+    assert_eq!(value.read(), 0);
+    assert_eq!(optlen.read(), size_of::<i32>() as socklen_t);
+
+    let enabled = TestUserValue::from_value(2).unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            SOL_NETLINK,
+            NETLINK_CAP_ACK,
+            UserPtr::from(enabled.as_user_ptr().cast::<u8>()).as_const(),
+            size_of::<i32>() as socklen_t,
+        ),
+        Ok(0)
+    );
+    optlen.write(size_of::<i32>() as socklen_t);
+    assert_eq!(
+        sys_getsockopt(fd, SOL_NETLINK, NETLINK_CAP_ACK, value_ptr, optlen_ptr),
+        Ok(0)
+    );
+    assert_eq!(value.read(), 1);
+
+    // Linux reads the integer only when `optlen >= sizeof(int)`; short
+    // lengths select the zero value and clear the flag instead of returning
+    // EINVAL.  A negative length is still rejected.
+    let empty = TestUserValue::<u8>::new().unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            SOL_NETLINK,
+            NETLINK_CAP_ACK,
+            UserPtr::from(empty.as_user_ptr()).as_const(),
+            0,
+        ),
+        Ok(0)
+    );
+    optlen.write(size_of::<i32>() as socklen_t);
+    assert_eq!(
+        sys_getsockopt(fd, SOL_NETLINK, NETLINK_CAP_ACK, value_ptr, optlen_ptr),
+        Ok(0)
+    );
+    assert_eq!(value.read(), 0);
+
+    let one = TestUserValue::from_value(1_u8).unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            SOL_NETLINK,
+            NETLINK_CAP_ACK,
+            UserPtr::from(one.as_user_ptr()).as_const(),
+            1,
+        ),
+        Ok(0)
+    );
+    optlen.write(size_of::<i32>() as socklen_t);
+    assert_eq!(
+        sys_getsockopt(fd, SOL_NETLINK, NETLINK_CAP_ACK, value_ptr, optlen_ptr),
+        Ok(0)
+    );
+    assert_eq!(value.read(), 0);
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            SOL_NETLINK,
+            NETLINK_CAP_ACK,
+            UserPtr::from(empty.as_user_ptr()).as_const(),
+            u32::MAX,
+        ),
+        Err(KError::from(LinuxError::EINVAL))
+    );
+
+    close_socket(fd);
 }

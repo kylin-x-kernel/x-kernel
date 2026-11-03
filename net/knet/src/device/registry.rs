@@ -26,9 +26,11 @@ struct DeviceEntry {
 #[must_use = "reconcile the address change before releasing the Router lock"]
 pub(crate) enum Ipv4AddrChange {
     Unchanged,
-    /// The old source, if any, may still be owned by another address entry.
+    /// Sources removed by the change.  Each may still be owned by another
+    /// address entry, so callers must re-check ownership before dropping
+    /// source-specific configured routes and pending packets.
     Updated {
-        old_source: Option<Ipv4Address>,
+        old_sources: Vec<Ipv4Address>,
     },
 }
 
@@ -248,6 +250,11 @@ impl DeviceRegistry {
         entry: Ipv4AddrEntry,
     ) -> Result<Ipv4AddrChange, LinuxError> {
         let addrs = self.ipv4(dev).ok_or(LinuxError::ENODEV)?;
+        // Linux's `__inet_insert_ifa` ignores a zero local address before it
+        // reaches any uniqueness, route, or notification work.
+        if entry.addr.address().is_unspecified() {
+            return Ok(Ipv4AddrChange::Unchanged);
+        }
         if !entry.addr.address().is_unicast() {
             return Err(LinuxError::EINVAL);
         }
@@ -260,7 +267,7 @@ impl DeviceRegistry {
         self.ipv4_mut(dev)
             .ok_or(LinuxError::ENODEV)?
             .insert(entry)?;
-        Ok(self.sync_ipv4_change(None))
+        Ok(self.sync_ipv4_change(Vec::new()))
     }
 
     /// Replaces the specified CIDR, preserving order and rejecting duplicate identities.
@@ -270,35 +277,33 @@ impl DeviceRegistry {
         addr: Ipv4Cidr,
         entry: Ipv4AddrEntry,
     ) -> Result<Ipv4AddrChange, LinuxError> {
-        let old = self
+        let removed = self
             .ipv4_mut(dev)
             .ok_or(LinuxError::ENODEV)?
             .replace(addr, entry)?;
-        if old == entry {
+        let unchanged = removed.len() == 1 && removed[0] == entry;
+        if unchanged {
             return Ok(Ipv4AddrChange::Unchanged);
         }
-        if old.addr != entry.addr {
-            self.sync_ipv4_addrs();
-        }
-        Ok(Ipv4AddrChange::Updated {
-            old_source: (old.addr.address() != entry.addr.address()).then_some(old.addr.address()),
-        })
+        let old_sources = removed.iter().map(|old| old.addr.address()).collect();
+        Ok(self.sync_ipv4_change(old_sources))
     }
 
     pub(crate) fn remove_ipv4_addr(&mut self, dev: NetDeviceId, addr: Ipv4Cidr) -> Ipv4AddrChange {
-        if self
-            .ipv4_mut(dev)
-            .and_then(|addrs| addrs.remove(addr))
-            .is_none()
-        {
+        let Some(addrs) = self.ipv4_mut(dev) else {
+            return Ipv4AddrChange::Unchanged;
+        };
+        let removed = addrs.remove_with_secondaries(addr);
+        if removed.is_empty() {
             return Ipv4AddrChange::Unchanged;
         }
-        self.sync_ipv4_change(Some(addr.address()))
+        let old_sources = removed.iter().map(|old| old.addr.address()).collect();
+        self.sync_ipv4_change(old_sources)
     }
 
-    fn sync_ipv4_change(&mut self, old_source: Option<Ipv4Address>) -> Ipv4AddrChange {
+    fn sync_ipv4_change(&mut self, old_sources: Vec<Ipv4Address>) -> Ipv4AddrChange {
         self.sync_ipv4_addrs();
-        Ipv4AddrChange::Updated { old_source }
+        Ipv4AddrChange::Updated { old_sources }
     }
 
     /// Refreshes the device projections after an address or device mutation.
@@ -337,6 +342,14 @@ impl DeviceRegistry {
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &dyn NetDevice> {
         self.entries.iter().map(|entry| entry.device.as_ref())
+    }
+
+    pub(crate) fn iter_with_ids(
+        &self,
+    ) -> impl Iterator<Item = (NetDeviceId, &(dyn NetDevice + 'static))> {
+        self.entries
+            .iter()
+            .map(|entry| (entry.id, entry.device.as_ref()))
     }
 
     pub(crate) fn iter_mut<'a>(

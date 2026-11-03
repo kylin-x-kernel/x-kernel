@@ -18,7 +18,10 @@ use kerrno::{KError, KResult, LinuxError};
 use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
     AcceptOptions, ConnectOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
-    netlink::{NetlinkSocket, NetlinkSocketType},
+    netlink::{
+        NETLINK_MAX_LINKS, NetlinkAddr, NetlinkSocket, NetlinkSocketType,
+        netlink_protocol_supported,
+    },
     packet::{PacketSocket, PacketSocketKind},
     raw::{IpProtocol, IpVersion, RawSocket},
     sock_alloc_file, sock_from_file,
@@ -104,7 +107,8 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             ))?)
         }
         (AF_NETLINK, SOCK_RAW) | (AF_NETLINK, SOCK_DGRAM) => {
-            if proto > i32::MAX as u32 {
+            let protocol = i32::try_from(proto).map_err(|_| LinuxError::EPROTONOSUPPORT)?;
+            if protocol >= NETLINK_MAX_LINKS || !netlink_protocol_supported(protocol) {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
             let socket_type = if ty == SOCK_RAW {
@@ -112,7 +116,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             } else {
                 NetlinkSocketType::Datagram
             };
-            knet::Socket::Netlink(KBox::new(NetlinkSocket::new(proto as i32, socket_type))?)
+            knet::Socket::Netlink(KBox::new(NetlinkSocket::new(protocol, socket_type))?)
         }
         (AF_PACKET, SOCK_RAW) | (AF_PACKET, SOCK_DGRAM) => {
             if !cred.has_cap(kcred::CAP_NET_RAW) {
@@ -153,24 +157,39 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
 
 /// Bind a socket to a local address
 pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
-    let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
+    let socket = socket_from_fd(fd)?;
+    // The generic parser dispatches on `sa_family`, which would turn a
+    // non-AF_NETLINK address on a netlink socket into a protocol lookup error.
+    // Linux `netlink_bind` instead owns both the family and length checks.
+    let addr = if socket.socket_family() == AF_NETLINK as i32 {
+        SocketAddrEx::Netlink(NetlinkAddr::read_from_user(addr, addrlen)?)
+    } else {
+        SocketAddrEx::read_from_user(addr, addrlen)?
+    };
 
-    socket_from_fd(fd)?.bind(addr)?;
+    socket.bind_with_cred(addr, &kprocess::current_cred())?;
 
     Ok(0)
 }
 
 /// Initiate a connection to a remote address
 pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
-    let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
-
+    // Linux resolves the descriptor before copying the address. Netlink also
+    // owns its connect-time family policy, which the generic dispatcher would
+    // otherwise report as EAFNOSUPPORT for an unknown family.
     let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
-    socket.connect(
+    let addr = if socket.socket_family() == AF_NETLINK as i32 {
+        crate::addr::read_netlink_connect_addr(addr, addrlen)?
+    } else {
+        SocketAddrEx::read_from_user(addr, addrlen)?
+    };
+    socket.connect_with_cred(
         addr,
         ConnectOptions {
             nonblocking: file.is_nonblocking(),
         },
+        &kprocess::current_cred(),
     )?;
 
     Ok(0)

@@ -29,8 +29,8 @@ use kvfs::VfsFile;
 use linux_raw_sys::{
     general::timespec,
     net::{
-        MSG_CTRUNC, MSG_DONTWAIT, MSG_ERRQUEUE, MSG_PEEK, MSG_TRUNC, SCM_CREDENTIALS, SCM_RIGHTS,
-        SOL_SOCKET, cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t,
+        MSG_CTRUNC, MSG_DONTWAIT, MSG_ERRQUEUE, MSG_OOB, MSG_PEEK, MSG_TRUNC, SCM_CREDENTIALS,
+        SCM_RIGHTS, SOL_SOCKET, cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t,
     },
 };
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
@@ -39,8 +39,8 @@ use posix_types::{IoVec, IoVectorBuf, TimeSpanLike, UserConstPtr, UserPtr};
 use crate::{
     addr::SocketAddrExt,
     cmsg::{
-        CMsg, CMsgBuilder, OPTMEM_MAX, ScmFdBudget, ScmSenderContext, parse_control_msgs,
-        push_ip_recverr_cmsg,
+        CMsg, CMsgBuilder, CmsgFamily, OPTMEM_MAX, ScmFdBudget, ScmSenderContext,
+        parse_control_msgs, push_ip_recverr_cmsg,
     },
 };
 
@@ -51,6 +51,9 @@ fn parse_send_flags(flags: u32) -> SendFlags {
     let mut send_flags = SendFlags::empty();
     if flags & MSG_DONTWAIT != 0 {
         send_flags |= SendFlags::DONT_WAIT;
+    }
+    if flags & MSG_OOB != 0 {
+        send_flags |= SendFlags::OOB;
     }
     send_flags
 }
@@ -87,15 +90,6 @@ fn write_recvmmsg_outputs(msgvec: UserPtr<mmsghdr>, msgs: &[mmsghdr]) -> KResult
     Ok(())
 }
 
-/// Copies `msg_len` of each sent message to the leading entries of the user
-/// array `msgvec`, the only field `sendmmsg` updates.
-fn write_sendmmsg_outputs(msgvec: UserPtr<mmsghdr>, msgs: &[mmsghdr]) -> KResult<()> {
-    for (index, msg) in msgs.iter().enumerate() {
-        field_ptr(mmsg_entry(msgvec, index), offset_of!(mmsghdr, msg_len)).write_vm(msg.msg_len)?;
-    }
-    Ok(())
-}
-
 fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<TimeSpan>> {
     if timeout.is_null() {
         return Ok(None);
@@ -120,8 +114,8 @@ const CONTROL_BUFFER_LIMIT: usize = OPTMEM_MAX;
 ///
 /// # Execution context
 ///
-/// Requires a current user process thread when `is_unix` is true: the
-/// `SCM_CREDENTIALS` validator reads the caller's process identity and
+/// Requires a current user process thread when `family` is Unix or netlink:
+/// the `SCM_CREDENTIALS` validator reads the caller's process identity and
 /// subjective credentials, and the helper panics otherwise (as with any
 /// `kprocess::current_user_thread` caller). Must not run in IRQ context: it
 /// copies the whole control buffer from user memory and may allocate, so it
@@ -131,7 +125,7 @@ fn parse_send_cmsgs(
     resources: &kresources::TaskFiles,
     control_ptr: usize,
     control_len: usize,
-    is_unix: bool,
+    family: CmsgFamily,
 ) -> KResult<ParsedCmsgs> {
     if control_ptr == 0 || control_len == 0 {
         return Ok(ParsedCmsgs {
@@ -154,9 +148,9 @@ fn parse_send_cmsgs(
     // copy, the way Linux `____sys_sendmsg` copies into `ctl_buf` before
     // `__scm_send` parses it.
     let control = UserConstPtr::<u8>::from(control_ptr).load_vm_vec(control_len)?;
-    // `SCM_CREDENTIALS`/`SCM_RIGHTS` are Unix-only; other families ignore
-    // them (Linux `__sock_cmsg_send`), so no identity context is needed.
-    let sender = is_unix.then(|| {
+    // `SCM_CREDENTIALS` validation needs the caller's identity for both Unix
+    // and netlink; other families ignore both generic SCM message types.
+    let sender = matches!(family, CmsgFamily::Unix | CmsgFamily::Netlink).then(|| {
         let thread = kprocess::current_user_thread();
         ScmSenderContext {
             pid: thread.process().visible_pid() as u32,
@@ -166,7 +160,7 @@ fn parse_send_cmsgs(
     });
 
     let mut fd_budget = ScmFdBudget::default();
-    let (msgs, credentials) = parse_control_msgs(&control, sender.as_ref(), &mut |fds| {
+    let (msgs, credentials) = parse_control_msgs(&control, family, sender.as_ref(), &mut |fds| {
         // Linux caps the descriptors of one `sendmsg` across all of its
         // `SCM_RIGHTS` messages, not only within each.
         fd_budget.charge(fds.len())?;
@@ -294,61 +288,135 @@ fn push_credentials_cmsg(
     Ok(pushed && is_complete)
 }
 
-/// Send data on a socket with optional destination address and ancillary data
+/// Resolves the descriptor once for a send syscall.
+///
+/// Linux's `sockfd_lookup_light()` runs before any `msg_name`/iovec copy, so
+/// descriptor errors take precedence over malformed message headers.
+///
+/// # Execution context
+///
+/// Requires a current user process thread.  `kprocess::current_files()`
+/// dereferences `current_user_thread()` and panics for a kernel task or IRQ
+/// execution path.  The lookup may block on the process's file-table binding
+/// and table locks, so it must run in sleepable process context; callers must
+/// not hold a spinlock, an IRQ-disable/preempt-disable guard, or any lock the
+/// descriptor-table path needs.  Ordinary send-syscall state may be held.  No
+/// user memory is copied here, and the returned file and socket references
+/// stay valid for the rest of the syscall.
+fn lookup_send_socket(fd: i32) -> KResult<(Arc<VfsFile>, Arc<Socket>)> {
+    let file = kprocess::current_files().get_file(fd)?;
+    let socket = sock_from_file(&file)?;
+    Ok((file, socket))
+}
+
+/// Send data on a socket with optional destination address and ancillary data.
 fn send_impl(
     fd: i32,
-    mut src: impl Read + IoBuf,
+    src: impl Read + IoBuf,
     flags: u32,
     addr: UserConstPtr<sockaddr>,
     addrlen: socklen_t,
     control_ptr: usize,
     control_len: usize,
 ) -> KResult<isize> {
-    let addr = if addr.is_null() || addrlen == 0 {
-        None
-    } else {
-        Some(SocketAddrEx::read_from_user(addr, addrlen)?)
-    };
-
-    debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
-
-    let resources = kprocess::current_files();
-    let file = resources.get_file(fd)?;
-    let socket = sock_from_file(&file)?;
-    // Control data is parsed only now, because `SCM_CREDENTIALS` validation
-    // and `SCM_RIGHTS` resolution depend on the socket family: a Unix socket
-    // owns those messages, while Linux ignores them on other families.
-    let ParsedCmsgs {
-        ancillary,
-        credentials,
-    } = parse_send_cmsgs(
-        &resources,
+    let (file, socket) = lookup_send_socket(fd)?;
+    send_impl_resolved(
+        fd,
+        &file,
+        &socket,
+        src,
+        flags,
+        addr,
+        addrlen,
         control_ptr,
         control_len,
-        matches!(socket.as_ref(), Socket::Unix(_)),
-    )?;
+    )
+    .map(|(sent, _total)| sent)
+}
+
+/// Sends on an already-resolved socket.
+///
+/// `sys_sendmsg()` and `sys_sendmmsg()` resolve the descriptor before copying
+/// their message headers, matching Linux's `sockfd_lookup_light()` ordering.
+#[expect(clippy::too_many_arguments, reason = "mirrors the send syscall inputs")]
+fn send_impl_resolved(
+    fd: i32,
+    file: &VfsFile,
+    socket: &Arc<Socket>,
+    mut src: impl Read + IoBuf,
+    flags: u32,
+    addr: UserConstPtr<sockaddr>,
+    addrlen: socklen_t,
+    control_ptr: usize,
+    control_len: usize,
+) -> KResult<(isize, usize)> {
+    // `sendmmsg()` must stop after a short send, exactly as the Linux loop
+    // checks `msg_data_left(&msg_sys)`.  Capture the requested byte count
+    // before the protocol consumes any of the source.
+    let total = src.remaining();
+    // Linux treats a NULL `msg_name` as an absent destination even when
+    // `msg_namelen` is nonzero: `__copy_msghdr()` clears both fields together.
+    // The same applies to `sendto()`, which shares this path.
+    let has_addr = !addr.is_null() && addrlen != 0;
+
+    let resources = kprocess::current_files();
+    let family = match socket.as_ref() {
+        Socket::Unix(_) => CmsgFamily::Unix,
+        Socket::Netlink(_) => CmsgFamily::Netlink,
+        _ => CmsgFamily::Other,
+    };
     let mut send_flags = parse_send_flags(flags);
     if file.is_nonblocking() {
         send_flags |= SendFlags::DONT_WAIT;
     }
-    let mut unix_sender_credentials = match socket.as_ref() {
-        Socket::Unix(unix) if unix.should_attach_sender_credentials() => {
-            Some(current_sender_credentials())
+    if matches!(family, CmsgFamily::Netlink) {
+        // Linux `netlink_sendmsg` validates these before `scm_send`, unlike
+        // Unix which parses control data first.
+        if send_flags.contains(SendFlags::OOB) {
+            return Err(LinuxError::EOPNOTSUPP.into());
+        }
+        if src.remaining() == 0 {
+            return Err(LinuxError::ENODATA.into());
+        }
+    }
+    // Control data is parsed before the destination for Unix and netlink,
+    // matching their `scm_send` ordering. `SCM_RIGHTS`/`SCM_CREDENTIALS`
+    // follow the socket family's rules.
+    let ParsedCmsgs {
+        ancillary,
+        credentials,
+    } = parse_send_cmsgs(&resources, control_ptr, control_len, family)?;
+    let addr = if has_addr {
+        Some(SocketAddrEx::read_from_user(addr, addrlen)?)
+    } else {
+        None
+    };
+
+    debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
+
+    // Linux netlink pre-fills `scm.creds` with the current process TGID and
+    // real UID/GID before parsing cmsgs; Unix attaches a record only when the
+    // receiver enabled `SO_PASSCRED`. An explicit valid `SCM_CREDENTIALS`
+    // replaces that default in both cases.
+    let mut sender_credentials = match (family, socket.as_ref()) {
+        (CmsgFamily::Netlink, _) => current_sender_credentials(),
+        (CmsgFamily::Unix, Socket::Unix(unix)) if unix.should_attach_sender_credentials() => {
+            current_sender_credentials()
         }
         _ => None,
     };
-    // Linux consumes an explicit `SCM_CREDENTIALS` claim into `scm->creds`;
-    // the peer only observes it through the `SO_PASSCRED` record, never as a
-    // relayed control message. An explicit claim therefore replaces the
-    // automatically filled sender identity.
     if credentials.is_some() {
-        unix_sender_credentials = credentials;
+        sender_credentials = credentials;
     }
     let options = SendOptions {
         to: addr,
         flags: send_flags,
         ancillary,
-        unix_sender_credentials,
+        sender_credentials,
+        // A destinationless netlink command addressed to the kernel requires
+        // the capability in both the opener and the current sender.  The
+        // generic VFS socket path passes the same fact through its file.
+        opener_cred: Some(file.cred().as_ref().clone()),
     };
     let sent = match socket.as_ref() {
         Socket::Netlink(_) => {
@@ -358,7 +426,7 @@ fn send_impl(
         _ => socket.send(&mut src, options)?,
     };
 
-    Ok(sent as isize)
+    Ok((sent as isize, total))
 }
 
 /// Send data to a specific address on a socket
@@ -373,11 +441,50 @@ pub fn sys_sendto(
     send_impl(fd, VmBytes::new(buf, len), flags, addr, addrlen, 0, 0)
 }
 
+/// Clamps a `sendmsg`/`sendmmsg` destination length the way `__copy_msghdr()`
+/// does before `move_addr_to_kernel()` sees it.
+///
+/// `sendto()` passes its raw `addrlen` to `move_addr_to_kernel()`, which
+/// rejects anything larger than `sockaddr_storage`; `sendmsg()` instead
+/// clamps `msg_namelen` first, so only that entry point accepts an oversized
+/// destination length.  Negative lengths are rejected here: converting them to
+/// `socklen_t` would instead turn them into huge positive lengths and let a
+/// protocol-specific precheck report a different errno before the address
+/// layer sees them.
+///
+/// The clamp is deliberately generic: family parsers still apply their own
+/// address bounds. In particular, `UnixAddr::read_from_user()` rejects lengths
+/// at or below `offsetof(struct sockaddr_un, sun_path)` and lengths above
+/// `sizeof(struct sockaddr_un)`, matching `unix_validate_addr()`. AF_UNIX
+/// lengths of 111 through 128 therefore fail with `EINVAL` after the clamp
+/// rather than being accepted as destinations.
+fn clamp_sendmsg_name_len(len_bytes: i32) -> KResult<socklen_t> {
+    if len_bytes < 0 {
+        return Err(LinuxError::EINVAL.into());
+    }
+    Ok(len_bytes.min(crate::addr::MAX_SOCKADDR_LEN as i32) as socklen_t)
+}
+
 /// Send data with vectored I/O and ancillary data (control messages)
 pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<isize> {
+    // Linux `__sys_sendmsg()` resolves the descriptor before
+    // `sendmsg_copy_msghdr()`, so EBADF/ENOTSOCK precedes EINVAL from a
+    // negative destination length or a fault from the header/iovec copy.
+    let (file, socket) = lookup_send_socket(fd)?;
     let msg = msg.read_vm()?;
-    send_impl(
+    // Linux `__copy_msghdr()` validates the destination length before it
+    // imports the iovec, and a NULL name clears the length without inspecting
+    // it.  Preserve both rules so a negative length is EINVAL here, while a
+    // NULL name with any length remains an addressless send.
+    let name_len = if msg.msg_name.is_null() {
+        0
+    } else {
+        clamp_sendmsg_name_len(msg.msg_namelen)?
+    };
+    send_impl_resolved(
         fd,
+        &file,
+        &socket,
         IoVectorBuf::from_iovecs(IoVec::load_from_user(
             posix_types::UserConstPtr::from(msg.msg_iov as usize),
             msg.msg_iovlen,
@@ -385,10 +492,11 @@ pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<is
         .into_io(),
         flags,
         UserConstPtr::from(msg.msg_name as usize),
-        msg.msg_namelen as socklen_t,
+        name_len,
         msg.msg_control as usize,
         msg.msg_controllen,
     )
+    .map(|(sent, _total)| sent)
 }
 
 /// Receive data from a socket with optional remote address and ancillary data collection
@@ -459,6 +567,9 @@ fn recv_impl(
     }
     if file.is_nonblocking() || flags & MSG_DONTWAIT != 0 {
         recv_flags |= RecvFlags::DONT_WAIT;
+    }
+    if flags & MSG_OOB != 0 {
+        recv_flags |= RecvFlags::OOB;
     }
 
     let mut ancillary = Vec::new();
@@ -611,42 +722,72 @@ fn recv_truncate_to_msg_flag(flags: RecvFlags) -> u32 {
 
 /// Send multiple datagrams in one syscall.
 pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) -> KResult<isize> {
+    // Linux clamps `vlen` before the one descriptor lookup, and still performs
+    // that lookup when `vlen == 0`; `sendmmsg(-1, ..., 0)` is EBADF, not zero.
+    let (file, socket) = lookup_send_socket(fd)?;
     if vlen == 0 {
         return Ok(0);
     }
-    if vlen > MMSG_MAX_VLEN {
-        return Err(KError::InvalidInput);
-    }
+    let vlen = vlen.min(MMSG_MAX_VLEN);
 
-    let mut msgvec_value = msgvec.load_vm_vec(vlen as usize)?;
     let mut sent = 0;
-    for msg in msgvec_value.iter_mut() {
-        match send_impl(
-            fd,
-            IoVectorBuf::from_iovecs(IoVec::load_from_user(
-                posix_types::UserConstPtr::from(msg.msg_hdr.msg_iov as usize),
-                msg.msg_hdr.msg_iovlen,
-            )?)?
-            .into_io(),
-            flags,
-            UserConstPtr::from(msg.msg_hdr.msg_name as usize),
-            msg.msg_hdr.msg_namelen as socklen_t,
-            msg.msg_hdr.msg_control as usize,
-            msg.msg_hdr.msg_controllen,
-        ) {
-            Ok(n) => {
-                msg.msg_len = n as u32;
+    for index in 0..vlen as usize {
+        let entry = mmsg_entry(msgvec, index);
+        // Linux reads and sends one `mmsghdr` at a time.  A later header or
+        // iovec fault ends the call while preserving previously sent
+        // datagrams and their `msg_len` outputs.
+        let result = (|| -> KResult<(isize, usize)> {
+            let header: msghdr = field_ptr(entry, offset_of!(mmsghdr, msg_hdr)).read_vm()?;
+            let name_len = if header.msg_name.is_null() {
+                0
+            } else {
+                clamp_sendmsg_name_len(header.msg_namelen)?
+            };
+            send_impl_resolved(
+                fd,
+                &file,
+                &socket,
+                IoVectorBuf::from_iovecs(IoVec::load_from_user(
+                    posix_types::UserConstPtr::from(header.msg_iov as usize),
+                    header.msg_iovlen,
+                )?)?
+                .into_io(),
+                flags,
+                UserConstPtr::from(header.msg_name as usize),
+                name_len,
+                header.msg_control as usize,
+                header.msg_controllen,
+            )
+        })();
+        match result {
+            Ok((n, total)) => {
+                // Linux increments the returned datagram count only after
+                // storing `msg_len`; a fault while writing the count discards
+                // this message from the prefix just like a send failure.
+                if let Err(error) =
+                    field_ptr(entry, offset_of!(mmsghdr, msg_len)).write_vm(n as u32)
+                {
+                    if sent == 0 {
+                        return Err(error.into());
+                    }
+                    break;
+                }
                 sent += 1;
+                // A protocol may accept fewer bytes than the iovecs offered.
+                // Linux treats that as a completed datagram and stops the
+                // `sendmmsg` loop rather than sending the remaining entries.
+                if (n as usize) < total {
+                    break;
+                }
             }
-            Err(e) => {
+            Err(error) => {
                 if sent == 0 {
-                    return Err(e);
+                    return Err(error);
                 }
                 break;
             }
         }
     }
-    write_sendmmsg_outputs(msgvec, &msgvec_value[..sent as usize])?;
     Ok(sent)
 }
 

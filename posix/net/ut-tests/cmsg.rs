@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use unittest::def_test;
 use core::cell::RefCell;
+
+use unittest::def_test;
 
 use super::*;
 
@@ -92,7 +93,16 @@ fn parse_with(
     sender: &ScmSenderContext,
     resolve: &mut dyn FnMut(Vec<i32>) -> KResult<CMsg>,
 ) -> KResult<(Vec<CMsg>, Option<knet::SenderCredentials>)> {
-    parse_control_msgs(control, Some(sender), resolve)
+    parse_with_family(control, CmsgFamily::Unix, sender, resolve)
+}
+
+fn parse_with_family(
+    control: &[u8],
+    family: CmsgFamily,
+    sender: &ScmSenderContext,
+    resolve: &mut dyn FnMut(Vec<i32>) -> KResult<CMsg>,
+) -> KResult<(Vec<CMsg>, Option<knet::SenderCredentials>)> {
+    parse_control_msgs(control, family, Some(sender), resolve)
 }
 
 fn parse_with_err(control: &[u8], sender: &ScmSenderContext) -> KError {
@@ -118,7 +128,8 @@ fn two_aligned_cmsgs_both_parse() {
     // Distinct real/effective ids make the two claims differ while both stay
     // adoptable, so the returned claim proves the second header was reached.
     let mut cred = kcred::Cred::root();
-    cred.set_reuid(Some(1001), Some(1002)).expect("root sets real/effective id");
+    cred.set_reuid(Some(1001), Some(1002))
+        .expect("root sets real/effective id");
     let sender = ScmSenderContext {
         pid: 4242,
         cred: Arc::new(cred),
@@ -206,10 +217,7 @@ fn short_or_overrunning_header_is_invalid() {
     );
     buf[0] = 0;
     buf[1] = 0;
-    assert_eq!(
-        parse_with_err(&buf, &sender),
-        KError::InvalidInput
-    );
+    assert_eq!(parse_with_err(&buf, &sender), KError::InvalidInput);
 
     // cmsg_len overruns the buffer.
     let mut buf = Vec::new();
@@ -220,18 +228,12 @@ fn short_or_overrunning_header_is_invalid() {
         &credentials_body(4242, 1000, 1000),
     );
     buf[0] = 0xff;
-    assert_eq!(
-        parse_with_err(&buf, &sender),
-        KError::InvalidInput
-    );
+    assert_eq!(parse_with_err(&buf, &sender), KError::InvalidInput);
 
     // Unknown SOL_SOCKET type.
     let mut buf = Vec::new();
     push_cmsg(&mut buf, SOL_SOCKET, 0x7fff, &[]);
-    assert_eq!(
-        parse_with_err(&buf, &sender),
-        KError::InvalidInput
-    );
+    assert_eq!(parse_with_err(&buf, &sender), KError::InvalidInput);
 }
 
 #[def_test]
@@ -262,10 +264,7 @@ fn credentials_length_is_exact() {
         SCM_CREDENTIALS,
         &credentials_body(4242, 1000, 1000)[..size_of::<ucred>() - 1],
     );
-    assert_eq!(
-        parse_with_err(&buf, &sender),
-        KError::InvalidInput
-    );
+    assert_eq!(parse_with_err(&buf, &sender), KError::InvalidInput);
 }
 
 #[def_test]
@@ -313,7 +312,8 @@ fn invalid_credential_ids_are_einval() {
     // `(uid_t)-1` is an unmapped id: Linux rejects it with EINVAL before any
     // permission check, even for a privileged sender.
     let mut cred = kcred::Cred::root();
-    cred.set_reuid(Some(1001), Some(1002)).expect("root sets ids");
+    cred.set_reuid(Some(1001), Some(1002))
+        .expect("root sets ids");
     let sender = ScmSenderContext {
         pid: 4242,
         cred: Arc::new(cred),
@@ -331,38 +331,43 @@ fn invalid_credential_ids_are_einval() {
 
 #[def_test]
 fn ip_level_control_data_is_rejected_without_ip_cmsg_support() {
-    // Non-Unix sockets: IP-level control data is not applied here, so it must
-    // fail instead of being silently accepted.
+    // IP sockets: IP-level control data is not applied here, so it must fail
+    // instead of being silently accepted.
     let mut buf = Vec::new();
     push_cmsg(&mut buf, SOL_IP, 8 /* IP_PKTINFO */, &[0u8; 12]);
-    let err = parse_control_msgs(&buf, None, &mut |_| Ok(CMsg::Rights { fds: Vec::new() }))
-        .err()
-        .expect("SOL_IP rejected");
+    let err = parse_control_msgs(&buf, CmsgFamily::Other, None, &mut |_| {
+        Ok(CMsg::Rights { fds: Vec::new() })
+    })
+    .err()
+    .expect("SOL_IP rejected");
     assert_eq!(err, KError::InvalidInput);
 
     let mut buf = Vec::new();
     push_cmsg(&mut buf, SOL_IPV6, 50 /* IPV6_PKTINFO */, &[0u8; 20]);
     assert_eq!(
-        parse_control_msgs(&buf, None, &mut |_| Ok(CMsg::Rights { fds: Vec::new() }))
-            .err()
-            .expect("SOL_IPV6 rejected"),
+        parse_control_msgs(&buf, CmsgFamily::Other, None, &mut |_| Ok(CMsg::Rights {
+            fds: Vec::new()
+        }),)
+        .err()
+        .expect("SOL_IPV6 rejected"),
         KError::InvalidInput
     );
 
     // Other non-SOL_SOCKET levels are skipped like Linux does for IP sockets.
     let mut buf = Vec::new();
     push_cmsg(&mut buf, 99, 1, &[1, 2, 3, 4]);
-    let (msgs, credentials) =
-        parse_control_msgs(&buf, None, &mut |_| Ok(CMsg::Rights { fds: Vec::new() }))
-            .expect("unknown level skipped");
+    let (msgs, credentials) = parse_control_msgs(&buf, CmsgFamily::Other, None, &mut |_| {
+        Ok(CMsg::Rights { fds: Vec::new() })
+    })
+    .expect("unknown level skipped");
     assert!(msgs.is_empty());
     assert!(credentials.is_none());
 }
 
 #[def_test]
-fn non_unix_sockets_ignore_unix_control_messages() {
-    // Linux `__sock_cmsg_send` silently ignores SCM_RIGHTS and SCM_CREDENTIALS
-    // on non-Unix families, including foreign credential claims.
+fn other_families_ignore_unix_control_messages() {
+    // Non-Unix, non-netlink families do not run the generic SCM walk. Their
+    // transport paths ignore SCM_RIGHTS and SCM_CREDENTIALS.
     let mut buf = Vec::new();
     push_cmsg(&mut buf, SOL_SOCKET, SCM_RIGHTS, &100i32.to_ne_bytes());
     push_cmsg(
@@ -372,7 +377,7 @@ fn non_unix_sockets_ignore_unix_control_messages() {
         &credentials_body(9999, 0, 0),
     );
     let mut resolved = false;
-    let (msgs, credentials) = parse_control_msgs(&buf, None, &mut |_fds| {
+    let (msgs, credentials) = parse_control_msgs(&buf, CmsgFamily::Other, None, &mut |_fds| {
         resolved = true;
         Ok(CMsg::Rights { fds: Vec::new() })
     })
@@ -380,6 +385,58 @@ fn non_unix_sockets_ignore_unix_control_messages() {
     assert!(msgs.is_empty());
     assert!(credentials.is_none());
     assert!(!resolved, "rights must not be resolved on non-Unix sockets");
+}
+
+#[def_test]
+fn netlink_rejects_scm_rights_with_einval() {
+    // `__scm_send` rejects descriptor passing on every non-Unix family, even
+    // before it reaches the SCM_CREDENTIALS type check.
+    let sender = sender_context(4242);
+    let mut buf = Vec::new();
+    push_cmsg(&mut buf, SOL_SOCKET, SCM_RIGHTS, &100i32.to_ne_bytes());
+    assert!(matches!(
+        parse_with_family(&buf, CmsgFamily::Netlink, &sender, &mut |fds| {
+            let _ = fds.len();
+            Ok(CMsg::Rights { fds: Vec::new() })
+        }),
+        Err(KError::InvalidInput)
+    ));
+}
+
+#[def_test]
+fn netlink_accepts_scm_credentials_claim() {
+    let sender = sender_context(4242);
+    let mut buf = Vec::new();
+    push_cmsg(
+        &mut buf,
+        SOL_SOCKET,
+        SCM_CREDENTIALS,
+        &credentials_body(4242, 1000, 1000),
+    );
+    let (msgs, credentials) = parse_with_family(&buf, CmsgFamily::Netlink, &sender, &mut |_| {
+        Ok(CMsg::Rights { fds: Vec::new() })
+    })
+    .expect("netlink accepts SCM_CREDENTIALS");
+    assert!(msgs.is_empty());
+    let credentials = credentials.expect("claim returned");
+    assert_eq!(credentials.uid, 1000);
+    assert_eq!(credentials.gid, 1000);
+}
+
+#[def_test]
+fn netlink_ignores_non_socket_cmsg_levels() {
+    // Netlink never calls `sock_cmsg_send`, so IP-level and other unknown
+    // levels are ignored rather than validated.
+    let sender = sender_context(4242);
+    let mut buf = Vec::new();
+    push_cmsg(&mut buf, SOL_IP, 8 /* IP_PKTINFO */, &[0u8; 12]);
+    push_cmsg(&mut buf, 99, 1, &[1, 2, 3, 4]);
+    let (msgs, credentials) = parse_with_family(&buf, CmsgFamily::Netlink, &sender, &mut |_| {
+        Ok(CMsg::Rights { fds: Vec::new() })
+    })
+    .expect("non-SOL_SOCKET levels ignored");
+    assert!(msgs.is_empty());
+    assert!(credentials.is_none());
 }
 
 #[def_test]
@@ -425,4 +482,101 @@ fn privileged_claim_naming_a_missing_pid_is_esrch() {
         &credentials_body(4_000_001, 0, 0),
     );
     assert_eq!(parse_with_err(&buf, &sender), KError::NoSuchProcess);
+}
+
+#[def_test(user)]
+fn netlink_sendmsg_forwards_validated_explicit_credentials() {
+    use core::mem::size_of;
+
+    use kio::Cursor;
+    use knet::{
+        KernelAncillaryData, RecvOptions, SocketAddrEx, SocketOps,
+        netlink::{NETLINK_ROUTE, NetlinkAddr, NetlinkSocket, NetlinkSocketType},
+        options::{Configurable, SetSocketOption},
+    };
+    use linux_raw_sys::net::{AF_NETLINK, SOCK_RAW, msghdr};
+    use posix_types::{IoVec, UserConstPtr, net::socket_addr::sockaddr_nl};
+    use unittest_support::TestUserArray;
+
+    let subscriber = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
+    subscriber
+        .bind(SocketAddrEx::Netlink(NetlinkAddr {
+            pid: 777,
+            groups: 0,
+        }))
+        .unwrap();
+    subscriber
+        .set_option(SetSocketOption::PassCredentials(&true))
+        .unwrap();
+
+    let claim_pid = kprocess::init_proc().visible_pid();
+    let mut control = [0u8; 32];
+    control[0..8].copy_from_slice(&28usize.to_ne_bytes());
+    control[8..12].copy_from_slice(&(SOL_SOCKET as i32).to_ne_bytes());
+    control[12..16].copy_from_slice(&(SCM_CREDENTIALS as i32).to_ne_bytes());
+    control[16..20].copy_from_slice(&claim_pid.to_ne_bytes());
+    control[20..24].copy_from_slice(&4321u32.to_ne_bytes());
+    control[24..28].copy_from_slice(&8765u32.to_ne_bytes());
+    let control = TestUserArray::from_array(control).unwrap();
+
+    let payload = TestUserArray::from_array([0x5a_u8]).unwrap();
+    let iovec = TestUserArray::from_array([IoVec {
+        iov_base: payload.as_user_ptr(),
+        iov_len: 1,
+    }])
+    .unwrap();
+    let destination = TestUserArray::from_array([sockaddr_nl {
+        nl_family: AF_NETLINK as u16,
+        nl_pad: 0,
+        nl_pid: 777,
+        nl_groups: 0,
+    }])
+    .unwrap();
+    let message = TestUserArray::from_array([msghdr {
+        msg_name: destination.as_user_ptr().cast(),
+        msg_namelen: size_of::<sockaddr_nl>() as i32,
+        msg_iov: iovec.as_user_ptr().cast(),
+        msg_iovlen: 1,
+        msg_control: control.as_user_ptr().cast(),
+        msg_controllen: control.len(),
+        msg_flags: 0,
+    }])
+    .unwrap();
+
+    let fd = crate::sys_socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE as u32).unwrap() as i32;
+    assert_eq!(
+        crate::sys_sendmsg(
+            fd,
+            UserConstPtr::from(message.as_user_ptr().cast_const()),
+            0,
+        ),
+        Ok(1)
+    );
+
+    let mut data = [0u8; 1];
+    let mut ancillary = Vec::new();
+    subscriber
+        .recv(
+            Cursor::new(data.as_mut_slice()),
+            RecvOptions {
+                ancillary: Some(&mut ancillary),
+                ..RecvOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(data, [0x5a]);
+    let credentials = ancillary
+        .pop()
+        .unwrap()
+        .downcast::<KernelAncillaryData>()
+        .unwrap();
+    let KernelAncillaryData::Credentials(credentials) = credentials.as_ref() else {
+        panic!("expected SCM_CREDENTIALS ancillary data");
+    };
+    let identity = credentials.pid.as_ref().expect("claimed pid resolved");
+    assert_eq!(identity.root_nr(), claim_pid);
+    assert_eq!(credentials.uid, 4321);
+    assert_eq!(credentials.gid, 8765);
+
+    kprocess::current_files().close_file(fd).unwrap();
 }

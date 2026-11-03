@@ -143,6 +143,9 @@ define_options! {
     SendBufferForce(usize),
     PassCredentials(bool),
     PeerCredentials(PeerCredentials),
+    /// `NETLINK_CAP_ACK`: omit the original request payload from error
+    /// acknowledgements and mark them `NLM_F_CAPPED`.
+    NetlinkCapAck(bool),
 
     // ---- TCP options ----
     NoDelay(bool),

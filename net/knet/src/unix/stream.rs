@@ -336,7 +336,7 @@ impl UnixTransportOps for StreamTransport {
                 // pointer-equal, so adjacent equal records still coalesce.
                 let mut pending = if count > 0 {
                     let mut records = core::mem::take(&mut options.ancillary);
-                    if let Some(credentials) = options.unix_sender_credentials.as_ref() {
+                    if let Some(credentials) = options.sender_credentials.as_ref() {
                         records.insert(
                             0,
                             Arc::new(KernelAncillaryData::Credentials(credentials.clone()))

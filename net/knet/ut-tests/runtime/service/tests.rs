@@ -168,6 +168,8 @@ fn poll_round_dispatches_tx_when_due_ipv4_expiration_lock_is_contended() {
                 addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
+                no_prefix_route: false,
+                label: None,
             },
         )
         .unwrap();
@@ -201,6 +203,8 @@ fn tx_dispatch_exposes_loopback_rx_in_the_same_round() {
                 addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
+                no_prefix_route: false,
+                label: None,
             },
         )
         .unwrap();

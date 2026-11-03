@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Network device abstractions.
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 use ::core::task::Waker;
 use kerrno::{KResult, LinuxError};
@@ -92,7 +92,7 @@ pub(crate) fn validate_interface_name(name: &str) -> Result<(), LinuxError> {
     (!is_invalid).then_some(()).ok_or(LinuxError::EINVAL)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LinkSnapshot {
     pub(crate) ifindex: i32,
     pub(crate) name: String,
@@ -111,11 +111,32 @@ pub(crate) struct LinkSendSnapshot {
     pub(crate) hardware_addr: [u8; 6],
 }
 
-/// Neighbor states accepted from the control plane.
+/// State of one neighbor-table entry.
+///
+/// `Reachable` is the state learned from address resolution; `Permanent` is
+/// installed by the control plane and never ages out.  Keeping the state on
+/// the entry is required because deletion notifications report the state that
+/// actually existed, not a state inferred from whether a link-layer address is
+/// present.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NeighborState {
     Incomplete,
+    Reachable { hardware_addr: [u8; 6] },
+    Stale { hardware_addr: [u8; 6] },
+    Failed,
     Permanent { hardware_addr: [u8; 6] },
+}
+
+impl NeighborState {
+    /// Returns the link-layer address, or `None` while resolution is pending.
+    pub(crate) const fn hardware_addr(self) -> Option<[u8; 6]> {
+        match self {
+            Self::Incomplete | Self::Failed => None,
+            Self::Reachable { hardware_addr }
+            | Self::Stale { hardware_addr }
+            | Self::Permanent { hardware_addr } => Some(hardware_addr),
+        }
+    }
 }
 
 /// A control-plane neighbor update targeted at one network device.
@@ -124,6 +145,21 @@ pub(crate) struct NeighborUpdate {
     pub(crate) dev: NetDeviceId,
     pub(crate) dst: IpAddress,
     pub(crate) state: NeighborState,
+}
+
+/// A neighbor-table entry removed from a network device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NeighborSnapshot {
+    pub(crate) dev: NetDeviceId,
+    pub(crate) dst: IpAddress,
+    pub(crate) state: NeighborState,
+}
+
+/// Asynchronous neighbor-table change owned by the data plane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NeighborEvent {
+    Added(NeighborSnapshot),
+    Removed(NeighborSnapshot),
 }
 
 /// Outcome charged to the Router's device RX budget.
@@ -180,6 +216,18 @@ pub(crate) trait NetDevice: Send + Sync {
 
     /// Returns whether the device has RX work available without waiting.
     fn has_rx_work(&self) -> bool;
+
+    /// Returns the next time this device needs timer work even without a
+    /// received frame.
+    ///
+    /// Ethernet uses this for neighbor expiry and unresolved-probe retries.
+    /// The Service includes the earliest device deadline in its timer wakeup
+    /// so an idle link still advances those state machines. A device whose
+    /// poll path freezes timer work, such as an administratively down link,
+    /// must report `None` rather than a deadline that cannot make progress.
+    fn next_neighbor_deadline(&self) -> Option<MonotonicInstant> {
+        None
+    }
 
     /// Sends a validated IP packet to the next hop.
     ///
@@ -249,13 +297,50 @@ pub(crate) trait NetDevice: Send + Sync {
     fn remove_pending_ipv4_source(&mut self, _addr: crate::ip::Ipv4Address) {}
 
     /// Applies one neighbor-table update to this device.
-    fn apply_neighbor_update(&mut self, _update: NeighborUpdate) -> Result<(), LinuxError> {
+    ///
+    /// `can_override` is false when the request did not carry `NLM_F_REPLACE`.
+    /// In that case an existing valid entry keeps its current link-layer
+    /// address, matching Linux `__neigh_update`.
+    fn apply_neighbor_update(
+        &mut self,
+        _update: NeighborUpdate,
+        _can_override: bool,
+    ) -> Result<(), LinuxError> {
         Err(LinuxError::EOPNOTSUPP)
     }
 
     /// Returns whether this device owns a neighbor entry for `dst`.
     fn has_neighbor(&self, _dst: IpAddress) -> bool {
         false
+    }
+
+    /// Returns the state of a neighbor entry.
+    ///
+    /// The outer option distinguishes a missing entry from an entry in the
+    /// incomplete state, whose hardware address is not known yet.
+    fn neighbor_state(&self, _dst: IpAddress) -> Option<NeighborState> {
+        None
+    }
+
+    /// Returns every neighbor entry currently owned by this device.
+    ///
+    /// Device teardown snapshots these entries before destroying the device so
+    /// subscribers receive one `RTM_DELNEIGH` per flushed neighbor.
+    fn neighbor_snapshots(&self, _dev: NetDeviceId) -> Vec<NeighborSnapshot> {
+        Vec::new()
+    }
+
+    /// Removes a neighbor entry and reports whether it existed.
+    fn remove_neighbor(&mut self, _dst: IpAddress) -> bool {
+        false
+    }
+
+    /// Drains neighbor changes produced by data-plane packet processing.
+    ///
+    /// Control-plane mutations return their own events to the caller, so this
+    /// queue is reserved for asynchronous ARP learning and resolution.
+    fn take_neighbor_events(&mut self) -> Vec<NeighborEvent> {
+        Vec::new()
     }
 }
 

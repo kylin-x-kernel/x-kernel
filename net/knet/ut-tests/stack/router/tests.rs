@@ -10,7 +10,10 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::{
     device::{LinkSendSnapshot, LinkSnapshot, LoopbackDevice},
-    network::router::ROUTE_SCOPE_HOST,
+    network::router::{
+        ROUTE_PROTOCOL_KERNEL, ROUTE_SCOPE_HOST, ROUTE_SCOPE_LINK, ROUTE_TABLE_LOCAL,
+        ROUTE_TYPE_BROADCAST,
+    },
 };
 
 fn valid_ipv4_cidr(address: Ipv4Address, prefix_len: u8) -> Ipv4Cidr {
@@ -38,6 +41,7 @@ fn router_with_ready_loopback_packet() -> Router {
 struct FailingRxDevice {
     link: LoopbackDevice,
     packet: Option<PacketBuf>,
+    up: bool,
 }
 
 impl NetDevice for FailingRxDevice {
@@ -54,7 +58,11 @@ impl NetDevice for FailingRxDevice {
     }
 
     fn is_link_up(&self) -> bool {
-        true
+        self.up
+    }
+
+    fn set_link_up(&mut self, is_up: bool) {
+        self.up = is_up;
     }
 
     fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot {
@@ -104,6 +112,7 @@ fn rx_failure_preserves_partial_batch_and_advances_device_cursor() {
             .add_device(Box::new(FailingRxDevice {
                 link: LoopbackDevice::new(),
                 packet: Some(tx_packet_buf(vec![0x45, 0, 0, 20])),
+                up: true,
             }))
             .unwrap();
     }
@@ -184,12 +193,15 @@ fn unrelated_address_update_preserves_automatic_and_configured_route_order() {
             .add_device(Box::new(FailingRxDevice {
                 link: LoopbackDevice::new(),
                 packet: None,
+                up: true,
             }))
             .unwrap();
         let primary = Ipv4AddrEntry {
             addr: valid_ipv4_cidr(Ipv4Address::new(10, 0, 0, 1), 24),
             scope: ROUTE_SCOPE_UNIVERSE,
             broadcast: None,
+            no_prefix_route: false,
+            label: None,
         };
         router.add_ipv4_addr(first, primary).unwrap();
         let connected = Ipv4AddrEntry {
@@ -219,7 +231,7 @@ fn unrelated_address_update_preserves_automatic_and_configured_route_order() {
         };
         router.add_ipv4_addr(first, unrelated).unwrap();
         assert_eq!(router.table.lookup(&destination).unwrap().dev, expected_dev);
-        assert!(router.remove_ipv4_addr(first, unrelated.addr));
+        assert!(!router.remove_ipv4_addr(first, unrelated.addr).is_empty());
         assert_eq!(router.table.lookup(&destination).unwrap().dev, expected_dev);
 
         router.replace_route_rule(configured, configured).unwrap();
@@ -235,12 +247,15 @@ fn cross_device_address_iteration_does_not_reorder_surviving_routes() {
         .add_device(Box::new(FailingRxDevice {
             link: LoopbackDevice::new(),
             packet: None,
+            up: true,
         }))
         .unwrap();
     let first_primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(10, 0, 0, 1), 24),
         scope: ROUTE_SCOPE_UNIVERSE,
         broadcast: None,
+        no_prefix_route: false,
+        label: None,
     };
     let second_primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 1), 24),
@@ -280,7 +295,11 @@ fn cross_device_address_iteration_does_not_reorder_surviving_routes() {
         Some(second_primary.addr.address().into())
     );
 
-    assert!(router.remove_ipv4_addr(second, second_primary.addr));
+    assert!(
+        !router
+            .remove_ipv4_addr(second, second_primary.addr)
+            .is_empty()
+    );
     assert_eq!(router.table.lookup(&destination).unwrap().dev, first);
     assert!(
         router
@@ -305,19 +324,22 @@ fn cross_device_address_iteration_does_not_reorder_surviving_routes() {
 }
 
 #[def_test]
-fn connected_source_change_preserves_route_precedence() {
+fn deleting_connected_primary_cascades_secondaries_and_falls_back() {
     let mut router = Router::new();
     let first = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
     let second = router
         .add_device(Box::new(FailingRxDevice {
             link: LoopbackDevice::new(),
             packet: None,
+            up: true,
         }))
         .unwrap();
     let primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 1), 24),
         scope: ROUTE_SCOPE_UNIVERSE,
         broadcast: None,
+        no_prefix_route: false,
+        label: None,
     };
     let competing = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 2), 24),
@@ -330,32 +352,66 @@ fn connected_source_change_preserves_route_precedence() {
     for (dev, entry) in [(first, primary), (second, competing), (first, secondary)] {
         router.add_ipv4_addr(dev, entry).unwrap();
     }
+    // Removing the primary also removes its matching secondary.  The other
+    // device's primary for the same subnet stays and provides the source.
     router.remove_primary_ipv4_addr(first).unwrap();
+    assert!(router.ipv4_addr_entries(first).is_empty());
     let destination = Ipv4Address::new(192, 0, 2, 99).into();
     let selected = router.table.lookup(&destination).unwrap();
-    assert_eq!(selected.dev, first);
+    assert_eq!(selected.dev, second);
     assert_eq!(
         selected.preferred_source(),
-        Some(secondary.addr.address().into())
+        Some(competing.addr.address().into())
     );
     assert_eq!(
         router.output_route_source(&destination, 0).unwrap(),
-        secondary.addr.address().into()
+        competing.addr.address().into()
     );
+    assert!(router.remove_ipv4_addr(first, secondary.addr).is_empty());
+    assert_eq!(router.table.lookup(&destination).unwrap().dev, second);
+}
 
+#[def_test]
+fn local_address_output_survives_owner_link_down_without_oif() {
+    let mut router = Router::new();
+    let loopback = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let owner = router
+        .add_device(Box::new(FailingRxDevice {
+            link: LoopbackDevice::new(),
+            packet: None,
+            up: true,
+        }))
+        .unwrap();
+    let entry = Ipv4AddrEntry {
+        addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
+        scope: ROUTE_SCOPE_UNIVERSE,
+        broadcast: None,
+        no_prefix_route: false,
+        label: None,
+    };
+    router.add_ipv4_addr(owner, entry).unwrap();
+    router
+        .devices
+        .get_mut_by_id(owner)
+        .unwrap()
+        .set_link_up(false);
+    router.sync_ipv4_address_routes();
+
+    let destination = entry.addr.address().into();
+    let local = router.table.lookup(&destination).unwrap();
+    assert_eq!(local.dev, loopback);
+    assert_eq!(local.lookup_device(), owner);
+    // Linux keeps the local-table route and resolves output through loopback
+    // even after the address owner goes down.
     assert_eq!(
-        router
-            .table
-            .snapshot()
-            .iter()
-            .filter(|route| route.dev == first && route.filter == primary.addr.network().into())
-            .count(),
-        1
+        router.output_route_source(&destination, 0),
+        Ok(entry.addr.address().into())
     );
-    assert!(router.remove_ipv4_addr(first, secondary.addr));
-    assert_eq!(router.table.lookup(&destination).unwrap().dev, second);
-    router.add_ipv4_addr(first, primary).unwrap();
-    assert_eq!(router.table.lookup(&destination).unwrap().dev, second);
+    // An explicit OIF still validates the FIB device before the lookup.
+    assert_eq!(
+        router.output_route_source(&destination, owner.ifindex()),
+        Err(LinuxError::ENETUNREACH.into())
+    );
 }
 
 #[def_test]
@@ -366,6 +422,8 @@ fn ipv4_address_installs_local_and_connected_routes() {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
         scope: ROUTE_SCOPE_HOST,
         broadcast: None,
+        no_prefix_route: false,
+        label: None,
     };
 
     router.add_ipv4_addr(dev, entry).unwrap();
@@ -390,6 +448,243 @@ fn ipv4_address_installs_local_and_connected_routes() {
 }
 
 #[def_test]
+fn explicit_ipv4_broadcast_installs_and_replaces_a_broadcast_route() {
+    let mut router = Router::new();
+    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let assigned = Ipv4Address::new(192, 0, 2, 111);
+    let entry = Ipv4AddrEntry {
+        addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
+        scope: ROUTE_SCOPE_UNIVERSE,
+        broadcast: Some(assigned),
+        no_prefix_route: false,
+        label: None,
+    };
+    router.add_ipv4_addr(dev, entry).unwrap();
+
+    let explicit = router
+        .table
+        .snapshot()
+        .into_iter()
+        .find(|route| route.filter == valid_ipv4_cidr(assigned, 32).into())
+        .unwrap();
+    assert_eq!(explicit.dev, dev);
+    assert_eq!(explicit.table, ROUTE_TABLE_LOCAL);
+    assert_eq!(explicit.route_type, ROUTE_TYPE_BROADCAST);
+    assert_eq!(explicit.scope, ROUTE_SCOPE_LINK);
+    assert_eq!(explicit.protocol, ROUTE_PROTOCOL_KERNEL);
+    assert_eq!(
+        explicit.preferred_source(),
+        Some(IpAddress::Ipv4(entry.addr.address()))
+    );
+
+    // The computed network broadcast coexists with an explicit assignment.
+    let computed = Ipv4Address::new(192, 0, 2, 255);
+    assert!(
+        router
+            .table
+            .snapshot()
+            .iter()
+            .any(|route| route.filter == valid_ipv4_cidr(computed, 32).into())
+    );
+
+    let replacement = Ipv4Address::new(192, 0, 2, 222);
+    router.set_ipv4_broadcast(dev, replacement).unwrap();
+    let routes = router.table.snapshot();
+    assert!(
+        !routes
+            .iter()
+            .any(|route| route.filter == valid_ipv4_cidr(assigned, 32).into())
+    );
+    assert!(
+        routes
+            .iter()
+            .any(|route| route.filter == valid_ipv4_cidr(replacement, 32).into())
+    );
+    assert!(
+        routes
+            .iter()
+            .any(|route| route.filter == valid_ipv4_cidr(computed, 32).into())
+    );
+
+    // Assigning the limited broadcast suppresses only the explicit route.
+    router
+        .set_ipv4_broadcast(dev, Ipv4Address::BROADCAST)
+        .unwrap();
+    let routes = router.table.snapshot();
+    assert!(
+        !routes
+            .iter()
+            .any(|route| route.filter == valid_ipv4_cidr(replacement, 32).into())
+    );
+    assert!(
+        routes
+            .iter()
+            .any(|route| route.filter == valid_ipv4_cidr(computed, 32).into())
+    );
+}
+
+#[def_test]
+fn implicit_ipv4_broadcast_assignment_updates_stored_value_without_duplicate_route() {
+    let mut router = Router::new();
+    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    router
+        .add_ipv4_addr(
+            dev,
+            Ipv4AddrEntry {
+                addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
+                scope: ROUTE_SCOPE_UNIVERSE,
+                broadcast: None,
+                no_prefix_route: false,
+                label: None,
+            },
+        )
+        .unwrap();
+
+    let computed = Ipv4Address::new(192, 0, 2, 255);
+    router.set_ipv4_broadcast(dev, computed).unwrap();
+    assert_eq!(router.ipv4_addr_entries(dev)[0].broadcast, Some(computed));
+    assert_eq!(
+        router
+            .table
+            .snapshot()
+            .iter()
+            .filter(|route| route.filter == valid_ipv4_cidr(computed, 32).into())
+            .count(),
+        1
+    );
+
+    router
+        .set_ipv4_broadcast(dev, Ipv4Address::UNSPECIFIED)
+        .unwrap();
+    assert_eq!(router.ipv4_addr_entries(dev)[0].broadcast, None);
+    assert_eq!(
+        router
+            .table
+            .snapshot()
+            .iter()
+            .filter(|route| route.filter == valid_ipv4_cidr(computed, 32).into())
+            .count(),
+        1
+    );
+}
+
+#[def_test]
+fn zero_ipv4_broadcast_is_not_derived_by_netmask_changes() {
+    let mut router = Router::new();
+    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    router
+        .add_ipv4_addr(
+            dev,
+            Ipv4AddrEntry {
+                addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
+                scope: ROUTE_SCOPE_UNIVERSE,
+                broadcast: None,
+                no_prefix_route: false,
+                label: None,
+            },
+        )
+        .unwrap();
+
+    router.set_ipv4_netmask(dev, 16).unwrap();
+    assert_eq!(router.ipv4_addr_entries(dev)[0].broadcast, None);
+}
+
+#[def_test]
+fn explicit_ipv4_broadcast_route_follows_link_state_and_prefix_suppression() {
+    let mut router = Router::new();
+    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let assigned = Ipv4Address::new(198, 51, 100, 111);
+    let entry = Ipv4AddrEntry {
+        addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
+        scope: ROUTE_SCOPE_UNIVERSE,
+        broadcast: Some(assigned),
+        no_prefix_route: true,
+        label: None,
+    };
+    router.add_ipv4_addr(dev, entry).unwrap();
+    let broadcast_route = valid_ipv4_cidr(assigned, 32).into();
+    let connected_route = entry.addr.network().into();
+    assert!(
+        router
+            .table
+            .snapshot()
+            .iter()
+            .any(|route| route.filter == broadcast_route)
+    );
+    assert!(
+        !router
+            .table
+            .snapshot()
+            .iter()
+            .any(|route| route.filter == connected_route)
+    );
+
+    router
+        .devices
+        .get_mut_by_id(dev)
+        .unwrap()
+        .set_link_up(false);
+    router.sync_ipv4_address_routes();
+    assert!(
+        !router
+            .table
+            .snapshot()
+            .iter()
+            .any(|route| route.filter == broadcast_route)
+    );
+
+    router.devices.get_mut_by_id(dev).unwrap().set_link_up(true);
+    router.sync_ipv4_address_routes();
+    assert!(
+        router
+            .table
+            .snapshot()
+            .iter()
+            .any(|route| route.filter == broadcast_route)
+    );
+    assert!(
+        !router
+            .table
+            .snapshot()
+            .iter()
+            .any(|route| route.filter == connected_route)
+    );
+}
+
+#[def_test]
+fn ipv4_netmask_change_updates_computed_broadcast_and_keeps_explicit_one() {
+    let mut router = Router::new();
+    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let explicit = Ipv4Address::new(192, 168, 1, 111);
+    router
+        .add_ipv4_addr(
+            dev,
+            Ipv4AddrEntry {
+                addr: valid_ipv4_cidr(Ipv4Address::new(192, 168, 1, 7), 24),
+                scope: ROUTE_SCOPE_UNIVERSE,
+                broadcast: Some(explicit),
+                no_prefix_route: false,
+                label: None,
+            },
+        )
+        .unwrap();
+    router.set_ipv4_netmask(dev, 16).unwrap();
+    let routes = router.table.snapshot();
+    assert!(
+        routes
+            .iter()
+            .any(|route| route.filter == valid_ipv4_cidr(explicit, 32).into())
+    );
+    assert!(
+        routes.iter().any(|route| route.filter
+            == valid_ipv4_cidr(Ipv4Address::new(192, 168, 255, 255), 32).into())
+    );
+    assert!(!routes.iter().any(
+        |route| route.filter == valid_ipv4_cidr(Ipv4Address::new(192, 168, 1, 255), 32).into()
+    ));
+}
+
+#[def_test]
 fn ipv4_broadcast_detection_covers_limited_and_directed_addresses() {
     let mut router = Router::new();
     let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
@@ -400,6 +695,8 @@ fn ipv4_broadcast_detection_covers_limited_and_directed_addresses() {
                 addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
+                no_prefix_route: false,
+                label: None,
             },
         )
         .unwrap();
@@ -412,18 +709,22 @@ fn ipv4_broadcast_detection_covers_limited_and_directed_addresses() {
 }
 
 #[def_test]
-fn setting_primary_ipv4_address_keeps_secondary_addresses() {
+fn setting_primary_ipv4_address_preserves_unrelated_addresses() {
     let mut router = Router::new();
     let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
     let primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
         scope: ROUTE_SCOPE_HOST,
         broadcast: Some(Ipv4Address::new(192, 0, 2, 111)),
+        no_prefix_route: true,
+        label: None,
     };
     let secondary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
         scope: ROUTE_SCOPE_HOST,
         broadcast: None,
+        no_prefix_route: false,
+        label: None,
     };
     router.add_ipv4_addr(dev, primary).unwrap();
     router.add_ipv4_addr(dev, secondary).unwrap();
@@ -442,25 +743,34 @@ fn setting_primary_ipv4_address_keeps_secondary_addresses() {
     router.set_primary_ipv4_addr(dev, replacement).unwrap();
 
     assert_eq!(router.ipv4_addr_entries(dev).len(), 2);
-    assert_eq!(router.ipv4_addr_entries(dev)[0].addr, replacement);
-    assert_eq!(router.ipv4_addr_entries(dev)[0].scope, ROUTE_SCOPE_UNIVERSE);
-    assert_eq!(router.ipv4_addr_entries(dev)[0].broadcast, None);
-    assert_eq!(router.ipv4_addr_entries(dev)[1], secondary);
+    // Linux reinserts a replacement at its scope-derived position.  The new
+    // universe-scope primary follows the surviving host-scope address.
+    assert_eq!(router.ipv4_addr_entries(dev)[0], secondary);
+    assert_eq!(router.ipv4_addr_entries(dev)[1].addr, replacement);
+    assert_eq!(router.ipv4_addr_entries(dev)[1].scope, ROUTE_SCOPE_UNIVERSE);
+    assert_eq!(router.ipv4_addr_entries(dev)[1].broadcast, None);
+    // `SIOCSIFADDR` clears the derived broadcast and resets scope, but it
+    // preserves `IFA_F_NOPREFIXROUTE` on the replaced address.
+    assert!(router.ipv4_addr_entries(dev)[1].no_prefix_route);
 }
 
 #[def_test]
-fn removing_primary_ipv4_address_keeps_secondary_addresses() {
+fn removing_primary_ipv4_address_preserves_unrelated_addresses() {
     let mut router = Router::new();
     let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
     let primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
         scope: ROUTE_SCOPE_HOST,
         broadcast: None,
+        no_prefix_route: false,
+        label: None,
     };
     let secondary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
         scope: ROUTE_SCOPE_HOST,
         broadcast: None,
+        no_prefix_route: false,
+        label: None,
     };
     router.add_ipv4_addr(dev, primary).unwrap();
     router.add_ipv4_addr(dev, secondary).unwrap();
@@ -480,6 +790,8 @@ fn setting_ipv4_netmask_keeps_secondary_scope_and_custom_broadcast() {
         addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
         scope: ROUTE_SCOPE_UNIVERSE,
         broadcast: None,
+        no_prefix_route: false,
+        label: None,
     };
     router
         .add_ipv4_addr(
@@ -488,6 +800,8 @@ fn setting_ipv4_netmask_keeps_secondary_scope_and_custom_broadcast() {
                 addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: Some(custom_broadcast),
+                no_prefix_route: false,
+                label: None,
             },
         )
         .unwrap();
@@ -513,10 +827,14 @@ fn setting_ipv4_netmask_collision_keeps_existing_target() {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
         scope: ROUTE_SCOPE_HOST,
         broadcast: None,
+        no_prefix_route: false,
+        label: None,
     };
     let secondary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(primary.addr.address(), 16),
         broadcast: Some(Ipv4Address::new(192, 0, 255, 111)),
+        no_prefix_route: false,
+        label: None,
         ..primary
     };
     router.add_ipv4_addr(dev, primary).unwrap();
@@ -531,7 +849,10 @@ fn setting_ipv4_netmask_collision_keeps_existing_target() {
         router.table.lookup(&destination).unwrap().filter,
         secondary.addr.network().into()
     );
-    assert_eq!(router.output_route_source(&destination, 0), Ok(primary.addr.address().into()));
+    assert_eq!(
+        router.output_route_source(&destination, 0),
+        Ok(primary.addr.address().into())
+    );
 }
 
 #[def_test]
@@ -542,6 +863,8 @@ fn deleting_ipv4_address_removes_automatic_routes() {
         addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
         scope: ROUTE_SCOPE_HOST,
         broadcast: None,
+        no_prefix_route: false,
+        label: None,
     };
     let secondary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(entry.addr.address(), 16),
@@ -560,7 +883,7 @@ fn deleting_ipv4_address_removes_automatic_routes() {
         1
     );
 
-    assert!(router.remove_ipv4_addr(dev, entry.addr));
+    assert!(!router.remove_ipv4_addr(dev, entry.addr).is_empty());
     assert_eq!(
         router.table.lookup(&host.address().into()).unwrap().filter,
         host.into()
@@ -571,7 +894,7 @@ fn deleting_ipv4_address_removes_automatic_routes() {
             .lookup(&Ipv4Address::new(198, 51, 100, 8).into())
             .is_some()
     );
-    assert!(router.remove_ipv4_addr(dev, secondary.addr));
+    assert!(!router.remove_ipv4_addr(dev, secondary.addr).is_empty());
     assert!(router.table.lookup(&host.address().into()).is_none());
     assert!(
         router
@@ -592,6 +915,8 @@ fn configured_gateway_must_be_on_device_subnet() {
                 addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
+                no_prefix_route: false,
+                label: None,
             },
         )
         .unwrap();

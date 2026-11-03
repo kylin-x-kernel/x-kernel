@@ -17,6 +17,7 @@ use crate::{
     },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
     network::{
+        event::NetworkEvent,
         interface_address::Ipv4AddrEntry,
         router::{
             ROUTE_PROTOCOL_BOOT, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TABLE_MAIN,
@@ -38,6 +39,27 @@ static_lock! {
 /// not interleave.
 pub(crate) fn network_config_lock() -> MutexGuard<'static, ()> {
     NETWORK_CONFIG_MUTATION_LOCK.lock()
+}
+
+/// Nonblocking variant used by the data-plane poller.
+///
+/// Neighbor events are consumed from [`crate::network::router::Router`] and
+/// published to netlink.  Taking this lock first serializes that pair with
+/// control-plane mutations, which hold it across their own Router update and
+/// notification.  A caller that cannot take it must leave the events pending
+/// so they cannot be republished after a later `NeighborRemoved`.
+pub(crate) fn try_network_config_lock() -> Option<MutexGuard<'static, ()>> {
+    NETWORK_CONFIG_MUTATION_LOCK.try_lock()
+}
+
+/// Publishes neutral network changes to netlink.
+///
+/// Callers invoke this while still holding [`network_config_lock`], so the
+/// notification order is the same as the order in which mutations commit.
+pub(crate) fn publish_events(events: Vec<NetworkEvent>) {
+    if !events.is_empty() {
+        crate::netlink::publish_network_events(events);
+    }
 }
 
 /// Snapshot of interface state required by network socket ioctls.
@@ -101,12 +123,15 @@ pub fn set_interface_ipv4_addr(
 ) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let dev = device_id_by_name(name)?;
-    if addr.is_unspecified() {
-        return SERVICE.remove_primary_ipv4_addr(dev);
-    }
-    let cidr = Ipv4Cidr::new(Ipv4Address::from_octets(addr.octets()), prefix_len)
-        .ok_or(LinuxError::EINVAL)?;
-    SERVICE.set_primary_ipv4_addr(dev, cidr)
+    let events = if addr.is_unspecified() {
+        SERVICE.remove_primary_ipv4_addr(dev)?
+    } else {
+        let cidr = Ipv4Cidr::new(Ipv4Address::from_octets(addr.octets()), prefix_len)
+            .ok_or(LinuxError::EINVAL)?;
+        SERVICE.set_primary_ipv4_addr(dev, cidr)?
+    };
+    publish_events(events);
+    Ok(())
 }
 
 /// Updates the prefix length of the first IPv4 address assigned to `name`.
@@ -123,7 +148,9 @@ pub fn set_interface_ipv4_addr(
 pub fn set_interface_ipv4_netmask(name: &str, prefix_len: u8) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let dev = device_id_by_name(name)?;
-    SERVICE.set_ipv4_netmask(dev, prefix_len)
+    let events = SERVICE.set_ipv4_netmask(dev, prefix_len)?;
+    publish_events(events);
+    Ok(())
 }
 
 /// Sets the IPv4 broadcast address stored on the first address of `name`.
@@ -135,7 +162,9 @@ pub fn set_interface_ipv4_netmask(name: &str, prefix_len: u8) -> Result<(), Linu
 pub fn set_interface_ipv4_broadcast(name: &str, broadcast: Ipv4Addr) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let dev = device_id_by_name(name)?;
-    SERVICE.set_ipv4_broadcast(dev, Ipv4Address::from_octets(broadcast.octets()))
+    let events = SERVICE.set_ipv4_broadcast(dev, Ipv4Address::from_octets(broadcast.octets()))?;
+    publish_events(events);
+    Ok(())
 }
 
 /// Applies the `IFF_UP` state requested through `SIOCSIFFLAGS`.
@@ -146,14 +175,16 @@ pub fn set_interface_ipv4_broadcast(name: &str, broadcast: Ipv4Addr) -> Result<(
 pub fn set_interface_flags(name: &str, flags: u16) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let ifindex = device_id_by_name(name)?.ifindex();
-    SERVICE.update_device_link(
+    let events = SERVICE.update_device_link(
         ifindex,
         LinkConfigUpdate {
             name: None,
             mtu: None,
             is_up: Some(flags as u32 & LINK_FLAG_UP != 0),
         },
-    )
+    )?;
+    publish_events(events);
+    Ok(())
 }
 
 /// Adds an IPv4 route owned by `Router`.
@@ -183,7 +214,9 @@ pub fn add_ipv4_route(
     }) {
         return Err(LinuxError::EEXIST);
     }
-    SERVICE.add_route_rule(rule)
+    let events = SERVICE.add_route_rule(rule)?;
+    publish_events(events);
+    Ok(())
 }
 
 /// Deletes an IPv4 route owned by `Router`. Missing entries return `ESRCH`.
@@ -219,7 +252,11 @@ pub fn del_ipv4_route(
                 && (via.is_none() || existing.via == via)
         })
         .ok_or(LinuxError::ESRCH)?;
-    SERVICE.remove_route_rule(existing);
+    let events = SERVICE.remove_route_rule(existing);
+    if events.is_empty() {
+        return Err(LinuxError::ESRCH);
+    }
+    publish_events(events);
     Ok(())
 }
 

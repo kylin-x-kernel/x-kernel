@@ -117,6 +117,8 @@ bitflags! {
     pub struct SendFlags: u32 {
         /// Do not block for this send operation.
         const DONT_WAIT = 0x01;
+        /// Out-of-band data was requested with `MSG_OOB`.
+        const OOB = 0x02;
     }
 }
 
@@ -142,6 +144,8 @@ bitflags! {
         const ERROR_QUEUE = 0x04;
         /// Do not block for this receive operation.
         const DONT_WAIT = 0x08;
+        /// Out-of-band data was requested with `MSG_OOB`.
+        const OOB = 0x10;
     }
 }
 
@@ -212,6 +216,24 @@ pub struct SenderCredentials {
     pub gid: u32,
 }
 
+impl SenderCredentials {
+    /// Identity reported for a kernel-origin netlink skb.
+    ///
+    /// Linux zeroes `struct sk_buff` through `NETLINK_CB(skb).creds` on
+    /// allocation, so ordinary kernel replies and notifications expose numeric
+    /// uid/gid 0 and no live task identity. `alloc_uevent_skb` explicitly
+    /// installs `GLOBAL_ROOT_UID`/`GLOBAL_ROOT_GID` instead, which projects to
+    /// the same zeros in the initial user namespace; both paths leave the PID
+    /// field at zero.
+    pub(crate) fn kernel() -> Self {
+        Self {
+            pid: None,
+            uid: 0,
+            gid: 0,
+        }
+    }
+}
+
 impl core::fmt::Debug for SenderCredentials {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // Only the root projection is printable; the handle's per-namespace
@@ -236,16 +258,45 @@ pub enum KernelAncillaryData {
 /// Options for sending data to a socket.
 ///
 /// See [`SocketOps::send`].
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct SendOptions {
     pub to: Option<SocketAddrEx>,
     pub flags: SendFlags,
     pub ancillary: Vec<AncillaryData>,
-    /// Authenticated identity of the user process sending this Unix message.
+    /// Per-datagram sender identity captured at the socket send boundary.
     ///
-    /// User-facing socket entry points populate this snapshot. Kernel callers
-    /// without a current user process may leave it unset.
-    pub unix_sender_credentials: Option<SenderCredentials>,
+    /// Unix transports use it when the receiver enabled `SO_PASSCRED` and for
+    /// stream credential records; netlink stores it in the skb-like control
+    /// block so every recipient observes the sender of that datagram. Kernel
+    /// callers without a current user process may leave it unset, which means
+    /// a kernel-origin packet with zeroed credentials.
+    pub sender_credentials: Option<SenderCredentials>,
+    /// Credentials captured when the socket file was opened.
+    ///
+    /// Linux authorizes a netlink destination of PID 0 through
+    /// `__netlink_ns_capable()`. For an explicit destination the check uses the
+    /// sending process only, because `NETLINK_SKB_DST` is set. For an
+    /// addressless or connected send it also requires the capability in these
+    /// opener credentials. Keeping the snapshot separate from the current send
+    /// credentials preserves Linux's two-party check; callers that cannot
+    /// supply it fall back to the current process, which preserves direct
+    /// kernel API callers.
+    ///
+    /// Rtnetlink requests require `CAP_NET_ADMIN`; the
+    /// `NETLINK_KOBJECT_UEVENT` receive callback requires `CAP_SYS_ADMIN`.
+    pub opener_cred: Option<Cred>,
+}
+
+impl Debug for SendOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendOptions")
+            .field("to", &self.to)
+            .field("flags", &self.flags)
+            .field("ancillary", &self.ancillary)
+            .field("sender_credentials", &self.sender_credentials)
+            .field("opener_cred", &self.opener_cred.as_ref().map(|_| ()))
+            .finish()
+    }
 }
 
 /// Options for receiving data from a socket.
@@ -427,6 +478,36 @@ pub enum Socket {
 }
 
 impl Socket {
+    /// Binds using the credential active at the syscall boundary.
+    ///
+    /// Netlink group subscriptions can require administrative privilege, so
+    /// the bind must observe the caller that performed the syscall rather than
+    /// ambient state sampled later. Other families have no credential-sensitive
+    /// bind rules and use their normal implementation.
+    pub fn bind_with_cred(&self, local_addr: SocketAddrEx, cred: &Cred) -> KResult {
+        match self {
+            Self::Netlink(socket) => socket.bind_with_cred(local_addr, cred),
+            _ => <Self as SocketOps>::bind(self, local_addr),
+        }
+    }
+
+    /// Connects using the credential active at the syscall boundary.
+    ///
+    /// Netlink connect authorization depends on the caller's capability set;
+    /// other protocols accept the same address and options as
+    /// [`SocketOps::connect`].
+    pub fn connect_with_cred(
+        &self,
+        remote_addr: SocketAddrEx,
+        options: ConnectOptions,
+        cred: &Cred,
+    ) -> KResult {
+        match self {
+            Self::Netlink(socket) => socket.connect_with_cred(remote_addr, cred),
+            _ => <Self as SocketOps>::connect(self, remote_addr, options),
+        }
+    }
+
     /// Sends data using the sending task's credential.
     ///
     /// Netlink authorization depends on the process performing each send, not

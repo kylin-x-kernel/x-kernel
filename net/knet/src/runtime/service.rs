@@ -4,7 +4,7 @@
 
 //! Network service with budgeted data-plane progression.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 #[cfg(unittest)]
 use core::sync::atomic::AtomicUsize;
 use core::{
@@ -27,13 +27,17 @@ use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
     device::{
-        LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDeviceId,
-        RxDeviceSelection,
+        LINK_FLAG_UP, LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborEvent,
+        NeighborSnapshot, NeighborState, NeighborUpdate, NetDeviceId, RxDeviceSelection,
     },
-    ip::{self, IpAddress},
-    network::router::Rule,
+    ip::{self, IpAddress, Ipv4Address},
+    network::{
+        event::{NetworkEvent, RouteProvenance},
+        interface_address::Ipv4AddrSnapshot,
+        router::Rule,
+    },
     poller::{PollBudget, PollProgress},
-    router::{NeighborUpdatePolicy, Router},
+    router::{Ipv4OutputRoute, NeighborUpdatePolicy, Router},
     stack::{
         device::StackDevice,
         ingress::{IngressProcessor, prepare_smoltcp_ingress},
@@ -91,6 +95,9 @@ struct NetworkTimer;
 
 #[cfg(unittest)]
 static SAMPLE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(unittest)]
+static NEIGHBOR_TIMER_SCHEDULES: AtomicUsize = AtomicUsize::new(0);
 
 unittest::path_mod_test!(
     timer_irq_tests,
@@ -196,6 +203,13 @@ impl Service {
             return deferred_poll_progress(0, 0, timer_events);
         }
 
+        // Neighbor transitions are committed in Router but published after
+        // its lock is dropped.  Serialize the take/publish pair with the
+        // control plane so a data-plane `NeighborAdded` cannot be observed
+        // after the control plane has removed the same entry.
+        let Some(network_config_guard) = crate::control::try_network_config_lock() else {
+            return deferred_poll_progress(0, 0, timer_events);
+        };
         let Some(mut router) = self.router.try_lock() else {
             return deferred_poll_progress(0, 0, timer_events);
         };
@@ -209,8 +223,11 @@ impl Service {
             budget.tx_packets,
             round_started_at,
         );
+        let neighbor_events = router.take_neighbor_events();
         drop(router);
         wake_tx_capacity_waiters(capacity_poll);
+        self.publish_neighbor_events(neighbor_events);
+        drop(network_config_guard);
         let mut tx_remaining = budget.tx_packets.saturating_sub(tx_packets);
 
         let rx_progress = self.poll_device_rx_budgeted(
@@ -292,10 +309,20 @@ impl Service {
         LISTEN_TABLE.refresh_acceptors(&mut sockets);
         drop(sockets);
         timer_events += usize::from(timer_events < budget.timer_events && has_socket_state_change);
+        // The ingress phase above holds Router for smoltcp.  Release it before
+        // taking the configuration lock so the data plane always follows the
+        // control plane's `configuration -> Router` lock order.
+        drop(router);
 
         if has_reached_time_limit {
             tx_remaining = 0;
         }
+        let Some(network_config_guard) = crate::control::try_network_config_lock() else {
+            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
+        };
+        let Some(mut router) = self.router.try_lock() else {
+            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
+        };
         let TxDispatchProgress {
             packet_count: dispatched,
             has_reached_time_limit: tx_time_limit,
@@ -308,8 +335,11 @@ impl Service {
         );
         tx_packets += dispatched;
         has_reached_time_limit |= tx_time_limit;
+        let neighbor_events = router.take_neighbor_events();
         drop(router);
         wake_tx_capacity_waiters(capacity_poll);
+        self.publish_neighbor_events(neighbor_events);
+        drop(network_config_guard);
 
         let rx_remaining = budget.rx_packets.saturating_sub(rx_packets);
         if !has_reached_time_limit && rx_remaining > 0 {
@@ -327,17 +357,20 @@ impl Service {
             }
         }
 
-        let next_poll = earliest_poll_deadline(protocol_deadline, deferred_close_deadline);
-        let timer_current = now();
-        let timer_has_more = has_immediate_timer_work(timer_current, next_poll);
-        self.update_poll_timeout(timer_current, next_poll);
-
         let Some(mut router) = self.router.try_lock() else {
             return deferred_poll_progress(rx_packets, tx_packets, timer_events);
         };
         let ingress_has_more = router.has_pending_ingress();
         let rx_has_more = router.has_immediate_rx_work();
         let (_, tx_has_more) = router.dispatch_budgeted(device_timestamp, 0);
+        let next_poll = earliest_poll_deadline(
+            protocol_deadline,
+            deferred_close_deadline,
+            router.next_neighbor_deadline().map(to_smoltcp_instant),
+        );
+        let timer_current = now();
+        let timer_has_more = has_immediate_timer_work(timer_current, next_poll);
+        self.update_poll_timeout(timer_current, next_poll);
         PollProgress {
             rx_packets,
             tx_packets,
@@ -349,6 +382,32 @@ impl Service {
                 || ipv4_expiration.has_more
                 || self.has_pending_ipv4_reassembly_expiration(),
         }
+    }
+
+    /// Publishes asynchronous neighbor transitions after the Router and
+    /// device locks have been released.
+    ///
+    /// Only poller work reaches this method. The `knet-poller` normal queue
+    /// runs callbacks in worker task context, never inline or in BH context,
+    /// so taking netlink's sleepable `PORTS` lock while publishing is valid.
+    fn publish_neighbor_events(&self, events: Vec<NeighborEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        let events = events
+            .into_iter()
+            .map(|event| match event {
+                NeighborEvent::Added(neighbor) => NetworkEvent::NeighborAdded {
+                    neighbor: NeighborUpdate {
+                        dev: neighbor.dev,
+                        dst: neighbor.dst,
+                        state: neighbor.state,
+                    },
+                },
+                NeighborEvent::Removed(neighbor) => NetworkEvent::NeighborRemoved { neighbor },
+            })
+            .collect();
+        crate::netlink::publish_network_events(events);
     }
 
     fn poll_device_rx_budgeted(
@@ -383,6 +442,16 @@ impl Service {
                 }
             }
 
+            // Keep the configuration guard through ingress dispatch so a
+            // data-plane neighbor transition cannot be published after the
+            // control plane has removed the same entry.  Processing holds
+            // config -> ingress and releases ingress before the flush takes
+            // SOCKET_SET -> Router; no socket dispatch callback acquires the
+            // configuration lock, so that order has no inverse path.
+            let Some(_network_config_guard) = crate::control::try_network_config_lock() else {
+                progress.has_lock_contention = true;
+                break;
+            };
             let Some(mut router) = self.router.try_lock() else {
                 progress.has_lock_contention = true;
                 break;
@@ -393,10 +462,15 @@ impl Service {
                 .min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
                 .min(router.ingress_capacity());
             if batch_budget == 0 {
+                let neighbor_events = router.take_neighbor_events();
+                drop(router);
+                self.publish_neighbor_events(neighbor_events);
                 break;
             }
             let drain = router.drain_rx_budgeted_into(device_timestamp, batch_budget, rx_batch);
+            let neighbor_events = router.take_neighbor_events();
             drop(router);
+            self.publish_neighbor_events(neighbor_events);
             if let Some((ifindex, error)) = &drain.error {
                 warn!("network RX poll failed on ifindex {ifindex}: {error:?}");
             }
@@ -533,6 +607,15 @@ impl Service {
         self.router.lock().output_route_source(dst_addr, 0)
     }
 
+    pub(crate) fn lookup_ipv4_output(
+        &self,
+        dst: Ipv4Address,
+        src: Option<Ipv4Address>,
+        oif: Option<NetDeviceId>,
+    ) -> Result<Ipv4OutputRoute, LinuxError> {
+        Ok(self.router.lock().lookup_ipv4_output(dst, src, oif)?)
+    }
+
     #[cfg(unittest)]
     pub(crate) fn ipv4_route_mtu(&self, dst_addr: &IpAddress) -> Option<usize> {
         self.router.lock().route_mtu(dst_addr)
@@ -595,23 +678,32 @@ impl Service {
 
         let current = now();
         let sockets = SOCKET_SET.inner.lock();
-        let next = earliest_poll_deadline(
-            self.iface.lock().poll_at(current, &sockets),
-            sockets.deferred_tcp_close_deadline(),
-        );
+        let protocol_deadline = self.iface.lock().poll_at(current, &sockets);
+        let deferred_close_deadline = sockets.deferred_tcp_close_deadline();
         drop(sockets);
-        self.update_poll_timeout(current, next);
+        let next = {
+            let router = self.router.lock();
+            let next = earliest_poll_deadline(
+                protocol_deadline,
+                deferred_close_deadline,
+                router.next_neighbor_deadline().map(to_smoltcp_instant),
+            );
 
-        let router = self.router.lock();
-        for (slot, device) in router.devices.iter().enumerate() {
-            let id = router.devices.id_at(slot);
-            if selection.includes(id) {
-                // Ethernet devices that support interrupt-driven RX register
-                // on their NetRx softirq-backed poll source. Loopback and
-                // poll-only devices keep the timeout_poll-backed source waker.
-                device.register_rx_waker(&source_waker, context)?;
+            for (slot, device) in router.devices.iter().enumerate() {
+                let id = router.devices.id_at(slot);
+                if selection.includes(id) {
+                    // Ethernet devices that support interrupt-driven RX register
+                    // on their NetRx softirq-backed poll source. Loopback and
+                    // poll-only devices keep the timeout_poll-backed source waker.
+                    device.register_rx_waker(&source_waker, context)?;
+                }
             }
-        }
+            next
+        };
+        // Publish the timer wake after releasing Router: waking the poller
+        // takes the poller state lock, which must not nest inside the data
+        // plane's routing lock.
+        self.update_poll_timeout(current, next);
         Ok(source_waker)
     }
 
@@ -817,108 +909,251 @@ impl Service {
         dev: NetDeviceId,
         entry: crate::network::interface_address::Ipv4AddrEntry,
         existing_action: ExistingIpv4AddrAction,
-    ) -> Result<(), LinuxError> {
+    ) -> Result<Vec<NetworkEvent>, LinuxError> {
         let mut router = self.router.lock();
-        let is_existing = router.has_ipv4_addr_entry(dev, entry.addr);
-        if is_existing {
+        if let Some(addr) = router.ipv4_addr_snapshot(dev, entry.addr) {
             return match existing_action {
-                ExistingIpv4AddrAction::Keep => Ok(()),
+                // A matching address with NLM_F_REPLACE keeps its attributes,
+                // but Linux still sends RTM_NEWADDR for the existing entry.
+                ExistingIpv4AddrAction::Keep => Ok(vec![NetworkEvent::AddrAdded { addr }]),
                 ExistingIpv4AddrAction::Reject => Err(LinuxError::EEXIST),
             };
         }
+        let before = ipv4_snapshots_for_device(&router, dev);
+        let routes_before = router.table.snapshot();
         router.add_ipv4_addr(dev, entry)?;
+        let after = ipv4_snapshots_for_device(&router, dev);
+        let routes_after = router.table.snapshot();
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
-        Ok(())
+        Ok(ipv4_transition_events(
+            before,
+            after,
+            &[],
+            routes_before,
+            &routes_after,
+        ))
     }
 
     pub(crate) fn remove_ipv4_addr(
         &self,
         dev: NetDeviceId,
         addr: crate::ip::Ipv4Cidr,
-    ) -> Result<bool, LinuxError> {
+    ) -> Result<Vec<NetworkEvent>, LinuxError> {
         let mut router = self.router.lock();
-        if !router.remove_ipv4_addr(dev, addr) {
+        let before = ipv4_snapshots_for_device(&router, dev);
+        let routes_before = router.table.snapshot();
+        if !router
+            .ipv4_addr_snapshots()
+            .iter()
+            .any(|snapshot| snapshot.dev == dev && snapshot.entry.addr == addr)
+        {
             return Err(LinuxError::EADDRNOTAVAIL);
         }
-        let is_last_owner = !router.has_ipv4_address(addr.address());
+        let removed_sources = router.remove_ipv4_addr(dev, addr);
+        if removed_sources.is_empty() {
+            return Err(LinuxError::EADDRNOTAVAIL);
+        }
+        let after = ipv4_snapshots_for_device(&router, dev);
+        let routes_after = router.table.snapshot();
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
-        Ok(is_last_owner)
+        Ok(ipv4_transition_events(
+            before,
+            after,
+            &removed_sources,
+            routes_before,
+            &routes_after,
+        ))
     }
 
     pub(crate) fn set_primary_ipv4_addr(
         &self,
         dev: NetDeviceId,
         addr: crate::ip::Ipv4Cidr,
-    ) -> Result<(), LinuxError> {
+    ) -> Result<Vec<NetworkEvent>, LinuxError> {
         let mut router = self.router.lock();
+        let before = ipv4_snapshots_for_device(&router, dev);
+        let routes_before = router.table.snapshot();
         router.set_primary_ipv4_addr(dev, addr)?;
+        let after = ipv4_snapshots_for_device(&router, dev);
+        let routes_after = router.table.snapshot();
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
-        Ok(())
+        Ok(ipv4_transition_events(
+            before,
+            after,
+            &[],
+            routes_before,
+            &routes_after,
+        ))
     }
 
-    pub(crate) fn remove_primary_ipv4_addr(&self, dev: NetDeviceId) -> Result<(), LinuxError> {
+    pub(crate) fn remove_primary_ipv4_addr(
+        &self,
+        dev: NetDeviceId,
+    ) -> Result<Vec<NetworkEvent>, LinuxError> {
         let mut router = self.router.lock();
-        router.remove_primary_ipv4_addr(dev)?;
+        let before = ipv4_snapshots_for_device(&router, dev);
+        let routes_before = router.table.snapshot();
+        let removed_sources = router.remove_primary_ipv4_addr(dev)?;
+        let after = ipv4_snapshots_for_device(&router, dev);
+        let routes_after = router.table.snapshot();
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
-        Ok(())
+        Ok(ipv4_transition_events(
+            before,
+            after,
+            &removed_sources,
+            routes_before,
+            &routes_after,
+        ))
     }
 
     pub(crate) fn route_snapshot(&self) -> Vec<Rule> {
         self.router.lock().table.snapshot()
     }
 
-    pub(crate) fn add_route_rule(&self, rule: Rule) -> Result<(), LinuxError> {
-        self.router.lock().add_route_rule(rule)
+    pub(crate) fn add_route_rule(&self, rule: Rule) -> Result<Vec<NetworkEvent>, LinuxError> {
+        let mut router = self.router.lock();
+        router.add_route_rule(rule)?;
+        Ok(vec![NetworkEvent::RouteAdded {
+            route: rule,
+            provenance: RouteProvenance::Request,
+        }])
     }
 
     pub(crate) fn replace_route_rule(
         &self,
         existing: Rule,
         replacement: Rule,
-    ) -> Result<(), LinuxError> {
-        self.router.lock().replace_route_rule(existing, replacement)
+    ) -> Result<Vec<NetworkEvent>, LinuxError> {
+        let mut router = self.router.lock();
+        router.replace_route_rule(existing, replacement)?;
+        // Linux `fib_table_insert` replaces an existing route in place and
+        // emits only RTM_NEWROUTE; there is no removal notification.
+        Ok(vec![NetworkEvent::RouteAdded {
+            route: replacement,
+            provenance: RouteProvenance::Request,
+        }])
     }
 
-    pub(crate) fn remove_route_rule(&self, route: Rule) {
-        self.router.lock().table.remove_exact_rule(route);
+    pub(crate) fn remove_route_rule(&self, route: Rule) -> Vec<NetworkEvent> {
+        self.router
+            .lock()
+            .table
+            .take_exact_rule(route)
+            .map(|route| NetworkEvent::RouteRemoved {
+                route,
+                provenance: RouteProvenance::Request,
+            })
+            .into_iter()
+            .collect()
     }
 
     pub(crate) fn set_ipv4_broadcast(
         &self,
         dev: NetDeviceId,
         broadcast: crate::ip::Ipv4Address,
-    ) -> Result<(), LinuxError> {
-        self.router.lock().set_ipv4_broadcast(dev, broadcast)
+    ) -> Result<Vec<NetworkEvent>, LinuxError> {
+        let mut router = self.router.lock();
+        let before = ipv4_snapshots_for_device(&router, dev);
+        let routes_before = router.table.snapshot();
+        router.set_ipv4_broadcast(dev, broadcast)?;
+        let after = ipv4_snapshots_for_device(&router, dev);
+        let routes_after = router.table.snapshot();
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        Ok(ipv4_transition_events(
+            before,
+            after,
+            &[],
+            routes_before,
+            &routes_after,
+        ))
     }
 
     pub(crate) fn set_ipv4_netmask(
         &self,
         dev: NetDeviceId,
         prefix_len: u8,
-    ) -> Result<(), LinuxError> {
+    ) -> Result<Vec<NetworkEvent>, LinuxError> {
         let mut router = self.router.lock();
+        let before = ipv4_snapshots_for_device(&router, dev);
+        let routes_before = router.table.snapshot();
         router.set_ipv4_netmask(dev, prefix_len)?;
+        let after = ipv4_snapshots_for_device(&router, dev);
+        let routes_after = router.table.snapshot();
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
-        Ok(())
+        Ok(ipv4_transition_events(
+            before,
+            after,
+            &[],
+            routes_before,
+            &routes_after,
+        ))
     }
 
     pub(crate) fn update_device_link(
         &self,
         ifindex: i32,
         update: LinkConfigUpdate,
-    ) -> Result<(), LinuxError> {
+    ) -> Result<Vec<NetworkEvent>, LinuxError> {
         let mut router = self.router.lock();
+        let before = router.devices.link_snapshot_for_ifindex(ifindex);
+        let routes_before = router.table.snapshot();
         let is_effective_mtu_changed = router.devices.update_device_link(ifindex, update)?;
         if is_effective_mtu_changed {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
         }
-        Ok(())
+        router.sync_ipv4_address_routes();
+        let routes_after = router.table.snapshot();
+        let Some(before) = before else {
+            return Ok(Vec::new());
+        };
+        let Some(after) = router.devices.link_snapshot_for_ifindex(ifindex) else {
+            return Ok(Vec::new());
+        };
+        let link_became_up = before.flags & LINK_FLAG_UP == 0 && after.flags & LINK_FLAG_UP != 0;
+        if before == after && routes_before == routes_after {
+            return Ok(Vec::new());
+        }
+        // Linux publishes the link transition from `__dev_notify_flags()`
+        // before running the `NETDEV_UP`/`NETDEV_DOWN` notifier chain that
+        // resynchronizes addresses and derived routes.  Route additions from
+        // `fib_add_ifaddr()` are real RTM_NEWROUTE notifications.  On the way
+        // down, `fib_table_flush()` only calls the internal FIB notifier for
+        // dead routes; it calls `rtmsg_fib(RTM_DELROUTE, ...)` solely when the
+        // preferred source was removed, which a link transition does not do.
+        // The routes disappear from the table without a userspace deletion
+        // notification.
+        let mut route_events =
+            ipv4_transition_events(Vec::new(), Vec::new(), &[], routes_before, &routes_after);
+        route_events.retain(|event| !matches!(event, NetworkEvent::RouteRemoved { .. }));
+        // A derived-route change with an unchanged link is not a link event.
+        // `__dev_notify_flags()` only calls `rtmsg_ifinfo()` when the link
+        // flags or the device state actually changed; emitting a LinkChanged
+        // with `changed_flags == 0` here would be a synthetic notification.
+        let mut events = Vec::new();
+        if before != after {
+            events.push(NetworkEvent::LinkChanged {
+                changed_flags: before.flags ^ after.flags,
+                link: after,
+            });
+        }
+        events.extend(route_events);
+        drop(router);
+        // Neighbor deadlines are frozen, not retired, while the link is down
+        // (`next_neighbor_deadline` reports no work so a down device cannot
+        // spin the timer). Bringing the link back up makes those deadlines
+        // serviceable again, so the poller must recompute and arm the Service
+        // timer even when the link transition changes no routes.
+        if link_became_up {
+            self.schedule_neighbor_timer();
+        }
+        Ok(events)
     }
 
     #[cfg(unittest)]
@@ -941,31 +1176,98 @@ impl Service {
         self.rebuild_count.load(Ordering::Relaxed)
     }
 
+    #[cfg(unittest)]
+    pub(crate) fn neighbor_timer_schedule_count(&self) -> usize {
+        NEIGHBOR_TIMER_SCHEDULES.load(Ordering::Relaxed)
+    }
+
     /// Removes a device and refreshes every address-derived data-plane view.
     ///
     /// Callers must hold [`crate::control::network_config_lock`] so device
     /// removal cannot interleave with other control-plane mutations.
-    pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<()> {
+    pub(crate) fn remove_device_by_model_id(
+        &self,
+        id: kdevice::DeviceId,
+    ) -> Option<Vec<NetworkEvent>> {
         let mut router = self.router.lock();
         let effective_mtu = router.devices.effective_mtu();
-        router.remove_device_by_model_id(id)?;
+        let removed = router.remove_device_by_model_id(id)?;
         if router.devices.effective_mtu() != effective_mtu {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
         }
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
-        Some(())
+        Some(removed)
     }
 
     pub(crate) fn apply_neighbor_update(
         &self,
         update: NeighborUpdate,
         policy: NeighborUpdatePolicy,
-    ) -> Result<(), LinuxError> {
-        self.router.lock().apply_neighbor_update(update, policy)?;
+    ) -> Result<Option<NetworkEvent>, LinuxError> {
+        let event = self.router.lock().apply_neighbor_update(update, policy)?;
+        self.schedule_neighbor_timer();
+        Ok(event)
+    }
+
+    pub(crate) fn apply_neighbor_admin_update<F>(
+        &self,
+        dev: NetDeviceId,
+        dst: IpAddress,
+        policy: NeighborUpdatePolicy,
+        build: F,
+    ) -> Result<Option<NetworkEvent>, LinuxError>
+    where
+        F: FnOnce(Option<NeighborState>) -> Result<NeighborUpdate, LinuxError>,
+    {
+        let event = self
+            .router
+            .lock()
+            .apply_neighbor_admin_update(dev, dst, policy, build)?;
+        self.schedule_neighbor_timer();
+        Ok(event)
+    }
+
+    /// Wakes timer waiters and schedules a poll round after a neighbor change.
+    ///
+    /// A neighbor mutation can install an immediately due probe or a future
+    /// TTL. The last poll round may have recorded no aggregate deadline on an
+    /// idle link, and `timeout_poll` only wakes poll waiters; the sampling
+    /// timer therefore needs an explicit poller notification to recompute and
+    /// arm the neighbor deadline.
+    fn schedule_neighbor_timer(&self) {
         self.timeout_poll.wake();
-        Ok(())
+        crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
+        #[cfg(unittest)]
+        NEIGHBOR_TIMER_SCHEDULES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn remove_neighbor(
+        &self,
+        dev: NetDeviceId,
+        dst: IpAddress,
+    ) -> Result<NeighborSnapshot, LinuxError> {
+        let snapshot = self.router.lock().remove_neighbor(dev, dst)?;
+        self.timeout_poll.wake();
+        Ok(snapshot)
+    }
+
+    pub(crate) fn neighbor_snapshot(
+        &self,
+        dev: NetDeviceId,
+        dst: IpAddress,
+    ) -> Option<NeighborSnapshot> {
+        self.router
+            .lock()
+            .devices
+            .get_by_id(dev)?
+            .neighbor_state(dst)
+            .map(|state| NeighborSnapshot { dev, dst, state })
+    }
+
+    pub(crate) fn neighbor_snapshots(&self) -> Vec<NeighborSnapshot> {
+        self.router.lock().neighbor_snapshots()
     }
 
     #[cfg(unittest)]
@@ -1022,6 +1324,11 @@ fn has_reached_poll_round_time_limit(
     current.saturating_duration_since(round_started_at) >= POLL_ROUND_TIME_LIMIT
 }
 
+/// Reports deferred work as immediately runnable.
+///
+/// `try_*` contention preserves all pending state.  Returning `has_more`
+/// makes the poller run another bounded round and then requeue itself, so a
+/// temporarily held configuration lock delays rather than loses the work.
 fn deferred_poll_progress(
     rx_packets: usize,
     tx_packets: usize,
@@ -1110,6 +1417,140 @@ fn output_ipv4_packet_count(
         .checked_add(max_fragment_payload_len - 1)
         .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?
         / max_fragment_payload_len)
+}
+
+fn ipv4_snapshots_for_device(router: &Router, dev: NetDeviceId) -> Vec<Ipv4AddrSnapshot> {
+    router
+        .ipv4_addr_snapshots()
+        .into_iter()
+        .filter(|snapshot| snapshot.dev == dev)
+        .collect()
+}
+
+/// Interleaves an address transition with the routes derived from it.
+///
+/// Linux sends the address notification first, then the FIB notifier removes
+/// prefix routes for a deleted address and adds them for a new address.  A
+/// replacement therefore removes the old address and its routes before adding
+/// the new address and its routes.
+fn ipv4_transition_events(
+    before_addrs: Vec<Ipv4AddrSnapshot>,
+    after_addrs: Vec<Ipv4AddrSnapshot>,
+    removed_sources: &[Ipv4Address],
+    routes_before: Vec<Rule>,
+    routes_after: &[Rule],
+) -> Vec<NetworkEvent> {
+    let mut added_routes = routes_after.to_vec();
+    let mut removed_routes = Vec::new();
+    for route in routes_before {
+        if let Some(index) = added_routes
+            .iter()
+            .position(|candidate| *candidate == route)
+        {
+            added_routes.remove(index);
+        } else {
+            removed_routes.push(route);
+        }
+    }
+
+    // Preserve the cascade order reported by the address set: explicitly
+    // removed sources first, in their removal order, followed by any other
+    // address that disappeared.
+    let mut removed = Vec::new();
+    for source in removed_sources {
+        if let Some(snapshot) = before_addrs.iter().find(|snapshot| {
+            snapshot.entry.addr.address() == *source && !after_addrs.contains(snapshot)
+        }) && !removed
+            .iter()
+            .any(|existing: &Ipv4AddrSnapshot| existing.entry.addr == snapshot.entry.addr)
+        {
+            removed.push(snapshot.clone());
+        }
+    }
+    for snapshot in &before_addrs {
+        if !after_addrs.contains(snapshot)
+            && !removed
+                .iter()
+                .any(|removed: &Ipv4AddrSnapshot| removed.entry.addr == snapshot.entry.addr)
+        {
+            removed.push(snapshot.clone());
+        }
+    }
+
+    let take_routes = |routes: &mut Vec<Rule>, snapshot: &Ipv4AddrSnapshot, deleting: bool| {
+        let mut owned = Vec::new();
+        let mut index = 0;
+        while index < routes.len() {
+            if routes[index].is_derived_from_address(snapshot.dev, snapshot.entry) {
+                owned.push(routes.remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        // The snapshot's storage order is a lookup concern, not an
+        // announcement order.  Linux installs and removes the same set of
+        // derived routes in different sequences; apply the matching one.
+        owned.sort_by_key(|route| {
+            route
+                .address_route_transition_rank(snapshot.entry, deleting)
+                .unwrap_or(u8::MAX)
+        });
+        owned
+    };
+
+    // Linux sends the address notification first, then the FIB notifier
+    // removes or adds the routes derived from that exact address before the
+    // next address is processed.  Do not batch all address events ahead of
+    // the route events: listeners observe a per-address transition.
+    let mut events = Vec::new();
+    for snapshot in removed {
+        events.push(NetworkEvent::AddrRemoved {
+            addr: snapshot.clone(),
+        });
+        events.extend(
+            take_routes(&mut removed_routes, &snapshot, true)
+                .into_iter()
+                .map(|route| NetworkEvent::RouteRemoved {
+                    route,
+                    provenance: RouteProvenance::Kernel,
+                }),
+        );
+    }
+    for snapshot in after_addrs
+        .into_iter()
+        .filter(|snapshot| !before_addrs.contains(snapshot))
+    {
+        events.push(NetworkEvent::AddrAdded {
+            addr: snapshot.clone(),
+        });
+        events.extend(
+            take_routes(&mut added_routes, &snapshot, false)
+                .into_iter()
+                .map(|route| NetworkEvent::RouteAdded {
+                    route,
+                    provenance: RouteProvenance::Kernel,
+                }),
+        );
+    }
+    // Defensive fallback for route-only changes that cannot be attributed to
+    // an address transition (for example a link-state-driven FIB update).
+    events.extend(
+        removed_routes
+            .into_iter()
+            .map(|route| NetworkEvent::RouteRemoved {
+                route,
+                provenance: RouteProvenance::Kernel,
+            }),
+    );
+    events.extend(
+        added_routes
+            .into_iter()
+            .map(|route| NetworkEvent::RouteAdded {
+                route,
+                provenance: RouteProvenance::Kernel,
+            }),
+    );
+    events
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/runtime/service/tests.rs");

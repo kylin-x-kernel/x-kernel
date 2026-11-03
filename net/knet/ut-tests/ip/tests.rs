@@ -22,6 +22,9 @@ fn test_ip_address_and_cidr_helpers() {
     assert_eq!(ip_cidr.prefix_len(), 24);
     assert!(ip_cidr.contains_addr(&IpAddress::from(addr)));
     assert!(IpAddress::from(Ipv4Address::UNSPECIFIED).is_unspecified());
+    assert!(Ipv4Address::UNSPECIFIED.is_zeronet());
+    // Linux `ipv4_is_zeronet()` is exactly 0.0.0.0, not the whole 0/8.
+    assert!(!Ipv4Address::new(0, 1, 2, 3).is_zeronet());
     assert!(IpAddress::from(Ipv4Address::BROADCAST).is_broadcast());
     assert_eq!(Ipv4Cidr::new(addr, 33), None);
 }

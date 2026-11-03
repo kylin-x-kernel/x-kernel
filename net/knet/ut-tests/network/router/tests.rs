@@ -50,6 +50,7 @@ fn route_priority_survives_storage_changes() {
             NetDeviceId::LOOPBACK,
             oldest.dev,
             Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 0), 24).unwrap(),
+            Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 0), 24).unwrap(),
         ));
         assert_eq!(
             table.lookup(&destination).unwrap().dev,

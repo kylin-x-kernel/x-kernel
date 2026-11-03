@@ -124,12 +124,14 @@ net/knet/
     │       └── table.rs
     ├── netlink/
     │   ├── mod.rs
+    │   ├── port.rs
     │   ├── rtnetlink.rs
     │   ├── socket.rs
     │   ├── tests.rs
     │   └── wire.rs
     ├── netns.rs
     ├── network/
+    │   ├── event.rs
     │   ├── ipv4/
     │   │   ├── mod.rs
     │   │   └── process.rs
@@ -297,7 +299,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | UDP | Manages UDP PCBs and queues, using knet's IPv4 path for packet I/O. |
 | AF_PACKET | Receives Ethernet frame subscriptions and sends frames through Router. |
 | Unix | Provides local stream and datagram communication. |
-| netlink | Delivers kobject uevents and handles supported rtnetlink queries and configuration changes. |
+| netlink | Owns port IDs and subscription masks, delivers kernel uevents and rtnetlink multicast notifications, and handles supported rtnetlink queries and configuration changes. |
 | vsock | Provides optional guest-host stream communication through virtio-vsock. |
 | smoltcp | Provides IPv4/IPv6 processing for the smoltcp socket path. |
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
@@ -667,19 +669,26 @@ With `vsock_tipc_bridge`, `BridgeConnectionState` tracks the TIPC side in `bridg
 
 `NETLINK_KOBJECT_UEVENT` sockets subscribe by binding a multicast group. Kernel
 publishers append `SEQNUM` and enqueue each message only for matching groups.
-The credential path crosses three knet modules. `GeneralOptions` in
-`socket/general` stores the receiver's `SO_PASSCRED` selection.
-`NetlinkSocket::recv`, the `SocketOps::recv` implementation invoked by POSIX
-`recvmsg`, first verifies that the socket protocol is
-`NETLINK_KOBJECT_UEVENT`, then reads that option for each dequeued kernel
-uevent and constructs a trusted
-`UnixCredentials { pid: 0, uid: 0, gid: 0 }` sender identity. Other netlink
-protocols never receive these synthetic credentials. The receive path wraps
-that value in the public `KernelAncillaryData::Credentials` variant from
-`socket/mod` and appends it to the receive ancillary-data vector. The POSIX
-layer consumes that variant and serializes it as `SCM_CREDENTIALS`, allowing
-udev-compatible receivers to verify the kernel publication path without
-consulting current-process credentials.
+`SO_PASSCRED` is a receiver option on every netlink protocol, not a
+uevent-specific one. `GeneralOptions` in `socket/general` stores the selection,
+and `NetlinkSocket::recv` attaches one
+`KernelAncillaryData::Credentials` value per dequeued datagram whenever the
+option is enabled. The value comes from the datagram's own control block, so a
+short receive that truncates the payload still reports it. A userspace send
+captures `task_tgid(current)` and the real UID/GID at the socket boundary;
+an explicit, fully validated `SCM_CREDENTIALS` control message replaces that
+default. The captured identity follows every unicast and multicast copy of the
+datagram. Kernel-originated rtnetlink packets leave the control block zeroed,
+so they report UID 0, GID 0, and no PID. Kernel-originated kobject uevents are
+the deliberate exception: they report UID 0, GID 0, and PID 0, while a
+userspace-originated uevent forwarded by the kernel port preserves the original
+sender's identity. The POSIX layer serializes the ancillary value as
+`SCM_CREDENTIALS`.
+
+These credentials describe the sender; they never authorize an operation.
+Netlink bind, connect, send, and rtnetlink mutation checks use the capability of
+the socket opener or current sending task. A process cannot gain route-mutation
+or privileged-group access by claiming root through `SCM_CREDENTIALS`.
 
 User-space uevent receivers commonly install a classic BPF filter. The POSIX
 socket-option layer accepts attach/detach only on kobject-uevent sockets,
@@ -690,6 +699,196 @@ valid kernel uevents and must retain their ordinary subsystem checks.
 `NetlinkSocket::is_kobject_uevent` is the public protocol query used by that
 POSIX option layer to restrict this classic-BPF compatibility behavior to
 `NETLINK_KOBJECT_UEVENT` sockets.
+
+### Netlink multicast and rtnetlink notifications
+
+Netlink addressing is owned by the port registry in `netlink/port.rs`. A
+socket becomes addressable when it binds: an unbound socket with `nl_pid == 0`
+receives an automatically allocated port ID, an explicit port ID is reserved
+for that protocol, and duplicate IDs fail with `EADDRINUSE`. Autobind starts
+with the caller's process ID, as Linux `task_tgid_vnr(current)` does, and falls
+back to the kernel-reserved high range `0x8000_0000..=0xffff_efff`, scanning
+downward. Kernel tasks have no process ID and therefore start directly in that
+range. Port IDs are unique per protocol. A bound socket may change only its subscription
+mask, and must repeat its current port ID when rebinding; changing the ID
+returns `EINVAL`. The registry stores weak references, and socket teardown also
+sets the closed flag and removes the port before waking senders, so a released
+socket cannot keep receiving or pin its numeric port ID.
+
+`bind` installs the requested 32-bit `nl_groups` mask. Bits the protocol does
+not implement are masked off instead of rejected, matching `netlink_bind`.
+`NETLINK_ROUTE` advertises 36 route groups, but only the first 32 fit in
+`nl_groups`; groups 33 through 36 require `NETLINK_ADD_MEMBERSHIP`, which this
+stack does not yet implement. `NETLINK_KOBJECT_UEVENT` exposes all 32 group bits,
+mirroring Linux's `__netlink_kernel_create` minimum group count; kernel-originated
+uevents use group 1. `getsockname` reports the effective mask. Route notifications use group `g` with the bit
+`1 << (g - 1)`: link, neighbor, IPv4 address, and IPv4 route events map to
+`RTNLGRP_LINK`, `RTNLGRP_NEIGH`, `RTNLGRP_IPV4_IFADDR`, and
+`RTNLGRP_IPV4_ROUTE` respectively.
+
+Group authorization follows Linux `netlink_bind` ordering. A nonzero group
+request first needs `NL_CFG_F_NONROOT_RECV` or privilege and a registered
+protocol group table: an unknown protocol returns `EPERM` without privilege and
+`ENOENT` with it. The generic port-ID conformance check (`EINVAL` on a rebind
+that changes the ID) runs next. `NETLINK_ROUTE` then applies `rtnetlink_bind`'s
+extra veto: the reverse-path groups `RTNLGRP_IPV4_MROUTE_R` and
+`RTNLGRP_IPV6_MROUTE_R` require privilege and otherwise fail with `EPERM`.
+Authorization completes before the socket is inserted or its stored address is
+changed, so a rejected bind leaves the previous subscription untouched. POSIX
+`bind` passes the syscall credential through `Socket::bind_with_cred`;
+credential-free `SocketOps::bind` callers have no administrative authority.
+
+Kernel publishers deliver a message only to live, bound sockets whose mask
+contains the event group. Delivery snapshots the registry under its lock, then
+enqueues and wakes receivers after releasing it. Receive queues model Linux's
+default `sk_rcvbuf` of 212992 bytes. `SO_RCVBUF` clamps its hint to
+`net.core.rmem_max` (4 MiB), doubles it, and applies the
+`SOCK_MIN_RCVBUF` floor of 2304; `getsockopt` reports the effective limit.
+Lowering the limit does not purge packets already queued. Admission adds the
+incoming datagram to the queued byte total before comparing it with the
+effective limit, matching Linux's `netlink_attachskb` and
+`netlink_broadcast_deliver` accounting. An empty queue admits one datagram even
+when that datagram is larger than the limit; any non-empty queue admits a
+datagram only when the resulting total remains within the limit. A multicast
+message that cannot enter the recipient's queue is dropped without blocking the
+mutation path. Unicast delivery is reliable: a missing destination returns
+`ECONNREFUSED`, a nonblocking send to a queue that cannot admit another
+packet returns `EAGAIN`, and a blocking send waits for capacity. Closing the
+receiver unregisters its port before waking a blocked sender; the sender then
+re-resolves the destination and reports `ECONNREFUSED` (or delivers to a newly
+bound socket with the same ID), never `EPIPE`. Queue accounting charges
+netlink payload bytes rather than `skb->truesize`, so the actual retained
+memory is approximately the configured limit plus one oversized datagram, not
+an exact replica of Linux socket memory accounting. A multicast delivery
+that cannot enter the recipient's queue sets `NETLINK_S_CONGESTED`, records one
+positive `ENOBUFS` pending socket error, and reports `EPOLLERR`; subsequent
+multicast messages are dropped while congestion remains set. `SO_ERROR`
+consumes the positive error without clearing congestion, a successful receive
+that leaves the queue empty clears congestion, and a kernel reply that cannot
+enter the requester's queue uses the same overrun accounting.
+
+Userspace sends follow `netlink_sendmsg`. An empty datagram fails with
+`ENODATA` before destination parsing or autobind. `SO_SNDBUF` clamps its hint to
+`wmem_max` (4 MiB), stores twice the requested size, and applies the Linux
+minimum; the effective `sk_sndbuf` therefore defaults to 212992 bytes and can
+grow to 8 MiB. A datagram larger than
+`sk_sndbuf` minus 32 bytes fails with `EMSGSIZE` after autobind. Send
+authorization is protocol-specific: `NETLINK_ROUTE` and
+`NETLINK_KOBJECT_UEVENT` omit `NL_CFG_F_NONROOT_SEND`, so a nonzero destination
+port ID or group from those protocols requires privilege, while
+`NETLINK_USERSOCK` enables `NL_CFG_F_NONROOT_SEND` and permits unprivileged
+peers to send. Linux authorizes the destination supplied in `msg_name` on each
+send; a destination stored by `connect` was authorized once at connect time and
+is not rechecked by later address-less sends. When `nl_groups` is nonzero, the
+lowest set bit selects the destination group; the multicast copy reaches that
+group's subscribers except the sending socket and the requested unicast port
+ID (normally the same socket). The same message is then unicast to `nl_pid`,
+including port ID zero for local kernel request handling. The receive path reports the sender's port ID and the
+selected group bit in `NetlinkAddr`. A sender does not need to subscribe to the
+destination group; Linux checks only the protocol's non-root send policy. The kernel request path
+splits a datagram into its constituent messages, handles each independently,
+and pulls the aligned length after every message. Malformed or truncated
+messages stop the batch silently; messages without `NLM_F_REQUEST` or with a
+type below `NLMSG_MIN_TYPE` are skipped; callback errors produce
+`NLMSG_ERROR`, and a zero error ACK is sent only when `NLM_F_ACK` was set.
+`nlmsg_len < sizeof(struct rtgenmsg)` is a silent no-op. A successful ACK
+contains the fixed 16-byte request header after the zero errno and sets
+`NLM_F_CAPPED`, matching Linux `netlink_ack`. An error ACK normally appends the
+complete original request; with `NETLINK_CAP_ACK` it carries only the fixed
+request header and also sets `NLM_F_CAPPED`. The socket option defaults off and
+is exposed through `SOL_NETLINK` as a boolean. A dump queues its result
+messages and `NLMSG_DONE`; a successfully started dump suppresses the success
+ACK even when the request sets `NLM_F_ACK`, because Linux `netlink_dump_start`
+returns `-EINTR` to `netlink_rcv_skb` for that case. ACK enqueue is best-effort
+after the mutation, so a full receive queue never prevents or rolls back a
+committed change.
+
+`connect` follows `netlink_connect`'s family and length rules. `AF_UNSPEC`
+disconnects once the two-byte `sa_family_t` is present; any other family except
+`AF_NETLINK` fails with `EINVAL`, as does an `AF_NETLINK` address shorter than
+`sockaddr_nl`. A nonzero connected destination requires privilege or the
+protocol's non-root send capability, and an unbound socket is autobound first.
+The destination stores the lowest requested group bit, so `getpeername` reports
+the normalized mask; an unconnected socket reports port zero/groups zero. A
+connected socket receives unicast only from its peer: a datagram whose source
+port differs is rejected with `ECONNREFUSED`, while multicast remains
+independent of the connected destination. `recv` reports the source netlink
+address and supports `MSG_PEEK`. A consuming receive removes the datagram before
+copying it to userspace, so a copy fault still consumes it, matching Linux's
+`skb_free_datagram`; `MSG_PEEK` retains it.
+
+Network mutations publish neutral `NetworkEvent` values instead of building
+rtnetlink messages in the owning subsystem. Link changes and removals, IPv4
+address additions and removals, configured and address-derived route additions
+and removals, and neighbor additions and removals map to `RTM_NEWLINK` /
+`RTM_DELLINK`, `RTM_NEWADDR` / `RTM_DELADDR`, `RTM_NEWROUTE` /
+`RTM_DELROUTE`, and `RTM_NEWNEIGH` / `RTM_DELNEIGH`. Events are emitted only
+for real state transitions, except that an exact `NLM_F_REPLACE` address
+request republishes `RTM_NEWADDR` without changing the retained entry, as
+Linux does. A link update whose name, MTU, operstate, flags, and address
+snapshot are unchanged publishes no `RTM_NEWLINK`, even when resynchronizing
+derived routes yields route events; a changed snapshot publishes the link
+event with its real flag delta. `IFA_F_NOPREFIXROUTE` suppresses only the
+connected-prefix route; the local `/32` host route remains. An address with a stored broadcast value
+also derives a local-table broadcast route, independently of
+`IFA_F_NOPREFIXROUTE`, while a zero or `255.255.255.255` broadcast suppresses
+that addition. Address notifications carry
+`IFA_F_PERMANENT` in the legacy one-byte `ifa_flags` field and the complete
+flags in `IFA_FLAGS`, so `0x200` survives the narrow header field. ARP
+resolution and reply processing are data-plane state changes too: a new
+unresolved entry publishes `RTM_NEWNEIGH` with `NUD_INCOMPLETE`;
+responses addressed to the local link address publish `NUD_REACHABLE`, while
+requests and broadcast responses publish `NUD_STALE`. A different hardware
+address received within the one-second ARP locktime retains the first binding,
+as Linux does. Locktime is bypassed by a gratuitous ARP and by a request
+addressed to a local address, but an unsolicited non-local ARP without an
+existing entry does not create a neighbor (`arp_accept` defaults to zero).
+Data-plane learning never replaces a `NUD_PERMANENT` entry, and an identical
+state/MAC update neither refreshes the timestamp nor publishes an event.
+Valid entries past their TTL are retained as `NUD_STALE` with their hardware
+address intact. Traffic marks an expired entry stale and sends one probe while
+continuing to use the old address; later sends do not duplicate an outstanding
+probe. The timer retries that probe at each retransmit deadline, and when the
+solicitation budget is exhausted the entry becomes `NUD_FAILED` instead of
+being deleted. A failed entry remains visible without a link address, has no
+probe timer, and is garbage-collected after the neighbor TTL. Traffic to it
+restarts resolution in place: the entry returns to `NUD_INCOMPLETE`, a fresh
+solicitation is sent, and queued packets wait for the reply. Neighbor expiry
+and retries are time-driven: RX drains visit devices round-robin and poll each
+one even when no frame arrived, and `Service` includes the earliest device
+neighbor deadline in its timer wakeup so an idle link still probes and expires
+entries. While a link is administratively down, `poll_rx` freezes neighbor
+state and the device reports no timer deadline; otherwise a permanently
+expired deadline would spin the Service poller until the link returned. The
+retained deadlines resume when the link is brought back up, and that transition
+explicitly notifies the network poller because the down device contributed no
+deadline from which the Service timer could otherwise notice the change.
+Buffered frames are likewise not reported as RX work while the link is down;
+they remain queued until the link can consume them instead of making the
+poller requeue without progress. Device scans are coalesced to at most one per
+retransmit interval; per-entry probe deadlines still advance by one retransmit
+interval, and an unresolved entry is marked `NUD_FAILED` after three failed
+solicitations and reclaimed by the same TTL garbage collection. Probing does
+not require a local IPv4 source: like Linux `arp_solicit()`, an address-less
+device emits the solicitation with a `0.0.0.0` sender and still consumes the
+probe budget, so an unresolved entry cannot live forever on a timer. Router
+collects those device events after each RX or TX device operation, and `Service`
+publishes them after releasing the Router lock while retaining
+`network_config_lock` across the take/publish pair; control-plane mutations
+publish while holding `network_config_lock`, so their notification order
+matches commit order.
+Address mutations snapshot the route table and publish events per address:
+each removed address is followed immediately by the routes derived from that
+exact address snapshot, then the next removed address, and each added address
+is followed by its derived route additions. This preserves Linux's ordering
+of `RTM_DELADDR` / `RTM_NEWADDR` before the address notifier's FIB changes for
+that address; cascaded primary/secondary removals are not batched. Device teardown snapshots neighbors before destroying
+the device. If the link was administratively up, it first publishes
+`RTM_NEWLINK` with `IFF_UP | IFF_RUNNING` cleared and operstate down, then
+address, route, and neighbor removals, and finally `RTM_DELLINK` with every
+changed bit set. The Router lock is ordered after `network_config_lock`; the
+nonblocking data-plane publish path uses `try_network_config_lock` and leaves
+neighbor events queued when the configuration lock is busy.
 
 ### Rtnetlink Control Plane
 
@@ -753,15 +952,79 @@ flowchart LR
 | From | To | Trigger |
 |---|---|---|
 | Device link configuration | Updated device link configuration | `RTM_NEWLINK` updates the target `NetDevice` through `Service::update_device_link`. |
-| Device link configuration | `RTM_NEWLINK` response | An `RTM_GETLINK` dump reads all `LinkSnapshot` values; a single-object query reads the matching snapshot by interface index or name. |
+| Device link configuration | `RTM_NEWLINK` response | An `RTM_GETLINK` dump reads all `LinkSnapshot` values; a single-object query reads the matching snapshot by interface index, primary name, or alternate-name fallback. |
 | Initial IPv4 address entry | `DeviceEntry::ipv4` | `init_network` registers the address through `Router::add_ipv4_addr`; Router also creates the corresponding local and connected routes. |
 | IPv4 address entry | smoltcp, `IngressProcessor`, and device address projections | `DeviceRegistry` refreshes device projections; `Service` refreshes smoltcp and ingress views when an address is added, removed, or its owning device is removed. |
 | Last owner of an IPv4 address | Router configured routes | When the address is removed, configured routes using that address as `prefsrc` are also removed. |
 | Removed device | Router routes and device neighbor state | `unregister_netdev` holds `network_config_lock`; Router removes routes, addresses, and neighbors associated with the interface; other interface indices remain unchanged. |
-| `RTM_GETADDR` | Router address snapshot | rtnetlink reads `Service::ipv4_addr_snapshots` directly and returns only the specified device's addresses when the request includes an interface index. |
+| `RTM_GETADDR` | Router address snapshot | rtnetlink reads `Service::ipv4_addr_snapshots` directly. Non-strict Linux address dumps ignore the request payload, so family and interface-index fields do not filter the returned IPv4 addresses. |
+| `RTM_GETROUTE` | Output IPv4 route lookup | A non-dump request requires a complete `rtmsg` and `AF_INET` in the first payload byte. Attributes use Linux's liberal `rtm_ipv4_policy` minimum sizes; malformed trailing bytes stop parsing but do not fail the request. `RTA_IP_PROTO` is validated before `RTA_IIF` is resolved. The lookup honours `RTA_DST`, `RTA_SRC`, `RTA_OIF`, and `RTA_IIF` device existence; it reports `EOPNOTSUPP` for an input route rather than fabricating one. The reply always sets `dst_len` to 32, reports the main table unless `RTM_F_LOOKUP_TABLE` is set, emits the original destination and requested source, emits `RTA_PREFSRC` only when the selected source differs, and always includes a zeroed `RTA_CACHEINFO`. `RTM_F_FIB_MATCH` instead returns the matched FIB entry, or `EHOSTUNREACH` when the route has none. |
 | Initial route | `RouteTable` | `init_network` inserts the boot route directly into the table. |
 | `RTM_NEWROUTE` / `RTM_DELROUTE` / `SIOCADDRT` / `SIOCDELRT` | `RouteTable` | Route updates are validated and applied by the table under the Router lock. |
 | `RTM_NEWNEIGH` | Target `NetDevice` | rtnetlink forwards the update through `Service` and `Router` to the device neighbor table. |
+| `RTM_GETNEIGH` | Target `NetDevice` neighbor table | A non-dump request validates the strict `ndmsg` form and rejects a non-proxy request with a zero interface index before parsing attributes. It then applies strict attribute policy (trailing bytes, unknown kinds, and strict-start `NDA_*` constraints), requires `NDA_DST`, accepts only `NDA_DST`, selects the address family before checking the four-byte IPv4 key, resolves the interface index only after the key is valid, rejects proxy lookups, and replies with `RTM_NEWNEIGH` to the requesting port and sequence. |
+| `RTM_GETNEIGH` dump | Every neighbor table | Parses attributes with liberal `nda_policy` validation, applies the `NDA_IFINDEX` and `NDA_MASTER` filters, and selects the address family and proxy mode from the `ndmsg` header. A policy failure discards the attribute filters while retaining the family and proxy selection. Returns live snapshots with `NLM_F_MULTI`, adds `NLM_F_DUMP_FILTERED` for an interface or master filter, and finishes with `NLMSG_DONE`. An unmatched filter is an empty result, not an error. `NETLINK_GET_STRICT_CHK` is not implemented, so the liberal path is always used. |
+
+Requests are checked in Linux order. A type above `RTM_MAX` returns
+`EOPNOTSUPP`. A payload shorter than one `rtgenmsg` byte is a silent no-op.
+`RTM_GETROUTE` selects `inet_rtm_getroute` only for `AF_INET`; every other
+family, including `AF_UNSPEC`, has no registered handler in this stack and
+therefore returns `EOPNOTSUPP`. The attribute parser accepts the full Linux
+policy surface for wire compatibility, but this stack's single-table output
+lookup deliberately does not model policy rules, source routing, marks, UIDs,
+TOS, protocol/port selectors, multipath, route metrics, or input routes.
+`RTA_TABLE`, `RTA_MARK`, `RTA_UID`, `RTA_METRICS`, `RTA_ENCAP`, and
+`RTA_MULTIPATH` are validated and then ignored rather than used to fabricate a
+lookup key. There is no IGMP membership model, so a multicast output route is
+never marked local merely because a group is joined.
+Every in-range non-GET type then requires `CAP_NET_ADMIN`, even when no handler
+exists, so an unprivileged `RTM_SETLINK` fails with `EPERM` rather than
+`EOPNOTSUPP`. Unsupported in-range non-GET types reach the same capability
+check and then report `EOPNOTSUPP`; this includes `RTM_SETLINK` and
+`RTM_DELLINK`, so link configuration is changed through `RTM_NEWLINK`.
+Devices are registered at startup and may be unregistered at runtime, but the
+stack has no runtime netdev creation, and startup registration emits no
+`RTM_NEWLINK` because no subscriber can exist yet. Link dumps use liberal
+attribute iteration, apply `IFLA_MASTER`, and add `NLM_F_DUMP_FILTERED` when a
+filter is active; `IFLA_LINKINFO` is accepted but does not filter because the
+stack registers no link kinds. Dump dispatch follows the requested family:
+`AF_INET` invokes the IPv4 dump, `AF_INET6` invokes an empty IPv6 handler that
+still terminates with `NLMSG_DONE`, and `AF_UNSPEC` or an unregistered family
+uses the all-family fallback, which reports the IPv4 records. Non-strict IPv4
+address dumps then ignore the `ifaddrmsg` body and return every IPv4 address.
+IPv4 route dumps ignore the table and all header fields except `RTM_F_PREFIX`
+in a complete `RtMsg`, which returns an empty dump; `RTM_F_CLONED` has no
+effect because cloned and exception routes are not modelled. Neighbor dumps
+apply the `NDA_IFINDEX` and `NDA_MASTER` filters from the liberal path, select
+family and proxy mode from `ndmsg`, and fall back to no attribute filters on a
+policy failure. A single-object GETLINK also uses the non-strict path: it
+requires a complete `ifinfomsg` but ignores its header fields, ignores unknown
+attributes and malformed trailing bytes, enforces the `IFLA_IFNAME` and
+`IFLA_ALT_IFNAME` string limits plus the four-byte `IFLA_EXT_MASK` width,
+returns `EOPNOTSUPP` for `IFLA_NET_NS_PID`/`IFLA_NET_NS_FD`, and returns
+`EINVAL` for an unresolvable `IFLA_TARGET_NETNSID` or `IFLA_PERM_ADDRESS`.
+`IFLA_IFNAME` takes precedence over the `IFLA_ALT_IFNAME` fallback. Both are
+resolved against the primary-name registry because no alternate names are
+registered, so an alternate-only lookup for an unregistered name still reports
+`ENODEV`. A nonempty `IFLA_LINKINFO` shorter than one nested attribute header
+returns `EINVAL`, matching `NLA_NESTED`, while an empty one is accepted.
+Target-netns switching and the policy validation of the remaining known
+fixed-width link attributes are not modelled. These are the Linux non-strict
+behaviours, not strict-check behaviour: `NETLINK_GET_STRICT_CHK` is not
+implemented, and a known link-dump `NLA_U32` shorter than four bytes falls
+back to an unfiltered walk instead of performing Linux's out-of-bounds prefix
+read. GET replies and dump entries use
+the request's port ID and sequence, as do the payload headers of address and
+route notifications caused by that request, even without `NLM_F_ECHO`. An
+address request that derives connected or local routes emits those route
+notifications with port zero, sequence zero, and no echo, because Linux's FIB
+notifier calls `fib_magic` without request metadata. Link notifications use
+port zero and sequence zero unless echo is requested. Unsolicited notifications
+use sequence zero. Neighbor notifications carry the requester port ID in
+`ndmsg` but never echo or exclude that port from multicast; address and route
+multicast excludes the requester only for `NLM_F_ECHO`. Address, route, and
+neighbor mutations commit before their replies are encoded, and replies are
+never normalized to port zero.
 
 ### Network Data-Plane Poller
 
@@ -1120,7 +1383,9 @@ Readable, writable, and connection-state events use separate `PollSet` instances
 
 The Router coordinates network configuration and dynamic source selection. `network/router.rs::RouteTable` owns configured and address-derived rules, validates configured-route updates against borrowed devices and addresses, and synchronizes address-derived routes by identity. `device/registry.rs::DeviceRegistry` owns device registration and exact address mutations, including capacity checks and device projection synchronization. Router retains legacy first-address, broadcast, and netmask update policies and applies them through those operations. The outer `stack/router.rs::Router` reconciles route and pending-packet state from those mutation results under its existing mutex. Each device owns its neighbor table. Netlink handles protocol parsing and live-snapshot encoding, then calls the appropriate owner.
 
-`control::network_config_lock` serializes control-plane mutations across sockets, legacy socket-ioctl mutations, and `unregister_netdev`. Each netlink socket has mutexes for its send transaction and RX queue and an `RwLock` for its local address. The global `UEVENT_SUBSCRIBERS` mutex protects weak subscriber references, and `UEVENT_SEQNUM` atomically allocates event sequence numbers. The send-transaction lock covers capacity preflight, mutation execution, and response enqueueing for one socket. Responses are generated outside the RX-queue lock; that lock is taken only to check capacity and enqueue the result. The fixed acquisition order is the send-transaction lock, `network_config_lock`, Router, ingress, Interface, and netlink RX queue, omitting any lock that the operation does not use.
+`control::network_config_lock` serializes control-plane mutations across sockets, legacy socket-ioctl mutations, and `unregister_netdev`. Each netlink socket has a send mutex, an RX-queue mutex, and an `RwLock` for its local address. Port subscriptions live in the process-global weak-reference `PORTS` table rather than a per-netns table; `UEVENT_SEQNUM` atomically allocates event sequence numbers. The send lock covers autobind and destination selection but not response-space reservation. Responses are generated after mutations and enqueued best-effort outside the RX-queue lock; that lock is held only to push or pop packets.
+
+The control-plane chain is send lock -> `network_config_lock` -> Router -> device/Interface state. The data-plane RX path holds `network_config_lock` with ingress while processing packets, releases ingress, then takes `SOCKET_SET` -> Router for the flush; the protocol poll path without a configuration mutation is `SOCKET_SET` -> Router -> Interface. Netlink RX-queue and `PORTS` locks are leaves: a path releases them before taking an earlier lock, and publication releases `PORTS` before enqueueing to receivers. The data-plane neighbor publisher takes `network_config_lock` before Router, drops Router before publication but retains the configuration lock, and defers publication if the configuration lock is busy. No socket-dispatch callback acquires `network_config_lock`, so the control-plane chain and the data-plane RX path do not form a cycle.
 
 `GeneralOptions` stores device binding in `bound_dev_if: AtomicI32`. UDP lookup and transmission and raw-socket RX-device selection read this field with Relaxed ordering. Binding and unbinding use an atomic exchange; an actual change notifies `device_binding_changed: PollEvent`, whose Release/Acquire version ordering publishes the preceding field update. Repeated writes of the same interface index remain silent.
 
@@ -1128,7 +1393,7 @@ Raw-IP RX registration reads the event version, reads the interface index, regis
 
 Raw IP uses `GeneralOptions::rx_device_selection` to select RX devices. Explicit `SO_BINDTODEVICE` selects the specified device; default and unbound states select all devices. Address binding, connection state, and route changes do not determine this subscription selection.
 
-`Service::register_rx_waker` uses the caller's `PollContext` to register the aggregate `timeout_poll` and any Ethernet RX poll source that supports interrupt-driven RX. When a device becomes pending, the `NetRx` softirq wakes the corresponding poll source and schedules `knet-poller` work for background protocol progress. Raw IP waiters can also wake through that source; TCP waiters use socket-local sources. `PollRegistrations` keeps these registrations alive across the `Pending` state.
+`Service::register_rx_waker` uses the caller's `PollContext` to register the aggregate `timeout_poll` and any Ethernet RX poll source that supports interrupt-driven RX. The aggregate deadline combines protocol timers, deferred TCP close, and the earliest device neighbor deadline, so an idle link still advances probe retries and expiry. When a device becomes pending, the `NetRx` softirq wakes the corresponding poll source and schedules `knet-poller` work for background protocol progress. Raw IP waiters can also wake through that source; TCP waiters use socket-local sources. `PollRegistrations` keeps these registrations alive across the `Pending` state.
 
 Loopback devices and Ethernet devices without an attached `NetRxScheduler` continue to use the aggregate `timeout_poll` waker, which supports broadcast wakeups to multiple tasks. The device layer does not retain raw caller wakers or register a separate, inequivalent task waker outside `Service`.
 
@@ -1169,17 +1434,17 @@ The network device registry assigns stable `NetDeviceId` values independently of
 
 Devices own link configuration and expose interface names, MTUs, administrative and operational states, and hardware addresses through `NetDevice::link_snapshot`. `DeviceRegistry` resolves link queries and validates link updates, including name uniqueness and per-device MTU limits. It refreshes the aggregate MTU on device registration, removal, and successful MTU changes. `Service` accesses the registry under the Router lock. The AF_PACKET send path obtains an allocation-free `LinkSendSnapshot` under the Router lock, validates it after releasing that lock, and reacquires the Router lock through `Service::send_link_frame` for transmission. Snapshot validation and dispatch are separate critical sections. Device-existence checks use `has_device`, and route MTU queries read the matching device directly. Configuration changes or device removal rebuild the smoltcp `Interface` only when the effective MTU changes, keeping cached `DeviceCapabilities` consistent with the device set while otherwise preserving runtime caches.
 
-`DeviceEntry::ipv4` owns the interface address configuration defined in `network/interface_address.rs` and releases it on device removal. Each `Ipv4AddrEntry` has `addr`, `scope`, and optional `broadcast` fields; device identity is supplied separately. `Ipv4AddressSet` validates unicast addresses, maintains device-local CIDR uniqueness, and replaces or removes entries by CIDR while preserving device-local order. Rejected mutations leave entries unchanged. `DeviceRegistry` validates device existence and the address capacity supplied by the shared smoltcp stack; existing identities remain idempotent at capacity. Legacy address and netmask ioctls update the primary (first configured) entry while preserving other addresses on the device. Broadcast addresses default to the CIDR-derived value. Netmask updates retain scope and recompute the broadcast address only when its previous value was mask-derived. If the resulting CIDR already exists on the same device, the old entry is removed and the existing target retains its attributes; the operation succeeds, matching Linux `SIOCSIFNETMASK`.
+`DeviceEntry::ipv4` owns the interface address configuration defined in `network/interface_address.rs` and releases it on device removal. Each `Ipv4AddrEntry` has `addr`, `scope`, optional `broadcast`, `no_prefix_route`, and optional raw `label` fields; device identity is supplied separately. `broadcast` models Linux's stored `ifa_broadcast`: `None` means zero, not a value derived from the CIDR. `label` is a NUL-terminated `[u8; IFNAMSIZ]`; `None` uses the device name, while `Some` preserves an explicit label, including an explicitly empty one. Incoming `IFA_F_SECONDARY` is not trusted: an address is secondary exactly when an earlier address on the same device has the same prefix mask and network, so a later address on a different network is primary. `Ipv4AddressSet` validates unicast addresses and label length, maintains device-local CIDR uniqueness, and replaces or removes entries by CIDR while preserving device-local order. Removing a primary also removes every following matching secondary before the primary, matching Linux's promotion-disabled cascade. Rejected mutations leave entries unchanged. `DeviceRegistry` validates device existence and the address capacity supplied by the shared smoltcp stack; existing identities remain idempotent at capacity. Legacy address and netmask ioctls update the primary (first configured) entry while preserving other addresses on the device. `SIOCSIFADDR` stores the computed default broadcast for an Ethernet-class device with prefix length below 31; an `RTM_NEWADDR` request stores only an explicit nonzero `IFA_BROADCAST` and otherwise leaves the stored value zero. `SIOCSIFBRDADDR` replaces the stored value even when it equals the current CIDR-derived value, and a zero argument clears it. Netmask updates retain scope and recompute the stored broadcast only when it equaled the old CIDR-derived value and the new prefix length remains below 31; custom and zero stored values are preserved. If the resulting CIDR already exists on the same device, the old entry is removed and the existing target retains its attributes; the operation succeeds, matching Linux `SIOCSIFNETMASK`.
 
 Addresses are enumerated by device registration order, then by configuration order within each device. Device-local order determines primary-address and source selection; `RouteTable` independently preserves route precedence across address mutations.
 
 `RouteTable` owns route identity and precedence. Each `RouteEntry` carries an `insertion_order`; entries are sorted by longest prefix, local host-route priority, and then oldest sequence. Their physical order is derived from these explicit fields, and entry indices have no stable identity. Lookup and control-plane snapshots traverse the sorted entries directly. Sorting runs on configuration paths; packet lookup allocates no memory.
 
-`AddressRouteId` identifies address-derived routes by owner device, local/connected kind, and destination prefix. Derived routes use the main table; the output device is the owner for connected routes and loopback for local routes. Synchronization updates attributes of surviving identities while preserving their `insertion_order`, removes vanished identities, and gives newly created routes a new sequence. Multiple addresses on a device can support one local or connected route; the first remaining supporting address in per-device order supplies its preferred source. Local routes use a `/32` identity independent of address netmasks; connected routes use the network prefix and are omitted for `/32` and unspecified networks.
+`AddressRouteId` identifies address-derived routes by owner device, the exact generating address including its prefix length, local/connected/broadcast kind, and destination prefix. Internally, derived routes use the main table; the output device is the owner for connected and broadcast routes and loopback for local routes. rtnetlink notifications expose the Linux FIB representation instead: the local `/32` is reported in the local table as `RTN_LOCAL` on its owner device, while connected routes remain main-table unicast routes. Synchronization updates attributes of surviving identities while preserving their `insertion_order`, removes vanished identities, and gives newly created routes a new sequence. Every address supplies its own local `/32` with that address as preferred source. Two addresses can derive the same FIB route, so insertion is also deduplicated by complete route identity; the surviving rule carries one generator's provenance, and a later synchronization reattributes it after that generator disappears. Only a primary supplies the connected prefix and the computed broadcast, with the primary's address as preferred source; an explicit nonzero `IFA_BROADCAST` other than `255.255.255.255` supplies a broadcast route for any address, including a secondary, and is independent of `IFA_F_NOPREFIXROUTE`. The explicit route is attributed to the address that supplied the attribute but uses the primary address as preferred source, while the computed route is attributed to and sourced from the primary, so a primary-removal cascade can order each address's notifications by its own generator. A failed link suppresses connected and computed-broadcast routes but retains the local `/32`; `IFA_F_NOPREFIXROUTE` suppresses only the connected prefix. Local routes use a `/32` identity independent of address netmasks; connected routes use the network prefix and are omitted for `/32` and unspecified networks. A local destination is output through loopback while the owner device still supplies the preferred source, so an address-less local output does not require the owner link to be up; an explicitly requested output interface must itself exist and be up.
 
 Address removal also clears configured routes whose preferred source becomes invalid and the device's pending TX. `Service` projects Router addresses into the smoltcp `Interface`, `IngressProcessor`, and devices; Ethernet uses them for ARP, directed broadcasts, and packets awaiting neighbor resolution.
 
-Configured routes belong to `RouteTable`, whose update methods validate before modifying rules. Rejected replacements preserve the original rule and its sequence. Successful configured-route replacements retain the delete/add contract and receive a new sequence. For `RTM_NEWROUTE`, exclusive creation checks all matching routes, while replacement selects a matching configured route even when a derived route precedes it. Derived routes cannot be replaced through this interface. `RTM_NEWROUTE` and `SIOCADDRT` require gateways to lie within the output interface's IPv4 subnet and exclude directed-broadcast addresses. Ethernet devices own their neighbor tables, so route and neighbor mutations operate through their respective owners. `unregister_netdev` holds `network_config_lock` while Router removes the device's routes, addresses, and neighbors. Surviving interface indices remain unchanged.
+Configured routes belong to `RouteTable`, whose update methods validate before modifying rules. Rejected replacements preserve the original rule and its sequence. Successful configured-route replacements retain the delete/add contract and receive a new sequence. For `RTM_NEWROUTE`, exclusive creation checks all matching routes, while replacement selects a matching configured route even when a derived route precedes it. Derived routes cannot be replaced through this interface. `rtm_protocol` is stored as the raw Linux protocol byte rather than being normalized to `RTPROT_BOOT`, and route replies preserve it. `rtm_tos` carries the DSCP value with its ECN bits rejected, `rtm_type` is limited to the modelled Linux types, and table zero means the main table. `RTM_NEWROUTE` and `SIOCADDRT` require gateways to lie within the output interface's IPv4 subnet and exclude directed-broadcast addresses. The insert-only checks reject route type zero in every scope because `fib_create_info()` compares its synthetic `RT_SCOPE_NOWHERE` against the requested scope and then rejects the unsupported type; those checks and the dead/linkdown route flags do not apply to `RTM_DELROUTE`, which accepts those fields when matching and removing an existing route. Ethernet devices own their neighbor tables, so route and neighbor mutations operate through their respective owners. `unregister_netdev` holds `network_config_lock` while Router removes the device's routes, addresses, and neighbors. Surviving interface indices remain unchanged.
 
 ### Credentials for Unix Pathname Sockets
 
@@ -1187,9 +1452,23 @@ Linux implicitly reads credentials from the task context through `current_cred()
 
 Credentials follow the call path, keeping their lifetime separate from Unix sockets, path-lookup state, and dentries. `sock_alloc_file` explicitly receives `Arc<Cred>` and stores it in `VfsFile::cred`; the socket object retains only its own state. Entry points obtain the current task's credentials, and knet uses the supplied credentials throughout the operation.
 
-### Credentials for rtnetlink Sends
+### Credentials for rtnetlink Bind and Sends
 
-Netlink sockets can be passed between processes, so route mutation authorization follows Linux `netlink_net_capable()` and requires effective `CAP_NET_ADMIN` in the process performing the send. The socket's open credential does not participate: Linux authorizes the current sender, and transferring a socket neither transfers nor suppresses mutation authority. POSIX send and socket-file write take a current-sender snapshot at entry and pass it through `Socket::send_with_cred` to rtnetlink permission checks. Kernel callers outside a user-task context specify that credential explicitly through `send_with_cred`.
+Netlink sockets can be passed between processes, and an addressless or
+connected send to a kernel protocol is authorized through Linux's
+`__netlink_ns_capable()` two-party rule: both the current sender and the
+credential captured when the socket file was opened must hold the protocol
+capability. An explicit `msg_name` destination sets `NETLINK_SKB_DST` and is
+authorized against the current sender only. Rtnetlink route mutation and
+nonzero destination authorization require effective `CAP_NET_ADMIN`; the
+`NETLINK_KOBJECT_UEVENT` receive callback requires `CAP_SYS_ADMIN`. POSIX bind
+and send take a current-credential snapshot at entry. Bind passes it through
+`Socket::bind_with_cred` so `rtnetlink_bind` can reject the reverse-path groups
+without `CAP_NET_ADMIN`; send passes it through `Socket::send_with_cred`, along
+with the opener snapshot in `SendOptions`, to the protocol checks. Kernel
+callers outside a user-task context specify credentials explicitly through
+`bind_with_cred`, `connect_with_cred`, or `send_with_cred`; the credential-free
+`SocketOps` paths have no administrative authority.
 
 ### Credentials for Unix Messages and Peer Queries
 
@@ -1327,8 +1606,8 @@ With `vsock_tipc_bridge` enabled, `bind()` rejects explicit binding to ports in 
 | Device binding | UDP demultiplexing checks the bound device. TCP/raw bound-device packet filtering and complete IPv6 scope semantics remain separate compatibility work. |
 | DNS | smoltcp DNS support is compiled in; knet exposes no public resolver API. |
 | AF_PACKET | Ethernet raw/datagram sockets with byte- and frame-bounded queues; filters `PACKET_OTHERHOST`. Membership changes, connect, peer queries, shutdown, listen, and accept are unsupported. |
-| rtnetlink operations | Supports link queries/updates, IPv4 address and route queries/add/delete, and IPv4 neighbor updates. Other message types return `NLMSG_ERROR` with `EOPNOTSUPP`; neighbors accept only incomplete/permanent states with no flags. |
-| Netlink sockets | Route sockets reject multicast subscriptions, userspace-peer destinations, and mixed query/mutation batches. Kobject-uevent sockets support group delivery, `SO_PASSCRED`, and validated no-op classic-BPF attach/detach compatibility. Connect, peer queries, and shutdown are unsupported. |
+| rtnetlink operations | Supports link queries/updates, IPv4 address and route queries/add/delete, and IPv4 neighbor updates. Other message types return `NLMSG_ERROR` with `EOPNOTSUPP`; neighbor mutations accept only incomplete/permanent states and `NTF_*` flags are not modelled, so unsupported states fail explicitly. Dumps end with `NLMSG_DONE`; a successfully started dump suppresses the requested success ACK, matching Linux. Standard informational attributes such as `IFA_CACHEINFO`, `NDA_CACHEINFO`, `NDA_PROBES`, and extended link counters/queue metadata are not emitted; route dumps and route notifications do emit `RTA_TABLE`, matching `fib_dump_info`. `NETLINK_GET_STRICT_CHK` and `NETLINK_ADD_MEMBERSHIP` are not implemented. Dumps parse the strict filter attributes but treat malformed or policy-rejected filter attributes as absent filters, and they always apply successfully parsed family/interface/master filters instead of ignoring them in non-strict mode. Route groups 33 through 36 are unreachable. |
+| Netlink sockets | Route sockets support real group subscriptions, userspace multicast sends, kernel notifications, `SO_SNDBUF`, `SO_RCVBUF`, and `NETLINK_CAP_ACK`. Kobject-uevent sockets expose 32 groups, implement the privileged port-0 `SEQNUM` rebroadcast path, and validated no-op classic-BPF attach/detach compatibility. All netlink protocols support `SO_PASSCRED`. Usersock sockets permit unprivileged sends but reject group subscriptions. Connect and peer queries are supported; accept, listen, and shutdown are unsupported. |
 | Socket options | Options unhandled by the selected protocol return `ENOPROTOOPT`. |
 | Unix datagrams | Receive queues use unbounded `async_channel` queues. |
 | Unix stream control data | Byte-marked `SCM_RIGHTS` delivery with the segment-end barrier and `MSG_PEEK` duplication. Each `recvmsg` consumes at most one control record. Zero-length `sendmsg` with ancillary drops the control data because there is no byte to attach it to. Pending-record retention is bounded by `MAX_PENDING_RECORDS` / `MAX_PENDING_ANCILLARY`; a send beyond the quota fails with `ENOBUFS`. |

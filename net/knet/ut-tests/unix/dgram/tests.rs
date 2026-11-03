@@ -71,7 +71,7 @@ fn send_credentials(sender: &DgramTransport, credentials: crate::SenderCredentia
         .send(
             &b"x"[..],
             SendOptions {
-                unix_sender_credentials: Some(credentials),
+                sender_credentials: Some(credentials),
                 ..SendOptions::default()
             },
         )

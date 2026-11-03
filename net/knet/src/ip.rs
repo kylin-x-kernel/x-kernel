@@ -17,6 +17,7 @@ pub(crate) struct Ipv4Address([u8; 4]);
 
 impl Ipv4Address {
     pub(crate) const BROADCAST: Self = Self([255, 255, 255, 255]);
+    pub(crate) const LOOPBACK: Self = Self([127, 0, 0, 1]);
     pub(crate) const UNSPECIFIED: Self = Self([0, 0, 0, 0]);
 
     pub(crate) const fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
@@ -41,6 +42,18 @@ impl Ipv4Address {
 
     pub(crate) fn is_multicast(self) -> bool {
         (224..=239).contains(&self.0[0])
+    }
+
+    pub(crate) fn is_local_multicast(self) -> bool {
+        self.0[0] == 224 && self.0[1] == 0 && self.0[2] == 0
+    }
+
+    pub(crate) fn is_loopback(self) -> bool {
+        self.0[0] == 127
+    }
+
+    pub(crate) fn is_zeronet(self) -> bool {
+        self.is_unspecified()
     }
 
     pub(crate) fn is_unicast(self) -> bool {

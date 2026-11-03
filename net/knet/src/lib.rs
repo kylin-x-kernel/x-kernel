@@ -118,6 +118,8 @@ pub fn init_network() {
                 addr: lo_ip,
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
+                no_prefix_route: false,
+                label: None,
             },
         )
         .expect("loopback IPv4 address must fit the interface");
@@ -142,6 +144,8 @@ pub fn init_network() {
                     addr: eth0_ip,
                     scope: ROUTE_SCOPE_UNIVERSE,
                     broadcast: None,
+                    no_prefix_route: false,
+                    label: None,
                 },
             )
             .expect("Ethernet IPv4 address must fit the interface");
@@ -201,7 +205,13 @@ pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
         return false;
     }
     let _network_config_guard = control::network_config_lock();
-    SERVICE.remove_device_by_model_id(id).is_some()
+    let Some(removed) = SERVICE.remove_device_by_model_id(id) else {
+        return false;
+    };
+    // Publish before releasing the configuration lock so teardown events stay
+    // ordered with respect to later control-plane mutations.
+    crate::netlink::publish_network_events(removed);
+    true
 }
 
 /// Init vsock subsystem by vsock devices.

@@ -1799,7 +1799,7 @@ fn unix_stream_accepted_socket_ignores_passcred_enabled_after_connect() {
         client.send(
             &b"ab"[..],
             SendOptions {
-                unix_sender_credentials: Some(crate::SenderCredentials {
+                sender_credentials: Some(crate::SenderCredentials {
                     pid: Some(kidentity::PidHandle::fixed_root(46)),
                     uid: 4600,
                     gid: 4601,
@@ -1930,7 +1930,7 @@ fn unix_stream_passcred_stops_before_credential_record_start() {
         sender.send(
             &b"cd"[..],
             SendOptions {
-                unix_sender_credentials: Some(crate::SenderCredentials {
+                sender_credentials: Some(crate::SenderCredentials {
                     pid: Some(kidentity::PidHandle::fixed_root(47)),
                     uid: 4700,
                     gid: 4701,
@@ -1999,7 +1999,7 @@ fn unix_stream_blocking_send_attaches_credentials_to_every_round() {
             let result = sender.send(
                 &payload[..],
                 SendOptions {
-                    unix_sender_credentials: Some(credential),
+                    sender_credentials: Some(credential),
                     ..SendOptions::default()
                 },
             );
@@ -2070,7 +2070,7 @@ fn unix_stream_credential_only_filter_does_not_report_truncation() {
         sender.send(
             &b"abc"[..],
             SendOptions {
-                unix_sender_credentials: Some(crate::SenderCredentials {
+                sender_credentials: Some(crate::SenderCredentials {
                     pid: Some(kidentity::PidHandle::fixed_root(49)),
                     uid: 4900,
                     gid: 4901,
@@ -2124,7 +2124,7 @@ fn unix_stream_coalescing_compares_pid_identity_not_number() {
             sender.send(
                 core::slice::from_ref(byte),
                 SendOptions {
-                    unix_sender_credentials: Some(if *byte == b'a' {
+                    sender_credentials: Some(if *byte == b'a' {
                         first.clone()
                     } else {
                         second.clone()
@@ -2242,7 +2242,7 @@ fn unix_stream_peek_preserves_kernel_credential_record() {
             &b"abc"[..],
             SendOptions {
                 ancillary: vec![control(17)],
-                unix_sender_credentials: Some(credential.clone()),
+                sender_credentials: Some(credential.clone()),
                 ..SendOptions::default()
             }
         ),
@@ -2320,7 +2320,7 @@ fn unix_stream_peek_preserves_credential_only_record() {
         sender.send(
             &b"x"[..],
             SendOptions {
-                unix_sender_credentials: Some(crate::SenderCredentials {
+                sender_credentials: Some(crate::SenderCredentials {
                     pid: Some(kidentity::PidHandle::fixed_root(42)),
                     uid: 4200,
                     gid: 4201,
@@ -2395,7 +2395,7 @@ fn unix_stream_receive_filters_kernel_credentials_without_passcred() {
             &b"abc"[..],
             SendOptions {
                 ancillary: vec![control(18)],
-                unix_sender_credentials: Some(crate::SenderCredentials {
+                sender_credentials: Some(crate::SenderCredentials {
                     pid: Some(kidentity::PidHandle::fixed_root(42)),
                     uid: 4200,
                     gid: 4201,
@@ -2450,7 +2450,7 @@ fn unix_stream_passcred_coalesces_equal_credentials_and_stops_on_change() {
             sender.send(
                 &[*byte][..],
                 SendOptions {
-                    unix_sender_credentials: Some(first.clone()),
+                    sender_credentials: Some(first.clone()),
                     ..SendOptions::default()
                 }
             ),
@@ -2481,7 +2481,7 @@ fn unix_stream_passcred_coalesces_equal_credentials_and_stops_on_change() {
         sender.send(
             &b"d"[..],
             SendOptions {
-                unix_sender_credentials: Some(first),
+                sender_credentials: Some(first),
                 ..SendOptions::default()
             }
         ),
@@ -2491,7 +2491,7 @@ fn unix_stream_passcred_coalesces_equal_credentials_and_stops_on_change() {
         sender.send(
             &b"e"[..],
             SendOptions {
-                unix_sender_credentials: Some(second),
+                sender_credentials: Some(second),
                 ..SendOptions::default()
             }
         ),
@@ -2562,7 +2562,7 @@ fn unix_stream_without_passcred_reads_across_credential_records() {
             sender.send(
                 bytes,
                 SendOptions {
-                    unix_sender_credentials: credentials,
+                    sender_credentials: credentials,
                     ..SendOptions::default()
                 }
             ),
@@ -2600,7 +2600,7 @@ fn unix_stream_without_passcred_reads_across_credential_records() {
         sender.send(
             &b"w"[..],
             SendOptions {
-                unix_sender_credentials: Some(third),
+                sender_credentials: Some(third),
                 ..SendOptions::default()
             }
         ),

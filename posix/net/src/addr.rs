@@ -34,6 +34,18 @@ pub(crate) trait SocketAddrExt: Sized {
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()>;
 }
 
+/// Maximum user-provided socket address length accepted by Linux
+/// `move_addr_to_kernel()`, which rejects anything larger than
+/// `sizeof(struct sockaddr_storage)` before a family-specific parser runs.
+pub(crate) const MAX_SOCKADDR_LEN: usize = size_of::<__kernel_sockaddr_storage>();
+
+fn validate_sockaddr_len(addrlen: socklen_t) -> KResult<()> {
+    if addrlen as usize > MAX_SOCKADDR_LEN {
+        return Err(KError::InvalidInput);
+    }
+    Ok(())
+}
+
 /// Read the address family from a user-space sockaddr
 fn read_family(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<u16> {
     if size_of::<__kernel_sa_family_t>() > addrlen as usize {
@@ -66,6 +78,7 @@ fn fill_addr(addr: UserPtr<sockaddr>, addrlen: &mut socklen_t, data: &[u8]) -> K
 impl SocketAddrExt for SocketAddr {
     /// Read IPv4 or IPv6 socket address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
+        validate_sockaddr_len(addrlen)?;
         match read_family(addr, addrlen)? as u32 {
             AF_INET => SocketAddrV4::read_from_user(addr, addrlen).map(Self::V4),
             AF_INET6 => SocketAddrV6::read_from_user(addr, addrlen).map(Self::V6),
@@ -187,11 +200,20 @@ fn unix_addr_bytes(addr: &UnixAddr) -> Vec<u8> {
 /// SocketAddrExt implementation for Unix domain socket addresses
 impl SocketAddrExt for UnixAddr {
     /// Read Unix domain socket address from user space
+    ///
+    /// Linux `unix_validate_addr()` rejects a length that does not cover
+    /// `sun_path` or that exceeds `sizeof(struct sockaddr_un)` before it
+    /// inspects the family.  `sendmsg()` clamps an oversized `msg_namelen` to
+    /// `sizeof(struct sockaddr_storage)` in `__copy_msghdr()`, so the parser
+    /// itself must enforce the family-specific upper bound.
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
+        let offset = size_of::<__kernel_sa_family_t>();
+        if addrlen as usize <= offset || addrlen as usize > size_of::<sockaddr_un>() {
+            return Err(KError::from(LinuxError::EINVAL));
+        }
         if read_family(addr, addrlen)? as u32 != AF_UNIX {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
-        let offset = size_of::<__kernel_sa_family_t>();
         let ptr = UserConstPtr::<u8>::from(addr.as_ptr() as usize + offset);
         let data = ptr.load_vm_vec(addrlen as usize - offset)?;
         Ok(if data.is_empty() {
@@ -214,14 +236,38 @@ impl SocketAddrExt for UnixAddr {
     }
 }
 
+/// Parses the address argument of `connect(2)` on a netlink socket.
+///
+/// Linux `netlink_connect` validates the family itself: `AF_UNSPEC` disconnects
+/// after only `sa_family_t` is present, every family other than `AF_NETLINK`
+/// is `EINVAL`, and `AF_NETLINK` requires the complete `sockaddr_nl`. The
+/// generic [`SocketAddrExt`] dispatcher cannot express that policy because it
+/// maps unknown families to `EAFNOSUPPORT`.
+pub(crate) fn read_netlink_connect_addr(
+    addr: UserConstPtr<sockaddr>,
+    addrlen: socklen_t,
+) -> KResult<SocketAddrEx> {
+    validate_sockaddr_len(addrlen)?;
+    match read_family(addr, addrlen)? as u32 {
+        AF_UNSPEC => Ok(SocketAddrEx::Unspecified),
+        AF_NETLINK => NetlinkAddr::read_from_user(addr, addrlen).map(SocketAddrEx::Netlink),
+        _ => Err(KError::from(LinuxError::EINVAL)),
+    }
+}
+
 impl SocketAddrExt for NetlinkAddr {
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
-        if addrlen != size_of::<sockaddr_nl>() as socklen_t {
+        // `netlink_bind` only rejects addresses shorter than `sockaddr_nl`;
+        // a larger user buffer is valid and the trailing bytes are ignored.
+        validate_sockaddr_len(addrlen)?;
+        if (addrlen as usize) < size_of::<sockaddr_nl>() {
             return Err(KError::InvalidInput);
         }
         let addr_nl = addr.cast::<sockaddr_nl>().read_vm()?;
         if addr_nl.nl_family as u32 != AF_NETLINK {
-            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+            // `netlink_bind` reports a family mismatch as EINVAL, unlike the
+            // generic socket-address parser's EAFNOSUPPORT.
+            return Err(KError::from(LinuxError::EINVAL));
         }
         Ok(NetlinkAddr {
             pid: addr_nl.nl_pid,
@@ -327,6 +373,7 @@ impl SocketAddrExt for VsockAddr {
 impl SocketAddrExt for SocketAddrEx {
     /// Read any type of socket address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
+        validate_sockaddr_len(addrlen)?;
         match read_family(addr, addrlen)? as u32 {
             AF_UNSPEC => Ok(Self::Unspecified),
             AF_INET | AF_INET6 => SocketAddr::read_from_user(addr, addrlen).map(Self::Ip),

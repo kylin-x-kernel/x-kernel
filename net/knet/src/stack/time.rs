@@ -36,8 +36,12 @@ pub(crate) fn has_immediate_timer_work(
 pub(crate) fn earliest_poll_deadline(
     protocol: Option<SmoltcpInstant>,
     deferred_close: Option<SmoltcpInstant>,
+    neighbor: Option<SmoltcpInstant>,
 ) -> Option<SmoltcpInstant> {
-    [protocol, deferred_close].into_iter().flatten().min()
+    [protocol, deferred_close, neighbor]
+        .into_iter()
+        .flatten()
+        .min()
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/stack/time/tests.rs");

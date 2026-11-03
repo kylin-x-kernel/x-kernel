@@ -235,20 +235,46 @@ fn read_cmsghdr(bytes: &[u8]) -> cmsghdr {
 /// message can turn the failure into `EINVAL`, matching Linux's in-loop
 /// `scm_fp_copy`. Validated `SCM_CREDENTIALS` claims are not records to relay:
 /// Linux consumes them into `scm->creds`, so the last claim wins and is
-/// returned separately.
+/// Socket family policy for `SOL_SOCKET` control messages.
 ///
-/// `unix_sender` is `None` for non-Unix sockets. `SCM_RIGHTS` and
-/// `SCM_CREDENTIALS` are semantically Unix-only: Linux's `__sock_cmsg_send`
-/// silently ignores both on IP sockets (`net/core/sock.c`), while unknown
-/// `SOL_SOCKET` types stay `EINVAL` there too.
+/// Linux runs the generic `__scm_send` walk for Unix and netlink sockets only;
+/// IP and other families use `sock_cmsg_send`, which has different handling.
+/// Keeping the family explicit lets the parser reject `SCM_RIGHTS` on netlink
+/// while still accepting `SCM_CREDENTIALS` there.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CmsgFamily {
+    Unix,
+    Netlink,
+    Other,
+}
+
+impl CmsgFamily {
+    fn accepts_scm_credentials(self) -> bool {
+        matches!(self, Self::Unix | Self::Netlink)
+    }
+}
+
+/// Parses and validates the control buffer of one send syscall.
 ///
-/// IPv4/IPv6-level control data (`SOL_IP`/`SOL_IPV6`, e.g. `IP_PKTINFO`) is
-/// applied to the packet by Linux. The IP transports here do not consume
-/// ancillary data yet, so those levels are rejected with `EINVAL` instead of
-/// being silently accepted and dropped.
+/// This mirrors Linux's two control-message paths:
+///
+/// - Unix and netlink sockets use the generic `__scm_send` walk. Both accept
+///   `SCM_CREDENTIALS` (netlink pre-fills the current task's credentials before
+///   parsing, so an explicit claim replaces them); `SCM_RIGHTS` is accepted only
+///   on Unix and is `EINVAL` on netlink. Unknown `SOL_SOCKET` types are
+///   `EINVAL`, and non-`SOL_SOCKET` levels are ignored.
+/// - Other families use `sock_cmsg_send` semantics here only to the extent the
+///   transports support them: `SCM_RIGHTS` and `SCM_CREDENTIALS` are ignored
+///   and IPv4/IPv6 packet-control data is rejected because it is not applied.
+///
+/// `sender` is the identity captured at the syscall boundary. It is `Some` for
+/// Unix and netlink send paths that run on a user thread; a missing identity
+/// makes an explicit `SCM_CREDENTIALS` claim invalid rather than silently
+/// dropping it.
 pub(crate) fn parse_control_msgs(
     control: &[u8],
-    unix_sender: Option<&ScmSenderContext>,
+    family: CmsgFamily,
+    sender: Option<&ScmSenderContext>,
     resolve_rights: &mut dyn FnMut(Vec<i32>) -> KResult<CMsg>,
 ) -> KResult<(Vec<CMsg>, Option<knet::SenderCredentials>)> {
     let mut msgs = Vec::new();
@@ -270,14 +296,25 @@ pub(crate) fn parse_control_msgs(
 
         if hdr.cmsg_level == SOL_SOCKET as c_int {
             let body = &control[offset + size_of::<cmsghdr>()..body_end];
-            match (hdr.cmsg_type as u32, unix_sender) {
-                (SCM_RIGHTS, Some(_)) => msgs.push(resolve_rights(parse_rights_fds(body)?)?),
-                (SCM_CREDENTIALS, Some(sender)) => credentials = Some(check_creds(body, sender)?),
-                // Unix-only control messages are ignored on other families.
-                (SCM_RIGHTS | SCM_CREDENTIALS, None) => {}
+            match hdr.cmsg_type as u32 {
+                SCM_RIGHTS if family == CmsgFamily::Unix => {
+                    msgs.push(resolve_rights(parse_rights_fds(body)?)?);
+                }
+                // Linux `__scm_send` rejects file-descriptor passing on every
+                // non-Unix family while it walks the control buffer.
+                SCM_RIGHTS if family == CmsgFamily::Netlink => {
+                    return Err(KError::InvalidInput);
+                }
+                SCM_CREDENTIALS if family.accepts_scm_credentials() => {
+                    let sender = sender.ok_or(KError::InvalidInput)?;
+                    credentials = Some(check_creds(body, sender)?);
+                }
+                // Other families do not run the generic SCM walk. Preserve the
+                // existing behavior of ignoring these two types there.
+                SCM_RIGHTS | SCM_CREDENTIALS => {}
                 _ => return Err(KError::InvalidInput),
             }
-        } else if unix_sender.is_none()
+        } else if family == CmsgFamily::Other
             && (hdr.cmsg_level == SOL_IP as c_int || hdr.cmsg_level == SOL_IPV6 as c_int)
         {
             // Linux applies IP-level control data (`ip_cmsg_send` /

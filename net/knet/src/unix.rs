@@ -16,6 +16,7 @@ use kerrno::{KError, KResult};
 use kio::{IoBuf, IoBufMut, Read, Write};
 use klazy::lazy_static;
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
+use kprocess::AsThread;
 use ksync::Mutex;
 use ktask::future::block_on_interruptible;
 use kvfs::{
@@ -62,31 +63,30 @@ pub fn current_peer_credentials() -> PeerCredentials {
 
 /// Captures the current sending process's identity and real UID/GID.
 ///
-/// User-facing Unix send entry points call this once per send. The pid stays a
-/// process identity so each receiver resolves it in its own PID namespace
+/// User-facing socket send entry points call this once per send. The pid stays
+/// a process identity so each receiver resolves it in its own PID namespace
 /// (Linux `pid_vnr` at delivery). Kernel callers without a user thread supply
-/// an explicit `SendOptions::unix_sender_credentials` or none.
+/// an explicit [`SendOptions::sender_credentials`] or none.
 ///
 /// # Execution context
 ///
-/// Must run on a user thread in process context. It reads the current task's
-/// subjective credentials through a sleepable `RwLock`, so it must not run in
-/// IRQ context, with preemption disabled, or while holding a spinlock; ordinary
-/// sleepable locks may be held. It performs no I/O and does not wait for
-/// another task.
+/// Runs on a user thread in process context when one exists. It reads the
+/// current task's subjective credentials through a sleepable `RwLock`, so it
+/// must not run in IRQ context, with preemption disabled, or while holding a
+/// spinlock; ordinary sleepable locks may be held. It performs no I/O and does
+/// not wait for another task.
 ///
-/// # Panics
-///
-/// Panics when the current task has no user-thread runtime, including a kernel
-/// task or an interrupt context.
-pub fn current_sender_credentials() -> crate::SenderCredentials {
-    let thread = kprocess::current_user_thread();
-    let cred = thread.cred();
-    crate::SenderCredentials {
+/// Returns `None` for a kernel task or interrupt context, which have no
+/// user-visible sender identity.
+pub fn current_sender_credentials() -> Option<crate::SenderCredentials> {
+    let current = ktask::current();
+    let thread = current.try_as_thread()?;
+    let cred = kprocess::current_cred();
+    Some(crate::SenderCredentials {
         pid: Some(thread.process().pid_identity()),
         uid: cred.ruid(),
         gid: cred.rgid(),
-    }
+    })
 }
 
 #[derive(Default, Clone, Debug)]

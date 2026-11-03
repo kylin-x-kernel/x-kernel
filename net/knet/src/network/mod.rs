@@ -4,6 +4,7 @@
 
 //! Interface address configuration, network-layer packet processing, and routing.
 
+pub(crate) mod event;
 pub(crate) mod fragment;
 pub(crate) mod interface_address;
 pub(crate) mod ipv4;

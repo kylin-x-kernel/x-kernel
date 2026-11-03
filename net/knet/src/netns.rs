@@ -86,6 +86,8 @@ pub fn ensure_stack(id: u64) {
                 addr: lo_ip,
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
+                no_prefix_route: false,
+                label: None,
             },
         )
         .expect("loopback IPv4 address must fit the interface");
