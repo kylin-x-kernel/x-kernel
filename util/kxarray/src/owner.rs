@@ -4,9 +4,11 @@
 
 //! Sealed raw ownership conversions; pointers never encode tag bits.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 
-/// Supported ownership carriers: Box and Arc of a sized, shareable value.
+use kalloc_types::KBox;
+
+/// Supported ownership carriers: KBox and Arc of a sized, shareable value.
 ///
 /// This sealed trait describes representation, not destructor safety. Inserting
 /// a value separately requires certification of its complete release chain.
@@ -26,19 +28,19 @@ pub(crate) mod private {
     }
 }
 
-impl<T: Send + Sync> EntryOwner for Box<T> {
+impl<T: Send + Sync> EntryOwner for KBox<T> {
     type Target = T;
 }
 
-impl<T> private::RawOwner for Box<T> {
+impl<T> private::RawOwner for KBox<T> {
     fn into_raw(self) -> *mut () {
-        Box::into_raw(self).cast()
+        KBox::into_raw(self).cast()
     }
 
     unsafe fn drop_raw(raw: *mut ()) {
-        // SAFETY: the caller returns this implementation's unique raw Box only
+        // SAFETY: the caller returns this implementation's unique raw KBox only
         // after its borrowers have ended, preserving allocation provenance.
-        drop(unsafe { Box::from_raw(raw.cast::<T>()) });
+        drop(unsafe { KBox::from_raw(raw.cast::<T>()) });
     }
 }
 

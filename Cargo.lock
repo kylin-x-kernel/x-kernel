@@ -3660,6 +3660,7 @@ name = "kworkqueue_ng"
 version = "0.3.0-dev"
 dependencies = [
  "intrusive-collections",
+ "kalloc-types",
  "kcompletion",
  "kcpu_id_map",
  "kerrno",
@@ -3677,6 +3678,7 @@ dependencies = [
 name = "kxarray"
 version = "0.3.0-dev"
 dependencies = [
+ "kalloc-types",
  "kerrno",
  "krcu",
  "kspin",
@@ -3688,9 +3690,11 @@ name = "kxarray-kernel-tests"
 version = "0.3.0-dev"
 dependencies = [
  "kalloc",
+ "kalloc-types",
  "karch",
  "kbuild_config",
  "kcpu_id_map",
+ "kerrno",
  "khal",
  "kirq",
  "krcu",

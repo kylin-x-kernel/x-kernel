@@ -1,5 +1,14 @@
 # knet — Safety and Reliability Analysis
 
+## Poller Configuration Failure
+
+Fallible CPU-set preparation is not a boot invariant: NetworkPoller::start
+handles QueueConfig errors instead of panicking. It leaves the optional queue
+unset and does not consume pending demand. Both foreground assistance and
+background polling are unavailable until a successful explicit retry; the current
+boot path does not retry automatically. Nested
+queue, CPU-list and worker allocations retain their existing failure policies.
+
 ## Socket owner allocation boundary
 
 TCP, Unix and vsock reserve KBox storage before consuming a pending connection.

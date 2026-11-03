@@ -4,13 +4,13 @@
 
 //! Real affinity migration of scoped readers and prepared writers.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
-use unittest::{assert, assert_eq, def_test};
-
 use kxarray::XArray;
+use unittest::{assert, assert_eq, def_test};
 
 #[derive(Default)]
 struct History {
@@ -40,7 +40,7 @@ fn wait_for_flag(flag: &AtomicBool) {
     }
 }
 
-fn prepare_reader(array: Arc<XArray<Box<Version>>>, history: Arc<History>) -> ktask::KtaskRef {
+fn prepare_reader(array: Arc<XArray<KBox<Version>>>, history: Arc<History>) -> ktask::KtaskRef {
     ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
         move || {
             krcu::with_read(|scope| {
@@ -74,13 +74,14 @@ fn migrated_reader_retains_old_owner_and_original_enrollment() {
         return unittest::TestResult::Ignored;
     }
     let history = Arc::new(History::default());
-    let array = Arc::new(XArray::<Box<Version>>::new());
-    let old = Box::new(Version {
+    let array = Arc::new(XArray::<KBox<Version>>::new());
+    let old = KBox::new_nowait(Version {
         number: 0,
         history: history.clone(),
-    });
-    // SAFETY: task context, atomic-only destructor and nonblocking Box/Arc free.
-    assert!(unsafe { array.insert(usize::MAX, old) }.is_ok());
+    })
+    .unwrap();
+    // SAFETY: task context, atomic-only destructor and nonblocking KBox/Arc free.
+    assert!(unsafe { array.insert_with_flags(usize::MAX, old, AllocFlags::NOWAIT) }.is_ok());
     let original_affinity = ktask::current().cpumask();
     assert!(ktask::set_current_affinity(
         ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(0))
@@ -89,12 +90,13 @@ fn migrated_reader_retains_old_owner_and_original_enrollment() {
     reader.set_cpumask(ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(1)));
     ktask::activate_task(&reader);
     wait_for_flag(&history.has_entered);
-    let new = Box::new(Version {
+    let new = KBox::new_nowait(Version {
         number: 1,
         history: history.clone(),
-    });
+    })
+    .unwrap();
     // SAFETY: watched task, no scope/bookkeeping lock; permanent RCU service.
-    let published = unsafe { array.set(usize::MAX, new) }.is_ok();
+    let published = unsafe { array.set_with_flags(usize::MAX, new, AllocFlags::NOWAIT) }.is_ok();
     let affinity_applied = published
         && ktask::set_task_affinity(
             &reader,
@@ -134,7 +136,7 @@ fn migrated_reader_retains_old_owner_and_original_enrollment() {
     );
 }
 
-fn pause_prepared_writer(array: &XArray<Box<Version>>, index: usize) {
+fn pause_prepared_writer(array: &XArray<KBox<Version>>, index: usize) {
     let history = krcu::with_read(|scope| array.read(scope, index).map(|v| v.history.clone()));
     let Some(history) = history else { return };
     // No scope or writer lock spans the pause. Only the coordinating CPU asks
@@ -154,16 +156,18 @@ fn prepared_writer_migrates_before_replacement_and_retires_once() {
         return unittest::TestResult::Ignored;
     }
     let history = Arc::new(History::default());
-    let array = Arc::new(XArray::<Box<Version>>::new());
+    let array = Arc::new(XArray::<KBox<Version>>::new());
     assert!(
-        // SAFETY: task context, atomic-only destructor and nonblocking Box/Arc free.
+        // SAFETY: task context, atomic-only destructor and nonblocking KBox/Arc free.
         unsafe {
-            array.insert(
+            array.insert_with_flags(
                 usize::MAX,
-                Box::new(Version {
+                KBox::new_nowait(Version {
                     number: 0,
                     history: history.clone(),
-                }),
+                })
+                .unwrap(),
+                AllocFlags::NOWAIT,
             )
         }
         .is_ok()
@@ -180,11 +184,11 @@ fn prepared_writer_migrates_before_replacement_and_retires_once() {
             let history = history.clone();
             let has_published = has_published.clone();
             move || {
-                let new = Box::new(Version { number: 1, history });
+                let new = KBox::new_nowait(Version { number: 1, history }).unwrap();
                 // SAFETY: watched task, permanent RCU service, callback-safe owner.
                 // The checkpoint leaves no scope/lock or altered context behind.
                 has_published.store(
-                    unsafe { array.set(usize::MAX, new) }.is_ok(),
+                    unsafe { array.set_with_flags(usize::MAX, new, AllocFlags::NOWAIT) }.is_ok(),
                     Ordering::Release,
                 );
             }

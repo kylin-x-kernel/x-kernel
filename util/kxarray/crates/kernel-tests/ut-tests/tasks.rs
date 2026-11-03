@@ -4,12 +4,12 @@
 
 //! Task-backed container tests use the permanently initialized boot RCU host.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use unittest::{assert, assert_eq, def_test};
-
+use kalloc_types::{AllocFlags, KBox};
 use kxarray::XArray;
+use unittest::{assert, assert_eq, def_test};
 
 #[def_test]
 fn competing_insertions_keep_one_owner_and_return_every_loser() {
@@ -37,12 +37,14 @@ fn competing_insertions_keep_one_owner_and_return_every_loser() {
                 }
                 // SAFETY: task context, primitive payload and nonblocking Arc
                 // deallocation; no exclusion guard or read scope is held.
-                match unsafe { array.insert(usize::MAX, offered) } {
+                match unsafe { array.insert_with_flags(usize::MAX, offered, AllocFlags::NOWAIT) } {
                     Ok(()) => {
                         winners.fetch_add(1, Ordering::Relaxed);
                     }
-                    Err(returned) => {
-                        if Arc::as_ptr(&returned) != original {
+                    Err((error, returned)) => {
+                        if error != kerrno::KError::AlreadyExists
+                            || Arc::as_ptr(&returned) != original
+                        {
                             has_invalid_return.store(true, Ordering::Relaxed);
                         }
                     }
@@ -90,17 +92,18 @@ fn competing_sets_release_every_displaced_owner_once() {
         }
     }
     for key in [0, usize::MAX] {
-        let array = Arc::new(XArray::<Box<Value>>::new());
+        let array = Arc::new(XArray::<KBox<Value>>::new());
         let ready = Arc::new(AtomicUsize::new(0));
         let can_start = Arc::new(AtomicBool::new(false));
         let accepted = Arc::new(AtomicUsize::new(0));
         let drops = Arc::new(core::array::from_fn(|_| AtomicUsize::new(0)));
         let mut tasks = Vec::new();
         for number in 0..WRITERS {
-            let value = Box::new(Value {
+            let value = KBox::new_nowait(Value {
                 number,
                 drops: drops.clone(),
-            });
+            })
+            .unwrap();
             let array = array.clone();
             let ready = ready.clone();
             let can_start = can_start.clone();
@@ -114,7 +117,7 @@ fn competing_sets_release_every_displaced_owner_once() {
                     // SAFETY: watched task context, no scopes or locks held.
                     // The payload's release is atomic-only plus nonblocking
                     // allocation release; callbacks retain their own counters.
-                    if unsafe { array.set(key, value) }.is_ok() {
+                    if unsafe { array.set_with_flags(key, value, AllocFlags::NOWAIT) }.is_ok() {
                         accepted.fetch_add(1, Ordering::Release);
                     }
                 },
@@ -156,7 +159,7 @@ fn published_entries_remain_readable_during_root_growth() {
             .chain(core::iter::once(usize::MAX))
             .collect::<Vec<_>>(),
     );
-    let array = Arc::new(XArray::<Box<usize>>::new());
+    let array = Arc::new(XArray::<KBox<usize>>::new());
     let published = Arc::new(AtomicUsize::new(0));
     let observed = Arc::new(AtomicUsize::new(0));
     let has_failed_insert = Arc::new(AtomicBool::new(false));
@@ -168,8 +171,16 @@ fn published_entries_remain_readable_during_root_growth() {
     let writer = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
         move || {
             for (position, key) in writer_keys.iter().copied().enumerate() {
-                // SAFETY: task context, no held guard, primitive Box release.
-                if unsafe { writer_array.insert(key, Box::new(key)) }.is_err() {
+                // SAFETY: task context, no held guard, primitive KBox release.
+                if unsafe {
+                    writer_array.insert_with_flags(
+                        key,
+                        KBox::new_nowait(key).unwrap(),
+                        AllocFlags::NOWAIT,
+                    )
+                }
+                .is_err()
+                {
                     writer_failure.store(true, Ordering::Relaxed);
                 }
                 writer_published.store(position + 1, Ordering::Release);
@@ -206,8 +217,10 @@ fn competing_removals_withdraw_one_owner() {
     const REMOVERS: usize = 4;
     let owner = Arc::new(7_usize);
     let array = Arc::new(XArray::<Arc<usize>>::new());
-    // SAFETY: initialized task, primitive Arc payload and nonblocking release.
-    assert!(unsafe { array.insert(usize::MAX, owner.clone()) }.is_ok());
+    assert!(
+        // SAFETY: initialized task, primitive Arc payload and nonblocking release.
+        unsafe { array.insert_with_flags(usize::MAX, owner.clone(), AllocFlags::NOWAIT) }.is_ok()
+    );
     let ready = Arc::new(AtomicUsize::new(0));
     let can_start = Arc::new(AtomicBool::new(false));
     let removed = Arc::new(AtomicUsize::new(0));
@@ -227,7 +240,7 @@ fn competing_removals_withdraw_one_owner() {
                 }
                 // SAFETY: watched sleepable task, no scope or bookkeeping lock;
                 // the permanent RCU service remains available for retirement.
-                match unsafe { array.remove(usize::MAX) } {
+                match unsafe { array.remove_with_flags(usize::MAX, AllocFlags::NOWAIT) } {
                     Ok(true) => {
                         removed.fetch_add(1, Ordering::Release);
                     }
@@ -280,15 +293,16 @@ fn removal_and_reinsertion_preserve_a_held_old_borrow() {
             self.drops[self.number].fetch_add(1, Ordering::Release);
         }
     }
-    let array = Arc::new(XArray::<Box<Version>>::new());
+    let array = Arc::new(XArray::<KBox<Version>>::new());
     let drops = Arc::new(core::array::from_fn(|_| AtomicUsize::new(0)));
     // MAX builds the deepest path, all of which becomes empty on withdrawal.
-    let old = Box::new(Version {
+    let old = KBox::new_nowait(Version {
         number: 0,
         drops: drops.clone(),
-    });
-    // SAFETY: task context, atomic-only destructor and nonblocking Box/Arc free.
-    assert!(unsafe { array.insert(usize::MAX, old) }.is_ok());
+    })
+    .unwrap();
+    // SAFETY: task context, atomic-only destructor and nonblocking KBox/Arc free.
+    assert!(unsafe { array.insert_with_flags(usize::MAX, old, AllocFlags::NOWAIT) }.is_ok());
     let has_entered = Arc::new(AtomicBool::new(false));
     let can_exit = Arc::new(AtomicBool::new(false));
     let is_valid = Arc::new(AtomicBool::new(false));
@@ -325,14 +339,15 @@ fn removal_and_reinsertion_preserve_a_held_old_borrow() {
         ktask::yield_now();
     }
     // SAFETY: writer is outside all read scopes and holds no bookkeeping lock.
-    let removed = unsafe { array.remove(usize::MAX) };
+    let removed = unsafe { array.remove_with_flags(usize::MAX, AllocFlags::NOWAIT) };
     let is_absent = krcu::with_read(|scope| array.read(scope, usize::MAX).is_none());
-    let new = Box::new(Version {
+    let new = KBox::new_nowait(Version {
         number: 1,
         drops: drops.clone(),
-    });
+    })
+    .unwrap();
     // SAFETY: same task context and callback-safe release as initial insertion.
-    let inserted = unsafe { array.insert(usize::MAX, new) }.is_ok();
+    let inserted = unsafe { array.insert_with_flags(usize::MAX, new, AllocFlags::NOWAIT) }.is_ok();
     let current = krcu::with_read(|scope| array.read(scope, usize::MAX).map(|value| value.number));
     let before_exit = drops[0].load(Ordering::Acquire);
     can_exit.store(true, Ordering::Release);
@@ -387,7 +402,7 @@ fn successive_replacements_preserve_two_held_versions() {
         is_valid: core::array::from_fn(|_| AtomicBool::new(false)),
         drops: core::array::from_fn(|_| AtomicUsize::new(0)),
     });
-    let array = Arc::new(XArray::<Box<Version>>::new());
+    let array = Arc::new(XArray::<KBox<Version>>::new());
     let mut readers = Vec::new();
     let mut did_publish = true;
     let original_affinity = ktask::current().cpumask();
@@ -395,13 +410,14 @@ fn successive_replacements_preserve_two_held_versions() {
         ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(0))
     ));
     for number in 0..3 {
-        let value = Box::new(Version {
+        let value = KBox::new_nowait(Version {
             number,
             history: history.clone(),
-        });
+        })
+        .unwrap();
         // SAFETY: watched task outside read scopes/locks. Callback destruction
         // only updates an atomic and releases independently owned allocations.
-        did_publish &= unsafe { array.set(64, value) }.is_ok();
+        did_publish &= unsafe { array.set_with_flags(64, value, AllocFlags::NOWAIT) }.is_ok();
         if number == 2 {
             break;
         }

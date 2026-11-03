@@ -49,15 +49,43 @@ fn fs_owner_success_uses_reserved_storage_without_reboxing() {
             permissions.set(Some(flags));
             Ok(storage)
         },
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(*owner, 29);
     assert_eq!(permissions.get(), Some(AllocFlags::NOWAIT));
     assert_eq!(core::ptr::from_ref(&*owner).cast::<()>(), address);
 }
 
+use alloc::vec::Vec;
+
 use unittest::{assert, assert_eq};
 
 use super::*;
+
+#[unittest::def_test]
+fn temporary_blocks_are_zeroed_and_independently_owned() {
+    let mut first = get_tmp_block().unwrap();
+    let second = get_tmp_block().unwrap();
+    assert_eq!(first.len(), BLOCK_SIZE);
+    assert_eq!(second.len(), BLOCK_SIZE);
+    assert!(first.iter().all(|byte| *byte == 0));
+    first.fill(0xa5);
+    assert!(second.iter().all(|byte| *byte == 0));
+    assert!(first.as_ptr() != second.as_ptr());
+    drop(first);
+    assert_eq!(second[BLOCK_SIZE - 1], 0);
+}
+
+#[unittest::def_test]
+fn backing_fd_moves_without_changing_handle_identity() {
+    let mut file = TeeFsFd::default();
+    assert_eq!(file.fd.fd, -1);
+    file.fd = FileVariant { fd: 17 };
+    let auxiliary = TeeFsFdAux { fd: file.fd };
+    let moved = file;
+    assert_eq!(moved.fd.fd, 17);
+    assert_eq!(auxiliary.fd.fd, moved.fd.fd);
+}
 
 const NODE_SIZE_TEST: usize = size_of::<super::TeeFsHtreeNodeImage>(); // 66
 const HTREE_IMAGE_SIZE_TEST: usize = size_of::<super::TeeFsHtreeImage>(); // 256
@@ -133,21 +161,18 @@ fn test_ree_fs_primitive_operations() {
     };
 
     let mut hash = [0u8; TEE_FS_HTREE_HASH_SIZE];
-    let mut fdp =
-        ree_fs_open_primitive(Some(&uuid), true, Some(&mut hash), Some(&dfh)).unwrap();
+    let mut fdp = ree_fs_open_primitive(Some(&uuid), true, Some(&mut hash), Some(&dfh)).unwrap();
 
     assert_eq!(fdp.uuid, uuid);
     assert_eq!(fdp.dfh.file_number, dfh.file_number);
 
-    let test_data =
-        b"Hello, TEE World! This is a test message for ree_fs_primitive operations.";
+    let test_data = b"Hello, TEE World! This is a test message for ree_fs_primitive operations.";
     let write_result = ree_fs_write_primitive(&mut fdp, 0, test_data, &[], test_data.len());
     assert!(write_result.is_ok());
 
     let mut read_buffer = vec![0u8; test_data.len()];
     let mut read_len = read_buffer.len();
-    let read_result =
-        ree_fs_read_primitive(&mut fdp, 0, &mut read_buffer, &mut [], &mut read_len);
+    let read_result = ree_fs_read_primitive(&mut fdp, 0, &mut read_buffer, &mut [], &mut read_len);
     assert!(read_result.is_ok());
     assert_eq!(read_len, test_data.len());
     assert_eq!(&read_buffer[..read_len], test_data);

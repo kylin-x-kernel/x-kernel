@@ -9,7 +9,9 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::LogicalCpuId;
+use kerrno::KError;
 use unittest::def_test;
 
 use super::{
@@ -22,6 +24,77 @@ use crate::work::{Work, observers::CompletionObserver};
 #[path = "queue_routing_unittest.rs"]
 mod routing;
 
+/// Checks reservation errors propagate before a configuration can be published.
+///
+/// # Panics
+/// Panics if allocation failure changes input or hides the allocation error.
+#[def_test]
+fn configuration_reservation_failure_preserves_input() {
+    let cpus = [LogicalCpuId::new(2), LogicalCpuId::new(0)];
+    let result = QueueConfig::validate_with_allocator(
+        &cpus,
+        CpuPolicy::CurrentCpu,
+        1,
+        |_| true,
+        |_| Err(KError::NoMemory),
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        QueueConfigError::Allocation(KError::NoMemory)
+    );
+    assert_eq!(cpus, [LogicalCpuId::new(2), LogicalCpuId::new(0)]);
+}
+
+/// Checks early validation does not attempt storage preparation.
+///
+/// # Panics
+/// Panics if malformed configuration reaches the allocator.
+#[def_test]
+fn configuration_validates_before_reserving() {
+    let cpu = LogicalCpuId::new(0);
+    for (cpus, limit, present, expected) in [
+        (&[][..], 1, true, QueueConfigError::EmptyCpuSet),
+        (&[cpu][..], 0, true, QueueConfigError::ZeroMaxActive),
+        (&[cpu][..], 1, false, QueueConfigError::CpuUnavailable(cpu)),
+    ] {
+        let mut called = false;
+        let result = QueueConfig::validate_with_allocator(
+            cpus,
+            CpuPolicy::CurrentCpu,
+            limit,
+            |_| present,
+            |_| {
+                called = true;
+                Err(KError::NoMemory)
+            },
+        );
+        assert_eq!(result.unwrap_err(), expected);
+        assert!(!called);
+    }
+}
+
+/// Checks normalization reuses the prepared owner instead of allocating again.
+///
+/// # Panics
+/// Panics if preparation fails or the owner address or CPU order is wrong.
+#[def_test]
+fn configuration_reuses_reserved_storage() {
+    let cpus = [LogicalCpuId::new(2), LogicalCpuId::new(0)];
+    let storage = KBox::from_slice_with_flags(&cpus, AllocFlags::NOWAIT).unwrap();
+    let address = storage.as_ptr();
+    let config = QueueConfig::validate_with_allocator(
+        &cpus,
+        CpuPolicy::RoundRobin,
+        1,
+        |_| true,
+        |_| Ok(storage),
+    )
+    .unwrap();
+    assert_eq!(config.cpus().as_ptr(), address);
+    assert_eq!(config.cpus(), &[LogicalCpuId::new(0), LogicalCpuId::new(2)]);
+    assert_eq!(cpus, [LogicalCpuId::new(2), LogicalCpuId::new(0)]);
+}
+
 fn queue() -> Arc<Queue> {
     queue_for(&[0, 1], 1)
 }
@@ -32,7 +105,16 @@ fn queue() -> Arc<Queue> {
 /// Panics if the supplied CPU set or release limit is invalid.
 pub(crate) fn queue_for(cpus: &[usize], max_active: usize) -> Arc<Queue> {
     let cpus: alloc::vec::Vec<_> = cpus.iter().copied().map(LogicalCpuId::new).collect();
-    Queue::new(QueueConfig::validate(&cpus, CpuPolicy::CurrentCpu, max_active, |_| true).unwrap())
+    Queue::new(
+        QueueConfig::validate(
+            &cpus,
+            CpuPolicy::CurrentCpu,
+            max_active,
+            kalloc_types::AllocFlags::NOWAIT,
+            |_| true,
+        )
+        .unwrap(),
+    )
 }
 
 /// Checks sparse input normalization and explicit configuration failures.
@@ -42,31 +124,58 @@ pub(crate) fn queue_for(cpus: &[usize], max_active: usize) -> Arc<Queue> {
 #[def_test]
 fn configuration_rejects_invalid_inputs_and_sorts_cpus() {
     let cpu = LogicalCpuId::new;
-    let config = QueueConfig::validate(&[cpu(4), cpu(0), cpu(2)], CpuPolicy::RoundRobin, 3, |_| {
-        true
-    })
+    let config = QueueConfig::validate(
+        &[cpu(4), cpu(0), cpu(2)],
+        CpuPolicy::RoundRobin,
+        3,
+        kalloc_types::AllocFlags::NOWAIT,
+        |_| true,
+    )
     .unwrap();
     assert_eq!(config.cpus(), &[cpu(0), cpu(2), cpu(4)]);
     assert_eq!(config.policy(), CpuPolicy::RoundRobin);
     assert_eq!(config.max_active(), 3);
     assert_eq!(
-        QueueConfig::validate(&[], CpuPolicy::CurrentCpu, 1, |_| true).unwrap_err(),
+        QueueConfig::validate(
+            &[],
+            CpuPolicy::CurrentCpu,
+            1,
+            kalloc_types::AllocFlags::NOWAIT,
+            |_| true
+        )
+        .unwrap_err(),
         QueueConfigError::EmptyCpuSet
     );
     assert_eq!(
-        QueueConfig::validate(&[cpu(0)], CpuPolicy::CurrentCpu, 0, |_| true).unwrap_err(),
+        QueueConfig::validate(
+            &[cpu(0)],
+            CpuPolicy::CurrentCpu,
+            0,
+            kalloc_types::AllocFlags::NOWAIT,
+            |_| true
+        )
+        .unwrap_err(),
         QueueConfigError::ZeroMaxActive
     );
     assert_eq!(
-        QueueConfig::validate(&[cpu(2), cpu(0), cpu(2)], CpuPolicy::CurrentCpu, 1, |_| {
-            true
-        })
+        QueueConfig::validate(
+            &[cpu(2), cpu(0), cpu(2)],
+            CpuPolicy::CurrentCpu,
+            1,
+            kalloc_types::AllocFlags::NOWAIT,
+            |_| { true }
+        )
         .unwrap_err(),
         QueueConfigError::DuplicateCpu(cpu(2))
     );
     assert_eq!(
-        QueueConfig::validate(&[cpu(0), cpu(4)], CpuPolicy::CurrentCpu, 1, |id| id
-            != cpu(4))
+        QueueConfig::validate(
+            &[cpu(0), cpu(4)],
+            CpuPolicy::CurrentCpu,
+            1,
+            kalloc_types::AllocFlags::NOWAIT,
+            |id| id != cpu(4)
+        )
         .unwrap_err(),
         QueueConfigError::CpuUnavailable(cpu(4))
     );
@@ -82,6 +191,16 @@ fn configuration_checks_boot_cpu_presence() {
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
     let config = QueueConfig::new(&cpus, CpuPolicy::CurrentCpu, 1).unwrap();
     assert_eq!(config.cpus(), cpus.as_slice());
+    assert_eq!(
+        QueueConfig::new_with_flags(
+            &cpus,
+            CpuPolicy::CurrentCpu,
+            1,
+            AllocFlags::from_bits_retain(u32::MAX)
+        )
+        .unwrap_err(),
+        QueueConfigError::Allocation(KError::InvalidInput)
+    );
     let absent = LogicalCpuId::new(usize::MAX);
     assert_eq!(
         QueueConfig::new(&[absent], CpuPolicy::CurrentCpu, 1).unwrap_err(),

@@ -4,13 +4,13 @@
 
 //! Downward-only radix storage. Published nodes have immutable heights.
 
-use alloc::boxed::Box;
 use core::{
     mem::offset_of,
     ptr::NonNull,
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
 };
 
+use kalloc_types::KBox;
 use krcu::{CallbackNode, PreparedCallback};
 
 pub(super) const RADIX_BITS: u32 = 6;
@@ -102,7 +102,7 @@ unsafe fn release(callback: *mut CallbackNode) {
     let raw = unsafe { callback.byte_sub(offset_of!(Node, callback)) }.cast::<Node>();
     // SAFETY: all old readers ended; this callback owns exactly this allocation.
     // Shallow Drop never follows child or payload pointers.
-    drop(unsafe { Box::from_raw(raw) });
+    drop(unsafe { KBox::from_raw(raw) });
 }
 
 pub(super) fn height_for(index: usize) -> u32 {
@@ -113,7 +113,7 @@ pub(super) fn height_for(index: usize) -> u32 {
 
 /// Owns only unpublished allocations, never a borrowed part of the live tree.
 pub(super) struct PreparedNodes {
-    nodes: [Option<Box<Node>>; 2 * MAX_HEIGHT as usize],
+    nodes: [Option<KBox<Node>>; 2 * MAX_HEIGHT as usize],
     pub(super) len: usize,
 }
 
@@ -125,11 +125,16 @@ impl PreparedNodes {
         }
     }
 
-    pub(super) fn prepare(&mut self, needed: usize) {
+    pub(super) fn prepare(
+        &mut self,
+        needed: usize,
+        allocator: &mut impl crate::Allocator,
+    ) -> kerrno::KResult {
         while self.len < needed {
-            self.nodes[self.len] = Some(Box::new(Node::empty()));
+            self.nodes[self.len] = Some(allocator.allocate(Node::empty())?);
             self.len += 1;
         }
+        Ok(())
     }
 
     #[expect(
@@ -143,7 +148,7 @@ impl PreparedNodes {
             .take()
             .expect("prepared radix path capacity");
         node.height = height;
-        Box::into_raw(node)
+        KBox::into_raw(node)
     }
 }
 

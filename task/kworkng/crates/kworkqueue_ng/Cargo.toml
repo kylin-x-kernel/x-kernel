@@ -20,6 +20,7 @@ stall-check = []
 self-wait-check = []
 
 [dependencies]
+kalloc-types.workspace = true
 kcpu_id_map.workspace = true
 kerrno.workspace = true
 ktime_types.workspace = true

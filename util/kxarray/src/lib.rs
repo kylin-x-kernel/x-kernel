@@ -4,7 +4,7 @@
 
 //! Sparse usize-indexed ownership with lockless, RCU-scoped borrowing.
 //!
-//! `XArray<Box<T>>` owns each inserted object; `XArray<Arc<T>>` owns one strong
+//! `XArray<KBox<T>>` owns each inserted object; `XArray<Arc<T>>` owns one strong
 //! reference and also supports explicit strong-reference acquisition. Insertion
 //! transfers ownership only on success. Reads allocate nothing and never take
 //! the writer lock. Replacement retires the displaced owner through RCU without
@@ -20,34 +20,42 @@
 //! The following sequence runs in initialized, watched task context with the
 //! permanent RCU service available. Read scopes must not sleep or voluntarily
 //! yield. Updates run outside scopes and scheduler/RCU bookkeeping locks.
+//! Default updates require reclaim-safe, sleepable task context with IRQs and
+//! preemption enabled and no locks needed by reclaim, IO or filesystem entry.
 //! Successful replacement/removal publishes a change; it does not mean old
 //! objects have been destroyed. Stored data needs its own mutation protocol.
 //!
 //! ```no_run
 //! extern crate alloc;
-//! use alloc::boxed::Box;
+//! use kalloc_types::KBox;
 //!
-//! let entries = kxarray::XArray::<Box<usize>>::new();
+//! # fn example() -> Result<(), kerrno::KError> {
+//! let entries = kxarray::XArray::<KBox<usize>>::new();
+//! let first = KBox::new_nowait(7)?;
 //! // SAFETY: initialized task context, primitive payload and the kernel's
 //! // nonblocking allocator release; no callback-needed locks are held.
-//! let inserted = unsafe { entries.insert(42, Box::new(7)) };
-//! assert!(inserted.is_ok());
+//! unsafe { entries.insert(42, first) }.map_err(|(error, _owner)| error)?;
 //! let copied = krcu::with_read(|scope| entries.read(scope, 42).copied());
 //! assert_eq!(copied, Some(7));
+//! let replacement = KBox::new_nowait(9)?;
 //! // SAFETY: same audited primitive release chain; eligible task outside
 //! // read scopes/locks, with the permanent RCU service remaining available.
-//! assert!(unsafe { entries.set(42, Box::new(9)) }.is_ok());
+//! unsafe { entries.set(42, replacement) }.map_err(|(error, _owner)| error)?;
 //! assert_eq!(
 //!     krcu::with_read(|scope| entries.read(scope, 42).copied()),
 //!     Some(9)
 //! );
 //! // SAFETY: eligible task and live RCU service, no callback-required lock.
-//! assert_eq!(unsafe { entries.remove(42) }, Ok(true));
+//! let removed = unsafe { entries.remove(42) }?;
+//! assert!(removed);
 //! assert_eq!(
 //!     krcu::with_read(|scope| entries.read(scope, 42).copied()),
 //!     None
 //! );
 //! drop(entries); // Retired callbacks do not borrow the array.
+//! //
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! With Arc, an explicitly acquired owner can outlive both the read scope and
@@ -57,33 +65,41 @@
 //! extern crate alloc;
 //! use alloc::sync::Arc;
 //!
+//! # fn example() -> Result<(), kerrno::KError> {
 //! let entries = kxarray::XArray::<Arc<usize>>::new();
 //! // SAFETY: allocation-permitted task; usize and Arc storage have a
 //! // nonblocking release chain, including last-reference destruction.
-//! assert!(unsafe { entries.insert(5, Arc::new(11)) }.is_ok());
+//! unsafe { entries.insert(5, Arc::new(11)) }.map_err(|(error, _owner)| error)?;
 //! let retained = krcu::with_read(|scope| entries.get_owned(scope, 5));
 //! // SAFETY: initialized watched task outside scopes/locks, permanent RCU service.
-//! assert_eq!(unsafe { entries.remove(5) }, Ok(true));
+//! let removed = unsafe { entries.remove(5) }?;
+//! assert!(removed);
 //! drop(entries);
 //! assert_eq!(retained.as_deref(), Some(&11));
 //! drop(retained); // This need not be the last Arc: retirement may still be pending.
+//! //
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Before RCU service readiness, new insertions and root growth are permitted
-//! once allocation and local IRQ/per-CPU prerequisites exist. Replacement and
+//! with explicit NOWAIT permissions once allocation and local IRQ/per-CPU
+//! prerequisites exist. Default updates require sleepable, reclaim-safe task
+//! context. Replacement and
 //! removal need runtime admission. There is no per-array callback drain; use
 //! the system RCU drain contract separately when shutdown needs completion.
 #![no_std]
 
 extern crate alloc;
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     marker::PhantomData,
     sync::atomic::{AtomicPtr, Ordering},
 };
 
-use kerrno::KError;
+use kalloc_types::{AllocFlags, KBox};
+use kerrno::{KError, KResult};
 use krcu::ReadScope;
 use kspin::SpinNoPreempt;
 
@@ -95,6 +111,23 @@ use node::{MAX_HEIGHT, Node, PreparedNodes, height_for};
 pub use owner::EntryOwner;
 use retirement::Retirement;
 
+trait Allocator {
+    fn allocate<T>(&mut self, value: T) -> KResult<KBox<T>>;
+}
+
+impl Allocator for AllocFlags {
+    fn allocate<T>(&mut self, value: T) -> KResult<KBox<T>> {
+        KBox::new_with_flags(value, *self)
+    }
+}
+
+fn validate_flags(flags: AllocFlags) -> KResult {
+    if flags.bits() & !AllocFlags::all().bits() != 0 {
+        return Err(KError::InvalidInput);
+    }
+    Ok(())
+}
+
 /// An owning sparse index supporting concurrent insertion and scoped reads.
 ///
 /// Exclusive destruction releases all still-stored owners without waiting for
@@ -105,10 +138,15 @@ use retirement::Retirement;
 /// Shared mutation must not allow shortening the carrier's lifetime:
 ///
 /// ```compile_fail
-/// fn inject<'short>(array: &kxarray::XArray<Box<&'static usize>>, value: &'short usize) {
-///     let narrowed: &kxarray::XArray<Box<&'short usize>> = array;
+/// use kalloc_types::KBox;
+/// fn inject<'short>(array: &kxarray::XArray<KBox<&'static usize>>, value: &'short usize)
+///     -> Result<(), kerrno::KError>
+/// {
+///     let narrowed: &kxarray::XArray<KBox<&'short usize>> = array;
+///     let owned = KBox::new_nowait(value)?;
 ///     // SAFETY: primitive reference payload has no blocking destructor.
-///     let _ = unsafe { narrowed.insert(0, Box::new(value)) };
+///     unsafe { narrowed.insert(0, owned) }.map_err(|(error, _owner)| error)?;
+///     Ok(())
 /// }
 /// ```
 pub struct XArray<P: EntryOwner> {
@@ -150,7 +188,8 @@ impl<P: EntryOwner> XArray<P> {
     /// Concurrent insertion may be observed before or after publication.
     ///
     /// ```compile_fail
-    /// let array = kxarray::XArray::<Box<usize>>::new();
+    /// use kalloc_types::KBox;
+    /// let array = kxarray::XArray::<KBox<usize>>::new();
     /// let escaped = krcu::with_read(|scope| array.read(scope, 0));
     /// println!("{escaped:?}");
     /// ```
@@ -158,7 +197,8 @@ impl<P: EntryOwner> XArray<P> {
     /// The array must also remain alive for the entire borrow:
     ///
     /// ```compile_fail,E0505
-    /// let array = kxarray::XArray::<Box<usize>>::new();
+    /// use kalloc_types::KBox;
+    /// let array = kxarray::XArray::<KBox<usize>>::new();
     /// krcu::with_read(|scope| {
     ///     let borrowed = array.read(scope, 0);
     ///     drop(array);
@@ -177,32 +217,86 @@ impl<P: EntryOwner> XArray<P> {
     /// Inserts only if absent, returning the offered owner unchanged on conflict.
     ///
     /// Nodes are prepared outside the writer lock and the path is rechecked.
-    /// Allocation uses the kernel's infallible allocation/OOM policy. Initial
+    /// KERNEL allocation requires sleepable, reclaim-safe task context, enabled IRQs
+    /// and preemption, and no locks needed by reclaim/IO/filesystem entry. Use
+    /// explicit NOWAIT permissions for allocation-permitted early boot. Initial
     /// insertion and root growth do not require a running reclamation service.
     ///
     /// # Errors
-    /// Returns `Err(value)` only when the key is already occupied, preserving
-    /// the offered ownership and leaving the existing association unchanged.
+    /// Returns `(AlreadyExists, value)` on conflict or `(NoMemory, value)` on
+    /// reservation failure, preserving the offered owner. A failed operation
+    /// publishes nothing; concurrent writers may independently change the tree.
     ///
     /// # Safety
-    /// Call from an allocation-permitted task or early-boot context, with local
-    /// IRQ/per-CPU primitives initialized; never from IRQ, softirq or NMI.
+    /// Call from sleepable, reclaim-safe task context with local IRQ/per-CPU
+    /// primitives initialized; never from IRQ, softirq or NMI or an RCU scope.
     /// The offered owner's complete release chain must not block or unwind and
     /// must be valid in ordinary RCU callback context, including nested values,
     /// last strong-reference destruction and allocator deallocation. This is an
     /// adoption contract, not a consequence of Send/Sync. Rejected ownership
     /// remains the caller's responsibility.
-    pub unsafe fn insert(&self, index: usize, value: P) -> Result<(), P> {
+    pub unsafe fn insert(&self, index: usize, value: P) -> Result<(), (KError, P)> {
+        // SAFETY: insert's unsafe contract requires initialized local IRQ/per-CPU
+        // primitives and sleepable reclaim-safe task context, outside RCU scopes
+        // and reclaim/IO/filesystem locks. It also requires the offered owner's
+        // nested drops, final Arc release and deallocation to be nonblocking and
+        // non-unwinding in RCU callbacks. Forwarding the same owner with KERNEL
+        // permissions preserves these caller-established obligations.
+        unsafe { self.insert_with_flags(index, value, AllocFlags::KERNEL) }
+    }
+
+    /// Performs [`Self::insert`] with explicit allocation permissions.
+    ///
+    /// Flags govern only private node/retirement storage, never payload construction
+    /// or destruction. Invalid bits return InvalidInput before inspecting the tree.
+    /// NOWAIT does not grant IRQ/NMI access, reserves or bounded latency. NOIO/NOFS
+    /// still permit sleeping; callers must exclude locks needed by allowed reclaim.
+    ///
+    /// # Safety
+    /// Uphold [`Self::insert`]'s release-chain and RCU obligations. Without sleeping
+    /// reclaim, insertion/root growth may also run in initialized early boot;
+    /// replacement/removal still require eligible watched task context outside RCU
+    /// scopes. KERNEL requires sleepable, reclaim-safe task context, IRQs and
+    /// preemption enabled, and no lock needed by reclaim, IO or filesystem entry.
+    pub unsafe fn insert_with_flags(
+        &self,
+        index: usize,
+        value: P,
+        mut flags: AllocFlags,
+    ) -> Result<(), (KError, P)> {
+        if let Err(error) = validate_flags(flags) {
+            return Err((error, value));
+        }
+        // SAFETY: the unsafe entry contract establishes initialized IRQ/per-CPU
+        // primitives, no RCU read scope, and a nonblocking, non-unwinding owner
+        // release chain. The caller supplies either reclaim-safe task context
+        // for sleeping permissions or allocation-permitted early boot for NOWAIT.
+        // validate_flags rejected unknown bits; the AllocFlags allocator forwards
+        // these same permissions to KBox, and preparation releases the writer lock.
+        unsafe { self.insert_with_allocator(index, value, &mut flags) }
+    }
+
+    /// # Safety
+    /// The allocator must obey the caller-selected permissions; all other
+    /// obligations match the corresponding public update operation.
+    unsafe fn insert_with_allocator(
+        &self,
+        index: usize,
+        value: P,
+        allocator: &mut impl Allocator,
+    ) -> Result<(), (KError, P)> {
         let mut prepared = PreparedNodes::new();
         loop {
             let guard = self.writers.lock();
             let Some(needed) = self.nodes_needed(index) else {
                 drop(guard);
-                return Err(value);
+                return Err((KError::AlreadyExists, value));
             };
             if prepared.len < needed {
                 drop(guard);
-                prepared.prepare(needed);
+                if let Err(error) = prepared.prepare(needed, allocator) {
+                    return Err((error, value));
+                }
                 continue;
             }
             self.publish(index, value, &mut prepared);
@@ -223,7 +317,8 @@ impl<P: EntryOwner> XArray<P> {
     /// # Errors
     /// Replacement returns `(error, value)` unchanged if RCU preflight rejects
     /// service readiness or caller context. Publication is unchanged on error.
-    /// Allocation follows the infallible kernel OOM policy.
+    /// Node/retirement reservation failure returns `(NoMemory, value)` before
+    /// publication. Default KERNEL permissions require the context of insert.
     ///
     /// # Safety
     /// Uphold all of [`Self::insert`]'s context and full release-chain obligations.
@@ -235,6 +330,61 @@ impl<P: EntryOwner> XArray<P> {
     where
         P: 'static,
     {
+        // SAFETY: set's unsafe contract establishes initialized IRQ/per-CPU state,
+        // sleepable reclaim-safe context outside RCU scopes and scheduler/RCU
+        // locks, and a nonblocking, non-unwinding complete payload release chain.
+        // The caller retains permanent RCU service/CPU availability; the delegated
+        // replacement path checks runtime admission before publishing. KERNEL
+        // permissions match this caller-established context.
+        unsafe { self.set_with_flags(index, value, AllocFlags::KERNEL) }
+    }
+
+    /// Performs [`Self::set`] with explicit allocation permissions.
+    ///
+    /// Flags govern only private node/retirement storage, never payload construction
+    /// or destruction. Invalid bits return InvalidInput before inspecting the tree.
+    /// NOWAIT does not grant IRQ/NMI access, reserves or bounded latency. NOIO/NOFS
+    /// still permit sleeping; callers must exclude locks needed by allowed reclaim.
+    ///
+    /// # Safety
+    /// Uphold [`Self::set`]'s release-chain and RCU obligations. Without sleeping
+    /// reclaim, insertion/root growth may also run in initialized early boot;
+    /// replacement/removal still require eligible watched task context outside RCU
+    /// scopes. KERNEL requires sleepable, reclaim-safe task context, IRQs and
+    /// preemption enabled, and no lock needed by reclaim, IO or filesystem entry.
+    pub unsafe fn set_with_flags(
+        &self,
+        index: usize,
+        value: P,
+        mut flags: AllocFlags,
+    ) -> Result<(), (KError, P)>
+    where
+        P: 'static,
+    {
+        if let Err(error) = validate_flags(flags) {
+            return Err((error, value));
+        }
+        // SAFETY: the caller establishes the same initialized execution context and
+        // nonblocking, non-unwinding full owner release chain required by set,
+        // excludes scheduler/RCU and reclaim-needed locks, and keeps the permanent
+        // service/CPUs available for retirement. Validated flags are forwarded
+        // unchanged by the allocator. The helper preflights occupied replacement
+        // and prepares outside the writer lock before rechecking publication.
+        unsafe { self.set_with_allocator(index, value, &mut flags) }
+    }
+
+    /// # Safety
+    /// The allocator must obey the caller-selected permissions; all other
+    /// obligations match the corresponding public update operation.
+    unsafe fn set_with_allocator(
+        &self,
+        index: usize,
+        value: P,
+        allocator: &mut impl Allocator,
+    ) -> Result<(), (KError, P)>
+    where
+        P: 'static,
+    {
         let mut prepared = PreparedNodes::new();
         let mut retirement = None;
         loop {
@@ -242,7 +392,9 @@ impl<P: EntryOwner> XArray<P> {
             if let Some(needed) = self.nodes_needed(index) {
                 if prepared.len < needed {
                     drop(guard);
-                    prepared.prepare(needed);
+                    if let Err(error) = prepared.prepare(needed, allocator) {
+                        return Err((error, value));
+                    }
                     #[cfg(unittest)]
                     tests::after_set_preparation(self, index);
                     continue;
@@ -273,7 +425,10 @@ impl<P: EntryOwner> XArray<P> {
             if let Err(error) = krcu::preflight_callback_submission() {
                 return Err((error, value));
             }
-            retirement = Some(Retirement::<P>::prepare());
+            retirement = Some(match Retirement::<P>::prepare(allocator) {
+                Ok(record) => record,
+                Err(error) => return Err((error, value)),
+            });
             #[cfg(unittest)]
             tests::after_set_preparation(self, index);
             // Reinspect after allocation: never use a path retained across unlock.
@@ -290,13 +445,66 @@ impl<P: EntryOwner> XArray<P> {
     /// # Errors
     /// Returns the RCU preflight error without changing the association when
     /// service readiness or caller context is unsuitable. Even a missing-key
-    /// removal requires successful preflight. Allocation follows kernel OOM policy.
+    /// removal requires successful preflight. Retirement reservation failure returns
+    /// NoMemory before withdrawal. KERNEL requires sleepable, reclaim-safe
+    /// task context without locks needed by reclaim/IO/filesystem entry.
     ///
     /// # Safety
     /// Uphold [`Self::set`]'s execution-context and permanent-service obligations.
     /// Stored owners have already been admitted under the insertion release
     /// contract. No scheduler/RCU bookkeeping lock may be held.
     pub unsafe fn remove(&self, index: usize) -> Result<bool, KError>
+    where
+        P: 'static,
+    {
+        // SAFETY: remove's unsafe contract requires sleepable reclaim-safe task
+        // context with initialized IRQ/per-CPU state, no read scope or scheduler/
+        // RCU/reclaim-needed locks, and permanent service/CPU availability through
+        // callback execution. Stored owners were admitted with nonblocking,
+        // non-unwinding release chains by insertion. Delegation preserves KERNEL
+        // permissions and performs runtime preflight before withdrawal.
+        unsafe { self.remove_with_flags(index, AllocFlags::KERNEL) }
+    }
+
+    /// Performs [`Self::remove`] with explicit allocation permissions.
+    ///
+    /// Flags govern only private node/retirement storage, never payload construction
+    /// or destruction. Invalid bits return InvalidInput before inspecting the tree.
+    /// NOWAIT does not grant IRQ/NMI access, reserves or bounded latency. NOIO/NOFS
+    /// still permit sleeping; callers must exclude locks needed by allowed reclaim.
+    ///
+    /// # Safety
+    /// Uphold [`Self::remove`]'s release-chain and RCU obligations. Without sleeping
+    /// reclaim, insertion/root growth may also run in initialized early boot;
+    /// replacement/removal still require eligible watched task context outside RCU
+    /// scopes. KERNEL requires sleepable, reclaim-safe task context, IRQs and
+    /// preemption enabled, and no lock needed by reclaim, IO or filesystem entry.
+    pub unsafe fn remove_with_flags(
+        &self,
+        index: usize,
+        mut flags: AllocFlags,
+    ) -> Result<bool, KError>
+    where
+        P: 'static,
+    {
+        validate_flags(flags)?;
+        // SAFETY: the caller establishes eligible watched task context outside read
+        // scopes and scheduler/RCU/reclaim-needed locks, with initialized local
+        // primitives and permanent service/CPU availability. Insertion already
+        // admitted the stored owners' nonblocking, non-unwinding release chains.
+        // The allocator preserves validated permissions; the helper preflights
+        // before withdrawal and rechecks ownership under the writer lock.
+        unsafe { self.remove_with_allocator(index, &mut flags) }
+    }
+
+    /// # Safety
+    /// The allocator must obey the caller-selected permissions; all other
+    /// obligations match the corresponding public update operation.
+    unsafe fn remove_with_allocator(
+        &self,
+        index: usize,
+        allocator: &mut impl Allocator,
+    ) -> Result<bool, KError>
     where
         P: 'static,
     {
@@ -331,7 +539,7 @@ impl<P: EntryOwner> XArray<P> {
                 return Ok(true);
             }
             drop(guard);
-            retirement = Some(Retirement::<P>::prepare());
+            retirement = Some(Retirement::<P>::prepare(allocator)?);
             // Another writer may remove or replace the entry during preparation.
             // Discard the old path and inspect the current association again.
         }
@@ -457,7 +665,7 @@ impl<P: EntryOwner> XArray<P> {
         while current_height < height {
             let parent = prepared.take(current_height + 1);
             // SAFETY: parent is private, initialized storage; attaching the old
-            // root transfers its graph ownership without reconstructing a Box.
+            // root transfers its graph ownership without reconstructing a KBox.
             unsafe { (*parent).insert_slot(0, root.cast()) };
             root = parent;
             current_height += 1;
@@ -526,8 +734,8 @@ impl<P: EntryOwner> Drop for XArray<P> {
 /// Owns the complete downward graph; no reader or other owner may access its
 /// nodes or borrow its stored payloads. Each slot transfers exactly one owner.
 unsafe fn destroy_tree<P: EntryOwner>(raw: *mut Node) {
-    // SAFETY: exclusive graph ownership permits reconstructing this node Box.
-    let node = unsafe { Box::from_raw(raw) };
+    // SAFETY: exclusive graph ownership permits reconstructing this node KBox.
+    let node = unsafe { KBox::from_raw(raw) };
     for slot in &node.slots {
         let entry = slot.load(Ordering::Relaxed);
         if entry.is_null() {

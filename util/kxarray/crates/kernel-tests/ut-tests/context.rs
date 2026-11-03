@@ -4,26 +4,34 @@
 
 //! Actual delivery and explicitly labelled controlled-context fixtures.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+use kalloc_types::{AllocFlags, KBox};
 use kirq::context::InterruptContextLevel;
 use krcu::{CallbackNode, PreparedCallback};
 use ktime_types::TimeSpan;
-use unittest::{assert, assert_eq, def_test};
-
 use kxarray::XArray;
+use unittest::{assert, assert_eq, def_test};
 
 #[def_test(serial)]
 fn timer_hardirq_reads_replacement_absence_and_reinsertion() {
-    let array = Arc::new(XArray::<Box<usize>>::new());
-    // SAFETY: initialized task, primitive payloads and nonblocking Box release.
-    assert!(unsafe { array.insert(0, Box::new(17)) }.is_ok());
-    // SAFETY: same task context; growing the root retains the first association.
-    assert!(unsafe { array.insert(usize::MAX, Box::new(1)) }.is_ok());
+    let array = Arc::new(XArray::<KBox<usize>>::new());
+    assert!(
+        // SAFETY: initialized task, primitive payloads and nonblocking KBox release.
+        unsafe { array.insert_with_flags(0, KBox::new_nowait(17).unwrap(), AllocFlags::NOWAIT,) }
+            .is_ok()
+    );
+    assert!(
+        // SAFETY: same task context; growing the root retains the first association.
+        unsafe {
+            array.insert_with_flags(usize::MAX, KBox::new_nowait(1).unwrap(), AllocFlags::NOWAIT)
+        }
+        .is_ok()
+    );
     let requested = Arc::new(AtomicUsize::new(0));
     let completed = Arc::new(AtomicUsize::new(0));
     let has_invalid_read = Arc::new(AtomicBool::new(false));
@@ -87,11 +95,21 @@ fn timer_hardirq_reads_replacement_absence_and_reinsertion() {
         let updated = match stage {
             // SAFETY: watched sleepable task outside scopes/bookkeeping locks,
             // permanent RCU service and primitive nonblocking release.
-            0 => unsafe { array.set(usize::MAX, Box::new(2)) }.is_ok(),
+            0 => unsafe {
+                array.set_with_flags(usize::MAX, KBox::new_nowait(2).unwrap(), AllocFlags::NOWAIT)
+            }
+            .is_ok(),
             // SAFETY: same task context, preflight precedes withdrawal.
-            1 => (unsafe { array.remove(usize::MAX) }) == Ok(true),
+            1 => (unsafe { array.remove_with_flags(usize::MAX, AllocFlags::NOWAIT) }) == Ok(true),
             // SAFETY: same context and primitive adoption contract.
-            2 => unsafe { array.insert(usize::MAX, Box::new(3)) }.is_ok(),
+            2 => unsafe {
+                array.insert_with_flags(
+                    usize::MAX,
+                    KBox::new_nowait(3).unwrap(),
+                    AllocFlags::NOWAIT,
+                )
+            }
+            .is_ok(),
             _ => true,
         };
         if !updated {
@@ -113,7 +131,7 @@ fn timer_hardirq_reads_replacement_absence_and_reinsertion() {
 #[repr(C)]
 struct SoftirqRead {
     node: CallbackNode,
-    array: Arc<XArray<Box<usize>>>,
+    array: Arc<XArray<KBox<usize>>>,
     expected: Option<usize>,
     outcome: Arc<AtomicUsize>,
 }
@@ -121,11 +139,11 @@ struct SoftirqRead {
 const _: () = core::assert!(core::mem::offset_of!(SoftirqRead, node) == 0);
 
 /// # Safety
-/// The pointer is the zero-offset projection of one submitted SoftirqRead Box,
+/// The pointer is the zero-offset projection of one submitted SoftirqRead KBox,
 /// invoked exactly once after service detachment. Invocation consumes the record.
 unsafe fn read_from_softirq(node: *mut CallbackNode) {
-    // SAFETY: checked zero offset preserves Box provenance and unique ownership.
-    let record = unsafe { Box::from_raw(node.cast::<SoftirqRead>()) };
+    // SAFETY: checked zero offset preserves KBox provenance and unique ownership.
+    let record = unsafe { KBox::from_raw(node.cast::<SoftirqRead>()) };
     let is_context_valid = kirq::context::interrupt_context_level()
         == InterruptContextLevel::Softirq
         && krcu_core::RcuContextIf::current_cpu_watching().is_watching()
@@ -147,18 +165,21 @@ unsafe fn read_from_softirq(node: *mut CallbackNode) {
 /// The pointer is the zero-offset field of one rejected/unsubmitted record.
 /// The task retains another array owner; cancellation owns only this record.
 unsafe fn cancel_softirq_read(node: *mut CallbackNode) {
-    // SAFETY: checked layout and sole cancellation ownership recover the Box.
-    drop(unsafe { Box::from_raw(node.cast::<SoftirqRead>()) });
+    // SAFETY: checked layout and sole cancellation ownership recover the KBox.
+    drop(unsafe { KBox::from_raw(node.cast::<SoftirqRead>()) });
 }
 
-fn check_softirq_read(array: &Arc<XArray<Box<usize>>>, expected: Option<usize>) -> bool {
+fn check_softirq_read(array: &Arc<XArray<KBox<usize>>>, expected: Option<usize>) -> bool {
     let outcome = Arc::new(AtomicUsize::new(0));
-    let raw = Box::into_raw(Box::new(SoftirqRead {
-        node: CallbackNode::new(read_from_softirq),
-        array: array.clone(),
-        expected,
-        outcome: outcome.clone(),
-    }));
+    let raw = KBox::into_raw(
+        KBox::new_nowait(SoftirqRead {
+            node: CallbackNode::new(read_from_softirq),
+            array: array.clone(),
+            expected,
+            outcome: outcome.clone(),
+        })
+        .unwrap(),
+    );
     // SAFETY: raw field projection preserves enclosing allocation provenance.
     let node = unsafe { &raw mut (*raw).node };
     // SAFETY: field of a live allocation is nonnull.
@@ -179,21 +200,34 @@ fn check_softirq_read(array: &Arc<XArray<Box<usize>>>, expected: Option<usize>) 
 
 #[def_test(serial)]
 fn serving_softirq_reads_live_and_removed_entries() {
-    let array = Arc::new(XArray::<Box<usize>>::new());
-    // SAFETY: initialized task, nonblocking primitive Box release.
-    assert!(unsafe { array.insert(usize::MAX, Box::new(7)) }.is_ok());
+    let array = Arc::new(XArray::<KBox<usize>>::new());
+    assert!(
+        // SAFETY: initialized task, nonblocking primitive KBox release.
+        unsafe {
+            array.insert_with_flags(usize::MAX, KBox::new_nowait(7).unwrap(), AllocFlags::NOWAIT)
+        }
+        .is_ok()
+    );
     assert!(check_softirq_read(&array, Some(7)));
-    // SAFETY: watched task outside scopes/locks with permanent RCU service.
-    assert_eq!(unsafe { array.remove(usize::MAX) }, Ok(true));
+    assert_eq!(
+        // SAFETY: watched task outside scopes/locks with permanent RCU service.
+        unsafe { array.remove_with_flags(usize::MAX, AllocFlags::NOWAIT) },
+        Ok(true)
+    );
     assert!(check_softirq_read(&array, None));
-    // SAFETY: initialized task and primitive payload adoption contract.
-    assert!(unsafe { array.insert(usize::MAX, Box::new(9)) }.is_ok());
+    assert!(
+        // SAFETY: initialized task and primitive payload adoption contract.
+        unsafe {
+            array.insert_with_flags(usize::MAX, KBox::new_nowait(9).unwrap(), AllocFlags::NOWAIT)
+        }
+        .is_ok()
+    );
     assert!(check_softirq_read(&array, Some(9)));
 }
 
 #[def_test(serial)]
 fn writer_exclusion_keeps_normal_interrupts_enabled() {
-    let array = XArray::<Box<usize>>::new();
+    let array = XArray::<KBox<usize>>::new();
     assert!(karch::local_irq_enabled());
     let is_enabled = array.with_writer_locked_for_test(karch::local_irq_enabled);
     assert!(is_enabled);
@@ -202,16 +236,28 @@ fn writer_exclusion_keeps_normal_interrupts_enabled() {
 
 #[def_test(serial)]
 fn controlled_nmi_reads_while_writer_lock_is_held() {
-    let array = XArray::<Box<usize>>::new();
-    // SAFETY: initialized task, primitive payload and nonblocking Box release.
-    assert!(unsafe { array.insert(0, Box::new(17)) }.is_ok());
+    let array = XArray::<KBox<usize>>::new();
+    assert!(
+        // SAFETY: initialized task, primitive payload and nonblocking KBox release.
+        unsafe { array.insert_with_flags(0, KBox::new_nowait(17).unwrap(), AllocFlags::NOWAIT,) }
+            .is_ok()
+    );
     for expected in [Some(7), Some(9), None, Some(11)] {
         let updated = match expected {
             // SAFETY: watched task outside scopes/locks, primitive ownership,
             // permanent RCU service and no explicit submission context change.
-            Some(value) => unsafe { array.set(usize::MAX, Box::new(value)) }.is_ok(),
-            // SAFETY: same admitted task context; retirement is outside exclusion.
-            None => (unsafe { array.remove(usize::MAX) }) == Ok(true),
+            Some(value) => unsafe {
+                array.set_with_flags(
+                    usize::MAX,
+                    KBox::new_nowait(value).unwrap(),
+                    AllocFlags::NOWAIT,
+                )
+            }
+            .is_ok(),
+            None => {
+                // SAFETY: eligible task outside reader scopes with the permanent RCU host.
+                (unsafe { array.remove_with_flags(usize::MAX, AllocFlags::NOWAIT) }) == Ok(true)
+            }
         };
         let is_valid = {
             let pin = kspin::NoPreemptIrqSave::new();
@@ -281,16 +327,17 @@ struct PublicationProbe {
 }
 
 impl PublicationProbe {
-    fn new(value: usize) -> Box<Self> {
-        Box::new(Self {
+    fn new(value: usize) -> KBox<Self> {
+        KBox::new_nowait(Self {
             value,
             observations: AtomicUsize::new(0),
             has_invalid_read: AtomicBool::new(false),
         })
+        .unwrap()
     }
 }
 
-fn observe_partial_publication(array: &XArray<Box<PublicationProbe>>, index: usize) {
+fn observe_partial_publication(array: &XArray<KBox<PublicationProbe>>, index: usize) {
     // Software NMI entry needs IRQ exclusion; writer serialization itself does
     // not mask ordinary interrupts.
     let _irq = kspin::IrqSave::new();
@@ -321,16 +368,22 @@ fn observe_partial_publication(array: &XArray<Box<PublicationProbe>>, index: usi
 
 #[def_test(serial)]
 fn controlled_nmi_reads_before_root_and_payload_publication() {
-    let array = XArray::<Box<PublicationProbe>>::new();
-    // SAFETY: task context; atomic payloads and nonblocking allocator release.
-    assert!(unsafe { array.insert(0, PublicationProbe::new(17)) }.is_ok());
+    let array = XArray::<KBox<PublicationProbe>>::new();
+    assert!(
+        // SAFETY: task context; atomic payloads and nonblocking allocator release.
+        unsafe { array.insert_with_flags(0, PublicationProbe::new(17), AllocFlags::NOWAIT,) }
+            .is_ok()
+    );
     // First: new ancestors remain private until the final root publication.
     // Second: the existing tree exposes a newly linked, still-empty leaf.
     for (stage, index) in [usize::MAX, 64].into_iter().enumerate() {
         array.set_publication_hook_for_test(observe_partial_publication);
         // SAFETY: same task/adoption contract; test observer restores context
         // and only reads while the insertion holds its writer lock.
-        let inserted = unsafe { array.insert(index, PublicationProbe::new(23)) }.is_ok();
+        let inserted = unsafe {
+            array.insert_with_flags(index, PublicationProbe::new(23), AllocFlags::NOWAIT)
+        }
+        .is_ok();
         let is_valid = krcu::with_read(|scope| {
             array.read(scope, 0).is_some_and(|anchor| {
                 anchor.observations.load(Ordering::Acquire) == stage + 1

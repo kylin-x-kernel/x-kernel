@@ -1,5 +1,16 @@
 # knet — Design
 
+## Poller Configuration Preparation
+
+The private poller prepares QueueConfig CPU storage with KERNEL permissions in
+sleepable, reclaim-safe startup context, after releasing its state lock. Failure
+is logged and returns before queue creation or publication, like the existing
+NormalQueue preparation failure. Pending demand remains recorded, but both
+background polling and foreground assistance return without progressing the
+network while the queue is absent. A later explicit start can retry; the current
+boot path calls start only once. No automatic
+retry or allocation-free guarantee for the complete network startup is added.
+
 ## Fallible socket owners
 
 The seven `Socket` variants own `KBox<T>`; SocketOps and Configurable forwarding

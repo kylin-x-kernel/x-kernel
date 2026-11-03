@@ -30,3 +30,11 @@ Weak SMP forwarding does not activate this crate in ordinary system configuratio
 Cargo's workspace lockfile still resolves optional dependencies; their kernel
 edges belong to this test crate, never to the container. See the
 [coverage notes](../../tests/README.md) for coverage boundaries.
+
+## Allocation Policy
+
+Fixtures prepare unique payloads with KBox and explicitly select NOWAIT for
+container updates. This avoids introducing sleeping reclaim into controlled
+context and writer-migration probes. NOWAIT does not relax the existing task-only
+update and RCU preflight contracts. Basic reservation-failure coverage stays in
+the container's unit/host tests; this crate retains the real task/IRQ/RCU tests.

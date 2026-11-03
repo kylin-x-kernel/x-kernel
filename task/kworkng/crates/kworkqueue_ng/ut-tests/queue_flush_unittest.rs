@@ -15,7 +15,15 @@ use crate::{
 };
 
 fn queue() -> Arc<Queue> {
-    Queue::new(QueueConfig::new(&[0.into()], CpuPolicy::CurrentCpu, 8).unwrap())
+    Queue::new(
+        QueueConfig::new_with_flags(
+            &[0.into()],
+            CpuPolicy::CurrentCpu,
+            8,
+            kalloc_types::AllocFlags::NOWAIT,
+        )
+        .unwrap(),
+    )
 }
 
 fn wait_blocked(task: &ktask::KtaskRef) {
@@ -200,8 +208,15 @@ fn flush_visits_all_partitions_after_common_cutoff() {
     if kcpu_id_map::nr_cpus() < 2 {
         return unittest::TestResult::Ignored;
     }
-    let queue =
-        Queue::new(QueueConfig::new(&[0.into(), 1.into()], CpuPolicy::CurrentCpu, 1).unwrap());
+    let queue = Queue::new(
+        QueueConfig::new_with_flags(
+            &[0.into(), 1.into()],
+            CpuPolicy::CurrentCpu,
+            1,
+            kalloc_types::AllocFlags::NOWAIT,
+        )
+        .unwrap(),
+    );
     let late = Arc::new(Work::new());
     let published = Arc::new(AtomicBool::new(false));
     let flusher = ktask::spawn({
@@ -238,8 +253,15 @@ fn remote_sample_before_cutoff_commits_after_publication() {
     if kcpu_id_map::nr_cpus() < 2 {
         return unittest::TestResult::Ignored;
     }
-    let queue =
-        Queue::new(QueueConfig::new(&[0.into(), 1.into()], CpuPolicy::CurrentCpu, 2).unwrap());
+    let queue = Queue::new(
+        QueueConfig::new_with_flags(
+            &[0.into(), 1.into()],
+            CpuPolicy::CurrentCpu,
+            2,
+            kalloc_types::AllocFlags::NOWAIT,
+        )
+        .unwrap(),
+    );
     let old = Arc::new(Work::with_callback(|| {}));
     let later = core::pin::pin!(Work::with_callback(|| {}));
     for round in 0..32 {

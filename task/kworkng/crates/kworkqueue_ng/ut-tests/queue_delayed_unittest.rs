@@ -16,7 +16,16 @@ use crate::{queue::config::QueueConfig, work::delayed::DelayedWork};
 
 /// Prepares synthetic execution partitions that tests claim manually.
 pub(super) fn queue(policy: CpuPolicy) -> Arc<Queue> {
-    Queue::new(QueueConfig::validate(&[0.into(), 2.into(), 4.into()], policy, 1, |_| true).unwrap())
+    Queue::new(
+        QueueConfig::validate(
+            &[0.into(), 2.into(), 4.into()],
+            policy,
+            1,
+            kalloc_types::AllocFlags::NOWAIT,
+            |_| true,
+        )
+        .unwrap(),
+    )
 }
 
 /// Returns a representable delay beyond the duration of these tests.

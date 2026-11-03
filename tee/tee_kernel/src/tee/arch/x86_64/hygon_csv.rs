@@ -39,7 +39,7 @@
 //! bounded `&[u8]`, validate `len >= size_of::<Report>()`, then extract fields by
 //! offset; ignore `reserved` on read and never expose it as writable storage.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::mem::size_of;
 
 use bytemuck::{Pod, Zeroable, bytes_of};
@@ -80,13 +80,12 @@ const_assert!(
     CSV_SEALING_KEY_OFFSET + size_of::<CsvSealingKey>() <= size_of::<csv_attestation_report_t>()
 );
 
-fn construct_user_data() -> TeeResult<Box<csv_guest_user_data_attestation_t>> {
-    // Allocate and initialize the attestation user data structure
-    let mut udata = Box::new(csv_guest_user_data_attestation_t {
+fn construct_user_data() -> csv_guest_user_data_attestation_t {
+    let mut udata = csv_guest_user_data_attestation_t {
         user_data: [0u8; 64],
         mnonce: [0u8; 16],
         hash: [0u8; 32],
-    });
+    };
 
     // Fill user_data and mnonce with random bytes
     random_bytes(&mut udata.user_data);
@@ -100,14 +99,12 @@ fn construct_user_data() -> TeeResult<Box<csv_guest_user_data_attestation_t>> {
     let digest_len = size_of::<CsvSealingKey>().min(digest.len());
     udata.hash.copy_from_slice(&digest.as_bytes()[..digest_len]);
 
-    Ok(udata)
+    udata
 }
 
 fn get_csv_report(user_data: &csv_guest_user_data_attestation_t) -> TeeResult<Vec<u8>> {
     let kernel_buf_size = PAGE_SIZE as usize;
-    // Allocate a kernel buffer for the attestation request/response
-    // We use a page-aligned buffer for the hypercall
-    let mut kernel_buf = Box::new(alloc::vec![0u8; kernel_buf_size]);
+    let mut kernel_buf = alloc::vec![0u8; kernel_buf_size];
 
     // Copy user_data to kernel buffer
     let user_data_size = size_of::<csv_guest_user_data_attestation_t>();
@@ -128,11 +125,11 @@ fn get_csv_report(user_data: &csv_guest_user_data_attestation_t) -> TeeResult<Ve
         kernel_buf_size as u64,
     );
 
-    Ok(*kernel_buf)
+    Ok(kernel_buf)
 }
 
 fn get_sealing_key() -> TeeResult<Vec<u8>> {
-    let user_data = construct_user_data()?;
+    let user_data = construct_user_data();
     let report_data = get_csv_report(&user_data)?;
     let sealing_key_end = CSV_SEALING_KEY_OFFSET + size_of::<CsvSealingKey>();
     if report_data.len() < sealing_key_end {

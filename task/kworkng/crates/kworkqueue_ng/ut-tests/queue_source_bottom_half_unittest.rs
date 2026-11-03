@@ -108,7 +108,13 @@ fn prepare(max_active: usize, kick: Arc<Waker>) -> (Arc<Queue>, Arc<Service>) {
     let cpu = khal::percpu::this_cpu_id();
     let dispatch = PartitionDispatch::new();
     let queue = Queue::with_dispatch(
-        QueueConfig::new(&[cpu], CpuPolicy::CurrentCpu, max_active).unwrap(),
+        QueueConfig::new_with_flags(
+            &[cpu],
+            CpuPolicy::CurrentCpu,
+            max_active,
+            kalloc_types::AllocFlags::NOWAIT,
+        )
+        .unwrap(),
         |_| (dispatch.clone(), kick.clone()),
     );
     let service = Arc::new(kworkerpool_ng::test_support::bottom_half_service(

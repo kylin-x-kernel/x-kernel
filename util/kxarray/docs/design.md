@@ -1,6 +1,6 @@
 # Sparse Ownership Index
 
-`XArray<P>` owns one Box or Arc per usize key. The sealed carrier trait only
+`XArray<P>` owns one KBox or Arc per usize key. The sealed carrier trait only
 describes raw ownership conversion; it does not certify destructor context.
 Unsafe insertion admits a value whose entire release chain has been audited
 for nonblocking RCU callback execution. The implemented operations are creation,
@@ -69,6 +69,38 @@ Each detached node submits its embedded callback after unlocking. Callback
 submission uses pointers saved on the stack, never links in an already submitted
 node. Each callback frees only its node allocation, without following slots or
 borrowing the array. Node deallocation, like payload release, must not block.
+
+## Fallible Preparation and Execution Context
+
+Nodes, detached retirement records and unique payload carriers use KBox; Arc
+carriers retain their existing ownership behavior. KBox raw conversion preserves
+the original pointer and allocator pairing. A displaced owner remains raw until
+its grace period ends; converting it back before then would invalidate readers.
+There is no new fallible operation after publication or withdrawal.
+
+`insert` now returns `Result<(), (KError, P)>`: AlreadyExists distinguishes a
+conflict from NoMemory. `set` and `remove` also report NoMemory before mutation.
+Private allocations prepared before failure are dropped outside writer exclusion;
+insert/set return the exact offered owner rather than dropping or cloning it.
+The failing operation publishes nothing, but does not roll back independent
+concurrent writers. A valid-flag duplicate insert and missing-key removal do not
+allocate. Missing removal retains the existing RCU preflight requirement.
+
+Default update methods use KERNEL permissions: sleepable, reclaim-safe task
+context, enabled IRQs/preemption, no non-sleepable RCU scope, and no held locks
+needed by reclaim, IO or filesystem entry. `insert_with_flags`, `set_with_flags`
+and `remove_with_flags` allow explicit permissions. They reject unknown flag bits
+before inspecting the tree, including no-op operations. NOWAIT allows initialized
+early-boot insertion/root growth without sleeping reclaim, but is neither NOFAIL
+nor an IRQ/NMI access permission, reserve guarantee or latency bound. Replacement
+and removal still require RCU-admitted watched task context outside read scopes.
+NOIO and NOFS still allow sleeping. Flags do not govern payload creation, nested
+allocations or destruction. Readers and publication/withdrawal remain allocation-free.
+
+The private allocator interface is statically dispatched and returns KBox owners;
+production uses AllocFlags directly. Tests substitute per-call reservation failure,
+not a global allocator or a copied mutation algorithm. The host KBox backend lets
+storage/Miri tests retain their isolation from kernel task and interrupt providers.
 
 ## Test Ownership
 

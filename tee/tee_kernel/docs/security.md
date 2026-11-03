@@ -1,5 +1,30 @@
 # TEE Ownership and Lifecycle Safety
 
+## REE Scratch And Backing Handle Boundary
+
+Scratch allocation is fallible, zero-initialized and fixed at BLOCK_SIZE bytes.
+NOWAIT avoids sleeping reclaim under REE serialization locks; it does not make
+RPC, VFS IO or the complete storage transaction nonblocking. Failure returns
+through the existing TeeError conversion before block IO or payload copying.
+Read length clamping still occurs before reservation. RAII frees scratch storage
+on every exit without an explicit put operation.
+
+The inline FileVariant remains an integer handle with no Drop implementation.
+Copying it into TeeFsFdAux neither duplicates ownership nor closes the underlying
+table entry; the existing explicit close protocol remains responsible for release.
+No address of the inline handle is retained. Tests check scratch zeroing, size
+and independent lifetime, plus handle identity across a move. These tests do not
+inject global OOM or establish htree transaction rollback guarantees.
+
+## CSV Temporary Lifetime
+
+Attestation user data is borrowed only while copying into the separately owned
+report buffer. Removing its Box and the Box around the report Vec descriptor
+does not change the hypercall buffer address or lifetime. The existing Vec
+allocation remains infallible and does not guarantee page alignment. Hardware
+buffer suitability and hypercall response handling remain separate concerns;
+ordinary QEMU validation cannot establish Hygon CSV hardware behavior.
+
 ## ECC dispatch lifetime
 
 The key-generation dispatch wrapper contains only an exclusive key borrow and
@@ -95,7 +120,8 @@ allocator. Existing exec/exit fixtures continue exercising real session cleanup.
 This analysis covers session ownership and access in `src/tee/tee_session.rs`,
 the close-all entry points in `tee_obj.rs`, `tee_svc_storage.rs` and
 `tee_svc_cryp2.rs` under `src/tee/`, and their exec/exit handoff. It also covers
-the REE metadata owner reservation and initialization boundary in `tee_ree_fs.rs`
+the REE metadata owner reservation, scratch-block and inline backing-handle
+boundaries in `tee_ree_fs.rs`
 and `fs_dirfile.rs` under `src/tee/`, and property-query owner preparation in
 `tee_property.rs`, and buffer preparation in the crypto/storage service modules
 and the `TeeError` conversions in `mod.rs`. Other storage-backend operations, nested

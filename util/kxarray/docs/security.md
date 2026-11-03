@@ -1,10 +1,34 @@
 # Safety Boundaries
 
+Allocation permissions are caller obligations, not runtime context detection.
+Default updates require sleepable, reclaim-safe task context with IRQs and
+preemption enabled, outside non-sleepable RCU scopes and locks needed by reclaim.
+Explicit NOWAIT prevents sleeping reclaim only for private node/record storage;
+it does not legalize updates from IRQ/NMI or bypass replacement/removal preflight.
+Unknown bits are rejected before tree access. No owner from the standard Box
+allocator is accepted by the sealed KBox carrier implementation.
+
+Failure fixtures inject NoMemory before reservation success at successive points
+in a growing path, with and without an existing root. They verify root stability,
+absence of the new key, returned-owner identity and unlocked allocation. Kernel
+fixtures cover missing-key set failure and retirement failure for set/remove,
+preserving the old association and strong counts. Conflict and missing-removal
+checks do not consume allocation attempts. Invalid flags cover all public update
+families, including occupied and unused slots of an already allocated leaf.
+Host failure tests cover every reservation in both empty-root and anchored
+full-width growth. A thread-local counting System allocator checks that all
+successful reservations are deallocated before the failing operation returns,
+while the array still exists. Miri additionally checks partial-node cleanup;
+these fixtures do not simulate reclaim,
+global OOM or the kernel RCU preflight. Nested payload and Arc allocation failures
+remain outside this migration. Concurrent-writer progress is not rolled back by
+another operation's reservation failure.
+
 - Index arithmetic handles all usize values without shifting by the word width.
   Node heights are initialized privately and decrease during descent.
 - Every published slot retains exactly one owning reference. Readers use only
   immutable heights and acquire-loaded slots, never an exclusive node reference.
-- The sealed Box/Arc conversions preserve pointer provenance. Borrowed payload
+- The sealed KBox/Arc conversions preserve pointer provenance. Borrowed payload
   references are not used to reconstruct Arc allocation headers; independent
   Arc acquisition uses the original stored pointer and increments first.
 - The owning carrier parameter is invariant: shared insertion cannot shorten a
@@ -22,16 +46,19 @@
   Send/Sync alone is not evidence of callback-safe destruction. Sleeping Drop,
   unwinding and NMI destruction are unsupported. Independent external Arc owners
   remain responsible for their eventual release context.
-- Allocation follows the existing infallible kernel allocator policy. Duplicate
-  insertion returns the original owner. Prepared-node capacity is recomputed
+- Node and retirement-record allocation is fallible and occurs before publication
+  or withdrawal, outside the writer lock. Failure returns NoMemory; insertion
+  conflicts return AlreadyExists, and insert/set return the unchanged offered owner.
+  A partially prepared path owns only unpublished nodes and drops them on error.
+  Prepared-node capacity is recomputed
   under the same lock that protects publication; insufficient capacity is an
   internal invariant failure, not a recoverable allocation error.
 - Exclusive Drop has no overlapping array borrows and traverses an acyclic graph
   with bounded depth. The array neither synchronizes business shutdown nor waits
   for external Arc users. Detached callbacks retain their own records and payload
   owners, not the array; they can safely finish after array destruction.
-- Set and removal require static ownership. A displaced Box remains raw until its GP ends;
-  never reconstruct an exclusive Box while readers may hold shared references.
+- Set and removal require static ownership. A displaced KBox remains raw until its GP ends;
+  never reconstruct an exclusive KBox while readers may hold shared references.
   Callback recovery uses the actual node-field offset and allocation provenance.
   Unused preparation releases only an empty record. Rejected post-commit
   submission releases the record but intentionally leaks the protected raw
@@ -51,7 +78,7 @@ and preflight rejection with IRQs masked. Ordinary UT does not cover operations
 before RCU service startup. Host/Miri fixtures check raw-owner cancellation and
 GP-eligible callback recovery without
 claiming to validate the GP engine. Removal fixtures check missing keys, key
-reuse, full-width paths, preflight rejection and exact Box/Arc release. Kernel
+reuse, full-width paths, preflight rejection and exact KBox/Arc release. Kernel
 integration fixtures retain a real old-value scope across removal and reinsertion,
 and check that competing removers withdraw one owner. Pruning fixtures check empty roots
 and retained siblings. Exhaustive mutation interleavings are not covered.

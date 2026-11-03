@@ -1,5 +1,14 @@
 # Prepared Workqueue API Security
 
+## Default CPU Configuration Reservation
+
+Default CPU sets are prepared as fallible KBox slices before creating any normal
+worker or BH service. QueueConfigError converts storage failure into the existing
+InitError::Configuration channel. Failure drops any earlier local configurations
+and leaves the service registry and softirq actions unchanged. The boot caller's
+fatal startup policy is unchanged; dynamic worker growth, partition storage and
+nested allocations are not made recoverable by this configuration boundary.
+
 ## Scope And Trust Boundaries
 
 This analysis covers all kworkng production modules, optional diagnostic features

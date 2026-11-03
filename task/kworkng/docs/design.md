@@ -4,7 +4,12 @@ Manager entry preparation can return `InitError::Normal(NormalRuntimeError::NoMe
 Normal services join previously started CPU runtimes before returning; no registry
 or softirq action has been published. Startup uses KERNEL allocation permissions
 and requires sleepable context without locks needed by reclaim, I/O or filesystem
-callbacks. Other allocations and dynamic worker growth remain infallible.
+callbacks. CPU-set reservation can return
+`InitError::Configuration(QueueConfigError::Allocation(_))` before any worker
+starts: all three default configurations are prepared before execution services.
+Their CPU storage uses KERNEL permissions; IRQs and preemption must be enabled
+and callers must be outside non-sleepable RCU scopes. Other allocations and
+dynamic worker growth remain infallible.
 The system boot caller still treats service initialization failure as fatal
 because drivers cannot start without workers; returning NoMemory from this API
 does not introduce NOFAIL allocation or guarantee successful boot under OOM.
@@ -104,7 +109,8 @@ After publication, each accepted BH submission supplies its normal notification.
 The softirq runner already pins the CPU; the action adds no preemption guard.
 
 Successful services live for the kernel lifetime. Duplicate initialization fails
-without replacing them. Allocation failure follows kernel allocator policy.
+without replacing them. CPU-set and manager-entry preparation return allocation
+errors; other allocation failures retain the kernel allocator policy.
 Unready submissions return `NotReady` without logging, including from IRQ context;
 initialization failures are logged by `runtime::init`, not by each producer retry.
 `runtime` also re-exports the provider error types carried by `InitError`, so

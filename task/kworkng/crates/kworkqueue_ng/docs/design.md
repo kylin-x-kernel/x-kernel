@@ -1,5 +1,21 @@
 # Prepared Workqueue Management
 
+## CPU Configuration Storage
+
+QueueConfig owns its sorted CPU set in a KBox slice, copied directly from the
+input without an intermediate Vec. `new` uses KERNEL permissions and requires
+sleepable, reclaim-safe task context with IRQs and preemption enabled, outside
+non-sleepable RCU scopes and without locks needed by reclaim, IO or filesystem
+entry. `new_with_flags` permits explicit allocation permissions; it does not
+relax the separate worker or queue construction contracts.
+
+Zero limits, empty sets and unavailable CPUs are rejected before reservation.
+Sorting and duplicate detection follow reservation, so Allocation(NoMemory)
+can precede DuplicateCpu. KError converts through QueueConfigError::Allocation.
+Failure leaves the input unchanged and returns no configuration. System service
+preparation propagates this error before starting workers or registering sources.
+Partition storage, diagnostic names and dynamic worker provisioning are unchanged.
+
 ## Scope And Ownership
 
 This crate supplies allocation-free submission of prepared ordinary and delayed

@@ -4,7 +4,7 @@
 
 #[cfg(unittest)]
 use alloc::string::String;
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec};
 use core::{any::Any, ffi::c_uint, fmt::Debug};
 
 use kalloc_types::{AllocFlags, KBox};
@@ -12,7 +12,7 @@ use ksync::{Mutex, static_lock};
 use tee_raw_sys::{TEE_STORAGE_PRIVATE, *};
 
 use super::{
-    TeeResult,
+    TeeError, TeeResult,
     common::file_ops::FileVariant,
     fs_dirfile::{
         TeeFsDirfileDirh, TeeFsDirfileFileh, tee_fs_dirfile_close, tee_fs_dirfile_commit_writes,
@@ -75,11 +75,14 @@ fn new_fs_owner_with<T>(
 
 /// REE filesystem file descriptor (htree + backing file).
 ///
+/// The backing fd is an inline integer handle, not a stable-address owner.
+/// Its existing explicit close protocol is unchanged by moving this structure.
+///
 /// GP: `struct tee_fs_fd` / `tee_file_handle`
 #[derive(Debug, Default)]
 pub(super) struct TeeFsFd {
     pub ht: Box<TeeFsHtree>,
-    pub fd: Box<FileVariant>,
+    pub fd: FileVariant,
     pub dfh: TeeFsDirfileFileh,
     pub uuid: TEE_UUID,
 }
@@ -133,16 +136,18 @@ fn pos_to_block_num(position: usize) -> usize {
     position >> BLOCK_SHIFT
 }
 
-pub(super) fn get_tmp_block() -> Result<Box<[u8; BLOCK_SIZE]>, ()> {
-    let mut vec = Vec::new();
-    if vec.try_reserve_exact(BLOCK_SIZE).is_err() {
-        return Err(());
-    }
-    vec.resize(BLOCK_SIZE, 0);
-    vec.into_boxed_slice().try_into().map_err(|_| ())
+/// Reserves a zeroed block before REE block IO or metadata mutation.
+///
+/// Callers may hold REE serialization locks, so reservation uses NOWAIT and
+/// must not enter sleeping reclaim. This does not make subsequent IO nonblocking
+/// or grant reserve capacity, bounded latency or NMI safety.
+///
+/// # Errors
+/// Allocation errors use the shared TeeError conversion, including OUT_OF_MEMORY.
+pub(super) fn get_tmp_block() -> TeeResult<KBox<[u8]>> {
+    KBox::new_slice_with_flags(0, BLOCK_SIZE, AllocFlags::NOWAIT)
+        .map_err(|error| TeeError::from(error).into())
 }
-
-fn put_tmp_block(_block: Box<[u8; BLOCK_SIZE]>) {}
 
 pub(super) fn get_offs_size(
     typ: TeeFsHtreeType,
@@ -437,9 +442,9 @@ fn ree_fs_open_primitive_inner(
 
     let fd = fd?;
 
-    fdp.fd = Box::new(fd);
+    fdp.fd = fd;
 
-    let fd_aux = TeeFsFdAux { fd: *fdp.fd };
+    let fd_aux = TeeFsFdAux { fd: fdp.fd };
     let fs_tree = match tee_fs_htree_open(Box::new(fd_aux), create, hash, uuid) {
         Ok(fs_tree) => fs_tree,
         Err(e) => {
@@ -488,7 +493,7 @@ fn out_of_place_write(
     let mut remain_bytes = len;
     let meta = tee_fs_htree_get_meta(&mut fdp.ht);
 
-    let mut block = get_tmp_block().map_err(|_| TEE_ERROR_OUT_OF_MEMORY)?;
+    let mut block = get_tmp_block()?;
     let mut current_pos = pos;
     let mut current_start_block_num = start_block_num;
     let meta_length = meta.length;
@@ -503,7 +508,7 @@ fn out_of_place_write(
 
         // 如果块在现有文件范围内，先读取
         if current_start_block_num * BLOCK_SIZE < roundup_u(meta_length as usize, BLOCK_SIZE) {
-            tee_fs_htree_read_block(&mut fdp.ht, current_start_block_num, &mut *block)?;
+            tee_fs_htree_read_block(&mut fdp.ht, current_start_block_num, &mut block)?;
         } else {
             // 新块，初始化为0
             block.fill(0);
@@ -530,7 +535,7 @@ fn out_of_place_write(
             &mut fdp.ht,
             // &mut fdp.fd,
             current_start_block_num,
-            &*block,
+            &block,
         )?;
 
         remain_bytes -= size_to_write;
@@ -545,7 +550,6 @@ fn out_of_place_write(
         tee_fs_htree_meta_set_dirty(fdp.ht.as_mut());
     }
 
-    put_tmp_block(block);
     Ok(())
 }
 
@@ -596,10 +600,7 @@ pub(super) fn ree_fs_read_primitive(
         start_block_num,
         end_block_num
     );
-    let mut block = get_tmp_block().map_err(|e| {
-        error!("Failed to allocate temporary block: {:?}", e);
-        TEE_ERROR_OUT_OF_MEMORY
-    })?;
+    let mut block = get_tmp_block()?;
 
     let mut buf_offset = 0;
 
@@ -612,7 +613,7 @@ pub(super) fn ree_fs_read_primitive(
         }
 
         // 读取数据块
-        tee_fs_htree_read_block(&mut fh.ht, start_block_num, &mut *block)?;
+        tee_fs_htree_read_block(&mut fh.ht, start_block_num, &mut block)?;
 
         // 复制数据到目标缓冲区
         if !buf_core.is_empty() {
@@ -631,7 +632,6 @@ pub(super) fn ree_fs_read_primitive(
         start_block_num += 1;
     }
 
-    put_tmp_block(block);
     Ok(())
 }
 

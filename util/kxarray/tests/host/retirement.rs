@@ -21,19 +21,20 @@ impl Drop for Probe {
 #[test]
 fn raw_box_borrow_survives_record_preparation_until_release() {
     let drops = Arc::new(AtomicUsize::new(0));
-    let owner = Box::into_raw(Box::new(Probe(drops.clone())));
-    // SAFETY: retain the sole raw Box ownership through the last borrow use.
+    let owner = KBox::into_raw(KBox::new_nowait(Probe(drops.clone())).unwrap());
+    // SAFETY: retain the sole raw KBox ownership through the last borrow use.
     let borrowed = unsafe { &*owner };
-    let mut record = Retirement::<Box<Probe>>::prepare();
+    let mut flags = kalloc_types::AllocFlags::NOWAIT;
+    let mut record = Retirement::<KBox<Probe>>::prepare(&mut flags).unwrap();
     record.owner = owner.cast();
-    let raw = Box::into_raw(record);
+    let raw = KBox::into_raw(record);
     // SAFETY: raw projection from the record allocation retains its provenance.
     let node = unsafe { &raw mut (*raw).callback };
     assert_eq!(borrowed.0.load(Ordering::Relaxed), 0);
     assert_eq!(Arc::strong_count(&drops), 2);
     // SAFETY: this isolated callback has never been queued and this is its only
     // invocation. All payload borrows ended above, simulating GP eligibility.
-    unsafe { release::<Box<Probe>>(node) };
+    unsafe { release::<KBox<Probe>>(node) };
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert_eq!(Arc::strong_count(&drops), 1);
 }
@@ -41,23 +42,24 @@ fn raw_box_borrow_survives_record_preparation_until_release() {
 #[test]
 fn cancellation_does_not_reclaim_a_still_borrowed_payload() {
     let drops = Arc::new(AtomicUsize::new(0));
-    let owner = Box::into_raw(Box::new(Probe(drops.clone())));
+    let owner = KBox::into_raw(KBox::new_nowait(Probe(drops.clone())).unwrap());
     // SAFETY: fixture retains raw ownership for explicit cleanup after borrow.
     let borrowed = unsafe { &*owner };
-    let mut record = Retirement::<Box<Probe>>::prepare();
+    let mut flags = kalloc_types::AllocFlags::NOWAIT;
+    let mut record = Retirement::<KBox<Probe>>::prepare(&mut flags).unwrap();
     record.owner = owner.cast();
-    let raw = Box::into_raw(record);
-    // SAFETY: field projection preserves provenance of the entire record Box.
+    let raw = KBox::into_raw(record);
+    // SAFETY: field projection preserves provenance of the entire record KBox.
     let node = unsafe { &raw mut (*raw).callback };
     // SAFETY: unique unqueued record; direct cancellation releases the record,
     // but must not consume its still-borrowed protected payload. The kernel
     // tests exercise the separate PreparedCallback submission integration.
-    unsafe { cancel::<Box<Probe>>(node) };
+    unsafe { cancel::<KBox<Probe>>(node) };
     assert_eq!(borrowed.0.load(Ordering::Relaxed), 0);
     assert_eq!(Arc::strong_count(&drops), 2);
     // SAFETY: cancellation intentionally retained the raw owner. This fixture
     // has now ended every borrower and reclaims it once to avoid a test leak.
-    drop(unsafe { Box::from_raw(owner) });
+    drop(unsafe { KBox::from_raw(owner) });
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
@@ -65,9 +67,10 @@ fn cancellation_does_not_reclaim_a_still_borrowed_payload() {
 fn callback_releases_only_the_retired_arc_owner() {
     let drops = Arc::new(AtomicUsize::new(0));
     let retained = Arc::new(Probe(drops.clone()));
-    let mut record = Retirement::<Arc<Probe>>::prepare();
+    let mut flags = kalloc_types::AllocFlags::NOWAIT;
+    let mut record = Retirement::<Arc<Probe>>::prepare(&mut flags).unwrap();
     record.owner = Arc::into_raw(retained.clone()).cast_mut().cast();
-    let raw = Box::into_raw(record);
+    let raw = KBox::into_raw(record);
     // SAFETY: unique stable record, with an independently owned Arc reference.
     let node = unsafe { &raw mut (*raw).callback };
     // SAFETY: no payload borrower and no queue handle exists in this fixture;

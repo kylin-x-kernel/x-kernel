@@ -10,16 +10,25 @@ use crate::XArray;
 
 #[test]
 fn detached_path_survives_reinsertion_until_its_own_callbacks() {
-    let array = XArray::<Box<usize>>::new();
+    let array = XArray::<KBox<usize>>::new();
     for key in [0, 64, usize::MAX, 0, usize::MAX] {
-        // SAFETY: host fixture, primitive nonblocking payload and allocator.
-        assert!(unsafe { array.insert(key, Box::new(7)) }.is_ok());
+        assert!(
+            // SAFETY: host fixture, primitive nonblocking payload and allocator.
+            unsafe {
+                array.insert_with_flags(
+                    key,
+                    KBox::new_nowait(7).unwrap(),
+                    kalloc_types::AllocFlags::NOWAIT,
+                )
+            }
+            .is_ok()
+        );
         let root = array.root.load(Ordering::Acquire);
         // SAFETY: private fixture retains all withdrawn storage until below.
         let old_root = unsafe { &*root };
         // SAFETY: no reclamation occurs while this test holds raw borrows.
         let payload = unsafe { array.lookup(key) }.cast::<usize>();
-        // SAFETY: live Box payload, not freed until after the final borrow use.
+        // SAFETY: live KBox payload, not freed until after the final borrow use.
         let borrowed = unsafe { &*payload };
         let (old, detached) = {
             let _guard = array.writers.lock();
@@ -33,8 +42,17 @@ fn detached_path_survives_reinsertion_until_its_own_callbacks() {
             height_for(key) as usize
         );
         assert!(array.root.load(Ordering::Acquire).is_null());
-        // SAFETY: new publication is independent of the detached allocations.
-        assert!(unsafe { array.insert(key, Box::new(9)) }.is_ok());
+        assert!(
+            // SAFETY: new publication is independent of the detached allocations.
+            unsafe {
+                array.insert_with_flags(
+                    key,
+                    KBox::new_nowait(9).unwrap(),
+                    kalloc_types::AllocFlags::NOWAIT,
+                )
+            }
+            .is_ok()
+        );
         assert_ne!(array.root.load(Ordering::Acquire), root);
         assert!(
             old_root
@@ -45,7 +63,7 @@ fn detached_path_survives_reinsertion_until_its_own_callbacks() {
         assert_eq!(*borrowed, 7);
         assert_eq!(old, payload.cast());
         // SAFETY: all old payload borrows ended; this fixture owns withdrawal.
-        drop(unsafe { Box::from_raw(old.cast::<usize>()) });
+        drop(unsafe { KBox::from_raw(old.cast::<usize>()) });
         for raw in detached.into_iter().filter(|raw| !raw.is_null()) {
             // SAFETY: project from the original allocation; no old node borrows
             // remain. The detached node has never been submitted to an executor.
@@ -61,7 +79,7 @@ fn detached_path_survives_reinsertion_until_its_own_callbacks() {
             unsafe { array.withdraw(key) }
         };
         // SAFETY: no borrows of this new payload exist, and withdrawal owns it.
-        drop(unsafe { Box::from_raw(old.cast::<usize>()) });
+        drop(unsafe { KBox::from_raw(old.cast::<usize>()) });
         for raw in detached.into_iter().filter(|raw| !raw.is_null()) {
             // SAFETY: raw field projection from this uniquely withdrawn node.
             let callback = unsafe { &raw mut (*raw).callback };

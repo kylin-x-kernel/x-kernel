@@ -157,6 +157,7 @@ fn config(max_active: usize) -> QueueConfig {
         &[LogicalCpuId::new(0)],
         CpuPolicy::CurrentCpu,
         max_active,
+        kalloc_types::AllocFlags::NOWAIT,
         |_| true,
     )
     .unwrap()
@@ -371,6 +372,7 @@ fn sparse_cpu_bindings_keep_demand_and_execution_separate() {
         &[LogicalCpuId::new(0), LogicalCpuId::new(2)],
         CpuPolicy::CurrentCpu,
         1,
+        kalloc_types::AllocFlags::NOWAIT,
         |_| true,
     )
     .unwrap();

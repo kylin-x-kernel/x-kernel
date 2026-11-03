@@ -1,5 +1,33 @@
 # TEE Ownership and Lifecycle
 
+## REE Temporary Blocks And Inline File Handles
+
+REE read/write scratch blocks use a zeroed KBox byte slice of exactly BLOCK_SIZE.
+The temporary Vec-to-Box conversion is removed; this is final owned block storage,
+not migration of a growable Vec. Reservation uses NOWAIT because callers may hold
+REE_FS_MUTEX or other storage serialization locks, where sleeping reclaim has not
+been established safe. Shared TeeError conversions preserve OUT_OF_MEMORY, and
+the local owner releases storage on both early errors and normal return.
+
+Write scratch reservation precedes block IO and metadata mutation. Read reservation
+precedes block IO and payload copying, but follows the existing requested-length
+clamping; failure does not promise to restore that length argument. Nested htree
+allocation and write/rename transaction rollback are unchanged.
+
+TeeFsFd stores FileVariant inline: it is a copyable integer fd, and no pointer to
+this field escapes. The auxiliary storage object copies the handle value. Moving
+TeeFsFd therefore needs no separate fd allocation and preserves explicit close
+semantics. The htree and its auxiliary storage ownership are not migrated here.
+
+## CSV Temporary Ownership
+
+The x86_64 Hygon CSV path constructs its 112-byte attestation user-data value
+on the stack and copies it into the report buffer. No reference to that temporary
+escapes. The report buffer remains a Vec; only the redundant Box around its Vec
+descriptor is removed. Moving the descriptor does not move the backing bytes
+passed to the hypercall. This change neither migrates Vec nor adds a reclaim
+point, error path or new allocation alignment guarantee.
+
 ## Stack-local ECC dispatch
 
 ECC key generation dispatch constructs its borrowed `EccKeypairOpsCtx` on the
@@ -95,9 +123,10 @@ the initializer runs; existing initializer failures retain their cleanup paths.
 Reopening an enumeration still closes its previous iterator first, so a failed
 restart leaves it stopped rather than preserving the old iteration position.
 
-This migration covers outer metadata ownership only. Hash-tree nodes, tree and
-storage owners, FileVariant boxes, boxed buffers and their existing Default
-constructions remain unchanged. In particular, incremental tree growth needs
+The metadata reservation boundary covers outer ownership only. Hash-tree nodes,
+tree and storage owners and their existing Default constructions remain unchanged.
+Scratch blocks and inline FileVariant handles have the separate boundaries
+described above. In particular, incremental tree growth needs
 its own failure-consistency audit before becoming fallible.
 
 ## Fallible session ownership
@@ -131,11 +160,13 @@ and assertions preserved.
 
 This document covers session ownership in `src/tee/tee_session.rs` and its
 interaction with resource cleanup and process exec/exit. It also covers REE
-filesystem metadata owner reservation and initialization in `tee_ree_fs.rs` and
+filesystem metadata owner reservation, scratch blocks and inline file handles in
+`tee_ree_fs.rs` and initialization in
 `fs_dirfile.rs` under `src/tee/`, including ownership held by `tee_obj.rs` and
 `tee_svc_storage.rs`, as well as property-query owner preparation in
 `tee_property.rs`, and byte-owner preparation in the three service modules and
 the shared pointer/ownership APIs, with TEE error conversion in `mod.rs`.
+The CSV section covers only temporary ownership, not its hardware protocol.
 TEE dispatch, storage protocols, crypto algorithms and TA
 loading are outside this lifecycle scope.
 

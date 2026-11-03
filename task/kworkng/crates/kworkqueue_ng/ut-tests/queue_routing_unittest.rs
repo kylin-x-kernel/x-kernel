@@ -21,7 +21,16 @@ fn cpu(id: usize) -> LogicalCpuId {
 }
 
 fn queue(policy: CpuPolicy) -> Arc<Queue> {
-    Queue::new(QueueConfig::validate(&[cpu(4), cpu(0), cpu(2)], policy, 2, |_| true).unwrap())
+    Queue::new(
+        QueueConfig::validate(
+            &[cpu(4), cpu(0), cpu(2)],
+            policy,
+            2,
+            kalloc_types::AllocFlags::NOWAIT,
+            |_| true,
+        )
+        .unwrap(),
+    )
 }
 
 /// Checks successful automatic submissions alone advance each Queue's RR sequence.
@@ -283,12 +292,18 @@ fn current_cpu_policy_reuses_running_owner_across_submitters() {
         samples.set(samples.get() + 1);
         caller.get()
     };
-    // SAFETY: pinned Work is retained through every explicit run below.
-    assert_eq!(unsafe { queue.submit(&work, None, current_cpu) }, Ok(cpu(0)));
+    assert_eq!(
+        // SAFETY: pinned Work is retained through every explicit run below.
+        unsafe { queue.submit(&work, None, current_cpu) },
+        Ok(cpu(0))
+    );
     let running = queue.claim_with_demand(cpu(0)).0.unwrap();
     caller.set(cpu(2));
-    // SAFETY: the same queue and pinned Work retain unfinished ownership.
-    assert_eq!(unsafe { queue.submit(&work, None, current_cpu) }, Ok(cpu(0)));
+    assert_eq!(
+        // SAFETY: the same queue and pinned Work retain unfinished ownership.
+        unsafe { queue.submit(&work, None, current_cpu) },
+        Ok(cpu(0))
+    );
     assert_eq!(samples.get(), 1);
     assert!(queue.claim_with_demand(cpu(2)).0.is_none());
     assert_eq!(
@@ -298,8 +313,11 @@ fn current_cpu_policy_reuses_running_owner_across_submitters() {
     );
     running.run();
     queue.claim_with_demand(cpu(0)).0.unwrap().run();
-    // SAFETY: all earlier occurrences retired, so this retained Work may migrate.
-    assert_eq!(unsafe { queue.submit(&work, None, current_cpu) }, Ok(cpu(2)));
+    assert_eq!(
+        // SAFETY: all earlier occurrences retired, so this retained Work may migrate.
+        unsafe { queue.submit(&work, None, current_cpu) },
+        Ok(cpu(2))
+    );
     assert_eq!(samples.get(), 2);
     queue.claim_with_demand(cpu(2)).0.unwrap().run();
 }

@@ -77,8 +77,14 @@ impl Queue {
         max_active: usize,
         mut register: impl FnMut(LogicalCpuId) -> Arc<crate::diagnostics::StallRecord>,
     ) -> Arc<Self> {
-        let config =
-            QueueConfig::validate(cpus, CpuPolicy::RoundRobin, max_active, |_| true).unwrap();
+        let config = QueueConfig::validate(
+            cpus,
+            CpuPolicy::RoundRobin,
+            max_active,
+            kalloc_types::AllocFlags::NOWAIT,
+            |_| true,
+        )
+        .unwrap();
         Self::prepare(
             config,
             |_, _| None,

@@ -51,15 +51,21 @@ impl NetworkPoller {
         }
     }
 
-    /// Prepares the private queue in task context before network producers start.
+    /// Prepares the private queue before network producers start, in sleepable,
+    /// reclaim-safe task context without locks needed by reclaim, IO or filesystems.
     pub(crate) fn start(&'static self) {
         if self.state.lock().queue.is_some() {
             return;
         }
         let mut cpus = Vec::new();
         kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
-        let config = QueueConfig::new(&cpus, CpuPolicy::CurrentCpu, 1)
-            .expect("network uses the complete initialized boot CPU set");
+        let config = match QueueConfig::new(&cpus, CpuPolicy::CurrentCpu, 1) {
+            Ok(config) => config,
+            Err(error) => {
+                warn!("failed to prepare NG knet-poller configuration: {error:?}");
+                return;
+            }
+        };
         let queue = match NormalQueue::new("knet-poller", config) {
             Ok(queue) => queue,
             Err(error) => {

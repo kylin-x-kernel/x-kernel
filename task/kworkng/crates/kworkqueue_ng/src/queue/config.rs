@@ -4,10 +4,11 @@
 
 //! Immutable queue configuration and validation.
 
-use alloc::boxed::Box;
 use core::num::NonZeroUsize;
 
+use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::LogicalCpuId;
+use kerrno::{KError, KResult};
 
 /// Automatic selection for a task with no unfinished queue association.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,7 +19,7 @@ pub enum CpuPolicy {
     RoundRobin,
 }
 
-/// Invalid immutable queue configuration; no queue has been created.
+/// Configuration validation or storage preparation failed; no queue was created.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueueConfigError {
     /// At least one allowed CPU is required.
@@ -29,6 +30,14 @@ pub enum QueueConfigError {
     CpuUnavailable(LogicalCpuId),
     /// Zero is neither a default nor unlimited release allowance.
     ZeroMaxActive,
+    /// CPU selection storage could not be prepared with the requested permissions.
+    Allocation(KError),
+}
+
+impl From<KError> for QueueConfigError {
+    fn from(error: KError) -> Self {
+        Self::Allocation(error)
+    }
 }
 
 /// Immutable CPU selection and per-CPU release limit for a future queue.
@@ -38,7 +47,7 @@ pub enum QueueConfigError {
 /// queue constructor must also check execution-provider readiness and category.
 #[derive(Debug)]
 pub struct QueueConfig {
-    cpus: Box<[LogicalCpuId]>,
+    cpus: KBox<[LogicalCpuId]>,
     policy: CpuPolicy,
     max_active: NonZeroUsize,
 }
@@ -46,15 +55,19 @@ pub struct QueueConfig {
 impl QueueConfig {
     /// Validates an explicit policy, nonempty CPU set and positive release limit.
     ///
-    /// Call in allocation-capable task context after boot CPU-map initialization.
+    /// Call in sleepable, reclaim-safe task context after boot CPU-map initialization,
+    /// with IRQs/preemption enabled and no locks needed by reclaim, IO or filesystem
+    /// entry, outside non-sleepable RCU scopes. CPU storage uses KERNEL permissions
+    /// before any queue publication.
     /// CPUs must be distinct and present in that map; their input order does not
     /// affect routing. No hotplug or runtime configuration changes are supported.
-    /// Allocation follows the kernel allocator policy, with no recoverable OOM
-    /// result. Invalid input returns an error without exposing configuration.
+    /// Invalid input or allocation failure returns an error without exposing configuration.
     ///
     /// # Errors
     /// Rejects an empty CPU set, duplicate or unavailable CPUs, and zero
-    /// `max_active`. When several inputs are invalid, error priority is unspecified.
+    /// `max_active`. Storage failure returns Allocation(NoMemory). Reservation
+    /// precedes sorting, so OOM may precede DuplicateCpu. Other error priorities
+    /// among invalid inputs are unspecified.
     ///
     /// # Examples
     ///
@@ -72,7 +85,27 @@ impl QueueConfig {
         policy: CpuPolicy,
         max_active: usize,
     ) -> Result<Self, QueueConfigError> {
-        Self::validate(cpus, policy, max_active, |cpu| {
+        Self::new_with_flags(cpus, policy, max_active, AllocFlags::KERNEL)
+    }
+
+    /// Prepares configuration with explicit CPU-storage allocation permissions.
+    ///
+    /// CPU-map prerequisites and validation match [`Self::new`]. NOWAIT avoids
+    /// sleeping reclaim for this allocation only; it promises no reserve, bounded
+    /// latency or NMI safety. NOIO/NOFS still permit sleeping. Callers must satisfy
+    /// the selected allocator's context and lock-order contract. This does not
+    /// relax the separate worker/queue construction context requirements.
+    ///
+    /// # Errors
+    /// Validation errors match [`Self::new`]. Unknown flag bits return
+    /// Allocation(InvalidInput) when storage preparation is reached.
+    pub fn new_with_flags(
+        cpus: &[LogicalCpuId],
+        policy: CpuPolicy,
+        max_active: usize,
+        flags: AllocFlags,
+    ) -> Result<Self, QueueConfigError> {
+        Self::validate(cpus, policy, max_active, flags, |cpu| {
             kcpu_id_map::raw_cpu_id(cpu).is_some()
         })
     }
@@ -81,7 +114,20 @@ impl QueueConfig {
         cpus: &[LogicalCpuId],
         policy: CpuPolicy,
         max_active: usize,
+        flags: AllocFlags,
         is_present: impl Fn(LogicalCpuId) -> bool,
+    ) -> Result<Self, QueueConfigError> {
+        Self::validate_with_allocator(cpus, policy, max_active, is_present, |cpus| {
+            KBox::from_slice_with_flags(cpus, flags)
+        })
+    }
+
+    pub(super) fn validate_with_allocator(
+        cpus: &[LogicalCpuId],
+        policy: CpuPolicy,
+        max_active: usize,
+        is_present: impl Fn(LogicalCpuId) -> bool,
+        allocate: impl FnOnce(&[LogicalCpuId]) -> KResult<KBox<[LogicalCpuId]>>,
     ) -> Result<Self, QueueConfigError> {
         let max_active = NonZeroUsize::new(max_active).ok_or(QueueConfigError::ZeroMaxActive)?;
         if cpus.is_empty() {
@@ -92,7 +138,7 @@ impl QueueConfig {
                 return Err(QueueConfigError::CpuUnavailable(cpu));
             }
         }
-        let mut cpus = cpus.to_vec();
+        let mut cpus = allocate(cpus)?;
         cpus.sort_unstable();
         for pair in cpus.windows(2) {
             if pair[0] == pair[1] {
@@ -100,7 +146,7 @@ impl QueueConfig {
             }
         }
         Ok(Self {
-            cpus: cpus.into_boxed_slice(),
+            cpus,
             policy,
             max_active,
         })

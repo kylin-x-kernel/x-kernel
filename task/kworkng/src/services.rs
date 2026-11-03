@@ -258,7 +258,7 @@ fn with_services<R>(read: impl FnOnce(Option<&Services>) -> R) -> R {
 /// Service initialization failed without replacing an existing installation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InitError {
-    /// A default queue's CPU set or configured release limit is invalid.
+    /// A default queue configuration is invalid or its CPU storage could not be reserved.
     Configuration(QueueConfigError),
     /// BH preparation rejected the execution context or CPU configuration.
     BottomHalf(BottomHalfPrepareError),
@@ -294,7 +294,9 @@ pub enum InitError {
 /// prepared workers without changing existing services/actions. Default access
 /// stays unready unless an earlier initialization succeeded. Manager entry
 /// allocation failure returns `InitError::Normal(NormalRuntimeError::NoMemory)`
-/// after joined rollback. Other allocations retain the kernel allocator policy.
+/// after joined rollback. CPU-set reservation failure returns
+/// `InitError::Configuration(QueueConfigError::Allocation(_))` before any worker
+/// is started. Other allocations retain the kernel allocator policy.
 ///
 /// # Panics
 /// Panics if boot/provider invariants are violated, including inconsistent CPU

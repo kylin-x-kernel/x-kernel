@@ -32,7 +32,13 @@ fn queue(directory: &Directory) -> Arc<Queue> {
 fn bound_queue_reports_name_and_releases_records() {
     let directory = Directory::new();
     let cpu = khal::percpu::this_cpu_id();
-    let config = crate::QueueConfig::new(&[cpu], crate::CpuPolicy::CurrentCpu, 1).unwrap();
+    let config = crate::QueueConfig::new_with_flags(
+        &[cpu],
+        crate::CpuPolicy::CurrentCpu,
+        1,
+        kalloc_types::AllocFlags::NOWAIT,
+    )
+    .unwrap();
     let dispatch = kworkerpool_ng::PartitionDispatch::new();
     let queue = Queue::with_dispatch_and_diagnostics(config, "bound", &directory, |_| {
         (

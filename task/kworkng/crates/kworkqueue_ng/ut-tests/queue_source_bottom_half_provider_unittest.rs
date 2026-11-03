@@ -56,7 +56,13 @@ impl Fixture {
 
     fn queue(&self, cpu: LogicalCpuId) -> Arc<Queue> {
         Queue::with_dispatch(
-            QueueConfig::new(&[cpu], CpuPolicy::CurrentCpu, 1).unwrap(),
+            QueueConfig::new_with_flags(
+                &[cpu],
+                CpuPolicy::CurrentCpu,
+                1,
+                kalloc_types::AllocFlags::NOWAIT,
+            )
+            .unwrap(),
             |_| (self.service.dispatch(), self.service.notification_waker()),
         )
     }

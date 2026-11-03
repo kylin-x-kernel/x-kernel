@@ -1,5 +1,18 @@
 # Host Storage Checks
 
+Unique owners and private nodes/retirement records use KBox. Fixtures use explicit
+NOWAIT permissions unless they specifically exercise default sleepable task APIs.
+Host storage tests inject per-call reservation failure along partial paths and
+check that no root or payload is published. The failure loop covers all path
+reservations, including both branches needed to grow an anchored root. A host-only
+System allocator counts successful allocations and deallocations on the current
+test thread around the operation, asserting immediate release before array teardown;
+other threads and fixture setup are excluded. Miri also checks the released private
+storage. Kernel fixtures additionally reject retirement allocation for set/remove
+before mutation and verify returned-owner identity, conflict precedence and
+invalid flags. Injection affects only the private preparation interface, not
+global OOM, nested payload allocation or kernel reclaim behavior.
+
 Standalone, manually run weak-memory publication models and their explicit
 assumptions are documented in [models/README.md](models/README.md). They do not
 add a kernel dependency or run as part of the default unit-test suite.

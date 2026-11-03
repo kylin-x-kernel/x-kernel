@@ -110,7 +110,14 @@ fn queue_count_exhaustion_preserves_routing() {
     };
     let cpu = kcpu_id_map::LogicalCpuId::new;
     let mut queue = Queue::new(
-        QueueConfig::validate(&[cpu(0), cpu(2)], CpuPolicy::RoundRobin, 1, |_| true).unwrap(),
+        QueueConfig::validate(
+            &[cpu(0), cpu(2)],
+            CpuPolicy::RoundRobin,
+            1,
+            kalloc_types::AllocFlags::NOWAIT,
+            |_| true,
+        )
+        .unwrap(),
     );
     let partition = Arc::new(QueuePartition {
         in_flight: QueueInFlight::exhausted_for_test(),

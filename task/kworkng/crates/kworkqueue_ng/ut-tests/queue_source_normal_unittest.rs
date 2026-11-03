@@ -192,7 +192,13 @@ fn queue(
     kick: &Arc<Waker>,
 ) -> Arc<Queue> {
     Queue::with_dispatch(
-        QueueConfig::new(&[cpu], CpuPolicy::CurrentCpu, max_active).unwrap(),
+        QueueConfig::new_with_flags(
+            &[cpu],
+            CpuPolicy::CurrentCpu,
+            max_active,
+            kalloc_types::AllocFlags::NOWAIT,
+        )
+        .unwrap(),
         |_| (dispatch.clone(), kick.clone()),
     )
 }

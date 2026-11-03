@@ -109,7 +109,14 @@ fn waits_for_claim_and_preserves_callback_requeue() {
 #[def_test]
 fn timeout_reopens_every_partition() {
     let queue = Queue::new(
-        QueueConfig::validate(&[0.into(), 1.into()], CpuPolicy::CurrentCpu, 2, |_| true).unwrap(),
+        QueueConfig::validate(
+            &[0.into(), 1.into()],
+            CpuPolicy::CurrentCpu,
+            2,
+            kalloc_types::AllocFlags::NOWAIT,
+            |_| true,
+        )
+        .unwrap(),
     );
     let running = pin!(Work::with_callback(|| {}));
     let later = pin!(Work::with_callback(|| {}));

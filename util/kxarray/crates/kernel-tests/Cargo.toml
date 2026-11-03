@@ -12,7 +12,7 @@ publish = false
 
 [package.metadata.cargo-shear]
 # CG-024-lint-exceptions: cfg(unittest) modules in ut-tests/ are the consumers.
-ignored = ["kxarray", "krcu", "krcu-core", "ktask", "khal", "karch", "kirq", "kalloc", "kspin", "kcpu_id_map", "kbuild_config", "ktime_types"]
+ignored = ["kxarray", "kalloc-types", "kerrno", "krcu", "krcu-core", "ktask", "khal", "karch", "kirq", "kalloc", "kspin", "kcpu_id_map", "kbuild_config", "ktime_types"]
 
 [features]
 default = []
@@ -22,6 +22,8 @@ smp = []
 unittest.workspace = true
 
 [target.'cfg(target_os = "none")'.dependencies]
+kerrno.workspace = true
+kalloc-types.workspace = true
 kxarray.workspace = true
 krcu.workspace = true
 krcu-core.workspace = true

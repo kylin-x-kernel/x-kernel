@@ -21,7 +21,15 @@ use crate::{
 };
 
 fn queue() -> Arc<Queue> {
-    Queue::new(QueueConfig::new(&[LogicalCpuId::new(0)], CpuPolicy::CurrentCpu, 1).unwrap())
+    Queue::new(
+        QueueConfig::new_with_flags(
+            &[LogicalCpuId::new(0)],
+            CpuPolicy::CurrentCpu,
+            1,
+            kalloc_types::AllocFlags::NOWAIT,
+        )
+        .unwrap(),
+    )
 }
 
 /// Even idle/repeated calls validate context, and rejection leaves admission open.
@@ -111,8 +119,15 @@ fn queue_drain_covers_every_configured_partition() {
     if kcpu_id_map::nr_cpus() < 2 {
         return unittest::TestResult::Ignored;
     }
-    let queue =
-        Queue::new(QueueConfig::new(&[0.into(), 1.into()], CpuPolicy::CurrentCpu, 1).unwrap());
+    let queue = Queue::new(
+        QueueConfig::new_with_flags(
+            &[0.into(), 1.into()],
+            CpuPolicy::CurrentCpu,
+            1,
+            kalloc_types::AllocFlags::NOWAIT,
+        )
+        .unwrap(),
+    );
     let first = core::pin::pin!(Work::with_callback(|| {}));
     let second = core::pin::pin!(Work::with_callback(|| {}));
     // SAFETY: pinned Work storage survives both executions and the joined drain.
