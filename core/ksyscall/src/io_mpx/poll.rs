@@ -25,7 +25,9 @@ use super::FdPollSet;
 ///
 /// Negative descriptors are ignored and return zero `revents`. Invalid
 /// nonnegative descriptors report `POLLNVAL` alongside other ready entries;
-/// the result counts every entry with nonzero `revents`.
+/// the result counts every entry with nonzero `revents`. Unrecognized request
+/// bits are ignored. Only error and hangup events bypass the requested mask;
+/// a peer write-half closure (`POLLRDHUP`) must be explicitly requested.
 fn do_poll(
     poll_fds: &mut [pollfd],
     timeout: Option<TimeSpan>,
@@ -45,8 +47,7 @@ fn do_poll(
             Ok(f) => {
                 fds.push((
                     f,
-                    IoEvents::from_bits(fd.events as _).ok_or(KError::InvalidInput)?
-                        | IoEvents::ALWAYS_POLL,
+                    IoEvents::from_bits_truncate(fd.events as _) | IoEvents::ALWAYS_POLL,
                 ));
                 revents.push(&mut fd.revents);
             }
@@ -75,8 +76,7 @@ fn do_poll(
                     }
                     // POSIX: POLLHUP and POLLERR are always reported in revents,
                     // even if not requested in events. They must NOT be masked out.
-                    let always_report =
-                        result & (IoEvents::HUP | IoEvents::ERR | IoEvents::RDHUP | IoEvents::NVAL);
+                    let always_report = result & (IoEvents::HUP | IoEvents::ERR | IoEvents::NVAL);
                     result &= *events;
                     result |= always_report;
 

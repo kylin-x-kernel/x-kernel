@@ -276,6 +276,11 @@ are introduced.
 
 ## Poll result-array handling
 
+Unknown event-mask bits are ignored without granting readiness for those bits.
+Only error, full hangup and invalid-descriptor results bypass the caller's
+interest mask; a peer write-half closure requires `POLLRDHUP`. Descriptor
+lookup, user-memory copying and signal-mask validation are unchanged.
+
 Ignored negative descriptors perform no file lookup and expose no retained
 input `revents` as an output event. Invalid nonnegative descriptors report
 `POLLNVAL` without skipping valid entries. Counting invalid entries as ready

@@ -574,6 +574,14 @@ failed check reports a test failure instead of panicking the kernel.
 
 ## Poll result-array compatibility
 
+The requested event mask ignores unrecognized bits, matching Linux's
+`do_pollfd` filtering rather than rejecting the entire call. `POLLERR` and
+`POLLHUP` are reported without being requested; `POLLRDHUP` is returned only
+when the caller requested it. A stream peer closing only its write half must
+therefore not make an `events = 0` entry ready. The poll result regressions
+cover unknown bits both alone and alongside `POLLIN`, requested and unrequested
+half-close readiness, and unconditional full-hangup reporting.
+
 `poll` and `ppoll` clear each copied entry's `revents` before descriptor lookup.
 All negative descriptors are ignored. Invalid nonnegative entries contribute
 `POLLNVAL` and one ready entry, while valid entries are still polled during the
