@@ -272,7 +272,14 @@ pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
     let msix = None;
 
     let transport = PciTransport::new_with_msix::<H, C>(root, bdf, msix).ok()?;
-    if matches!(dev_kind, DeviceKind::Vsock | DeviceKind::Input) {
+    // Display is polled by the scanout path and registers no IRQ handler, so
+    // leaving PCI INTx enabled produces an unhandled level IRQ storm. Vsock and
+    // input disable it here because they install their own interrupt owner
+    // later; display never does, so this is its final state.
+    if matches!(
+        dev_kind,
+        DeviceKind::Vsock | DeviceKind::Input | DeviceKind::Display
+    ) {
         let (_, command) = root.get_status_command(bdf);
         root.set_command(bdf, command | Command::INTERRUPT_DISABLE);
     }

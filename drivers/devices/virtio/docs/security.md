@@ -35,6 +35,15 @@ function 上禁用 INTx 输出，避免未确认的设备中断持续触发。�
 IRQ 元数据不会关闭硬件中断；屏蔽共享线路又会阻断其他设备（包括 blk）
 的完成通知。更新 PCI Command 时保留其他位，维持内存访问和 DMA 能力。
 
+The PCI display scanout path also polls only (`transfer_to_host_2d`,
+`set_scanout`, `resource_flush`) and registers no IRQ handler. Probing must
+therefore disable INTx for this function as well; otherwise the host holds the
+level-triggered line high with no one to acknowledge it, and graphics load
+traps repeatedly. Display never installs an interrupt owner afterwards, so the
+mask is final, unlike input which masks first and re-enables after registering
+a handler. Command updates likewise set only `INTERRUPT_DISABLE`, preserve all
+other bits, and must not mask the shared line.
+
 `virtio` 是典型的硬件/虚拟硬件边界模块。
 它直接连接 VMM 暴露的 VirtIO 设备、
 平台传输层和上层驱动框架，
