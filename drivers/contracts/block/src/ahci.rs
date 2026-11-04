@@ -2,8 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use device_res::CpuMemoryOp;
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use driver_os_api::CpuMemoryOp;
 use kspin::SpinNoIrq;
 #[cfg(not(unittest))]
 use simple_ahci::AhciDriver as CoreAhciDriver;

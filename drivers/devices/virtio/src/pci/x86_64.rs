@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use device_res::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger, MsiResource};
+use driver_os_api::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger, MsiResource};
 use pci::{
     PciConfigAccess,
     msix::{self, MsixCapability, MsixTable, MsixTableEntry, PCI_BAR_COUNT},
@@ -391,7 +391,7 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
         return None;
     }
 
-    let irq = msi.irq.number;
+    let irq = msi.irq.virq().raw();
     let msix = PciMsixState {
         common_cfg,
         config: *config,
@@ -434,5 +434,5 @@ pub(super) fn legacy_irq_for_bdf(
         controller: IrqController::IoApic,
         domain: None,
     };
-    Some(irq_provider.map_irq(desc).ok()?.number)
+    Some(irq_provider.map_irq(desc).ok()?.virq().raw())
 }

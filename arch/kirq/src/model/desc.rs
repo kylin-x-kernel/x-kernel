@@ -5,45 +5,7 @@
 //! OS-visible IRQ descriptors.
 
 use bitflags::bitflags;
-
-/// Interrupt trigger mode understood by the generic IRQ core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqTrigger {
-    EdgeRising,
-    EdgeFalling,
-    LevelHigh,
-    LevelLow,
-    /// Trigger mode not described by firmware; carries preserved raw flag bits.
-    Unknown(u32),
-}
-
-/// Interrupt controller family for IRQ descriptor normalization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqController {
-    Gic,
-    Plic,
-    IoApic,
-    Msi,
-    LoongArchExtioi,
-    /// Controller not described by firmware or currently unknown.
-    Unknown,
-}
-
-/// Opaque identifier for an IRQ domain managed by the kernel IRQ core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct IrqDomainId(u32);
-
-impl IrqDomainId {
-    /// Creates an IRQ domain identifier from its stable numeric id.
-    pub const fn new(id: u32) -> Self {
-        Self(id)
-    }
-
-    /// Returns the stable numeric id.
-    pub const fn as_u32(self) -> u32 {
-        self.0
-    }
-}
+pub use irq_types::{IrqController, IrqDomainId, IrqTrigger};
 
 /// Outcome reported by an IRQ handler.
 ///

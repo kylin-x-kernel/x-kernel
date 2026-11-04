@@ -16,7 +16,7 @@ use core::{
     mem::{align_of, size_of},
 };
 
-use device_res::{CpuBuffer, CpuMemoryOp, ResError};
+use driver_os_api::{CpuBuffer, CpuMemoryOp, ResError};
 
 use crate::{DriverError, DriverResult};
 
@@ -47,9 +47,11 @@ fn staging(provider: &dyn CpuMemoryOp, bytes: usize) -> DriverResult<CpuBuffer<'
     CpuBuffer::alloc_with(provider, layout).map_err(|error| match error {
         ResError::NoMemory => DriverError::NoMemory,
         ResError::Unsupported => DriverError::Unsupported,
-        ResError::Busy => DriverError::ResourceBusy,
+        ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
         ResError::InvalidResource => DriverError::InvalidInput,
-        ResError::MappingFailed => DriverError::Io,
+        ResError::MappingFailed | ResError::Io | ResError::BadState | ResError::NotFound => {
+            DriverError::Io
+        }
     })
 }
 

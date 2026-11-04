@@ -220,7 +220,7 @@ fn activate_virtio_mmio(device: Arc<DeviceObject>, device_kind: DeviceKind) -> D
     };
 
     let regs = crate::iomap_mmio(base, size, "virtio-mmio-transport")?;
-    let irq = device.first_irq().map(|resource| resource.number);
+    let irq = device.first_irq().map(|resource| resource.virq().raw());
     // SAFETY: `regs` was obtained from `iomap_mmio` which maps a valid
     // physical MMIO region, and `size` matches the region size.
     let (ty, transport) =

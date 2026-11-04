@@ -21,7 +21,7 @@ kernel directly.
 ```text
 concrete drivers
         │
-        ├── require kernel capabilities through device_res / driver contracts
+        ├── require kernel capabilities through driver_os_api / driver contracts
         │
         └── provide device capabilities through kclass / driver_* traits
 
@@ -36,33 +36,36 @@ host kernel adapter
 - OS-neutral driver crates must not depend on host-kernel crates such as
   `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or `kwork`.
 - Concrete driver code must not call host-kernel APIs directly. It must use
-  driver subsystem contracts such as `device_res`, `driver_base`, `kclass`, and
+  driver subsystem contracts such as `driver_os_api`, `driver_base`, `kclass`, and
   device-class traits.
 - Host-specific adapter crates may depend on host-kernel crates only to
   implement driver subsystem contracts. Current examples are
-  `device-res-xkernel`, irqchip drivers, timer drivers, and X-Kernel integration
+  `driver-os-api-xkernel`, irqchip drivers, timer drivers, and X-Kernel integration
   glue under `kdriver`.
-- `device_res` remains OS-neutral. It defines capability traits and RAII/devres
+- `driver_os_api` remains OS-neutral. It defines capability traits and RAII
   ownership helpers, but it must not depend on X-Kernel implementation crates.
 - `kirq`, `memspace`, `kdma`, and other kernel subsystems must not depend on
-  `device_res` or concrete driver crates.
+  `driver_os_api` or concrete driver crates.
 - `kdriver` is the X-Kernel integration/orchestration layer. It may hold the
   X-Kernel provider and publish devices into `kclass`, but it must not expose
   host-kernel APIs as the public API expected by reusable concrete drivers.
 - New driver needs must be represented as capability contracts first. Do not
   make a concrete driver call a host API as a shortcut.
 
+Device inventories and managed cleanup registration belong to kdevice,
+not to OS providers. The old device-res crate is retired.
+
 ## Crate Layers
 
 Driver crates are grouped by role. See `drivers/README.md` for the local crate
 inventory.
 
-- **Contracts and model**: `driver_base`, `device-res`, `kdevice`, `kclass`,
+- **Contracts and model**: `driver_base`, `driver-os-api`, `kdevice`, `kclass`,
   and device class crates such as `block`, `char_driver`, `display`, `input`,
   `net`, and `vsock`.
 - **Portable concrete drivers**: reusable hardware/protocol drivers such as
   `virtio`. These crates consume contracts and implement device class traits.
-- **X-Kernel adapters and integration**: `device-res-xkernel`, `kdriver`, and
+- **X-Kernel adapters and integration**: `driver-os-api-xkernel`, `kdriver`, and
   platform/host integration drivers such as `irq-driver`, `timer-driver`,
   `rtc-driver`, `x86-apic`, and early `console-driver` paths.
 

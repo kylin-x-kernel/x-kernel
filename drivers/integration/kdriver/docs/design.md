@@ -157,7 +157,7 @@ outside that guarantee.
 | `DriverRegistrar` | Driver registration facade: registers `DeviceDriver` impls into the `kdevice` driver core |
 | `PlatformBackend` | Unified platform bus: firmware-described (device-tree / ACPI) plus compile-time-known static devices |
 | `PciBackend` | PCI bus: ECAM/MmioCam enumeration, BAR allocation, host-bridge / PCI-to-PCI-bridge adoption |
-| `device-res-xkernel` | x-kernel resource provider implementation; bridges `memspace` (iomap), `kirq` (irq), `kdma` (dma) |
+| `driver-os-api-xkernel` | x-kernel resource provider implementation; bridges `memspace` (iomap), `kirq` (irq), `kdma` (dma) |
 | VirtIO driver family | Each VirtIO device type yields two `DeviceDriver` descriptors (PCI/MMIO) sharing one activation path |
 | Platform driver family | ramdisk, AHCI, bcm2835-sdhci, sdmmc, fxmac, and other platform device drivers |
 
@@ -191,7 +191,7 @@ and returns.
 The lock order is stop_lock -> PENDING_DEVICES, never the reverse.
 
 Arc Drop does not stop processing. Activation must explicitly finish admitted
-I/O, suppress device IRQ generation, release/synchronize its Irq, then call
+I/O, suppress device IRQ generation, release/synchronize its DevIrq, then call
 stop_and_wait before destroying the transport. The owning CPU consumes disabled
 queued entries without invoking the device. Stop waits for a running callback's
 temporary device Arc to retire. Do not call stop from the device callback.
@@ -206,7 +206,7 @@ are unchanged. Request-local waiting remains separately owned in block_completio
 ### DMA And Execution Context
 
 Ordinary block completion follows `complete_* -> pop_used -> Hal::unshare ->
-device_res::unmap_streaming -> kdma::unmap_dma_buffer`. The existing provider
+driver_os_api::unmap_streaming -> kdma::unmap_dma_buffer`. The existing provider
 removes its mapping, copies reads back and returns bounce storage to the TLSF
 pool. Pool creation is on map, not unmap; pool recycling and indirect descriptor
 deallocation do not sleep in the audited implementation. Coherent virtqueue
@@ -224,7 +224,7 @@ bookkeeping is not a claim of allocation-free end-to-end wakeup.
 
 ### Registration And Removal
 
-`request_block_irq` returns the existing `device_res::Irq` directly. Its closure
+`request_block_irq` returns the existing `driver_os_api::DevIrq` directly. Its closure
 holds a Weak device IRQ handler and the device's reclaimer Arc. It acknowledges
 only that device, marks pending only for a claimed event, and preserves the
 complete IrqEvent. An expired device returns NOT_HANDLED.
@@ -235,7 +235,7 @@ Provider errors propagate: no block bucket, capacity workaround, local callback
 gate, extra registration owner, retry or polling fallback. In particular the
 current four-action capacity can make setup fail; changing it belongs to kirq.
 
-Dropping Irq in sleepable task context releases that action token. The existing
+Dropping DevIrq in sleepable task context releases that action token. The existing
 provider delegates to kirq, which waits for in-flight dispatches; currently this
 is line-wide synchronization and can wait for a neighboring callback too.
 The block adapter never masks the shared line. Activation must retain a strong
@@ -255,7 +255,7 @@ Production PCI/MMIO block activation uses try_new_irq and the real host provider
 Driver initialization also installs that provider for block-core BioWait; disk
 publication uses alloc_mq and the common Request data entry point.
 Missing/failed IRQ leaves no published disk. One BlockActivation owns the strong
-device, optional native Irq, reclaimer and optional Gendisk throughout setup and
+device, optional native DevIrq, reclaimer and optional Gendisk throughout setup and
 close. A task-only map stores an owned FnOnce close action to erase heterogeneous
 transport types; IRQ and request paths never consult that map. A local activation's Drop also handles
 partial setup failure. Registry and devres cleanup ownership precede publication.
@@ -264,7 +264,7 @@ VirtioDriver::remove takes the unique close action before bus teardown; device
 core's begin_removing serializes remove, and its later devres cleanup repeats
 the now-idempotent lookup. Close prepares fresh task-bound drain/stop waiters,
 marks the device Closing, removes owned block lookup, waits for admitted calls,
-suppresses device interrupts, drops native Irq, stops the reclaimer, then
+suppresses device interrupts, drops native DevIrq, stops the reclaimer, then
 destroys the transport. No registry/class spinlock spans a wait. Retained disks
 can query cached geometry but new I/O returns Io. Physical tests are grouped in
 src/tests/virtio_block_activation.rs and included beneath their owning module.
@@ -456,11 +456,11 @@ transports:
 
 ### Resource management (devres)
 
-`device-res-xkernel` provides x-kernel's implementation type for the
-`device-res` provider contract; the driver-facing resource API is exposed
+`driver-os-api-xkernel` provides x-kernel's implementation type for the
+`driver-os-api` provider contract; the driver-facing resource API is exposed
 to drivers by `kdriver::resource` as `DeviceResourceExt`.
 `kdriver::resource` holds the static `XKernelResourceProvider` and passes
-it explicitly to `device_res::devm_*_with_provider()`; on release the RAII
+it explicitly to `kdevice::device::managed::devm_*_with_provider()`; on release the RAII
 handles return to the same provider that created them:
 
 - **`device.devm_iomap`**: maps MMIO through `memspace::iomap_device`;
@@ -479,11 +479,11 @@ handles return to the same provider that created them:
 - **`device.devm_request_threaded_irq` /
   `device.devm_request_threaded_irq_default`**: bind devres primary/thread
   handlers to the provider contract. The current mainline
-  `device-res-xkernel` provider does not yet cover the threaded IRQ
+  `driver-os-api-xkernel` provider does not yet cover the threaded IRQ
   methods, so they return `DriverError::Unsupported`; a later kirq
   threadirq branch will supply the xkernel implementation.
-  `device-res-xkernel` is the adaptation layer between devres IRQ
-  resources and the kernel IRQ core, translating `device_res`
+  `driver-os-api-xkernel` is the adaptation layer between devres IRQ
+  resources and the kernel IRQ core, translating `driver_os_api`
   trigger/controller/event/handler values into `kirq`'s own types; `kirq`
   does not depend back on devres.
   Future IRQ core capability extensions belong in `kirq`; the driver
@@ -493,7 +493,7 @@ handles return to the same provider that created them:
   `kdma::allocate_dma_memory`; release calls
   `kdma::deallocate_dma_memory`.
 - **`resource_provider().monotonic_time`**: only X-Kernel glue passes
-  `device_res::TimeOp` into reusable drivers; concrete drivers must not
+  `driver_os_api::TimeOp` into reusable drivers; concrete drivers must not
   call `khal::time` directly.
 
 Release runs in reverse acquisition order (LIFO) so resource dependencies
@@ -501,21 +501,21 @@ are never inverted.
 
 ### IRQ dispatch mechanism
 
-`device-res-xkernel::XKernelResourceProvider` keeps no local IRQ line
-state. It converts `device_res::IrqResource` into `kirq::IrqSpec`, wraps
-`device_res::IrqHandler` as `kirq::IrqHandler`, and registers with the IRQ
+`driver-os-api-xkernel::XKernelResourceProvider` keeps no local IRQ line
+state. It converts `driver_os_api::IrqResource` into `kirq::IrqSpec`, wraps
+`driver_os_api::IrqHandler` as `kirq::IrqHandler`, and registers with the IRQ
 core per API:
 
 1. `request_irq` calls `kirq::try_register_shared()`; `kirq` allocates a
    line-local `IrqActionToken` and stores the action identity; the provider
-   returns `device_res::IrqHandlerToken::SharedAction(id)` to devres.
+   returns `driver_os_api::IrqHandlerToken::SharedAction(id)` to devres.
 2. `request_threaded_irq` / `request_threaded_irq_default` currently reuse
-   the `device_res::IrqOp` default implementations, returning
+   the `driver_os_api::IrqOp` default implementations, returning
    `Unsupported` until a kirq threadirq provider override lands.
 3. When an interrupt arrives, `kirq` snapshots the actions from
    `IrqDescRuntimeState`, invokes each handler in order, and passes the
    resolved `virq` as the handler argument. Each wrapper then converts the
-   devres handler's `device_res::IrqEvent` into `kirq::IrqEvent`.
+   devres handler's `driver_os_api::IrqEvent` into `kirq::IrqEvent`.
 4. After the whole line's fanout, `kirq` aggregates the handled result.
    VirtIO input reports `NOT_HANDLED` for an empty device ISR and calls the
    input layer's notifier only for an event-queue interrupt. The input layer
@@ -535,7 +535,7 @@ not allocate from the heap.
   bridge between bus backends and probe, filled only inside the `bus_mgr`
   lock.
 - IRQ action fanout, threaded wake/ONESHOT, token teardown, and
-  `in_flight` synchronization are owned by `kirq`; `device-res-xkernel`
+  `in_flight` synchronization are owned by `kirq`; `driver-os-api-xkernel`
   only stores the mapping from devres tokens to `kirq` release calls, and
   `kdriver` keeps no IRQ core state.
 - `PCI_BAR_ALLOCATOR` uses `SpinNoPreempt`: BAR allocation happens only in
@@ -625,9 +625,9 @@ Fewer descriptors, but the matcher would compare bus type and VirtIO type
 together, and `probe_device` would branch between two transport init
 logics.
 
-### IRQ handlers reach kirq through device-res-xkernel
+### IRQ handlers reach kirq through driver-os-api-xkernel
 
-**Choice**: `device-res-xkernel` is the `device_res` provider adapting
+**Choice**: `driver-os-api-xkernel` is the `driver_os_api` provider adapting
 driver devres IRQ requests onto `kirq`; `kirq` keeps the shared action
 list per IRQ line and manages devres handler lifetimes via tokens.
 

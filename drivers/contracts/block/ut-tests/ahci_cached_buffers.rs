@@ -4,7 +4,7 @@
 
 use core::{alloc::Layout, sync::atomic::Ordering};
 
-use device_res::CpuBuffer;
+use driver_os_api::CpuBuffer;
 use unittest::def_test;
 
 use super::*;

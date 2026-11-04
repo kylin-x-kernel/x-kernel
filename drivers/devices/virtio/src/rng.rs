@@ -7,8 +7,8 @@
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::{mem::ManuallyDrop, ops::Range};
 
-use device_res::{Irq, IrqEvent, IrqHandler, IrqOp, IrqResource, ResError};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use driver_os_api::{DevIrq, IrqEvent, IrqHandler, IrqOp, IrqResource, ResError};
 use hwrng::{HwrngDevice, completion::RngCompletion};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
@@ -24,9 +24,11 @@ const MAX_REQUEST_BYTES: usize = 256;
 fn map_irq_error(error: ResError) -> DriverError {
     match error {
         ResError::InvalidResource => DriverError::InvalidInput,
-        ResError::MappingFailed => DriverError::Io,
+        ResError::MappingFailed | ResError::Io | ResError::BadState | ResError::NotFound => {
+            DriverError::Io
+        }
         ResError::NoMemory => DriverError::NoMemory,
-        ResError::Busy => DriverError::ResourceBusy,
+        ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,
     }
 }
@@ -182,7 +184,7 @@ pub struct VirtIoRngDev<H: Hal, T: Transport> {
     completion: Arc<dyn RngCompletion>,
     // Drop after `request`, so a normal request cleanup runs before this guard
     // unregisters its completion handler.
-    irq_guard: SpinNoIrq<Option<Irq>>,
+    irq_guard: SpinNoIrq<Option<DevIrq>>,
 }
 
 impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> {
@@ -199,7 +201,7 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> 
         let device = Arc::new(Self::new(transport, completion)?);
         let handler: Arc<dyn IrqHandler> = device.clone();
         let weak = Arc::downgrade(&handler);
-        let irq = Irq::request_with(
+        let irq = DevIrq::request_with(
             provider,
             resource,
             Arc::new(move |number| {

@@ -279,3 +279,15 @@ When modifying this module, verify:
   complete.
 - New `DeviceMatcher` implementations keep `matches()` pure (no side
   effects, no lock acquisition).
+
+## OS capability ownership after device-res retirement
+
+ResourceDesc/ResourceSet belong to device::resource. device::managed acquires
+driver-os-api guards through explicit providers and registers them directly with
+DeviceObject::add_cleanup. DeviceResource and the unused ResourceProvider
+aggregate are removed without a replacement facade.
+Cleanup remains framework-triggered, LIFO and outside the devres lock.
+Failed acquisition registers nothing; repeated drains are empty. Raw MMIO/DMA
+views expire at cleanup. Hardware/users must be quiesced first and release must
+run in the provider's permitted context. Allocation policy and legacy
+remove-error handling are unchanged.

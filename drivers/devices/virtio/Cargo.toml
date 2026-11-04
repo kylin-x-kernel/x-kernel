@@ -24,7 +24,7 @@ virtio-9p = ["alloc"]
 [dependencies]
 bitflags = { workspace = true }
 driver_base = { workspace = true }
-device_res = { workspace = true }
+driver_os_api = { workspace = true }
 block = { workspace = true, optional = true }
 hwrng = { workspace = true, optional = true }
 display = { workspace = true, optional = true }

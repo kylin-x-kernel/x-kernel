@@ -10,7 +10,8 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
-device_res.workspace = true
+driver_os_api.workspace = true
+smallvec.workspace = true
 driver_base.workspace = true
 kspin.workspace = true
 lazyinit.workspace = true

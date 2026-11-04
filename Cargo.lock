@@ -341,7 +341,7 @@ name = "block"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
- "device-res",
+ "driver-os-api",
  "driver_base",
  "kdevice",
  "kerrno",
@@ -1174,32 +1174,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "device-res"
-version = "0.3.0-dev"
-dependencies = [
- "kspin",
- "ktime_types",
- "smallvec",
- "unittest",
-]
-
-[[package]]
-name = "device-res-xkernel"
-version = "0.3.0-dev"
-dependencies = [
- "device-res",
- "kalloc",
- "kdma",
- "khal",
- "kirq",
- "ktime_types",
- "log",
- "memaddr",
- "memspace",
- "unittest",
-]
-
-[[package]]
 name = "devpts"
 version = "0.3.0-dev"
 dependencies = [
@@ -1253,6 +1227,31 @@ name = "display"
 version = "0.3.0-dev"
 dependencies = [
  "driver_base",
+ "unittest",
+]
+
+[[package]]
+name = "driver-os-api"
+version = "0.3.0-dev"
+dependencies = [
+ "irq-types",
+ "ktime_types",
+ "unittest",
+]
+
+[[package]]
+name = "driver-os-api-xkernel"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-os-api",
+ "kalloc",
+ "kdma",
+ "khal",
+ "kirq",
+ "ktime_types",
+ "log",
+ "memaddr",
+ "memspace",
  "unittest",
 ]
 
@@ -2057,6 +2056,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "irq-types"
+version = "0.3.0-dev"
+
+[[package]]
 name = "is-terminal"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2271,11 +2274,12 @@ dependencies = [
 name = "kdevice"
 version = "0.3.0-dev"
 dependencies = [
- "device-res",
+ "driver-os-api",
  "driver_base",
  "kspin",
  "lazyinit",
  "log",
+ "smallvec",
  "unittest",
 ]
 
@@ -2314,9 +2318,9 @@ dependencies = [
  "char_driver",
  "console-driver",
  "crate_interface",
- "device-res",
- "device-res-xkernel",
  "display",
+ "driver-os-api",
+ "driver-os-api-xkernel",
  "driver_base",
  "hwrng",
  "input",
@@ -2742,6 +2746,7 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "intrusive-collections",
+ "irq-types",
  "kalloc-types",
  "karch",
  "kbuild_config",
@@ -6057,8 +6062,8 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "block",
- "device-res",
  "display",
+ "driver-os-api",
  "driver_base",
  "hwrng",
  "input",

@@ -422,18 +422,6 @@ impl DeviceObject {
     }
 }
 
-impl device_res::DeviceResource for DeviceObject {
-    fn resources(&self) -> &[ResourceDesc] {
-        // Inherent `DeviceObject::resources` takes priority in method
-        // resolution, so this calls the inherent accessor (not itself).
-        self.resources.as_slice()
-    }
-
-    fn register_cleanup(&self, cleanup: Box<dyn FnOnce() + Send>) {
-        self.add_cleanup(cleanup);
-    }
-}
-
 impl core::fmt::Debug for DeviceObject {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DeviceObject")

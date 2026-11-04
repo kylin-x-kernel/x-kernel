@@ -19,7 +19,7 @@ documentation.workspace = true
 # crate only forwards `dma-trace` to the DMA core's own feature, and cargo-shear
 # still reports it after the forwarding was made explicit with `dep:kdma`,
 # because a feature reference is not a use. (The DMA core stays in the graph
-# regardless: `device_res_xkernel` depends on it unconditionally.)
+# regardless: `driver_os_api_xkernel` depends on it unconditionally.)
 ignored = ["display", "kalloc", "vsock", "kcpu_id_map", "kdma"]
 
 [features]
@@ -85,8 +85,8 @@ default = []
 [dependencies]
 kalloc = { workspace = true, optional = true }
 kdma = { workspace = true, optional = true }
-device_res = { workspace = true }
-device_res_xkernel = { workspace = true }
+driver_os_api = { workspace = true }
+driver_os_api_xkernel = { workspace = true }
 driver_base = { workspace = true }
 karch = { workspace = true }
 kclass = { workspace = true }

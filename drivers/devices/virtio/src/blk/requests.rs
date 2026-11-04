@@ -8,7 +8,7 @@ use alloc::{boxed::Box, vec};
 use core::ptr::NonNull;
 
 use block::{BioOperation, completion::BlockCompletionOperations};
-use device_res::{IrqEvent, IrqHandler};
+use driver_os_api::{IrqEvent, IrqHandler};
 use linked_list_r4l::{GetLinks, Links, List};
 use virtio_drivers::{
     Error,

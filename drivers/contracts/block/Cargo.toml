@@ -20,7 +20,7 @@ ramdisk-static = []
 # ahci = ["dep:simple-ahci"]
 
 [dependencies]
-device_res = { workspace = true }
+driver_os_api = { workspace = true }
 memaddr.workspace = true
 bitflags = { workspace = true }
 driver_base = { workspace = true }

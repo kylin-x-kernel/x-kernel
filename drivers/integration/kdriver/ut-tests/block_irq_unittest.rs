@@ -6,7 +6,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use block::completion::BlockCompletionOperations;
-use device_res::{IrqHandlerToken, IrqTrigger, ResError};
+use driver_os_api::{IrqHandlerToken, IrqTrigger, ResError};
 use kirq::{
     context::test_support::ScopedHardIrqContext, softirq::test_support::ScopedDaemonWakeGate,
 };
@@ -31,19 +31,26 @@ impl IrqOp for MockProvider {
         irq: IrqResource,
         handler: Arc<dyn IrqHandler>,
     ) -> ResResult<IrqHandlerToken> {
-        if irq.number == FAILED_IRQ {
+        if irq.virq().raw() == FAILED_IRQ {
             return Err(ResError::Busy);
         }
         let id = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-        core::assert!(ACTIONS.lock().insert((irq.number, id), handler).is_none());
+        core::assert!(
+            ACTIONS
+                .lock()
+                .insert((irq.virq().raw(), id), handler)
+                .is_none()
+        );
         Ok(IrqHandlerToken::shared_action(id))
     }
+
     fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken) {
         let IrqHandlerToken::SharedAction(id) = token else {
             panic!("expected shared action");
         };
-        core::assert!(ACTIONS.lock().remove(&(irq.number, id)).is_some());
+        core::assert!(ACTIONS.lock().remove(&(irq.virq().raw(), id)).is_some());
     }
+
     fn set_irq_enabled(&self, _irq: IrqResource, _enabled: bool) {
         panic!("block removal must not mask a shared line");
     }
@@ -70,7 +77,7 @@ impl IrqHandler for TestDevice {
         core::assert!(kirq::context::is_in_hardirq());
         self.calls.fetch_add(1, Ordering::Relaxed);
         if self.is_claimed.load(Ordering::Relaxed) {
-            IrqEvent::from_sources(0b101)
+            IrqEvent::HANDLED
         } else {
             IrqEvent::NOT_HANDLED
         }
@@ -84,10 +91,10 @@ impl BlockCompletionOperations for TestDevice {
 }
 
 fn resource(irq: usize) -> IrqResource {
-    IrqResource::new(irq, IrqTrigger::LevelHigh)
+    IrqResource::plain(driver_os_api::Virq::new(irq), IrqTrigger::LevelHigh)
 }
 
-fn subscribe(device: &Arc<TestDevice>, irq: usize) -> (Irq, Arc<BlockIoReclaimer>) {
+fn subscribe(device: &Arc<TestDevice>, irq: usize) -> (DevIrq, Arc<BlockIoReclaimer>) {
     let completion: Arc<dyn BlockCompletionOperations> = device.clone();
     let reclaimer = BlockIoReclaimer::new(Arc::downgrade(&completion));
     let handler: Arc<dyn IrqHandler> = device.clone();
@@ -130,7 +137,7 @@ fn block_irq_registers_each_device_and_releases_only_its_action() {
     let (second_irq, second_reclaimer) = subscribe(&second, 0x4000);
     let (other_irq, other_reclaimer) = subscribe(&other, 0x4001);
     assert_eq!(ACTIONS.lock().len(), 3);
-    assert_eq!(dispatch(0x4000), IrqEvent::from_sources(0b101));
+    assert_eq!(dispatch(0x4000), IrqEvent::HANDLED);
     kirq::softirq::run_pending_softirqs();
     assert_eq!(first.reclaims.load(Ordering::Relaxed), 1);
     assert_eq!(second.reclaims.load(Ordering::Relaxed), 0);

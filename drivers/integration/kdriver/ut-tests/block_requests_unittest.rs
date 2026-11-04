@@ -8,7 +8,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use block::{Gendisk, completion::BlockCompletionOperations};
-use device_res::IrqHandler;
+use driver_os_api::IrqHandler;
 use kirq::context::test_support::ScopedHardIrqContext;
 use unittest::{assert_eq, def_test};
 

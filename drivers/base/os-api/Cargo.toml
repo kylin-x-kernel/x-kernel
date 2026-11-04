@@ -1,0 +1,17 @@
+[package]
+name = "driver-os-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "OS capability contracts and lifetime guards for the driver framework"
+
+[dependencies]
+ktime_types.workspace = true
+irq_types.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

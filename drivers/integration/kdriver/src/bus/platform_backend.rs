@@ -92,8 +92,8 @@ impl PlatformBackend {
                     }));
                 }
                 if let Some(irq) = dev.irq {
-                    resources.push(ResourceDesc::Irq(IrqResource::new(
-                        irq.irq,
+                    resources.push(ResourceDesc::Irq(IrqResource::plain(
+                        driver_os_api::Virq::new(irq.irq),
                         super::irq_trigger_from_firmware(irq.trigger),
                     )));
                 }

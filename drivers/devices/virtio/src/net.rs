@@ -6,11 +6,11 @@
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use device_res::{Irq, IrqEvent, IrqEventSource, IrqOp, IrqResource, IrqTrigger};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{
     MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice, NetRxScheduler,
 };
+use driver_os_api::{DevIrq, IrqEvent, IrqOp, IrqResource, IrqTrigger};
 use kspin::{SpinNoIrq, SpinNoPreempt, static_lock};
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 
@@ -71,15 +71,9 @@ static_lock! {
 }
 static_lock! {
     /// Keeps the network interrupt registrations alive for the lifetime of the
-    /// kernel; dropping an [`Irq`] guard would release the handler.
-    static NET_IRQ_GUARDS: SpinNoIrq<Vec<Irq>> = SpinNoIrq::new(Vec::new());
+    /// kernel; dropping a [`DevIrq`] guard would release the handler.
+    static NET_IRQ_GUARDS: SpinNoIrq<Vec<DevIrq>> = SpinNoIrq::new(Vec::new());
 }
-
-/// Event source bits reported by the virtio-net IRQ handler. The regular
-/// handler only acks; these bits are advisory for future multi-queue routing
-/// (the rx-task wake path does not read them).
-const RX_SRC: IrqEventSource = 0;
-const TX_SRC: IrqEventSource = 1;
 
 fn remove_virtio_net_irq_handle(handle_id: usize) {
     NET_IRQ_HANDLES
@@ -89,20 +83,20 @@ fn remove_virtio_net_irq_handle(handle_id: usize) {
 
 fn handle_virtio_net_irq(irq: usize) -> IrqEvent {
     let handles = NET_IRQ_HANDLES.lock();
-    let mut sources = 0;
+    let mut is_handled = false;
     for irq_handle in handles.iter() {
         if irq_handle.irq() != irq {
             continue;
         }
         if irq_handle.ack_interrupt() {
             irq_handle.schedule_rx();
-            sources |= (1 << RX_SRC) | (1 << TX_SRC);
+            is_handled = true;
         }
     }
-    if sources == 0 {
-        IrqEvent::NOT_HANDLED
+    if is_handled {
+        IrqEvent::HANDLED
     } else {
-        IrqEvent::from_sources(sources)
+        IrqEvent::NOT_HANDLED
     }
 }
 
@@ -123,8 +117,8 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
         }));
 
     if REGISTERED_NET_IRQS.lock().insert(irq) {
-        let resource = IrqResource::new(irq, IrqTrigger::Unknown(0));
-        match Irq::request_with(irq_provider, resource, Arc::new(handle_virtio_net_irq)) {
+        let resource = IrqResource::plain(driver_os_api::Virq::new(irq), IrqTrigger::Unknown(0));
+        match DevIrq::request_with(irq_provider, resource, Arc::new(handle_virtio_net_irq)) {
             Ok(guard) => NET_IRQ_GUARDS.lock().push(guard),
             Err(_) => {
                 remove_virtio_net_irq_handle(handle_id);
@@ -147,7 +141,7 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
             let mut guards = NET_IRQ_GUARDS.lock();
             guards
                 .iter()
-                .position(|guard| guard.number() == irq)
+                .position(|guard| guard.virq().raw() == irq)
                 .map(|index| guards.swap_remove(index))
         };
         drop(guard);

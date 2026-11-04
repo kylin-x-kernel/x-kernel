@@ -1,0 +1,12 @@
+[package]
+name = "irq-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Shared IRQ trigger, controller and opaque domain vocabulary"
+
+[lints]
+workspace = true

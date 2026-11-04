@@ -2,11 +2,22 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Unified resource descriptors for device discovery.
-//!
-//! The descriptor types themselves are OS-agnostic and live in [`device_res`].
-//! This module re-exports them for the shared device model.
+//! Hardware resource descriptions owned by the device model.
 
-pub use device_res::{
-    DmaSpec, IoPortRange, IrqResource, IrqTrigger, MmioRegion, ResourceDesc, ResourceSet,
-};
+pub use driver_os_api::{DmaSpec, IoPortRange, IrqResource, IrqTrigger, MmioRegion};
+
+/// A single resource associated with a device.
+#[derive(Debug, Clone, Copy)]
+pub enum ResourceDesc {
+    /// Memory-mapped I/O region.
+    Mmio(driver_os_api::MmioRegion),
+    /// x86 I/O port range.
+    IoPort(driver_os_api::IoPortRange),
+    /// Interrupt line.
+    Irq(driver_os_api::IrqResource),
+    /// Coherent DMA buffer request.
+    Dma(driver_os_api::DmaSpec),
+}
+
+/// A collection of resources for a single device.
+pub type ResourceSet = smallvec::SmallVec<[ResourceDesc; 4]>;

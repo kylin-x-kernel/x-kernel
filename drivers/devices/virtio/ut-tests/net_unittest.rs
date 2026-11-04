@@ -171,8 +171,7 @@ fn test_rx_scheduler_requires_registered_irq_but_allows_detach() {
 
     let mut transport = MockTransport::new();
     transport.device_type = virtio_drivers::transport::DeviceType::Network;
-    let dev =
-        VirtIoNetDev::<MockHal, MockTransport, 32>::try_new(transport, None, None).unwrap();
+    let dev = VirtIoNetDev::<MockHal, MockTransport, 32>::try_new(transport, None, None).unwrap();
     let scheduler = Arc::new(MockRxScheduler {
         schedules: AtomicUsize::new(0),
     });
@@ -191,8 +190,7 @@ fn test_recv_acknowledges_interrupt_in_poll_mode() {
     let mut transport = MockTransport::new();
     transport.device_type = virtio_drivers::transport::DeviceType::Network;
     let interrupt_ack_count = transport.interrupt_ack_count.clone();
-    let dev =
-        VirtIoNetDev::<MockHal, MockTransport, 32>::try_new(transport, None, None).unwrap();
+    let dev = VirtIoNetDev::<MockHal, MockTransport, 32>::try_new(transport, None, None).unwrap();
 
     assert!(matches!(dev.recv(), Err(DriverError::WouldBlock)));
     assert_eq!(interrupt_ack_count.load(Ordering::Relaxed), 1);
@@ -247,8 +245,7 @@ fn test_irq_handler_filters_irq_and_schedules_rx() {
 
     let event = handle_virtio_net_irq(71);
 
-    assert!(event.has_source(RX_SRC));
-    assert!(event.has_source(TX_SRC));
+    assert_eq!(event, IrqEvent::HANDLED);
     assert_eq!(scheduler.schedules.load(Ordering::Relaxed), 1);
 
     reset_irq_state();
@@ -270,8 +267,7 @@ fn test_irq_handler_treats_matched_empty_ack_as_miss() {
 
     let event = handle_virtio_net_irq(72);
 
-    assert!(!event.handled());
-    assert!(!event.has_source(RX_SRC));
+    assert_eq!(event, IrqEvent::NOT_HANDLED);
     assert_eq!(scheduler.schedules.load(Ordering::Relaxed), 0);
 
     reset_irq_state();

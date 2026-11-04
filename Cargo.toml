@@ -244,7 +244,8 @@ hwrng = { path = "drivers/contracts/hwrng" }
 char_driver = { path = "drivers/contracts/char" }
 display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }
-device_res = { path = "drivers/contracts/device-res", package = "device-res" }
+driver_os_api = { path = "drivers/base/os-api", package = "driver-os-api" }
+irq_types = { path = "arch/irq-types", package = "irq-types" }
 kclass = { path = "drivers/contracts/kclass" }
 kdevice = { path = "drivers/contracts/kdevice" }
 input = { path = "drivers/contracts/input" }
@@ -255,7 +256,7 @@ vsock = { path = "drivers/contracts/vsock" }
 virtio = { path = "drivers/devices/virtio" }
 
 # Internal: driver adapters and integration
-device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
+driver_os_api_xkernel = { path = "drivers/adapters/xkernel/provider", package = "driver-os-api-xkernel" }
 kdriver = { path = "drivers/integration/kdriver" }
 kdevice_uevent = { path = "drivers/integration/kdevice-uevent", package = "kdevice-uevent" }
 

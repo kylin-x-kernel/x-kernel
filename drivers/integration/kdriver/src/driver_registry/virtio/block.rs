@@ -7,8 +7,8 @@
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 
 use block::{Gendisk, GendiskRef, completion::BlockCompletionOperations};
-use device_res::{Irq, IrqHandler, IrqOp, IrqResource, IrqTrigger};
 use driver_base::{Device, DriverError, DriverResult};
+use driver_os_api::{DevIrq, IrqHandler, IrqOp, IrqResource, IrqTrigger};
 use kdevice::{DeviceId, DeviceObject};
 use ksync::{Mutex, static_lock};
 use virtio::{Transport, VirtIoBlkDev, VirtIoHal};
@@ -25,7 +25,7 @@ static_lock! {
 
 struct BlockActivation<H: VirtIoHal, T: Transport> {
     device: Arc<VirtIoBlkDev<H, T>>,
-    irq: Option<Irq>,
+    irq: Option<DevIrq>,
     reclaimer: Arc<BlockIoReclaimer>,
     disk: Option<GendiskRef>,
 }
@@ -72,7 +72,7 @@ pub(super) fn activate<T: Transport + 'static>(
     activate_device(
         parent,
         device,
-        IrqResource::new(irq, IrqTrigger::Unknown(0)),
+        IrqResource::plain(driver_os_api::Virq::new(irq), IrqTrigger::Unknown(0)),
         crate::resource::resource_provider(),
     )
 }

@@ -11,7 +11,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use device_res::{CpuMemoryOp, ResError, ResResult};
+use driver_os_api::{CpuMemoryOp, ResError, ResResult};
 
 pub(crate) struct Provider {
     pub(crate) allocations: AtomicUsize,

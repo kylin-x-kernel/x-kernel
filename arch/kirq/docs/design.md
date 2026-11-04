@@ -1,5 +1,11 @@
 # kirq — 设计文档
 
+## Shared value vocabulary
+
+IrqTrigger, IrqController and IrqDomainId are re-exported from irq-types with
+unchanged public kirq paths. Only value definitions move; domain, mapping,
+handler and release behavior stay in kirq. No driver-contract dependency exists.
+
 ## Fallible Reverse Map Ownership
 
 Ordinary domains prepare both KBox snapshot owners with NOWAIT under registry

@@ -38,21 +38,21 @@ kdriver
    |
    | Validated mappings, IRQ handler closures, DMA buffers
    v
-device-res-xkernel / kirq / khal / kdma / memspace / driver crates
+driver-os-api-xkernel / kirq / khal / kdma / memspace / driver crates
 ```
 
-- `kdriver` trusts `device-res-xkernel` to implement the `device_res` provider contract
+- `kdriver` trusts `driver-os-api-xkernel` to implement the `driver_os_api` provider contract
   correctly. Driver-facing devres APIs are exposed through
   `kdriver::resource::DeviceResourceExt`.
   `kdriver::resource` explicitly passes `XKernelResourceProvider` and converts
   `ResError` into `DriverError`.
-- `device-res-xkernel` trusts `kirq::try_register_shared()` to validate interrupt
+- `driver-os-api-xkernel` trusts `kirq::try_register_shared()` to validate interrupt
   descriptors, manage action fanout, and provide teardown synchronization.
-  `device_res` reserves a threaded-IRQ provider contract; the X-Kernel provider based
+  `driver_os_api` reserves a threaded-IRQ provider contract; the X-Kernel provider based
   on `main` currently still returns `Unsupported`.
-- `kdriver` and `device-res-xkernel` trust `memspace::iomap_device` to reject mappings
+- `kdriver` and `driver-os-api-xkernel` trust `memspace::iomap_device` to reject mappings
   of invalid physical address ranges.
-- `device-res-xkernel` trusts `kdma::allocate_dma_memory` and
+- `driver-os-api-xkernel` trusts `kdma::allocate_dma_memory` and
   `kdma::deallocate_dma_memory` to handle matching, valid `(cpu_addr, bus_addr)` pairs.
 - `kdriver` trusts `virtio::probe_mmio_device` to perform the required volatile-read
   safety checks before accessing MMIO registers.
@@ -92,7 +92,7 @@ The module directly or indirectly interacts with these boundaries:
 - **Driver probe paths:** MMIO regions mapped through `iomap_first_mmio` or
   `devm_iomap`, and DMA buffers allocated through `devm_alloc_coherent`.
 - **Interrupt registration:** IRQ line numbers supplied by firmware or PCI INTx routing
-  are converted into `kirq::IrqSpec` by `device-res-xkernel` and connected to `kirq`
+  are converted into `kirq::IrqSpec` by `driver-os-api-xkernel` and connected to `kirq`
   through shared hardirq actions.
 - **Compile-time static configuration:** Fixed platform addresses such as
   `kbuild_config::AHCI_PADDR` and `kbuild_config::SDMMC_PADDR`.
@@ -117,7 +117,7 @@ Threat analysis should cover:
 
 block_irq adds no unsafe code and no IRQ membership registry. Each registered
 closure owns only a Weak device and the reclaimer Arc. Activation must retain
-the strong device until the returned Irq has been dropped and the reclaimer
+the strong device until the returned DevIrq has been dropped and the reclaimer
 has stopped. The X-Kernel provider releases only the device's action token and
 delegates escaped-callback synchronization to kirq; block does not duplicate
 that bookkeeping or mask a shared line. Current kirq synchronization waits for
@@ -176,9 +176,9 @@ when waited on; the block layer serializes notification enrollment with result
 publication. Device-close drain/stop still prepare their waiters before exposing
 notification handles. Signals never retain a task, device or data pointer.
 
-### 1. device-res-xkernel — DMA Allocation
+### 1. driver-os-api-xkernel — DMA Allocation
 
-Location: `drivers/adapters/xkernel/device-res/src/dma.rs`
+Location: `drivers/adapters/xkernel/provider/src/dma.rs`
 
 ```rust
 let info = unsafe { kdma::allocate_dma_memory(layout) }.map_err(|_| ResError::NoMemory)?;
@@ -205,9 +205,9 @@ Callers:
 
 - Driver probe paths through `devm_alloc_coherent`.
 
-### 2. device-res-xkernel — DMA Release
+### 2. driver-os-api-xkernel — DMA Release
 
-Location: `drivers/adapters/xkernel/device-res/src/dma.rs`
+Location: `drivers/adapters/xkernel/provider/src/dma.rs`
 
 ```rust
 unsafe { kdma::deallocate_dma_memory(info, layout) };
@@ -227,8 +227,8 @@ Safety rationale:
 
 Callers:
 
-- The `free_coherent` method of the `device-res-xkernel` provider, triggered by
-  `device_res::DmaAllocation` destruction or devres release.
+- The `free_coherent` method of the `driver-os-api-xkernel` provider, triggered by
+  `driver_os_api::DmaAllocation` destruction or devres release.
 
 ### 3. VirtIoHalImpl — Unsafe Trait Implementation
 
@@ -472,7 +472,7 @@ Invariants:
 
 Safety rationale:
 
-- `devm_iomap` uses the `device-res-xkernel` MMIO provider and `memspace::iomap_device`
+- `devm_iomap` uses the `driver-os-api-xkernel` MMIO provider and `memspace::iomap_device`
   to establish a valid mapping. Mapping errors propagate through `?` before the
   constructor is called.
 - The device's devres owns the mapping and manages its lifetime, releasing it on
@@ -520,7 +520,7 @@ Callers:
 | `BusManager` | `Vec<(BusId, Box<dyn BusBackend>)>` satisfies `Send` | Shared access is protected by `SpinNoPreempt`. |
 | `EnumerationContext` | `Vec<DeviceDesc>` satisfies `Send` | Does not implement `Sync`; used by one thread. |
 | `DriverRegistrar` | Zero-sized type | Accesses shared state only through the global `kdevice` lock. |
-| `device-res-xkernel::XKernelResourceProvider` | Zero-sized type | The provider has no internally mutable state; `kirq` protects IRQ action state. |
+| `driver-os-api-xkernel::XKernelResourceProvider` | Zero-sized type | The provider has no internally mutable state; `kirq` protects IRQ action state. |
 | `PCI_BAR_ALLOCATOR` | `SpinNoPreempt<Option<PciRangeAllocator>>` satisfies `Send` and `Sync` | `SpinNoPreempt` provides interior mutability. |
 | `PlatformBackend` | The `LocalIdAlloc` field is `Copy` and satisfies `Send` | Does not implement `Sync`; access is serialized by the `BusManager` lock. |
 | `PciBackend` | `Cam` satisfies `Send` | Does not implement `Sync`. |
@@ -544,7 +544,7 @@ Callers:
 | T-12 | VirtIO MMIO discovery reads unmapped or invalid registers | Medium | Firmware advertises `virtio,mmio` but no VirtIO device exists at the physical address | `probe_mmio_device` first checks `MagicValue` and returns `None` if the VirtIO protocol is not present. |
 | T-13 | An unchecked firmware IRQ number is registered on the wrong vector | Medium | `kirq::register` does not validate the IRQ number sufficiently | Depends on the platform IRQ backend and `kirq` descriptor handling; IRQ numbers passed by `kdriver` come from firmware or PCI INTx routing. |
 | T-14 | Static platform device addresses such as AHCI_PADDR are misconfigured at compile time | Low | `kbuild_config` constants specify invalid physical addresses | `iomap_first_mmio` validates through `devm_iomap` and `iomap_device`; mapping failure prevents driver activation. |
-| T-15 | Incorrect conversion between devres and kernel IRQ types causes bad IRQ configuration, lost source bitmaps, or unwoken IRQ threads | Medium | The `device-res-xkernel` adapter omits trigger/controller/event/wake-thread fields | `device-res-xkernel` centralizes `device_res` to `kirq` conversion; the IRQ core does not depend on devres. |
+| T-15 | Incorrect conversion between devres and kernel IRQ types causes bad IRQ configuration, lost handled results, or unwoken IRQ threads | Medium | The `driver-os-api-xkernel` adapter omits trigger/controller/handled/wake-thread fields | `driver-os-api-xkernel` centralizes `driver_os_api` to `kirq` conversion; device-specific queue routing stays in the driver, and the IRQ core does not depend on devres. |
 | T-16 | VirtIO input is published before its interrupt action is usable | Medium | Input construction succeeds but IRQ registration fails or races publication | `virtio/input.rs` requires an IRQ, registers its devres action first, and calls `publish_input` only after registration succeeds. |
 
 Impact levels:
@@ -640,13 +640,13 @@ When modifying this module, verify:
   address ranges internally.
 - New DMA allocation paths use `devm_alloc_coherent` or `kdma::allocate_dma_memory`,
   with matching layouts at `free` time.
-- New IRQ registration passes through the `device-res-xkernel` devres provider into
+- New IRQ registration passes through the `driver-os-api-xkernel` devres provider into
   the `kirq` action list, instead of maintaining separate line-local fanout in `kdriver`.
 - VirtIO input keeps PCI INTx masked until its devres handler is installed,
   masks it again before handler release, and leaves an empty input ISR
   unclaimed. Its input-layer notifier is called only for a queue interrupt;
   configuration interrupts do not wake input readers.
-- New IRQ release uses `device-res-xkernel` to call the matching `kirq` release API
+- New IRQ release uses `driver-os-api-xkernel` to call the matching `kirq` release API
   by token; `kirq` performs masking, synchronization, and cleanup after the final action leaves.
 - When a new bus backend implements `BusBackend`, an individual device error in
   `enumerate` does not block enumeration of other devices.

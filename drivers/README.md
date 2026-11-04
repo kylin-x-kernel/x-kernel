@@ -8,7 +8,7 @@ contract it is implementing or consuming.
 ```text
                   driver contracts and device model
                ┌────────────────────────────────────┐
-               │ driver_base / device-res / kdevice │
+               │ driver_base / driver-os-api / kdevice │
                │ kclass / block / net / char / ...  │
                └───────────────┬────────────────────┘
                                │
@@ -33,8 +33,8 @@ drivers and a host kernel:
 | Crate | Role |
 |------|------|
 | `driver_base` | Common driver error/result and base device trait. |
-| `device-res` | Kernel capability contracts requested by drivers: MMIO, IRQ, DMA, time, and devres ownership helpers. |
-| `kdevice` | Shared bus/device/driver model, topology, matching, lifecycle, and device-managed cleanup storage. |
+| `driver-os-api` | OS-neutral MMIO, IRQ, DMA, CPU memory and time contracts with owning guards. |
+| `kdevice` | Shared bus/device/driver model, resource descriptions, topology, lifecycle and device-managed cleanup helpers/storage. |
 | `kclass` | Runtime publication layer for typed device classes. |
 | `block`, `char_driver`, `display`, `input`, `net`, `vsock`, `hwrng` | Device class contracts that concrete drivers implement and kernel subsystems consume. |
 
@@ -49,7 +49,7 @@ These crates or modules adapt the portable driver contracts to X-Kernel:
 
 | Crate or module | Role |
 |----------------|------|
-| `device-res-xkernel` | Implements `device-res` provider traits using `memspace`, `kirq`, `kdma`, and `khal`. |
+| `driver-os-api-xkernel` | Implements `driver-os-api` provider traits using `memspace`, `kirq`, `kdma`, and `khal`. |
 | `kdriver` | X-Kernel driver orchestration: bus discovery, provider holder, concrete-driver glue, and publication into `kclass`. |
 | `kdevice-uevent` | Adapts ordered `kdevice` node lifecycle events to X-Kernel kobject netlink messages and shared sysfs formatting. |
 | `irq-driver`, `timer-driver`, `rtc-driver`, `x86-apic`, `aarch64-pmuv3` | Host/platform driver integration pieces. |
@@ -66,7 +66,7 @@ kernel APIs. Current examples include:
 
 | Crate | Expected boundary |
 |------|-------------------|
-| `virtio` | Uses `virtio-drivers` plus `device-res` / class traits. It must not depend on `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or `kwork`. |
+| `virtio` | Uses `virtio-drivers` plus `driver-os-api` / class traits. It must not depend on `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or `kwork`. |
 
 When a concrete driver needs a new kernel facility, add a capability contract
 first, implement it in an adapter crate, then pass the provider through
@@ -75,8 +75,11 @@ first, implement it in an adapter crate, then pass the provider through
 ## Naming Guidance
 
 - Use `*-xkernel` for X-Kernel implementations of portable contracts, as with
-  `device-res-xkernel`.
+  `driver-os-api-xkernel`.
 - Keep portable contracts free of `xkernel`, `khal`, `kirq`, `memspace`, or
   other host implementation terms in their public API.
 - Avoid adding broad public helper APIs in adapter crates. Adapter crates should
   mainly expose provider types or integration entry points.
+
+ResourceDesc/Set and explicit-provider managed cleanup helpers belong to kdevice.
+The old device-res contract and adapter are removed, not retained as aliases.

@@ -6,8 +6,8 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use device_res::{IrqResource, IrqTrigger};
 use driver_base::{DriverError, DriverResult};
+use driver_os_api::{IrqResource, IrqTrigger};
 use kdevice::DeviceObject;
 use virtio::Transport;
 
@@ -45,7 +45,7 @@ fn activate<T: Transport + 'static>(
 ) -> DriverResult<()> {
     let input = virtio::VirtIoInputDev::<VirtIoHalImpl, T>::try_new(transport, irq)?;
     parent.devm_request_irq(
-        IrqResource::new(irq, IrqTrigger::Unknown(0)),
+        IrqResource::plain(driver_os_api::Virq::new(irq), IrqTrigger::Unknown(0)),
         input.irq_handler(),
     )?;
 

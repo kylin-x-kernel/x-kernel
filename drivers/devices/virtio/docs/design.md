@@ -7,7 +7,7 @@ VirtIO 设备封装为 [`driver_base`] 系列 trait 的实现。块设备、网�
 vsock、9p 等子系统通过本模块访问 VirtIO 虚拟设备。
 
 本 crate 属于可复用具体驱动层。它不能直接依赖 X-Kernel host API；需要的 DMA、
-IRQ 映射和时间能力必须通过 `virtio_drivers::Hal` 或 `device_res` provider
+IRQ 映射和时间能力必须通过 `virtio_drivers::Hal` 或 `driver_os_api` provider
 contract 传入。
 
 ## 背景
@@ -394,15 +394,15 @@ the per-axis query path.
 **IRQ 处理流程**：
 
 1. `register_virtio_net_irq(irq, irq_provider, inner)`：将 `VirtIoNetIrqHandle` 存入全局 `NET_IRQ_HANDLES`
-2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `Irq::request_with(irq_provider, resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
-3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，返回包含来源位图的 `IrqEvent`，没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
+2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `DevIrq::request_with(irq_provider, resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
+3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，确认中断后直接调度 RX 工作并返回 `IrqEvent::HANDLED`，没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
 4. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间新到达但尚未调度的设备事件；未注册 IRQ 时，由 `recv()` 在纯轮询路径中确认中断
 
 ### VirtIO 输入设备中断流程
 
 1. `VirtIoInputDev::try_new(transport, irq)` 初始化两个输入队列，缓存设备标识信息，
    并记录解析后的 IRQ。
-2. host 集成层获取 `irq_handler()`，通过 `device_res` 契约注册处理程序，
+2. host 集成层获取 `irq_handler()`，通过 `driver_os_api` 契约注册处理程序，
    随后再发布 class 设备。
 3. 硬中断处理程序检查回调传入的 IRQ，在共享的 `SpinNoIrq` 保护下确认 transport
    ISR，并且仅在 ISR 非空时认领该中断线。只有队列中断才调用已安装的
@@ -484,7 +484,7 @@ host IRQ 核心或工作队列。
   访问设备（`ack_interrupt`），与正常收发路径并发。全局静态变量
   `NET_IRQ_HANDLES`、`NET_IRQ_GUARDS` 和 `REGISTERED_NET_IRQS` 也使用 `SpinNoIrq` 保护。
 - **IRQ 注册**：`register_virtio_net_irq()` 在 `NET_IRQ_HANDLES` 中注册回调句柄，
-  同一 IRQ 仅注册一次（通过 `REGISTERED_NET_IRQS` 去重）。`Irq::request_with()` 返回的
+  同一 IRQ 仅注册一次（通过 `REGISTERED_NET_IRQS` 去重）。`DevIrq::request_with()` 返回的
   guard 存入 `NET_IRQ_GUARDS`，设备 Drop 时自动注销。
 
 ## 设计决策
@@ -506,7 +506,7 @@ host IRQ 核心或工作队列。
 中断处理函数 `handle_virtio_net_irq` 作为返回 `IrqEvent` 的回调注册，但仍需访问
 所有网络设备实例。使用全局 `NET_IRQ_HANDLES` 存储所有网络设备的 IRQ 回调句柄，
 中断到来时遍历所有句柄执行 `ack_interrupt()`。
-`NET_IRQ_GUARDS` 持有 `Irq` guard，确保设备 Drop 时自动注销中断。
+`NET_IRQ_GUARDS` 持有 `DevIrq` guard，确保设备 Drop 时自动注销中断。
 
 ## Drop / 资源释放
 
@@ -523,7 +523,7 @@ devres 清理动作，因此 LIFO 析构会先阻止新的设备中断，再释�
 随之清理。
 
 For IRQ block instances, host activation keeps the device alive through admitted
-I/O drain, device IRQ suppression, native Irq release and reclaimer stop.
+I/O drain, device IRQ suppression, native DevIrq release and reclaimer stop.
 BlockState represents Live by is_accepting with Some(transport), Closing by
 !is_accepting with Some(transport), and Closed by !is_accepting with None.
 Active-request accounting spans admission through the terminal callback, including

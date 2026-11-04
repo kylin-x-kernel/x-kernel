@@ -13,8 +13,8 @@ use bcm2835_sdhci::{
     Bcm2835SDhci::{BLOCK_SIZE, EmmcCtl},
     SDHCIError,
 };
-use device_res::CpuMemoryOp;
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use driver_os_api::CpuMemoryOp;
 use kspin::SpinNoIrq;
 
 use crate::BlockDeviceOperations;

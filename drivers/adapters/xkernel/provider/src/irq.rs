@@ -1,0 +1,197 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! X-Kernel implementation of the [`driver_os_api::IrqOp`] provider contract.
+
+use alloc::sync::Arc;
+
+use driver_os_api::{
+    IrqController as DevIrqController, IrqEvent as DevIrqEvent, IrqHandler as DevIrqHandler,
+    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, IrqTrigger as DevIrqTrigger, MsiResource,
+    ResError, ResResult, Virq,
+};
+
+use crate::XKernelResourceProvider;
+
+impl IrqOp for XKernelResourceProvider {
+    fn request_irq(
+        &self,
+        irq: IrqResource,
+        handler: Arc<dyn DevIrqHandler>,
+    ) -> ResResult<IrqHandlerToken> {
+        let dispatch_handler: Arc<dyn kirq::IrqHandler> = Arc::new(move |virq| {
+            let event = handler.handle(virq);
+            dev_irq_event_to_kirq(event)
+        });
+        match kirq::try_register_shared(irq_resource_to_kirq_spec(irq), dispatch_handler) {
+            Ok(Some(token)) => Ok(IrqHandlerToken::SharedAction(token.id())),
+            Ok(None) => Err(ResError::Busy),
+            Err(err) => {
+                log::warn!("failed to register IRQ handler for {irq:?}: {err:?}");
+                Err(map_irq_desc_error(err))
+            }
+        }
+    }
+
+    fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken) {
+        let result = match token {
+            IrqHandlerToken::RegularAction => {
+                kirq::try_free_irq(irq_resource_to_kirq_spec(irq)).map(|handler| handler.is_some())
+            }
+            IrqHandlerToken::SharedAction(id) => kirq::try_free_irq_action(
+                irq_resource_to_kirq_spec(irq),
+                kirq::IrqActionToken::new(id),
+            )
+            .map(|handler| handler.is_some()),
+        };
+        if let Err(error) = require_released_action(result) {
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): infallible IRQ release \
+                          cannot authorize resource reclamation after failed detach/drain; a \
+                          fallible teardown must retain its owner on failure"
+            )]
+            {
+                panic!("IRQ release did not establish quiescence: {irq:?} {token:?}: {error:?}");
+            }
+        }
+    }
+
+    fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {
+        kirq::enable(irq_resource_to_kirq_spec(irq), enabled);
+    }
+
+    fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
+        let desc = irq_route_to_kirq_desc(route);
+        let virq = kirq::try_map(desc).map_err(|err| {
+            log::warn!("failed to map IRQ route {route:?}: {err:?}");
+            map_irq_desc_error(err)
+        })?;
+        Ok(IrqResource::mapped(
+            Virq::new(virq),
+            route.trigger,
+            route.controller,
+            desc.domain,
+            route.hwirq,
+        ))
+    }
+
+    fn alloc_msix(&self) -> ResResult<MsiResource> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let allocation = kirq::alloc_msix(kirq::IrqAffinity::Any).ok_or(ResError::NoMemory)?;
+            let irq = IrqResource::plain(Virq::new(allocation.virq()), DevIrqTrigger::EdgeRising);
+            let message = allocation.message();
+            Ok(MsiResource::new(
+                irq,
+                driver_os_api::MsiMessage::new(message.address(), message.data()),
+            ))
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            Err(ResError::Unsupported)
+        }
+    }
+
+    fn free_msix(&self, resource: MsiResource) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !kirq::free_msix(resource.irq.virq().raw()) {
+                log::warn!(
+                    "failed to free MSI-X IRQ {} (not allocated?)",
+                    resource.irq.virq().raw()
+                );
+            }
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = resource;
+        }
+    }
+}
+
+fn default_irq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
+    match controller {
+        DevIrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
+        DevIrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
+        DevIrqController::IoApic => Some(kirq::IO_APIC_DOMAIN),
+        DevIrqController::LoongArchExtioi | DevIrqController::Msi | DevIrqController::Unknown => {
+            None
+        }
+    }
+}
+
+fn irq_route_to_kirq_desc(route: IrqRouteDesc) -> kirq::IrqDesc {
+    let mut desc = kirq::IrqDesc::new(route.hwirq, route.trigger).with_controller(route.controller);
+    if let Some(domain) = route
+        .domain
+        .or_else(|| default_irq_domain(route.controller))
+    {
+        desc = desc.with_domain(domain);
+    }
+    desc
+}
+
+fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
+    match irq {
+        IrqResource::PlainVirq { virq, .. } => kirq::IrqSpec::PlainVirq(virq.raw()),
+        IrqResource::DomainMapped {
+            virq,
+            trigger,
+            controller,
+            domain,
+            hwirq,
+        } => {
+            let desc = irq_route_to_kirq_desc(IrqRouteDesc {
+                hwirq,
+                trigger,
+                controller,
+                domain,
+            })
+            .with_virq(virq.raw());
+            kirq::IrqSpec::Desc(desc)
+        }
+    }
+}
+
+fn dev_irq_event_to_kirq(event: DevIrqEvent) -> kirq::IrqEvent {
+    if event.handled() {
+        kirq::IrqEvent::HANDLED
+    } else {
+        kirq::IrqEvent::NOT_HANDLED
+    }
+}
+
+fn require_released_action(result: Result<bool, kirq::IrqDescError>) -> ResResult<()> {
+    match result {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ResError::InvalidResource),
+        Err(error) => Err(map_irq_desc_error(error)),
+    }
+}
+
+fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
+    match err {
+        kirq::IrqDescError::VirqExhausted { .. } | kirq::IrqDescError::NoMemory => {
+            ResError::NoMemory
+        }
+        kirq::IrqDescError::InvalidHwirq { .. }
+        | kirq::IrqDescError::UnsupportedFlow { .. }
+        | kirq::IrqDescError::ConfigurationFailed { .. }
+        | kirq::IrqDescError::HwirqConflict { .. }
+        | kirq::IrqDescError::DomainConflict { .. }
+        | kirq::IrqDescError::VirqConflict { .. }
+        | kirq::IrqDescError::MappingConflict { .. }
+        | kirq::IrqDescError::VirqMappingConflict { .. }
+        | kirq::IrqDescError::UnknownDomain { .. }
+        | kirq::IrqDescError::UnknownIrq
+        | kirq::IrqDescError::TeardownInProgress { .. }
+        | kirq::IrqDescError::NoIrqAction { .. }
+        | kirq::IrqDescError::InvalidContext { .. } => ResError::InvalidResource,
+    }
+}
+
+unittest::path_mod_test!(tests, "../ut-tests/irq.rs");

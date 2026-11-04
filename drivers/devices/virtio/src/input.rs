@@ -9,8 +9,8 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use device_res::{IrqEvent, IrqHandler};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use driver_os_api::{IrqEvent, IrqHandler};
 use input::{
     ABS_BITMAP_LEN, ABS_CNT, AbsInfo, Event, EventType, InputDevice, InputDeviceId,
     InputEventNotifier, PROP_BITMAP_LEN,

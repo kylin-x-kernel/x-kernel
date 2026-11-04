@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use device_res::{IrqEvent, IrqHandlerToken, ResError, ResResult};
+use driver_os_api::{IrqEvent, IrqHandlerToken, ResError, ResResult};
 use kdevice::{
     BusId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity, ResourceSet,
 };
@@ -32,11 +32,11 @@ impl IrqOp for TestProvider {
         irq: IrqResource,
         handler: Arc<dyn IrqHandler>,
     ) -> ResResult<IrqHandlerToken> {
-        if irq.number == FAILED_IRQ {
+        if irq.virq().raw() == FAILED_IRQ {
             return Err(ResError::Busy);
         }
         let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-        ACTIONS.lock().insert((irq.number, token), handler);
+        ACTIONS.lock().insert((irq.virq().raw(), token), handler);
         Ok(IrqHandlerToken::shared_action(token))
     }
 
@@ -44,7 +44,7 @@ impl IrqOp for TestProvider {
         let IrqHandlerToken::SharedAction(token) = token else {
             panic!("shared action expected")
         };
-        core::assert!(ACTIONS.lock().remove(&(irq.number, token)).is_some());
+        core::assert!(ACTIONS.lock().remove(&(irq.virq().raw(), token)).is_some());
     }
 
     fn set_irq_enabled(&self, _: IrqResource, _: bool) {
@@ -53,7 +53,7 @@ impl IrqOp for TestProvider {
 }
 
 fn resource(number: usize) -> IrqResource {
-    IrqResource::new(number, IrqTrigger::Unknown(0))
+    IrqResource::plain(driver_os_api::Virq::new(number), IrqTrigger::Unknown(0))
 }
 
 fn parent() -> Arc<DeviceObject> {
@@ -150,7 +150,7 @@ fn close_drains_pending_and_submitted_calls_before_destroying_retained_disk() {
     };
     let neighbor_calls = Arc::new(AtomicUsize::new(0));
     let calls = neighbor_calls.clone();
-    let neighbor = Irq::request_with(
+    let neighbor = DevIrq::request_with(
         &PROVIDER,
         resource(IRQ),
         Arc::new(move |_| {

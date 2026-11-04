@@ -87,7 +87,7 @@ implementations must retain storage and exclusive access, not merely a reference
 count to concurrently accessible bytes. Concrete DMA/cache boundaries remain
 with their backend and provider.
 
-`word_io` uses `device_res::CpuBuffer` for initialized ordinary CPU storage.
+`word_io` uses `driver_os_api::CpuBuffer` for initialized ordinary CPU storage.
 Its unsafe `CpuMemoryOp` implementation contract supplies unique storage of the
 requested length/alignment; the RAII handle releases through its original
 provider after every byte borrow ends. The block adapter contains no unsafe

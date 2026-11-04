@@ -7,8 +7,8 @@ use alloc::boxed::Box;
 use core::ptr::NonNull;
 
 use cfg_if::cfg_if;
-use device_res::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, MmioOp, MmioRegion};
 use driver_base::DriverResult;
+use driver_os_api::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, MmioOp, MmioRegion};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
 cfg_if! {
@@ -96,7 +96,10 @@ cfg_if! {
                     transport,
                     crate::rng_completion::new_rng_completion(),
                     crate::resource::resource_provider(),
-                    device_res::IrqResource::new(irq, device_res::IrqTrigger::Unknown(0)),
+                    driver_os_api::IrqResource::plain(
+                        driver_os_api::Virq::new(irq),
+                        driver_os_api::IrqTrigger::Unknown(0),
+                    ),
                 )?;
                 Ok(device)
             }
@@ -114,7 +117,7 @@ pub(super) struct VirtIoHalImpl;
 // device views of a buffer coherent.
 //
 // This implementation upholds those invariants by routing every operation
-// through the `device_res` provider rather than x-kernel APIs directly:
+// through the `driver_os_api` provider rather than x-kernel APIs directly:
 // * `dma_alloc` / `dma_dealloc` use `alloc_coherent` / `free_coherent`, which
 //   return a paired (`cpu_addr`, `bus_addr`) for the same region and free it
 //   in one call;
@@ -132,7 +135,7 @@ const fn hal_direction(direction: BufferDirection) -> DmaDirection {
     }
 }
 
-// SAFETY: every method routes hardware access through the `device_res`
+// SAFETY: every method routes hardware access through the `driver_os_api`
 // provider, so the HAL holds no x-kernel state; DMA / MMIO ownership
 // invariants are delegated to the installed provider.
 unsafe impl VirtIoHal for VirtIoHalImpl {
@@ -152,7 +155,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 unsafe { core::ptr::write_bytes(cpu_ptr, 0, size) };
                 // Ownership of the allocation is handed to the virtio transport
                 // and returned via `dma_dealloc`. We deliberately do NOT wrap it
-                // in `DmaCoherent` (whose Drop would free it on return).
+                // in `CoherentMem` (whose Drop would free it on return).
                 let paddr = alloc.bus_addr as PhysAddr;
                 #[expect(
                     clippy::expect_used,

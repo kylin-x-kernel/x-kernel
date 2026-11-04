@@ -26,7 +26,7 @@ are accesses to controller registers, not casts of the caller buffer. Loop's
 and sdmmc's length/offset checks must not be confused with address checks.
 
 The VirtIO review follows `kvirtiodrivers` 0.13.5, its descriptor `set_buf`,
-the X-Kernel HAL glue, and `device-res-xkernel`'s DMA provider. The host
+the X-Kernel HAL glue, and `driver-os-api-xkernel`'s DMA provider. The host
 streaming provider allocates from its DMA bounce pool, tracks the active
 mapping and performs direction-dependent copy-back on unmap. Its device bus
 address is used by VirtIO; that is different from pure CPU word staging.

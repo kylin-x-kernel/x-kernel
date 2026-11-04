@@ -4,11 +4,11 @@
 
 //! VirtIO PCI transport integration.
 
-#[cfg(target_arch = "x86_64")]
-use device_res::IrqOp;
-#[cfg(not(target_arch = "x86_64"))]
-use device_res::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger};
 use driver_base::DeviceKind;
+#[cfg(target_arch = "x86_64")]
+use driver_os_api::IrqOp;
+#[cfg(not(target_arch = "x86_64"))]
+use driver_os_api::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger};
 use pci::PciConfigAccess;
 #[cfg(not(target_arch = "x86_64"))]
 use pci::legacy_interrupt_route;
@@ -325,7 +325,7 @@ fn legacy_irq_for_bdf(
             domain: None,
         };
         if let Ok(irq) = irq_provider.map_irq(desc) {
-            return Some(irq.number);
+            return Some(irq.virq().raw());
         }
     }
 
@@ -344,7 +344,7 @@ fn legacy_irq_for_bdf(
                 controller: IrqController::Gic,
                 domain: None,
             };
-            Some(irq_provider.map_irq(desc).ok()?.number)
+            Some(irq_provider.map_irq(desc).ok()?.virq().raw())
         }
         target_arch = "riscv64" => {
             let desc = IrqRouteDesc {
@@ -353,7 +353,7 @@ fn legacy_irq_for_bdf(
                 controller: IrqController::Plic,
                 domain: None,
             };
-            Some(irq_provider.map_irq(desc).ok()?.number)
+            Some(irq_provider.map_irq(desc).ok()?.virq().raw())
         }
     }
 }

@@ -1,0 +1,28 @@
+[package]
+name = "driver-os-api-xkernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "X-Kernel provider implementation for the OS-neutral driver-os-api contract"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[lib]
+name = "driver_os_api_xkernel"
+
+[dependencies]
+driver_os_api = { workspace = true }
+kalloc = { workspace = true }
+kdma = { workspace = true }
+kirq = { workspace = true }
+khal = { workspace = true }
+ktime_types = { workspace = true }
+log = { workspace = true }
+memaddr = { workspace = true }
+memspace = { workspace = true }
+unittest = { workspace = true }
+
+[lints]
+workspace = true

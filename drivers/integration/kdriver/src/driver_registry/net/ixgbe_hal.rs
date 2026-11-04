@@ -4,7 +4,7 @@
 
 use core::ptr::NonNull;
 
-use device_res::{DmaAllocation, DmaOp, DmaSpec};
+use driver_os_api::{DmaAllocation, DmaOp, DmaSpec};
 use khal::mem::{p2v, v2p};
 use net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
 
@@ -20,7 +20,7 @@ pub struct IxgbeHalImpl;
 // physical address.
 //
 // This implementation upholds those invariants by:
-// * `dma_alloc` / `dma_dealloc` going through the `device_res` provider's
+// * `dma_alloc` / `dma_dealloc` going through the `driver_os_api` provider's
 //   `alloc_coherent` / `free_coherent`, which return a paired
 //   (`cpu_addr`, `bus_addr`) for the same DMA region;
 // * `mmio_p2v` / `mmio_v2p` delegating to `khal::mem::p2v` / `khal::mem::v2p`,

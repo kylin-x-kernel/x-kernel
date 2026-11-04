@@ -130,7 +130,7 @@ handler 在访问 transport 前校验回调传入的 IRQ。ISR 为空时返回
 `IrqEvent::NOT_HANDLED`，从而保留共享中断线的分发语义；队列或配置中断则返回
 `HANDLED`。只有队列中断会调用输入层的 `InputEventNotifier` 安排延迟工作。
 handler 不分配内存、不访问 VFS、不复制事件，也不遍历唤醒列表。
-host 通过 `device_res` 注册和释放 handler；释放过程会等待正在执行的回调结束，
+host 通过 `driver_os_api` 注册和释放 handler；释放过程会等待正在执行的回调结束，
 随后才丢弃 handler 持有的 `Arc`。
 
 `inputdev` 的任务上下文 worker 在通知后调用 `pop_pending_event()`，即使没有文件读者
