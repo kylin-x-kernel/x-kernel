@@ -903,6 +903,13 @@ VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自�
 默认 `write_iter` 只推进已被标量 write 接受的迭代器与 `ki_pos`，短写回退剩余输入；
 `i_size` 由 `write_end` 或实际写入 backing store 的文件系统回调发布。
 
+`Kiocb::flags()` records the open file description's `O_DIRECT`, `O_DSYNC`, and
+`O_SYNC` state in `KiocbFlags` when the control block is created, mirroring Linux
+`iocb_flags()`. `O_SYNC` contains `O_DSYNC` in its encoding, so a synchronized request
+sets both `SYNC` and `DSYNC`. A control block is built per operation, so an `F_SETFL`
+change applies from the next operation. The flags are recorded only: no read or write
+path dispatches on them or changes completion behavior yet.
+
 `libfs::new_pseudo_super_block()` 对应 Linux `init_pseudo()` 与
 `pseudo_fs_fill_super()`：统一安装共享 simple `s_op`、`s_magic`、page-size geometry、
 标准 private root inode 和具体文件系统的静态 `s_d_op`。root dentry 在

@@ -57,7 +57,7 @@ pub use file_system_type::{
 };
 pub use filename::Filename;
 pub use fs_context::{FsContext, FsContextPurpose};
-pub use kiocb::Kiocb;
+pub use kiocb::{Kiocb, KiocbFlags};
 pub use ktime_types::TimestampLimits;
 pub use locks::{FileLock, FileLockOwner, FileLockType};
 pub use lookup::{LookupFlags, LookupIntent, MagicLinkOps, ResolvedObject};

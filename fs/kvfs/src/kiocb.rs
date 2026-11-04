@@ -6,21 +6,73 @@
 
 use iov_iter::{IovIterDest, IovIterSource};
 
-use crate::{VfsFile, VfsResult};
+use crate::{OpenFlags, VfsFile, VfsResult};
+
+bitflags::bitflags! {
+    /// Per-request I/O flags derived from the open file description.
+    ///
+    /// Records its `O_DIRECT`/`O_DSYNC`/`O_SYNC` state at control-block
+    /// creation, mirroring Linux `iocb_flags()`.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct KiocbFlags: u32 {
+        /// The request carries `O_DIRECT` semantics.
+        const DIRECT = 1 << 0;
+        /// The request requires data-integrity synchronized completion.
+        const DSYNC = 1 << 1;
+        /// The request requires fully synchronized completion.
+        const SYNC = 1 << 2;
+    }
+}
+
+impl KiocbFlags {
+    /// Derives control-block flags from open-file status flags.
+    ///
+    /// `O_SYNC` also contains `O_DSYNC` in its encoding, so a synchronized
+    /// request sets both bits as in Linux `iocb_flags()`.
+    ///
+    /// - `flags`: the open file's `f_flags`.
+    ///
+    /// Returns: the matching control-block flags.
+    fn from_open_flags(flags: OpenFlags) -> Self {
+        let mut kiocb_flags = Self::empty();
+        kiocb_flags.set(Self::DIRECT, flags.contains(OpenFlags::DIRECT));
+        kiocb_flags.set(Self::DSYNC, flags.contains(OpenFlags::DSYNC));
+        kiocb_flags.set(Self::SYNC, flags.contains(OpenFlags::SYNC));
+        kiocb_flags
+    }
+}
 
 /// Synchronous I/O control block.
 ///
-/// Carries the open file description and current operation position through
-/// `read_iter` and `write_iter`.
+/// Carries the open file description, current operation position, and the
+/// open-file completion flags through `read_iter` and `write_iter`.
 pub struct Kiocb<'a> {
     file: &'a VfsFile,
     ki_pos: u64,
+    flags: KiocbFlags,
 }
 
 impl<'a> Kiocb<'a> {
     /// Creates a control block for `file` at `ki_pos`.
+    ///
+    /// - `file`: the open file description; supplies the per-request flags.
+    /// - `ki_pos`: initial operation position in bytes.
+    ///
+    /// Returns: a control block whose flags are recorded from `file`.
+    ///
+    /// Locking: reads `f_flags` atomically and acquires no lock.
     pub fn new(file: &'a VfsFile, ki_pos: u64) -> Self {
-        Self { file, ki_pos }
+        let flags = KiocbFlags::from_open_flags(file.flags());
+        Self {
+            file,
+            ki_pos,
+            flags,
+        }
+    }
+
+    /// Returns the control-block flags recorded at creation.
+    pub fn flags(&self) -> KiocbFlags {
+        self.flags
     }
 
     /// Returns the open file description.
@@ -70,3 +122,5 @@ impl<'a> Kiocb<'a> {
         mapping.write_iter_with_checks(self, iter, checks)
     }
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/kiocb.rs");
