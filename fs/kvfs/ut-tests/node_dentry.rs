@@ -1144,6 +1144,55 @@ fn test_lookup_non_cacheable_positive_retracts() {
 }
 
 #[def_test]
+fn test_parallel_lookup_candidate_does_not_escape_cache_snapshot() {
+    let fs = Arc::new(MockFilesystem);
+    let (dir, _) = make_non_cacheable_dir(fs, 2, None, "dir");
+    let candidate = Dentry::new_negative(Some(dir.clone()), String::from("ptmx"));
+    candidate.begin_parallel_lookup();
+    assert!(dir.cache_lookup_candidate("ptmx", &candidate).is_none());
+
+    let observed = dir.lookup_cache_entry("ptmx");
+    dir.uncache_lookup_candidate("ptmx", &candidate);
+    candidate.end_parallel_lookup();
+
+    assert!(observed.is_none());
+    assert!(dir.lookup_cache_entry("ptmx").is_none());
+}
+
+#[def_test]
+fn test_parallel_lookup_replacement_publishes_only_completed_entry() {
+    let fs = Arc::new(MockFilesystem);
+    let dir = make_dir_entry(fs.clone(), 2, "dir");
+    let candidate = Dentry::new_negative(Some(dir.clone()), String::from("x"));
+    let (child, _) = make_file_entry(fs, 3, Some(dir.clone()), "x");
+    candidate.begin_parallel_lookup();
+    assert!(dir.cache_lookup_candidate("x", &candidate).is_none());
+
+    let observed = dir.lookup_cache_entry("x");
+    dir.replace_lookup_candidate("x", &candidate, &child);
+    candidate.end_parallel_lookup();
+
+    assert!(observed.is_none());
+    assert!(dir.lookup_cache("x").unwrap().ptr_eq(&child));
+}
+
+#[def_test]
+fn test_completed_negative_lookup_remains_cacheable() {
+    let fs = Arc::new(MockFilesystem);
+    let dir = make_dir_entry(fs, 2, "dir");
+    let candidate = Dentry::new_negative(Some(dir.clone()), String::from("missing"));
+    candidate.begin_parallel_lookup();
+    assert!(dir.cache_lookup_candidate("missing", &candidate).is_none());
+    assert!(dir.lookup_cache_entry("missing").is_none());
+
+    candidate.end_parallel_lookup();
+
+    let found = dir.lookup_cache("missing").unwrap();
+    assert!(found.ptr_eq(&candidate));
+    assert!(found.is_negative());
+}
+
+#[def_test]
 fn test_lookup_non_cacheable_negative_retracts() {
     let fs = Arc::new(MockFilesystem);
     let (dir, _) = make_non_cacheable_dir(fs.clone(), 2, None, "dir");

@@ -12,7 +12,11 @@ use unittest::def_test;
 use crate::{pool::WorkerPool, worker::WorkerState};
 
 fn pool(limit: usize) -> WorkerPool {
-    WorkerPool::new(NonZeroUsize::new(limit).unwrap())
+    WorkerPool::new(
+        NonZeroUsize::new(limit).unwrap(),
+        kalloc_types::AllocFlags::NOWAIT,
+    )
+    .unwrap()
 }
 
 fn at(ms: u64) -> MonotonicInstant {

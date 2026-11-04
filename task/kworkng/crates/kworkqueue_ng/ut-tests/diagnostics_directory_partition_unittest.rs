@@ -40,12 +40,18 @@ fn bound_queue_reports_name_and_releases_records() {
     )
     .unwrap();
     let dispatch = kworkerpool_ng::PartitionDispatch::new();
-    let queue = Queue::with_dispatch_and_diagnostics(config, "bound", &directory, |_| {
-        (
-            dispatch.clone(),
-            Arc::new(core::task::Waker::noop().clone()),
-        )
-    });
+    let queue = Queue::with_dispatch_and_diagnostics(
+        crate::service::PreparedQueue::new_with_flags(config, kalloc_types::AllocFlags::NOWAIT)
+            .unwrap(),
+        "bound",
+        &directory,
+        |_| {
+            (
+                dispatch.clone(),
+                Arc::new(core::task::Waker::noop().clone()),
+            )
+        },
+    );
     let weak = Arc::downgrade(&queue);
     let work = pin!(Work::with_callback(|| panic!("canceled work ran")));
     // SAFETY: pinned storage remains live until cancellation and queue drain below.

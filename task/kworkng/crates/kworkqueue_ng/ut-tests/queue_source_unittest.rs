@@ -173,7 +173,14 @@ fn setup(
     let dispatch = PartitionDispatch::new();
     let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
     let kick = Arc::new(Waker::from(wakes.clone()));
-    let queue = Queue::with_dispatch(config(max_active), |_| (dispatch.clone(), kick.clone()));
+    let queue = Queue::with_dispatch(
+        crate::service::PreparedQueue::new_with_flags(
+            config(max_active),
+            kalloc_types::AllocFlags::NOWAIT,
+        )
+        .unwrap(),
+        |_| (dispatch.clone(), kick.clone()),
+    );
     (queue, dispatch, wakes)
 }
 
@@ -330,7 +337,11 @@ fn canceled_last_work_leaves_only_harmless_stale_demand() {
 fn shared_dispatch_rotates_sources_and_drains_closed_queue() {
     let (first_queue, dispatch, wakes) = setup(1);
     let kick = Arc::new(Waker::from(wakes));
-    let second_queue = Queue::with_dispatch(config(1), |_| (dispatch.clone(), kick.clone()));
+    let second_queue = Queue::with_dispatch(
+        crate::service::PreparedQueue::new_with_flags(config(1), kalloc_types::AllocFlags::NOWAIT)
+            .unwrap(),
+        |_| (dispatch.clone(), kick.clone()),
+    );
     let trace = AtomicUsize::new(0);
     let first = pin!(Work::with_callback(|| {
         trace.fetch_add(1, Ordering::Relaxed);
@@ -376,13 +387,17 @@ fn sparse_cpu_bindings_keep_demand_and_execution_separate() {
         |_| true,
     )
     .unwrap();
-    let queue = Queue::with_dispatch(config, |cpu| {
-        let index = cpu.as_usize() / 2;
-        (
-            dispatches[index].clone(),
-            Arc::new(Waker::from(wakes[index].clone())),
-        )
-    });
+    let queue = Queue::with_dispatch(
+        crate::service::PreparedQueue::new_with_flags(config, kalloc_types::AllocFlags::NOWAIT)
+            .unwrap(),
+        |cpu| {
+            let index = cpu.as_usize() / 2;
+            (
+                dispatches[index].clone(),
+                Arc::new(Waker::from(wakes[index].clone())),
+            )
+        },
+    );
     let calls = AtomicUsize::new(0);
     let zero = pin!(Work::with_callback(|| {
         calls.fetch_add(1, Ordering::Relaxed);
@@ -438,7 +453,11 @@ fn service_kicks_run_after_partition_unlock() {
     });
     let dispatch = PartitionDispatch::new();
     let kick = Arc::new(Waker::from(probe.clone()));
-    let queue = Queue::with_dispatch(config(1), |_| (dispatch.clone(), kick.clone()));
+    let queue = Queue::with_dispatch(
+        crate::service::PreparedQueue::new_with_flags(config(1), kalloc_types::AllocFlags::NOWAIT)
+            .unwrap(),
+        |_| (dispatch.clone(), kick.clone()),
+    );
     *probe.queue.lock() = Arc::downgrade(&queue);
     let canceled = pin!(Work::with_callback(|| {}));
     let first = pin!(Work::with_callback(|| {}));

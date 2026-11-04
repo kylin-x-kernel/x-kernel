@@ -11,7 +11,7 @@ use super::*;
 #[unittest::def_test]
 pub fn test_authenc_functions() {
     // 1. 创建测试用的 TeeFsHtree
-    let mut ht = TeeFsHtree::default();
+    let mut ht = super::tests_htree_basic::test_tree();
 
     // 初始化必要的字段
     ht.data.fek = [0x01; TEE_FS_HTREE_FEK_SIZE];
@@ -91,7 +91,7 @@ pub fn test_authenc_functions() {
 
 #[unittest::def_test]
 pub fn test_authenc_roundtrip_no_node_image() {
-    let mut ht = TeeFsHtree::default();
+    let mut ht = super::tests_htree_basic::test_tree();
     ht.data.fek = [0x11; TEE_FS_HTREE_FEK_SIZE];
     ht.data.head.enc_fek = [0x22; TEE_FS_HTREE_FEK_SIZE];
     ht.data.head.counter = 1;
@@ -132,7 +132,7 @@ pub fn test_authenc_roundtrip_no_node_image() {
 
 #[unittest::def_test]
 pub fn test_authenc_empty_data() {
-    let mut ht = TeeFsHtree::default();
+    let mut ht = super::tests_htree_basic::test_tree();
     ht.data.fek = [0x01; TEE_FS_HTREE_FEK_SIZE];
     ht.data.head.enc_fek = [0x02; TEE_FS_HTREE_FEK_SIZE];
     ht.data.head.counter = 1;
@@ -170,7 +170,7 @@ pub fn test_authenc_empty_data() {
 
 #[unittest::def_test]
 pub fn test_authenc_wrong_tag() {
-    let mut ht = TeeFsHtree::default();
+    let mut ht = super::tests_htree_basic::test_tree();
     ht.data.fek = [0x01; TEE_FS_HTREE_FEK_SIZE];
     ht.data.head.enc_fek = [0x02; TEE_FS_HTREE_FEK_SIZE];
     ht.data.head.counter = 1;

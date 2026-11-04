@@ -8,9 +8,10 @@
 //! service protects it together with source/availability decisions. No task
 //! creation, activation, wake, park, destruction or callback is performed here.
 
-use alloc::{boxed::Box, vec};
 use core::num::NonZeroUsize;
 
+use kalloc_types::{AllocFlags, KBox};
+use kerrno::KResult;
 use ktime_types::{MonotonicInstant, TimeSpan};
 
 use crate::worker::WorkerState;
@@ -20,16 +21,17 @@ use crate::worker::WorkerState;
 /// only confirmed disposal/exit releases it. Slot indices are private owner-local
 /// identities, not durable handles for asynchronously retained commands.
 pub(crate) struct WorkerPool {
-    workers: Box<[WorkerState]>,
+    workers: KBox<[WorkerState]>,
     reserved_workers: usize,
 }
 
 impl WorkerPool {
-    pub(crate) fn new(limit: NonZeroUsize) -> Self {
-        Self {
-            workers: vec![WorkerState::Empty; limit.get()].into_boxed_slice(),
+    /// Prepares fixed capacity under the caller's allocation-context permissions.
+    pub(crate) fn new(limit: NonZeroUsize, flags: AllocFlags) -> KResult<Self> {
+        Ok(Self {
+            workers: KBox::new_slice_with_flags(WorkerState::Empty, limit.get(), flags)?,
             reserved_workers: 0,
-        }
+        })
     }
 
     #[cfg(unittest)]

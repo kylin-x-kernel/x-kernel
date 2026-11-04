@@ -30,7 +30,7 @@ fn build_test_tree() -> TeeFsHtree {
     TeeFsHtree {
         root: root_node,
         data: TeeFsHtreeData::default(),
-        storage: Box::new(TeeFsFdAux::new()),
+        storage: super::tests_htree_basic::test_storage(),
     }
 }
 
@@ -130,7 +130,7 @@ pub fn test_find_closest_node_empty_tree_or_only_root() {
     let mut ht = TeeFsHtree {
         root: root_node,
         data: TeeFsHtreeData::default(),
-        storage: Box::new(TeeFsFdAux::new()),
+        storage: super::tests_htree_basic::test_storage(),
     };
 
     // 查找根节点

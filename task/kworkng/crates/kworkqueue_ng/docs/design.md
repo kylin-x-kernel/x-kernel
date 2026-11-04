@@ -1,5 +1,21 @@
 # Prepared Workqueue Management
 
+## Partition Storage And Binding
+
+`service::PreparedQueue` owns a validated configuration and matching reserved
+KBox slice. `new` uses KERNEL; `new_with_flags` permits explicit permissions.
+Neither constructor binds providers or registers diagnostic records. Dropping
+an unused preparation only releases its configuration and uninitialized storage.
+Binding consumes this opaque value, fills the table in config CPU order inside
+Arc::new_cyclic, and transfers the same allocation into Queue. Sources begin
+detached; construction does not notify providers or admit work.
+
+A private initialized-prefix guard releases initialized owners on early drop.
+Only a fully initialized table can transfer ownership through assume_init.
+Binding retains its sleepable context requirement and existing Arc/name
+allocations; NOWAIT reservation does not make binding non-sleeping. Diagnostic
+registration may expose weak records before the completed queue is returned.
+
 ## CPU Configuration Storage
 
 QueueConfig owns its sorted CPU set in a KBox slice, copied directly from the
@@ -14,7 +30,7 @@ Sorting and duplicate detection follow reservation, so Allocation(NoMemory)
 can precede DuplicateCpu. KError converts through QueueConfigError::Allocation.
 Failure leaves the input unchanged and returns no configuration. System service
 preparation propagates this error before starting workers or registering sources.
-Partition storage, diagnostic names and dynamic worker provisioning are unchanged.
+Diagnostic names and dynamic worker provisioning are unchanged.
 
 ## Scope And Ownership
 

@@ -63,6 +63,90 @@ use unittest::{assert, assert_eq};
 use super::*;
 
 #[unittest::def_test]
+fn htree_reservation_failures_skip_directory_and_backend_initialization() {
+    for fail_tree in [true, false] {
+        let initialized = core::cell::Cell::new(false);
+        let storage_attempted = core::cell::Cell::new(false);
+        let tree_flags = core::cell::Cell::new(None);
+        let storage_flags = core::cell::Cell::new(None);
+        let result: TeeResult<()> = with_htree_owners(
+            |_| {
+                initialized.set(true);
+                Ok(())
+            },
+            |flags| {
+                tree_flags.set(Some(flags));
+                if fail_tree {
+                    Err(TeeError::from(kerrno::KError::NoMemory).into())
+                } else {
+                    reserve_fs_owner(flags)
+                }
+            },
+            |flags| {
+                storage_flags.set(Some(flags));
+                storage_attempted.set(true);
+                Err(TeeError::from(kerrno::KError::NoMemory).into())
+            },
+        );
+        assert_eq!(result.unwrap_err(), TEE_ERROR_OUT_OF_MEMORY);
+        assert_eq!(storage_attempted.get(), !fail_tree);
+        assert_eq!(tree_flags.get(), Some(AllocFlags::NOWAIT));
+        assert_eq!(
+            storage_flags.get(),
+            (!fail_tree).then_some(AllocFlags::NOWAIT)
+        );
+        assert!(!initialized.get());
+    }
+}
+
+#[unittest::def_test]
+fn htree_owners_initialize_in_reserved_storage() {
+    let tree = reserve_fs_owner::<TeeFsHtree>(AllocFlags::NOWAIT).unwrap();
+    let storage = reserve_fs_owner::<TeeFsFdAux>(AllocFlags::NOWAIT).unwrap();
+    let tree_address = core::ptr::from_ref(&*tree).cast::<()>();
+    let storage_address = core::ptr::from_ref(&*storage).cast::<()>();
+    let owner = with_htree_owners(
+        |owners| {
+            let storage = KBox::write(owners.storage, TeeFsFdAux::new());
+            Ok(KBox::write(owners.tree, TeeFsHtree::new(storage)))
+        },
+        |_| Ok(tree),
+        |_| Ok(storage),
+    )
+    .unwrap();
+    assert_eq!(core::ptr::from_ref(&*owner).cast::<()>(), tree_address);
+    assert_eq!(
+        core::ptr::from_ref(&*owner.storage).cast::<()>(),
+        storage_address
+    );
+    tee_fs_htree_close(owner).unwrap();
+}
+
+#[unittest::def_test(user)]
+fn close_releases_tree_and_backend_without_a_placeholder() {
+    use crate::tee::common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT};
+
+    let path = "/tmp/test_htree_owner_close.bin";
+    let fd = FileVariant::open(path, FS_OFLAG_DEFAULT, FS_MODE_644).unwrap();
+    let storage = KBox::new_with_flags(TeeFsFdAux { fd }, AllocFlags::NOWAIT).unwrap();
+    let tree = KBox::new_with_flags(TeeFsHtree::new(storage), AllocFlags::NOWAIT).unwrap();
+    let mut file = TeeFsFd {
+        ht: Some(tree),
+        fd,
+        ..Default::default()
+    };
+    ree_fs_close_primitive(&mut file);
+    assert!(file.ht.is_none());
+    assert!(fd.pread(&mut [0u8; 1], 0).is_err());
+    assert_eq!(
+        ree_fs_write_primitive(&mut file, 0, &[1], &[], 1).unwrap_err(),
+        TEE_ERROR_BAD_STATE
+    );
+    assert!(TeeFsFd::default().ht.is_none());
+    FileVariant::remove_file(path).unwrap();
+}
+
+#[unittest::def_test]
 fn temporary_blocks_are_zeroed_and_independently_owned() {
     let mut first = get_tmp_block().unwrap();
     let second = get_tmp_block().unwrap();

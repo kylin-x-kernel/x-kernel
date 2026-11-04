@@ -285,13 +285,20 @@ fn queue_binding_rejects_before_construction() {
         .unwrap()
     };
     assert!(matches!(
-        crate::create_queue("unavailable", config(), ExecutionKind::Normal),
+        prepare_queue_with("unavailable", config(), ExecutionKind::Normal, |_| panic!(
+            "unready reservation"
+        )),
         Err(QueueCreateError::ServicesUnavailable)
     ));
     let prepared = config();
     let _irq = kspin::NoPreemptIrqSave::new();
     assert!(matches!(
-        crate::create_queue("invalid-context", prepared, ExecutionKind::Normal),
+        prepare_queue_with(
+            "invalid-context",
+            prepared,
+            ExecutionKind::Normal,
+            |_| panic!("invalid-context reservation")
+        ),
         Err(QueueCreateError::InvalidContext)
     ));
     assert!(!is_ready());
@@ -400,7 +407,8 @@ fn watchdog_observes_only_published_services() {
     // disabling IRQs/preemption while inspecting the sleepable directory.
     let queue = with_services(|services| {
         service::bind_queue_with_diagnostics(
-            QueueConfig::new(&[cpu], CpuPolicy::CurrentCpu, 1).unwrap(),
+            PreparedQueue::new(QueueConfig::new(&[cpu], CpuPolicy::CurrentCpu, 1).unwrap())
+                .unwrap(),
             "diagnostic-backlog",
             &services.unwrap().diagnostics,
             |_| {

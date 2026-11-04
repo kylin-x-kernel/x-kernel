@@ -11,6 +11,8 @@ documentation.workspace = true
 description = "Execution service and retained source demand for prepared work"
 
 [dependencies]
+kalloc-types.workspace = true
+kerrno.workspace = true
 unittest.workspace = true
 intrusive-collections.workspace = true
 kcompletion.workspace = true

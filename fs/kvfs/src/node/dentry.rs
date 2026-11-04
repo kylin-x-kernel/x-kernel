@@ -825,7 +825,7 @@ impl Dentry {
         if entry.is_none() {
             children.remove(name);
         }
-        entry
+        entry.filter(|entry| !entry.is_parallel_lookup())
     }
 
     fn cache_lookup_candidate(&self, name: &str, candidate: &Dentry) -> Option<Dentry> {
@@ -900,7 +900,6 @@ impl Dentry {
     pub fn lookup_cache(&self, name: &str) -> Option<Dentry> {
         if self.can_cache_children() {
             self.lookup_cache_entry(name)
-                .filter(|entry| !entry.is_parallel_lookup())
         } else {
             None
         }
@@ -1074,10 +1073,6 @@ impl Dentry {
     fn lookup_locked(&self, dir_inode: &VfsInode, name: &str) -> VfsResult<Dentry> {
         loop {
             if let Some(entry) = self.lookup_cache_entry(name) {
-                if entry.is_parallel_lookup() {
-                    let _lookup_guard = entry.0.lookup_mutex.lock();
-                    continue;
-                }
                 return Ok(entry);
             }
 

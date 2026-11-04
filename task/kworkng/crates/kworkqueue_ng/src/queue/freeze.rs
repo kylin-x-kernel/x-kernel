@@ -83,7 +83,7 @@ pub struct FrozenQueue {
 
 impl Drop for FrozenQueue {
     fn drop(&mut self) {
-        for partition in &self.queue.partitions {
+        for partition in self.queue.partitions.iter() {
             partition.thaw();
         }
         *self.queue.is_freezing.lock() = false;
@@ -160,7 +160,7 @@ impl Queue {
             queue: self.clone(),
             _task_bound: PhantomData,
         };
-        for partition in &self.partitions {
+        for partition in self.partitions.iter() {
             partition.begin_freeze(&cancellation.0);
         }
         let is_quiescent = || {

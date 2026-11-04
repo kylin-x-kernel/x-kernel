@@ -9,6 +9,15 @@ a deadline, drain an admitted handler or stop remote IPI producers.
 
 ## Scope
 
+LAPIC owner reservation uses NOWAIT, never KERNEL, on IRQ-disabled BSP/AP boot
+paths. Allocation failure propagates through the platform interrupt preparation
+hooks to fatal boot handling. No per-CPU pointer is published and error delivery
+is not enabled after failure. No reserve, latency bound or NMI safety is promised.
+The pointer is leaked only after checking that its CPU-local slot is empty.
+Tests inject owner preparation failure while pinned with IRQs disabled and check
+NOWAIT selection and unchanged CPU-local storage; they do not force global OOM
+or simulate recovery from partially prepared hardware.
+
 This analysis covers the entire crate: `src/lib.rs` (Local APIC bring-up,
 IPIs, MSI-X backend) and `src/io_apic.rs` (checked IO-APIC flow operations). No modules are
 excluded; every unsafe access site is enumerated below. The vector and
@@ -44,7 +53,7 @@ All unsafe blocks carry `SAFETY:` comments and fall into three groups:
   APIC bring-up before interrupt routing changes.
 - xAPIC MMIO page — mapped through `memspace::iomap_device`
   (`"lapic"`) before the builder consumes the address; mapping failure
-  panics.
+  propagates to the runtime's fatal boot boundary.
 - IO-APIC volatile register access — serialized by the crate's
   `SpinNoIrq`, bounds-checked per redirection entry.
 - The per-CPU `LocalApic` borrow in `with_local_apic` — soundness rests
@@ -97,7 +106,7 @@ clock-event activation remains the timer driver's responsibility.
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | LAPIC MMIO mapping fails at `init_primary` | Panic | Boot fails | 2 | `unwrap_or_else` panic with the mapped range in the message. |
+| F-01 | APIC MMIO mapping fails at `init_primary` | KError returned | Boot fails | 2 | IoMapError converts to InvalidInput, Io or NoMemory; existing hardware and any published LAPIC owner are not rolled back. |
 | F-02 | MSI-X window exhausted | `None` returned to `kirq` | Device stays on a shared line or probe fails | 3 | 176 vectors; exhaustion is logged upstream by `kirq`. |
 | F-03 | `with_local_apic` before bring-up | Panic (named assert) | Offending caller aborts | 2 | Bring-up ordering bug surfaced loudly. |
 | F-04 | Affinity target has no raw APIC id | `None` from `compose_msi_message` | MSI retained or probe degrades | 3 | Logged warning with the CPU number. |

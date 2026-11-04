@@ -28,6 +28,7 @@ stall-check = ["kworkqueue_ng/stall-check", "dep:watchdog", "watchdog/workqueue-
 self-wait-check = ["kworkqueue_ng/self-wait-check"]
 
 [dependencies]
+kerrno.workspace = true
 kworkqueue_ng.workspace = true
 kworkerpool_ng.workspace = true
 kirq.workspace = true

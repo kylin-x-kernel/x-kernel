@@ -21,8 +21,8 @@
 //! use drivers::platform::x86_apic;
 //!
 //! // 1. Boot CPU bring-up: LAPIC vectors + IO-APIC mapping.
-//! x86_apic::init_primary(io_apic_paddr);
-//! x86_apic::init_secondary(); // on each AP
+//! x86_apic::init_primary(io_apic_paddr)?;
+//! x86_apic::init_secondary()?; // on each AP
 //!
 //! // 2. Route and enable a legacy line, then acknowledge it.
 //! x86_apic::configure_irq(4, x86_apic::IoApicTriggerMode::Edge,
@@ -34,16 +34,18 @@
 #![no_std]
 #![cfg(target_arch = "x86_64")]
 
+#[cfg(unittest)]
 extern crate alloc;
 
 #[macro_use]
 extern crate log;
 
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::{LogicalCpuId, RawCpuId, raw_cpu_id};
 use kcpu_slot::{CpuLocalGuard, cpu_slot_cell};
+use kerrno::KResult;
 use kspin::{NoPreemptIrqSave, SpinNoIrq, static_lock};
 use lazyinit::LazyInit;
 use memaddr::{PhysAddr, pa};
@@ -466,11 +468,19 @@ fn cpu_has_x2apic() -> bool {
 /// and maps and initializes the IO-APIC at `io_apic_paddr`.
 /// The LAPIC timer stays stopped and masked until the timer driver activates it.
 /// LINT0/LINT1 stay masked; this platform has no LINT routing consumer.
+/// Requires boot CPU context with IRQs and migration disabled. The kernel-lifetime
+/// handle uses NOWAIT; no reclaim or sleeping allocation is permitted here.
+///
+/// # Errors
+/// Owner allocation returns NoMemory before publishing the per-CPU handle or
+/// enabling error delivery. MMIO errors propagate as InvalidInput, Io or NoMemory;
+/// IO-APIC mapping can fail after LAPIC publication. Neither hardware preparation
+/// nor published ownership is rolled back; boot must not continue after an error.
 ///
 /// # Panics
 ///
-/// Panics if the xAPIC MMIO mapping fails.
-pub fn init_primary(io_apic_paddr: PhysAddr) {
+/// Panics if this CPU is initialized twice or fixed builder invariants fail.
+pub fn init_primary(io_apic_paddr: PhysAddr) -> KResult<()> {
     info!("Initialize Local APIC...");
     // SAFETY: CPL0 boot owns the master PIC data port; 0xff masks its legacy interrupt inputs.
     unsafe { Port::<u8>::new(0x21).write(0xff) };
@@ -486,16 +496,9 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
         IS_X2APIC.store(true, Ordering::Relaxed);
     } else {
         info!("Using xAPIC.");
-        #[expect(
-            clippy::panic,
-            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the xAPIC register page \
-                      cannot be mapped; interrupt-controller initialization has no error return \
-                      or recovery"
-        )]
         // SAFETY: on the xAPIC path, `xapic_base` reads the architectural LAPIC
         // base address, which is then mapped before the builder uses it.
-        let base_vaddr = iomap_device(pa!(unsafe { xapic_base() } as usize), 0x1000, "lapic")
-            .unwrap_or_else(|err| panic!("failed to iomap LAPIC: {err:?}"));
+        let base_vaddr = iomap_device(pa!(unsafe { xapic_base() } as usize), 0x1000, "lapic")?;
         XAPIC_BASE.store(base_vaddr.as_usize() as u64, Ordering::Relaxed);
         builder.set_xapic_base(base_vaddr.as_usize() as u64);
     }
@@ -511,17 +514,10 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
     unsafe { lapic.enable_masked() };
     #[cfg(unittest)]
     tests_preparation::verify_masked_preparation();
-    install_local_apic(lapic);
+    install_local_apic(lapic)?;
     enable_error_delivery();
 
-    #[expect(
-        clippy::panic,
-        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the IOAPIC register page \
-                  cannot be mapped; interrupt-controller initialization has no error return or \
-                  recovery"
-    )]
-    let io_apic_base = iomap_device(io_apic_paddr, 0x1000, "ioapic")
-        .unwrap_or_else(|err| panic!("failed to iomap IOAPIC: {err:?}"));
+    let io_apic_base = iomap_device(io_apic_paddr, 0x1000, "ioapic")?;
     // SAFETY: `io_apic_base` is the MMIO mapping for the platform IO-APIC and is
     // kept alive for the duration of the constructed controller object.
     let mut io_apic = unsafe { IoApic::new(io_apic_base.as_usize() as u64) };
@@ -556,12 +552,22 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
     }
 
     IO_APIC.init_once(SpinNoIrq::new(io_apic));
+    Ok(())
 }
 
 /// Brings up the Local APIC on an application CPU (spurious/error/timer
 /// vectors only; the IO-APIC is owned by the boot CPU).
 /// Leaves the LAPIC timer stopped and timer/LINT sources masked, as on the BSP.
-pub fn init_secondary() {
+/// Requires AP boot context with IRQs and migration disabled; owner allocation
+/// uses NOWAIT, not sleeping reclaim.
+///
+/// # Errors
+/// NoMemory leaves the handle unpublished and error delivery masked. Hardware
+/// preparation has already happened; the platform must fail this CPU's boot.
+///
+/// # Panics
+/// Panics on missing BSP preparation or duplicate per-CPU initialization.
+pub fn init_secondary() -> KResult<()> {
     let mut lapic = build_local_apic();
     // SAFETY: AP bring-up excludes IRQs and migration and uses the supported
     // APIC mode/mapping established by the BSP. This CPU exclusively owns its
@@ -569,8 +575,9 @@ pub fn init_secondary() {
     unsafe { lapic.enable_masked() };
     #[cfg(unittest)]
     tests_preparation::verify_masked_preparation();
-    install_local_apic(lapic);
+    install_local_apic(lapic)?;
     enable_error_delivery();
+    Ok(())
 }
 
 fn enable_error_delivery() {
@@ -637,11 +644,19 @@ fn build_local_apic() -> LocalApic {
     builder.build().expect("failed to build local APIC")
 }
 
-fn install_local_apic(lapic: LocalApic) {
-    let ptr = Box::into_raw(Box::new(lapic)) as usize;
+fn install_local_apic(lapic: LocalApic) -> KResult<()> {
+    install_local_apic_with(lapic, KBox::new_with_flags)
+}
+
+fn install_local_apic_with(
+    lapic: LocalApic,
+    prepare: impl FnOnce(LocalApic, AllocFlags) -> KResult<KBox<LocalApic>>,
+) -> KResult<()> {
+    let owned = prepare(lapic, AllocFlags::NOWAIT)?;
     let guard = NoPreemptIrqSave::new();
     assert_eq!(LOCAL_APIC_PTR.read(&guard), 0);
-    LOCAL_APIC_PTR.write(&guard, ptr);
+    LOCAL_APIC_PTR.write(&guard, KBox::into_raw(owned) as usize);
+    Ok(())
 }
 
 fn local_apic_ptr(pin: &impl CpuLocalGuard) -> *mut LocalApic {

@@ -4,10 +4,12 @@
 
 //! Normal-service lifecycle, durable management waits and prepared deadline timer.
 
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::sync::Arc;
 use core::num::NonZeroUsize;
 
+use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId};
+use kerrno::KResult;
 use ktask::future::PreparedTaskWait;
 use ktime_types::{MonotonicInstant, TimeSpan};
 
@@ -18,20 +20,27 @@ use super::{NormalService, PartitionWorkSource, WorkerState};
 /// escape this owner. The provider runs this owner in a CPU-bound manager task.
 pub(crate) struct WorkerManager<S> {
     pub(super) service: Arc<NormalService<S>>,
-    tasks: Box<[Option<ktask::KtaskRef>]>,
+    tasks: KBox<[Option<ktask::KtaskRef>]>,
     idle_for: TimeSpan,
     is_stopping: bool,
 }
 
 impl<S: PartitionWorkSource + Send + Sync + 'static> WorkerManager<S> {
-    pub(crate) fn new(cpu: LogicalCpuId, limit: NonZeroUsize, idle_for: TimeSpan) -> Self {
+    /// Reserves fixed metadata before any task preparation or worker admission.
+    /// Caller must satisfy flags' context contract; nested Arc policy is unchanged.
+    pub(crate) fn new(
+        cpu: LogicalCpuId,
+        limit: NonZeroUsize,
+        idle_for: TimeSpan,
+        flags: AllocFlags,
+    ) -> KResult<Self> {
         assert!(idle_for > TimeSpan::ZERO, "idle interval must be positive");
-        Self {
-            service: NormalService::new(cpu, limit),
-            tasks: vec![None; limit.get()].into_boxed_slice(),
+        Ok(Self {
+            service: NormalService::new(cpu, limit, flags)?,
+            tasks: super::empty_slots(limit, flags)?,
             idle_for,
             is_stopping: false,
-        }
+        })
     }
 
     /// Run in the service CPU's initialized, sleepable manager task. All timer

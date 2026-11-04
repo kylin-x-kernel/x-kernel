@@ -162,7 +162,7 @@ pub fn test_init_root_node_sets_fields_and_hash() {
     let mut ht = TeeFsHtree {
         root: HtreeNode::new(0, TeeFsHtreeNodeImage::default()),
         data: TeeFsHtreeData::default(),
-        storage: Box::new(TeeFsFdAux::new()),
+        storage: super::tests_htree_basic::test_storage(),
     };
     let result = init_root_node(&mut ht);
 
@@ -199,7 +199,7 @@ pub fn test_calc_and_verify_tree() {
     let mut ht = TeeFsHtree {
         root,
         data: TeeFsHtreeData::default(),
-        storage: Box::new(TeeFsFdAux::new()),
+        storage: super::tests_htree_basic::test_storage(),
     };
     debug!("Verify tree completed.");
     let calc_result = calc_tree(&mut ht);
@@ -227,7 +227,7 @@ pub fn test_calc_and_verify_tree() {
 
 #[unittest::def_test]
 pub fn test_verify_node_after_calc() {
-    let mut ht = TeeFsHtree::default();
+    let mut ht = super::tests_htree_basic::test_tree();
     ht.data.imeta.meta.length = 100;
 
     let mut node = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
@@ -244,7 +244,7 @@ pub fn test_verify_node_after_calc() {
 
 #[unittest::def_test]
 pub fn test_verify_node_without_calc() {
-    let ht = TeeFsHtree::default();
+    let ht = super::tests_htree_basic::test_tree();
     let node = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
 
     // 不计算直接验证（应该失败）
@@ -253,7 +253,7 @@ pub fn test_verify_node_without_calc() {
 
 #[unittest::def_test]
 pub fn test_verify_node_with_parent_after_calc() {
-    let ht = TeeFsHtree::default();
+    let ht = super::tests_htree_basic::test_tree();
     let mut child = HtreeNode::new(2, TeeFsHtreeNodeImage::default());
     child.parent_id = Some(1);
 
@@ -269,7 +269,7 @@ pub fn test_verify_node_with_parent_after_calc() {
 
 #[unittest::def_test]
 pub fn test_update_verify_root() {
-    let mut ht = TeeFsHtree::default();
+    let mut ht = super::tests_htree_basic::test_tree();
     ht.data.uuid = TEE_UUID {
         timeLow: 1,
         timeMid: 2,
@@ -303,7 +303,7 @@ pub fn test_update_verify_root() {
 
 #[unittest::def_test]
 pub fn test_update_root_multiple_times() {
-    let mut ht = TeeFsHtree::default();
+    let mut ht = super::tests_htree_basic::test_tree();
     ht.data.uuid = TEE_UUID {
         timeLow: 1,
         timeMid: 2,
@@ -337,7 +337,7 @@ pub fn test_update_root_multiple_times() {
 
 #[unittest::def_test]
 pub fn test_verify_root_without_update() {
-    let mut ht = TeeFsHtree::default();
+    let mut ht = super::tests_htree_basic::test_tree();
     ht.data.uuid = TEE_UUID {
         timeLow: 1,
         timeMid: 2,
@@ -347,4 +347,15 @@ pub fn test_verify_root_without_update() {
     ht.data.head.imeta = [0x00; TEE_FS_HTREE_IMETA_SIZE]; // 未加密数据
 
     assert!(verify_root(&mut ht).is_err());
+}
+pub(super) fn test_storage() -> KBox<dyn TeeFsHtreeStorageOps> {
+    KBox::new_with_flags(
+        crate::tee::tee_ree_fs::TeeFsFdAux::new(),
+        kalloc_types::AllocFlags::NOWAIT,
+    )
+    .unwrap()
+}
+
+pub(super) fn test_tree() -> TeeFsHtree {
+    TeeFsHtree::new(test_storage())
 }

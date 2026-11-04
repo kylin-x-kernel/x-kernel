@@ -65,7 +65,9 @@ fn manager(limit: usize) -> WorkerManager<Arc<Probe>> {
         khal::percpu::this_cpu_id(),
         NonZeroUsize::new(limit).unwrap(),
         TimeSpan::from_millis(10),
+        kalloc_types::AllocFlags::NOWAIT,
     )
+    .unwrap()
 }
 
 fn pass(manager: &mut WorkerManager<Arc<Probe>>) {

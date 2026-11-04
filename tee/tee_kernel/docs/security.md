@@ -99,6 +99,33 @@ is skipped, preserve initializer errors and cleanup, and check successful pointe
 identity. Existing REE primitive and storage syscall tests exercise actual IO/close.
 The injection does not simulate global OOM, nested Box failure or disk failure.
 
+### Htree and storage owners
+
+File initialization reserves the file owner, htree owner and concrete storage
+owner before directory-cache admission, temporary-number assignment or backend
+RPC open/create. Failure of either htree reservation drops earlier reservations
+and skips the initializer entirely. Errors are converted through `TeeError`;
+NoMemory becomes OUT_OF_MEMORY. After backend open there is no further allocation
+for these owners: storage coercion and tree initialization reuse the reservations.
+Htree crypto, verification and IO failures still pass through the existing
+explicit fd-close and create-file-removal branch. Its existing cleanup-error
+precedence is unchanged; this migration does not promise transactional rollback
+for recursive node allocation, Vec growth, IO or cleanup failure.
+
+These are task-context operations requiring the existing filesystem/credential
+context. NOWAIT prevents sleeping reclaim for the owner reservations while REE
+locks may be held; it does not make IO, nested allocation or destruction
+nonblocking, early-boot safe or IRQ/NMI safe. Backend data remains untrusted and
+the htree authentication checks are unchanged. No new unsafe conversion is used.
+
+Close consumes the optional tree without allocating a placeholder and then
+explicitly closes the backing fd. Default file handles contain no tree or storage
+allocation. Injected tests cover failure of each reservation, NOWAIT, skipped
+initialization and successful address preservation through dyn coercion. The
+close test checks an absent tree, rejected post-close writes and an invalidated
+backend descriptor. These tests do not inject allocator failure during close or
+claim that recursive destruction and backend close have bounded latency.
+
 ## Session-owner allocation boundary
 
 Session initialization uses a fallible KBox under the thread's session-slot
@@ -121,8 +148,9 @@ This analysis covers session ownership and access in `src/tee/tee_session.rs`,
 the close-all entry points in `tee_obj.rs`, `tee_svc_storage.rs` and
 `tee_svc_cryp2.rs` under `src/tee/`, and their exec/exit handoff. It also covers
 the REE metadata owner reservation, scratch-block and inline backing-handle
-boundaries in `tee_ree_fs.rs`
-and `fs_dirfile.rs` under `src/tee/`, and property-query owner preparation in
+boundaries in `tee_ree_fs.rs` and `fs_dirfile.rs`, together with prepared htree
+and storage owner initialization in `fs_htree.rs` under `src/tee/`,
+and property-query owner preparation in
 `tee_property.rs`, and buffer preparation in the crypto/storage service modules
 and the `TeeError` conversions in `mod.rs`. Other storage-backend operations, nested
 allocations, crypto algorithms, TA loading and syscall argument validation remain

@@ -14,7 +14,9 @@ use crate::{QueueConfig, services};
 
 /// Creates an independent named queue using initialized shared execution services.
 ///
-/// Requires sleepable task context. The supplied configuration fixes CPU policy,
+/// Requires reclaim-safe sleepable task context, with IRQs and preemption enabled,
+/// outside non-sleepable RCU scopes and without locks needed by reclaim or I/O.
+/// The supplied configuration fixes CPU policy,
 /// allowed boot CPUs and per-CPU release allowance; it does not configure workers.
 /// Preparation may allocate, but later prepared submissions do not. The name is
 /// diagnostic identity, not a unique routing key; it need not outlive this call.
@@ -27,7 +29,8 @@ use crate::{QueueConfig, services};
 /// an implicit shutdown. There is no conversion from DefaultQueue to this authority.
 ///
 /// # Errors
-/// Warns and returns an identifiable context/readiness/CPU binding error before
+/// Warns and returns an identifiable context/readiness/CPU binding or partition
+/// allocation error before
 /// exposing a queue. Failure does not accept any work or stop existing services.
 /// Invalid configuration is rejected earlier by QueueConfig::new.
 ///

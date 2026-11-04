@@ -71,7 +71,12 @@ fn prepare() -> (Arc<NormalService<Arc<Probe>>>, usize) {
 }
 
 fn prepare_on(cpu: LogicalCpuId) -> (Arc<NormalService<Arc<Probe>>>, usize) {
-    let service = NormalService::new(cpu, NonZeroUsize::new(2).unwrap());
+    let service = NormalService::new(
+        cpu,
+        NonZeroUsize::new(2).unwrap(),
+        kalloc_types::AllocFlags::NOWAIT,
+    )
+    .unwrap();
     let worker = {
         let mut workers = service.workers.lock();
         // Keep retirement policy out of this isolated one-thread wait probe.
@@ -236,7 +241,12 @@ fn normal_worker_rechecks_after_spurious_wake() {
 #[def_test]
 fn normal_worker_retained_demand_progresses_while_callback_sleeps() {
     let cpu = khal::percpu::this_cpu_id();
-    let service = NormalService::new(cpu, NonZeroUsize::new(3).unwrap());
+    let service = NormalService::new(
+        cpu,
+        NonZeroUsize::new(3).unwrap(),
+        kalloc_types::AllocFlags::NOWAIT,
+    )
+    .unwrap();
     let ids = {
         let mut workers = service.workers.lock();
         let baseline = workers.pool.reserve_worker().unwrap();
@@ -337,7 +347,9 @@ fn normal_notification_can_outlive_quiescent_service() {
     let service = NormalService::<Arc<Probe>>::new(
         khal::percpu::this_cpu_id(),
         NonZeroUsize::new(1).unwrap(),
-    );
+        kalloc_types::AllocFlags::NOWAIT,
+    )
+    .unwrap();
     let weak = Arc::downgrade(&service);
     let notification = service.notification_waker();
     notification.wake_by_ref();
@@ -348,6 +360,37 @@ fn normal_notification_can_outlive_quiescent_service() {
 }
 
 struct ManagerWakeCount(AtomicUsize);
+
+#[def_test]
+fn fixed_waker_slots_start_empty_and_release_installed_owners() {
+    let owner = Arc::new(ManagerWakeCount(AtomicUsize::new(0)));
+    let mut slots = empty_slots::<Waker>(
+        NonZeroUsize::new(3).unwrap(),
+        kalloc_types::AllocFlags::NOWAIT,
+    )
+    .unwrap();
+    assert_eq!(slots.len(), 3);
+    assert!(slots.iter().all(Option::is_none));
+    slots[1] = Some(Waker::from(owner.clone()));
+    assert_eq!(Arc::strong_count(&owner), 2);
+    drop(slots);
+    assert_eq!(Arc::strong_count(&owner), 1);
+    assert_eq!(owner.0.load(Ordering::Relaxed), 0);
+}
+
+#[def_test]
+fn fixed_tables_reject_invalid_flags_without_publishing_service() {
+    let invalid = kalloc_types::AllocFlags::from_bits_retain(u32::MAX);
+    let limit = NonZeroUsize::new(1).unwrap();
+    assert!(matches!(
+        empty_slots::<Waker>(limit, invalid),
+        Err(kerrno::KError::InvalidInput)
+    ));
+    assert!(matches!(
+        NormalService::<Arc<Probe>>::new(khal::percpu::this_cpu_id(), limit, invalid),
+        Err(kerrno::KError::InvalidInput)
+    ));
+}
 
 impl Wake for ManagerWakeCount {
     fn wake(self: Arc<Self>) {
@@ -365,7 +408,9 @@ fn normal_growth_notification_does_not_spin_when_capacity_is_full() {
         let service = NormalService::new(
             khal::percpu::this_cpu_id(),
             NonZeroUsize::new(limit).unwrap(),
-        );
+            kalloc_types::AllocFlags::NOWAIT,
+        )
+        .unwrap();
         let count = Arc::new(ManagerWakeCount(AtomicUsize::new(0)));
         let source = service.dispatch.create_source(probe(1, false));
         {

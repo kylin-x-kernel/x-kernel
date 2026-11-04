@@ -69,7 +69,7 @@ impl Queue {
             assert_eq!(self.publish_color(next), current);
             after_publish(current);
             let mut empty = CompletionObservers::new();
-            for partition in &self.partitions {
+            for partition in self.partitions.iter() {
                 // Crossing this guard joins acceptors that sampled the old color
                 // before cutoff but had not yet committed their local accounting.
                 let token = tokens.pop().expect("one token per partition");

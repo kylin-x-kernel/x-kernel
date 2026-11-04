@@ -29,10 +29,11 @@ impl NormalQueue {
     }
 
     /// Prepares a named normal queue in sleepable context after service startup.
+    /// Requires the reclaim-safe context of [`crate::create_queue`].
     /// Preparation may allocate; later static submissions do not.
     ///
     /// # Errors
-    /// Returns the context, readiness or CPU error from queue creation.
+    /// Returns the context, readiness, CPU or allocation error from queue creation.
     ///
     /// # Panics
     /// Propagates fatal allocation failures and provider invariant violations.

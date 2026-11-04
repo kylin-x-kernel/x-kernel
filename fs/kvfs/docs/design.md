@@ -31,6 +31,17 @@ solution for initialization re-entry. Preparing outside an existing singleton
 gate would require a separate identity/publication redesign, not a mechanical
 owner conversion.
 
+## Parallel lookup completion
+
+Parallel lookup candidates are not completed cache hits. `lookup_cache_entry`
+checks `PAR_LOOKUP` while holding the parent's children mutex, so candidate
+replacement or removal cannot race with that classification. In-progress
+candidates remain hashed for `cache_lookup_candidate` to join; waiters release
+the children mutex before waiting on the candidate's lookup mutex and then
+retry. A detached negative candidate must never escape as a completed miss
+after its owner clears `PAR_LOOKUP`. Completed negative entries in cacheable
+directories remain valid cache hits.
+
 ## Static simple-directory entries
 
 `DirMapping` retains one inode for each statically declared directory, simple

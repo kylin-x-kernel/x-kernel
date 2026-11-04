@@ -108,10 +108,14 @@ fn prepare(max_active: usize, kick: Arc<Waker>) -> (Arc<Queue>, Arc<Service>) {
     let cpu = khal::percpu::this_cpu_id();
     let dispatch = PartitionDispatch::new();
     let queue = Queue::with_dispatch(
-        QueueConfig::new_with_flags(
-            &[cpu],
-            CpuPolicy::CurrentCpu,
-            max_active,
+        crate::service::PreparedQueue::new_with_flags(
+            QueueConfig::new_with_flags(
+                &[cpu],
+                CpuPolicy::CurrentCpu,
+                max_active,
+                kalloc_types::AllocFlags::NOWAIT,
+            )
+            .unwrap(),
             kalloc_types::AllocFlags::NOWAIT,
         )
         .unwrap(),

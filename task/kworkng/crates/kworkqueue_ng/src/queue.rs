@@ -4,13 +4,12 @@
 
 //! Queue ownership, immutable configuration and common admission control.
 
-use alloc::{
-    boxed::Box,
-    sync::{Arc, Weak},
-};
-use core::{num::NonZeroUsize, sync::atomic::AtomicUsize, task::Waker};
+use alloc::sync::{Arc, Weak};
+use core::{mem::MaybeUninit, num::NonZeroUsize, sync::atomic::AtomicUsize, task::Waker};
 
+use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::LogicalCpuId;
+use kerrno::KResult;
 use ksync::Mutex;
 use kworkerpool_ng::PartitionDispatch;
 
@@ -37,6 +36,80 @@ pub use source::QueuePartitionSource;
 use source::QueueSource;
 pub use submission::SubmitError;
 
+/// Owns a validated configuration and uninitialized partition storage.
+/// Dropping this value never binds providers or stops workers.
+pub struct PreparedQueue {
+    config: QueueConfig,
+    storage: KBox<[MaybeUninit<Arc<QueuePartition>>]>,
+}
+
+impl PreparedQueue {
+    /// Reserves partition storage in reclaim-safe, sleepable task context.
+    /// Hold no locks needed by reclaim or I/O, and keep IRQs/preemption enabled.
+    /// The caller must be outside non-sleepable RCU scopes.
+    ///
+    /// # Errors
+    /// Returns NoMemory on allocation failure or InvalidInput on layout overflow,
+    /// without binding any execution provider.
+    pub fn new(config: QueueConfig) -> KResult<Self> {
+        Self::new_with_flags(config, AllocFlags::KERNEL)
+    }
+
+    /// Reserves storage under the selected allocation permissions.
+    /// The caller must satisfy the flags' context contract. NOWAIT does not
+    /// make subsequent provider binding IRQ-safe or grant NMI safety.
+    ///
+    /// # Errors
+    /// Returns InvalidInput for unknown flags or layout overflow, and NoMemory
+    /// on allocation failure. Errors consume the config without binding providers.
+    pub fn new_with_flags(config: QueueConfig, flags: AllocFlags) -> KResult<Self> {
+        let storage = KBox::new_uninit_slice_with_flags(config.cpus().len(), flags)?;
+        Ok(Self { config, storage })
+    }
+}
+
+struct InitializedPrefix<'a, T> {
+    storage: &'a mut [MaybeUninit<T>],
+    initialized: usize,
+}
+
+impl<T> InitializedPrefix<'_, T> {
+    fn push(&mut self, value: T) {
+        self.storage[self.initialized].write(value);
+        self.initialized += 1;
+    }
+}
+
+impl<T> Drop for InitializedPrefix<'_, T> {
+    fn drop(&mut self) {
+        for slot in &mut self.storage[..self.initialized] {
+            // SAFETY: push initializes each prefix slot exactly once before
+            // advancing the count; this guard holds exclusive storage access.
+            unsafe { slot.assume_init_drop() };
+        }
+    }
+}
+
+fn initialize_storage<T>(
+    mut storage: KBox<[MaybeUninit<T>]>,
+    mut initialize: impl FnMut(usize) -> T,
+) -> KBox<[T]> {
+    let length = storage.len();
+    {
+        let mut prefix = InitializedPrefix {
+            storage: &mut storage,
+            initialized: 0,
+        };
+        for index in 0..length {
+            prefix.push(initialize(index));
+        }
+        prefix.initialized = 0;
+    }
+    // SAFETY: every slot was initialized above, and the prefix guard was
+    // disarmed only after completion. Ownership transfers without another drop.
+    unsafe { storage.assume_init() }
+}
+
 /// Owns one partition per logical CPU and the queue-wide admission boundary.
 ///
 /// Queue owns partitions; partitions never own Queue. Accepted Work occurrences
@@ -49,7 +122,7 @@ pub use submission::SubmitError;
 pub struct Queue {
     config: QueueConfig,
     // Same compact order as config.cpus(); disallowed CPUs own no partition.
-    partitions: Box<[Arc<QueuePartition>]>,
+    partitions: KBox<[Arc<QueuePartition>]>,
     control: AtomicUsize,
     next_cpu_index: AtomicUsize,
     // Serializes cutoff/setup, never admission, completion or shutdown.
@@ -68,7 +141,8 @@ impl Queue {
     /// Prepares unbound management for tests that drive claims manually.
     #[cfg(unittest)]
     pub(crate) fn new(config: QueueConfig) -> Arc<Self> {
-        Self::prepare(config, |_, _| None, |partition| partition)
+        let prepared = PreparedQueue::new_with_flags(config, AllocFlags::NOWAIT).unwrap();
+        Self::prepare(prepared, |_, _| None, |partition| partition)
     }
 
     #[cfg(all(unittest, feature = "stall-check"))]
@@ -86,7 +160,7 @@ impl Queue {
         )
         .unwrap();
         Self::prepare(
-            config,
+            PreparedQueue::new_with_flags(config, AllocFlags::NOWAIT).unwrap(),
             |_, _| None,
             |partition| {
                 let record = register(partition.cpu_id());
@@ -104,13 +178,13 @@ impl Queue {
     /// # Panics
     /// Propagates provider closure panics and fatal kernel allocation failures.
     pub(crate) fn with_dispatch(
-        config: QueueConfig,
+        prepared: PreparedQueue,
         mut service: impl FnMut(
             LogicalCpuId,
         ) -> (Arc<PartitionDispatch<QueuePartitionSource>>, Arc<Waker>),
     ) -> Arc<Self> {
         Self::prepare(
-            config,
+            prepared,
             |queue, cpu| {
                 let (dispatch, kick) = service(cpu);
                 Some(QueueSource::new(queue.clone(), cpu, dispatch, kick))
@@ -128,7 +202,7 @@ impl Queue {
     /// Propagates provider closure panics and fatal kernel allocation failures.
     #[cfg(feature = "stall-check")]
     pub(crate) fn with_dispatch_and_diagnostics(
-        config: QueueConfig,
+        prepared: PreparedQueue,
         name: &str,
         directory: &crate::diagnostics::Directory,
         mut service: impl FnMut(
@@ -136,7 +210,7 @@ impl Queue {
         ) -> (Arc<PartitionDispatch<QueuePartitionSource>>, Arc<Waker>),
     ) -> Arc<Self> {
         Self::prepare(
-            config,
+            prepared,
             |queue, cpu| {
                 let (dispatch, kick) = service(cpu);
                 Some(QueueSource::new(queue.clone(), cpu, dispatch, kick))
@@ -149,23 +223,20 @@ impl Queue {
     }
 
     fn prepare(
-        config: QueueConfig,
+        prepared: PreparedQueue,
         mut source: impl FnMut(&Weak<Self>, LogicalCpuId) -> Option<QueueSource>,
         mut decorate: impl FnMut(QueuePartition) -> QueuePartition,
     ) -> Arc<Self> {
+        let PreparedQueue { config, storage } = prepared;
         Arc::new_cyclic(|queue| Self {
-            partitions: config
-                .cpus()
-                .iter()
-                .map(|&cpu| {
-                    Arc::new(decorate(QueuePartition::with_source(
-                        cpu,
-                        NonZeroUsize::new(config.max_active())
-                            .expect("validated positive allowance"),
-                        source(queue, cpu),
-                    )))
-                })
-                .collect(),
+            partitions: initialize_storage(storage, |index| {
+                let cpu = config.cpus()[index];
+                Arc::new(decorate(QueuePartition::with_source(
+                    cpu,
+                    NonZeroUsize::new(config.max_active()).expect("validated positive allowance"),
+                    source(queue, cpu),
+                )))
+            }),
             config,
             control: AtomicUsize::new(0),
             next_cpu_index: AtomicUsize::new(0),

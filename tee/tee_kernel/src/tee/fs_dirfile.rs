@@ -383,8 +383,8 @@ pub(super) fn tee_fs_dirfile_remove(
     dent = DirFileEntry::default();
     write_dent(dirh, dfh.idx as usize, &dent)?;
     tee_debug!(
-        "tee_fs_dirfile_remove: after write_dent, dirh.fh.ht.data.dirty: {}, dfh.idx: {}",
-        dirh.fh.ht.data.dirty,
+        "tee_fs_dirfile_remove: after write_dent, dirh.fh.ht.data.dirty: {:?}, dfh.idx: {}",
+        dirh.fh.ht.as_ref().map(|tree| tree.data.dirty),
         dfh.idx
     );
     clear_file(dirh, file_number as usize);
@@ -425,9 +425,9 @@ pub(super) fn tee_fs_dirfile_commit_writes(
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
 ) -> TeeResult {
     tee_debug!(
-        "tee_fs_dirfile_commit_writes: dirh.fh.fd: {:?}, dirh.fh.ht.data.head.counter: {}",
+        "tee_fs_dirfile_commit_writes: dirh.fh.fd: {:?}, dirh.fh.ht.data.head.counter: {:?}",
         dirh.fh.fd,
-        dirh.fh.ht.data.head.counter
+        dirh.fh.ht.as_ref().map(|tree| tree.data.head.counter)
     );
     dirh.fops.commit_writes(&mut dirh.fh, hash)
 }

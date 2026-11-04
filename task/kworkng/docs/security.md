@@ -1,12 +1,25 @@
 # Prepared Workqueue API Security
 
+## Partition Reservation Failure
+
+All three default partition tables are reserved before BH preparation and normal
+startup. Failure drops earlier preparations and leaves registry/actions untouched.
+Independent reservation runs only after context, readiness and CPU coverage
+validation, before source binding. KError converts into the owning error enum;
+there is no automatic NOWAIT fallback or new fatal allocation expectation.
+The existing provider startup and rejected-install stop/join protocols remain.
+Tests inject failure at each default reservation and at independent creation;
+the live tests preserve the permanent registry and prohibit the default startup
+continuation on failure. Independent retry dispatches and drains real Work.
+These do not simulate global allocator OOM or nested Arc/diagnostic failures.
+
 ## Default CPU Configuration Reservation
 
 Default CPU sets are prepared as fallible KBox slices before creating any normal
 worker or BH service. QueueConfigError converts storage failure into the existing
 InitError::Configuration channel. Failure drops any earlier local configurations
 and leaves the service registry and softirq actions unchanged. The boot caller's
-fatal startup policy is unchanged; dynamic worker growth, partition storage and
+fatal startup policy is unchanged; dynamic worker growth and
 nested allocations are not made recoverable by this configuration boundary.
 
 ## Scope And Trust Boundaries
@@ -130,7 +143,7 @@ Their selected Once remains Arc-owned through each reader closure and worker joi
 | Invalid CPU/admission/deadline | No newly accepted work | Core typed error; existing arrangement unchanged except independent concurrency |
 | Shutdown drain error after closure | Admission stays closed | Retry drain; final Drop still retains storage for reclamation |
 | Duplicate init / occupied actions | Candidate not published | Warning and typed error; stop candidate workers unlocked |
-| Allocator exhaustion | Manager entry preparation returns Normal(NoMemory); other allocations retain kernel failure policy | Join the started CPU prefix before returning; no whole-startup recoverable OOM promise |
+| Allocator exhaustion | Fixed worker-table or manager entry preparation returns Normal(NoMemory); other allocations retain kernel failure policy | Join the started CPU prefix before returning; no whole-startup recoverable OOM promise |
 | Reclaimer admission invariant failure | Cannot reclaim normally | Panic while raw strong reference still retains storage; no premature free |
 | Callback/destructor panic or nonreturn | Incomplete cleanup / halted progress | No unwind recovery, cancellation timeout or progress guarantee |
 

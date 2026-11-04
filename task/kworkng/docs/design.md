@@ -1,6 +1,23 @@
 # Prepared Workqueue API
 
-Manager entry preparation can return `InitError::Normal(NormalRuntimeError::NoMemory)`.
+## Partition Table Preparation
+
+Default initialization reserves three `PreparedQueue` tables after validating
+all configurations and before preparing BH services or starting normal workers.
+Reservation errors convert to `InitError::QueueAllocation` through `From<KError>`.
+Binding consumes each preparation without reserving another partition table.
+Independent creation validates context, registry readiness and CPU coverage
+before reserving; failure returns `QueueCreateError::Allocation` without binding.
+Both production flows use KERNEL in reclaim-safe, sleepable task context.
+
+Registry installation remains short and nonblocking. Duplicate/action-conflict
+rollback still stops and joins unpublished workers outside NoPreempt. Binding
+still allocates Arc owners and optional diagnostics under the existing fatal
+OOM policy; this is not whole-path fallibility or dynamic-worker recovery.
+
+Fixed worker-table and manager entry preparation can return
+`InitError::Normal(NormalRuntimeError::NoMemory)`. Unrepresentable table capacity
+returns `InitError::Normal(NormalRuntimeError::Allocation(InvalidInput))`.
 Normal services join previously started CPU runtimes before returning; no registry
 or softirq action has been published. Startup uses KERNEL allocation permissions
 and requires sleepable context without locks needed by reclaim, I/O or filesystem
@@ -8,7 +25,8 @@ callbacks. CPU-set reservation can return
 `InitError::Configuration(QueueConfigError::Allocation(_))` before any worker
 starts: all three default configurations are prepared before execution services.
 Their CPU storage uses KERNEL permissions; IRQs and preemption must be enabled
-and callers must be outside non-sleepable RCU scopes. Other allocations and
+and callers must be outside non-sleepable RCU scopes. Besides partition tables,
+other allocations and
 dynamic worker growth remain infallible.
 The system boot caller still treats service initialization failure as fatal
 because drivers cannot start without workers; returning NoMemory from this API
@@ -70,6 +88,8 @@ by its constructor from the permanent normal default, never a caller-supplied qu
 - `kworkqueue_ng`: configuration, borrowed Work, delayed timer lifecycle, queue
   admission/drain, optional diagnostic directory and terminal retirement hook.
 - `kworkerpool_ng`: prepared per-CPU normal/BH execution services.
+- `kerrno`: KError/KResult for partition reservation and the
+  InitError::QueueAllocation and QueueCreateError::Allocation error channels.
 - `kirq`: group action registration and CPU-pinned softirq invocation.
 - `ktask`, `khal`, `kcpu_id_map`, `ktime_types`: context checks, CPU identity,
   boot map, scheduling and time; real task/timer fixtures also use these providers.
@@ -109,7 +129,7 @@ After publication, each accepted BH submission supplies its normal notification.
 The softirq runner already pins the CPU; the action adds no preemption guard.
 
 Successful services live for the kernel lifetime. Duplicate initialization fails
-without replacing them. CPU-set and manager-entry preparation return allocation
+without replacing them. CPU-set, fixed worker-table and manager-entry preparation return allocation
 errors; other allocation failures retain the kernel allocator policy.
 Unready submissions return `NotReady` without logging, including from IRQ context;
 initialization failures are logged by `runtime::init`, not by each producer retry.
@@ -247,7 +267,11 @@ The runtime enables `system`, which selects live-service tests instead of these
 replaceable fixtures. This feature changes test selection only, not production
 implementation selection. Live tests leave the permanent Once and both BH
 actions installed, covering all CPU/categories, safe ownership, deferred release
-and delayed work. `kruntime` additionally probes real hard IRQ publication,
+and delayed work. The live suite is nested under services so reservation tests
+exercise private production preparation without exporting test-only interfaces.
+Default failure injection forbids entry into the provider-start continuation;
+independent failure injection verifies successful creation and dispatch on retry.
+`kruntime` additionally probes real hard IRQ publication,
 caller-CPU allocation counters, timer cancellation races and payload visibility.
 
 ## Normal finalization provider

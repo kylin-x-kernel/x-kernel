@@ -4,10 +4,12 @@
 
 //! Private normal workers and their shared manager notification state.
 
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::sync::Arc;
 use core::{num::NonZeroUsize, task::Waker};
 
+use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::LogicalCpuId;
+use kerrno::KResult;
 use kspin::SpinNoIrq;
 use ktask::future::PreparedTaskWait;
 pub use runtime::RuntimeError as NormalRuntimeError;
@@ -36,26 +38,44 @@ struct NormalWorkers {
     pool: WorkerPool,
     // Task-bound waits cannot be prepared before the corresponding task starts.
     // These weak-task wakers are installed before that slot becomes Available.
-    wakers: Box<[Option<Waker>]>,
+    wakers: KBox<[Option<Waker>]>,
     manager_waker: Option<Waker>,
     stop_requested: bool,
 }
 
 impl<S: Send + Sync + 'static> NormalService<S> {
-    pub(crate) fn new(cpu: LogicalCpuId, limit: NonZeroUsize) -> Arc<Self> {
+    /// Prepares fixed tables before cyclic service construction. Flags constrain
+    /// only these tables; existing Arc and notification allocations are unchanged.
+    pub(crate) fn new(
+        cpu: LogicalCpuId,
+        limit: NonZeroUsize,
+        flags: AllocFlags,
+    ) -> KResult<Arc<Self>> {
         assert!(kcpu_id_map::raw_cpu_id(cpu).is_some(), "invalid worker CPU");
-        Arc::new_cyclic(|owner| Self {
+        let pool = WorkerPool::new(limit, flags)?;
+        let wakers = empty_slots(limit, flags)?;
+        Ok(Arc::new_cyclic(|owner| Self {
             cpu,
             dispatch: PartitionDispatch::new(),
             workers: SpinNoIrq::new(NormalWorkers {
-                pool: WorkerPool::new(limit),
-                wakers: vec![None; limit.get()].into_boxed_slice(),
+                pool,
+                wakers,
                 manager_waker: None,
                 stop_requested: false,
             }),
             notification: wake::prepare(owner.clone()),
-        })
+        }))
     }
+}
+
+fn empty_slots<T>(limit: NonZeroUsize, flags: AllocFlags) -> KResult<KBox<[Option<T>]>> {
+    let mut storage = KBox::<[Option<T>]>::new_uninit_slice_with_flags(limit.get(), flags)?;
+    for slot in storage.iter_mut() {
+        slot.write(None);
+    }
+    // SAFETY: every slot contains None, a valid Option<T>; no initialization can
+    // fail or panic, and the unique owner transfers all initialized elements.
+    Ok(unsafe { storage.assume_init() })
 }
 
 impl<S> NormalService<S> {

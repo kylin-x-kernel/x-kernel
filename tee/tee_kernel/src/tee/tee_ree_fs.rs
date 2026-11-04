@@ -4,8 +4,8 @@
 
 #[cfg(unittest)]
 use alloc::string::String;
-use alloc::{boxed::Box, vec};
-use core::{any::Any, ffi::c_uint, fmt::Debug};
+use alloc::vec;
+use core::{any::Any, ffi::c_uint, fmt::Debug, mem::MaybeUninit};
 
 use kalloc_types::{AllocFlags, KBox};
 use ksync::{Mutex, static_lock};
@@ -60,9 +60,11 @@ pub(super) const BLOCK_SIZE: usize = 1 << BLOCK_SHIFT;
 /// nonblocking. Allocator reentrancy and lock-order requirements still apply.
 /// Reservation failure returns TEE_ERROR_OUT_OF_MEMORY without invoking init.
 pub(super) fn new_fs_owner<T>(init: impl FnOnce() -> TeeResult<T>) -> TeeResult<KBox<T>> {
-    new_fs_owner_with(init, |flags| {
-        KBox::<T>::new_uninit_with_flags(flags).map_err(|_| TEE_ERROR_OUT_OF_MEMORY)
-    })
+    new_fs_owner_with(init, reserve_fs_owner)
+}
+
+fn reserve_fs_owner<T>(flags: AllocFlags) -> TeeResult<KBox<MaybeUninit<T>>> {
+    KBox::<T>::new_uninit_with_flags(flags).map_err(|error| TeeError::from(error).into())
 }
 
 fn new_fs_owner_with<T>(
@@ -73,6 +75,29 @@ fn new_fs_owner_with<T>(
     Ok(KBox::write(storage, init()?))
 }
 
+struct HtreeOwners {
+    tree: KBox<MaybeUninit<TeeFsHtree>>,
+    storage: KBox<MaybeUninit<TeeFsFdAux>>,
+}
+
+/// Reserves all three file owners with NOWAIT before directory admission or RPC.
+/// This shares the task-context and nested-allocation limits of `new_fs_owner`.
+fn new_fs_file_owner(
+    init: impl FnOnce(HtreeOwners) -> TeeResult<TeeFsFd>,
+) -> TeeResult<KBox<TeeFsFd>> {
+    new_fs_owner(|| with_htree_owners(init, reserve_fs_owner, reserve_fs_owner))
+}
+
+fn with_htree_owners<T>(
+    init: impl FnOnce(HtreeOwners) -> TeeResult<T>,
+    reserve_tree: impl FnOnce(AllocFlags) -> TeeResult<KBox<MaybeUninit<TeeFsHtree>>>,
+    reserve_storage: impl FnOnce(AllocFlags) -> TeeResult<KBox<MaybeUninit<TeeFsFdAux>>>,
+) -> TeeResult<T> {
+    let tree = reserve_tree(AllocFlags::NOWAIT)?;
+    let storage = reserve_storage(AllocFlags::NOWAIT)?;
+    init(HtreeOwners { tree, storage })
+}
+
 /// REE filesystem file descriptor (htree + backing file).
 ///
 /// The backing fd is an inline integer handle, not a stable-address owner.
@@ -81,7 +106,7 @@ fn new_fs_owner_with<T>(
 /// GP: `struct tee_fs_fd` / `tee_file_handle`
 #[derive(Debug, Default)]
 pub(super) struct TeeFsFd {
-    pub ht: Box<TeeFsHtree>,
+    pub ht: Option<KBox<TeeFsHtree>>,
     pub fd: FileVariant,
     pub dfh: TeeFsDirfileFileh,
     pub uuid: TEE_UUID,
@@ -410,10 +435,11 @@ pub(super) fn ree_fs_open_primitive(
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
     dfh: Option<&TeeFsDirfileFileh>,
 ) -> TeeResult<KBox<TeeFsFd>> {
-    new_fs_owner(|| ree_fs_open_primitive_inner(uuid, create, hash, dfh))
+    new_fs_file_owner(|owners| ree_fs_open_primitive_inner(owners, uuid, create, hash, dfh))
 }
 
 fn ree_fs_open_primitive_inner(
+    owners: HtreeOwners,
     uuid: Option<&TEE_UUID>,
     create: bool,
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
@@ -444,8 +470,8 @@ fn ree_fs_open_primitive_inner(
 
     fdp.fd = fd;
 
-    let fd_aux = TeeFsFdAux { fd: fdp.fd };
-    let fs_tree = match tee_fs_htree_open(Box::new(fd_aux), create, hash, uuid) {
+    let fd_aux = KBox::write(owners.storage, TeeFsFdAux { fd: fdp.fd });
+    let fs_tree = match tee_fs_htree_open(owners.tree, fd_aux, create, hash, uuid) {
         Ok(fs_tree) => fs_tree,
         Err(e) => {
             error!("ree_fs_open_primitive: open htree error: {:X?}", e);
@@ -461,7 +487,7 @@ fn ree_fs_open_primitive_inner(
     if let Some(dfh_val) = dfh {
         fdp.dfh = *dfh_val;
     }
-    fdp.ht = fs_tree;
+    fdp.ht = Some(fs_tree);
 
     Ok(fdp)
 }
@@ -491,7 +517,7 @@ fn out_of_place_write(
     let start_block_num = pos_to_block_num(pos);
     let end_block_num = pos_to_block_num(pos + len - 1);
     let mut remain_bytes = len;
-    let meta = tee_fs_htree_get_meta(&mut fdp.ht);
+    let meta = tee_fs_htree_get_meta(fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?);
 
     let mut block = get_tmp_block()?;
     let mut current_pos = pos;
@@ -508,7 +534,11 @@ fn out_of_place_write(
 
         // 如果块在现有文件范围内，先读取
         if current_start_block_num * BLOCK_SIZE < roundup_u(meta_length as usize, BLOCK_SIZE) {
-            tee_fs_htree_read_block(&mut fdp.ht, current_start_block_num, &mut block)?;
+            tee_fs_htree_read_block(
+                fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?,
+                current_start_block_num,
+                &mut block,
+            )?;
         } else {
             // 新块，初始化为0
             block.fill(0);
@@ -532,7 +562,7 @@ fn out_of_place_write(
 
         // 写入块
         tee_fs_htree_write_block(
-            &mut fdp.ht,
+            fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?,
             // &mut fdp.fd,
             current_start_block_num,
             &block,
@@ -544,10 +574,10 @@ fn out_of_place_write(
     }
 
     // 更新文件长度
-    let meta = tee_fs_htree_get_meta(&mut fdp.ht);
+    let meta = tee_fs_htree_get_meta(fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?);
     if current_pos > meta.length as usize {
         meta.length = current_pos as u64;
-        tee_fs_htree_meta_set_dirty(fdp.ht.as_mut());
+        tee_fs_htree_meta_set_dirty(fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?);
     }
 
     Ok(())
@@ -570,7 +600,7 @@ pub(super) fn ree_fs_read_primitive(
         len
     );
     let mut remain_bytes = *len;
-    let meta = tee_fs_htree_get_meta(&mut fh.ht);
+    let meta = tee_fs_htree_get_meta(fh.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?);
 
     // One of buf_core and buf_user must be NULL
     debug_assert!(!buf_core.is_empty() || !buf_user.is_empty());
@@ -613,7 +643,11 @@ pub(super) fn ree_fs_read_primitive(
         }
 
         // 读取数据块
-        tee_fs_htree_read_block(&mut fh.ht, start_block_num, &mut block)?;
+        tee_fs_htree_read_block(
+            fh.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?,
+            start_block_num,
+            &mut block,
+        )?;
 
         // 复制数据到目标缓冲区
         if !buf_core.is_empty() {
@@ -637,7 +671,7 @@ pub(super) fn ree_fs_read_primitive(
 
 pub(super) fn ree_fs_ftruncate_internal(fdp: &mut TeeFsFd, new_file_len: usize) -> TeeResult {
     let meta_length = {
-        let meta = tee_fs_htree_get_meta(&mut fdp.ht);
+        let meta = tee_fs_htree_get_meta(fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?);
         meta.length
     };
 
@@ -652,11 +686,14 @@ pub(super) fn ree_fs_ftruncate_internal(fdp: &mut TeeFsFd, new_file_len: usize) 
             roundup_u(new_file_len, BLOCK_SIZE) / BLOCK_SIZE,
             1,
         )?;
-        tee_fs_htree_truncate(&mut fdp.ht, new_file_len / BLOCK_SIZE)?;
+        tee_fs_htree_truncate(
+            fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?,
+            new_file_len / BLOCK_SIZE,
+        )?;
         tee_fs_rpc_truncate(&mut fdp.fd, offs + sz)?;
-        let meta = tee_fs_htree_get_meta(&mut fdp.ht);
+        let meta = tee_fs_htree_get_meta(fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?);
         meta.length = new_file_len as u64;
-        tee_fs_htree_meta_set_dirty(&mut fdp.ht);
+        tee_fs_htree_meta_set_dirty(fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?);
     }
     Ok(())
 }
@@ -674,7 +711,7 @@ pub(super) fn ree_fs_write_primitive(
         return Ok(());
     }
 
-    let file_size = tee_fs_htree_get_meta(&mut fdp.ht).length;
+    let file_size = tee_fs_htree_get_meta(fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?).length;
 
     if pos.checked_add(len).is_none() {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -695,8 +732,9 @@ pub(super) fn ree_fs_write_primitive(
 pub(super) fn ree_fs_close_primitive(fdp: &mut TeeFsFd) {
     // Align with GP ree_fs_close_primitive():
     // close htree context then close underlying file descriptor.
-    let ht = core::mem::take(&mut fdp.ht);
-    let _ = tee_fs_htree_close(ht);
+    if let Some(ht) = fdp.ht.take() {
+        let _ = tee_fs_htree_close(ht);
+    }
     let _ = tee_fs_rpc_close(&fdp.fd);
 }
 
@@ -704,7 +742,10 @@ pub(super) fn ree_dirf_commit_writes(
     fh: &mut TeeFsFd,
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
 ) -> TeeResult {
-    tee_fs_htree_sync_to_storage(&mut fh.ht, Some(&mut fh.dfh.hash))?;
+    tee_fs_htree_sync_to_storage(
+        fh.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?,
+        Some(&mut fh.dfh.hash),
+    )?;
 
     if let Some(h) = hash {
         h.copy_from_slice(&fh.dfh.hash);
@@ -835,7 +876,7 @@ pub(super) struct TeeFileOperations {
 }
 
 pub(super) fn ree_fs_open(po: &TeePobj, size: Option<&mut usize>) -> TeeResult<KBox<TeeFsFd>> {
-    new_fs_owner(|| {
+    new_fs_file_owner(|owners| {
         tee_debug!("ree_fs_open: po: {:?}", po);
         let _global_lock = REE_FS_MUTEX.lock();
         let mut state = REE_FS_STATE.lock();
@@ -848,6 +889,7 @@ pub(super) fn ree_fs_open(po: &TeePobj, size: Option<&mut usize>) -> TeeResult<K
             dfh_result.and_then(|mut dfh| {
                 let mut hash_buf = dfh.hash;
                 let mut fdp = ree_fs_open_primitive_inner(
+                    owners,
                     Some(&po.uuid),
                     false,
                     Some(&mut hash_buf),
@@ -863,7 +905,8 @@ pub(super) fn ree_fs_open(po: &TeePobj, size: Option<&mut usize>) -> TeeResult<K
                 dfh.hash.copy_from_slice(&hash_buf);
 
                 if let Some(size_ref) = size {
-                    let meta = tee_fs_htree_get_meta(&mut fdp.ht);
+                    let meta =
+                        tee_fs_htree_get_meta(fdp.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?);
                     *size_ref = meta.length as usize;
                 }
 
@@ -946,7 +989,7 @@ fn ree_fs_create(
     data_user: &[u8],
     data_size: usize,
 ) -> TeeResult<KBox<TeeFsFd>> {
-    new_fs_owner(|| {
+    new_fs_file_owner(|owners| {
         // One of data_core and data_user must be NULL
         debug_assert!(data_core.is_empty() || data_user.is_empty());
 
@@ -958,6 +1001,7 @@ fn ree_fs_create(
         state.get_dirh()?;
 
         let ret = ree_fs_create_inner(
+            owners,
             &mut state,
             &ReeFsCreateParams {
                 po,
@@ -997,6 +1041,7 @@ struct ReeFsCreateParams<'a> {
 
 /// Inner helper for `ree_fs_create` to avoid borrow conflicts with `state`.
 fn ree_fs_create_inner(
+    owners: HtreeOwners,
     state: &mut ReeFsDirh,
     params: &ReeFsCreateParams<'_>,
     dfh: &mut TeeFsDirfileFileh,
@@ -1005,8 +1050,13 @@ fn ree_fs_create_inner(
     tee_fs_dirfile_get_tmp(state.dirh_mut(), dfh)?;
 
     let mut hash_buf = dfh.hash;
-    let opened_fdp =
-        ree_fs_open_primitive_inner(Some(&params.po.uuid), true, Some(&mut hash_buf), Some(dfh))?;
+    let opened_fdp = ree_fs_open_primitive_inner(
+        owners,
+        Some(&params.po.uuid),
+        true,
+        Some(&mut hash_buf),
+        Some(dfh),
+    )?;
     dfh.hash.copy_from_slice(&hash_buf);
 
     *fdp = Some(opened_fdp);
@@ -1035,7 +1085,10 @@ fn ree_fs_create_inner(
     }
 
     tee_debug!("ree_fs_create: sync to storage");
-    tee_fs_htree_sync_to_storage(&mut fdp_val.ht, Some(&mut fdp_val.dfh.hash))?;
+    tee_fs_htree_sync_to_storage(
+        fdp_val.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?,
+        Some(&mut fdp_val.dfh.hash),
+    )?;
 
     tee_debug!("ree_fs_create: set name");
     set_name(state.dirh_mut(), fdp_val, params.po, params.overwrite).inspect_err(|e| {
@@ -1089,7 +1142,11 @@ pub(super) fn ree_fs_write(
         ree_fs_write_primitive(fh, pos, buf_core, buf_user, len).inspect_err(|e| {
             error!("ree_fs_write: write primitive failed: {:#010X}", e);
         })?;
-        tee_fs_htree_sync_to_storage(&mut fh.ht, Some(&mut fh.dfh.hash)).inspect_err(|e| {
+        tee_fs_htree_sync_to_storage(
+            fh.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?,
+            Some(&mut fh.dfh.hash),
+        )
+        .inspect_err(|e| {
             error!("ree_fs_write: sync to storage failed: {:#010X}", e);
         })?;
         tee_fs_dirfile_update_hash(state.dirh_mut(), &fh.dfh).inspect_err(|e| {
@@ -1115,7 +1172,10 @@ pub(super) fn ree_fs_truncate(fh: &mut TeeFsFd, len: usize) -> TeeResult {
     let ret = (|| -> TeeResult {
         ree_fs_ftruncate_internal(fh, len)?;
 
-        tee_fs_htree_sync_to_storage(&mut fh.ht, Some(&mut fh.dfh.hash))?;
+        tee_fs_htree_sync_to_storage(
+            fh.ht.as_deref_mut().ok_or(TEE_ERROR_BAD_STATE)?,
+            Some(&mut fh.dfh.hash),
+        )?;
 
         tee_fs_dirfile_update_hash(state.dirh_mut(), &fh.dfh)?;
         commit_dirh_writes(state.dirh_mut())?;

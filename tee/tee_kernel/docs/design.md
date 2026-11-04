@@ -17,7 +17,7 @@ allocation and write/rename transaction rollback are unchanged.
 TeeFsFd stores FileVariant inline: it is a copyable integer fd, and no pointer to
 this field escapes. The auxiliary storage object copies the handle value. Moving
 TeeFsFd therefore needs no separate fd allocation and preserves explicit close
-semantics. The htree and its auxiliary storage ownership are not migrated here.
+semantics. The htree and its auxiliary storage use the fallible owners described below.
 
 ## CSV Temporary Ownership
 
@@ -111,6 +111,23 @@ directory reference. `open_dirh` returns the existing owner instead of moving
 its contents into a second allocation. Dirfile initialization consumes a file
 owner with `KBox::into_inner`, preserving the existing explicit close protocol.
 
+`new_fs_file_owner` also reserves the outer `TeeFsHtree` and concrete
+`TeeFsFdAux` storage before invoking the file initializer. All three reservations
+therefore precede `get_dirh()` and temporary-number mutation in public open/create,
+and precede backend RPC open/create in the primitive path. Each reservation uses
+NOWAIT because directory-file opens can already hold REE serialization locks.
+Allocator errors use the existing `TeeError::from(KError)` conversion.
+After RPC open, `KBox::write` initializes the storage reservation and coerces it
+to `KBox<dyn TeeFsHtreeStorageOps>` without allocating. Htree open initializes
+its supplied reservation with that storage owner, without a dummy storage object.
+
+`TeeFsFd::ht` is `Option<KBox<TeeFsHtree>>`: default is empty, successful open
+installs the tree, and close takes and drops it before explicitly closing the fd.
+Close does not allocate a replacement tree or storage owner. Operations requiring
+a tree return BAD_STATE when it is absent. The fd remains an explicit-close
+integer handle; dropping an owner alone does not close it. Recursive `Subtree`
+nodes still use Box, and existing Vec and pobj rename behavior is unchanged.
+
 These paths run in sleepable task context with the filesystem and credential
 context required by the existing file helpers; IRQ handlers, IRQ/preemption-
 disabled regions and non-sleeping locks must not enclose the storage operation.
@@ -123,8 +140,10 @@ the initializer runs; existing initializer failures retain their cleanup paths.
 Reopening an enumeration still closes its previous iterator first, so a failed
 restart leaves it stopped rather than preserving the old iteration position.
 
-The metadata reservation boundary covers outer ownership only. Hash-tree nodes,
-tree and storage owners and their existing Default constructions remain unchanged.
+The metadata reservation boundary covers outer ownership, including the tree and
+storage owners. `TeeFsHtree::new(storage)` replaces the tree's former Default
+construction and consumes a prepared storage owner; `TeeFsFd::default()` leaves
+`ht` as `None`. Recursive hash-tree nodes and their allocation behavior remain unchanged.
 Scratch blocks and inline FileVariant handles have the separate boundaries
 described above. In particular, incremental tree growth needs
 its own failure-consistency audit before becoming fallible.

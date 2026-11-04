@@ -6,6 +6,7 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use core::{fmt, fmt::Debug};
 
 use bytemuck::{Pod, Zeroable, bytes_of, bytes_of_mut};
+use kalloc_types::KBox;
 use memoffset::offset_of;
 use subtle::ConstantTimeEq;
 use tee_crypto::{
@@ -28,7 +29,7 @@ use crate::tee::{
     TeeResult,
     rng_software::crypto_rng_read,
     tee_fs_key_manager::{TEE_FS_KM_FEK_SIZE, tee_fs_fek_crypt},
-    tee_ree_fs::{TeeFsFdAux, TeeFsHtreeStorageOps},
+    tee_ree_fs::TeeFsHtreeStorageOps,
     utee_defines::TeeAlg,
     utils::slice_fmt,
 };
@@ -242,15 +243,15 @@ impl SubtreeExt for Subtree {
 pub(super) struct TeeFsHtree {
     pub root: HtreeNode,
     pub data: TeeFsHtreeData,
-    pub storage: Box<dyn TeeFsHtreeStorageOps>,
+    pub storage: KBox<dyn TeeFsHtreeStorageOps>,
 }
 
-impl Default for TeeFsHtree {
-    fn default() -> Self {
+impl TeeFsHtree {
+    pub(super) fn new(storage: KBox<dyn TeeFsHtreeStorageOps>) -> Self {
         TeeFsHtree {
             root: HtreeNode::new(0, TeeFsHtreeNodeImage::default()),
             data: TeeFsHtreeData::default(),
-            storage: Box::new(TeeFsFdAux::new()),
+            storage,
         }
     }
 }
@@ -1612,43 +1613,46 @@ pub(super) fn tee_fs_htree_sync_to_storage(
 /// open the tree
 ///
 /// # Arguments
-/// * `fd` - the file descriptor
+/// * `owner` - tree storage reserved before opening the backing file
+/// * `storage` - initialized backing-file operations owner
 /// * `create` - if create the tree
 /// * `hash` - the hash of the tree
 /// * `uuid` - the uuid of the tree
 /// # Returns
-/// * `TeeResult<Box<TeeFsHtree>>` - the tree
+/// * `TeeResult<KBox<TeeFsHtree>>` - the tree
+///
+/// Owner initialization does not allocate. Nested tree/crypto/IO operations can
+/// still fail; callers retain responsibility for explicitly closing the backing fd.
 pub(super) fn tee_fs_htree_open(
-    // fd: &mut FileVariant,
-    storage: Box<dyn TeeFsHtreeStorageOps>,
+    owner: KBox<core::mem::MaybeUninit<TeeFsHtree>>,
+    storage: KBox<dyn TeeFsHtreeStorageOps>,
     create: bool,
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
     uuid: Option<&TEE_UUID>,
-) -> TeeResult<Box<TeeFsHtree>> {
+) -> TeeResult<KBox<TeeFsHtree>> {
     tee_debug!(
         "tee_fs_htree_open: create: {:?}, hash: {:?}, uuid: {:?}",
         create,
         hash,
         uuid
     );
-    let mut ht = Box::new(TeeFsHtree::default());
+    let mut ht = KBox::write(owner, TeeFsHtree::new(storage));
     if let Some(uuid_val) = uuid {
         ht.data.uuid = *uuid_val;
     }
-
-    ht.storage = storage;
 
     let init_result = (|| {
         if create {
             let dummy_head = TeeFsHtreeImage::default();
             tee_debug!("tee_fs_htree_open: create: true");
             crypto_rng_read(&mut ht.data.fek)?;
+            let data = &mut ht.data;
             tee_fs_fek_crypt(
-                Some(&ht.data.uuid),
+                Some(&data.uuid),
                 TEE_OperationMode::TEE_MODE_ENCRYPT,
-                Some(&ht.data.fek),
-                size_of_val(&ht.data.fek),
-                Some(&mut ht.data.head.enc_fek),
+                Some(&data.fek),
+                size_of_val(&data.fek),
+                Some(&mut data.head.enc_fek),
             )?;
             init_root_node(&mut ht)?;
             tee_debug!("init_root_node to get: ht: {:?}", &ht);
@@ -1695,7 +1699,7 @@ pub(super) fn tee_fs_htree_open(
 /// * `ht` - the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub(super) fn tee_fs_htree_close(_ht: Box<TeeFsHtree>) -> TeeResult {
+pub(super) fn tee_fs_htree_close(_ht: KBox<TeeFsHtree>) -> TeeResult {
     // TODO: check if no need to free nodes manually??? rust will free them automatically???
     // htree_traverse_post_order(&ht, &mut free_node, None)?;
 

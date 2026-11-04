@@ -1,5 +1,15 @@
 # kvfs - 安全与可靠性分析
 
+## Parallel lookup result publication
+
+The parent children mutex protects both candidate membership and the decision
+to expose a completed cache hit. Checking `PAR_LOOKUP` only after releasing
+that mutex could expose an obsolete negative candidate after successful
+replacement or non-cacheable lookup, causing spurious `NotFound` errors for
+existing names. Pending candidates stay discoverable for lookup serialization,
+but neither fast nor slow lookup consumes them as results. Tests cover candidate
+retraction, replacement, and retention of genuine completed negative entries.
+
 ## Prepared mount-state ownership
 
 Private-owner allocation errors occur before the SimpleFs root factory runs and

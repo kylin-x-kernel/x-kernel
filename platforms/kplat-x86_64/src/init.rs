@@ -60,14 +60,12 @@ impl PlatformBootIf {
     }
 
     fn prepare_interrupts(_boot_info: &BootInfo) -> kerrno::KResult<()> {
-        x86_apic::init_primary(io_apic_paddr_from_firmware_or_fallback());
-        Ok(())
+        x86_apic::init_primary(io_apic_paddr_from_firmware_or_fallback())
     }
 
     #[cfg(feature = "smp")]
     fn prepare_local_interrupts(_logical_cpu_id: kcpu_id_map::LogicalCpuId) -> kerrno::KResult<()> {
-        x86_apic::init_secondary();
-        Ok(())
+        x86_apic::init_secondary()
     }
 
     fn activate_local_interrupts() -> kerrno::KResult<()> {

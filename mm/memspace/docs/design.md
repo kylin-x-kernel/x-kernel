@@ -384,3 +384,9 @@ the existing kernel layout lock and preserves previous error behavior.
 Coherent is READ|WRITE|UNCACHED|SHARED; Normal is READ|WRITE. The caller owns the
 allocation and quiesces device access before restoration. Allocation, platform
 sharing, rollback and device-cache synchronization are outside this capability.
+
+## MMIO Error Conversion
+
+IoMapError converts into KError at callers' kernel error boundaries: InvalidRange
+maps to InvalidInput, MappingFailed to Io, and NoMemory remains NoMemory. The
+conversion does not release mappings or roll back partially initialized hardware.

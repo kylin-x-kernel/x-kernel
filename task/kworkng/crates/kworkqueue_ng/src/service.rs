@@ -10,11 +10,10 @@ use core::task::Waker;
 use kcpu_id_map::LogicalCpuId;
 use kworkerpool_ng::PartitionDispatch;
 
-use crate::QueueConfig;
 #[cfg(feature = "stall-check")]
 pub use crate::diagnostics::Directory;
 pub use crate::{
-    queue::{Queue, QueuePartitionSource},
+    queue::{PreparedQueue, Queue, QueuePartitionSource},
     work::{execution::Execution, wait::WaitError},
 };
 
@@ -48,14 +47,16 @@ pub unsafe fn prepare_retiring_work(
 /// Call in sleepable task context; retain providers through ordinary drain and source
 /// detachment. Kicks must be IRQ-compatible and retain no Queue/Work. This does not
 /// initialize providers or certify subsystem readiness.
+/// Consumes reserved partition storage without allocating a second table.
+/// Nested Arc allocations retain the fatal allocator policy.
 ///
 /// # Panics
 /// Propagates provider closure panics and fatal kernel allocation failures.
 pub fn bind_queue(
-    config: QueueConfig,
+    prepared: PreparedQueue,
     service: impl FnMut(LogicalCpuId) -> (Arc<PartitionDispatch<QueuePartitionSource>>, Arc<Waker>),
 ) -> Arc<Queue> {
-    Queue::with_dispatch(config, service)
+    Queue::with_dispatch(prepared, service)
 }
 
 /// Binds execution and named per-CPU diagnostics before exposing a queue.
@@ -66,10 +67,10 @@ pub fn bind_queue(
 /// Propagates provider closure panics and fatal kernel allocation failures.
 #[cfg(feature = "stall-check")]
 pub fn bind_queue_with_diagnostics(
-    config: QueueConfig,
+    prepared: PreparedQueue,
     name: &str,
     directory: &Directory,
     service: impl FnMut(LogicalCpuId) -> (Arc<PartitionDispatch<QueuePartitionSource>>, Arc<Waker>),
 ) -> Arc<Queue> {
-    Queue::with_dispatch_and_diagnostics(config, name, directory, service)
+    Queue::with_dispatch_and_diagnostics(prepared, name, directory, service)
 }

@@ -12,7 +12,73 @@ use core::{
 use ktime_types::TimeSpan;
 use unittest::def_test;
 
+use super::{
+    CpuPolicy, ExecutionKind, InitError, KError, PreparedQueue, QueueConfig, QueueCreateError,
+    Services, prepare_queue, prepare_queue_with, with_services,
+};
 use crate::{DefaultQueue, DelayedWork, Work};
+
+fn is_ready() -> bool {
+    with_services(|services| services.is_some())
+}
+
+/// Checks each default reservation fails before reaching provider startup.
+/// # Panics
+/// Panics if provider startup is invoked despite reservation failure.
+#[def_test(serial)]
+fn default_partition_reservation_precedes_startup() {
+    let was_ready = is_ready();
+    for failure_index in 0..3 {
+        let mut calls = 0;
+        let result = Services::prepare_with_reservation(
+            1,
+            1,
+            |config| {
+                let index = calls;
+                calls += 1;
+                if index == failure_index {
+                    Err(KError::NoMemory)
+                } else {
+                    PreparedQueue::new(config)
+                }
+            },
+            |_| panic!("providers must not start before all reservations succeed"),
+        );
+        assert!(matches!(
+            result,
+            Err(InitError::QueueAllocation(KError::NoMemory))
+        ));
+        assert_eq!(calls, failure_index + 1);
+        assert_eq!(is_ready(), was_ready);
+    }
+}
+
+/// Checks reservation failure preserves existing providers and allows retry.
+/// # Panics
+/// Panics if allocation failure publishes a queue or damages live services.
+#[def_test(serial)]
+fn independent_partition_reservation_failure_allows_retry() {
+    assert!(is_ready());
+    let cpu = khal::percpu::this_cpu_id();
+    let config = || QueueConfig::new(&[cpu], CpuPolicy::CurrentCpu, 1).unwrap();
+    let result = prepare_queue_with("failure", config(), ExecutionKind::Normal, |_| {
+        Err(KError::NoMemory)
+    });
+    assert!(matches!(
+        result,
+        Err(QueueCreateError::Allocation(KError::NoMemory))
+    ));
+    assert!(is_ready());
+    let queue = prepare_queue("retry", config(), ExecutionKind::Normal).unwrap();
+    let calls = core::sync::atomic::AtomicUsize::new(0);
+    let work = core::pin::pin!(crate::Work::with_callback(|| {
+        calls.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }));
+    // SAFETY: the pinned Work and captures remain alive through queue drain.
+    unsafe { queue.queue_work(work.as_ref(), Some(cpu)) }.unwrap();
+    queue.close_and_drain().unwrap();
+    assert_eq!(calls.load(core::sync::atomic::Ordering::Relaxed), 1);
+}
 
 struct TerminalOwner {
     work: Work,

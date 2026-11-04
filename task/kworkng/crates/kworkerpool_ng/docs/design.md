@@ -1,6 +1,19 @@
 # Prepared Work Execution Services
 
-## Fallible Manager Entry Preparation
+## Fallible Startup Storage And Manager Entry
+
+Each CPU reserves three fixed KBox slices: worker states, optional task wakers,
+and optional task references. They replace only final boxed-slice owners, not
+general Vec storage. The state and waker tables are ready before Arc::new_cyclic;
+all three tables are ready before manager entry preparation or task activation.
+The optional tables are initialized to None without cloning or allocating elements.
+Failure drops previously prepared local storage; no worker slot has been admitted.
+NoMemory preserves the existing startup error channel. Layout overflow is returned
+as Allocation(InvalidInput), not mislabeled as allocator exhaustion.
+Production uses KERNEL in reclaim-safe sleepable task context, with IRQs and
+preemption enabled, outside non-sleepable RCU and without reclaim/IO/FS-dependent
+locks. Isolated state fixtures pass NOWAIT explicitly; this does not make nested
+Arc allocations, task preparation, or later callbacks atomic-safe.
 
 Normal runtime startup allocates the manager closure as `PreparedTaskEntry`
 with KERNEL, after validating context, CPU and idle interval. It holds no
@@ -15,7 +28,7 @@ Dynamic worker creation remains unchanged: it reserves a Creating slot first
 and supplies the baseline worker needed to complete startup. Migrating it needs
 both reservation rollback and a progress/retry or startup-failure protocol;
 simply returning on allocation failure could strand retained demand or startup.
-Manager/service arrays, Arc, stack and task-wait allocations remain infallible.
+Arc, stack and task-wait allocations remain infallible.
 
 ## Purpose And Scope
 

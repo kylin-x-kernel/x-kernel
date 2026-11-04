@@ -1,5 +1,20 @@
 # Workqueue Security
 
+## Partition Initialization Ownership
+
+PreparedQueue keeps CPU configuration and reserved partition storage inseparable.
+The private initializer holds exclusive access and records a slot only after
+writing its value. Its drop path destroys exactly that initialized prefix.
+Successful completion disarms the guard before converting the fully initialized
+slice, preserving address, length and single ownership. No uninitialized slot
+is read or dropped as an Arc. Tests cover empty/partial/full prefix cleanup,
+successful transfer, invalid flags and preservation of storage and CPU order.
+
+Sources remain detached until normal submission. Binding can still allocate
+infallible Arc owners and register weak diagnostics. Expired diagnostic entries
+are pruned later; cleanup does not promise directory rollback or panic recovery
+for running workers. The prefix guard is not a global OOM recovery mechanism.
+
 ## Configuration Reservation Boundary
 
 CPU-set storage is reserved before a QueueConfig can escape. Allocation failure
@@ -7,7 +22,7 @@ returns QueueConfigError::Allocation without publishing a queue or starting a
 worker. The default KERNEL allocation requires a sleepable, reclaim-safe caller;
 NOWAIT only excludes sleeping reclaim for this allocation and promises neither
 reserve capacity, bounded latency nor NMI safety. NOIO and NOFS may still sleep.
-Existing queue partition and worker allocations retain their previous behavior;
+Nested partition Arc and worker allocations retain their previous behavior;
 this boundary does not make full service preparation OOM-safe.
 
 Tests inject failure into the same private reservation operation used by the

@@ -7,7 +7,9 @@
 use alloc::sync::Arc;
 use core::num::NonZeroUsize;
 
+use kalloc_types::AllocFlags;
 use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId};
+use kerrno::KError;
 use ktask::future::PreparedTaskWait;
 use ktime_types::TimeSpan;
 
@@ -22,8 +24,19 @@ pub enum RuntimeError {
     CpuUnavailable,
     /// The idle interval is zero or its deadline exceeds the timer range.
     InvalidIdleInterval,
-    /// The manager entry owner could not be allocated before task activation.
+    /// Fixed-table layout or allocation permissions were rejected.
+    Allocation(KError),
+    /// Fixed metadata or the manager entry could not be allocated before activation.
     NoMemory,
+}
+
+impl From<KError> for RuntimeError {
+    fn from(error: KError) -> Self {
+        match error {
+            KError::NoMemory => Self::NoMemory,
+            error => Self::Allocation(error),
+        }
+    }
 }
 
 /// Rejects intervals whose first idle deadline cannot be represented by the timer.
@@ -53,13 +66,14 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalRuntime<S> {
     /// Starts one CPU-bound service after boot CPU/task/timer initialization.
     /// Returns only after manager notification and a baseline worker wait exist.
     /// Requires sleepable context without locks needed by reclaim, I/O or
-    /// filesystem callbacks. Manager entry allocation uses KERNEL and can fail
+    /// filesystem callbacks. Fixed tables and manager entry use KERNEL and can fail
     /// before task activation; other allocations retain their existing policy.
     ///
     /// # Errors
     /// Rejects non-sleepable context, an unmapped CPU, a zero idle interval or
     /// an idle deadline outside the timer's range at preparation time. Returns
-    /// NoMemory if manager entry preparation fails, without starting a task.
+    /// NoMemory if fixed-table or manager entry allocation fails, without starting
+    /// a task. Allocation(InvalidInput) rejects an unrepresentable table layout.
     ///
     /// # Panics
     /// Propagates task/timer preparation or initialized runtime invariant failures.
@@ -88,7 +102,7 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalRuntime<S> {
             return Err(RuntimeError::CpuUnavailable);
         }
         validate_idle_interval(idle_for)?;
-        let manager = WorkerManager::new(cpu, limit, idle_for);
+        let manager = WorkerManager::new(cpu, limit, idle_for, AllocFlags::KERNEL)?;
         let service = manager.service.clone();
         let wake = startup.waker();
         let entry = prepare_entry(manager, wake)?;

@@ -23,6 +23,16 @@ pub enum IoMapError {
     NoMemory,
 }
 
+impl From<IoMapError> for kerrno::KError {
+    fn from(error: IoMapError) -> Self {
+        match error {
+            IoMapError::InvalidRange => Self::InvalidInput,
+            IoMapError::MappingFailed => Self::Io,
+            IoMapError::NoMemory => Self::NoMemory,
+        }
+    }
+}
+
 /// A registered device MMIO region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceRegion {

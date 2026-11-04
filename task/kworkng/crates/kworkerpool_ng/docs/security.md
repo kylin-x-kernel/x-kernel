@@ -33,6 +33,7 @@ must preserve acquired execution lifetime independently of source inspection.
 
 | Site | Operation and required invariant |
 | --- | --- |
+| `src/normal.rs`: `empty_slots<T>` | `assume_init` transfers `KBox<[MaybeUninit<Option<T>>]>` to `KBox<[Option<T>]>`; every slot is written with `None` before transfer, with no callback or fallible operation after reservation |
 | `src/dispatch.rs`: Sync for PartitionSource<S> | S: Send + Sync; all private mutable state/list access uses its unique owner lock; payload is shared |
 | `notify`, `detach` | UnsafeCell mutable access after Weak owner identity check; no reference escapes the lock |
 | `detach` | cursor_mut_from_ptr uses Arc-derived pointer; protected Queued state proves exact-list membership and Arc retains storage |
@@ -72,7 +73,7 @@ Recoverable startup/context/CPU errors use `NormalRuntimeError` and
 `BottomHalfPrepareError`. BH execution rejects with `BottomHalfRunError`
 before acquiring work. Invalid source ownership and impossible state/count
 transitions panic; adapter, callback and Waker panics are not recovered.
-Manager entry allocation uses KERNEL in sleepable context without service or
+Fixed-table and manager entry allocation use KERNEL in sleepable context without service or
 reclaim-dependent caller locks. NoMemory returns before task activation and
 worker reservation. The unpublished empty manager, startup wake and service
 owners are dropped; previously started CPU runtimes are stopped and joined.
@@ -84,6 +85,15 @@ Tests inject entry preparation failure, check that the unpublished service is
 released, and start a fresh runtime afterwards. Collection tests inject NoMemory
 at every startup prefix and check release after joined rollback. These tests
 do not force allocator-wide OOM or claim whole-startup OOM safety.
+Fixed-table tests reject overflowing capacity before entry preparation, reject
+invalid flags, and verify that empty optional slots release subsequently installed
+waker owners exactly once without invoking them. They do not inject allocator
+failure at every individual table reservation.
+
+The private empty-slot initializer writes None to every MaybeUninit element before
+assume_init. It invokes no callbacks and cannot fail after storage reservation.
+Unpublished table owners drop on subsequent preparation errors; task slots are
+still empty, so cleanup neither joins tasks nor invokes worker lifecycle actions.
 
 | Failure mode | Local/system effect | Control |
 | --- | --- | --- |

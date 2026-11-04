@@ -52,6 +52,22 @@ fn manager_entry_failure_releases_unpublished_service() {
     runtime.stop().unwrap();
 }
 
+#[def_test]
+fn fixed_capacity_overflow_rejects_before_entry_preparation() {
+    let result = NormalRuntime::<Empty>::start_with_entry(
+        khal::percpu::this_cpu_id(),
+        NonZeroUsize::new(usize::MAX).unwrap(),
+        TimeSpan::from_millis(10),
+        |_, _| panic!("invalid fixed capacity must reject before preparing an entry"),
+    );
+    assert!(matches!(
+        result,
+        Err(RuntimeError::Allocation(KError::InvalidInput))
+    ));
+    let runtime = start();
+    runtime.stop().unwrap();
+}
+
 /// Startup returns with a usable worker; stop joins and removes runtime ownership.
 ///
 /// # Panics

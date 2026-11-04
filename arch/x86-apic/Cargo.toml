@@ -12,6 +12,8 @@ repository.workspace = true
 default = []
 
 [dependencies]
+kalloc-types.workspace = true
+kerrno.workspace = true
 kspin = { workspace = true }
 kcpu_id_map = { workspace = true }
 memspace = { workspace = true }

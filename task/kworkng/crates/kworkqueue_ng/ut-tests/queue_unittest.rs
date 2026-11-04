@@ -99,6 +99,86 @@ fn queue() -> Arc<Queue> {
     queue_for(&[0, 1], 1)
 }
 
+/// Checks that binding consumes the reserved table in configuration order.
+/// # Panics
+/// Panics on reservation failure, relocation or incorrect routing.
+#[def_test]
+fn prepared_queue_reuses_table() {
+    let config = QueueConfig::validate(
+        &[LogicalCpuId::new(2), LogicalCpuId::new(0)],
+        CpuPolicy::CurrentCpu,
+        1,
+        AllocFlags::NOWAIT,
+        |_| true,
+    )
+    .unwrap();
+    let prepared = super::PreparedQueue::new_with_flags(config, AllocFlags::NOWAIT).unwrap();
+    let address = prepared
+        .storage
+        .as_ptr()
+        .cast::<Arc<super::QueuePartition>>();
+    let queue = Queue::prepare(prepared, |_, _| None, |partition| partition);
+    assert_eq!(queue.partitions.as_ptr(), address);
+    assert_eq!(queue.partitions[0].cpu_id(), LogicalCpuId::new(0));
+    assert_eq!(queue.partitions[1].cpu_id(), LogicalCpuId::new(2));
+}
+
+/// Checks initialized owners are retired once on partial drop and transfer.
+/// # Panics
+/// Panics if cleanup leaks, double-drops or initializes an unused slot.
+#[def_test]
+fn partition_storage_prefix_cleanup() {
+    struct Tracked<'a>(&'a AtomicUsize);
+    impl Drop for Tracked<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    for count in 0..=3 {
+        let drops = AtomicUsize::new(0);
+        let mut storage =
+            KBox::<[Tracked<'_>]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
+        {
+            let mut prefix = super::InitializedPrefix {
+                storage: &mut storage,
+                initialized: 0,
+            };
+            for _ in 0..count {
+                prefix.push(Tracked(&drops));
+            }
+        }
+        assert_eq!(drops.load(Ordering::Relaxed), count);
+        drop(storage);
+        assert_eq!(drops.load(Ordering::Relaxed), count);
+    }
+    let drops = AtomicUsize::new(0);
+    let storage =
+        KBox::<[Tracked<'_>]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
+    let initialized = super::initialize_storage(storage, |_| Tracked(&drops));
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    drop(initialized);
+    assert_eq!(drops.load(Ordering::Relaxed), 3);
+}
+
+/// Checks invalid permissions reject a preparation before binding providers.
+/// # Panics
+/// Panics if invalid flags are accepted.
+#[def_test]
+fn prepared_queue_rejects_invalid_flags() {
+    let config = QueueConfig::validate(
+        &[LogicalCpuId::new(0)],
+        CpuPolicy::CurrentCpu,
+        1,
+        AllocFlags::NOWAIT,
+        |_| true,
+    )
+    .unwrap();
+    assert_eq!(
+        super::PreparedQueue::new_with_flags(config, AllocFlags::from_bits_retain(u32::MAX)).err(),
+        Some(KError::InvalidInput)
+    );
+}
+
 /// Prepares an unbound test queue whose execution is driven by explicit claims.
 ///
 /// # Panics

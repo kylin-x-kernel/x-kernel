@@ -232,8 +232,6 @@ unittest::path_mod_test!(owned_unittest, "../ut-tests/owned_unittest.rs");
 
 #[cfg(feature = "system")]
 unittest::path_mod_test!(live_owned_unittest, "../ut-tests/live_owned_unittest.rs");
-#[cfg(feature = "system")]
-unittest::path_mod_test!(system_unittest, "../ut-tests/system_unittest.rs");
 
 mod defaults;
 pub use defaults::{DefaultQueue, ServiceError};

@@ -2,15 +2,19 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kalloc_types::AllocFlags;
 use unittest::{assert, assert_eq};
 
 use super::*;
-use crate::tee::common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT, FileVariant};
+use crate::tee::{
+    common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT, FileVariant},
+    tee_ree_fs::TeeFsFdAux,
+};
 
 #[unittest::def_test(user)]
 fn test_tee_fs_htree_open() {
-    let fd = FileVariant::open("/tmp/test_fs_htree_open.bin", FS_OFLAG_DEFAULT, FS_MODE_644)
-        .unwrap();
+    let fd =
+        FileVariant::open("/tmp/test_fs_htree_open.bin", FS_OFLAG_DEFAULT, FS_MODE_644).unwrap();
 
     let uuid = TEE_UUID {
         timeLow: 1,
@@ -24,7 +28,8 @@ fn test_tee_fs_htree_open() {
     info!("fd_back: {:?}", fd_back);
     // 先创建文件 (create = true)
     let ht_create = tee_fs_htree_open(
-        Box::new(TeeFsFdAux { fd }),
+        KBox::<TeeFsHtree>::new_uninit_with_flags(AllocFlags::NOWAIT).unwrap(),
+        KBox::new_with_flags(TeeFsFdAux { fd }, AllocFlags::NOWAIT).unwrap(),
         true,
         Some(&mut hash),
         Some(&uuid),
@@ -36,7 +41,8 @@ fn test_tee_fs_htree_open() {
 
     // 再打开文件 (create = false)
     let ht_open = tee_fs_htree_open(
-        Box::new(TeeFsFdAux { fd: fd_back }),
+        KBox::<TeeFsHtree>::new_uninit_with_flags(AllocFlags::NOWAIT).unwrap(),
+        KBox::new_with_flags(TeeFsFdAux { fd: fd_back }, AllocFlags::NOWAIT).unwrap(),
         false,
         Some(&mut hash),
         Some(&uuid),

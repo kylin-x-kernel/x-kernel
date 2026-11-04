@@ -9,6 +9,17 @@ remains with the timer driver. There is no per-vector hardware mask for IPIs.
 
 ## Purpose
 
+LAPIC handles use kernel-lifetime KBox storage. BSP and AP initialization return
+KResult and reserve this owner with NOWAIT because IRQs and migration are disabled
+before scheduler startup. A failed reservation returns NoMemory without publishing
+the CPU-local pointer or enabling error delivery. The platform forwards this error
+to the existing fatal boot boundary; this is not retryable hardware initialization.
+MMIO mapping errors also propagate through this boundary via IoMapError's KError
+conversion. IO-APIC mapping can fail after LAPIC publication and error unmasking;
+the published owner is retained and boot cannot continue. Hardware preparation
+is not rolled back. On success,
+the owner becomes a raw pointer retained for kernel life, as before.
+
 `x86-apic` is the x86_64 platform's interrupt-hardware adapter: it brings
 up the Local APIC on every CPU, owns IO-APIC input-line routing, sends
 IPIs, provides the MSI-X vector backend that `kirq` consumes, and exposes
@@ -177,13 +188,15 @@ CPU performing the request. There is no other creation or cleanup path.
 
 ## Error And Panic Model
 
-- Allocator exhaustion returns `None` to `kirq` (`alloc_msi_vector`);
+- LAPIC owner allocation failure returns `NoMemory` through the platform's
+  fallible interrupt preparation hooks to the runtime's fatal boot boundary.
+- MSI vector exhaustion returns `None` to `kirq` (`alloc_msi_vector`);
   free with an out-of-window vector returns `false`; `compose_msi_message`
   returns `None` for an out-of-window vector or an unresolvable affinity
   target (logged).
 - Panics mark bring-up ordering violations: `with_local_apic` without a
   per-CPU handle, `boot_ap` with a logical CPU that has no raw id
-  mapping, and a failed LAPIC MMIO mapping in `init_primary`.
+  mapping, or duplicate local initialization.
 
 ## Unsafe Code
 

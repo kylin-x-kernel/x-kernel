@@ -8,6 +8,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
 
 use kcpu_id_map::LogicalCpuId;
+use kerrno::{KError, KResult};
 use kirq::softirq::{self, SoftirqVec};
 use klazy::Once;
 use ktime_types::TimeSpan;
@@ -17,7 +18,7 @@ use kworkerpool_ng::{
 };
 use kworkqueue_ng::{
     CpuPolicy, QueueConfig, QueueConfigError,
-    service::{self, Queue, QueuePartitionSource},
+    service::{self, PreparedQueue, Queue, QueuePartitionSource},
 };
 
 /// Callback execution context selected when creating an independent queue.
@@ -32,12 +33,20 @@ pub enum ExecutionKind {
 /// Independent queue creation failed before exposing any queue or accepting work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueueCreateError {
+    /// Partition storage reservation failed before provider binding.
+    Allocation(KError),
     /// Queue preparation requires sleepable task context.
     InvalidContext,
     /// Kernel initialization has not published usable execution services.
     ServicesUnavailable,
     /// A configured CPU has no matching execution service.
     CpuUnavailable(LogicalCpuId),
+}
+
+impl From<KError> for QueueCreateError {
+    fn from(error: KError) -> Self {
+        Self::Allocation(error)
+    }
 }
 
 /// Prepares an independent queue against the registered service set.
@@ -47,6 +56,15 @@ pub(crate) fn prepare_queue(
     name: &str,
     config: QueueConfig,
     kind: ExecutionKind,
+) -> Result<Arc<Queue>, QueueCreateError> {
+    prepare_queue_with(name, config, kind, PreparedQueue::new)
+}
+
+fn prepare_queue_with(
+    name: &str,
+    config: QueueConfig,
+    kind: ExecutionKind,
+    reserve: impl FnOnce(QueueConfig) -> KResult<PreparedQueue>,
 ) -> Result<Arc<Queue>, QueueCreateError> {
     if !ktask::is_sleepable_context() {
         return Err(QueueCreateError::InvalidContext);
@@ -60,6 +78,7 @@ pub(crate) fn prepare_queue(
                 return Err(QueueCreateError::CpuUnavailable(cpu));
             }
         }
+        let prepared = reserve(config)?;
         let binding = |cpu| {
             #[expect(
                 clippy::expect_used,
@@ -72,11 +91,11 @@ pub(crate) fn prepare_queue(
         };
         #[cfg(feature = "stall-check")]
         let queue =
-            service::bind_queue_with_diagnostics(config, name, &services.diagnostics, binding);
+            service::bind_queue_with_diagnostics(prepared, name, &services.diagnostics, binding);
         #[cfg(not(feature = "stall-check"))]
         let queue = {
             let _ = name;
-            service::bind_queue(config, binding)
+            service::bind_queue(prepared, binding)
         };
         Ok(queue)
     })
@@ -129,6 +148,20 @@ impl Services {
         normal_max_active: usize,
         bh_max_active: usize,
     ) -> Result<Self, InitError> {
+        Self::prepare_with_reservation(
+            normal_max_active,
+            bh_max_active,
+            PreparedQueue::new,
+            |prepared| Self::start_prepared(prepared, limit, idle_for, budget),
+        )
+    }
+
+    fn prepare_with_reservation(
+        normal_max_active: usize,
+        bh_max_active: usize,
+        mut reserve: impl FnMut(QueueConfig) -> KResult<PreparedQueue>,
+        start: impl FnOnce([PreparedQueue; 3]) -> Result<Self, InitError>,
+    ) -> Result<Self, InitError> {
         if !ktask::is_sleepable_context() {
             return Err(InitError::BottomHalf(
                 BottomHalfPrepareError::InvalidContext,
@@ -146,11 +179,26 @@ impl Services {
             config(bh_max_active)?,
             config(bh_max_active)?,
         ];
+        let [normal_config, bh_config, high_config] = configs;
+        let prepared = [
+            reserve(normal_config)?,
+            reserve(bh_config)?,
+            reserve(high_config)?,
+        ];
+        start(prepared)
+    }
+
+    fn start_prepared(
+        prepared: [PreparedQueue; 3],
+        limit: NonZeroUsize,
+        idle_for: TimeSpan,
+        budget: NonZeroUsize,
+    ) -> Result<Self, InitError> {
         let bottom_half = BottomHalfServices::prepare(budget).map_err(InitError::BottomHalf)?;
         let normal = NormalServices::start(limit, idle_for).map_err(InitError::Normal)?;
         #[cfg(feature = "stall-check")]
         let diagnostics = kworkqueue_ng::service::Directory::new();
-        let create = |config, name, kind| {
+        let create = |prepared, name, kind| {
             let binding = |cpu| match kind {
                 ExecutionKind::Normal =>
                 {
@@ -176,15 +224,15 @@ impl Services {
                 }
             };
             #[cfg(feature = "stall-check")]
-            let queue = service::bind_queue_with_diagnostics(config, name, &diagnostics, binding);
+            let queue = service::bind_queue_with_diagnostics(prepared, name, &diagnostics, binding);
             #[cfg(not(feature = "stall-check"))]
             let queue = {
                 let _ = name;
-                service::bind_queue(config, binding)
+                service::bind_queue(prepared, binding)
             };
             queue
         };
-        let [normal_config, bh_config, high_config] = configs;
+        let [normal_config, bh_config, high_config] = prepared;
         let defaults = [
             create(normal_config, "system", ExecutionKind::Normal),
             create(
@@ -258,6 +306,8 @@ fn with_services<R>(read: impl FnOnce(Option<&Services>) -> R) -> R {
 /// Service initialization failed without replacing an existing installation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InitError {
+    /// Default partition storage reservation failed before provider startup.
+    QueueAllocation(KError),
     /// A default queue configuration is invalid or its CPU storage could not be reserved.
     Configuration(QueueConfigError),
     /// BH preparation rejected the execution context or CPU configuration.
@@ -268,6 +318,12 @@ pub enum InitError {
     AlreadyInitialized,
     /// At least one required BH action belongs to another provider.
     ActionsOccupied,
+}
+
+impl From<KError> for InitError {
+    fn from(error: KError) -> Self {
+        Self::QueueAllocation(error)
+    }
 }
 
 /// Starts normal services and installs both BH entries for every boot CPU.
@@ -292,11 +348,14 @@ pub enum InitError {
 /// Returns [`InitError`] and emits a warning on invalid preparation, duplicate
 /// initialization or occupied BH actions. A failed candidate stops its own
 /// prepared workers without changing existing services/actions. Default access
-/// stays unready unless an earlier initialization succeeded. Manager entry
+/// stays unready unless an earlier initialization succeeded. Fixed worker-table or manager entry
 /// allocation failure returns `InitError::Normal(NormalRuntimeError::NoMemory)`
-/// after joined rollback. CPU-set reservation failure returns
+/// after joined rollback. Fixed-table layout overflow returns
+/// `InitError::Normal(NormalRuntimeError::Allocation(InvalidInput))`.
+/// CPU-set reservation failure returns
 /// `InitError::Configuration(QueueConfigError::Allocation(_))` before any worker
-/// is started. Other allocations retain the kernel allocator policy.
+/// is started. Partition reservation returns `InitError::QueueAllocation` before
+/// BH preparation or worker startup. Other allocations retain the kernel allocator policy.
 ///
 /// # Panics
 /// Panics if boot/provider invariants are violated, including inconsistent CPU
@@ -426,6 +485,9 @@ fn run(priority: BottomHalfPriority) {
         service.run_pass().expect("registered local softirq entry");
     });
 }
+
+#[cfg(feature = "system")]
+unittest::path_mod_test!(system_unittest, "../ut-tests/system_unittest.rs");
 
 #[cfg(not(feature = "system"))]
 unittest::path_mod_test!(

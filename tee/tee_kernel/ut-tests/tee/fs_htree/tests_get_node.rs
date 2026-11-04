@@ -16,7 +16,7 @@ fn build_root_only_tree() -> TeeFsHtree {
     TeeFsHtree {
         root: root_node,
         data: TeeFsHtreeData::default(),
-        storage: Box::new(TeeFsFdAux::new()),
+        storage: super::tests_htree_basic::test_storage(),
     }
 }
 
@@ -42,7 +42,7 @@ fn build_partial_tree() -> TeeFsHtree {
     TeeFsHtree {
         root: root_node,
         data: ht_data,
-        storage: Box::new(TeeFsFdAux::new()),
+        storage: super::tests_htree_basic::test_storage(),
     }
 }
 

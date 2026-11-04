@@ -38,12 +38,12 @@ impl Queue {
         let mut receipts = Vec::new();
         let mut prepared = Vec::new();
         let mut source_receipts = Vec::new();
-        for partition in &self.partitions {
+        for partition in self.partitions.iter() {
             if let Some(receipt) = partition.source_detachment_completion() {
                 source_receipts.push(receipt);
             }
         }
-        for _ in &self.partitions {
+        for _ in self.partitions.iter() {
             for _ in 0..COLOR_COUNT {
                 let (receipt, token) = CompletionObserver::prepare();
                 receipts.push(receipt);
@@ -53,7 +53,7 @@ impl Queue {
 
         self.close_admission();
         let mut empty = CompletionObservers::new();
-        for partition in &self.partitions {
+        for partition in self.partitions.iter() {
             for color in 0..COLOR_COUNT {
                 let token = prepared.pop().expect("one observer per partition/color");
                 // The admission barrier includes a submitter that sampled open
@@ -67,7 +67,7 @@ impl Queue {
         for receipt in receipts {
             receipt.wait(&task_wait);
         }
-        for partition in &self.partitions {
+        for partition in self.partitions.iter() {
             partition.detach_source();
         }
         for receipt in source_receipts {

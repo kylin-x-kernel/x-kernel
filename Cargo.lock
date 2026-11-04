@@ -3640,9 +3640,11 @@ name = "kworkerpool_ng"
 version = "0.3.0-dev"
 dependencies = [
  "intrusive-collections",
+ "kalloc-types",
  "kbuild_config",
  "kcompletion",
  "kcpu_id_map",
+ "kerrno",
  "khal",
  "kipi",
  "kirq",
@@ -3659,6 +3661,7 @@ dependencies = [
  "intrusive-collections",
  "kbuild_config",
  "kcpu_id_map",
+ "kerrno",
  "kfinalize",
  "khal",
  "kiface",
@@ -6411,8 +6414,10 @@ dependencies = [
 name = "x86-apic"
 version = "0.3.0-dev"
 dependencies = [
+ "kalloc-types",
  "kcpu_id_map",
  "kcpu_slot",
+ "kerrno",
  "kiface",
  "kirq",
  "kspin",

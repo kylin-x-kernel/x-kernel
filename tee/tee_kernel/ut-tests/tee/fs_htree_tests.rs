@@ -2,15 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::{any::Any, fmt, fmt::Debug, mem::size_of};
 
+use kalloc_types::{AllocFlags, KBox};
 use ksync::Mutex;
 use static_assertions::const_assert;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_SECURITY, TEE_ERROR_TIME_NOT_SET, TEE_UUID};
 
 use super::{
-    TeeResult,
+    TeeError, TeeResult,
     fs_htree::{
         TEE_FS_HTREE_HASH_SIZE, TeeFsHtree, TeeFsHtreeImage, TeeFsHtreeNodeImage, TeeFsHtreeType,
         print_tree_hash, tee_fs_htree_close, tee_fs_htree_open, tee_fs_htree_read_block,
@@ -214,12 +215,24 @@ impl TeeFsHtreeStorageOps for TestHtreeStorage {
     }
 }
 
-fn clone_test_storage(storage: &dyn TeeFsHtreeStorageOps) -> Box<dyn TeeFsHtreeStorageOps> {
+fn open_test_htree(
+    storage: TestHtreeStorage,
+    create: bool,
+    hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
+    uuid: Option<&TEE_UUID>,
+) -> TeeResult<KBox<TeeFsHtree>> {
+    let owner =
+        KBox::<TeeFsHtree>::new_uninit_with_flags(AllocFlags::NOWAIT).map_err(TeeError::from)?;
+    let storage = KBox::new_with_flags(storage, AllocFlags::NOWAIT).map_err(TeeError::from)?;
+    tee_fs_htree_open(owner, storage, create, hash, uuid)
+}
+
+fn clone_test_storage(storage: &dyn TeeFsHtreeStorageOps) -> TestHtreeStorage {
     let any = storage as &dyn Any;
     let mock = any
         .downcast_ref::<TestHtreeStorage>()
         .expect("test storage only");
-    Box::new(mock.clone())
+    mock.clone()
 }
 
 fn val_from_bn_n_salt(bn: usize, n: usize, salt: u8) -> u32 {
@@ -293,7 +306,8 @@ fn do_range_backwards(
 
 #[expect(
     clippy::too_many_lines,
-    reason = "CG-028-focused-functions: unittest scenario: one linear hash-tree rewrite script in a file test module"
+    reason = "CG-028-focused-functions: unittest scenario: one linear hash-tree rewrite script in \
+              a file test module"
 )]
 fn htree_test_rewrite(
     aux: &mut TestHtreeStorage,
@@ -310,12 +324,12 @@ fn htree_test_rewrite(
     let alloced = aux_inner.data_alloced;
     aux_inner.data[..alloced].fill(0xce);
 
-    let storage = Box::new(TestHtreeStorage {
+    let storage = TestHtreeStorage {
         inner: Mutex::new(aux_inner.clone()),
-    });
+    };
 
-    tee_debug!("storage: {:?}", *storage);
-    let mut ht = tee_fs_htree_open(storage, true, Some(&mut hash), Some(&TEE_UUID::default()))?;
+    tee_debug!("storage: {:?}", storage);
+    let mut ht = open_test_htree(storage, true, Some(&mut hash), Some(&TEE_UUID::default()))?;
 
     // Intialize all blocks and verify that they read back as
     // expected.
@@ -357,8 +371,8 @@ fn htree_test_rewrite(
     info!("------ Close and reopen the hash-tree ------");
     let storage = clone_test_storage(ht.storage.as_ref());
     tee_fs_htree_close(ht)?;
-    tee_debug!("storage: {:?}", storage.as_ref());
-    let mut ht = tee_fs_htree_open(storage, false, Some(&mut hash), Some(&TEE_UUID::default()))
+    tee_debug!("storage: {:?}", &storage);
+    let mut ht = open_test_htree(storage, false, Some(&mut hash), Some(&TEE_UUID::default()))
         .inspect_err(|e| {
             error!("tee_fs_htree_open: error: {:X?}", e);
         })?;
@@ -424,7 +438,7 @@ fn htree_test_rewrite(
     );
     let storage = clone_test_storage(ht.storage.as_ref());
     tee_fs_htree_close(ht)?;
-    let mut ht = tee_fs_htree_open(storage, false, Some(&mut hash), Some(&TEE_UUID::default()))?;
+    let mut ht = open_test_htree(storage, false, Some(&mut hash), Some(&TEE_UUID::default()))?;
     do_range(read_block, &mut ht, 0, num_blocks, salt as u8)?;
 
     info!(
@@ -433,7 +447,7 @@ fn htree_test_rewrite(
     );
     let storage = clone_test_storage(ht.storage.as_ref());
     tee_fs_htree_close(ht)?;
-    let mut ht = tee_fs_htree_open(storage, false, None, Some(&TEE_UUID::default()))?;
+    let mut ht = open_test_htree(storage, false, None, Some(&TEE_UUID::default()))?;
     do_range(read_block, &mut ht, 0, num_blocks, salt as u8)?;
 
     Ok(())
@@ -501,9 +515,9 @@ fn test_corrupt_type(
             }
 
             // Errors in head or node is detected by
-            // tee_fs_htree_open() errors in block is detected when
+            // open_test_htree() errors in block is detected when
             // actually read by do_range(read_block)
-            let result = tee_fs_htree_open(Box::new(aux2), false, Some(hash), Some(uuid));
+            let result = open_test_htree(aux2, false, Some(hash), Some(uuid));
             tee_debug!("tee_fs_htree_open: result: {:?}", result);
             if let Ok(mut ht) = result {
                 let result = do_range(read_block, &mut ht, 0, num_blocks, 1);
@@ -570,7 +584,7 @@ fn test_corrupt(num_blocks: usize) -> TeeResult {
 
     // Write the object and close it
     tee_debug!("--- Write the object and close it ---");
-    let mut ht = tee_fs_htree_open(Box::new(aux), true, Some(&mut hash), Some(&uuid))?;
+    let mut ht = open_test_htree(aux, true, Some(&mut hash), Some(&uuid))?;
     do_range(write_block, &mut ht, 0, num_blocks, 1)?;
     tee_fs_htree_sync_to_storage(&mut ht, Some(&mut hash))?;
 
@@ -579,19 +593,14 @@ fn test_corrupt(num_blocks: usize) -> TeeResult {
 
     // Verify that the object can be read correctly
     tee_debug!("--- Verify that the object can be read correctly ---");
-    let mut ht = tee_fs_htree_open(aux, false, Some(&mut hash), Some(&uuid))?;
+    let mut ht = open_test_htree(aux, false, Some(&mut hash), Some(&uuid))?;
     tee_debug!("tee_fs_htree_open: ht: {:?}", &ht);
     do_range(read_block, &mut ht, 0, num_blocks, 1)?;
     let aux = clone_test_storage(ht.storage.as_ref());
     tee_fs_htree_close(ht)?;
 
-    // Downcast Box<dyn TeeFsHtreeStorageOps> to Box<TestHtreeStorage>
-    // We know in test context, storage is always TestHtreeStorage
-    // First convert to Box<dyn Any>, then downcast
     tee_debug!("--- test_corrupt with Head ---");
-    let aux_any: Box<dyn core::any::Any> = aux;
-    let aux_box: Box<TestHtreeStorage> = aux_any.downcast().map_err(|_| TEE_ERROR_GENERIC)?;
-    let mut aux = *aux_box;
+    let mut aux = aux;
     test_corrupt_type(
         &uuid,
         &mut hash,
