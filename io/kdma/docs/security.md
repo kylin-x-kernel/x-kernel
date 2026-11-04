@@ -27,7 +27,11 @@ temporary grants are confined to the bounce pool.
 - **The bounce pool**: a 1024-page coherent region sub-allocated by
   TLSF. Driver buffers are never directly device-visible on the mapping
   path, bounding the blast radius of a mis-programmed device to the
-  pool.
+  pool. Its TLSF control block is const-initialized in the global DMA
+  allocator. First use registers coherent backing memory in place under
+  the same lock; failed coherent allocation leaves the pool uninitialized
+  and retryable. No runtime path constructs or moves the large control
+  block on the caller's stack, including IRQ-exit softirqs on an idle stack.
 - **Platform hooks** (`kplat::dma::prepare`/`release`): called with
   page-granular ranges for share/unshare bookkeeping; a hook failure
   fails the allocation (`AllocError::NoMemory`), never proceeds

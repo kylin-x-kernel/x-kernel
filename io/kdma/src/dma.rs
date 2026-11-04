@@ -26,7 +26,7 @@ static_lock! {
 }
 
 pub(crate) struct DmaAllocator {
-    bounce_pool: Option<BouncePool>,
+    bounce_pool: BouncePool,
     active_mappings: BTreeMap<u64, BounceMapping>,
     #[cfg(feature = "dma-trace")]
     coherent_allocs: BTreeMap<usize, CoherentAllocation>,
@@ -51,7 +51,7 @@ struct CoherentAllocation {
 impl DmaAllocator {
     pub(crate) const fn new() -> Self {
         Self {
-            bounce_pool: None,
+            bounce_pool: BouncePool::new(),
             active_mappings: BTreeMap::new(),
             #[cfg(feature = "dma-trace")]
             coherent_allocs: BTreeMap::new(),
@@ -257,29 +257,15 @@ impl DmaAllocator {
     }
 
     fn recycle_bounce_buffer(&mut self, cpu_addr: usize, layout: Layout) {
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: Active bounce mappings retain the \
-                      bounce pool until their buffers are recycled"
-        )]
-        let pool = self
-            .bounce_pool
-            .as_mut()
-            .expect("DMA bounce pool must exist while mappings are active");
-        pool.deallocate(cpu_addr, layout);
+        self.bounce_pool.deallocate(cpu_addr, layout);
     }
 
     fn bounce_pool_mut(&mut self) -> AllocResult<&mut BouncePool> {
-        if self.bounce_pool.is_none() {
+        if !self.bounce_pool.is_initialized() {
             let dma = self.alloc_coherent_pages(layout_for_pages(DMA_BOUNCE_POOL_PAGES))?;
-            self.bounce_pool = Some(BouncePool::new(dma, bounce_pool_size()));
+            self.bounce_pool.initialize(dma, bounce_pool_size());
         }
-        #[expect(
-            clippy::unwrap_used,
-            reason = "CG-021-no-panic-on-reachable-failure: the None branch installs the bounce \
-                      pool or returns the allocation error before reaching this expression"
-        )]
-        Ok(self.bounce_pool.as_mut().unwrap())
+        Ok(&mut self.bounce_pool)
     }
 
     #[cfg(feature = "dma-trace")]

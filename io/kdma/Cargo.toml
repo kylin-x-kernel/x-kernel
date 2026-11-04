@@ -23,6 +23,7 @@ kspin.workspace = true
 log.workspace = true
 memaddr.workspace = true
 kbuild_config = { workspace = true }
+unittest.workspace = true
 
 [lints]
 workspace = true

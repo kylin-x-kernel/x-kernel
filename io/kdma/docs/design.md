@@ -32,7 +32,12 @@ attribute transitions.
   with the device view of each region.
 - Bounce pool: a lazily created 1024-page coherent region sub-allocated
   by a TLSF byte allocator (`bounce_pool`), sized once from the same
-  coherent path.
+  coherent path. The TLSF control block is const-initialized inside the
+  global `DmaAllocator`; first use registers the region in place instead
+  of constructing and moving the multi-KiB allocator on the caller's stack.
+  The optional region records this second phase under the existing allocator
+  lock; a value-returning `Once<BouncePool>` initializer would still construct
+  the large control block at runtime before publishing it.
 - Mapping attributes: kiface-mm-api accepts only Coherent or Normal mode; memspace
   chooses the corresponding flags and owns page-table locking. DMA owns page
   allocation and platform sharing, not arbitrary page-table permissions.
@@ -89,6 +94,10 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   allocates the pool through the same path.
 - `map_dma_buffer`/`unmap_dma_buffer` copy up to the buffer length on the
   calling thread; they are intended for driver submit/completion paths.
+- Completion softirqs can submit pending requests on the interrupted idle
+  task's 16 KiB stack. Both first-use pool registration and later mappings
+  must avoid stack temporaries containing `TlsfByteAllocator`; the control
+  block stays in the static allocator throughout its lifetime.
 - The `dma-trace` feature adds allocation-site bookkeeping for
   debugging; it is off in production builds.
 
@@ -112,7 +121,7 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   mappings or an already-active bus address.
 - Panics mark contract violations: unmapping a non-active address,
   length mismatch between map and unmap, bounce recycling outside the
-  pool, and missing pool during recycle.
+  initialized pool, and initializing an already registered pool.
 - `deallocate_dma_memory` ignores (logs under `dma-trace`) mismatched
   frees instead of corrupting the allocator — the trace layer detects and
   skips duplicate or inconsistent records.
