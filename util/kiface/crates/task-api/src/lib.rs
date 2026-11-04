@@ -5,12 +5,65 @@
 //! Low-level task execution, preemption, blocking-context and diagnostic contracts.
 //!
 //! Consumers depend on these contracts without depending on a scheduler.
-//! The linked task runtime supplies exactly one provider for each interface.
+//! The linked task runtime supplies exactly one provider for each static
+//! interface. Resource consumers implement the task-owned scheduling observer.
 //! This crate owns no scheduler, lock algorithm, or global runtime state.
 
 #![no_std]
 
 use ktask_types::OwnerKey;
+
+/// The scheduler's committed reason for releasing the outgoing CPU.
+///
+/// A concurrent wake may already have made a blocked task runnable again;
+/// this value describes the switch decision, not a fresh task-state sample.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduleOutReason {
+    /// The task remains runnable, including preemption, yield and migration.
+    Runnable,
+    /// The task entered a wait; a concurrent wake may already be pending.
+    Blocked,
+    /// This is the task's final switch out. No further switch in will occur.
+    Exited,
+}
+
+/// Task-owned notifications for CPU-local resource load/put.
+///
+/// The task subsystem invokes these on real task switches, not on guest/user
+/// entry or exit. `schedule_in` runs on the incoming task's stack, including
+/// its first entry, before ordinary IRQs are restored. `schedule_out` runs on
+/// the outgoing task's stack before CPU ownership is handed off. Both receive
+/// the executing logical CPU, not a saved run-queue identity. Same-task
+/// reselection invokes neither callback. A task's callbacks are serialized
+/// across migration; sharing an observer between tasks requires its own
+/// synchronization. The observer is retained through the final switch out.
+///
+/// # Safety
+/// Implementations run with ordinary IRQs masked in scheduler context. They
+/// must preserve IRQ/preemption state and must not sleep, schedule, unwind,
+/// allocate, wait for another CPU, or acquire run-queue locks. They must not
+/// synchronously drain callbacks that could need scheduler progress. Resource
+/// users own lock ordering, NMI exclusion where needed, and eventual cleanup;
+/// a scheduling notification is not an interrupt or DMA completion barrier.
+/// Do not retain a strong reference cycle back to the observed task.
+pub unsafe trait TaskScheduleObserver: Send + Sync {
+    /// Acquires or restores this task's CPU-local state on the incoming CPU.
+    ///
+    /// # Safety
+    /// The observed task must be current on `cpu`, with ordinary IRQs masked
+    /// and migration excluded. Serialize this call with that task's other
+    /// notifications and pair it with the preceding put, except at first entry.
+    unsafe fn schedule_in(&self, cpu: kcpu_id_map::LogicalCpuId);
+
+    /// Saves and releases this task's CPU-local state before another task runs.
+    ///
+    /// # Safety
+    /// The observed task must be current on `cpu`, with ordinary IRQs masked
+    /// and migration excluded, following its unmatched load. Complete this
+    /// call before handing its CPU-local resources to another task. `reason`
+    /// must describe the committed switch decision.
+    unsafe fn schedule_out(&self, cpu: kcpu_id_map::LogicalCpuId, reason: ScheduleOutReason);
+}
 
 /// Current-task blocking admission, without preparing or performing a wait.
 #[kiface::interface]

@@ -8,11 +8,20 @@ homepage.workspace = true
 repository.workspace = true
 description = "Lifecycle-oriented control-plane devices built on the kvmm mechanism crate"
 
+[package.metadata.cargo-shear]
+# Kernel guest fixtures use cache maintenance, task placement and a read-only
+# irqchip probe. They are outside cargo-shear's production-source scan.
+ignored = ["karch", "ktask", "kcpu_id_map", "khal", "irq_driver"]
+
 [features]
 default = []
+smp = []
+kernel-tests = ["dep:irq_driver", "dep:ktask", "dep:kcpu_id_map", "dep:khal", "dep:karch"]
 
 [dependencies]
 kalloc-types.workspace = true
+unittest.workspace = true
+kirq.workspace = true
 log.workspace = true
 kaddr_layout.workspace = true
 kcred.workspace = true
@@ -30,6 +39,12 @@ vdev-virtio-blk.workspace = true
 vdev-virtio-net.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
+tock-registers.workspace = true
+irq_driver = { workspace = true, optional = true }
+ktask = { workspace = true, optional = true }
+kcpu_id_map = { workspace = true, optional = true }
+khal = { workspace = true, optional = true }
+karch = { workspace = true, optional = true }
 vdev-vpl011.workspace = true
 vdev-virtio-blk.workspace = true
 vdev-virtio-net.workspace = true

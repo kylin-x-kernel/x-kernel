@@ -5,6 +5,46 @@
 use unittest::{assert_eq, def_test};
 
 #[def_test]
+fn guest_interface_requires_disjoint_firmware_virtualization_pages() {
+    use super::{GicConfig, GicMmioRegion, GicVersion};
+    let region = |address, size| GicMmioRegion {
+        paddr: memaddr::PhysAddr::from_usize(address),
+        size,
+    };
+    let mut config = GicConfig {
+        version: GicVersion::V2,
+        gicd: region(0x08000000, 0x10000),
+        gicc: Some(region(0x08010000, 0x10000)),
+        gicr: None,
+        gich: None,
+        gicv: None,
+    };
+    assert_eq!(super::guest_interface(config), None);
+    config.gich = Some(region(0x08030000, 0x10000));
+    assert_eq!(super::guest_interface(config), None);
+    config.gicv = Some(region(0x08040000, 0x10000));
+    assert_eq!(
+        super::guest_interface(config),
+        Some(kirq::GuestIrqInterface::GicV2 {
+            control_paddr: 0x08030000,
+            cpu_paddr: 0x08040000,
+        })
+    );
+    for invalid in [
+        region(0x08030000, 0x2000),
+        region(0x08040001, 0x2000),
+        region(0x08040000, 0x1000),
+        region(usize::MAX & !0xfff, 0x2000),
+    ] {
+        config.gicv = Some(invalid);
+        assert_eq!(super::guest_interface(config), None);
+    }
+    config.gicv = Some(region(0x08040000, 0x2000));
+    config.version = GicVersion::V3;
+    assert_eq!(super::guest_interface(config), None);
+}
+
+#[def_test]
 fn standard_intid_limit_uses_lines_not_id_bits() {
     for id_bits in [0, 7, 15, 31] {
         let other_fields = id_bits << 19;
@@ -24,24 +64,39 @@ fn explicit_gic_sources_require_discovered_standard_range() {
             IrqDesc::from_hwirq(hwirq).with_controller(IrqController::Gic),
             IrqDesc::from_hwirq(hwirq).with_domain(super::GIC_ROOT_DOMAIN),
         ] {
-            let expected = if hwirq < 32 { IrqFlow::PerCpu }
-                else { IrqFlow::Fasteoi(&super::spi::CHIP) };
+            let expected = if hwirq < 32 {
+                IrqFlow::PerCpu
+            } else {
+                IrqFlow::Fasteoi(&super::spi::CHIP)
+            };
             assert_eq!(super::select_gic_flow(desc, Some(64)), Ok(expected));
-            assert_eq!(super::select_gic_flow(desc, None),
-                Err(IrqDescError::UnsupportedFlow { hwirq }));
+            assert_eq!(
+                super::select_gic_flow(desc, None),
+                Err(IrqDescError::UnsupportedFlow { hwirq })
+            );
         }
     }
     for (limit, hwirq) in [
-        (32, 32), (64, 64), (992, 992), (1020, 1020), (1020, 1023),
-        (1020, 1024), (1020, 8192), (1020, u32::MAX as usize + 1),
+        (32, 32),
+        (64, 64),
+        (992, 992),
+        (1020, 1020),
+        (1020, 1023),
+        (1020, 1024),
+        (1020, 8192),
+        (1020, u32::MAX as usize + 1),
         (1020, usize::MAX),
     ] {
         let desc = super::level_irq_desc(hwirq);
-        assert_eq!(super::select_gic_flow(desc, Some(limit)),
-            Err(IrqDescError::UnsupportedFlow { hwirq }));
+        assert_eq!(
+            super::select_gic_flow(desc, Some(limit)),
+            Err(IrqDescError::UnsupportedFlow { hwirq })
+        );
     }
-    assert_eq!(super::select_gic_flow(super::level_irq_desc(1019), Some(1020)),
-        Ok(IrqFlow::Fasteoi(&super::spi::CHIP)));
+    assert_eq!(
+        super::select_gic_flow(super::level_irq_desc(1019), Some(1020)),
+        Ok(IrqFlow::Fasteoi(&super::spi::CHIP))
+    );
 }
 
 #[def_test]
@@ -53,12 +108,16 @@ fn gic_identity_must_not_name_another_controller_or_domain() {
         super::level_irq_desc(hwirq).with_controller(IrqController::Plic),
         super::level_irq_desc(hwirq).with_domain(kirq::PLIC_ROOT_DOMAIN),
     ] {
-        assert_eq!(super::select_gic_flow(desc, Some(64)),
-            Err(IrqDescError::UnsupportedFlow { hwirq }));
+        assert_eq!(
+            super::select_gic_flow(desc, Some(64)),
+            Err(IrqDescError::UnsupportedFlow { hwirq })
+        );
     }
     // This gate must not reinterpret software-only fixtures or other backends.
-    assert_eq!(super::select_gic_flow(IrqDesc::from_virq(0x6000), None),
-        Ok(IrqFlow::Legacy));
+    assert_eq!(
+        super::select_gic_flow(IrqDesc::from_virq(0x6000), None),
+        Ok(IrqFlow::Legacy)
+    );
 }
 
 #[def_test]
@@ -71,51 +130,89 @@ fn explicit_gic_spis_reject_unsupported_trigger_polarity() {
                 IrqDesc::new(hwirq, trigger).with_controller(IrqController::Gic),
                 IrqDesc::new(hwirq, trigger).with_domain(super::GIC_ROOT_DOMAIN),
             ] {
-                assert_eq!(super::select_gic_flow(desc, Some(64)),
-                    Err(IrqDescError::UnsupportedFlow { hwirq }));
+                assert_eq!(
+                    super::select_gic_flow(desc, Some(64)),
+                    Err(IrqDescError::UnsupportedFlow { hwirq })
+                );
             }
         }
-        for trigger in [IrqTrigger::EdgeRising, IrqTrigger::LevelHigh,
-                        IrqTrigger::Unknown(0), IrqTrigger::Unknown(0x100)] {
-            assert_eq!(super::select_gic_flow(super::irq_desc(hwirq, trigger), Some(64)),
-                Ok(IrqFlow::Fasteoi(&super::spi::CHIP)));
+        for trigger in [
+            IrqTrigger::EdgeRising,
+            IrqTrigger::LevelHigh,
+            IrqTrigger::Unknown(0),
+            IrqTrigger::Unknown(0x100),
+        ] {
+            assert_eq!(
+                super::select_gic_flow(super::irq_desc(hwirq, trigger), Some(64)),
+                Ok(IrqFlow::Fasteoi(&super::spi::CHIP))
+            );
         }
     }
     // PPI polarity can be fixed by the integration. Do not impose the SPI
     // policy on private sources or reinterpret undeclared legacy resources.
     for hwirq in [0, 15, 16, 31] {
-        assert_eq!(super::select_gic_flow(
-            super::irq_desc(hwirq, IrqTrigger::LevelLow), Some(64)), Ok(IrqFlow::PerCpu));
+        assert_eq!(
+            super::select_gic_flow(super::irq_desc(hwirq, IrqTrigger::LevelLow), Some(64)),
+            Ok(IrqFlow::PerCpu)
+        );
     }
-    assert_eq!(super::select_gic_flow(IrqDesc::new(32, IrqTrigger::EdgeFalling), None),
-        Ok(IrqFlow::Legacy));
+    assert_eq!(
+        super::select_gic_flow(IrqDesc::new(32, IrqTrigger::EdgeFalling), None),
+        Ok(IrqFlow::Legacy)
+    );
 }
 
 #[def_test]
 fn spi_flow_excludes_private_nmi_and_unsupported_routing() {
     use kirq::{IrqAffinity, IrqDescError, IrqFlags, IrqFlow, IrqPolarity};
     for hwirq in [0, 15, 16, 27, 31] {
-        assert_eq!(super::select_gic_flow(super::edge_irq_desc(hwirq), Some(64)),
-            Ok(if hwirq == 27 { IrqFlow::Legacy } else { IrqFlow::PerCpu }));
+        assert_eq!(
+            super::select_gic_flow(super::edge_irq_desc(hwirq), Some(64)),
+            Ok(IrqFlow::PerCpu)
+        );
     }
     // register_nmi tags its fallback PER_CPU before flow selection, including
     // SPI metadata. This is not an ordinary-source hardware capability.
     let spi = super::edge_irq_desc(32);
-    assert_eq!(super::select_gic_flow(spi.with_flags(IrqFlags::PER_CPU), Some(64)),
-        Ok(IrqFlow::Legacy));
-    for flags in [IrqFlags::empty(), IrqFlags::SHARED, IrqFlags::WAKEUP_SOURCE,
-                  IrqFlags::SHARED | IrqFlags::WAKEUP_SOURCE] {
-        assert_eq!(super::select_gic_flow(spi.with_flags(flags), Some(64)),
-            Ok(IrqFlow::Fasteoi(&super::spi::CHIP)));
+    assert_eq!(
+        super::select_gic_flow(spi.with_flags(IrqFlags::PER_CPU), Some(64)),
+        Ok(IrqFlow::Legacy)
+    );
+    for flags in [
+        IrqFlags::empty(),
+        IrqFlags::SHARED,
+        IrqFlags::WAKEUP_SOURCE,
+        IrqFlags::SHARED | IrqFlags::WAKEUP_SOURCE,
+    ] {
+        assert_eq!(
+            super::select_gic_flow(spi.with_flags(flags), Some(64)),
+            Ok(IrqFlow::Fasteoi(&super::spi::CHIP))
+        );
     }
-    for desc in [spi.with_flags(IrqFlags::MSI),
-                 spi.with_flags(IrqFlags::from_bits_retain(1 << 31)),
-                 kirq::IrqDesc { polarity: IrqPolarity::Low, ..spi },
-                 kirq::IrqDesc { affinity: IrqAffinity::Cpu(0), ..spi }] {
-        assert_eq!(super::select_gic_flow(desc, Some(64)),
-            Err(IrqDescError::UnsupportedFlow { hwirq: 32 }));
+    for desc in [
+        spi.with_flags(IrqFlags::MSI),
+        spi.with_flags(IrqFlags::from_bits_retain(1 << 31)),
+        kirq::IrqDesc {
+            polarity: IrqPolarity::Low,
+            ..spi
+        },
+        kirq::IrqDesc {
+            affinity: IrqAffinity::Cpu(0),
+            ..spi
+        },
+    ] {
+        assert_eq!(
+            super::select_gic_flow(desc, Some(64)),
+            Err(IrqDescError::UnsupportedFlow { hwirq: 32 })
+        );
     }
-    assert_eq!(matches!(super::spi::CHIP.resend, kirq::FasteoiResend::HardwareOnly(_)), true);
+    assert_eq!(
+        matches!(
+            super::spi::CHIP.resend,
+            kirq::FasteoiResend::HardwareOnly(_)
+        ),
+        true
+    );
 }
 
 #[def_test]

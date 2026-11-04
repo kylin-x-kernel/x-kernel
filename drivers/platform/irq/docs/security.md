@@ -2,8 +2,16 @@
 
 ## Local Source Control
 
-PerCpu selection is limited to ordinary GIC private sources (excluding forwarded
-PPI 27 and NMI-tagged sources), RISC-V timer/software causes, and x86 timer/IPI
+`gicv2::set_forwarding_state` validates descriptor identity and the PPI range
+before constructing the vendor IntId. Its GIC guard covers banked active writes
+and the per-CPU delegation bit. The caller owns producer stop and local IRQ
+exclusion across the wider transition; the backend does not infer quiescence
+from an inactive bit. Ordinary GICv2 completion consults only explicit local
+delegation. `gic::guest_interface` validates all firmware register ranges before
+exposing GICH/GICV; its tests do not prove physical MMIO accessibility.
+
+PerCpu selection is limited to ordinary GIC private sources (including forwarded
+PPI 27 but excluding NMI-tagged sources), RISC-V timer/software causes, and x86 timer/IPI
 vectors. KIRQ pins the CPU across configure/enable/commit. RISC-V controls the
 local SIE bit, and x86 timer control changes only the LAPIC timer mask. An x86
 IPI vector has no independent hardware mask: disabled software admission is not
@@ -81,10 +89,13 @@ Every unsafe site is in a backend wrapper with a `SAFETY:` comment; the
 common precondition is that hwirq/interrupt identifiers were validated
 by the caller (`kirq` dispatch or platform init):
 
-- `gicv2.rs:25` — `Gic::new(gicd_base, gicc_base, None)`: the bases are
+- `gicv2.rs::init` -- `Gic::new(gicd_base, gicc_base, None)`: the bases are
   the iomapped GICv2 MMIO frames from platform discovery.
-- `gicv2.rs:43/52/60` — `IntId::raw(interrupt_id as u32)`: wraps a
-  caller-validated hardware IRQ number into the backend's integer id.
+- `gicv2.rs::{checked_config,set_trigger,enable,set_prio,retrigger_spi}` --
+  `IntId::raw(..)` wraps a validated hardware IRQ number. `init_current_cpu`
+  enumerates the fixed private range; `set_forwarding_state` checks the PPI
+  range/domain and asserts IRQ/NMI exclusion before changing banked ownership.
+  The unittest PPI state/pending helpers receive range-checked IDs from `gic.rs`.
 - `gicv3.rs:25` — `Gic::new(gicd_base, gicr_base)`: bases are the
   iomapped GICv3 MMIO frames.
 - `gicv3.rs:43/52/60/83/113` — `IntId::raw(..)`: same wrapping
@@ -309,6 +320,13 @@ virtual timer PPI, are not ordinary SPI flow. A future SPI forwarding consumer
 must establish exclusion and completion ownership before using this capability.
 The `gic_spi` model tests cover access order and timeout reporting, not physical
 hardware or firmware security ownership.
+
+The `cfg(unittest)` helper `gic::pend_local_ppi_for_test` is an unsafe fixture
+boundary in `src/gic.rs`: it admits only GICv2 INTIDs 16..32 before a banked
+pending MMIO write. The caller must own the source, stop its producer, exclude
+local IRQs/migration during the write, and drain delivery and restore source
+state before releasing ownership. This hook does not grant source ownership
+and is absent from production builds.
 
 ## PLIC Flow Masking
 

@@ -14,10 +14,9 @@
 //! software-emulated (see [`super::vgicd`]).
 
 use alloc::sync::{Arc, Weak};
-use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicU16, AtomicU64, Ordering},
-};
+use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+
+use kspin::SpinNoPreempt;
 
 use crate::{
     arch::aarch64::Aarch64Vhe,
@@ -33,6 +32,8 @@ const GICH_APR: usize = 0x0f0;
 const GICH_LR0: usize = 0x100;
 
 const MAX_LRS: usize = 4;
+
+unittest::path_mod_test!(entry_tests, "../../../ut-tests/vgic_entry.rs");
 const HCR_EN: u32 = 1;
 const SGI_MASK: u64 = 0xffff;
 const FIRST_HOST_BACKED_GUEST_IRQ: u32 = 17;
@@ -41,6 +42,7 @@ const FIRST_HOST_BACKED_GUEST_IRQ: u32 = 17;
 // [19:10]=PhysicalID when HW=1, [9:0]=VirtualID.
 const LR_HW: u32 = 1 << 31;
 const LR_STATE_PENDING: u32 = 1 << 28;
+const LR_STATE_ACTIVE: u32 = 1 << 29;
 const LR_PRIORITY: u32 = 0x14 << 23;
 const LR_STATE_MASK: u32 = 0x3 << 28;
 const LR_PHYSID_SHIFT: u32 = 10;
@@ -69,8 +71,9 @@ struct Core {
     sgi_sources: [AtomicU16; 16],
     /// Banked SGI/PPI enable state for this vCPU (IRQs 0..31).
     local_enabled: AtomicU64,
-    /// Cached GICH state, owned by the running vCPU thread.
-    hw: UnsafeCell<Hw>,
+    /// Task-only cached image, shared by hooks. Hardware access separately
+    /// requires the caller's world-switch IRQ exclusion.
+    hw: SpinNoPreempt<Hw>,
 }
 
 /// Per-VM virtual GIC (GICH list-register injector).
@@ -83,14 +86,6 @@ pub struct Vgic {
     shared_enabled: AtomicU64,
 }
 
-// SAFETY: `hw` is only accessed by the owning vCPU thread inside the IRQ-masked
-// world-switch window (`VgicHook::on_entry`/`on_exit`), so there is no
-// concurrent access to the `UnsafeCell`. Pending and enable state are atomics.
-unsafe impl Sync for Vgic {}
-// SAFETY: see the `Sync` justification above — non-atomic interior mutability
-// is confined to the owning vCPU thread's world-switch window.
-unsafe impl Send for Vgic {}
-
 impl Vgic {
     /// Create a vGIC. `gich_va` is the kernel VA of the mapped GICH MMIO base.
     pub fn new(nr_vcpus: usize, gich_va: usize, waker: Weak<dyn VcpuWaker>) -> Arc<Self> {
@@ -101,7 +96,7 @@ impl Vgic {
                 pending: AtomicU64::new(0),
                 sgi_sources: [const { AtomicU16::new(0) }; 16],
                 local_enabled: AtomicU64::new(SGI_MASK),
-                hw: UnsafeCell::new(Hw {
+                hw: SpinNoPreempt::new(Hw {
                     vmcr: 0,
                     apr: 0,
                     lr: [0; MAX_LRS],
@@ -278,6 +273,39 @@ impl VgicHook {
 }
 
 impl VcpuHook<Aarch64Vhe> for VgicHook {
+    fn on_stop(&mut self, vcpu_id: u32) {
+        let Some(core) = self.vgic.cores.get(vcpu_id as usize) else {
+            return;
+        };
+        *core.hw.lock() = Hw {
+            vmcr: 0,
+            apr: 0,
+            lr: [0; MAX_LRS],
+        };
+        // Acquire readers can observe these cleared masks, but the stores
+        // neither publish a combined stopped snapshot nor exclude new injectors.
+        // The run-loop lifecycle prevents this vCPU from entering again.
+        core.pending.store(0, Ordering::Release);
+        for sources in &core.sgi_sources {
+            sources.store(0, Ordering::Release);
+        }
+    }
+
+    fn has_pending_interrupt(&self, vcpu_id: u32) -> bool {
+        let Some(core) = self.vgic.cores.get(vcpu_id as usize) else {
+            return false;
+        };
+        // Pair with Release updates in set_enabled/set_pending_from. These are
+        // individual observations, not one atomic enable/pending snapshot;
+        // concurrent injection also supplies a latched task wake.
+        let enabled = core.local_enabled.load(Ordering::Acquire)
+            | SGI_MASK
+            | self.vgic.shared_enabled.load(Ordering::Acquire);
+        let hw = core.hw.lock();
+        core.pending.load(Ordering::Acquire) & enabled != 0
+            || hw.lr.iter().any(|lr| lr & LR_STATE_PENDING != 0)
+    }
+
     fn on_entry(&mut self, vcpu: &mut Vcpu<Aarch64Vhe>) {
         let vcpu_id = vcpu.vcpu_id;
         let vgic = &self.vgic;
@@ -285,9 +313,34 @@ impl VcpuHook<Aarch64Vhe> for VgicHook {
             return;
         }
         let core = &vgic.cores[vcpu_id as usize];
-        // SAFETY: single accessor inside the IRQ-masked world-switch window.
-        let hw = unsafe { &mut *core.hw.get() };
+        let mut saved = core.hw.lock();
+        let hw = &mut *saved;
         let lr = &mut hw.lr;
+
+        // A mapped level timer is resampled, not replayed as a stale edge.
+        // HW LRs may be pending or active, never pending+active. Preserve an
+        // active guest acknowledgement across migration; the destination PPI
+        // active bank is reconstructed by the timer's residency observer.
+        let timer_asserted = super::vtimer::is_timer_asserted(vcpu);
+        for entry in lr.iter_mut() {
+            if *entry & LR_VINTID_MASK == super::irq_route::HOST_VTIMER_IRQ {
+                if *entry & LR_STATE_ACTIVE != 0 {
+                    *entry &= !LR_STATE_PENDING;
+                } else if !timer_asserted {
+                    *entry = 0;
+                }
+            }
+        }
+        if !timer_asserted {
+            // The RMW preserves other IRQ bits in the atomic modification
+            // order. Acquire observes prior Release pending publications;
+            // Release makes the clear available to Acquire pending queries.
+            // This is not a barrier against a later injection of the same bit.
+            core.pending.fetch_and(
+                !(1u64 << super::irq_route::HOST_VTIMER_IRQ),
+                Ordering::AcqRel,
+            );
+        }
 
         // Drain only enabled pending bits into free LR slots. Disabled pending
         // lines remain latched and become deliverable if the guest enables them.
@@ -377,8 +430,8 @@ impl VcpuHook<Aarch64Vhe> for VgicHook {
         }
 
         let core = &vgic.cores[vcpu_id as usize];
-        // SAFETY: single accessor inside the IRQ-masked world-switch window.
-        let hw = unsafe { &mut *core.hw.get() };
+        let mut saved = core.hw.lock();
+        let hw = &mut *saved;
 
         // Save the virtual CPU-interface state (VMCR/APR) and list registers so
         // they can be reloaded on the next entry (possibly on another pCPU).
@@ -409,5 +462,22 @@ impl VcpuHook<Aarch64Vhe> for VgicHook {
         vgic.gich_write(GICH_VMCR, 0);
         vgic.gich_write(GICH_APR, 0);
         vgic.gich_write(GICH_HCR, 0);
+        super::irq_route::set_guest_active(hw.lr.iter().any(|lr| {
+            lr & LR_VINTID_MASK == super::irq_route::HOST_VTIMER_IRQ && lr & LR_STATE_ACTIVE != 0
+        }));
+    }
+
+    fn on_entry_failure(&mut self, vcpu_id: u32) {
+        if vcpu_id as usize >= self.vgic.nr_vcpus {
+            return;
+        }
+        // The saved LRs still own the pending work consumed during preparation.
+        // No guest ran: preserve that software image, only detach hardware.
+        self.vgic.gich_write(GICH_HCR, 0);
+        for i in 0..MAX_LRS {
+            self.vgic.gich_write(GICH_LR0 + i * 4, 0);
+        }
+        self.vgic.gich_write(GICH_VMCR, 0);
+        self.vgic.gich_write(GICH_APR, 0);
     }
 }

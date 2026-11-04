@@ -11,10 +11,68 @@ use lazyinit::LazyInit;
 
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
-const GUEST_VTIMER_IRQ: usize = 27;
 const PRIVATE_IRQ_COUNT: u32 = 32;
 
+kcpu_slot::cpu_slot_cell! {
+    static FORWARDED_PPIS: u32 = 0;
+}
+
+pub(super) static FORWARDING: kirq::PerCpuForwardingChip = kirq::PerCpuForwardingChip {
+    set_state: set_forwarding_state,
+};
+
+/// Applies a validated CPU-local forwarding transition.
+///
+/// # Safety
+/// The caller must uphold `PerCpuForwardingChip::set_state`'s source-lifetime,
+/// IRQ exclusion and producer-quiescence requirements on the owning CPU.
+unsafe fn set_forwarding_state(desc: kirq::IrqDesc, state: kirq::PerCpuForwardingState) {
+    debug_assert!(!karch::local_irq_enabled());
+    debug_assert!(!kirq::context::is_in_nmi());
+    if desc.domain != Some(super::GIC_ROOT_DOMAIN)
+        || !(16..32).contains(&desc.hwirq)
+        || super::select_gic_flow(desc, super::STANDARD_INTID_LIMIT.get().copied())
+            != Ok(kirq::IrqFlow::PerCpu)
+    {
+        return;
+    }
+    // SAFETY: capability selection admitted this GIC's PPI range 16..32.
+    let intid = unsafe { IntId::raw(desc.hwirq as u32) };
+    let gic = GIC.lock();
+    let bit = 1u32 << desc.hwirq;
+    let previous = FORWARDED_PPIS.load_current();
+    match state {
+        kirq::PerCpuForwardingState::Host => {
+            gic.set_active(intid, false);
+            FORWARDED_PPIS.store_current(previous & !bit);
+        }
+        kirq::PerCpuForwardingState::Guest { is_active } => {
+            gic.set_active(intid, is_active);
+            FORWARDED_PPIS.store_current(previous | bit);
+        }
+    }
+}
+
 unittest::path_mod_test!(config_tests, "../ut-tests/gicv2_config.rs");
+
+#[cfg(unittest)]
+pub(super) fn pend_local_ppi_for_test(irq: usize) {
+    // SAFETY: the parent admitted only the banked PPI range 16..32.
+    let intid = unsafe { IntId::raw(irq as u32) };
+    GIC.lock().set_pending(intid, true);
+}
+
+#[cfg(unittest)]
+pub(super) fn local_ppi_state_for_test(irq: usize) -> (bool, bool, bool) {
+    let gic = GIC.lock();
+    // SAFETY: the parent validates the PPI range before calling this helper.
+    let intid = unsafe { IntId::raw(irq as u32) };
+    (
+        gic.is_irq_enable(intid),
+        gic.is_active(intid),
+        FORWARDED_PPIS.load_current() & (1 << irq) != 0,
+    )
+}
 
 /// Configures an admitted source without changing caller-owned priority.
 ///
@@ -261,26 +319,21 @@ pub(super) fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
     claim_irq()
 }
 
-fn skip_dir_for_vmm_guest_irq(ack: Ack) -> bool {
-    if !kbuild_config::KFEAT_VMM {
-        return false;
-    }
+fn is_deactivation_delegated(ack: Ack) -> bool {
     let hwirq = match ack {
         Ack::Other(intid) => intid,
         Ack::SGI { intid, cpu_id: _ } => intid,
     }
     .to_u32() as usize;
 
-    // KVM-style GICv2 HW LR injection for the guest virtual timer keeps the
-    // physical PPI active until the guest EOI/deactivate path consumes the HW
-    // LR. Host-side DIR here would drop the physical backing interrupt before
-    // the guest observes it.
-    hwirq == GUEST_VTIMER_IRQ
+    // Delegation is local residency state, never inferred from a build option
+    // or INTID alone. No task handoff may occur before this claim completes.
+    hwirq < 32 && FORWARDED_PPIS.load_current() & (1u32 << hwirq) != 0
 }
 
 pub(super) fn complete_irq(completion_cookie: usize) {
     let ack = Ack::from(completion_cookie as u32);
-    if skip_dir_for_vmm_guest_irq(ack) {
+    if is_deactivation_delegated(ack) {
         return;
     }
     TRAP_OP.dir(ack);

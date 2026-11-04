@@ -16,6 +16,10 @@ struct HostCurrentObserver {
 }
 
 impl VcpuHook<CurrentArch> for HostCurrentObserver {
+    fn on_entry_failure(&mut self, _vcpu_id: u32) {
+        self.task = None;
+    }
+
     fn on_entry(&mut self, _vcpu: &mut Vcpu<CurrentArch>) {
         self.task = Some(ktask::current().clone());
     }

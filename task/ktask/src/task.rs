@@ -338,6 +338,8 @@ impl TaskEntry {
 /// The inner task structure.
 pub struct TaskInner {
     identity: TaskIdentity,
+    // Immutable after publication; callbacks need no task lock or Arc clone.
+    schedule_observer: Option<Arc<dyn kiface_task_api::TaskScheduleObserver>>,
     name: SpinNoIrq<String>,
     is_init: bool,
 
@@ -725,6 +727,52 @@ impl TaskInner {
         self.identity.user_runtime()
     }
 
+    /// Attaches CPU-local resource notifications before publishing this task.
+    ///
+    /// The observer is retained for the task's entire lifetime, including a
+    /// nonreturning `exit`. It is not invoked if the task is never activated.
+    /// Consumers with a shorter resource lifetime keep an inactive state in
+    /// their observer after explicitly stopping their resources. This is not
+    /// a user-address-space hook and does not alter task identity.
+    pub fn with_schedule_observer(
+        mut self,
+        observer: Arc<dyn kiface_task_api::TaskScheduleObserver>,
+    ) -> Self {
+        self.schedule_observer = Some(observer);
+        self
+    }
+
+    pub(crate) fn notify_schedule_in(&self) {
+        if let Some(observer) = &self.schedule_observer {
+            debug_assert!(!karch::local_irq_enabled());
+            debug_assert!(core::ptr::eq(self, &***crate::current()));
+            // SAFETY: only first task entry and the resumed scheduler stack
+            // call here, after current installation and handoff cleanup, with
+            // IRQs masked. Scheduler ownership serializes this task's callbacks.
+            unsafe { observer.schedule_in(khal::percpu::this_cpu_id()) };
+        }
+    }
+
+    pub(crate) fn notify_schedule_out(&self, state: TaskState) {
+        use kiface_task_api::ScheduleOutReason;
+
+        if let Some(observer) = &self.schedule_observer {
+            debug_assert!(!karch::local_irq_enabled());
+            debug_assert!(core::ptr::eq(self, &***crate::current()));
+            let reason = match state {
+                TaskState::Running | TaskState::Ready => ScheduleOutReason::Runnable,
+                TaskState::Blocked
+                | TaskState::BlockedInterruptible
+                | TaskState::BlockedKillable => ScheduleOutReason::Blocked,
+                TaskState::Exited => ScheduleOutReason::Exited,
+            };
+            // SAFETY: switch_to calls here only for an actual switch, while
+            // self is current with IRQs masked and before transferring its
+            // CPU ownership. state is the committed outgoing decision.
+            unsafe { observer.schedule_out(khal::percpu::this_cpu_id(), reason) };
+        }
+    }
+
     /// Returns a mutable reference to the task context.
     #[inline]
     pub fn ctx_mut(&mut self) -> &mut TaskContext {
@@ -921,6 +969,7 @@ impl TaskInner {
 
         Self {
             identity,
+            schedule_observer: None,
             name: SpinNoIrq::new(name),
             is_init: false,
             start_time_ns: khal::time::monotonic_time_nanos(),
@@ -1560,6 +1609,7 @@ extern "C" fn task_entry() -> ! {
     unsafe {
         crate::run_queue::finish_task_switch();
     }
+    crate::current().notify_schedule_in();
     // Enable irq (if feature "irq" is enabled) before running the task entry function.
     karch::enable_local_irq();
     // Fresh task entry owns no ordinary-task resources.

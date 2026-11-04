@@ -21,6 +21,7 @@
 extern crate alloc;
 
 pub mod device;
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
 mod loader;
 
 pub use device::KvmmVmDevice;

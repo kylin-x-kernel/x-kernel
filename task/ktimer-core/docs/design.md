@@ -320,6 +320,12 @@ Batch-mean medians are not per-operation latency percentiles. Host results do no
 establish real IRQ/IPI latency, hardware safety or end-to-end business performance.
 Real IRQ/IPI integration checks live in `ktask::tests_timer_irq`; end-to-end
 business acceptance belongs to the later caller migration PRs.
+Under `cfg(unittest)`, owned cancellation uses the same `cancel_sync_with`
+loop with `TimerHandler::on_cancel_wait_for_test` before its spin hint. This
+observer runs only after an actual Running result and after releasing the
+owner lock. It lets consumers coordinate an in-flight callback with their real
+destructor instead of assuming that entering Drop implies a drain occurred.
+Production builds retain only the spin hint and expose no observer method.
 The one-shot API intentionally removes interval/tag parameters and accumulated
 counts. Later integration branches must migrate their periodic callers explicitly;
 old periodic benchmark results do not validate this API. Host checks cover

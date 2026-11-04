@@ -4,98 +4,196 @@
 
 //! Host IRQ routes that wake vCPU threads for guest interrupt delivery.
 
-use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU8, Ordering};
+use alloc::sync::{Arc, Weak};
 
 use kirq::IrqEvent;
-use kspin::SpinNoIrq;
+use ksync::{Mutex, static_lock};
+use lazyinit::LazyInit;
 
 pub(crate) const HOST_VTIMER_IRQ: u32 = 27;
-const ROUTE_UNUSED: u8 = 0;
-const ROUTE_REGISTERING: u8 = 1;
-const ROUTE_REGISTERED: u8 = 2;
 
-static HOST_VTIMER_ROUTE_STATE: AtomicU8 = AtomicU8::new(ROUTE_UNUSED);
+static_lock! {
+    static ROUTE_REGISTRATION: Mutex<()> = Mutex::new(());
+}
 
-static OWNER_TASKS: [SpinNoIrq<Option<ktask::KtaskRef>>; kbuild_config::NR_CPUS] =
-    [const { SpinNoIrq::new(None) }; kbuild_config::NR_CPUS];
+unittest::path_mod_test!(
+    registration_tests,
+    "../../../ut-tests/route_registration.rs"
+);
+
+#[cfg(all(unittest, feature = "kernel-tests"))]
+kcpu_slot::cpu_slot_cell! { static TEST_DELIVERIES: usize = 0; }
+
+#[cfg(feature = "kernel-tests")]
+unittest::path_mod_test!(tests, "../../../ut-tests/irq_route.rs");
+
+struct LocalOwner {
+    task: Option<ktask::WeakKtaskRef>,
+    timer: Option<Weak<super::vtimer::TimerResidency>>,
+}
+
+kcpu_slot::cpu_slot! {
+    static LOCAL_OWNER: kspin::SpinNoIrq<crate::vdev::aarch64::irq_route::LocalOwner> =
+        kspin::SpinNoIrq::new(crate::vdev::aarch64::irq_route::LocalOwner { task: None, timer: None });
+}
+static FORWARDING: LazyInit<kirq::PerCpuForwarding> = LazyInit::new();
+kcpu_slot::cpu_slot_cell! { static IS_LOCAL_ROUTE_ENABLED: u8 = 0; }
 
 /// Publish the current task as the vCPU owner for the current physical CPU.
 pub(crate) fn publish_owner_for_current_cpu() {
-    let cpu = khal::percpu::this_cpu_id().as_usize();
-    *OWNER_TASKS[cpu].lock() = Some(ktask::current().clone());
+    let _guard = kspin::IrqSave::new();
+    LOCAL_OWNER.with_current_irq_disabled(|owner| {
+        owner.lock().task = Some(ktask::KtaskRef::downgrade(&ktask::current()));
+    });
 }
 
-/// Remove the current task from every per-CPU owner slot.
-pub(crate) fn clear_owner_for_current_task() {
-    let current = ktask::current().clone();
-    for owner in &OWNER_TASKS {
-        let mut guard = owner.lock();
-        if guard
-            .as_ref()
-            .is_some_and(|task| ktask::KtaskRef::ptr_eq(task, &current))
-        {
-            *guard = None;
-        }
+pub(crate) fn publish_timer_for_current_cpu(timer: Weak<super::vtimer::TimerResidency>) {
+    let _guard = kspin::IrqSave::new();
+    LOCAL_OWNER.with_current_irq_disabled(|owner| owner.lock().timer = Some(timer));
+    publish_owner_for_current_cpu();
+}
+
+/// Retains the executing CPU's resident timer, not another task's saved state.
+/// Runs in the owning task or ordinary IRQ context, never NMI, after CPU-slot
+/// initialization. Temporarily masks IRQs for lookup; does not sleep or allocate.
+/// The returned Arc retains storage, not CPU residency: callers performing local
+/// hardware operations must keep IRQ/migration exclusion across lookup and use.
+/// Callers must not hold LOCAL_OWNER's lock; it is released before returning,
+/// so taking the timer's state lock does not nest it under the owner-slot lock.
+fn current_timer() -> Option<Arc<super::vtimer::TimerResidency>> {
+    LOCAL_OWNER
+        .with_current_irq_disabled(|owner| owner.lock().timer.as_ref().and_then(Weak::upgrade))
+}
+
+pub(crate) fn set_guest_active(is_active: bool) {
+    let _guard = kspin::IrqSave::new();
+    if let Some(timer) = current_timer() {
+        timer.set_guest_active(is_active);
     }
 }
 
-/// Register or enable the host-backed guest virtual timer IRQ route.
+/// Detach the current resident before this CPU can be reused.
+pub(crate) fn clear_owner_for_current_task() {
+    LOCAL_OWNER.with_current_irq_disabled(|owner| {
+        *owner.lock() = LocalOwner {
+            task: None,
+            timer: None,
+        };
+    });
+}
+
+/// Update the resident timer's enablement after sleepable route preparation.
 pub(crate) fn set_host_vtimer_irq_enabled(enabled: bool) {
-    let desc = kirq::gic_level_irq_desc(HOST_VTIMER_IRQ as usize);
-    if enabled {
-        if !ensure_host_vtimer_route_registered(desc) {
-            return;
-        }
-    } else if HOST_VTIMER_ROUTE_STATE.load(Ordering::Acquire) != ROUTE_REGISTERED {
+    if FORWARDING.get().is_none() {
         return;
     }
-    kirq::enable(desc, enabled);
+    let _guard = kspin::IrqSave::new();
+    if let Some(timer) = current_timer() {
+        timer.set_irq_enabled(enabled);
+    }
+}
+
+pub(crate) fn set_local_forwarding(is_resident: bool, enabled: bool, is_active: bool) -> bool {
+    let Some(forwarding) = FORWARDING.get() else {
+        return !enabled;
+    };
+    let desc = kirq::gic_level_irq_desc(HOST_VTIMER_IRQ as usize);
+    if IS_LOCAL_ROUTE_ENABLED.load_current() != 0 {
+        if kirq::try_enable(desc, false).is_err() {
+            return false;
+        }
+        IS_LOCAL_ROUTE_ENABLED.store_current(0);
+    }
+    // SAFETY: the route is permanently registered and exclusively owned here.
+    // Callers hold IRQ exclusion; puts stop CNTV before revocation. Load/enable
+    // reconstructs active state while delivery is masked, before re-enabling.
+    unsafe {
+        forwarding.set_local_state(if is_resident {
+            kirq::PerCpuForwardingState::Guest { is_active }
+        } else {
+            kirq::PerCpuForwardingState::Host
+        });
+    }
+    if enabled {
+        if kirq::try_enable(desc, true).is_err() {
+            return false;
+        }
+        IS_LOCAL_ROUTE_ENABLED.store_current(1);
+    }
+    true
 }
 
 /// Return the hardware INTID backing `guest_irq`, if this route uses GIC LR HW mode.
 pub(crate) fn host_hwirq_for_guest_irq(guest_irq: u32) -> Option<u32> {
+    let _guard = kspin::IrqSave::new();
     (guest_irq == HOST_VTIMER_IRQ
-        && HOST_VTIMER_ROUTE_STATE.load(Ordering::Acquire) == ROUTE_REGISTERED)
-        .then_some(HOST_VTIMER_IRQ)
+        && FORWARDING.get().is_some()
+        && current_timer().is_some_and(|timer| timer.is_resident()))
+    .then_some(HOST_VTIMER_IRQ)
 }
 
-fn ensure_host_vtimer_route_registered(desc: kirq::IrqDesc) -> bool {
-    match HOST_VTIMER_ROUTE_STATE.compare_exchange(
-        ROUTE_UNUSED,
-        ROUTE_REGISTERING,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    ) {
-        Ok(_) => {}
-        Err(ROUTE_REGISTERED) => return true,
-        Err(_) => return false,
+/// Serializes fallible preparation in sleepable task context. The initializer
+/// must not reenter this gate and must finish rollback before returning None.
+/// LazyInit publishes the completed capability to lock-free IRQ-side readers;
+/// the mutex orders failed attempts and lets contenders sleep until retry.
+/// Every initializer of `ready` must use this same gate.
+fn prepare_route_once<T>(
+    ready: &LazyInit<T>,
+    gate: &Mutex<()>,
+    initialize: impl FnOnce() -> Option<T>,
+) -> bool {
+    if ready.get().is_some() {
+        return true;
     }
+    let _registration = gate.lock();
+    if ready.get().is_some() {
+        return true;
+    }
+    let Some(capability) = initialize() else {
+        return false;
+    };
+    ready.init_once(capability);
+    true
+}
 
+fn register_host_vtimer_route(desc: kirq::IrqDesc) -> Option<kirq::PerCpuForwarding> {
     let virq = match kirq::try_map(desc) {
         Ok(virq) => virq,
         Err(err) => {
-            HOST_VTIMER_ROUTE_STATE.store(ROUTE_UNUSED, Ordering::Release);
             log::warn!(
                 "[kvmm] failed to map host vtimer IRQ hwirq {}: {:?}",
                 HOST_VTIMER_IRQ,
                 err,
             );
-            return false;
+            return None;
         }
     };
 
     if !kirq::register_disabled(desc, Arc::new(move |irq| host_irq_route_handler(irq, virq))) {
-        HOST_VTIMER_ROUTE_STATE.store(ROUTE_UNUSED, Ordering::Release);
         log::warn!(
             "[kvmm] failed to register host vtimer IRQ hwirq {}",
             HOST_VTIMER_IRQ,
         );
-        return false;
+        return None;
     }
 
-    HOST_VTIMER_ROUTE_STATE.store(ROUTE_REGISTERED, Ordering::Release);
-    true
+    match kirq::prepare_percpu_forwarding(desc) {
+        Ok(forwarding) => Some(forwarding),
+        Err(err) => {
+            log::warn!("[kvmm] host timer forwarding is unavailable: {:?}", err);
+            kirq::free_irq(desc);
+            None
+        }
+    }
+}
+
+/// Prepares the permanent route in sleepable task context, without IRQ/spin
+/// guards or locks needed by IRQ management. Concurrent callers wait for the
+/// current attempt; a failed attempt leaves the route retryable.
+pub(crate) fn prepare_host_vtimer_route() -> bool {
+    prepare_route_once(&FORWARDING, &ROUTE_REGISTRATION, || {
+        register_host_vtimer_route(kirq::gic_level_irq_desc(HOST_VTIMER_IRQ as usize))
+    })
 }
 
 fn host_irq_route_handler(irq: usize, route_virq: usize) -> IrqEvent {
@@ -103,10 +201,16 @@ fn host_irq_route_handler(irq: usize, route_virq: usize) -> IrqEvent {
         return IrqEvent::NOT_HANDLED;
     }
 
-    let task = {
-        let cpu = khal::percpu::this_cpu_id().as_usize();
-        OWNER_TASKS[cpu].lock().clone()
-    };
+    #[cfg(all(unittest, feature = "kernel-tests"))]
+    TEST_DELIVERIES.store_current(TEST_DELIVERIES.load_current() + 1);
+
+    let task = LOCAL_OWNER.with_current_irq_disabled(|owner| {
+        owner
+            .lock()
+            .task
+            .as_ref()
+            .and_then(ktask::WeakKtaskRef::upgrade)
+    });
     if let Some(task) = task {
         ktask::interrupt_task(&task, true);
     }

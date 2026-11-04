@@ -5,7 +5,10 @@
 //! Dummy implementation of platform-related interfaces defined in [`kplat`].
 
 use kcpu_id_map::LogicalCpuId;
-use kplat::{boot::PlatformBootIf, sys::{CpuStartIf, PlatformPowerIf}};
+use kplat::{
+    boot::PlatformBootIf,
+    sys::{CpuStartIf, PlatformPowerIf},
+};
 
 #[kiface::provide]
 impl PlatformBootIf {
@@ -38,7 +41,6 @@ impl kiface_console_api::ConsoleIoIf {
     fn read_data(_bytes: &mut [u8]) -> usize {
         unimplemented!()
     }
-
 }
 
 #[kiface::provide]
@@ -46,7 +48,6 @@ impl kiface_console_api::EmergencyConsoleWriteIf {
     fn write_data_atomic(_bytes: &[u8]) {
         unimplemented!()
     }
-
 }
 
 #[kiface::provide]
@@ -90,7 +91,6 @@ impl crate::time::ClockEventIf {
     fn arm_timer_after(_interval: ktime_types::TimeSpan) {}
 
     fn disarm_timer() {}
-
 }
 
 #[kiface::provide]
@@ -106,7 +106,6 @@ impl CpuStartIf {
     fn boot_ap(_logical_cpu_id: LogicalCpuId, _stack_top_paddr: usize) -> kerrno::KResult {
         Ok(())
     }
-
 }
 
 #[kiface::provide]
@@ -126,6 +125,14 @@ impl PlatformPowerIf {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn guest_interface() -> Option<kirq::GuestIrqInterface> {
+        None
+    }
+
+    fn percpu_forwarding(_: kirq::IrqDesc) -> Option<&'static kirq::PerCpuForwardingChip> {
+        None
+    }
+
     fn select_flow(_desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
         Ok(kirq::IrqFlow::Legacy)
     }

@@ -2,6 +2,29 @@
 
 ## Scheduler Entry Ownership
 
+The unittest-only sleep probe registration is scoped to one retained task
+identity and captured by its prepared timers. Probe methods execute without
+sleep-state or timer owner locks. Fixtures must not unwind, sleep in IRQ
+context, recursively cancel the timer, or wait for progress from a CPU they
+have blocked. Cancellation observations occur only after the core sees Running;
+they neither authorize freeing storage nor replace the owned timer's drain.
+The registration and callback references are removed after scoped waits retire.
+
+The optional task scheduling observer is installed through an exclusive owned
+TaskInner before publication. It is immutable thereafter and retained through
+the outgoing stack handoff, so switching needs neither raw callback pointers
+nor mutable registration races. The unsafe TaskScheduleObserver implementation
+contract excludes allocation, sleeping, unwinding, recursive scheduling,
+run-queue lock acquisition and waits for other CPUs. Callbacks preserve IRQ and
+preemption exclusion. Same-task selection is not a resource ownership transfer.
+One task's callbacks cannot overlap across migration because its SMP on-CPU
+handoff precedes remote enqueue; UP execution is serialized by IRQ exclusion.
+Sharing observers across tasks requires separate
+synchronization. Terminal put must release CPU-local ownership but cannot wait
+for cleanup needing scheduler progress; ordinary consumer teardown owns such
+draining. Observer destruction follows normal task ownership, not callback
+execution, and is not guaranteed complete by observing a task exit code.
+
 Idle and SMP affinity helpers do not allocate an independent callback owner.
 The affinity helper retains one KtaskRef directly in a private entry variant,
 transfers it to the migration function on execution, or releases it when the

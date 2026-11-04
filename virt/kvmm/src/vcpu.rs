@@ -7,6 +7,8 @@
 use alloc::sync::Arc;
 use core::sync::atomic::Ordering;
 
+unittest::path_mod_test!(entry_tests, "../ut-tests/entry.rs");
+
 #[cfg(target_arch = "aarch64")]
 use crate::vdev::aarch64::vpsci;
 use crate::{
@@ -61,9 +63,36 @@ pub struct Vcpu<A: VmmArch> {
     /// World-switch hooks (e.g. the vGIC) run inside the IRQ-masked window
     /// around guest entry/exit to load/read-back per-physical-CPU device state.
     pub hooks: alloc::vec::Vec<alloc::boxed::Box<dyn crate::vdev::VcpuHook<A>>>,
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) timer_residency: Option<Arc<crate::vdev::aarch64::vtimer::TimerResidency>>,
 }
 
 impl<A: VmmArch> Vcpu<A> {
+    fn stop(&mut self) {
+        self.vm
+            .set_vcpu_run_state(self.vcpu_id, VcpuRunState::Offline);
+        let _irq = kspin::IrqSave::new();
+        A::teardown_vcpu(self);
+        for hook in &mut self.hooks {
+            hook.on_stop(self.vcpu_id);
+        }
+    }
+
+    fn activate(&mut self) {
+        self.vm
+            .set_vcpu_task(self.vcpu_id, ktask::current().clone());
+        let vm = Arc::clone(&self.vm);
+        if let Some(memory) = vm.guest_mem() {
+            A::activate_guest_mem(self, memory);
+        }
+    }
+
+    fn abort_device_entry(&mut self) {
+        for hook in self.hooks.iter_mut().rev() {
+            hook.on_entry_failure(self.vcpu_id);
+        }
+    }
+
     /// Create a new vCPU bound to the given VM.
     pub fn new(vcpu_id: u32, vm: Arc<VmShared<A>>) -> Self {
         let mut vcpu = Self {
@@ -74,6 +103,8 @@ impl<A: VmmArch> Vcpu<A> {
             vm,
             hw_pages: alloc::vec::Vec::new(),
             hooks: alloc::vec::Vec::new(),
+            #[cfg(target_arch = "aarch64")]
+            timer_residency: None,
         };
         let vm = Arc::clone(&vcpu.vm);
         vm.devices().install_vcpu_hooks(&mut vcpu);
@@ -97,12 +128,7 @@ pub fn vmm_run_vcpu<A: VmmArch>(vcpu: &mut Vcpu<A>) -> Result<(), ()> {
 
     // One-time guest memory activation on the vCPU thread.
     // x86: writes EPTP to VMCS. aarch64/riscv64: writes per-CPU register.
-    {
-        let vm_ref = Arc::clone(&vcpu.vm);
-        if let Some(gm) = vm_ref.guest_mem() {
-            A::activate_guest_mem(vcpu, gm);
-        }
-    }
+    vcpu.activate();
 
     let vm_stats = Arc::clone(&vcpu.vm);
     let mut exit_start = khal::time::now_ticks();
@@ -162,6 +188,7 @@ pub fn vmm_run_vcpu<A: VmmArch>(vcpu: &mut Vcpu<A>) -> Result<(), ()> {
         );
 
         if !A::enter_guest(vcpu) {
+            vcpu.abort_device_entry();
             vcpu.vm.set_vcpu_pcpu(vcpu.vcpu_id, -1);
             vcpu.vm
                 .set_vcpu_run_state(vcpu.vcpu_id, VcpuRunState::HostHandlingExit);
@@ -234,9 +261,7 @@ pub fn vmm_run_vcpu<A: VmmArch>(vcpu: &mut Vcpu<A>) -> Result<(), ()> {
         }
     };
 
-    vcpu.vm
-        .set_vcpu_run_state(vcpu.vcpu_id, VcpuRunState::Offline);
-    A::teardown_vcpu(vcpu);
+    vcpu.stop();
     result
 }
 
@@ -245,10 +270,11 @@ pub fn vmm_run_vcpu<A: VmmArch>(vcpu: &mut Vcpu<A>) -> Result<(), ()> {
 /// The vCPU is moved into the thread and executes `vmm_run_vcpu` in a loop.
 /// The thread is named `vcpu-N` and participates in normal scheduler scheduling.
 /// Use `task_ref.join()` to wait for completion (returns 0 on success, 1 on error).
-pub fn spawn_vcpu_thread<A: VmmArch + 'static>(vcpu: Vcpu<A>) -> ktask::KtaskRef {
+pub fn spawn_vcpu_thread<A: VmmArch + 'static>(mut vcpu: Vcpu<A>) -> ktask::KtaskRef {
     let id = vcpu.vcpu_id;
     let vm = Arc::clone(&vcpu.vm);
-    let task = ktask::spawn_with_name(
+    let observer = A::schedule_observer(&mut vcpu);
+    let mut task = ktask::TaskInner::new_pidless_kthread(
         move || {
             let mut vcpu: Vcpu<A> = vcpu;
             let exit_code = if vmm_run_vcpu::<A>(&mut vcpu).is_ok() {
@@ -260,7 +286,12 @@ pub fn spawn_vcpu_thread<A: VmmArch + 'static>(vcpu: Vcpu<A>) -> ktask::KtaskRef
             ktask::exit(exit_code);
         },
         alloc::format!("vcpu-{}", id),
+        kbuild_config::TASK_STACK_SIZE,
     );
+    if let Some(observer) = observer {
+        task = task.with_schedule_observer(observer);
+    }
+    let task = ktask::spawn_task(task);
     // Publish the owning task so `inject_irq` can wake this vCPU when it is
     // parked in the WFI path.
     vm.set_vcpu_task(id, task.clone());

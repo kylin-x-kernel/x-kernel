@@ -183,13 +183,16 @@ fn selftest_smp_impl<A: VmmArch + 'static>() -> bool {
         for v in 0..VCPUS_PER_CPU {
             let vcpu_id = (cpu * VCPUS_PER_CPU + v) as u32;
             let vm_ref = alloc::sync::Arc::clone(&vm_ref);
-            tasks.push(ktask::spawn_with_name(
+            let mut vcpu = Vcpu::<A>::new(vcpu_id, vm_ref);
+            let observer = A::schedule_observer(&mut vcpu);
+            let mut task = ktask::TaskInner::new_pidless_kthread(
                 move || {
                     let mask = ktask::KCpuMask::one_shot(cpu);
                     ktask::set_current_affinity(mask);
 
                     if !A::percpu_hw_init() {
                         log::error!("[vmm] smp: per-CPU init failed on CPU {}", cpu);
+                        drop(vcpu);
                         ktask::exit(1);
                     }
 
@@ -198,20 +201,29 @@ fn selftest_smp_impl<A: VmmArch + 'static>() -> bool {
                     let stack_top =
                         (kaddr_layout::p2v(stack_page.phys_addr().as_usize()) + 4096) as u64;
 
-                    let mut vcpu = Vcpu::<A>::new(vcpu_id, vm_ref);
                     if !A::init_vcpu(&mut vcpu, entry_va, stack_top) {
                         log::error!("[vmm] smp: init_vcpu failed vcpu{}", vcpu_id);
+                        drop(stack_page);
+                        drop(vcpu);
                         ktask::exit(1);
                     }
                     vcpu.hw_pages.push(stack_page);
 
-                    match vmm_run_vcpu::<A>(&mut vcpu) {
-                        Ok(()) => ktask::exit(0),
-                        Err(()) => ktask::exit(1),
-                    }
+                    let code = if vmm_run_vcpu::<A>(&mut vcpu).is_ok() {
+                        0
+                    } else {
+                        1
+                    };
+                    drop(vcpu);
+                    ktask::exit(code);
                 },
                 alloc::format!("vcpu-{}", vcpu_id),
-            ));
+                kbuild_config::TASK_STACK_SIZE,
+            );
+            if let Some(observer) = observer {
+                task = task.with_schedule_observer(observer);
+            }
+            tasks.push(ktask::spawn_task(task));
         }
     }
 

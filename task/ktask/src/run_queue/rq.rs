@@ -8,6 +8,10 @@
 unittest::path_mod_test!(tests_rcu_switch, "../../ut-tests/tests/rcu_switch.rs");
 #[cfg(unittest)]
 unittest::path_mod_test!(tests_rcu_progress, "../../ut-tests/tests/rcu_progress.rs");
+unittest::path_mod_test!(
+    tests_schedule_observer,
+    "../../ut-tests/schedule_observer.rs"
+);
 
 #[cfg(feature = "smp")]
 use core::sync::atomic::{AtomicU8, AtomicUsize};
@@ -983,6 +987,7 @@ impl RunQueue {
                 runtime.on_leave()
             }
         }
+        prev_task.notify_schedule_out(prev_state);
 
         // Program the schedule timer for the incoming task before switching.
         program_next_deadline(self, &next_task, now_ns);
@@ -1033,6 +1038,7 @@ impl RunQueue {
         // SAFETY: the incoming task is now running with IRQs disabled. Use
         // this CPU's handoff, not `self`: this continuation may have migrated.
         unsafe { finish_task_switch() };
+        current().notify_schedule_in();
     }
 }
 

@@ -186,7 +186,7 @@ impl<const N: usize> TimerSet<N> {
     /// # Safety
     /// Same contract as cancel_sync. wait must preserve it, may not unwind, and must
     /// suit the calling context; it runs without a timer lock after observing running.
-    unsafe fn cancel_sync_with(&self, node: &TimerNode, mut wait: impl FnMut()) -> bool {
+    pub(super) unsafe fn cancel_sync_with(&self, node: &TimerNode, mut wait: impl FnMut()) -> bool {
         loop {
             let result = {
                 let (_, mut timers) = self.lock_owner(node);

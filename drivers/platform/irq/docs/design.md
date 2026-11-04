@@ -223,7 +223,7 @@ initialization, special IDs and IDs beyond the discovered standard range before
 KIRQ publishes a mapping or installs an action. Checks precede narrowing from
 `usize`; extended IDs and LPIs are not supported by this provider path.
 Accepted ordinary SPIs use Fasteoi and ordinary SGI/PPI sources use PerCpu.
-Forwarded virtual timer PPI 27 and NMI-tagged sources retain Legacy. Range
+Forwarded virtual timer PPI 27 also uses PerCpu; NMI-tagged sources retain Legacy. Range
 admission is separate from hardware trigger readback, masked configuration and
 RWP synchronization; direct low-level calls still require validated hardware IDs.
 
@@ -305,10 +305,25 @@ cannot validate MMIO accessibility, physical delivery or write completion.
 
 ### Ordinary SPI Flow
 
+GICv2 PPI forwarding is a separate, explicit capability. A per-CPU slot records
+which PPIs delegate deactivation to a guest. Completion skips DIR only for those
+bits, not because VMM is compiled or the INTID equals 27. Under the GIC guard,
+`set_forwarding_state` reconstructs the banked active bit and changes the local
+delegation bit. Host return clears both after the consumer stops/masks output.
+This does not add SPI forwarding. Optional GICH/GICV regions are obtained from
+the third/fourth DT `reg` entries; discovery rejects absent, overlapping,
+unaligned, too-small and overflowing regions before exposing their addresses.
+The `cfg(unittest)` PPI probe reads enabled/active/delegated state under the
+existing GIC lock for consumer lifecycle tests; it is not a production API.
+The accompanying unsafe `pend_local_ppi_for_test` admits only GICv2 PPIs and
+sets their banked pending bit under that same lock. Consumer fixtures retain
+source ownership and CPU/IRQ exclusion across injection, then drain real
+delivery. This tests late events without substituting a synthetic handler call.
+
 Validated standard SPIs select the static `gic_spi::CHIP` Fasteoi capability.
 Shared and wakeup flags are accepted; MSI, unknown flags, explicit affinity and
-low polarity are rejected. Ordinary SGI/PPI INTIDs use PerCpu; the forwarded
-virtual timer PPI 27 and NMI-tagged PER_CPU descriptors retain Legacy.
+low polarity are rejected. Ordinary SGI/PPI INTIDs, including forwarded virtual
+timer PPI 27, use PerCpu; NMI-tagged PER_CPU descriptors retain Legacy.
 The publicly reachable chip callbacks revalidate this binding before MMIO:
 invalid mask/unmask inputs are ignored and invalid retrigger returns false.
 NMI registration adds PER_CPU before selection. The only current VMM HW-LR

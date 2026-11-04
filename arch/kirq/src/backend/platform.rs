@@ -70,6 +70,46 @@ pub struct LevelChip {
     pub unmask: fn(IrqDesc),
 }
 
+/// CPU-local guest completion delegation, independent of source enablement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PerCpuForwardingState {
+    /// Producer stopped and delivery masked; revoke delegation and clear active.
+    Host,
+    /// Delegate deactivation and reconstruct the destination's physical activity.
+    Guest { is_active: bool },
+}
+
+/// Permanent irqchip operations for a validated CPU-local forwarding source.
+///
+/// Called with ordinary IRQs masked, never in NMI, after source-owner exclusion.
+/// Must not sleep, allocate, reenter KIRQ, or change IRQ/preemption state.
+pub struct PerCpuForwardingChip {
+    /// Updates delegation and physical active state as one controller transaction.
+    /// Source masking and producer shutdown are the caller's responsibility.
+    ///
+    /// # Safety
+    /// Use the descriptor admitted by `percpu_forwarding`; retain its source
+    /// ownership and registered action, exclude competing management, and keep
+    /// IRQs/migration disabled outside NMI. No claim may cross the transition.
+    /// Host requires stopped output and masked delivery; Guest requires masked
+    /// delivery and the owner's reconstructed logical active state.
+    pub set_state: unsafe fn(IrqDesc, PerCpuForwardingState),
+}
+
+/// Firmware-described hardware virtualization interfaces owned by an irqchip.
+/// Physical ranges are validated by the provider; consumers must still map
+/// them as device memory and validate controller-specific register capacity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestIrqInterface {
+    /// GICv2 virtual interface control (GICH) and guest CPU interface (GICV).
+    GicV2 {
+        /// Physical base of the GICH register page.
+        control_paddr: usize,
+        /// Physical base of the two-page GICV CPU interface.
+        cpu_paddr: usize,
+    },
+}
+
 /// Pending-service policy for an ordinary fasteoi source.
 #[derive(Clone, Copy, Debug)]
 pub enum FasteoiResend {
@@ -268,6 +308,13 @@ impl Drop for PendingIrq {
 
 #[kiface::interface]
 pub trait IntrManagerIf {
+    /// Returns explicitly discovered guest-interface capability, not a platform
+    /// address guess. None forbids guest-interface MMIO mapping.
+    fn guest_interface() -> Option<GuestIrqInterface>;
+    /// Returns forwarding operations for a supported private source, or None.
+    /// Must validate controller identity/range without modifying hardware.
+    /// Absence is not permission to emulate delegation by omitting completion.
+    fn percpu_forwarding(desc: IrqDesc) -> Option<&'static PerCpuForwardingChip>;
     /// Selects supported flow operations without allocation or hardware writes.
     ///
     /// Called under registry and Line exclusion, before publishing merged

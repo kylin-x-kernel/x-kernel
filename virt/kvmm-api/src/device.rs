@@ -35,6 +35,7 @@ use kpoll::IoEvents;
 use kvfs::{DeviceFileOps, NodeFlags, VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult};
 use kvmm::{Vm, arch::CurrentArch};
 
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
 use crate::loader;
 
 /// Default guest memory base (riscv64; QEMU virt DRAM starts at 0x80000000).
@@ -717,28 +718,21 @@ fn setup_gic(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
     let register_storage = KBox::new_nowait([0u8; vgicd::REG_SIZE])?;
 
     const GICC_BASE: u64 = 0x0801_0000;
-    const GICH_BASE: u64 = 0x0803_0000;
-    const GICV_BASE: u64 = 0x0804_0000;
-    const GIC_IF_SIZE: u64 = 0x1_0000;
+    let Some(kirq::GuestIrqInterface::GicV2 {
+        control_paddr,
+        cpu_paddr,
+    }) = kirq::IntrManagerIf::guest_interface()
+    else {
+        return Err(VfsError::NoSuchDevice);
+    };
 
-    // GICC (guest) → GICV (hardware). Must run while the shared Arc is unique
-    // (before create_vcpu clones it), since guest_mem_mut needs Arc::get_mut.
-    match vm.guest_mem_mut() {
-        Some(gm) => {
-            if !gm.map_region(GICC_BASE, GICV_BASE, GIC_IF_SIZE, GuestPerm::DeviceRw) {
-                log::error!("[kvmm-api] GICC→GICV map_region failed");
-                return Err(VfsError::NoSuchDevice);
-            }
-        }
-        None => {
-            log::error!("[kvmm-api] guest_mem_mut unavailable for GIC map");
-            return Err(VfsError::NoSuchDevice);
-        }
+    if !vtimer::VtimerHookFactory::prepare_route() {
+        return Err(VfsError::NoSuchDevice);
     }
 
     // Map GICH (host-only) for the vGIC to program list registers.
     let gich_va = memspace::iomap_device(
-        memaddr::PhysAddr::from(GICH_BASE as usize),
+        memaddr::PhysAddr::from(control_paddr),
         0x1000,
         "kvmm-api-gich",
     )
@@ -746,6 +740,22 @@ fn setup_gic(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
         log::error!("[kvmm-api] GICH iomap failed: {:?}", e);
         VfsError::NoSuchDevice
     })?;
+
+    use tock_registers::{interfaces::Readable, registers::ReadOnly};
+
+    // SAFETY: the validated GICH page remains device-mapped throughout this
+    // read; +4 is aligned and in bounds. VTR is a read-only capability register
+    // with no read side effects, so concurrent setup may share this accessor.
+    let vtr_register = unsafe { &*((gich_va.as_usize() + 4) as *const ReadOnly<u32>) };
+    let vtr = vtr_register.get();
+    if (vtr & 0x3f) + 1 < 4 {
+        return Err(VfsError::NoSuchDevice);
+    }
+    // Map only GICV's two CPU-interface pages, not the surrounding aperture.
+    let gm = vm.guest_mem_mut().ok_or(VfsError::NoSuchDevice)?;
+    if !gm.map_region(GICC_BASE, cpu_paddr as u64, 0x2000, GuestPerm::DeviceRw) {
+        return Err(VfsError::NoSuchDevice);
+    }
 
     let waker = Arc::downgrade(&(vm.shared().clone() as Arc<dyn VcpuWaker>));
     let vgic = vgic::Vgic::new(vm.shared().nr_vcpus(), gich_va.as_usize(), waker);
@@ -777,3 +787,7 @@ fn setup_gic(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
     );
     Ok(())
 }
+
+#[cfg(target_arch = "aarch64")]
+#[cfg(feature = "kernel-tests")]
+unittest::path_mod_test!(timer_guest_tests, "../ut-tests/timer_guest.rs");

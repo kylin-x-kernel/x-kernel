@@ -19,6 +19,8 @@ use ktime_types::{MonotonicInstant, TimeSpan};
 struct SleepState {
     is_expired: bool,
     waker: Option<Waker>,
+    #[cfg(unittest)]
+    probe: Option<alloc::sync::Arc<dyn SleepProbeForTests>>,
 }
 
 impl SleepState {
@@ -31,11 +33,29 @@ impl SleepState {
 struct SleepHandler(SpinNoIrq<SleepState>);
 
 impl crate::TimerHandler for SleepHandler {
+    #[cfg(unittest)]
+    fn on_cancel_wait_for_test(&self) {
+        let probe = self.0.lock().probe.clone();
+        if let Some(probe) = probe {
+            probe.on_cancel_wait();
+        }
+    }
+
     fn on_expiration(&self, _: crate::TimerControl<'_>, _: crate::Expiration) {
         let waker = self.0.lock().complete();
+        #[cfg(unittest)]
+        let probe = self.0.lock().probe.clone();
+        #[cfg(unittest)]
+        if let Some(probe) = &probe {
+            probe.before_wake();
+        }
         // Waker code may take task/runqueue locks: never call it under our lock.
         if let Some(waker) = waker {
             waker.wake();
+        }
+        #[cfg(unittest)]
+        if let Some(probe) = &probe {
+            probe.after_wake();
         }
     }
 }
@@ -50,11 +70,17 @@ pub struct TimerFuture {
     timer: crate::Timer<SleepHandler>,
 }
 
+unittest::path_mod_test!(sleep_probe, "../../ut-tests/future/time/sleep_probe.rs");
+#[cfg(unittest)]
+pub use sleep_probe::{SleepProbeForTests, with_sleep_probe_for_tests};
+
 impl TimerFuture {
     fn new(deadline: MonotonicInstant) -> Result<Self, KError> {
         let timer = crate::Timer::new(SleepHandler(SpinNoIrq::new(SleepState {
             is_expired: false,
             waker: None,
+            #[cfg(unittest)]
+            probe: sleep_probe::current_probe(),
         })));
         // SAFETY: task sleep runs after local scheduler/IRQ setup. The handler
         // only publishes completion and wakes the task outside its state lock,

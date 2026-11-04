@@ -1,7 +1,7 @@
 # kiface-task-api security
 
 This crate is a trusted kernel contract boundary. It contains no runtime state,
-allocation, manual unsafe code, task pointers, or user-input handling. `kiface`
+allocation, raw-pointer operations, task pointers, or user-input handling. `kiface`
 generates static Rust-ABI calls; the linked provider must obey the documented
 context, identity, lifetime and progress obligations.
 
@@ -39,3 +39,21 @@ Diagnostic addresses are opaque identities, never dereferenced. Hooks may run
 under IRQ or preemption exclusion and must not block, unwind or reenter the
 calling lock. They must not determine lock admission. Numeric keys and lock
 addresses remain kernel diagnostics, not public process identifiers.
+
+## Scheduling Callback Boundary
+
+`src/lib.rs::TaskScheduleObserver` is an unsafe implementation contract.
+Its unsafe schedule_in/schedule_out methods require the observed task to be
+current on the supplied CPU, IRQ/migration exclusion, serialized paired calls,
+and an accurate committed outgoing reason. ktask supplies these conditions at
+first entry and actual switch sites; arbitrary callers cannot invoke them safely.
+ktask retains the observer and calls it only on actual task transitions with
+ordinary IRQs masked. The implementer must preserve IRQ/preemption state,
+must not allocate, sleep, unwind, enter scheduling, acquire run-queue locks,
+or wait for remote work or callbacks needing scheduler progress. The consumer
+must establish NMI exclusion separately for resources accessible to NMI.
+Migration serializes callbacks for one task, not different tasks sharing an
+observer. Resource ownership, lock ordering, and device completion remain the
+consumer's responsibility. Strong references back to the observed task must
+not create a retention cycle. Scheduler notification alone is not a reclamation
+barrier; terminal callback return precedes final stack handoff.

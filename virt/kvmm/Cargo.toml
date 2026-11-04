@@ -9,12 +9,14 @@ repository.workspace = true
 description = "Architecture-independent virtual machine monitor for x-kernel"
 
 [package.metadata.cargo-shear]
-# ut-tests/vdev.rs uses this dependency in cfg(unittest) kernel builds;
+# Kernel fixtures use the block model and optional irqchip probe;
 # cargo-shear ignores ut-tests/ paths by workspace convention.
-ignored = ["vdev-virtio-blk"]
+ignored = ["vdev-virtio-blk", "irq_driver"]
 
 [features]
 default = []
+smp = []
+kernel-tests = ["dep:irq_driver"]
 
 [dependencies]
 kalloc-types.workspace = true
@@ -22,10 +24,12 @@ log.workspace = true
 klogger.workspace = true
 kaddr_layout.workspace = true
 ktask.workspace = true
+kiface-task-api.workspace = true
 kalloc.workspace = true
 kcpu_id_map.workspace = true
 kbuild_config.workspace = true
 kspin.workspace = true
+karch.workspace = true
 ksync.workspace = true
 khal.workspace = true
 kirq.workspace = true
@@ -39,6 +43,8 @@ unittest.workspace = true
 kcpu_slot.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
+irq_driver = { workspace = true, optional = true }
+lazyinit.workspace = true
 aarch64-cpu.workspace = true
 kcpu_slot.workspace = true
 

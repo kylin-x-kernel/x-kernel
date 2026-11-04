@@ -2,6 +2,17 @@
 
 ## Trust model
 
+GIC virtualization setup trusts only an explicit active irqchip capability.
+`device.rs::setup_gic` reads GICH_VTR through a device mapping of the provider's
+validated control page. Constructing the shared `tock_registers::ReadOnly<u32>`
+accessor is the unsafe boundary: the mapping must remain valid, the register
+must be aligned and in bounds, and its reads must have no side effects. The
+typed accessor performs the volatile read. Firmware
+must correctly describe accessible hardware. Missing regions or insufficient
+LR capacity return NoSuchDevice; fixed QEMU addresses are not a fallback.
+The permanent host timer action is shared infrastructure, while residency and
+its weak wake route belong to each vCPU. Preparing it does not enable delivery.
+
 `/dev/kvmm-vm` is a privileged control device. Anyone able to open it can
 create a VM that consumes host physical RAM and CPU time. Access is governed
 by the devfs node's permissions; the device itself performs no capability

@@ -82,26 +82,46 @@ remain on the source modules; relocating tests does not enable other platforms.
 
 ### VmmArch Trait
 
+Interface outline (default bodies omitted); the complete contract is in
+`src/arch/mod.rs`.
+
 ```rust
 pub trait VmmArch {
     type ArchVcpu: Default + Send;
+    type GuestMem: GuestMem + Send + Sync;
 
-    fn init_vcpu(vcpu: &mut Vcpu<Self>, entry: u64, sp: u64) -> bool;
-    fn restore_guest_ctx(vcpu: &mut Vcpu<Self>);
-    fn enter_guest(vcpu: &mut Vcpu<Self>) -> bool;
-    fn exit_handler(vcpu: &mut Vcpu<Self>) -> ExitAction;
-    fn save_guest_ctx(vcpu: &mut Vcpu<Self>);
-    fn guest_test_entry() -> u64;
-    fn percpu_hw_init() -> bool { true }
+    fn schedule_observer(
+        vcpu: &mut Vcpu<Self>,
+    ) -> Option<alloc::sync::Arc<dyn kiface_task_api::TaskScheduleObserver>>
+    where Self: Sized;
+    fn init_vcpu(vcpu: &mut Vcpu<Self>, entry: u64, sp: u64) -> bool
+    where Self: Sized;
+    fn init_secondary_vcpu(vcpu: &mut Vcpu<Self>, entry_pa: u64, context_id: u64) -> bool
+    where Self: Sized;
+    fn restore_guest_ctx(vcpu: &mut Vcpu<Self>) where Self: Sized;
+    fn enter_guest(vcpu: &mut Vcpu<Self>) -> bool where Self: Sized;
+    fn exit_handler(vcpu: &mut Vcpu<Self>) -> ExitAction where Self: Sized;
+    fn save_guest_ctx(vcpu: &mut Vcpu<Self>) where Self: Sized;
+    fn guest_test_code() -> (*const u8, usize);
+    fn percpu_hw_init() -> bool;
+    fn activate_guest_mem(vcpu: &mut Vcpu<Self>, guest_mem: &Self::GuestMem)
+    where Self: Sized;
+    fn teardown_vcpu(vcpu: &mut Vcpu<Self>) where Self: Sized;
 }
 ```
 
 `init_vcpu` provides a unified interface to set up guest entry point and stack pointer,
 translating them into arch-specific registers (ELR/SP_EL1, vsepc/sp, VMCS RIP/RSP).
 
-`guest_test_entry` returns the architecture's selftest guest entry point address.
+`guest_test_code` returns the selftest guest code pointer and byte length.
 `percpu_hw_init` performs per-CPU hardware initialization (idempotent) — defaults to
 a no-op for architectures that need none (e.g. AArch64 VHE).
+
+`schedule_observer` prepares task-owned residency before publication;
+`activate_guest_mem` installs second-stage translation on the executing task;
+`teardown_vcpu` stops architecture-owned hardware with IRQs masked. The run loop
+keeps IRQs masked across entry and device cleanup. The x86 entry implementation
+also rejects IRQ-enabled direct calls before any VMCS selection or VMX access.
 
 ### vCPU Run Loop (`vmm_run_vcpu`)
 
@@ -118,7 +138,7 @@ loop {
 
 The selftest is architecture-generic — `selftest_impl<A: VmmArch>()` and
 `selftest_smp_impl<A: VmmArch>()` are parameterized by the `VmmArch` trait,
-using `A::guest_test_entry()` and `A::percpu_hw_init()` to dispatch per-arch
+using `A::guest_test_code()` and `A::percpu_hw_init()` to dispatch per-arch
 setup. A `CurrentArch` type alias (cfg-selected) maps to the concrete backend.
 
 The selftest has two modes:
@@ -213,6 +233,19 @@ running guest code on another physical CPU are the subject of the next stage
 (see *Future Work → Interrupt Injection*). Until then, guests receive no
 virtual interrupts.
 
+### Guest-entry failure
+
+The run loop pairs device preparation with either `VcpuHook::on_exit` after
+successful entry, or `VcpuHook::on_entry_failure` in reverse order if entry is
+rejected. Both execute before the IRQ-masked window ends. Failure rollback
+does not read back guest progress and precedes architecture teardown. The
+run-loop fixture in `ut-tests/entry.rs` verifies ordering, IRQ restoration,
+and absence of guest-save/exit-handler calls using a rejecting architecture.
+It is not a hardware virtualization test.
+The x86 entry backend preserves the outer IRQ exclusion on both VMCS-load
+failure and VM entry/exit; it must not issue `sti` between VMCS selection and
+device cleanup. VMX hardware execution requires a separate capable host.
+
 ### AArch64 world-switch / thread fixes
 
 SP_EL0 holds host current in kernel execution but is also guest architectural
@@ -283,8 +316,9 @@ simplest possible guest:
   are banked per vCPU, shared SPI enable bits are VM-wide, and ISPENDR/SGIR latch
   pending interrupts for the selected target vCPUs.
 - **GICC → GICV**: the guest CPU interface (`0x0801_0000`) is redirected to the
-  hardware virtual interface GICV (`0x0804_0000`) via `map_region`, so ack/EOI
-  are hardware-assisted.
+  firmware-described hardware GICV via `map_region`, so ack/EOI are
+  hardware-assisted. The backend must advertise disjoint GICH/GICV regions;
+  `kvmm-api` checks GICH capacity and maps only the two GICV interface pages.
 - **`aarch64::vgic`** owns virtual CPU-interface/GICH state. Pending interrupts are
   latched independently from enable state; `VgicHook::on_entry` drains only
   `pending & enabled` into free LRs inside the IRQ-masked world-switch window.
@@ -292,9 +326,15 @@ simplest possible guest:
   back in `on_exit`, then the physical GICH LR/VMCR/APR state is cleared so
   another VM that later runs on the same pCPU cannot observe stale virtual
   interrupt state.
+- **Virtual timer residency:** [vcpu-residency.md](vcpu-residency.md) describes
+  the task-owned register snapshot and explicit CPU-local forwarding. The
+  observer is installed before task publication and owns no pointer into Vcpu.
 - **Virtual timer**: guest `CNTV_CTL_EL02`/`CNTV_CVAL_EL02` are saved on exit and
   restored on entry; the timer is not disabled on exit because the host IRQ 27
-  path must keep observing guest virtual timer expiry. The host IRQ route only
+  path observes expiry while this task remains resident. Actual task switch-out
+  saves and disables CNTV before CPU reuse; switch-in reconstructs local active
+  state and restores offset/CVAL before CTL. WFI uses an interruptible host wait
+  at the guest deadline, not periodic polling. The host IRQ route only
   wakes the per-pCPU owner task; before each guest entry, the VMM recomputes
   whether the current vCPU's saved virtual timer deadline is overdue and latches
   virtual PPI 27 pending when needed. Delivery still requires the guest's banked
@@ -602,7 +642,9 @@ refresh handles all per-CPU-variable host fields.
 ---
 
 All three architecture selftests pass in both single-vCPU and SMP modes:
-- **AArch64**: 100 iterations of WFI + HVC, verified on QEMU `virt` with EL2
+- **AArch64**: 100 finite HVC round trips on QEMU `virt` with EL2. The timerless
+  smoke guest does not execute WFI: indefinite WFI now correctly parks rather
+  than periodically polling. Separate GICv2 guest tests supply real deadlines.
 - **RISC-V**: 100 iterations of WFI + ecall, verified on QEMU `virt` with H-extension (4 CPUs × 2 vCPUs)
 - **x86_64**: 100 iterations of HLT + VMCALL, verified on QEMU with `-cpu max,+vmx` (4 CPUs × 2 vCPUs)
 
@@ -618,7 +660,9 @@ perspective, a vCPU thread is identical to any other kernel thread:
 
 - **Preemption**: Host timer interrupts force VM-exits; the scheduler can then preempt the
   vCPU thread at any timer tick, regardless of guest behavior.
-- **Cooperative yield**: WFI/HLT exits call `ktask::yield_now()` so idle guests release
+- **Cooperative wait**: AArch64 WFI uses an interruptible task wait, with an
+  owned deadline only when CNTV is enabled and unmasked. Other backends retain
+  their existing WFI/HLT yield behavior so idle guests release
   their time slice early (optimization, not required for correctness).
 - **API**: `spawn_vcpu_thread<A>(vcpu) -> KtaskRef` — moves the Vcpu into the thread,
   caller uses `.join()` to wait (returns 0 on success, 1 on error).

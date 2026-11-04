@@ -31,6 +31,16 @@ use crate::{
 /// Each architecture implements these four functions to drive
 /// the guest execution cycle in [`vmm_run_vcpu`](crate::vcpu::vmm_run_vcpu).
 pub trait VmmArch {
+    /// Prepares task-owned CPU residency before the task becomes runnable.
+    fn schedule_observer(
+        _vcpu: &mut Vcpu<Self>,
+    ) -> Option<alloc::sync::Arc<dyn kiface_task_api::TaskScheduleObserver>>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     /// Per-architecture vCPU state (GPRs, sysregs, host save area).
     /// Must be `#[repr(C)]` with ABI-stable layout for assembly.
     type ArchVcpu: Default + Send;
@@ -62,6 +72,11 @@ pub trait VmmArch {
 
     /// Enter the guest (eret / vmlaunch / sret).
     /// Returns `true` on success, `false` on entry failure.
+    ///
+    /// The run loop calls with local IRQs masked and requires that mask on
+    /// return, including failure. The backend must restore host execution state
+    /// before returning; device rollback cannot depend on saved guest-exit state
+    /// when entry failed. The outer loop restores IRQs after device cleanup.
     fn enter_guest(vcpu: &mut Vcpu<Self>) -> bool
     where
         Self: Sized;
@@ -104,6 +119,9 @@ pub trait VmmArch {
     /// Teardown hardware state before dropping a vCPU.
     ///
     /// Called at the end of `vmm_run_vcpu` before the `Vcpu` is dropped.
+    /// Local IRQs are masked; stop CPU-local producers without waiting or
+    /// enabling IRQs. Sleepable wait resources must already have been drained
+    /// by the outer exit handler before returning to the run loop.
     /// x86_64 uses this to `vmclear` the VMCS before the page is freed.
     fn teardown_vcpu(_vcpu: &mut Vcpu<Self>)
     where

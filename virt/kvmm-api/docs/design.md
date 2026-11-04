@@ -2,6 +2,14 @@
 
 ## Purpose
 
+AArch64 `setup_gic` obtains the active backend's guest-interface capability
+before mapping hardware. It rejects absent GICH/GICV regions, prepares the
+disabled timer route in sleepable context and checks that GICH exposes at least
+four LRs. Only the two validated GICV pages are mapped at the guest GICC address.
+The control-plane kernel fixture in `ut-tests/timer_guest.rs` exercises this
+same setup with a finite EL1 program, real timer IRQ acknowledge/EOI and MMIO
+migration checkpoints. It is not a mocked register test or a performance test.
+
 `kvmm-api` is the control-plane (policy) crate for the VMM. The [`kvmm`] crate
 provides only *mechanism* — `Vm`, `Vcpu`, guest memory, and the virtual-device
 substrate — with no opinion on how a VM is created or destroyed. `kvmm-api`
@@ -83,6 +91,9 @@ this in practice for Linux guests.
 * riscv64 and aarch64 Linux boot are implemented. On other architectures the
   boot command logs and returns an error; the crate still compiles so the
   workspace builds on every target.
+  The private `loader` module and its import use the same AArch64/RISC-V gate
+  as these boot implementations; unsupported targets do not compile unused
+  image-loading and DTB-patching helpers.
 * This crate owns the Linux boot control plane, including image loading and DTB
   patching. The `kvmm` crate keeps only the VMM mechanism (`Vm`, `Vcpu`, guest
   memory, and virtual-device substrate).
@@ -103,6 +114,14 @@ this in practice for Linux guests.
   in `/proc/kvmm`.
 
 ## Future direction
+
+Kernel integration tests are selected by `kernel-tests` through kfeat, not by
+production VMM selection. Their optional irq-driver dependency provides a
+read-only GICv2 PPI probe: tests check physical active/enable/delegation state
+after a withdrawn pending timer and after final stop, including an asserted,
+guest-active source. The production control plane uses only KIRQ capabilities.
+The fixture exercises two guests and CPU migration; it is not a performance
+benchmark or a proof of every asynchronous wakeup interleaving.
 
 * Add an event-driven console wakeup (`poll` wait queue woken on TX push) if
   the poll-timeout first-byte latency proves too coarse for interactive use.

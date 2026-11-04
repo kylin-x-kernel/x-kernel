@@ -3,7 +3,8 @@
 `kiface-task-api` owns low-level shared task capability contracts, not scheduling algorithms or
 consumer lock policy. Its dependencies are `kiface`, which supplies static
 exactly-one-provider wiring, and `ktask-types`, which supplies the shared
-`OwnerKey` boundary type. Consumers do not depend on `ktask`; the runtime
+`OwnerKey` boundary type, plus `kcpu_id_map` for logical CPU identities.
+Consumers do not depend on `ktask`; the runtime
 implements the contracts without exposing task handles or scheduler types.
 
 `TaskBlockingContextIf` supplies a nonallocating admission snapshot. It neither
@@ -51,3 +52,26 @@ The khal normal-IRQ exit path calls TaskIrqExitCheckpointIf after controller
 completion and dispatch cleanup; ktask/src/api.rs provides that checkpoint.
 The kipi reschedule endpoint calls TaskRescheduleRequestIf during pending
 notification handling; ktask/src/api.rs provides the request-only implementation.
+
+## Task Scheduling Observers
+
+`TaskScheduleObserver` is a consumer-implemented callback contract, not a
+static kiface provider. ktask invokes it at actual scheduling transitions;
+CPU-local resource owners implement load/put without adding their device
+dependencies to the scheduler. `ScheduleOutReason` describes the committed
+scheduling decision, even when a concurrent wake has changed task state.
+
+Callbacks run on the observed task's stack with ordinary IRQs masked. First
+entry is a load; a real switch pairs put on the source CPU with load on the
+destination CPU. Same-task reselection is neither. Terminal exit is the last
+put and has no matching subsequent load. Callbacks cannot block, allocate,
+wait for remote execution, reenter scheduling or acquire run-queue locks.
+
+Linux KVM uses `vcpu_load`/`vcpu_put` and preemption notifiers in
+`virt/kvm/kvm_main.c` to separate task scheduling from guest world switches.
+The current ktask registration is immutable and task-owned: attach an observer
+to an unpublished TaskInner and retain it through terminal exit. Unlike Linux's
+scoped notifier list, this supports one composed observer for the whole task;
+the consumer can make it inactive outside its resource residency interval.
+Dynamic registration/removal and callbacks for idle bootstrap are not provided.
+No hardware completion or guest virtual-interrupt algorithm lives here.

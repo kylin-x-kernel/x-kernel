@@ -2,6 +2,17 @@
 
 ## CPU-local Control Boundary
 
+`runtime/manager.rs::PerCpuForwarding::set_local_state` is an unsafe boundary.
+The retained Arc prevents Line storage reclamation, but is not a producer or
+hardware lifetime lease. Callers must keep the action registered, exclude
+mapping/configuration/teardown and competing ownership changes, execute on the
+owning CPU outside NMI with IRQs masked, and stop/mask the source before Host.
+Guest transitions reconstruct logical activity while delivery remains masked.
+The callback must not allocate, sleep, reenter KIRQ or retain a borrowed vCPU.
+Backend guest-interface metadata is trusted firmware input validated for range,
+alignment and non-overlap by the provider; the VMM validates register capacity
+after device mapping. Missing capability must not fall back to guessed MMIO.
+
 `runtime/state_local.rs` is protected by the retained Line lock. CPU selection,
 controller programming and commit must retain IRQ/preemption exclusion; plans
 cannot move to another CPU. Configuration failure closes only that CPU's action

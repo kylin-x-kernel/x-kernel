@@ -24,7 +24,8 @@ kvmm_guest_test_entry:
     mov  x20, #100            // max iterations
 
 .Lgt_loop:
-    wfi
+    // This fixture has no interrupt controller or timer producer. WFI would
+    // correctly park forever; finite world-switch coverage uses HVC instead.
 
     mov  x0, #1              // HVC_PRINT
     mov  x1, x19             // iteration count

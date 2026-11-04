@@ -462,6 +462,14 @@ macro_rules! with_cause {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn guest_interface() -> Option<kirq::GuestIrqInterface> {
+        None
+    }
+
+    fn percpu_forwarding(_: kirq::IrqDesc) -> Option<&'static kirq::PerCpuForwardingChip> {
+        None
+    }
+
     fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
         select_plic_flow(desc, PLIC.get().map(|controller| controller.sources))
     }

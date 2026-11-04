@@ -1,5 +1,30 @@
 # ktask — Design
 
+## Scheduling Observers
+
+CPU-local resource consumers can attach one
+`kiface_task_api::TaskScheduleObserver` to an unpublished TaskInner with
+`with_schedule_observer`. The slot stays immutable after publication and owns
+an Arc until task destruction. Unobserved tasks pay one optional-slot check;
+switching clones no Arc and acquires no observer lock. This is independent of
+UserTaskRuntime and supports ordinary kernel threads without user identity.
+
+`run_queue/rq.rs::switch_to` sends the outgoing notification after the
+same-task fast path and before the context switch. Its `prev_state` is the
+committed switch decision, not a wake-racy state reload. The resumed stack
+notifies incoming ownership using its actual current CPU, never the old `self`
+run queue. `task_entry` supplies the first-entry notification. Both incoming
+paths notify after finish_task_switch but before IRQ restoration. Exit receives
+one terminal outgoing notification even when the entry calls nonreturning exit.
+
+The consumer owns device load/put, inactive periods, background deadlines and
+final device teardown. ktask neither knows virtual CPUs nor manipulates IRQ-chip
+forwarding. Tests in `ut-tests/schedule_observer.rs` cover unpublished lifetime,
+first entry, real blocking/resumption, terminal exit, same-task reselection,
+SMP affinity migration, same-CPU reuse and a prepared timer armed from switch-out
+to wake the blocked task. They use event handshakes rather than elapsed-time
+assertions; synchronous timer draining stays outside scheduler notifications.
+
 ## Inline Scheduler Entries
 
 Task entry storage distinguishes an ordinary owned closure, an inline function
@@ -1249,6 +1274,15 @@ metadata before entering that guard. The observer is absent from production.
 The scheduling algorithm is selected by Kconfig (default EEVDF).
 
 ## Sub-tick / contended wake tests
+
+With `cfg(unittest)`, `with_sleep_probe_for_tests` installs a scoped observer
+for sleeps prepared by the calling task. The timer captures the observer at
+preparation; wake observations run outside the sleep-state lock. A cancellation
+observation comes from the core's actual Running retry, outside its owner lock.
+The owned Timer destructor and cancellation algorithm are unchanged. Serial consumer
+fixtures can coordinate a remote in-flight callback with wait cancellation.
+The registration is removed by RAII, does not affect other tasks' sleeps, and
+is absent together with all probe fields/calls from production builds.
 
 `future/time.rs` unittests split into two classes:
 

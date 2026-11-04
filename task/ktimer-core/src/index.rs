@@ -27,6 +27,12 @@ use super::{
 pub trait TimerHandler: Sync {
     /// Handles one expiration in hard IRQ context outside timer locks.
     fn on_expiration(&self, timer: TimerControl<'_>, expiration: Expiration);
+
+    /// Observes an actual synchronous cancellation retry after its owner lock
+    /// was released. Test fixtures must preserve callback progress and must
+    /// not unwind or recursively cancel this timer.
+    #[cfg(unittest)]
+    fn on_cancel_wait_for_test(&self) {}
 }
 
 impl<F: for<'call> Fn(TimerControl<'call>, Expiration) + Sync> TimerHandler for F {

@@ -33,4 +33,8 @@ impl VcpuHook<RiscvHext> for RiscvTimerHook {
     fn on_exit(&mut self, _vcpu_id: u32) {
         riscv64::set_virtual_timer_irq_pending(false);
     }
+
+    fn on_entry_failure(&mut self, _vcpu_id: u32) {
+        riscv64::set_virtual_timer_irq_pending(false);
+    }
 }

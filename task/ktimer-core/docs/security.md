@@ -15,6 +15,11 @@ The core validates representable times and CPU bounds; it cannot verify arbitrar
 callbacks' progress, lack of unwinding, or hardware readiness.
 `TimerHandler: Sync` permits shared access, not arbitrary IRQ-context behavior.
 Synchronous cancellation is not permission to violate callback lock ordering.
+In unittest builds, `TimerHandler::on_cancel_wait_for_test` observes a Running
+retry without the owner lock. It must preserve progress, must not unwind or
+recursively cancel its timer, and cannot replace the retry or cleanup barrier.
+Its storage is the same retained handler allocation that cancellation drains.
+The observer is absent from production builds.
 
 ## Assets and External Boundaries
 

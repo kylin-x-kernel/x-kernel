@@ -43,6 +43,8 @@ const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
 /// AArch64 VHE VMM backend.
 pub struct Aarch64Vhe;
 
+unittest::path_mod_test!(wfi_tests, "../../../ut-tests/wfi.rs");
+
 /// AArch64 vCPU state matching avatar-next `vcpu_t` layout.
 ///
 /// The first fields are accessed by assembly at fixed offsets.
@@ -111,13 +113,31 @@ fn advance_pc(vcpu: &mut Aarch64Vcpu, esr: u64) {
 fn handle_wfi(vcpu: &mut Vcpu<Aarch64Vhe>, esr: u64) -> ExitAction {
     advance_pc(&mut vcpu.arch, esr);
 
-    // Park the vCPU in an interruptible sleep so an injected virtual IRQ can
-    // wake it early via `inject_irq` -> `interrupt_task`. Publishing the
-    // WfiSleeping state is what lets `inject_irq` know a wake is needed.
-    let deadline = khal::time::monotonic_time() + ktime_types::TimeSpan::from_millis(1);
+    // Publish wake eligibility before checking previously queued events. The
+    // interruptible wait registers against the task's latched wake state, so
+    // an injection between this check and parking is not lost.
     vcpu.vm
         .set_vcpu_run_state(vcpu.vcpu_id, VcpuRunState::WfiSleeping);
-    ktask::interruptible_sleep_until(deadline);
+    let deadline = {
+        let _guard = kspin::IrqSave::new();
+        if vcpu.vm.is_stop_requested()
+            || vcpu
+                .hooks
+                .iter()
+                .any(|hook| hook.has_pending_interrupt(vcpu.vcpu_id))
+            || vtimer::is_timer_asserted(vcpu)
+        {
+            Some(khal::time::monotonic_time())
+        } else {
+            vtimer::blocking_deadline(vcpu)
+        }
+    };
+    if let Some(deadline) = deadline {
+        ktask::interruptible_sleep_until(deadline);
+    } else {
+        let _ =
+            ktask::future::block_on(ktask::future::interruptible(core::future::pending::<()>()));
+    }
     vcpu.vm
         .set_vcpu_run_state(vcpu.vcpu_id, VcpuRunState::HostHandlingExit);
     ExitAction::Resume
@@ -261,6 +281,9 @@ impl VmmArch for Aarch64Vhe {
     }
 
     fn restore_guest_ctx(vcpu: &mut Vcpu<Self>) {
+        if let Some(timer) = &vcpu.timer_residency {
+            timer.enter();
+        }
         let vmpidr = (1u64 << 31) | vcpu.vcpu_id as u64;
         // SAFETY: VMPIDR_EL2 is an EL2-controlled virtualization register.
         unsafe {
@@ -273,6 +296,13 @@ impl VmmArch for Aarch64Vhe {
     }
 
     fn enter_guest(vcpu: &mut Vcpu<Self>) -> bool {
+        if vcpu
+            .timer_residency
+            .as_ref()
+            .is_none_or(|timer| timer.has_failed())
+        {
+            return false;
+        }
         // SAFETY: el2_enter_guest saves/restores host state correctly.
         // It returns via el2_trap_exit when the guest traps.
         unsafe {
@@ -346,7 +376,18 @@ impl VmmArch for Aarch64Vhe {
         }
     }
 
-    fn teardown_vcpu(_vcpu: &mut Vcpu<Self>) {
+    fn schedule_observer(
+        vcpu: &mut Vcpu<Self>,
+    ) -> Option<alloc::sync::Arc<dyn kiface_task_api::TaskScheduleObserver>> {
+        let timer = vtimer::TimerResidency::new();
+        vcpu.timer_residency = Some(timer.clone());
+        Some(timer)
+    }
+
+    fn teardown_vcpu(vcpu: &mut Vcpu<Self>) {
+        if let Some(timer) = &vcpu.timer_residency {
+            timer.stop();
+        }
         vtimer::clear_host_vtimer_owner_for_current_task();
     }
 

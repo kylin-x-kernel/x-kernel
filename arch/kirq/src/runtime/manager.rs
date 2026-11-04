@@ -48,6 +48,68 @@ pub use crate::{
     state::DYNAMIC_VIRQ_BASE,
 };
 
+/// Retained source identity for explicit CPU-local guest completion delegation.
+/// Does not own the producer or implicitly disable/drain it on Drop.
+pub struct PerCpuForwarding {
+    _line: Arc<IrqLine>,
+    desc: IrqDesc,
+    chip: &'static crate::PerCpuForwardingChip,
+}
+
+impl PerCpuForwarding {
+    /// Changes delegation on the executing CPU without waiting or allocation.
+    ///
+    /// # Safety
+    /// The source owner must retain the registered action and exclude mapping,
+    /// configuration, teardown and competing ownership changes for this handle's
+    /// lifetime. Call outside NMI, with IRQs and migration disabled. Before Host,
+    /// stop the producer and mask delivery; before Guest, reconstruct logical
+    /// activity and keep delivery masked until state installation completes.
+    /// No outstanding claim may cross either ownership transition.
+    pub unsafe fn set_local_state(&self, state: crate::PerCpuForwardingState) {
+        debug_assert!(!karch::local_irq_enabled());
+        debug_assert!(!crate::context::is_in_nmi());
+        // SAFETY: preparation retained the admitted binding; this unsafe
+        // method's caller supplies the source lifetime and local exclusion.
+        unsafe { (self.chip.set_state)(self.desc, state) };
+    }
+}
+
+/// Prepares forwarding access for an already registered CPU-local source.
+///
+/// Task context only. This does not activate or change hardware and does not
+/// replace source-owner lifetime/exclusion obligations of `set_local_state`.
+///
+/// # Errors
+/// Returns InvalidContext outside management context, UnknownIrq when absent,
+/// NoIrqAction when the retained Line has no action,
+/// or UnsupportedFlow when the controller/source cannot delegate completion.
+pub fn prepare_percpu_forwarding(
+    spec: impl Into<IrqSpec>,
+) -> Result<PerCpuForwarding, IrqDescError> {
+    can_wait_for_irq_sync("prepare_percpu_forwarding")?;
+    let state = IRQ_STATE.lock();
+    let Some((virq, line)) = lookup_line(&state, spec.into()) else {
+        return Err(IrqDescError::UnknownIrq);
+    };
+    let entry = line.lock();
+    if !entry.has_actions() {
+        return Err(IrqDescError::NoIrqAction { virq });
+    }
+    let desc = entry.desc;
+    if entry.flow != crate::IrqFlow::PerCpu {
+        return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
+    }
+    let chip = IntrManagerIf::percpu_forwarding(desc)
+        .ok_or(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq })?;
+    drop(entry);
+    Ok(PerCpuForwarding {
+        _line: line,
+        desc,
+        chip,
+    })
+}
+
 /// Options for installing a regular IRQ handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IrqRegisterOptions {

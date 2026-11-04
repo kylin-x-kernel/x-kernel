@@ -12,6 +12,7 @@ documentation.workspace = true
 [dependencies]
 kiface.workspace = true
 ktask-types.workspace = true
+kcpu_id_map.workspace = true
 
 [lints]
 workspace = true

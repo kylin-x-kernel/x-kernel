@@ -247,6 +247,14 @@ unittest::path_mod_test!(mod tests, "../ut-tests/x86.rs");
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn guest_interface() -> Option<kirq::GuestIrqInterface> {
+        None
+    }
+
+    fn percpu_forwarding(_: kirq::IrqDesc) -> Option<&'static kirq::PerCpuForwardingChip> {
+        None
+    }
+
     fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
         let flow = select_x86_flow(desc, x86_apic::irq_trigger_mode)?;
         if is_msi_source(desc) && !x86_apic::msi_route_matches(desc.hwirq, desc.affinity) {

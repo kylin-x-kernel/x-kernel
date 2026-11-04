@@ -224,10 +224,25 @@ impl<H: TimerHandler + 'static, const N: usize> Timer<H, N> {
     /// durable stop; do not block the callback's progress or wait from itself.
     /// May leave one stale hardware IRQ, which the platform will re-arbitrate.
     pub fn cancel_sync(&self) -> bool {
-        // SAFETY: the shell retains the private allocation and static set for
-        // the entire wait; no raw node reference or direct mutation is exposed.
-        // Progress violations can deadlock but cannot release live storage.
-        unsafe { self.timers.cancel_sync(&self.data.node) }
+        #[cfg(unittest)]
+        {
+            // SAFETY: the same owned allocation and wait loop as production;
+            // the fixture only observes retries outside the owner lock and
+            // must preserve callback progress without unwinding.
+            unsafe {
+                self.timers.cancel_sync_with(&self.data.node, || {
+                    self.handler().on_cancel_wait_for_test();
+                    core::hint::spin_loop();
+                })
+            }
+        }
+        #[cfg(not(unittest))]
+        {
+            // SAFETY: the shell retains the private allocation and static set for
+            // the entire wait; no raw node reference or direct mutation is exposed.
+            // Progress violations can deadlock but cannot release live storage.
+            unsafe { self.timers.cancel_sync(&self.data.node) }
+        }
     }
 }
 

@@ -2,6 +2,17 @@
 
 ## CPU-local Ordinary Flow
 
+`prepare_percpu_forwarding` retains an already registered Line and obtains the
+backend's `PerCpuForwardingChip`. It does not start a producer or transfer
+resource ownership. The consumer calls unsafe `set_local_state` under IRQ and
+migration exclusion to delegate guest completion or return it to the host.
+The consumer must retain registration, exclude competing management and stop
+the producer before returning ownership. No claim may cross this transition.
+GICv2 supplies this capability for validated ordinary PPIs; other providers
+return None. This is separate from guest-interface discovery:
+`IntrManagerIf::guest_interface` supplies firmware-validated GICH/GICV physical
+pages, not permission to delegate any particular IRQ.
+
 `IrqFlow::PerCpu` keeps enablement, nested disable depth, configuration generation
 and failed-configuration admission in one `LocalControl` per logical CPU inside
 the retained Line. These bounded slots are protected by the Line lock; they are
@@ -387,8 +398,8 @@ ordering, not a claim that every controller has equivalent EOI semantics.
 
 | Provider / source | Before generic fanout | Completion after fanout | Control and remaining boundary |
 | --- | --- | --- | --- |
-| GICv2: `drivers/platform/irq/src/gicv2.rs`, `claim_irq` | Ack, reject spurious, EOI priority drop | Normally DIR using the claim cookie; VMM builds skip host DIR for the guest virtual timer INTID | Ordinary SPIs select Fasteoi; ordinary private sources select PerCpu, except virtual timer PPI 27 and PER_CPU-tagged sources, which retain Legacy. The guest HW LR path owns the intended forwarded deactivation. This build/INTID exception is not a general forwarding-lifecycle guarantee. |
-| GICv3: `drivers/platform/irq/src/gicv3.rs`, `ack_irq` | Ack, classify NMI, EOI priority drop | `complete_irq` issues DIR | Ordinary SPIs select Fasteoi independently of claim classification. Ordinary private sources select PerCpu, except PPI 27 and PER_CPU-tagged sources, which retain Legacy. NMI-class claims enter generic NMI. |
+| GICv2: `drivers/platform/irq/src/gicv2.rs`, `claim_irq` | Ack, reject spurious, EOI priority drop | DIR using the claim cookie unless this CPU's `FORWARDED_PPIS` delegates deactivation to a guest | Ordinary SPIs select Fasteoi; explicitly described ordinary private sources, including the VMM timer PPI 27, select PerCpu. NMI-tagged sources retain Legacy. The resident guest HW LR owns delegated deactivation; detached sources return to host completion. |
+| GICv3: `drivers/platform/irq/src/gicv3.rs`, `ack_irq` | Ack, classify NMI, EOI priority drop | `complete_irq` issues DIR | Ordinary SPIs select Fasteoi independently of claim classification. Explicitly described ordinary private sources select PerCpu; NMI-tagged sources retain Legacy. NMI-class claims enter generic NMI. Guest forwarding is not supported by this backend. |
 | x86 IO-APIC level: `drivers/platform/irq/src/x86.rs`, `dispatch_regular_irq` | Decode vector, retain nonzero completion cookie | LAPIC EOI under Line lock after Fasteoi handlers | Selected Fasteoi gates admission; validated hardware level reasserts after unmask. |
 | x86 IO-APIC edge and MSI-X: same provider | Transfer nonzero EOI cookie to generic Edge | LAPIC EOI under Line lock before handlers, or after masking a rejected arrival | Overlapping arrivals latch pending for the running owner. Re-enable retriggers using the recorded backend target/vector, not an arbitrary self-IPI. MSI device masking/release remains owner-controlled. |
 | x86 local timer/IPI vectors: same provider | LAPIC EOI before generic dispatch | Zero cookie: no further EOI | PerCpu controls local admission independently; remote producer shutdown remains an owner obligation. |
@@ -453,7 +464,7 @@ Therefore neither the flag nor its absence is a complete local-source classifier
 | `drivers/platform/timer/src/arm_generic.rs::rearm_local_timer_irq` | Programs the current CPU timer and calls the legacy `kirq::enable` bridge, now updating its PerCpu slot. | Local disable updates only that CPU; timer stop/rearm exclusion remains with the timer service. |
 | `arch/kipi/src/notification.rs::enable_fixed_notifications` | Enables the local IPI line, publishes readiness and drains retained notification reasons during CPU-bound boot. | No shutdown/hotplug protocol exists here. Do not use an IPI callback to disable its own transport before pending shutdown work has completed. |
 | `platforms/kplat-aarch64/src/peripherals/pmu.rs::pmu_if_impl` | Registers overflow dispatch once and enables the local PMU line on each CPU; NMI mode has a separate table/fallback contract. | PMU-local counter shutdown and NMI reader exclusion cannot be replaced with ordinary Line drain. |
-| `virt/kvmm/src/vdev/aarch64/irq_route.rs::set_host_vtimer_irq_enabled` | Registers one route lazily, then controls the current CPU's timer PPI through the legacy bridge. Owner references are maintained separately. | Clearing task owners is not local hardware shutdown or guest deactivation completion; forwarded timer retirement remains a separate gate. |
+| `virt/kvmm/src/vdev/aarch64/irq_route.rs` and `timer_residency.rs` | Prepares one PerCpu route in sleepable context. Task schedule transitions save/restore CNTV and transfer this CPU's forwarding state under IRQ exclusion. | Stop disables timer output, revokes forwarding and clears local ownership. The permanent shared route is not unregistered per vCPU. See `virt/kvmm/docs/vcpu-residency.md` for the supported GICv2 lifecycle and WFI drain. |
 
 ### Retirement Responsibilities
 

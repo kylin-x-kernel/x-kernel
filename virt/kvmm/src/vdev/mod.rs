@@ -30,10 +30,28 @@ use crate::{arch::VmmArch, vcpu::Vcpu};
 
 /// Per-vCPU world-switch hook.
 pub trait VcpuHook<A: VmmArch>: Send {
+    /// Retires saved device associations after architecture producer stop.
+    /// Called once at run-loop termination with IRQs masked. Must not wait or
+    /// restore IRQs. Unlike entry rollback, this discards saved guest state.
+    fn on_stop(&mut self, _vcpu_id: u32) {}
+
+    /// Reports an already queued wake event for the owning vCPU task.
+    /// Called with local IRQs masked before parking, after wake eligibility
+    /// has been published. Concurrent producers must also notify the task.
+    fn has_pending_interrupt(&self, _vcpu_id: u32) -> bool {
+        false
+    }
     /// Called just before entering the guest (IRQs masked).
     fn on_entry(&mut self, vcpu: &mut Vcpu<A>);
     /// Called just after the guest exit is saved (IRQs still masked).
     fn on_exit(&mut self, vcpu_id: u32);
+    /// Undo device preparation when architecture entry fails, with IRQs masked.
+    ///
+    /// Clear installed CPU-local state without consuming guest progress or
+    /// reading back registers whose validity requires a successful entry.
+    /// The run loop calls this in reverse preparation order, instead of
+    /// `on_exit`. Implementations must not sleep or restore IRQs.
+    fn on_entry_failure(&mut self, vcpu_id: u32);
 }
 
 /// Factory for per-vCPU world-switch hooks provided by a VM device.

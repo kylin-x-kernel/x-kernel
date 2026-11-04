@@ -67,10 +67,10 @@ fn select_gic_flow(
     if desc.hwirq >= 32 && matches!(desc.trigger, IrqTrigger::EdgeFalling | IrqTrigger::LevelLow) {
         return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
     }
-    // NMI registration tags its fallback PER_CPU. Private sources also include
-    // the only current HW-LR forwarding route (virtual timer PPI 27); neither
-    // participates in ordinary shared-source running/pending state.
-    if desc.hwirq == 27 || desc.flags.contains(kirq::IrqFlags::PER_CPU) {
+    // NMI registration tags its fallback PER_CPU and retains its separate
+    // lifecycle. Ordinary PPIs, including explicitly forwarded PPIs, use
+    // CPU-local flow state rather than shared-source running/pending state.
+    if desc.flags.contains(kirq::IrqFlags::PER_CPU) {
         return Ok(IrqFlow::Legacy);
     }
     if desc.hwirq < 32 {
@@ -134,6 +134,8 @@ pub struct GicConfig {
     pub gicd: GicMmioRegion,
     pub gicc: Option<GicMmioRegion>,
     pub gicr: Option<GicMmioRegion>,
+    pub gich: Option<GicMmioRegion>,
+    pub gicv: Option<GicMmioRegion>,
 }
 
 impl GicConfig {
@@ -220,6 +222,14 @@ fn config_from_device_tree() -> Option<GicConfig> {
     match version {
         GicVersion::V2 => {
             let gicc = regs.next()?;
+            let gich = regs.next().map(|reg| GicMmioRegion {
+                paddr: PhysAddr::from_usize(reg.starting_address as usize),
+                size: reg.size,
+            });
+            let gicv = regs.next().map(|reg| GicMmioRegion {
+                paddr: PhysAddr::from_usize(reg.starting_address as usize),
+                size: reg.size,
+            });
             Some(GicConfig {
                 version,
                 gicd,
@@ -228,6 +238,8 @@ fn config_from_device_tree() -> Option<GicConfig> {
                     size: gicc.size,
                 }),
                 gicr: None,
+                gich,
+                gicv,
             })
         }
         GicVersion::V3 => {
@@ -236,6 +248,8 @@ fn config_from_device_tree() -> Option<GicConfig> {
                 version,
                 gicd,
                 gicc: None,
+                gich: None,
+                gicv: None,
                 gicr: Some(GicMmioRegion {
                     paddr: PhysAddr::from_usize(gicr.starting_address as usize),
                     size: gicr.size,
@@ -243,6 +257,36 @@ fn config_from_device_tree() -> Option<GicConfig> {
             })
         }
     }
+}
+
+fn guest_interface(config: GicConfig) -> Option<kirq::GuestIrqInterface> {
+    if config.version != GicVersion::V2 {
+        return None;
+    }
+    let control = config.gich?;
+    let cpu = config.gicv?;
+    let regions = [config.gicd, config.gicc?, control, cpu];
+    for (index, region) in regions.iter().enumerate() {
+        let start = region.paddr.as_usize();
+        let end = start.checked_add(region.size)?;
+        if !start.is_multiple_of(4096) || region.size == 0 {
+            return None;
+        }
+        for other in &regions[..index] {
+            let other_start = other.paddr.as_usize();
+            let other_end = other_start.checked_add(other.size)?;
+            if start < other_end && other_start < end {
+                return None;
+            }
+        }
+    }
+    if control.size < 0x1000 || cpu.size < 0x2000 {
+        return None;
+    }
+    Some(kirq::GuestIrqInterface::GicV2 {
+        control_paddr: control.paddr.as_usize(),
+        cpu_paddr: cpu.paddr.as_usize(),
+    })
 }
 
 fn remember_config(config: GicConfig) {
@@ -440,6 +484,32 @@ pub fn with_irq_work_gic_lock_for_test(action: impl FnOnce()) -> bool {
     }
 }
 
+/// Samples the current CPU's GICv2 PPI for kernel integration tests.
+/// Returns `(enabled, active, forwarded)`, or `None` for other controllers/IDs.
+#[cfg(unittest)]
+pub fn local_ppi_state_for_test(irq: usize) -> Option<(bool, bool, bool)> {
+    if ACTIVE_GIC.get() != Some(&GicVersion::V2) || !(16..32).contains(&irq) {
+        return None;
+    }
+    Some(gicv2::local_ppi_state_for_test(irq))
+}
+
+/// Pends a GICv2 PPI on the executing CPU for kernel integration tests.
+/// Returns `false` for other controllers or non-PPI IDs.
+///
+/// # Safety
+/// The caller owns this source, has stopped its producer, and excludes local
+/// IRQs and migration. It must drain delivery and restore source state before
+/// relinquishing that ownership.
+#[cfg(unittest)]
+pub unsafe fn pend_local_ppi_for_test(irq: usize) -> bool {
+    if ACTIVE_GIC.get() != Some(&GicVersion::V2) || !(16..32).contains(&irq) {
+        return false;
+    }
+    gicv2::pend_local_ppi_for_test(irq);
+    true
+}
+
 pub fn set_prio(irq: usize, priority: u8) {
     // NMI classification relies on the invariant that only NMI sources live
     // below IRQ_THRESHOLD: excp routes IRQs taken with PMR <= NMI_ONLY to the
@@ -483,6 +553,22 @@ pub fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn guest_interface() -> Option<kirq::GuestIrqInterface> {
+        if ACTIVE_GIC.get() != Some(&GicVersion::V2) {
+            return None;
+        }
+        guest_interface(*GIC_INFO.get()?)
+    }
+
+    fn percpu_forwarding(desc: kirq::IrqDesc) -> Option<&'static kirq::PerCpuForwardingChip> {
+        (ACTIVE_GIC.get() == Some(&GicVersion::V2)
+            && desc.domain == Some(GIC_ROOT_DOMAIN)
+            && (16..32).contains(&desc.hwirq)
+            && select_gic_flow(desc, STANDARD_INTID_LIMIT.get().copied())
+                == Ok(kirq::IrqFlow::PerCpu))
+        .then_some(&gicv2::FORWARDING)
+    }
+
     fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
         select_gic_flow(desc, STANDARD_INTID_LIMIT.get().copied())
     }

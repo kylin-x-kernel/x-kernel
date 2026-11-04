@@ -28,7 +28,10 @@ pub use backend::msi::{MsiBackendIf, MsiBackendToken};
 pub(crate) use backend::platform;
 pub use backend::{
     msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix},
-    platform::{EdgeChip, FasteoiChip, FasteoiResend, IrqFlow, LevelChip},
+    platform::{
+        EdgeChip, FasteoiChip, FasteoiResend, GuestIrqInterface, IrqFlow, LevelChip,
+        PerCpuForwardingChip, PerCpuForwardingState,
+    },
 };
 pub use bottom_half::{context, deferred, lifecycle, softirq};
 pub use domain::IrqRef;

@@ -12,6 +12,8 @@ use crate::vcpu::{ExitAction, Vcpu};
 
 pub mod vmx;
 
+unittest::path_mod_test!(entry_tests, "../../../ut-tests/x86_entry.rs");
+
 use vmx::{
     VMX_HYPERCALL_DONE, VMX_HYPERCALL_PRINT, VMX_REASON_CPUID, VMX_REASON_EPT_VIOLATION,
     VMX_REASON_EXC_NMI, VMX_REASON_EXT_INT, VMX_REASON_HLT, VMX_REASON_VMCALL, VmcsField,
@@ -186,29 +188,20 @@ impl VmmArch for X86Vmx {
     }
 
     fn enter_guest(vcpu: &mut Vcpu<Self>) -> bool {
+        // Reject direct callers before selecting a CPU-local VMCS. The run
+        // loop keeps exclusion through device readback or rollback as well.
+        if karch::local_irq_enabled() {
+            return false;
+        }
         if !Self::percpu_hw_init() {
             log::error!("[VMX] percpu_hw_init failed in enter_guest");
             return false;
         }
-        // Disable interrupts to prevent preemption between vmptrld and
-        // vmlaunch — another thread doing vmptrld would steal "current VMCS".
-        // SAFETY: cli/sti bracket the critical section; VM exit returns here.
-        unsafe {
-            core::arch::asm!("cli");
-        }
-
+        // The run loop owns IRQ exclusion through device readback or rollback.
+        // Opening IRQs here could migrate after selecting this CPU's VMCS.
         if !vmx::vmptrld(vcpu.arch.vmcs_pa) {
-            // SAFETY: re-enable interrupts on error path.
-            unsafe {
-                core::arch::asm!("sti");
-            }
             log::error!("[VMX] vmptrld failed in enter_guest");
             return false;
-        }
-
-        // SAFETY: re-enable interrupts after VM exit (or entry failure).
-        unsafe {
-            core::arch::asm!("sti");
         }
 
         vmx::refresh_host_state();
