@@ -17,6 +17,31 @@ Standalone, manually run weak-memory publication models and their explicit
 assumptions are documented in [models/README.md](models/README.md). They do not
 add a kernel dependency or run as part of the default unit-test suite.
 
+Prepared insertion tests allocate a full private capacity token, change root
+shape before commit, and count zero allocations during publication. Conflict
+returns the unchanged owner and deallocates all unused private nodes. Failure
+injection covers each node preparation allocation; cancellation also balances
+all private allocations without an RCU provider. A compile-fail doctest rejects
+token reuse. The kernel fixture verifies prepared publication through real RCU
+reads. This is not coverage of a paired IRQ-index transaction.
+
+Prepared removal tests cover allocation failure, invalid flags and private
+cancellation without an RCU provider. The kernel test prepares a record, masks
+IRQs, and verifies rejection before withdrawal; a new record then removes the
+entry in admitted context and real callback draining releases exactly the array
+owner. Missing-key removal and compile-time single-use are covered too. These
+checks do not prove paired-index atomicity or every interleaving of readers and
+destructive updates.
+
+Split-phase tests withdraw two private indexes under a caller-held SpinNoIrq
+lock, then submit their pending retirements after unlocking. They verify that
+both array owners are retained until submission and released after callback
+drain. The optional SMP integration fixture holds one real read scope across
+both withdrawals and submissions, confirms identical borrowed payload identity,
+then checks exactly one final destructor after reader exit. Compile-fail doctests
+reject transferring or reusing a pending retirement. These are container protocol
+tests, not proof that KIRQ's paired-index publication has been integrated.
+
 Run from the workspace root:
 
 ```sh
@@ -38,6 +63,14 @@ only while the fixture retains all traversed storage. Miri checks
 the executed ownership, alignment and aliasing paths, including an existing
 payload borrow across root growth. It does not validate kernel admission,
 interrupt exclusion, grace periods or every possible concurrent interleaving.
+
+Locked ownership queries use the public `get_owned_locked` entrance without
+an RCU provider. Host checks cover missing/boundary keys, pointer identity,
+strong counts, no allocation during lookup, concurrent root growth and an owner
+surviving array destruction. The kernel removal fixture retains both a scoped
+and a locked-query Arc across actual callback draining. Neither test establishes
+early-boot CPU-slot initialization or permits locked queries from IRQ/NMI/BH
+handlers; those continue to use scoped RCU reads.
 Pruning fixtures use the real locked withdrawal path, retain old raw nodes and
 payloads across reinsertion, then explicitly end their borrows before invoking
 the actual shallow node callbacks. They check detached path lengths and empty

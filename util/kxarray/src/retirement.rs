@@ -9,7 +9,10 @@ use core::{marker::PhantomData, mem::offset_of, ptr::NonNull};
 use kalloc_types::KBox;
 use krcu::{CallbackNode, PreparedCallback};
 
-use crate::EntryOwner;
+use crate::{
+    EntryOwner,
+    node::{MAX_HEIGHT, Node},
+};
 
 pub(super) struct Retirement<P: EntryOwner> {
     callback: CallbackNode,
@@ -18,6 +21,24 @@ pub(super) struct Retirement<P: EntryOwner> {
 }
 
 impl<P: EntryOwner> Retirement<P> {
+    /// # Safety
+    /// Uphold submit's ownership/context obligations. Each nonnull node must be
+    /// an empty, uniquely detached node protected by the same preflight. Hold no
+    /// writer lock and make no explicit context transition through submission.
+    pub(super) unsafe fn submit_with_nodes(
+        record: KBox<Self>,
+        owner: *mut (),
+        detached: [*mut Node; MAX_HEIGHT as usize],
+    ) {
+        // SAFETY: caller supplies unique withdrawn owner and current admission.
+        unsafe { Self::submit(record, owner) };
+        for raw in detached.into_iter().filter(|raw| !raw.is_null()) {
+            // SAFETY: caller supplies unique empty detached nodes. The stack
+            // array supplies each next pointer even if an earlier callback ran.
+            unsafe { Node::retire(raw) };
+        }
+    }
+
     pub(super) fn prepare(allocator: &mut impl crate::Allocator) -> kerrno::KResult<KBox<Self>> {
         allocator.allocate(Self {
             callback: CallbackNode::new(release::<P>),

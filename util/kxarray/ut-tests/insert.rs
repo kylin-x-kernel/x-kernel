@@ -16,6 +16,27 @@ struct FailingAllocator<'a, P: EntryOwner> {
 }
 
 #[def_test]
+fn prepared_insertion_keeps_identity_across_root_growth() {
+    let array = XArray::<Arc<usize>>::new();
+    // SAFETY: initialized task with NOWAIT allocation and no read scope.
+    let prepared = unsafe { array.prepare_insert(0, AllocFlags::NOWAIT) }.unwrap();
+    assert!(
+        // SAFETY: primitive nonblocking owner, initialized task outside read scopes.
+        unsafe { array.insert_with_flags(usize::MAX, Arc::new(9), AllocFlags::NOWAIT) }.is_ok()
+    );
+    let owner = Arc::new(7);
+    // SAFETY: prepared commit in task context; primitive release cannot block.
+    assert!(unsafe { array.insert_prepared(owner.clone(), prepared) }.is_ok());
+    let retained = krcu::with_read(|scope| array.get_owned(scope, 0)).unwrap();
+    assert!(Arc::ptr_eq(&retained, &owner));
+    assert_eq!(*array.get_owned_locked(usize::MAX).unwrap(), 9);
+    // SAFETY: private preparation does not inspect or mutate the existing key.
+    let cancelled = unsafe { array.prepare_insert(0, AllocFlags::NOWAIT) }.unwrap();
+    drop(cancelled);
+    assert_eq!(Arc::strong_count(&owner), 3);
+}
+
+#[def_test]
 fn invalid_flags_reject_all_updates_before_publication() {
     let array = XArray::<Arc<usize>>::new();
     let offered = Arc::new(7);

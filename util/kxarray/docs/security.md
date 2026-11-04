@@ -1,5 +1,60 @@
 # Safety Boundaries
 
+`prepare_remove` allocates only an empty `PreparedRemove<P>` record and checks
+allocation flags. Its unsafe boundary requires valid allocation/cancellation
+context, not RCU readiness. `remove_prepared` requires ordinary removal's
+execution and permanent-service obligations and rechecks preflight immediately
+before mutation. An old successful preparation cannot authorize removal with
+IRQs disabled. Writer exclusion spans occupied-path inspection and withdrawal;
+`Retirement::submit_with_nodes` submits uniquely detached storage only after
+unlocking, using the stack array rather than already-submitted nodes to iterate.
+An admission error or absent key drops only unused storage, outside the lock.
+No borrowed payload or path lives in preparation. Kernel tests cover changed
+context rejection, absence, real callback drain and retained external ownership;
+host tests cover failed preparation and cancellation without any RCU provider.
+
+The unsafe `XArray::withdraw_prepared` entrance in `src/lib.rs` intentionally
+does not run sleepable-context preflight while the caller's short lock is held.
+The caller must preflight in watched task context first, prepare all fallible
+resources and serialize any identity checks. Only temporary IRQ/preemption
+exclusion may intervene through the transaction. Withdrawal transfers the raw
+payload and uniquely detached nodes into `PendingRetirement` in `src/prepared.rs`;
+no borrowed value or callback is exposed. Its unsafe `retire` consumes those
+rights after caller locks are released and preflight context is restored, with
+the permanent service/CPU contract still satisfied. No scheduler or RCU
+bookkeeping lock, RCU scope, explicit context transition or arbitrary caller
+callback may intervene. Abandoning the pending record leaks protected storage;
+its ordinary Drop cannot reclaim a payload or node still visible to readers.
+The record's raw pointers prevent Send/Sync and its single-use ownership prevents
+double submission. Compile-fail examples check task transfer and repeated use.
+Kernel fixtures withdraw two indexes under one IRQ-safe outer lock and submit
+after release; an SMP reader retains both old borrows through submission and
+observes one shared payload destructor only after exit and callback drain.
+
+`src/prepared.rs` stores only private unpublished nodes and a fixed key.
+`prepare_insert` requires valid allocation context and permissions, validates
+flags, and releases partial capacity on failure. `insert_prepared` requires
+the same owner-release and task/initialized-boot obligations as insertion,
+without a sleeping allocation requirement. It checks conflicts and publishes
+under writer exclusion; it never retains a stale tree path from preparation.
+The complete-shape capacity bound is documented in design.md. Spare nodes are
+released outside the lock, and no callback is submitted for unpublished nodes.
+The token cannot be cloned or reused after commitment. Preparing it does not
+grant IRQ/NMI access or RCU participation. Host tests inject each allocation
+failure and count cleanup, change root shape before commit, and verify zero
+allocations during success/conflict with exact returned-payload identity.
+
+`src/lib.rs::get_owned_locked` protects raw traversal and Arc acquisition with
+the same writer lock used by all detach operations. The shared array borrow
+excludes destruction, and the stored owner stays live until the extra strong
+reference is established. No raw borrow escapes. Its caller must not be an
+IRQ/NMI/serving-softirq handler or reenter a held writer lock. Local lock
+primitives must be initialized; an RCU service/current reader is not required.
+The returned owner has the usual caller-side destruction-context obligations.
+Host tests check absence, boundary keys, identity/counts, allocation-free lookup,
+root-growth competition and retention past array destruction without a forged
+RCU scope. They do not establish early kernel startup or interrupt-context safety.
+
 Allocation permissions are caller obligations, not runtime context detection.
 Default updates require sleepable, reclaim-safe task context with IRQs and
 preemption enabled, outside non-sleepable RCU scopes and locks needed by reclaim.

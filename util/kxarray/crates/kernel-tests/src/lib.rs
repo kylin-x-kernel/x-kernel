@@ -20,3 +20,5 @@ unittest::path_mod_test!(tests_tasks, "../ut-tests/tasks.rs");
 unittest::path_mod_test!(tests_context, "../ut-tests/context.rs");
 #[cfg(all(target_os = "none", feature = "smp"))]
 unittest::path_mod_test!(tests_migration, "../ut-tests/migration.rs");
+#[cfg(all(target_os = "none", feature = "smp"))]
+unittest::path_mod_test!(tests_retirement, "../ut-tests/retirement.rs");

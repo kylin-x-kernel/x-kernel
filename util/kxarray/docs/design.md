@@ -7,13 +7,21 @@ for nonblocking RCU callback execution. The implemented operations are creation,
 insert-if-absent, set (insert or replace), scoped borrowing, explicit Arc
 acquisition, removal and exclusive Drop.
 
+`XArray<Arc<T>>::get_owned_locked` provides control-plane ownership acquisition
+without an RCU scope. It traverses the same tree under writer exclusion and
+increments the stored Arc before unlocking. It allocates nothing and exposes
+neither borrowed entries nor a callback/guard. It supports initialized early
+lock contexts without a running RCU service. IRQ/NMI/serving-softirq callers
+must retain the scoped read path: they cannot wait on an interrupted writer's
+preemption-only lock. Guard release may run the normal scheduling checkpoint.
+
 Nodes contain 64 atomic slots, an immutable height, writer-serialized occupancy
 accounting and an embedded retirement callback. Height one stores raw
 payload owners; higher nodes store child-node owners. There are no pointer tags,
 payload wrappers or owning parent links. The root is null or a node. Maximum
 height is ceil(usize bits / 6), including a partial top digit.
 
-Readers acquire-load a downward path under a kernel-issued RCU scope. They never
+RCU readers acquire-load a downward path under a kernel-issued RCU scope. They never
 take the writer lock, allocate or automatically increment a reference count.
 Borrowing is bounded by both scope and container. Payload contents require their
 own synchronization. Detached nodes remain valid through the reader's grace
@@ -21,8 +29,8 @@ period; root growth preserves the previous root as
 a descendant. Overlapping reads may miss a newly inserted key, but growth never
 removes an existing association.
 
-Writers serialize with one preemption-disabling spinlock. Only task-context
-writers take this lock; IRQ/NMI readers use the published atomic topology and
+Writers serialize with one preemption-disabling spinlock. Task-context writers
+and locked ownership queries take this lock; IRQ/NMI readers use the atomic topology and
 RCU, so writer serialization need not mask ordinary interrupts.
 Inspection counts missing nodes;
 preparation allocates outside the lock, then repeats inspection. Spare private
@@ -71,6 +79,53 @@ node. Each callback frees only its node allocation, without following slots or
 borrowing the array. Node deallocation, like payload release, must not block.
 
 ## Fallible Preparation and Execution Context
+
+`prepared.rs` owns the public, non-Clone `PreparedInsert` capacity token.
+`prepare_insert` allocates private nodes for a fixed key without inspecting or
+reserving the array. `insert_prepared` consumes it, checks absence under the
+writer lock, and publishes without allocation. Conflicts return the payload
+unchanged and cancel preparation. Both paths free spare private nodes only
+after unlocking. The token is independent of array identity and contains no
+borrowed live path. Ordinary insert keeps its existing demand-sized preparation.
+
+Prepared insertion deliberately reserves `2 * MAX_HEIGHT` nodes. An empty tree
+needs H; uncovered-key growth needs H-R + H-1; a missing descent needs at most
+R-1. All are bounded by this capacity for any valid subsequent root shape.
+This trades transient storage for an allocation-free commit; it is not a
+performance improvement claim. Cancelling unused preparation needs no GP.
+It does not reserve keys, prevent conflicts, or provide a multi-array transaction.
+Commit can deallocate spare nodes and run a preemption checkpoint on unlocking.
+
+`PreparedRemove<P>` owns one unpublished retirement record, without selecting
+an entry or reserving RCU admission. `prepare_remove` allocates it under explicit
+permissions; cancellation requires neither current-reader storage nor a GP.
+`remove_prepared` rechecks admission before locking, withdraws the current entry
+without allocation, then submits payload/node retirements after unlocking using
+the same helper as ordinary removal. An absent entry cancels the unused record.
+This is not compare-and-remove: caller serialization must protect expected
+identity across multi-index operations. Paired retirement also requires proving
+that both commits retain valid submission context; two preparation objects alone
+do not prove that. No new RCU admission token or multi-index transaction is added.
+
+`withdraw_prepared` is the advanced split-phase entrance for a caller that
+must withdraw several associations under its own short lock. The caller runs
+RCU preflight before that lock, prepares every record, and serializes identity
+validation and withdrawal. Each withdrawal returns a task-local
+`PendingRetirement<P>` without submitting callbacks. After releasing its locks,
+the caller consumes every pending record with `retire`; normal `remove_prepared`
+uses the same path internally and retains its independent preflight check.
+The split does not authorize IRQ/NMI callers or provide a transferable readiness
+permit. Temporary exclusion must restore the admitted task context before
+submission, without intervening arbitrary callbacks or explicit context changes.
+
+Pending records contain the raw displaced owner, bounded detached-node pointers
+and the unused callback record. They expose no payload reference. Forgetting or
+dropping one retains the protected owner/nodes rather than reclaiming them before
+a grace period; Drop releases only unused callback storage. This leak-on-abandon
+rule is a safety fallback, not a supported successful cleanup path. The type is
+must-use, non-Clone and non-Send; callers must retire records even after a later
+transaction error. The container does not decide multi-index publication order,
+hardware shutdown or service admission. Those remain the consumer's obligations.
 
 Nodes, detached retirement records and unique payload carriers use KBox; Arc
 carriers retain their existing ownership behavior. KBox raw conversion preserves

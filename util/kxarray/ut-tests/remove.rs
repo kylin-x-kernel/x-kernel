@@ -12,6 +12,80 @@ use crate::XArray;
 
 struct DropProbe(Arc<AtomicUsize>);
 
+#[def_test]
+fn paired_withdrawal_defers_submission_until_outer_unlock() {
+    let first = XArray::<Arc<usize>>::new();
+    let second = XArray::<Arc<usize>>::new();
+    let owner = Arc::new(42);
+    for array in [&first, &second] {
+        assert!(
+            // SAFETY: initialized task; primitive owner has a nonblocking release chain.
+            unsafe { array.insert_with_flags(usize::MAX, owner.clone(), AllocFlags::NOWAIT) }
+                .is_ok()
+        );
+    }
+    // SAFETY: initialized task permits private NOWAIT allocation and cancellation.
+    let first_record = unsafe { first.prepare_remove(AllocFlags::NOWAIT) }.unwrap();
+    // SAFETY: same task and private allocation context.
+    let second_record = unsafe { second.prepare_remove(AllocFlags::NOWAIT) }.unwrap();
+    let exclusion = kspin::SpinNoIrq::new(());
+    assert!(krcu::preflight_callback_submission().is_ok());
+    let (first_retired, second_retired, retained_before_submission) = {
+        let _guard = exclusion.lock();
+        // SAFETY: preflight preceded temporary IRQ exclusion. Both private
+        // indexes have no competing writer; submit only after this guard exits.
+        let first_retired = unsafe { first.withdraw_prepared(usize::MAX, first_record) };
+        // SAFETY: same transaction and preflight; this does not submit callbacks.
+        let second_retired = unsafe { second.withdraw_prepared(usize::MAX, second_record) };
+        (first_retired, second_retired, Arc::strong_count(&owner))
+    };
+    let had_both = first_retired.is_some() && second_retired.is_some();
+    for retired in [first_retired, second_retired].into_iter().flatten() {
+        // SAFETY: outer exclusion ended, admitted task context restored, no
+        // intervening reader scope or user callback; service remains permanent.
+        unsafe { retired.retire() };
+    }
+    assert!(had_both);
+    assert_eq!(retained_before_submission, 3);
+    assert!(first.get_owned_locked(usize::MAX).is_none());
+    assert!(second.get_owned_locked(usize::MAX).is_none());
+    // SAFETY: independent callbacks require no resources retained by this task.
+    assert!(unsafe { krcu::drain_callbacks() }.is_ok());
+    assert_eq!(Arc::strong_count(&owner), 1);
+}
+
+#[def_test]
+fn prepared_removal_revalidates_context_and_retains_external_owner() {
+    let array = XArray::<Arc<usize>>::new();
+    let owner = Arc::new(7);
+    // SAFETY: initialized task and primitive nonblocking release chain.
+    assert!(unsafe { array.insert_with_flags(0, owner.clone(), AllocFlags::NOWAIT) }.is_ok());
+    // SAFETY: initialized task permits private NOWAIT allocation.
+    let rejected = unsafe { array.prepare_remove(AllocFlags::NOWAIT) }.unwrap();
+    let result = {
+        let _irq = kspin::IrqSave::new();
+        // SAFETY: no RCU/bookkeeping locks; runtime preflight rejects IRQ masking
+        // before withdrawal. Prepared storage is not an admission permit.
+        unsafe { array.remove_prepared(0, rejected) }
+    };
+    assert_eq!(result, Err(kerrno::KError::InvalidInput));
+    assert_eq!(Arc::strong_count(&owner), 2);
+    assert!(Arc::ptr_eq(&array.get_owned_locked(0).unwrap(), &owner));
+    // SAFETY: initialized task permits private NOWAIT allocation.
+    let prepared = unsafe { array.prepare_remove(AllocFlags::NOWAIT) }.unwrap();
+    // SAFETY: watched task outside scopes/locks with permanent service.
+    assert_eq!(unsafe { array.remove_prepared(0, prepared) }, Ok(true));
+    assert!(array.get_owned_locked(0).is_none());
+    // SAFETY: initialized task permits private allocation, even for an absent key.
+    let missing = unsafe { array.prepare_remove(AllocFlags::NOWAIT) }.unwrap();
+    // SAFETY: watched task outside scopes/locks with permanent service.
+    assert_eq!(unsafe { array.remove_prepared(0, missing) }, Ok(false));
+    // SAFETY: callbacks own independent storage and do not wait for this task.
+    assert!(unsafe { krcu::drain_callbacks() }.is_ok());
+    assert_eq!(Arc::strong_count(&owner), 1);
+    assert_eq!(*owner, 7);
+}
+
 impl Drop for DropProbe {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::Relaxed);
@@ -128,14 +202,20 @@ fn removal_releases_only_the_arrays_arc_reference() {
         unsafe { array.insert_with_flags(usize::MAX, old.clone(), AllocFlags::NOWAIT) }.is_ok()
     );
     let retained = krcu::with_read(|scope| array.get_owned(scope, usize::MAX)).unwrap();
+    let locked_owner = array.get_owned_locked(usize::MAX).unwrap();
+    assert!(Arc::ptr_eq(&retained, &locked_owner));
     assert_eq!(
         // SAFETY: watched task outside scopes/locks with permanent RCU service.
         unsafe { array.remove_with_flags(usize::MAX, AllocFlags::NOWAIT) },
         Ok(true)
     );
+    assert!(array.get_owned_locked(usize::MAX).is_none());
     drop(array);
     // SAFETY: callbacks own only independent references and do not await us.
     assert!(unsafe { krcu::drain_callbacks() }.is_ok());
+    assert_eq!(Arc::strong_count(&old), 3);
+    assert_eq!(*locked_owner, 7);
+    drop(locked_owner);
     assert_eq!(Arc::strong_count(&old), 2);
     assert_eq!(*retained, 7);
 }

@@ -24,6 +24,169 @@ std::thread_local! {
 
 struct CountingAllocator;
 
+#[test]
+fn removal_preparation_cancels_without_rcu_or_publication() {
+    let array = XArray::<Arc<usize>>::new();
+    let mut allocator = FailingAllocator {
+        array: &array,
+        remaining: 0,
+    };
+    let failure = PreparedRemove::<Arc<usize>>::with_allocator(&mut allocator);
+    assert!(matches!(failure, Err(KError::NoMemory)));
+    assert!(matches!(
+        // SAFETY: host task-equivalent context; invalid permissions reject first.
+        unsafe { array.prepare_remove(AllocFlags::from_bits_retain(1 << 31)) },
+        Err(KError::InvalidInput)
+    ));
+    ALLOCATION_COUNTS.with(|counts| counts.set(Some((0, 0))));
+    // SAFETY: host private allocation/free context; no RCU service needed.
+    let prepared = unsafe { array.prepare_remove(AllocFlags::NOWAIT) }.unwrap();
+    drop(prepared);
+    let counts = ALLOCATION_COUNTS.with(|counts| counts.replace(None));
+    assert_eq!(counts, Some((1, 1)));
+    assert!(array.root.load(Ordering::Acquire).is_null());
+}
+
+#[test]
+fn prepared_insert_survives_root_changes_without_allocating() {
+    for key in [0, 63, 64, usize::MAX] {
+        let array = XArray::<Arc<usize>>::new();
+        // SAFETY: host task-equivalent context with nonblocking allocation/free.
+        let prepared = unsafe { array.prepare_insert(key, AllocFlags::NOWAIT) }.unwrap();
+        let other = if key == usize::MAX { 0 } else { usize::MAX };
+        assert!(
+            // SAFETY: primitive owner and host writer context.
+            unsafe { array.insert_with_flags(other, Arc::new(other), AllocFlags::NOWAIT) }.is_ok()
+        );
+        let value = Arc::new(key);
+        ALLOCATION_COUNTS.with(|counts| counts.set(Some((0, 0))));
+        // SAFETY: same context and primitive ownership as above; key is absent.
+        let result = unsafe { array.insert_prepared(value, prepared) };
+        let counts = ALLOCATION_COUNTS
+            .with(|counts| counts.replace(None))
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(counts.0, 0);
+        assert_eq!(*array.get_owned_locked(key).unwrap(), key);
+        assert_eq!(*array.get_owned_locked(other).unwrap(), other);
+    }
+}
+
+#[test]
+fn prepared_insert_conflict_returns_owner_and_cancels_private_capacity() {
+    let array = XArray::<Arc<usize>>::new();
+    // SAFETY: host task-equivalent fixture permits private allocation/free.
+    let prepared = unsafe { array.prepare_insert(7, AllocFlags::NOWAIT) }.unwrap();
+    // SAFETY: primitive owner, host writer context.
+    assert!(unsafe { array.insert_with_flags(7, Arc::new(9), AllocFlags::NOWAIT) }.is_ok());
+    let owner = Arc::new(11);
+    let offered = owner.clone();
+    ALLOCATION_COUNTS.with(|counts| counts.set(Some((0, 0))));
+    // SAFETY: valid context and primitive release chain; conflict must preserve it.
+    let result = unsafe { array.insert_prepared(offered, prepared) };
+    let counts = ALLOCATION_COUNTS
+        .with(|counts| counts.replace(None))
+        .unwrap();
+    let (error, returned) = result.unwrap_err();
+    assert_eq!(error, KError::AlreadyExists);
+    assert!(Arc::ptr_eq(&owner, &returned));
+    assert_eq!(counts, (0, 2 * MAX_HEIGHT as usize));
+    assert_eq!(*array.get_owned_locked(7).unwrap(), 9);
+}
+
+#[test]
+fn prepared_capacity_failure_releases_every_private_node() {
+    let array = XArray::<Arc<usize>>::new();
+    assert!(matches!(
+        // SAFETY: host allocation context; invalid flags must reject before allocation.
+        unsafe { array.prepare_insert(0, AllocFlags::from_bits_retain(1 << 31)) },
+        Err(KError::InvalidInput)
+    ));
+    for remaining in 0..2 * MAX_HEIGHT as usize {
+        let mut allocator = FailingAllocator {
+            array: &array,
+            remaining,
+        };
+        ALLOCATION_COUNTS.with(|counts| counts.set(Some((0, 0))));
+        let result = PreparedInsert::with_allocator(usize::MAX, &mut allocator);
+        let counts = ALLOCATION_COUNTS
+            .with(|counts| counts.replace(None))
+            .unwrap();
+        assert!(matches!(result, Err(KError::NoMemory)));
+        assert_eq!(counts, (remaining, remaining));
+        assert!(array.root.load(Ordering::Acquire).is_null());
+    }
+    ALLOCATION_COUNTS.with(|counts| counts.set(Some((0, 0))));
+    // SAFETY: host task-equivalent allocation and deallocation context, no RCU.
+    let cancelled = unsafe { array.prepare_insert(0, AllocFlags::NOWAIT) }.unwrap();
+    drop(cancelled);
+    let counts = ALLOCATION_COUNTS
+        .with(|counts| counts.replace(None))
+        .unwrap();
+    assert_eq!(counts, (2 * MAX_HEIGHT as usize, 2 * MAX_HEIGHT as usize));
+    assert!(array.root.load(Ordering::Acquire).is_null());
+}
+
+#[test]
+fn locked_lookup_retains_identity_without_allocating_or_rcu() {
+    let array = XArray::<Arc<usize>>::new();
+    assert!(array.get_owned_locked(0).is_none());
+    for key in [0, 63, 64, usize::MAX] {
+        let owner = Arc::new(key);
+        // SAFETY: host task-equivalent fixture with primitive nonblocking release.
+        assert!(unsafe { array.insert_with_flags(key, owner.clone(), AllocFlags::NOWAIT) }.is_ok());
+        ALLOCATION_COUNTS.with(|counts| counts.set(Some((0, 0))));
+        let retained = array.get_owned_locked(key);
+        let counts = ALLOCATION_COUNTS.with(|counts| counts.replace(None));
+        assert_eq!(counts, Some((0, 0)));
+        let retained = retained.unwrap();
+        assert!(Arc::ptr_eq(&retained, &owner));
+        assert_eq!(Arc::strong_count(&owner), 3);
+        assert!(array.writers.try_lock().is_some());
+    }
+    assert!(array.get_owned_locked(65).is_none());
+    let retained = array.get_owned_locked(usize::MAX).unwrap();
+    drop(array);
+    assert_eq!(*retained, usize::MAX);
+    assert_eq!(Arc::strong_count(&retained), 1);
+}
+
+#[test]
+fn locked_lookup_overlaps_root_growth() {
+    let array = XArray::<Arc<usize>>::new();
+    let anchor = Arc::new(17);
+    // SAFETY: host task-equivalent fixture; primitive owner cannot block on release.
+    assert!(unsafe { array.insert_with_flags(0, anchor.clone(), AllocFlags::NOWAIT) }.is_ok());
+    let barrier = Barrier::new(2);
+    thread::scope(|threads| {
+        let writer = threads.spawn(|| {
+            barrier.wait();
+            for bit in 0..usize::BITS {
+                let key = 1usize << bit;
+                assert!(
+                    // SAFETY: host writer with real SMP exclusion and primitive owners.
+                    unsafe { array.insert_with_flags(key, Arc::new(key), AllocFlags::NOWAIT) }
+                        .is_ok()
+                );
+            }
+        });
+        barrier.wait();
+        for bit in 0..usize::BITS {
+            assert!(Arc::ptr_eq(&array.get_owned_locked(0).unwrap(), &anchor));
+            if let Some(value) = array.get_owned_locked(1usize << bit) {
+                assert_eq!(*value, 1usize << bit);
+            }
+        }
+        writer.join().unwrap();
+    });
+    for bit in 0..usize::BITS {
+        assert_eq!(
+            *array.get_owned_locked(1usize << bit).unwrap(),
+            1usize << bit
+        );
+    }
+}
+
 #[global_allocator]
 static HOST_ALLOCATOR: CountingAllocator = CountingAllocator;
 

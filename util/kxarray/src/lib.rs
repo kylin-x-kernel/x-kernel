@@ -105,10 +105,12 @@ use kspin::SpinNoPreempt;
 
 mod node;
 mod owner;
+mod prepared;
 mod retirement;
 
 use node::{MAX_HEIGHT, Node, PreparedNodes, height_for};
 pub use owner::EntryOwner;
+pub use prepared::{PendingRetirement, PreparedInsert, PreparedRemove};
 use retirement::Retirement;
 
 trait Allocator {
@@ -243,6 +245,55 @@ impl<P: EntryOwner> XArray<P> {
         // non-unwinding in RCU callbacks. Forwarding the same owner with KERNEL
         // permissions preserves these caller-established obligations.
         unsafe { self.insert_with_flags(index, value, AllocFlags::KERNEL) }
+    }
+
+    /// Prepares private capacity for one insertion, without inspecting the array.
+    ///
+    /// Does not reserve the key or publish anything. Capacity covers any later
+    /// root shape, at the cost of up to twice the maximum tree height in nodes.
+    /// Invalid flags or allocation failure return an error without mutation.
+    /// Cancel by dropping the result; no RCU service is needed.
+    ///
+    /// # Safety
+    /// Use initialized local primitives and the allocation context required by
+    /// [`Self::insert_with_flags`]. NOWAIT permits allocation-ready early boot,
+    /// not interrupt/NMI context. Drop unused preparation only where allocator
+    /// deallocation is permitted.
+    pub unsafe fn prepare_insert(
+        &self,
+        index: usize,
+        mut flags: AllocFlags,
+    ) -> KResult<PreparedInsert> {
+        validate_flags(flags)?;
+        PreparedInsert::with_allocator(index, &mut flags)
+    }
+
+    /// Inserts at the prepared key without allocating or waiting for RCU.
+    ///
+    /// Consumes preparation on both success and conflict. An occupied key returns
+    /// `(AlreadyExists, value)` without changing the association. Spare private
+    /// nodes are deallocated after unlocking; this is not a no-deallocation API.
+    /// Writers must separately serialize multi-array transactions; preparation
+    /// does not prevent a competing insertion.
+    ///
+    /// # Safety
+    /// Uphold [`Self::insert`]'s nonblocking, non-unwinding payload release and
+    /// initialized task/early-boot context requirements. This operation requires
+    /// no sleeping allocation permission, but cannot run in IRQ/NMI context or
+    /// a read scope. Local guard release may run a scheduling checkpoint.
+    pub unsafe fn insert_prepared(
+        &self,
+        value: P,
+        mut prepared: PreparedInsert,
+    ) -> Result<(), (KError, P)> {
+        let guard = self.writers.lock();
+        if self.nodes_needed(prepared.index).is_none() {
+            drop(guard);
+            return Err((KError::AlreadyExists, value));
+        }
+        self.publish(prepared.index, value, &mut prepared.nodes);
+        drop(guard);
+        Ok(())
     }
 
     /// Performs [`Self::insert`] with explicit allocation permissions.
@@ -435,6 +486,96 @@ impl<P: EntryOwner> XArray<P> {
         }
     }
 
+    /// Allocates private retirement storage without inspecting or withdrawing an entry.
+    ///
+    /// Invalid flags or allocation failure leave the array unchanged. The result
+    /// is storage only, not a transferable RCU readiness/context permit. It may
+    /// be cancelled by dropping it before RCU service startup.
+    ///
+    /// # Safety
+    /// Supply the allocation context required by [`Self::prepare_insert`], and
+    /// cancel only where allocator deallocation is permitted. No payload release
+    /// or RCU submission occurs in this operation.
+    pub unsafe fn prepare_remove(&self, mut flags: AllocFlags) -> KResult<PreparedRemove<P>> {
+        validate_flags(flags)?;
+        PreparedRemove::with_allocator(&mut flags)
+    }
+
+    /// Removes the entry currently at `index` using preallocated retirement storage.
+    ///
+    /// Rechecks RCU admission before any mutation, including for an absent key.
+    /// Returns a preflight error unchanged, false for absence, or true after
+    /// withdrawal and callback submission. No allocation occurs. Unused storage
+    /// is deallocated outside the writer lock. Preparation is consumed on every
+    /// outcome and does not identify an earlier version of this entry: callers
+    /// requiring identity-matched removal must serialize all competing writers.
+    ///
+    /// # Safety
+    /// Uphold [`Self::remove`]'s context, stored-owner release and permanent-service
+    /// obligations. Hold no RCU scope or scheduler/bookkeeping lock. Preparation
+    /// does not relax these conditions or make two arrays an atomic transaction.
+    pub unsafe fn remove_prepared(&self, index: usize, prepared: PreparedRemove<P>) -> KResult<bool>
+    where
+        P: 'static,
+    {
+        krcu::preflight_callback_submission()?;
+        // SAFETY: current preflight precedes the internal writer critical
+        // section; this method's caller supplies release and service obligations.
+        let Some(retirement) = (unsafe { self.withdraw_prepared(index, prepared) }) else {
+            return Ok(false);
+        };
+        // SAFETY: withdrawal released the writer guard; no caller code or
+        // explicit context transition intervenes before submission.
+        unsafe { retirement.retire() };
+        Ok(true)
+    }
+
+    /// Withdraws an entry without allocating or submitting its RCU retirement.
+    ///
+    /// This advanced entrance separates index mutation from callback submission
+    /// for callers serializing several indexes under their own short lock.
+    /// It consumes preparation and returns None for an absent key, or ownership
+    /// of the pending retirement. No payload is returned and no grace period
+    /// has yet begun on behalf of this removal. The caller must retire every
+    /// returned record after releasing its locks, even if later work fails.
+    /// Preparation and this operation do not reserve a key or compare identities.
+    ///
+    /// # Safety
+    /// Successfully call [`krcu::preflight_callback_submission`] in the current
+    /// task before acquiring caller-held writer exclusion. Uphold insertion's
+    /// payload-release obligations and the permanent-service contract. Between
+    /// preflight, withdrawal and [`PendingRetirement::retire`], allow only the
+    /// index transaction and temporary exclusion guards, not arbitrary caller
+    /// code, explicit context changes or RCU scopes. IRQ masking/preemption
+    /// exclusion for the transaction is allowed; IRQ/NMI/BH callers are not.
+    /// Release those guards and restore preflight context before retirement.
+    /// Serialize competing writers when removing a previously selected identity.
+    /// This operation deliberately does not recheck sleepable context under
+    /// the caller's short lock; use [`Self::remove_prepared`] otherwise.
+    pub unsafe fn withdraw_prepared(
+        &self,
+        index: usize,
+        prepared: PreparedRemove<P>,
+    ) -> Option<PendingRetirement<P>>
+    where
+        P: 'static,
+    {
+        let guard = self.writers.lock();
+        // SAFETY: writer exclusion retains the current path and payload owner.
+        if unsafe { self.lookup(index) }.is_null() {
+            drop(guard);
+            return None;
+        }
+        // SAFETY: the occupied path was checked under this same writer guard.
+        let (old, detached) = unsafe { self.withdraw(index) };
+        drop(guard);
+        Some(PendingRetirement {
+            record: prepared.record,
+            owner: old,
+            detached,
+        })
+    }
+
     /// Removes an association without waiting for readers or returning its owner.
     ///
     /// Returns whether this call removed an entry. Old borrows remain valid until
@@ -528,14 +669,10 @@ impl<P: EntryOwner> XArray<P> {
                 drop(guard);
                 // SAFETY: preflight preceded withdrawal, and the writer lock
                 // serialized inspection and removal of exactly one owner.
+                // Each non-null detached pointer is an empty node uniquely
+                // unlinked under that same guard and covered by that preflight.
                 // No explicit context transition precedes unlocked submission.
-                unsafe { Retirement::<P>::submit(record, old) };
-                for raw in detached.into_iter().filter(|raw| !raw.is_null()) {
-                    // SAFETY: each empty node was detached under this lock.
-                    // The local array, not any submitted node, supplies the next
-                    // pointer, so immediate callbacks cannot invalidate iteration.
-                    unsafe { Node::retire(raw) };
-                }
+                unsafe { Retirement::<P>::submit_with_nodes(record, old, detached) };
                 return Ok(true);
             }
             drop(guard);
@@ -694,6 +831,34 @@ impl<P: EntryOwner> XArray<P> {
 }
 
 impl<T: Send + Sync> XArray<Arc<T>> {
+    /// Acquires an independent owner under writer exclusion, without an RCU scope.
+    ///
+    /// Intended for control paths and early boot after local lock primitives are
+    /// initialized. No allocation or caller callback occurs under the lock, and
+    /// the returned owner may outlive the array. The caller is responsible for
+    /// its eventual destruction context.
+    ///
+    /// Do not call from IRQ, NMI or serving-softirq context: the interrupted
+    /// code may hold this same preemption-disabling writer lock. Interrupt
+    /// readers must use [`Self::get_owned`] with a real RCU scope instead.
+    /// Releasing the guard may run the normal preemption checkpoint; this is
+    /// not a no-schedule primitive. No initialized RCU service is required.
+    pub fn get_owned_locked(&self, index: usize) -> Option<Arc<T>> {
+        let _guard = self.writers.lock();
+        // SAFETY: writer exclusion prevents detaching any traversed node or
+        // payload, and the shared array borrow excludes container destruction.
+        let raw = unsafe { self.lookup(index) }.cast::<T>();
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: the stored strong owner cannot be withdrawn under this lock;
+        // raw is the original Arc allocation pointer, not a payload reborrow.
+        unsafe { Arc::increment_strong_count(raw) };
+        // SAFETY: consume only the newly acquired reference. The returned owner
+        // is constructed before writer exclusion ends and is dropped by its caller.
+        Some(unsafe { Arc::from_raw(raw) })
+    }
+
     /// Acquires an independent strong reference while the stored owner is protected.
     ///
     /// Unlike a borrowed entry, this owner may outlive the scope and array:
