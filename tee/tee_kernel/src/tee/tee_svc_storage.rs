@@ -1011,14 +1011,7 @@ pub(super) fn syscall_storage_obj_rename(
         }
         fs_res?;
 
-        let (new_obj_id_buf, new_obj_id_len) = {
-            let objid = po.obj_id.lock();
-            (
-                objid.obj_id[..objid.obj_id_len as usize].to_vec(),
-                objid.obj_id_len,
-            )
-        };
-        let pobj_res = tee_pobj_rename(old_pobj.as_ref(), &new_obj_id_buf, new_obj_id_len);
+        let pobj_res = tee_pobj_rename(old_pobj.as_ref(), oid_bbuf, object_id_len as u32);
         if let Err(e) = pobj_res {
             error!(
                 "syscall_storage_obj_rename: tee_pobj_rename error: {:#X?} (fops.rename already \

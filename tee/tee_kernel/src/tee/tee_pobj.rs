@@ -2,19 +2,20 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, collections::VecDeque, string::String, sync::Arc};
+use alloc::{collections::VecDeque, string::String, sync::Arc};
 use core::{
-    default, fmt,
+    fmt,
     fmt::Debug,
     ptr,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
+use kalloc_types::{AllocFlags, KBox};
 use klazy::lazy_static;
 use ksync::{Mutex, static_lock};
 use tee_raw_sys::*;
 
-use super::{TeeResult, tee_ree_fs::TeeFileOperations, uuid::Uuid};
+use super::{TeeError, TeeResult, tee_ree_fs::TeeFileOperations, uuid::Uuid};
 
 static_lock! {
     static POBJS_MUTEX: Mutex<()> = Mutex::new(());
@@ -27,9 +28,9 @@ lazy_static! {
     static ref POBJS: TeePobjs = TeePobjs::new();
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ObjId {
-    pub(crate) obj_id: Box<[u8]>,
+    pub(crate) obj_id: KBox<[u8]>,
     pub(crate) obj_id_len: u32,
 }
 
@@ -67,24 +68,6 @@ impl Debug for TeePobj {
             self.creating.load(Ordering::Relaxed),
             self.fops.as_ref().map(|fops| fops.name).unwrap_or("None"),
         )
-    }
-}
-
-impl default::Default for TeePobj {
-    fn default() -> Self {
-        TeePobj {
-            refcnt: AtomicU32::new(0),
-            uuid: TEE_UUID::default(),
-            obj_id: Mutex::new(ObjId {
-                obj_id: Box::new([]),
-                obj_id_len: 0,
-            }),
-            flags: AtomicU32::new(0),
-            obj_info_usage: AtomicU32::new(0),
-            temporary: AtomicBool::new(false),
-            creating: AtomicBool::new(false),
-            fops: None,
-        }
     }
 }
 
@@ -265,6 +248,11 @@ fn tee_pobj_check_access(oflags: u32, nflags: u32) -> TeeResult {
 ///
 /// # Returns
 /// * The TeePobj, can safe shared reference
+///
+/// New ID storage uses NOWAIT while the metadata mutex is held; reclaim must
+/// not reenter this registry. Failure leaves the registry unchanged. Existing
+/// owners are reused without allocating ID storage. Arc and queue allocations
+/// retain their existing allocation policy.
 pub(super) fn tee_pobj_get(
     uuid: &TEE_UUID,
     obj_id: &[u8],
@@ -273,6 +261,31 @@ pub(super) fn tee_pobj_get(
     usage: TeePobjUsage,
     fops: &'static TeeFileOperations,
 ) -> TeeResult<Arc<TeePobj>> {
+    tee_pobj_get_with_owner(
+        uuid,
+        obj_id,
+        obj_id_len,
+        flags,
+        usage,
+        fops,
+        |bytes, flags| {
+            KBox::from_slice_with_flags(bytes, flags).map_err(|error| TeeError::from(error).into())
+        },
+    )
+}
+
+fn tee_pobj_get_with_owner(
+    uuid: &TEE_UUID,
+    obj_id: &[u8],
+    obj_id_len: u32,
+    flags: u32,
+    usage: TeePobjUsage,
+    fops: &'static TeeFileOperations,
+    prepare: impl FnOnce(&[u8], AllocFlags) -> TeeResult<KBox<[u8]>>,
+) -> TeeResult<Arc<TeePobj>> {
+    let obj_id = obj_id
+        .get(..obj_id_len as usize)
+        .ok_or(TEE_ERROR_BAD_PARAMETERS)?;
     // Serialize metadata operations to match the GP reference's pobj mutex model.
     let _guard = POBJS_MUTEX.lock();
 
@@ -307,7 +320,7 @@ pub(super) fn tee_pobj_get(
         refcnt: AtomicU32::new(1),
         uuid: *uuid,
         obj_id: Mutex::new(ObjId {
-            obj_id: obj_id[..obj_id_len as usize].to_vec().into_boxed_slice(),
+            obj_id: prepare(obj_id, AllocFlags::NOWAIT)?,
             obj_id_len,
         }),
         flags: AtomicU32::new(flags),
@@ -364,11 +377,15 @@ pub(super) fn tee_pobj_release(obj: Arc<TeePobj>) -> TeeResult {
 ///
 /// # Arguments
 /// * `obj` - The TeePobj
-/// * `obj_id` - The new object ID
+/// * `obj_id` - The prepared new object ID owner
 /// * `obj_id_len` - The actual length of the new object ID
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub(super) fn tee_pobj_rename(obj: &TeePobj, obj_id: &[u8], obj_id_len: u32) -> TeeResult {
+///
+/// Transfers storage without allocation. The caller must prepare the owner
+/// before committing the backend rename. Existing reference-count validation
+/// remains fallible; this does not make the backend and registry transactional.
+pub(super) fn tee_pobj_rename(obj: &TeePobj, obj_id: KBox<[u8]>, obj_id_len: u32) -> TeeResult {
     let _guard = POBJS_MUTEX.lock();
 
     let refcnt = obj.refcnt.load(Ordering::Relaxed);
@@ -382,7 +399,7 @@ pub(super) fn tee_pobj_rename(obj: &TeePobj, obj_id: &[u8], obj_id_len: u32) -> 
     }
 
     let mut objid = obj.obj_id.lock();
-    objid.obj_id = obj_id[..obj_id_len as usize].to_vec().into_boxed_slice();
+    objid.obj_id = obj_id;
     objid.obj_id_len = obj_id_len;
     Ok(())
 }

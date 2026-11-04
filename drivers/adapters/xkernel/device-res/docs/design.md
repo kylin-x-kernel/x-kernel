@@ -5,6 +5,11 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
 ## Purpose
 
+IRQ reverse-map owner preparation errors map from `IrqDescError::NoMemory` to
+`ResError::NoMemory`; invalid hardware-number bounds map to InvalidResource.
+The consuming unit-returning MSI release interface remains unchanged because
+KIRQ now removes production MSI reverse lookup without allocating an owner.
+
 `device-res-xkernel` is X-Kernel's implementation layer for the OS-neutral
 `device-res` provider contract. It is not responsible for driver matching,
 probe/remove orchestration, device publication, or the driver-facing

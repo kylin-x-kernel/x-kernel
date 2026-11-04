@@ -4,9 +4,9 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, vec};
 use core::{num::NonZeroU32, ptr::NonNull};
 
+use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use kirq::TargetCpu;
 use kplat::cpu::id as this_cpu_id;
@@ -43,7 +43,7 @@ struct PlicController {
 struct PlicState {
     registers: Plic,
     // Controller-lifetime bindings; disable does not imply affinity migration.
-    sources: Box<[PlicSourceState]>,
+    sources: KBox<[PlicSourceState]>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -352,6 +352,17 @@ pub fn init_primary() {
             },
         ));
     #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: PLIC source state is required \
+                  before controller publication; early IRQ initialization has no recovery channel"
+    )]
+    let source_state = KBox::new_slice_with_flags(
+        PlicSourceState::default(),
+        sources.last as usize + 1,
+        AllocFlags::NOWAIT,
+    )
+    .expect("failed to prepare PLIC source state");
+    #[expect(
         clippy::panic,
         reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the PLIC register window \
                   cannot be mapped; interrupt-controller initialization has no error return or \
@@ -372,7 +383,7 @@ pub fn init_primary() {
         sources,
         state: SpinNoIrq::new(PlicState {
             registers: plic,
-            sources: vec![PlicSourceState::default(); sources.last as usize + 1].into_boxed_slice(),
+            sources: source_state,
         }),
     });
 }

@@ -2,6 +2,12 @@
 
 ## Purpose
 
+PLIC source-state storage uses a KBox slice reserved with NOWAIT after firmware
+source-count validation and before MMIO mapping/controller publication. This is
+early boot, before ordinary task scheduling; KERNEL is not permitted. Failure
+terminates at the existing fatal-boot boundary rather than publishing a partial
+controller. The source-zero slot is retained for hardware-number indexing.
+
 `irq-driver` is the platform interrupt-controller integration layer: it
 implements the `kirq::IntrManagerIf` contract for each supported
 architecture (GIC v2/v3 on AArch64, PLIC on RISC-V, IO-APIC glue on

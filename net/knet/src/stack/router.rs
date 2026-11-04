@@ -4,8 +4,9 @@
 
 //! Router state and packet dispatch.
 
-use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
+use alloc::{collections::VecDeque, vec, vec::Vec};
 
+use kalloc_types::KBox;
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::{PollContext, PollRegisterError, PollSet};
 use ktime_types::MonotonicInstant;
@@ -526,7 +527,7 @@ impl Router {
 
     pub(crate) fn add_device(
         &mut self,
-        device: Box<dyn NetDevice>,
+        device: KBox<dyn NetDevice>,
     ) -> Result<NetDeviceId, LinuxError> {
         self.devices.register(device)
     }

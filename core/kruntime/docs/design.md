@@ -1,6 +1,20 @@
 # kruntime — 设计文档
 
+## Network Startup Owners
+
+Late-init task context calls the fallible `knet::init_network`. Device owners
+are reserved with KERNEL before NIC notification setup and global publication.
+Failure terminates at this explicit fatal-boot boundary because configured
+network initialization has no recovery/error-return path here. This policy is
+not inherited by namespace construction or other runtime network APIs.
+
 ## IRQ Startup Ownership
+
+The x86 runtime fixture `msi_lookup_interleaves_with_release_and_reallocation`
+uses a real reader task and phase acknowledgements across 32 MSI ownership
+cycles. It verifies stable lookups after admission and strict misses after
+release while lookups also interleave with transitions. No device is programmed
+to deliver MSI, and the reader is stopped and joined before result assertions.
 
 Timer and IPI actions are registered disabled. Each CPU enables its own generic
 timer slot before platform source activation; fixed IPI notification setup

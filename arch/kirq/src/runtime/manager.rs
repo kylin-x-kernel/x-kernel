@@ -158,6 +158,9 @@ fn apply_platform_delivery(plan: IrqPlatformPlan) {
     }
 }
 /// Try to map a hardware IRQ resource into the OS-visible logical IRQ namespace.
+/// Reverse-map owners are prepared with NOWAIT under control-lock exclusion.
+/// NoMemory leaves mappings and descriptors unchanged; a dynamic virq number
+/// may still have been consumed. Existing nested allocations retain their policy.
 pub fn try_map(desc: IrqDesc) -> Result<Virq, IrqDescError> {
     reject_nmi_management("map IRQ")?;
     let spec = IrqSpec::Desc(desc);

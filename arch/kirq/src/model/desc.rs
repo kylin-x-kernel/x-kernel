@@ -197,6 +197,10 @@ pub struct IrqDesc {
 /// Descriptor, mapping, controller configuration, or IRQ lifecycle error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrqDescError {
+    /// Preparing unpublished reverse-map ownership failed; no mapping was committed.
+    NoMemory,
+    /// The hardware number is outside the domain's supported reverse-map range.
+    InvalidHwirq { hwirq: Hwirq },
     /// Controller configuration did not complete or its readback did not match.
     /// Hardware may have changed; this error does not imply rollback or drain.
     ConfigurationFailed { hwirq: Hwirq },

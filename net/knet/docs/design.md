@@ -1,5 +1,27 @@
 # knet — Design
 
+## Fallible Protocol-Stack Device Owners
+
+The registry and Router own protocol-stack devices through `KBox<dyn NetDevice>`.
+This does not change portable driver-class owners. Boot reserves both loopback
+and optional Ethernet storage with KERNEL before constructing devices, attaching
+NIC notification sources, or publishing SERVICE. The boot caller handles owner
+failure at its explicit fatal-boot boundary; ordinary constructors return errors.
+
+`PreparedStack` prepares an unpublished loopback-only namespace stack in
+reclaim-safe sleepable task context. `ensure_stack` checks the registry, prepares
+outside its lock, and rechecks before insertion. A concurrent winner is retained;
+the unused candidate is destroyed outside the registry lock. The namespace is
+borrowed throughout installation, preventing identity destruction during publish.
+Clone prepares before child relationships exist, then installs without another
+fallible owner allocation. Unshare and setns prepare before switching namespaces.
+Dropping a namespace removes its installed stack through the existing drop hook.
+
+String, Vec, BTreeMap and Arc allocations retain their existing infallible policy.
+This is not a whole-stack OOM guarantee or per-namespace data-plane isolation.
+Tests inject owner failure, check retry/idempotence, and deterministically publish
+a competing stack during preparation to exercise the recheck path.
+
 ## Poller Configuration Preparation
 
 The private poller prepares QueueConfig CPU storage with KERNEL permissions in
@@ -30,8 +52,8 @@ locks needed by reclaim: nonblocking controls connection waiting, not allocator
 permissions. NoMemory can precede empty-queue WouldBlock; Unix/vsock reservation
 can also fail before transport validation. Each blocked accept retains one
 reserved slot, avoiding connection loss without a queue rollback protocol.
-Device owners, boxed packet buffers, async-trait futures, nested Arc/Vec
-allocations and dynamic workers remain outside this migration.
+Portable driver-class owners, boxed packet buffers, async-trait futures,
+nested Arc/Vec allocations and dynamic workers remain outside this migration.
 
 ## Bridge receive buffers
 
@@ -1109,17 +1131,18 @@ not allocate submission storage or execute the data plane.
 
 **Input:** Registered NIC handles and IPv4 configuration.
 
-**Output:** Initialized network service, sockets, and poller.
+**Output:** Initialized network service, sockets, and poller, or an owner
+reservation error before their publication.
 
 | Line | Operation |
 |---:|:---|
 | 1 | **Procedure** `init_network()` |
-| 2 | &emsp;`nics = kclass.net_devices()` |
+| 2 | &emsp;Select an optional NIC from `kclass.net_devices()`; reserve loopback and optional Ethernet owners with KERNEL, returning on error. |
 | 3 | &emsp;`router = Router.new()` |
-| 4 | &emsp;`lo = router.add_device(LoopbackDevice.new())` |
+| 4 | &emsp;Initialize the reserved loopback owner and add it to `router`. |
 | 5 | &emsp;`router.add_ipv4_addr(lo, 127.0.0.1/8, host_scope)` |
-| 6 | &emsp;**if** `nics.pop()` yields `nic`: |
-| 7 | &emsp;&emsp;`eth = router.add_device(EthernetDevice.new("eth0", nic))` |
+| 6 | &emsp;**if** a NIC and its reserved owner are present: |
+| 7 | &emsp;&emsp;Initialize the reserved Ethernet owner with `EthernetDevice.new("eth0", nic)` and add it to `router`. |
 | 8 | &emsp;&emsp;`router.add_ipv4_addr(eth, configured_ipv4, universe_scope)` |
 | 9 | &emsp;&emsp;`router.add_default_route(eth, configured_gateway)` |
 | 10 | &emsp;&emsp;`subscribe_network_unregister(nic.id)` |
@@ -1307,8 +1330,9 @@ Concurrency is organized around a single owner for protocol progress, with finer
 
 `NAMESPACE_STACKS: Mutex<BTreeMap<u64, Arc<Service>>>` (declared through
 `static_lock!` so the lock-stat build gets a const initializer) guards the
-per-namespace stacks. It is taken only by `ensure_stack` (insert) and the
-`kns` drop hook (remove), never from the packet or socket paths, and it is
+per-namespace stacks. It is taken by `ensure_stack` (lookup), prepared-stack
+installation (recheck/insert), and the `kns` drop hook (remove), never from the
+packet or socket paths, and it is
 independent of the `SERVICE` / `Router` / `Interface` locks: those protect the
 boot stack's protocol progress, while this registry only answers "has this
 namespace's stack been materialized". No code path holds this mutex and a
@@ -1619,17 +1643,20 @@ With `vsock_tipc_bridge` enabled, `bind()` rejects explicit binding to ports in 
 
 ### Network namespace stacks
 
-`netns.rs` owns the per-namespace protocol-stack registry. Its single entry
-point is `pub fn ensure_stack(id: u64)`, called by the namespace lifecycle path
-in `core/ksyscall` on `unshare(CLONE_NEWNET)`, `clone(CLONE_NEWNET)` and
-`setns(2)` — the private stack is materialized at the syscall boundary, not
-inside `knet`. The data flow is:
+`netns.rs` owns the per-namespace protocol-stack registry. Unshare and setns call
+`ensure_stack(&NetNamespace) -> KResult<()>` before switching namespaces. Clone
+uses `PreparedStack::new` before creating child relationships and `install`
+afterward. The syscall adapter selects transaction ordering; knet owns stack
+construction and registry publication. The data flow is:
 
 ```text
-kns::NetNamespace::initial_id()  -> knet::netns::ensure_stack(id)
-    id == initial  -> return (the boot-time global SERVICE is the stack)
-    otherwise      -> build Router + LoopbackDevice + 127.0.0.1/8 (ROUTE_SCOPE_HOST)
-                   -> insert Arc<Service> into NAMESPACE_STACKS
+ensure_stack(namespace)
+    initial or registered -> Ok (reuse the existing stack)
+    otherwise -> prepare owner and Router + loopback + 127.0.0.1/8 outside lock
+              -> on failure return NoMemory without insertion
+              -> recheck under lock; insert only if still absent
+
+clone -> PreparedStack::new -> prepare child -> install into child namespace
 
 dropping the last NetNamespace -> kns::set_net_namespace_drop_hook callback
     -> on_namespace_drop(id) -> remove the id from NAMESPACE_STACKS

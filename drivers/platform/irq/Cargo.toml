@@ -34,6 +34,7 @@ kcpu_slot.workspace = true
 unittest.workspace = true
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
+kalloc-types.workspace = true
 riscv = "0.14"
 riscv_plic = { version = "0.2" }
 sbi-rt = { version = "0.0.3", features = ["legacy"] }

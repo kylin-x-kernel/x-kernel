@@ -38,19 +38,21 @@ pub mod unix;
 #[cfg(feature = "vsock")]
 pub mod vsock;
 
-use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
+use alloc::{borrow::ToOwned, sync::Arc};
 
 pub use control::{
     NetInterfaceInfo, add_ipv4_route, del_ipv4_route, find_interface, interface_ipv4_addr,
     set_interface_flags, set_interface_ipv4_addr, set_interface_ipv4_broadcast,
     set_interface_ipv4_netmask,
 };
+use kalloc_types::KBox;
 #[cfg(feature = "vsock")]
 use kclass::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
 use kclass::{NetDevice, net_devices};
 use kdevice::subscribe_device_removed;
 #[cfg(feature = "vsock")]
 use kerrno::KError;
+use kerrno::KResult;
 use lazyinit::LazyInit;
 pub(crate) use link::{buf, wire};
 pub use link::{packet, send_link_frame};
@@ -89,20 +91,33 @@ static SERVICE: LazyInit<Service> = LazyInit::new();
 /// Call once after scheduler and timer IRQ initialization. Publishes the global
 /// service and poller before starting the retained sampling timer.
 ///
+/// # Execution context
+/// Requires reclaim-safe sleepable task context without device/registry locks.
+/// Device storage is reserved with KERNEL permissions.
+///
+/// # Errors
+/// Owner reservation failure precedes NIC notification setup and global stack
+/// publication. Nested allocations retain their existing failure policy.
+///
 /// # Panics
 /// Panics on repeated global initialization or if the initial sampling deadline
 /// exceeds the timer core's nanosecond range.
-pub fn init_network() {
+pub fn init_network() -> KResult<()> {
     info!("Initialize network subsystem...");
 
-    // Prepare stable Work storage before installing NIC notification sources.
+    let mut net_devs = net_devices();
+    let loopback_storage = KBox::<LoopbackDevice>::new_uninit()?;
+    let ethernet_storage = net_devs
+        .pop()
+        .map(|handle| KBox::<EthernetDevice>::new_uninit().map(|storage| (handle, storage)))
+        .transpose()?;
+
     let _ = poller::network_poller();
 
-    let mut net_devs = net_devices();
-
     let mut router = Router::new();
+    let loopback = KBox::write(loopback_storage, LoopbackDevice::new());
     let lo_dev = router
-        .add_device(Box::new(LoopbackDevice::new()))
+        .add_device(loopback)
         .expect("loopback interface ID must be available");
 
     #[expect(
@@ -124,7 +139,7 @@ pub fn init_network() {
         )
         .expect("loopback IPv4 address must fit the interface");
 
-    if let Some(handle) = net_devs.pop() {
+    if let Some((handle, storage)) = ethernet_storage {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
@@ -133,8 +148,9 @@ pub fn init_network() {
             .expect("configured IPv4 prefix length must be valid");
 
         let eth0 = EthernetDevice::new("eth0".to_owned(), handle);
+        let eth0 = KBox::write(storage, eth0);
         let eth0_dev = router
-            .add_device(Box::new(eth0))
+            .add_device(eth0)
             .expect("Ethernet interface ID must be available");
 
         router
@@ -183,6 +199,7 @@ pub fn init_network() {
     udp::init_udp_registry();
     poller::network_poller().start();
     SERVICE.start_timer();
+    Ok(())
 }
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {

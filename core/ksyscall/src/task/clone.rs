@@ -188,15 +188,24 @@ impl CloneRequest {
         })
     }
 
+    fn do_clone_with_entry(
+        self,
+        uctx: &UserContext,
+        prepare_entry: impl FnOnce(UserContext, usize) -> KResult<ktask::PreparedTaskEntry>,
+    ) -> KResult<isize> {
+        self.do_clone_with_preparation(uctx, prepare_entry, knet::netns::PreparedStack::new)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "CG-028-focused-functions: TODO(cg): legacy clone; split flag validation, \
                   resource sharing and task start"
     )]
-    fn do_clone_with_entry(
+    fn do_clone_with_preparation(
         mut self,
         uctx: &UserContext,
         prepare_entry: impl FnOnce(UserContext, usize) -> KResult<ktask::PreparedTaskEntry>,
+        prepare_network: impl FnOnce() -> KResult<knet::netns::PreparedStack>,
     ) -> KResult<isize> {
         if self.flags.contains(CloneFlags::VFORK) {
             // TODO: Implement Linux vfork semantics: keep the mm shared, block
@@ -296,6 +305,11 @@ impl CloneRequest {
             Self::parse_exit_signal(self.exit_signal)?
         };
         let entry = prepare_entry(new_uctx, set_child_tid)?;
+        let network_stack = if namespace_flags.contains(NamespaceFlags::NEWNET) {
+            Some(prepare_network()?)
+        } else {
+            None
+        };
         let prepared = if self.flags.contains(CloneFlags::THREAD) {
             current_thread
                 .prepare_thread_clone_with_files(self.flags.contains(CloneFlags::FILES))?
@@ -332,14 +346,11 @@ impl CloneRequest {
         };
         let tid = prepared.tid();
         let child_process = prepared.process().clone();
-        if self
-            .extract_namespace_flags()
-            .contains(NamespaceFlags::NEWNET)
-        {
+        if let Some(network_stack) = network_stack {
             // Materialize the private protocol stack of the child's fresh
             // network namespace (loopback with 127.0.0.1/8) before the child
             // can run.
-            knet::netns::ensure_stack(child_process.net_ns()?.id().as_u64());
+            network_stack.install(child_process.net_ns()?.as_ref());
         }
         let page_table_root = prepared.page_table_root();
         let (thr, task_number) = prepared.into_parts();

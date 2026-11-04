@@ -1,5 +1,16 @@
 # ksyscall security and reliability
 
+## Network Namespace Allocation Failure
+
+NoMemory from NEWNET device-owner preparation propagates before clone creates
+child relationships or unshare/setns switches the calling process's namespace.
+Clone abandons its unpublished prepared stack if later fork preparation fails.
+The namespace remains borrowed while its stack is installed. User-context tests
+inject preparation failure and check unchanged child/thread sets and unchanged
+unshare namespace/filesystem owners. These are local preparation failures, not
+global OOM tests; remaining process, registry and protocol allocations retain
+their prior policies, and setns failure injection is not covered here.
+
 ## Clone Entry Allocation Failure
 
 The entry allocation precedes both process and thread clone preparation. Its
@@ -104,7 +115,7 @@ and NUMA-node output pointers still go through `UserPtr` and retain copyout erro
 | T-14 | `waitid` copies signals across a raw `siginfo_t`-shaped buffer | Medium | `waitid(P_PID, ...)` status reporting | `siginfo_t` is registered as `posix_types::UserWrite` and written via `write_vm`; the payload is built by `ksignal::ChildExitSignalInfo`, the same source used for real SIGCHLD delivery |
 | T-15 | `execveat(AT_EMPTY_PATH)` execs an fd the caller cannot name | Medium | runc/crun self-reexec from a sealed memfd | The fd must reference an already-open file the caller owns; the image still goes through `kexec`'s execute-permission and ELF validation, and the resulting `/proc/self/exe` follows to the same opened backing file |
 | T-16 | Unprivileged caller creates namespaces | High | `unshare` with any `NEW*` bit | The ns owner checks that `UnshareContext::privileged` was set from effective `CAP_SYS_ADMIN` and returns `EPERM` otherwise; plain `CLONE_FS`/`CLONE_FILES` need no privilege |
-| T-17 | `setns` enters a namespace without authorization, a mismatched one, or an unsupported one | High | any fd without privilege; fd type / `nstype` mismatch; net/user/cgroup/time swap | Both channels require effective `CAP_SYS_ADMIN` (`EPERM`), standing in for Linux's per-type install checks; NsFd channel rejects type mismatches with `EINVAL` and answers `EOPNOTSUPP` for user/cgroup swaps whose backing tables are not isolated (a net swap materializes the target namespace's protocol stack via `knet::netns::ensure_stack` and succeeds); pidfd channel validates the whole `nstype` mask against the target before committing and answers `EOPNOTSUPP` for user/cgroup/time swaps (net swaps are supported and materialize the target stack); PID-namespace targets must be the caller's active namespace or a descendant (the `pidns_install` ancestor rule) |
+| T-17 | `setns` enters a namespace without authorization, a mismatched one, or an unsupported one | High | any fd without privilege; fd type / `nstype` mismatch; net/user/cgroup/time swap | Both channels require effective `CAP_SYS_ADMIN` (`EPERM`), standing in for Linux's per-type install checks; NsFd channel rejects type mismatches with `EINVAL` and answers `EOPNOTSUPP` for user/cgroup swaps whose backing tables are not isolated (a net swap prepares the target namespace's protocol stack via `knet::netns::ensure_stack`, returning NoMemory without switching on owner failure); pidfd channel validates the whole `nstype` mask against the target before committing and answers `EOPNOTSUPP` for user/cgroup/time swaps (net swaps are supported and materialize the target stack); PID-namespace targets must be the caller's active namespace or a descendant (the `pidns_install` ancestor rule) |
 | T-18 | Seccomp filter install silently accepts unsupported flags or skips privilege gating | High | `seccomp(2)` flags / privilege check | `SECCOMP_ALLOWED_FLAGS` whitelist rejects unknown flags with `EINVAL`; both strict and filter install require `no_new_privileges` or effective `CAP_SYS_ADMIN`, otherwise `EACCES` (Linux `seccomp_prepare_filter`) |
 | T-19 | A seccomp filter is not evaluated before dispatch, letting a denied syscall run | High | any syscall | `dispatch_irq_syscall` runs `evaluate_seccomp` before the `Sysno` match; the decision is applied to the context (`Errno` → retval, `KILL_PROCESS`/`KILL_THREAD`/`TRAP`/unrecognised → `do_exit(SIGSYS)`, a strict-mode violation → `do_exit(SIGKILL)` as Linux does, `USER_NOTIF`/`TRACE` → `ENOSYS`) before any handler runs |
 | T-20 | A malformed filter is installed and later kills the task, or a `TSYNC` drops a sibling's restriction | High | `seccomp(2)` program/flags | `SeccompFilter::new` validates instruction encoding and jump targets at install time (`EINVAL`); `TSYNC` refuses when a sibling's chain is not a prefix of the caller's (blocking TID / `ESRCH` with `TSYNC_ESRCH`), re-validates under each sibling's own lock before replacing its chain, and a mode change is refused (`EINVAL`) |

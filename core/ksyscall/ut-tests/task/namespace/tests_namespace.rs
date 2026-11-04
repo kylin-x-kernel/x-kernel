@@ -10,6 +10,23 @@ use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 
+#[def_test(user, serial)]
+fn network_owner_failure_precedes_unshare_commit() {
+    let process = current_user_process();
+    let previous = process.nsproxy().unwrap();
+    let previous_fs = process.fs_context().unwrap();
+    let mut prepared_id = None;
+    let result = sys_unshare_with_stack(CLONE_NEWNET as usize, |namespace| {
+        prepared_id = Some(namespace.id());
+        Err(KError::NoMemory)
+    });
+    assert_eq!(result, Err(KError::NoMemory));
+    assert!(prepared_id.is_some());
+    assert!(prepared_id.unwrap() != previous.net_ns().id());
+    assert!(Arc::ptr_eq(&previous, &process.nsproxy().unwrap()));
+    assert!(Arc::ptr_eq(&previous_fs, &process.fs_context().unwrap()));
+}
+
 #[def_test]
 fn unshare_flag_set_parses_supported_namespace_and_detach_flags() {
     let raw = (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID) as u64

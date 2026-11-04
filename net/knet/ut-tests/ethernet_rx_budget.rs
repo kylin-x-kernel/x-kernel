@@ -190,7 +190,7 @@ fn non_ip_frames_consume_rx_budget_and_recycle_before_returning() {
     frames.push(frame(LOCAL_MAC, EtherType::Ipv4));
     let (ethernet, state) = device(frames);
     let mut router = Router::new();
-    router.add_device(Box::new(ethernet)).unwrap();
+    router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     let mut packets = Vec::new();
 
     for consumed in 1..=non_ip_count {
@@ -221,8 +221,8 @@ fn dropped_frames_exhaust_budget_and_rotate_to_another_device() {
     let mut router = Router::new();
     let (first, first_state) = device(non_ip_frames());
     let (second, second_state) = device([frame(LOCAL_MAC, EtherType::Ipv4)]);
-    router.add_device(Box::new(first)).unwrap();
-    router.add_device(Box::new(second)).unwrap();
+    router.add_device(kalloc_types::KBox::new(first).unwrap()).unwrap();
+    router.add_device(kalloc_types::KBox::new(second).unwrap()).unwrap();
     let mut packets = Vec::new();
 
     let drain = router.drain_rx_budgeted_into(MonotonicInstant::ORIGIN, 2, &mut packets);
@@ -251,7 +251,7 @@ fn dropped_frames_exhaust_budget_and_rotate_to_another_device() {
 fn zero_rx_budget_does_not_consume_an_ethernet_frame() {
     let (ethernet, state) = device(non_ip_frames());
     let mut router = Router::new();
-    router.add_device(Box::new(ethernet)).unwrap();
+    router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     let mut packets = Vec::new();
 
     let drain = router.drain_rx_budgeted_into(MonotonicInstant::ORIGIN, 0, &mut packets);
@@ -270,7 +270,7 @@ fn recycling_failure_ends_rx_without_reading_another_frame() {
     ]);
     state.has_recycle_error.store(true, Ordering::Relaxed);
     let mut router = Router::new();
-    router.add_device(Box::new(ethernet)).unwrap();
+    router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     let mut packets = Vec::new();
 
     let drain = router.drain_rx_budgeted_into(MonotonicInstant::ORIGIN, 4, &mut packets);
@@ -379,7 +379,7 @@ fn send_test_ipv4(
 fn unresolved_neighbor_sends_three_solicits_then_fails() {
     let (ethernet, state) = device([]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     let local = crate::ip::Ipv4Address::new(192, 0, 2, 1);
     let remote = crate::ip::Ipv4Address::new(192, 0, 2, 9);
     router
@@ -483,7 +483,7 @@ fn failed_neighbor_restarts_resolution_on_traffic() {
     let remote = crate::ip::Ipv4Address::new(192, 0, 2, 9);
     let (ethernet, state) = device([]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(dev, Ipv4Cidr::new(local, 24).unwrap())
         .unwrap();
@@ -556,7 +556,7 @@ fn arp_reply_resolves_incomplete_neighbor_inside_locktime() {
     let remote_mac = [2, 0, 0, 0, 0, 9];
     let (ethernet, state) = device([]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     let local = crate::ip::Ipv4Address::new(192, 0, 2, 1);
     let remote = crate::ip::Ipv4Address::new(192, 0, 2, 9);
     router
@@ -614,7 +614,7 @@ fn arp_reply_resolves_incomplete_neighbor_inside_locktime() {
 fn link_down_freezes_neighbor_probes_and_arp_learning() {
     let (ethernet, state) = device([]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     let local = crate::ip::Ipv4Address::new(192, 0, 2, 1);
     let remote = crate::ip::Ipv4Address::new(192, 0, 2, 9);
     router
@@ -692,7 +692,7 @@ fn valid_neighbor_expiry_retains_hardware_and_goes_stale() {
     let remote = crate::ip::Ipv4Address::new(192, 0, 2, 9);
     let (ethernet, state) = device([]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(dev, Ipv4Cidr::new(local, 24).unwrap())
         .unwrap();
@@ -783,7 +783,7 @@ fn administrative_reachable_refreshes_connected_lifetime() {
     let remote = crate::ip::Ipv4Address::new(192, 0, 2, 9);
     let (ethernet, _) = device([]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(dev, Ipv4Cidr::new(local, 24).unwrap())
         .unwrap();
@@ -826,7 +826,7 @@ fn administrative_reachable_drains_pending_tx() {
     let remote = crate::ip::Ipv4Address::new(192, 0, 2, 9);
     let (ethernet, state) = device([]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(dev, Ipv4Cidr::new(local, 24).unwrap())
         .unwrap();
@@ -875,7 +875,7 @@ fn arp_local_requests_and_garp_override_locktime() {
         gratuitous_arp(third_mac, remote),
     ]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(dev, Ipv4Cidr::new(local, 24).unwrap())
         .unwrap();
@@ -944,7 +944,7 @@ fn gratuitous_arp_from_directed_broadcast_does_not_override_locktime() {
     let directed_broadcast = crate::ip::Ipv4Address::new(192, 0, 2, 255);
     let (ethernet, _) = device([gratuitous_arp(second_mac, directed_broadcast)]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(dev, Ipv4Cidr::new(local, 24).unwrap())
         .unwrap();
@@ -992,7 +992,7 @@ fn remote_gratuitous_arp_does_not_create_a_neighbor() {
     let remote = crate::ip::Ipv4Address::new(192, 0, 2, 9);
     let (ethernet, _) = device([gratuitous_arp(remote_mac, remote)]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(dev, Ipv4Cidr::new(local, 24).unwrap())
         .unwrap();
@@ -1011,7 +1011,7 @@ fn arp_request_learning_is_stale() {
     let source_ip = crate::ip::Ipv4Address::new(192, 0, 2, 2);
     let (ethernet, _) = device([arp_request(source_mac, source_ip)]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(
             dev,
@@ -1044,7 +1044,7 @@ fn arp_learning_retains_first_binding_for_locktime() {
         arp_reply(second_mac, source_ip),
     ]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(
             dev,
@@ -1093,7 +1093,7 @@ fn arp_learning_publishes_one_reachable_transition() {
     let reply = arp_reply(source_mac, source_ip);
     let (ethernet, _) = device([reply.clone(), reply]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(
             dev,
@@ -1145,7 +1145,7 @@ fn repeated_reachable_arp_refreshes_lifetime_without_an_event() {
         arp_reply(source_mac, source_ip),
     ]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(
             dev,
@@ -1231,7 +1231,7 @@ fn arp_broadcast_replies_do_not_assert_reachability() {
         arp_reply_to(LOCAL_MAC, replacement_mac, source_ip),
     ]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(
             dev,
@@ -1321,7 +1321,7 @@ fn arp_learning_preserves_permanent_entries() {
     // timestamp of the following drain.  Anchor the test to that stamp.
     let permanent_at = khal::time::monotonic_time();
     let mut router = Router::new();
-    let registered = router.add_device(Box::new(ethernet)).unwrap();
+    let registered = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     assert_eq!(registered, dev);
     router
         .set_primary_ipv4_addr(
@@ -1374,7 +1374,7 @@ fn administrative_incomplete_neighbor_bypasses_prior_scan_gate() {
     let remote = crate::ip::Ipv4Address::new(192, 0, 2, 9);
     let (ethernet, state) = device([]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     router
         .set_primary_ipv4_addr(dev, Ipv4Cidr::new(local, 24).unwrap())
         .unwrap();
@@ -1437,7 +1437,7 @@ fn source_less_incomplete_neighbor_exhausts_probe_budget() {
     let remote = crate::ip::Ipv4Address::new(192, 0, 2, 9);
     let (ethernet, state) = device([]);
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(ethernet)).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(ethernet).unwrap()).unwrap();
     // The device has no assigned or local IPv4 address, so resolution has no
     // natural ARP source.  Linux still sends source-0 probes and must consume
     // the solicitation budget instead of rescheduling forever.

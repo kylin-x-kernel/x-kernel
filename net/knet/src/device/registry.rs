@@ -4,9 +4,10 @@
 
 //! Registered interfaces, their protocol configuration, and aggregate stack MTU.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 
 use hashbrown::HashMap;
+use kalloc_types::KBox;
 use kerrno::LinuxError;
 
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
 
 struct DeviceEntry {
     id: NetDeviceId,
-    device: Box<dyn NetDevice>,
+    device: KBox<dyn NetDevice>,
     ipv4: Ipv4AddressSet,
 }
 
@@ -167,7 +168,7 @@ impl DeviceRegistry {
 
     pub(crate) fn register(
         &mut self,
-        device: Box<dyn NetDevice>,
+        device: KBox<dyn NetDevice>,
     ) -> Result<NetDeviceId, LinuxError> {
         let id = if device.link_kind() == LinkKind::Loopback {
             if self.loopback_registered {

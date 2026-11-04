@@ -80,6 +80,11 @@ impl MsiAllocation {
 /// Platform backend for MSI vector allocation and message composition.
 #[kiface::interface]
 pub trait MsiBackendIf {
+    /// Returns the immutable, half-open hardware-vector range supported by MSI.
+    /// No allocation or hardware mutation is permitted; kirq queries under its
+    /// IRQ-disabled control lock before preparing stable reverse-map storage.
+    fn msi_hwirq_range() -> Option<core::ops::Range<Hwirq>>;
+
     /// Allocates a backend-local hardware MSI vector.
     fn alloc_msi_vector(
         token: MsiBackendToken,
@@ -88,6 +93,8 @@ pub trait MsiBackendIf {
     ) -> Option<Hwirq>;
 
     /// Releases a backend-local hardware MSI vector.
+    /// False must retain ownership of the vector. The caller has already
+    /// cleared reverse lookup and restores it on rejection without allocation.
     fn free_msi_vector(token: MsiBackendToken, hwirq: Hwirq) -> bool;
 
     /// Composes the device-visible MSI message for `hwirq`.
@@ -120,6 +127,8 @@ pub fn alloc_msix(affinity: IrqAffinity) -> Option<MsiAllocation> {
 }
 
 /// Releases a PCI MSI-X interrupt previously allocated by [`alloc_msix`].
+/// The source must already be stopped and drained. Reverse-map removal does
+/// not allocate; backend rejection restores the prior mapping and returns false.
 pub fn free_msix(virq: Virq) -> bool {
     free_msi(virq)
 }

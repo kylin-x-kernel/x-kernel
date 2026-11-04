@@ -15,6 +15,7 @@ irq_context_debug = []
 irq_stat = []
 
 [dependencies]
+kalloc-types.workspace = true
 kiface-cpu-api.workspace = true
 kiface-irq-context-api.workspace = true
 kcompletion.workspace = true

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 use ktime_types::MonotonicInstant;
 use unittest::{assert, assert_eq, def_test};
@@ -22,7 +22,7 @@ fn valid_ipv4_cidr(address: Ipv4Address, prefix_len: u8) -> Ipv4Cidr {
 
 fn router_with_ready_loopback_packet() -> Router {
     let mut router = Router::new();
-    let loopback = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let loopback = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::Ipv4Stack);
     let _ = router
         .devices
@@ -109,11 +109,11 @@ fn rx_failure_preserves_partial_batch_and_advances_device_cursor() {
     let mut router = Router::new();
     for _ in 0..2 {
         router
-            .add_device(Box::new(FailingRxDevice {
+            .add_device(kalloc_types::KBox::new(FailingRxDevice {
                 link: LoopbackDevice::new(),
                 packet: Some(tx_packet_buf(vec![0x45, 0, 0, 20])),
                 up: true,
-            }))
+            }).unwrap())
             .unwrap();
     }
     let mut packets = Vec::new();
@@ -188,13 +188,13 @@ fn data_dispatch_frees_data_tx_capacity() {
 fn unrelated_address_update_preserves_automatic_and_configured_route_order() {
     for is_configured_first in [false, true] {
         let mut router = Router::new();
-        let first = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+        let first = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
         let second = router
-            .add_device(Box::new(FailingRxDevice {
+            .add_device(kalloc_types::KBox::new(FailingRxDevice {
                 link: LoopbackDevice::new(),
                 packet: None,
                 up: true,
-            }))
+            }).unwrap())
             .unwrap();
         let primary = Ipv4AddrEntry {
             addr: valid_ipv4_cidr(Ipv4Address::new(10, 0, 0, 1), 24),
@@ -242,13 +242,13 @@ fn unrelated_address_update_preserves_automatic_and_configured_route_order() {
 #[def_test]
 fn cross_device_address_iteration_does_not_reorder_surviving_routes() {
     let mut router = Router::new();
-    let first = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let first = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let second = router
-        .add_device(Box::new(FailingRxDevice {
+        .add_device(kalloc_types::KBox::new(FailingRxDevice {
             link: LoopbackDevice::new(),
             packet: None,
             up: true,
-        }))
+        }).unwrap())
         .unwrap();
     let first_primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(10, 0, 0, 1), 24),
@@ -326,13 +326,13 @@ fn cross_device_address_iteration_does_not_reorder_surviving_routes() {
 #[def_test]
 fn deleting_connected_primary_cascades_secondaries_and_falls_back() {
     let mut router = Router::new();
-    let first = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let first = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let second = router
-        .add_device(Box::new(FailingRxDevice {
+        .add_device(kalloc_types::KBox::new(FailingRxDevice {
             link: LoopbackDevice::new(),
             packet: None,
             up: true,
-        }))
+        }).unwrap())
         .unwrap();
     let primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 1), 24),
@@ -374,13 +374,13 @@ fn deleting_connected_primary_cascades_secondaries_and_falls_back() {
 #[def_test]
 fn local_address_output_survives_owner_link_down_without_oif() {
     let mut router = Router::new();
-    let loopback = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let loopback = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let owner = router
-        .add_device(Box::new(FailingRxDevice {
+        .add_device(kalloc_types::KBox::new(FailingRxDevice {
             link: LoopbackDevice::new(),
             packet: None,
             up: true,
-        }))
+        }).unwrap())
         .unwrap();
     let entry = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
@@ -417,7 +417,7 @@ fn local_address_output_survives_owner_link_down_without_oif() {
 #[def_test]
 fn ipv4_address_installs_local_and_connected_routes() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let entry = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
         scope: ROUTE_SCOPE_HOST,
@@ -450,7 +450,7 @@ fn ipv4_address_installs_local_and_connected_routes() {
 #[def_test]
 fn explicit_ipv4_broadcast_installs_and_replaces_a_broadcast_route() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let assigned = Ipv4Address::new(192, 0, 2, 111);
     let entry = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
@@ -526,7 +526,7 @@ fn explicit_ipv4_broadcast_installs_and_replaces_a_broadcast_route() {
 #[def_test]
 fn implicit_ipv4_broadcast_assignment_updates_stored_value_without_duplicate_route() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     router
         .add_ipv4_addr(
             dev,
@@ -571,7 +571,7 @@ fn implicit_ipv4_broadcast_assignment_updates_stored_value_without_duplicate_rou
 #[def_test]
 fn zero_ipv4_broadcast_is_not_derived_by_netmask_changes() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     router
         .add_ipv4_addr(
             dev,
@@ -592,7 +592,7 @@ fn zero_ipv4_broadcast_is_not_derived_by_netmask_changes() {
 #[def_test]
 fn explicit_ipv4_broadcast_route_follows_link_state_and_prefix_suppression() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let assigned = Ipv4Address::new(198, 51, 100, 111);
     let entry = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
@@ -654,7 +654,7 @@ fn explicit_ipv4_broadcast_route_follows_link_state_and_prefix_suppression() {
 #[def_test]
 fn ipv4_netmask_change_updates_computed_broadcast_and_keeps_explicit_one() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let explicit = Ipv4Address::new(192, 168, 1, 111);
     router
         .add_ipv4_addr(
@@ -687,7 +687,7 @@ fn ipv4_netmask_change_updates_computed_broadcast_and_keeps_explicit_one() {
 #[def_test]
 fn ipv4_broadcast_detection_covers_limited_and_directed_addresses() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     router
         .add_ipv4_addr(
             dev,
@@ -711,7 +711,7 @@ fn ipv4_broadcast_detection_covers_limited_and_directed_addresses() {
 #[def_test]
 fn setting_primary_ipv4_address_preserves_unrelated_addresses() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
         scope: ROUTE_SCOPE_HOST,
@@ -757,7 +757,7 @@ fn setting_primary_ipv4_address_preserves_unrelated_addresses() {
 #[def_test]
 fn removing_primary_ipv4_address_preserves_unrelated_addresses() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
         scope: ROUTE_SCOPE_HOST,
@@ -784,7 +784,7 @@ fn removing_primary_ipv4_address_preserves_unrelated_addresses() {
 #[def_test]
 fn setting_ipv4_netmask_keeps_secondary_scope_and_custom_broadcast() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let custom_broadcast = Ipv4Address::new(192, 0, 2, 111);
     let secondary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
@@ -822,7 +822,7 @@ fn setting_ipv4_netmask_keeps_secondary_scope_and_custom_broadcast() {
 #[def_test]
 fn setting_ipv4_netmask_collision_keeps_existing_target() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
         scope: ROUTE_SCOPE_HOST,
@@ -858,7 +858,7 @@ fn setting_ipv4_netmask_collision_keeps_existing_target() {
 #[def_test]
 fn deleting_ipv4_address_removes_automatic_routes() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     let entry = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
         scope: ROUTE_SCOPE_HOST,
@@ -907,7 +907,7 @@ fn deleting_ipv4_address_removes_automatic_routes() {
 #[def_test]
 fn configured_gateway_must_be_on_device_subnet() {
     let mut router = Router::new();
-    let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let dev = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     router
         .add_ipv4_addr(
             dev,

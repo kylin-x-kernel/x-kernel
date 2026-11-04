@@ -238,14 +238,30 @@ kirq
 
 ## unsafe 代码清单
 
-`arch/kirq/src` 的本地 unsafe 边界位于 `domain::Published<T>`：
+Ownership regression tests in `ut-tests/line_admission.rs` inject preparation
+failure before descriptor/map commit and verify that resolving an existing
+mapping bypasses allocation. `ut-tests/backend_msi.rs` checks retry after failed
+record/table preparation, stable-table reuse, rejected release restoration,
+retained-reader lifetime, and x86 backend allocation/free/reallocation. These
+seams do not simulate global allocator failure, nested map/Arc allocation or
+physical interrupt drain. The PLIC path is additionally exercised by RISC-V
+boot and its existing source-bound/controller tests.
+The runtime fixture `msi_lookup_interleaves_with_release_and_reallocation`
+runs a real reader task across repeated x86 allocation/release cycles with
+publication/removal acknowledgements. It is not a physical MSI delivery test.
 
-- `get()` 通过 `AtomicPtr::load(Acquire)` 读取已发布快照；
-- `publish()` 用 `Box::into_raw` 发布新快照；
-- 旧快照故意泄漏，避免 racing IRQ reader 悬垂；
-- `Published<T>` 没有 `Drop`，只用于 static domain registry。
+`domain::Published<T>` acquire-loads pointers transferred with `KBox::into_raw`.
+Published owners are never deallocated, even after a slot is cleared. Ordinary
+snapshots and MSI records are immutable; the MSI table permits mutation only
+through its atomic slots under registry exclusion. `Published` has no Drop
+that could free a record still held by a reader.
 
-安全不变量是：快照发布前完全初始化，发布后不可变，且永不释放。
+`MsiTable::new` initializes every exclusively owned uninitialized slice slot
+with a null Published pointer before `assume_init`. The loop cannot fail and
+no reference escapes before initialization completes. Allocation failure drops
+only unpublished storage. The table and records use NOWAIT because preparation
+runs under IRQ-disabled control locks; this grants neither NMI allocation
+safety nor a latency bound.
 
 `arch/kirq/src/bottom_half/context.rs` 使用 `kcpu_slot` 的
 `CpuSlotCell<SpinNoIrq<IrqContextState>>`：
@@ -296,9 +312,9 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
 - `try_disable_irq_nosync()` 必须保持 lookup-only；未知 IRQ 返回
   `IrqDescError::UnknownIrq`，不能在 hardirq-safe disable 路径中创建 descriptor 或
   domain mapping。
-- Domain reverse-map snapshots are immutable views of the build table. Writers
-  publish a replacement snapshot after mapping changes; old snapshots are never
-  mutated or freed while data-plane readers may still hold them.
+- Ordinary domain snapshots are prepared before mapping changes and published
+  after commit; old snapshots remain immutable and retained. MSI uses atomic
+  slots with retained immutable records instead of replacement snapshots.
 - MSI allocation 必须只向调用者暴露 virq 和 `MsiMessage`；backend-local vector、
   APIC id 和 affinity 选择不能泄露到 `device_res` 或 generic driver。
 - NMI dispatch 不得依赖 `IRQ_STATE`，否则 pseudo-NMI 可能打断 normal IRQ 持锁路径并
@@ -327,8 +343,8 @@ dispatch path 在持锁期间解析 `PendingIrq`、查找 descriptor，并复制
 snapshot，然后释放锁再调用 handler。这样保留 resolve 与 descriptor lookup 的原子性，
 同时避免回调重入 IRQ API 时自锁。
 
-Domain `hwirq -> virq` reverse maps are published as immutable snapshots.
-Dispatch resolves a `PendingIrq` through the snapshot rather than querying the
+Ordinary `hwirq -> virq` maps use immutable snapshots; MSI uses stable atomic
+slots. Dispatch resolves a `PendingIrq` through those published owners rather than querying the
 control-plane `domain_states` table; strict misses stay misses instead of falling
 back to identity dispatch. The control plane also keeps `virq_to_mapping` as the
 reverse index for the same mappings, so "one virq maps to at most one hardware
@@ -537,11 +553,11 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
   `in_flight` 归零并删除 unused descriptor。等待期间 `teardown_depth` 阻止同一 line
   重新注册，也阻止 `enable_irq()` 重新打开 action-less line。普通 unregister 只是兼容
   wrapper。等待式 API 调用方不能持有 handler 可能获取的锁。
-- MSI descriptor 不走普通 platform configure/enable；分配失败返回 `None` /
-  `Unsupported`，message compose 失败时立即释放 backend vector 并在失败时 warning。
-  正常释放由 `free_msix()` 先释放 backend vector，成功后再删除 descriptor、mapping
-  和 domain snapshot，并同步删除 `virq_to_mapping` reverse index；backend 释放失败时
-  保留 OS-side mapping 以便重试。
+- MSI descriptor preparation failure returns through the existing allocation
+  rollback path. Release clears the published slot before backend vector reuse,
+  then removes the descriptor and both software mapping indexes. Backend
+  rejection restores the slot and retains software ownership. Release performs
+  no owner allocation; source masking/draining remains the caller's obligation.
 - lifecycle hook 注册是单 owner；后续如果需要多个 consumer，应显式升级为
   notifier chain，而不是让多个子系统覆盖同一全局 hook。
 - No global IRQ waiter table is consulted after action fanout. Descriptor-local

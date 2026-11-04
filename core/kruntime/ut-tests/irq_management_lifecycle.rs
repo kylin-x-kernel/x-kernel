@@ -19,6 +19,66 @@ use kirq::{IrqEvent, IrqHandler, tests_irq::RetainedInFlight};
 use ktask::TaskState;
 use unittest::{assert, assert_eq, def_test};
 
+#[cfg(target_arch = "x86_64")]
+#[def_test(serial)]
+fn msi_lookup_interleaves_with_release_and_reallocation() {
+    struct Probe {
+        request: AtomicUsize,
+        acknowledged: AtomicUsize,
+        hwirq: AtomicUsize,
+        expected: AtomicUsize,
+        stopped: AtomicBool,
+        valid: AtomicBool,
+    }
+    let probe = Arc::new(Probe {
+        request: AtomicUsize::new(0),
+        acknowledged: AtomicUsize::new(0),
+        hwirq: AtomicUsize::new(0),
+        expected: AtomicUsize::new(usize::MAX),
+        stopped: AtomicBool::new(false),
+        valid: AtomicBool::new(true),
+    });
+    let reader = {
+        let probe = probe.clone();
+        ktask::spawn(move || {
+            while !probe.stopped.load(Ordering::Acquire) {
+                let request = probe.request.load(Ordering::Acquire);
+                let observed = kirq::translate_hwirq(
+                    kirq::MSI_DOMAIN, probe.hwirq.load(Ordering::Relaxed));
+                if request != probe.acknowledged.load(Ordering::Relaxed) {
+                    if observed.unwrap_or(usize::MAX) != probe.expected.load(Ordering::Relaxed) {
+                        probe.valid.store(false, Ordering::Relaxed);
+                    }
+                    probe.acknowledged.store(request, Ordering::Release);
+                }
+                ktask::yield_now();
+            }
+        })
+    };
+    for round in 0..32 {
+        let allocation = kirq::alloc_msix(kirq::IrqAffinity::Any).unwrap();
+        let desc = kirq::descriptor(allocation.virq()).unwrap();
+        probe.hwirq.store(desc.hwirq, Ordering::Relaxed);
+        probe.expected.store(allocation.virq(), Ordering::Relaxed);
+        probe.request.store(round * 2 + 1, Ordering::Release);
+        while probe.acknowledged.load(Ordering::Acquire) != round * 2 + 1 {
+            ktask::yield_now();
+        }
+        if !kirq::free_msix(allocation.virq()) {
+            probe.valid.store(false, Ordering::Relaxed);
+        }
+        probe.expected.store(usize::MAX, Ordering::Relaxed);
+        probe.request.store(round * 2 + 2, Ordering::Release);
+        while probe.acknowledged.load(Ordering::Acquire) != round * 2 + 2 {
+            ktask::yield_now();
+        }
+    }
+    probe.stopped.store(true, Ordering::Release);
+    let status = reader.join();
+    assert_eq!(status, 0);
+    assert!(probe.valid.load(Ordering::Acquire));
+}
+
 #[cfg(feature = "ipi")]
 #[def_test(serial)]
 fn completed_cpu_calls_observe_body_and_capture_destruction() {

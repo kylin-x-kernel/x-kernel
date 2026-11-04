@@ -1,5 +1,12 @@
 # irq-driver — Security And Reliability
 
+## PLIC Source State Reservation
+
+The validated PLIC source bound limits the NOWAIT KBox reservation to 1024
+entries including reserved source zero. Reservation precedes MMIO admission
+and PLIC publication. Allocation failure is fatal boot because this early IRQ
+initialization API has no recovery channel; it is not a NOFAIL allocation.
+
 ## Local Source Control
 
 `gicv2::set_forwarding_state` validates descriptor identity and the PPI range

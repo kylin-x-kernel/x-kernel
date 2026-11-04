@@ -1,5 +1,16 @@
 # ksyscall design
 
+## Network Namespace Owner Preparation
+
+Clone prepares an unpublished `knet::netns::PreparedStack` for NEWNET after
+validation and before process-fork preparation creates child relationships.
+Afterward installation performs no fallible device-owner allocation. Unshare
+materializes the prepared proxy's network stack before applying that proxy;
+both setns paths validate their replacement proxy before stack preparation and
+install it only on success. Allocation uses KERNEL in reclaim-safe syscall task
+context, outside process, filesystem-context and namespace-registry locks.
+Existing fd-table detach ordering and other allocations are not changed.
+
 ## Clone Entry Preparation
 
 Clone prepares its user entry with KERNEL after flag, namespace capability and

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Weak, task::Wake, vec, vec::Vec};
+use alloc::{sync::Weak, task::Wake, vec, vec::Vec};
 use core::{sync::atomic::AtomicBool, task::Context};
 
 use kpoll::PollRegistrations;
@@ -160,7 +160,7 @@ fn poll_round_defers_router_lock_contention() {
 fn poll_round_dispatches_tx_when_due_ipv4_expiration_lock_is_contended() {
     let loopback_addr = Ipv4Address::new(127, 0, 0, 1);
     let mut router = Router::new();
-    let loopback = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let loopback = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     router
         .add_ipv4_addr(
             loopback,
@@ -195,7 +195,7 @@ fn poll_round_dispatches_tx_when_due_ipv4_expiration_lock_is_contended() {
 fn tx_dispatch_exposes_loopback_rx_in_the_same_round() {
     let loopback_addr = Ipv4Address::new(127, 0, 0, 1);
     let mut router = Router::new();
-    let loopback = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
+    let loopback = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
     router
         .add_ipv4_addr(
             loopback,

@@ -2,6 +2,11 @@
 
 ## Scope
 
+Fallible IRQ owner preparation propagates as NoMemory before mapping admission.
+MSI cleanup does not gain a new OOM failure mode: the IRQ core clears a prepared
+slot without allocation. Existing backend rejection still produces a warning;
+this adapter does not infer device quiescence or manufacture a retry owner.
+
 This analysis covers the entire crate: `src/lib.rs`
 (`XKernelResourceProvider`), `src/mmio.rs`, `src/dma.rs`, `src/memory.rs`,
 `src/irq.rs`, and `src/time.rs`. No modules are

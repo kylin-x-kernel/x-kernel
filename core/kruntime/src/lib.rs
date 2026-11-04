@@ -418,7 +418,12 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     fs_boot::mount_host_share("/mnt/hostshare");
 
     #[cfg(feature = "net")]
-    knet::init_network();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: configured network stack \
+                  preparation failed; late init has no recovery or error return"
+    )]
+    knet::init_network().expect("prepare configured network stack");
     #[cfg(feature = "vsock")]
     knet::init_vsock();
 

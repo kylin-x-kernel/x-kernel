@@ -112,6 +112,13 @@ fn ensure_pid_ns_reachable(process: &kprocess::Process, target: &Arc<PidNamespac
 /// descriptor table when `CLONE_FILES` was requested — the fd table is
 /// thread-owned, so the detach must run on this thread's own binding.
 pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
+    sys_unshare_with_stack(flags, knet::netns::ensure_stack)
+}
+
+fn sys_unshare_with_stack(
+    flags: usize,
+    prepare_stack: impl FnOnce(&kns::NetNamespace) -> KResult<()>,
+) -> KResult<isize> {
     let process = current_user_process();
     let multithreaded = process.threads().len() > 1;
     let (namespace_flags, detach_fs, detach_files) = unshare_flag_set(flags as u64, multithreaded)?;
@@ -131,12 +138,12 @@ pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
         )
         .map_err(map_unshare_error)?;
     let unshare_files = prepared.unshare_files();
-    process.apply_prepared_unshare(prepared)?;
     if namespace_flags.contains(NamespaceFlags::NEWNET) {
         // Materialize the private protocol stack of the new namespace before
         // the caller can enter it or bind its `/proc/<pid>/ns/net` file.
-        knet::netns::ensure_stack(process.net_ns()?.id().as_u64());
+        prepare_stack(prepared.nsproxy().net_ns())?;
     }
+    process.apply_prepared_unshare(prepared)?;
     if unshare_files {
         current_files().unshare_fd_table()?;
     }
@@ -182,18 +189,15 @@ fn sys_setns_nsfd(process: &kprocess::Process, nsfd: Arc<NsFd>, nstype: u64) -> 
             ensure_pid_ns_reachable(process, ns)?;
             None
         }
-        NsFd::Net(ns) => {
-            // Entering a network namespace materializes its protocol stack
-            // (loopback with 127.0.0.1/8 for a freshly unshared namespace).
-            knet::netns::ensure_stack(ns.id().as_u64());
-            None
-        }
         _ => None,
     };
     let new_proxy = process
         .nsproxy()?
         .with_namespace(&nsfd)
         .map_err(map_unshare_error)?;
+    if let NsFd::Net(ns) = &*nsfd {
+        knet::netns::ensure_stack(ns)?;
+    }
     process.apply_setns(new_proxy, target_mnt)?;
     Ok(0)
 }
@@ -254,10 +258,10 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
 
     let mut proxy = process.nsproxy()?;
     for nsfd in &swaps {
-        if let NsFd::Net(ns) = nsfd {
-            knet::netns::ensure_stack(ns.id().as_u64());
-        }
         proxy = proxy.with_namespace(nsfd).map_err(map_unshare_error)?;
+    }
+    if requested.contains(NamespaceFlags::NEWNET) {
+        knet::netns::ensure_stack(proxy.net_ns())?;
     }
     process.apply_setns(proxy, target_mnt)?;
     Ok(0)

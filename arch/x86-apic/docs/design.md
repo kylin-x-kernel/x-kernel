@@ -1,5 +1,13 @@
 # x86-apic — Design
 
+## MSI Reverse Map Range
+
+`MsiBackendIf::msi_hwirq_range` declares the fixed half-open range from
+MSIX_VECTOR_BASE to APIC_TIMER_VECTOR without locking or allocating. KIRQ uses
+it to prepare permanent reverse-map slots. Release clears lookup before this
+backend returns a vector to its allocator; rejection retains ownership and
+allows KIRQ to restore lookup without allocation.
+
 ## Local Timer Mask
 
 `set_local_timer_enabled` changes the current LAPIC timer mask through the

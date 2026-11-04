@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+use alloc::{format, string::String, vec, vec::Vec};
 use core::{
     sync::atomic::Ordering,
     task::{Context, Waker},
@@ -254,7 +254,7 @@ impl NetDevice for TestDevice {
 fn init_test_state() {
     let mut router = Router::new();
     router
-        .add_device(Box::new(TestDevice::new(LinkSnapshot {
+        .add_device(kalloc_types::KBox::new(TestDevice::new(LinkSnapshot {
             ifindex: 1,
             name: String::from("lo"),
             flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
@@ -263,10 +263,10 @@ fn init_test_state() {
             kind: LinkKind::Loopback,
             hardware_addr: [0; 6],
             broadcast_addr: [0; 6],
-        })))
+        })).unwrap())
         .unwrap();
     router
-        .add_device(Box::new(
+        .add_device(kalloc_types::KBox::new(
             TestDevice::new(LinkSnapshot {
                 ifindex: 2,
                 name: String::from("eth0"),
@@ -282,7 +282,7 @@ fn init_test_state() {
                 broadcast_addr: [0xff; 6],
             })
             .with_device_id(kdevice::DeviceId::new(2)),
-        ))
+        ).unwrap())
         .unwrap();
     router
         .add_ipv4_addr(
@@ -5451,7 +5451,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
     };
     let mut router = Router::new();
     router
-        .add_device(Box::new(TestDevice::new(LinkSnapshot {
+        .add_device(kalloc_types::KBox::new(TestDevice::new(LinkSnapshot {
             ifindex: 1,
             name: String::from("lo"),
             flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
@@ -5460,10 +5460,10 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
             kind: LinkKind::Loopback,
             hardware_addr: [0; 6],
             broadcast_addr: [0; 6],
-        })))
+        })).unwrap())
         .unwrap();
-    router.add_device(Box::new(ethernet(2, "eth0", 2))).unwrap();
-    router.add_device(Box::new(ethernet(3, "eth1", 3))).unwrap();
+    router.add_device(kalloc_types::KBox::new(ethernet(2, "eth0", 2)).unwrap()).unwrap();
+    router.add_device(kalloc_types::KBox::new(ethernet(3, "eth1", 3)).unwrap()).unwrap();
     for (dev, addr, scope) in [
         (
             0,
@@ -5530,8 +5530,8 @@ fn test_device_removal_releases_address_capacity_and_preserves_surviving_ids() {
         .with_device_id(kdevice::DeviceId::new(model_id))
     };
     let mut router = Router::new();
-    let eth0 = router.add_device(Box::new(ethernet("eth0", 2))).unwrap();
-    let eth1 = router.add_device(Box::new(ethernet("eth1", 3))).unwrap();
+    let eth0 = router.add_device(kalloc_types::KBox::new(ethernet("eth0", 2)).unwrap()).unwrap();
+    let eth1 = router.add_device(kalloc_types::KBox::new(ethernet("eth1", 3)).unwrap()).unwrap();
     let address = crate::ip::Ipv4Address::new(10, 0, 0, 2);
     let entry = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(address, 24),
@@ -5577,7 +5577,7 @@ fn test_device_removal_releases_address_capacity_and_preserves_surviving_ids() {
         Err(LinuxError::ENETUNREACH.into())
     );
 
-    let eth2 = router.add_device(Box::new(ethernet("eth2", 4))).unwrap();
+    let eth2 = router.add_device(kalloc_types::KBox::new(ethernet("eth2", 4)).unwrap()).unwrap();
     assert_eq!(eth2.ifindex(), 4);
     assert!(!router.devices.has_device(eth0.ifindex()));
     assert!(router.ipv4_addr_entries(eth2).is_empty());

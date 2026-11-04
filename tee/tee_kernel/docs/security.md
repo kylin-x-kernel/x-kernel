@@ -1,5 +1,25 @@
 # TEE Ownership and Lifecycle Safety
 
+## Persistent ID Allocation Boundary
+
+Persistent ID allocation uses `NOWAIT` while `POBJS_MUTEX` serializes lookup
+and insertion. Invalid lengths and owner allocation failures return before
+publication; failed preparation does not change registry references. Existing
+owners bypass preparation. `NOWAIT` constrains this allocation only, not
+backend RPC, nested allocations or the complete storage operation.
+
+Rename reuses the user-copy `KBox` prepared before backend mutation. Successful
+metadata replacement preserves its allocation address and drops the old ID;
+invalid length/reference count leaves the old ID intact. No fallible owner
+allocation remains after backend success. The pre-existing possibility of
+reference-count rejection after backend commit remains a separate consistency
+risk, not an OOM rollback guarantee.
+
+`ut-tests/tee/tee_pobj/tests.rs` covers injected preparation failure without
+publication, explicit NOWAIT selection, reuse without preparation, ownership
+transfer and rejected replacement preserving the source. Injection substitutes
+only ID preparation, not the global allocator or backend rename.
+
 ## REE Scratch And Backing Handle Boundary
 
 Scratch allocation is fallible, zero-initialized and fixed at BLOCK_SIZE bytes.
@@ -152,7 +172,9 @@ boundaries in `tee_ree_fs.rs` and `fs_dirfile.rs`, together with prepared htree
 and storage owner initialization in `fs_htree.rs` under `src/tee/`,
 and property-query owner preparation in
 `tee_property.rs`, and buffer preparation in the crypto/storage service modules
-and the `TeeError` conversions in `mod.rs`. Other storage-backend operations, nested
+and the `TeeError` conversions in `mod.rs`. It includes persistent ID preparation
+in `tee_pobj.rs` and rename owner transfer in `tee_svc_storage.rs`.
+Other storage-backend operations, nested
 allocations, crypto algorithms, TA loading and syscall argument validation remain
 outside this analysis, as do resource operations unrelated to these boundaries.
 

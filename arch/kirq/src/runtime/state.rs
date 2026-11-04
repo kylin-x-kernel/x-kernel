@@ -38,30 +38,21 @@ pub(super) const MAX_IRQ_ACTIONS: usize = 4;
 /// Result of resolving one caller-provided IRQ descriptor.
 ///
 /// This is the handoff object between the locked control-plane mutation and
-/// the publication step. Keeping the publication target here makes mapping
-/// changes explicit instead of hiding them behind a global dirty flag. The
-/// snapshot field is deliberately separate from `IrqDesc::domain`: a
-/// descriptor may belong to a domain without inserting a new mapping, and only
-/// newly inserted mappings require publishing a new lock-free reverse-map
-/// snapshot.
+/// the allocation-free publication step. A prepared owner is present only for
+/// newly inserted mappings; existing mappings need no allocation. Discarding
+/// this result without publication is reserved for isolated test registries.
 pub(super) struct ResolvedIrqDesc {
     desc: IrqDesc,
-    snapshot_domain_to_publish: Option<IrqDomainId>,
+    publication: Option<crate::domain::PreparedPublication>,
 }
 
 impl ResolvedIrqDesc {
-    const fn new(desc: IrqDesc, snapshot_domain_to_publish: Option<IrqDomainId>) -> Self {
-        Self {
-            desc,
-            snapshot_domain_to_publish,
-        }
+    fn new(desc: IrqDesc, publication: Option<crate::domain::PreparedPublication>) -> Self {
+        Self { desc, publication }
     }
 
-    const fn snapshot_domain_to_publish(&self) -> Option<IrqDomainId> {
-        self.snapshot_domain_to_publish
-    }
-
-    pub(super) const fn into_desc(self) -> IrqDesc {
+    #[cfg(unittest)]
+    pub(super) fn into_desc(self) -> IrqDesc {
         self.desc
     }
 }
@@ -910,6 +901,21 @@ impl IrqState {
         line: &Arc<IrqLine>,
         entry: &mut IrqStateDesc,
     ) -> Result<ResolvedIrqDesc, IrqDescError> {
+        self.commit_resolution_with(resolution, line, entry, crate::domain::prepare_mapping)
+    }
+
+    fn commit_resolution_with(
+        &mut self,
+        resolution: IrqResolution,
+        line: &Arc<IrqLine>,
+        entry: &mut IrqStateDesc,
+        prepare: impl FnOnce(
+            IrqDomainId,
+            alloc::vec::Vec<(Hwirq, Virq)>,
+            Hwirq,
+            Virq,
+        ) -> Result<crate::domain::PreparedPublication, IrqDescError>,
+    ) -> Result<ResolvedIrqDesc, IrqDescError> {
         let virq = resolution.virq;
         let is_existing = if let Some(current) = self.descs.get(&virq) {
             if !Arc::ptr_eq(current, line) {
@@ -956,7 +962,7 @@ impl IrqState {
         } else {
             None
         };
-        let mut snapshot_domain_to_publish = None;
+        let mut publication = None;
         if let Some((domain, hwirq, virq)) = mapping_to_insert {
             if let Some((existing_domain, existing_hwirq)) = self.mapping_for_virq(virq) {
                 return Err(IrqDescError::VirqMappingConflict {
@@ -967,12 +973,19 @@ impl IrqState {
                     newer_hwirq: hwirq,
                 });
             }
+            let entries = if domain == crate::desc::MSI_DOMAIN {
+                alloc::vec::Vec::new()
+            } else {
+                self.domain_mapping_entries(domain)
+                    .chain(core::iter::once((hwirq, virq)))
+                    .collect()
+            };
+            publication = Some(prepare(domain, entries, hwirq, virq)?);
             let inserted = self.domain_state_mut(domain).insert_mapping(hwirq, virq);
             debug_assert!(inserted, "domain mapping insertion was prevalidated");
             if inserted {
                 let old_mapping = self.virq_to_mapping.insert(virq, (domain, hwirq));
                 debug_assert_eq!(old_mapping, None, "virq mapping insertion was prevalidated");
-                snapshot_domain_to_publish = Some(domain);
             }
         }
         entry.flow = flow;
@@ -985,10 +998,7 @@ impl IrqState {
             entry.runtime.remember_desc(stored_desc);
             self.descs.insert(virq, line.clone());
         }
-        Ok(ResolvedIrqDesc::new(
-            stored_desc,
-            snapshot_domain_to_publish,
-        ))
+        Ok(ResolvedIrqDesc::new(stored_desc, publication))
     }
 
     pub(super) fn try_resolve_spec(
@@ -1125,6 +1135,22 @@ impl IrqState {
     /// The test owns the Line exclusively; no real source or dispatch may use it.
     #[cfg(unittest)]
     pub(super) fn remove_test_line(&mut self, virq: Virq) -> Option<Arc<IrqLine>> {
+        let publication = if let Some((domain, hwirq)) = self.mapping_for_virq(virq) {
+            if domain == crate::desc::MSI_DOMAIN {
+                if !crate::domain::remove_msi(hwirq, || true) {
+                    return None;
+                }
+                None
+            } else {
+                let entries: alloc::vec::Vec<_> = self
+                    .domain_mapping_entries(domain)
+                    .filter(|&(hardware, _)| hardware != hwirq)
+                    .collect();
+                Some(crate::domain::prepare_snapshot(domain, &entries).ok()?)
+            }
+        } else {
+            None
+        };
         if let Some((domain, hwirq)) = self.virq_to_mapping.remove(&virq) {
             if let Some(domain_state) = self.domain_states.get_mut(&domain) {
                 domain_state.remove_mapping(hwirq);
@@ -1132,45 +1158,56 @@ impl IrqState {
                     self.domain_states.remove(&domain);
                 }
             }
-            crate::domain::publish_snapshot(domain, self.domain_mapping_entries(domain));
+            if let Some(publication) = publication {
+                publication.publish();
+            }
         }
         // Return ownership so final handler destruction occurs outside the lock.
         self.descs.remove(&virq)
     }
 
-    #[cfg(any(target_arch = "x86_64", unittest))]
+    #[cfg(unittest)]
     pub(super) fn remove_msi_if_unused(&mut self, virq: Virq) -> Option<Hwirq> {
-        let stored_desc = self.stored_desc(virq)?;
-        if !stored_desc.flags.contains(IrqFlags::MSI) {
+        self.remove_msi_with(virq, |_| true)
+    }
+
+    #[cfg(any(target_arch = "x86_64", unittest))]
+    fn remove_msi_with(
+        &mut self,
+        virq: Virq,
+        release: impl FnOnce(Hwirq) -> bool,
+    ) -> Option<Hwirq> {
+        let desc = {
+            let entry = self.descs.get(&virq)?.lock();
+            if !entry.is_msi() || !entry.is_unused() {
+                return None;
+            }
+            entry.desc
+        };
+        let publication = if let Some(domain) = desc.domain
+            && domain != crate::desc::MSI_DOMAIN
+        {
+            let entries: alloc::vec::Vec<_> = self
+                .domain_mapping_entries(domain)
+                .filter(|&(hwirq, _)| hwirq != desc.hwirq)
+                .collect();
+            Some(crate::domain::prepare_snapshot(domain, &entries).ok()?)
+        } else {
+            None
+        };
+        let released = if desc.domain == Some(crate::desc::MSI_DOMAIN) {
+            crate::domain::remove_msi(desc.hwirq, || release(desc.hwirq))
+        } else {
+            release(desc.hwirq)
+        };
+        if !released {
             return None;
         }
-        let domain = stored_desc.domain;
-        let desc = self.remove_if_unused_inner(virq, true)?;
-        if let Some(domain) = domain {
-            let published =
-                crate::domain::publish_snapshot(domain, self.domain_mapping_entries(domain));
-            if !published {
-                warn!(
-                    "remove_msi_if_unused: unregistered irq domain {domain:?}; removed MSI \
-                     mapping will not be reflected on the data path"
-                );
-            }
+        self.remove_if_unused_inner(virq, true)?;
+        if let Some(publication) = publication {
+            publication.publish();
         }
         Some(desc.hwirq)
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    pub(super) fn is_unused(&self, virq: Virq) -> bool {
-        self.descs
-            .get(&virq)
-            .is_some_and(|line| line.lock().is_unused())
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    pub(super) fn is_msi(&self, virq: Virq) -> bool {
-        self.descs
-            .get(&virq)
-            .is_some_and(|line| line.lock().is_msi())
     }
 }
 
@@ -1181,7 +1218,7 @@ pub(super) fn try_resolve_and_publish(
 ) -> Result<IrqDesc, IrqDescError> {
     validate_resolution_domain(spec)?;
     let resolved = state.try_resolve_spec(spec, prepared)?;
-    Ok(publish_resolution(state, resolved))
+    Ok(publish_resolution(resolved))
 }
 
 /// Resolves while the caller keeps the selected Line locked through its update.
@@ -1199,7 +1236,7 @@ pub(super) fn try_resolve_and_publish_locked(
     validate_resolution_domain(spec)?;
     let resolution = state.plan_resolution(spec)?;
     let resolved = state.commit_resolution(resolution, line, entry)?;
-    Ok(publish_resolution(state, resolved))
+    Ok(publish_resolution(resolved))
 }
 
 fn validate_resolution_domain(spec: IrqSpec) -> Result<(), IrqDescError> {
@@ -1215,13 +1252,11 @@ fn validate_resolution_domain(spec: IrqSpec) -> Result<(), IrqDescError> {
     Ok(())
 }
 
-fn publish_resolution(state: &IrqState, resolved: ResolvedIrqDesc) -> IrqDesc {
-    if let Some(domain_id) = resolved.snapshot_domain_to_publish() {
-        let published =
-            crate::domain::publish_snapshot(domain_id, state.domain_mapping_entries(domain_id));
-        debug_assert!(published);
+fn publish_resolution(resolved: ResolvedIrqDesc) -> IrqDesc {
+    if let Some(publication) = resolved.publication {
+        publication.publish();
     }
-    resolved.into_desc()
+    resolved.desc
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1230,23 +1265,15 @@ pub(crate) fn free_msi_if_unused(
     free_backend_vector_fn: impl FnOnce(Hwirq) -> bool,
 ) -> bool {
     let mut state = IRQ_STATE.lock();
-    let Some(desc) = state.stored_desc(virq) else {
-        return false;
-    };
-    if !state.is_msi(virq) {
-        return false;
-    }
-    if !state.is_unused(virq) {
-        warn!("refusing to free MSI IRQ {virq} while it is still in use");
+    if state
+        .stored_desc(virq)
+        .is_none_or(|desc| desc.domain != Some(crate::desc::MSI_DOMAIN))
+    {
         return false;
     }
-
-    let hwirq = desc.hwirq;
-    if !free_backend_vector_fn(hwirq) {
-        return false;
-    }
-
-    state.remove_msi_if_unused(virq).is_some()
+    state
+        .remove_msi_with(virq, free_backend_vector_fn)
+        .is_some()
 }
 
 unittest::path_mod_test!(tests_line_admission, "../../ut-tests/line_admission.rs");

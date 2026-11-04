@@ -1,5 +1,35 @@
 # kirq — 设计文档
 
+## Fallible Reverse Map Ownership
+
+Ordinary domains prepare both KBox snapshot owners with NOWAIT under registry
+and Line exclusion, after conflict validation but before changing mappings or
+publishing a Line. `IrqDescError::NoMemory` leaves those objects unchanged.
+An existing mapping bypasses preparation. IO-APIC bounds violations return
+`InvalidHwirq`; the provider maps allocation failure to `ResError::NoMemory`.
+Dynamic virq numbering may still advance on a failed attempt. Existing Vec,
+BTreeMap, Arc and candidate Line allocation policies are not changed here.
+
+MSI uses a permanently published table bounded by the backend's half-open
+hardware-vector range. Empty/invalid ranges are rejected before admission.
+NOWAIT prepares the table and an immutable KBox virq record during mapping;
+failed mapping releases the backend vector through the existing allocator
+rollback path. Table initialization is retryable until publication. The table
+is never resized; each slot is an atomic pointer, with null meaning unmapped.
+Readers acquire-load the table and slot without locks or allocation.
+
+MSI release never allocates. Under registry exclusion it checks unused state,
+clears the slot, returns the vector to the backend, then removes control-plane
+ownership. Backend rejection restores the previous slot without allocation.
+Published records remain alive forever, including after removal, so readers
+that loaded an old pointer remain safe. This conservative lifetime policy does
+not solve retained-memory growth or stale physical interrupt delivery.
+The caller still owns masking and draining the device before release.
+
+This follows the allocation-free removal principle in linux-stable
+`8d3ae59288f1`, `kernel/irq/irqdomain.c::irq_domain_clear_mapping`, without
+adopting Linux's RCU reclamation or domain mutex implementation.
+
 ## CPU-local Ordinary Flow
 
 `prepare_percpu_forwarding` retains an already registered Line and obtains the
@@ -636,8 +666,8 @@ register_nmi()
   NMI），不触碰 normal IRQ dispatch fanout，不调用 lifecycle hooks，也不获取
   `IRQ_STATE`。若异常来自 IRQ-on context，入口已经执行普通 IRQ entry；GIC 在该外层
   lifecycle 内调用 `generic_handle_nmi()`，与 Linux 的 IRQ-on NMI 语义一致。
-- `translate_hwirq()` 从 domain 发布的 immutable reverse-map snapshot 做 lock-free
-  查询；strict domain miss 返回 `None`，不会伪装成 identity `virq`。
+- `translate_hwirq()` performs lock-free lookup through ordinary immutable
+  snapshots or MSI atomic slots. Strict misses never become identity virqs.
 - `IrqLifecycleHook` 在 trap adapter 已禁抢占、IRQ-on exception 生命周期仍未结束时
   执行；该 exception 随后可能由 irqchip 分类为普通 IRQ、NMI 或 spurious。它不是
   hardirq-depth 边界；hardirq/softirq/BH 状态由
@@ -751,12 +781,11 @@ OS-visible IRQ namespace 中引用一条已知 `virq`，不会携带或更新硬
 `IrqSpec::Desc` 表示调用者提交完整 IRQ resource descriptor，可以参与 domain
 mapping、descriptor merge、冲突检测和动态 `virq` 分配。
 
-`try_resolve_spec()` 返回一个解析结果对象，携带规范化后的 descriptor 以及
-`snapshot_domain_to_publish`。`try_resolve_desc()` 只处理完整 descriptor 分支，不再
-根据一组 default 字段反推 plain virq 语义。`snapshot_domain_to_publish` 不是
-`IrqDesc::domain` 的副本，而是表示本次解析是否新增了 `(domain, hwirq) -> virq`
-mapping，从而需要重新发布该 domain 的 lock-free reverse-map snapshot。这样
-mapping 发布是 descriptor 解析的显式结果，而不是隐藏在全局 dirty 标志里的副作用。
+`try_resolve_spec()` returns the normalized descriptor and an optional prepared
+publication owner. `try_resolve_desc()` handles complete descriptors rather
+than inferring handle-only input from default fields. Preparation occurs before
+mapping insertion; successful resolution hands the owner to allocation-free
+publication. The owner represents a new mapping, not merely domain membership.
 
 `IrqDesc::try_merge()` 允许后来的 descriptor 补齐 trigger、polarity、controller、
 domain、affinity 和 flags，但不会丢掉已经确认的 metadata。hwirq、virq、domain
@@ -817,7 +846,8 @@ future-only thread slot 的 action 在当前非线程化 core 中不可 dispatch
 
 - 显式 `virq` 直接使用调用者指定的 OS-visible IRQ number；
 - 带 `domain` 但无 `virq` 的 descriptor 通过 `(domain, hwirq)` 分配动态 virq；
-- 新增 domain mapping 后重建并发布该 domain 的 immutable reverse-map snapshot；
+- Prepare a reverse-map owner before adding a domain mapping, then publish
+  the ordinary snapshot or MSI slot without further owner allocation.
 - 未注册在 `domain/mod.rs` 静态 registry 中的 domain 会返回 `IrqDescError::UnknownDomain`，
   不会留下控制面 mapping 或返回一条数据面不可解析的死线；
 - 动态 virq 从 `DYNAMIC_VIRQ_BASE` 开始；
@@ -857,12 +887,13 @@ alloc_msix(affinity)
 x86 MSI-X dispatch
    -> hardware vector
    -> PendingIrq::Domain(MSI_DOMAIN, vector)
-   -> dispatch_claim(source, completion) resolves via domain snapshot
+   -> dispatch_claim(source, completion) resolves via the stable MSI slot
 
 free_msix(virq)
    -> verify handler state is unused
-   -> remove MSI descriptor and mapping
-   -> backend frees controller-local vector
+   -> clear published MSI slot without allocation
+   -> backend frees controller-local vector (restore slot on rejection)
+   -> remove MSI descriptor and control-plane mapping
 ```
 
 MSI resources are edge-triggered and marked with `IrqFlags::MSI`. They do not
@@ -878,12 +909,13 @@ dispatch the raw APIC vector as an OS-visible IRQ.
 
 `unregister()` / `free_irq()` do not delete MSI descriptors. MSI allocation ownership is held
 by the `MsiAllocation`/`MsiResource`, so `free_msix()` is the final cleanup point
-for the descriptor, domain mapping, published domain snapshot, and backend
+for the descriptor, domain mapping, published MSI slot, and backend
 vector. This keeps the documented device teardown order valid: unregister the
 handler first, then free the MSI resource.
-`free_msix()` releases the backend vector before removing the kirq descriptor and
-published mapping; if backend release fails, the OS-side mapping is retained so
-cleanup can be retried.
+`free_msix()` clears reverse lookup before returning the backend vector for
+reuse. On rejection it restores that lookup and retains software ownership;
+on success it removes the descriptor and both mapping indexes. No new owner
+allocation can fail in the production MSI release path.
 
 ### Device-owned readiness
 
@@ -1391,9 +1423,9 @@ IRQ lifecycle enter；GIC 只在其中用 `generic_handle_nmi()` 替换普通 ac
 - `IRQ_STATE` uses `SpinNoIrq` to protect directory and mapping transactions;
   the short `IrqLine` lock protects descriptor/action state. Normal IRQ paths
   access both, always acquiring the directory lock before the Line lock.
-- domain reverse-map snapshot 由控制面在 `IRQ_STATE` 锁内发布；IRQ 数据面只做
-  atomic load 和 immutable snapshot lookup。普通 IRQ unregister 不删除 domain
-  mapping；MSI resource final free 删除 mapping 后会发布替换 snapshot。
+- Ordinary reverse-map snapshots are prepared and published under IRQ_STATE;
+  readers only acquire-load immutable owners. Ordinary unregister retains domain
+  mappings. MSI final free clears a stable slot without building a snapshot.
 - Normal dispatch snapshots the action list, records in-flight dispatch and
   retains the original Line under `IRQ_STATE -> Line` exclusion. Driver handlers
   run after both locks are released. Resolution and descriptor lookup share one

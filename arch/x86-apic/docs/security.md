@@ -1,5 +1,11 @@
 # x86-apic — Security And Reliability
 
+The MSI range declaration matches the allocator's admission bounds and never
+changes after initialization. Invalid/unallocated vector release returns false
+without transferring ownership to a new caller; KIRQ restores the previous
+lookup on rejection. Device masking and interrupt drain remain prerequisites,
+not consequences of reverse-map clearing or allocator reuse.
+
 ## Local Timer Mask Boundary
 
 `set_local_timer_enabled` requires a prepared current-CPU LAPIC. The existing

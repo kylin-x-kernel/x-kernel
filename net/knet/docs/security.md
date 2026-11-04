@@ -1,5 +1,20 @@
 # knet — Safety and Reliability Analysis
 
+## Protocol-Stack Device Reservation
+
+KERNEL reservations occur without namespace-registry or device locks, in
+reclaim-safe sleepable task context. Boot reserves device owners before attaching
+NIC schedulers or publishing the global stack. Namespace owner failure leaves
+the registry unchanged. Installation borrows the namespace, preventing its drop
+hook from racing identity destruction against publication. Concurrent candidates
+cannot overwrite the winner, and losing candidates are dropped after unlocking.
+The drop hook retains the existing registry-removal lifecycle.
+
+The local failure tests verify an unlocked preparation boundary, unchanged
+registry on NoMemory, successful retry, and retention of a competing publication.
+They do not force global OOM or cover failures of nested String/Vec/Arc/BTreeMap
+allocations. A prepared stack is not a transaction for all network resources.
+
 ## Poller Configuration Failure
 
 Fallible CPU-set preparation is not a boot invariant: NetworkPoller::start

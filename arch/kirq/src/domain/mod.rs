@@ -4,19 +4,22 @@
 
 //! Per-domain IRQ reverse maps and lock-free data-plane resolution.
 //!
-//! Each [`IrqDomain`] owns an immutable `hwirq -> virq` snapshot that is
+//! Ordinary domains own an immutable `hwirq -> virq` snapshot that is
 //! published atomically by the control plane and read without any lock by the
 //! dispatch data path (hardirq / irqson NMI). Snapshots are never freed and
 //! never mutated after publication, which is what makes the lock-free read
-//! sound without RCU or seqlocks.
+//! sound without RCU or seqlocks. MSI uses permanent per-vector slots pointing
+//! to immutable retained records, so removal needs no snapshot allocation.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     marker::PhantomData,
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
 };
 
-use crate::desc::{Hwirq, IrqDomainId, Virq};
+use kalloc_types::{AllocFlags, KBox};
+
+use crate::desc::{Hwirq, IrqDescError, IrqDomainId, Virq};
 
 /// A frozen `hwirq -> virq` reverse map, published per domain.
 ///
@@ -28,11 +31,11 @@ use crate::desc::{Hwirq, IrqDomainId, Virq};
 pub(crate) enum ReverseMap {
     /// Dense linear table for small contiguous domains (IO-APIC), indexed by
     /// `hwirq`. Sized to the highest mapped line at build time.
-    Linear(Box<[Option<Virq>]>),
+    Linear(KBox<[Option<Virq>]>),
     /// Sorted ascending slice for sparse domains (GIC, PLIC); binary search.
     /// Chosen over `BTreeMap` because the snapshot is read-only: one
     /// contiguous allocation, cache-friendly, no node-pointer chasing.
-    Sparse(Box<[(Hwirq, Virq)]>),
+    Sparse(KBox<[(Hwirq, Virq)]>),
 }
 
 impl ReverseMap {
@@ -58,8 +61,9 @@ impl ReverseMap {
 /// `get()` returns `&'static T` so the "pointee lives forever" property is
 /// encoded in the type, not just in comments.
 ///
-/// This type deliberately has **no `Drop` implementation**: freeing a snapshot
-/// would dangle racing readers. It is only ever used as a static.
+/// This type deliberately has **no `Drop` implementation**: freeing a record
+/// would dangle racing readers. Production owners are static domains or slots
+/// in the permanently published MSI table.
 pub(crate) struct Published<T> {
     ptr: AtomicPtr<T>,
     // Raw-pointer marker negates the auto Send/Sync traits of `AtomicPtr<T>`
@@ -95,8 +99,9 @@ impl<T> Published<T> {
     /// after this `Published` itself has been dropped.
     pub(crate) fn get(&self) -> Option<&'static T> {
         let ptr = self.ptr.load(Ordering::Acquire);
-        // SAFETY: a non-null pointer here was produced by `Box::into_raw` in
-        // `publish()` and is never freed or mutated afterwards; the Acquire
+        // SAFETY: a non-null pointer here was produced by `KBox::into_raw` in
+        // `publish()` and is never freed afterwards; mutation requires safe
+        // interior mutability (the MSI table's atomic slots). The Acquire
         // load synchronizes with the AcqRel store in `publish()` so the
         // snapshot contents are visible. The pointee is never deallocated, so
         // the reference is valid for the program lifetime and may be given the
@@ -105,11 +110,21 @@ impl<T> Published<T> {
         unsafe { ptr.as_ref() }
     }
 
-    /// Publishes a new snapshot, leaking any previously published one.
-    ///
-    /// Must be called with the control lock held so writers serialize.
-    pub(crate) fn publish(&self, value: Box<T>) {
-        let new = Box::into_raw(value);
+    /// Clears a slot during serialized release, restoring it on rejection.
+    #[cfg(any(target_arch = "x86_64", unittest))]
+    pub(crate) fn clear_with(&self, release: impl FnOnce() -> bool) -> bool {
+        let previous = self.ptr.swap(core::ptr::null_mut(), Ordering::AcqRel);
+        if release() {
+            true
+        } else {
+            self.ptr.store(previous, Ordering::Release);
+            false
+        }
+    }
+
+    /// Publishes an immutable owner permanently under control-lock exclusion.
+    pub(crate) fn publish(&self, value: KBox<T>) {
+        let new = KBox::into_raw(value);
         let old = self.ptr.swap(new, Ordering::AcqRel);
         // Deliberately leak `old`: a racing reader may still hold a reference
         // to it, so it must remain alive for the rest of the program. Dropping
@@ -159,6 +174,9 @@ impl IrqDomain {
     /// policy — the raw `hwirq`. `None` means the domain has no mapping and
     /// no identity policy; callers report the interrupt as unhandled.
     pub(crate) fn resolve(&self, hwirq: Hwirq) -> Option<Virq> {
+        if self.id == crate::desc::MSI_DOMAIN {
+            return MSI_TABLE.get()?.slot(hwirq)?.get().copied();
+        }
         if let Some(virq) = self.revmap.get().and_then(|map| map.lookup(hwirq)) {
             return Some(virq);
         }
@@ -173,9 +191,14 @@ impl IrqDomain {
         None
     }
 
-    pub(crate) fn publish(&self, revmap: Box<ReverseMap>) {
+    pub(crate) fn publish(&self, revmap: KBox<ReverseMap>) {
         self.revmap.publish(revmap);
         self.publishes.fetch_add(1, Ordering::Relaxed);
+        debug!(
+            "published irq domain {} snapshot #{}",
+            self.id.as_u32(),
+            self.publish_count()
+        );
     }
 
     pub(crate) fn publish_count(&self) -> usize {
@@ -206,7 +229,7 @@ static TEST_IRQ_DOMAIN: IrqDomain = IrqDomain::new(TEST_DOMAIN, UnmappedPolicy::
 /// malformed firmware/ACPI table could otherwise force a giant allocation
 /// while the IRQ control lock is held. 4096 covers any realistic IO-APIC GSI
 /// space (hardware redirection tables are at most a few hundred pins per
-/// controller); larger values are treated as a configuration error and abort.
+/// controller); larger values return InvalidHwirq before mutation.
 const MAX_IO_APIC_LINEAR_ENTRIES: usize = 0x1000;
 
 /// Returns the registered domain for `id`, if any.
@@ -230,52 +253,160 @@ pub(crate) fn resolve(domain_id: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
     domain(domain_id)?.resolve(hwirq)
 }
 
-/// Rebuilds and atomically publishes the reverse map of one domain from its
-/// current build-table entries.
-///
-/// Must be called with the IRQ control lock held (single writer). Readers on
-/// the data path never block: they observe either the previous or the new
-/// complete snapshot. Ordinary IRQ unregister keeps mappings append-only, while
-/// MSI resource final free may remove a mapping and publish a replacement
-/// snapshot after the backend vector is no longer owned by the device.
-pub(crate) fn publish_snapshot(
-    domain_id: IrqDomainId,
-    entries: impl Iterator<Item = (Hwirq, Virq)>,
-) -> bool {
-    let Some(irq_domain) = domain(domain_id) else {
+/// A complete unpublished update. Dropping it does not affect reverse lookup.
+pub(crate) enum PreparedPublication {
+    Snapshot(&'static IrqDomain, KBox<ReverseMap>),
+    Msi(&'static Published<Virq>, KBox<Virq>),
+}
+
+impl PreparedPublication {
+    pub(crate) fn publish(self) {
+        match self {
+            Self::Snapshot(domain, snapshot) => domain.publish(snapshot),
+            Self::Msi(slot, record) => {
+                slot.publish(record);
+                MSI_IRQ_DOMAIN.publishes.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+pub(crate) struct MsiTable {
+    first: Hwirq,
+    slots: KBox<[Published<Virq>]>,
+}
+
+impl MsiTable {
+    /// Builds exclusively owned slots before publication. Every slot is written
+    /// once before assume_init, and initialization cannot unwind or fail.
+    pub(crate) fn new(range: core::ops::Range<Hwirq>) -> Result<Self, IrqDescError> {
+        let count = range
+            .end
+            .checked_sub(range.start)
+            .filter(|&count| count != 0)
+            .ok_or(IrqDescError::InvalidHwirq { hwirq: range.start })?;
+        let mut slots =
+            KBox::<[Published<Virq>]>::new_uninit_slice_with_flags(count, AllocFlags::NOWAIT)
+                .map_err(|_| IrqDescError::NoMemory)?;
+        for slot in slots.iter_mut() {
+            slot.write(Published::new());
+        }
+        // SAFETY: every slot was initialized above; no references escape before ownership transfer.
+        let slots = unsafe { slots.assume_init() };
+        Ok(Self {
+            first: range.start,
+            slots,
+        })
+    }
+
+    pub(crate) fn slot(&self, hwirq: Hwirq) -> Option<&Published<Virq>> {
+        self.slots.get(hwirq.checked_sub(self.first)?)
+    }
+}
+
+static MSI_TABLE: Published<MsiTable> = Published::new();
+
+/// Called under registry exclusion. A failed attempt publishes no table and
+/// may be retried; the backend range must never change after first admission.
+fn prepare_msi(hwirq: Hwirq, virq: Virq) -> Result<PreparedPublication, IrqDescError> {
+    #[cfg(target_arch = "x86_64")]
+    let range = crate::MsiBackendIf::msi_hwirq_range();
+    #[cfg(not(target_arch = "x86_64"))]
+    let range: Option<core::ops::Range<Hwirq>> = None;
+    let range = range.ok_or(IrqDescError::InvalidHwirq { hwirq })?;
+    prepare_msi_with(
+        &MSI_TABLE,
+        range,
+        hwirq,
+        virq,
+        |virq| KBox::new_nowait(virq).map_err(|_| IrqDescError::NoMemory),
+        |range| KBox::new_nowait(MsiTable::new(range)?).map_err(|_| IrqDescError::NoMemory),
+    )
+}
+
+/// Shared preparation seam. The caller serializes table initialization and
+/// mapping changes. Record failure skips table preparation; table failure
+/// drops the unpublished record. Reuse never calls the table factory.
+pub(crate) fn prepare_msi_with(
+    table: &Published<MsiTable>,
+    range: core::ops::Range<Hwirq>,
+    hwirq: Hwirq,
+    virq: Virq,
+    prepare_record: impl FnOnce(Virq) -> Result<KBox<Virq>, IrqDescError>,
+    prepare_table: impl FnOnce(core::ops::Range<Hwirq>) -> Result<KBox<MsiTable>, IrqDescError>,
+) -> Result<PreparedPublication, IrqDescError> {
+    if !range.contains(&hwirq) {
+        return Err(IrqDescError::InvalidHwirq { hwirq });
+    }
+    let record = prepare_record(virq)?;
+    if table.get().is_none() {
+        table.publish(prepare_table(range)?);
+    }
+    let slot = table
+        .get()
+        .and_then(|table| table.slot(hwirq))
+        .ok_or(IrqDescError::InvalidHwirq { hwirq })?;
+    Ok(PreparedPublication::Msi(slot, record))
+}
+
+/// Clears reverse lookup before returning a vector for reuse. Registry
+/// exclusion must span this call and software removal. Backend rejection must
+/// retain vector ownership; it restores the prior record without allocation.
+#[cfg(any(target_arch = "x86_64", unittest))]
+pub(crate) fn remove_msi(hwirq: Hwirq, release: impl FnOnce() -> bool) -> bool {
+    let Some(slot) = MSI_TABLE.get().and_then(|table| table.slot(hwirq)) else {
         return false;
     };
+    let removed = slot.clear_with(release);
+    if removed {
+        MSI_IRQ_DOMAIN.publishes.fetch_add(1, Ordering::Relaxed);
+    }
+    removed
+}
+
+/// Prepares a new mapping under IRQ control/Line exclusion using NOWAIT.
+/// No mapping, descriptor or reverse lookup is changed on allocation failure.
+pub(crate) fn prepare_mapping(
+    domain_id: IrqDomainId,
+    mut entries: Vec<(Hwirq, Virq)>,
+    hwirq: Hwirq,
+    virq: Virq,
+) -> Result<PreparedPublication, IrqDescError> {
+    if domain_id == crate::desc::MSI_DOMAIN {
+        return prepare_msi(hwirq, virq);
+    }
+    entries.sort_unstable_by_key(|&(hwirq, _)| hwirq);
+    prepare_snapshot(domain_id, &entries)
+}
+
+/// Prepares both ordinary snapshot owners before any live-state mutation.
+/// The caller supplies sorted entries and retains registry exclusion.
+pub(crate) fn prepare_snapshot(
+    domain_id: IrqDomainId,
+    entries: &[(Hwirq, Virq)],
+) -> Result<PreparedPublication, IrqDescError> {
+    let irq_domain = domain(domain_id).ok_or(IrqDescError::UnknownDomain { domain: domain_id })?;
     let revmap = if domain_id == crate::desc::IO_APIC_DOMAIN {
-        let collected: Vec<(Hwirq, Virq)> = entries.collect();
-        let max_hwirq = collected.iter().map(|&(hwirq, _)| hwirq).max().unwrap_or(0);
-        assert!(
-            max_hwirq < MAX_IO_APIC_LINEAR_ENTRIES,
-            "IO-APIC hwirq {max_hwirq} exceeds linear snapshot bound {}",
-            MAX_IO_APIC_LINEAR_ENTRIES - 1
-        );
-        let size = max_hwirq + 1;
-        let mut linear = vec![None::<Virq>; size];
-        for (hwirq, virq) in collected {
+        let max_hwirq = entries.iter().map(|&(hwirq, _)| hwirq).max().unwrap_or(0);
+        if max_hwirq >= MAX_IO_APIC_LINEAR_ENTRIES {
+            return Err(IrqDescError::InvalidHwirq { hwirq: max_hwirq });
+        }
+        let mut linear =
+            KBox::new_slice_with_flags(None::<Virq>, max_hwirq + 1, AllocFlags::NOWAIT)
+                .map_err(|_| IrqDescError::NoMemory)?;
+        for &(hwirq, virq) in entries {
             linear[hwirq] = Some(virq);
         }
-        ReverseMap::Linear(linear.into_boxed_slice())
+        ReverseMap::Linear(linear)
     } else {
-        let sparse: Vec<(Hwirq, Virq)> = entries.collect();
-        // The control plane feeds entries from one domain's `hwirq_to_virq`
-        // BTreeMap, so they are already ordered by hwirq. Keep a defensive
-        // check so a future caller that feeds unsorted entries fails loudly in
-        // debug builds instead of silently breaking the binary search in
-        // `ReverseMap::lookup`.
-        debug_assert!(sparse.windows(2).all(|w| w[0].0 <= w[1].0));
-        ReverseMap::Sparse(sparse.into_boxed_slice())
+        debug_assert!(entries.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        ReverseMap::Sparse(
+            KBox::from_slice_with_flags(entries, AllocFlags::NOWAIT)
+                .map_err(|_| IrqDescError::NoMemory)?,
+        )
     };
-    irq_domain.publish(Box::new(revmap));
-    debug!(
-        "published irq domain {} snapshot #{}",
-        irq_domain.id.as_u32(),
-        irq_domain.publish_count()
-    );
-    true
+    let snapshot = KBox::new_nowait(revmap).map_err(|_| IrqDescError::NoMemory)?;
+    Ok(PreparedPublication::Snapshot(irq_domain, snapshot))
 }
 
 /// How a claimed interrupt should be turned into an OS-visible logical IRQ.

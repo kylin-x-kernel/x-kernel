@@ -7,6 +7,30 @@ use unittest::def_test;
 use super::*;
 
 #[def_test(user, serial)]
+fn network_owner_failure_precedes_child_relationships() {
+    let process = current_user_thread().process().clone();
+    let children: alloc::vec::Vec<_> = process.children().iter().map(|child| child.pid()).collect();
+    let threads = process.threads();
+    let context = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
+    let mut request = CloneRequest::new();
+    request.set_flags(CloneFlags::NEWNET);
+    let mut called = false;
+    let result = request.do_clone_with_preparation(
+        &context,
+        |_, _| ktask::PreparedTaskEntry::new(|| {}),
+        || {
+            called = true;
+            Err(KError::NoMemory)
+        },
+    );
+    assert_eq!(result, Err(KError::NoMemory));
+    assert!(called);
+    let after: alloc::vec::Vec<_> = process.children().iter().map(|child| child.pid()).collect();
+    assert_eq!(after, children);
+    assert_eq!(process.threads(), threads);
+}
+
+#[def_test(user, serial)]
 fn entry_allocation_failure_precedes_process_and_thread_preparation() {
     let process = current_user_thread().process().clone();
     let children: alloc::vec::Vec<_> = process.children().iter().map(|child| child.pid()).collect();

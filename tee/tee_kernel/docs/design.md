@@ -1,5 +1,24 @@
 # TEE Ownership and Lifecycle
 
+## Persistent Object ID Ownership
+
+`tee_pobj.rs` stores persistent IDs in `KBox<[u8]>`. New registry entries
+prepare the ID after reuse/access checks and before publication. Preparation
+uses `NOWAIT` under `POBJS_MUTEX`: reclaim reentry into metadata operations is
+not safe there. Allocation errors use `TeeError` and return
+`TEE_ERROR_OUT_OF_MEMORY` without publishing an entry. Reusing an existing
+entry does not allocate ID storage. The registry's `Arc` and `VecDeque`
+allocations remain outside this migration.
+
+Storage rename transfers the existing user-copy owner into the source pobj
+after backend success. That owner was prepared with `KERNEL` in task context
+before object/registry locks and before backend mutation; the destination
+reservation has its own ID owner. The metadata update neither copies nor
+allocates ID storage. Backend errors drop the unused owner and retain the
+source ID. The existing reference-count check can still fail after backend
+commit; this change does not solve rename/enumeration concurrency or provide
+a transactional backend/registry protocol.
+
 ## REE Temporary Blocks And Inline File Handles
 
 REE read/write scratch blocks use a zeroed KBox byte slice of exactly BLOCK_SIZE.
@@ -179,6 +198,8 @@ and assertions preserved.
 
 This document covers session ownership in `src/tee/tee_session.rs` and its
 interaction with resource cleanup and process exec/exit. It also covers REE
+persistent object ID ownership in `tee_pobj.rs` and rename owner transfer in
+`tee_svc_storage.rs`, as well as
 filesystem metadata owner reservation, scratch blocks and inline file handles in
 `tee_ree_fs.rs` and initialization in
 `fs_dirfile.rs` under `src/tee/`, including ownership held by `tee_obj.rs` and

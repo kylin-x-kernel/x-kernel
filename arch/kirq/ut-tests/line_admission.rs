@@ -10,6 +10,53 @@ use super::{IrqDesc, IrqFlags, IrqLine, IrqState, IrqStateDesc, try_resolve_and_
 use crate::{IrqDescError, IrqSpec};
 
 #[def_test]
+fn snapshot_preparation_failure_preserves_unpublished_line_and_mapping() {
+    let domain = crate::domain::TEST_DOMAIN;
+    let desc = IrqDesc::from_hwirq(17)
+        .with_domain(domain)
+        .with_virq(0x5f90);
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let mut state = IrqState::new();
+    let resolution = state.plan_resolution(desc.into()).unwrap();
+    let mut entry = line.lock();
+    let before = entry.desc;
+    let mut observed = None;
+    let result = state.commit_resolution_with(
+        resolution,
+        &line,
+        &mut entry,
+        |target, entries, hwirq, virq| {
+            observed = Some((target, entries.len(), hwirq, virq));
+            Err(IrqDescError::NoMemory)
+        },
+    );
+    assert!(matches!(result, Err(IrqDescError::NoMemory)));
+    assert_eq!(observed, Some((domain, 1, 17, 0x5f90)));
+    assert_eq!(entry.desc, before);
+    assert!(state.descs.is_empty());
+    assert!(state.domain_states.is_empty());
+    assert!(state.virq_to_mapping.is_empty());
+    drop(entry);
+    state.try_resolve_desc(desc, Some(&line)).unwrap();
+    let resolution = state.plan_resolution(desc.into()).unwrap();
+    let mut entry = line.lock();
+    let reused = state.commit_resolution_with(resolution, &line, &mut entry, |_, _, _, _| {
+        Err(IrqDescError::NoMemory)
+    });
+    assert!(reused.is_ok());
+    drop(entry);
+    let other = IrqDesc::from_hwirq(18).with_domain(domain).with_virq(0x5f91);
+    let other_line = Arc::new(IrqLine::new(IrqStateDesc::new(other)));
+    let resolution = state.plan_resolution(other.into()).unwrap();
+    let result = state.commit_resolution_with(resolution, &other_line, &mut other_line.lock(),
+        |_, _, _, _| Err(IrqDescError::NoMemory));
+    assert!(matches!(result, Err(IrqDescError::NoMemory)));
+    assert_eq!(state.translated_hwirq(domain, 17), Some(0x5f90));
+    assert_eq!(state.translated_hwirq(domain, 18), None);
+    assert_eq!(state.descs.len(), 1);
+}
+
+#[def_test]
 fn enabled_local_slot_retains_empty_line_and_flow_identity() {
     let desc = IrqDesc::from_virq(0x5f83);
     let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));

@@ -19,8 +19,10 @@
 //! `runc`'s `setns` path require. Per-namespace data-plane routing is the
 //! follow-up layer.
 
-use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
+use alloc::{collections::BTreeMap, sync::Arc};
 
+use kalloc_types::KBox;
+use kerrno::KResult;
 use ksync::{Mutex, static_lock};
 
 use crate::{
@@ -56,41 +58,114 @@ fn on_namespace_drop(id: u64) {
 /// this layer.
 ///
 /// Idempotent: entering the same namespace again reuses its stack.
-pub fn ensure_stack(id: u64) {
+///
+/// # Execution context
+/// Requires reclaim-safe sleepable task context with no registry lock held.
+///
+/// # Errors
+/// Owner allocation failure leaves the registry unchanged. The borrowed
+/// namespace keeps its identity alive until publication completes.
+pub fn ensure_stack(namespace: &kns::NetNamespace) -> KResult<()> {
+    let id = namespace.id().as_u64();
     kns::set_net_namespace_drop_hook(on_namespace_drop);
     if kns::NetNamespace::initial_id() == Some(id) {
         // The boot namespace's stack is the global singleton created by
         // `init_network`.
-        return;
+        return Ok(());
     }
-    let mut stacks = NAMESPACE_STACKS.lock();
-    if stacks.contains_key(&id) {
-        return;
+    ensure_stack_with(&NAMESPACE_STACKS, id, KBox::<LoopbackDevice>::new_uninit)
+}
+
+pub(crate) fn ensure_stack_with(
+    stacks: &Mutex<BTreeMap<u64, Arc<Service>>>,
+    id: u64,
+    reserve: impl FnOnce() -> KResult<KBox<core::mem::MaybeUninit<LoopbackDevice>>>,
+) -> KResult<()> {
+    if stacks.lock().contains_key(&id) {
+        return Ok(());
     }
 
-    let mut router = Router::new();
-    let lo_dev = router
-        .add_device(Box::new(LoopbackDevice::new()))
-        .expect("loopback interface ID must be available");
+    PreparedStack::new_with(reserve)?.install_into(stacks, id);
+    Ok(())
+}
 
-    #[expect(
-        clippy::unwrap_used,
-        reason = "CG-021-no-panic-on-reachable-failure: the fixed loopback prefix length 8 is \
-                  within the IPv4 range 0 through 32"
-    )]
-    let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap();
-    router
-        .add_ipv4_addr(
-            lo_dev,
-            Ipv4AddrEntry {
-                addr: lo_ip,
-                scope: ROUTE_SCOPE_HOST,
-                broadcast: None,
-                no_prefix_route: false,
-                label: None,
-            },
-        )
-        .expect("loopback IPv4 address must fit the interface");
+/// Unpublished loopback-only stack prepared before a namespace transaction.
+/// Dropping it abandons preparation without installing a registry entry.
+pub struct PreparedStack {
+    service: Arc<Service>,
+}
 
-    stacks.insert(id, Arc::new(Service::new(router)));
+impl PreparedStack {
+    /// Prepares the device owner with KERNEL permissions outside registry locks.
+    ///
+    /// # Execution context
+    /// Requires reclaim-safe sleepable task context without reclaim-dependent locks.
+    ///
+    /// # Errors
+    /// Returns NoMemory before constructing the loopback device; nested
+    /// allocations remain infallible.
+    pub fn new() -> KResult<Self> {
+        Self::new_with(KBox::<LoopbackDevice>::new_uninit)
+    }
+
+    fn new_with(
+        reserve: impl FnOnce() -> KResult<KBox<core::mem::MaybeUninit<LoopbackDevice>>>,
+    ) -> KResult<Self> {
+        let storage = reserve()?;
+        let mut router = Router::new();
+        let loopback = KBox::write(storage, LoopbackDevice::new());
+        let lo_dev = router
+            .add_device(loopback)
+            .expect("loopback interface ID must be available");
+
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the fixed loopback prefix length 8 is \
+                      within the IPv4 range 0 through 32"
+        )]
+        let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap();
+        router
+            .add_ipv4_addr(
+                lo_dev,
+                Ipv4AddrEntry {
+                    addr: lo_ip,
+                    scope: ROUTE_SCOPE_HOST,
+                    broadcast: None,
+                    no_prefix_route: false,
+                    label: None,
+                },
+            )
+            .expect("loopback IPv4 address must fit the interface");
+
+        Ok(Self {
+            service: Arc::new(Service::new(router)),
+        })
+    }
+
+    /// Installs without another fallible owner allocation. An existing stack
+    /// wins; the unused candidate is destroyed outside the registry lock.
+    ///
+    /// # Execution context
+    /// Requires task context without registry locks. Registry growth retains
+    /// its existing infallible allocation policy. The namespace borrow pins
+    /// the identity throughout publication.
+    pub fn install(self, namespace: &kns::NetNamespace) {
+        kns::set_net_namespace_drop_hook(on_namespace_drop);
+        let id = namespace.id().as_u64();
+        if kns::NetNamespace::initial_id() != Some(id) {
+            self.install_into(&NAMESPACE_STACKS, id);
+        }
+    }
+
+    fn install_into(self, stacks: &Mutex<BTreeMap<u64, Arc<Service>>>, id: u64) {
+        let candidate = self.service;
+        {
+            let mut stacks = stacks.lock();
+            if let alloc::collections::btree_map::Entry::Vacant(entry) = stacks.entry(id) {
+                entry.insert(candidate);
+                return;
+            }
+        }
+        drop(candidate);
+    }
 }

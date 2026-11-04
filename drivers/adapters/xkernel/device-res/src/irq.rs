@@ -212,8 +212,11 @@ fn dev_irq_event_to_kirq(event: DevIrqEvent) -> kirq::IrqEvent {
 
 fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
     match err {
-        kirq::IrqDescError::VirqExhausted { .. } => ResError::NoMemory,
-        kirq::IrqDescError::UnsupportedFlow { .. }
+        kirq::IrqDescError::VirqExhausted { .. } | kirq::IrqDescError::NoMemory => {
+            ResError::NoMemory
+        }
+        kirq::IrqDescError::InvalidHwirq { .. }
+        | kirq::IrqDescError::UnsupportedFlow { .. }
         | kirq::IrqDescError::ConfigurationFailed { .. }
         | kirq::IrqDescError::HwirqConflict { .. }
         | kirq::IrqDescError::DomainConflict { .. }

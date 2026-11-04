@@ -2035,6 +2035,7 @@ version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
  "arm-gic-driver",
+ "kalloc-types",
  "karch",
  "kbuild_config",
  "kcpu_id_map",
@@ -2741,6 +2742,7 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "intrusive-collections",
+ "kalloc-types",
  "karch",
  "kbuild_config",
  "kcompletion",

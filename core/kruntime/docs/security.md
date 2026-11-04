@@ -1,5 +1,17 @@
 # kruntime — 安全与可靠性分析
 
+Network device-owner reservation failure is fatal only at the configured boot
+network boundary. It occurs before global stack publication and NIC scheduler
+attachment; ordinary namespace callers receive NoMemory. Late init provides
+sleepable reclaim-safe context; this does not authorize KERNEL allocation from
+early IRQ-disabled startup. Nested allocation and poller failure policies remain
+unchanged, and boot allocator OOM is not injected by the tests.
+
+The x86 MSI lookup/reallocation fixture checks software publication and removal
+using task interleavings, not physical interrupt drain or device DMA teardown.
+Its acknowledgements work on UP and SMP; an external QEMU timeout diagnoses a
+stalled handshake. The fixture adds no production boot policy.
+
 Local timer activation must successfully enable the current CPU's KIRQ slot
 before the runtime publishes IRQ readiness. Failure is fatal at boot. Shared
 action installation alone cannot authorize delivery on an unprepared CPU.
