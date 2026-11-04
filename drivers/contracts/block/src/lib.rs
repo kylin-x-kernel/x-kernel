@@ -28,6 +28,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
+    any::Any,
     ops::Deref,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
@@ -80,6 +81,12 @@ bitflags::bitflags! {
         const READ = 1 << 0;
         /// The opened file permits writes.
         const WRITE = 1 << 1;
+        /// Establish one exclusive holder, independently of ordinary opens.
+        const EXCLUSIVE = 1 << 2;
+        /// Ask the driver not to wait for media during open.
+        const NONBLOCK = 1 << 3;
+        /// Permit legacy write ioctls without permitting data writes.
+        const WRITE_IOCTL = 1 << 4;
     }
 }
 
@@ -112,13 +119,20 @@ pub trait BlockDeviceOperations: Send + Sync {
         false
     }
 
-    /// Opens a block-device view through this disk.
-    fn open(&self, _device: &BlockDevice, _mode: BlockOpenMode) -> KResult<()> {
+    /// Opens this disk in sleepable task context under its open mutex.
+    ///
+    /// Called once per successful open attempt, including partition opens,
+    /// as Linux `blkdev_get_whole()` calls `gendisk::fops->open`. Must not
+    /// recursively open or close a view of the same disk: the mutex's task-owner
+    /// check rejects recursive locking before it can sleep.
+    fn open(&self, _disk: &Gendisk, _mode: BlockOpenMode) -> KResult<()> {
         Ok(())
     }
 
-    /// Releases a previously opened block-device view.
-    fn release(&self, _device: &BlockDevice) {}
+    /// Closes one successful open in sleepable task context under the open mutex.
+    /// Must not recursively open or close a view of the same disk. The mutex's
+    /// task-owner check rejects recursive locking before it can sleep.
+    fn release(&self, _disk: &Gendisk) {}
 
     /// Handles a disk-specific ioctl not consumed by the generic block layer.
     ///
@@ -155,12 +169,12 @@ impl<T: BlockDeviceOperations + ?Sized> BlockDeviceOperations for Arc<T> {
         (**self).is_inherently_read_only()
     }
 
-    fn open(&self, device: &BlockDevice, mode: BlockOpenMode) -> KResult<()> {
-        (**self).open(device, mode)
+    fn open(&self, disk: &Gendisk, mode: BlockOpenMode) -> KResult<()> {
+        (**self).open(disk, mode)
     }
 
-    fn release(&self, device: &BlockDevice) {
-        (**self).release(device)
+    fn release(&self, disk: &Gendisk) {
+        (**self).release(disk)
     }
 
     fn ioctl(
@@ -193,6 +207,7 @@ pub struct Gendisk {
     minors: u32,
     is_inherently_read_only: bool,
     state: AtomicUsize,
+    open_mutex: Mutex<()>,
     operations: Arc<dyn BlockDeviceOperations>,
     queue: Arc<RequestQueue>,
     part0: Weak<BlockDevice>,
@@ -308,6 +323,7 @@ impl Gendisk {
                 minors,
                 is_inherently_read_only,
                 state: AtomicUsize::new(0),
+                open_mutex: Mutex::new(()),
                 operations,
                 queue,
                 part0: part0.clone(),
@@ -407,16 +423,22 @@ pub struct BlockDevice {
     device_number: DeviceNumber,
     start_sector: u64,
     num_sectors: AtomicU64,
-    exclusive_holder: Mutex<bool>,
+    exclusive_holder: Mutex<Option<(Weak<dyn Any + Send + Sync>, usize)>>,
 }
 
-/// An exclusive holder claim on one canonical block-device object.
+/// One open of a canonical block-device object, optionally with an exclusive holder.
 ///
-/// This is the ownership part of Linux's exclusive `bdev_open()`: while the
-/// token is alive, another subsystem cannot establish a distinct holder for
-/// the same [`BlockDevice`]. Dropping the token releases the claim.
+/// Corresponds to the file lifetime managed by Linux `bdev_open()`/`bdev_release()`.
+/// Retains the device and open mode without depending on publication. An
+/// exclusive claim excludes other holders, while the same holder may open again
+/// and ordinary opens may coexist. Weak holder references pin identity without
+/// retaining the holder object, so a superblock can own its own open file.
+/// Release and drop require sleepable task context with no spin/IRQ-disable/
+/// preemption-disable guard. The driver is released exactly once.
 pub struct BlockDeviceClaim {
     device: Arc<BlockDevice>,
+    mode: BlockOpenMode,
+    holder: Option<Weak<dyn Any + Send + Sync>>,
     is_active: Mutex<bool>,
 }
 
@@ -426,18 +448,48 @@ impl BlockDeviceClaim {
         &self.device
     }
 
+    /// Returns the mode used for this open, including exclusive ownership.
+    pub const fn mode(&self) -> BlockOpenMode {
+        self.mode
+    }
+
     /// Releases the claim before the token itself is dropped.
     ///
     /// This is idempotent so an owning object's lifecycle can release block
     /// ownership at its logical death rather than waiting for its final `Arc`.
+    ///
+    /// # Panics
+    ///
+    /// Recursive open/close from the same disk's driver callback is rejected by
+    /// the existing mutex task-owner check, including recursion on this token.
     pub fn release(&self) {
+        // Published opens can only become inactive. Do not wait for disk
+        // callbacks when dropping an already released or failed open; try_lock
+        // also keeps callback recursion from blocking on another token's lock.
+        if self.is_active.try_lock().is_some_and(|active| !*active) {
+            return;
+        }
+        let _open_guard = self.device.disk.open_mutex.lock();
         let mut is_active = self.is_active.lock();
         if !*is_active {
             return;
         }
-        let mut holder = self.device.exclusive_holder.lock();
-        assert!(*holder, "an active block-device claim must own the holder");
-        *holder = false;
+        if let Some(holder) = &self.holder {
+            let mut current = self.device.exclusive_holder.lock();
+            assert!(
+                current
+                    .as_ref()
+                    .is_some_and(|(owner, count)| { Weak::ptr_eq(owner, holder) && *count > 0 }),
+                "an exclusive block-device claim must own the holder"
+            );
+            if let Some((_, count)) = current.as_mut() {
+                *count -= 1;
+                if *count == 0 {
+                    *current = None;
+                }
+            }
+        }
+        self.device.disk.operations.release(&self.device.disk);
         *is_active = false;
     }
 }
@@ -457,29 +509,77 @@ impl BlockDevice {
             device_number,
             start_sector: 0,
             num_sectors: AtomicU64::new(capacity_sectors),
-            exclusive_holder: Mutex::new(false),
+            exclusive_holder: Mutex::new(None),
         }
     }
 
-    /// Claims this canonical block-device object for one exclusive holder.
+    /// Opens this canonical device and retains the driver's open lifetime.
     ///
-    /// Filesystem superblocks retain the returned token for their complete
-    /// lifetime, preventing a different filesystem instance from acquiring
-    /// the same media concurrently.
+    /// Requires sleepable task context without spin/IRQ-disable/preemption-disable
+    /// guards. Driver callbacks are serialized by the disk's open mutex.
+    /// Unpublished disks are usable; registry lookup is only an acquisition path.
+    /// Like Linux `bdev_open()`, a writable raw open does not itself reject
+    /// read-only media: writes and writable mounts enforce that policy.
+    ///
+    /// An explicit holder establishes exclusive ownership, as Linux's non-null
+    /// `bdev_open` holder does. Reopens compare object identity, not its value;
+    /// each successful open must be released before another holder can claim.
+    /// The owner is retained only during this call; the returned token keeps a
+    /// weak identity so storing it inside its owner cannot form a strong cycle.
+    /// Without an explicit holder, `EXCLUSIVE` uses the returned open object as
+    /// its own holder, like a Linux block-special file's `file::private_data`.
     ///
     /// # Errors
     ///
-    /// Returns [`KError::ResourceBusy`] while another holder owns the device.
-    pub fn claim_exclusive(self: &Arc<Self>) -> KResult<BlockDeviceClaim> {
-        let mut holder = self.exclusive_holder.lock();
-        if *holder {
-            return Err(KError::ResourceBusy);
+    /// Returns [`KError::ResourceBusy`] for a competing exclusive holder, or
+    /// [`KError::OutOfRange`] if the holder's open count would overflow, or the
+    /// driver's open error. Failure retains no open or holder ownership.
+    ///
+    /// # Panics
+    ///
+    /// Recursive same-disk open from a driver callback is rejected by the
+    /// existing mutex task-owner check before blocking.
+    pub fn open(
+        self: &Arc<Self>,
+        mut mode: BlockOpenMode,
+        holder: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> KResult<Arc<BlockDeviceClaim>> {
+        // Reject callback recursion before allocation can enter reclaim.
+        self.disk
+            .open_mutex
+            .assert_not_owned_by_current("block-device open must not recurse from its driver");
+        if holder.is_some() {
+            mode.insert(BlockOpenMode::EXCLUSIVE);
         }
-        *holder = true;
-        Ok(BlockDeviceClaim {
+        let identity = holder.as_ref().map(Arc::downgrade);
+        let claim = Arc::new_cyclic(|weak: &Weak<BlockDeviceClaim>| BlockDeviceClaim {
             device: self.clone(),
-            is_active: Mutex::new(true),
-        })
+            mode,
+            holder: if mode.contains(BlockOpenMode::EXCLUSIVE) {
+                identity.or_else(|| Some(weak.clone()))
+            } else {
+                None
+            },
+            is_active: Mutex::new(false),
+        });
+        let _open_guard = self.disk.open_mutex.lock();
+        let holder_count = if let Some(holder) = &claim.holder {
+            match self.exclusive_holder.lock().as_ref() {
+                Some((current, count)) if Weak::ptr_eq(current, holder) => {
+                    count.checked_add(1).ok_or(KError::OutOfRange)?
+                }
+                Some(_) => return Err(KError::ResourceBusy),
+                None => 1,
+            }
+        } else {
+            0
+        };
+        self.disk.operations.open(&self.disk, mode)?;
+        if let Some(holder) = &claim.holder {
+            *self.exclusive_holder.lock() = Some((holder.clone(), holder_count));
+        }
+        *claim.is_active.lock() = true;
+        Ok(claim)
     }
 
     /// Returns this view's device number (`bd_dev`).
@@ -589,6 +689,18 @@ impl BlockDevice {
         let sector = block_id
             .checked_mul(self.queue.limits().logical_block_sectors())
             .ok_or(DriverError::InvalidInput)?;
+        self.read_sectors(sector, buf)
+    }
+
+    /// Reads a borrowed buffer starting at a fixed 512-byte sector.
+    ///
+    /// Requires sleepable task context and retains the borrow until terminal
+    /// completion. Queue alignment and device bounds are checked by Bio dispatch.
+    ///
+    /// # Errors
+    /// Returns validation, wait preparation or device errors. An error may leave
+    /// partial data. Unwinding builds return Unsupported before lending memory.
+    pub fn read_sectors(self: &Arc<Self>, sector: u64, buf: &mut [u8]) -> DriverResult {
         if buf.is_empty() {
             return if sector <= self.num_sectors() {
                 Ok(())
@@ -620,6 +732,19 @@ impl BlockDevice {
         let sector = block_id
             .checked_mul(self.queue.limits().logical_block_sectors())
             .ok_or(DriverError::InvalidInput)?;
+        self.write_sectors(sector, buf)
+    }
+
+    /// Writes a borrowed buffer starting at a fixed 512-byte sector.
+    ///
+    /// Requires sleepable task context and retains the borrow until terminal
+    /// completion. Queue alignment, device bounds and read-only policy are
+    /// checked by Bio dispatch.
+    ///
+    /// # Errors
+    /// Returns validation, wait preparation or device errors. Unwinding builds
+    /// return Unsupported before lending memory.
+    pub fn write_sectors(self: &Arc<Self>, sector: u64, buf: &[u8]) -> DriverResult {
         if self.is_read_only() {
             return Err(DriverError::ReadOnly);
         }
@@ -665,20 +790,6 @@ impl BlockDevice {
             };
         self.submit_bio(bio);
         waiter.wait()
-    }
-
-    /// Opens this block-device view with the requested access mode.
-    ///
-    /// # Errors
-    ///
-    /// Propagates the driver open error unchanged.
-    pub fn open(&self, mode: BlockOpenMode) -> KResult<()> {
-        self.disk.operations.open(self, mode)
-    }
-
-    /// Releases a previously opened block-device view.
-    pub fn release(&self) {
-        self.disk.operations.release(self);
     }
 
     /// Passes a device-specific ioctl to the driver operations table.

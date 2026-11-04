@@ -380,7 +380,10 @@ impl FileOperations for DefaultBlkdevFileOperations {
         check_device_access(inode.rdev(), access)?;
         let device = block::lookup_block_device(inode.rdev())
             .ok_or_else(|| VfsError::from(LinuxError::ENXIO))?;
-        BlockDevice::open(&device, block_open_mode(file.mode()))
+        let mode = block_open_mode(file.mode(), file.flags());
+        let claim = device.open(mode, None)?;
+        file.set_private_data(claim);
+        Ok(())
     }
 
     fn supports_read(&self) -> bool {
@@ -425,9 +428,9 @@ impl FileOperations for DefaultBlkdevFileOperations {
         file_block_device(file)?.mmap(file, mapper)
     }
 
-    fn release(&self, inode: &VfsInode, _file: &VfsFile) -> VfsResult<()> {
-        if let Some(device) = block::lookup_block_device(inode.rdev()) {
-            BlockDevice::release(&device);
+    fn release(&self, _inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
+        if let Some(claim) = file.private_data_get::<block::BlockDeviceClaim>() {
+            claim.release();
         }
         Ok(())
     }
@@ -437,7 +440,7 @@ impl FileOperations for DefaultBlkdevFileOperations {
     }
 }
 
-fn block_open_mode(mode: FMode) -> BlockOpenMode {
+fn block_open_mode(mode: FMode, flags: crate::OpenFlags) -> BlockOpenMode {
     let mut block_mode = BlockOpenMode::empty();
     if mode.contains(FMode::READ) {
         block_mode.insert(BlockOpenMode::READ);
@@ -445,11 +448,26 @@ fn block_open_mode(mode: FMode) -> BlockOpenMode {
     if mode.contains(FMode::WRITE) {
         block_mode.insert(BlockOpenMode::WRITE);
     }
+    block_mode.set(
+        BlockOpenMode::EXCLUSIVE,
+        flags.contains(crate::OpenFlags::EXCLUSIVE),
+    );
+    block_mode.set(
+        BlockOpenMode::NONBLOCK,
+        flags.contains(crate::OpenFlags::NONBLOCK),
+    );
+    // Linux file_to_blk_mode() preserves ioctl-only access mode 3.
+    block_mode.set(
+        BlockOpenMode::WRITE_IOCTL,
+        flags.contains(crate::OpenFlags::READ_WRITE | crate::OpenFlags::WRITE_ONLY),
+    );
     block_mode
 }
 
 fn file_block_device(file: &VfsFile) -> VfsResult<Arc<BlockDevice>> {
-    block::lookup_block_device(file.inode().rdev()).ok_or_else(|| VfsError::from(LinuxError::ENXIO))
+    file.private_data_get::<block::BlockDeviceClaim>()
+        .map(|claim| claim.device().clone())
+        .ok_or_else(|| VfsError::from(LinuxError::ENXIO))
 }
 
 fn map_block_error(error: DriverError) -> VfsError {
@@ -700,9 +718,14 @@ impl DeviceFileOps for Arc<BlockDevice> {
     }
 
     fn ioctl(&self, file: &VfsFile, cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
+        let claim = file
+            .private_data_get::<block::BlockDeviceClaim>()
+            .ok_or_else(|| VfsError::from(LinuxError::ENXIO))?;
+        let mut mode = claim.mode();
+        mode.set(BlockOpenMode::NONBLOCK, file.is_nonblocking());
         BlockDevice::ioctl(
             self,
-            block_open_mode(file.mode()),
+            mode,
             cmd,
             arg,
             cred.has_sys_admin(),

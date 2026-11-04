@@ -912,9 +912,9 @@ impl VfsFile {
     pub fn size(&self) -> u64 {
         let inode = self.inode();
         if inode.node_type() == NodeType::BlockDevice
-            && let Some(device) = block::lookup_block_device(inode.rdev())
+            && let Some(claim) = self.private_data_get::<block::BlockDeviceClaim>()
         {
-            return device.size();
+            return claim.device().size();
         }
         inode.size()
     }

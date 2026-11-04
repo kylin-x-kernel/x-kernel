@@ -201,7 +201,7 @@ fn bio_validates_whole_transfer_and_remaps_once() {
         device_number: DeviceNumber::new(250, 1),
         start_sector: 8,
         num_sectors: AtomicU64::new(8),
-        exclusive_holder: Mutex::new(false),
+        exclusive_holder: Mutex::new(None),
     });
     let vectors = || {
         vec![
@@ -760,19 +760,21 @@ fn exclusive_claim_follows_token_lifetime() {
     let disk = disk("test-exclusive-claim", 243, 0, 1);
     let device = add_disk(disk.clone()).expect("publish claim test disk");
 
-    let first = device.claim_exclusive().expect("claim unowned device");
+    let first = device
+        .open(BlockOpenMode::READ | BlockOpenMode::EXCLUSIVE, None)
+        .expect("claim unowned device");
     assert!(matches!(
-        device.claim_exclusive(),
+        device.open(BlockOpenMode::READ | BlockOpenMode::EXCLUSIVE, None),
         Err(KError::ResourceBusy)
     ));
 
     first.release();
     let second = device
-        .claim_exclusive()
+        .open(BlockOpenMode::READ | BlockOpenMode::EXCLUSIVE, None)
         .expect("explicit release makes device claimable");
     drop(second);
     device
-        .claim_exclusive()
+        .open(BlockOpenMode::READ | BlockOpenMode::EXCLUSIVE, None)
         .expect("drop makes device claimable");
 
     del_gendisk(disk.device_number()).expect("remove claim test disk");
@@ -975,4 +977,192 @@ fn bio_wait_returns_memory_on_device_validation_and_preparation_errors() {
         drop(vectors);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
+}
+
+struct OpenDisk {
+    memory: MemoryDisk,
+    modes: Mutex<Vec<BlockOpenMode>>,
+    releases: core::sync::atomic::AtomicUsize,
+    fail_open: core::sync::atomic::AtomicBool,
+}
+
+impl OpenDisk {
+    fn new() -> Self {
+        Self {
+            memory: MemoryDisk::new(8),
+            modes: Mutex::new(Vec::new()),
+            releases: core::sync::atomic::AtomicUsize::new(0),
+            fail_open: core::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl BlockDeviceOperations for OpenDisk {
+    fn num_blocks(&self) -> u64 {
+        self.memory.num_blocks()
+    }
+
+    fn block_size(&self) -> usize {
+        self.memory.block_size()
+    }
+
+    fn open(&self, disk: &Gendisk, mode: BlockOpenMode) -> KResult<()> {
+        assert!(disk.open_mutex.is_owned_by_current());
+        assert!(disk.open_mutex.try_lock().is_none());
+        assert_eq!(disk.part0().disk().name(), disk.name());
+        self.modes.lock().push(mode);
+        if self.fail_open.load(Ordering::Relaxed) {
+            Err(KError::Io)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn release(&self, disk: &Gendisk) {
+        assert!(disk.open_mutex.is_owned_by_current());
+        assert!(disk.open_mutex.try_lock().is_none());
+        self.releases.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl BioOperations for OpenDisk {
+    fn submit_bio(&self, bio: Bio) {
+        self.memory.submit_bio(bio);
+    }
+}
+
+#[def_test]
+fn open_claim_pairs_each_success_with_one_close_without_publication() {
+    let backend = Arc::new(OpenDisk::new());
+    let disk = Gendisk::alloc(
+        String::from("open-lifetime"),
+        0,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .unwrap();
+    let device = disk.part0();
+    let mode = BlockOpenMode::READ | BlockOpenMode::NONBLOCK;
+    let ordinary = device.open(mode, None).unwrap();
+    assert!(Arc::ptr_eq(ordinary.device(), &device));
+    assert_eq!(ordinary.mode(), mode);
+    let exclusive = device
+        .open(BlockOpenMode::READ | BlockOpenMode::EXCLUSIVE, None)
+        .unwrap();
+    assert!(matches!(
+        device.open(BlockOpenMode::EXCLUSIVE, None),
+        Err(KError::ResourceBusy)
+    ));
+    let concurrent = device.open(BlockOpenMode::WRITE, None).unwrap();
+    assert_eq!(
+        backend.modes.lock().as_slice(),
+        &[
+            mode,
+            BlockOpenMode::READ | BlockOpenMode::EXCLUSIVE,
+            BlockOpenMode::WRITE
+        ]
+    );
+    exclusive.release();
+    exclusive.release();
+    drop(exclusive);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 1);
+    drop(ordinary);
+    drop(concurrent);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 3);
+    drop(disk);
+    device.open(BlockOpenMode::EXCLUSIVE, None).unwrap().release();
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 4);
+}
+
+#[def_test]
+fn same_holder_reopens_until_its_last_exclusive_close() {
+    let backend = Arc::new(OpenDisk::new());
+    let device = Gendisk::alloc(
+        String::from("nested-holder"),
+        0,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .unwrap()
+    .part0();
+    let holder = Arc::new(7_u32);
+    let other_holder = Arc::new(7_u32);
+    let weak_holder = Arc::downgrade(&holder);
+    let first = device
+        .open(BlockOpenMode::READ, Some(holder.clone()))
+        .unwrap();
+    assert_eq!(first.mode(), BlockOpenMode::READ | BlockOpenMode::EXCLUSIVE);
+    let second = device
+        .open(BlockOpenMode::WRITE, Some(holder.clone()))
+        .unwrap();
+    assert!(matches!(
+        device.open(BlockOpenMode::READ, Some(other_holder.clone())),
+        Err(KError::ResourceBusy)
+    ));
+    let same_open = first.clone();
+    first.release();
+    drop(first);
+    drop(same_open);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 1);
+    assert!(matches!(
+        device.open(BlockOpenMode::READ, Some(other_holder.clone())),
+        Err(KError::ResourceBusy)
+    ));
+    drop(holder);
+    assert!(weak_holder.upgrade().is_none());
+    second.release();
+    second.release();
+    drop(second);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 2);
+    assert_eq!(backend.modes.lock().len(), 2);
+    device
+        .open(BlockOpenMode::READ, Some(other_holder))
+        .expect("the last close makes the device available to another holder")
+        .release();
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 3);
+}
+
+#[def_test]
+fn failed_driver_open_rolls_back_exclusive_ownership_without_release() {
+    let backend = Arc::new(OpenDisk::new());
+    let device = Gendisk::alloc(
+        String::from("open-failure"),
+        0,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .unwrap()
+    .part0();
+    let holder = Arc::new(());
+    backend.fail_open.store(true, Ordering::Relaxed);
+    let mode = BlockOpenMode::READ | BlockOpenMode::EXCLUSIVE;
+    assert!(matches!(
+        device.open(mode, Some(holder.clone())),
+        Err(KError::Io)
+    ));
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 0);
+    backend.fail_open.store(false, Ordering::Relaxed);
+    let claim = device
+        .open(mode, Some(holder.clone()))
+        .expect("failed open must not retain a holder");
+    assert_eq!(backend.modes.lock().len(), 2);
+    backend.fail_open.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        device.open(mode, Some(holder)),
+        Err(KError::Io)
+    ));
+    assert!(matches!(
+        device.open(mode, None),
+        Err(KError::ResourceBusy)
+    ));
+    assert_eq!(backend.modes.lock().len(), 3);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 0);
+    drop(claim);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 1);
+    backend.fail_open.store(false, Ordering::Relaxed);
+    device.open(mode, None).unwrap().release();
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 2);
 }

@@ -97,7 +97,6 @@ where
     }
     let device = block::lookup_block_device(device_number)
         .ok_or_else(|| VfsError::from(kerrno::LinuxError::ENXIO))?;
-    validate_block_device_flags(&device, context.sb_flags())?;
     super_block_registry().get_or_try_init_bdev(
         context.fs_type(),
         device,
@@ -132,6 +131,7 @@ impl SuperBlockSet {
         &mut self,
         file_system_type: &'static FileSystemType,
         block_device: &Arc<block::BlockDevice>,
+        live_refs: &mut Vec<Arc<SuperBlock>>,
     ) -> Option<Arc<SuperBlock>> {
         let mut matching = None;
         self.super_blocks
@@ -143,8 +143,11 @@ impl SuperBlockSet {
                             Arc::ptr_eq(registered_device, block_device)
                         })
                     {
-                        matching = Some(super_block);
+                        matching = Some(super_block.clone());
                     }
+                    // A temporary Weak upgrade can become the final owner.
+                    // Defer its drop so driver release cannot reenter this lock.
+                    live_refs.push(super_block);
                     true
                 }
                 None => false,
@@ -203,25 +206,42 @@ impl SuperBlockRegistry {
     {
         let mut fill_super = Some(fill_super);
         loop {
+            let mut live_refs = Vec::new();
             let (super_block, is_new) = {
                 let mut super_blocks = self.super_blocks.lock();
-                match super_blocks.lookup_bdev(file_system_type, &block_device) {
+                match super_blocks.lookup_bdev(file_system_type, &block_device, &mut live_refs) {
                     Some(super_block) => (super_block, false),
                     None => {
-                        let claim = block_device.claim_exclusive()?;
-                        let candidate = SuperBlock::allocate(file_system_type, Some(claim), flags);
+                        let candidate = SuperBlock::allocate(
+                            file_system_type,
+                            Some(block_device.clone()),
+                            flags,
+                        );
                         super_blocks.register(&candidate);
                         (candidate, true)
                     }
                 }
             };
+            drop(live_refs);
             if is_new {
                 let fill_super = fill_super
                     .take()
                     .expect("a fill callback is consumed only by a new superblock");
-                match fill_super(&super_block) {
+                let initialize = || -> VfsResult<()> {
+                    let mut mode = block::BlockOpenMode::READ | block::BlockOpenMode::EXCLUSIVE;
+                    mode.set(
+                        block::BlockOpenMode::WRITE,
+                        !flags.contains(SuperBlockFlags::RDONLY),
+                    );
+                    let claim = block_device.open(mode, Some(super_block.clone()))?;
+                    super_block.block_device_claim.call_once(|| claim);
+                    validate_block_device_flags(&block_device, flags)?;
+                    fill_super(&super_block)
+                };
+                match initialize() {
                     Ok(()) => super_block.finish_initialization(),
                     Err(error) => {
+                        super_block.release_block_device();
                         {
                             let mut super_blocks = self.super_blocks.lock();
                             super_block.fail_initialization();
@@ -491,9 +511,12 @@ impl SuperBlockLifecycle {
 pub struct SuperBlock {
     /// Canonical filesystem type corresponding to Linux `s_type`.
     file_system_type: &'static FileSystemType,
-    /// Exclusive claim on the canonical device corresponding to Linux
-    /// `super_block::s_bdev` and its block-device holder.
-    block_device: Option<block::BlockDeviceClaim>,
+    /// Canonical identity (`s_bdev`), reserved before driver open so concurrent
+    /// mounts wait on the same nascent superblock without a registry-held callback.
+    block_device: Option<Arc<block::BlockDevice>>,
+    /// Open lifetime (`s_bdev_file`), installed after reservation and closed at
+    /// logical shutdown even if dead superblock references remain.
+    block_device_claim: Once<Arc<block::BlockDeviceClaim>>,
     /// Shared filesystem operation table corresponding to Linux `s_op`.
     ops: Once<&'static dyn SuperBlockOperations>,
     /// Default dentry operation table corresponding to Linux `s_d_op`.
@@ -544,9 +567,7 @@ impl SuperBlock {
 
     /// Returns the canonical block device backing this superblock, if any.
     pub fn block_device(&self) -> Option<&Arc<block::BlockDevice>> {
-        self.block_device
-            .as_ref()
-            .map(block::BlockDeviceClaim::device)
+        self.block_device.as_ref()
     }
 
     /// Returns the root dentry for this superblock.
@@ -831,12 +852,13 @@ impl SuperBlock {
 
     fn allocate(
         file_system_type: &'static FileSystemType,
-        block_device: Option<block::BlockDeviceClaim>,
+        block_device: Option<Arc<block::BlockDevice>>,
         flags: SuperBlockFlags,
     ) -> Arc<Self> {
         Arc::new(Self {
             file_system_type,
             block_device,
+            block_device_claim: Once::new(),
             ops: Once::new(),
             default_dentry_operations: Once::new(),
             magic: Once::new(),
@@ -934,11 +956,10 @@ impl SuperBlock {
         );
         *lifecycle = SuperBlockLifecycle::Dead;
         drop(lifecycle);
-        self.release_block_device();
     }
 
     fn release_block_device(&self) {
-        if let Some(block_device) = &self.block_device {
+        if let Some(block_device) = self.block_device_claim.get() {
             block_device.release();
         }
     }
@@ -1086,12 +1107,12 @@ impl SuperBlock {
         }
 
         let shutdown_result = self.shutdown();
-        // A new `sget` must observe either the old identity and holder or
-        // neither of them.
+        // Keep the Dying identity visible until the driver has closed. A
+        // same-filesystem sget waits; driver callbacks run outside the registry.
+        self.release_block_device();
         {
             let mut super_blocks = super_block_registry().super_blocks.lock();
             *self.lifecycle.lock() = SuperBlockLifecycle::Dead;
-            self.release_block_device();
             super_blocks.unregister(self);
         }
         self.lifecycle_waiters.notify_all(false);

@@ -472,7 +472,10 @@ filesystem type 创建不同 holder，因此不能同时取得同一设备。VFS
 先分配并注册已经带有 `s_type/s_bdev/s_flags` 的 nascent `SuperBlock`，fill callback 只接收
 该对象并安装 filesystem operations 与 root，不再接收或复制 type、device、flags；一次性
 fill closure 可以捕获同一 `FsContext` 中已经解析的 mount state，而不把 option parser 放进
-generic VFS。fill 成功后 VFS 才把 lifecycle 切换为 available。
+generic VFS. Driver open runs after reservation, outside the registry mutex. The once-installed
+claim corresponds to Linux `s_bdev_file`, separate from reserved `s_bdev` identity.
+Failure/final shutdown closes it before unregistering and waking mount waiters.
+VFS publishes the available lifecycle only after fill succeeds.
 已有 block-backed superblock 与新请求的 `SB_RDONLY` 不一致时返回 `EBUSY`，对应 Linux
 `get_tree_bdev_flags()` 的已有 `s_root` 分支，而不是将 block mount 降格为 per-mount 策略。
 与 Linux `bdev_file_open_by_path` 一样，可写 mount 会拒绝
@@ -483,9 +486,13 @@ canonical read-only device；只读 mount 仍可继续交给 filesystem fill-sup
 新增标志（如 binary mountdata、subtype）时保持同一编号体系即可扩展。
 
 block-special inode 统一安装 KVFS 的 `DefaultBlkdevFileOperations`，对应 Linux
-`def_blk_fops`。open 按 inode `rdev` 直接查 block core；read/write/fsync 和通用
+`def_blk_fops`. Only open looks up `rdev`; existing file-private storage retains
+`BlockDeviceClaim`. Capacity, I/O, ioctl and close use that original device even
+after withdrawal or device-number reuse. The claim preserves `O_EXCL`; ioctl uses
+the current nonblocking flag. Last-file release closes once.
 块设备特殊 inode 尚无 canonical block address space，mmap 返回 ENODEV；启用前必须同时实现介质变更失效协议。
-ioctl 操作作用于同一个 resident `BlockDevice`。KVFS 提供参数的安全读写函数及从当前调用者凭据取得的 `has_sys_admin` 权限值；ioctl 调用链显式传递 syscall 取得的 `&Cred`，不使用 opener credential，也不新增凭据字段。
+KVFS supplies checked argument access and `has_sys_admin` from the current caller.
+The ioctl path receives the syscall caller's `&Cred`, without retaining extra credentials.
 通用 block 命令及未知命令的 driver fallback 统一由 `BlockDevice::ioctl` 分派。普通 close 和 write 不隐式 flush，显式 fsync 才把
 durability 请求传给 backend。KVFS 不维护第二张 `dev_t -> DeviceFileOps` 表；
 devfs 只投影名称与 `rdev`，loop 设备也按普通 `Gendisk` 发布。

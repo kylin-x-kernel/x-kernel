@@ -429,7 +429,7 @@ fn new_file_readahead_snapshots_the_backing_disk_budget() {
 }
 
 #[def_test(serial)]
-fn block_device_claim_rejects_a_different_filesystem_until_shutdown() {
+fn block_device_claim_rejects_a_different_filesystem_until_last_holder_close() {
     FILL_COUNT.store(0, Ordering::Relaxed);
     let (disk, block_device) = add_test_disk("kvfs-holder-test", 247);
     let registry = super_block_registry();
@@ -442,6 +442,9 @@ fn block_device_claim_rejects_a_different_filesystem_until_shutdown() {
         )
         .expect("first filesystem claims the device");
     first.activate_mount();
+    let nested = block_device
+        .open(block::BlockOpenMode::READ, Some(first.clone()))
+        .expect("the superblock is the holder of its open file");
 
     assert!(matches!(
         registry.get_or_try_init_bdev(
@@ -455,6 +458,17 @@ fn block_device_claim_rejects_a_different_filesystem_until_shutdown() {
     assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 1);
 
     first.deactivate_mount();
+    assert!(matches!(
+        registry.get_or_try_init_bdev(
+            &BDEV_ALT_FILE_SYSTEM_TYPE,
+            block_device.clone(),
+            SuperBlockFlags::empty(),
+            fill_test_bdev,
+        ),
+        Err(VfsError::ResourceBusy)
+    ));
+    assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 1);
+    nested.release();
     let replacement = registry
         .get_or_try_init_bdev(
             &BDEV_ALT_FILE_SYSTEM_TYPE,
@@ -462,7 +476,7 @@ fn block_device_claim_rejects_a_different_filesystem_until_shutdown() {
             SuperBlockFlags::empty(),
             fill_test_bdev,
         )
-        .expect("dead superblock releases its block-device claim");
+        .expect("the last holder close releases the block-device claim");
     replacement.activate_mount();
     assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 2);
     replacement.deactivate_mount();
@@ -639,4 +653,188 @@ fn dying_superblock_wakes_waiter_after_shutdown() {
     assert_eq!(TRANSITION_WAITER_DONE.load(Ordering::Acquire), 1);
     assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 2);
     block::del_gendisk(disk.device_number()).expect("remove dying-wait test disk");
+}
+
+struct OpenLifecycleDevice {
+    modes: crate::Mutex<alloc::vec::Vec<block::BlockOpenMode>>,
+    releases: AtomicUsize,
+    fail_open: core::sync::atomic::AtomicBool,
+}
+
+impl block::BlockDeviceOperations for OpenLifecycleDevice {
+    fn num_blocks(&self) -> u64 {
+        8
+    }
+
+    fn block_size(&self) -> usize {
+        512
+    }
+
+    fn open(&self, _disk: &block::Gendisk, mode: block::BlockOpenMode) -> VfsResult<()> {
+        // A driver may inspect VFS state; no global registry lock may span it.
+        let _ = super_block_registry().live_super_blocks();
+        self.modes.lock().push(mode);
+        if self.fail_open.load(Ordering::Relaxed) {
+            Err(VfsError::Io)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn release(&self, _disk: &block::Gendisk) {
+        let _ = super_block_registry().live_super_blocks();
+        self.releases.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl block::BioOperations for OpenLifecycleDevice {
+    fn submit_bio(&self, bio: block::Bio) {
+        bio.end_io(Ok(()));
+    }
+}
+
+#[def_test(serial)]
+fn mount_opens_once_and_closes_at_failure_or_logical_shutdown() {
+    let backend = Arc::new(OpenLifecycleDevice {
+        modes: crate::Mutex::new(alloc::vec::Vec::new()),
+        releases: AtomicUsize::new(0),
+        fail_open: core::sync::atomic::AtomicBool::new(true),
+    });
+    let device = block::Gendisk::alloc(
+        String::from("mount-open"),
+        0,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .unwrap()
+    .part0();
+    let registry = super_block_registry();
+    let mut did_fill = false;
+    assert!(matches!(
+        registry.get_or_try_init_bdev(
+            &BDEV_TEST_FILE_SYSTEM_TYPE,
+            device.clone(),
+            SuperBlockFlags::empty(),
+            |_| {
+                did_fill = true;
+                Ok(())
+            }
+        ),
+        Err(VfsError::Io)
+    ));
+    assert!(!did_fill);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 0);
+    backend.fail_open.store(false, Ordering::Relaxed);
+    assert!(matches!(
+        registry.get_or_try_init_bdev(
+            &BDEV_TEST_FILE_SYSTEM_TYPE,
+            device.clone(),
+            SuperBlockFlags::empty(),
+            |_| Err(VfsError::InvalidInput)
+        ),
+        Err(VfsError::InvalidInput)
+    ));
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 1);
+    let sb = registry
+        .get_or_try_init_bdev(
+            &BDEV_TEST_FILE_SYSTEM_TYPE,
+            device.clone(),
+            SuperBlockFlags::empty(),
+            |sb| initialize_test_bdev(sb, &BDEV_TEST_SUPER_OPERATIONS),
+        )
+        .unwrap();
+    sb.activate_mount();
+    let shared = registry
+        .get_or_try_init_bdev(
+            &BDEV_TEST_FILE_SYSTEM_TYPE,
+            device.clone(),
+            SuperBlockFlags::empty(),
+            |_| panic!("shared mount must not fill again"),
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&sb, &shared));
+    shared.activate_mount();
+    assert_eq!(backend.modes.lock().len(), 3);
+    sb.deactivate_mount();
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 1);
+    shared.deactivate_mount();
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 2);
+    let readonly = registry
+        .get_or_try_init_bdev(
+            &BDEV_TEST_FILE_SYSTEM_TYPE,
+            device.clone(),
+            SuperBlockFlags::RDONLY,
+            |sb| initialize_test_bdev(sb, &BDEV_TEST_SUPER_OPERATIONS),
+        )
+        .unwrap();
+    readonly.activate_mount();
+    let read_mode = block::BlockOpenMode::READ | block::BlockOpenMode::EXCLUSIVE;
+    let write_mode = read_mode | block::BlockOpenMode::WRITE;
+    {
+        let modes = backend.modes.lock();
+        assert_eq!(
+            modes.as_slice(),
+            &[write_mode, write_mode, write_mode, read_mode]
+        );
+    }
+    readonly.deactivate_mount();
+    drop((sb, shared, readonly));
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 3);
+
+    device.set_disk_read_only(true).unwrap();
+    did_fill = false;
+    assert!(matches!(
+        registry.get_or_try_init_bdev(
+            &BDEV_TEST_FILE_SYSTEM_TYPE,
+            device,
+            SuperBlockFlags::empty(),
+            |_| {
+                did_fill = true;
+                Ok(())
+            }
+        ),
+        Err(VfsError::PermissionDenied)
+    ));
+    assert!(!did_fill);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 4);
+}
+
+#[def_test(serial)]
+fn registry_lookup_defers_final_superblock_drop_until_after_unlock() {
+    let backend = Arc::new(OpenLifecycleDevice {
+        modes: crate::Mutex::new(alloc::vec::Vec::new()),
+        releases: AtomicUsize::new(0),
+        fail_open: core::sync::atomic::AtomicBool::new(false),
+    });
+    let device = block::Gendisk::alloc(
+        String::from("lookup-drop"),
+        0,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .unwrap()
+    .part0();
+    let registry = super_block_registry();
+    let sb = registry
+        .get_or_try_init_bdev(
+            &BDEV_TEST_FILE_SYSTEM_TYPE,
+            device.clone(),
+            SuperBlockFlags::empty(),
+            |sb| initialize_test_bdev(sb, &BDEV_TEST_SUPER_OPERATIONS),
+        )
+        .unwrap();
+    let mut live_refs = alloc::vec::Vec::new();
+    let mut entries = registry.super_blocks.lock();
+    assert!(
+        entries
+            .lookup_bdev(&BDEV_ALT_FILE_SYSTEM_TYPE, &device, &mut live_refs)
+            .is_none()
+    );
+    drop(sb);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 0);
+    drop(entries);
+    drop(live_refs);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 1);
 }

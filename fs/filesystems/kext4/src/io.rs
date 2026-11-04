@@ -12,7 +12,7 @@ use crate::{
     jbd2::{JournalReplayBlockWriter, JournalTargetBlock},
 };
 
-/// Adapts device blocks to the ext4 filesystem block address space.
+/// Validates ext4 filesystem ranges and submits them as sector-addressed bios.
 pub(crate) struct FilesystemDevice {
     device: Arc<block::BlockDevice>,
     filesystem_block_size: usize,
@@ -26,19 +26,14 @@ impl FilesystemDevice {
         filesystem_blocks: u64,
     ) -> Ext4Result<Self> {
         let device_block_size = device.block_size();
-        if device_block_size == 0
-            || !device_block_size.is_power_of_two()
-            || !filesystem_block_size.is_multiple_of(device_block_size)
-        {
+        if filesystem_block_size == 0 || !filesystem_block_size.is_multiple_of(device_block_size) {
             return Err(Ext4Error::InvalidDeviceBlockSize(device_block_size));
         }
 
-        let blocks_per_filesystem_block = u64::try_from(filesystem_block_size / device_block_size)
-            .map_err(|_| Ext4Error::Overflow)?;
-        let required_device_blocks = filesystem_blocks
-            .checked_mul(blocks_per_filesystem_block)
+        let filesystem_bytes = filesystem_blocks
+            .checked_mul(filesystem_block_size as u64)
             .ok_or(Ext4Error::Overflow)?;
-        if required_device_blocks > (device.size() / device.block_size() as u64) {
+        if filesystem_bytes > device.size() {
             return Err(Ext4Error::OutOfBounds);
         }
 
@@ -59,9 +54,6 @@ impl FilesystemDevice {
         }
 
         let device_block_size = device.block_size();
-        if device_block_size == 0 || !device_block_size.is_power_of_two() {
-            return Err(Ext4Error::InvalidDeviceBlockSize(device_block_size));
-        }
         let block_size = u64::try_from(device_block_size).map_err(|_| Ext4Error::Overflow)?;
         let output_len = u64::try_from(output.len()).map_err(|_| Ext4Error::Overflow)?;
         let end = byte_offset
@@ -70,6 +62,12 @@ impl FilesystemDevice {
         let capacity = device.size();
         if end > capacity {
             return Err(Ext4Error::OutOfBounds);
+        }
+
+        if byte_offset.is_multiple_of(block_size) && output.len().is_multiple_of(device_block_size)
+        {
+            device.read_sectors(byte_offset / u64::from(block::SECTOR_SIZE), output)?;
+            return Ok(());
         }
 
         let first_block = byte_offset / block_size;
@@ -106,30 +104,8 @@ impl FilesystemDevice {
         block_count: u32,
         output: &mut [u8],
     ) -> Ext4Result<()> {
-        let expected = usize::try_from(block_count)
-            .map_err(|_| Ext4Error::Overflow)?
-            .checked_mul(self.filesystem_block_size)
-            .ok_or(Ext4Error::Overflow)?;
-        if output.len() != expected {
-            return Err(Ext4Error::InvalidBufferLength {
-                expected,
-                actual: output.len(),
-            });
-        }
-
-        let end = start
-            .get()
-            .checked_add(u64::from(block_count))
-            .ok_or(Ext4Error::Overflow)?;
-        if end > self.filesystem_blocks {
-            return Err(Ext4Error::OutOfBounds);
-        }
-
-        let device_block = start
-            .get()
-            .checked_mul((self.filesystem_block_size / self.device.block_size()) as u64)
-            .ok_or(Ext4Error::Overflow)?;
-        self.device.read_block(device_block, output)?;
+        let sector = self.validate_blocks(start, u64::from(block_count), output.len())?;
+        self.device.read_sectors(sector, output)?;
         Ok(())
     }
 
@@ -140,34 +116,39 @@ impl FilesystemDevice {
         block_count: u32,
         input: &[u8],
     ) -> Ext4Result<()> {
+        let sector = self.validate_blocks(start, u64::from(block_count), input.len())?;
+        self.device.write_sectors(sector, input)?;
+        Ok(())
+    }
+
+    /// Checks filesystem bounds; queue geometry and media bounds belong to block core.
+    fn validate_blocks(
+        &self,
+        start: FilesystemBlock,
+        block_count: u64,
+        length_bytes: usize,
+    ) -> Ext4Result<u64> {
         let expected = usize::try_from(block_count)
             .map_err(|_| Ext4Error::Overflow)?
             .checked_mul(self.filesystem_block_size)
             .ok_or(Ext4Error::Overflow)?;
-        if input.len() != expected {
+        if length_bytes != expected {
             return Err(Ext4Error::InvalidBufferLength {
                 expected,
-                actual: input.len(),
+                actual: length_bytes,
             });
         }
-
         let end = start
             .get()
-            .checked_add(u64::from(block_count))
+            .checked_add(block_count)
             .ok_or(Ext4Error::Overflow)?;
         if end > self.filesystem_blocks {
             return Err(Ext4Error::OutOfBounds);
         }
-
-        let device_block = start
+        start
             .get()
-            .checked_mul((self.filesystem_block_size / self.device.block_size()) as u64)
-            .ok_or(Ext4Error::Overflow)?;
-        let device_block_count = u64::from(block_count)
-            .checked_mul((self.filesystem_block_size / self.device.block_size()) as u64)
-            .ok_or(Ext4Error::Overflow)?;
-        self.write_contiguous_device_blocks(device_block, device_block_count, input)?;
-        Ok(())
+            .checked_mul((self.filesystem_block_size / block::SECTOR_SIZE as usize) as u64)
+            .ok_or(Ext4Error::Overflow)
     }
 
     /// Prepares an owned, block-aligned write without submitting it.
@@ -181,20 +162,10 @@ impl FilesystemDevice {
             return Err(Ext4Error::OutOfBounds);
         }
         let blocks = (input.len() / self.filesystem_block_size) as u64;
-        let end = start.get().checked_add(blocks).ok_or(Ext4Error::Overflow)?;
-        if end > self.filesystem_blocks {
-            return Err(Ext4Error::OutOfBounds);
-        }
-        let byte_offset = start
-            .get()
-            .checked_mul(self.filesystem_block_size as u64)
-            .ok_or(Ext4Error::Overflow)?;
-        if !byte_offset.is_multiple_of(512) {
-            return Err(Ext4Error::OutOfBounds);
-        }
+        let sector = self.validate_blocks(start, blocks, input.len())?;
         block::completion::BioWait::prepare(
             self.device.clone(),
-            byte_offset / 512,
+            sector,
             block::BioOperation::Write,
             vec![block::BioVec::new(input)],
         )
@@ -208,32 +179,6 @@ impl FilesystemDevice {
     /// Flushes pending device writes.
     pub(crate) fn flush(&self) -> Ext4Result<()> {
         self.device.flush().map_err(Ext4Error::Device)
-    }
-
-    fn write_contiguous_device_blocks(
-        &self,
-        start: u64,
-        block_count: u64,
-        input: &[u8],
-    ) -> Ext4Result<()> {
-        let expected = usize::try_from(block_count)
-            .map_err(|_| Ext4Error::Overflow)?
-            .checked_mul(self.device.block_size())
-            .ok_or(Ext4Error::Overflow)?;
-        if input.len() != expected {
-            return Err(Ext4Error::InvalidBufferLength {
-                expected,
-                actual: input.len(),
-            });
-        }
-        let end = start.checked_add(block_count).ok_or(Ext4Error::Overflow)?;
-        if end > (self.device.size() / self.device.block_size() as u64) {
-            return Err(Ext4Error::OutOfBounds);
-        }
-
-        self.device
-            .write_block(start, input)
-            .map_err(Ext4Error::Device)
     }
 }
 

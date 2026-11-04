@@ -153,7 +153,9 @@ filesystem block 边界且本段长度为整块倍数时，才把调用者已有
 由后端与既有 DMA 能力层解决设备地址对齐、连续性、映射及缓存维护要求。
 同步调用在设备访问结束后才返回，通用层不复制完整块缓冲区。
 ext4 不保存设备对齐常量或驱动清单，也不为设备地址要求额外创建回退缓冲。
-`FilesystemDevice` 负责 filesystem/device block 换算和长度、范围校验。
+`FilesystemDevice` validates filesystem bounds and buffer lengths, then converts
+filesystem blocks directly to 512-byte sectors. Queue geometry, live media bounds
+and read-only policy are checked by block core; no device geometry is cached.
 部分块仍需 staging 来提取文件范围，与设备地址要求无关；驱动的 DMA/bounce buffer 所有权
 协议不变，这不是端到端零拷贝。
 

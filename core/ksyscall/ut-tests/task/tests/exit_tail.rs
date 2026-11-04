@@ -28,6 +28,7 @@ struct Stages {
     // The leader publishes exit; only the parent releases both held tails.
     has_leader_exited: AtomicBool,
     can_finish: AtomicBool,
+    waiters: WaitQueue,
 }
 
 const START: usize = 1;
@@ -42,6 +43,7 @@ impl Stages {
         // Only the leader writes commands; only the sibling acknowledges them.
         // Release/acquire publishes completed observations before advancing.
         self.command.store(value, Ordering::Release);
+        self.waiters.notify_all(false);
     }
 
     fn acknowledge(&self, value: usize) {
@@ -49,9 +51,11 @@ impl Stages {
     }
 
     fn wait_command(&self, value: usize) {
-        bounded_wait_labeled("sibling wait command", || {
-            self.command.load(Ordering::Acquire) >= value
-        });
+        // A parked tail must stay blocked until the next stage. Polling with
+        // 1 ms timeouts can wake both peers on every tick, so the observer
+        // repeatedly misses Blocked even though the tail is making progress.
+        self.waiters
+            .wait_until(|| self.command.load(Ordering::Acquire) >= value);
     }
 
     fn wait_parked(&self, value: usize, task: &ktask::KtaskRef) {
@@ -62,9 +66,13 @@ impl Stages {
     }
 
     fn wait_finish(&self) {
-        bounded_wait_labeled("child wait finish release", || {
-            self.can_finish.load(Ordering::Acquire)
-        });
+        self.waiters
+            .wait_until(|| self.can_finish.load(Ordering::Acquire));
+    }
+
+    fn release_tails(&self) {
+        self.can_finish.store(true, Ordering::Release);
+        self.waiters.notify_all(false);
     }
 }
 
@@ -200,6 +208,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
         acknowledgement: AtomicUsize::new(0),
         has_leader_exited: AtomicBool::new(false),
         can_finish: AtomicBool::new(false),
+        waiters: WaitQueue::new(),
     });
     let child_stages = stages.clone();
     let child_mm = observed.clone();
@@ -379,7 +388,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
         let mm = observed.upgrade().expect("held exit tails lost their MM");
         assert_eq!(mm.lock().vmas().count(), 0);
     }
-    stages.can_finish.store(true, Ordering::Release);
+    stages.release_tails();
     bounded_wait_labeled("parent wait leader exited", || {
         child.state() == TaskState::Exited
     });

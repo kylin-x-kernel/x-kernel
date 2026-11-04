@@ -743,6 +743,11 @@ sources stay linked. A snapshot owns its parent reference and name, and releases
 the location guard before any notification callback. Cache membership alone is
 not evidence that an entry has been unlinked.
 
+Block files retain their opened device claim, preventing `rdev` reuse from
+redirecting I/O or release. Superblock open/close runs outside registry locks;
+failed open skips fill, and failed fill/final shutdown closes once before
+unregistering. Dead superblock references retain identity without a live holder.
+
 ## Bounded private-fault readahead
 
 Private-fault readahead holds the invalidate lock for reading across EOF

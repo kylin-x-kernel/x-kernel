@@ -90,8 +90,7 @@ impl MemoryBlockDevice {
 
 impl block::BioOperations for MemoryBlockDevice {
     fn submit_bio(&self, mut bio: block::Bio) {
-        let block_id =
-            bio.sector() / (block::BlockDeviceOperations::block_size(self) as u64 / 512);
+        let block_id = bio.sector() / (block::BlockDeviceOperations::block_size(self) as u64 / 512);
         let result = match bio.operation() {
             block::BioOperation::Read => {
                 bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
@@ -124,8 +123,7 @@ fn writes_filesystem_blocks_through_device_block_mapping() {
 #[def_test]
 fn rejects_partial_contiguous_filesystem_block_write() {
     let device = Arc::new(MemoryBlockDevice::new(8));
-    let filesystem =
-        FilesystemDevice::open(crate::io::test_block_device(device), 1024, 4).unwrap();
+    let filesystem = FilesystemDevice::open(crate::io::test_block_device(device), 1024, 4).unwrap();
 
     assert_eq!(
         filesystem.write_contiguous_blocks(FilesystemBlock::new(1), 1, &[0; 512]),
@@ -151,4 +149,27 @@ fn replay_writer_writes_one_block_and_flushes() {
     let bytes = device.bytes.lock();
     assert_eq!(&bytes[1024..2048], input.as_slice());
     assert!(*device.is_flushed.lock());
+}
+
+#[def_test]
+fn filesystem_bounds_and_live_media_bounds_have_distinct_owners() {
+    let backend = Arc::new(MemoryBlockDevice::new(16));
+    let device = test_block_device(backend.clone());
+    let filesystem = FilesystemDevice::open(device.clone(), 1024, 4).unwrap();
+    assert_eq!(
+        filesystem.write_contiguous_blocks(FilesystemBlock::new(4), 1, &[0; 1024]),
+        Err(Ext4Error::OutOfBounds)
+    );
+    assert!(backend.write_lengths.lock().is_empty());
+    device.set_capacity(2).unwrap();
+    assert_eq!(
+        filesystem.write_contiguous_blocks(FilesystemBlock::new(1), 1, &[0; 1024]),
+        Err(Ext4Error::Device(DriverError::InvalidInput))
+    );
+    assert!(backend.write_lengths.lock().is_empty());
+    let mut output = [0; 1024];
+    assert_eq!(
+        filesystem.read_blocks(FilesystemBlock::new(1), 1, &mut output),
+        Err(Ext4Error::Device(DriverError::InvalidInput))
+    );
 }

@@ -37,8 +37,12 @@ format validation belongs to the filesystem consuming the device.
 - `BlockDevice` start and capacity use 512-byte sectors; `num_sectors * 512`
   must be representable in `u64`.
 - One `dev_t` maps to exactly one `BlockDevice` in the resident registry.
-- A canonical `BlockDevice` has at most one exclusive holder at a time;
-  the claim token owns release.
+- A canonical `BlockDevice` has at most one exclusive holder identity at a time;
+  same-holder opens are counted until their last close. Weak holder references
+  prevent address reuse without retaining their objects. Successful driver opens
+  close exactly once; failed opens leave existing claims unchanged. Callbacks run
+  under the disk open mutex, outside registry locks; its existing task-owner check
+  rejects recursive locking. Claim release/drop requires sleepable context.
 - Each I/O has a logically aligned starting sector and total byte length;
   memory-segment boundaries need not be aligned. Its complete sector extent
   lies within current capacity.
@@ -61,7 +65,7 @@ format validation belongs to the filesystem consuming the device.
 
 `BioVec` in `src/bio.rs` retains stable storage through the unsafe `BioMemory`
 contract. Its private borrowed variants erase a slice lifetime only inside
-`BlockDevice::read_block`/`write_block`. Those entry points reject unwinding
+`BlockDevice::read_sectors`/`write_sectors`, also used by the logical-block adapters. Those entry points reject unwinding
 builds before publication, wait non-interruptibly, and dispose of vectors before
 returning. Preparation failures occur before device access. Shared write sources
 never produce mutable slices; read submission rejects shared-only storage.

@@ -18,7 +18,8 @@
 | `struct request` / `blk_mq_ops` | `Request` / `BlkMqOperations` | One-bio dispatch and driver completion |
 | `struct gendisk` | `Gendisk` | Disk identity, queue, `part0`, state, operations |
 | `struct block_device` | `BlockDevice` | `dev_t`, queue, sector range, capacity |
-| `bd_holder` / exclusive `bdev_open` | `BlockDeviceClaim` | Exclusive holder lifetime |
+| Block-device `struct file` / `bdev_open` / `bdev_release` | `BlockDeviceClaim` | Ordinary/exclusive open, mode and driver lifetime |
+| `bd_holder` / `bd_holders` | `BlockDevice::exclusive_holder` | Holder object identity and nested exclusive-open count |
 | `add_disk` / `del_gendisk` | Same-named functions | Explicit publication and withdrawal |
 | `blkdev_get_no_open` | `lookup_block_device` | Canonical `dev_t` lookup |
 | `set_capacity` | `BlockDevice::set_capacity` | Mutable media capacity publication |
@@ -106,10 +107,17 @@ independently constructed `Gendisk` to escape.
 
 ## Exclusive Claims
 
-`BlockDevice::claim_exclusive()` returns the RAII `BlockDeviceClaim`, corresponding
-to Linux block-holder ownership. A canonical device admits one holder at a time.
-The filesystem superblock holds that token directly and releases it on
-initialization failure or when final shutdown enters the dead state. Different
+`BlockDevice::open(mode, holder)` returns an `Arc<BlockDeviceClaim>` for ordinary
+or exclusive opens. It retains the device and mode and pairs each successful
+driver open with exactly one release under `Gendisk::open_mutex`; failure
+publishes no new claim. An explicit holder establishes exclusive ownership; reopens by
+the same object share a count, and only its last close admits another holder.
+An anonymous exclusive open uses its own token identity. Weak holder references
+pin allocation identity without retaining the object or forming a strong cycle.
+Ordinary opens remain independent. Callbacks and token destruction may sleep;
+the existing mutex task-owner check rejects recursive locking before blocking.
+The filesystem superblock is its open's holder, retains the token, and releases it
+on initialization failure or when final shutdown enters the dead state. Different
 filesystem instances cannot own the same media concurrently, and the block core
 needs no knowledge of VFS or filesystem types.
 

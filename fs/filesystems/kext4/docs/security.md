@@ -617,3 +617,8 @@ the new storage path does not make writable quota-feature filesystems safe.
 Mount capability validation therefore rejects quota/project features before
 any recovery writes, including during read-only VFS mount preparation. Disk
 read-only decoding remains available for those feature bits.
+
+Filesystem range/length checks precede sector-addressed Bio I/O. Live media
+capacity, queue alignment and read-only checks remain in block core; a later
+media shrink returns a device error. Aligned byte reads borrow the destination
+and may partially modify it on failure; partial blocks use staging.

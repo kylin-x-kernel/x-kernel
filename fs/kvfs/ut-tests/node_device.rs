@@ -1243,3 +1243,205 @@ fn device_access_policy_gates_open_and_mknod_kinds() {
         );
     }
 }
+
+struct OpenBlockDevice {
+    memory: Arc<MemoryBlockDevice>,
+    modes: Mutex<Vec<BlockOpenMode>>,
+    ioctl_modes: Mutex<Vec<BlockOpenMode>>,
+    releases: core::sync::atomic::AtomicUsize,
+    fail_open: core::sync::atomic::AtomicBool,
+}
+
+impl OpenBlockDevice {
+    fn new(blocks: usize) -> Arc<Self> {
+        use core::sync::atomic::{AtomicBool, AtomicUsize};
+        Arc::new(Self {
+            memory: Arc::new(MemoryBlockDevice {
+                storage: Arc::new(Mutex::new(vec![0x35; blocks * 512])),
+                block_size: 512,
+                flushes: Arc::new(AtomicUsize::new(0)),
+                reads: Arc::new(AtomicUsize::new(0)),
+                writes: Arc::new(AtomicUsize::new(0)),
+                fail_io: Arc::new(AtomicBool::new(false)),
+                fail_after_write_bytes: AtomicUsize::new(usize::MAX),
+            }),
+            modes: Mutex::new(Vec::new()),
+            ioctl_modes: Mutex::new(Vec::new()),
+            releases: AtomicUsize::new(0),
+            fail_open: AtomicBool::new(false),
+        })
+    }
+}
+
+impl block::BlockDeviceOperations for OpenBlockDevice {
+    fn num_blocks(&self) -> u64 {
+        block::BlockDeviceOperations::num_blocks(self.memory.as_ref())
+    }
+
+    fn block_size(&self) -> usize {
+        512
+    }
+
+    fn open(&self, _disk: &block::Gendisk, mode: BlockOpenMode) -> VfsResult<()> {
+        self.modes.lock().push(mode);
+        if self.fail_open.load(core::sync::atomic::Ordering::Relaxed) {
+            Err(VfsError::Io)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn release(&self, _disk: &block::Gendisk) {
+        self.releases
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn ioctl(
+        &self,
+        _device: &BlockDevice,
+        mode: BlockOpenMode,
+        _cmd: u32,
+        _arg: usize,
+        _has_sys_admin: bool,
+    ) -> VfsResult<usize> {
+        self.ioctl_modes.lock().push(mode);
+        Ok(17)
+    }
+}
+
+impl block::BioOperations for OpenBlockDevice {
+    fn submit_bio(&self, bio: block::Bio) {
+        block::BioOperations::submit_bio(self.memory.as_ref(), bio);
+    }
+}
+
+#[def_test(serial)]
+fn block_file_retains_open_identity_across_device_number_reuse() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let old = OpenBlockDevice::new(8);
+    let disk =
+        block::Gendisk::alloc(String::from("open-old"), 242, 0, 1, Box::new(old.clone())).unwrap();
+    let device = block::add_disk(disk).unwrap();
+    let rdev = device.device_number();
+    let flags =
+        crate::OpenFlags::READ_WRITE | crate::OpenFlags::EXCLUSIVE | crate::OpenFlags::NONBLOCK;
+    let (file, _) = open_block_device_file_with(rdev, flags).unwrap();
+    let mode = BlockOpenMode::READ
+        | BlockOpenMode::WRITE
+        | BlockOpenMode::EXCLUSIVE
+        | BlockOpenMode::NONBLOCK;
+    assert_eq!(old.modes.lock().as_slice(), &[mode]);
+    assert!(matches!(
+        open_block_device_file_with(rdev, flags),
+        Err(VfsError::ResourceBusy)
+    ));
+    block::del_gendisk(rdev).unwrap();
+    assert_eq!(file.size(), 4096);
+    file.fsync(false).unwrap();
+
+    let replacement = OpenBlockDevice::new(16);
+    let disk = block::Gendisk::alloc(
+        String::from("open-new"),
+        242,
+        0,
+        1,
+        Box::new(replacement.clone()),
+    )
+    .unwrap();
+    let new_device = block::add_disk(disk).unwrap();
+    assert_eq!(file.llseek(0, SEEK_END).unwrap(), 4096);
+    assert_eq!(new_device.size(), 8192);
+    let mut offset = 0;
+    file.write_from(&[0xa5; 512], &mut offset).unwrap();
+    let mut output = [0; 512];
+    let mut read_offset = 0;
+    file.read_from(&mut output, &mut read_offset).unwrap();
+    assert_eq!(output, [0xa5; 512]);
+    assert!(
+        replacement
+            .memory
+            .storage
+            .lock()
+            .iter()
+            .all(|&byte| byte == 0x35)
+    );
+    let cred = kcred::initial_cred();
+    assert_eq!(file.ioctl(&cred, u32::MAX, 0), Ok(17));
+    file.set_nonblocking(false);
+    assert_eq!(file.ioctl(&cred, u32::MAX, 0), Ok(17));
+    assert_eq!(
+        old.ioctl_modes.lock().as_slice(),
+        &[mode, mode & !BlockOpenMode::NONBLOCK]
+    );
+    assert!(replacement.ioctl_modes.lock().is_empty());
+    let duplicate = file.clone();
+    drop(file);
+    assert_eq!(old.releases.load(Relaxed), 0);
+    drop(duplicate);
+    assert_eq!(old.releases.load(Relaxed), 1);
+    assert_eq!(replacement.releases.load(Relaxed), 0);
+    device.open(BlockOpenMode::EXCLUSIVE, None).unwrap().release();
+    assert_eq!(old.releases.load(Relaxed), 2);
+    block::del_gendisk(rdev).unwrap();
+}
+
+#[def_test(serial)]
+fn failed_block_file_open_leaves_no_holder_or_release_callback() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let backend = OpenBlockDevice::new(8);
+    let disk = block::Gendisk::alloc(
+        String::from("open-fail"),
+        242,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .unwrap();
+    let device = block::add_disk(disk).unwrap();
+    let flags = crate::OpenFlags::EXCLUSIVE;
+    backend.fail_open.store(true, Relaxed);
+    assert!(matches!(
+        open_block_device_file_with(device.device_number(), flags),
+        Err(VfsError::Io)
+    ));
+    assert_eq!(backend.releases.load(Relaxed), 0);
+    backend.fail_open.store(false, Relaxed);
+    let (file, _) = open_block_device_file_with(device.device_number(), flags).unwrap();
+    drop(file);
+    assert_eq!(backend.releases.load(Relaxed), 1);
+    block::del_gendisk(device.device_number()).unwrap();
+}
+
+#[def_test(serial)]
+fn block_file_preserves_ioctl_only_mode_and_allows_raw_readonly_open() {
+    let backend = OpenBlockDevice::new(8);
+    let disk = block::Gendisk::alloc(
+        String::from("open-mode"),
+        242,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .unwrap();
+    let device = block::add_disk(disk).unwrap();
+    let flags = crate::OpenFlags::READ_WRITE | crate::OpenFlags::WRITE_ONLY;
+    let (ioctl_only, _) = open_block_device_file_with(device.device_number(), flags).unwrap();
+    assert_eq!(
+        backend.modes.lock().as_slice(),
+        &[BlockOpenMode::WRITE_IOCTL]
+    );
+    assert!(ioctl_only.read(&mut [0; 512]).is_err());
+    assert!(ioctl_only.write(&[0; 512]).is_err());
+    assert_eq!(
+        ioctl_only.ioctl(&kcred::initial_cred(), u32::MAX, 0),
+        Ok(17)
+    );
+    drop(ioctl_only);
+    device.set_disk_read_only(true).unwrap();
+    let (raw, _) = open_block_device_file(device.device_number())
+        .expect("Linux permits raw writable opens on readonly media");
+    assert!(raw.write(&[0; 512]).is_err());
+    drop(raw);
+    assert_eq!(backend.releases.load(Ordering::Relaxed), 2);
+    block::del_gendisk(device.device_number()).unwrap();
+}
