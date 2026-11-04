@@ -44,15 +44,26 @@ Enabling the feature requires exactly one `kiface` implementation at link time.
   Invariant: This plain `Option<MonotonicInstant>` is only read and written by
   the current CPU's timer callback, and the accessors never return a reference.
   Safe entry point: The timer callback registered by `init_softlockup_detection`.
+- `SOFTLOCKUP_STOP_WORK` is a per-CPU `ktask::CpuStopWork` filled with
+  `unsafe { CpuStopWork::empty() }`. That value owns no heap memory and no
+  queued callback, so copying the template does not alias a live callback.
+  `queue_softlockup_touch` borrows the slot with
+  `unsafe { SOFTLOCKUP_STOP_WORK.get_mut_unchecked(&guard) }` under
+  `NoPreemptIrqSave`. The guard pins this CPU. The timer IRQ and this CPU's
+  Stop thread share the slot; `queued` keeps a second sample from reusing it
+  before the touch returns.
 
 ### `lockup_detection.rs`
 
 - `current_lockup_detection` constructs a kernel-lifetime shared reference from
   the current CPU's slot.
-  Invariant: Callers are pinned watchdog tasks, timer IRQs, or NMIs; the slot is
-  initialized and cannot migrate. `LockupDetection` exposes only shared
-  operations over atomic fields, so these contexts may access it concurrently.
-  Safe entry points: The callbacks and pinned tasks registered by `init_softlockup_detection`.
+  Invariant: Callers are this CPU's Stop thread (`touch_softlockup` via
+  `softlockup_fn`), timer IRQs (`timer_tick` / `check_softlockup`), or NMIs.
+  The slot is initialized and cannot migrate. `LockupDetection` exposes only
+  shared operations over atomic fields, so these contexts may access it
+  concurrently. The pinned watchdog task does not call into this boundary.
+  Safe entry points: The timer callback and Stop callback registered by
+  `init_softlockup_detection`, and the NMI hard-lockup check.
 
 ### `watchdog_task.rs`
 
@@ -94,7 +105,7 @@ Enabling the feature requires exactly one `kiface` implementation at link time.
 | T-02 | NMI does not arrive at the expected interval | Medium (false hard-lockup report) | Delayed or lost NMI under TCG emulation | The hard-lockup counter must first be initialized (`current != 0`); detection is disabled at boot if NMI is unavailable. |
 | T-03 | A CPU can never enter NMI context | High (initiating CPU spins forever) | The CPU's interrupt/NMI handling has stopped | The strong rendezvous intentionally has no timeout because the system is already unusable; documented in the design. |
 | T-04 | Snapshot reentry | Medium (snapshot corruption/deadlock) | NMI interrupts an existing snapshot operation | Skip the dump if `nmi_begin()` fails; `kprint_atomic!` bypasses normal serial locks for best-effort output. |
-| T-05 | False soft-lockup reports flood the console | Low (log storm) | The watchdog task is starved while the timer still runs | Limit reports to one per threshold interval. |
+| T-05 | False soft-lockup reports flood the console | Low (log storm) | The Stop thread does not run while the timer IRQ still does | Limit reports to one per threshold interval. The touch runs on Stop, so a lower-priority task being starved is not itself a softlockup. |
 | T-06 | Sampling accesses the wrong CPU or expired storage | High | Owner migration, duplicate initialization or premature release | Retain one owner in each per-CPU slot under an IRQ/preemption guard, reject duplicate initialization, and rearm only through callback-scoped control on the running CPU. No hotplug or runtime teardown is supported. |
 | T-07 | Late diagnostics trigger an IRQ catch-up loop | High | Reporting takes longer than the sample interval | Rearm once at completion plus the interval. Deadline range failure logs and stops sampling; loss of soft-lockup sampling is the residual risk. |
 
@@ -104,7 +115,7 @@ Enabling the feature requires exactly one `kiface` implementation at link time.
 |----|--------------|-------|--------------|---------------|----------|------------|
 | F-01 | NMI mechanism unavailable | GICv2 or no FEAT_NMI | Hard-lockup detection disabled | Loss of hard-lockup detection; soft-lockup detection cannot cover a hard hang | 3 | Log at boot, check `mode()`, and return. |
 | F-02 | Periodic NMI arming fails | PMU unavailable or arming returns `false` | Hard-lockup detection disabled on this CPU | One CPU loses hard-lockup detection | 3 | Log an error when `enable_periodic_nmi` fails. |
-| F-03 | Watchdog task starved | Scheduling problem | False soft-lockup report | Log storm and snapshot dumps | 3 | Update the timestamp every 4 seconds, use a 20-second threshold, and rate-limit reports. |
+| F-03 | False soft-lockup report | Stop thread does not run while the timer IRQ still does | Soft-lockup log and snapshot | Log and dump, once per threshold interval | 3 | The touch runs on the Stop thread, so a starved lower-priority watchdog task is not a softlockup. Reports are limited to one per threshold interval. |
 | F-04 | Timer interrupts stop | Interrupt masking or hardware failure | `hrtimer_interrupts` stops advancing | NMI detects a hard lockup, then rendezvous and panic follow | 2 | This is the intended behavior of hard-lockup detection. |
 | F-05 | Initiating CPU panics during rendezvous | A task check failed | System stops | Shutdown with diagnostic dump output retained | 1 | Intentional: stop the system while preserving diagnostics. |
 

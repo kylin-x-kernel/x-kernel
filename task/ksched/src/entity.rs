@@ -241,7 +241,7 @@ impl FairEntity {
 /// Kernel-only class used at task construction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KernelClass {
-    /// Per-CPU stop / migration helper. Not activated by `ktask` yet.
+    /// Per-CPU stop / migration helper. `ktask` activates one `migration/%u`.
     Stop,
     /// Per-CPU idle thread.
     Idle,

@@ -168,9 +168,9 @@ impl LockupDetection {
 
 /// Per-CPU soft/hard lockup detection state.
 ///
-/// Only accessed on the owning CPU, from the pinned watchdog thread
-/// (soft-lockup timestamp), timer interrupt (tick / soft-lockup check),
-/// and NMI (hard-lockup check) contexts.
+/// Only accessed on the owning CPU, from the Stop thread (soft-lockup
+/// timestamp), timer interrupt (tick / soft-lockup check), and NMI
+/// (hard-lockup check) contexts.
 // SAFETY: the template contains only atomic integers and booleans initialized
 // to their const reset state; each copied area owns independent atomics.
 unsafe impl kcpu_slot::StaticSlotValue for LockupDetection {}
@@ -192,7 +192,7 @@ fn current_lockup_detection() -> &'static LockupDetection {
     LOCKUP_DETECTION.shared_at(area)
 }
 
-/// Touch softlockup timestamp from the per-CPU watchdog task.
+/// Touch the soft-lockup timestamp from this CPU's Stop thread.
 #[inline]
 pub fn touch_softlockup(timestamp: MonotonicInstant) {
     current_lockup_detection().touch_softlockup(timestamp);

@@ -8,7 +8,8 @@ extern crate alloc;
 
 /// Optional workqueue warning provider, called only from sleepable task context.
 /// Enabling `workqueue-stall-check` requires exactly one linked implementation.
-/// The per-CPU watchdog task invokes it between timestamp updates and sleep.
+/// A pinned watchdog task invokes it, then sleeps. Softlockup timestamps are
+/// updated on the stop thread and do not pass through this trait.
 /// It is separate from fatal
 /// IRQ/NMI checks and must not drain or recover queues. Busy or uninitialized
 /// services may skip inspection without reporting.

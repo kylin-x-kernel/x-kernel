@@ -7,12 +7,8 @@
 use khal::percpu::this_cpu_id;
 use ksched::EnqueueKind;
 
-#[cfg(feature = "smp")]
-use super::rq::request_remote_resched;
-#[cfg(feature = "smp")]
-use super::stats::record_remote_resched;
-use super::{current_run_queue, placement::select_run_queue, rq::with_owner_sched};
-use crate::{KtaskRef, TaskInner, TaskState, api::current};
+use super::{placement::select_run_queue, rq::with_owner_sched};
+use crate::{KCpuMask, KtaskRef, TaskInner, TaskState, api::current};
 
 /// Migrate `migrated_task` onto a CPU its current cpumask allows.
 ///
@@ -113,28 +109,28 @@ fn dequeue_ready_task_waiting_off_cpu(task: &KtaskRef) -> Option<KtaskRef> {
 /// (`activate_task`, wake, or dest idle-pull enqueue) rejects a CPU outside
 /// the new mask under that run queue's lock.
 ///
-/// - current: migrate immediately (same as historical `set_current_affinity`);
-/// - ready on a forbidden RQ: dequeue and `migrate_entry`;
-/// - not queued: mask-only;
-/// - running remotely: request resched and wait for the affinity migrate in
-///   [`CurrentRunQueueRef::preempt_resched`].
+/// - current, or running remotely: `stop_one_cpu` on the CPU it occupies.
+///   The Stop callback dequeues a ready off-CPU task. A task that is already
+///   blocked stays mask-only; its next wake publishes under the destination
+///   run-queue lock. `preempt_resched` / `yield_current` still migrate if
+///   they notice the mask first;
+/// - ready on a forbidden RQ and already off-CPU: dequeue and `migrate_entry`;
+/// - not queued: mask-only.
 ///
-/// Returns `false` only when a remote running task cannot be migrated off a
-/// newly forbidden CPU (no preempt/IPI path, or still there after the wait).
+/// Returns `false` when the stopper is not up (the previous mask is restored)
+/// or the task is still running on a forbidden CPU after the stop.
 ///
 /// The first occupancy check samples `state` and `cpu_id` before the owner
 /// lock. A publish that already read the previous mask can still enqueue on
 /// a CPU this mask forbids, and this call can return success for that
 /// in-flight publish. The task stays there until it leaves that run queue or
 /// a later call observes the updated `cpu_id`.
-pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
+pub(crate) fn enforce_affinity_placement(task: &KtaskRef, old_mask: KCpuMask) -> bool {
     let cpumask = task.cpumask();
 
     if current().ptr_eq(task) {
         if !cpumask.get(this_cpu_id().as_usize()) {
-            let migration_task = spawn_affinity_migration_task(task.clone());
-            current_run_queue::<kspin::NoPreemptIrqSave>().migrate_current(migration_task);
-            assert!(cpumask.get(this_cpu_id().as_usize()), "Migration failed");
+            return stop_and_recheck(task, cpumask, old_mask);
         }
         return true;
     }
@@ -154,25 +150,11 @@ pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
     }
 
     if task.is_running() {
-        #[cfg(feature = "smp")]
-        {
-            let cpu_id = task.cpu_id();
-            debug_assert_ne!(cpu_id, this_cpu_id());
-            let resched_result = request_remote_resched(cpu_id);
-            record_remote_resched(cpu_id, resched_result.is_err());
-            // Same pattern as waiting on `on_cpu`: the remote CPU finishes the
-            // affinity migrate at its next preempt safe point.
-            while task.is_running() && !cpumask.get(task.cpu_id().as_usize()) {
-                core::hint::spin_loop();
-            }
-        }
-        #[cfg(not(feature = "smp"))]
-        {
-            return false;
-        }
+        return stop_and_recheck(task, cpumask, old_mask);
     }
 
-    // Running→Ready on the old RQ can race the IPI wait; take one more dequeue.
+    // A task can become Ready on the old RQ between the first dequeue and this
+    // check. Take one more dequeue when it is off-CPU.
     if !task.is_running()
         && !cpumask.get(task.cpu_id().as_usize())
         && let Some(removed) = dequeue_ready_task_waiting_off_cpu(task)
@@ -182,4 +164,60 @@ pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
 
     // Occupying a forbidden CPU is failure. Anything off-queue is mask-only.
     !task.is_running() || cpumask.get(task.cpu_id().as_usize())
+}
+
+fn stop_and_recheck(task: &KtaskRef, mask: KCpuMask, old_mask: KCpuMask) -> bool {
+    crate::api::assert_sleepable_context("set_task_affinity");
+    let cpu = task.cpu_id();
+    let pinned = task.clone();
+    if !crate::stop_one_cpu(
+        cpu,
+        migration_cpu_stop,
+        core::ptr::from_ref(&pinned).cast::<()>().cast_mut(),
+    ) {
+        // The stopper never ran, so the new mask would leave this task on a
+        // CPU it now forbids.
+        task.set_cpumask(old_mask);
+        return false;
+    }
+    if !task.is_running()
+        && !mask.get(task.cpu_id().as_usize())
+        && let Some(removed) = dequeue_ready_task_waiting_off_cpu(task)
+    {
+        migrate_entry(removed, EnqueueKind::MigrateIn);
+    }
+    !task.is_running() || mask.get(task.cpu_id().as_usize())
+}
+
+/// Stop-thread callback: dequeue a ready off-CPU `task` and migrate it.
+///
+/// A blocked task is not queued. Its wake selects a CPU the new mask allows
+/// and `publish_task` moves `cpu_id` / `nr_home` under that run queue's
+/// scheduler lock. Writing those fields here would race that publish: the
+/// waker does not hold this CPU's run-queue lock. This runs with IRQs
+/// disabled and must not spin on `on_cpu`.
+fn migration_cpu_stop(arg: *mut ()) {
+    // SAFETY: `stop_one_cpu` keeps the caller's `KtaskRef` on the stack until
+    // this callback returns. `wait` does not drop that frame until `notify_done`.
+    let task = unsafe { &*arg.cast::<KtaskRef>() };
+    if task.is_idle() || task.cpu_id() != this_cpu_id() {
+        return;
+    }
+    if task.state().is_blocked()
+        || task.state() == TaskState::Exited
+        || task.on_cpu()
+        || !task.is_ready()
+    {
+        return;
+    }
+    let now_ns = khal::time::monotonic_time_nanos();
+    let mut removed = None;
+    with_owner_sched(task, |sched| {
+        if can_dequeue_ready_task(task.as_ref()) {
+            removed = sched.dequeue(task, now_ns);
+        }
+    });
+    if let Some(removed) = removed {
+        migrate_entry(removed, EnqueueKind::MigrateIn);
+    }
 }

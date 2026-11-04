@@ -175,6 +175,9 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     kipi::enable_fixed_notifications();
 
     ktask::init_softirqd_current_cpu();
+    // Same window as the primary: timer handler is installed, IRQs not yet
+    // enabled, Stop may preempt and enable them from `task_entry`.
+    ktask::init_percpu_helpers();
     super::init_local_irq_work();
     karch::enable_local_irq();
 

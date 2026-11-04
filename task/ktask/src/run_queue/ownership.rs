@@ -20,7 +20,7 @@ impl RunQueue {
     ///   [`super::placement::select_wake_run_queue`]
     ///
     /// Call sites outside `publish_task` / `enqueue_task` / `switch_to_local`
-    /// are limited to boot bring-up before a run queue exists.
+    /// are boot bring-up.
     #[inline]
     pub(super) fn set_owner_cpu(task: &TaskInner, cpu_id: LogicalCpuId) {
         task.set_cpu_id(cpu_id);

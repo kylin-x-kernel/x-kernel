@@ -261,8 +261,8 @@ No user data. The crate operates only on kernel task scheduling metadata.
 
 ## Known limitations
 
-- The Stop queue is in the arbiter, but `ktask` does not create Stop tasks
-  yet and has no stop-machine. `SCHED_DEADLINE` must carry a valid
+- `ktask` creates one `migration/%u` Stop task per run queue and runs the
+  stop-machine. `SCHED_DEADLINE` must carry a valid
   `DlParams`, or `SchedAttr::validate` rejects it with `InvalidPolicy`. A
   per-RQ admission failure is `AdmissionFull`, not a permission check.
 - `sched_setscheduler` / `sched_setattr` move FIFO/RR into `RtClass` and

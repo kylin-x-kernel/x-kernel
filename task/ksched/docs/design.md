@@ -169,11 +169,11 @@ RR slice. A class change dequeues, switches, and enqueues.
 
 ### Stop class
 
-Each RQ has at most one Stop task, reserved for a future per-CPU
-`migration/%u`. It may be a waiter or the runner in `Scheduler::curr`, but
-those cannot be two different tasks. This layer only implements the queue.
-`ktask` does not create Stop tasks yet and does not run a stop-machine.
-Creation and wake must already satisfy that rule when they are wired in.
+Each RQ has at most one Stop task. `ktask` creates and wakes one
+`migration/%u` per run queue and runs the stop-machine on it. It may be a
+waiter or the runner in `Scheduler::curr`, but those cannot be two
+different tasks. This layer only implements the queue. Creation and wake
+already satisfy the one-Stop-task rule.
 
 - The caller guarantees one Stop task per RQ. `enqueue` (a waiter is already
   present, or the current runner is already Stop) and `install_current` (via

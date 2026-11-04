@@ -8,6 +8,7 @@
 
 use core::sync::atomic::Ordering;
 
+use ktime_types::TimeSpan;
 use unittest::{assert, def_test};
 
 use super::*;

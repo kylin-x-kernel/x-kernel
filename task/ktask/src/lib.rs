@@ -29,6 +29,8 @@ compile_error!(
 );
 
 unittest::path_mod_test!(tests, "../ut-tests/task_lifecycle.rs");
+#[cfg(unittest)]
+unittest::path_mod_test!(tests_stop_machine, "../ut-tests/stop_machine.rs");
 
 #[macro_use]
 extern crate log;
@@ -53,6 +55,7 @@ mod run_queue;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
 mod softirqd;
+mod stop_machine;
 mod task;
 mod task_api;
 #[cfg(feature = "snapshot")]
@@ -72,6 +75,7 @@ pub use self::{
     completion::wait_for_completion,
     lock_owner::{LockOwner, LockOwnerState, can_optimistic_spin},
     softirqd::init_current_cpu as init_softirqd_current_cpu,
+    stop_machine::{CpuStopWork, stop_one_cpu, stop_one_cpu_nowait},
     timers::{CancelResult, Expiration, Timer, TimerControl, TimerHandler},
     tracing_hooks::register_sched_trace_hooks,
 };

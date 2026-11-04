@@ -273,6 +273,16 @@ pub fn init_scheduler_secondary() {
     crate::run_queue::init_secondary();
 }
 
+/// Activate this CPU's Stop (`migration/%u`) helper.
+///
+/// Call after the timer IRQ handler is registered and before local IRQs are
+/// enabled on a CPU that has not yet run this helper. Stop is the highest
+/// class, so activating it can immediately preempt the bring-up task and
+/// enable IRQs in `task_entry`.
+pub fn init_percpu_helpers() {
+    crate::stop_machine::init_current_cpu();
+}
+
 cpu_slot_cell! {
     /// Absolute monotonic ns of the next schedule-evaluation deadline, or
     /// `0` if none.
@@ -751,17 +761,20 @@ pub fn init_task_sched_attr(child: &KtaskRef, attr: SchedAttr) -> Result<(), Sch
 /// occupying a CPU: only the mask changes, and the next enqueue selects a
 /// legal CPU.
 ///
-/// Returns `false` if `cpumask` is empty, or (on SMP) if a remote running task
-/// could not be migrated off a newly forbidden CPU. On success the task is not
-/// left running or queued on a CPU outside `cpumask`.
+/// Returns `false` if `cpumask` is empty, or (on SMP) if the task is still
+/// running on a newly forbidden CPU. A failed stop-thread queue restores the
+/// previous mask. On success the task is not left running or queued on a CPU
+/// outside `cpumask`.
 pub fn set_task_affinity(task: &KtaskRef, cpumask: KCpuMask) -> bool {
     if cpumask.is_empty() {
         return false;
     }
+    #[cfg(feature = "smp")]
+    let old_mask = task.cpumask();
     task.set_cpumask(cpumask);
     #[cfg(feature = "smp")]
     {
-        crate::run_queue::enforce_affinity_placement(task)
+        crate::run_queue::enforce_affinity_placement(task, old_mask)
     }
     #[cfg(not(feature = "smp"))]
     {
@@ -912,7 +925,7 @@ pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
     }
 }
 
-fn assert_sleepable_context(operation: &'static str) {
+pub(crate) fn assert_sleepable_context(operation: &'static str) {
     assert!(
         is_sleepable_context(),
         "{operation} called from non-sleepable context: no non-idle current task, interrupt-like, \

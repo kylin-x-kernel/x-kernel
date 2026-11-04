@@ -953,6 +953,9 @@ fn init_interrupt() {
     // Handler publication succeeded above; ordinary CPU delivery is still off.
     activate_local_interrupts();
     ktask::init_softirqd_current_cpu();
+    // Stop can preempt immediately and `task_entry` enables IRQs. The timer
+    // handler above must already be registered.
+    ktask::init_percpu_helpers();
     // Enable IRQs before starting app
     karch::enable_local_irq();
 }

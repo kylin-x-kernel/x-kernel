@@ -8,15 +8,17 @@ Enable `KFEAT_WATCHDOG=y` in the kernel configuration to include these tests.
 
 The optional `workqueue-stall-check` feature declares `WorkqueueStallInspectorIf` through
 `kiface`. A linked workqueue provider implements task-context, warning-only backlog
-inspection. The per-CPU watchdog task invokes it after updating its soft-lockup
-timestamp and before sleeping for four seconds. It does not depend on a concrete
+inspection. The per-CPU watchdog task invokes it before sleeping for four
+seconds. It does not depend on a concrete
 workqueue implementation. Queue backlog only produces warnings; the legacy fatal
 system-workqueue check is no longer registered. Soft/hard lockup checks are unchanged.
 
 `io/watchdog` provides X-Kernel's soft-lockup and hard-lockup detection:
 
-- Soft lockup: A watchdog task on each CPU periodically updates a timestamp;
-  a timer callback checks whether that timestamp has expired.
+- Soft lockup: each CPU's timer IRQ queues `stop_one_cpu_nowait` so the
+  Stop thread updates a timestamp; the same callback checks whether that
+  timestamp has expired. A touch that never runs while IRQs still fire is
+  the softlockup signal.
 - Hard lockup: NMI support (the `nmi` feature) periodically checks whether the local
   CPU's timer interrupt count is still advancing.
   A failed check triggers a global rendezvous, collects snapshots, and panics.
@@ -50,7 +52,7 @@ this crate is the NMI consumer.
         +---------+-------------------+                       |
         v                             v                       v
  touch/check_softlockup           timer_tick          check_watchdog_tasks
- (watchdog task + timer)      (hard-lockup count)         (NMI context)
+ (timer → Stop thread)        (hard-lockup count)         (NMI context)
         |                             |                       |
         +-----------------------------+-----------------------+
                                       |
@@ -71,7 +73,9 @@ this crate is the NMI consumer.
 | `init_nmi_watchdog` | Boot, with the NMI feature | Checks `khal::nmi::mode()`; logs and disables hard-lockup detection when it returns `None`. |
 | NMI callback registered through `enable_periodic_nmi` | NMI context | Only NMI-safe operations: atomics, snapshots, and `kprint_atomic!`, including lock-free argument formatting. Ordinary IRQ spinlocks are forbidden. |
 | Timer callback (`timer_tick` / soft-lockup check) | Timer interrupt, with IRQs disabled | Per-CPU atomic accesses. |
-| Watchdog task | One task pinned to each CPU | Updates the soft-lockup timestamp, optionally inspects workqueue backlog, then sleeps for 4 seconds. |
+| Timer callback queues `stop_one_cpu_nowait` | Timer interrupt, with IRQs disabled | Hands `touch_softlockup` to this CPU's Stop thread. Does not wait. |
+| Stop callback (`softlockup_fn`) | Per-CPU Stop thread, IRQs disabled | Updates the soft-lockup timestamp. Must not sleep. |
+| Watchdog task | One task pinned to each CPU | With `workqueue-stall-check`, inspects workqueue backlog, then sleeps for 4 seconds. It does not update the soft-lockup timestamp. |
 
 ## State Machines
 
@@ -112,7 +116,11 @@ must use it carefully.
 
 ### Soft-Lockup Detection
 
-- The watchdog task pinned to each CPU calls `touch_softlockup` every 4 seconds.
+- Each sample queues `stop_one_cpu_nowait` on this CPU. The Stop thread calls
+  `touch_softlockup`. The per-CPU `CpuStopWork` stays in `SOFTLOCKUP_STOP_WORK`
+  until that callback returns.
+- A pinned watchdog task still sleeps 4 seconds. With `workqueue-stall-check`
+  it inspects queue backlog. It does not update the softlockup timestamp.
 - Each CPU retains a `ktask::Timer<SoftlockupTimer>` in `SOFTLOCKUP_TIMER`,
   allocated once during local initialization. The first sample is 4 seconds
   later; the callback explicitly rearms on its owner CPU for completion time
@@ -151,8 +159,9 @@ must use it carefully.
 ## Design Decisions
 
 - **Thresholds:** 20 seconds for soft lockups and 10 seconds for hard lockups.
-  The watchdog task updates its timestamp every 4 seconds, providing five chances
-  within the 20-second threshold to avoid false reports.
+  The timer samples every 4 seconds and the Stop thread updates the timestamp,
+  so a starved lower-priority task is not a softlockup. Reports are limited to
+  one per threshold interval.
 - **Strong rendezvous without a timeout:** The initiating CPU waits for every CPU
   before dumping snapshots, avoiding missing CPU snapshots.
   If any CPU cannot enter NMI context, the wait is permanent; this is accepted

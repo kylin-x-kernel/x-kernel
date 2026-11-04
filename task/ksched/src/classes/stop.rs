@@ -11,8 +11,7 @@
 //! The failure is a kernel bug: this trait has no error return, and a second
 //! Stop task is not a recoverable user failure.
 //! The runner is never preempted by a lower class and is not charged a slice.
-//! `ktask` does not activate this class yet; when it does, it must create and
-//! wake only one Stop task per runqueue.
+//! `ktask` creates and wakes one `migration/%u` Stop task per runqueue.
 
 use crate::{
     class::{ClassOps, EnqueueKind, LeaveReason},

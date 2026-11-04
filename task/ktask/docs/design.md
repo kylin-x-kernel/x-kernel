@@ -254,6 +254,7 @@ task/ktask/
 │   ├── task_api.rs            # shared task execution/context/completion providers
 │   ├── timer_api.rs           # kiface-time-api scoped one-shot timer provider
 │   ├── softirqd.rs            # ksoftirqd/N daemon
+│   ├── stop_machine.rs        # per-CPU migration/%u Stop thread
 │   ├── run_queue/             # per-CPU RQ: ownership, placement, switch
 │   │   ├── mod.rs             # RunQueue type, per-CPU slots, registry, init
 │   │   ├── rq.rs              # leave / pick / switch / kick
@@ -434,9 +435,21 @@ entries:
 - `rq.rs` `leave_current` / `pick` / `resched` / `switch_to` operate only on
   the current CPU's queue. `switch_to` requires local IRQs already off.
   Idle-pull runs from task context when this CPU is about to idle.
-- `migrate.rs` `enforce_affinity_placement` runs in task context after
-  `set_cpumask`. A remote running task only gets a resched IPI; the caller
-  does not `switch_to` on the remote CPU.
+- `migrate.rs` `enforce_affinity_placement` runs in sleepable task context
+  after `set_cpumask`. A current task or a remote running task on a forbidden
+  CPU calls `stop_one_cpu` on that CPU and waits until its Stop thread has
+  run `migration_cpu_stop`. If the stopper is not up yet, the previous mask
+  is restored and the call returns `false`. A ready off-CPU task is dequeued
+  and `migrate_entry`'d. The caller does not `switch_to` on the remote CPU.
+- `init_percpu_helpers` runs once per CPU after the timer IRQ handler is
+  registered and before local IRQs are enabled. Activating Stop can preempt
+  the bring-up task immediately; `task_entry` then enables IRQs.
+- `stop_one_cpu` requires sleepable task context and does not return until
+  the callback has run and `notify_one` has finished writing the stack
+  completion. The callback runs on the target CPU with IRQs disabled and
+  must not sleep, block, or call `stop_one_cpu`. `stop_one_cpu_nowait` may
+  run from IRQ context; the caller keeps `CpuStopWork` pinned until the
+  callback returns, and a slot that is already queued is left unchanged.
 - IRQ / IPI paths may call `request_remote_resched` / `kick_running_task`,
   but must not `account` / `refresh` the dest RQ from an IPI callback.
 
@@ -1138,20 +1151,24 @@ ordinary IRQ before worker submission, without inline Task destruction.
   snapshot and does not hold a task `Arc`. `pick_next` requires a prior
   `leave_current` and no longer silently erases stale state.
 - `set_task_affinity` writes `cpumask` then `enforce_affinity_placement`.
-  Migration happens only while the task **occupies** a CPU: current
-  immediately `migrate_current`; ready already on a forbidden RQ is
-  `remove_task` then `migrate_entry` (dest enqueue then `kick(Decision)`,
-  same as `add_task`). Yield/preempt requeue the runner as `Ready` before
-  `switch_to` (it must be in the tree for this `pick_next`), so a queued
-  task can still be `on_cpu`. The dequeue checks `!on_cpu` under the source
-  RQ lock (a queued task cannot be picked there) and otherwise drops the lock
-  and spins until the old CPU's `finish_task_switch` clears `on_cpu`. A miss
-  while already off-CPU is a detached seat and returns without retrying;
-  publishing a still-`on_cpu` task would resume one stack on two CPUs. A remote running
-  task under `preempt`+`ipi` gets
-  a reschedule IPI, and `preempt_resched` / `yield_current` force-migrate
-  when the mask no longer contains this CPU. The caller spins until the
-  task leaves the forbidden CPU; failure returns `false` (syscall `EBUSY`).
+  Migration happens only while the task **occupies** a CPU. Current and a
+  remote running task sleep in `stop_one_cpu` on the CPU they occupy. The
+  Stop callback dequeues a ready off-CPU task and `migrate_entry`s it. A
+  task that is already blocked is not rewritten: its next wake publishes
+  under the destination run-queue lock, which rejects a forbidden CPU and
+  moves `cpu_id` / `nr_home` there. If the stopper is not up yet,
+  the previous mask is restored and the call returns `false`. Ready already
+  on a forbidden RQ and off-CPU is dequeued then `migrate_entry` (dest enqueue
+  then `kick(Decision)`, same as `add_task`). Yield/preempt requeue the runner
+  as `Ready` before `switch_to` (it must be in the tree for this `pick_next`),
+  so a queued task can still be `on_cpu`. The dequeue checks `!on_cpu` under
+  the source RQ lock (a queued task cannot be picked there) and otherwise
+  drops the lock and spins until the old CPU's `finish_task_switch` clears
+  `on_cpu`. A miss while already off-CPU is a detached seat and returns
+  without retrying; publishing a still-`on_cpu` task would resume one stack
+  on two CPUs. `preempt_resched` / `yield_current` still `migrate_current`
+  when they notice the mask no longer contains this CPU. Failure returns
+  `false` (syscall `EBUSY`).
   A prepared-but-not-activated task, Blocked/Exited, and the idle-pull
   steal-to-enqueue gap (Ready, on no queue) do not occupy a CPU, so the
   path is mask-only. Every publish (`activate_task`, wake, deferred wake,

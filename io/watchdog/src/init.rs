@@ -24,10 +24,17 @@ kcpu_slot::cpu_slot_cell_with_template! {
 const SOFTLOCKUP_TOUCH_INTERVAL: TimeSpan = TimeSpan::from_secs(4);
 const WATCHDOG_TASK_PRIO: isize = -20;
 
+// Reused by the timer IRQ. The Stop thread clears `queued` before returning
+// from the touch, so the next sample can claim the same slot.
+kcpu_slot::cpu_slot_cell_with_template! {
+    // SAFETY: `CpuStopWork::empty` owns no heap memory and no queued callback.
+    static SOFTLOCKUP_STOP_WORK: ktask::CpuStopWork = unsafe { ktask::CpuStopWork::empty() };
+}
+
 /// Common watchdog initialization for both primary and secondary CPUs.
 ///
 /// It sets up:
-/// - soft lockup detection (timer check + per-CPU watchdog task)
+/// - soft lockup detection (timer check queued onto the per-CPU stop thread)
 fn init_common() {
     // Hardlockup is "this CPU stopped taking timer IRQs", not "the 4s sample
     // callback did not run between two PMU NMIs". Count every local timer IRQ.
@@ -158,6 +165,8 @@ impl ktask::TimerHandler for SoftlockupTimer {
         let now = khal::time::monotonic_time();
         crate::timer_tick(now);
 
+        queue_softlockup_touch();
+
         if crate::check_softlockup(now) {
             let guard = NoPreemptIrqSave::new();
             let last = LAST_SOFTLOCKUP_REPORT.read(&guard);
@@ -187,8 +196,9 @@ impl ktask::TimerHandler for SoftlockupTimer {
 
 /// Initialize soft lockup detection once on the current CPU after scheduler setup.
 ///
-/// A per-CPU watchdog task periodically updates a timestamp, and a retained
-/// timer checks whether the timestamp is stale. Its callback rearms on that CPU.
+/// A retained timer queues a touch on this CPU's stop thread and checks
+/// whether the timestamp is stale. A Stop-class touch that never runs while
+/// IRQs still fire is the softlockup signal. The callback rearms on that CPU.
 ///
 /// # Panics
 /// Panics if this CPU's timer was already initialized or its first deadline
@@ -247,7 +257,6 @@ fn start_softlockup_watchdog_task(cpu_id: LogicalCpuId) {
 
 fn softlockup_watchdog_task() {
     loop {
-        crate::touch_softlockup(khal::time::monotonic_time());
         #[cfg(feature = "workqueue-stall-check")]
         crate::WorkqueueStallInspectorIf::inspect(
             khal::percpu::this_cpu_id(),
@@ -256,6 +265,19 @@ fn softlockup_watchdog_task() {
         );
         ktask::sleep(SOFTLOCKUP_TOUCH_INTERVAL);
     }
+}
+
+fn queue_softlockup_touch() {
+    let guard = NoPreemptIrqSave::new();
+    // SAFETY: the guard pins this CPU. The timer callback and the stop thread
+    // on this CPU share the slot; `queued` keeps a second sample from reusing
+    // it before the touch returns.
+    let work = unsafe { SOFTLOCKUP_STOP_WORK.get_mut_unchecked(&guard) };
+    let _ = ktask::stop_one_cpu_nowait(this_cpu_id(), softlockup_fn, core::ptr::null_mut(), work);
+}
+
+fn softlockup_fn(_arg: *mut ()) {
+    crate::touch_softlockup(khal::time::monotonic_time());
 }
 
 /// Initialize watchdogs on the primary CPU.
