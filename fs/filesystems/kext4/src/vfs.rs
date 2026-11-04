@@ -10,14 +10,14 @@ use iov_iter::{IovIterDest, IovIterSource};
 use kerrno::LinuxError;
 use ktime_types::SystemTime;
 use kvfs::{
-    AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FMode, FiemapExtentFlags,
-    FiemapExtentInfo, FiemapFlags, FileDirOperations, FileMappingOperations, FileOperations,
-    InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations, InodeOperations,
-    InodeSymlinkOperations, InodeTimes, InodeUpdateTime, Kiocb, LockedDentry, Metadata,
-    MetadataUpdate, NodePermission, NodeType, ReadaheadControl, RenameFlags, StatFs, SuperBlock,
-    SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit,
-    VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName, XattrNameRef,
-    XattrNameSink, XattrSetFlags, default_evict_inode, inode_init_owner,
+    AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FMode, FallocateFlags,
+    FiemapExtentFlags, FiemapExtentInfo, FiemapFlags, FileDirOperations, FileMappingOperations,
+    FileOperations, InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations,
+    InodeOperations, InodeSymlinkOperations, InodeTimes, InodeUpdateTime, Kiocb, LockedDentry,
+    Metadata, MetadataUpdate, NodePermission, NodeType, ReadaheadControl, RenameFlags, StatFs,
+    SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode,
+    VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName,
+    XattrNameRef, XattrNameSink, XattrSetFlags, default_evict_inode, inode_init_owner,
 };
 use pagecache::FolioRead;
 
@@ -321,7 +321,7 @@ fn ext4_private(super_block: &SuperBlock) -> VfsResult<&Ext4Mount> {
 /// private data. The operation table remains shared across mounts.
 pub(crate) struct Ext4SuperOperations;
 
-static EXT4_SUPER_OPERATIONS: Ext4SuperOperations = Ext4SuperOperations;
+pub(crate) static EXT4_SUPER_OPERATIONS: Ext4SuperOperations = Ext4SuperOperations;
 
 impl Ext4SuperOperations {
     /// Fills a newly reserved ext4 superblock from its canonical block device.
@@ -390,7 +390,18 @@ impl Ext4SuperOperations {
         })
     }
 
-    fn iget_from_private(
+    /// Builds the VFS inode for an already-loaded ext4 inode.
+    ///
+    /// - `super_block`: mounted ext4 superblock.
+    /// - `private`: ext4 inode payload handed to the new VFS inode.
+    ///
+    /// Returns: the cached VFS inode for `private.number()`, initialized on
+    /// first use.
+    ///
+    /// Errors: inode construction errors propagate unchanged.
+    ///
+    /// Locking: none; may sleep while the VFS inode is initialized.
+    pub(crate) fn iget_from_private(
         super_block: &Arc<SuperBlock>,
         private: Ext4Inode,
     ) -> VfsResult<Arc<VfsInode>> {
@@ -1643,6 +1654,75 @@ impl FileOperations for Ext4Inode {
             })
             .map_err(into_vfs_err)?;
         Ok(())
+    }
+
+    /// Declares plain allocation plus `KEEP_SIZE`; `UNSHARE_RANGE` needs
+    /// reflink, which ext4 lacks.
+    ///
+    /// Returns: `KEEP_SIZE`.
+    fn supported_fallocate_modes(&self) -> FallocateFlags {
+        FallocateFlags::KEEP_SIZE
+    }
+
+    /// Preallocates unwritten extents for a regular file.
+    ///
+    /// - `file`: the open file; its inode supplies the VFS and ext4 state.
+    /// - `flags`: must be within `supported_fallocate_modes`.
+    /// - `offset`: range start in bytes.
+    /// - `len`: range length in bytes; `0` is a no-op.
+    ///
+    /// Returns: `()`; the visible size is published here when the request
+    /// grows the file.
+    ///
+    /// Errors: `EOPNOTSUPP` for non-regular inodes, `EFBIG` past the
+    /// filesystem size bound; core errors propagate unchanged.
+    ///
+    /// Locking: called with the inode data lock and the address-space
+    /// invalidate lock held; takes the ext4 write lock and publishes size
+    /// through `truncate_setsize`. May sleep on device I/O.
+    fn fallocate(
+        &self,
+        file: &VfsFile,
+        flags: FallocateFlags,
+        offset: u64,
+        len: u64,
+    ) -> VfsResult<()> {
+        if self.kind() != InodeKind::RegularFile {
+            return Err(VfsError::from(LinuxError::EOPNOTSUPP));
+        }
+        let keep_size = flags.contains(FallocateFlags::KEEP_SIZE);
+        if len == 0 {
+            return Ok(());
+        }
+        let end = offset.checked_add(len).ok_or(VfsError::FileTooLarge)?;
+        let vfs_inode = file.inode();
+        let super_block = ext4_super_block(vfs_inode)?;
+        let ext4 = ext4_private(&super_block)?;
+        if end > Ext4SuperOperations::max_file_size(ext4, &super_block, self) {
+            return Err(VfsError::FileTooLarge);
+        }
+        let timestamp = current_ext4_timestamp(vfs_inode);
+        let mut committed_end = 0u64;
+        let result = ext4
+            .fallocate_regular_inode_preallocate(
+                &super_block,
+                self,
+                offset,
+                len,
+                keep_size,
+                timestamp,
+                &mut committed_end,
+            )
+            .map_err(into_vfs_err);
+        // Publish the committed prefix on success and partial failure so the
+        // writeback `visible_size < disk_size` guard stays satisfiable; `0`
+        // (KEEP_SIZE / first-batch failure) and the `> size` check skip it.
+        if committed_end > self.size() {
+            // Dispatch holds the data and invalidate locks, so writeback is
+            // excluded while `disk_size` already leads the visible size.
+            vfs_inode.truncate_setsize(committed_end)?;
+        }
+        result
     }
 }
 

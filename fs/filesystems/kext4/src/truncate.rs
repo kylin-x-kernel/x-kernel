@@ -108,10 +108,22 @@ impl Ext4SbInfo {
         Ok(())
     }
 
-    /// Discards unwritten preallocation beyond a regular file's `i_disksize`.
+    /// Discards initialized mappings beyond a regular file's `i_disksize`.
     ///
-    /// Active delayed-allocation reservations make this operation a no-op so
-    /// allocation state cannot be discarded underneath dirty page-cache data.
+    /// Unwritten preallocation is kept so fallocate reservations survive the
+    /// final writable close; writeback speculative preallocation lives only in
+    /// the in-memory prealloc-space index and is reclaimed by
+    /// `release_preallocs` here. Active delayed-allocation reservations make
+    /// this a no-op.
+    ///
+    /// - `inode`: regular file at its final writable close.
+    ///
+    /// Returns: `()` after nothing-to-do or a committed discard.
+    ///
+    /// Errors: journal and extent-tree errors propagate unchanged.
+    ///
+    /// Locking: caller holds the ext4 write lock; opens a journal transaction
+    /// and may sleep.
     pub(crate) fn discard_regular_inode_preallocations(
         &mut self,
         inode: &Ext4Inode,
@@ -121,7 +133,7 @@ impl Ext4SbInfo {
             return Ok(());
         }
         let disk_blocks = file_block_count(inode.disk_size(), self.layout().block_size())?;
-        if !self.has_extent_mapping_from(inode, LogicalBlock::new(disk_blocks))? {
+        if !self.has_initialized_extent_mapping_from(inode, LogicalBlock::new(disk_blocks))? {
             return Ok(());
         }
 
@@ -131,8 +143,8 @@ impl Ext4SbInfo {
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
         )?;
         let mut handle = journal.begin(credits)?;
-        let blocks = file_block_count(inode.disk_size(), self.layout().block_size())?;
-        let result = self.truncate_extent_mappings(inode, LogicalBlock::new(blocks), &mut handle);
+        let result =
+            self.truncate_extent_mappings(inode, LogicalBlock::new(disk_blocks), true, &mut handle);
         self.complete_metadata_mutation(handle, result)
     }
 
@@ -227,7 +239,7 @@ impl Ext4SbInfo {
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
         let blocks = file_block_count(new_size, self.layout().block_size())?;
-        self.truncate_extent_mappings(inode, LogicalBlock::new(blocks), handle)?;
+        self.truncate_extent_mappings(inode, LogicalBlock::new(blocks), false, handle)?;
         self.remove_orphan(inode, handle)
     }
 
@@ -238,11 +250,28 @@ impl Ext4SbInfo {
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
         let blocks = file_block_count(target_size, self.layout().block_size())?;
-        self.truncate_extent_mappings(inode, LogicalBlock::new(blocks), handle)?;
+        self.truncate_extent_mappings(inode, LogicalBlock::new(blocks), false, handle)?;
         self.remove_orphan(inode, handle)
     }
 
-    fn zero_regular_inode_tail_data(&self, inode: &Ext4Inode, new_size: u64) -> Ext4Result<()> {
+    /// Zeroes the bytes from `new_size` to the end of its partial block.
+    ///
+    /// - `inode`: regular file whose tail is cleared; hole and unwritten tails
+    ///   already read as zeroes and are skipped.
+    /// - `new_size`: size in bytes; the block containing byte `new_size - 1` is
+    ///   cleared from `new_size % block_size` onward.
+    ///
+    /// Returns: `()`; a block-aligned or zero `new_size` needs no work.
+    ///
+    /// Errors: device and corruption errors propagate unchanged.
+    ///
+    /// Locking: caller holds the ext4 write lock; reads, writes and flushes the
+    /// device, so it may sleep.
+    pub(crate) fn zero_regular_inode_tail_data(
+        &self,
+        inode: &Ext4Inode,
+        new_size: u64,
+    ) -> Ext4Result<()> {
         let block_size = u64::from(self.layout().block_size());
         let tail = new_size % block_size;
         if new_size == 0 || tail == 0 {
@@ -276,7 +305,15 @@ impl Ext4SbInfo {
     }
 }
 
-fn file_block_count(size: u64, block_size: u32) -> Ext4Result<u64> {
+/// Number of blocks needed to hold `size` bytes.
+///
+/// - `size`: byte count; `0` yields `0`.
+/// - `block_size`: block size in bytes; must be non-zero.
+///
+/// Returns: `size` rounded up to whole blocks.
+///
+/// Errors: `Overflow` when the rounded count exceeds `u64`.
+pub(crate) fn file_block_count(size: u64, block_size: u32) -> Ext4Result<u64> {
     if size == 0 {
         return Ok(0);
     }

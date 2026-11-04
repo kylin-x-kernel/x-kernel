@@ -355,7 +355,34 @@ pub trait FileOperations: Send + Sync + 'static {
         Ok(())
     }
 
+    /// fallocate mode bits this backend accepts, mirroring Linux per-filesystem
+    /// capability masks.
+    ///
+    /// Returns: the accepted mask. Plain allocation is the empty flag set and
+    /// always passes, so backends supporting only plain allocation keep the
+    /// default empty mask.
+    ///
+    /// Locking: none; [`VfsFile::fallocate`] consults it before taking locks.
+    fn supported_fallocate_modes(&self) -> FallocateFlags {
+        FallocateFlags::empty()
+    }
+
     /// Applies filesystem-specific space allocation or range-shift operations.
+    ///
+    /// - `file`: the open file whose inode and address space own the range.
+    /// - `flags`: mode bits; all declared by `supported_fallocate_modes`.
+    /// - `offset`: range start in bytes.
+    /// - `len`: range length in bytes.
+    ///
+    /// Returns: `()` once the operation is applied.
+    ///
+    /// Errors: the default implementation answers `EOPNOTSUPP`, matching Linux
+    /// when a file has no fallocate handler; implementations return their own
+    /// errors.
+    ///
+    /// Locking: called by [`VfsFile::fallocate`] with the inode data lock and
+    /// the address-space invalidate lock held exclusively. Publish size through
+    /// [`VfsInode::truncate_setsize`]; the self-locking helpers deadlock here.
     fn fallocate(
         &self,
         _file: &VfsFile,
@@ -1309,8 +1336,41 @@ impl VfsFile {
     }
 
     /// Applies filesystem-specific space allocation or range-shift operations.
+    ///
+    /// - `flags`: mode bits; must be within the backend's
+    ///   `supported_fallocate_modes` declaration.
+    /// - `offset`: range start in bytes.
+    /// - `len`: range length in bytes.
+    ///
+    /// Returns: `()` once the backend completed the operation.
+    ///
+    /// Errors: `EOPNOTSUPP` when the backend does not declare a requested mode
+    /// bit; backend errors propagate unchanged.
+    ///
+    /// Locking: holds the inode data lock and the address-space invalidate
+    /// lock exclusively across the backend call, like `set_len`; writeback
+    /// samples the visible size under the invalidate read lock, so excluding it
+    /// keeps a batch from carrying a stale size snapshot past a disk-size
+    /// advance.
     pub fn fallocate(&self, flags: FallocateFlags, offset: u64, len: u64) -> VfsResult<()> {
-        self.operations().fallocate(self, flags, offset, len)
+        let inode = self.inode();
+        let operations = self.operations();
+        if !operations.supported_fallocate_modes().contains(flags) {
+            return Err(VfsError::from(LinuxError::EOPNOTSUPP));
+        }
+        let _data_guard = inode.lock_data();
+        let _invalidate_guard = self.mapping().lock_invalidate_exclusive();
+        operations.fallocate(self, flags, offset, len)
+    }
+
+    /// Returns this file's backend fallocate capability mask.
+    ///
+    /// Returns: the declared mask; empty means the backend has no real
+    /// fallocate, so the syscall layer may emulate plain allocation.
+    ///
+    /// Locking: none.
+    pub fn supported_fallocate_modes(&self) -> FallocateFlags {
+        self.operations().supported_fallocate_modes()
     }
 
     /// Polls this open file (Linux `vfs_poll`).

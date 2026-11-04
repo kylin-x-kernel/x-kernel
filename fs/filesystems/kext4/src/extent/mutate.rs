@@ -173,7 +173,7 @@ impl Ext4SbInfo {
             return Ok(0);
         };
         let mut remaining_extents = collected.extents.clone();
-        let released_extents = remove_extent_range(&mut remaining_extents, range)?;
+        let released_extents = remove_extent_range(&mut remaining_extents, range, false)?;
         if released_extents.is_empty() {
             return Ok(0);
         }
@@ -421,26 +421,46 @@ impl Ext4SbInfo {
     ) -> Ext4Result<()> {
         self.begin_extent_mutation(inode)?;
         let range = LogicalExtentRange::new(logical, len)?;
-        if self.try_remove_extent_range_path_local(inode, range, handle)? {
+        if self.try_remove_extent_range_path_local(inode, range, false, handle)? {
             return Ok(());
         }
-        self.mutate_extent_tree(inode, handle, |extents| remove_extent_range(extents, range))
+        self.mutate_extent_tree(inode, handle, |extents| {
+            remove_extent_range(extents, range, false)
+        })
     }
 
+    /// Removes mappings at or beyond `new_blocks`.
+    ///
+    /// - `inode`: file whose extent tree is updated.
+    /// - `new_blocks`: first logical block to remove, in blocks.
+    /// - `retain_unwritten`: keeps unwritten preallocation in place so a
+    ///   bounded sweep (the final-close discard) preserves fallocate
+    ///   reservations.
+    /// - `handle`: journal handle receiving the tree and allocator updates.
+    ///
+    /// Returns: `()` after the affected leaf or the whole tree is rewritten.
+    ///
+    /// Errors: journal, allocation and corruption errors propagate unchanged.
+    ///
+    /// Locking: caller holds the ext4 write lock; may sleep on journal and
+    /// device I/O.
     pub(crate) fn truncate_extent_mappings(
         &mut self,
         inode: &Ext4Inode,
         new_blocks: LogicalBlock,
+        retain_unwritten: bool,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
         self.begin_extent_mutation(inode)?;
         let Some(range) = LogicalExtentRange::from_logical_to_tree_end(new_blocks)? else {
             return Ok(());
         };
-        if self.try_remove_extent_range_path_local(inode, range, handle)? {
+        if self.try_remove_extent_range_path_local(inode, range, retain_unwritten, handle)? {
             return Ok(());
         }
-        self.mutate_extent_tree(inode, handle, |extents| remove_extent_range(extents, range))
+        self.mutate_extent_tree(inode, handle, |extents| {
+            remove_extent_range(extents, range, retain_unwritten)
+        })
     }
 
     fn insert_extent_mapping_path_local(
@@ -642,10 +662,25 @@ impl Ext4SbInfo {
         self.update_inode_extent_block_delta(inode, i128::from(new_metadata_blocks), handle)
     }
 
+    /// Removes `range` when it is contained in a single leaf path.
+    ///
+    /// - `inode`: file whose extent tree is updated.
+    /// - `range`: logical range to remove.
+    /// - `retain_unwritten`: keeps overlapping unwritten extents.
+    /// - `handle`: journal handle receiving the updates.
+    ///
+    /// Returns: `true` when the range was handled here; `false` when the
+    /// caller must run the full-tree algorithm because the path does not
+    /// contain the range or a leaf split is unsupported.
+    ///
+    /// Errors: journal, allocation and corruption errors propagate unchanged.
+    ///
+    /// Locking: caller holds the ext4 write lock; may sleep on journal I/O.
     fn try_remove_extent_range_path_local(
         &mut self,
         inode: &Ext4Inode,
         range: LogicalExtentRange,
+        retain_unwritten: bool,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<bool> {
         let path = self.locate_extent_path(inode, range.start_u32()?)?;
@@ -656,7 +691,7 @@ impl Ext4SbInfo {
         }
         let header = path.leaf_header()?;
         let mut extents = path.decode_leaf_extents(self, inode)?;
-        let released = remove_extent_range(&mut extents, range)?;
+        let released = remove_extent_range(&mut extents, range, retain_unwritten)?;
         if released.is_empty() {
             return Ok(true);
         }
@@ -953,7 +988,7 @@ impl Ext4SbInfo {
         Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent))
     }
 
-    pub(crate) fn has_extent_mapping_from(
+    pub(crate) fn has_initialized_extent_mapping_from(
         &self,
         inode: &Ext4Inode,
         logical: LogicalBlock,
@@ -962,7 +997,7 @@ impl Ext4SbInfo {
         let start = logical.get();
         let collected = self.collect_extent_tree(inode)?;
         for extent in collected.extents {
-            if extent.end_u64()? > start {
+            if !extent.is_unwritten && extent.end_u64()? > start {
                 return Ok(true);
             }
         }
@@ -1572,9 +1607,24 @@ fn set_extent_range_state(
     Ok(Vec::new())
 }
 
+/// Removes mappings inside `range` from an in-memory leaf extent list.
+///
+/// - `extents`: leaf extents rewritten in place and re-merged.
+/// - `range`: logical range to remove.
+/// - `retain_unwritten`: keeps overlapping unwritten extents instead of
+///   releasing them.
+///
+/// Returns: the released extents for block-free accounting; empty when the
+/// range overlaps nothing.
+///
+/// Errors: `Overflow` and corruption errors from extent slicing propagate
+/// unchanged.
+///
+/// Locking: pure in-memory transformation; the caller owns `extents`.
 fn remove_extent_range(
     extents: &mut Vec<MutableExtent>,
     range: LogicalExtentRange,
+    retain_unwritten: bool,
 ) -> Ext4Result<Vec<MutableExtent>> {
     let mut kept = Vec::with_capacity(extents.len());
     let mut released = Vec::new();
@@ -1592,7 +1642,12 @@ fn remove_extent_range(
         if extent_start < overlap_start {
             kept.push(extent.slice(extent_start, overlap_start)?);
         }
-        released.push(extent.slice(overlap_start, overlap_end)?);
+        let overlap = extent.slice(overlap_start, overlap_end)?;
+        if retain_unwritten && overlap.is_unwritten {
+            kept.push(overlap);
+        } else {
+            released.push(overlap);
+        }
         if overlap_end < extent_end {
             kept.push(extent.slice(overlap_end, extent_end)?);
         }

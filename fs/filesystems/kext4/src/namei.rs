@@ -1299,7 +1299,7 @@ impl Ext4SbInfo {
         self.add_namespace_orphan(inode, handle)?;
         self.release_external_xattr_block_for_eviction(inode, handle)?;
         if self.unlinked_inode_data_blocks(inode)? != 0 {
-            self.truncate_extent_mappings(inode, LogicalBlock::new(0), handle)?;
+            self.truncate_extent_mappings(inode, LogicalBlock::new(0), false, handle)?;
         }
         self.update_unlinked_inode_metadata(inode, size, timestamp, handle)?;
         self.remove_orphan(inode, handle)?;

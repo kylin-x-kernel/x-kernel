@@ -348,11 +348,24 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 
 ### `fallocate`
 
-1. 校验 `offset`、`len` 非负并检查 `offset + len` 溢出。
-2. 只接受当前实现支持的模式组合。
-3. 普通预分配和 `UNSHARE_RANGE` 通过必要时写入最后一个零字节推进 EOF。
-4. `PUNCH_HOLE` 和 `ZERO_RANGE` 用分块写零模拟。
-5. `COLLAPSE_RANGE`、`INSERT_RANGE` 委托 `File` 的范围操作。
+1. Validate `offset`/`len` as non-negative and check `offset + len` overflow.
+2. Accept only the mode combinations the implementation supports; append-only
+   inodes admit plain preallocation only and immutable inodes return `EPERM`,
+   decided before the node-type dispatch and the `EFBIG` bound.
+3. Plain preallocation (mode 0 / `KEEP_SIZE`) hands the full flags to the backend
+   first. Only a backend that declares no fallocate capability (empty mask) is
+   emulated on `EOPNOTSUPP` (a trailing zero-byte write for non-KEEP_SIZE, a
+   no-op for KEEP_SIZE); a backend that declares modes but still answers
+   `EOPNOTSUPP` is rejecting the file, so the error propagates instead of a
+   silent success. A prefix committed by the backend, whether the call fully
+   succeeded or partially failed, is published as the visible size by the VFS
+   exit.
+4. `UNSHARE_RANGE`, `COLLAPSE_RANGE`, `INSERT_RANGE` hand the flags to the
+   backend, whose `supported_fallocate_modes` mask accepts them or returns
+   `EOPNOTSUPP`.
+5. `PUNCH_HOLE`, `ZERO_RANGE` route to the backend when it declares the mode;
+   otherwise they fall back to chunked zero writes, which free no blocks and
+   leave the range allocated.
 
 ### `FS_IOC_FIEMAP`
 

@@ -491,7 +491,8 @@ G3 退出条件：
 
 - shared writable mmap 的高级 writeback、msync 和 truncate coherence；
 - direct I/O、buffered/direct overlap 和 ordered-data completion；
-- fallocate、preallocation、punch-hole 及其他按 workload 需要的 range operations；
+- fallocate preallocation (mode 0/KEEP_SIZE, unwritten extents already implemented),
+  punch-hole and other range operations as workloads require;
 - xattr syscall surface、ACL permission/inheritance、security namespace policy；
 - HTree write scalability、large directory 和常见 ext4 feature；
 - 每项格式能力必须同时考虑 feature negotiation、checksum、journal credits、recovery 和

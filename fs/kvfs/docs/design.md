@@ -904,6 +904,24 @@ invalidate exclusive lock 下执行，并在 backing prepare 后、释放 block 
 第二轮用于清理 cache truncate 窗口中产生的 private COW PTE。Backing filesystem 的 prepare
 阶段不得提前修改该 `i_size`，否则这里无法取得真实旧 EOF，可能跳过 folio 丢弃和同页增长区间
 清零。
+`VfsFile::fallocate()` dispatches the backend under the same lock shape (the data
+lock and the invalidate exclusive lock) across both the backing change and the
+visible-size publish: writeback samples the visible size per batch under the
+invalidate shared lock, while fallocate-style backends commit the backing disk size
+first and publish the visible size afterwards; without excluding concurrent
+writeback, a batch carrying a stale visible-size snapshot would enter the backing
+store after the disk-size advance and spuriously fail against the "writeback range
+not yet visible" guard. A backend publishing growth inside the dispatch's
+held-lock context must call `VfsInode::truncate_setsize()`; the self-locking
+`update_size_after_backing_change()` / `grow_size_after_backing_write()` helpers
+deadlock in that context. Before taking those locks, `VfsFile::fallocate()`
+queries `FileOperations::supported_fallocate_modes()` and answers `EOPNOTSUPP`
+for any requested mode bit outside the backend's declaration; the default empty
+mask admits plain allocation (mode 0) and rejects every other mode, so backends
+supporting only plain allocation need no override. The syscall layer consults the
+same mask before dispatching: a backend that declares PUNCH_HOLE/ZERO_RANGE owns
+those modes, and a mode it does not declare (kext4 today) is emulated locally by
+zeroing the range, which frees no blocks.
 无独立 backing 的文件使用 inode operation 的默认截断实现；有 backing 状态的文件系统
 覆盖它，并在调用 `truncate_setsize()` 前完成自身准备。
 
@@ -1058,6 +1076,9 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
   owner，operation table 只标识并读取该 inode 状态。
 - `InodeOperations::set_len()` 必须进入 `VfsInode::truncate_setsize()`；文件系统不能自行组合
   i_size、cache resize 和 mmap invalidation，也不能建立第二套 EOF/cache owner。
+- `FileOperations::fallocate()` must publish visible-size growth through
+  `VfsInode::truncate_setsize()`; dispatch already holds the data and invalidate
+  locks, so the self-locking publish helpers deadlock in that context.
 - `VfsInode` 直接保存唯一的 `Arc<AddressSpace>`，不增加单字段 address-space wrapper；
   `VfsFile` 保存 Linux 风格的 `f_mapping` 引用，MM runtime 只保存 `VfsFile`。
 - 锁由语义 VFS 对象持有，而不是由 filesystem bridge 持有。

@@ -136,6 +136,7 @@ mod dirhash;
 mod disk;
 mod error;
 mod extent;
+mod falloc;
 mod file;
 mod ialloc;
 mod inode;

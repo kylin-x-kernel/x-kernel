@@ -19,7 +19,7 @@ use iov_iter::{IovSink, IovSource, iov_iter_dest, iov_iter_source};
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 use kvfs::{
-    FMode, FallocateFlags, Filename, LookupFlags, LookupIntent, NodeType, OpenFlags,
+    FMode, FallocateFlags, Filename, LookupFlags, LookupIntent, NodeFlags, NodeType, OpenFlags,
     TransferPosition, VfsFile, pipe::PipeObject,
 };
 use linux_raw_sys::general::__kernel_off_t;
@@ -333,6 +333,23 @@ fn parse_fallocate(mode: u32) -> KResult<FallocateFlags> {
     Ok(flags)
 }
 
+/// Allocates or manipulates the space of an open file, dispatching on `mode`.
+///
+/// - `fd`: open descriptor; resolved before any range check, so `EBADF` wins.
+/// - `mode`: Linux fallocate mode bits; `KEEP_SIZE` is the only modifier every
+///   mode accepts.
+/// - `offset`: range start in bytes; must be non-negative.
+/// - `len`: range length in bytes; must be positive.
+///
+/// Returns: `0` on success.
+///
+/// Errors: `EBADF` for a bad or non-writable descriptor, `EINVAL` for an
+/// invalid range or mode, `EFBIG` past the size bound, and `EPERM` /
+/// `EOPNOTSUPP` / `ESPIPE` / `EISDIR` / `ENODEV` from the attribute, mode and
+/// node-type checks; backend errors propagate unchanged.
+///
+/// Locking: syscall context, may sleep; backend dispatch takes the inode data
+/// lock and the address-space invalidate lock.
 pub fn sys_fallocate(
     fd: c_int,
     mode: u32,
@@ -353,6 +370,18 @@ pub fn sys_fallocate(
     let keep_size = flags.contains(FallocateFlags::KEEP_SIZE);
     let base_mode = flags - FallocateFlags::KEEP_SIZE;
     f.verify_mode(FMode::WRITE)?;
+
+    // Linux vfs_fallocate rejects append-only and immutable inodes with EPERM
+    // before the node-type dispatch and the EFBIG bound, so attribute
+    // rejection wins over any range or node-type error. Append-only files
+    // admit only plain preallocation.
+    let inode_flags = f.inode().flags();
+    if !base_mode.is_empty() && inode_flags.intersects(NodeFlags::APPEND_ONLY) {
+        return Err(KError::from(LinuxError::EPERM));
+    }
+    if inode_flags.intersects(NodeFlags::IMMUTABLE) {
+        return Err(KError::from(LinuxError::EPERM));
+    }
 
     // Node-type dispatch mirrors vfs_fallocate (fs/open.c): FIFOs are not
     // seekable, directories are their own error, and only regular files and
@@ -389,52 +418,70 @@ pub fn sys_fallocate(
     let old_size = f.size();
 
     if base_mode == FallocateFlags::empty() {
-        // Standard preallocation behavior in our current implementation.
-        if !keep_size {
-            let target_size = old_size.max(end);
-            if target_size > old_size {
-                // Some backends may delay i_size visibility on set_len-only growth.
-                // Force EOF advancement with a single-byte write at target_size - 1.
-                let z = [0u8; 1];
-                let mut pos = target_size - 1;
-                let written = f.write_from(&z[..], &mut pos)?;
-                if written != 1 {
-                    return Err(KError::WriteZero);
+        // Prefer a real backend (kext4 unwritten extents). Only a backend that
+        // declares no fallocate capability (empty mask) is emulated; one that
+        // declares modes but still answers EOPNOTSUPP is rejecting the file and
+        // propagates instead of silently succeeding.
+        match f.fallocate(flags, start, len_u) {
+            Ok(()) => {}
+            Err(error)
+                if error.canonicalize() == KError::OperationNotSupported
+                    && f.supported_fallocate_modes().is_empty() =>
+            {
+                if !keep_size {
+                    let target_size = old_size.max(end);
+                    if target_size > old_size {
+                        // Some backends may delay i_size visibility on set_len-only growth.
+                        // Force EOF advancement with a single-byte write at target_size - 1.
+                        let z = [0u8; 1];
+                        let mut pos = target_size - 1;
+                        let written = f.write_from(&z[..], &mut pos)?;
+                        if written != 1 {
+                            return Err(KError::WriteZero);
+                        }
+                    }
                 }
             }
+            Err(error) => return Err(error),
         }
     } else if base_mode == FallocateFlags::PUNCH_HOLE {
-        // Emulate punch hole by zeroing existing file range.
-        let target_end = end.min(old_size);
-        if target_end > start {
-            write_zeros_range(&f, start, target_end)?;
+        if f.supported_fallocate_modes()
+            .contains(FallocateFlags::PUNCH_HOLE)
+        {
+            // Backend owns the release; its errors propagate.
+            f.fallocate(flags, start, len_u)?;
+        } else {
+            // Emulate punch hole by zeroing the range; the blocks stay
+            // allocated, so this frees nothing (unlike Linux ext4).
+            let target_end = end.min(old_size);
+            if target_end > start {
+                write_zeros_range(&f, start, target_end)?;
+            }
         }
     } else if base_mode == FallocateFlags::ZERO_RANGE {
-        // Emulate zero-range by writing zeros to the range. KEEP_SIZE only
-        // affects visible bytes in current file size; avoid temporary i_size
-        // growth, which can perturb extent metadata on backends with
-        // incomplete hole/truncate handling.
-        let target_end = if keep_size { end.min(old_size) } else { end };
-        if target_end > start {
-            if !keep_size && target_end > old_size {
-                f.truncate(target_end)?;
+        if f.supported_fallocate_modes()
+            .contains(FallocateFlags::ZERO_RANGE)
+        {
+            // Backend owns the zeroing/allocation; its errors propagate.
+            f.fallocate(flags, start, len_u)?;
+        } else {
+            // Emulate zero-range by writing zeros. KEEP_SIZE only affects bytes
+            // within the current size; avoid temporary i_size growth.
+            let target_end = if keep_size { end.min(old_size) } else { end };
+            if target_end > start {
+                if !keep_size && target_end > old_size {
+                    f.truncate(target_end)?;
+                }
+                write_zeros_range(&f, start, target_end)?;
             }
-            write_zeros_range(&f, start, target_end)?;
         }
     } else if base_mode == FallocateFlags::UNSHARE_RANGE {
-        // On non-reflink filesystems, emulate unshare by preallocating range
-        // semantics.
-        if !keep_size {
-            let target_size = old_size.max(end);
-            if target_size > old_size {
-                let z = [0u8; 1];
-                let mut pos = target_size - 1;
-                let written = f.write_from(&z[..], &mut pos)?;
-                if written != 1 {
-                    return Err(KError::WriteZero);
-                }
-            }
-        }
+        // ext4 has no reflink and does not support unshare; delegate to the
+        // backend capability declaration (kext4's supported_fallocate_modes
+        // lacks UNSHARE_RANGE -> EOPNOTSUPP) instead of emulating it with a
+        // trailing-byte write or a KEEP_SIZE no-op. Linux ext4's mode mask
+        // likewise excludes UNSHARE_RANGE.
+        f.fallocate(base_mode, start, len_u)?;
     } else if base_mode == FallocateFlags::COLLAPSE_RANGE
         || base_mode == FallocateFlags::INSERT_RANGE
     {

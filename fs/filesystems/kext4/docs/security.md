@@ -71,6 +71,26 @@ KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name
 - 从磁盘读取的 directory name 和 dirent file type；
 - extent tree entry 和 block mapping；
 - KVFS FIEMAP 请求范围，以及 core 从磁盘 mapping 与 inode extent-status 区间统一报告的 extent；
+- KVFS fallocate's mode, offset and len: mode bits are admitted against the
+  backend's `supported_fallocate_modes()` declaration. The kvfs layer filters
+  requests routed through `VfsFile::fallocate` (mode 0, UNSHARE_RANGE,
+  COLLAPSE_RANGE, INSERT_RANGE; kext4 declares KEEP_SIZE, stray combinations are
+  rejected, and UNSHARE_RANGE — needing reflink — is rejected like Linux ext4
+  without shared blocks), and the posix entry consults the same mask before
+  dispatching PUNCH_HOLE/ZERO_RANGE: a backend that declares the mode owns it, and
+  kext4 does not, so those are emulated by zeroing the range without freeing
+  blocks;
+  append-only inodes allow only plain preallocation and immutable inodes reject
+  everything (Linux `vfs_fallocate`'s EPERM semantics, judged in the posix entry
+  before the node-type dispatch, the size-bound check and the backend mask); the
+  posix layer rejects `offset < 0` and `len <= 0` (EINVAL), and the kext4 entry
+  additionally validates `offset + len` overflow and `max_file_size()`;
+  on ENOSPC the committed batches remain as unwritten preallocation beyond EOF
+  (block occupancy observable via df/fiemap/st_blocks, surviving across close and
+  resumable via retry); before returning the original error, `i_disksize` advances
+  to the successfully allocated prefix (capped at the request end, never shrinking)
+  and ctime/mtime are refreshed, matching Linux `ext4_alloc_file_blocks`; this
+  failure state is defined, not undefined;
 - xattr name、value、external xattr block header、refcount 和 checksum；
 - KVFS 运行态操作，例如 create、unlink、rename、truncate、writeback、fsync 和 syncfs；
 - KVFS 传入的 atime、mtime 和 ctime，以及磁盘 inode size/extra timestamp 字段决定的可表示范围；

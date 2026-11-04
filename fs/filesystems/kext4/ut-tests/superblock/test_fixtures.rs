@@ -4,6 +4,8 @@
 
 //! In-memory filesystem fixtures shared by kernel component tests.
 
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use block::{Device, DeviceKind, DriverError, DriverResult};
 
 use super::*;
@@ -263,6 +265,8 @@ pub(crate) struct TestDevice {
     write_count: Mutex<usize>,
     fail_write_at: Mutex<Option<usize>>,
     fail_write_block: Mutex<Option<u64>>,
+    holds_io: AtomicBool,
+    held_io_ops: AtomicUsize,
 }
 
 impl TestDevice {
@@ -274,6 +278,8 @@ impl TestDevice {
             write_count: Mutex::new(0),
             fail_write_at: Mutex::new(None),
             fail_write_block: Mutex::new(None),
+            holds_io: AtomicBool::new(false),
+            held_io_ops: AtomicUsize::new(0),
         }
     }
 
@@ -301,6 +307,40 @@ impl TestDevice {
     pub(crate) fn fail_flush_at(&self, flush_count: usize) {
         *lock(&self.fail_flush_at) = Some(flush_count);
     }
+
+    /// Freezes device I/O so a test can park one task mid-transaction while
+    /// another runs.
+    ///
+    /// - `holds`: `true` parks subsequent operations until cleared.
+    ///
+    /// Locking: atomic store; held operations spin, so clear it from a task
+    /// that keeps sleeping or yielding.
+    pub(crate) fn set_holds_io(&self, holds: bool) {
+        self.holds_io.store(holds, Ordering::Release);
+    }
+
+    /// Number of device operations currently parked in the hold.
+    ///
+    /// Returns: the parked-operation count.
+    ///
+    /// Locking: atomic load; no lock.
+    pub(crate) fn held_io_ops(&self) -> usize {
+        self.held_io_ops.load(Ordering::Acquire)
+    }
+
+    /// Parks the caller while the hold is set, counting it as a parked operation.
+    ///
+    /// Locking: spins with `yield_now`; another task must clear the hold.
+    fn wait_while_holds_io(&self) {
+        if !self.holds_io.load(Ordering::Acquire) {
+            return;
+        }
+        self.held_io_ops.fetch_add(1, Ordering::AcqRel);
+        while self.holds_io.load(Ordering::Acquire) {
+            ktask::yield_now();
+        }
+        self.held_io_ops.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl Device for TestDevice {
@@ -324,6 +364,7 @@ impl BlockDeviceOperations for TestDevice {
 }
 impl TestDevice {
     fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
+        self.wait_while_holds_io();
         let start = usize::try_from(block_id)
             .ok()
             .and_then(|block| block.checked_mul(TEST_BLOCK_SIZE))
@@ -340,6 +381,7 @@ impl TestDevice {
     }
 
     fn write_block(&self, block_id: u64, input: &[u8]) -> DriverResult {
+        self.wait_while_holds_io();
         let mut write_count = lock(&self.write_count);
         *write_count += 1;
         if *lock(&self.fail_write_at) == Some(*write_count)
@@ -363,6 +405,7 @@ impl TestDevice {
     }
 
     fn flush(&self) -> DriverResult {
+        self.wait_while_holds_io();
         let mut flush_count = lock(&self.flush_count);
         *flush_count += 1;
         if *lock(&self.fail_flush_at) == Some(*flush_count) {
@@ -1115,6 +1158,71 @@ pub(crate) fn eviction_test_unlinked_inode_with_initialization(
 
 pub(crate) fn install_test_internal_journal(filesystem: &mut Ext4SbInfo, sequence: u32) {
     install_test_journal(filesystem, test_journal_superblock(sequence));
+}
+
+/// A mounted ext4 regular file driving the production `Ext4Mount`/VFS entry.
+pub(crate) struct FallocateVfs {
+    pub(crate) super_block: alloc::sync::Arc<kvfs::SuperBlock>,
+    pub(crate) file: alloc::sync::Arc<kvfs::VfsFile>,
+    pub(crate) _mount: alloc::sync::Arc<kvfs::Mount>,
+}
+
+impl FallocateVfs {
+    /// Production mount owning the file's core state.
+    pub(crate) fn ext4(&self) -> &crate::vfs::Ext4Mount {
+        self.super_block.private::<crate::vfs::Ext4Mount>().unwrap()
+    }
+
+    /// The file's ext4 private inode (visible size and disk size).
+    pub(crate) fn inode(&self) -> &Ext4Inode {
+        self.file.inode().private::<Ext4Inode>().unwrap()
+    }
+
+    /// Shared handle to the ext4 private inode for the core writeback helpers.
+    pub(crate) fn inode_arc(&self) -> alloc::sync::Arc<Ext4Inode> {
+        self.file.inode().private_data_get::<Ext4Inode>().unwrap()
+    }
+
+    /// Current free-block count from the mount's allocator state.
+    pub(crate) fn free_blocks(&self) -> u64 {
+        self.ext4().read().free_blocks_count()
+    }
+}
+
+/// Builds a mounted regular file so component tests drive the runtime's
+/// `Ext4Mount`/VFS entry instead of a test-only copy of the fallocate sweep.
+pub(crate) fn fallocate_vfs(free_blocks: u32, first_byte: u8, journal_seq: u32) -> FallocateVfs {
+    let (mut filesystem, _device) = journal_allocator_test_filesystem(free_blocks, first_byte);
+    let private_inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    install_test_internal_journal(&mut filesystem, journal_seq);
+    let block_size = u64::from(filesystem.layout().block_size());
+    let max_file_size = filesystem.extent_max_file_size().unwrap();
+    let super_block = kvfs::SuperBlock::new_with_flags_and_private(
+        &crate::FILE_SYSTEM_TYPE,
+        &crate::vfs::EXT4_SUPER_OPERATIONS,
+        kalloc_types::KBox::new(crate::vfs::Ext4Mount::new(filesystem)).unwrap(),
+        kvfs::SuperBlockFlags::empty(),
+        block_size,
+        max_file_size,
+        |super_block| {
+            let inode =
+                crate::vfs::Ext4SuperOperations::iget_from_private(super_block, private_inode)
+                    .unwrap();
+            kvfs::Dentry::new_file_from_inode(inode, None, alloc::string::String::new())
+        },
+    );
+    let mount = kvfs::Mount::new_root(&super_block);
+    let file = kvfs::dentry_open(
+        mount.root_path(),
+        kvfs::OpenFlags::READ_WRITE.bits(),
+        kcred::initial_cred(),
+    )
+    .unwrap();
+    FallocateVfs {
+        super_block,
+        file,
+        _mount: mount,
+    }
 }
 
 pub(crate) const TEST_EXT4_BG_INODE_UNINIT: u16 = 1;

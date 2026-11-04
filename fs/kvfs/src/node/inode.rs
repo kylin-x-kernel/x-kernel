@@ -1952,11 +1952,19 @@ impl VfsInode {
         }
     }
 
-    /// Publishes the size prepared by an inode `set_len` implementation.
+    /// Publishes the size prepared by an inode `set_len` or `fallocate`
+    /// implementation.
     ///
-    /// The caller must hold the inode data and address-space invalidate locks
-    /// exclusively; [`Self::set_len`] provides both locks. Call this before
-    /// releasing backing blocks that may still be reachable from cached folios.
+    /// - `len`: new visible size in bytes.
+    ///
+    /// Returns: `()` after the size, mapped view and cached folios are updated.
+    ///
+    /// Errors: address-space truncation errors propagate unchanged.
+    ///
+    /// Locking: caller must hold the inode data lock and the address-space
+    /// invalidate lock exclusively; [`Self::set_len`] and
+    /// [`crate::VfsFile::fallocate`] hold both. Call this before releasing
+    /// blocks still reachable from cached folios.
     pub fn truncate_setsize(&self, len: u64) -> VfsResult<()> {
         self.mapping.truncate_setsize(len)
     }

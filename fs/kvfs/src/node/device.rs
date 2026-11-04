@@ -414,6 +414,13 @@ impl FileOperations for DefaultBlkdevFileOperations {
         block_device_fallocate(&file_block_device(file)?, flags, offset, len)
     }
 
+    /// Declares the modes `block_device_fallocate` validates.
+    ///
+    /// Returns: `KEEP_SIZE | PUNCH_HOLE | ZERO_RANGE`.
+    fn supported_fallocate_modes(&self) -> FallocateFlags {
+        blkdev_fallocate_supported()
+    }
+
     fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         file_block_device(file)?.mmap(file, mapper)
     }
@@ -567,11 +574,34 @@ fn write_block_device(device: &Arc<BlockDevice>, buf: &[u8], offset: u64) -> Vfs
     Ok(length)
 }
 
+/// fallocate mode mask the block-device backend accepts.
+///
+/// Returns: `KEEP_SIZE | PUNCH_HOLE | ZERO_RANGE`, shared by the capability
+/// declaration and the dispatcher's own mask check.
+fn blkdev_fallocate_supported() -> FallocateFlags {
+    FallocateFlags::KEEP_SIZE | FallocateFlags::PUNCH_HOLE | FallocateFlags::ZERO_RANGE
+}
+
 /// Mirrors Linux `blkdev_fallocate` (block/fops.c): only the zeroing modes
 /// are supported, and the mode mask, capacity and logical-block alignment are
 /// all validated before any media write. Generic file emulation must not run
 /// against raw devices — an unaligned range is `EINVAL`, never a silent
 /// partial-block write.
+///
+/// - `device`: block device backing the file.
+/// - `flags`: mode bits; only `ZERO_RANGE`, with optional `KEEP_SIZE`, reaches
+///   the media.
+/// - `start`: range start in bytes; must be logical-block aligned.
+/// - `len`: range length in bytes; block aligned unless a `KEEP_SIZE` clamp
+///   against a non-multiple capacity floored it.
+///
+/// Returns: `()` after the range is zeroed through the device write path.
+///
+/// Errors: `EOPNOTSUPP` for unsupported modes, `EINVAL` for an out-of-range or
+/// unaligned request, `EFBIG` on overflow; device errors propagate unchanged.
+///
+/// Locking: called by `VfsFile::fallocate` with its data and invalidate locks
+/// held; performs synchronous device writes, so it may sleep.
 fn block_device_fallocate(
     device: &Arc<BlockDevice>,
     flags: FallocateFlags,
@@ -581,7 +611,7 @@ fn block_device_fallocate(
     use FallocateFlags as F;
 
     const ZERO_CHUNK_BYTES: usize = 64 * 1024;
-    let supported = F::KEEP_SIZE | F::PUNCH_HOLE | F::ZERO_RANGE;
+    let supported = blkdev_fallocate_supported();
     if !supported.contains(flags) {
         return Err(VfsError::from(LinuxError::EOPNOTSUPP));
     }

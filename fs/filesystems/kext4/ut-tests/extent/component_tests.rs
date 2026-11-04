@@ -537,7 +537,7 @@ fn extent_truncate_releases_tail_range() {
         )
         .unwrap();
     filesystem
-        .truncate_extent_mappings(&inode, LogicalBlock::new(3), &mut handle)
+        .truncate_extent_mappings(&inode, LogicalBlock::new(3), false, &mut handle)
         .unwrap();
 
     assert_eq!(

@@ -61,6 +61,7 @@ fs/filesystems/kext4/
 ├── src/ialloc.rs
 ├── src/mballoc.rs
 ├── src/prealloc_space.rs
+├── src/falloc.rs
 ├── src/file.rs
 ├── src/truncate.rs
 ├── src/orphan.rs
@@ -841,6 +842,55 @@ superblock，I/O 借用现有 metadata object，不增加 operation context 或�
 挂载级独占访问串行化槽位修改，因此不需要 Linux 并发分配器的 CPU hash、CAS 和原子计数。
 信息只在 journal replay 后初始化一次；recovery 每块只取一次 entry snapshot，逐 inode
 checkpoint 只重载 superblock/group 可变状态并增量维护 free-entry 计数，不重复扫描整个 orphan file。
+
+Fallocate preallocation (`Ext4Mount::fallocate_regular_inode_preallocate`, mode 0
+and KEEP_SIZE) walks `map_blocks()` and skips each already-mapped range (including
+unwritten, so repeated calls are idempotent). Each hole range opens an independent
+journal transaction capped at `EXT_UNWRITTEN_MAX_LEN` per batch: one
+`Ext4AllocationRequest` (goal taken after the previous extent, ALLOW_PARTIAL) plus
+one unwritten `insert_extent_mapping()`, reusing the ordered-writeback worst-case
+credit model of "1 allocation run + 2 extent mutations"; `map_blocks()` already
+truncates the hole length to a leaf boundary, so the insertion naturally satisfies
+the single-leaf constraint. ENOSPC inside a batch propagates immediately, keeping
+the committed batches. On failure kext4 settles the committed prefix before
+returning the original error: it advances `i_disksize` to the successfully
+allocated end (capped at the request end, never shrinking) and refreshes
+ctime/mtime, mirroring Linux `ext4_alloc_file_blocks`'s `min(epos, new_size)`
+update and its `file_modified()` entry; for KEEP_SIZE only timestamps are
+refreshed and size stays untouched. The allocated batches stay allocated as
+unwritten preallocation beyond EOF, observable via df/fiemap/st_blocks, surviving
+across close and resumable via idempotent retry. kext4 does not retry the whole
+loop as Linux does: its allocator
+is goal-driven scanning, so a retry gains nothing. For !KEEP_SIZE it first zeroes
+the old EOF tail via `zero_regular_inode_tail_data()`, then once every allocation
+is durable commits `i_disksize = end` in a separate small transaction (Linux
+`ext4_alloc_file_blocks`'s "extents before size" ordering — a crash loses only the
+size transaction, keeping the preallocated blocks), and the VFS layer later
+publishes the visible size (`truncate_setsize`; `VfsFile::fallocate` holds the data
+and invalidate write locks across the entire dispatch, excluding concurrent
+writeback both before the `i_disksize` advance and after the publish, so a writeback
+batch carrying a stale visible-size snapshot cannot reach the UnallocatedWrite
+guard). KEEP_SIZE leaves size/`i_disksize` untouched and only refreshes ctime/mtime
+with a `Full` metadata transaction (Linux `file_modified()`). Delalloc reservations
+and unwritten preallocation coexist: a later writeback hits the Unwritten branch
+and converts the preallocated block in place without freeing it first. The
+supported-mode set is expressed via the kvfs
+`FileOperations::supported_fallocate_modes()` capability declaration: kext4
+declares `KEEP_SIZE` (UNSHARE_RANGE needs reflink and, like Linux ext4 without
+shared blocks, is rejected by the mask outright rather than degrading to
+preallocation), `VfsFile::fallocate` rejects mode 0, UNSHARE_RANGE, COLLAPSE_RANGE
+and INSERT_RANGE bits outside that declared mask (plain allocate is encoded as no
+bits set, as in Linux, and always passes the mask), and the kext4 entry
+additionally validates `offset + len` overflow and `max_file_size()`. A backend
+that declares a mode but still answers `EOPNOTSUPP` is rejecting the file, so the
+error propagates instead of a silent emulation; only a backend that declares no
+fallocate capability (empty mask) is emulated by the posix layer. PUNCH_HOLE and
+ZERO_RANGE are owned by a backend that declares them; kext4 declares neither, so
+the posix entry emulates them by zeroing the range, which neither frees blocks nor
+reclaims an unwritten reservation (punch hole converts an unwritten extent to
+initialized rather than deallocating). This approximation stays until kext4
+implements real punch-hole/zero-range, at which point it declares the modes and
+owns the release/zeroing.
 Legacy orphan 链的 `i_dtime` 是 journaled inode-table topology，不复制到 resident private
 state。链遍历直接读取 metadata cache 中的 inode-table bytes，前驱重连也按已经校验的 inode
 number 原位修改同一 bytes；它不会为了读取或更新前驱而构造另一个 `Ext4Inode`。因此两个同时
@@ -867,19 +917,26 @@ commit/checkpoint 完成后才允许清理最终 recovery feature。Bitmap 读�
 合法但 KExt4 尚不支持的格式或 cleanup 错误仍向上返回，不借此路径静默吞掉一般 metadata
 corruption 或把未完成的有效 cleanup 伪装成成功。
 
-Truncate 和 unwritten preallocation discard 的 journal credits 按实际 extent 结构计算：inode
-root、重建后的 extent-tree blocks、需要 revoke 的旧 tree blocks，以及释放范围覆盖的不同 block
-group 中各一个 bitmap/descriptor target。此处的 "unwritten preallocation" 指磁盘 extent tree 中
-越过 `i_disksize` 的未写 extent（`discard_regular_inode_preallocations()`，对应 Linux
-`ext3_truncate_failed_write()` 一类清理），与上一节"写回 speculative prealloc space"所述的
-in-memory space 无关：后者不写盘、不需要 credits。数据块数量本身不会一对一增加 journal metadata block，
-因此不能用 `i_blocks` 或被释放 data block 数直接放大 reservation；否则大文件只回收一个很小的
-preallocation tail 也会被误判为超过空 journal 容量。唯一例外是目录与 block-mapped symlink
-的数据块：它们本身是 journaled metadata buffer，释放路径对每个被释放块各产生一个 revoke，
-因此 credits 按本次实际释放的数据块数逐一追加 revoke credit（与 Linux
-get_default_free_blocks_flags() 对 S_ISDIR/S_ISLNK 的 METADATA|FORGET 语义一致）；regular
-file 数据块不带该开销。计算结果仍为 allocator entry check 保留固定 headroom，并在任何
-metadata mutation 前完成。
+Truncate and preallocation-discard journal credits are computed from the actual
+extent structure: the inode root, the rebuilt extent-tree blocks, the old tree
+blocks that need revoking, and one bitmap/descriptor target per distinct block
+group the released range touches. "Unwritten preallocation" here means the
+unwritten extents beyond `i_disksize` in the on-disk extent tree
+(`discard_regular_inode_preallocations()`, corresponding to Linux
+`ext3_truncate_failed_write()`-style cleanup), unrelated to the in-memory space
+described in the previous section on writeback speculative prealloc space: the
+latter never hits disk and needs no credits. The number of data blocks does not
+add journal metadata blocks one-to-one, so `i_blocks` or the count of released
+data blocks must not be used to scale the reservation directly; otherwise
+reclaiming one tiny preallocation tail of a large file would be misjudged as
+exceeding an empty journal's capacity. The only exception is the data blocks of
+directories and block-mapped symlinks: they are journaled metadata buffers
+themselves, so the release path emits one revoke per released block, and the
+credits append one revoke credit per actually released data block (matching
+Linux `get_default_free_blocks_flags()`'s METADATA|FORGET semantics for
+S_ISDIR/S_ISLNK); regular-file data blocks carry no such overhead. The result
+still reserves fixed headroom for the allocator entry check and is computed
+before any metadata mutation.
 
 Ordered writeback 的 insert 与 unwritten conversion 只使用 `ExtentPath`，因此 transaction 内不再
 切换到复杂度取决于整棵树大小的重建算法。writeback execution cursor 每步读取 live mapping；
@@ -1177,10 +1234,27 @@ Namespace removal 在修改目录项之前验证 inode 的数据回收格式。`
 block，则先释放或降低 refcount，并清理 `i_file_acl`/`i_blocks`，然后 truncate
 extent-backed data，清理 inode metadata，最后释放 inode bitmap entry。
 
-运行态 kext4 KVFS 层仅在最后一个 writable-file `release()` 且没有 delayed data
-reservation 时丢弃 EOF 后未使用的预分配，对应 Linux `ext4_release_file()`；
-close 不额外强制普通 dirty PageCache writeback，数据回写由 `fsync`/`syncfs` 和通用
-writeback 路径负责。`VfsInode` 最后一个引用消失时，superblock hook 先丢弃
+The runtime kext4 KVFS layer, on the last writable-file `release()` with no delayed
+data reservation, only cleans initialized leftover mappings beyond `i_disksize`
+(garbage from a crash-recovery scenario); unwritten preallocation persists across
+close and is freed only on truncate or deletion (a real landed hole punch will also
+reclaim it; the posix layer's current PUNCH_HOLE write-zero emulation does not free
+blocks and instead converts unwritten to initialized). fallocate-sourced unwritten
+matches Linux on-disk semantics: `ext4_release_file()` discards only mballoc's
+in-memory reservations (pa), not extent entries; kext4 likewise reclaims only the
+in-memory writeback speculative reservation via `release_preallocs()` on close
+(`prealloc_space.rs`), so on-disk unwritten that persists across close comes only
+from fallocate itself and is freed on truncate or deletion. The writeback
+speculative reservation (the `normalize_write_allocation_len` surplus, capped at
+`EXT4_MAX_PREALLOC_BLOCKS`, 4MB@4K) is never materialized as an on-disk unwritten
+extent: it only registers in-memory space, never touches the bitmap, and leaves
+zero on-disk residue across crash/unmount/close, matching Linux writeback
+speculative reservation (invisible to the extent tree, returned on close), so
+`st_blocks`/df do not diverge from Linux; the payoff is that fallocate's unwritten
+extent is converted in place on a subsequent write after reopen, avoiding
+reallocation. close does not additionally force ordinary dirty PageCache
+writeback; data writeback is handled by `fsync`/`syncfs` and the generic writeback
+path. When the last `VfsInode` reference goes away, the superblock hook first drops
 PageCache/剩余 delalloc accounting，再对 nlink=0 inode 组合持有的 ext4 private state 调用
 final eviction。KVFS 在 hook 前完成 `Live -> Freeing`，所以 cleanup 期间没有普通 VFS 能力；
 三阶段 core API 始终借用该 `VfsInode` 组合持有的同一 private component；它不返回可逃逸的

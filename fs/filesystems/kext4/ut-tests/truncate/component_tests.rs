@@ -10,11 +10,13 @@ use unittest::def_test;
 
 use crate::{
     BlockCount, BlockMapping, BlockMappingFlags, Ext4SyncIntent, FilesystemBlock, LogicalBlock,
+    extent::ExtentMappingState,
     file::RegularWriteMetadata,
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     superblock::test_fixtures::{
         TEST_BLOCK_SIZE, TEST_FREE_BLOCKS, allocate_checkpointed_regular_inode,
-        install_test_internal_journal, journal_allocator_test_filesystem,
+        allocate_contiguous_blocks, fallocate_vfs, install_test_internal_journal,
+        journal_allocator_test_filesystem,
     },
 };
 
@@ -238,4 +240,90 @@ fn truncate_shrink_releases_tail_blocks_and_zeroes_partial_eof_block() {
         .unwrap();
     assert_eq!(&eof_block[..17], &[0xa5; 17]);
     assert!(eof_block[17..].iter().all(|byte| *byte == 0));
+}
+
+/// Final-close discard drops only initialized mappings beyond `i_disksize`;
+/// unwritten preallocation stays.
+#[def_test]
+fn preallocation_discard_drops_only_initialized_beyond_disk_size() {
+    let fx = fallocate_vfs(TEST_FREE_BLOCKS, 0b0011_1111, 752);
+    let inode = fx.inode_arc();
+    let input = vec![0x42; TEST_BLOCK_SIZE * 4];
+    let free_before_write = fx.free_blocks();
+
+    inode.set_size(input.len() as u64);
+    fx.ext4()
+        .write(fx.super_block.as_ref())
+        .writeback_ordered_at_with_prealloc_budget(
+            &inode,
+            0,
+            &input,
+            input.len() as u64,
+            Ext4SyncIntent::DataOnly,
+            0,
+            || true,
+        )
+        .unwrap();
+    // The unwritten reservation beyond the committed disk size comes from
+    // fallocate with KEEP_SIZE, not from in-memory writeback surplus.
+    fx.file
+        .fallocate(
+            kvfs::FallocateFlags::KEEP_SIZE,
+            input.len() as u64,
+            TEST_BLOCK_SIZE as u64 * 4,
+        )
+        .unwrap();
+    let BlockMapping::Unwritten {
+        physical: unwritten_physical,
+        ..
+    } = fx.ext4().read().map_blocks(&inode, LogicalBlock::new(4)).unwrap()
+    else {
+        panic!("fallocate reservation should be unwritten");
+    };
+
+    // Crash-recovery leftover: an initialized mapping beyond the disk size.
+    {
+        let mut guard = fx.ext4().write(fx.super_block.as_ref());
+        let credits = JournalCredits::new(64);
+        let journal = guard
+            .metadata_journal_for_mutation(
+                credits,
+                crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            )
+            .unwrap();
+        let mut handle = journal.begin(credits).unwrap();
+        let stale_physical = allocate_contiguous_blocks(&mut guard, 2, &mut handle);
+        let result = guard.insert_extent_mapping(
+            &inode,
+            LogicalBlock::new(8),
+            stale_physical,
+            BlockCount::new(2),
+            ExtentMappingState::Initialized,
+            &mut handle,
+        );
+        guard.complete_metadata_mutation(handle, result).unwrap();
+    }
+
+    fx.ext4()
+        .write(fx.super_block.as_ref())
+        .discard_regular_inode_preallocations(&inode)
+        .unwrap();
+
+    assert_eq!(
+        fx.ext4().read().map_blocks(&inode, LogicalBlock::new(8)),
+        Ok(BlockMapping::Hole {
+            len: BlockCount::new(u32::MAX),
+            flags: BlockMappingFlags::empty(),
+        })
+    );
+    assert_eq!(
+        fx.ext4().read().map_blocks(&inode, LogicalBlock::new(4)),
+        Ok(BlockMapping::Unwritten {
+            physical: unwritten_physical,
+            len: BlockCount::new(4),
+            flags: BlockMappingFlags::empty(),
+        })
+    );
+    assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 8) as u64);
+    assert_eq!(fx.free_blocks(), free_before_write - 8);
 }
