@@ -4,8 +4,8 @@
 
 //! Task-owned blocking mutexes independent of a concrete scheduler or HAL.
 //!
-//! [`Mutex`] and [`RawMutex`] retain the adaptive spinning and event-listener
-//! algorithm used by `ksync`. The host supplies [`kiface_task_api::TaskExecutionIf`]
+//! [`Mutex`] and [`RawMutex`] retain adaptive spinning and use an owned FIFO
+//! wait queue for blocking. The host supplies [`kiface_task_api::TaskExecutionIf`]
 //! for identity, yielding and waiting, and [`kiface_task_api::TaskLockDiagnosticsIf`]
 //! for watchdog diagnostics. The task-domain contracts live in `kiface-task-api`.
 //! Blocking acquisition requires sleepable task context and is not recursive.
@@ -24,6 +24,7 @@
 
 mod mutex;
 mod spin;
+mod wait;
 
 pub use mutex::{Mutex, MutexGuard, RawMutex};
 pub use spin::SpinConfig;

@@ -2799,9 +2799,10 @@ dependencies = [
 name = "kmutex"
 version = "0.3.0-dev"
 dependencies = [
- "event-listener",
+ "intrusive-collections",
  "kiface-task-api",
  "klockstat",
+ "kspin",
  "ktask-types",
  "lock_api",
 ]
