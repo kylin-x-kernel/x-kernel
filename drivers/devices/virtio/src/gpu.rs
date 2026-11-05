@@ -5,13 +5,14 @@
 //! VirtIO GPU driver adapter.
 
 use alloc::boxed::Box;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use display::{DisplayDevice, DisplayInfo, ScanoutRect, ScanoutResource};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal, PAGE_SIZE,
-    config::{ReadOnly, WriteOnly, read_config},
+    config::{ReadOnly, WriteOnly, read_config, write_config},
     queue::VirtQueue,
     transport::Transport,
 };
@@ -21,6 +22,8 @@ const QUEUE_SIZE: u16 = 2;
 const QUEUE_TRANSMIT: u16 = 0;
 const QUEUE_CURSOR: u16 = 1;
 const SCANOUT_ID: u32 = 0;
+/// Config-space event bit the host sets when the display configuration changed.
+const EVENT_DISPLAY: u32 = 1 << 0;
 
 #[derive(Default)]
 struct ScanoutBinding {
@@ -50,9 +53,28 @@ impl ScanoutBinding {
     }
 }
 
+/// Packs a visible size into the one atomic word the driver keeps.
+const fn pack_display_info(info: DisplayInfo) -> u64 {
+    ((info.width as u64) << 32) | info.height as u64
+}
+
+/// Unpacks the atomic word written by [`pack_display_info`].
+const fn unpack_display_info(packed: u64) -> DisplayInfo {
+    DisplayInfo {
+        width: (packed >> 32) as u32,
+        height: packed as u32,
+    }
+}
+
 /// The VirtIO GPU device driver.
 pub struct VirtIoGpuDev<H: Hal, T: Transport> {
-    info: DisplayInfo,
+    /// Host-reported visible size, packed as `width << 32 | height`.
+    ///
+    /// Only the query path (`info`/`refresh_info`) touches it and no interrupt
+    /// or softirq context does, so an atomic copy needs no lock. A plain
+    /// relaxed load/store is enough: the value publishes no other state, and a
+    /// reader that observes a stale size is corrected by the next refresh.
+    info: AtomicU64,
     inner: SpinNoIrq<VirtIoGpu2d<H, T>>,
 }
 
@@ -71,7 +93,7 @@ impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
         let (width, height) = device.resolution().map_err(crate::as_driver_error)?;
 
         Ok(Self {
-            info: DisplayInfo { width, height },
+            info: AtomicU64::new(pack_display_info(DisplayInfo { width, height })),
             inner: SpinNoIrq::new(device),
         })
     }
@@ -89,7 +111,48 @@ impl<H: Hal, T: Transport> Device for VirtIoGpuDev<H, T> {
 
 impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
     fn info(&self) -> DisplayInfo {
+        unpack_display_info(self.info.load(Ordering::Relaxed))
+    }
+
+    fn refresh_info(&self) -> Option<DisplayInfo> {
+        let mut inner = self.inner.lock();
+        // The host reports a display change by setting the event bit in the
+        // config space; there is no interrupt for it here, so the query paths
+        // ask for it explicitly and acknowledge what they consumed.
+        match inner.take_display_event() {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(err) => {
+                log::warn!("virtio-gpu: cannot read the display event: {err:?}");
+                return None;
+            }
+        }
+        let (width, height) = match inner.resolution() {
+            Ok(resolution) => resolution,
+            Err(err) => {
+                log::warn!("virtio-gpu: cannot read the display size: {err:?}");
+                return None;
+            }
+        };
+
+        // The device lock above serializes refreshes, so the compare and the
+        // store cannot race another refresh; the relaxed access only has to
+        // carry the value, not order it against other state.
+        let previous = unpack_display_info(self.info.load(Ordering::Relaxed));
+        let refreshed = DisplayInfo { width, height };
+        if previous == refreshed {
+            return None;
+        }
+        log::info!(
+            "virtio-gpu: display size changed from {}x{} to {}x{}",
+            previous.width,
+            previous.height,
+            refreshed.width,
+            refreshed.height
+        );
         self.info
+            .store(pack_display_info(refreshed), Ordering::Relaxed);
+        Some(refreshed)
     }
 
     fn need_flush(&self) -> bool {
@@ -197,6 +260,20 @@ impl<H: Hal, T: Transport> VirtIoGpu2d<H, T> {
             queue_buf_recv,
             active_scanout: ScanoutBinding::default(),
         })
+    }
+
+    /// Reads and acknowledges the display-change event.
+    ///
+    /// Returns `true` when the host reported a display change that has not
+    /// been acknowledged yet. Acknowledging is what stops the host from
+    /// re-reporting the same change on the next call.
+    fn take_display_event(&mut self) -> virtio_drivers::Result<bool> {
+        let events = read_config!(self.transport, Config, events_read)?;
+        if events & EVENT_DISPLAY == 0 {
+            return Ok(false);
+        }
+        write_config!(self.transport, Config, events_clear, EVENT_DISPLAY)?;
+        Ok(true)
     }
 
     fn resolution(&mut self) -> virtio_drivers::Result<(u32, u32)> {

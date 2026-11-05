@@ -61,6 +61,7 @@ inputdev = { workspace = true, optional = true }
 console_driver = { workspace = true, optional = true }
 driver_base.workspace = true
 kdevice.workspace = true
+kdevice_uevent.workspace = true
 unittest.workspace = true
 
 [lints]

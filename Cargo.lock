@@ -1147,6 +1147,7 @@ dependencies = [
  "kclass",
  "kcred",
  "kdevice",
+ "kdevice-uevent",
  "kerrno",
  "kexec",
  "khal",

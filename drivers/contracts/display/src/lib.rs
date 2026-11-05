@@ -10,7 +10,7 @@
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
 /// The information of the graphics display device.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct DisplayInfo {
     /// The visible width.
     pub width: u32,
@@ -56,7 +56,24 @@ pub struct ScanoutResource {
 /// Operations that require a graphics device driver to implement.
 pub trait DisplayDevice: Device {
     /// Get the display information.
+    ///
+    /// The returned size is the one the host currently scans out. Call
+    /// [`Self::refresh_info`] first to pick up a host-side change.
     fn info(&self) -> DisplayInfo;
+
+    /// Re-read the display information from the device.
+    ///
+    /// Returns the new information when the host reported a change since the
+    /// last acknowledgement (for example the QEMU window was resized), and
+    /// `None` when the cached information is still current. Implementations
+    /// that cannot observe host changes keep the default, which never reports
+    /// one.
+    ///
+    /// The call may issue device requests; callers use it on query paths, not
+    /// on scanout presentation.
+    fn refresh_info(&self) -> Option<DisplayInfo> {
+        None
+    }
 
     /// Whether need to flush the framebuffer to the screen.
     fn need_flush(&self) -> bool;

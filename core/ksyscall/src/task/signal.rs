@@ -478,11 +478,11 @@ pub(crate) fn sys_signalfd4(
 ) -> KResult<isize> {
     posix_types::check_sigset_size(sigsetsize)?;
 
+    // Unknown flag bits are rejected, but on the update path the remaining
+    // flags are ignored: Linux only consults them when it allocates a new
+    // descriptor (`get_unused_fd_flags`), and callers such as sd-event pass
+    // `SFD_CLOEXEC` again when they widen an existing signalfd's mask.
     let flags = SignalfdFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
-
-    if fd != -1 && flags.contains(SignalfdFlags::CLOEXEC) {
-        return Err(KError::InvalidInput);
-    }
 
     let mut mask: SignalSet = mask.read_vm()?.into();
     // SIGKILL and SIGSTOP cannot be caught, so they are silently removed

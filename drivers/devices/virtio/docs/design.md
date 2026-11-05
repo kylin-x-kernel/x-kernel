@@ -317,7 +317,8 @@ passes; caller-side waits use the common block adapter only.
 
 1. `try_new(transport)`：协商 feature、分配 control/cursor virtqueue
 2. `GET_DISPLAY_INFO`：查询显示分辨率 `(width, height)`
-3. 将 `width`、`height` 封装为 `DisplayInfo { width, height }`。
+3. Wrap `width` and `height` in `DisplayInfo { width, height }`; from then on only
+   `refresh_info()` updates it (see "Display size changes" below).
    virtio-gpu 是 scanout-only 设备，不暴露直接 framebuffer 映射——`DisplayDevice`
    trait 不再包含 `fb()` / 直接映射字段，所有像素输出经 scanout resource 路径
    （由 `fbdevice` 的 fbdev emulation 和 `drmdevice` 共享使用）。
@@ -333,6 +334,24 @@ passes; caller-side waits use the common block adapter only.
 
 > resource ID 由 DRM 层分配并随 dumb buffer 生命周期释放；virtio-gpu 驱动负责把这些
 > resource 命令串行提交到 control virtqueue。
+
+### Display size changes
+
+When the host changes the console size (for example by resizing the QEMU
+window), it sets `VIRTIO_GPU_EVENT_DISPLAY` in the config-space `events_read`
+word. This driver registers no interrupt for the display device (`pci.rs`
+deliberately masks the Display INTx), so the query path polls instead:
+
+1. `DisplayDevice::refresh_info()` reads `events_read`, acknowledges the bits it
+   consumed by writing `events_clear`, and issues `GET_DISPLAY_INFO` again.
+2. When the size differs from the cached value it updates `DisplayInfo` and
+   returns `Some(new)`; otherwise it returns `None`.
+3. `drmdevice` calls it before `GETCONNECTOR`, so the new size appears as a
+   mode named `<width>x<height>` on the connector, and `GETRESOURCES` reports
+   the capability envelope rather than the current size.
+
+`refresh_info()` issues control virtqueue requests, so it may only run in
+process context and never from interrupt handling.
 
 ### 输入设备事件读取
 

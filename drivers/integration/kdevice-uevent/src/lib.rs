@@ -340,6 +340,27 @@ fn publish_object(
     knet::netlink::publish_kobject_uevent(UEVENT_GROUP, payload.as_bytes());
 }
 
+/// Publishes a DRM connector hotplug notification for a card node.
+///
+/// Linux sends `KOBJ_CHANGE` with `HOTPLUG=1` on the card's kobject when a
+/// connector's mode set changes, and userspace re-reads the connector in
+/// response. This is the same notification on the same object: the card is
+/// the only DRM kobject the device model publishes, so no connector object is
+/// required for a client to re-probe.
+pub fn publish_drm_hotplug(node: &DeviceNode) {
+    if node.kind() != DeviceNodeKind::Drm {
+        return;
+    }
+    let Some(path) = uevent_path(node, UeventScope::Device) else {
+        return;
+    };
+    let mut properties = uevent_properties(node, UeventScope::Device);
+    // The Linux kernel adds this to the uevent environment so a listener can
+    // tell a connector change from an unrelated change on the same object.
+    properties.push(("HOTPLUG".to_string(), "1".to_string()));
+    publish_object(UeventAction::Change, &path, node, &properties);
+}
+
 /// Publishes the render minor of a DRM node when the node has one.
 fn publish_render(action: UeventAction, node: &DeviceNode) {
     publish(action, node, UeventScope::Render);

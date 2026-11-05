@@ -413,6 +413,10 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
         self.with(|device| device.info())
     }
 
+    fn refresh_info(&self) -> Option<DisplayInfo> {
+        self.with(|device| device.refresh_info())
+    }
+
     fn need_flush(&self) -> bool {
         self.with(|device| device.need_flush())
     }

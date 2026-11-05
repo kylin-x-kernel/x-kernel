@@ -23,6 +23,12 @@ The publisher never scans or backfills an existing registry. Its installation
 fails if discovery already published a node, which makes incorrect boot order
 visible instead of creating synthetic add events at first sysfs mount.
 
+A display resize publishes `change` on the primary minor with `HOTPLUG=1` in
+the environment. That event is hardware-triggered rather than lifecycle-ordered:
+it carries no add/remove meaning, can repeat, and only tells listeners to
+re-read the connector. It is the one event this crate publishes outside the
+`kdevice` lifecycle callback, through `publish_drm_hotplug`.
+
 Input devices publish the parent `inputN` add before the `eventN` add and use
 the reverse order for removal. A DRM node publishes two objects: the primary
 minor (`drm/cardN`) first and the render minor (`drm/renderD{128+N}`) second on

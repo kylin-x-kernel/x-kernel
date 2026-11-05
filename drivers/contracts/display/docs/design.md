@@ -12,7 +12,8 @@ drivers that can scan out guest memory directly.
 ## Responsibilities
 
 - Define `DisplayDevice: Device`: `info` (visible `width`/`height` as
-  `DisplayInfo`), `need_flush`, and `flush` to push the framebuffer to
+  `DisplayInfo`), `refresh_info` (re-read the host size and report a
+  change once), `need_flush`, and `flush` to push the framebuffer to
   the screen.
 - Define the optional scanout-resource operations: creating a
   host-visible 2D resource backed by guest memory
@@ -33,7 +34,9 @@ drivers that can scan out guest memory directly.
   where it lives is the driver's and framebuffer layer's business; the
   trait only describes flushing.
 - No mode setting, multi-monitor topology, or EDID handling: one visible
-  geometry, no mode enumeration.
+  geometry with no mode enumeration. That geometry is not constant — a
+  host may resize its window at run time — but the contract reports it
+  as one size, and enumerating alternatives stays out of scope.
 - No rendering, compositing, or damage tracking: `need_flush`/`flush` is
   the whole frame-level contract.
 - No user-space exposure: `/dev/dri`-style interfaces belong to the
@@ -91,6 +94,12 @@ ownership protocol over host-visible 2D resources:
 
 - All methods take `&self` and must not sleep; implementations synchronize
   internally if the hardware is shared.
+- `info` is a latch: it answers the last size the device acknowledged.
+  `refresh_info` is the only method that talks to the hardware about it,
+  so callers that publish a size run it first. It may issue device
+  requests (a config read and, on a change, one display-info query) and
+  is therefore for query paths, never for interrupt context or scanout
+  presentation.
 - `flush` is intended for driver/ktask-driven refresh paths, including
   from deferred work; implementations must tolerate being called
   repeatedly.

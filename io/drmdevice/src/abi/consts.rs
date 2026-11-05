@@ -37,6 +37,19 @@ pub(crate) const fn io(ty: u8, nr: u8) -> u32 {
 
 // ======== driver identity ========
 
+/// Smallest scanout the connector can be asked to produce.
+pub(crate) const MIN_SCANOUT_WIDTH: u32 = 32;
+pub(crate) const MIN_SCANOUT_HEIGHT: u32 = 32;
+
+/// Largest scanout the connector can be asked to produce.
+///
+/// A KMS client sizes its screen from this envelope at startup and cannot grow
+/// past it later, so it must describe the range the host may resize within and
+/// not the size the host happens to scan out today. The values match Linux's
+/// virtio-gpu mode-config limits.
+pub(crate) const MAX_SCANOUT_WIDTH: u32 = 8192;
+pub(crate) const MAX_SCANOUT_HEIGHT: u32 = 8192;
+
 pub(crate) const DRIVER_NAME: &str = "simpledrm";
 pub(crate) const DRIVER_DATE: &str = "2026-06-02";
 pub(crate) const DRIVER_DESC: &str = "X-Kernel simple DRM driver";

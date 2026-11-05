@@ -29,7 +29,7 @@ mod kms;
 mod model;
 mod scanout;
 
-pub use model::device::{DrmDevice, MinorKind};
+pub use model::device::{DrmDevice, HotplugSink, MinorKind};
 
 #[cfg(unittest)]
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

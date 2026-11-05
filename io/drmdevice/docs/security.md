@@ -82,6 +82,16 @@ through `UserRead`, `UserWrite`, and `UserPtr` abstractions.
 - User-copy helpers enforce the matching ioctl direction bits
   at compile time, preventing a mismatched dispatcher arm from being built.
 
+## Display hotplug
+
+A refresh that observes a host size change calls the sink installed by the node
+owner. The call happens after the display driver's internal lock is released
+and outside the device locks, so the sink may publish to userspace. It runs in
+syscall context and inherits that constraint: no blocking, no unbounded work.
+The sink cannot change what is scanned — only a later `SETCRTC`/page flip does.
+A card without an installed sink simply reports the new size to the next
+querying client.
+
 ## Connector size metadata
 
 The caller's incoming physical dimensions are overwritten on a successful
@@ -135,8 +145,11 @@ handle's availability state and does not mutate another card's local tables.
   first successful present. This unbounded-until-success retention is accepted
   because freeing a resource the host may still scan would corrupt the display.
 - Each card currently exposes one CRTC, connector, plane and encoder.
-- Connector hotplug within one display backend is not modeled separately from
-  driver-core device removal.
+- Connector hotplug is reported as a `change` uevent on the card, not through a
+  connector object: the driver projects one connector and has no per-connector
+  kobject. A hotplug only tells listeners to re-read; it never mutates the
+  committed KMS state, so a listener that ignores it keeps scanning the frame
+  it already set.
 
 ## Permission model
 

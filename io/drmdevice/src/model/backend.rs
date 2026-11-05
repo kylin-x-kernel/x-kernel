@@ -88,6 +88,15 @@ pub(crate) trait Backend: Send + Sync {
     /// Visible mode of the display.
     fn info(&self) -> DisplayInfo;
 
+    /// Re-reads the visible mode, reporting a host-side change.
+    ///
+    /// Returns the new mode when the display device observed one since the
+    /// previous acknowledgement. Backends that cannot report changes keep the
+    /// default, so `info` stays the only source of truth.
+    fn refresh_info(&self) -> Option<DisplayInfo> {
+        None
+    }
+
     /// Capabilities that this backend implements.
     fn caps(&self) -> BackendCaps;
 
@@ -135,6 +144,10 @@ impl Backend for ClassBackend {
 
     fn info(&self) -> DisplayInfo {
         self.display.info()
+    }
+
+    fn refresh_info(&self) -> Option<DisplayInfo> {
+        self.display.refresh_info()
     }
 
     fn caps(&self) -> BackendCaps {

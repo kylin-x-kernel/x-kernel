@@ -486,11 +486,52 @@ fn display_resolution(dev: &DrmDevice) -> (u32, u32) {
         .unwrap_or((640, 480))
 }
 
-fn current_mode(dev: &DrmDevice) -> DrmModeModeInfo {
-    let (w, h) = display_resolution(dev);
+/// Writes the decimal form of `value` at `cursor`, returning the new cursor.
+///
+/// The mode name lives in a fixed 32-byte array and this runs on the ioctl
+/// path, so the conversion must not allocate.
+fn write_decimal(out: &mut [u8], mut cursor: usize, value: u32) -> usize {
+    let mut digits = [0u8; 10];
+    let mut len = 0;
+    let mut rest = value;
+    loop {
+        digits[len] = b'0' + (rest % 10) as u8;
+        len += 1;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    while len > 0 {
+        len -= 1;
+        if cursor < out.len() {
+            out[cursor] = digits[len];
+            cursor += 1;
+        }
+    }
+    cursor
+}
+
+/// Synthesizes the connector's single mode from the visible display size.
+///
+/// The name tracks the pixel size instead of being a constant: a host resize
+/// changes both the dimensions and the name, so a client that re-reads the
+/// mode list can tell the new mode from the one it had cached, the same way an
+/// EDID-derived mode is named after its timing.
+pub(crate) fn current_mode(dev: &DrmDevice) -> DrmModeModeInfo {
+    let (width, height) = display_resolution(dev);
+    mode_for_size(width, height)
+}
+
+/// Builds the connector's single mode for one visible size.
+fn mode_for_size(w: u32, h: u32) -> DrmModeModeInfo {
     let mut name = [0u8; DRM_MODE_NAME_LEN];
-    let label = b"current";
-    name[..label.len()].copy_from_slice(label);
+    let mut cursor = write_decimal(&mut name, 0, w);
+    if cursor < name.len() {
+        name[cursor] = b'x';
+        cursor += 1;
+    }
+    let _ = write_decimal(&mut name, cursor, h);
     DrmModeModeInfo {
         clock: 0,
         hdisplay: w as u16,
@@ -569,7 +610,7 @@ pub(crate) fn mode_from_bytes(bytes: &[u8]) -> Option<DrmModeModeInfo> {
 }
 
 impl Ioctl for DrmModeCardRes {
-    fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, r: &mut Self) -> DrmResult<usize> {
+    fn handle(_dev: &DrmDevice, file: &Arc<DrmFile>, r: &mut Self) -> DrmResult<usize> {
         // Snapshot only this open file's IDs. Bound allocation by both the
         // actual list and the caller's capacity; count-only queries allocate
         // nothing. Drop the list lock before potentially faulting user copies.
@@ -584,11 +625,13 @@ impl Ioctl for DrmModeCardRes {
         };
         report_user_array(r.fb_id_ptr, r.count_fbs, &fb_ids)?;
         r.count_fbs = fb_count;
-        let (w, h) = display_resolution(dev);
-        r.min_width = w;
-        r.max_width = w;
-        r.min_height = h;
-        r.max_height = h;
+        // The visible size is a point inside this envelope, not the envelope:
+        // reporting it as the maximum would make a client reject every larger
+        // mode the host can still resize to.
+        r.min_width = MIN_SCANOUT_WIDTH;
+        r.max_width = MAX_SCANOUT_WIDTH;
+        r.min_height = MIN_SCANOUT_HEIGHT;
+        r.max_height = MAX_SCANOUT_HEIGHT;
         r.count_crtcs = report_user_array(r.crtc_id_ptr, r.count_crtcs, &[CRTC_ID])?;
         r.count_encoders = report_user_array(r.encoder_id_ptr, r.count_encoders, &[ENCODER_ID])?;
         r.count_connectors =
@@ -715,6 +758,13 @@ impl Ioctl for DrmModeGetConnector {
         if c.connector_id != CONNECTOR_ID {
             return Err(DrmError::NotFound);
         }
+        // A host-side resize only shows up in a fresh query: this driver has no
+        // hotplug notification path, so the mode list is refreshed here and the
+        // display driver reports the change once it is acknowledged. The mode
+        // and the geometry below come from the same snapshot, so a concurrent
+        // resize cannot make them disagree.
+        let _ = dev.refresh_info();
+        let (width, height) = display_resolution(dev);
         c.encoder_id = ENCODER_ID;
         c.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
         c.connector_type_id = 1;
@@ -728,7 +778,7 @@ impl Ioctl for DrmModeGetConnector {
         c.count_encoders = report_user_array(c.encoders_ptr, c.count_encoders, &[ENCODER_ID])?;
         if !c.modes_ptr.is_null() && c.count_modes > 0 {
             c.modes_ptr
-                .write_vm(current_mode(dev))
+                .write_vm(mode_for_size(width, height))
                 .map_err(|_| DrmError::BadAddress)?;
         }
         c.count_modes = 1;

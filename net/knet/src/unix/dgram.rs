@@ -19,19 +19,19 @@ use crate::{
     unix::{UnixAddr, UnixTransport, UnixTransportOps, lookup_bind_entry},
 };
 
-struct Datagram {
-    data: Vec<u8>,
-    ancillary: Vec<AncillaryData>,
-    sender: UnixAddr,
-    sender_credentials: Option<crate::SenderCredentials>,
+pub(crate) struct Datagram {
+    pub(crate) data: Vec<u8>,
+    pub(crate) ancillary: Vec<AncillaryData>,
+    pub(crate) sender: UnixAddr,
+    pub(crate) sender_credentials: Option<crate::SenderCredentials>,
 }
 
-struct Channel {
-    tx: async_channel::Sender<Datagram>,
-    poll: Arc<PollSet>,
+pub(crate) struct Channel {
+    pub(crate) tx: async_channel::Sender<Datagram>,
+    pub(crate) poll: Arc<PollSet>,
     /// Established only for socketpair peers; datagram `bind` and `connect`
     /// leave Linux `sk_peer_pid` unset.
-    peer_credentials: PeerCredentials,
+    pub(crate) peer_credentials: PeerCredentials,
 }
 
 pub(crate) struct Bind {

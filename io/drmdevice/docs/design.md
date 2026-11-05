@@ -149,6 +149,28 @@ cannot be reused as millimetres or converted using an assumed DPI. A future
 physical-size provider must pass measured dimensions through that contract
 before this query can report nonzero values.
 
+The pixel size is a host property that can change while the card is open
+(a resized QEMU window). The connector query therefore asks the backend to
+refresh first and derives the mode and the reported geometry from that one
+snapshot, so a resize cannot make `hdisplay`/`vdisplay` disagree with the
+mode name. Refreshing is a read: it never touches `KmsState`, the scanout
+slot or the legacy mode blob, so a running client keeps presenting its old
+framebuffer until it sets a mode itself.
+
+`GETRESOURCES` reports the size *envelope* (`MIN_SCANOUT_*`/`MAX_SCANOUT_*`),
+not the current size. A KMS client fixes its screen range from these bounds
+at startup and cannot grow past them later; reporting the boot size as the
+maximum would make every larger host size unreachable. `GETCRTC` keeps
+reporting the committed mode, which is what the card is actually scanning.
+
+A refresh that observes a change also calls the hotplug sink installed with
+[`DrmDevice::set_hotplug_sink`]. The card does not know what a sink does: the
+filesystem that owns the device node installs one that publishes a Linux-style
+`change` uevent with `HOTPLUG=1` on `drm/cardN`, which is the object udev and
+the compositor watch. A client that is not listening can still re-read the
+connector, for example through a RandR re-probe. The sink runs in the querying
+syscall context and therefore must not block.
+
 ## Concurrency
 
 Two locks with a fixed order: `commit` before the state/registry locks. The

@@ -26,6 +26,13 @@ pub enum MinorKind {
     Render,
 }
 
+/// Sink the node owner installs to publish a display hotplug notification.
+///
+/// The DRM object model does not know how a card is announced to userspace;
+/// the filesystem that owns the device node installs this and turns the call
+/// into whatever its platform uses (a kobject uevent in X-Kernel).
+pub type HotplugSink = Arc<dyn Fn() + Send + Sync>;
+
 /// One DRM card: both minors resolve to this object.
 pub struct DrmDevice {
     backend: BackendHandle,
@@ -48,6 +55,8 @@ pub struct DrmDevice {
     /// owns it. Keeping the slot is what lets the next modeset free the
     /// previous one; without it every SETCRTC leaked a blob.
     legacy_mode: Mutex<Option<(BlobId, Arc<Blob>)>>,
+    /// Called when a refresh observes a host display change.
+    hotplug: Mutex<Option<HotplugSink>>,
     retained_pages: Mutex<BTreeMap<u64, Arc<PageRef>>>,
     next_dumb: AtomicU32,
     next_offset: AtomicU64,
@@ -76,6 +85,7 @@ impl DrmDevice {
             events: EventQueue::new(),
             in_formats: Mutex::new(None),
             legacy_mode: Mutex::new(None),
+            hotplug: Mutex::new(None),
             retained_pages: Mutex::new(BTreeMap::new()),
             next_dumb: AtomicU32::new(FIRST_DUMB_HANDLE),
             next_offset: AtomicU64::new(DUMB_BUFFER_OFFSET_STRIDE),
@@ -106,6 +116,31 @@ impl DrmDevice {
     /// Visible mode of the display.
     pub(crate) fn info(&self) -> DrmResult<DisplayInfo> {
         Ok(self.backend()?.info())
+    }
+
+    /// Installs the sink called when a refresh observes a host resize.
+    ///
+    /// The sink runs in the caller's context (a query ioctl), so it must not
+    /// block or take locks that the refresh path holds. Installing it replaces
+    /// any previous sink; the card keeps working without one.
+    pub fn set_hotplug_sink(&self, sink: HotplugSink) {
+        *self.hotplug.lock() = Some(sink);
+    }
+
+    /// Re-reads the visible mode and returns it when the host changed it.
+    ///
+    /// The query paths call this so a host resize (for example a resized QEMU
+    /// window) is visible to a client that asks, and the installed sink is what
+    /// tells a client that it should ask.
+    pub(crate) fn refresh_info(&self) -> Option<DisplayInfo> {
+        let changed = self.backend().ok()?.refresh_info()?;
+        // Clone out of the lock: the sink publishes to userspace and must not
+        // run with the device lock held.
+        let sink = self.hotplug.lock().clone();
+        if let Some(sink) = sink {
+            sink();
+        }
+        Some(changed)
     }
 
     /// Backend capabilities.

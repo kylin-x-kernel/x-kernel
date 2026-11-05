@@ -103,12 +103,19 @@ fn display_files(
     fs: Arc<SimpleFs>,
     number: DeviceId,
     render: Option<DeviceId>,
-    id: CoreDeviceId,
+    node: DeviceNode,
 ) -> VfsResult<Option<NodeFiles>> {
-    let Some(device) = find_display_device(id) else {
+    let Some(device) = find_display_device(node.core_id()) else {
         return Ok(None);
     };
     let card = drmdevice::DrmDevice::new(device);
+    // A host resize is only visible to a client that re-reads the connector,
+    // so announce it the Linux way: a `change` uevent carrying HOTPLUG=1 on
+    // the card node, which is what udev forwards to the compositor.
+    let hotplug_node = node.clone();
+    card.set_hotplug_sink(Arc::new(move || {
+        kdevice_uevent::publish_drm_hotplug(&hotplug_node);
+    }));
     let weak_card = Arc::downgrade(&card);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {
         if let Some(card) = weak_card.upgrade() {
@@ -155,7 +162,7 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
             .map(|file| file.map(|(file, on_remove)| (file, None, on_remove))),
         #[cfg(not(feature = "input"))]
         DeviceNodeKind::Input => Ok(None),
-        DeviceNodeKind::Drm => display_files(projection.fs.clone(), number, render, node.core_id()),
+        DeviceNodeKind::Drm => display_files(projection.fs.clone(), number, render, node.clone()),
     };
     let file = match file {
         Ok(file) => file,

@@ -37,6 +37,10 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly.
 - A scanout resource id is driver-scoped; `destroy_scanout_resource` on
   an unknown id returns an error rather than affecting other resources.
 - `flush` is repeatable and side-effect-free beyond presenting pixels.
+- `refresh_info` is a read: it may acknowledge a host event and update the
+  cached size, but it never binds, rebinds, or frees a scanout resource.
+  A size change is only observable to userspace after a later present or
+  mode set, so a refresh cannot move the pixels under a scanning host.
 
 ## Threat Analysis
 

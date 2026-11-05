@@ -217,7 +217,7 @@ fn setcrtc_with_mode_and_no_framebuffer_is_enoent() {
 // ===========================================================================
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::{
     gem::GemObject,
@@ -231,16 +231,25 @@ use crate::{
 /// Backend that records what the driver asked it to do.
 #[derive(Default)]
 struct FakeBackend {
-    resolution: Option<DisplayInfo>,
+    /// Visible size packed as `width << 32 | height`; zero selects the default.
+    resolution: AtomicU64,
+    /// Whether the next `refresh_info` must report the stored size as changed.
+    pending_change: AtomicBool,
     created: AtomicUsize,
     destroyed: AtomicUsize,
     presented: AtomicUsize,
     flushed: AtomicUsize,
-    fail_next_present: core::sync::atomic::AtomicBool,
-    fail_next_create: core::sync::atomic::AtomicBool,
+    fail_next_present: AtomicBool,
+    fail_next_create: AtomicBool,
 }
 
 impl FakeBackend {
+    fn set_resolution(&self, width: u32, height: u32) {
+        self.resolution
+            .store((u64::from(width) << 32) | u64::from(height), Ordering::Relaxed);
+        self.pending_change.store(true, Ordering::Relaxed);
+    }
+
     fn destroyed(&self) -> usize {
         self.destroyed.load(Ordering::Relaxed)
     }
@@ -259,11 +268,25 @@ impl Backend for FakeBackend {
         true
     }
 
+    fn refresh_info(&self) -> Option<DisplayInfo> {
+        if !self.pending_change.swap(false, Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.info())
+    }
+
     fn info(&self) -> DisplayInfo {
-        self.resolution.unwrap_or(DisplayInfo {
-            width: 1280,
-            height: 800,
-        })
+        let packed = self.resolution.load(Ordering::Relaxed);
+        if packed == 0 {
+            return DisplayInfo {
+                width: 1280,
+                height: 800,
+            };
+        }
+        DisplayInfo {
+            width: (packed >> 32) as u32,
+            height: packed as u32,
+        }
     }
 
     fn caps(&self) -> BackendCaps {
@@ -818,10 +841,8 @@ fn oversized_atomic_object_count_is_refused_before_loading() {
 #[def_test]
 fn connector_without_physical_dimensions_reports_unknown_size() {
     for (width, height) in [(640, 480), (1280, 800), (3840, 2160)] {
-        let backend = Arc::new(FakeBackend {
-            resolution: Some(DisplayInfo { width, height }),
-            ..Default::default()
-        });
+        let backend = Arc::new(FakeBackend::default());
+        backend.set_resolution(width, height);
         let dev = DrmDevice::new_with_backend(backend);
         let file = dev.open_file(MinorKind::Primary).expect("open");
         let mut connector = DrmModeGetConnector {
@@ -837,9 +858,85 @@ fn connector_without_physical_dimensions_reports_unknown_size() {
 
         let mut resources = DrmModeCardRes::default();
         DrmModeCardRes::handle(&dev, &file, &mut resources).expect("resources");
-        assert_eq!((resources.min_width, resources.min_height), (width, height));
-        assert_eq!((resources.max_width, resources.max_height), (width, height));
+        // The reported range is the capability envelope, not this mode's size:
+        // a client pins its screen bounds to it at startup, so it has to stay
+        // wider than any size the host may resize to later.
+        assert_eq!(
+            (resources.min_width, resources.min_height),
+            (MIN_SCANOUT_WIDTH, MIN_SCANOUT_HEIGHT)
+        );
+        assert_eq!(
+            (resources.max_width, resources.max_height),
+            (MAX_SCANOUT_WIDTH, MAX_SCANOUT_HEIGHT)
+        );
     }
+}
+
+#[def_test]
+fn connector_mode_tracks_a_host_resize() {
+    let backend = Arc::new(FakeBackend::default());
+    let dev = DrmDevice::new_with_backend(backend.clone());
+
+    let mode = current_mode(&dev);
+    assert_eq!((mode.hdisplay, mode.vdisplay), (1280, 800));
+    assert_eq!(mode_name(&mode), "1280x800");
+
+    // A resized host window must change both the pixels and the mode name, so
+    // a client that re-reads the mode list can tell the new mode apart.
+    backend.set_resolution(1024, 768);
+    let mode = current_mode(&dev);
+    assert_eq!((mode.hdisplay, mode.vdisplay), (1024, 768));
+    assert_eq!(mode_name(&mode), "1024x768");
+
+    // The query envelope must not shrink to the new mode, otherwise a client
+    // that grew the window could never ask for the larger size again.
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+    let mut resources = DrmModeCardRes::default();
+    DrmModeCardRes::handle(&dev, &file, &mut resources).expect("resources");
+    assert_eq!((resources.max_width, resources.max_height), (8192, 8192));
+}
+
+#[def_test]
+fn refresh_notifies_the_hotplug_sink_once() {
+    let (dev, backend) = fake_device();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    dev.set_hotplug_sink(Arc::new(move || {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }));
+
+    // A query with nothing to report must not publish a hotplug.
+    assert_eq!(dev.refresh_info(), None);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    backend.set_resolution(1024, 768);
+    assert_eq!(dev.refresh_info().map(|info| info.width), Some(1024));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    // The change was acknowledged, so the next refresh notifies nobody.
+    assert_eq!(dev.refresh_info(), None);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[def_test]
+fn refresh_reports_a_pending_host_change_once() {
+    let (dev, backend) = fake_device();
+    assert_eq!(dev.refresh_info(), None);
+
+    backend.set_resolution(800, 600);
+    let changed = dev.refresh_info().expect("change reported");
+    assert_eq!((changed.width, changed.height), (800, 600));
+    assert_eq!(dev.refresh_info(), None);
+    assert_eq!(dev.info().expect("info").width, 800);
+}
+
+fn mode_name(mode: &DrmModeModeInfo) -> &str {
+    let end = mode
+        .name
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(mode.name.len());
+    core::str::from_utf8(&mode.name[..end]).expect("mode name is ASCII")
 }
 
 #[def_test]

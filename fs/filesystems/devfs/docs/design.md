@@ -181,7 +181,10 @@ The optional Cargo feature `input` enables `kclass/input` and `inputdev`; the to
 adapt input node assignments to `EventDev`. Display support is unconditional
 through `kclass/display`, so DRM primary nodes remain available independently.
 
-`devfs` depends on `kdevice` and `kclass`. `sysfs` depends directly on
+`devfs` depends on `kdevice`, `kclass` and `kdevice_uevent`. The last one is
+how a DRM card publishes the Linux `change`/`HOTPLUG=1` notification when the
+display backend reports a new size: devfs owns the `DeviceNode`, so it installs
+the sink that turns the DRM event into that uevent. `sysfs` depends directly on
 `kdevice`; there is no dependency edge from sysfs to devfs.
 
 ## Initialization and lifecycle

@@ -4,6 +4,7 @@
 
 //! Unix domain socket implementations.
 pub(crate) mod dgram;
+pub(crate) mod seqpacket;
 pub(crate) mod stream;
 
 use alloc::{boxed::Box, sync::Arc};
@@ -24,7 +25,7 @@ use kvfs::{
     WeakVfsInode,
 };
 
-pub use self::{dgram::DgramTransport, stream::StreamTransport};
+pub use self::{dgram::DgramTransport, seqpacket::SeqpacketTransport, stream::StreamTransport};
 use crate::{
     AcceptOptions, ConnectOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx,
     SocketOps,
@@ -137,12 +138,14 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
 pub enum UnixTransport {
     Stream(StreamTransport),
     Dgram(DgramTransport),
+    Seqpacket(SeqpacketTransport),
 }
 impl Pollable for UnixTransport {
     fn poll(&self) -> IoEvents {
         match self {
             UnixTransport::Stream(stream) => stream.poll(),
             UnixTransport::Dgram(dgram) => dgram.poll(),
+            UnixTransport::Seqpacket(seqpacket) => seqpacket.poll(),
         }
     }
 
@@ -154,6 +157,7 @@ impl Pollable for UnixTransport {
         match self {
             UnixTransport::Stream(stream) => stream.register(context, events),
             UnixTransport::Dgram(dgram) => dgram.register(context, events),
+            UnixTransport::Seqpacket(seqpacket) => seqpacket.register(context, events),
         }
     }
 }
@@ -161,6 +165,7 @@ impl Pollable for UnixTransport {
 pub struct BindEntry {
     pub(crate) stream: Arc<Mutex<Option<stream::Bind>>>,
     pub(crate) dgram: Arc<Mutex<Option<dgram::Bind>>>,
+    pub(crate) seqpacket: Arc<Mutex<Option<seqpacket::Bind>>>,
 }
 
 impl Default for BindEntry {
@@ -168,6 +173,7 @@ impl Default for BindEntry {
         Self {
             stream: Arc::new(Mutex::new(None)),
             dgram: Arc::new(Mutex::new(None)),
+            seqpacket: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -310,11 +316,10 @@ fn lookup_or_create_bind_entry<R>(
 
 /// The socket type requested at creation.
 ///
-/// Linux keeps it in `sk_type` and reports it back from `SO_TYPE`, so it cannot
-/// be derived from the transport: `SOCK_DGRAM` and `SOCK_SEQPACKET` pairs both
-/// use the datagram transport (`sk_getsockopt` in `net/core/sock.c` reports the
-/// stored type; `unix_create` keeps `SOCK_SEQPACKET` and rewrites only
-/// `SOCK_RAW` to `SOCK_DGRAM`).
+/// Linux keeps it in `sk_type` and reports it back from `SO_TYPE`, so it is
+/// stored rather than derived from the transport: a socket may be created
+/// before its transport kind is observable, and `unix_create` keeps
+/// `SOCK_SEQPACKET` while rewriting only `SOCK_RAW` to `SOCK_DGRAM`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnixSocketType {
     Stream,
@@ -370,7 +375,10 @@ impl UnixDomainSocket {
         }
     }
 
-    /// Whether this socket uses datagram transport, including current seqpacket pairs.
+    /// Whether this socket uses the datagram transport.
+    ///
+    /// Seqpacket sockets now have their own connection-oriented transport, so
+    /// only genuine `SOCK_DGRAM` sockets answer `true`.
     pub fn is_datagram(&self) -> bool {
         matches!(&self.transport, UnixTransport::Dgram(_))
     }
@@ -385,7 +393,10 @@ impl UnixDomainSocket {
     /// per-message credential barrier.
     pub fn should_attach_sender_credentials(&self) -> bool {
         match &self.transport {
-            UnixTransport::Dgram(_) => true,
+            // Linux sends seqpacket messages through the datagram path, which
+            // always captures the sender so a receiver with `SO_PASSCRED` can
+            // observe it.
+            UnixTransport::Dgram(_) | UnixTransport::Seqpacket(_) => true,
             UnixTransport::Stream(stream) => {
                 stream.pass_credentials() || stream.peer_pass_credentials()
             }
@@ -506,19 +517,20 @@ impl SocketOps for UnixDomainSocket {
     fn connect(&self, remote_addr: SocketAddrEx, options: ConnectOptions) -> KResult {
         let remote_addr = remote_addr.into_unix()?;
         let cred = kprocess::current_cred();
-        // Linux initializes peer credentials only while establishing a stream
-        // peer; datagram `connect` leaves `sk_peer_pid` unset.
+        // Linux initializes peer credentials only while establishing a
+        // connection; datagram `connect` leaves `sk_peer_pid` unset.
         let peer_credentials = match &self.transport {
-            UnixTransport::Stream(_) => current_peer_credentials(),
+            UnixTransport::Stream(_) | UnixTransport::Seqpacket(_) => current_peer_credentials(),
             UnixTransport::Dgram(_) => PeerCredentials::none(),
         };
         self.connect_unix_with_credentials(remote_addr, options, &cred, &peer_credentials)
     }
 
     fn listen(&self, backlog: usize) -> KResult {
-        // Only a stream listener records an identity for future clients.
+        // Only a connection-oriented listener records an identity for future
+        // clients.
         let peer_credentials = match &self.transport {
-            UnixTransport::Stream(_) => current_peer_credentials(),
+            UnixTransport::Stream(_) | UnixTransport::Seqpacket(_) => current_peer_credentials(),
             UnixTransport::Dgram(_) => PeerCredentials::none(),
         };
         self.listen_with_credentials(backlog, &peer_credentials)
