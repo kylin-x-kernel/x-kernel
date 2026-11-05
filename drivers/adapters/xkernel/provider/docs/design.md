@@ -32,6 +32,8 @@ Requests return a shared action token. Regular-action release remains supported
 for compatibility, but is not a fallback for failed shared-action release.
 NoMemory and VirqExhausted map to NoMemory; InvalidHwirq and the remaining
 descriptor errors retain mainline InvalidResource classification.
+This includes RetirementUnavailable: failure to prepare IRQ action reclamation
+does not authorize releasing the device resource or discarding its removal key.
 
 Ordinary handlers report handled/unhandled. WAKE_THREAD remains handled without
 a threaded wake because this path has no paired thread; threaded entry points

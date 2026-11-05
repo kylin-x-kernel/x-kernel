@@ -64,6 +64,7 @@ fn level_overlap_masks_and_completes_each_claim_without_recursive_actions() {
             .line
             .lock()
             .install_regular_action(IrqAction::regular(Arc::new(move |_| {
+                assert!(krcu::is_reading());
                 assert_eq!(MASKS.load(Ordering::Relaxed), 1);
                 assert_eq!(UNMASKS.load(Ordering::Relaxed), 0);
                 called.fetch_add(1, Ordering::Relaxed);
@@ -79,6 +80,7 @@ fn level_overlap_masks_and_completes_each_claim_without_recursive_actions() {
     );
     fixture.enable();
     super::dispatch_claim(IrqRef::Virq(virq), || {
+        assert!(!krcu::is_reading());
         assert_eq!(MASKS.load(Ordering::Relaxed), 1);
     });
     assert_eq!(calls.load(Ordering::Relaxed), 1);

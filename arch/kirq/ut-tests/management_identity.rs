@@ -3,11 +3,12 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use unittest::{assert, assert_eq, assert_ne, def_test};
 
 use super::{IRQ_STATE, IrqLine, IrqStateDesc};
+use crate::runtime::manager::take_from_line;
 use crate::{Handler, IrqDesc, IrqDescError, IrqEvent};
 
 struct ReplaceBeforeAdmission {
@@ -122,7 +123,7 @@ fn unsupported_gic_spi_trigger_preserves_resolution_state() {
 enum RegistrationRejection {
     DuplicateRegular,
     IncompatibleShared,
-    FullShared,
+    ExhaustedSequence,
 }
 
 #[expect(
@@ -143,10 +144,9 @@ fn check_registration_rejection(
     let installed: Handler = Arc::new(|_| IrqEvent::HANDLED);
     let offered: Handler = Arc::new(|_| IrqEvent::HANDLED);
     let mut entry = IrqStateDesc::new(desc);
-    if matches!(rejection, RegistrationRejection::FullShared) {
-        for _ in 0..crate::state::MAX_IRQ_ACTIONS {
-            assert!(entry.install_shared_action(installed.clone()).is_some());
-        }
+    if matches!(rejection, RegistrationRejection::ExhaustedSequence) {
+        assert!(entry.install_shared_action(installed.clone()).is_some());
+        entry.exhaust_action_sequences_for_tests();
     } else {
         assert!(
             entry.install_regular_action(crate::action::IrqAction::regular(installed.clone(),))
@@ -229,8 +229,9 @@ fn incompatible_shared_registration_preserves_richer_legacy_metadata_and_owners(
 }
 
 #[def_test(serial)]
-fn full_shared_registration_preserves_richer_legacy_metadata_and_owners() -> unittest::TestResult {
-    check_registration_rejection(0x5f72, RegistrationRejection::FullShared)
+fn exhausted_sequence_registration_preserves_richer_legacy_metadata_and_owners()
+-> unittest::TestResult {
+    check_registration_rejection(0x5f72, RegistrationRejection::ExhaustedSequence)
 }
 
 #[def_test(serial)]
@@ -333,7 +334,9 @@ fn failed_registration_retains_resolved_metadata_without_committing_configuratio
             },
         );
         assert_eq!(result, Err(IrqDescError::ConfigurationFailed { hwirq }));
-        assert_eq!(observed, Some((offered, true, None, false, 1)));
+        // The unpublished PreparedAction retains the offered handler through
+        // configuration; failure returns that extra owner before this call ends.
+        assert_eq!(observed, Some((offered, true, None, false, 2)));
         assert_eq!(karch::local_irq_enabled(), irq_before);
         assert_eq!(IRQ_STATE.lock().translated_hwirq(domain, hwirq), Some(virq));
         {
@@ -442,11 +445,15 @@ fn shared_withdrawal_restores_pending_service_after_teardown() {
         .unwrap();
     let plan = entry.prepare_auto_enable();
     entry.commit_platform_plan(plan);
-    entry.begin_management();
-    let removed = entry.take_action(removed_token);
-    entry.begin_teardown();
-    entry.is_pending = true;
     let line = Arc::new(IrqLine::new(entry));
+    {
+        let mut entry = line.lock();
+        entry.begin_management();
+        entry.begin_teardown();
+        entry.is_pending = true;
+    }
+    let removed = take_from_line(&line, Some(removed_token));
+    assert!(removed.is_some());
     let completion = line.lock().in_flight_zero_completion();
     drop(super::ManagementAdmission {
         line: &line,
@@ -488,11 +495,15 @@ fn shared_edge_withdrawal_unmasks_before_requesting_hardware_delivery() {
         .unwrap();
     let plan = entry.prepare_auto_enable();
     entry.commit_platform_plan(plan);
-    entry.begin_management();
-    let removed = entry.take_action(token);
-    entry.begin_teardown();
-    entry.is_pending = true;
     let line = Arc::new(IrqLine::new(entry));
+    {
+        let mut entry = line.lock();
+        entry.begin_management();
+        entry.begin_teardown();
+        entry.is_pending = true;
+    }
+    let removed = take_from_line(&line, Some(token));
+    assert!(removed.is_some());
     drop(super::ManagementAdmission {
         line: &line,
         is_active: true,
@@ -831,6 +842,76 @@ impl Drop for ReentrantDrop {
         let has_line_access = self.line.management.try_lock().is_some();
         self.has_unlocked_drop
             .store(has_registry_access && has_line_access, Ordering::Release);
+    }
+}
+
+struct CountedReentrantDrop {
+    reentry: ReentrantDrop,
+    drops: Arc<AtomicUsize>,
+}
+
+impl crate::IrqHandler for CountedReentrantDrop {
+    fn handle(&self, irq: usize) -> IrqEvent {
+        self.reentry.handle(irq)
+    }
+}
+
+impl Drop for CountedReentrantDrop {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+        // Field destruction then exercises ReentrantDrop's same-Line reentry.
+    }
+}
+
+#[def_test(serial)]
+fn shared_public_api_churn_reclaims_each_owner_after_unlock() {
+    // Metadata-free synthetic identity: public registration performs no MMIO.
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x5fb8;
+    let cleanup = ScopedTestLine::for_vacant_slot(virq);
+    assert!(cleanup.is_some());
+    assert_eq!(crate::try_map(IrqDesc::from_virq(virq)), Ok(virq));
+    let line = IRQ_STATE.lock().descs.get(&virq).unwrap().clone();
+    let mut previous_token = 0;
+    for _ in 0..8 {
+        let drops: [_; 6] = core::array::from_fn(|_| Arc::new(AtomicUsize::new(0)));
+        let unlocked: [_; 6] = core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+        let mut tokens = [None; 6];
+        let mut owners = alloc::vec::Vec::new();
+        for index in 0..6 {
+            let handler: Handler = Arc::new(CountedReentrantDrop {
+                reentry: ReentrantDrop {
+                    line: line.clone(),
+                    has_unlocked_drop: unlocked[index].clone(),
+                },
+                drops: drops[index].clone(),
+            });
+            owners.push(Arc::downgrade(&handler));
+            let token = crate::try_register_shared(virq, handler).unwrap().unwrap();
+            assert!(token.id() > previous_token);
+            previous_token = token.id();
+            tokens[index] = Some(token);
+        }
+        assert_eq!(line.lock().action_count(), 6);
+        // Alternate middle positions, then remove the two endpoints.
+        for (removed_count, index) in [2, 3, 1, 4, 0, 5].into_iter().enumerate() {
+            let token = tokens[index].take().unwrap();
+            let removed = crate::try_free_irq_action(virq, token).unwrap().unwrap();
+            assert_eq!(Arc::strong_count(&removed), 1);
+            assert_eq!(drops[index].load(Ordering::Relaxed), 0);
+            assert!(!unlocked[index].load(Ordering::Acquire));
+            assert!(!line.lock().is_teardown_in_progress());
+            assert_eq!(line.lock().action_count(), 5 - removed_count);
+            drop(removed);
+            assert_eq!(drops[index].load(Ordering::Relaxed), 1);
+            assert!(unlocked[index].load(Ordering::Acquire));
+            assert!(owners[index].upgrade().is_none());
+            assert!(crate::try_free_irq_action(virq, token).unwrap().is_none());
+        }
+        for count in &drops {
+            assert_eq!(count.load(Ordering::Relaxed), 1);
+        }
+        assert!(line.management.try_lock().is_some());
+        assert!(line.lock().is_unused());
     }
 }
 

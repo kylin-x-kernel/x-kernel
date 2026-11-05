@@ -207,7 +207,9 @@ impl<T> RetiredRcuValue<'_, T> {
         if self.raw.is_null() {
             return None;
         }
-        self.wait.submit_and_wait();
+        // SAFETY: reclaim's caller restores the preparing task's watched,
+        // sleepable context after withdrawal and keeps readers/progress unblocked.
+        unsafe { self.wait.submit_and_wait() };
         // SAFETY: atomic withdrawal assigned this unique raw owner, and the
         // subsequent GP ended all protected borrows. No raw owner was exposed.
         Some(unsafe { KBox::from_raw(self.raw) })

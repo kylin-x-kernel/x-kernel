@@ -5,7 +5,6 @@
 //! IRQ descriptor and action state.
 
 use alloc::sync::Arc;
-use core::array;
 
 use intrusive_collections::intrusive_adapter;
 
@@ -16,17 +15,21 @@ mod local;
 
 use kcompletion::{Completion, DeferredWake};
 use klazy::Once;
+use krcu_list::{PreparedListTake, RcuList, RetiredListEntry};
 use kspin::{SpinNoIrq, SpinNoIrqGuard, static_lock};
 
 #[cfg(any(target_arch = "x86_64", unittest))]
 use super::index::{PreparedWithdrawal, WithdrawnIndexes};
 use super::{
+    action_set::{ActionRecord, ActionSet},
     index::{LineIndex, PreparedPublication},
     unhandled::{UnhandledIrqReport, UnhandledIrqState},
 };
+#[cfg(unittest)]
+use crate::action::IrqAction;
 use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqFlags, IrqSpec, Virq,
-    action::{IrqAction, IrqActionToken},
+    action::{IrqActionToken, PreparedAction},
 };
 
 static_lock! {
@@ -38,7 +41,7 @@ static_lock! {
     pub(super) static IRQ_STATE: SpinNoIrq<IrqState> = SpinNoIrq::new(IrqState::global());
 }
 pub const DYNAMIC_VIRQ_BASE: Virq = 4096;
-pub(super) const MAX_IRQ_ACTIONS: usize = 4;
+pub(super) use super::action_set::IrqActionSnapshot;
 
 /// Result of resolving one caller-provided IRQ descriptor.
 ///
@@ -63,10 +66,6 @@ impl ResolvedIrqDesc {
 pub(super) struct IrqResolution {
     pub(super) virq: Virq,
     pub(super) offered: Option<IrqDesc>,
-}
-
-pub(super) struct IrqActionSnapshot {
-    pub(super) actions: [Option<IrqAction>; MAX_IRQ_ACTIONS],
 }
 
 /// Hardware operations and the disable depth to publish after they complete.
@@ -96,10 +95,9 @@ impl IrqPlatformPlan {
 }
 
 pub(super) struct IrqDescRuntimeState {
-    actions: [Option<IrqAction>; MAX_IRQ_ACTIONS],
-    // NMI ownership lives in IrqLine::nmi_action, not in this fanout array.
+    actions: ActionSet,
+    // NMI ownership lives in IrqLine::nmi_action, not in the ordinary collection.
     has_nmi_action: bool,
-    action_count: usize,
     generation: u64,
     configured_generation: Option<u64>,
     is_configuration_failed: bool,
@@ -110,7 +108,6 @@ pub(super) struct IrqDescRuntimeState {
     teardown_depth: usize,
     is_msi: bool,
     oneshot_mask_pending: bool,
-    next_shared_action_token: usize,
     unhandled: UnhandledIrqState,
 }
 
@@ -119,9 +116,8 @@ impl IrqDescRuntimeState {
         let in_flight_zero = Arc::new(Completion::new());
         in_flight_zero.complete_all();
         Self {
-            actions: array::from_fn(|_| None),
+            actions: ActionSet::new(),
             has_nmi_action: false,
-            action_count: 0,
             generation: 0,
             configured_generation: None,
             is_configuration_failed: false,
@@ -132,7 +128,6 @@ impl IrqDescRuntimeState {
             teardown_depth: 0,
             is_msi: desc.flags.contains(IrqFlags::MSI),
             oneshot_mask_pending: false,
-            next_shared_action_token: 1,
             unhandled: UnhandledIrqState::new(),
         }
     }
@@ -196,7 +191,7 @@ impl IrqDescRuntimeState {
     fn prepare_disable_if_no_actions(&self, desc: IrqDesc) -> Option<IrqPlatformPlan> {
         // Old snapshots remain covered by drain; only action ownership decides
         // whether the final withdrawal must mask the source.
-        if self.action_count != 0 {
+        if self.has_actions() {
             return None;
         }
         Some(IrqPlatformPlan {
@@ -206,90 +201,48 @@ impl IrqDescRuntimeState {
     }
 
     fn can_install_regular_action(&self) -> bool {
-        self.teardown_depth == 0 && self.action_count == 0
+        self.teardown_depth == 0 && !self.has_actions() && self.actions.can_install_regular()
     }
 
-    fn install_regular_action(&mut self, action: IrqAction) -> bool {
+    fn publish_regular_action(&mut self, prepared: &mut PreparedAction) -> bool {
         if !self.can_install_regular_action() {
             return false;
         }
-        self.actions[0] = Some(action);
-        self.action_count = 1;
-        true
-    }
-
-    fn take_regular_action(&mut self) -> Option<IrqAction> {
-        if self.has_nmi_action {
-            return None;
-        }
-        self.take_single_action()
-    }
-
-    fn take_single_action(&mut self) -> Option<IrqAction> {
-        if self.action_count != 1 {
-            return None;
-        }
-        // Shared removal leaves holes; a count of one does not imply slot zero
-        // is occupied. Only regular installation guarantees that slot.
-        if self.actions[0].as_ref()?.is_shared() {
-            return None;
-        }
-        let action = self.actions[0].take()?;
-        self.action_count = 0;
-        self.oneshot_mask_pending = false;
-        Some(action)
+        self.actions.publish_regular(prepared)
     }
 
     fn can_install_shared_action(&self) -> bool {
-        self.teardown_depth == 0
-            && !self.has_nmi_action
-            && self.action_count < MAX_IRQ_ACTIONS
-            && self.next_shared_action_token.checked_add(1).is_some()
-            && self.actions.iter().flatten().all(IrqAction::is_shared)
-            && self.actions.iter().any(Option::is_none)
+        self.teardown_depth == 0 && !self.has_nmi_action && self.actions.can_install_shared()
     }
 
-    fn install_shared_action(
-        &mut self,
-        handler: crate::platform::Handler,
-    ) -> Option<IrqActionToken> {
+    fn publish_shared_action(&mut self, prepared: &mut PreparedAction) -> Option<IrqActionToken> {
         if !self.can_install_shared_action() {
             return None;
         }
-        let token = IrqActionToken::new(self.next_shared_action_token);
-        self.next_shared_action_token = self.next_shared_action_token.checked_add(1)?;
-        let slot = self.actions.iter_mut().find(|slot| slot.is_none())?;
-        *slot = Some(IrqAction::shared(token, handler));
-        self.action_count += 1;
-        Some(token)
+        self.actions.publish_shared(prepared)
     }
 
-    fn take_action(&mut self, token: IrqActionToken) -> Option<IrqAction> {
-        let action_index = self.actions.iter().position(|action| {
-            action
-                .as_ref()
-                .is_some_and(|action| action.token() == token)
-        })?;
-        if !self.actions[action_index]
-            .as_ref()
-            .is_some_and(IrqAction::is_shared)
-        {
+    fn withdraw_action<'wait>(
+        &mut self,
+        prepared: PreparedListTake<'_, 'wait, ActionRecord>,
+        token: Option<IrqActionToken>,
+    ) -> Option<RetiredListEntry<'wait, ActionRecord>> {
+        if self.has_nmi_action {
             return None;
         }
-        let action = self.actions[action_index].take();
-        self.action_count -= 1;
-        if self.action_count == 0 {
+        let retired = self.actions.withdraw(prepared, token)?;
+        if !self.has_actions() {
             self.oneshot_mask_pending = false;
         }
-        action
+        Some(retired)
     }
 
     const fn has_actions(&self) -> bool {
-        self.action_count != 0
+        self.action_count() != 0
     }
 
     const fn action_count(&self) -> usize {
-        self.action_count
+        self.actions.len() + self.has_nmi_action as usize
     }
 
     fn begin_dispatch(&mut self) {
@@ -358,7 +311,7 @@ impl IrqDescRuntimeState {
     }
 
     const fn is_unused_ignoring_in_flight(&self) -> bool {
-        self.action_count == 0 && self.teardown_depth == 0
+        !self.has_actions() && self.teardown_depth == 0
     }
 }
 
@@ -376,7 +329,7 @@ pub(crate) struct IrqLine {
     // Assigned before publication, independent of mutable controller metadata.
     virq: Once<Virq>,
     pub(super) management: kmutex::Mutex<()>,
-    pub(super) nmi_action: krcu::RcuSlot<crate::platform::Handler>,
+    pub(super) nmi_action: super::nmi::NmiAction,
     state: SpinNoIrq<IrqStateDesc>,
     replay_links: intrusive_collections::LinkedListAtomicLink,
 }
@@ -386,7 +339,7 @@ impl IrqLine {
         Self {
             virq: Once::new(),
             management: kmutex::Mutex::new(()),
-            nmi_action: krcu::RcuSlot::new(),
+            nmi_action: super::nmi::NmiAction::new(),
             state: SpinNoIrq::new(state),
             replay_links: intrusive_collections::LinkedListAtomicLink::new(),
         }
@@ -473,34 +426,63 @@ impl IrqStateDesc {
         });
     }
 
+    pub(super) fn publish_regular_action(&mut self, prepared: &mut PreparedAction) -> bool {
+        !self.is_retired && !self.has_nmi_shutdown && self.runtime.publish_regular_action(prepared)
+    }
+
+    #[cfg(unittest)]
     pub(super) fn install_regular_action(&mut self, action: IrqAction) -> bool {
-        !self.is_retired && !self.has_nmi_shutdown && self.runtime.install_regular_action(action)
+        let Ok(mut prepared) = PreparedAction::from_action(action) else {
+            return false;
+        };
+        self.publish_regular_action(&mut prepared)
     }
 
     pub(super) fn can_install_regular_action(&self) -> bool {
         !self.is_retired && !self.has_nmi_shutdown && self.runtime.can_install_regular_action()
     }
 
+    pub(super) fn can_install_nmi_action(&self) -> bool {
+        !self.is_retired
+            && !self.has_nmi_shutdown
+            && self.runtime.teardown_depth == 0
+            && !self.runtime.has_actions()
+    }
+
     pub(super) fn can_install_shared_action(&self) -> bool {
         !self.is_retired && !self.has_nmi_shutdown && self.runtime.can_install_shared_action()
     }
 
-    pub(super) fn take_regular_action(&mut self) -> Option<IrqAction> {
-        self.runtime.take_regular_action()
+    pub(super) fn action_list(&self) -> Arc<RcuList<ActionRecord>> {
+        self.runtime.actions.list()
+    }
+
+    pub(super) fn withdraw_action<'wait>(
+        &mut self,
+        prepared: PreparedListTake<'_, 'wait, ActionRecord>,
+        token: Option<IrqActionToken>,
+    ) -> Option<RetiredListEntry<'wait, ActionRecord>> {
+        if self.is_retired || self.has_nmi_shutdown {
+            return None;
+        }
+        self.runtime.withdraw_action(prepared, token)
+    }
+
+    #[cfg(unittest)]
+    pub(super) fn exhaust_action_sequences_for_tests(&mut self) {
+        self.runtime.actions.exhaust_sequences();
     }
 
     /// Called under Line exclusion after the sole NMI owner is published.
     pub(super) fn install_nmi_action(&mut self) {
-        debug_assert!(self.can_install_regular_action());
+        debug_assert!(self.can_install_nmi_action());
         self.runtime.has_nmi_action = true;
-        self.runtime.action_count = 1;
     }
 
-    /// Admission remains closed until withdrawal's grace period has completed.
+    /// Admission remains closed until local action publications are withdrawn.
     pub(super) fn finish_nmi_retirement(&mut self) {
         debug_assert!(self.has_nmi_action() && self.is_nmi_closing);
         self.runtime.has_nmi_action = false;
-        self.runtime.action_count = 0;
         self.is_nmi_closing = self.has_nmi_shutdown;
     }
 
@@ -550,26 +532,32 @@ impl IrqStateDesc {
             .any(local::LocalControl::has_nmi_preparation)
     }
 
-    pub(super) fn has_failed_local_nmi_preparation(&self) -> bool {
-        self.local[local::current_cpu()].has_failed_nmi_preparation()
+    pub(super) fn has_ready_local_nmi_preparation(&self) -> bool {
+        let local = &self.local[local::current_cpu()];
+        local.has_nmi_preparation() && !local.has_failed_nmi_preparation()
     }
 
     pub(super) fn has_nmi_action(&self) -> bool {
         self.runtime.has_nmi_action
     }
 
-    pub(super) fn install_shared_action(
+    pub(super) fn publish_shared_action(
         &mut self,
-        handler: crate::platform::Handler,
+        prepared: &mut PreparedAction,
     ) -> Option<IrqActionToken> {
         if self.is_retired || self.has_nmi_shutdown {
             return None;
         }
-        self.runtime.install_shared_action(handler)
+        self.runtime.publish_shared_action(prepared)
     }
 
-    pub(super) fn take_action(&mut self, token: IrqActionToken) -> Option<IrqAction> {
-        self.runtime.take_action(token)
+    #[cfg(unittest)]
+    pub(super) fn install_shared_action(
+        &mut self,
+        handler: crate::platform::Handler,
+    ) -> Option<IrqActionToken> {
+        let mut prepared = PreparedAction::shared(handler).ok()?;
+        self.publish_shared_action(&mut prepared)
     }
 
     pub(super) fn has_actions(&self) -> bool {
@@ -581,8 +569,7 @@ impl IrqStateDesc {
     }
 
     pub(super) fn snapshot_actions(&mut self) -> IrqActionSnapshot {
-        let actions = self.runtime.actions.clone();
-        IrqActionSnapshot { actions }
+        self.runtime.actions.snapshot()
     }
 
     pub(super) fn prepare_auto_enable(&self) -> IrqPlatformPlan {

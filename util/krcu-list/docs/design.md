@@ -21,12 +21,15 @@ chain plus synchronize_irq; it does not itself use the generic rculist API.
 
 Each Entry allocates one Node containing T, an atomic next pointer and an embedded
 CallbackNode. Appending consumes Entry. Reads do not allocate or clone ownership.
-Removal allocates nothing and does not wait for readers. A consumer can store
+`Entry::get_mut` permits final payload initialization while uniquely owned and
+unpublished; linked entries expose no mutable payload accessor.
+Asynchronous removal allocates nothing and does not wait for readers. A consumer can store
 Arc<Action> to retain an action independently of its list membership; this adds
 an action allocation but no extra refcount operation per traversal step.
 
 `src/lib.rs` owns publication, iteration and writer exclusion; `src/node.rs`
-owns embedded callback recovery. Kernel-only scheduler/IRQ test dependencies
+owns embedded callback recovery. `src/take.rs` owns prepared task-side removal.
+Kernel-only scheduler/IRQ test dependencies
 reside in `crates/kernel-tests`, not in the reusable container.
 
 The allocation lifecycle is:
@@ -60,8 +63,9 @@ obtained that node, including through a previously detached predecessor.
 Concurrent traversal is not a snapshot, and repeated appends need not yield a
 fixed-length traversal. Consumers requiring admission cutoff own that policy.
 
-There is no public detached-node handle, reusable node pointer or mutable payload
-access. This avoids a Drop/cancellation path that could release a node before GP.
+There is no public raw detached-node pointer or mutable payload access while
+readers may exist. Opaque task-owned retirement deliberately leaks on abandonment
+rather than releasing a node before its GP.
 The iterator borrows both list and ReadScope, cannot escape either, and is not
 Send. Exclusive list Drop releases only still-linked nodes; retirement callbacks
 are independent and never dereference next or the former list.
@@ -84,6 +88,32 @@ unsafe and explicitly requires a nonblocking, nonunwinding release chain. Sleepi
 destruction needs an appropriate existing finalization owner, not a new RCU mode.
 KBox deallocation is currently nonblocking; changing the allocator must preserve
 an atomic-context release facility for this path.
+
+## Prepared Task-Owned Removal
+
+`with_prepared_take` uses krcu's prepared grace-period capability before invoking
+the consumer. Its single-use `PreparedListTake` binds the list and preparing task.
+`withdraw_first` may run inside a consumer short lock, then takes the list writer
+lock internally. It performs the same link-preserving unlink as asynchronous
+removal, without submitting the embedded callback or allocating. Predicate and
+writer constraints remain unchanged; consumers order their outer locks.
+
+The returned `RetiredListEntry` exposes only match presence. After short locks
+are released, `reclaim` submits the prepared marker, waits for the post-unlink
+GP and returns T to the task. Unmatched removal skips submission. KBox recovery
+is shallow: the stale successor pointer is never followed. The container frees
+node storage but never destroys T in an RCU callback. Consumers may retain T
+through a separate execution/controller drain and drop it after management unlock.
+This reuses the prepared wait already used by RcuSlot; it adds no callback-side
+terminal notification or new reclamation service.
+
+Preparation errors precede mutation. Cancelling unused preparation leaves the
+list unchanged. Abandoning a detached entry leaks it; cancellation is not a GP.
+Neither prepared nor retired handles may escape the preparing stack or migrate
+to another task. CPU migration by the same task is allowed. Waiting requires
+restored watched sleepable context and a permanent available RCU service.
+The wait marker currently follows krcu's fatal-OOM allocation policy, unlike
+fallible entry preparation. Existing asynchronous removal remains unchanged.
 
 ## Test Dependency Selection
 

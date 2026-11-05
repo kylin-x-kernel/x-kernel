@@ -359,3 +359,40 @@ fn dispatch_without_line_still_completes_once() {
         assert_eq!(calls, 1);
     }
 }
+
+#[def_test(serial)]
+fn action_read_scope_ends_before_original_claim_completion() {
+    for (virq, flow) in [
+        (0x5f30, crate::IrqFlow::Legacy),
+        (0x5f31, crate::IrqFlow::Fasteoi(&FLOW_CHIP)),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let handler: crate::platform::Handler = Arc::new(move |_| {
+            assert!(krcu::is_reading());
+            observed.fetch_add(1, Ordering::Relaxed);
+            crate::IrqEvent::HANDLED
+        });
+        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+        entry.flow = flow;
+        assert!(entry.install_regular_action(crate::action::IrqAction::regular(handler.clone())));
+        let plan = entry.prepare_auto_enable();
+        entry.commit_platform_plan(plan);
+        let line = Arc::new(IrqLine::new(entry));
+        let completion = line.lock().in_flight_zero_completion();
+        assert!(IRQ_STATE.lock().descs.insert(virq, line.clone()).is_none());
+        let mut completions = 0;
+        super::dispatch_claim(crate::IrqRef::Virq(virq), || {
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            assert!(!krcu::is_reading());
+            assert!(!completion.is_completed());
+            assert_eq!(Arc::strong_count(&handler), 2);
+            completions += 1;
+        });
+        let removed = IRQ_STATE.lock().descs.remove(&virq);
+        drop(removed);
+        assert_eq!(completions, 1);
+        assert!(completion.is_completed());
+        assert_eq!(line.lock().in_flight(), 0);
+    }
+}

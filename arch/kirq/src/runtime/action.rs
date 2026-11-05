@@ -5,8 +5,47 @@
 //! Internal IRQ action model.
 
 use bitflags::bitflags;
+use krcu_list::Entry;
 
+use super::action_set::ActionRecord;
 use crate::{IrqEvent, Virq, platform::Handler};
+
+/// Allocation prepared before Line exclusion; rejection retains this owner.
+pub(super) struct PreparedAction {
+    pub(super) pending: Option<Entry<ActionRecord>>,
+    is_shared: bool,
+}
+
+impl PreparedAction {
+    pub(super) fn regular(handler: Handler) -> Result<Self, crate::IrqDescError> {
+        Self::from_action(IrqAction::regular(handler))
+    }
+
+    pub(super) fn shared(handler: Handler) -> Result<Self, crate::IrqDescError> {
+        Self::from_action(IrqAction::shared(IrqActionToken::new(0), handler))
+    }
+
+    pub(super) fn from_action(action: IrqAction) -> Result<Self, crate::IrqDescError> {
+        #[cfg(unittest)]
+        if tests_allocation::reject_allocation(action.primary()) {
+            return Err(crate::IrqDescError::NoMemory);
+        }
+        let is_shared = action.is_shared();
+        let entry = Entry::new_nowait(ActionRecord {
+            action,
+            sequence: 0,
+        })
+        .map_err(|_| crate::IrqDescError::NoMemory)?;
+        Ok(Self {
+            pending: Some(entry),
+            is_shared,
+        })
+    }
+
+    pub(super) fn is_shared(&self) -> bool {
+        self.is_shared
+    }
+}
 
 /// Public identity for one registered IRQ action on a line.
 ///
@@ -107,6 +146,10 @@ impl IrqAction {
     /// Returns this action's line-local removal token.
     pub(super) fn token(&self) -> IrqActionToken {
         self.id.token()
+    }
+
+    pub(super) fn set_shared_token(&mut self, token: IrqActionToken) {
+        self.id = IrqActionId::shared(token);
     }
 
     /// Returns whether this action participates in shared IRQ fanout.
@@ -217,3 +260,4 @@ impl IrqActionReturn {
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/runtime_action.rs");
+unittest::path_mod_test!(tests_allocation, "../../ut-tests/action_allocation.rs");

@@ -33,8 +33,11 @@ Untrusted payloads must be validated by consumers before handler invocation.
 
 ## Reclamation
 
-Every linked allocation has one owning list; unlink transfers its sole retirement
-right to its embedded callback. Field projection and offset_of preserve allocation
+`Entry::get_mut` accesses only uniquely owned unpublished payload storage.
+Publication consumes Entry, preventing mutable access after readers can see it.
+
+Every linked allocation has one owning list. Asynchronous unlink transfers its
+sole retirement right to its embedded callback. Field projection and offset_of preserve allocation
 provenance without assuming a particular Rust field order. No exclusive Node
 reference is created while readers can observe it. Callback destruction is shallow:
 it never follows next, which may already refer to reclaimed storage.
@@ -44,11 +47,32 @@ the enclosing node. This leak is only an invariant-failure containment measure,
 not the ordinary error policy. Admission failure before mutation leaves the list
 unchanged. No raw detached handle is exposed to safe callers.
 
+Prepared task removal in `src/take.rs` instead retains the unique raw allocation
+in an opaque `RetiredListEntry`; its embedded callback is never submitted.
+`withdraw_first` has the same task-origin and nonblocking predicate obligations
+as the existing writer path. It may run under a consumer short lock only after
+wait preparation. `reclaim` is unsafe because the preparing task must restore
+watched sleepable execution with no reader/progress locks before waiting.
+The prepared GP is submitted after unlink; only successful completion permits
+KBox recovery and transfer of T. There is no callback access to T and no unsafe
+claim that Send/Sync makes its destructor nonblocking. Final T destruction stays
+with its task owner. Independently owned operations still require consumer drain.
+
+Both handles are task-bound and cannot escape the prepared wait's stack scope.
+An unmatched withdrawal has no raw owner and skips waiting. Dropping a matched
+retirement without reclamation intentionally leaks its node; the cancelled wait
+does not authorize freeing it. Forgetting the handle also leaks its wait marker.
+No detached link is reset, reused or traversed by reclamation. The enclosing
+prepared-take call retains its list borrow through the body, even though the
+retirement handle itself only owns detached storage and its prepared wait.
+
 ## Context
 
 Unsafe writer contracts exclude interrupt-origin mutation and reentrancy.
-Removal additionally requires watched sleepable task context and a nonblocking,
-nonunwinding complete destructor chain. Predicate execution occurs under writer
+Asynchronous removal additionally requires watched sleepable task context and a
+nonblocking, nonunwinding complete destructor chain. Prepared removal instead
+returns the payload to its task owner after reclamation; that owner must choose
+a context suitable for its destructor. Predicate execution occurs under writer
 exclusion. No allocation, scheduling or execution-context transition is permitted
 there. Existing IRQ/NMI read admission belongs to krcu, not this container.
 
@@ -65,6 +89,7 @@ referenced by deferred callbacks outlive their execution.
 | `src/lib.rs`: Iter::next | Scope and list borrows, Acquire traversal | Obey krcu scope execution rules |
 | `src/lib.rs`: Drop | Exclusive list ownership; no submitted live node | Valid context for the entire payload release chain |
 | `src/node.rs`: retire/release | One embedded submission right, offset-based KBox recovery | Nonblocking callback destruction; permanent service |
+| `src/take.rs`: withdraw_first/reclaim | Unique opaque retirement, stack/task binding, post-unlink GP | Task-origin predicate; restore sleepable watched context without reader/progress locks before reclaim |
 
 | Failure | Effect | Containment |
 | --- | --- | --- |

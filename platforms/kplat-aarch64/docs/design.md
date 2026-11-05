@@ -2,6 +2,16 @@
 
 ## PMU NMI Preparation
 
+The runtime NMI mode is initialized before PMU registration and remains stable.
+With `nmi-pmu`, an available mechanism selects `register_nmi_startup`; mode
+`None` selects the ordinary `try_register_startup` path with `disabled()`;
+explicit per-CPU activation follows registration. PMU-only builds retain their
+existing `auto_enable()` registration. This ordinary action needs no NMI
+preparation or local action publication.
+Activation skips `configure_nmi` in mode `None`. Periodic NMI shutdown and global
+NMI retirement remain unsupported in that mode; they do not retire the ordinary
+fallback action.
+
 With an available NMI mechanism and `nmi-pmu`, PMU IRQ activation first prepares
 the local registered Line through `NmiMechanismIf::configure_nmi` and KIRQ's
 `prepare_percpu_nmi`. Failure leaves the line disabled and is diagnosed.
@@ -16,6 +26,28 @@ Periodic-source setup pins the CPU and masks ordinary IRQs across the complete
 counter/callback/PPI/start sequence, including failure rollback. Per-access guards
 alone would allow setup steps to select different CPUs. This local transaction
 does not exclude NMI or supply remote shutdown serialization.
+
+`arm_periodic_source` owns configuration as one transaction. It rejects NMI,
+Closing and any allocated counter before hardware changes or exclusive storage
+access. It disables/tears down the vacant source, then prepares the disabled PPI
+before installing the counter and callback. Preparation verifies hardware disable
+completion and absence of active claims even when no previous preparation record
+exists. This is the exclusion proof for the mutable manager borrow, not the
+ordinary IRQ guard. A vacant manager is never mutably borrowed by shutdown.
+
+After publication, the counter becomes ready and starts while the PPI remains
+masked; only then is delivery enabled. This avoids exposing a stale overflow to
+a handler whose software counter is not ready. Setup failure uses checked local
+shutdown, retaining storage on teardown failure. Repeated active arm cannot
+replace the callback or threshold. The unused platform-level split initialization,
+callback-registration and threshold-mutation functions have been removed; the
+lower-level PMUv3 driver remains responsible for counter register operations.
+Live event reconfiguration is not part of this exclusive periodic-source contract.
+
+Linux's `perf_pmu_disable` / `perf_pmu_enable` bracket event removal, and the Arm
+PMU provider stops counters before clearing event slots. This implementation
+keeps that owner responsibility outside KIRQ and additionally proves local
+delivery exclusion before constructing Rust exclusive storage references.
 
 `shutdown_periodic_nmi` is a separate reusable local operation. It rejects
 other allocated PMU counters before changing hardware, stops the cycle counter
@@ -48,16 +80,31 @@ counter start and PPI activation while closing. Each local setup holds its
 CPU/IRQ guard throughout the transaction: an already admitted start finishes
 before that CPU can execute its synchronous shutdown callback.
 
-Shutdown retains KIRQ's original-Line `NmiShutdown` claim and snapshots its
-enabled/prepared participants, not the firmware present-CPU list. It invokes
-`kipi::run_on_cpu_sync` for each remaining participant to stop the PMU and tear
-down its GIC state. Completed CPUs are removed from the pending set; a failed
+Shutdown retains KIRQ's original-Line `NmiShutdown` claim. Its pending set
+includes every boot-static CPU permitted to start the source, even if it has
+no enabled/prepared slot, and every participant reported by the claim. SMP uses
+the configured present CPU prefix under the all-boot-CPUs-ready prerequisite;
+UP uses only CPU 0, irrespective of additional firmware-described CPUs.
+`kipi::run_on_cpu_sync` validates target service readiness rather than treating
+presence as readiness. An unavailable target returns an error, never a skipped
+acknowledgement. Each remaining CPU stops the PMU and tears down its GIC state.
+Completed CPUs are removed from the pending set; a failed
 CPU and the original claim remain owned for retry. No completed CPU acquires
-another nested disable credit. After all acknowledgements, `finish` withdraws
-the action and waits for its RCU readers. Only then is the state Stopped.
+another nested disable credit. After all acknowledgements, `finish` verifies
+local action publications are revoked and destroys their shared owner in
+task context, without an action grace period. Only then is the
+state Stopped.
 Restoration uses task-context NMI registration before reopening admission;
-it neither enables PPIs nor starts counters. Periodic arming performs local
-prepare/enable/start, so it also works after restoration.
+it neither enables PPIs nor starts counters. Periodic arming prepares locally,
+publishes the payload, starts the counter and then enables its PPI, so it also
+works after restoration.
+
+The broader stop set closes the pre-preparation startup window: a local arm
+may already have passed admission and removed its vacant preparation record.
+Its full IRQ-off region finishes before this CPU can run the stop callback.
+Admission remains closed until every such callback completes, preventing an
+old start from crossing shutdown/republication. This source-owner guarantee
+does not depend on a KIRQ action-reader grace period.
 
 The protocol is for exclusive periodic PMU ownership on boot-static CPUs with
 IPI services ready. The consumer must authorize service loss; other allocated
@@ -65,9 +112,13 @@ event counters reject local shutdown. It is not a general perf event scheduler,
 CPU-hotplug lease or system-stop protocol. Startup registration remains a
 boot-only operation, distinct from task-context restoration.
 
-Linux v6.12 `drivers/perf/arm_pmu.c` similarly places per-CPU disable/teardown
+Linux v7.2 `drivers/perf/arm_pmu.c` similarly places per-CPU disable/teardown
 and final free in the PMU ownership layer, not in generic `free_percpu_nmi`.
-Our retained close claim and RCU slot encode software lifetime explicitly;
+Its PMU initialization installs a CPU-hotplug instance for local lifecycle work.
+This kernel instead supports a fixed boot CPU set and completed CPU calls; it
+does not claim Linux's CPU-hotplug serialization or implement a second hotplug
+framework in KIRQ.
+Our retained close claim and CPU-local action publications encode lifetime explicitly;
 they are not substitutes for the controller/source shutdown obligations.
 
 ## Scope
@@ -84,12 +135,21 @@ installing either its ordinary IRQ action or NMI action. Mapping preparation
 does not configure or enable the source. The mapping belongs to platform
 lifetime, independently of the handler; failed installation leaves it reserved
 for retry rather than attempting early-boot RCU reclamation. Mapping errors
-are logged with the descriptor and returned as registration failure. Existing
-normal-IRQ activation and later NMI promotion remain separate operations.
+are logged with the descriptor and returned as registration failure. Runtime
+mode selects ordinary or NMI ownership at registration; there is no live
+promotion of an ordinary fallback action to NMI ownership.
 This startup owner exposes no mapping-disposal operation; explicit preparation
 does not change KIRQ's generic action-teardown behavior.
 
 ## Guest Test Layout
+
+The mode-None PMU lifecycle test runs on the GICv2 QEMU override rather than
+skipping with the NMI tests. It checks ordinary ownership, rejects NMI retirement,
+and reads each CPU's real GICv2 PPI enable bit before disable, after disable and
+after the production enable path. This verifies activation, not counter-overflow
+delivery. Use `XKMAKE_ARGS='--no-net --no-vsock -- -machine virt,gic-version=2'`
+with the pseudo-NMI test build. The hardware-state assertion is specific to this
+GICv2 validation.
 
 Guest tests live in crate-root `ut-tests/`, mounted by
 `unittest::path_mod_test!` at their original parent modules:
@@ -98,8 +158,27 @@ Guest tests live in crate-root `ut-tests/`, mounted by
 | --- | --- | --- |
 | `peripherals::smccc::tests` | `ut-tests/peripherals_smccc.rs` | 4 |
 | `peripherals::trng::tests` | `ut-tests/peripherals_trng.rs` | 6 |
-| `peripherals::pmu::tests_shutdown` | `ut-tests/peripherals_pmu_shutdown.rs` | Local shutdown ordering, retry and reuse |
+| `peripherals::pmu::tests_shutdown` | `ut-tests/peripherals_pmu_shutdown.rs` | Local shutdown ordering, retry, reuse and rejection with another event-counter owner |
 | `peripherals::pmu::lifecycle::tests` | `ut-tests/pmu_lifecycle.rs` | Real cross-CPU PMU/GIC shutdown, injected incomplete pass, retry and republication |
+
+An event-counter fixture verifies that periodic arm and shutdown reject another
+owner without changing its counter, callback or controller-disable credit.
+Its cleanup retains storage when controller teardown fails.
+
+The PMU setup fixture injects rejection after real controller preparation,
+before delivery enable, and during teardown. Its CPU-local fault mask is restored
+by a pinned RAII scope; combined faults target failed-setup rollback rather than
+the initial vacant shutdown. Hooks exist only in unittest builds and cannot
+turn a failed controller operation into success. Assertions cover retained
+counter/callback ownership, stopped producer state, rejected reuse and successful
+cleanup/rearm after retry. The global fixture also stages a prepared CPU without
+counter storage before Closing and checks that its stop obligation is retained.
+These ordered interleavings do not claim exhaustive concurrent schedule coverage.
+Another injected transition closes only the source admission gate after payload
+publication, before counter activation. It verifies local start rejection and
+rollback; it is not a substitute for the separate real Line Closing test. The
+scope restores the gate and asserts every requested fault was consumed, so an
+unrelated earlier rejection cannot silently satisfy the failure case.
 
 The private `tests` modules retain access to parent helpers through `super`.
 They are compiled only with `cfg(unittest)`, within the crate's architecture

@@ -10,11 +10,38 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 
 #[def_test]
+fn public_prepared_wait_submits_after_restoring_task_context() {
+    let mut has_returned = false;
+    let result = crate::with_prepared_grace_period(|prepared| {
+        let was_masked = {
+            let _irq = kspin::IrqSave::new();
+            !karch::local_irq_enabled()
+        };
+        // SAFETY: the preparing task restored IRQs and remains watched and
+        // sleepable, with no reader/progress locks. No payload is reclaimed.
+        unsafe { prepared.submit_and_wait() };
+        has_returned = true;
+        was_masked && karch::local_irq_enabled() && !crate::is_reading()
+    });
+    assert_eq!(result, Ok(true));
+    assert!(has_returned);
+}
+
+#[def_test]
+fn public_prepared_wait_can_cancel_without_submission() {
+    let result = crate::with_prepared_grace_period(|prepared| {
+        drop(prepared);
+        42
+    });
+    assert_eq!(result, Ok(42));
+}
+
+#[def_test]
 fn masked_context_is_rejected_before_submission() {
     let mut was_called = false;
     let result = {
         let _irq = kspin::IrqSave::new();
-        with_prepared_grace_period(|_| was_called = true)
+        crate::with_prepared_grace_period(|_| was_called = true)
     };
     assert!(matches!(result, Err(KError::InvalidInput)));
     assert!(!was_called);

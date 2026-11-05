@@ -110,6 +110,7 @@ fn irq_error_classification_retains_mainline_contract() {
             domain: kirq::IrqDomainId::new(87),
         },
         kirq::IrqDescError::UnknownIrq,
+        kirq::IrqDescError::RetirementUnavailable,
         kirq::IrqDescError::InvalidContext {
             operation: "provider test",
         },
@@ -132,6 +133,10 @@ fn missing_release_action_cannot_authorize_cleanup() {
     assert_eq!(
         require_released_action(Err(kirq::IrqDescError::NoMemory)),
         Err(ResError::NoMemory)
+    );
+    assert_eq!(
+        require_released_action(Err(kirq::IrqDescError::RetirementUnavailable)),
+        Err(ResError::InvalidResource)
     );
 }
 

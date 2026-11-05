@@ -5,6 +5,7 @@
 //! IRQ core runtime state and dispatch orchestration.
 
 pub(crate) mod action;
+mod action_set;
 pub(crate) mod dispatch;
 pub(crate) mod index;
 pub(crate) mod manager;

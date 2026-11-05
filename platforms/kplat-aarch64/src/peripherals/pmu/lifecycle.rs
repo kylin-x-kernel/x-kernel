@@ -27,10 +27,19 @@ static OWNER: klazy::Lazy<kmutex::Mutex<State>> =
 // Local start checks this under its whole-transaction CPU/IRQ guard. An older
 // start must finish before the same CPU can execute the synchronous stop call.
 // Release/acquire publishes the gate; IPI completion, not this flag, proves stop.
+// Visit every CPU allowed to start, even without a preparation record. Its stop
+// callback drains any old pinned arm before restore can reopen this gate.
 static IS_CLOSED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn can_start() -> bool {
     !IS_CLOSED.load(Ordering::Acquire)
+}
+
+// Tests model a remote gate transition inside a pinned local setup without
+// incorrectly running sleepable global shutdown from that setup's context.
+#[cfg(unittest)]
+pub(super) fn set_closed_for_test(is_closed: bool) {
+    IS_CLOSED.store(is_closed, Ordering::Release);
 }
 
 fn validate_context() -> KResult<()> {
@@ -63,7 +72,14 @@ fn shutdown_with(mut stop: impl FnMut(usize) -> KResult<()>) -> KResult<()> {
                 return Err(KError::BadState);
             }
         };
-        let pending = core::array::from_fn(|cpu| claim.is_participant(cpu));
+        // Presence is not readiness: stop_cpu checks the target's IPI service
+        // and failure retains Closing. UP must not target dormant firmware CPUs.
+        let start_cpus = if cfg!(feature = "smp") {
+            kcpu_id_map::nr_cpus()
+        } else {
+            1
+        };
+        let pending = core::array::from_fn(|cpu| cpu < start_cpus || claim.is_participant(cpu));
         *state = State::Closing(Closing {
             claim: Some(claim),
             pending,

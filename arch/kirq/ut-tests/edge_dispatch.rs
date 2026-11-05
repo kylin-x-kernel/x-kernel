@@ -76,6 +76,7 @@ fn overlapping_edges_are_acknowledged_once_and_coalesced_by_running_owner() {
             .line
             .lock()
             .install_regular_action(IrqAction::regular(Arc::new(move |_| {
+                assert!(krcu::is_reading());
                 let call = called.fetch_add(1, Ordering::Relaxed);
                 let line = weak.upgrade().unwrap();
                 assert!(line.lock().is_running);
@@ -101,6 +102,7 @@ fn overlapping_edges_are_acknowledged_once_and_coalesced_by_running_owner() {
     fixture.enable();
     let completion = fixture.line.lock().in_flight_zero_completion();
     super::dispatch_claim(IrqRef::Virq(virq), || {
+        assert!(!krcu::is_reading());
         acks.fetch_add(1, Ordering::Relaxed);
     });
     assert_eq!(calls.load(Ordering::Relaxed), 2);

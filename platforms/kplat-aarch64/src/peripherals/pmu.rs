@@ -5,7 +5,7 @@
 #[cfg(feature = "nmi-pmu")]
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use aarch64_pmuv3::pmuv3::{PmuCounter, PmuEvent};
+use aarch64_pmuv3::pmuv3::PmuCounter;
 type PerfCb = fn();
 const MAX_PMU_COUNTERS: usize = 32;
 
@@ -34,117 +34,83 @@ kcpu_slot::cpu_slot! {
         core::sync::atomic::AtomicBool::new(false);
 }
 
-/// Runs `f` with the current CPU's initialized [`PmuManager`], initialising it
-/// on first access.
+/// Arms an exclusively owned local periodic source.
 ///
-/// The guard pins the current CPU and masks local IRQs for the call; the
-/// caller-scoped mutable reference cannot escape.
-#[inline]
-fn with_pmu_inited<R>(f: impl FnOnce(&mut PmuManager) -> R) -> R {
-    let guard = kspin::NoPreemptIrqSave::new();
-    // SAFETY: the guard pins this CPU with local IRQs masked, and only this
-    // call mutates the manager.
-    let pmu = unsafe { PMU.get_mut_unchecked(&guard) };
-    pmu.call_once(|| PmuManager {
-        counters: [const { None }; MAX_PMU_COUNTERS],
-        overflow_handlers: [const { None }; MAX_PMU_COUNTERS],
-    });
-    f(pmu)
-}
-
-pub fn register_overflow_handler(index: u32, handler: PerfCb) -> bool {
-    let idx = index as usize;
-    if idx >= MAX_PMU_COUNTERS {
-        warn!("register_overflow_handler: index {idx} out of range");
+/// Rejects existing counter ownership and NMI callers before changing hardware
+/// or borrowing storage exclusively. A failed rollback retains storage until
+/// [`shutdown_periodic_source`] succeeds; callers must retry shutdown before arm.
+#[cfg(feature = "nmi-pmu")]
+pub(crate) fn arm_periodic_source(period_ns: u64, handler: PerfCb) -> bool {
+    if kirq::context::is_in_nmi() {
         return false;
     }
-    with_pmu_inited(|pmu| {
-        #[cfg(feature = "nmi-pmu")]
-        if !lifecycle::can_start() {
-            return false;
-        }
-        if pmu.counters[idx].is_none() {
-            warn!("register_overflow_handler: counter {idx} not initialised");
-            return false;
-        }
-        pmu.overflow_handlers[idx] = Some(handler);
-        true
-    })
-}
-
-pub fn init_cycle_counter(threshold: u64) -> bool {
-    with_pmu_inited(|pmu| {
-        #[cfg(feature = "nmi-pmu")]
-        if !lifecycle::can_start() {
-            return false;
-        }
-        let idx = MAX_PMU_COUNTERS - 1;
-        if pmu.counters[idx].is_some() {
-            return false;
-        }
-        let counter = PmuCounter::new_cycle_counter(threshold);
-        if counter.check_pmu_support().is_err() {
-            return false;
-        }
-        pmu.counters[idx] = Some(counter);
-        true
-    })
-}
-
-/// Release this CPU's cycle counter and its overflow handler.
-///
-/// Rolls back a partially failed [`enable_periodic_nmi`]: the counter is
-/// disabled (if it was ever started) and both the counter and handler slots
-/// are cleared so a later arming attempt starts from a clean per‑CPU state.
-pub fn deinit_cycle_counter() {
-    with_pmu_inited(|pmu| {
-        if let Some(Some(counter)) = pmu.counters.get_mut(CYCLE_COUNTER_IDX as usize) {
-            counter.disable();
-        }
-        pmu.counters[CYCLE_COUNTER_IDX as usize] = None;
-        pmu.overflow_handlers[CYCLE_COUNTER_IDX as usize] = None;
-    });
-}
-
-pub fn init_event_counter(index: u32, threshold: u64, event: PmuEvent) -> bool {
-    let idx = index as usize;
-    if idx >= MAX_PMU_COUNTERS - 1 {
+    let guard = kspin::NoPreemptIrqSave::new();
+    if !lifecycle::can_start()
+        || kplat::nm_irq::mode() == kplat::nm_irq::NmiMode::None
+        || PMU
+            .get(&guard)
+            .get()
+            .is_some_and(|pmu| pmu.counters.iter().any(Option::is_some))
+    {
         return false;
     }
-    with_pmu_inited(|pmu| {
-        #[cfg(feature = "nmi-pmu")]
-        if !lifecycle::can_start() {
-            return false;
-        }
-        if pmu.counters[idx].is_some() {
-            return false;
-        }
-        let counter = PmuCounter::new_event_counter(index, threshold, event);
-        if counter.check_pmu_support().is_err() {
-            return false;
-        }
-        pmu.counters[idx] = Some(counter);
-        true
-    })
-}
-/// Runs a closure with a mutable reference to the PMU counter at `index` on the
-/// current CPU.
-///
-/// `index` must have been initialized via [`init_cycle_counter`] or
-/// [`init_event_counter`]; an uninitialized counter is a no-op (the closure is
-/// silently skipped). The guard pins the current CPU for the call.
-#[inline]
-fn with_counter_mut<F>(index: u32, f: F)
-where
-    F: FnOnce(&mut PmuCounter),
-{
-    let guard = kspin::NoPreemptIrqSave::new();
-    // SAFETY: the guard pins this CPU with local IRQs masked; this call is the
-    // only mutable access to the per-CPU manager.
-    let pmu = unsafe { PMU.get_mut_unchecked(&guard) };
-    if let Some(Some(counter)) = pmu.counters.get_mut(index as usize) {
-        f(counter);
+    // TODO: derive the counter frequency from the platform instead of 2.5 GHz.
+    let cycles = (period_ns as u128 * 2_500_000_000u128 / 1_000_000_000u128) as u64;
+    let counter = PmuCounter::new_cycle_counter(cycles);
+    if counter.check_pmu_support().is_err() {
+        return false;
     }
+    // Software vacancy alone does not prove the inherited cycle producer is
+    // stopped. Quiesce the owned hardware before teardown may clear pending.
+    counter.disable();
+    let _ = counter.check_and_clear_overflow();
+    if !shutdown_periodic_source() {
+        return false;
+    }
+    let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
+    // Initial teardown may have no preparation record. Preparation independently
+    // verifies completed hardware disable and no active claim, even on first use.
+    if !kplat::nm_irq::NmiMechanismIf::configure_nmi(irq) {
+        let _ = shutdown_periodic_source();
+        return false;
+    }
+    #[cfg(unittest)]
+    if tests_shutdown::take_failure(tests_shutdown::AFTER_PREPARATION) {
+        let _ = shutdown_periodic_source();
+        return false;
+    }
+    {
+        // SAFETY: preparation verified the local PPI is disabled and inactive.
+        // No counter is owned; this guard excludes task/ordinary IRQ mutation.
+        // The exclusive borrow ends before delivery or the producer is enabled.
+        let pmu = unsafe { PMU.get_mut_unchecked(&guard) };
+        pmu.call_once(|| PmuManager {
+            counters: [const { None }; MAX_PMU_COUNTERS],
+            overflow_handlers: [const { None }; MAX_PMU_COUNTERS],
+        });
+        pmu.counters[CYCLE_COUNTER_IDX as usize] = Some(counter);
+        pmu.overflow_handlers[CYCLE_COUNTER_IDX as usize] = Some(handler);
+    }
+    // Clear stale overflow and publish handler readiness while the PPI remains
+    // masked. Otherwise an old pending level could preempt counter activation
+    // repeatedly while the handler still observes a disabled software counter.
+    #[cfg(unittest)]
+    if tests_shutdown::take_failure(tests_shutdown::CLOSE_ADMISSION) {
+        lifecycle::set_closed_for_test(true);
+    }
+    enable(CYCLE_COUNTER_IDX);
+    #[cfg(unittest)]
+    if tests_shutdown::take_failure(tests_shutdown::BEFORE_DELIVERY) {
+        let _ = shutdown_periodic_source();
+        return false;
+    }
+    // A close racing this pinned region either rejects enable or includes this
+    // prepared CPU in its stop pass. No exclusive reference survives this point.
+    if !is_enabled(CYCLE_COUNTER_IDX) || !enable_periodic_irq(kirq::gic_level_irq_desc(irq)) {
+        let _ = shutdown_periodic_source();
+        return false;
+    }
+    true
 }
 
 /// Runs a closure with a shared reference to the PMU counter at `index` on the
@@ -210,10 +176,6 @@ pub fn handle_overflows() -> bool {
     }
     dispatched_any
 }
-pub fn set_threshold(index: u32, threshold: u64) {
-    with_counter_mut(index, |c| c.set_threshold(threshold));
-}
-
 /// Stops the exclusive local periodic source without removing the Line owner.
 ///
 /// Implements [`kplat::nm_irq::PeriodicNmiSourceIf::shutdown_periodic_nmi`]:
@@ -239,6 +201,7 @@ pub fn shutdown_periodic_source() -> bool {
         return false;
     }
     let counter = pmu.and_then(|pmu| pmu.counters[CYCLE_COUNTER_IDX as usize].as_ref());
+    let has_counter = counter.is_some();
     let is_irq_disabled = PERIODIC_IRQ_DISABLED.current(&guard);
     let desc = kirq::gic_level_irq_desc(of::pmu_irq_or(kbuild_config::PMU_IRQ));
     let stopped = shutdown_local_with(
@@ -252,6 +215,10 @@ pub fn shutdown_periodic_source() -> bool {
         },
         || kirq::try_disable_irq_nosync(desc).is_ok(),
         || {
+            #[cfg(unittest)]
+            if tests_shutdown::take_failure(tests_shutdown::DURING_TEARDOWN) {
+                return false;
+            }
             // SAFETY: this CPU is pinned, its sole producer is stopped, and
             // ordinary IRQs stay masked. The GIC teardown verifies disable
             // completion, rejects active claims and clears pending delivery;
@@ -262,7 +229,7 @@ pub fn shutdown_periodic_source() -> bool {
     if !stopped {
         return false;
     }
-    if pmu.is_some() {
+    if has_counter {
         // SAFETY: the producer and local PPI are stopped, pending/active delivery
         // has been excluded by successful teardown, and no other counters exist.
         // The guard excludes local task/IRQ access; the shared borrow above is over.
@@ -347,29 +314,28 @@ macro_rules! pmu_if_impl {
                     $crate::peripherals::pmu::handle_overflows();
                     kirq::IrqEvent::HANDLED
                 });
-                // Normal IRQ delivery in pmu-only builds; NMI registration
-                // (one Line-owned action, also used by IRQ fallback) when the PMU is the
-                // compiled NMI source, so the line can later be promoted.
+                // Mechanism selection is initialized before PMU registration
+                // and remains stable. Unavailable NMI uses an ordinary action,
+                // which needs no NMI-local publication or teardown.
                 #[cfg(feature = "nmi-pmu")]
-                {
-                    kirq::register_nmi_startup(desc, handler)
+                if kplat::nm_irq::NmiMechanismIf::mode() != kplat::nm_irq::NmiMode::None {
+                    return kirq::register_nmi_startup(desc, handler);
                 }
+                // NMI-source builds activate each CPU explicitly after startup
+                // registration. Preserve PMU-only auto-enable compatibility.
+                #[cfg(feature = "nmi-pmu")]
+                let options = kirq::IrqRegisterOptions::disabled();
                 #[cfg(not(feature = "nmi-pmu"))]
-                {
-                    match kirq::try_register_startup(
-                        desc,
-                        handler,
-                        kirq::IrqRegisterOptions::auto_enable(),
-                    ) {
-                        Ok(true) => true,
-                        Ok(false) => {
-                            log::warn!("PMU registration rejected: desc={desc:?}");
-                            false
-                        }
-                        Err(err) => {
-                            log::warn!("PMU registration failed: desc={desc:?}, error={err:?}");
-                            false
-                        }
+                let options = kirq::IrqRegisterOptions::auto_enable();
+                match kirq::try_register_startup(desc, handler, options) {
+                    Ok(true) => true,
+                    Ok(false) => {
+                        log::warn!("PMU registration rejected: desc={desc:?}");
+                        false
+                    }
+                    Err(err) => {
+                        log::warn!("PMU registration failed: desc={desc:?}, error={err:?}");
+                        false
                     }
                 }
             }
@@ -415,9 +381,9 @@ macro_rules! pmu_if_impl {
 /// `khal::pmu::register_overflow_dispatch` (called from the `pmu` feature
 /// init) independently of the watchdog — as a normal IRQ handler in pmu-only
 /// builds, or as an NMI handler (with normal‑IRQ fallback) when the PMU is
-/// the compiled NMI source (`nmi-pmu`) — so perf overflow delivery works
-/// even without the hardlockup watchdog.  Consumers never see these details;
-/// they only depend on `khal::nmi::enable_periodic_nmi`.
+/// the compiled NMI source (`nmi-pmu`). Counter configuration currently supports
+/// the exclusive periodic owner, not general live perf event reconfiguration.
+/// Consumers depend on `khal::nmi::enable_periodic_nmi`.
 ///
 /// # Single‑provider note
 ///
@@ -433,66 +399,7 @@ macro_rules! nmi_pmu_if_impl {
         #[kiface::provide]
         impl kplat::nm_irq::PeriodicNmiSourceIf {
             fn enable_periodic_nmi(period_ns: u64, handler: NmiCb) -> bool {
-                // All steps, including rollback, belong to the same CPU.
-                // The helpers' individual guards do not cover migration
-                // between counter setup, callback publication and PPI setup.
-                let _guard = kspin::NoPreemptIrqSave::new();
-                if !$crate::peripherals::pmu::lifecycle::can_start() {
-                    return false;
-                }
-                // ── 1. Compute cycle threshold ────────────────────────
-                // TODO: read CPU max frequency from DT OPP table (opp-hz).
-                let cpu_freq_hz: u64 = 2_500_000_000;
-                let cycles = (period_ns as u128 * cpu_freq_hz as u128 / 1_000_000_000u128) as u64;
-
-                let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
-
-                // ── 2. Fallible per‑CPU setup, counter first ──────────
-                // Create the counter and register its handler before the
-                // line is promoted, so a failure at most leaves counter
-                // state that `deinit_cycle_counter()` rolls back.  The
-                // counter is not started until step 4, so nothing can
-                // overflow while this ordering holds.
-                if !$crate::peripherals::pmu::init_cycle_counter(cycles) {
-                    warn!("enable_periodic_nmi: cycle counter already initialised");
-                    return false;
-                }
-
-                if !$crate::peripherals::pmu::register_overflow_handler(
-                    $crate::peripherals::pmu::CYCLE_COUNTER_IDX,
-                    handler,
-                ) {
-                    warn!(
-                        "enable_periodic_nmi: failed to register overflow handler for cycle \
-                         counter {}",
-                        $crate::peripherals::pmu::CYCLE_COUNTER_IDX,
-                    );
-                    $crate::peripherals::pmu::deinit_cycle_counter();
-                    return false;
-                }
-
-                // ── 3. Promote this CPU's PMU line to NMI delivery ────
-                // The PMU interrupt is a PPI, so its priority lives in the
-                // local redistributor: every CPU must configure its own
-                // line.  The overflow‑dispatch handler on this line is
-                // registered by the `pmu` feature init, so this path only
-                // changes how that same line is delivered.
-                if !khal::irq::configure_nmi(irq) {
-                    // NmiMechanismIf::configure_nmi logged the reason; roll back the
-                    // counter state so a retry starts from a clean CPU.
-                    $crate::peripherals::pmu::deinit_cycle_counter();
-                    return false;
-                }
-
-                if !$crate::peripherals::pmu::enable_periodic_irq(kirq::gic_level_irq_desc(irq)) {
-                    $crate::peripherals::pmu::deinit_cycle_counter();
-                    return false;
-                }
-
-                // ── 4. Start the counter ─────────────────────────────
-                $crate::peripherals::pmu::enable($crate::peripherals::pmu::CYCLE_COUNTER_IDX);
-
-                true
+                $crate::peripherals::pmu::arm_periodic_source(period_ns, handler)
             }
 
             fn quiesce_periodic_nmi() {

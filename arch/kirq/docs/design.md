@@ -6,110 +6,79 @@ IrqTrigger, IrqController and IrqDomainId are re-exported from irq-types with
 unchanged public kirq paths. Only value definitions move; domain, mapping,
 handler and release behavior stay in kirq. No driver-contract dependency exists.
 
-## Candidate: Quiescent Per-CPU NMI Action Lifetime
+## NMI Action Lifetime
 
-This is a simplification candidate for the overall IRQ refactor, not a required
-Ticket05 change or a claim about the current implementation. Adopt it only after
-the source-completion proof and cost review below justify replacing action RCU.
-The following "NMI Close Admission" section describes the existing RcuSlot
-implementation until a replacement is validated.
+`runtime/nmi/action.rs::NmiAction` owns one stable `KBox<Handler>` in
+`IrqLine::nmi_action`. Its per-CPU `AtomicPtr<Handler>` slots publish access
+to that same immutable owner; they are neither per-CPU action owners nor reader
+counters. Registration supports only `IrqFlow::PerCpu`; Legacy and other flows
+are rejected before publication. Ordinary fallback uses the same owner rather
+than a second action in the ordinary fanout list. No live replacement is offered.
 
-The requirements are fixed action ownership while enabled, safe final release,
-bounded responsibility at the source/controller/core boundaries, and no live
-replacement requirement. Removing RCU is an implementation choice, not itself
-a requirement. Prefer a focused per-CPU action-lifetime change after source-owner
-shutdown acceptance and before the final IRQ lifecycle acceptance. It need not
-share a ticket with ordinary shared-action list migration: shared handlers may
-be removed while other actions continue and have a different lifetime model.
-Do not replace one existing RCU primitive with a larger generic proof/token
-framework merely to match Linux's storage representation. Retain the current
-mechanism if the complete replacement increases unsafe surface or caller burden
-without a demonstrated simplification. No later ticket number is assigned here.
+### Publication and scoped access
 
-Align the per-CPU source lifecycle with Linux v6.12
-`drivers/perf/arm_pmu.c::armpmu_disable_percpu_pmunmi` and
-`kernel/irq/manage.c::__free_percpu_irq/free_percpu_nmi`: install one shared
-action before local enable, keep it immutable while delivery is possible,
-disable/teardown on every participating CPU, then detach and destroy it.
-Per-CPU describes source state and callback data, not one action allocation per
-CPU. Linux's empty enabled mask is a check within this caller-owned protocol;
-it is not independently a remote execution barrier.
+Registration prepares the owner outside short locks and installs it under
+Line management/state exclusion. Installation alone does not publish CPU-local
+access. `prepare_local_action` first completes local controller preparation,
+then release-publishes the current CPU's slot under continuous Line and CPU/IRQ
+exclusion. Initial preparation failure leaves no local publication and retains
+the controller cleanup obligation. Enable must follow successful preparation.
 
-### Storage and read access
+The private `NmiAction::with_current` owns a `NoPreemptIrqSave` guard, selects
+the current CPU, acquire-loads its slot and lends the handler only to its
+callback. The borrow cannot escape that callback. It neither locks nor clones
+an owner, updates a reference count, allocates or waits. True NMI dispatch also
+has an outer `runtime::rcu::with_nmi_claim` CPU/IRQ guard spanning dispatch and
+original claim completion. The Domain/XArray read scope spans both operations
+to retain the Line, independently of action ownership.
 
-Keep Domain/XArray RCU protection for borrowed Line identity. Replace the
-per-CPU NMI action's RcuSlot with a private, stable owned action and a published
-read pointer. Management serializes installation and detachment; initialization
-precedes release publication and readers use acquire loads. The action stays
-immutable and owned until shutdown proves all admitted uses have ended.
-Do not add an action reference count, hazard pointer, second reader counter,
-or generic reclamation service. Retain a stable allocation only where the Rust
-trait-object representation requires it; pointer publication is not itself
-permission to free the allocation.
+Normal IRQ fallback keeps ordinary Line admission and the local enable check.
+Its `with_current` callback includes original claim completion, so local
+revocation cannot overtake either handler execution or completion. The later
+dispatch-guard cleanup touches retained-Line accounting, not the action.
+Neither NMI path queues software replay. Ordinary shared-action drain and
+reclamation have separate requirements and are unchanged.
 
-The read helper must be private and scoped to a validated dispatch invocation.
-A directory ReadScope protects the Line, not this action: it must not grant
-arbitrary task-context access to the action. The unsafe lifetime proof belongs
-inside this small storage/dispatch boundary, not in every source consumer.
-IRQ/NMI dispatch must not allocate, clone an action owner, take the management
-lock or run a final destructor. Directory protection still spans the original
-controller claim's completion.
+### Local revocation and final release
 
-### Shutdown and ownership
+Unsafe `teardown_percpu_nmi` requires the source owner to stop local generation,
+exclude restart and ensure no active claim crosses the transition. Under the
+Line lock and CPU/IRQ guard, it completes backend teardown before clearing only
+the current CPU's publication. Failure retains the local publication and
+preparation obligation; it does not authorize owner release. Local IRQ exclusion
+prevents ordinary revocation during a borrow, and a nested NMI finishes before
+the interrupted local teardown resumes. Remote CPUs cannot revoke that slot.
 
-Use the existing original-Line close identity rather than introducing another
-lease protocol. The target sequence is:
+Removal closes preparation/enable admission and checks all local enabled and
+preparation records. `NmiAction::take`, under management and Line exclusion,
+also refuses any nonempty publication slot. Only after every local revocation
+may it recover the sole owner. The returned owner is destroyed outside Line,
+CPU/IRQ and management guards. Removal needs neither an action grace period
+nor a running RCU callback service; directory retirement still uses RCU.
 
-1. Close preparation/enable and serialize producer restart.
-2. On each participating CPU, stop the producer, disable delivery, complete
-   controller teardown and exclude stale pending/active claims.
-3. Confirm that CPU's old handler and original controller completion have
-   finished. A queued callback or cleared enabled bit is not sufficient.
-4. After all acknowledgements, detach the action under management exclusion.
-5. Release locks and destroy the detached owner. Only then permit registration
-   of the next action generation; re-registration does not restart the producer.
+### Source-owner ordering
 
-For PMU, synchronous target-CPU work plus the local pinned IRQ-off shutdown and
-controller checks supplies step 3: an earlier local NMI completes before the
-normal callback resumes, and successful shutdown prevents another PMU claim.
-IPI callback acknowledgement is not completion of the surrounding IPI claim;
-that unrelated claim must not be confused with the PMU claim being drained.
-This proof assumes boot-ready CPUs and excludes concurrent CPU hotplug or stop.
+Local bookkeeping is not a remote execution barrier. A PMU start may pass its
+source gate, tear down a vacant local source and pause before preparing it
+again. An enabled/prepared-only snapshot would omit that admitted start.
+The PMU owner therefore closes admission and performs synchronous stop calls on
+every boot-static CPU permitted to start, including unprepared CPUs. Those
+completed target calls follow each CPU's old pinned IRQ-off interval before
+restoration can admit a new generation.
 
-Failure retains the original action, Closing and unfinished CPU obligations;
-retry must not apply duplicate disable credits. Finalization must consume a
-shutdown proof, not infer quiescence solely from empty local bookkeeping.
-The proof must also cover a start transaction that passed its source gate but
-has not yet installed a preparation record when participants are snapshotted.
-The current implementation rejects its preparation while Closing and its grace
-period covers the old pinned region before restoration. Removing that grace
-period requires equivalent start-versus-restore exclusion; the participant
-snapshot alone does not supply it. If establishing this adds a more complex
-protocol, retain action RCU rather than weaken the proof.
-Keep proof construction internal to validated paths or at one documented
-unsafe owner boundary. A public safe function must not accept an unchecked
-"all CPUs stopped" boolean as that proof. Ordinary unregister must not bypass
-this requirement. No action grace period or running RCU service is required
-for finalization once this protocol is established; directory retirement
-remains a separate RCU operation.
+Each stop must also stop counters, disable delivery and complete controller
+teardown; acknowledgement alone does not prove hardware pending/active state
+is clear. An earlier local NMI finishes its original PMU claim before the normal
+stop callback resumes. Completion of that callback is not completion of its
+surrounding, unrelated IPI claim. This protocol assumes boot-ready CPUs and
+excludes concurrent CPU hotplug or stop. Other source owners must provide
+equivalent start-versus-restore exclusion.
 
-### Scope and acceptance
-
-Ordinary-IRQ delivery of the same per-CPU PMU source uses the same stable action
-and local shutdown protocol. Legacy/non-per-CPU NMI registration is not thereby
-covered: audit real callers and reject unsupported flows before publication,
-or give them a separate justified lifecycle. Do not retain broad Legacy support
-only to accommodate synthetic fixtures. No live action replacement is offered.
-
-Replace action-withdrawal-during-read fixtures with source-protocol tests:
-publication before enable, actual NMI and ordinary fallback delivery, closing
-against restart, partial shutdown failure/retry, last PMU completion before
-destruction, destruction outside locks, and stop/free/register/start reuse.
-Verify that finalization has no action RCU wait and that directory concurrency
-tests still pass. Invalid synthetic dispatch after shutdown violates the claim
-contract and must not silently become a supported reader lifetime. Existing
-RcuSlot infrastructure must be audited for remaining consumers before removing
-any API; this change does not alter the RCU grace-period algorithm.
+Partial shutdown failure retains the action, Closing and unfinished local
+obligations for retry without duplicate disable credits. Restoration must not
+reopen the source gate before old admitted starts and local claims are excluded.
+This is the installed action-lifetime protocol, not a general shared-action
+reclamation scheme or a change to the RCU grace-period algorithm.
 
 ## NMI Close Admission
 
@@ -118,8 +87,9 @@ CPU-local slot remains enabled, removal returns false without withdrawing the
 handler owner. Closing survives management-mutex release: both ordinary and
 force-enable reject it, while local disable remains available. The owner can
 finish local shutdown and retry removal on the same Line. Successful withdrawal
-retains Closing, the ownership marker and teardown through a post-withdrawal
-grace period. Only then are admission and the recovered owner released.
+recovers the owner only after every local publication is revoked. Management
+cleanup releases teardown/admission before the returned owner is destroyed
+outside its guards; an active shutdown claim keeps Closing through destruction.
 
 `prepare_percpu_nmi` and `teardown_percpu_nmi` retain the selected Line and pin
 the executing CPU through the controller transaction. A local slot retains its
@@ -138,13 +108,12 @@ still retains its callback and preparation, rather than claiming full teardown.
 
 These controller checks are not a remote-handler drain. Source owners must
 stop producers and confirm each CPU's disable/teardown before removal.
-`IrqLine::nmi_action` is the single RCU-owned handler for true NMI and fallback.
-Withdrawal waits for their full-use read scopes; it needs no global NMI table
-or exclusion of unrelated NMI sources. RCU does not clear pending hardware.
-Ordinary fallback completes its controller claim inside that read scope. Its
-subsequent dispatch-guard destruction updates only retained-Line accounting,
-not the action. These NMI flows do not queue software replay, so action
-reclamation does not add a second ordinary in-flight wait.
+The single `NmiAction` owner serves true NMI and fallback through CPU-local
+publication. Completed local teardown revokes access only after the old handler
+and its original claim have finished. Empty publication slots permit owner
+recovery without an action RCU wait or a second ordinary in-flight wait.
+No global NMI table or exclusion of unrelated NMI sources is needed. Directory
+RCU remains independent and cannot clear pending hardware.
 
 `runtime/nmi/shutdown.rs` owns `NmiShutdown`, a non-cloneable close claim.
 `begin_nmi_shutdown` retains the original Line, closes admission and snapshots
@@ -585,8 +554,8 @@ ordering, not a claim that every controller has equivalent EOI semantics.
 
 | Provider / source | Before generic fanout | Completion after fanout | Control and remaining boundary |
 | --- | --- | --- | --- |
-| GICv2: `drivers/platform/irq/src/gicv2.rs`, `claim_irq` | Ack, reject spurious, EOI priority drop | DIR using the claim cookie unless this CPU's `FORWARDED_PPIS` delegates deactivation to a guest | Ordinary SPIs select Fasteoi; explicitly described private sources, including the VMM timer PPI 27 and NMI-fallback PPIs, select PerCpu. NMI-tagged SPIs retain Legacy. GICv2 does not provide NMI preparation. The resident guest HW LR owns delegated deactivation; detached sources return to host completion. |
-| GICv3: `drivers/platform/irq/src/gicv3.rs`, `ack_irq` | Ack, classify NMI, EOI priority drop | `complete_irq` issues DIR | Ordinary SPIs select Fasteoi independently of claim classification. Explicitly described private sources including NMI-fallback PPIs select PerCpu; NMI-tagged SPIs retain Legacy. NMI-class claims enter generic NMI. Guest forwarding is not supported by this backend. |
+| GICv2: `drivers/platform/irq/src/gicv2.rs`, `claim_irq` | Ack, reject spurious, EOI priority drop | DIR using the claim cookie unless this CPU's `FORWARDED_PPIS` delegates deactivation to a guest | Ordinary SPIs select Fasteoi; explicitly described private sources, including the VMM timer PPI 27 and NMI-fallback PPIs, select PerCpu. NMI-tagged SPIs retain Legacy and are rejected by NMI action registration. GICv2 does not provide NMI preparation. The resident guest HW LR owns delegated deactivation; detached sources return to host completion. |
+| GICv3: `drivers/platform/irq/src/gicv3.rs`, `ack_irq` | Ack, classify NMI, EOI priority drop | `complete_irq` issues DIR | Ordinary SPIs select Fasteoi independently of claim classification. Explicitly described private sources including NMI-fallback PPIs select PerCpu; NMI-tagged SPIs retain Legacy and are rejected by NMI action registration. NMI-class claims enter generic NMI. Guest forwarding is not supported by this backend. |
 | x86 IO-APIC level: `drivers/platform/irq/src/x86.rs`, `dispatch_regular_irq` | Decode vector, retain nonzero completion cookie | LAPIC EOI under Line lock after Fasteoi handlers | Selected Fasteoi gates admission; validated hardware level reasserts after unmask. |
 | x86 IO-APIC edge and MSI-X: same provider | Transfer nonzero EOI cookie to generic Edge | LAPIC EOI under Line lock before handlers, or after masking a rejected arrival | Overlapping arrivals latch pending for the running owner. Re-enable retriggers using the recorded backend target/vector, not an arbitrary self-IPI. MSI device masking/release remains owner-controlled. |
 | x86 local timer/IPI vectors: same provider | LAPIC EOI before generic dispatch | Zero cookie: no further EOI | PerCpu controls local admission independently; remote producer shutdown remains an owner obligation. |
@@ -717,12 +686,14 @@ arch/kirq/src/
 ├── runtime/
 │   ├── mod.rs
 │   ├── action.rs       # internal regular IRQ action and return classification
+│   ├── action_set.rs   # RCU action membership, shared tokens and admission ceilings
 │   ├── index.rs        # owning XArray indexes, prepared publication and retirement
-│   ├── state.rs        # descriptor map, virq allocation, and action state
+│   ├── state.rs        # descriptor map, virq allocation and Line lifecycle gates
 │   ├── state_local.rs  # Line-locked CPU-local enable/configuration slots
 │   ├── dispatch.rs     # normal IRQ action fanout
 │   ├── resend.rs       # retained-Line pending replay queue and executor binding
 │   ├── nmi.rs          # Line-owned NMI publication, scoped dispatch and retirement
+│   ├── nmi/action.rs   # Sole owner and quiescent CPU-local publication
 │   ├── nmi/shutdown.rs # Retained close identity and local participant snapshot
 │   └── manager.rs      # public API and dispatch-entry orchestration
 ├── domain/
@@ -796,7 +767,12 @@ alloc_msix()
 register_nmi()
     |-- prepare one KBox<Handler> outside locks
     |-- original Line management -> registry -> Line state
-    `-- publish IrqLine::nmi_action, mark NMI ownership in Line state
+    `-- install NmiAction owner, mark NMI ownership; reject non-PerCpu flow
+
+prepare_percpu_nmi()
+    |-- retain Line and exclude local IRQs/migration
+    |-- complete local controller preparation under Line lock
+    `-- publish current CPU's pointer to the installed owner
 ```
 
 ## 调用约束 / 执行上下文
@@ -1005,8 +981,10 @@ future threaded slot 和 optional name，但本阶段 threaded slot 始终
 
 `IrqDescRuntimeState` 是 descriptor/action 运行态的唯一 owner。它当前保存：
 
-- `actions`：当前安装在 line 上的 regular/shared primary action list。非 shared
-  regular API 仍只能安装一个 action；shared API 最多安装固定数量的 shared action；
+- `actions`: the ordinary RCU action list. Regular registration admits one
+  exclusive action; shared registration has no fixed four-action limit.
+  Storage is prepared with NOWAIT before short locks. Exhausted publication
+  sequences reject registration without wrapping or reusing removal keys;
 - `generation`：descriptor/platform configuration metadata 变化序号；action 和
   lifecycle 不递增该值；
 - `configured_generation`：上一次成功下发到平台 configure 路径的 descriptor
@@ -1356,8 +1334,10 @@ not install a competing implicit deferred-executor owner.
 
 ### Unclaimed action fanout diagnostics
 
-For a descriptor with a primary-action snapshot, dispatch still runs every
-eligible shared action and ORs its claim result. Only a completely unclaimed
+For a descriptor with ordinary action admission, dispatch visits the current
+RCU list up to its captured publication ceiling and ORs the visited actions'
+claim results. Concurrent unlink can bypass unseen actions; this is not an
+exact admission-time fanout snapshot. Only a completely unclaimed
 fanout increments the descriptor's unhandled count. `HANDLED` with no source
 bits is still a claim; a claim is not proof that a device deasserted its IRQ.
 
@@ -1390,23 +1370,36 @@ unreported tail is not preserved after removal and report spacing can grow
 large. These counts are not per-action attribution, a failure ratio, a hardware
 mask policy, or a recovery detector.
 
-Unresolved sources, resolved sources without descriptors, empty action
-snapshots, and unsupported threaded-state warnings retain their existing
-behavior. They are outside this diagnostic sampling scope and can still log
-on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
+Unresolved sources, resolved sources without descriptors, admission with no
+actions, and unsupported threaded-state warnings remain separate diagnostic
+paths and can still log on each occurrence. If an admitted ordinary traversal
+visits no actions because of concurrent unlink, its merged result is unhandled
+and participates in the sampled count. Dedicated NMI dispatch remains outside
+`IRQ_STATE`.
 
 ### `register(desc, handler)`
 
-1. 解析 `IrqSpec`。
-2. Resolve the stable logical number and commit prepared index insertions.
-3. 若 `IrqStateDesc` 已有 action，返回 `false`。
-4. 把 `Arc<dyn IrqHandler>` 包装成内部 regular action；normal IRQ dispatch 会以
-   resolved `virq` 调用 `handler.handle(virq)`。
-5. 释放 `IRQ_STATE`。
-6. Registration applies stale configuration before installing the handler.
+1. Parse `IrqSpec` and validate the requested management context.
+2. Prepare the action node with NOWAIT allocation before management or short
+   locks. Allocation failure leaves membership and metadata unchanged.
+3. Retain an already prepared Line, acquire management admission and revalidate
+   identity. Missing descriptors are not created by registration.
+4. Under Line exclusion, reject occupied or sequence-exhausted membership before
+   merging descriptor metadata or publishing mappings. Release registry exclusion
+   before controller application; retain the original Line guard.
+5. Registration applies stale configuration before publishing the prepared node.
    Default registration then enables delivery. Disabled registration preserves
    a disable depth of at least one and waits for explicit `enable_irq()`; for
    PerCpu flow it first masks an already enabled calling CPU's source.
+6. Release management exclusion before dropping unpublished storage or the
+   caller's retained handler owner. Dispatch supplies the resolved `virq` to
+   `handler.handle(virq)`.
+
+`ut-tests/action_allocation.rs` injects preparation failure for one selected
+handler in unittest builds. It checks regular, startup and shared registration
+without changing membership, metadata, delivery state or the next publication
+sequence, and verifies terminal handler destruction outside management/short
+locks. This exercises error handling, not physical allocator exhaustion.
 
 ### `enable_irq(desc)`
 
@@ -1426,10 +1419,12 @@ on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
 1. 拒绝 hardirq、softirq 和 BH-disabled context 中的等待式 teardown。
 2. Retain the Line under `IRQ_STATE`, acquire its management mutex outside short
    locks, then revalidate identity and record admission under `IRQ_STATE`.
-3. 移除 regular action。
-4. 如果 descriptor 已经没有 action 使用者，先 mask 平台 line，并把
-   `disable_depth` 固定到至少 `1`。
-5. 释放锁后等待该 `virq` 的 `in_flight` dispatch 计数归零。
+3. Prepare a task-bound grace-period wait before taking the Line short lock.
+   Preparation failure returns `RetirementUnavailable` without withdrawing anything.
+4. Unlink the regular action under the Line lock. Mask the last action's source
+   and set disable depth to at least one before releasing that lock.
+5. Outside short locks, wait for a post-unlink grace period, then drain the
+   retained Line's `in_flight` obligations through controller completion.
 6. Finish teardown and admission under the original Line lock; no directory
    lookup or removal occurs. MSI resource owners use `free_msix()` for final
    release, independently of action removal.
@@ -1439,11 +1434,12 @@ on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
 1. 拒绝 hardirq、softirq 和 BH-disabled context 中的等待式 teardown。
 2. Retain the Line under `IRQ_STATE`, acquire its management mutex outside short
    locks, then revalidate identity and record admission under `IRQ_STATE`.
-3. 只移除 token 对应的 shared action；若 line 还有其它 action，保留平台 enable
-   状态和 descriptor。
-4. 若移除的是最后一个 action，则 mask 平台 line。
-5. 释放锁后等待该 `virq` 的 `in_flight` dispatch 计数归零，保证旧 snapshot 不再
-   持有被移除 action。
+3. Prepare the task-bound wait, then unlink only the matching token under the
+   Line lock. An unmatched token changes neither membership nor delivery state.
+4. Mask the source only when removing its last action.
+5. Release short locks, wait for a post-unlink grace period and then drain
+   `in_flight`. RCU protects software node borrows; it does not prove hardware
+   source quiescence or completion of the original controller claim.
 6. Finish teardown on the original Line and retain its directory membership,
    including after the last action is removed.
 
@@ -1579,10 +1575,12 @@ prepare mappings first. Startup acquisition still never waits, and descriptor
 identity is rechecked after acquisition before metadata changes. Task-mode
 registration also performs lookup only: console and virtual timer routes map
 before requesting actions, and devres consumes mapped or MSI-allocated resources.
-Missing descriptors return `UnknownIrq` without allocation or publication.
-This matches Linux `request_threaded_irq` in `kernel/irq/manage.c`: `irq_to_desc`
-must succeed before an action is allocated or installed; requesting an action
-does not allocate the IRQ descriptor.
+Missing descriptors are not allocated or published by registration. Ordinary
+registration prepares a NOWAIT action node before descriptor lookup: allocation
+failure can return `NoMemory` first; after successful preparation, a missing
+descriptor returns `UnknownIrq` and the unpublished node is dropped. Requesting
+an action does not allocate the IRQ descriptor, as in Linux, but this local
+action-storage preparation order differs from Linux's lookup-first ordering.
 Regular, shared and NMI registration retain one Line guard from preflight
 through descriptor resolution, configuration, action installation and delivery
 restoration.
@@ -1611,11 +1609,11 @@ to the caller. Removing a non-last shared action does not mask the remaining
 actions.
 NMI registration and withdrawal retain the original Line state lock across
 bounded controller configure/mask operations, after directory release.
-The handler is published in the Line's RCU slot, not in the ordinary fanout
-array. A state marker reserves its action ownership for both dispatch paths.
-Removal retains Closing and management admission through withdrawal and the
-subsequent grace period, without holding any short lock while waiting. The
-returned owner is destroyed only after the management mutex is released.
+The handler is installed in the Line's `NmiAction`, not in the ordinary fanout
+array. Successful local preparation publishes access on that CPU. A state
+marker reserves ownership for both dispatch paths. Removal requires completed
+local revocation and an empty publication array, not an action grace period.
+The returned owner is destroyed only after management and short guards release.
 Outer IRQ-off protection outlives both directory and Line guards, so releasing
 the directory first cannot restore ordinary IRQ delivery inside this transaction.
 Synchronous disable captures this identity in the same transaction as its
@@ -1644,16 +1642,17 @@ the registry lock; these control-plane serialization limits do not apply to it.
    to `dispatch_claim`. An RCU lookup retains the original Line without
    `IRQ_STATE`; its lock checks retirement and grants in-flight admission even
    without actions.
-   Fasteoi checks running and action eligibility before copying callbacks;
+   Fasteoi checks running and action eligibility before capturing the list ceiling;
    rejected disabled/action-less arrivals become pending and are masked before
    completion. Running rejection completes without clearing the active owner.
    Legacy retains its prior fanout policy. Missing mappings/Lines complete the
    original claim without attaching to a replacement. The return is resolved
    IRQ metadata, not a statement that an action ran or handled the interrupt.
-6. 在不持有 `IRQ_STATE` 的情况下按 snapshot 顺序调用所有 action primary handler，
-   每个 handler 都收到 resolved `virq`，随后合并并分类每个 `IrqEvent`。若整条
-   line 未被认领，则记录未处理告警；没有通用 IRQ waiter 通知。本阶段不调度 threaded
-   handler，也不做 per-action 统计。
+6. Without directory or Line locks, traverse the ordinary list in an RCU scope
+   up to the captured publication ceiling. Each visited primary receives the
+   resolved `virq`; results are combined and classified. Concurrent unlink may
+   skip an unseen action. An unclaimed pass records diagnostics, without generic
+   waiter notification, threaded-handler scheduling or per-action statistics.
 7. Original-claim completion runs before admission release. The Fasteoi owner
    clears running and completes under its original Line lock; Legacy completion
    stays unlocked. Edge completion occurs before handlers as described above,
@@ -1677,17 +1676,19 @@ Both dedicated NMI entry and controller-classified IRQ-on NMI delivery pass a
 typed `PendingIrq` to `generic_handle_nmi`. GIC identifies its root Domain
 and raw hwirq; the original cookie retains completion responsibility.
 
-1. Establish effective NMI context and RCU watching.
+1. Hold CPU/IRQ exclusion and establish effective NMI context and RCU watching.
 2. Open one interrupt read scope before borrowing the Domain's XArray Line.
-3. Borrow `IrqLine::nmi_action` and invoke the handler with the raw hwirq.
+3. Use `NmiAction::with_current` to borrow the local publication and invoke
+   the handler with the raw hwirq; no action borrow escapes the callback.
 4. Complete the original claim, including when lookup or action is absent.
-5. End the read scope, then restore watching and NMI context.
+5. End the directory read scope, restore watching and NMI context, then
+   release the outer CPU/IRQ guard.
 
 The true NMI read path takes no registry, Line or management lock, clones no
 Arc, runs no destructor and emits no potentially locking diagnostic.
 It does not fall back to the logical directory on a Domain miss.
 Normal IRQ fallback keeps ordinary Line admission and its local enable check,
-then borrows the same action in an interrupt RCU scope through completion.
+then borrows the local publication with `with_current` through completion.
 Fallback preserves the existing logical-IRQ callback argument. There is one
 handler owner, not a second regular action. A disabled fallback still completes
 its claim without invoking the handler.
@@ -1698,11 +1699,19 @@ the NMI before reopening NMI delivery and continuing the ordinary IRQ exit.
 
 Tests cover borrowed dispatch under held writer locks, single ownership,
 raw-vs-logical callback arguments, original completion within the read scope,
-and owner retention across withdrawal. They do not prove physical NMI delivery,
-source quiescence or remote shutdown completion.
+and refusal to withdraw a locally published owner. They do not prove physical
+NMI delivery, source quiescence or remote shutdown completion.
 
 ## 并发模型
 
+- `runtime/action_set.rs::ActionSet` owns ordinary RCU-list membership, its count
+  and monotonic publication sequences. The Line serializes writers; node storage
+  is prepared before short locks. Admission captures a list owner and sequence
+  ceiling, not independent handler owners or an immutable membership snapshot.
+  Traversal starts its RCU scope before loading links and stops at a sequence
+  above the ceiling. Concurrent removal may bypass an unseen node; concurrent
+  append cannot extend that pass indefinitely. Each edge pass captures a new
+  ceiling. NMI ownership stays separate from ordinary list membership.
 - `IRQ_STATE` serializes control-plane directory and mapping transactions;
   each Line lock protects descriptor/action state. Normal dispatch retains a
   Line through RCU and takes only its Line lock for admission. Completion uses
@@ -1711,8 +1720,9 @@ source quiescence or remote shutdown completion.
   it through RCU. MSI release closes admission and withdraws both entries before
   submitting their independent retirement records outside registry exclusion.
   Each index owner remains alive until its callback's grace period completes.
-- Normal dispatch snapshots actions and increments admission under the Line
-  lock, then runs handlers after unlocking. A lookup racing withdrawal may
+- Normal dispatch captures the action-list owner and publication ceiling and
+  increments admission under the Line lock, then borrows handlers in an RCU
+  read scope after unlocking. A lookup racing withdrawal may
   retain a retired Line, but cannot admit service on it. A replacement with the
   same number cannot redirect the retained completion owner.
 - `in_flight` includes real claims and queued/running replay, released by the
@@ -1720,15 +1730,17 @@ source quiescence or remote shutdown completion.
   The last guard publishes `in_flight_zero` completion under the Line lock and
   wakes outside that lock. The same lock protects `in_flight == 0` observations.
   Control-plane owners, not dispatch completion, decide descriptor withdrawal.
-  `free_irq()` removes the action, masks the last action's source, then waits
-  outside short locks for `in_flight` to reach zero. It retains the descriptor.
+  `free_irq()` unlinks the action, masks the last action's source, then waits
+  outside short locks for a post-unlink GP and for `in_flight` to reach zero.
+  It retains the descriptor and returns the handler only after management unlock.
   The last action must mask even while another teardown owns a credit.
   `teardown_depth` excludes registration and re-enable while draining. Waiting
   APIs reject interrupt-like contexts; callers must not hold locks needed by
   handlers or otherwise prevent their completion.
-- NMI reads borrow the Domain index and Line action inside one RCU scope.
-  Only task/startup writers acquire management and state locks. Retirement
-  waits with short locks released; readers never acquire the management mutex.
+- NMI reads borrow the Domain index under RCU and the locally published action
+  under CPU/IRQ exclusion. Only task/startup writers acquire management and
+  state locks. Action removal requires completed local teardown on every
+  published CPU, not an RCU wait; readers never acquire the management mutex.
 - `IRQ_LIFECYCLE_HOOKS` 使用 `SpinNoIrq`，只在 active bit 为真时于 entry 短暂复制
   函数指针。无 hook 的 IRQ hot path 通过 atomic active bit 跳过全局锁；hook 本体
   不在该锁内执行。
@@ -1810,9 +1822,10 @@ RX。
 ### Why NMI Reads Avoid Mutable IRQ State
 
 NMI may interrupt a writer holding registry or Line exclusion. Its read path
-therefore borrows only the RCU-protected index and action, not mutable Line
-state. Publication is serialized by the Line's management/state locks;
-withdrawal retains the allocation through a subsequent grace period.
+therefore borrows the RCU-protected index and acquire-loads its CPU-local action
+publication, not mutable Line state. Management/state locks serialize owner
+installation and withdrawal. Local teardown revokes publication only after
+handler and claim completion; withdrawal refuses any remaining published slot.
 Management from NMI is rejected before allocation or locks. Unrelated NMI
 sources can continue during task-context retirement.
 
@@ -1833,13 +1846,14 @@ hardware claim, without inventing an identity fallback for strict Domains.
   deferred execution owner 一次性注册。
 - `unregister()` removes the regular action and disables the last action's
   source. It retains all descriptor identities, including domainless entries.
-  MSI owners release resources with `free_msix()`. The scheduler wait
-  provider validates sleepable context before withdrawal; stack-based waiters
-  drain escaped snapshots without a post-withdrawal registration-failure branch.
+  MSI owners release resources with `free_msix()`. Sleepable context and the
+  task-bound GP wait are prepared before withdrawal. After unlink, the task
+  waits for RCU readers and retained-Line claim/replay admission without a
+  post-withdrawal wait-preparation failure branch.
 - `unregister_nmi()` closes admission and rejects removal while any CPU is
-  enabled or prepared. Once local shutdown is complete, it withdraws the sole
-  RCU action and waits for old true-NMI/fallback scopes through completion.
-  The ownership marker and Closing remain set until that wait finishes.
+  enabled, prepared or locally published. Once local shutdown is complete,
+  it recovers the sole action owner without an action grace-period wait.
+  An outstanding `NmiShutdown` claim rejects ordinary unregister.
   Normal/token-based free cannot remove this action. Client destruction occurs
   after management unlock; mapping ownership remains independent.
 
@@ -1850,10 +1864,14 @@ locking logger. `descriptor()` is still an ordinary locked query, not an NMI
 observation API. Ordinary and NMI writers share the Line management boundary.
 Source stop, restart exclusion and completed local teardown remain mandatory.
 
-Linux `kernel/irq/manage.c` distinguishes `request_nmi`/`free_nmi`, records NMI
-ownership in descriptor state and requires non-interrupt context for `free_irq`.
-Our scoped RCU ownership implements Rust borrow lifetime protection. Linux's
-generic NMI lifecycle does not use this exact RCU retirement protocol.
+Linux `kernel/irq/manage.c::free_percpu_nmi` uses `__free_percpu_irq` to check
+the enabled CPU mask and detach the action before freeing it, without an action
+RCU grace period. Its source owner completes per-CPU disable/teardown first.
+KIRQ follows that ordering but does not copy the C storage layout: one shared
+owner plus local publication slots encode the scoped Rust borrow lifetime.
+These slots are not Linux's `percpu_dev_id` payloads or separate action owners.
+Directory RCU protects Line identity separately; neither Linux's enabled-mask
+check nor KIRQ's empty slots alone stop a producer.
 
 ## Line Management Transactions
 
@@ -1985,9 +2003,10 @@ where logging itself is unsafe. Startup SGI and PMU callers likewise distinguish
 Ordinary registration also checks action admission before descriptor merging
 or mapping publication. The preflight borrows the retained Line's locked state
 under management, registry and Line exclusion and inspects the same predicates
-used by installation. Regular actions
-require an empty Line; shared actions require compatible ownership, capacity
-and an available token. Line exclusion remains held through the body, so a
+used by installation. Regular actions require an empty Line and an available
+publication sequence; shared actions require compatible ownership and checked
+sequence/count increments. Storage has already been prepared; there is no
+fixed fanout-capacity gate. Line exclusion remains held through the body, so a
 competing control transaction cannot invalidate admission after preflight.
 Rejected richer descriptors leave existing
 metadata, generations, mappings and action owners unchanged. Diagnostics occur

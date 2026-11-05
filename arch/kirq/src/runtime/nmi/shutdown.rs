@@ -40,7 +40,7 @@ impl NmiShutdown {
 
     /// Retires the original action after completed source shutdown.
     ///
-    /// Requires sleepable task context and an operational RCU service. Consume
+    /// Requires sleepable task context, but no action grace-period wait. Consume
     /// the unique handle only after remote callbacks and their captures finish;
     /// Arc owners must recover it with Arc::try_unwrap, not drop a clone and free
     /// by number. The source owner must also exclude stale hardware claims and
@@ -48,7 +48,7 @@ impl NmiShutdown {
     ///
     /// # Errors
     /// Returns the unchanged handle on rejected context, incomplete local
-    /// teardown, stale identity or wait preparation failure. The action remains
+    /// teardown, remaining local publication or stale identity. The action remains
     /// installed and admission stays closed, so the owner can retry.
     pub fn finish(self) -> Result<(), Self> {
         self.finish_with(|desc| crate::platform::set_platform_irq_enabled(desc, false))

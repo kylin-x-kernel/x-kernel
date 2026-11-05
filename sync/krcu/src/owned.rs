@@ -118,7 +118,9 @@ impl<T> Rcu<T> {
             // Do not reconstruct a KBox yet: old readers may still hold shared
             // borrows. A nonreturning wait leaks this raw owner instead of freeing
             // it early, including if unwinding is introduced in a host environment.
-            wait.submit_and_wait();
+            // SAFETY: preparation validated task context; only the publication
+            // exchange intervenes, with no locks, reader scopes or context changes.
+            unsafe { wait.submit_and_wait() };
             // SAFETY: the exchange gave this operation unique ownership, and its
             // subsequent GP ended all protected borrows of this removed allocation.
             // No independent publication or raw ownership API is exposed.

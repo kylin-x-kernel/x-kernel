@@ -79,8 +79,8 @@ pub(super) fn dispatch_claim(source: IrqRef, complete_claim: impl FnOnce()) -> O
             entry.can_run_actions()
         };
         drop(entry);
-        krcu::with_interrupt_read(|scope| {
-            if can_dispatch && let Some(handler) = line.nmi_action.read(scope) {
+        line.nmi_action.with_current(|handler| {
+            if can_dispatch && let Some(handler) = handler {
                 // Ordinary fallback preserves the logical IRQ callback ABI.
                 guard.is_unhandled = !handler.handle(virq).handled();
             }
@@ -239,7 +239,7 @@ fn handle_percpu_irq(
 
 fn run_actions(virq: crate::Virq, snapshot: super::state::IrqActionSnapshot) -> bool {
     let mut merged_event = IrqEvent::NOT_HANDLED;
-    for action in snapshot.actions.into_iter().flatten() {
+    snapshot.with_actions(|action| {
         if action.is_currently_dispatchable() {
             let action_return = action.run_primary(virq);
             if action_return.handled() {
@@ -248,7 +248,7 @@ fn run_actions(virq: crate::Virq, snapshot: super::state::IrqActionSnapshot) -> 
         } else {
             warn!("IRQ {virq} action has unsupported threaded state");
         }
-    }
+    });
     !merged_event.handled()
 }
 

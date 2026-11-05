@@ -2765,6 +2765,7 @@ dependencies = [
  "kmutex",
  "krcu",
  "krcu-core",
+ "krcu-list",
  "kspin",
  "kxarray",
  "log",

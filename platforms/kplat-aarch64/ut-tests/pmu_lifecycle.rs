@@ -32,7 +32,57 @@ fn on_cpu(cpu: usize, body: impl FnOnce() -> bool + Send + 'static) -> bool {
 }
 
 #[def_test(serial)]
-fn real_pmu_global_shutdown_retries_and_republishes_after_reader_drain() -> unittest::TestResult {
+fn mode_none_pmu_uses_an_enabled_ordinary_action() -> unittest::TestResult {
+    if kplat::nm_irq::mode() != kplat::nm_irq::NmiMode::None {
+        return unittest::TestResult::Ignored;
+    }
+    let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
+    {
+        let _pin = kspin::NoPreemptIrqSave::new();
+        if irq_driver::gic::local_ppi_state_for_test(irq).is_none() {
+            return unittest::TestResult::Ignored;
+        }
+    }
+    let desc = kirq::gic_level_irq_desc(irq);
+    // A normal action must exist, not an unprepared NMI owner. This rejection
+    // leaves ordinary ownership and admission unchanged.
+    assert!(matches!(
+        kirq::begin_nmi_shutdown(desc),
+        Err(kirq::IrqDescError::NoIrqAction { .. })
+    ));
+    assert_eq!(khal::pmu::shutdown_overflow_irq(), Err(KError::Unsupported));
+    assert_eq!(khal::pmu::restore_overflow_irq(), Err(KError::Unsupported));
+    let cpus = if cfg!(feature = "smp") {
+        kcpu_id_map::nr_cpus()
+    } else {
+        1
+    };
+    for cpu in 0..cpus {
+        assert!(on_cpu(cpu, move || {
+            let _pin = kspin::NoPreemptIrqSave::new();
+            let before = irq_driver::gic::local_ppi_state_for_test(irq);
+            let disabled = kirq::try_disable_irq_nosync(desc).is_ok();
+            let masked = irq_driver::gic::local_ppi_state_for_test(irq);
+            // Restore through the production activation path even on failure.
+            khal::pmu::enable_irq();
+            let enabled = irq_driver::gic::local_ppi_state_for_test(irq);
+            disabled
+                && before.is_some_and(|(enabled, ..)| enabled)
+                && masked.is_some_and(|(enabled, ..)| !enabled)
+                && enabled.is_some_and(|(enabled, ..)| enabled)
+                && kirq::try_enable_irq(desc).is_ok()
+        }));
+    }
+    unittest::ktest_println!(
+        "mode-None PMU ordinary action activated on {} GICv2 CPUs",
+        cpus
+    );
+    unittest::TestResult::Ok
+}
+
+#[def_test(serial)]
+fn real_pmu_global_shutdown_retries_and_republishes_after_local_revocation() -> unittest::TestResult
+{
     if kplat::nm_irq::mode() == kplat::nm_irq::NmiMode::None {
         return unittest::TestResult::Ignored;
     }
@@ -54,10 +104,25 @@ fn real_pmu_global_shutdown_retries_and_republishes_after_reader_drain() -> unit
             return unittest::TestResult::Ignored;
         }
     }
+    let result = close_visits_unprepared_cpus_before_republication(cpus);
+    if !result.is_ok() {
+        return result;
+    }
     HAS_INVALID_CONTEXT.store(false, Ordering::Relaxed);
     for round in 0..2 {
         for (cpu, calls) in CALLBACKS.iter().enumerate().take(cpus) {
             calls.store(0, Ordering::Relaxed);
+            assert!(on_cpu(cpu, || {
+                let desc =
+                    kirq::gic_level_irq_desc(of::pmu_irq_or(kbuild_config::PMU_IRQ));
+                matches!(
+                    kirq::try_enable(desc, true),
+                    Err(kirq::IrqDescError::ConfigurationFailed { .. })
+                ) && matches!(
+                    kirq::try_enable_irq(desc),
+                    Err(kirq::IrqDescError::ConfigurationFailed { .. })
+                )
+            }));
             assert!(on_cpu(cpu, || kplat::nm_irq::enable_periodic_nmi(
                 100_000, overflow
             )));
@@ -102,6 +167,54 @@ fn real_pmu_global_shutdown_retries_and_republishes_after_reader_drain() -> unit
             true
         }));
     }
+    unittest::TestResult::Ok
+}
+
+fn close_visits_unprepared_cpus_before_republication(cpus: usize) -> unittest::TestResult {
+    // Only the last CPU has prepared. Other CPUs can still have an admitted
+    // start before preparation, so they must acknowledge Closing as well.
+    for cpu in 0..cpus {
+        assert!(on_cpu(cpu, super::super::shutdown_periodic_source));
+    }
+    let target = cpus - 1;
+    assert!(on_cpu(target, || {
+        kplat::nm_irq::NmiMechanismIf::configure_nmi(of::pmu_irq_or(kbuild_config::PMU_IRQ))
+    }));
+    if cpus > 1 {
+        let mut attempted_unprepared = false;
+        let result = super::shutdown_with(|cpu| {
+            if cpu == 0 {
+                attempted_unprepared = true;
+                Err(KError::BadState)
+            } else {
+                super::stop_cpu(cpu)
+            }
+        });
+        // If shutdown incorrectly succeeded, restore its registration before
+        // reporting failure so later source fixtures do not inherit Stopped.
+        let restore_was_rejected = khal::pmu::restore_overflow_irq().is_err();
+        assert_eq!(result, Err(KError::BadState));
+        assert!(attempted_unprepared);
+        assert!(!super::can_start());
+        assert!(restore_was_rejected);
+    }
+    let mut visited = [false; kbuild_config::NR_CPUS];
+    let mut rejected_start = [false; kbuild_config::NR_CPUS];
+    assert_eq!(
+        super::shutdown_with(|cpu| {
+            visited[cpu] = true;
+            rejected_start[cpu] = !super::can_start()
+                && on_cpu(cpu, || {
+                    !kplat::nm_irq::enable_periodic_nmi(100_000, overflow)
+                });
+            super::stop_cpu(cpu)
+        }),
+        Ok(())
+    );
+    assert!(visited[..cpus].iter().all(|visited| *visited));
+    assert!(visited[cpus..].iter().all(|visited| !visited));
+    assert_eq!(khal::pmu::restore_overflow_irq(), Ok(()));
+    assert!(rejected_start[..cpus].iter().all(|rejected| *rejected));
     unittest::TestResult::Ok
 }
 

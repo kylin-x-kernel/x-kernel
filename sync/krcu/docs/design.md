@@ -382,8 +382,9 @@ task prepares a different wait on its own stack, then prepares its timer and
 publishes readiness. The startup caller still checks RCU's waker publication
 after each wake; activation alone is not readiness.
 
-The synchronous-wait module supports owning replacement and the public unsafe
-`synchronize_rcu` operation. The latter does not withdraw or own user data;
+The synchronous-wait module supports owning replacement, the public scoped
+`with_prepared_grace_period` capability and unsafe `synchronize_rcu` operation.
+The latter does not withdraw or own user data;
 integrations retain responsibility for withdrawal, lifetime and error handling.
 Like Linux's callback/completion wait, it
 prepares the task waiter and callback storage before submitting a marker.
@@ -397,6 +398,17 @@ accepts only a completion token, not a signal or arbitrary wake. An RCU-local Se
 completion observation, including completion before parking or migration. The marker
 never owns a retired payload, and potentially sleeping destruction remains with
 the caller after successful return. This waits for a GP, not callback drainage.
+
+`PreparedGracePeriodWait` is an opaque, single-use capability tied to the
+provider's borrowed task wait and explicitly non-Send/non-Sync. Consumers such
+as containers can prepare before taking writer locks, withdraw under those locks,
+then release them before unsafe `submit_and_wait`. Submission, not preparation,
+starts the relevant post-withdrawal wait. The caller must be the preparing task
+in restored watched, sleepable context with no reader/progress locks held.
+Dropping an unused capability cancels only its private marker; detached payload
+ownership remains the consumer's responsibility and cannot be released early.
+This exposes existing wait machinery without a new callback registry, reader
+counter, or change to grace-period progression.
 
 The public `Rcu<T>` retains one KBox behind
 an atomic pointer; Acquire reads borrow both the container and the current task's

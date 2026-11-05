@@ -46,7 +46,7 @@ pub use drain::drain_callbacks;
 pub use drain::{has_installed_drain_markers_for_tests, with_drain_lock_for_tests};
 pub use owned::Rcu;
 pub use slot::{PreparedRcuTake, RcuSlot, RetiredRcuValue};
-pub use synchronize::synchronize_rcu;
+pub use synchronize::{PreparedGracePeriodWait, synchronize_rcu, with_prepared_grace_period};
 
 struct GracePeriodTask {
     drain: drain::CallbackDrain,

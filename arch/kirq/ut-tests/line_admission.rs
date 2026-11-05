@@ -7,6 +7,7 @@ use alloc::sync::Arc;
 use unittest::{assert, assert_eq, def_test};
 
 use super::{IrqDesc, IrqFlags, IrqLine, IrqState, IrqStateDesc, try_resolve_and_publish_locked};
+use crate::runtime::manager::take_from_line;
 use crate::{IrqDescError, IrqSpec};
 
 #[def_test]
@@ -170,7 +171,7 @@ fn msi_release_rejects_action_dispatch_and_teardown_ownership() {
 
     // Removing the action does not release an already-admitted dispatch.
     line.lock().begin_dispatch();
-    let removed = line.lock().take_regular_action();
+    let removed = take_from_line(&line, None);
     assert!(removed.is_some());
     drop(removed);
     assert!(
@@ -271,7 +272,7 @@ fn gic_spi_cannot_change_flow_while_actions_or_original_claim_remain() {
         assert_eq!(line.lock().desc, original);
         assert_eq!(line.lock().flow, flow);
         if has_action {
-            let removed = line.lock().take_regular_action();
+            let removed = take_from_line(&line, None);
             assert!(removed.is_some());
             drop(removed);
         } else {
@@ -346,7 +347,7 @@ fn flow_reselection_waits_for_actions_and_in_flight_admission() {
                 assert_eq!(entry.generation_for_tests(), generation);
             }
             if has_action {
-                let removed = line.lock().take_regular_action();
+                let removed = take_from_line(&line, None);
                 assert!(removed.is_some());
                 drop(removed);
             } else {
@@ -412,7 +413,7 @@ fn plic_metadata_enrichment_waits_for_actions_and_in_flight_admission() {
                 .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
         );
         if has_action {
-            let removed = line.lock().take_regular_action();
+            let removed = take_from_line(&line, None);
             assert!(removed.is_some());
             drop(removed);
         } else {

@@ -20,6 +20,15 @@ struct Fixture {
     line: Arc<IrqLine>,
 }
 
+fn register_fixture_with_mode(
+    desc: IrqDesc,
+    handler: Handler,
+    mode: super::ManagementMode,
+    configure: impl FnOnce(IrqDesc) -> Result<(), IrqDescError>,
+) -> bool {
+    super::register_nmi_with_flow(desc, handler, mode, |_| crate::IrqFlow::PerCpu, configure)
+}
+
 impl Fixture {
     fn new(virq: usize) -> Self {
         Self::mapped(IrqDesc::from_virq(virq))
@@ -32,7 +41,7 @@ impl Fixture {
     }
 
     fn install(&self, handler: Handler) -> bool {
-        super::register_nmi_with_mode(self.desc, handler, super::ManagementMode::Task, |_| Ok(()))
+        register_fixture_with_mode(self.desc, handler, super::ManagementMode::Task, |_| Ok(()))
     }
 
     fn remove(&self) -> bool {
@@ -40,7 +49,18 @@ impl Fixture {
     }
 
     fn has_owner(&self) -> bool {
-        krcu::with_read(|scope| self.line.nmi_action.read(scope).is_some())
+        self.line.nmi_action.has_owner()
+    }
+
+    fn prepare_local(&self) -> bool {
+        let mut entry = self.line.lock();
+        super::prepare_local_action(&self.line, &mut entry, &LOCAL_NMI_CHIP).is_ok()
+    }
+
+    fn teardown_local(&self) -> bool {
+        // SAFETY: synthetic fixtures have no hardware producer. Callers retain
+        // their CPU pin from preparation through completion of every test claim.
+        unsafe { super::teardown_percpu_nmi(self.desc).is_ok() }
     }
 }
 
@@ -76,7 +96,9 @@ impl NmiShutdownProbe {
     pub fn prepare_local(&self) -> bool {
         let _pin = kspin::NoPreemptIrqSave::new();
         let mut entry = self.0.line.lock();
-        if entry.is_nmi_closing() || entry.prepare_local_nmi(&LOCAL_NMI_CHIP).is_err() {
+        if entry.is_nmi_closing()
+            || super::prepare_local_action(&self.0.line, &mut entry, &LOCAL_NMI_CHIP).is_err()
+        {
             return false;
         }
         let plan = entry.prepare_legacy_enable();
@@ -92,7 +114,13 @@ impl NmiShutdownProbe {
             let plan = entry.prepare_disable_irq_nosync();
             entry.commit_platform_plan(plan);
         }
-        has_teardown_ack && entry.teardown_local_nmi().is_ok()
+        if !has_teardown_ack || entry.teardown_local_nmi().is_err() {
+            return false;
+        }
+        // SAFETY: this pinned CPU has completed synthetic teardown, with no
+        // outstanding test claims; the Line guard serializes owner removal.
+        unsafe { self.0.line.nmi_action.clear_current() };
+        true
     }
 
     /// Starts the real retained-Line shutdown transaction.
@@ -177,7 +205,7 @@ fn shutdown_snapshots_prepared_cpu_and_rejects_incomplete_teardown() {
     {
         let mut entry = fixture.line.lock();
         entry.flow = crate::IrqFlow::PerCpu;
-        assert!(entry.prepare_local_nmi(&LOCAL_NMI_CHIP).is_ok());
+        assert!(super::prepare_local_action(&fixture.line, &mut entry, &LOCAL_NMI_CHIP).is_ok());
     }
     drop(pin);
     let shutdown = super::begin_nmi_shutdown(fixture.desc).unwrap();
@@ -194,8 +222,15 @@ fn shutdown_snapshots_prepared_cpu_and_rejects_incomplete_teardown() {
 }
 
 static HAS_TEARDOWN_FAILURE: AtomicBool = AtomicBool::new(false);
+static HAS_PREPARATION_FAILURE: AtomicBool = AtomicBool::new(false);
 static RETRY_NMI_CHIP: crate::PerCpuNmiChip = crate::PerCpuNmiChip {
-    prepare: |_| Ok(()),
+    prepare: |desc| {
+        if HAS_PREPARATION_FAILURE.load(Ordering::Relaxed) {
+            Err(IrqDescError::ConfigurationFailed { hwirq: desc.hwirq })
+        } else {
+            Ok(())
+        }
+    },
     teardown: |desc| {
         if HAS_TEARDOWN_FAILURE.load(Ordering::Relaxed) {
             Err(IrqDescError::ConfigurationFailed { hwirq: desc.hwirq })
@@ -204,6 +239,83 @@ static RETRY_NMI_CHIP: crate::PerCpuNmiChip = crate::PerCpuNmiChip {
         }
     },
 };
+
+#[def_test(serial)]
+fn failed_initial_preparation_retains_cleanup_without_local_publication() {
+    let fixture = Fixture::new(0x5fbc);
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert!(fixture.install(handler.clone()));
+    {
+        let _pin = kspin::NoPreemptIrqSave::new();
+        HAS_PREPARATION_FAILURE.store(true, Ordering::Relaxed);
+        let prepared = {
+            let mut entry = fixture.line.lock();
+            super::prepare_local_action(&fixture.line, &mut entry, &RETRY_NMI_CHIP)
+        };
+        HAS_PREPARATION_FAILURE.store(false, Ordering::Relaxed);
+        assert!(matches!(
+            prepared,
+            Err(IrqDescError::ConfigurationFailed { .. })
+        ));
+        assert!(fixture.has_owner());
+        assert_eq!(Arc::strong_count(&handler), 2);
+        assert!(fixture.line.lock().has_local_nmi_preparation());
+        assert!(!fixture.line.lock().has_ready_local_nmi_preparation());
+        assert!(
+            fixture
+                .line
+                .nmi_action
+                .with_current(|handler| handler.is_none())
+        );
+        // Force-enable re-resolves the fake backend's Legacy flow and rejects
+        // that mismatch before reaching preparation admission.
+        assert!(matches!(
+            crate::try_enable(fixture.desc, true),
+            Err(IrqDescError::UnsupportedFlow { .. })
+        ));
+        assert!(matches!(
+            crate::try_enable_irq(fixture.desc),
+            Err(IrqDescError::ConfigurationFailed { .. })
+        ));
+        assert!(!fixture.line.lock().has_enabled_local_cpu());
+
+        HAS_TEARDOWN_FAILURE.store(true, Ordering::Relaxed);
+        let torn_down = fixture.teardown_local();
+        HAS_TEARDOWN_FAILURE.store(false, Ordering::Relaxed);
+        assert!(!torn_down);
+        assert!(fixture.line.lock().has_local_nmi_preparation());
+        assert!(
+            fixture
+                .line
+                .nmi_action
+                .with_current(|handler| handler.is_none())
+        );
+        assert!(fixture.teardown_local());
+        assert!(!fixture.line.lock().has_local_nmi_preparation());
+        assert!(
+            fixture
+                .line
+                .nmi_action
+                .with_current(|handler| handler.is_none())
+        );
+        {
+            let mut entry = fixture.line.lock();
+            assert!(
+                super::prepare_local_action(&fixture.line, &mut entry, &RETRY_NMI_CHIP).is_ok()
+            );
+            assert!(entry.has_ready_local_nmi_preparation());
+        }
+        assert!(
+            fixture
+                .line
+                .nmi_action
+                .with_current(|handler| handler.is_some())
+        );
+        assert!(fixture.teardown_local());
+    }
+    assert!(fixture.remove());
+    assert_eq!(Arc::strong_count(&handler), 1);
+}
 
 #[def_test(serial)]
 fn failed_local_teardown_preserves_owner_until_retry_and_retirement() {
@@ -216,7 +328,7 @@ fn failed_local_teardown_preserves_owner_until_retry_and_retirement() {
     {
         let mut entry = fixture.line.lock();
         entry.flow = crate::IrqFlow::PerCpu;
-        assert!(entry.prepare_local_nmi(&RETRY_NMI_CHIP).is_ok());
+        assert!(super::prepare_local_action(&fixture.line, &mut entry, &RETRY_NMI_CHIP).is_ok());
         entry.begin_nmi_close();
     }
     HAS_TEARDOWN_FAILURE.store(true, Ordering::Relaxed);
@@ -226,6 +338,12 @@ fn failed_local_teardown_preserves_owner_until_retry_and_retirement() {
     HAS_TEARDOWN_FAILURE.store(false, Ordering::Relaxed);
     assert!(failed.is_err());
     assert!(fixture.line.lock().has_local_nmi_preparation());
+    assert!(
+        fixture
+            .line
+            .nmi_action
+            .with_current(|handler| handler.is_some())
+    );
     assert!(fixture.has_owner());
     assert_eq!(Arc::strong_count(&handler), 2);
     assert_eq!(fixture.line.lock().action_count(), 1);
@@ -239,6 +357,12 @@ fn failed_local_teardown_preserves_owner_until_retry_and_retirement() {
     let completed = unsafe { super::teardown_percpu_nmi(fixture.desc) };
     assert!(completed.is_ok());
     assert!(!fixture.line.lock().has_local_nmi_preparation());
+    assert!(
+        fixture
+            .line
+            .nmi_action
+            .with_current(|handler| handler.is_none())
+    );
     drop(pin);
     assert!(fixture.remove());
     assert_eq!(Arc::strong_count(&handler), 1);
@@ -254,15 +378,16 @@ fn closing_nmi_requires_local_teardown_before_owner_withdrawal() {
     let fixture = Fixture::new(0x5fb5);
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
     assert!(fixture.install(handler.clone()));
-    fixture.line.lock().flow = crate::IrqFlow::PerCpu;
-    assert!(
-        fixture
-            .line
-            .lock()
-            .prepare_local_nmi(&LOCAL_NMI_CHIP)
-            .is_ok()
-    );
-    assert!(!fixture.remove());
+    let management = fixture.line.management.lock();
+    let pin = kspin::NoPreemptIrqSave::new();
+    assert!(fixture.prepare_local());
+    {
+        let mut entry = fixture.line.lock();
+        entry.begin_nmi_close();
+        // SAFETY: management and Line exclusion serialize withdrawal while
+        // Closing; this synthetic source has no producer or outstanding claim.
+        assert!(unsafe { fixture.line.nmi_action.take() }.is_none());
+    }
     assert_eq!(Arc::strong_count(&handler), 2);
     assert!(matches!(
         super::prepare_percpu_nmi(fixture.desc),
@@ -273,6 +398,8 @@ fn closing_nmi_requires_local_teardown_before_owner_withdrawal() {
     let torn_down = unsafe { super::teardown_percpu_nmi(fixture.desc) };
     assert!(torn_down.is_ok());
     assert!(!fixture.line.lock().has_local_nmi_preparation());
+    drop(pin);
+    drop(management);
     assert!(fixture.remove());
     assert_eq!(Arc::strong_count(&handler), 1);
 }
@@ -318,6 +445,76 @@ fn incomplete_local_nmi_close_retains_owner_and_rejects_reenable() {
 }
 
 #[def_test(serial)]
+fn nmi_enable_requires_current_cpu_preparation() {
+    let fixture = Fixture::new(0x5fbb);
+    assert!(fixture.install(Arc::new(|_| IrqEvent::HANDLED)));
+    {
+        let _pin = kspin::NoPreemptIrqSave::new();
+        for has_prepared in [false, true] {
+            if has_prepared {
+                assert!(fixture.prepare_local());
+                {
+                    let entry = fixture.line.lock();
+                    assert!(entry.has_ready_local_nmi_preparation());
+                    // Inspect plans only: this synthetic source must never
+                    // apply controller writes for its test IRQ number.
+                    assert_eq!(entry.prepare_enable_irq().enable, Some(true));
+                    assert_eq!(entry.prepare_legacy_enable().enable, Some(true));
+                }
+                assert!(
+                    fixture
+                        .line
+                        .nmi_action
+                        .with_current(|handler| handler.is_some())
+                );
+                assert!(fixture.teardown_local());
+            }
+            // Unlike ordinary enable, force-enable re-resolves this synthetic
+            // backend as Legacy and rejects the installed PerCpu flow first.
+            assert!(matches!(
+                crate::try_enable(fixture.desc, true),
+                Err(IrqDescError::UnsupportedFlow { .. })
+            ));
+            assert!(matches!(
+                crate::try_enable_irq(fixture.desc),
+                Err(IrqDescError::ConfigurationFailed { .. })
+            ));
+            assert!(!fixture.line.lock().has_enabled_local_cpu());
+            assert!(
+                fixture
+                    .line
+                    .nmi_action
+                    .with_current(|handler| handler.is_none())
+            );
+        }
+    }
+    assert!(fixture.remove());
+}
+
+#[def_test(serial)]
+fn legacy_nmi_registration_rejects_before_configuration_or_publication() {
+    let fixture = Fixture::new(0x5fba);
+    fixture.line.lock().flow = crate::IrqFlow::Legacy;
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    for mode in [super::ManagementMode::Task, super::ManagementMode::Startup] {
+        let mut has_configured = false;
+        assert!(!super::register_nmi_with_mode(
+            fixture.desc,
+            handler.clone(),
+            mode,
+            |_| {
+                has_configured = true;
+                Ok(())
+            },
+        ));
+        assert!(!has_configured);
+        assert!(!fixture.has_owner());
+        assert_eq!(fixture.line.lock().action_count(), 0);
+        assert_eq!(Arc::strong_count(&handler), 1);
+    }
+}
+
+#[def_test(serial)]
 fn startup_nmi_registration_reuses_prepared_mapping() {
     let desc = IrqDesc::from_hwirq(0x5f7b)
         .with_virq(crate::DYNAMIC_VIRQ_BASE + 0x5f7b)
@@ -326,7 +523,7 @@ fn startup_nmi_registration_reuses_prepared_mapping() {
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
     {
         let _irq = kspin::IrqSave::new();
-        assert!(super::register_nmi_with_mode(
+        assert!(register_fixture_with_mode(
             desc,
             handler.clone(),
             super::ManagementMode::Startup,
@@ -353,7 +550,7 @@ fn task_and_startup_nmi_reject_missing_mapping_before_configuration() {
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
     for mode in [super::ManagementMode::Task, super::ManagementMode::Startup] {
         let mut has_configured = false;
-        assert!(!super::register_nmi_with_mode(
+        assert!(!register_fixture_with_mode(
             desc,
             handler.clone(),
             mode,
@@ -381,7 +578,7 @@ fn failed_nmi_configuration_publishes_no_owner_and_preserves_irq_mask() {
             super::ManagementMode::Task
         };
         let mut observed = None;
-        assert!(!super::register_nmi_with_mode(
+        assert!(!register_fixture_with_mode(
             fixture.desc,
             handler.clone(),
             mode,
@@ -419,7 +616,7 @@ fn nmi_controller_updates_hold_original_line_exclusion() -> unittest::TestResult
     }
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
     let mut has_configured = false;
-    assert!(super::register_nmi_with_mode(
+    assert!(register_fixture_with_mode(
         fixture.desc,
         handler.clone(),
         super::ManagementMode::Task,
@@ -567,7 +764,7 @@ fn nmi_drop_probe_rejects_masked_context_without_reentry() {
 }
 
 #[def_test(serial)]
-fn nmi_removal_drops_client_after_state_unlock_and_grace_period() {
+fn nmi_removal_drops_client_after_state_and_management_unlock() {
     let fixture = Fixture::new(0x5f43);
     let has_unlocked_drop = Arc::new(AtomicBool::new(false));
     assert!(fixture.install(Arc::new(DropProbe(
@@ -596,8 +793,9 @@ fn nmi_dispatch_borrows_one_owner_even_while_writer_locks_are_held() {
     let mut completed = false;
     {
         let _context = kspin::NoPreemptIrqSave::new();
-        let _registry = IRQ_STATE.lock();
-        let _entry = fixture.line.lock();
+        assert!(fixture.prepare_local());
+        let registry = IRQ_STATE.lock();
+        let entry = fixture.line.lock();
         // SAFETY: no hardware source uses this key; claim and completion stay
         // on this pinned stack. Neither reader callback takes a writer lock.
         unsafe {
@@ -611,6 +809,9 @@ fn nmi_dispatch_borrows_one_owner_even_while_writer_locks_are_held() {
                 || completed = krcu::is_reading() && Arc::strong_count(&handler) == 2,
             );
         }
+        drop(entry);
+        drop(registry);
+        assert!(fixture.teardown_local());
     }
     assert!(completed);
     assert_eq!(received.load(Ordering::Relaxed), desc.hwirq);
@@ -619,48 +820,77 @@ fn nmi_dispatch_borrows_one_owner_even_while_writer_locks_are_held() {
 }
 
 #[def_test(serial)]
-fn withdrawn_nmi_owner_survives_the_original_completion_scope() {
+fn local_publication_gates_dispatch_and_retains_owner_through_completion() {
     let fixture = Fixture::new(0x5fa1);
-    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let handler: Handler = Arc::new(move |_| {
+        observed.fetch_add(1, Ordering::Relaxed);
+        IrqEvent::HANDLED
+    });
     assert!(fixture.install(handler.clone()));
     let mut completed = false;
-    let mut borrowed_survived = false;
-    let owner = fixture
-        .line
-        .nmi_action
-        .with_prepared_take(|take| {
-            let mut retired = None;
-            {
-                let _pin = kspin::NoPreemptIrqSave::new();
-                // SAFETY: synthetic strictly nested read/withdraw interleaving;
-                // no waiting occurs until this NMI scope and CPU guard have ended.
-                unsafe {
-                    with_nmi_claim(
-                        |scope| {
-                            let borrowed = fixture.line.nmi_action.read(scope).unwrap();
-                            retired = Some(take.withdraw());
-                            borrowed_survived = fixture.line.nmi_action.read(scope).is_none()
-                                && borrowed.handle(0).handled();
-                        },
-                        || completed = krcu::is_reading() && Arc::strong_count(&handler) == 2,
-                    );
-                }
-            }
-            // SAFETY: restored watched preparing task, no IRQ/reader/Line guard;
-            // the permanent RCU service is live throughout this test.
-            unsafe { retired.unwrap().reclaim() }
-        })
-        .unwrap();
-    assert!(completed);
-    assert!(borrowed_survived);
-    assert!(owner.is_some());
-    assert_eq!(Arc::strong_count(&handler), 2);
     {
-        let mut entry = fixture.line.lock();
-        entry.begin_nmi_close();
-        entry.finish_nmi_retirement();
+        let _management = fixture.line.management.lock();
+        let _pin = kspin::NoPreemptIrqSave::new();
+        assert!(
+            fixture
+                .line
+                .nmi_action
+                .with_current(|handler| handler.is_none())
+        );
+        // SAFETY: synthetic claim and completion remain on this pinned stack;
+        // no hardware source or asynchronous dispatch uses the fixture.
+        unsafe {
+            with_nmi_claim(
+                |scope| super::dispatch_nmi_handler(IrqRef::Virq(0x5fa1), scope),
+                || {},
+            );
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(fixture.prepare_local());
+        {
+            let mut entry = fixture.line.lock();
+            entry.begin_nmi_close();
+            // SAFETY: management and Line exclusion serialize withdrawal while
+            // Closing; this synthetic source has no producer or outstanding claim.
+            assert!(unsafe { fixture.line.nmi_action.take() }.is_none());
+        }
+        // SAFETY: preparation, dispatch and teardown all run on this pinned CPU;
+        // completion is synchronous and does not withdraw local publication.
+        unsafe {
+            with_nmi_claim(
+                |scope| super::dispatch_nmi_handler(IrqRef::Virq(0x5fa1), scope),
+                || {
+                    completed = fixture.has_owner()
+                        && Arc::strong_count(&handler) == 2
+                        && fixture
+                            .line
+                            .nmi_action
+                            .with_current(|handler| handler.is_some());
+                },
+            );
+        }
+        assert!(completed);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(fixture.teardown_local());
+        assert!(
+            fixture
+                .line
+                .nmi_action
+                .with_current(|handler| handler.is_none())
+        );
+        // SAFETY: this stopped synthetic source has no hardware claim; the
+        // scoped software dispatch must see the cleared CPU-local publication.
+        unsafe {
+            with_nmi_claim(
+                |scope| super::dispatch_nmi_handler(IrqRef::Virq(0x5fa1), scope),
+                || {},
+            );
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
-    drop(owner);
+    assert!(fixture.remove());
     assert_eq!(Arc::strong_count(&handler), 1);
     assert!(!fixture.has_owner());
 }
@@ -681,17 +911,33 @@ fn fallback_uses_the_same_owner_and_preserves_logical_irq() {
     let mut completed = false;
     let resolved = {
         let _pin = kspin::NoPreemptIrqSave::new();
+        assert!(fixture.prepare_local());
         {
             let mut entry = fixture.line.lock();
             entry.flow = crate::IrqFlow::PerCpu;
             let plan = entry.prepare_legacy_enable();
             entry.commit_platform_plan(plan);
         }
-        let _irq = crate::context::HardIrqContextGuard::enter();
-        super::super::dispatch::dispatch_claim(
+        let irq = crate::context::HardIrqContextGuard::enter();
+        let resolved = super::super::dispatch::dispatch_claim(
             IrqRef::Domain(crate::domain::TEST_DOMAIN, desc.hwirq),
-            || completed = krcu::is_reading() && Arc::strong_count(&handler) == 2,
-        )
+            || {
+                completed = !karch::local_irq_enabled()
+                    && Arc::strong_count(&handler) == 2
+                    && fixture
+                        .line
+                        .nmi_action
+                        .with_current(|handler| handler.is_some());
+            },
+        );
+        drop(irq);
+        {
+            let mut entry = fixture.line.lock();
+            let plan = entry.prepare_disable_irq_nosync();
+            entry.commit_platform_plan(plan);
+        }
+        assert!(fixture.teardown_local());
+        resolved
     };
     assert!(completed);
     assert_eq!(resolved, desc.logical_irq());
@@ -700,11 +946,6 @@ fn fallback_uses_the_same_owner_and_preserves_logical_irq() {
         desc.logical_irq().unwrap()
     );
     assert_eq!(fixture.line.lock().in_flight(), 0);
-    {
-        let mut entry = fixture.line.lock();
-        let plan = entry.prepare_disable_irq_nosync();
-        entry.commit_platform_plan(plan);
-    }
     assert!(fixture.remove());
     assert_eq!(Arc::strong_count(&handler), 1);
 }
@@ -716,7 +957,7 @@ fn duplicate_and_shared_registration_cannot_replace_nmi_owner() {
     let offered: Handler = Arc::new(|_| IrqEvent::HANDLED);
     assert!(fixture.install(handler.clone()));
     let mut configured = false;
-    assert!(!super::register_nmi_with_mode(
+    assert!(!register_fixture_with_mode(
         fixture.desc,
         offered.clone(),
         super::ManagementMode::Task,
@@ -769,6 +1010,8 @@ fn typed_nmi_domains_do_not_alias_equal_hardware_numbers() {
     })));
     {
         let _pin = kspin::NoPreemptIrqSave::new();
+        assert!(first.prepare_local());
+        assert!(second.prepare_local());
         // SAFETY: synthetic Domain claims on this pinned CPU, no controller
         // operations; each read and completion finishes on this stack.
         unsafe {
@@ -786,6 +1029,8 @@ fn typed_nmi_domains_do_not_alias_equal_hardware_numbers() {
                 || {},
             );
         }
+        assert!(first.teardown_local());
+        assert!(second.teardown_local());
     }
     assert_eq!(first_calls.load(Ordering::Relaxed), 1);
     assert_eq!(second_calls.load(Ordering::Relaxed), 1);

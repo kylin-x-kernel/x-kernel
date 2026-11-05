@@ -9,10 +9,13 @@
 //! [`RcuList::remove_first`] withdraws one entry without waiting for readers;
 //! its embedded callback releases it after a grace period. An iterator is not a
 //! snapshot: concurrent additions/removals may or may not be observed.
+//! [`RcuList::with_prepared_take`] instead prepares a task-bound removal: unlink
+//! under consumer exclusion, wait after unlocking, then recover the owned value.
 //!
 //! Mutation originates in task context. Readers may use task scopes or already
 //! watched interrupt/NMI scopes. Removal requires a ready RCU service and a
-//! payload destructor valid in its nonblocking callback context. `Send + Sync`
+//! payload destructor valid in its nonblocking callback context for asynchronous
+//! removal. Prepared take returns ownership without callback-side destruction. `Send + Sync`
 //! alone does not establish that destructor contract.
 //!
 //! Store `Arc<Action>` when a consumer must retain an action independently of
@@ -53,6 +56,8 @@ use kspin::SpinNoPreempt;
 
 mod node;
 use node::Node;
+mod take;
+pub use take::{PreparedListTake, RetiredListEntry};
 
 /// A uniquely owned, unpublished entry. Preparation allocates once.
 ///
@@ -71,6 +76,12 @@ use node::Node;
 pub struct Entry<T: Send + Sync + 'static>(KBox<Node<T>>);
 
 impl<T: Send + Sync + 'static> Entry<T> {
+    /// Mutably accesses the unpublished, uniquely owned payload. Publication
+    /// consumes this entry before any reader can observe it.
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.0.value
+    }
+
     /// Prepares unpublished storage with KERNEL permissions before writer locking.
     ///
     /// Requires the sleepable, reclaim-safe context of [`KBox::new`]. Failure

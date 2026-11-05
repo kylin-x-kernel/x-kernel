@@ -39,6 +39,9 @@ pub(super) unsafe fn with_nmi_claim(
     dispatch: impl for<'scope> FnOnce(&'scope krcu::ReadScope<'_>),
     complete: impl FnOnce(),
 ) {
+    // Local action revocation cannot overtake handler return or the original
+    // completion, including when a software adapter invokes this entry.
+    let _pin = kspin::NoPreemptIrqSave::new();
     // SAFETY: the caller's claim exclusion covers dispatch and completion.
     unsafe {
         with_nmi_context(|| {

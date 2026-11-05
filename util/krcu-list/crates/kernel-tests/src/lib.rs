@@ -19,4 +19,6 @@ unittest::path_mod_test!(contexts, "../ut-tests/contexts.rs");
 #[cfg(target_os = "none")]
 unittest::path_mod_test!(#[cfg(feature = "smp")] mod concurrency, "../ut-tests/concurrency.rs");
 #[cfg(target_os = "none")]
+unittest::path_mod_test!(#[cfg(feature = "smp")] mod task_retirement, "../ut-tests/task_retirement.rs");
+#[cfg(target_os = "none")]
 unittest::path_mod_test!(mod stress, "../ut-tests/stress.rs");

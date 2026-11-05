@@ -284,8 +284,9 @@ owning replacement destroys retired payloads in its calling task, not softirq.
 
 ## Consumer Ownership
 
-The public unsafe `synchronize_rcu` and owning replacement share private wait
-machinery. Standalone callers exclude unsupported reader contexts, withdraw all
+The public unsafe `synchronize_rcu`, scoped `with_prepared_grace_period`
+capability and owning replacement share the same wait machinery.
+Standalone callers exclude unsupported reader contexts, withdraw all
 publication routes and retain the old owner on preparation failure. Task wait
 preparation and callback storage setup precede callback admission; afterward the wait cannot return
 an interrupt error or treat a wake as GP completion. Callback and waiter own
@@ -294,6 +295,16 @@ completion and queue storage are released in softirq, never the retired object.
 The initialized service has a permanent driver claim and fixed participants;
 submission from a running CPU cannot reject a prepared request. Violating that
 boot invariant is fatal, not a recoverable post-withdrawal failure.
+
+The public prepared capability cannot escape its provider scope or transfer
+between tasks. An explicit task-local marker preserves that restriction even
+if the borrowed wait provider's auto-trait bounds change. Preparation validates
+context and service readiness but does not certify later execution context or
+start a grace period. Unsafe `submit_and_wait` requires the same preparing task
+after restoring watched, sleepable execution and releasing reader/progress
+locks. All relevant publication must be withdrawn before submission. Cancellation
+releases marker resources only; a container abandoning detached ownership must
+retain or leak it, never infer that cancellation permits destruction.
 
 The owning container exposes scoped task/interrupt reads and task-context replacement.
 Its safe `read` requires the host-issued `ReadScope` and bounds its result by

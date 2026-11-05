@@ -105,3 +105,55 @@ fn rejected_context_does_not_invoke_predicate_or_unlink() {
         [3]
     );
 }
+
+#[def_test]
+fn prepared_take_cancels_or_returns_task_owned_payload() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let list = RcuList::new();
+    // SAFETY: initialized task, with entry allocation outside writer exclusion.
+    unsafe { list.push_back(Entry::new_nowait(Probe(drops.clone())).unwrap()) };
+    assert!(list.with_prepared_take(|prepared| drop(prepared)).is_ok());
+    assert_eq!(krcu::with_read(|scope| list.iter(scope).count()), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    let unmatched = list
+        .with_prepared_take(|prepared| {
+            // SAFETY: same task, no reentrant writer or blocking predicate.
+            let retired = unsafe { prepared.withdraw_first(|_| false) };
+            let has_match = retired.is_some();
+            // SAFETY: unchanged watched sleepable task, with no progress lock.
+            (has_match, unsafe { retired.reclaim() })
+        })
+        .unwrap();
+    assert!(!unmatched.0 && unmatched.1.is_none());
+    let exclusion = kspin::SpinNoIrq::new(());
+    let owner = list
+        .with_prepared_take(|prepared| {
+            let retired = {
+                let _guard = exclusion.lock();
+                // SAFETY: task-origin transaction; predicate is nonblocking and
+                // does not reenter the list. The guard is not an RCU/progress lock.
+                unsafe { prepared.withdraw_first(|_| true) }
+            };
+            // SAFETY: preparing task restored sleepable watched context; no locks
+            // needed by readers or the permanent service remain held.
+            unsafe { retired.reclaim() }
+        })
+        .unwrap();
+    assert!(owner.is_some());
+    assert_eq!(krcu::with_read(|scope| list.iter(scope).count()), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    drop(owner);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[def_test]
+fn prepared_take_rejects_atomic_context_before_body() {
+    let list = RcuList::<usize>::new();
+    let mut has_called = false;
+    let result = {
+        let _irq = kspin::IrqSave::new();
+        list.with_prepared_take(|_| has_called = true)
+    };
+    assert_eq!(result, Err(kerrno::KError::InvalidInput));
+    assert!(!has_called);
+}

@@ -188,6 +188,7 @@ fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
         | kirq::IrqDescError::VirqMappingConflict { .. }
         | kirq::IrqDescError::UnknownDomain { .. }
         | kirq::IrqDescError::UnknownIrq
+        | kirq::IrqDescError::RetirementUnavailable
         | kirq::IrqDescError::TeardownInProgress { .. }
         | kirq::IrqDescError::NoIrqAction { .. }
         | kirq::IrqDescError::InvalidContext { .. } => ResError::InvalidResource,

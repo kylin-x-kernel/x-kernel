@@ -39,6 +39,45 @@ fn queue() -> SpinNoIrq<ReplayQueue> {
     SpinNoIrq::new(ReplayQueue { pending: LinkedList::new(ReplayAdapter::new()), notify: None })
 }
 
+#[def_test(serial)]
+fn serving_softirq_replay_scopes_action_reads_and_drains_admission() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(0x5f4e));
+    entry.flow = IrqFlow::Fasteoi(&CHIP);
+    assert!(entry.install_regular_action(IrqAction::regular(Arc::new(move |_| {
+        assert!(crate::context::is_softirq_context());
+        assert!(krcu::is_reading());
+        assert!(!karch::local_irq_enabled());
+        observed.fetch_add(1, Ordering::Relaxed);
+        IrqEvent::HANDLED
+    }))));
+    let plan = entry.prepare_auto_enable();
+    entry.commit_platform_plan(plan);
+    entry.is_pending = true;
+    let line = Arc::new(IrqLine::new(entry));
+    let queue = queue();
+    schedule_on(&queue, &line);
+    let completion = line.lock().in_flight_zero_completion();
+    assert!(!completion.is_completed());
+    assert!(!krcu::is_reading());
+    {
+        let _pin = kspin::NoPreemptIrqSave::new();
+        let _softirq = crate::context::SoftIrqContextGuard::enter();
+        super::run_on(&queue);
+        assert!(crate::context::is_softirq_context());
+        assert!(!krcu::is_reading());
+        assert_eq!(line.lock().in_flight(), 0);
+        assert!(completion.is_completed());
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(!crate::context::is_softirq_context());
+    assert!(!krcu::is_reading());
+    assert!(queue.lock().pending.is_empty());
+    assert!(!line.lock().is_running);
+    assert!(!line.lock().is_replaying);
+}
+
 static HARDWARE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 static HARDWARE_ACCEPTS: AtomicBool = AtomicBool::new(true);
 static LEVEL_CHIP: FasteoiChip = FasteoiChip {
@@ -273,15 +312,16 @@ fn queued_replay_does_not_snapshot_a_withdrawn_action() {
     let queue = queue();
     schedule_on(&queue, &line);
     let completion = line.lock().in_flight_zero_completion();
-    let action = {
+    line.lock().begin_teardown();
+    // No Line guard spans preparation or GP reclamation. This private queue
+    // retains admission but has not borrowed an action, so it cannot block GP.
+    let action = super::super::manager::take_from_line(&line, None);
+    {
         let mut entry = line.lock();
-        entry.begin_teardown();
-        let action = entry.take_regular_action();
         if let Some(plan) = entry.prepare_disable_if_no_actions() {
             entry.commit_platform_plan(plan);
         }
-        action
-    };
+    }
     assert!(action.is_some());
     assert!(!completion.is_completed());
     let queued = queue.lock().pending.pop_front().unwrap();
@@ -289,6 +329,9 @@ fn queued_replay_does_not_snapshot_a_withdrawn_action() {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert!(completion.is_completed());
     assert!(!line.lock().is_running);
+    line.lock().finish_teardown();
+    // Keep task-owned handler destruction after the queued admission drains.
+    drop(action);
 }
 
 #[def_test(serial)]

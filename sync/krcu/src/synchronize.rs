@@ -6,6 +6,7 @@
 
 use alloc::sync::Arc;
 use core::{
+    marker::PhantomData,
     ptr::NonNull,
     sync::atomic::{Ordering, fence},
 };
@@ -27,15 +28,50 @@ struct GracePeriodCompletion {
 // The callback recovers the Arc allocation directly from its node pointer.
 const _: () = assert!(core::mem::offset_of!(GracePeriodCompletion, node) == 0);
 
-/// Prepared before withdrawal so no recoverable setup failure can abandon it.
-pub(super) struct PreparedGracePeriodWait<'wait> {
+/// Single-use grace-period wait bound to its preparing task and provider scope.
+///
+/// Created only by [`with_prepared_grace_period`]. Preparation does not start a
+/// grace period. Dropping this capability cancels its private marker without
+/// submitting work, waiting, or reclaiming any consumer-owned data.
+///
+/// The capability cannot move to another task:
+///
+/// ```compile_fail
+/// fn require_send<T: Send>() {}
+/// require_send::<krcu::PreparedGracePeriodWait<'static>>();
+/// ```
+#[must_use = "submit after withdrawal, or drop to cancel the unused wait marker"]
+pub struct PreparedGracePeriodWait<'wait> {
     callback: PreparedCallback,
     completion: Arc<GracePeriodCompletion>,
     wait: &'wait mut dyn PreparedCompletionWait,
+    task_local: PhantomData<*mut ()>,
 }
 
-/// Invokes the update only after task waiting and callback storage are prepared.
-pub(super) fn with_prepared_grace_period<R>(
+/// Prepares task waiting and callback storage before invoking `body_fn` once.
+///
+/// Preparation requires sleepable task context outside read scopes and atomic
+/// exclusion. The body stays on that task; it may temporarily acquire writer
+/// locks to withdraw publication, but must restore watched, sleepable context
+/// before submitting the wait. This capability owns no retired data and does
+/// not serialize writers. Consumers retain detached storage until successful
+/// submission and completion, or leak it on abandonment.
+///
+/// Callback storage follows the kernel's fatal-OOM allocation policy. No marker
+/// is submitted until [`PreparedGracePeriodWait::submit_and_wait`] is called.
+///
+/// # Errors
+/// Returns `InvalidInput` for invalid task context or `BadState` before service
+/// readiness, without invoking the body. No recoverable preparation error is
+/// returned after the body has run.
+///
+/// The capability cannot escape the provider's stack scope:
+///
+/// ```compile_fail
+/// let escaped = krcu::with_prepared_grace_period(|prepared| prepared);
+/// drop(escaped);
+/// ```
+pub fn with_prepared_grace_period<R>(
     body_fn: impl FnOnce(PreparedGracePeriodWait<'_>) -> R,
 ) -> KResult<R> {
     with_prepared_wait(|wait| PreparedGracePeriodWait::prepare(wait).map(body_fn))?
@@ -65,10 +101,29 @@ impl<'wait> PreparedGracePeriodWait<'wait> {
             callback,
             completion,
             wait,
+            task_local: PhantomData,
         })
     }
 
-    pub(super) fn submit_and_wait(self) {
+    /// Submits a fresh marker and waits noninterruptibly for its grace period.
+    ///
+    /// Returns with completion ordering established, including when completion
+    /// precedes parking or this task migrates. This is not a callback barrier;
+    /// neither the marker nor this capability destroys consumer payloads.
+    ///
+    /// # Safety
+    /// Call on the preparing task in restored watched, sleepable context: no
+    /// read scope, IRQ/preemption exclusion, or lock needed by readers, scheduler
+    /// or RCU progress may remain held. Withdraw every publication relevant to
+    /// reclamation before submission, and retain the old storage until return.
+    /// All protected accesses must use this kernel's RCU participation protocol.
+    /// Keep the permanent service and its participants available throughout.
+    /// Abandonment or a nonreturning wait never authorizes reclamation.
+    ///
+    /// # Panics
+    /// Panics if submission violates the prepared context/service admission
+    /// invariant. Consumers must not free withdrawn storage on that failure.
+    pub unsafe fn submit_and_wait(self) {
         // SAFETY: preparation verified the permanent boot service. Every
         // executing CPU belongs to its fixed participant set. This fresh node
         // has one queue owner; its raw Arc survives through the nonblocking
@@ -144,7 +199,11 @@ unsafe fn complete_grace_period(node: *mut CallbackNode) {
 /// service. An error does not authorize reclamation. The boot-owned service
 /// and participating CPUs must remain available throughout the wait.
 pub unsafe fn synchronize_rcu() -> KResult<()> {
-    with_prepared_grace_period(|wait| wait.submit_and_wait())
+    with_prepared_grace_period(|wait| {
+        // SAFETY: the caller guarantees watched task context and publication
+        // withdrawal; preparation introduces no intervening locks or readers.
+        unsafe { wait.submit_and_wait() }
+    })
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/rcu_synchronize.rs");

@@ -13,11 +13,20 @@ use alloc::sync::Arc;
 use kiface_task_api::TaskBlockingContextIf;
 use krcu_core::RcuContextIf;
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
+#[cfg(unittest)]
+pub(super) use tests_action_helpers::{
+    register_locked, register_shared_locked, take_from_line, take_from_state, withdraw_on_line,
+};
 
-use super::rcu::{with_nmi_claim, with_nmi_context};
+use super::{
+    action::PreparedAction,
+    action_set::ActionRecord,
+    rcu::{with_nmi_claim, with_nmi_context},
+};
+#[cfg(unittest)]
+use crate::action::IrqAction;
 use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqSpec, Virq,
-    action::IrqAction,
     context::HardIrqContextGuard,
     dispatch::dispatch_claim,
     lifecycle::IrqLifecycleGuard,
@@ -364,7 +373,7 @@ fn prepare_enable_plan(
     force_platform_enable: bool,
 ) -> Result<IrqPlatformPlan, IrqDescError> {
     reject_teardown(entry, virq, "enable IRQ")?;
-    if entry.has_failed_local_nmi_preparation() {
+    if entry.has_nmi_action() && !entry.has_ready_local_nmi_preparation() {
         return Err(IrqDescError::ConfigurationFailed {
             hwirq: entry.desc.hwirq,
         });
@@ -673,6 +682,8 @@ pub fn try_register_disabled(
 ///
 /// Requires sleepable task context even without contention. Management exclusion
 /// serializes with registration/removal on this Line and may block or migrate.
+/// Prepares NOWAIT action storage before lookup and short locks. Allocation
+/// failure returns [`IrqDescError::NoMemory`] without publishing an action.
 /// Requires a descriptor prepared through [`try_map`] or MSI allocation.
 /// A missing descriptor returns [`IrqDescError::UnknownIrq`] without creating
 /// a Line, configuring hardware or retaining a handler in the registry.
@@ -702,6 +713,8 @@ pub fn try_register_with_options(
 /// occupied Line. IRQs may be masked, but interrupt/BH context is rejected.
 /// Call before source activation; this is not an atomic-context fallback.
 /// Requires a descriptor already prepared through [`try_map`] or MSI allocation.
+/// NOWAIT action allocation can return [`IrqDescError::NoMemory`] before lookup;
+/// publication itself does not require a running RCU grace-period service.
 /// Missing descriptors return [`IrqDescError::UnknownIrq`] without creating a
 /// Line, configuring hardware or retaining the offered handler.
 /// Configuration errors have the same retained-metadata and no-new-handler
@@ -722,12 +735,17 @@ fn register_with_mode(
 ) -> Result<bool, IrqDescError> {
     // Keep a caller-owned reference until the scoped mutex has been released,
     // including rejection and installation failure.
+    validate_management(mode)?;
+    let mut prepared = PreparedAction::regular(handler.clone())?;
     let result = with_registration_line_checked(
         spec,
         mode,
         |entry| Ok(entry.can_install_regular_action()),
-        |virq, _, entry| register_locked(virq, entry, &handler, options, apply_platform_plan),
+        |virq, _, entry| {
+            register_prepared_locked(virq, entry, &mut prepared, options, apply_platform_plan)
+        },
     );
+    drop(prepared);
     drop(handler);
     if matches!(&result, Ok(None)) && !crate::context::is_in_nmi() {
         warn!("register handler for IRQ {spec:?} failed");
@@ -738,10 +756,10 @@ fn register_with_mode(
 // The caller retains Line exclusion from resolution through this update.
 // Management admission pins membership after registry exclusion is released.
 // The caller retains handler ownership until management exclusion is released.
-fn register_locked(
+fn register_prepared_locked(
     virq: Virq,
     entry: &mut IrqStateDesc,
-    handler: &Handler,
+    prepared: &mut PreparedAction,
     options: IrqRegisterOptions,
     mut apply_plan: impl FnMut(IrqPlatformPlan) -> Result<(), IrqDescError>,
 ) -> Result<bool, IrqDescError> {
@@ -750,7 +768,7 @@ fn register_locked(
         return Ok(false);
     }
     let needs_restore = configure_registration(entry, &mut apply_plan)?;
-    let installed = entry.install_regular_action(IrqAction::regular(handler.clone()));
+    let installed = entry.publish_regular_action(prepared);
     debug_assert!(installed, "duplicate regular action was checked above");
     let mut plan = if options.should_auto_enable() {
         entry.prepare_auto_enable()
@@ -815,9 +833,11 @@ pub fn register_shared(spec: impl Into<IrqSpec>, handler: Handler) -> Option<Irq
 /// Try to register one shared IRQ action with default auto-enable behavior.
 ///
 /// Requires sleepable task context; waits for this Line's management mutex.
+/// NOWAIT action allocation precedes lookup and short locks; failure returns
+/// [`IrqDescError::NoMemory`] without changing membership or delivery state.
 /// Requires an already prepared descriptor; absence returns
 /// [`IrqDescError::UnknownIrq`] without creating a Line or retaining the handler.
-/// Incompatible actions, exhausted capacity or unavailable action tokens return
+/// Incompatible actions or exhausted publication sequences return
 /// None before descriptor metadata or mappings are changed.
 /// Configuration errors preserve existing shared owners and publish no new
 /// token. Resolved metadata can remain and hardware may be masked; a successful
@@ -827,12 +847,17 @@ pub fn try_register_shared(
     handler: Handler,
 ) -> Result<Option<IrqActionToken>, IrqDescError> {
     let spec = spec.into();
+    validate_management(ManagementMode::Task)?;
+    let mut prepared = PreparedAction::shared(handler.clone())?;
     let result = with_registration_line_checked(
         spec,
         ManagementMode::Task,
         |entry| Ok(entry.can_install_shared_action()),
-        |virq, _, entry| register_shared_locked(virq, entry, &handler, apply_platform_plan),
+        |virq, _, entry| {
+            register_shared_prepared_locked(virq, entry, &mut prepared, apply_platform_plan)
+        },
     );
+    drop(prepared);
     drop(handler);
     if matches!(&result, Ok(None)) && !crate::context::is_in_nmi() {
         warn!("register shared handler for IRQ {spec:?} failed");
@@ -840,10 +865,10 @@ pub fn try_register_shared(
     result.map(Option::flatten)
 }
 
-fn register_shared_locked(
+fn register_shared_prepared_locked(
     virq: Virq,
     entry: &mut IrqStateDesc,
-    handler: &Handler,
+    prepared: &mut PreparedAction,
     mut apply_plan: impl FnMut(IrqPlatformPlan) -> Result<(), IrqDescError>,
 ) -> Result<Option<IrqActionToken>, IrqDescError> {
     if !entry.can_install_shared_action() {
@@ -852,7 +877,7 @@ fn register_shared_locked(
     }
     let needs_restore = configure_registration(entry, &mut apply_plan)?;
     let was_first_action = !entry.has_actions();
-    let Some(token) = entry.install_shared_action(handler.clone()) else {
+    let Some(token) = entry.publish_shared_action(prepared) else {
         warn!("register shared handler for IRQ {virq} failed");
         return Ok(None);
     };
@@ -971,7 +996,7 @@ fn finish_management_on_line(
 /// Preflight and resolution run under management, registry and Line
 /// exclusion. Neither callback may reacquire outer locks, allocate or wait.
 /// False rejects without resolution or publication. The body borrows the same
-/// retained Line and locked state after registry release; its RCU slot can be
+/// retained Line and locked state after registry release; its NMI owner can be
 /// published without creating a second handler owner or another writer lock.
 /// Identity retries happen before publication. Missing descriptors return
 /// UnknownIrq in both modes. None means startup contention, teardown or preflight
@@ -1156,7 +1181,10 @@ pub fn free_irq(spec: impl Into<IrqSpec>) -> Option<Handler> {
 /// Callers must not hold locks or resources that the IRQ handler may acquire
 /// while waiting, otherwise the handler can block behind its own teardown.
 ///
-/// Context is validated before action removal; subsequent waiting is infallible.
+/// Context and grace-period wait preparation are checked before action removal.
+/// Unavailable RCU retirement preparation returns [`IrqDescError::RetirementUnavailable`]
+/// with the action intact. After unlinking, the task waits for both RCU readers
+/// and original controller/replay completion before returning the handler.
 pub fn try_free_irq(spec: impl Into<IrqSpec>) -> Result<Option<Handler>, IrqDescError> {
     try_free_irq_inner(spec.into(), None)
 }
@@ -1197,7 +1225,10 @@ pub fn free_irq_action(spec: impl Into<IrqSpec>, token: IrqActionToken) -> Optio
 /// Callers must not hold locks or resources that the IRQ handler may acquire
 /// while waiting, otherwise the handler can block behind its own teardown.
 ///
-/// Context is validated before action removal; subsequent waiting is infallible.
+/// Context and grace-period wait preparation are checked before action removal.
+/// Unavailable RCU retirement preparation returns [`IrqDescError::RetirementUnavailable`]
+/// with the action intact. After unlinking, the task waits for both RCU readers
+/// and original controller/replay completion before returning the handler.
 pub fn try_free_irq_action(
     spec: impl Into<IrqSpec>,
     token: IrqActionToken,
@@ -1211,12 +1242,26 @@ fn try_free_irq_inner(
 ) -> Result<Option<Handler>, IrqDescError> {
     can_wait_for_irq_sync("free_irq")?;
     with_existing_line(spec, ManagementMode::Task, |virq, line| {
-        let removed_action = withdraw_on_line(virq, line, token, apply_platform_delivery);
-        let Some(removed_action) = removed_action else {
-            return Ok(None);
-        };
-        IrqDrain::new(virq, line).wait();
-        Ok(Some(removed_action.into_primary()))
+        let actions = line.lock().action_list();
+        actions
+            .with_prepared_take(|prepared| {
+                let retired = withdraw_prepared_on_line(
+                    virq,
+                    line,
+                    token,
+                    prepared,
+                    apply_platform_delivery,
+                )?;
+                // SAFETY: the preparing task has released Line/list writer locks;
+                // handlers never acquire management, and permanent RCU services are
+                // available. Withdrawal precedes this grace-period submission.
+                let removed = unsafe { retired.reclaim() }?;
+                // Reader quiescence does not cover original controller completion
+                // or queued replay. Retain the recovered owner through their drain.
+                IrqDrain::new(virq, line).wait();
+                Some(removed.into_action().into_primary())
+            })
+            .map_err(|_| IrqDescError::RetirementUnavailable)
     })
 }
 
@@ -1226,33 +1271,29 @@ fn try_free_irq_inner(
 // No global control exclusion is needed for ordinary action withdrawal.
 // Return the removed owner: neither this short transaction nor its caller's
 // management-locked body may run the client's final destructor.
-fn withdraw_on_line(
+fn withdraw_prepared_on_line<'wait>(
     virq: Virq,
     line: &Arc<IrqLine>,
     token: Option<IrqActionToken>,
+    prepared: krcu_list::PreparedListTake<'_, 'wait, ActionRecord>,
     apply_plan: impl FnOnce(IrqPlatformPlan),
-) -> Option<IrqAction> {
+) -> Option<krcu_list::RetiredListEntry<'wait, ActionRecord>> {
     let mut entry = line.lock();
     if entry.has_enabled_local_cpu() {
         warn!("free_irq for IRQ {virq} rejected: disable the local source on every CPU first");
         return None;
     }
-    let removed_action = if let Some(token) = token {
-        entry.take_action(token)
-    } else {
-        if entry.action_count() > 1 {
-            warn!("free_irq for IRQ {virq} requires an action token");
-            return None;
-        }
-        let removed_action = entry.take_regular_action();
-        if removed_action.is_none() && entry.action_count() == 1 {
-            warn!(
-                "free_irq for IRQ {virq} rejected: action belongs to shared or NMI registration; \
-                 use its owning removal API"
-            );
-        }
-        removed_action
-    };
+    if token.is_none() && entry.action_count() > 1 {
+        warn!("free_irq for IRQ {virq} requires an action token");
+        return None;
+    }
+    let removed_action = entry.withdraw_action(prepared, token);
+    if removed_action.is_none() && token.is_none() && entry.action_count() == 1 {
+        warn!(
+            "free_irq for IRQ {virq} rejected: action belongs to shared or NMI registration; use \
+             its owning removal API"
+        );
+    }
     // Absence is not a disable request: a legacy-enabled empty Line must keep
     // its control state when no action matched the caller's removal key.
     let removed_action = removed_action?;
@@ -1267,14 +1308,16 @@ fn withdraw_on_line(
     Some(removed_action)
 }
 
+unittest::path_mod_test!(tests_action_helpers, "../../ut-tests/action_helpers.rs");
+
 /// Handles a pseudo-NMI after an architecture trap adapter has disabled
 /// preemption.
 ///
 /// Invoked from the exception entry layer when `dispatch_exception` detects
 /// that normal IRQs were masked (PMR <= NMI_ONLY) at the moment the interrupt
 /// fired — a pseudo-NMI preempting a critical section. Dispatch borrows the
-/// typed Domain index and Line-owned action inside one RCU scope, without
-/// acquiring registry, Line or management locks.
+/// typed Domain index inside one RCU scope and the locally published action,
+/// without acquiring registry, Line or management locks.
 pub fn handle_nmi(vector: usize) -> bool {
     handle_nmi_with(vector, platform_dispatch_nmi)
 }

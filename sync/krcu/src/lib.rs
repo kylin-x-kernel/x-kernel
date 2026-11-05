@@ -190,8 +190,9 @@ pub use context::{enter_user_quiescent, exit_user_quiescent};
 pub use krcu_core::CallbackNode;
 pub use read::{ReadScope, is_reading, with_interrupt_read, with_read};
 pub use service::{
-    PreparedCallback, PreparedRcuTake, Rcu, RcuSlot, RetiredRcuValue, drain_callbacks,
-    init_service, preflight_callback_submission, synchronize_rcu,
+    PreparedCallback, PreparedGracePeriodWait, PreparedRcuTake, Rcu, RcuSlot, RetiredRcuValue,
+    drain_callbacks, init_service, preflight_callback_submission, synchronize_rcu,
+    with_prepared_grace_period,
 };
 #[cfg(unittest)]
 #[doc(hidden)]
