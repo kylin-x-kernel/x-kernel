@@ -2,11 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::{fmt, fmt::Debug};
 
 use bytemuck::{Pod, Zeroable, bytes_of, bytes_of_mut};
-use kalloc_types::KBox;
+use kalloc_types::{AllocFlags, KBox};
 use memoffset::offset_of;
 use subtle::ConstantTimeEq;
 use tee_crypto::{
@@ -18,15 +18,15 @@ use tee_raw_sys::{TEE_ALG_AES_ECB_NOPAD, TEE_ALG_HMAC_SHA256};
 use tee_raw_sys::{
     TEE_ALG_AES_GCM, TEE_ALG_SHA256, TEE_ALG_SM3, TEE_ALG_SM4_GCM, TEE_ERROR_BAD_PARAMETERS,
     TEE_ERROR_CORRUPT_OBJECT, TEE_ERROR_GENERIC, TEE_ERROR_MAC_INVALID, TEE_ERROR_NOT_IMPLEMENTED,
-    TEE_ERROR_NOT_SUPPORTED, TEE_ERROR_SECURITY, TEE_ERROR_SHORT_BUFFER, TEE_OperationMode,
-    TEE_UUID,
+    TEE_ERROR_NOT_SUPPORTED, TEE_ERROR_OUT_OF_MEMORY, TEE_ERROR_SECURITY, TEE_ERROR_SHORT_BUFFER,
+    TEE_OperationMode, TEE_UUID,
 };
 
 use super::utee_defines::TEE_SM3_HASH_SIZE;
 #[cfg(not(feature = "tee_ss_smx"))]
 use super::utee_defines::{TEE_AES_BLOCK_SIZE, TEE_SHA256_HASH_SIZE};
 use crate::tee::{
-    TeeResult,
+    TeeError, TeeResult,
     rng_software::crypto_rng_read,
     tee_fs_key_manager::{TEE_FS_KM_FEK_SIZE, tee_fs_fek_crypt},
     tee_ree_fs::TeeFsHtreeStorageOps,
@@ -53,8 +53,17 @@ cfg_if::cfg_if! {
 pub(super) const HTREE_NODE_COMMITTED_BLOCK: u32 = 1 << 0; // 即 0x1
 
 #[inline]
-fn block_num_to_node_id(num: usize) -> usize {
-    num + 1
+fn block_num_to_node_id(num: usize) -> TeeResult<usize> {
+    let node_id = num.checked_add(1).ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+    validate_node_id(node_id)?;
+    Ok(node_id)
+}
+
+fn validate_node_id(node_id: usize) -> TeeResult<u32> {
+    if node_id == 0 || node_id == usize::MAX {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    u32::try_from(node_id).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
 }
 
 #[allow(dead_code)]
@@ -169,10 +178,6 @@ pub(super) struct HtreeNode {
     pub block_updated: bool,
     pub node: TeeFsHtreeNodeImage,
     pub parent_id: Option<usize>,
-    // left/right 使用 Box，因为：
-    // 1. 子节点由父节点拥有
-    // 2. 释放时通过 Box 自动管理
-    // 3. 符合 Rust 的所有权模型
     pub left: Subtree,
     pub right: Subtree,
 }
@@ -186,14 +191,18 @@ impl HtreeNode {
         }
     }
 
-    pub(super) fn set_left(current_node: &mut HtreeNode, mut child: HtreeNode) {
+    /// Attaches a prepared child without allocation; the destination must be empty.
+    pub(super) fn set_left(current_node: &mut HtreeNode, mut child: KBox<HtreeNode>) {
+        assert!(current_node.left.is_none());
         child.parent_id = Some(current_node.id);
-        current_node.left = Some(Box::new(child));
+        current_node.left = Some(child);
     }
 
-    pub(super) fn set_right(current_node: &mut HtreeNode, mut child: HtreeNode) {
+    /// Attaches a prepared child without allocation; the destination must be empty.
+    pub(super) fn set_right(current_node: &mut HtreeNode, mut child: KBox<HtreeNode>) {
+        assert!(current_node.right.is_none());
         child.parent_id = Some(current_node.id);
-        current_node.right = Some(Box::new(child));
+        current_node.right = Some(child);
     }
 
     /// 根据索引获取左右子树的引用。
@@ -221,7 +230,7 @@ impl HtreeNode {
     }
 }
 
-pub(super) type Subtree = Option<Box<HtreeNode>>;
+pub(super) type Subtree = Option<KBox<HtreeNode>>;
 
 pub(super) trait SubtreeExt {
     fn get_mut(&mut self) -> Option<&mut HtreeNode>;
@@ -1255,16 +1264,9 @@ pub(super) fn node_id_to_level(node_id: usize) -> usize {
 pub(super) fn find_closest_node(ht: &mut TeeFsHtree, node_id: usize) -> &mut HtreeNode {
     let target_level = node_id_to_level(node_id);
 
-    // 记录访问路径（索引序列），避免在循环中的借用冲突
-    let mut path = Vec::new();
-    for n in 1..target_level {
-        let bit_idx = target_level - n - 1;
-        path.push((node_id >> bit_idx) & 1);
-    }
-
-    // 通过路径逐步访问节点，每次只借用一次
     let mut current = &mut ht.root;
-    for &index in &path {
+    for bit_index in (0..target_level - 1).rev() {
+        let index = (node_id >> bit_index) & 1;
         // 检查子节点是否存在
         let child_exists = {
             let child_opt = current.get_child_by_index(index);
@@ -1301,52 +1303,89 @@ pub(super) fn find_node(ht: &mut TeeFsHtree, node_id: usize) -> Option<&mut Htre
     if node.id == node_id { Some(node) } else { None }
 }
 
-/// ensure the node exists, if not create it
-/// internal function, not return reference, to avoid borrow conflicts
-///
-/// # Arguments
-/// * `ht` - the tree
-/// * `create` - if create the node
-/// * `node_id` - the node id
-/// # Returns
-/// * `TeeResult` - the result of the operation
-fn ensure_node_exists(ht: &mut TeeFsHtree, create: bool, node_id: usize) -> TeeResult {
-    let current_node = find_closest_node(ht, node_id);
-    let current_id = current_node.id;
+/// Detached nodes use their right links for staging, never for live traversal.
+/// Cleanup detaches each link before dropping so cancellation has bounded depth.
+#[derive(Default)]
+struct PreparedNodes {
+    first: Subtree,
+}
 
-    if current_id == node_id {
-        return Ok(()); // node exists
+impl PreparedNodes {
+    fn pop(&mut self) -> Subtree {
+        let mut node = self.first.take()?;
+        self.first = node.right.take();
+        Some(node)
     }
+}
 
-    if !create {
-        return Err(TEE_ERROR_GENERIC);
+impl Drop for PreparedNodes {
+    fn drop(&mut self) {
+        while self.pop().is_some() {}
     }
+}
 
-    // Add missing nodes, some nodes may already be there.
-    for n in current_id..=node_id {
-        let node = find_closest_node(ht, n);
-        if node.id == n {
-            continue;
+fn reserve_htree_node(node: HtreeNode, flags: AllocFlags) -> TeeResult<KBox<HtreeNode>> {
+    KBox::new_with_flags(node, flags).map_err(|error| TeeError::from(error).into())
+}
+
+/// Holds exclusive tree access from reservation through commit or cancellation.
+/// NOWAIT avoids reclaim under REE locks; it does not make storage IO atomic-safe.
+struct HtreeGrowth<'tree> {
+    tree: &'tree mut TeeFsHtree,
+    nodes: PreparedNodes,
+    node_id: u32,
+}
+
+impl<'tree> HtreeGrowth<'tree> {
+    fn prepare_with(
+        tree: &'tree mut TeeFsHtree,
+        create: bool,
+        node_id: usize,
+        mut reserve: impl FnMut(HtreeNode, AllocFlags) -> TeeResult<KBox<HtreeNode>>,
+    ) -> TeeResult<Self> {
+        let checked_id = validate_node_id(node_id)?;
+        let current_id = find_closest_node(tree, node_id).id;
+        let mut nodes = PreparedNodes::default();
+        if current_id != node_id {
+            if !create {
+                return Err(TEE_ERROR_GENERIC);
+            }
+            let mut next = &mut nodes.first;
+            for candidate in current_id..=node_id {
+                if find_closest_node(tree, candidate).id == candidate {
+                    continue;
+                }
+                let node = reserve(
+                    HtreeNode::new(candidate, TeeFsHtreeNodeImage::default()),
+                    AllocFlags::NOWAIT,
+                )?;
+                next = &mut next.insert(node).right;
+            }
         }
-        // Node id n should be a child of node
-        debug_assert_eq!((n >> 1), node.id);
-        debug_assert!(node.get_child_by_index(n & 1).is_none());
+        Ok(Self {
+            tree,
+            nodes,
+            node_id: checked_id,
+        })
+    }
 
-        let new_node = HtreeNode::new(n, TeeFsHtreeNodeImage::default());
-
-        if (n & 1) == 0 {
-            HtreeNode::set_left(node, new_node);
-        } else {
-            HtreeNode::set_right(node, new_node);
+    fn commit(mut self) -> &'tree mut HtreeNode {
+        let grew = self.nodes.first.is_some();
+        while let Some(node) = self.nodes.pop() {
+            let node_id = node.id;
+            let parent = find_closest_node(self.tree, node_id);
+            assert_eq!(parent.id, node_id >> 1);
+            if node_id & 1 == 0 {
+                HtreeNode::set_left(parent, node);
+            } else {
+                HtreeNode::set_right(parent, node);
+            }
         }
+        if grew {
+            self.tree.data.imeta.max_node_id = self.tree.data.imeta.max_node_id.max(self.node_id);
+        }
+        find_closest_node(self.tree, self.node_id as usize)
     }
-
-    // update max_node_id
-    if node_id > ht.data.imeta.max_node_id as usize {
-        ht.data.imeta.max_node_id = node_id as u32;
-    }
-
-    Ok(())
 }
 
 /// get the node of the tree
@@ -1357,16 +1396,17 @@ fn ensure_node_exists(ht: &mut TeeFsHtree, create: bool, node_id: usize) -> TeeR
 /// * `node_id` - the node id
 /// # Returns
 /// * `TeeResult<&mut HtreeNode>` - the node
+///
+/// # Errors
+/// Invalid IDs return BAD_PARAMETERS. Missing nodes without creation return
+/// GENERIC. NOWAIT owner reservation failure returns OUT_OF_MEMORY without
+/// changing the tree. Requires the caller's existing task-context REE exclusion.
 pub(super) fn get_node(
     ht: &mut TeeFsHtree,
     create: bool,
     node_id: usize,
 ) -> TeeResult<&mut HtreeNode> {
-    // first ensure the node exists (create the required nodes)
-    ensure_node_exists(ht, create, node_id)?;
-
-    // then find and return the node
-    Ok(find_closest_node(ht, node_id))
+    Ok(HtreeGrowth::prepare_with(ht, create, node_id, reserve_htree_node)?.commit())
 }
 
 /// get the index from the counter
@@ -1484,6 +1524,13 @@ pub(super) fn init_head_from_data(
 /// # Returns
 /// * `TeeResult` - the result of the operation
 pub(super) fn init_tree_from_data(ht: &mut TeeFsHtree) -> TeeResult {
+    init_tree_with_reservation(ht, reserve_htree_node)
+}
+
+fn init_tree_with_reservation(
+    ht: &mut TeeFsHtree,
+    mut reserve: impl FnMut(HtreeNode, AllocFlags) -> TeeResult<KBox<HtreeNode>>,
+) -> TeeResult {
     let mut node_image = TeeFsHtreeNodeImage::default();
     let mut node_id = 2;
 
@@ -1506,7 +1553,7 @@ pub(super) fn init_tree_from_data(ht: &mut TeeFsHtree) -> TeeResult {
         )?;
 
         // create node or get the existing node reference
-        let nc = get_node(ht, true, node_id as usize)?;
+        let nc = HtreeGrowth::prepare_with(ht, true, node_id as usize, &mut reserve)?.commit();
 
         // set the content
         nc.node = node_image;
@@ -1741,7 +1788,7 @@ fn get_block_node(
     create: bool,
     block_num: usize,
 ) -> TeeResult<&mut HtreeNode> {
-    let node_id = block_num_to_node_id(block_num);
+    let node_id = block_num_to_node_id(block_num)?;
     get_node(ht, create, node_id)
 }
 
@@ -1860,12 +1907,25 @@ pub(super) fn tee_fs_htree_read_block(
 /// * `block` - the block
 /// # Returns
 /// * `TeeResult` - the result of the operation
+///
+/// Child owners are reserved with NOWAIT before write-init. Owner exhaustion
+/// returns OUT_OF_MEMORY without changing this tree or issuing this block's IO.
+/// Later crypto/IO failures and earlier blocks are not rolled back.
 pub(super) fn tee_fs_htree_write_block(
     ht: &mut TeeFsHtree,
     // storage: &dyn TeeFsHtreeStorageOps,
     // fd: &mut FileVariant,
     block_num: usize,
     block: &[u8],
+) -> TeeResult {
+    write_block_with_reservation(ht, block_num, block, reserve_htree_node)
+}
+
+fn write_block_with_reservation(
+    ht: &mut TeeFsHtree,
+    block_num: usize,
+    block: &[u8],
+    reserve: impl FnMut(HtreeNode, AllocFlags) -> TeeResult<KBox<HtreeNode>>,
 ) -> TeeResult {
     tee_debug!(
         "tee_fs_htree_write_block-> block_num: {:?}, block.len: {:?}",
@@ -1879,18 +1939,21 @@ pub(super) fn tee_fs_htree_write_block(
     let fek = ht.data.fek;
     let head = ht.data.head;
 
-    // 在获取 node 之前先获取 block_size 和初始化写入操作，避免借用冲突
-    let (block_size, write_init_result) = {
-        let storage = ht.storage.as_ref();
-        let block_size = storage.block_size();
-        let write_init_result = storage.rpc_write_init();
-        (block_size, write_init_result)
-    };
-    write_init_result?;
+    let node_id = block_num_to_node_id(block_num)?;
+    let growth = HtreeGrowth::prepare_with(ht, true, node_id, reserve).map_err(|error| {
+        if error == TEE_ERROR_OUT_OF_MEMORY {
+            error
+        } else {
+            TEE_ERROR_CORRUPT_OBJECT
+        }
+    })?;
+    let block_size = growth.tree.storage.block_size();
+    growth.tree.storage.rpc_write_init()?;
+    growth.commit();
 
     let result = (|| {
         // get node once for all operations
-        let node = get_block_node(ht, true, block_num).map_err(|_| TEE_ERROR_CORRUPT_OBJECT)?;
+        let node = find_closest_node(ht, node_id);
 
         // if block not updated, toggle committed flag
         let block_vers = {
@@ -1964,7 +2027,7 @@ pub(super) fn tee_fs_htree_write_block(
 /// # Returns
 /// * `TeeResult` - the result of the operation
 pub(super) fn tee_fs_htree_truncate(ht: &mut TeeFsHtree, block_num: usize) -> TeeResult {
-    let node_id = block_num_to_node_id(block_num);
+    let node_id = block_num_to_node_id(block_num)?;
 
     while node_id < ht.data.imeta.max_node_id as usize {
         let current_max_node_id = ht.data.imeta.max_node_id as usize;

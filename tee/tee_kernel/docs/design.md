@@ -1,5 +1,78 @@
 # TEE Ownership and Lifecycle
 
+## Fallible Htree Child Ownership
+
+`fs_htree.rs` stores child nodes as `Option<KBox<HtreeNode>>`. Child attachment
+consumes an already allocated owner and asserts that the destination is empty.
+It does not allocate or replace an existing subtree. Disk formats, node numbering,
+cryptographic algorithms and growable buffers are unchanged.
+
+### Context and Failure Contract
+
+REE callers may hold `REE_FS_MUTEX` and `REE_FS_STATE`. Sleeping reclaim under
+these locks is not proven safe, so node reservation explicitly uses
+`AllocFlags::NOWAIT`. Allocation errors use the existing `TeeError` conversion.
+This remains a task-context storage operation: NOWAIT does not make RPC,
+encryption, nested allocation or destruction IRQ/NMI safe.
+
+A failed growth reservation leaves the original topology, existing node addresses
+and contents, parent IDs, dirty/version flags and `max_node_id` unchanged.
+Existing-node and no-create lookups do not reserve owners. Invalid IDs return
+BAD_PARAMETERS before allocation; IDs must be nonzero, representable as u32,
+and below usize::MAX for traversal. Block-to-node addition is checked.
+
+### Growth Transaction
+
+`HtreeGrowth` holds exclusive tree access from preparation through commit or
+cancellation. It reserves all absent nodes in the same ascending candidate range
+as the previous algorithm; it does not change growth to a target-only ancestor
+path. Live parent/child links and metadata remain untouched during reservation.
+
+`PreparedNodes` temporarily connects detached nodes through their right child
+links, with empty left links. This is a private staging representation of the
+existing tree owners, not an additional queue allocation or public container.
+It cannot be accessed through live-tree traversal. Both cancellation and commit
+take each staging link before releasing/transferring its owner, so abandoning
+a large preparation does not recursively drop a linear chain.
+
+Commit attaches nodes in ascending ID order, so required new parents precede
+their children, and updates `max_node_id` after all attachments. It does not
+allocate, perform RPC or return a recoverable error. Existing structural tree
+invariants remain required. `find_closest_node` now reads path bits directly
+rather than allocating a scratch Vec, making lookups in commit allocation-free.
+
+### Write and Load Integration
+
+Block write prepares growth before `rpc_write_init`. Write-init failure drops
+the detached nodes. Success commits them before changing block version, IV,
+tag or dirty state. Owner exhaustion returns OUT_OF_MEMORY, rather than the
+previous blanket CORRUPT_OBJECT mapping, and issues no write-init/write-final
+call for that block. Other preparation errors retain their corruption mapping;
+invalid block-to-node conversion returns BAD_PARAMETERS directly.
+
+Loading may read a node image before preparing its owner. Failure propagates
+through tree open; the unpublished tree owns and releases earlier loaded nodes.
+The existing REE open/create cleanup still explicitly closes the backing fd and
+may remove a created file; its cleanup-error precedence is unchanged.
+
+These guarantees cover one growth transaction, not an entire multi-block write.
+Earlier blocks and directory-cache activity may already have changed. Crypto,
+IO and sync failures after commit keep their existing behavior. Large valid
+growth requests and existing nested allocations remain resource-limit concerns;
+this change does not establish global OOM safety or bounded total growth time.
+
+### Test Surface
+
+The private reservation seam substitutes only allocation; production and tests
+use the same growth and write/load ordering. Tests in
+`ut-tests/tee/fs_htree/tests_get_node.rs` cover each owner failure in a multi-node
+growth, NOWAIT selection, unchanged state and existing addresses, retry,
+existing/no-create lookup, cancellation of a large staged chain, truncation and
+regrowth, sparse-tree success, prepared-address reuse, ID bounds, write RPC
+ordering and partial-load error propagation/owner cleanup. These are targeted
+owner-failure tests, not global allocator or encrypted-backend fault injection.
+Existing authentication, persistence and REE regression tests remain applicable.
+
 ## Persistent Object ID Ownership
 
 `tee_pobj.rs` stores persistent IDs in `KBox<[u8]>`. New registry entries
@@ -145,7 +218,8 @@ installs the tree, and close takes and drops it before explicitly closing the fd
 Close does not allocate a replacement tree or storage owner. Operations requiring
 a tree return BAD_STATE when it is absent. The fd remains an explicit-close
 integer handle; dropping an owner alone does not close it. Recursive `Subtree`
-nodes still use Box, and existing Vec and pobj rename behavior is unchanged.
+nodes use the fallible growth transaction described above; existing Vec and
+pobj rename behavior is unchanged.
 
 These paths run in sleepable task context with the filesystem and credential
 context required by the existing file helpers; IRQ handlers, IRQ/preemption-

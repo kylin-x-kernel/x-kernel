@@ -4,11 +4,273 @@
 
 //-------- test framework import --------
 //-------- local tests import --------
-use alloc::collections::VecDeque;
+use alloc::{collections::VecDeque, sync::Arc};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use unittest::{TestResult, assert, assert_eq};
 
 use super::*;
+
+#[derive(Debug, Default)]
+struct StorageCalls {
+    read_final: AtomicUsize,
+    write_init: AtomicUsize,
+    write_final: AtomicUsize,
+    drops: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct RejectWriteStorage(Arc<StorageCalls>);
+
+impl Drop for RejectWriteStorage {
+    fn drop(&mut self) {
+        self.0.drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl TeeFsHtreeStorageOps for RejectWriteStorage {
+    fn block_size(&self) -> usize {
+        4096
+    }
+
+    fn rpc_read_init(&self) -> TeeResult {
+        Ok(())
+    }
+
+    fn rpc_read_final(
+        &self,
+        _typ: TeeFsHtreeType,
+        _idx: usize,
+        _vers: u8,
+        data: &mut [u8],
+    ) -> TeeResult<usize> {
+        self.0.read_final.fetch_add(1, Ordering::Relaxed);
+        data.fill(0);
+        Ok(data.len())
+    }
+
+    fn rpc_write_init(&self) -> TeeResult {
+        self.0.write_init.fetch_add(1, Ordering::Relaxed);
+        Err(TEE_ERROR_GENERIC)
+    }
+
+    fn rpc_write_final(
+        &self,
+        _typ: TeeFsHtreeType,
+        _idx: usize,
+        _vers: u8,
+        _data: &[u8],
+    ) -> TeeResult<usize> {
+        self.0.write_final.fetch_add(1, Ordering::Relaxed);
+        Err(TEE_ERROR_GENERIC)
+    }
+}
+
+fn tree_with_storage(calls: Arc<StorageCalls>) -> TeeResult<TeeFsHtree> {
+    let storage = KBox::new_with_flags(RejectWriteStorage(calls), AllocFlags::NOWAIT)
+        .map_err(|error| u32::from(TeeError::from(error)))?;
+    let mut tree = TeeFsHtree::new(storage);
+    tree.root.id = 1;
+    tree.data.imeta.max_node_id = 1;
+    Ok(tree)
+}
+
+#[unittest::def_test]
+fn growth_failure_at_each_owner_preserves_tree_and_retry() {
+    for fail_at in 0..6 {
+        let mut tree = tree_with_storage(Arc::default()).unwrap();
+        get_node(&mut tree, true, 3).unwrap();
+        tree.root.dirty = true;
+        tree.root.node.flags = 7;
+        tree.data.dirty = true;
+        let child_address = core::ptr::from_ref(find_node(&mut tree, 2).unwrap());
+        let before = alloc::format!("{tree:?}");
+        let mut attempts = 0;
+        let mut permissions = true;
+        let result = HtreeGrowth::prepare_with(&mut tree, true, 9, |node, flags| {
+            permissions &= flags == AllocFlags::NOWAIT;
+            let index = attempts;
+            attempts += 1;
+            if index == fail_at {
+                Err(TEE_ERROR_OUT_OF_MEMORY)
+            } else {
+                reserve_htree_node(node, flags)
+            }
+        });
+        assert!(matches!(result, Err(TEE_ERROR_OUT_OF_MEMORY)));
+        drop(result);
+        assert_eq!(attempts, fail_at + 1);
+        assert!(permissions);
+        assert_eq!(alloc::format!("{tree:?}"), before);
+        assert_eq!(
+            core::ptr::from_ref(find_node(&mut tree, 2).unwrap()),
+            child_address
+        );
+        assert_eq!(get_node(&mut tree, true, 9).unwrap().id, 9);
+        assert_eq!(tree.data.imeta.max_node_id, 9);
+        for node_id in 2..=9 {
+            assert_eq!(
+                find_node(&mut tree, node_id).unwrap().parent_id,
+                Some(node_id >> 1)
+            );
+        }
+    }
+}
+
+#[unittest::def_test]
+fn existing_and_no_create_lookups_skip_reservation() {
+    let mut tree = tree_with_storage(Arc::default()).unwrap();
+    let mut attempts = 0;
+    let growth = HtreeGrowth::prepare_with(&mut tree, true, 1, |_, _| {
+        attempts += 1;
+        Err(TEE_ERROR_OUT_OF_MEMORY)
+    })
+    .unwrap();
+    assert_eq!(growth.commit().id, 1);
+    let result = HtreeGrowth::prepare_with(&mut tree, false, 2, |_, _| {
+        attempts += 1;
+        Err(TEE_ERROR_OUT_OF_MEMORY)
+    });
+    assert!(matches!(result, Err(TEE_ERROR_GENERIC)));
+    drop(result);
+    assert_eq!(attempts, 0);
+    assert_eq!(tree.data.imeta.max_node_id, 1);
+}
+
+#[unittest::def_test]
+fn prepared_growth_can_be_cancelled_then_truncated_and_regrown() {
+    let mut tree = tree_with_storage(Arc::default()).unwrap();
+    let before = alloc::format!("{tree:?}");
+    drop(HtreeGrowth::prepare_with(&mut tree, true, 2048, reserve_htree_node).unwrap());
+    assert_eq!(alloc::format!("{tree:?}"), before);
+    get_node(&mut tree, true, 15).unwrap();
+    tee_fs_htree_truncate(&mut tree, 3).unwrap();
+    assert_eq!(tree.data.imeta.max_node_id, 4);
+    for node_id in 5..=15 {
+        assert!(find_node(&mut tree, node_id).is_none());
+    }
+    get_node(&mut tree, true, 15).unwrap();
+    assert_eq!(tree.data.imeta.max_node_id, 15);
+}
+
+#[unittest::def_test]
+fn write_owner_failure_precedes_rpc_and_preserves_error() {
+    let calls = Arc::new(StorageCalls::default());
+    let mut tree = tree_with_storage(calls.clone()).unwrap();
+    let before = alloc::format!("{tree:?}");
+    let result =
+        write_block_with_reservation(&mut tree, 4, &[0; 16], |_, _| Err(TEE_ERROR_OUT_OF_MEMORY));
+    assert_eq!(result, Err(TEE_ERROR_OUT_OF_MEMORY));
+    assert_eq!(calls.write_init.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.write_final.load(Ordering::Relaxed), 0);
+    assert_eq!(alloc::format!("{tree:?}"), before);
+}
+
+#[unittest::def_test]
+fn write_init_failure_discards_prepared_nodes() {
+    let calls = Arc::new(StorageCalls::default());
+    let mut tree = tree_with_storage(calls.clone()).unwrap();
+    let before = alloc::format!("{tree:?}");
+    assert_eq!(
+        tee_fs_htree_write_block(&mut tree, 4, &[0; 16]),
+        Err(TEE_ERROR_GENERIC)
+    );
+    assert_eq!(calls.write_init.load(Ordering::Relaxed), 1);
+    assert_eq!(calls.write_final.load(Ordering::Relaxed), 0);
+    assert_eq!(alloc::format!("{tree:?}"), before);
+    assert_eq!(get_node(&mut tree, true, 5).unwrap().id, 5);
+}
+
+#[unittest::def_test]
+fn invalid_node_ids_fail_before_reservation() {
+    let mut tree = tree_with_storage(Arc::default()).unwrap();
+    for node_id in [0, usize::MAX] {
+        let mut attempts = 0;
+        let result = HtreeGrowth::prepare_with(&mut tree, true, node_id, |_, _| {
+            attempts += 1;
+            Err(TEE_ERROR_OUT_OF_MEMORY)
+        });
+        assert!(matches!(result, Err(TEE_ERROR_BAD_PARAMETERS)));
+        drop(result);
+        assert_eq!(attempts, 0);
+    }
+    assert_eq!(
+        block_num_to_node_id(usize::MAX),
+        Err(TEE_ERROR_BAD_PARAMETERS)
+    );
+    assert_eq!(
+        block_num_to_node_id(u32::MAX as usize),
+        Err(TEE_ERROR_BAD_PARAMETERS)
+    );
+    assert_eq!(validate_node_id((u32::MAX - 1) as usize), Ok(u32::MAX - 1));
+    assert_eq!(validate_node_id(1), Ok(1));
+}
+
+#[unittest::def_test]
+fn commit_preserves_prepared_addresses_and_existing_sparse_nodes() {
+    let mut tree = tree_with_storage(Arc::default()).unwrap();
+    let mut child = reserve_htree_node(
+        HtreeNode::new(2, TeeFsHtreeNodeImage::default()),
+        AllocFlags::NOWAIT,
+    )
+    .unwrap();
+    HtreeNode::set_left(
+        &mut child,
+        reserve_htree_node(
+            HtreeNode::new(4, TeeFsHtreeNodeImage::default()),
+            AllocFlags::NOWAIT,
+        )
+        .unwrap(),
+    );
+    HtreeNode::set_left(&mut tree.root, child);
+    tree.data.imeta.max_node_id = 4;
+    let existing = core::ptr::from_ref(find_node(&mut tree, 4).unwrap());
+    let mut prepared = Vec::new();
+    let growth = HtreeGrowth::prepare_with(&mut tree, true, 7, |node, flags| {
+        let owner = reserve_htree_node(node, flags)?;
+        prepared.push((owner.id, core::ptr::from_ref(&*owner)));
+        Ok(owner)
+    })
+    .unwrap();
+    growth.commit();
+    assert_eq!(prepared.len(), 4);
+    for (node_id, address) in prepared {
+        let node = find_node(&mut tree, node_id).unwrap();
+        assert_eq!(core::ptr::from_ref(node), address);
+        assert_eq!(node.parent_id, Some(node_id >> 1));
+    }
+    assert_eq!(
+        core::ptr::from_ref(find_node(&mut tree, 4).unwrap()),
+        existing
+    );
+    assert_eq!(tree.data.imeta.max_node_id, 7);
+    assert!(!tree.data.dirty);
+}
+
+#[unittest::def_test]
+fn load_owner_failure_preserves_error_and_unpublished_tree_is_released() {
+    for fail_at in 0..3 {
+        let calls = Arc::new(StorageCalls::default());
+        let mut tree = tree_with_storage(calls.clone()).unwrap();
+        tree.data.imeta.max_node_id = 4;
+        let mut attempts = 0;
+        let result = init_tree_with_reservation(&mut tree, |node, flags| {
+            let index = attempts;
+            attempts += 1;
+            if index == fail_at {
+                Err(TEE_ERROR_OUT_OF_MEMORY)
+            } else {
+                reserve_htree_node(node, flags)
+            }
+        });
+        assert_eq!(result, Err(TEE_ERROR_OUT_OF_MEMORY));
+        assert_eq!(attempts, fail_at + 1);
+        assert_eq!(calls.read_final.load(Ordering::Relaxed), fail_at + 1);
+        assert!(find_node(&mut tree, fail_at + 2).is_none());
+        drop(tree);
+        assert_eq!(calls.drops.load(Ordering::Relaxed), 1);
+    }
+}
 
 // 辅助函数：构建一个只有根节点的树 (ID=1)
 fn build_root_only_tree() -> TeeFsHtree {
@@ -33,9 +295,18 @@ fn build_partial_tree() -> TeeFsHtree {
     let node3 = HtreeNode::new(3, TeeFsHtreeNodeImage::default());
     let node4 = HtreeNode::new(4, TeeFsHtreeNodeImage::default());
 
-    HtreeNode::set_left(&mut node2, node4);
-    HtreeNode::set_left(&mut root_node, node2);
-    HtreeNode::set_right(&mut root_node, node3);
+    HtreeNode::set_left(
+        &mut node2,
+        reserve_htree_node(node4, AllocFlags::NOWAIT).unwrap(),
+    );
+    HtreeNode::set_left(
+        &mut root_node,
+        reserve_htree_node(node2, AllocFlags::NOWAIT).unwrap(),
+    );
+    HtreeNode::set_right(
+        &mut root_node,
+        reserve_htree_node(node3, AllocFlags::NOWAIT).unwrap(),
+    );
 
     let mut ht_data = TeeFsHtreeData::default();
     ht_data.imeta.max_node_id = 4; // 根据实际最大ID设置

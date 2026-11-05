@@ -21,11 +21,26 @@ fn build_test_tree() -> TeeFsHtree {
     let node5 = HtreeNode::new(5, TeeFsHtreeNodeImage::default()); // ID 5 (level 3) - Right of 2
     let node6 = HtreeNode::new(6, TeeFsHtreeNodeImage::default()); // ID 6 (level 3) - Left of 3
 
-    HtreeNode::set_left(&mut node3, node6); // 节点 3 的右子树不存在
-    HtreeNode::set_left(&mut node2, node4);
-    HtreeNode::set_right(&mut node2, node5);
-    HtreeNode::set_left(&mut root_node, node2);
-    HtreeNode::set_right(&mut root_node, node3);
+    HtreeNode::set_left(
+        &mut node3,
+        reserve_htree_node(node6, AllocFlags::NOWAIT).unwrap(),
+    ); // 节点 3 的右子树不存在
+    HtreeNode::set_left(
+        &mut node2,
+        reserve_htree_node(node4, AllocFlags::NOWAIT).unwrap(),
+    );
+    HtreeNode::set_right(
+        &mut node2,
+        reserve_htree_node(node5, AllocFlags::NOWAIT).unwrap(),
+    );
+    HtreeNode::set_left(
+        &mut root_node,
+        reserve_htree_node(node2, AllocFlags::NOWAIT).unwrap(),
+    );
+    HtreeNode::set_right(
+        &mut root_node,
+        reserve_htree_node(node3, AllocFlags::NOWAIT).unwrap(),
+    );
 
     TeeFsHtree {
         root: root_node,

@@ -1,5 +1,35 @@
 # TEE Ownership and Lifecycle Safety
 
+## Htree Child Growth Boundary
+
+Child owners use KBox with explicit NOWAIT under the caller's REE serialization
+locks. A private growth transaction retains exclusive tree access while preparing
+detached nodes. Only after all reservations succeed are nodes attached and
+max_node_id updated. On owner failure, live topology, node addresses, flags and
+metadata are unchanged. No raw-pointer conversion or new unsafe code is involved.
+
+The staging representation uses detached nodes' right links. Those links must
+never enter live traversal: pop clears the link before attachment or destruction.
+Cancellation drains iteratively to avoid a linear-depth Drop stack. Commit uses
+allocation-free ID-bit traversal and consumes the exact prepared owners. Its
+parent/empty-slot assertions enforce existing internal tree invariants, not an
+allocation-success assumption. Node-ID validation and checked block conversion
+precede reservation; large valid requests remain a potential resource cost.
+
+Write reservation precedes write-init, and OUT_OF_MEMORY is not converted into
+CORRUPT_OBJECT. Write-init failure abandons preparation without changing the tree.
+Loading propagates owner errors while the partial tree is still unpublished;
+normal owner destruction releases its nodes and storage owner. Explicit backend
+fd cleanup and its error precedence remain the responsibility of REE callers.
+This is not rollback of earlier blocks, cache activity, crypto or later IO.
+
+Tests in `ut-tests/tee/fs_htree/tests_get_node.rs` inject each selected owner
+failure and check unchanged state, retry, NOWAIT, address-preserving commit,
+large-chain cancellation, truncation/regrowth, invalid IDs, write-init ordering
+and partial-load failure. Mock storage confirms error propagation and storage
+owner destruction, not physical-disk recovery. Global OOM, nested allocations
+and exact allocator deallocation counts are not injected or measured.
+
 ## Persistent ID Allocation Boundary
 
 Persistent ID allocation uses `NOWAIT` while `POBJS_MUTEX` serializes lookup
@@ -130,7 +160,8 @@ for these owners: storage coercion and tree initialization reuse the reservation
 Htree crypto, verification and IO failures still pass through the existing
 explicit fd-close and create-file-removal branch. Its existing cleanup-error
 precedence is unchanged; this migration does not promise transactional rollback
-for recursive node allocation, Vec growth, IO or cleanup failure.
+for the complete open operation, Vec growth, IO or cleanup failure. Individual
+node-growth reservation has the unchanged-tree guarantee described above.
 
 These are task-context operations requiring the existing filesystem/credential
 context. NOWAIT prevents sleeping reclaim for the owner reservations while REE

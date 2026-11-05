@@ -43,8 +43,14 @@ pub fn test_construct_tree_with_children() {
 
     let meta = TeeFsHtreeMeta::default();
 
-    HtreeNode::set_left(&mut root, left);
-    HtreeNode::set_right(&mut root, right);
+    HtreeNode::set_left(
+        &mut root,
+        reserve_htree_node(left, AllocFlags::NOWAIT).unwrap(),
+    );
+    HtreeNode::set_right(
+        &mut root,
+        reserve_htree_node(right, AllocFlags::NOWAIT).unwrap(),
+    );
 
     let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
@@ -128,8 +134,14 @@ pub fn test_htree_structure_and_access() {
         },
     );
 
-    HtreeNode::set_left(&mut root, left);
-    HtreeNode::set_right(&mut root, right);
+    HtreeNode::set_left(
+        &mut root,
+        reserve_htree_node(left, AllocFlags::NOWAIT).unwrap(),
+    );
+    HtreeNode::set_right(
+        &mut root,
+        reserve_htree_node(right, AllocFlags::NOWAIT).unwrap(),
+    );
 
     {
         assert!(root.left.is_some());
@@ -191,10 +203,22 @@ pub fn test_calc_and_verify_tree() {
     let left_left_child = HtreeNode::new(4, node_image_ll);
     let left_right_child = HtreeNode::new(5, node_image_lr);
 
-    HtreeNode::set_left(&mut left_child, left_left_child);
-    HtreeNode::set_right(&mut left_child, left_right_child);
-    HtreeNode::set_left(&mut root, left_child);
-    HtreeNode::set_right(&mut root, right_child);
+    HtreeNode::set_left(
+        &mut left_child,
+        reserve_htree_node(left_left_child, AllocFlags::NOWAIT).unwrap(),
+    );
+    HtreeNode::set_right(
+        &mut left_child,
+        reserve_htree_node(left_right_child, AllocFlags::NOWAIT).unwrap(),
+    );
+    HtreeNode::set_left(
+        &mut root,
+        reserve_htree_node(left_child, AllocFlags::NOWAIT).unwrap(),
+    );
+    HtreeNode::set_right(
+        &mut root,
+        reserve_htree_node(right_child, AllocFlags::NOWAIT).unwrap(),
+    );
     // Create the TeeFsHtree structure
     let mut ht = TeeFsHtree {
         root,
