@@ -160,6 +160,7 @@ mutex avoids unregister callbacks nesting under that lock.
 | F-04 | Short I/O buffer | Caller supplies insufficient bytes | No record transfer | Caller must supply valid size | 4 | InvalidInput before copying/consuming. |
 | F-05 | Callback/drain deadlock | Synchronous teardown while holding callback state or blocking its CPU | Final release cannot finish | Task or CPU stalls | 2 | Settime cancels outside inner state; callback never acquires programming; final-owner callers must permit callback progress. |
 | F-06 | Inotify queue overruns | Producer outpaces the reader past 16384 events | Excess events dropped | Watcher misses changes | 3 | Overrun flag under the queue lock makes the next read report `IN_Q_OVERFLOW` (`wd=-1`) exactly once, so the loss is visible; ceiling bounds memory. |
+| F-07 | Epoll loses future notifications | Source wakes drain consecutive one-shot registrations while readiness bits stay unchanged | No live subscription remains | An ET waiter can block indefinitely | 2 | Every deferred wake retains a ready-queue entry for recheck and rearm; no retry limit can silently discard that responsibility. |
 
 ## Privacy, limitations and verification
 
@@ -180,6 +181,11 @@ claim they were executed by this documentation edit.
 MOD failure tests cover later readiness, repeated registration failure, queued
 events, partial-registration cancellation and preserving a disabled OneShot.
 They use explicit source readiness and injected errors, not timing thresholds.
+ET rearm tests inject successive same-direction notifications during source
+registration, drain readiness, and verify that a later notification is still
+delivered. Empty notifications must schedule a recheck without synthesizing
+an I/O event. Sustained registration-time notifications are bounded per
+`poll_events` call rather than suppressed or retried recursively.
 
 ## Audit checklist
 
@@ -188,6 +194,10 @@ They use explicit source readiness and injected errors, not timing thresholds.
 - Check independent timer callback data and final Drop cancellation; never drain under inner state.
 - Preserve read-driven periodic rearm and poll-before-IRQ notification.
 - Keep epoll MOD identity, queue deduplication and generation checks together.
+- Treat each queued source notification as an edge; do not suppress it by comparing with previously reported readiness bits. Separate arrivals can leave identical masks.
+- Epoll edge rearm rechecks readiness for newly ready directions after source registration. Unchanged levels alone must not repeat an event, but every source wake during registration must retain queued work even when its readiness bits are unchanged or empty. Source wakeups may coalesce; delivery always rechecks readiness.
+- Concurrent epoll consumers must preserve freshly requeued entries during per-call deduplication. Never drop the only entry while leaving its queue-membership flag set. Deferral completion and callback notification use one atomic state to avoid losing wakes at registration completion.
+- Keep each interest's consume/rearm and MOD serialized through its operation mutex; generation changes and registration-owner replacement must not overtake one another. IRQ-reachable source callbacks must never acquire the operation mutex.
 - Drop registration owners outside their mutex; verify callback lock context.
 - Keep IRQ-reachable epoll wake paths on IRQ-safe state and avoid task-only locks.
 - Keep inotify record sizing (`len`-arithmetic, no name field for nameless

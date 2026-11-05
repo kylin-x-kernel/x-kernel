@@ -69,7 +69,12 @@ impl SocketSetState<'_> {
         } = self;
         let mut next_deadline = None;
         deferred_tcp_closes.retain_mut(|entry| {
-            let socket = sockets.get::<tcp::Socket>(entry.handle);
+            let socket = sockets.get_mut::<tcp::Socket>(entry.handle);
+            // No reader remains after file close. Data arriving during the
+            // FIN handshake must reset the peer instead of filling an orphan.
+            if socket.state() != tcp::State::Closed && socket.recv_queue() != 0 {
+                socket.abort();
+            }
             let state = socket.state();
             // smoltcp keeps the tuple until a CLOSED socket's pending RST has
             // been emitted. The protocol object must remain reachable until

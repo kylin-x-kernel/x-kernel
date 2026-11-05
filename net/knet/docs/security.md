@@ -1014,7 +1014,7 @@ Changes to this module must verify the following:
 - UDP PCB queue changes verify that PCB creation reserves 1024 pointer-sized slots and that `PacketBuf` establishes its reference-counted lifetime when entering the network stack.
   Loopback must write validated UDP metadata before disabling BH; softirq and `SpinNoIrq` enqueue paths only move existing handles.
   Receive queues preserve FIFO order, full queues drop packets outside the lock, and `MSG_PEEK` also copies payloads outside the lock.
-- Changes to TCP Drop or asynchronous TX verify that successfully written payloads remain owned by the protocol object after file closure, unread data at close triggers RST, deferred-close handles are removed after `Closed`, and the reclamation deadline applies only to `FIN_WAIT_2` handles detached from user file objects.
+- Changes to TCP Drop or asynchronous TX verify that successfully written payloads remain owned by the protocol object after file closure, unread data at or after close triggers RST, deferred-close handles are removed after `Closed`, and the reclamation deadline applies only to `FIN_WAIT_2` handles detached from user file objects.
 - New socket options specify error codes, blocking semantics, and poll readiness conditions.
 - New pathname Unix socket entry points use a single credential snapshot and pass it explicitly to all VFS operations.
 - Pathname binding preserves exclusive creation, uses mode `0777 & !umask`, and takes ownership information from filesystem credentials.

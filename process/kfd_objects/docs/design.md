@@ -67,6 +67,41 @@ does not redirect registration or synthesize HUP. Readiness still uses the
 current caller's pending queues. Files without a captured source retain their
 ordinary `register_poll` path.
 
+Edge-triggered interests recheck readiness after replacing their one-shot
+source registrations. The recheck queues directions that were absent from the
+event just consumed, preserving a read arrival while a write event is being
+rearmed without repeatedly reporting unchanged writability. Deferred source
+wakes always enqueue the interest, including when their readiness mask is
+unchanged or the final sample is empty. A source wake can drain a one-shot
+registration; its queued entry then owns the next readiness check and rearm.
+There is no bounded restoration attempt that can exhaust its retries and
+leave the interest with neither a live subscription nor queued work.
+Each queued source notification is eligible for delivery even when its current
+readiness mask equals the previous event. ET removes the consumed ready entry
+instead of retaining it as LT does; it does not infer edges from mask changes.
+This delivery rule matches Linux's `ep_send_events`. Source subscriptions
+still use `kpoll`'s one-shot registrations rather than Linux's persistent
+wait-queue callbacks. Multiple source wakes may coalesce into one queue entry;
+consumption reports an event only if the current readiness matches.
+Registration deferral and callback notification share one atomic state so a wake
+cannot fall between ending deferral and collecting deferred notifications.
+Callbacks become live before the final readiness sample: a notification arriving
+after the sample must enqueue independently rather than be ignored using stale
+readiness bits. Registration does not recursively retry after a wake. Each
+`poll_events` call processes a bounded initial batch and reports an interest
+at most once, leaving notifications during registration for a later check.
+Sources must not manufacture notifications merely because they are registered:
+an always-waking source can keep its consumer runnable even without readiness.
+Concurrent consumers can drain the original ready batch while an interest is
+requeued. Per-call deduplication retains that fresh entry when no level-triggered
+entry was already kept, preserving its queue-membership flag and future wakes.
+Each interest serializes consume/rearm and MOD with a sleepable operation mutex.
+This keeps generation advancement, registration-owner replacement and readiness
+rechecks in one transaction; an older consumer cannot cancel a newer owner's
+registrations. Source callbacks use only the IRQ-safe enqueue path and never
+take this mutex. Control operations acquire the control mutex first; no ready
+consumer acquires it while holding an interest's operation mutex.
+
 File construction requires allocator and initialized anonymous-inode filesystem.
 `read`/`write` may block through their polling futures unless the file carries
 NONBLOCK. The authoritative nonblocking flag is on `VfsFile`. Epoll control uses

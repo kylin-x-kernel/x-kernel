@@ -13,13 +13,13 @@ use alloc::{
 use core::{
     hash::{Hash, Hasher},
     mem,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     task::{Context, Waker},
 };
 
 use anon_inodefs::AnonInodeFs;
 use bitflags::bitflags;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollRegistrations, PollSet, Pollable};
@@ -42,7 +42,7 @@ bitflags! {
     /// Flags for entries in an `epoll` instance.
     #[derive(Debug, Clone, Copy, Default)]
     pub struct EpollFlags: u32 {
-        /// Rearm notification through source transitions rather than retained level readiness.
+        /// Remove delivered readiness; later source notifications can queue it again.
         const EDGE_TRIGGER = EPOLLET;
         /// Disable an interest after one event until MOD rearms it.
         const ONESHOT = EPOLLONESHOT;
@@ -54,7 +54,7 @@ bitflags! {
 enum TriggerMode {
     /// Level-triggered: until the condition is cleared.
     Level,
-    /// Edge-triggered: only notify when the condition changes.
+    /// Edge-triggered: remove the ready entry after delivery.
     Edge,
     /// One-shot: notify only once.
     OneShot { fired: bool },
@@ -101,9 +101,7 @@ enum ConsumeResult {
     /// Return no event and rearm the interest according to the supplied policy.
     NoEvent {
         queue_current_events: IoEvents,
-        queue_registered_wake: bool,
         registered_events: IoEvents,
-        post_register_poll: bool,
     },
 }
 
@@ -120,11 +118,6 @@ impl EpollInterestConfig {
             mode: TriggerMode::from_flags(flags),
         }
     }
-}
-
-struct EpollInterestSnapshot {
-    config: EpollInterestConfig,
-    last_reported_events: usize,
 }
 
 fn match_ready_events(current: IoEvents, interested: IoEvents) -> IoEvents {
@@ -181,13 +174,15 @@ struct EpollInterest {
     // Captured at ADD even when ready or not interested in the source's events.
     // An expired Some remains bound; MOD and rearm must never recapture it.
     poll_source: Option<FilePollSource>,
+    // Serializes consume/rearm with MOD so an older registration cannot
+    // replace a newer generation's owner. Source callbacks never take it.
+    operation_lock: Mutex<()>,
     config: SpinNoPreempt<EpollInterestConfig>,
     // Sleepable: held only while swapping the owner, not across file poll hooks.
     // Old `PollRegistrations` must be dropped outside this lock so source
     // `SpinNoIrq` unregister work does not nest under the Mutex.
     registrations: Mutex<PollRegistrations>,
     in_ready_queue: AtomicBool,
-    last_reported_events: AtomicUsize,
     waker_generation: AtomicUsize,
 }
 
@@ -201,10 +196,10 @@ impl EpollInterest {
         Self {
             key,
             poll_source,
+            operation_lock: Mutex::new(()),
             config: SpinNoPreempt::new(EpollInterestConfig::new(event, flags)),
             registrations: Mutex::new(PollRegistrations::new()),
             in_ready_queue: AtomicBool::new(false),
-            last_reported_events: AtomicUsize::new(IoEvents::empty().bits() as usize),
             waker_generation: AtomicUsize::new(0),
         }
     }
@@ -241,26 +236,15 @@ impl EpollInterest {
         register_events(self.interested_events())
     }
 
-    fn modify_config(&self, event: EpollEvent, flags: EpollFlags) -> EpollInterestSnapshot {
-        let last_reported_events = self
-            .last_reported_events
-            .swap(IoEvents::empty().bits() as usize, Ordering::AcqRel);
-        let config = {
-            let mut config = self.config.lock();
-            let previous = *config;
-            *config = EpollInterestConfig::new(event, flags);
-            previous
-        };
-        EpollInterestSnapshot {
-            config,
-            last_reported_events,
-        }
+    fn modify_config(&self, event: EpollEvent, flags: EpollFlags) -> EpollInterestConfig {
+        mem::replace(
+            &mut *self.config.lock(),
+            EpollInterestConfig::new(event, flags),
+        )
     }
 
-    fn restore_config(&self, snapshot: EpollInterestSnapshot) {
-        *self.config.lock() = snapshot.config;
-        self.last_reported_events
-            .store(snapshot.last_reported_events, Ordering::Release);
+    fn restore_config(&self, snapshot: EpollInterestConfig) {
+        *self.config.lock() = snapshot;
     }
 
     #[inline]
@@ -303,9 +287,10 @@ impl EpollInterest {
             return self.no_event_rearm_current_ready(interested_events);
         }
 
-        if matches!(config.mode, TriggerMode::Edge) && !self.should_notify_edge(matched) {
-            return self.no_event_wait_for_transition(interested_events);
-        }
+        // The ready entry represents a source notification. Two arrivals can
+        // leave the same readiness mask; comparing it with the previous mask
+        // would discard a real edge. ET differs from LT by not retaining this
+        // entry after delivery (Linux fs/eventpoll.c: ep_send_events).
         let (should_notify, new_mode) = config.mode.should_notify();
         config.mode = new_mode;
         trace!(
@@ -338,51 +323,17 @@ impl EpollInterest {
 
     fn no_event_rearm_current_ready(&self, interested_events: IoEvents) -> ConsumeResult {
         let registered_events = register_events(interested_events);
-        self.last_reported_events
-            .store(IoEvents::empty().bits() as usize, Ordering::Release);
         ConsumeResult::NoEvent {
             queue_current_events: registered_events,
-            queue_registered_wake: false,
             registered_events,
-            post_register_poll: true,
         }
-    }
-
-    fn no_event_wait_for_transition(&self, interested_events: IoEvents) -> ConsumeResult {
-        let registered_events = register_events(interested_events);
-        ConsumeResult::NoEvent {
-            queue_current_events: IoEvents::empty(),
-            queue_registered_wake: true,
-            registered_events,
-            post_register_poll: false,
-        }
-    }
-
-    fn should_notify_edge(&self, matched: IoEvents) -> bool {
-        let edge_events = matched - IoEvents::ALWAYS_POLL;
-        if matched.intersects(IoEvents::ALWAYS_POLL) {
-            self.last_reported_events
-                .store(edge_events.bits() as usize, Ordering::Release);
-            return true;
-        }
-
-        let matched_bits = edge_events.bits() as usize;
-        self.last_reported_events
-            .swap(matched_bits, Ordering::AcqRel)
-            != matched_bits
-    }
-
-    fn clear_reported_edge_events(&self) {
-        self.last_reported_events
-            .store(IoEvents::empty().bits() as usize, Ordering::Release);
     }
 }
 
 struct InterestWaker {
     epoll: Weak<EpollInner>,
     interest: Weak<EpollInterest>,
-    defer_wake: AtomicBool,
-    deferred_wake: AtomicBool,
+    registration_state: AtomicU8,
     generation: usize,
 }
 
@@ -392,8 +343,16 @@ impl Wake for InterestWaker {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        if self.defer_wake.load(Ordering::Acquire) {
-            self.deferred_wake.store(true, Ordering::Release);
+        // One atomic transition pairs with finish_register's swap: a callback
+        // either belongs to registration or observes the live registration.
+        // Separate defer/notified flags can lose a wake between their updates.
+        if self.registration_state.compare_exchange(
+            Self::REGISTERING,
+            Self::WAKE_DEFERRED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) != Err(Self::REGISTERED)
+        {
             return;
         }
 
@@ -401,42 +360,44 @@ impl Wake for InterestWaker {
             if !interest.is_current_waker_generation(self.generation) {
                 return;
             }
-            interest.clear_reported_edge_events();
             self.queue_interest_with(interest);
         }
     }
 }
 
 impl InterestWaker {
+    const REGISTERED: u8 = 2;
+    const REGISTERING: u8 = 0;
+    const WAKE_DEFERRED: u8 = 1;
+
     fn new(epoll: &Arc<EpollInner>, interest: &Arc<EpollInterest>) -> Arc<Self> {
         let generation = interest.next_waker_generation();
         Arc::new(Self {
             epoll: Arc::downgrade(epoll),
             interest: Arc::downgrade(interest),
-            defer_wake: AtomicBool::new(true),
-            deferred_wake: AtomicBool::new(false),
+            registration_state: AtomicU8::new(Self::REGISTERING),
             generation,
         })
     }
 
     fn finish_register(
         &self,
-        ready_events: IoEvents,
+        poll_ready: impl FnOnce() -> IoEvents,
         queue_current_events: IoEvents,
-        queue_registered_wake: bool,
-    ) -> bool {
-        self.defer_wake.store(false, Ordering::Release);
-        let had_registered_wake = self.deferred_wake.swap(false, Ordering::AcqRel);
-        let should_queue = ready_events.intersects(queue_current_events)
-            || (queue_registered_wake && had_registered_wake);
-        if should_queue {
+    ) {
+        let had_registered_wake = self
+            .registration_state
+            .swap(Self::REGISTERED, Ordering::AcqRel)
+            == Self::WAKE_DEFERRED;
+        // Notifications must be live before the final readiness sample. A
+        // callback after that sample must queue independently of its old bits.
+        let ready_events = poll_ready();
+        // A source wake can drain its one-shot registration even when the
+        // sampled readiness is unchanged or empty. Keep queued work to own
+        // the next recheck/rearm instead of silently abandoning monitoring.
+        if ready_events.intersects(queue_current_events) || had_registered_wake {
             self.queue_interest();
-            // Queued: any one-shot drain is accounted for by the ready-queue entry.
-            return false;
         }
-        // Deferred wake was ignored (e.g. ET rearm). One-shot `PollSet::wake`
-        // may already have detached the waiter; caller should restore once.
-        had_registered_wake
     }
 
     fn queue_interest(&self) {
@@ -537,28 +498,7 @@ impl Epoll {
         &self,
         interest: &Arc<EpollInterest>,
         queue_current_events: IoEvents,
-        queue_registered_wake: bool,
         registered_events: IoEvents,
-        post_register_poll: bool,
-    ) -> KResult<()> {
-        self.register_waker_only_inner(
-            interest,
-            queue_current_events,
-            queue_registered_wake,
-            registered_events,
-            post_register_poll,
-            true,
-        )
-    }
-
-    fn register_waker_only_inner(
-        &self,
-        interest: &Arc<EpollInterest>,
-        queue_current_events: IoEvents,
-        queue_registered_wake: bool,
-        registered_events: IoEvents,
-        post_register_poll: bool,
-        allow_restore: bool,
     ) -> KResult<()> {
         let Some(file) = interest.key.get_file() else {
             drop(interest.take_registrations());
@@ -587,27 +527,10 @@ impl Epoll {
         // SpinNoIrq unregister under interest.registrations.
         drop(interest.replace_registrations(registrations));
 
-        let current = if post_register_poll {
-            match_ready_events(file.poll(), interest.interested_events())
-        } else {
-            IoEvents::empty()
-        };
-        let needs_restore =
-            interest_waker.finish_register(current, queue_current_events, queue_registered_wake);
-        // One-shot sources detach the waiter when they wake during defer. ET
-        // rearm intentionally ignores that wake as a readiness edge, but must
-        // restore a live registration once. A second deferred wake (test
-        // files that wake on every register) stops here to avoid a loop.
-        if needs_restore && allow_restore {
-            return self.register_waker_only_inner(
-                interest,
-                queue_current_events,
-                queue_registered_wake,
-                registered_events,
-                post_register_poll,
-                false,
-            );
-        }
+        interest_waker.finish_register(
+            || match_ready_events(file.poll(), interest.interested_events()),
+            queue_current_events,
+        );
         Ok(())
     }
 
@@ -630,7 +553,7 @@ impl Epoll {
             // Ready now: drop any prior registrations and do not leave a waiter.
             drop(interest.take_registrations());
             waker.wake_by_ref();
-            let _ = interest_waker.finish_register(current, registered_events, false);
+            interest_waker.finish_register(|| current, registered_events);
         } else {
             let context = Context::from_waker(&waker);
             let mut registrations = PollRegistrations::new();
@@ -642,18 +565,10 @@ impl Epoll {
             }
             drop(interest.replace_registrations(registrations));
 
-            let current = match_ready_events(file.poll(), interest.interested_events());
-            let needs_restore = interest_waker.finish_register(current, registered_events, false);
-            if needs_restore {
-                // One-shot drained during defer and we did not queue; restore.
-                return self.register_waker_only(
-                    interest,
-                    registered_events,
-                    false,
-                    registered_events,
-                    true,
-                );
-            }
+            interest_waker.finish_register(
+                || match_ready_events(file.poll(), interest.interested_events()),
+                registered_events,
+            );
         }
         Ok(())
     }
@@ -687,6 +602,7 @@ impl Epoll {
             fd,
             interest.interested_events()
         );
+        let _operation_guard = interest.operation_lock.lock();
         if let Err(err) = self.check_and_register_waker(&interest) {
             let removed = {
                 let mut guard = self.inner.interests.lock();
@@ -728,12 +644,13 @@ impl Epoll {
             .get(&key)
             .cloned()
             .ok_or(KError::NotFound)?;
+        let _operation_guard = interest.operation_lock.lock();
         let snapshot = interest.modify_config(event, flags);
         let registered_events = register_events(event.events);
         let was_in_queue = interest.is_in_queue();
 
         let registration_result = if was_in_queue {
-            self.register_waker_only(&interest, registered_events, true, registered_events, true)
+            self.register_waker_only(&interest, registered_events, registered_events)
         } else {
             self.check_and_register_waker(&interest)
         };
@@ -788,7 +705,7 @@ impl Epoll {
 
         let mut count = 0;
         let mut deferred_keep = Vec::new();
-        // Bound this call to the entries that were ready when it started.
+        // Bound this call to the number of entries ready when it started.
         // Rearming an interest while consuming it can synchronously enqueue the
         // same interest again through `finish_register()`. Leaving those new
         // entries for the next call prevents a persistently-ready fd from
@@ -798,7 +715,10 @@ impl Epoll {
             let ready_count = queue.len();
             (ready_count, queue.pop_front())
         };
-        let mut emitted = HashSet::with_capacity(ready_count);
+        // The value records whether this call already retained a queue entry.
+        // Stale duplicates may be discarded, but a fresh wake after an edge
+        // was consumed still owns its in_ready_queue flag and must be kept.
+        let mut emitted: HashMap<EntryKey, bool> = HashMap::with_capacity(ready_count);
         for index in 0..ready_count {
             let weak_interest = if index == 0 {
                 first_ready_interest.take()
@@ -819,10 +739,16 @@ impl Epoll {
                 interest.mark_not_in_queue();
                 continue;
             };
-            if emitted.contains(&interest.key) {
+            if let Some(has_retained_entry) = emitted.get(&interest.key) {
+                if !*has_retained_entry && interest.is_in_queue() {
+                    self.inner.ready_queue.lock().push_front(weak_interest);
+                    // The original batch has been overtaken by a new wake.
+                    // Stop before this call can pop and discard it again.
+                    break;
+                }
                 continue;
             }
-            emitted.insert(interest.key.clone());
+            emitted.insert(interest.key.clone(), false);
             if count >= out.len() {
                 self.inner.ready_queue.lock().push_front(weak_interest);
                 break;
@@ -834,11 +760,13 @@ impl Epoll {
                 interest.interested_events()
             );
 
+            let _operation_guard = interest.operation_lock.lock();
             match interest.consume(file.as_ref()) {
                 ConsumeResult::EventAndKeep(event) => {
                     out[count] = k_epoll_event::new(event.events.bits(), event.user_data);
                     count += 1;
                     deferred_keep.push(Arc::downgrade(&interest));
+                    emitted.insert(interest.key.clone(), true);
                 }
                 ConsumeResult::EventAndRemove(event) => {
                     out[count] = k_epoll_event::new(event.events.bits(), event.user_data);
@@ -847,10 +775,10 @@ impl Epoll {
                     let registered_events = interest.registered_events();
                     if let Err(err) = self.register_waker_only(
                         &interest,
-                        IoEvents::empty(),
-                        false,
+                        // Rearming must catch a new direction that became ready
+                        // after consume, without repeating the delivered level.
+                        registered_events - event.events,
                         registered_events,
-                        false,
                     ) {
                         // Event already copied out; keep partial results and
                         // requeue so a later poll can retry rearm.
@@ -865,18 +793,12 @@ impl Epoll {
                 }
                 ConsumeResult::NoEvent {
                     queue_current_events,
-                    queue_registered_wake,
                     registered_events,
-                    post_register_poll,
                 } => {
                     interest.mark_not_in_queue();
-                    if let Err(err) = self.register_waker_only(
-                        &interest,
-                        queue_current_events,
-                        queue_registered_wake,
-                        registered_events,
-                        post_register_poll,
-                    ) {
+                    if let Err(err) =
+                        self.register_waker_only(&interest, queue_current_events, registered_events)
+                    {
                         return Self::finish_poll_events(
                             &self.inner,
                             count,
