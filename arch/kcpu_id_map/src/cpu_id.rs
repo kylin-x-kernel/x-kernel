@@ -118,7 +118,7 @@ fn current_cpu_id_map() -> &'static CpuIdMap {
     CPU_ID_MAP.get().unwrap_or(&UNINITIALIZED_CPU_ID_MAP)
 }
 
-fn load_cpu_id_map(load: impl FnOnce(&mut CpuIdMap) -> bool) -> bool {
+pub(crate) fn load_cpu_id_map(load: impl FnOnce(&mut CpuIdMap) -> bool) -> bool {
     assert!(
         CPU_ID_MAP.get().is_none(),
         "CPU id map is already initialized"

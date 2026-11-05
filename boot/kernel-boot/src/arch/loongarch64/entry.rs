@@ -238,7 +238,7 @@ pub(super) unsafe extern "C" fn __primary_switched(
     // SAFETY: boot MMU setup cached the DTB/RSDP firmware table addresses in
     // boot globals that remain valid until kernel handoff.
     let (dtb_paddr, rsdp_paddr) = unsafe { super::mmu::boot_firmware_tables() };
-    kcpu_id_map::init_boot_cpu_id_map(dtb_paddr);
+    kcpu_id_map::init_boot_cpu_id_map(dtb_paddr, raw_cpu_id);
     #[expect(
         clippy::panic,
         reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware CPU description \

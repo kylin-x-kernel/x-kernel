@@ -1,5 +1,31 @@
 # Boot Entry Design Notes
 
+## LoongArch CPU-Cap Handoff
+
+The primary entry passes its actual CSR CPUID to `kcpu_id_map`. Before
+truncating enabled DTB CPU nodes to `NR_CPUS`, the mapper retains that CPU as
+logical CPU zero, followed by the remaining CPUs in firmware order. This
+requires no allocation and does not synthesize a CPU absent from firmware.
+QEMU enumerates LoongArch CPUs in descending order, so truncating first can
+otherwise discard CPU0 and cause a panic before the runtime console exists.
+
+Regression procedure (retain `NR_CPUS=1`):
+
+```sh
+cp platforms/kplat-loongarch64/qemu_defconfig .config
+make defconfig
+make UNITTEST=y build
+bash boot/kernel-boot/tests/loongarch-cpu-cap.sh target/xkmake/kplat-loongarch64/release/kernel.bin
+```
+
+The same image must reach primary entry and allocator initialization with
+1, 2, 4 and 8 QEMU vCPUs. This tests firmware CPU-cap handling, not secondary
+CPU execution. The LoongArch platform feature currently does not enable
+`kfeat/smp`. Increasing `NR_CPUS` alone is not a supported SMP configuration:
+runtime can discover multiple CPUs but never starts the APs, then waits for
+their service readiness. Enabling and validating LoongArch SMP is separate
+from retaining the boot CPU in a capped map.
+
 ## Ordinary IRQ Exclusion
 
 RISC-V and LoongArch primary and secondary entries establish ordinary IRQ

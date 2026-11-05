@@ -1,5 +1,16 @@
 # Boot Entry Security Notes
 
+## LoongArch CPU Enumeration Boundary
+
+The current CPU's hardware ID comes from CSR CPUID, not DTB node ordering.
+CPU-cap truncation must retain its enabled DTB entry before admitting other
+CPUs; otherwise firmware order can exclude the executing primary CPU and
+trigger an early fatal lookup failure. The mapper never invents a missing
+boot CPU: invalid firmware still reaches the existing fatal-boot boundary.
+The bounded map remains capped at `NR_CPUS`; extra firmware CPUs are not
+started. Validation includes over-cap QEMU boots, but does not claim coverage
+of malformed DTBs, duplicate IDs or physical firmware implementations.
+
 ## Ordinary IRQ Entry Boundary
 
 The RISC-V and LoongArch entry instructions explicitly mask ordinary IRQ
