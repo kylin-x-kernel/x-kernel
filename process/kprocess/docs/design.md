@@ -8,13 +8,18 @@ non-SI_USER realtime owner exhaustion reaches userspace as EAGAIN. Target,
 permission and signal-zero behavior remain unchanged. Group delivery retains
 its existing partial-delivery semantics; no rollback of prior recipients is added.
 
-Current-kernel signal delivery and non-SIGCHLD child-exit notifications explicitly
-use SignalNotification::kernel_fallback. These audited events retain a pending
-bit if NOWAIT owner allocation fails, without requiring userspace to retry an
-exit event. Userspace send helpers never opt in based on a siginfo code.
+Current-kernel signal delivery explicitly uses SignalNotification::kernel_fallback.
+Non-SIGCHLD child-exit notifications use ordinary admission: realtime CLD_* owner
+exhaustion is logged without publishing a pending bit or interrupting the parent.
+The independent notify_child_exit call still wakes wait* waiters after exit
+publication. Userspace send helpers never opt in based on a siginfo code.
 Prepared POSIX timers still submit reserved ownership without allocating.
 Tests adapt existing delivery calls to Result; fault injection remains at the
 ksignal production allocator seam, not syscall dispatch or global allocation.
+The realtime child-exit regression injects ordinary owner failure for CLD_EXITED,
+CLD_KILLED and CLD_DUMPED payloads and checks that pending state, fatal epochs
+and signal wake observers remain unchanged. It does not inject failure through
+the complete process-exit and wait* path.
 
 ## Independent Standard Timer Notifications
 

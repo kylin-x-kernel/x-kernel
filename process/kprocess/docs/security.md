@@ -4,9 +4,10 @@
 
 send_signal errors propagate before task interruption. Ordinary realtime owner
 exhaustion returns WouldBlock instead of pretending delivery or invoking fatal
-OOM. Only audited current-kernel and child-exit sends explicitly permit bit-only
-fallback; ABI SI_KERNEL does not grant that policy to userspace. The child-exit
-wait-state notification remains independent of signal metadata preservation.
+OOM. Only audited current-kernel sends explicitly permit bit-only fallback;
+ABI SI_KERNEL does not grant that policy to userspace. Realtime child-exit
+notifications use ordinary CLD_* admission: owner exhaustion is logged without
+publishing a signal, while the independent child-exit wait notification still runs.
 This does not make process construction, nested allocations or user accounting
 memory-pressure safe. Kernel-generated fallback can lose sender/status details.
 

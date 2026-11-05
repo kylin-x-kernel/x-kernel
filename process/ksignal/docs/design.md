@@ -17,8 +17,8 @@ publish pending_changed notifications. Failed ordinary nodes own only plain
 siginfo; destruction under the lock releases no timer or runtime references.
 
 SignalNotification::kernel_fallback explicitly permits loss of details for
-audited kernel sends: current-kernel signal delivery, fatal trap delivery and
-non-SIGCHLD child-exit notifications. Userspace conversion never gains this
+audited kernel sends: current-kernel signal delivery and fatal trap delivery.
+Child-exit notifications retain ordinary admission. Userspace conversion never gains this
 policy from SI_KERNEL or another ABI code. This is not NOFAIL allocation:
 NOWAIT may fail and delivery then retains only an aggregate pending bit.
 
@@ -489,9 +489,10 @@ standard-only proposal, enabling realtime fallback requires changing the
 realtime dequeue path at the same time as its admission path.
 
 Non-SIGCHLD child-exit notifications may use a caller-selected realtime signo.
-Their post-exit sender now explicitly selects kernel_fallback; the parent's
-wait-state notification remains separate. This preserves a pending bit on owner
-exhaustion without claiming that every kernel-originated payload is infallible. SIGCHLD's prepared exit decision is
+Their post-exit sender uses ordinary CLD_* admission. Realtime owner exhaustion
+returns WouldBlock without publishing a pending bit; the sender logs the error
+and independently notifies the parent's wait-state observers, matching Linux
+do_notify_parent. Kernel origin alone does not authorize fallback. SIGCHLD's prepared exit decision is
 not a prepared storage lease and does not authorize a timer completion.
 
 Acceptance cases: inject ordinary owner failure for standard and realtime

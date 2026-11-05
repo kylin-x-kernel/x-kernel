@@ -99,11 +99,9 @@ pub fn complete_process_exit(process: &Arc<Process>) -> bool {
         delivery.commit_and_interrupt();
     } else if let Some(signo) = transition.exit_signal
         && signo != Signo::SIGCHLD
-        && let Err(err) = process_signals::send_notification_to_process_ref(
+        && let Err(err) = process_signals::send_to_process_ref(
             &parent,
-            Some(ksignal::SignalNotification::kernel_fallback(
-                child_exit_signal_info(process, &parent, signo).into_signal_info(),
-            )),
+            Some(child_exit_signal_info(process, &parent, signo).into_signal_info()),
         )
     {
         warn!(

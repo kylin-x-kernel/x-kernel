@@ -618,6 +618,31 @@ fn shared_realtime_owner_failure_does_not_publish_fatal_epoch_or_wake() {
 }
 
 #[def_test]
+fn realtime_child_exit_owner_failure_does_not_publish_signal() {
+    for status in [7 << 8, 9, 11 | 0x80] {
+        let receiver = new_thread_manager();
+        let process = receiver.process();
+        let source = receiver.pending_source().unwrap();
+        let (observed, _registration) = observe_pending(&source, &receiver, Signo::SIGRTMIN);
+        let before = process.fatal_signal_snapshot();
+        let child = ChildExitInfo::from_wait_status(
+            42,
+            1000,
+            status,
+            TimeSpan::from_millis(20),
+            TimeSpan::from_millis(30),
+        );
+        let info = ChildExitSignalInfo::new(Signo::SIGRTMIN, child).into_signal_info();
+        let failed = process.send_signal_with_allocator(info.into(), false, |_| None);
+        assert_eq!(failed.admission_result(), Err(kerrno::KError::WouldBlock));
+        assert_eq!(failed.wake_tid(), None);
+        assert_eq!(process.fatal_signal_snapshot(), before);
+        assert!(receiver.pending().is_empty());
+        assert_eq!(observed.calls.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[def_test]
 fn ignored_realtime_admission_does_not_attempt_owner_allocation() {
     let receiver = new_thread_manager();
     receiver
