@@ -742,7 +742,7 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg3().into(),
         ),
         Sysno::sysinfo => sys_sysinfo(uctx.arg0().into()),
-        Sysno::syslog => sys_syslog(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::syslog => sys_syslog(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
         Sysno::getrandom => sys_getrandom(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         Sysno::seccomp => sys_seccomp(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         #[cfg(target_arch = "riscv64")]

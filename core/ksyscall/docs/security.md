@@ -397,3 +397,48 @@ IDs return InvalidInput before user-memory access. Recognizing an enum does not
 grant support for every syscall: the existing setter, sleep and timerfd subsets
 and their error ordering remain enforced. The timerfd backend accepts only
 `TimerFdClock`, so invalid integer IDs cannot silently select REALTIME.
+
+### Kernel log read-back (`syslog`)
+
+`syslog(2)` is gated per action, matching Linux with `dmesg_restrict` off (its
+default): `READ_ALL` and `SIZE_BUFFER` are readable by any caller — otherwise an
+unprivileged `dmesg` could not run at all — while `READ_CLEAR`, `CLEAR` and
+`SIZE_UNREAD` require privilege, as does any unknown action. That means the log
+contents (kernel addresses from backtraces, module paths, task names) are an
+unprivileged information channel exactly as on a stock Linux kernel; the way to
+close it is Linux's `dmesg_restrict`, which this kernel does not implement yet.
+
+The privilege predicate is `CAP_SYSLOG`, like Linux's `check_syslog_permissions`:
+a non-root caller that holds the capability may read-and-clear and clear the log,
+and root is trusted only while its capability set retains it.
+
+Read actions rebuild a typed `UserPtr<u8>` and reject a null destination as
+`InvalidInput`; the actual copy runs after the log ring's lock is released, and a
+failing copy returns its own error without dropping anything.
+
+`len` is a signed 32-bit ABI argument, so it is truncated to `i32` and a negative
+value is rejected with `InvalidInput` before the ring or the destination is
+touched; clamping it to the buffer size would copy up to the whole ring past a
+length the caller declared as negative. Truncating first means a caller cannot
+smuggle a "huge" length past the check by encoding the same value with a
+zero-extended register.
+
+`READ_CLEAR` drops the whole unread range after a successful copy that delivered
+at least one byte (`logbuf_clear`) — a zero length or an empty window returns 0
+and keeps the buffer, matching Linux's early return for `len == 0` — which is what
+Linux's clear cursor ends up doing: it advances
+past the records it returned *and* past the older ones a short destination could
+not take, so nothing is re-delivered. A page fault on the destination keeps
+everything, because the clear runs only after the copy succeeded. A caller that
+wants every record sizes its buffer from `SIZE_BUFFER`, as `dmesg` does.
+
+Snapshot size is clamped to `min(requested_len, LOGBUF_SIZE)`, so the kernel
+allocation is bounded by the ring (64 KiB) and never by the caller's `len`. The
+clamp deliberately does not consult `logbuf_len()`: a record published between
+that sample and the read would make the buffer smaller than the newest record and
+turn a plain read into a spurious 0.
+Console-verbosity actions stay unimplemented on purpose: Linux's inverted
+`console_loglevel` numbering would let an unauthorized or confused writer
+change console verbosity through a path that looks like a read. Console
+control remains on `/proc/sys/kernel/printk`, whose write side has its own
+privilege check and spec validation.

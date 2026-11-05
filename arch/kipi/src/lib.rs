@@ -252,7 +252,7 @@ fn enqueue_callback(dest_cpu: LogicalCpuId, callback: Callback) {
 /// allocating a callback owner; initial Arc and queue growth remain infallible.
 /// Sending is not NMI-safe or allocator-reentrant.
 pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
-    debug!("Send IPI event to all other CPUs");
+    trace!("Send IPI event to all other CPUs");
     let current_cpu_id = this_cpu_id();
     let callback = callback.into();
 
@@ -411,7 +411,7 @@ pub fn ipi_handler() {
         .lock()
         .pop_one()
     {
-        debug!("Received IPI event from CPU {}", src_cpu_id.as_usize());
+        trace!("Received IPI event from CPU {}", src_cpu_id.as_usize());
 
         // use logging instead of silent failure
         callback.call();

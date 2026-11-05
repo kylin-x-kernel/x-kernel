@@ -133,9 +133,107 @@ pub(crate) fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
     Ok(0)
 }
 
-/// Access kernel log buffer (syslog)
-pub(crate) fn sys_syslog(_type: i32, _buf: *mut c_char, _len: usize) -> KResult<isize> {
-    Ok(0)
+/// `syslog(2)` action: return the whole kernel log buffer (Linux
+/// `SYSLOG_ACTION_READ_ALL`).
+const SYSLOG_ACTION_READ_ALL: i32 = 3;
+/// `syslog(2)` action: like `READ_ALL`, then drop the bytes that were returned.
+const SYSLOG_ACTION_READ_CLEAR: i32 = 4;
+/// `syslog(2)` action: empty the buffer.
+const SYSLOG_ACTION_CLEAR: i32 = 5;
+/// `syslog(2)` action: return how many bytes are unread.
+const SYSLOG_ACTION_SIZE_UNREAD: i32 = 9;
+/// `syslog(2)` action: return the buffer's total size.
+const SYSLOG_ACTION_SIZE_BUFFER: i32 = 10;
+
+/// Whether `action` needs privilege, mirroring Linux's `syslog_action_restricted`.
+///
+/// With `dmesg_restrict` off (Linux's default, and X-Kernel has no restrict
+/// knob) Linux keeps `READ_ALL` and `SIZE_BUFFER` open to every caller, so
+/// `dmesg` works for an unprivileged user; clearing the log, read-and-clear and
+/// the unread count stay restricted. Unknown actions count as restricted, which
+/// is also how Linux reaches `EPERM` before it reaches its `EINVAL` default.
+///
+/// The privilege predicate is `CAP_SYSLOG`, as in Linux: capability sets exist,
+/// so a non-root caller that holds the capability may read-and-clear and clear
+/// the log, and root is trusted only when its capability set says so.
+fn action_needs_privilege(action: i32) -> bool {
+    !matches!(action, SYSLOG_ACTION_READ_ALL | SYSLOG_ACTION_SIZE_BUFFER)
+}
+
+/// Accesses the kernel log buffer (`dmesg`).
+///
+/// Only the read side is implemented, which is what `dmesg` uses; the console
+/// verbosity controls (`SYSLOG_ACTION_CONSOLE_*`) stay with
+/// `/proc/sys/kernel/printk`, whose value domain is X-Kernel's (higher = more
+/// verbose), so reusing Linux's inverted numbering here would be a trap.
+///
+/// Both read actions return the **newest** whole records that fit, in log order —
+/// the shape Linux's `syslog_print_all` produces (it walks back from the newest
+/// record until the requested size fits, and starts the copy at a record
+/// boundary; if even the newest record does not fit, it returns 0 rather than a
+/// fragment). `READ_CLEAR` then advances past everything it returned, which is
+/// also what Linux does with `clear_seq`: records older than the returned window
+/// were skipped by the same cursor, so the whole unread range is consumed. A
+/// caller that wants the entire buffer sizes it from `SIZE_BUFFER`, as `dmesg`
+/// does. A zero length returns 0 without touching the ring (Linux returns before
+/// `syslog_print_all` for `len == 0`).
+///
+/// `len` is decoded at the ABI width: Linux declares it `int`, so the register
+/// is truncated to `i32` and a negative value is rejected with `InvalidInput`
+/// before the buffer or the ring is touched — the same result as Linux's
+/// `len < 0` check, for both the sign-extended and the zero-extended register
+/// encodings a caller can produce.
+///
+/// `buf` arrives as the typed [`UserPtr`] the dispatch arm builds, like every
+/// other pointer argument in this crate; the actions that do not use it simply
+/// ignore it.
+pub(crate) fn sys_syslog(action: i32, buf: UserPtr<u8>, len: i32) -> KResult<isize> {
+    // Privilege is decided per action and before the action is validated, the
+    // order Linux's `check_syslog_permissions` uses: reading the log is open to
+    // any caller, while mutating it (or asking for the unread count) is not.
+    if action_needs_privilege(action) && !kprocess::current_cred().has_cap(kcred::CAP_SYSLOG) {
+        return Err(KError::OperationNotPermitted);
+    }
+    match action {
+        SYSLOG_ACTION_SIZE_BUFFER => Ok(klogger::LOGBUF_SIZE as isize),
+        SYSLOG_ACTION_SIZE_UNREAD => Ok(klogger::logbuf_len() as isize),
+        SYSLOG_ACTION_CLEAR => {
+            klogger::logbuf_clear();
+            Ok(0)
+        }
+        SYSLOG_ACTION_READ_ALL | SYSLOG_ACTION_READ_CLEAR => {
+            if len < 0 {
+                return Err(KError::InvalidInput);
+            }
+            let user = buf;
+            if user.is_null() {
+                // A null destination is invalid whatever the length, as in Linux.
+                return Err(KError::InvalidInput);
+            }
+            if len == 0 {
+                // Nothing to deliver and nothing to consume.
+                return Ok(0);
+            }
+            let len = len as usize;
+            // Bound the kernel buffer by the caller's length and the ring size,
+            // never by a separate `logbuf_len` sample: a record published between
+            // that sample and the read would make the buffer too small for the
+            // newest record and turn the read into a spurious 0.
+            let mut kbuf = alloc::vec![0u8; len.min(klogger::LOGBUF_SIZE)];
+            let (copied, newest) = klogger::logbuf_read_newest_seq(&mut kbuf);
+            user.write_vm_slice(&kbuf[..copied])?;
+            if action == SYSLOG_ACTION_READ_CLEAR && copied > 0 {
+                // Only after a successful copy that delivered something, and only
+                // up to the newest record the window covered: records logged
+                // after the snapshot (during the user copy, say) stay buffered,
+                // which is Linux's `clear_seq` cursor behaviour. This also drops
+                // the older records the window skipped.
+                klogger::logbuf_clear_through(newest);
+            }
+            Ok(copied as isize)
+        }
+        _ => Err(KError::InvalidInput),
+    }
 }
 
 /// Sets the hostname in the calling process's UTS namespace.
@@ -322,3 +420,4 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
     Ok(written as _)
 }
 unittest::path_mod_test!(tests_sysinfo, "../ut-tests/sys/tests_sysinfo.rs");
+unittest::path_mod_test!(tests_syslog, "../ut-tests/sys/tests_syslog.rs");

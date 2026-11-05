@@ -12,7 +12,7 @@ use unittest::{assert_eq, def_test};
 use super::{
     build_floor_from, build_level_floor, current_log_level, effective_ceiling, filter_enabled,
     filter_spec, level_name, level_number,
-    parse_log_level, set_filter_spec, set_log_level,
+    logbuf_clear, logbuf_clear_through, logbuf_len, logbuf_read_newest, logbuf_read_newest_seq, parse_log_level, set_filter_spec, set_log_level,
     set_log_level_filter,
 };
 
@@ -39,6 +39,14 @@ impl SavedSpec {
     }
 }
 
+/// Whole-ring snapshot, for assertions that must not depend on how much other
+/// kernel threads logged in the meantime.
+fn ring_snapshot() -> alloc::vec::Vec<u8> {
+    let mut buf = alloc::vec![0u8; super::LOGBUF_SIZE];
+    let len = logbuf_read_newest(&mut buf);
+    buf.truncate(len);
+    buf
+}
 
 #[def_test]
 fn parse_accepts_level_names_case_insensitively() {
@@ -217,7 +225,275 @@ fn filter_spec_rejects_bad_input_without_half_applying() {
     saved.restore();
 }
 
+/// A record the console filter drops still lands in the ring: that is the
+/// "quiet console, complete log" contract `dmesg` depends on, and it holds for
+/// every build cap because capture is no longer derived from the console filter.
+///
+/// `serial`: the ring and the filter are process-global resources. The assertions
+/// below are scoped to this test's own unique markers because other kernel
+/// threads keep logging concurrently.
+#[def_test(serial)]
+fn logbuf_captures_records_the_console_filter_hides() {
+    let saved = SavedSpec::take();
+    // Console filter `off`: even `error!` is not printed. `error` is at or below
+    // every build cap, so the ring still records it in any configuration.
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    // Drop whatever earlier contexts buffered: the window below must be this
+    // test's records.
+    logbuf_clear();
 
+    super::error!("klogger logbuf captured marker");
+
+    // Search the whole ring: a fixed window could be filled by other kernel
+    // threads between the record and the read.
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
+    let line = text
+        .lines()
+        .find(|line| line.contains("klogger logbuf captured marker"))
+        .expect("the record the console dropped is missing from the ring");
+    // Each line carries X-Kernel's own level number, which is what makes
+    // `dmesg | grep '^<1>'` a level filter.
+    assert!(
+        line.starts_with("<1>"),
+        "the captured record lost its level: {text}"
+    );
+    // A whole-ring snapshot ends on a record boundary.
+    assert!(text.ends_with('\n'), "record without newline: {text:?}");
+
+    // Clearing drops this test's records; unrelated records may follow.
+    logbuf_clear();
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
+    assert!(
+        !text.contains("klogger logbuf"),
+        "clear left stale records: {text}"
+    );
+
+    saved.restore();
+}
+
+/// A read returns the newest whole records that fit, oldest first, starting at a
+/// record boundary — Linux's `syslog_print_all` shape — and never consumes.
+///
+/// `serial` because the ring is process-global; the level used is `error`, which
+/// is at or below every build cap, and the records are emitted while the console
+/// filter is `off` so nothing goes through the UART.
+#[def_test(serial)]
+fn logbuf_read_returns_the_newest_whole_records() {
+    let saved = SavedSpec::take();
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    logbuf_clear();
+
+    super::error!("klogger order marker one");
+    super::error!("klogger order marker two");
+
+    // Whole-ring window: independent of how much other contexts logged.
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
+    let first = text.find("klogger order marker one").expect("first record");
+    let second = text.find("klogger order marker two").expect("second record");
+    assert!(first < second, "records are not in log order: {text}");
+    assert!(text.ends_with('\n'), "snapshot does not end a record: {text:?}");
+
+    // Reading does not consume; the markers are still there. Their *byte count*
+    // is not compared with a later read: other threads keep logging into this
+    // process-global ring, so only the content is stable.
+
+    // A destination smaller than the ring gets the *newest* whole records, and
+    // never a fragment: either at least one whole record, starting at a record
+    // boundary, or nothing at all.
+    let mut small = [0u8; 96];
+    let small_len = logbuf_read_newest(&mut small);
+    assert!(small_len <= small.len());
+    let tail = core::str::from_utf8(&small[..small_len]).expect("log text is utf-8");
+    assert!(
+        small_len == 0 || tail.starts_with('<'),
+        "the window does not start at a record boundary: {tail:?}"
+    );
+
+    // A destination smaller than the newest record returns nothing rather than
+    // half a record.
+    let mut tiny = [0u8; 4];
+    assert_eq!(logbuf_read_newest(&mut tiny), 0);
+
+    logbuf_clear();
+    saved.restore();
+}
+
+/// The read window never starts inside a record, even when the record body
+/// itself contains a newline (a message may carry one, and `/dev/log` forwards a
+/// user datagram verbatim), so a line-scanner would cut in the wrong place.
+#[def_test(serial)]
+fn logbuf_window_starts_at_a_record_boundary_despite_embedded_newlines() {
+    let saved = SavedSpec::take();
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    logbuf_clear();
+
+    super::error!("first line of a multi-line record");
+    super::error!("second line\nthird line of a multi-line record");
+
+    // Every destination size either yields whole records or nothing. (No
+    // comparison against a snapshot taken earlier: other kernel threads keep
+    // logging, so the ring's tail moves between the two reads; the property under
+    // test is the window *shape*.)
+    let _ = ring_snapshot();
+    for size in [1usize, 8, 16, 32, 64, 96, 128, 4096] {
+        let mut buf = alloc::vec![0u8; size];
+        let len = logbuf_read_newest(&mut buf);
+        assert!(len <= size);
+        if len == 0 {
+            continue;
+        }
+        let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
+        assert!(
+            text.starts_with('<'),
+            "a {size}-byte window started mid-record: {text:?}"
+        );
+        // A window is whole records: it starts with a record's level tag and
+        // ends with the terminator of the last record it includes.
+        assert!(
+            text.ends_with('\n'),
+            "a {size}-byte window ends inside a record: {text:?}"
+        );
+    }
+
+    logbuf_clear();
+    saved.restore();
+}
+
+/// A ring that wrapped keeps serving whole records: a record the wrap cut into is
+/// dropped rather than returned in part.
+#[def_test(serial)]
+fn logbuf_serves_whole_records_after_a_wrap() {
+    let saved = SavedSpec::take();
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    logbuf_clear();
+
+    // Wrap the ring several times; records are ~80 bytes, so this is well past
+    // 64 KiB.
+    for index in 0..1200 {
+        super::error!("klogger wrap marker {index}");
+    }
+
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
+    assert!(!text.is_empty());
+    assert!(
+        text.starts_with('<'),
+        "the window after a wrap starts mid-record: {text:?}"
+    );
+    assert!(text.ends_with('\n'), "the snapshot ends mid-record");
+
+    logbuf_clear();
+    saved.restore();
+}
+
+/// A `READ_CLEAR` drops exactly the records a read returned and leaves later
+/// ones buffered, so records logged while the reader was copying are not lost.
+#[def_test(serial)]
+fn logbuf_clear_through_keeps_records_above_the_watermark() {
+    let saved = SavedSpec::take();
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    logbuf_clear();
+
+    super::error!("klogger watermark before");
+    let mut buf = alloc::vec![0u8; super::LOGBUF_SIZE];
+    let (len, watermark) = logbuf_read_newest_seq(&mut buf);
+    assert!(len > 0);
+    let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
+    assert!(text.contains("klogger watermark before"));
+    assert!(watermark > 0, "a read must report its clear watermark");
+
+    super::error!("klogger watermark after");
+    logbuf_clear_through(watermark);
+
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
+    assert!(
+        !text.contains("klogger watermark before"),
+        "the cleared record came back: {text}"
+    );
+    assert!(
+        text.contains("klogger watermark after"),
+        "a record logged after the read was cleared: {text}"
+    );
+
+    logbuf_clear();
+    saved.restore();
+}
+
+/// A clear is a watermark, not an erasure: the bodies stay in the ring, so a
+/// record pushed after a clear must not be mixed with stale bytes of a longer
+/// record that occupied the same place.
+#[def_test(serial)]
+fn logbuf_clear_hides_bodies_without_erasing_them() {
+    let saved = SavedSpec::take();
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    logbuf_clear();
+
+    super::error!("klogger pre-clear record with a long body that fills the slot");
+    logbuf_clear();
+    super::error!("klogger post-clear x");
+
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
+    assert!(
+        !text.contains("pre-clear record"),
+        "a cleared record came back: {text}"
+    );
+    let line = text
+        .lines()
+        .find(|line| line.contains("klogger post-clear x"))
+        .expect("the record pushed after the clear is missing");
+    assert!(
+        line.ends_with("post-clear x"),
+        "a shorter record kept bytes of a longer one: {line:?}"
+    );
+
+    logbuf_clear();
+    saved.restore();
+}
+
+/// The reported length tracks the ring: it grows with the records, saturates at
+/// the ring size instead of overrunning it, and returns to 0 on a clear.
+///
+/// The length is a snapshot, and other kernel threads keep logging regardless of
+/// the console filter, so this asserts the bound rather than an exact equality
+/// with a second read.
+#[def_test(serial)]
+fn logbuf_length_tracks_the_ring_and_saturates() {
+    let saved = SavedSpec::take();
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    logbuf_clear();
+
+    super::error!("klogger length marker one");
+    let after_one = logbuf_len();
+    assert!(after_one > 0, "a captured record reported no bytes");
+
+    for index in 0..1500 {
+        super::error!("klogger length marker fill {index}");
+        let len = logbuf_len();
+        assert!(len <= super::LOGBUF_SIZE, "the ring overran its budget: {len}");
+    }
+    assert!(
+        logbuf_len() > super::LOGBUF_SIZE - 1024,
+        "a wrapped ring reports far less than it holds"
+    );
+
+    // A clear is a watermark, so a record another thread publishes right after it
+    // is visible again; "the marker is gone" is the property, not "length is 0".
+    super::error!("klogger length marker after-clear");
+    logbuf_clear();
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
+    assert!(
+        !text.contains("klogger length marker fill"),
+        "the clear left records behind: {}",
+        &text[..text.len().min(200)]
+    );
+    saved.restore();
+}
 
 /// The build level is the logger's floor, so it must never be `off`; a
 /// configuration that selects nothing falls back to `error` rather than silence.
@@ -264,3 +540,37 @@ fn console_filter_moves_the_ceiling_but_not_below_the_build_floor() {
     saved.restore();
 }
 
+/// A record longer than the line buffer keeps its terminating newline and never
+/// ends in the middle of a code point, so `dmesg` still sees one line per
+/// record.
+#[def_test(serial)]
+fn logbuf_terminates_truncated_records() {
+    use alloc::string::String;
+
+    let saved = SavedSpec::take();
+    // `off` keeps the console quiet; `error` is at or below every build cap, so
+    // the ring records these in any configuration.
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    logbuf_clear();
+
+    // Four times the 256-byte line buffer, so both records are truncated.
+    let long = String::from("0123456789abcdef").repeat(16);
+    super::error!("marker-one {long}");
+    super::error!("marker-two {long}");
+    // Truncation must not split a three-byte code point.
+    super::error!("{}", String::from("\u{5b57}").repeat(120));
+
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
+    let marker_lines: alloc::vec::Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("marker-one") || line.contains("marker-two"))
+        .collect();
+    assert_eq!(marker_lines.len(), 2, "records ran together: {text}");
+    for line in marker_lines {
+        assert!(line.len() < 256, "record over the line budget: {line:?}");
+    }
+    assert!(text.ends_with('\n'), "record without terminator: {text:?}");
+
+    saved.restore();
+}

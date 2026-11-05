@@ -726,3 +726,73 @@ Timerfd creation maps the accepted enum to the backend's `TimerFdClock`, which
 is retained through construction and arming; raw ABI IDs do not enter the backend.
 `ut-tests/time_clock_id.rs` checks ABI identity, negative/unknown rejection before
 user-memory access and operation-specific restrictions.
+
+### Kernel log read-back (`syslog`)
+
+`sys_syslog` is the adapter over `klogger`'s log ring. The ring, the filter and
+the level vocabulary all belong to `klogger`; `ksyscall` only validates the
+arguments, reads a window of the ring and performs the user copy.
+
+Implemented actions, with Linux's numbering:
+
+| action | name | behaviour |
+|--------|------|-----------|
+| 3 | `READ_ALL` | return the newest whole records that fit, keep them buffered |
+| 4 | `READ_CLEAR` | return the newest whole records that fit, then drop them and everything older (a clear watermark, not "the ring as it is now") |
+| 5 | `CLEAR` | drop the whole buffer, return 0 |
+| 9 | `SIZE_UNREAD` | return the number of buffered bytes |
+| 10 | `SIZE_BUFFER` | return the ring's total capacity |
+
+Order of operations and failure handling:
+
+1. Privilege is decided **per action**, before the action is validated — the
+   order Linux's `check_syslog_permissions` uses. `READ_ALL` (3) and
+   `SIZE_BUFFER` (10) are open to every caller, matching Linux's default
+   (`dmesg_restrict` off); `READ_CLEAR` (4), `CLEAR` (5) and `SIZE_UNREAD` (9)
+   require privilege, and an unknown action counts as restricted so an
+   unprivileged caller sees `EPERM` where Linux also returns `EPERM` before its
+   `EINVAL` default. The predicate is `CAP_SYSLOG`, as in Linux's
+   `check_syslog_permissions`: capability sets exist, so a non-root caller that
+   holds the capability may clear the log, and root is trusted only while its
+   capability set retains it.
+2. The `SIZE_*` actions return `klogger`'s count and capacity.
+3. The read actions decode `len` at its ABI width (`i32`) and reject a negative
+   value with `InvalidInput` before touching the ring: Linux declares the
+   argument as a signed `int`, so a caller's `-1` must fail like Linux's
+   `len < 0` instead of being clamped to the buffer size and copied past the
+   length the caller declared. Truncating to `i32` first normalizes both the
+   sign-extended and the zero-extended register encodings to the same value.
+4. They then rebuild a typed `UserPtr<u8>` and reject a null destination with
+   `InvalidInput`.
+5. A kernel read buffer is allocated, sized `len.min(LOGBUF_SIZE)` — bounded by
+   the caller's length and the ring, never by a separate `logbuf_len()` sample (a
+   record published between that sample and the read would make the buffer too
+   small for the newest record) — and filled
+   by `klogger::logbuf_read_newest_seq`, which copies the newest records that fit,
+   oldest first, starting at a record boundary and returning `(copied, newest)`.
+   `newest` is the sequence number of the window's last record and is what a
+   `READ_CLEAR` later hands to `klogger::logbuf_clear_through` as its clear
+   watermark. That is the shape Linux's `syslog_print_all` produces (it walks
+   back from the newest record until the size fits and starts the copy at a
+   record boundary), so a short destination receives the most recent records and
+   never a partial line. The ring takes no lock, so a concurrent push cannot split
+   the window and cannot stall the reader; **the user copy never runs with any
+   ring state held**, so a page fault on the destination cannot hold up a writer.
+6. A zero length returns 0 before the ring is touched: Linux returns ahead of
+   `syslog_print_all` for `len == 0`, and nothing was delivered, so nothing may be
+   consumed.
+7. `READ_CLEAR` calls `logbuf_clear_through(watermark)` after a successful copy
+   that delivered at least one byte, where the watermark is the sequence number of
+   the last record the read copied. Records logged after the snapshot — during
+   the user copy, say — therefore stay buffered, as with Linux's `clear_seq`; the
+   records older than the returned window are dropped too, because the cursor
+   also skips past everything it did not return.
+   so `dmesg -c` clears what it drained and does not re-deliver it. A copy failure
+   keeps everything, because the clear runs only after the copy succeeded.
+8. Every other action, including Linux's `CONSOLE_*` controls, returns
+   `InvalidInput`: console verbosity belongs to `/proc/sys/kernel/printk`, whose
+   value domain is inverted relative to Linux's, and mixing the two would let a
+   caller believe it changed something else.
+
+The return value is the number of bytes copied (`isize`), so `dmesg`,
+`dmesg -c` and `dmesg -r` work unchanged.

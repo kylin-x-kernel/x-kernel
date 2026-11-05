@@ -10,6 +10,7 @@ extern crate log;
 use core::{
     fmt::{self, Write},
     str::FromStr,
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering},
 };
 
 use kspin::{SpinNoIrq, static_lock};
@@ -258,6 +259,436 @@ impl FilterSpecWriter<'_> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Kernel log ring buffer ("dmesg"): every record that passes the `log`
+// ceiling is stored here, whether or not the console prints it. That is what
+// makes a quiet console and a complete boot log compatible: the console filter
+// decides what to *show*, this buffer keeps what happened, and userland reads
+// it back through `syslog(2)` / `dmesg`.
+// ---------------------------------------------------------------------------
+
+/// Fixed size of the kernel log buffer.
+pub const LOGBUF_SIZE: usize = 64 * 1024;
+/// Longest single stored line; longer records are truncated.
+const LOGBUF_LINE: usize = 256;
+/// Number of records the index tracks.
+///
+/// The ring stores bodies only; each published body's location lives in a slot,
+/// which is what makes a record boundary exact without putting framing bytes
+/// into the text that `dmesg` prints and without scanning for newlines (a
+/// message body may contain one). The ring keeps at most this many records even
+/// when its byte budget would allow more, so a flood of very short records
+/// retains less than 64 KiB.
+const LOGBUF_RECORDS: usize = 1024;
+/// How often a read restarts when the ring overwrites its window mid-copy.
+const LOGBUF_READ_RETRIES: usize = 8;
+
+/// Where one published record lives, indexed by its sequence number.
+///
+/// `seq` is the publication word: it holds 0 until the body is fully copied and
+/// then the record's sequence number, stored with `Release`. A reader loads it
+/// with `Acquire`, so seeing `seq == n` guarantees the `at`/`len` it reads are
+/// the ones written for record `n`, and that the body bytes it copied are the
+/// body of record `n` (a later record can overwrite those bytes, which the
+/// reader detects separately). Slots are recycled: record `n` and record
+/// `n + LOGBUF_RECORDS` share a slot, and a reader tells them apart by exact
+/// `seq` comparison.
+struct Slot {
+    seq: AtomicU64,
+    /// Absolute position of the body in the reservation space. Absolute, not
+    /// modulo the ring, because it is what tells a reader whether the body has
+    /// already been overwritten.
+    at: AtomicU64,
+    len: AtomicU16,
+}
+
+impl Slot {
+    const fn new() -> Self {
+        Self {
+            seq: AtomicU64::new(0),
+            at: AtomicU64::new(0),
+            len: AtomicU16::new(0),
+        }
+    }
+}
+
+/// Bodies, as single-byte atomics.
+///
+/// They are atomics rather than a plain array because a writer may be copying
+/// into the ring while a reader copies out of it. Each access is `Relaxed`: the
+/// `Release`/`Acquire` pair on [`Slot::seq`] and the final tail check order the
+/// two sides, so the bytes themselves need no stronger ordering. On the targets
+/// X-Kernel builds for, a relaxed single-byte atomic compiles to an ordinary
+/// `ldrb`/`strb`, so the record path does not pay a fence per byte.
+static LOGBUF_BYTES: [AtomicU8; LOGBUF_SIZE] = [const { AtomicU8::new(0) }; LOGBUF_SIZE];
+static LOGBUF_SLOTS: [Slot; LOGBUF_RECORDS] = [const { Slot::new() }; LOGBUF_RECORDS];
+/// End of the reservation space: a record's body starts where the reservation
+/// returned, and no writer ever writes below `LOGBUF_TAIL - LOGBUF_SIZE`.
+static LOGBUF_TAIL: AtomicU64 = AtomicU64::new(0);
+/// Sequence number of the newest record whose body is complete.
+static LOGBUF_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Records at or below this sequence number were cleared and are not readable.
+static LOGBUF_CLEARED: AtomicU64 = AtomicU64::new(0);
+
+/// The slot that holds record `seq` (1-based).
+fn slot_of(seq: u64) -> &'static Slot {
+    &LOGBUF_SLOTS[((seq - 1) % LOGBUF_RECORDS as u64) as usize]
+}
+
+/// Where record `seq` is, if it is still published and still inside the ring.
+///
+/// Whether a record slot is readable right now.
+enum SlotState {
+    /// Published and still inside the ring.
+    Live { at: u64, len: usize },
+    /// The sequence number is out but the slot still names the previous
+    /// incarnation, so the writer has not published the slot yet. The record
+    /// becomes readable in a moment; a reader skips it.
+    Pending,
+    /// A newer incarnation has taken the slot (its sequence number is higher than
+    /// the one asked for), so this record can never become readable again.
+    Recycled,
+    /// The ring wrapped past the body, so the record is gone for good.
+    Gone,
+}
+
+/// The state of record `seq`, given the oldest absolute position still valid.
+///
+/// The sequence number is loaded with `Acquire` **before** the slot's `at`/`len`:
+/// the writer stores those with `Relaxed` and then publishes `seq` with
+/// `Release`, so only an acquire load of `seq` orders the metadata reads after
+/// it. Loading the metadata first could pair a new sequence number with the
+/// previous occupant's `at`/`len`. The second `seq` load catches a slot that was
+/// recycled while the metadata was read.
+fn slot_state(seq: u64, oldest_at: u64) -> SlotState {
+    let slot = slot_of(seq);
+    let published = slot.seq.load(Ordering::Acquire);
+    if published != seq {
+        // A slot's sequence number only grows, so a value above `seq` means a
+        // newer record already took this slot: the record is gone, not pending.
+        return if published > seq {
+            SlotState::Recycled
+        } else {
+            SlotState::Pending
+        };
+    }
+    let at = slot.at.load(Ordering::Relaxed);
+    let len = slot.len.load(Ordering::Relaxed) as usize;
+    if slot.seq.load(Ordering::Acquire) != seq {
+        return SlotState::Recycled;
+    }
+    if at < oldest_at || at + len as u64 > LOGBUF_TAIL.load(Ordering::Acquire) {
+        return SlotState::Gone;
+    }
+    SlotState::Live { at, len }
+}
+
+/// Appends `line` as one record. Never blocks and never disables interrupts.
+///
+/// The body is reserved with one `fetch_add` on [`LOGBUF_TAIL`], so writers on
+/// different CPUs never wait for each other: each owns a disjoint byte range,
+/// writes it, and only then publishes its slot. Publication order can therefore
+/// differ from byte order, which is why a record's identity is its sequence
+/// number and not its position.
+fn logbuf_push(line: &[u8]) {
+    let len = line.len().min(LOGBUF_SIZE);
+    if len == 0 {
+        return;
+    }
+    let at = LOGBUF_TAIL.fetch_add(len as u64, Ordering::Relaxed);
+    let offset = (at % LOGBUF_SIZE as u64) as usize;
+    let head = len.min(LOGBUF_SIZE - offset);
+    for (i, byte) in line[..head].iter().enumerate() {
+        LOGBUF_BYTES[offset + i].store(*byte, Ordering::Relaxed);
+    }
+    for (i, byte) in line[head..len].iter().enumerate() {
+        LOGBUF_BYTES[i].store(*byte, Ordering::Relaxed);
+    }
+    let seq = LOGBUF_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let slot = slot_of(seq);
+    slot.at.store(at, Ordering::Relaxed);
+    slot.len.store(len as u16, Ordering::Relaxed);
+    // Release: the body and the slot fields above are visible to a reader that
+    // loads this value with Acquire.
+    slot.seq.store(seq, Ordering::Release);
+}
+
+/// Copies the body of one record into `out`.
+fn copy_record(at: u64, len: usize, out: &mut [u8]) {
+    let offset = (at % LOGBUF_SIZE as u64) as usize;
+    let head = len.min(LOGBUF_SIZE - offset);
+    for i in 0..head {
+        out[i] = LOGBUF_BYTES[offset + i].load(Ordering::Relaxed);
+    }
+    for i in 0..len - head {
+        out[head + i] = LOGBUF_BYTES[i].load(Ordering::Relaxed);
+    }
+}
+
+/// The newest whole records that fit in `cap` bytes.
+///
+/// Returns `(first, newest, bytes)` — the records `first..=newest` — or `None`
+/// when nothing is readable. Walks back from the newest record and stops at the
+/// first one that is unpublished, cleared or already overwritten, so a window is
+/// always a contiguous run of real records and never mixes two ring states.
+fn newest_window(cap: usize) -> Option<(u64, u64, usize)> {
+    let cleared = LOGBUF_CLEARED.load(Ordering::Acquire);
+    let mut newest = LOGBUF_SEQ.load(Ordering::Acquire);
+    if newest <= cleared {
+        return None;
+    }
+    let oldest_at = LOGBUF_TAIL
+        .load(Ordering::Acquire)
+        .saturating_sub(LOGBUF_SIZE as u64);
+    // `logbuf_push` makes the sequence number visible after the body is copied
+    // but before the slot is published, so a reader can sample a newest record
+    // that is still being published. Step down to the highest published record
+    // instead of returning "nothing": the older records are perfectly readable.
+    //
+    // The step-down is bounded: only an in-flight publication (a handful of
+    // records, one per writing CPU) can be skipped. If the sample is so old that
+    // the ring already recycled its slot, `LOGBUF_SEQ` moved on and the window is
+    // recomputed from a fresh sample rather than walking sequence numbers.
+    let mut skipped = 0;
+    loop {
+        match slot_state(newest, oldest_at) {
+            SlotState::Live { .. } => break,
+            SlotState::Pending if skipped < LOGBUF_RECORDS => {
+                newest -= 1;
+                skipped += 1;
+                if newest <= cleared {
+                    return None;
+                }
+            }
+            // Recycled, gone, or too many pending hops: the sample is stale.
+            SlotState::Pending | SlotState::Recycled | SlotState::Gone => {
+                let refreshed = LOGBUF_SEQ.load(Ordering::Acquire);
+                if refreshed <= newest {
+                    return None;
+                }
+                newest = refreshed;
+                skipped = 0;
+            }
+        }
+    }
+    let mut first = newest + 1;
+    let mut bytes = 0;
+    while first > cleared + 1 && newest + 1 - first < LOGBUF_RECORDS as u64 {
+        let seq = first - 1;
+        match slot_state(seq, oldest_at) {
+            SlotState::Live { len, .. } => {
+                if bytes + len > cap {
+                    break;
+                }
+                bytes += len;
+                first = seq;
+            }
+            // A hole below the newest record: end the window here rather than
+            // returning records that skip over it.
+            SlotState::Pending | SlotState::Recycled | SlotState::Gone => break,
+        }
+    }
+    if first > newest {
+        return None;
+    }
+    Some((first, newest, bytes))
+}
+
+/// Bytes currently held in the kernel log buffer.
+pub fn logbuf_len() -> usize {
+    newest_window(usize::MAX)
+        .map(|(_, _, bytes)| bytes)
+        .unwrap_or(0)
+}
+
+/// Copies the newest **whole records** that fit into `out`, oldest first, and
+/// returns how many bytes were written.
+///
+/// A thin wrapper over [`logbuf_read_newest_seq`] for callers that do not clear
+/// afterwards.
+pub fn logbuf_read_newest(out: &mut [u8]) -> usize {
+    logbuf_read_newest_seq(out).0
+}
+
+/// Copies the newest **whole records** that fit into `out` and reports the
+/// window's newest record sequence number, which a `READ_CLEAR` uses as its
+/// clear watermark.
+///
+/// The window always starts and ends on a record boundary: when even the newest
+/// record does not fit, nothing is copied and the return value is `(0, 0)` — the
+/// same outcome Linux's `syslog_print_all` produces. Reading never consumes.
+///
+/// Neither side takes a lock. Writers reserve bodies with `fetch_add` and publish
+/// a slot, so a writer can wrap the ring onto the window while the copy runs;
+/// records are therefore copied newest first and each one is validated against
+/// the tail after it was copied. A wrap then costs the oldest records, not the
+/// newest: the read returns the surviving suffix of the window instead of an
+/// empty result, so a full ring under sustained logging never reports an empty
+/// log. Only a window whose newest record is already gone returns `(0, 0)`.
+pub fn logbuf_read_newest_seq(out: &mut [u8]) -> (usize, u64) {
+    for _ in 0..LOGBUF_READ_RETRIES {
+        let Some((first, newest, total)) = newest_window(out.len()) else {
+            return (0, 0);
+        };
+        // Walk backwards from the newest record, so the destination offsets of
+        // the records that survive a concurrent wrap stay valid.
+        let mut offset = total;
+        let mut accepted = None;
+        let mut seq = newest;
+        loop {
+            let tail = LOGBUF_TAIL.load(Ordering::Acquire);
+            let oldest_at = tail.saturating_sub(LOGBUF_SIZE as u64);
+            let SlotState::Live { at, len } = slot_state(seq, oldest_at) else {
+                break;
+            };
+            if len > offset {
+                break;
+            }
+            let begin = offset - len;
+            copy_record(at, len, &mut out[begin..offset]);
+            // The bytes are still this record's until the ring wraps past its
+            // start; a newer record is overwritten strictly later, so the first
+            // failure bounds the suffix that survives.
+            if LOGBUF_TAIL.load(Ordering::Acquire) >= at + LOGBUF_SIZE as u64 {
+                break;
+            }
+            offset = begin;
+            accepted = Some(seq);
+            if seq == first {
+                break;
+            }
+            seq -= 1;
+        }
+        if accepted.is_none() {
+            // Even the newest record did not survive: retry from a fresh window.
+            continue;
+        }
+        if offset > 0 {
+            out.copy_within(offset..total, 0);
+        }
+        // The accepted suffix always ends at the window's newest record, which is
+        // therefore the clear watermark a `READ_CLEAR` should use.
+        return (total - offset, newest);
+    }
+    (0, 0)
+}
+
+/// Drops every record up to and including `seq`, the watermark a `READ_CLEAR`
+/// takes from [`logbuf_read_newest_seq`].
+///
+/// Records logged after that watermark — including those logged while the read
+/// was copying — stay readable, which is Linux's `clear_seq` behaviour: a reader
+/// that loses records to concurrent logging can read them next time instead of
+/// losing them silently.
+pub fn logbuf_clear_through(seq: u64) {
+    LOGBUF_CLEARED.fetch_max(seq, Ordering::AcqRel);
+}
+
+/// Drops everything in the kernel log buffer.
+///
+/// The bodies stay in the ring; the clear watermark is what makes them
+/// unreadable, so a reader that is copying a window keeps a consistent picture
+/// instead of reading bytes that were zeroed underneath it.
+pub fn logbuf_clear() {
+    LOGBUF_CLEARED.store(LOGBUF_SEQ.load(Ordering::Acquire), Ordering::Release);
+}
+
+/// Fixed-capacity line writer: logging must not allocate, and a runaway
+/// message must not lose the interesting prefix.
+struct LineBuf {
+    buf: [u8; LOGBUF_LINE],
+    len: usize,
+}
+
+impl LineBuf {
+    const fn new() -> Self {
+        Self {
+            buf: [0; LOGBUF_LINE],
+            len: 0,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+
+    /// Appends the record's terminating newline.
+    ///
+    /// Kept separate from the formatting path so the terminator cannot be
+    /// truncated away: `write_str` reserves the byte, this writes it.
+    fn terminate(&mut self) {
+        self.buf[self.len] = b'\n';
+        self.len += 1;
+    }
+}
+
+impl fmt::Write for LineBuf {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        // One byte is reserved for the record's terminating newline: the caller
+        // formats the body with `write!` and then appends the terminator through
+        // `LineBuf::terminate`, so a record that filled the buffer would
+        // otherwise lose it and run into the next record.
+        let room = self.buf.len() - 1 - self.len;
+        let mut take = text.len().min(room);
+        // Copy whole characters only; a split code point would put invalid
+        // UTF-8 into the ring and into every `dmesg` reader.
+        while take > 0 && !text.is_char_boundary(take) {
+            take -= 1;
+        }
+        self.buf[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
+        self.len += take;
+        Ok(())
+    }
+}
+
+/// Maximum number of CPUs the recursion guard tracks.
+///
+/// The guard only needs to catch a CPU re-entering the logger, which happens
+/// with a console sink that logs or with a fault taken inside the logger. A CPU
+/// id beyond this bound simply skips the guard rather than growing state.
+const MAX_GUARD_CPUS: usize = 64;
+
+/// Per-CPU "this CPU is inside the logger" flags.
+static LOGGING: [AtomicBool; MAX_GUARD_CPUS] = [const { AtomicBool::new(false) }; MAX_GUARD_CPUS];
+
+/// Marks the current CPU as inside the logger for as long as it lives.
+struct RecursionGuard {
+    slot: Option<&'static AtomicBool>,
+}
+
+impl RecursionGuard {
+    /// Returns `None` when this CPU is already inside the logger.
+    fn enter() -> Option<Self> {
+        // The host (`std`) build links no kiface provider, so it must not ask
+        // one: it runs one thread per logger and needs no per-CPU guard.
+        #[cfg(feature = "std")]
+        let cpu = None;
+        #[cfg(not(feature = "std"))]
+        let cpu = kiface_logging_api::LogContextIf::cpu_id();
+        let slot = cpu.and_then(|cpu| LOGGING.get(cpu.min(MAX_GUARD_CPUS - 1)));
+        match slot {
+            // `Acquire` on success pairs with the `Release` store in `drop`; the
+            // failure case only needs the current value, so it stays `Relaxed`.
+            Some(slot) => slot
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .ok()
+                .map(|_| Self { slot: Some(slot) }),
+            // No CPU identity yet (very early boot): skip the guard.
+            None => Some(Self { slot: None }),
+        }
+    }
+}
+
+impl Drop for RecursionGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot {
+            // `Release` publishes everything this CPU did inside the logger to the
+            // next CPU that claims the slot with an `Acquire` exchange.
+            slot.store(false, Ordering::Release);
+        }
+    }
+}
+
 struct KernelLogger;
 
 impl Write for KernelLogger {
@@ -307,6 +738,14 @@ impl Log for KernelLogger {
         if kiface_logging_api::LogContextIf::in_nmi() {
             return;
         }
+        // The other context that must not reach the locks is a nested record on
+        // the same CPU — a console sink that logs, or a fault inside the logger.
+        // It would deadlock on `SpinNoIrq` instead of reporting anything.
+        let Some(_guard) = RecursionGuard::enter() else {
+            return;
+        };
+
+        capture_record(record);
 
         if !filter_enabled(record.target(), record.level()) {
             return;
@@ -400,6 +839,82 @@ impl Log for KernelLogger {
             }
         }
     }
+}
+
+/// The `[time cpu:tid target:line]` prefix, in the same shape the console
+/// uses (without the per-level colour).
+struct LineText<'a>(&'a Record<'a>);
+
+impl fmt::Display for LineText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let record = self.0;
+        let path = record.target();
+        let line = record.line().unwrap_or(0);
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "std")] {
+                write!(f, "[{} {}:{}] {}", chrono::Local::now().format("%H:%M:%S%.6f"), path, line, record.args())
+            } else {
+                let now = kiface_logging_api::LogContextIf::now();
+                match (
+                    kiface_logging_api::LogContextIf::cpu_id(),
+                    kiface_logging_api::LogContextIf::task_id(),
+                ) {
+                    (Some(c), Some(t)) => write!(
+                        f,
+                        "[{:>3}.{:06} {c}:{t} {path}:{line}] {}",
+                        now.as_secs(),
+                        now.subsec_micros(),
+                        record.args()
+                    ),
+                    (Some(c), None) => write!(
+                        f,
+                        "[{:>3}.{:06} {c} {path}:{line}] {}",
+                        now.as_secs(),
+                        now.subsec_micros(),
+                        record.args()
+                    ),
+                    _ => write!(
+                        f,
+                        "[{:>3}.{:06} {path}:{line}] {}",
+                        now.as_secs(),
+                        now.subsec_micros(),
+                        record.args()
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// Writes already formatted text to the console output path.
+///
+/// This is the primitive behind [`kprint!`] and [`kprintln!`]: it serializes
+/// console writes with an IRQ-safe lock, but bypasses the per-target filter and
+/// the kernel log buffer (`kprint!` output is not visible to `dmesg`).
+///
+/// May be called in any execution context.
+/// Appends one record to the kernel log buffer, in the shape `dmesg` prints.
+///
+/// Kept out of [`Log::log`] so the record path (guards, capture, filter) and the
+/// console formatting each stay readable; the console half is unchanged from the
+/// pre-ring logger.
+fn capture_record(record: &Record) {
+    // Capture first, print second: the buffer is the record of what
+    // happened, the console filter only decides what is shown. The macros
+    // already dropped everything above the build cap, so every record that
+    // reaches this point is stored — the ring is never narrowed by the
+    // console filter. The `<level>` prefix is X-Kernel's own numbering
+    // (`1..=5`, error..trace), so `dmesg | grep '^<1>'` selects one level.
+    let mut line = LineBuf::new();
+    let level = level_filter_of(record.level());
+    // The trailing newline is part of the record: the console path adds its
+    // own, and without it every buffered record runs into the next one, so
+    // `dmesg` prints the whole log as a single line. It is appended after
+    // formatting because a record that fills the line buffer would otherwise
+    // lose it to truncation.
+    let _ = write!(line, "<{}>{}", level_number(level), LineText(record));
+    line.terminate();
+    logbuf_push(line.as_bytes());
 }
 
 pub fn print_fmt(args: fmt::Arguments) -> fmt::Result {
