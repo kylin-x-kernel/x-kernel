@@ -39,12 +39,12 @@ impl MappingPages {
         }
 
         let first_truncated = len.div_ceil(PAGE_SIZE_4K as u64);
-        self.remove_ready_folios_from(first_truncated);
+        self.remove_ready_folios_from(first_truncated, None);
         let tail_off = (len % PAGE_SIZE_4K as u64) as usize;
         if tail_off != 0 {
             self.truncate_partial_folio(len / PAGE_SIZE_4K as u64, tail_off, &wait);
         }
-        self.remove_folios_from(first_truncated, &wait);
+        self.remove_folios_from(first_truncated, None, &wait);
         Ok(())
     }
 
@@ -59,18 +59,27 @@ impl MappingPages {
     /// Returns `InvalidInput` before mutation outside sleepable task context.
     pub fn truncate_final(&self) -> KResult<()> {
         let wait = CompletionWait::prepare()?;
-        self.remove_ready_folios_from(0);
-        self.remove_folios_from(0, &wait);
+        self.remove_ready_folios_from(0, None);
+        self.remove_folios_from(0, None, &wait);
         Ok(())
     }
 
     // A cursor of None denotes exhaustion, including a folio at u64::MAX.
-    fn collect_truncate_folios(&self, cursor: &mut Option<PageIndex>, batch: &mut FolioBatch) {
+    // `end` is exclusive; None covers the whole suffix.
+    fn collect_truncate_folios(
+        &self,
+        cursor: &mut Option<PageIndex>,
+        end: Option<PageIndex>,
+        batch: &mut FolioBatch,
+    ) {
         batch.clear();
         let Some(start) = *cursor else { return };
         let state = self.state.lock();
         *cursor = None;
         for (&index, folio) in state.entries.range(start..) {
+            if end.is_some_and(|end| index >= end) {
+                break;
+            }
             batch.push(folio.clone());
             if batch.len() == FolioBatch::CAPACITY {
                 *cursor = index.checked_add(1);
@@ -79,14 +88,15 @@ impl MappingPages {
         }
     }
 
-    // Discard ready folios before waiting, so one busy folio cannot delay
-    // removal of the rest or allow them to start unnecessary I/O. The second
-    // pass handles folios skipped here because they are locked or in writeback.
-    fn remove_ready_folios_from(&self, first_index: PageIndex) {
+    // Discard ready folios in `[first_index, end)`. None keeps the unbounded
+    // suffix. Discarding before waiting keeps one busy folio from delaying the
+    // rest or starting unnecessary I/O; the second pass handles folios skipped
+    // here because they are locked or in writeback.
+    fn remove_ready_folios_from(&self, first_index: PageIndex, end: Option<PageIndex>) {
         let mut cursor = Some(first_index);
         let mut batch = FolioBatch::new();
         while cursor.is_some() {
-            self.collect_truncate_folios(&mut cursor, &mut batch);
+            self.collect_truncate_folios(&mut cursor, end, &mut batch);
             let mut state = self.state.lock();
             for candidate in batch.iter() {
                 let Some(mut folio) = candidate.try_lock() else {
@@ -99,14 +109,21 @@ impl MappingPages {
         }
     }
 
-    fn remove_folios_from(&self, first_index: PageIndex, wait: &CompletionWait) {
+    // Remove folios in `[first_index, end)` even if locked or in writeback.
+    // None keeps the unbounded suffix.
+    fn remove_folios_from(
+        &self,
+        first_index: PageIndex,
+        end: Option<PageIndex>,
+        wait: &CompletionWait,
+    ) {
         let mut batch = FolioBatch::new();
         loop {
             // Restart at the boundary to include replacements installed while
             // locks were released. The owner excludes continuing population.
             // Success requires an empty range: a retry limit or a no-progress
             // exit could leave pages referencing blocks the owner will release.
-            self.collect_truncate_folios(&mut Some(first_index), &mut batch);
+            self.collect_truncate_folios(&mut Some(first_index), end, &mut batch);
             if batch.is_empty() {
                 break;
             }
