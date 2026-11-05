@@ -186,7 +186,7 @@ mod service;
 
 pub use context::{enter_user_quiescent, exit_user_quiescent};
 pub use krcu_core::CallbackNode;
-pub use read::{ReadScope, with_interrupt_read, with_read};
+pub use read::{ReadScope, is_reading, with_interrupt_read, with_read};
 pub use service::{
     PreparedCallback, Rcu, drain_callbacks, init_service, preflight_callback_submission,
     synchronize_rcu,

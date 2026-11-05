@@ -79,6 +79,94 @@ fn msi_lookup_interleaves_with_release_and_reallocation() {
     assert!(probe.valid.load(Ordering::Acquire));
 }
 
+#[cfg(feature = "smp")]
+#[def_test(serial)]
+fn directory_and_domain_reuse_waits_for_old_borrowed_readers() {
+    let result = check_index_reuse(false);
+    if !result.is_ok() {
+        return result;
+    }
+}
+
+#[cfg(feature = "smp")]
+#[def_test(serial)]
+fn directory_reuse_preserves_interrupt_borrows_and_nested_nmi_queries() {
+    let result = check_index_reuse(true);
+    if !result.is_ok() {
+        return result;
+    }
+}
+
+#[cfg(feature = "smp")]
+fn check_index_reuse(is_interrupt_reader: bool) -> unittest::TestResult {
+    use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
+    use kirq::tests_irq::RcuIndexProbe;
+    if kcpu_id_map::nr_cpus() < 2 {
+        return unittest::TestResult::Ignored;
+    }
+    let original_affinity = ktask::current().cpumask();
+    assert!(ktask::set_current_affinity(
+        ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(0))
+    ));
+    let old = Arc::new(RcuIndexProbe::new(0x5fb0, 0x5fb1));
+    let entered = Arc::new(AtomicBool::new(false));
+    let can_exit = Arc::new(AtomicBool::new(false));
+    let valid = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let old = old.clone();
+        let entered = entered.clone();
+        let can_exit = can_exit.clone();
+        let valid = valid.clone();
+        ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
+            move || {
+                let wait_for_writer = || {
+                    entered.store(true, Ordering::Release);
+                    while !can_exit.load(Ordering::Acquire) {
+                        core::hint::spin_loop();
+                    }
+                };
+                let matches = if is_interrupt_reader {
+                    old.read_interrupt_across(wait_for_writer)
+                } else {
+                    old.read_across(wait_for_writer)
+                };
+                valid.store(matches, Ordering::Release);
+            },
+            "irq-index-old-reader".into(),
+            kbuild_config::TASK_STACK_SIZE,
+        ))
+    };
+    reader.set_cpumask(ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(1)));
+    ktask::activate_task(&reader);
+    while !entered.load(Ordering::Acquire) {
+        ktask::yield_now();
+    }
+    let retired = old.retire();
+    let stayed_alive = !old.is_reclaimed();
+    // Do not strand the reader if withdrawal unexpectedly rejects the fixture.
+    let successor = retired.then(|| RcuIndexProbe::new(0x5fb0, 0x5fb1));
+    let new_lookup = successor.as_ref().is_some_and(|new| new.read_across(|| {}));
+    can_exit.store(true, Ordering::Release);
+    let status = reader.join();
+    drop(reader);
+    let restored = ktask::set_current_affinity(original_affinity);
+    // SAFETY: the old reader has exited; callbacks need no resource we hold.
+    let drained = unsafe { krcu::drain_callbacks() };
+    let old_reclaimed = old.is_reclaimed();
+    let successor_retired = successor.as_ref().is_some_and(RcuIndexProbe::retire);
+    if !retired {
+        old.retire();
+    }
+    // SAFETY: no fixture read scope or callback-owned lock remains held.
+    let cleanup = unsafe { krcu::drain_callbacks() };
+    assert!(retired && stayed_alive && new_lookup && restored);
+    assert_eq!(status, 0);
+    assert!(valid.load(Ordering::Acquire));
+    assert!(drained.is_ok() && old_reclaimed);
+    assert!(successor_retired && cleanup.is_ok());
+    unittest::TestResult::Ok
+}
+
 #[cfg(feature = "ipi")]
 #[def_test(serial)]
 fn completed_cpu_calls_observe_body_and_capture_destruction() {
@@ -328,6 +416,12 @@ fn read_scope_rejects_normal_registration_before_publication() {
         let result = kirq::try_register_disabled(virq, handler.clone());
         (result, kirq::descriptor(virq).is_none())
     });
+    let map_rejected = krcu::with_read(|_| kirq::try_map(kirq::IrqDesc::from_virq(virq)));
+    assert!(matches!(
+        map_rejected,
+        Err(kirq::IrqDescError::InvalidContext { .. })
+    ));
+    assert!(kirq::descriptor(virq).is_none());
     // This is an ordinary-admission check only. It deliberately makes no claim
     // about startup registration being valid while retaining an RCU read scope.
     assert_eq!(kirq::try_map(kirq::IrqDesc::from_virq(virq)), Ok(virq));

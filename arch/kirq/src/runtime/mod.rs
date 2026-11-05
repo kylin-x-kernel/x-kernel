@@ -6,6 +6,7 @@
 
 pub(crate) mod action;
 pub(crate) mod dispatch;
+pub(crate) mod index;
 pub(crate) mod manager;
 pub(crate) mod nmi;
 pub(crate) mod rcu;

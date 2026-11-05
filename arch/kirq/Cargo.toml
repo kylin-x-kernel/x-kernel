@@ -16,6 +16,8 @@ irq_stat = []
 
 [dependencies]
 irq_types.workspace = true
+kxarray.workspace = true
+krcu.workspace = true
 kalloc-types.workspace = true
 kiface-cpu-api.workspace = true
 kiface-irq-context-api.workspace = true

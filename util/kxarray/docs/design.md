@@ -99,6 +99,9 @@ Commit can deallocate spare nodes and run a preemption checkpoint on unlocking.
 `PreparedRemove<P>` owns one unpublished retirement record, without selecting
 an entry or reserving RCU admission. `prepare_remove` allocates it under explicit
 permissions; cancellation requires neither current-reader storage nor a GP.
+Empty records are Send + Sync and may be retained with their future payload
+until removal. They hold no payload and grant no submission permission;
+owner bounds apply to construction/consumption rather than the storage type.
 `remove_prepared` rechecks admission before locking, withdraws the current entry
 without allocation, then submits payload/node retirements after unlocking using
 the same helper as ordinary removal. An absent entry cancels the unused record.
@@ -176,3 +179,11 @@ ordinary UT, host tests and doctests stay in the owning crate.
 The test crate resolves its kernel dependencies on kernel targets, but is not a
 default system dependency. The container exposes three observation helpers
 only under `cfg(unittest)`; they are not part of its production API.
+
+## Quiescent kernel fixtures
+
+The unittest-only `take_quiescent_fixture` removes an Arc slot without pruning
+radix nodes. Synthetic KIRQ tests use it only after excluding same-key borrowed
+readers and writers. Empty paths remain reusable and are destroyed with the
+container; unrelated-key readers retain their traversed nodes. This hook is
+absent from production and does not replace RCU withdrawal tests.

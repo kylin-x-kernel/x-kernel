@@ -102,7 +102,7 @@ fn unsupported_gic_spi_trigger_preserves_resolution_state() {
             };
             let before = snapshot(&line.lock());
             let offered = crate::gic_irq_desc(hwirq, trigger).with_virq(virq);
-            let result = state.try_resolve_spec(offered.into(), Some(&line));
+            let result = state.try_resolve_desc(offered, Some(&line));
             assert!(
                 matches!(result, Err(IrqDescError::UnsupportedFlow { hwirq: id }) if id == hwirq)
             );
@@ -248,7 +248,8 @@ fn registration_preflight_preserves_regular_and_shared_success() {
     assert!(super::try_register_disabled(regular, handler.clone()).unwrap());
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&regular).unwrap().lock();
+        let retained_line = state.descs.get(&regular).unwrap();
+        let entry = retained_line.lock();
         assert_eq!(entry.action_count(), 1);
         assert_eq!(entry.disable_depth_for_tests(), 1);
         assert!(!entry.is_enabled_for_tests());
@@ -264,7 +265,8 @@ fn registration_preflight_preserves_regular_and_shared_success() {
     assert_ne!(first, second);
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&shared).unwrap().lock();
+        let retained_line = state.descs.get(&shared).unwrap();
+        let entry = retained_line.lock();
         assert_eq!(entry.action_count(), 2);
         assert!(entry.is_enabled_for_tests());
         assert_eq!(entry.disable_depth_for_tests(), 0);
@@ -362,7 +364,7 @@ fn failed_legacy_enable_retains_prepared_mapping_without_enabling_line() {
     assert!(cleanup.is_some());
     assert!(IRQ_STATE.lock().translated_hwirq(domain, hwirq).is_none());
     assert_eq!(super::try_map(desc), Ok(virq));
-    let prepared = IRQ_STATE.lock().descs.get(&virq).cloned().unwrap();
+    let prepared = IRQ_STATE.lock().descs.get(&virq).unwrap();
     let irq_before = karch::local_irq_enabled();
     let mut observed = None;
     let result = super::enable_line(&IRQ_STATE, desc.into(), true, |plan| {
@@ -373,7 +375,7 @@ fn failed_legacy_enable_retains_prepared_mapping_without_enabling_line() {
     assert_eq!(observed, Some((desc, true, Some(true))));
     assert_eq!(karch::local_irq_enabled(), irq_before);
     assert_eq!(IRQ_STATE.lock().translated_hwirq(domain, hwirq), Some(virq));
-    let line = IRQ_STATE.lock().descs.get(&virq).cloned().unwrap();
+    let line = IRQ_STATE.lock().descs.get(&virq).unwrap();
     assert!(Arc::ptr_eq(&line, &prepared));
     let entry = line.lock();
     assert_eq!(entry.desc, desc);
@@ -598,7 +600,7 @@ fn registration_does_not_recreate_line_withdrawn_before_admission() {
     let cleanup = ScopedTestLine::for_vacant_slot(virq);
     assert!(cleanup.is_some());
     assert_eq!(crate::try_map(IrqDesc::from_virq(virq)), Ok(virq));
-    let original = IRQ_STATE.lock().descs.get(&virq).cloned().unwrap();
+    let original = IRQ_STATE.lock().descs.get(&virq).unwrap();
     *WITHDRAW_BEFORE_ADMISSION.lock() = Some(original.clone());
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
     let registered = crate::try_register_disabled(virq, handler.clone());
@@ -883,7 +885,7 @@ fn removed_handler_destructor_runs_after_management_cleanup() {
             .lock()
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
     assert!(!line.lock().is_teardown_in_progress());
     assert!(!has_unlocked_drop.load(Ordering::Acquire));

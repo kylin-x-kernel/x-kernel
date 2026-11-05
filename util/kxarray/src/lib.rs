@@ -831,6 +831,43 @@ impl<P: EntryOwner> XArray<P> {
 }
 
 impl<T: Send + Sync> XArray<Arc<T>> {
+    /// Removes a quiescent synthetic fixture without pruning shared radix nodes.
+    ///
+    /// This test-only entrance is not an RCU retirement test. Nodes stay in the
+    /// tree until reuse or container destruction, allowing unrelated-key readers.
+    ///
+    /// # Safety
+    /// Exclude all readers and competing writers of this key, including readers
+    /// retaining a borrowed payload after lookup. Owned Arc results may survive.
+    /// Call only from allocator-capable task context, never IRQ/NMI/BH.
+    #[cfg(unittest)]
+    pub unsafe fn take_quiescent_fixture(&self, index: usize) -> Option<Arc<T>> {
+        let _guard = self.writers.lock();
+        let mut raw = self.root.load(Ordering::Acquire);
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: writer exclusion retains every traversed node.
+        if !unsafe { &*raw }.covers(index) {
+            return None;
+        }
+        while !raw.is_null() {
+            // SAFETY: writer exclusion retains this initialized node.
+            let node = unsafe { &*raw };
+            if node.height == 1 {
+                if node.slot(index).load(Ordering::Acquire).is_null() {
+                    return None;
+                }
+                let owner = node.remove_slot(index).cast::<T>();
+                // SAFETY: the slot transfers exactly one Arc owner; the caller
+                // excluded borrowed readers of this fixture. No nodes detach.
+                return Some(unsafe { Arc::from_raw(owner) });
+            }
+            raw = node.slot(index).load(Ordering::Acquire).cast();
+        }
+        None
+    }
+
     /// Acquires an independent owner under writer exclusion, without an RCU scope.
     ///
     /// Intended for control paths and early boot after local lock primitives are

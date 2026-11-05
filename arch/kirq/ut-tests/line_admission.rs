@@ -10,56 +10,22 @@ use super::{IrqDesc, IrqFlags, IrqLine, IrqState, IrqStateDesc, try_resolve_and_
 use crate::{IrqDescError, IrqSpec};
 
 #[def_test]
-fn snapshot_preparation_failure_preserves_unpublished_line_and_mapping() {
-    let domain = crate::domain::TEST_DOMAIN;
+fn existing_mapping_needs_no_new_index_capacity() {
     let desc = IrqDesc::from_hwirq(17)
-        .with_domain(domain)
+        .with_domain(crate::domain::TEST_DOMAIN)
         .with_virq(0x5f90);
     let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
     let mut state = IrqState::new();
-    let resolution = state.plan_resolution(desc.into()).unwrap();
-    let mut entry = line.lock();
-    let before = entry.desc;
-    let mut observed = None;
-    let result = state.commit_resolution_with(
-        resolution,
-        &line,
-        &mut entry,
-        |target, entries, hwirq, virq| {
-            observed = Some((target, entries.len(), hwirq, virq));
-            Err(IrqDescError::NoMemory)
-        },
-    );
-    assert!(matches!(result, Err(IrqDescError::NoMemory)));
-    assert_eq!(observed, Some((domain, 1, 17, 0x5f90)));
-    assert_eq!(entry.desc, before);
-    assert!(state.descs.is_empty());
-    assert!(state.domain_states.is_empty());
-    assert!(state.virq_to_mapping.is_empty());
-    drop(entry);
     state.try_resolve_desc(desc, Some(&line)).unwrap();
+    let mut prepared = super::PreparedPublication::new(0x5f90, None, false).unwrap();
     let resolution = state.plan_resolution(desc.into()).unwrap();
-    let mut entry = line.lock();
-    let reused = state.commit_resolution_with(resolution, &line, &mut entry, |_, _, _, _| {
-        Err(IrqDescError::NoMemory)
-    });
-    assert!(reused.is_ok());
-    drop(entry);
-    let other = IrqDesc::from_hwirq(18)
-        .with_domain(domain)
-        .with_virq(0x5f91);
-    let other_line = Arc::new(IrqLine::new(IrqStateDesc::new(other)));
-    let resolution = state.plan_resolution(other.into()).unwrap();
-    let result = state.commit_resolution_with(
-        resolution,
-        &other_line,
-        &mut other_line.lock(),
-        |_, _, _, _| Err(IrqDescError::NoMemory),
+    let result = state.commit_resolution(resolution, &line, &mut line.lock(), &mut prepared);
+    assert!(result.is_ok());
+    assert_eq!(
+        state.translated_hwirq(crate::domain::TEST_DOMAIN, 17),
+        Some(0x5f90)
     );
-    assert!(matches!(result, Err(IrqDescError::NoMemory)));
-    assert_eq!(state.translated_hwirq(domain, 17), Some(0x5f90));
-    assert_eq!(state.translated_hwirq(domain, 18), None);
-    assert_eq!(state.descs.len(), 1);
+    assert!(prepared.logical.is_none() && prepared.domain.is_none());
 }
 
 #[def_test]
@@ -67,6 +33,8 @@ fn msi_release_requires_reservation_and_consumes_it_once_after_withdrawal() {
     let virq = 0x5f52;
     let desc = IrqDesc::from_virq(virq).with_flags(IrqFlags::MSI);
     let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let withdrawal = super::PreparedWithdrawal::new(desc.hwirq).unwrap();
+    line.lock().msi_withdrawal = Some(withdrawal);
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
     let mut calls = 0;
@@ -103,7 +71,7 @@ fn msi_release_requires_reservation_and_consumes_it_once_after_withdrawal() {
         state
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
 
     line.lock().msi_reservation = Some(super::MsiReservation::for_test(desc.hwirq));
@@ -146,7 +114,7 @@ fn msi_release_rejects_non_msi_without_calling_backend() {
         state
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
 }
 
@@ -155,6 +123,8 @@ fn msi_release_rejects_action_dispatch_and_teardown_ownership() {
     let virq = 0x5f54;
     let desc = IrqDesc::from_virq(virq).with_flags(IrqFlags::MSI);
     let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let withdrawal = super::PreparedWithdrawal::new(desc.hwirq).unwrap();
+    line.lock().msi_withdrawal = Some(withdrawal);
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
     line.lock().msi_reservation = Some(super::MsiReservation::for_test(desc.hwirq));
@@ -200,7 +170,7 @@ fn msi_release_rejects_action_dispatch_and_teardown_ownership() {
         state
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
 
     line.lock().finish_teardown();
@@ -289,7 +259,7 @@ fn gic_spi_cannot_change_flow_while_actions_or_original_claim_remain() {
             state
                 .descs
                 .get(&0x5f59)
-                .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+                .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
         );
     }
 }
@@ -364,7 +334,7 @@ fn flow_reselection_waits_for_actions_and_in_flight_admission() {
                 state
                     .descs
                     .get(&desc.hwirq)
-                    .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+                    .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
             );
         }
     }
@@ -414,7 +384,7 @@ fn plic_metadata_enrichment_waits_for_actions_and_in_flight_admission() {
             state
                 .descs
                 .get(&0x5f58)
-                .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+                .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
         );
         if has_action {
             let removed = line.lock().take_regular_action();
@@ -445,7 +415,7 @@ fn locked_resolution_preserves_line_and_plain_metadata() {
         state
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
     let resolved =
         try_resolve_and_publish_locked(&mut state, IrqSpec::PlainVirq(virq), &line, &mut entry)
@@ -476,7 +446,7 @@ fn locked_resolution_rejects_a_different_line_identity() {
         state
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
 }
 
@@ -499,7 +469,7 @@ fn management_completion_updates_only_the_original_identity() {
         state
             .descs
             .get(&virq)
-            .is_some_and(|line| Arc::ptr_eq(line, &successor))
+            .is_some_and(|line| Arc::ptr_eq(&line, &successor))
     );
     assert_eq!(Arc::strong_count(&old), 1);
 }
@@ -545,7 +515,7 @@ fn management_completion_preserves_both_idle_and_drained_descriptors() {
         state
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
     assert!(line.lock().is_unused());
     assert_eq!(Arc::strong_count(&line), 2);
@@ -567,7 +537,7 @@ fn management_admission_prevents_unused_line_removal() {
         state
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
 
     line.lock().end_management();
@@ -595,7 +565,7 @@ fn management_admission_prevents_unused_msi_removal() {
         state
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
 
     line.lock().end_management();

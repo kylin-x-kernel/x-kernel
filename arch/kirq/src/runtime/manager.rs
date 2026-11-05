@@ -27,8 +27,8 @@ use crate::{
         set_platform_irq_enabled,
     },
     state::{
-        IRQ_STATE, IrqLine, IrqPlatformPlan, IrqState, IrqStateDesc, try_resolve_and_publish,
-        try_resolve_and_publish_locked,
+        IRQ_STATE, IrqLine, IrqPlatformPlan, IrqState, IrqStateDesc, resolve_prepared_locked,
+        validate_resolution_domain,
     },
 };
 pub use crate::{
@@ -158,9 +158,6 @@ fn apply_platform_delivery(plan: IrqPlatformPlan) {
     }
 }
 /// Try to map a hardware IRQ resource into the OS-visible logical IRQ namespace.
-/// Reverse-map owners are prepared with NOWAIT under control-lock exclusion.
-/// NoMemory leaves mappings and descriptors unchanged; a dynamic virq number
-/// may still have been consumed. Existing nested allocations retain their policy.
 ///
 /// A Domain association retains its Line across handler removal and empty
 /// dispatch. Platform mappings belong to the Domain/platform lifetime; this is
@@ -168,34 +165,62 @@ fn apply_platform_delivery(plan: IrqPlatformPlan) {
 /// release protocol. Descriptors without a Domain retain registry lifetime too;
 /// neither action removal nor dispatch completion disposes them. No general
 /// non-MSI runtime disposal API is provided yet.
+///
+/// Requires allocation-ready boot/task context, outside IRQ/NMI/BH handlers.
+/// New index entries also reject active RCU read scopes. Capacity preparation
+/// failure returns `NoMemory` without publishing either entry.
 pub fn try_map(desc: IrqDesc) -> Result<Virq, IrqDescError> {
     reject_nmi_management("map IRQ")?;
+    if crate::context::is_in_interrupt_context() {
+        return Err(IrqDescError::InvalidContext {
+            operation: "map IRQ",
+        });
+    }
     let spec = IrqSpec::Desc(desc);
-    let mut prepared = None;
+    validate_resolution_domain(spec)?;
     loop {
+        let (resolution, existing, mapping) = {
+            let mut state = IRQ_STATE.lock();
+            let resolution = state.plan_resolution(spec)?;
+            let existing = state.descs.get(&resolution.virq);
+            let mapping = state.mapping_to_prepare(spec);
+            (resolution, existing, mapping)
+        };
+        let mut prepared =
+            super::index::PreparedPublication::new(resolution.virq, mapping, existing.is_none())?;
+        let candidate = existing.unwrap_or_else(|| prepare_line(spec));
+        // Rejected private owners are destroyed only after registry exclusion.
+        let line;
         let mut state = IRQ_STATE.lock();
-        if lookup_line(&state, spec).is_none() && prepared.is_none() {
-            drop(state);
-            prepared = Some(prepare_line(spec));
+        if desc.logical_irq().is_none()
+            && desc.domain.is_some()
+            && state
+                .lookup_virq(spec)
+                .is_some_and(|virq| virq != resolution.virq)
+        {
             continue;
         }
-        #[expect(
-            clippy::unwrap_used,
-            reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish returns only \
-                      descriptors assigned a logical IRQ"
-        )]
-        return Ok(
-            try_resolve_and_publish(&mut state, spec, prepared.as_ref())?
-                .logical_irq()
-                .unwrap(),
-        );
+        let virq = resolution.virq;
+        line = state.descs.get(&virq).unwrap_or_else(|| candidate.clone());
+        state.commit_resolution(resolution, &line, &mut line.lock(), &mut prepared)?;
+        return Ok(virq);
     }
 }
 
 /// Returns the mapped logical IRQ number for a domain-local hardware IRQ.
 ///
-/// This is a lock-free read from the domain's published reverse-map snapshot.
+/// IRQ/NMI handlers borrow the Domain index in an interrupt RCU scope. Boot and
+/// control callers use its writer-locked read without requiring an RCU service.
 /// `None` means the domain has no mapping and no explicit identity policy.
+///
+/// Handler callers require balanced interrupt entry to have established RCU
+/// watching and retained initialized current-task storage. This is not an
+/// early architecture-entry API. Boot/control callers require initialized
+/// CPU-local lock primitives, but need neither a current task nor a GP service.
+///
+/// # Panics
+/// Handler lookup of a registered Domain panics if watching or current-task
+/// storage is unavailable, or if the interrupt read nesting counter overflows.
 pub fn translate_hwirq(domain: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
     crate::domain::resolve(domain, hwirq)
 }
@@ -228,6 +253,8 @@ pub fn enable(spec: impl Into<IrqSpec>, on: bool) {
 /// Both directions require an existing descriptor. Missing Lines return
 /// [`IrqDescError::UnknownIrq`] without allocation or controller operations;
 /// owners must prepare them through [`try_map`] or MSI allocation first.
+/// Adding a Domain binding is a task-only publication and may fail before any
+/// controller operation; IRQ callers must use already-prepared metadata.
 #[inline]
 pub fn try_enable(spec: impl Into<IrqSpec>, on: bool) -> Result<(), IrqDescError> {
     if on {
@@ -294,14 +321,29 @@ fn enable_legacy_line(
 ) -> Result<(), IrqDescError> {
     // Source activation cannot allocate descriptor ownership. Keep the retained
     // owner outside the guards, and preserve IRQ exclusion across their handoff.
-    let line;
+    let (virq, line, mapping) = {
+        let state = registry.lock();
+        let (virq, line) = lookup_line(&state, spec).ok_or(IrqDescError::UnknownIrq)?;
+        (virq, line, state.mapping_to_prepare(spec))
+    };
+    if mapping.is_some() && crate::context::is_in_interrupt_context() {
+        return Err(IrqDescError::InvalidContext {
+            operation: "extend IRQ mapping",
+        });
+    }
+    let mut prepared = super::index::PreparedPublication::new(virq, mapping, false)?;
     let _context_guard = NoPreemptIrqSave::new();
     let mut state = registry.lock();
-    let (virq, existing) = lookup_line(&state, spec).ok_or(IrqDescError::UnknownIrq)?;
-    line = existing;
+    if !state
+        .descs
+        .get(&virq)
+        .is_some_and(|current| Arc::ptr_eq(&current, &line))
+    {
+        return Err(IrqDescError::UnknownIrq);
+    }
     let mut entry = line.lock();
     reject_teardown(&entry, virq, "enable IRQ")?;
-    try_resolve_and_publish_locked(&mut state, spec, &line, &mut entry)?;
+    resolve_prepared_locked(&mut state, spec, &line, &mut entry, &mut prepared)?;
     drop(state);
     let plan = prepare_enable_plan(&entry, virq, true)?;
     apply_configuration_plan(&mut entry, plan, apply_plan)?;
@@ -363,7 +405,7 @@ fn disable_line(
     let state = registry.lock();
     let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
     let line = state.descs.get(&virq).ok_or(IrqDescError::UnknownIrq)?;
-    let drain = IrqDrain::new(virq, line);
+    let drain = IrqDrain::new(virq, &line);
     {
         let mut entry = drain.line.lock();
         // The outer context guard masks IRQs across this non-LIFO handoff.
@@ -460,7 +502,7 @@ pub fn try_synchronize_irq(spec: impl Into<IrqSpec>) -> Result<bool, IrqDescErro
         state
             .descs
             .get(&virq)
-            .map(|entry| IrqDrain::new(virq, entry))
+            .map(|entry| IrqDrain::new(virq, &entry))
     };
     if let Some(drain) = drain {
         drain.wait();
@@ -945,11 +987,12 @@ pub(super) fn with_registration_line_checked<T>(
 ) -> Result<Option<T>, IrqDescError> {
     validate_management(mode)?;
     loop {
-        let (_, line) = {
+        let (virq, line, mapping) = {
             let state = IRQ_STATE.lock();
-            lookup_line(&state, spec)
-        }
-        .ok_or(IrqDescError::UnknownIrq)?;
+            let (virq, line) = lookup_line(&state, spec).ok_or(IrqDescError::UnknownIrq)?;
+            (virq, line, state.mapping_to_prepare(spec))
+        };
+        let mut prepared = super::index::PreparedPublication::new(virq, mapping, false)?;
         let Some(_management_guard) = acquire_management(&line, mode)? else {
             return Ok(None);
         };
@@ -977,7 +1020,7 @@ pub(super) fn with_registration_line_checked<T>(
         }
         entry.begin_management();
         admission.is_active = true;
-        let desc = try_resolve_and_publish_locked(&mut state, spec, &line, &mut entry)?;
+        let desc = resolve_prepared_locked(&mut state, spec, &line, &mut entry, &mut prepared)?;
         let virq = desc.logical_irq().expect("resolved descriptor has a virq");
         drop(state);
         let result = body_fn(virq, &mut entry).map(Some);
@@ -1025,7 +1068,7 @@ pub(super) fn with_existing_line<T>(
         if !state
             .descs
             .get(&virq)
-            .is_some_and(|current| Arc::ptr_eq(current, &line))
+            .is_some_and(|current| Arc::ptr_eq(&current, &line))
         {
             return Ok(None);
         }

@@ -4,10 +4,7 @@
 
 //! IRQ descriptor and action state.
 
-use alloc::{
-    collections::{BTreeMap, btree_map::Entry},
-    sync::Arc,
-};
+use alloc::sync::Arc;
 use core::array;
 
 use intrusive_collections::intrusive_adapter;
@@ -21,7 +18,12 @@ use kcompletion::{Completion, DeferredWake};
 use klazy::Once;
 use kspin::{SpinNoIrq, SpinNoIrqGuard, static_lock};
 
-use super::unhandled::{UnhandledIrqReport, UnhandledIrqState};
+#[cfg(any(target_arch = "x86_64", unittest))]
+use super::index::{PreparedWithdrawal, WithdrawnIndexes};
+use super::{
+    index::{LineIndex, PreparedPublication},
+    unhandled::{UnhandledIrqReport, UnhandledIrqState},
+};
 use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqFlags, IrqSpec, Virq,
     action::{IrqAction, IrqActionToken},
@@ -31,32 +33,26 @@ static_lock! {
     /// IRQ control-plane aggregate.
     ///
     /// All descriptor, handler, and `(domain, hwirq) -> virq` namespace changes go
-    /// through this lock. Dispatch may briefly snapshot an action from this state,
-    /// but hardware IRQ translation on the hot path consumes the immutable reverse
-    /// maps published by `domain.rs` instead of walking these mutable maps directly.
-    pub(super) static IRQ_STATE: SpinNoIrq<IrqState> = SpinNoIrq::new(IrqState::new());
+    /// through this lock. Hardware dispatch retains a Line through the RCU index
+    /// without this lock, then takes only the Line lock to obtain admission.
+    pub(super) static IRQ_STATE: SpinNoIrq<IrqState> = SpinNoIrq::new(IrqState::global());
 }
 pub const DYNAMIC_VIRQ_BASE: Virq = 4096;
 pub(super) const MAX_IRQ_ACTIONS: usize = 4;
 
 /// Result of resolving one caller-provided IRQ descriptor.
 ///
-/// This is the handoff object between the locked control-plane mutation and
-/// the allocation-free publication step. A prepared owner is present only for
-/// newly inserted mappings; existing mappings need no allocation. Discarding
-/// this result without publication is reserved for isolated test registries.
+/// Both prepared index insertions have completed before this result is returned.
 pub(super) struct ResolvedIrqDesc {
     desc: IrqDesc,
-    publication: Option<crate::domain::PreparedPublication>,
 }
 
 impl ResolvedIrqDesc {
-    fn new(desc: IrqDesc, publication: Option<crate::domain::PreparedPublication>) -> Self {
-        Self { desc, publication }
+    const fn new(desc: IrqDesc) -> Self {
+        Self { desc }
     }
 
-    #[cfg(unittest)]
-    pub(super) fn into_desc(self) -> IrqDesc {
+    pub(super) const fn into_desc(self) -> IrqDesc {
         self.desc
     }
 }
@@ -64,53 +60,9 @@ impl ResolvedIrqDesc {
 // Planning selects an identity without acquiring a Line lock. All descriptor
 // and mapping checks precede mutation in commit_resolution under the caller's
 // continuous registry and Line exclusion.
-struct IrqResolution {
-    virq: Virq,
-    offered: Option<IrqDesc>,
-}
-
-/// Control-plane state owned by one IRQ domain.
-///
-/// This table is the mutable build source for the immutable reverse-map
-/// snapshot published by `domain.rs`. It is not read by the hardirq data path.
-struct IrqDomainState {
-    hwirq_to_virq: BTreeMap<Hwirq, Virq>,
-}
-
-impl IrqDomainState {
-    const fn new() -> Self {
-        Self {
-            hwirq_to_virq: BTreeMap::new(),
-        }
-    }
-
-    fn virq_for_hwirq(&self, hwirq: Hwirq) -> Option<Virq> {
-        self.hwirq_to_virq.get(&hwirq).copied()
-    }
-
-    fn insert_mapping(&mut self, hwirq: Hwirq, virq: Virq) -> bool {
-        if let Entry::Vacant(entry) = self.hwirq_to_virq.entry(hwirq) {
-            entry.insert(virq);
-            return true;
-        }
-        false
-    }
-
-    #[cfg(any(target_arch = "x86_64", unittest))]
-    fn remove_mapping(&mut self, hwirq: Hwirq) -> bool {
-        self.hwirq_to_virq.remove(&hwirq).is_some()
-    }
-
-    #[cfg(any(target_arch = "x86_64", unittest))]
-    fn is_empty(&self) -> bool {
-        self.hwirq_to_virq.is_empty()
-    }
-
-    fn entries(&self) -> impl Iterator<Item = (Hwirq, Virq)> + '_ {
-        self.hwirq_to_virq
-            .iter()
-            .map(|(&hwirq, &virq)| (hwirq, virq))
-    }
+pub(super) struct IrqResolution {
+    pub(super) virq: Virq,
+    pub(super) offered: Option<IrqDesc>,
 }
 
 pub(super) struct IrqActionSnapshot {
@@ -429,7 +381,7 @@ impl IrqDescRuntimeState {
 /// Line then global state. Release the Line guard before registry removal.
 /// Retention alone does not admit an operation: callers must revalidate original
 /// Line membership and pair management admission under global state serialization.
-pub(super) struct IrqLine {
+pub(crate) struct IrqLine {
     // Assigned before publication, independent of mutable controller metadata.
     virq: Once<Virq>,
     pub(super) management: kmutex::Mutex<()>,
@@ -454,7 +406,7 @@ impl IrqLine {
     /// Observes the assigned identity without locking, waiting or cloning an owner.
     /// None means publication has not assigned it; Some survives retirement and
     /// does not grant service admission or prove current directory membership.
-    pub(super) fn logical_irq(&self) -> Option<Virq> {
+    pub(crate) fn logical_irq(&self) -> Option<Virq> {
         self.virq.get().copied()
     }
 
@@ -472,6 +424,9 @@ pub(super) struct IrqStateDesc {
     pub(super) desc: IrqDesc,
     #[cfg(any(target_arch = "x86_64", unittest))]
     msi_reservation: Option<MsiReservation>,
+    // Allocation-time storage, consumed only after successful release validation.
+    #[cfg(any(target_arch = "x86_64", unittest))]
+    msi_withdrawal: Option<PreparedWithdrawal>,
     runtime: IrqDescRuntimeState,
     is_managed: bool,
     // One-way storage lifecycle state, distinct from reversible action teardown.
@@ -491,6 +446,8 @@ impl IrqStateDesc {
             desc,
             #[cfg(any(target_arch = "x86_64", unittest))]
             msi_reservation: None,
+            #[cfg(any(target_arch = "x86_64", unittest))]
+            msi_withdrawal: None,
             runtime: IrqDescRuntimeState::new(desc),
             is_managed: false,
             is_retired: false,
@@ -829,53 +786,65 @@ pub(super) struct IrqState {
     ///
     /// `virq` is the stable key used by registration, unregister, descriptor
     /// queries, and normal action dispatch.
-    pub(super) descs: BTreeMap<Virq, Arc<IrqLine>>,
+    pub(super) descs: LineIndex,
     /// Per-domain control-plane state.
     ///
-    /// Each domain owns its mutable `hwirq -> virq` build table. This is not
-    /// the hardirq lookup structure. Whenever a new mapping is inserted, the
-    /// affected domain publishes an immutable reverse-map snapshot for
-    /// lock-free dispatch.
-    domain_states: BTreeMap<IrqDomainId, IrqDomainState>,
-    /// Reverse index for domain mappings keyed by OS-visible IRQ.
-    ///
-    /// This mirrors `domain_states` and makes the "one virq maps to at most
-    /// one domain-local hwirq" invariant explicit instead of proving it through
-    /// a full domain scan.
-    virq_to_mapping: BTreeMap<Virq, (IrqDomainId, Hwirq)>,
+    /// Each Domain maps hardware numbers directly to the same retained Lines.
+    /// Dispatch reads the shared XArray through RCU without registry exclusion.
+    domain_states: [LineIndex; crate::domain::DOMAIN_COUNT],
     /// Next dynamically allocated OS-visible IRQ number.
     ///
     /// Caller-provided `virq` values occupy the explicit OS-visible namespace;
     /// dynamically assigned descriptors start here so they do not collide with
     /// ordinary low platform line numbers.
     next_virq: Virq,
+    #[cfg(unittest)]
+    index_observer: Option<tests_index_transactions::IndexObserver>,
 }
 
 impl IrqState {
-    pub(super) const fn new() -> Self {
+    const fn global() -> Self {
         Self {
-            descs: BTreeMap::new(),
-            domain_states: BTreeMap::new(),
-            virq_to_mapping: BTreeMap::new(),
+            descs: LineIndex::shared(&super::index::DIRECTORY),
+            domain_states: [
+                LineIndex::shared(&crate::domain::GIC_IRQ_DOMAIN.lines),
+                LineIndex::shared(&crate::domain::PLIC_IRQ_DOMAIN.lines),
+                LineIndex::shared(&crate::domain::IO_APIC_IRQ_DOMAIN.lines),
+                LineIndex::shared(&crate::domain::MSI_IRQ_DOMAIN.lines),
+                #[cfg(unittest)]
+                LineIndex::shared(&crate::domain::TEST_IRQ_DOMAIN.lines),
+            ],
             next_virq: DYNAMIC_VIRQ_BASE,
+            #[cfg(unittest)]
+            index_observer: None,
         }
     }
 
-    fn alloc_virq(&mut self) -> Result<Virq, IrqDescError> {
+    #[cfg(unittest)]
+    pub(super) const fn new() -> Self {
+        Self {
+            descs: LineIndex::new(),
+            domain_states: [const { LineIndex::new() }; crate::domain::DOMAIN_COUNT],
+            next_virq: DYNAMIC_VIRQ_BASE,
+            index_observer: None,
+        }
+    }
+
+    pub(super) fn alloc_virq(&mut self) -> Result<Virq, IrqDescError> {
         loop {
             let virq = self.next_virq;
             self.next_virq = self
                 .next_virq
                 .checked_add(1)
                 .ok_or(IrqDescError::VirqExhausted { next: virq })?;
-            if !self.descs.contains_key(&virq) && self.mapping_for_virq(virq).is_none() {
+            if !self.descs.contains_key(&virq) {
                 return Ok(virq);
             }
         }
     }
 
     /// Publishes a private allocation as a new identity, never an existing binding.
-    #[cfg(any(target_arch = "x86_64", unittest))]
+    #[cfg(unittest)]
     fn insert_msi_reservation(
         &mut self,
         desc: IrqDesc,
@@ -887,13 +856,16 @@ impl IrqState {
             virq,
             offered: Some(desc.with_virq(virq)),
         };
-        self.commit_resolution(resolution, line, &mut line.lock())
+        let mut prepared =
+            PreparedPublication::new(virq, desc.domain.map(|domain| (domain, desc.hwirq)), true)?;
+        self.commit_resolution(resolution, line, &mut line.lock(), &mut prepared)
     }
 
     /// Resolves under the registry lock using a fresh candidate if absent.
     ///
     /// The caller retains `prepared` until outside short locks. An existing
     /// entry ignores it; a missing entry requires an unpublished candidate.
+    #[cfg(unittest)]
     pub(super) fn try_resolve_desc(
         &mut self,
         desc: IrqDesc,
@@ -903,7 +875,7 @@ impl IrqState {
         self.resolve_planned(resolution, prepared)
     }
 
-    fn plan_resolution(&mut self, spec: IrqSpec) -> Result<IrqResolution, IrqDescError> {
+    pub(super) fn plan_resolution(&mut self, spec: IrqSpec) -> Result<IrqResolution, IrqDescError> {
         let desc = match spec {
             IrqSpec::PlainVirq(virq) => {
                 return Ok(IrqResolution {
@@ -929,6 +901,7 @@ impl IrqState {
         })
     }
 
+    #[cfg(unittest)]
     fn resolve_planned(
         &mut self,
         resolution: IrqResolution,
@@ -944,35 +917,25 @@ impl IrqState {
         let line = self
             .descs
             .get(&resolution.virq)
-            .or(prepared)
+            .or_else(|| prepared.cloned())
             .expect("missing Line requires a prepared candidate")
             .clone();
         let mut entry = line.lock();
-        self.commit_resolution(resolution, &line, &mut entry)
+        let mapping = resolution
+            .offered
+            .and_then(|desc| desc.domain.map(|domain| (domain, desc.hwirq)));
+        let mut publication = PreparedPublication::new(resolution.virq, mapping, true)?;
+        self.commit_resolution(resolution, &line, &mut entry, &mut publication)
     }
 
     // The supplied entry is locked from this Line. Registry exclusion must
     // remain held from planning through commit, so identity cannot be replaced.
-    fn commit_resolution(
+    pub(super) fn commit_resolution(
         &mut self,
         resolution: IrqResolution,
         line: &Arc<IrqLine>,
         entry: &mut IrqStateDesc,
-    ) -> Result<ResolvedIrqDesc, IrqDescError> {
-        self.commit_resolution_with(resolution, line, entry, crate::domain::prepare_mapping)
-    }
-
-    fn commit_resolution_with(
-        &mut self,
-        resolution: IrqResolution,
-        line: &Arc<IrqLine>,
-        entry: &mut IrqStateDesc,
-        prepare: impl FnOnce(
-            IrqDomainId,
-            alloc::vec::Vec<(Hwirq, Virq)>,
-            Hwirq,
-            Virq,
-        ) -> Result<crate::domain::PreparedPublication, IrqDescError>,
+        prepared: &mut PreparedPublication,
     ) -> Result<ResolvedIrqDesc, IrqDescError> {
         // A retained old owner is not an unpublished candidate. Reject before
         // selecting a chip or modifying either mapping index.
@@ -984,7 +947,7 @@ impl IrqState {
             return Err(IrqDescError::UnknownIrq);
         }
         let is_existing = if let Some(current) = self.descs.get(&virq) {
-            if !Arc::ptr_eq(current, line) {
+            if !Arc::ptr_eq(&current, line) {
                 return Err(IrqDescError::UnknownIrq);
             }
             true
@@ -1028,63 +991,63 @@ impl IrqState {
         } else {
             None
         };
-        let mut publication = None;
-        if let Some((domain, hwirq, virq)) = mapping_to_insert {
-            if let Some((existing_domain, existing_hwirq)) = self.mapping_for_virq(virq) {
-                return Err(IrqDescError::VirqMappingConflict {
-                    virq,
-                    existing_domain,
-                    existing_hwirq,
-                    newer_domain: domain,
-                    newer_hwirq: hwirq,
-                });
-            }
-            let entries = if domain == crate::desc::MSI_DOMAIN {
-                alloc::vec::Vec::new()
-            } else {
-                self.domain_mapping_entries(domain)
-                    .chain(core::iter::once((hwirq, virq)))
-                    .collect()
-            };
-            publication = Some(prepare(domain, entries, hwirq, virq)?);
+        if let Some((domain, hwirq, virq)) = mapping_to_insert
+            && let Some(existing_domain) = is_existing.then_some(entry.desc.domain).flatten()
+            && self.domain_virq(existing_domain, entry.desc.hwirq) == Some(virq)
+        {
+            return Err(IrqDescError::VirqMappingConflict {
+                virq,
+                existing_domain,
+                existing_hwirq: entry.desc.hwirq,
+                newer_domain: domain,
+                newer_hwirq: hwirq,
+            });
         }
         // All recoverable validation precedes identity assignment. Registry and
         // Line exclusion serialize this non-allocating, non-reentrant initializer;
         // readers use only Once::get, never an initialization/wait operation.
-        line.virq.call_once(|| virq);
-        if let Some((domain, hwirq, virq)) = mapping_to_insert {
-            let inserted = self.domain_state_mut(domain).insert_mapping(hwirq, virq);
-            debug_assert!(inserted, "domain mapping insertion was prevalidated");
-            if inserted {
-                let old_mapping = self.virq_to_mapping.insert(virq, (domain, hwirq));
-                debug_assert_eq!(old_mapping, None, "virq mapping insertion was prevalidated");
-            }
+        // Both capacity checks precede either publication. A racing RCU reader
+        // can retain a partially published Line, but its lock prevents admission
+        // until descriptor/flow initialization and both insertions complete.
+        if (!is_existing && prepared.logical.is_none())
+            || (mapping_to_insert.is_some() && prepared.domain.is_none())
+        {
+            return Err(IrqDescError::NoMemory);
         }
+        line.virq.call_once(|| virq);
         entry.flow = flow;
         if is_existing {
             entry.update_desc(stored_desc);
         } else {
-            // First publication preserves the candidate's initial generation
-            // and preallocated completion/management storage.
+            // First publication preserves the candidate's initial generation.
             entry.desc = stored_desc;
             entry.runtime.remember_desc(stored_desc);
-            self.descs.insert(virq, line.clone());
         }
-        Ok(ResolvedIrqDesc::new(stored_desc, publication))
-    }
-
-    pub(super) fn try_resolve_spec(
-        &mut self,
-        spec: IrqSpec,
-        prepared: Option<&Arc<IrqLine>>,
-    ) -> Result<ResolvedIrqDesc, IrqDescError> {
-        match spec {
-            IrqSpec::PlainVirq(_) => {
-                let resolution = self.plan_resolution(spec)?;
-                self.resolve_planned(resolution, prepared)
-            }
-            IrqSpec::Desc(desc) => self.try_resolve_desc(desc, prepared),
+        if let Some((domain, ..)) = mapping_to_insert {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: both publication capacities \
+                          validated before either insertion"
+            )]
+            self.domain_states[crate::domain::slot(domain).expect("validated domain")].publish(
+                line.clone(),
+                prepared.domain.take().expect("prepared domain insertion"),
+            );
         }
+        #[cfg(unittest)]
+        self.observe_index_transition(line, entry);
+        if !is_existing {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: logical publication capacity \
+                          validated before either insertion"
+            )]
+            self.descs.publish(
+                line.clone(),
+                prepared.logical.take().expect("prepared logical insertion"),
+            );
+        }
+        Ok(ResolvedIrqDesc::new(stored_desc))
     }
 
     pub(super) fn lookup_virq(&self, spec: IrqSpec) -> Option<Virq> {
@@ -1095,6 +1058,42 @@ impl IrqState {
                     .and_then(|domain| self.domain_virq(domain, desc.hwirq))
             }),
         }
+    }
+
+    pub(super) fn mapping_to_prepare(&self, spec: IrqSpec) -> Option<(IrqDomainId, Hwirq)> {
+        let IrqSpec::Desc(desc) = spec else {
+            return None;
+        };
+        let domain = desc.domain?;
+        self.domain_virq(domain, desc.hwirq)
+            .is_none()
+            .then_some((domain, desc.hwirq))
+    }
+
+    /// Resolves a claim without looking up a mapped Line a second time by number.
+    ///
+    /// The outer option is an unresolved source. A resolved identity source can
+    /// have no Line; dispatch still reports that number and completes its claim.
+    /// Keep registry exclusion until the returned Line is retained and admitted.
+    #[cfg(unittest)]
+    pub(super) fn lookup_dispatch_line(
+        &self,
+        source: crate::IrqRef,
+    ) -> Option<(Virq, Option<Arc<IrqLine>>)> {
+        let virq = match source {
+            crate::IrqRef::Virq(virq) => virq,
+            crate::IrqRef::Domain(domain, hwirq) => {
+                if let Some(line) = self
+                    .domain_states
+                    .get(crate::domain::slot(domain)?)
+                    .and_then(|state| state.get(&hwirq))
+                {
+                    return Some((line.logical_irq()?, Some(line)));
+                }
+                crate::domain::domain(domain)?.resolve_unmapped(hwirq)?
+            }
+        };
+        Some((virq, self.descs.get(&virq)))
     }
 
     #[cfg(unittest)]
@@ -1117,160 +1116,102 @@ impl IrqState {
     }
 
     fn domain_virq(&self, domain: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
-        self.domain_states
-            .get(&domain)
-            .and_then(|state| state.virq_for_hwirq(hwirq))
+        self.domain_states[crate::domain::slot(domain)?]
+            .get(&hwirq)?
+            .logical_irq()
     }
 
+    #[cfg(unittest)]
     fn mapping_for_virq(&self, virq: Virq) -> Option<(IrqDomainId, Hwirq)> {
-        self.virq_to_mapping.get(&virq).copied()
+        let line = self.descs.get(&virq)?;
+        let desc = line.lock().desc;
+        let domain = desc.domain?;
+        (self.domain_virq(domain, desc.hwirq) == Some(virq)).then_some((domain, desc.hwirq))
     }
 
-    fn domain_state_mut(&mut self, domain: IrqDomainId) -> &mut IrqDomainState {
-        self.domain_states
-            .entry(domain)
-            .or_insert_with(IrqDomainState::new)
-    }
-
-    fn domain_mapping_entries(
-        &self,
-        domain_id: IrqDomainId,
-    ) -> impl Iterator<Item = (Hwirq, Virq)> + '_ {
-        self.domain_states
-            .get(&domain_id)
-            .into_iter()
-            .flat_map(IrqDomainState::entries)
-    }
-
-    /// Explicit cleanup of unused, synthetic unbound test Lines.
+    /// Synthetic quiescent fixture teardown, not production RCU retirement.
     #[cfg(unittest)]
     pub(super) fn remove_if_unused(&mut self, virq: Virq) -> Option<IrqDesc> {
-        self.remove_if_unused_inner(virq, false)
-    }
-
-    #[cfg(any(target_arch = "x86_64", unittest))]
-    fn remove_if_unused_inner(&mut self, virq: Virq, remove_msi: bool) -> Option<IrqDesc> {
-        let desc = {
-            let mut entry = self.descs.get(&virq)?.lock();
-            // Fixture cleanup must not dispose a Domain or MSI owner. The
-            // production caller reaches this helper only for explicit MSI free.
-            if !remove_msi
-                && (entry.desc.domain.is_some() || entry.desc.flags.contains(IrqFlags::MSI))
-            {
-                return None;
-            }
-            if !entry.is_unused() {
-                return None;
-            }
-            // Close old-reference admission before removing either index.
-            // The registry lock still serializes all publication and disposal.
-            entry.is_retired = true;
-            entry.desc
-        };
-        if remove_msi
-            && let Some(domain) = desc.domain
-            && let Some(domain_state) = self.domain_states.get_mut(&domain)
-        {
-            if domain_state.remove_mapping(desc.hwirq) {
-                self.virq_to_mapping.remove(&virq);
-            }
-            if domain_state.is_empty() {
-                self.domain_states.remove(&domain);
-            }
+        let line = self.descs.get(&virq)?;
+        let mut entry = line.lock();
+        if entry.desc.domain.is_some() || entry.is_msi() || !entry.is_unused() {
+            return None;
         }
+        entry.is_retired = true;
+        let desc = entry.desc;
+        drop(entry);
         self.descs.remove(&virq);
         Some(desc)
     }
 
-    /// Removes a software-only fixture, including any unexpectedly published mapping.
-    /// The test owns the Line exclusively; no real source or dispatch may use it.
     #[cfg(unittest)]
     pub(super) fn remove_test_line(&mut self, virq: Virq) -> Option<Arc<IrqLine>> {
-        let publication = if let Some((domain, hwirq)) = self.mapping_for_virq(virq) {
-            if domain == crate::desc::MSI_DOMAIN {
-                if !crate::domain::remove_msi(hwirq, || true) {
-                    return None;
-                }
-                None
-            } else {
-                let entries: alloc::vec::Vec<_> = self
-                    .domain_mapping_entries(domain)
-                    .filter(|&(hardware, _)| hardware != hwirq)
-                    .collect();
-                Some(crate::domain::prepare_snapshot(domain, &entries).ok()?)
-            }
-        } else {
-            None
+        let line = self.descs.get(&virq)?;
+        let desc = {
+            let mut entry = line.lock();
+            entry.is_retired = true;
+            entry.desc
         };
-        self.descs.get(&virq)?.lock().is_retired = true;
-        if let Some((domain, hwirq)) = self.virq_to_mapping.remove(&virq) {
-            if let Some(domain_state) = self.domain_states.get_mut(&domain) {
-                domain_state.remove_mapping(hwirq);
-                if domain_state.is_empty() {
-                    self.domain_states.remove(&domain);
-                }
-            }
-            if let Some(publication) = publication {
-                publication.publish();
-            }
+        if let Some(slot) = desc.domain.and_then(crate::domain::slot) {
+            self.domain_states[slot].remove(&desc.hwirq);
         }
-        // Return ownership so final handler destruction occurs outside the lock.
         self.descs.remove(&virq)
     }
 
-    #[cfg(any(target_arch = "x86_64", unittest))]
+    #[cfg(unittest)]
     pub(super) fn remove_msi_if_unused(&mut self, virq: Virq) -> Option<Hwirq> {
-        self.remove_msi_with(virq, |_| true)
+        let line = self.descs.get(&virq)?;
+        let entry = line.lock();
+        if !entry.is_msi() || !entry.is_unused() {
+            return None;
+        }
+        let hwirq = entry.desc.hwirq;
+        drop(entry);
+        self.remove_test_line(virq)?;
+        Some(hwirq)
     }
 
+    /// Caller preflight precedes exclusion. Close admission before either
+    /// index is withdrawn and return all retirement rights for unlocked submit.
+    ///
+    /// # Safety
+    /// The caller successfully preflighted before registry exclusion and must
+    /// retire the returned records after restoring context, before other callbacks.
     #[cfg(any(target_arch = "x86_64", unittest))]
-    fn remove_msi_with(
+    pub(super) unsafe fn withdraw_msi(
         &mut self,
         virq: Virq,
-        release: impl FnOnce(Hwirq) -> bool,
-    ) -> Option<Hwirq> {
-        let desc = {
-            let entry = self.descs.get(&virq)?.lock();
-            if !entry.is_msi() || !entry.is_unused() {
-                return None;
-            }
-            entry.desc
-        };
-        let publication = if let Some(domain) = desc.domain
-            && domain != crate::desc::MSI_DOMAIN
+    ) -> Option<(Arc<IrqLine>, MsiReservation, WithdrawnIndexes)> {
+        let line = self.descs.get(&virq)?;
+        let mut entry = line.lock();
+        if !entry.is_msi()
+            || !entry.is_unused()
+            || entry.runtime.is_enabled
+            || entry.msi_reservation.as_ref()?.hwirq() != entry.desc.hwirq
         {
-            let entries: alloc::vec::Vec<_> = self
-                .domain_mapping_entries(domain)
-                .filter(|&(hwirq, _)| hwirq != desc.hwirq)
-                .collect();
-            Some(crate::domain::prepare_snapshot(domain, &entries).ok()?)
+            return None;
+        }
+        let prepared = entry.msi_withdrawal.take()?;
+        entry.is_retired = true;
+        let desc = entry.desc;
+        let reservation = entry.msi_reservation.take()?;
+        // SAFETY: caller preflight and registry exclusion span validation and
+        // both withdrawals; every pending record is returned for unlocked submit.
+        let domain = if let Some(slot) = desc.domain.and_then(crate::domain::slot) {
+            // SAFETY: the caller's preflight and registry exclusion cover this
+            // withdrawal; its pending record is transferred to the caller.
+            unsafe { self.domain_states[slot].withdraw(desc.hwirq, prepared.domain) }
         } else {
             None
         };
-        let released = if desc.domain == Some(crate::desc::MSI_DOMAIN) {
-            crate::domain::remove_msi(desc.hwirq, || release(desc.hwirq))
-        } else {
-            release(desc.hwirq)
-        };
-        if !released {
-            return None;
-        }
-        self.remove_if_unused_inner(virq, true)?;
-        if let Some(publication) = publication {
-            publication.publish();
-        }
-        Some(desc.hwirq)
+        #[cfg(unittest)]
+        self.observe_index_transition(&line, &entry);
+        // SAFETY: caller preflight still spans this second withdrawal, and its
+        // pending retirement is returned for submission outside exclusion.
+        let logical = unsafe { self.descs.withdraw(virq, prepared.logical) };
+        drop(entry);
+        Some((line, reservation, WithdrawnIndexes { logical, domain }))
     }
-}
-
-pub(super) fn try_resolve_and_publish(
-    state: &mut IrqState,
-    spec: IrqSpec,
-    prepared: Option<&Arc<IrqLine>>,
-) -> Result<IrqDesc, IrqDescError> {
-    validate_resolution_domain(spec)?;
-    let resolved = state.try_resolve_spec(spec, prepared)?;
-    Ok(publish_resolution(resolved))
 }
 
 /// Resolves while the caller keeps the selected Line locked through its update.
@@ -1279,19 +1220,20 @@ pub(super) fn try_resolve_and_publish(
 /// unpublished candidate, and passes that Line's locked state. This function
 /// never reacquires a Line lock. Rejected validation does not change metadata
 /// or mappings; allocating a fresh dynamic identity may advance the allocator.
-pub(super) fn try_resolve_and_publish_locked(
+pub(super) fn resolve_prepared_locked(
     state: &mut IrqState,
     spec: IrqSpec,
     line: &Arc<IrqLine>,
     entry: &mut IrqStateDesc,
+    prepared: &mut PreparedPublication,
 ) -> Result<IrqDesc, IrqDescError> {
     validate_resolution_domain(spec)?;
     let resolution = state.plan_resolution(spec)?;
-    let resolved = state.commit_resolution(resolution, line, entry)?;
-    Ok(publish_resolution(resolved))
+    let resolved = state.commit_resolution(resolution, line, entry, prepared)?;
+    Ok(resolved.into_desc())
 }
 
-fn validate_resolution_domain(spec: IrqSpec) -> Result<(), IrqDescError> {
+pub(super) fn validate_resolution_domain(spec: IrqSpec) -> Result<(), IrqDescError> {
     let domain_id = match spec {
         IrqSpec::PlainVirq(_) => None,
         IrqSpec::Desc(desc) => desc.domain,
@@ -1304,14 +1246,23 @@ fn validate_resolution_domain(spec: IrqSpec) -> Result<(), IrqDescError> {
     Ok(())
 }
 
-fn publish_resolution(resolved: ResolvedIrqDesc) -> IrqDesc {
-    if let Some(publication) = resolved.publication {
-        publication.publish();
-    }
-    resolved.desc
+#[cfg(unittest)]
+pub(super) fn try_resolve_and_publish_locked(
+    state: &mut IrqState,
+    spec: IrqSpec,
+    line: &Arc<IrqLine>,
+    entry: &mut IrqStateDesc,
+) -> Result<IrqDesc, IrqDescError> {
+    let virq = line.logical_irq().unwrap_or(entry.desc.hwirq);
+    let mapping = match spec {
+        IrqSpec::Desc(desc) => desc.domain.map(|domain| (domain, desc.hwirq)),
+        _ => None,
+    };
+    let mut prepared = PreparedPublication::new(virq, mapping, true)?;
+    resolve_prepared_locked(state, spec, line, entry, &mut prepared)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", unittest))]
 #[expect(
     clippy::expect_used,
     reason = "CG-021-no-panic-on-reachable-failure: a rejected private candidate retains its \
@@ -1321,15 +1272,27 @@ pub(crate) fn publish_msi_reservation(
     desc: IrqDesc,
     reservation: MsiReservation,
 ) -> Result<Virq, (IrqDescError, MsiReservation)> {
+    let Some(withdrawal) = PreparedWithdrawal::new(desc.hwirq) else {
+        return Err((IrqDescError::NoMemory, reservation));
+    };
     let mut entry = IrqStateDesc::new(desc);
     entry.msi_reservation = Some(reservation);
+    entry.msi_withdrawal = Some(withdrawal);
     let line = Arc::new(IrqLine::new(entry));
-    let result = {
+    let result = (|| {
+        validate_resolution_domain(IrqSpec::Desc(desc))?;
+        let virq = IRQ_STATE.lock().alloc_virq()?;
+        let mut prepared =
+            PreparedPublication::new(virq, desc.domain.map(|domain| (domain, desc.hwirq)), true)?;
+        let resolution = IrqResolution {
+            virq,
+            offered: Some(desc.with_virq(virq)),
+        };
         let mut state = IRQ_STATE.lock();
         state
-            .insert_msi_reservation(desc, &line)
-            .map(publish_resolution)
-    };
+            .commit_resolution(resolution, &line, &mut line.lock(), &mut prepared)
+            .map(ResolvedIrqDesc::into_desc)
+    })();
     match result {
         Ok(desc) => Ok(desc.logical_irq().expect("MSI publication assigned virq")),
         Err(error) => {
@@ -1348,52 +1311,48 @@ pub(crate) fn free_msi_if_unused(
     virq: Virq,
     free_backend_vector_fn: impl FnOnce(MsiReservation),
 ) -> bool {
+    if krcu::preflight_callback_submission().is_err() {
+        return false;
+    }
     let removed = {
         let mut state = IRQ_STATE.lock();
-        release_unused_msi(&mut state, virq, |_, reservation| {
-            free_backend_vector_fn(reservation);
-        })
+        // SAFETY: preflight preceded exclusion; submission follows immediately
+        // after restoring that context, before the backend/user callback.
+        unsafe { state.withdraw_msi(virq) }
     };
-    // Final Line destruction is outside registry and backend allocator locks.
-    removed.is_some()
+    let Some((line, reservation, pending)) = removed else {
+        return false;
+    };
+    pending.retire();
+    free_backend_vector_fn(reservation);
+    drop(line);
+    true
 }
 
-// The production caller holds IRQ_STATE across validation, mapping withdrawal
-// and backend release. Retain the Line beyond this lock, even though admission
-// is already empty. Tests observe the withdrawn registry through the callback.
-#[cfg(any(target_arch = "x86_64", unittest))]
-#[expect(
-    clippy::expect_used,
-    reason = "CG-021-no-panic-on-reachable-failure: registry exclusion spans reservation \
-              validation and withdrawal; no other writer can consume that owner"
-)]
+// Mirror production withdrawal/submission on a private registry. Backend
+// release runs only after submission, never under the registry/Line locks.
+#[cfg(unittest)]
 fn release_unused_msi(
     state: &mut IrqState,
     virq: Virq,
     free_backend_vector_fn: impl FnOnce(&IrqState, MsiReservation),
 ) -> Option<Arc<IrqLine>> {
-    let line = state.descs.get(&virq)?.clone();
-    {
-        let entry = line.lock();
-        // Legacy force-enable can open a Line without installing an action.
-        // Empty admission alone is therefore not permission to return its vector.
-        if !entry.is_msi() || !entry.is_unused() || entry.runtime.is_enabled {
-            return None;
-        }
-        if entry.msi_reservation.as_ref()?.hwirq() != entry.desc.hwirq {
-            return None;
-        }
-    }
-    state.remove_msi_if_unused(virq)?;
-    let reservation = line
-        .lock()
-        .msi_reservation
-        .take()
-        .expect("withdrawn MSI Line retains its validated reservation");
+    krcu::preflight_callback_submission().ok()?;
+    // SAFETY: this private-registry test helper preflights outside exclusion,
+    // then submits immediately before invoking the observation callback.
+    let (line, reservation, pending) = unsafe { state.withdraw_msi(virq) }?;
+    pending.retire();
     free_backend_vector_fn(state, reservation);
     Some(line)
 }
 
 unittest::path_mod_test!(tests_line_admission, "../../ut-tests/line_admission.rs");
 unittest::path_mod_test!(tests_msi_reservation, "../../ut-tests/msi_reservation.rs");
+
+#[cfg(unittest)]
+pub use tests_msi_reservation::RcuIndexProbe;
 unittest::path_mod_test!(tests_mapping_lifetime, "../../ut-tests/mapping_lifetime.rs");
+unittest::path_mod_test!(
+    tests_index_transactions,
+    "../../ut-tests/index_transactions.rs"
+);

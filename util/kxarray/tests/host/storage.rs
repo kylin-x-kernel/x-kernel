@@ -25,6 +25,21 @@ std::thread_local! {
 struct CountingAllocator;
 
 #[test]
+fn empty_removal_storage_can_be_retained_by_its_future_owner() {
+    struct Owner {
+        _removal: PreparedRemove<Arc<Owner>>,
+    }
+    fn require_send_sync<T: Send + Sync>() {}
+    require_send_sync::<Owner>();
+    let array = XArray::<Arc<Owner>>::new();
+    // SAFETY: host allocation context; empty storage needs no RCU provider.
+    let removal = unsafe { array.prepare_remove(AllocFlags::NOWAIT) }.unwrap();
+    thread::spawn(move || drop(Owner { _removal: removal }))
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn removal_preparation_cancels_without_rcu_or_publication() {
     let array = XArray::<Arc<usize>>::new();
     let mut allocator = FailingAllocator {

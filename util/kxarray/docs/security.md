@@ -1,5 +1,13 @@
 # Safety Boundaries
 
+The `Send`/`Sync` implementations for `PreparedRemove<P>` in `src/prepared.rs`
+cover empty, unsubmitted storage only: it owns no payload or borrowed tree
+pointer, exposes no shared mutation, and transfers no admission permission.
+Construction and consumption require `EntryOwner`; the storage type itself
+does not, allowing a future payload to retain its own removal record without
+recursive trait obligations. `Retirement<P>` remains private, with owner-bound
+operations. `PendingRetirement<P>` remains task-local after withdrawal.
+
 `prepare_remove` allocates only an empty `PreparedRemove<P>` record and checks
 allocation flags. Its unsafe boundary requires valid allocation/cancellation
 context, not RCU readiness. `remove_prepared` requires ordinary removal's
@@ -158,3 +166,13 @@ A prepared-writer fixture also migrates a writer after preflight and retirement
 preparation, before locked reinspection and mutation. It checks the resumed CPU,
 association and exact release. This does not force migration specifically
 between publication and callback submission or cover every scheduling interleaving.
+
+## Quiescent fixture removal
+
+`src/lib.rs::take_quiescent_fixture` exists only under `cfg(unittest)`. Its
+unsafe caller must exclude same-key borrowed readers and writers, and provide
+allocator-capable task context. The writer lock retains traversed nodes, but
+cannot by itself exclude old RCU payload borrows. No node is pruned, so unrelated
+readers remain safe. `Arc::from_raw` consumes exactly the removed slot's owner;
+independently retained Arcs may survive. Production callers must use normal
+RCU withdrawal and retirement instead.

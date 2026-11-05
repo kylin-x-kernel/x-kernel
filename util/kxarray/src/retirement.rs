@@ -14,7 +14,7 @@ use crate::{
     node::{MAX_HEIGHT, Node},
 };
 
-pub(super) struct Retirement<P: EntryOwner> {
+pub(super) struct Retirement<P> {
     callback: CallbackNode,
     owner: *mut (),
     carrier: PhantomData<P>,

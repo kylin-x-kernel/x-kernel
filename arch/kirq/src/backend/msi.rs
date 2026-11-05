@@ -109,11 +109,6 @@ impl MsiAllocation {
 /// Platform backend for MSI vector allocation and message composition.
 #[kiface::interface]
 pub trait MsiBackendIf {
-    /// Returns the immutable, half-open hardware-vector range supported by MSI.
-    /// No allocation or hardware mutation is permitted; kirq queries under its
-    /// IRQ-disabled control lock before preparing stable reverse-map storage.
-    fn msi_hwirq_range() -> Option<core::ops::Range<Hwirq>>;
-
     /// Allocates a backend-local hardware MSI vector.
     fn alloc_msi_vector(
         token: MsiBackendToken,
@@ -123,8 +118,8 @@ pub trait MsiBackendIf {
 
     /// Consumes an exclusively owned backend reservation after withdrawal.
     ///
-    /// Published-resource release holds the KIRQ registry lock with local IRQs
-    /// masked; allocation rollback can call without that lock. The backend must
+    /// KIRQ releases registry exclusion and submits index retirements before
+    /// published-resource release; allocation rollback also runs unlocked. The backend must
     /// provide its own allocator exclusion and must not sleep or reenter KIRQ.
     /// KIRQ withdraws published mappings before this call, or supplies a fresh
     /// unpublished allocation for rollback. Returning normally commits release;
@@ -153,6 +148,8 @@ pub trait MsiBackendIf {
 ///
 /// Failure after backend allocation rolls back the unpublished vector. The
 /// backend must accept release of that fresh, exclusively owned reservation.
+/// Both index retirement records are allocated before publishing the Line;
+/// failure to prepare them follows this rollback path, not a later release.
 /// NMI callers are rejected before entering the backend allocator.
 pub fn alloc_msix(affinity: IrqAffinity) -> Option<MsiAllocation> {
     #[cfg(target_arch = "x86_64")]
@@ -174,10 +171,13 @@ pub fn alloc_msix(affinity: IrqAffinity) -> Option<MsiAllocation> {
 /// its IRQ actions. The Line must also be logically disabled; an actionless
 /// Line enabled through the legacy force-enable API needs an explicit disable.
 /// Serialize release against registration and other owner operations.
-/// Call from ordinary kernel context, not NMI context.
+/// Call from a watched, sleepable task with the RCU service running. No read
+/// scope or caller-held IRQ/preemption exclusion may span this operation.
 ///
 /// Returns false for an unknown/non-MSI IRQ, a mapping without an allocation
-/// reservation, an IRQ still in use or logically enabled, or NMI context.
+/// reservation, an IRQ still in use or logically enabled, invalid submission
+/// context. Retirement storage is prepared before allocation publication;
+/// release does not allocate retirement records.
 /// Rejection does not remove the mapping or release its reservation;
 /// the owner must retain its allocation identity for cleanup. Success releases
 /// the mapping before returning the reservation; the old IRQ number must no longer
@@ -188,7 +188,7 @@ pub fn free_msix(virq: Virq) -> bool {
 
 #[cfg(target_arch = "x86_64")]
 fn alloc_msi(kind: MsiKind, affinity: IrqAffinity) -> Option<MsiAllocation> {
-    if crate::context::is_in_nmi() {
+    if crate::context::is_in_interrupt_context() || krcu::is_reading() {
         return None;
     }
     let token = MsiBackendToken::new();

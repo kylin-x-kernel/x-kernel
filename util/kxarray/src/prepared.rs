@@ -19,6 +19,8 @@ use crate::{
 /// and cancellation do not require an RCU service, but do require a context
 /// supporting allocator operations. The ordinary removal entrance validates
 /// current context; the advanced withdrawal entrance requires caller preflight.
+/// Empty storage is Send + Sync and may be retained with its future owner;
+/// construction and consumption still require an [`EntryOwner`] carrier.
 ///
 /// A removal consumes its record even when the key is absent:
 ///
@@ -37,9 +39,18 @@ use crate::{
 ///     unsafe { array.remove_prepared(1, token) }.unwrap();
 /// }
 /// ```
-pub struct PreparedRemove<P: EntryOwner> {
+pub struct PreparedRemove<P> {
     pub(super) record: kalloc_types::KBox<Retirement<P>>,
 }
+
+// SAFETY: this private, unsubmitted record contains no payload or borrowed tree
+// pointer. Moving it transfers exclusive storage only, not RCU admission. The
+// consuming removal must validate its own execution context before withdrawal.
+unsafe impl<P> Send for PreparedRemove<P> {}
+
+// SAFETY: shared references expose no mutation or record access. All operations
+// that initialize or submit the private record consume its unique owner.
+unsafe impl<P> Sync for PreparedRemove<P> {}
 
 /// Withdrawn ownership awaiting RCU submission after caller-held locks are released.
 ///

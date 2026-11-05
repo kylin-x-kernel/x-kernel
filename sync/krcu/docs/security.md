@@ -425,3 +425,12 @@ their slot lock before waking the waiter and do not acquire the serialization
 mutex. Completion authorizes disposal only of resources owned by the completed
 callbacks, not downstream work they scheduled. Stopping producers/reposts is
 the teardown owner's responsibility, not an effect of drain.
+
+## Read-state snapshot boundary
+
+`src/read.rs::is_reading` uses the task provider's current-installation check
+outside interrupt handlers. Handlers require installed current and bypass that
+task-only check. CPU-local primitives must already be initialized. The query
+changes no depth or enrollment and grants no permission to
+dereference retired data; consumers must establish their remaining context and
+allocation requirements independently.

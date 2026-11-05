@@ -14,6 +14,7 @@ use super::{
     try_disable_irq_nosync, try_enable, try_enable_irq, try_free_irq, try_free_irq_action, try_map,
     try_register, try_register_disabled, try_register_shared, try_synchronize_irq, unregister,
 };
+pub use crate::state::RcuIndexProbe;
 use crate::{
     GIC_ROOT_DOMAIN, IrqController, IrqEvent, IrqFlags, IrqLifecycleHooks, IrqRef, IrqSource,
     IrqTrigger, MSI_DOMAIN, PendingIrq,
@@ -280,7 +281,7 @@ impl Drop for RetainedInFlight {
             if state
                 .descs
                 .get(&self.virq)
-                .is_some_and(|line| Arc::ptr_eq(line, &self.line))
+                .is_some_and(|line| Arc::ptr_eq(&line, &self.line))
             {
                 state.remove_if_unused(self.virq);
             }
@@ -348,7 +349,7 @@ fn test_release_in_flight_on_wait(virq: usize, in_flight: usize) {
         let wait_set = IRQ_STATE
             .lock()
             .descs
-            .get_mut(&virq)
+            .get(&virq)
             .and_then(|line| line.lock().finish_dispatch());
         if let Some(wait_set) = wait_set {
             wait_set.wake();
@@ -542,7 +543,8 @@ fn test_try_map_rejects_reusing_virq_for_another_domain_mapping() {
     let newer_hwirq = 0x2f2b;
     let virq = try_map(IrqDesc::new(existing_hwirq, IrqTrigger::EdgeRising).with_domain(domain))
         .expect("initial map should succeed");
-    IRQ_STATE.lock().descs.remove(&virq);
+    // A published mapping retains both indexes until paired withdrawal. Keep
+    // that invariant while attempting to alias its logical number.
 
     let err = try_map(
         IrqDesc::new(newer_hwirq, IrqTrigger::EdgeRising)
@@ -553,17 +555,8 @@ fn test_try_map_rejects_reusing_virq_for_another_domain_mapping() {
 
     assert!(matches!(
         err,
-        IrqDescError::VirqMappingConflict {
-            virq: got_virq,
-            existing_domain,
-            existing_hwirq: got_existing_hwirq,
-            newer_domain,
-            newer_hwirq: got_newer_hwirq,
-        } if got_virq == virq
-            && existing_domain == domain
-            && got_existing_hwirq == existing_hwirq
-            && newer_domain == domain
-            && got_newer_hwirq == newer_hwirq
+        IrqDescError::HwirqConflict { existing, newer }
+            if existing == existing_hwirq && newer == newer_hwirq
     ));
     assert_eq!(IRQ_STATE.lock().translated_hwirq(domain, newer_hwirq), None);
 }
@@ -975,11 +968,8 @@ fn test_tokenless_free_preserves_shared_action_after_first_slot_removal() {
     assert!(unregister(virq).is_none());
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must remain")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = retained_line.lock();
         assert_eq!(entry.action_count(), 1);
         assert!(entry.is_enabled_for_tests());
     }
@@ -1014,11 +1004,8 @@ fn test_shared_irq_action_limit_is_enforced() {
     );
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must remain")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = retained_line.lock();
         assert_eq!(entry.action_count(), MAX_IRQ_ACTIONS);
     }
 
@@ -1048,11 +1035,8 @@ fn test_free_irq_rejects_single_shared_action_without_token() {
     );
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must remain")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = retained_line.lock();
         assert_eq!(entry.action_count(), 1);
     }
 
@@ -1073,11 +1057,8 @@ fn test_free_irq_action_rejects_forged_regular_token() {
     );
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must remain")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = retained_line.lock();
         assert_eq!(entry.action_count(), 1);
     }
 
@@ -1116,7 +1097,7 @@ fn test_register_rejected_during_teardown_has_no_descriptor_side_effect() {
         state.descs.insert(virq, line.clone());
         state
             .descs
-            .get_mut(&virq)
+            .get(&virq)
             .expect("descriptor must exist")
             .lock()
             .begin_teardown();
@@ -1129,22 +1110,16 @@ fn test_register_rejected_during_teardown_has_no_descriptor_side_effect() {
 
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must remain")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = retained_line.lock();
         assert_eq!(entry.desc, initial_desc);
         assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), None);
     }
 
     {
         let mut state = IRQ_STATE.lock();
-        let mut entry = state
-            .descs
-            .get_mut(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let mut entry = retained_line.lock();
         entry.finish_teardown();
         drop(entry);
         let _ = state.remove_if_unused(virq);
@@ -1167,7 +1142,7 @@ fn test_shared_register_rejected_during_teardown_has_no_descriptor_side_effect()
         state.descs.insert(virq, line.clone());
         state
             .descs
-            .get_mut(&virq)
+            .get(&virq)
             .expect("descriptor must exist")
             .lock()
             .begin_teardown();
@@ -1181,11 +1156,8 @@ fn test_shared_register_rejected_during_teardown_has_no_descriptor_side_effect()
 
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must remain")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = retained_line.lock();
         assert_eq!(entry.desc, initial_desc);
         assert_eq!(entry.action_count(), 0);
         assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), None);
@@ -1193,11 +1165,8 @@ fn test_shared_register_rejected_during_teardown_has_no_descriptor_side_effect()
 
     {
         let mut state = IRQ_STATE.lock();
-        let mut entry = state
-            .descs
-            .get_mut(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let mut entry = retained_line.lock();
         entry.finish_teardown();
         drop(entry);
         let _ = state.remove_if_unused(virq);
@@ -1212,11 +1181,8 @@ fn test_try_register_auto_enable_marks_runtime_enabled() {
     assert!(try_register(virq, Arc::new(test_handler)).expect("register should work"));
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = retained_line.lock();
         assert_eq!(entry.disable_depth_for_tests(), 0);
         assert!(entry.is_enabled_for_tests());
         assert_eq!(
@@ -1239,11 +1205,8 @@ fn test_try_register_disabled_leaves_runtime_disabled() {
     );
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = retained_line.lock();
         assert_eq!(entry.disable_depth_for_tests(), 1);
         assert!(!entry.is_enabled_for_tests());
         assert_eq!(
@@ -1267,11 +1230,8 @@ fn test_enable_irq_starts_disabled_registration() {
     try_enable_irq(virq).expect("explicit enable should work");
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = retained_line.lock();
         assert_eq!(entry.disable_depth_for_tests(), 0);
         assert!(entry.is_enabled_for_tests());
         assert_eq!(
@@ -1310,22 +1270,16 @@ fn test_enable_irq_rejects_teardown_wait_window() {
     ));
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must remain")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = retained_line.lock();
         assert!(!entry.is_enabled_for_tests());
         assert_eq!(entry.teardown_depth_for_tests(), 1);
     }
 
     {
         let mut state = IRQ_STATE.lock();
-        let mut entry = state
-            .descs
-            .get_mut(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let mut entry = retained_line.lock();
         entry.finish_teardown();
         drop(entry);
         let _ = state.remove_if_unused(virq);
@@ -1357,22 +1311,16 @@ fn test_legacy_enable_rejected_during_teardown_has_no_descriptor_side_effect() {
     ));
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must remain")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = retained_line.lock();
         assert_eq!(entry.desc, initial_desc);
         assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), None);
     }
 
     {
         let mut state = IRQ_STATE.lock();
-        let mut entry = state
-            .descs
-            .get_mut(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let mut entry = retained_line.lock();
         entry.finish_teardown();
         drop(entry);
         let _ = state.remove_if_unused(virq);
@@ -1395,11 +1343,8 @@ fn test_enable_irq_rejects_descriptor_without_action() {
     ));
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must remain")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = retained_line.lock();
         assert!(!entry.is_enabled_for_tests());
         assert_eq!(entry.disable_depth_for_tests(), 0);
     }
@@ -1427,11 +1372,8 @@ fn test_disable_irq_nosync_uses_nested_depth() {
     try_disable_irq_nosync(virq).expect("nested disable should work");
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = retained_line.lock();
         assert_eq!(entry.disable_depth_for_tests(), 2);
         assert!(!entry.is_enabled_for_tests());
     }
@@ -1439,11 +1381,8 @@ fn test_disable_irq_nosync_uses_nested_depth() {
     try_enable_irq(virq).expect("first enable should work");
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = retained_line.lock();
         assert_eq!(entry.disable_depth_for_tests(), 1);
         assert!(!entry.is_enabled_for_tests());
     }
@@ -1451,11 +1390,8 @@ fn test_disable_irq_nosync_uses_nested_depth() {
     try_enable_irq(virq).expect("second enable should work");
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = retained_line.lock();
         assert_eq!(entry.disable_depth_for_tests(), 0);
         assert!(entry.is_enabled_for_tests());
     }
@@ -2119,7 +2055,7 @@ fn registration_preflight_and_install_share_resolved_line_state() {
             .lock()
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
     assert!(IRQ_STATE.lock().remove_if_unused(virq).is_some());
     assert_eq!(Arc::strong_count(&handler), 1);
@@ -2292,7 +2228,7 @@ fn withdrawn_line_rejects_enable_while_disable_keeps_original_drain() {
             .lock()
             .descs
             .get(&virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
     );
     assert_eq!(Arc::strong_count(&handler), 2);
     drop(removed);
@@ -2457,7 +2393,7 @@ fn enable_backend_holds_original_line_through_nested_and_forced_updates() -> uni
         assert_eq!(line.lock().disable_depth_for_tests(), depth);
         assert_eq!(line.lock().is_enabled_for_tests(), depth == 0);
         assert!(Arc::ptr_eq(
-            registry.lock().descs.get(&virq).unwrap(),
+            &registry.lock().descs.get(&virq).unwrap(),
             &line
         ));
     }
@@ -2536,7 +2472,7 @@ fn management_completion_preserves_irq_state_and_restores_under_line_lock() -> u
                 .lock()
                 .descs
                 .get(&virq)
-                .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+                .is_some_and(|stored| Arc::ptr_eq(&stored, &line))
         );
     }
     unittest::TestResult::Ok
@@ -2626,7 +2562,7 @@ fn controller_update_excludes_only_its_original_line() -> unittest::TestResult {
             // controller callback reenter management. Private state excludes
             // unrelated IRQ activity from this lock-availability assertion.
             let state = registry.try_lock().unwrap();
-            assert!(Arc::ptr_eq(state.descs.get(&virq).unwrap(), original));
+            assert!(Arc::ptr_eq(&state.descs.get(&virq).unwrap(), original));
             assert!(!other.is_state_locked_for_tests());
             let other_entry = other.lock();
             assert_eq!(other_entry.disable_depth_for_tests(), 1);
@@ -2675,7 +2611,7 @@ fn legacy_enable_uses_prepared_line_for_backend_update() {
     let line = retained.unwrap();
     assert!(Arc::ptr_eq(&line, &prepared));
     assert!(Arc::ptr_eq(
-        registry.lock().descs.get(&virq).unwrap(),
+        &registry.lock().descs.get(&virq).unwrap(),
         &line
     ));
     assert_eq!(line.lock().disable_depth_for_tests(), 0);
@@ -2770,11 +2706,11 @@ fn test_dispatch_tracks_line_level_in_flight() {
     assert_eq!(IRQ_IN_FLIGHT_OBSERVED.load(Ordering::Relaxed), 1);
     {
         let state = IRQ_STATE.lock();
-        let entry = state
+        let retained_line = state
             .descs
             .get(&IRQ_IN_FLIGHT_TEST_VIRQ)
-            .expect("descriptor must remain while action exists")
-            .lock();
+            .expect("descriptor must remain while action exists");
+        let entry = retained_line.lock();
         assert_eq!(entry.in_flight_for_tests(), 0);
     }
 
@@ -3000,12 +2936,9 @@ fn test_free_irq_waits_for_in_flight_dispatch() {
 
     assert!(try_register(virq, Arc::new(test_handler)).expect("register should work"));
     {
-        let mut state = IRQ_STATE.lock();
-        let mut entry = state
-            .descs
-            .get_mut(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let state = IRQ_STATE.lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let mut entry = retained_line.lock();
         entry.begin_dispatch();
     }
 
@@ -3120,7 +3053,7 @@ fn test_free_holds_management_per_line_until_dispatch_drains() {
         .lock()
         .descs
         .get(&virq)
-        .is_some_and(|stored| Arc::ptr_eq(stored, &line));
+        .is_some_and(|stored| Arc::ptr_eq(&stored, &line));
     let registered_after_free = try_register_disabled(desc, Arc::new(test_handler));
     let final_removed = try_free_irq(virq);
     let other_removed = try_free_irq(IRQ_MANAGEMENT_OTHER_VIRQ);
@@ -3158,11 +3091,8 @@ fn replace_drained_instance_on_wait(virq: usize, _in_flight: usize) {
     });
     let (wake, removed_action) = {
         let mut state = IRQ_STATE.lock();
-        let mut entry = state
-            .descs
-            .get_mut(&virq)
-            .expect("waiting instance exists")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("waiting instance exists");
+        let mut entry = retained_line.lock();
         let wake = entry
             .finish_dispatch()
             .expect("one synthetic dispatch remains");
@@ -3195,7 +3125,7 @@ fn check_wait_keeps_original_instance(wait_fn: impl FnOnce(usize) -> Result<bool
     IRQ_STATE
         .lock()
         .descs
-        .get_mut(&virq)
+        .get(&virq)
         .unwrap()
         .lock()
         .begin_dispatch();
@@ -3211,8 +3141,9 @@ fn check_wait_keeps_original_instance(wait_fn: impl FnOnce(usize) -> Result<bool
     IRQ_WAIT_TEST_TARGET.store(0, Ordering::Release);
     let passes = IRQ_WAIT_TEST_RELEASES.load(Ordering::Acquire);
     let (replacement_in_flight, wake) = {
-        let mut state = IRQ_STATE.lock();
-        let mut entry = state.descs.get_mut(&virq).unwrap().lock();
+        let state = IRQ_STATE.lock();
+        let retained_line = state.descs.get(&virq).unwrap();
+        let mut entry = retained_line.lock();
         let in_flight = entry.in_flight();
         let wake = (in_flight != 0).then(|| entry.finish_dispatch().unwrap());
         (in_flight, wake)
@@ -3250,7 +3181,7 @@ fn test_irq_drain_retains_line_after_directory_removal() {
         let mut state = IRQ_STATE.lock();
         assert!(!state.descs.contains_key(&virq));
         state.descs.insert(virq, line.clone());
-        let drain = super::IrqDrain::new(virq, state.descs.get(&virq).unwrap());
+        let drain = super::IrqDrain::new(virq, &state.descs.get(&virq).unwrap());
         let removed = state.remove_if_unused(virq);
         (drain, removed)
     };
@@ -3282,11 +3213,8 @@ fn test_disable_irq_waits_after_nosync_disable() {
     assert!(try_disable_irq(virq).expect("disable_irq should not fail"));
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = retained_line.lock();
         assert_eq!(entry.disable_depth_for_tests(), 1);
         assert!(!entry.is_enabled_for_tests());
     }
@@ -3325,11 +3253,11 @@ fn test_free_irq_rejects_masked_irqs_before_action_removal() {
     ));
     {
         let state = IRQ_STATE.lock();
-        let entry = state
+        let retained_line = state
             .descs
             .get(&virq)
-            .expect("action must remain installed")
-            .lock();
+            .expect("action must remain installed");
+        let entry = retained_line.lock();
         assert_eq!(entry.action_count(), 1);
         assert!(!entry.is_teardown_in_progress());
     }
@@ -3366,12 +3294,9 @@ fn test_synchronize_irq_waits_for_in_flight_dispatch() {
 
     assert!(try_register(virq, Arc::new(test_handler)).expect("register should work"));
     {
-        let mut state = IRQ_STATE.lock();
-        let mut entry = state
-            .descs
-            .get_mut(&virq)
-            .expect("descriptor must exist")
-            .lock();
+        let state = IRQ_STATE.lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must exist");
+        let mut entry = retained_line.lock();
         entry.begin_dispatch();
     }
 
@@ -3383,11 +3308,8 @@ fn test_synchronize_irq_waits_for_in_flight_dispatch() {
     assert_eq!(IRQ_WAIT_TEST_RELEASES.load(Ordering::Acquire), 1);
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("descriptor must remain")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = retained_line.lock();
         assert_eq!(entry.in_flight_for_tests(), 0);
     }
     assert!(unregister(virq).is_some());
@@ -3616,22 +3538,19 @@ fn test_unregister_keeps_msi_descriptor_for_free_msix() {
             .try_resolve_desc(desc, Some(&prepared))
             .expect("MSI descriptor should be accepted")
             .into_desc();
-        let mut entry = state
+        let retained_line = state
             .descs
-            .get_mut(&desc.logical_irq().unwrap())
-            .expect("descriptor state must exist after try_resolve_desc")
-            .lock();
+            .get(&desc.logical_irq().unwrap())
+            .expect("descriptor state must exist after try_resolve_desc");
+        let mut entry = retained_line.lock();
         assert!(entry.install_regular_action(action));
     }
 
     assert!(unregister(virq).is_some());
     {
         let state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get(&virq)
-            .expect("MSI descriptor must stay")
-            .lock();
+        let retained_line = state.descs.get(&virq).expect("MSI descriptor must stay");
+        let entry = retained_line.lock();
         assert!(entry.is_unused());
         assert_eq!(state.translated_hwirq(domain, hwirq), Some(virq));
     }

@@ -2759,8 +2759,10 @@ dependencies = [
  "kiface-task-wait-api",
  "klazy",
  "kmutex",
+ "krcu",
  "krcu-core",
  "kspin",
+ "kxarray",
  "log",
  "unittest",
 ]

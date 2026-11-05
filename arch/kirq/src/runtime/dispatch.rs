@@ -11,7 +11,7 @@ use kspin::{NoPreemptIrqSave, SpinNoIrqGuard};
 
 use crate::{
     IrqEvent, IrqFlow, IrqRef,
-    state::{IRQ_STATE, IrqLine, IrqStateDesc},
+    state::{IrqLine, IrqStateDesc},
 };
 
 /// Retains dispatch admission until the caller has completed the controller claim.
@@ -48,29 +48,20 @@ impl IrqDispatch {
 /// Dispatches a real claim and consumes its original completion on every path.
 pub(super) fn dispatch_claim(source: IrqRef, complete_claim: impl FnOnce()) -> Option<crate::Virq> {
     let _context_guard = NoPreemptIrqSave::new();
-    let state = IRQ_STATE.lock();
-    let resolved = match source {
-        IrqRef::Virq(virq) => Some(virq),
-        IrqRef::Domain(domain, hwirq) => crate::domain::resolve(domain, hwirq),
-    };
-    let Some(virq) = resolved else {
-        drop(state);
+    let Some((virq, line)) = super::index::lookup(source) else {
         warn!("Unhandled IRQ {source:?}");
         complete_claim();
         return None;
     };
-    let Some(line) = state.descs.get(&virq) else {
-        drop(state);
+    let Some(line) = line else {
         warn!("Unhandled IRQ {virq}");
         // A resolved source without a descriptor still completes its own claim.
         complete_claim();
         return Some(virq);
     };
-    let line = line.clone();
     let mut entry = line.lock();
     if entry.is_retired() {
         drop(entry);
-        drop(state);
         // A stale lookup must complete its claim without touching the old chip.
         complete_claim();
         return Some(virq);
@@ -78,8 +69,8 @@ pub(super) fn dispatch_claim(source: IrqRef, complete_claim: impl FnOnce()) -> O
     // Empty Lines retain admission through completion, not just action return.
     entry.begin_dispatch();
     let guard = IrqDispatchGuard::new(virq, line.clone());
-    // The outer context guard preserves IRQ exclusion across this handoff.
-    drop(state);
+    // Lookup's RCU scope has ended; this owner and admission retain the original
+    // Line through controller completion, without taking the directory lock.
 
     match entry.flow {
         IrqFlow::Level(chip) => handle_level_irq(entry, guard, chip, complete_claim),

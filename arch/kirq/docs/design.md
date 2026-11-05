@@ -6,35 +6,24 @@ IrqTrigger, IrqController and IrqDomainId are re-exported from irq-types with
 unchanged public kirq paths. Only value definitions move; domain, mapping,
 handler and release behavior stay in kirq. No driver-contract dependency exists.
 
-## Fallible Reverse Map Ownership
+## Fallible Index Ownership
 
-Ordinary domains prepare both KBox snapshot owners with NOWAIT under registry
-and Line exclusion, after conflict validation but before changing mappings or
-publishing a Line. `IrqDescError::NoMemory` leaves those objects unchanged.
-An existing mapping bypasses preparation. IO-APIC bounds violations return
-`InvalidHwirq`; the provider maps allocation failure to `ResError::NoMemory`.
-Dynamic virq numbering may still advance on a failed attempt. Existing Vec,
-BTreeMap, Arc and candidate Line allocation policies are not changed here.
+Domain and logical indexes use prepared XArray storage. NOWAIT allocation
+precedes registry and Line exclusion; commit publishes neither entry when
+capacity is missing. Allocation failure returns `IrqDescError::NoMemory`;
+an existing binding needs no new capacity. Dynamic numbering may still advance
+after an unsuccessful attempt. Backend hardware validation remains separate
+from container indexing; the former IO-APIC linear-table size limit no longer
+bounds a sparse XArray.
 
-MSI uses a permanently published table bounded by the backend's half-open
-hardware-vector range. Empty/invalid ranges are rejected before admission.
-NOWAIT prepares the table and an immutable KBox virq record during mapping;
-failed mapping releases the backend vector through the existing allocator
-rollback path. Table initialization is retryable until publication. The table
-is never resized; each slot is an atomic pointer, with null meaning unmapped.
-Readers acquire-load the table and slot without locks or allocation.
-
-MSI release never allocates. Under registry exclusion it checks unused state,
-clears the slot, returns the vector to the backend, then removes control-plane
-ownership. Backend rejection restores the previous slot without allocation.
-Published records remain alive forever, including after removal, so readers
-that loaded an old pointer remain safe. This conservative lifetime policy does
-not solve retained-memory growth or stale physical interrupt delivery.
-The caller still owns masking and draining the device before release.
-
-This follows the allocation-free removal principle in linux-stable
-`8d3ae59288f1`, `kernel/irq/irqdomain.c::irq_domain_clear_mapping`, without
-adopting Linux's RCU reclamation or domain mutex implementation.
+MSI publication prepares both eventual retirement records and retains them in
+the Line. Preparation failure returns the unpublished reservation to the
+allocation caller for backend rollback. Release allocates no records; rejected
+release retains both records with the live reservation for retry. Successful
+withdrawal closes Line admission, removes both indexes, submits their RCU
+retirement records outside exclusion, and only then consumes the reservation
+in the backend. Old readers retain storage, not permission to admit service.
+The source owner still must stop device messages and satisfy transport ordering.
 
 ## CPU-local Ordinary Flow
 
@@ -208,15 +197,15 @@ bottom-half 扩展点分散在 HAL 或平台/驱动 glue 中。这样容易出�
 不同平台对 hwirq/virq/domain 的解释不一致，二是中断热路径为了兼容控制面状态而
 重新引入全局锁或隐式 identity fallback。
 
-`kirq` 把这些语义收束到一个 ownership boundary：控制面负责 descriptor 与
-domain snapshot 发布，数据面只消费稳定的 `PendingIrq`/`IrqRef` claim 和已发布的
-reverse-map snapshot；trap adapter、irqchip backend、devres provider 各自只保留
-自己的适配责任。
+`kirq` owns descriptor publication and Domain mappings. Normal dispatch resolves
+stable `PendingIrq`/`IrqRef` claims directly to retained Lines; numeric-only
+queries borrow the same Domain XArray. Trap adapters, irqchip backends
+and devres providers retain only their integration responsibilities.
 
 ## 测试布局
 
 Mapping-only fixtures use a `cfg(unittest)` software domain with strict lookup
-and sparse snapshots. They do not borrow a real controller's domain for
+and a private XArray index. They do not borrow a real controller's domain for
 synthetic out-of-range hardware IDs. This registry entry is absent from
 production builds; real-provider admission tests remain separate.
 
@@ -256,7 +245,7 @@ guest 宏调用另有外层 `cfg(unittest)`，独立 host 导入生产源码时�
 ## Ordinary Flow And Replay
 
 `dispatch_claim` resolves and retains the original Line, establishes admission
-under its state lock, releases the directory lock, and selects one private flow
+under its state lock without a directory lock, and selects one private flow
 handler with an exhaustive match. Each handler consumes the already-held Line
 guard and the original completion closure; it owns admission rejection, action
 execution and the flow-specific completion order. Level mask/ack precedes claim
@@ -289,7 +278,7 @@ admission separately. One models reselection from retained Fasteoi/Edge/Level bi
 to the provider's Legacy selection. A RISC-V-only test uses the initialized
 PLIC selector to reject trigger enrichment until admission ends, then accepts
 it without replacing the Line. Neither test performs controller writes or
-publishes a global reverse-map snapshot.
+publishes a global Domain entry.
 
 Fasteoi admission sets running only for an eligible callback chain. A rejected
 concurrent claim completes itself without clearing that ownership or creating
@@ -566,6 +555,7 @@ arch/kirq/src/
 ├── runtime/
 │   ├── mod.rs
 │   ├── action.rs       # internal regular IRQ action and return classification
+│   ├── index.rs        # owning XArray indexes, prepared publication and retirement
 │   ├── state.rs        # descriptor map, virq allocation, and action state
 │   ├── state_local.rs  # Line-locked CPU-local enable/configuration slots
 │   ├── dispatch.rs     # normal IRQ action fanout
@@ -573,7 +563,7 @@ arch/kirq/src/
 │   ├── nmi.rs          # NMI（pseudo/hardware）registration and lock-minimal dispatch table
 │   └── manager.rs      # public API and dispatch-entry orchestration
 ├── domain/
-│   └── mod.rs          # per-domain lock-free reverse-map snapshots
+│   └── mod.rs          # per-domain RCU XArray indexes
 ├── backend/
 │   ├── mod.rs
 │   ├── platform.rs     # IntrManagerIf bridge and claimed IRQ completion guards
@@ -627,10 +617,10 @@ CPU trap entry
 try_map/try_register/try_enable/unregister
     └── IRQ_STATE (lookup/publication; released before controller operations)
             ├── virq -> Arc<IrqLine> -> SpinNoIrq<IrqStateDesc>
-            └── (domain, hwirq) -> virq
+            └── (domain, hwirq) -> the same Arc<IrqLine>
 
-domain::Published<ReverseMap>
-    └── lock-free data-plane (domain, hwirq) -> virq snapshot
+domain::IrqDomain
+    └── XArray<Arc<IrqLine>>: RCU lookup for IRQ/NMI readers
 
 configure_platform_irq() / set_platform_irq_enabled()
     └── IntrManagerIf::{configure, enable}
@@ -672,8 +662,8 @@ register_nmi()
   NMI），不触碰 normal IRQ dispatch fanout，不调用 lifecycle hooks，也不获取
   `IRQ_STATE`。若异常来自 IRQ-on context，入口已经执行普通 IRQ entry；GIC 在该外层
   lifecycle 内调用 `generic_handle_nmi()`，与 Linux 的 IRQ-on NMI 语义一致。
-- `translate_hwirq()` performs lock-free lookup through ordinary immutable
-  snapshots or MSI atomic slots. Strict misses never become identity virqs.
+- `translate_hwirq()` borrows the Domain XArray in IRQ/NMI context; boot/control
+  queries use writer exclusion. Strict misses return `None`, not identity IDs.
 - `IrqLifecycleHook` 在 trap adapter 已禁抢占、IRQ-on exception 生命周期仍未结束时
   执行；该 exception 随后可能由 irqchip 分类为普通 IRQ、NMI 或 spurious。它不是
   hardirq-depth 边界；hardirq/softirq/BH 状态由
@@ -775,7 +765,7 @@ unknown
 
 Domain association owns the mapped Line independently of its actions. Removing
 the final regular/shared/NMI action or completing an empty claim preserves both
-mapping indexes, the published reverse mapping and the same Line allocation.
+owning XArray entries and the same Line allocation.
 Remapping the same source therefore reuses its existing identity and control
 state instead of reconstructing a descriptor behind a surviving reverse map.
 This also applies to domainless fixed descriptors: handler removal must not
@@ -788,33 +778,48 @@ general runtime Domain disposal entrance yet. MSI has its explicit resource
 release transaction. Domainless descriptors retain registry lifetime too;
 neither action removal nor IRQ completion disposes them. Registration requires
 explicit descriptor preparation in both management modes. General non-MSI
-descriptor disposal is not provided yet. This is not a claim that all ownership
-migration or the XArray index cutover is complete.
+descriptor disposal is not provided yet; the XArray cutover does not add a
+generic platform-mapping destruction API.
 `ut-tests/mapping_lifetime.rs` checks regular/shared removal, empty-claim
 completion, repeated mapping and enrichment without using a hardware producer.
 It also checks that neither an empty claim nor regular/shared action removal
 can undo bare descriptor preparation before startup handler registration.
 
-`IrqState` 是 `kirq` 控制面的 aggregate root。它以 `virq` 作为主键保存
-OS-visible IRQ descriptor 与运行态，并维护按 domain 拆分的控制面
-`domain_states: domain -> hwirq -> virq` 以及反向索引
-`virq_to_mapping: virq -> (domain, hwirq)`。控制面 API 必须通过 `IrqState`
-完成 descriptor 解析、冲突检测、动态 `virq` 分配、action 生命周期更新和 MSI
-清理；hardirq 数据面只消费 `IrqState` 发布到 `domain/mod.rs` 的 immutable
-reverse-map snapshot，不直接把 `IrqState::domain_states` 或 `virq_to_mapping`
-当作热路径查询结构。
+The logical directory and each Domain own an `XArray<Arc<IrqLine>>`.
+Both entries retain the same allocation, whose logical number is immutable.
+Normal Domain dispatch obtains that Line directly in an interrupt RCU scope;
+only explicit identity fallback queries the logical directory. Strict misses
+and unknown Domains remain unresolved. After retaining the Arc, dispatch exits
+the RCU scope and checks retirement/admission under the Line lock, without
+acquiring `IRQ_STATE`. The retained admission survives controller completion.
 
-`try_resolve_and_publish()` 的输入是 `IrqSpec`。`IrqSpec::PlainVirq` 表示调用者只在
-OS-visible IRQ namespace 中引用一条已知 `virq`，不会携带或更新硬件 metadata；
-`IrqSpec::Desc` 表示调用者提交完整 IRQ resource descriptor，可以参与 domain
-mapping、descriptor merge、冲突检测和动态 `virq` 分配。
+`IRQ_STATE` serializes writers, conflict checks and dynamic number assignment.
+The descriptor and the actual Domain entry provide reverse-mapping validation;
+there is no separate `virq_to_mapping` copy. Numeric-only IRQ/NMI translation
+borrows the Domain entry without retaining an Arc; boot/control queries use
+XArray's writer-locked read and need no initialized RCU service. Immutable
+numeric snapshots and their intentional leaks have been removed.
 
-`try_resolve_spec()` returns the normalized descriptor and an optional prepared
-publication owner. `try_resolve_desc()` handles complete descriptors rather
-than inferring handle-only input from default fields. Preparation occurs before
-mapping insertion; successful resolution hands the owner to allocation-free
-publication. The owner represents a new mapping, not merely domain membership.
+Writers prepare worst-case insertion capacity with NOWAIT before registry/Line
+exclusion. Under exclusion, identity and mapping conflicts are revalidated,
+then descriptor/flow state and both indexes are published without allocation.
+A reader may retain the first published entry before the second is visible,
+but cannot acquire Line admission until the writer releases its Line lock.
+Preparation failure returns `NoMemory` before publication;
+dynamic number allocation may leave an unused number after a failed attempt.
 
+MSI release preflights callback submission before exclusion and consumes the
+two records retained since publication only after validating release. It closes
+admission and withdraws both indexes under registry and Line exclusion, then
+submits both records after restoring task context.
+Only after submission does it release the backend reservation. Old borrowed
+readers retain the withdrawn owners through the RCU grace period; independent
+Arc holders may retain the Line longer. Reusing a number never retargets an old
+reader or dispatch guard. Ordinary action removal still keeps its descriptor.
+
+`IrqSpec::PlainVirq` contributes no hardware metadata. `IrqSpec::Desc`
+participates in descriptor merge and mapping validation. `commit_resolution`
+returns only after both required prepared insertions have completed.
 `IrqDesc::try_merge()` 允许后来的 descriptor 补齐 trigger、polarity、controller、
 domain、affinity 和 flags，但不会丢掉已经确认的 metadata。hwirq、virq、domain
 或 `(domain, hwirq) -> virq` 映射冲突会返回 `IrqDescError`，release 构建中不会
@@ -874,8 +879,7 @@ future-only thread slot 的 action 在当前非线程化 core 中不可 dispatch
 
 - 显式 `virq` 直接使用调用者指定的 OS-visible IRQ number；
 - 带 `domain` 但无 `virq` 的 descriptor 通过 `(domain, hwirq)` 分配动态 virq；
-- Prepare a reverse-map owner before adding a domain mapping, then publish
-  the ordinary snapshot or MSI slot without further owner allocation.
+- New Domain bindings publish the retained Line through a prepared XArray slot;
 - 未注册在 `domain/mod.rs` 静态 registry 中的 domain 会返回 `IrqDescError::UnknownDomain`，
   不会留下控制面 mapping 或返回一条数据面不可解析的死线；
 - 动态 virq 从 `DYNAMIC_VIRQ_BASE` 开始；
@@ -909,24 +913,29 @@ resource 到 `kirq` action 生命周期的适配。
 alloc_msix(affinity)
    -> backend allocates controller-local vector
    -> backend composes MsiMessage { address, data }
-   -> kirq retains a non-cloneable MsiReservation in the new Line
+   -> prepare both retirement records; failure returns the reservation for rollback
+   -> kirq retains the records and non-cloneable MsiReservation in the new Line
    -> kirq publishes (MSI_DOMAIN, vector) to a fresh virq
    -> caller registers handler on virq and programs device with message
 
 x86 MSI-X dispatch
    -> hardware vector
    -> PendingIrq::Domain(MSI_DOMAIN, vector)
-   -> dispatch_claim(source, completion) resolves via the stable MSI slot
+   -> dispatch_claim(source, completion) retains the Domain's Line directly
 
 free_msix(virq)
+   -> preflight RCU submission (no retirement allocation)
    -> verify unused, logically disabled state and the allocation reservation
-   -> remove descriptor, both mapping indexes and published reverse mapping
+   -> consume the Line's two preallocated withdrawal records
+   -> close admission and withdraw both owning indexes under registry exclusion
+   -> release short locks and submit both RCU retirement records
    -> consume reservation in backend release
-   -> drop the retained Line after registry exclusion ends
+   -> drop the transaction's retained Line; old readers retain index owners
 ```
 
-The registry lock spans this release transaction. All ordinary rejection occurs
-before withdrawal. A caller-created MSI flag is not an allocation proof: a
+The registry lock spans validation and withdrawal, not retirement submission or
+backend release. All ordinary rejection, including invalid submission context,
+occurs before withdrawal. A caller-created MSI flag is not an allocation proof: a
 mapping without the private reservation cannot release backend storage.
 `MsiBackendToken` grants allocator access, while `MsiReservation` represents one
 successful allocation and cannot be reconstructed or cloned by consumers.
@@ -962,6 +971,19 @@ in-flight counts alone do not authorize disposal. No controller operation is
 issued by this rejection path.
 These are software ownership tests, not hardware late-message validation.
 
+`ut-tests/index_preparation.rs` injects rejection at either production insertion
+preparation boundary. It verifies that neither index becomes visible and that
+the same mapping can subsequently be published. This is not global allocator
+OOM injection; allocation-level cancellation belongs to the XArray tests.
+`ut-tests/index_transactions.rs` observes the exact interval between Domain and
+logical publication or withdrawal. Software hardirq and nested NMI queries
+check visibility while the Line lock still excludes admission. The lock probe
+runs only when SMP lock exclusion is present, not with an elided UP lock.
+The runtime lifecycle fixture additionally holds an interrupt read borrow on
+another CPU across withdrawal and same-key reuse, then verifies reclamation
+after reader exit and callback drain. These fixtures check context balance;
+they do not claim physical IRQ/NMI delivery coverage.
+
 MSI resources are edge-triggered and marked with `IrqFlags::MSI`. They do not
 run through normal `IntrManagerIf::configure/enable` line configuration; the
 device-visible state is the MSI message written into the PCI MSI-X table by the
@@ -976,7 +998,7 @@ dispatch the raw APIC vector as an OS-visible IRQ.
 `unregister()` / `free_irq()` do not delete MSI descriptors. The Line retains the
 backend reservation; `MsiAllocation` is only the device-facing identity/message.
 The caller's resource owner invokes `free_msix()` as the final cleanup point
-for the descriptor, domain mapping, published domain snapshot, and backend
+for the descriptor, both owning XArray entries, and backend
 vector. This keeps the documented device teardown order valid: unregister the
 handler first, then free the MSI resource.
 `free_msix()` withdraws the descriptor and published mapping before returning
@@ -1212,7 +1234,7 @@ on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
 ### `register(desc, handler)`
 
 1. 解析 `IrqSpec`。
-2. 通过 `try_resolve_and_publish()` 获得稳定 `virq`，必要时发布 domain snapshot。
+2. Resolve the stable logical number and commit prepared index insertions.
 3. 若 `IrqStateDesc` 已有 action，返回 `false`。
 4. 把 `Arc<dyn IrqHandler>` 包装成内部 regular action；normal IRQ dispatch 会以
    resolved `virq` 调用 `handler.handle(virq)`。
@@ -1376,7 +1398,7 @@ the same Line guard that covers controller application. Normal enable has no
 separate unlocked teardown observation. Legacy enable additionally prechecks
 before descriptor merging and passes the same guard to the locked resolver.
 Resolution selects an identity, validates descriptor and mapping compatibility,
-then commits metadata and publishes the reverse-map snapshot without reacquiring
+then commits metadata and prepared index entries without reacquiring
 the Line lock. Ordinary map and registration reuse the same validation/commit
 implementation. Registry exclusion ends before controller application; Line
 exclusion remains continuous. Only NMI shared-table writers additionally take
@@ -1440,7 +1462,8 @@ unrelated control operations. Directory-to-Line acquisition can still retain
 `IRQ_STATE` while waiting for a busy Line, delaying other directory users.
 Controller-internal register locks may also serialize distinct Lines. Releasing
 the directory before controller application removes that particular global
-critical section; it does not make registry lookup lock-free.
+critical section. Normal IRQ lookup separately uses RCU and does not take
+the registry lock; these control-plane serialization limits do not apply to it.
 
 `synchronize_irq()` 不 mask line，持续 IRQ 仍可能让等待条件反复变为非零；teardown
 路径应使用 `disable_irq()` 或 `free_irq()`。
@@ -1454,8 +1477,9 @@ critical section; it does not make registry lookup lock-free.
    `PendingIrq { IrqRef, completion cookie }`，直接调用
    `generic_handle_irq()`。
 5. `generic_handle_irq()` delegates source resolution and original completion
-   to `dispatch_claim`. Resolution and descriptor lookup share `IRQ_STATE`
-   exclusion. A found Line gains in-flight admission even without actions.
+   to `dispatch_claim`. An RCU lookup retains the original Line without
+   `IRQ_STATE`; its lock checks retirement and grants in-flight admission even
+   without actions.
    Fasteoi checks running and action eligibility before copying callbacks;
    rejected disabled/action-less arrivals become pending and are masked before
    completion. Running rejection completes without clearing the active owner.
@@ -1511,18 +1535,18 @@ IRQ lifecycle enter；GIC 只在其中用 `generic_handle_nmi()` 替换普通 ac
 
 ## 并发模型
 
-- `IRQ_STATE` uses `SpinNoIrq` to protect directory and mapping transactions;
-  the short `IrqLine` lock protects descriptor/action state. Normal IRQ paths
-  acquire the directory lock before the Line lock for admission. Completion
-  uses only its retained Line lock, without directory lookup or mutation.
-- Ordinary reverse-map snapshots are prepared and published under IRQ_STATE;
-  readers only acquire-load immutable owners. Ordinary unregister retains domain
-  mappings. MSI final free clears a stable slot without building a snapshot.
-- Normal dispatch snapshots the action list, records in-flight dispatch and
-  retains the original Line under `IRQ_STATE -> Line` exclusion. Driver handlers
-  run after both locks are released. Resolution and descriptor lookup share one
-  directory critical section; dispatch completion updates the retained Line
-  without selecting an instance again by number or withdrawing its membership.
+- `IRQ_STATE` serializes control-plane directory and mapping transactions;
+  each Line lock protects descriptor/action state. Normal dispatch retains a
+  Line through RCU and takes only its Line lock for admission. Completion uses
+  that retained Line, without directory lookup or mutation.
+- Both XArray indexes own the same allocation. Numeric IRQ/NMI queries borrow
+  it through RCU. MSI release closes admission and withdraws both entries before
+  submitting their independent retirement records outside registry exclusion.
+  Each index owner remains alive until its callback's grace period completes.
+- Normal dispatch snapshots actions and increments admission under the Line
+  lock, then runs handlers after unlocking. A lookup racing withdrawal may
+  retain a retired Line, but cannot admit service on it. A replacement with the
+  same number cannot redirect the retained completion owner.
 - `in_flight` includes real claims and queued/running replay, released by the
   retained-Line guard.
   The last guard publishes `in_flight_zero` completion under the Line lock and
@@ -1632,10 +1656,11 @@ NMI handlers are rejected before acquiring any lock.
 
 ### 为什么 normal IRQ claim 使用 `PendingIrq`
 
-平台 claim 和 OS-visible `virq` 解析是两个不同步骤。`PendingIrq` 保存 raw claim
-source 与 completion cookie，让 LAPIC timer、LoongArch EXTIOI 等显式 identity
-claim 可以直接派发，也让 GIC/PLIC/IO-APIC/MSI 等 domain IRQ 通过发布的
-lock-free snapshot 解析，避免每次中断都查询控制面的 mapping table。
+Hardware claiming and logical resolution are separate steps. `PendingIrq`
+retains the raw source and completion cookie. LAPIC timer and LoongArch EXTIOI
+claims use explicit logical identities; GIC/PLIC/IO-APIC/MSI Domain claims
+retain the mapped Line directly. A lookup miss still completes the original
+hardware claim, without inventing an identity fallback for strict Domains.
 
 ## Drop / 资源释放
 
@@ -1676,8 +1701,8 @@ Directory withdrawal, service admission and final storage destruction are
 separate events. An `Arc<IrqLine>` preserves allocation identity; it does not
 grant permission to install an action or dispatch after withdrawal. Management
 must revalidate directory identity after acquiring its potentially blocking
-mutex. The existing directory lock still provides that admission check; this
-is not yet an RCU-readable directory implementation.
+mutex. Registry exclusion still provides that control-plane identity check;
+normal dispatch instead checks retirement under the RCU-retained Line's lock.
 
 `IrqLine::virq` uses `klazy::Once<Virq>` to bind the logical number once,
 independently of mutable controller metadata. A private candidate starts
@@ -1691,8 +1716,8 @@ neither the mutable Line lock nor an owning reference clone. An assigned number
 does not prove directory membership or grant service admission. The initializer
 runs only in the serialized commit path and returns an integer; it cannot
 allocate, reenter or wait for another initializer. This separates identity
-observation from admission without changing the current directory/snapshot
-lookup architecture. Mapping lifetime and MSI reservation tests cover alias
+observation from admission. Direct Domain lookup uses this immutable number
+without reacquiring the Line lock. Mapping lifetime and MSI reservation tests cover alias
 rejection, observation while the Line lock is held, failed preparation,
 metadata enrichment and retirement.
 
@@ -1716,8 +1741,9 @@ The retirement regression in `ut-tests/msi_reservation.rs` retains an old
 owner across disposal, rejects its republication and action installation, and
 accepts a fresh identity at the same logical number. `ut-tests/line_dispatch.rs`
 injects a retired lookup and verifies exactly one claim completion with no old
-flow mask/unmask calls or in-flight credit. This models a stale-reference
-interleaving; it is not evidence that RCU directory publication is implemented.
+flow mask/unmask calls or in-flight credit. This models stale-reference admission.
+The runtime paired-index reuse test separately exercises actual RCU publication,
+withdrawal, retained borrowed readers and grace-period reclamation.
 
 The final release chain is bounded by the following ownership rules:
 
@@ -1859,7 +1885,5 @@ including when two descriptors name the same hwirq through different Lines.
 Linux `kernel/irq/manage.c` uses `request_mutex` outside descriptor and chip-bus
 locks for request/free serialization, releasing the short locks before
 `__synchronize_irq` while retaining `request_mutex`. The RAII guard expresses
-that ownership directly in Rust. Registry
-BTreeMap/reverse-map snapshot allocation remains legacy behavior for the later
-Domain-directory ticket; this step moves Line-owned preparation, not every
-registry allocation, out of short locks.
+that ownership directly in Rust. XArray capacity is also prepared before short
+locks; commits revalidate identity and publish without allocating nodes.

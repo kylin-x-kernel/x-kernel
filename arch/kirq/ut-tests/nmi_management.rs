@@ -45,7 +45,7 @@ fn startup_nmi_registration_reuses_prepared_mapping() {
     assert!(crate::descriptor(virq).is_none());
     let cleanup = ScopedFailedNmi { virq, hwirq };
     assert_eq!(crate::try_map(desc), Ok(virq));
-    let prepared = IRQ_STATE.lock().descs.get(&virq).cloned().unwrap();
+    let prepared = IRQ_STATE.lock().descs.get(&virq).unwrap();
     assert_eq!(prepared.lock().action_count(), 0);
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
     // The synthetic source has no hardware producer. Only configuration is
@@ -59,7 +59,7 @@ fn startup_nmi_registration_reuses_prepared_mapping() {
     ));
     assert!(!karch::local_irq_enabled());
     drop(irq_guard);
-    let installed = IRQ_STATE.lock().descs.get(&virq).cloned().unwrap();
+    let installed = IRQ_STATE.lock().descs.get(&virq).unwrap();
     assert!(Arc::ptr_eq(&prepared, &installed));
     assert_eq!(installed.lock().action_count(), 1);
     assert!(
@@ -162,7 +162,7 @@ fn failed_nmi_configuration_publishes_neither_owner_and_preserves_irq_mask() {
         assert_eq!(Arc::strong_count(&handler), 1);
         assert_eq!(IRQ_STATE.lock().translated_hwirq(domain, hwirq), Some(virq));
         {
-            let line = IRQ_STATE.lock().descs.get(&virq).cloned().unwrap();
+            let line = IRQ_STATE.lock().descs.get(&virq).unwrap();
             let entry = line.lock();
             assert_eq!(entry.desc, desc.with_flags(crate::IrqFlags::PER_CPU));
             assert_eq!(entry.action_count(), 0);
@@ -182,7 +182,7 @@ fn failed_nmi_configuration_publishes_neither_owner_and_preserves_irq_mask() {
         ));
         assert!(has_reconfigured);
         {
-            let line = IRQ_STATE.lock().descs.get(&virq).cloned().unwrap();
+            let line = IRQ_STATE.lock().descs.get(&virq).unwrap();
             let entry = line.lock();
             assert_eq!(
                 entry.configured_generation_for_tests(),
@@ -310,7 +310,7 @@ fn duplicate_nmi_on_another_line_does_not_publish_mapping() {
         state
             .descs
             .get(&other_virq)
-            .is_some_and(|stored| Arc::ptr_eq(stored, &other_line))
+            .is_some_and(|stored| Arc::ptr_eq(&stored, &other_line))
             && state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq).is_none()
     };
     let other_unchanged = {

@@ -675,3 +675,11 @@ The same runner times baseline, empty task read scopes and immutable object
 reads in 1024-operation batches. Batch totals include normal IRQ/preemption
 interference; they are not single-read tail latencies or multicore scaling
 measurements. No updater pressure or baseline subtraction is applied.
+
+## Read-state admission query
+
+`is_reading()` samples current's task and nested interrupt read depth without
+entering a scope, scheduling or running cleanup. Task callers before current
+installation get false; interrupt callers require installed current. Index writers use it to reject publication from
+an active read scope while still allowing allocation-ready early boot. A false
+result is not a lifetime token or a general certificate of sleepability.

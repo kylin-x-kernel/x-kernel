@@ -9,6 +9,21 @@ use krcu_core::ReadGuard;
 
 use crate::host::{CurrentReader, with_current_reader};
 
+/// Reports whether current has an active task or nested interrupt read scope.
+///
+/// Requires initialized CPU-local primitives and, in interrupt handlers, an
+/// installed current task. Task callers before current installation get false.
+/// Never allocates, schedules or performs cleanup.
+/// This is an admission snapshot, not proof that any protected pointer is live.
+pub fn is_reading() -> bool {
+    if !kiface_irq_context_api::InterruptContextIf::is_in_interrupt_handler()
+        && !kiface_task_api::TaskExecutionIf::has_current_task()
+    {
+        return false;
+    }
+    with_current_reader(|current| current.reader().is_reading())
+}
+
 /// Borrowed proof of participation in a task or interrupt kernel RCU read scope.
 ///
 /// Only this crate constructs the token, after establishing host participation.

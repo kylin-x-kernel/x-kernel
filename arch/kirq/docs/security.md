@@ -238,31 +238,26 @@ kirq
 
 ## unsafe 代码清单
 
-Ownership regression tests in `ut-tests/line_admission.rs` inject preparation
-failure before descriptor/map commit and verify that resolving an existing
-mapping bypasses allocation. `ut-tests/backend_msi.rs` checks retry after failed
-record/table preparation, stable-table reuse, rejected release restoration,
-retained-reader lifetime, and x86 backend allocation/free/reallocation. These
-seams do not simulate global allocator failure, nested map/Arc allocation or
-physical interrupt drain. The PLIC path is additionally exercised by RISC-V
-boot and its existing source-bound/controller tests.
-The runtime fixture `msi_lookup_interleaves_with_release_and_reallocation`
-runs a real reader task across repeated x86 allocation/release cycles with
-publication/removal acknowledgements. It is not a physical MSI delivery test.
+The index boundaries are in `runtime/index.rs` and `runtime/state.rs`:
 
-`domain::Published<T>` acquire-loads pointers transferred with `KBox::into_raw`.
-Published owners are never deallocated, even after a slot is cleared. Ordinary
-snapshots and MSI records are immutable; the MSI table permits mutation only
-through its atomic slots under registry exclusion. `Published` has no Drop
-that could free a record still held by a reader.
-
-`MsiTable::new` initializes every exclusively owned uninitialized slice slot
-with a null Published pointer before `assume_init`. The loop cannot fail and
-no reference escapes before initialization completes. Allocation failure drops
-only unpublished storage. The table and records use NOWAIT because preparation
-runs under IRQ-disabled control locks; this grants neither NMI allocation
-safety nor a latency bound.
-
+- Prepared XArray insertion runs in allocator-initialized boot/task context,
+  never IRQ/NMI/BH context. NOWAIT preparation precedes registry/Line exclusion.
+- `withdraw_msi` requires successful RCU submission preflight before exclusion.
+  MSI publication allocates both empty retirement records before publishing the
+  Line; failure returns the unpublished reservation for backend rollback.
+  Release consumes those records only after validation, without allocating.
+  Every returned retirement record must be submitted after restoring that same
+  context, before invoking arbitrary backend callbacks.
+- Both owning indexes retain the original Line. Withdrawal marks it retired
+  before removing either entry, so a racing old lookup cannot gain admission.
+- IRQ readers clone their Arc within an interrupt RCU scope. Numeric NMI queries
+  only borrow and return a scalar; they cannot run a final Line destructor.
+- Retired tree nodes and index-owned Arcs are released by RCU, not leaked.
+  Remaining owned Arc holders extend lifetime beyond the grace period.
+- The unittest-only quiescent fixture removes a synthetic slot without pruning
+  radix nodes. It requires exclusion of same-key borrowed readers and writers;
+  it is not used to prove the production retirement protocol. The runtime
+  paired-index reuse test instead exercises actual withdrawal and RCU callbacks.
 `arch/kirq/src/bottom_half/context.rs` 使用 `kcpu_slot` 的
 `CpuSlotCell<SpinNoIrq<IrqContextState>>`：
 
@@ -312,9 +307,9 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
 - `try_disable_irq_nosync()` 必须保持 lookup-only；未知 IRQ 返回
   `IrqDescError::UnknownIrq`，不能在 hardirq-safe disable 路径中创建 descriptor 或
   domain mapping。
-- Ordinary domain snapshots are prepared before mapping changes and published
-  after commit; old snapshots remain immutable and retained. MSI uses atomic
-  slots with retained immutable records instead of replacement snapshots.
+- RCU protects borrowed Domain/directory entries across withdrawal. Writers
+  prepare capacity before exclusion, publish initialized Lines under their lock,
+  and submit withdrawn ownership only after restoring task context.
 - MSI allocation 必须只向调用者暴露 virq 和 `MsiMessage`；backend-local vector、
   APIC id 和 affinity 选择不能泄露到 `device_res` 或 generic driver。
 - NMI dispatch 不得依赖 `IRQ_STATE`，否则 pseudo-NMI 可能打断 normal IRQ 持锁路径并
@@ -338,18 +333,18 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
 
 ### normal IRQ state
 
-`IRQ_STATE` 使用 `SpinNoIrq` 保护 descriptor 和 action list。
-dispatch path 在持锁期间解析 `PendingIrq`、查找 descriptor，并复制 action
-snapshot，然后释放锁再调用 handler。这样保留 resolve 与 descriptor lookup 的原子性，
-同时避免回调重入 IRQ API 时自锁。
+`IRQ_STATE` serializes directory and Domain writers; each Line lock protects
+descriptor, action and admission state. Normal dispatch retains the original
+Line through an interrupt RCU lookup, then takes only its Line lock. Driver
+handlers run after releasing that lock. Completion uses the retained identity,
+never a fresh number lookup.
 
-Ordinary `hwirq -> virq` maps use immutable snapshots; MSI uses stable atomic
-slots. Dispatch resolves a `PendingIrq` through those published owners rather than querying the
-control-plane `domain_states` table; strict misses stay misses instead of falling
-back to identity dispatch. The control plane also keeps `virq_to_mapping` as the
-reverse index for the same mappings, so "one virq maps to at most one hardware
-line" is checked without scanning all domains.
-
+Domain and logical indexes own the same Line. Reverse conflict checks use its
+descriptor and the actual Domain binding instead of a redundant metadata map.
+A reader racing withdrawal either misses or retains the old Line and observes
+its retired gate; number reuse cannot redirect that retained owner. Numeric-only
+IRQ/NMI translation uses an RCU borrow. Early boot and control reads use the
+XArray writer lock, without assuming a current task or a running RCU service.
 Waiting teardown APIs (`disable_irq()`, `synchronize_irq()`, and `free_irq()`)
 are valid only from ordinary kernel context. They reject hardirq, softirq, and
 BH-disabled callers before waiting on `in_flight`, because those contexts may be
@@ -359,8 +354,8 @@ acquire while waiting; otherwise teardown can wait for a handler that is blocked
 behind the caller's own lock.
 
 All descriptors survive action removal and empty-claim completion, including
-domainless fixed Lines. Domain-bound Lines also retain their forward/reverse
-indexes and published lookup snapshot. Mapping ownership is not inferred from
+domainless fixed Lines. Domain-bound Lines retain both owning XArray entries.
+Mapping ownership is not inferred from
 handler count, and handler removal cannot undo preparation. General non-MSI
 runtime disposal is not provided yet: these descriptors retain registry lifetime.
 MSI resources retain their separate explicit release transaction.
@@ -385,6 +380,13 @@ not cleared by normal action teardown, and a failed release must not set it.
 The original claim still requires completion when a retired lookup is rejected;
 no old-Line flow operation may be invoked on that path. Retirement does not
 itself provide RCU protection or physical interrupt drain.
+Unittest-only checkpoints observe partial publication and withdrawal without
+releasing the writer or Line lock. Their interrupt observers perform lookups,
+not handler admission, controller operations or sleeping waits. Nested NMI
+observers return scalar identities only. The cross-CPU interrupt-reader fixture
+keeps borrowed storage alive until its read scope exits and drains callbacks
+only after releasing the reader. These checks do not establish device shutdown
+or hardware late-message ordering.
 Final storage destruction must not contain a client action or an unconsumed
 hardware-release obligation. The management path returns removed handlers
 outside its locks instead of delegating their destructors to storage retirement.
@@ -397,9 +399,9 @@ no-std Event implementation releases its inner storage without acquiring the
 management mutex. Changing that dependency, adding a destructor-bearing Line
 field, or making allocation release sleepable requires a new release-context
 audit. IRQ-safe allocator locks are not NMI-safe: a future NMI lookup must not
-become the final owning release of a retired Line. The current directory and
-snapshot protocols remain in place until replacement admission and reader
-lifetime protection are implemented together.
+become the final owning release of a retired Line. Numeric NMI lookup therefore
+borrows through RCU and returns only the logical number. Normal dispatch retains
+an Arc and checks retired admission under the Line lock.
 
 MSI allocation publishes a fresh `(MSI_DOMAIN, backend_vector) -> virq`
 mapping under `IRQ_STATE`, retaining its exclusive reservation in the Line.
@@ -508,7 +510,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 |------|------|----------|------|------|
 | T-01 | IRQ metadata 配置错误 | 固件或平台提供错误 trigger/polarity/domain | 中断丢失、重复触发或无法 mask | `IrqDesc` 明确携带 metadata，平台 configure 只消费规范化描述 |
 | T-02 | handler executes under registry/Line locks | Dispatch invokes an action before unlocking | Callback reentry deadlocks | `dispatch_claim` and `replay` snapshot eligible actions, then release short locks before `run_actions` |
-| T-03 | 数据面 mapping miss 被当作 identity virq | strict domain 未发布或缺失映射 | 错 handler 或错误确认中断 | `PendingIrq` 通过 domain snapshot 解析；strict miss 保持 unhandled |
+| T-03 | Mapping miss becomes identity dispatch | Strict Domain has no mapping | Wrong handler or completion | Direct Domain lookup preserves strict misses; only declared identity Domains may use the logical directory |
 | T-04 | NMI path 获取 normal IRQ state | pseudo/hardware NMI 打断 normal IRQ 持锁区（hardware NMI 在 IRQ path 打开 ALLINT 窗口时抢占） | 同 CPU 自锁或 NMI 延迟 | NMI 使用独立 `NMI_TABLE`，dispatch 不触碰 `IRQ_STATE`；NMI path 保持 ALLINT/PMR 防止 NMI 嵌套 |
 | T-05 | claimed IRQ 未 complete | normal control flow 提前返回或忘记显式 complete | 控制器认为中断仍 active，后续中断异常 | claimed IRQ guard Drop 补偿 completion |
 | T-06 | lifecycle enter/exit 不配对 | IRQ 中途 clear/re-register hook | hardirq nesting 或 deferred work 状态损坏 | guard 保存 entry 时的 exit hook 快照 |
@@ -522,7 +524,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-14 | driver 读取当前 APIC id 生成 MSI message | MSI message 由设备层而非 IRQ backend 编码 | SMP/affinity/x2APIC 下中断投递到错误 CPU | `MsiBackendIf::compose_msi_message()` 是唯一 message composition 边界 |
 | T-15 | MSI vector 与 handler 生命周期失配 | 设备释放 MSI resource 时 handler 仍注册，或 handler 注销提前删除 MSI mapping | vector reuse 后旧 handler、stale mapping 或 backend vector 泄漏 | `unregister()` 保留 MSI descriptor；`free_msix()` 检测 descriptor 是否仍被使用并完成最终清理；驱动 teardown 应先撤 handler 再释放 MSI resource |
 | T-16 | descriptor 冲突被静默合并 | hwirq/domain/virq metadata 不一致 | handler 绑定到错误 IRQ 或平台 configure 错误 | `try_resolve_desc()` / `try_merge()` 运行时返回 `IrqDescError` |
-| T-17 | MSI mapping 丢失后 raw vector 被当成 virq | backend vector 无 `(MSI_DOMAIN, vector)` 映射 | 误派发到同号 OS IRQ | MSI dispatch 使用 strict MSI domain snapshot；miss 只记录 unhandled，不 fallback raw vector |
+| T-17 | Missing MSI mapping becomes a raw logical IRQ | No `(MSI_DOMAIN, vector)` entry | Wrong handler selected | MSI dispatch uses the strict Domain Line index; a miss never falls back to the raw vector |
 | T-18 | 未注册 domain 被映射成功 | 控制面接受未知 `IrqDomainId` | 驱动拿到永远不可达的 virq | `try_resolve_and_publish()` 在改状态前返回 `UnknownDomain` |
 | T-19 | BH-disabled 被误判为普通 task context | diagnostics 只区分 hardirq/softirq/task | sleepable future callback 可能在 BH-disabled 区间运行 | `InterruptContextLevel::BhDisabled` 和 docs 明确其 non-sleepable 语义 |
 | T-20 | context misuse 日志风暴 | underflow 或 hardirq 中反复 local_bh_disable | 日志淹没真实故障，拉长 IRQ 处理时间 | warning 计数保留，日志只输出初始样本和 2 的幂次样本 |
@@ -534,7 +536,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-21g | Callback dependency cycle | Callback waits on work that cannot progress | Bounded pool starvation or deadlock | Accept residual risk: optional self-wait checks catch local cases, not arbitrary dependency cycles; callers must avoid those cycles. |
 | T-22 | oneshot runtime 字段被误当成已实现行为 | 后续代码只改 flag，没有安装 mask protocol | oneshot IRQ 无法屏蔽重入或误解除 mask | review 要求 oneshot mask 和 thread identity 在 `IrqDescRuntimeState` owner 内成组实现 |
 | T-23 | threaded slot 提前保存 task/worker 指针 | 未建立线程生命周期、取消、CPU 亲和和退出同步 | handler return 后唤醒已释放对象，或在 hardirq 中触发 sleepable 路径 | 当前 `IrqThreadSlot` 不携带目标，带 slot 的 action 不会被当前 dispatch 路径同步执行；后续 milestone 必须先定义所有权和 teardown ordering |
-| T-24 | action snapshot 与 cleanup 分离不完整 | dispatch 多次取锁并依赖跨锁状态 | unregister/free 与 dispatch 交错后调用 stale callback 或保留 stale mapping | `IrqActionSnapshot` 在一个 `IRQ_STATE` 临界区内形成完整快照，回调只使用快照 |
+| T-24 | Incomplete action/admission snapshot | Dispatch re-resolves state across locks | Withdrawal redirects an old claim or callback | RCU retains the original Line; its lock grants admission and snapshots actions together; callbacks run after unlocking |
 | T-25 | Stale controller updates | Concurrent register/enable/disable/free after directory release | A late unmask reopens a disabled or retired Line | The original Line lock spans state changes and controller application; teardown rejects enable and management admission pins identity through drain |
 | T-26 | 驱动需要清 pending 后再开 IRQ，但 request 立即 enable | 复杂设备 request handler 后尚未初始化 DMA ring/MMIO 状态 | 中断 handler 观察未初始化设备状态 | `try_register_disabled()` 以 disable depth `1` 安装 handler，驱动完成初始化后显式 `try_enable_irq()` |
 | T-27 | Handler remains active after teardown | Free removes an action without draining its admitted snapshots | A handler accesses released MMIO/DMA state | Dispatch admission survives original-claim completion; free masks and drains the retained Line. Completion is published under the Line lock and waiters are woken after unlocking; IRQ completion never withdraws directory membership. |
@@ -606,8 +608,8 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 - MSI descriptors bypass ordinary platform configure/enable. Allocation failure
   returns `None`; composition/publication failure explicitly returns the private
   reservation to the backend. `free_msix()` validates unused state and reservation
-  ownership before withdrawing the descriptor, mapping indexes and published
-  snapshot; only then does the backend consume the reservation. Backend release
+  ownership before withdrawing both owning indexes. RCU retirement submission
+  precedes backend consumption of the reservation. Backend release
   has no recoverable failure after withdrawal. NMI calls are rejected before locks.
 - lifecycle hook 注册是单 owner；后续如果需要多个 consumer，应显式升级为
   notifier chain，而不是让多个子系统覆盖同一全局 hook。
@@ -980,14 +982,17 @@ APIC delivery remain owner shutdown obligations. Neither in-flight == 0 nor a
 successful retrigger is a vector-reuse barrier; the existing MSI release API
 does not gain a new shutdown guarantee from retained target metadata.
 
-MSI release holds the registry lock across the unused/ownership checks, mapping
-removal, reverse-map publication and backend release, in that order. A private
-non-cloneable `MsiReservation` is attached before the Line is published; an MSI
-flag or raw IRQ number alone cannot authorize release. The backend consumes
+MSI release holds the registry lock across unused/ownership checks and both
+index withdrawals. It restores task context and submits RCU retirement before
+backend release, which provides its own allocator exclusion. A private
+non-cloneable `MsiReservation` and both preallocated index retirement records
+are attached before the Line is published; an MSI flag or raw IRQ number alone
+cannot authorize release. The backend consumes
 the reservation and must release it without sleeping or reentering KIRQ. It
 cannot report an ordinary failure after withdrawal. Software rejection preserves the
-mapping; callers must still retain a usable allocation identity. This does not
-repair an adapter that consumes its retry handle on rejection. Private-state
+mapping and its retirement records; callers must still retain a usable allocation
+identity. Release no longer adds an OOM failure to otherwise valid cleanup.
+This does not repair an adapter that consumes its retry handle on rejection. Private-state
 release tests check software failure atomicity, not device shutdown or physical
 late-message isolation.
 

@@ -662,6 +662,14 @@ sleeping IRQ handler. This is lifecycle integration coverage, not hardware IRQ
 delivery or controller-completion coverage. Handshake stalls are bounded by the
 external QEMU runner; elapsed time does not decide correctness.
 
+The same lifecycle fixture tests directory/Domain reuse with task and interrupt
+RCU borrows on another CPU. The interrupt variant uses KIRQ's software hardirq
+entry and nested NMI query fixture, not a physical interrupt injection. A
+Release/Acquire handshake keeps the old reader alive across withdrawal and
+same-key publication; callback drain happens only after reader exit. This
+checks retained identity, successor lookup and eventual reclamation without
+requiring the writer to wait for IRQ delivery on the reader CPU.
+
 ## System power management
 
 System suspend/resume coordination belongs to `core/kpm`, independently of

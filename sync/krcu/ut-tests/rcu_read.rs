@@ -9,6 +9,18 @@ use unittest::{assert, assert_eq, def_test};
 use crate::host;
 
 #[def_test]
+fn reading_snapshot_tracks_nested_scopes_without_changing_depth() {
+    assert!(!crate::is_reading());
+    let observed = crate::with_read(|_| {
+        let outer = crate::is_reading();
+        let inner = crate::with_read(|_| crate::is_reading());
+        (outer, inner, crate::is_reading())
+    });
+    assert_eq!(observed, (true, true, true));
+    assert!(!crate::is_reading());
+}
+
+#[def_test]
 fn host_borrow_preserves_current_reader_without_entering_a_scope() {
     let (calls, observed, result, is_reading_after_borrow) =
         host::with_current_reader(|expected| {
@@ -40,8 +52,8 @@ fn cleanup_without_notification_still_unlinks_finished_membership() {
                 // SAFETY: retained current at a watched task boundary under
                 // IRQ/preemption exclusion; no node lock or active scope.
                 unsafe { crate::context::finish_reader_cleanup(reader) };
-                let initially_clean = !reader.is_enrolled()
-                    && !crate::context::needs_reader_cleanup(cpu);
+                let initially_clean =
+                    !reader.is_enrolled() && !crate::context::needs_reader_cleanup(cpu);
                 let enroll_fn = |_: &krcu_core::ReadGuard<'_>| {
                     // SAFETY: exclusively driven current under host exclusion;
                     // its permanent node and retained storage outlive unlinking.
@@ -56,8 +68,7 @@ fn cleanup_without_notification_still_unlinks_finished_membership() {
                 // SAFETY: the scope ended, with the same retained current and
                 // IRQ/preemption exclusion; membership alone requires cleanup.
                 unsafe { crate::context::finish_reader_cleanup(reader) };
-                let cleaned = !reader.is_enrolled()
-                    && !crate::context::needs_reader_cleanup(cpu);
+                let cleaned = !reader.is_enrolled() && !crate::context::needs_reader_cleanup(cpu);
                 // Restore the fixture even if the provider incorrectly skipped
                 // unlinking. This also preserves any resulting progress hint.
                 // SAFETY: same excluded retained current after scope exit.

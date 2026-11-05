@@ -220,10 +220,6 @@ unittest::path_mod_test!(tests_routing, "../ut-tests/routing.rs");
 
 #[kiface::provide]
 impl kirq::MsiBackendIf {
-    fn msi_hwirq_range() -> Option<core::ops::Range<usize>> {
-        Some(usize::from(MSIX_VECTOR_BASE)..usize::from(APIC_TIMER_VECTOR))
-    }
-
     fn alloc_msi_vector(
         _token: kirq::MsiBackendToken,
         kind: kirq::MsiKind,

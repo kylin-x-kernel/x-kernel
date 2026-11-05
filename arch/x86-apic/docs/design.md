@@ -1,12 +1,12 @@
 # x86-apic — Design
 
-## MSI Reverse Map Range
+## MSI Allocation Range
 
-`MsiBackendIf::msi_hwirq_range` declares the fixed half-open range from
-MSIX_VECTOR_BASE to APIC_TIMER_VECTOR without locking or allocating. KIRQ uses
-it to prepare permanent reverse-map slots. Release clears lookup before this
-backend returns a vector to its allocator; rejection retains ownership and
-allows KIRQ to restore lookup without allocation.
+The backend allocates vectors in the half-open range from MSIX_VECTOR_BASE
+to APIC_TIMER_VECTOR. KIRQ's sparse XArray needs no pre-sized table or range
+query. Before consuming the reservation, KIRQ withdraws both lookup entries
+and submits their RCU retirement records. Backend release then returns the
+owned vector to its allocator; it cannot reject a valid reservation.
 
 ## Local Timer Mask
 

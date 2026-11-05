@@ -13,6 +13,25 @@ use crate::XArray;
 struct DropProbe(Arc<AtomicUsize>);
 
 #[def_test]
+fn quiescent_fixture_removal_retains_paths_for_reuse() {
+    let array = XArray::<Arc<usize>>::new();
+    let owner = Arc::new(42);
+    // SAFETY: private task fixture, primitive callback-safe payload.
+    unsafe { array.insert_with_flags(usize::MAX, owner.clone(), AllocFlags::NOWAIT) }.unwrap();
+    // SAFETY: this task exclusively owns the array; no borrowed readers exist.
+    let removed = unsafe { array.take_quiescent_fixture(usize::MAX) }.unwrap();
+    assert!(Arc::ptr_eq(&removed, &owner));
+    assert!(array.get_owned_locked(usize::MAX).is_none());
+    // SAFETY: same exclusive fixture and callback-safe payload. Reuse the
+    // retained empty leaf and verify its occupancy accounting remains correct.
+    unsafe { array.insert_with_flags(usize::MAX, owner.clone(), AllocFlags::NOWAIT) }.unwrap();
+    assert_eq!(*array.get_owned_locked(usize::MAX).unwrap(), 42);
+    drop(removed);
+    drop(array);
+    assert_eq!(Arc::strong_count(&owner), 1);
+}
+
+#[def_test]
 fn paired_withdrawal_defers_submission_until_outer_unlock() {
     let first = XArray::<Arc<usize>>::new();
     let second = XArray::<Arc<usize>>::new();
