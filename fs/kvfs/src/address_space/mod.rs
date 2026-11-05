@@ -19,12 +19,14 @@ mod readahead;
 mod truncate;
 mod views;
 mod writeback;
+mod writeback_errors;
 
 pub use operations::{AddressSpaceOperations, WriteBeginRequest, WriteEndRequest};
 pub(crate) use operations::{default_address_space_operations, empty_address_space_operations};
 pub use readahead::ReadaheadControl;
 pub use views::AddressSpaceViewGuard;
 pub use writeback::{WritebackControl, WritebackSyncMode};
+pub use writeback_errors::WritebackErrors;
 
 static NEXT_ADDRESS_SPACE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -38,6 +40,7 @@ pub struct AddressSpace {
     views: Mutex<BTreeMap<MappingViewId, RegisteredView>>,
     /// Resident folios and dirty marks, corresponding to Linux `i_pages`.
     i_pages: MappingPages,
+    writeback_errors: WritebackErrors,
 }
 
 impl AddressSpace {
@@ -60,6 +63,7 @@ impl AddressSpace {
             invalidate_lock: RwLock::new(()),
             views: Mutex::new(BTreeMap::new()),
             i_pages: MappingPages::with_residency(residency),
+            writeback_errors: WritebackErrors::new(),
         })
     }
 
@@ -76,6 +80,11 @@ impl AddressSpace {
     /// Returns `address_space::nrpages`.
     pub fn nrpages(&self) -> u64 {
         self.i_pages.nrpages()
+    }
+
+    /// Borrows the error channel embedded in this address space.
+    pub fn writeback_errors(&self) -> &WritebackErrors {
+        &self.writeback_errors
     }
 
     fn visible_len(&self) -> VfsResult<u64> {

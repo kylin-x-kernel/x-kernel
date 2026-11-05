@@ -137,16 +137,20 @@ reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只�
 该入口按交给 callback 的页数扣预算，包括 callback 拒绝的批次；同步入口仍按
 完成页数扣预算。每批至多 31 页，文件系统必须另行限制在途批次数。
 
-`WritebackCompletion` borrows the existing index and retains the original folios;
-there is no second index owner. Final index destruction cannot overlap those
-borrows. The filesystem separately retains inode and block-mapping protection
-until I/O is drained. Completion accounts a byte prefix, redirties incomplete
-folios, and preserves concurrent dirtying. An invalid prefix or abandoned batch
-completes with a zero prefix. This changes only atomic folio flags and index
-marks, without acquiring the content lock or carrying the submitter's task wait.
-The index mutex still requires sleepable task context: do not complete or drop
-batches in BIO IRQ/BH callbacks. Deferred error reporting, background scheduling
-and fsync policy remain with the owner.
+The index mutex is embedded in `MappingPages`; synchronous completion borrows
+it. Cross-task `into_owned` creates an `OwnedWritebackCompletion` retaining the
+complete address-space owner and validates that its index projection matches the
+original batch. It neither extends index lifetime independently nor copies index
+state. The filesystem still retains inode and physical-mapping protection;
+address-space ownership does not replace truncate/drain coordination.
+
+Completion acknowledges fully completed folios within a byte prefix, redirties
+the suffix, and preserves concurrent dirtying. An invalid prefix or dropping an
+unconsumed completion redirties the entire batch. Completion changes atomic folio
+flags and index marks without the content lock or the submitter's wait handle.
+The index mutex requires sleepable task context for completion and Drop, never
+BIO IRQ/BH callbacks, and only after associated I/O has drained. Upper layers own
+error recording, background scheduling, and fsync semantics.
 
 ## 并发模型
 
@@ -215,8 +219,9 @@ surviving truncated tail 等待写回后清零并重新加入 dirty index；增�
 MappingPagesState Drop has exclusive access to the index and atomically invalidates
 each entry, clearing dirty without waiting for its content lock. Read tokens
 retain their page, capacity charge and backing resources independently; a later
-completion cannot reinsert a detached page. Writeback completion borrows
-the index and cannot overlap final destruction. Owners that must drain I/O
+completion cannot reinsert a detached page. Writeback completion either borrows
+the index or retains its complete mapping owner, so it cannot overlap final
+index destruction. Owners that must drain I/O
 before releasing backing resources call `truncate_final()` explicitly. That
 operation waits for initialization and writeback before removal. Admission to
 resize, final truncation and writeback validates sleepable context before mutation.

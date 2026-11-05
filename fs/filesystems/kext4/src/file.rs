@@ -13,83 +13,38 @@ use crate::{
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
 };
 
+mod async_writeback;
+mod mapped_writeback;
+
+pub(crate) use async_writeback::PreparedWriteback;
+pub(crate) use mapped_writeback::{MappedWriteback, PendingMappedWriteback};
+
+/// Completed data reuses the ordered metadata engine without issuing I/O again.
+#[derive(Clone, Copy)]
+enum OrderedWritebackData<'a> {
+    Write(&'a [u8]),
+    Completed(usize),
+}
+
+impl OrderedWritebackData<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Write(bytes) => bytes.len(),
+            Self::Completed(bytes) => bytes,
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+}
+
 struct AllocatedWriteRun {
     first_block: FilesystemBlock,
     block_count: u32,
     input_offset: usize,
     in_block: usize,
     write_len: usize,
-}
-
-/// Fully mapped, aligned overwrite prepared while mount state is protected.
-/// The inode writeback mutex must remain held through submission and completion.
-/// No journal handle or borrowed data buffer survives mapping preparation.
-pub(crate) struct MappedWriteback {
-    device: alloc::sync::Arc<crate::io::FilesystemDevice>,
-    runs: Vec<AllocatedWriteRun>,
-}
-
-/// Bounded owned BIOs, drained in their preparing task on every exit.
-/// Drop waits for remaining I/O before a surrounding PageCache completion can
-/// redirty/release the corresponding folios. No mount lock may be held then.
-pub(crate) struct PendingMappedWriteback {
-    requests: Vec<(block::completion::BioWait, usize)>,
-}
-
-impl MappedWriteback {
-    pub(crate) fn submit(self, input: Vec<u8>) -> Ext4Result<PendingMappedWriteback> {
-        // Prepare every request before publishing any; preparation failure has
-        // no partial device side effects. Keep the common contiguous path copy-free.
-        let mut prepared = Vec::with_capacity(self.runs.len());
-        if self.runs.len() == 1 {
-            let (bio, wait) = self
-                .device
-                .prepare_owned_write(self.runs[0].first_block, input.into_boxed_slice())?;
-            prepared.push((bio, wait, self.runs[0].write_len));
-        } else {
-            for run in self.runs {
-                let data = input[run.input_offset..run.input_offset + run.write_len]
-                    .to_vec()
-                    .into_boxed_slice();
-                let (bio, wait) = self.device.prepare_owned_write(run.first_block, data)?;
-                prepared.push((bio, wait, run.write_len));
-            }
-        }
-        let mut requests = Vec::with_capacity(prepared.len());
-        for (bio, wait, bytes) in prepared {
-            self.device.submit_owned_write(bio);
-            requests.push((wait, bytes));
-        }
-        Ok(PendingMappedWriteback { requests })
-    }
-}
-
-impl PendingMappedWriteback {
-    /// Waits every BIO, even after an error; reports only the contiguous prefix.
-    pub(crate) fn wait(mut self) -> Ext4WritebackResult {
-        let mut completed_bytes = 0;
-        let mut first_error = None;
-        for (wait, bytes) in self.requests.drain(..) {
-            let (result, _buffers) = wait.wait();
-            if first_error.is_none() {
-                match result {
-                    Ok(()) => completed_bytes += bytes,
-                    Err(error) => first_error = Some(Ext4Error::Device(error)),
-                }
-            }
-        }
-        first_error.map_or(Ok(completed_bytes), |error| {
-            Err(Ext4WritebackError::new(completed_bytes, error))
-        })
-    }
-}
-
-impl Drop for PendingMappedWriteback {
-    fn drop(&mut self) {
-        for (wait, _) in self.requests.drain(..) {
-            let _ = wait.wait();
-        }
-    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -610,6 +565,33 @@ impl Ext4SbInfo {
         max_extra_prealloc_blocks: u32,
         is_open_for_write: impl Fn() -> bool,
     ) -> Ext4WritebackResult {
+        self.writeback_ordered_data(
+            inode,
+            offset,
+            OrderedWritebackData::Write(input),
+            visible_size,
+            intent,
+            max_extra_prealloc_blocks,
+            is_open_for_write,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: shared data and completion \
+                  engine needs independent range, visibility, sync, allocation, and live \
+                  writer-state inputs; grouping them would hide their contracts"
+    )]
+    fn writeback_ordered_data(
+        &mut self,
+        inode: &Arc<Ext4Inode>,
+        offset: u64,
+        input: OrderedWritebackData<'_>,
+        visible_size: u64,
+        intent: Ext4SyncIntent,
+        max_extra_prealloc_blocks: u32,
+        is_open_for_write: impl Fn() -> bool,
+    ) -> Ext4WritebackResult {
         self.ensure_regular_file_mutation_supported(inode)?;
         if self.journal.is_none() && intent.requires_full_metadata() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite).into());
@@ -654,7 +636,7 @@ impl Ext4SbInfo {
                 self.collect_allocated_write_runs(inode, offset, input.len(), block_size_usize)?;
             let mut completed_bytes = 0usize;
             for run in &runs {
-                if let Err(error) = self.write_allocated_run(
+                if let Err(error) = self.write_ordered_run(
                     run,
                     input,
                     block_size_usize,
@@ -1003,7 +985,7 @@ impl Ext4SbInfo {
         &mut self,
         inode: &Arc<Ext4Inode>,
         offset: u64,
-        input: &[u8],
+        input: OrderedWritebackData<'_>,
         visible_size: u64,
         intent: Ext4SyncIntent,
         block_size_usize: usize,
@@ -1042,7 +1024,7 @@ impl Ext4SbInfo {
                         in_block,
                         write_len,
                     };
-                    self.write_allocated_run(
+                    self.write_ordered_run(
                         &run,
                         input,
                         block_size_usize,
@@ -1070,7 +1052,7 @@ impl Ext4SbInfo {
                         in_block,
                         write_len,
                     };
-                    self.write_allocated_run(
+                    self.write_ordered_run(
                         &run,
                         input,
                         block_size_usize,
@@ -1100,70 +1082,20 @@ impl Ext4SbInfo {
                     if requested == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                     }
-                    // Linux order: reuse a prealloc space first
-                    // (`ext4_mb_use_preallocated`), and normalize and allocate
-                    // only on a miss. A hit marks exactly the consumed span
-                    // inside the same allocator lock section; the hole mapping
-                    // already reserved one allocation run, so it needs no extra
-                    // credits.
-                    let (physical_start, allocated_blocks) = match self.consume_prealloc_for_write(
-                        inode,
-                        logical,
-                        u64::from(requested),
-                        handle,
-                    )? {
-                        Some(consumed) => consumed,
-                        None => {
-                            let goal =
-                                self.allocation_goal_after_previous_extent(inode, logical)?;
-                            let normalized = normalize_write_allocation_len(
-                                requested,
-                                len.get(),
-                                goal.is_some(),
-                            );
-                            let surplus_budget = normalized
-                                .checked_sub(requested)
-                                .ok_or(Ext4Error::Overflow)?
-                                .min(cursor.remaining_extra_prealloc_blocks)
-                                .min(
-                                    u32::from(crate::disk::extent::EXT_UNWRITTEN_MAX_LEN)
-                                        - requested,
-                                );
-                            // The surplus is registered in memory, never marked
-                            // on disk, so the request asks for the dirty window
-                            // only and the birth hook samples the rest.
-                            let request = Ext4AllocationRequest::new(
-                                inode,
-                                logical,
-                                goal,
-                                BlockCount::new(requested),
-                                BlockCount::new(1),
-                                Ext4AllocationFlags::ALLOW_PARTIAL,
-                            )?;
-                            let (allocation, registered) = self
-                                .allocate_blocks_for_write_with_prealloc(
-                                    request,
-                                    inode,
-                                    surplus_budget,
-                                    handle,
-                                )?;
-                            cursor.remaining_extra_prealloc_blocks = cursor
-                                .remaining_extra_prealloc_blocks
-                                .saturating_sub(registered);
-                            (allocation.physical_start(), allocation.block_count())
-                        }
-                    };
-                    // Registration stays inside the allocation lock section (it
-                    // cannot move below), so a failed mapping insert leaves the
-                    // space in memory for close or eviction to reclaim.
-                    self.insert_extent_mapping(
-                        inode,
-                        logical,
-                        physical_start,
-                        allocated_blocks,
-                        ExtentMappingState::Unwritten,
-                        handle,
-                    )?;
+                    if matches!(input, OrderedWritebackData::Completed(_)) {
+                        // Preparation installed every mapping and truncate drains
+                        // this request before removal. Never allocate at completion.
+                        return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
+                    }
+                    let (physical_start, allocated_blocks) = self
+                        .allocate_unwritten_writeback_run(
+                            inode,
+                            logical,
+                            requested,
+                            len.get(),
+                            &mut cursor.remaining_extra_prealloc_blocks,
+                            handle,
+                        )?;
 
                     let write_len = mapping_write_len(
                         input
@@ -1183,7 +1115,7 @@ impl Ext4SbInfo {
                         in_block,
                         write_len,
                     };
-                    self.write_allocated_run(
+                    self.write_ordered_run(
                         &run,
                         input,
                         block_size_usize,
@@ -1264,6 +1196,70 @@ impl Ext4SbInfo {
         }
     }
 
+    /// Allocates only an unwritten mapping. It is safe to commit before data I/O.
+    fn allocate_unwritten_writeback_run(
+        &mut self,
+        inode: &Arc<Ext4Inode>,
+        logical: LogicalBlock,
+        requested: u32,
+        hole_len: u32,
+        remaining_extra_prealloc_blocks: &mut u32,
+        handle: &mut crate::jbd2::JournalHandle<'_>,
+    ) -> Ext4Result<(crate::PhysicalBlock, BlockCount)> {
+        // Linux order: reuse a prealloc space first
+        // (`ext4_mb_use_preallocated`), and normalize and allocate
+        // only on a miss. A hit marks exactly the consumed span
+        // inside the same allocator lock section; the hole mapping
+        // already reserved one allocation run, so it needs no extra
+        // credits.
+        let (physical_start, allocated_blocks) =
+            match self.consume_prealloc_for_write(inode, logical, u64::from(requested), handle)? {
+                Some(consumed) => consumed,
+                None => {
+                    let goal = self.allocation_goal_after_previous_extent(inode, logical)?;
+                    let normalized =
+                        normalize_write_allocation_len(requested, hole_len, goal.is_some());
+                    let surplus_budget = normalized
+                        .checked_sub(requested)
+                        .ok_or(Ext4Error::Overflow)?
+                        .min(*remaining_extra_prealloc_blocks)
+                        .min(u32::from(crate::disk::extent::EXT_UNWRITTEN_MAX_LEN) - requested);
+                    // The surplus is registered in memory, never marked
+                    // on disk, so the request asks for the dirty window
+                    // only and the birth hook samples the rest.
+                    let request = Ext4AllocationRequest::new(
+                        inode,
+                        logical,
+                        goal,
+                        BlockCount::new(requested),
+                        BlockCount::new(1),
+                        Ext4AllocationFlags::ALLOW_PARTIAL,
+                    )?;
+                    let (allocation, registered) = self.allocate_blocks_for_write_with_prealloc(
+                        request,
+                        inode,
+                        surplus_budget,
+                        handle,
+                    )?;
+                    *remaining_extra_prealloc_blocks =
+                        (*remaining_extra_prealloc_blocks).saturating_sub(registered);
+                    (allocation.physical_start(), allocation.block_count())
+                }
+            };
+        // Registration stays inside the allocation lock section (it
+        // cannot move below), so a failed mapping insert leaves the
+        // space in memory for close or eviction to reclaim.
+        self.insert_extent_mapping(
+            inode,
+            logical,
+            physical_start,
+            allocated_blocks,
+            ExtentMappingState::Unwritten,
+            handle,
+        )?;
+        Ok((physical_start, allocated_blocks))
+    }
+
     /// Calculate the next allocation target (physical block number) after the given logical block.
     /// # Return Value
     /// - `Some(physical)` - The suggested physical block number for allocation
@@ -1293,8 +1289,9 @@ impl Ext4SbInfo {
 
     /// Resolves a complete aligned overwrite before any I/O is submitted.
     /// Partial filesystem blocks, growth, holes and unwritten extents retain
-    /// the existing ordered path. Caller retains inode writeback and KVFS
-    /// invalidate protection through all I/O and metadata completion.
+    /// the existing ordered path. Caller holds inode submission and KVFS
+    /// invalidate protection until deferred queue installation, or through all
+    /// completion when the preparing task retains the waited request.
     pub(crate) fn prepare_mapped_writeback(
         &self,
         inode: &Ext4Inode,
@@ -1333,53 +1330,7 @@ impl Ext4SbInfo {
             Err(Ext4Error::Unsupported(UnsupportedKind::UnallocatedWrite)) => return Ok(None),
             Err(error) => return Err(error),
         };
-        Ok(Some(MappedWriteback {
-            device: self.device.clone(),
-            runs,
-        }))
-    }
-
-    /// Publishes metadata only after successful data I/O, with the same ordered
-    /// flush dependency and allocation admission as the synchronous path.
-    /// Re-read the writable-open gate at settlement so in-use preallocations
-    /// survive both successful overwrites and cleanup of failed data prefixes.
-    pub(crate) fn finish_mapped_writeback(
-        &mut self,
-        inode: &Ext4Inode,
-        offset: u64,
-        completed_bytes: usize,
-        intent: Ext4SyncIntent,
-        is_open_for_write: impl Fn() -> bool,
-    ) -> Ext4WritebackResult {
-        if intent.requires_full_metadata() {
-            let credits = JournalCredits::new(self.extent_writeback_metadata_credits(inode, 0, 0)?);
-            let journal = self.metadata_journal_for_allocation(
-                credits,
-                crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
-                self.inode_extra_isize_allocation_blocks(inode),
-            )?;
-            let mut handle = journal.begin(credits)?;
-            let result = handle.require_ordered_data_flush().and_then(|()| {
-                self.update_regular_inode_write_metadata(
-                    inode,
-                    inode.disk_size(),
-                    RegularWriteMetadata::SizeOnly,
-                    &mut handle,
-                )
-            });
-            self.complete_metadata_mutation(handle, result)?;
-        }
-        let mut cursor = OrderedWritebackCursor::new(0);
-        cursor.advance(completed_bytes)?;
-        self.release_ordered_writeback_cursor_range(
-            inode,
-            offset,
-            self.device.block_size(),
-            &cursor,
-            &is_open_for_write,
-        )
-        .map_err(|error| cursor.current_failure(error))?;
-        Ok(completed_bytes)
+        Ok(Some(MappedWriteback::new(self.device.clone(), runs)))
     }
 
     fn collect_allocated_write_runs(
@@ -1441,6 +1392,21 @@ impl Ext4SbInfo {
         }
 
         Ok(runs)
+    }
+
+    fn write_ordered_run(
+        &self,
+        run: &AllocatedWriteRun,
+        input: OrderedWritebackData<'_>,
+        block_size: usize,
+        partial: PartialBlockWrite,
+    ) -> Ext4Result<()> {
+        match input {
+            OrderedWritebackData::Write(bytes) => {
+                self.write_allocated_run(run, bytes, block_size, partial)
+            }
+            OrderedWritebackData::Completed(_) => Ok(()),
+        }
     }
 
     fn write_allocated_run(

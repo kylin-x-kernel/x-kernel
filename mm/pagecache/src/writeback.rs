@@ -132,23 +132,33 @@ pub struct WritebackCompletion<'a> {
 }
 
 impl WritebackCompletion<'_> {
+    /// Retains the complete mapping owner for completion after submission returns.
+    /// `pages` must always project the same embedded page index from that owner.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` if the owner does not contain this batch's index.
+    pub fn into_owned<O>(
+        mut self,
+        owner: Arc<O>,
+        pages: fn(&O) -> &MappingPages,
+    ) -> KResult<OwnedWritebackCompletion<O>> {
+        if !core::ptr::eq(self.state, &pages(&owner).state) {
+            return Err(KError::InvalidInput);
+        }
+        Ok(OwnedWritebackCompletion {
+            owner,
+            pages,
+            folios: core::mem::replace(&mut self.folios, FolioBatch::new()),
+            bytes: self.bytes,
+        })
+    }
+
     /// Ends writeback and returns the number of fully completed folios.
     ///
     /// # Errors
     /// An oversized prefix redirties the entire batch and returns InvalidInput.
     pub fn complete(mut self, completed_bytes: usize) -> KResult<usize> {
-        if completed_bytes > self.bytes {
-            return Err(KError::InvalidInput);
-        }
-        let mut completed_pages = 0;
-        for (position, folio) in self.folios.iter().enumerate() {
-            let folio_end = ((position + 1) * PAGE_SIZE_4K).min(self.bytes);
-            let is_complete = folio_end <= completed_bytes;
-            finish_writeback(self.state, folio, is_complete);
-            completed_pages += usize::from(is_complete);
-        }
-        self.folios.clear();
-        Ok(completed_pages)
+        complete_folios(self.state, &mut self.folios, self.bytes, completed_bytes)
     }
 }
 
@@ -158,6 +168,58 @@ impl Drop for WritebackCompletion<'_> {
             finish_writeback(self.state, folio, false);
         }
     }
+}
+
+/// An asynchronous completion retaining the address-space owner, not a separately
+/// owned page index. Complete or drop only in task context after data I/O ends.
+pub struct OwnedWritebackCompletion<O> {
+    owner: Arc<O>,
+    pages: fn(&O) -> &MappingPages,
+    folios: FolioBatch,
+    bytes: usize,
+}
+
+impl<O> OwnedWritebackCompletion<O> {
+    /// Ends writeback with the same prefix and redirty rules as borrowed completion.
+    ///
+    /// # Errors
+    /// An oversized prefix redirties the entire batch and returns `InvalidInput`.
+    pub fn complete(mut self, completed_bytes: usize) -> KResult<usize> {
+        complete_folios(
+            &(self.pages)(&self.owner).state,
+            &mut self.folios,
+            self.bytes,
+            completed_bytes,
+        )
+    }
+}
+
+impl<O> Drop for OwnedWritebackCompletion<O> {
+    fn drop(&mut self) {
+        for folio in self.folios.iter() {
+            finish_writeback(&(self.pages)(&self.owner).state, folio, false);
+        }
+    }
+}
+
+fn complete_folios(
+    state: &Mutex<MappingPagesState>,
+    folios: &mut FolioBatch,
+    bytes: usize,
+    completed_bytes: usize,
+) -> KResult<usize> {
+    if completed_bytes > bytes {
+        return Err(KError::InvalidInput);
+    }
+    let mut completed_pages = 0;
+    for (position, folio) in folios.iter().enumerate() {
+        let folio_end = ((position + 1) * PAGE_SIZE_4K).min(bytes);
+        let is_complete = folio_end <= completed_bytes;
+        finish_writeback(state, folio, is_complete);
+        completed_pages += usize::from(is_complete);
+    }
+    folios.clear();
+    Ok(completed_pages)
 }
 
 enum FolioMark {

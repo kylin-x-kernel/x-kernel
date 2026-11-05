@@ -347,11 +347,12 @@ membership TOCTOU。递归 detach 把 child mountpoint 的 overmount stack 一�
 更新 parent 弱索引，再更新 dcache 强所有权。类型化 flags 是不可变值快照，不提供共享
 可变状态。
 
-regular-file inode 的 data lock 覆盖 generic buffered write 和整个 set-length callback。
-address-space invalidate lock 的 shared 侧保护 `page_mkwrite` 和完整 writeback，exclusive
-侧保护 truncate、mapped-view invalidation 与 page-cache truncate；目标 folio lock 串行化
-fault preparation、dirty 与 PTE publish。具体文件系统的 mapping/reservation lock 在这些
-边界内获取。writeback callback 不得升级为 invalidate exclusive lock。
+A regular inode's data lock covers generic buffered writes and the entire
+set-length callback. Invalidate shared protection covers `page_mkwrite` and the
+writepages call; exclusive protection covers truncate, mapped-view invalidation,
+and cache truncation. The target folio lock serializes fault preparation, dirtying,
+and PTE publication. Filesystem mapping/reservation locks are acquired within these
+boundaries. Writeback callbacks must not upgrade to invalidate exclusive protection.
 
 所有 namespace lock 都是 sleepable lock。mount tree 操作先取 mount-namespace registry
 mutex；其后全局顺序为 superblock topology、父目录、子目录、非目录 inode，最后才是
@@ -707,12 +708,42 @@ remount 可修改普通挂载标志；文件系统必须用已有失败状态拒
 保护结束后仍存在未受其他机制保护的物理映射使用。PageCache completion 的消费与
 Drop 需要任务上下文，且只能在对应 I/O 结束后执行。
 
+### Asynchronous writeback errors and lifetime
+
+A submission-based filesystem may retain completion after `None` returns, but
+cannot rely on the caller's invalidate guard to protect physical mappings. Before
+truncate/release, it must exclude new same-inode submissions and drain accepted
+requests. In task context, real preparation/submission/completion errors enter
+both mapping and superblock channels before completion ownership is released or
+folio writeback ends. Ordinary queue throttling must not create an error.
+
+Per-file fsync/syncfs cursors observe the channels independently. Sampling and
+non-consuming checks preserve unseen failures for later opens; advancing one
+cursor leaves older observers pending. Observing the mapping error does not
+consume the filesystem error. A successful retry cannot erase either channel.
+Temporary writeback checks use the current generation rather than the open-time
+sample that inherits unseen errors. The boundary is taken before waiting for
+submission or existing I/O, so failures recorded during those waits still count.
+This neither marks errors seen nor adds a persistent observer. Repeated syncfs
+calls report history through their own superblock cursor; they must not depend
+on a file fsync consuming mapping history to stop reporting an old failure.
+These cursors do not replace waiting or prove device durability. Every channel
+operation may sleep and requires task context without spinlocks or interrupt/
+preemption exclusion. Superblock sync attempts remaining inode data, inode
+metadata, and filesystem flush after failure, preserving the first error and the
+backend's abort checks. Shutdown must drain every inode's accepted I/O.
+
 ## Automatic write timestamps
 
 Removing timestamp publication from buffered write or shared writable faults violates
 the observable inode metadata contract. Deferred filesystem persistence must preserve
 resident visibility and retain pending metadata until the corresponding sync or
 eviction boundary; it must not acquire filesystem locks while holding a folio lock.
+The automatic `update_time` callback owns resident publication and must finish
+fallible checks before publishing values. Its default publishes only timestamps
+confirmed by `setattr`; explicit setattr retains the separate returned-field contract.
+Mount read-only and atime/relatime checks remain at the Path boundary.
+
 ## Quota state boundary
 
 The superblock's `quota_info()` guard serializes its single generic quota

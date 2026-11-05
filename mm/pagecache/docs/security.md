@@ -28,6 +28,10 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 - 同步写回错误返回前保留已完成页的预算更新，并结束所有已开始的 folio writeback；
 - 提交式写回转移完成责任，callback 返回不清 writeback；owner 必须限制在途批次，
   在所有 I/O 结束后于任务上下文完成或丢弃 completion，不得在 IRQ/BH 中获取 cache mutex；
+- Cross-task completion retains the complete mapping owner. Conversion validates
+  embedded-index identity, and the owner's projection must remain stable. Release
+  the owner only after completion or Drop settles its folios; never extend index
+  mutex lifetime independently.
 - 每个 `Folio` 独占一页；
 - `FolioBatch` 只持有有界、按遍历顺序排列的引用；引用存活不等于 mapping identity 仍有效；
 - batch clear/drop 不结束 writeback；任何已开始的写回必须先显式完成，包括失败后缀；

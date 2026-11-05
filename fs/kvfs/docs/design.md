@@ -442,14 +442,18 @@ device 冲突的读写目标。
 后查询一次该 capability，再由唯一的 `SuperBlock` 持久保存。文件系统可以像 Linux
 `fill_super()` 设置 `s_time_*` 一样，根据磁盘格式或协议状态显式覆盖；KVFS 不另建并行的
 format object，也不在 bridge 中复制该状态。
-`VfsInode::current_time()` 生成已经向下取整并截断范围的当前
-时间，`truncate_timestamp()` 对显式值执行同一转换。显式 `setattr`、自动 I/O 时间更新和
-namespace helper 在比较及 filesystem callback 前应用 superblock 级公共能力；filesystem
-callback 再处理 FAT 分字段粒度等格式专有语义，并通过同一个 `MetadataUpdate` 返回实际生效值。
-resident inode 只发布 callback 返回的字段，忽略的字段不再被 VFS 恢复为原请求；raw timestamp
-setter 只负责存储，不再重复查询 superblock policy。这与
-Linux `current_time()`/`timestamp_truncate()` 负责准备、`inode_set_*_to_ts()` 负责存储的层次
-一致，也允许 FAT 像 Linux `fat_truncate_time()` 一样维护 atime 与 mtime/ctime 的不同不变量。
+`VfsInode::current_time()` rounds and clamps the current time;
+`truncate_timestamp()` applies the same conversion to explicit values. Explicit
+setattr, automatic I/O updates, and namespace helpers apply superblock policy
+before comparison and filesystem callbacks. Backends then apply format-specific
+rules such as FAT field precision. Explicit setattr returns effective values in
+`MetadataUpdate`, and KVFS publishes only those fields. Automatic `update_time`
+callbacks publish resident timestamps themselves; the default likewise publishes
+only fields confirmed by setattr. Ignored fields are never restored from the
+original request. Raw setters only store values without repeating policy lookup.
+This follows Linux's separation between `current_time()`/`timestamp_truncate()`
+and `inode_set_*_to_ts()`, while allowing FAT-style distinct atime and mtime/ctime
+invariants.
 
 `FileSystemType` 对应 Linux `struct file_system_type`，描述文件系统实现的名称、
 是否需要 backing device、`init_fs_context` 及类型 flags。`init_fs_context` 为每个
@@ -732,14 +736,18 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
 
 `SetattrTime` 只承载单次调用中“当前值/显式值”的授权信息，落盘的 `MetadataUpdate`
 只包含解析后的 atime/mtime/ctime 值，不在 inode 或 namei 状态中保存调用上下文。
-自动 I/O 时间更新使用 Linux `FS_UPD_ATIME` / `FS_UPD_CMTIME` 对应的
-`InodeUpdateTime`，并经 filesystem `update_time` callback 落盘。授权完成后的显式时间值由
-`VfsInode::truncate_timestamp()` 准备；自动更新时间通过 `current_time()` 取得可表示值，并在
-atime/mtime/ctime 比较之前使用。该比较经 `InodeAttributeOperations::times()` 在单次存储锁内
-读取驻留时间戳，命中早退时不再构造完整 metadata 快照；未命中时的 `update_time` 落盘路径
-不变。callback 返回实际生效的 `MetadataUpdate`；resident attribute
-setter 只发布返回字段及其最终值，因而后端可以降低字段精度、联动多个时间字段或明确忽略
-无法持久化的字段，setter 本身不再重复执行 capability policy。
+Automatic I/O updates use `InodeUpdateTime`, corresponding to Linux
+`FS_UPD_ATIME` / `FS_UPD_CMTIME`, and invoke filesystem `update_time`. Authorized
+explicit values pass through `VfsInode::truncate_timestamp()`; automatic values
+come from `current_time()` before comparison. Path retains mount/relatime atime
+checks; the callback decides whether mtime/ctime changed. It receives the resident
+inode, returns `VfsResult<()>`, and owns publication; KVFS does not invoke setters
+again. The default and filesystem fallbacks share `generic_update_time`: compare
+`times()`, skip unchanged values, otherwise call setattr and publish only confirmed
+timestamps. Backends owning resident attributes may compare, update, and mark dirty
+in one critical section, deferring persistence under filesystem sync rules. They
+may reduce precision, couple fields, or ignore unsupported fields; raw setters do
+not repeat capability policy.
 
 `InodeOperations::setattr` 的默认实现是公共回退层，对应 Linux `notify_change()` 把
 没有 `->setattr` 的 inode 路由到 `simple_setattr()` 的形态：owner/mode/时间更新被接受并
@@ -917,18 +925,20 @@ superblock publish 时继承该静态 table；已有 parent/superblock 的新 de
 继承同一个引用。dentry operation identity 因而不需要 per-dentry `Arc`、mutex 或由具体
 文件系统在 `alloc_file_pseudo()` 后补装。
 
-`VfsInode` 的 data lock 串行化 buffered write 与 truncate。shared-file write fault 不取得
-该独占锁；`VfsFile::page_mkwrite()` 取得 address-space invalidate shared lock，再在
-folio lock 内重新检查 EOF、调用 `FileMappingOperations` prepare callback、标脏 folio 并完成 PTE
-更新。`AddressSpace::writepages_control()` 同样在 address-space invalidate shared lock 下完成
-整次 writeback，包括 backing-store I/O；因此 set-length 不会在已选中的 folio 写回期间发布
-新 EOF 或移除该 folio。文件系统 `InodeOperations::set_len()` 在 address-space
-invalidate exclusive lock 下执行，并在 backing prepare 后、释放 block 前调用一次
-`VfsInode::truncate_setsize()`。该入口先发布唯一的
-`inode::i_size`，再执行第一次 mapped-view unmap、cached-folio truncate 和第二次 unmap；
-第二轮用于清理 cache truncate 窗口中产生的 private COW PTE。Backing filesystem 的 prepare
-阶段不得提前修改该 `i_size`，否则这里无法取得真实旧 EOF，可能跳过 folio 丢弃和同页增长区间
-清零。
+The `VfsInode` data lock serializes buffered writes and truncate. Shared-file
+write faults do not take this exclusive lock: `VfsFile::page_mkwrite()` holds
+address-space invalidate shared protection, then under the folio lock rechecks
+EOF, calls the filesystem prepare hook, dirties the folio, and publishes the PTE.
+`AddressSpace::writepages_control()` holds invalidate shared protection through
+enumeration and submission; synchronous implementations also cover backing I/O.
+Asynchronous filesystems must retain inode/mapping ownership separately and drain
+requests before set-length preparation or physical release. Filesystem
+`InodeOperations::set_len()` runs under invalidate exclusive protection and calls
+`VfsInode::truncate_setsize()` once after backing preparation and before block
+release. That entry publishes the sole `i_size`, unmaps views, truncates cached
+folios, then unmaps again to remove private COW PTEs created during cache truncate.
+Backing preparation must not publish `i_size` early, so the common boundary retains
+the old/new EOF transition.
 `VfsFile::fallocate()` dispatches the backend under the same lock shape (the data
 lock and the invalidate exclusive lock) across both the backing change and the
 visible-size publish: writeback samples the visible size per batch under the
@@ -1358,21 +1368,63 @@ after their final allocation reference is dropped outside the locks.
 文件系统的 reconfigure 回调必须依据已有的失败状态拒绝恢复可写，且在返回错误前不应用
 其他挂载选项。`RDONLY` 本身仍是挂载标志，不能替代文件系统内部的写入准入校验。
 
-### 提交式回写批次
+### Submission-based writeback batches
 
-`AddressSpace::submit_cached_ranges` 将 PageCache 的有界快照和完成责任交给文件系统，
-与原同步 `writeback_cached_ranges` 共用底层枚举逻辑。此入口的 `nr_to_write` 按
-交给提交回调的页数扣减；原同步入口仍按已完成页数扣减。callback 返回不等于回写完成。
-文件系统负责限制在途数量、排空 I/O、在任务上下文结束 folio writeback，并保持
-inode/extent 生命周期保护。KVFS 的 invalidate shared guard 仍覆盖整个 writepages；
-此适配器未增加异步错误序列或后台提交能力，现有同步调用必须在返回前完成所有批次。
+`AddressSpace::submit_cached_ranges` transfers bounded PageCache snapshots and
+completion responsibility to the filesystem, sharing enumeration with synchronous
+`writeback_cached_ranges`. Its budget counts pages handed to the callback; the
+synchronous API counts completed pages. Callback return does not mean completion.
+The filesystem bounds in-flight work, drains I/O, completes folios in task context,
+and protects inode/extent lifetime. Invalidate shared protection covers the call
+and is not transferred to deferred completion. Filesystems therefore need their
+own drain protocol. `All` waits for its target; `None` may return after bounded
+admission.
+
+Cross-task completion uses `retain_writeback_completion` to retain the complete
+`AddressSpace` and validate that the batch belongs to its embedded `i_pages`.
+Synchronous completion may borrow the index; neither path creates an independent
+index owner.
+
+`AddressSpace` embeds its mapping `WritebackErrors`; `SuperBlock` embeds a separate
+filesystem channel. Completion can borrow the mapping channel through its retained
+VFS inode without allocating another Arc owner. Filesystems record real preparation,
+submission, and completion errors in both channels before ending writeback or
+dropping completion ownership. Capacity throttling is not an I/O failure.
+
+Each channel keeps a generation, latest error, and observation flag. `record`
+advances the generation and marks it unseen. `sample` skips only seen errors, so a
+newly opened file still observes an unconsumed failure. `current_generation` reads
+the current boundary without inheriting history or marking it seen. `check`
+reports generation changes without consuming; `check_and_advance` marks the error
+seen and advances only that observer.
+Existing older cursors still see the failure. All operations require sleepable
+task context, with no spinlock or IRQ/preemption-disable guard and no dependency
+on a current process. A complete 2^64 generation wrap can alias an old cursor.
+
+Each `VfsFile` samples separate mapping and filesystem cursors at open; fsync and
+syncfs respectively check and advance them. Shared file descriptions share cursors;
+independent opens do not consume each other's pending errors. Mapping observation
+does not mark the filesystem channel seen. Successful retry never clears errors;
+multiple unseen failures coalesce to the latest. Temporary synchronous writeback
+passes snapshot `current_generation` before waiting for submission or existing
+I/O, then use non-consuming checks for failures recorded during the pass. They
+do not repeatedly inject old mapping history into syncfs after its filesystem
+cursor has advanced. Historical errors remain pending for the appropriate file
+cursor, including later opens while the mapping error is unseen. A direct error
+takes precedence over recorded history, while required drains and cursor checks
+still run. Superblock sync tries
+all live inodes, all inode metadata, and the filesystem sync hook after an earlier
+failure, retaining the first error. Filesystem abort checks remain authoritative,
+and shutdown cannot skip remaining drain/flush stages because one stage failed.
 
 ## Buffered-write timestamp publication
 
 Buffered writes and shared writable faults call `file_update_time()` outside folio
 protection. Filesystems may implement automatic `InodeOperations::update_time` with
 resident attribute publication and deferred persistence; explicit setattr remains
-a separate contract. The filesystem must retain metadata dirtiness through data-only
+a separate contract. The automatic callback owns comparison and publication and must
+finish fallible checks before changing resident values. KVFS does not republish them.
+The filesystem must retain metadata dirtiness through data-only
 writeback and cover full fsync, syncfs/unmount and inode eviction.
 ## Generic quota ownership
 

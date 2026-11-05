@@ -80,23 +80,30 @@ fn automatic_timestamps_do_not_issue_remote_setattr() {
     // Automatic timestamps must remain local even if remote setattr fails.
     transport.should_fail.store(true, Ordering::Relaxed);
     let timestamp = SystemTime::from_unix_seconds(123);
-    let applied = node
-        .update_time(&MountIdmap, &dentry, timestamp, InodeUpdateTime::Access)
-        .unwrap();
-    assert_eq!(applied.atime, Some(timestamp));
-    assert_eq!(applied.mtime, None);
-    assert_eq!(applied.ctime, None);
-    let applied = node
-        .update_time(
-            &MountIdmap,
-            &dentry,
-            timestamp,
-            InodeUpdateTime::ChangeAndModification,
-        )
-        .unwrap();
-    assert_eq!(applied.atime, None);
-    assert_eq!(applied.mtime, Some(timestamp));
-    assert_eq!(applied.ctime, Some(timestamp));
+    let inode = dentry.inode_ref();
+    let before = inode.metadata();
+    node.update_time(
+        &MountIdmap,
+        &dentry,
+        &inode,
+        timestamp,
+        InodeUpdateTime::Access,
+    )
+    .unwrap();
+    assert_eq!(inode.metadata().atime, timestamp);
+    assert_eq!(inode.metadata().mtime, before.mtime);
+    assert_eq!(inode.metadata().ctime, before.ctime);
+    node.update_time(
+        &MountIdmap,
+        &dentry,
+        &inode,
+        timestamp,
+        InodeUpdateTime::ChangeAndModification,
+    )
+    .unwrap();
+    assert_eq!(inode.metadata().atime, timestamp);
+    assert_eq!(inode.metadata().mtime, timestamp);
+    assert_eq!(inode.metadata().ctime, timestamp);
     assert_eq!(transport.requests.load(Ordering::Relaxed), requests);
 }
 

@@ -1161,10 +1161,6 @@ impl Path {
 
         let inode = self.inode();
         let now = inode.current_time();
-        let times = inode.times();
-        if times.modified_at == now && times.changed_at == now {
-            return Ok(());
-        }
         inode.update_time(self.dentry(), now, InodeUpdateTime::ChangeAndModification)
     }
 

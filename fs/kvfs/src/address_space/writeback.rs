@@ -4,7 +4,9 @@
 
 //! Writeback control and filesystem dispatch.
 
-use pagecache::{PageIndex, WritebackBatch, WritebackRangeResult};
+use pagecache::{
+    OwnedWritebackCompletion, PageIndex, WritebackBatch, WritebackCompletion, WritebackRangeResult,
+};
 
 use super::AddressSpace;
 use crate::{VfsError, VfsResult};
@@ -29,7 +31,7 @@ pub struct WritebackControl {
 pub enum WritebackSyncMode {
     /// Start writeback without requiring all matching folios to be written.
     None,
-    /// Write every matching dirty folio that can be written synchronously.
+    /// Write matching dirty folios and wait for the pass's completion target.
     All,
 }
 
@@ -120,6 +122,19 @@ impl WritebackControl {
 }
 
 impl AddressSpace {
+    /// Retains this address space until asynchronous folio completion finishes.
+    /// The embedded page index keeps the same owner throughout writeback.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` if the inode is gone or the batch belongs elsewhere.
+    pub fn retain_writeback_completion(
+        &self,
+        completion: WritebackCompletion<'_>,
+    ) -> VfsResult<OwnedWritebackCompletion<Self>> {
+        let owner = self.inode().ok_or(VfsError::InvalidInput)?.address_space();
+        completion.into_owned(owner, |mapping| &mapping.i_pages)
+    }
+
     /// Writes dirty pages belonging to this address space.
     pub fn writepages(&self, data_only: bool) -> VfsResult<()> {
         let mut control = WritebackControl::all(data_only);
@@ -139,6 +154,9 @@ impl AddressSpace {
     }
 
     /// Writes dirty pages according to an explicit control object.
+    /// The invalidate guard covers this call only. An asynchronous filesystem
+    /// must independently protect mappings through completion and drain them
+    /// before truncate or release.
     pub fn writepages_control(&self, control: &mut WritebackControl) -> VfsResult<()> {
         let _invalidate_guard = self.invalidate_lock.read();
         self.ops.writepages(self, control)

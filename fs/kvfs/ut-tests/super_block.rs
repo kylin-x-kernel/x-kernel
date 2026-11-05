@@ -24,6 +24,122 @@ static TEST_FILE_SYSTEM_TYPE: crate::FileSystemType =
 
 struct TestPrivate(u64);
 
+struct SyncFailureProbe {
+    calls: crate::Mutex<(usize, usize, usize)>,
+    has_data_error: bool,
+}
+
+struct FailingSyncOperations;
+
+static FAILING_SYNC_OPERATIONS: FailingSyncOperations = FailingSyncOperations;
+
+impl crate::InodeOperations for FailingSyncOperations {}
+impl crate::FileOperations for FailingSyncOperations {}
+
+impl crate::AddressSpaceOperations for FailingSyncOperations {
+    fn writepages(
+        &self,
+        mapping: &crate::AddressSpace,
+        _control: &mut crate::WritebackControl,
+    ) -> VfsResult<()> {
+        let sb = mapping.inode().unwrap().super_block()?;
+        let probe = sb.private::<SyncFailureProbe>()?;
+        probe.calls.lock().0 += 1;
+        if probe.has_data_error {
+            Err(VfsError::Io)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl SuperBlockOperations for FailingSyncOperations {
+    fn statfs(&self, _sb: &SuperBlock) -> VfsResult<StatFs> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn write_inode(
+        &self,
+        inode: &VfsInode,
+        _control: &mut crate::WritebackControl,
+    ) -> VfsResult<()> {
+        if inode.node_type() != NodeType::RegularFile {
+            return Ok(());
+        }
+        inode
+            .super_block()?
+            .private::<SyncFailureProbe>()?
+            .calls
+            .lock()
+            .1 += 1;
+        Err(VfsError::StorageFull)
+    }
+
+    fn sync_fs(&self, sb: &SuperBlock) -> VfsResult<()> {
+        sb.private::<SyncFailureProbe>()?.calls.lock().2 += 1;
+        Err(VfsError::InvalidData)
+    }
+}
+
+#[def_test]
+fn filesystem_sync_attempts_all_stages_and_keeps_the_first_error() {
+    for has_data_error in [true, false] {
+        let sb = SuperBlock::try_new_with_flags_and_private(
+            &TEST_FILE_SYSTEM_TYPE,
+            &FAILING_SYNC_OPERATIONS,
+            kalloc_types::KBox::new(SyncFailureProbe {
+                calls: crate::Mutex::new((0, 0, 0)),
+                has_data_error,
+            })
+            .unwrap(),
+            SuperBlockFlags::empty(),
+            4096,
+            MAX_LFS_FILESIZE,
+            |_| {
+                Ok::<_, VfsError>(Dentry::new_dir_from_inode(
+                    VfsInode::new_dir_with_defaults(
+                        NodeFlags::empty(),
+                        VfsInodeInit::new(
+                            2,
+                            0,
+                            Umode::new(NodeType::Directory, NodePermission::default()),
+                        ),
+                    ),
+                    None,
+                    String::new(),
+                ))
+            },
+        )
+        .unwrap();
+        let inodes = [3, 4].map(|number| {
+            let inode = VfsInode::new_file_with_address_space(
+                Arc::new(FailingSyncOperations),
+                &FAILING_SYNC_OPERATIONS,
+                VfsInodeInit::new(
+                    number,
+                    0,
+                    Umode::new(NodeType::RegularFile, NodePermission::default()),
+                ),
+            );
+            inode.bind_super_block(&sb);
+            inode
+        });
+        assert_eq!(
+            sb.sync_fs_locked(),
+            Err(if has_data_error {
+                VfsError::Io
+            } else {
+                VfsError::StorageFull
+            })
+        );
+        assert_eq!(
+            *sb.private::<SyncFailureProbe>().unwrap().calls.lock(),
+            (2, 2, 1)
+        );
+        drop(inodes);
+    }
+}
+
 impl SuperBlockOperations for TestSuperOperations {
     fn statfs(&self, super_block: &SuperBlock) -> crate::VfsResult<StatFs> {
         if super_block.private::<TestPrivate>()?.0 != 0x5f5f_494e_464f {

@@ -157,12 +157,25 @@ impl FilesystemDevice {
         &self,
         start: FilesystemBlock,
         input: alloc::boxed::Box<[u8]>,
+        complete: impl FnOnce(block::DriverResult, alloc::vec::Vec<block::BioVec>) + Send + 'static,
+    ) -> Ext4Result<block::Bio> {
+        let sector = self.owned_write_sector(start, input.len())?;
+        Ok(block::Bio::new(
+            self.device.clone(),
+            sector,
+            block::BioOperation::Write,
+            vec![block::BioVec::new(input)],
+            complete,
+        ))
+    }
+
+    /// Prepares a task-bound result owner for synchronous, pipelined writeback.
+    pub(crate) fn prepare_waited_write(
+        &self,
+        start: FilesystemBlock,
+        input: alloc::boxed::Box<[u8]>,
     ) -> Ext4Result<(block::Bio, block::completion::BioWait)> {
-        if input.is_empty() || !input.len().is_multiple_of(self.filesystem_block_size) {
-            return Err(Ext4Error::OutOfBounds);
-        }
-        let blocks = (input.len() / self.filesystem_block_size) as u64;
-        let sector = self.validate_blocks(start, blocks, input.len())?;
+        let sector = self.owned_write_sector(start, input.len())?;
         block::completion::BioWait::prepare(
             self.device.clone(),
             sector,
@@ -170,6 +183,14 @@ impl FilesystemDevice {
             vec![block::BioVec::new(input)],
         )
         .map_err(|(error, _)| Ext4Error::Device(error))
+    }
+
+    fn owned_write_sector(&self, start: FilesystemBlock, input_len: usize) -> Ext4Result<u64> {
+        if input_len == 0 || !input_len.is_multiple_of(self.filesystem_block_size) {
+            return Err(Ext4Error::OutOfBounds);
+        }
+        let blocks = (input_len / self.filesystem_block_size) as u64;
+        self.validate_blocks(start, blocks, input_len)
     }
 
     pub(crate) fn submit_owned_write(&self, bio: block::Bio) {

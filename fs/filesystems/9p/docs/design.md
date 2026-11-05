@@ -91,8 +91,10 @@ attributes 通过 `TGETATTR` 获取，并验证 fid qid、attribute qid 和 VFS 
 使用明确指定的时间。ctime 只能请求服务端更新，`RSETATTR` 不返回其实际值，因此不会把
 客户端 ctime 当作确认结果发布；对外 getattr 仍从服务端读取时间。
 
-自动访问/修改时间更新对应 Linux `generic_update_time`：仅向 KVFS 返回本地 inode 应更新的
-atime 或 mtime/ctime，不发送远端 `TSETATTR`，也不把自动更新转换成服务端取当前时间。
+Automatic access/modification updates follow Linux `generic_update_time`: the
+`update_time` callback publishes local inode atime or mtime/ctime directly, and
+KVFS does not publish them again. It sends no remote `TSETATTR` and does not
+translate automatic updates into server-side current-time requests.
 
 ### open、I/O 和生命周期
 

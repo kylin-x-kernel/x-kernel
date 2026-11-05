@@ -313,6 +313,56 @@ impl FiemapCapability<'_> {
     }
 }
 
+/// Applies the default automatic timestamp policy through `setattr`.
+/// Publishes only timestamps returned by the filesystem; unchanged values skip
+/// the backend call. Requires the same sleepable context as `update_time`.
+///
+/// # Errors
+/// Returns the filesystem error without publishing a partial timestamp update.
+pub fn generic_update_time(
+    ops: &(impl InodeOperations + ?Sized),
+    idmap: &MountIdmap,
+    dentry: &Dentry,
+    inode: &VfsInode,
+    timestamp: SystemTime,
+    update: InodeUpdateTime,
+) -> VfsResult<()> {
+    let times = inode.times();
+    let is_unchanged = match update {
+        InodeUpdateTime::Access => times.accessed_at == timestamp,
+        InodeUpdateTime::ChangeAndModification => {
+            times.modified_at == timestamp && times.changed_at == timestamp
+        }
+    };
+    if is_unchanged {
+        return Ok(());
+    }
+    let (atime, mtime, ctime) = match update {
+        InodeUpdateTime::Access => (Some(timestamp), None, None),
+        InodeUpdateTime::ChangeAndModification => (None, Some(timestamp), Some(timestamp)),
+    };
+    let applied = ops.setattr(
+        idmap,
+        dentry,
+        MetadataUpdate {
+            atime,
+            mtime,
+            ctime,
+            ..Default::default()
+        },
+    )?;
+    if let Some(atime) = applied.atime {
+        inode.set_accessed_at(atime);
+    }
+    if let Some(mtime) = applied.mtime {
+        inode.set_modified_at(mtime);
+    }
+    if let Some(ctime) = applied.ctime {
+        inode.set_changed_at(ctime);
+    }
+    Ok(())
+}
+
 /// Inode operation table installed on VFS inodes.
 pub trait InodeOperations: Send + Sync + 'static {
     /// Supplies filesystem-owned cache admission and removal accounting.
@@ -405,34 +455,28 @@ pub trait InodeOperations: Send + Sync + 'static {
         Ok(update)
     }
 
-    /// Applies an automatic VFS timestamp update and returns the values
-    /// actually applied.
+    /// Applies an automatic VFS timestamp update to the resident `inode`.
+    ///
+    /// `timestamp` already satisfies the superblock's timestamp limits. The
+    /// default compares resident values, calls `setattr`, and publishes only
+    /// the returned timestamps. Filesystems owning resident attributes may
+    /// compare, update, and mark them dirty in one critical section instead.
+    /// Backing persistence may be deferred according to filesystem sync rules.
+    /// KVFS does not publish timestamps again after this callback returns.
     ///
     /// # Errors
     ///
-    /// Returns any error reported while applying the timestamp update. KVFS
-    /// does not update the resident inode when this method fails.
+    /// Returns any error reported while applying the timestamp update.
+    /// Implementations must complete fallible checks before publishing values.
     fn update_time(
         &self,
         idmap: &MountIdmap,
         dentry: &Dentry,
+        inode: &VfsInode,
         timestamp: SystemTime,
         update: InodeUpdateTime,
-    ) -> VfsResult<MetadataUpdate> {
-        let (atime, mtime, ctime) = match update {
-            InodeUpdateTime::Access => (Some(timestamp), None, None),
-            InodeUpdateTime::ChangeAndModification => (None, Some(timestamp), Some(timestamp)),
-        };
-        self.setattr(
-            idmap,
-            dentry,
-            MetadataUpdate {
-                atime,
-                mtime,
-                ctime,
-                ..Default::default()
-            },
-        )
+    ) -> VfsResult<()> {
+        generic_update_time(self, idmap, dentry, inode, timestamp, update)
     }
 
     /// Returns metadata for this inode.
@@ -1907,19 +1951,8 @@ impl VfsInode {
         timestamp: SystemTime,
         update: InodeUpdateTime,
     ) -> VfsResult<()> {
-        let applied = self
-            .inode_operations
-            .update_time(&MountIdmap, dentry, timestamp, update)?;
-        if let Some(atime) = applied.atime {
-            self.set_accessed_at(atime);
-        }
-        if let Some(mtime) = applied.mtime {
-            self.set_modified_at(mtime);
-        }
-        if let Some(ctime) = applied.ctime {
-            self.set_changed_at(ctime);
-        }
-        Ok(())
+        self.inode_operations
+            .update_time(&MountIdmap, dentry, self, timestamp, update)
     }
 
     /// Gets the size of the node.
@@ -2374,6 +2407,11 @@ impl VfsInode {
         self.mapping.clone()
     }
 
+    /// Borrows the mapping error channel while this inode keeps its owner alive.
+    pub fn writeback_errors(&self) -> &crate::WritebackErrors {
+        self.mapping.writeback_errors()
+    }
+
     /// Read a dentry's symlink target as a string.
     pub fn read_link(&self, dentry: &Dentry) -> VfsResult<String> {
         if self.operation_flags() & IOP_CACHED_LINK != 0
@@ -2447,7 +2485,7 @@ impl VfsInode {
 
     /// Returns the resident access, modification, and status-change
     /// timestamps read under a single storage lock.
-    pub(crate) fn times(&self) -> InodeTimes {
+    pub fn times(&self) -> InodeTimes {
         self.attributes.times()
     }
 

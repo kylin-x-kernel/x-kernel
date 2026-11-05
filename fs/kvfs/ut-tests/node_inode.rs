@@ -5,7 +5,7 @@
 use alloc::{string::String, sync::Arc};
 
 use ktime_types::{NANOS_PER_SEC, SystemTime};
-use unittest::{assert_eq, def_test};
+use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 use crate::{
@@ -16,7 +16,7 @@ use crate::{
 struct TestChrdevInode {
     metadata: Mutex<Metadata>,
     last_update: Mutex<Option<MetadataUpdate>>,
-    next_applied_update: Mutex<Option<MetadataUpdate>>,
+    next_applied_update: Mutex<Option<VfsResult<MetadataUpdate>>>,
 }
 
 impl TestChrdevInode {
@@ -64,7 +64,7 @@ impl InodeOperations for TestChrdevInode {
         update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate> {
         *self.last_update.lock() = Some(update.clone());
-        Ok(self.next_applied_update.lock().take().unwrap_or(update))
+        self.next_applied_update.lock().take().unwrap_or(Ok(update))
     }
 }
 
@@ -383,10 +383,10 @@ fn resident_timestamps_follow_values_returned_by_filesystem() {
     });
     let dentry = Dentry::new_file_from_inode(inode.clone(), None, String::from("applied"));
     let applied_atime = SystemTime::from_unix_seconds(20);
-    *node.next_applied_update.lock() = Some(MetadataUpdate {
+    *node.next_applied_update.lock() = Some(Ok(MetadataUpdate {
         atime: Some(applied_atime),
         ..Default::default()
-    });
+    }));
 
     dentry
         .update_metadata(MetadataUpdate {
@@ -400,11 +400,11 @@ fn resident_timestamps_follow_values_returned_by_filesystem() {
     assert_eq!(inode.metadata().mtime, SystemTime::UNIX_EPOCH);
 
     let applied_cmtime = SystemTime::from_unix_seconds(24);
-    *node.next_applied_update.lock() = Some(MetadataUpdate {
+    *node.next_applied_update.lock() = Some(Ok(MetadataUpdate {
         mtime: Some(applied_cmtime),
         ctime: Some(applied_cmtime),
         ..Default::default()
-    });
+    }));
     inode
         .update_time(
             &dentry,
@@ -413,6 +413,29 @@ fn resident_timestamps_follow_values_returned_by_filesystem() {
         )
         .unwrap();
 
+    assert_eq!(inode.metadata().mtime, applied_cmtime);
+    assert_eq!(inode.metadata().ctime, applied_cmtime);
+
+    *node.last_update.lock() = None;
+    inode
+        .update_time(
+            &dentry,
+            applied_cmtime,
+            InodeUpdateTime::ChangeAndModification,
+        )
+        .unwrap();
+    assert!(node.last_update.lock().is_none());
+
+    *node.next_applied_update.lock() = Some(Err(VfsError::Io));
+    assert_eq!(
+        inode.update_time(
+            &dentry,
+            SystemTime::from_unix_seconds(26),
+            InodeUpdateTime::ChangeAndModification,
+        ),
+        Err(VfsError::Io)
+    );
+    assert_eq!(inode.metadata().atime, applied_atime);
     assert_eq!(inode.metadata().mtime, applied_cmtime);
     assert_eq!(inode.metadata().ctime, applied_cmtime);
 }

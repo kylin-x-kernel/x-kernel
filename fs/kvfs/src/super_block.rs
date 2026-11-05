@@ -543,6 +543,7 @@ pub struct SuperBlock {
     rename_mutex: Mutex<()>,
     inodes: Mutex<Vec<Weak<VfsInode>>>,
     quota_info: Mutex<kquota::QuotaInfo<Arc<VfsInode>>>,
+    writeback_errors: crate::WritebackErrors,
 }
 
 impl SuperBlock {
@@ -553,6 +554,11 @@ impl SuperBlock {
     /// not reenter quota accounting or reacquire a caller-held filesystem lock.
     pub fn quota_info(&self) -> MutexGuard<'_, kquota::QuotaInfo<Arc<VfsInode>>> {
         self.quota_info.lock()
+    }
+
+    /// Filesystem-wide error generations observed independently by syncfs callers.
+    pub const fn writeback_errors(&self) -> &crate::WritebackErrors {
+        &self.writeback_errors
     }
 
     /// Returns the filesystem type name.
@@ -875,6 +881,7 @@ impl SuperBlock {
             rename_mutex: Mutex::default(),
             inodes: Mutex::default(),
             quota_info: Mutex::default(),
+            writeback_errors: crate::WritebackErrors::new(),
         })
     }
 
@@ -1274,19 +1281,27 @@ impl SuperBlock {
 
     /// Starts writeback for dirty inode page-cache state on this superblock.
     fn writeback_inodes(inodes: &[Arc<VfsInode>], data_only: bool) -> VfsResult<()> {
+        let mut first_error = None;
+        // Shutdown must drain every inode, including after another inode fails.
+        // Completion workers may still own these inodes and mount state.
         for inode in inodes {
-            inode.sync(data_only)?;
+            if let Err(error) = inode.sync(data_only) {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Writes back filesystem-owned metadata for live inodes on this superblock.
     fn writeback_inode_metadata(&self, inodes: &[Arc<VfsInode>], data_only: bool) -> VfsResult<()> {
         let mut control = WritebackControl::all(data_only);
+        let mut first_error = None;
         for inode in inodes {
-            self.ops().write_inode(inode.as_ref(), &mut control)?;
+            if let Err(error) = self.ops().write_inode(inode.as_ref(), &mut control) {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Synchronizes inode page-cache state and then filesystem-owned state.
@@ -1303,9 +1318,12 @@ impl SuperBlock {
 
     fn sync_fs_locked(&self) -> VfsResult<()> {
         let inodes = self.live_inodes();
-        Self::writeback_inodes(&inodes, false)?;
-        self.writeback_inode_metadata(&inodes, false)?;
-        self.ops().sync_fs(self)
+        let data = Self::writeback_inodes(&inodes, false);
+        let metadata = self.writeback_inode_metadata(&inodes, false);
+        // Complete every stage even after an earlier error. Filesystem hooks
+        // retain their own abort checks; the first failure stays authoritative.
+        let filesystem = self.ops().sync_fs(self);
+        data.and(metadata).and(filesystem)
     }
 
     /// Releases filesystem-owned inode state during final inode teardown.

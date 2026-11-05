@@ -173,6 +173,45 @@ const fn timestamp(seconds: i64, nanos: u32) -> Ext4Timestamp {
 }
 
 #[def_test]
+fn automatic_write_timestamps_preserve_precision_and_pending_fields() {
+    let original = timestamp(123, 456);
+    let mut metadata = regular_inode_metadata();
+    metadata.mtime = original;
+    metadata.ctime = original;
+    let inode = test_inode(metadata);
+    assert!(inode.update_regular_write_timestamps(original));
+    assert!(!inode.has_dirty_timestamps());
+
+    inode.set_atime(timestamp(100, 789));
+    // Only ctime differs; the equal mtime must not become newly dirty.
+    inode.set_ctime(timestamp(122, 456));
+    assert!(inode.update_regular_write_timestamps(original));
+    let pending = inode.pending_timestamps();
+    assert_eq!(pending.atime, Some(timestamp(100, 789)));
+    assert_eq!(pending.mtime, None);
+    assert_eq!(pending.ctime, Some(original));
+
+    // A change within one second must remain visible and pending for sync.
+    let newer = timestamp(123, 457);
+    assert!(inode.update_regular_write_timestamps(newer));
+    assert!(inode.update_regular_write_timestamps(newer));
+    let pending = inode.pending_timestamps();
+    assert_eq!(pending.atime, Some(timestamp(100, 789)));
+    assert_eq!(pending.mtime, Some(newer));
+    assert_eq!(pending.ctime, Some(newer));
+    assert_eq!(inode.mtime(), newer);
+    assert_eq!(inode.ctime(), newer);
+
+    let mut metadata = regular_inode_metadata();
+    metadata.kind = InodeKind::Directory;
+    let directory = test_inode(metadata);
+    assert!(!directory.update_regular_write_timestamps(newer));
+    assert!(!directory.has_dirty_timestamps());
+    assert_eq!(directory.mtime(), timestamp(0, 0));
+    assert_eq!(directory.ctime(), timestamp(0, 0));
+}
+
+#[def_test]
 fn orphan_truncation_classifies_inode_kind_and_symlink_storage() {
     for (kind, expected) in [
         (InodeKind::RegularFile, true),

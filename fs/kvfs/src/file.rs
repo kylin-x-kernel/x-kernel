@@ -797,6 +797,8 @@ impl VfsFileBuilder {
         let operations = operations.ok_or(VfsError::InvalidInput)?;
         let location = location.ok_or(VfsError::InvalidInput)?;
         let readahead = crate::file_ra::FileRaState::new(location.inode().readahead_pages());
+        let writeback_error_cursor = location.mapping().writeback_errors().sample();
+        let filesystem_error_cursor = location.path().super_block().writeback_errors().sample();
         Ok(Arc::new(VfsFile {
             cred,
             mode: AtomicU32::new(mode.bits()),
@@ -806,6 +808,8 @@ impl VfsFileBuilder {
             flags: AtomicU32::new(flags.bits()),
             position: Mutex::new(position),
             readahead: Mutex::new(readahead),
+            writeback_error_cursor: Mutex::new(writeback_error_cursor),
+            filesystem_error_cursor: Mutex::new(filesystem_error_cursor),
             pipe_generation,
             created_under,
         }))
@@ -822,6 +826,8 @@ pub struct VfsFile {
     flags: AtomicU32,
     position: Mutex<u64>,
     pub(crate) readahead: Mutex<crate::file_ra::FileRaState>,
+    writeback_error_cursor: Mutex<u64>,
+    filesystem_error_cursor: Mutex<u64>,
     /// FIFO writer-generation snapshot, corresponding to Linux `file::f_pipe`.
     pipe_generation: u64,
     /// Where and under what name the open that produced this file created its
@@ -972,7 +978,13 @@ impl VfsFile {
 
     /// Synchronizes the filesystem containing this open file.
     pub fn sync_filesystem(&self) -> VfsResult<()> {
-        self.path().sync_filesystem()
+        let result = self.path().sync_filesystem();
+        let recorded = self
+            .path()
+            .super_block()
+            .writeback_errors()
+            .check_and_advance(&mut self.filesystem_error_cursor.lock());
+        result.and(recorded)
     }
 
     fn operations(&self) -> &dyn FileOperations {
@@ -1313,7 +1325,12 @@ impl VfsFile {
         if self.is_path() {
             return Err(VfsError::BadFileDescriptor);
         }
-        self.operations().fsync(self, data_only)
+        let result = self.operations().fsync(self, data_only);
+        let recorded = self
+            .mapping()
+            .writeback_errors()
+            .check_and_advance(&mut self.writeback_error_cursor.lock());
+        result.and(recorded)
     }
 
     /// Changes this open file offset.

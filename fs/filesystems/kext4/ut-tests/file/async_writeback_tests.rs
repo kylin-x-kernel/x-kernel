@@ -16,8 +16,9 @@ use crate::{
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     superblock::test_fixtures::{
         TEST_BLOCK_SIZE, TEST_FREE_BLOCKS, TestDevice, allocate_checkpointed_regular_inode,
-        allocate_contiguous_blocks, install_test_internal_journal,
-        journal_allocator_test_filesystem,
+        allocate_contiguous_blocks, fragment_ordered_writeback_free_space,
+        install_credit_limited_journal, install_test_internal_journal,
+        journal_allocator_test_filesystem, recovery_test_filesystem_with_free_blocks,
     },
 };
 
@@ -66,7 +67,7 @@ fn mapped_overwrite_fixture() -> (Ext4SbInfo, Ext4Inode, Arc<TestDevice>) {
 #[def_test]
 fn mapped_overwrite_probe_falls_back_before_io_for_holes_unwritten_and_growth() {
     let (filesystem, inode, device) = mapped_overwrite_fixture();
-    let _writeback = inode.lock_writeback();
+    let _writeback = inode.lock_writeback_submission();
     let input = vec![0x58; 4 * TEST_BLOCK_SIZE];
     let writes = device.write_count();
     for (offset, data, visible_size) in [
@@ -103,19 +104,30 @@ fn mapped_overwrite_probe_falls_back_before_io_for_holes_unwritten_and_growth() 
 #[def_test]
 fn mapped_bio_failure_reports_prefix_and_drains_later_requests() {
     let (filesystem, inode, device) = mapped_overwrite_fixture();
-    let _writeback = inode.lock_writeback();
+    let _writeback = inode.lock_writeback_submission();
     let writes = device.write_count();
     device.fail_write_at(writes + 1);
     let input = vec![0x79; 2 * TEST_BLOCK_SIZE];
-    let pending = filesystem
+    let completed = Arc::new(ksync::Mutex::new(None));
+    let result = completed.clone();
+    filesystem
         .prepare_mapped_writeback(&inode, 0, &input, inode.size(), Ext4SyncIntent::DataOnly)
         .unwrap()
         .unwrap()
-        .submit(input)
+        .into_async()
+        .submit(
+            input,
+            inode.writeback_io(),
+            move |completion| {
+                *result.lock() = Some(completion);
+            },
+            |error| panic!("unexpected preparation failure: {error:?}"),
+        )
         .unwrap();
     // Both discontiguous runs are submitted, even though the first fails inline.
     assert_eq!(device.write_count(), writes + 2);
-    let failure = pending.wait().unwrap_err();
+    inode.writeback_io().drain();
+    let failure = completed.lock().take().unwrap().unwrap_err();
     assert_eq!(failure.error(), Ext4Error::Device(DriverError::Io));
     assert_eq!(failure.completed_bytes(), 0);
     let mut bytes = vec![0; TEST_BLOCK_SIZE];
@@ -123,4 +135,102 @@ fn mapped_bio_failure_reports_prefix_and_drains_later_requests() {
         .read_at(&inode, TEST_BLOCK_SIZE as u64, &mut bytes)
         .unwrap();
     assert!(bytes.iter().all(|byte| *byte == 0x79));
+}
+
+#[def_test]
+fn async_fragmented_allocation_completes_through_small_journal_without_rewriting_data() {
+    let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    fragment_ordered_writeback_free_space(&mut filesystem);
+    install_credit_limited_journal(&mut filesystem, 933, 64, true);
+    let input = vec![0x7d; TEST_BLOCK_SIZE * 8];
+    inode.set_size(input.len() as u64);
+    filesystem
+        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 8)
+        .unwrap();
+    let plan = filesystem
+        .prepare_allocating_writeback(
+            &inode,
+            0,
+            input.len(),
+            inode.size(),
+            Ext4SyncIntent::DataOnly,
+        )
+        .unwrap();
+    assert_eq!(inode.disk_size(), 0);
+    filesystem.sync_filesystem().unwrap();
+    // One conversion fits, but reserving another path edit forces restart.
+    install_credit_limited_journal(&mut filesystem, 935, 40, true);
+    let physical = match filesystem.map_blocks(&inode, LogicalBlock::new(0)).unwrap() {
+        crate::BlockMapping::Unwritten { physical, .. } => physical,
+        _ => panic!("prepared allocation must remain unwritten"),
+    };
+    let completed = Arc::new(ksync::Mutex::new(None));
+    let result = completed.clone();
+    plan.submit(
+        input.clone(),
+        inode.writeback_io(),
+        move |completion| {
+            *result.lock() = Some(completion);
+        },
+        |error| panic!("unexpected preparation failure: {error:?}"),
+    )
+    .unwrap();
+    inode.writeback_io().drain();
+    device.fail_write_block(physical);
+    let data = completed.lock().take().unwrap();
+    assert_eq!(
+        filesystem.finish_prepared_writeback(&inode, 0, data, Ext4SyncIntent::DataOnly, || true),
+        Ok(input.len())
+    );
+    assert!(filesystem.pending_checkpoint_count() > 0);
+    assert!(!inode.has_delalloc_reservations());
+    assert_eq!(inode.disk_size(), input.len() as u64);
+    filesystem.sync_filesystem().unwrap();
+    let mut output = vec![0; input.len()];
+    filesystem.read_at(&inode, 0, &mut output).unwrap();
+    assert_eq!(output, input);
+}
+
+#[def_test]
+fn preparation_enospc_retains_safe_unwritten_prefix_without_submitting_data() {
+    let (mut filesystem, device) = recovery_test_filesystem_with_free_blocks(2);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    install_credit_limited_journal(&mut filesystem, 934, 341, true);
+    inode.set_size((TEST_BLOCK_SIZE * 3) as u64);
+    assert!(matches!(
+        filesystem.prepare_allocating_writeback(
+            &inode,
+            0,
+            TEST_BLOCK_SIZE * 3,
+            inode.size(),
+            Ext4SyncIntent::DataOnly
+        ),
+        Err(Ext4Error::NoSpace)
+    ));
+    assert_eq!(inode.disk_size(), 0);
+    assert!(!filesystem.journal.as_ref().unwrap().is_aborted());
+    let mut output = vec![0xff; TEST_BLOCK_SIZE * 3];
+    filesystem.read_at(&inode, 0, &mut output).unwrap();
+    assert!(output.iter().all(|byte| *byte == 0));
+    filesystem.sync_filesystem().unwrap();
+    let reopened = Ext4SbInfo::open(
+        crate::io::test_block_device(Arc::new(TestDevice::new(device.bytes()))),
+        false,
+    )
+    .unwrap();
+    let disk_inode = reopened.load_inode_private(inode.number()).unwrap();
+    assert_eq!(disk_inode.disk_size(), 0);
+    assert!(matches!(
+        reopened
+            .map_blocks(&disk_inode, LogicalBlock::new(0))
+            .unwrap(),
+        crate::BlockMapping::Unwritten { .. }
+    ));
+    assert!(matches!(
+        reopened
+            .map_blocks(&disk_inode, LogicalBlock::new(2))
+            .unwrap(),
+        crate::BlockMapping::Hole { .. }
+    ));
 }

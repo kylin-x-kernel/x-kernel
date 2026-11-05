@@ -44,7 +44,7 @@ mod xattr;
 
 pub use address_space::{
     AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, ReadaheadControl,
-    WriteBeginRequest, WriteEndRequest, WritebackControl, WritebackSyncMode,
+    WriteBeginRequest, WriteEndRequest, WritebackControl, WritebackErrors, WritebackSyncMode,
 };
 pub use fiemap::{FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags};
 pub use file::{
@@ -72,8 +72,9 @@ pub use node::{
     InodeFiemapOperations, InodeLookupFlags, InodeOperations, InodeSymlinkOperations,
     InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
     WeakVfsInode, cdev_add, cdev_add_named, cdev_del, check_device_access, empty_inode_operations,
-    get_next_ino, inode_init_owner, metadata_only_inode_operations, open_character_device,
-    register_device_access_policy, registered_character_devices, subscribe_character_devices,
+    generic_update_time, get_next_ino, inode_init_owner, metadata_only_inode_operations,
+    open_character_device, register_device_access_policy, registered_character_devices,
+    subscribe_character_devices,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,

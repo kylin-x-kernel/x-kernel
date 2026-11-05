@@ -523,7 +523,9 @@ next transaction from the same cursor. Optional preallocation uses only the bloc
 every delalloc reservation are subtracted, and the cursor budget is decremented by the number of blocks the
 writeback actually registered as in-memory prealloc spaces; the dirty window itself is allocated and marked in
 the bitmap as usual, and registration does not change this allocation's size. Only the last transaction
-publishes the complete timestamp/size. Async dependency objects and background writeback belong to a later stage.
+publishes the complete size. Write and shared-mapping fault entry points update timestamps;
+completion preserves the inode's current timestamps, including concurrent setattr changes.
+Allocation/unwritten completion shares the ordered engine; background writeback scheduling belongs to a later stage.
 
 operation savepoint、operation token 和 operation-local metadata byte copy 已删除。ext4
 mutation 在首次 metadata access 前完成格式、目标状态、空间、credits 和 extent path
@@ -1072,10 +1074,14 @@ slot 使用自己的等待队列，等待发生在释放 cache mutex 之后，�
 mutation 不进入另一张 inode cache。
 核心内部的 metadata buffer
 和 JBD2 transaction handle 仍会记录 buffer ownership、credit consumption 和 revoke 状态。
-同一 inode 的 `writepages()`、VFS 两阶段 `set_len()`、最后写者预分配清理和 final eviction
-共同使用 `Ext4Inode` 的 sleepable writeback mutex；truncate 保持到 PageCache 调整和物理释放
-完成，eviction 保持到所有释放批次完成。KVFS 要求的 data/invalidate 保护先取得，再取得
-writeback mutex，随后才进入 mount。禁止持 mount 或 inode-state guard 反向取得 writeback mutex。
+`writepages()`, the two VFS `set_len()` phases, last-writer preallocation cleanup,
+and final eviction share the inode's sleepable submission mutex. Writeback may
+release it after installing in-flight requests. Mapping mutation and release
+acquire it and drain first; truncate retains it through PageCache adjustment and
+physical release, and eviction through all release batches. Acquire KVFS
+data/invalidate protection before submission protection, then enter the mount.
+Never acquire submission protection while holding a mount or inode-state guard.
+
 恢复期只操作未发布 inode，仍由独占恢复流程保护。进入 PageCache
 遍历时不持有挂载级 core mutex；PageCache 在释放 mapping/folio mutex 后调用 batch writer，
 batch writer 才短暂取得 core write guard；delalloc accounting 由独立 reservation mutex 更新。这样
@@ -1098,7 +1104,7 @@ invalidate exclusive 侧。三条路径通过同一个 delayed-set lock 发布 m
 | 共享 inode-table 发布 | `replace_inode_table_entry` 只把已验证的目标 entry 合入最新 block；普通 inode、xattr、分配/释放及 orphan-next 路径共用 | 同一 inode 的逻辑修改仍须串行；此机制不提供多 inode 操作的原子事务 |
 | 不可变读取及预热 | `MetadataBuffer` 同时持有 bytes 和 slot 的 Arc；预热 pins 保持至 allocator 锁释放 | pins 不是权威内容快照，锁内仍重读最新 bytes |
 | 回收/forget 后移除槽位 | cache index mutex 下校验 slot 唯一引用及 clean、无 frozen、字节无读者等条件 | 整体失效仍是独占恢复/生命周期操作，不能与活跃访问并行 |
-| 文件映射寿命 | 同 inode writeback mutex 覆盖回写、truncate 两阶段和 VFS 释放边界 | KVFS invalidate/data 锁先取得；底层 core API 仍由其调用者提供操作排他 |
+| File mapping lifetime | The per-inode submission mutex serializes admission; truncate and VFS release boundaries drain in-flight requests first | Acquire KVFS invalidate/data locks first; core callers still provide operation exclusion |
 
 分开调用 `snapshot()` 与完整块 `replace_bytes()` 不构成原子读改写；仅允许由已有
 allocator、目录/extent 操作或 mount 排他保证的完整块重写。共享 inode-table 不能使用
@@ -1151,28 +1157,90 @@ N1 已将 journal mapping/superblock、transaction engine 和 checkpoint queue �
 allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域。不得在 spinlock 下执行块 I/O、
 等待 PageCache 或获取 sleepable lock。
 
-### 已映射覆盖写的 BIO 提交与完成
+### Asynchronous data writeback and metadata completion
 
-VFS `writepages` 对不增长、整文件系统块对齐、全部已经 initialized 的范围，
-在 mount read guard 内解析完整映射，释放 guard 后提交持有数据快照的 BIO。
-每个 inode 至多保留四个 PageCache 批次（每批至多 31 页），再按提交顺序等待；
-底层可以乱序完成。常见单 extent 直接转移快照，多 extent 分拆为独立拥有的缓冲区。
-准备失败不提交任何 BIO；已提交的请求即使中途失败也全部等待结束。
+`file/async_writeback.rs` owns allocation preparation and deferred owned BIO
+assembly. `file/mapped_writeback.rs` owns initialized mapping plans, task-bound
+BIO waits, and specialized completion. Aligned overwrites without growth prepare
+under mount read protection. Holes, unwritten extents, append, and partial blocks
+prepare under mount write protection, installing unwritten extents for holes.
+All preparation handles end before data submission; neither journal handles nor
+mount guards cross data-I/O waits. Preparation changes allocation and unwritten
+mappings without initializing extents or advancing `i_disksize`. Space pressure
+may safely commit these changes. A later preparation failure retains installed
+unwritten prefixes for retry and submits no data BIO from that batch.
 
-成功数据的 metadata publication 在 mount write guard 下进行，保留既有的实际
-allocation admission 和 ordered-data flush 登记；最后才结束 PageCache writeback。
-正常完成和 DataOnly 失败前缀结算均实时检查 VFS writable-open 数量；写者仍在时
-保留预分配空间，最后写者关闭后的结算沿用主线回收条件。分配回退持有同一 resident
-`Arc<Ext4Inode>`，避免预分配 owner 与 VFS inode 脱离。
-DataOnly 失败只确认连续成功前缀；FullMetadata 数据失败不发布 metadata，保留
-全批 dirty 并按原有策略 abort journal。BIO 完成只发布结果与唤醒；页状态、额度
-回收、metadata 更新都由原任务完成，不在 IRQ/BH 上获取睡眠锁。
+Allocation reuses synchronous preallocation consumption, optional surplus
+registration, and extent insertion. Once the bitmap and unwritten extent own a
+block, its delalloc reservation is released to avoid charging it twice. Failed
+data retries reuse the mapping; unallocated holes retain reservations. Optional
+preallocation still obeys pending-free admission and the live writable-open count.
 
-本阶段两种 writeback mode 都在返回前排空，inode writeback mutex 和 KVFS
-invalidate shared 保护覆盖整个过程。等待数据时没有 mount guard，但同一 inode
-仍串行，分配、unwritten、增长和部分块写继续走原 ordered path，切换前先排空
-已有 BIO。尚未接入后台返回、errseq、异步 unwritten completion 或后台调度。
-这些限制保留现有 fsync/truncate 错误与生命周期边界，不代表完整异步回写已经完成。
+BIO assembly and submission run outside mount protection. A single contiguous,
+aligned run takes ownership of the PageCache snapshot; multiple runs own separate
+buffers. Partial initialized blocks require a synchronous read/modify/write
+outside mount protection. Partial unwritten blocks are zero padded, including
+the tail beyond appended EOF. Filesystem blocks larger than cache pages retain
+the synchronous drain path until block-level exclusion prevents overlapping
+partial writes. Allocation, unwritten, and append writes on 1/2/4 KiB blocks use
+the asynchronous data path.
+
+The inode submission mutex serializes preparation and publication. Both the
+local mapped pipeline and deferred queue use `MAX_INFLIGHT_BATCHES` (four);
+each PageCache batch independently holds at most 31 pages. Device callbacks
+store results and buffers in IRQ-safe slots and queue a prepared
+`kworkng::WorkHandle`. The worker settles requests in submission order.
+Allocation/unwritten/growth completion uses the ordered engine's `Completed`
+mode: reread live extents, register the ordered-data flush dependency, convert
+successfully written unwritten ranges, and advance `i_disksize` no further than
+the successful prefix. This mode never rewrites data or allocates holes; it shares
+credits, transaction restart, and committed-prefix accounting with `Write` mode.
+Data completion is not durability; the pre-commit data barrier remains required.
+
+DataOnly failures settle only the contiguous successful prefix. If prefix
+metadata settlement also fails, folio completion uses the settled length while
+preserving the original device error. Failed ranges remain unwritten or retain
+their old mapping and stay dirty. FullMetadata data failure still aborts the
+journal and leaves the whole batch dirty. Real preparation, submission, and
+completion failures enter both KVFS mapping and superblock error channels before
+releasing cache completion or waking folio waiters. Preparation failure does not
+run post-I/O metadata completion. Queue-capacity throttling is not an I/O error.
+Successful retry does not erase an unobserved failure.
+
+Initialized overwrites without growth publish inode metadata, register ordered
+data dependencies, and settle reservations without generic extent conversion or
+transaction restart. Both synchronous and deferred overwrite completion use this
+path, reading current metadata so timestamp changes during data I/O survive.
+
+Aligned `All` overwrites use `BioWait` in the submitting task, with no completion
+work allocation or queueing. Submission protection lasts through all local
+completions; BIO waits hold no mount guard. Drain local batches before allocation
+or conversion, and drain deferred requests before returning to the local pipeline.
+These transitions and producer exclusion prevent the two bounds from adding up
+to eight concurrent batches. Later preparation/admission failure still drains all
+previously submitted BIOs and records their errors.
+
+`None` returns after bounded admission and leaves dirty pages when full; preparation
+metadata I/O and partial-block reads can still wait. `All` drains old requests
+before enumeration, drains local batches, releases submission protection, then
+waits for its deferred sequence prefix and flushes existing completion work.
+Each worker occurrence handles at most four batches, so later submissions cannot
+extend it indefinitely. Truncate, FIEMAP, last-writer close, and eviction acquire
+submission protection and drain before changing mappings or releasing blocks.
+Workers acquire neither submission nor invalidate locks. Requests retain VFS and
+private inodes, the superblock, and cache completion until queue removal and
+wakeup. Synchronous callers also wait for task-context capture release so final
+eviction cannot cross shutdown. Temporary writeback checks snapshot the current
+mapping error generation before waiting for submission protection or existing
+I/O, then report failures recorded during the pass without consuming them. They
+do not use the open-time sample that inherits unseen history: a successful retry
+or clean pass must not reintroduce old mapping errors into syncfs. Each file's
+fsync/syncfs cursor independently reports its channel's history; later opens still
+inherit unseen errors. Direct submission errors take precedence, after all
+required drains and error checks have run.
+
+Background triggering, asynchronous readahead, global writeback throttling, and
+precise per-inode transaction sync targets remain outside this stage.
 
 ## 设计决策
 
@@ -1211,10 +1279,16 @@ invalidate shared 保护覆盖整个过程。等待数据时没有 mount guard�
 
 ### 自动写入时间戳的延迟持久化
 
-缓冲写和共享可写缺页保留 KVFS `file_update_time()`。regular inode 的
-`InodeOperations::update_time` 对自动 mtime/ctime 更新只返回需要发布的内存值，
-不申请 journal handle；attribute setters 在 resident inode state 中标脏变化的字段。
-显式 setattr/utimensat 仍走原有的 journaled mutation。
+Buffered writes and shared writable faults retain KVFS `file_update_time()`.
+For regular-file automatic mtime/ctime updates, `InodeOperations::update_time`
+checks journal writability, then checks the inode kind, compares and updates both
+timestamps, and marks changed fields dirty under one resident-state write lock.
+KVFS neither reads an old snapshot nor republishes callback results; no journal
+handle is needed. Unchanged values create no new dirty fields and preserve
+existing dirty state and superblock timestamp precision. Other timestamp updates
+use KVFS `generic_update_time`, also used by the default callback, to publish only
+fields confirmed by `setattr`. Explicit setattr/utimensat retains its journaled
+mutation path.
 
 每次 inode-table mutation 先捕获待写时间戳，在自己的显式字段修改之前合入；
 staging 后只确认捕获值，I/O 期间再次变化的字段保留最新内存值和 dirty 状态。

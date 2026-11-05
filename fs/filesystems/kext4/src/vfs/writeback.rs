@@ -2,142 +2,95 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Bounded BIO submission and task-context completion for mapped overwrites.
+//! Owned data submission and ordered metadata completion for buffered writeback.
 
 use alloc::{sync::Arc, vec::Vec};
 
-use kvfs::{AddressSpace, SuperBlock, VfsError, VfsInode, VfsResult, WritebackControl};
-use pagecache::{WritebackBatch, WritebackCompletion};
+use ksync::Mutex;
+use kvfs::{
+    AddressSpace, SuperBlock, VfsError, VfsInode, VfsResult, WritebackControl, WritebackSyncMode,
+};
+use pagecache::{OwnedWritebackCompletion, WritebackBatch};
 
-use super::{Ext4Mount, MAX_WRITEBACK_BYTES, ext4_private, into_vfs_err};
-use crate::{Ext4Inode, Ext4SyncIntent, file::PendingMappedWriteback};
+use super::{MAX_WRITEBACK_BYTES, ext4_private, into_vfs_err};
+use crate::{
+    Ext4Inode, Ext4SyncIntent, Ext4WritebackResult, file::PendingMappedWriteback,
+    writeback_io::MAX_INFLIGHT_BATCHES,
+};
 
-// Four PageCache batches bound retained snapshots and queued BIOs per inode.
-const MAX_PENDING_BATCHES: usize = 4;
+#[derive(Clone, Copy)]
+enum CompletionKind {
+    Mapped,
+    Ordered,
+}
 
-struct PendingBatch<'a> {
-    // Field order also drains I/O before fallback completion during Drop.
+struct PendingMappedBatch {
+    // Drain the device before PageCache can release or redirty its snapshot.
     io: PendingMappedWriteback,
-    completion: WritebackCompletion<'a>,
+    context: CompletionContext,
+}
+
+struct CompletionContext {
+    // Retained until queue removal and wakeup, so final inode eviction cannot
+    // run while its own completion is still registered as in-flight.
+    inode: Arc<VfsInode>,
+    private: Arc<Ext4Inode>,
+    super_block: Arc<SuperBlock>,
+    completion: Mutex<Option<OwnedWritebackCompletion<AddressSpace>>>,
     offset: u64,
-}
-
-struct WritebackPass<'a> {
-    ext4: &'a Ext4Mount,
-    super_block: &'a SuperBlock,
-    vfs_inode: &'a VfsInode,
-    inode: &'a Arc<Ext4Inode>,
     intent: Ext4SyncIntent,
-    pending: Vec<PendingBatch<'a>>,
+    kind: CompletionKind,
 }
 
-impl<'a> WritebackPass<'a> {
-    fn submit(&mut self, batch: WritebackBatch<'a>) -> VfsResult<()> {
-        let offset = batch.offset();
-        let plan = self
-            .ext4
-            .read()
-            .prepare_mapped_writeback(
-                self.inode,
-                offset,
-                batch.data(),
-                self.vfs_inode.size(),
-                self.intent,
-            )
-            .map_err(into_vfs_err)?;
-        if let Some(plan) = plan {
-            let (data, completion) = batch.into_parts();
-            let io = plan.submit(data).map_err(into_vfs_err)?;
-            self.pending.push(PendingBatch {
-                io,
-                completion,
-                offset,
-            });
-            if self.pending.len() == MAX_PENDING_BATCHES {
-                self.drain()?;
-            }
-            return Ok(());
+impl CompletionContext {
+    fn finish(&self, data: Ext4WritebackResult) -> VfsResult<()> {
+        let result = self.finish_metadata(data);
+        if let Err(failure) = result {
+            self.record_error(into_vfs_err(failure.error()));
         }
-
-        // Allocation/unwritten/partial-block paths retain their existing
-        // transaction protocol. Do not run it ahead of earlier in-flight data.
-        self.drain()?;
-        let result = self.ext4.write(self.super_block).writeback_ordered_at(
-            self.inode,
-            offset,
-            batch.data(),
-            self.vfs_inode.size(),
-            self.intent,
-            || self.vfs_inode.write_count() != 0,
-        );
-        let (_, completion) = batch.into_parts();
-        finish_cache_batch(self.inode, offset, completion, result)
+        let completed = match self.completion.lock().take() {
+            Some(completion) => finish_cache_batch(&self.private, self.offset, completion, result),
+            None => Ok(()),
+        };
+        if result.is_ok()
+            && let Err(error) = completed
+        {
+            self.record_error(error);
+        }
+        completed
     }
 
-    fn drain(&mut self) -> VfsResult<()> {
-        let mut first_error = None;
-        for pending in self.pending.drain(..) {
-            let result = pending.io.wait();
-            let result = match result {
-                Ok(bytes) => self.ext4.write(self.super_block).finish_mapped_writeback(
-                    self.inode,
-                    pending.offset,
-                    bytes,
-                    self.intent,
-                    || self.vfs_inode.write_count() != 0,
-                ),
-                Err(failure) => {
-                    let mut state = self.ext4.write(self.super_block);
-                    if self.intent.requires_full_metadata() {
-                        // No metadata publication is allowed for failed data.
-                        let error = state.fail_metadata_mutation(false, failure.error());
-                        Err(error.into())
-                    } else {
-                        // Release reservations for the successful prefix, but
-                        // preserve the original device error if cleanup also fails.
-                        let settlement = state.finish_mapped_writeback(
-                            self.inode,
-                            pending.offset,
-                            failure.completed_bytes(),
-                            self.intent,
-                            || self.vfs_inode.write_count() != 0,
-                        );
-                        let prefix = match settlement {
-                            Ok(bytes) => bytes,
-                            Err(error) => {
-                                error!(
-                                    "KExt4 inode {} failed to settle writeback at {}: {:?}",
-                                    self.inode.number().get(),
-                                    pending.offset,
-                                    error.error()
-                                );
-                                // Keep the batch dirty when reservation settlement
-                                // failed; do not discard the original I/O error.
-                                0
-                            }
-                        };
-                        Err(crate::file::Ext4WritebackError::new(
-                            prefix,
-                            failure.error(),
-                        ))
-                    }
-                }
-            };
-            if let Err(error) =
-                finish_cache_batch(self.inode, pending.offset, pending.completion, result)
-            {
-                first_error.get_or_insert(error);
+    fn record_error(&self, error: VfsError) {
+        self.inode.writeback_errors().record(error);
+        self.super_block.writeback_errors().record(error);
+    }
+
+    fn finish_metadata(&self, data: Ext4WritebackResult) -> Ext4WritebackResult {
+        let ext4 = ext4_private(&self.super_block)
+            .map_err(|_| crate::Ext4Error::Device(block::DriverError::BadState))?;
+        let mut state = ext4.write(&self.super_block);
+        match self.kind {
+            CompletionKind::Mapped => {
+                state.finish_mapped_writeback(&self.private, self.offset, data, self.intent, || {
+                    self.inode.write_count() != 0
+                })
             }
+            CompletionKind::Ordered => state.finish_prepared_writeback(
+                &self.private,
+                self.offset,
+                data,
+                self.intent,
+                || self.inode.write_count() != 0,
+            ),
         }
-        first_error.map_or(Ok(()), Err)
     }
 }
 
 fn finish_cache_batch(
     inode: &Ext4Inode,
     offset: u64,
-    completion: WritebackCompletion<'_>,
-    result: crate::file::Ext4WritebackResult,
+    completion: OwnedWritebackCompletion<AddressSpace>,
+    result: Ext4WritebackResult,
 ) -> VfsResult<()> {
     let (prefix, error) = match result {
         Ok(bytes) => (bytes, None),
@@ -155,27 +108,177 @@ fn finish_cache_batch(
         }
     };
     let settled = completion.complete(prefix);
-    // Preserve the filesystem/device root cause if cache settlement also fails.
     error.map_or_else(|| settled.map(|_| ()), Err)
 }
 
+struct WritebackPass {
+    inode: Arc<VfsInode>,
+    private: Arc<Ext4Inode>,
+    super_block: Arc<SuperBlock>,
+    intent: Ext4SyncIntent,
+    sync_mode: WritebackSyncMode,
+    is_throttled: bool,
+    pending_mapped: Vec<PendingMappedBatch>,
+}
+
+impl WritebackPass {
+    fn submit(&mut self, mapping: &AddressSpace, batch: WritebackBatch<'_>) -> VfsResult<()> {
+        let queue = self.private.writeback_io().clone();
+        if !queue.has_capacity() {
+            if self.sync_mode == WritebackSyncMode::None {
+                self.is_throttled = true;
+                return Err(VfsError::WouldBlock);
+            }
+            queue.wait_capacity();
+        }
+        // Different cache pages can share a larger filesystem block. Keep
+        // their read/modify/write serialized until block-granular exclusion exists.
+        if self.super_block.block_size() > super::PAGE_SIZE_4K as u64 {
+            self.drain_mapped()?;
+            queue.drain();
+            let offset = batch.offset();
+            let result = ext4_private(&self.super_block)?
+                .write(&self.super_block)
+                .writeback_ordered_at(
+                    &self.private,
+                    offset,
+                    batch.data(),
+                    self.inode.size(),
+                    self.intent,
+                    || self.inode.write_count() != 0,
+                );
+            if let Err(failure) = result {
+                let error = into_vfs_err(failure.error());
+                mapping.writeback_errors().record(error);
+                self.super_block.writeback_errors().record(error);
+            }
+            let (_, completion) = batch.into_parts();
+            let completion = mapping.retain_writeback_completion(completion)?;
+            return finish_cache_batch(&self.private, offset, completion, result);
+        }
+        let offset = batch.offset();
+        let super_block = self.super_block.clone();
+        let ext4 = ext4_private(&super_block)?;
+        let plan = ext4
+            .read()
+            .prepare_mapped_writeback(
+                &self.private,
+                offset,
+                batch.data(),
+                self.inode.size(),
+                self.intent,
+            )
+            .map_err(into_vfs_err)
+            .inspect_err(|&error| self.record_error(error))?;
+        let (data, completion) = batch.into_parts();
+        let completion = mapping.retain_writeback_completion(completion)?;
+        let kind = if plan.is_some() {
+            CompletionKind::Mapped
+        } else {
+            CompletionKind::Ordered
+        };
+        let context = CompletionContext {
+            inode: self.inode.clone(),
+            private: self.private.clone(),
+            super_block: self.super_block.clone(),
+            completion: Mutex::new(Some(completion)),
+            offset,
+            intent: self.intent,
+            kind,
+        };
+        let plan = match plan {
+            Some(plan) if self.sync_mode == WritebackSyncMode::All => {
+                // Earlier allocating batches may still own metadata publication.
+                // The submission guard excludes mapping removal until this local
+                // pipeline drains, so no worker is needed for these overwrites.
+                queue.drain();
+                let io = plan
+                    .submit(data)
+                    .map_err(into_vfs_err)
+                    .inspect_err(|&error| context.record_error(error))?;
+                self.pending_mapped.push(PendingMappedBatch { io, context });
+                if self.pending_mapped.len() == MAX_INFLIGHT_BATCHES {
+                    self.drain_mapped()?;
+                }
+                return Ok(());
+            }
+            Some(plan) => plan.into_async(),
+            None => {
+                self.drain_mapped()?;
+                ext4.write(&self.super_block)
+                    .prepare_allocating_writeback(
+                        &self.private,
+                        offset,
+                        data.len(),
+                        self.inode.size(),
+                        self.intent,
+                    )
+                    .map_err(into_vfs_err)
+                    .inspect_err(|&error| context.record_error(error))?
+            }
+        };
+        plan.submit(
+            data,
+            &queue,
+            move |result| {
+                let _ = context.finish(result);
+            },
+            |error| self.record_error(into_vfs_err(error)),
+        )
+        .map_err(into_vfs_err)
+    }
+
+    fn record_error(&self, error: VfsError) {
+        self.inode.writeback_errors().record(error);
+        self.super_block.writeback_errors().record(error);
+    }
+
+    fn drain_mapped(&mut self) -> VfsResult<()> {
+        let mut first_error = None;
+        for pending in self.pending_mapped.drain(..) {
+            let result = pending.io.wait();
+            if let Err(error) = pending.context.finish(result) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
 pub(super) fn writepages(mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
-    let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-    let inode = vfs_inode.downcast::<Ext4Inode>()?;
-    let _writeback_guard = inode.lock_writeback();
-    let super_block = vfs_inode.super_block()?;
+    let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
+    let private = inode.downcast::<Ext4Inode>()?;
+    let errors = mapping.writeback_errors();
+    // File cursors report historical failures. Include new failures while
+    // waiting for submission or old I/O without inheriting unseen history.
+    let error_generation = errors.current_generation();
+    let guard = private.lock_writeback_submission();
+    let queue = private.writeback_io();
+    if control.sync_mode() == WritebackSyncMode::All {
+        // Busy redirtied folios must become eligible before enumeration.
+        queue.drain();
+    }
     let mut pass = WritebackPass {
-        ext4: ext4_private(&super_block)?,
-        super_block: &super_block,
-        vfs_inode: &vfs_inode,
-        inode: &inode,
+        super_block: inode.super_block()?,
+        inode: inode.clone(),
+        private: private.clone(),
         intent: Ext4SyncIntent::from_data_only(control.is_data_only()),
-        pending: Vec::with_capacity(MAX_PENDING_BATCHES),
+        sync_mode: control.sync_mode(),
+        is_throttled: false,
+        pending_mapped: Vec::new(),
     };
-    let submitted =
-        mapping.submit_cached_ranges(control, MAX_WRITEBACK_BYTES, |batch| pass.submit(batch));
-    // Both modes drain in this first integration. No deferred error escapes a
-    // writepages call, and invalidate/inode guards outlive every completion.
-    let completed = pass.drain();
-    completed.and(submitted)
+    let submitted = mapping.submit_cached_ranges(control, MAX_WRITEBACK_BYTES, |batch| {
+        pass.submit(mapping, batch)
+    });
+    // Always settle already submitted BIOs, including after a later admission error.
+    let mapped_completed = pass.drain_mapped();
+    let target = queue.snapshot();
+    drop(guard);
+    if control.sync_mode() == WritebackSyncMode::All {
+        queue.wait_through(target);
+        let released = queue.flush_completions().map_err(into_vfs_err);
+        let completed = errors.check(error_generation);
+        return submitted.and(mapped_completed).and(released).and(completed);
+    }
+    if pass.is_throttled { Ok(()) } else { submitted }
 }

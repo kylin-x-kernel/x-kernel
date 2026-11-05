@@ -305,12 +305,19 @@ superblock/group metadata 的 mutation 由挂载级 write guard 串行化；只�
 delalloc range 与 mount aggregate 则在 shared guard 下由独立 reservation mutex 联合更新。KVFS
 cache 合并并发 `iget` 并封闭 `New/Freeing`；ext4 private metadata 与 transient state 在 inode
 state mutex 下更新，KExt4 不再取得另一把 inode-cache lock。内部 JBD2 和 metadata-buffer 状态仍会记录
-transaction ownership。共享 buffer 原子修改在 slot mutex 下完成，失败不替换旧字节；同一事务
-的不同写者也不能分别读旧快照后整块覆盖。inode-table 的发布只合并目标 entry，保留
-邻居 inode 的最新数据；同一 inode 修改仍要求调用者串行。writeback、VFS truncate 两阶段、
-最后写者预分配清理和 final eviction 共同由 Ext4Inode mutex 串行化；它先于 mount 获取，
-不得在 mount 或 inode-state guard 内反向等待。writeback 扫描 PageCache 时不持有 core mutex，batch writer 只在 PageCache 释放
-mapping/folio mutex 后进入核心。journal execution mutex 位于 mount 之后；handle stop 不取得它。
+transaction ownership。
+Shared-buffer atomic mutations hold the slot mutex and preserve old bytes on
+failure. Writers in the same transaction must not independently read old snapshots
+and then replace whole blocks.
+Inode-table publication merges only the target entry, preserving neighboring
+inodes' current data; callers still serialize logical changes to the same inode.
+Writeback, both VFS truncate phases, last-writer preallocation cleanup, and final
+eviction share the inode submission mutex. Mapping mutation/release drains
+in-flight requests after acquiring it; completion workers do not acquire it.
+Acquire it before mount protection, never while holding mount or inode-state
+guards. PageCache enumeration holds no core mutex, and batch writers enter the
+core only after mapping/folio locks are released. Journal execution protection
+follows mount protection; stopping a handle does not acquire it.
 容量 preflight 与 begin 仍由同一次 mount mutation 排他保证，尚不是独立 credit reservation，
 不得据此放开全部 metadata mutation。后续引入细粒度锁时，必须保持该跨层边界，以及 buffer
 ownership、journal handle、allocator bitmap 和 inode metadata 之间的顺序约束。
@@ -478,8 +485,9 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
 - 新增或扩展 mutation 时必须继续证明所有预期失败可在首次 metadata access 前发现；若无法
   做到，需要实现 path-local 显式 unwind，不能恢复 operation savepoint。遗漏路径会保守地
   abort 整个 running transaction，保证正确性但降低该次 mount 的可用性。
-- 当前通用 block 接口仍是逐请求同步完成路径；多请求 in-flight、完成通知和 VirtIO 中断驱动
-  等待属于 block/driver 外部依赖，KExt4 只能先减少并聚合请求。
+- Owned data BIOs and task-context completion cover allocation, unwritten extents,
+  and append. Partial initialized-block reads and metadata I/O remain synchronous;
+  background triggering and precise per-inode sync targets remain future work.
 - Birth and consume of speculative prealloc spaces are wired into the writeback path: the Hole branch consumes
   a registered space first and, only on a miss, allocates and registers the surplus inside the same allocator
   lock section; the reclaim side (close, eviction, shrink, writeback settlement), group-scan exclusion and the
@@ -558,17 +566,65 @@ link/rename, admission one credit below the bound, 64-credit batching across con
 feature/index-flag mismatch, nested admission, remount rejection, stop/abort wakeups and
 durable reopen.
 
-### 覆盖写在途 BIO
+### In-flight BIOs for allocation, conversion, and overwrite
 
-已映射覆盖写先完整验证映射和数据几何，再在 mount guard 外提交 owned BIO；
-原任务持有 inode writeback/invalidate 保护直到全部请求及 metadata 完成，避免
-truncate/eviction 释放仍被设备使用的块。最多四个、每个至多 31 页的批次在途；
-部分块读改写、分配与 unwritten 不进入该路径。等待与错误清理不持 mount guard。
+Hole preparation publishes only bitmap ownership and unwritten extents, never
+initialized mappings or a larger `i_disksize`. Committing that metadata before
+data cannot expose old disk contents. Once allocated, blocks no longer consume
+delalloc reservations; retries reuse their mappings. A later preparation failure
+retains completed unwritten allocations for retry, truncate, or final cleanup,
+and submits no BIO from the failed batch. Partial unwritten buffers must be zero
+filled; partial initialized blocks use read/modify/write outside mount protection.
+Blocks larger than cache pages retain synchronous draining to prevent overlapping
+partial writes.
 
-设备可以乱序失败，完成前缀只跨越连续成功请求；失败后的请求仍须排空。
-PageCache completion 在 metadata/额度处理之后于任务上下文消费，Drop 不能先于
-设备完成。同步入口不遗留后台错误，原始设备/事务错误优先于收尾错误。现有
-ordered-data barrier 和 commit barrier 均保留，BIO 完成不等于持久化完成。
+Synchronous aligned overwrites use task-owned `BioWait`; deferred overwrites and
+allocation/conversion use the inode queue. Both use the same four-batch limit and
+drain the other path before switching. Producer exclusion and these drains keep
+the combined bound at four; each cache batch separately holds at most 31 pages.
+The synchronous pipeline retains submission protection and waits for every
+submitted BIO before any failure exit releases/redirties cache completion.
+Waiting holds no mount guard and does not depend on the completion worker.
+Initialized overwrites update inode metadata and ordered-data dependencies
+without reinterpreting extent mappings.
+
+All BIOs are prepared before queue installation and device submission. Truncate,
+FIEMAP, last-writer close, and eviction acquire submission protection and drain
+without mount protection. Producer preparation and task/worker metadata completion
+serialize through mount write protection; no journal handle crosses data I/O.
+Workers take neither submission nor invalidate locks. `Completed` mode neither
+rewrites data nor allocates holes; it converts only successfully written unwritten
+ranges and registers the ordered-data barrier before commit.
+
+Device callbacks only publish BIO results and wake `BioWait` or queue normal work.
+Metadata, page state, buffers, and references whose destruction can evict inodes
+are handled in task context. Private work exposes no cancellation/closure. Every
+accepted BIO must complete exactly once; a missing completion blocks drain and
+cannot justify early block release. Workers process submission order, at most
+four batches per occurrence, removing slots and waking waiters before releasing
+captures. Synchronous callers retain the inode, release submission protection,
+wait for their target prefix, and flush completion work before shutdown proceeds.
+
+DataOnly errors acknowledge only a contiguous prefix whose metadata settled;
+successful BIOs alone cannot clean pages after conversion/accounting failure.
+FullMetadata data errors retain the abort policy. Original device errors precede
+prefix-settlement errors; unsuccessful ranges stay dirty. Preparation and
+submission failures are recorded before releasing completion ownership, without
+running post-I/O metadata settlement. Queue throttling is not an error. Both
+mapping and superblock errors are recorded before ending page writeback. Retry
+and non-consuming checks preserve unseen failures, including for newly opened
+files; fsync observation does not consume the independent syncfs channel.
+Temporary passes read the current error generation before waiting for submission
+or pending I/O and check for newly recorded failures after draining. They do not
+inherit old mapping errors or mark them observed. Thus repeated syncfs calls on
+one file stop reporting a recovered failure after its superblock cursor advances,
+without consuming mapping history belonging to existing or later file observers.
+Regression tests cover syncfs-only retries, clean repeats, subsequent new errors,
+independent file cursors, and a pending I/O failure during submission-lock wait.
+Superblock sync attempts remaining inodes, metadata, and filesystem flush after
+failure while retaining the first error and honoring filesystem abort checks.
+Transaction restart, pending-free admission, and ordered/commit barriers remain
+unchanged. A finite error generation cannot distinguish an entire 2^64 wrap cycle.
 
 ## Deferred automatic timestamps
 
@@ -577,6 +633,9 @@ updates. Only their journal staging is deferred. Per-field dirty state is protec
 by the existing inode-state lock; no state guard survives device I/O. Metadata
 publication acknowledges only captured values, preserving racing automatic updates
 and explicit setattr values. Failed staging leaves timestamps dirty.
+Automatic write updates check journal writability before publishing, then compare
+and update both timestamps and dirty bits under one inode-state write lock. They
+preserve timestamp precision, pending atime, and already-dirty unchanged fields.
 
 Full fsync, syncfs/unmount inode metadata writeback and linked-inode eviction stage
 pending timestamps. Data-only mapped overwrite may omit a timestamp-only transaction;

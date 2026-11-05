@@ -22,7 +22,9 @@ mod writeback;
 pub use folio::{Folio, FolioGuard, FolioRead, MappedFolio, PinnedFolio};
 pub use folio_batch::FolioBatch;
 pub use mapping_pages::{CacheResidency, MappingPages};
-pub use writeback::{WritebackBatch, WritebackCompletion, WritebackRangeResult};
+pub use writeback::{
+    OwnedWritebackCompletion, WritebackBatch, WritebackCompletion, WritebackRangeResult,
+};
 
 /// Page index within a mapping.
 pub type PageIndex = u64;

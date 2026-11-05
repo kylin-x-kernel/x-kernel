@@ -971,38 +971,23 @@ impl InodeOperations for Ext4Inode {
         &self,
         idmap: &kvfs::MountIdmap,
         dentry: &Dentry,
+        inode: &VfsInode,
         timestamp: SystemTime,
         update: InodeUpdateTime,
-    ) -> VfsResult<MetadataUpdate> {
-        if self.kind() == InodeKind::RegularFile && update == InodeUpdateTime::ChangeAndModification
-        {
+    ) -> VfsResult<()> {
+        if update == InodeUpdateTime::ChangeAndModification {
             let super_block = dentry.super_block().ok_or(VfsError::InvalidInput)?;
             ext4_private(&super_block)?
                 .read()
                 .ensure_writable()
                 .map_err(into_vfs_err)?;
-            // KVFS publishes through our resident attribute setters. Their dirty
-            // timestamps join the next metadata mutation or explicit sync.
-            return Ok(MetadataUpdate {
-                mtime: Some(timestamp),
-                ctime: Some(timestamp),
-                ..Default::default()
-            });
+            // The resident state owns both values and their dirty bits, so no
+            // VFS snapshot or separate attribute-setter locks are needed.
+            if self.update_regular_write_timestamps(system_time_to_ext4(timestamp)) {
+                return Ok(());
+            }
         }
-        let (atime, mtime, ctime) = match update {
-            InodeUpdateTime::Access => (Some(timestamp), None, None),
-            InodeUpdateTime::ChangeAndModification => (None, Some(timestamp), Some(timestamp)),
-        };
-        self.setattr(
-            idmap,
-            dentry,
-            MetadataUpdate {
-                atime,
-                mtime,
-                ctime,
-                ..Default::default()
-            },
-        )
+        kvfs::generic_update_time(self, idmap, dentry, inode, timestamp, update)
     }
 
     fn set_len(&self, vfs_inode: &VfsInode, len: u64) -> VfsResult<()> {

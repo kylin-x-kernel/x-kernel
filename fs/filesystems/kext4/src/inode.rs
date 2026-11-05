@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     fmt,
     sync::atomic::{AtomicU64, Ordering},
@@ -794,6 +794,7 @@ pub struct Ext4Inode {
     visible_size: AtomicU64,
     state: RwLock<Ext4InodeState>,
     writeback_lock: Mutex<()>,
+    writeback_io: Arc<crate::writeback_io::InodeWritebackIo>,
     /// Speculative prealloc spaces owned by this inode (Linux:
     /// `i_prealloc_node`). They die with this inode object; see the
     /// prealloc-space module for the lifecycle and locking.
@@ -818,19 +819,27 @@ impl Ext4Inode {
                 orphan: None,
             }),
             writeback_lock: Mutex::new(()),
+            writeback_io: Arc::new(crate::writeback_io::InodeWritebackIo::new()),
             prealloc_map: InodePreallocMap::new(),
         }
     }
 
-    /// Serializes writeback with mapping changes and release of physical blocks.
-    ///
-    /// KVFS callers acquire their invalidate guard first when required, then
-    /// this guard, then mount protection. Keep it across both truncate phases
-    /// or the entire writeback pass. Never acquire it while holding mount or
-    /// inode-state protection. Recovery uses unpublished inodes under exclusive
-    /// mount ownership and does not enter the KVFS callbacks.
+    /// Excludes new submissions and drains existing I/O before mapping mutation.
+    /// KVFS invalidate/data protection precedes this guard. Never acquire it
+    /// under mount protection; completion needs mount access but not this guard.
     pub(crate) fn lock_writeback(&self) -> sync::MutexGuard<'_, ()> {
+        let guard = self.lock_writeback_submission();
+        self.writeback_io.drain();
+        guard
+    }
+
+    /// Serializes mapping preparation and publication, without waiting for I/O.
+    pub(crate) fn lock_writeback_submission(&self) -> sync::MutexGuard<'_, ()> {
         sync::mutex_lock(&self.writeback_lock)
+    }
+
+    pub(crate) fn writeback_io(&self) -> &Arc<crate::writeback_io::InodeWritebackIo> {
+        &self.writeback_io
     }
 
     /// Holds the inode-state read lock while running `f`, with zero cloning.
@@ -1172,6 +1181,21 @@ impl Ext4Inode {
             state.has_dirty_ctime |= state.metadata.ctime != ctime;
             state.metadata.ctime = ctime;
         });
+    }
+
+    /// Updates automatic write timestamps together, returning whether this is a
+    /// regular inode. Other inode kinds keep their journaled update path.
+    pub(crate) fn update_regular_write_timestamps(&self, timestamp: Ext4Timestamp) -> bool {
+        self.update_state(|state| {
+            if state.metadata.kind != InodeKind::RegularFile {
+                return false;
+            }
+            state.has_dirty_mtime |= state.metadata.mtime != timestamp;
+            state.has_dirty_ctime |= state.metadata.ctime != timestamp;
+            state.metadata.mtime = timestamp;
+            state.metadata.ctime = timestamp;
+            true
+        })
     }
 
     /// Updates generic allocated-block accounting in the resident inode.

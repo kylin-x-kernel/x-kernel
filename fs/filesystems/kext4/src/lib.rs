@@ -153,6 +153,7 @@ mod sync;
 mod truncate;
 mod types;
 mod vfs;
+mod writeback_io;
 mod xattr;
 
 pub use dir::{DirectoryEntry, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink};

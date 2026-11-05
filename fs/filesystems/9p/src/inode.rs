@@ -227,23 +227,26 @@ impl InodeOperations for V9fsInode {
         &self,
         _idmap: &MountIdmap,
         _dentry: &Dentry,
+        inode: &VfsInode,
         timestamp: SystemTime,
         update: InodeUpdateTime,
-    ) -> VfsResult<MetadataUpdate> {
+    ) -> VfsResult<()> {
         // Linux v9fs uses generic_update_time for automatic inode timestamps.
         // Explicit remote attribute changes belong to setattr, not this hook.
-        let update = match update {
-            InodeUpdateTime::Access => MetadataUpdate {
-                atime: Some(timestamp),
-                ..Default::default()
-            },
-            InodeUpdateTime::ChangeAndModification => MetadataUpdate {
-                mtime: Some(timestamp),
-                ctime: Some(timestamp),
-                ..Default::default()
-            },
-        };
-        Ok(update)
+        let times = inode.times();
+        match update {
+            InodeUpdateTime::Access if times.accessed_at != timestamp => {
+                inode.set_accessed_at(timestamp);
+            }
+            InodeUpdateTime::ChangeAndModification
+                if times.modified_at != timestamp || times.changed_at != timestamp =>
+            {
+                inode.set_modified_at(timestamp);
+                inode.set_changed_at(timestamp);
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 

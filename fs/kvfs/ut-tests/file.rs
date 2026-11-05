@@ -291,3 +291,24 @@ fn fsync_path_only_file_returns_ebadf_without_calling_backend() {
     }
     assert_eq!(operations.intents.lock().len(), 0);
 }
+
+#[def_test]
+fn fsync_backend_error_keeps_priority_and_consumes_recorded_failure() {
+    let file = sync_test_file(
+        Arc::new(SyncOperations {
+            intents: Mutex::new(Vec::new()),
+        }),
+        FMode::READ,
+    );
+    file.mapping()
+        .writeback_errors()
+        .record(VfsError::InvalidData);
+    assert_eq!(file.fsync(true), Err(VfsError::StorageFull));
+    let mut cursor = *file.writeback_error_cursor.lock();
+    assert_eq!(
+        file.mapping()
+            .writeback_errors()
+            .check_and_advance(&mut cursor),
+        Ok(())
+    );
+}

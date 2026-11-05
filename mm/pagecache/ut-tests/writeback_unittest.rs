@@ -831,3 +831,39 @@ fn writeback_completion_finishes_without_acquiring_the_content_lock() {
         cache.truncate_final().unwrap();
     }
 }
+
+#[def_test]
+fn owned_completion_retains_mapping_owner_until_finish_or_drop() {
+    struct Owner {
+        pages: crate::MappingPages,
+    }
+    for finish in [false, true] {
+        let owner = Arc::new(Owner { pages: new_cache() });
+        let weak = Arc::downgrade(&owner);
+        write_cached(&owner.pages, 0, b"snapshot").unwrap();
+        let folio = owner.pages.state.lock().entries.get(&0).unwrap().clone();
+        let mut pending = None;
+        owner
+            .pages
+            .submit_cache_pages(8, 0..8, &mut 1, &mut 0, PAGE_SIZE_4K, &mut |batch| {
+                let (_, completion) = batch.into_parts();
+                pending = Some(completion.into_owned(owner.clone(), |owner| &owner.pages)?);
+                Ok(())
+            })
+            .unwrap();
+        drop(owner);
+        assert!(weak.upgrade().is_some());
+        assert!(!folio.lock().unwrap().is_invalidated());
+        assert!(folio.lock().unwrap().is_under_writeback());
+        let completion = pending.take().unwrap();
+        if finish {
+            assert_eq!(completion.complete(8), Ok(1));
+        } else {
+            drop(completion);
+        }
+        assert!(weak.upgrade().is_none());
+        let folio = folio.lock().unwrap();
+        assert!(!folio.is_under_writeback());
+        assert!(folio.is_invalidated());
+    }
+}
