@@ -896,6 +896,16 @@ fn init_interrupt() {
     // bookkeeping, soft-timer wheel drain, and hardware re-arm — lives in
     // `ktask::on_timer_fire`.
     let timer_irq = khal::time::interrupt_id();
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: mandatory fixed IRQ \
+                  descriptor preparation failed; handlers and sources cannot be activated"
+    )]
+    if let Err(error) = prepare_fixed_interrupts(timer_irq) {
+        panic!("mandatory fixed IRQ preparation failed: {error:?}");
+    }
+    #[cfg(unittest)]
+    tests_irq_startup::record_descriptors_ready(timer_irq);
     let timer_registration = kirq::try_register_startup(
         timer_irq,
         alloc::sync::Arc::new(|_| {
@@ -958,4 +968,14 @@ fn init_interrupt() {
     ktask::init_percpu_helpers();
     // Enable IRQs before starting app
     karch::enable_local_irq();
+}
+
+fn prepare_fixed_interrupts(timer_irq: usize) -> Result<(), kirq::IrqDescError> {
+    // These are platform-fixed identity numbers, not domain-local hardware IDs.
+    // Mapping owns descriptor lifetime separately from handler installation and
+    // does not configure or enable hardware. APs reuse the primary's descriptors.
+    kirq::try_map(kirq::IrqDesc::from_virq(timer_irq))?;
+    #[cfg(feature = "ipi")]
+    kirq::try_map(kirq::IrqDesc::from_virq(kbuild_config::IPI_IRQ))?;
+    Ok(())
 }

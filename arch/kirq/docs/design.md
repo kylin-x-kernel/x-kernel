@@ -298,7 +298,7 @@ mask before original-cookie completion under the same Line lock. Handlers run
 outside registry/Line locks. The owner reacquires the original Line, clears
 running, completes the original claim while still locked, then releases Line
 state before scheduling replay and dropping admission. Lock order is registry
-then Line for lookup/cleanup, and Line then chip for hardware transactions; no
+then Line for admission, and Line then chip for hardware transactions; no
 registry lock is held across completion. A normal tail does not unmask.
 
 Registration delivery/enable plans carry `flow_unmask` independently of the optional
@@ -638,7 +638,7 @@ configure_platform_irq() / set_platform_irq_enabled()
 alloc_msix()
     ├── MsiBackendIf::alloc_msi_vector()
     ├── MsiBackendIf::compose_msi_message()
-    └── try_map() maps (MSI_DOMAIN, backend_vector) -> virq
+    └── publish_msi_reservation() publishes a fresh virq and retained reservation
 
 register_nmi()
     |-- NMI_PUBLICATION_LOCK (after Line management acquisition)
@@ -770,8 +770,30 @@ unknown
    -> disable_irq_nosync() masks without waiting
    -> synchronize_irq() drains original claims and queued/running replay
    -> unregister()/free_irq() removes regular action and synchronizes teardown
-   -> remove_if_unused() for non-MSI descriptors
+   -> retain the descriptor independently of its remaining actions
 ```
+
+Domain association owns the mapped Line independently of its actions. Removing
+the final regular/shared/NMI action or completing an empty claim preserves both
+mapping indexes, the published reverse mapping and the same Line allocation.
+Remapping the same source therefore reuses its existing identity and control
+state instead of reconstructing a descriptor behind a surviving reverse map.
+This also applies to domainless fixed descriptors: handler removal must not
+undo explicit preparation or change the Line identity used for re-registration.
+
+This follows Linux's separation between `free_irq()` in `kernel/irq/manage.c`
+and mapping disposal in `kernel/irq/irqdomain.c`. Platform Domain mappings have
+platform/Domain lifetime; action owners must not dispose them. There is no
+general runtime Domain disposal entrance yet. MSI has its explicit resource
+release transaction. Domainless descriptors retain registry lifetime too;
+neither action removal nor IRQ completion disposes them. Registration requires
+explicit descriptor preparation in both management modes. General non-MSI
+descriptor disposal is not provided yet. This is not a claim that all ownership
+migration or the XArray index cutover is complete.
+`ut-tests/mapping_lifetime.rs` checks regular/shared removal, empty-claim
+completion, repeated mapping and enrichment without using a hardware producer.
+It also checks that neither an empty claim nor regular/shared action removal
+can undo bare descriptor preparation before startup handler registration.
 
 `IrqState` 是 `kirq` 控制面的 aggregate root。它以 `virq` 作为主键保存
 OS-visible IRQ descriptor 与运行态，并维护按 domain 拆分的控制面
@@ -827,8 +849,8 @@ future threaded slot 和 optional name，但本阶段 threaded slot 始终
 - `in_flight`: real-claim admissions through original completion plus queued or
   running software replay obligations. `synchronize_irq()`, `disable_irq()` and
   `free_irq()` drain this retained-Line count, not just active callback snapshots;
-- `teardown_depth`：等待式 teardown 正在进行的深度。该值非 `0` 时拒绝同一 line
-  的新 action 注册，并阻止 unused descriptor 被 dispatch guard 提前删除；
+- `teardown_depth`: outstanding synchronous teardown credits. A nonzero value
+  rejects new actions; descriptor lifetime is independent of action teardown;
 - `is_msi`：从 descriptor flags 派生的 MSI lifetime marker；
 - `oneshot_mask_pending`：后续 threaded/oneshot 语义预留，本阶段不驱动硬件 mask。
 
@@ -887,7 +909,8 @@ resource 到 `kirq` action 生命周期的适配。
 alloc_msix(affinity)
    -> backend allocates controller-local vector
    -> backend composes MsiMessage { address, data }
-   -> kirq maps (MSI_DOMAIN, vector) to virq
+   -> kirq retains a non-cloneable MsiReservation in the new Line
+   -> kirq publishes (MSI_DOMAIN, vector) to a fresh virq
    -> caller registers handler on virq and programs device with message
 
 x86 MSI-X dispatch
@@ -896,11 +919,48 @@ x86 MSI-X dispatch
    -> dispatch_claim(source, completion) resolves via the stable MSI slot
 
 free_msix(virq)
-   -> verify handler state is unused
-   -> clear published MSI slot without allocation
-   -> backend frees controller-local vector (restore slot on rejection)
-   -> remove MSI descriptor and control-plane mapping
+   -> verify unused, logically disabled state and the allocation reservation
+   -> remove descriptor, both mapping indexes and published reverse mapping
+   -> consume reservation in backend release
+   -> drop the retained Line after registry exclusion ends
 ```
+
+The registry lock spans this release transaction. All ordinary rejection occurs
+before withdrawal. A caller-created MSI flag is not an allocation proof: a
+mapping without the private reservation cannot release backend storage.
+`MsiBackendToken` grants allocator access, while `MsiReservation` represents one
+successful allocation and cannot be reconstructed or cloned by consumers.
+The backend consumes that reservation and must not sleep, reenter KIRQ or
+return without releasing it. An invalid owned reservation is an internal bug,
+not a recoverable rejection after mapping withdrawal. The reservation has no
+hardware-releasing Drop; an arbitrary lookup's final Arc is not a teardown owner.
+A rejected release leaves the caller responsible for its allocation identity.
+Device shutdown and ordering of already-issued MSI messages are caller-side
+prerequisites, not consequences of the software unused check. IRQ action drain
+does not stop DMA or device message production.
+
+Allocation rollback is a different transaction: if message composition or
+mapping fails, the fresh vector has not been returned to a consumer and is
+released without holding the registry lock. The backend supplies its own
+allocator exclusion. Allocation publication uses a fresh logical number rather
+than adopting an existing domain binding. Publication failure returns the same
+reservation for explicit rollback. The x86 allocator's release only clears its
+owned bitmap bit and destination; a future fallible backend needs a separate
+pre-withdrawal preparation protocol before integration.
+
+Private-state tests in `ut-tests/line_admission.rs` exercise the same release
+transaction as production with an injected backend: management admission,
+installed actions, admitted dispatch, unfinished teardown, non-MSI identity and
+missing/mismatched reservations reject without backend calls. Successful release
+prevents a second backend call. `ut-tests/msi_reservation.rs` additionally checks
+private ownership after publication failure, rejection of an existing binding,
+and reverse-map withdrawal before the injected backend consumes ownership.
+It also verifies that an actionless but logically enabled MSI retains its
+descriptor, both indexes and reservation until explicitly disabled. The legacy
+force-enable API can create this state without a handler; zero action and
+in-flight counts alone do not authorize disposal. No controller operation is
+issued by this rejection path.
+These are software ownership tests, not hardware late-message validation.
 
 MSI resources are edge-triggered and marked with `IrqFlags::MSI`. They do not
 run through normal `IntrManagerIf::configure/enable` line configuration; the
@@ -913,15 +973,16 @@ If an MSI-X vector fires without a matching `(MSI_DOMAIN, vector) -> virq`
 mapping, normal dispatch reports an unhandled strict-domain miss. It must not
 dispatch the raw APIC vector as an OS-visible IRQ.
 
-`unregister()` / `free_irq()` do not delete MSI descriptors. MSI allocation ownership is held
-by the `MsiAllocation`/`MsiResource`, so `free_msix()` is the final cleanup point
-for the descriptor, domain mapping, published MSI slot, and backend
+`unregister()` / `free_irq()` do not delete MSI descriptors. The Line retains the
+backend reservation; `MsiAllocation` is only the device-facing identity/message.
+The caller's resource owner invokes `free_msix()` as the final cleanup point
+for the descriptor, domain mapping, published domain snapshot, and backend
 vector. This keeps the documented device teardown order valid: unregister the
 handler first, then free the MSI resource.
-`free_msix()` clears reverse lookup before returning the backend vector for
-reuse. On rejection it restores that lookup and retains software ownership;
-on success it removes the descriptor and both mapping indexes. No new owner
-allocation can fail in the production MSI release path.
+`free_msix()` withdraws the descriptor and published mapping before returning
+the vector, preventing allocator reuse while the old binding remains published.
+Existing pre-withdrawal failures leave ownership available for retry. Neither
+allocation nor release accepts NMI context.
 
 ### Device-owned readiness
 
@@ -1116,14 +1177,14 @@ bits is still a claim; a claim is not proof that a device deasserted its IRQ.
 
 The count and pending suppressed-report count are saturating `u64`s owned by
 `IrqDescRuntimeState`. Accounting uses the retained Line's state critical section
-at in-flight guard cleanup, under the outer `IRQ_STATE` lock. CPUs sharing a
+at in-flight guard completion, without acquiring `IRQ_STATE`. CPUs sharing a
 Line, including a per-CPU IRQ descriptor, share this diagnostic count. Accounting
 adds no lock beyond those used by cleanup, nor an atomic, allocation, clock read,
 feature switch or controller call.
 This warning budget remains active without `KFEAT_IRQ_STAT`; it records only
 unclaimed fanout, rather than adding general per-CPU IRQ activity statistics.
 The existing guard and claim completion ordering is retained; an owned summary
-is logged after releasing `IRQ_STATE` and waking synchronization waiters.
+is logged after releasing the Line lock and waking synchronization waiters.
 Consequently reports can appear out of order across CPUs, or after a later
 descriptor lifetime has begun. A virq and count are not a unique lifetime id.
 
@@ -1183,8 +1244,9 @@ on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
 4. 如果 descriptor 已经没有 action 使用者，先 mask 平台 line，并把
    `disable_depth` 固定到至少 `1`。
 5. 释放锁后等待该 `virq` 的 `in_flight` dispatch 计数归零。
-6. 重新进入控制面锁并删除 unused non-MSI descriptor。MSI descriptor 仍由
-   `free_msix()` 作为资源 owner 做最终释放。
+6. Finish teardown and admission under the original Line lock; no directory
+   lookup or removal occurs. MSI resource owners use `free_msix()` for final
+   release, independently of action removal.
 
 ### `free_irq_action(desc, token)`
 
@@ -1196,7 +1258,8 @@ on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
 4. 若移除的是最后一个 action，则 mask 平台 line。
 5. 释放锁后等待该 `virq` 的 `in_flight` dispatch 计数归零，保证旧 snapshot 不再
    持有被移除 action。
-6. 最后一个 action 被移除时，重新进入控制面锁并删除 unused non-MSI descriptor。
+6. Finish teardown on the original Line and retain its directory membership,
+   including after the last action is removed.
 
 ### `synchronize_irq(desc)`
 
@@ -1208,16 +1271,16 @@ on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
 5. 调用方不能持有 handler 可能获取的锁或阻止目标 CPU handler 退出的资源锁，否则
    可能形成 handler 等锁、teardown 等 handler 的死锁。
 
-`in_flight` 等待使用 descriptor-local `kcompletion::Completion` 作为 wake source：
-`begin_dispatch()` 在 `0 -> 1` 转换时 `reinit()`，`IrqDispatchGuard::drop()` 在
-`1 -> 0` 转换时于 `IRQ_STATE` 锁内把 completion 标记为完成，并在释放
-`IRQ_STATE` 后 wake waiter。这样上一代 dispatch 的 delayed wake 不能在下一代
-`begin_dispatch()` 之后重新把同一个 completion 置为 completed，同时避免在全局
-IRQ state 锁内运行同步 wake callback。`kcompletion::DeferredWake` 持有 completion
-的 `Arc`，不持有可逃逸的栈上 waiter 指针。`kirq` 通过 `TaskCompletionWaitIf`
-调用 scheduler 层提供的等待实现，因此不依赖 `ktask`/`ksync`。等待实现按
-作用域内 pinned 栈上 waiter 协议消费 completion token，使用 ktask 的
-`CompletionWait` 与共享 park latch 握手，不分配 poll registration 或 Waker。
+`in_flight` waits use a descriptor-local `kcompletion::Completion`.
+`begin_dispatch()` reinitializes it on `0 -> 1`; `IrqDispatchGuard::drop()`
+marks it complete on `1 -> 0` under the same retained Line lock, then wakes
+waiters after unlocking. The completion path neither acquires `IRQ_STATE`
+nor looks up or deletes a descriptor. A delayed wake from a prior dispatch
+cannot mark a newly reinitialized completion done, and wake callbacks never
+run under the Line lock. `kcompletion::DeferredWake` owns a completion `Arc`,
+not an escaping stack waiter. The task provider implements scoped pinned
+waiters through `CompletionWait` and the shared park latch, without allocating
+poll registrations or Wakers; kirq does not depend on `ktask`/`ksync`.
 `kiface_task_api::TaskBlockingContextIf::is_sleepable_context()` checks sleepable task
 context before synchronization; kirq rejects invalid callers with
 `IrqDescError::InvalidContext`. `free_irq*()` checks before removing actions,
@@ -1240,8 +1303,8 @@ number implies that the original dispatch is complete. Completion remains only
 a wake mechanism; the retained Line's in-flight count is authoritative.
 
 Dispatch snapshots retain the same Line through their in-flight guard. Guard
-cleanup and teardown finish update that instance directly and only remove a
-directory entry if it still points to the same allocation. Short-lock ordering
+completion and teardown finish update that instance directly without looking
+up or removing a directory entry. Short-lock ordering
 is registry lock then Line state lock. NMI writers additionally acquire their
 publication lock before registry/Line locks and their table lock after the Line
 lock. Never acquire registry/publication locks while holding a Line state lock. Wait and wake
@@ -1300,8 +1363,13 @@ serialize independent Lines; no throughput improvement is claimed without measur
 Normal and legacy enable follow the same registry-to-Line handoff: the selected
 Line remains owned while configuration and unmask run under its state lock,
 without registry exclusion. Normal enable remains lookup-only and requires an
-action; legacy enable may publish a preallocated candidate and force the
-hardware enable write at depth zero for per-CPU bring-up. Nested enable still
+action; legacy enable also requires a prepared Line, but can force the
+hardware enable write at depth zero for per-CPU bring-up. Neither path creates
+a missing descriptor. Absence returns `UnknownIrq` before number allocation,
+mapping publication or controller operations. Fixed timer/IPI preparation in
+`kruntime` precedes local source activation; SGI15/PMU and vtimer route setup
+likewise prepare their mappings before enable. Restore reuses that identity.
+Nested enable still
 decrements disable depth without unmasking until the depth reaches zero.
 The final enable admission checks teardown and prepares the enable plan under
 the same Line guard that covers controller application. Normal enable has no
@@ -1313,6 +1381,22 @@ the Line lock. Ordinary map and registration reuse the same validation/commit
 implementation. Registry exclusion ends before controller application; Line
 exclusion remains continuous. Only NMI shared-table writers additionally take
 their own publication lock for cross-Line duplicate checks and publication.
+
+`ut-tests/enable_preparation.rs` checks missing plain/Domain identities with
+IRQs initially enabled and masked, plus rejection of an orphaned reverse mapping.
+Existing failure/locking tests prepare their Line explicitly before exercising
+configuration and force-enable. All regular/shared/NMI registration, including
+the explicit startup variants, requires a prepared descriptor. Absence is
+rejected before preflight, controller configuration or action publication.
+Primary timer/IPI, SGI15 and PMU setup
+prepare mappings first. Startup acquisition still never waits, and descriptor
+identity is rechecked after acquisition before metadata changes. Task-mode
+registration also performs lookup only: console and virtual timer routes map
+before requesting actions, and devres consumes mapped or MSI-allocated resources.
+Missing descriptors return `UnknownIrq` without allocation or publication.
+This matches Linux `request_threaded_irq` in `kernel/irq/manage.c`: `irq_to_desc`
+must succeed before an action is allocated or installed; requesting an action
+does not allocate the IRQ descriptor.
 Regular, shared and NMI registration retain one Line guard from preflight
 through descriptor resolution, configuration, action installation and delivery
 restoration.
@@ -1336,8 +1420,8 @@ exclusion. Same-Line registration is excluded by the management mutex, while
 enable/disable use the state lock and teardown rejects re-enable. NMI shared-table
 transactions retain their separate global protection. The removed owner is returned
 out of that transaction; only then does the caller drain the original Line,
-with all short locks released. Admission cleanup uses a registry transaction
-without the global control lock, and releases management before returning the handler
+with all short locks released. Admission completion uses only the retained
+Line lock, and releases management before returning the handler
 to the caller. Removing a non-last shared action does not mask the remaining
 actions.
 NMI registration and withdrawal also retain the original Line state lock across
@@ -1387,8 +1471,9 @@ critical section; it does not make registry lookup lock-free.
    stays unlocked. Edge completion occurs before handlers as described above,
    but admission survives the whole pending loop. Level completes after mask/ack
    before handlers and retains admission through conditional tail unmask.
-   Registry cleanup follows only
-   after releasing Line state.
+   Admission release updates only the retained Line and wakes drain waiters
+   outside its lock. It does not acquire the directory lock or delete even an
+   empty domainless descriptor; an empty claim must not undo preparation.
 8. `HardIrqContextGuard` 退出 generic hardirq context。
 9. `run_hardirq_exit_deferred()` 调用当前注册的 deferred executor；
    `DeferredRunContext::resolved_irq()` 携带上一步解析出的 IRQ identity，NMI、strict
@@ -1428,28 +1513,27 @@ IRQ lifecycle enter；GIC 只在其中用 `generic_handle_nmi()` 替换普通 ac
 
 - `IRQ_STATE` uses `SpinNoIrq` to protect directory and mapping transactions;
   the short `IrqLine` lock protects descriptor/action state. Normal IRQ paths
-  access both, always acquiring the directory lock before the Line lock.
+  acquire the directory lock before the Line lock for admission. Completion
+  uses only its retained Line lock, without directory lookup or mutation.
 - Ordinary reverse-map snapshots are prepared and published under IRQ_STATE;
   readers only acquire-load immutable owners. Ordinary unregister retains domain
   mappings. MSI final free clears a stable slot without building a snapshot.
 - Normal dispatch snapshots the action list, records in-flight dispatch and
   retains the original Line under `IRQ_STATE -> Line` exclusion. Driver handlers
   run after both locks are released. Resolution and descriptor lookup share one
-  directory critical section; dispatch cleanup updates the retained Line rather
-  than selecting an instance again by number.
+  directory critical section; dispatch completion updates the retained Line
+  without selecting an instance again by number or withdrawing its membership.
 - `in_flight` includes real claims and queued/running replay, released by the
   retained-Line guard.
-  `in_flight_zero` completion 只负责唤醒等待者，不参与 cleanup 判定。最后一个
-  guard drop 时在 `IRQ_STATE` 锁内发布 completion done state，锁外执行 wake，保证
-  completion state 和 `in_flight == 0` 的观察顺序一致。
-  `free_irq()` 先移除 action，action list 为空时就 mask 平台 line；随后在锁外等待
-  `in_flight` 归零，最后只在 `action_count == 0 && in_flight == 0 && teardown_depth == 0`
-  时清理 descriptor。平台 mask 与 descriptor cleanup 使用不同判定：并发 shared
-  teardown 中即使已有 waiter 让 `teardown_depth != 0`，最后一个 action 离开仍必须
-  关闭平台 line。等待期间 descriptor 保留 `teardown_depth` gate，阻止同一 line 重新
-  注册或通过 `enable_irq()` 重新打开平台 line；等待式 API 禁止在 interrupt-like
-  context 调用，避免当前 CPU 自己等待自己退出 handler。调用方也不能持有 handler
-  可能获取的锁或阻止目标 CPU handler 退出的资源锁。
+  The last guard publishes `in_flight_zero` completion under the Line lock and
+  wakes outside that lock. The same lock protects `in_flight == 0` observations.
+  Control-plane owners, not dispatch completion, decide descriptor withdrawal.
+  `free_irq()` removes the action, masks the last action's source, then waits
+  outside short locks for `in_flight` to reach zero. It retains the descriptor.
+  The last action must mask even while another teardown owns a credit.
+  `teardown_depth` excludes registration and re-enable while draining. Waiting
+  APIs reject interrupt-like contexts; callers must not hold locks needed by
+  handlers or otherwise prevent their completion.
 - `NMI_TABLE` 使用 `SpinRaw`，依赖“boot-time 写入 + NMI-only 读取 + pseudo-NMI
   不同 CPU 本地不可重入”的不变量，避免 NMI path 使用会保存 IRQ state 的锁。
 - `IRQ_LIFECYCLE_HOOKS` 使用 `SpinNoIrq`，只在 active bit 为真时于 entry 短暂复制
@@ -1560,11 +1644,11 @@ lock-free snapshot 解析，避免每次中断都查询控制面的 mapping tabl
 - `IrqLifecycleGuard` 的 `Drop` 执行 entry 时保存的 exit hook。
 - `clear_deferred_executor()` 清空 hardirq-exit handoff owner；正常运行期应由
   deferred execution owner 一次性注册。
-- `unregister()` 移除 regular action，并在 descriptor 无 action 使用者时
-  删除 `IRQ_STATE` 条目并禁用平台 IRQ。MSI descriptor 仍由 MSI resource owner
-  最终通过 `free_msix()` 释放；不存在额外的通用 IRQ waiter entry。
-  scheduler wait provider 在 action 摘除前检查可睡眠上下文；通过后使用栈上
-  waiter 等待 escaped handler snapshot 退出，不存在摘除后的登记失败分支。
+- `unregister()` removes the regular action and disables the last action's
+  source. It retains all descriptor identities, including domainless entries.
+  MSI owners release resources with `free_msix()`. The scheduler wait
+  provider validates sleepable context before withdrawal; stack-based waiters
+  drain escaped snapshots without a post-withdrawal registration-failure branch.
 - `unregister_nmi()` 同时清理 `NMI_TABLE`、fallback action 和 `PER_CPU` 标记。
   The fallback carries an internal `NMI_FALLBACK` action marker; ordinary
   `free_irq()` must not withdraw it separately, and NMI cleanup must not remove
@@ -1586,6 +1670,98 @@ it is not a claim that Linux has the same fallback or identical misuse handling.
 
 ## Line Management Transactions
 
+### Storage Lifetime and Destruction
+
+Directory withdrawal, service admission and final storage destruction are
+separate events. An `Arc<IrqLine>` preserves allocation identity; it does not
+grant permission to install an action or dispatch after withdrawal. Management
+must revalidate directory identity after acquiring its potentially blocking
+mutex. The existing directory lock still provides that admission check; this
+is not yet an RCU-readable directory implementation.
+
+`IrqLine::virq` uses `klazy::Once<Virq>` to bind the logical number once,
+independently of mutable controller metadata. A private candidate starts
+unassigned. Mapping commit validates all recoverable conflicts, assigns the
+number under registry and Line exclusion, then publishes the indexes. Reusing
+that Line for a different number is rejected before publication. Metadata
+enrichment and retirement preserve the assigned number.
+
+`IrqLine::logical_irq` uses only non-waiting `Once::get`, so observation needs
+neither the mutable Line lock nor an owning reference clone. An assigned number
+does not prove directory membership or grant service admission. The initializer
+runs only in the serialized commit path and returns an integer; it cannot
+allocate, reenter or wait for another initializer. This separates identity
+observation from admission without changing the current directory/snapshot
+lookup architecture. Mapping lifetime and MSI reservation tests cover alias
+rejection, observation while the Line lock is held, failed preparation,
+metadata enrichment and retirement.
+
+`IrqStateDesc::is_retired` is a one-way state under the Line lock. Explicit
+disposal sets it before unlinking either index, while registry exclusion still
+serializes publication. It is not `teardown_depth`: removing an action leaves
+the prepared descriptor available for another registration, whereas retiring
+the descriptor permanently closes that allocation. A stale owner cannot become
+a new publication candidate. A fresh Line can use the logical number only
+through the normal mapping checks; it does not reset the old Line's state.
+
+Registration and removal check retirement before management admission, and
+ordinary dispatch checks it before taking an in-flight credit or invoking a
+flow operation. A retired lookup still completes its original claim, but does
+not use the old Line's chip callbacks. Action-install and execution predicates
+also reject retired state, including software replay eligibility. Existing
+registry identity checks remain necessary; this flag does not replace index
+consistency, reader lifetime protection, or device shutdown.
+
+The retirement regression in `ut-tests/msi_reservation.rs` retains an old
+owner across disposal, rejects its republication and action installation, and
+accepts a fresh identity at the same logical number. `ut-tests/line_dispatch.rs`
+injects a retired lookup and verifies exactly one claim completion with no old
+flow mask/unmask calls or in-flight credit. This models a stale-reference
+interleaving; it is not evidence that RCU directory publication is implemented.
+
+The final release chain is bounded by the following ownership rules:
+
+- Management lookup retains the Line before acquiring its mutex. The guard
+  and its scoped event listener finish before that retained owner is dropped.
+  A waiter not yet admitted can outlive directory withdrawal, but cannot
+  resurrect the withdrawn descriptor.
+- Dispatch and queued replay retain the original Line. Replay takes an
+  in-flight credit before linking its Arc; popping the queue transfers the
+  owner to dispatch rather than ending admission. Resource release rejects
+  outstanding in-flight or admitted management work.
+- Actions are removed and drained by the management path. Removed handlers
+  leave management and short-lock exclusion before final destruction. A
+  disposable Line must contain no actions: arbitrary client destructors are
+  not part of the empty-Line storage release contract.
+- `IrqDrain` retains the Line and clones its `Completion` while waiting.
+  Scoped completion registrations retain their borrows until unlinking;
+  `DeferredWake` independently retains the completion until notification.
+  Dropping the Line's completion owner neither signals nor cancels waiters.
+- MSI reservation consumption is explicit and precedes final Line release.
+  The reservation's destructor does not stop hardware or return a vector.
+
+`kmutex::RawMutex` destruction does not acquire the mutex or call its unlock
+operation. With the pinned no-std `event-listener` 5.4.1 implementation, Event
+destruction releases its inner Arc; the listener slab and pending-operation
+queue are storage, not a worker that may be run during destruction. Listener
+cleanup and queue draining must already have finished with the last mutex
+operation. The current allocator releases this storage through IRQ-safe locks
+and per-CPU caches, not a sleepable reclamation operation. These dependencies
+must be rechecked if mutex internals or allocation backends change.
+
+This permits reasoning about empty storage separately from driver teardown;
+it does not authorize final Arc release in NMI context. Nor does it establish
+an RCU grace period or prevent stale admission by itself. Any future directory
+replacement must preserve these ownership rules and provide both guarantees.
+
+Linux makes the same separation in `kernel/irq/irqdesc.c`:
+`irq_desc_free_rcu` schedules `delayed_free_desc`, which releases the descriptor's
+kobject; `irq_kobj_release` frees descriptor-owned storage. That callback is not
+driver action teardown. X-Kernel's retained Arc and completion machinery differ,
+so the Linux callback alone is not proof that every Rust field is safe to drop.
+
+### Transaction Admission
+
 Each Line embeds a `kmutex::Mutex<()>`, built on `lock_api`. KIRQ holds the
 ordinary RAII guard on the acquiring task's stack across its transaction.
 `kmutex` owns the single sleeping-mutex algorithm also reexported by `ksync`;
@@ -1605,13 +1781,13 @@ IRQ locks; a startup transaction must not sleep.
 
 After acquiring a retained Line's mutex, management rechecks that the
 directory still names that allocation. Registration retries against the current
-Line if its first candidate was retired; removal never redirects an old request
-to a replacement sharing the same number. New Lines acquire management before
-publication. Explicit startup registration performs try-acquisition only:
+Line if its selected identity was retired; removal never redirects an old request
+to a replacement sharing the same number. Registration never creates a Line.
+Explicit startup registration performs try-acquisition only:
 contention must not install an action or change hardware/descriptor metadata.
-Identity retries retain the first unpublished candidate instead of allocating
-another Line on every missing-directory observation. A published or retired
-Line is never recycled as that candidate; retry remains progress-dependent.
+Identity retries allocate no candidate. If withdrawal leaves the directory
+empty, registration returns UnknownIrq rather than recreating the retired Line.
+Replacement retries remain progress-dependent.
 
 Boolean NMI registration wrappers report rejected admission and concrete
 registration errors after releasing management locks, except in NMI context,
@@ -1656,11 +1832,11 @@ disable, beginning teardown or waiting for drain. An existing empty Line keeps
 its enable state, disable depth and directory identity; missing Lines remain
 absent. A successful removal keeps the existing mask-and-drain sequence.
 
-Admission is recorded under the registry/Line locks so dispatch cleanup and MSI
-cleanup cannot remove a Line while its management transaction is active. Free
+Admission is recorded under the registry/Line locks so explicit MSI release
+cannot remove a Line while its management transaction is active. Free
 withdraws the action and masks the last action's source under short locks, then
 releases those locks before waiting on the original Line. Management exclusion
-remains held through that wait. Removed handlers and losing candidates retain
+remains held through that wait. Removed handlers retain
 an owner outside the transaction so their final destructors do not run under
 the management mutex or short locks.
 
@@ -1670,13 +1846,13 @@ enabled through the legacy startup bridge. Only a successfully withdrawn last
 action triggers masking; callers that intend to disable a source use the
 explicit disable APIs.
 
-After drain, teardown completion, admission release and unused-Line withdrawal
-share one registry transaction. The registry lock excludes new enable lookups
-between the Line-locked teardown release and identity-checked unused removal;
-already admitted users serialize through the Line lock. Retained dispatch counts
-still prevent removal before controller completion. No global control lock is
-needed for this cleanup. Clearing teardown outside the registry transaction
-would let legacy force-enable race with later withdrawal. NMI duplicate checking and
+After drain, teardown completion, admission release and conditional surviving
+action unmask share one original-Line critical section. No descriptor is
+withdrawn, so completion needs neither the registry lock nor an outer IRQ guard
+for a registry-to-Line handoff. Enable/disable and dispatch serialize through
+that same Line lock. The management mutex still excludes registration through
+completion, and retained dispatch counts protect explicit resource release.
+NMI duplicate checking and
 paired table/fallback publication retain NMI publication exclusion throughout,
 including when two descriptors name the same hwirq through different Lines.
 

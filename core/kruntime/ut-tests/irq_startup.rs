@@ -10,7 +10,9 @@ use unittest::{assert, assert_eq, def_test};
 // Both primary and AP activation call sites are boot-only. Repeated activation
 // or CPU hotplug requires a separate contract, not relaxed phase observations.
 static HANDLERS_READY: AtomicBool = AtomicBool::new(false);
-static PHASES: [AtomicU8; kbuild_config::NR_CPUS] = [const { AtomicU8::new(0) }; kbuild_config::NR_CPUS];
+static DESCRIPTORS_READY: AtomicBool = AtomicBool::new(false);
+static PHASES: [AtomicU8; kbuild_config::NR_CPUS] =
+    [const { AtomicU8::new(0) }; kbuild_config::NR_CPUS];
 static HAS_INVALID_ORDER: AtomicBool = AtomicBool::new(false);
 static HAS_EARLY_CONSOLE_INPUT: AtomicBool = AtomicBool::new(false);
 
@@ -30,7 +32,29 @@ pub(super) fn record_prepared() {
 }
 
 pub(super) fn record_handlers_ready() {
+    if !DESCRIPTORS_READY.load(Ordering::Acquire) {
+        HAS_INVALID_ORDER.store(true, Ordering::Release);
+    }
     HANDLERS_READY.store(true, Ordering::Release);
+}
+
+pub(super) fn record_descriptors_ready(timer_irq: usize) {
+    let timer_matches = kirq::descriptor(timer_irq)
+        .is_some_and(|desc| desc.logical_irq() == Some(timer_irq) && desc.hwirq == timer_irq);
+    #[cfg(feature = "ipi")]
+    let ipi_matches = kirq::descriptor(kbuild_config::IPI_IRQ).is_some_and(|desc| {
+        desc.logical_irq() == Some(kbuild_config::IPI_IRQ) && desc.hwirq == kbuild_config::IPI_IRQ
+    });
+    #[cfg(not(feature = "ipi"))]
+    let ipi_matches = true;
+    if karch::local_irq_enabled()
+        || HANDLERS_READY.load(Ordering::Acquire)
+        || !timer_matches
+        || !ipi_matches
+        || DESCRIPTORS_READY.swap(true, Ordering::AcqRel)
+    {
+        HAS_INVALID_ORDER.store(true, Ordering::Release);
+    }
 }
 
 pub(super) fn record_activation_entry() {
@@ -55,6 +79,7 @@ fn console_input_is_not_registered_during_local_source_activation() {
 #[def_test]
 fn local_sources_activate_after_preparation_and_handler_publication() {
     assert!(!HAS_INVALID_ORDER.load(Ordering::Acquire));
+    assert!(DESCRIPTORS_READY.load(Ordering::Acquire));
     assert!(HANDLERS_READY.load(Ordering::Acquire));
     #[cfg(feature = "smp")]
     let cpu_count = kcpu_id_map::nr_cpus();

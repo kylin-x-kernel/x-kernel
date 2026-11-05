@@ -131,11 +131,15 @@ remains a separate timer-driver operation.
 GICv3 reserves ordinary Group 1 SGI15 for irq_work. Preparation rejects an
 out-of-range SGI, a conflict with `IPI_IRQ`, or MPIDR Aff0 >= 16 (the sender
 does not implement the optional range selector). A global `LazyInit<bool>`
-serializes one `kirq::try_register_startup` call with
+serializes mapping preparation through `kirq::try_map`, followed by one
+`kirq::try_register_startup` call with
 `kirq::IrqRegisterOptions::disabled()`; the permanent handler invokes
 `kirq::irq_work::handle_irq`. Registration and enablement share a descriptor
 marked `IrqFlags::PER_CPU`, identifying the SGI's CPU-local hardware state.
-Registration failure is retained and yields
+The platform owns this mapping for kernel lifetime; APs reuse it. Mapping
+preparation does not configure or enable hardware. If action installation fails,
+the prepared mapping remains reserved rather than being reclaimed during boot.
+Preparation or registration failure is retained and yields
 `None`, without replacing an existing handler. No GIC lock is held while
 entering the generic IRQ registration/control plane.
 

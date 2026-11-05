@@ -18,6 +18,10 @@ Kernel tests live in ut-tests and are mounted by their source modules.
 
 ## IRQ identity and results
 
+`request_irq()` requires a descriptor already prepared through `map_irq()`,
+MSI-X allocation or the platform's fixed-source setup. Requesting an action
+does not create a descriptor; an absent IRQ returns `ResError::InvalidResource`.
+
 PlainVirq remains a handle-only lookup. DomainMapped retains the virtual IRQ,
 hardware IRQ, trigger and controller. An explicit domain always wins; only a
 missing domain permits the existing GIC, PLIC or IO-APIC root fallback.

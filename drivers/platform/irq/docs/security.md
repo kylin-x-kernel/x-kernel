@@ -135,6 +135,9 @@ anywhere in this crate.
   handle and its trap operations, installed once.
 - `IRQ_WORK_HANDLER_REGISTERED`: one-time registration outcome for reserved
   SGI15. Its handler is never removed; the notifier does not read this state.
+  Mapping is prepared before action installation without enabling delivery.
+  Either preparation or installation failure prevents notifier publication;
+  an already prepared mapping remains platform-owned for kernel lifetime.
 - `PLIC` (`LazyInit<PlicController>`): the source bound and PLIC register handle;
   access before init panics with a named `expect`.
   Its inner `SpinNoIrq<PlicState>` lock protects registers and effective targets,

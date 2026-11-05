@@ -2757,6 +2757,7 @@ dependencies = [
  "kiface-irq-context-api",
  "kiface-task-api",
  "kiface-task-wait-api",
+ "klazy",
  "kmutex",
  "krcu-core",
  "kspin",

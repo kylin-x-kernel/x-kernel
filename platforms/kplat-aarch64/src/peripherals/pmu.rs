@@ -189,6 +189,12 @@ macro_rules! pmu_if_impl {
             fn register_overflow_irq() -> bool {
                 let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
                 let desc = kirq::gic_level_irq_desc(irq);
+                // The platform owns this mapping independently of the normal
+                // or NMI action. Preparing it does not enable PMU delivery.
+                if let Err(err) = kirq::try_map(desc) {
+                    log::warn!("PMU mapping preparation failed: desc={desc:?}, error={err:?}");
+                    return false;
+                }
                 let handler = alloc::sync::Arc::new(|_| {
                     $crate::peripherals::pmu::handle_overflows();
                     kirq::IrqEvent::HANDLED

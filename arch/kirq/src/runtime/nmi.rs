@@ -74,6 +74,8 @@ static_lock! {
 ///   line, and rejects duplicates before touching any internal state.
 /// - Requires sleepable task context and may wait for Line management exclusion.
 ///   Use [`register_nmi_startup`] for explicit nonwaiting startup registration.
+/// - Requires a descriptor already prepared through [`crate::try_map`].
+///   Absence is rejected without configuration or handler publication.
 /// - The caller must quiesce the affected source and exclude all local NMI
 ///   readers of the shared table throughout this call, including after sleeping
 ///   or migration to another CPU. Merely masking NMI on the entry CPU is not
@@ -96,6 +98,8 @@ pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
 /// Requires an installed current task and no interrupt/BH context. IRQs may
 /// still be disabled. Never waits for Line management exclusion; contention
 /// returns false rather than falling back to ordinary task acquisition.
+/// The descriptor must already be prepared through [`crate::try_map`]. Missing
+/// descriptors return false without configuration or table/fallback publication.
 /// All [`register_nmi`]'s source/table quiescence obligations apply. Complete
 /// startup registration before allowing NMI delivery; this is not a runtime
 /// atomic-context registration API.
@@ -175,6 +179,8 @@ fn register_nmi_with_mode(
 /// so a re-enabled or re-triggered IRQ no longer dispatches the removed
 /// handler through the normal path. The platform line is disabled when it is
 /// no longer used, using the full stored descriptor.
+/// The descriptor and any Domain association survive handler removal, including
+/// domainless Lines. This does not dispose mapping ownership.
 /// Requires sleepable task context. The caller must first quiesce the source
 /// and exclude all local NMI readers of the shared table throughout the call,
 /// including management waits and every CPU on which it may resume after
@@ -207,7 +213,8 @@ fn unregister_nmi_with(desc: IrqDesc, mask: impl FnOnce(IrqDesc)) -> bool {
             return Ok(None);
         };
         // Keep legacy force-enable excluded until admission cleanup atomically
-        // finishes teardown and retires this original Line after masking.
+        // finishes teardown after masking. Handler removal retains this Line's
+        // directory membership independently of any Domain association.
         entry.begin_teardown();
         let removed_handler = table.remove(&desc.hwirq);
         entry.remove_flags(IrqFlags::PER_CPU);

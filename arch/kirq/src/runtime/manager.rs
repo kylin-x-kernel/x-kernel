@@ -161,6 +161,13 @@ fn apply_platform_delivery(plan: IrqPlatformPlan) {
 /// Reverse-map owners are prepared with NOWAIT under control-lock exclusion.
 /// NoMemory leaves mappings and descriptors unchanged; a dynamic virq number
 /// may still have been consumed. Existing nested allocations retain their policy.
+///
+/// A Domain association retains its Line across handler removal and empty
+/// dispatch. Platform mappings belong to the Domain/platform lifetime; this is
+/// not a per-handler allocation. MSI allocations use their separate explicit
+/// release protocol. Descriptors without a Domain retain registry lifetime too;
+/// neither action removal nor dispatch completion disposes them. No general
+/// non-MSI runtime disposal API is provided yet.
 pub fn try_map(desc: IrqDesc) -> Result<Virq, IrqDescError> {
     reject_nmi_management("map IRQ")?;
     let spec = IrqSpec::Desc(desc);
@@ -218,6 +225,9 @@ pub fn enable(spec: impl Into<IrqSpec>, on: bool) {
 /// Configuration errors leave logical enable/depth uncommitted and may leave
 /// hardware masked. Resolved metadata is retained; successful retry restores
 /// eligible delivery. Neither error nor success proves hardware-active drain.
+/// Both directions require an existing descriptor. Missing Lines return
+/// [`IrqDescError::UnknownIrq`] without allocation or controller operations;
+/// owners must prepare them through [`try_map`] or MSI allocation first.
 #[inline]
 pub fn try_enable(spec: impl Into<IrqSpec>, on: bool) -> Result<(), IrqDescError> {
     if on {
@@ -282,52 +292,23 @@ fn enable_legacy_line(
     spec: IrqSpec,
     apply_plan: impl FnOnce(IrqPlatformPlan) -> Result<(), IrqDescError>,
 ) -> Result<(), IrqDescError> {
-    let mut prepared = None;
-    loop {
-        if prepared.is_none() {
-            let is_missing = {
-                let state = registry.lock();
-                lookup_line(&state, spec).is_none()
-            };
-            if is_missing {
-                prepared = Some(prepare_line(spec));
-            }
-        }
-        // Declare the retained owner before the guards so even error returns
-        // release short locks before a possible final Line destruction.
-        let line;
-        let context_guard = NoPreemptIrqSave::new();
-        let mut state = registry.lock();
-        let existing_virq = if let Some((virq, existing)) = lookup_line(&state, spec) {
-            line = existing.clone();
-            Some(virq)
-        } else {
-            let Some(candidate) = prepared.as_ref() else {
-                drop(state);
-                drop(context_guard);
-                continue;
-            };
-            line = candidate.clone();
-            None
-        };
-        let mut entry = line.lock();
-        if let Some(virq) = existing_virq {
-            reject_teardown(&entry, virq, "enable IRQ")?;
-        }
-        let desc = try_resolve_and_publish_locked(&mut state, spec, &line, &mut entry)?;
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: successful resolution assigns a virq"
-        )]
-        let virq = desc.logical_irq().expect("resolved descriptor has a virq");
-        drop(state);
-        let plan = prepare_enable_plan(&entry, virq, true)?;
-        apply_configuration_plan(&mut entry, plan, apply_plan)?;
-        entry.commit_platform_plan(plan);
-        drop(entry);
-        super::resend::schedule(&line);
-        return Ok(());
-    }
+    // Source activation cannot allocate descriptor ownership. Keep the retained
+    // owner outside the guards, and preserve IRQ exclusion across their handoff.
+    let line;
+    let _context_guard = NoPreemptIrqSave::new();
+    let mut state = registry.lock();
+    let (virq, existing) = lookup_line(&state, spec).ok_or(IrqDescError::UnknownIrq)?;
+    line = existing;
+    let mut entry = line.lock();
+    reject_teardown(&entry, virq, "enable IRQ")?;
+    try_resolve_and_publish_locked(&mut state, spec, &line, &mut entry)?;
+    drop(state);
+    let plan = prepare_enable_plan(&entry, virq, true)?;
+    apply_configuration_plan(&mut entry, plan, apply_plan)?;
+    entry.commit_platform_plan(plan);
+    drop(entry);
+    super::resend::schedule(&line);
+    Ok(())
 }
 
 // Admission, legacy metadata resolution, and the state change share the
@@ -596,6 +577,8 @@ pub fn descriptor(virq: Virq) -> Option<IrqDesc> {
 /// and wake their readers when data becomes ready.
 /// Registration requires sleepable task context, including when uncontended;
 /// boot callers use [`try_register_startup`] after installing the current task.
+/// The source owner must prepare the descriptor through [`try_map`] or MSI
+/// allocation before requesting a handler.
 pub fn register(spec: impl Into<IrqSpec>, handler: Handler) -> bool {
     match try_register(spec, handler) {
         Ok(registered) => registered,
@@ -640,6 +623,9 @@ pub fn try_register_disabled(
 ///
 /// Requires sleepable task context even without contention. Management exclusion
 /// serializes with registration/removal on this Line and may block or migrate.
+/// Requires a descriptor prepared through [`try_map`] or MSI allocation.
+/// A missing descriptor returns [`IrqDescError::UnknownIrq`] without creating
+/// a Line, configuring hardware or retaining a handler in the registry.
 /// An occupied Line returns false before merging descriptor metadata or
 /// publishing mappings; the existing action and control state remain unchanged.
 /// Stale controller configuration is applied before publishing the handler,
@@ -665,6 +651,9 @@ pub fn try_register_with_options(
 /// Never waits for management exclusion. Returns false on contention or an
 /// occupied Line. IRQs may be masked, but interrupt/BH context is rejected.
 /// Call before source activation; this is not an atomic-context fallback.
+/// Requires a descriptor already prepared through [`try_map`] or MSI allocation.
+/// Missing descriptors return [`IrqDescError::UnknownIrq`] without creating a
+/// Line, configuring hardware or retaining the offered handler.
 /// Configuration errors have the same retained-metadata and no-new-handler
 /// semantics as [`try_register_with_options`].
 pub fn try_register_startup(
@@ -777,6 +766,8 @@ pub fn register_shared(spec: impl Into<IrqSpec>, handler: Handler) -> Option<Irq
 /// Try to register one shared IRQ action with default auto-enable behavior.
 ///
 /// Requires sleepable task context; waits for this Line's management mutex.
+/// Requires an already prepared descriptor; absence returns
+/// [`IrqDescError::UnknownIrq`] without creating a Line or retaining the handler.
 /// Incompatible actions, exhausted capacity or unavailable action tokens return
 /// None before descriptor metadata or mappings are changed.
 /// Configuration errors preserve existing shared owners and publish no new
@@ -887,7 +878,6 @@ fn acquire_management(
 /// Membership pin; the caller keeps its mutex guard alive until this drops.
 struct ManagementAdmission<'a> {
     line: &'a Arc<IrqLine>,
-    virq: Option<Virq>,
     is_active: bool,
     has_removed_action: bool,
 }
@@ -897,13 +887,9 @@ impl Drop for ManagementAdmission<'_> {
         if !self.is_active {
             return;
         }
-        finish_management_on_line(
-            &IRQ_STATE,
-            self.virq,
-            self.line,
-            self.has_removed_action,
-            |unmask, desc| unmask(desc),
-        );
+        finish_management_on_line(self.line, self.has_removed_action, |unmask, desc| {
+            unmask(desc)
+        });
         if self.has_removed_action {
             super::resend::schedule(self.line);
         }
@@ -911,22 +897,18 @@ impl Drop for ManagementAdmission<'_> {
 }
 
 fn finish_management_on_line(
-    registry: &SpinNoIrq<IrqState>,
-    virq: Option<Virq>,
     line: &Arc<IrqLine>,
     has_removed_action: bool,
     unmask: impl FnOnce(fn(IrqDesc), IrqDesc),
 ) {
-    // Keep IRQ exclusion across the non-LIFO registry-to-Line handoff.
-    // The caller retains management exclusion and ownership through cleanup.
-    let _context_guard = NoPreemptIrqSave::new();
-    let mut state = registry.lock();
-    state.finish_management(virq, line, has_removed_action);
+    // Action ownership is independent of descriptor lifetime. Retain the
+    // original Line and management mutex through completion and restoration;
+    // no directory lookup, withdrawal or non-LIFO lock handoff is needed.
+    let mut entry = line.lock();
+    entry.finish_management(has_removed_action);
     if !has_removed_action {
         return;
     }
-    let entry = line.lock();
-    drop(state);
     // Withdrawal can suppress an arrival while other shared actions survive.
     // Restore that still-enabled Line without retaining the directory lock.
     if entry.can_run_actions()
@@ -946,8 +928,9 @@ fn finish_management_on_line(
 /// acquired after management and before registry exclusion, and held through
 /// the body. Shared-table owners must use the same lock on every writer to
 /// serialize preflight/publication across Lines; ordinary registration needs none.
-/// Identity retries happen before publication. None means startup contention,
-/// teardown or preflight rejection. Return discarded handler owners instead of
+/// Identity retries happen before publication. Missing descriptors return
+/// UnknownIrq in both modes. None means startup contention, teardown or preflight
+/// rejection. Return discarded handler owners instead of
 /// finally destroying them under management or short-lock exclusion.
 #[expect(
     clippy::expect_used,
@@ -961,25 +944,17 @@ pub(super) fn with_registration_line_checked<T>(
     body_fn: impl FnOnce(Virq, &mut IrqStateDesc) -> Result<T, IrqDescError>,
 ) -> Result<Option<T>, IrqDescError> {
     validate_management(mode)?;
-    // Identity retries happen before publication or mutation. Retain only our
-    // unpublished candidate; never reuse a retired, previously published Line.
-    let mut candidate = None;
     loop {
-        let existing = {
+        let (_, line) = {
             let state = IRQ_STATE.lock();
             lookup_line(&state, spec)
-        };
-        let is_candidate = existing.is_none();
-        let line = match existing {
-            Some((_, line)) => line,
-            None => Arc::clone(candidate.get_or_insert_with(|| prepare_line(spec))),
-        };
+        }
+        .ok_or(IrqDescError::UnknownIrq)?;
         let Some(_management_guard) = acquire_management(&line, mode)? else {
             return Ok(None);
         };
         let mut admission = ManagementAdmission {
             line: &line,
-            virq: None,
             is_active: false,
             has_removed_action: false,
         };
@@ -990,11 +965,13 @@ pub(super) fn with_registration_line_checked<T>(
         let _publication_guard = publication_lock.map(|lock| lock.lock());
         let mut state = IRQ_STATE.lock();
         match lookup_line(&state, spec) {
-            Some((_, current)) if !is_candidate && Arc::ptr_eq(&current, &line) => {}
-            None if is_candidate => {}
+            Some((_, current)) if Arc::ptr_eq(&current, &line) => {}
             _ => continue,
         }
         let mut entry = line.lock();
+        if entry.is_retired() {
+            return Err(IrqDescError::UnknownIrq);
+        }
         if entry.is_teardown_in_progress() || !preflight_fn(&entry)? {
             return Ok(None);
         }
@@ -1002,7 +979,6 @@ pub(super) fn with_registration_line_checked<T>(
         admission.is_active = true;
         let desc = try_resolve_and_publish_locked(&mut state, spec, &line, &mut entry)?;
         let virq = desc.logical_irq().expect("resolved descriptor has a virq");
-        admission.virq = Some(virq);
         drop(state);
         let result = body_fn(virq, &mut entry).map(Some);
         drop(entry);
@@ -1017,12 +993,12 @@ pub(super) fn with_registration_line_checked<T>(
 ///
 /// Missing/stale entries and startup contention return None without executing
 /// the body. Admission pins membership across drain. The body returns Some only
-/// after successful removal; only then may unused cleanup follow under registry
-/// exclusion, while management exclusion is still held. None or an error leaves
-/// idle mappings intact. Return removed owners out of the body so their final
+/// after successful removal; only then is teardown finished under the retained
+/// Line lock, while management exclusion is still held. All outcomes retain
+/// directory membership. Return removed owners out of the body so their final
 /// destruction occurs after mutex release.
 /// A successful body must begin teardown before withdrawal and leave it set:
-/// completion, admission release and unused removal form one registry transaction.
+/// completion and admission release share the Line's state critical section.
 pub(super) fn with_existing_line<T>(
     spec: IrqSpec,
     mode: ManagementMode,
@@ -1041,7 +1017,6 @@ pub(super) fn with_existing_line<T>(
     };
     let mut admission = ManagementAdmission {
         line: &line,
-        virq: Some(virq),
         is_active: false,
         has_removed_action: false,
     };
@@ -1054,7 +1029,11 @@ pub(super) fn with_existing_line<T>(
         {
             return Ok(None);
         }
-        line.lock().begin_management();
+        let mut entry = line.lock();
+        if entry.is_retired() {
+            return Ok(None);
+        }
+        entry.begin_management();
         admission.is_active = true;
     }
     let result = body_fn(virq, &line)?;
@@ -1085,6 +1064,9 @@ pub fn unregister(spec: impl Into<IrqSpec>) -> Option<Handler> {
 ///
 /// An NMI-owned fallback is not a regular registration and cannot be removed
 /// here. Its owner must use [`unregister_nmi`] after quiescing the source.
+/// All descriptor identities survive action removal, including domainless
+/// Lines. This is not a mapping-disposal operation; MSI owners subsequently
+/// use [`crate::free_msix`].
 ///
 /// The line is masked once the last regular action is removed. The API
 /// returns after previously admitted handler snapshots and their original host
@@ -1384,6 +1366,10 @@ fn run_irq_exit_tail_with_context(
 }
 
 unittest::path_mod_test!(pub mod tests_irq, "../../ut-tests/runtime_manager.rs");
+unittest::path_mod_test!(
+    tests_enable_preparation,
+    "../../ut-tests/enable_preparation.rs"
+);
 unittest::path_mod_test!(
     tests_management_identity,
     "../../ut-tests/management_identity.rs"

@@ -58,7 +58,36 @@ impl MsiBackendToken {
     }
 }
 
-/// A kirq-owned MSI allocation.
+/// Exclusive ownership of one backend allocation, consumed by explicit release.
+///
+/// Only KIRQ constructs this after a successful backend allocation. It cannot
+/// be cloned or reconstructed from a hardware number. Published ownership lives
+/// in the Line, not in the device-visible allocation handle. Drop deliberately
+/// does not release hardware: dropping a lookup owner proves no device quiescence.
+#[derive(Debug)]
+#[must_use = "MSI reservations must be published or explicitly returned to the backend"]
+pub struct MsiReservation {
+    hwirq: Hwirq,
+}
+
+impl MsiReservation {
+    /// Returns the hardware number owned by this reservation.
+    pub const fn hwirq(&self) -> Hwirq {
+        self.hwirq
+    }
+
+    #[cfg(unittest)]
+    pub(crate) const fn for_test(hwirq: Hwirq) -> Self {
+        // Software fixtures must consume this through an injected release,
+        // never through the real platform allocator.
+        Self { hwirq }
+    }
+}
+
+/// Device-facing identity and message for a KIRQ-owned MSI allocation.
+///
+/// Dropping this handle does not free the reservation. The resource owner must
+/// stop the device, remove its actions, and explicitly call [`free_msix`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct MsiAllocation {
     virq: Virq,
@@ -92,10 +121,18 @@ pub trait MsiBackendIf {
         affinity: IrqAffinity,
     ) -> Option<Hwirq>;
 
-    /// Releases a backend-local hardware MSI vector.
-    /// False must retain ownership of the vector. The caller has already
-    /// cleared reverse lookup and restores it on rejection without allocation.
-    fn free_msi_vector(token: MsiBackendToken, hwirq: Hwirq) -> bool;
+    /// Consumes an exclusively owned backend reservation after withdrawal.
+    ///
+    /// Published-resource release holds the KIRQ registry lock with local IRQs
+    /// masked; allocation rollback can call without that lock. The backend must
+    /// provide its own allocator exclusion and must not sleep or reenter KIRQ.
+    /// KIRQ withdraws published mappings before this call, or supplies a fresh
+    /// unpublished allocation for rollback. Returning normally commits release;
+    /// there is no recoverable refusal after withdrawal. An invalid reservation
+    /// is an internal allocator/ownership bug, not a device teardown error.
+    /// Device shutdown remains the resource owner's duty. A backend requiring
+    /// fallible release must add a pre-withdrawal protocol before integration.
+    fn free_msi_vector(reservation: MsiReservation);
 
     /// Composes the device-visible MSI message for `hwirq`.
     ///
@@ -113,6 +150,10 @@ pub trait MsiBackendIf {
 /// The returned [`MsiAllocation::virq`] is the IRQ number higher layers should
 /// register a handler on. The CPU vector and APIC destination remain backend
 /// details and are intentionally not exposed.
+///
+/// Failure after backend allocation rolls back the unpublished vector. The
+/// backend must accept release of that fresh, exclusively owned reservation.
+/// NMI callers are rejected before entering the backend allocator.
 pub fn alloc_msix(affinity: IrqAffinity) -> Option<MsiAllocation> {
     #[cfg(target_arch = "x86_64")]
     {
@@ -127,20 +168,34 @@ pub fn alloc_msix(affinity: IrqAffinity) -> Option<MsiAllocation> {
 }
 
 /// Releases a PCI MSI-X interrupt previously allocated by [`alloc_msix`].
-/// The source must already be stopped and drained. Reverse-map removal does
-/// not allocate; backend rejection restores the prior mapping and returns false.
+///
+/// The owner must first stop device message production, satisfy the transport's
+/// ordering requirements for already-issued messages, and synchronously remove
+/// its IRQ actions. The Line must also be logically disabled; an actionless
+/// Line enabled through the legacy force-enable API needs an explicit disable.
+/// Serialize release against registration and other owner operations.
+/// Call from ordinary kernel context, not NMI context.
+///
+/// Returns false for an unknown/non-MSI IRQ, a mapping without an allocation
+/// reservation, an IRQ still in use or logically enabled, or NMI context.
+/// Rejection does not remove the mapping or release its reservation;
+/// the owner must retain its allocation identity for cleanup. Success releases
+/// the mapping before returning the reservation; the old IRQ number must no longer
+/// be used. This function neither resets the device nor waits for its DMA.
 pub fn free_msix(virq: Virq) -> bool {
     free_msi(virq)
 }
 
 #[cfg(target_arch = "x86_64")]
 fn alloc_msi(kind: MsiKind, affinity: IrqAffinity) -> Option<MsiAllocation> {
+    if crate::context::is_in_nmi() {
+        return None;
+    }
     let token = MsiBackendToken::new();
     let hwirq = MsiBackendIf::alloc_msi_vector(token, kind, affinity)?;
+    let reservation = MsiReservation { hwirq };
     let Some(message) = MsiBackendIf::compose_msi_message(token, hwirq, affinity) else {
-        if !MsiBackendIf::free_msi_vector(token, hwirq) {
-            warn!("failed to roll back MSI vector {hwirq} after message composition failure");
-        }
+        MsiBackendIf::free_msi_vector(reservation);
         return None;
     };
 
@@ -149,13 +204,11 @@ fn alloc_msi(kind: MsiKind, affinity: IrqAffinity) -> Option<MsiAllocation> {
         .with_domain(MSI_DOMAIN)
         .with_affinity(affinity)
         .with_flags(IrqFlags::MSI);
-    let virq = match crate::try_map(desc) {
+    let virq = match state::publish_msi_reservation(desc, reservation) {
         Ok(virq) => virq,
-        Err(err) => {
+        Err((err, reservation)) => {
             warn!("failed to map MSI vector {hwirq}: {err:?}");
-            if !MsiBackendIf::free_msi_vector(token, hwirq) {
-                warn!("failed to roll back MSI vector {hwirq} after IRQ mapping failure");
-            }
+            MsiBackendIf::free_msi_vector(reservation);
             return None;
         }
     };
@@ -169,13 +222,11 @@ fn free_msi(_virq: Virq) -> bool {
 
 #[cfg(target_arch = "x86_64")]
 fn free_msi(virq: Virq) -> bool {
-    state::free_msi_if_unused(virq, |hwirq| {
-        if MsiBackendIf::free_msi_vector(MsiBackendToken::new(), hwirq) {
-            return true;
-        }
-        warn!("failed to free backend MSI vector {hwirq} for IRQ {virq}");
+    if crate::context::is_in_nmi() {
         false
-    })
+    } else {
+        state::free_msi_if_unused(virq, MsiBackendIf::free_msi_vector)
+    }
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/backend_msi.rs");

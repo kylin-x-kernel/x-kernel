@@ -11,10 +11,14 @@ use alloc::{
 use core::array;
 
 use intrusive_collections::intrusive_adapter;
+
+#[cfg(any(target_arch = "x86_64", unittest))]
+use crate::backend::msi::MsiReservation;
 #[path = "state_local.rs"]
 mod local;
 
 use kcompletion::{Completion, DeferredWake};
+use klazy::Once;
 use kspin::{SpinNoIrq, SpinNoIrqGuard, static_lock};
 
 use super::unhandled::{UnhandledIrqReport, UnhandledIrqState};
@@ -92,10 +96,12 @@ impl IrqDomainState {
         false
     }
 
+    #[cfg(any(target_arch = "x86_64", unittest))]
     fn remove_mapping(&mut self, hwirq: Hwirq) -> bool {
         self.hwirq_to_virq.remove(&hwirq).is_some()
     }
 
+    #[cfg(any(target_arch = "x86_64", unittest))]
     fn is_empty(&self) -> bool {
         self.hwirq_to_virq.is_empty()
     }
@@ -424,6 +430,8 @@ impl IrqDescRuntimeState {
 /// Retention alone does not admit an operation: callers must revalidate original
 /// Line membership and pair management admission under global state serialization.
 pub(super) struct IrqLine {
+    // Assigned before publication, independent of mutable controller metadata.
+    virq: Once<Virq>,
     pub(super) management: kmutex::Mutex<()>,
     state: SpinNoIrq<IrqStateDesc>,
     replay_links: intrusive_collections::LinkedListAtomicLink,
@@ -432,6 +440,7 @@ pub(super) struct IrqLine {
 impl IrqLine {
     pub(super) fn new(state: IrqStateDesc) -> Self {
         Self {
+            virq: Once::new(),
             management: kmutex::Mutex::new(()),
             state: SpinNoIrq::new(state),
             replay_links: intrusive_collections::LinkedListAtomicLink::new(),
@@ -440,6 +449,13 @@ impl IrqLine {
 
     pub(super) fn lock(&self) -> SpinNoIrqGuard<'_, IrqStateDesc> {
         self.state.lock()
+    }
+
+    /// Observes the assigned identity without locking, waiting or cloning an owner.
+    /// None means publication has not assigned it; Some survives retirement and
+    /// does not grant service admission or prove current directory membership.
+    pub(super) fn logical_irq(&self) -> Option<Virq> {
+        self.virq.get().copied()
     }
 
     #[cfg(unittest)]
@@ -454,8 +470,12 @@ intrusive_adapter!(pub(super) ReplayAdapter = Arc<IrqLine>: IrqLine {
 
 pub(super) struct IrqStateDesc {
     pub(super) desc: IrqDesc,
+    #[cfg(any(target_arch = "x86_64", unittest))]
+    msi_reservation: Option<MsiReservation>,
     runtime: IrqDescRuntimeState,
     is_managed: bool,
+    // One-way storage lifecycle state, distinct from reversible action teardown.
+    is_retired: bool,
     pub(super) flow: crate::IrqFlow,
     pub(super) is_running: bool,
     // Software service has no hardware claim keeping the gateway occupied.
@@ -469,8 +489,11 @@ impl IrqStateDesc {
     pub(super) fn new(desc: IrqDesc) -> Self {
         Self {
             desc,
+            #[cfg(any(target_arch = "x86_64", unittest))]
+            msi_reservation: None,
             runtime: IrqDescRuntimeState::new(desc),
             is_managed: false,
+            is_retired: false,
             flow: crate::IrqFlow::Legacy,
             is_running: false,
             is_replaying: false,
@@ -496,15 +519,15 @@ impl IrqStateDesc {
     }
 
     pub(super) fn install_regular_action(&mut self, action: IrqAction) -> bool {
-        self.runtime.install_regular_action(action)
+        !self.is_retired && self.runtime.install_regular_action(action)
     }
 
     pub(super) fn can_install_regular_action(&self) -> bool {
-        self.runtime.can_install_regular_action()
+        !self.is_retired && self.runtime.can_install_regular_action()
     }
 
     pub(super) fn can_install_shared_action(&self) -> bool {
-        self.runtime.can_install_shared_action()
+        !self.is_retired && self.runtime.can_install_shared_action()
     }
 
     pub(super) fn take_regular_action(&mut self) -> Option<IrqAction> {
@@ -519,6 +542,9 @@ impl IrqStateDesc {
         &mut self,
         handler: crate::platform::Handler,
     ) -> Option<IrqActionToken> {
+        if self.is_retired {
+            return None;
+        }
         self.runtime.install_shared_action(handler)
     }
 
@@ -649,11 +675,13 @@ impl IrqStateDesc {
     }
 
     pub(super) fn begin_dispatch(&mut self) {
+        debug_assert!(!self.is_retired, "dispatch must validate Line lifetime");
         self.runtime.begin_dispatch();
     }
 
     pub(super) fn can_run_actions(&self) -> bool {
-        !self.runtime.is_configuration_failed
+        !self.is_retired
+            && !self.runtime.is_configuration_failed
             && self.runtime.is_enabled
             && self.runtime.disable_depth == 0
             && self.has_actions()
@@ -661,7 +689,8 @@ impl IrqStateDesc {
     }
 
     pub(super) fn can_run_local_actions(&self) -> bool {
-        self.local[local::current_cpu()].can_run()
+        !self.is_retired
+            && self.local[local::current_cpu()].can_run()
             && self.has_actions()
             && !self.is_teardown_in_progress()
     }
@@ -730,16 +759,29 @@ impl IrqStateDesc {
         !self.is_managed && self.runtime.is_unused() && !self.has_enabled_local_cpu()
     }
 
+    pub(super) fn is_retired(&self) -> bool {
+        self.is_retired
+    }
+
     /// Pins directory membership for an admitted management transaction.
     pub(super) fn begin_management(&mut self) {
+        debug_assert!(!self.is_retired, "management must validate Line lifetime");
         debug_assert!(!self.is_managed, "management admission must be paired");
         self.is_managed = true;
     }
 
-    /// Releases admission before testing whether the Line can be removed.
+    /// Releases admission; descriptor disposal remains a separate operation.
     pub(super) fn end_management(&mut self) {
         debug_assert!(self.is_managed, "management completion requires admission");
         self.is_managed = false;
+    }
+
+    /// Ends an admitted transaction without changing directory membership.
+    pub(super) fn finish_management(&mut self, has_removed_action: bool) {
+        if has_removed_action {
+            self.finish_teardown();
+        }
+        self.end_management();
     }
 
     #[cfg(unittest)]
@@ -832,6 +874,22 @@ impl IrqState {
         }
     }
 
+    /// Publishes a private allocation as a new identity, never an existing binding.
+    #[cfg(any(target_arch = "x86_64", unittest))]
+    fn insert_msi_reservation(
+        &mut self,
+        desc: IrqDesc,
+        line: &Arc<IrqLine>,
+    ) -> Result<ResolvedIrqDesc, IrqDescError> {
+        validate_resolution_domain(IrqSpec::Desc(desc))?;
+        let virq = self.alloc_virq()?;
+        let resolution = IrqResolution {
+            virq,
+            offered: Some(desc.with_virq(virq)),
+        };
+        self.commit_resolution(resolution, line, &mut line.lock())
+    }
+
     /// Resolves under the registry lock using a fresh candidate if absent.
     ///
     /// The caller retains `prepared` until outside short locks. An existing
@@ -916,7 +974,15 @@ impl IrqState {
             Virq,
         ) -> Result<crate::domain::PreparedPublication, IrqDescError>,
     ) -> Result<ResolvedIrqDesc, IrqDescError> {
+        // A retained old owner is not an unpublished candidate. Reject before
+        // selecting a chip or modifying either mapping index.
+        if entry.is_retired {
+            return Err(IrqDescError::UnknownIrq);
+        }
         let virq = resolution.virq;
+        if line.logical_irq().is_some_and(|assigned| assigned != virq) {
+            return Err(IrqDescError::UnknownIrq);
+        }
         let is_existing = if let Some(current) = self.descs.get(&virq) {
             if !Arc::ptr_eq(current, line) {
                 return Err(IrqDescError::UnknownIrq);
@@ -981,6 +1047,12 @@ impl IrqState {
                     .collect()
             };
             publication = Some(prepare(domain, entries, hwirq, virq)?);
+        }
+        // All recoverable validation precedes identity assignment. Registry and
+        // Line exclusion serialize this non-allocating, non-reentrant initializer;
+        // readers use only Once::get, never an initialization/wait operation.
+        line.virq.call_once(|| virq);
+        if let Some((domain, hwirq, virq)) = mapping_to_insert {
             let inserted = self.domain_state_mut(domain).insert_mapping(hwirq, virq);
             debug_assert!(inserted, "domain mapping insertion was prevalidated");
             if inserted {
@@ -1070,19 +1142,29 @@ impl IrqState {
             .flat_map(IrqDomainState::entries)
     }
 
+    /// Explicit cleanup of unused, synthetic unbound test Lines.
+    #[cfg(unittest)]
     pub(super) fn remove_if_unused(&mut self, virq: Virq) -> Option<IrqDesc> {
         self.remove_if_unused_inner(virq, false)
     }
 
+    #[cfg(any(target_arch = "x86_64", unittest))]
     fn remove_if_unused_inner(&mut self, virq: Virq, remove_msi: bool) -> Option<IrqDesc> {
         let desc = {
-            let entry = self.descs.get(&virq)?.lock();
-            if entry.desc.flags.contains(IrqFlags::MSI) && !remove_msi {
+            let mut entry = self.descs.get(&virq)?.lock();
+            // Fixture cleanup must not dispose a Domain or MSI owner. The
+            // production caller reaches this helper only for explicit MSI free.
+            if !remove_msi
+                && (entry.desc.domain.is_some() || entry.desc.flags.contains(IrqFlags::MSI))
+            {
                 return None;
             }
             if !entry.is_unused() {
                 return None;
             }
+            // Close old-reference admission before removing either index.
+            // The registry lock still serializes all publication and disposal.
+            entry.is_retired = true;
             entry.desc
         };
         if remove_msi
@@ -1098,37 +1180,6 @@ impl IrqState {
         }
         self.descs.remove(&virq);
         Some(desc)
-    }
-
-    /// Ends admission and retires only the admitted identity under registry exclusion.
-    ///
-    /// The caller retains the Line owner and management mutex until after this
-    /// transaction. Keeping registry exclusion across both Line-lock scopes
-    /// prevents enable from selecting the Line between teardown release and
-    /// removal. Already admitted users serialize on its state lock; dispatch
-    /// counts still prevent removal until controller completion.
-    pub(super) fn finish_management(
-        &mut self,
-        virq: Option<Virq>,
-        line: &Arc<IrqLine>,
-        has_removed_action: bool,
-    ) {
-        {
-            let mut entry = line.lock();
-            if has_removed_action {
-                entry.finish_teardown();
-            }
-            entry.end_management();
-        }
-        if has_removed_action
-            && let Some(virq) = virq
-            && self
-                .descs
-                .get(&virq)
-                .is_some_and(|current| Arc::ptr_eq(current, line))
-        {
-            self.remove_if_unused(virq);
-        }
     }
 
     /// Removes a software-only fixture, including any unexpectedly published mapping.
@@ -1151,6 +1202,7 @@ impl IrqState {
         } else {
             None
         };
+        self.descs.get(&virq)?.lock().is_retired = true;
         if let Some((domain, hwirq)) = self.virq_to_mapping.remove(&virq) {
             if let Some(domain_state) = self.domain_states.get_mut(&domain) {
                 domain_state.remove_mapping(hwirq);
@@ -1166,7 +1218,7 @@ impl IrqState {
         self.descs.remove(&virq)
     }
 
-    #[cfg(unittest)]
+    #[cfg(any(target_arch = "x86_64", unittest))]
     pub(super) fn remove_msi_if_unused(&mut self, virq: Virq) -> Option<Hwirq> {
         self.remove_msi_with(virq, |_| true)
     }
@@ -1260,20 +1312,88 @@ fn publish_resolution(resolved: ResolvedIrqDesc) -> IrqDesc {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: a rejected private candidate retains its \
+              reservation; successful resolution always assigns a logical IRQ"
+)]
+pub(crate) fn publish_msi_reservation(
+    desc: IrqDesc,
+    reservation: MsiReservation,
+) -> Result<Virq, (IrqDescError, MsiReservation)> {
+    let mut entry = IrqStateDesc::new(desc);
+    entry.msi_reservation = Some(reservation);
+    let line = Arc::new(IrqLine::new(entry));
+    let result = {
+        let mut state = IRQ_STATE.lock();
+        state
+            .insert_msi_reservation(desc, &line)
+            .map(publish_resolution)
+    };
+    match result {
+        Ok(desc) => Ok(desc.logical_irq().expect("MSI publication assigned virq")),
+        Err(error) => {
+            let reservation = line
+                .lock()
+                .msi_reservation
+                .take()
+                .expect("private MSI candidate retains its reservation");
+            Err((error, reservation))
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn free_msi_if_unused(
     virq: Virq,
-    free_backend_vector_fn: impl FnOnce(Hwirq) -> bool,
+    free_backend_vector_fn: impl FnOnce(MsiReservation),
 ) -> bool {
-    let mut state = IRQ_STATE.lock();
-    if state
-        .stored_desc(virq)
-        .is_none_or(|desc| desc.domain != Some(crate::desc::MSI_DOMAIN))
+    let removed = {
+        let mut state = IRQ_STATE.lock();
+        release_unused_msi(&mut state, virq, |_, reservation| {
+            free_backend_vector_fn(reservation);
+        })
+    };
+    // Final Line destruction is outside registry and backend allocator locks.
+    removed.is_some()
+}
+
+// The production caller holds IRQ_STATE across validation, mapping withdrawal
+// and backend release. Retain the Line beyond this lock, even though admission
+// is already empty. Tests observe the withdrawn registry through the callback.
+#[cfg(any(target_arch = "x86_64", unittest))]
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: registry exclusion spans reservation \
+              validation and withdrawal; no other writer can consume that owner"
+)]
+fn release_unused_msi(
+    state: &mut IrqState,
+    virq: Virq,
+    free_backend_vector_fn: impl FnOnce(&IrqState, MsiReservation),
+) -> Option<Arc<IrqLine>> {
+    let line = state.descs.get(&virq)?.clone();
     {
-        return false;
+        let entry = line.lock();
+        // Legacy force-enable can open a Line without installing an action.
+        // Empty admission alone is therefore not permission to return its vector.
+        if !entry.is_msi() || !entry.is_unused() || entry.runtime.is_enabled {
+            return None;
+        }
+        if entry.msi_reservation.as_ref()?.hwirq() != entry.desc.hwirq {
+            return None;
+        }
     }
-    state
-        .remove_msi_with(virq, free_backend_vector_fn)
-        .is_some()
+    state.remove_msi_if_unused(virq)?;
+    let reservation = line
+        .lock()
+        .msi_reservation
+        .take()
+        .expect("withdrawn MSI Line retains its validated reservation");
+    free_backend_vector_fn(state, reservation);
+    Some(line)
 }
 
 unittest::path_mod_test!(tests_line_admission, "../../ut-tests/line_admission.rs");
+unittest::path_mod_test!(tests_msi_reservation, "../../ut-tests/msi_reservation.rs");
+unittest::path_mod_test!(tests_mapping_lifetime, "../../ut-tests/mapping_lifetime.rs");

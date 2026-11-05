@@ -234,11 +234,17 @@ impl kirq::MsiBackendIf {
         }
     }
 
-    fn free_msi_vector(_token: kirq::MsiBackendToken, hwirq: usize) -> bool {
-        let Ok(vector) = u8::try_from(hwirq) else {
-            return false;
-        };
-        MSIX_VECTOR_ALLOCATOR.lock().free(vector)
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: KIRQ constructs the reservation only from \
+                  this backend's successful u8 vector allocation"
+    )]
+    fn free_msi_vector(reservation: kirq::MsiReservation) {
+        let vector = u8::try_from(reservation.hwirq()).expect("owned MSI vector fits u8");
+        let was_allocated = MSIX_VECTOR_ALLOCATOR.lock().free(vector);
+        // One non-cloneable reservation is created per successful allocation;
+        // no other production path can free this private allocator's bit.
+        assert!(was_allocated, "owned MSI vector must still be allocated");
     }
 
     fn compose_msi_message(

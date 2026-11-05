@@ -98,6 +98,10 @@ kirq::MsiBackendIf ──> MsixVectorAllocator (bitmap, 0x40..0xf0)
   `MsiMessage` back to `kirq` for device programming — `None` when the
   id exceeds the xAPIC destination width or the vector is out of
   window.
+- `free_msi_vector(reservation)`: KIRQ consumes its exclusive allocation owner
+  after withdrawing the published mapping, or during unpublished rollback.
+  The backend clears the bitmap and destination under its allocator lock.
+  The non-cloneable reservation replaces a caller-supplied numeric free request.
 - `send_ipi_raw(interrupt_id, target_raw_apic_id)`: called by kernel
   subsystems (e.g. TLB shootdown, rescheduling); the interrupt id comes
   from the caller, the raw id from `kcpu_id_map` resolution, and the
@@ -155,9 +159,10 @@ The MSI-X vector window (`MSIX_VECTOR_ALLOCATOR`) is created statically
 MSI-X interrupt and returns a vector in `0x40..0xf0` or `None` on
 exhaustion; `compose_msi_message` uses the still-held vector for the
 device message. `free_msi_vector` is invoked by `kirq` when the
-registration is aborted or torn down: it validates `u8` convertibility,
-clears the bitmap bit and destination binding only for in-window vectors, and
-returns `false` otherwise. The same allocator lock protects both allocation bits
+registration is aborted or torn down: it consumes `MsiReservation`, validates
+the allocation invariant, and clears the bitmap bit and destination binding.
+There is no recoverable release failure; invalid or already-free ownership is
+an internal bug. The same allocator lock protects both allocation bits
 and each vector's optional APIC destination. The first successful composition
 binds that destination; recomposition accepts only the same target until free.
 Route admission validates this binding, and retrigger uses it rather than the
@@ -198,8 +203,10 @@ CPU performing the request. There is no other creation or cleanup path.
 
 - LAPIC owner allocation failure returns `NoMemory` through the platform's
   fallible interrupt preparation hooks to the runtime's fatal boot boundary.
-- MSI vector exhaustion returns `None` to `kirq` (`alloc_msi_vector`);
-  free with an out-of-window vector returns `false`; `compose_msi_message`
+- Allocator exhaustion returns `None` to `kirq` (`alloc_msi_vector`);
+  releasing an invalid owned reservation panics on an internal invariant;
+  the private bitmap helper still returns false for invalid/double-free inputs.
+  `compose_msi_message`
   returns `None` for an out-of-window vector or an unresolvable affinity
   target (logged).
 - Panics mark bring-up ordering violations: `with_local_apic` without a

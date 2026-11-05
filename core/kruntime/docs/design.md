@@ -637,6 +637,17 @@ and the RAII guard across membership validation, action withdrawal and drain.
 the same implementation. Timer/IPI registration still uses the explicit startup
 entry, rather than inferring startup from masked IRQs.
 
+`init_interrupt` explicitly prepares the fixed timer/IPI identity descriptors
+through `prepare_fixed_interrupts` before installing either handler. These
+descriptors belong to platform/runtime lifetime and are reused by AP activation;
+preparation does not configure or enable the controller. Handler installation
+still uses the startup entrance, with source activation later. This is an
+incremental separation of descriptor preparation from action ownership, not a
+claim that all legacy KIRQ registration entrances already require prior mapping.
+The startup fixture records descriptor identities before handler publication
+and requires this observation before local source activation. It does not
+measure hardware masking or prove every caller's mapping lifetime.
+
 Generic mutex contention and guard migration tests live beside the scheduler
 provider in `ktask/ut-tests/task_api.rs`. Lifecycle membership, stale-Line
 selection and dispatch drain remain KIRQ responsibilities with separate tests.

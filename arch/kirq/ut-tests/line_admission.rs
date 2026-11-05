@@ -45,15 +45,173 @@ fn snapshot_preparation_failure_preserves_unpublished_line_and_mapping() {
     });
     assert!(reused.is_ok());
     drop(entry);
-    let other = IrqDesc::from_hwirq(18).with_domain(domain).with_virq(0x5f91);
+    let other = IrqDesc::from_hwirq(18)
+        .with_domain(domain)
+        .with_virq(0x5f91);
     let other_line = Arc::new(IrqLine::new(IrqStateDesc::new(other)));
     let resolution = state.plan_resolution(other.into()).unwrap();
-    let result = state.commit_resolution_with(resolution, &other_line, &mut other_line.lock(),
-        |_, _, _, _| Err(IrqDescError::NoMemory));
+    let result = state.commit_resolution_with(
+        resolution,
+        &other_line,
+        &mut other_line.lock(),
+        |_, _, _, _| Err(IrqDescError::NoMemory),
+    );
     assert!(matches!(result, Err(IrqDescError::NoMemory)));
     assert_eq!(state.translated_hwirq(domain, 17), Some(0x5f90));
     assert_eq!(state.translated_hwirq(domain, 18), None);
     assert_eq!(state.descs.len(), 1);
+}
+
+#[def_test]
+fn msi_release_requires_reservation_and_consumes_it_once_after_withdrawal() {
+    let virq = 0x5f52;
+    let desc = IrqDesc::from_virq(virq).with_flags(IrqFlags::MSI);
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let mut state = IrqState::new();
+    state.try_resolve_desc(desc, Some(&line)).unwrap();
+    let mut calls = 0;
+
+    // A flag or caller-supplied number does not prove backend ownership.
+    assert!(
+        super::release_unused_msi(&mut state, virq, |_, _| {
+            calls += 1;
+        })
+        .is_none()
+    );
+    line.lock().msi_reservation = Some(super::MsiReservation::for_test(desc.hwirq));
+
+    line.lock().begin_management();
+    assert!(
+        super::release_unused_msi(&mut state, virq, |_, _| {
+            calls += 1;
+        })
+        .is_none()
+    );
+    assert_eq!(calls, 0);
+    line.lock().end_management();
+
+    // Reject a mismatched owner before any withdrawal or backend call.
+    line.lock().msi_reservation = Some(super::MsiReservation::for_test(desc.hwirq + 1));
+    assert!(
+        super::release_unused_msi(&mut state, virq, |_, _| {
+            calls += 1;
+        })
+        .is_none()
+    );
+    assert_eq!(calls, 0);
+    assert!(
+        state
+            .descs
+            .get(&virq)
+            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+    );
+
+    line.lock().msi_reservation = Some(super::MsiReservation::for_test(desc.hwirq));
+    let mut released = None;
+    let removed = super::release_unused_msi(&mut state, virq, |registry, reservation| {
+        released = Some((reservation.hwirq(), registry.descs.contains_key(&virq)));
+        calls += 1;
+    })
+    .unwrap();
+    assert_eq!(released, Some((desc.hwirq, false)));
+    assert!(Arc::ptr_eq(&removed, &line));
+    assert!(line.lock().msi_reservation.is_none());
+    drop(removed);
+    assert!(!state.descs.contains_key(&virq));
+    assert!(
+        super::release_unused_msi(&mut state, virq, |_, _| {
+            calls += 1;
+        })
+        .is_none()
+    );
+    assert_eq!(calls, 1);
+}
+
+#[def_test]
+fn msi_release_rejects_non_msi_without_calling_backend() {
+    let virq = 0x5f53;
+    let desc = IrqDesc::from_virq(virq);
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let mut state = IrqState::new();
+    state.try_resolve_desc(desc, Some(&line)).unwrap();
+    let mut has_called_backend = false;
+    assert!(
+        super::release_unused_msi(&mut state, virq, |_, _| {
+            has_called_backend = true;
+        })
+        .is_none()
+    );
+    assert!(!has_called_backend);
+    assert!(
+        state
+            .descs
+            .get(&virq)
+            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+    );
+}
+
+#[def_test]
+fn msi_release_rejects_action_dispatch_and_teardown_ownership() {
+    let virq = 0x5f54;
+    let desc = IrqDesc::from_virq(virq).with_flags(IrqFlags::MSI);
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let mut state = IrqState::new();
+    state.try_resolve_desc(desc, Some(&line)).unwrap();
+    line.lock().msi_reservation = Some(super::MsiReservation::for_test(desc.hwirq));
+    assert!(
+        line.lock()
+            .install_regular_action(crate::action::IrqAction::regular(Arc::new(|_| {
+                crate::IrqEvent::HANDLED
+            }),))
+    );
+    let mut calls = 0;
+    assert!(
+        super::release_unused_msi(&mut state, virq, |_, _| {
+            calls += 1;
+        })
+        .is_none()
+    );
+    assert_eq!(calls, 0);
+
+    // Removing the action does not release an already-admitted dispatch.
+    line.lock().begin_dispatch();
+    let removed = line.lock().take_regular_action();
+    assert!(removed.is_some());
+    drop(removed);
+    assert!(
+        super::release_unused_msi(&mut state, virq, |_, _| {
+            calls += 1;
+        })
+        .is_none()
+    );
+    assert_eq!(calls, 0);
+
+    line.lock().begin_teardown();
+    let wake = line.lock().finish_dispatch();
+    drop(wake);
+    assert!(
+        super::release_unused_msi(&mut state, virq, |_, _| {
+            calls += 1;
+        })
+        .is_none()
+    );
+    assert_eq!(calls, 0);
+    assert!(
+        state
+            .descs
+            .get(&virq)
+            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+    );
+
+    line.lock().finish_teardown();
+    assert!(
+        super::release_unused_msi(&mut state, virq, |_, _| {
+            calls += 1;
+        })
+        .is_some()
+    );
+    assert_eq!(calls, 1);
+    assert!(!state.descs.contains_key(&virq));
 }
 
 #[def_test]
@@ -101,16 +259,20 @@ fn gic_spi_cannot_change_flow_while_actions_or_original_claim_remain() {
             let mut entry = line.lock();
             assert!(matches!(entry.flow, crate::IrqFlow::Fasteoi(_)));
             if has_action {
-                assert!(entry.install_regular_action(crate::action::IrqAction::regular(
-                    Arc::new(|_| crate::IrqEvent::HANDLED),
-                )));
+                assert!(
+                    entry.install_regular_action(crate::action::IrqAction::regular(Arc::new(
+                        |_| crate::IrqEvent::HANDLED
+                    ),))
+                );
             } else {
                 entry.begin_dispatch();
             }
             entry.flow
         };
-        assert!(matches!(state.try_resolve_desc(private, None),
-            Err(IrqDescError::UnsupportedFlow { hwirq: 32 })));
+        assert!(matches!(
+            state.try_resolve_desc(private, None),
+            Err(IrqDescError::UnsupportedFlow { hwirq: 32 })
+        ));
         assert_eq!(line.lock().desc, original);
         assert_eq!(line.lock().flow, flow);
         if has_action {
@@ -123,7 +285,12 @@ fn gic_spi_cannot_change_flow_while_actions_or_original_claim_remain() {
         }
         state.try_resolve_desc(private, None).unwrap();
         assert_eq!(line.lock().flow, crate::IrqFlow::Legacy);
-        assert!(state.descs.get(&0x5f59).is_some_and(|stored| Arc::ptr_eq(stored, &line)));
+        assert!(
+            state
+                .descs
+                .get(&0x5f59)
+                .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+        );
     }
 }
 
@@ -135,50 +302,71 @@ fn flow_reselection_waits_for_actions_and_in_flight_admission() {
         resend: crate::FasteoiResend::Software,
     };
     let desc = IrqDesc::from_virq(0x5f57);
-    assert_eq!(crate::IntrManagerIf::select_flow(desc), Ok(crate::IrqFlow::Legacy));
+    assert_eq!(
+        crate::IntrManagerIf::select_flow(desc),
+        Ok(crate::IrqFlow::Legacy)
+    );
     static EDGE: crate::EdgeChip = crate::EdgeChip {
-        mask: |_| {}, unmask: |_| {}, retrigger: |_| true,
+        mask: |_| {},
+        unmask: |_| {},
+        retrigger: |_| true,
     };
-    static LEVEL: crate::LevelChip = crate::LevelChip { mask_ack: |_| {}, unmask: |_| {} };
-    for old_flow in [crate::IrqFlow::Fasteoi(&CHIP), crate::IrqFlow::Edge(&EDGE), crate::IrqFlow::Level(&LEVEL)] {
-    for has_action in [true, false] {
-        let mut state = IrqState::new();
-        let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
-        state.try_resolve_desc(desc, Some(&line)).unwrap();
-        let generation = {
-            let mut entry = line.lock();
-            // Model an old flow on a private Line. The real provider selects
-            // Legacy for this directory-only identity; no chip callback runs.
-            entry.flow = old_flow;
-            if has_action {
-                assert!(entry.install_regular_action(crate::action::IrqAction::regular(
-                    Arc::new(|_| crate::IrqEvent::HANDLED),
-                )));
-            } else {
-                entry.begin_dispatch();
+    static LEVEL: crate::LevelChip = crate::LevelChip {
+        mask_ack: |_| {},
+        unmask: |_| {},
+    };
+    for old_flow in [
+        crate::IrqFlow::Fasteoi(&CHIP),
+        crate::IrqFlow::Edge(&EDGE),
+        crate::IrqFlow::Level(&LEVEL),
+    ] {
+        for has_action in [true, false] {
+            let mut state = IrqState::new();
+            let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+            state.try_resolve_desc(desc, Some(&line)).unwrap();
+            let generation = {
+                let mut entry = line.lock();
+                // Model an old flow on a private Line. The real provider selects
+                // Legacy for this directory-only identity; no chip callback runs.
+                entry.flow = old_flow;
+                if has_action {
+                    assert!(
+                        entry.install_regular_action(crate::action::IrqAction::regular(Arc::new(
+                            |_| crate::IrqEvent::HANDLED
+                        ),))
+                    );
+                } else {
+                    entry.begin_dispatch();
+                }
+                entry.generation_for_tests()
+            };
+            let result = state.try_resolve_desc(desc, None);
+            assert!(
+                matches!(result, Err(IrqDescError::UnsupportedFlow { hwirq }) if hwirq == desc.hwirq)
+            );
+            {
+                let entry = line.lock();
+                assert_eq!(entry.flow, old_flow);
+                assert_eq!(entry.desc, desc);
+                assert_eq!(entry.generation_for_tests(), generation);
             }
-            entry.generation_for_tests()
-        };
-        let result = state.try_resolve_desc(desc, None);
-        assert!(matches!(result, Err(IrqDescError::UnsupportedFlow { hwirq }) if hwirq == desc.hwirq));
-        {
-            let entry = line.lock();
-            assert_eq!(entry.flow, old_flow);
-            assert_eq!(entry.desc, desc);
-            assert_eq!(entry.generation_for_tests(), generation);
+            if has_action {
+                let removed = line.lock().take_regular_action();
+                assert!(removed.is_some());
+                drop(removed);
+            } else {
+                let wake = line.lock().finish_dispatch();
+                drop(wake);
+            }
+            state.try_resolve_desc(desc, None).unwrap();
+            assert_eq!(line.lock().flow, crate::IrqFlow::Legacy);
+            assert!(
+                state
+                    .descs
+                    .get(&desc.hwirq)
+                    .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+            );
         }
-        if has_action {
-            let removed = line.lock().take_regular_action();
-            assert!(removed.is_some());
-            drop(removed);
-        } else {
-            let wake = line.lock().finish_dispatch();
-            drop(wake);
-        }
-        state.try_resolve_desc(desc, None).unwrap();
-        assert_eq!(line.lock().flow, crate::IrqFlow::Legacy);
-        assert!(state.descs.get(&desc.hwirq).is_some_and(|stored| Arc::ptr_eq(stored, &line)));
-    }
     }
 }
 
@@ -188,7 +376,10 @@ fn flow_reselection_waits_for_actions_and_in_flight_admission() {
 #[def_test]
 fn plic_metadata_enrichment_waits_for_actions_and_in_flight_admission() {
     let original = crate::plic_irq_desc(1).with_virq(0x5f58);
-    let enriched = IrqDesc { trigger: crate::IrqTrigger::LevelHigh, ..original };
+    let enriched = IrqDesc {
+        trigger: crate::IrqTrigger::LevelHigh,
+        ..original
+    };
     for has_action in [true, false] {
         let mut state = IrqState::new();
         let line = Arc::new(IrqLine::new(IrqStateDesc::new(original)));
@@ -197,16 +388,21 @@ fn plic_metadata_enrichment_waits_for_actions_and_in_flight_admission() {
             let mut entry = line.lock();
             assert!(matches!(entry.flow, crate::IrqFlow::Fasteoi(_)));
             if has_action {
-                assert!(entry.install_regular_action(crate::action::IrqAction::regular(
-                    Arc::new(|_| crate::IrqEvent::HANDLED),
-                )));
+                assert!(
+                    entry.install_regular_action(crate::action::IrqAction::regular(Arc::new(
+                        |_| crate::IrqEvent::HANDLED
+                    ),))
+                );
             } else {
                 entry.begin_dispatch();
             }
             (entry.flow, entry.generation_for_tests())
         };
         let result = state.try_resolve_desc(enriched, None);
-        assert!(matches!(result, Err(IrqDescError::UnsupportedFlow { hwirq: 1 })));
+        assert!(matches!(
+            result,
+            Err(IrqDescError::UnsupportedFlow { hwirq: 1 })
+        ));
         {
             let entry = line.lock();
             assert_eq!(entry.desc, original);
@@ -214,7 +410,12 @@ fn plic_metadata_enrichment_waits_for_actions_and_in_flight_admission() {
             assert_eq!(entry.generation_for_tests(), generation);
         }
         assert_eq!(state.domain_virq(crate::PLIC_ROOT_DOMAIN, 1), Some(0x5f58));
-        assert!(state.descs.get(&0x5f58).is_some_and(|stored| Arc::ptr_eq(stored, &line)));
+        assert!(
+            state
+                .descs
+                .get(&0x5f58)
+                .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+        );
         if has_action {
             let removed = line.lock().take_regular_action();
             assert!(removed.is_some());
@@ -237,14 +438,18 @@ fn locked_resolution_preserves_line_and_plain_metadata() {
     let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
     let mut state = IrqState::new();
     let mut entry = line.lock();
-    let resolved = try_resolve_and_publish_locked(
-        &mut state, IrqSpec::Desc(desc), &line, &mut entry,
-    ).unwrap();
+    let resolved =
+        try_resolve_and_publish_locked(&mut state, IrqSpec::Desc(desc), &line, &mut entry).unwrap();
     assert_eq!(resolved, desc);
-    assert!(state.descs.get(&virq).is_some_and(|stored| Arc::ptr_eq(stored, &line)));
-    let resolved = try_resolve_and_publish_locked(
-        &mut state, IrqSpec::PlainVirq(virq), &line, &mut entry,
-    ).unwrap();
+    assert!(
+        state
+            .descs
+            .get(&virq)
+            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+    );
+    let resolved =
+        try_resolve_and_publish_locked(&mut state, IrqSpec::PlainVirq(virq), &line, &mut entry)
+            .unwrap();
     assert_eq!(resolved, desc);
     assert_eq!(entry.desc, desc);
 }
@@ -259,16 +464,24 @@ fn locked_resolution_rejects_a_different_line_identity() {
     state.try_resolve_desc(desc, Some(&line)).unwrap();
     let mut entry = other.lock();
     let result = try_resolve_and_publish_locked(
-        &mut state, IrqSpec::Desc(desc.with_flags(IrqFlags::MSI)), &other, &mut entry,
+        &mut state,
+        IrqSpec::Desc(desc.with_flags(IrqFlags::MSI)),
+        &other,
+        &mut entry,
     );
     assert!(matches!(result, Err(IrqDescError::UnknownIrq)));
     assert_eq!(entry.desc, desc);
     assert_eq!(line.lock().desc, desc);
-    assert!(state.descs.get(&virq).is_some_and(|stored| Arc::ptr_eq(stored, &line)));
+    assert!(
+        state
+            .descs
+            .get(&virq)
+            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+    );
 }
 
 #[def_test]
-fn management_completion_retires_only_the_original_identity() {
+fn management_completion_updates_only_the_original_identity() {
     let virq = 0x5f54;
     let desc = IrqDesc::from_virq(virq);
     let old = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
@@ -280,9 +493,14 @@ fn management_completion_retires_only_the_original_identity() {
     // Model a stale identity defensively; ordinary admission prevents this
     // replacement, but completion must never clean up by number alone.
     state.descs.insert(virq, successor.clone());
-    state.finish_management(Some(virq), &old, true);
+    old.lock().finish_management(true);
     assert!(old.lock().is_unused());
-    assert!(state.descs.get(&virq).is_some_and(|line| Arc::ptr_eq(line, &successor)));
+    assert!(
+        state
+            .descs
+            .get(&virq)
+            .is_some_and(|line| Arc::ptr_eq(line, &successor))
+    );
     assert_eq!(Arc::strong_count(&old), 1);
 }
 
@@ -299,7 +517,7 @@ fn management_completion_keeps_in_flight_line_until_dispatch_finishes() {
         entry.begin_dispatch();
         entry.begin_teardown();
     }
-    state.finish_management(Some(virq), &line, true);
+    line.lock().finish_management(true);
     assert!(!line.lock().is_teardown_in_progress());
     assert!(!line.lock().is_unused());
     assert!(state.descs.contains_key(&virq));
@@ -310,22 +528,27 @@ fn management_completion_keeps_in_flight_line_until_dispatch_finishes() {
 }
 
 #[def_test]
-fn management_completion_preserves_non_removal_and_retires_drained_line() {
+fn management_completion_preserves_both_idle_and_drained_descriptors() {
     let virq = 0x5f56;
     let desc = IrqDesc::from_virq(virq);
     let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
     line.lock().begin_management();
-    state.finish_management(Some(virq), &line, false);
+    line.lock().finish_management(false);
     assert!(state.descs.contains_key(&virq));
     assert!(line.lock().is_unused());
     line.lock().begin_management();
     line.lock().begin_teardown();
-    state.finish_management(Some(virq), &line, true);
-    assert!(!state.descs.contains_key(&virq));
+    line.lock().finish_management(true);
+    assert!(
+        state
+            .descs
+            .get(&virq)
+            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+    );
     assert!(line.lock().is_unused());
-    assert_eq!(Arc::strong_count(&line), 1);
+    assert_eq!(Arc::strong_count(&line), 2);
 }
 
 #[def_test]
@@ -340,7 +563,12 @@ fn management_admission_prevents_unused_line_removal() {
     line.lock().begin_management();
     assert!(!line.lock().is_unused());
     assert!(state.remove_if_unused(virq).is_none());
-    assert!(state.descs.get(&virq).is_some_and(|stored| Arc::ptr_eq(stored, &line)));
+    assert!(
+        state
+            .descs
+            .get(&virq)
+            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+    );
 
     line.lock().end_management();
     assert!(line.lock().is_unused());
@@ -363,7 +591,12 @@ fn management_admission_prevents_unused_msi_removal() {
     line.lock().begin_management();
     assert!(!line.lock().is_unused());
     assert!(state.remove_msi_if_unused(virq).is_none());
-    assert!(state.descs.get(&virq).is_some_and(|stored| Arc::ptr_eq(stored, &line)));
+    assert!(
+        state
+            .descs
+            .get(&virq)
+            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+    );
 
     line.lock().end_management();
     assert!(line.lock().is_unused());

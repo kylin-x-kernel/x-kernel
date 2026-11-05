@@ -10,6 +10,10 @@ pairing contracts.
 
 ## IRQ teardown
 
+IRQ resources must refer to descriptors prepared by mapping, MSI-X allocation
+or fixed-source setup. KIRQ rejects a missing descriptor before publishing
+handler ownership; the adapter does not reconstruct one from a raw IRQ number.
+
 Registration may invoke the callback before returning. KIRQ owns dispatch,
 mapping validation and synchronization. Explicit route domains are preserved;
 plain virtual IRQs are not reinterpreted as hardware numbers.

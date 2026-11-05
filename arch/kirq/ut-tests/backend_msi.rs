@@ -114,28 +114,50 @@ fn rejected_or_discarded_snapshots_do_not_publish() {
 }
 
 #[cfg(target_arch = "x86_64")]
+struct UnprogrammedMsi(crate::Virq);
+
+#[cfg(target_arch = "x86_64")]
+impl Drop for UnprogrammedMsi {
+    fn drop(&mut self) {
+        // The test never programs a device, so no producer can use this vector.
+        drop(crate::free_irq(self.0));
+        super::free_msix(self.0);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 #[def_test(serial)]
-fn real_msi_release_clears_lookup_before_vector_reuse() {
-    use crate::{IrqAffinity, MSI_DOMAIN, alloc_msix, free_msix};
-    let allocation = alloc_msix(IrqAffinity::Any).unwrap();
+fn allocated_msi_retains_reservation_until_action_removal_and_explicit_free() {
+    use alloc::sync::Arc;
+
+    use unittest::{assert, assert_eq};
+
+    let allocation = super::alloc_msix(crate::IrqAffinity::Any).unwrap();
     let virq = allocation.virq();
+    let cleanup = UnprogrammedMsi(virq);
     let desc = crate::descriptor(virq).unwrap();
-    assert_eq!(crate::domain::resolve(MSI_DOMAIN, desc.hwirq), Some(virq));
-    assert!(!crate::state::free_msi_if_unused(virq, |hwirq| {
-        assert_eq!(hwirq, desc.hwirq);
-        assert_eq!(crate::domain::resolve(MSI_DOMAIN, hwirq), None);
-        false
-    }));
-    assert_eq!(crate::domain::resolve(MSI_DOMAIN, desc.hwirq), Some(virq));
-    assert!(crate::descriptor(virq).is_some());
-    assert!(free_msix(virq));
-    assert_eq!(crate::domain::resolve(MSI_DOMAIN, desc.hwirq), None);
-    assert!(crate::descriptor(virq).is_none());
-    let next = alloc_msix(IrqAffinity::Any).unwrap();
-    let next_desc = crate::descriptor(next.virq()).unwrap();
+    assert_eq!(desc.domain, Some(crate::MSI_DOMAIN));
     assert_eq!(
-        crate::domain::resolve(MSI_DOMAIN, next_desc.hwirq),
-        Some(next.virq())
+        crate::translate_hwirq(crate::MSI_DOMAIN, desc.hwirq),
+        Some(virq)
     );
-    assert!(free_msix(next.virq()));
+    let handler: crate::platform::Handler = Arc::new(|_| crate::IrqEvent::HANDLED);
+    assert_eq!(
+        crate::try_register_with_options(
+            virq,
+            handler.clone(),
+            crate::IrqRegisterOptions::disabled(),
+        ),
+        Ok(true)
+    );
+    assert!(!super::free_msix(virq));
+    assert_eq!(crate::descriptor(virq), Some(desc));
+    assert!(crate::free_irq(virq).is_some());
+    assert_eq!(Arc::strong_count(&handler), 1);
+    assert!(crate::descriptor(virq).is_some());
+    assert!(super::free_msix(virq));
+    assert!(crate::descriptor(virq).is_none());
+    assert_eq!(crate::translate_hwirq(crate::MSI_DOMAIN, desc.hwirq), None);
+    assert!(!super::free_msix(virq));
+    drop(cleanup);
 }

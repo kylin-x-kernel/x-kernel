@@ -413,6 +413,14 @@ operations. The runtime lifecycle test validates actual task waits with a
 test-owned in-flight operation, without enabling a hardware source or pretending
 to exercise controller completion. Startup ordering remains runtime's duty.
 
+Mandatory timer/IPI descriptors are prepared before handler registration while
+ordinary CPU IRQ delivery remains masked. A preparation error is fatal before
+activation; no rollback of a partially prepared fixed set is attempted because
+boot cannot proceed. These are platform-lifetime identity descriptors, not
+device-local hwirqs translated by guesswork. AP activation reuses them. Startup
+tests observe their identities and phase ordering; they do not establish source
+quiescence or memory reclamation safety for dynamic device mappings.
+
 ## System power management boundary
 
 System PM admission, platform trust and rollback are owned by `kpm`, not the

@@ -16,11 +16,11 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use driver_base::DriverResult;
+use driver_os_api::IrqOp;
 use kdevice::{
     ActiveDeviceAdoption, BusId, BusTypeId, DeviceDriver, DeviceId, DeviceIdentity, DeviceKind,
     DeviceLocation, DeviceMatcher, DeviceObject, DiscoveryOrigin, DriverObject, IoPortRange,
-    IrqResource, MmioRegion, NeverMatcher, PciIdentity, PlatformIdentity, ResourceDesc,
-    ResourceSet,
+    MmioRegion, NeverMatcher, PciIdentity, PlatformIdentity, ResourceDesc, ResourceSet,
 };
 use lazyinit::LazyInit;
 use pci::{Cam, HeaderType, PciBus, PciConfigSource};
@@ -433,10 +433,19 @@ impl BusBackend for PciBackend {
             // negotiated MSI/MSI-X. Best-effort: errors from firmware lookup
             // are silently ignored because most modern devices use MSI-X.
             if let Some(route) = pci::legacy_interrupt_route(config, bdf) {
-                resources.push(ResourceDesc::Irq(IrqResource::plain(
-                    driver_os_api::Virq::new(route.irq),
-                    super::irq_trigger_from_firmware(route.trigger),
-                )));
+                let irq = khal::firmware::devices::InterruptInfo {
+                    irq: route.irq,
+                    trigger: route.trigger,
+                    controller: route.controller,
+                };
+                match super::map_firmware_irq(irq, |route| {
+                    crate::resource::resource_provider().map_irq(route)
+                }) {
+                    Ok(mapped) => resources.push(ResourceDesc::Irq(mapped)),
+                    Err(error) => {
+                        log::warn!("PCI backend: {bdf:?} INTx mapping failed: {route:?}: {error:?}")
+                    }
+                }
             }
 
             let location = DeviceLocation::Pci {

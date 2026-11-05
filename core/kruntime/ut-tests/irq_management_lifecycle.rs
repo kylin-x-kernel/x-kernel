@@ -43,8 +43,8 @@ fn msi_lookup_interleaves_with_release_and_reallocation() {
         ktask::spawn(move || {
             while !probe.stopped.load(Ordering::Acquire) {
                 let request = probe.request.load(Ordering::Acquire);
-                let observed = kirq::translate_hwirq(
-                    kirq::MSI_DOMAIN, probe.hwirq.load(Ordering::Relaxed));
+                let observed =
+                    kirq::translate_hwirq(kirq::MSI_DOMAIN, probe.hwirq.load(Ordering::Relaxed));
                 if request != probe.acknowledged.load(Ordering::Relaxed) {
                     if observed.unwrap_or(usize::MAX) != probe.expected.load(Ordering::Relaxed) {
                         probe.valid.store(false, Ordering::Relaxed);
@@ -297,6 +297,7 @@ fn masked_registration_rejects_normal_admission_but_allows_explicit_startup() {
         let _irq = kspin::IrqSave::new();
         let ordinary = kirq::try_register_disabled(virq, handler.clone());
         let was_absent = kirq::descriptor(virq).is_none();
+        assert_eq!(kirq::try_map(kirq::IrqDesc::from_virq(virq)), Ok(virq));
         let startup =
             kirq::try_register_startup(virq, handler.clone(), kirq::IrqRegisterOptions::disabled());
         (ordinary, was_absent, startup, !karch::local_irq_enabled())
@@ -312,6 +313,8 @@ fn masked_registration_rejects_normal_admission_but_allows_explicit_startup() {
     assert_eq!(startup, Ok(true));
     assert!(stayed_masked);
     assert!(did_remove);
+    assert!(kirq::descriptor(virq).is_some());
+    assert!(kirq::tests_irq::retire_unused_test_line(virq));
     assert!(kirq::descriptor(virq).is_none());
     assert_eq!(Arc::strong_count(&handler), 1);
 }
@@ -327,6 +330,7 @@ fn read_scope_rejects_normal_registration_before_publication() {
     });
     // This is an ordinary-admission check only. It deliberately makes no claim
     // about startup registration being valid while retaining an RCU read scope.
+    assert_eq!(kirq::try_map(kirq::IrqDesc::from_virq(virq)), Ok(virq));
     let after_scope = kirq::try_register_disabled(virq, handler.clone());
     let removed = kirq::try_free_irq(virq);
     let did_remove = matches!(&removed, Ok(Some(_)));
@@ -338,6 +342,8 @@ fn read_scope_rejects_normal_registration_before_publication() {
     assert!(was_absent);
     assert_eq!(after_scope, Ok(true));
     assert!(did_remove);
+    assert!(kirq::descriptor(virq).is_some());
+    assert!(kirq::tests_irq::retire_unused_test_line(virq));
     assert!(kirq::descriptor(virq).is_none());
     assert_eq!(Arc::strong_count(&handler), 1);
 }
@@ -350,6 +356,11 @@ fn request_waits_for_free_to_drain_retained_inflight() {
     let other_virq = 0x5f71;
     assert!(kirq::descriptor(virq).is_none());
     assert!(kirq::descriptor(other_virq).is_none());
+    assert_eq!(kirq::try_map(kirq::IrqDesc::from_virq(virq)), Ok(virq));
+    assert_eq!(
+        kirq::try_map(kirq::IrqDesc::from_virq(other_virq)),
+        Ok(other_virq)
+    );
     let old_drops = Arc::new(AtomicUsize::new(0));
     let new_drops = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
@@ -445,11 +456,15 @@ fn request_waits_for_free_to_drain_retained_inflight() {
     assert_eq!(other_disabled, Ok(()));
     assert_eq!(other_synchronized, Ok(true));
     assert!(did_remove_other);
+    assert!(kirq::descriptor(other_virq).is_some());
+    assert!(kirq::tests_irq::retire_unused_test_line(other_virq));
     assert!(kirq::descriptor(other_virq).is_none());
     assert_eq!([old_drops_before_release, new_drops_before_release], [0, 0]);
     assert!(free_succeeded.load(Ordering::Acquire));
     assert!(request_succeeded.load(Ordering::Acquire));
     assert!(did_remove_replacement);
+    assert!(kirq::descriptor(virq).is_some());
+    assert!(kirq::tests_irq::retire_unused_test_line(virq));
     assert!(kirq::descriptor(virq).is_none());
     assert_eq!(old_drops.load(Ordering::Acquire), 1);
     assert_eq!(new_drops.load(Ordering::Acquire), 1);

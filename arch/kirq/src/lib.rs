@@ -24,7 +24,7 @@ mod model;
 mod runtime;
 
 #[doc(hidden)]
-pub use backend::msi::{MsiBackendIf, MsiBackendToken};
+pub use backend::msi::{MsiBackendIf, MsiBackendToken, MsiReservation};
 pub(crate) use backend::platform;
 pub use backend::{
     msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix},

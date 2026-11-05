@@ -358,12 +358,61 @@ Callers must also avoid holding locks or resources that their IRQ handler may
 acquire while waiting; otherwise teardown can wait for a handler that is blocked
 behind the caller's own lock.
 
-MSI allocation 也通过 `IRQ_STATE` 建立 `(MSI_DOMAIN, backend_vector) -> virq`
-映射并发布到 MSI domain snapshot。普通 `unregister()` 不删除 MSI descriptor 或
-mapping；最终清理由 `free_msix()` 在确认 handler state 已撤销后完成，
-先释放 backend vector，再移除 descriptor/domain mapping 并发布替换 snapshot。
-若仍有 handler 或 backend 释放失败，释放路径记录 warning 并保留 OS-side mapping，
-暴露 handler/resource 生命周期顺序或 backend 状态问题，并允许调用方重试。
+All descriptors survive action removal and empty-claim completion, including
+domainless fixed Lines. Domain-bound Lines also retain their forward/reverse
+indexes and published lookup snapshot. Mapping ownership is not inferred from
+handler count, and handler removal cannot undo preparation. General non-MSI
+runtime disposal is not provided yet: these descriptors retain registry lifetime.
+MSI resources retain their separate explicit release transaction.
+
+Retaining a Line is not admission to use its hardware binding. Management
+waiters retain the original Arc and recheck registry identity after locking;
+dispatch and queued replay retain both identity and in-flight admission.
+
+Logical identity is assigned through `klazy::Once<Virq>` after recoverable
+commit validation and before index publication. Only the registry/Line-locked
+commit path initializes it, with a non-reentrant integer-only closure. Readers
+use non-waiting `get`, never initialization or waiting operations; they must
+still retain or borrow the Line through an appropriate lifetime owner.
+The assigned number survives retirement and does not authorize controller or
+action access. Reusing one Line under another logical number is rejected.
+The stored integer adds no destructor work or client-owned resource.
+
+Explicit disposal marks the Line retired under its short lock before removing
+the indexes. This one-way state rejects republication of the same allocation,
+new management/dispatch admission and action installation or execution. It is
+not cleared by normal action teardown, and a failed release must not set it.
+The original claim still requires completion when a retired lookup is rejected;
+no old-Line flow operation may be invoked on that path. Retirement does not
+itself provide RCU protection or physical interrupt drain.
+Final storage destruction must not contain a client action or an unconsumed
+hardware-release obligation. The management path returns removed handlers
+outside its locks instead of delegating their destructors to storage retirement.
+Completion registrations and deferred wakes preserve their own borrow/owner
+lifetimes; dropping a Line is not a wake or cancellation operation.
+
+Empty-Line deallocation relies on the non-sleeping allocator and on completed
+mutex-listener cleanup, not merely on the presence of an Arc. The pinned
+no-std Event implementation releases its inner storage without acquiring the
+management mutex. Changing that dependency, adding a destructor-bearing Line
+field, or making allocation release sleepable requires a new release-context
+audit. IRQ-safe allocator locks are not NMI-safe: a future NMI lookup must not
+become the final owning release of a retired Line. The current directory and
+snapshot protocols remain in place until replacement admission and reader
+lifetime protection are implemented together.
+
+MSI allocation publishes a fresh `(MSI_DOMAIN, backend_vector) -> virq`
+mapping under `IRQ_STATE`, retaining its exclusive reservation in the Line.
+Ordinary `unregister()` does not delete MSI descriptors or mappings. Final
+`free_msix()` first validates unused, logically disabled state and reservation
+ownership, then withdraws the descriptor and reverse mappings before returning
+the vector.
+An actionless Line can still be enabled by the legacy force-enable API; that
+state is rejected without changing its mappings, control state or reservation.
+Logical disablement is necessary but does not prove device-message quiescence,
+which remains the resource owner's obligation.
+Pre-withdrawal rejection preserves the caller's cleanup identity. Backend
+release consumes valid ownership and has no recoverable post-withdrawal failure.
 
 ### NMI table
 
@@ -488,7 +537,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-24 | action snapshot 与 cleanup 分离不完整 | dispatch 多次取锁并依赖跨锁状态 | unregister/free 与 dispatch 交错后调用 stale callback 或保留 stale mapping | `IrqActionSnapshot` 在一个 `IRQ_STATE` 临界区内形成完整快照，回调只使用快照 |
 | T-25 | Stale controller updates | Concurrent register/enable/disable/free after directory release | A late unmask reopens a disabled or retired Line | The original Line lock spans state changes and controller application; teardown rejects enable and management admission pins identity through drain |
 | T-26 | 驱动需要清 pending 后再开 IRQ，但 request 立即 enable | 复杂设备 request handler 后尚未初始化 DMA ring/MMIO 状态 | 中断 handler 观察未初始化设备状态 | `try_register_disabled()` 以 disable depth `1` 安装 handler，驱动完成初始化后显式 `try_enable_irq()` |
-| T-27 | handler teardown 后仍在运行 | free/unregister 只移除 `Arc`，不等待已经复制的 dispatch snapshot | 驱动释放 MMIO/DMA 后旧 handler 访问已释放状态 | dispatch guard 维护 `in_flight`，`free_irq()` 先 mask unused line，再通过 descriptor-local completion 等待计数归零；completion done state 在 `IRQ_STATE` 锁内发布、wake 在锁外执行 |
+| T-27 | Handler remains active after teardown | Free removes an action without draining its admitted snapshots | A handler accesses released MMIO/DMA state | Dispatch admission survives original-claim completion; free masks and drains the retained Line. Completion is published under the Line lock and waiters are woken after unlocking; IRQ completion never withdraws directory membership. |
 | T-28 | 等待式 IRQ API 在 interrupt-like context 调用 | hardirq/softirq/BH-disabled 中调用 `disable_irq()`、`synchronize_irq()` 或 `free_irq()` | 当前 CPU 等待自己退出，导致死锁或长时间自旋 | `try_*` API 使用 `is_in_interrupt_context()` gating 并返回 `InvalidContext`；兼容 wrapper 记录 warning 后返回失败值 |
 | T-28b | IRQ sync wait provider 无 sleepable current task | scheduler 尚未初始化或非 task context 调用等待 API | 非法调度或等待 API 伪成功 | `TaskBlockingContextIf::is_sleepable_context` 在 action 摘除前检查 sleepable current task，失败返回 `IrqDescError::InvalidContext`；释放控制锁后用 `CompletionWait` 栈上登记执行无失败等待，消除摘除后的登记失败分支 |
 | T-29 | shared IRQ token 释放错误 action | devres adapter 保存的 token 与 kirq action identity 不一致，或 token 在旧 action 同步前复用 | 释放错误 handler、旧 handler 继续访问已释放设备状态 | token 是 line-local `IrqActionToken`，free-by-token 先摘除 action 再等待 `in_flight`，token 单调递增且不回收 |
@@ -496,7 +545,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-31 | Device readiness published too early | Driver wakes readers before publishing data | Readers observe incomplete data | Device subsystems own data publication and wakeup ordering; IRQ core does not broadcast readiness |
 | T-32 | free/register 在 teardown wait 窗口重叠 | action 已摘除但旧 snapshot 仍在运行时，同一 virq 被重新注册 | 新旧 handler 生命周期交叠，后续 threaded/worker teardown 难以定义 | `teardown_depth` gate 在等待期间阻止新 action 注册，并阻止 descriptor 被提前 cleanup |
 | T-33 | handler 无法识别触发的 IRQ | shared handler 回调没有 IRQ 参数，只能依赖外部状态推断 | 共享 line、diagnostics 或通用 wrapper 误判事件来源 | normal IRQ handler 统一接收 resolved `virq` 参数；NMI handler 接收 raw hwirq |
-| T-34 | 并发 shared teardown 漏掉平台 mask | 最后一个 action 离开时已有 teardown waiter，cleanup gate 被误用于 disable 判定 | descriptor 被清理但平台 line 仍 unmasked，后续中断落到 stale/unknown line | 平台 disable 只看 action list 是否为空；descriptor cleanup 才同时要求 `in_flight == 0` 和 `teardown_depth == 0` |
+| T-34 | Missing last-action mask | A teardown waiter is mistaken for a surviving action | The source remains unmasked without a handler | Mask the last action's source independently of teardown credits; retain descriptor ownership through and after drain |
 | T-35 | teardown 期间失败注册仍修改 descriptor/mapping | 注册路径先 resolve/publish，再检查 teardown gate | 返回失败但留下 merged metadata 或新 domain mapping | 注册先做 lookup-only teardown gate，命中后不进入 resolve/publish |
 | T-36 | teardown wait 窗口重新 enable action-less line | 最后一个 action 已摘除并 mask 后，另一 CPU 调用 `enable_irq()` / legacy force-enable | descriptor 被删除后平台 line 又 unmasked，后续 unhandled IRQ 或 storm；或失败路径留下 merged metadata/domain mapping | `try_enable_irq()` lookup-only 解析已存在 descriptor，并拒绝 `teardown_depth != 0` 或 `action_count == 0` 的普通 enable；legacy force-enable 在 resolve/publish 前先检查已有 teardown descriptor |
 | T-37 | 等待式 teardown 持有 handler 需要的锁 | task context 持 driver lock 调用 `free_irq()` / `synchronize_irq()`，旧 handler snapshot 在另一 CPU 等同一把锁 | teardown 等 handler，handler 等 teardown caller，形成死锁 | public rustdoc 和设计文档明确等待时不能持有 handler 可能获取的锁或阻止 handler 退出的资源锁 |
@@ -527,7 +576,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | F-16 | future `WakeThread` 被同步执行 | `WakeThread` return 被当成 handled primary work | future thread 未实现时错误唤醒或执行 sleepable work | 当前 `WakeThread` 分类保持 inert，threaded IRQ milestone 必须显式实现 thread ownership |
 | F-17 | action runtime 字段漂移 | `generation`、MSI marker、action list 或 oneshot pending 与 descriptor 不一致 | MSI free 判断、shared/threaded 诊断或 cleanup 决策错误 | descriptor merge/update 统一经过 `IrqStateDesc` 方法，后续新增字段必须同步在该 owner 内维护 |
 | F-18 | disable nesting 不配对 | 多次 disable 后只 enable 一次，或 legacy boolean API 语义不清 | IRQ line 长期 masked 或过早 unmask | `disable_depth` 在 `IrqDescRuntimeState` 中显式维护，`enable(spec,false)` 映射 nosync disable，`enable(spec,true)` 映射 depth-aware enable |
-| F-19 | free_irq 与 dispatch 并发 | teardown 移除 action 时另一个 CPU 已复制 handler snapshot | descriptor 被删除但旧 handler 仍执行 | `in_flight` 阻止 unused descriptor 删除，`free_irq()` 等待 snapshot guard drop 后再完成 cleanup |
+| F-19 | Free overlaps dispatch | Another CPU retains an admitted handler snapshot | Caller resources are reclaimed before the handler finishes | `free_irq()` waits for retained-Line admission to drain before returning handler ownership, and does not delete the descriptor |
 | F-20 | synchronize_irq 未先 disable | 等待期间设备继续触发新中断 | 调用可能长期等待或只能观察当前窗口 | 文档规定 `synchronize_irq()` 不 mask line；teardown 使用 `disable_irq()` / `free_irq()` |
 | F-21 | 释放 shared line 的一个 action 时关闭整条线 | free-by-token 不检查剩余 action | 其它共享设备中断丢失 | `free_irq_action()` 只在最后一个 action 移除后产生 platform disable plan |
 | F-22 | enable_irq 作用于未知或无 action descriptor | 显式 enable 创建 descriptor 或 unmask 没有 handler 的 line | 未处理 IRQ 或错误平台状态 | `try_enable_irq()` 不创建 descriptor，未知 IRQ 返回 `UnknownIrq`，无 action 返回 `NoIrqAction` |
@@ -549,19 +598,25 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 - `disable_irq()`、`synchronize_irq()` 和 `free_irq()` 在 interrupt-like context 中通过
   `try_*` API 返回 `InvalidContext`；兼容 wrapper 记录 warning 后返回失败值。
   `disable_irq_nosync()` 是唯一可在 hardirq-like 路径使用的 non-waiting disable API。
-- `free_irq()` 在移除最后一个 action 时先 mask non-MSI line，再等待
-  `in_flight` 归零并删除 unused descriptor。等待期间 `teardown_depth` 阻止同一 line
-  重新注册，也阻止 `enable_irq()` 重新打开 action-less line。普通 unregister 只是兼容
-  wrapper。等待式 API 调用方不能持有 handler 可能获取的锁。
-- MSI descriptor preparation failure returns through the existing allocation
-  rollback path. Release clears the published slot before backend vector reuse,
-  then removes the descriptor and both software mapping indexes. Backend
-  rejection restores the slot and retains software ownership. Release performs
-  no owner allocation; source masking/draining remains the caller's obligation.
+- `free_irq()` masks the last non-MSI action's source and waits for in-flight
+  claims to finish. All Lines remain owned independently of their actions,
+  including domainless descriptors. During the wait,
+  `teardown_depth` rejects registration and enable. `unregister()` is a
+  compatibility wrapper. Waiters must not hold locks needed by the handler.
+- MSI descriptors bypass ordinary platform configure/enable. Allocation failure
+  returns `None`; composition/publication failure explicitly returns the private
+  reservation to the backend. `free_msix()` validates unused state and reservation
+  ownership before withdrawing the descriptor, mapping indexes and published
+  snapshot; only then does the backend consume the reservation. Backend release
+  has no recoverable failure after withdrawal. NMI calls are rejected before locks.
 - lifecycle hook 注册是单 owner；后续如果需要多个 consumer，应显式升级为
   notifier chain，而不是让多个子系统覆盖同一全局 hook。
 - No global IRQ waiter table is consulted after action fanout. Descriptor-local
-  in-flight completion remains for synchronization and is woken outside IRQ_STATE.
+  in-flight completion is published under the retained Line lock and woken
+  outside it. This path does not acquire IRQ_STATE or remove a descriptor,
+  including an empty domainless Line prepared before handler installation.
+  Explicit MSI release still checks zero in-flight admission before directory
+  withdrawal; action removal never disposes a descriptor.
 - deferred executor 注册是单 owner。`softirq::init()` 在启动路径安装默认 owner；
   重复注册返回 `false`，空 executor 也返回 `false`；runner 在未注册时返回
   `NoExecutor`。
@@ -584,7 +639,8 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
 
 - Descriptor-backed unclaimed action fanout uses saturating event counters
   and power-of-two warning sampling. Accounting is serialized by the existing
-  in-flight cleanup lock; formatting and logging occur outside `IRQ_STATE`.
+  Line lock used for in-flight completion; formatting and logging occur after
+  releasing that lock. No directory lookup or lock is needed for accounting.
   It never masks an IRQ or changes disable depth. Any shared action claiming
   an IRQ prevents an unhandled count, including a faulty always-claiming
   action; these diagnostics cannot establish that hardware was acknowledged.
@@ -626,7 +682,7 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   all short locks.
 - The normal dispatch admission outlives the controller completion call, not
   merely the handler snapshot. A registered Line with no actions is admitted
-  too, so unused-Line cleanup cannot run during completion. Lookup misses still
+  too, so explicit resource release cannot run during completion. Lookup misses still
   complete their original claim without acquiring a later Line by number.
   The private consuming `IrqDispatch::complete` centralizes this normal-return
   ordering; it is not a type-level ban on dropping an admission early or a
@@ -649,8 +705,18 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
 - Enable retains the selected Line before releasing registry exclusion and
   keeps its state locked through configuration and unmask. Both controller
   operations obey the same non-reentrancy and bounded-execution contract as
-  mask. Rejected normal enables do not publish a Line or change disable depth;
-  legacy candidate allocation and final owner release stay outside short locks.
+  mask. Both normal and legacy enable reject a missing descriptor before
+  allocation, mapping publication or controller application. A surviving
+  reverse mapping alone cannot authorize reconstructing its missing Line.
+  Legacy force-enable retains metadata merging for an existing Line; this is
+  not a replacement for explicit descriptor preparation. Final owner release
+  stays outside short locks.
+  All registration paths, including explicit startup variants, reject missing descriptors before
+  preflight, configuration or action publication. Rejection retains no handler
+  owner and does not create a reverse mapping. Neither mode implicitly allocates
+  a descriptor. An existing identity is revalidated
+  after management acquisition; source/table quiescence requirements for NMI
+  remain unchanged.
   The outer local NoPreemptIrqSave guard masks IRQs before registry and Line acquisition
   and restores context only after both guards are gone. It protects the non-LIFO
   registry-to-Line handoff independently of cross-CPU mutual exclusion.
@@ -729,14 +795,13 @@ outside short locks, and an unlocked mutex's final destruction must not wait.
 
 These checks do not validate IRQ directory membership, hardware quiescence or
 application dependency cycles. KIRQ revalidates retained Line identity after
-acquisition and records admission before releasing the registry lock; unused
-cleanup excludes admitted Lines. A stale remover cannot touch a replacement.
-Admission completion holds registry exclusion continuously while releasing
-teardown/admission under the original Line lock and checking identity for unused
-removal. It does not acquire global control exclusion: new enable lookups require
-the registry lock, and retained dispatch counts protect outstanding claims.
-The caller retains the Line owner and management mutex until cleanup returns,
-so removing the directory reference cannot finally destroy the Line under locks.
+acquisition and records admission before releasing the registry lock; explicit
+resource release excludes admitted Lines. A stale remover cannot touch a
+replacement. Admission completion releases teardown/admission and conditionally
+unmasks surviving actions under the original Line lock. It never looks up or
+withdraws a descriptor, and therefore needs no registry lock or non-LIFO guard
+handoff. The caller retains the Line owner and management mutex until completion
+returns. Handler owners are returned outside locks for final destruction.
 Registration may retry, but only after releasing the old mutex. Waiting for
 dispatch holds management exclusion, not publication/registry/Line spinlocks.
 Caller-owned handler dependencies must not require the same management mutex
@@ -769,7 +834,7 @@ dispatch with running ownership clears it, under the original Line lock held
 through completion. Rejected claims complete under Line exclusion without
 clearing another owner's running bit. Legacy retains unlocked completion.
 Registry exclusion is released before hardware operations; the Line guard must
-be released before admission cleanup reacquires registry then Line. Handlers
+be released before admission completion reacquires the original Line. Handlers
 never execute under these short locks. This does not establish hardware
 quiescence or type-level prevention of dropping an internal admission early.
 
@@ -870,12 +935,10 @@ handler/Line owner releases must remain outside short locks. Software replay
 does not construct PendingIrq or complete the old hardware cookie.
 
 Shared-action removal must not strand surviving actions behind a flow mask.
-After drain, management cleanup finishes teardown on the original Line, then
-acquires the Line lock before releasing registry exclusion. An outer
-IRQ/preemption guard preserves masking across the non-LIFO handoff. Fasteoi
-unmask checks `can_run_actions` and runs under the retained Line lock without
-the directory lock. Pending scheduling follows after releasing the short locks
-and context guard. Last-action
+After drain, management completion finishes teardown and admission, then checks
+`can_run_actions` before Fasteoi unmask in the same original-Line critical section.
+No directory lock or additional context guard is acquired. Pending scheduling
+follows after releasing the Line lock. Last-action
 removal, disable depth or outstanding teardown prevents unmask; pending recovery
 uses the current original-Line state, not a saved pre-withdrawal enable flag.
 
@@ -916,3 +979,22 @@ unmask and does not prove physical drain. MSI's device-owned mask and outstandin
 APIC delivery remain owner shutdown obligations. Neither in-flight == 0 nor a
 successful retrigger is a vector-reuse barrier; the existing MSI release API
 does not gain a new shutdown guarantee from retained target metadata.
+
+MSI release holds the registry lock across the unused/ownership checks, mapping
+removal, reverse-map publication and backend release, in that order. A private
+non-cloneable `MsiReservation` is attached before the Line is published; an MSI
+flag or raw IRQ number alone cannot authorize release. The backend consumes
+the reservation and must release it without sleeping or reentering KIRQ. It
+cannot report an ordinary failure after withdrawal. Software rejection preserves the
+mapping; callers must still retain a usable allocation identity. This does not
+repair an adapter that consumes its retry handle on rejection. Private-state
+release tests check software failure atomicity, not device shutdown or physical
+late-message isolation.
+
+Allocation rollback calls the backend without the registry lock using the same
+fresh unpublished reservation returned by failed publication. Backend allocator
+exclusion is required in both call contexts. The x86 release has no fallible
+hardware work: an out-of-range/already-free owned vector indicates a violated
+allocation invariant. A backend with recoverable release failures requires a
+pre-withdrawal protocol before integration. Reservation Drop does not release
+hardware, and final Line destruction occurs outside the registry lock.

@@ -50,6 +50,14 @@ driver-os-api-xkernel / kirq / khal / kdma / memspace / driver crates
   descriptors, manage action fanout, and provide teardown synchronization.
   `driver_os_api` reserves a threaded-IRQ provider contract; the X-Kernel provider based
   on `main` currently still returns `Unsupported`.
+- Bus enumeration passes firmware IRQ controller/trigger/number to
+  `IrqOp::map_irq` before publishing an IRQ resource. Only the returned logical
+  identity is exposed; mapping errors never fall back to the hardware number.
+  Platform mapping failure prevents device publication. Optional PCI INTx
+  mapping failure is logged and leaves no INTx resource, without excluding
+  later MSI/MSI-X setup. Mapping preparation neither installs a handler nor
+  activates hardware. The provider owns Domain association and mapping lifetime;
+  this adapter does not dispose a shared route after a failed driver probe.
 - `kdriver` and `driver-os-api-xkernel` trust `memspace::iomap_device` to reject mappings
   of invalid physical address ranges.
 - `driver-os-api-xkernel` trusts `kdma::allocate_dma_memory` and

@@ -7,6 +7,18 @@ peripherals. `src/lib.rs` gates the crate on `target_arch = "aarch64"` and
 `k_plat_name = "kplat-aarch64"`; peripheral feature gates remain in
 `src/peripherals/mod.rs`.
 
+## PMU Interrupt Ownership
+
+The platform prepares the PMU's GIC domain mapping with `kirq::try_map` before
+installing either its ordinary IRQ action or NMI action. Mapping preparation
+does not configure or enable the source. The mapping belongs to platform
+lifetime, independently of the handler; failed installation leaves it reserved
+for retry rather than attempting early-boot RCU reclamation. Mapping errors
+are logged with the descriptor and returned as registration failure. Existing
+normal-IRQ activation and later NMI promotion remain separate operations.
+This startup owner exposes no mapping-disposal operation; explicit preparation
+does not change KIRQ's generic action-teardown behavior.
+
 ## Guest Test Layout
 
 Guest tests live in crate-root `ut-tests/`, mounted by

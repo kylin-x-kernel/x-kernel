@@ -1,10 +1,20 @@
-# kplat-aarch64 Test Security Scope
+# kplat-aarch64 Security Scope
 
 ## Scope
 
 This note covers the guest tests in `ut-tests/peripherals_smccc.rs` and
 `ut-tests/peripherals_trng.rs` and their mounts in `src/peripherals/smccc.rs`
-and `src/peripherals/trng.rs`. It is not a whole-platform unsafe-code audit.
+and `src/peripherals/trng.rs`, plus PMU mapping preparation in
+`src/peripherals/pmu.rs`. It is not a whole-platform unsafe-code audit.
+
+## PMU Mapping Preparation
+
+Startup owns PMU mapping preparation and keeps the source quiescent until
+handler installation and the existing activation/promotion steps permit
+delivery. A mapping error is logged and rejects registration before handler
+allocation. Successful mapping alone neither enables hardware nor establishes
+NMI quiescence. An installation failure retains the platform-owned mapping;
+no early-boot RCU disposal or rollback of controller writes is promised.
 
 ## Boundaries
 

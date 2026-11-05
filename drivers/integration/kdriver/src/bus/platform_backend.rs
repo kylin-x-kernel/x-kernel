@@ -13,8 +13,9 @@
 //! firmware-agnostic.
 
 use driver_base::DriverResult;
+use driver_os_api::IrqOp;
 use kdevice::{
-    BusId, BusTypeId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, IrqResource, MmioRegion,
+    BusId, BusTypeId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, MmioRegion,
     PlatformIdentity, ResourceDesc, ResourceSet,
 };
 use khal::firmware::devices as fw;
@@ -91,13 +92,6 @@ impl PlatformBackend {
                         size: mmio.size,
                     }));
                 }
-                if let Some(irq) = dev.irq {
-                    resources.push(ResourceDesc::Irq(IrqResource::plain(
-                        driver_os_api::Virq::new(irq.irq),
-                        super::irq_trigger_from_firmware(irq.trigger),
-                    )));
-                }
-
                 let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {
                     match dev.mmio {
                         #[cfg(feature = "virtio")]
@@ -133,6 +127,22 @@ impl PlatformBackend {
                 let Some((location, identity, transport)) = registration else {
                     return;
                 };
+
+                if let Some(irq) = dev.irq {
+                    match super::map_firmware_irq(irq, |route| {
+                        crate::resource::resource_provider().map_irq(route)
+                    }) {
+                        Ok(mapped) => resources.push(ResourceDesc::Irq(mapped)),
+                        Err(error) => {
+                            log::warn!(
+                                "platform: IRQ mapping failed for {}: {irq:?}: {error:?}",
+                                dev.firmware_id
+                            );
+                            first_error.get_or_insert(error);
+                            return;
+                        }
+                    }
+                }
 
                 if let Err(err) = context.register_device(
                     bus_id,

@@ -68,6 +68,13 @@ pub(super) fn dispatch_claim(source: IrqRef, complete_claim: impl FnOnce()) -> O
     };
     let line = line.clone();
     let mut entry = line.lock();
+    if entry.is_retired() {
+        drop(entry);
+        drop(state);
+        // A stale lookup must complete its claim without touching the old chip.
+        complete_claim();
+        return Some(virq);
+    }
     // Empty Lines retain admission through completion, not just action return.
     entry.begin_dispatch();
     let guard = IrqDispatchGuard::new(virq, line.clone());
@@ -287,28 +294,16 @@ impl IrqDispatchGuard {
 impl Drop for IrqDispatchGuard {
     fn drop(&mut self) {
         let (wait_set, report) = {
-            let mut state = IRQ_STATE.lock();
-            let (wait_set, report) = {
-                let mut entry = self.line.lock();
-                // Account on the retained Line after the shared chain returned,
-                // in the same state critical section as in-flight completion.
-                let report = if self.is_unhandled {
-                    entry.record_unhandled_dispatch()
-                } else {
-                    None
-                };
-                (entry.finish_dispatch(), report)
+            let mut entry = self.line.lock();
+            // Completion owns admission, not directory membership. The retained
+            // Line serializes both the predicate and completion publication;
+            // descriptor withdrawal belongs to the control plane after drain.
+            let report = if self.is_unhandled {
+                entry.record_unhandled_dispatch()
+            } else {
+                None
             };
-            // The original controller claim has completed. An empty Line may
-            // now be removable; platform masking belongs to the control path.
-            if state
-                .descs
-                .get(&self.virq)
-                .is_some_and(|line| Arc::ptr_eq(line, &self.line))
-            {
-                state.remove_if_unused(self.virq);
-            }
-            (wait_set, report)
+            (entry.finish_dispatch(), report)
         };
         wake_in_flight_zero(wait_set);
         if let Some(report) = report {

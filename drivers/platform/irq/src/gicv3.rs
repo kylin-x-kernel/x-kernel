@@ -162,6 +162,12 @@ pub(super) fn prepare_local_irq_work() -> Option<fn()> {
 
     let desc = super::edge_irq_desc(IRQ_WORK_SGI as usize).with_flags(kirq::IrqFlags::PER_CPU);
     IRQ_WORK_HANDLER_REGISTERED.call_once(|| {
+        // The reserved SGI mapping outlives its action and is shared by APs.
+        // Keep mapping preparation separate from configuration and activation.
+        if let Err(err) = kirq::try_map(desc) {
+            warn!("irq_work mapping preparation failed: desc={desc:?}, error={err:?}");
+            return false;
+        }
         match kirq::try_register_startup(
             desc,
             Arc::new(|_| {
