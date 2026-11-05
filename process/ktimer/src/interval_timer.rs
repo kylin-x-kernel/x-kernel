@@ -76,6 +76,10 @@ pub(crate) struct ITimer {
 }
 
 impl ITimer {
+    pub(crate) fn is_periodic(&self) -> bool {
+        !self.interval.is_zero()
+    }
+
     pub(crate) fn snapshot(&self, now: TimerInstant) -> (TimeSpan, TimeSpan) {
         (self.interval, self.remaining(now))
     }

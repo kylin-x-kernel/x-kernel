@@ -551,6 +551,11 @@ impl SignalInfo {
         &mut self.header_mut()._sifields
     }
 
+    /// Synthesizes zeroed SI_USER data for a pending bit without detailed storage.
+    pub(crate) fn without_sender(signo: Signo) -> Self {
+        Self::new_user(signo, linux_raw_sys::general::SI_USER as _, 0)
+    }
+
     /// Construct a kernel-originated signal.
     pub fn new_kernel(signo: Signo) -> Self {
         let mut result = Self::empty();

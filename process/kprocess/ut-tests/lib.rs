@@ -3633,3 +3633,433 @@ fn test_cpu_timer_gate_skips_poll_before_runtime_lookup() {
         "an open gate must reach the runtime before polling"
     );
 }
+
+#[def_test(serial)]
+fn test_timer_creation_validates_after_runtime_lookup_before_admission() {
+    const CLOCK_MONOTONIC: i32 = 1;
+    let detached = ensure_init().fork(9_152);
+    assert_eq!(
+        detached.create_posix_timer(-1, ktimer::PosixTimerCreateNotify::None),
+        Err(kerrno::KError::NoSuchProcess)
+    );
+    let (process, _task) = process_with_address_space(9_153, mapped_test_address_space());
+    assert_eq!(
+        process.create_posix_timer(-1, ktimer::PosixTimerCreateNotify::None),
+        Err(kerrno::KError::InvalidInput)
+    );
+    let timer_id = process
+        .create_posix_timer(CLOCK_MONOTONIC, ktimer::PosixTimerCreateNotify::None)
+        .unwrap();
+    assert_eq!(timer_id, 1);
+    assert!(!process.cpu_timers_armed());
+    process.delete_posix_timer(timer_id).unwrap();
+}
+
+#[def_test(serial)]
+fn test_timer_completion_is_bound_to_originating_runtime() {
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
+    let (first, _first_task) = process_with_address_space(9_154, mapped_test_address_space());
+    let (second, _second_task) = process_with_address_space(9_155, mapped_test_address_space());
+    let mut notifications = Vec::new();
+    for process in [&first, &second] {
+        let timer_id = process
+            .create_posix_timer(
+                CLOCK_PROCESS_CPUTIME_ID,
+                ktimer::PosixTimerCreateNotify::Signal {
+                    signo: ksignal::Signo::SIGRTMIN,
+                    target_tid: None,
+                    value: ktimer::PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap();
+        assert_eq!(timer_id, 1);
+        let runtime = process.runtime_ref().unwrap();
+        let mut manager = runtime.timer_manager().lock();
+        let update = manager
+            .set_posix_timer(
+                timer_id,
+                false,
+                TimeSpan::from_nanos(1),
+                TimeSpan::from_nanos(1),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        notifications.extend(manager.poll_cpu_timers(TimeSpan::from_nanos(3), TimeSpan::ZERO));
+        drop(manager);
+        update.finish();
+    }
+    let ktimer::TimerDelivery::Process(ktimer::TimerSignal::Posix { notification, .. }) =
+        notifications.remove(0)
+    else {
+        panic!("expected POSIX notification");
+    };
+    let timer_id = notification.receipt().unwrap().timer_id();
+    let signal_seq = notification.receipt().unwrap().signal_seq();
+    let ktimer::TimerDelivery::Process(ktimer::TimerSignal::Posix {
+        notification: other_notification,
+        ..
+    }) = notifications.remove(0)
+    else {
+        panic!("expected POSIX notification");
+    };
+    let other_id = other_notification.receipt().unwrap().timer_id();
+    let other_seq = other_notification.receipt().unwrap().signal_seq();
+    assert_eq!((timer_id, signal_seq), (other_id, other_seq));
+    let receiver = ksignal::api::ThreadSignalManager::new(
+        71,
+        Arc::new(ksignal::api::ProcessSignalManager::new(
+            ksignal::api::SignalActions::default(),
+            0,
+        )),
+    )
+    .unwrap();
+    assert!(receiver.send_signal(notification));
+    let mut mask = ksignal::SignalSet::default();
+    mask.add(ksignal::Signo::SIGRTMIN);
+    assert!(receiver.dequeue_signal(&mask).is_some());
+    assert_eq!(first.get_posix_timer_overrun(timer_id).unwrap(), 2);
+    assert_eq!(second.get_posix_timer_overrun(other_id).unwrap(), 0);
+    second.runtime_ref().unwrap().clear_posix_timers();
+    assert!(!receiver.send_signal(other_notification));
+    assert!(receiver.dequeue_signal(&mask).is_none());
+    first.delete_posix_timer(timer_id).unwrap();
+}
+
+#[def_test(serial)]
+fn test_ignored_periodic_timer_replays_with_accumulated_overruns() {
+    let (owner, task) = process_with_address_space(9_163, mapped_test_address_space());
+    let published = prepare_user_task(task).publish().unwrap();
+    let signals = published.task().as_thread().signal_manager();
+    let manager = owner.signal_manager().unwrap();
+    manager
+        .set_signal_action(
+            Signo::SIGUSR1,
+            ksignal::SignalAction {
+                disposition: ksignal::SignalDisposition::Ignore,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let runtime = owner.runtime_ref().unwrap();
+    let timer_id = owner
+        .create_posix_timer(
+            2,
+            ktimer::PosixTimerCreateNotify::Signal {
+                signo: Signo::SIGUSR1,
+                target_tid: None,
+                value: ktimer::PosixTimerSigValue::TimerId,
+            },
+        )
+        .unwrap();
+    let update = runtime
+        .timer_manager()
+        .lock()
+        .set_posix_timer(
+            timer_id,
+            false,
+            TimeSpan::from_nanos(1),
+            TimeSpan::from_nanos(1),
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        )
+        .unwrap();
+    update.finish();
+    let deliveries = runtime
+        .timer_manager()
+        .lock()
+        .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO);
+    assert_eq!(deliveries.len(), 1);
+    for delivery in deliveries {
+        crate::dispatch_timer_delivery(owner.pid(), delivery);
+    }
+    assert!(signals.pending().is_empty());
+    assert!(
+        runtime
+            .timer_manager()
+            .lock()
+            .poll_cpu_timers(TimeSpan::from_nanos(4), TimeSpan::ZERO)
+            .is_empty()
+    );
+    assert_eq!(owner.get_posix_timer_overrun(timer_id).unwrap(), 0);
+    manager
+        .set_signal_action(Signo::SIGUSR1, ksignal::SignalAction::default())
+        .unwrap();
+    assert!(signals.pending().has(Signo::SIGUSR1));
+    let mut mask = ksignal::SignalSet::default();
+    mask.add(Signo::SIGUSR1);
+    signals.set_blocked(mask);
+    assert_eq!(
+        signals.dequeue_signal(&mask).unwrap().timer_id(),
+        Some(timer_id)
+    );
+    assert!(signals.dequeue_signal(&mask).is_none());
+    assert_eq!(owner.get_posix_timer_overrun(timer_id).unwrap(), 3);
+    owner.delete_posix_timer(timer_id).unwrap();
+    drop(runtime);
+    drop(published);
+    process_publication().cleanup();
+}
+
+#[def_test(serial)]
+fn test_distinct_posix_timers_deliver_the_same_standard_signal() {
+    let (owner, task) = process_with_address_space(9_162, mapped_test_address_space());
+    let published = prepare_user_task(task).publish().unwrap();
+    let signals = published.task().as_thread().signal_manager();
+    let mut mask = ksignal::SignalSet::default();
+    mask.add(Signo::SIGUSR1);
+    signals.set_blocked(mask);
+    let runtime = owner.runtime_ref().unwrap();
+    let mut timer_ids = [0; 2];
+    for timer_id in &mut timer_ids {
+        *timer_id = owner
+            .create_posix_timer(
+                2,
+                ktimer::PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGUSR1,
+                    target_tid: None,
+                    value: ktimer::PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap();
+        let update = runtime
+            .timer_manager()
+            .lock()
+            .set_posix_timer(
+                *timer_id,
+                false,
+                TimeSpan::ZERO,
+                TimeSpan::from_nanos(1),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        update.finish();
+    }
+    let deliveries = runtime
+        .timer_manager()
+        .lock()
+        .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO);
+    assert_eq!(deliveries.len(), 2);
+    for delivery in deliveries {
+        crate::dispatch_timer_delivery(owner.pid(), delivery);
+    }
+    for timer_id in timer_ids {
+        assert!(
+            owner
+                .signal_manager()
+                .unwrap()
+                .pending()
+                .has(Signo::SIGUSR1)
+        );
+        let info = signals.dequeue_signal(&mask).unwrap();
+        assert_eq!(info.signo(), Signo::SIGUSR1);
+        assert_eq!(info.timer_id(), Some(timer_id));
+        assert_eq!(info.timer_overrun(), Some(0));
+        owner.delete_posix_timer(timer_id).unwrap();
+    }
+    assert!(signals.dequeue_signal(&mask).is_none());
+    drop(runtime);
+    drop(published);
+    process_publication().cleanup();
+}
+
+#[def_test(serial)]
+fn test_timer_rearm_and_delete_cancel_pending_without_acknowledgement() {
+    let (owner, task) = process_with_address_space(9_161, mapped_test_address_space());
+    let published = prepare_user_task(task).publish().unwrap();
+    let signals = published.task().as_thread().signal_manager();
+    let mut mask = ksignal::SignalSet::default();
+    mask.add(Signo::SIGRTMIN);
+    signals.set_blocked(mask);
+    for operation in 0..3 {
+        let timer_id = owner
+            .create_posix_timer(
+                2,
+                ktimer::PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGRTMIN,
+                    target_tid: None,
+                    value: ktimer::PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap();
+        let runtime = owner.runtime_ref().unwrap();
+        let (update, delivery) = {
+            let mut manager = runtime.timer_manager().lock();
+            let update = manager
+                .set_posix_timer(
+                    timer_id,
+                    false,
+                    TimeSpan::ZERO,
+                    TimeSpan::from_nanos(1),
+                    TimeSpan::ZERO,
+                    TimeSpan::ZERO,
+                )
+                .unwrap();
+            let delivery = manager
+                .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO)
+                .remove(0);
+            (update, delivery)
+        };
+        update.finish();
+        crate::dispatch_timer_delivery(owner.pid(), delivery);
+        assert!(
+            owner
+                .signal_manager()
+                .unwrap()
+                .pending()
+                .has(Signo::SIGRTMIN)
+        );
+        if operation == 2 {
+            runtime.clear_posix_timers();
+        } else if operation == 1 {
+            owner.delete_posix_timer(timer_id).unwrap();
+        } else {
+            owner
+                .set_posix_timer(timer_id, false, TimeSpan::ZERO, TimeSpan::ZERO)
+                .unwrap();
+            assert_eq!(owner.get_posix_timer_overrun(timer_id).unwrap(), 0);
+            owner.delete_posix_timer(timer_id).unwrap();
+        }
+        assert!(signals.dequeue_signal(&mask).is_none());
+        assert!(
+            !owner
+                .signal_manager()
+                .unwrap()
+                .pending()
+                .has(Signo::SIGRTMIN)
+        );
+    }
+    drop(published);
+    process_publication().cleanup();
+}
+
+#[def_test(serial)]
+fn test_returned_record_progresses_rearmed_cpu_one_shot_without_another_tick() {
+    let (owner, task) = process_with_address_space(9_160, mapped_test_address_space());
+    let published = prepare_user_task(task).publish().unwrap();
+    let timer_id = owner
+        .create_posix_timer(
+            2,
+            ktimer::PosixTimerCreateNotify::Signal {
+                signo: Signo::SIGRTMIN,
+                target_tid: None,
+                value: ktimer::PosixTimerSigValue::TimerId,
+            },
+        )
+        .unwrap();
+    let runtime = owner.runtime_ref().unwrap();
+    let old_delivery = {
+        let mut manager = runtime.timer_manager().lock();
+        let first_update = manager
+            .set_posix_timer(
+                timer_id,
+                false,
+                TimeSpan::ZERO,
+                TimeSpan::from_nanos(1),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        let old = manager
+            .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO)
+            .remove(0);
+        let update = manager
+            .set_posix_timer(
+                timer_id,
+                true,
+                TimeSpan::ZERO,
+                TimeSpan::from_nanos(1),
+                TimeSpan::from_nanos(2),
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        assert!(!manager.any_cpu_timer_armed());
+        drop(manager);
+        first_update.finish();
+        let (_, immediate) = update.finish();
+        assert!(immediate.is_none());
+        old
+    };
+    let signals = published.task().as_thread().signal_manager();
+    assert!(!signals.pending().has(Signo::SIGRTMIN));
+    drop(old_delivery);
+    let deadline = khal::time::monotonic_time() + TimeSpan::from_secs(5);
+    while !signals.pending().has(Signo::SIGRTMIN) && khal::time::monotonic_time() < deadline {
+        ktask::sleep(TimeSpan::from_millis(1));
+    }
+    let mut mask = ksignal::SignalSet::default();
+    mask.add(Signo::SIGRTMIN);
+    let info = signals
+        .dequeue_signal(&mask)
+        .expect("ready record progresses expired one-shot");
+    assert_eq!(info.timer_id(), Some(timer_id));
+    assert_eq!(info.timer_overrun(), Some(0));
+    assert!(signals.dequeue_signal(&mask).is_none());
+    owner.delete_posix_timer(timer_id).unwrap();
+    drop(runtime);
+    drop(published);
+    process_publication().cleanup();
+}
+
+#[def_test(serial)]
+fn test_timer_dispatch_uses_captured_target_not_numeric_envelope() {
+    for directed in [false, true] {
+        let base_pid = if directed { 9_158 } else { 9_156 };
+        let (owner, owner_task) = process_with_address_space(base_pid, mapped_test_address_space());
+        let (other, other_task) =
+            process_with_address_space(base_pid + 1, mapped_test_address_space());
+        let published_owner = prepare_user_task(owner_task).publish().unwrap();
+        let published_other = prepare_user_task(other_task).publish().unwrap();
+        let timer_id = owner
+            .create_posix_timer(
+                2,
+                ktimer::PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGUSR1,
+                    target_tid: directed.then_some(owner.pid()),
+                    value: ktimer::PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap();
+        let runtime = owner.runtime_ref().unwrap();
+        let delivery = {
+            let mut manager = runtime.timer_manager().lock();
+            let update = manager
+                .set_posix_timer(
+                    timer_id,
+                    false,
+                    TimeSpan::ZERO,
+                    TimeSpan::from_nanos(1),
+                    TimeSpan::ZERO,
+                    TimeSpan::ZERO,
+                )
+                .unwrap();
+            let delivery = manager
+                .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO)
+                .remove(0);
+            drop(manager);
+            update.finish();
+            delivery
+        };
+        let wrong_envelope = match delivery {
+            ktimer::TimerDelivery::Thread { signal, .. } => ktimer::TimerDelivery::Thread {
+                tid: other.pid(),
+                signal,
+            },
+            delivery => delivery,
+        };
+        crate::dispatch_timer_delivery(other.pid(), wrong_envelope);
+        let owner_signal = published_owner.task().as_thread().signal_manager();
+        let other_signal = published_other.task().as_thread().signal_manager();
+        assert!(owner_signal.pending().has(Signo::SIGUSR1));
+        assert!(other_signal.pending().is_empty());
+        let mut mask = ksignal::SignalSet::default();
+        mask.add(Signo::SIGUSR1);
+        assert!(owner_signal.dequeue_signal(&mask).is_some());
+        owner.delete_posix_timer(timer_id).unwrap();
+        drop(runtime);
+        drop(published_owner);
+        drop(published_other);
+        process_publication().cleanup();
+    }
+}

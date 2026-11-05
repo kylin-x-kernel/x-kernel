@@ -16,7 +16,7 @@ use khal::paging::MappingFlags;
 use ksignal::api::ProcessSignalManager;
 use ksync::{Mutex, MutexGuard};
 use ktime_types::TimeSpan;
-use ktimer::{PosixTimerCreateNotify, TimerDelivery};
+use ktimer::{PosixTimerConfig, PosixTimerCreateNotify, TimerDelivery};
 use memaddr::VirtAddr;
 use memspace::{
     InvalidateHandle, MmObserver, MmSpace, MremapSource, process_lifetime::MmUserHandle,
@@ -625,16 +625,57 @@ impl Process {
 
     /// Creates a POSIX timer while runtime remains attached.
     ///
+    /// Pins the runtime and reserves notifying-timer storage outside the manager
+    /// lock, then consumes the configuration under that lock. Requires a
+    /// sleepable, reclaim-safe task context without locks needed by reclaim,
+    /// IRQ/preemption exclusion or non-sleepable RCU scopes.
+    /// Rejected admission retains the configuration until after the manager
+    /// lock is released, then maps the rejection back to its original error.
+    ///
     /// # Errors
     ///
-    /// Returns `KError::NoSuchProcess` when runtime is gone and forwards the
-    /// matching `ktimer::ProcessTimerManager::create_posix_timer` error contract.
+    /// Returns `KError::NoSuchProcess` when runtime or a requested target task
+    /// is gone. InvalidInput covers a wrong-process/exited target and invalid
+    /// configuration or exhausted manager identity space. Runtime lookup precedes
+    /// target capture and configuration validation. Target capture holds no
+    /// timer-manager lock and allocates no target owner. NoMemory from record
+    /// reservation returns before any timer ID is published. SIGEV_NONE skips
+    /// reservation; timer-map and alarm allocations retain their existing policy.
     pub fn create_posix_timer(
         &self,
         clock_id: i32,
         notify: PosixTimerCreateNotify,
     ) -> KResult<i32> {
-        self.with_timer_manager_mut(|manager| manager.create_posix_timer(clock_id, notify))
+        let runtime = self.runtime()?;
+        let origin = Arc::downgrade(&runtime);
+        let target = match notify {
+            PosixTimerCreateNotify::Signal {
+                target_tid: Some(tid),
+                ..
+            } => {
+                let task = crate::lookup::task(tid)?;
+                let thread = task.try_as_thread().ok_or(KError::InvalidInput)?;
+                if !core::ptr::eq(thread.process().as_ref(), self) {
+                    return Err(KError::InvalidInput);
+                }
+                thread
+                    .signal_manager()
+                    .timer_target()
+                    .ok_or(KError::InvalidInput)?
+            }
+            _ => ksignal::TimerSignalTarget::process(Arc::downgrade(runtime.signal_manager())),
+        };
+        let config = PosixTimerConfig::new(clock_id, notify, origin, target)?;
+        let result = {
+            let mut manager = runtime.timer_manager().lock();
+            let result = manager.create_posix_timer(config);
+            self.set_cpu_timers_armed(manager.any_cpu_timer_armed());
+            result
+        };
+        result.map_err(|rejected| {
+            let (error, _config) = rejected.into_parts();
+            error
+        })
     }
 
     /// Returns the current POSIX timer state while runtime remains attached.
@@ -677,6 +718,7 @@ impl Process {
                 process_stime,
             )
         })
+        .map(|update| update.finish())
     }
 
     /// Deletes a POSIX timer while runtime remains attached.
@@ -686,7 +728,10 @@ impl Process {
     /// Returns `KError::NoSuchProcess` when runtime is gone and forwards the
     /// matching `ktimer::ProcessTimerManager::delete_posix_timer` error contract.
     pub fn delete_posix_timer(&self, timer_id: i32) -> KResult<()> {
-        self.with_timer_manager_mut(|manager| manager.delete_posix_timer(timer_id))
+        let retired =
+            self.with_timer_manager_mut(|manager| manager.delete_posix_timer(timer_id))?;
+        drop(retired);
+        Ok(())
     }
 
     /// Returns the POSIX timer overrun count while runtime remains attached.
@@ -768,34 +813,6 @@ impl Process {
         let (process_utime, process_stime) = self.process_cpu_times();
         self.with_timer_manager_mut(|manager| {
             Ok(manager.poll_cpu_timers(process_utime, process_stime))
-        })
-    }
-
-    /// Updates POSIX timer signal accounting when a timer signal is dequeued.
-    pub(crate) fn on_timer_signal_dequeued(&self, timer_id: i32, signal_seq: u32) -> KResult<bool> {
-        let runtime = self.runtime()?;
-        // The sample walks the thread table, so only pay for it when this
-        // dequeue will consume it: a stale generation or a timer whose clock
-        // ignores the totals never does. The read-only check deliberately
-        // bypasses `with_timer_manager_mut`; the mutation below goes through it.
-        let needs_cpu_times = runtime
-            .timer_manager()
-            .lock()
-            .posix_timer_dequeue_needs_cpu_times(timer_id, signal_seq);
-        let (process_utime, process_stime) = if needs_cpu_times {
-            self.process_cpu_times()
-        } else {
-            (TimeSpan::ZERO, TimeSpan::ZERO)
-        };
-        self.with_timer_manager_mut(|manager| {
-            Ok(
-                manager.on_timer_signal_dequeued(
-                    timer_id,
-                    signal_seq,
-                    process_utime,
-                    process_stime,
-                ),
-            )
         })
     }
 

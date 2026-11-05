@@ -41,6 +41,13 @@ pub use action::*;
 mod pending;
 pub use pending::*;
 
+mod notification;
+pub use notification::{
+    PreparedTimerRecord, SignalNotification, TimerSignalCancellation, TimerSignalOrigin,
+    TimerSignalReceipt, TimerSignalRejection, TimerSignalSendOutcome, TimerSignalTarget,
+    process_one_ready_timer_record, register_timer_record_waker,
+};
+
 mod siglock;
 pub(crate) use siglock::{Dequeued, SigLock, SlotId};
 

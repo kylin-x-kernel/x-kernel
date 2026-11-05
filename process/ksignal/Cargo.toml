@@ -9,7 +9,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-kalloc-types.workspace = true
+kalloc-types = { workspace = true, features = ["intrusive-collections"] }
+intrusive-collections.workspace = true
 kaddr_layout.workspace = true
 kcpu.workspace = true
 kerrno.workspace = true

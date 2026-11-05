@@ -32,6 +32,247 @@ fn new_thread_manager() -> alloc::sync::Arc<ThreadSignalManager> {
 }
 
 #[def_test]
+fn standard_owner_failure_preserves_bit_and_coalesces_without_retry() {
+    let mut pending = PendingSignals::default();
+    let mut mask = SignalSet::default();
+    mask.add(Signo::SIGUSR1);
+    let allocations = core::cell::Cell::new(0);
+    for attempt in 0..2 {
+        let rejected = pending.put_notification_with_allocator(
+            SignalInfo::new_user(Signo::SIGUSR1, linux_raw_sys::general::SI_QUEUE as _, 123).into(),
+            |node| {
+                allocations.set(allocations.get() + 1);
+                if attempt == 0 {
+                    None
+                } else {
+                    kalloc_types::KArc::new_nowait(node).ok()
+                }
+            },
+        );
+        assert_eq!(rejected.is_some(), attempt != 0);
+    }
+    assert_eq!(allocations.get(), 1);
+    assert!(pending.has_deliverable(SignalSet::default()));
+    assert!(!pending.has_deliverable(mask));
+    let (info, receipt) = pending.dequeue_notification(&mask).unwrap().into_parts();
+    assert_eq!(info.signo(), Signo::SIGUSR1);
+    assert_eq!(info.code(), linux_raw_sys::general::SI_USER as i32);
+    assert_eq!(info.errno(), 0);
+    assert!(info.sigval().is_none());
+    assert!(receipt.is_none());
+    assert!(pending.set.is_empty());
+    assert!(pending.dequeue_signal(&mask).is_none());
+}
+
+#[def_test]
+fn ordinary_sigkill_does_not_request_owner_storage() {
+    let mut pending = PendingSignals::default();
+    let allocations = core::cell::Cell::new(0);
+    assert!(
+        pending
+            .put_notification_with_allocator(SignalInfo::new_kernel(Signo::SIGKILL).into(), |_| {
+                allocations.set(allocations.get() + 1);
+                None
+            },)
+            .is_none()
+    );
+    assert_eq!(allocations.get(), 0);
+    let mut mask = SignalSet::default();
+    mask.add(Signo::SIGKILL);
+    let info = pending.dequeue_signal(&mask).unwrap();
+    assert_eq!(info.signo(), Signo::SIGKILL);
+    assert_eq!(info.code(), linux_raw_sys::general::SI_USER as i32);
+    assert!(pending.set.is_empty());
+}
+
+#[def_test]
+fn sigkill_bit_only_admission_reaches_both_manager_queues() {
+    for private in [false, true] {
+        let thread = new_thread_manager();
+        if private {
+            assert!(thread.send_signal(SignalInfo::new_kernel(Signo::SIGKILL)));
+        } else {
+            assert_eq!(
+                thread
+                    .process()
+                    .send_signal(SignalInfo::new_kernel(Signo::SIGKILL)),
+                Some(1)
+            );
+        }
+        assert!(thread.pending().has(Signo::SIGKILL));
+        let mut mask = SignalSet::default();
+        mask.add(Signo::SIGKILL);
+        assert_eq!(
+            thread.dequeue_signal(&mask).unwrap().code(),
+            linux_raw_sys::general::SI_USER as i32
+        );
+        assert!(thread.pending().is_empty());
+    }
+}
+
+#[def_test]
+fn timer_private_target_rejects_exit_and_reused_slot() {
+    let thread = new_thread_manager();
+    let process = thread.process().clone();
+    let target = thread.timer_target().unwrap();
+    assert!(target.matches_thread(&thread));
+    thread.exit();
+    let fatal_before = process.fatal_signal_snapshot();
+    assert_eq!(
+        target
+            .send(SignalInfo::new_kernel(Signo::SIGKILL).into())
+            .wake_tid(),
+        None
+    );
+    assert_eq!(process.fatal_signal_snapshot(), fatal_before);
+    assert!(thread.pending().is_empty());
+    assert!(!target.matches_thread(&thread));
+    drop(thread);
+    let successor = ThreadSignalManager::new(1, process).unwrap();
+    assert!(!target.matches_thread(&successor));
+    assert_eq!(
+        target
+            .send(SignalInfo::new_kernel(Signo::SIGUSR1).into())
+            .wake_tid(),
+        None
+    );
+    assert!(successor.pending().is_empty());
+    let fresh = successor.timer_target().unwrap();
+    assert_eq!(
+        fresh
+            .send(SignalInfo::new_kernel(Signo::SIGUSR1).into())
+            .wake_tid(),
+        Some(1)
+    );
+    assert!(successor.pending().has(Signo::SIGUSR1));
+}
+
+#[def_test]
+fn timer_target_follows_slot_rebind_not_original_number() {
+    let thread = new_thread_manager();
+    let target = thread.timer_target().unwrap();
+    thread.rebind_after_exec(2);
+    let successor = ThreadSignalManager::new(1, thread.process().clone()).unwrap();
+    assert_eq!(
+        target
+            .send(SignalInfo::new_kernel(Signo::SIGUSR1).into())
+            .wake_tid(),
+        Some(2)
+    );
+    assert!(thread.pending().has(Signo::SIGUSR1));
+    assert!(successor.pending().is_empty());
+    assert!(target.matches_thread(&thread));
+    assert!(!target.matches_thread(&successor));
+}
+
+#[def_test]
+fn timer_shared_target_preserves_blocking_and_rejects_empty_or_expired_manager() {
+    let thread = new_thread_manager();
+    let process = thread.process().clone();
+    let target = crate::TimerSignalTarget::process(Arc::downgrade(&process));
+    let unrelated = new_thread_manager();
+    assert!(!target.matches_thread(&unrelated));
+    let mut mask = SignalSet::default();
+    mask.add(Signo::SIGUSR1);
+    thread.set_blocked(mask);
+    assert_eq!(
+        target
+            .send(SignalInfo::new_kernel(Signo::SIGUSR1).into())
+            .wake_tid(),
+        None
+    );
+    assert!(process.pending().has(Signo::SIGUSR1));
+    assert!(thread.dequeue_signal(&mask).is_some());
+    thread.exit();
+    assert_eq!(
+        target
+            .send(SignalInfo::new_kernel(Signo::SIGUSR1).into())
+            .wake_tid(),
+        None
+    );
+    assert!(process.pending().is_empty());
+    drop(thread);
+    let weak = Arc::downgrade(&process);
+    drop(process);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(
+        target
+            .send(SignalInfo::new_kernel(Signo::SIGUSR1).into())
+            .wake_tid(),
+        None
+    );
+    assert!(unrelated.pending().is_empty());
+}
+
+#[def_test]
+fn slot_generation_high_bits_prevent_stale_index_reuse() {
+    let lock = crate::SigLock::new();
+    let (stale, _) = lock.register(31, kalloc_types::AllocFlags::NOWAIT).unwrap();
+    lock.retire(stale);
+    lock.set_next_generation_for_test(1u64 << 32);
+    let (successor, hint) = lock.register(32, kalloc_types::AllocFlags::NOWAIT).unwrap();
+    assert!(stale != successor);
+    let rejected =
+        lock.transact(|txn| txn.put_thread(stale, SignalInfo::new_kernel(Signo::SIGUSR1)));
+    assert!(rejected.is_some());
+    assert!(!hint.load(Ordering::Acquire));
+    lock.retire(stale);
+    let rejected =
+        lock.transact(|txn| txn.put_thread(successor, SignalInfo::new_kernel(Signo::SIGUSR1)));
+    assert!(rejected.is_none());
+    assert!(hint.load(Ordering::Acquire));
+    lock.retire(successor);
+}
+
+#[def_test]
+fn exhausted_registration_preserves_signal_state_and_allows_retirement() {
+    let lock = crate::SigLock::new();
+    lock.set_next_generation_for_test(u64::MAX);
+    let (last, hint) = lock.register(41, kalloc_types::AllocFlags::NOWAIT).unwrap();
+    let rejected =
+        lock.transact(|txn| txn.put_thread(last, SignalInfo::new_kernel(Signo::SIGUSR1)));
+    assert!(rejected.is_none());
+    assert!(matches!(
+        lock.register(42, kalloc_types::AllocFlags::NOWAIT),
+        Err(kerrno::KError::InvalidInput)
+    ));
+    assert!(hint.load(Ordering::Acquire));
+    assert!(lock.inspect(|view| view.pending(last)).has(Signo::SIGUSR1));
+    assert_eq!(Arc::strong_count(&hint), 2);
+    lock.retire(last);
+    assert_eq!(Arc::strong_count(&hint), 1);
+    assert_eq!(
+        lock.inspect(|view| view.find_target(Signo::SIGUSR1)),
+        (None, false)
+    );
+    assert!(matches!(
+        lock.register(43, kalloc_types::AllocFlags::NOWAIT),
+        Err(kerrno::KError::InvalidInput)
+    ));
+    assert_eq!(
+        lock.inspect(|view| view.find_target(Signo::SIGUSR1)),
+        (None, false)
+    );
+}
+
+#[def_test]
+fn allocation_policy_failure_does_not_consume_last_slot_generation() {
+    let lock = crate::SigLock::new();
+    lock.set_next_generation_for_test(u64::MAX);
+    let invalid = kalloc_types::AllocFlags::from_bits_retain(1 << 31);
+    assert!(matches!(
+        lock.register(51, invalid),
+        Err(kerrno::KError::InvalidInput)
+    ));
+    let (last, _) = lock.register(52, kalloc_types::AllocFlags::NOWAIT).unwrap();
+    lock.retire(last);
+    assert!(matches!(
+        lock.register(53, kalloc_types::AllocFlags::NOWAIT),
+        Err(kerrno::KError::InvalidInput)
+    ));
+}
+
+#[def_test]
 fn test_slot_policy_failure_does_not_publish_registration() {
     let lock = crate::SigLock::new();
     let invalid = kalloc_types::AllocFlags::from_bits_retain(1 << 31);
@@ -49,11 +290,72 @@ fn test_slot_policy_failure_does_not_publish_registration() {
         lock.inspect(|view| view.find_target(Signo::SIGUSR1)).0,
         Some(42)
     );
-    lock.transact(|txn| txn.retire(slot));
+    lock.retire(slot);
     assert_eq!(
         lock.inspect(|view| view.find_target(Signo::SIGUSR1)),
         (None, false)
     );
+}
+
+#[def_test]
+fn test_detached_slot_keeps_ownership_without_retaining_registration() {
+    let lock = crate::SigLock::new();
+    let (slot, hint) = lock.register(61, kalloc_types::AllocFlags::NOWAIT).unwrap();
+    let _rejected =
+        lock.transact(|txn| txn.put_thread(slot, SignalInfo::new_kernel(Signo::SIGUSR1)));
+    let _rejected = lock.transact(|txn| txn.put_shared(SignalInfo::new_kernel(Signo::SIGRTMIN)));
+    assert_eq!(Arc::strong_count(&hint), 2);
+
+    let (retired, retained_references, target, pending) = lock.transact(|txn| {
+        let retired = txn.detach_slot(slot);
+        (
+            retired,
+            Arc::strong_count(&hint),
+            txn.view().find_target(Signo::SIGUSR1),
+            txn.view().pending(slot),
+        )
+    });
+    assert!(retired.is_some());
+    assert_eq!(retained_references, 2);
+    assert_eq!(target, (None, false));
+    assert!(pending.is_empty());
+    let (successor, successor_hint) = lock.register(62, kalloc_types::AllocFlags::NOWAIT).unwrap();
+    assert!(successor_hint.load(Ordering::Acquire));
+    lock.retire(slot);
+    assert_eq!(
+        lock.inspect(|view| view.find_target(Signo::SIGUSR1)),
+        (Some(62), false)
+    );
+    assert!(lock.inspect(|view| view.pending(successor)).is_empty());
+    assert!(
+        lock.inspect(|view| view.shared_pending())
+            .has(Signo::SIGRTMIN)
+    );
+
+    drop(retired);
+    assert_eq!(Arc::strong_count(&hint), 1);
+    lock.retire(successor);
+    assert_eq!(Arc::strong_count(&successor_hint), 1);
+}
+
+#[def_test]
+fn test_standard_dequeue_transfers_storage_before_queue_reuse() {
+    let mut pending = PendingSignals::default();
+    let mut mask = SignalSet::default();
+    mask.add(Signo::SIGUSR1);
+    assert!(pending.put_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
+    let detached = pending.dequeue_notification(&mask).unwrap();
+    assert!(!pending.set.has(Signo::SIGUSR1));
+    assert!(pending.put_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
+    let (info, receipt) = detached.into_parts();
+    assert_eq!(info.signo(), Signo::SIGUSR1);
+    assert!(receipt.is_none());
+    assert!(pending.set.has(Signo::SIGUSR1));
+    assert_eq!(
+        pending.dequeue_signal(&mask).unwrap().signo(),
+        Signo::SIGUSR1
+    );
+    assert!(pending.dequeue_signal(&mask).is_none());
 }
 
 #[def_test]
@@ -109,6 +411,46 @@ fn observe_pending(
         .register_weak(source)
         .unwrap();
     (observed, registrations)
+}
+
+#[def_test]
+fn shared_disposition_changes_apply_to_process_and_private_admission() {
+    for is_private in [false, true] {
+        let receiver = new_thread_manager();
+        let peer = receiver.process().fork_shared().unwrap();
+        let signo = Signo::SIGUSR1;
+        peer.set_signal_action(
+            signo,
+            SignalAction {
+                disposition: SignalDisposition::Ignore,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let source = receiver.pending_source().unwrap();
+        let (observed, _registration) = observe_pending(&source, &receiver, signo);
+        let send = || {
+            if is_private {
+                let _ = receiver.send_signal(SignalInfo::new_kernel(signo));
+            } else {
+                let _ = receiver
+                    .process()
+                    .send_signal(SignalInfo::new_kernel(signo));
+            }
+        };
+        send();
+        assert!(receiver.pending().is_empty());
+        assert_eq!(observed.calls.load(Ordering::Relaxed), 0);
+
+        let old = peer
+            .replace_signal_action(signo, Some(SignalAction::default()))
+            .unwrap();
+        assert!(matches!(old.disposition, SignalDisposition::Ignore));
+        send();
+        assert!(receiver.pending().has(signo));
+        assert_eq!(observed.calls.load(Ordering::Relaxed), 1);
+        assert!(observed.saw_pending.load(Ordering::Relaxed));
+    }
 }
 
 #[def_test]
@@ -889,25 +1231,32 @@ fn test_availability_projection_tracks_both_queues() {
     assert!(!hint.load(Ordering::Acquire));
 
     // Thread-private queue: enqueue, mask, unmask, dequeue.
-    lock.transact(|txn| txn.put_thread(slot, SignalInfo::new_kernel(Signo::SIGTERM)));
+    let _rejected =
+        lock.transact(|txn| txn.put_thread(slot, SignalInfo::new_kernel(Signo::SIGTERM)));
     assert!(hint.load(Ordering::Acquire));
     block(&lock, slot, Signo::SIGTERM);
     assert!(!hint.load(Ordering::Acquire));
     unblock(&lock, slot);
     assert!(hint.load(Ordering::Acquire));
-    let taken = lock.transact(|txn| txn.take(slot)).map(|d| d.sig.signo());
+    let taken = lock
+        .transact(|txn| txn.take(slot))
+        .and_then(|detached| detached.complete())
+        .map(|dequeued| dequeued.sig.signo());
     assert_eq!(taken, Some(Signo::SIGTERM));
     assert!(!hint.load(Ordering::Acquire));
 
     // Process-directed queue: the same transitions, but the answer depends on
     // this thread's mask, so the queueing side must publish every slot.
-    lock.transact(|txn| txn.put_shared(SignalInfo::new_kernel(Signo::SIGUSR1)));
+    let _rejected = lock.transact(|txn| txn.put_shared(SignalInfo::new_kernel(Signo::SIGUSR1)));
     assert!(hint.load(Ordering::Acquire));
     block(&lock, slot, Signo::SIGUSR1);
     assert!(!hint.load(Ordering::Acquire));
     unblock(&lock, slot);
     assert!(hint.load(Ordering::Acquire));
-    let taken = lock.transact(|txn| txn.take(slot)).map(|d| d.sig.signo());
+    let taken = lock
+        .transact(|txn| txn.take(slot))
+        .and_then(|detached| detached.complete())
+        .map(|dequeued| dequeued.sig.signo());
     assert_eq!(taken, Some(Signo::SIGUSR1));
     assert!(!hint.load(Ordering::Acquire));
 }
@@ -951,7 +1300,7 @@ fn test_leave_group_removes_delivery_target() {
 fn test_retired_slot_handle_cannot_address_reused_slot() {
     let lock = crate::SigLock::new();
     let (stale, _) = lock.register(31, kalloc_types::AllocFlags::KERNEL).unwrap();
-    lock.transact(|txn| txn.retire(stale));
+    lock.retire(stale);
 
     // The freed index is reused, with a new generation.
     let (successor, hint) = lock.register(32, kalloc_types::AllocFlags::KERNEL).unwrap();
@@ -962,13 +1311,19 @@ fn test_retired_slot_handle_cannot_address_reused_slot() {
     lock.transact(|txn| txn.set_blocked(stale, set));
     assert!(lock.inspect(|view| view.blocked(successor)).is_empty());
 
-    assert!(!lock.transact(|txn| txn.put_thread(stale, SignalInfo::new_kernel(Signo::SIGTERM))));
+    assert!(
+        lock.transact(|txn| txn.put_thread(stale, SignalInfo::new_kernel(Signo::SIGTERM)))
+            .is_some()
+    );
     assert!(lock.inspect(|view| view.pending(successor)).is_empty());
     assert!(lock.transact(|txn| txn.take(stale)).is_none());
     assert!(!hint.load(Ordering::Acquire));
 
     // The successor's own handle still works.
-    assert!(lock.transact(|txn| txn.put_thread(successor, SignalInfo::new_kernel(Signo::SIGTERM))));
+    assert!(
+        lock.transact(|txn| txn.put_thread(successor, SignalInfo::new_kernel(Signo::SIGTERM)))
+            .is_none()
+    );
     assert!(
         lock.inspect(|view| view.pending(successor))
             .has(Signo::SIGTERM)

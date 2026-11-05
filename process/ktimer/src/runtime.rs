@@ -14,11 +14,12 @@ extern crate alloc;
 use alloc::{borrow::ToOwned, collections::binary_heap::BinaryHeap, sync::Arc};
 use core::{
     cmp::Ordering,
+    future::poll_fn,
     sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    task::{Context, Poll},
 };
 
-use event_listener::{Event, listener};
-use futures_util::{FutureExt, select_biased};
+use futures_util::{FutureExt, select_biased, task::AtomicWaker};
 use khal::time::monotonic_time;
 use klazy::Once;
 use ksync::{Mutex, static_lock};
@@ -101,8 +102,47 @@ static_lock! {
         monotonic: BinaryHeap::new(), realtime: BinaryHeap::new(), boottime: BinaryHeap::new(),
     });
 }
-static EVENT_NEW_TIMER: Event = Event::new();
+static ALARM_WAKE: AlarmWake = AlarmWake::new();
+static ALARM_TASK_INIT: Once<()> = Once::new();
 static EXPIRED_TASK_HANDLER: Once<fn(Pid)> = Once::new();
+
+/// Coalesced rescan requests for the single alarm task, independent of wait lifetime.
+struct AlarmWake {
+    needs_rescan: AtomicBool,
+    waker: AtomicWaker,
+}
+
+impl AlarmWake {
+    const fn new() -> Self {
+        Self {
+            needs_rescan: AtomicBool::new(false),
+            waker: AtomicWaker::new(),
+        }
+    }
+
+    /// Publishes after the alarm queues are updated and unlocked.
+    ///
+    /// This stores no dynamically allocated listener. The sole consumer uses
+    /// block_on's task-bound waker; its clone/wake operations allocate no owner.
+    fn notify(&self) {
+        self.needs_rescan.store(true, AtomicOrdering::Release);
+        self.waker.wake();
+    }
+
+    fn poll_changed(&self, context: &mut Context<'_>) -> Poll<()> {
+        self.waker.register(context.waker());
+        if self.needs_rescan.swap(false, AtomicOrdering::AcqRel) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+
+    /// Wait cancellation preserves requests; every poll renews wake registration.
+    async fn changed(&self) {
+        poll_fn(|context| self.poll_changed(context)).await
+    }
+}
 
 pub(crate) struct AlarmTicket(AtomicBool);
 impl AlarmTicket {
@@ -131,7 +171,7 @@ pub(super) fn enqueue_alarm(deadline: TimerInstant, pid: Pid) -> Option<Arc<Alar
     });
     drop(guard);
     if should_wake {
-        EVENT_NEW_TIMER.notify(1);
+        ALARM_WAKE.notify();
     }
     Some(ticket)
 }
@@ -147,8 +187,9 @@ pub fn register_expired_task_handler(handler: fn(Pid)) {
 
 async fn alarm_task() {
     loop {
-        // Listeners precede both the queue and clock snapshots.
-        listener!(EVENT_NEW_TIMER => new_timer);
+        let record_progress = ksignal::process_one_ready_timer_record();
+        // Clock listeners precede snapshots; alarm rescan requests are persistent.
+        let new_timer = ALARM_WAKE.changed();
         let realtime = ktime::clock_change_listener(ktime::ClockDomain::Realtime);
         let boottime = ktime::clock_change_listener(ktime::ClockDomain::Boottime);
         let (next, expired) = {
@@ -170,6 +211,9 @@ async fn alarm_task() {
             }
             continue;
         }
+        if record_progress {
+            continue;
+        }
         // Clock changes invalidate conversions, never original heap ordering.
         // A registration failure falls back to a bounded retry, not a busy loop.
         let failed = select_biased! {
@@ -186,14 +230,18 @@ async fn alarm_task() {
 /// Spawns the global alarm task that waits on the earliest queued
 /// deadline across the three wall-clock domains and invokes the owner handler.
 ///
-/// Called once during kernel/process subsystem bring-up; the task runs for
-/// the lifetime of the kernel.
+/// Repeated calls are idempotent: the wake registration has exactly one consumer.
+/// The first call runs during kernel/process bring-up; the task runs for the
+/// lifetime of the kernel. Task creation retains its existing allocation policy.
 pub fn spawn_alarm_task() {
-    ktask::spawn_raw(
-        || block_on(alarm_task()),
-        "alarm_task".to_owned(),
-        kbuild_config::TASK_STACK_SIZE,
-    );
+    ALARM_TASK_INIT.call_once(|| {
+        ksignal::register_timer_record_waker(|| ALARM_WAKE.notify());
+        ktask::spawn_raw(
+            || block_on(alarm_task()),
+            "alarm_task".to_owned(),
+            kbuild_config::TASK_STACK_SIZE,
+        );
+    });
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/runtime.rs");

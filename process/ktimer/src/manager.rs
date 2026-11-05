@@ -15,19 +15,68 @@ use crate::{
     Pid,
     delivery::{TimerDelivery, TimerSignal},
     interval_timer::{ITIMER_SIGNAL_CAPACITY, ITimer, TimerInstant, timer_signal},
-    posix_timer::{PosixTimer, PosixTimerClock, PosixTimerCreateNotify},
+    posix_timer::{PosixTimer, PosixTimerConfig, PosixTimerCreateError},
 };
 
 const ITIMER_REAL_INDEX: usize = ITimerType::Real as usize;
 const ITIMER_VIRTUAL_INDEX: usize = ITimerType::Virtual as usize;
 const ITIMER_PROF_INDEX: usize = ITimerType::Prof as usize;
 
+/// Ownership removed from the live timer map, retained for unlocked destruction.
+///
+/// Drop only after releasing the timer-manager lock. This owner cannot rearm or
+/// complete the removed timer and performs no cancellation acknowledgement.
+#[must_use = "release retired timer ownership outside the timer-manager lock"]
+pub struct RetiredPosixTimer {
+    timer: PosixTimer,
+}
+
+/// A detached timer map, including its storage, for unlocked destruction.
+///
+/// Taking this owner publishes an empty live map without allocating a replacement.
+/// Drop it after releasing the timer-manager lock, not inside the transaction.
+#[must_use = "release retired timer ownership outside the timer-manager lock"]
+pub struct RetiredPosixTimers {
+    timers: BTreeMap<i32, PosixTimer>,
+}
+
+impl Drop for RetiredPosixTimer {
+    fn drop(&mut self) {
+        drop(self.timer.cancel_notifications());
+    }
+}
+
+impl Drop for RetiredPosixTimers {
+    fn drop(&mut self) {
+        for timer in self.timers.values() {
+            drop(timer.cancel_notifications());
+        }
+    }
+}
+
+/// Rearm result retaining old-generation cancellation until the caller unlocks.
+#[must_use = "finish the timer update outside the timer-manager lock"]
+pub struct PosixTimerUpdate {
+    old: (TimeSpan, TimeSpan),
+    delivery: Option<TimerDelivery>,
+    cancellation: Option<ksignal::TimerSignalCancellation>,
+}
+
+impl PosixTimerUpdate {
+    /// Removes invalidated pending ownership before returning the syscall result.
+    /// Call outside timer and signal locks; cancellation does not complete a receipt.
+    pub fn finish(self) -> ((TimeSpan, TimeSpan), Option<TimerDelivery>) {
+        drop(self.cancellation);
+        (self.old, self.delivery)
+    }
+}
+
 /// A manager for process-shared signal-driven interval timers.
 pub struct ProcessTimerManager {
     owner_pid: Pid,
     itimers: [ITimer; ITIMER_SIGNAL_CAPACITY],
     next_posix_timer_id: i32,
-    next_posix_signal_seq: u32,
+    next_posix_signal_seq: Option<u64>,
     posix_timers: BTreeMap<i32, PosixTimer>,
 }
 
@@ -38,7 +87,7 @@ impl ProcessTimerManager {
             owner_pid,
             itimers: Default::default(),
             next_posix_timer_id: 1,
-            next_posix_signal_seq: 1,
+            next_posix_signal_seq: Some(1),
             posix_timers: BTreeMap::new(),
         }
     }
@@ -103,10 +152,6 @@ impl ProcessTimerManager {
             // back before update, renew its scheduling without duplicating a
             // still-queued ticket. The ticket also deduplicates repeated polls.
             timer.arm_deadline(owner_pid);
-            if expirations == 0 {
-                continue;
-            }
-
             if let Some(delivery) = timer.collect_delivery(*timer_id, expirations) {
                 deliveries.push(delivery);
             }
@@ -148,10 +193,6 @@ impl ProcessTimerManager {
             }
 
             let expirations = timer.update(process_utime, process_stime);
-            if expirations == 0 {
-                continue;
-            }
-
             if let Some(delivery) = timer.collect_delivery(*timer_id, expirations) {
                 deliveries.push(delivery);
             }
@@ -177,7 +218,11 @@ impl ProcessTimerManager {
             .any(|timer| timer.is_process_cpu() && timer.is_armed())
     }
 
-    /// Creates a POSIX timer with the given clock and notification policy.
+    /// Publishes a POSIX timer from an already validated configuration.
+    ///
+    /// Prepare the configuration before acquiring the owner mutex. ID and
+    /// sequence allocation happen here; the timer is initially disarmed.
+    /// BTreeMap storage still follows the existing infallible allocation policy.
     ///
     /// # Returns
     ///
@@ -185,22 +230,32 @@ impl ProcessTimerManager {
     ///
     /// # Errors
     ///
-    /// Returns `EINVAL` (`InvalidInput`) when `clock_id` is not a supported
-    /// POSIX timer clock or when the ID space is exhausted.
+    /// Returns `EINVAL` (`InvalidInput`) with the unconsumed configuration
+    /// when the ID or internal generation space is exhausted. The caller must
+    /// move the rejection outside its manager lock before releasing it or
+    /// recovering its parts.
     pub fn create_posix_timer(
         &mut self,
-        clock_id: i32,
-        notify: PosixTimerCreateNotify,
-    ) -> KResult<i32> {
-        let Some(clock) = PosixTimerClock::from_clock_id(clock_id) else {
-            return Err(KError::InvalidInput);
+        config: PosixTimerConfig,
+    ) -> Result<i32, PosixTimerCreateError> {
+        self.create_posix_timer_with_id(config, Self::allocate_posix_timer_id)
+    }
+
+    fn create_posix_timer_with_id(
+        &mut self,
+        config: PosixTimerConfig,
+        allocate_id: impl FnOnce(&mut Self) -> KResult<i32>,
+    ) -> Result<i32, PosixTimerCreateError> {
+        let Some(signal_seq) = self.next_posix_signal_seq else {
+            return Err(PosixTimerCreateError::new(KError::InvalidInput, config));
         };
-        let timer_id = self.allocate_posix_timer_id()?;
-        let signal_seq = self.allocate_posix_signal_seq();
-        self.posix_timers.insert(
-            timer_id,
-            PosixTimer::new(clock, notify, timer_id, signal_seq),
-        );
+        let timer_id = match allocate_id(self) {
+            Ok(timer_id) => timer_id,
+            Err(error) => return Err(PosixTimerCreateError::new(error, config)),
+        };
+        self.next_posix_signal_seq = signal_seq.checked_add(1);
+        self.posix_timers
+            .insert(timer_id, config.into_timer(timer_id, signal_seq));
         Ok(timer_id)
     }
 
@@ -233,13 +288,15 @@ impl ProcessTimerManager {
     ///
     /// # Returns
     ///
-    /// The previous `(interval, remaining)` state and the immediate delivery,
-    /// if the timer expired during this call.
+    /// A must-use update retaining previous state, immediate delivery and old
+    /// notification cancellation. Call `finish` after releasing the manager lock.
     ///
     /// # Errors
     ///
-    /// Returns `EINVAL` when `timer_id` is unknown or the requested deadline
-    /// is not representable in the timer's clock domain (state is preserved).
+    /// Returns `EINVAL` when `timer_id` is unknown, generations are exhausted,
+    /// or the requested deadline is not representable in the timer's clock
+    /// domain (state is preserved). Exhaustion also rejects disarming; deletion
+    /// remains available.
     ///
     /// # Panics
     ///
@@ -254,7 +311,8 @@ impl ProcessTimerManager {
         value: TimeSpan,
         process_utime: TimeSpan,
         process_stime: TimeSpan,
-    ) -> KResult<((TimeSpan, TimeSpan), Option<TimerDelivery>)> {
+    ) -> KResult<PosixTimerUpdate> {
+        let signal_seq = self.next_posix_signal_seq.ok_or(KError::InvalidInput)?;
         let owner_pid = self.owner_pid;
         let old = self
             .posix_timers
@@ -262,7 +320,7 @@ impl ProcessTimerManager {
             .ok_or(KError::InvalidInput)?
             .settime(absolute, interval, value, process_utime, process_stime)?;
 
-        let signal_seq = self.allocate_posix_signal_seq();
+        self.next_posix_signal_seq = signal_seq.checked_add(1);
         #[expect(
             clippy::expect_used,
             reason = "CG-021-no-panic-on-reachable-failure: The timer ID was validated in this \
@@ -272,6 +330,7 @@ impl ProcessTimerManager {
             .posix_timers
             .get_mut(&timer_id)
             .expect("POSIX timer was validated before allocating its signal sequence");
+        let cancellation = timer.cancel_notifications();
         timer.set_signal_seq(signal_seq);
         timer.arm_deadline(owner_pid);
         // The timer may have already expired; update() advances the deadline
@@ -279,19 +338,29 @@ impl ProcessTimerManager {
         let expirations = timer.update(process_utime, process_stime);
         let delivery = timer.collect_delivery(timer_id, expirations);
         timer.arm_deadline(owner_pid);
-        Ok((old, delivery))
+        Ok(PosixTimerUpdate {
+            old,
+            delivery,
+            cancellation,
+        })
     }
 
-    /// Deletes a POSIX timer, dropping any queued alarm entry at the next
-    /// poll.
+    /// Removes a POSIX timer and transfers its ownership for unlocked release.
+    ///
+    /// Lookup and dequeue validation reject the timer immediately. Existing
+    /// alarm-heap entries can still cause an owner poll, but cannot find this
+    /// removed timer. Drop the returned owner outside the manager lock.
     ///
     /// # Errors
     ///
     /// Returns `EINVAL` when `timer_id` does not name a live timer.
-    pub fn delete_posix_timer(&mut self, timer_id: i32) -> KResult<()> {
+    pub fn delete_posix_timer(&mut self, timer_id: i32) -> KResult<RetiredPosixTimer> {
         self.posix_timers
             .remove(&timer_id)
-            .map(|_| ())
+            .map(|timer| {
+                timer.invalidate_notifications();
+                RetiredPosixTimer { timer }
+            })
             .ok_or(KError::InvalidInput)
     }
 
@@ -316,10 +385,61 @@ impl ProcessTimerManager {
     /// unused for a stale generation or for a timer whose clock ignores those
     /// totals. The check applies the same admission rule
     /// [`Self::on_timer_signal_dequeued`] applies before it mutates anything.
-    pub fn posix_timer_dequeue_needs_cpu_times(&self, timer_id: i32, signal_seq: u32) -> bool {
+    pub fn posix_timer_dequeue_needs_cpu_times(&self, timer_id: i32, signal_seq: u64) -> bool {
         self.posix_timers
             .get(&timer_id)
             .is_some_and(|timer| timer.signal_seq() == signal_seq && timer.is_process_cpu())
+    }
+
+    /// Tests whether returning this exact record needs owner CPU-time sampling.
+    /// A deleted/reused timer ID is not authority to progress another record.
+    pub fn posix_timer_record_needs_cpu_times(
+        &self,
+        timer_id: i32,
+        record: &ksignal::PreparedTimerRecord,
+    ) -> bool {
+        self.posix_timers
+            .get(&timer_id)
+            .is_some_and(|timer| timer.owns_record(record) && timer.is_process_cpu())
+    }
+
+    /// Retries deferred demand when the originating record becomes available.
+    ///
+    /// The alarm task calls this through the unlocked runtime bridge. It may
+    /// produce a one-shot delivery even after the deadline has been consumed.
+    /// Record identity, not a reusable timer ID alone, authorizes the retry.
+    /// This returns one lease without allocating a delivery batch. Existing
+    /// wall-clock alarm scheduling retains its separate allocation policy.
+    pub fn progress_posix_timer_record(
+        &mut self,
+        timer_id: i32,
+        record: &ksignal::PreparedTimerRecord,
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
+    ) -> Option<TimerDelivery> {
+        let timer = self.posix_timers.get_mut(&timer_id)?;
+        if !timer.owns_record(record) {
+            return None;
+        }
+        let expirations = timer.update(process_utime, process_stime);
+        if timer.needs_alarm_task() {
+            timer.arm_deadline(self.owner_pid);
+        }
+        timer.collect_delivery(timer_id, expirations)
+    }
+
+    /// Captures a pending wake destination only for this exact timer reservation.
+    /// Use the returned destination after releasing the timer-manager lock.
+    pub fn posix_timer_record_wake_target(
+        &self,
+        timer_id: i32,
+        record: &ksignal::PreparedTimerRecord,
+    ) -> Option<(ksignal::TimerSignalTarget, ksignal::Signo)> {
+        let timer = self.posix_timers.get(&timer_id)?;
+        if !timer.owns_record(record) {
+            return None;
+        }
+        timer.pending_wake_target()
     }
 
     /// Test observation of a POSIX timer's registered runtime alarm deadline.
@@ -335,14 +455,22 @@ impl ProcessTimerManager {
 
     /// Test observation of a POSIX timer's current signal generation.
     #[cfg(unittest)]
-    pub(crate) fn posix_timer_signal_seq(&self, timer_id: i32) -> Option<u32> {
+    pub(crate) fn posix_timer_signal_seq(&self, timer_id: i32) -> Option<u64> {
         self.posix_timers.get(&timer_id).map(PosixTimer::signal_seq)
     }
 
     /// Removes all POSIX timers of the owner, used on exec (`execve` keeps
     /// itimers but not POSIX timers).
-    pub fn clear_posix_timers(&mut self) {
-        self.posix_timers.clear();
+    /// Does not reset the generation source, including its exhausted state.
+    /// Transfers the entire map without allocation. Drop the returned owner
+    /// outside the timer-manager lock.
+    pub fn clear_posix_timers(&mut self) -> RetiredPosixTimers {
+        for timer in self.posix_timers.values() {
+            timer.invalidate_notifications();
+        }
+        RetiredPosixTimers {
+            timers: core::mem::take(&mut self.posix_timers),
+        }
     }
 
     /// Dequeue validation for POSIX timer signals.
@@ -365,7 +493,7 @@ impl ProcessTimerManager {
     pub fn on_timer_signal_dequeued(
         &mut self,
         timer_id: i32,
-        signal_seq: u32,
+        signal_seq: u64,
         process_utime: TimeSpan,
         process_stime: TimeSpan,
     ) -> bool {
@@ -419,12 +547,6 @@ impl ProcessTimerManager {
                 return Err(KError::InvalidInput);
             }
         }
-    }
-
-    fn allocate_posix_signal_seq(&mut self) -> u32 {
-        let signal_seq = self.next_posix_signal_seq;
-        self.next_posix_signal_seq = self.next_posix_signal_seq.checked_add(1).unwrap_or(1);
-        signal_seq
     }
 
     fn arm_itimer_real(timer: &mut ITimer, owner_pid: Pid) {

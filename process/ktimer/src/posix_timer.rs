@@ -4,8 +4,10 @@
 
 //! POSIX timer configuration, clock mapping, and overrun bookkeeping.
 
+use alloc::sync::Weak;
+
 use kerrno::{KError, KResult};
-use ksignal::Signo;
+use ksignal::{PreparedTimerRecord, Signo, TimerSignalOrigin, TimerSignalTarget};
 use ktime_types::{BoottimeInstant, MonotonicInstant, ProcessCpuInstant, SystemTime, TimeSpan};
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME,
@@ -17,6 +19,105 @@ use crate::{
     delivery::{TimerDelivery, TimerSignal},
     interval_timer::{ITimer, TimerInstant},
 };
+
+/// Validated configuration consumed by timer admission.
+pub struct PosixTimerConfig {
+    clock: PosixTimerClock,
+    notify: PosixTimerCreateNotify,
+    origin: Weak<dyn TimerSignalOrigin>,
+    target: TimerSignalTarget,
+    record: Option<PreparedTimerRecord>,
+}
+
+/// Rejected admission retaining the unconsumed timer configuration.
+///
+/// Move this value out of the timer-manager critical section before releasing
+/// it. Rejection must not destroy resources prepared outside that section.
+pub struct PosixTimerCreateError {
+    error: KError,
+    config: PosixTimerConfig,
+}
+
+impl PosixTimerCreateError {
+    pub(crate) fn new(error: KError, config: PosixTimerConfig) -> Self {
+        Self { error, config }
+    }
+
+    /// Recovers the error and configuration for unlocked release or retry.
+    pub fn into_parts(self) -> (KError, PosixTimerConfig) {
+        (self.error, self.config)
+    }
+}
+
+impl core::fmt::Debug for PosixTimerCreateError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PosixTimerCreateError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PosixTimerConfig {
+    /// Validates the clock before entering the timer-manager critical section.
+    ///
+    /// This stage reserves notification storage and publishes no timer identity. The
+    /// syscall layer must already have validated the notification target.
+    /// Call in a sleepable, reclaim-safe task context without timer or signal
+    /// locks, IRQ/preemption exclusion or locks required by reclaim. SIGEV_NONE
+    /// performs no notification allocation. Nested timer-map/alarm allocations
+    /// are not covered by this reservation.
+    ///
+    /// `origin` must name the runtime admitting this timer. Weak ownership
+    /// avoids a pending-queue/runtime cycle and allocates no reference storage.
+    /// `target` must be the already captured signal destination selected by the
+    /// notification request. Numeric routing fields are descriptive only for
+    /// POSIX dispatch. SIGEV_NONE retains no signal record and never sends.
+    ///
+    /// # Errors
+    /// Returns InvalidInput for an unsupported clock, or NoMemory if reservation fails.
+    pub fn new(
+        clock_id: i32,
+        notify: PosixTimerCreateNotify,
+        origin: Weak<dyn TimerSignalOrigin>,
+        target: TimerSignalTarget,
+    ) -> KResult<Self> {
+        Self::new_with_reservation(clock_id, notify, origin, target, PreparedTimerRecord::new)
+    }
+
+    fn new_with_reservation(
+        clock_id: i32,
+        notify: PosixTimerCreateNotify,
+        origin: Weak<dyn TimerSignalOrigin>,
+        target: TimerSignalTarget,
+        reserve: impl FnOnce(Weak<dyn TimerSignalOrigin>) -> KResult<PreparedTimerRecord>,
+    ) -> KResult<Self> {
+        let clock = PosixTimerClock::from_clock_id(clock_id).ok_or(KError::InvalidInput)?;
+        let record = match notify {
+            PosixTimerCreateNotify::None => None,
+            PosixTimerCreateNotify::Signal { .. } => Some(reserve(origin.clone())?),
+        };
+        Ok(Self {
+            clock,
+            notify,
+            origin,
+            target,
+            record,
+        })
+    }
+
+    pub(crate) fn into_timer(self, timer_id: i32, signal_seq: u64) -> PosixTimer {
+        PosixTimer::new(
+            self.clock,
+            self.notify,
+            timer_id,
+            signal_seq,
+            self.origin,
+            self.target,
+            self.record,
+        )
+    }
+}
 
 /// Notification configuration requested at `timer_create`.
 #[derive(Clone, Copy)]
@@ -143,14 +244,18 @@ enum PosixTimerNotify {
 }
 
 pub(crate) struct PosixTimer {
+    _origin: Weak<dyn TimerSignalOrigin>,
+    target: TimerSignalTarget,
+    record: Option<PreparedTimerRecord>,
     clock: PosixTimerClock,
     armed_clock: PosixTimerClock,
     spec: ITimer,
     notify: PosixTimerNotify,
-    signal_seq: u32,
+    signal_seq: u64,
     pending_signal: bool,
     queued_overrun: u32,
     last_overrun: u32,
+    deferred_expirations: u32,
 }
 
 /// Narrows a collected expiration count for overrun accounting.
@@ -169,7 +274,10 @@ impl PosixTimer {
         clock: PosixTimerClock,
         notify: PosixTimerCreateNotify,
         timer_id: i32,
-        signal_seq: u32,
+        signal_seq: u64,
+        origin: Weak<dyn TimerSignalOrigin>,
+        target: TimerSignalTarget,
+        record: Option<PreparedTimerRecord>,
     ) -> Self {
         let notify = match notify {
             PosixTimerCreateNotify::None => PosixTimerNotify::None,
@@ -188,6 +296,9 @@ impl PosixTimer {
         };
 
         Self {
+            _origin: origin,
+            target,
+            record,
             clock,
             armed_clock: clock,
             spec: ITimer::default(),
@@ -196,6 +307,7 @@ impl PosixTimer {
             pending_signal: false,
             queued_overrun: 0,
             last_overrun: 0,
+            deferred_expirations: 0,
         }
     }
 
@@ -241,6 +353,7 @@ impl PosixTimer {
         self.pending_signal = false;
         self.queued_overrun = 0;
         self.last_overrun = 0;
+        self.deferred_expirations = 0;
         Ok(old)
     }
 
@@ -270,12 +383,37 @@ impl PosixTimer {
             .set_alarm(runtime_deadline, runtime_deadline.map(|_| owner_pid));
     }
 
-    pub(crate) fn set_signal_seq(&mut self, signal_seq: u32) {
+    pub(crate) fn set_signal_seq(&mut self, signal_seq: u64) {
         self.signal_seq = signal_seq;
     }
 
-    pub(crate) fn signal_seq(&self) -> u32 {
+    pub(crate) fn invalidate_notifications(&self) {
+        if let Some(record) = &self.record {
+            record.invalidate_through(self.signal_seq);
+        }
+    }
+
+    pub(crate) fn cancel_notifications(&self) -> Option<ksignal::TimerSignalCancellation> {
+        self.record
+            .as_ref()
+            .map(|record| record.invalidate(&self.target, self.signal_seq))
+    }
+
+    pub(crate) fn signal_seq(&self) -> u64 {
         self.signal_seq
+    }
+
+    pub(crate) fn owns_record(&self, record: &PreparedTimerRecord) -> bool {
+        self.record
+            .as_ref()
+            .is_some_and(|owned| owned.same_storage(record))
+    }
+
+    pub(crate) fn pending_wake_target(&self) -> Option<(TimerSignalTarget, Signo)> {
+        let PosixTimerNotify::Signal { signo, .. } = self.notify else {
+            return None;
+        };
+        self.pending_signal.then(|| (self.target.clone(), signo))
     }
 
     /// Folds intervals that are already due into the pending notification's
@@ -337,10 +475,6 @@ impl PosixTimer {
         timer_id: i32,
         expirations: usize,
     ) -> Option<TimerDelivery> {
-        if expirations == 0 {
-            return None;
-        }
-
         let PosixTimerNotify::Signal {
             signo,
             target_tid,
@@ -363,7 +497,20 @@ impl PosixTimer {
             return None;
         }
 
-        let overrun = expirations.saturating_sub(1);
+        self.deferred_expirations = self.deferred_expirations.saturating_add(expirations);
+        if self.deferred_expirations == 0 {
+            return None;
+        }
+        let overrun = self.deferred_expirations.saturating_sub(1);
+        let notification = self.record.as_ref()?.prepare(
+            signo,
+            timer_id,
+            overrun.min(i32::MAX as u32) as i32,
+            value.into_raw(),
+            self.signal_seq,
+            self.spec.is_periodic(),
+        )?;
+        self.deferred_expirations = 0;
         self.pending_signal = true;
         self.queued_overrun = overrun;
         // last_overrun is intentionally NOT written here.  It is frozen only
@@ -371,11 +518,8 @@ impl PosixTimer {
         // count for the most recently *delivered* notification).
 
         let signal = TimerSignal::Posix {
-            signo,
-            timer_id,
-            overrun: overrun.min(i32::MAX as u32) as i32,
-            signal_seq: self.signal_seq,
-            value: value.into_raw(),
+            target: self.target.clone(),
+            notification,
         };
         Some(match target_tid {
             Some(tid) => TimerDelivery::Thread { tid, signal },

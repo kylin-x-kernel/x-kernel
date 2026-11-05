@@ -11,9 +11,300 @@ use unittest::def_test;
 
 use super::ProcessTimerManager;
 use crate::{
-    TimerDelivery, TimerSignal,
+    PosixTimerConfig, TimerDelivery, TimerSignal,
     posix_timer::{PosixTimerCreateNotify, PosixTimerSigValue},
 };
+
+struct InactiveOrigin;
+
+impl ksignal::TimerSignalOrigin for InactiveOrigin {
+    fn complete(&self, _: i32, _: u64) -> ksignal::SignalDequeueAction {
+        ksignal::SignalDequeueAction::Drop
+    }
+}
+
+fn configuration(
+    clock_id: i32,
+    notify: PosixTimerCreateNotify,
+) -> kerrno::KResult<PosixTimerConfig> {
+    PosixTimerConfig::new(
+        clock_id,
+        notify,
+        alloc::sync::Weak::<InactiveOrigin>::new(),
+        ksignal::TimerSignalTarget::process(alloc::sync::Weak::new()),
+    )
+}
+
+#[def_test]
+fn configuration_rejects_unsupported_clock() {
+    assert!(matches!(
+        configuration(-1, PosixTimerCreateNotify::None),
+        Err(kerrno::KError::InvalidInput)
+    ));
+}
+
+#[def_test]
+fn deleted_timer_rejects_completion_before_releasing_ownership() {
+    let origin = alloc::sync::Arc::new(InactiveOrigin);
+    let weak = alloc::sync::Arc::downgrade(&origin);
+    let mut manager = ProcessTimerManager::new(1);
+    let timer_id = manager
+        .create_posix_timer(
+            PosixTimerConfig::new(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::None,
+                weak,
+                ksignal::TimerSignalTarget::process(alloc::sync::Weak::new()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let sequence = manager.posix_timer_signal_seq(timer_id).unwrap();
+    let retired = manager.delete_posix_timer(timer_id).unwrap();
+    assert_eq!(alloc::sync::Arc::weak_count(&origin), 1);
+    assert!(
+        manager
+            .get_posix_timer(timer_id, TimeSpan::ZERO, TimeSpan::ZERO)
+            .is_err()
+    );
+    assert!(!manager.on_timer_signal_dequeued(timer_id, sequence, TimeSpan::ZERO, TimeSpan::ZERO));
+    assert!(matches!(
+        manager.delete_posix_timer(timer_id),
+        Err(kerrno::KError::InvalidInput)
+    ));
+    manager.next_posix_timer_id = timer_id;
+    let successor = manager
+        .create_posix_timer(
+            configuration(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(successor, timer_id);
+    assert!(!manager.on_timer_signal_dequeued(successor, sequence, TimeSpan::ZERO, TimeSpan::ZERO));
+    drop(retired);
+    assert_eq!(alloc::sync::Arc::weak_count(&origin), 0);
+    assert!(
+        manager
+            .get_posix_timer(successor, TimeSpan::ZERO, TimeSpan::ZERO)
+            .is_ok()
+    );
+    drop(manager.delete_posix_timer(successor).unwrap());
+}
+
+#[def_test]
+fn cleared_timer_map_retains_owners_until_unlocked_release() {
+    let origin = alloc::sync::Arc::new(InactiveOrigin);
+    let mut manager = ProcessTimerManager::new(1);
+    for _ in 0..2 {
+        let weak = alloc::sync::Arc::downgrade(&origin);
+        let timer_id = manager
+            .create_posix_timer(
+                PosixTimerConfig::new(
+                    CLOCK_PROCESS_CPUTIME_ID as i32,
+                    PosixTimerCreateNotify::None,
+                    weak,
+                    ksignal::TimerSignalTarget::process(alloc::sync::Weak::new()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        manager
+            .set_posix_timer(
+                timer_id,
+                false,
+                TimeSpan::ZERO,
+                TimeSpan::from_nanos(10),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap()
+            .finish();
+    }
+    let sequence = manager.posix_timer_signal_seq(1).unwrap();
+    let next_sequence = manager.next_posix_signal_seq;
+    assert!(manager.any_cpu_timer_armed());
+    let retired = manager.clear_posix_timers();
+    assert!(manager.posix_timers.is_empty());
+    assert!(!manager.any_cpu_timer_armed());
+    assert_eq!(manager.next_posix_signal_seq, next_sequence);
+    assert_eq!(alloc::sync::Arc::weak_count(&origin), 2);
+    assert!(!manager.on_timer_signal_dequeued(1, sequence, TimeSpan::ZERO, TimeSpan::ZERO));
+    drop(manager.clear_posix_timers());
+    assert_eq!(alloc::sync::Arc::weak_count(&origin), 2);
+    drop(retired);
+    assert_eq!(alloc::sync::Arc::weak_count(&origin), 0);
+}
+
+#[def_test]
+fn generation_exhaustion_rejects_creation_without_consuming_identity() {
+    let mut manager = ProcessTimerManager::new(1);
+    manager.next_posix_signal_seq = Some(u64::MAX);
+    let timer_id = manager
+        .create_posix_timer(
+            configuration(CLOCK_MONOTONIC as i32, PosixTimerCreateNotify::None).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(manager.posix_timer_signal_seq(timer_id), Some(u64::MAX));
+    assert_eq!(manager.next_posix_signal_seq, None);
+    let next_id = manager.next_posix_timer_id;
+    let rejected = manager
+        .create_posix_timer_with_id(
+            configuration(CLOCK_MONOTONIC as i32, PosixTimerCreateNotify::None).unwrap(),
+            |_| panic!("exhausted generation must reject before ID allocation"),
+        )
+        .unwrap_err();
+    let (error, _config) = rejected.into_parts();
+    assert_eq!(error, kerrno::KError::InvalidInput);
+    assert_eq!(manager.next_posix_timer_id, next_id);
+    assert_eq!(manager.posix_timers.len(), 1);
+    drop(manager.delete_posix_timer(timer_id).unwrap());
+    drop(manager.clear_posix_timers());
+    assert_eq!(manager.next_posix_signal_seq, None);
+}
+
+#[def_test]
+fn generation_exhaustion_preserves_armed_timer_and_allows_deletion() {
+    let mut manager = ProcessTimerManager::new(1);
+    let timer_id = manager
+        .create_posix_timer(
+            configuration(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    manager.next_posix_signal_seq = Some(u64::MAX);
+    assert!(
+        manager
+            .set_posix_timer(
+                -1,
+                false,
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+                TimeSpan::ZERO
+            )
+            .is_err()
+    );
+    assert_eq!(manager.next_posix_signal_seq, Some(u64::MAX));
+    assert!(matches!(
+        manager.set_posix_timer(
+            timer_id,
+            false,
+            TimeSpan::ZERO,
+            TimeSpan::MAX,
+            TimeSpan::from_nanos(1),
+            TimeSpan::ZERO,
+        ),
+        Err(kerrno::KError::InvalidInput)
+    ));
+    assert_eq!(manager.next_posix_signal_seq, Some(u64::MAX));
+    manager
+        .set_posix_timer(
+            timer_id,
+            false,
+            TimeSpan::from_nanos(3),
+            TimeSpan::from_nanos(10),
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        )
+        .unwrap()
+        .finish();
+    let before = manager
+        .get_posix_timer(timer_id, TimeSpan::ZERO, TimeSpan::ZERO)
+        .unwrap();
+    assert!(matches!(
+        manager.set_posix_timer(
+            timer_id,
+            false,
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+            TimeSpan::ZERO
+        ),
+        Err(kerrno::KError::InvalidInput)
+    ));
+    assert_eq!(
+        manager
+            .get_posix_timer(timer_id, TimeSpan::ZERO, TimeSpan::ZERO)
+            .unwrap(),
+        before
+    );
+    assert_eq!(manager.posix_timer_signal_seq(timer_id), Some(u64::MAX));
+    drop(manager.delete_posix_timer(timer_id).unwrap());
+    assert!(manager.posix_timers.is_empty());
+}
+
+#[def_test]
+fn prepared_configuration_publishes_only_when_consumed() {
+    let mut manager = ProcessTimerManager::new(1);
+    let config = configuration(CLOCK_MONOTONIC as i32, PosixTimerCreateNotify::None).unwrap();
+    let next_id = manager.next_posix_timer_id;
+    let next_sequence = manager.next_posix_signal_seq;
+    assert!(manager.posix_timers.is_empty());
+    let timer_id = manager.create_posix_timer(config).unwrap();
+    assert_eq!(timer_id, next_id);
+    assert_eq!(manager.posix_timer_signal_seq(timer_id), next_sequence);
+    assert!(!manager.any_cpu_timer_armed());
+    drop(manager.delete_posix_timer(timer_id).unwrap());
+    assert!(manager.posix_timers.is_empty());
+}
+
+#[def_test]
+fn rejected_admission_returns_configuration_without_publishing() {
+    let mut manager = ProcessTimerManager::new(1);
+    let config = configuration(
+        CLOCK_PROCESS_CPUTIME_ID as i32,
+        PosixTimerCreateNotify::Signal {
+            signo: Signo::SIGRTMIN,
+            target_tid: Some(42),
+            value: PosixTimerSigValue::TimerId,
+        },
+    )
+    .unwrap();
+    let next_id = manager.next_posix_timer_id;
+    let next_sequence = manager.next_posix_signal_seq;
+    let rejected = manager
+        .create_posix_timer_with_id(config, |_| Err(kerrno::KError::InvalidInput))
+        .unwrap_err();
+    assert!(manager.posix_timers.is_empty());
+    assert_eq!(manager.next_posix_timer_id, next_id);
+    assert_eq!(manager.next_posix_signal_seq, next_sequence);
+    assert!(!manager.any_cpu_timer_armed());
+
+    let (error, config) = rejected.into_parts();
+    assert_eq!(error, kerrno::KError::InvalidInput);
+    let timer_id = manager.create_posix_timer(config).unwrap();
+    assert_eq!(timer_id, next_id);
+    assert_eq!(manager.posix_timer_signal_seq(timer_id), next_sequence);
+    manager
+        .set_posix_timer(
+            timer_id,
+            false,
+            TimeSpan::ZERO,
+            TimeSpan::from_nanos(1),
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        )
+        .unwrap()
+        .finish();
+    let deliveries = manager.poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO);
+    assert_eq!(deliveries.len(), 1);
+    assert!(matches!(
+        deliveries.as_slice(),
+        [TimerDelivery::Thread {
+            tid: 42,
+            signal: TimerSignal::Posix {
+                notification,
+                ..
+            },
+        }] if notification.signo() == Signo::SIGRTMIN && notification.receipt().unwrap().timer_id() == timer_id
+    ));
+}
 
 #[def_test]
 fn test_any_cpu_timer_armed_tracks_arm_and_disarm() {
@@ -46,12 +337,15 @@ fn test_any_cpu_timer_armed_tracks_arm_and_disarm() {
     // Process-CPU POSIX timers participate in the gate.
     let timer_id = manager
         .create_posix_timer(
-            CLOCK_PROCESS_CPUTIME_ID as i32,
-            PosixTimerCreateNotify::Signal {
-                signo: Signo::SIGRTMIN,
-                target_tid: None,
-                value: PosixTimerSigValue::TimerId,
-            },
+            configuration(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGRTMIN,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
     manager
@@ -63,9 +357,10 @@ fn test_any_cpu_timer_armed_tracks_arm_and_disarm() {
             TimeSpan::ZERO,
             TimeSpan::ZERO,
         )
-        .unwrap();
+        .unwrap()
+        .finish();
     assert!(manager.any_cpu_timer_armed());
-    manager.delete_posix_timer(timer_id).unwrap();
+    drop(manager.delete_posix_timer(timer_id).unwrap());
     assert!(!manager.any_cpu_timer_armed());
 }
 
@@ -104,12 +399,15 @@ fn test_posix_timer_signal_seq_invalidates_stale_signal() {
     let mut manager = ProcessTimerManager::new(1);
     let timer_id = manager
         .create_posix_timer(
-            CLOCK_PROCESS_CPUTIME_ID as i32,
-            PosixTimerCreateNotify::Signal {
-                signo: Signo::SIGRTMIN,
-                target_tid: None,
-                value: PosixTimerSigValue::TimerId,
-            },
+            configuration(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGRTMIN,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
     let (_, delivery) = manager
@@ -121,7 +419,8 @@ fn test_posix_timer_signal_seq_invalidates_stale_signal() {
             TimeSpan::ZERO,
             TimeSpan::ZERO,
         )
-        .unwrap();
+        .unwrap()
+        .finish();
     assert!(delivery.is_none());
 
     let delivery = manager
@@ -130,9 +429,13 @@ fn test_posix_timer_signal_seq_invalidates_stale_signal() {
         .next()
         .expect("timer delivery");
     let stale_signal_seq = match delivery {
-        TimerDelivery::Process(TimerSignal::Posix { signal_seq, .. }) => signal_seq,
+        TimerDelivery::Process(TimerSignal::Posix { notification, .. }) => {
+            notification.receipt().unwrap().signal_seq()
+        }
         _ => panic!("expected a POSIX timer signal"),
     };
+
+    manager.next_posix_signal_seq = Some(stale_signal_seq + (1u64 << 32));
 
     let _ = manager
         .set_posix_timer(
@@ -143,13 +446,17 @@ fn test_posix_timer_signal_seq_invalidates_stale_signal() {
             TimeSpan::from_nanos(1),
             TimeSpan::ZERO,
         )
-        .unwrap();
+        .unwrap()
+        .finish();
     assert!(!manager.on_timer_signal_dequeued(
         timer_id,
         stale_signal_seq,
         TimeSpan::from_nanos(1),
         TimeSpan::ZERO,
     ));
+    let current_seq = manager.posix_timer_signal_seq(timer_id).unwrap();
+    assert_eq!(current_seq as u32, stale_signal_seq as u32);
+    assert_ne!(current_seq, stale_signal_seq);
 }
 
 /// POSIX delivers at most one notification per pending timer signal. An
@@ -161,12 +468,15 @@ fn dequeued_notification_absorbs_intervals_due_before_delivery() {
     let mut manager = ProcessTimerManager::new(1);
     let timer_id = manager
         .create_posix_timer(
-            CLOCK_PROCESS_CPUTIME_ID as i32,
-            PosixTimerCreateNotify::Signal {
-                signo: Signo::SIGALRM,
-                target_tid: None,
-                value: PosixTimerSigValue::TimerId,
-            },
+            configuration(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGALRM,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
     let (_, delivery) = manager
@@ -178,7 +488,8 @@ fn dequeued_notification_absorbs_intervals_due_before_delivery() {
             TimeSpan::ZERO,
             TimeSpan::ZERO,
         )
-        .unwrap();
+        .unwrap()
+        .finish();
     assert!(delivery.is_none());
     // The first interval produces the notification; the two intervals that
     // elapse afterwards are still uncollected when it is dequeued.
@@ -188,7 +499,9 @@ fn dequeued_notification_absorbs_intervals_due_before_delivery() {
         .next()
         .expect("timer delivery");
     let signal_seq = match delivery {
-        TimerDelivery::Process(TimerSignal::Posix { signal_seq, .. }) => signal_seq,
+        TimerDelivery::Process(TimerSignal::Posix { notification, .. }) => {
+            notification.receipt().unwrap().signal_seq()
+        }
         _ => panic!("expected a POSIX timer signal"),
     };
     assert!(manager.on_timer_signal_dequeued(
@@ -222,12 +535,15 @@ fn dequeued_notification_rearms_the_advanced_alarm() {
     let mut manager = ProcessTimerManager::new(1);
     let timer_id = manager
         .create_posix_timer(
-            CLOCK_MONOTONIC as i32,
-            PosixTimerCreateNotify::Signal {
-                signo: Signo::SIGRTMIN,
-                target_tid: None,
-                value: PosixTimerSigValue::TimerId,
-            },
+            configuration(
+                CLOCK_MONOTONIC as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGRTMIN,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
     // Arm with an absolute deadline one second in the past: the arming
@@ -245,12 +561,14 @@ fn dequeued_notification_rearms_the_advanced_alarm() {
             TimeSpan::ZERO,
             TimeSpan::ZERO,
         )
-        .unwrap();
-    let TimerDelivery::Process(TimerSignal::Posix { signal_seq, .. }) =
+        .unwrap()
+        .finish();
+    let TimerDelivery::Process(TimerSignal::Posix { notification, .. }) =
         delivery.expect("a past deadline expires on arming")
     else {
         panic!("expected a POSIX timer signal");
     };
+    let signal_seq = notification.receipt().unwrap().signal_seq();
     let armed_after_arming = manager
         .posix_timer_alarm_deadline(timer_id)
         .expect("arming re-arms the next period");
@@ -286,12 +604,15 @@ fn dequeue_cpu_time_gate_matches_the_manager_admission() {
     let mut manager = ProcessTimerManager::new(1);
     let timer_id = manager
         .create_posix_timer(
-            CLOCK_PROCESS_CPUTIME_ID as i32,
-            PosixTimerCreateNotify::Signal {
-                signo: Signo::SIGALRM,
-                target_tid: None,
-                value: PosixTimerSigValue::TimerId,
-            },
+            configuration(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGALRM,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
     manager
@@ -303,15 +624,17 @@ fn dequeue_cpu_time_gate_matches_the_manager_admission() {
             TimeSpan::ZERO,
             TimeSpan::ZERO,
         )
-        .unwrap();
+        .unwrap()
+        .finish();
     let delivery = manager
         .poll_cpu_timers(TimeSpan::from_nanos(2), TimeSpan::ZERO)
         .into_iter()
         .next()
         .expect("timer delivery");
-    let TimerDelivery::Process(TimerSignal::Posix { signal_seq, .. }) = delivery else {
+    let TimerDelivery::Process(TimerSignal::Posix { notification, .. }) = delivery else {
         panic!("expected a POSIX timer signal");
     };
+    let signal_seq = notification.receipt().unwrap().signal_seq();
     assert!(manager.posix_timer_dequeue_needs_cpu_times(timer_id, signal_seq));
 
     // Re-arming bumps the generation: an in-flight notification from the
@@ -326,7 +649,8 @@ fn dequeue_cpu_time_gate_matches_the_manager_admission() {
             TimeSpan::from_nanos(2),
             TimeSpan::ZERO,
         )
-        .unwrap();
+        .unwrap()
+        .finish();
     assert!(!manager.posix_timer_dequeue_needs_cpu_times(timer_id, signal_seq));
 
     // A wall-clock timer never consumes the sampled totals: assert with
@@ -334,12 +658,15 @@ fn dequeue_cpu_time_gate_matches_the_manager_admission() {
     // decides the answer.
     let wall_clock_id = manager
         .create_posix_timer(
-            CLOCK_MONOTONIC as i32,
-            PosixTimerCreateNotify::Signal {
-                signo: Signo::SIGRTMIN,
-                target_tid: None,
-                value: PosixTimerSigValue::TimerId,
-            },
+            configuration(
+                CLOCK_MONOTONIC as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGRTMIN,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
     let wall_clock_seq = manager

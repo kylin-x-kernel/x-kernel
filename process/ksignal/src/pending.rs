@@ -3,73 +3,230 @@
 // See LICENSES for license details.
 
 //! Pending signal queues for processes and threads.
-use alloc::{boxed::Box, collections::vec_deque::VecDeque};
 use core::array;
 
-use crate::{MAX_SIGNALS, SignalInfo, SignalSet};
+use intrusive_collections::LinkedList;
+use kalloc_types::KArc;
+
+use crate::{
+    MAX_SIGNALS, SignalInfo, SignalNotification, SignalSet, TimerSignalReceipt,
+    notification::{NotificationAdapter, NotificationNode},
+};
+
+/// Notification storage transferred out of a pending queue without freeing it.
+pub(crate) enum DetachedNotification {
+    Stored(KArc<NotificationNode>),
+    BitOnly(crate::Signo),
+}
+
+impl DetachedNotification {
+    /// Consumes the detached owner after the enclosing signal lock is released.
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: detached queue owners contain exactly one \
+                  notification until consumed"
+    )]
+    pub(crate) fn into_parts(self) -> (SignalInfo, Option<TimerSignalReceipt>) {
+        match &self {
+            Self::Stored(node) => NotificationNode::into_notification(node)
+                .expect("detached notification payload")
+                .into_parts(),
+            Self::BitOnly(signo) => (SignalInfo::without_sender(*signo), None),
+        }
+    }
+}
+
+impl Drop for DetachedNotification {
+    fn drop(&mut self) {
+        if let Self::Stored(node) = self {
+            drop(NotificationNode::into_notification(node));
+        }
+    }
+}
+
+/// Removed owners whose payloads must be destroyed after the signal transaction.
+pub(crate) struct DiscardedNotifications(LinkedList<NotificationAdapter<false>>);
+
+impl Default for DiscardedNotifications {
+    fn default() -> Self {
+        Self(LinkedList::new(NotificationAdapter::new()))
+    }
+}
+
+impl Drop for DiscardedNotifications {
+    fn drop(&mut self) {
+        while let Some(node) = self.0.pop_front() {
+            drop(DetachedNotification::Stored(node));
+        }
+    }
+}
 
 /// Queue for managing pending signals awaiting delivery.
 ///
-/// This structure maintains separate handling for standard signals (1-31)
-/// and real-time signals (32-64), as they have different queuing semantics.
-/// Standard signals can only have one pending instance, while real-time
-/// signals can queue multiple instances.
+/// Each signo owns a FIFO shared by ordinary and prepared notifications.
+/// Ordinary standard sends coalesce whenever that signo is already pending.
+/// Distinct prepared timer records bypass that check, including for standard
+/// signals; each timer's unique lease still permits only one queued instance.
+/// Ignored periodic records retain that same link in a separate list, without
+/// setting pending bits, until replay, cancellation or destruction.
 pub struct PendingSignals {
     /// Bitmask of all pending signals
     pub set: SignalSet,
 
-    /// Signal information for standard signals (1-31)
-    /// Only one instance can be pending at a time
-    info_std: [Option<Box<SignalInfo>>; 32],
-    /// Signal information queues for real-time signals (32-64)
-    /// Multiple instances can be queued
-    info_rt: [VecDeque<SignalInfo>; MAX_SIGNALS - 31],
+    /// Same-signo arrival order, indexed by signal number minus one.
+    queues: [LinkedList<NotificationAdapter<false>>; MAX_SIGNALS],
+    ignored: LinkedList<NotificationAdapter<false>>,
 }
 
 impl Default for PendingSignals {
     fn default() -> Self {
         Self {
             set: SignalSet::default(),
-            info_std: Default::default(),
-            info_rt: array::from_fn(|_| VecDeque::new()),
+            queues: array::from_fn(|_| LinkedList::new(NotificationAdapter::new())),
+            ignored: LinkedList::new(NotificationAdapter::new()),
         }
     }
 }
 
 impl PendingSignals {
+    pub(crate) fn retain_ignored(&mut self, notification: SignalNotification) {
+        self.ignored.push_back(notification.into_node());
+    }
+
+    pub(crate) fn ignore(&mut self, signo: crate::Signo, discarded: &mut DiscardedNotifications) {
+        while let Some(node) = self.queues[signo as usize - 1].pop_front() {
+            if node.can_retain_ignored() {
+                self.ignored.push_back(node);
+            } else {
+                discarded.0.push_back(node);
+            }
+        }
+        self.set.remove(signo);
+    }
+
+    pub(crate) fn replay(
+        &mut self,
+        mask: SignalSet,
+        has_target: bool,
+        discarded: &mut DiscardedNotifications,
+    ) -> bool {
+        let mut has_replayed = false;
+        let mut cursor = self.ignored.front_mut();
+        while let Some(node) = cursor.get() {
+            let Some(signo) = node.signo().filter(|signo| mask.has(*signo)) else {
+                cursor.move_next();
+                continue;
+            };
+            let can_replay = has_target && node.can_retain_ignored();
+            if let Some(node) = cursor.remove() {
+                if can_replay {
+                    NotificationNode::schedule_requeue_wake(&node);
+                    self.queues[signo as usize - 1].push_back(node);
+                    self.set.add(signo);
+                    has_replayed = true;
+                } else {
+                    discarded.0.push_back(node);
+                }
+            }
+        }
+        has_replayed
+    }
+
+    pub(crate) fn hide_ignored(
+        &mut self,
+        mut mask: SignalSet,
+        discarded: &mut DiscardedNotifications,
+    ) {
+        while let Some(signo) = mask.dequeue(&self.set) {
+            self.ignore(signo, discarded);
+        }
+    }
+
+    /// Cold-path cancellation searches the recorded FIFO then the ignored list, using
+    /// exact owner identity rather than unsafe cross-queue cursor reconstruction.
+    pub(crate) fn cancel_timer(
+        &mut self,
+        record: &crate::PreparedTimerRecord,
+        through: u64,
+    ) -> Option<DetachedNotification> {
+        let signo = record.pending_signo(through)?;
+        let queue = &mut self.queues[signo as usize - 1];
+        let mut cursor = queue.front_mut();
+        while let Some(node) = cursor.get() {
+            if core::ptr::eq(node, &**record.node_ref()) {
+                break;
+            }
+            cursor.move_next();
+        }
+        let removed = cursor.remove();
+        if removed.is_some() && queue.is_empty() {
+            self.set.remove(signo);
+        }
+        if let Some(removed) = removed {
+            return Some(DetachedNotification::Stored(removed));
+        }
+        let mut cursor = self.ignored.front_mut();
+        while let Some(node) = cursor.get() {
+            if core::ptr::eq(node, &**record.node_ref()) {
+                return cursor.remove().map(DetachedNotification::Stored);
+            }
+            cursor.move_next();
+        }
+        None
+    }
+
     /// Adds a signal to the pending queue.
     ///
-    /// For standard signals (1-31), only one instance can be pending.
-    /// For real-time signals (32-64), multiple instances can be queued.
+    /// Ordinary standard signals (1-31) coalesce while any instance is pending,
+    /// including a prepared timer. Real-time signals (32-64) always append.
     ///
     /// # Arguments
     /// * `sig` - Signal information to add
     ///
-    /// The payload is boxed only once the queue accepts it (not for a
-    /// coalesced standard signal), which keeps this the only allocation on the
-    /// send path. That allocation happens under the owning signal lock, as in
-    /// Linux, where `__send_signal_locked` calls `__sigqueue_alloc` with
-    /// `GFP_ATOMIC` while already holding `sighand->siglock`, and skips it
-    /// entirely for a coalesced signal or `SIGKILL`.
+    /// Ordinary notifications allocate a KArc node with NOWAIT only after
+    /// admission. Ordinary standard allocation failure preserves the pending bit
+    /// without detailed siginfo; ordinary SIGKILL needs no storage. Realtime
+    /// failure still retains the fatal OOM policy. The API remains infallible.
+    /// The reference-count overhead is accepted
+    /// so ordinary and prepared timer notifications share the same FIFO.
+    /// Prepared timer notifications reuse their reserved node without allocation.
     ///
     /// # Returns
     /// `true` if the signal was successfully added, `false` if it was
     /// already pending (for standard signals only)
     pub fn put_signal(&mut self, sig: SignalInfo) -> bool {
-        let signo = sig.signo();
-        let added = self.set.add(signo);
+        self.put_notification(sig.into()).is_none()
+    }
 
-        if signo.is_realtime() {
-            self.info_rt[signo as usize - 32].push_back(sig);
-        } else {
-            if !added {
-                // At most one standard signal instance stays pending; the
-                // first one wins, matching Linux standard-signal coalescing.
-                return false;
-            }
-            self.info_std[signo as usize] = Some(Box::new(sig));
+    /// Returns unqueued ownership for release outside the enclosing signal lock.
+    pub(crate) fn put_notification(
+        &mut self,
+        sig: SignalNotification,
+    ) -> Option<SignalNotification> {
+        self.put_notification_with_allocator(sig, |node| KArc::new_nowait(node).ok())
+    }
+
+    pub(crate) fn put_notification_with_allocator(
+        &mut self,
+        sig: SignalNotification,
+        allocate: impl FnOnce(NotificationNode) -> Option<KArc<NotificationNode>>,
+    ) -> Option<SignalNotification> {
+        let signo = sig.signo();
+        if !signo.is_realtime() && self.set.has(signo) && !sig.has_reserved_storage() {
+            return Some(sig);
         }
-        true
+        if !signo.is_realtime() && sig.receipt().is_none() {
+            if signo != crate::Signo::SIGKILL
+                && let Some(node) =
+                    NotificationNode::allocate_ordinary(sig.into_parts().0, allocate)
+            {
+                self.queues[signo as usize - 1].push_back(node);
+            }
+        } else {
+            self.queues[signo as usize - 1].push_back(sig.into_node());
+        }
+        self.set.add(signo);
+        None
     }
 
     /// Returns whether any queued signal is deliverable under `blocked`.
@@ -82,19 +239,43 @@ impl PendingSignals {
         !(self.set & !blocked).is_empty()
     }
 
-    /// Dequeues the next pending signal contained in `mask`, if any.
+    /// Dequeues ordinary data inserted through [`Self::put_signal`].
+    ///
+    /// Manager-owned queues use the internal notification dequeue so timer
+    /// authority is transferred to their unlocked completion path instead.
     pub fn dequeue_signal(&mut self, mask: &SignalSet) -> Option<SignalInfo> {
+        self.dequeue_notification(mask)
+            .map(|notification| notification.into_parts().0)
+    }
+
+    pub(crate) fn dequeue_notification(
+        &mut self,
+        mask: &SignalSet,
+    ) -> Option<DetachedNotification> {
         self.set.dequeue(mask).and_then(|signo| {
-            if signo.is_realtime() {
-                let queue = &mut self.info_rt[signo as usize - 32];
-                let result = queue.pop_front();
-                if !queue.is_empty() {
-                    self.set.add(signo);
-                }
-                result
-            } else {
-                self.info_std[signo as usize].take().map(|boxed| *boxed)
+            let queue = &mut self.queues[signo as usize - 1];
+            let result = queue.pop_front();
+            if !queue.is_empty() {
+                self.set.add(signo);
             }
+            result
+                .map(DetachedNotification::Stored)
+                .or_else(|| (!signo.is_realtime()).then_some(DetachedNotification::BitOnly(signo)))
         })
+    }
+}
+
+/// Entire queues are detached by their manager before destruction, so payload,
+/// lease and final strong/weak releases occur outside the outer signal locks.
+impl Drop for PendingSignals {
+    fn drop(&mut self) {
+        while let Some(node) = self.ignored.pop_front() {
+            drop(DetachedNotification::Stored(node));
+        }
+        for queue in &mut self.queues {
+            while let Some(node) = queue.pop_front() {
+                drop(DetachedNotification::Stored(node));
+            }
+        }
     }
 }

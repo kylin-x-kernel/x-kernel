@@ -1,5 +1,131 @@
 # ksignal security and reliability
 
+## Standard Owner Allocation Failure
+
+Only ordinary standard notifications may lose detailed storage. Admission first
+coalesces, then attempts NOWAIT allocation; failure leaves an authoritative
+pending bit and no owner. Ordinary SIGKILL skips allocation altogether. A
+bit-only dequeue synthesizes zeroed SI_USER information on the stack and carries
+no receipt. User-controlled SI_TIMER does not grant timer authority. Prepared
+records bypass allocation and are never converted into this fallback. Ordinary
+realtime failure remains fatal until its error propagation contract is enabled.
+
+Ignored cancellation must not clear an unrelated no-info pending bit. Only
+actual removal from a pending FIFO permits cancellation to clear its last bit.
+Mixed queues retain the aggregate-bit semantics: no separately counted fallback
+survives the final detailed owner. Normal and explicit-mask dequeue share the
+same representation; dirty projections and wakes follow successful admission.
+Private allocator-seam tests cover loss of details, no-retry coalescing, SIGKILL,
+forged timer payloads, reserved timer ownership and cancellation isolation.
+There is no global allocator override, new unsafe code, or realtime OOM recovery.
+
+## Invalidated Pending Ownership
+
+Invalidation is monotonic and checked inside the signal admission transaction
+before fatal and wake bookkeeping. Cancellation uses exact storage identity,
+the captured manager and generation-checked private slot; a pending link alone
+is never authority to unlink. Delayed tokens only remove receipts at or below
+their invalidated generation. Safe FIFO cursor traversal avoids new unsafe
+membership assumptions, at O(n) cancellation latency for that signo.
+Pending-bit/projection changes are serialized; detached payloads and final
+references release outside signal/timer locks. Already detached receipts remain
+occupied until released and undergo the existing timer completion validation.
+Tests cover shared/private queues, standard/realtime signals, late cancellation,
+in-flight send rejection, detached ownership and ignored-record reuse.
+
+## Timer Provenance Boundary
+
+Process and private-slot admission retain the shared disposition lock until
+SigLock commits the ignored/fatal decision and queue state. The lock order is
+configuration ownership -> shared actions -> SigLock -> record state; no
+transaction acquires an action lock in reverse order. CLONE_SIGHAND peers have
+different ownership locks, so ownership alone cannot protect this boundary.
+Both guards are released before arrival callbacks or rejected owner destruction.
+Action replacement flushes only the caller group's queues. Valid periodic
+receipts retain their occupied storage on an ignored list; one-shots do not.
+Same-value Ignore still flushes. Explicit-mask consumers can acknowledge blocked
+ignored records, but the normal handler path retains/discards them before
+completion. ABI SI_TIMER cannot authorize retention. Cancellation and destruction
+cover both lists. Detached discard batches use existing intrusive links and
+release payloads after unlocking; no temporary allocation or new unsafe cursor
+is introduced. Replay to dead targets discards without acknowledgement.
+
+Requeue schedules the existing ready link under SigLock -> ready -> record,
+without invoking its waker under those locks. The worker upgrades the weak
+origin and validates exact timer storage before obtaining a destination; it
+then rechecks disposition, pending/liveness and task identity outside the timer
+mutex. Ignored shared signals cannot wake an unblocked peer when another thread
+blocks the signal. A stale
+request may cause a harmless pending-state recheck, never a receipt completion
+or publication into a reused slot. This is not an SMP stress-test proof.
+
+Ordinary SignalInfo conversion never grants a TimerSignalReceipt, even when
+userspace supplies SI_TIMER and matching ID/sequence fields. Kernel code is
+trusted to prepare timer records only for actual timer emissions. The unreserved
+SignalNotification::timer constructor is crate-private and available only with
+cfg(unittest) for compatibility fixtures. Production uses reserved preparation.
+The non-Clone receipt is consumed once after SigLock is released, before
+generic observers. Both handler and explicit-mask consumers use this path.
+Its weak TimerSignalOrigin is captured at creation and upgraded only at unlocked
+completion. Expiration rejects delivery, with no receiver/PID fallback. The
+origin method may acquire timer/signal locks; it never runs in queue Drop.
+No strong runtime cycle is added, although a weak reference retains its Arc
+control block until release. The last weak release also occurs outside signal
+and configuration locks on production send/dequeue/retirement paths.
+Ordinary coalescing is unchanged; ignored/flushed notifications never acknowledge
+timers. Realtime allocation failure recovery remains outside this change.
+The timer manager issues non-wrapping u64 generations and rejects exhaustion.
+Receipts retain the full value independently of the truncated ABI field.
+POSIX TimerSignalTarget binds destination manager identity and optional slot,
+not a numeric PID/TID. Upgrade precedes locking; private liveness and slot
+generation are checked with enqueue, and empty shared targets reject sends.
+Wake hints require a second identity check against a retained task. Ordinary
+signal routes and legacy itimers are unchanged. Slot generations also use a checked
+u64 source and never wrap: exhaustion rejects registration before mutation,
+returns prepared storage to the unlocked caller, and does not prevent retirement.
+Shrinking the slot table never resets the generation source. SlotId is scoped
+to its manager, not a standalone cross-manager capability. Ordinary KArc node
+allocations use NOWAIT. Standard failure preserves the signal bit; realtime
+failure remains fatal. Prepared records reserve
+storage fallibly before locking; submission, dequeue and ready scheduling do
+not allocate. A busy reservation cannot overwrite a queued payload.
+
+Standard notification dequeue now transfers the KArc node in DetachedSignal rather
+than freeing it inside SigLock. Handler and explicit-mask consumers release
+that storage and complete provenance only after their transaction returns.
+Thread retirement transfers the entire slot owner out of the transaction before
+destroying its private queue. Queue state and registration are already detached
+when final storage release occurs. Destructors schedule availability through
+the alarm wake hook, never invoke origin completion/availability directly.
+Tests verify retained ownership, independent successor registration and pending
+state, and no acknowledgement when a detached notification is discarded.
+Prepared tests cover mixed FIFO, busy exclusion through completion, drain,
+ordinary coalescing, independent standard timers, rejected ownership and expired
+origins. The standard bypass requires a live reserved lease, not SI_TIMER data.
+No public allocator failure hook is introduced; allocator failure injection is
+private to kalloc-types.
+
+Pending and ready links are separate AtomicLinks, projected by a private
+concrete adapter with KArcPointerOps. The unique lease prevents double pending
+membership; the global ready lock prevents double ready membership. Payloads
+contain no lease while queued, avoiding a strong self-cycle. Pending queue
+destruction reconstructs leases only after callers detach the entire queue.
+Ready processing retains a strong node owner while invoking the weak origin
+outside all locks. Exact same_storage checks prevent timer-ID reuse from
+turning stale availability into successor retry. Storage clones do not clone
+leases. Final strong/weak release happens outside these locks.
+
+Send transactions now return the original notification on coalescing or stale
+slot rejection instead of destroying it inside SigLock. Nonretained ignored sends
+carry ownership out of the transaction. Production callers release returned
+ownership only after releasing the outer handler-ownership lock as well; missing
+configuration drops that guard before the original notification by local
+declaration order. Public bool/TID wake hints remain unchanged and do not encode
+whether a record was inserted. Tests verify returned provenance survives retry,
+stale sends do not publish into a reused slot, and ignored/released sends do not
+acknowledge timers. Ignored-but-blocked sends queue; unblocked periodic records
+remain retained until replay, invalidation or queue destruction.
+
 ## Scope, assets, and boundaries
 
 Thread-slot owners use fallible `KBox` allocation before acquiring `SigLock`.
@@ -63,8 +189,8 @@ treats payload fields as raw bits and never dereferences pointer-like values
 | T-01 | Handler frame overwrite of unmapped/guard user stack | Medium | `SA_ONSTACK` with invalid `sigaltstack`, or stack exhaustion at dispatch | Frame write uses checked `write_vm`; failure is converted to `CoreDump` fatal exit instead of a kernel fault |
 | T-02 | `sigreturn` on a corrupted/forged frame | Medium | user changes `sp` or overwrites frame memory, then calls `rt_sigreturn` | Context restore treats frame contents as data; register/pc/sp are re-entered through the normal user-return path so a bad frame cannot corrupt kernel state. `saved` is user-writable, so on x86_64 the restored `MXCSR` is masked against the trusted feature mask before `FXRSTOR` (avoids kernel `#GP`); `sigmask` is range-limited by `SignalSet`. Residual risk: user can forge its own register/FP state, which is also true on Linux |
 | T-03 | Invalid signal number from user input reaching decode | Medium | invalid or truncating raw numeric argument, or unvalidated imported `siginfo` | `ksyscall` uses `Signo::from_raw` before producing signal payloads; primitive negative or out-of-width values cannot wrap into a valid signal. Zero probes stay separate. `SignalInfo::signo` still documents and relies on its existing validated-payload caller contract |
-| T-04 | Stale POSIX timer signal delivered after timer rearm | Low | timer signal dequeued after `timer_settime` changed the timer | dequeue observers compare the embedded `signal_seq`; stale signals are dropped (`kprocess` wiring) |
-| T-05 | Signal flood exhausting kernel memory | Medium | unbounded `rt_sigqueueinfo`/timer expirations | Standard signals coalesce to one instance; real-time queues are bounded by sender rate — matches Linux behavior; no additional kernel cap (accepted residual risk, same as Linux) |
+| T-04 | Stale POSIX timer signal delivered after timer rearm | Low | timer signal dequeued after `timer_settime` changed the timer | typed timer receipts carry sequence authority to the unlocked kprocess validator; ordinary ABI payloads cannot invoke it |
+| T-05 | Signal flood exhausting kernel memory | Medium | unbounded `rt_sigqueueinfo`/timer expirations | Ordinary standard sends coalesce while any record is pending; each prepared timer can hold one record even for a standard signo. Queued timer storage is reserved at creation. Ordinary realtime growth remains unbounded; Linux resource-limit parity is not claimed |
 | T-06 | Observer table races | Low | re-registering an observer while signals dequeue | Table access is `SpinNoIrq`-serialized; overwrite is documented last-wins |
 | T-07 | `SignalInfo` auto-trait unsoundness | High (if violated) | storing a `sival_ptr` that becomes a dereferenceable alias | `unsafe impl` is justified by opaque-bits treatment; all reads return raw values, no dereference of payload pointers exists in this crate |
 
@@ -139,6 +265,13 @@ data is processed or logged.
 
 ## Known limitations
 
+- TimerSignalSendOutcome returns rejected ownership to the unlocked bridge.
+  TargetGone, Ignored and Coalesced are admission outcomes, not successful
+  completion or proof of future delivery. A missing wake hint can also mean
+  successful blocked admission. No receipt completion runs on rejection or
+  destruction. Reserved-record return supports deferred new-generation demand;
+  Retained denotes ignored periodic storage, not delivery. Replay does not
+  release occupancy or acknowledge; discarded one-shots never replay.
 - Notification scope does not imply readable data: pending queues remain private
   to a process/thread, and unselected or repeated signals may request rechecks.
 - `SIGSTKFLT` default action follows Linux (terminate) though it is unused.

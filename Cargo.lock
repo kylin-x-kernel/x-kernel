@@ -3264,6 +3264,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cfg-if",
  "derive_more",
+ "intrusive-collections",
  "kaddr_layout",
  "kalloc-types",
  "kcpu",
@@ -3436,7 +3437,6 @@ dependencies = [
 name = "ktimer"
 version = "0.3.0-dev"
 dependencies = [
- "event-listener",
  "futures-util",
  "kbuild_config",
  "kerrno",

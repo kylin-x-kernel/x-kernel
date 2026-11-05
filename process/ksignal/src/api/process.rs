@@ -16,7 +16,8 @@ use strum::IntoEnumIterator;
 
 use crate::{
     DefaultSignalAction, MAX_SIGNALS, SigLock, SigchldChildExitSignalInfo, SignalAction,
-    SignalActionFlags, SignalDisposition, SignalInfo, SignalSet, Signo,
+    SignalActionFlags, SignalDisposition, SignalInfo, SignalNotification, SignalSet, Signo,
+    TimerSignalRejection, TimerSignalSendOutcome,
 };
 
 /// Container for signal actions across all supported signals.
@@ -33,6 +34,16 @@ impl Default for SignalActions {
 }
 
 impl SignalActions {
+    pub(super) fn ignored_set(&self, mut pending: SignalSet) -> SignalSet {
+        let mut ignored = SignalSet::default();
+        while let Some(signo) = pending.dequeue(&!SignalSet::default()) {
+            if signal_ignored_by(self, signo) {
+                ignored.add(signo);
+            }
+        }
+        ignored
+    }
+
     fn reset_for_exec(&mut self) {
         for action in &mut self.0 {
             let disposition = if matches!(action.disposition, SignalDisposition::Ignore) {
@@ -295,18 +306,47 @@ impl ProcessSignalManager {
     }
 
     /// Replaces the configured action for the given signal and returns the old one.
+    /// Serializes with process/thread send_signal admission in every process
+    /// sharing this action table. Prepared child-exit publication is separate.
+    /// Ignoring flushes this group's queues, retaining valid periodic records;
+    /// restoring a disposition requeues them without allocating. Peer groups
+    /// sharing the action table are not flushed. Releases and wakes run unlocked.
     /// Returns `NoSuchProcess` after configuration ownership is released.
     pub fn replace_signal_action(
         &self,
         signo: Signo,
         action: Option<SignalAction>,
     ) -> KResult<SignalAction> {
-        let handlers = self.handlers.lock();
-        let handlers = handlers.as_ref().ok_or(KError::NoSuchProcess)?;
+        let owner = self.handlers.lock();
+        let handlers = owner.as_ref().ok_or(KError::NoSuchProcess)?;
         let mut actions = handlers.actions.lock();
+        let mut discarded = crate::pending::DiscardedNotifications::default();
         let old = actions[signo].clone();
+        let mut has_replayed = false;
         if let Some(action) = action {
             actions[signo] = action;
+            has_replayed = self.siglock.transact(|txn| {
+                let has_replayed = txn.change_disposition(
+                    signo,
+                    signal_ignored_by(&actions, signo),
+                    &mut discarded,
+                );
+                if has_replayed
+                    && signal_is_fatal(&actions, signo)
+                    && txn.view().has_deliverable_signo(signo)
+                {
+                    self.note_fatal_signal(signo);
+                }
+                has_replayed
+            });
+        }
+        let source = handlers.pending_changed.clone();
+        drop(actions);
+        drop(owner);
+        drop(discarded);
+        if has_replayed {
+            crate::notification::wake_ready_records();
+            source.wake();
         }
         Ok(old)
     }
@@ -314,10 +354,34 @@ impl ProcessSignalManager {
     /// Replaces the configured action for the given signal.
     /// Returns `NoSuchProcess` after configuration ownership is released.
     pub fn set_signal_action(&self, signo: Signo, action: SignalAction) -> KResult<()> {
-        let handlers = self.handlers.lock();
-        let handlers = handlers.as_ref().ok_or(KError::NoSuchProcess)?;
-        handlers.actions.lock()[signo] = action;
+        self.replace_signal_action(signo, Some(action))?;
         Ok(())
+    }
+
+    /// Rechecks disposition, pending state and target selection before a deferred wake.
+    pub(crate) fn pending_timer_wake_tid(
+        &self,
+        slot: Option<crate::SlotId>,
+        signo: Signo,
+    ) -> Option<u32> {
+        let owner = self.handlers.lock();
+        let handlers = owner.as_ref()?;
+        let actions = handlers.actions.lock();
+        if signal_ignored_by(&actions, signo) {
+            return None;
+        }
+        self.siglock.inspect(|view| {
+            if let Some(slot) = slot {
+                (view.pending(slot).has(signo) && !view.blocked_has(slot, signo))
+                    .then(|| view.target_tid(slot))
+                    .flatten()
+            } else {
+                view.shared_pending()
+                    .has(signo)
+                    .then(|| view.find_target(signo).0)
+                    .flatten()
+            }
+        })
     }
 
     /// Sends a signal to the process.
@@ -332,32 +396,59 @@ impl ProcessSignalManager {
     /// `Some(tid)` if a specific thread should be interrupted, `None` otherwise.
     /// After configuration ownership is released, drops the signal and returns `None`.
     ///
-    /// Ignored signals are dropped only when no live thread currently blocks
+    /// Ordinary ignored signals are dropped only when no live thread currently blocks
     /// them. If a signal is blocked, it remains pending because userspace may
     /// install a handler before unblocking it. The implicitly ignored set
     /// covers default dispositions whose action is a no-op for a running
     /// process (Linux `SIG_KERNEL_IGNORE_MASK`), including default `SIGCONT`.
+    ///
+    /// Ordinary SignalInfo carries no timer completion authority. The kernel
+    /// timer bridge may instead supply a typed SignalNotification.
+    /// Ignored periodic reservations remain retained without a wake; one-shot
+    /// reservations are discarded. Action or blocked-mask changes can replay
+    /// retained records without allocating notification storage.
+    /// Unqueued notifications are released after signal and configuration locks;
+    /// this does not complete a timer receipt or change the wake hint on coalescing.
     #[must_use]
-    pub fn send_signal(&self, sig: SignalInfo) -> Option<u32> {
+    pub fn send_signal(&self, sig: impl Into<SignalNotification>) -> Option<u32> {
+        self.send_signal_inner(sig.into(), false).wake_tid()
+    }
+
+    pub(crate) fn send_signal_inner(
+        &self,
+        sig: SignalNotification,
+        require_live: bool,
+    ) -> TimerSignalSendOutcome {
         let signo = sig.signo();
         let owner = self.handlers.lock();
-        let handlers = owner.as_ref()?;
-        let (ignored, fatal) = {
-            let actions = handlers.actions.lock();
-            (
-                signal_ignored_by(&actions, signo),
-                signal_is_fatal(&actions, signo),
-            )
+        let Some(handlers) = owner.as_ref() else {
+            drop(owner);
+            return TimerSignalSendOutcome::rejected(sig, TimerSignalRejection::TargetGone);
         };
+        let actions = handlers.actions.lock();
+        let ignored = signal_ignored_by(&actions, signo);
+        let fatal = signal_is_fatal(&actions, signo);
 
         // Target selection and queueing are one transaction, so a target
         // cannot change its blocked set between selection and queueing, and
         // the arrival projection is derived from the queue that was just
         // extended rather than published separately.
-        let (target_tid, has_blocked_thread) = self.siglock.transact(|txn| {
+        let (should_notify, outcome) = self.siglock.transact(|txn| {
+            if sig.is_invalidated() {
+                return (
+                    false,
+                    TimerSignalSendOutcome::rejected(sig, TimerSignalRejection::Invalidated),
+                );
+            }
             let (target_tid, has_blocked_thread) = txn.view().find_target(signo);
+            if require_live && target_tid.is_none() && !has_blocked_thread {
+                return (
+                    false,
+                    TimerSignalSendOutcome::rejected(sig, TimerSignalRejection::TargetGone),
+                );
+            }
             if ignored && !has_blocked_thread {
-                return (target_tid, has_blocked_thread);
+                return (false, txn.retain_ignored(None, sig));
             }
             // A fatal group signal terminates the whole process when some
             // thread can actually take it; record it before the queue so a
@@ -369,17 +460,23 @@ impl ProcessSignalManager {
             if fatal && target_tid.is_some() {
                 self.note_fatal_signal(signo);
             }
-            txn.put_shared(sig);
-            (target_tid, has_blocked_thread)
+            let rejected = txn.put_shared(sig);
+            (
+                true,
+                TimerSignalSendOutcome::from_queue(
+                    rejected,
+                    if ignored { None } else { target_tid },
+                ),
+            )
         });
 
-        if ignored && !has_blocked_thread {
-            return None;
-        }
         let source = handlers.pending_changed.clone();
+        drop(actions);
         drop(owner);
-        source.wake();
-        if ignored { None } else { target_tid }
+        if should_notify {
+            source.wake();
+        }
+        outcome
     }
 }
 
@@ -449,12 +546,13 @@ impl ProcessSignalManager {
         let owner = self.handlers.lock();
         let handlers = owner.as_ref()?;
         if prepared.queue_signal {
-            let (target_tid, _) = self.siglock.transact(|txn| {
-                txn.put_shared(prepared.sig.into_signal_info());
-                txn.view().find_target(Signo::SIGCHLD)
+            let (target_tid, rejected) = self.siglock.transact(|txn| {
+                let rejected = txn.put_shared(prepared.sig.into_signal_info());
+                (txn.view().find_target(Signo::SIGCHLD).0, rejected)
             });
             let source = handlers.pending_changed.clone();
             drop(owner);
+            let _rejected = rejected;
             source.wake();
             target_tid
         } else {

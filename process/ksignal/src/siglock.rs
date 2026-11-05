@@ -29,10 +29,12 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use kalloc_types::{AllocFlags, KBox};
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 
-use crate::{PendingSignals, SignalInfo, SignalSet, Signo};
+use crate::{
+    PendingSignals, SignalInfo, SignalNotification, SignalSet, Signo, pending::DetachedNotification,
+};
 
 /// Slot-table capacity reserved when the process signal state is created.
 ///
@@ -56,7 +58,7 @@ const DIRTY_BITS: usize = DIRTY_WORDS * 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SlotId {
     index: usize,
-    generation: u32,
+    generation: u64,
 }
 
 /// Per-thread signal state owned by [`SigLock`].
@@ -65,7 +67,7 @@ pub(crate) struct SlotId {
 /// `PendingSignals` (32 standard-signal cells plus 33 real-time queues), so
 /// keeping it out of line keeps a retired-then-shrunk table small.
 pub(crate) struct ThreadSlot {
-    generation: u32,
+    generation: u64,
     tid: u32,
     /// Whether this thread is still a candidate target for process-directed
     /// signals. Cleared at thread exit; the slot's own pending/blocked state
@@ -209,7 +211,7 @@ pub(crate) struct SigInner {
     /// Per-thread state, indexed by [`SlotId::index`].
     slots: Vec<Option<KBox<ThreadSlot>>>,
     /// Generation source for slot handles.
-    next_generation: u32,
+    next_generation: Option<u64>,
 }
 
 impl SigInner {
@@ -270,18 +272,50 @@ pub(crate) struct Dequeued {
     pub(crate) current_blocked: SignalSet,
 }
 
+/// Detached queue storage awaiting unlocked completion.
+pub(crate) struct DetachedSignal {
+    notification: DetachedNotification,
+    current_blocked: SignalSet,
+}
+
+impl DetachedSignal {
+    /// Consumes timer provenance, then runs ordinary observers outside SigLock.
+    ///
+    /// Call only after the dequeue transaction returns. Completion can acquire
+    /// timer or signal locks; neither it nor observers run from a destructor.
+    pub(crate) fn complete(self) -> Option<Dequeued> {
+        let (sig, receipt) = self.notification.into_parts();
+        if let Some(receipt) = receipt
+            && receipt.complete() == crate::SignalDequeueAction::Drop
+        {
+            return None;
+        }
+        (crate::api::notify_signal_dequeued(&sig) == crate::SignalDequeueAction::Deliver).then_some(
+            Dequeued {
+                sig,
+                current_blocked: self.current_blocked,
+            },
+        )
+    }
+}
+
 /// The process-wide critical section for signal deliverability.
 pub(crate) struct SigLock {
     inner: SpinNoIrq<SigInner>,
 }
 
 impl SigLock {
+    #[cfg(unittest)]
+    pub(crate) fn set_next_generation_for_test(&self, generation: u64) {
+        self.inner.lock().next_generation = Some(generation);
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             inner: SpinNoIrq::new(SigInner {
                 shared: PendingSignals::default(),
                 slots: Vec::with_capacity(SLOT_TABLE_INITIAL_CAPACITY),
-                next_generation: 0,
+                next_generation: Some(0),
             }),
         }
     }
@@ -293,6 +327,8 @@ impl SigLock {
     /// The table is pre-sized at construction, so linking is allocation-free
     /// until a process exceeds that capacity; past it the table may double,
     /// which moves 8-byte entries rather than the slot payload.
+    /// Exhausted generations return InvalidInput without publication; the
+    /// rejected slot is released only after the transaction unlocks.
     pub(crate) fn register(
         &self,
         tid: u32,
@@ -300,8 +336,17 @@ impl SigLock {
     ) -> KResult<(SlotId, Arc<AtomicBool>)> {
         let hint = Arc::new(AtomicBool::new(false));
         let slot = ThreadSlot::allocate(tid, hint.clone(), flags)?;
-        let slot_id = self.transact(|txn| txn.register(slot));
+        let slot_id = self.transact(|txn| txn.register(slot)).map_err(|slot| {
+            drop(slot);
+            KError::InvalidInput
+        })?;
         Ok((slot_id, hint))
+    }
+
+    /// Removes a slot under SigLock and destroys its private queue after unlocking.
+    pub(crate) fn retire(&self, id: SlotId) {
+        let retired = self.transact(|txn| txn.detach_slot(id));
+        drop(retired);
     }
 
     /// Runs `f` with read-only access to the guarded state.
@@ -361,6 +406,20 @@ pub(crate) struct SigView<'a> {
 }
 
 impl SigView<'_> {
+    pub(crate) fn has_deliverable_signo(&self, signo: Signo) -> bool {
+        (self.inner.shared.set.has(signo) && self.inner.find_target(signo).0.is_some())
+            || self.inner.slots.iter().flatten().any(|slot| {
+                slot.is_target && !slot.blocked.has(signo) && slot.pending.set.has(signo)
+            })
+    }
+
+    pub(crate) fn target_tid(&self, id: SlotId) -> Option<u32> {
+        self.inner
+            .live(id)
+            .filter(|slot| slot.is_target)
+            .map(|slot| slot.tid)
+    }
+
     /// Selects a delivery target for a process-directed signal.
     ///
     /// Returns the first live thread that does not block `signo`, and whether
@@ -413,9 +472,16 @@ impl<'a> SigTxn<'a> {
     }
 
     /// Links a slot prepared by [`SigLock::register`] and publishes it.
-    pub(crate) fn register(&mut self, mut slot: KBox<ThreadSlot>) -> SlotId {
-        let generation = self.inner.next_generation;
-        self.inner.next_generation = generation.wrapping_add(1);
+    /// On generation exhaustion, transfers the untouched owner back to the
+    /// caller for release outside SigLock. Retirement never resets the source.
+    pub(crate) fn register(
+        &mut self,
+        mut slot: KBox<ThreadSlot>,
+    ) -> Result<SlotId, KBox<ThreadSlot>> {
+        let Some(generation) = self.inner.next_generation else {
+            return Err(slot);
+        };
+        self.inner.next_generation = generation.checked_add(1);
         slot.generation = generation;
         let index = match self.inner.slots.iter().position(Option::is_none) {
             Some(index) => {
@@ -428,22 +494,22 @@ impl<'a> SigTxn<'a> {
             }
         };
         self.dirty.mark_slot(index);
-        SlotId { index, generation }
+        Ok(SlotId { index, generation })
     }
 
-    /// Releases a thread's slot once its manager is dropped, and lets the
+    /// Detaches a thread's slot once its manager is dropped, and lets the
     /// table shrink again after a thread-count peak.
     ///
     /// Idempotent and generation-compared, so releasing after reuse cannot
-    /// free a successor.
-    pub(crate) fn retire(&mut self, id: SlotId) {
-        let Some(index) = self.inner.live_index(id) else {
-            return;
-        };
-        self.inner.slots[index] = None;
+    /// free a successor. Transfer the returned owner out of the transaction
+    /// before releasing its pending records and projection reference.
+    pub(crate) fn detach_slot(&mut self, id: SlotId) -> Option<KBox<ThreadSlot>> {
+        let index = self.inner.live_index(id)?;
+        let retired = self.inner.slots[index].take();
         while self.inner.slots.last().is_some_and(Option::is_none) {
             self.inner.slots.pop();
         }
+        retired
     }
 
     /// Removes a thread from process-directed selection at exit.
@@ -464,41 +530,176 @@ impl<'a> SigTxn<'a> {
         }
     }
 
-    /// Queues a thread-directed signal. Returns whether it became pending.
+    /// Queues a thread-directed signal, returning unqueued ownership.
     ///
-    /// This is the one place a send allocates, and only when the queue accepts
-    /// the signal (a coalesced standard signal allocates nothing). The
-    /// allocation therefore lands inside the critical section, matching Linux,
-    /// where `__send_signal_locked` calls `__sigqueue_alloc` with `GFP_ATOMIC`
-    /// under `sighand->siglock` and skips it for a coalesced signal or
-    /// `SIGKILL`.
-    pub(crate) fn put_thread(&mut self, id: SlotId, sig: SignalInfo) -> bool {
-        let Some(index) = self.inner.live_index(id) else {
-            return false;
+    /// Coalescing and stale-slot rejection return the original notification;
+    /// release it only after leaving the transaction and outer ownership locks.
+    ///
+    /// Accepted ordinary notifications allocate a KArc node with NOWAIT inside
+    /// this critical section. Standard failure preserves a no-information pending
+    /// bit; realtime failure still follows the fatal OOM policy. Coalesced standard
+    /// signals and ordinary SIGKILL allocate nothing. Prepared timer notifications
+    /// transfer reserved storage without fallback. NOWAIT supplies no reserve.
+    pub(crate) fn put_thread(
+        &mut self,
+        id: SlotId,
+        sig: impl Into<SignalNotification>,
+    ) -> Option<SignalNotification> {
+        let sig = sig.into();
+        let Some(slot) = self.inner.live_mut(id) else {
+            return Some(sig);
         };
-        let added = self.inner.slots[index]
-            .as_deref_mut()
-            .is_some_and(|slot| slot.pending.put_signal(sig));
-        if added {
-            self.dirty.mark_slot(index);
+        let rejected = slot.pending.put_notification(sig);
+        if rejected.is_none() {
+            self.dirty.mark_slot(id.index);
         }
-        added
+        rejected
     }
 
-    /// Queues a process-directed signal. Returns whether it became pending.
+    /// Queues a process-directed signal, returning coalesced ownership.
     ///
     /// Allocates on acceptance for the same reason as [`Self::put_thread`].
-    pub(crate) fn put_shared(&mut self, sig: SignalInfo) -> bool {
-        let added = self.inner.shared.put_signal(sig);
-        if added {
+    /// Release the returned notification outside signal and ownership locks.
+    pub(crate) fn put_shared(
+        &mut self,
+        sig: impl Into<SignalNotification>,
+    ) -> Option<SignalNotification> {
+        let rejected = self.inner.shared.put_notification(sig.into());
+        if rejected.is_none() {
             self.dirty.mark_all();
         }
-        added
+        rejected
+    }
+
+    pub(crate) fn cancel_timer(
+        &mut self,
+        slot: Option<SlotId>,
+        record: &crate::PreparedTimerRecord,
+        through: u64,
+    ) -> Option<crate::pending::DetachedNotification> {
+        if let Some(slot) = slot {
+            let removed = self
+                .inner
+                .live_mut(slot)?
+                .pending
+                .cancel_timer(record, through);
+            if removed.is_some() {
+                self.dirty.mark_slot(slot.index);
+            }
+            removed
+        } else {
+            let removed = self.inner.shared.cancel_timer(record, through);
+            if removed.is_some() {
+                self.dirty.mark_all();
+            }
+            removed
+        }
+    }
+
+    pub(crate) fn retain_ignored(
+        &mut self,
+        slot: Option<SlotId>,
+        notification: SignalNotification,
+    ) -> crate::TimerSignalSendOutcome {
+        if !notification.can_retain_ignored() {
+            return crate::TimerSignalSendOutcome::rejected(
+                notification,
+                crate::TimerSignalRejection::Ignored,
+            );
+        }
+        if let Some(slot) = slot {
+            let Some(slot) = self.inner.live_mut(slot).filter(|slot| slot.is_target) else {
+                return crate::TimerSignalSendOutcome::rejected(
+                    notification,
+                    crate::TimerSignalRejection::TargetGone,
+                );
+            };
+            slot.pending.retain_ignored(notification);
+        } else {
+            let (target, has_blocked) = self.inner.find_target(notification.signo());
+            if target.is_none() && !has_blocked {
+                return crate::TimerSignalSendOutcome::rejected(
+                    notification,
+                    crate::TimerSignalRejection::TargetGone,
+                );
+            }
+            self.inner.shared.retain_ignored(notification);
+        }
+        crate::TimerSignalSendOutcome::Retained
+    }
+
+    pub(crate) fn change_disposition(
+        &mut self,
+        signo: Signo,
+        is_ignored: bool,
+        discarded: &mut crate::pending::DiscardedNotifications,
+    ) -> bool {
+        let mut has_replayed = false;
+        let mut mask = SignalSet::default();
+        mask.add(signo);
+        let (target, has_blocked) = self.inner.find_target(signo);
+        if is_ignored {
+            self.inner.shared.ignore(signo, discarded);
+        } else {
+            has_replayed |=
+                self.inner
+                    .shared
+                    .replay(mask, target.is_some() || has_blocked, discarded);
+        }
+        for slot in self.inner.slots.iter_mut().flatten() {
+            if is_ignored {
+                slot.pending.ignore(signo, discarded);
+            } else {
+                let has_target = slot.is_target;
+                has_replayed |= slot.pending.replay(mask, has_target, discarded);
+            }
+        }
+        self.dirty.mark_all();
+        has_replayed
+    }
+
+    pub(crate) fn replay_blocked(
+        &mut self,
+        id: SlotId,
+        discarded: &mut crate::pending::DiscardedNotifications,
+    ) -> bool {
+        let Some(slot) = self.inner.live_mut(id).filter(|slot| slot.is_target) else {
+            return false;
+        };
+        let blocked = slot.blocked;
+        let private = slot.pending.replay(blocked, true, discarded);
+        let shared = self.inner.shared.replay(blocked, true, discarded);
+        if shared {
+            self.dirty.mark_all();
+        } else if private {
+            self.dirty.mark_slot(id.index);
+        }
+        private || shared
+    }
+
+    pub(crate) fn take_for_handler(
+        &mut self,
+        id: SlotId,
+        ignored: SignalSet,
+        discarded: &mut crate::pending::DiscardedNotifications,
+    ) -> Option<DetachedSignal> {
+        let slot = self.inner.live_mut(id)?;
+        let ignored = ignored & !slot.blocked;
+        let private_changed = !(slot.pending.set & ignored).is_empty();
+        slot.pending.hide_ignored(ignored, discarded);
+        let shared_changed = !(self.inner.shared.set & ignored).is_empty();
+        self.inner.shared.hide_ignored(ignored, discarded);
+        if shared_changed {
+            self.dirty.mark_all();
+        } else if private_changed {
+            self.dirty.mark_slot(id.index);
+        }
+        self.take(id)
     }
 
     /// Dequeues the next signal deliverable to `id` under its blocked mask,
     /// preferring the thread-private queue over the process-directed one.
-    pub(crate) fn take(&mut self, id: SlotId) -> Option<Dequeued> {
+    pub(crate) fn take(&mut self, id: SlotId) -> Option<DetachedSignal> {
         self.take_inner(id, None)
     }
 
@@ -506,30 +707,30 @@ impl<'a> SigTxn<'a> {
     ///
     /// Used by `signalfd` and `sigtimedwait`, whose mask is supplied by the
     /// caller rather than derived from this thread's blocked set.
-    pub(crate) fn take_masked(&mut self, id: SlotId, mask: &SignalSet) -> Option<Dequeued> {
+    pub(crate) fn take_masked(&mut self, id: SlotId, mask: &SignalSet) -> Option<DetachedSignal> {
         self.take_inner(id, Some(*mask))
     }
 
-    fn take_inner(&mut self, id: SlotId, explicit: Option<SignalSet>) -> Option<Dequeued> {
+    fn take_inner(&mut self, id: SlotId, explicit: Option<SignalSet>) -> Option<DetachedSignal> {
         let index = self.inner.live_index(id)?;
         let current_blocked = self.inner.slots[index].as_deref()?.blocked;
         let mask = explicit.unwrap_or(!current_blocked);
         if let Some(sig) = self.inner.slots[index]
             .as_deref_mut()?
             .pending
-            .dequeue_signal(&mask)
+            .dequeue_notification(&mask)
         {
             self.dirty.mark_slot(index);
-            return Some(Dequeued {
-                sig,
+            return Some(DetachedSignal {
+                notification: sig,
                 current_blocked,
             });
         }
-        let sig = self.inner.shared.dequeue_signal(&mask)?;
+        let notification = self.inner.shared.dequeue_notification(&mask)?;
         // The shared queue changed, so every thread's answer may have.
         self.dirty.mark_all();
-        Some(Dequeued {
-            sig,
+        Some(DetachedSignal {
+            notification,
             current_blocked,
         })
     }

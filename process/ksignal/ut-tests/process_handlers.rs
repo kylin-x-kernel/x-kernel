@@ -9,9 +9,9 @@ use crate::api::ThreadSignalManager;
 #[unittest::def_test]
 fn test_captured_notification_survives_exec_without_owning_handlers() {
     let manager = ProcessSignalManager::new(SignalActions::default(), 0);
-    manager.siglock().transact(|txn| {
-        txn.put_shared(SignalInfo::new_kernel(Signo::SIGUSR1));
-    });
+    let _rejected = manager
+        .siglock()
+        .transact(|txn| txn.put_shared(SignalInfo::new_kernel(Signo::SIGUSR1)));
     let source = {
         let owner = manager.handlers.lock();
         owner.as_ref().unwrap().pending_changed.clone()
@@ -119,9 +119,9 @@ fn test_unshared_exec_retains_table_after_prepared_child_drop() {
 fn test_private_pending_excludes_shared_signals() {
     let manager = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
     let thread = ThreadSignalManager::new(9_901, manager.clone()).unwrap();
-    manager.siglock().transact(|txn| {
-        txn.put_shared(SignalInfo::new_kernel(Signo::SIGUSR1));
-    });
+    let _rejected = manager
+        .siglock()
+        .transact(|txn| txn.put_shared(SignalInfo::new_kernel(Signo::SIGUSR1)));
     thread.set_blocked({
         let mut set = SignalSet::default();
         set.add(Signo::SIGUSR2);

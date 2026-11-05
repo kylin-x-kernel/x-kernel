@@ -19,8 +19,8 @@ use osvm::VirtMutPtr;
 use super::ProcessSignalManager;
 use crate::{
     DefaultSignalAction, Dequeued, SignalAction, SignalActionFlags, SignalDisposition, SignalInfo,
-    SignalOsAction, SignalSet, SignalStack, Signo, SlotId,
-    api::{SignalDequeueAction, notify_signal_dequeued},
+    SignalNotification, SignalOsAction, SignalSet, SignalStack, Signo, SlotId,
+    TimerSignalRejection, TimerSignalSendOutcome,
     arch::{self, UContext},
 };
 
@@ -29,6 +29,8 @@ struct SignalFrame {
     siginfo: SignalInfo,
     saved: UserRestorableContext,
 }
+
+unittest::path_mod_test!(receipt_tests, "../../ut-tests/timer_receipt.rs");
 
 // The x86_64 restorable context holds an FXSAVE block that `restore` feeds to
 // `FXRSTOR`, which requires 16-byte alignment. Rust's field layout keeps
@@ -96,6 +98,22 @@ impl SignalMasks {
 }
 
 impl ThreadSignalManager {
+    pub(crate) fn slot_id(&self) -> SlotId {
+        self.slot
+    }
+
+    /// Captures this live thread's registered slot without retaining its manager.
+    /// Later sends reject exit or retirement under the same signal-state lock.
+    pub fn timer_target(&self) -> Option<crate::TimerSignalTarget> {
+        self.proc
+            .siglock()
+            .inspect(|view| view.target_tid(self.slot))?;
+        Some(crate::TimerSignalTarget::thread(
+            Arc::downgrade(&self.proc),
+            self.slot,
+        ))
+    }
+
     /// Reports a queued uncatchable kill, without consuming pending signals.
     /// May run under scheduler exclusion; only the short signal-state lock is
     /// acquired. Signal senders release that lock before waking a task.
@@ -129,7 +147,9 @@ impl ThreadSignalManager {
     /// DIRECT_RECLAIM requires sleepable context and reclaim-compatible locks;
     /// without it, allocator lock ordering and reentrancy constraints still apply.
     /// Slot allocation precedes the signal lock. NoMemory or invalid flags leave
-    /// registration unchanged. Flags cover only slot storage, not Arc allocation
+    /// registration unchanged. Exhausted slot generations return InvalidInput
+    /// without publication, and rejected slot storage is released after unlocking.
+    /// Flags cover only slot storage, not Arc allocation
     /// or table growth, which retain their existing infallible behavior.
     pub fn new_with_flags(
         tid: u32,
@@ -182,7 +202,7 @@ impl ThreadSignalManager {
                 .proc
                 .siglock()
                 .transact(|txn| txn.take_masked(self.slot, mask))?;
-            if notify_signal_dequeued(&dequeued.sig) == SignalDequeueAction::Deliver {
+            if let Some(dequeued) = dequeued.complete() {
                 return Some(dequeued.sig);
             }
         }
@@ -303,9 +323,16 @@ impl ThreadSignalManager {
                         .set_signal_action(signo, SignalAction::default())
                         .ok()?;
                 }
-                self.proc
-                    .siglock()
-                    .transact(|txn| txn.add_blocked(self.slot, add_blocked));
+                let mut discarded = crate::pending::DiscardedNotifications::default();
+                let has_replayed = self.proc.siglock().transact(|txn| {
+                    txn.add_blocked(self.slot, add_blocked);
+                    txn.replay_blocked(self.slot, &mut discarded)
+                });
+                drop(discarded);
+                if has_replayed {
+                    crate::notification::wake_ready_records();
+                    let _ = self.notify_pending();
+                }
                 Some(SignalOsAction::Handler)
             }
         }
@@ -340,8 +367,19 @@ impl ThreadSignalManager {
     /// critical section held across a callback.
     fn take_signal(&self) -> Option<Dequeued> {
         loop {
-            let dequeued = self.proc.siglock().transact(|txn| txn.take(self.slot))?;
-            if notify_signal_dequeued(&dequeued.sig) == SignalDequeueAction::Deliver {
+            let mut discarded = crate::pending::DiscardedNotifications::default();
+            let dequeued = {
+                let owner = self.proc.handlers.lock();
+                let handlers = owner.as_ref()?;
+                let actions = handlers.actions.lock();
+                self.proc.siglock().transact(|txn| {
+                    let pending = txn.view().pending(self.slot) | txn.view().shared_pending();
+                    txn.take_for_handler(self.slot, actions.ignored_set(pending), &mut discarded)
+                })
+            };
+            drop(discarded);
+            let dequeued = dequeued?;
+            if let Some(dequeued) = dequeued.complete() {
                 return Some(dequeued);
             }
         }
@@ -391,9 +429,7 @@ impl ThreadSignalManager {
         uctx.restore_user_restorable(frame.saved);
         frame.ucontext.mcontext.restore(uctx);
 
-        self.proc
-            .siglock()
-            .transact(|txn| txn.set_blocked(self.slot, frame.ucontext.sigmask));
+        self.set_blocked(frame.ucontext.sigmask);
     }
 
     /// Sends a signal to the thread.
@@ -408,29 +444,58 @@ impl ThreadSignalManager {
     /// semantics that let userspace change the handler before unblocking.
     ///
     /// See [`ProcessSignalManager::send_signal`] for the process-level version.
+    ///
+    /// Ordinary SignalInfo carries no timer completion authority. The kernel
+    /// timer bridge may instead supply a typed SignalNotification.
+    /// Unqueued notifications are released after signal and configuration locks;
+    /// this does not complete a timer receipt or change the wake hint on coalescing.
     #[must_use]
-    pub fn send_signal(&self, sig: SignalInfo) -> bool {
+    pub fn send_signal(&self, sig: impl Into<SignalNotification>) -> bool {
+        Self::send_to_slot(&self.proc, self.slot, sig.into(), false).0
+    }
+
+    pub(crate) fn send_to_slot(
+        process: &ProcessSignalManager,
+        slot: SlotId,
+        sig: SignalNotification,
+        require_live: bool,
+    ) -> (bool, TimerSignalSendOutcome) {
         let signo = sig.signo();
-        let owner = self.proc.handlers.lock();
+        let owner = process.handlers.lock();
         let Some(handlers) = owner.as_ref() else {
-            return false;
+            drop(owner);
+            return (
+                false,
+                TimerSignalSendOutcome::rejected(sig, TimerSignalRejection::TargetGone),
+            );
         };
-        let (ignored, fatal) = {
-            let actions = handlers.actions.lock();
-            (
-                super::process::signal_ignored_by(&actions, signo),
-                super::process::signal_is_fatal(&actions, signo),
-            )
-        };
+        let actions = handlers.actions.lock();
+        let ignored = super::process::signal_ignored_by(&actions, signo);
+        let fatal = super::process::signal_is_fatal(&actions, signo);
 
         // The blocked check, the fatal-signal note and the enqueue are one
         // transaction: a mask change can no longer land between the
         // "deliverable" answer and the queue it justifies, and the arrival
         // projection is published from the queue that was just extended.
-        let (is_blocked, accepted) = self.proc.siglock().transact(|txn| {
-            let is_blocked = txn.view().blocked_has(self.slot, signo);
+        let (should_wake, should_notify, outcome) = process.siglock().transact(|txn| {
+            if sig.is_invalidated() {
+                return (
+                    false,
+                    false,
+                    TimerSignalSendOutcome::rejected(sig, TimerSignalRejection::Invalidated),
+                );
+            }
+            let tid = txn.view().target_tid(slot);
+            if require_live && tid.is_none() {
+                return (
+                    false,
+                    false,
+                    TimerSignalSendOutcome::rejected(sig, TimerSignalRejection::TargetGone),
+                );
+            }
+            let is_blocked = txn.view().blocked_has(slot, signo);
             if ignored && !is_blocked {
-                return (is_blocked, false);
+                return (false, false, txn.retain_ignored(Some(slot), sig));
             }
             // A fatal signal delivered to this thread terminates the whole
             // process when it is not blocked; a blocked one stays pending (and
@@ -438,19 +503,24 @@ impl ThreadSignalManager {
             // it before the queue so a concurrent `exec` sibling sweep cannot
             // absorb it.
             if fatal && !is_blocked {
-                self.proc.note_fatal_signal(signo);
+                process.note_fatal_signal(signo);
             }
-            txn.put_thread(self.slot, sig);
-            (is_blocked, true)
+            let rejected = txn.put_thread(slot, sig);
+            let wake_tid = if is_blocked { None } else { tid };
+            (
+                !is_blocked,
+                true,
+                TimerSignalSendOutcome::from_queue(rejected, wake_tid),
+            )
         });
 
         let source = handlers.pending_changed.clone();
+        drop(actions);
         drop(owner);
-        if !accepted {
-            return false;
+        if should_notify {
+            source.wake();
         }
-        source.wake();
-        !is_blocked
+        (should_wake, outcome)
     }
 
     /// Delivers the `de_thread` sibling sweep's uncatchable kill.
@@ -466,10 +536,12 @@ impl ThreadSignalManager {
             return false;
         };
         let source = handlers.pending_changed.clone();
-        self.proc
+        let rejected = self
+            .proc
             .siglock()
             .transact(|txn| txn.put_thread(self.slot, SignalInfo::new_kernel(Signo::SIGKILL)));
         drop(owner);
+        let _rejected = rejected;
         source.wake();
         true
     }
@@ -521,10 +593,22 @@ impl ThreadSignalManager {
     /// `rt_sigreturn` path. The availability projection is recomputed from the
     /// new mask before the lock is released, so a signal that became
     /// deliverable by this change is handled before the next user return.
+    /// Retained ignored periodic records covered by the new mask become pending
+    /// for explicit-mask consumers. Discarded storage and recheck notifications
+    /// are processed after unlocking; call without outer signal locks.
     pub fn set_blocked(&self, set: SignalSet) -> SignalSet {
-        self.proc
-            .siglock()
-            .transact(|txn| txn.set_blocked(self.slot, set))
+        let mut discarded = crate::pending::DiscardedNotifications::default();
+        let (old, has_replayed) = self.proc.siglock().transact(|txn| {
+            let old = txn.set_blocked(self.slot, set);
+            let has_replayed = txn.replay_blocked(self.slot, &mut discarded);
+            (old, has_replayed)
+        });
+        drop(discarded);
+        if has_replayed {
+            crate::notification::wake_ready_records();
+            let _ = self.notify_pending();
+        }
+        old
     }
 
     /// Temporarily replaces the blocked signal set for the duration of `f`,
@@ -605,9 +689,10 @@ impl ThreadSignalManager {
 impl Drop for ThreadSignalManager {
     /// Releases this thread's slot so it can be reused.
     ///
-    /// [`Self::exit`] retires the slot at thread exit; this covers managers
-    /// retired without it. The handle is generation-checked, so a second
-    /// retirement after the slot was reused is a no-op.
+    /// [`Self::exit`] removes the thread from target selection but retains its
+    /// slot until manager destruction. This detaches that slot under SigLock
+    /// and destroys its private queue after unlocking. The handle is generation-
+    /// checked, so a second retirement after slot reuse is a no-op.
     ///
     /// This acquires the process `SigLock`, which is a non-reentrant
     /// `SpinNoIrq`, so the last `Arc<ThreadSignalManager>` must not be dropped
@@ -616,7 +701,7 @@ impl Drop for ThreadSignalManager {
     /// state and never a manager reference — and this is stated here so a
     /// future one cannot assume otherwise.
     fn drop(&mut self) {
-        self.proc.siglock().transact(|txn| txn.retire(self.slot));
+        self.proc.siglock().retire(self.slot);
     }
 }
 

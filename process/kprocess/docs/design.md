@@ -1,6 +1,34 @@
 # kprocess — Design
 
+## Independent Standard Timer Notifications
+
+The POSIX dispatch bridge transfers the reserved lease to ksignal even for
+standard signal numbers. Distinct timers targeting the same signo remain
+independent; ordinary notifications still coalesce while that signo is pending.
+The process regression queues two CPU one-shot timers on SIGUSR1 and verifies
+their separate IDs and completion, including the pending bit between dequeues.
+This adds no dispatch allocation. Ignored replay uses the same stable target.
+
 ## Purpose and ownership
+
+POSIX timer dispatch consumes the signal layer's typed admission outcome after
+all signal locks are released. It treats the wake TID only as an identity-checked
+wake hint, then drops any rejected notification in this unlocked bridge scope.
+Coalescing can still wake the existing pending signal; blocked admission needs
+no task wake. Releasing a prepared receipt queues its reserved record for the
+alarm task, which calls the captured runtime outside locks. That runtime checks
+exact record identity, polls one timer under its mutex and dispatches after
+unlocking. This supports deferred one-shot demand without a remaining alarm.
+Ignored periodic records are retained by ksignal. Its requeue request uses the
+same ready worker: record_requeued validates exact timer reservation identity,
+captures its stable target under the timer mutex, then queries pending state and
+wakes an identity-checked task after unlocking. No new notification or receipt
+is created. Retention/replay and rejected sends never acknowledge delivery.
+The ready-progress regression holds an old CPU-timer notification, rearms an
+already-expired one-shot while storage is busy, and releases the old lease.
+It waits for actual alarm-task dispatch without polling the timer again, then
+checks the single new notification. This tests progress with no remaining
+deadline or armed CPU-timer gate, not just a helper's return value.
 
 The per-thread TEE session slot also holds a preallocated `KBox` DST. Installing
 an owner or borrowing the slot does not allocate in kprocess. TEE's lazy initializer
@@ -108,6 +136,48 @@ retains init identity; orphan reparenting reserves an init relation slot.
   does not observe `ESRCH` before the parent reaps it. `None` probes a target
   without queuing a signal. These helpers do not perform all syscall permission
   checks.
+  Timer delivery uses a separate internal notification route: POSIX emissions
+  carry a non-Clone ksignal receipt, while legacy timers and all ordinary sends
+  carry only siginfo. Creation captures a weak ProcessRuntime as TimerSignalOrigin;
+  emission forwards it to the receipt. Completion upgrades this exact runtime
+  after signal locks are released and validates its existing ID/sequence, never
+  the receiver's current runtime. It applies to every timer signo without
+  installing global observers or allocating a callback owner.
+  Emissions now transfer the unique lease of a KArc-backed record reserved at
+  creation; the dispatch bridge no longer builds a receipt from copied fields.
+  Timer creation pins the runtime, builds a validated PosixTimerConfig outside
+  its timer-manager mutex, then publishes the disarmed timer under the mutex.
+  Runtime absence still precedes invalid-clock errors. Notifying configurations
+  reserve storage with KERNEL before taking that mutex; NoMemory publishes no ID.
+  SIGEV_NONE skips reservation. The caller must be sleepable and reclaim-safe.
+  A rejected admission returns its configuration; the Process adapter leaves
+  the manager lock scope before releasing that configuration and exposing the
+  original KError to its caller.
+  The creation regression checks absent-runtime precedence, invalid-clock
+  rejection without consuming the first timer ID, and successful disarmed
+  admission through the production Process interface.
+  A second regression creates equal timer IDs/sequences in two real runtimes,
+  verifies the captured origin and updates overrun only in that runtime. Clearing
+  its POSIX timers (the exec path) makes the old completion fail. These tests do
+  not yet establish stable signal destination membership or non-wrapping leases.
+  The manager now issues non-wrapping u64 generations independently of siginfo.
+  Exhausted create/settime returns InvalidInput before publication or mutation;
+  deletion and exec clearing remain possible without resetting that source.
+  The runtime completion bridge preserves all 64 bits when checking the timer.
+  POSIX timer creation also captures a weak signal-manager target; SIGEV_THREAD_ID
+  resolves a task, verifies exact Process identity, and captures its live slot
+  before admission. Dispatch ignores the POSIX numeric envelope and sends through
+  this target. TID lookup is only a wake hint: the resolved task's manager/slot
+  must still match, and the task is retained through signal_task. Legacy itimers
+  keep numeric routing. Regression tests substitute another process/TID in the
+  envelope and verify both shared and private notifications reach only the
+  captured owner. Rearm finishes its `PosixTimerUpdate` after unlocking, cancelling
+  old pending ownership before returning the syscall result.
+  Delete and exec clearing now transfer retired timer ownership out of the
+  manager mutex. The CPU-timer gate is updated before unlocking, and the removed
+  timer or detached map is dropped, cancelling invalidated pending ownership.
+  Process/syscall return types are
+  unchanged; the lower-level ktimer removal APIs now return opaque owners.
 - `process_exit` and `wait_reap` are used by lifecycle/syscall owners to sequence
   last-thread cleanup, stable exit publication, child scanning and final identity
   removal. `PidFd` implements `Pollable` and anonymous-file operations against
@@ -130,7 +200,7 @@ retains init identity; orphan reparenting reserves an init relation slot.
   real/effective/saved IDs and the target's permitted capabilities with the
   caller's effective set, and allows effective `CAP_SYS_PTRACE` to override
   both checks.
-- `timer_delivery` registers `ktimer` expiry and `ksignal` dequeue observers;
+- `timer_delivery` registers `ktimer` expiry and attaches typed dequeue receipts;
   CPU timers run on current-user-thread return and wall timers on the alarm task.
   `UserTaskRuntime for Thread` supplies CPU residency, pending-fatal-signal
   queries and AArch64 switch roots to `ktask`; `CurrentThreadSignalIf` adapts

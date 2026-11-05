@@ -4,13 +4,18 @@
 
 //! Timer-domain delivery descriptions.
 
-use ksignal::Signo;
-use posix_types::k_sigval;
+use ksignal::{SignalNotification, Signo, TimerSignalTarget};
 
 use crate::Tid;
 
 /// A timer-produced signal before it is converted into `SignalInfo`.
-#[derive(Clone)]
+///
+/// Not Clone: one expiration handoff must not mint multiple dequeue receipts.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "CG-024-lint-exceptions: clippy::large_enum_variant: POSIX handoff keeps the unique \
+              reserved-record receipt inline to avoid a new fallible allocation after expiration"
+)]
 pub enum TimerSignal {
     /// Legacy `setitimer` expiration (`SIGALRM`/`SIGVTALRM`/`SIGPROF`)
     /// carrying no payload.
@@ -20,28 +25,22 @@ pub enum TimerSignal {
     },
     /// POSIX timer expiration carrying the `SI_TIMER` payload fields.
     Posix {
-        /// Notification signal chosen at `timer_create`.
-        signo: Signo,
-        /// Kernel timer ID used by `timer_getoverrun`/dequeue validation.
-        timer_id: i32,
-        /// Overrun count frozen for this notification.
-        overrun: i32,
-        /// Generation of the timer state at expiration; stale notifications
-        /// are dropped at dequeue time.
-        signal_seq: u32,
-        /// `sigval` payload requested at `timer_create`.
-        value: k_sigval,
+        /// Stable destination; the outer numeric routing fields are not authority.
+        target: TimerSignalTarget,
+        /// Unique lease of the record reserved at creation, with immutable payload.
+        notification: SignalNotification,
     },
 }
 
 /// A process- or thread-directed timer delivery.
-#[derive(Clone)]
+///
+/// Consumed once by dispatch; timer-origin ownership cannot be duplicated here.
 pub enum TimerDelivery {
     /// Deliver to the process (any unblocked thread may handle it).
     Process(TimerSignal),
     /// Deliver to one specific thread (`SIGEV_THREAD_ID`).
     Thread {
-        /// Target thread ID.
+        /// Requested thread ID; POSIX dispatch uses the signal's captured target.
         tid: Tid,
         /// Notification signal payload.
         signal: TimerSignal,

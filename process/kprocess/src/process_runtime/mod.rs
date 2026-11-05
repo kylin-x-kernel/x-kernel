@@ -515,10 +515,71 @@ impl ProcessRuntime {
 
     /// Clears all process POSIX timers.
     pub(crate) fn clear_posix_timers(&self) {
+        let retired = {
+            let mut manager = self.timer_manager().lock();
+            let retired = manager.clear_posix_timers();
+            self.process
+                .set_cpu_timers_armed(manager.any_cpu_timer_armed());
+            retired
+        };
+        drop(retired);
+    }
+}
+
+impl ksignal::TimerSignalOrigin for ProcessRuntime {
+    fn record_requeued(&self, timer_id: i32, record: &ksignal::PreparedTimerRecord) {
+        let target = self
+            .timer_manager()
+            .lock()
+            .posix_timer_record_wake_target(timer_id, record);
+        if let Some((target, signo)) = target {
+            crate::timer_delivery::wake_requeued_timer(&target, signo);
+        }
+    }
+
+    fn record_available(&self, timer_id: i32, record: &ksignal::PreparedTimerRecord) {
+        let needs_cpu_times = self
+            .timer_manager()
+            .lock()
+            .posix_timer_record_needs_cpu_times(timer_id, record);
+        let (process_utime, process_stime) = if needs_cpu_times {
+            self.process.process_cpu_times()
+        } else {
+            (ktime_types::TimeSpan::ZERO, ktime_types::TimeSpan::ZERO)
+        };
+        let delivery = {
+            let mut manager = self.timer_manager().lock();
+            let delivery =
+                manager.progress_posix_timer_record(timer_id, record, process_utime, process_stime);
+            self.process
+                .set_cpu_timers_armed(manager.any_cpu_timer_armed());
+            delivery
+        };
+        if let Some(delivery) = delivery {
+            crate::dispatch_timer_delivery(self.process.pid(), delivery);
+        }
+    }
+
+    fn complete(&self, timer_id: i32, signal_seq: u64) -> ksignal::SignalDequeueAction {
+        let needs_cpu_times = self
+            .timer_manager()
+            .lock()
+            .posix_timer_dequeue_needs_cpu_times(timer_id, signal_seq);
+        let (process_utime, process_stime) = if needs_cpu_times {
+            self.process.process_cpu_times()
+        } else {
+            (ktime_types::TimeSpan::ZERO, ktime_types::TimeSpan::ZERO)
+        };
         let mut manager = self.timer_manager().lock();
-        manager.clear_posix_timers();
+        let should_deliver =
+            manager.on_timer_signal_dequeued(timer_id, signal_seq, process_utime, process_stime);
         self.process
             .set_cpu_timers_armed(manager.any_cpu_timer_armed());
+        if should_deliver {
+            ksignal::SignalDequeueAction::Deliver
+        } else {
+            ksignal::SignalDequeueAction::Drop
+        }
     }
 }
 

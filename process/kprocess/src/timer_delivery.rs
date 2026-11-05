@@ -5,30 +5,60 @@
 //! Thread/process timer runtime surface.
 //!
 //! This module owns the bridge between process-owned timer state and signal
-//! delivery. Timer expiration polling, dequeue validation callbacks, and
-//! alarm-task registration all converge here.
+//! delivery. Timer expiration polling and alarm-task registration converge
+//! here; dequeue validation belongs to the originating process runtime.
 
 use alloc::vec::Vec;
 
 use klazy::Once;
-use ksignal::{SignalDequeueAction, SignalInfo, Signo};
+use ksignal::SignalInfo;
 use ktimer::{TimerDelivery, TimerSignal};
 
 use crate::{
-    Pid, Thread, current_user_thread, lookup,
-    process_signals::{send_to_process, send_to_thread},
+    AsThread, Pid, Thread, lookup,
+    process_signals::{send_notification_to_process, send_notification_to_thread},
 };
 
+pub(crate) fn wake_requeued_timer(target: &ksignal::TimerSignalTarget, signo: ksignal::Signo) {
+    if let Some(tid) = target.pending_wake_tid(signo)
+        && let Ok(task) = lookup::task(tid)
+        && let Some(thread) = task.try_as_thread()
+        && target.matches_thread(thread.signal_manager())
+    {
+        ktask::signal_task(&task);
+    }
+}
+
 /// Dispatches a single timer delivery to its process or thread target.
+/// POSIX deliveries use their captured manager/slot, not the numeric envelope.
+/// Legacy itimers retain numeric routing. No timer or signal lock may be held.
 pub fn dispatch_timer_delivery(process_pid: Pid, delivery: TimerDelivery) {
-    match delivery {
-        TimerDelivery::Process(signal) => {
-            // The target may exit before delivery; nobody is left to notify.
-            let _ = send_to_process(process_pid, Some(build_timer_signal_info(signal)));
+    let (legacy_tid, signal) = match delivery {
+        TimerDelivery::Process(signal) => (None, signal),
+        TimerDelivery::Thread { tid, signal } => (Some(tid), signal),
+    };
+    match signal {
+        TimerSignal::Posix {
+            target,
+            notification,
+        } => {
+            let outcome = target.send(notification);
+            if let Some(tid) = outcome.wake_tid()
+                && let Ok(task) = lookup::task(tid)
+                && let Some(thread) = task.try_as_thread()
+                && target.matches_thread(thread.signal_manager())
+            {
+                ktask::signal_task(&task);
+            }
+            drop(outcome);
         }
-        TimerDelivery::Thread { tid, signal } => {
-            // The target may exit before delivery; nobody is left to notify.
-            let _ = send_to_thread(None, tid, Some(build_timer_signal_info(signal)));
+        TimerSignal::Legacy { signo } => {
+            let notification = SignalInfo::new_kernel(signo).into();
+            if let Some(tid) = legacy_tid {
+                let _ = send_notification_to_thread(None, tid, Some(notification));
+            } else {
+                let _ = send_notification_to_process(process_pid, Some(notification));
+            }
         }
     }
 }
@@ -69,57 +99,12 @@ pub fn poll_cpu_timers_for(thread: &Thread) {
     dispatch_timer_deliveries(process.pid(), deliveries);
 }
 
-fn on_timer_signal_dequeued_for_current_user_thread(sig: &SignalInfo) -> SignalDequeueAction {
-    let Some(timer_id) = sig.timer_id() else {
-        return SignalDequeueAction::Deliver;
-    };
-    let Some(signal_seq) = sig.timer_signal_seq() else {
-        return SignalDequeueAction::Drop;
-    };
-    let process = current_user_thread().process().clone();
-    let should_deliver = process
-        .on_timer_signal_dequeued(timer_id, signal_seq)
-        .expect("current thread must still expose process timer state");
-    if should_deliver {
-        SignalDequeueAction::Deliver
-    } else {
-        SignalDequeueAction::Drop
-    }
-}
-
-fn build_timer_signal_info(signal: TimerSignal) -> SignalInfo {
-    match signal {
-        TimerSignal::Legacy { signo } => SignalInfo::new_kernel(signo),
-        TimerSignal::Posix {
-            signo,
-            timer_id,
-            overrun,
-            signal_seq,
-            value,
-        } => SignalInfo::new_timer(signo, timer_id, overrun, value, signal_seq),
-    }
-}
-
 static TIMER_RUNTIME_INIT: Once<()> = Once::new();
 
 /// Installs the timer-expiration bridge and starts the timer runtime once.
 pub fn init_timer_runtime() {
     TIMER_RUNTIME_INIT.call_once(|| {
         ktimer::register_expired_task_handler(poll_timer);
-        for signo in [Signo::SIGALRM, Signo::SIGVTALRM, Signo::SIGPROF] {
-            ksignal::register_signal_observer(
-                signo,
-                on_timer_signal_dequeued_for_current_user_thread,
-            );
-        }
-        for raw in Signo::SIGRTMIN as u8..=Signo::SIGRT32 as u8 {
-            if let Some(signo) = Signo::from_repr(raw) {
-                ksignal::register_signal_observer(
-                    signo,
-                    on_timer_signal_dequeued_for_current_user_thread,
-                );
-            }
-        }
         ktimer::spawn_alarm_task();
     });
 }

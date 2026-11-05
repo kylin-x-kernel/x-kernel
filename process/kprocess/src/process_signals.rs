@@ -6,14 +6,14 @@ use alloc::sync::Arc;
 
 use kerrno::{KError, KResult};
 use ksignal::{
-    SigchldChildExitSignalInfo, SignalInfo,
+    SigchldChildExitSignalInfo, SignalInfo, SignalNotification,
     api::{PreparedChildExitSignal as PreparedKsignalChildExitSignal, ProcessSignalManager},
 };
 use ktask::{KtaskRef, current};
 
 use crate::{AsThread, Pid, Process, Thread, Tid, lookup};
 
-fn send_signal_thread_inner(task: &KtaskRef, thread: &Thread, sig: SignalInfo) {
+fn send_signal_thread_inner(task: &KtaskRef, thread: &Thread, sig: impl Into<SignalNotification>) {
     let signal = thread.signal_manager();
     if signal.send_signal(sig) {
         ktask::signal_task(task);
@@ -73,11 +73,18 @@ impl ksignal::CurrentThreadSignalIf {
 /// runtime signal manager is already gone. PID zero selects the current user
 /// process.
 pub fn send_to_process(pid: Pid, sig: Option<SignalInfo>) -> KResult<()> {
+    send_notification_to_process(pid, sig.map(Into::into))
+}
+
+pub(crate) fn send_notification_to_process(
+    pid: Pid,
+    sig: Option<SignalNotification>,
+) -> KResult<()> {
     let proc = lookup::published_process(pid)?;
     if proc.is_waitable_zombie() {
         return Ok(());
     }
-    send_to_process_ref(&proc, sig)
+    send_notification_to_process_ref(&proc, sig)
 }
 
 /// Sends a signal to a specific process object reference.
@@ -88,11 +95,17 @@ pub fn send_to_process(pid: Pid, sig: Option<SignalInfo>) -> KResult<()> {
 /// A disappearing selected task is tolerated after queuing; this helper does
 /// not itself check signal permissions or reject every exited process reference.
 pub fn send_to_process_ref(proc: &Arc<Process>, sig: Option<SignalInfo>) -> KResult<()> {
+    send_notification_to_process_ref(proc, sig.map(Into::into))
+}
+
+fn send_notification_to_process_ref(
+    proc: &Arc<Process>,
+    sig: Option<SignalNotification>,
+) -> KResult<()> {
     let signal_manager = proc.signal_manager()?;
 
     if let Some(sig) = sig {
-        let signo = sig.signo();
-        debug!("Send signal {signo:?} to process {}", proc.pid());
+        debug!("Send signal {:?} to process {}", sig.signo(), proc.pid());
         if let Some(tid) = signal_manager.send_signal(sig)
             && let Ok(task) = lookup::task(tid)
         {
@@ -149,6 +162,14 @@ pub fn send_to_process_group(pgid: Pid, sig: Option<SignalInfo>) -> KResult<()> 
 /// TGID, and `KError::OperationNotPermitted` if the task has no Thread runtime.
 /// TID zero resolves the current task; `None` checks without queuing.
 pub fn send_to_thread(tgid: Option<Pid>, tid: Tid, sig: Option<SignalInfo>) -> KResult<()> {
+    send_notification_to_thread(tgid, tid, sig.map(Into::into))
+}
+
+pub(crate) fn send_notification_to_thread(
+    tgid: Option<Pid>,
+    tid: Tid,
+    sig: Option<SignalNotification>,
+) -> KResult<()> {
     let task = lookup::task(tid)?;
     let thread = task.try_as_thread().ok_or(KError::OperationNotPermitted)?;
     if tgid.is_some_and(|tgid| thread.pid() != tgid) {

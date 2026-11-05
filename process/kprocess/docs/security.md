@@ -1,5 +1,17 @@
 # kprocess — Security and reliability
 
+## Requeued Timer Wake Boundary
+
+record_requeued accepts no numeric target authority. The timer manager verifies
+the supplied reservation identity before returning its captured TimerSignalTarget.
+The runtime releases the timer mutex before checking current disposition, pending state and
+live slot identity, looking up a task, and validating matches_thread. Deletion,
+ID reuse, expired managers and retired slots cannot redirect this wake to a new
+owner. Concurrent consumption may make a wake redundant; it cannot create a
+notification or acknowledge a timer. Ready callbacks execute outside all signal
+and record locks. The CPU-timer integration test covers ignored retention,
+accumulated overruns and one completion, not exhaustive wake/exit interleavings.
+
 ## Prepared Task Entry Ordering
 
 Callers prepare the user-task entry before process/thread clone preparation.
@@ -10,6 +22,14 @@ documents this order; syscall tests inject entry allocation failure and verify
 unchanged child and thread relationships. They do not force global allocator OOM.
 
 ## Scope and trust model
+
+Timer dispatch does not infer queue admission from a wake hint. Rejected
+notifications return through TimerSignalSendOutcome and are released outside
+timer, signal and handler ownership locks. Their receipts are not acknowledged
+as delivered. Prepared receipt release queues record availability, never a
+direct timer callback. The alarm task upgrades the captured runtime, verifies
+exact storage identity under its timer mutex, and dispatches deferred demand
+after unlocking. Neither a reused PID nor a reused timer ID authorizes progress.
 
 TEE session-slot access exposes an optional KBox under the existing mutex.
 The installing API accepts an already allocated owner; rejected redundant owners
@@ -217,8 +237,45 @@ and synchronized remote samples; interrupt handlers must not access this state.
 Aggregate counters are relaxed atomics.
 Their snapshots are not transactionally tied to every directory/resource field.
 `ExecMetadata` atomically replaces its pair, while separate getters can straddle
-updates. Timer signal dequeue callbacks validate timer sequence through ktimer;
-missing targets are ignored by delivery glue rather than reviving retired tasks.
+updates. Typed timer dequeue receipts validate timer sequence through ktimer;
+ordinary userspace SI_TIMER fields do not select that completion path. The
+trusted timer bridge supplies provenance, and ksignal consumes it outside its
+locks before handing the signal to a consumer. Completion compares the full
+non-wrapping u64 generation, not the truncated u32 ABI field. Exhausted creation
+and settime return InvalidInput without publication or timer mutation; deletion
+and exec cleanup remain available. Creation captures a weak ProcessRuntime
+origin, and dequeue upgrades it rather than resolving the receiving task. The
+pinned runtime directly samples its process CPU times and mutates its own timer
+manager, refreshing the same CPU-timer gate. Its manager lock is released before
+the upgraded owner is dropped. Expired origins reject delivery; exec's timer
+clear rejects old IDs in the still-live origin. A reusable record lease retains
+occupancy through completion. Cancellation removes only still-queued old
+ownership, never releasing an in-flight dequeue lease.
+POSIX destinations are now separately
+captured as weak signal-manager identity plus an optional registered slot.
+Thread capture checks exact Process identity, not just TGID equality. Sends
+validate slot liveness under SigLock. Numeric dispatch fields cannot redirect
+the notification, and wake lookup checks manager/slot identity while retaining
+the task. Legacy itimers and alarm-owner polling still use their existing
+numeric routes; this is not a global PID/TID routing redesign.
+Missing targets are ignored by delivery glue rather than reviving retired tasks.
+Delete and exec clearing publish timer-map removal and refresh the CPU gate
+under the manager mutex, then drop returned retired ownership after unlocking.
+Late receipts fail lookup even when retired storage is still retained. This
+provides the release boundary for captured destination references and
+reserved records. Retired-wrapper destruction cancels old pending ownership.
+Rearm similarly finishes its update after the timer mutex is released. Exact
+record identity and captured manager/slot prevent cancellation of successors;
+no timer/signal lock nesting is introduced.
+Timer creation pins the runtime before validating PosixTimerConfig outside the
+manager mutex. The same strong runtime owner spans admission; no preparation
+step can dereference a retired runtime. Configuration contains validated
+clock/notification values, a weak origin, a weak destination/optional slot and,
+for notifying timers, fallibly reserved record storage. Reservation uses KERNEL
+outside the manager lock and requires reclaim-safe sleepable context.
+Admission errors retain the configuration until the explicit manager lock scope
+has ended. Only then does the Process adapter discard it and return KError;
+the runtime stays pinned through this unlocked cleanup as well.
 
 ## Threat analysis
 
