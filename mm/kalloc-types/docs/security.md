@@ -1,6 +1,68 @@
 # kalloc-types 安全与可靠性
 
-## Raw ownership boundary
+## Shared Owner Boundary
+
+KArc and KWeak expose only sized, typed ownership. They do not export the
+internal allocator or permit reconstructing owners from foreign pointers.
+The standard Arc implementation owns the strong/weak counters and their
+ordering; its Send/Sync constraints require both Send and Sync from T.
+This avoids PR #385's weaker Sync bound, which could permit cloning/upgrading
+on a different thread and transferring destruction of a non-Send payload.
+
+The unsafe implementation includes SharedAllocator and raw KArc recovery.
+Allocation returns an
+aligned region for the requested Layout through KBox's backend; deallocation
+accepts only the matching live allocation transferred by Arc after all strong
+and weak users finish. Zero-size allocator requests return an aligned dangling
+region and require no free; actual Arc count headers are nonzero-sized even
+when T is a ZST. The host allocator pair and kernel allocator pair never mix.
+
+| Failure / risk | Handling and remaining obligation |
+| --- | --- |
+| Invalid flags or reservation OOM | Return InvalidInput or NoMemory; input drops once; no owner published |
+| Upgrade racing final strong drop | Standard Arc either grants a live strong reference or returns None; no resurrection |
+| Payload destructor unwinds | Standard Arc releases the implicit weak through its guard; surviving weak handles cannot upgrade |
+| Final weak release in an unsuitable context | Caller must obey allocator lock/reentrancy constraints; constructor flags are not destructor permissions |
+| Strong reference cycle | Leak unless callers break the cycle; KWeak is available for back-references |
+| Reference-count overflow | Inherited standard Arc abort protection, not a recoverable allocation failure or wrapping counter |
+| Raw reference recovered twice, from an address borrow, or from another owner type | Violates from_raw's unsafe contract; one unclaimed KArc strong reference is required |
+| Stateful allocator introduced without preserving its release authority | Invalidates pointer-only raw recovery; backend changes must revise the representation and recovery proof |
+
+`into_raw` does not decrement the count or drop the payload. Recovery uses the
+same SharedAllocator type and allocation domain, with canonical NOWAIT flags;
+release never inspects allocation flags or the test-only failure switch. This
+is equivalent release authority, not conversion to Global or reconstruction
+from an arbitrary address. as_ptr does not extend lifetime or grant mutable
+access. Transferring a raw pointer does not bypass Send/Sync requirements.
+Final strong/weak destruction after recovery retains the normal context rules.
+
+Raw round-trip tests cover both allocation policies, independently transferred
+references, extraction, aligned ZSTs and weak release through recovered
+allocator metadata. Optional KArcPointerOps delegates directly to that raw-owner
+contract, without a new allocator, refcount or queue identity. Its safety depends
+on the concrete adapter preserving link projections and the library returning
+each transferred pointer once. Conversion does not authorize arbitrary removal
+or release under a lock; those obligations remain with the subsystem.
+Library duplicate-insertion panics and fast_clear's intentional ownership leak
+are not converted into recoverable cancellation. Normal teardown is covered;
+complete draining after a panicking payload destructor is not guaranteed by
+this adapter. Kernel panic handling and any hosted unwind-cleanup protocol remain
+outside its ownership-conversion contract.
+Hosted intrusive_collections probes exercise independent links, duplicate-insertion
+panic recovery, removal and normal list teardown. Production adapters must own
+and release every linked reference and enforce the list's removal preconditions.
+
+Allocation-failure injection changes only the private allocator result before
+the same Arc::try_new_in call used in production. It does not inject payload
+construction failure or global allocator exhaustion. Concurrent and unwind
+tests are hosted; guest tests do not unwind the kernel. No timer call site is
+migrated by introducing these types, and no complete OOM-safety claim is made.
+The empty-weak test checks identity/upgrade behavior, not allocator traffic;
+invalid-flag tests check the returned error and input cleanup. Allocation-free
+clone/downgrade/upgrade and validation-before-allocation are additionally
+established by source inspection, not an allocation-counting regression test.
+
+## KBox raw ownership boundary
 
 A raw transfer suppresses owner destruction, not pointee initialization.
 Recovery requires exactly one outstanding ownership right and the original

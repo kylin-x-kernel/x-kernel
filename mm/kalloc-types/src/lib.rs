@@ -12,13 +12,20 @@
 
 #![no_std]
 #![feature(derive_coerce_pointee)]
+#![feature(allocator_api)]
 #![feature(fn_traits, unboxed_closures, tuple_trait)]
 
-#[cfg(not(target_os = "none"))]
 extern crate alloc;
 
+#[cfg(feature = "intrusive-collections")]
+mod intrusive;
+#[cfg(feature = "intrusive-collections")]
+pub use intrusive::KArcPointerOps;
+
+mod karc;
 mod kbox;
 
+pub use karc::{KArc, KWeak};
 pub use kbox::KBox;
 
 bitflags::bitflags! {

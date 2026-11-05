@@ -16,14 +16,14 @@ use kerrno::{KError, KResult};
 use crate::AllocFlags;
 
 #[cfg(target_os = "none")]
-fn allocate(layout: Layout, _flags: AllocFlags) -> KResult<NonNull<u8>> {
+pub(super) fn allocate(layout: Layout, _flags: AllocFlags) -> KResult<NonNull<u8>> {
     kalloc::global_allocator()
         .alloc(layout)
         .map_err(|_| KError::NoMemory)
 }
 
 #[cfg(not(target_os = "none"))]
-fn allocate(layout: Layout, _flags: AllocFlags) -> KResult<NonNull<u8>> {
+pub(super) fn allocate(layout: Layout, _flags: AllocFlags) -> KResult<NonNull<u8>> {
     // SAFETY: callers supply a nonzero layout; null is returned as NoMemory.
     NonNull::new(unsafe { alloc::alloc::alloc(layout) }).ok_or(KError::NoMemory)
 }

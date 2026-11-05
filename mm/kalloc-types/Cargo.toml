@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 
+[features]
+intrusive-collections = ["dep:intrusive-collections"]
+
 [dependencies]
+intrusive-collections = { workspace = true, optional = true }
 bitflags.workspace = true
 kerrno.workspace = true
 unittest.workspace = true

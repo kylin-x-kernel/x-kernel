@@ -2133,6 +2133,7 @@ name = "kalloc-types"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
+ "intrusive-collections",
  "kalloc",
  "kerrno",
  "unittest",

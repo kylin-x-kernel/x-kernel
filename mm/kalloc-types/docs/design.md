@@ -1,5 +1,80 @@
 # kalloc-types 设计
 
+## Minimal Shared Ownership
+
+`KArc<T>` and `KWeak<T>` adapt the sized shared-owner surface from PR #385,
+head `e3042051e558cf65d8533dfb2edab2a2e3152648`. This migration deliberately
+retains sharing, downgrade/upgrade, identity/count queries and try_unwrap,
+but excludes cyclic construction, DST coercions, mutable
+uniqueness and whole-kernel Arc replacement. The original manual reference
+counter is not copied: its Sync bounds omitted Send, its final-value Drop did
+not guard the implicit weak release against unwinding, and overflow used a
+post-increment panic rather than preventing a wrapping count.
+
+The private representation is standard `Arc<T, SharedAllocator>` and its Weak
+counterpart, using the pinned Rust toolchain's allocator_api implementation.
+Rust supplies strong/weak synchronization, overflow protection and cleanup
+when the payload unwinds. Auto traits inherit the Send + Sync payload
+requirements; no unsafe Send/Sync implementation is added by this wrapper.
+The allocator's permission field is carried by handles but is not a release
+token: raw recovery uses equivalent NOWAIT allocator metadata. Unlike PR #385's
+single-pointer representation, this wrapper must not be assumed pointer-sized
+or layout-compatible with standard Arc<T>. No representation/ABI guarantee is
+exported; broad call-site migration needs a separate footprint review.
+
+`new`, `new_nowait` and `new_with_flags` return KResult and use the same
+layout allocator as KBox. Unlike `Arc::try_new` with Global, the custom
+allocator calls kalloc's fallible inherent allocation method rather than the
+fatal GlobalAlloc adapter. Unknown flags fail before allocation, even for ZST
+payloads. Every shared owner needs a count header, so ZST construction can
+return NoMemory. Hosted builds retain paired nullable host allocation/free.
+
+The allocator is private and copied with immutable flags; Arc owns its exact
+layout and transfers the live allocation once at final weak release. Cloning,
+downgrading, upgrading and empty weak construction do not allocate. Dropping
+the last strong owner destroys T in the caller's context; weak owners retain
+only storage. Final weak drop deallocates without reclaim. Neither operation
+inherits the constructor's sleeping permission, and neither claims NMI safety
+or bounded latency. Callers must audit T::drop and allocator lock order.
+
+Guest tests cover ownership/counts, weak lifetime, extraction, alignment, ZST
+allocation, invalid flags and local allocation-failure injection. Hosted tests
+also cover concurrent upgrade/final release and payload unwinding. Hosted
+compile-fail doctests reject Sync wrappers around a Sync-but-not-Send payload.
+These tests do not simulate global OOM or prove timer admission/progress; timer
+and signal protocol work remains separate.
+
+### Shared Raw Ownership
+
+`KArc::as_ptr` borrows an address without adding ownership. `into_raw`
+transfers exactly one strong reference, and unsafe `from_raw` recovers that
+reference without changing its count, allocating or sleeping. Multiple
+transfers may have identical addresses but each retains a separate reference.
+Pointer copies alone do not create ownership. The reference must be recovered
+once, with the same type and provenance; it cannot be mixed with standard Arc,
+Weak or KBox pointers. The implementation delegates pointer extraction to Arc,
+not a pointer derived through Deref, preserving raw allocation provenance.
+
+SharedAllocator flags and its test failure switch only affect allocation.
+All instances share the same build-time kernel/host backend and layout-based
+deallocator, so raw recovery can reconstruct an equivalent release allocator.
+No caller-visible policy or allocator state is recoverable from the pointer.
+Introducing arenas, per-allocation release tokens or stateful backends requires
+revisiting this representation before retaining the pointer-only interface.
+
+The optional `intrusive-collections` feature exports `KArcPointerOps<T>` for
+concrete adapters using the existing library. This zero-sized implementation
+transfers exactly one KArc strong reference per occupied link, with no allocation
+or custom queue protocol. The default configuration does not enable this optional
+dependency.
+Hosted tests use this production pointer adapter with test-only link projections.
+They cover duplicate-insertion panic recovery, known-member removal, independent
+linkage fields, normal list teardown and the library's own take operation for
+moving owners without destruction. Link selection remains subsystem-specific; these
+tests do not establish a production timer queue's locking or cancellation
+protocol. Production integration must encapsulate those obligations separately.
+See `tests/README.md` for default and opt-in host/Miri commands.
+
 ## Raw ownership and hosted validation
 
 `KBox::into_raw` transfers the sole owner without touching its pointee;
