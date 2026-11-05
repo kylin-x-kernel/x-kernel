@@ -74,11 +74,12 @@ fn init_nmi_watchdog() {
     //   1. Computes the cycle threshold from period_ns.
     //   2. Initialises the per-CPU counter hardware.
     //   3. Registers our per-CPU callback.
-    //   4. Promotes the PMU line to NMI delivery on this CPU (PPI).
+    //   4. Prepares and enables PMU NMI delivery on this CPU (PPI).
     //   5. Starts the counter.
     // Steps 2-4 are fallible; the counter and callback are set up *before*
     // the line is promoted, so any failure is rolled back completely by
-    // `deinit_cycle_counter()` and promotion is the last fallible step.
+    // `deinit_cycle_counter()` before producer start. A rejected activation
+    // can retain a disabled preparation obligation for later teardown.
     // The PMU overflow-dispatch handler on the interrupt line is registered
     // independently by the `pmu` feature init (kruntime), so perf overflow
     // delivery works even without the hardlockup watchdog.

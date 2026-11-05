@@ -1,5 +1,18 @@
 # irq-driver — Design
 
+## Local NMI Transactions
+
+`IntrManagerIf::percpu_nmi` selects `PerCpuNmiChip` only for a standard GICv3
+PPI with a platform-validated NMI mechanism. Unsupported controllers return
+None. `gicv3_nmi.rs` owns bounded local attribute transactions under the GIC
+lock; KIRQ retains Line exclusion and CPU pinning around these operations.
+The backend uses the selected CPU interface's Redistributor RWP wait, checks
+disabled/inactive state, then programs and reads back priority or NMI attributes.
+Teardown clears and checks stale pending state before restoring normal delivery.
+It never enables the source or writes active state. PMU producer control and
+remote rendezvous remain outside the controller. Register fixtures validate
+failure ordering; they do not prove physical NMI quiescence.
+
 ## Purpose
 
 PLIC source-state storage uses a KBox slice reserved with NOWAIT after firmware
@@ -233,7 +246,8 @@ initialization, special IDs and IDs beyond the discovered standard range before
 KIRQ publishes a mapping or installs an action. Checks precede narrowing from
 `usize`; extended IDs and LPIs are not supported by this provider path.
 Accepted ordinary SPIs use Fasteoi and ordinary SGI/PPI sources use PerCpu.
-Forwarded virtual timer PPI 27 also uses PerCpu; NMI-tagged sources retain Legacy. Range
+Forwarded virtual timer PPI 27 and NMI-fallback PPIs also use PerCpu;
+NMI-tagged SPIs retain Legacy. Range
 admission is separate from hardware trigger readback, masked configuration and
 RWP synchronization; direct low-level calls still require validated hardware IDs.
 
@@ -333,7 +347,7 @@ delivery. This tests late events without substituting a synthetic handler call.
 Validated standard SPIs select the static `gic_spi::CHIP` Fasteoi capability.
 Shared and wakeup flags are accepted; MSI, unknown flags, explicit affinity and
 low polarity are rejected. Ordinary SGI/PPI INTIDs, including forwarded virtual
-timer PPI 27, use PerCpu; NMI-tagged PER_CPU descriptors retain Legacy.
+timer PPI 27 and NMI-fallback PPIs, use PerCpu; NMI-tagged SPIs retain Legacy.
 The publicly reachable chip callbacks revalidate this binding before MMIO:
 invalid mask/unmask inputs are ignored and invalid retrigger returns false.
 NMI registration adds PER_CPU before selection. The only current VMM HW-LR
@@ -419,6 +433,10 @@ models are not physical delivery, MMIO fault or hardware-quiescence proofs.
 - The GICv3 NMI path is a separate `dispatch_nmi` entry: claim-time
   IRQ/NMI classification happens in the backend, keeping the PMR-based
   NMI window logic out of `kirq`.
+  Both GIC NMI entry routes pass `PendingIrq` with `GIC_ROOT_DOMAIN`, the raw
+  hwirq and the original completion cookie. KIRQ borrows the Domain's Line and
+  NMI action through completion; the driver neither selects a handler by a
+  global raw number nor owns its lifetime.
 - PLIC keeps Linux-style constant IRQ bases (`S_SOFT`/`S_TIMER`/
   `S_EXT` offsets above the `INTC_IRQ_BASE` sentinel) and a skip
   sentinel for completion, since timer and IPI events need no PLIC

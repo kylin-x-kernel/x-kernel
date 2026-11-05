@@ -6,7 +6,21 @@ IDs; translating them to hardware IDs belongs to the platform. Power terminals
 do not perform filesystem/process/device cleanup.
 
 PMU IRQ registration precedes activation. NMI source and mechanism protocols
-retain their separate contexts. MMIO/DMA preparation errors must be handled by
+retain their separate contexts. Local NMI preparation requires an initialized
+CPU mechanism and a disabled registered source on the first call. KIRQ retains
+partial-failure cleanup state; callers must not enable delivery after rejection.
+The source owner still excludes counter restart during shutdown and cannot use
+terminal quiescence as evidence that handlers/resources may be freed.
+Reusable `shutdown_periodic_nmi` reports only the calling CPU's producer and
+controller teardown. A false result retains resources; successful remote queue
+submission is not a successful shutdown result. The owner must serialize restart
+and observe completion from every participating CPU before shared handler removal.
+`PmuInterruptIf::shutdown_overflow_irq` delegates that global responsibility to
+the PMU owner. Consumers must authorize losing periodic service and exclude CPU
+hotplug/system stop. Providers retain partial failure and block restoration until
+all source/controller acknowledgements and software-reader retirement finish.
+`restore_overflow_irq` republishes only the handler, not old consumer callbacks.
+MMIO/DMA preparation errors must be handled by
 their callers; moving or renaming contracts does not certify rollback on
 partial platform sharing failure. The existing AArch64 partial-sharing error
 policy is tracked separately in kiface's capability audit.

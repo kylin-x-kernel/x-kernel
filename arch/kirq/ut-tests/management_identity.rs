@@ -301,7 +301,6 @@ fn failed_registration_retains_resolved_metadata_without_committing_configuratio
         let result = super::with_registration_line_checked(
             offered.into(),
             super::ManagementMode::Task,
-            None,
             |entry| {
                 Ok(if kind == 2 {
                     entry.can_install_shared_action()
@@ -309,7 +308,7 @@ fn failed_registration_retains_resolved_metadata_without_committing_configuratio
                     entry.can_install_regular_action()
                 })
             },
-            |resolved, entry| {
+            |resolved, _, entry| {
                 let fail = |plan: super::IrqPlatformPlan| {
                     observed = Some((
                         plan.desc,
@@ -938,12 +937,11 @@ fn startup_registration_rejects_missing_descriptors_before_preflight() {
             let result = super::with_registration_line_checked(
                 spec.into(),
                 super::ManagementMode::Startup,
-                None,
                 |_| {
                     has_checked = true;
                     Ok(true)
                 },
-                |_, _| {
+                |_, _, _| {
                     has_applied = true;
                     Ok(())
                 },
@@ -988,12 +986,11 @@ fn task_registration_rejects_missing_descriptors_before_preflight() {
         let result = super::with_registration_line_checked(
             spec.into(),
             super::ManagementMode::Task,
-            None,
             |_| {
                 has_checked = true;
                 Ok(true)
             },
-            |_, _| {
+            |_, _, _| {
                 has_applied = true;
                 Ok(())
             },

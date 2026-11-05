@@ -67,10 +67,9 @@ fn select_gic_flow(
     if desc.hwirq >= 32 && matches!(desc.trigger, IrqTrigger::EdgeFalling | IrqTrigger::LevelLow) {
         return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
     }
-    // NMI registration tags its fallback PER_CPU and retains its separate
-    // lifecycle. Ordinary PPIs, including explicitly forwarded PPIs, use
-    // CPU-local flow state rather than shared-source running/pending state.
-    if desc.flags.contains(kirq::IrqFlags::PER_CPU) {
+    // NMI-fallback PPIs now share local enable/disable accounting. Preserve
+    // the existing tagged SGI/SPI contract outside this PPI lifecycle change.
+    if desc.flags.contains(kirq::IrqFlags::PER_CPU) && !(16..32).contains(&desc.hwirq) {
         return Ok(IrqFlow::Legacy);
     }
     if desc.hwirq < 32 {
@@ -448,7 +447,10 @@ fn gic_dispatch_nmi_from_irqsoff(_unused: usize) {
         GicVersion::V3 => gicv3::dispatch_irq_from_irqsoff(),
     };
     if let Some((hwirq, completion_cookie)) = claim {
-        kirq::generic_handle_nmi(kirq::DispatchedIrq::new(hwirq, completion_cookie));
+        kirq::generic_handle_nmi(kirq::PendingIrq::new(
+            kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, hwirq),
+            completion_cookie,
+        ));
     }
 }
 
@@ -553,6 +555,23 @@ pub fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn percpu_nmi(desc: kirq::IrqDesc) -> Option<&'static kirq::PerCpuNmiChip> {
+        #[cfg(any(feature = "nmi-pseudo", feature = "nmi-hardware"))]
+        if ACTIVE_GIC.get() == Some(&GicVersion::V3)
+            && desc.domain == Some(GIC_ROOT_DOMAIN)
+            && matches!(
+                select_gic_flow(desc, STANDARD_INTID_LIMIT.get().copied()),
+                Ok(kirq::IrqFlow::PerCpu)
+            )
+            && (16..32).contains(&desc.hwirq)
+            && kplat::nm_irq::NmiMechanismIf::mode() != kplat::nm_irq::NmiMode::None
+        {
+            return Some(&gicv3::nmi::CHIP);
+        }
+        let _ = desc;
+        None
+    }
+
     fn guest_interface() -> Option<kirq::GuestIrqInterface> {
         if ACTIVE_GIC.get() != Some(&GicVersion::V2) {
             return None;

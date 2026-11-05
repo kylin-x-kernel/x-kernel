@@ -1,5 +1,17 @@
 # irq-driver — Security And Reliability
 
+## Local NMI Boundary
+
+`src/gicv3_nmi.rs` accepts only standard PPIs in the GIC domain. Its sole unsafe
+conversion constructs an IntId after the 16..32 check, preventing truncation or
+out-of-range register indexing. KIRQ supplies retained Line exclusion and CPU
+pinning; the GIC lock serializes the full register transaction. Redistributor
+RWP completion is not active-handler completion: active state is checked and
+never forcibly cleared. A teardown caller must stop the producer before pending
+state is cleared. Timeouts, active claims, stuck pending state and attribute
+readback failures return errors without enabling delivery. Higher layers retain
+the preparation/handler on failure and must not treat the error as shutdown.
+
 ## PLIC Source State Reservation
 
 The validated PLIC source bound limits the NOWAIT KBox reservation to 1024
@@ -17,8 +29,8 @@ from an inactive bit. Ordinary GICv2 completion consults only explicit local
 delegation. `gic::guest_interface` validates all firmware register ranges before
 exposing GICH/GICV; its tests do not prove physical MMIO accessibility.
 
-PerCpu selection is limited to ordinary GIC private sources (including forwarded
-PPI 27 but excluding NMI-tagged sources), RISC-V timer/software causes, and x86 timer/IPI
+PerCpu selection includes GIC private sources (including forwarded PPI 27 and
+NMI-fallback PPIs), RISC-V timer/software causes, and x86 timer/IPI
 vectors. KIRQ pins the CPU across configure/enable/commit. RISC-V controls the
 local SIE bit, and x86 timer control changes only the LAPIC timer mask. An x86
 IPI vector has no independent hardware mask: disabled software admission is not
@@ -249,8 +261,8 @@ The same gate rejects explicit GIC SPI `EdgeFalling`/`LevelLow` requests before
 new mapping publication or existing metadata updates. It does not validate bare
 legacy IDs, direct controller calls, private-source trigger support, unspecified
 trigger metadata, forwarding state or per-CPU shutdown. Eligible ordinary SPIs
-select Fasteoi; ordinary private sources select PerCpu, except PPI 27 and
-PER_CPU-tagged sources, which retain Legacy;
+select Fasteoi; private sources including PPI 27 and NMI-fallback PPIs select
+PerCpu. NMI-tagged SPIs retain Legacy;
 neither successful admission nor cached hardware capacity proves delivery,
 configuration success, register-write completion or hardware quiescence.
 

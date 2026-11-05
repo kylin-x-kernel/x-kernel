@@ -171,21 +171,20 @@ macro_rules! nmi_if_impl {
             }
 
             fn configure_nmi(hwirq: usize) -> bool {
-                #[cfg(feature = "nmi-hardware")]
-                if matches!(current_mode(), NmiMode::Hardware) {
-                    // Propagate controller-level failures (unsupported
-                    // INTID, missing redistributor frame) so the caller can
-                    // report that NMI delivery was never actually enabled.
-                    return gic::set_nmi_attr(hwirq, true);
+                if current_mode() == NmiMode::None {
+                    warn!("configure_nmi: NMI unavailable; hwirq {hwirq}");
+                    return false;
                 }
-                #[cfg(feature = "nmi-pseudo")]
-                if matches!(current_mode(), NmiMode::Pseudo) {
-                    // Promote to pseudo‑NMI by raising GIC priority to 0.
-                    gic::set_prio(hwirq, 0);
-                    return true;
+                let _guard = kspin::NoPreemptIrqSave::new();
+                let desc = kirq::gic_level_irq_desc(hwirq);
+                // Initial preparation precedes PMU IRQ activation. Repeated
+                // preparation is a no-op, but still checks Closing admission.
+                let result = kirq::prepare_percpu_nmi(desc);
+                if let Err(err) = result {
+                    warn!("configure_nmi: local preparation failed; hwirq={hwirq}, error={err:?}");
+                    return false;
                 }
-                warn!("configure_nmi: NMI not supported on this platform; hwirq {hwirq}");
-                false
+                true
             }
 
             fn info() -> NmiSourceInfo {

@@ -68,9 +68,27 @@ pub(super) fn dispatch_claim(source: IrqRef, complete_claim: impl FnOnce()) -> O
     }
     // Empty Lines retain admission through completion, not just action return.
     entry.begin_dispatch();
-    let guard = IrqDispatchGuard::new(virq, line.clone());
+    let mut guard = IrqDispatchGuard::new(virq, line.clone());
     // Lookup's RCU scope has ended; this owner and admission retain the original
     // Line through controller completion, without taking the directory lock.
+
+    if entry.has_nmi_action() {
+        let can_dispatch = if entry.flow == IrqFlow::PerCpu {
+            entry.can_run_local_actions()
+        } else {
+            entry.can_run_actions()
+        };
+        drop(entry);
+        krcu::with_interrupt_read(|scope| {
+            if can_dispatch && let Some(handler) = line.nmi_action.read(scope) {
+                // Ordinary fallback preserves the logical IRQ callback ABI.
+                guard.is_unhandled = !handler.handle(virq).handled();
+            }
+            complete_claim();
+        });
+        drop(guard);
+        return Some(virq);
+    }
 
     match entry.flow {
         IrqFlow::Level(chip) => handle_level_irq(entry, guard, chip, complete_claim),

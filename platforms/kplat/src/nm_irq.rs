@@ -19,13 +19,13 @@
 //!       → PeriodicNmiSourceIf provider (e.g. PMU cycle counter backend)
 //!         → khal::irq::configure_nmi(hwirq)          (per CPU)
 //!           → NmiMechanismIf::configure_nmi(hwirq)
-//!             → NmiMode::Hardware → GIC NMI attribute
-//!             → NmiMode::Pseudo   → gic::set_prio(hwirq, 0)
+//!             → kirq::prepare_percpu_nmi(desc)
+//!               → local GIC NMI attribute / pseudo-NMI priority transaction
 //!   pmu feature init (kruntime)
 //!     → khal::pmu::register_overflow_dispatch(hwirq)
 //!       → pmu-only build: kirq::try_register_startup(...)
 //!       → PMU as NMI source (nmi-pmu): kirq::register_nmi_startup(...)
-//!         → NMI_TABLE (+ normal-IRQ fallback)
+//!         → Line-owned RCU action (shared by true NMI and IRQ fallback)
 //! ```
 
 use kplat_macros::device_interface;
@@ -86,12 +86,13 @@ pub trait NmiMechanismIf {
     /// Promote the hardware interrupt `hwirq` to NMI delivery on the
     /// **calling CPU** according to the current [`NmiMode`].
     ///
-    /// The platform implementation owns the mode‑specific controller
-    /// configuration: a GIC NMI attribute for [`NmiMode::Hardware`] or a
-    /// priority‑0 promotion for [`NmiMode::Pseudo`].  For per‑CPU interrupt
-    /// lines (PPIs) this must be invoked on every CPU; for shared lines
-    /// (SPIs) the write is idempotent across CPUs.  Returns `false` when the
-    /// platform cannot deliver NMI on this line.
+    /// The platform validates the selected mechanism and enters KIRQ's local
+    /// preparation protocol. The irqchip owns mode-specific attributes. Initial
+    /// preparation requires a disabled, registered CPU-local NMI source and is
+    /// performed before PMU IRQ activation on every participating CPU. Repeated
+    /// preparation is a no-op but still rejects Closing. Shared lines are not
+    /// supported by this entry. Returns false on rejected or failed preparation;
+    /// it does not enable the source or start its producer.
     fn configure_nmi(hwirq: usize) -> bool;
 }
 
@@ -111,6 +112,9 @@ pub trait PeriodicNmiSourceIf {
     /// Arm a periodic NMI with period `period_ns`.
     ///
     /// Must be called on **each CPU** so every CPU arms its own source.
+    /// The provider keeps setup, rollback and producer start on the calling
+    /// CPU. This local exclusion does not serialize a remote source shutdown;
+    /// the source owner must exclude concurrent shutdown and restart.
     /// This method never registers an IRQ-level handler: the line's
     /// overflow-dispatch handler is registered exactly once by the PMU
     /// feature init (`khal::pmu::register_overflow_dispatch`, backed by
@@ -118,8 +122,8 @@ pub trait PeriodicNmiSourceIf {
     /// pmu-only builds, or as an NMI handler with normal-IRQ fallback when
     /// the PMU is the compiled NMI source.  This method only arms the local
     /// CPU's source: it registers the consumer callback into the per-CPU
-    /// source state, promotes the line's delivery (e.g. PPI priority / NMI
-    /// attribute), and starts the counter.  `handler` is invoked in NMI
+    /// source state, prepares and enables local line delivery (e.g. PPI priority
+    /// / NMI attribute), and starts the counter. `handler` is invoked in NMI
     /// context on each overflow.  Returns `false` if no periodic NMI source
     /// is available or the local source is already armed.
     fn enable_periodic_nmi(period_ns: u64, handler: NmiCb) -> bool;
@@ -133,4 +137,21 @@ pub trait PeriodicNmiSourceIf {
     /// pinned to the CPU whose source they are stopping and must not attempt
     /// to re-arm that source afterwards.
     fn quiesce_periodic_nmi();
+
+    /// Stops and releases the calling CPU's periodic source for later reuse.
+    ///
+    /// The owner must serialize this operation against source start and other
+    /// users of the same interrupt line. The provider pins the whole local
+    /// transaction; task or ordinary IPI context is allowed, NMI is not.
+    /// True confirms producer stop and local controller teardown before local
+    /// callback storage is cleared. False retains storage for retry and does
+    /// not authorize handler removal or source reuse. Unsupported mechanisms
+    /// and shared source ownership are rejected before stopping production.
+    /// A prepared local line still needs teardown when no periodic counter was
+    /// armed; absence of a producer alone is not shutdown completion.
+    ///
+    /// This neither broadcasts nor removes the Line's shared handler. The owner
+    /// must collect successful execution on every participant before removing
+    /// that handler. A later restart must prepare and enable local delivery again.
+    fn shutdown_periodic_nmi() -> bool;
 }

@@ -6,6 +6,53 @@ use unittest::{assert, assert_eq, def_test};
 
 use super::{IrqDesc, LocalControl};
 
+// Stateless backend fixtures keep parallel tests independent.
+static PREPARE_FAILURE: crate::PerCpuNmiChip = crate::PerCpuNmiChip {
+    prepare: |desc| Err(crate::IrqDescError::ConfigurationFailed { hwirq: desc.hwirq }),
+    teardown: |_| Ok(()),
+};
+
+static TEARDOWN_FAILURE: crate::PerCpuNmiChip = crate::PerCpuNmiChip {
+    prepare: |_| Ok(()),
+    teardown: |desc| Err(crate::IrqDescError::ConfigurationFailed { hwirq: desc.hwirq }),
+};
+
+static READY_CHIP: crate::PerCpuNmiChip = crate::PerCpuNmiChip {
+    prepare: |_| Ok(()),
+    teardown: |_| Ok(()),
+};
+
+#[def_test]
+fn failed_nmi_preparation_retains_cleanup_and_rejects_backend_replacement() {
+    let desc = IrqDesc::from_virq(0x5fb3);
+    let mut slot = LocalControl::new();
+    assert!(slot.prepare_nmi(desc, &PREPARE_FAILURE).is_err());
+    assert!(slot.has_nmi_preparation());
+    assert!(slot.has_failed_nmi_preparation());
+    assert!(slot.prepare_nmi(desc, &READY_CHIP).is_err());
+    assert!(slot.teardown_nmi(desc).is_ok());
+    assert!(!slot.has_nmi_preparation());
+    assert!(slot.prepare_nmi(desc, &READY_CHIP).is_ok());
+    assert!(!slot.has_failed_nmi_preparation());
+}
+
+#[def_test]
+fn enabled_nmi_cannot_teardown_and_failed_teardown_retains_obligation() {
+    let desc = IrqDesc::from_virq(0x5fb4);
+    let mut slot = LocalControl::new();
+    assert!(slot.prepare_nmi(desc, &TEARDOWN_FAILURE).is_ok());
+    let plan = slot.enable(desc, 1, 0, true, false);
+    slot.commit(plan, 1);
+    assert!(slot.prepare_nmi(desc, &TEARDOWN_FAILURE).is_ok());
+    assert!(slot.teardown_nmi(desc).is_err());
+    assert!(!slot.has_failed_nmi_preparation());
+    let plan = slot.disable(desc, 0);
+    slot.commit(plan, 1);
+    assert!(slot.teardown_nmi(desc).is_err());
+    assert!(slot.has_nmi_preparation());
+    assert!(slot.has_failed_nmi_preparation());
+}
+
 #[def_test]
 fn local_enable_depth_and_configuration_are_independent() {
     let desc = IrqDesc::from_virq(0x5f80);

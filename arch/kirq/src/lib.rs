@@ -5,7 +5,7 @@
 //! Generic kernel IRQ core.
 //!
 //! `kirq` owns the IRQ descriptor namespace, handler registration, hardirq
-//! dispatch context, pseudo-NMI dispatch table, lifecycle hooks, and the
+//! dispatch context, Line-owned NMI actions, lifecycle hooks, and the
 //! generic interrupt-controller interface. Architecture trap entry remains
 //! outside this crate; HAL adapters call [`handle_irq`] and [`handle_nmi`] from
 //! their exception handlers.
@@ -30,7 +30,7 @@ pub use backend::{
     msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix},
     platform::{
         EdgeChip, FasteoiChip, FasteoiResend, GuestIrqInterface, IrqFlow, LevelChip,
-        PerCpuForwardingChip, PerCpuForwardingState,
+        PerCpuForwardingChip, PerCpuForwardingState, PerCpuNmiChip,
     },
 };
 pub use bottom_half::{context, deferred, lifecycle, softirq};

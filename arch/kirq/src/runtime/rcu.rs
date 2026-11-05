@@ -29,4 +29,27 @@ pub(crate) unsafe fn with_nmi_context<R>(operation_fn: impl FnOnce() -> R) -> R 
     result
 }
 
+/// Keeps borrowed NMI state protected until the original claim is completed.
+///
+/// # Safety
+/// The caller owns an active claim on this initialized CPU, with ordinary IRQs
+/// and migration excluded. Both callbacks must return on this stack without
+/// scheduling; completion must consume that original claim exactly once.
+pub(super) unsafe fn with_nmi_claim(
+    dispatch: impl for<'scope> FnOnce(&'scope krcu::ReadScope<'_>),
+    complete: impl FnOnce(),
+) {
+    // SAFETY: the caller's claim exclusion covers dispatch and completion.
+    unsafe {
+        with_nmi_context(|| {
+            krcu::with_interrupt_read(|scope| {
+                dispatch(scope);
+                // Hardware can still refer to the old source after its handler
+                // returns. Do not end the read scope before controller completion.
+                complete();
+            });
+        });
+    }
+}
+
 unittest::path_mod_test!(tests, "../../ut-tests/rcu_context.rs");

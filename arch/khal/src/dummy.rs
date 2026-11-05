@@ -133,6 +133,10 @@ impl kirq::IntrManagerIf {
         None
     }
 
+    fn percpu_nmi(_: kirq::IrqDesc) -> Option<&'static kirq::PerCpuNmiChip> {
+        None
+    }
+
     fn select_flow(_desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
         Ok(kirq::IrqFlow::Legacy)
     }

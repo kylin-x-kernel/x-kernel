@@ -3,6 +3,16 @@
 This document covers the IRQ trap-entry adapter, crate test layout, and page-table
 storage adapter. Other HAL subsystems retain their own interface contracts.
 
+The NMI facade also exposes the platform's `shutdown_periodic_nmi`: a local,
+fallible reusable-source shutdown, distinct from terminal `quiesce_nmi`. HAL
+does not broadcast it, free KIRQ handlers or interpret queue submission as
+completion. The source owner coordinates those steps.
+
+The PMU facade forwards `shutdown_overflow_irq` and `restore_overflow_irq` to
+that source owner through `PmuInterruptIf`. These task-context operations own
+global PMU retirement/republication in the platform provider, not HAL. The local
+NMI operation and terminal stop remain separate APIs with different lifetimes.
+
 ## 定位
 
 `khal::irq` 是 IRQ trap-entry adapter。通用 IRQ core
@@ -24,9 +34,10 @@ arch/khal/src/
 └── lib.rs           # khal::nmi / khal::pmu 机制中立 facade（re-export kplat）
 ```
 
-generic IRQ state、descriptor、dispatch、NMI table、lifecycle hooks 和
-`IntrManagerIf` contract 由 `arch/kirq` 文档描述。`khal::nmi` 只做机制中立
-facade，机制细节归 `kplat::nm_irq` 与平台实现。
+Generic IRQ state, descriptors, dispatch, Line-owned NMI actions, lifecycle
+hooks and `IntrManagerIf` belong to `arch/kirq`. `khal::nmi` is a
+mechanism-neutral facade; mechanism details belong to `kplat::nm_irq` and its
+platform implementations.
 
 ## 架构
 
@@ -84,7 +95,8 @@ of truth, which is why the accessor returns the unvalidated `&'static str`.
   IRQ completion 顺序由 `kirq` 负责。
 - `nmi_handler()` 调用 `kirq::handle_nmi()`；NMI raw-hwirq dispatch 语义由
   `kirq` 负责。
-- `khal::irq` 自身不保存 `IRQ_STATE` 或 `NMI_TABLE`，避免两个活跃 IRQ core。
+- `khal::irq` stores neither IRQ registry state nor NMI handler ownership;
+  both remain in the single `kirq` core.
 - `khal::nmi::early_init()`：GIC 初始化后、任何 NMI 使能前调用一次（平台
   early_driver_init），探测机制并写入运行时 `NmiMode`。
 - `khal::nmi::late_init()`：主核 `prepare_interrupts` 与每个从核 `prepare_local_interrupts` 各调用
@@ -94,15 +106,19 @@ of truth, which is why the accessor returns the unvalidated `&'static str`.
 - `khal::quiesce_nmi()`：仅供终止停机路径调用；以 `NoPreempt` 钉住当前 CPU，
   停掉已武装的本地周期源但保留回调和 IRQ 配置。没有 `nmi_pmu` source 或本地
   source 未初始化时为 no-op，调用后不得重新武装。
-- `khal::irq::configure_nmi(hwirq)`：PPI 需每 CPU 调用，SPI 幂等；返回 `false`
-  表示该线无法提升为 NMI（例如机制已降级为 `None`）。
+- `khal::irq::configure_nmi(hwirq)` delegates CPU-local preparation through the
+  platform to KIRQ. Initial preparation requires a registered disabled source;
+  repeated preparation rechecks admission without rewriting live attributes.
+  Shared sources are unsupported. False means rejected/failed preparation,
+  including an unavailable mechanism or a closing Line; it does not enable IRQs.
 - `khal::nmi::mode()`：返回 `NmiMode::{Pseudo, Hardware, None}`，供消费者
   （如 watchdog）判断是否启用依赖 NMI 的功能。
 
 ## 并发模型
 
 `khal::irq` adapter 只有短生命周期的 `NoPreempt` guard，不持有全局 IRQ state。
-IRQ shared state、NMI table 和 lifecycle hooks 的锁模型都在 `kirq` 内部维护。
+IRQ shared-state locking, NMI RCU ownership and lifecycle hooks are maintained
+inside `kirq`.
 
 After normal IRQ completion, the adapter suspends the architecture exception
 marker, releases its local guard without a pending-work check and invokes

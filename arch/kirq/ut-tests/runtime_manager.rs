@@ -14,7 +14,6 @@ use super::{
     try_disable_irq_nosync, try_enable, try_enable_irq, try_free_irq, try_free_irq_action, try_map,
     try_register, try_register_disabled, try_register_shared, try_synchronize_irq, unregister,
 };
-pub use crate::state::RcuIndexProbe;
 use crate::{
     GIC_ROOT_DOMAIN, IrqController, IrqEvent, IrqFlags, IrqLifecycleHooks, IrqRef, IrqSource,
     IrqTrigger, MSI_DOMAIN, PendingIrq,
@@ -29,6 +28,7 @@ use crate::{
     },
     state::{IrqLine, MAX_IRQ_ACTIONS},
 };
+pub use crate::{runtime::nmi::NmiShutdownProbe, state::RcuIndexProbe};
 
 #[expect(
     clippy::allow_attributes,
@@ -1949,50 +1949,6 @@ fn shared_registration_keeps_line_locked_without_reenabling_later_actions() -> u
 }
 
 #[def_test]
-fn registration_publication_lock_is_optional_and_spans_both_callbacks() -> unittest::TestResult {
-    let publication = kspin::SpinNoPreempt::new(());
-    let has_atomic_exclusion = {
-        let _guard = publication.lock();
-        publication.is_locked()
-    };
-    if !has_atomic_exclusion {
-        return unittest::TestResult::Ignored;
-    }
-    for (index, (has_publication_lock, is_accepted)) in
-        [(false, false), (false, true), (true, false), (true, true)]
-            .into_iter()
-            .enumerate()
-    {
-        let virq = 0x3166 + index;
-        assert_eq!(try_map(IrqDesc::from_virq(virq)), Ok(virq));
-        let mut has_run_body = false;
-        let were_irqs_enabled = karch::local_irq_enabled();
-        let result = super::with_registration_line_checked(
-            virq.into(),
-            super::ManagementMode::Task,
-            has_publication_lock.then_some(&publication),
-            |_| {
-                assert_eq!(publication.is_locked(), has_publication_lock);
-                Ok(is_accepted)
-            },
-            |_, _| {
-                assert_eq!(publication.is_locked(), has_publication_lock);
-                has_run_body = true;
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(result.is_some(), is_accepted);
-        assert_eq!(has_run_body, is_accepted);
-        assert!(!publication.is_locked());
-        assert_eq!(karch::local_irq_enabled(), were_irqs_enabled);
-        assert!(IRQ_STATE.lock().descs.contains_key(&virq));
-        IRQ_STATE.lock().remove_if_unused(virq);
-    }
-    unittest::TestResult::Ok
-}
-
-#[def_test]
 fn registration_preflight_and_install_share_resolved_line_state() {
     let virq = 0x3165;
     let desc = IrqDesc::from_virq(virq);
@@ -2007,12 +1963,11 @@ fn registration_preflight_and_install_share_resolved_line_state() {
     let rejected = super::with_registration_line_checked(
         richer.into(),
         super::ManagementMode::Task,
-        None,
         |entry| {
             assert_eq!(entry.desc, desc);
             Ok(false)
         },
-        |_, _| -> Result<(), IrqDescError> {
+        |_, _, _| -> Result<(), IrqDescError> {
             panic!("rejected preflight must not run installation")
         },
     )
@@ -2025,13 +1980,12 @@ fn registration_preflight_and_install_share_resolved_line_state() {
     let accepted = super::with_registration_line_checked(
         richer.into(),
         super::ManagementMode::Task,
-        None,
         |entry| {
             assert_eq!(entry.desc, desc);
             assert!(!has_atomic_exclusion || line.is_state_locked_for_tests());
             Ok(true)
         },
-        |resolved_virq, entry| {
+        |resolved_virq, _, entry| {
             assert_eq!(resolved_virq, virq);
             assert_eq!(entry.desc, richer);
             assert!(!has_atomic_exclusion || line.is_state_locked_for_tests());

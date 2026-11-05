@@ -264,6 +264,11 @@ unsafe impl Send for Gic {}
 #[error("GICv3 Distributor CTLR RWP wait timeout")]
 pub struct DistributorRwpTimeout;
 
+/// The selected Redistributor RWP bit did not clear within the polling budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("GICv3 Redistributor CTLR RWP wait timeout")]
+pub struct RedistributorRwpTimeout;
+
 /// Lock-free access to GICv3 Distributor state used by IRQ completion paths.
 #[derive(Clone, Copy)]
 pub struct DistributorOperations {
@@ -1021,6 +1026,28 @@ impl CpuInterface {
         unsafe { &*self.rd }
     }
 
+    /// Waits for tracked writes to this interface's Redistributor to complete.
+    ///
+    /// Uses the existing bounded Redistributor polling budget. This reads
+    /// GICR_CTLR.RWP, not GICD_CTLR.RWP, and does not modify registers. It can
+    /// complete a preceding SGI/PPI disable, but is not a general configuration
+    /// barrier, a pending-interrupt clear, or an active-interrupt/handler drain.
+    ///
+    /// The interface retains the Redistributor selected when it was created.
+    /// Callers performing a CPU-local transaction must exclude migration and
+    /// serialize conflicting control operations across the writes and this
+    /// wait. Timeout does not establish that the source has been masked.
+    ///
+    /// # Errors
+    /// Returns [`RedistributorRwpTimeout`] if RWP does not clear within the
+    /// existing polling budget.
+    pub fn wait_for_redistributor_rwp(&self) -> Result<(), RedistributorRwpTimeout> {
+        self.rd()
+            .lpi
+            .wait_for_rwp()
+            .map_err(|_| RedistributorRwpTimeout)
+    }
+
     /// Initialize the CPU interface for the current CPU
     ///
     /// This follows the GICv3 architecture specification for CPU interface initialization:
@@ -1335,7 +1362,10 @@ mod rwp_tests {
 
     use tock_registers::interfaces::{Readable, Writeable};
 
-    use super::{DistributorReg, DistributorRwpTimeout, Gic, SecurityState};
+    use super::{
+        CpuInterface, DistributorReg, DistributorRwpTimeout, Gic, RedistributorRwpTimeout,
+        RedistributorV3, SecurityState,
+    };
     use crate::VirtAddr;
 
     #[test]
@@ -1361,5 +1391,37 @@ mod rwp_tests {
         registers.CTLR.set(ENABLE_GROUP);
         assert_eq!(gic.wait_for_distributor_rwp(), Ok(()));
         assert_eq!(registers.CTLR.get(), ENABLE_GROUP);
+    }
+
+    #[test]
+    fn redistributor_rwp_wait_uses_selected_frame_and_preserves_control() {
+        // SAFETY: RedistributorV3 contains integer MMIO registers and reserved
+        // integer storage. Zero is valid throughout; Box supplies full size
+        // and alignment. No CPU system registers are accessed by this fixture.
+        let mut registers = unsafe { Box::<RedistributorV3>::new_zeroed().assume_init() };
+        // SAFETY: same register-layout validity as the first fixture above.
+        let other = unsafe { Box::<RedistributorV3>::new_zeroed().assume_init() };
+        let interface = CpuInterface {
+            rd: &mut *registers,
+            security_state: SecurityState::Single,
+        };
+        const ENABLE_LPIS: u32 = 1;
+        const RWP: u32 = 1 << 3;
+        // GICR bit 31 is not RWP. Keeping it set also catches accidental reuse
+        // of the Distributor's bit-31 polling implementation.
+        const UWP: u32 = 1 << 31;
+
+        registers.lpi.CTLR.set(ENABLE_LPIS | UWP | RWP);
+        assert_eq!(
+            interface.wait_for_redistributor_rwp(),
+            Err(RedistributorRwpTimeout)
+        );
+        assert_eq!(registers.lpi.CTLR.get(), ENABLE_LPIS | UWP | RWP);
+
+        other.lpi.CTLR.set(RWP);
+        registers.lpi.CTLR.set(ENABLE_LPIS | UWP);
+        assert_eq!(interface.wait_for_redistributor_rwp(), Ok(()));
+        assert_eq!(registers.lpi.CTLR.get(), ENABLE_LPIS | UWP);
+        assert_eq!(other.lpi.CTLR.get(), RWP);
     }
 }

@@ -18,6 +18,94 @@ use unittest::{assert, assert_eq, def_test};
 use super::rcu_support;
 
 #[def_test]
+fn optional_slot_preparation_rejects_irq_exclusion_without_running_writer() {
+    let slot = krcu::RcuSlot::new();
+    slot.try_publish(kalloc_types::KBox::new_nowait(41_u64).unwrap())
+        .unwrap();
+    let mut was_called = false;
+    let result = {
+        let _irq = kspin::IrqSave::new();
+        slot.with_prepared_take(|_| was_called = true)
+    };
+    assert_eq!(result, Err(KError::InvalidInput));
+    assert!(!was_called);
+    assert_eq!(krcu::with_read(|scope| slot.read(scope).copied()), Some(41));
+    slot.with_prepared_take(|prepared| drop(prepared)).unwrap();
+    assert_eq!(krcu::with_read(|scope| slot.read(scope).copied()), Some(41));
+}
+
+#[def_test]
+fn optional_slot_withdraws_under_short_lock_and_reclaims_after_unlock() {
+    let slot = krcu::RcuSlot::new();
+    slot.try_publish(kalloc_types::KBox::new_nowait(41_u64).unwrap())
+        .unwrap();
+    let lock = kspin::SpinNoIrq::new(());
+    let (old, was_empty) = slot
+        .with_prepared_take(|prepared| {
+            let pending = {
+                let _guard = lock.lock();
+                prepared.withdraw()
+            };
+            let was_empty = krcu::with_read(|scope| slot.read(scope).is_none());
+            slot.try_publish(kalloc_types::KBox::new_nowait(42).unwrap())
+                .unwrap();
+            // SAFETY: short exclusion ended; this is the preparing sleepable task,
+            // with no readers or progress locks held and the permanent service live.
+            (unsafe { pending.reclaim() }, was_empty)
+        })
+        .unwrap();
+    let old = old.unwrap();
+    assert!(was_empty);
+    assert_eq!(*old, 41);
+    assert_eq!(krcu::with_read(|scope| slot.read(scope).copied()), Some(42));
+}
+
+#[def_test]
+fn optional_slot_empty_withdrawal_returns_no_owner() {
+    let slot = krcu::RcuSlot::<u64>::new();
+    let old = slot
+        .with_prepared_take(|prepared| {
+            // SAFETY: unchanged preparing task context, with no reader/short lock.
+            unsafe { prepared.withdraw().reclaim() }
+        })
+        .unwrap();
+    assert!(old.is_none());
+}
+
+#[def_test]
+fn optional_slot_nmi_borrow_survives_withdrawal_until_handler_completion() {
+    let slot = krcu::RcuSlot::new();
+    slot.try_publish(kalloc_types::KBox::new_nowait(41_u64).unwrap())
+        .unwrap();
+    let (old, is_valid) = slot
+        .with_prepared_take(|prepared| {
+            let (pending, is_valid) = {
+                let _irq = kspin::IrqSave::new();
+                // SAFETY: initialized CPU, IRQ exclusion and strictly nested software
+                // NMI fixture; no scheduling or real device source is involved.
+                unsafe {
+                    kirq::context::test_support::with_nmi_context(|| {
+                        krcu::with_interrupt_read(|scope| {
+                            let borrowed = slot.read(scope).unwrap();
+                            let pending = prepared.withdraw();
+                            // The simulated handler/completion still owns this borrow.
+                            let is_valid = slot.read(scope).is_none() && *borrowed == 41;
+                            (pending, is_valid)
+                        })
+                    })
+                }
+            };
+            // SAFETY: software NMI/read scope and IRQ exclusion ended on the same
+            // preparing task; wait holds no reader or progress lock.
+            (unsafe { pending.reclaim() }, is_valid)
+        })
+        .unwrap();
+    let old = old.unwrap();
+    assert!(is_valid);
+    assert_eq!(*old, 41);
+}
+
+#[def_test]
 fn scoped_read_update_example_preserves_owned_results() {
     let value = Rcu::new(kalloc_types::KBox::new_nowait(alloc::string::String::from("old")).unwrap());
     let copied = value.with_read(|text| text.clone());

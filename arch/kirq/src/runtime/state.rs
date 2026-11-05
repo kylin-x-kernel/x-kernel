@@ -97,6 +97,8 @@ impl IrqPlatformPlan {
 
 pub(super) struct IrqDescRuntimeState {
     actions: [Option<IrqAction>; MAX_IRQ_ACTIONS],
+    // NMI ownership lives in IrqLine::nmi_action, not in this fanout array.
+    has_nmi_action: bool,
     action_count: usize,
     generation: u64,
     configured_generation: Option<u64>,
@@ -118,6 +120,7 @@ impl IrqDescRuntimeState {
         in_flight_zero.complete_all();
         Self {
             actions: array::from_fn(|_| None),
+            has_nmi_action: false,
             action_count: 0,
             generation: 0,
             configured_generation: None,
@@ -216,20 +219,7 @@ impl IrqDescRuntimeState {
     }
 
     fn take_regular_action(&mut self) -> Option<IrqAction> {
-        if self.actions[0]
-            .as_ref()
-            .is_some_and(IrqAction::is_nmi_fallback)
-        {
-            return None;
-        }
-        self.take_single_action()
-    }
-
-    fn take_nmi_fallback(&mut self) -> Option<IrqAction> {
-        if !self.actions[0]
-            .as_ref()
-            .is_some_and(IrqAction::is_nmi_fallback)
-        {
+        if self.has_nmi_action {
             return None;
         }
         self.take_single_action()
@@ -240,7 +230,7 @@ impl IrqDescRuntimeState {
             return None;
         }
         // Shared removal leaves holes; a count of one does not imply slot zero
-        // is occupied. Only regular/NMI installation guarantees that slot.
+        // is occupied. Only regular installation guarantees that slot.
         if self.actions[0].as_ref()?.is_shared() {
             return None;
         }
@@ -252,6 +242,7 @@ impl IrqDescRuntimeState {
 
     fn can_install_shared_action(&self) -> bool {
         self.teardown_depth == 0
+            && !self.has_nmi_action
             && self.action_count < MAX_IRQ_ACTIONS
             && self.next_shared_action_token.checked_add(1).is_some()
             && self.actions.iter().flatten().all(IrqAction::is_shared)
@@ -385,6 +376,7 @@ pub(crate) struct IrqLine {
     // Assigned before publication, independent of mutable controller metadata.
     virq: Once<Virq>,
     pub(super) management: kmutex::Mutex<()>,
+    pub(super) nmi_action: krcu::RcuSlot<crate::platform::Handler>,
     state: SpinNoIrq<IrqStateDesc>,
     replay_links: intrusive_collections::LinkedListAtomicLink,
 }
@@ -394,6 +386,7 @@ impl IrqLine {
         Self {
             virq: Once::new(),
             management: kmutex::Mutex::new(()),
+            nmi_action: krcu::RcuSlot::new(),
             state: SpinNoIrq::new(state),
             replay_links: intrusive_collections::LinkedListAtomicLink::new(),
         }
@@ -431,6 +424,9 @@ pub(super) struct IrqStateDesc {
     is_managed: bool,
     // One-way storage lifecycle state, distinct from reversible action teardown.
     is_retired: bool,
+    // Unlike transient teardown, a failed NMI close keeps enable admission shut.
+    is_nmi_closing: bool,
+    has_nmi_shutdown: bool,
     pub(super) flow: crate::IrqFlow,
     pub(super) is_running: bool,
     // Software service has no hardware claim keeping the gateway occupied.
@@ -451,6 +447,8 @@ impl IrqStateDesc {
             runtime: IrqDescRuntimeState::new(desc),
             is_managed: false,
             is_retired: false,
+            is_nmi_closing: false,
+            has_nmi_shutdown: false,
             flow: crate::IrqFlow::Legacy,
             is_running: false,
             is_replaying: false,
@@ -476,30 +474,95 @@ impl IrqStateDesc {
     }
 
     pub(super) fn install_regular_action(&mut self, action: IrqAction) -> bool {
-        !self.is_retired && self.runtime.install_regular_action(action)
+        !self.is_retired && !self.has_nmi_shutdown && self.runtime.install_regular_action(action)
     }
 
     pub(super) fn can_install_regular_action(&self) -> bool {
-        !self.is_retired && self.runtime.can_install_regular_action()
+        !self.is_retired && !self.has_nmi_shutdown && self.runtime.can_install_regular_action()
     }
 
     pub(super) fn can_install_shared_action(&self) -> bool {
-        !self.is_retired && self.runtime.can_install_shared_action()
+        !self.is_retired && !self.has_nmi_shutdown && self.runtime.can_install_shared_action()
     }
 
     pub(super) fn take_regular_action(&mut self) -> Option<IrqAction> {
         self.runtime.take_regular_action()
     }
 
-    pub(super) fn take_nmi_fallback(&mut self) -> Option<IrqAction> {
-        self.runtime.take_nmi_fallback()
+    /// Called under Line exclusion after the sole NMI owner is published.
+    pub(super) fn install_nmi_action(&mut self) {
+        debug_assert!(self.can_install_regular_action());
+        self.runtime.has_nmi_action = true;
+        self.runtime.action_count = 1;
+    }
+
+    /// Admission remains closed until withdrawal's grace period has completed.
+    pub(super) fn finish_nmi_retirement(&mut self) {
+        debug_assert!(self.has_nmi_action() && self.is_nmi_closing);
+        self.runtime.has_nmi_action = false;
+        self.runtime.action_count = 0;
+        self.is_nmi_closing = self.has_nmi_shutdown;
+    }
+
+    pub(super) fn begin_nmi_close(&mut self) {
+        self.is_nmi_closing = true;
+    }
+
+    pub(super) fn is_nmi_closing(&self) -> bool {
+        self.is_nmi_closing
+    }
+
+    pub(super) fn has_nmi_shutdown(&self) -> bool {
+        self.has_nmi_shutdown
+    }
+
+    pub(super) fn claim_nmi_shutdown(&mut self) -> [bool; kbuild_config::NR_CPUS] {
+        debug_assert!(!self.has_nmi_shutdown && self.has_nmi_action());
+        self.begin_nmi_close();
+        self.has_nmi_shutdown = true;
+        core::array::from_fn(|cpu| {
+            self.local[cpu].is_enabled || self.local[cpu].has_nmi_preparation()
+        })
+    }
+
+    pub(super) fn release_nmi_shutdown(&mut self) {
+        debug_assert!(self.has_nmi_shutdown);
+        self.has_nmi_shutdown = false;
+        if !self.has_nmi_action() {
+            self.is_nmi_closing = false;
+        }
+    }
+
+    pub(super) fn prepare_local_nmi(
+        &mut self,
+        chip: &'static crate::PerCpuNmiChip,
+    ) -> Result<(), crate::IrqDescError> {
+        self.local[local::current_cpu()].prepare_nmi(self.desc, chip)
+    }
+
+    pub(super) fn teardown_local_nmi(&mut self) -> Result<(), crate::IrqDescError> {
+        self.local[local::current_cpu()].teardown_nmi(self.desc)
+    }
+
+    pub(super) fn has_local_nmi_preparation(&self) -> bool {
+        self.local
+            .iter()
+            .any(local::LocalControl::has_nmi_preparation)
+    }
+
+    pub(super) fn has_failed_local_nmi_preparation(&self) -> bool {
+        self.local[local::current_cpu()].has_failed_nmi_preparation()
+    }
+
+    pub(super) fn has_nmi_action(&self) -> bool {
+        self.runtime.has_nmi_action
     }
 
     pub(super) fn install_shared_action(
         &mut self,
         handler: crate::platform::Handler,
     ) -> Option<IrqActionToken> {
-        if self.is_retired {
+        if self.is_retired || self.has_nmi_shutdown {
             return None;
         }
         self.runtime.install_shared_action(handler)
@@ -713,7 +776,10 @@ impl IrqStateDesc {
     }
 
     pub(super) fn is_unused(&self) -> bool {
-        !self.is_managed && self.runtime.is_unused() && !self.has_enabled_local_cpu()
+        !self.is_managed
+            && !self.has_nmi_shutdown
+            && self.runtime.is_unused()
+            && !self.has_enabled_local_cpu()
     }
 
     pub(super) fn is_retired(&self) -> bool {
@@ -813,6 +879,8 @@ impl IrqState {
                 LineIndex::shared(&crate::domain::MSI_IRQ_DOMAIN.lines),
                 #[cfg(unittest)]
                 LineIndex::shared(&crate::domain::TEST_IRQ_DOMAIN.lines),
+                #[cfg(unittest)]
+                LineIndex::shared(&crate::domain::SECOND_TEST_IRQ_DOMAIN.lines),
             ],
             next_virq: DYNAMIC_VIRQ_BASE,
             #[cfg(unittest)]

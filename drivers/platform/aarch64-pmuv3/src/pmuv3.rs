@@ -118,8 +118,14 @@ impl PmuCounter {
 
     /// Enable the PMU Counter.
     ///
-    /// This starts the counter and enables overflow interrupt.
+    /// Configures a stopped counter, publishes software readiness, then enables
+    /// overflow delivery and counting. The caller pins this CPU and serializes
+    /// counter reconfiguration; ordinary IRQ masking does not exclude NMI.
     pub fn enable(&self) {
+        // A reused counter can still contain a near-overflow value. Keep this
+        // counter and its interrupt disabled until its period and handler-visible
+        // state are ready; otherwise an NMI can starve the unfinished setup.
+        self.disable();
         // Clear all pending overflow flags first — KVM leaves garbage in
         // uninitialised event counters whose overflow bits would otherwise
         // cause an interrupt storm.  We do NOT bulk-clear PMCNTENCLR_EL0 or
@@ -127,12 +133,6 @@ impl PmuCounter {
         // disable the entire vPMU.
         msr!(PMOVSCLR_EL0, !0u64);
         isb!();
-
-        // Enable overflow interrupt
-        msr!(PMINTENSET_EL1, 1u64 << self.counter_index);
-
-        // Enable counter
-        msr!(PMCNTENSET_EL0, 1u64 << self.counter_index);
 
         // Ensure PMU is enabled
         let pmcr: u64 = mrs!(PMCR_EL0);
@@ -151,18 +151,41 @@ impl PmuCounter {
         self.set_counter();
 
         self.enabled.store(true, Ordering::Release);
+        // No handler-visible initialization may follow delivery activation.
+        // An NMI arriving immediately after these writes must clear/reload the
+        // overflow instead of returning NotEnabled with the level still asserted.
+        // SAFETY: the caller owns this CPU's validated counter. These privileged
+        // writes activate only its bit. The memory clobber deliberately orders
+        // software publication before activation, unlike the nomem MSR helper.
+        unsafe {
+            core::arch::asm!(
+                "msr PMINTENSET_EL1, {mask}",
+                "msr PMCNTENSET_EL0, {mask}",
+                "isb",
+                mask = in(reg) 1u64 << self.counter_index,
+                options(nostack),
+            );
+        }
     }
 
     /// Disable the PMU Counter.
     pub fn disable(&self) {
+        // SAFETY: the caller owns this CPU's validated counter. Only its enable
+        // bits are cleared. The memory clobber keeps readiness withdrawal after
+        // the hardware stop, and ISB synchronizes the system-register effects.
+        unsafe {
+            core::arch::asm!(
+                "msr PMCNTENCLR_EL0, {mask}",
+                "msr PMINTENCLR_EL1, {mask}",
+                "isb",
+                mask = in(reg) 1u64 << self.counter_index,
+                options(nostack),
+            );
+        }
+        // A pending NMI can still preempt the hardware stop above. Keep its
+        // handler willing to acknowledge overflow until production/delivery are
+        // disabled; withdrawing software readiness first can cause an NMI storm.
         self.enabled.store(false, Ordering::Release);
-
-        // Disable counter
-        msr!(PMCNTENCLR_EL0, 1u64 << self.counter_index);
-        // Disable overflow interrupt
-        msr!(PMINTENCLR_EL1, 1u64 << self.counter_index);
-
-        isb!();
     }
 
     /// Set the counter value.

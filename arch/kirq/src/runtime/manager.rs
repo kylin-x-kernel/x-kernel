@@ -12,9 +12,9 @@ use alloc::sync::Arc;
 
 use kiface_task_api::TaskBlockingContextIf;
 use krcu_core::RcuContextIf;
-use kspin::{NoPreemptIrqSave, SpinNoIrq, SpinNoPreempt};
+use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
-use super::rcu::with_nmi_context;
+use super::rcu::{with_nmi_claim, with_nmi_context};
 use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqSpec, Virq,
     action::IrqAction,
@@ -41,7 +41,10 @@ pub use crate::{
         IrqLifecycleHook, IrqLifecycleHooks, clear_irq_lifecycle_hooks,
         register_irq_lifecycle_hooks,
     },
-    nmi::{register_nmi, register_nmi_startup, unregister_nmi},
+    nmi::{
+        NmiShutdown, begin_nmi_shutdown, prepare_percpu_nmi, register_nmi, register_nmi_startup,
+        teardown_percpu_nmi, unregister_nmi,
+    },
     platform::{
         DispatchedIrq, Handler, IntrManagerIf, PendingIrq, TargetCpu, notify_cpu, set_prio,
     },
@@ -361,6 +364,11 @@ fn prepare_enable_plan(
     force_platform_enable: bool,
 ) -> Result<IrqPlatformPlan, IrqDescError> {
     reject_teardown(entry, virq, "enable IRQ")?;
+    if entry.has_failed_local_nmi_preparation() {
+        return Err(IrqDescError::ConfigurationFailed {
+            hwirq: entry.desc.hwirq,
+        });
+    }
     if force_platform_enable {
         Ok(entry.prepare_legacy_enable())
     } else {
@@ -717,9 +725,8 @@ fn register_with_mode(
     let result = with_registration_line_checked(
         spec,
         mode,
-        None,
         |entry| Ok(entry.can_install_regular_action()),
-        |virq, entry| register_locked(virq, entry, &handler, options, apply_platform_plan),
+        |virq, _, entry| register_locked(virq, entry, &handler, options, apply_platform_plan),
     );
     drop(handler);
     if matches!(&result, Ok(None)) && !crate::context::is_in_nmi() {
@@ -823,9 +830,8 @@ pub fn try_register_shared(
     let result = with_registration_line_checked(
         spec,
         ManagementMode::Task,
-        None,
         |entry| Ok(entry.can_install_shared_action()),
-        |virq, entry| register_shared_locked(virq, entry, &handler, apply_platform_plan),
+        |virq, _, entry| register_shared_locked(virq, entry, &handler, apply_platform_plan),
     );
     drop(handler);
     if matches!(&result, Ok(None)) && !crate::context::is_in_nmi() {
@@ -870,7 +876,7 @@ pub(super) enum ManagementMode {
     Startup,
 }
 
-fn validate_management(mode: ManagementMode) -> Result<(), IrqDescError> {
+pub(super) fn validate_management(mode: ManagementMode) -> Result<(), IrqDescError> {
     reject_nmi_management("IRQ management")?;
     match mode {
         ManagementMode::Task => can_wait_for_irq_sync("IRQ management"),
@@ -963,13 +969,10 @@ fn finish_management_on_line(
 /// Checks registration-specific rejection before merging or publishing metadata.
 ///
 /// Preflight and resolution run under management, registry and Line
-/// exclusion. Preflight may lock the NMI table, but must not reacquire any outer
-/// lock, allocate or wait. False rejects without resolution or publication.
-/// The body borrows the same locked Line state after registry release; it must
-/// not reacquire registry/Line locks or wait. An optional publication lock is
-/// acquired after management and before registry exclusion, and held through
-/// the body. Shared-table owners must use the same lock on every writer to
-/// serialize preflight/publication across Lines; ordinary registration needs none.
+/// exclusion. Neither callback may reacquire outer locks, allocate or wait.
+/// False rejects without resolution or publication. The body borrows the same
+/// retained Line and locked state after registry release; its RCU slot can be
+/// published without creating a second handler owner or another writer lock.
 /// Identity retries happen before publication. Missing descriptors return
 /// UnknownIrq in both modes. None means startup contention, teardown or preflight
 /// rejection. Return discarded handler owners instead of
@@ -981,9 +984,8 @@ fn finish_management_on_line(
 pub(super) fn with_registration_line_checked<T>(
     spec: IrqSpec,
     mode: ManagementMode,
-    publication_lock: Option<&SpinNoPreempt<()>>,
     mut preflight_fn: impl FnMut(&IrqStateDesc) -> Result<bool, IrqDescError>,
-    body_fn: impl FnOnce(Virq, &mut IrqStateDesc) -> Result<T, IrqDescError>,
+    body_fn: impl FnOnce(Virq, &IrqLine, &mut IrqStateDesc) -> Result<T, IrqDescError>,
 ) -> Result<Option<T>, IrqDescError> {
     validate_management(mode)?;
     loop {
@@ -1002,10 +1004,8 @@ pub(super) fn with_registration_line_checked<T>(
             has_removed_action: false,
         };
         // Keep local context protection across the non-LIFO registry/Line
-        // handoff. Release publication exclusion before admission cleanup;
-        // management exclusion still outlives that cleanup.
+        // handoff. Management exclusion still outlives admission cleanup.
         let _context_guard = NoPreemptIrqSave::new();
-        let _publication_guard = publication_lock.map(|lock| lock.lock());
         let mut state = IRQ_STATE.lock();
         match lookup_line(&state, spec) {
             Some((_, current)) if Arc::ptr_eq(&current, &line) => {}
@@ -1023,7 +1023,7 @@ pub(super) fn with_registration_line_checked<T>(
         let desc = resolve_prepared_locked(&mut state, spec, &line, &mut entry, &mut prepared)?;
         let virq = desc.logical_irq().expect("resolved descriptor has a virq");
         drop(state);
-        let result = body_fn(virq, &mut entry).map(Some);
+        let result = body_fn(virq, &line, &mut entry).map(Some);
         drop(entry);
         if result.is_ok() {
             super::resend::schedule(&line);
@@ -1089,7 +1089,7 @@ fn reject_teardown(
     virq: Virq,
     operation: &'static str,
 ) -> Result<(), IrqDescError> {
-    if entry.is_teardown_in_progress() {
+    if entry.is_teardown_in_progress() || entry.is_nmi_closing() {
         warn!("{operation} for IRQ {virq} failed while teardown is in progress");
         return Err(IrqDescError::TeardownInProgress { virq });
     }
@@ -1272,8 +1272,9 @@ fn withdraw_on_line(
 ///
 /// Invoked from the exception entry layer when `dispatch_exception` detects
 /// that normal IRQs were masked (PMR <= NMI_ONLY) at the moment the interrupt
-/// fired — a pseudo-NMI preempting a critical section. The handler uses the
-/// lock-free NMI path which only touches the NMI table, never `IRQ_STATE`.
+/// fired — a pseudo-NMI preempting a critical section. Dispatch borrows the
+/// typed Domain index and Line-owned action inside one RCU scope, without
+/// acquiring registry, Line or management locks.
 pub fn handle_nmi(vector: usize) -> bool {
     handle_nmi_with(vector, platform_dispatch_nmi)
 }
@@ -1309,23 +1310,25 @@ fn dispatch_and_complete(claim: PendingIrq, complete_irq: impl FnOnce(PendingIrq
 /// Dispatches and completes a claimed NMI without touching normal IRQ state.
 ///
 /// This is the generic entry for an irqchip that classifies an IRQ-on claim as
-/// NMI-class. Dispatch is keyed by the raw hwirq stored in `claim`; it bypasses
-/// domain translation and normal IRQ action fanout. [`handle_nmi`] also uses
+/// NMI-class. The typed source selects a Line through its Domain index; the
+/// handler receives the hardware number rather than the logical IRQ. It bypasses
+/// normal IRQ action fanout. [`handle_nmi`] also uses
 /// this helper for an interrupt that entered through the architecture's
 /// dedicated NMI path.
 ///
 /// The claim must be consumed on the CPU that acknowledged it.
+/// A single interrupt RCU read scope covers handler dispatch and completion;
+/// neither the scope nor effective NMI context ends at handler return.
 #[doc(hidden)]
-pub fn generic_handle_nmi(claim: DispatchedIrq) {
+pub fn generic_handle_nmi(claim: PendingIrq) {
+    let source = claim.source();
     // SAFETY: the active controller claim belongs to this CPU in an IRQ/NMI
     // entry. Neither handler dispatch nor claim completion may schedule.
     unsafe {
-        with_nmi_context(|| {
-            // Keep effective NMI context through controller completion, even
-            // when classification happened inside an ordinary IRQ entry.
-            dispatch_nmi_handler(claim.irq());
-            claim.complete();
-        })
+        with_nmi_claim(
+            |scope| dispatch_nmi_handler(source, scope),
+            || claim.complete(),
+        )
     };
 }
 
@@ -1358,7 +1361,7 @@ pub fn generic_handle_nmi(claim: DispatchedIrq) {
 ///
 /// As on Linux, an NMI discovered after entering from an IRQ-on context remains
 /// inside the outer IRQ lifecycle. Only its inner handler dispatch differs:
-/// it uses the lock-free NMI table rather than normal IRQ action state.
+/// it borrows the Line-owned NMI action rather than normal IRQ action state.
 pub fn handle_irq(vector: usize) -> bool {
     handle_irq_with(vector, platform_dispatch_irq)
 }

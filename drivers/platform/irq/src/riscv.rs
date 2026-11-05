@@ -481,6 +481,10 @@ impl kirq::IntrManagerIf {
         None
     }
 
+    fn percpu_nmi(_: kirq::IrqDesc) -> Option<&'static kirq::PerCpuNmiChip> {
+        None
+    }
+
     fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
         select_plic_flow(desc, PLIC.get().map(|controller| controller.sources))
     }

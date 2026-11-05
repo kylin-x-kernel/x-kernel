@@ -213,9 +213,8 @@ impl DispatchedIrq {
 
     /// Returns the interrupt number claimed by the backend.
     ///
-    /// Normal IRQ dispatch returns an OS-visible virq. NMI dispatch returns a
-    /// raw hwirq because pseudo-NMI dispatch is intentionally independent from
-    /// the normal `IRQ_STATE` translation table.
+    /// This compatibility guard carries an already resolved logical IRQ.
+    /// Controller dispatch uses typed [`PendingIrq`] for both IRQ and NMI.
     pub const fn irq(&self) -> Virq {
         self.irq
     }
@@ -306,8 +305,28 @@ impl Drop for PendingIrq {
     }
 }
 
+/// Controller operations for one CPU's NMI configuration.
+///
+/// Both operations run under Line exclusion with IRQs and migration disabled,
+/// outside NMI. They must be bounded, non-sleeping and non-reentrant; they must
+/// not call source callbacks or reacquire KIRQ locks. The local line is already
+/// logically disabled. Preparation verifies hardware disable completion before
+/// promotion. Teardown verifies disable completion, rejects active delivery,
+/// clears stale pending state and restores ordinary delivery attributes.
+/// Neither operation enables the source. Errors retain the local preparation
+/// obligation and prohibit enable until successful preparation or teardown.
+pub struct PerCpuNmiChip {
+    /// Installs local NMI attributes after checking the disabled source.
+    pub prepare: fn(IrqDesc) -> Result<(), crate::IrqDescError>,
+    /// Removes local attributes after the source owner stopped generation.
+    pub teardown: fn(IrqDesc) -> Result<(), crate::IrqDescError>,
+}
+
 #[kiface::interface]
 pub trait IntrManagerIf {
+    /// Selects CPU-local NMI control for an admitted descriptor, without writes.
+    /// None means the controller cannot provide the local NMI lifecycle.
+    fn percpu_nmi(desc: IrqDesc) -> Option<&'static PerCpuNmiChip>;
     /// Returns explicitly discovered guest-interface capability, not a platform
     /// address guess. None forbids guest-interface MMIO mapping.
     fn guest_interface() -> Option<GuestIrqInterface>;
@@ -379,7 +398,7 @@ pub trait IntrManagerIf {
     /// Claims and dispatches an interrupt taken through the NMI entry path.
     ///
     /// The backend must call [`crate::generic_handle_nmi`] with a
-    /// [`DispatchedIrq`] containing the raw hwirq and completion cookie. Unlike
+    /// [`PendingIrq`] containing its typed source and completion cookie. Unlike
     /// [`IntrManagerIf::dispatch_irq`], this path never opens the normal IRQ
     /// window. It is only called where normal IRQs are already masked.
     fn dispatch_nmi(id: usize);

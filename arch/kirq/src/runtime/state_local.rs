@@ -8,11 +8,18 @@
 use super::{IrqDesc, IrqPlatformPlan};
 
 #[derive(Clone, Copy)]
+struct NmiPreparation {
+    chip: &'static crate::PerCpuNmiChip,
+    is_ready: bool,
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct LocalControl {
     pub(super) is_enabled: bool,
     pub(super) has_failed_configuration: bool,
     configured_generation: Option<u64>,
     disable_depth: usize,
+    nmi: Option<NmiPreparation>,
 }
 
 impl LocalControl {
@@ -22,7 +29,61 @@ impl LocalControl {
             has_failed_configuration: false,
             configured_generation: None,
             disable_depth: 0,
+            nmi: None,
         }
+    }
+
+    pub(super) fn has_nmi_preparation(&self) -> bool {
+        self.nmi.is_some()
+    }
+
+    pub(super) fn has_failed_nmi_preparation(&self) -> bool {
+        self.nmi.is_some_and(|nmi| !nmi.is_ready)
+    }
+
+    pub(super) fn prepare_nmi(
+        &mut self,
+        desc: IrqDesc,
+        chip: &'static crate::PerCpuNmiChip,
+    ) -> Result<(), crate::IrqDescError> {
+        if let Some(nmi) = self.nmi {
+            if !core::ptr::eq(nmi.chip, chip) {
+                return Err(crate::IrqDescError::ConfigurationFailed { hwirq: desc.hwirq });
+            }
+            if nmi.is_ready {
+                return Ok(());
+            }
+        }
+        if self.is_enabled {
+            return Err(crate::IrqDescError::ConfigurationFailed { hwirq: desc.hwirq });
+        }
+        // A failing backend may have changed attributes. Retain its exact
+        // cleanup operations before the first write, and keep enable closed.
+        self.nmi = Some(NmiPreparation {
+            chip,
+            is_ready: false,
+        });
+        (chip.prepare)(desc)?;
+        self.nmi = Some(NmiPreparation {
+            chip,
+            is_ready: true,
+        });
+        Ok(())
+    }
+
+    pub(super) fn teardown_nmi(&mut self, desc: IrqDesc) -> Result<(), crate::IrqDescError> {
+        if self.is_enabled {
+            return Err(crate::IrqDescError::ConfigurationFailed { hwirq: desc.hwirq });
+        }
+        if let Some(nmi) = self.nmi {
+            self.nmi = Some(NmiPreparation {
+                is_ready: false,
+                ..nmi
+            });
+            (nmi.chip.teardown)(desc)?;
+            self.nmi = None;
+        }
+        Ok(())
     }
 
     fn plan(&self, desc: IrqDesc, cpu: usize) -> IrqPlatformPlan {

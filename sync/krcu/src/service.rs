@@ -37,11 +37,15 @@ mod synchronize;
 #[path = "owned.rs"]
 mod owned;
 
+#[path = "slot.rs"]
+mod slot;
+
 pub use callback::{PreparedCallback, preflight_callback_submission};
 pub use drain::drain_callbacks;
 #[cfg(unittest)]
 pub use drain::{has_installed_drain_markers_for_tests, with_drain_lock_for_tests};
 pub use owned::Rcu;
+pub use slot::{PreparedRcuTake, RcuSlot, RetiredRcuValue};
 pub use synchronize::synchronize_rcu;
 
 struct GracePeriodTask {

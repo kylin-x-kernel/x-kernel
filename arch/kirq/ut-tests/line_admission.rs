@@ -10,6 +10,31 @@ use super::{IrqDesc, IrqFlags, IrqLine, IrqState, IrqStateDesc, try_resolve_and_
 use crate::{IrqDescError, IrqSpec};
 
 #[def_test]
+fn nmi_close_keeps_enabled_cpus_until_each_local_disable_completes() {
+    let desc = IrqDesc::from_virq(0x5fb2);
+    let mut entry = IrqStateDesc::new(desc);
+    entry.flow = crate::IrqFlow::PerCpu;
+    // Exercise every configured slot without depending on scheduler migration
+    // or firmware-present CPUs. LocalControl's explicit CPU is a private fixture.
+    for (cpu, slot) in entry.local.iter_mut().enumerate() {
+        let enabled = slot.enable(desc, 1, cpu, true, false);
+        slot.commit(enabled, 1);
+    }
+    entry.begin_nmi_close();
+    for cpu in 0..entry.local.len() {
+        assert!(entry.has_enabled_local_cpu());
+        let disabled = entry.local[cpu].disable(desc, cpu);
+        // Planning is not completion and must leave the CPU obligation visible.
+        assert!(entry.local[cpu].is_enabled);
+        entry.local[cpu].commit(disabled, 1);
+        assert!(!entry.local[cpu].is_enabled);
+        assert!(entry.is_nmi_closing());
+    }
+    assert!(!entry.has_enabled_local_cpu());
+    assert!(entry.is_nmi_closing());
+}
+
+#[def_test]
 fn existing_mapping_needs_no_new_index_capacity() {
     let desc = IrqDesc::from_hwirq(17)
         .with_domain(crate::domain::TEST_DOMAIN)

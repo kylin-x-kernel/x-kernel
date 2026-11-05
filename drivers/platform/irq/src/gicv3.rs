@@ -17,6 +17,10 @@ use lazyinit::LazyInit;
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
 
+#[cfg(any(feature = "nmi-pseudo", feature = "nmi-hardware"))]
+#[path = "gicv3_nmi.rs"]
+pub(super) mod nmi;
+
 const IRQ_WORK_SGI: u32 = 15;
 static IRQ_WORK_HANDLER_REGISTERED: LazyInit<bool> = LazyInit::new();
 
@@ -450,7 +454,10 @@ pub(super) fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
     };
 
     if is_nmi {
-        kirq::generic_handle_nmi(kirq::DispatchedIrq::new(irq, cookie));
+        kirq::generic_handle_nmi(kirq::PendingIrq::new(
+            kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, irq),
+            cookie,
+        ));
     }
 
     // Linux does this after completing an IRQ-on NMI and before dispatching a

@@ -16,6 +16,18 @@ use crate::{IrqDescError, IrqDomainId, IrqRef, Virq};
 
 pub(crate) static DIRECTORY: XArray<Arc<IrqLine>> = XArray::new();
 
+/// Borrows the exact indexed Line without refcount updates or writer locks.
+/// Keep the scope through handler use and original controller completion.
+pub(super) fn borrowed<'scope>(
+    source: IrqRef,
+    scope: &'scope krcu::ReadScope<'_>,
+) -> Option<&'scope IrqLine> {
+    match source {
+        IrqRef::Virq(virq) => DIRECTORY.read(scope, virq),
+        IrqRef::Domain(id, hwirq) => crate::domain::domain(id)?.lines.read(scope, hwirq),
+    }
+}
+
 /// Retain before leaving the scope; the Line lock separately grants admission.
 pub(crate) fn owned(array: &XArray<Arc<IrqLine>>, key: usize) -> Option<Arc<IrqLine>> {
     if kiface_irq_context_api::InterruptContextIf::is_in_interrupt_handler() {

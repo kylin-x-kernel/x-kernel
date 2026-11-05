@@ -12,6 +12,8 @@
 //! [`drain_callbacks`] waits for prior callbacks. [`with_read`] supplies a
 //! borrowed [`ReadScope`] for multi-object reads; [`synchronize_rcu`] supports
 //! audited low-level lifetime protocols. Core reader accounting stays internal.
+//! [`RcuSlot`] supports an initially empty publication with separately prepared
+//! withdrawal and task-context reclamation; it does not manage source shutdown.
 //!
 //! # Mechanism
 //!
@@ -188,8 +190,8 @@ pub use context::{enter_user_quiescent, exit_user_quiescent};
 pub use krcu_core::CallbackNode;
 pub use read::{ReadScope, is_reading, with_interrupt_read, with_read};
 pub use service::{
-    PreparedCallback, Rcu, drain_callbacks, init_service, preflight_callback_submission,
-    synchronize_rcu,
+    PreparedCallback, PreparedRcuTake, Rcu, RcuSlot, RetiredRcuValue, drain_callbacks,
+    init_service, preflight_callback_submission, synchronize_rcu,
 };
 #[cfg(unittest)]
 #[doc(hidden)]

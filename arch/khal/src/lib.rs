@@ -102,12 +102,16 @@ pub use kplat::boot::{activate_local_interrupts, prepare_interrupts};
 pub mod nmi {
     pub use kplat::nm_irq::{
         NmiCb, NmiMode, NmiSourceInfo, early_init, enable_periodic_nmi, info, late_init, mode,
+        shutdown_periodic_nmi,
     };
 }
 
 #[cfg(feature = "pmu")]
 pub mod pmu {
-    pub use kplat::perf::{enable_irq, register_overflow_irq as register_overflow_dispatch};
+    pub use kplat::perf::{
+        enable_irq, register_overflow_irq as register_overflow_dispatch, restore_overflow_irq,
+        shutdown_overflow_irq,
+    };
 }
 
 /// Quiesces the local NMI (or pseudo-NMI) source on the current CPU.

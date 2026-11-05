@@ -662,6 +662,14 @@ sleeping IRQ handler. This is lifecycle integration coverage, not hardware IRQ
 delivery or controller-completion coverage. Handshake stalls are bounded by the
 external QEMU runner; elapsed time does not decide correctness.
 
+The NMI shutdown case combines KIRQ's synthetic `NmiShutdownProbe` with real
+`kipi::run_on_cpu_sync` calls on two initialized boot CPUs. The source owner
+serializes restart, retains its shutdown handle in remote captures, and recovers
+unique ownership only after those captures are destroyed. A failed local
+teardown keeps the original action installed until the unfinished CPU succeeds.
+Controller acknowledgements are injected; successful IPI execution is not
+treated as physical source drain or completion of the surrounding IPI claim.
+
 The same lifecycle fixture tests directory/Domain reuse with task and interrupt
 RCU borrows on another CPU. The interrupt variant uses KIRQ's software hardirq
 entry and nested NMI query fixture, not a physical interrupt injection. A

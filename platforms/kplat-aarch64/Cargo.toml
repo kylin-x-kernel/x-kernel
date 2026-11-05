@@ -21,7 +21,7 @@ smp = []
 nmi = ["kplat/nmi"]
 nmi-pseudo = ["nmi", "irq_driver/nmi-pseudo"]
 nmi-hardware = ["nmi", "irq_driver/nmi-hardware"]
-nmi-pmu = ["nmi", "pmu"]
+nmi-pmu = ["nmi", "pmu", "dep:kipi", "dep:kmutex", "dep:kiface-task-api"]
 pmu = ["kplat/pmu", "dep:aarch64-pmuv3", "dep:kirq"]
 console-pl011 = ["console_driver/pl011"]
 console-ns16550-mmio = ["console_driver/ns16550-mmio"]
@@ -55,6 +55,9 @@ karch = { workspace = true }
 aarch64-pmuv3 = { workspace = true, optional = true }
 kcpu_slot = { workspace = true }
 kspin = { workspace = true }
+kipi = { workspace = true, optional = true }
+kmutex = { workspace = true, optional = true }
+kiface-task-api = { workspace = true, optional = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

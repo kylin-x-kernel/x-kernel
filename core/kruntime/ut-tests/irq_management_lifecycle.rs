@@ -204,6 +204,79 @@ fn completed_cpu_calls_observe_body_and_capture_destruction() {
 
 #[cfg(feature = "ipi")]
 #[def_test(serial)]
+fn nmi_shutdown_retains_original_owner_across_remote_failure_and_retry() {
+    use kcpu_id_map::LogicalCpuId;
+    use kirq::tests_irq::NmiShutdownProbe;
+
+    if !cfg!(feature = "smp") || kcpu_id_map::nr_cpus() < 2 {
+        return unittest::TestResult::Ignored;
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let source = Arc::new(NmiShutdownProbe::new(
+        0x5fba,
+        Arc::new(HandlerProbe {
+            drops: drops.clone(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }),
+    ));
+    // This source owner excludes restart across both passes. Runtime UT runs
+    // after boot-static CPU services; no hotplug or system stop is permitted.
+    let owner = kmutex::Mutex::new(());
+    let _owner = owner.lock();
+    let completed = Arc::new(AtomicBool::new(false));
+    for cpu in 0..2 {
+        let source = source.clone();
+        let result = completed.clone();
+        kipi::run_on_cpu_sync(LogicalCpuId::new(cpu), move || {
+            result.store(source.prepare_local(), Ordering::Release);
+        })
+        .unwrap();
+        assert!(completed.load(Ordering::Acquire));
+    }
+    let shutdown = Arc::new(source.begin());
+    for cpu in 0..kbuild_config::NR_CPUS {
+        assert_eq!(shutdown.is_participant(cpu), cpu < 2);
+    }
+    for cpu in 0..2 {
+        let local_source = source.clone();
+        let retained = shutdown.clone();
+        let result = completed.clone();
+        kipi::run_on_cpu_sync(LogicalCpuId::new(cpu), move || {
+            core::assert!(retained.is_participant(cpu));
+            // CPU1 stops but does not yet acknowledge controller teardown.
+            result.store(local_source.stop_local(cpu == 0), Ordering::Release);
+            drop(retained);
+        })
+        .unwrap();
+        assert_eq!(completed.load(Ordering::Acquire), cpu == 0);
+        assert!(!source.remove_without_claim());
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+    }
+    // Successful transport return includes capture destruction. Only then can
+    // the owner recover the unique claim; incomplete local teardown still fails.
+    let shutdown = Arc::try_unwrap(shutdown).ok().unwrap();
+    let shutdown = source.finish(shutdown).err().unwrap();
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+    let shutdown = Arc::new(shutdown);
+    let retained = shutdown.clone();
+    let retry_source = source.clone();
+    let result = completed.clone();
+    kipi::run_on_cpu_sync(LogicalCpuId::new(1), move || {
+        core::assert!(retained.is_participant(1));
+        result.store(retry_source.stop_local(true), Ordering::Release);
+        drop(retained);
+    })
+    .unwrap();
+    assert!(completed.load(Ordering::Acquire));
+    let shutdown = Arc::try_unwrap(shutdown).ok().unwrap();
+    assert!(source.finish(shutdown).is_ok());
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+    // Fake controller acknowledgements prove lifecycle composition, not GIC
+    // delivery or that the surrounding IPI claim has completed.
+}
+
+#[cfg(feature = "ipi")]
+#[def_test(serial)]
 fn local_action_retirement_waits_for_owner_shutdown_and_admitted_operations() {
     let virq = 0x5f83;
     let drops = Arc::new(AtomicUsize::new(0));

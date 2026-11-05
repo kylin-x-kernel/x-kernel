@@ -171,9 +171,27 @@ fn spi_flow_excludes_private_nmi_and_unsupported_routing() {
             Ok(IrqFlow::PerCpu)
         );
     }
+    // PMU registration adds PER_CPU before local NMI preparation. Keeping
+    // these PPIs on Legacy would bypass per-CPU shutdown accounting entirely.
+    for hwirq in [16, 23, 31] {
+        assert_eq!(
+            super::select_gic_flow(
+                super::level_irq_desc(hwirq).with_flags(IrqFlags::PER_CPU),
+                Some(64),
+            ),
+            Ok(IrqFlow::PerCpu)
+        );
+    }
     // register_nmi tags its fallback PER_CPU before flow selection, including
     // SPI metadata. This is not an ordinary-source hardware capability.
     let spi = super::edge_irq_desc(32);
+    assert_eq!(
+        super::select_gic_flow(
+            super::edge_irq_desc(15).with_flags(IrqFlags::PER_CPU),
+            Some(64)
+        ),
+        Ok(IrqFlow::Legacy)
+    );
     assert_eq!(
         super::select_gic_flow(spi.with_flags(IrqFlags::PER_CPU), Some(64)),
         Ok(IrqFlow::Legacy)

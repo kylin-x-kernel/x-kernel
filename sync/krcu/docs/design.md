@@ -11,6 +11,32 @@ and returns it. Final exclusive destruction recovers only the current owner.
 The grace-period protocol and callback preparation policy are unchanged.
 
 
+## Optional owning publication
+
+`src/slot.rs` supplies `RcuSlot<T>` for lifecycle owners that begin empty,
+publish before the GP service starts, and later remove their sole publication.
+`try_publish` transfers a caller-prepared KBox with a Release compare-exchange;
+failure returns the unchanged offered owner. Task/interrupt readers use the
+same host-issued `ReadScope` and Acquire load as `Rcu`, without cloning owners.
+Initialization does not authorize early exception-entry reads.
+
+`with_prepared_take` prepares the existing task-bound GP marker before invoking
+the writer. `PreparedRcuTake::withdraw` exchanges null under optional caller
+short exclusion, returning `RetiredRcuValue` with opaque raw ownership. The
+caller restores the preparing task's sleepable context before `reclaim`, which
+submits the post-withdrawal marker, waits, then returns the KBox. Destruction is
+the caller's task-context responsibility, not an RCU callback operation.
+Empty withdrawal cancels the marker. Abandoned nonempty retirement leaks the
+payload rather than reclaiming it prematurely. Neither token can leave its
+prepared-wait scope or transfer to another task.
+
+The slot does not serialize surrounding lifecycle state, prevent republishing,
+stop a device, or drain a controller. Those remain consumer responsibilities.
+The kernel integration fixtures in `kruntime/ut-tests/rcu_owned.rs` cover
+preparation rejection, cancellation, lock-separated withdrawal, republishing,
+empty removal and a software NMI borrow spanning withdrawal. These are lifetime
+tests, not evidence of physical NMI source shutdown.
+
 ## Purpose And Ownership
 
 `krcu` owns kernel RCU instances and their execution-context integration.
@@ -42,8 +68,8 @@ rendezvous; POSIX brackets user transfer with this crate's callbacks.
   the static `RcuContextIf` provider and user-boundary callbacks.
 - `src/service.rs`: service state, sole GP driver/task, progress timer and
   bounded Rcu softirq callback execution.
-- `src/read.rs`, `src/synchronize.rs`, `src/owned.rs`: private scope/wait
-  machinery behind the exported owning `Rcu` container.
+- `src/read.rs`, `src/synchronize.rs`, `src/owned.rs`, `src/slot.rs`: scope/wait
+  machinery behind the exported owning `Rcu` and `RcuSlot` containers.
 - `src/callback.rs`: public one-shot ownership of prepared callback nodes.
 - `src/drain.rs`: private serialized callback drain and reusable completion
   markers behind the exported `drain_callbacks` operation.

@@ -44,6 +44,14 @@ without changing initialization or register-write policy. RWP only tracks
 architecturally specified Distributor writes; success is neither a general
 configuration barrier nor an active-interrupt/handler drain guarantee.
 
+`v3::CpuInterface::wait_for_redistributor_rwp()` separately exposes the existing
+bounded GICR wait with `RedistributorRwpTimeout`. It targets the Redistributor
+retained by that interface and polls GICR_CTLR bit 3, not the Distributor's bit
+31. It does not clear pending state or certify handler completion. CPU-local
+callers must exclude migration and serialize the complete control transaction.
+The fixture checks timeout, recovery, frame selection and unchanged control
+registers; it does not emulate hardware propagation or physical NMI delivery.
+
 Run `make check_gic` on a native AArch64 Linux host; the AArch64 Build Artifact
 CI leg runs this gate. On an x86_64 host with AArch64 musl Rust std, the cross
 linker and QEMU user emulator installed, use:

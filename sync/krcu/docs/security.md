@@ -1,5 +1,26 @@
 # krcu - Security And Reliability
 
+## Optional publication and retirement
+
+This boundary covers `src/slot.rs`. `RcuSlot`'s unsafe Sync implementation
+requires Send + Sync payloads: shared readers see only &T, while another task
+may recover ownership. Release/Acquire publication initializes every observed
+value; failed publication reconstructs only the never-published offered KBox.
+`read` retains both container and host-issued scope lifetimes. Exclusive Drop
+recovers only the current owner and cannot overlap its protected borrows.
+
+Atomic withdrawal transfers the old pointer into opaque `RetiredRcuValue`;
+no owner access is exposed before its GP. `reclaim` is unsafe because its
+caller must restore the preparing task's watched, sleepable context, release
+all reader/progress locks and IRQ/preemption guards, and retain permanent
+service availability. It submits a marker after withdrawal and reconstructs
+the KBox only after completion. Its caller chooses the eventual destructor
+context. Empty withdrawal submits no callback. Dropping an abandoned retirement
+cancels only marker resources and leaks the payload, never freeing old readers'
+storage. Both preparation and retirement are task-local and scoped to the
+provider's prepared wait. No new RCU algorithm or hardware shutdown guarantee
+is introduced; the lifecycle consumer must close all source admission itself.
+
 ## KBox publication lifetime
 
 Only KBox-origin pointers enter the owning container. Acquire/release publication
@@ -398,7 +419,7 @@ arithmetic validates representation, not progress at the host clock horizon.
 | `src/service.rs`: state construction, observation and invocation | One permanent controller; all admitted CPU services initialized; fresh ordered observations; eligible callbacks outside bookkeeping locks. |
 | `src/callback.rs`: preparation, submission and cancellation | Unique stable node with enclosing provenance; transferable resources; cancellation safe without a GP; accepted transfer suppresses cancellation before publication. |
 | `src/drain.rs`: marker insertion and completion | Serialized installations, permanent marker storage, count before publication, no marker access after decrement, independently retained notifier storage. |
-| `src/read.rs`, `src/synchronize.rs`, `src/owned.rs` | Scoped task admission; retained current and valid context; unique withdrawn ownership and independent callback/waiter lifetimes. |
+| `src/read.rs`, `src/synchronize.rs`, `src/owned.rs`, `src/slot.rs` | Scoped task admission; retained current and valid context; unique withdrawn ownership and independent callback/waiter lifetimes. |
 
 ## Failure Modes And Audit Limits
 

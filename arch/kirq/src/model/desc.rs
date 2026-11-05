@@ -67,9 +67,9 @@ impl IrqEvent {
 /// A kernel IRQ handler.
 ///
 /// Handlers run in interrupt context and must not sleep. Normal IRQ handlers
-/// receive the resolved OS-visible [`Virq`]. Pseudo-NMI handlers reuse this
-/// trait and receive the raw hwirq because the NMI table is keyed outside the
-/// normal IRQ descriptor namespace. Any `Fn(Virq) -> IrqEvent + Send + Sync`
+/// receive the resolved OS-visible [`Virq`]. True NMI delivery passes the raw
+/// hardware number from its typed claim; ordinary IRQ fallback passes the
+/// logical IRQ to the same Line-owned handler. Any `Fn(Virq) -> IrqEvent + Send + Sync`
 /// implements this trait.
 pub trait IrqHandler: Send + Sync {
     /// Service a fired interrupt and report whether it was handled.

@@ -53,8 +53,14 @@ pub(crate) static MSI_IRQ_DOMAIN: IrqDomain = IrqDomain::new(false);
 pub(crate) const TEST_DOMAIN: IrqDomainId = IrqDomainId::new(u32::MAX);
 #[cfg(unittest)]
 pub(crate) static TEST_IRQ_DOMAIN: IrqDomain = IrqDomain::new(false);
+// Namespace-isolation fixtures must not borrow a real controller's domain:
+// its provider validates hardware bounds and may reject synthetic sources.
+#[cfg(unittest)]
+pub(crate) const SECOND_TEST_DOMAIN: IrqDomainId = IrqDomainId::new(u32::MAX - 1);
+#[cfg(unittest)]
+pub(crate) static SECOND_TEST_IRQ_DOMAIN: IrqDomain = IrqDomain::new(false);
 
-pub(crate) const DOMAIN_COUNT: usize = if cfg!(unittest) { 5 } else { 4 };
+pub(crate) const DOMAIN_COUNT: usize = if cfg!(unittest) { 6 } else { 4 };
 
 pub(crate) fn slot(id: IrqDomainId) -> Option<usize> {
     match id {
@@ -64,6 +70,8 @@ pub(crate) fn slot(id: IrqDomainId) -> Option<usize> {
         crate::desc::MSI_DOMAIN => Some(3),
         #[cfg(unittest)]
         TEST_DOMAIN => Some(4),
+        #[cfg(unittest)]
+        SECOND_TEST_DOMAIN => Some(5),
         _ => None,
     }
 }
@@ -76,6 +84,8 @@ pub(crate) fn domain(id: IrqDomainId) -> Option<&'static IrqDomain> {
         crate::desc::MSI_DOMAIN => Some(&MSI_IRQ_DOMAIN),
         #[cfg(unittest)]
         TEST_DOMAIN => Some(&TEST_IRQ_DOMAIN),
+        #[cfg(unittest)]
+        SECOND_TEST_DOMAIN => Some(&SECOND_TEST_IRQ_DOMAIN),
         _ => None,
     }
 }

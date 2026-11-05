@@ -4,6 +4,16 @@ This document describes the IRQ adapter trust model and page-table storage
 reference boundary separately. Basic tests do not replace hardware retirement
 protocol verification.
 
+`nmi::shutdown_periodic_nmi` forwards the local platform result unchanged. A
+false result cannot authorize source reuse or handler destruction. The caller
+owns restart exclusion and completed shutdown on all participating CPUs; this
+facade does not supply a remote execution or hardware-drain barrier.
+
+`pmu::shutdown_overflow_irq` and `restore_overflow_irq` forward source-owner
+errors unchanged. Their provider validates sleepable context and retains failed
+shutdown state. Callers must authorize service loss and exclude system stop and
+CPU hotplug; success is not permission to restart old watchdog consumer state.
+
 ## 信任模型
 
 `khal::irq` 是 trap-entry adapter，不拥有 generic IRQ state，也不 re-export
@@ -12,7 +22,7 @@ generic `kirq` API。
 
 - `kcpu` trap dispatch 只在正确异常上下文调用 `irq_handler()` / `nmi_handler()`；
 - `kspin::NoPreempt` 能覆盖进入 `kirq` 的 adapter 调用区间；
-- `kirq` 维护 IRQ state、NMI table、dispatch 和 completion 不变量；
+- `kirq` owns IRQ state, Line-owned NMI actions, dispatch and completion invariants.
 - `kplat::nm_irq` 的平台实现（`NmiMechanismIf` / `PeriodicNmiSourceIf`）与 `karch` 的 NMI 寄存器
   访问（PMR / ALLINT / SCTLR_EL1.NMI）正确反映机制与降级状态。
 
@@ -25,7 +35,10 @@ generic `kirq` API。
 2. **NMI 机制 facade 边界**
    `khal::nmi` 把 `mode()` / `enable_periodic_nmi()` 等接口 re-export 给消费者。
    机制不可用（`mode() == NmiMode::None`）时，消费者必须禁用依赖 NMI 的功能；
-   `configure_nmi` / `enable_periodic_nmi` 返回 `false` 表示该 CPU 无法使用 NMI。
+   `configure_nmi` can also reject Closing, unsupported source types or failed
+   local preparation. A false result must not be treated as prepared delivery;
+   partial controller failure retains cleanup obligations in KIRQ. Periodic
+   source activation remains separate from this preparation contract.
    最终停机路径经 `quiesce_nmi()` 停掉当前 CPU 的周期源；该路径持有
    `NoPreempt`，并依赖 PMU backend 的共享计数器访问与原子 enabled 状态来安全
    覆盖可能已经到达的 NMI 分发。
@@ -71,7 +84,8 @@ generic `kirq` API。
 
 ## 内存安全不变量
 
-- `khal::irq` 不保存 `IRQ_STATE` 或 `NMI_TABLE`，避免与 `kirq` 形成重复活跃 state。
+- `khal::irq` owns no IRQ registry or NMI handler storage, avoiding duplicate
+  active state beside `kirq`.
 - `NoPreempt` guard 必须覆盖整个 `kirq::handle_irq()` / `kirq::handle_nmi()` 调用。
 - `kiface_task_api::TaskIrqExitCheckpointIf` (defined by kiface-task-api, provided by ktask)
   is reserved for the completed normal IRQ tail, after controller
