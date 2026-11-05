@@ -1,5 +1,21 @@
 # kprocess — Design
 
+## Fallible Ordinary Signal Admission
+
+Process/thread signal helpers propagate ksignal WouldBlock before interrupting
+any task. Existing syscall callers already propagate KResult, so ordinary
+non-SI_USER realtime owner exhaustion reaches userspace as EAGAIN. Target,
+permission and signal-zero behavior remain unchanged. Group delivery retains
+its existing partial-delivery semantics; no rollback of prior recipients is added.
+
+Current-kernel signal delivery and non-SIGCHLD child-exit notifications explicitly
+use SignalNotification::kernel_fallback. These audited events retain a pending
+bit if NOWAIT owner allocation fails, without requiring userspace to retry an
+exit event. Userspace send helpers never opt in based on a siginfo code.
+Prepared POSIX timers still submit reserved ownership without allocating.
+Tests adapt existing delivery calls to Result; fault injection remains at the
+ksignal production allocator seam, not syscall dispatch or global allocation.
+
 ## Independent Standard Timer Notifications
 
 The POSIX dispatch bridge transfers the reserved lease to ksignal even for

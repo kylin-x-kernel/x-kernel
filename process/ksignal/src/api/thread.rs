@@ -449,9 +449,14 @@ impl ThreadSignalManager {
     /// timer bridge may instead supply a typed SignalNotification.
     /// Unqueued notifications are released after signal and configuration locks;
     /// this does not complete a timer receipt or change the wake hint on coalescing.
-    #[must_use]
-    pub fn send_signal(&self, sig: impl Into<SignalNotification>) -> bool {
-        Self::send_to_slot(&self.proc, self.slot, sig.into(), false).0
+    ///
+    /// # Errors
+    /// Returns WouldBlock for ordinary non-SI_USER realtime owner exhaustion.
+    /// Failure publishes neither a pending signal, fatal epoch nor a wake.
+    pub fn send_signal(&self, sig: impl Into<SignalNotification>) -> KResult<bool> {
+        let (should_wake, outcome) = Self::send_to_slot(&self.proc, self.slot, sig.into(), false);
+        outcome.admission_result()?;
+        Ok(should_wake)
     }
 
     pub(crate) fn send_to_slot(
@@ -459,6 +464,21 @@ impl ThreadSignalManager {
         slot: SlotId,
         sig: SignalNotification,
         require_live: bool,
+    ) -> (bool, TimerSignalSendOutcome) {
+        Self::send_to_slot_with_allocator(process, slot, sig, require_live, |node| {
+            kalloc_types::KArc::new_nowait(node).ok()
+        })
+    }
+
+    pub(crate) fn send_to_slot_with_allocator(
+        process: &ProcessSignalManager,
+        slot: SlotId,
+        sig: SignalNotification,
+        require_live: bool,
+        allocate: impl FnOnce(
+            crate::notification::NotificationNode,
+        )
+            -> Option<kalloc_types::KArc<crate::notification::NotificationNode>>,
     ) -> (bool, TimerSignalSendOutcome) {
         let signo = sig.signo();
         let owner = process.handlers.lock();
@@ -497,15 +517,12 @@ impl ThreadSignalManager {
             if ignored && !is_blocked {
                 return (false, false, txn.retain_ignored(Some(slot), sig));
             }
-            // A fatal signal delivered to this thread terminates the whole
-            // process when it is not blocked; a blocked one stays pending (and
-            // survives `execve`) without marking the process as dying. Record
-            // it before the queue so a concurrent `exec` sibling sweep cannot
-            // absorb it.
+            let Ok(rejected) = txn.put_thread_with_allocator(slot, sig, allocate) else {
+                return (false, false, TimerSignalSendOutcome::QueueFull);
+            };
             if fatal && !is_blocked {
                 process.note_fatal_signal(signo);
             }
-            let rejected = txn.put_thread(slot, sig);
             let wake_tid = if is_blocked { None } else { tid };
             (
                 !is_blocked,

@@ -1,5 +1,10 @@
 # posix-process — Security and reliability
 
+Fatal trap signals explicitly permit bit-only fallback on owner exhaustion;
+this policy is not selected by an untrusted SI_KERNEL code. The call retains
+its existing kernel-fatal-delivery role and direct-exit fallback. No allocator
+retry, sleeping reclaim or NOFAIL guarantee is introduced.
+
 ## Scope, trust and assets
 
 The analysis covers all three source files and their optional TEE/TIPC paths.

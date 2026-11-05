@@ -99,8 +99,16 @@ impl Retirement {
         assert!(mm.find_vma(sentinel.into()).is_some());
         assert!(signal.pending().is_empty());
         // Enqueue/interrupt cannot acquire M or wait for this child to respond.
-        assert!(signal.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
-        assert!(signal.send_signal(SignalInfo::new_kernel(Signo::SIGTERM)));
+        assert!(
+            signal
+                .send_signal(SignalInfo::new_kernel(Signo::SIGUSR1))
+                .unwrap()
+        );
+        assert!(
+            signal
+                .send_signal(SignalInfo::new_kernel(Signo::SIGTERM))
+                .unwrap()
+        );
         assert_retirement_pending(signal.pending());
         child.interrupt();
         // No child acknowledgement is required while we prevent final clear.
@@ -754,8 +762,16 @@ fn run_child(
         .set_signal_action(Signo::SIGTERM, SignalAction::default())
         .unwrap();
     signal.set_blocked(SignalSet::default());
-    assert!(signal.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
-    assert!(signal.send_signal(SignalInfo::new_kernel(Signo::SIGTERM)));
+    assert!(
+        signal
+            .send_signal(SignalInfo::new_kernel(Signo::SIGUSR1))
+            .unwrap()
+    );
+    assert!(
+        signal
+            .send_signal(SignalInfo::new_kernel(Signo::SIGTERM))
+            .unwrap()
+    );
     let pending = signal.pending();
     let context = format!("{uctx:?}");
     posix_process::do_exit(0, false);
@@ -877,7 +893,8 @@ fn run_case_with_session(
                 #[cfg(feature = "tee")]
                 has_tee_session,
             )
-        }).expect("test entry preparation"),
+        })
+        .expect("test entry preparation"),
         "exec-lifecycle-child".into(),
         task_number,
         thread,

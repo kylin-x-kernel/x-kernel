@@ -33,6 +33,8 @@ pub enum TimerSignalRejection {
 /// Queued does not mean delivered: a later flush can still discard the signal.
 #[must_use = "handle returned notification ownership outside locks"]
 pub enum TimerSignalSendOutcome {
+    /// Ordinary realtime admission could not allocate a record; nothing was published.
+    QueueFull,
     /// An ignored periodic notification retains its reservation without a wake.
     Retained,
     /// Pending storage now owns the notification, possibly with all targets blocked.
@@ -55,8 +57,16 @@ impl TimerSignalSendOutcome {
     /// Returns a wake hint, never proof of queue admission or completion.
     pub fn wake_tid(&self) -> Option<u32> {
         match self {
-            Self::Retained => None,
+            Self::Retained | Self::QueueFull => None,
             Self::Queued { wake_tid } | Self::Rejected { wake_tid, .. } => *wake_tid,
+        }
+    }
+
+    pub(crate) fn admission_result(&self) -> kerrno::KResult<()> {
+        if matches!(self, Self::QueueFull) {
+            Err(kerrno::KError::WouldBlock)
+        } else {
+            Ok(())
         }
     }
 
@@ -185,6 +195,7 @@ pub trait TimerSignalOrigin: Send + Sync {
 pub struct SignalNotification {
     info: SignalInfo,
     receipt: Option<TimerSignalReceipt>,
+    can_lose_details: bool,
 }
 
 /// Unique dequeue authority for a kernel-originated POSIX timer notification.
@@ -223,6 +234,26 @@ impl TimerSignalReceipt {
 }
 
 impl SignalNotification {
+    /// Creates an ordinary kernel notification that must survive owner exhaustion.
+    ///
+    /// Use only for audited kernel-generated events, never for supplied userspace
+    /// siginfo. Allocation still uses NOWAIT; failure preserves only a pending bit.
+    /// This grants no timer receipt or completion authority.
+    pub fn kernel_fallback(info: SignalInfo) -> Self {
+        Self {
+            info,
+            receipt: None,
+            can_lose_details: true,
+        }
+    }
+
+    pub(crate) fn can_lose_details(&self) -> bool {
+        self.receipt.is_none()
+            && (self.can_lose_details
+                || !self.signo().is_realtime()
+                || self.info.code() == linux_raw_sys::general::SI_USER as i32)
+    }
+
     /// Builds an unreserved kernel timer notification for compatibility tests.
     ///
     /// Crate-local fixtures use this to test provenance independently of storage
@@ -249,6 +280,7 @@ impl SignalNotification {
                 lease: None,
                 is_periodic: false,
             }),
+            can_lose_details: false,
         }
     }
 
@@ -277,6 +309,7 @@ impl From<SignalInfo> for SignalNotification {
         Self {
             info,
             receipt: None,
+            can_lose_details: false,
         }
     }
 }
@@ -487,6 +520,7 @@ impl PreparedTimerRecord {
                 lease: Some(TimerRecordLease(Some(self.node.clone()), timer_id)),
                 is_periodic,
             }),
+            can_lose_details: false,
         })
     }
 }
@@ -548,7 +582,7 @@ impl SignalNotification {
     }
 
     /// Transfers the lease's owner to the queue without a self-reference.
-    /// Used for reserved records and still-infallible realtime admission.
+    /// Used for reserved records and unreserved receipt compatibility fixtures.
     pub(crate) fn into_node(mut self) -> KArc<NotificationNode> {
         let reserved = self
             .receipt

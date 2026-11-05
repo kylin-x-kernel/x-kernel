@@ -2192,11 +2192,13 @@ fn test_clone_inherits_calling_thread_mask_without_copying_private_pending() {
         !caller
             .signal_manager()
             .send_signal(SignalInfo::new_kernel(Signo::SIGUSR2))
+            .unwrap()
     );
     let _ = caller
         .signal_manager()
         .process()
-        .send_signal(SignalInfo::new_kernel(Signo::SIGTERM));
+        .send_signal(SignalInfo::new_kernel(Signo::SIGTERM))
+        .unwrap();
 
     let sibling = caller.clone_thread_in_process().unwrap();
     assert!(same_set(sibling.signal_manager().blocked(), caller_mask));
@@ -3714,14 +3716,14 @@ fn test_timer_completion_is_bound_to_originating_runtime() {
         )),
     )
     .unwrap();
-    assert!(receiver.send_signal(notification));
+    assert!(receiver.send_signal(notification).unwrap());
     let mut mask = ksignal::SignalSet::default();
     mask.add(ksignal::Signo::SIGRTMIN);
     assert!(receiver.dequeue_signal(&mask).is_some());
     assert_eq!(first.get_posix_timer_overrun(timer_id).unwrap(), 2);
     assert_eq!(second.get_posix_timer_overrun(other_id).unwrap(), 0);
     second.runtime_ref().unwrap().clear_posix_timers();
-    assert!(!receiver.send_signal(other_notification));
+    assert!(!receiver.send_signal(other_notification).unwrap());
     assert!(receiver.dequeue_signal(&mask).is_none());
     first.delete_posix_timer(timer_id).unwrap();
 }

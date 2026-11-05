@@ -9,8 +9,8 @@ use ktime_types::{MonotonicInstant, TimeSpan};
 use linux_raw_sys::general::{
     FUTEX_CLOCK_REALTIME, FUTEX_CMP_REQUEUE_PI, FUTEX_LOCK_PI, FUTEX_LOCK_PI2, FUTEX_OP_ADD,
     FUTEX_OP_CMP_EQ, FUTEX_PRIVATE_FLAG, FUTEX_TRYLOCK_PI, FUTEX_UNLOCK_PI, FUTEX_WAIT,
-    FUTEX_WAIT_BITSET, FUTEX_WAIT_REQUEUE_PI, FUTEX_WAKE_OP, MAP_ANONYMOUS, MAP_PRIVATE,
-    PROT_READ, PROT_WRITE, timespec,
+    FUTEX_WAIT_BITSET, FUTEX_WAIT_REQUEUE_PI, FUTEX_WAKE_OP, MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ,
+    PROT_WRITE, timespec,
 };
 use posix_types::UserPtr;
 use unittest::{assert_eq, def_test};
@@ -497,7 +497,11 @@ mod user_return_restart {
         let mut blocked = old_blocked;
         blocked.add(Signo::SIGCONT);
         signal.set_blocked(blocked);
-        assert!(!signal.send_signal(SignalInfo::new_kernel(Signo::SIGCONT)));
+        assert!(
+            !signal
+                .send_signal(SignalInfo::new_kernel(Signo::SIGCONT))
+                .unwrap()
+        );
         signal.set_blocked(old_blocked);
 
         assert!(signal.pending().has(Signo::SIGCONT));
@@ -537,6 +541,7 @@ mod user_return_restart {
             current_user_thread()
                 .signal_manager()
                 .send_signal(SignalInfo::new_kernel(Signo::SIGUSR1))
+                .unwrap()
         );
 
         let (stack, mut uctx) = syscall_context(LinuxError::ERESTART_RESTARTBLOCK);
@@ -583,7 +588,11 @@ mod user_return_restart {
             &mut uctx,
             false,
             || {
-                assert!(signal.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
+                assert!(
+                    signal
+                        .send_signal(SignalInfo::new_kernel(Signo::SIGUSR1))
+                        .unwrap()
+                );
                 ktask::current().interrupt();
             },
         );
@@ -613,6 +622,7 @@ mod user_return_restart {
             current_user_thread()
                 .signal_manager()
                 .send_signal(SignalInfo::new_kernel(Signo::SIGUSR2))
+                .unwrap()
         );
 
         let (stack, mut uctx) = syscall_context(LinuxError::ERESTARTSYS);

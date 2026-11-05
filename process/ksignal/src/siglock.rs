@@ -537,23 +537,39 @@ impl<'a> SigTxn<'a> {
     ///
     /// Accepted ordinary notifications allocate a KArc node with NOWAIT inside
     /// this critical section. Standard failure preserves a no-information pending
-    /// bit; realtime failure still follows the fatal OOM policy. Coalesced standard
+    /// bit, as does realtime SI_USER failure. Other ordinary realtime failures
+    /// return WouldBlock before marking any projection dirty. Coalesced standard
     /// signals and ordinary SIGKILL allocate nothing. Prepared timer notifications
     /// transfer reserved storage without fallback. NOWAIT supplies no reserve.
     pub(crate) fn put_thread(
         &mut self,
         id: SlotId,
         sig: impl Into<SignalNotification>,
-    ) -> Option<SignalNotification> {
-        let sig = sig.into();
+    ) -> KResult<Option<SignalNotification>> {
+        self.put_thread_with_allocator(id, sig.into(), |node| {
+            kalloc_types::KArc::new_nowait(node).ok()
+        })
+    }
+
+    pub(crate) fn put_thread_with_allocator(
+        &mut self,
+        id: SlotId,
+        sig: SignalNotification,
+        allocate: impl FnOnce(
+            crate::notification::NotificationNode,
+        )
+            -> Option<kalloc_types::KArc<crate::notification::NotificationNode>>,
+    ) -> KResult<Option<SignalNotification>> {
         let Some(slot) = self.inner.live_mut(id) else {
-            return Some(sig);
+            return Ok(Some(sig));
         };
-        let rejected = slot.pending.put_notification(sig);
+        let rejected = slot
+            .pending
+            .put_notification_with_allocator(sig, allocate)?;
         if rejected.is_none() {
             self.dirty.mark_slot(id.index);
         }
-        rejected
+        Ok(rejected)
     }
 
     /// Queues a process-directed signal, returning coalesced ownership.
@@ -563,12 +579,26 @@ impl<'a> SigTxn<'a> {
     pub(crate) fn put_shared(
         &mut self,
         sig: impl Into<SignalNotification>,
-    ) -> Option<SignalNotification> {
-        let rejected = self.inner.shared.put_notification(sig.into());
+    ) -> KResult<Option<SignalNotification>> {
+        self.put_shared_with_allocator(sig.into(), |node| kalloc_types::KArc::new_nowait(node).ok())
+    }
+
+    pub(crate) fn put_shared_with_allocator(
+        &mut self,
+        sig: SignalNotification,
+        allocate: impl FnOnce(
+            crate::notification::NotificationNode,
+        )
+            -> Option<kalloc_types::KArc<crate::notification::NotificationNode>>,
+    ) -> KResult<Option<SignalNotification>> {
+        let rejected = self
+            .inner
+            .shared
+            .put_notification_with_allocator(sig, allocate)?;
         if rejected.is_none() {
             self.dirty.mark_all();
         }
-        rejected
+        Ok(rejected)
     }
 
     pub(crate) fn cancel_timer(

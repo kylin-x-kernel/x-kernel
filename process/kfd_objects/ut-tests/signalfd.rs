@@ -48,6 +48,7 @@ fn test_signalfd_ready_and_nonblocking_reads_precede_interrupt() {
             !access
                 .signal
                 .send_signal(SignalInfo::new_kernel(Signo::SIGUSR1))
+                .unwrap()
         );
         task.interrupt();
         let ready = block_on(access.read(&mut buf, is_nonblocking));
@@ -81,6 +82,7 @@ fn test_signalfd_record_arriving_during_wait_precedes_interrupt() {
         !access
             .signal
             .send_signal(SignalInfo::new_kernel(Signo::SIGUSR1))
+            .unwrap()
     );
     let task = current();
     task.interrupt();
@@ -122,7 +124,9 @@ fn signalfd_arrival_wakes_blocked_process_and_thread_readers() {
         .unwrap();
     assert!(access.poll().is_empty());
     assert_eq!(
-        process.send_signal(SignalInfo::new_kernel(Signo::SIGURG)),
+        process
+            .send_signal(SignalInfo::new_kernel(Signo::SIGURG))
+            .unwrap(),
         None
     );
     assert!(count.0.load(Ordering::Relaxed) > 0);
@@ -138,6 +142,7 @@ fn signalfd_arrival_wakes_blocked_process_and_thread_readers() {
         !access
             .signal
             .send_signal(SignalInfo::new_kernel(Signo::SIGURG))
+            .unwrap()
     );
     assert!(count.0.load(Ordering::Relaxed) > 0);
     assert_eq!(access.dequeue_signal().unwrap().signo(), Signo::SIGURG);
@@ -147,7 +152,9 @@ fn signalfd_arrival_wakes_blocked_process_and_thread_readers() {
         .unwrap();
     drop(registrations);
     count.0.store(0, Ordering::Relaxed);
-    let _ = process.send_signal(SignalInfo::new_kernel(Signo::SIGURG));
+    let _ = process
+        .send_signal(SignalInfo::new_kernel(Signo::SIGURG))
+        .unwrap();
     assert_eq!(count.0.load(Ordering::Relaxed), 0);
 }
 
@@ -176,13 +183,15 @@ fn signalfd_shared_file_keeps_readiness_local_to_accessing_process() {
         .unwrap();
     let _ = first
         .signal
-        .send_signal(SignalInfo::new_kernel(Signo::SIGURG));
+        .send_signal(SignalInfo::new_kernel(Signo::SIGURG))
+        .unwrap();
     assert_eq!(count.0.load(Ordering::Relaxed), 0);
     assert!(first.poll().contains(IoEvents::IN));
     assert!(second.poll().is_empty());
     let _ = second
         .signal
-        .send_signal(SignalInfo::new_kernel(Signo::SIGURG));
+        .send_signal(SignalInfo::new_kernel(Signo::SIGURG))
+        .unwrap();
     assert!(count.0.load(Ordering::Relaxed) > 0);
     assert!(second.poll().contains(IoEvents::IN));
 }
@@ -210,7 +219,8 @@ fn signalfd_mask_update_notifies_only_updaters_shared_source() {
     peer.signal.set_blocked(mask);
     let _ = peer
         .signal
-        .send_signal(SignalInfo::new_kernel(Signo::SIGURG));
+        .send_signal(SignalInfo::new_kernel(Signo::SIGURG))
+        .unwrap();
 
     let shared_count = Arc::new(WakeCount(AtomicUsize::new(0)));
     let private_count = Arc::new(WakeCount(AtomicUsize::new(0)));

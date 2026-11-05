@@ -409,15 +409,34 @@ impl ProcessSignalManager {
     /// retained records without allocating notification storage.
     /// Unqueued notifications are released after signal and configuration locks;
     /// this does not complete a timer receipt or change the wake hint on coalescing.
-    #[must_use]
-    pub fn send_signal(&self, sig: impl Into<SignalNotification>) -> Option<u32> {
-        self.send_signal_inner(sig.into(), false).wake_tid()
+    ///
+    /// # Errors
+    /// Returns WouldBlock for ordinary non-SI_USER realtime owner exhaustion.
+    /// Failure publishes neither a pending signal, fatal epoch nor a wake.
+    pub fn send_signal(&self, sig: impl Into<SignalNotification>) -> KResult<Option<u32>> {
+        let outcome = self.send_signal_inner(sig.into(), false);
+        outcome.admission_result()?;
+        Ok(outcome.wake_tid())
     }
 
     pub(crate) fn send_signal_inner(
         &self,
         sig: SignalNotification,
         require_live: bool,
+    ) -> TimerSignalSendOutcome {
+        self.send_signal_with_allocator(sig, require_live, |node| {
+            kalloc_types::KArc::new_nowait(node).ok()
+        })
+    }
+
+    pub(crate) fn send_signal_with_allocator(
+        &self,
+        sig: SignalNotification,
+        require_live: bool,
+        allocate: impl FnOnce(
+            crate::notification::NotificationNode,
+        )
+            -> Option<kalloc_types::KArc<crate::notification::NotificationNode>>,
     ) -> TimerSignalSendOutcome {
         let signo = sig.signo();
         let owner = self.handlers.lock();
@@ -450,17 +469,12 @@ impl ProcessSignalManager {
             if ignored && !has_blocked_thread {
                 return (false, txn.retain_ignored(None, sig));
             }
-            // A fatal group signal terminates the whole process when some
-            // thread can actually take it; record it before the queue so a
-            // concurrent `exec` sibling sweep cannot absorb it. A signal every
-            // thread blocks stays pending (and survives `execve`) without
-            // marking the process as dying. The epoch is a plain atomic store,
-            // so it is safe to publish it inside the critical section where
-            // the ordering matters.
+            let Ok(rejected) = txn.put_shared_with_allocator(sig, allocate) else {
+                return (false, TimerSignalSendOutcome::QueueFull);
+            };
             if fatal && target_tid.is_some() {
                 self.note_fatal_signal(signo);
             }
-            let rejected = txn.put_shared(sig);
             (
                 true,
                 TimerSignalSendOutcome::from_queue(

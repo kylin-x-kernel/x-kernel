@@ -1,14 +1,18 @@
 # ksignal security and reliability
 
-## Standard Owner Allocation Failure
+## Ordinary Owner Allocation Fallback
 
-Only ordinary standard notifications may lose detailed storage. Admission first
-coalesces, then attempts NOWAIT allocation; failure leaves an authoritative
+Ordinary standard and realtime SI_USER notifications may lose detailed storage.
+Standard admission first coalesces; realtime sends always attempt allocation.
+NOWAIT failure leaves an authoritative
 pending bit and no owner. Ordinary SIGKILL skips allocation altogether. A
 bit-only dequeue synthesizes zeroed SI_USER information on the stack and carries
 no receipt. User-controlled SI_TIMER does not grant timer authority. Prepared
 records bypass allocation and are never converted into this fallback. Ordinary
-realtime failure remains fatal until its error propagation contract is enabled.
+non-SI_USER realtime failure returns WouldBlock without publishing queue state,
+fatal epochs or wakes. Explicit kernel_fallback is reserved for audited kernel
+sources, never inferred from ABI SI_KERNEL. Ordinary From<SignalInfo> cannot
+acquire that policy. Prepared receipts remain outside this fallback.
 
 Ignored cancellation must not clear an unrelated no-info pending bit. Only
 actual removal from a pending FIFO permits cancellation to clear its last bit.
@@ -17,7 +21,12 @@ survives the final detailed owner. Normal and explicit-mask dequeue share the
 same representation; dirty projections and wakes follow successful admission.
 Private allocator-seam tests cover loss of details, no-retry coalescing, SIGKILL,
 forged timer payloads, reserved timer ownership and cancellation isolation.
-There is no global allocator override, new unsafe code, or realtime OOM recovery.
+Realtime SI_USER tests also cover repeated failed admission attempts and mixed
+detailed/bit-only arrival orders without an extra synthesized occurrence.
+Private allocator-seam regressions also cover realtime WouldBlock, unchanged
+existing FIFO state, ignored admission without allocation, unchanged fatal
+snapshots/projections/wake observations, and successful retry. There is no global
+allocator override, new unsafe code or syscall-level OOM injection.
 
 ## Invalidated Pending Ownership
 
@@ -73,7 +82,7 @@ No strong runtime cycle is added, although a weak reference retains its Arc
 control block until release. The last weak release also occurs outside signal
 and configuration locks on production send/dequeue/retirement paths.
 Ordinary coalescing is unchanged; ignored/flushed notifications never acknowledge
-timers. Realtime allocation failure recovery remains outside this change.
+timers. Ordinary realtime owner errors now propagate through senders.
 The timer manager issues non-wrapping u64 generations and rejects exhaustion.
 Receipts retain the full value independently of the truncated ABI field.
 POSIX TimerSignalTarget binds destination manager identity and optional slot,
@@ -85,8 +94,9 @@ u64 source and never wrap: exhaustion rejects registration before mutation,
 returns prepared storage to the unlocked caller, and does not prevent retirement.
 Shrinking the slot table never resets the generation source. SlotId is scoped
 to its manager, not a standalone cross-manager capability. Ordinary KArc node
-allocations use NOWAIT. Standard failure preserves the signal bit; realtime
-failure remains fatal. Prepared records reserve
+allocations use NOWAIT. Standard and realtime SI_USER failure preserve the signal
+bit; other ordinary realtime failure returns WouldBlock unless kernel fallback
+is explicit. Prepared records reserve
 storage fallibly before locking; submission, dequeue and ready scheduling do
 not allocate. A busy reservation cannot overwrite a queued payload.
 

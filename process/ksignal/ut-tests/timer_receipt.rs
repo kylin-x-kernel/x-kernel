@@ -69,10 +69,58 @@ fn prepare_record(
     )
 }
 
+#[def_test]
+fn private_realtime_owner_failure_preserves_projection_and_fatal_epoch() {
+    for is_blocked in [false, true] {
+        let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
+        let thread = ThreadSignalManager::new(1, process.clone()).unwrap();
+        let mut mask = SignalSet::default();
+        mask.add(Signo::SIGRTMIN);
+        if is_blocked {
+            thread.set_blocked(mask);
+        }
+        let before = process.fatal_signal_snapshot();
+        let (should_wake, outcome) = ThreadSignalManager::send_to_slot_with_allocator(
+            &process,
+            thread.slot,
+            SignalInfo::new_user(Signo::SIGRTMIN, linux_raw_sys::general::SI_TKILL, 123).into(),
+            false,
+            |_| None,
+        );
+        assert!(!should_wake);
+        assert_eq!(outcome.admission_result(), Err(kerrno::KError::WouldBlock));
+        assert_eq!(outcome.wake_tid(), None);
+        assert!(thread.pending().is_empty());
+        assert!(!thread.may_have_signal());
+        assert_eq!(process.fatal_signal_snapshot(), before);
+        assert_eq!(
+            thread
+                .send_signal(SignalInfo::new_user(
+                    Signo::SIGRTMIN,
+                    linux_raw_sys::general::SI_TKILL,
+                    123,
+                ))
+                .unwrap(),
+            !is_blocked
+        );
+        assert_eq!(thread.may_have_signal(), !is_blocked);
+        assert_eq!(process.fatal_signal_snapshot() != before, !is_blocked);
+        assert_eq!(
+            thread.dequeue_signal(&mask).unwrap().code(),
+            linux_raw_sys::general::SI_TKILL
+        );
+        assert!(thread.pending().is_empty());
+    }
+}
+
 #[def_test(serial)]
 fn standard_fallback_never_creates_timer_authority_or_an_extra_occurrence() {
     let thread = setup();
-    assert!(thread.send_signal(SignalInfo::new_kernel(Signo::SIGKILL)));
+    assert!(
+        thread
+            .send_signal(SignalInfo::new_kernel(Signo::SIGKILL))
+            .unwrap()
+    );
     assert!(thread.may_have_signal());
     assert_eq!(
         thread.take_signal().unwrap().sig.code(),
@@ -88,6 +136,7 @@ fn standard_fallback_never_creates_timer_authority_or_an_extra_occurrence() {
     assert!(
         pending
             .put_notification_with_allocator(forged.into(), |_| None)
+            .unwrap()
             .is_none()
     );
     let (info, receipt) = pending.dequeue_notification(&mask).unwrap().into_parts();
@@ -99,6 +148,7 @@ fn standard_fallback_never_creates_timer_authority_or_an_extra_occurrence() {
     assert!(
         pending
             .put_notification_with_allocator(SignalInfo::new_kernel(signo).into(), |_| None)
+            .unwrap()
             .is_none()
     );
     let allocations = core::cell::Cell::new(0);
@@ -108,6 +158,7 @@ fn standard_fallback_never_creates_timer_authority_or_an_extra_occurrence() {
                 allocations.set(allocations.get() + 1);
                 None
             })
+            .unwrap()
             .is_none()
     );
     assert_eq!(allocations.get(), 0);
@@ -145,6 +196,7 @@ fn cancelling_ignored_timer_keeps_an_unrelated_bit_only_signal() {
     assert!(
         pending
             .put_notification_with_allocator(SignalInfo::new_kernel(signo).into(), |_| None)
+            .unwrap()
             .is_none()
     );
     record.invalidate_through(23);
@@ -640,24 +692,28 @@ fn cancellation_preserves_mixed_fifo_and_checks_captured_queue() {
     let mut mask = SignalSet::default();
     mask.add(Signo::SIGRTMIN);
     thread.set_blocked(mask);
-    let _ = thread.send_signal(SignalInfo::new_timer(
-        Signo::SIGRTMIN,
-        101,
-        0,
-        posix_types::k_sigval { sival_int: 0 },
-        0,
-    ));
+    let _ = thread
+        .send_signal(SignalInfo::new_timer(
+            Signo::SIGRTMIN,
+            101,
+            0,
+            posix_types::k_sigval { sival_int: 0 },
+            0,
+        ))
+        .unwrap();
     assert!(matches!(
         target.send(prepare_record(&origin, Signo::SIGRTMIN, 1).unwrap()),
         crate::TimerSignalSendOutcome::Queued { .. }
     ));
-    let _ = thread.send_signal(SignalInfo::new_timer(
-        Signo::SIGRTMIN,
-        102,
-        0,
-        posix_types::k_sigval { sival_int: 0 },
-        0,
-    ));
+    let _ = thread
+        .send_signal(SignalInfo::new_timer(
+            Signo::SIGRTMIN,
+            102,
+            0,
+            posix_types::k_sigval { sival_int: 0 },
+            0,
+        ))
+        .unwrap();
     drop(record.invalidate(&wrong_target, 1));
     assert!(prepare_record(&origin, Signo::SIGRTMIN, 2).is_none());
     drop(record.invalidate(&target, 1));
@@ -752,25 +808,34 @@ fn prepared_record_mixed_fifo_keeps_lease_until_receipt_completion() {
     let signo = Signo::SIGRTMIN;
     let mut mask = SignalSet::default();
     mask.add(signo);
-    assert!(pending.put_signal(SignalInfo::new_timer(
-        signo,
-        1,
-        0,
-        posix_types::k_sigval { sival_int: 0 },
-        1
-    )));
+    assert!(
+        pending
+            .put_signal(SignalInfo::new_timer(
+                signo,
+                1,
+                0,
+                posix_types::k_sigval { sival_int: 0 },
+                1
+            ))
+            .unwrap()
+    );
     assert!(
         pending
             .put_notification(prepare_record(&origin, signo, 23).unwrap())
+            .unwrap()
             .is_none()
     );
-    assert!(pending.put_signal(SignalInfo::new_timer(
-        signo,
-        2,
-        0,
-        posix_types::k_sigval { sival_int: 0 },
-        2
-    )));
+    assert!(
+        pending
+            .put_signal(SignalInfo::new_timer(
+                signo,
+                2,
+                0,
+                posix_types::k_sigval { sival_int: 0 },
+                2
+            ))
+            .unwrap()
+    );
     assert!(prepare_record(&origin, signo, 24).is_none());
     assert_eq!(pending.dequeue_signal(&mask).unwrap().timer_id(), Some(1));
     let detached = pending.dequeue_notification(&mask).unwrap();
@@ -796,8 +861,10 @@ fn prepared_record_bypasses_coalescing_and_drain_returns_unique_ownership() {
     for signo in [Signo::SIGUSR1, Signo::SIGRTMIN] {
         let origin = record_origin();
         let mut pending = crate::PendingSignals::default();
-        assert!(pending.put_signal(SignalInfo::new_kernel(signo)));
-        let rejected = pending.put_notification(prepare_record(&origin, signo, 23).unwrap());
+        assert!(pending.put_signal(SignalInfo::new_kernel(signo)).unwrap());
+        let rejected = pending
+            .put_notification(prepare_record(&origin, signo, 23).unwrap())
+            .unwrap();
         assert!(rejected.is_none());
         assert!(prepare_record(&origin, signo, 24).is_none());
         drop(rejected);
@@ -836,6 +903,7 @@ fn prepared_record_detached_discard_releases_without_acknowledgement() {
         assert!(
             pending
                 .put_notification(prepare_record(&origin, signo, 23).unwrap())
+                .unwrap()
                 .is_none()
         );
         let detached = pending.dequeue_notification(&mask).unwrap();
@@ -1085,7 +1153,11 @@ fn expired_timer_origin_is_not_kept_alive_or_replaced_by_the_receiver() {
     let thread = setup();
     let origin = ORIGINS.lock().as_ref().unwrap()[0].clone();
     let weak = Arc::downgrade(&origin);
-    assert!(thread.send_signal(notification(Signo::SIGUSR1, false)));
+    assert!(
+        thread
+            .send_signal(notification(Signo::SIGUSR1, false))
+            .unwrap()
+    );
     drop(ORIGINS.lock().take());
     assert_eq!(Arc::strong_count(&origin), 1);
     drop(origin);
@@ -1101,16 +1173,24 @@ fn ordinary_timer_siginfo_has_no_completion_authority() {
     let thread = setup();
     let mut mask = SignalSet::default();
     mask.add(Signo::SIGUSR1);
-    assert!(thread.send_signal(SignalInfo::new_timer(
-        Signo::SIGUSR1,
-        17,
-        0,
-        posix_types::k_sigval { sival_int: 0 },
-        23
-    )));
+    assert!(
+        thread
+            .send_signal(SignalInfo::new_timer(
+                Signo::SIGUSR1,
+                17,
+                0,
+                posix_types::k_sigval { sival_int: 0 },
+                23
+            ))
+            .unwrap()
+    );
     assert_eq!(thread.dequeue_signal(&mask).unwrap().timer_id(), Some(17));
     assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 0);
-    assert!(thread.send_signal(notification(Signo::SIGUSR1, false)));
+    assert!(
+        thread
+            .send_signal(notification(Signo::SIGUSR1, false))
+            .unwrap()
+    );
     assert!(thread.dequeue_signal(&mask).is_some());
     assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 1);
     drop(MANAGER.lock().take());
@@ -1130,7 +1210,10 @@ fn masked_dequeue_completes_every_timer_signo_outside_siglock() {
         let mut mask = SignalSet::default();
         mask.add(signo);
         thread.set_blocked(mask);
-        let _ = thread.process().send_signal(notification(signo, false));
+        let _ = thread
+            .process()
+            .send_signal(notification(signo, false))
+            .unwrap();
         assert_eq!(thread.dequeue_signal(&mask).unwrap().signo(), signo);
         count += 1;
         assert_eq!(COMPLETIONS.load(Ordering::Relaxed), count);
@@ -1142,8 +1225,16 @@ fn masked_dequeue_completes_every_timer_signo_outside_siglock() {
 #[def_test(serial)]
 fn normal_dequeue_skips_rejected_receipt_and_completes_next_once() {
     let thread = setup();
-    assert!(thread.send_signal(notification(Signo::SIGRTMIN, true)));
-    assert!(thread.send_signal(notification(Signo::SIGRTMIN, false)));
+    assert!(
+        thread
+            .send_signal(notification(Signo::SIGRTMIN, true))
+            .unwrap()
+    );
+    assert!(
+        thread
+            .send_signal(notification(Signo::SIGRTMIN, false))
+            .unwrap()
+    );
     assert_eq!(thread.take_signal().unwrap().sig.signo(), Signo::SIGRTMIN);
     assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 2);
     assert!(thread.take_signal().is_none());
@@ -1156,9 +1247,10 @@ fn coalesced_timer_ownership_can_be_retried_after_unlocking() {
         let thread = setup();
         let first = thread.proc.siglock().transact(|txn| {
             if shared {
-                txn.put_shared(notification(Signo::SIGUSR1, false))
+                txn.put_shared(notification(Signo::SIGUSR1, false)).unwrap()
             } else {
                 txn.put_thread(thread.slot, notification(Signo::SIGUSR1, false))
+                    .unwrap()
             }
         });
         assert!(first.is_none());
@@ -1167,9 +1259,10 @@ fn coalesced_timer_ownership_can_be_retried_after_unlocking() {
             .siglock()
             .transact(|txn| {
                 if shared {
-                    txn.put_shared(notification(Signo::SIGUSR1, false))
+                    txn.put_shared(notification(Signo::SIGUSR1, false)).unwrap()
                 } else {
                     txn.put_thread(thread.slot, notification(Signo::SIGUSR1, false))
+                        .unwrap()
                 }
             })
             .unwrap();
@@ -1178,7 +1271,7 @@ fn coalesced_timer_ownership_can_be_retried_after_unlocking() {
         assert!(thread.take_signal().is_some());
         assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 1);
         assert!(thread.take_signal().is_none());
-        assert!(thread.send_signal(rejected));
+        assert!(thread.send_signal(rejected).unwrap());
         assert!(thread.take_signal().is_some());
         assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 2);
         drop(MANAGER.lock().take());
@@ -1193,11 +1286,14 @@ fn stale_target_returns_timer_ownership_without_publishing_to_successor() {
     let rejected = thread
         .proc
         .siglock()
-        .transact(|txn| txn.put_thread(thread.slot, notification(Signo::SIGRTMIN, false)))
+        .transact(|txn| {
+            txn.put_thread(thread.slot, notification(Signo::SIGRTMIN, false))
+                .unwrap()
+        })
         .unwrap();
     assert!(successor.pending().is_empty());
     assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 0);
-    assert!(successor.send_signal(rejected));
+    assert!(successor.send_signal(rejected).unwrap());
     assert!(successor.take_signal().is_some());
     assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 1);
     assert!(successor.take_signal().is_none());
@@ -1217,11 +1313,16 @@ fn ignored_and_released_destinations_do_not_acknowledge_timer_notifications() {
             },
         )
         .unwrap();
-    assert!(!thread.send_signal(notification(Signo::SIGUSR1, false)));
+    assert!(
+        !thread
+            .send_signal(notification(Signo::SIGUSR1, false))
+            .unwrap()
+    );
     assert!(
         thread
             .proc
             .send_signal(notification(Signo::SIGUSR1, false))
+            .unwrap()
             .is_none()
     );
     assert!(thread.pending().is_empty());
@@ -1230,22 +1331,32 @@ fn ignored_and_released_destinations_do_not_acknowledge_timer_notifications() {
     let mut mask = SignalSet::default();
     mask.add(Signo::SIGUSR1);
     thread.set_blocked(mask);
-    assert!(!thread.send_signal(notification(Signo::SIGUSR1, false)));
+    assert!(
+        !thread
+            .send_signal(notification(Signo::SIGUSR1, false))
+            .unwrap()
+    );
     assert!(
         thread
             .proc
             .send_signal(notification(Signo::SIGUSR1, false))
+            .unwrap()
             .is_none()
     );
     assert!(thread.dequeue_signal(&mask).is_some());
     assert!(thread.dequeue_signal(&mask).is_some());
     assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 2);
     thread.proc.release_handlers();
-    assert!(!thread.send_signal(notification(Signo::SIGRTMIN, false)));
+    assert!(
+        !thread
+            .send_signal(notification(Signo::SIGRTMIN, false))
+            .unwrap()
+    );
     assert!(
         thread
             .proc
             .send_signal(notification(Signo::SIGRTMIN, false))
+            .unwrap()
             .is_none()
     );
     assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 2);
@@ -1256,14 +1367,14 @@ fn ignored_and_released_destinations_do_not_acknowledge_timer_notifications() {
 fn detached_timer_discard_does_not_acknowledge_or_consume_successor() {
     for signo in [Signo::SIGUSR1, Signo::SIGRTMIN] {
         let thread = setup();
-        assert!(thread.send_signal(notification(signo, false)));
+        assert!(thread.send_signal(notification(signo, false)).unwrap());
         let detached = thread
             .proc
             .siglock()
             .transact(|txn| txn.take(thread.slot))
             .unwrap();
         assert!(!thread.pending().has(signo));
-        assert!(thread.send_signal(notification(signo, false)));
+        assert!(thread.send_signal(notification(signo, false)).unwrap());
         drop(detached);
         assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 0);
         assert!(thread.pending().has(signo));
@@ -1277,12 +1388,22 @@ fn detached_timer_discard_does_not_acknowledge_or_consume_successor() {
 #[def_test(serial)]
 fn coalescing_and_teardown_do_not_invoke_dequeue_completion() {
     let thread = setup();
-    assert!(thread.send_signal(notification(Signo::SIGUSR1, false)));
-    let _ = thread.send_signal(notification(Signo::SIGUSR1, false));
+    assert!(
+        thread
+            .send_signal(notification(Signo::SIGUSR1, false))
+            .unwrap()
+    );
+    let _ = thread
+        .send_signal(notification(Signo::SIGUSR1, false))
+        .unwrap();
     assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 0);
     assert!(thread.take_signal().is_some());
     assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 1);
-    assert!(thread.send_signal(notification(Signo::SIGUSR1, false)));
+    assert!(
+        thread
+            .send_signal(notification(Signo::SIGUSR1, false))
+            .unwrap()
+    );
     drop(thread);
     drop(MANAGER.lock().take());
     assert_eq!(COMPLETIONS.load(Ordering::Relaxed), 1);

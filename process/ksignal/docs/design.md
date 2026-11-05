@@ -1,5 +1,54 @@
 # ksignal design
 
+## Implemented: Realtime Admission Errors
+
+Ordinary non-SI_USER realtime owner exhaustion returns WouldBlock (EAGAIN).
+PendingSignals and SigTxn return KResult without changing queue membership or
+pending projections on error. Process/thread send_signal return KResult of the
+existing wake hint; kprocess propagates the error before task interruption.
+The syscall adapters already propagate these results, preserving validation
+order and signal-zero handling. TimerSignalSendOutcome::QueueFull represents
+ordinary failure with no wake or retained ownership. Prepared leases cannot
+reach it because their submission requires no owner allocation.
+
+Disposition checks precede allocation. Fatal epochs are published only after
+successful admission, inside the same SigLock transaction. Failure does not
+publish pending_changed notifications. Failed ordinary nodes own only plain
+siginfo; destruction under the lock releases no timer or runtime references.
+
+SignalNotification::kernel_fallback explicitly permits loss of details for
+audited kernel sends: current-kernel signal delivery, fatal trap delivery and
+non-SIGCHLD child-exit notifications. Userspace conversion never gains this
+policy from SI_KERNEL or another ABI code. This is not NOFAIL allocation:
+NOWAIT may fail and delivery then retains only an aggregate pending bit.
+
+Five deterministic regressions cover code-dependent rejection with an existing
+FIFO, explicit kernel fallback, shared failure without fatal epoch/wake changes,
+ignored admission without allocation, and blocked/unblocked private failures
+followed by successful retry. The private seam replaces only the ordinary
+allocator in the production send algorithm. No resource-limit accounting,
+syscall-level OOM injection or complete memory-pressure safety is claimed.
+
+## Implemented: Realtime SI_USER Allocation Fallback
+
+Linux `kernel/signal.c::__send_signal_locked` does not return EAGAIN for
+ordinary SI_USER owner allocation failure, even for a realtime signo. The
+shared enqueue algorithm now accepts that failure with a pending bit and the
+shared dequeue algorithm synthesizes zeroed SI_USER when no record exists.
+The receipt check precedes this policy: prepared timer ownership never degrades.
+
+Realtime admission does not use standard-signal coalescing: every SI_USER send
+still attempts NOWAIT allocation. Multiple failed attempts leave one aggregate
+bit. Detailed records before or after a failed attempt retain FIFO behavior;
+consuming the final record clears the bit without an extra synthesized event.
+Two deterministic allocator-seam tests cover repeated failures, blocked-mask
+visibility, no-info dequeue and both orders of mixed detailed/bit-only arrivals.
+These tests do not inject failure through a syscall or the global allocator.
+
+This is the kill-compatible branch. Other ordinary realtime codes return EAGAIN
+unless an audited kernel sender explicitly permits fallback. Fatal epoch
+publication follows successful admission under SigLock.
+
 ## Implemented: Standard-Signal Allocation Fallback
 
 Ordinary standard signals now allocate detailed KArc storage with NOWAIT only
@@ -7,11 +56,11 @@ after coalescing. Failure publishes the existing pending bit without an owner;
 ordinary SIGKILL takes that no-allocation path directly. Duplicate standard
 sends never retry allocation or upgrade lost information. The API still reports
 successful admission, so existing SigTxn dirty tracking and unlocked wake paths
-remain in use. Realtime owner failure remains fatal until its code-dependent
-EAGAIN contract is propagated through senders; no realtime fallback is enabled.
+remain in use. Realtime SI_USER uses the fallback described above; other
+realtime owner failure returns EAGAIN unless explicit kernel fallback applies.
 
 DetachedNotification carries either a stored owner or an inline signo. A
-record-less standard dequeue synthesizes zero-initialized SI_USER, errno zero,
+record-less dequeue synthesizes zero-initialized SI_USER, errno zero,
 and no sender/timer payload through SignalInfo::without_sender. Normal handlers
 and explicit-mask consumers use the same unlocked completion path. The inline
 variant has no receipt and cannot acknowledge a timer. Prepared records never
@@ -80,7 +129,7 @@ complete, return storage and accumulate overruns. Ordinary sends still coalesce
 even when only prepared records remain. Cancellation clears the bitmap only
 after the last record is removed. Queue drain returns every lease exactly once
 without acknowledging delivery. No enqueue/dequeue allocation is added for
-prepared timers; ordinary realtime NOWAIT failure still retains fatal OOM behavior.
+prepared timers; ordinary realtime non-SI_USER failure now returns EAGAIN.
 
 The unified 64-list layout replaces 32 optional standard slots and 33 realtime
 lists. It consumes more inline queue metadata but no new heap allocation; enqueue
@@ -107,8 +156,8 @@ outside signal locks just like detached queue ownership.
 Each signal uses an existing intrusive_collections LinkedList with AtomicLink
 and KArcPointerOps. Ordinary
 and prepared notifications share the same FIFO. Ordinary admission allocates
-with NOWAIT; standard failure preserves the bit, while realtime failure retains
-fatal handle_alloc_error behavior. Refcount overhead
+with NOWAIT; standard and realtime SI_USER failure preserve the bit, while other
+realtime failure returns WouldBlock unless kernel fallback is explicit. Refcount overhead
 is accepted. PreparedTimerRecord::new reserves one KArc with KERNEL permissions
 before the timer lock, returning NoMemory on failure. Its nonallocating prepare
 claims one lease and returns None while occupied, without overwriting payload.
@@ -356,18 +405,17 @@ existing manager identity and ownership lock; do not turn shared handler
 ownership into global pending-queue membership. The wake-path plan similarly
 reuses futures-util AtomicWaker, with registration on every consumer poll.
 
-## Draft: Fallible Standard-Signal Payload Ownership
+## Ordinary Signal Payload Ownership
 
-Status: remaining ordinary OOM/admission proposal, not implemented. Pending
-storage now uses KArc nodes and per-signo intrusive lists, with reserved timer
-leases. Standard fallback is implemented above. Ordinary realtime allocation
-remains infallible at the API boundary and fatal on failure; the realtime
-fallback/error propagation policies below remain future work.
+Status: ordinary fallback and realtime admission errors are implemented.
+Pending storage uses KArc nodes and intrusive lists, with reserved timer leases.
+The classification below defines the implemented policy; remaining validation
+and resource-accounting limits are called out separately.
 
 ### Sender Classification and Error Propagation
 
-The standard column is implemented; realtime rules and error propagation are
-the proposed next migration, not current fallible realtime queue behavior.
+Standard and realtime SI_USER fallback, realtime error propagation and explicit
+kernel-only fallback are implemented.
 Source audit covers the syscall adapters in `core/ksyscall/src/task/signal.rs`
 and `pidfd.rs`, `process/kprocess/src/process_signals.rs`, timer delivery,
 process exit, fatal delivery in posix-process, and terminal-generated signals.
@@ -441,10 +489,9 @@ standard-only proposal, enabling realtime fallback requires changing the
 realtime dequeue path at the same time as its admission path.
 
 Non-SIGCHLD child-exit notifications may use a caller-selected realtime signo.
-Their current post-exit sender logs failure, while the parent's wait-state
-notification is separate. Audit that path explicitly; neither silently
-discard it as an ordinary standard notification nor assert that every
-kernel-originated payload is infallible. SIGCHLD's prepared exit decision is
+Their post-exit sender now explicitly selects kernel_fallback; the parent's
+wait-state notification remains separate. This preserves a pending bit on owner
+exhaustion without claiming that every kernel-originated payload is infallible. SIGCHLD's prepared exit decision is
 not a prepared storage lease and does not authorize a timer completion.
 
 Acceptance cases: inject ordinary owner failure for standard and realtime
@@ -467,10 +514,8 @@ Remaining work is ordered by observable contracts, not by crate count:
 
 1. Validate ignored-record lifecycle under concurrent syscall stress beyond the
    implemented deterministic queue and disposition regressions.
-2. Propagate the proposed realtime admission/error contract through senders
-   and consumers; the no-information standard-signal state is implemented.
-3. Enable recoverable realtime allocation failure only with the corresponding
-   fallback, error propagation and deterministic failure tests.
+2. Extend allocator-seam coverage to syscall-level memory-pressure validation;
+   realtime fallback, error propagation and deterministic tests are implemented.
 
 Each slice needs its own executable tests and synchronized security contracts.
 The queue representation change is confined to pending signals, not a general
@@ -539,8 +584,8 @@ fallback on the stack and clears the bit. The fallback constructor belongs in
 `SignalInfo`, alongside the existing
 zero-initializing constructors. It must not impersonate SI_KERNEL, retain stale
 sender data, or expose uninitialized union/padding bytes. No allocation occurs
-on dequeue. Apply this fallback only to standard signals in this batch; do
-not conceal inconsistent realtime queue/bitmap state with it.
+on dequeue. Standard and ordinary realtime SI_USER admission may produce this
+state; prepared receipts and other realtime codes must not silently degrade.
 
 No independently counted no-information instance survives beside a detailed
 record. As in Linux `collect_signal`, an ordinary owner OOM followed by a
@@ -616,14 +661,14 @@ still a partial migration, not completion of the pending-owner work.
   trade-off requiring measurement, not the default migration strategy.
 - A compact timer fallback token still needs lifetime, coalescing and sequence
   acknowledgement rules; it is not a substitute for the timer protocol.
-- Realtime storage is already intrusive; recoverable realtime admission,
+- Realtime storage is intrusive and ordinary admission errors are propagated.
   RLIMIT_SIGPENDING accounting and unrelated Arc allocations remain outside
-  this standard-signal fallback proposal. Do not advertise end-to-end OOM safety.
+  this migration. Do not advertise end-to-end OOM safety.
 
 ### Validation and Implementation Gate
 
 Standard fallback is enabled on the implemented shared nodes, following the
-timer reservation and ignored-record lifecycle work. Realtime propagation is separate.
+timer reservation and ignored-record lifecycle work. Realtime propagation is now implemented.
 Production and tests must use the same enqueue/dequeue algorithms, with a
 private seam replacing only the selected owner allocation.
 
@@ -637,11 +682,11 @@ dequeue and observer processing.
 
 Timer tests must cover standard-number periodic notifications after injected
 OOM, stale records after rearm/delete, overrun acknowledgement, competing
-ordinary/timer sends and multiple timers sharing a signo. Realtime delivery
-must retain its existing behavior. Before landing implementation, synchronize
-security/rustdoc contracts and run four-architecture build/Clippy plus targeted
-ksignal, timer, process and signal-consumer tests. These are planned checks,
-not validation results from this design-only pass.
+ordinary/timer sends and multiple timers sharing a signo. Successful realtime
+delivery retains FIFO behavior; owner failure follows the admission policy
+above. Validation requires four-architecture build/Clippy plus targeted ksignal,
+timer, process and signal-consumer tests. The allocator-seam regressions do not
+substitute for syscall-level memory-pressure or concurrency stress testing.
 
 The process-handler ownership regressions live in `ut-tests/process_handlers.rs`,
 mounted under `api::process::handler_tests` with `unittest::path_mod_test!`.
@@ -950,18 +995,20 @@ Generation exhaustion returns InvalidInput with the same publication guarantee;
 slot-owner release happens outside the lock on this error path too.
 The projection and manager Arcs and table growth remain infallible; this is not
 end-to-end OOM safety. Standard payloads now use KArc ownership with bit-only
-OOM fallback; recoverable realtime admission remains unimplemented.
+OOM fallback, also available for realtime SI_USER and explicit kernel fallback.
+Other ordinary realtime failures propagate WouldBlock.
 
 Payload admission distinguishes ordinary and prepared notifications.
 `put_thread`/`put_shared` reach `PendingSignals::put_notification`: an accepted
 ordinary signal allocates a KArc node with NOWAIT inside SigLock. Standard
-failure preserves a bit-only notification; realtime failure retains fatal
-handle_alloc_error behavior. Coalesced standard sends and ordinary SIGKILL
+failure preserves a bit-only notification, as does realtime SI_USER. Other
+ordinary realtime failure returns WouldBlock unless kernel fallback is explicit. Coalesced standard sends and ordinary SIGKILL
 allocate nothing. Prepared timer sends transfer their preallocated node without any
 allocation; creation reserves it with KERNEL permissions before timer locks.
 Linux similarly allocates ordinary records under siglock after coalescing,
 and this implementation now supports SIGKILL's no-record path and standard
-fallback, but not recoverable realtime admission. NOWAIT is not a reserve
+fallback plus realtime SI_USER fallback and realtime EAGAIN propagation.
+NOWAIT is not a reserve
 guarantee or Linux GFP_ATOMIC equivalence.
 
 ## Design decisions

@@ -13,11 +13,16 @@ use ktask::{KtaskRef, current};
 
 use crate::{AsThread, Pid, Process, Thread, Tid, lookup};
 
-fn send_signal_thread_inner(task: &KtaskRef, thread: &Thread, sig: impl Into<SignalNotification>) {
+fn send_signal_thread_inner(
+    task: &KtaskRef,
+    thread: &Thread,
+    sig: impl Into<SignalNotification>,
+) -> KResult<()> {
     let signal = thread.signal_manager();
-    if signal.send_signal(sig) {
+    if signal.send_signal(sig)? {
         ktask::signal_task(task);
     }
+    Ok(())
 }
 
 /// A prepared child-exit signal whose queueing and task interrupt are delayed.
@@ -55,8 +60,11 @@ impl ksignal::CurrentThreadSignalIf {
     fn send_sig_current(signo: ksignal::Signo) -> KResult<()> {
         let task = current();
         let thread = task.try_as_thread().ok_or(KError::OperationNotPermitted)?;
-        send_signal_thread_inner(&task, thread, SignalInfo::new_kernel(signo));
-        Ok(())
+        send_signal_thread_inner(
+            &task,
+            thread,
+            SignalNotification::kernel_fallback(SignalInfo::new_kernel(signo)),
+        )
     }
 }
 
@@ -72,6 +80,8 @@ impl ksignal::CurrentThreadSignalIf {
 /// Returns `KError::NoSuchProcess` for an unpublished PID or a live PID whose
 /// runtime signal manager is already gone. PID zero selects the current user
 /// process.
+/// Returns WouldBlock for ordinary non-SI_USER realtime owner exhaustion,
+/// before interrupting a task or publishing a pending signal.
 pub fn send_to_process(pid: Pid, sig: Option<SignalInfo>) -> KResult<()> {
     send_notification_to_process(pid, sig.map(Into::into))
 }
@@ -92,13 +102,14 @@ pub(crate) fn send_notification_to_process(
 /// # Errors
 ///
 /// Forwards `Process::signal_manager` errors when the runtime is gone.
+/// Propagates WouldBlock from ordinary realtime queue admission.
 /// A disappearing selected task is tolerated after queuing; this helper does
 /// not itself check signal permissions or reject every exited process reference.
 pub fn send_to_process_ref(proc: &Arc<Process>, sig: Option<SignalInfo>) -> KResult<()> {
     send_notification_to_process_ref(proc, sig.map(Into::into))
 }
 
-fn send_notification_to_process_ref(
+pub(crate) fn send_notification_to_process_ref(
     proc: &Arc<Process>,
     sig: Option<SignalNotification>,
 ) -> KResult<()> {
@@ -106,7 +117,7 @@ fn send_notification_to_process_ref(
 
     if let Some(sig) = sig {
         debug!("Send signal {:?} to process {}", sig.signo(), proc.pid());
-        if let Some(tid) = signal_manager.send_signal(sig)
+        if let Some(tid) = signal_manager.send_signal(sig)?
             && let Ok(task) = lookup::task(tid)
         {
             ktask::signal_task(&task);
@@ -161,6 +172,7 @@ pub fn send_to_process_group(pgid: Pid, sig: Option<SignalInfo>) -> KResult<()> 
 /// Returns `KError::NoSuchProcess` for a missing TID or mismatched supplied
 /// TGID, and `KError::OperationNotPermitted` if the task has no Thread runtime.
 /// TID zero resolves the current task; `None` checks without queuing.
+/// Propagates WouldBlock from ordinary realtime queue admission before any wake.
 pub fn send_to_thread(tgid: Option<Pid>, tid: Tid, sig: Option<SignalInfo>) -> KResult<()> {
     send_notification_to_thread(tgid, tid, sig.map(Into::into))
 }
@@ -178,7 +190,7 @@ pub(crate) fn send_notification_to_thread(
 
     if let Some(sig) = sig {
         debug!("Send signal {:?} to thread {}", sig.signo(), tid);
-        send_signal_thread_inner(&task, thread, sig);
+        send_signal_thread_inner(&task, thread, sig)?;
     }
 
     Ok(())

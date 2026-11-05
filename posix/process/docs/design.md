@@ -1,5 +1,11 @@
 # posix-process — Design
 
+Fatal trap delivery explicitly constructs a kernel_fallback notification before
+calling the fallible signal manager. NOWAIT owner exhaustion may lose detailed
+siginfo but must preserve the pending bit; it is not treated as an ordinary
+user-queued realtime request. Failure to find an interruptible target retains
+the existing direct-exit behavior. Other manager errors are propagated.
+
 The x86 syscall-restart guest regressions live in `ut-tests/runtime/tests.rs`,
 mounted at their original scope with `unittest::path_mod_test!`. Their
 `target_arch = "x86_64"` gate is retained; no architecture API is widened.

@@ -609,7 +609,9 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
     let signo = sig.signo();
     info!("Send fatal signal {signo:?} to the current process");
     let process = current_user_process();
-    if let Some(tid) = process.signal_manager()?.send_signal(sig)
+    if let Some(tid) = process
+        .signal_manager()?
+        .send_signal(ksignal::SignalNotification::kernel_fallback(sig))?
         && process_signals::interrupt_thread(tid).is_ok()
     {
     } else {

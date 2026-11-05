@@ -1,5 +1,15 @@
 # kprocess — Security and reliability
 
+## Ordinary Signal Admission Errors
+
+send_signal errors propagate before task interruption. Ordinary realtime owner
+exhaustion returns WouldBlock instead of pretending delivery or invoking fatal
+OOM. Only audited current-kernel and child-exit sends explicitly permit bit-only
+fallback; ABI SI_KERNEL does not grant that policy to userspace. The child-exit
+wait-state notification remains independent of signal metadata preservation.
+This does not make process construction, nested allocations or user accounting
+memory-pressure safe. Kernel-generated fallback can lose sender/status details.
+
 ## Requeued Timer Wake Boundary
 
 record_requeued accepts no numeric target authority. The timer manager verifies

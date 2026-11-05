@@ -7,6 +7,7 @@ use core::array;
 
 use intrusive_collections::LinkedList;
 use kalloc_types::KArc;
+use kerrno::{KError, KResult};
 
 use crate::{
     MAX_SIGNALS, SignalInfo, SignalNotification, SignalSet, TimerSignalReceipt,
@@ -178,7 +179,8 @@ impl PendingSignals {
     /// Adds a signal to the pending queue.
     ///
     /// Ordinary standard signals (1-31) coalesce while any instance is pending,
-    /// including a prepared timer. Real-time signals (32-64) always append.
+    /// including a prepared timer. Real-time signals (32-64) attempt an append
+    /// on every send, including when a previous send left only a pending bit.
     ///
     /// # Arguments
     /// * `sig` - Signal information to add
@@ -186,7 +188,8 @@ impl PendingSignals {
     /// Ordinary notifications allocate a KArc node with NOWAIT only after
     /// admission. Ordinary standard allocation failure preserves the pending bit
     /// without detailed siginfo; ordinary SIGKILL needs no storage. Realtime
-    /// failure still retains the fatal OOM policy. The API remains infallible.
+    /// SI_USER failure also preserves the bit. Other ordinary realtime failures
+    /// return WouldBlock without changing the queue or pending set.
     /// The reference-count overhead is accepted
     /// so ordinary and prepared timer notifications share the same FIFO.
     /// Prepared timer notifications reuse their reserved node without allocation.
@@ -194,15 +197,19 @@ impl PendingSignals {
     /// # Returns
     /// `true` if the signal was successfully added, `false` if it was
     /// already pending (for standard signals only)
-    pub fn put_signal(&mut self, sig: SignalInfo) -> bool {
-        self.put_notification(sig.into()).is_none()
+    ///
+    /// # Errors
+    /// Returns WouldBlock when an ordinary non-SI_USER realtime owner cannot
+    /// be allocated. The queue and pending bitmap are unchanged on failure.
+    pub fn put_signal(&mut self, sig: SignalInfo) -> KResult<bool> {
+        Ok(self.put_notification(sig.into())?.is_none())
     }
 
     /// Returns unqueued ownership for release outside the enclosing signal lock.
     pub(crate) fn put_notification(
         &mut self,
         sig: SignalNotification,
-    ) -> Option<SignalNotification> {
+    ) -> KResult<Option<SignalNotification>> {
         self.put_notification_with_allocator(sig, |node| KArc::new_nowait(node).ok())
     }
 
@@ -210,23 +217,25 @@ impl PendingSignals {
         &mut self,
         sig: SignalNotification,
         allocate: impl FnOnce(NotificationNode) -> Option<KArc<NotificationNode>>,
-    ) -> Option<SignalNotification> {
+    ) -> KResult<Option<SignalNotification>> {
         let signo = sig.signo();
         if !signo.is_realtime() && self.set.has(signo) && !sig.has_reserved_storage() {
-            return Some(sig);
+            return Ok(Some(sig));
         }
-        if !signo.is_realtime() && sig.receipt().is_none() {
-            if signo != crate::Signo::SIGKILL
-                && let Some(node) =
-                    NotificationNode::allocate_ordinary(sig.into_parts().0, allocate)
-            {
-                self.queues[signo as usize - 1].push_back(node);
+        if sig.receipt().is_none() {
+            let can_lose_details = sig.can_lose_details();
+            if signo != crate::Signo::SIGKILL {
+                match NotificationNode::allocate_ordinary(sig.into_parts().0, allocate) {
+                    Some(node) => self.queues[signo as usize - 1].push_back(node),
+                    None if can_lose_details => {}
+                    None => return Err(KError::WouldBlock),
+                }
             }
         } else {
             self.queues[signo as usize - 1].push_back(sig.into_node());
         }
         self.set.add(signo);
-        None
+        Ok(None)
     }
 
     /// Returns whether any queued signal is deliverable under `blocked`.
@@ -260,7 +269,7 @@ impl PendingSignals {
             }
             result
                 .map(DetachedNotification::Stored)
-                .or_else(|| (!signo.is_realtime()).then_some(DetachedNotification::BitOnly(signo)))
+                .or(Some(DetachedNotification::BitOnly(signo)))
         })
     }
 }
