@@ -4,9 +4,13 @@
 
 //! Internal network-filter policies and packet evaluation.
 
-#[expect(
-    dead_code,
-    reason = "CG-024-lint-exceptions: dead_code: whole-table legacy export follows in IKIXDM"
+#[cfg_attr(
+    not(unittest),
+    expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: legacy iptables socket consumers follow in \
+                  IKIXDM"
+    )
 )]
 mod compat;
 

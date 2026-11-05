@@ -12,19 +12,34 @@ use super::abi::{
     IptIcmp, IptIp, STANDARD_ENTRY_SIZE, XT_ENTRY_HEADER_SIZE, XT_ERROR_TARGET,
     XT_ERROR_TARGET_SIZE, XT_STANDARD_TARGET_SIZE, XT_TCP_INV_DSTPT, XT_TCP_INV_FLAGS,
     XT_TCP_INV_SRCPT, XT_TCP_MATCH_SIZE, XT_UDP_INV_DSTPT, XT_UDP_INV_SRCPT, XT_UDP_MATCH_SIZE,
-    XtEntryHeader, XtErrorTarget, XtStandardTarget, XtTcp, XtUdp,
+    XT_VERDICT_ACCEPT, XT_VERDICT_DROP, XtCounters, XtEntryHeader, XtErrorTarget, XtStandardTarget,
+    XtTcp, XtUdp,
 };
-use crate::netfilter::filter::matcher::{
-    BaseMatch, ExtensionMatch, IcmpMatch, InterfacePattern, Negated, PortRange, TcpMatch, UdpMatch,
+use crate::netfilter::filter::{
+    counter::FilterCounter,
+    matcher::{
+        BaseMatch, ExtensionMatch, IcmpMatch, InterfacePattern, Negated, PortRange, TcpMatch,
+        UdpMatch,
+    },
+    rule::Verdict,
 };
 
 /// Invalid sizes or names, or matches the ABI cannot express.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum EncodeError {
+pub(in crate::netfilter) enum EncodeError {
     BufferSize,
     EntryTooLarge,
+    TableTooLarge,
     UnsupportedMatch,
     InvalidName,
+}
+
+/// Returns the native standard-target code for a terminal verdict.
+pub(super) fn verdict_code(verdict: Verdict) -> i32 {
+    match verdict {
+        Verdict::Accept => XT_VERDICT_ACCEPT,
+        Verdict::Drop => XT_VERDICT_DROP,
+    }
 }
 
 /// Returns the aligned size, including the standard target.
@@ -99,6 +114,21 @@ fn extension_size(extension: &ExtensionMatch) -> usize {
         ExtensionMatch::Tcp(_) => XT_TCP_MATCH_SIZE,
         ExtensionMatch::Udp(_) => XT_UDP_MATCH_SIZE,
         ExtensionMatch::Icmp(_) => IPT_ICMP_MATCH_SIZE,
+    }
+}
+
+/// Writes counters into an entry produced by this encoder.
+pub(super) fn encode_counter(output: &mut [u8], counter: FilterCounter) -> Result<(), EncodeError> {
+    let offset = core::mem::offset_of!(IptEntry, counters);
+    write(&mut output[offset..], &XtCounters::from(counter))
+}
+
+impl From<FilterCounter> for XtCounters {
+    fn from(counter: FilterCounter) -> Self {
+        Self {
+            packets: counter.packets,
+            bytes: counter.bytes,
+        }
     }
 }
 

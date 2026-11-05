@@ -124,6 +124,14 @@ fit a NUL-terminated ABI field, and conditions whose meaning would change in the
 legacy format. The output buffer may be partially written on failure and must
 be discarded. The encoder receives kernel values and does not access user memory.
 
+`TableLayout` checks total byte arithmetic and native offset widths before
+output allocation. Layout and counters are derived from the same immutable table,
+so their chain and rule order agree during encoding. Export uses validated chain
+IDs and preserves the table's resource limits.
+A configuration read guard keeps rules and counter layout in one generation;
+live counter samples need not be mutually consistent. Export owns its output,
+initializes ERROR counters to zero, and changes no configuration state on error.
+
 The prepared poller Work and its private NormalQueue live for the kernel
 lifetime. Initialization prepares storage before NIC notification sources can
 call it, and queue startup follows network state initialization. An IRQ-safe

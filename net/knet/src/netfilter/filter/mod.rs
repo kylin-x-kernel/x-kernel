@@ -4,13 +4,13 @@
 
 //! Immutable IPv4 filter policies, publication, counters, and bounded evaluation.
 
-mod chain;
+pub(super) mod chain;
 pub(super) mod config;
 pub(super) mod counter;
 mod error;
 pub(super) mod matcher;
 mod packet;
-mod rule;
-mod table;
+pub(super) mod rule;
+pub(super) mod table;
 
 unittest::path_mod_test!(tests, "../../../ut-tests/filter_evaluation.rs");

@@ -132,8 +132,8 @@ net/knet/
     │   ├── mod.rs
     │   ├── compat/
     │   │   ├── mod.rs
-    │   │   ├── iptables_legacy.rs
     │   │   └── iptables_legacy/
+    │   │       ├── mod.rs
     │   │       ├── abi.rs
     │   │       └── encode.rs
     │   └── filter/
@@ -434,9 +434,9 @@ task context; table construction and counter collection allocate bounded storage
 The shared store starts with empty ACCEPT chains and remains internal pending
 network-path and ABI integration.
 
-### Legacy IPv4 Entry Encoding
+### Legacy IPv4 Table Export
 
-`netfilter/compat/iptables_legacy` encodes individual entries in the native
+`netfilter/compat/iptables_legacy` exports tables in the native
 64-bit legacy IPv4 iptables format.
 `abi.rs` defines the fixed ABI layouts; `encode.rs` converts base conditions and
 TCP/UDP/ICMP matches into ABI records and assembles entries with standard targets
@@ -446,7 +446,22 @@ offsets for standard targets.
 Encoding checks ABI field widths, allocates no memory, and zeroes counters,
 reserved bytes, and padding.
 Conditions without an equivalent legacy representation return an error.
-Table layout and publication remain separate from entry encoding.
+
+`LegacyFilterTable` owns the complete entry array and its hook and policy offsets.
+`TableLayout` computes chain boundaries, total size, entry count, and hook and
+policy offsets before output allocation. It resolves targets against those chain
+positions and remains local to one conversion of the immutable source table.
+`ChainLayout` records table-relative byte offsets; an empty chain's rules start
+at its tail. `LegacyFilterTable::try_from` initializes the output from the layout
+and delegates each chain's marker, rules, counters, and tail to `encode_chain`,
+then writes the terminal ERROR entry.
+Jump offsets skip user-chain markers; Continue offsets select the next entry.
+Rule and chain-end counters map to their rule and tail entries; ERROR counters are zero.
+`LegacyFilterTable::export` constructs the owned legacy table from one
+configuration state under its read lock, so rules and counter layout remain
+paired while live counter fields are sampled independently.
+Output and scratch allocation require task context. Failed export discards its
+output and leaves the configuration unchanged.
 
 ## Calling Constraints and Execution Context
 
