@@ -10,7 +10,8 @@ extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
 use core::{
-    fmt::Write,
+    fmt::{self, Write},
+    panic::Location,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -23,11 +24,56 @@ pub use linkme;
 #[cfg(feature = "stats")]
 pub use runtime::class_for_init_site;
 
+/// A static label or an unformatted runtime constructor location.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum LockLocation {
+    /// A label supplied by static lock registration.
+    Label(&'static str),
+    /// Static compiler metadata; no owned string is allocated.
+    Caller(&'static Location<'static>),
+}
+
+impl Default for LockLocation {
+    fn default() -> Self {
+        Self::Label("")
+    }
+}
+
+impl From<&'static str> for LockLocation {
+    fn from(label: &'static str) -> Self {
+        Self::Label(label)
+    }
+}
+
+impl fmt::Display for LockLocation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Label(label) => formatter.pad(label),
+            Self::Caller(location) => write!(formatter, "{}:{}", location.file(), location.line()),
+        }
+    }
+}
+
+/// Whether diagnostic counters are enabled.
+///
+/// Pool exhaustion permanently disables both static and runtime counters.
+/// An already in-flight record may finish; old snapshots remain readable.
+pub fn statistics_enabled() -> bool {
+    #[cfg(feature = "stats")]
+    {
+        runtime::is_enabled()
+    }
+    #[cfg(not(feature = "stats"))]
+    {
+        true
+    }
+}
+
 /// Snapshot of counters collected for one lock class.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LockClassEntry {
     /// Lock class label, usually `file:line`.
-    pub location: &'static str,
+    pub location: LockLocation,
     /// Lock kind, such as `Mutex` or `SpinNoIrq`.
     pub kind: &'static str,
     /// Times a caller had to wait before acquiring the lock.
@@ -45,7 +91,7 @@ pub static NOOP_CLASS: LockClassStats = LockClassStats::untracked();
 
 /// Contention counters for one lock class.
 pub struct LockClassStats {
-    location: &'static str,
+    location: LockLocation,
     kind: &'static str,
     tracked: bool,
     contentions: AtomicU64,
@@ -55,6 +101,10 @@ pub struct LockClassStats {
 impl LockClassStats {
     /// Creates a zeroed counter set for a lock class labeled `location`.
     pub const fn new(location: &'static str, kind: &'static str) -> Self {
+        Self::with_location(LockLocation::Label(location), kind)
+    }
+
+    const fn with_location(location: LockLocation, kind: &'static str) -> Self {
         Self {
             location,
             kind,
@@ -66,7 +116,7 @@ impl LockClassStats {
 
     const fn untracked() -> Self {
         Self {
-            location: "",
+            location: LockLocation::Label(""),
             kind: "",
             tracked: false,
             contentions: AtomicU64::new(0),
@@ -80,7 +130,7 @@ impl LockClassStats {
     }
 
     /// Returns the lock class label.
-    pub const fn location(&self) -> &'static str {
+    pub const fn location(&self) -> LockLocation {
         self.location
     }
 
@@ -92,7 +142,7 @@ impl LockClassStats {
     /// Records successful lock acquisitions.
     #[inline(always)]
     pub fn record_acquisitions(&self, count: u64) {
-        if self.tracked && count != 0 {
+        if self.tracked && count != 0 && statistics_enabled() {
             self.acquisitions.fetch_add(count, Ordering::Relaxed);
         }
     }
@@ -100,7 +150,7 @@ impl LockClassStats {
     /// Records task blocking while waiting for a lock.
     #[inline(always)]
     pub fn record_contentions(&self, count: u64) {
-        if self.tracked && count != 0 {
+        if self.tracked && count != 0 && statistics_enabled() {
             self.contentions.fetch_add(count, Ordering::Relaxed);
         }
     }
@@ -138,6 +188,9 @@ const COL_KIND: usize = 12;
 const COL_NUM: usize = 12;
 
 /// Returns snapshots for all registered lock statistics.
+///
+/// Reporting allocates and requires an allocation-safe task context. Concurrent
+/// registrations may be omitted; counters are not a transactional snapshot.
 pub fn snapshot() -> Vec<LockClassEntry> {
     LOCK_CLASSES
         .iter()
@@ -170,7 +223,7 @@ fn sort_entries(entries: &mut [LockClassEntry]) {
         rhs.contentions
             .cmp(&lhs.contentions)
             .then_with(|| rhs.acquisitions.cmp(&lhs.acquisitions))
-            .then_with(|| lhs.location.cmp(rhs.location))
+            .then_with(|| lhs.location.cmp(&rhs.location))
     });
 }
 
@@ -179,6 +232,9 @@ pub fn dump_lock_stat() -> String {
     let entries = top_snapshot(DUMP_TOP_N);
 
     let mut out = String::new();
+    if !statistics_enabled() {
+        out.push_str("lock statistics disabled: runtime class pool exhausted\n");
+    }
     let _ = writeln!(
         out,
         "{:<COL_LOCATION$} {:<COL_KIND$} {:>COL_NUM$} {:>COL_NUM$}",
@@ -195,7 +251,10 @@ pub fn dump_lock_stat() -> String {
         let _ = writeln!(
             out,
             "{:<COL_LOCATION$} {:<COL_KIND$} {:>COL_NUM$} {:>COL_NUM$}",
-            entry.location, entry.kind, entry.contentions, entry.acquisitions
+            alloc::format!("{}", entry.location),
+            entry.kind,
+            entry.contentions,
+            entry.acquisitions
         );
     }
 

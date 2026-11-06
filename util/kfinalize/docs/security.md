@@ -1,5 +1,20 @@
 # kfinalize — 安全与可靠性分析
 
+## Payload Allocation Failure Boundary
+
+Payload storage is reserved with NOWAIT after provider preparation and before
+moving the input. Reservation failure returns NoMemory with the original T,
+releases the unused carrier, and publishes no identity or Finalization. A private
+fault-injection test verifies this rollback and that provider rejection prevents
+reservation. These tests do not force global allocator OOM.
+
+Only KBox::into_raw pointers are paired with KBox::from_raw. Header initialization
+precedes public access, and the worker never reads the retired identity header.
+The carrier and identity allocations still follow kernel fatal-OOM policy;
+task-owner preparation still has no recoverable allocation-error channel. NOWAIT
+does not make provider code, metadata release or T::drop NMI-safe, nor relax the
+existing sleepable/integration construction requirements.
+
 ## 信任模型与外部边界
 
 输入是内核 Rust 对象 T: Send + Sync + 'static，不直接接受用户指针、MMIO、DMA、固件或网络字节。若 T 包含硬件/RCU 裸访问，所属模块必须先结束那些未计入引用的访问；引用归零不能代替 GP 或设备停止。provider 是受信任内核集成代码，不是用户可注入执行器。
@@ -7,10 +22,10 @@
 ## unsafe 清单与内存安全不变量
 
 - `lib.rs::Identity` Send/Sync：标准 Arc 保证共享访问阶段；T 的 Send/Sync 允许跨 CPU 共享及最终移交。
-- `DeferredArc::deref`：公开强引用保护初始化完成的稳定 Box；不暴露可变引用。
+- `DeferredArc::deref`: public strong ownership protects initialized stable KBox storage; no mutable reference is exposed.
 - `DeferredArc::from_raw/borrow_raw`：原始分配 provenance、未消费的强引用和初始化后不可变的 payload 头部共同保证恢复；borrow_raw 视图不得消耗计数，真实 owner 必须覆盖全部借用。
 - `Identity::drop`：仅一次提交，所有公开 payload 借用已结束。指针及 destructor 类型配对由构造器维护。
-- `destroy_value`：唯一 Finalization 恢复唯一 Box，执行一次析构和释放。
+- `destroy_value`: the unique Finalization recovers the original KBox owner, dropping and freeing it exactly once.
 - `service::Finalization::finish`：调用者保证普通可睡眠 worker 上下文，且不在发布调用内执行。token 不可克隆；丢弃它只泄漏，不错误内联析构。
 - `service::Prepared` / `install_normal`：unsafe provider 负责一次交接、永久服务、发布/执行保活、无取消、无提交分配或睡眠。安装仅用于串行启动。
 - `service::new_integration` / `install_integration`：主 CPU 串行安装永久 provider，各 CPU 独立满足本地分配/锁前提后可并发准备，包括已审计 NoPreempt 路径。provider 返回新鲜 carrier，未绑定时保留责任；不创建任务、不等待执行。未安装返回原输入。此 unsafe 入口不允许 hardirq/softirq/NMI 构造，普通安全构造检查不变。
@@ -28,7 +43,8 @@
 | worker 先于提交返回 | 载体 UAF | provider 必须保留独立发布者 owner |
 | 错误 provider 内联执行 | 原子上下文睡眠 | unsafe 安装及 Prepared 契约；普通用户不可选择 provider |
 | Clone/Weak 改变执行策略 | 错误上下文析构 | 原 carrier 固定队列，Weak 升级仍只返回 DeferredArc |
-| OOM 或不可能的接纳失败 | 致命停止/泄漏 | 沿内核策略；禁止在失败路径错误回收可能已发布的 token |
+| Payload reservation OOM | Construction rejected | Return NoMemory and unchanged input; drop unused carrier without submitting |
+| Carrier/identity OOM or impossible admission failure | Fatal stop/leak | Existing kernel policy; never free a token whose publication may have succeeded |
 | 析构 panic | 泄漏或内核停止 | 不重试析构，不提供恢复承诺 |
 | 业务等待形成共享池或同一 finalizer 的等待环 | 无进展 | 每类共享 Work 串行；析构不得等待同类其他对象回收，使用者审核间接依赖，本层不做全局死锁检测 |
 

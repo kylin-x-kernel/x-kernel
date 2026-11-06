@@ -192,3 +192,48 @@ fn preparation_error_returns_original_payload() {
         assert_eq!(drops.load(Ordering::Acquire), 1);
     }
 }
+
+#[def_test]
+fn payload_reservation_failure_releases_carrier_and_returns_input() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut held = Arc::new(Held {
+        pending: UnsafeCell::new(None),
+    });
+    let result = DeferredArc::new_prepared_with(
+        Payload {
+            drops: drops.clone(),
+            value: 73,
+        },
+        || Ok(held.clone()),
+        |flags| {
+            assert_eq!(flags, kalloc_types::AllocFlags::NOWAIT);
+            Err(CreateError::NoMemory)
+        },
+    );
+    let Err((error, value)) = result else {
+        panic!("reservation should fail")
+    };
+    assert_eq!(error, CreateError::NoMemory);
+    assert_eq!(value.value, 73);
+    assert!(Arc::ptr_eq(&value.drops, &drops));
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+    assert!(Arc::get_mut(&mut held).unwrap().pending.get_mut().is_none());
+    drop(value);
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+}
+
+#[def_test]
+fn provider_rejection_precedes_payload_reservation() {
+    for error in [CreateError::NotReady, CreateError::InvalidContext] {
+        let result = DeferredArc::new_prepared_with(
+            73usize,
+            || Err(error),
+            |_| panic!("rejected preparation must not reserve payload storage"),
+        );
+        let Err((actual, value)) = result else {
+            panic!("preparation should fail")
+        };
+        assert_eq!(actual, error);
+        assert_eq!(value, 73);
+    }
+}

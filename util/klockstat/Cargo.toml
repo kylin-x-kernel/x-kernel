@@ -11,11 +11,15 @@ description = "Kernel lock contention statistics"
 
 [features]
 default = []
-stats = ["dep:klockstat-macros"]
+stats = ["dep:klockstat-macros", "dep:klazy", "dep:karch"]
 
 [dependencies]
 linkme.workspace = true
 klockstat-macros = { workspace = true, optional = true }
+klazy = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "none")'.dependencies]
+karch = { workspace = true, optional = true }
 
 [lints]
 workspace = true

@@ -76,26 +76,27 @@
 
 extern crate alloc;
 
-use alloc::{
-    boxed::Box,
-    sync::{Arc, Weak},
-};
+use alloc::sync::{Arc, Weak};
 use core::{
     mem::{ManuallyDrop, MaybeUninit},
     ops::Deref,
     ptr::NonNull,
 };
 
+use kalloc_types::{AllocFlags, KBox};
+
 #[doc(hidden)]
 pub mod service;
 
-/// Recoverable preparation failure. Allocation failure follows kernel policy.
+/// Recoverable preparation failure. Provider/identity allocation still follows kernel policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CreateError {
     /// Construction requires sleepable task context.
     InvalidContext,
     /// The selected permanent execution service has not been installed.
     NotReady,
+    /// Payload storage could not be reserved without reclaim.
+    NoMemory,
 }
 
 struct Identity<T: Send + Sync + 'static> {
@@ -114,7 +115,7 @@ struct Payload<T: Send + Sync + 'static> {
     value: T,
 }
 
-// SAFETY: Identity exclusively owns the payload Box token until its last Arc drops.
+// SAFETY: Identity exclusively owns the payload KBox token until its last Arc drops.
 // All public access is shared and T is Send + Sync; only the final Drop transfers
 // exclusive destruction to the prepared provider, after all public borrows end.
 unsafe impl<T: Send + Sync + 'static> Send for Identity<T> {}
@@ -137,11 +138,11 @@ impl<T: Send + Sync + 'static> Drop for Identity<T> {
 }
 
 /// # Safety
-/// context is the sole Box<T> token, after all public strong references ended.
+/// context is the sole KBox<T> token, after all public strong references ended.
 unsafe fn destroy_value<T>(context: NonNull<()>) {
-    // SAFETY: new_prepared produced this concrete Box pointer; the non-cloneable
+    // SAFETY: new_prepared produced this concrete KBox pointer; the non-cloneable
     // finalization transfers its only destruction right to this one invocation.
-    drop(unsafe { Box::from_raw(context.cast::<T>().as_ptr()) });
+    drop(unsafe { KBox::from_raw(context.cast::<T>().as_ptr()) });
 }
 
 /// An Arc-like shared owner with worker-context payload destruction.
@@ -164,13 +165,17 @@ impl<T: Send + Sync + 'static> DeferredArc<T> {
     /// per-object allocation costs; cloning an existing handle does not prepare
     /// another carrier. Final payload destruction is asynchronous, not bounded
     /// by the lifetime of this call's task or a later handle Drop.
+    /// Payload storage uses NOWAIT even here: sleepability alone does not prove
+    /// reclaim-safe caller locks or absence of finalizer dependency cycles.
+    /// This does not permit construction in interrupt or non-sleepable contexts.
     ///
     /// # Errors
-    /// Returns the error and unchanged input on invalid context or unready service.
+    /// Returns the error and unchanged input on invalid context, unready service,
+    /// or payload reservation failure (NoMemory). An unused carrier is released.
     /// The caller remains responsible for handling/dropping that input.
     ///
     /// # Panics
-    /// Allocation and provider invariant failures follow kernel policy.
+    /// Carrier/identity allocation and provider invariant failures follow kernel policy.
     pub fn new(value: T) -> Result<Self, (CreateError, T)> {
         Self::new_prepared(value, service::prepare_normal)
     }
@@ -179,18 +184,41 @@ impl<T: Send + Sync + 'static> DeferredArc<T> {
         value: T,
         prepare: impl FnOnce() -> Result<Arc<dyn service::Prepared>, CreateError>,
     ) -> Result<Self, (CreateError, T)> {
+        Self::new_prepared_with(value, prepare, |flags| {
+            KBox::<Payload<T>>::new_uninit_with_flags(flags).map_err(|_| CreateError::NoMemory)
+        })
+    }
+
+    fn new_prepared_with(
+        value: T,
+        prepare: impl FnOnce() -> Result<Arc<dyn service::Prepared>, CreateError>,
+        reserve: impl FnOnce(AllocFlags) -> Result<KBox<MaybeUninit<Payload<T>>>, CreateError>,
+    ) -> Result<Self, (CreateError, T)> {
         let prepared = match prepare() {
             Ok(prepared) => prepared,
             Err(error) => return Err((error, value)),
         };
-        Ok(Self::from_carrier(value, prepared))
+        let storage = match reserve(AllocFlags::NOWAIT) {
+            Ok(storage) => storage,
+            Err(error) => return Err((error, value)),
+        };
+        Ok(Self::from_carrier(value, prepared, storage))
     }
 
-    fn from_carrier(value: T, prepared: Arc<dyn service::Prepared>) -> Self {
-        let value = NonNull::from(Box::leak(Box::new(Payload {
-            identity: MaybeUninit::uninit(),
-            value,
-        })));
+    fn from_carrier(
+        value: T,
+        prepared: Arc<dyn service::Prepared>,
+        storage: KBox<MaybeUninit<Payload<T>>>,
+    ) -> Self {
+        let payload = KBox::write(
+            storage,
+            Payload {
+                identity: MaybeUninit::uninit(),
+                value,
+            },
+        );
+        // SAFETY: into_raw transfers this live KBox's non-null allocation pointer.
+        let value = unsafe { NonNull::new_unchecked(KBox::into_raw(payload)) };
         let identity = Arc::new_in(
             Identity {
                 value,

@@ -2,105 +2,104 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Runtime per-class lock-stat registration for `Mutex::new` / `RwLock::new`.
-//!
-//! `#[track_caller]` on those constructors identifies the call site. All lock
-//! instances created from the same call site share one lock class.
+//! Allocation-free runtime lock-class registration.
 
-use alloc::{boxed::Box, collections::BTreeMap, format, vec::Vec};
+use alloc::vec::Vec;
 use core::{
-    cell::UnsafeCell,
     panic::Location,
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::LockClassStats;
+use klazy::Once;
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-struct LocationKey {
-    file: &'static str,
-    line: u32,
-    column: u32,
+use crate::{LockClassStats, LockLocation, NOOP_CLASS};
+
+const MAX_RUNTIME_CLASSES: usize = 1024;
+
+struct RuntimeClass {
+    location: &'static Location<'static>,
+    stats: LockClassStats,
 }
 
-struct Registry {
-    by_class: BTreeMap<LocationKey, &'static LockClassStats>,
-    runtime_stats: Vec<&'static LockClassStats>,
+struct Registry<const CAPACITY: usize> {
+    slots: [Once<RuntimeClass>; CAPACITY],
+    is_enabled: AtomicBool,
 }
 
-struct RegistryLock {
-    locked: AtomicBool,
-    registry: UnsafeCell<Registry>,
-}
-
-impl RegistryLock {
+impl<const CAPACITY: usize> Registry<CAPACITY> {
     const fn new() -> Self {
         Self {
-            locked: AtomicBool::new(false),
-            registry: UnsafeCell::new(Registry {
-                by_class: BTreeMap::new(),
-                runtime_stats: Vec::new(),
-            }),
+            slots: [const { Once::new() }; CAPACITY],
+            is_enabled: AtomicBool::new(true),
         }
     }
 
-    fn with<R>(&self, f: impl FnOnce(&mut Registry) -> R) -> R {
-        while self
-            .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            core::hint::spin_loop();
+    fn class_for(
+        &self,
+        location: &'static Location<'static>,
+        kind: &'static str,
+    ) -> &LockClassStats {
+        if !self.is_enabled.load(Ordering::Relaxed) {
+            return &NOOP_CLASS;
         }
-
-        // SAFETY: the spin bit serializes exclusive access to `registry`.
-        let result = unsafe { f(&mut *self.registry.get()) };
-
-        self.locked.store(false, Ordering::Release);
-        result
+        let hash = location.file().bytes().chain(kind.bytes()).fold(
+            location.line() as usize ^ location.column() as usize,
+            |hash, byte| hash.wrapping_mul(31).wrapping_add(byte as usize),
+        );
+        for offset in 0..CAPACITY {
+            let slot = &self.slots[(hash % CAPACITY + offset) % CAPACITY];
+            let entry = slot.call_once(|| RuntimeClass {
+                location,
+                stats: LockClassStats::with_location(LockLocation::Caller(location), kind),
+            });
+            if entry.location == location && entry.stats.kind() == kind {
+                return &entry.stats;
+            }
+        }
+        self.is_enabled.store(false, Ordering::Relaxed);
+        &NOOP_CLASS
     }
-}
 
-// SAFETY: `RegistryLock` serializes access through the atomic `locked` flag.
-unsafe impl Sync for RegistryLock {}
-
-static REGISTRY: RegistryLock = RegistryLock::new();
-
-/// Returns the lock class for `loc`, registering it on first use.
-pub fn class_for_init_site(loc: &'static Location, kind: &'static str) -> &'static LockClassStats {
-    let key = LocationKey {
-        file: loc.file(),
-        line: loc.line(),
-        column: loc.column(),
-    };
-
-    REGISTRY.with(|registry| {
-        if let Some(&stats) = registry.by_class.get(&key) {
-            return stats;
-        }
-
-        let location = leak_class_label(loc);
-        let stats = Box::leak(Box::new(LockClassStats::new(location, kind)));
-        registry.by_class.insert(key, stats);
-        registry.runtime_stats.push(stats);
-        stats
-    })
-}
-
-/// Returns snapshots for runtime-registered lock statistics.
-pub(crate) fn runtime_stats_snapshot() -> Vec<crate::LockClassEntry> {
-    REGISTRY.with(|registry| {
-        registry
-            .runtime_stats
+    fn snapshots(&self) -> Vec<crate::LockClassEntry> {
+        self.slots
             .iter()
-            .map(|stats| stats.snapshot())
+            .filter_map(|slot| slot.get().map(|entry| entry.stats.snapshot()))
             .collect()
-    })
+    }
 }
 
-fn leak_class_label(loc: &'static Location) -> &'static str {
-    let location = format!("{}:{}", loc.file(), loc.line());
-    Box::leak(location.into_boxed_str())
+static REGISTRY: Registry<MAX_RUNTIME_CLASSES> = Registry::new();
+
+#[cfg(target_os = "none")]
+struct IrqRestore(usize);
+
+#[cfg(target_os = "none")]
+impl Drop for IrqRestore {
+    fn drop(&mut self) {
+        karch::restore_irq(self.0);
+    }
+}
+
+/// Returns a stable class without allocating or sleeping.
+///
+/// Task and ordinary IRQ contexts are supported; NMI registration is not.
+/// Exhausting the fixed class pool permanently disables all statistics until
+/// reboot and returns the untracked class. Existing references stay valid.
+pub fn class_for_init_site(
+    location: &'static Location<'static>,
+    kind: &'static str,
+) -> &'static LockClassStats {
+    #[cfg(target_os = "none")]
+    let _irq_restore = IrqRestore(karch::save_irq_and_disable());
+    REGISTRY.class_for(location, kind)
+}
+
+pub(crate) fn is_enabled() -> bool {
+    REGISTRY.is_enabled.load(Ordering::Relaxed)
+}
+
+pub(crate) fn runtime_stats_snapshot() -> Vec<crate::LockClassEntry> {
+    REGISTRY.snapshots()
 }
 
 #[cfg(all(test, feature = "stats"))]

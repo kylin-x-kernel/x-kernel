@@ -307,7 +307,10 @@ entire Normal finalizer: it MUST NOT wait for another finalization on the same
 executor (including indirect dependencies). It can enqueue more nodes without
 waiting. Shared worker-pool dependency restrictions still apply.
 
-Payload Box and standard Arc/Weak counting semantics remain unchanged. The publishing Arc
+Payload ownership uses a NOWAIT KBox reservation in kfinalize; failure returns
+NoMemory and the original input, releasing the unused carrier. Carrier and
+identity allocations retain the existing kernel OOM policy. Standard Arc/Weak
+counting semantics remain unchanged. The publishing Arc
 protects the lightweight node while a consumer may finish early; list ownership
 keeps it live independently of the public identity. Only the private consumer
 takes the token. No user cancellation, flush or executor teardown is exposed.

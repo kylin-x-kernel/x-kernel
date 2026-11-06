@@ -11,6 +11,7 @@ documentation.workspace = true
 description = "Shared ownership with prepared worker-context destruction"
 
 [dependencies]
+kalloc-types.workspace = true
 klazy.workspace = true
 unittest.workspace = true
 

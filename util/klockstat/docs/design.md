@@ -28,12 +28,12 @@ Host unit tests live in `tests/host/` and remain private path modules in
 their original parents, not separately discovered Cargo integration targets.
 `tests/host/lib.rs` preserves `tests` under `cfg(test)` (four cases);
 `tests/host/runtime.rs` preserves `runtime::tests` under
-`cfg(all(test, feature = "stats"))` (one case). There are no guest tests.
+`cfg(all(test, feature = "stats"))` (five cases). There are no guest tests.
 The runtime test still compares two lookups from the same call site; it does
 not depend on a fixed source filename or line number.
 
 Validate on a host target with `cargo test -p klockstat --lib` and
-`cargo test -p klockstat --features stats --lib` (four and five cases).
+`cargo test -p klockstat --features stats --lib` (four and nine cases).
 Use host-target Cargo settings without kernel `--cfg unittest`.
 
 ## Lock Class 模型
@@ -123,12 +123,42 @@ static_lock! {
 - **按调用点而非类型聚合**：与 Linux `lock_stat` 类似，便于定位源码位置；同一行多个
   `Mutex::new` 因 `column` 不同可能分为多个 class。
 - **Relaxed 原子**：统计为诊断用途，不要求与锁状态严格 happens-before。
-- **运行时注册表自旋锁**：仅在首次 `Mutex::new` 时写入，启动后只读为主。
-- **`Box::leak`**：class 与标签字符串生命周期与内核相同，class 数量有上界（调用点数）。
+- Runtime registration uses a fixed 1024-slot open-addressed table. Each slot
+  is published once through `klazy::Once`; no heap allocation, container growth,
+  or label formatting occurs during registration. The key includes file, line,
+  column and lock kind. Slots are never removed or reused.
+  Hash lookup uses linear probing bounded by the pool capacity, not a scan on
+  every counter update. Publication can wait for another CPU's initializer;
+  this is not a bounded-latency or NMI-safe primitive.
+- This follows Linux's fixed `lock_classes[MAX_LOCKDEP_KEYS]` pool and
+  `register_lock_class` exhaustion policy (`kernel/locking/lockdep.c`): capacity
+  exhaustion permanently disables diagnostics instead of failing lock creation.
+  X-Kernel disables both static and runtime counter recording; it does not
+  implement Linux's dependency graph or per-CPU lock-stat arrays. Existing
+  references and snapshots remain valid. In-flight counter updates may finish.
+- Runtime labels retain compiler-provided static `Location` metadata.
+  `LockClassEntry::location` and `LockClassStats::location()` now expose
+  `LockLocation` instead of a string reference. Formatting still prints
+  `file:line`; static labels are unchanged. Formatting and snapshot vectors
+  allocate only on the reporting path, which remains infallible on OOM.
+- Snapshot iteration uses nonblocking `Once::get`, without holding a registry
+  lock. A concurrent registration may be absent from a snapshot. The dump
+  explicitly reports pool exhaustion rather than presenting frozen counters
+  as live statistics. `statistics_enabled()` exposes the same state.
 
 ## 调用约束
 
-- `class_for_init_site` 与 `Mutex::new`（stats 模式）须在可运行、可分配的任务上下文中
-  调用，不适合中断上下文首次初始化。
+- Registration requires no sleep or reclaim permission. Kernel registration
+  saves and disables local IRQs until publication finishes, then restores the
+  original state, including on unwind. Only another CPU can own an initializing
+  slot during ordinary task/IRQ registration. NMI registration is unsupported:
+  NMIs can interrupt a slot initializer and must not wait on that same slot.
+  Initialization performs no callbacks, logging, allocation or scheduling.
+- The table and slot storage exist only with `stats`; the capacity is a local
+  diagnostic budget, not a claim that all possible lock sites fit. Exhaustion
+  does not retry or re-enable counters until reboot. Host tests use isolated
+  small tables for exhaustion and concurrent publication checks.
+  A subprocess isolates the permanent disable transition while checking that
+  previously registered static and runtime counters stop and the dump reports it.
 - 静态锁应优先使用 `static_lock!`，避免 `stats` 下 `static X = Mutex::new(...)` 因
   非 `const fn` 导致编译失败。

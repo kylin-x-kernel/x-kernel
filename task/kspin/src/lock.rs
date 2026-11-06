@@ -295,6 +295,7 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
         self.stats.record_acquisitions(1);
     }
 
+    #[cfg(feature = "smp")]
     #[inline(always)]
     fn record_contentions(&self) {
         self.stats.record_contentions(1);

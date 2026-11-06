@@ -54,8 +54,7 @@ or feature selection, and introduces no guest test runtime dependency.
 
 | 位置 | 操作 | 不变量 |
 |------|------|--------|
-| `runtime.rs` `RegistryLock::with` | `UnsafeCell` 可变借用 | `locked` 原子位串行化独占访问 |
-| `RegistryLock` | `unsafe impl Sync` | 所有可变访问经 `with` 串行化 |
+| Runtime publication | No local unsafe code | `klazy::Once` owns initialization and release/acquire publication; published slots are immutable except atomic counters |
 
 `linkme` 分布式切片由链接脚本 `KEEP` 收集，依赖构建系统正确保留
 `LOCK_CLASSES` 段。
@@ -63,7 +62,8 @@ or feature selection, and introduces no guest test runtime dependency.
 ## 线程安全
 
 - `LockClassStats` 计数器为 `AtomicU64`，多 CPU 并发 `record_*` 安全。
-- 运行时注册表在首次注册时写入，之后主要为快照读取；`with` 保证互斥。
+- Runtime slots are initialized once and never recycled. Snapshots use
+  nonblocking reads and do not hold a registration lock while allocating.
 - 快照使用 `Relaxed` load，允许轻微撕裂（诊断可接受）。
 
 ## 失败与滥用场景
@@ -71,7 +71,7 @@ or feature selection, and introduces no guest test runtime dependency.
 | 场景 | 影响 | 缓解 |
 |------|------|------|
 | 关闭 `KFEAT_LOCK_STAT` 仍挂载 procfs 节点 | 旧行为：空表误导 | 已通过 `procfs/lock_stat` feature 门控节点 |
-| 大量唯一 `Mutex::new` 调用点 | 运行时注册表与泄漏字符串增长 | 按调用点去重；仅诊断配置启用 |
+| More than 1024 runtime classes | Statistics become permanently disabled | Fixed storage, no OOM or failure of the underlying lock; dump reports disabled state |
 | 误用 `static Mutex::new`（stats 开） | 编译失败 | 文档要求使用 `static_lock!` |
 | 计数与真实竞争不完全一致 | 误判热点 | `design.md` 明确指标语义 |
 
@@ -79,4 +79,13 @@ or feature selection, and introduces no guest test runtime dependency.
 
 - 生产镜像默认关闭 `KFEAT_LOCK_STAT`。
 - 限制 procfs 挂载与读取权限（沿用现有 procfs 访问控制）。
-- 勿在 IRQ 上下文首次调用 stats 模式下的 `Mutex::new`。
+- Registration supports task and ordinary IRQ contexts but not NMI context.
+  An IRQ-save guard prevents same-CPU interrupt/preemption reentry into a
+  partially initialized slot; initializers neither allocate nor call out.
+- Disabling statistics is diagnostic degradation, not a synchronization failure.
+  Existing classes stay alive and frozen counters remain readable; already
+  in-flight records may complete. Reporting still uses ordinary `Vec`/`String`
+  allocation and is not globally OOM-safe.
+- Host tests cover capacity exhaustion, kind separation, stable references,
+  concurrent duplicate registration and runtime label formatting. They do not
+  execute hardware IRQ masking or prove NMI safety.

@@ -14,14 +14,14 @@ fn dump_lock_stat_sorts_by_contentions() {
 
     let mut entries = vec![STATS_A.snapshot(), STATS_B.snapshot()];
     sort_entries(&mut entries);
-    assert_eq!(entries[0].location, "b");
-    assert_eq!(entries[1].location, "a");
+    assert_eq!(entries[0].location, "b".into());
+    assert_eq!(entries[1].location, "a".into());
 }
 
 #[test]
 fn dump_lock_stat_aligns_columns() {
     let out = dump_lock_stat_from(&[LockClassEntry {
-        location: "process/kprocess/src/scheduler.rs:18",
+        location: "process/kprocess/src/scheduler.rs:18".into(),
         kind: "RwLock",
         contentions: 0,
         acquisitions: 33,
@@ -66,19 +66,19 @@ fn noop_stats_do_not_record() {
 fn top_snapshot_limits_to_n() {
     let mut entries = vec![
         LockClassEntry {
-            location: "a",
+            location: "a".into(),
             kind: "Mutex",
             contentions: 1,
             acquisitions: 0,
         },
         LockClassEntry {
-            location: "b",
+            location: "b".into(),
             kind: "Mutex",
             contentions: 2,
             acquisitions: 0,
         },
         LockClassEntry {
-            location: "c",
+            location: "c".into(),
             kind: "Mutex",
             contentions: 3,
             acquisitions: 0,
@@ -87,6 +87,6 @@ fn top_snapshot_limits_to_n() {
     sort_entries(&mut entries);
     entries.truncate(2);
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].location, "c");
-    assert_eq!(entries[1].location, "b");
+    assert_eq!(entries[0].location, "c".into());
+    assert_eq!(entries[1].location, "b".into());
 }

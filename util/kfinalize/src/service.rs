@@ -146,9 +146,11 @@ pub unsafe fn install_identity_memory(memory: &'static IdentityMemory) {
 /// # Errors
 /// Returns NotReady and the unchanged input before provider installation.
 /// Other preparation errors also return the unchanged input.
+/// Payload reservation uses NOWAIT and returns NoMemory with the unchanged input
+/// after releasing the unused carrier. No finalization is submitted on failure.
 ///
 /// # Panics
-/// Allocation failure follows kernel policy.
+/// Carrier and identity allocation failure still follows kernel policy.
 pub unsafe fn new_integration<T: Send + Sync + 'static>(
     value: T,
 ) -> Result<DeferredArc<T>, (CreateError, T)> {
@@ -184,7 +186,7 @@ impl Finalization {
     /// # Panics
     /// Propagates payload destructor panics; never retry a failed destructor.
     pub unsafe fn finish(self) {
-        // SAFETY: construction pairs the concrete Box token with its destructor;
+        // SAFETY: construction pairs the concrete KBox token with its destructor;
         // consuming self makes this the only call, in the caller-certified context.
         unsafe { (self.destroy)(self.context) };
     }

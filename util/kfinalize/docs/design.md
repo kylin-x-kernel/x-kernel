@@ -1,10 +1,45 @@
 # kfinalize — 设计文档
 
+## Fallible Payload Reservation
+
+After provider validation and carrier preparation, both constructors reserve
+`KBox<MaybeUninit<Payload<T>>>` with `AllocFlags::NOWAIT`, before moving `T`.
+Failure returns `(CreateError::NoMemory, T)` and drops the unused carrier;
+it neither creates an identity nor submits finalization. `KBox::write` then
+initializes the reserved address without allocating, and `KBox::into_raw` /
+`KBox::from_raw` transfer and recover the unique payload owner. Weak expiry,
+the raw identity header and NMI retirement protocols remain unchanged.
+
+Normal construction still requires a sleepable task. It does not grant reclaim
+permissions merely because sleeping is allowed: callers may hold locks needed
+by reclaim or the finalizer. Integration construction can run during boot or
+with preemption disabled, so it also uses NOWAIT. This only constrains payload
+reservation, not nested allocations, provider preparation or payload Drop.
+
+The carrier still uses `Arc::new`, and the identity uses `Arc::new_in` with the
+provider's `Global.allocate` backing region. Both retain the existing fatal
+kernel OOM policy; using `Arc::try_new_in` alone would not fix that backing
+allocator. This batch does not change their NMI deallocation protocol or claim
+whole-constructor OOM recovery. Task constructors still lack an admission-error
+channel and treat finalizer preparation failure as fatal; their rollback/API
+redesign remains separate from this payload migration.
+
+Guest tests inject only the private payload reservation operation, verifying
+unchanged input ownership, unused-carrier release, no submission and provider
+error precedence. Existing raw-owner and host/Miri probes cover successful
+publication, alignment, ZSTs, Weak expiry and modeled NMI retirement. This is
+not global OOM injection or proof of all kernel NMI/reclaim interleavings.
+
 ## 定位与范围
 
 公共 `DeferredArc<T>` / `DeferredWeak<T>` 将末公开强引用与 payload 析构分开。只提供普通可睡眠 worker 析构，不提供 BH 析构类型。普通使用者仅依赖 kfinalize；本 crate 不依赖 ktask、kirq 或 kworkng。安全构造器仍要求 provider 已安装、当前可睡眠；受审计的启动/任务准备通过 unsafe service::new_integration 提前准备。此入口复用现有共享链表保活未绑定责任，不扩展到 Task/RCU 迁移或公共排空 API。
 
-隐藏集成层的 unsafe service::new_integration 从已安装 provider 获取新鲜 carrier，复用同一 identity/Box 构造。主 CPU 串行安装后，各 CPU 在本地基础能力就绪时可并发准备；未安装返回 NotReady 与原值。既不更改 Arc 计数，也不保活公开强引用。早期末强引用释放后 Weak 立即失效；服务成功绑定后才执行业务析构。启动失败时永久 inbox 保留责任，不承诺失败启动后的释放，也不允许启动线程等待回收来解决服务自身的启动依赖。
+The hidden unsafe service::new_integration entry obtains a fresh carrier and
+shares the same identity/KBox construction. After primary-CPU installation,
+independently initialized CPUs may prepare concurrently. NotReady and payload
+NoMemory return the unchanged input. Early retirement expires Weak immediately;
+the permanent inbox retains destruction until workers bind. Failed boot does
+not guarantee reclamation, and startup must not wait on its own executor.
 
 ## 使用原则：非必要不使用
 
@@ -31,7 +66,7 @@ Arc/Weak 为 8 B。Clone 不新建 carrier，但解引用多一层指针间接�
 ## 架构
 
 ```text
-DeferredArc ── Arc<Identity<T>, IdentityAllocator> ── Box<Payload<T>> (raw header + T)
+DeferredArc ── Arc<Identity<T>, IdentityAllocator> ── KBox<Payload<T>> (raw header + T)
                      │
                      └── Arc<dyn Prepared> ── 轻量链表节点 ── 共享 Normal Work
 DeferredWeak ── Weak<Identity<T>, IdentityAllocator>
@@ -49,7 +84,7 @@ DeferredWeak ── Weak<Identity<T>, IdentityAllocator>
 | unsafe service::new_integration | provider 已安装，各 CPU 本地 allocator/per-CPU/IRQ 锁就绪；已审计启动/任务准备，可禁止抢占 | 不允许 hardirq/softirq/NMI 构造；不是通用检查旁路 |
 | 最后强引用释放 | task、softirq、hardirq、已审计启动路径；NMI 要求本 CPU irq_work 已准备好 | 普通路径锁序约束不变；不保证 wait-free |
 | 最后 Weak 释放 | 普通上下文直接释放 identity；NMI 经独立 irq_work 节点转交普通 IRQ | 不支持未准备 irq_work 的 NMI；不保证延迟 |
-| payload Drop / Box free | 普通可睡眠 worker，链表锁外 | 不在提交者现场执行；不保证回收时延 |
+| Payload Drop / KBox free | Sleepable normal worker, outside queue locks | Never inline in submit; no latency bound |
 
 NMI 分支在任何普通 guard、pending/queue 锁或 allocator free 前判断。
 payload carrier 的原始 Arc owner 转交到普通 IRQ，之后沿原链表进入 worker。
@@ -62,7 +97,12 @@ payload carrier 的原始 Arc owner 转交到普通 IRQ，之后沿原链表进�
 覆盖整个借用期间，且读取操作本身适合 NMI，可以单独审计该借用。
 DeferredArc 不自动提供此借用协议，也不保证任意 T 的方法适合 NMI。
 
-创建由 provider 检查可睡眠任务上下文及就绪状态，失败带回原输入。OOM 沿内核策略。Clone/Deref/Weak 沿标准 Arc 语义；NMI 末 Drop 额外要求本 CPU irq_work 已初始化。提交不分配载体、不等待后台、不内联 payload Drop；不承诺 wait-free 或持任意锁安全。
+The provider checks context and readiness before payload reservation. Recoverable
+failure returns the original input; only payload reservation gains NoMemory
+recovery. Clone/Deref/Weak retain standard Arc semantics. NMI final Drop needs
+initialized local irq_work. Submission allocates no carrier, never waits for
+workers and never destroys the payload inline; it is not wait-free or safe
+under arbitrary locks.
 
 IdentityAllocator 是每 identity 一次分配的 allocator，不是通用多分配池。
 成功分配后才能 Clone，复制永久 policy 和原始 token；所有副本拒绝第二次
@@ -79,10 +119,10 @@ Normal 最终 Drop 可以睡眠，但仍须避免共享池等待依赖环。即�
 ## 状态机与算法
 
 1. 检查 provider，准备 carrier；任何可恢复失败都尚未接管输入。
-2. 分配稳定 Box<Payload<T>>，建立标准 Arc 公开身份，发布前初始化 payload 头部。布局三块分配：identity、payload、carrier；即使 T 为 ZST，payload 仍须分配头部。
+2. Reserve and initialize stable KBox<Payload<T>> storage, construct the standard Arc identity, then initialize the raw header before publication. Identity, payload and carrier remain separate allocations, including the header for ZST values.
 3. 标准 Arc 将最后强引用变为零后调用 Identity::drop。此时所有 Weak 升级失败。
 4. Identity 交出唯一 Finalization；载体保活不引用公开身份，不延长 Weak 升级窗口。
-5. 准备时固定的执行器消费 Finalization，Box::from_raw 执行 T::drop 并释放 payload 分配；不根据提交上下文切换执行器。
+5. The prepared executor consumes Finalization; KBox::from_raw runs T::drop and releases payload storage. Submission context does not change the executor.
 
 ## 并发模型与设计决策
 
@@ -102,11 +142,11 @@ IdentityAllocator 副本。初始化发生在首次发布前，不添加保活�
 保留该分配 provenance 的拥有型指针，按 repr(C) 字段偏移回到头部。
 不能从 Deref 产生的 &T 逆推头部；as_ptr 本身也不授予一份强引用。
 这与禁止从 Arc 缩窄区域指针恢复 allocator backing allocation 不冲突：
-此处保存的是 Box 完整分配的原始 provenance，未从共享 T 引用扩大权限。
+The retained pointer has the full KBox allocation provenance, not authority widened from a shared T reference.
 
 末强引用结束后头部中的 identity 指针可能悬垂，worker 绝不读取它；
 MaybeUninit 头部无需析构，其 allocator 副本本身不释放资源。worker 仅
-析构 T 并释放整个 payload Box。末 Weak 仍按原 identity-memory 协议释放。
+The worker drops T and frees the whole payload KBox. Last Weak release retains the identity-memory protocol.
 
 64 位 RawIdentity 为 24 B；usize payload 请求从 8 B 变为 32 B，ZST
 从无 payload 分配变为 24 B，其他类型还受对齐影响。非 ZST 的分配次数
@@ -121,7 +161,7 @@ Prepared 的消费式 Arc receiver 与待处理链表持有的 Arc 分别保护�
 
 | 对象 | 释放位置 |
 | --- | --- |
-| T 的 Drop 和 Box<Payload<T>> 分配 | 普通 worker 的 Finalization::finish |
+| T destruction and KBox<Payload<T>> storage | Finalization::finish on a normal worker |
 | Arc 公开控制块 | 最后强/弱引用的调用者；可能在 IRQ 路径 |
 | 空 carrier 分配与元数据 | 最后发布者或 worker；可能在 IRQ 路径 |
 

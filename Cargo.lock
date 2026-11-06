@@ -2564,6 +2564,7 @@ dependencies = [
 name = "kfinalize"
 version = "0.3.0-dev"
 dependencies = [
+ "kalloc-types",
  "klazy",
  "unittest",
 ]
@@ -2784,6 +2785,8 @@ dependencies = [
 name = "klockstat"
 version = "0.3.0-dev"
 dependencies = [
+ "karch",
+ "klazy",
  "klockstat-macros",
  "linkme",
 ]

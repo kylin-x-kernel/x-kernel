@@ -296,6 +296,10 @@ guard 类型参数把临界区策略编码进类型：
 互斥问题退化为本 CPU 是否会被抢占或中断重入，
 由 guard 负责。
 
+With `stats` enabled, UP builds record acquisitions only. The contention
+recording helper is compiled only with `smp`, matching its spin-wait caller;
+`stats` without `smp` remains a supported configuration.
+
 ### 为何 `try_lock` 失败也要先 acquire guard
 
 如果不先关闭本地抢占或 IRQ，

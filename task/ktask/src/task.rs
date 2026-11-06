@@ -1076,9 +1076,9 @@ impl TaskInner {
             }
             #[expect(
                 clippy::panic,
-                reason = "CG-021-no-panic-on-reachable-failure: kruntime permanently installs the \
-                          integration provider before any Task creation; that provider only \
-                          prepares carriers and has no recoverable failure after initialization"
+                reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): task owner preparation \
+                          has no error channel; propagate finalizer NoMemory through task \
+                          constructors and add admission rollback before making it recoverable"
             )]
             Err((error, _task)) => panic!("task finalization preparation failed: {error:?}"),
         }

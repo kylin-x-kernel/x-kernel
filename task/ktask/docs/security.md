@@ -88,6 +88,11 @@ serialized behind them on the shared finalizer. NMI retirement is allowed only
 after local irq_work initialization. Creation remains boot/task-only with
 allocator and local context facilities initialized. BH-disabled task preparation
 is permitted under allocation-safe locks; this does not permit sleeping there.
+The finalizer now reserves its payload owner with NOWAIT and can return NoMemory.
+Task owner preparation remains infallible at its public boundary and treats this
+as fatal, preserving the previous Box OOM outcome. Making it recoverable requires
+task-constructor error propagation and admission rollback; this migration does
+not establish that protocol or make stack/identity/carrier allocations fallible.
 
 No GC task or exit queue retains an additional exit reference.
 The diagnostic module owns a task's registration token and inline weak slot.
