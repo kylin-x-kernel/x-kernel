@@ -436,6 +436,7 @@ impl Ext4SbInfo {
         inode: &Ext4Inode,
         recovery_flag_policy: RecoveryFlagPolicy,
     ) -> Ext4Result<()> {
+        self.initialize_inode_quotas_with_policy(inode, recovery_flag_policy)?;
         if inode.links_count() == 0 {
             self.cleanup_unlinked_orphan(inode, recovery_flag_policy)
         } else {

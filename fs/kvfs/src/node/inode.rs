@@ -2432,7 +2432,15 @@ impl VfsInode {
         }
     }
 
+    /// Binds an initializing inode to its owner before cache publication.
+    ///
+    /// # Panics
+    /// Panics if this identity already belongs to another superblock.
     pub(crate) fn bind_super_block(self: &Arc<Self>, super_block: &Arc<SuperBlock>) {
+        if self.identity.super_block.get().is_some() {
+            self.identity.bind_super_block(super_block);
+            return;
+        }
         self.identity.bind_super_block(super_block);
         super_block.register_inode(self);
     }
@@ -2703,6 +2711,29 @@ impl InodeCache {
         });
     }
 
+    fn wait_for_evictions(&self, super_block: &SuperBlock) {
+        loop {
+            let pending = {
+                let inodes = self.inodes.lock();
+                inodes.iter().find_map(|(key, entry)| {
+                    if !core::ptr::eq(key.super_block.as_ptr(), super_block) {
+                        return None;
+                    }
+                    let is_freeing = match &entry.state {
+                        CachedInodeState::Freeing(_) => true,
+                        CachedInodeState::Live(inode) => inode.strong_count() == 0,
+                        CachedInodeState::New => false,
+                    };
+                    is_freeing.then(|| (key.clone(), entry.waiters.clone()))
+                })
+            };
+            let Some((key, waiters)) = pending else {
+                return;
+            };
+            self.wait_for_transition(&key, &waiters);
+        }
+    }
+
     fn begin_eviction(&self, inode: &VfsInode) -> Option<InodeCacheKey> {
         let key = inode.identity.cache_key()?;
         let mut inodes = self.inodes.lock();
@@ -2827,6 +2858,10 @@ impl InodeCache {
 
 fn inode_cache() -> &'static InodeCache {
     Lazy::force(&INODE_CACHE)
+}
+
+pub(crate) fn wait_for_inode_evictions(super_block: &SuperBlock) {
+    inode_cache().wait_for_evictions(super_block);
 }
 
 pub(crate) fn lookup_inode(

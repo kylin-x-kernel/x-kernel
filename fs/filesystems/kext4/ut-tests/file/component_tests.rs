@@ -833,7 +833,9 @@ fn failed_split_writeback_publishes_only_the_durable_prefix() {
     // advance i_disksize and FullMetadata must remain unpublished.
     assert_eq!(inode.disk_size(), (TEST_BLOCK_SIZE * 5) as u64);
     assert!(inode.has_delalloc_reservations());
-    assert_eq!(filesystem.delalloc_reserved_blocks(), 6);
+    // The next transaction has already allocated its first block before
+    // the failing data barrier; only five holes remain unallocated.
+    assert_eq!(filesystem.delalloc_reserved_blocks(), 5);
     assert_ne!(inode.ctime(), timestamp);
     assert_ne!(inode.mtime(), timestamp);
     assert!(
@@ -1553,9 +1555,11 @@ fn readmission_failure_preserves_prefix(
         failure.completed_bytes(),
         completed_blocks * TEST_BLOCK_SIZE
     );
+    // Physical allocation claims its reservation before data I/O or commit;
+    // an aborted transaction is recovered from disk rather than re-reserved.
     assert_eq!(
         filesystem.delalloc_reserved_blocks(),
-        if completed_blocks == 0 { 5 } else { 1 }
+        if fail_commit { 1 } else { 0 }
     );
     assert_eq!(
         filesystem.pending_checkpoint_count() > 0,

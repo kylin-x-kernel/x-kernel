@@ -26,4 +26,4 @@ pub use inode::{
     WeakVfsInode, empty_inode_operations, generic_update_time, get_next_ino, inode_init_owner,
     metadata_only_inode_operations,
 };
-pub(crate) use inode::{get_or_try_init_inode, lookup_inode};
+pub(crate) use inode::{get_or_try_init_inode, lookup_inode, wait_for_inode_evictions};

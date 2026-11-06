@@ -197,6 +197,15 @@ impl<'a> FsContext<'a> {
         self.target_super_block.ok_or(VfsError::InvalidInput)
     }
 
+    /// Flushes the target filesystem from its reconfigure callback.
+    ///
+    /// The callback already runs under the superblock's umount exclusion;
+    /// this entry avoids reacquiring that lock through `SuperBlock::sync_fs`.
+    /// Requires sleepable task context. Mount-purpose contexts return InvalidInput.
+    pub fn sync_filesystem(&self) -> VfsResult<()> {
+        self.super_block()?.sync_fs_locked()
+    }
+
     /// Installs the immutable operation table selected by the filesystem type.
     ///
     /// This is the object-oriented equivalent of

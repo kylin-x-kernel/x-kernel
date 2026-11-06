@@ -98,6 +98,9 @@ pub struct Ext4DiskSuperblock {
     flags: u32,
     journal: JournalFields,
     backup_groups: [u32; 2],
+    user_quota_inode: u32,
+    group_quota_inode: u32,
+    project_quota_inode: u32,
 }
 
 impl Ext4DiskSuperblock {
@@ -317,8 +320,19 @@ impl Ext4DiskSuperblock {
                 uuid: codec::bytes(input, 0xd0)?,
                 inode_backup: codec::bytes(input, 0x10c)?,
             },
-            backup_groups: [codec::le_u32(input, 0x244)?, codec::le_u32(input, 0x248)?],
+            backup_groups: [codec::le_u32(input, 0x24c)?, codec::le_u32(input, 0x250)?],
+            user_quota_inode: codec::le_u32(input, 0x240)?,
+            group_quota_inode: codec::le_u32(input, 0x244)?,
+            project_quota_inode: codec::le_u32(input, 0x26c)?,
         })
+    }
+
+    pub(crate) const fn quota_inode(&self, kind: kquota::QuotaType) -> u32 {
+        match kind {
+            kquota::QuotaType::User => self.user_quota_inode,
+            kquota::QuotaType::Group => self.group_quota_inode,
+            kquota::QuotaType::Project => self.project_quota_inode,
+        }
     }
 
     /// Returns the total inode count.

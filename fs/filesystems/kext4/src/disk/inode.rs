@@ -19,6 +19,9 @@ pub(crate) const CTIME_EXTRA_OFFSET: usize = 0x84;
 pub(crate) const MTIME_EXTRA_OFFSET: usize = 0x88;
 pub(crate) const ATIME_EXTRA_OFFSET: usize = 0x8c;
 pub(crate) const EXT4_ROOT_INO: u32 = 2;
+pub(crate) const EXT4_USR_QUOTA_INO: u32 = 3;
+pub(crate) const EXT4_GRP_QUOTA_INO: u32 = 4;
+pub(crate) const EXT4_GOOD_OLD_FIRST_INO: u32 = 11;
 
 pub(crate) const S_IFMT: u16 = 0xf000;
 pub(crate) const S_IFIFO: u16 = 0x1000;

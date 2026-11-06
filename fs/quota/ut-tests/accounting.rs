@@ -671,6 +671,82 @@ fn suspension_preserves_usage_but_skips_new_charges_until_resume() {
 }
 
 #[def_test]
+fn suspension_discards_clean_cache_without_releasing_persistent_records() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut quota = io.enable_all(FORMAT);
+    let owner = ids(25)[0];
+    quota
+        .alloc_space(&mut io, &[owner], 100, 1, ChargeFlags::WARN)
+        .unwrap();
+    quota.sync(&mut io, QuotaType::User).unwrap();
+    let writes = io.writes.get();
+    quota.suspend_cached(QuotaType::User).unwrap();
+    assert_eq!(quota.next_cached_id(None), None);
+    assert_eq!(io.writes.get(), writes);
+    quota.unload(QuotaType::User).unwrap();
+    assert_eq!(io.writes.get(), writes);
+    let mut reopened = io.enable_all(FORMAT);
+    assert_eq!(reopened.get(&mut io, owner).unwrap().used_bytes, 100);
+}
+
+#[def_test]
+fn suspension_retains_dirty_active_usage_until_it_is_synchronized() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut quota = io.enable_all(FORMAT);
+    let clean = ids(25)[0];
+    let dirty = ids(26)[0];
+    quota
+        .alloc_space(&mut io, &[clean], 100, 1, ChargeFlags::WARN)
+        .unwrap();
+    quota.sync(&mut io, QuotaType::User).unwrap();
+    quota
+        .alloc_space(&mut io, &[dirty], 200, 1, ChargeFlags::WARN)
+        .unwrap();
+    let writes = io.writes.get();
+    quota.suspend_cached(QuotaType::User).unwrap();
+    assert_eq!(io.writes.get(), writes);
+    assert_eq!(quota.next_cached_id(None), Some(dirty));
+    assert_eq!(quota.next_dirty_id(None), Some(dirty));
+    assert_eq!(
+        quota.unload(QuotaType::User),
+        Err(KError::from(LinuxError::EBUSY))
+    );
+    quota.resume(QuotaType::User).unwrap();
+    quota.sync(&mut io, QuotaType::User).unwrap();
+    quota.suspend_cached(QuotaType::User).unwrap();
+    quota.unload(QuotaType::User).unwrap();
+    let mut reopened = io.enable_all(FORMAT);
+    assert_eq!(reopened.get(&mut io, clean).unwrap().used_bytes, 100);
+    assert_eq!(reopened.get(&mut io, dirty).unwrap().used_bytes, 200);
+}
+
+#[def_test]
+fn invalidation_releases_only_the_quiesced_class_without_io() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut quota = io.enable_all(FORMAT);
+    let owners = ids(25);
+    quota
+        .alloc_space(&mut io, &owners[..2], 100, 1, ChargeFlags::WARN)
+        .unwrap();
+    io.has_short_writes.set(true);
+    assert_eq!(
+        quota.set_grace_times(&mut io, QuotaType::User, 20, 30),
+        Err(KError::from(LinuxError::EIO))
+    );
+    quota.suspend_cached(QuotaType::User).unwrap();
+    assert!(quota.info(QuotaType::User).unwrap().is_dirty());
+    let writes = io.writes.get();
+    let file = quota.invalidate(QuotaType::User).unwrap();
+    assert_eq!(*file, QuotaType::User);
+    assert_eq!(io.writes.get(), writes);
+    assert!(quota.info(QuotaType::User).is_none());
+    assert_eq!(quota.next_cached_id(None), Some(owners[1]));
+    assert_eq!(quota.next_dirty_id(None), Some(owners[1]));
+    assert_eq!(quota.get(&mut io, owners[1]).unwrap().used_bytes, 100);
+    assert!(quota.invalidate(QuotaType::User).is_none());
+}
+
+#[def_test]
 fn freeing_more_than_the_usage_stops_at_zero() {
     let mut io = MemoryFiles::new(FORMAT);
     let mut quota = io.enable_all(FORMAT);
@@ -1106,16 +1182,169 @@ fn writeback_does_not_finish_a_failed_record_acquisition() {
         quota.sync_dquot(&mut io, owner),
         Err(KError::from(LinuxError::EIO))
     );
-    assert_eq!(
-        quota.sync(&mut io, QuotaType::User),
-        Err(KError::from(LinuxError::EIO))
-    );
+    quota.sync(&mut io, QuotaType::User).unwrap();
     assert_eq!(io.writes.get(), writes);
-    assert_eq!(quota.next_dirty_id(None), Some(owner));
+    assert_eq!(quota.next_dirty_id(None), None);
 
     quota.get(&mut io, owner).unwrap();
     quota.alloc_inode(&mut io, &[owner], 0, false).unwrap();
     quota.sync_dquot(&mut io, owner).unwrap();
     let mut reopened = io.enable_all(FORMAT);
     assert_eq!(reopened.get(&mut io, owner).unwrap().used_inodes, 1);
+}
+
+#[def_test]
+fn failed_acquisition_can_be_disabled_after_its_error_is_reported() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut quota = io.enable_all(FORMAT);
+    io.has_short_writes.set(true);
+    assert!(quota.get(&mut io, ids(24)[0]).is_err());
+    io.has_short_writes.set(false);
+    assert_eq!(
+        quota.disable(&mut io, QuotaType::User),
+        Err(KError::from(LinuxError::EIO))
+    );
+    let file = quota.disable(&mut io, QuotaType::User).unwrap();
+    assert_eq!(*file, QuotaType::User);
+    assert!(quota.info(QuotaType::User).is_none());
+}
+
+#[def_test]
+fn cached_reservations_require_initialized_records_and_never_write_files() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut quota = io.enable_all(FORMAT);
+    let owners = ids(500);
+    assert_eq!(
+        quota.reserve_space_cached(&owners, 4096, 1, ChargeFlags::WARN),
+        Err(KError::from(LinuxError::ESRCH))
+    );
+    for owner in owners {
+        quota.get(&mut io, owner).unwrap();
+    }
+    let writes = io.writes.get();
+    quota
+        .reserve_space_cached(&owners, 4096, 1, ChargeFlags::WARN)
+        .unwrap();
+    for owner in owners {
+        assert_eq!(quota.get(&mut io, owner).unwrap().reserved_bytes, 4096);
+    }
+    quota.release_space_cached(&owners, 1024).unwrap();
+    assert_eq!(io.writes.get(), writes);
+    for owner in owners {
+        assert_eq!(quota.get(&mut io, owner).unwrap().reserved_bytes, 3072);
+    }
+}
+
+#[def_test]
+fn transfer_moves_allocated_and_reserved_usage_atomically_across_classes() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut quota = io.enable_all(FORMAT);
+    let old = ids(100);
+    let new = ids(200);
+    quota.alloc_inode(&mut io, &old, 1, false).unwrap();
+    quota
+        .alloc_space(&mut io, &old, 4096, 1, ChargeFlags::WARN)
+        .unwrap();
+    quota
+        .alloc_space(&mut io, &old, 2048, 1, ChargeFlags::RESERVE)
+        .unwrap();
+    quota
+        .set(
+            &mut io,
+            new[2],
+            Dqblk {
+                space_hard_limit_bytes: 4096,
+                ..Dqblk::default()
+            },
+            QuotaFields::SPACE_HARD,
+            1,
+        )
+        .unwrap();
+    assert_eq!(
+        quota.transfer(&mut io, (&old, &new), 4096, 2048, 2, false),
+        Err(KError::from(LinuxError::EDQUOT))
+    );
+    for index in 0..3 {
+        assert_eq!(quota.get(&mut io, old[index]).unwrap().used_inodes, 1);
+        assert_eq!(quota.get(&mut io, old[index]).unwrap().reserved_bytes, 2048);
+        assert_eq!(quota.get(&mut io, new[index]).unwrap().used_inodes, 0);
+    }
+    quota.set_limits_enabled(QuotaType::Project, false).unwrap();
+    quota
+        .transfer(&mut io, (&old, &new), 4096, 2048, 2, false)
+        .unwrap();
+    for index in 0..3 {
+        let previous = quota.get(&mut io, old[index]).unwrap();
+        let next = quota.get(&mut io, new[index]).unwrap();
+        assert_eq!(
+            (
+                previous.used_inodes,
+                previous.used_bytes,
+                previous.reserved_bytes
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (next.used_inodes, next.used_bytes, next.reserved_bytes),
+            (1, 4096, 2048)
+        );
+    }
+}
+
+#[def_test]
+fn transfer_clamps_short_source_reservations_and_admits_the_full_target() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut quota = io.enable_all(FORMAT);
+    let old = ids(100);
+    let new = ids(200);
+    quota.alloc_inode(&mut io, &old, 1, false).unwrap();
+    quota
+        .alloc_space(&mut io, &old, 4096, 1, ChargeFlags::WARN)
+        .unwrap();
+    quota
+        .alloc_space(&mut io, &old, 1024, 1, ChargeFlags::RESERVE)
+        .unwrap();
+    quota
+        .set(
+            &mut io,
+            new[2],
+            Dqblk {
+                space_hard_limit_bytes: 4096,
+                ..Dqblk::default()
+            },
+            QuotaFields::SPACE_HARD,
+            1,
+        )
+        .unwrap();
+    assert_eq!(
+        quota.transfer(&mut io, (&old, &new), 4096, 2048, 2, false),
+        Err(KError::from(LinuxError::EDQUOT))
+    );
+    for id in old {
+        let data = quota.get(&mut io, id).unwrap();
+        assert_eq!(
+            (data.used_inodes, data.used_bytes, data.reserved_bytes),
+            (1, 4096, 1024)
+        );
+    }
+    quota.set_limits_enabled(QuotaType::Project, false).unwrap();
+    quota
+        .transfer(&mut io, (&old, &new), 4096, 2048, 2, false)
+        .unwrap();
+    for index in 0..3 {
+        let previous = quota.get(&mut io, old[index]).unwrap();
+        let next = quota.get(&mut io, new[index]).unwrap();
+        assert_eq!(
+            (
+                previous.used_inodes,
+                previous.used_bytes,
+                previous.reserved_bytes
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (next.used_inodes, next.used_bytes, next.reserved_bytes),
+            (1, 4096, 2048)
+        );
+    }
 }

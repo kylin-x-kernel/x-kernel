@@ -34,11 +34,11 @@ crate. No unsafe code or custom synchronization primitive is introduced.
 - A reservation is never encoded as allocated disk space. Failed claims
   or reclaims cannot move only a subset of the participating quota classes.
   Reclaim cannot transfer more than an active record's allocated usage.
-- Dirty state is cleared only after the corresponding write succeeds.
+- Active-record dirty state is cleared only after its write succeeds.
   An initial acquisition remains inactive until its record and file header
   have both been written successfully. Writeback rejects inactive dirty
-  records with `EIO` without doing I/O, so a bounded overwrite transaction
-  cannot accidentally resume failed structural initialization.
+  records once with `EIO` without doing I/O and clears their dirty indication,
+  so later sync/disable can finish. Only acquisition can resume initialization.
 
 ## Concurrency and execution context
 
@@ -64,7 +64,7 @@ No second quota lock or atomic counter mirrors a field in the protected state.
 | T5 | Invalid limit, negative charge or counter overflow | Limit bypass through arithmetic wrap | Boundary checks, format limit checks and checked arithmetic returning errors |
 | T6 | Short or failed metadata writes | Lost accounting or damaged quota tree | Exact-size writes, dirty-state retention, explicit error propagation; filesystem transactions and abort/recovery must handle structural partial writes |
 | T7 | Untrusted caller requests resource bypass or quota changes | Quota policy bypass | No implicit current credentials; trusted VFS/syscall integration must authorize these arguments |
-| T8 | Backing-file I/O recursively charges quota | Deadlock or recursive accounting | Direct-I/O integration contract and documented nonreentrancy; no concrete filesystem enables this interface yet |
+| T8 | Backing-file I/O recursively charges quota | Deadlock or recursive accounting | Direct-I/O integration contract and documented nonreentrancy; internal ext4 quota inodes are exempt by on-disk identity |
 
 ## Failure modes
 
@@ -105,3 +105,26 @@ by the filesystem's transaction implementation.
 - Do not use ordinary overwrite retry as structural recovery.
 - Keep `QuotaIo` outside recursive charging and caller-held lock reentry.
 - Complete explicit synchronization/disable before final owner destruction.
+
+Cached reservation operations never call a provider while the caller holds its
+inode reservation lock. Missing active records fail atomically. Ownership
+transfer validates both owner sets and all three classes before publishing
+candidates, including outstanding reservations in new-owner admission.
+
+A free-entry head replacement is published after its data-block write succeeds.
+A failed first write leaves the head unchanged; failures after earlier neighbor
+writes still require provider transaction recovery. The no-I/O suspension phase
+retains class/file ownership and rejects outstanding reservations; the provider
+must drain writes before publishing read-only state. Resume uses that same state
+rather than reopening or duplicating quota-file ownership.
+
+Terminal `invalidate` requires a quiesced provider whose writes were synchronized
+or irreversibly aborted. It performs no I/O and returns the sole file reference
+for unlocked release. On abort, the provider retains on-disk recovery evidence
+and reports the writeback error; dropping dirty cache state is not durability.
+Other classes retain their records and backing-file ownership.
+
+
+Ownership transfer clamps an undersized source reservation to zero and emits a
+warning. Target admission still includes the full transferred reservation, and
+a refusal in any class leaves both owner sets unchanged.

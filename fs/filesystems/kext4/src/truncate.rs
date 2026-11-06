@@ -63,6 +63,7 @@ impl Ext4SbInfo {
         if new_size == old_disk_size {
             return Ok(());
         }
+        self.initialize_inode_quotas(inode)?;
         if new_size > old_disk_size {
             self.zero_regular_inode_tail_data(inode, old_disk_size)?;
             self.commit_regular_inode_write_metadata(
@@ -138,6 +139,7 @@ impl Ext4SbInfo {
         }
 
         let credits = JournalCredits::for_preallocation_discard(self, inode)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_for_mutation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -167,6 +169,7 @@ impl Ext4SbInfo {
         self.zero_regular_inode_tail_data(inode, target_size)?;
 
         let credits = JournalCredits::for_regular_truncate(self, inode, target_size)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_for_mutation(credits, recovery_flag_policy)?;
         let mut handle = journal.begin(credits)?;
         let result = self.cleanup_orphaned_inode_metadata(inode, target_size, &mut handle);
@@ -179,6 +182,7 @@ impl Ext4SbInfo {
         new_size: u64,
     ) -> Ext4Result<()> {
         let credits = JournalCredits::for_regular_truncate(self, inode, new_size)?;
+        let credits = self.quota_metadata_credits(credits);
         self.zero_regular_inode_tail_data(inode, new_size)?;
 
         let journal = self.metadata_journal_for_mutation(
@@ -198,6 +202,7 @@ impl Ext4SbInfo {
     ) -> Ext4Result<()> {
         self.validate_inode_timestamp_update(inode, timestamp)?;
         let credits = JournalCredits::for_orphan_size_update();
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_for_mutation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,

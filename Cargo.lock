@@ -2451,6 +2451,7 @@ dependencies = [
  "kspin",
  "ksync",
  "ktask",
+ "ktime",
  "ktime_types",
  "kvfs",
  "kworkng",
@@ -3100,6 +3101,7 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "kerrno",
+ "log",
  "unittest",
 ]
 

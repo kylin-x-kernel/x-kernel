@@ -94,6 +94,14 @@ pub(crate) struct InodeInitialization {
 
 #[allow(dead_code)]
 impl InodeInitialization {
+    pub(crate) const fn uid(self) -> u32 {
+        self.uid
+    }
+
+    pub(crate) const fn gid(self) -> u32 {
+        self.gid
+    }
+
     pub(crate) const fn regular_file(permissions: u16, uid: u32, gid: u32) -> Self {
         Self {
             kind: InodeKind::RegularFile,
@@ -1392,7 +1400,12 @@ impl Ext4Inode {
 
     #[cfg(unittest)]
     fn insert_unreserved_delalloc_extents(&self, extents: &[(u64, u64)]) -> Ext4Result<u64> {
-        self.update_state(|state| insert_unreserved_delalloc_extents_in_state(state, extents))
+        self.update_state(|state| {
+            let new_total = validate_unreserved_delalloc_extents_in_state(state, extents)?;
+            let inserted = new_total - state.reserved_data_blocks;
+            insert_unreserved_delalloc_extents_in_state(state, extents, new_total);
+            Ok(inserted)
+        })
     }
 
     /// Reserves unallocated blocks in one logical range for delayed allocation.
@@ -1405,6 +1418,8 @@ impl Ext4Inode {
     /// inodes no longer serialize. Per-inode reservations and the mount-wide
     /// aggregate are updated as one ext4-owned invariant; already allocated
     /// or already reserved subranges consume no additional reservation.
+    /// Extent and counter validation precede quota and mount admission, so
+    /// publishing admitted reservations cannot return an insertion error.
     ///
     /// # Locking
     ///
@@ -1494,17 +1509,9 @@ impl Ext4Inode {
                 }
             }
 
-            let reserved = holes
-                .iter()
-                .try_fold(0u64, |total, (hole_start, hole_end)| {
-                    total
-                        .checked_add(
-                            hole_end
-                                .checked_sub(*hole_start)
-                                .ok_or(Ext4Error::Overflow)?,
-                        )
-                        .ok_or(Ext4Error::Overflow)
-                })?;
+            let new_reserved_data_blocks =
+                validate_unreserved_delalloc_extents_in_state(state, &holes)?;
+            let reserved = new_reserved_data_blocks - state.reserved_data_blocks;
             // An empty reservation skips mount-wide accounting entirely: the
             // mutex pair guards the aggregate against concurrent reserves, not
             // an empty range against itself.
@@ -1517,7 +1524,8 @@ impl Ext4Inode {
             // stale free/reserved view and over-reserve the mount-wide total,
             // starving later writes and underreporting statfs. Lock order stays
             // allocator then delalloc, matching statfs.
-            {
+            sb.reserve_quota_space(state.metadata.uid, state.metadata.gid, reserved)?;
+            let admission = (|| {
                 let allocator = sync::mutex_lock(&sb.allocator);
                 let mut delalloc_reserved_blocks = sync::mutex_lock(&sb.delalloc_reserved_blocks);
                 let blocks_available = allocator
@@ -1530,13 +1538,34 @@ impl Ext4Inode {
                 *delalloc_reserved_blocks = delalloc_reserved_blocks
                     .checked_add(reserved)
                     .ok_or(Ext4Error::Overflow)?;
+                Ok(())
+            })();
+            if let Err(error) = admission {
+                if let Err(cleanup_error) =
+                    sb.release_quota_reservation(state.metadata.uid, state.metadata.gid, reserved)
+                {
+                    error!(
+                        "KExt4 delayed reservation rollback after {error:?} failed: \
+                         {cleanup_error:?}"
+                    );
+                }
+                return Err(error);
             }
-            let inserted_blocks = insert_unreserved_delalloc_extents_in_state(state, &holes)?;
-            assert_eq!(
-                inserted_blocks, reserved,
-                "validated delayed-allocation holes must preserve their block count"
-            );
+            insert_unreserved_delalloc_extents_in_state(state, &holes, new_reserved_data_blocks);
             Ok(())
+        })
+    }
+
+    pub(crate) fn reserved_delalloc_in_range(
+        &self,
+        start: LogicalBlock,
+        count: u64,
+    ) -> Ext4Result<u64> {
+        let end = start.get().checked_add(count).ok_or(Ext4Error::Overflow)?;
+        self.with_state(|state| {
+            Ok(overlapping_delalloc_extents(state, start.get(), end)
+                .map(|(first, last)| last.min(end) - first.max(start.get()))
+                .sum())
         })
     }
 
@@ -1545,12 +1574,7 @@ impl Ext4Inode {
             return Ok(0);
         }
         self.update_state(|state| -> Ext4Result<u64> {
-            let overlapping = state
-                .delayed_extents
-                .range(..end)
-                .filter(|(extent_start, extent_end)| **extent_end > start && **extent_start < end)
-                .map(|(&extent_start, &extent_end)| (extent_start, extent_end))
-                .collect::<Vec<_>>();
+            let overlapping = overlapping_delalloc_extents(state, start, end).collect::<Vec<_>>();
             let released = overlapping.iter().try_fold(
                 0u64,
                 |total, &(extent_start, extent_end)| -> Ext4Result<u64> {
@@ -1599,7 +1623,7 @@ impl Ext4Inode {
         })
     }
 
-    fn reserved_data_blocks(&self) -> u64 {
+    pub(crate) fn reserved_data_blocks(&self) -> u64 {
         self.with_state(|state| state.reserved_data_blocks)
     }
 
@@ -1640,6 +1664,25 @@ impl fmt::Debug for Ext4Inode {
 /// by delayed-allocation reservations, in ascending order; an empty result
 /// means the whole range is already reserved. Operates on the borrowed state
 /// directly — the caller already holds the inode-state lock.
+fn overlapping_delalloc_extents(
+    state: &Ext4InodeState,
+    start: u64,
+    end: u64,
+) -> impl Iterator<Item = (u64, u64)> + '_ {
+    let covering = state
+        .delayed_extents
+        .range(..start)
+        .next_back()
+        .filter(|(_, last)| **last > start)
+        .map(|(&first, &last)| (first, last));
+    covering.into_iter().chain(
+        state
+            .delayed_extents
+            .range(start..end)
+            .map(|(&first, &last)| (first, last)),
+    )
+}
+
 fn unreserved_delalloc_extents_in_state(
     state: &Ext4InodeState,
     start: u64,
@@ -1647,7 +1690,7 @@ fn unreserved_delalloc_extents_in_state(
 ) -> Vec<(u64, u64)> {
     let mut extents = Vec::new();
     let mut cursor = start;
-    for (&extent_start, &extent_end) in state.delayed_extents.range(..end) {
+    for (extent_start, extent_end) in overlapping_delalloc_extents(state, start, end) {
         if extent_end <= cursor {
             continue;
         }
@@ -1665,8 +1708,8 @@ fn unreserved_delalloc_extents_in_state(
     extents
 }
 
-fn insert_unreserved_delalloc_extents_in_state(
-    state: &mut Ext4InodeState,
+fn validate_unreserved_delalloc_extents_in_state(
+    state: &Ext4InodeState,
     extents: &[(u64, u64)],
 ) -> Ext4Result<u64> {
     let mut previous_end = None;
@@ -1696,11 +1739,17 @@ fn insert_unreserved_delalloc_extents_in_state(
                 .ok_or(Ext4Error::Overflow)
         },
     )?;
-    let new_reserved_data_blocks = state
+    state
         .reserved_data_blocks
         .checked_add(newly_reserved)
-        .ok_or(Ext4Error::Overflow)?;
+        .ok_or(Ext4Error::Overflow)
+}
 
+fn insert_unreserved_delalloc_extents_in_state(
+    state: &mut Ext4InodeState,
+    extents: &[(u64, u64)],
+    new_reserved_data_blocks: u64,
+) {
     for &(extent_start, extent_end) in extents {
         let left = state
             .delayed_extents
@@ -1718,7 +1767,6 @@ fn insert_unreserved_delalloc_extents_in_state(
             .insert(merged_start, right.unwrap_or(extent_end));
     }
     state.reserved_data_blocks = new_reserved_data_blocks;
-    Ok(newly_reserved)
 }
 
 /// Shared admission rule for mutating regular-file extent mappings.
@@ -1971,6 +2019,24 @@ impl Ext4SbInfo {
         *delalloc_reserved_blocks = delalloc_reserved_blocks
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
+        drop(delalloc_reserved_blocks);
+        let stat = inode.stat();
+        self.release_quota_reservation(stat.uid, stat.gid, released)
+    }
+
+    /// Removes reservations already converted into physical allocation.
+    pub(crate) fn consume_delalloc_range(
+        &self,
+        inode: &Ext4Inode,
+        start: LogicalBlock,
+        count: u64,
+    ) -> Ext4Result<()> {
+        let end = start.get().checked_add(count).ok_or(Ext4Error::Overflow)?;
+        let released = inode.remove_delalloc_extent(start.get(), end)?;
+        let mut reserved = sync::mutex_lock(&self.delalloc_reserved_blocks);
+        *reserved = reserved
+            .checked_sub(released)
+            .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
         Ok(())
     }
 
@@ -1990,7 +2056,9 @@ impl Ext4SbInfo {
         *delalloc_reserved_blocks = delalloc_reserved_blocks
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
-        Ok(())
+        drop(delalloc_reserved_blocks);
+        let stat = inode.stat();
+        self.release_quota_reservation(stat.uid, stat.gid, released)
     }
 
     /// Releases every delayed-allocation reservation owned by an inode.
@@ -2005,7 +2073,9 @@ impl Ext4SbInfo {
         *delalloc_reserved_blocks = delalloc_reserved_blocks
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
-        Ok(())
+        drop(delalloc_reserved_blocks);
+        let stat = inode.stat();
+        self.release_quota_reservation(stat.uid, stat.gid, released)
     }
 
     pub(crate) fn publish_inode_metadata(
@@ -2026,7 +2096,7 @@ impl Ext4SbInfo {
         inode.publish_metadata_with_timestamps(metadata, timestamps)
     }
 
-    fn is_public_inode_number(&self, number: InodeNumber) -> bool {
+    pub(crate) fn is_public_inode_number(&self, number: InodeNumber) -> bool {
         !self.is_special_inode_number(number)
             && (number.get() == disk_inode::EXT4_ROOT_INO
                 || number.get() >= self.superblock().first_inode())
@@ -2034,7 +2104,8 @@ impl Ext4SbInfo {
 
     pub(crate) fn is_special_inode_number(&self, number: InodeNumber) -> bool {
         let inode = number.get();
-        (inode != disk_inode::EXT4_ROOT_INO && inode < self.superblock().first_inode())
+        self.is_quota_inode(number)
+            || (inode != disk_inode::EXT4_ROOT_INO && inode < self.superblock().first_inode())
             || self
                 .superblock()
                 .orphan_file_inode()
@@ -2184,12 +2255,11 @@ impl Ext4SbInfo {
     /// Persists one ordinary inode metadata change after best-effort expansion
     /// of the inode's extra fields.
     ///
-    /// Xattr mutation and zero-link eviction intentionally use the lower-level
-    /// table-entry helpers so their inode writes cannot recurse into xattr
-    /// migration. All other referenced-inode dirty paths should use this
-    /// entry point, matching Linux `__ext4_mark_inode_dirty()`.
+    /// Xattr mutation and zero-link eviction use lower-level table-entry
+    /// helpers so they do not recurse into migration. Owner changes expand
+    /// first, then transfer the resulting complete allocation to the new owner.
     pub(crate) fn update_dirty_inode_metadata(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         handle: &mut JournalHandle<'_>,
         update: impl FnOnce(&Self, &mut [u8]) -> Ext4Result<()>,
@@ -2221,7 +2291,9 @@ impl Ext4SbInfo {
         if !inode.has_dirty_timestamps() {
             return Ok(());
         }
+        self.initialize_inode_quotas(inode)?;
         let credits = JournalCredits::new(2);
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_for_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -2233,7 +2305,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn update_regular_inode_write_metadata(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         new_disk_size: u64,
         metadata: RegularWriteMetadata,
@@ -2264,7 +2336,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn update_regular_inode_size_metadata(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         new_disk_size: u64,
         metadata: RegularWriteMetadata,
@@ -2298,7 +2370,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn update_inode_size_metadata(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         size: u64,
         timestamp: Ext4Timestamp,
@@ -2313,7 +2385,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn update_inode_timestamps_metadata(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
@@ -2324,7 +2396,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn update_inode_ctime_metadata(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
@@ -2353,7 +2425,12 @@ impl Ext4SbInfo {
             return Ok(());
         }
 
+        self.initialize_inode_quotas(inode)?;
+        if let Some((uid, gid)) = update.owner {
+            self.initialize_owner_quotas(uid, gid)?;
+        }
         let credits = JournalCredits::new(2);
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_for_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -2365,52 +2442,64 @@ impl Ext4SbInfo {
     }
 
     fn update_inode_metadata_in_transaction(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         update: Ext4InodeMetadataUpdate,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
-            let raw = disk_inode::RawInode::decode(inode_bytes)?;
-            if let Some(mode) = update.mode {
-                put_u16(inode_bytes, 0x00, (raw.mode() & disk_inode::S_IFMT) | mode)?;
-            }
-            if let Some((uid, gid)) = update.owner {
-                put_u16(inode_bytes, 0x02, uid as u16)?;
-                put_u16(inode_bytes, 0x18, gid as u16)?;
-                put_u16(inode_bytes, 0x78, (uid >> 16) as u16)?;
-                put_u16(inode_bytes, 0x7a, (gid >> 16) as u16)?;
-            }
-            if let Some(atime) = update.atime {
+        self.try_expand_inode_extra_isize(inode, handle)?;
+        let timestamps = inode.pending_timestamps();
+        let block = self.inode_table_entry_block(inode.number())?;
+        let mut bytes = self.read_metadata_block(block)?.as_ref().to_vec();
+        let metadata =
+            self.update_referenced_inode_table_entry(&mut bytes, inode, |inode_bytes| {
+                timestamps.encode(inode_bytes)?;
+                let raw = disk_inode::RawInode::decode(inode_bytes)?;
+                if let Some(mode) = update.mode {
+                    put_u16(inode_bytes, 0x00, (raw.mode() & disk_inode::S_IFMT) | mode)?;
+                }
+                if let Some((uid, gid)) = update.owner {
+                    put_u16(inode_bytes, 0x02, uid as u16)?;
+                    put_u16(inode_bytes, 0x18, gid as u16)?;
+                    put_u16(inode_bytes, 0x78, (uid >> 16) as u16)?;
+                    put_u16(inode_bytes, 0x7a, (gid >> 16) as u16)?;
+                }
+                if let Some(atime) = update.atime {
+                    update_inode_timestamp_bytes(
+                        inode_bytes,
+                        0x08,
+                        disk_inode::ATIME_EXTRA_OFFSET,
+                        raw.atime_extra().is_some(),
+                        atime,
+                    )?;
+                }
+                if let Some(mtime) = update.mtime {
+                    update_inode_timestamp_bytes(
+                        inode_bytes,
+                        0x10,
+                        disk_inode::MTIME_EXTRA_OFFSET,
+                        raw.mtime_extra().is_some(),
+                        mtime,
+                    )?;
+                }
                 update_inode_timestamp_bytes(
                     inode_bytes,
-                    0x08,
-                    disk_inode::ATIME_EXTRA_OFFSET,
-                    raw.atime_extra().is_some(),
-                    atime,
-                )?;
-            }
-            if let Some(mtime) = update.mtime {
-                update_inode_timestamp_bytes(
-                    inode_bytes,
-                    0x10,
-                    disk_inode::MTIME_EXTRA_OFFSET,
-                    raw.mtime_extra().is_some(),
-                    mtime,
-                )?;
-            }
-            update_inode_timestamp_bytes(
-                inode_bytes,
-                0x0c,
-                disk_inode::CTIME_EXTRA_OFFSET,
-                raw.ctime_extra().is_some(),
-                update.ctime,
-            )
-        })
+                    0x0c,
+                    disk_inode::CTIME_EXTRA_OFFSET,
+                    raw.ctime_extra().is_some(),
+                    update.ctime,
+                )
+            })?;
+        if let Some((uid, gid)) = update.owner {
+            self.transfer_inode_quotas(inode, uid, gid, handle)?;
+        }
+        let access = self.metadata_io.write_access(block, handle)?;
+        self.replace_inode_table_entry(&access, inode.number(), &bytes)?;
+        inode.publish_metadata_with_timestamps(metadata, timestamps)
     }
 
     pub(crate) fn update_inode_flags_timestamps_metadata(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         flags: u32,
         timestamp: Ext4Timestamp,
@@ -2423,7 +2512,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn update_inode_links_count_metadata(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         links_count: u16,
         timestamp: Ext4Timestamp,
@@ -2436,7 +2525,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn update_inode_links_count_ctime_metadata(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         links_count: u16,
         timestamp: Ext4Timestamp,
@@ -2479,7 +2568,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn update_inode_blocks_metadata(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         blocks: u64,
         handle: &mut JournalHandle<'_>,

@@ -2,7 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
+use alloc::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
 use core::num::NonZeroU32;
 
 #[cfg(unittest)]
@@ -481,6 +486,8 @@ pub(crate) struct AllocatorState {
 /// KVFS owns resident inode identity. This object owns ext4 superblock state,
 /// including the mount-wide delayed-allocation reservation aggregate.
 pub(crate) struct Ext4SbInfo {
+    /// Back-reference to the VFS owner of quota state and resident identities.
+    pub(crate) vfs_superblock: Weak<kvfs::SuperBlock>,
     pub(crate) allocator: Mutex<AllocatorState>,
     /// Mount-wide delayed-allocation reservation total.
     ///
@@ -570,6 +577,7 @@ impl Ext4SbInfo {
         statfs_mode: Ext4StatFsMode,
     ) -> Ext4Result<Self> {
         let mut filesystem = Self::open(device, false)?;
+        filesystem.ensure_writable()?;
         filesystem.statfs_mode = statfs_mode;
         Ok(filesystem)
     }
@@ -762,6 +770,7 @@ impl Ext4SbInfo {
             hash_unsigned: 0,
             device: filesystem_device,
             metadata_io,
+            vfs_superblock: Weak::new(),
             journal: None,
             orphan_info: None,
             layout,

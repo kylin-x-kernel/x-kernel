@@ -200,21 +200,25 @@ impl FeatureSet {
 
     pub(crate) fn validate_mount(self) -> Ext4Result<()> {
         self.validate_read_only()?;
-        // Mount preparation can replay and clean up orphans before publication.
-        // Those mutations require accounting even for a read-only VFS mount.
+        if !self.has_extents() {
+            return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentFilesystem));
+        }
+
+        Ok(())
+    }
+
+    /// Checks features required by inode and allocation mutations.
+    pub(crate) fn validate_writable(self) -> Ext4Result<()> {
+        self.validate_mount()?;
         let quota_features = self
             .read_only_compat
-            .intersection(ReadOnlyCompatFeatures::QUOTA | ReadOnlyCompatFeatures::PROJECT);
+            .intersection(ReadOnlyCompatFeatures::PROJECT);
         if !quota_features.is_empty() {
             return Err(Ext4Error::UnsupportedFeature {
                 class: FeatureClass::ReadOnlyCompatible,
                 bits: quota_features.bits(),
             });
         }
-        if !self.has_extents() {
-            return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentFilesystem));
-        }
-
         Ok(())
     }
 }

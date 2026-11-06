@@ -164,7 +164,7 @@ fn full_orphan_file_falls_back_to_legacy_list() {
 
 #[def_test]
 fn recovery_orphan_propagates_unsupported_inode_format() {
-    let (mut filesystem, inode) = orphan_test_filesystem();
+    let (filesystem, inode) = orphan_test_filesystem();
     let journal = JournalTransactions::new(TransactionId::new(1003));
     let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
     let transaction = handle.id();

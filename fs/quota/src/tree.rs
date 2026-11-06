@@ -16,6 +16,15 @@ const BLOCK_BYTES: usize = 1024;
 const DATA_HEADER_BYTES: usize = 16;
 const ROOT_BLOCK: u32 = 1;
 const TREE_DEPTH: usize = 4;
+pub(crate) const fn record_growth_bytes_bound() -> u64 {
+    (TREE_DEPTH * BLOCK_BYTES) as u64
+}
+
+pub(crate) const fn record_write_blocks_bound() -> u32 {
+    // Tree path, data block, two free-entry neighbors, info, and one spare.
+    TREE_DEPTH as u32 + 5
+}
+
 type Block = [u8; BLOCK_BYTES];
 
 #[derive(Debug)]
@@ -257,7 +266,7 @@ impl QuotaTree {
         file: &F,
         number: u32,
         block: &mut Block,
-    ) -> KResult<()> {
+    ) -> KResult<Option<u32>> {
         let next = u32_at(block, 0);
         let previous = u32_at(block, 4);
         self.check_optional_block(next)?;
@@ -292,13 +301,11 @@ impl QuotaTree {
         if let Some(bytes) = &mut previous_block {
             put_u32(bytes, 0, next);
             self.write_block(io, file, previous, bytes)?;
-        } else {
-            self.free_entry = next;
-            self.is_dirty = true;
         }
         put_u32(block, 0, 0);
         put_u32(block, 4, 0);
-        Ok(())
+        // The caller publishes this head only after its target write succeeds.
+        Ok((previous == 0).then_some(next))
     }
 
     fn link_free_entry<F>(
@@ -364,13 +371,19 @@ impl QuotaTree {
             })
             .ok_or_else(corrupt)?;
         let count = data_count(&block) + 1;
-        if usize::from(count) == entries_per_block(self.format) {
-            self.unlink_free_entry(io, file, number, &mut block)?;
-        }
+        let new_head = if usize::from(count) == entries_per_block(self.format) {
+            self.unlink_free_entry(io, file, number, &mut block)?
+        } else {
+            None
+        };
         set_data_count(&mut block, count);
         let start = DATA_HEADER_BYTES + slot * self.format.entry_size();
         block[start..start + entry.len()].copy_from_slice(entry);
         self.write_block(io, file, number, &block)?;
+        if let Some(head) = new_head {
+            self.free_entry = head;
+            self.is_dirty = true;
+        }
         Ok((number, block_offset(number) + start as u64))
     }
 
@@ -441,8 +454,13 @@ impl QuotaTree {
         set_data_count(&mut block, previous_count - 1);
         block[start..start + self.format.entry_size()].fill(0);
         if previous_count == 1 {
-            self.unlink_free_entry(io, file, number, &mut block)?;
-            self.free_block(io, file, number)
+            let new_head = self.unlink_free_entry(io, file, number, &mut block)?;
+            self.free_block(io, file, number)?;
+            if let Some(head) = new_head {
+                self.free_entry = head;
+                self.is_dirty = true;
+            }
+            Ok(())
         } else if usize::from(previous_count) == entries_per_block(self.format) {
             self.link_free_entry(io, file, number, &mut block)
         } else {

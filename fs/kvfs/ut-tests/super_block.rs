@@ -954,3 +954,125 @@ fn registry_lookup_defers_final_superblock_drop_until_after_unlock() {
     drop(live_refs);
     assert_eq!(backend.releases.load(Ordering::Relaxed), 1);
 }
+
+struct FinalReleaseOperations;
+static FINAL_RELEASE_OPERATIONS: FinalReleaseOperations = FinalReleaseOperations;
+
+struct FinalReleaseState {
+    syncs: AtomicUsize,
+    releases: AtomicUsize,
+}
+
+impl SuperBlockOperations for FinalReleaseOperations {
+    fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
+        Ok(test_statfs())
+    }
+
+    fn sync_fs(&self, super_block: &SuperBlock) -> VfsResult<()> {
+        super_block
+            .private::<Arc<FinalReleaseState>>()?
+            .syncs
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn put_super(&self, super_block: &SuperBlock) -> VfsResult<()> {
+        let state = super_block.private::<Arc<FinalReleaseState>>()?;
+        if state.syncs.load(Ordering::Relaxed) != 2 {
+            return Err(VfsError::InvalidData);
+        }
+        state.releases.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+#[def_test]
+fn final_resource_release_follows_both_shutdown_sync_passes() {
+    let state = Arc::new(FinalReleaseState {
+        syncs: AtomicUsize::new(0),
+        releases: AtomicUsize::new(0),
+    });
+    let super_block = SuperBlock::new_with_flags_and_private(
+        &TEST_FILE_SYSTEM_TYPE,
+        &FINAL_RELEASE_OPERATIONS,
+        kalloc_types::KBox::new(state.clone()).unwrap(),
+        SuperBlockFlags::empty(),
+        4096,
+        MAX_LFS_FILESIZE,
+        |_| {
+            Dentry::new_dir_from_inode(
+                VfsInode::new_dir_with_defaults(
+                    NodeFlags::empty(),
+                    VfsInodeInit::new(
+                        2,
+                        0,
+                        Umode::new(NodeType::Directory, NodePermission::default()),
+                    ),
+                ),
+                None,
+                String::new(),
+            )
+        },
+    );
+    super_block.activate_mount();
+    super_block.deactivate_mount();
+    assert_eq!(state.releases.load(Ordering::Relaxed), 1);
+}
+
+#[def_test(serial)]
+fn fifo_timestamp_mutation_waits_for_readonly_policy_publication() {
+    struct SpecialOperations;
+    impl crate::InodeOperations for SpecialOperations {}
+
+    let sb = SuperBlock::new(&TEST_FILE_SYSTEM_TYPE, &BDEV_TEST_SUPER_OPERATIONS, |sb| {
+        let root = sb.get_or_init_inode(1, || {
+            VfsInode::new_dir_with_defaults(
+                NodeFlags::empty(),
+                VfsInodeInit::new(
+                    1,
+                    0,
+                    Umode::new(NodeType::Directory, NodePermission::default()),
+                ),
+            )
+        });
+        Dentry::new_dir_from_inode(root, None, String::new())
+    });
+    let inode = sb.get_or_init_inode(2, || {
+        VfsInode::new_special(
+            Arc::new(SpecialOperations),
+            NodeFlags::empty(),
+            VfsInodeInit::new(2, 0, Umode::new(NodeType::Fifo, NodePermission::default())),
+        )
+    });
+    let path = Path::new(
+        crate::Mount::new_root(&sb),
+        Dentry::new_file_from_inode(inode.clone(), None, String::new()),
+    );
+    let file = crate::dentry_open(
+        path,
+        crate::OpenFlags::READ_WRITE.bits(),
+        kcred::initial_cred(),
+    )
+    .unwrap();
+    assert!(!file.mode().contains(crate::FMode::WRITER));
+    let before = inode.times();
+    let gate = sb.umount_lock.write();
+    let result = Arc::new(crate::Mutex::new(None));
+    let saved = result.clone();
+    let done = Arc::new(core::sync::atomic::AtomicBool::new(false));
+    let finished = done.clone();
+    let writer = ktask::spawn(move || {
+        *saved.lock() = Some(file.write(b"x"));
+        finished.store(true, Ordering::Release);
+    });
+    while !writer.state().is_blocked() && !done.load(Ordering::Acquire) {
+        ktask::yield_now();
+    }
+    assert!(writer.state().is_blocked());
+    sb.mark_read_only();
+    drop(gate);
+    writer.join();
+    assert_eq!(result.lock().take().unwrap(), Ok(1));
+    assert_eq!(inode.times().modified_at, before.modified_at);
+    assert_eq!(inode.times().changed_at, before.changed_at);
+}

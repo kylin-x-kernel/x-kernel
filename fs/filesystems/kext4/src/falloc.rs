@@ -214,6 +214,7 @@ impl Ext4SbInfo {
             FALLOCATE_CREDIT_ALLOCATION_RUNS,
             FALLOCATE_CREDIT_EXTENT_MUTATIONS,
         )?);
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_for_mutation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,

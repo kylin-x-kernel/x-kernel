@@ -709,6 +709,7 @@ impl VfsFileBuilder {
                     | NodeType::Socket
             );
         if holds_write_access {
+            let _write_guard = location.path().lock_writable_mount()?;
             location.inode().acquire_write_access();
             self.mode.insert(FMode::WRITER);
         }
@@ -1172,6 +1173,17 @@ impl VfsFile {
     }
 
     pub(crate) fn file_update_time(&self) -> VfsResult<()> {
+        // Regular writable files retain write admission for their lifetime.
+        // Special files need admission only while changing inode timestamps.
+        let _write_guard = if self.mode().contains(FMode::WRITER) {
+            None
+        } else {
+            match self.path().lock_writable_mount() {
+                Ok(guard) => Some(guard),
+                Err(error) if error == VfsError::ReadOnlyFilesystem => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        };
         self.path().update_cmtime()
     }
 

@@ -340,6 +340,8 @@ impl Ext4SbInfo {
         else {
             return Ok(());
         };
+        self.initialize_inode_quotas(inode)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_for_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -368,6 +370,8 @@ impl Ext4SbInfo {
         else {
             return Ok(());
         };
+        self.initialize_inode_quotas(inode)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_for_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -381,7 +385,7 @@ impl Ext4SbInfo {
     }
 
     fn update_xattr_in_transaction(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
@@ -391,7 +395,7 @@ impl Ext4SbInfo {
     }
 
     fn apply_xattr_storage_plan(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         plan: InodeXattrStoragePlan,
         preallocated_external_block: Option<FilesystemBlock>,
@@ -536,14 +540,13 @@ impl Ext4SbInfo {
 
     /// Best-effort expansion of an existing inode's extra fields.
     ///
-    /// Linux performs this step when an inode is dirtied. KExt4 follows the
-    /// same fallback rule: try `want_extra_isize`, then `min_extra_isize`, and
-    /// keep the current size if neither layout can preserve every xattr.
+    /// Try `want_extra_isize`, then `min_extra_isize`, and keep the current
+    /// size if neither layout can preserve every xattr.
     /// Layout and allocation-space failures leave ordinary inode metadata
     /// updates available; device, checksum, and corruption errors still
     /// propagate because they invalidate the transaction's integrity.
     pub(crate) fn try_expand_inode_extra_isize(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
@@ -604,7 +607,7 @@ impl Ext4SbInfo {
             if plan.external_block_action == ExternalXattrBlockAction::Allocate {
                 match self.allocate_block(inode, None, handle) {
                     Ok(allocation) => Some(FilesystemBlock::new(allocation.block().get())),
-                    Err(Ext4Error::NoSpace) => {
+                    Err(Ext4Error::NoSpace | Ext4Error::Quota(kerrno::LinuxError::EDQUOT)) => {
                         inode.disable_extra_isize_expansion();
                         return Ok(());
                     }
@@ -721,7 +724,7 @@ impl Ext4SbInfo {
     }
 
     fn create_external_xattr_block(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         xattrs: &[Ext4Xattr],
         handle: &mut JournalHandle<'_>,
@@ -738,7 +741,7 @@ impl Ext4SbInfo {
     }
 
     fn write_external_xattr_block(
-        &mut self,
+        &self,
         block: FilesystemBlock,
         xattrs: &[Ext4Xattr],
         handle: &mut JournalHandle<'_>,
@@ -762,7 +765,7 @@ impl Ext4SbInfo {
     }
 
     fn drop_external_xattr_block(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         block: u64,
         handle: &mut JournalHandle<'_>,
@@ -787,6 +790,10 @@ impl Ext4SbInfo {
                 .metadata_io
                 .write_access(FilesystemBlock::new(block), handle)?;
             replace_metadata_access_bytes(&access, bytes)?;
+            // Each owner releases its charge even while another inode retains
+            // the shared physical block.
+            self.free_quota_space(inode, 1, handle)?;
+            self.sync_inode_quotas(inode, handle)?;
             return Ok(());
         }
 
@@ -800,7 +807,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn release_external_xattr_block_for_eviction(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {

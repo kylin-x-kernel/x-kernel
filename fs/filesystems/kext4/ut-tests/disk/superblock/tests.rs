@@ -6,8 +6,7 @@ use unittest::def_test;
 
 use super::{
     CHECKSUM_OFFSET, CRC32C_CHECKSUM_TYPE, EXT2_FLAGS_UNSIGNED_HASH, Ext4DiskSuperblock,
-    LINUX_DEFAULT_EXTRA_ISIZE, MIN_EXTRA_ISIZE_OFFSET, SUPERBLOCK_SIZE,
-    WANT_EXTRA_ISIZE_OFFSET,
+    LINUX_DEFAULT_EXTRA_ISIZE, MIN_EXTRA_ISIZE_OFFSET, SUPERBLOCK_SIZE, WANT_EXTRA_ISIZE_OFFSET,
 };
 use crate::{ChecksumTarget, CorruptKind, Ext4Error, disk::checksum};
 
@@ -343,4 +342,24 @@ fn put_u16(output: &mut [u8], offset: usize, value: u16) {
 
 fn put_u32(output: &mut [u8], offset: usize, value: u32) {
     output[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+#[def_test]
+fn quota_inodes_and_sparse_backup_groups_decode_distinct_fields() {
+    let mut bytes = valid_superblock();
+    for (offset, value) in [
+        (0x240, 3),
+        (0x244, 4),
+        (0x248, 91),
+        (0x24c, 7),
+        (0x250, 15),
+        (0x26c, 12),
+    ] {
+        put_u32(&mut bytes, offset, value);
+    }
+    let decoded = Ext4DiskSuperblock::decode(&bytes).unwrap();
+    assert_eq!(decoded.quota_inode(kquota::QuotaType::User), 3);
+    assert_eq!(decoded.quota_inode(kquota::QuotaType::Group), 4);
+    assert_eq!(decoded.quota_inode(kquota::QuotaType::Project), 12);
+    assert_eq!(decoded.backup_groups(), [7, 15]);
 }

@@ -351,7 +351,14 @@ fn consume_entire_space() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(0), 4, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(0),
+            4,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -371,7 +378,14 @@ fn consume_prefix_leaves_tail() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(0), 3, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(0),
+            3,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -395,7 +409,14 @@ fn consume_suffix_leaves_head() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(5), 3, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(5),
+            3,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -419,7 +440,14 @@ fn consume_interior_splits_to_head_and_tail() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(3), 3, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(3),
+            3,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -447,7 +475,14 @@ fn consume_empty_request_returns_none() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(0), 0, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(0),
+            0,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -465,7 +500,14 @@ fn consume_empty_inode_returns_none() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(0), 4, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(0),
+            4,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -482,7 +524,14 @@ fn consume_no_matching_space_returns_none() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(0), 4, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(0),
+            4,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -498,7 +547,14 @@ fn consume_overflow_bound_returns_none() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(u64::MAX), 1, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(u64::MAX),
+            1,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -515,7 +571,14 @@ fn consume_clips_to_space_end() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(7), 10, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(7),
+            10,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -537,10 +600,24 @@ fn consume_then_consume_remainder() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let r1 = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(0), 3, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(0),
+            3,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     let r2 = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(3), 5, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(3),
+            5,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -562,7 +639,14 @@ fn consume_preserves_conservation_invariant() {
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     // Consume interior of first space → head [0,1), consumed [1,3), tail [3,4).
     let _ = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(1), 2, &mut handle)
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(1),
+            2,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())))
         .unwrap();
     drop(handle);
 
@@ -592,7 +676,14 @@ fn consume_insufficient_credits_restores_entire_space() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(0), 4, &mut handle);
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(0),
+            4,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())));
     drop(handle);
 
     // Allocation failed before marking → restore path → Err.
@@ -616,7 +707,14 @@ fn consume_insufficient_credits_restores_split_to_head_and_tail() {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
     let result = filesystem
-        .consume_prealloc_for_write(&inode, LogicalBlock::new(2), 3, &mut handle);
+        .consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(2),
+            3,
+            BlockCount::new(1),
+            &mut handle,
+        )
+        .map(|run| run.map(|allocation| (allocation.first_block(), allocation.block_count())));
     drop(handle);
 
     assert!(result.is_err());
@@ -1113,6 +1211,7 @@ fn scan_without_birth(
 
 #[def_test]
 fn enospc_valve_discards_spaces_and_retries_scan() {
+    let allocation_inode = allocation_test_inode(12);
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     // One space covers the whole free region [6, 32): the first scan finds no
@@ -1120,7 +1219,7 @@ fn enospc_valve_discards_spaces_and_retries_scan() {
     insert_prealloc_space(&filesystem, &inode, 0, 6, TEST_FREE_BLOCKS, 0);
     assert_eq!(filesystem.free_blocks_count(), u64::from(TEST_FREE_BLOCKS));
 
-    let run = scan_without_birth(&filesystem, group0_request(&inode, 0, 4)).unwrap();
+    let run = scan_without_birth(&filesystem, group0_request(&allocation_inode, 0, 4)).unwrap();
 
     assert_eq!(run.physical_start(), PhysicalBlock::new(6));
     assert_eq!(run.block_count(), BlockCount::new(4));
@@ -1190,6 +1289,7 @@ fn enospc_valve_skips_retry_when_failure_is_geometric() {
 
 #[def_test]
 fn enospc_valve_does_not_retry_corrupt_bitmap() {
+    let allocation_inode = allocation_test_inode(12);
     // A bitmap-checksum mismatch surfaces as InvalidBlockBitmap. Discard
     // cannot repair corruption, so the valve must stay put: the original
     // error is returned and the space is left intact.
@@ -1209,7 +1309,7 @@ fn enospc_valve_does_not_retry_corrupt_bitmap() {
     let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     insert_prealloc_space(&filesystem, &inode, 0, 6, TEST_FREE_BLOCKS, 0);
 
-    let result = scan_without_birth(&filesystem, group0_request(&inode, 0, 4));
+    let result = scan_without_birth(&filesystem, group0_request(&allocation_inode, 0, 4));
 
     assert_eq!(
         result,
@@ -1222,6 +1322,7 @@ fn enospc_valve_does_not_retry_corrupt_bitmap() {
 
 #[def_test]
 fn enospc_valve_retries_healthy_group_despite_corrupt_sibling() {
+    let allocation_inode = allocation_test_inode(12);
     // Distinguishes "corruption is only latched" from "corruption closes the
     // retry gate". Group 0's bitmap checksum is bad; group 1's free bits are
     // all held by a prealloc space. The scan reports Corrupt for group 0 and
@@ -1252,7 +1353,7 @@ fn enospc_valve_retries_healthy_group_despite_corrupt_sibling() {
     // Group 1 spans blocks 32..64, so its first free block (bit 6) is 38.
     insert_prealloc_space(&filesystem, &inode, 0, 38, TEST_FREE_BLOCKS, 1);
 
-    let run = scan_without_birth(&filesystem, group0_request(&inode, 0, 4)).unwrap();
+    let run = scan_without_birth(&filesystem, group0_request(&allocation_inode, 0, 4)).unwrap();
 
     assert_eq!(run.group(), BlockGroupNumber::new(1));
     assert_eq!(run.physical_start(), PhysicalBlock::new(38));
@@ -1354,4 +1455,30 @@ fn allocation_rejects_a_different_preallocation_owner_before_mutation() {
     assert_eq!(filesystem.free_blocks_count(), free_before);
     assert_eq!(prealloc_count(&inode), 0);
     assert_eq!(prealloc_twin_count(&filesystem), 0);
+}
+
+
+#[def_test]
+fn short_preallocation_preserves_hint_when_request_minimum_is_larger() {
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    insert_prealloc_space(&filesystem, &inode, 0, 6, 2, 0);
+    let free_blocks = filesystem.free_blocks_count();
+    let journal = JournalTransactions::new(TransactionId::new(200));
+    let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
+    assert_eq!(
+        filesystem.consume_prealloc_for_write(
+            &inode,
+            LogicalBlock::new(0),
+            4,
+            BlockCount::new(4),
+            &mut handle,
+        ),
+        Ok(None)
+    );
+    assert!(!handle.has_updates());
+    assert_eq!(filesystem.free_blocks_count(), free_blocks);
+    assert_eq!(prealloc_count(&inode), 1);
+    assert_eq!(prealloc_twin_count(&filesystem), 1);
+    assert_eq!(preallocated_blocks(&filesystem), 2);
 }

@@ -224,6 +224,7 @@ impl Ext4SbInfo {
         gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4Inode> {
+        self.initialize_owner_quotas(uid, gid)?;
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -232,6 +233,7 @@ impl Ext4SbInfo {
         let required_blocks = self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
         let credits = Ext4Credits::create(self, parent)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal =
             self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent])?;
         let mut handle = journal.begin(credits)?;
@@ -257,6 +259,7 @@ impl Ext4SbInfo {
         gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4Inode> {
+        self.initialize_owner_quotas(uid, gid)?;
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -270,6 +273,7 @@ impl Ext4SbInfo {
         let required_blocks = self.ensure_namespace_insert_capacity(parent, name, 1)?;
 
         let credits = Ext4Credits::mkdir(self, parent)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal =
             self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent])?;
         let mut handle = journal.begin(credits)?;
@@ -342,6 +346,7 @@ impl Ext4SbInfo {
         if !self.superblock().features().has_extents() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode));
         }
+        self.initialize_owner_quotas(uid, gid)?;
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -350,6 +355,7 @@ impl Ext4SbInfo {
         let required_blocks = self.ensure_namespace_insert_capacity(parent, name, 1)?;
 
         let credits = Ext4Credits::block_mapped_symlink(self, parent)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal =
             self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent])?;
         let mut handle = journal.begin(credits)?;
@@ -381,6 +387,7 @@ impl Ext4SbInfo {
         let initialization = InodeInitialization::special(kind, permissions, device, uid, gid)?
             .with_timestamp(timestamp);
         let file_type = directory_file_type_for_inode_kind(kind);
+        self.initialize_owner_quotas(uid, gid)?;
         self.create_initialized_child(parent, name, initialization, file_type, timestamp)
     }
 
@@ -408,6 +415,7 @@ impl Ext4SbInfo {
         let required_blocks = self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
         let credits = Ext4Credits::link(self, parent)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal =
             self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent, target])?;
         let mut handle = journal.begin(credits)?;
@@ -447,6 +455,7 @@ impl Ext4SbInfo {
         self.validate_inode_timestamp_update(child, timestamp)?;
 
         let credits = Ext4Credits::unlink(self, parent, child);
+        let credits = self.quota_metadata_credits(credits);
         let required_blocks = 0;
         let journal =
             self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent, child])?;
@@ -487,6 +496,7 @@ impl Ext4SbInfo {
         self.validate_inode_timestamp_update(child, timestamp)?;
 
         let credits = Ext4Credits::rmdir(self, parent, child);
+        let credits = self.quota_metadata_credits(credits);
         let required_blocks = 0;
         let journal =
             self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent, child])?;
@@ -581,6 +591,7 @@ impl Ext4SbInfo {
                 .ok_or(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit))?;
         }
         let credits = Ext4Credits::rename(self, source_parent, target_parent, moved, replaced)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.namei_metadata_journal_for_allocation(
             credits,
             required_blocks,
@@ -674,6 +685,7 @@ impl Ext4SbInfo {
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4Inode> {
+        self.initialize_owner_quotas(initialization.uid(), initialization.gid())?;
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -682,6 +694,7 @@ impl Ext4SbInfo {
         let required_blocks = self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
         let credits = Ext4Credits::create(self, parent)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal =
             self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent])?;
         let mut handle = journal.begin(credits)?;
@@ -940,8 +953,10 @@ impl Ext4SbInfo {
     ) -> Ext4Result<()> {
         self.ensure_unlinked_inode_eviction_supported(inode)?;
         self.validate_inode_timestamp_update(inode, timestamp)?;
+        self.initialize_inode_quotas_with_policy(inode, recovery_flag_policy)?;
 
         let credits = Ext4Credits::final_eviction(self, inode)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.namei_metadata_journal_with_policy(credits, recovery_flag_policy)?;
         let mut handle = journal.begin(credits)?;
         let result = self.evict_zero_link_inode(inode, None, timestamp, &mut handle);
@@ -973,8 +988,10 @@ impl Ext4SbInfo {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
         self.ensure_unlinked_inode_eviction_supported(inode)?;
+        self.initialize_inode_quotas(inode)?;
 
         let credits = Ext4Credits::eviction_prepare(inode)?;
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_without_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -1027,7 +1044,9 @@ impl Ext4SbInfo {
             if plan.freed == 0 {
                 return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
             }
-            if journal.can_fit_handle(JournalCredits::new(plan.credits)) {
+            if journal
+                .can_fit_handle(self.quota_metadata_credits(JournalCredits::new(plan.credits)))
+            {
                 break plan;
             }
             // Capacity is a planning constraint, not an allocator/commit error.
@@ -1038,6 +1057,7 @@ impl Ext4SbInfo {
             batch_limit /= 2;
         };
         let credits = JournalCredits::new(plan.credits);
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_without_allocation(credits, policy)?;
         let mut jh = journal.begin(credits)?;
         // Enforce this phase's no-EA-allocation premise locally, rather than
@@ -1075,6 +1095,7 @@ impl Ext4SbInfo {
         }
 
         let credits = JournalCredits::new(EVICTION_FINISH_CREDITS);
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_without_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -2622,6 +2643,7 @@ impl Ext4SbInfo {
     ) -> Ext4Result<Arc<MountedJournal>> {
         let mut required = required_blocks;
         for inode in inodes {
+            self.initialize_inode_quotas(inode)?;
             required = required
                 .checked_add(self.inode_extra_isize_allocation_blocks(inode))
                 .ok_or(Ext4Error::Overflow)?;

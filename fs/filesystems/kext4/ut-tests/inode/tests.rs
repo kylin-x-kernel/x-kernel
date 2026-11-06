@@ -405,3 +405,20 @@ fn encode_new_device_id(major: u32, minor: u32) -> u32 {
 fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
+
+#[def_test]
+fn invalid_delalloc_extents_do_not_publish_a_valid_prefix_or_counter_change() {
+    let inode = test_inode(regular_inode_metadata());
+    inode.insert_unreserved_delalloc_extents(&[(3, 8)]).unwrap();
+    for extents in [&[(9, 10), (7, 8)][..], &[(9, 10), (11, 11)][..]] {
+        assert_eq!(
+            inode.insert_unreserved_delalloc_extents(extents),
+            Err(Ext4Error::InvalidDelayedAllocationState)
+        );
+        assert_eq!(inode.reserved_data_blocks(), 5);
+        assert_eq!(
+            inode.unreserved_delalloc_extents(0, 12),
+            alloc::vec![(0, 3), (8, 12)]
+        );
+    }
+}

@@ -22,7 +22,7 @@ use crate::{
 
 #[def_test]
 fn inline_extent_mutation_journals_inode_table_update() {
-    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let (filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let journal = JournalTransactions::new(TransactionId::new(451));
     let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
 
@@ -64,7 +64,7 @@ fn inline_extent_mutation_journals_inode_table_update() {
 
 #[def_test]
 fn extent_root_grow_without_revoke_journals_only_live_leaf_block() {
-    let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let (filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let journal = JournalTransactions::new(TransactionId::new(461));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let transaction = handle.id();
@@ -145,7 +145,7 @@ fn extent_root_grow_without_revoke_journals_only_live_leaf_block() {
 
 #[def_test]
 fn extent_point_mutations_keep_existing_leaf_block() {
-    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let (filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let journal = JournalTransactions::new(TransactionId::new(4611));
     let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
     let inode_allocation = filesystem
@@ -231,7 +231,7 @@ fn extent_leaf_split_leaves_space_in_reused_leaf() {
         inode_bitmap: [0, 0, 0, 0],
     }; 16];
     groups[0].inode_bitmap = [0xff, 0x03, 0, 0];
-    let (mut filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
+    let (filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
     let journal = JournalTransactions::new(TransactionId::new(4612));
     let mut handle = journal.begin(JournalCredits::new(100_000)).unwrap();
     let inode_allocation = filesystem
@@ -569,7 +569,7 @@ fn extent_mutation_splits_multiple_leaf_blocks() {
         inode_bitmap: [0, 0, 0, 0],
     }; 16];
     groups[0].inode_bitmap = [0xff, 0x03, 0, 0];
-    let (mut filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
+    let (filesystem, _device) = allocator_multigroup_test_filesystem(&groups);
     let journal = JournalTransactions::new(TransactionId::new(465));
     let mut handle = journal.begin(JournalCredits::new(100_000)).unwrap();
     let inode_allocation = filesystem

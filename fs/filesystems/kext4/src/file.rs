@@ -697,6 +697,7 @@ impl Ext4SbInfo {
                 )
                 .map_err(|error| cursor.settled_failure(error))?,
             );
+            let credits = self.quota_metadata_credits(credits);
             let allocation_blocks = if self
                 .has_pending_block_frees()
                 .map_err(|error| cursor.settled_failure(error))?
@@ -968,7 +969,9 @@ impl Ext4SbInfo {
         if let RegularWriteMetadata::Full { timestamp } = metadata {
             self.validate_inode_timestamp_update(inode, timestamp)?;
         }
+        self.initialize_inode_quotas(inode)?;
         let credits = JournalCredits::for_regular_inode_write_metadata();
+        let credits = self.quota_metadata_credits(credits);
         let journal = self.metadata_journal_for_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -1206,46 +1209,27 @@ impl Ext4SbInfo {
         remaining_extra_prealloc_blocks: &mut u32,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<(crate::PhysicalBlock, BlockCount)> {
-        // Linux order: reuse a prealloc space first
-        // (`ext4_mb_use_preallocated`), and normalize and allocate
-        // only on a miss. A hit marks exactly the consumed span
-        // inside the same allocator lock section; the hole mapping
-        // already reserved one allocation run, so it needs no extra
-        // credits.
-        let (physical_start, allocated_blocks) =
-            match self.consume_prealloc_for_write(inode, logical, u64::from(requested), handle)? {
-                Some(consumed) => consumed,
-                None => {
-                    let goal = self.allocation_goal_after_previous_extent(inode, logical)?;
-                    let normalized =
-                        normalize_write_allocation_len(requested, hole_len, goal.is_some());
-                    let surplus_budget = normalized
-                        .checked_sub(requested)
-                        .ok_or(Ext4Error::Overflow)?
-                        .min(*remaining_extra_prealloc_blocks)
-                        .min(u32::from(crate::disk::extent::EXT_UNWRITTEN_MAX_LEN) - requested);
-                    // The surplus is registered in memory, never marked
-                    // on disk, so the request asks for the dirty window
-                    // only and the birth hook samples the rest.
-                    let request = Ext4AllocationRequest::new(
-                        inode,
-                        logical,
-                        goal,
-                        BlockCount::new(requested),
-                        BlockCount::new(1),
-                        Ext4AllocationFlags::ALLOW_PARTIAL,
-                    )?;
-                    let (allocation, registered) = self.allocate_blocks_for_write_with_prealloc(
-                        request,
-                        inode,
-                        surplus_budget,
-                        handle,
-                    )?;
-                    *remaining_extra_prealloc_blocks =
-                        (*remaining_extra_prealloc_blocks).saturating_sub(registered);
-                    (allocation.physical_start(), allocation.block_count())
-                }
-            };
+        let goal = self.allocation_goal_after_previous_extent(inode, logical)?;
+        let normalized = normalize_write_allocation_len(requested, hole_len, goal.is_some());
+        let surplus_budget = normalized
+            .checked_sub(requested)
+            .ok_or(Ext4Error::Overflow)?
+            .min(*remaining_extra_prealloc_blocks)
+            .min(u32::from(crate::disk::extent::EXT_UNWRITTEN_MAX_LEN) - requested);
+        let request = Ext4AllocationRequest::new(
+            inode,
+            logical,
+            goal,
+            BlockCount::new(requested),
+            BlockCount::new(1),
+            Ext4AllocationFlags::ALLOW_PARTIAL,
+        )?;
+        let (allocation, registered) =
+            self.allocate_blocks_for_write_with_prealloc(request, inode, surplus_budget, handle)?;
+        *remaining_extra_prealloc_blocks =
+            (*remaining_extra_prealloc_blocks).saturating_sub(registered);
+        let physical_start = allocation.physical_start();
+        let allocated_blocks = allocation.block_count();
         // Registration stays inside the allocation lock section (it
         // cannot move below), so a failed mapping insert leaves the
         // space in memory for close or eviction to reclaim.

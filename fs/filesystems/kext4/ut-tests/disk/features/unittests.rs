@@ -18,7 +18,7 @@ fn mount_negotiation_rejects_filesystem_without_extents() {
 }
 
 #[def_test]
-fn quota_features_are_readable_but_block_mutating_mount_preparation() {
+fn quota_mount_support_distinguishes_user_group_and_project() {
     use super::ReadOnlyCompatFeatures;
     use crate::FeatureClass;
 
@@ -29,11 +29,16 @@ fn quota_features_are_readable_but_block_mutating_mount_preparation() {
     ] {
         let features = FeatureSet::new(0, IncompatFeatures::EXTENTS.bits(), flags.bits());
         assert_eq!(features.validate_read_only(), Ok(()));
+        assert_eq!(features.validate_mount(), Ok(()));
+        if !flags.contains(ReadOnlyCompatFeatures::PROJECT) {
+            assert_eq!(features.validate_writable(), Ok(()));
+            continue;
+        }
         assert_eq!(
-            features.validate_mount(),
+            features.validate_writable(),
             Err(Ext4Error::UnsupportedFeature {
                 class: FeatureClass::ReadOnlyCompatible,
-                bits: flags.bits(),
+                bits: ReadOnlyCompatFeatures::PROJECT.bits(),
             })
         );
     }

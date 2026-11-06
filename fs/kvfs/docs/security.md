@@ -753,7 +753,8 @@ It may span blocking quota-file I/O only in task context without
 spin/IRQ-disable/preemption-disable guards. Providers must use direct quota
 I/O without recursive charging or caller-held lock reentry. Administrative
 authorization, ID mapping, backing-file protection and transaction recovery
-remain integration obligations; this change leaves production quota disabled.
+remain integration obligations. Ext4 enables internal user/group usage accounting
+from its superblock quota inode fields.
 
 ## Notification-interest lifetime
 
@@ -788,3 +789,27 @@ are inserted. The page-cache index lock is not held across backend I/O. The
 read adjacent pages and later concurrent inserts still win over prefetched data.
 Only returned I/O/allocation errors permit demand fallback; allocator aborts are
 not made recoverable.
+
+## Final filesystem resource release
+
+Final `put_super` executes after inode/dcache writeback under umount exclusion.
+Callbacks may sleep and must release retained inode references outside their
+filesystem locks. Live-inode visitation pins a snapshot and drops the registry
+lock before callbacks. Reconfigure callbacks use their context's sync entry to
+avoid recursively acquiring the superblock umount read/write lock.
+
+Read-only remount holds exclusive umount protection against ordinary VFS
+mutations and writable-open admission. Existing writable files and zero-link
+live inodes cause `EBUSY` before filesystem state changes. The live snapshot
+pins identities through policy publication, while existing cache transition
+queues drain evictions that had already started. No new eviction takes umount
+protection: final shutdown may itself drop the last inode reference while
+holding that lock. The VFS cache binds and registers initialized identities
+before publication; inode constructors must not rely on write-dependent
+lifecycle initialization outside mutation or writable-open admission.
+
+FIFO/pipe timestamp mutations share remount write admission even though their
+file descriptions carry no inode writer count. The guard spans the read-only
+check and timestamp callback; read-only policy prevents metadata mutation while
+allowing the special file's already-completed data operation. Regular writable
+files reuse their retained writer count instead of taking a nested read guard.

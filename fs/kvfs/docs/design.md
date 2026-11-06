@@ -1436,7 +1436,7 @@ formats, while the concrete filesystem supplies direct backing-file I/O and
 transactions. Each loaded class retains the canonical VFS inode in that
 state, so filesystem integration needs no second class-to-inode array.
 Suspension and failed disable retain that reference; successful disable returns
-it for release after writeback and after leaving filesystem locks. No concrete filesystem enables quotas on mount yet.
+it for release after writeback and after leaving filesystem locks. Ext4 enables internal user/group usage accounting on mount.
 
 Quota operations may sleep. Their backing-file I/O must bypass charging and
 must not reenter the same quota owner or reacquire a caller-held filesystem
@@ -1453,3 +1453,37 @@ lock is held for reading across EOF selection and submission, so concurrent
 truncate cannot change the bound before stale pages are inserted. The helper
 fills cache entries, not PTEs, and is optional: a returned error lets the caller
 perform the original demand read.
+
+## Final filesystem resource release
+
+`SuperBlockOperations::put_super` runs after final ordinary inode writeback and
+dcache eviction, under umount exclusion and without the lifecycle mutex. It lets
+a filesystem disable quota and release other superblock-owned resources before
+block-device ownership is dropped. Inode references must be dropped outside
+filesystem mutation locks. `for_each_inode` visits a retained live-inode snapshot
+without holding the registry lock, for serialized lifecycle initialization.
+`FsContext::sync_filesystem` supplies writeback to reconfigure callbacks already
+protected by umount exclusion, without recursively taking that lock.
+
+## Read-only remount admission
+
+The existing superblock umount lock is a read/write lock. Ordinary namespace,
+attribute and xattr mutations hold its shared side through the backend call.
+Writable open holds it until the existing inode write count is acquired;
+that count remains held for the file's lifetime. Reconfigure and final shutdown
+hold the exclusive side. Read-only remount pins the live inode snapshot,
+waits for already-running cache evictions on their existing transition queues,
+and rejects remaining writers or zero-link inodes with `EBUSY` before calling
+the filesystem. Snapshot pins remain until the new flags are published.
+This reuses inode counts and cache states without another removal counter.
+
+The VFS cache binds and registers each successfully initialized inode before
+cache publication. Filesystem inode constructors prepare identity and readable state;
+write-dependent initialization belongs to writable-open and mutation callbacks
+that participate in remount admission.
+
+Special-file timestamp changes acquire shared write admission for the metadata
+update because those files do not retain an inode writer count. After a
+read-only policy is published, FIFO data I/O may continue while its timestamp
+update is skipped. Ordinary writable files retain their existing admission
+through the open-file writer count and do not recursively acquire this lock.

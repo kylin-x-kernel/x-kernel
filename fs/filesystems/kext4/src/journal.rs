@@ -209,6 +209,7 @@ impl MountedJournal {
 impl Ext4SbInfo {
     /// Rejects further writes using the journal's authoritative abort state.
     pub(crate) fn ensure_writable(&self) -> Ext4Result<()> {
+        self.ensure_quota_feature_supported()?;
         if let Some(journal) = self.journal.as_ref() {
             journal.transactions.ensure_writable()?;
         }
@@ -229,6 +230,11 @@ impl Ext4SbInfo {
     /// writeback, and journal-space pressure drive the queue. Freeze should
     /// call the same drain path once that lifecycle hook exists in KVFS.
     pub(crate) fn sync_filesystem(&mut self) -> Ext4Result<()> {
+        // Unsupported writable features leave recovery evidence untouched.
+        // Such mounts cannot own metadata transactions or orphan cleanup.
+        if self.ensure_quota_feature_supported().is_err() {
+            return Ok(());
+        }
         let journal = self.journal.as_ref().cloned();
         let persistence = journal.as_ref().map(|journal| journal.lock_persistence());
         let result = (|| {
@@ -255,6 +261,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn metadata_journal(&mut self) -> Ext4Result<Arc<MountedJournal>> {
+        self.ensure_writable()?;
         let journal = self
             .journal
             .as_ref()
@@ -621,7 +628,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn fail_metadata_mutation(
-        &mut self,
+        &self,
         has_updates: bool,
         mutation_error: Ext4Error,
     ) -> Ext4Error {
@@ -1006,7 +1013,8 @@ impl Ext4SbInfo {
 fn mutation_error_requires_abort(error: Ext4Error) -> bool {
     matches!(
         error,
-        Ext4Error::Device(_)
+        Ext4Error::Quota(kerrno::LinuxError::EIO | kerrno::LinuxError::EUCLEAN)
+            | Ext4Error::Device(_)
             | Ext4Error::JournalAborted
             | Ext4Error::JournalBusy
             | Ext4Error::InvalidJournalTransaction
@@ -1046,6 +1054,12 @@ impl Ext4SbInfo {
         Ok(Some(applied))
     }
 
+    pub(crate) fn quota_recovery_needed(&self) -> Ext4Result<bool> {
+        Ok(self.orphan_head().is_some()
+            || self.has_orphan_present()
+            || !self.orphan_file_empty()?)
+    }
+
     /// Finishes orphan cleanup after mount-private state has been installed.
     ///
     /// Requires exclusive access before creating or publishing resident inodes.
@@ -1053,6 +1067,12 @@ impl Ext4SbInfo {
         &mut self,
         applied: Option<JournalReplayApplied>,
     ) -> Ext4Result<Option<Ext4RecoveryReport>> {
+        // Journal replay preserves committed quota updates. Orphan allocation
+        // changes need writable feature support; preserve their recovery
+        // evidence when serving a read-only mount without that support.
+        if self.ensure_quota_feature_supported().is_err() {
+            return Ok(None);
+        }
         let Some(applied) = applied else {
             if self.orphan_head().is_some()
                 || !self.orphan_file_empty()?
@@ -1084,6 +1104,7 @@ impl Ext4SbInfo {
 
     #[cfg(unittest)]
     pub(crate) fn recover_in_place(&mut self) -> Ext4Result<Option<Ext4RecoveryReport>> {
+        self.ensure_writable()?;
         let applied = self.prepare_recovery()?;
         self.finish_recovery(applied)
     }

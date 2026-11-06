@@ -105,6 +105,8 @@ pub enum UnsupportedKind {
 /// Classifies malformed ext4 metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CorruptKind {
+    /// Quota storage contains an invalid record or tree structure.
+    InvalidQuota,
     /// The input does not contain the complete structure.
     Truncated,
     /// A required count or size is zero.
@@ -163,6 +165,8 @@ pub enum Ext4Error {
     InsufficientJournalCredits,
     /// No free space is available for the requested allocation.
     NoSpace,
+    /// Quota accounting refused or could not complete the operation.
+    Quota(kerrno::LinuxError),
     /// The requested directory entry already exists.
     AlreadyExists,
     /// The requested directory entry does not exist.
@@ -224,6 +228,7 @@ impl From<DriverError> for Ext4Error {
 impl fmt::Display for Ext4Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Quota(error) => write!(formatter, "quota error: {error:?}"),
             Self::Device(error) => write!(formatter, "block device error: {error}"),
             Self::JournalAborted => formatter.write_str("ext4 journal has aborted"),
             Self::InsufficientJournalCredits => {

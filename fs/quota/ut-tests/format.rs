@@ -404,3 +404,96 @@ fn unlink_rejects_a_head_with_a_nonzero_previous_link_before_writing() {
     assert_eq!(io.writes.get(), writes);
     assert_eq!(io.files.borrow()[0], before);
 }
+
+#[def_test]
+fn failed_first_write_does_not_publish_a_full_data_block_head() {
+    for (format, capacity) in [(QuotaFormat::VfsV0, 21_u32), (QuotaFormat::VfsV1, 14)] {
+        let mut io = MemoryFiles::new(format);
+        let mut quota = io.enable_all(format);
+        for id in 1..capacity {
+            quota.get(&mut io, ids(id)[0]).unwrap();
+        }
+        quota.sync(&mut io, QuotaType::User).unwrap();
+        let data_block = io.u32_at(QuotaType::User, 28);
+        let original = io.files.borrow()[0].clone();
+        io.fail_write_at.set(Some(u64::from(data_block) * 1024));
+        assert_eq!(
+            quota.get(&mut io, ids(capacity)[0]),
+            Err(KError::from(LinuxError::EIO))
+        );
+        assert_eq!(io.files.borrow()[0], original);
+        assert_eq!(
+            quota.sync(&mut io, QuotaType::User),
+            Err(KError::from(LinuxError::EIO))
+        );
+        quota.sync(&mut io, QuotaType::User).unwrap();
+        assert_eq!(io.files.borrow()[0], original);
+        io.fail_write_at.set(None);
+        quota.get(&mut io, ids(capacity)[0]).unwrap();
+        assert_eq!(io.u32_at(QuotaType::User, 28), 0);
+        assert_eq!(io.files.borrow()[0].len(), original.len());
+    }
+}
+
+#[def_test]
+fn record_bounds_cover_radix_splits_and_free_list_reuse() {
+    use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
+
+    use kerrno::KResult;
+
+    use crate::QuotaIo;
+
+    struct WriteTrace {
+        io: MemoryFiles,
+        blocks: BTreeSet<u64>,
+    }
+
+    impl QuotaIo for WriteTrace {
+        type File = Arc<QuotaType>;
+
+        fn read(&self, file: &Self::File, offset: u64, bytes: &mut [u8]) -> KResult<usize> {
+            self.io.read(file, offset, bytes)
+        }
+
+        fn write(&mut self, file: &Self::File, offset: u64, bytes: &[u8]) -> KResult<usize> {
+            for block in offset / 1024..=(offset + bytes.len() as u64 - 1) / 1024 {
+                self.blocks.insert(block);
+            }
+            self.io.write(file, offset, bytes)
+        }
+
+        fn file_len(&self, file: &Self::File) -> KResult<u64> {
+            self.io.file_len(file)
+        }
+    }
+
+    for (format, capacity) in [(QuotaFormat::VfsV0, 21), (QuotaFormat::VfsV1, 14)] {
+        let mut io = WriteTrace {
+            io: MemoryFiles::new(format),
+            blocks: BTreeSet::new(),
+        };
+        let mut quota = io.io.enable_all(format);
+        let info = quota.info(QuotaType::User).unwrap();
+        let write_bound = info.record_write_blocks_bound();
+        let growth_bound = info.record_growth_bytes_bound();
+        let owners: Vec<_> = (0..capacity * 3)
+            .chain([255, 256, 65535, 65536, 0x00ff_fffe, 0xffff_fffe])
+            .map(|id| ids(id)[0])
+            .collect();
+        for _ in 0..2 {
+            for &owner in &owners {
+                io.blocks.clear();
+                let length = io.io.files.borrow()[0].len();
+                quota.get(&mut io, owner).unwrap();
+                quota.sync(&mut io, QuotaType::User).unwrap();
+                assert!(io.blocks.len() <= write_bound as usize);
+                assert!((io.io.files.borrow()[0].len() - length) as u64 <= growth_bound);
+            }
+            for &owner in owners.iter().rev() {
+                io.blocks.clear();
+                quota.release(&mut io, owner).unwrap();
+                assert!(io.blocks.len() <= write_bound as usize);
+            }
+        }
+    }
+}

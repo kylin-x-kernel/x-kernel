@@ -15,9 +15,9 @@ use kvfs::{
     FileOperations, InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations,
     InodeOperations, InodeSymlinkOperations, InodeTimes, InodeUpdateTime, Kiocb, LockedDentry,
     Metadata, MetadataUpdate, NodePermission, NodeType, ReadaheadControl, RenameFlags, StatFs,
-    SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode,
-    VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName,
-    XattrNameRef, XattrNameSink, XattrSetFlags, default_evict_inode, inode_init_owner,
+    SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsFile, VfsFileBuilder,
+    VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl,
+    XattrName, XattrNameRef, XattrNameSink, XattrSetFlags, default_evict_inode, inode_init_owner,
 };
 use pagecache::FolioRead;
 
@@ -162,6 +162,7 @@ fn into_xattr_vfs_err(err: Ext4Error) -> VfsError {
 
 pub(super) fn into_vfs_err(error: Ext4Error) -> VfsError {
     let linux_error = match error {
+        Ext4Error::Quota(error) => error,
         Ext4Error::NoSpace | Ext4Error::InsufficientJournalCredits => LinuxError::ENOSPC,
         Ext4Error::JournalAborted => LinuxError::EROFS,
         Ext4Error::AlreadyExists => LinuxError::EEXIST,
@@ -350,6 +351,10 @@ impl Ext4SuperOperations {
         let is_read_only = super_block.flags().contains(SuperBlockFlags::RDONLY);
         let mut state = Ext4SbInfo::open(device, true).map_err(into_vfs_err)?;
         state.set_statfs_mode(statfs_mode);
+        state.vfs_superblock = Arc::downgrade(super_block);
+        if !is_read_only {
+            state.ensure_writable().map_err(into_vfs_err)?;
+        }
         let replay = state.prepare_recovery().map_err(into_vfs_err)?;
         let block_size = u64::from(state.layout().block_size());
         let max_file_size = state.extent_max_file_size().map_err(into_vfs_err)?;
@@ -360,10 +365,27 @@ impl Ext4SuperOperations {
             block_size,
             max_file_size,
             |super_block| {
+                let needs_quota_recovery = {
+                    let state = ext4_private(super_block)?.read();
+                    state.ensure_quota_feature_supported().is_ok()
+                        && state.quota_recovery_needed().map_err(into_vfs_err)?
+                };
+                if !is_read_only || needs_quota_recovery {
+                    Self::activate_internal_quotas(super_block)?;
+                }
                 ext4_private(super_block)?
                     .write(super_block)
                     .finish_recovery(replay)
                     .map_err(into_vfs_err)?;
+                if is_read_only {
+                    Self::deactivate_internal_quotas(super_block)?;
+                    if needs_quota_recovery {
+                        ext4_private(super_block)?
+                            .write(super_block)
+                            .sync_filesystem()
+                            .map_err(into_vfs_err)?;
+                    }
+                }
                 let root_inode = Self::iget(super_block, InodeNumber::new(EXT4_ROOT_INO))
                     .inspect_err(|error| {
                         error!("KExt4 root inode VFS initialization failed: {error:?}")
@@ -380,8 +402,99 @@ impl Ext4SuperOperations {
         )
     }
 
+    pub(crate) fn deactivate_internal_quotas(super_block: &SuperBlock) -> VfsResult<()> {
+        let ext4 = ext4_private(super_block)?;
+        // Completion captures can outlive failed writeback. Drain them before
+        // quota ownership is removed, without holding mount mutation protection.
+        super_block.for_each_inode(|inode| {
+            let private = inode.private::<Ext4Inode>()?;
+            private.writeback_io().drain();
+            private
+                .writeback_io()
+                .flush_completions()
+                .map_err(into_vfs_err)
+        })?;
+        let mut result = Ok(());
+        for kind in kquota::QuotaType::ALL {
+            let release = ext4.disable_internal_quota(super_block, kind);
+            result = result.and(release.map_err(into_vfs_err));
+        }
+        result
+    }
+
+    pub(crate) fn activate_internal_quotas(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
+        let ext4 = ext4_private(super_block)?;
+        let mut files = Vec::new();
+        {
+            let state = ext4.read();
+            if !state.has_quota_feature() || state.ensure_quota_feature_supported().is_err() {
+                return Ok(());
+            }
+            state
+                .validate_internal_quota_inodes()
+                .map_err(into_vfs_err)?;
+            for kind in [kquota::QuotaType::User, kquota::QuotaType::Group] {
+                if super_block.quota_info().info(kind).is_some() {
+                    continue;
+                }
+                let number = state.superblock().quota_inode(kind);
+                if number == 0 {
+                    continue;
+                }
+                let number = InodeNumber::new(number);
+                if number.get() == EXT4_ROOT_INO
+                    || state
+                        .superblock()
+                        .journal()
+                        .inode()
+                        .is_some_and(|journal| journal.get() == number.get())
+                    || state
+                        .superblock()
+                        .orphan_file_inode()
+                        .is_some_and(|orphan| orphan.get() == number.get())
+                    || !state.is_inode_allocated(number).map_err(into_vfs_err)?
+                {
+                    return Err(VfsError::InvalidData);
+                }
+                let private = state.special_iget(number).map_err(into_vfs_err)?;
+                if private.kind() != InodeKind::RegularFile {
+                    return Err(VfsError::InvalidData);
+                }
+                files.push((kind, private));
+            }
+        }
+        let mut enabled = 0_u8;
+        for (kind, private) in files {
+            let number = private.number();
+            let file = super_block.get_or_try_init_inode(u64::from(number.get()), || {
+                Self::new_vfs_inode(super_block, ext4, private)
+            })?;
+            let result = ext4
+                .write(super_block)
+                .enable_internal_quota(super_block, kind, &file)
+                .map_err(into_vfs_err);
+            if result.is_err() {
+                for loaded in [kquota::QuotaType::User, kquota::QuotaType::Group] {
+                    if enabled & (1 << loaded as u8) == 0 {
+                        continue;
+                    }
+                    let release = ext4.disable_internal_quota(super_block, loaded);
+                    if let Err(error) = release {
+                        error!("KExt4 quota activation cleanup failed: {error:?}");
+                    }
+                }
+            }
+            result?;
+            enabled |= 1 << kind as u8;
+        }
+        Ok(())
+    }
+
     fn iget(super_block: &Arc<SuperBlock>, number: InodeNumber) -> VfsResult<Arc<VfsInode>> {
         let ext4 = ext4_private(super_block)?;
+        if !ext4.read().is_public_inode_number(number) {
+            return Err(VfsError::OperationNotSupported);
+        }
         super_block.get_or_try_init_inode(u64::from(number.get()), || {
             let private = ext4
                 .read()
@@ -465,6 +578,15 @@ impl Ext4SuperOperations {
 }
 
 impl SuperBlockOperations for Ext4SuperOperations {
+    fn put_super(&self, super_block: &SuperBlock) -> VfsResult<()> {
+        let quota_result = Self::deactivate_internal_quotas(super_block);
+        let filesystem_result = ext4_private(super_block)?
+            .write(super_block)
+            .sync_filesystem()
+            .map_err(into_vfs_err);
+        quota_result.and(filesystem_result)
+    }
+
     fn timestamp_limits(&self, super_block: &SuperBlock) -> kvfs::TimestampLimits {
         #[expect(
             clippy::expect_used,
@@ -515,6 +637,9 @@ impl SuperBlockOperations for Ext4SuperOperations {
         let super_block = inode.super_block()?;
         let ext4 = ext4_private(&super_block)?;
         let state = ext4.read();
+        if state.is_quota_inode(private.number()) {
+            return Ok(());
+        }
         // Drop the spaces on every eviction, link count included: unlink comes
         // through here too, and only this call releases the group twin's strong
         // owner reference. Must run before release_all_delalloc: the latter can
@@ -1515,6 +1640,16 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
 }
 
 impl FileOperations for Ext4Inode {
+    fn open(self: Arc<Self>, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        if file.mode().contains(FMode::WRITE) {
+            let super_block = inode.super_block()?;
+            let mut state = ext4_private(&super_block)?.write(&super_block);
+            state.ensure_writable().map_err(into_vfs_err)?;
+            state.initialize_inode_quotas(&self).map_err(into_vfs_err)?;
+        }
+        Ok(())
+    }
+
     fn mapping_operations(&self) -> Option<&dyn FileMappingOperations> {
         (self.kind() == InodeKind::RegularFile).then_some(self)
     }

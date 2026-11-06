@@ -74,7 +74,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use crate::{
-    BlockCount, BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock, PhysicalBlock,
+    BlockCount, BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock,
     bitmap_allocator::{BlockGroupRange, BlockRunAllocation, range_end_containing},
     error::{Ext4Error, Ext4Result},
     inode::Ext4Inode,
@@ -846,13 +846,15 @@ impl Ext4SbInfo {
     /// - `inode`: the writing file.
     /// - `logical_start`: first file block the run needs.
     /// - `logical_len`: how many file blocks the run needs.
+    /// - `min_len`: minimum acceptable run; a shorter hint remains untouched.
     /// - `handle`: journal handle of the consuming run.
     ///
-    /// Returns: the marked physical range, or `None` when the request is
-    /// empty, no space contains its first block, or the run could not be
+    /// Returns: the bitmap allocation, or `None` when the request is
+    /// empty, no hint meets its minimum length, or the run could not be
     /// secured - on `None`/error nothing is consumed (the span is restored
     /// on both sides): a lost hint, never a lost block. At most one space is
-    /// consumed per call, like Linux.
+    /// consumed per call.
+    /// Quota admission and settlement belong to the enclosing allocation policy.
     ///
     /// Locking: a leaf-lock peek takes only the leaf lock and returns when no
     /// space serves the request; otherwise the serving group is warmed outside
@@ -863,8 +865,9 @@ impl Ext4SbInfo {
         inode: &Ext4Inode,
         logical_start: LogicalBlock,
         logical_len: u64,
+        min_len: BlockCount,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<Option<(PhysicalBlock, BlockCount)>> {
+    ) -> Ext4Result<Option<BlockRunAllocation>> {
         // An empty request has nothing to consume; answering it here keeps
         // the space intact instead of splitting it around a zero-length
         // middle. An overflowing bound falls back to normal allocation.
@@ -906,6 +909,9 @@ impl Ext4SbInfo {
             let Ok(consumed_len) = u32::try_from(consumed_end - logical_start.get()) else {
                 return None;
             };
+            if consumed_len < min_len.get() {
+                return None;
+            }
             let consumed = ConsumedPrealloc {
                 phys_start: FilesystemBlock::new(
                     space.phys_start.get() + (logical_start.get() - space.logical_start.get()),
@@ -984,7 +990,7 @@ impl Ext4SbInfo {
             count,
             handle,
         ) {
-            Ok(allocation) => Ok(Some((allocation.first_block(), allocation.block_count()))),
+            Ok(allocation) => Ok(Some(allocation)),
             Err(Ext4Error::NoSpace) => {
                 self.restore_taken_prealloc(&mut alloc, inode, logical_start, &taken);
                 Ok(None)

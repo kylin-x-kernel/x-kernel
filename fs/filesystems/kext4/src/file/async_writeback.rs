@@ -183,6 +183,7 @@ impl Ext4SbInfo {
                     } else {
                         0
                     };
+                    let credits = self.quota_metadata_credits(credits);
                     let journal = self.metadata_journal_for_allocation(
                         credits,
                         crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,

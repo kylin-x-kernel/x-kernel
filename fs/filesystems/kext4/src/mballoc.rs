@@ -647,23 +647,23 @@ impl Ext4SbInfo {
         Ok(Some(allocation))
     }
 
-    /// Scans groups for a write allocation, running `after_allocated` inside the
-    /// same allocator-lock section as the successful allocation, so the caller
-    /// can attach state that no other allocator may observe half-built; the
-    /// preallocation entry registers its surplus there. Linux births a PA under
-    /// the allocation's group lock for the same reason.
+    /// Admits quota before consuming a preallocation hint or scanning groups.
+    /// For a fresh run, `after_allocated` runs inside the same allocator-lock
+    /// section as bitmap allocation, so surplus registration cannot race with
+    /// another allocation. Consumed hints bypass this birth hook.
     ///
     /// - `request`: the write request; lengths in blocks, and
     ///   `min_len < expected_len` only when its flags allow a partial run.
     /// - `handle`: journal handle carrying the winning group's updates.
-    /// - `after_allocated`: runs at most once, only on success; under the guard
-    ///   it may take nothing but an owner's prealloc map leaf lock.
+    /// - `after_allocated`: runs at most once, only for a fresh run; under the
+    ///   guard it may take nothing but an owner's prealloc map leaf lock.
     ///
     /// Returns: the allocated run paired with `request.logical_start`, shorter
     /// than `expected_len` only when a partial run is allowed.
     ///
-    /// Errors: `NoSpace` when no group served the request after the discard
-    /// retries; other errors propagate unchanged.
+    /// Errors: `Quota(EDQUOT)` when no admissible run meets the minimum length;
+    /// `NoSpace` when healthy groups cannot serve the admitted request after
+    /// discard retries. Accounting, metadata and I/O errors propagate unchanged.
     ///
     /// Worth noting: one corrupt group does not fail the write. The first
     /// `Corrupt` is remembered and returned instead of `NoSpace` only when no
@@ -676,8 +676,85 @@ impl Ext4SbInfo {
         &self,
         request: Ext4AllocationRequest<'_>,
         handle: &mut JournalHandle<'_>,
+        after_allocated: impl FnMut(&mut AllocatorState, &BlockRunAllocation),
+    ) -> Ext4Result<Ext4AllocatedRun> {
+        let mut admitted = request;
+        let reserved = |count: u32| -> Ext4Result<u64> {
+            request.logical_start.map_or(Ok(0), |start| {
+                request
+                    .inode
+                    .reserved_delalloc_in_range(start, u64::from(count))
+            })
+        };
+        let charged = loop {
+            let unreserved =
+                u64::from(admitted.expected_len.get()) - reserved(admitted.expected_len.get())?;
+            match self.charge_quota_space(request.inode, unreserved, handle) {
+                Err(Ext4Error::Quota(kerrno::LinuxError::EDQUOT))
+                    if admitted.flags.allows_partial()
+                        && admitted.expected_len > admitted.min_len =>
+                {
+                    admitted.expected_len = BlockCount::new(
+                        (admitted.expected_len.get() / 2).max(admitted.min_len.get()),
+                    );
+                }
+                result => {
+                    result?;
+                    break unreserved;
+                }
+            }
+        };
+        let result = self.allocate_blocks_for_write_unaccounted(admitted, handle, after_allocated);
+        let mut allocation = match result {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                if let Err(cleanup_error) = self.free_quota_space(request.inode, charged, handle) {
+                    error!(
+                        "KExt4 allocation quota rollback after {error:?} failed: {cleanup_error:?}"
+                    );
+                    self.fail_journal_operation(cleanup_error);
+                }
+                return Err(error);
+            }
+        };
+        let allocated = u64::from(allocation.block_count().get());
+        let claimed = reserved(allocation.block_count().get())?;
+        self.free_quota_space(request.inode, charged - (allocated - claimed), handle)?;
+        self.claim_quota_space(request.inode, claimed, handle)?;
+        if let Some(start) = request.logical_start {
+            self.consume_delalloc_range(request.inode, start, allocated)?;
+        }
+        self.sync_inode_quotas(request.inode, handle)?;
+        allocation.requested_len = request.expected_len;
+        Ok(allocation)
+    }
+
+    fn allocate_blocks_for_write_unaccounted(
+        &self,
+        request: Ext4AllocationRequest<'_>,
+        handle: &mut JournalHandle<'_>,
         mut after_allocated: impl FnMut(&mut AllocatorState, &BlockRunAllocation),
     ) -> Ext4Result<Ext4AllocatedRun> {
+        if let Some(logical) = request.logical_start {
+            let min_len = if request.flags.allows_partial() {
+                request.min_len
+            } else {
+                request.expected_len
+            };
+            if let Some(allocation) = self.consume_prealloc_for_write(
+                request.inode,
+                logical,
+                u64::from(request.expected_len.get()),
+                min_len,
+                handle,
+            )? {
+                return Ok(Ext4AllocatedRun::new(
+                    logical,
+                    request.expected_len,
+                    allocation,
+                ));
+            }
+        }
         let inode_group = self.block_group_for_inode(request.inode().number())?;
         if self.free_blocks_count() == 0 {
             return Err(Ext4Error::NoSpace);

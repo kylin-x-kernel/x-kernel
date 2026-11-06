@@ -20,8 +20,8 @@ use ktime_types::{SystemTime, TimestampLimits};
 
 use crate::{
     Dentry, DentryKey, DentryOperations, FileSystemType, Filename, FsContext, FsContextPurpose,
-    LookupFlags, LookupIntent, MountFlags, Mutex, MutexGuard, NodeType, Path, VfsError, VfsInode,
-    VfsResult, WritebackControl, node,
+    LookupFlags, LookupIntent, MountFlags, Mutex, MutexGuard, NodeType, Path, RwLock,
+    RwLockReadGuard, VfsError, VfsInode, VfsResult, WritebackControl, node,
 };
 
 /// Compares an extant superblock's read-only state with a mount request the
@@ -308,6 +308,15 @@ pub trait SuperBlockOperations: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Releases filesystem-wide resources after final inode writeback and eviction.
+    ///
+    /// Runs under final mount shutdown exclusion in sleepable task context.
+    /// Filesystems must drop inode references outside their own mutation locks.
+    /// The default has no filesystem resources to release.
+    fn put_super(&self, _super_block: &SuperBlock) -> VfsResult<()> {
+        Ok(())
+    }
+
     /// Writes back filesystem-owned metadata for one inode.
     fn write_inode(&self, _inode: &VfsInode, _control: &mut WritebackControl) -> VfsResult<()> {
         Ok(())
@@ -531,9 +540,8 @@ pub struct SuperBlock {
     /// Active mount references and shutdown state, corresponding to Linux
     /// `super_block::s_active` together with `SB_DYING` and `SB_DEAD`.
     lifecycle: Mutex<SuperBlockLifecycle>,
-    /// Serializes reconfiguration and final shutdown, corresponding to Linux
-    /// `super_block::s_umount`.
-    umount_lock: Mutex<()>,
+    /// Excludes write admission during reconfiguration and final shutdown.
+    umount_lock: RwLock<()>,
     /// Wakes `sget_dev` callers after nascent initialization or final shutdown.
     lifecycle_waiters: WaitQueue,
     dentry_cache: Mutex<HashMap<DentryKey, Dentry>>,
@@ -872,7 +880,7 @@ impl SuperBlock {
             root: Once::new(),
             flags: AtomicSuperBlockFlags::new(flags),
             lifecycle: Mutex::new(SuperBlockLifecycle::Nascent),
-            umount_lock: Mutex::default(),
+            umount_lock: RwLock::default(),
             lifecycle_waiters: WaitQueue::new(),
             dentry_cache: Mutex::default(),
             block_size: Once::new(),
@@ -1071,7 +1079,7 @@ impl SuperBlock {
         &self,
         requested_flags: Option<SuperBlockFlags>,
     ) -> VfsResult<bool> {
-        let _umount_guard = self.umount_lock.lock();
+        let _umount_guard = self.umount_lock.write();
         let mut lifecycle = self.lifecycle.lock();
         if !lifecycle.is_available() {
             return Ok(false);
@@ -1106,7 +1114,7 @@ impl SuperBlock {
             return;
         }
 
-        let _umount_guard = self.umount_lock.lock();
+        let _umount_guard = self.umount_lock.write();
         // A concurrent activation may have made this reference non-final while
         // the umount lock was being acquired.
         if !self.lifecycle.lock().begin_shutdown() {
@@ -1143,7 +1151,30 @@ impl SuperBlock {
             root.forget();
         }
         let flush_result = self.sync_fs_locked();
-        writeback_result.and(flush_result)
+        let release_result = self.ops().put_super(self);
+        writeback_result.and(flush_result).and(release_result)
+    }
+
+    /// Keeps write admission stable through one ordinary VFS mutation.
+    /// Reconfiguration and final shutdown hold the exclusive side.
+    pub(crate) fn start_write(&self) -> VfsResult<RwLockReadGuard<'_, ()>> {
+        let guard = self.umount_lock.read();
+        if self.is_readonly() {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
+        Ok(guard)
+    }
+
+    fn prepare_readonly_remount(&self) -> VfsResult<Vec<Arc<VfsInode>>> {
+        let inodes = self.live_inodes();
+        node::wait_for_inode_evictions(self);
+        if inodes
+            .iter()
+            .any(|inode| inode.link_count() == 0 || inode.write_count() != 0)
+        {
+            return Err(VfsError::from(kerrno::LinuxError::EBUSY));
+        }
+        Ok(inodes)
     }
 
     /// Applies a parsed filesystem-context transaction to this superblock.
@@ -1153,8 +1184,9 @@ impl SuperBlock {
     /// Returns [`VfsError::InvalidInput`] if the context is not a reconfigure
     /// transaction or targets another superblock. Filesystem-specific
     /// validation errors are returned without changing the superblock flags.
+    /// A read-only transition returns EBUSY while writers or zero-link inodes remain.
     pub fn reconfigure(&self, context: &mut FsContext<'_>) -> VfsResult<()> {
-        let _umount_guard = self.umount_lock.lock();
+        let _umount_guard = self.umount_lock.write();
         if context.purpose() != FsContextPurpose::Reconfigure
             || !core::ptr::eq(self, context.super_block()?)
         {
@@ -1169,6 +1201,12 @@ impl SuperBlock {
         if let Some(block_device) = self.block_device() {
             validate_block_device_flags(block_device, caller_flags)?;
         }
+        // Pin the checked identities until the new policy has been published.
+        let _inodes = if caller_flags.contains(SuperBlockFlags::RDONLY) && !self.is_readonly() {
+            self.prepare_readonly_remount()?
+        } else {
+            Vec::new()
+        };
         // The callback may adjust the proposal from its own mount data
         // (`ro`/`rw`, Linux `vfs_parse_sb_flag`); phase two re-validates the
         // adjusted values before anything is published.
@@ -1267,6 +1305,20 @@ impl SuperBlock {
         inodes.push(Arc::downgrade(inode));
     }
 
+    /// Visits live inode references without holding the inode registry lock.
+    ///
+    /// Used during serialized filesystem lifecycle changes. The callback may
+    /// sleep and acquire filesystem locks; the snapshot keeps each inode alive.
+    pub fn for_each_inode(
+        &self,
+        mut visit: impl FnMut(&Arc<VfsInode>) -> VfsResult<()>,
+    ) -> VfsResult<()> {
+        for inode in self.live_inodes() {
+            visit(&inode)?;
+        }
+        Ok(())
+    }
+
     fn live_inodes(&self) -> Vec<Arc<VfsInode>> {
         let mut live = Vec::new();
         self.inodes.lock().retain(|inode| match inode.upgrade() {
@@ -1309,14 +1361,14 @@ impl SuperBlock {
     /// The operation is serialized with reconfiguration and final shutdown by
     /// the superblock umount lock.
     pub fn sync_fs(&self) -> VfsResult<()> {
-        let _umount_guard = self.umount_lock.lock();
+        let _umount_guard = self.umount_lock.read();
         if !self.lifecycle.lock().is_available() {
             return Ok(());
         }
         self.sync_fs_locked()
     }
 
-    fn sync_fs_locked(&self) -> VfsResult<()> {
+    pub(crate) fn sync_fs_locked(&self) -> VfsResult<()> {
         let inodes = self.live_inodes();
         let data = Self::writeback_inodes(&inodes, false);
         let metadata = self.writeback_inode_metadata(&inodes, false);

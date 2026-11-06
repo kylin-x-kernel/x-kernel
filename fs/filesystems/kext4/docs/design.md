@@ -1394,7 +1394,9 @@ Recovery 不创建 resident inode 表。它在 mount/VFS identity 尚未发布�
 ## Quota-file storage and synchronization
 
 `src/quota.rs` implements `kquota::QuotaIo` with a borrowed `Ext4QuotaIo`
-containing the existing mutable `Ext4SbInfo` and current `JournalHandle`.
+containing a shared `Ext4SbInfo` borrow and the current mutable `JournalHandle`.
+Active-handle extent, inode and xattr edits mutate their existing locked state;
+mount admission, recovery and commit retain exclusive lifecycle access.
 This transient pair supplies explicit transaction context; it owns no mount,
 file registry or quota state. The superblock's `QuotaInfo<Arc<VfsInode>>`
 retains each backing inode, and I/O borrows that inode's `Ext4Inode` component.
@@ -1423,19 +1425,96 @@ file information, then drains the filesystem journal and checkpoints. The
 ordered-cache cursor advances past failed records and retains the first error
 while attempting later items. An inactive dirty dquot reports `EIO` without
 quota-file I/O; acquisition owns initialization and its larger transaction.
-This adds no persistent dirty queue. Native write errors pass through
-`fail_metadata_mutation` before conversion to VFS errors. A format error
-without published updates stops the handle without aborting the journal;
+This adds no persistent dirty queue. Native read and write errors pass through
+`fail_metadata_mutation` before conversion to VFS errors. Format corruption aborts the journal even before publication; an ordinary
+error without published updates stops the handle without aborting it;
 errors after publication use the existing abort boundary. Final filesystem
 synchronization is still attempted. Lock order is mount state then quota state;
 backing I/O uses the already borrowed state and cannot reacquire the mount.
 
-Mount-time quota activation, allocation charging and quota-control dispatch
-remain disabled until their integration is complete. The storage path alone
-does not advertise quota enforcement. `FeatureSet::validate_mount` rejects
-`QUOTA` and `PROJECT` before recovery can mutate storage. The disk decoder
-still accepts those read-only-compatible feature bits. Production mount
-preparation can replay and clean up orphans even for a read-only VFS mount,
-so that path also requires quota accounting and currently rejects these images. Guest tests exercise retained-file identity, cache visibility,
-cross-block rejection, sparse reads and quota record persistence through the
-real superblock synchronization hook.
+Internal user/group quota files are selected by the decoded superblock inode
+numbers. Activation validates user inode 3, group inode 4 and the non-reserved
+project range before loading any class; malformed identities report EUCLEAN.
+Their canonical VFS references live only in `SuperBlock::quota_info`.
+`Ext4SbInfo` keeps a weak back-reference to that owner; inode components do not
+mirror quota state or hold another filesystem reference. Namespace lookup rejects
+internal quota identities before consulting the inode cache. Quota-file block
+allocation is exempt by the same on-disk identity, avoiding recursive charging.
+
+Mount enables usage accounting before orphan cleanup. Recovery acquisition
+propagates the enclosing recovery policy through journal admission and handle
+completion, retaining evidence until the whole cleanup finishes. A clean read-only mount
+loads no quota files and performs no accounting writes. Recovery may temporarily
+enable supported accounting, then releases records and files and drains the
+journal before publishing a read-only mount. Project quota remains unsupported
+for writes until project identity and inheritance are integrated. Read-only
+project mounts retain orphan/recovery evidence instead of performing unaccounted
+cleanup. Filesystem sync also preserves this unsupported mount state without
+clearing recovery features. Read-only remount drains writeback and releases
+cached records in bounded transactions before suspending accounting. Suspension
+retains the canonical quota files and class information; final shutdown alone unloads them. Failed
+read-write initialization restores suspension so a later remount can retry.
+Resident inode construction and read-only open do not acquire owner records or
+require a writable journal. Read-write remount resumes the retained quota
+classes without acquiring owners for read-only resident inodes; read-only
+remount admission has already excluded writable file descriptions. Writable
+open initializes its owners, while namespace, metadata, xattr, truncate and
+eviction mutations initialize their affected owners before journal admission.
+
+Owner records are initialized in separate admitted transactions before ordinary
+inode operations take reservation/allocator locks. The format supplies its
+maximum distinct-block write bound. Each touched 1-KiB quota block can occupy
+a separate filesystem block, including holes reused below EOF. Physical and
+journal admission therefore cover one allocation and extent insertion per
+touched quota block through the supported extent depth, plus inode extra-isize
+migration. Rewriting a block already owned by the handle consumes no additional
+journal credit. Namespace creation initializes the new owner before inode bitmap
+mutation. Inode and physical-block policies charge cached records before
+allocation, undo unsuccessful admission, reconcile partial runs, and journal
+dirty usage records in the same handle as bitmap changes. Dropping a shared
+external-xattr reference releases that inode owner's charge even when the
+physical block remains allocated for other inodes. Fallocate uses the same
+allocation policy and reserves owner-record writeback credits for each batch. Raw bitmap operations
+retain their physical role. Up to four affected inodes contribute user/group
+record credits to an ordinary mutation.
+
+Delayed-allocation admission updates cached quota reservations while holding the
+existing inode state lock, before allocator/delalloc aggregate locks. It performs
+no quota-file I/O. Range validation and inode-counter overflow checks precede
+quota and mount admission. After admission, extent and counter publication cannot
+return an error. Mount admission failure refunds quota without replacing the
+admission error. The common physical-allocation entry admits quota before
+selecting either a preallocation hint or a free run. Both outcomes claim the
+overlapping reservation
+at allocation success and remove the corresponding inode/mount reservation;
+later writeback settlement releases only reservations still present. Allocation
+or data-I/O failure after publication follows the journal abort/recovery policy.
+Allocation rollback preserves the allocation error and reports cleanup failures
+separately, aborting the journal for fatal cleanup errors.
+Truncation and eviction free actual usage; invalidation frees reservations.
+Chown first performs optional extra-isize expansion under the original owner.
+It then admits both new owners atomically using the complete allocated sectors
+and outstanding reservations, journals both old/new records, and persists the
+owner change. A failed expansion cannot publish a new resident owner.
+
+Final VFS shutdown invokes `put_super` after ordinary inode writeback and dcache
+eviction. Quota deactivation first drains all live inode I/O queues and flushes
+their completion captures outside mount mutation protection; failed ordinary
+writeback may have left another inode's completion in flight. Ext4 releases each cached record in a bounded transaction, disables one
+class, and returns its retained file to the mounted owner. The mounted owner
+ends mutation protection before dropping the file; the core helper is private
+to quota integration. A final journal drain persists structural release changes. Writeback status and the
+retained file are returned separately within that scope, so an error cannot
+prevent unlocked file release or processing later classes. After journal abort,
+final disable
+invalidates class cache/info without I/O; the original error is returned and
+disk recovery flags and committed journal evidence remain intact. No copied file registry,
+per-inode quota owner array, dirty queue or parallel usage counter is introduced.
+External quota activation, quota-control syscalls, mount limit options and
+project identity/transfer remain outside this stage. Internal accounting defaults
+to usage tracking; explicit core limit state is exercised by allocation tests.
+
+The asynchronous allocating and mapped-completion writeback transactions reserve
+owner-record credits at their existing journal admission boundary. Quota claims
+share the unwritten allocation transaction, and completed overwrites reuse
+existing allocation without another charge.

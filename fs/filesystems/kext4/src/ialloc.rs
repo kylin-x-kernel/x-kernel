@@ -88,6 +88,26 @@ impl Ext4SbInfo {
         initialization: InodeInitialization,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<InodeAllocation> {
+        self.charge_quota_inode(initialization.uid(), initialization.gid(), handle)?;
+        match self.allocate_inode_in_groups(parent, child_name, initialization, handle) {
+            Ok(allocation) => {
+                self.sync_owner_quotas(initialization.uid(), initialization.gid(), handle)?;
+                Ok(allocation)
+            }
+            Err(error) => {
+                self.free_quota_inode(initialization.uid(), initialization.gid(), handle)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn allocate_inode_in_groups(
+        &self,
+        parent: Option<InodeNumber>,
+        child_name: Option<&[u8]>,
+        initialization: InodeInitialization,
+        handle: &mut crate::jbd2::JournalHandle<'_>,
+    ) -> Ext4Result<InodeAllocation> {
         if self.free_inodes_count() == 0 {
             return Err(Ext4Error::NoSpace);
         }
@@ -391,6 +411,18 @@ impl Ext4SbInfo {
 
     #[allow(dead_code)]
     pub(crate) fn release_allocated_inode(
+        &self,
+        inode: &Ext4Inode,
+        handle: &mut crate::jbd2::JournalHandle<'_>,
+    ) -> Ext4Result<InodeAllocation> {
+        let allocation = self.release_inode_bitmap(inode, handle)?;
+        let stat = inode.stat();
+        self.free_quota_inode(stat.uid, stat.gid, handle)?;
+        self.sync_inode_quotas(inode, handle)?;
+        Ok(allocation)
+    }
+
+    fn release_inode_bitmap(
         &self,
         inode: &Ext4Inode,
         handle: &mut crate::jbd2::JournalHandle<'_>,

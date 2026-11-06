@@ -145,6 +145,7 @@ impl Ext4SbInfo {
     ) -> Ext4WritebackResult {
         if intent.requires_full_metadata() {
             let credits = JournalCredits::new(self.extent_writeback_metadata_credits(inode, 0, 0)?);
+            let credits = self.quota_metadata_credits(credits);
             let journal = self.metadata_journal_for_allocation(
                 credits,
                 crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,

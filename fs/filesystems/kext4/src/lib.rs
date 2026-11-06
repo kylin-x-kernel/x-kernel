@@ -59,6 +59,9 @@
 //! Recovery keeps one mount state through journal replay and private-owner
 //! installation. Orphan cleanup then uses unpublished inode components with the
 //! normal truncate/eviction algorithms before root publication.
+//! Internal user/group quota uses the VFS superblock's existing quota owner.
+//! Inode/block allocation, delayed reservations, ownership transfer and final
+//! disable share the filesystem's journal and canonical inode identities.
 //! Allocation requests borrow their inode owner; bitmap updates remain separate
 //! physical primitives. The R8 write strategy adds
 //! per-group order-bucket free extent caches, interval-based delayed-allocation
@@ -197,7 +200,45 @@ fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
     let super_block = context.super_block()?;
     let flags = (super_block.flags() & !context.sb_flags_mask())
         | (context.sb_flags() & context.sb_flags_mask());
-    let mut state = super_block.private::<vfs::Ext4Mount>()?.write(super_block);
+    let ext4 = super_block.private::<vfs::Ext4Mount>()?;
+    if !flags.contains(kvfs::SuperBlockFlags::RDONLY) {
+        ext4.read().ensure_writable().map_err(vfs::into_vfs_err)?;
+        if super_block.flags().contains(kvfs::SuperBlockFlags::RDONLY)
+            && ext4.read().has_quota_feature()
+        {
+            let owner = ext4
+                .read()
+                .vfs_superblock
+                .upgrade()
+                .ok_or(kvfs::VfsError::InvalidData)?;
+            let result = (|| -> kvfs::VfsResult<()> {
+                Ext4SuperOperations::activate_internal_quotas(&owner)?;
+                {
+                    let state = ext4.write(super_block);
+                    state.ensure_writable().map_err(vfs::into_vfs_err)?;
+                    state
+                        .resume_internal_quotas(super_block)
+                        .map_err(vfs::into_vfs_err)?;
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                ext4.read()
+                    .mark_quotas_suspended(super_block)
+                    .map_err(vfs::into_vfs_err)?;
+            }
+            result?;
+        }
+    } else if !super_block.flags().contains(kvfs::SuperBlockFlags::RDONLY) {
+        context.sync_filesystem()?;
+        ext4.write(super_block)
+            .suspend_internal_quotas(super_block)
+            .map_err(vfs::into_vfs_err)?;
+        ext4.write(super_block)
+            .sync_filesystem()
+            .map_err(vfs::into_vfs_err)?;
+    }
+    let mut state = ext4.write(super_block);
     if !flags.contains(kvfs::SuperBlockFlags::RDONLY) {
         state.ensure_writable().map_err(vfs::into_vfs_err)?;
     }

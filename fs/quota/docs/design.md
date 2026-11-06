@@ -11,8 +11,9 @@ block accounting remain outside this crate.
 The implementation covers user, group and project identities, record
 acquisition/release, administrative field masks, hard and soft limits, grace
 periods, delayed-allocation reservations, synchronization, suspension and
-disable. Both format IDs 2 and 4 are supported. No concrete filesystem enables
-quota yet, and this change does not expose a quota syscall.
+disable. Both format IDs 2 and 4 are supported. Ext4 enables internal user/group
+usage accounting; syscall authorization and external-file activation remain
+outside this crate.
 
 ## Ownership and semantic layers
 
@@ -94,7 +95,8 @@ same writeback in separate handles. The cursor advances exclusively after the
 last ID, including failed IDs; it uses the existing ordered cache without an
 extra dirty list or copied record collection. Writeback accepts only active
 dquots. A dirty record left inactive by failed acquisition returns `EIO` without
-quota-file I/O; it retains dirty state until explicit acquisition completes.
+quota-file I/O; it clears the dirty indication so later synchronization and disable can finish.
+Only explicit acquisition may complete initialization.
 Writeback never retries tree insertion on an inactive record. An independent record can
 complete even when an earlier record repeatedly fails. It does not provide a device
 flush or transaction commit. `release` writes a retained nonempty record or
@@ -102,11 +104,25 @@ deletes an unused one, then removes its cache entry. A later operation can
 reacquire it; callers receive value snapshots, never references into the cache.
 
 Suspension flushes first and skips later accounting while keeping loaded
-state. Resume restores the same accounting/enforcement mode. Disable flushes,
+state. `suspend_cached` performs only the state transition after the provider
+has drained reservations and synchronized/released records in its own bounded
+transactions. It invalidates clean cached snapshots and failed inactive
+acquisitions, retaining dirty active records for recovery. A failed resume can
+therefore unload clean state without deleting persistent records or writing
+on a read-only filesystem. `check_no_reservations` supports preflight before
+that drain.
+Resume restores the same accounting/enforcement mode. Disable flushes,
 releases unused entries, drops the cache and file information, and returns
 the retained file reference for that class. The filesystem must release the
 returned file after leaving its locks, so final inode eviction cannot
 recursively acquire mount or quota state.
+`invalidate` is the terminal no-I/O release after the provider has quiesced
+operations and either synchronized or irreversibly aborted its mutation domain.
+It removes class records and file information and returns the retained file;
+it does not claim that discarded dirty usage became durable. The provider
+preserves disk recovery evidence after abort. Normal `unload` still rejects
+cached records or dirty information and never bypasses successful writeback.
+
 Suspend, disable and release refuse outstanding reservations with
 `EBUSY`, so the filesystem must first drain delayed allocation. Destruction
 does not perform implicit I/O; the filesystem owns successful final disable.
@@ -156,7 +172,9 @@ block; the requested ID is located within its bounded slot array.
 The tree validates block ranges, ancestor cycles, data counts, duplicate IDs
 and free-list links as those structures are accessed. A partial-list block is
 the head exactly when its previous link is zero; unlink validates both
-directions of that equivalence before any disk write. Insertions reuse the
+directions of that equivalence before any disk write. Removing the head
+publishes its replacement only after the affected data block has been written;
+a failed first write cannot change the file-information free-entry head. Insertions reuse the
 partial-data-block list and then the free-block list before growing the file.
 Deletion returns newly partial blocks to the entry list, completely empty
 blocks to the free-block list, and prunes empty tree nodes while preserving
@@ -191,3 +209,21 @@ state transitions, format revisions, ID-zero escaping, radix iteration,
 data/free-block reuse, corrupt input and short/failed I/O. An independent
 e2fsprogs-generated quota file checks interoperability; its provenance and
 regeneration commands are next to the fixture.
+
+## Cached reservations and ownership transfer
+
+`reserve_space_cached` and `release_space_cached` update existing acquired
+records without I/O; active missing records return `ESRCH` before any candidate
+is published. Filesystems initialize owners before their inode reservation
+lock. `transfer` takes source/target ID sets, one inode and allocated/reserved
+byte counts. It admits every new owner into temporary candidates, then updates
+both sets atomically; rejected admission preserves usage and deadlines. Record
+acquisition can still instantiate empty entries before a refusal. A source
+reservation smaller than the transferred inode reservation is warned about and
+clamped to zero; the target still admits the full amount. Source drift cannot
+permanently block an otherwise admissible ownership change.
+
+`next_cached_id` lets teardown release each record in a separate bounded
+transaction before class disable. `record_growth_bytes_bound` describes v2
+format growth for filesystem physical/journal admission; it is not a second
+usage or free-space counter.

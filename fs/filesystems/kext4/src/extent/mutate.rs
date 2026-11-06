@@ -119,7 +119,7 @@ impl Ext4SbInfo {
 
     /// Applies a plan under mount mutation exclusion; this path cannot allocate.
     pub(crate) fn release_extent_tail(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         plan: ExtentTailRelease,
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -351,7 +351,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn insert_extent_mapping(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         logical: LogicalBlock,
         physical: PhysicalBlock,
@@ -370,7 +370,7 @@ impl Ext4SbInfo {
 
     #[allow(dead_code)]
     pub(crate) fn insert_inline_extent_mapping(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         logical: LogicalBlock,
         physical: PhysicalBlock,
@@ -395,7 +395,7 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn convert_unwritten_extent_range(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         logical: LogicalBlock,
         len: BlockCount,
@@ -413,7 +413,7 @@ impl Ext4SbInfo {
 
     #[allow(dead_code)]
     pub(crate) fn remove_extent_range(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         logical: LogicalBlock,
         len: BlockCount,
@@ -445,7 +445,7 @@ impl Ext4SbInfo {
     /// Locking: caller holds the ext4 write lock; may sleep on journal and
     /// device I/O.
     pub(crate) fn truncate_extent_mappings(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         new_blocks: LogicalBlock,
         retain_unwritten: bool,
@@ -464,7 +464,7 @@ impl Ext4SbInfo {
     }
 
     fn insert_extent_mapping_path_local(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         new_extents: &[MutableExtent],
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -530,7 +530,7 @@ impl Ext4SbInfo {
 
     #[allow(clippy::too_many_arguments)]
     fn rewrite_split_extent_index_blocks(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         generation: u32,
         depth: u16,
@@ -583,7 +583,7 @@ impl Ext4SbInfo {
 
     #[allow(clippy::too_many_arguments)]
     fn install_inline_extent_root_from_children(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         generation: u32,
         mut root_depth: u16,
@@ -633,7 +633,7 @@ impl Ext4SbInfo {
     }
 
     fn set_extent_range_state_path_local(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         range: LogicalExtentRange,
         state: ExtentMappingState,
@@ -677,7 +677,7 @@ impl Ext4SbInfo {
     ///
     /// Locking: caller holds the ext4 write lock; may sleep on journal I/O.
     fn try_remove_extent_range_path_local(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         range: LogicalExtentRange,
         retain_unwritten: bool,
@@ -725,7 +725,7 @@ impl Ext4SbInfo {
     }
 
     fn prune_extent_path_leaf(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         location: &ExtentPath,
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -892,7 +892,7 @@ impl Ext4SbInfo {
     }
 
     fn rewrite_extent_path_leaf_and_indexes(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         location: &ExtentPath,
         extents: &[MutableExtent],
@@ -1006,7 +1006,7 @@ impl Ext4SbInfo {
 
     /// Invalidates cached proofs before a mutation can change external leaves.
     /// Keep read-only capability and credit queries free of this side effect.
-    fn begin_extent_mutation(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
+    fn begin_extent_mutation(&self, inode: &Ext4Inode) -> Ext4Result<()> {
         inode.invalidate_extent_status();
         self.ensure_extent_mutation_supported(inode)
     }
@@ -1031,7 +1031,7 @@ impl Ext4SbInfo {
     /// and rewrite the tree.  Returns `None` when the mutation has no effect
     /// (extents unchanged and nothing released).
     fn prepare_extent_tree_mutation(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         handle: &mut crate::jbd2::JournalHandle<'_>,
         mutate: impl FnOnce(&mut Vec<MutableExtent>) -> Ext4Result<Vec<MutableExtent>>,
@@ -1063,7 +1063,7 @@ impl Ext4SbInfo {
     }
 
     fn mutate_extent_tree(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         handle: &mut crate::jbd2::JournalHandle<'_>,
         mutate: impl FnOnce(&mut Vec<MutableExtent>) -> Ext4Result<Vec<MutableExtent>>,
@@ -1190,7 +1190,7 @@ impl Ext4SbInfo {
     }
 
     fn rewrite_extent_tree(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         extents: &[MutableExtent],
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -1222,7 +1222,7 @@ impl Ext4SbInfo {
     }
 
     fn rewrite_inode_extent_root(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         handle: &mut crate::jbd2::JournalHandle<'_>,
         encode: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
@@ -1239,7 +1239,7 @@ impl Ext4SbInfo {
     }
 
     fn create_extent_tree_blocks(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         generation: u32,
         extents: &[MutableExtent],
@@ -1318,7 +1318,7 @@ impl Ext4SbInfo {
     }
 
     fn update_inode_extent_block_accounting(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         old_allocated_blocks: u64,
         extents: &[MutableExtent],
@@ -1333,7 +1333,7 @@ impl Ext4SbInfo {
     }
 
     fn update_inode_extent_block_delta(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         delta: i128,
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -1346,7 +1346,7 @@ impl Ext4SbInfo {
     }
 
     fn allocate_extent_tree_block(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         goal_extent: Option<MutableExtent>,
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -1362,19 +1362,20 @@ impl Ext4SbInfo {
     ///
     /// This is the single source of truth for that policy, mirroring Linux's
     /// get_default_free_blocks_flags() (S_ISDIR/S_ISLNK/EA_INODE => METADATA |
-    /// FORGET). Both the journal-credit estimate
+    /// FORGET). Internal quota payload also belongs to the journal. Both the journal-credit estimate
     /// (extent_truncate_metadata_credits_from) and the actual release
     /// (release_extent_data_blocks) consult it, so extending the kind set or
     /// adding a journal-data mount mode cannot desynchronize the two.
     fn extent_data_blocks_need_metadata_release(&self, inode: &Ext4Inode) -> bool {
-        matches!(
-            inode.kind(),
-            crate::inode::InodeKind::Directory | crate::inode::InodeKind::Symlink
-        )
+        self.is_quota_inode(inode.number())
+            || matches!(
+                inode.kind(),
+                crate::inode::InodeKind::Directory | crate::inode::InodeKind::Symlink
+            )
     }
 
     fn release_extent_data_blocks(
-        &mut self,
+        &self,
         inode: &Ext4Inode,
         extent: MutableExtent,
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -1987,7 +1988,7 @@ impl ExtentPath {
 
     fn split_leaf(
         &self,
-        filesystem: &mut Ext4SbInfo,
+        filesystem: &Ext4SbInfo,
         inode: &Ext4Inode,
         extents: &[MutableExtent],
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -2099,7 +2100,7 @@ impl ExtentPath {
 
     fn rewrite_leaf(
         &self,
-        filesystem: &mut Ext4SbInfo,
+        filesystem: &Ext4SbInfo,
         inode: &Ext4Inode,
         extents: &[MutableExtent],
         handle: &mut crate::jbd2::JournalHandle<'_>,
@@ -2109,7 +2110,7 @@ impl ExtentPath {
 
     fn prune_empty_leaf(
         &self,
-        filesystem: &mut Ext4SbInfo,
+        filesystem: &Ext4SbInfo,
         inode: &Ext4Inode,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<u64> {

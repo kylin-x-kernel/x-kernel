@@ -37,6 +37,17 @@ impl<F> Dqinfo<F> {
         &self.file
     }
 
+    /// Upper bound on file growth when instantiating one v2 record.
+    pub const fn record_growth_bytes_bound(&self) -> u64 {
+        crate::tree::record_growth_bytes_bound()
+    }
+
+    /// Upper bound on distinct 1-KiB quota blocks dirtied by one record edit.
+    /// Includes tree/free-list links and file information, not filesystem extents.
+    pub const fn record_write_blocks_bound(&self) -> u32 {
+        crate::tree::record_write_blocks_bound()
+    }
+
     /// Returns the loaded quota format.
     pub const fn format(&self) -> QuotaFormat {
         self.tree.format
@@ -96,8 +107,9 @@ impl Dquot {
         info: &mut Dqinfo<F>,
     ) -> KResult<()> {
         if !self.is_active {
-            // Failed acquisition must be retried through initialization, which
-            // owns structural allocation and file-information publication.
+            // Initialization owns structural allocation. Report this failed
+            // acquisition once without trapping class teardown in writeback.
+            self.is_dirty = false;
             return Err(LinuxError::EIO.into());
         }
         self.commit(io, id, info)
@@ -206,8 +218,33 @@ impl<F> QuotaInfo<F> {
             self.release(io, id)?;
         }
         self.dquots.retain(|id, _| id.kind() != kind);
-        let info = self.info[kind.index()].take().ok_or(LinuxError::ESRCH)?;
-        Ok(info.file)
+        self.unload(kind)
+    }
+
+    /// Returns the backing file after bounded record release has completed.
+    ///
+    /// Performs no I/O. Cached records or dirty file information return EBUSY;
+    /// an unloaded class returns ESRCH. Filesystems call this only after their
+    /// last release transaction has stopped, and drop the file outside locks.
+    pub fn unload(&mut self, kind: QuotaType) -> KResult<F> {
+        let info = self.loaded_info(kind)?;
+        if info.is_dirty() || self.dquots.keys().any(|id| id.kind() == kind) {
+            return Err(LinuxError::EBUSY.into());
+        }
+        self.invalidate(kind)
+            .ok_or_else(|| LinuxError::ESRCH.into())
+    }
+
+    /// Releases a quiesced class and its cache without backing-file I/O.
+    ///
+    /// The provider must first synchronize the class or irreversibly abort its
+    /// mutation domain and preserve on-disk recovery evidence. Dirty usage and
+    /// reservations are discarded; this does not make them durable. Returns the
+    /// retained file for release outside provider locks, or None if unloaded.
+    pub fn invalidate(&mut self, kind: QuotaType) -> Option<F> {
+        let info = self.info[kind.index()].take()?;
+        self.dquots.retain(|id, _| id.kind() != kind);
+        Some(info.file)
     }
 
     /// Flushes a loaded class before suspending its accounting and limits.
@@ -215,9 +252,22 @@ impl<F> QuotaInfo<F> {
         self.active_info(kind)?;
         self.check_no_reservations(kind)?;
         self.sync(io, kind)?;
+        self.suspend_cached(kind)
+    }
+
+    /// Pauses a loaded class without I/O, retaining its file and dirty active records.
+    ///
+    /// The filesystem drains writeback before publishing a successful read-only
+    /// transition. A failed resume may retain dirty state for recovery. Reserved
+    /// bytes return EBUSY; an unloaded class returns ESRCH. Repeated calls are harmless.
+    pub fn suspend_cached(&mut self, kind: QuotaType) -> KResult<()> {
+        self.loaded_info(kind)?;
+        self.check_no_reservations(kind)?;
         if let Some(info) = &mut self.info[kind.index()] {
             info.state.insert(QuotaState::SUSPENDED);
         }
+        self.dquots
+            .retain(|id, dquot| id.kind() != kind || (dquot.is_active && dquot.is_dirty));
         Ok(())
     }
 
@@ -314,6 +364,50 @@ impl<F> QuotaInfo<F> {
         Ok(())
     }
 
+    /// Returns whether acquisition has completed for this cached record.
+    pub fn is_cached_active(&self, id: QuotaId) -> bool {
+        self.dquots.get(&id).is_some_and(|record| record.is_active)
+    }
+
+    /// Reserves bytes using already acquired records, without backing-file I/O.
+    ///
+    /// The filesystem initializes records before taking its inode reservation
+    /// lock. Missing records in active classes return ESRCH atomically.
+    pub fn reserve_space_cached(
+        &mut self,
+        ids: &[QuotaId],
+        bytes: i64,
+        now_seconds: i64,
+        flags: ChargeFlags,
+    ) -> KResult<()> {
+        if bytes < 0 || flags.bits() & !ChargeFlags::all().bits() != 0 {
+            return Err(LinuxError::EINVAL.into());
+        }
+        self.update_ids(None, ids, |dquot, info| {
+            charge_space(
+                &mut dquot.data,
+                info,
+                bytes,
+                now_seconds,
+                flags | ChargeFlags::RESERVE,
+            )
+        })
+    }
+
+    /// Releases cached reservations without I/O; disabled classes are skipped.
+    pub fn release_space_cached(&mut self, ids: &[QuotaId], bytes: i64) -> KResult<()> {
+        if bytes < 0 {
+            return Err(LinuxError::EINVAL.into());
+        }
+        self.update_ids(None, ids, |dquot, _| {
+            dquot.data.reserved_bytes = dquot.data.reserved_bytes.saturating_sub(bytes).max(0);
+            if dquot.data.total_bytes()? <= dquot.data.space_soft_limit_bytes {
+                dquot.data.space_expires_at = 0;
+            }
+            Ok(())
+        })
+    }
+
     /// Charges bytes to at most one ID per quota class.
     ///
     /// Disabled/suspended classes are skipped. Admission is atomic across the
@@ -330,7 +424,7 @@ impl<F> QuotaInfo<F> {
         if bytes < 0 || flags.bits() & !ChargeFlags::all().bits() != 0 {
             return Err(LinuxError::EINVAL.into());
         }
-        self.update_ids(io, ids, |dquot, info| {
+        self.update_ids(Some(io), ids, |dquot, info| {
             charge_space(&mut dquot.data, info, bytes, now_seconds, flags)?;
             if !flags.contains(ChargeFlags::RESERVE) {
                 dquot.is_dirty = true;
@@ -347,7 +441,7 @@ impl<F> QuotaInfo<F> {
         now_seconds: i64,
         can_bypass_limits: bool,
     ) -> KResult<()> {
-        self.update_ids(io, ids, |dquot, info| {
+        self.update_ids(Some(io), ids, |dquot, info| {
             charge_inode(&mut dquot.data, info, now_seconds, can_bypass_limits)?;
             dquot.is_dirty = true;
             Ok(())
@@ -369,7 +463,7 @@ impl<F> QuotaInfo<F> {
         if bytes < 0 {
             return Err(LinuxError::EINVAL.into());
         }
-        self.update_ids(io, ids, |dquot, _| {
+        self.update_ids(Some(io), ids, |dquot, _| {
             if is_reserved {
                 dquot.data.reserved_bytes = dquot.data.reserved_bytes.saturating_sub(bytes).max(0);
             } else {
@@ -385,7 +479,7 @@ impl<F> QuotaInfo<F> {
 
     /// Releases one inode, stopping at zero and resetting an ended grace period.
     pub fn free_inode(&mut self, io: &mut dyn QuotaIo<File = F>, ids: &[QuotaId]) -> KResult<()> {
-        self.update_ids(io, ids, |dquot, _| {
+        self.update_ids(Some(io), ids, |dquot, _| {
             dquot.data.used_inodes = dquot.data.used_inodes.saturating_sub(1).max(0);
             if dquot.data.used_inodes <= dquot.data.inode_soft_limit {
                 dquot.data.inode_expires_at = 0;
@@ -408,7 +502,7 @@ impl<F> QuotaInfo<F> {
         if bytes < 0 {
             return Err(LinuxError::EINVAL.into());
         }
-        self.update_ids(io, ids, |dquot, _| {
+        self.update_ids(Some(io), ids, |dquot, _| {
             if dquot.data.reserved_bytes < bytes {
                 return Err(LinuxError::EINVAL.into());
             }
@@ -437,7 +531,7 @@ impl<F> QuotaInfo<F> {
         if bytes < 0 {
             return Err(LinuxError::EINVAL.into());
         }
-        self.update_ids(io, ids, |dquot, _| {
+        self.update_ids(Some(io), ids, |dquot, _| {
             if dquot.data.used_bytes < bytes {
                 return Err(LinuxError::EINVAL.into());
             }
@@ -454,6 +548,111 @@ impl<F> QuotaInfo<F> {
             dquot.is_dirty = true;
             Ok(())
         })
+    }
+
+    /// Transfers one inode and its allocated/reserved bytes between owners.
+    ///
+    /// `owners` contains the source and target ID sets, in that order.
+    /// Admission is atomic across classes and both owner sets. The caller
+    /// serializes ownership and reservation changes on the inode. Acquiring
+    /// records may instantiate empty disk entries before admission.
+    /// A short source reservation is warned about and clamped to zero; the
+    /// target still admits the full transferred reservation.
+    /// Invalid ID sets or negative byte counts return EINVAL; new-owner limits
+    /// return EDQUOT, arithmetic overflow returns EOVERFLOW, and I/O errors propagate.
+    pub fn transfer(
+        &mut self,
+        io: &mut dyn QuotaIo<File = F>,
+        owners: (&[QuotaId], &[QuotaId]),
+        allocated_bytes: i64,
+        reserved_bytes: i64,
+        now_seconds: i64,
+        can_bypass_limits: bool,
+    ) -> KResult<()> {
+        if allocated_bytes < 0 || reserved_bytes < 0 {
+            return Err(LinuxError::EINVAL.into());
+        }
+        let (from, to) = owners;
+        let mut source = [None; 3];
+        let mut target = [None; 3];
+        for (ids, slots) in [(from, &mut source), (to, &mut target)] {
+            for &id in ids {
+                if slots[id.kind().index()].replace(id).is_some() {
+                    return Err(LinuxError::EINVAL.into());
+                }
+            }
+        }
+        let mut updated = [None; 6];
+        for kind in QuotaType::ALL {
+            let index = kind.index();
+            if source[index] == target[index] {
+                continue;
+            }
+            let (Some(old), Some(new)) = (source[index], target[index]) else {
+                return Err(LinuxError::EINVAL.into());
+            };
+            if !self.info(kind).is_some_and(Dqinfo::is_active) {
+                continue;
+            }
+            self.acquire(io, old)?;
+            self.acquire(io, new)?;
+            let mut previous = *self.dquots.get(&old).ok_or(LinuxError::ESRCH)?;
+            let mut next = *self.dquots.get(&new).ok_or(LinuxError::ESRCH)?;
+            let info = self.active_info(kind)?;
+            let mut flags = ChargeFlags::WARN;
+            flags.set(ChargeFlags::BYPASS_LIMITS, can_bypass_limits);
+            charge_inode(&mut next.data, info, now_seconds, can_bypass_limits)?;
+            charge_space(&mut next.data, info, allocated_bytes, now_seconds, flags)?;
+            charge_space(
+                &mut next.data,
+                info,
+                reserved_bytes,
+                now_seconds,
+                flags | ChargeFlags::RESERVE,
+            )?;
+            previous.data.used_inodes = previous.data.used_inodes.saturating_sub(1).max(0);
+            previous.data.used_bytes = previous
+                .data
+                .used_bytes
+                .saturating_sub(allocated_bytes)
+                .max(0);
+            if previous.data.reserved_bytes < reserved_bytes {
+                log::warn!(
+                    "quota reservation underflow for {old:?}: reserved={}, \
+                     transferred={reserved_bytes}",
+                    previous.data.reserved_bytes
+                );
+            }
+            previous.data.reserved_bytes = previous
+                .data
+                .reserved_bytes
+                .saturating_sub(reserved_bytes)
+                .max(0);
+            if previous.data.total_bytes()? <= previous.data.space_soft_limit_bytes {
+                previous.data.space_expires_at = 0;
+            }
+            if previous.data.used_inodes <= previous.data.inode_soft_limit {
+                previous.data.inode_expires_at = 0;
+            }
+            previous.is_dirty = true;
+            next.is_dirty = true;
+            updated[index * 2] = Some((old, previous));
+            updated[index * 2 + 1] = Some((new, next));
+        }
+        for (id, record) in updated.into_iter().flatten() {
+            self.dquots.insert(id, record);
+        }
+        Ok(())
+    }
+
+    /// Returns the next cached ID, exclusively after `after`.
+    /// Used by filesystems to release records in bounded transactions.
+    pub fn next_cached_id(&self, after: Option<QuotaId>) -> Option<QuotaId> {
+        use core::ops::Bound::{Excluded, Unbounded};
+        self.dquots
+            .range((after.map_or(Unbounded, Excluded), Unbounded))
+            .next()
+            .map(|(&id, _)| id)
     }
 
     /// Returns the next dirty cached ID, exclusively after `after`.
@@ -501,7 +700,8 @@ impl<F> QuotaInfo<F> {
     /// Writes dirty records and file information; the filesystem makes them durable.
     ///
     /// Attempts every dirty record and then file information, preserving the
-    /// first error. Failed records and file information retain dirty state.
+    /// first error. Failed active records and file information retain dirty state.
+    /// Inactive records report their initialization error once and clear dirty state.
     pub fn sync(&mut self, io: &mut dyn QuotaIo<File = F>, kind: QuotaType) -> KResult<()> {
         let info = self.info[kind.index()].as_mut().ok_or(LinuxError::ESRCH)?;
         let mut result = Ok(());
@@ -572,7 +772,9 @@ impl<F> QuotaInfo<F> {
         Ok(info)
     }
 
-    fn check_no_reservations(&self, kind: QuotaType) -> KResult<()> {
+    /// Checks whether a class can relinquish accounting without losing reservations.
+    /// Returns EBUSY while any cached record owns reserved bytes; performs no I/O.
+    pub fn check_no_reservations(&self, kind: QuotaType) -> KResult<()> {
         if self
             .dquots
             .iter()
@@ -612,7 +814,7 @@ impl<F> QuotaInfo<F> {
 
     fn update_ids(
         &mut self,
-        io: &mut dyn QuotaIo<File = F>,
+        mut io: Option<&mut dyn QuotaIo<File = F>>,
         ids: &[QuotaId],
         mut update_fn: impl FnMut(&mut Dquot, &Dqinfo<F>) -> KResult<()>,
     ) -> KResult<()> {
@@ -627,7 +829,11 @@ impl<F> QuotaInfo<F> {
             if !self.info(id.kind()).is_some_and(Dqinfo::is_active) {
                 continue;
             }
-            self.acquire(io, id)?;
+            if let Some(io) = io.as_deref_mut() {
+                self.acquire(io, id)?;
+            } else if !self.is_cached_active(id) {
+                return Err(LinuxError::ESRCH.into());
+            }
             let info = self.active_info(id.kind())?;
             let mut dquot = *self.dquots.get(&id).ok_or(LinuxError::ESRCH)?;
             update_fn(&mut dquot, info)?;

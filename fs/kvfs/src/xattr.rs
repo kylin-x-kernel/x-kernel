@@ -243,7 +243,7 @@ impl Path {
         flags: XattrSetFlags,
         cred: &Cred,
     ) -> VfsResult<()> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
         check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         let _data_guard = inode.lock_data();
@@ -255,7 +255,7 @@ impl Path {
     /// Removing `security.*` requires effective `CAP_SYS_ADMIN` until KVFS has
     /// an LSM authorization hook.
     pub fn remove_xattr(&self, name: &XattrName, cred: &Cred) -> VfsResult<()> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
         check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         let _data_guard = inode.lock_data();

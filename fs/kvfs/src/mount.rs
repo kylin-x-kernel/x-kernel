@@ -1116,10 +1116,16 @@ impl Path {
         Ok(())
     }
 
+    pub(crate) fn lock_writable_mount(&self) -> VfsResult<crate::RwLockReadGuard<'_, ()>> {
+        let guard = self.super_block().start_write()?;
+        self.check_writable_mount()?;
+        Ok(guard)
+    }
+
     pub(crate) fn touch_atime(&self) {
-        if self.is_effectively_readonly() {
+        let Ok(_write_guard) = self.lock_writable_mount() else {
             return;
-        }
+        };
 
         let mount_flags = self.mnt.flags();
         let super_block_flags = self.super_block().flags();
@@ -1202,7 +1208,7 @@ impl Path {
 
     /// Changes this inode's owner after applying Linux chown/chgrp authorization.
     pub fn chown(&self, uid: Option<u32>, gid: Option<u32>, cred: &Cred) -> VfsResult<()> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         let metadata = self.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
         let can_chown = cred.has_cap_chown();
@@ -1239,7 +1245,7 @@ impl Path {
 
     /// Changes this inode's permission bits after applying Linux chmod authorization.
     pub fn chmod(&self, mut mode: NodePermission, cred: &Cred) -> VfsResult<()> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         let metadata = self.metadata();
         if cred.fsuid() != metadata.uid && !cred.has_cap_fowner() {
             return Err(VfsError::OperationNotPermitted);
@@ -1267,7 +1273,7 @@ impl Path {
             return Ok(());
         }
 
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         let metadata = self.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
         let is_touch = matches!(
@@ -1344,7 +1350,7 @@ impl Path {
         exclusive: bool,
         cred: &Cred,
     ) -> VfsResult<()> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         self.may_modify_directory(cred)?;
         let dir_inode = self.inode();
         let mode = dir_inode.prepare_create_mode(
@@ -1365,7 +1371,7 @@ impl Path {
         umask: NodePermission,
         cred: &Cred,
     ) -> VfsResult<()> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         self.may_modify_directory(cred)?;
         let node_type = mode.node_type();
         if matches!(node_type, NodeType::CharacterDevice | NodeType::BlockDevice) {
@@ -1396,7 +1402,7 @@ impl Path {
         umask: NodePermission,
         cred: &Cred,
     ) -> VfsResult<()> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         self.may_modify_directory(cred)?;
         let dir_inode = self.inode();
         let allowed_permission =
@@ -1417,7 +1423,7 @@ impl Path {
         target: &str,
         cred: &Cred,
     ) -> VfsResult<()> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         self.may_modify_directory(cred)?;
         let dir_inode = self.inode();
         dir_inode.symlink(candidate, target, cred)
@@ -1427,7 +1433,7 @@ impl Path {
         if !Arc::ptr_eq(&self.mnt, &source.mnt) {
             return Err(VfsError::CrossesDevices);
         }
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         self.may_modify_directory(cred)?;
         if source.is_dir() {
             return Err(VfsError::OperationNotPermitted);
@@ -1547,7 +1553,7 @@ impl Path {
         if !Arc::ptr_eq(&self.mnt, &new_dir.mnt) {
             return Err(VfsError::CrossesDevices);
         }
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
 
         // The identities the event sources need are captured here, inside the
         // callback the rename runs under its namespace lock, from the very
@@ -1624,7 +1630,7 @@ impl Path {
         has_trailing_slash: bool,
         cred: &Cred,
     ) -> VfsResult<Option<RemovedEntry>> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         // Captured under the namespace lock, from the dentry the removal
         // actually unlinks -- the event identity must describe that object,
         // not whatever a separate lookup saw before the lock was taken.
@@ -1670,7 +1676,7 @@ impl Path {
 
     /// Removes a directory like `Mount::rmdir` and reports the victim.
     pub fn rmdir_tracked(&self, name: &str, cred: &Cred) -> VfsResult<Option<RemovedEntry>> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         let mut removed = None;
         self.dentry.as_dir()?.rmdir_with(name, |victim| {
             self.may_modify_directory(cred)?;
@@ -1836,7 +1842,7 @@ impl Path {
     }
 
     pub(crate) fn truncate_opened(&self, len: u64) -> VfsResult<()> {
-        self.check_writable_mount()?;
+        let _write_guard = self.lock_writable_mount()?;
         if self.is_dir() {
             return Err(VfsError::IsADirectory);
         }

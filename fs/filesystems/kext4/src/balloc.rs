@@ -401,7 +401,11 @@ impl Ext4SbInfo {
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
         self.block_group_for_inode(inode.number())?;
-        self.release_allocated_block_inner(block, 1, handle, BlockReleaseKind::Data)
+        let allocation =
+            self.release_allocated_block_inner(block, 1, handle, BlockReleaseKind::Data)?;
+        self.free_quota_space(inode, 1, handle)?;
+        self.sync_inode_quotas(inode, handle)?;
+        Ok(allocation)
     }
 
     pub(crate) fn release_allocated_metadata_block(
@@ -411,7 +415,11 @@ impl Ext4SbInfo {
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
         self.block_group_for_inode(inode.number())?;
-        self.release_allocated_block_inner(block, 1, handle, BlockReleaseKind::Metadata)
+        let allocation =
+            self.release_allocated_block_inner(block, 1, handle, BlockReleaseKind::Metadata)?;
+        self.free_quota_space(inode, 1, handle)?;
+        self.sync_inode_quotas(inode, handle)?;
+        Ok(allocation)
     }
 
     pub(crate) fn release_allocated_metadata_block_without_revoke(
@@ -421,12 +429,15 @@ impl Ext4SbInfo {
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
         self.block_group_for_inode(inode.number())?;
-        self.release_allocated_block_inner(
+        let allocation = self.release_allocated_block_inner(
             block,
             1,
             handle,
             BlockReleaseKind::MetadataWithoutRevoke,
-        )
+        )?;
+        self.free_quota_space(inode, 1, handle)?;
+        self.sync_inode_quotas(inode, handle)?;
+        Ok(allocation)
     }
 
     /// Releases a contiguous extent in bounded group-local bitmap updates.
@@ -453,9 +464,10 @@ impl Ext4SbInfo {
                 .min(u64::from(range.block_count() - range.bit_index(block)?))
                 .min(256) as u32;
             self.release_allocated_block_inner(PhysicalBlock::new(next), count, handle, kind)?;
+            self.free_quota_space(inode, u64::from(count), handle)?;
             next += u64::from(count);
         }
-        Ok(())
+        self.sync_inode_quotas(inode, handle)
     }
 
     fn release_allocated_block_inner(
