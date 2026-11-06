@@ -25,8 +25,16 @@ contract. IRQ detach/drain must complete before dependent storage is reclaimed.
 Neither guards nor raw addresses authorize access after shutdown.
 
 ## IRQ
-IrqRouteDesc is an unresolved route. IrqResource distinguishes plain resolved
-virq from a mapped virq carrying its origin, without a zero-number sentinel.
+IrqRouteDesc is an unresolved legacy route. IrqResource distinguishes plain
+resolved virq from a mapped virq carrying its origin, without a zero-number
+sentinel. `map_fw_irq` is the firmware path: it carries the exact controller
+firmware node and the complete binding cells, and the provider maps them through
+the host IRQ core. A provider must not re-decode cells, guess a controller
+family, or fall back to the raw firmware number; its default is Unsupported.
+`map_irq` remains the family-and-hwirq route path for PCI legacy INTx.
+Registration and line control resolve both resource shapes by logical number:
+the IRQ core descriptor created by the mapping is authoritative, so retained
+route metadata is never rebuilt into a second descriptor.
 Explicit domains survive conversion. IrqEvent conveys handled/wake-thread;
 queue-specific events stay in drivers, not an unused source bitmap.
 Threaded defaults remain Unsupported. `try_free_msix` consumes the resource on

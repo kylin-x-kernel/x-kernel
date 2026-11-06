@@ -13,7 +13,7 @@
 //! firmware-agnostic.
 
 use driver_base::DriverResult;
-use driver_os_api::IrqOp;
+use driver_os_api::{IrqOp, IrqResource};
 use kdevice::{
     BusId, BusTypeId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, MmioRegion,
     PlatformIdentity, ResourceDesc, ResourceSet,
@@ -128,19 +128,16 @@ impl PlatformBackend {
                     return;
                 };
 
-                if let Some(irq) = dev.irq {
-                    match super::map_firmware_irq(irq, |route| {
-                        crate::resource::resource_provider().map_irq(route)
-                    }) {
-                        Ok(mapped) => resources.push(ResourceDesc::Irq(mapped)),
-                        Err(error) => {
-                            log::warn!(
-                                "platform: IRQ mapping failed for {}: {irq:?}: {error:?}",
-                                dev.firmware_id
-                            );
-                            first_error.get_or_insert(error);
-                            return;
-                        }
+                match map_firmware_irq(&dev) {
+                    Ok(Some(mapped)) => resources.push(ResourceDesc::Irq(mapped)),
+                    Ok(None) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "platform: IRQ mapping failed for {}: {error:?}",
+                            dev.firmware_id
+                        );
+                        first_error.get_or_insert(error);
+                        return;
                     }
                 }
 
@@ -166,6 +163,27 @@ impl PlatformBackend {
         match first_error {
             Some(err) => Err(err),
             None => Ok(()),
+        }
+    }
+}
+
+/// Map a device's firmware interrupt declaration through the host provider.
+///
+/// `Ok(None)` means the node declares no interrupt; an unreadable declaration
+/// is an error, never an absent interrupt or a raw-number fallback.
+fn map_firmware_irq(device: &fw::FirmwareDevice) -> DriverResult<Option<IrqResource>> {
+    match device.irq {
+        Ok(Some(spec)) => crate::resource::resource_provider()
+            .map_fw_irq(spec)
+            .map(Some)
+            .map_err(crate::resource::map_res_err),
+        Ok(None) => Ok(None),
+        Err(error) => {
+            log::warn!(
+                "platform: malformed IRQ declaration for {}: {error:?}",
+                device.firmware_id
+            );
+            Err(super::firmware_error_to_driver(error))
         }
     }
 }

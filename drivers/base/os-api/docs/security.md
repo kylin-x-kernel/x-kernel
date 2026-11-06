@@ -18,6 +18,7 @@ device shutdown is a framework/driver responsibility, not inferred from Drop.
 | Risk | Mitigation / owner |
 |---|---|
 | Wrong IRQ or shared peer removed | Preserve mapped origin and exact action token |
+| Firmware cells become a wrong logical IRQ | Provider maps by exact controller node; malformed/unsupported/not-ready/conflict errors are distinct; no raw-number fallback |
 | Callback uses freed memory | Host detach/drain completes before release returns |
 | Invalid register offset | Bounds/alignment checks before volatile access |
 | Allocation failure | Typed error; failed acquisition registers nothing |

@@ -69,11 +69,37 @@ pub enum FwError {
     BufferTooSmall,
 }
 
+/// The firmware interface that produced a node description.
+///
+/// This is descriptive metadata, not another identity: the node is still
+/// identified by [`FwNode`] alone. Consumers use it for diagnostics and for
+/// selecting the correct resource provenance without matching compatible
+/// strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FwSource {
+    /// Flattened device tree.
+    DeviceTree,
+    /// ACPI namespace or ACPI-derived description.
+    Acpi,
+    /// Static board or platform table.
+    Static,
+    /// The backend does not report its provenance.
+    Unknown,
+}
+
 /// Operations implemented by one device-description backend.
 ///
 /// Implementations are shared immutably. Methods return borrowed firmware
 /// data, so the backend must outlive every [`FwNode`] created from it.
 pub trait FwNodeOps<'a>: Sync + 'a {
+    /// Returns the firmware interface that produced this backend.
+    ///
+    /// The default keeps unrelated test backends source-agnostic; concrete
+    /// firmware backends should report their real provenance.
+    fn source(&self) -> FwSource {
+        FwSource::Unknown
+    }
+
     /// Returns the node name, or `None` for an invalid handle.
     fn name(&self, id: FwNodeId) -> Option<&'a str>;
 
@@ -98,6 +124,18 @@ pub trait FwNodeOps<'a>: Sync + 'a {
     /// [`FwError::InvalidValue`] when the availability declaration is
     /// malformed.
     fn is_available(&self, id: FwNodeId) -> Result<bool, FwError>;
+
+    /// Returns whether firmware declares this node as an interrupt controller.
+    ///
+    /// The backend owns how its firmware represents this role; callers must
+    /// not test a device-tree property name themselves. A missing declaration
+    /// is `Ok(false)`, while a malformed declaration is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FwError::InvalidNode`] for an unknown handle or a backend
+    /// error when the declaration cannot be interpreted.
+    fn is_interrupt_controller(&self, id: FwNodeId) -> Result<bool, FwError>;
 
     /// Returns firmware identity string `index`, in firmware order.
     ///
@@ -208,6 +246,11 @@ impl<'a> FwNode<'a> {
         self.id
     }
 
+    /// Returns the firmware interface that produced this node.
+    pub fn source(self) -> FwSource {
+        self.ops.source()
+    }
+
     /// Returns the node name.
     pub fn name(self) -> Option<&'a str> {
         self.ops.name(self.id)
@@ -269,6 +312,15 @@ impl<'a> FwNode<'a> {
     /// See [`FwNodeOps::is_available`].
     pub fn is_available(self) -> Result<bool, FwError> {
         self.ops.is_available(self.id)
+    }
+
+    /// Returns whether firmware declares this node as an interrupt controller.
+    ///
+    /// # Errors
+    ///
+    /// See [`FwNodeOps::is_interrupt_controller`].
+    pub fn is_interrupt_controller(self) -> Result<bool, FwError> {
+        self.ops.is_interrupt_controller(self.id)
     }
 
     /// Iterates firmware identity strings in firmware order.

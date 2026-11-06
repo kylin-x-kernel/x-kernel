@@ -23,6 +23,7 @@
 //! Common interrupt / PCI host description types live in `of` today and are
 //! re-exported here so callers depend only on `khal::firmware::devices::*`.
 
+pub use fwnode::{FwError, FwIrqSpec};
 #[cfg(target_arch = "x86_64")]
 use lazyinit::LazyInit;
 pub use of::{
@@ -60,7 +61,11 @@ pub struct FirmwareDevice {
     pub firmware_id: &'static str,
     pub source: FirmwareSource,
     pub mmio: Option<MmioResource>,
-    pub irq: Option<InterruptInfo>,
+    /// The node's first interrupt declaration, still carrying its exact
+    /// controller node and complete binding cells. A malformed declaration is
+    /// reported, not silently treated as "no interrupt": downstream mapping
+    /// must distinguish the two. `Ok(None)` means the node declares none.
+    pub irq: Result<Option<FwIrqSpec<'static>>, FwError>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -210,9 +215,7 @@ pub fn for_each_compatible(
                 base: resource.base as usize,
                 size: resource.size as usize,
             });
-        let irq = node.irq_spec(0).ok().flatten().and_then(|spec| {
-            of::decode_irq_cells(spec.controller.firmware_ids(), spec.params.as_slice())
-        });
+        let irq = node.irq_spec(0);
 
         visitor(FirmwareDevice {
             firmware_id,

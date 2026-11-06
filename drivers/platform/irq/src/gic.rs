@@ -7,7 +7,9 @@
 use core::{fmt, sync::atomic::Ordering};
 
 mod firmware;
-pub use firmware::GicConfigError;
+pub use firmware::{GicConfigError, GicSelection};
+mod xlate;
+use xlate::GIC_XLATE;
 
 #[path = "gicv2.rs"]
 mod gicv2;
@@ -363,24 +365,31 @@ pub fn init(config: GicConfig) -> Result<(), &'static str> {
 ///
 /// The caller supplies the root published by the active device-description
 /// backend (device tree, ACPI, or static configuration). Requires the same
-/// masked boot context as [`init`]. Register mapping and hardware setup remain
-/// here, independent of how the facts were obtained.
+/// masked boot context as [`init`]. The selected controller node must outlive
+/// the kernel because it becomes the identity under which consumers map
+/// firmware interrupts. Register mapping and hardware setup remain here,
+/// independent of how the facts were obtained.
 ///
 /// # Errors
 /// Returns an error if the selected node's status or translated register
 /// resources are invalid, no supported controller is available, the
-/// firmware-described layout is unsupported, or CPU setup fails.
+/// firmware-described layout is unsupported, the controller node cannot be
+/// associated with its IRQ domain, or CPU setup fails.
 ///
 /// # Panics
 /// Has the same controller-wide failure conditions as [`init`].
-pub fn init_from_fwnode(root: fwnode::FwNode<'_>) -> Result<(), &'static str> {
-    let config = GicConfig::from_fwnode(root)
+pub fn init_from_fwnode(root: fwnode::FwNode<'static>) -> Result<(), &'static str> {
+    let GicSelection { config, controller } = GicConfig::from_fwnode(root)
         .map_err(|error| {
             error!("invalid GIC firmware configuration: {error:?}");
             "invalid GIC firmware configuration"
         })?
         .ok_or("no available supported GIC controller in firmware description")?;
-    init(config)
+    init(config)?;
+    kirq::register_irq_domain(GIC_ROOT_DOMAIN, controller, &GIC_XLATE).map_err(|error| {
+        error!("failed to register GIC IRQ domain: {error:?}");
+        "failed to register GIC IRQ domain"
+    })
 }
 
 /// Initializes this CPU's GIC interface during bring-up.

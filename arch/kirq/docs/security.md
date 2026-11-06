@@ -562,6 +562,25 @@ the CPU-local NMI owner protocol, or the generic `krcu-list` contracts.
 - `IRQ_STATE` 中的 `virq -> IrqStateDesc` 和 `domain -> hwirq -> virq` 映射必须保持一致。
 - 带 domain 的 descriptor 只能使用 `domain/mod.rs` 静态 registry 中已注册的 domain；
   未知 domain 必须返回 `IrqDescError::UnknownDomain`，不能创建数据面不可解析的映射。
+- Firmware 中断只能通过 `domain/fw.rs` 中按 `FwNode` 精确身份注册的
+  controller/domain 关联映射。`FwNode` 相等性同时比较 backend 身份和 node id；
+  不能退化为 compatible 字符串、`IrqController` family 或数字 id 匹配。
+- `IrqDomainXlate::translate()` 只把绑定 cell 解码为 `IrqHwSpec`，不能分配 virq、
+  选择其它 controller 或回调 `kirq`。registry 锁必须在调用 translate 和
+  `try_map` 之前释放。
+- `register_irq_domain()` 是 boot-only 且非幂等：同一 domain 的第二个 controller、
+  同一 controller 的第二个 domain、未知 domain 都必须显式报错，不能静默覆盖。
+  关联保存在所属 `IrqDomain` 内，不存在独立的固定容量关联表；boot 期由注册锁串行化。
+- `IrqDomain` 的 controller family 是 domain 元数据；`register_irq_domain()` 不接受
+  调用者另行提供的 kind，`try_map_fwspec()` 使用该权威值填充 descriptor，避免
+  domain 与 controller kind 的矛盾组合。当前静态 domain 集合每族一个，尚不支持
+  同族多实例；精确节点身份只保证 lookup 不串线，不等于多实例注册能力。
+- `try_map_fwspec()` 必须区分“无声明”（backend 返回 `Ok(None)`）、声明损坏
+  （`MalformedSpec`/`InvalidHwirq`）、绑定不支持（`UnsupportedSpec`）、
+  controller 未注册（`ControllerNotReady`）和 IRQ core 拒绝（`Map(...)`）；
+  不得回退到默认 controller 或 family 推导。
+- `MappedIrq::desc` 必须来自 `commit_resolution` 返回的已存储 descriptor，使
+  translate 得到的 trigger/polarity/controller 不会被 consumer 默认值覆盖。
 - `try_disable_irq_nosync()` 必须保持 lookup-only；未知 IRQ 返回
   `IrqDescError::UnknownIrq`，不能在 hardirq-safe disable 路径中创建 descriptor 或
   domain mapping。
@@ -797,7 +816,9 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-13 | BH-disabled guard 跨 CPU drop | guard 生命周期没有 pin 当前 CPU 或可跨线程移动 | per-CPU BH depth 泄漏、underflow 或在错误 CPU drain softirq | `LocalBhGuard` 持有 `NoPreempt` 且不是 `Send` |
 | T-14 | driver 读取当前 APIC id 生成 MSI message | MSI message 由设备层而非 IRQ backend 编码 | SMP/affinity/x2APIC 下中断投递到错误 CPU | `MsiBackendIf::compose_msi_message()` 是唯一 message composition 边界 |
 | T-15 | MSI vector 与 handler 生命周期失配 | 设备释放 MSI resource 时 handler 仍注册，或 handler 注销提前删除 MSI mapping | vector reuse 后旧 handler、stale mapping 或 backend vector 泄漏 | `unregister()` 保留 MSI descriptor；`free_msix()` 检测 descriptor 是否仍被使用并完成最终清理；驱动 teardown 应先撤 handler 再释放 MSI resource |
-| T-16 | descriptor 冲突被静默合并 | hwirq/domain/virq metadata 不一致 | handler 绑定到错误 IRQ 或平台 configure 错误 | `try_resolve_desc()` / `try_merge()` 运行时返回 `IrqDescError` |
+| T-16 | descriptor 冲突被静默合并 | hwirq/domain/virq/trigger/polarity/controller metadata 不一致 | handler 绑定到错误 IRQ 或平台 configure 错误 | `try_resolve_desc()` / `try_merge()` 运行时返回 `IrqDescError`；两个确定的 trigger/polarity/controller 不会互相覆盖 |
+| T-16b | Firmware controller 身份被猜测匹配 | 用 compatible、family 或数字 node id 代替 `FwNode` | 多实例或多 backend 时中断被路由到错误 controller | `domain/fw.rs` 只按 `FwNode` 的 backend 指针 + node id 精确关联；重复关联显式失败 |
+| T-16c | 固件 cell 由错误 owner 解释 | IRQ core 猜测 trigger，或 controller 返回 logical IRQ | 绑定错误、双份 decoder 或 controller 越权 | `IrqDomainXlate` 只产生 `IrqHwSpec`；`kirq` 负责 domain 关联与逻辑映射；translate 错误按 `IrqXlateError` 分类返回 |
 | T-17 | Missing MSI mapping becomes a raw logical IRQ | No `(MSI_DOMAIN, vector)` entry | Wrong handler selected | MSI dispatch uses the strict Domain Line index; a miss never falls back to the raw vector |
 | T-18 | 未注册 domain 被映射成功 | 控制面接受未知 `IrqDomainId` | 驱动拿到永远不可达的 virq | `try_resolve_and_publish()` 在改状态前返回 `UnknownDomain` |
 | T-19 | BH-disabled 被误判为普通 task context | diagnostics 只区分 hardirq/softirq/task | sleepable future callback 可能在 BH-disabled 区间运行 | `InterruptContextLevel::BhDisabled` 和 docs 明确其 non-sleepable 语义 |
@@ -858,6 +879,9 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | F-22 | enable_irq 作用于未知或无 action descriptor | 显式 enable 创建 descriptor 或 unmask 没有 handler 的 line | 未处理 IRQ 或错误平台状态 | `try_enable_irq()` 不创建 descriptor，未知 IRQ 返回 `UnknownIrq`，无 action 返回 `NoIrqAction` |
 | F-23 | enable_irq 与 free_irq wait 重叠 | teardown 已 mask line 但 descriptor 尚未清理 | platform line 在 action 删除后被重新打开 | `teardown_depth` 让 `try_enable_irq()` 返回 `TeardownInProgress` |
 | F-24 | Runtime NMI mechanism unavailable | The initialized platform mode is `None`, including unsupported GICv2 configurations | An NMI action cannot obtain local preparation/publication | AArch64 PMU registers an ordinary PerCpu action instead and skips NMI preparation; periodic NMI retirement remains unsupported. This is ordinary registration, not normal-IRQ delivery to an NMI-owned Line, which is rejected without invoking its handler. |
+| F-25 | Firmware controller not registered when a consumer maps | Controller driver has not completed initialization, or the wrong node was registered | Mapping fails or a node is attached to the wrong domain | `try_map_fwspec()` returns `ControllerNotReady`; association uses exact `FwNode` identity and registration is explicit after controller init |
+| F-26 | Malformed or unsupported firmware binding | Truncated cells, unknown type, out-of-range hwirq | Wrong hardware source configured or silent fallback | `IrqXlateError` distinguishes malformed, unsupported and invalid hwirq; the consumer maps that to `MalformedSpec`/`UnsupportedSpec`/`InvalidHwirq` |
+| F-27 | Reusing a mapping with conflicting attributes | Same `(domain, hwirq)` declared with a different trigger or controller | Handler configured for the wrong electrical mode | `try_merge()` returns `TriggerConflict`/`ControllerConflict`; `MappedIrq::desc` never overwrites stored metadata from translation |
 
 ## 故障管理
 

@@ -23,7 +23,7 @@ fn descriptor() -> IrqDesc {
 fn repeat_without_work(state: &SpinNoIrq<InputIrqState>, fixture: &SerialPortFixture) {
     prepare_input_with(
         state,
-        Some((fixture.port(), descriptor())),
+        Some((fixture.port(), crate::serial::EarlyIrq::Legacy(descriptor()))),
         |_| panic!("duplicate setup prepared storage"),
         |_| panic!("duplicate setup mapped an IRQ"),
         |_, _| panic!("duplicate setup registered an action"),
@@ -73,7 +73,7 @@ fn setup_failures_never_enable_rx_or_publish_readiness() {
         let stage = Cell::new(0);
         prepare_input_with(
             &state,
-            Some((fixture.port(), descriptor())),
+            Some((fixture.port(), crate::serial::EarlyIrq::Legacy(descriptor()))),
             |port| {
                 stage.set(1);
                 if matches!(failure, Failure::Buffer) {
@@ -87,9 +87,9 @@ fn setup_failures_never_enable_rx_or_publish_readiness() {
                 core::assert_eq!(stage.get(), 1);
                 stage.set(2);
                 if matches!(failure, Failure::Mapping) {
-                    Err(kirq::IrqDescError::UnknownIrq)
+                    None
                 } else {
-                    Ok(91)
+                    Some(91)
                 }
             },
             |virq, _| {
@@ -130,7 +130,7 @@ fn successful_setup_enables_rx_once_after_action_installation() {
     let stage = Cell::new(0);
     prepare_input_with(
         &state,
-        Some((fixture.port(), descriptor())),
+        Some((fixture.port(), crate::serial::EarlyIrq::Legacy(descriptor()))),
         |port| {
             stage.set(1);
             port.prepare_irq_input()
@@ -138,7 +138,7 @@ fn successful_setup_enables_rx_once_after_action_installation() {
         |_| {
             core::assert_eq!(stage.get(), 1);
             stage.set(2);
-            Ok(91)
+            Some(91)
         },
         |virq, _| {
             core::assert_eq!(stage.get(), 2);

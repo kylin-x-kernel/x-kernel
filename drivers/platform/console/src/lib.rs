@@ -87,7 +87,7 @@ struct StdoutDesc {
     /// 16550 MMIO register access width from `reg-io-width`.
     #[cfg(feature = "ns16550-mmio")]
     reg_width: SerialRegWidth,
-    irq: Option<IrqDesc>,
+    irq: Option<serial::EarlyIrq>,
 }
 
 /// Device-tree MMIO layout for an NS16550-compatible UART.
@@ -145,6 +145,50 @@ pub fn getchar() -> Option<u8> {
     serial::stdout_port().and_then(|port| port.getchar())
 }
 
+/// Resolve the backend-neutral firmware node for a `chosen` stdout path.
+///
+/// The path is resolved through `/aliases` first (the `of` and `fwnode` views
+/// do not share handles), then walked by node name from the firmware root.
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+fn stdout_fwnode(stdout_path: &str) -> Option<fwnode::FwNode<'static>> {
+    let key = stdout_path.split(':').next()?;
+    let path = if key.starts_with('/') {
+        key
+    } else {
+        of::fdt()?
+            .find_node("/aliases")?
+            .property_str(key)?
+            .split(':')
+            .next()?
+    };
+    let mut node = khal::firmware::fwnode_root()?;
+    for component in path.split('/').filter(|component| !component.is_empty()) {
+        let mut child = node.first_child()?;
+        loop {
+            if child.name() == Some(component) {
+                node = child;
+                break;
+            }
+            child = child.next_sibling()?;
+        }
+    }
+    Some(node)
+}
+
+/// The stdout node's IRQ declaration as firmware cells plus controller node.
+///
+/// `Ok(None)` means the node declares no interrupt; an invalid declaration is
+/// an error and must not be treated as absence.
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+fn stdout_firmware_irq(
+    stdout_path: &str,
+) -> Result<Option<fwnode::FwIrqSpec<'static>>, fwnode::FwError> {
+    let Some(node) = stdout_fwnode(stdout_path) else {
+        return Ok(None);
+    };
+    node.irq_spec(0)
+}
+
 /// Resolve the device-tree stdout node into a port description.
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 fn stdout_desc_from_device_tree() -> Option<StdoutDesc> {
@@ -152,12 +196,16 @@ fn stdout_desc_from_device_tree() -> Option<StdoutDesc> {
     let node = of::resolve_node(stdout_path)?;
     let reg = node.reg()?.next()?;
     let paddr = PhysAddr::from_usize(reg.starting_address as usize);
-    let irq = node
-        .irq_spec(0)
-        .ok()
-        .flatten()
-        .and_then(|spec| of::decode_fdt_irq_spec(spec.controller, spec.params))
-        .map(device_tree_irq_desc);
+    let irq = match stdout_firmware_irq(stdout_path) {
+        Ok(Some(spec)) => Some(serial::EarlyIrq::Firmware(spec)),
+        Ok(None) => None,
+        Err(error) => {
+            // Keep polling output, but do not re-decode through the legacy OF
+            // path: a declaration that exists but is invalid is not absence.
+            log::warn!("console: invalid stdout IRQ declaration; input stays polled: {error:?}");
+            None
+        }
+    };
     // Register stride: each UART register is `1 << reg-shift` bytes apart
     // (RK3588's DesignWare UART uses reg-shift = 2 -> 4-byte stride). PL011
     // does not use this property; it is recorded but ignored by that backend.
@@ -247,29 +295,6 @@ pub fn ns16550_mmio_layout_for_paddr(paddr: usize) -> Option<SerialMmioLayout> {
     })
 }
 
-#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
-fn device_tree_irq_desc(info: of::InterruptInfo) -> IrqDesc {
-    let desc = match info.controller {
-        of::InterruptControllerKind::Gic => match info.trigger {
-            of::InterruptTrigger::EdgeRising => kirq::gic_edge_irq_desc(info.irq),
-            of::InterruptTrigger::EdgeFalling => {
-                kirq::gic_irq_desc(info.irq, kirq::IrqTrigger::EdgeFalling)
-            }
-            of::InterruptTrigger::LevelHigh => kirq::gic_level_irq_desc(info.irq),
-            of::InterruptTrigger::LevelLow => {
-                kirq::gic_irq_desc(info.irq, kirq::IrqTrigger::LevelLow)
-            }
-            of::InterruptTrigger::Unknown(flags) => {
-                kirq::gic_irq_desc(info.irq, kirq::IrqTrigger::Unknown(flags))
-            }
-        },
-        of::InterruptControllerKind::Plic => kirq::plic_irq_desc(info.irq),
-        of::InterruptControllerKind::Unknown => kirq::IrqDesc::from_hwirq(info.irq),
-    };
-
-    desc.with_source(kirq::IrqSource::DeviceTree)
-}
-
 /// Map the stdout MMIO window and build the matching [`SerialPort`].
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 fn build_stdout_port(desc: &StdoutDesc) -> SerialPort {
@@ -327,16 +352,16 @@ pub fn init_stdout_from_device_tree() -> Option<()> {
 pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
     // SAFETY: `port` is the platform-configured NS16550 I/O-port base.
     let uart = unsafe { SerialPort::new_ioport_ns16550(port, SerialRole::Stdout) };
-    serial::register_early_stdout(Arc::new(uart), irq);
+    serial::register_early_stdout(Arc::new(uart), irq.map(serial::EarlyIrq::Legacy));
 }
 
 // Keep failure tests off the live console/IRQ registry. Hardware activation
 // and readiness publication remain in this shared production transaction.
 fn prepare_input_with(
     input_irq: &SpinNoIrq<InputIrqState>,
-    console: Option<(Arc<SerialPort>, IrqDesc)>,
+    console: Option<(Arc<SerialPort>, serial::EarlyIrq)>,
     prepare_fn: impl FnOnce(&SerialPort) -> Result<(), alloc::collections::TryReserveError>,
-    map_fn: impl FnOnce(IrqDesc) -> Result<usize, kirq::IrqDescError>,
+    map_fn: impl FnOnce(serial::EarlyIrq) -> Option<usize>,
     register_fn: impl FnOnce(usize, kirq::Handler) -> Result<Option<IrqActionToken>, kirq::IrqDescError>,
 ) {
     {
@@ -353,12 +378,9 @@ fn prepare_input_with(
         log::warn!("console input stays polled: buffer preparation failed: {error:?}");
         return;
     }
-    let virq = match map_fn(desc) {
-        Ok(virq) => virq,
-        Err(error) => {
-            log::warn!("console input stays polled: cannot map {desc:?}: {error:?}");
-            return;
-        }
+    let Some(virq) = map_fn(desc) else {
+        log::warn!("console input stays polled: cannot map {desc:?}");
+        return;
     };
     let irq_port = port.clone();
     // A mapping may predate this attempt or serve another shared action.
@@ -377,10 +399,30 @@ fn prepare_input_with(
     }
 }
 
-unittest::path_mod_test!(input_setup_tests, "../ut-tests/input_setup.rs");
+/// Map the early console's interrupt description through the same IRQ core
+/// paths used by other consumers: firmware declarations by exact controller
+/// node, legacy descriptions by their pre-decoded identity.
+fn map_console_irq(irq: serial::EarlyIrq) -> Option<usize> {
+    match irq {
+        #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+        serial::EarlyIrq::Firmware(spec) => match kirq::try_map_fwspec(spec) {
+            Ok(mapped) => Some(mapped.virq),
+            Err(error) => {
+                log::warn!("console input stays polled: firmware IRQ mapping failed: {error:?}");
+                None
+            }
+        },
+        serial::EarlyIrq::Legacy(desc) => match kirq::try_map(desc) {
+            Ok(virq) => Some(virq),
+            Err(error) => {
+                log::warn!("console input stays polled: cannot map {desc:?}: {error:?}");
+                None
+            }
+        },
+    }
+}
 
-#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
-unittest::path_mod_test!(irq_desc_unittest, "../ut-tests/irq_desc_unittest.rs");
+unittest::path_mod_test!(input_setup_tests, "../ut-tests/input_setup.rs");
 
 #[kiface::provide]
 impl kiface_console_api::EmergencyConsoleWriteIf {
@@ -406,7 +448,7 @@ impl kiface_console_api::ConsoleInputSetupIf {
             &INPUT_IRQ,
             serial::stdout_port().zip(serial::stdout_irq()),
             SerialPort::prepare_irq_input,
-            kirq::try_map,
+            map_console_irq,
             kirq::try_register_shared,
         );
     }

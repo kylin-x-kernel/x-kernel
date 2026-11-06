@@ -6,7 +6,7 @@ extern crate alloc;
 
 use core::{num::NonZeroU32, ptr::NonNull};
 
-use fwnode::{FwNode, FwPropertyValue};
+use fwnode::FwNode;
 use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use kirq::TargetCpu;
@@ -18,6 +18,9 @@ use memspace::iomap_device;
 use riscv::register::{sie, sip};
 use riscv_plic::Plic;
 use sbi_rt::HartMask;
+
+mod firmware;
+use firmware::{PlicConfig, PlicSources};
 
 const PLIC_PADDR: usize = 0x0c00_0000;
 const PLIC_MMIO_SIZE: usize = 0x0400_0000;
@@ -159,30 +162,6 @@ impl PlicController {
     }
 }
 
-#[derive(Clone, Copy)]
-struct PlicSources {
-    last: u32,
-}
-
-impl PlicSources {
-    fn from_property(value: Option<&[u8]>) -> Result<Self, &'static str> {
-        let bytes: [u8; 4] = value
-            .ok_or("PLIC node is missing riscv,ndev")?
-            .try_into()
-            .map_err(|_| "PLIC riscv,ndev must contain exactly one u32")?;
-        let last = u32::from_be_bytes(bytes);
-        if last == 0 || last > PLIC_MAX_SOURCE {
-            return Err("PLIC riscv,ndev exceeds supported source range 1..=1023");
-        }
-        Ok(Self { last })
-    }
-
-    fn source(self, id: usize) -> Option<NonZeroU32> {
-        let id = u32::try_from(id).ok()?;
-        (id <= self.last).then(|| NonZeroU32::new(id)).flatten()
-    }
-}
-
 pub const fn plic_irq_desc(hwirq: usize) -> kirq::IrqDesc {
     kirq::plic_irq_desc(hwirq)
 }
@@ -315,41 +294,25 @@ fn disable_plic_sources(plic: &mut impl PlicCompletion, context: usize, sources:
     }
 }
 
-fn is_plic_compatible(compatible: &str) -> bool {
-    matches!(compatible, "sifive,plic-1.0.0" | "riscv,plic0")
-}
+/// PLIC binding translator registered with the PLIC IRQ domain.
+struct PlicXlate;
 
-fn plic_sources_from_fwnode(node: FwNode<'_>) -> Result<PlicSources, &'static str> {
-    match node.property("riscv,ndev") {
-        Ok(Some(property)) => match property.value {
-            FwPropertyValue::Bytes(bytes) => PlicSources::from_property(Some(bytes)),
-            _ => Err("PLIC riscv,ndev must contain exactly one u32"),
-        },
-        Ok(None) => PlicSources::from_property(None),
-        Err(_) => Err("PLIC riscv,ndev is malformed"),
-    }
-}
+static PLIC_XLATE: PlicXlate = PlicXlate;
 
-fn plic_region_from_fwnode(
-    root: FwNode<'_>,
-) -> Result<Option<(PhysAddr, usize, PlicSources)>, &'static str> {
-    for node in root.descendants() {
-        if !node.firmware_ids().any(is_plic_compatible) {
-            continue;
+impl kirq::IrqDomainXlate for PlicXlate {
+    fn translate(&self, params: &[u32]) -> Result<kirq::IrqHwSpec, kirq::IrqXlateError> {
+        let &[source] = params else {
+            return Err(kirq::IrqXlateError::Malformed);
+        };
+        if source == 0 || source > PLIC_MAX_SOURCE {
+            return Err(kirq::IrqXlateError::InvalidHwirq);
         }
-        let sources = plic_sources_from_fwnode(node)?;
-        let region = node
-            .mmio_resource(0)
-            .map_err(|_| "PLIC register region is malformed")?
-            .ok_or("PLIC node is missing its register region")?;
-        let base = usize::try_from(region.base)
-            .map_err(|_| "PLIC register base does not fit the CPU address width")?;
-        let size = usize::try_from(region.size)
-            .map_err(|_| "PLIC register size does not fit the CPU address width")?
-            .max(0x1000);
-        return Ok(Some((PhysAddr::from_usize(base), size, sources)));
+        Ok(kirq::IrqHwSpec {
+            hwirq: source as usize,
+            // The PLIC binding has no trigger cell; every source is level-high.
+            trigger: kirq::IrqTrigger::LevelHigh,
+        })
     }
-    Ok(None)
 }
 
 /// Initializes the primary PLIC from the published firmware description.
@@ -358,23 +321,32 @@ fn plic_region_from_fwnode(
 /// first PLIC-compatible node and uses the translated register resource, so
 /// this must run after allocator setup, like the other firmware-node
 /// consumers.
-pub fn init_primary(root: FwNode<'_>) {
+pub fn init_primary(root: FwNode<'static>) {
     #[expect(
         clippy::panic,
         reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: invalid PLIC firmware \
                   metadata; interrupt initialization cannot safely continue"
     )]
-    let (paddr, size, sources) = plic_region_from_fwnode(root)
-        .unwrap_or_else(|err| panic!("invalid PLIC configuration: {err}"))
-        // Preserve the legacy no-DT layout. This is a library capacity bound,
-        // not discovery of the number of physically implemented sources.
-        .unwrap_or((
+    let selection = PlicConfig::from_fwnode(root)
+        .unwrap_or_else(|err| panic!("invalid PLIC configuration: {err:?}"));
+    // Preserve the legacy no-DT layout. This is a library capacity bound, not
+    // discovery of the number of physically implemented sources.
+    let (paddr, size, sources, controller) = match selection {
+        Some(PlicConfig {
+            paddr,
+            size,
+            sources,
+            controller,
+        }) => (paddr, size, sources, Some(controller)),
+        None => (
             PhysAddr::from_usize(PLIC_PADDR),
             PLIC_MMIO_SIZE,
             PlicSources {
                 last: PLIC_MAX_SOURCE,
             },
-        ));
+            None,
+        ),
+    };
     #[expect(
         clippy::expect_used,
         reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: PLIC source state is required \
@@ -410,6 +382,17 @@ pub fn init_primary(root: FwNode<'_>) {
             sources: source_state,
         }),
     });
+    if let Some(controller) = controller {
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware-described \
+                      PLIC controller must be associated with its IRQ domain before consumers map \
+                      interrupts; early IRQ initialization has no recovery channel"
+        )]
+        if let Err(error) = kirq::register_irq_domain(PLIC_DOMAIN, controller, &PLIC_XLATE) {
+            panic!("failed to register PLIC IRQ domain: {error:?}");
+        }
+    }
 }
 
 fn this_context() -> usize {

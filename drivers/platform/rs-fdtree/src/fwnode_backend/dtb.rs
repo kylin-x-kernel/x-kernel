@@ -13,7 +13,7 @@
 
 use ::fwnode::{
     FW_IRQ_SPEC_MAX_PARAMS, FwError, FwIrqSpec, FwMmioResource, FwNode, FwNodeId, FwNodeOps,
-    FwParams, FwProperty, FwPropertyValue, FwReference,
+    FwParams, FwProperty, FwPropertyValue, FwReference, FwSource,
 };
 use lazyinit::LazyInit;
 
@@ -82,6 +82,10 @@ impl<'a> DtBackend<'a> {
 }
 
 impl<'s, 'a: 's> FwNodeOps<'s> for DtBackend<'a> {
+    fn source(&self) -> FwSource {
+        FwSource::DeviceTree
+    }
+
     fn name(&self, id: FwNodeId) -> Option<&'s str> {
         Some(self.node(id)?.name)
     }
@@ -103,6 +107,11 @@ impl<'s, 'a: 's> FwNodeOps<'s> for DtBackend<'a> {
             .ok_or(FwError::InvalidNode)?
             .is_available()
             .map_err(|_| FwError::InvalidValue)
+    }
+
+    fn is_interrupt_controller(&self, id: FwNodeId) -> Result<bool, FwError> {
+        let node = self.node(id).ok_or(FwError::InvalidNode)?;
+        Ok(node.property("interrupt-controller").is_some())
     }
 
     fn firmware_id(&self, id: FwNodeId, index: usize) -> Option<&'s str> {

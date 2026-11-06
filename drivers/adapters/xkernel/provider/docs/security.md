@@ -18,6 +18,14 @@ Registration may invoke the callback before returning. KIRQ owns dispatch,
 mapping validation and synchronization. Explicit route domains are preserved;
 plain virtual IRQs are not reinterpreted as hardware numbers.
 
+`map_fw_irq` passes the untrusted firmware binding cells to the controller's
+registered translator by exact controller-node identity. The adapter does not
+guess a controller family from compatible strings and does not fall back to the
+raw cell as a logical IRQ. Malformed, unsupported, out-of-range, not-ready and
+conflicting declarations remain distinct failures; the returned resource is
+KIRQ's stored descriptor, so later registration cannot silently replace its
+trigger or ownership metadata.
+
 Action release requires sleepable context without locks needed by the handler.
 Both KIRQ errors and missing actions fail closed rather than returning permission
 to reclaim callback resources. This deliberately strengthens mainline's missing

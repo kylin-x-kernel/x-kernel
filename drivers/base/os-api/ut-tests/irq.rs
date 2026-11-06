@@ -8,7 +8,8 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use unittest::{assert_eq, def_test};
 
 use crate::{
-    IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, ResResult, Virq,
+    IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, ResError, ResResult,
+    Virq,
 };
 
 struct MockIrqProvider;
@@ -177,6 +178,91 @@ fn irq_mapping_retains_shared_vocabulary_and_origin() {
         })
     );
     assert_eq!(domain.as_u32(), 73);
+}
+
+struct EmptyBackend;
+
+impl fwnode::FwNodeOps<'static> for EmptyBackend {
+    fn source(&self) -> fwnode::FwSource {
+        fwnode::FwSource::Static
+    }
+
+    fn name(&self, _: fwnode::FwNodeId) -> Option<&'static str> {
+        None
+    }
+
+    fn parent(&self, _: fwnode::FwNodeId) -> Option<fwnode::FwNodeId> {
+        None
+    }
+
+    fn first_child(&self, _: fwnode::FwNodeId) -> Option<fwnode::FwNodeId> {
+        None
+    }
+
+    fn next_sibling(&self, _: fwnode::FwNodeId) -> Option<fwnode::FwNodeId> {
+        None
+    }
+
+    fn is_available(&self, _: fwnode::FwNodeId) -> Result<bool, fwnode::FwError> {
+        Ok(true)
+    }
+
+    fn is_interrupt_controller(&self, _: fwnode::FwNodeId) -> Result<bool, fwnode::FwError> {
+        Ok(false)
+    }
+
+    fn firmware_id(&self, _: fwnode::FwNodeId, _: usize) -> Option<&'static str> {
+        None
+    }
+
+    fn property(
+        &self,
+        _: fwnode::FwNodeId,
+        _: &str,
+    ) -> Result<Option<fwnode::FwProperty<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+
+    fn mmio_resource(
+        &self,
+        _: fwnode::FwNodeId,
+        _: usize,
+    ) -> Result<Option<fwnode::FwMmioResource<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+
+    fn irq_spec(
+        &'static self,
+        _: fwnode::FwNodeId,
+        _: usize,
+    ) -> Result<Option<fwnode::FwIrqSpec<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+
+    fn reference(
+        &'static self,
+        _: fwnode::FwNodeId,
+        _: &str,
+        _: usize,
+        _: usize,
+    ) -> Result<Option<fwnode::FwReference<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+}
+
+static EMPTY_BACKEND: EmptyBackend = EmptyBackend;
+
+#[def_test]
+fn providers_without_firmware_identity_reject_firmware_mapping() {
+    let spec = fwnode::FwIrqSpec {
+        controller: fwnode::FwNode::new(&EMPTY_BACKEND, fwnode::FwNodeId::new(1)),
+        params: fwnode::FwParams::new(&[1]).unwrap(),
+    };
+    // The default must not pretend the raw binding cell is a logical IRQ.
+    assert_eq!(
+        MockIrqProvider.map_fw_irq(spec),
+        Err(ResError::Unsupported)
+    );
 }
 
 #[def_test]

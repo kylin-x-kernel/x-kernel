@@ -11,7 +11,7 @@ use super::{NonZeroU32, PlicCompletion, complete_plic_claim};
 
 #[def_test]
 fn plic_source_count_requires_one_supported_nonzero_cell() {
-    use super::PlicSources;
+    use super::firmware::PlicSources;
     assert!(PlicSources::from_property(None).is_err());
     assert!(PlicSources::from_property(Some(&[])).is_err());
     assert!(PlicSources::from_property(Some(&[0, 0, 1])).is_err());
@@ -35,7 +35,7 @@ fn plic_source_count_requires_one_supported_nonzero_cell() {
 
 #[def_test]
 fn plic_source_validation_rejects_zero_out_of_range_and_truncation() {
-    let sources = super::PlicSources::from_property(Some(&53u32.to_be_bytes())).unwrap();
+    let sources = super::firmware::PlicSources::from_property(Some(&53u32.to_be_bytes())).unwrap();
     assert!(sources.source(0).is_none());
     assert_eq!(sources.source(1).unwrap().get(), 1);
     assert_eq!(sources.source(53).unwrap().get(), 53);
@@ -60,7 +60,7 @@ fn context_preparation_clears_supported_sources_without_completing_claims() {
         accepted: 0,
         accesses: alloc::vec::Vec::new(),
     };
-    super::disable_plic_sources(&mut model, 3, super::PlicSources { last: 7 });
+    super::disable_plic_sources(&mut model, 3, super::firmware::PlicSources { last: 7 });
     assert_eq!(model.enabled, !0xfeu32);
     assert_eq!(model.accepted, 0);
     assert!(model.is_claim_active);
@@ -336,7 +336,7 @@ fn plic_flow_selection_requires_supported_binding() {
         IrqAffinity, IrqController, IrqDesc, IrqDescError, IrqFlags, IrqFlow, IrqPolarity,
         IrqTrigger,
     };
-    let sources = Some(super::PlicSources { last: 53 });
+    let sources = Some(super::firmware::PlicSources { last: 53 });
     let desc = super::plic_irq_desc(5);
     for accepted in [
         desc,
@@ -524,6 +524,14 @@ fn cells(values: &[u32]) -> alloc::vec::Vec<u8> {
 }
 
 fn plic_fixture(ndev: Option<u32>) -> alloc::vec::Vec<u8> {
+    plic_fixture_with(ndev, None, true)
+}
+
+fn plic_fixture_with(
+    ndev: Option<u32>,
+    status: Option<&[u8]>,
+    is_controller: bool,
+) -> alloc::vec::Vec<u8> {
     let mut blob = Dtb::new();
     blob.begin("");
     blob.property("#address-cells", &cells(&[2]));
@@ -535,9 +543,14 @@ fn plic_fixture(ndev: Option<u32>) -> alloc::vec::Vec<u8> {
     blob.property("ranges", &[]);
     blob.begin("interrupt-controller@c000000");
     blob.property("compatible", b"riscv,plic0\0");
-    blob.property("interrupt-controller", &[]);
+    if is_controller {
+        blob.property("interrupt-controller", &[]);
+    }
     blob.property("#interrupt-cells", &cells(&[1]));
     blob.property("reg", &cells(&[0, 0x0c00_0000, 0, 0x0400_0000]));
+    if let Some(status) = status {
+        blob.property("status", status);
+    }
     if let Some(ndev) = ndev {
         blob.property("riscv,ndev", &cells(&[ndev]));
     }
@@ -547,11 +560,14 @@ fn plic_fixture(ndev: Option<u32>) -> alloc::vec::Vec<u8> {
     blob.finish()
 }
 
-fn plic_region(bytes: &[u8]) -> Result<Option<(memaddr::PhysAddr, usize, u32)>, &'static str> {
+fn plic_region(
+    bytes: &[u8],
+) -> Result<Option<(memaddr::PhysAddr, usize, u32)>, super::firmware::PlicConfigError> {
     let tree = rs_fdtree::LinuxFdt::new(bytes).unwrap();
     let backend = rs_fdtree::DtBackend::new(tree);
-    super::plic_region_from_fwnode(backend.root().unwrap())
-        .map(|region| region.map(|(paddr, size, sources)| (paddr, size, sources.last)))
+    super::PlicConfig::from_fwnode(backend.root().unwrap()).map(|config| {
+        config.map(|config| (config.paddr, config.size, config.sources.last))
+    })
 }
 
 #[def_test]
@@ -571,4 +587,49 @@ fn plic_discovery_rejects_malformed_or_missing_description() {
     blob.begin("");
     blob.end();
     assert!(plic_region(&blob.finish()).unwrap().is_none());
+}
+
+#[def_test]
+fn plic_discovery_honors_controller_and_availability_declarations() {
+    assert!(
+        plic_region(&plic_fixture_with(Some(53), None, false))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        plic_region(&plic_fixture_with(Some(53), Some(b"disabled\0"), true))
+            .unwrap()
+            .is_none()
+    );
+    assert!(plic_region(&plic_fixture_with(Some(53), Some(b"\x01"), true)).is_err());
+}
+
+#[def_test]
+fn plic_cells_decode_level_high_sources_and_reject_invalid_numbers() {
+    use kirq::{IrqDomainXlate, IrqTrigger, IrqHwSpec, IrqXlateError};
+
+    let xlate = &super::PLIC_XLATE;
+    assert_eq!(
+        xlate.translate(&[1]),
+        Ok(IrqHwSpec {
+            hwirq: 1,
+            trigger: IrqTrigger::LevelHigh,
+        })
+    );
+    assert_eq!(
+        xlate.translate(&[1023]),
+        Ok(IrqHwSpec {
+            hwirq: 1023,
+            trigger: IrqTrigger::LevelHigh,
+        })
+    );
+    for cells in [&[][..], &[1, 2][..]] {
+        assert_eq!(xlate.translate(cells), Err(IrqXlateError::Malformed));
+    }
+    for source in [0, 1024, u32::MAX] {
+        assert_eq!(
+            xlate.translate(&[source]),
+            Err(IrqXlateError::InvalidHwirq)
+        );
+    }
 }

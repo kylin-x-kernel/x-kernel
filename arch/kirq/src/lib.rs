@@ -71,7 +71,10 @@ pub use bottom_half::{
     },
     softirq,
 };
-pub use domain::IrqRef;
+pub use domain::{
+    IrqRef,
+    fw::{IrqDomainRegisterError, IrqDomainXlate, IrqHwSpec, IrqXlateError, register_irq_domain},
+};
 pub(crate) use model::desc;
 pub use model::desc::{
     GIC_ROOT_DOMAIN, Hwirq, IO_APIC_DOMAIN, IRQ_EVENT_SOURCES, IrqAffinity, IrqController, IrqDesc,
@@ -88,13 +91,14 @@ pub use runtime::{
     action::IrqActionToken,
     entry::{generic_handle_irq, generic_handle_nmi, handle_irq, handle_nmi},
     manager::{
-        IrqRegisterOptions, PerCpuForwarding, descriptor, disable_irq, disable_irq_nosync, enable,
-        enable_irq, free_irq, free_irq_action, prepare_percpu_forwarding, register,
-        register_disabled, register_shared, synchronize_irq, translate_hwirq, try_disable_irq,
-        try_disable_irq_nosync, try_enable, try_enable_irq, try_free_irq, try_free_irq_action,
-        try_free_percpu_irq, try_map, try_register, try_register_disabled, try_register_percpu,
-        try_register_percpu_startup, try_register_shared, try_register_startup,
-        try_register_with_options, try_synchronize_irq, unregister,
+        FwIrqMapError, IrqRegisterOptions, MappedIrq, PerCpuForwarding, descriptor, disable_irq,
+        disable_irq_nosync, enable, enable_irq, free_irq, free_irq_action,
+        prepare_percpu_forwarding, register, register_disabled, register_shared, synchronize_irq,
+        translate_hwirq, try_disable_irq, try_disable_irq_nosync, try_enable, try_enable_irq,
+        try_free_irq, try_free_irq_action, try_free_percpu_irq, try_map, try_map_fwspec,
+        try_register, try_register_disabled, try_register_percpu, try_register_percpu_startup,
+        try_register_shared, try_register_startup, try_register_with_options, try_synchronize_irq,
+        unregister,
     },
     nmi::{
         NmiShutdown, begin_nmi_shutdown, prepare_percpu_nmi, register_nmi, register_nmi_startup,

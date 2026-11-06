@@ -413,10 +413,12 @@ Registered ──► early_init() ──► enumerate() ──► probe_pending(
      detected and the MMIO region mapped to probe the VirtIO device type.
    - Build the `ResourceSet` (MMIO + IRQ) and register through the
      `EnumerationContext`.
-     After selecting a supported device, map its firmware IRQ through
-     `IrqOp::map_irq`. Failure skips that device and records an enumeration
-     error; no unmapped numeric fallback is published. Empty/unsupported
-     VirtIO MMIO slots do not allocate IRQ mappings.
+     After selecting a supported device, map its firmware declaration through
+     `IrqOp::map_fw_irq`, passing the controller node and complete binding
+     cells unchanged. Failure — including an unreadable or malformed
+     declaration, an unready controller, or a conflict — skips that device and
+     records an enumeration error; no unmapped numeric fallback is published.
+     Empty/unsupported VirtIO MMIO slots do not allocate IRQ mappings.
 2. **UART/serial nodes**: UART nodes in the DT (including the stdout
    console) are enumerated here. The stdout UART is reused by the serial
    driver through `take_early_port` (same hardware, no re-map); other
@@ -433,16 +435,24 @@ Registered ──► early_init() ──► enumerate() ──► probe_pending(
    > mounted as a real read-write root filesystem. See
    > `drivers/contracts/block/src/ramdisk_image.rs`.
 
-The shared `bus::map_firmware_irq` adapter translates firmware facts to
-`IrqRouteDesc`; the host provider owns Domain selection and descriptor
-preparation. Mapping does not configure or enable delivery. Known-controller
-Domain associations belong to platform/Domain lifetime, not to one handler
-or probe attempt; handler release does not dispose those mappings. Unknown
-controllers retain the provider's legacy domainless lifetime rules; enumeration
-does not invent a Domain or promise persistent ownership for them. No KIRQ
-dependency is added to reusable concrete drivers or firmware parsers.
-`ut-tests/irq_mapping.rs` checks all firmware controller/trigger variants,
-nonidentity logical IRQ results, metadata retention and mapping errors.
+Platform enumeration passes `FirmwareDevice.irq` straight to the host
+provider's `map_fw_irq`; the provider selects the domain by exact firmware-node
+identity, the controller's translator interprets the cells, and the IRQ core
+owns the resulting descriptor and logical number. kdriver neither decodes
+cells nor guesses a controller family. Mapping does not configure or enable
+delivery. Domain associations belong to platform/Domain lifetime, not to one
+handler or probe attempt; handler release does not dispose those mappings. No
+KIRQ dependency is added to reusable concrete drivers or firmware parsers.
+
+PCI legacy INTx is the remaining exception: `bus::map_pci_legacy_irq` still
+converts the `of` compatibility layer's decoded controller/hwirq/trigger into
+`IrqRouteDesc` and calls `map_irq`. That path is explicitly legacy and must
+migrate with PCI firmware routing.
+
+`ut-tests/irq_mapping.rs` checks that unreadable firmware declarations map to
+input/unsupported enumeration errors and never look like an absent IRQ.
+Provider tests cover mapping error classification and authoritative descriptor
+retention.
 
 ### Driver matching and activation
 

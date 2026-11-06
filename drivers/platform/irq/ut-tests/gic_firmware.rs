@@ -85,6 +85,7 @@ fn config(bytes: &[u8]) -> Result<Option<super::GicConfig>, super::GicConfigErro
     let tree = rs_fdtree::LinuxFdt::new(bytes).unwrap();
     let backend = rs_fdtree::DtBackend::new(tree);
     super::GicConfig::from_fwnode(backend.root().unwrap())
+        .map(|selection| selection.map(|selection| selection.config))
 }
 
 fn fixture(status: Option<&[u8]>, ranges: Option<&[u32]>, reg: &[u32]) -> Vec<u8> {

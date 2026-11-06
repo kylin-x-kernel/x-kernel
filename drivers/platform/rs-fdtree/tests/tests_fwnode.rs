@@ -119,6 +119,8 @@ fn exposes_tree_structure_and_properties() {
     assert_eq!(gic.next_sibling().unwrap().name(), Some("second"));
     assert!(gic.next_sibling().unwrap().next_sibling().is_none());
     assert_eq!(gic.is_available(), Ok(true));
+    assert_eq!(gic.is_interrupt_controller(), Ok(true));
+    assert_eq!(root.is_interrupt_controller(), Ok(false));
     assert_eq!(
         gic.property("#interrupt-cells").unwrap().unwrap().as_u32(),
         Ok(3)

@@ -438,7 +438,7 @@ impl BusBackend for PciBackend {
                     trigger: route.trigger,
                     controller: route.controller,
                 };
-                match super::map_firmware_irq(irq, |route| {
+                match super::map_pci_legacy_irq(irq, |route| {
                     crate::resource::resource_provider().map_irq(route)
                 }) {
                     Ok(mapped) => resources.push(ResourceDesc::Irq(mapped)),

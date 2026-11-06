@@ -18,15 +18,25 @@ Kernel tests live in ut-tests and are mounted by their source modules.
 
 ## IRQ identity and results
 
-`request_irq()` requires a descriptor already prepared through `map_irq()`,
-MSI-X allocation or the platform's fixed-source setup. Requesting an action
-does not create a descriptor; an absent IRQ returns `ResError::InvalidResource`.
+`request_irq()` requires a descriptor already prepared through `map_fw_irq()`,
+`map_irq()`, MSI-X allocation or the platform's fixed-source setup. Requesting
+an action does not create a descriptor; an absent IRQ returns
+`ResError::InvalidResource`.
 
-PlainVirq remains a handle-only lookup. DomainMapped retains the virtual IRQ,
-hardware IRQ, trigger and controller. An explicit domain always wins; only a
-missing domain permits the existing GIC, PLIC or IO-APIC root fallback.
-map_irq returns the domain used in the descriptor, not just the original hint.
-No root is invented for Unknown, MSI or LoongArchExtioi.
+`map_fw_irq` resolves the declaration's exact controller firmware node and
+complete binding cells through `kirq::try_map_fwspec`. It returns the IRQ core's
+authoritative `MappedIrq` descriptor — trigger, controller, domain and hwirq —
+rather than values reconstructed from a route hint. ControllerNotReady maps to
+BadState, malformed or out-of-range cells to InvalidResource, an unsupported
+binding to Unsupported, and descriptor conflicts share the existing
+classification. There is no raw-number fallback. Both resource shapes then
+resolve by logical number for registration and line control, so the stored
+descriptor is never bypassed or duplicated.
+
+PlainVirq remains a handle-only lookup. Legacy `map_irq` (PCI INTx) retains its
+GIC/PLIC/IO-APIC root fallback: an explicit domain always wins, only a missing
+domain permits a root, and no root is invented for Unknown, MSI or
+LoongArchExtioi. That family-based path is not used for firmware declarations.
 
 Requests return a shared action token. Regular-action release remains supported
 for compatibility, but is not a fallback for failed shared-action release.
@@ -77,8 +87,8 @@ the following observable changes from the package/path migration:
 
 | Area | Previous behavior | Extracted behavior and evidence |
 |---|---|---|
-| Explicit IRQ domain | Controller-root selection ignored the supplied domain | Explicit domain wins for both route mapping and mapped-resource conversion; route-domain and mapped-resource tests in ut-tests/irq.rs |
-| Returned mapped identity | map_irq retained controller/hwirq, but not the selected domain | DomainMapped retains the domain actually supplied to KIRQ, including a default root when selected |
+| Explicit IRQ domain | Controller-root selection ignored the supplied domain | Explicit domain wins for legacy route mapping; route-domain tests in ut-tests/irq.rs |
+| Returned mapped identity | map_irq retained controller/hwirq, but not the selected domain | Legacy DomainMapped retains the selected domain; map_fw_irq returns KIRQ's authoritative descriptor, including the domain selected by exact firmware-node lookup |
 | Missing release action | Ok(None) logged a warning and returned | Both regular/shared release reject absence; the infallible outer entry panics; missing_release_action_cannot_authorize_cleanup tests the classifier, not a live panic |
 | Handler event metadata | Claimed events forwarded the source bitmap | Only handled/unhandled reaches KIRQ; source bits are zero, and WAKE_THREAD still does not create a threaded wake; ordinary_events_do_not_create_threaded_wakes_or_source_bits covers conversion |
 | MMIO API safety | Safe trait and safe token release | Implements the extracted unsafe MmioOp contract and unsafe unmap; the underlying iomap/iounmap behavior is unchanged |

@@ -31,7 +31,7 @@ use core::{
     ptr::NonNull,
 };
 
-pub use define::{CheckedIntIdError, IntId, checked_intid};
+pub use define::{CheckedIntIdError, IntId, PPI_RANGE, SPI_RANGE, checked_intid};
 pub use version::*;
 
 /// Virtual address wrapper for memory-mapped register access.

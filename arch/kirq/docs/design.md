@@ -897,7 +897,8 @@ arch/kirq/src/
 │   ├── nmi/shutdown.rs # Retained close identity and local participant snapshot
 │   └── manager.rs      # mapping, registration, control and removal transactions
 ├── domain/
-│   └── mod.rs          # per-domain RCU XArray indexes
+│   ├── mod.rs          # per-domain RCU XArray indexes
+│   └── fw.rs           # firmware controller-node to domain association and xlate
 ├── backend/
 │   ├── mod.rs
 │   ├── platform.rs     # IntrManagerIf bridge and PendingIrq claim ownership
@@ -910,8 +911,11 @@ arch/kirq/src/
     └── softirq.rs      # fixed-vector softirq pending bits and bounded runner
 ```
 
-`kirq` deliberately does not depend on `khal`, `kcpu`, `kplat`, or
-`device_res`. It uses `kbuild_config::NR_CPUS` for bounded CPU-local control,
+`kirq` deliberately does not depend on `khal`, `kcpu`, `kplat`, `device_res`,
+any firmware parser, or any controller driver. Its only firmware-facing
+dependency is the allocation-free `fwnode` vocabulary crate, which names a node
+and its raw binding cells but owns neither parsing nor policy. It uses
+`kbuild_config::NR_CPUS` for bounded CPU-local control,
 NMI publication/participant storage and softirq CPU iteration; this is not an
 online-CPU membership or shutdown guarantee. Architecture trap registration and x86 APIC
 trap adapters remain in `khal::irq`; x86 APIC MSI vector allocation is an
@@ -1196,9 +1200,57 @@ reader or dispatch guard. Ordinary action removal still keeps its descriptor.
 participates in descriptor merge and mapping validation. `commit_resolution`
 returns only after both required prepared insertions have completed.
 `IrqDesc::try_merge()` 允许后来的 descriptor 补齐 trigger、polarity、controller、
-domain、affinity 和 flags，但不会丢掉已经确认的 metadata。hwirq、virq、domain
-或 `(domain, hwirq) -> virq` 映射冲突会返回 `IrqDescError`，release 构建中不会
-静默覆盖 metadata。
+domain、affinity 和 flags，但不会丢掉已经确认的 metadata。hwirq、virq、domain、
+trigger、polarity、controller 或 `(domain, hwirq) -> virq` 映射冲突会返回
+`IrqDescError`，release 构建中不会静默覆盖 metadata。Unknown trigger/polarity/
+controller 可以由后继的确定值补齐；两个不同的确定值永不互相覆盖。
+
+### Firmware interrupt mapping
+
+Firmware-to-IRQ mapping has three owners and no overlap:
+
+1. The firmware backend returns a controller `FwNode` plus the raw binding
+   cells in `FwIrqSpec`. It does not interpret the cells, choose a domain, or
+   allocate a logical IRQ.
+2. The controller driver implements `IrqDomainXlate` next to the code that owns
+   the controller. It converts its binding cells into `IrqHwSpec`
+   (controller-local `hwirq` and trigger) and rejects malformed, unsupported or
+   out-of-range declarations with `IrqXlateError`. It never names another
+   controller or calls the mapping API.
+3. `kirq` associates that exact controller node with one registered
+   `IrqDomainId` and maps the resulting `IrqDesc` through the existing
+   `try_map` transaction. `try_map_fwspec` returns `MappedIrq`, whose `desc` is
+   the authoritative stored resource.
+
+Association is keyed by `FwNode` identity: backend identity plus backend-local
+node id, never compatible strings, family, or physical address. Two instances
+of one controller family therefore remain distinct, and a node from another
+backend with the same numeric id does not match. `register_irq_domain` takes a
+`FwNode<'static>` and is boot-only; duplicate domain association, duplicate
+controller association and unknown domains are explicit errors. The
+association is stored inside the owning `IrqDomain` rather than in a second
+fixed-capacity table; lookup copies it out and releases the domain lock before
+translation and mapping. The controller family used in mapped descriptors is
+domain metadata (`IrqDomain::kind`), not a caller-supplied argument, so a
+registration cannot create a contradictory domain/kind pair.
+
+Phase one has one static domain per controller family. Exact-node association
+distinguishes controllers in lookup, but the static domain set cannot register
+two same-family instances at once; a per-instance domain allocation is a later
+extension.
+
+`try_map_fwspec` distinguishes the required failure classes: an absent
+declaration is `Ok(None)` from the backend, a malformed declaration is
+`MalformedSpec`/`InvalidHwirq`, an unsupported binding is `UnsupportedSpec`, an
+unregistered controller is `ControllerNotReady`, and IRQ-core rejection
+(capacity, mapping conflict, unsupported flow) is `FwIrqMapError::Map(...)`.
+There is no fallback to a default controller or to family-based lookup.
+
+The same `commit_resolution` transaction validates and stores the descriptor,
+so `MappedIrq::desc` carries the trigger produced by translation rather than a
+consumer default. Repeating the same valid declaration returns the existing
+mapping; conflicting trigger/controller/domain metadata returns
+`IrqDescError::TriggerConflict` / `ControllerConflict` / `DomainConflict`.
 
 `actions` 是 `kirq` 内部 action list。`register(desc, handler)` 仍是兼容的
 single-action API：它只允许空 line 上安装一个非 shared action，第二次 regular

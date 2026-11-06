@@ -7,6 +7,9 @@ malformed and missing properties, without allocation or binding policy.
 Node offsets are source-local structure-block offsets, not firmware identities.
 Parent and offset lookup scan the validated tree without allocation. Status
 interpretation and reg/ranges resource translation belong to this DT backend.
+The fwnode adapter's `is_interrupt_controller` answers from the node's
+`interrupt-controller` declaration, so controller drivers consume the semantic
+without matching the property name themselves.
 
 ## DT address interpretation
 

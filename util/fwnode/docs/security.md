@@ -22,6 +22,8 @@ for passing it back to the same backend, not for dereferencing.
 ## Scope
 
 The analysis covers `src/lib.rs` and the host tests in `tests/property.rs`.
+`FwSource` is backend-reported, descriptive metadata; it must never be used as
+an identity or to bypass node validation.
 The crate has no `unsafe` code, no allocation and no dependencies, so there is
 no external-input parsing surface inside it.
 
@@ -57,6 +59,10 @@ no external-input parsing surface inside it.
 - `FwNode::firmware_ids` increments its index until the backend returns
   `None`; a backend that never terminates its identity list can make the
   iterator run indefinitely. Backends must return `None` past the last entry.
+- `FwNode::is_interrupt_controller` delegates controller-declaration
+  interpretation to the backend. Consumers must not test a firmware property
+  name themselves, and a backend must report a malformed declaration as
+  `FwError` rather than `Ok(false)`, so corruption cannot look like absence.
 
 ## Threat Analysis
 

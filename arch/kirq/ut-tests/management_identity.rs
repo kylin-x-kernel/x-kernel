@@ -73,7 +73,13 @@ fn invalid_gic_source_is_rejected_before_mapping_or_action_publication() {
 fn unsupported_gic_spi_trigger_preserves_resolution_state() {
     let hwirq = 32;
     let virq = crate::DYNAMIC_VIRQ_BASE + 0x5f77;
-    let original = crate::gic_level_irq_desc(hwirq).with_virq(virq);
+    // Leave the trigger undeclared so the offered concrete trigger is adopted
+    // instead of being rejected as an attribute conflict; controller flow
+    // validation must then reject the unsupported SPI trigger.
+    let original = crate::IrqDesc::new(hwirq, crate::IrqTrigger::Unknown(0))
+        .with_controller(crate::IrqController::Gic)
+        .with_domain(crate::GIC_ROOT_DOMAIN)
+        .with_virq(virq);
     assert_eq!(
         matches!(
             crate::IntrManagerIf::select_flow(original),

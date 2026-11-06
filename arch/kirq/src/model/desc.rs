@@ -175,6 +175,30 @@ pub enum IrqDescError {
         existing: Option<IrqDomainId>,
         newer: Option<IrqDomainId>,
     },
+    /// Two descriptors name different concrete trigger modes.
+    ///
+    /// An unknown trigger adopts the concrete mode, but two concrete modes
+    /// never overwrite each other.
+    TriggerConflict {
+        existing: IrqTrigger,
+        newer: IrqTrigger,
+    },
+    /// Two descriptors name different concrete signal polarities.
+    ///
+    /// An unknown polarity adopts the concrete value, but two concrete values
+    /// never overwrite each other.
+    PolarityConflict {
+        existing: IrqPolarity,
+        newer: IrqPolarity,
+    },
+    /// Two descriptors name different concrete controller families.
+    ///
+    /// An unknown controller adopts the concrete family, but two concrete
+    /// families never overwrite each other.
+    ControllerConflict {
+        existing: IrqController,
+        newer: IrqController,
+    },
     /// Two descriptors name incompatible logical IRQs.
     VirqConflict {
         existing: Option<Virq>,
@@ -317,25 +341,40 @@ impl IrqDesc {
                 newer: newer.virq,
             });
         }
+        let trigger = match (self.trigger, newer.trigger) {
+            (_, IrqTrigger::Unknown(_)) => self.trigger,
+            (IrqTrigger::Unknown(_), concrete) => concrete,
+            (existing, concrete) if existing == concrete => existing,
+            (existing, newer) => {
+                return Err(IrqDescError::TriggerConflict { existing, newer });
+            }
+        };
+        let polarity = match (self.polarity, newer.polarity) {
+            (_, IrqPolarity::Unknown) => self.polarity,
+            (IrqPolarity::Unknown, concrete) => concrete,
+            (existing, concrete) if existing == concrete => existing,
+            (existing, newer) => {
+                return Err(IrqDescError::PolarityConflict { existing, newer });
+            }
+        };
+        let controller = match (self.controller, newer.controller) {
+            (_, IrqController::Unknown) => self.controller,
+            (IrqController::Unknown, concrete) => concrete,
+            (existing, concrete) if existing == concrete => existing,
+            (existing, newer) => {
+                return Err(IrqDescError::ControllerConflict { existing, newer });
+            }
+        };
         Ok(Self {
             virq: newer.virq.or(self.virq),
             hwirq: self.hwirq,
-            trigger: match newer.trigger {
-                IrqTrigger::Unknown(_) => self.trigger,
-                _ => newer.trigger,
-            },
-            polarity: match newer.polarity {
-                IrqPolarity::Unknown => self.polarity,
-                _ => newer.polarity,
-            },
+            trigger,
+            polarity,
             source: match newer.source {
                 IrqSource::Unknown => self.source,
                 _ => newer.source,
             },
-            controller: match newer.controller {
-                IrqController::Unknown => self.controller,
-                _ => newer.controller,
-            },
+            controller,
             domain: newer.domain.or(self.domain),
             affinity: match newer.affinity {
                 IrqAffinity::Any => self.affinity,

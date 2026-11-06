@@ -91,8 +91,11 @@ generic `kirq` API。
    node rather than panicking or indexing firmware-controlled offsets.
    `for_each_compatible` decodes the primary MMIO resource through translated
    `ranges`; a tree without an ancestor `ranges` therefore reports no MMIO
-   instead of adopting an untranslated address. This layer adds no unsafe code,
-   no mapping and no hardware access.
+   instead of adopting an untranslated address. It exposes the IRQ declaration
+   as `Result<Option<FwIrqSpec>, FwError>`, so an unreadable or malformed
+   declaration remains an error and is never conflated with an absent IRQ or a
+   raw firmware number. This layer adds no cell decode, unsafe code, mapping or
+   hardware access.
 
 本模块不直接处理用户指针、DMA buffer、设备 MMIO 或文件/网络数据。
 

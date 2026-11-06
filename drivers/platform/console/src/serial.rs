@@ -465,17 +465,33 @@ impl SerialPort {
     }
 }
 
+/// How the early console's interrupt source was described.
+///
+/// Device-tree consoles retain the firmware declaration (exact controller node
+/// plus binding cells) and let the IRQ core translate it. Platforms without an
+/// IRQ domain for their controller, such as the x86 I/O-port console, retain a
+/// pre-decoded descriptor as an explicit legacy description.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum EarlyIrq {
+    /// Firmware declaration, mapped through the controller's registered domain.
+    #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+    Firmware(fwnode::FwIrqSpec<'static>),
+    /// Legacy pre-decoded descriptor.
+    Legacy(IrqDesc),
+}
+
 struct EarlyStdout {
     port: Arc<SerialPort>,
-    irq: Option<IrqDesc>,
+    irq: Option<EarlyIrq>,
 }
 
 static STDOUT: LazyInit<EarlyStdout> = LazyInit::new();
 
-/// Record the early-boot stdout UART (and its interrupt descriptor) so printk
+/// Record the early-boot stdout UART (and its interrupt description) so printk
 /// and the runtime serial driver share the same instance. Called once from
-/// platform `early_driver_init`.
-pub fn register_early_stdout(port: Arc<SerialPort>, irq: Option<IrqDesc>) {
+/// platform `early_driver_init`. This maps nothing: early console output keeps
+/// polling until `prepare_input` runs.
+pub(crate) fn register_early_stdout(port: Arc<SerialPort>, irq: Option<EarlyIrq>) {
     STDOUT.init_once(EarlyStdout { port, irq });
 }
 
@@ -484,9 +500,9 @@ pub fn stdout_port() -> Option<Arc<SerialPort>> {
     STDOUT.get().map(|stdout| stdout.port.clone())
 }
 
-/// Firmware/platform interrupt metadata, not input IRQ readiness.
+/// Firmware/platform interrupt description, not input IRQ readiness.
 /// Mapping and action installation happen later through `kiface_console_api::ConsoleInputSetupIf::prepare_input`.
-pub(crate) fn stdout_irq() -> Option<IrqDesc> {
+pub(crate) fn stdout_irq() -> Option<EarlyIrq> {
     STDOUT.get().and_then(|stdout| stdout.irq)
 }
 

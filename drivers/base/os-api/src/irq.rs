@@ -202,7 +202,30 @@ pub trait IrqOp: Send + Sync {
     /// Enable or disable delivery of `irq`.
     fn set_irq_enabled(&self, irq: IrqResource, enabled: bool);
 
+    /// Map a firmware interrupt declaration to an OS-visible IRQ resource.
+    ///
+    /// The declaration carries the exact controller firmware node and the
+    /// complete binding cells; the provider must resolve both through the host
+    /// IRQ core rather than re-decoding cells or guessing a controller family.
+    /// Mapping may reuse an existing mapping for the same valid declaration.
+    ///
+    /// Errors must distinguish an unready controller (`BadState`), a malformed
+    /// declaration (`InvalidResource`), an unsupported binding (`Unsupported`),
+    /// and an incompatible duplicate association (`AlreadyExists`). A provider
+    /// must not fall back to the raw firmware number.
+    ///
+    /// Default: unsupported; providers without firmware-node identity return
+    /// this instead of pretending the declaration was mapped.
+    fn map_fw_irq(&self, spec: fwnode::FwIrqSpec<'static>) -> ResResult<IrqResource> {
+        let _ = spec;
+        Err(ResError::Unsupported)
+    }
+
     /// Translate a discovered interrupt route into an OS-visible IRQ resource.
+    ///
+    /// Legacy route mapping by controller family and hardware number. New
+    /// firmware consumers use [`Self::map_fw_irq`], which preserves the exact
+    /// controller node and full binding cells.
     ///
     /// Default: treat the hardware number as the OS-visible number with no
     /// translation.

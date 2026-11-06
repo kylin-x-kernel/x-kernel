@@ -18,6 +18,7 @@ ns16550-ioport = ["dep:uart_16550"]
 [dependencies]
 kiface-console-api.workspace = true
 driver_base = { workspace = true }
+fwnode = { workspace = true }
 kclass = { workspace = true, features = ["char"] }
 kdevice = { workspace = true }
 khal = { workspace = true }

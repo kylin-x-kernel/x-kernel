@@ -13,7 +13,7 @@ members = [
     "util/kiface/crates/cpu-api",
     "util/kiface/crates/task-wait-api",
     "core/kpm",
-    "drivers/contracts/fwnode",
+    "util/fwnode",
     # kernel entry
     "entry",
     # boot and loader
@@ -245,7 +245,7 @@ hwrng = { path = "drivers/contracts/hwrng" }
 char_driver = { path = "drivers/contracts/char" }
 display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }
-fwnode = { path = "drivers/contracts/fwnode" }
+fwnode = { path = "util/fwnode" }
 driver_os_api = { path = "drivers/base/os-api", package = "driver-os-api" }
 irq_types = { path = "arch/irq-types", package = "irq-types" }
 kclass = { path = "drivers/contracts/kclass" }

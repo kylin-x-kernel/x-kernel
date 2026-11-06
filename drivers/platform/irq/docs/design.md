@@ -16,12 +16,53 @@ fail instead of falling through to a later controller.
 The DT backend supplies structural views and status/address interpretation,
 and irq-driver owns register meaning and hardware initialization, matching Linux
 OF resource interpretation and irqchip bindings. `GicConfig::from_fwnode`
-translates metadata; `init_from_fwnode` collects it after allocator
-initialization, then invokes the existing `init(config)` path. `from_madt` for
-ACPI and `from_static` for board tables are future peers that produce the same
-`GicConfig`.
-This extraction does not publish firmware/domain associations or alter KIRQ,
-NMI transactions, runtime dispatch, PLIC discovery or boot ordering.
+returns a `GicSelection` carrying both the configuration and the selected
+`FwNode`; `init_from_fwnode` collects it after allocator initialization,
+invokes the existing `init(config)` path, then registers the exact node with
+KIRQ. `from_madt` for ACPI and `from_static` for board tables are future peers
+that produce the same selection.
+
+## PLIC register discovery
+
+`riscv::firmware` is a private binding module on the same model. It selects the
+first available PLIC-compatible node that the backend also reports as an
+interrupt controller (`FwNode::is_interrupt_controller`), consumes its
+translated first `reg` interval, and reads
+`riscv,ndev` through the backend-neutral property API. A disabled node is
+skipped; malformed availability, register resources, address widths, or source
+counts fail discovery instead of falling through to the legacy fixed layout.
+`PlicConfig::from_fwnode` returns both the configuration and the selected
+`FwNode`, which primary initialization registers with `PLIC_ROOT_DOMAIN` after
+hardware setup.
+
+## Firmware interrupt binding translation
+
+After controller initialization, `init_from_fwnode` calls
+`kirq::register_irq_domain(GIC_ROOT_DOMAIN, controller, IrqController::Gic,
+&GIC_XLATE)` and `init_primary` does the equivalent for `PLIC_ROOT_DOMAIN`.
+Registration is boot-only and keyed by exact firmware-node identity, so two
+instances of the same controller family remain distinct and a second
+registration is an error. The controller node must outlive the kernel; both
+entry points therefore take `FwNode<'static>`.
+
+The controllers own the meaning of their binding cells through
+`kirq::IrqDomainXlate`:
+
+- `gic/xlate.rs` requires exactly three cells. Type 0 is an SPI at `32 + N`
+  below the architectural 1020 limit; type 1 is a PPI at `16 + N` below 32.
+  The SPI/PPI identifier ranges come from the vendored GIC driver;
+  type 2 (ESPI) is unsupported; other types and cell counts are malformed.
+  Flag values 1/2/4/8 map to rising/falling/high/low, zero stays unknown, and
+  any other sense nibble is malformed. It does not allocate IRQs or call back
+  into KIRQ.
+- `riscv.rs` requires exactly one nonzero PLIC source within the supported
+  `1..=1023` range and reports level-high, matching the binding's lack of a
+  trigger cell. The legacy no-firmware PLIC fallback has no node and therefore
+  registers no firmware domain; it only serves legacy descriptor paths.
+
+Actual hardware range admission (`STANDARD_INTID_LIMIT`, `riscv,ndev`) remains
+in the existing flow selectors; translation is a binding decoder, not a
+readiness or hardware-presence claim.
 
 Before the DT backend migration, the extraction based on main f5f3cf4a1 passed parser host tests (24),
 AArch64 OF/irq-driver guest tests (54/54, coverage exported), and UNITTEST-enabled
@@ -59,11 +100,15 @@ configuration so that `kirq` stays architecture-neutral.
 ## Responsibilities
 
 - Discover and map the controller from the backend-neutral firmware root:
-  GIC regions through `GicConfig::from_fwnode`, and the PLIC region through
-  `FwNode::mmio_resource(0)` on the first PLIC-compatible node. Both use the
-  firmware-translated CPU addresses and map them through
-  `memspace::iomap_device`. The PLIC keeps its fixed platform address as the
-  no-firmware fallback, preserving the legacy layout.
+  `GicConfig::from_fwnode` for GIC and `PlicConfig::from_fwnode` for PLIC.
+  Both select the exact controller node, consume firmware-translated CPU
+  addresses, and map them through `memspace::iomap_device`. The PLIC keeps its
+  fixed platform address as the no-firmware fallback, preserving the legacy
+  layout.
+- Retain the selected controller node and register its exact identity with
+  KIRQ after hardware initialization, together with a binding-specific
+  `IrqDomainXlate`. Consumers map firmware interrupts through that identity;
+  the driver never selects a controller or allocates a logical IRQ itself.
 - PLIC `riscv,ndev` is read through the same node and still bounded to
   `1..=1023` before the source-state allocation.
 - Provide `kirq::IntrManagerIf` per architecture: `configure` (trigger
@@ -95,10 +140,12 @@ drivers/platform/irq/
 ├── src/
 │   ├── lib.rs      # architecture dispatch (cfg per target)
 │   ├── gic.rs      # AArch64: discovery, mapping, IntrManagerIf, NMI
+│   ├── gic/xlate.rs # GIC firmware interrupt-cell translation
 │   ├── gicv2.rs    # GICv2 backend (arm_gic_driver)
 │   ├── gicv3.rs    # GICv3 backend (arm_gic_driver)
 │   ├── gic_spi.rs  # ordinary SPI flow operations and transaction adapters
 │   ├── riscv.rs    # RISC-V PLIC backend
+│   ├── riscv/firmware.rs # PLIC firmware discovery and binding decode
 │   └── x86.rs      # x86_64 IO-APIC glue (x86-apic crate)
 └── Cargo.toml
 ```
@@ -494,8 +541,8 @@ models are not physical delivery, MMIO fault or hardware-quiescence proofs.
 - One crate per architecture via `cfg` dispatch instead of trait
   objects: each target compiles only its own backend, and `kirq` sees a
   uniform `IntrManagerIf` provider either way.
-- GIC discovery walks the device tree for an
-  `interrupt-controller` node whose compatible strings map to a known
+- GIC discovery walks the device tree for a node the backend reports as an
+  interrupt controller whose compatible strings map to a known
   version, then takes as many `reg` regions as that version requires
   (v2: GICD+GICC; v3: GICD+GICR) — matching the hardware layout instead
   of hard-coding addresses.

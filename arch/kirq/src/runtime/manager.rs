@@ -15,6 +15,7 @@
 
 use alloc::sync::Arc;
 
+use fwnode::{FwIrqSpec, FwSource};
 use kiface_task_api::TaskBlockingContextIf;
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 #[cfg(unittest)]
@@ -36,7 +37,8 @@ use super::{
 #[cfg(unittest)]
 use crate::action::IrqAction;
 use crate::{
-    Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqFlow, IrqSpec, Virq,
+    Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqFlow, IrqSource, IrqSpec, Virq,
+    domain::fw,
     platform::{Handler, IntrManagerIf, configure_platform_irq, set_platform_irq_enabled},
     state::{
         IRQ_STATE, IrqLine, IrqPlatformPlan, IrqState, IrqStateDesc, resolve_prepared_locked,
@@ -153,6 +155,36 @@ fn apply_platform_delivery(plan: IrqPlatformPlan) {
         unmask(plan.desc);
     }
 }
+/// A firmware interrupt specifier mapped into the logical IRQ namespace.
+///
+/// The descriptor is the authoritative stored resource: it includes metadata
+/// from both the firmware declaration and any earlier mapping of the same
+/// source. Consumers that register a handler must use [`Self::virq`]; consumers
+/// that need trigger or controller details must use this descriptor rather than
+/// reconstructing a default one from the logical number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MappedIrq {
+    /// OS-visible logical IRQ number.
+    pub virq: Virq,
+    /// Resource metadata retained by the IRQ core.
+    pub desc: IrqDesc,
+}
+
+/// A firmware interrupt declaration that could not be mapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FwIrqMapError {
+    /// No IRQ domain is registered for the specifier's exact controller node.
+    ControllerNotReady,
+    /// The controller rejected the binding cells as malformed.
+    MalformedSpec,
+    /// The controller understands the binding but cannot implement this entry.
+    UnsupportedSpec,
+    /// The controller binding decoded an out-of-range hardware number.
+    InvalidHwirq,
+    /// The IRQ core rejected the resulting resource.
+    Map(IrqDescError),
+}
+
 /// Try to map a hardware IRQ resource into the OS-visible logical IRQ namespace.
 ///
 /// A Domain association retains its Line across handler removal and empty
@@ -166,6 +198,60 @@ fn apply_platform_delivery(plan: IrqPlatformPlan) {
 /// New index entries also reject active RCU read scopes. Capacity preparation
 /// failure returns `NoMemory` without publishing either entry.
 pub fn try_map(desc: IrqDesc) -> Result<Virq, IrqDescError> {
+    try_map_resolved(desc).map(|mapped| mapped.virq)
+}
+
+/// Maps a firmware interrupt specifier through its controller's registered
+/// domain.
+///
+/// The specifier's controller node selects the domain by exact firmware-node
+/// identity. The controller's `IrqDomainXlate` interprets the binding
+/// cells; the IRQ core then associates the resulting hardware number with the
+/// registered domain and allocates or reuses the logical IRQ.
+///
+/// A repeated mapping of the same valid declaration returns the existing
+/// mapping. Conflicting hardware, domain, trigger or controller metadata is an
+/// error; it is never merged by discarding one side.
+///
+/// # Errors
+///
+/// Returns [`FwIrqMapError::ControllerNotReady`] when no domain is registered
+/// for the controller node, a translation error when the binding rejects the
+/// cells, and [`FwIrqMapError::Map`] when the IRQ core rejects the resource
+/// (including capacity and mapping conflicts).
+pub fn try_map_fwspec(spec: FwIrqSpec<'static>) -> Result<MappedIrq, FwIrqMapError> {
+    reject_nmi_management("map firmware IRQ").map_err(FwIrqMapError::Map)?;
+    if crate::context::is_in_interrupt_context() {
+        return Err(FwIrqMapError::Map(IrqDescError::InvalidContext {
+            operation: "map firmware IRQ",
+        }));
+    }
+    let binding = fw::lookup(spec.controller).ok_or(FwIrqMapError::ControllerNotReady)?;
+    let hw = binding
+        .xlate
+        .translate(spec.params.as_slice())
+        .map_err(|error| match error {
+            fw::IrqXlateError::Malformed => FwIrqMapError::MalformedSpec,
+            fw::IrqXlateError::Unsupported => FwIrqMapError::UnsupportedSpec,
+            fw::IrqXlateError::InvalidHwirq => FwIrqMapError::InvalidHwirq,
+        })?;
+    let desc = IrqDesc::new(hw.hwirq, hw.trigger)
+        .with_controller(binding.kind)
+        .with_domain(binding.domain)
+        .with_source(irq_source(spec.controller.source()));
+    try_map_resolved(desc).map_err(FwIrqMapError::Map)
+}
+
+fn irq_source(source: FwSource) -> IrqSource {
+    match source {
+        FwSource::DeviceTree => IrqSource::DeviceTree,
+        FwSource::Acpi => IrqSource::Acpi,
+        FwSource::Static => IrqSource::PlatformStatic,
+        FwSource::Unknown => IrqSource::Unknown,
+    }
+}
+
+fn try_map_resolved(desc: IrqDesc) -> Result<MappedIrq, IrqDescError> {
     reject_nmi_management("map IRQ")?;
     if crate::context::is_in_interrupt_context() {
         return Err(IrqDescError::InvalidContext {
@@ -198,8 +284,12 @@ pub fn try_map(desc: IrqDesc) -> Result<Virq, IrqDescError> {
         }
         let virq = resolution.virq;
         line = state.descs.get(&virq).unwrap_or_else(|| candidate.clone());
-        state.commit_resolution(resolution, &line, &mut line.lock(), &mut prepared)?;
-        return Ok(virq);
+        let resolved =
+            state.commit_resolution(resolution, &line, &mut line.lock(), &mut prepared)?;
+        return Ok(MappedIrq {
+            virq,
+            desc: resolved.into_desc(),
+        });
     }
 }
 

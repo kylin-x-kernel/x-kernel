@@ -15,6 +15,7 @@ irq_context_debug = []
 irq_stat = []
 
 [dependencies]
+fwnode.workspace = true
 irq_types.workspace = true
 kxarray.workspace = true
 krcu.workspace = true

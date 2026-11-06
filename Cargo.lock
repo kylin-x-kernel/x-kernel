@@ -663,6 +663,7 @@ version = "0.3.0-dev"
 dependencies = [
  "arm_pl011",
  "driver_base",
+ "fwnode",
  "kclass",
  "kdevice",
  "khal",
@@ -1235,6 +1236,7 @@ dependencies = [
 name = "driver-os-api"
 version = "0.3.0-dev"
 dependencies = [
+ "fwnode",
  "irq-types",
  "ktime_types",
  "unittest",
@@ -1245,6 +1247,7 @@ name = "driver-os-api-xkernel"
 version = "0.3.0-dev"
 dependencies = [
  "driver-os-api",
+ "fwnode",
  "kalloc",
  "kdma",
  "khal",
@@ -2758,6 +2761,7 @@ name = "kirq"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
+ "fwnode",
  "intrusive-collections",
  "irq-types",
  "kalloc-types",

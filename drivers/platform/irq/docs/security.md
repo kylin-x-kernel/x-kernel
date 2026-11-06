@@ -10,6 +10,26 @@ the existing GIC initializer. This change adds no MMIO unsafe block, fallback
 registry or readiness state. DT address metadata is not proof of controller
 presence; hardware setup can still fail at the existing fatal-boot boundary.
 
+## Firmware interrupt-cell boundary
+
+Controller translation treats interrupt specifiers as untrusted firmware input.
+`gic/xlate.rs` accepts only exactly three cells, types 0/1, in-range SPI/PPI
+numbers below 1020/32, and the four defined sense nibbles or zero. It returns
+malformed for other shapes and values, unsupported for ESPI, and invalid-hwirq
+for out-of-range numbers; it never clamps a cell. The PLIC translator accepts
+exactly one nonzero source no greater than the driver's supported 1023 and
+reports level-high. Neither translator allocates IRQs, reads controller state,
+or retries through another controller.
+
+After initialization, the driver registers the selected node's exact identity
+with KIRQ. A duplicate domain or controller association is a fatal boot error,
+not a replacement. Registration failure aborts the boot hook because consumers
+would otherwise retain an unmapable firmware description; there is no fallback
+to a compatible-string search. Flow selectors still enforce the runtime
+`STANDARD_INTID_LIMIT` and `riscv,ndev`, so successful translation is not proof
+that hardware implements the source. The legacy PLIC fallback registers no
+firmware domain and cannot be reached through firmware interrupt mapping.
+
 ## Local NMI Boundary
 
 `src/gicv3_nmi.rs` accepts only standard PPIs in the GIC domain. Its sole unsafe
@@ -49,8 +69,10 @@ producer shutdown or completed remote quiescence. Completion timing is unchanged
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs` (architecture
-dispatch), `src/gic.rs`, `src/gic_spi.rs`, `src/gicv2.rs`, `src/gicv3.rs` (AArch64 GIC),
-`src/riscv.rs` (PLIC), and `src/x86.rs` (IO-APIC glue). No modules are
+dispatch), `src/gic.rs`, `src/gic/xlate.rs`, `src/gic_spi.rs`, `src/gicv2.rs`,
+`src/gicv3.rs` (AArch64 GIC),
+`src/riscv.rs` and `src/riscv/firmware.rs` (PLIC), and `src/x86.rs` (IO-APIC
+glue). No modules are
 excluded; the backend crates (`arm_gic_driver`, `riscv_plic`,
 `x86-apic`) encapsulate their own register access and are audited
 separately — values they return are treated as hardware facts here.
@@ -65,17 +87,19 @@ network/file data path in this crate.
 
 ## External Boundaries
 
-- **Device-tree controller description** (`gic.rs`): the
-  `interrupt-controller` node's compatible strings and `reg` regions
-  determine version and MMIO windows. Checked properties: compatible
+- **Device-tree controller description** (`gic.rs`): the node the backend
+  reports as an interrupt controller contributes its compatible strings and
+  `reg` regions, which determine version and MMIO windows. Checked properties: compatible
   must match a known GIC list, and each detected version must supply
   its required regions (v2: GICD+GICC; v3: GICD+GICR). Failure:
   `None` — platform init applies its own fallback or abort policy.
-- **PLIC region**: the first `sifive,plic-1.0.0` / `riscv,plic0` node in
-  the published firmware root supplies its translated `reg` resource and
-  `riscv,ndev`; malformed values abort initialization instead of being
-  guessed. Without firmware, the legacy fixed address `0x0c00_0000` and
-  the library source bound are retained.
+- **PLIC region**: `PlicConfig::from_fwnode` selects the first available
+  `sifive,plic-1.0.0` / `riscv,plic0` node that the backend reports as an
+  interrupt controller, and supplies its translated `reg` resource and
+  `riscv,ndev`; malformed availability, register resources or source counts
+  abort initialization instead of being guessed or falling back to the fixed
+  layout. Without firmware, the legacy fixed address `0x0c00_0000` and the
+  library source bound are retained.
 - **Controller MMIO windows**: mapped once through
   `memspace::iomap_device`; all later access stays inside the mapped
   apertures.
@@ -191,6 +215,7 @@ anywhere in this crate.
 | T-05 | Spurious PLIC claim | Low — wasted IRQ cycle | Level noise on a PLIC line | Claim returns `None`/skip sentinel for timer and IPI events; completion only for genuine device lines. |
 | T-06 | NMI irq_work submission re-enters controller or logging locks | High — CPU deadlock | NMI interrupts a GIC/logging critical section | Prepared notifier uses only immutable MPIDR affinity, integer encoding, DSB, the public SGI1R write primitive and ISB; no generic IPI helper, CPU map, lazy state or logging. |
 | T-07 | irq_work SGI reaches the wrong CPU or runs as NMI | Medium — work stranded or drained in forbidden context | Unrepresentable Aff0, SGI/IPI conflict, wrong priority or NMI attribute | Preparation validates SGI < 16, distinct IPI_IRQ and Aff0 < 16; encodes all affinity levels with RS=0/IRM=0; sets ordinary priority and clears supported hardware NMI attributes before enabling. |
+| T-08 | Firmware interrupt cells decode to a different hardware source or trigger | High — interrupt delivered for the wrong device, or a line programmed with unstated semantics | Malformed or hostile device tree interrupt specifier | The owning controller translates with strict cell count, type, range, and sense-bit checks; malformed, unsupported, and invalid-hwirq are distinct errors with no clamping or controller fallback. Runtime flow selectors independently bound the actual hardware range. |
 
 ## Failure Modes
 
@@ -201,6 +226,7 @@ anywhere in this crate.
 | F-03 | PLIC accessed before `init` | Named-`expect` panic | Offending caller aborts | 2 | Initialization-order bug surfaced loudly. |
 | F-04 | GIC config re-supplied with different values | `remember_config` assert panic | Platform init aborts | 2 | Inconsistent platform description surfaced loudly. |
 | F-05 | Local irq_work preparation unsupported or fails | Returns `None`, no notifier published | Generic irq_work remains unavailable on this CPU | 3 | Reject invalid affinity/SGI, retain global registration failure, and propagate NMI-attribute or generic-enable failure. GICv3 logs the failed preparation step; runtime publishes ready only on success and rejects available NMI without a ready local handoff. |
+| F-06 | Firmware controller node cannot be associated with its IRQ domain | `init_from_fwnode`/`init_primary` reports the registration error; PLIC aborts boot | Consumers cannot map firmware interrupts; boot stops rather than silently using another controller | 3 | Registration happens only after hardware initialization and rejects duplicate domain/controller associations. No compatible-string fallback or lazy replacement exists. |
 
 ## Known Limitations
 

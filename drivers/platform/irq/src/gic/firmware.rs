@@ -26,9 +26,29 @@ pub(super) fn is_gicv3_compatible(compatible: &str) -> bool {
     matches!(compatible, "arm,gic-v3" | "arm,gic-v4")
 }
 
+/// One discovered GIC controller and the firmware node that described it.
+///
+/// The node is retained so the caller can associate the exact controller
+/// instance with its IRQ domain after initialization. Discovery must not drop
+/// the node and let the IRQ core guess the controller from a compatible string.
+#[derive(Debug, Clone, Copy)]
+pub struct GicSelection<'a> {
+    /// Controller configuration decoded from the node.
+    pub config: GicConfig,
+    /// Firmware node the configuration came from.
+    pub controller: FwNode<'a>,
+}
+
 /// A rejection while translating a firmware node into [`GicConfig`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GicConfigError {
+    /// The node's interrupt-controller declaration is malformed.
+    Controller {
+        /// Offending firmware node.
+        node: FwNodeId,
+        /// Backend failure.
+        error: FwError,
+    },
     /// The node's availability declaration is malformed.
     Status {
         /// Offending firmware node.
@@ -87,19 +107,14 @@ impl GicConfig {
     /// Returns [`GicConfigError`] when a candidate's availability, register
     /// resources, or binding properties cannot be interpreted, or when a
     /// GICv3 candidate describes an invalid redistributor region count.
-    pub fn from_fwnode(root: FwNode<'_>) -> Result<Option<Self>, GicConfigError> {
+    pub fn from_fwnode<'a>(root: FwNode<'a>) -> Result<Option<GicSelection<'a>>, GicConfigError> {
         for node in root.descendants() {
             let id = node.id();
-            match node.property("interrupt-controller") {
-                Ok(Some(_)) => {}
-                Ok(None) => continue,
-                Err(error) => {
-                    return Err(GicConfigError::Property {
-                        node: id,
-                        property: "interrupt-controller",
-                        error,
-                    });
-                }
+            if !node
+                .is_interrupt_controller()
+                .map_err(|error| GicConfigError::Controller { node: id, error })?
+            {
+                continue;
             }
             let version = if node.firmware_ids().any(is_gicv3_compatible) {
                 GicVersion::V3
@@ -119,7 +134,10 @@ impl GicConfig {
                 GicVersion::V2 => gicv2_config(id, &regions)?,
                 GicVersion::V3 => gicv3_config(node, id, &regions)?,
             };
-            return Ok(Some(config));
+            return Ok(Some(GicSelection {
+                config,
+                controller: node,
+            }));
         }
         Ok(None)
     }

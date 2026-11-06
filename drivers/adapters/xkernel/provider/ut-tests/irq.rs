@@ -58,22 +58,25 @@ fn plain_resource_retains_virq_identity() {
 }
 
 #[def_test]
-fn mapped_resource_preserves_explicit_domain_and_distinct_hwirq() {
+fn registration_and_line_control_resolve_both_shapes_by_logical_number() {
     let domain = kirq::IrqDomainId::new(87);
-    let resource = IrqResource::mapped(
+    let mapped = IrqResource::mapped(
         Virq::new(48),
         DevIrqTrigger::LevelHigh,
         DevIrqController::Gic,
         Some(domain),
         30,
     );
-    let expected = kirq::IrqDesc::new(30, DevIrqTrigger::LevelHigh)
-        .with_controller(DevIrqController::Gic)
-        .with_domain(domain)
-        .with_virq(48);
+    let plain = IrqResource::plain(Virq::new(48), DevIrqTrigger::LevelHigh);
+    // The IRQ core owns the descriptor created by the mapping. Rebuilding one
+    // here from retained route metadata would bypass its authoritative state.
     assert_eq!(
-        irq_resource_to_kirq_spec(resource),
-        kirq::IrqSpec::Desc(expected)
+        irq_resource_to_kirq_spec(mapped),
+        kirq::IrqSpec::PlainVirq(48)
+    );
+    assert_eq!(
+        irq_resource_to_kirq_spec(plain),
+        kirq::IrqSpec::PlainVirq(48)
     );
 }
 
@@ -158,6 +161,61 @@ fn irq_error_classification_retains_mainline_contract() {
     ] {
         assert_eq!(map_irq_desc_error(error), ResError::InvalidResource);
     }
+}
+
+#[def_test]
+fn firmware_mapping_errors_keep_readiness_declaration_and_conflict_apart() {
+    assert_eq!(
+        map_fw_irq_error(kirq::FwIrqMapError::ControllerNotReady),
+        ResError::BadState
+    );
+    for error in [
+        kirq::FwIrqMapError::MalformedSpec,
+        kirq::FwIrqMapError::InvalidHwirq,
+    ] {
+        assert_eq!(map_fw_irq_error(error), ResError::InvalidResource);
+    }
+    assert_eq!(
+        map_fw_irq_error(kirq::FwIrqMapError::UnsupportedSpec),
+        ResError::Unsupported
+    );
+    for error in [
+        kirq::IrqDescError::HwirqConflict {
+            existing: 30,
+            newer: 31,
+        },
+        kirq::IrqDescError::DomainConflict {
+            existing: Some(kirq::IrqDomainId::new(1)),
+            newer: Some(kirq::IrqDomainId::new(2)),
+        },
+        kirq::IrqDescError::TriggerConflict {
+            existing: DevIrqTrigger::LevelHigh,
+            newer: DevIrqTrigger::EdgeRising,
+        },
+        kirq::IrqDescError::PolarityConflict {
+            existing: kirq::IrqPolarity::High,
+            newer: kirq::IrqPolarity::Low,
+        },
+        kirq::IrqDescError::ControllerConflict {
+            existing: DevIrqController::Gic,
+            newer: DevIrqController::Plic,
+        },
+        kirq::IrqDescError::MappingConflict {
+            domain: kirq::IrqDomainId::new(1),
+            hwirq: 30,
+            existing: 40,
+            newer: 41,
+        },
+    ] {
+        assert_eq!(
+            map_fw_irq_error(kirq::FwIrqMapError::Map(error)),
+            ResError::AlreadyExists
+        );
+    }
+    assert_eq!(
+        map_fw_irq_error(kirq::FwIrqMapError::Map(kirq::IrqDescError::NoMemory)),
+        ResError::NoMemory
+    );
 }
 
 #[def_test]

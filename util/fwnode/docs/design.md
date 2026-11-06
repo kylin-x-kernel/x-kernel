@@ -5,9 +5,15 @@
 `fwnode` defines the backend-neutral contract for firmware descriptions.
 Device Tree, ACPI objects and static board tables all describe the same facts
 — nodes, properties, translated MMIO resources, interrupt specifiers and
-phandle-like references — but in different representations. Consumers such as
-interrupt-controller drivers should depend on those facts, not on a firmware
-format. This crate is that seam.
+phandle-like references — but in different representations. Kernel IRQ
+infrastructure and consumers such as interrupt-controller drivers should
+depend on those facts, not on a firmware format. This crate is that seam.
+
+The crate lives under `util/` because it is pure shared vocabulary: it has no
+kernel, architecture or driver-framework dependency. Both `kirq` and
+controller drivers may depend on it without weakening the driver-subsystem
+boundary, which forbids kernel subsystems from depending on driver
+capability contracts such as `driver_os_api`.
 
 It is deliberately small:
 
@@ -21,7 +27,7 @@ It is deliberately small:
 ## Scope
 
 ```text
-drivers/contracts/fwnode/
+util/fwnode/
 ├── src/
 │   └── lib.rs          # Contract types and object-safe backend trait
 ├── tests/
@@ -41,9 +47,16 @@ drivers/contracts/fwnode/
 - `FwNode<'a>` is a copyable handle: a `FwNodeId` plus `&dyn FwNodeOps<'a>`.
   Equality compares both the identity and the backend identity, so handles
   from different backends with numerically equal IDs do not compare equal.
+- `FwSource` reports whether a backend describes a device tree, ACPI, or a
+  static table. It is provenance metadata for diagnostics and resource
+  classification, not a second identity system.
 - `FwNode::next_dfs`, `children`, `descendants` and `firmware_ids` are
   convenience iterators built only from `parent`, `first_child`,
   `next_sibling` and `firmware_id`. They add no state and no allocation.
+- `FwNode::is_interrupt_controller` asks the backend whether firmware declares
+  the node as an interrupt controller. Consumers must not test a firmware
+  property name themselves; the device-tree backend answers from its own
+  controller declaration, and future backends use their native representation.
 - `FwProperty` / `FwPropertyValue` carry a property in its firmware
   representation. Accessors (`as_u32`, `as_u64`, `as_str`, `as_bool`) interpret
   only unambiguous encodings and return `FwError::InvalidValue` otherwise.

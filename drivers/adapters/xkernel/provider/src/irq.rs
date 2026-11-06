@@ -6,10 +6,11 @@
 
 use alloc::sync::Arc;
 
+#[cfg(any(target_arch = "x86_64", unittest))]
+use driver_os_api::IrqTrigger as DevIrqTrigger;
 use driver_os_api::{
     IrqController as DevIrqController, IrqEvent as DevIrqEvent, IrqHandler as DevIrqHandler,
-    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, IrqTrigger as DevIrqTrigger, MsiResource,
-    ResError, ResResult, Virq,
+    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, MsiResource, ResError, ResResult, Virq,
 };
 
 use crate::XKernelResourceProvider;
@@ -60,6 +61,21 @@ impl IrqOp for XKernelResourceProvider {
 
     fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {
         kirq::enable(irq_resource_to_kirq_spec(irq), enabled);
+    }
+
+    fn map_fw_irq(&self, spec: fwnode::FwIrqSpec<'static>) -> ResResult<IrqResource> {
+        let mapped = kirq::try_map_fwspec(spec).map_err(|err| {
+            log::warn!("failed to map firmware IRQ declaration {spec:?}: {err:?}");
+            map_fw_irq_error(err)
+        })?;
+        let desc = mapped.desc;
+        Ok(IrqResource::mapped(
+            Virq::new(mapped.virq),
+            desc.trigger,
+            desc.controller,
+            desc.domain,
+            desc.hwirq,
+        ))
     }
 
     fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
@@ -135,6 +151,17 @@ fn default_irq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId>
     }
 }
 
+fn map_fw_irq_error(err: kirq::FwIrqMapError) -> ResError {
+    match err {
+        kirq::FwIrqMapError::ControllerNotReady => ResError::BadState,
+        kirq::FwIrqMapError::MalformedSpec | kirq::FwIrqMapError::InvalidHwirq => {
+            ResError::InvalidResource
+        }
+        kirq::FwIrqMapError::UnsupportedSpec => ResError::Unsupported,
+        kirq::FwIrqMapError::Map(err) => map_irq_desc_error(err),
+    }
+}
+
 fn irq_route_to_kirq_desc(route: IrqRouteDesc) -> kirq::IrqDesc {
     let mut desc = kirq::IrqDesc::new(route.hwirq, route.trigger).with_controller(route.controller);
     if let Some(domain) = route
@@ -146,26 +173,11 @@ fn irq_route_to_kirq_desc(route: IrqRouteDesc) -> kirq::IrqDesc {
     desc
 }
 
+/// Handler registration and line control address a mapping that has already
+/// happened. Rebuilding a descriptor from the resource would bypass the IRQ
+/// core's authoritative metadata, so both shapes resolve by logical number.
 fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
-    match irq {
-        IrqResource::PlainVirq { virq, .. } => kirq::IrqSpec::PlainVirq(virq.raw()),
-        IrqResource::DomainMapped {
-            virq,
-            trigger,
-            controller,
-            domain,
-            hwirq,
-        } => {
-            let desc = irq_route_to_kirq_desc(IrqRouteDesc {
-                hwirq,
-                trigger,
-                controller,
-                domain,
-            })
-            .with_virq(virq.raw());
-            kirq::IrqSpec::Desc(desc)
-        }
-    }
+    kirq::IrqSpec::PlainVirq(irq.virq().raw())
 }
 
 fn dev_irq_event_to_kirq(event: DevIrqEvent) -> kirq::IrqEvent {
@@ -189,14 +201,17 @@ fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
         kirq::IrqDescError::VirqExhausted { .. } | kirq::IrqDescError::NoMemory => {
             ResError::NoMemory
         }
+        kirq::IrqDescError::HwirqConflict { .. }
+        | kirq::IrqDescError::DomainConflict { .. }
+        | kirq::IrqDescError::TriggerConflict { .. }
+        | kirq::IrqDescError::PolarityConflict { .. }
+        | kirq::IrqDescError::ControllerConflict { .. }
+        | kirq::IrqDescError::VirqConflict { .. }
+        | kirq::IrqDescError::MappingConflict { .. }
+        | kirq::IrqDescError::VirqMappingConflict { .. } => ResError::AlreadyExists,
         kirq::IrqDescError::InvalidHwirq { .. }
         | kirq::IrqDescError::UnsupportedFlow { .. }
         | kirq::IrqDescError::ConfigurationFailed { .. }
-        | kirq::IrqDescError::HwirqConflict { .. }
-        | kirq::IrqDescError::DomainConflict { .. }
-        | kirq::IrqDescError::VirqConflict { .. }
-        | kirq::IrqDescError::MappingConflict { .. }
-        | kirq::IrqDescError::VirqMappingConflict { .. }
         | kirq::IrqDescError::UnknownDomain { .. }
         | kirq::IrqDescError::UnknownIrq
         | kirq::IrqDescError::TeardownInProgress { .. }

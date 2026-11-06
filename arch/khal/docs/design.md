@@ -100,10 +100,12 @@ the index.
 Consumers above this module use the root instead of reaching into `of` for
 firmware walks. `khal::firmware::devices::for_each_compatible` iterates
 `FwNode::descendants`, matches `firmware_ids()`, and requests the primary MMIO
-resource and IRQ specifier. Platform bring-up passes the same root to GIC
-discovery. The transition is intentionally partial: GIC/PLIC cell *meaning*
-still lives in `of`'s shared decoder, and the PCI `interrupt-map` walk remains
-in `of`, both pending `irq_domain`.
+resource and IRQ declaration. The declaration is returned as `FwIrqSpec`
+(controller node plus complete binding cells); this layer does not decode cells
+and reports a malformed declaration as an error instead of "no interrupt".
+Controller drivers own cell meaning through their registered domain
+translators. Platform bring-up passes the same root to GIC discovery. The PCI
+`interrupt-map` walk remains in `of` until PCI legacy INTx migrates.
 
 The lazy index means device enumeration must not run before the allocator
 exists. Early console and PMU discovery use allocation-free

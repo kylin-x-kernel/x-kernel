@@ -13,10 +13,14 @@ reachable from the audited entry points.
 
 Port construction trusts the platform/device layer to provide valid UART addresses,
 mapping lifetimes, and device-tree layouts.
-The early stdout IRQ descriptor comes from `FdtNode::irq_spec(0)` and the
-shared GIC/PLIC cell decoder. Both are allocation-free and report a missing,
-dangling, truncated or unsupported specifier as absent metadata; the console
-then keeps polled input instead of acting on a partial descriptor.
+The early stdout IRQ description comes from the backend-neutral firmware node
+as its exact controller handle plus binding cells. No cells are interpreted at
+early boot; `prepare_input` passes them to the controller's registered domain
+translator, which rejects malformed, out-of-range or unsupported declarations.
+A malformed declaration is logged and keeps polled input; it is not treated as
+absent and is not re-decoded through the legacy OF path. Missing metadata and
+mapping failure also keep polled input; the console never acts on a partial
+descriptor or substitutes a raw firmware number.
 Emergency transmission reads hardware status and writes transmit registers using
 byte slices supplied by the kernel.
 It does not access user pointers, allocate DMA or ordinary memory, or parse external

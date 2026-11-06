@@ -71,13 +71,23 @@ consumer calls `take_input_dropped_bytes()` and logs nonzero losses in task
 context, outside the UART lock. Reading the report clears only the count, not
 buffered data. Before attachment the count accumulates for the initial pass.
 
-Early stdout publication resolves the UART's first interrupt specifier with
-the allocation-free `FdtNode::irq_spec(0)` and converts the already-resolved
-controller cells with `of::decode_fdt_irq_spec`. This works before and after
-allocator setup. It retains only the physical IRQ descriptor; it does not
-map or register an IRQ. The runtime boot task calls `kiface_console_api::ConsoleInputSetupIf::prepare_input`
+Early stdout publication resolves the UART node in the backend-neutral firmware
+tree and retains its first `FwIrqSpec`: the exact controller node plus the
+complete binding cells. It performs no decoding, mapping or registration; early
+console output stays polling. A malformed declaration is reported and leaves
+input polled; it never falls back to the legacy `of` decoder, so a broken
+declaration cannot masquerade as an absent one. The x86 I/O-port console
+explicitly retains a pre-decoded `Legacy` descriptor because it has no firmware
+node; that is a board fact, not a parse-failure fallback.
+
+The runtime boot task calls `kiface_console_api::ConsoleInputSetupIf::prepare_input`
 after GP and worker startup, before device discovery can construct N_TTY.
 This one-shot attempt prepares storage, maps the IRQ, and installs a shared action.
+Firmware declarations map through `kirq::try_map_fwspec`, so the exact controller
+node selects the domain and the controller translator interprets the cells;
+legacy descriptions map through `kirq::try_map`. Mapping before device
+enumeration reuses the same core mapping and trigger metadata, avoiding a
+duplicate descriptor that would conflict with the device's mapping.
 Absent IRQ metadata or a failed preparation/map/registration keeps polled input
 and output available. An already created buffer or mapping is retained on failure:
 the mapping may belong to other users, and this path must not disable their line.
@@ -160,5 +170,8 @@ the fallible storage preparation, IRQ mapping and action registration calls.
 They exercise the production ordering and RX activation, without modifying the
 live IRQ registry. Coverage includes absent metadata, capacity failure, mapping
 failure, rejected/failed registration, retained polled I/O, and no repeated work
-after either success or failure. The storage failure is a deterministic
-capacity-overflow result, not a test of allocator exhaustion recovery.
+after either success or failure. The IRQ form passed to the mapping step is
+opaque to these tests; the production mapping of firmware declarations and
+legacy descriptors is covered by the IRQ-core and serial integration tests. The
+storage failure is a deterministic capacity-overflow result, not a test of
+allocator exhaustion recovery.

@@ -63,7 +63,7 @@ recorded below.
 
 ## Implemented neutral contract (first slice)
 
-`drivers/contracts/fwnode` defines the backend-neutral contract:
+`util/fwnode` defines the backend-neutral contract:
 `FwNodeId`, opaque `FwNode<'a>` handles over a `FwNodeOps<'a>` provider,
 `FwProperty`/`FwPropertyValue`, `FwMmioResource`, and
 `FwIrqSpec`/`FwParams`. Handles are comparable across backends and carry no
