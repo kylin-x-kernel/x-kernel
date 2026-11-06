@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+#![cfg(feature = "fwnode")]
+
+mod support;
+
+use fwnode::{FwError, FwNode};
+use rs_fdtree::{DtBackend, LinuxFdt};
+use support::Dtb;
+
+fn cells(values: &[u32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_be_bytes())
+        .collect()
+}
+
+fn node<'a>(root: FwNode<'a>, name: &str) -> FwNode<'a> {
+    root.descendants()
+        .find(|node| node.name() == Some(name))
+        .unwrap()
+}
+
+fn irq_fixture() -> Vec<u8> {
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.begin("intc");
+    blob.property("compatible", b"arm,gic-v3\0");
+    blob.property("interrupt-controller", &[]);
+    blob.property("#interrupt-cells", &cells(&[3]));
+    blob.property("phandle", &cells(&[1]));
+    blob.end();
+    blob.begin("intc2");
+    blob.property("compatible", b"sifive,plic-1.0.0\0");
+    blob.property("interrupt-controller", &[]);
+    blob.property("#interrupt-cells", &cells(&[1]));
+    blob.property("phandle", &cells(&[2]));
+    blob.end();
+    blob.begin("intc3");
+    blob.property("compatible", b"test,bad-controller\0");
+    blob.property("interrupt-controller", &[]);
+    blob.property("phandle", &cells(&[3]));
+    blob.end();
+    blob.begin("bus");
+    blob.property("interrupt-parent", &cells(&[1]));
+    blob.begin("uart");
+    blob.property("compatible", b"arm,pl011\0");
+    blob.property("interrupts", &cells(&[0, 5, 4]));
+    blob.property("refs", &cells(&[1, 3, 2, 9]));
+    blob.end();
+    blob.end();
+    blob.begin("device");
+    blob.property("interrupts-extended", &cells(&[1, 0, 6, 4, 2, 7]));
+    blob.end();
+    blob.begin("bare");
+    blob.end();
+    blob.begin("bad-parent");
+    blob.property("interrupts-extended", &cells(&[9, 0, 5, 4]));
+    blob.end();
+    blob.begin("missing-cells");
+    blob.property("interrupt-parent", &cells(&[3]));
+    blob.property("interrupts", &cells(&[5]));
+    blob.end();
+    blob.begin("no-parent");
+    blob.property("interrupts", &cells(&[5, 0, 4]));
+    blob.end();
+    blob.begin("short");
+    blob.property("interrupt-parent", &cells(&[1]));
+    blob.property("interrupts", &cells(&[0, 5]));
+    blob.end();
+    blob.end();
+    blob.finish()
+}
+
+fn fixture() -> Vec<u8> {
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.property("compatible", b"test,root\0");
+    blob.begin("gic");
+    blob.property("compatible", b"arm,gic-v3\0");
+    blob.property("interrupt-controller", &[]);
+    blob.property("#interrupt-cells", &cells(&[3]));
+    blob.property("status", b"okay\0");
+    blob.end();
+    blob.begin("second");
+    blob.end();
+    blob.end();
+    blob.finish()
+}
+
+#[test]
+fn exposes_tree_structure_and_properties() {
+    let bytes = fixture();
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let backend = DtBackend::new(tree);
+    let root = backend.root().unwrap();
+
+    assert_eq!(root.name(), Some("/"));
+    assert_eq!(
+        root.property("compatible").unwrap().unwrap().as_str(),
+        Ok("test,root")
+    );
+    assert_eq!(root.firmware_ids().collect::<Vec<_>>(), ["test,root"]);
+
+    let children: Vec<_> = root.children().map(|node| node.name().unwrap()).collect();
+    assert_eq!(children, ["gic", "second"]);
+
+    let descendants: Vec<_> = root
+        .descendants()
+        .map(|node| node.name().unwrap())
+        .collect();
+    assert_eq!(descendants, ["/", "gic", "second"]);
+
+    let gic = root.first_child().unwrap();
+    assert_eq!(gic.name(), Some("gic"));
+    assert_eq!(gic.parent(), Some(root));
+    assert_eq!(gic.next_sibling().unwrap().name(), Some("second"));
+    assert!(gic.next_sibling().unwrap().next_sibling().is_none());
+    assert_eq!(gic.is_available(), Ok(true));
+    assert_eq!(
+        gic.property("#interrupt-cells").unwrap().unwrap().as_u32(),
+        Ok(3)
+    );
+    assert_eq!(
+        gic.property("interrupt-controller")
+            .unwrap()
+            .unwrap()
+            .as_bool(),
+        Ok(true)
+    );
+}
+
+#[test]
+fn resolves_inherited_interrupts_against_the_controller() {
+    let bytes = irq_fixture();
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let backend = DtBackend::new(tree);
+    let root = backend.root().unwrap();
+    let uart = node(root, "uart");
+    let intc = node(root, "intc");
+
+    let spec = uart.irq_spec(0).unwrap().unwrap();
+    assert_eq!(spec.controller, intc);
+    assert_eq!(spec.params.as_slice(), [0, 5, 4]);
+    assert_eq!(uart.irq_spec(1), Ok(None));
+}
+
+#[test]
+fn enumerates_interrupts_extended_entries() {
+    let bytes = irq_fixture();
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let backend = DtBackend::new(tree);
+    let root = backend.root().unwrap();
+    let device = node(root, "device");
+
+    let first = device.irq_spec(0).unwrap().unwrap();
+    assert_eq!(first.controller, node(root, "intc"));
+    assert_eq!(first.params.as_slice(), [0, 6, 4]);
+
+    let second = device.irq_spec(1).unwrap().unwrap();
+    assert_eq!(second.controller, node(root, "intc2"));
+    assert_eq!(second.params.as_slice(), [7]);
+
+    assert_eq!(device.irq_spec(2), Ok(None));
+    assert_eq!(node(root, "bare").irq_spec(0), Ok(None));
+}
+
+#[test]
+fn resolves_references_and_their_arguments() {
+    let bytes = irq_fixture();
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let backend = DtBackend::new(tree);
+    let root = backend.root().unwrap();
+    let uart = node(root, "uart");
+
+    let parent = node(root, "bus")
+        .reference("interrupt-parent", 0, 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(parent.node, node(root, "intc"));
+    assert!(parent.args.is_empty());
+    assert_eq!(uart.reference("interrupt-parent", 0, 0), Ok(None));
+
+    let first = uart.reference("refs", 0, 1).unwrap().unwrap();
+    assert_eq!(first.node, node(root, "intc"));
+    assert_eq!(first.args.as_slice(), [3]);
+
+    let second = uart.reference("refs", 1, 1).unwrap().unwrap();
+    assert_eq!(second.node, node(root, "intc2"));
+    assert_eq!(second.args.as_slice(), [9]);
+
+    assert_eq!(uart.reference("refs", 2, 1), Ok(None));
+    assert_eq!(uart.reference("absent", 0, 0), Ok(None));
+    assert_eq!(uart.reference("refs", 0, 2), Err(FwError::InvalidValue));
+    assert_eq!(
+        uart.reference("refs", 0, fwnode::FW_IRQ_SPEC_MAX_PARAMS + 1),
+        Err(FwError::BufferTooSmall)
+    );
+}
+
+#[test]
+fn rejects_malformed_interrupt_descriptions() {
+    let bytes = irq_fixture();
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let backend = DtBackend::new(tree);
+    let root = backend.root().unwrap();
+
+    for name in ["bad-parent", "missing-cells", "no-parent", "short"] {
+        assert_eq!(
+            node(root, name).irq_spec(0),
+            Err(FwError::InvalidValue),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn rejects_a_handle_from_another_backend() {
+    let first = fixture();
+    let second = fixture();
+    let first_tree = LinuxFdt::new(&first).unwrap();
+    let second_tree = LinuxFdt::new(&second).unwrap();
+    let first_backend = DtBackend::new(first_tree);
+    let second_backend = DtBackend::new(second_tree);
+    let node = first_backend.root().unwrap();
+    let other = second_backend.root().unwrap();
+
+    assert_ne!(node, other);
+    assert_eq!(node.name(), Some("/"));
+}

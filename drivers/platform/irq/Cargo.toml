@@ -25,7 +25,8 @@ lazyinit = "0.2"
 log = "0.4"
 memaddr = { workspace = true }
 memspace = { workspace = true }
-of = { workspace = true }
+fwnode = { workspace = true }
+rs_fdtree = { workspace = true, features = ["alloc", "fwnode"] }
 arm-gic-driver = { workspace = true }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
@@ -43,6 +44,11 @@ unittest.workspace = true
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_apic = { workspace = true }
 unittest.workspace = true
+
+[package.metadata.cargo-shear]
+# rs_fdtree is used by cfg(unittest) firmware fixtures, which cargo-shear does
+# not inspect.
+ignored = ["rs_fdtree"]
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none", "riscv64gc-unknown-none-elf"]

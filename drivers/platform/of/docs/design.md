@@ -1,5 +1,17 @@
 # of — Design
 
+## DT backend migration
+
+rs_fdtree owns strict properties, status and numeric reg/ranges translation.
+GIC consumes its FdtNode methods directly; OF no longer implements or forwards
+the moved availability/address APIs. OF currently provides the boot tree view
+and legacy queries, not a generic firmware-node abstraction.
+
+See [firmware-node direction](firmware-node-direction.md) for the agreed
+boundary and delivery order. This PR does not add fwnode, firmware identity,
+IRQ domain mapping or migrate legacy IRQ/PCI consumers. Those helpers remain
+explicit follow-up debt; OF is not being renamed into a generic interface.
+
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
@@ -25,10 +37,14 @@ controller kind, generic PCI host bridge facts, the PMU IRQ, and the
   `rs_fdtree::Chosen::x_kernel_log_level`. `of` provides the transport only;
   `khal::firmware::dt_log_level` re-exports it and the logger owns the level
   vocabulary that validates it.
-- Decode interrupts: `first_interrupt_desc` resolves `interrupts` /
-  `interrupts-extended`, follows `interrupt-parent` phandles, and maps
-  controller-specific cells to `InterruptInfo` (GIC SPI/PPI numbering,
-  trigger flags; PLIC single-cell). `generic_pci_legacy_interrupt` walks
+- Decode interrupts: specifier resolution (`interrupts`,
+  `interrupts-extended`, inherited `interrupt-parent`) belongs to
+  `rs_fdtree::FdtNode::irq_spec` and the fwnode contract. `of` no longer
+  rescans those properties; `decode_irq_cells` / `decode_fdt_irq_spec` only
+  turn already-resolved controller cells into `InterruptInfo` (GIC SPI/PPI
+  numbering and trigger flags; PLIC single-cell). That GIC/PLIC binding
+  decode is transitional and moves to the controller drivers with
+  `irq_domain`. `generic_pci_legacy_interrupt` still walks
   `interrupt-map` / `interrupt-map-mask` for a (bus, device, function, pin)
   key. `pmu_irq_or` resolves the ARM CPU PMU IRQ once and caches it.
 - Extract PCI host facts: `generic_pci_host_info` (CAM vs ECAM, config

@@ -445,3 +445,130 @@ fn source_activation_preserves_global_irq_mask() {
     assert_eq!(activated.bits(), expected.bits());
     assert!(!is_irq_enabled);
 }
+
+struct Dtb {
+    structure: alloc::vec::Vec<u8>,
+    strings: alloc::vec::Vec<u8>,
+}
+
+impl Dtb {
+    fn new() -> Self {
+        Self {
+            structure: alloc::vec::Vec::new(),
+            strings: alloc::vec::Vec::new(),
+        }
+    }
+
+    fn word(&mut self, value: u32) {
+        self.structure.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn align(&mut self) {
+        while !self.structure.len().is_multiple_of(4) {
+            self.structure.push(0);
+        }
+    }
+
+    fn begin(&mut self, name: &str) {
+        self.word(1);
+        self.structure.extend_from_slice(name.as_bytes());
+        self.structure.push(0);
+        self.align();
+        self.word(4);
+    }
+
+    fn property(&mut self, name: &str, bytes: &[u8]) {
+        self.word(3);
+        self.word(bytes.len() as u32);
+        self.word(self.strings.len() as u32);
+        self.strings.extend_from_slice(name.as_bytes());
+        self.strings.push(0);
+        self.structure.extend_from_slice(bytes);
+        self.align();
+    }
+
+    fn end(&mut self) {
+        self.word(2);
+    }
+
+    fn finish(mut self) -> alloc::vec::Vec<u8> {
+        self.word(9);
+        let strings_offset = 56 + self.structure.len();
+        let mut bytes = alloc::vec::Vec::new();
+        for value in [
+            0xd00d_feed,
+            (strings_offset + self.strings.len()) as u32,
+            56,
+            strings_offset as u32,
+            40,
+            17,
+            16,
+            0,
+            self.strings.len() as u32,
+            self.structure.len() as u32,
+        ] {
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        bytes.extend_from_slice(&[0; 16]);
+        bytes.extend_from_slice(&self.structure);
+        bytes.extend_from_slice(&self.strings);
+        bytes
+    }
+}
+
+fn cells(values: &[u32]) -> alloc::vec::Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_be_bytes())
+        .collect()
+}
+
+fn plic_fixture(ndev: Option<u32>) -> alloc::vec::Vec<u8> {
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[2]));
+    blob.begin("soc");
+    blob.property("compatible", b"simple-bus\0");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[2]));
+    blob.property("ranges", &[]);
+    blob.begin("interrupt-controller@c000000");
+    blob.property("compatible", b"riscv,plic0\0");
+    blob.property("interrupt-controller", &[]);
+    blob.property("#interrupt-cells", &cells(&[1]));
+    blob.property("reg", &cells(&[0, 0x0c00_0000, 0, 0x0400_0000]));
+    if let Some(ndev) = ndev {
+        blob.property("riscv,ndev", &cells(&[ndev]));
+    }
+    blob.end();
+    blob.end();
+    blob.end();
+    blob.finish()
+}
+
+fn plic_region(bytes: &[u8]) -> Result<Option<(memaddr::PhysAddr, usize, u32)>, &'static str> {
+    let tree = rs_fdtree::LinuxFdt::new(bytes).unwrap();
+    let backend = rs_fdtree::DtBackend::new(tree);
+    super::plic_region_from_fwnode(backend.root().unwrap())
+        .map(|region| region.map(|(paddr, size, sources)| (paddr, size, sources.last)))
+}
+
+#[def_test]
+fn plic_discovery_uses_translated_firmware_resource() {
+    let (paddr, size, sources) = plic_region(&plic_fixture(Some(53))).unwrap().unwrap();
+    assert_eq!(paddr.as_usize(), 0x0c00_0000);
+    assert_eq!(size, 0x0400_0000);
+    assert_eq!(sources, 53);
+}
+
+#[def_test]
+fn plic_discovery_rejects_malformed_or_missing_description() {
+    assert!(plic_region(&plic_fixture(None)).is_err());
+    assert!(plic_region(&plic_fixture(Some(1024))).is_err());
+
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.end();
+    assert!(plic_region(&blob.finish()).unwrap().is_none());
+}

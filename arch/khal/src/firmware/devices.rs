@@ -186,30 +186,33 @@ pub fn io_apic_paddr() -> Option<usize> {
 /// node's remaining compatibles. The visitor then receives the matched raw
 /// firmware ID plus the node's primary MMIO / IRQ resources, if present.
 ///
-/// Today this walks the device tree. ACPI `_HID/_CID` walks can be added here
-/// without touching callers — the matcher signature stays string-based and
-/// firmware-neutral.
+/// Today this walks the published firmware-node root. ACPI `_HID/_CID` walks
+/// can be added here without touching callers — the matcher signature stays
+/// string-based and firmware-neutral.
 pub fn for_each_compatible(
     mut matcher: impl FnMut(&str) -> Option<&'static str>,
     mut visitor: impl FnMut(FirmwareDevice),
 ) {
-    let Some(fdt) = of::fdt() else {
+    let Some(root) = crate::firmware::fwnode_root() else {
         return;
     };
 
-    for node in fdt.all_nodes() {
-        let Some(firmware_id) = node.compatibles().find_map(&mut matcher) else {
+    for node in root.descendants() {
+        let Some(firmware_id) = node.firmware_ids().find_map(&mut matcher) else {
             continue;
         };
 
         let mmio = node
-            .reg()
-            .and_then(|mut regs| regs.next())
-            .map(|reg| MmioResource {
-                base: reg.starting_address as usize,
-                size: reg.size,
+            .mmio_resource(0)
+            .ok()
+            .flatten()
+            .map(|resource| MmioResource {
+                base: resource.base as usize,
+                size: resource.size as usize,
             });
-        let irq = of::first_interrupt_desc(node);
+        let irq = node.irq_spec(0).ok().flatten().and_then(|spec| {
+            of::decode_irq_cells(spec.controller.firmware_ids(), spec.params.as_slice())
+        });
 
         visitor(FirmwareDevice {
             firmware_id,

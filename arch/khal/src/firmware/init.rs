@@ -14,6 +14,10 @@ pub(super) fn init(boot_info: &BootInfo) {
         // immutable device-tree blob selected for early firmware parsing.
         if let Err(err) = unsafe { of::init_device_tree_ptr(ptr) } {
             bootln!("firmware: failed to initialize DTB: {err:?}");
+        } else if let Some(tree) = of::fdt()
+            && let Err(err) = super::fw_node::init(tree)
+        {
+            bootln!("firmware: failed to publish firmware root node: {err}");
         }
         if let Some(stdout_path) = of::chosen_stdout_path() {
             bootln!("firmware: chosen stdout-path={}", stdout_path);

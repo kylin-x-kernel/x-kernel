@@ -6,17 +6,39 @@
 
 #![no_std]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+#[cfg(feature = "alloc")]
+mod address;
+#[cfg(feature = "alloc")]
+pub use address::{AddressError, AddressErrorReason, MmioResource};
+#[cfg(feature = "alloc")]
+mod index;
+#[cfg(feature = "alloc")]
+pub use index::NodeIndex;
+
+#[cfg(feature = "fwnode")]
+mod fwnode_backend;
+#[cfg(feature = "fwnode")]
+pub use fwnode_backend::DtBackend;
+
+mod property;
+
+pub use property::{Cells, PropertyError};
+
 mod error;
 mod header;
 mod kernel_nodes;
 mod node;
 mod parsing;
+mod reference;
 
 pub use error::FdtError;
 use header::FdtHeader;
 pub use kernel_nodes::{Chosen, Dice, InterruptController};
 pub use node::{FdtNode, MemoryRegion, NodeProperty, RegIter};
 use parsing::{BigEndianU64, CStr, FdtData};
+pub use reference::{InterruptSpec, NodeReference, ReferenceError};
 
 /// Iterator over the DTB memory-reservation block, yielding each
 /// `(address, size)` pair until the `0, 0` terminator.
@@ -130,6 +152,23 @@ impl<'a> LinuxFdt<'a> {
         &self.data[..self.total_size()]
     }
 
+    /// Find a node at a BEGIN_NODE offset in this tree's structure block.
+    ///
+    /// This allocation-free linear lookup rejects non-node offsets. An offset
+    /// is local to this blob, not a canonical firmware identity.
+    pub fn node_at_offset(&self, offset: u32) -> Option<FdtNode<'_, 'a>> {
+        self.all_nodes().find(|node| node.offset() == offset)
+    }
+
+    /// Builds an allocation-backed index over this tree.
+    ///
+    /// Intended for callers past allocator setup. The allocation-free
+    /// accessors remain available and behave identically.
+    #[cfg(feature = "alloc")]
+    pub fn node_index(&self) -> NodeIndex<'a> {
+        NodeIndex::new(*self)
+    }
+
     /// Returns interrupt controller node.
     ///
     /// Searches for the first node with an "interrupt-controller" property.
@@ -168,6 +207,7 @@ impl<'a> LinuxFdt<'a> {
             path,
             self,
             None,
+            Ok(None),
         )
     }
 

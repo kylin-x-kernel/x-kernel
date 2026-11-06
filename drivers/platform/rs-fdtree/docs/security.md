@@ -1,12 +1,57 @@
 # rs_fdtree — Security And Reliability
 
+## Strict property trust boundary
+
+Strict readers reject duplicate or malformed properties before returning values.
+Parent traversal uses the validated immutable tree; offsets are only meaningful
+within that tree. These operations neither allocate nor interpret status or
+address bindings. The separate address module validates translated resources.
+
+## Translated address input boundary
+
+The address module rejects malformed/duplicate properties, invalid reg tuples,
+reg-names, unsupported cell widths, zero lengths and arithmetic overflow.
+Containment checks cover the full interval; missing ranges is not identity.
+After rejecting zero size, bounds use base + size - 1, including 32-bit widths.
+A last byte at u64::MAX is valid. Subtraction-based containment never needs an
+unrepresentable exclusive end. Metadata collection requires an allocator and
+follows its existing OOM policy. It introduces no mappings or hardware access;
+returned names borrow the immutable input tree.
+
+## Phandle references and interrupt specifiers
+
+`LinuxFdt::node_by_phandle`, `FdtNode::phandle`, `interrupt_parent`,
+`reference` and `irq_spec` are strict interpretations of validated
+properties. Duplicate or malformed properties are errors; zero and `u32::MAX`
+name no node. Interrupt specifiers keep controller cells raw and apply no
+GIC/PLIC policy. `reference` checks the requested stride with
+`checked_add`/`checked_mul`, rejects a property length that is not a whole
+number of entries, and bounds the argument slice with `Cells::slice`;
+`irq_spec` rejects zero or unrepresentable `#interrupt-cells` and truncated
+`interrupts-extended` entries. Resolving a dangling phandle is
+`UnresolvedPhandle`, not silence. The plain accessors rescans the validated
+structure block per lookup; they do not trust offsets supplied by callers.
+
+`NodeIndex` is the only indexed implementation and requires the allocator.
+It records `NodeParts` (tree, offset, cached effective `interrupt-parent`)
+for every node in one traversal; it stores no raw pointers. Offset lookup
+uses a binary search over depth-first order, which is strictly increasing
+structure-offset order. Phandle entries are sorted and first-wins deduplicated
+in firmware order, matching the allocation-free search. A malformed or
+duplicate `phandle` property is ignored by the index exactly as the linear
+lookup ignores it. Allocation failure follows the allocator's existing policy;
+the index adds no mappings or hardware access.
+
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs` (`LinuxFdt`,
 `MemReserveIter`), `src/header.rs`, `src/parsing.rs`, `src/node.rs`,
-`src/error.rs`, and `src/kernel_nodes/`. No modules are excluded;
-everything is reachable from `LinuxFdt::new` / `LinuxFdt::from_ptr` and
-the iterators they produce.
+`src/property.rs`, `src/reference.rs`, `src/index.rs`, `src/address.rs`,
+`src/fwnode_backend/`, `src/error.rs`, and `src/kernel_nodes/`. No modules
+are excluded; everything is reachable from `LinuxFdt::new` /
+`LinuxFdt::from_ptr` and the iterators they produce. `DtBackend` is an
+optional `fwnode`-feature adapter over the same validated tree; it performs
+no additional parsing.
 
 
 ### `Chosen::x_kernel_log_level`
@@ -36,7 +81,9 @@ immutable as long as borrowed views exist.
   sized view, then the header-declared total size. The precondition (see
   Unsafe Code) covers pointer validity and lifetime.
 - All property/node bytes handed upward are slices into the validated
-  blob; semantic interpretation happens in `of`, which re-checks lengths.
+  blob. Generic phandle/interrupt-specifier interpretation is bounded here;
+  controller-specific meaning remains with the consumers (`of` today, the
+  controller drivers with `irq_domain` later).
 
 ## Unsafe Code
 
@@ -76,6 +123,8 @@ slice is formed before validation.
 | T-02 | Malformed block ranges, node tokens, or properties | Rejected tree | Corrupted firmware input | Construction returns `ParseError` before exposing traversal; semantic hardware claims remain caller-owned. |
 | T-03 | Declared `totalsize` exceeding the real blob | High — OOB slice formation | Forged header | `new` checks `data.len() >= totalsize` and rejects (`BufferTooSmall`); for `from_ptr` the caller owns the real length. |
 | T-04 | Infinite loop on a malformed node stream | Medium — boot hang | Structure block without an end token | Validation requires balanced delimiters, a terminal `FDT_END`, bounded depth, and progress within the declared structure range. |
+| T-05 | Phandle or interrupt specifier arithmetic overflows | Low — wrong reference or rejected lookup | Hostile `#interrupt-cells`, huge indices, or a truncated `interrupts-extended` list | `checked_mul`/`checked_add`, exact property-length divisibility, and `Cells::slice` bounds; failures are `ReferenceError`, never indexing outside the property. |
+| T-06 | Indexed lookup disagrees with the linear lookup | Medium — device resolves to the wrong node | Duplicate phandles or same-offset entries | Stable sort plus first-wins dedup mirrors firmware-order linear lookup; offsets are collected from the validated traversal, never from firmware input. |
 
 ## Failure Modes
 
@@ -105,3 +154,7 @@ raw-pointer validation, and single-byte mutations followed by traversal.
 - New iterators keep the "check length, then read" discipline and
   terminate on malformed streams.
 - `from_ptr`'s `# Safety` text still matches the two slice formations.
+- New phandle/specifier accessors use checked arithmetic and treat a dangling
+  phandle as an error, not as node zero.
+- New allocation-backed helpers build from the validated traversal and keep
+  their lookup order identical to the allocation-free path.

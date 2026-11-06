@@ -268,87 +268,11 @@ fn test_fdt() -> &'static LinuxFdt<'static> {
     Box::leak(Box::new(fdt))
 }
 
-fn test_find_node_by_phandle(
-    fdt: &'static LinuxFdt<'static>,
-    phandle: u32,
-) -> Option<FdtNode<'static, 'static>> {
-    fdt.all_nodes().find(move |node| {
-        node.property_u32("phandle")
-            .or_else(|| node.property_u32("linux,phandle"))
-            == Some(phandle)
-    })
-}
-
-fn test_interrupt_parent_node(
-    fdt: &'static LinuxFdt<'static>,
-    node: FdtNode<'static, 'static>,
-) -> Option<FdtNode<'static, 'static>> {
-    let phandle = node.property_u32("interrupt-parent").or_else(|| {
-        node.parent_property("interrupt-parent")
-            .and_then(|prop| prop.value.get(..4))
-            .and_then(|bytes| bytes.try_into().ok())
-            .map(u32::from_be_bytes)
-    })?;
-    test_find_node_by_phandle(fdt, phandle)
-}
-
-fn test_controller_kind(node: FdtNode<'static, 'static>) -> InterruptControllerKind {
-    if node.compatibles().any(|compatible| {
-        matches!(
-            compatible,
-            "arm,gic-400"
-                | "arm,cortex-a15-gic"
-                | "arm,cortex-a7-gic"
-                | "arm,gic-v2"
-                | "arm,gic-v3"
-                | "arm,gic-v4"
-        )
-    }) {
-        InterruptControllerKind::Gic
-    } else if node
-        .compatibles()
-        .any(|compatible| matches!(compatible, "sifive,plic-1.0.0" | "riscv,plic0"))
-    {
-        InterruptControllerKind::Plic
-    } else {
-        InterruptControllerKind::Unknown
-    }
-}
-
-fn test_first_interrupt_desc(
-    fdt: &'static LinuxFdt<'static>,
-    node: FdtNode<'static, 'static>,
-) -> Option<InterruptInfo> {
-    if let Some(parent) = test_interrupt_parent_node(fdt, node) {
-        let controller = test_controller_kind(parent);
-        if let Some(cells) = property_u32_cells::<3>(node, "interrupts")
-            && let Some(irq) = parse_interrupt_by_controller(controller, &cells)
-        {
-            return Some(irq);
-        }
-
-        if let Some(cells) = property_u32_cells::<1>(node, "interrupts")
-            && let Some(irq) = parse_interrupt_by_controller(controller, &cells)
-        {
-            return Some(irq);
-        }
-    }
-
-    if let Some(cells) = property_u32_cells::<4>(node, "interrupts-extended") {
-        let controller_node = test_find_node_by_phandle(fdt, cells[0])?;
-        let controller = test_controller_kind(controller_node);
-        let irq = parse_interrupt_by_controller(controller, &cells[1..])?;
-        return Some(irq);
-    }
-
-    if let Some(cells) = property_u32_cells::<2>(node, "interrupts-extended") {
-        let controller_node = test_find_node_by_phandle(fdt, cells[0])?;
-        let controller = test_controller_kind(controller_node);
-        let irq = parse_interrupt_by_controller(controller, &cells[1..])?;
-        return Some(irq);
-    }
-
-    None
+fn decoded_irq(node: FdtNode<'static, 'static>) -> Option<InterruptInfo> {
+    node.irq_spec(0)
+        .ok()
+        .flatten()
+        .and_then(|spec| decode_fdt_irq_spec(spec.controller, spec.params))
 }
 
 fn test_generic_pci_host(fdt: &'static LinuxFdt<'static>) -> Option<FdtNode<'static, 'static>> {
@@ -456,11 +380,11 @@ fn cpu_helpers_skip_disabled_nodes_and_parse_two_cell_reg() {
 }
 
 #[def_test]
-fn first_interrupt_desc_decodes_interrupt_parent_gic_irq() {
+fn irq_spec_decodes_inherited_interrupt_parent_gic_irq() {
     let fdt = test_fdt();
     let uart = fdt.find_node("/uart@1000").unwrap();
     assert_eq!(
-        test_first_interrupt_desc(fdt, uart),
+        decoded_irq(uart),
         Some(InterruptInfo {
             irq: 37,
             trigger: InterruptTrigger::LevelHigh,
@@ -470,11 +394,11 @@ fn first_interrupt_desc_decodes_interrupt_parent_gic_irq() {
 }
 
 #[def_test]
-fn first_interrupt_desc_decodes_interrupts_extended_plic_irq() {
+fn irq_spec_decodes_interrupts_extended_plic_irq() {
     let fdt = test_fdt();
     let virtio = fdt.find_node("/virtio@2000").unwrap();
     assert_eq!(
-        test_first_interrupt_desc(fdt, virtio),
+        decoded_irq(virtio),
         Some(InterruptInfo {
             irq: 9,
             trigger: InterruptTrigger::Unknown(0),

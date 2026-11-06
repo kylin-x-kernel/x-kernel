@@ -13,7 +13,26 @@ keywords = [
     "linux",
 ]
 
+[features]
+default = []
+alloc = []
+fwnode = ["alloc", "dep:fwnode", "dep:lazyinit"]
+
+[[test]]
+name = "tests_address"
+required-features = ["alloc"]
+
+[[test]]
+name = "tests_fwnode"
+required-features = ["fwnode"]
+
+[[test]]
+name = "tests_index"
+required-features = ["alloc"]
+
 [dependencies]
+fwnode = { workspace = true, optional = true }
+lazyinit = { workspace = true, optional = true }
 
 [lints]
 workspace = true

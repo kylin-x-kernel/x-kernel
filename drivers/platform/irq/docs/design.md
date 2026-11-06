@@ -1,5 +1,34 @@
 # irq-driver — Design
 
+## GIC register discovery
+
+`gic::firmware` is a private binding module, not a new crate. It selects the first
+available supported controller in tree order through the backend-neutral
+`fwnode` contract and consumes translated register intervals. GICv2 assigns
+GICD/GICC and optional GICH/GICV; GICv3 retains GICD, every declared
+redistributor region (`#redistributor-regions`, default 1) and
+`redistributor-stride` (default 0). The vendored GIC driver only maps one
+contiguous redistributor frame array with the architectural 0x20000 stride, so
+`gic::init` rejects disjoint or custom-stride layouts until that driver grows
+support; discovery still describes them faithfully. Malformed selected nodes
+fail instead of falling through to a later controller.
+
+The DT backend supplies structural views and status/address interpretation,
+and irq-driver owns register meaning and hardware initialization, matching Linux
+OF resource interpretation and irqchip bindings. `GicConfig::from_fwnode`
+translates metadata; `init_from_fwnode` collects it after allocator
+initialization, then invokes the existing `init(config)` path. `from_madt` for
+ACPI and `from_static` for board tables are future peers that produce the same
+`GicConfig`.
+This extraction does not publish firmware/domain associations or alter KIRQ,
+NMI transactions, runtime dispatch, PLIC discovery or boot ordering.
+
+Before the DT backend migration, the extraction based on main f5f3cf4a1 passed parser host tests (24),
+AArch64 OF/irq-driver guest tests (54/54, coverage exported), and UNITTEST-enabled
+Clippy on AArch64, RISC-V, x86 and LoongArch. Guest boot exercised GICv3; GICv2
+register selection is fixture coverage, not a GICv2 hardware acceptance claim.
+Runs used a private disk with NET=n, VSOCK=n and ACCEL=n.
+
 ## Local NMI Transactions
 
 `IntrManagerIf::percpu_nmi` selects `PerCpuNmiChip` only for a standard GICv3
@@ -29,9 +58,14 @@ configuration so that `kirq` stays architecture-neutral.
 
 ## Responsibilities
 
-- Discover and map the controller: GIC regions from the device tree
-  (`config_from_device_tree`), PLIC from its fixed platform address with
-  DT confirmation, each mapped through `memspace::iomap_device`.
+- Discover and map the controller from the backend-neutral firmware root:
+  GIC regions through `GicConfig::from_fwnode`, and the PLIC region through
+  `FwNode::mmio_resource(0)` on the first PLIC-compatible node. Both use the
+  firmware-translated CPU addresses and map them through
+  `memspace::iomap_device`. The PLIC keeps its fixed platform address as the
+  no-firmware fallback, preserving the legacy layout.
+- PLIC `riscv,ndev` is read through the same node and still bounded to
+  `1..=1023` before the source-state allocation.
 - Provide `kirq::IntrManagerIf` per architecture: `configure` (trigger
   and polarity), `enable`/disable, `dispatch_irq` (claim-and-handle),
   `dispatch_nmi` (GICv3 PMR-protected path), `complete_irq`,
@@ -91,7 +125,7 @@ kirq (policy) ──IntrManagerIf──> irq-driver
 
 Reproducible boot checks and their coverage limits are in [testing.md](testing.md).
 
-- `init` / `init_from_device_tree` run once during platform bring-up,
+- `init` / `init_from_fwnode` run once during platform bring-up,
   before device interrupts are enabled and include primary CPU-interface
   initialization. Each AP calls `init_current_cpu` once before activating local
   sources. The primary interrupt-preparation hook must not repeat it: local initialization

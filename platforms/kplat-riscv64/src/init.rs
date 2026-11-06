@@ -18,7 +18,14 @@ impl PlatformBootIf {
             irq_driver::riscv::S_TIMER,
             ktime_types::Frequency::from_hz(10_000_000),
         ));
-        irq_driver::riscv::init_primary();
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware root publication \
+                      is required before PLIC discovery; this boot hook has no error return or \
+                      recovery"
+        )]
+        let root = khal::firmware::fwnode_root().expect("firmware root node unavailable");
+        irq_driver::riscv::init_primary(root);
         irq_driver::riscv::init_current_cpu_context();
         #[expect(
             clippy::expect_used,

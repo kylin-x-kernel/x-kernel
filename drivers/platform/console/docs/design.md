@@ -71,7 +71,10 @@ consumer calls `take_input_dropped_bytes()` and logs nonzero losses in task
 context, outside the UART lock. Reading the report clears only the count, not
 buffered data. Before attachment the count accumulates for the initial pass.
 
-Early stdout publication retains only the physical IRQ descriptor; it does not
+Early stdout publication resolves the UART's first interrupt specifier with
+the allocation-free `FdtNode::irq_spec(0)` and converts the already-resolved
+controller cells with `of::decode_fdt_irq_spec`. This works before and after
+allocator setup. It retains only the physical IRQ descriptor; it does not
 map or register an IRQ. The runtime boot task calls `kiface_console_api::ConsoleInputSetupIf::prepare_input`
 after GP and worker startup, before device discovery can construct N_TTY.
 This one-shot attempt prepares storage, maps the IRQ, and installs a shared action.

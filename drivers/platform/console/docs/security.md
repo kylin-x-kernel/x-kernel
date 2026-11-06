@@ -13,6 +13,10 @@ reachable from the audited entry points.
 
 Port construction trusts the platform/device layer to provide valid UART addresses,
 mapping lifetimes, and device-tree layouts.
+The early stdout IRQ descriptor comes from `FdtNode::irq_spec(0)` and the
+shared GIC/PLIC cell decoder. Both are allocation-free and report a missing,
+dangling, truncated or unsupported specifier as absent metadata; the console
+then keeps polled input instead of acting on a partial descriptor.
 Emergency transmission reads hardware status and writes transmit registers using
 byte slices supplied by the kernel.
 It does not access user pointers, allocate DMA or ordinary memory, or parse external

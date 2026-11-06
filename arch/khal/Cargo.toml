@@ -53,7 +53,9 @@ kaddr_layout.workspace = true
 page_table = { workspace = true }
 kiface.workspace = true
 acpi = { workspace = true }
+fwnode = { workspace = true }
 of = { workspace = true }
+rs_fdtree = { workspace = true, features = ["fwnode"] }
 unittest.workspace = true
 bitflags = { workspace = true }
 

@@ -152,7 +152,12 @@ fn stdout_desc_from_device_tree() -> Option<StdoutDesc> {
     let node = of::resolve_node(stdout_path)?;
     let reg = node.reg()?.next()?;
     let paddr = PhysAddr::from_usize(reg.starting_address as usize);
-    let irq = of::first_interrupt_desc(node).map(device_tree_irq_desc);
+    let irq = node
+        .irq_spec(0)
+        .ok()
+        .flatten()
+        .and_then(|spec| of::decode_fdt_irq_spec(spec.controller, spec.params))
+        .map(device_tree_irq_desc);
     // Register stride: each UART register is `1 << reg-shift` bytes apart
     // (RK3588's DesignWare UART uses reg-shift = 2 -> 4-byte stride). PL011
     // does not use this property; it is recorded but ignored by that backend.

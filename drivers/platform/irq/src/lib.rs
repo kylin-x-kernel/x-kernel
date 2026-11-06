@@ -8,19 +8,20 @@
 //! and dispatch model.
 //!
 //! The primary entry point is the architecture module selected at
-//! compile time — [`gic`] on AArch64 (`gic::init_from_device_tree`,
+//! compile time — [`gic`] on AArch64 (`gic::init_from_fwnode`,
 //! `gic::init_current_cpu`), `riscv` on RISC-V. The backend is
 //! registered with `kirq` through the generated `IntrManagerIf`
 //! provider; platform init only needs the module's `init*` functions.
 //! A production call site is `platforms/kplat-aarch64/src/init.rs`,
-//! which runs `gic::init_from_device_tree` and `gic::init_current_cpu`
+//! which runs `gic::init_from_fwnode` and `gic::init_current_cpu`
 //! during platform bring-up.
 //!
 //! ```ignore
 //! // Kernel code only: run once during platform bring-up.
 //! use irq_driver::gic;
 //!
-//! gic::init_from_device_tree()?; // discovers/maps the GIC and initializes
+//! let root = khal::firmware::fwnode_root()?;
+//! gic::init_from_fwnode(root)?; // discovers/maps the GIC and initializes
 //!                               // the primary CPU interface
 //! // On each secondary CPU only:
 //! // gic::init_current_cpu()?;

@@ -1,5 +1,16 @@
 # of — Security And Reliability
 
+## Moved DT interpretation boundary
+
+Status, numeric address, phandle, reference and interrupt-specifier
+resolution now live in rs_fdtree; see that crate's security document. OF has
+no forwarding API for these operations and no longer rescans `interrupts`,
+`interrupts-extended` or `interrupt-parent`. `decode_irq_cells` and
+`decode_fdt_irq_spec` consume already-resolved controller cells and only
+apply the transitional GIC/PLIC binding meaning; both reject malformed cell
+counts and map them to `None`. Existing boot-pointer ownership and legacy
+query boundaries below are unchanged.
+
 ## Scope
 
 This analysis covers the entire crate — `src/lib.rs` (global DTB state,

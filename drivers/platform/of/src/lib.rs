@@ -6,13 +6,15 @@
 
 #![no_std]
 
+extern crate alloc;
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use lazyinit::LazyInit;
 use memaddr::PhysAddr;
 pub use rs_fdtree::{
     Chosen, Dice, FdtError, FdtNode, InterruptController, LinuxFdt, MemoryRegion, NodeProperty,
-    RegIter,
+    PropertyError, RegIter,
 };
 
 /// Failure to initialize the global device-tree handle.
@@ -214,27 +216,23 @@ fn parse_plic_interrupt(cells: &[u32]) -> Option<InterruptInfo> {
     }
 }
 
-fn controller_kind(node: FdtNode<'static, 'static>) -> InterruptControllerKind {
-    if node.compatibles().any(|compatible| {
-        matches!(
-            compatible,
-            "arm,gic-400"
-                | "arm,cortex-a15-gic"
-                | "arm,cortex-a7-gic"
-                | "arm,gic-v2"
-                | "arm,gic-v3"
-                | "arm,gic-v4"
-        )
-    }) {
-        InterruptControllerKind::Gic
-    } else if node
-        .compatibles()
-        .any(|compatible| matches!(compatible, "sifive,plic-1.0.0" | "riscv,plic0"))
-    {
-        InterruptControllerKind::Plic
-    } else {
-        InterruptControllerKind::Unknown
+fn controller_kind_from<'a>(
+    compatibles: impl IntoIterator<Item = &'a str>,
+) -> InterruptControllerKind {
+    let mut kind = InterruptControllerKind::Unknown;
+    for compatible in compatibles {
+        match compatible {
+            "arm,gic-400" | "arm,cortex-a15-gic" | "arm,cortex-a7-gic" | "arm,gic-v2"
+            | "arm,gic-v3" | "arm,gic-v4" => return InterruptControllerKind::Gic,
+            "sifive,plic-1.0.0" | "riscv,plic0" => kind = InterruptControllerKind::Plic,
+            _ => {}
+        }
     }
+    kind
+}
+
+fn controller_kind(node: FdtNode<'static, 'static>) -> InterruptControllerKind {
+    controller_kind_from(node.compatibles())
 }
 
 fn parse_interrupt_by_controller(
@@ -262,14 +260,31 @@ fn find_node_by_phandle_in(
     })
 }
 
-fn interrupt_parent_node(node: FdtNode<'static, 'static>) -> Option<FdtNode<'static, 'static>> {
-    let phandle = property_u32(node, "interrupt-parent").or_else(|| {
-        node.parent_property("interrupt-parent")
-            .and_then(|prop| prop.value.get(..4))
-            .and_then(|bytes| bytes.try_into().ok())
-            .map(u32::from_be_bytes)
-    })?;
-    find_node_by_phandle(phandle)
+/// Decodes raw interrupt specifier cells against the controller's compatible
+/// identifiers.
+///
+/// The device-tree side no longer gathers `interrupts` / `interrupt-parent` /
+/// `interrupts-extended` itself; callers obtain the controller and raw cells
+/// from `rs_fdtree` (`FdtNode::irq_spec` or the fwnode contract) and pass them
+/// here. This function is the transitional GIC/PLIC binding policy that will
+/// move to the controller drivers with `irq_domain`.
+pub fn decode_irq_cells<'a>(
+    controller_compatibles: impl IntoIterator<Item = &'a str>,
+    cells: &[u32],
+) -> Option<InterruptInfo> {
+    parse_interrupt_by_controller(controller_kind_from(controller_compatibles), cells)
+}
+
+/// Decodes a specifier produced by `rs_fdtree::FdtNode::irq_spec`.
+pub fn decode_fdt_irq_spec(
+    controller: FdtNode<'_, '_>,
+    params: rs_fdtree::Cells<'_>,
+) -> Option<InterruptInfo> {
+    // GIC specifiers carry three cells and PLIC specifiers one; anything
+    // longer is not a binding this transitional decoder understands.
+    let mut cells = [0u32; 3];
+    let len = params.read_into(&mut cells).ok()?;
+    decode_irq_cells(controller.compatibles(), &cells[..len])
 }
 
 /// Returns the global device-tree view initialized at boot; `None` before
@@ -409,40 +424,6 @@ pub fn syscon_poweroff() -> Option<SysconControl> {
     })
 }
 
-/// Returns the first interrupt specifier for a device node.
-pub fn first_interrupt_desc(node: FdtNode<'static, 'static>) -> Option<InterruptInfo> {
-    if let Some(parent) = interrupt_parent_node(node) {
-        let controller = controller_kind(parent);
-        if let Some(cells) = property_u32_cells::<3>(node, "interrupts")
-            && let Some(irq) = parse_interrupt_by_controller(controller, &cells)
-        {
-            return Some(irq);
-        }
-
-        if let Some(cells) = property_u32_cells::<1>(node, "interrupts")
-            && let Some(irq) = parse_interrupt_by_controller(controller, &cells)
-        {
-            return Some(irq);
-        }
-    }
-
-    if let Some(cells) = property_u32_cells::<4>(node, "interrupts-extended") {
-        let controller_node = find_node_by_phandle(cells[0])?;
-        let controller = controller_kind(controller_node);
-        let irq = parse_interrupt_by_controller(controller, &cells[1..])?;
-        return Some(irq);
-    }
-
-    if let Some(cells) = property_u32_cells::<2>(node, "interrupts-extended") {
-        let controller_node = find_node_by_phandle(cells[0])?;
-        let controller = controller_kind(controller_node);
-        let irq = parse_interrupt_by_controller(controller, &cells[1..])?;
-        return Some(irq);
-    }
-
-    None
-}
-
 /// Cached PMU interrupt IRQ. `0` means "not yet resolved"; a real PMU IRQ is
 /// never 0 on a GIC (SGIs start at 0 but the PMU uses an SPI/PPI >= 16).
 static PMU_IRQ_CACHE: AtomicUsize = AtomicUsize::new(0);
@@ -464,7 +445,13 @@ fn resolve_pmu_irq() -> Option<usize> {
     let fdt = fdt()?;
     fdt.all_nodes()
         .filter(|node| node.compatibles().any(is_arm_cpu_pmu_compatible))
-        .find_map(|node| first_interrupt_desc(node).map(|info| info.irq))
+        .find_map(|node| {
+            node.irq_spec(0)
+                .ok()
+                .flatten()
+                .and_then(|spec| decode_fdt_irq_spec(spec.controller, spec.params))
+                .map(|info| info.irq)
+        })
 }
 
 /// Return the PMU interrupt IRQ number, resolved once from the device tree and

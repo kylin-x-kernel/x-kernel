@@ -6,6 +6,7 @@ extern crate alloc;
 
 use core::{num::NonZeroU32, ptr::NonNull};
 
+use fwnode::{FwNode, FwPropertyValue};
 use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use kirq::TargetCpu;
@@ -314,32 +315,56 @@ fn disable_plic_sources(plic: &mut impl PlicCompletion, context: usize, sources:
     }
 }
 
-fn plic_region_from_device_tree() -> Result<Option<(PhysAddr, usize, PlicSources)>, &'static str> {
-    for compatible in ["sifive,plic-1.0.0", "riscv,plic0"] {
-        let Some(node) = of::find_compatible(compatible) else {
+fn is_plic_compatible(compatible: &str) -> bool {
+    matches!(compatible, "sifive,plic-1.0.0" | "riscv,plic0")
+}
+
+fn plic_sources_from_fwnode(node: FwNode<'_>) -> Result<PlicSources, &'static str> {
+    match node.property("riscv,ndev") {
+        Ok(Some(property)) => match property.value {
+            FwPropertyValue::Bytes(bytes) => PlicSources::from_property(Some(bytes)),
+            _ => Err("PLIC riscv,ndev must contain exactly one u32"),
+        },
+        Ok(None) => PlicSources::from_property(None),
+        Err(_) => Err("PLIC riscv,ndev is malformed"),
+    }
+}
+
+fn plic_region_from_fwnode(
+    root: FwNode<'_>,
+) -> Result<Option<(PhysAddr, usize, PlicSources)>, &'static str> {
+    for node in root.descendants() {
+        if !node.firmware_ids().any(is_plic_compatible) {
             continue;
-        };
-        let sources = PlicSources::from_property(node.property("riscv,ndev").map(|p| p.value))?;
+        }
+        let sources = plic_sources_from_fwnode(node)?;
         let region = node
-            .reg()
-            .and_then(|mut regs| regs.next())
+            .mmio_resource(0)
+            .map_err(|_| "PLIC register region is malformed")?
             .ok_or("PLIC node is missing its register region")?;
-        return Ok(Some((
-            PhysAddr::from_usize(region.starting_address as usize),
-            region.size.max(0x1000),
-            sources,
-        )));
+        let base = usize::try_from(region.base)
+            .map_err(|_| "PLIC register base does not fit the CPU address width")?;
+        let size = usize::try_from(region.size)
+            .map_err(|_| "PLIC register size does not fit the CPU address width")?
+            .max(0x1000);
+        return Ok(Some((PhysAddr::from_usize(base), size, sources)));
     }
     Ok(None)
 }
 
-pub fn init_primary() {
+/// Initializes the primary PLIC from the published firmware description.
+///
+/// `root` is the backend-neutral firmware root. Discovery walks it for the
+/// first PLIC-compatible node and uses the translated register resource, so
+/// this must run after allocator setup, like the other firmware-node
+/// consumers.
+pub fn init_primary(root: FwNode<'_>) {
     #[expect(
         clippy::panic,
         reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: invalid PLIC firmware \
                   metadata; interrupt initialization cannot safely continue"
     )]
-    let (paddr, size, sources) = plic_region_from_device_tree()
+    let (paddr, size, sources) = plic_region_from_fwnode(root)
         .unwrap_or_else(|err| panic!("invalid PLIC configuration: {err}"))
         // Preserve the legacy no-DT layout. This is a library capacity bound,
         // not discovery of the number of physically implemented sources.

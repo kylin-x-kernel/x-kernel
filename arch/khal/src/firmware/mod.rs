@@ -9,6 +9,7 @@ use memaddr::MemoryAddr;
 use crate::mem::{self, MemRange, ReservedKind, ReservedRegion, ReservedSource};
 
 pub mod devices;
+mod fw_node;
 #[cfg(target_os = "none")]
 mod init;
 mod memory_source;
@@ -19,6 +20,7 @@ const MAX_MEMORY_RAM_REGIONS: usize = 128;
 const MAX_MEMORY_RESERVED_REGIONS: usize = 128;
 const FIRMWARE_RESERVED_NAME: &str = "firmware reserved";
 
+pub use fw_node::root as fwnode_root;
 pub use state::{cmdline, dt_log_level, dtb_bytes};
 
 #[cfg(target_os = "none")]

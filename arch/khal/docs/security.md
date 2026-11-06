@@ -74,6 +74,26 @@ generic `kirq` API。
    change verbosity but cannot corrupt kernel state or silence logging
    permanently.
 
+4. **Firmware-node publication boundary** (`khal::firmware::fwnode`)
+
+   `fwnode_root()` exposes the validated device tree through the neutral
+   `fwnode` contract. The root handle is a borrowed `FwNode<'static>` over
+   `rs_fdtree::DtBackend`; it contains no raw pointer and no mutable state.
+   Publication is allocation-free. The first indexed node lookup builds a
+   `NodeIndex`, which allocates `Vec` metadata after the allocator exists;
+   `for_each_compatible` is consequently restricted to post-allocator boot
+   stages, while early console/PMU users stay on the allocation-free
+   `FdtNode` accessors.
+
+   Node iteration is bounded by the already-validated structure block. A
+   malformed availability declaration, dangling phandle, bad `#interrupt-cells`
+   or untranslatable address encoding degrades to `None`/`FwError` for that
+   node rather than panicking or indexing firmware-controlled offsets.
+   `for_each_compatible` decodes the primary MMIO resource through translated
+   `ranges`; a tree without an ancestor `ranges` therefore reports no MMIO
+   instead of adopting an untranslated address. This layer adds no unsafe code,
+   no mapping and no hardware access.
+
 本模块不直接处理用户指针、DMA buffer、设备 MMIO 或文件/网络数据。
 
 `arch/khal/src/irq` 当前没有本地 `unsafe` 代码块。相关 unsafe 边界位于：

@@ -87,6 +87,28 @@ Data flow: `/chosen/x-kernel,log-level` → `of::chosen_log_level` →
 Validating in `khal` would duplicate the vocabulary and split the single source
 of truth, which is why the accessor returns the unvalidated `&'static str`.
 
+## Firmware-node publication (`khal::firmware::fwnode`)
+
+`khal::firmware` also publishes the backend-neutral firmware root after `of`
+has validated and installed the DTB. `fwnode_root()` returns
+`Option<FwNode<'static>>`; today it wraps `rs_fdtree::DtBackend`, and ACPI or
+static backends can publish the same contract later. Publishing the root is
+allocation-free: the backend is a borrowed tree plus an uninitialized lazy
+index, and only the first indexed node access (after allocator setup) builds
+the index.
+
+Consumers above this module use the root instead of reaching into `of` for
+firmware walks. `khal::firmware::devices::for_each_compatible` iterates
+`FwNode::descendants`, matches `firmware_ids()`, and requests the primary MMIO
+resource and IRQ specifier. Platform bring-up passes the same root to GIC
+discovery. The transition is intentionally partial: GIC/PLIC cell *meaning*
+still lives in `of`'s shared decoder, and the PCI `interrupt-map` walk remains
+in `of`, both pending `irq_domain`.
+
+The lazy index means device enumeration must not run before the allocator
+exists. Early console and PMU discovery use allocation-free
+`FdtNode::irq_spec(0)` directly instead of `for_each_compatible`.
+
 ## 调用约束 / 执行上下文
 
 - `irq_handler()` 与 `nmi_handler()` 只能由架构 trap dispatch 调用。

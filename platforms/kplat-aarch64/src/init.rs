@@ -53,10 +53,17 @@ impl PlatformBootIf {
         }
         #[expect(
             clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware root publication \
+                      is required before GIC discovery; this boot hook has no error return or \
+                      recovery"
+        )]
+        let root = khal::firmware::fwnode_root().expect("firmware root node unavailable");
+        #[expect(
+            clippy::expect_used,
             reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: mandatory GIC preparation \
                       failed; this boot hook has no error return and must not activate sources"
         )]
-        irq_driver::gic::init_from_device_tree().expect("primary GIC initialization failed");
+        irq_driver::gic::init_from_fwnode(root).expect("primary GIC initialization failed");
         #[cfg(feature = "nmi")]
         khal::nmi::early_init();
     }

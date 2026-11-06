@@ -1699,6 +1699,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fwnode"
+version = "0.3.0-dev"
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2035,6 +2039,7 @@ version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
  "arm-gic-driver",
+ "fwnode",
  "kalloc-types",
  "karch",
  "kbuild_config",
@@ -2048,9 +2053,9 @@ dependencies = [
  "log",
  "memaddr",
  "memspace",
- "of",
  "riscv",
  "riscv_plic",
+ "rs_fdtree",
  "sbi-rt",
  "unittest",
  "x86-apic",
@@ -2595,6 +2600,7 @@ dependencies = [
  "boot-info",
  "cfg-if",
  "firmware-handoff",
+ "fwnode",
  "heapless",
  "kaddr_layout",
  "kalloc",
@@ -2616,6 +2622,7 @@ dependencies = [
  "multiboot2",
  "of",
  "page_table",
+ "rs_fdtree",
  "unittest",
 ]
 
@@ -4980,6 +4987,10 @@ dependencies = [
 [[package]]
 name = "rs_fdtree"
 version = "0.3.0-dev"
+dependencies = [
+ "fwnode",
+ "lazyinit",
+]
 
 [[package]]
 name = "rsa"

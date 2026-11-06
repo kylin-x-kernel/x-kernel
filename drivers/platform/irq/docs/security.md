@@ -1,5 +1,15 @@
 # irq-driver — Security And Reliability
 
+## GIC firmware resource boundary
+
+Discovery rejects malformed status, untranslated/malformed reg and ranges,
+missing required register roles and address-width overflow before hardware init.
+Disabled supported nodes are skipped; a malformed selected node is not skipped
+in favor of a later controller. Mapping and register-size admission remain in
+the existing GIC initializer. This change adds no MMIO unsafe block, fallback
+registry or readiness state. DT address metadata is not proof of controller
+presence; hardware setup can still fail at the existing fatal-boot boundary.
+
 ## Local NMI Boundary
 
 `src/gicv3_nmi.rs` accepts only standard PPIs in the GIC domain. Its sole unsafe
@@ -61,8 +71,11 @@ network/file data path in this crate.
   must match a known GIC list, and each detected version must supply
   its required regions (v2: GICD+GICC; v3: GICD+GICR). Failure:
   `None` — platform init applies its own fallback or abort policy.
-- **PLIC region**: fixed platform address `0x0c00_0000` with a
-  DT-confirmation pass over `sifive,plic-1.0.0` / `riscv,plic0`.
+- **PLIC region**: the first `sifive,plic-1.0.0` / `riscv,plic0` node in
+  the published firmware root supplies its translated `reg` resource and
+  `riscv,ndev`; malformed values abort initialization instead of being
+  guessed. Without firmware, the legacy fixed address `0x0c00_0000` and
+  the library source bound are retained.
 - **Controller MMIO windows**: mapped once through
   `memspace::iomap_device`; all later access stays inside the mapped
   apertures.
@@ -183,7 +196,7 @@ anywhere in this crate.
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | No usable interrupt controller in the device tree | `init_from_device_tree` returns `Err` | Mandatory platform bring-up stops | 3 | Discover configuration before hardware initialization; propagate failure to the platform. |
+| F-01 | No usable interrupt controller in the firmware description | `init_from_fwnode` returns `Err` | Mandatory platform bring-up stops | 3 | Discover configuration before hardware initialization; propagate failure to the platform. |
 | F-02 | GIC region MMIO mapping fails | Panic with the region name | Boot fails | 2 | Bring-up ordering bug surfaced loudly. |
 | F-03 | PLIC accessed before `init` | Named-`expect` panic | Offending caller aborts | 2 | Initialization-order bug surfaced loudly. |
 | F-04 | GIC config re-supplied with different values | `remember_config` assert panic | Platform init aborts | 2 | Inconsistent platform description surfaced loudly. |

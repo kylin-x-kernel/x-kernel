@@ -1,13 +1,65 @@
 # rs_fdtree — Design
 
+## Strict property and structural access
+
+Strict scalar/string/array reads validate encoding and distinguish duplicate,
+malformed and missing properties, without allocation or binding policy.
+Node offsets are source-local structure-block offsets, not firmware identities.
+Parent and offset lookup scan the validated tree without allocation. Status
+interpretation and reg/ranges resource translation belong to this DT backend.
+
+## DT address interpretation
+
+FdtNode::is_available accepts absent/ok/okay status, rejects malformed properties,
+and does not decide ancestor availability or controller readiness.
+FdtNode::mmio_resources collects full CPU-physical reg intervals and reg-names
+through numeric ranges. Missing ranges rejects translation; empty ranges is
+identity. PCI/ISA encodings remain unsupported. The private address module
+owns interval validation, including inclusive maximum-address bounds; it does
+not map MMIO. GIC register roles remain in the controller driver.
+Host tests run both with and without alloc; address tests require alloc.
+
+## Phandle references and interrupt specifiers
+
+These are generic DT interpretations, owned here rather than by a firmware
+backend adapter. `LinuxFdt::node_by_phandle` resolves a phandle (also the
+legacy `linux,phandle`) in firmware order; zero and `u32::MAX` name no node.
+`FdtNode::phandle` reads a node's own identifier strictly.
+`FdtNode::interrupt_parent` returns the effective declaration cached on the
+node during traversal: `all_nodes` keeps an inheritance stack and `find_node`
+carries the value down its recursion, so neither a later query nor a subtree
+node re-walks ancestors. A malformed or duplicated declaration is cached as
+an error and inherited by descendants until a node declares its own valid
+parent. `FdtNode::reference` resolves one phandle plus caller-declared
+argument cells (for example `#clock-cells`) and returns the target node and a
+borrowed `Cells` view. `FdtNode::irq_spec` prefers
+`interrupts-extended`, otherwise uses `interrupts` with the inherited parent
+and the controller's `#interrupt-cells`; it returns the controller node and
+raw cells without GIC/PLIC meaning. All of this is allocation-free and strict
+about duplicate/malformed properties. Phandle-to-node resolution is a linear
+structure scan, matching libfdt; the per-node inheritance cache removes
+repeated ancestor walks, not that final lookup.
+
+Once the heap exists, `NodeIndex` (`LinuxFdt::node_index`) records every node
+in one traversal and answers both offset and phandle lookups with a binary
+search. Nodes are stored in depth-first order, which is strictly increasing
+structure-offset order; phandles are sorted separately and keep the first
+declaration in firmware order, matching the linear lookup. The index stores
+borrowed node pieces (`NodeParts`), so it owns only the `Vec` metadata and
+still keeps the traversal-time `interrupt-parent` cache. `FdtNode`'s indexed
+accessors (`interrupt_parent_with`, `reference_with`, `irq_spec_with`) use the
+index for phandle resolution. The device-tree fwnode backend builds the index
+lazily on first node access, because the backend and its root handle are
+published before allocator setup; its `root()` path stays allocation-free.
+
 ## Purpose
 
 `rs_fdtree` is a minimal, dependency-free, `no_std` parser for the Linux
 flattened devicetree (FDT/DTB) format. It turns a DTB blob in memory into
 borrowed, `Copy`-able views: the tree of nodes, their properties, memory
 regions, and a few well-known kernel nodes (`/chosen`, Open DICE, the
-interrupt controller). It is the structural layer beneath the `of` crate,
-which adds kernel-specific semantics.
+interrupt controller). It is the DT backend. The transitional `of` crate owns boot integration and
+legacy queries, not new DT interpretation.
 
 ## Responsibilities
 
@@ -19,8 +71,14 @@ which adds kernel-specific semantics.
   cell suffixes), `find_compatible`.
 - Read properties: raw bytes (`property`), C-string and string-list views
   (`property_str`, `compatibles`), big-endian `u32` (`property_u32`),
-  parent-node lookups (`parent_property`, `parent_property_u32`), and
-  `cell_sizes` (`#address-cells` / `#size-cells`).
+  borrowed cell sequences (`Cells`), parent-node lookups (`parent_property`,
+  `parent_property_u32`), and `cell_sizes` (`#address-cells` /
+  `#size-cells`).
+- Resolve phandle-based firmware references: `node_by_phandle`, `phandle`,
+  inherited `interrupt_parent`, `reference` with binding-supplied argument
+  cells, and `irq_spec` returning the controller plus raw interrupt cells.
+- Build an allocation-backed `NodeIndex` for repeated offset/phandle lookups
+  after allocator setup; the allocation-free accessors remain equivalent.
 - Decode `reg` entries into `MemoryRegion`s through `RegIter`, honoring the
   node's cell sizes.
 - Enumerate memory layout sources: `memory_regions` (`/memory`),
@@ -39,14 +97,17 @@ which adds kernel-specific semantics.
 
 ## Non-Responsibilities
 
-- No kernel semantics: interrupt-cell decoding, PCI ranges, CPU status
-  filtering, and phandle-to-node policy live in `of`, not here.
+- No controller-specific bindings, IRQ mapping or device registration.
+  Legacy OF interpreters not migrated here are follow-up debt, not the intended
+  final ownership of DT semantics.
 - No global state: the crate has no statics; a tree is whatever
   `LinuxFdt` borrows, for as long as the caller keeps the blob alive.
 - No mutation, patching, or DTB generation: read-only views over
   firmware-provided bytes.
-- No allocation: everything borrows from the input buffer; no `alloc`
-  dependency at all.
+- Borrowed tree/property views do not allocate by default. The optional alloc
+  feature enables resource metadata collection and node indexing, not hardware
+  resource acquisition. The core parser has no dependencies; the optional
+  fwnode adapter adds `fwnode` and `lazyinit` for its lazy index.
 - No alignment guarantees: unaligned big-endian field reads are supported
   on purpose (`FdtData`), because boot loaders do not always align the blob.
 
@@ -59,6 +120,12 @@ drivers/platform/rs-fdtree/
 │   ├── header.rs         # FdtHeader layout, magic and block ranges
 │   ├── parsing.rs        # FdtData cursor, big-endian ints, CStr
 │   ├── node.rs           # FdtNode, NodeProperty, RegIter, region iterators
+│   ├── property.rs       # Strict property encoding reads, borrowed Cells
+│   ├── reference.rs      # Phandle lookup, references, interrupt specifiers
+│   ├── index.rs          # Optional alloc-backed node/phandle index
+│   ├── fwnode_backend/   # fwnode contract adapters
+│   │   ├── mod.rs        # Backend module boundary and re-exports
+│   │   └── dtb.rs        # DtBackend: device-tree translation
 │   ├── error.rs          # FdtError, Result alias
 │   └── kernel_nodes/     # Chosen, Dice, InterruptController wrappers
 └── Cargo.toml
@@ -110,9 +177,9 @@ checks owned by callers.
 
 ## Execution Context
 
-- Callable from the earliest boot stage: no allocator, no globals, no
-  hardware access, no environment assumptions beyond the blob being
-  readable at the given address.
+- Borrowed parsing, structural queries and status work before allocator setup.
+  Resource collection (mmio_resources) requires the optional alloc feature and
+  an initialized allocator; it performs no hardware access.
 - RISC-V calls the constructor at physical addresses before enabling paging.
   Token validation consumes NOPs separately and checks the final `FDT_END`
   after the root closes, leaving only the three node/property tokens in the
@@ -141,6 +208,13 @@ On a successfully constructed tree, accessors return `None` for absent nodes or
 properties and for property values that cannot be decoded in the requested
 semantic format. Iterators traverse already validated structural data.
 
+Phandle-based accessors distinguish an out-of-range index (`Ok(None)`, which
+allows enumeration) from an unresolvable reference
+(`ReferenceError::UnresolvedPhandle`) and from a required property that is
+missing, duplicated or malformed (`ReferenceError::Property`). A plain
+`interrupts` list without any inherited `interrupt-parent` is
+`ReferenceError::MissingInterruptParent`, not silence.
+
 ## Firmware Trust Boundary
 
 Both constructors validate container ranges and the complete structure before
@@ -161,8 +235,8 @@ checked.
 
 ## Design Decisions
 
-- Zero dependencies and no `alloc`: this parser runs before the kernel
-  heap exists and is reused by any subsystem that needs raw DTB access.
+- Zero dependencies and no allocation in the core: raw parsing remains usable
+  before the kernel heap exists. Allocation-backed helpers are feature-gated.
 - Borrowed, `Copy`-heavy views instead of an owned tree: boot-time code
   passes nodes and properties around freely without cloning, and the
   two-lifetime `FdtNode<'b, 'a>` lets iterators borrow the tree while

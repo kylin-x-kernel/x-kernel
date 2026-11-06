@@ -1,0 +1,15 @@
+[package]
+name = "fwnode"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "Firmware-node contract shared by device-description backends"
+
+[dependencies]
+
+[lints]
+workspace = true

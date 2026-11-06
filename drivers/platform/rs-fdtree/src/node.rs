@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use crate::{
-    LinuxFdt,
+    LinuxFdt, PropertyError,
     parsing::{BigEndianU32, CStr, FdtData},
 };
 
@@ -37,29 +37,131 @@ pub struct FdtNode<'b, 'a> {
     /// Node name (may include unit address, e.g., "uart@10000000")
     pub name: &'a str,
     pub(crate) header: &'b LinuxFdt<'a>,
+    offset: u32,
     props: &'a [u8],
     parent_props: Option<&'a [u8]>,
+    /// Effective `interrupt-parent` for this node, inherited during the
+    /// traversal that produced it.
+    ///
+    /// `Ok(Some(phandle))` is the nearest declaration, `Ok(None)` means no
+    /// declaration in the ancestor chain, and `Err` records a malformed or
+    /// duplicated declaration that must not be mistaken for absence.
+    interrupt_parent: Result<Option<u32>, PropertyError>,
+}
+
+/// The borrowed pieces of a node, kept by allocation-backed indexes so a
+/// node can be rebuilt without scanning the structure block again.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NodeParts<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) offset: u32,
+    pub(crate) props: &'a [u8],
+    pub(crate) parent_props: Option<&'a [u8]>,
+    pub(crate) interrupt_parent: Result<Option<u32>, PropertyError>,
 }
 
 impl<'b, 'a: 'b> FdtNode<'b, 'a> {
+    /// Returns the effective `interrupt-parent` phandle computed while
+    /// traversing the tree, including declarations inherited from ancestors.
+    pub(crate) fn effective_interrupt_parent(self) -> Result<Option<u32>, PropertyError> {
+        self.interrupt_parent
+    }
+
+    /// Returns the borrowed pieces this node was built from.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn parts(self) -> NodeParts<'a> {
+        NodeParts {
+            name: self.name,
+            offset: self.offset,
+            props: self.props,
+            parent_props: self.parent_props,
+            interrupt_parent: self.interrupt_parent,
+        }
+    }
+
+    /// Rebuilds a node from pieces captured during an earlier traversal.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn from_parts(header: &'b LinuxFdt<'a>, parts: NodeParts<'a>) -> Self {
+        Self {
+            name: parts.name,
+            header,
+            offset: parts.offset,
+            props: parts.props,
+            parent_props: parts.parent_props,
+            interrupt_parent: parts.interrupt_parent,
+        }
+    }
+
+    /// Byte offset of this node's BEGIN_NODE token within the structure block.
+    ///
+    /// This is local to the tree, not a phandle or a globally unique identity.
+    /// Use LinuxFdt::node_at_offset to validate a stored offset on lookup.
+    pub fn offset(self) -> u32 {
+        self.offset
+    }
+
+    /// Returns the borrowed parser view, not a canonical firmware identity.
+    pub fn as_tree(self) -> &'b LinuxFdt<'a> {
+        self.header
+    }
+
+    /// Return the structural parent, or `None` for the root.
+    ///
+    /// Uses property-slice identity, not potentially duplicated node names.
+    /// This allocation-free lookup scans the tree: O(number of nodes), intended
+    /// for firmware discovery rather than runtime device operations.
+    pub fn parent(self) -> Option<Self> {
+        let props = self.parent_props?;
+        self.header
+            .all_nodes()
+            .find(|node| node.props.as_ptr() == props.as_ptr() && node.props.len() == props.len())
+    }
+
+    /// Returns the first direct child, or `None` for a leaf.
+    ///
+    /// Uses property-slice identity, not names. This allocation-free lookup
+    /// scans the tree: O(number of nodes), intended for firmware discovery.
+    pub fn first_child(self) -> Option<Self> {
+        let props = self.props;
+        self.header.all_nodes().find(|node| {
+            node.parent_props
+                .is_some_and(|parent| parent.as_ptr() == props.as_ptr())
+        })
+    }
+
+    /// Returns the next direct sibling, or `None` for the last child.
+    ///
+    /// This allocation-free lookup scans the tree: O(number of nodes),
+    /// intended for firmware discovery.
+    pub fn next_sibling(self) -> Option<Self> {
+        let parent_props = self.parent_props.map(|props| props.as_ptr());
+        let mut after_self = false;
+        for node in self.header.all_nodes() {
+            if node.offset == self.offset {
+                after_self = true;
+                continue;
+            }
+            if after_self && node.parent_props.map(|props| props.as_ptr()) == parent_props {
+                return Some(node);
+            }
+        }
+        None
+    }
+
+    /// Returns an iterator over the direct children.
+    pub fn children(self) -> impl Iterator<Item = Self> + 'b {
+        let mut next = self.first_child();
+        core::iter::from_fn(move || {
+            let node = next?;
+            next = node.next_sibling();
+            Some(node)
+        })
+    }
+
     /// Returns an iterator over the current node properties.
     pub fn properties(self) -> impl Iterator<Item = NodeProperty<'a>> + 'b {
-        let mut stream = FdtData::new(self.props);
-        let mut done = false;
-
-        core::iter::from_fn(move || {
-            if stream.is_empty() || done {
-                return None;
-            }
-
-            stream.skip_nops();
-            if stream.peek_u32()?.get() != FDT_PROP {
-                done = true;
-                return None;
-            }
-
-            Some(NodeProperty::parse(&mut stream, self.header))
-        })
+        properties(self.header, self.props)
     }
 
     /// Returns the named property if present.
@@ -134,12 +236,66 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
     }
 }
 
+fn interrupt_parent_cell(value: &[u8]) -> Result<u32, PropertyError> {
+    let value: [u8; 4] = value
+        .try_into()
+        .map_err(|_| PropertyError::InvalidEncoding)?;
+    Ok(u32::from_be_bytes(value))
+}
+
+fn merge_interrupt_parent(
+    declared: Option<Result<u32, PropertyError>>,
+    inherited: Result<Option<u32>, PropertyError>,
+) -> Result<Option<u32>, PropertyError> {
+    match declared {
+        Some(Ok(phandle)) => Ok(Some(phandle)),
+        Some(Err(error)) => Err(error),
+        None => inherited,
+    }
+}
+
+/// Returns the effective `interrupt-parent` declared in one node's property
+/// stream, falling back to the value inherited from its ancestors.
+///
+/// Scans only this node's properties; traversal callers normally capture the
+/// declaration while already walking the same property stream.
+fn scan_interrupt_parent<'a>(
+    props: &'a [u8],
+    header: &LinuxFdt<'a>,
+    inherited: Result<Option<u32>, PropertyError>,
+) -> Result<Option<u32>, PropertyError> {
+    let mut stream = FdtData::new(props);
+    let mut declared = None;
+    loop {
+        stream.skip_nops();
+        let Some(tag) = stream.peek_u32() else {
+            break;
+        };
+        if tag.get() != FDT_PROP {
+            break;
+        }
+        let property = NodeProperty::parse(&mut stream, header);
+        if property.name == "interrupt-parent" {
+            let value = interrupt_parent_cell(property.value);
+            declared = Some(if declared.is_some() {
+                Err(PropertyError::Duplicate)
+            } else {
+                value
+            });
+        }
+        stream.skip_nops();
+    }
+    merge_interrupt_parent(declared, inherited)
+}
+
 pub(crate) fn all_nodes<'b, 'a: 'b>(
     header: &'b LinuxFdt<'a>,
 ) -> impl Iterator<Item = FdtNode<'b, 'a>> {
     let mut stream = FdtData::new(header.structs_block());
     let mut done = false;
     let mut parents: [&[u8]; MAX_NODE_DEPTH + 1] = [&[]; MAX_NODE_DEPTH + 1];
+    let mut interrupt_parents: [Result<Option<u32>, PropertyError>; MAX_NODE_DEPTH + 1] =
+        [Ok(None); MAX_NODE_DEPTH + 1];
     let mut parent_index = 0usize;
 
     core::iter::from_fn(move || {
@@ -160,6 +316,7 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(
         }
 
         stream.skip_nops();
+        let offset = (header.structs_block().len() - stream.remaining().len()) as u32;
         if stream.u32()?.get() != FDT_BEGIN_NODE {
             return None;
         }
@@ -171,22 +328,36 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(
 
         parent_index += 1;
         parents[parent_index] = curr_node;
+        let inherited = interrupt_parents[parent_index - 1];
 
+        let mut declared = None;
         stream.skip_nops();
         while stream.peek_u32()?.get() == FDT_PROP {
-            let _ = NodeProperty::parse(&mut stream, header);
+            let property = NodeProperty::parse(&mut stream, header);
+            if property.name == "interrupt-parent" {
+                let value = interrupt_parent_cell(property.value);
+                declared = Some(if declared.is_some() {
+                    Err(PropertyError::Duplicate)
+                } else {
+                    value
+                });
+            }
             stream.skip_nops();
         }
+        let interrupt_parent = merge_interrupt_parent(declared, inherited);
+        interrupt_parents[parent_index] = interrupt_parent;
 
         Some(FdtNode {
             name: if unit_name.is_empty() { "/" } else { unit_name },
             header,
+            offset,
             props: curr_node,
             parent_props: if parent_index == 1 {
                 None
             } else {
                 Some(parents[parent_index - 1])
             },
+            interrupt_parent,
         })
     })
 }
@@ -319,40 +490,58 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
     /// Returns this node's `#address-cells` / `#size-cells`, falling back
     /// to the spec defaults (2 and 1).
     pub fn cell_sizes(self) -> CellSizes {
-        let mut cell_sizes = CellSizes::default();
-
-        for property in self.properties() {
-            match property.name {
-                "#address-cells" => {
-                    if let Some(val) = BigEndianU32::from_bytes(property.value) {
-                        cell_sizes.address_cells = val.get() as usize;
-                    }
-                }
-                "#size-cells" => {
-                    if let Some(val) = BigEndianU32::from_bytes(property.value) {
-                        cell_sizes.size_cells = val.get() as usize;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        cell_sizes
+        cell_sizes(self.properties())
     }
 
     fn parent_cell_sizes(self) -> CellSizes {
-        if let Some(parent) = self.parent_props {
-            return FdtNode {
-                name: "",
-                header: self.header,
-                props: parent,
-                parent_props: None,
+        self.parent_props.map_or_else(CellSizes::default, |parent| {
+            cell_sizes(properties(self.header, parent))
+        })
+    }
+}
+
+fn cell_sizes<'a>(properties: impl Iterator<Item = NodeProperty<'a>>) -> CellSizes {
+    let mut cell_sizes = CellSizes::default();
+
+    for property in properties {
+        match property.name {
+            "#address-cells" => {
+                if let Some(val) = BigEndianU32::from_bytes(property.value) {
+                    cell_sizes.address_cells = val.get() as usize;
+                }
             }
-            .cell_sizes();
+            "#size-cells" => {
+                if let Some(val) = BigEndianU32::from_bytes(property.value) {
+                    cell_sizes.size_cells = val.get() as usize;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    cell_sizes
+}
+
+fn properties<'b, 'a: 'b>(
+    header: &'b LinuxFdt<'a>,
+    props: &'a [u8],
+) -> impl Iterator<Item = NodeProperty<'a>> + 'b {
+    let mut stream = FdtData::new(props);
+    let mut done = false;
+
+    core::iter::from_fn(move || {
+        if stream.is_empty() || done {
+            return None;
         }
 
-        CellSizes::default()
-    }
+        stream.skip_nops();
+        if stream.peek_u32()?.get() != FDT_PROP {
+            done = true;
+            return None;
+        }
+
+        Some(NodeProperty::parse(&mut stream, header))
+    })
 }
 
 pub(crate) fn find_node<'b, 'a: 'b>(
@@ -360,6 +549,7 @@ pub(crate) fn find_node<'b, 'a: 'b>(
     name: &str,
     header: &'b LinuxFdt<'a>,
     parent_props: Option<&'a [u8]>,
+    inherited_interrupt_parent: Result<Option<u32>, PropertyError>,
 ) -> Option<FdtNode<'b, 'a>> {
     let mut parts = name.splitn(2, '/');
     let looking_for = parts.next()?;
@@ -390,27 +580,49 @@ pub(crate) fn find_node<'b, 'a: 'b>(
             return Some(FdtNode {
                 name: unit_name,
                 header,
+                offset: (header.structs_block().len() - curr_data.len()) as u32,
                 props: stream.remaining(),
                 parent_props,
+                interrupt_parent: scan_interrupt_parent(
+                    stream.remaining(),
+                    header,
+                    inherited_interrupt_parent,
+                ),
             });
         }
         Some(part) => part,
     };
 
-    stream.skip_nops();
     let parent_props = Some(stream.remaining());
+    let mut declared = None;
+    stream.skip_nops();
 
     while stream.peek_u32()?.get() == FDT_PROP {
-        let _ = NodeProperty::parse(stream, header);
+        let property = NodeProperty::parse(stream, header);
+        if property.name == "interrupt-parent" {
+            let value = interrupt_parent_cell(property.value);
+            declared = Some(if declared.is_some() {
+                Err(PropertyError::Duplicate)
+            } else {
+                value
+            });
+        }
         stream.skip_nops();
     }
+    let inherited_interrupt_parent = merge_interrupt_parent(declared, inherited_interrupt_parent);
 
     loop {
         stream.skip_nops();
         if stream.peek_u32()?.get() != FDT_BEGIN_NODE {
             break;
         }
-        if let Some(node) = find_node(stream, next_part, header, parent_props) {
+        if let Some(node) = find_node(
+            stream,
+            next_part,
+            header,
+            parent_props,
+            inherited_interrupt_parent,
+        ) {
             return Some(node);
         }
     }
@@ -437,6 +649,7 @@ pub(crate) fn reserved_memory_nodes<'b, 'a: 'b>(
         "/reserved-memory",
         header,
         None,
+        Ok(None),
     )
     .map(|node| node.props);
 

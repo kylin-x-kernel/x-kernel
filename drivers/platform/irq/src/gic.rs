@@ -6,6 +6,9 @@
 
 use core::{fmt, sync::atomic::Ordering};
 
+mod firmware;
+pub use firmware::GicConfigError;
+
 #[path = "gicv2.rs"]
 mod gicv2;
 #[path = "gicv3.rs"]
@@ -21,6 +24,8 @@ use memspace::iomap_device;
 const GICD_NAME: &str = "gicd";
 const GICC_NAME: &str = "gicc";
 const GICR_NAME: &str = "gicr";
+/// MMIO frame span of one GICv3 redistributor.
+const GICR_FRAME_SIZE: usize = 0x2_0000;
 static GIC_INFO: LazyInit<GicConfig> = LazyInit::new();
 static ACTIVE_GIC: LazyInit<GicVersion> = LazyInit::new();
 static STANDARD_INTID_LIMIT: LazyInit<usize> = LazyInit::new();
@@ -82,6 +87,7 @@ kcpu_slot::cpu_slot! {
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/gic.rs");
+unittest::path_mod_test!(firmware_tests, "../ut-tests/gic_firmware.rs");
 
 pub const GIC_ROOT_DOMAIN: kirq::IrqDomainId = kirq::GIC_ROOT_DOMAIN;
 
@@ -118,12 +124,42 @@ pub struct GicMmioRegion {
     pub size: usize,
 }
 
+/// Maximum number of disjoint GICv3 redistributor regions carried by
+/// [`GicConfig`].
+pub const MAX_GICR_REGIONS: usize = 8;
+
+/// Firmware-described GICv3 redistributor layout.
+///
+/// Device tree may describe multiple GICR regions and an explicit
+/// redistributor stride. The current arm-gic-driver backend walks one
+/// contiguous frame array, so [`init`] accepts this description only when the
+/// regions are contiguous and the stride is the architectural default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GicRedistributorConfig {
+    /// Regions in firmware order; only the first `count` entries are used.
+    pub regions: [Option<GicMmioRegion>; MAX_GICR_REGIONS],
+    /// Number of valid entries in `regions`.
+    pub count: usize,
+    /// Firmware-declared redistributor stride, or zero for the default.
+    pub stride: usize,
+}
+
+impl GicRedistributorConfig {
+    /// Iterates the valid redistributor regions in firmware order.
+    pub fn regions(&self) -> impl Iterator<Item = GicMmioRegion> + '_ {
+        self.regions
+            .iter()
+            .take(self.count)
+            .filter_map(|region| *region)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GicConfig {
     pub version: GicVersion,
     pub gicd: GicMmioRegion,
     pub gicc: Option<GicMmioRegion>,
-    pub gicr: Option<GicMmioRegion>,
+    pub gicr: Option<GicRedistributorConfig>,
     pub gich: Option<GicMmioRegion>,
     pub gicv: Option<GicMmioRegion>,
 }
@@ -146,15 +182,26 @@ impl GicConfig {
         )
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: init validates the GICv3 redistributor \
+                  layout before mapping, so the configuration and its first region are present"
+    )]
     fn map_gicr(self) -> VirtAddr {
+        let gicr = self.gicr.expect("missing GICR configuration");
+        let first = gicr.regions().next().expect("missing GICR region");
+        // The backend maps one contiguous frame array, so adjacent declared
+        // regions are mapped as their combined span.
+        let end = gicr
+            .regions()
+            .map(|region| region.paddr.as_usize() + region.size)
+            .max()
+            .expect("missing GICR region");
         map_mmio_region(
-            #[expect(
-                clippy::expect_used,
-                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: GICv3 has no \
-                          redistributor region; interrupt-controller initialization has no error \
-                          return or recovery"
-            )]
-            self.gicr.expect("missing GICR region"),
+            GicMmioRegion {
+                paddr: first.paddr,
+                size: end - first.paddr.as_usize(),
+            },
             GICR_NAME,
         )
     }
@@ -169,84 +216,6 @@ impl GicConfig {
 fn map_mmio_region(region: GicMmioRegion, name: &'static str) -> VirtAddr {
     iomap_device(region.paddr, region.size, name)
         .unwrap_or_else(|err| panic!("failed to map {name}: {err:?}"))
-}
-
-fn is_gicv2_compatible(compatible: &str) -> bool {
-    matches!(
-        compatible,
-        "arm,gic-400"
-            | "arm,cortex-a15-gic"
-            | "arm,cortex-a9-gic"
-            | "arm,cortex-a7-gic"
-            | "arm,gic-v2"
-    )
-}
-
-fn is_gicv3_compatible(compatible: &str) -> bool {
-    matches!(compatible, "arm,gic-v3" | "arm,gic-v4")
-}
-
-fn config_from_device_tree() -> Option<GicConfig> {
-    let node = of::fdt()?.all_nodes().find(|node| {
-        node.property("interrupt-controller").is_some()
-            && node.compatibles().any(|compatible| {
-                is_gicv2_compatible(compatible) || is_gicv3_compatible(compatible)
-            })
-    })?;
-
-    let version = if node.compatibles().any(is_gicv3_compatible) {
-        GicVersion::V3
-    } else if node.compatibles().any(is_gicv2_compatible) {
-        GicVersion::V2
-    } else {
-        return None;
-    };
-
-    let mut regs = node.reg()?;
-    let gicd = regs.next()?;
-    let gicd = GicMmioRegion {
-        paddr: PhysAddr::from_usize(gicd.starting_address as usize),
-        size: gicd.size,
-    };
-
-    match version {
-        GicVersion::V2 => {
-            let gicc = regs.next()?;
-            let gich = regs.next().map(|reg| GicMmioRegion {
-                paddr: PhysAddr::from_usize(reg.starting_address as usize),
-                size: reg.size,
-            });
-            let gicv = regs.next().map(|reg| GicMmioRegion {
-                paddr: PhysAddr::from_usize(reg.starting_address as usize),
-                size: reg.size,
-            });
-            Some(GicConfig {
-                version,
-                gicd,
-                gicc: Some(GicMmioRegion {
-                    paddr: PhysAddr::from_usize(gicc.starting_address as usize),
-                    size: gicc.size,
-                }),
-                gicr: None,
-                gich,
-                gicv,
-            })
-        }
-        GicVersion::V3 => {
-            let gicr = regs.next()?;
-            Some(GicConfig {
-                version,
-                gicd,
-                gicc: None,
-                gich: None,
-                gicv: None,
-                gicr: Some(GicMmioRegion {
-                    paddr: PhysAddr::from_usize(gicr.starting_address as usize),
-                    size: gicr.size,
-                }),
-            })
-        }
-    }
 }
 
 fn guest_interface(config: GicConfig) -> Option<kirq::GuestIrqInterface> {
@@ -304,6 +273,56 @@ pub fn active_version() -> GicVersion {
         .expect("GIC config not initialized")
 }
 
+/// Validates the firmware-described layout against the current backend.
+fn validate_config(config: GicConfig) -> Result<(), &'static str> {
+    match config.version {
+        GicVersion::V2 => {
+            if config.gicr.is_some() {
+                return Err("GICv2 configuration carries a redistributor");
+            }
+            Ok(())
+        }
+        GicVersion::V3 => {
+            let gicr = config
+                .gicr
+                .ok_or("GICv3 configuration lacks a redistributor")?;
+            if gicr.count == 0 || gicr.count > MAX_GICR_REGIONS {
+                return Err("invalid GICv3 redistributor region count");
+            }
+            if gicr
+                .regions
+                .iter()
+                .filter(|region| region.is_some())
+                .count()
+                != gicr.count
+            {
+                return Err("GICv3 redistributor region count mismatch");
+            }
+            if gicr.stride != 0 && gicr.stride != GICR_FRAME_SIZE {
+                return Err("unsupported GICv3 redistributor stride");
+            }
+            let mut previous_end = None;
+            for region in gicr.regions() {
+                if region.size == 0 || !region.size.is_multiple_of(GICR_FRAME_SIZE) {
+                    return Err("GICv3 redistributor region is not frame-aligned");
+                }
+                let start = region.paddr.as_usize();
+                if let Some(end) = previous_end
+                    && end != start
+                {
+                    return Err("discontiguous GICv3 redistributor regions are unsupported");
+                }
+                previous_end = Some(
+                    start
+                        .checked_add(region.size)
+                        .ok_or("GICv3 redistributor region overflows")?,
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Initializes the controller and the primary CPU interface.
 ///
 /// Call during boot with local CPU IRQ delivery masked and before activating
@@ -311,13 +330,16 @@ pub fn active_version() -> GicVersion {
 /// [`init_current_cpu`]; it is not a runtime reinitialization operation.
 ///
 /// # Errors
-/// Returns a local CPU initialization or boot-context error. Global controller
-/// setup may already have taken effect; an error does not roll it back.
+/// Returns an error when the firmware-described register layout is not
+/// supported by this backend, or a local CPU initialization or boot-context
+/// error. Global controller setup may already have taken effect; an error does
+/// not roll it back.
 ///
 /// # Panics
 /// Panics on conflicting configuration, invalid MMIO configuration or a fatal
 /// controller-wide initialization failure.
 pub fn init(config: GicConfig) -> Result<(), &'static str> {
+    validate_config(config)?;
     remember_config(config);
     if let Some(active) = ACTIVE_GIC.get() {
         assert_eq!(
@@ -336,17 +358,28 @@ pub fn init(config: GicConfig) -> Result<(), &'static str> {
     init_current_cpu()
 }
 
-/// Discovers the GIC and initializes it for the primary CPU.
+/// Discovers the GIC through a firmware-node backend and initializes it for
+/// the primary CPU.
 ///
-/// Requires the same masked boot context as [`init`].
+/// The caller supplies the root published by the active device-description
+/// backend (device tree, ACPI, or static configuration). Requires the same
+/// masked boot context as [`init`]. Register mapping and hardware setup remain
+/// here, independent of how the facts were obtained.
 ///
 /// # Errors
-/// Returns an error if configuration is unavailable or local CPU setup fails.
+/// Returns an error if the selected node's status or translated register
+/// resources are invalid, no supported controller is available, the
+/// firmware-described layout is unsupported, or CPU setup fails.
 ///
 /// # Panics
 /// Has the same controller-wide failure conditions as [`init`].
-pub fn init_from_device_tree() -> Result<(), &'static str> {
-    let config = config_from_device_tree().ok_or("failed to parse GIC from device tree")?;
+pub fn init_from_fwnode(root: fwnode::FwNode<'_>) -> Result<(), &'static str> {
+    let config = GicConfig::from_fwnode(root)
+        .map_err(|error| {
+            error!("invalid GIC firmware configuration: {error:?}");
+            "invalid GIC firmware configuration"
+        })?
+        .ok_or("no available supported GIC controller in firmware description")?;
     init(config)
 }
 
@@ -356,7 +389,7 @@ pub fn init_from_device_tree() -> Result<(), &'static str> {
 /// execution. In pseudo-NMI builds, DAIF.I must still be set on entry; this call
 /// establishes PMR masking but does not enable IRQ delivery.
 ///
-/// [`init`] (including [`init_from_device_tree`]) already calls this for the
+/// [`init`] (including [`init_from_fwnode`]) already calls this for the
 /// primary CPU. Secondary CPUs call it once before activating local sources.
 /// This is not an idempotent readiness check: it resets interface priorities
 /// and private interrupt enable/active state. GICv2 SGI enable bits may be
