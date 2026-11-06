@@ -4,7 +4,8 @@
 
 //! IRQ-owned pending service, scheduled by a permanent non-sleeping BH executor.
 //!
-//! Queue ownership retains the original Line and contributes to its drain. No
+//! Queue ownership retains the original Line, not an action execution credit.
+//! Admission is acquired only after dequeue and eligibility validation. No
 //! hardware claim is created or completed by software service.
 
 use alloc::sync::Arc;
@@ -19,6 +20,10 @@ use super::{
 
 const BATCH_LIMIT: usize = 64;
 
+/// Owns queued Line references and the permanent executor notification hook.
+/// Queue membership is not permission to run a handler: dequeue must recheck
+/// Line eligibility before taking execution admission.
+/// Enqueue holds Line then queue; dequeue releases queue before locking Line.
 struct ReplayQueue {
     pending: LinkedList<ReplayAdapter>,
     notify: Option<fn()>,
@@ -67,52 +72,68 @@ pub(super) fn schedule(line: &Arc<IrqLine>) {
 }
 
 fn schedule_on(queue: &SpinNoIrq<ReplayQueue>, line: &Arc<IrqLine>) {
-    let notify = {
-        let mut entry = line.lock();
-        if !entry.needs_replay() {
-            return;
-        }
-        let chip = match entry.flow {
-            crate::IrqFlow::Level(_) => {
-                entry.is_pending = false;
-                return;
-            }
-            crate::IrqFlow::Edge(chip) => {
-                if (chip.retrigger)(entry.desc) {
-                    entry.is_pending = false;
-                }
-                return;
-            }
-            crate::IrqFlow::Fasteoi(chip) => chip,
-            crate::IrqFlow::Legacy | crate::IrqFlow::PerCpu => return,
-        };
-        // Only an explicit level contract permits relying on hardware
-        // reassertion. Unknown-trigger PLIC sources still need software service.
-        if matches!(chip.resend, crate::FasteoiResend::Level)
-            || matches!(
-                entry.desc.trigger,
-                crate::IrqTrigger::LevelHigh | crate::IrqTrigger::LevelLow
-            )
-        {
-            entry.is_pending = false;
-            return;
-        }
-        if let crate::FasteoiResend::HardwareOnly(retrigger) = chip.resend {
-            if retrigger(entry.desc) {
-                entry.is_pending = false;
-            }
-            return;
-        }
-        entry.is_replay_queued = true;
-        entry.begin_dispatch();
-        // Lock order: Line then queue. Consumers release queue before Line.
-        let mut queue = queue.lock();
-        queue.pending.push_back(line.clone());
-        queue.notify
-    };
+    let notify = prepare_on(queue, line, &mut line.lock());
     if let Some(notify) = notify {
         notify();
     }
+}
+
+/// Decides pending service before the completing flow releases Line exclusion.
+/// The returned notifier must run only after the caller releases that exclusion.
+///
+/// # Safety
+/// `entry` must be the locked state of `line`.
+pub(super) unsafe fn prepare_locked(
+    line: &Arc<IrqLine>,
+    entry: &mut super::state::IrqStateDesc,
+) -> Option<fn()> {
+    prepare_on(&REPLAY, line, entry)
+}
+
+fn prepare_on(
+    queue: &SpinNoIrq<ReplayQueue>,
+    line: &Arc<IrqLine>,
+    entry: &mut super::state::IrqStateDesc,
+) -> Option<fn()> {
+    if !entry.needs_replay() {
+        return None;
+    }
+    let chip = match entry.flow? {
+        crate::IrqFlow::Level(_) => {
+            entry.is_pending = false;
+            return None;
+        }
+        crate::IrqFlow::Edge(chip) => {
+            if (chip.retrigger)(entry.desc) {
+                entry.is_pending = false;
+            }
+            return None;
+        }
+        crate::IrqFlow::Fasteoi(chip) => chip,
+        crate::IrqFlow::PerCpu => return None,
+    };
+    // Only an explicit level contract permits relying on hardware
+    // reassertion. Unknown-trigger PLIC sources still need software service.
+    if matches!(chip.resend, crate::FasteoiResend::Level)
+        || matches!(
+            entry.desc.trigger,
+            crate::IrqTrigger::LevelHigh | crate::IrqTrigger::LevelLow
+        )
+    {
+        entry.is_pending = false;
+        return None;
+    }
+    if let crate::FasteoiResend::HardwareOnly(retrigger) = chip.resend {
+        if retrigger(entry.desc) {
+            entry.is_pending = false;
+        }
+        return None;
+    }
+    entry.is_replay_queued = true;
+    // Lock order: Line then queue. Consumers release queue before Line.
+    let mut queue = queue.lock();
+    queue.pending.push_back(line.clone());
+    queue.notify
 }
 
 /// Services a bounded batch, re-notifying the executor when work remains.

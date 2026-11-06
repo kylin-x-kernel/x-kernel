@@ -95,21 +95,32 @@ impl IrqOp for XKernelResourceProvider {
         }
     }
 
-    fn free_msix(&self, resource: MsiResource) {
+    /// Requires a watched, sleepable task with the RCU service running, plus
+    /// the source-stop, action-drain and exclusion rules of IrqOp. KIRQ exposes
+    /// only a bool here, so Busy includes context and identity rejection too.
+    fn try_free_msix(&self, resource: MsiResource) -> Result<(), (ResError, MsiResource)> {
         #[cfg(target_arch = "x86_64")]
         {
-            if !kirq::free_msix(resource.irq.virq().raw()) {
-                log::warn!(
-                    "failed to free MSI-X IRQ {} (not allocated?)",
-                    resource.irq.virq().raw()
-                );
-            }
+            let is_released = kirq::free_msix(resource.irq.virq().raw());
+            msix_release_result(resource, is_released)
         }
 
         #[cfg(not(target_arch = "x86_64"))]
         {
-            let _ = resource;
+            Err((ResError::Unsupported, resource))
         }
+    }
+}
+
+#[cfg(any(target_arch = "x86_64", unittest))]
+fn msix_release_result(
+    resource: MsiResource,
+    is_released: bool,
+) -> Result<(), (ResError, MsiResource)> {
+    if is_released {
+        Ok(())
+    } else {
+        Err((ResError::Busy, resource))
     }
 }
 
@@ -188,7 +199,6 @@ fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
         | kirq::IrqDescError::VirqMappingConflict { .. }
         | kirq::IrqDescError::UnknownDomain { .. }
         | kirq::IrqDescError::UnknownIrq
-        | kirq::IrqDescError::RetirementUnavailable
         | kirq::IrqDescError::TeardownInProgress { .. }
         | kirq::IrqDescError::NoIrqAction { .. }
         | kirq::IrqDescError::InvalidContext { .. } => ResError::InvalidResource,

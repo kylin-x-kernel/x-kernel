@@ -4,10 +4,18 @@
 
 //! Cross-crate integration tests for simple interface shapes.
 
-use define_simple_interfaces::{AdvancedIf, CallerIf, NamespacedIf, SimpleIf};
+use define_simple_interfaces::{AdvancedIf, BorrowedIf, CallerIf, NamespacedIf, SimpleIf};
 
 fn link_providers() {
     impl_simple_interfaces::force_link();
+}
+
+#[test]
+fn unsafe_interface_calls_cross_crate_provider() {
+    link_providers();
+    let value = 73;
+    // SAFETY: the local value remains readable and aligned until return.
+    assert_eq!(unsafe { BorrowedIf::read(&value) }, value);
 }
 
 #[test]

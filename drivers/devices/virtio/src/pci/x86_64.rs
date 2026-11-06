@@ -2,7 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use driver_os_api::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger, MsiResource};
+//! x86 PCI interrupt setup and transport-owned MSI-X allocation cleanup.
+//! IRQ actions and device quiescence remain the device owner's responsibility.
+
+use driver_os_api::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger, MsiResource, ResResult};
 use pci::{
     PciConfigAccess,
     msix::{self, MsixCapability, MsixTable, MsixTableEntry, PCI_BAR_COUNT},
@@ -21,6 +24,8 @@ impl Drop for super::PciTransport {
     }
 }
 
+/// Device-side MSI-X configuration plus its exact host allocation owner.
+/// It does not own a registered IRQ action or establish hardware quiescence.
 pub(super) struct PciMsixState {
     common_cfg: VirtioPciCommonCfg,
     config: PciConfigAccess,
@@ -30,10 +35,13 @@ pub(super) struct PciMsixState {
     msi: MsiResource,
 }
 
+/// Transport admission, separate from whether an allocation still needs release.
+/// Failed transports cannot reactivate MSI-X, including while retaining a retry owner.
 pub(super) enum PciIrqState {
     Legacy,
     Msix(PciMsixState),
-    Failed,
+    // A failed transport must retain its allocation until action teardown.
+    Failed(Option<PciMsixState>),
 }
 
 impl PciIrqState {
@@ -45,36 +53,53 @@ impl PciIrqState {
     }
 
     pub(super) fn is_failed(&self) -> bool {
-        matches!(self, Self::Failed)
+        matches!(self, Self::Failed(_))
     }
 
     pub(super) fn msix_mut(&mut self) -> Option<&mut PciMsixState> {
         match self {
             Self::Msix(msix) => Some(msix),
-            Self::Legacy | Self::Failed => None,
+            Self::Legacy | Self::Failed(_) => None,
         }
     }
 
     pub(super) fn fail(&mut self) {
-        if !matches!(self, Self::Msix(_)) {
-            return;
+        match core::mem::replace(self, Self::Failed(None)) {
+            Self::Msix(msix) => {
+                msix.disable();
+                *self = Self::Failed(Some(msix));
+            }
+            state => *self = state,
         }
+    }
 
-        let Self::Msix(msix) = core::mem::replace(self, Self::Failed) else {
-            unreachable!();
-        };
-        msix.release();
+    pub(super) fn try_release(&mut self) -> ResResult<()> {
+        let state = core::mem::replace(self, Self::Failed(None));
+        match state {
+            Self::Msix(mut msix) | Self::Failed(Some(mut msix)) => {
+                msix.disable();
+                match msix.irq_provider.try_free_msix(msix.msi) {
+                    Ok(()) => Ok(()),
+                    Err((error, resource)) => {
+                        msix.msi = resource;
+                        *self = Self::Failed(Some(msix));
+                        Err(error)
+                    }
+                }
+            }
+            Self::Legacy => {
+                *self = Self::Legacy;
+                Ok(())
+            }
+            Self::Failed(None) => Ok(()),
+        }
     }
 
     pub(super) fn release(&mut self) {
-        if !matches!(self, Self::Msix(_)) {
-            return;
+        match core::mem::replace(self, Self::Failed(None)) {
+            Self::Msix(msix) | Self::Failed(Some(msix)) => msix.release(),
+            Self::Legacy | Self::Failed(None) => {}
         }
-
-        let Self::Msix(msix) = core::mem::replace(self, Self::Legacy) else {
-            unreachable!();
-        };
-        msix.release();
     }
 }
 
@@ -436,3 +461,5 @@ pub(super) fn legacy_irq_for_bdf(
     };
     Some(irq_provider.map_irq(desc).ok()?.virq().raw())
 }
+
+unittest::path_mod_test!(tests_msix_release, "../../ut-tests/msix_release.rs");

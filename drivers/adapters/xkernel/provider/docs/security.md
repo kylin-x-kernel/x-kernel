@@ -24,11 +24,20 @@ to reclaim callback resources. This deliberately strengthens mainline's missing
 action warning behavior. No shared peer is removed as a fallback.
 Tests cover the result classifier without inducing a kernel panic.
 
-MSI reservation and IRQ action lifetimes remain distinct. Mainline MSI free
-rejection is still logged, not converted into a retained retry owner. Neither
-action drain nor allocation-free MSI deletion proves device-side message
-quiescence. Network close, MSI hardware retirement and new threaded IRQ support
-are not implemented by this extraction.
+MSI reservation and IRQ action lifetimes remain distinct. `try_free_msix` returns
+the unchanged resource on rejection without release side effects. The x86 core
+bool cannot distinguish context, identity or live-use rejection: all map to Busy,
+not an exact diagnosis or a promise of eventual success. Non-x86 release returns
+Unsupported with ownership intact. The inherited terminal `free_msix` wrapper
+panics on rejection instead of discarding the resource and continuing cleanup.
+
+The owner must stop message production, order outstanding messages, detach/drain
+actions, logically disable the line and serialize owner operations. Release needs
+a watched, sleepable task and running RCU service, with no spinlocks, IRQ/preemption
+exclusion or RCU read scope. Neither action drain nor allocation-free MSI deletion
+proves device-side message quiescence or DMA stop. Returned ownership enables an
+explicit retry only while an owner retains it; no automatic retry, recoverable
+Drop, complete dynamic removal or new threaded IRQ support is implemented here.
 
 ## Memory boundaries
 

@@ -50,7 +50,7 @@ fn force_enable_does_not_reconstruct_a_line_from_a_reverse_mapping() {
     // Model an incomplete legacy registry privately. Activation must report
     // absence, not construct a new identity behind the old reverse mapping.
     let desc = IrqDesc::from_hwirq(0x5faa).with_domain(crate::domain::TEST_DOMAIN);
-    let original = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let original = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let registry = kspin::SpinNoIrq::new(IrqState::new());
     let virq = registry
         .lock()

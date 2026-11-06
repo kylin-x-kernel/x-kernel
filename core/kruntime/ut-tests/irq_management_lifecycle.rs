@@ -5,7 +5,7 @@
 //! Real task registration/free serialization and CPU-local flow ownership.
 //!
 //! Local-flow tests invoke handlers with synthetic claims; no hardware source
-//! is enabled. RetainedInFlight tests substitute only admitted-operation accounting.
+//! is enabled. RetainedRunningDispatch tests substitute only admitted-operation accounting.
 //! The permanent boot task/IRQ services supply the real mutex and drain waits.
 //! Both UP and SMP are supported: all contenders may park and the coordinator
 //! yields. An external QEMU timeout diagnoses a stalled handshake; elapsed time
@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kcompletion::Completion;
-use kirq::{IrqEvent, IrqHandler, tests_irq::RetainedInFlight};
+use kirq::{IrqEvent, IrqHandler, tests_irq::RetainedRunningDispatch};
 use ktask::TaskState;
 use unittest::{assert, assert_eq, def_test};
 
@@ -277,19 +277,17 @@ fn nmi_shutdown_retains_original_owner_across_remote_failure_and_retry() {
 
 #[cfg(feature = "ipi")]
 #[def_test(serial)]
-fn local_action_retirement_waits_for_owner_shutdown_and_admitted_operations() {
+fn local_action_retirement_requires_owner_shutdown_and_restart_exclusion() {
     let virq = 0x5f83;
     let drops = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
     let probe = Arc::new(kirq::tests_irq::LocalFlowProbe::new(
         virq,
         Arc::new(HandlerProbe {
             drops: drops.clone(),
-            calls: Arc::new(AtomicUsize::new(0)),
+            calls: calls.clone(),
         }),
     ));
-    // Keep one admitted operation alive across stop and withdrawal. No fake
-    // controller claim is issued; the normal Line drain owns this accounting.
-    let admitted = RetainedInFlight::begin(virq).unwrap();
     let cpus = if cfg!(feature = "smp") {
         kcpu_id_map::nr_cpus()
     } else {
@@ -298,21 +296,25 @@ fn local_action_retirement_waits_for_owner_shutdown_and_admitted_operations() {
     for cpu in 0..cpus {
         let probe = probe.clone();
         kipi::run_on_cpu_sync(kcpu_id_map::LogicalCpuId::new(cpu), move || {
+            let _pin = kspin::NoPreemptIrqSave::new();
             probe.set_enabled(true);
+            // This synchronous synthetic dispatch includes its claim completion.
+            // No source callback remains admitted when the owner starts closing.
+            core::assert!(probe.dispatch());
         })
         .unwrap();
     }
-    assert!(matches!(kirq::try_free_irq(virq), Ok(None)));
+    assert_eq!(calls.load(Ordering::Acquire), cpus);
     assert_eq!(drops.load(Ordering::Acquire), 0);
 
-    // This mutex belongs to the source owner, not KIRQ or the IPI transport.
-    // Every enable path must take it and refuse once retirement has started.
     let is_stopping = Arc::new(kmutex::Mutex::new(false));
     let stopped = Arc::new(Completion::new());
+    let allow_retirement = Arc::new(Completion::new());
     let did_free = Arc::new(AtomicBool::new(false));
     let free_task = {
         let owner = is_stopping.clone();
         let stopped = stopped.clone();
+        let allow_retirement = allow_retirement.clone();
         let probe = probe.clone();
         let did_free = did_free.clone();
         ktask::spawn(move || {
@@ -321,28 +323,26 @@ fn local_action_retirement_waits_for_owner_shutdown_and_admitted_operations() {
             for cpu in 0..cpus {
                 let local = probe.clone();
                 kipi::run_on_cpu_sync(kcpu_id_map::LogicalCpuId::new(cpu), move || {
-                    // A real source owner stops its device before this local mask.
-                    // The callback must not acquire the source-owner mutex.
                     local.set_enabled(false);
                 })
                 .unwrap();
             }
             stopped.complete_all();
-            let removed = kirq::try_free_irq(virq);
+            // Test the source-owner gate independently of KIRQ's ordinary drain.
+            kiface_task_wait_api::wait_for_completion(&allow_retirement).unwrap();
+            // SAFETY: this software source has no hardware producer. Every
+            // dispatch and its synthetic completion returned before this task
+            // started; all local slots are now stopped. The owner mutex and
+            // stopping flag exclude every restart until retirement finishes.
+            let removed = unsafe { kirq::try_free_percpu_irq(virq) };
             did_free.store(matches!(&removed, Ok(Some(_))), Ordering::Release);
+            drop(stopping);
             drop(removed);
         })
     };
     kiface_task_wait_api::wait_for_completion(&stopped).unwrap();
-    while !admitted.is_teardown_in_progress() && free_task.state() != TaskState::Exited {
-        ktask::yield_now();
-    }
-    while !matches!(free_task.state(), TaskState::Blocked | TaskState::Exited) {
-        ktask::yield_now();
-    }
-    let is_draining = admitted.is_teardown_in_progress() && free_task.state() == TaskState::Blocked;
-    let drops_before_drain = drops.load(Ordering::Acquire);
-    let free_before_drain = did_free.load(Ordering::Acquire);
+    let drops_before_retirement = drops.load(Ordering::Acquire);
+    let free_before_permission = did_free.load(Ordering::Acquire);
     let did_reenable = Arc::new(AtomicBool::new(false));
     let reenable_started = Arc::new(Completion::new());
     let reenable_task = {
@@ -363,14 +363,13 @@ fn local_action_retirement_waits_for_owner_shutdown_and_admitted_operations() {
         ktask::yield_now();
     }
     let is_enable_excluded = reenable_task.state() == TaskState::Blocked;
-    drop(admitted);
+    allow_retirement.complete_all();
     let statuses = [free_task.join(), reenable_task.join()];
     drop(probe);
     assert_eq!(statuses, [0, 0]);
-    assert!(is_draining);
     assert!(is_enable_excluded);
-    assert!(!free_before_drain);
-    assert_eq!(drops_before_drain, 0);
+    assert!(!free_before_permission);
+    assert_eq!(drops_before_retirement, 0);
     assert!(did_free.load(Ordering::Acquire));
     assert!(!did_reenable.load(Ordering::Acquire));
     assert_eq!(drops.load(Ordering::Acquire), 1);
@@ -421,8 +420,16 @@ fn local_flow_handlers_overlap_on_distinct_cpus() {
             kbuild_config::TASK_STACK_SIZE,
         ));
         task.set_cpumask(ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(cpu)));
-        ktask::activate_task(&task);
         tasks.push(task);
+    }
+    {
+        // The first IRQ-off handler must not preempt this coordinator before
+        // its peer is runnable. Prepare allocations and affinity above, then
+        // publish both tasks before allowing a local scheduling checkpoint.
+        let _pin = kspin::NoPreemptIrqSave::new();
+        for task in &tasks {
+            ktask::activate_task(task);
+        }
     }
     let statuses: alloc::vec::Vec<_> = tasks.into_iter().map(|task| task.join()).collect();
     assert!(statuses.iter().all(|status| *status == 0));
@@ -454,14 +461,21 @@ fn masked_registration_rejects_normal_admission_but_allows_explicit_startup() {
     let virq = 0x5f72;
     assert!(kirq::descriptor(virq).is_none());
     let handler: Arc<dyn IrqHandler> = Arc::new(|_| IrqEvent::HANDLED);
-    let (ordinary, was_absent, startup, stayed_masked) = {
+    let (ordinary, was_absent, startup, stayed_masked, _binding) = {
         let _irq = kspin::IrqSave::new();
         let ordinary = kirq::try_register_disabled(virq, handler.clone());
         let was_absent = kirq::descriptor(virq).is_none();
+        let binding = kirq::tests_irq::SyntheticLine::new(kirq::IrqDesc::from_virq(virq));
         assert_eq!(kirq::try_map(kirq::IrqDesc::from_virq(virq)), Ok(virq));
         let startup =
             kirq::try_register_startup(virq, handler.clone(), kirq::IrqRegisterOptions::disabled());
-        (ordinary, was_absent, startup, !karch::local_irq_enabled())
+        (
+            ordinary,
+            was_absent,
+            startup,
+            !karch::local_irq_enabled(),
+            binding,
+        )
     };
     let removed = kirq::try_free_irq(virq);
     let did_remove = matches!(&removed, Ok(Some(_)));
@@ -497,6 +511,7 @@ fn read_scope_rejects_normal_registration_before_publication() {
     assert!(kirq::descriptor(virq).is_none());
     // This is an ordinary-admission check only. It deliberately makes no claim
     // about startup registration being valid while retaining an RCU read scope.
+    let _binding = kirq::tests_irq::SyntheticLine::new(kirq::IrqDesc::from_virq(virq));
     assert_eq!(kirq::try_map(kirq::IrqDesc::from_virq(virq)), Ok(virq));
     let after_scope = kirq::try_register_disabled(virq, handler.clone());
     let removed = kirq::try_free_irq(virq);
@@ -523,7 +538,9 @@ fn request_waits_for_free_to_drain_retained_inflight() {
     let other_virq = 0x5f71;
     assert!(kirq::descriptor(virq).is_none());
     assert!(kirq::descriptor(other_virq).is_none());
+    let _binding = kirq::tests_irq::SyntheticLine::new(kirq::IrqDesc::from_virq(virq));
     assert_eq!(kirq::try_map(kirq::IrqDesc::from_virq(virq)), Ok(virq));
+    let _other_binding = kirq::tests_irq::SyntheticLine::new(kirq::IrqDesc::from_virq(other_virq));
     assert_eq!(
         kirq::try_map(kirq::IrqDesc::from_virq(other_virq)),
         Ok(other_virq)
@@ -541,7 +558,7 @@ fn request_waits_for_free_to_drain_retained_inflight() {
         )
         .unwrap()
     );
-    let in_flight = RetainedInFlight::begin(virq).unwrap();
+    let running = RetainedRunningDispatch::begin(virq).unwrap();
     let free_started = Arc::new(Completion::new());
     let free_succeeded = Arc::new(AtomicBool::new(false));
     let free_task = {
@@ -556,14 +573,14 @@ fn request_waits_for_free_to_drain_retained_inflight() {
         })
     };
     kiface_task_wait_api::wait_for_completion(&free_started).unwrap();
-    while !in_flight.is_teardown_in_progress() && free_task.state() != TaskState::Exited {
+    while !running.is_teardown_in_progress() && free_task.state() != TaskState::Exited {
         ktask::yield_now();
     }
     while !matches!(free_task.state(), TaskState::Blocked | TaskState::Exited) {
         ktask::yield_now();
     }
     let has_teardown_waiter =
-        in_flight.is_teardown_in_progress() && free_task.state() == TaskState::Blocked;
+        running.is_teardown_in_progress() && free_task.state() == TaskState::Blocked;
 
     let request_started = Arc::new(Completion::new());
     let request_succeeded = Arc::new(AtomicBool::new(false));
@@ -606,7 +623,7 @@ fn request_waits_for_free_to_drain_retained_inflight() {
     let did_remove_other = matches!(&other_removed, Ok(Some(_)));
     drop(other_removed);
 
-    drop(in_flight);
+    drop(running);
     let free_status = free_task.join();
     let request_status = request_task.join();
     let final_removed = kirq::try_free_irq(virq);

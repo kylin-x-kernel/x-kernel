@@ -84,7 +84,9 @@ fn loongarch64_trap_handler(tf: &mut ExceptionContext) {
                 karch::fixup_idle_irq_return(&mut tf.era);
             }
             let interrupt_id: usize = estat.is().trailing_zeros() as usize;
-            handle_trap!(IRQ, interrupt_id);
+            // SAFETY: exception entry cleared CRMD.IE; the saved interrupt
+            // state and stack remain live through the completed-IRQ tail.
+            unsafe { handle_trap!(IRQ, interrupt_id) };
         }
         trap => {
             panic!(

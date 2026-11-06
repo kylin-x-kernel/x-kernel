@@ -258,3 +258,12 @@ destruction and borrowed root entries. It uses the real `PagingHandlerImpl` and
 global `PageRef`; the generic page-table `TestHandler` has no such ownership or
 reclaim protocol. Test tables are never activated in hardware, so these cases do
 not validate generic page-table algorithms or TLB shootdown.
+
+## IRQ Entry Contract
+
+The private `irq::manager::{irq_handler, nmi_handler}` callbacks implement kcpu's unsafe trap callback
+types. Architecture entry supplies the captured source and ordinary IRQ mask;
+HAL adds a preemption credit and forwards that proof to KIRQ. KIRQ completes
+claims and finishes its context before the normal IRQ adapter performs the
+scheduling checkpoint. Dedicated NMI return has no such checkpoint. These
+adapters do not turn arbitrary task-context calls into valid hardware entries.

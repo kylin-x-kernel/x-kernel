@@ -13,8 +13,16 @@ pub use page_table::PagingFlags as PageFaultFlags;
 pub use crate::TrapFrame;
 
 /// A slice of IRQ handler functions.
+///
+/// # Safety
+/// Invoke only for a captured interrupt on an initialized CPU, with ordinary
+/// IRQs masked and no locks needed by IRQ handlers held. Claim processing must
+/// retain IRQ exclusion. After completion, deferred work may briefly enable
+/// IRQs but must restore the masked state before return. Dispatch must stay on
+/// the entry CPU; only the adapter's final
+/// completed-IRQ checkpoint may schedule, after all claim/context work ends.
 #[def_trap_handler]
-pub static IRQ: [fn(usize) -> bool];
+pub static IRQ: [unsafe fn(usize) -> bool];
 
 /// A slice of NMI handler functions.
 ///
@@ -22,8 +30,12 @@ pub static IRQ: [fn(usize) -> bool];
 /// (GICv3.3 NMI attribute + FEAT_NMI) or a pseudo‑NMI (IRQ taken while
 /// normal IRQs are masked by PMR).  Handlers must use the lock‑free
 /// [`NMI`] dispatch path.
+///
+/// # Safety
+/// Invoke only for an architecture-classified NMI on an initialized CPU with
+/// ordinary IRQs and migration excluded until return. No scheduling is allowed.
 #[def_trap_handler]
-pub static NMI: [fn(usize) -> bool];
+pub static NMI: [unsafe fn(usize) -> bool];
 
 /// A slice of page fault handler functions.
 #[def_trap_handler]

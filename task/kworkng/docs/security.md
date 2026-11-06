@@ -231,20 +231,26 @@ replace KIRQ's retained-Line backlog. Submission errors other than AlreadyQueued
 are invariant failures, not silently successful replay. No queue shutdown or
 runtime unregister is supported. This does not authorize NMI submission.
 
-KIRQ retains Line identity, owns queue membership/in-flight accounting, checks
-withdrawal eligibility and releases drain obligations. Kworkng only schedules
+KIRQ retains Line identity and queue membership without execution admission.
+It checks execution eligibility under the Line lock, then takes an in-flight
+credit before capturing actions. Rejected retired, disabled or action-less
+entries perform no handler or chip access. The queued flag independently blocks
+incompatible flow/source mutation. Kworkng only schedules
 its non-sleeping BH callback, outside queue locks. The callback takes no sleeping
 IRQ management mutex and has no authority to fabricate a hardware claim. The
 existing Tasklet/High actions remain the service owners; a separate resend action
 must not overwrite either slot.
 
-Binding kicks KIRQ's pre-install backlog. Until then, queued IRQ obligations can
-keep synchronous drain incomplete indefinitely. Startup/rollback must not wait
-on that drain before reaching installation; there is no automatic pre-bind wait
-rejection or cancellation fallback. Successful service initialization precedes
-the current runtime's console input preparation and device setup. The requirement
-is executor progress for waits covering queued replay, not a blanket prohibition
-on pre-bind zero-in-flight waits. This ordering is not a
-general proof for future early producers. Physical IRQ delivery, controller
+Binding kicks KIRQ's pre-install backlog. Pending entries retain Line Arcs but
+cannot keep IRQ execution drain incomplete: sync/free waits for admitted claims
+and running replay, not pending queue entries. It may return before executor
+binding or execution; a later executor cannot snapshot an already removed action.
+There is no eager queue cancellation. Executor progress remains necessary for
+pending service and eventual queued-owner release, while admitted executions must
+be able to finish during a drain. The retained Arc protects descriptor storage,
+not device resources or authority to use a retired chip binding. Source owners
+must still stop producers and exclude restart before resource release.
+Successful service initialization precedes the current runtime's console input
+preparation and device setup. Physical IRQ delivery, controller
 quiescence and hotplug/affinity correctness are outside the adapter's guarantee;
 no unperformed hardware validation is claimed.

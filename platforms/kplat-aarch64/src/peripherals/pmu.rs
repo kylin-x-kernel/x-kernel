@@ -2,9 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#[cfg(feature = "nmi-pmu")]
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use aarch64_pmuv3::pmuv3::PmuCounter;
 type PerfCb = fn();
 const MAX_PMU_COUNTERS: usize = 32;
@@ -24,14 +21,6 @@ pub struct PmuManager {
 kcpu_slot::cpu_slot_cell_with_template! {
     static PMU: lazyinit::LazyInit<crate::peripherals::pmu::PmuManager> =
         unsafe { lazyinit::LazyInit::new() };
-}
-
-// Boot prepares the PPI before any counter manager exists. Retrying local
-// teardown must not initialize or mutably borrow NMI-visible counter storage.
-#[cfg(feature = "nmi-pmu")]
-kcpu_slot::cpu_slot! {
-    static PERIODIC_IRQ_DISABLED: core::sync::atomic::AtomicBool =
-        core::sync::atomic::AtomicBool::new(false);
 }
 
 /// Arms an exclusively owned local periodic source.
@@ -106,7 +95,9 @@ pub(crate) fn arm_periodic_source(period_ns: u64, handler: PerfCb) -> bool {
     }
     // A close racing this pinned region either rejects enable or includes this
     // prepared CPU in its stop pass. No exclusive reference survives this point.
-    if !is_enabled(CYCLE_COUNTER_IDX) || !enable_periodic_irq(kirq::gic_level_irq_desc(irq)) {
+    if !is_enabled(CYCLE_COUNTER_IDX)
+        || kirq::try_enable_irq(kirq::gic_level_irq_desc(irq)).is_err()
+    {
         let _ = shutdown_periodic_source();
         return false;
     }
@@ -202,10 +193,8 @@ pub fn shutdown_periodic_source() -> bool {
     }
     let counter = pmu.and_then(|pmu| pmu.counters[CYCLE_COUNTER_IDX as usize].as_ref());
     let has_counter = counter.is_some();
-    let is_irq_disabled = PERIODIC_IRQ_DISABLED.current(&guard);
     let desc = kirq::gic_level_irq_desc(of::pmu_irq_or(kbuild_config::PMU_IRQ));
     let stopped = shutdown_local_with(
-        is_irq_disabled,
         || {
             if let Some(counter) = counter {
                 counter.disable();
@@ -237,43 +226,27 @@ pub fn shutdown_periodic_source() -> bool {
         pmu.counters[CYCLE_COUNTER_IDX as usize] = None;
         pmu.overflow_handlers[CYCLE_COUNTER_IDX as usize] = None;
     }
-    // Teardown does not consume the disable credit. Retain it through repeated
-    // successful shutdowns; only a successful local rearm consumes it.
-    true
-}
-
-#[cfg(feature = "nmi-pmu")]
-pub(crate) fn enable_periodic_irq(desc: kirq::IrqDesc) -> bool {
-    let guard = kspin::NoPreemptIrqSave::new();
-    if kirq::try_enable(desc, true).is_err() {
-        return false;
-    }
-    PERIODIC_IRQ_DISABLED
-        .current(&guard)
-        .store(false, Ordering::Relaxed);
     true
 }
 
 #[cfg(feature = "nmi-pmu")]
 fn shutdown_local_with(
-    is_irq_disabled: &AtomicBool,
     stop: impl FnOnce(),
     disable: impl FnOnce() -> bool,
     teardown: impl FnOnce() -> bool,
 ) -> bool {
     stop();
-    if !is_irq_disabled.load(Ordering::Relaxed) {
-        if !disable() {
-            return false;
-        }
-        // Retry teardown without consuming another nested disable credit.
-        is_irq_disabled.store(true, Ordering::Relaxed);
+    // PerCpu disable is not nested; every retry can safely close the gate again.
+    if !disable() {
+        return false;
     }
     teardown()
 }
 
 #[cfg(feature = "nmi-pmu")]
 unittest::path_mod_test!(tests_shutdown, "../../ut-tests/peripherals_pmu_shutdown.rs");
+#[cfg(feature = "ipi")]
+unittest::path_mod_test!(tests_ordinary, "../../ut-tests/peripherals_pmu_ordinary.rs");
 #[macro_export]
 macro_rules! pmu_if_impl {
     () => {
@@ -321,13 +294,19 @@ macro_rules! pmu_if_impl {
                 if kplat::nm_irq::NmiMechanismIf::mode() != kplat::nm_irq::NmiMode::None {
                     return kirq::register_nmi_startup(desc, handler);
                 }
-                // NMI-source builds activate each CPU explicitly after startup
-                // registration. Preserve PMU-only auto-enable compatibility.
-                #[cfg(feature = "nmi-pmu")]
-                let options = kirq::IrqRegisterOptions::disabled();
-                #[cfg(not(feature = "nmi-pmu"))]
-                let options = kirq::IrqRegisterOptions::auto_enable();
-                match kirq::try_register_startup(desc, handler, options) {
+                let registered = if (16..32).contains(&irq) {
+                    // Runtime CPU services explicitly activate each local PPI.
+                    kirq::try_register_percpu_startup(desc, handler)
+                } else {
+                    // Preserve the existing SPI policy; a shared interrupt is
+                    // not a per-CPU registration merely because the PMU is local.
+                    #[cfg(feature = "nmi-pmu")]
+                    let options = kirq::IrqRegisterOptions::disabled();
+                    #[cfg(not(feature = "nmi-pmu"))]
+                    let options = kirq::IrqRegisterOptions::auto_enable();
+                    kirq::try_register_startup(desc, handler, options)
+                };
+                match registered {
                     Ok(true) => true,
                     Ok(false) => {
                         log::warn!("PMU registration rejected: desc={desc:?}");
@@ -361,7 +340,7 @@ macro_rules! pmu_if_impl {
                 // back to the PlainVirq identity path).
                 let desc = kirq::gic_level_irq_desc(irq);
                 #[cfg(feature = "nmi-pmu")]
-                if !$crate::peripherals::pmu::enable_periodic_irq(desc) {
+                if kirq::try_enable_irq(desc).is_err() {
                     log::warn!("PMU local IRQ enable failed: {irq}");
                 }
                 #[cfg(not(feature = "nmi-pmu"))]
@@ -380,8 +359,10 @@ macro_rules! pmu_if_impl {
 /// overflow‑dispatch handler is registered by
 /// `khal::pmu::register_overflow_dispatch` (called from the `pmu` feature
 /// init) independently of the watchdog — as a normal IRQ handler in pmu-only
-/// builds, or as an NMI handler (with normal‑IRQ fallback) when the PMU is
-/// the compiled NMI source (`nmi-pmu`). Counter configuration currently supports
+/// builds, or as an NMI handler when the PMU is the compiled NMI source
+/// (`nmi-pmu`) and the runtime mechanism is available. An unavailable mechanism
+/// selects an ordinary action instead, not normal-IRQ dispatch of an NMI action.
+/// Counter configuration currently supports
 /// the exclusive periodic owner, not general live perf event reconfiguration.
 /// Consumers depend on `khal::nmi::enable_periodic_nmi`.
 ///

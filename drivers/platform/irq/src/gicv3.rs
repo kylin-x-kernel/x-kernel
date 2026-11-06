@@ -172,13 +172,12 @@ pub(super) fn prepare_local_irq_work() -> Option<fn()> {
             warn!("irq_work mapping preparation failed: desc={desc:?}, error={err:?}");
             return false;
         }
-        match kirq::try_register_startup(
+        match kirq::try_register_percpu_startup(
             desc,
             Arc::new(|_| {
                 kirq::irq_work::handle_irq();
                 kirq::IrqEvent::HANDLED
             }),
-            kirq::IrqRegisterOptions::disabled(),
         ) {
             Ok(true) => true,
             Ok(false) => {
@@ -443,7 +442,9 @@ fn open_pseudo_nmi_window_from_irqson() {
 /// helper. For a normal interrupt in hardware mode, the ALLINT mask set by
 /// exception entry is cleared before the generic IRQ handler so a
 /// Superpriority NMI can preempt it; ordinary IRQs stay masked by `DAIF.I`.
-pub(super) fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
+/// # Safety
+/// The caller must uphold [`kirq::IntrManagerIf::dispatch_irq`]'s contract.
+pub(super) unsafe fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
     let Some((irq, cookie, is_nmi)) = ack_irq() else {
         // The exception came from an IRQ-on context. Even if the pending
         // interrupt retired before the acknowledge, restore the IRQ-on NMI
@@ -454,10 +455,12 @@ pub(super) fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
     };
 
     if is_nmi {
-        kirq::generic_handle_nmi(kirq::PendingIrq::new(
-            kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, irq),
-            cookie,
-        ));
+        // SAFETY: ack_irq classified this unique claim as NMI. The caller
+        // retains CPU/ordinary IRQ exclusion through its completion here.
+        let pending = unsafe {
+            kirq::PendingIrq::new(kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, irq), cookie)
+        };
+        kirq::generic_handle_nmi(pending);
     }
 
     // Linux does this after completing an IRQ-on NMI and before dispatching a
@@ -468,10 +471,12 @@ pub(super) fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
     if is_nmi {
         None
     } else {
-        kirq::generic_handle_irq(kirq::PendingIrq::new(
-            kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, irq),
-            cookie,
-        ))
+        // SAFETY: this is the unique normal claim; opening NMI nesting did
+        // not admit ordinary IRQs or migration or leave hardirq context.
+        let pending = unsafe {
+            kirq::PendingIrq::new(kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, irq), cookie)
+        };
+        kirq::generic_handle_irq(pending)
     }
 }
 

@@ -23,7 +23,11 @@ impl RcuIndexProbe {
             .with_domain(crate::domain::TEST_DOMAIN)
             .with_virq(virq)
             .with_flags(IrqFlags::MSI);
-        crate::try_map(desc).unwrap();
+        let candidate = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
+        super::IRQ_STATE
+            .lock()
+            .try_resolve_desc(desc, Some(&candidate))
+            .unwrap();
         let line = super::IRQ_STATE.lock().descs.get(&virq).unwrap();
         let withdrawal = super::PreparedWithdrawal::new(hwirq).unwrap();
         line.lock().msi_withdrawal = Some(withdrawal);
@@ -38,7 +42,7 @@ impl RcuIndexProbe {
     /// Keep borrowed references, not owned Arcs, across the supplied handshake.
     pub fn read_across(&self, body: impl FnOnce()) -> bool {
         krcu::with_read(|scope| {
-            let directory = super::super::index::DIRECTORY.read(scope, self.virq);
+            let directory = crate::runtime::index::DIRECTORY.read(scope, self.virq);
             let domain = crate::domain::domain(crate::domain::TEST_DOMAIN).unwrap();
             let mapping = domain.lines.read(scope, self.hwirq);
             body();
@@ -60,22 +64,22 @@ impl RcuIndexProbe {
         let was_reading = krcu::is_reading();
         let valid = super::tests_index_transactions::with_irq(|| {
             krcu::with_interrupt_read(|scope| {
-                let directory = super::super::index::DIRECTORY.read(scope, self.virq);
+                let directory = crate::runtime::index::DIRECTORY.read(scope, self.virq);
                 let mapping = crate::domain::TEST_IRQ_DOMAIN.lines.read(scope, self.hwirq);
                 let source = crate::IrqRef::Domain(crate::domain::TEST_DOMAIN, self.hwirq);
-                let retained_matches = super::super::index::lookup(source)
+                let retained_matches = crate::runtime::index::lookup(source)
                     .and_then(|(_, line)| line)
                     .is_some_and(|line| core::ptr::eq(Arc::as_ptr(&line), self.owner.as_ptr()));
                 // SAFETY: this strictly nested synthetic NMI runs under the
                 // outer IRQ fixture's CPU exclusion, without scheduling.
                 let numeric_matches = unsafe {
-                    super::super::rcu::with_nmi_context(|| {
+                    crate::runtime::rcu::with_nmi_context(|| {
                         crate::translate_hwirq(crate::domain::TEST_DOMAIN, self.hwirq)
                             == Some(self.virq)
                     })
                 };
                 body();
-                let successor_matches = super::super::index::lookup(source)
+                let successor_matches = crate::runtime::index::lookup(source)
                     .and_then(|(_, line)| line)
                     .is_some_and(|line| !core::ptr::eq(Arc::as_ptr(&line), self.owner.as_ptr()));
                 directory.zip(mapping).is_some_and(|(left, right)| {
@@ -130,7 +134,7 @@ impl RcuIndexProbe {
 }
 
 fn candidate(desc: IrqDesc) -> Arc<IrqLine> {
-    let mut entry = IrqStateDesc::new(desc);
+    let mut entry = IrqStateDesc::test_new(desc);
     entry.msi_reservation = Some(MsiReservation::for_test(desc.hwirq));
     entry.msi_withdrawal = Some(super::PreparedWithdrawal::new(desc.hwirq).unwrap());
     Arc::new(IrqLine::new(entry))
@@ -171,7 +175,7 @@ fn withdrawn_line_cannot_be_republished_or_accept_actions() {
                 .is_none()
         );
         assert_eq!(entry.action_count(), 0);
-        assert_eq!(entry.in_flight(), 0);
+        assert!(!entry.is_running);
     }
     // Reusing a logical number requires a fresh identity, not the old owner.
     let successor = candidate(desc);

@@ -473,3 +473,12 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
 - [ ] 修改 `fp-simd` feature 门控代码后验证所有架构的一致性。
 - [ ] 修改 x86_64 `orig_rax` 或 syscall 重启逻辑后验证 `excp.S` 中的 push/pop 序列与 `ExceptionContext` 布局一致。
 - [ ] 新增可重启 syscall 错误码时同步更新 `syscall_restart_error()` 中的常量列表。
+
+## Interrupt Callback Safety
+
+`src/excp.rs` exposes unsafe IRQ/NMI callback pointers. Invocation sites in each
+architecture's `excp.rs` and `userspace.rs` rely on hardware trap masking and
+saved CPU state; user-return callbacks must retain the existing IRQ-off contract.
+The captured stack remains valid across the ordinary HAL scheduling checkpoint.
+NMI entry retains ordinary IRQ/migration exclusion until return and does not
+authorize scheduling. Page-fault callbacks do not inherit this unsafe signature.

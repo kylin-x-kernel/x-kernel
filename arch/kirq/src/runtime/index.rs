@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 //! Owning IRQ indexes. Registry exclusion serializes writers, RCU protects readers.
+//!
+//! This module owns XArray preparation and deferred storage retirement, not
+//! descriptor compatibility policy. Registry commits coordinate both indexes
+//! under exclusion; dispatch uses their retained or borrowed Line identities.
+//! An index lifetime never substitutes for action execution synchronization.
 
 use alloc::sync::Arc;
 
@@ -168,6 +173,9 @@ impl LineIndex {
     }
 }
 
+/// Private allocation budget for a registry commit across two indexes.
+/// Construction changes no published state; the registry consumes each prepared
+/// insertion only after validating the complete descriptor transaction.
 pub(super) struct PreparedPublication {
     pub(super) logical: Option<PreparedInsert>,
     pub(super) domain: Option<PreparedInsert>,
@@ -207,6 +215,8 @@ impl PreparedPublication {
 unittest::path_mod_test!(tests_preparation, "../../ut-tests/index_preparation.rs");
 
 #[cfg(any(target_arch = "x86_64", unittest))]
+/// Allocation-time resources for eventual MSI removal from both indexes.
+/// Stored with the Line so a valid release does not introduce a new OOM path.
 pub(super) struct PreparedWithdrawal {
     pub(super) logical: PreparedRemove<Arc<IrqLine>>,
     pub(super) domain: PreparedRemove<Arc<IrqLine>>,
@@ -232,6 +242,8 @@ impl PreparedWithdrawal {
 }
 
 #[cfg(any(target_arch = "x86_64", unittest))]
+/// Detached index owners awaiting RCU retirement outside registry exclusion.
+/// This is storage reclamation, not device shutdown or an action drain.
 pub(super) struct WithdrawnIndexes {
     pub(super) logical: Option<PendingRetirement<Arc<IrqLine>>>,
     pub(super) domain: Option<PendingRetirement<Arc<IrqLine>>>,

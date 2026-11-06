@@ -102,8 +102,7 @@ fn select_x86_flow(
         return Ok(IrqFlow::Edge(&MSI_EDGE));
     }
     if desc.domain != Some(IO_APIC_DOMAIN) && desc.controller != IrqController::IoApic {
-        // Local vectors have a distinct per-CPU lifecycle, not shared edge flow.
-        return Ok(IrqFlow::Legacy);
+        return Err(unsupported);
     }
     if !is_io_source(desc)
         || desc.affinity != kirq::IrqAffinity::Any
@@ -176,19 +175,24 @@ fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     }
 }
 
-fn dispatch_irq(vector: usize) -> Option<kirq::PendingIrq> {
+/// # Safety
+/// The caller must uphold [`kirq::IntrManagerIf::dispatch_irq`]'s contract.
+unsafe fn dispatch_irq(vector: usize) -> Option<kirq::PendingIrq> {
     dispatch_irq_with(
         vector,
-        dispatch_regular_irq,
+        |vector| {
+            // SAFETY: the caller supplies the captured vector on the entry CPU.
+            unsafe { dispatch_regular_irq(vector) }
+        },
         x86_apic::handle_error_interrupt,
     )
 }
 
-fn dispatch_irq_with(
+fn dispatch_irq_with<T>(
     vector: usize,
-    dispatch_regular_fn: impl FnOnce(usize) -> Option<kirq::PendingIrq>,
+    dispatch_regular_fn: impl FnOnce(usize) -> Option<T>,
     handle_error_fn: impl FnOnce(),
-) -> Option<kirq::PendingIrq> {
+) -> Option<T> {
     match vector {
         // The dedicated spurious vector has no ISR entry to acknowledge.
         value if value == usize::from(x86_apic::APIC_SPURIOUS_VECTOR) => None,
@@ -200,13 +204,17 @@ fn dispatch_irq_with(
     }
 }
 
-fn dispatch_regular_irq(vector: usize) -> Option<kirq::PendingIrq> {
+/// # Safety
+/// The caller must uphold [`kirq::IntrManagerIf::dispatch_irq`]'s contract.
+unsafe fn dispatch_regular_irq(vector: usize) -> Option<kirq::PendingIrq> {
     let (source, completion_cookie) = prepare_regular_delivery(
         vector,
         x86_apic::irq_trigger_mode,
         x86_apic::end_of_interrupt,
     )?;
-    Some(kirq::PendingIrq::new(source, completion_cookie))
+    // SAFETY: classification transfers this vector's unique remaining EOI
+    // obligation, or its no-op sentinel, under the caller's entry exclusion.
+    Some(unsafe { kirq::PendingIrq::new(source, completion_cookie) })
 }
 
 // Keep classification and early EOI in one path. The returned cookie transfers
@@ -279,13 +287,22 @@ impl kirq::IntrManagerIf {
         enable(desc.hwirq, enabled);
     }
 
-    fn dispatch_irq(vector: usize) -> Option<kirq::Virq> {
-        kirq::generic_handle_irq(dispatch_irq(vector)?)
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::dispatch_irq`]'s contract.
+    unsafe fn dispatch_irq(vector: usize) -> Option<kirq::Virq> {
+        // SAFETY: the captured vector is claimed and consumed exactly once
+        // within the facade caller's hardirq and CPU/IRQ exclusion.
+        let pending = unsafe { dispatch_irq(vector)? };
+        kirq::generic_handle_irq(pending)
     }
 
-    fn dispatch_nmi(_irq: usize) {}
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::dispatch_nmi`]'s contract.
+    unsafe fn dispatch_nmi(_irq: usize) {}
 
-    fn complete_irq(completion_cookie: usize) {
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::complete_irq`]'s contract.
+    unsafe fn complete_irq(completion_cookie: usize) {
         complete_delivery(completion_cookie, x86_apic::end_of_interrupt);
     }
 

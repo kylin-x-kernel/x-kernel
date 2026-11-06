@@ -39,12 +39,9 @@ pub(super) fn record_handlers_ready() {
 }
 
 pub(super) fn record_descriptors_ready(timer_irq: usize) {
-    let timer_matches = kirq::descriptor(timer_irq)
-        .is_some_and(|desc| desc.logical_irq() == Some(timer_irq) && desc.hwirq == timer_irq);
+    let timer_matches = fixed_descriptor_is_percpu(timer_irq);
     #[cfg(feature = "ipi")]
-    let ipi_matches = kirq::descriptor(kbuild_config::IPI_IRQ).is_some_and(|desc| {
-        desc.logical_irq() == Some(kbuild_config::IPI_IRQ) && desc.hwirq == kbuild_config::IPI_IRQ
-    });
+    let ipi_matches = fixed_descriptor_is_percpu(kbuild_config::IPI_IRQ);
     #[cfg(not(feature = "ipi"))]
     let ipi_matches = true;
     if karch::local_irq_enabled()
@@ -55,6 +52,14 @@ pub(super) fn record_descriptors_ready(timer_irq: usize) {
     {
         HAS_INVALID_ORDER.store(true, Ordering::Release);
     }
+}
+
+fn fixed_descriptor_is_percpu(irq: usize) -> bool {
+    kirq::descriptor(irq).is_some_and(|desc| {
+        desc.logical_irq() == Some(irq)
+            && desc.hwirq == irq
+            && matches!(kirq::IntrManagerIf::select_flow(desc), Ok(kirq::IrqFlow::PerCpu))
+    })
 }
 
 pub(super) fn record_activation_entry() {

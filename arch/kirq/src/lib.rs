@@ -9,6 +9,34 @@
 //! generic interrupt-controller interface. Architecture trap entry remains
 //! outside this crate; HAL adapters call [`handle_irq`] and [`handle_nmi`] from
 //! their exception handlers.
+//!
+//! # Responsibilities
+//! Mapping gives a source a logical identity; registration installs a consumer;
+//! dispatch borrows that consumer only for an admitted execution. These are
+//! separate lifetimes: freeing an action does not dispose of its mapping, and
+//! controller completion does not prove that the source has stopped producing.
+//! Device and per-CPU source owners retain that shutdown responsibility.
+//!
+//! # Interfaces
+//! - Drivers use [`try_map`], registration, enable/disable, and synchronous free.
+//!   Checked operations report context and ownership errors instead of hiding them.
+//! - Architecture adapters enter through [`handle_irq`] / [`handle_nmi`]; irqchip
+//!   providers implement [`IntrManagerIf`] and transfer claims using [`PendingIrq`].
+//!   These entry functions and claim construction are unsafe: the adapter must
+//!   prove captured-source provenance and retain initialized-CPU, IRQ and
+//!   migration exclusion through the matching completion. A driver must not
+//!   call them as a substitute for requesting an interrupt.
+//!   [`generic_handle_irq`] and [`generic_handle_nmi`] safely consume an existing
+//!   claim; they do not accept raw cookies or create hardware-entry provenance.
+//! - [`softirq`] owns fixed-vector bottom halves; [`irq_work`] provides a distinct
+//!   NMI-to-hardirq handoff. Neither is a sleepable worker implementation.
+//!
+//! # Internal ownership
+//! `model` defines values, `domain` owns hardware-number indexes, `backend`
+//! defines controller contracts, and `runtime` owns Line lifecycle transactions
+//! and dispatch. `bottom_half` owns execution context and the IRQ-tail runner.
+//! Internal modules are not alternative public entry points. The explicit
+//! exports below keep implementation moves separate from API changes.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -29,11 +57,20 @@ pub(crate) use backend::platform;
 pub use backend::{
     msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix},
     platform::{
-        EdgeChip, FasteoiChip, FasteoiResend, GuestIrqInterface, IrqFlow, LevelChip,
-        PerCpuForwardingChip, PerCpuForwardingState, PerCpuNmiChip,
+        EdgeChip, FasteoiChip, FasteoiResend, GuestIrqInterface, Handler, IntrManagerIf, IrqFlow,
+        LevelChip, PendingIrq, PerCpuForwardingChip, PerCpuForwardingState, PerCpuNmiChip,
+        TargetCpu, notify_cpu, set_prio,
     },
 };
-pub use bottom_half::{context, deferred, lifecycle, softirq};
+pub(crate) use bottom_half::deferred;
+pub use bottom_half::{
+    context, lifecycle,
+    lifecycle::{
+        IrqLifecycleHook, IrqLifecycleHooks, clear_irq_lifecycle_hooks,
+        register_irq_lifecycle_hooks,
+    },
+    softirq,
+};
 pub use domain::IrqRef;
 pub(crate) use model::desc;
 pub use model::desc::{
@@ -42,8 +79,30 @@ pub use model::desc::{
     IrqSource, IrqSpec, IrqTrigger, MSI_DOMAIN, PLIC_ROOT_DOMAIN, Virq, gic_edge_irq_desc,
     gic_irq_desc, gic_level_irq_desc, io_apic_irq_desc, plic_irq_desc,
 };
-pub(crate) use runtime::{action, dispatch, nmi, state};
-pub use runtime::{manager::*, resend};
+#[cfg(unittest)]
+pub(crate) use runtime::dispatch;
+#[cfg(unittest)]
+pub use runtime::manager::tests_irq;
+pub(crate) use runtime::{action, state};
+pub use runtime::{
+    action::IrqActionToken,
+    entry::{generic_handle_irq, generic_handle_nmi, handle_irq, handle_nmi},
+    manager::{
+        IrqRegisterOptions, PerCpuForwarding, descriptor, disable_irq, disable_irq_nosync, enable,
+        enable_irq, free_irq, free_irq_action, prepare_percpu_forwarding, register,
+        register_disabled, register_shared, synchronize_irq, translate_hwirq, try_disable_irq,
+        try_disable_irq_nosync, try_enable, try_enable_irq, try_free_irq, try_free_irq_action,
+        try_free_percpu_irq, try_map, try_register, try_register_disabled, try_register_percpu,
+        try_register_percpu_startup, try_register_shared, try_register_startup,
+        try_register_with_options, try_synchronize_irq, unregister,
+    },
+    nmi::{
+        NmiShutdown, begin_nmi_shutdown, prepare_percpu_nmi, register_nmi, register_nmi_startup,
+        teardown_percpu_nmi, unregister_nmi,
+    },
+    resend,
+    state::DYNAMIC_VIRQ_BASE,
+};
 
 #[kiface::provide]
 impl kiface_irq_context_api::InterruptContextIf {

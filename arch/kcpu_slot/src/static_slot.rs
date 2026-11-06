@@ -274,8 +274,9 @@ impl<T: 'static> CpuSlotCell<T> {
     ///
     /// Sound only because `T: Sync` and the storage is permanent. Used by
     /// self-hosting code that cannot construct a guard (CPU identity, active
-    /// trapframe atomics); ordinary non-`Sync` payloads must use
-    /// [`Self::get`]/[`Self::get_mut`].
+    /// trapframe atomics); ordinary non-`Sync` payloads use [`Self::get`] for
+    /// guarded shared access. Mutable access is separately governed by
+    /// [`Self::get_mut_unchecked`]'s exclusive-access contract.
     pub fn shared_current(&self) -> &T
     where
         T: Sync,

@@ -73,8 +73,25 @@ Wake routes use per-CPU weak references, not task-observer reference cycles.
 Route preparation serializes sleepable task callers with `ROUTE_REGISTRATION`.
 `FORWARDING` publishes only a fully prepared capability through `LazyInit`;
 IRQ-side readers never acquire the preparation mutex. A contender waits for
-publication or retries after a failed attempt has rolled back its action.
-Preparation must not reenter the gate or hold IRQ/spin guards.
+publication or retries pending rollback before attempting another registration.
+The mutex's pending-rollback flag clears only after `try_free_percpu_irq` returns
+an owner, or after successful forwarding publication. Errors and no-action
+results retain cleanup responsibility and leave forwarding unpublished. The
+returned handler is destroyed after releasing the gate, allowing destructor
+reentry; preparation rechecks publication and pending state after reacquiring it.
+This relies on exclusive VMM ownership of the route, not identity protection
+against unrelated callers replacing its action. Preparation callbacks must not
+reenter the gate or hold IRQ/spin guards.
+The dedicated `kirq::try_register_percpu` entrance rejects a wrong resolved flow
+or enabled local slot before configuration/action publication. This is an
+admission check, not hardware quiescence. The unsafe `try_free_percpu_irq` call
+in `src/vdev/aarch64/irq_route.rs` discharges caller-owned execution exclusion:
+rollback runs under the preparation gate before `FORWARDING` is published,
+and local activation requires that published capability. No action execution
+has been admitted, and competing preparation is excluded. Rejected claims
+borrow no action and complete under KIRQ's Line lock. KIRQ does not supply a
+counted drain. Successful permanent routes
+never use this rollback path; vCPU stop revokes local forwarding instead.
 
 The vGIC's LR snapshot is protected by a per-vCPU `SpinNoPreempt` lock, including
 safe queries and final-stop calls through distinct hooks for the same vCPU.

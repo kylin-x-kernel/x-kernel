@@ -5,10 +5,9 @@
 //! VirtIO PCI transport integration.
 
 use driver_base::DeviceKind;
-#[cfg(target_arch = "x86_64")]
 use driver_os_api::IrqOp;
-#[cfg(not(target_arch = "x86_64"))]
-use driver_os_api::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger};
+#[cfg(any(not(target_arch = "x86_64"), unittest))]
+use driver_os_api::{IrqController, IrqRouteDesc, IrqTrigger};
 use pci::PciConfigAccess;
 #[cfg(not(target_arch = "x86_64"))]
 use pci::legacy_interrupt_route;
@@ -47,6 +46,22 @@ type PciMsixStateOption = Option<PciMsixState>;
 type PciMsixStateOption = Option<()>;
 
 impl PciTransport {
+    /// Permanently close MSI-X delivery and release its vector allocation.
+    ///
+    /// Call after stopping device submissions, ordering already-issued messages,
+    /// and draining/removing every IRQ action, in the provider's sleepable release
+    /// context. This does not stop DMA or drain messages. Do not resume device operations
+    /// after calling it, including after a failed attempt.
+    ///
+    /// # Errors
+    /// On rejection the disabled transport retains its exact allocation for a
+    /// later retry. Drop uses the infallible release contract instead: it must
+    /// not silently discard a rejected allocation. Non-MSI transports are unchanged.
+    #[cfg(target_arch = "x86_64")]
+    pub fn try_release_msix(&mut self) -> driver_os_api::ResResult<()> {
+        self.irq_state.try_release()
+    }
+
     /// Construct a new PCI VirtIO transport.
     pub fn new<H: VirtIoHal, C: ConfigurationAccess>(
         root: &mut PciRoot<C>,
@@ -334,8 +349,7 @@ fn legacy_irq_for_bdf(
     // PCI IRQs at 0x20, aarch64 test DT interrupt-map covers 0x20..0x23.
     cfg_select! {
         target_arch = "loongarch64" => {
-            // LoongArch uses a 1:1 hwirq→virq mapping for these lines.
-            Some(0x10 + (bdf.device & 3) as usize)
+            loongarch_legacy_irq(bdf.device, |desc| irq_provider.map_irq(desc))
         }
         target_arch = "aarch64" => {
             let desc = IrqRouteDesc {
@@ -357,3 +371,20 @@ fn legacy_irq_for_bdf(
         }
     }
 }
+
+#[cfg(any(target_arch = "loongarch64", unittest))]
+fn loongarch_legacy_irq(
+    device: u8,
+    map_irq: impl FnOnce(IrqRouteDesc) -> driver_os_api::ResResult<driver_os_api::IrqResource>,
+) -> Option<usize> {
+    let desc = IrqRouteDesc {
+        hwirq: 0x10 + usize::from(device & 3),
+        trigger: IrqTrigger::LevelHigh,
+        controller: IrqController::LoongArchExtioi,
+        domain: None,
+    };
+    // Even an identity mapping must prepare the host's descriptor and flow.
+    Some(map_irq(desc).ok()?.virq().raw())
+}
+
+unittest::path_mod_test!(pci_irq_unittest, "../ut-tests/pci_irq_unittest.rs");

@@ -6,7 +6,7 @@ This analysis covers the entire crate: `src/lib.rs` (the two public
 attribute macros) and its private modules `src/args.rs`, `src/interface.rs`,
 `src/provide.rs`, `src/naming.rs`, `src/errors.rs`, and `src/validator.rs`,
 including the code those macros generate. The test fixtures under
-`test_crates/` are separate crates exercised only by `cargo test --doc`
+`test_crates/` are separate crates exercised by host integration tests
 and are excluded from this analysis; they contain no production wiring.
 External responsibility: the macros emit no runtime component, so runtime
 isolation, scheduling, and memory safety of provider bodies belong to the
@@ -25,12 +25,13 @@ attributes):
   `unsafe { extern_fn(args) }` with a `SAFETY:` comment.
 - Provider side (`src/provide.rs`): each method is emitted as
   `#[unsafe(export_name = "__kiface_{namespace}_{Interface}_{method}")]
-  extern "Rust" fn ...` with its original body.
+  [unsafe] extern "Rust" fn ...` with its original body and safety qualifier.
 
 Safety of the generated unsafe rests on two locally checked facts:
-(1) `src/provide.rs` emits a `const _: fn(arg_types) -> output =
-Interface::method;` type-check per method, so a provider that does not
-match the facade signature fails to compile on the provider side; and
+(1) `src/provide.rs` checks a `fn` or `unsafe fn` pointer against the facade
+signature and compares the generated per-method safety marker. This rejects
+qualifier mismatches even where safe-to-unsafe pointer coercion would otherwise
+succeed. A provider that does not match fails to compile; and
 (2) both symbol names derive from the same `src/naming.rs` rule
 (`__kiface_{namespace}_{Interface}_{method}`), so the definition and
 provider sides can only meet when namespace, interface name, and method
@@ -39,6 +40,11 @@ covered by the invariants below.
 
 `kiface` is a build-time wiring mechanism. It does not provide an isolation
 boundary; all providers run in the same kernel address space as their callers.
+For an unsafe facade method, its caller must uphold the interface owner's
+`# Safety` contract before crossing the generated extern boundary. The provider
+may rely on that contract but must use explicit justified unsafe blocks for
+unsafe operations in its body. The macros do not establish IRQ exclusion,
+validate raw-pointer provenance or enforce dynamic execution context.
 
 ## Invariants
 
@@ -58,8 +64,8 @@ best-effort dependency into a hard link dependency.
 
 ## Current Restrictions
 
-The first `interface` implementation rejects generics, receivers, unsafe
-methods, async methods, extern methods, variadic methods, and default bodies.
+The `interface` implementation rejects generics, receivers, async methods,
+explicit extern methods, variadic methods, and default bodies.
 These restrictions keep the generated ABI surface small while the crate is used
 to replace existing single-provider `crate_interface` and accidental `linkme`
 entry wiring.

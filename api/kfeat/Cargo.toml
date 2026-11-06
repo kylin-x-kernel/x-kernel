@@ -70,7 +70,7 @@ vmm = [
 
 
 # Interrupts
-ipi = ["kipi/reschedule", "kipi/timer-reprogram", "kruntime/ipi", "ktask/ipi", "krcu/ipi"]
+ipi = ["kipi/reschedule", "kipi/timer-reprogram", "kruntime/ipi", "ktask/ipi", "krcu/ipi", "kplat-aarch64?/ipi"]
 dma-trace = ["kdriver/dma-trace"]
 dev_log = ["devfs/dev-log"]
 dice = [

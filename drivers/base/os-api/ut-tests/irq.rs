@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use unittest::{assert_eq, def_test};
 
@@ -11,6 +12,81 @@ use crate::{
 };
 
 struct MockIrqProvider;
+
+struct MockMsiProvider {
+    is_busy: AtomicBool,
+    releases: AtomicUsize,
+}
+
+impl IrqOp for MockMsiProvider {
+    fn request_irq(
+        &self,
+        irq: IrqResource,
+        handler: Arc<dyn IrqHandler>,
+    ) -> ResResult<IrqHandlerToken> {
+        MockIrqProvider.request_irq(irq, handler)
+    }
+
+    fn release_irq(&self, _irq: IrqResource, _token: IrqHandlerToken) {}
+
+    fn set_irq_enabled(&self, _irq: IrqResource, _enabled: bool) {}
+
+    fn try_free_msix(
+        &self,
+        resource: crate::MsiResource,
+    ) -> Result<(), (crate::ResError, crate::MsiResource)> {
+        // Private sequential fixture: these atomics satisfy the provider's
+        // Sync bound, not a cross-thread publication protocol.
+        if self.is_busy.load(Ordering::Relaxed) {
+            return Err((crate::ResError::Busy, resource));
+        }
+        self.releases.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+fn msi_resource() -> crate::MsiResource {
+    crate::MsiResource::new(
+        IrqResource::plain(Virq::new(41), crate::IrqTrigger::EdgeRising),
+        crate::MsiMessage::new(0xfee0_1000, 0x52),
+    )
+}
+
+#[def_test]
+fn default_msi_release_returns_original_resource() {
+    let (error, resource) = MockIrqProvider.try_free_msix(msi_resource()).unwrap_err();
+    assert_eq!(error, crate::ResError::Unsupported);
+    assert_eq!(resource, msi_resource());
+    assert_eq!(
+        MockIrqProvider.try_free_msix(resource),
+        Err((crate::ResError::Unsupported, msi_resource()))
+    );
+}
+
+#[def_test]
+fn rejected_msi_release_retains_ownership_for_explicit_retry() {
+    let provider = MockMsiProvider {
+        is_busy: AtomicBool::new(true),
+        releases: AtomicUsize::new(0),
+    };
+    let (error, resource) = provider.try_free_msix(msi_resource()).unwrap_err();
+    assert_eq!(error, crate::ResError::Busy);
+    assert_eq!(resource, msi_resource());
+    assert_eq!(provider.releases.load(Ordering::Relaxed), 0);
+    provider.is_busy.store(false, Ordering::Relaxed);
+    assert_eq!(provider.try_free_msix(resource), Ok(()));
+    assert_eq!(provider.releases.load(Ordering::Relaxed), 1);
+}
+
+#[def_test]
+fn terminal_msi_cleanup_delegates_to_fallible_release() {
+    let provider = MockMsiProvider {
+        is_busy: AtomicBool::new(false),
+        releases: AtomicUsize::new(0),
+    };
+    provider.free_msix(msi_resource());
+    assert_eq!(provider.releases.load(Ordering::Relaxed), 1);
+}
 
 #[def_test]
 fn unsupported_threaded_requests_do_not_invoke_callbacks() {

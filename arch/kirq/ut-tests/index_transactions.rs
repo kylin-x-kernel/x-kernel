@@ -115,13 +115,13 @@ fn partial_publication_and_withdrawal_keep_admission_closed() {
         .with_domain(TEST_DOMAIN)
         .with_virq(virq)
         .with_flags(IrqFlags::MSI);
-    let published = crate::try_map(desc);
+    let binding = crate::runtime::manager::tests_irq::SyntheticLine::mapped(desc);
     let (visits, valid) = {
         let state = IRQ_STATE.lock();
         let probe = state.index_observer.as_ref().unwrap();
         (probe.visits, probe.is_valid)
     };
-    assert_eq!(published, Ok(virq));
+    assert_eq!(binding.virq(), virq);
     assert_eq!(visits, 1);
     assert!(valid);
     let line = IRQ_STATE.lock().descs.get(&virq).unwrap();

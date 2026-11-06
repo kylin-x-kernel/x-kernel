@@ -24,8 +24,14 @@ device shutdown is a framework/driver responsibility, not inferred from Drop.
 | DMA still running at drop | Driver stops hardware before cleanup |
 | Invalid release context | Caller follows host provider's synchronous contract |
 
-The existing consuming MSI free API cannot retain retryable ownership after
-rejection. Network close/reset and legacy remove-error continuation are separate
-known limitations, not repaired by migration. Framework cleanup registration
+MSI `try_free_msix` rejection must have no release side effects and returns the
+unchanged resource to its owner. Only success consumes ownership. The terminal
+`free_msix` wrapper panics on rejection; it is not a retry or recovery mechanism.
+The caller must stop the source, order outstanding messages, detach/drain actions,
+disable the line and serialize ownership before task-context release. No spinlock,
+IRQ/preemption exclusion or RCU read scope may span release; host retirement
+services must be running. Neither this contract nor action drain proves DMA stop.
+Network close/reset, fallible action teardown and legacy remove-error continuation
+remain separate limitations. Framework cleanup registration
 still assumes infallible kernel allocation policy. No credentials, persistent
 data or network protocol state are stored.

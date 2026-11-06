@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use unittest::{assert_eq, def_test};
+use unittest::{assert, assert_eq, def_test};
 
 #[def_test]
 fn guest_interface_requires_disjoint_firmware_virtualization_pages() {
@@ -101,22 +101,23 @@ fn explicit_gic_sources_require_discovered_standard_range() {
 
 #[def_test]
 fn gic_identity_must_not_name_another_controller_or_domain() {
-    use kirq::{IrqController, IrqDesc, IrqDescError, IrqFlow};
+    use kirq::{IrqController, IrqDesc, IrqDescError};
 
     let hwirq = 32;
     for desc in [
         super::level_irq_desc(hwirq).with_controller(IrqController::Plic),
         super::level_irq_desc(hwirq).with_domain(kirq::PLIC_ROOT_DOMAIN),
+        kirq::plic_irq_desc(hwirq),
+        IrqDesc::from_hwirq(hwirq),
     ] {
         assert_eq!(
             super::select_gic_flow(desc, Some(64)),
             Err(IrqDescError::UnsupportedFlow { hwirq })
         );
     }
-    // This gate must not reinterpret software-only fixtures or other backends.
     assert_eq!(
         super::select_gic_flow(IrqDesc::from_virq(0x6000), None),
-        Ok(IrqFlow::Legacy)
+        Err(IrqDescError::UnsupportedFlow { hwirq: 0x6000 })
     );
 }
 
@@ -149,7 +150,7 @@ fn explicit_gic_spis_reject_unsupported_trigger_polarity() {
         }
     }
     // PPI polarity can be fixed by the integration. Do not impose the SPI
-    // policy on private sources or reinterpret undeclared legacy resources.
+    // policy on private sources.
     for hwirq in [0, 15, 16, 31] {
         assert_eq!(
             super::select_gic_flow(super::irq_desc(hwirq, IrqTrigger::LevelLow), Some(64)),
@@ -158,7 +159,7 @@ fn explicit_gic_spis_reject_unsupported_trigger_polarity() {
     }
     assert_eq!(
         super::select_gic_flow(IrqDesc::new(32, IrqTrigger::EdgeFalling), None),
-        Ok(IrqFlow::Legacy)
+        Err(IrqDescError::UnsupportedFlow { hwirq: 32 })
     );
 }
 
@@ -171,9 +172,9 @@ fn spi_flow_excludes_private_nmi_and_unsupported_routing() {
             Ok(IrqFlow::PerCpu)
         );
     }
-    // PMU registration adds PER_CPU before local NMI preparation. Keeping
-    // these PPIs on Legacy would bypass per-CPU shutdown accounting entirely.
-    for hwirq in [16, 23, 31] {
+    // SGI15 irq_work and PMU PPIs must use the claiming CPU's enable state,
+    // regardless of whether registration explicitly supplied PER_CPU.
+    for hwirq in [0, 15, 16, 23, 27, 31] {
         assert_eq!(
             super::select_gic_flow(
                 super::level_irq_desc(hwirq).with_flags(IrqFlags::PER_CPU),
@@ -182,20 +183,16 @@ fn spi_flow_excludes_private_nmi_and_unsupported_routing() {
             Ok(IrqFlow::PerCpu)
         );
     }
-    // register_nmi tags its fallback PER_CPU before flow selection, including
-    // SPI metadata. This is not an ordinary-source hardware capability.
     let spi = super::edge_irq_desc(32);
-    assert_eq!(
-        super::select_gic_flow(
-            super::edge_irq_desc(15).with_flags(IrqFlags::PER_CPU),
-            Some(64)
-        ),
-        Ok(IrqFlow::Legacy)
-    );
-    assert_eq!(
-        super::select_gic_flow(spi.with_flags(IrqFlags::PER_CPU), Some(64)),
-        Ok(IrqFlow::Legacy)
-    );
+    for hwirq in [32, 63, 1019, 1020] {
+        assert_eq!(
+            super::select_gic_flow(
+                super::edge_irq_desc(hwirq).with_flags(IrqFlags::PER_CPU),
+                Some(1020)
+            ),
+            Err(IrqDescError::UnsupportedFlow { hwirq })
+        );
+    }
     for flags in [
         IrqFlags::empty(),
         IrqFlags::SHARED,
@@ -231,6 +228,39 @@ fn spi_flow_excludes_private_nmi_and_unsupported_routing() {
         ),
         true
     );
+}
+
+#[def_test]
+fn raw_private_sources_use_local_control_without_granting_special_capabilities() {
+    use kirq::{IrqDesc, IrqFlags, IrqFlow};
+
+    for hwirq in [0, 15, 16, 27, 31] {
+        for flags in [IrqFlags::empty(), IrqFlags::PER_CPU] {
+            let desc = IrqDesc::from_hwirq(hwirq).with_flags(flags);
+            assert_eq!(super::select_gic_flow(desc, None), Ok(IrqFlow::PerCpu));
+            assert!(kirq::IntrManagerIf::percpu_nmi(desc).is_none());
+            assert!(kirq::IntrManagerIf::percpu_forwarding(desc).is_none());
+        }
+    }
+    for hwirq in [0, 15] {
+        let desc = super::edge_irq_desc(hwirq).with_flags(IrqFlags::PER_CPU);
+        assert_eq!(super::select_gic_flow(desc, Some(64)), Ok(IrqFlow::PerCpu));
+        assert!(kirq::IntrManagerIf::percpu_nmi(desc).is_none());
+        assert!(kirq::IntrManagerIf::percpu_forwarding(desc).is_none());
+    }
+    // On each supported backend, a real PPI must still expose its capability;
+    // the negative SGI checks above must not pass merely because all are absent.
+    match super::active_version() {
+        super::GicVersion::V2 => {
+            assert!(kirq::IntrManagerIf::percpu_forwarding(super::level_irq_desc(27)).is_some())
+        }
+        super::GicVersion::V3 => {
+            #[cfg(any(feature = "nmi-pseudo", feature = "nmi-hardware"))]
+            if kplat::nm_irq::NmiMechanismIf::mode() != kplat::nm_irq::NmiMode::None {
+                assert!(kirq::IntrManagerIf::percpu_nmi(super::level_irq_desc(23)).is_some());
+            }
+        }
+    }
 }
 
 #[def_test]

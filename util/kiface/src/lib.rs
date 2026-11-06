@@ -32,6 +32,32 @@
 //! an interface to break a dependency cycle, correct any misplaced ownership;
 //! use a domain API only for the reverse calls that remain. See
 //! `docs/design.md`, "Interface Ownership and Dependency Rules", for the policy.
+//!
+//! # Unsafe contracts
+//!
+//! An `unsafe fn` remains unsafe on the facade and provider. The contract owner
+//! documents caller obligations in `# Safety`; macros do not validate runtime
+//! execution context. Providers must repeat the safety qualifier exactly.
+//!
+//! ```compile_fail,E0133
+//! #[kiface::interface]
+//! pub trait InterruptEntry { unsafe fn enter(); }
+//! fn invalid_caller() { InterruptEntry::enter(); }
+//! ```
+//!
+//! ```compile_fail
+//! #[kiface::interface]
+//! pub trait SafeOperation { fn run(); }
+//! #[kiface::provide]
+//! impl SafeOperation { unsafe fn run() {} }
+//! ```
+//!
+//! ```compile_fail
+//! #[kiface::interface]
+//! pub trait UnsafeOperation { unsafe fn run(); }
+//! #[kiface::provide]
+//! impl UnsafeOperation { fn run() {} }
+//! ```
 
 use proc_macro::TokenStream;
 use syn::{ItemImpl, ItemTrait, parse_macro_input};

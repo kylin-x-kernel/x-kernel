@@ -906,7 +906,7 @@ fn init_interrupt() {
     }
     #[cfg(unittest)]
     tests_irq_startup::record_descriptors_ready(timer_irq);
-    let timer_registration = kirq::try_register_startup(
+    let timer_registration = kirq::try_register_percpu_startup(
         timer_irq,
         alloc::sync::Arc::new(|_| {
             #[cfg(feature = "arm-timer-resume-fixup")]
@@ -914,7 +914,6 @@ fn init_interrupt() {
             ktask::on_timer_fire();
             kirq::IrqEvent::HANDLED
         }),
-        kirq::IrqRegisterOptions::disabled(),
     );
     #[expect(
         clippy::panic,
@@ -926,7 +925,7 @@ fn init_interrupt() {
     }
 
     #[cfg(feature = "ipi")]
-    let ipi_registration = kirq::try_register_startup(
+    let ipi_registration = kirq::try_register_percpu_startup(
         kbuild_config::IPI_IRQ,
         alloc::sync::Arc::new(|_| {
             #[cfg(feature = "arm-timer-resume-fixup")]
@@ -935,7 +934,6 @@ fn init_interrupt() {
             kipi::ipi_handler();
             kirq::IrqEvent::HANDLED
         }),
-        kirq::IrqRegisterOptions::disabled(),
     );
     #[cfg(feature = "ipi")]
     #[expect(

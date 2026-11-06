@@ -2,10 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Entry watching/context balance with synthetic controller dispatch.
+
+use krcu_core::RcuContextIf;
 use unittest::{assert, assert_eq, def_test};
 
-use super::{RcuContextIf, handle_irq_with, handle_nmi_with, with_nmi_context};
-use crate::context;
+use super::{handle_irq_with, handle_nmi_with};
+use crate::{context, runtime::rcu::with_nmi_context};
 
 #[def_test]
 fn dedicated_nmi_dispatch_balances_watching_without_a_claim() {

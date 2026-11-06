@@ -442,3 +442,15 @@ RISC-V 的 `sstatus.FS` 字段跟踪 FP 状态（Off/Initial/Clean/Dirty）。
 per-CPU 活跃 trapframe 指针为前一个值。调度器在当前 CPU 切离安装该指针的任务前
 会挂起并清空本 CPU slot，任务被切回后恢复到新的当前 CPU，避免旧 CPU stale 标记
 和恢复后 trap handler 后半段缺失异常上下文标记。
+
+## Interrupt Callback Boundary
+
+`excp::IRQ` and `excp::NMI` store `unsafe fn(usize) -> bool` callbacks. The
+architecture owns captured trap state and ordinary IRQ exclusion before invoking
+the HAL adapter; the callback type does not permit an arbitrary safe Rust call
+to impersonate an interrupt. Kernel and user-return call sites retain their
+existing entry masks. Ordinary deferred work may briefly enable IRQs after
+claim completion and must restore the mask before return. The ordinary adapter
+owns its completed-IRQ scheduling tail;
+dedicated NMI callbacks must return without scheduling. Page-fault callbacks
+retain their separate safe signature.

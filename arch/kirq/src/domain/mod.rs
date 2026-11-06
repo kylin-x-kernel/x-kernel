@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 //! Domain-owned RCU indexes. Entries retain the same Line as the logical directory.
+//!
+//! This module selects the static hardware-number namespace and its fallback
+//! policy. Registry transactions publish into these indexes; domain lookup
+//! neither installs actions nor grants permission to service a source. Firmware
+//! parsing and concrete interrupt-controller setup are outside this module.
 
 use alloc::sync::Arc;
 
@@ -13,6 +18,8 @@ use crate::{
     runtime::state::IrqLine,
 };
 
+/// Static hardware-number namespace retaining the registry's original Lines.
+/// Numeric identity fallback is a lookup policy, not implicit flow binding.
 pub(crate) struct IrqDomain {
     pub(crate) lines: XArray<Arc<IrqLine>>,
     is_identity: bool,

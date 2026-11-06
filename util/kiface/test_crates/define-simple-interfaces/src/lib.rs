@@ -7,6 +7,16 @@
 
 use kiface::interface;
 
+/// An unsafe contract crossing a crate and symbol namespace boundary.
+#[interface(namespace = BorrowedNs)]
+pub trait BorrowedIf {
+    /// Reads the caller's value.
+    ///
+    /// # Safety
+    /// `value` must point to a readable aligned usize throughout the call.
+    unsafe fn read(value: *const usize) -> usize;
+}
+
 /// A simple interface with basic associated functions.
 #[interface]
 pub trait SimpleIf {

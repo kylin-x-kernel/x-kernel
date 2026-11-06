@@ -267,14 +267,17 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 1. 读取 PCI 配置空间，获取设备类型信息
 2. 通过 `virtio_device_type()` 判断是否为 VirtIO 设备，再通过 `as_device_kind()` 映射为 `DeviceKind`
-3. x86_64 架构：尝试 MSI-X 设置（当前回退到 legacy IRQ）
-   - 查找 MSI-X capability，分配 CPU 中断向量，配置 MSI-X 表项
-   - 若 MSI-X 不可用或向量耗尽，读取 Interrupt Line 寄存器获取 legacy IRQ
-   - 通过 `kirq::try_map()` 将硬件 IRQ 映射为虚拟 IRQ
+3. On x86_64, network devices attempt MSI-X setup through `IrqOp`.
+   - Discover the capability, allocate a vector and program the MSI-X table.
+   - If unavailable, use the PCI Interrupt Line fallback through `IrqOp::map_irq`.
+   - Other device classes currently keep their legacy IRQ path.
 4. 其他架构：通过设备树或固定映射获取 IRQ
    - aarch64：`pci::legacy_interrupt_route()` 获取设备树路由，按触发类型创建 GIC 描述符
    - riscv64：映射为 PLIC 中断
-   - loongarch64：直接使用硬件 IRQ 号
+   - loongarch64: the static INTx fallback maps `0x10 + device % 4` through
+     `IrqOp::map_irq` as `LoongArchExtioi` / `LevelHigh`, without a domain.
+     It returns the provider's virtual IRQ, not the raw hardware number;
+     mapping failure leaves the IRQ absent.
 5. 屏蔽输入设备及当前仅轮询的 vsock 路径所使用的 legacy INTx，随后返回
    `(DeviceKind, PciTransport, irq)`。host 集成层仅在输入设备的共享中断处理程序
    注册完成后解除其 INTx 屏蔽；vsock 的 INTx 保持屏蔽。
@@ -528,6 +531,38 @@ host IRQ 核心或工作队列。
 `NET_IRQ_GUARDS` 持有 `DevIrq` guard，确保设备 Drop 时自动注销中断。
 
 ## Drop / 资源释放
+
+### MSI-X allocation ownership
+
+`PciMsixState` retains the exact `MsiResource` returned by its provider. A
+configuration/vector failure disables MSI-X and moves that owner into
+`PciIrqState::Failed(Some(...))`; it does not release a vector that might still
+have an action installed. Repeating failure cannot discard the owner.
+
+The explicit x86 `PciTransport::try_release_msix` entry permanently closes
+MSI-X delivery before asking `IrqOp::try_free_msix` to release the allocation.
+Success consumes the allocation and leaves a terminal failed/closed transport.
+Rejection returns the original resource to the disabled transport for retry;
+it cannot resume config/queue vector setup or reactivate MSI-X. Repeated release
+after success is a no-op. A legacy transport is unchanged.
+
+The caller must first stop submissions, establish device/message quiescence,
+and detach/drain all IRQ actions in sleepable task context. MSI-X masking alone
+does not establish DMA or outstanding-message quiescence. The current net Drop
+removes its registration before its transport fields are dropped, but this is
+not a general hot-unplug/reset protocol for all device classes.
+
+Transport Drop and initialization rollback have no error-return channel. They
+use the provider's infallible `free_msix` contract, which does not return after
+a rejected release. The default wrapper is fail-stop, not a recovery queue or
+a promise of eventual cleanup. Callers requiring recovery must retain their
+transport and use explicit release before Drop. Raw transport construction and
+table-programming rollback occur before action registration; their normal
+release still requires the provider's valid task context.
+
+`ut-tests/msix_release.rs` checks configuration failure, repeated failure,
+rejected release and retry against a private fake provider and RAM-backed
+configuration space. It does not claim hardware message-drain coverage.
 
 `VirtIoNetDev` 实现了自定义 `Drop`：在设备销毁时调用 `unregister_virtio_net_irq()`
 注销 IRQ 回调，释放 `NET_IRQ_GUARDS` 中对应的 guard。其他设备适配器未实现自定义

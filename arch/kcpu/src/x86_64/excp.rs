@@ -66,7 +66,9 @@ fn x86_trap_handler(tf: &mut ExceptionContext) {
             );
         }
         IRQ_VECTOR_START..=IRQ_VECTOR_END => {
-            handle_trap!(IRQ, tf.vector as _);
+            // SAFETY: the interrupt gate cleared IF; tf retains this hardware
+            // vector and saved state until the adapter and scheduling tail return.
+            unsafe { handle_trap!(IRQ, tf.vector as _) };
         }
         _ => {
             panic!(

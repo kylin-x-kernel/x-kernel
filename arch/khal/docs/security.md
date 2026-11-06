@@ -210,3 +210,11 @@ restoration consumes only the handler's exact transfer. A live observer keeps
 the page unavailable to another allocation; after the last hold ends, the page
 is reused from the local PCP. IRQ and preemption exclusion makes this reuse
 check deterministic. The tests do not forge raw releases to inspect lifetimes.
+
+## IRQ Entry Safety
+
+The unsafe functions in `src/irq/manager.rs` require the caller to uphold
+`kcpu::excp::{IRQ, NMI}`'s captured-state and IRQ-exclusion contracts. Their
+`NoPreempt` guards add CPU pinning for KIRQ dispatch but do not mask IRQs or
+validate a fabricated vector. The ordinary checkpoint runs only after KIRQ
+completion and context cleanup; dedicated NMI return must not schedule.

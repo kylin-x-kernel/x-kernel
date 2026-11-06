@@ -3,6 +3,12 @@
 // See LICENSES for license details.
 
 //! NMI registration and dispatch state.
+//!
+//! Management publishes a Line-owned handler into prepared CPU-local slots.
+//! Dispatch only borrows that publication under directory RCU; shutdown revokes
+//! local access before recovering the handler in task context. Controller
+//! preparation is distinct from stopping the event producer, which remains the
+//! source owner's responsibility.
 
 use kalloc_types::KBox;
 use kspin::NoPreemptIrqSave;
@@ -109,7 +115,7 @@ fn with_local_nmi(
     if entry.is_retired() || !entry.has_nmi_action() {
         return Err(IrqDescError::NoIrqAction { virq });
     }
-    if entry.flow != crate::IrqFlow::PerCpu {
+    if entry.flow != Some(crate::IrqFlow::PerCpu) {
         return Err(IrqDescError::UnsupportedFlow {
             hwirq: entry.desc.hwirq,
         });
@@ -117,14 +123,15 @@ fn with_local_nmi(
     operation(virq, &line, &mut entry)
 }
 
-/// Registers the sole Line-owned handler for true NMI and ordinary IRQ fallback.
+/// Registers the sole Line-owned handler for NMI-class delivery.
 ///
 /// Requires a previously mapped descriptor and sleepable task context. The
 /// source owner must keep delivery stopped until registration and CPU-local
 /// preparation are complete. This tags the Line PER_CPU, but neither starts the
 /// producer nor enables a CPU's source. Duplicate/regular/shared ownership is
-/// rejected. Only PerCpu flows are supported; ordinary IRQ fallback uses the
-/// same per-CPU preparation and teardown. Hardware
+/// rejected. Only PerCpu flows are supported. Ordinary IRQ dispatch rejects
+/// this action and only completes its claim; the irqchip must select the NMI
+/// entry for NMI-class delivery, including IRQ-on entry. Hardware
 /// configuration failure publishes no handler; partially
 /// written hardware remains the source owner's cleanup responsibility.
 ///
@@ -177,13 +184,15 @@ fn register_nmi_with_flow(
             mode,
             |entry| Ok(entry.can_install_nmi_action()),
             |_, line, entry| {
-                let flow = select_flow(entry.flow);
+                let flow = select_flow(entry.flow.ok_or(IrqDescError::UnsupportedFlow {
+                    hwirq: entry.desc.hwirq,
+                })?);
                 if flow != crate::IrqFlow::PerCpu {
                     return Err(IrqDescError::UnsupportedFlow {
                         hwirq: entry.desc.hwirq,
                     });
                 }
-                entry.flow = flow;
+                entry.flow = Some(flow);
                 if let Err(error) = configure(entry.desc) {
                     entry.mark_configuration_failed();
                     return Err(error);
@@ -283,13 +292,12 @@ pub(super) fn dispatch_nmi_handler(source: IrqRef, scope: &krcu::ReadScope<'_>) 
     let Some(line) = super::index::borrowed(source, scope) else {
         return;
     };
+    let Some(virq) = line.logical_irq() else {
+        return;
+    };
     line.nmi_action.with_current(|handler| {
         let Some(handler) = handler else { return };
-        let hwirq = match source {
-            IrqRef::Domain(_, hwirq) => hwirq,
-            IrqRef::Virq(virq) => virq,
-        };
-        let _ = handler.handle(hwirq);
+        let _ = handler.handle(virq);
     });
 }
 

@@ -329,6 +329,16 @@ simplest possible guest:
 - **Virtual timer residency:** [vcpu-residency.md](vcpu-residency.md) describes
   the task-owned register snapshot and explicit CPU-local forwarding. The
   observer is installed before task publication and owns no pointer into Vcpu.
+  Route setup uses `kirq::try_register_percpu`: the mapped host PPI must resolve
+  to PerCpu flow with every local slot disabled. Registration does not activate
+  delivery. Forwarding preparation failure uses unsafe `try_free_percpu_irq`:
+  the capability is still unpublished, so no local activation or admitted
+  handler exists and no execution drain is needed. The preparation mutex
+  excludes competing setup and retains a pending-rollback flag until
+  removal returns an owner; errors and no-action results block new registration.
+  Later attempts retry cleanup first. Returned handlers are destroyed outside
+  the gate, then preparation rechecks state before retrying registration.
+  Successful preparation publishes the permanent forwarding capability.
 - **Virtual timer**: guest `CNTV_CTL_EL02`/`CNTV_CVAL_EL02` are saved on exit and
   restored on entry; the timer is not disabled on exit because the host IRQ 27
   path observes expiry while this task remains resident. Actual task switch-out

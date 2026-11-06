@@ -2766,7 +2766,6 @@ dependencies = [
  "kmutex",
  "krcu",
  "krcu-core",
- "krcu-list",
  "kspin",
  "kxarray",
  "log",
@@ -4265,6 +4264,7 @@ dependencies = [
  "log",
  "memspace",
  "tock-registers 0.10.1",
+ "unittest",
 ]
 
 [[package]]

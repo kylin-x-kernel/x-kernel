@@ -37,3 +37,28 @@ impl NamespacedInterface {
 fn interface_supports_namespaces() {
     assert_eq!(NamespacedInterface::value(), 7);
 }
+
+#[interface(namespace = unsafe_test)]
+trait BorrowedValue {
+    /// # Safety
+    /// `value` must point to a readable, aligned usize for this call.
+    unsafe fn read(value: *const usize) -> usize;
+}
+
+#[provide(namespace = unsafe_test)]
+impl BorrowedValue {
+    /// # Safety
+    /// The caller supplies a readable aligned usize for this call.
+    unsafe fn read(value: *const usize) -> usize {
+        // SAFETY: the caller supplies a live, aligned usize.
+        unsafe { *value }
+    }
+}
+
+#[test]
+fn unsafe_interface_preserves_signature_and_provider_call() {
+    let read: unsafe fn(*const usize) -> usize = BorrowedValue::read;
+    let value = 42;
+    // SAFETY: value is live and borrowed until the provider returns.
+    assert_eq!(unsafe { read(&value) }, value);
+}

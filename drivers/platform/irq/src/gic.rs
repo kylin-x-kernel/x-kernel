@@ -41,19 +41,13 @@ fn select_gic_flow(
 ) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
     use kirq::{IrqController, IrqDescError, IrqFlow, IrqTrigger};
 
-    if desc.domain.is_none()
-        && desc.controller == IrqController::Unknown
-        && desc.hwirq < 32
-        && desc.hwirq != 27
-        && !desc.flags.contains(kirq::IrqFlags::PER_CPU)
-    {
+    if desc.domain.is_none() && desc.controller == IrqController::Unknown && desc.hwirq < 32 {
         return Ok(IrqFlow::PerCpu);
     }
 
-    // Scope this admission to explicit GIC resources. Directory-only and
-    // unmigrated legacy identities keep their existing provider contract.
+    // External sources require an explicit GIC identity.
     if desc.domain != Some(GIC_ROOT_DOMAIN) && desc.controller != IrqController::Gic {
-        return Ok(IrqFlow::Legacy);
+        return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
     }
     if desc.domain.is_some_and(|domain| domain != GIC_ROOT_DOMAIN)
         || !matches!(desc.controller, IrqController::Unknown | IrqController::Gic)
@@ -67,11 +61,8 @@ fn select_gic_flow(
     if desc.hwirq >= 32 && matches!(desc.trigger, IrqTrigger::EdgeFalling | IrqTrigger::LevelLow) {
         return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
     }
-    // NMI-fallback PPIs now share local enable/disable accounting. Preserve
-    // the existing tagged SGI/SPI contract outside this PPI lifecycle change.
-    if desc.flags.contains(kirq::IrqFlags::PER_CPU) && !(16..32).contains(&desc.hwirq) {
-        return Ok(IrqFlow::Legacy);
-    }
+    // Like Linux gic_irq_domain_map, SGIs and PPIs use local control slots.
+    // NMI preparation and forwarding remain separate PPI-only capabilities.
     if desc.hwirq < 32 {
         return Ok(IrqFlow::PerCpu);
     }
@@ -427,10 +418,14 @@ pub fn enable(irq: usize, enabled: bool) {
 /// register, to select kirq's generic IRQ or NMI handler. GICv2 always uses the
 /// generic IRQ handler. The return value is resolved normal-IRQ metadata for
 /// the outer deferred hook, not a claim classification.
-fn gic_dispatch_irq_from_irqson(_unused: usize) -> Option<kirq::Virq> {
+/// # Safety
+/// The caller must uphold [`kirq::IntrManagerIf::dispatch_irq`]'s contract.
+unsafe fn gic_dispatch_irq_from_irqson(_unused: usize) -> Option<kirq::Virq> {
     match active_version() {
-        GicVersion::V2 => gicv2::dispatch_irq_from_irqson(),
-        GicVersion::V3 => gicv3::dispatch_irq_from_irqson(),
+        // SAFETY: the provider forwards the ordinary entry contract on this CPU.
+        GicVersion::V2 => unsafe { gicv2::dispatch_irq_from_irqson() },
+        // SAFETY: the provider forwards the ordinary entry contract on this CPU.
+        GicVersion::V3 => unsafe { gicv3::dispatch_irq_from_irqson() },
     }
 }
 
@@ -441,22 +436,31 @@ fn gic_dispatch_irq_from_irqson(_unused: usize) -> Option<kirq::Virq> {
 /// the ack; GICv2 merely acks (no pseudo‑NMI support). It does **not** open the
 /// NMI window. A valid claim is dispatched and completed through kirq's generic
 /// NMI helper before this function returns.
-fn gic_dispatch_nmi_from_irqsoff(_unused: usize) {
+/// # Safety
+/// The caller must uphold [`kirq::IntrManagerIf::dispatch_nmi`]'s contract.
+unsafe fn gic_dispatch_nmi_from_irqsoff(_unused: usize) {
     let claim = match active_version() {
         GicVersion::V2 => gicv2::dispatch_irq_from_irqsoff(),
         GicVersion::V3 => gicv3::dispatch_irq_from_irqsoff(),
     };
     if let Some((hwirq, completion_cookie)) = claim {
-        kirq::generic_handle_nmi(kirq::PendingIrq::new(
-            kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, hwirq),
-            completion_cookie,
-        ));
+        // SAFETY: the acknowledged claim is unique and consumed on this CPU
+        // before returning to the caller's IRQ-masked NMI entry.
+        let pending = unsafe {
+            kirq::PendingIrq::new(
+                kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, hwirq),
+                completion_cookie,
+            )
+        };
+        kirq::generic_handle_nmi(pending);
     }
 }
 
 /// Deactivate a previously dispatched interrupt.
 /// PMR is restored by the exception exit path (saved at entry).
-pub fn complete_irq(completion_cookie: usize) {
+/// # Safety
+/// The caller must uphold [`kirq::IntrManagerIf::complete_irq`]'s contract.
+unsafe fn complete_irq(completion_cookie: usize) {
     match active_version() {
         GicVersion::V2 => gicv2::complete_irq(completion_cookie),
         GicVersion::V3 => gicv3::complete_irq(completion_cookie),
@@ -614,18 +618,27 @@ impl kirq::IntrManagerIf {
     ///
     /// The GIC owns claim-time IRQ/NMI classification and invokes the matching
     /// generic handler before returning to the common IRQ-entry tail.
-    fn dispatch_irq(irq: usize) -> Option<kirq::Virq> {
-        crate::gic::gic_dispatch_irq_from_irqson(irq)
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::dispatch_irq`]'s contract.
+    unsafe fn dispatch_irq(irq: usize) -> Option<kirq::Virq> {
+        // SAFETY: the facade caller supplies the ordinary IRQ entry contract.
+        unsafe { crate::gic::gic_dispatch_irq_from_irqson(irq) }
     }
 
     /// NMI path: IRQs were disabled → no lock, no NMI window, PMR protected.
-    fn dispatch_nmi(irq: usize) {
-        crate::gic::gic_dispatch_nmi_from_irqsoff(irq);
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::dispatch_nmi`]'s contract.
+    unsafe fn dispatch_nmi(irq: usize) {
+        // SAFETY: the facade caller supplies the dedicated NMI entry contract.
+        unsafe { crate::gic::gic_dispatch_nmi_from_irqsoff(irq) };
     }
 
     /// Deactivate the interrupt.  PMR is restored by exception exit.
-    fn complete_irq(completion_cookie: usize) {
-        crate::gic::complete_irq(completion_cookie);
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::complete_irq`]'s contract.
+    unsafe fn complete_irq(completion_cookie: usize) {
+        // SAFETY: the facade caller retains the original claim and CPU exclusion.
+        unsafe { crate::gic::complete_irq(completion_cookie) };
     }
 
     fn notify_cpu(interrupt_id: usize, target: kirq::TargetCpu) {

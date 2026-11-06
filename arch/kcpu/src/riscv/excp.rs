@@ -63,7 +63,9 @@ fn riscv_trap_handler(tf: &mut ExceptionContext) {
             }
             Trap::Exception(E::Breakpoint) => handle_breakpoint(&mut tf.sepc),
             Trap::Interrupt(_) => {
-                handle_trap!(IRQ, scause.bits());
+                // SAFETY: supervisor trap entry cleared SIE; the captured
+                // interrupt cause and stack remain valid through the IRQ tail.
+                unsafe { handle_trap!(IRQ, scause.bits()) };
             }
             _ => {
                 panic!(

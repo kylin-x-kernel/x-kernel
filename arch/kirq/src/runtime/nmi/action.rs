@@ -13,6 +13,11 @@ use kalloc_types::KBox;
 
 use crate::platform::Handler;
 
+/// Owns one immutable handler and lends it through CPU-local publication slots.
+/// A slot is a borrow, not another allocation owner. Management serializes
+/// publication/withdrawal; source shutdown and local revocation end all borrows
+/// before task-context destruction. Directory RCU protects the containing Line,
+/// not this handler's retirement protocol.
 pub(in crate::runtime) struct NmiAction {
     owner: AtomicPtr<Handler>,
     local: [AtomicPtr<Handler>; kbuild_config::NR_CPUS],

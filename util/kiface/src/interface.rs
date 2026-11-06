@@ -5,7 +5,7 @@
 //! Implementation of the `#[interface]` macro.
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{Error, ItemTrait, TraitItem};
 
 use crate::{
@@ -55,6 +55,11 @@ pub(crate) fn interface(interface: ItemTrait, args: InterfaceArgs) -> Result<Tok
         let fn_name = &sig.ident;
         let symbol = exported_symbol(namespace, interface_name, fn_name);
         let caller_args = extract_caller_args(sig)?;
+        let safety_marker = format_ident!("__kiface_unsafe_{}", fn_name);
+        let is_unsafe = sig.unsafety.is_some();
+        let cfg_attrs = method_attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"));
 
         extern_decls.push(quote! {
             #(#method_attrs)*
@@ -63,13 +68,22 @@ pub(crate) fn interface(interface: ItemTrait, args: InterfaceArgs) -> Result<Tok
         });
 
         methods.push(quote! {
+            #(#cfg_attrs)*
+            #[doc(hidden)]
+            #[allow(
+                non_upper_case_globals,
+                reason = "CG-024-lint-exceptions: generated safety marker preserves the case-sensitive method identity"
+            )]
+            #vis const #safety_marker: bool = #is_unsafe;
+
             #(#method_attrs)*
             #[inline]
             #vis #sig {
                 // SAFETY: the provider signature is checked against this facade
                 // method by the provider macro's const function-pointer type
                 // check, and the final image must link exactly one matching
-                // exported provider symbol.
+                // exported provider symbol. For unsafe methods the facade
+                // caller also upholds the original interface's safety contract.
                 unsafe { #extern_mod_name::#fn_name(#caller_args) }
             }
         });

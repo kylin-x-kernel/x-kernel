@@ -5,7 +5,12 @@
 //! PMU Counter Configuration Module
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use aarch64_cpu::registers::{CurrentEL, Readable};
+
 use crate::{isb, mrs, msr};
+
+// PMCCFILTR and PMEVTYPER use bit 27 to include Non-secure EL2.
+const INCLUDE_EL2: u64 = 1 << 27;
 
 /// PMU overflow interrupt number (typically PPI 23, so INTID 23).
 pub const PMU_OVERFLOW_IRQ: u32 = 23;
@@ -121,6 +126,8 @@ impl PmuCounter {
     /// Configures a stopped counter, publishes software readiness, then enables
     /// overflow delivery and counting. The caller pins this CPU and serializes
     /// counter reconfiguration; ordinary IRQ masking does not exclude NMI.
+    /// Counting retains the EL0/EL1 policy and includes EL2 when the caller
+    /// runs there, so a VHE host can use the counter as a periodic source.
     pub fn enable(&self) {
         // A reused counter can still contain a near-overflow value. Keep this
         // counter and its interrupt disabled until its period and handler-visible
@@ -141,12 +148,18 @@ impl PmuCounter {
         // Clear any pending overflow on our counter
         msr!(PMOVSCLR_EL0, 1u64 << self.counter_index);
 
-        msr!(PMCCFILTR_EL0, 0u64, "x");
-
-        // If event counter, select event type
+        // VHE does not make EL2 execution count as EL1. Like Linux's
+        // armv8pmu_set_event_filter, explicitly include a host running at EL2.
+        let filter = if CurrentEL.read(CurrentEL::EL) == 2 {
+            INCLUDE_EL2
+        } else {
+            0
+        };
         if let Some(event) = self.event {
             msr!(PMSELR_EL0, self.counter_index, "x");
-            msr!(PMXEVTYPER_EL0, event as u32, "x");
+            msr!(PMXEVTYPER_EL0, u64::from(event as u32) | filter, "x");
+        } else {
+            msr!(PMCCFILTR_EL0, filter, "x");
         }
         self.set_counter();
 

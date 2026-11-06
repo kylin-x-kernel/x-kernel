@@ -280,12 +280,19 @@ pub(super) fn set_prio(irq: usize, priority: u8) {
 
 /// IRQ path: ack + early EOI. GICv2 has no NMI classification.
 /// Mirrors `__gic_handle_irq_from_irqson`.
-pub(super) fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
+/// # Safety
+/// The caller must uphold [`kirq::IntrManagerIf::dispatch_irq`]'s contract.
+pub(super) unsafe fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
     let (hwirq, completion_cookie) = claim_irq()?;
-    kirq::generic_handle_irq(kirq::PendingIrq::new(
-        kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, hwirq),
-        completion_cookie,
-    ))
+    // SAFETY: claim_irq acknowledged this unique source; the caller retains
+    // hardirq context and CPU/IRQ exclusion through dispatch and completion.
+    let pending = unsafe {
+        kirq::PendingIrq::new(
+            kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, hwirq),
+            completion_cookie,
+        )
+    };
+    kirq::generic_handle_irq(pending)
 }
 
 fn claim_irq() -> Option<(usize, usize)> {

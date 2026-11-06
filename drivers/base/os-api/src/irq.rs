@@ -90,6 +90,11 @@ pub enum IrqResource {
 }
 
 /// MSI/MSI-X interrupt resource allocated by the host IRQ core.
+///
+/// This is an explicit allocation identity, not an RAII release guard. Its owner
+/// must return it to the allocating provider after source/action shutdown;
+/// dropping this value alone does not free the vector. [`IrqOp::try_free_msix`]
+/// returns this same identity on rejection so the owner can retain and retry it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct MsiResource {
     /// OS-visible IRQ used for handler registration.
@@ -221,10 +226,47 @@ pub trait IrqOp: Send + Sync {
         Err(ResError::Unsupported)
     }
 
-    /// Release an MSI-X resource previously allocated by [`Self::alloc_msix`].
-    /// Default: no-op.
+    /// Try to release a resource obtained from this provider's [`Self::alloc_msix`].
+    ///
+    /// The caller must stop device message production, order already-issued
+    /// messages, synchronously detach/drain all IRQ actions, and leave the line
+    /// logically disabled. Serialize release against registration and other
+    /// allocation-owner operations. This does not stop DMA or drain actions.
+    /// Call in sleepable task context, not IRQ/NMI context, without spinlocks,
+    /// IRQ/preemption exclusion or RCU read scopes. Host retirement services
+    /// must be running; follow any additional provider context requirements.
+    ///
+    /// Success consumes the resource.
+    ///
+    /// # Errors
+    /// On error there must be no release side
+    /// effects: return the original resource unchanged and still reusable by
+    /// its owner for an explicit retry after correcting the rejection cause.
+    /// No retry is scheduled. The default returns [`ResError::Unsupported`].
+    fn try_free_msix(&self, resource: MsiResource) -> Result<(), (ResError, MsiResource)> {
+        Err((ResError::Unsupported, resource))
+    }
+
+    /// Terminal compatibility cleanup with [`Self::try_free_msix`] preconditions.
+    ///
+    /// Explicit teardown owners must use the fallible operation to retain and
+    /// recover rejected resources. This wrapper neither retries nor implements
+    /// dynamic device removal.
+    ///
+    /// # Panics
+    /// Panics on rejection rather than silently discarding allocation ownership.
     fn free_msix(&self, resource: MsiResource) {
-        let _ = resource;
+        if let Err((error, resource)) = self.try_free_msix(resource) {
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): terminal MSI-X cleanup \
+                          cannot return rejected ownership; explicit teardown owners must use \
+                          try_free_msix and retain the resource for recovery"
+            )]
+            {
+                panic!("MSI-X release rejected: {resource:?}: {error:?}");
+            }
+        }
     }
 }
 

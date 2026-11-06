@@ -126,6 +126,12 @@ fn on_each_cpu(action: fn()) {
 }
 
 fn ordinary_probe() {
+    #[cfg(any(feature = "nmi", feature = "watchdog_hardlockup"))]
+    if khal::nmi::mode() != khal::nmi::NmiMode::None {
+        // NMI-capable startup requires local irq_work on every CPU. Do not
+        // let a lost registration turn that delivery test into a silent skip.
+        assert!(kirq::irq_work::is_ready());
+    }
     if !kirq::irq_work::is_ready() {
         return;
     }

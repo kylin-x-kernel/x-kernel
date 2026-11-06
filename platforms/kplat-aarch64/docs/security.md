@@ -13,11 +13,15 @@ and `src/peripherals/trng.rs`, plus PMU mapping preparation in
 
 PMU registration relies on the early-initialized, stable runtime NMI mode.
 Even with `nmi-pmu` compiled, mode `None` installs an ordinary IRQ action and
-skips NMI preparation at enable. Registration is disabled until explicit per-CPU
-activation; PMU-only builds retain their existing auto-enable policy. No
-synthetic preparation capability is used
-to publish an NMI action on an unsupported controller. Periodic NMI shutdown
-and global retirement reject mode `None` as unsupported, leaving ordinary
+skips NMI preparation at enable. Ordinary PPI registration uses the dedicated
+disabled PerCpu startup API in both `nmi-pmu` and PMU-only builds; runtime CPU
+services explicitly activate each local line. KIRQ rejects a mismatched resolved
+flow rather than falling back to generic registration. Ordinary SPI registration
+retains the existing policy: disabled with `nmi-pmu`, auto-enabled without it.
+The single global firmware IRQ selection does not establish per-CPU SPI routing
+or affinity; this change adds no such guarantee. No synthetic preparation
+capability is used to publish an NMI action on an unsupported controller.
+Periodic NMI shutdown and global retirement reject mode `None` as unsupported, leaving ordinary
 fallback ownership outside that protocol. Mode changes after registration
 are not supported.
 
@@ -80,7 +84,7 @@ producer does not authorize mutable access to its storage: the GIC backend must
 also confirm disable completion, reject active claims and clear pending state.
 Only then may the unsafe `PMU.get_mut_unchecked` clear counter/callback slots.
 IRQ/preemption exclusion spans this proof and mutation; it is not NMI exclusion.
-Failure preserves storage and the acquired disable credit for retry. The source
+Failure preserves storage for retry. The source
 owner excludes concurrent restart/global handler removal and collects each
 participant's completed operation; this API does not establish remote quiescence.
 
@@ -88,13 +92,12 @@ An absent cycle counter does not prove the local PPI is unprepared. The shutdown
 path still requires controller teardown before reporting success on a CPU whose
 line was prepared at boot but whose periodic source was never armed. All other
 counter slots must remain unallocated under the same exclusive-source contract.
-The independent `PERIODIC_IRQ_DISABLED` CPU slot retains the disable credit
-even if the lazy PMU manager has never been initialized. All accesses use the
-whole-transaction CPU/IRQ guard; relaxed atomics do not publish shutdown to
-remote CPUs. Source-owner transport completion supplies that separate ordering.
-Successful teardown does not release this credit. The marker survives repeated
-shutdowns until successful local rearm, so two closes cannot leave a hidden
-disable depth that makes a subsequent counter start appear to enable delivery.
+KIRQ owns the non-nesting local enable state, so shutdown retries need no
+duplicate PMU state even before the lazy manager has been initialized. Every
+retry stops production, masks the PPI and attempts teardown under the same
+whole-transaction CPU/IRQ guard. Repeated shutdown cannot accumulate a hidden
+disable depth. Source-owner transport completion supplies remote ordering;
+local masking alone does not prove remote shutdown or local claim completion.
 
 `ut-tests/peripherals_pmu_shutdown.rs` covers operation order and failure retry
 without devices. Its exclusive-source integration case uses live PMU/GIC state

@@ -13,7 +13,9 @@ fn spurious_vector_returns_through_common_irq_exit() {
     // fixed_vectors_bypass_regular_claim_and_completion checks classification.
     let _guard = kspin::NoPreemptIrqSave::new();
     assert!(!kirq::context::is_in_interrupt_context());
-    kirq::handle_irq(usize::from(x86_apic::APIC_SPURIOUS_VECTOR));
+    // SAFETY: the guard supplies CPU/IRQ exclusion on this initialized CPU;
+    // the spurious vector cannot claim or complete a hardware interrupt.
+    unsafe { kirq::handle_irq(usize::from(x86_apic::APIC_SPURIOUS_VECTOR)) };
     assert!(!kirq::context::is_in_interrupt_context());
     assert!(!karch::local_irq_enabled());
 }
@@ -30,7 +32,7 @@ fn fixed_vectors_bypass_regular_claim_and_completion() {
             usize::from(vector),
             |_| {
                 regular_calls.set(regular_calls.get() + 1);
-                None
+                None::<()>
             },
             || errors.set(errors.get() + 1),
         );
@@ -56,14 +58,13 @@ fn non_fixed_vectors_delegate_to_regular_dispatch() {
             vector,
             |received| {
                 observed_vector.set(Some(received));
-                // Cookie zero has no hardware completion side effect.
-                Some(kirq::PendingIrq::new(kirq::IrqRef::Virq(received), 0))
+                Some(kirq::IrqRef::Virq(received))
             },
             || errors.set(errors.get() + 1),
         );
         assert_eq!(observed_vector.get(), Some(vector));
         assert_eq!(
-            claim.as_ref().map(kirq::PendingIrq::source),
+            claim,
             Some(kirq::IrqRef::Virq(vector))
         );
         assert_eq!(errors.get(), 0);
@@ -208,6 +209,22 @@ fn unsupported_source_metadata_is_rejected_before_register_access() {
         );
     }
     assert!(super::select_x86_flow(io, |_| None).is_err());
+}
+
+#[def_test]
+fn unknown_and_foreign_sources_are_rejected_without_register_access() {
+    use kirq::{IrqDesc, IrqDescError};
+    for desc in [
+        IrqDesc::from_hwirq(4),
+        IrqDesc::from_virq(kirq::DYNAMIC_VIRQ_BASE),
+        kirq::gic_level_irq_desc(32),
+        kirq::plic_irq_desc(4),
+    ] {
+        assert_eq!(
+            super::select_x86_flow(desc, |_| panic!("unknown source must not read registers")),
+            Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq })
+        );
+    }
 }
 
 #[def_test]

@@ -3,6 +3,12 @@
 // See LICENSES for license details.
 
 //! Private fixture adapters; production prepares publication before Line locks.
+//!
+//! Removal helpers require exclusive fixture control: no live action snapshot
+//! or concurrent dispatch/membership mutation. Synthetic running state and
+//! private queued replays are allowed only before they have captured actions;
+//! later traversal captures the post-withdrawal chain. These helpers deliberately
+//! do not drain running state that only the calling fixture can finish.
 
 use super::*;
 
@@ -33,15 +39,11 @@ pub(in crate::runtime) fn withdraw_on_line(
     token: Option<IrqActionToken>,
     apply_plan: impl FnOnce(IrqPlatformPlan),
 ) -> Option<IrqAction> {
-    let actions = line.lock().action_list();
-    actions
-        .with_prepared_take(|prepared| {
-            let retired = withdraw_prepared_on_line(virq, line, token, prepared, apply_plan)?;
-            // SAFETY: the fixture calls from a sleepable task. The production short
-            // transaction has returned and no reader/progress lock remains held.
-            unsafe { retired.reclaim() }.map(ActionRecord::into_action)
-        })
-        .expect("fixture retirement preparation")
+    let retired = withdraw_action_on_line(virq, line, token, false, apply_plan).unwrap()?;
+    // SAFETY: audited callers exclusively drive synthetic Lines and have no
+    // live snapshots. Any retained running state is synthetic, not a reader;
+    // future snapshots cannot reach the detached node. The Line lock is gone.
+    Some(unsafe { retired.reclaim() })
 }
 
 /// Removes membership only, for a private, exclusively borrowed state fixture.
@@ -49,15 +51,11 @@ pub(in crate::runtime) fn take_from_state(
     entry: &mut IrqStateDesc,
     token: Option<IrqActionToken>,
 ) -> Option<IrqAction> {
-    let actions = entry.action_list();
-    actions
-        .with_prepared_take(|prepared| {
-            let retired = entry.withdraw_action(prepared, token)?;
-            // SAFETY: fixtures pass private state, not a locked Line guard, and
-            // hold no read scope. Withdrawal has released the list writer lock.
-            unsafe { retired.reclaim() }.map(ActionRecord::into_action)
-        })
-        .expect("fixture retirement preparation")
+    let retired = entry.withdraw_action(token)?;
+    // SAFETY: callers supply private state, not a locked Line guard, and have
+    // never captured a live snapshot of the removed node. Exclusive fixture
+    // ownership excludes concurrent readers; later snapshots see its removal.
+    Some(unsafe { retired.reclaim() })
 }
 
 /// Removes fixture membership without masking or installing a teardown credit.
@@ -65,13 +63,10 @@ pub(in crate::runtime) fn take_from_line(
     line: &IrqLine,
     token: Option<IrqActionToken>,
 ) -> Option<IrqAction> {
-    let actions = line.lock().action_list();
-    actions
-        .with_prepared_take(|prepared| {
-            let retired = line.lock().withdraw_action(prepared, token)?;
-            // SAFETY: fixture task prepared outside exclusion; the temporary Line
-            // guard and list writer lock have been released before the wait.
-            unsafe { retired.reclaim() }.map(ActionRecord::into_action)
-        })
-        .expect("fixture retirement preparation")
+    let retired = line.lock().withdraw_action(token)?;
+    // SAFETY: callers exclusively control this fixture's readers. Any previous
+    // traversal has ended; synthetic running state/private queued replay have not
+    // captured the removed node. Replay after withdrawal sees the new chain.
+    // The temporary Line guard ended before this allocation is reclaimed.
+    Some(unsafe { retired.reclaim() })
 }

@@ -30,6 +30,13 @@
 
 ## 外部边界 / 攻击面
 
+The LoongArch PCI INTx fallback must pass its static PCH route through the IRQ
+provider before exposing an IRQ number. Identity numbering alone does not
+establish a host descriptor or validated flow. Mapping failure returns no IRQ;
+the fallback neither registers a handler nor enables delivery. Unit tests use a
+recording mapper to check route metadata, nonidentity virtual IRQs and failure
+without accessing PCI or interrupt-controller hardware.
+
 PCI vsock 当前没有 ISR 确认路径，依靠轮询推进收发。探测时必须在该
 function 上禁用 INTx 输出，避免未确认的设备中断持续触发。只删除软件
 IRQ 元数据不会关闭硬件中断；屏蔽共享线路又会阻断其他设备（包括 blk）
@@ -375,8 +382,14 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 
 ## 已知限制
 
-1. **MSI-X 未启用**：x86_64 上的 MSI-X 支持代码已编写但被注释掉（TODO），
-   当前所有架构使用 legacy IRQ，可能导致中断共享问题。
+1. **MSI-X release scope**: x86_64 net uses MSI-X where available; other classes
+   retain legacy IRQs. A failed configuration retains its disabled allocation.
+   Explicit release retains that owner on rejection and permits retry only
+   after the caller has satisfied source-stop and action-drain obligations.
+   Terminal Drop/rollback use the infallible provider contract and fail-stop
+   rather than silently discarding a rejected allocation. They do not provide
+   recoverable hot-unplug or automatic retries. Configuration masking is not
+   evidence of DMA or posted-message completion.
 2. **无超时机制**：9p 设备的 `request()` 同步等待响应，无超时保护，
    恶意或故障设备可能导致调用者永久阻塞。
 3. **input 设备硬编码路径**：`physical_location()` 返回固定字符串 `"virtio0/input0"`，

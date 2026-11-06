@@ -7,18 +7,22 @@
 
 use super::{IrqDesc, IrqPlatformPlan};
 
+/// Retains the matching controller teardown obligation even when preparation
+/// fails. Readiness permits enable; absence alone means teardown is complete.
 #[derive(Clone, Copy)]
 struct NmiPreparation {
     chip: &'static crate::PerCpuNmiChip,
     is_ready: bool,
 }
 
+/// One CPU's software control state within a PerCpu Line.
+/// Hardware plans commit here under the Line lock; this record does not prove
+/// that the external producer has stopped or that its final claim has returned.
 #[derive(Clone, Copy)]
 pub(super) struct LocalControl {
     pub(super) is_enabled: bool,
     pub(super) has_failed_configuration: bool,
     configured_generation: Option<u64>,
-    disable_depth: usize,
     nmi: Option<NmiPreparation>,
 }
 
@@ -28,7 +32,6 @@ impl LocalControl {
             is_enabled: false,
             has_failed_configuration: false,
             configured_generation: None,
-            disable_depth: 0,
             nmi: None,
         }
     }
@@ -89,39 +92,23 @@ impl LocalControl {
     fn plan(&self, desc: IrqDesc, cpu: usize) -> IrqPlatformPlan {
         IrqPlatformPlan {
             cpu: Some(cpu),
-            ..IrqPlatformPlan::none(desc, self.disable_depth)
+            // Disable nesting belongs to ordinary shared Lines, not local gates.
+            ..IrqPlatformPlan::none(desc, 0)
         }
     }
 
-    pub(super) fn enable(
-        &self,
-        desc: IrqDesc,
-        generation: u64,
-        cpu: usize,
-        force: bool,
-        auto: bool,
-    ) -> IrqPlatformPlan {
+    pub(super) fn enable(&self, desc: IrqDesc, generation: u64, cpu: usize) -> IrqPlatformPlan {
         let mut plan = self.plan(desc, cpu);
-        plan.disable_depth = if auto {
-            0
-        } else {
-            self.disable_depth.saturating_sub(1)
-        };
-        if plan.disable_depth == 0 {
-            plan.configure =
-                self.has_failed_configuration || self.configured_generation != Some(generation);
-            plan.enable =
-                (force || !self.is_enabled || self.has_failed_configuration).then_some(true);
-        }
+        plan.configure =
+            self.has_failed_configuration || self.configured_generation != Some(generation);
+        plan.enable = Some(true);
         plan
     }
 
     pub(super) fn register_disabled(&self, desc: IrqDesc, cpu: usize) -> IrqPlatformPlan {
         IrqPlatformPlan {
-            // Legacy enable can precede action installation. Mask before
-            // committing a nonzero depth, or nested disable would skip it.
+            // Mask an inherited enabled source before publishing disabled state.
             enable: self.is_enabled.then_some(false),
-            disable_depth: self.disable_depth.max(1),
             ..self.plan(desc, cpu)
         }
     }
@@ -141,8 +128,9 @@ impl LocalControl {
 
     pub(super) fn disable(&self, desc: IrqDesc, cpu: usize) -> IrqPlatformPlan {
         IrqPlatformPlan {
-            enable: (self.disable_depth == 0 && self.is_enabled).then_some(false),
-            disable_depth: self.disable_depth.saturating_add(1),
+            // Like Linux irq_percpu_disable, each call closes the local gate;
+            // repeated shutdown never accumulates credits for a future enable.
+            enable: Some(false),
             ..self.plan(desc, cpu)
         }
     }
@@ -155,11 +143,10 @@ impl LocalControl {
         if let Some(enabled) = plan.enable {
             self.is_enabled = enabled;
         }
-        self.disable_depth = plan.disable_depth;
     }
 
     pub(super) fn can_run(&self) -> bool {
-        self.is_enabled && self.disable_depth == 0 && !self.has_failed_configuration
+        self.is_enabled && !self.has_failed_configuration
     }
 }
 

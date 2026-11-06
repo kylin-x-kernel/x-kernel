@@ -49,23 +49,11 @@ fn claim_external(
 
 fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
     use kirq::{IrqAffinity, IrqController, IrqFlags, IrqTrigger};
-    if desc.controller != IrqController::LoongArchExtioi
-        && (desc.domain.is_some() || desc.hwirq >= pch_pic::PCH_PIC_IRQ_COUNT)
+    // Only the timer is a registerable local source. The EIOINTC parent is
+    // demultiplexed before generic dispatch and cannot own an action.
+    if desc.domain.is_none() && desc.controller == IrqController::Unknown && desc.hwirq == TIMER_IRQ
     {
-        // Non-platform domains and software-only Lines retain their own flow.
-        return Ok(kirq::IrqFlow::Legacy);
-    }
-    // The current flat binding reserves these IDs for CPU-local sources.
-    // Distinct external IDs colliding with them need a domain, not guessing.
-    if desc.domain.is_none()
-        && desc.controller == IrqController::Unknown
-        && matches!(desc.hwirq, TIMER_IRQ | EIOINTC_IRQ)
-    {
-        return Ok(if desc.hwirq == TIMER_IRQ {
-            kirq::IrqFlow::PerCpu
-        } else {
-            kirq::IrqFlow::Legacy
-        });
+        return Ok(kirq::IrqFlow::PerCpu);
     }
     if desc.domain.is_some()
         || desc.hwirq >= pch_pic::PCH_PIC_IRQ_COUNT
@@ -205,7 +193,9 @@ impl kirq::IntrManagerIf {
         }
     }
 
-    fn dispatch_irq(irq: usize) -> Option<kirq::Virq> {
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::dispatch_irq`]'s contract.
+    unsafe fn dispatch_irq(irq: usize) -> Option<kirq::Virq> {
         let mut irq = IrqType::new(irq);
         if matches!(irq, IrqType::Io) {
             let Some(ex_irq) = claim_external(eiointc::claim_irq, eiointc::complete_irq) else {
@@ -222,12 +212,19 @@ impl kirq::IntrManagerIf {
             IrqType::Io => {}
             IrqType::Ex(_) => {}
         }
-        kirq::generic_handle_irq(kirq::PendingIrq::new(kirq::IrqRef::Virq(irq.as_usize()), 0))
+        // SAFETY: this entry has already acknowledged the source. The no-op
+        // completion cookie is consumed under the caller's hardirq exclusion.
+        let pending = unsafe { kirq::PendingIrq::new(kirq::IrqRef::Virq(irq.as_usize()), 0) };
+        kirq::generic_handle_irq(pending)
     }
 
-    fn dispatch_nmi(_irq: usize) {}
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::dispatch_nmi`]'s contract.
+    unsafe fn dispatch_nmi(_irq: usize) {}
 
-    fn complete_irq(_completion_cookie: usize) {}
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::complete_irq`]'s contract.
+    unsafe fn complete_irq(_completion_cookie: usize) {}
 
     #[expect(
         clippy::todo,

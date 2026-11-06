@@ -5,7 +5,7 @@
 //! Implementation of the `#[provide]` macro.
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{Attribute, Error, ImplItem, ItemImpl, Type};
 
 use crate::{
@@ -65,17 +65,27 @@ pub(crate) fn provide(implementation: ItemImpl, args: ProvideArgs) -> Result<Tok
         let body = &method.block;
         let mut exported_sig = sig.clone();
         exported_sig.ident = exported_fn_ident.clone();
+        exported_sig.abi = Some(syn::parse_quote!(extern "Rust"));
+        let unsafety = &sig.unsafety;
+        let is_unsafe = unsafety.is_some();
+        let safety_marker = format_ident!("__kiface_unsafe_{}", fn_name);
         let cfg_attrs = cfg_attrs(attrs);
 
         exported_fns.push(quote! {
             #(#cfg_attrs)*
-            const _: fn(#arg_types) #output = #interface_path::#fn_name;
+            const _: () = {
+                // A safe function coerces to an unsafe function pointer, so
+                // the pointer check alone cannot require matching contracts.
+                assert!(#interface_path::#safety_marker == #is_unsafe,
+                        "interface/provider safety qualifier mismatch");
+                let _: #unsafety fn(#arg_types) #output = #interface_path::#fn_name;
+            };
 
             #(#attrs)*
             #[doc(hidden)]
             #[allow(non_snake_case)]
             #[unsafe(export_name = #symbol)]
-            extern "Rust" #exported_sig #body
+            #exported_sig #body
         });
     }
 

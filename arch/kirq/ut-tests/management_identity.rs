@@ -8,8 +8,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use unittest::{assert, assert_eq, assert_ne, def_test};
 
 use super::{IRQ_STATE, IrqLine, IrqStateDesc};
-use crate::runtime::manager::take_from_line;
-use crate::{Handler, IrqDesc, IrqDescError, IrqEvent};
+use crate::{Handler, IrqDesc, IrqDescError, IrqEvent, runtime::manager::take_from_line};
 
 struct ReplaceBeforeAdmission {
     virq: usize,
@@ -143,7 +142,7 @@ fn check_registration_rejection(
         .with_source(crate::IrqSource::Acpi);
     let installed: Handler = Arc::new(|_| IrqEvent::HANDLED);
     let offered: Handler = Arc::new(|_| IrqEvent::HANDLED);
-    let mut entry = IrqStateDesc::new(desc);
+    let mut entry = IrqStateDesc::test_new(desc);
     if matches!(rejection, RegistrationRejection::ExhaustedSequence) {
         assert!(entry.install_shared_action(installed.clone()).is_some());
         entry.exhaust_action_sequences_for_tests();
@@ -244,7 +243,11 @@ fn registration_preflight_preserves_regular_and_shared_success() {
     let shared_cleanup = ScopedTestLine::for_vacant_slot(shared);
     assert!(shared_cleanup.is_some());
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    let _binding =
+        crate::runtime::manager::tests_irq::SyntheticLine::new(IrqDesc::from_virq(regular));
     assert_eq!(super::try_map(IrqDesc::from_virq(regular)), Ok(regular));
+    let _binding =
+        crate::runtime::manager::tests_irq::SyntheticLine::new(IrqDesc::from_virq(shared));
     assert_eq!(super::try_map(IrqDesc::from_virq(shared)), Ok(shared));
     assert!(super::try_register_disabled(regular, handler.clone()).unwrap());
     {
@@ -294,7 +297,7 @@ fn failed_registration_retains_resolved_metadata_without_committing_configuratio
         let cleanup = ScopedTestLine::for_vacant_slot(virq);
         assert!(cleanup.is_some());
         assert!(IRQ_STATE.lock().translated_hwirq(domain, hwirq).is_none());
-        let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+        let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
         assert!(IRQ_STATE.lock().descs.insert(virq, line.clone()).is_none());
         let generation_before = line.lock().generation_for_tests();
         let irq_before = karch::local_irq_enabled();
@@ -365,6 +368,7 @@ fn failed_legacy_enable_retains_prepared_mapping_without_enabling_line() {
     let cleanup = ScopedTestLine::for_vacant_slot(virq);
     assert!(cleanup.is_some());
     assert!(IRQ_STATE.lock().translated_hwirq(domain, hwirq).is_none());
+    let _binding = crate::runtime::manager::tests_irq::SyntheticLine::new(desc);
     assert_eq!(super::try_map(desc), Ok(virq));
     let prepared = IRQ_STATE.lock().descs.get(&virq).unwrap();
     let irq_before = karch::local_irq_enabled();
@@ -396,8 +400,8 @@ fn first_action_registration_unmasks_an_already_enabled_line() {
         unmask: |_| IS_MASKED.store(false, Ordering::Relaxed),
     };
     let virq = 0x5f49;
-    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
-    entry.flow = crate::IrqFlow::Fasteoi(&CHIP);
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    entry.set_flow_for_tests(crate::IrqFlow::Fasteoi(&CHIP));
     let plan = entry.prepare_legacy_enable();
     entry.commit_platform_plan(plan);
     (CHIP.mask)(entry.desc);
@@ -429,10 +433,12 @@ fn shared_withdrawal_restores_pending_service_after_teardown() {
         resend: crate::FasteoiResend::Software,
     };
     HAS_UNMASKED.store(false, Ordering::Relaxed);
+    let serviced = Arc::new(kcompletion::Completion::new());
+    let observed_service = serviced.clone();
     let calls = Arc::new(core::sync::atomic::AtomicUsize::new(0));
     let count = calls.clone();
-    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(0x5f46));
-    entry.flow = crate::IrqFlow::Fasteoi(&CHIP);
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x5f46));
+    entry.set_flow_for_tests(crate::IrqFlow::Fasteoi(&CHIP));
     let removed_token = entry
         .install_shared_action(Arc::new(|_| IrqEvent::HANDLED))
         .unwrap();
@@ -440,6 +446,7 @@ fn shared_withdrawal_restores_pending_service_after_teardown() {
         .install_shared_action(Arc::new(move |_| {
             core::assert!(HAS_UNMASKED.load(Ordering::Acquire));
             count.fetch_add(1, Ordering::Relaxed);
+            observed_service.complete_all();
             IrqEvent::HANDLED
         }))
         .unwrap();
@@ -454,12 +461,13 @@ fn shared_withdrawal_restores_pending_service_after_teardown() {
     }
     let removed = take_from_line(&line, Some(removed_token));
     assert!(removed.is_some());
-    let completion = line.lock().in_flight_zero_completion();
+    let completion = line.lock().execution_idle_completion();
     drop(super::ManagementAdmission {
         line: &line,
         is_active: true,
         has_removed_action: true,
     });
+    kiface_task_wait_api::wait_for_completion(&serviced).unwrap();
     kiface_task_wait_api::wait_for_completion(&completion).unwrap();
     assert!(HAS_UNMASKED.load(Ordering::Acquire));
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -483,8 +491,8 @@ fn shared_edge_withdrawal_unmasks_before_requesting_hardware_delivery() {
     };
     HAS_UNMASKED.store(false, Ordering::Relaxed);
     HAS_REQUESTED.store(false, Ordering::Relaxed);
-    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(0x5f46));
-    entry.flow = crate::IrqFlow::Edge(&CHIP);
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x5f46));
+    entry.set_flow_for_tests(crate::IrqFlow::Edge(&CHIP));
     let token = entry
         .install_shared_action(Arc::new(|_| IrqEvent::HANDLED))
         .unwrap();
@@ -512,7 +520,7 @@ fn shared_edge_withdrawal_unmasks_before_requesting_hardware_delivery() {
     assert!(HAS_REQUESTED.load(Ordering::Relaxed));
     assert!(!line.lock().is_pending);
     assert_eq!(line.lock().action_count(), 1);
-    assert_eq!(line.lock().in_flight(), 0);
+    assert!(!line.lock().is_running);
     assert!(!line.lock().is_teardown_in_progress());
     drop(removed);
 }
@@ -525,12 +533,15 @@ fn only_final_enable_replays_an_unknown_trigger_once() {
         resend: crate::FasteoiResend::Software,
     };
     let virq = 0x5f48;
+    let serviced = Arc::new(kcompletion::Completion::new());
+    let observed_service = serviced.clone();
     let calls = Arc::new(core::sync::atomic::AtomicUsize::new(0));
     let count = calls.clone();
-    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
-    entry.flow = crate::IrqFlow::Fasteoi(&CHIP);
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    entry.set_flow_for_tests(crate::IrqFlow::Fasteoi(&CHIP));
     entry.install_regular_action(crate::action::IrqAction::regular(Arc::new(move |_| {
         count.fetch_add(1, Ordering::Relaxed);
+        observed_service.complete_all();
         IrqEvent::HANDLED
     })));
     let plan = entry.prepare_register_disabled();
@@ -541,12 +552,15 @@ fn only_final_enable_replays_an_unknown_trigger_once() {
     let line = Arc::new(IrqLine::new(entry));
     let registry = kspin::SpinNoIrq::new(super::IrqState::new());
     registry.lock().descs.insert(virq, line.clone());
-    let completion = line.lock().in_flight_zero_completion();
+    let completion = line.lock().execution_idle_completion();
     super::enable_line(&registry, virq.into(), false, |_| Ok(())).unwrap();
     assert!(line.lock().is_pending);
-    assert_eq!(line.lock().in_flight(), 0);
+    assert!(!line.lock().is_running);
     super::enable_line(&registry, virq.into(), false, |_| Ok(())).unwrap();
     super::enable_line(&registry, virq.into(), false, |_| Ok(())).unwrap();
+    // Pending queue ownership is not execution admission. Confirm service before
+    // draining the admitted callback's remaining completion tail.
+    kiface_task_wait_api::wait_for_completion(&serviced).unwrap();
     kiface_task_wait_api::wait_for_completion(&completion).unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(!line.lock().is_pending);
@@ -609,6 +623,7 @@ fn registration_does_not_recreate_line_withdrawn_before_admission() {
     let virq = 0x5f56;
     let cleanup = ScopedTestLine::for_vacant_slot(virq);
     assert!(cleanup.is_some());
+    let _binding = crate::runtime::manager::tests_irq::SyntheticLine::new(IrqDesc::from_virq(virq));
     assert_eq!(crate::try_map(IrqDesc::from_virq(virq)), Ok(virq));
     let original = IRQ_STATE.lock().descs.get(&virq).unwrap();
     *WITHDRAW_BEFORE_ADMISSION.lock() = Some(original.clone());
@@ -650,7 +665,9 @@ fn publish_replaced_on_acquisition(
     virq: usize,
     replacement: &Arc<IrqLine>,
 ) -> (Arc<IrqLine>, ScopedReplacement) {
-    let original = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    let original = Arc::new(IrqLine::new(IrqStateDesc::test_new(IrqDesc::from_virq(
+        virq,
+    ))));
     let hook = ReplaceBeforeAdmission {
         virq,
         original: original.clone(),
@@ -680,7 +697,7 @@ fn stale_removal_does_not_remove_replacement_action() {
     let cleanup = ScopedTestLine::for_vacant_slot(virq);
     assert!(cleanup.is_some());
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
-    let mut state = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    let mut state = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
     assert!(state.install_regular_action(crate::action::IrqAction::regular(handler.clone())));
     let replacement = Arc::new(IrqLine::new(state));
     let (original, _replacement_hook) = publish_replaced_on_acquisition(virq, &replacement);
@@ -703,7 +720,9 @@ fn stale_registration_retries_current_line() {
     let virq = 0x5f51;
     let cleanup = ScopedTestLine::for_vacant_slot(virq);
     assert!(cleanup.is_some());
-    let replacement = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    let replacement = Arc::new(IrqLine::new(IrqStateDesc::test_new(IrqDesc::from_virq(
+        virq,
+    ))));
     let (original, _replacement_hook) = publish_replaced_on_acquisition(virq, &replacement);
     let registered = crate::try_register_disabled(virq, Arc::new(|_| IrqEvent::HANDLED));
     let original_count = original.lock().action_count();
@@ -722,7 +741,7 @@ fn stale_registration_rechecks_replacement_metadata() {
     let cleanup = ScopedTestLine::for_vacant_slot(virq);
     assert!(cleanup.is_some());
     let replacement_desc = IrqDesc::from_hwirq(0x5f53).with_virq(virq);
-    let replacement = Arc::new(IrqLine::new(IrqStateDesc::new(replacement_desc)));
+    let replacement = Arc::new(IrqLine::new(IrqStateDesc::test_new(replacement_desc)));
     let (original, _replacement_hook) = publish_replaced_on_acquisition(virq, &replacement);
     let irq_enabled_before = karch::local_irq_enabled();
     let registered =
@@ -774,7 +793,7 @@ fn unmatched_free_preserves_empty_line_control_state() {
     assert!(cleanup.is_some());
     for is_enabled in [false, true] {
         for token in [None, Some(crate::IrqActionToken::new(1))] {
-            let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+            let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
             if is_enabled {
                 // Commit the software-only fixture's prepared enable state.
                 let plan = entry.prepare_legacy_enable();
@@ -869,6 +888,7 @@ fn shared_public_api_churn_reclaims_each_owner_after_unlock() {
     let virq = crate::DYNAMIC_VIRQ_BASE + 0x5fb8;
     let cleanup = ScopedTestLine::for_vacant_slot(virq);
     assert!(cleanup.is_some());
+    let _binding = crate::runtime::manager::tests_irq::SyntheticLine::new(IrqDesc::from_virq(virq));
     assert_eq!(crate::try_map(IrqDesc::from_virq(virq)), Ok(virq));
     let line = IRQ_STATE.lock().descs.get(&virq).unwrap().clone();
     let mut previous_token = 0;
@@ -920,6 +940,7 @@ fn rejected_handler_destructor_runs_after_management_unlock() {
     let virq = 0x5f54;
     let cleanup = ScopedTestLine::for_vacant_slot(virq);
     assert!(cleanup.is_some());
+    let _binding = crate::runtime::manager::tests_irq::SyntheticLine::new(IrqDesc::from_virq(virq));
     assert_eq!(crate::try_map(IrqDesc::from_virq(virq)), Ok(virq));
     assert_eq!(
         crate::try_register_disabled(virq, Arc::new(|_| IrqEvent::HANDLED)),
@@ -946,7 +967,9 @@ fn removed_handler_destructor_runs_after_management_cleanup() {
     let virq = 0x5f59;
     let cleanup = ScopedTestLine::for_vacant_slot(virq);
     assert!(cleanup.is_some());
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(IrqDesc::from_virq(
+        virq,
+    ))));
     let has_unlocked_drop = Arc::new(AtomicBool::new(false));
     let handler: Handler = Arc::new(ReentrantDrop {
         line: line.clone(),
@@ -978,17 +1001,25 @@ fn masked_registration_requires_explicit_startup_entry() {
     let virq = 0x5f55;
     let cleanup = ScopedTestLine::for_vacant_slot(virq);
     assert!(cleanup.is_some());
-    let (normal, was_absent, startup, has_preserved_mask) = {
+    let (normal, was_absent, startup, has_preserved_mask, _binding) = {
         let _pin = kspin::IrqSave::new();
         let normal = crate::try_register_disabled(virq, Arc::new(|_| IrqEvent::HANDLED));
         let was_absent = crate::descriptor(virq).is_none();
+        let binding =
+            crate::runtime::manager::tests_irq::SyntheticLine::new(IrqDesc::from_virq(virq));
         assert_eq!(crate::try_map(IrqDesc::from_virq(virq)), Ok(virq));
         let startup = crate::try_register_startup(
             virq,
             Arc::new(|_| IrqEvent::HANDLED),
             crate::IrqRegisterOptions::disabled(),
         );
-        (normal, was_absent, startup, !karch::local_irq_enabled())
+        (
+            normal,
+            was_absent,
+            startup,
+            !karch::local_irq_enabled(),
+            binding,
+        )
     };
     let removed = crate::try_free_irq(virq).unwrap();
 

@@ -634,8 +634,12 @@ DmaMappingMode and DmaMappingIf; memspace directly implements the transition.
 Runtime does not provide an IRQ-specific mutex. KIRQ owns its `kmutex::Mutex`
 and the RAII guard across membership validation, action withdrawal and drain.
 `ktask` supplies the generic mutex's scheduling operations, and `ksync` reexports
-the same implementation. Timer/IPI registration still uses the explicit startup
-entry, rather than inferring startup from masked IRQs.
+the same implementation. Timer/IPI registration uses
+`kirq::try_register_percpu_startup`, rather than inferring startup from masked
+IRQs. The controller must resolve each fixed source to PerCpu flow. Registration
+requires disabled local slots and never enables delivery; each CPU activates its
+own sources later. A wrong flow is a fatal boot error, not a generic-registration
+fallback.
 
 `init_interrupt` explicitly prepares the fixed timer/IPI identity descriptors
 through `prepare_fixed_interrupts` before installing either handler. These
@@ -644,7 +648,7 @@ preparation does not configure or enable the controller. Handler installation
 still uses the startup entrance, with source activation later. This is an
 incremental separation of descriptor preparation from action ownership, not a
 claim that all legacy KIRQ registration entrances already require prior mapping.
-The startup fixture records descriptor identities before handler publication
+The startup fixture records descriptor identities and PerCpu classification before handler publication
 and requires this observation before local source activation. It does not
 measure hardware masking or prove every caller's mapping lifetime.
 

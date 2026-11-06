@@ -388,8 +388,8 @@ fn plic_flow_selection_requires_supported_binding() {
 }
 
 #[def_test]
-fn plic_flow_selection_preserves_non_plic_legacy_contract() {
-    use kirq::{IrqController, IrqDesc, IrqFlags, IrqFlow, IrqTrigger};
+fn plic_flow_selection_rejects_unknown_sources_but_preserves_fixed_local_sources() {
+    use kirq::{IrqController, IrqDesc, IrqDescError, IrqFlags, IrqFlow, IrqTrigger};
     for desc in [
         IrqDesc::from_hwirq(5),
         IrqDesc::from_virq(kirq::DYNAMIC_VIRQ_BASE),
@@ -402,18 +402,19 @@ fn plic_flow_selection_preserves_non_plic_legacy_contract() {
         IrqDesc::from_virq(kirq::DYNAMIC_VIRQ_BASE).with_flags(IrqFlags::MSI),
         IrqDesc::from_hwirq(super::S_EXT),
     ] {
-        assert!(matches!(
+        assert_eq!(
             super::select_plic_flow(desc, None),
-            Ok(IrqFlow::Legacy)
-        ));
+            Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq })
+        );
     }
     let local = IrqDesc::from_hwirq(super::S_TIMER).with_domain(super::PLIC_DOMAIN);
     assert!(super::select_plic_flow(local, None).is_err());
     for cause in [super::S_TIMER, super::S_SOFT] {
         for flags in [IrqFlags::empty(), IrqFlags::PER_CPU] {
-            assert!(matches!(super::select_plic_flow(
-                IrqDesc::from_hwirq(cause).with_flags(flags), None),
-                Ok(IrqFlow::PerCpu)));
+            assert!(matches!(
+                super::select_plic_flow(IrqDesc::from_hwirq(cause).with_flags(flags), None),
+                Ok(IrqFlow::PerCpu)
+            ));
         }
     }
 }

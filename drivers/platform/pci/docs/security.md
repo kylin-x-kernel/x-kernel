@@ -70,6 +70,13 @@ No FFI or inline assembly exists in the crate.
 
 ## Invariants
 
+- MSI-X shutdown sets Function Mask and clears Enable even if discovery found
+  MSI-X enabled and unmasked. It never restores that stale enabled state after
+  the caller has programmed a new message into the table. Other capability
+  fields are preserved, and legacy INTx is re-enabled as before.
+- Shutdown changes delivery configuration only. It does not prove completion
+  of already-issued MSI writes, stop DMA, remove handlers or free host vectors;
+  those ordering and lifetime obligations remain with the device/resource owner.
 - Every config-space byte accessed lies inside the mapped ECAM window.
 - BAR assignments never overlap: the allocator is sequential, aligned,
   overflow-checked, and allocations are committed only after the range
@@ -89,6 +96,7 @@ No FFI or inline assembly exists in the crate.
 | T-03 | Config-space access beyond the mapped window | High — kernel memory corruption via MMIO | BDF/register arithmetic overflow | `cam_offset` builds bounded offsets from the CAM geometry; word offsets are masked to 32-bit alignment and halfword writes add only the selected in-word offset; `unsafe` contracts require a window sized for all accesses. Residual risk sits in the `PciConfigAccess::new` contract. |
 | T-04 | Firmware/build CAM mismatch | Medium — garbage config accesses | Firmware CAM kind differs from build-selected `Cam` | Cross-check at `PciBus::new` with warning and fallback to static configuration. |
 | T-05 | ECAM base from runtime override pointing at non-ECAM memory | High — MMIO corruption of unrelated regions | Operator error via `set_pci_config_space` | Override is a bring-up/debug facility requiring explicit action; mapping still goes through `memspace` which owns region sanity. Residual risk accepted as a debug feature. |
+| T-06 | Shutdown restores an old enabled MSI-X state | High - messages can target a released host vector | Device was enabled and unmasked at discovery | Both shutdown APIs force Function Mask set and Enable clear; private fake-config regression covers this case and repeated shutdown. Outstanding-message ordering remains an owner obligation. |
 
 ## Failure Modes
 

@@ -6,11 +6,21 @@
 
 //! Simple interface providers used by `kiface` integration tests.
 
-use define_simple_interfaces::{AdvancedIf, CallerIf, NamespacedIf, SimpleIf};
+use define_simple_interfaces::{AdvancedIf, BorrowedIf, CallerIf, NamespacedIf, SimpleIf};
 use kiface::provide;
 
 /// References every provider symbol so test binaries link them in.
 pub fn force_link() {}
+
+#[provide(namespace = BorrowedNs)]
+impl BorrowedIf {
+    /// # Safety
+    /// The caller supplies a readable aligned usize for this call.
+    unsafe fn read(value: *const usize) -> usize {
+        // SAFETY: the facade caller retains the readable aligned value.
+        unsafe { *value }
+    }
+}
 
 #[provide]
 impl SimpleIf {

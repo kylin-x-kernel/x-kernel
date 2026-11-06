@@ -98,6 +98,17 @@ cam offset math is duplicated deliberately, documented on the type.
   x86_64-only today (`#[cfg(target_arch = "x86_64")]`); capability
   discovery and enable/disable are cross-architecture.
 
+## MSI-X Shutdown
+
+MSI-X shutdown through either `disable_msix` entry point sets Function Mask
+and clears Enable, independent of the capability's discovery-time state.
+It preserves the other Message Control fields and re-enables legacy INTx.
+Neither current caller needs restoration of a previous owner's MSI-X setup:
+VirtIO initialization failure abandons the new allocation, and transport
+release shuts it down. There is therefore no restore operation here.
+The device owner must still stop event production, order already-issued
+messages, and remove IRQ actions before releasing the host vector allocation.
+
 ## Concurrency Model
 
 - Configuration-space override state: two `AtomicU64`/`AtomicU32` with
@@ -174,3 +185,13 @@ cam offset math is duplicated deliberately, documented on the type.
 - MSI-X preferred over INTx where available: edge-triggered per-vector
   messages avoid shared-line and routing complexity; INTx remains via
   firmware route lookup for devices without MSI-X.
+
+## Regression Coverage
+
+`ut-tests/msix.rs` drives both public shutdown entry points using one private
+RAM-backed configuration window per case, with no PCI hardware access.
+It covers all discovery-time Enable/Function Mask combinations, including
+enabled and unmasked, while shutting down a currently enabled/unmasked
+function. Assertions check masked/disabled state, unrelated capability and
+command bits, INTx re-enable, and repeated shutdown. The backing storage is
+retained for program lifetime to satisfy `PciConfigAccess::new`.

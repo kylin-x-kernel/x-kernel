@@ -18,6 +18,7 @@ use crate::{
 struct Fixture {
     desc: IrqDesc,
     line: Arc<IrqLine>,
+    _binding: crate::runtime::manager::tests_irq::SyntheticLine,
 }
 
 fn register_fixture_with_mode(
@@ -35,13 +36,23 @@ impl Fixture {
     }
 
     fn mapped(desc: IrqDesc) -> Self {
-        let virq = crate::try_map(desc).unwrap();
+        let binding = crate::runtime::manager::tests_irq::SyntheticLine::mapped(desc);
+        let virq = binding.virq();
         let line = IRQ_STATE.lock().descs.get(&virq).unwrap();
-        Self { desc, line }
+        Self {
+            desc,
+            line,
+            _binding: binding,
+        }
     }
 
     fn install(&self, handler: Handler) -> bool {
-        register_fixture_with_mode(self.desc, handler, super::ManagementMode::Task, |_| Ok(()))
+        let installed =
+            register_fixture_with_mode(self.desc, handler, super::ManagementMode::Task, |_| Ok(()));
+        if installed {
+            self.line.lock().set_flow_for_tests(crate::IrqFlow::PerCpu);
+        }
+        installed
     }
 
     fn remove(&self) -> bool {
@@ -88,7 +99,10 @@ impl NmiShutdownProbe {
     pub fn new(virq: usize, handler: Handler) -> Self {
         let fixture = Fixture::new(virq);
         core::assert!(fixture.install(handler));
-        fixture.line.lock().flow = crate::IrqFlow::PerCpu;
+        fixture
+            .line
+            .lock()
+            .set_flow_for_tests(crate::IrqFlow::PerCpu);
         Self(fixture)
     }
 
@@ -148,7 +162,10 @@ fn shutdown_claim_retains_action_until_unique_owner_finishes() {
     let fixture = Fixture::new(0x5fb7);
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
     assert!(fixture.install(handler.clone()));
-    fixture.line.lock().flow = crate::IrqFlow::PerCpu;
+    fixture
+        .line
+        .lock()
+        .set_flow_for_tests(crate::IrqFlow::PerCpu);
     let shutdown = super::begin_nmi_shutdown(fixture.desc).unwrap();
     assert!((0..kbuild_config::NR_CPUS).all(|cpu| !shutdown.is_participant(cpu)));
     assert!(!shutdown.is_participant(usize::MAX));
@@ -179,7 +196,10 @@ fn abandoned_shutdown_keeps_admission_closed_and_allows_retry() {
     let fixture = Fixture::new(0x5fb8);
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
     assert!(fixture.install(handler.clone()));
-    fixture.line.lock().flow = crate::IrqFlow::PerCpu;
+    fixture
+        .line
+        .lock()
+        .set_flow_for_tests(crate::IrqFlow::PerCpu);
     let shutdown = super::begin_nmi_shutdown(fixture.desc).unwrap();
     drop(shutdown);
     assert!(fixture.line.lock().is_nmi_closing());
@@ -204,7 +224,7 @@ fn shutdown_snapshots_prepared_cpu_and_rejects_incomplete_teardown() {
     let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu().as_usize();
     {
         let mut entry = fixture.line.lock();
-        entry.flow = crate::IrqFlow::PerCpu;
+        entry.set_flow_for_tests(crate::IrqFlow::PerCpu);
         assert!(super::prepare_local_action(&fixture.line, &mut entry, &LOCAL_NMI_CHIP).is_ok());
     }
     drop(pin);
@@ -267,11 +287,10 @@ fn failed_initial_preparation_retains_cleanup_without_local_publication() {
                 .nmi_action
                 .with_current(|handler| handler.is_none())
         );
-        // Force-enable re-resolves the fake backend's Legacy flow and rejects
-        // that mismatch before reaching preparation admission.
+        // Both enable entrances reject the failed local preparation.
         assert!(matches!(
             crate::try_enable(fixture.desc, true),
-            Err(IrqDescError::UnsupportedFlow { .. })
+            Err(IrqDescError::ConfigurationFailed { .. })
         ));
         assert!(matches!(
             crate::try_enable_irq(fixture.desc),
@@ -327,7 +346,7 @@ fn failed_local_teardown_preserves_owner_until_retry_and_retirement() {
     let pin = kspin::NoPreemptIrqSave::new();
     {
         let mut entry = fixture.line.lock();
-        entry.flow = crate::IrqFlow::PerCpu;
+        entry.set_flow_for_tests(crate::IrqFlow::PerCpu);
         assert!(super::prepare_local_action(&fixture.line, &mut entry, &RETRY_NMI_CHIP).is_ok());
         entry.begin_nmi_close();
     }
@@ -411,7 +430,7 @@ fn incomplete_local_nmi_close_retains_owner_and_rejects_reenable() {
     assert!(fixture.install(handler.clone()));
     {
         let mut entry = fixture.line.lock();
-        entry.flow = crate::IrqFlow::PerCpu;
+        entry.set_flow_for_tests(crate::IrqFlow::PerCpu);
         let plan = entry.prepare_legacy_enable();
         entry.commit_platform_plan(plan);
     }
@@ -469,11 +488,11 @@ fn nmi_enable_requires_current_cpu_preparation() {
                 );
                 assert!(fixture.teardown_local());
             }
-            // Unlike ordinary enable, force-enable re-resolves this synthetic
-            // backend as Legacy and rejects the installed PerCpu flow first.
+            // The explicit fake PerCpu binding reaches preparation admission
+            // through both normal and forced enable entrances.
             assert!(matches!(
                 crate::try_enable(fixture.desc, true),
-                Err(IrqDescError::UnsupportedFlow { .. })
+                Err(IrqDescError::ConfigurationFailed { .. })
             ));
             assert!(matches!(
                 crate::try_enable_irq(fixture.desc),
@@ -492,9 +511,8 @@ fn nmi_enable_requires_current_cpu_preparation() {
 }
 
 #[def_test(serial)]
-fn legacy_nmi_registration_rejects_before_configuration_or_publication() {
+fn ordinary_nmi_registration_rejects_before_configuration_or_publication() {
     let fixture = Fixture::new(0x5fba);
-    fixture.line.lock().flow = crate::IrqFlow::Legacy;
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
     for mode in [super::ManagementMode::Task, super::ManagementMode::Startup] {
         let mut has_configured = false;
@@ -716,12 +734,19 @@ fn ordinary_free_cannot_withdraw_nmi_owner() {
     let fixture = Fixture::new(0x5f41);
     let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
     assert!(fixture.install(handler.clone()));
-    assert!(crate::try_free_irq(fixture.desc).unwrap().is_none());
-    assert!(
-        crate::try_free_irq_action(fixture.desc, IrqActionToken::new(0))
-            .unwrap()
-            .is_none()
-    );
+    // SAFETY: the fixture uses a synthetic controller and has not dispatched
+    // any claim. No snapshot or completion is outstanding and no concurrent
+    // restart exists; this call must leave the separately owned NMI action intact.
+    let removed = unsafe { crate::try_free_percpu_irq(fixture.desc) }.unwrap();
+    assert!(removed.is_none());
+    assert!(matches!(
+        crate::try_free_irq(fixture.desc),
+        Err(IrqDescError::UnsupportedFlow { hwirq }) if hwirq == fixture.desc.hwirq
+    ));
+    assert!(matches!(
+        crate::try_free_irq_action(fixture.desc, IrqActionToken::new(0)),
+        Err(IrqDescError::UnsupportedFlow { hwirq }) if hwirq == fixture.desc.hwirq
+    ));
     assert_eq!(fixture.line.lock().action_count(), 1);
     assert_eq!(fixture.line.lock().teardown_depth_for_tests(), 0);
     assert!(fixture.has_owner());
@@ -814,7 +839,10 @@ fn nmi_dispatch_borrows_one_owner_even_while_writer_locks_are_held() {
         assert!(fixture.teardown_local());
     }
     assert!(completed);
-    assert_eq!(received.load(Ordering::Relaxed), desc.hwirq);
+    assert_eq!(
+        received.load(Ordering::Relaxed),
+        desc.logical_irq().unwrap()
+    );
     assert!(fixture.remove());
     assert_eq!(Arc::strong_count(&handler), 1);
 }
@@ -896,56 +924,80 @@ fn local_publication_gates_dispatch_and_retains_owner_through_completion() {
 }
 
 #[def_test(serial)]
-fn fallback_uses_the_same_owner_and_preserves_logical_irq() {
+fn normal_irq_rejects_nmi_action_but_completes_the_original_claim() {
     let desc = IrqDesc::from_hwirq(0x5fa2)
         .with_virq(crate::DYNAMIC_VIRQ_BASE + 0x5fa2)
         .with_domain(crate::domain::TEST_DOMAIN);
     let fixture = Fixture::mapped(desc);
+    let has_atomic_exclusion = {
+        let _guard = fixture.line.lock();
+        fixture.line.is_state_locked_for_tests()
+    };
     let received = Arc::new(AtomicUsize::new(0));
     let observer = received.clone();
-    let handler: Handler = Arc::new(move |irq| {
-        observer.store(irq, Ordering::Relaxed);
+    let handler: Handler = Arc::new(move |_| {
+        observer.fetch_add(1, Ordering::Relaxed);
         IrqEvent::HANDLED
     });
     assert!(fixture.install(handler.clone()));
     let mut completed = false;
+    let mut completions = 0;
     let resolved = {
         let _pin = kspin::NoPreemptIrqSave::new();
         assert!(fixture.prepare_local());
-        {
+        let idle = {
             let mut entry = fixture.line.lock();
-            entry.flow = crate::IrqFlow::PerCpu;
+            entry.set_flow_for_tests(crate::IrqFlow::PerCpu);
             let plan = entry.prepare_legacy_enable();
             entry.commit_platform_plan(plan);
-        }
+            assert!(!entry.is_running);
+            entry.execution_idle_completion()
+        };
+        assert!(idle.is_completed());
         let irq = crate::context::HardIrqContextGuard::enter();
         let resolved = super::super::dispatch::dispatch_claim(
             IrqRef::Domain(crate::domain::TEST_DOMAIN, desc.hwirq),
             || {
+                completions += 1;
+                // Completion retains Line exclusion, not execution admission.
+                // UP backends may omit atomic lock state: there the exclusion
+                // check proves only IRQ masking. Never relock the Line here.
                 completed = !karch::local_irq_enabled()
                     && Arc::strong_count(&handler) == 2
-                    && fixture
-                        .line
-                        .nmi_action
-                        .with_current(|handler| handler.is_some());
+                    && (!has_atomic_exclusion || fixture.line.is_state_locked_for_tests())
+                    && idle.is_completed()
+                    && fixture.line.nmi_action.with_current(|published| {
+                        published.is_some_and(|published| Arc::ptr_eq(published, &handler))
+                    });
             },
         );
         drop(irq);
         {
             let mut entry = fixture.line.lock();
+            assert!(!entry.is_running);
+            assert!(idle.is_completed());
             let plan = entry.prepare_disable_irq_nosync();
             entry.commit_platform_plan(plan);
         }
+        assert!(fixture.has_owner());
+        assert!(fixture.line.nmi_action.with_current(|published| {
+            published.is_some_and(|published| Arc::ptr_eq(published, &handler))
+        }));
         assert!(fixture.teardown_local());
         resolved
     };
     assert!(completed);
     assert_eq!(resolved, desc.logical_irq());
-    assert_eq!(
-        received.load(Ordering::Relaxed),
-        desc.logical_irq().unwrap()
+    assert_eq!(received.load(Ordering::Relaxed), 0);
+    assert_eq!(completions, 1);
+    assert!(!fixture.line.lock().is_running);
+    assert!(
+        fixture
+            .line
+            .lock()
+            .execution_idle_completion()
+            .is_completed()
     );
-    assert_eq!(fixture.line.lock().in_flight(), 0);
     assert!(fixture.remove());
     assert_eq!(Arc::strong_count(&handler), 1);
 }
@@ -967,12 +1019,16 @@ fn duplicate_and_shared_registration_cannot_replace_nmi_owner() {
         },
     ));
     assert!(!configured);
-    assert!(
-        crate::try_register_shared(fixture.desc, offered.clone())
-            .unwrap()
-            .is_none()
+    assert!(matches!(
+        crate::try_register_shared(fixture.desc, offered.clone()),
+        Err(IrqDescError::UnsupportedFlow { hwirq }) if hwirq == fixture.desc.hwirq
+    ));
+    assert_eq!(
+        crate::try_register_disabled(fixture.desc, offered.clone()),
+        Err(IrqDescError::UnsupportedFlow {
+            hwirq: fixture.desc.hwirq
+        })
     );
-    assert!(!crate::try_register_disabled(fixture.desc, offered.clone()).unwrap());
     assert_eq!(Arc::strong_count(&handler), 2);
     assert_eq!(Arc::strong_count(&offered), 1);
     assert!(fixture.remove());
@@ -998,14 +1054,20 @@ fn typed_nmi_domains_do_not_alias_equal_hardware_numbers() {
     );
     let first_calls = Arc::new(AtomicUsize::new(0));
     let second_calls = Arc::new(AtomicUsize::new(0));
+    let first_received = Arc::new(AtomicUsize::new(0));
+    let second_received = Arc::new(AtomicUsize::new(0));
     let count = first_calls.clone();
-    assert!(first.install(Arc::new(move |_| {
+    let received = first_received.clone();
+    assert!(first.install(Arc::new(move |irq| {
         count.fetch_add(1, Ordering::Relaxed);
+        received.store(irq, Ordering::Relaxed);
         IrqEvent::HANDLED
     })));
     let count = second_calls.clone();
-    assert!(second.install(Arc::new(move |_| {
+    let received = second_received.clone();
+    assert!(second.install(Arc::new(move |irq| {
         count.fetch_add(1, Ordering::Relaxed);
+        received.store(irq, Ordering::Relaxed);
         IrqEvent::HANDLED
     })));
     {
@@ -1034,6 +1096,8 @@ fn typed_nmi_domains_do_not_alias_equal_hardware_numbers() {
     }
     assert_eq!(first_calls.load(Ordering::Relaxed), 1);
     assert_eq!(second_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(first_received.load(Ordering::Relaxed), 0x16fa4);
+    assert_eq!(second_received.load(Ordering::Relaxed), 0x17fa4);
     assert!(first.remove());
     let mut completed = false;
     {

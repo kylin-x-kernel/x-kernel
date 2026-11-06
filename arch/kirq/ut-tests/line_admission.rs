@@ -7,18 +7,17 @@ use alloc::sync::Arc;
 use unittest::{assert, assert_eq, def_test};
 
 use super::{IrqDesc, IrqFlags, IrqLine, IrqState, IrqStateDesc, try_resolve_and_publish_locked};
-use crate::runtime::manager::take_from_line;
-use crate::{IrqDescError, IrqSpec};
+use crate::{IrqDescError, IrqSpec, runtime::manager::take_from_line};
 
 #[def_test]
 fn nmi_close_keeps_enabled_cpus_until_each_local_disable_completes() {
     let desc = IrqDesc::from_virq(0x5fb2);
-    let mut entry = IrqStateDesc::new(desc);
-    entry.flow = crate::IrqFlow::PerCpu;
+    let mut entry = IrqStateDesc::test_new(desc);
+    entry.set_flow_for_tests(crate::IrqFlow::PerCpu);
     // Exercise every configured slot without depending on scheduler migration
     // or firmware-present CPUs. LocalControl's explicit CPU is a private fixture.
     for (cpu, slot) in entry.local.iter_mut().enumerate() {
-        let enabled = slot.enable(desc, 1, cpu, true, false);
+        let enabled = slot.enable(desc, 1, cpu);
         slot.commit(enabled, 1);
     }
     entry.begin_nmi_close();
@@ -40,7 +39,7 @@ fn existing_mapping_needs_no_new_index_capacity() {
     let desc = IrqDesc::from_hwirq(17)
         .with_domain(crate::domain::TEST_DOMAIN)
         .with_virq(0x5f90);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
     let mut prepared = super::PreparedPublication::new(0x5f90, None, false).unwrap();
@@ -58,7 +57,7 @@ fn existing_mapping_needs_no_new_index_capacity() {
 fn msi_release_requires_reservation_and_consumes_it_once_after_withdrawal() {
     let virq = 0x5f52;
     let desc = IrqDesc::from_virq(virq).with_flags(IrqFlags::MSI);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let withdrawal = super::PreparedWithdrawal::new(desc.hwirq).unwrap();
     line.lock().msi_withdrawal = Some(withdrawal);
     let mut state = IrqState::new();
@@ -125,7 +124,7 @@ fn msi_release_requires_reservation_and_consumes_it_once_after_withdrawal() {
 fn msi_release_rejects_non_msi_without_calling_backend() {
     let virq = 0x5f53;
     let desc = IrqDesc::from_virq(virq);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
     let mut has_called_backend = false;
@@ -148,7 +147,7 @@ fn msi_release_rejects_non_msi_without_calling_backend() {
 fn msi_release_rejects_action_dispatch_and_teardown_ownership() {
     let virq = 0x5f54;
     let desc = IrqDesc::from_virq(virq).with_flags(IrqFlags::MSI);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let withdrawal = super::PreparedWithdrawal::new(desc.hwirq).unwrap();
     line.lock().msi_withdrawal = Some(withdrawal);
     let mut state = IrqState::new();
@@ -170,7 +169,7 @@ fn msi_release_rejects_action_dispatch_and_teardown_ownership() {
     assert_eq!(calls, 0);
 
     // Removing the action does not release an already-admitted dispatch.
-    line.lock().begin_dispatch();
+    line.lock().begin_running_dispatch();
     let removed = take_from_line(&line, None);
     assert!(removed.is_some());
     drop(removed);
@@ -183,7 +182,7 @@ fn msi_release_rejects_action_dispatch_and_teardown_ownership() {
     assert_eq!(calls, 0);
 
     line.lock().begin_teardown();
-    let wake = line.lock().finish_dispatch();
+    let wake = line.lock().finish_running_dispatch();
     drop(wake);
     assert!(
         super::release_unused_msi(&mut state, virq, |_, _| {
@@ -213,12 +212,14 @@ fn msi_release_rejects_action_dispatch_and_teardown_ownership() {
 #[def_test]
 fn enabled_local_slot_retains_empty_line_and_flow_identity() {
     let desc = IrqDesc::from_virq(0x5f83);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
+    let next_flow = line.lock().flow;
     {
         let mut entry = line.lock();
-        entry.flow = crate::IrqFlow::PerCpu;
+        entry.set_flow_for_tests(crate::IrqFlow::PerCpu);
+        entry.test_flow = next_flow;
         let plan = entry.prepare_auto_enable();
         entry.commit_platform_plan(plan);
         assert!(entry.has_enabled_local_cpu());
@@ -236,13 +237,13 @@ fn enabled_local_slot_retains_empty_line_and_flow_identity() {
         assert!(!entry.has_enabled_local_cpu());
     }
     state.try_resolve_desc(desc, None).unwrap();
-    assert_eq!(line.lock().flow, crate::IrqFlow::Legacy);
+    assert_eq!(line.lock().flow, next_flow);
     assert!(state.remove_if_unused(desc.hwirq).is_some());
 }
 
 #[cfg(target_arch = "aarch64")]
 #[def_test]
-fn gic_spi_cannot_change_flow_while_actions_or_original_claim_remain() {
+fn gic_spi_rejects_percpu_metadata_before_and_after_execution_drain() {
     let original = crate::gic_edge_irq_desc(32).with_virq(0x5f59);
     let private = original.with_flags(IrqFlags::PER_CPU);
     for has_action in [false, true] {
@@ -253,7 +254,7 @@ fn gic_spi_cannot_change_flow_while_actions_or_original_claim_remain() {
         state.try_resolve_desc(original, Some(&line)).unwrap();
         let flow = {
             let mut entry = line.lock();
-            assert!(matches!(entry.flow, crate::IrqFlow::Fasteoi(_)));
+            assert!(matches!(entry.flow, Some(crate::IrqFlow::Fasteoi(_))));
             if has_action {
                 assert!(
                     entry.install_regular_action(crate::action::IrqAction::regular(Arc::new(
@@ -261,7 +262,7 @@ fn gic_spi_cannot_change_flow_while_actions_or_original_claim_remain() {
                     ),))
                 );
             } else {
-                entry.begin_dispatch();
+                entry.begin_running_dispatch();
             }
             entry.flow
         };
@@ -276,11 +277,17 @@ fn gic_spi_cannot_change_flow_while_actions_or_original_claim_remain() {
             assert!(removed.is_some());
             drop(removed);
         } else {
-            let wake = line.lock().finish_dispatch();
+            let wake = line.lock().finish_running_dispatch();
             drop(wake);
         }
-        state.try_resolve_desc(private, None).unwrap();
-        assert_eq!(line.lock().flow, crate::IrqFlow::Legacy);
+        // Draining execution does not grant a hardware capability. Invalid
+        // local-source metadata must not mutate the existing SPI mapping.
+        assert!(matches!(
+            state.try_resolve_desc(private, None),
+            Err(IrqDescError::UnsupportedFlow { hwirq: 32 })
+        ));
+        assert_eq!(line.lock().desc, original);
+        assert_eq!(line.lock().flow, flow);
         assert!(
             state
                 .descs
@@ -291,17 +298,79 @@ fn gic_spi_cannot_change_flow_while_actions_or_original_claim_remain() {
 }
 
 #[def_test]
-fn flow_reselection_waits_for_actions_and_in_flight_admission() {
+fn queued_replay_freezes_flow_without_execution_admission() {
     static CHIP: crate::FasteoiChip = crate::FasteoiChip {
         mask: |_| {},
         unmask: |_| {},
         resend: crate::FasteoiResend::Software,
     };
     let desc = IrqDesc::from_virq(0x5f57);
-    assert_eq!(
-        crate::IntrManagerIf::select_flow(desc),
-        Ok(crate::IrqFlow::Legacy)
-    );
+    let mut state = IrqState::new();
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
+    state.try_resolve_desc(desc, Some(&line)).unwrap();
+    let next_flow = line.lock().flow;
+    {
+        let mut entry = line.lock();
+        // Change the next fixture selection without changing its live binding.
+        entry.set_flow_for_tests(crate::IrqFlow::Fasteoi(&CHIP));
+        entry.test_flow = next_flow;
+        entry.is_replay_queued = true;
+        assert!(!entry.has_actions());
+        assert!(!entry.is_running);
+    }
+    assert!(matches!(
+        state.try_resolve_desc(desc, None),
+        Err(IrqDescError::UnsupportedFlow { .. })
+    ));
+    assert_eq!(line.lock().flow, Some(crate::IrqFlow::Fasteoi(&CHIP)));
+    line.lock().is_replay_queued = false;
+    state.try_resolve_desc(desc, None).unwrap();
+    assert_eq!(line.lock().flow, next_flow);
+    assert!(state.remove_if_unused(desc.hwirq).is_some());
+}
+
+#[def_test]
+fn running_owner_freezes_binding_and_retirement() {
+    static CHIP: crate::FasteoiChip = crate::FasteoiChip {
+        mask: |_| {},
+        unmask: |_| {},
+        resend: crate::FasteoiResend::Software,
+    };
+    let desc = IrqDesc::from_virq(0x5f56);
+    let mut state = IrqState::new();
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
+    state.try_resolve_desc(desc, Some(&line)).unwrap();
+    let next_flow = line.lock().flow;
+    {
+        let mut entry = line.lock();
+        // Isolate the running owner's obligation after its action was removed.
+        entry.set_flow_for_tests(crate::IrqFlow::Fasteoi(&CHIP));
+        entry.test_flow = next_flow;
+        entry.begin_running_dispatch();
+        assert!(entry.is_running);
+        assert!(!entry.has_actions());
+        assert!(!entry.is_unused());
+    }
+    assert!(state.remove_if_unused(desc.hwirq).is_none());
+    assert!(matches!(
+        state.try_resolve_desc(desc, None),
+        Err(IrqDescError::UnsupportedFlow { .. })
+    ));
+    let wake = line.lock().finish_running_dispatch();
+    drop(wake);
+    state.try_resolve_desc(desc, None).unwrap();
+    assert_eq!(line.lock().flow, next_flow);
+    assert!(state.remove_if_unused(desc.hwirq).is_some());
+}
+
+#[def_test]
+fn flow_reselection_waits_for_actions_and_running_admission() {
+    static CHIP: crate::FasteoiChip = crate::FasteoiChip {
+        mask: |_| {},
+        unmask: |_| {},
+        resend: crate::FasteoiResend::Software,
+    };
+    let desc = IrqDesc::from_virq(0x5f57);
     static EDGE: crate::EdgeChip = crate::EdgeChip {
         mask: |_| {},
         unmask: |_| {},
@@ -318,13 +387,15 @@ fn flow_reselection_waits_for_actions_and_in_flight_admission() {
     ] {
         for has_action in [true, false] {
             let mut state = IrqState::new();
-            let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+            let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
             state.try_resolve_desc(desc, Some(&line)).unwrap();
+            let next_flow = line.lock().flow;
             let generation = {
                 let mut entry = line.lock();
-                // Model an old flow on a private Line. The real provider selects
-                // Legacy for this directory-only identity; no chip callback runs.
-                entry.flow = old_flow;
+                // The injected selector requests another flow; the live
+                // binding must remain frozen until all old users finish.
+                entry.set_flow_for_tests(old_flow);
+                entry.test_flow = next_flow;
                 if has_action {
                     assert!(
                         entry.install_regular_action(crate::action::IrqAction::regular(Arc::new(
@@ -332,7 +403,7 @@ fn flow_reselection_waits_for_actions_and_in_flight_admission() {
                         ),))
                     );
                 } else {
-                    entry.begin_dispatch();
+                    entry.begin_running_dispatch();
                 }
                 entry.generation_for_tests()
             };
@@ -342,7 +413,7 @@ fn flow_reselection_waits_for_actions_and_in_flight_admission() {
             );
             {
                 let entry = line.lock();
-                assert_eq!(entry.flow, old_flow);
+                assert_eq!(entry.flow, Some(old_flow));
                 assert_eq!(entry.desc, desc);
                 assert_eq!(entry.generation_for_tests(), generation);
             }
@@ -351,11 +422,11 @@ fn flow_reselection_waits_for_actions_and_in_flight_admission() {
                 assert!(removed.is_some());
                 drop(removed);
             } else {
-                let wake = line.lock().finish_dispatch();
+                let wake = line.lock().finish_running_dispatch();
                 drop(wake);
             }
             state.try_resolve_desc(desc, None).unwrap();
-            assert_eq!(line.lock().flow, crate::IrqFlow::Legacy);
+            assert_eq!(line.lock().flow, next_flow);
             assert!(
                 state
                     .descs
@@ -370,7 +441,7 @@ fn flow_reselection_waits_for_actions_and_in_flight_admission() {
 // Only a private registry is changed; no mapping snapshot or MMIO is published.
 #[cfg(target_arch = "riscv64")]
 #[def_test]
-fn plic_metadata_enrichment_waits_for_actions_and_in_flight_admission() {
+fn plic_metadata_enrichment_waits_for_actions_and_running_admission() {
     let original = crate::plic_irq_desc(1).with_virq(0x5f58);
     let enriched = IrqDesc {
         trigger: crate::IrqTrigger::LevelHigh,
@@ -382,7 +453,7 @@ fn plic_metadata_enrichment_waits_for_actions_and_in_flight_admission() {
         state.try_resolve_desc(original, Some(&line)).unwrap();
         let (flow, generation) = {
             let mut entry = line.lock();
-            assert!(matches!(entry.flow, crate::IrqFlow::Fasteoi(_)));
+            assert!(matches!(entry.flow, Some(crate::IrqFlow::Fasteoi(_))));
             if has_action {
                 assert!(
                     entry.install_regular_action(crate::action::IrqAction::regular(Arc::new(
@@ -390,7 +461,7 @@ fn plic_metadata_enrichment_waits_for_actions_and_in_flight_admission() {
                     ),))
                 );
             } else {
-                entry.begin_dispatch();
+                entry.begin_running_dispatch();
             }
             (entry.flow, entry.generation_for_tests())
         };
@@ -417,7 +488,7 @@ fn plic_metadata_enrichment_waits_for_actions_and_in_flight_admission() {
             assert!(removed.is_some());
             drop(removed);
         } else {
-            let wake = line.lock().finish_dispatch();
+            let wake = line.lock().finish_running_dispatch();
             drop(wake);
         }
         state.try_resolve_desc(enriched, None).unwrap();
@@ -431,7 +502,7 @@ fn plic_metadata_enrichment_waits_for_actions_and_in_flight_admission() {
 fn locked_resolution_preserves_line_and_plain_metadata() {
     let virq = 0x5f52;
     let desc = IrqDesc::from_virq(virq).with_flags(IrqFlags::MSI);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     let mut entry = line.lock();
     let resolved =
@@ -454,8 +525,8 @@ fn locked_resolution_preserves_line_and_plain_metadata() {
 fn locked_resolution_rejects_a_different_line_identity() {
     let virq = 0x5f53;
     let desc = IrqDesc::from_virq(virq);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
-    let other = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
+    let other = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
     let mut entry = other.lock();
@@ -480,8 +551,8 @@ fn locked_resolution_rejects_a_different_line_identity() {
 fn management_completion_updates_only_the_original_identity() {
     let virq = 0x5f54;
     let desc = IrqDesc::from_virq(virq);
-    let old = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
-    let successor = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let old = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
+    let successor = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&old)).unwrap();
     old.lock().begin_management();
@@ -501,23 +572,23 @@ fn management_completion_updates_only_the_original_identity() {
 }
 
 #[def_test]
-fn management_completion_keeps_in_flight_line_until_dispatch_finishes() {
+fn management_completion_keeps_running_line_until_dispatch_finishes() {
     let virq = 0x5f55;
     let desc = IrqDesc::from_virq(virq);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
     {
         let mut entry = line.lock();
         entry.begin_management();
-        entry.begin_dispatch();
+        entry.begin_running_dispatch();
         entry.begin_teardown();
     }
     line.lock().finish_management(true);
     assert!(!line.lock().is_teardown_in_progress());
     assert!(!line.lock().is_unused());
     assert!(state.descs.contains_key(&virq));
-    let wake = line.lock().finish_dispatch();
+    let wake = line.lock().finish_running_dispatch();
     drop(wake);
     assert_eq!(state.remove_if_unused(virq), Some(desc));
     assert_eq!(Arc::strong_count(&line), 1);
@@ -527,7 +598,7 @@ fn management_completion_keeps_in_flight_line_until_dispatch_finishes() {
 fn management_completion_preserves_both_idle_and_drained_descriptors() {
     let virq = 0x5f56;
     let desc = IrqDesc::from_virq(virq);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
     line.lock().begin_management();
@@ -551,7 +622,7 @@ fn management_completion_preserves_both_idle_and_drained_descriptors() {
 fn management_admission_prevents_unused_line_removal() {
     let virq = 0x5f50;
     let desc = IrqDesc::from_virq(virq);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
 
@@ -579,7 +650,7 @@ fn management_admission_prevents_unused_msi_removal() {
     // No domain is needed to exercise MSI ownership removal; keep publication
     // and hardware backends out of this local-state admission test.
     let desc = IrqDesc::from_virq(virq).with_flags(IrqFlags::MSI);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
 

@@ -162,7 +162,9 @@ impl UserContext {
 
         let ret = match trap_kind {
             ArchTrap::Irq => {
-                handle_trap!(IRQ, 0);
+                // SAFETY: user return captured an IRQ, restored kernel CPU
+                // state and kept ordinary IRQs masked through on_user_exit.
+                unsafe { handle_trap!(IRQ, 0) };
                 ReturnReason::Interrupt
             }
             ArchTrap::Fiq | ArchTrap::SError => ReturnReason::Unknown,

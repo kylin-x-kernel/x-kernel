@@ -5,13 +5,20 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use kspin::SpinNoIrq;
 use intrusive_collections::LinkedList;
+use kcompletion::Completion;
+use kspin::SpinNoIrq;
 use unittest::def_test;
 
 use super::{ReplayAdapter, ReplayQueue, schedule, schedule_on};
-use crate::{FasteoiChip, IrqDesc, IrqEvent, IrqFlow, action::IrqAction,
-    runtime::{dispatch, state::{IrqLine, IrqStateDesc, IRQ_STATE}}};
+use crate::{
+    FasteoiChip, IrqDesc, IrqEvent, IrqFlow,
+    action::IrqAction,
+    runtime::{
+        dispatch,
+        state::{IRQ_STATE, IrqLine, IrqStateDesc},
+    },
+};
 
 static CHIP: FasteoiChip = FasteoiChip {
     mask: |_| {},
@@ -20,15 +27,27 @@ static CHIP: FasteoiChip = FasteoiChip {
 };
 
 fn fixture(virq: usize) -> (Arc<IrqLine>, Arc<AtomicUsize>) {
+    fixture_with_completion(virq, None)
+}
+
+fn fixture_with_completion(
+    virq: usize,
+    completed: Option<Arc<Completion>>,
+) -> (Arc<IrqLine>, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
-    entry.flow = IrqFlow::Fasteoi(&CHIP);
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    entry.set_flow_for_tests(IrqFlow::Fasteoi(&CHIP));
     let count = calls.clone();
-    assert!(entry.install_regular_action(IrqAction::regular(Arc::new(move |_| {
-        assert!(!karch::local_irq_enabled());
-        count.fetch_add(1, Ordering::Relaxed);
-        IrqEvent::HANDLED
-    }))));
+    assert!(
+        entry.install_regular_action(IrqAction::regular(Arc::new(move |_| {
+            assert!(!karch::local_irq_enabled());
+            count.fetch_add(1, Ordering::Relaxed);
+            if let Some(completed) = &completed {
+                completed.complete_all();
+            }
+            IrqEvent::HANDLED
+        })))
+    );
     let plan = entry.prepare_auto_enable();
     entry.commit_platform_plan(plan);
     entry.is_pending = true;
@@ -36,30 +55,36 @@ fn fixture(virq: usize) -> (Arc<IrqLine>, Arc<AtomicUsize>) {
 }
 
 fn queue() -> SpinNoIrq<ReplayQueue> {
-    SpinNoIrq::new(ReplayQueue { pending: LinkedList::new(ReplayAdapter::new()), notify: None })
+    SpinNoIrq::new(ReplayQueue {
+        pending: LinkedList::new(ReplayAdapter::new()),
+        notify: None,
+    })
 }
 
 #[def_test(serial)]
-fn serving_softirq_replay_scopes_action_reads_and_drains_admission() {
+fn serving_softirq_replay_borrows_actions_under_admission_without_rcu() {
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
-    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(0x5f4e));
-    entry.flow = IrqFlow::Fasteoi(&CHIP);
-    assert!(entry.install_regular_action(IrqAction::regular(Arc::new(move |_| {
-        assert!(crate::context::is_softirq_context());
-        assert!(krcu::is_reading());
-        assert!(!karch::local_irq_enabled());
-        observed.fetch_add(1, Ordering::Relaxed);
-        IrqEvent::HANDLED
-    }))));
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x5f4e));
+    entry.set_flow_for_tests(IrqFlow::Fasteoi(&CHIP));
+    assert!(
+        entry.install_regular_action(IrqAction::regular(Arc::new(move |_| {
+            assert!(crate::context::is_softirq_context());
+            assert!(!krcu::is_reading());
+            assert!(!karch::local_irq_enabled());
+            observed.fetch_add(1, Ordering::Relaxed);
+            IrqEvent::HANDLED
+        })))
+    );
     let plan = entry.prepare_auto_enable();
     entry.commit_platform_plan(plan);
     entry.is_pending = true;
     let line = Arc::new(IrqLine::new(entry));
     let queue = queue();
     schedule_on(&queue, &line);
-    let completion = line.lock().in_flight_zero_completion();
-    assert!(!completion.is_completed());
+    let completion = line.lock().execution_idle_completion();
+    assert!(completion.is_completed());
+    assert!(!line.lock().is_running);
     assert!(!krcu::is_reading());
     {
         let _pin = kspin::NoPreemptIrqSave::new();
@@ -67,7 +92,7 @@ fn serving_softirq_replay_scopes_action_reads_and_drains_admission() {
         super::run_on(&queue);
         assert!(crate::context::is_softirq_context());
         assert!(!krcu::is_reading());
-        assert_eq!(line.lock().in_flight(), 0);
+        assert!(!line.lock().is_running);
         assert!(completion.is_completed());
     }
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -89,7 +114,8 @@ static LEVEL_CHIP: FasteoiChip = FasteoiChip {
 #[def_test]
 fn validated_hardware_level_needs_no_replay_for_unspecified_firmware_trigger() {
     let (line, calls) = fixture(0x5f4b);
-    line.lock().flow = IrqFlow::Fasteoi(&LEVEL_CHIP);
+    line.lock()
+        .set_flow_for_tests(IrqFlow::Fasteoi(&LEVEL_CHIP));
     let queue = queue();
     {
         let mut entry = line.lock();
@@ -122,20 +148,16 @@ fn hardware_fixture() -> (Arc<IrqLine>, Arc<AtomicUsize>) {
     HARDWARE_REQUESTS.store(0, Ordering::Relaxed);
     HARDWARE_ACCEPTS.store(true, Ordering::Relaxed);
     let (line, calls) = fixture(0x5f4a);
-    line.lock().flow = IrqFlow::Fasteoi(&HARDWARE_CHIP);
+    line.lock()
+        .set_flow_for_tests(IrqFlow::Fasteoi(&HARDWARE_CHIP));
     (line, calls)
 }
 
-fn assert_no_software_service(
-    line: &IrqLine,
-    queue: &SpinNoIrq<ReplayQueue>,
-    calls: &AtomicUsize,
-) {
+fn assert_no_software_service(line: &IrqLine, queue: &SpinNoIrq<ReplayQueue>, calls: &AtomicUsize) {
     assert!(queue.lock().pending.is_empty());
     let entry = line.lock();
     assert!(!entry.is_replay_queued);
-    assert_eq!(entry.in_flight(), 0);
-    assert!(entry.in_flight_zero_completion().is_completed());
+    assert!(entry.execution_idle_completion().is_completed());
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
@@ -200,6 +222,7 @@ fn hardware_resend_waits_for_final_enable_and_running_owner() {
     schedule_on(&queue, &line);
     assert_eq!(HARDWARE_REQUESTS.load(Ordering::Relaxed), 0);
     assert!(line.lock().is_pending);
+    assert!(line.lock().is_running);
     assert_no_software_service(&line, &queue, &calls);
     line.lock().is_running = false;
     schedule_on(&queue, &line);
@@ -215,7 +238,7 @@ fn discarded_enable_plan_does_not_release_pending_resend() {
         let queue = queue();
         {
             let mut entry = line.lock();
-            entry.flow = IrqFlow::Fasteoi(chip);
+            entry.set_flow_for_tests(IrqFlow::Fasteoi(chip));
             let disable = entry.prepare_disable_irq_nosync();
             entry.commit_platform_plan(disable);
             let abandoned = entry.prepare_enable_irq();
@@ -241,7 +264,8 @@ fn discarded_enable_plan_does_not_release_pending_resend() {
         match chip.resend {
             crate::FasteoiResend::Level => panic!("fixture uses software or hardware resend"),
             crate::FasteoiResend::Software => {
-                assert_eq!(line.lock().in_flight(), 1);
+                assert!(!line.lock().is_running);
+                assert!(line.lock().is_replay_queued);
                 let queued = queue.lock().pending.pop_front().unwrap();
                 dispatch::replay(queued);
                 assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -253,8 +277,8 @@ fn discarded_enable_plan_does_not_release_pending_resend() {
             }
         }
         assert!(!line.lock().is_pending);
-        assert_eq!(line.lock().in_flight(), 0);
-        assert!(line.lock().in_flight_zero_completion().is_completed());
+        assert!(!line.lock().is_running);
+        assert!(line.lock().execution_idle_completion().is_completed());
     }
 }
 
@@ -292,15 +316,19 @@ fn repeated_requests_retain_one_service_obligation() {
     schedule_on(&queue, &line);
     schedule_on(&queue, &line);
     assert_eq!(Arc::strong_count(&line), 2);
-    assert_eq!(line.lock().in_flight(), 1);
+    assert!(!line.lock().is_running);
+    assert!(line.lock().is_replay_queued);
+    assert!(line.lock().execution_idle_completion().is_completed());
     let queued = queue.lock().pending.pop_front().unwrap();
     assert!(Arc::ptr_eq(&queued, &line));
     assert_eq!(Arc::strong_count(&line), 2);
     assert!(queue.lock().pending.is_empty());
+    assert!(line.lock().is_replay_queued);
+    assert!(!line.lock().is_running);
     dispatch::replay(queued);
     assert_eq!(Arc::strong_count(&line), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    assert_eq!(line.lock().in_flight(), 0);
+    assert!(!line.lock().is_running);
     assert!(!line.lock().is_pending);
     schedule_on(&queue, &line);
     assert!(queue.lock().pending.is_empty());
@@ -311,10 +339,10 @@ fn queued_replay_does_not_snapshot_a_withdrawn_action() {
     let (line, calls) = fixture(0x5f41);
     let queue = queue();
     schedule_on(&queue, &line);
-    let completion = line.lock().in_flight_zero_completion();
+    let completion = line.lock().execution_idle_completion();
     line.lock().begin_teardown();
-    // No Line guard spans preparation or GP reclamation. This private queue
-    // retains admission but has not borrowed an action, so it cannot block GP.
+    // The private queue retains only the Line, with no action snapshot or
+    // execution admission. Reclaim before allowing its sole consumer to run.
     let action = super::super::manager::take_from_line(&line, None);
     {
         let mut entry = line.lock();
@@ -323,29 +351,295 @@ fn queued_replay_does_not_snapshot_a_withdrawn_action() {
         }
     }
     assert!(action.is_some());
-    assert!(!completion.is_completed());
+    assert!(completion.is_completed());
+    assert!(!line.lock().is_running);
+    assert_eq!(Arc::strong_count(&calls), 2);
+    drop(action);
+    assert_eq!(Arc::strong_count(&calls), 1);
     let queued = queue.lock().pending.pop_front().unwrap();
     dispatch::replay(queued);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert!(completion.is_completed());
     assert!(!line.lock().is_running);
     line.lock().finish_teardown();
-    // Keep task-owned handler destruction after the queued admission drains.
-    drop(action);
+}
+
+static REJECTED_REPLAY_CHIP: FasteoiChip = FasteoiChip {
+    mask: |_| panic!("rejected replay must not mask the chip"),
+    unmask: |_| panic!("rejected replay must not unmask the chip"),
+    resend: crate::FasteoiResend::Software,
+};
+
+fn disable_fixture_before_public_free(line: &IrqLine) {
+    let mut entry = line.lock();
+    // Model completed source shutdown without calling a provider for this
+    // synthetic hwirq. Last-action removal must not issue platform disable.
+    let plan = entry.prepare_disable_irq_nosync();
+    entry.commit_platform_plan(plan);
+    assert!(!entry.is_enabled_for_tests());
+    let next_disable = entry.prepare_disable_irq_nosync();
+    assert_eq!(next_disable.enable, None);
+}
+
+// These serial fixtures own the private queue and drive its consumer inline.
+// Cleanup never executes pending callbacks and cannot recover from kernel abort.
+struct ScopedReplayLine<'a> {
+    virq: usize,
+    line: &'a Arc<IrqLine>,
+    queue: &'a SpinNoIrq<ReplayQueue>,
+}
+
+impl<'a> ScopedReplayLine<'a> {
+    fn install(
+        virq: usize,
+        line: &'a Arc<IrqLine>,
+        queue: &'a SpinNoIrq<ReplayQueue>,
+    ) -> Option<Self> {
+        let mut state = IRQ_STATE.lock();
+        if state.descs.contains_key(&virq) {
+            return None;
+        }
+        state.descs.insert(virq, line.clone());
+        Some(Self { virq, line, queue })
+    }
+}
+
+impl Drop for ScopedReplayLine<'_> {
+    fn drop(&mut self) {
+        let removed = {
+            let mut state = IRQ_STATE.lock();
+            if state
+                .descs
+                .get(&self.virq)
+                .is_some_and(|line| Arc::ptr_eq(&line, self.line))
+            {
+                state.remove_test_line(self.virq)
+            } else {
+                None
+            }
+        };
+        loop {
+            let queued = { self.queue.lock().pending.pop_front() };
+            let Some(queued) = queued else { break };
+            queued.lock().is_replay_queued = false;
+            // Dropping a queue owner can release a handler; no short lock spans it.
+            drop(queued);
+        }
+        // Also clear membership if this private consumer popped but never ran.
+        self.line.lock().is_replay_queued = false;
+        drop(removed);
+    }
 }
 
 #[def_test(serial)]
-fn disable_after_enqueue_drains_the_old_obligation_but_retains_pending() {
+fn scoped_replay_cleanup_preserves_replacement_and_discards_pending_service() {
+    use unittest::{assert, assert_eq};
+
+    let virq = 0x5f64;
+    let (original, calls) = fixture(virq);
+    let queue = queue();
+    let cleanup = ScopedReplayLine::install(virq, &original, &queue);
+    assert!(cleanup.is_some());
+    schedule_on(&queue, &original);
+    let (replacement, replacement_calls) = fixture(virq);
+    // Both guards precede assertions; the replacement guard owns this exact
+    // successor, while the old guard must leave its registry membership alone.
+    let replacement_cleanup = ScopedReplayLine {
+        virq,
+        line: &replacement,
+        queue: &queue,
+    };
+    let removed = { IRQ_STATE.lock().descs.insert(virq, replacement.clone()) };
+    drop(removed);
+    drop(cleanup);
+    assert!(
+        IRQ_STATE
+            .lock()
+            .descs
+            .get(&virq)
+            .is_some_and(|line| Arc::ptr_eq(&line, &replacement))
+    );
+    assert!(queue.lock().pending.is_empty());
+    assert!(!original.lock().is_replay_queued);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(Arc::strong_count(&original), 1);
+    drop(original);
+    assert_eq!(Arc::strong_count(&calls), 1);
+    drop(replacement_cleanup);
+    assert!(IRQ_STATE.lock().descs.get(&virq).is_none());
+    drop(replacement);
+    assert_eq!(Arc::strong_count(&replacement_calls), 1);
+}
+
+#[def_test(serial)]
+fn popped_replay_does_not_borrow_a_reclaimed_action() {
+    let (line, calls) = fixture(0x5f60);
+    line.lock()
+        .set_flow_for_tests(IrqFlow::Fasteoi(&REJECTED_REPLAY_CHIP));
+    let queue = queue();
+    schedule_on(&queue, &line);
+    let popped = queue.lock().pending.pop_front().unwrap();
+    assert!(Arc::ptr_eq(&popped, &line));
+    assert!(line.lock().is_replay_queued);
+    assert!(!line.lock().is_running);
+    assert!(line.lock().execution_idle_completion().is_completed());
+
+    // Pop transfers only the Line owner. No consumer has entered replay, so
+    // the fixture removal helper may reclaim the action before admission.
+    let removed = super::super::manager::take_from_line(&line, None).unwrap();
+    assert_eq!(Arc::strong_count(&calls), 2);
+    drop(removed);
+    assert_eq!(Arc::strong_count(&calls), 1);
+    dispatch::replay(popped);
+    assert_no_software_service(&line, &queue, &calls);
+    assert!(!line.lock().is_running);
+    assert!(!line.lock().is_replaying);
+    assert_eq!(Arc::strong_count(&line), 1);
+}
+
+#[def_test(serial)]
+fn popped_replay_skips_a_retired_line_with_an_action() {
+    use unittest::{assert, assert_eq};
+
+    let virq = 0x5f61;
+    let (line, calls) = fixture(virq);
+    line.lock()
+        .set_flow_for_tests(IrqFlow::Fasteoi(&REJECTED_REPLAY_CHIP));
+    let queue = queue();
+    let cleanup = ScopedReplayLine::install(virq, &line, &queue);
+    assert!(cleanup.is_some());
+    schedule_on(&queue, &line);
+    let popped = queue.lock().pending.pop_front().unwrap();
+    assert!(!line.lock().is_running);
+    // The private consumer is paused before action capture. Keep the action,
+    // enable state and pending bit intact to isolate the retired-Line check.
+    let retired = IRQ_STATE.lock().remove_test_line(virq).unwrap();
+    assert!(Arc::ptr_eq(&retired, &line));
+    assert!(line.lock().is_retired());
+    assert!(line.lock().has_actions());
+    assert!(line.lock().is_pending);
+    assert!(line.lock().is_enabled_for_tests());
+    dispatch::replay(popped);
+    assert_no_software_service(&line, &queue, &calls);
+    assert!(!line.lock().is_running);
+    assert!(!line.lock().is_replaying);
+    assert!(IRQ_STATE.lock().descs.get(&virq).is_none());
+    drop(retired);
+    drop(cleanup);
+    drop(line);
+    assert_eq!(Arc::strong_count(&calls), 1);
+}
+
+#[def_test(serial)]
+fn public_free_returns_before_private_queued_replay_is_serviced() {
+    use unittest::{assert, assert_eq};
+
+    let virq = 0x5f62;
+    let (line, calls) = fixture(virq);
+    let queue = queue();
+    let cleanup = ScopedReplayLine::install(virq, &line, &queue);
+    assert!(cleanup.is_some());
+    schedule_on(&queue, &line);
+    assert!(!line.lock().is_running);
+    assert!(line.lock().execution_idle_completion().is_completed());
+
+    // No executor can consume this private queue. Public removal must finish
+    // without its progress, and the returned owner can be destroyed immediately.
+    disable_fixture_before_public_free(&line);
+    let removed = crate::free_irq(virq).unwrap();
+    assert!(!queue.lock().pending.is_empty());
+    assert!(line.lock().is_replay_queued);
+    assert!(!line.lock().has_actions());
+    assert_eq!(Arc::strong_count(&calls), 2);
+    drop(removed);
+    assert_eq!(Arc::strong_count(&calls), 1);
+    super::run_on(&queue);
+    assert_no_software_service(&line, &queue, &calls);
+    assert!(!line.lock().is_running);
+    assert!(!line.lock().is_replaying);
+    let retired = IRQ_STATE.lock().remove_test_line(virq).unwrap();
+    assert!(Arc::ptr_eq(&retired, &line));
+    assert!(IRQ_STATE.lock().descs.get(&virq).is_none());
+    drop(retired);
+    assert_eq!(Arc::strong_count(&line), 1);
+}
+
+#[def_test(serial)]
+fn queued_replay_services_a_new_action_on_the_same_line() {
+    use unittest::{assert, assert_eq};
+
+    let virq = 0x5f63;
+    let (line, old_calls) = fixture(virq);
+    let queue = queue();
+    let cleanup = ScopedReplayLine::install(virq, &line, &queue);
+    assert!(cleanup.is_some());
+    schedule_on(&queue, &line);
+    disable_fixture_before_public_free(&line);
+    let removed = crate::free_irq(virq).unwrap();
+    drop(removed);
+    assert_eq!(Arc::strong_count(&old_calls), 1);
+    assert!(line.lock().is_replay_queued);
+    assert!(!line.lock().is_running);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let weak = Arc::downgrade(&line);
+    let handler: crate::Handler = Arc::new(move |_| {
+        let line = weak.upgrade().unwrap();
+        let entry = line.lock();
+        core::assert!(entry.is_running);
+        core::assert!(entry.has_active_execution());
+        core::assert!(!entry.execution_idle_completion().is_completed());
+        observed.fetch_add(1, Ordering::Relaxed);
+        IrqEvent::HANDLED
+    });
+    {
+        // Preserve the synthetic flow using the registration fixture adapter;
+        // public descriptor resolution would select a real provider's flow.
+        let mut entry = line.lock();
+        assert!(
+            super::super::manager::register_locked(
+                virq,
+                &mut entry,
+                &handler,
+                crate::IrqRegisterOptions::auto_enable(),
+                |_| Ok(()),
+            )
+            .unwrap()
+        );
+        assert!(entry.is_pending);
+        assert!(entry.is_replay_queued);
+        assert!(!entry.is_running);
+    }
+    drop(handler);
+    // Queue ownership identifies a Line, not an event or action generation.
+    super::run_on(&queue);
+    assert_eq!(old_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(queue.lock().pending.is_empty());
+    assert!(!line.lock().is_replay_queued);
+    assert!(!line.lock().is_pending);
+    assert!(!line.lock().is_running);
+    disable_fixture_before_public_free(&line);
+    drop(crate::free_irq(virq).unwrap());
+    assert_eq!(Arc::strong_count(&calls), 1);
+    let retired = IRQ_STATE.lock().remove_test_line(virq).unwrap();
+    assert!(Arc::ptr_eq(&retired, &line));
+    assert!(IRQ_STATE.lock().descs.get(&virq).is_none());
+}
+
+#[def_test(serial)]
+fn disable_after_enqueue_skips_admission_but_retains_pending() {
     let (line, calls) = fixture(0x5f48);
     let queue = queue();
     schedule_on(&queue, &line);
-    let completion = line.lock().in_flight_zero_completion();
+    let completion = line.lock().execution_idle_completion();
     {
         let mut entry = line.lock();
         let plan = entry.prepare_disable_irq_nosync();
         entry.commit_platform_plan(plan);
     }
-    assert!(!completion.is_completed());
+    assert!(completion.is_completed());
     super::run_on(&queue);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert!(completion.is_completed());
@@ -353,12 +647,12 @@ fn disable_after_enqueue_drains_the_old_obligation_but_retains_pending() {
         let mut entry = line.lock();
         assert!(entry.is_pending);
         assert!(!entry.is_replay_queued);
-        assert_eq!(entry.in_flight(), 0);
+        assert!(!entry.is_running);
         let plan = entry.prepare_enable_irq();
         entry.commit_platform_plan(plan);
     }
     schedule_on(&queue, &line);
-    assert!(!completion.is_completed());
+    assert!(completion.is_completed());
     super::run_on(&queue);
     assert!(completion.is_completed());
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -367,22 +661,25 @@ fn disable_after_enqueue_drains_the_old_obligation_but_retains_pending() {
 }
 
 #[def_test(serial)]
-fn configuration_failure_drains_queued_replay_without_service_until_recovery() {
+fn configuration_failure_skips_queued_replay_until_recovery() {
     let (line, calls) = fixture(0x5f4b);
     let queue = queue();
     schedule_on(&queue, &line);
-    let completion = line.lock().in_flight_zero_completion();
+    let completion = line.lock().execution_idle_completion();
     {
         let mut entry = line.lock();
         // A controller can fail even when descriptor generation is unchanged.
         entry.mark_configuration_failed();
-        assert_eq!(entry.configured_generation_for_tests(), Some(entry.generation_for_tests()));
+        assert_eq!(
+            entry.configured_generation_for_tests(),
+            Some(entry.generation_for_tests())
+        );
         assert!(entry.is_enabled_for_tests());
         assert_eq!(entry.disable_depth_for_tests(), 0);
         assert!(!entry.can_run_actions());
         assert!(entry.needs_configuration_restore());
     }
-    assert!(!completion.is_completed());
+    assert!(completion.is_completed());
     super::run_on(&queue);
     assert!(completion.is_completed());
     assert!(line.lock().is_pending);
@@ -401,12 +698,12 @@ fn configuration_failure_drains_queued_replay_without_service_until_recovery() {
         assert!(!entry.needs_configuration_restore());
     }
     schedule_on(&queue, &line);
-    assert!(!completion.is_completed());
+    assert!(completion.is_completed());
     super::run_on(&queue);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(completion.is_completed());
     assert!(!line.lock().is_pending);
-    assert_eq!(line.lock().in_flight(), 0);
+    assert!(!line.lock().is_running);
     assert!(queue.lock().pending.is_empty());
 }
 
@@ -454,7 +751,10 @@ fn metadata_merge_alone_keeps_pending_replay_eligible() {
         let mut entry = line.lock();
         let richer = entry.desc.with_flags(crate::IrqFlags::WAKEUP_SOURCE);
         entry.update_desc(richer);
-        assert_ne!(entry.configured_generation_for_tests(), Some(entry.generation_for_tests()));
+        assert_ne!(
+            entry.configured_generation_for_tests(),
+            Some(entry.generation_for_tests())
+        );
         assert!(entry.prepare_reconfigure_if_stale().configure);
         assert!(entry.can_run_actions());
         assert!(entry.needs_replay());
@@ -464,7 +764,7 @@ fn metadata_merge_alone_keeps_pending_replay_eligible() {
     super::run_on(&queue);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(!line.lock().is_pending);
-    assert_eq!(line.lock().in_flight(), 0);
+    assert!(!line.lock().is_running);
     assert!(queue.lock().pending.is_empty());
 }
 
@@ -472,23 +772,25 @@ fn metadata_merge_alone_keeps_pending_replay_eligible() {
 fn replay_handler_disable_preserves_pending_until_explicit_enable() {
     let calls = Arc::new(AtomicUsize::new(0));
     let line = Arc::new_cyclic(|weak: &alloc::sync::Weak<IrqLine>| {
-        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(0x5f49));
-        entry.flow = IrqFlow::Fasteoi(&CHIP);
+        let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x5f49));
+        entry.set_flow_for_tests(IrqFlow::Fasteoi(&CHIP));
         let weak = weak.clone();
         let calls = calls.clone();
-        assert!(entry.install_regular_action(IrqAction::regular(Arc::new(move |_| {
-            let line = weak.upgrade().unwrap();
-            let mut entry = line.lock();
-            assert!(entry.is_running);
-            assert_eq!(entry.in_flight(), 1);
-            assert!(!entry.in_flight_zero_completion().is_completed());
-            if calls.fetch_add(1, Ordering::Relaxed) == 0 {
-                let disable = entry.prepare_disable_irq_nosync();
-                entry.commit_platform_plan(disable);
-                entry.is_pending = true;
-            }
-            IrqEvent::HANDLED
-        }))));
+        assert!(
+            entry.install_regular_action(IrqAction::regular(Arc::new(move |_| {
+                let line = weak.upgrade().unwrap();
+                let mut entry = line.lock();
+                assert!(entry.is_running);
+                assert!(entry.has_active_execution());
+                assert!(!entry.execution_idle_completion().is_completed());
+                if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    let disable = entry.prepare_disable_irq_nosync();
+                    entry.commit_platform_plan(disable);
+                    entry.is_pending = true;
+                }
+                IrqEvent::HANDLED
+            })))
+        );
         let plan = entry.prepare_auto_enable();
         entry.commit_platform_plan(plan);
         entry.is_pending = true;
@@ -502,8 +804,7 @@ fn replay_handler_disable_preserves_pending_until_explicit_enable() {
         assert!(entry.is_pending);
         assert!(!entry.is_running);
         assert!(!entry.is_replay_queued);
-        assert_eq!(entry.in_flight(), 0);
-        assert!(entry.in_flight_zero_completion().is_completed());
+        assert!(entry.execution_idle_completion().is_completed());
         assert_eq!(entry.disable_depth_for_tests(), 1);
         let enable = entry.prepare_enable_irq();
         entry.commit_platform_plan(enable);
@@ -512,7 +813,7 @@ fn replay_handler_disable_preserves_pending_until_explicit_enable() {
     schedule_on(&queue, &line);
     super::run_on(&queue);
     assert_eq!(calls.load(Ordering::Relaxed), 2);
-    assert_eq!(line.lock().in_flight(), 0);
+    assert!(!line.lock().is_running);
     assert!(!line.lock().is_pending);
     assert!(queue.lock().pending.is_empty());
 }
@@ -523,30 +824,36 @@ fn real_claim_during_replay_preserves_successor_service() {
     let calls = Arc::new(AtomicUsize::new(0));
     let completions = Arc::new(AtomicUsize::new(0));
     let line = Arc::new_cyclic(|weak: &alloc::sync::Weak<IrqLine>| {
-        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
-        entry.flow = IrqFlow::Fasteoi(&CHIP);
+        let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+        entry.set_flow_for_tests(IrqFlow::Fasteoi(&CHIP));
         let weak = weak.clone();
         let calls = calls.clone();
         let completions = completions.clone();
-        assert!(entry.install_regular_action(IrqAction::regular(Arc::new(move |_| {
-            if calls.fetch_add(1, Ordering::Relaxed) == 0 {
-                // Inject the cross-CPU ordering deterministically after the
-                // replay handler's device work, without depending on timing.
-                assert_eq!(dispatch::dispatch_claim(crate::IrqRef::Virq(virq), || {
-                    completions.fetch_add(1, Ordering::Relaxed);
-                }), Some(virq));
-                let line = weak.upgrade().unwrap();
-                let mut entry = line.lock();
-                assert!(entry.is_pending);
-                assert!(entry.is_running);
-                assert_eq!(entry.in_flight(), 1);
-                // Keep the successor on this fixture's private queue rather
-                // than letting the global BH executor race the assertions.
-                let disable = entry.prepare_disable_irq_nosync();
-                entry.commit_platform_plan(disable);
-            }
-            IrqEvent::HANDLED
-        }))));
+        assert!(
+            entry.install_regular_action(IrqAction::regular(Arc::new(move |_| {
+                if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    // Inject the cross-CPU ordering deterministically after the
+                    // replay handler's device work, without depending on timing.
+                    assert_eq!(
+                        dispatch::dispatch_claim(crate::IrqRef::Virq(virq), || {
+                            completions.fetch_add(1, Ordering::Relaxed);
+                        }),
+                        Some(virq)
+                    );
+                    let line = weak.upgrade().unwrap();
+                    let mut entry = line.lock();
+                    assert!(entry.is_pending);
+                    assert!(entry.is_running);
+                    assert!(entry.has_active_execution());
+                    assert!(!entry.execution_idle_completion().is_completed());
+                    // Keep the successor on this fixture's private queue rather
+                    // than letting the global BH executor race the assertions.
+                    let disable = entry.prepare_disable_irq_nosync();
+                    entry.commit_platform_plan(disable);
+                }
+                IrqEvent::HANDLED
+            })))
+        );
         let enable = entry.prepare_auto_enable();
         entry.commit_platform_plan(enable);
         entry.is_pending = true;
@@ -562,7 +869,6 @@ fn real_claim_during_replay_preserves_successor_service() {
         let mut entry = line.lock();
         assert!(entry.is_pending);
         assert!(!entry.is_running);
-        assert_eq!(entry.in_flight(), 0);
         let enable = entry.prepare_enable_irq();
         entry.commit_platform_plan(enable);
     }
@@ -571,8 +877,8 @@ fn real_claim_during_replay_preserves_successor_service() {
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert_eq!(completions.load(Ordering::Relaxed), 1);
     assert!(!line.lock().is_pending);
-    assert_eq!(line.lock().in_flight(), 0);
-    assert!(line.lock().in_flight_zero_completion().is_completed());
+    assert!(!line.lock().is_running);
+    assert!(line.lock().execution_idle_completion().is_completed());
     let removed = IRQ_STATE.lock().descs.remove(&virq).unwrap();
     assert!(Arc::ptr_eq(&removed, &line));
 }
@@ -586,7 +892,7 @@ fn hardware_service_consumes_pending_before_queued_replay() {
     let queued = queue.lock().pending.pop_front().unwrap();
     dispatch::replay(queued);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
-    assert_eq!(line.lock().in_flight(), 0);
+    assert!(!line.lock().is_running);
 }
 
 #[def_test(serial)]
@@ -625,12 +931,18 @@ fn replay_never_redirects_to_a_replacement_line() {
     let queue = queue();
     schedule_on(&queue, &original);
     // Deliberately bypass retirement to isolate original-identity retention.
-    assert!(IRQ_STATE.lock().descs.insert(virq, replacement.clone()).is_none());
+    assert!(
+        IRQ_STATE
+            .lock()
+            .descs
+            .insert(virq, replacement.clone())
+            .is_none()
+    );
     let queued = queue.lock().pending.pop_front().unwrap();
     dispatch::replay(queued);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(replacement_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(replacement.lock().in_flight(), 0);
+    assert!(!replacement.lock().is_running);
     let stored = IRQ_STATE.lock().descs.remove(&virq).unwrap();
     assert!(Arc::ptr_eq(&stored, &replacement));
 }
@@ -646,7 +958,6 @@ fn running_owner_defers_replay_without_losing_pending() {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert!(line.lock().is_running);
     assert!(line.lock().is_pending);
-    assert_eq!(line.lock().in_flight(), 0);
     line.lock().is_running = false;
     schedule_on(&queue, &line);
     let queued = queue.lock().pending.pop_front().unwrap();
@@ -656,33 +967,76 @@ fn running_owner_defers_replay_without_losing_pending() {
 
 #[def_test(serial)]
 fn permanent_bh_executor_drains_original_line() {
-    let (line, calls) = fixture(0x5f45);
-    let completion = line.lock().in_flight_zero_completion();
+    let serviced = Arc::new(Completion::new());
+    let (line, calls) = fixture_with_completion(0x5f45, Some(serviced.clone()));
     schedule(&line);
+    kiface_task_wait_api::wait_for_completion(&serviced).unwrap();
+    // Callback completion proves the queue was consumed. Only the already
+    // admitted dispatch tail may remain; a queued Line has no running ownership.
+    let completion = line.lock().execution_idle_completion();
     kiface_task_wait_api::wait_for_completion(&completion).unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    assert_eq!(line.lock().in_flight(), 0);
+    assert!(!line.lock().has_active_execution());
 }
 
 #[def_test(serial)]
 fn permanent_bh_executor_drains_a_multi_batch_burst() {
     let fixtures: alloc::vec::Vec<_> = (0..=super::BATCH_LIMIT)
-        .map(|index| fixture(0x6000 + index))
+        .map(|index| {
+            let serviced = Arc::new(Completion::new());
+            let (line, calls) = fixture_with_completion(0x6000 + index, Some(serviced.clone()));
+            (line, calls, serviced)
+        })
         .collect();
     {
         // Avoid local BH execution while publishing this burst. A predecessor
         // invocation on another CPU may still consume work concurrently.
         let _guard = kspin::NoPreemptIrqSave::new();
-        for (line, _) in &fixtures {
+        for (line, ..) in &fixtures {
             schedule(line);
         }
     }
-    for (line, calls) in fixtures {
-        let completion = line.lock().in_flight_zero_completion();
+    for (line, calls, serviced) in fixtures {
+        kiface_task_wait_api::wait_for_completion(&serviced).unwrap();
+        // This wait covers dispatch completion, never queued-service progress.
+        let completion = line.lock().execution_idle_completion();
         kiface_task_wait_api::wait_for_completion(&completion).unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert_eq!(line.lock().in_flight(), 0);
+        assert!(!line.lock().has_active_execution());
     }
+}
+
+#[def_test(serial)]
+fn locked_replay_preparation_defers_notification_and_rechecks_disable() {
+    static NOTIFICATIONS: AtomicUsize = AtomicUsize::new(0);
+    let (line, calls) = fixture(0x60ff);
+    let queue = queue();
+    queue.lock().notify = Some(|| {
+        NOTIFICATIONS.fetch_add(1, Ordering::Relaxed);
+    });
+    NOTIFICATIONS.store(0, Ordering::Relaxed);
+
+    let mut entry = line.lock();
+    let notify = super::prepare_on(&queue, &line, &mut entry);
+    assert!(entry.is_replay_queued);
+    assert!(!entry.is_running);
+    assert_eq!(NOTIFICATIONS.load(Ordering::Relaxed), 0);
+    assert!(notify.is_some());
+    drop(entry);
+
+    // Shutdown may win after publication but before the executor is notified.
+    // Queued ownership must not grant permission to execute the old action.
+    {
+        let mut entry = line.lock();
+        let plan = entry.prepare_register_disabled();
+        entry.commit_platform_plan(plan);
+    }
+    notify.unwrap()();
+    assert_eq!(NOTIFICATIONS.load(Ordering::Relaxed), 1);
+    super::run_on(&queue);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(!line.lock().is_replay_queued);
+    assert!(queue.lock().pending.is_empty());
 }
 
 #[def_test(serial)]
@@ -696,7 +1050,9 @@ fn batch_limit_leaves_one_line_and_notifies_for_successor() {
         schedule_on(&queue, line);
     }
     NOTIFICATIONS.store(0, Ordering::Relaxed);
-    queue.lock().notify = Some(|| { NOTIFICATIONS.fetch_add(1, Ordering::Relaxed); });
+    queue.lock().notify = Some(|| {
+        NOTIFICATIONS.fetch_add(1, Ordering::Relaxed);
+    });
     super::run_on(&queue);
     assert_eq!(NOTIFICATIONS.load(Ordering::Relaxed), 1);
     assert!(!queue.lock().pending.is_empty());
@@ -705,6 +1061,6 @@ fn batch_limit_leaves_one_line_and_notifies_for_successor() {
     assert!(queue.lock().pending.is_empty());
     for (line, calls) in fixtures {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert_eq!(line.lock().in_flight(), 0);
+        assert!(!line.lock().is_running);
     }
 }

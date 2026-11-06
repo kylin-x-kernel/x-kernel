@@ -6,6 +6,48 @@ use unittest::{assert_eq, def_test};
 
 use super::*;
 
+#[cfg(target_arch = "x86_64")]
+#[def_test(serial)]
+fn allocated_msi_owner_survives_live_action_rejection() {
+    let provider = XKernelResourceProvider;
+    let resource = provider.alloc_msix().unwrap();
+    let irq = resource.irq;
+    let message = resource.message;
+    // No device is programmed with this message, so this fixture has no producer.
+    let token = provider
+        .request_irq(irq, Arc::new(|_| DevIrqEvent::HANDLED))
+        .unwrap();
+    let (error, retained) = provider.try_free_msix(resource).unwrap_err();
+    assert_eq!(error, ResError::Busy);
+    assert_eq!(retained, MsiResource::new(irq, message));
+    unittest::assert!(kirq::descriptor(irq.virq().raw()).is_some());
+
+    provider.release_irq(irq, token);
+    assert_eq!(provider.try_free_msix(retained), Ok(()));
+    unittest::assert!(kirq::descriptor(irq.virq().raw()).is_none());
+}
+
+#[def_test]
+fn msi_rejection_returns_unchanged_resource_for_retry() {
+    let irq = IrqResource::plain(Virq::new(48), DevIrqTrigger::EdgeRising);
+    let message = driver_os_api::MsiMessage::new(0xfee0_1000, 0x52);
+    let (error, resource) = msix_release_result(MsiResource::new(irq, message), false).unwrap_err();
+    assert_eq!(error, ResError::Busy);
+    assert_eq!(resource, MsiResource::new(irq, message));
+    assert_eq!(msix_release_result(resource, true), Ok(()));
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[def_test]
+fn non_x86_msi_release_returns_unsupported_with_original_resource() {
+    let irq = IrqResource::plain(Virq::new(48), DevIrqTrigger::EdgeRising);
+    let message = driver_os_api::MsiMessage::new(0xfee0_1000, 0x52);
+    assert_eq!(
+        XKernelResourceProvider.try_free_msix(MsiResource::new(irq, message)),
+        Err((ResError::Unsupported, MsiResource::new(irq, message)))
+    );
+}
+
 #[def_test]
 fn plain_resource_retains_virq_identity() {
     let resource = IrqResource::plain(Virq::new(32), DevIrqTrigger::Unknown(0));
@@ -110,7 +152,6 @@ fn irq_error_classification_retains_mainline_contract() {
             domain: kirq::IrqDomainId::new(87),
         },
         kirq::IrqDescError::UnknownIrq,
-        kirq::IrqDescError::RetirementUnavailable,
         kirq::IrqDescError::InvalidContext {
             operation: "provider test",
         },
@@ -133,10 +174,6 @@ fn missing_release_action_cannot_authorize_cleanup() {
     assert_eq!(
         require_released_action(Err(kirq::IrqDescError::NoMemory)),
         Err(ResError::NoMemory)
-    );
-    assert_eq!(
-        require_released_action(Err(kirq::IrqDescError::RetirementUnavailable)),
-        Err(ResError::InvalidResource)
     );
 }
 

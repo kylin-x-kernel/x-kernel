@@ -5,14 +5,14 @@
 //! Internal IRQ action model.
 
 use bitflags::bitflags;
-use krcu_list::Entry;
+use kalloc_types::KBox;
 
 use super::action_set::ActionRecord;
 use crate::{IrqEvent, Virq, platform::Handler};
 
 /// Allocation prepared before Line exclusion; rejection retains this owner.
 pub(super) struct PreparedAction {
-    pub(super) pending: Option<Entry<ActionRecord>>,
+    pub(super) pending: Option<KBox<ActionRecord>>,
     is_shared: bool,
 }
 
@@ -31,11 +31,8 @@ impl PreparedAction {
             return Err(crate::IrqDescError::NoMemory);
         }
         let is_shared = action.is_shared();
-        let entry = Entry::new_nowait(ActionRecord {
-            action,
-            sequence: 0,
-        })
-        .map_err(|_| crate::IrqDescError::NoMemory)?;
+        let entry = KBox::new_nowait(ActionRecord::new(action))
+            .map_err(|_| crate::IrqDescError::NoMemory)?;
         Ok(Self {
             pending: Some(entry),
             is_shared,

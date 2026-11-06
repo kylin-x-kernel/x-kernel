@@ -2,13 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! IRQ-tail deferred-execution handoff.
+//! Private handoff from completed hardirq entry to the softirq runner.
 //!
-//! This module provides the first stable boundary for future IRQ bottom-half
-//! work. It does not implement softirq vectors, workerqueue execution, or IRQ
-//! threads; it only lets one owner install a bounded handoff that runs during
-//! the common IRQ-on exit path after irqchip dispatch and after the generic
-//! hardirq context depth has been dropped.
+//! Softirq installs the sole production owner at boot. This module publishes
+//! that callback and invokes it after hardirq context ends; it does not own
+//! pending vectors, worker execution or a runtime shutdown protocol. Test-only
+//! scoped replacement preserves the boot owner and is not a callback drain.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -23,18 +22,16 @@ use crate::Virq;
 /// exception. It must not sleep, allocate on the hot path, wait for
 /// scheduler activity, assume a current process thread, or recursively call
 /// [`run_hardirq_exit_deferred`].
-pub type DeferredExecutorHook = fn(DeferredRunContext);
+pub(crate) type DeferredExecutorHook = fn(DeferredRunContext);
 
 /// Optional hardirq-exit deferred executor callbacks.
 ///
-/// Only one owner can register hooks at a time. The initial consumer is
-/// expected to be the later softirq subsystem; workerqueue and threaded-IRQ
-/// support should hang from that subsystem or from explicit future APIs, not
-/// from implicit extra owners here.
+/// The softirq subsystem is the sole production owner. Other bottom-half
+/// services register vectors there rather than replacing this entry handoff.
 #[derive(Clone, Copy, Default)]
-pub struct DeferredExecutorHooks {
+pub(crate) struct DeferredExecutorHooks {
     /// Called after irqchip dispatch has returned and hardirq context ended.
-    pub on_hardirq_exit: Option<DeferredExecutorHook>,
+    pub(crate) on_hardirq_exit: Option<DeferredExecutorHook>,
 }
 
 impl DeferredExecutorHooks {
@@ -45,14 +42,14 @@ impl DeferredExecutorHooks {
 
 /// Context passed to a hardirq-exit deferred executor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DeferredRunContext {
+pub(crate) struct DeferredRunContext {
     vector: usize,
     resolved_irq: Option<Virq>,
 }
 
 impl DeferredRunContext {
     /// Creates a deferred run context for an IRQ-on exception.
-    pub const fn new(vector: usize, resolved_irq: Option<Virq>) -> Self {
+    pub(crate) const fn new(vector: usize, resolved_irq: Option<Virq>) -> Self {
         Self {
             vector,
             resolved_irq,
@@ -60,7 +57,8 @@ impl DeferredRunContext {
     }
 
     /// Returns the interrupt vector passed to the IRQ trap adapter.
-    pub const fn vector(&self) -> usize {
+    #[cfg(unittest)]
+    pub(crate) const fn vector(&self) -> usize {
         self.vector
     }
 
@@ -68,14 +66,15 @@ impl DeferredRunContext {
     ///
     /// This is an identity hint for IRQ-tail hooks, not a handled marker. A
     /// value can be present even when dispatch found no descriptor or handler.
-    pub const fn resolved_irq(&self) -> Option<Virq> {
+    #[cfg(unittest)]
+    pub(crate) const fn resolved_irq(&self) -> Option<Virq> {
         self.resolved_irq
     }
 }
 
 /// Result of attempting to run the deferred hardirq-exit handoff.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DeferredRunResult {
+pub(crate) enum DeferredRunResult {
     /// No executor is currently registered.
     NoExecutor,
     /// A registered executor was called.
@@ -95,7 +94,7 @@ static DEFERRED_EXECUTOR_HOOK: AtomicUsize = AtomicUsize::new(0);
 /// Returns `false` when another owner is already registered, or when `hooks`
 /// does not contain an executor. Hook implementations run in hardirq-exit
 /// context and must follow [`DeferredExecutorHook`]'s constraints.
-pub fn register_deferred_executor(hooks: DeferredExecutorHooks) -> bool {
+pub(crate) fn register_deferred_executor(hooks: DeferredExecutorHooks) -> bool {
     if !hooks.has_executor() {
         return false;
     }
@@ -112,13 +111,13 @@ pub fn register_deferred_executor(hooks: DeferredExecutorHooks) -> bool {
     true
 }
 
-/// Clear the registered deferred executor owner.
-///
-/// This is intended for shutdown and focused tests. Normal runtime ownership
-/// should be established once by the subsystem that owns deferred IRQ work.
-pub fn clear_deferred_executor() {
+/// Clears a test replacement without draining callbacks already in execution.
+/// Serial fixtures must restore the boot owner through `ScopedDeferredExecutor`.
+#[cfg(unittest)]
+pub(crate) fn clear_deferred_executor() {
+    let mut hooks = DEFERRED_EXECUTOR_HOOKS.lock();
     DEFERRED_EXECUTOR_HOOK.store(0, Ordering::Release);
-    *DEFERRED_EXECUTOR_HOOKS.lock() = DeferredExecutorHooks::default();
+    *hooks = DeferredExecutorHooks::default();
 }
 
 /// Run the normal hardirq-exit deferred handoff.
@@ -127,7 +126,7 @@ pub fn clear_deferred_executor() {
 /// takes the registration lock on the IRQ-tail hot path. This function must not
 /// be called from the dedicated IRQ-off NMI path. An NMI classified inside an
 /// IRQ-on entry still reaches this common outer tail.
-pub fn run_hardirq_exit_deferred(ctx: DeferredRunContext) -> DeferredRunResult {
+pub(crate) fn run_hardirq_exit_deferred(ctx: DeferredRunContext) -> DeferredRunResult {
     let hook = DEFERRED_EXECUTOR_HOOK.load(Ordering::Acquire);
     if hook == 0 {
         return DeferredRunResult::NoExecutor;
@@ -144,6 +143,7 @@ pub fn run_hardirq_exit_deferred(ctx: DeferredRunContext) -> DeferredRunResult {
 }
 
 #[cfg(unittest)]
+/// Restores the permanent executor after a serial fixture's temporary override.
 pub(crate) struct ScopedDeferredExecutor {
     previous: DeferredExecutorHooks,
     _irq_pin: kspin::NoPreemptIrqSave,

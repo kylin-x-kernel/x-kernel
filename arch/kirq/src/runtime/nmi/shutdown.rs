@@ -85,7 +85,7 @@ pub fn begin_nmi_shutdown(desc: IrqDesc) -> Result<NmiShutdown, IrqDescError> {
         if !entry.has_nmi_action() {
             return Err(IrqDescError::NoIrqAction { virq });
         }
-        if entry.flow != crate::IrqFlow::PerCpu {
+        if entry.flow != Some(crate::IrqFlow::PerCpu) {
             return Err(IrqDescError::UnsupportedFlow {
                 hwirq: entry.desc.hwirq,
             });

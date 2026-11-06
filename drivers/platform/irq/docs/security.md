@@ -30,7 +30,7 @@ delegation. `gic::guest_interface` validates all firmware register ranges before
 exposing GICH/GICV; its tests do not prove physical MMIO accessibility.
 
 PerCpu selection includes GIC private sources (including forwarded PPI 27 and
-NMI-fallback PPIs), RISC-V timer/software causes, and x86 timer/IPI
+NMI-tagged PPIs), RISC-V timer/software causes, and x86 timer/IPI
 vectors. KIRQ pins the CPU across configure/enable/commit. RISC-V controls the
 local SIE bit, and x86 timer control changes only the LAPIC timer mask. An x86
 IPI vector has no independent hardware mask: disabled software admission is not
@@ -92,6 +92,13 @@ are range/identity checked; MSI admission also requires retained allocation
 routing. Callbacks do not derive an MSI target from the replay CPU. Device-owned
 MSI masking, posted deliveries and vector-reuse safety are not supplied by these
 flow operations. Generic disable suppresses handlers but cannot stop MSI traffic.
+
+Production selectors reject unsupported identities rather than assigning a
+Legacy flow. x86 retains only explicit IO-APIC/MSI bindings and fixed raw
+timer/IPI PerCpu identities. A KIRQ candidate with no selected flow does not
+authorize configuration or dispatch. PCI legacy INTx and direct legacy
+`set_trigger` calls retain their existing contracts; neither is a fallback
+flow or gains new validation from this change.
 
 GICv2 local preparation constructs only architected SGI/PPI IDs (0..32),
 clears their banked active state and requests disablement before CPU-interface
@@ -165,7 +172,7 @@ anywhere in this crate.
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
 | T-01 | DTB describing a wrong GIC version or truncated regions | Medium — wrong MMIO windows mapped, later accesses fault | Malformed or hostile device tree | Version/region requirements checked per version before any mapping; missing regions yield `None` (no mapping, no access). |
-| T-02 | Out-of-range hwirq reaching a backend | Medium — out-of-window register access | `kirq` or platform init passing a bad source number | PLIC validates source bounds. Explicit GIC resources are checked by `select_gic_flow` before publication; bare legacy IDs and direct platform calls still require caller validation. `x86.rs` translates but never invents numbers. |
+| T-02 | Out-of-range hwirq reaching a backend | Medium — out-of-window register access | `kirq` or platform init passing a bad source number | PLIC validates source bounds. Explicit GIC resources are checked by `select_gic_flow` before publication; only raw private IDs retain PerCpu classification, and other raw IDs are rejected. Direct platform calls still require caller validation. `x86.rs` translates but never invents numbers. |
 | T-03 | Interrupt storm from a misconfigured trigger mode | Medium — CPU starvation | Wrong edge/level programming | Explicit GIC SPIs reject falling-edge and low-level requests before publication. Checked backends verify known trigger configuration and request masking on transaction failure; GICv3 private changes are rejected before mutation. `Unknown` leaves hardware unchanged. Misleading register reads and direct legacy writes retain the limitations below. |
 | T-04 | Reinitialization resets live controller state | Medium — inconsistent controller state | Repeated configuration or local CPU initialization after source activation | `remember_config` asserts config equality. Global handle reuse does not make local GIC initialization idempotent; platform bring-up initializes the primary interface through discovery and each AP interface separately, without repeating primary local setup. |
 | T-05 | Spurious PLIC claim | Low — wasted IRQ cycle | Level noise on a PLIC line | Claim returns `None`/skip sentinel for timer and IPI events; completion only for genuine device lines. |
@@ -221,8 +228,10 @@ anywhere in this crate.
   allocation and locks; it runs only after the allocator and GIC are ready.
 - Keep irq_work notification independent of `GIC`, `LazyInit`, CPU maps and
   logging, and keep SGI15 out of the NMI priority/attribute classes.
-- Keep the SGI descriptor marked `PER_CPU` and use the force-enable path on
-  every CPU; a globally enabled descriptor does not imply local SGI enablement.
+- Keep the SGI15 descriptor marked `PER_CPU`; typed SGIs now select PerCpu.
+  Prepare and enable it on every CPU using the existing force-enable path.
+  Shared registration does not enable remote slots, and even an enabled local
+  slot does not replace the required local hardware preparation.
 
 ## PLIC Source Validation
 
@@ -258,18 +267,32 @@ The KIRQ resolution path checks this result before metadata/mapping publication;
 registration therefore retains caller ownership of a rejected handler.
 
 The same gate rejects explicit GIC SPI `EdgeFalling`/`LevelLow` requests before
-new mapping publication or existing metadata updates. It does not validate bare
-legacy IDs, direct controller calls, private-source trigger support, unspecified
+new mapping publication or existing metadata updates. Raw private classification
+does not validate wiring, direct controller calls, private-source trigger support, unspecified
 trigger metadata, forwarding state or per-CPU shutdown. Eligible ordinary SPIs
-select Fasteoi; private sources including PPI 27 and NMI-fallback PPIs select
-PerCpu. NMI-tagged SPIs retain Legacy;
+select Fasteoi; private sources including PPI 27, tagged SGIs and NMI-tagged PPIs
+select PerCpu. Explicit GIC SPIs marked `PER_CPU` return `UnsupportedFlow`
+including NMI registration's added flag;
 neither successful admission nor cached hardware capacity proves delivery,
 configuration success, register-write completion or hardware quiescence.
+
+Raw descriptors (no domain, Unknown controller) select PerCpu for `0..32`,
+including 27, with or without `PER_CPU`. The flag alone does not select PerCpu
+for raw IDs outside that range. This compatibility classification
+is not hardware validation and does not relax checked register bounds. Other raw
+and foreign identities return `UnsupportedFlow`; neither a low INTID nor the
+flag overrides a foreign domain/controller identity.
+
+Flow selection grants no automatic NMI or forwarding access. NMI capability
+still requires an explicit GIC root-domain PPI on GICv3 with an available NMI
+mechanism; forwarding requires an explicit root-domain PPI on GICv2. In
+particular SGI15 remains an ordinary IRQ, and raw PerCpu classification cannot
+authorize either capability or replace source-owner shutdown.
 
 ### Checked Backend Configuration
 
 Both checked backends reuse `select_gic_flow` before hardware access and
-independently bound register indices, including legacy IDs, to the initialized
+independently bound register indices, including raw private IDs, to the initialized
 standard range below 1020, before handling unknown trigger metadata.
 Their new `IntId::raw` sites in `checked_config` therefore cannot truncate an
 oversized ID into a valid register index. The existing `GIC` lock serializes the
@@ -337,8 +360,9 @@ disabled/tearing-down handlers from running and completes arriving claims.
 Physical shutdown remains caller-owned. Configuration errors use the separate
 fallible path; none of these operations clears active state to fabricate drain.
 
-Private and PER_CPU sources, including NMI fallbacks and the current forwarded
-virtual timer PPI, are not ordinary SPI flow. A future SPI forwarding consumer
+Private sources, including NMI-tagged PPIs and the current forwarded virtual
+timer PPI, are not ordinary SPI flow. Explicit GIC SPI `PER_CPU` requests are
+rejected without an alternative flow. A future SPI forwarding consumer
 must establish exclusion and completion ownership before using this capability.
 The `gic_spi` model tests cover access order and timeout reporting, not physical
 hardware or firmware security ownership.
@@ -362,10 +386,20 @@ needed. Masking changes source-wide priority, not effective-target ownership.
 
 For descriptors declaring PLIC by domain or controller, flow selection rejects
 incompatible domain/controller, bounds, trigger, polarity, flags and affinity
-before returning the static PLIC capability. Non-PLIC descriptors retain the
-unmigrated Legacy contract, not a new hardware-validation guarantee. Selection itself
+before returning the static PLIC capability. Only fixed local timer/software
+causes select PerCpu; other non-PLIC descriptors return `UnsupportedFlow`. Selection itself
 does not write registers or require the replay executor to be ready. KIRQ must
 retain and validate binding identity, serialize mask/unmask decisions, and supply
 pending/replay cancellation and drain before activating this flow. Static
 operation lifetime is not proof of descriptor or replay lifetime. Unknown trigger
 acceptance is not a claim that hardware will replay a completed notification.
+
+## Dispatch Boundary Safety
+
+The unsafe `IntrManagerIf` providers in `src/gic.rs`, `src/x86.rs` and
+`src/riscv.rs` trust KIRQ's active-entry exclusion. GIC claim helpers retain this
+contract through IRQ/NMI classification; x86 transfers the remaining EOI cookie;
+RISC-V transfers a PLIC claim or a local no-completion sentinel. Only the original
+claiming CPU may consume the cookie, once, before entry exclusion ends. Safe
+generic claim construction is not exposed. Controller MMIO and hardware
+quiescence obligations remain independent of this Rust call boundary.

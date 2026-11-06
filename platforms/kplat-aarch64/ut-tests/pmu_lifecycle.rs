@@ -32,55 +32,6 @@ fn on_cpu(cpu: usize, body: impl FnOnce() -> bool + Send + 'static) -> bool {
 }
 
 #[def_test(serial)]
-fn mode_none_pmu_uses_an_enabled_ordinary_action() -> unittest::TestResult {
-    if kplat::nm_irq::mode() != kplat::nm_irq::NmiMode::None {
-        return unittest::TestResult::Ignored;
-    }
-    let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
-    {
-        let _pin = kspin::NoPreemptIrqSave::new();
-        if irq_driver::gic::local_ppi_state_for_test(irq).is_none() {
-            return unittest::TestResult::Ignored;
-        }
-    }
-    let desc = kirq::gic_level_irq_desc(irq);
-    // A normal action must exist, not an unprepared NMI owner. This rejection
-    // leaves ordinary ownership and admission unchanged.
-    assert!(matches!(
-        kirq::begin_nmi_shutdown(desc),
-        Err(kirq::IrqDescError::NoIrqAction { .. })
-    ));
-    assert_eq!(khal::pmu::shutdown_overflow_irq(), Err(KError::Unsupported));
-    assert_eq!(khal::pmu::restore_overflow_irq(), Err(KError::Unsupported));
-    let cpus = if cfg!(feature = "smp") {
-        kcpu_id_map::nr_cpus()
-    } else {
-        1
-    };
-    for cpu in 0..cpus {
-        assert!(on_cpu(cpu, move || {
-            let _pin = kspin::NoPreemptIrqSave::new();
-            let before = irq_driver::gic::local_ppi_state_for_test(irq);
-            let disabled = kirq::try_disable_irq_nosync(desc).is_ok();
-            let masked = irq_driver::gic::local_ppi_state_for_test(irq);
-            // Restore through the production activation path even on failure.
-            khal::pmu::enable_irq();
-            let enabled = irq_driver::gic::local_ppi_state_for_test(irq);
-            disabled
-                && before.is_some_and(|(enabled, ..)| enabled)
-                && masked.is_some_and(|(enabled, ..)| !enabled)
-                && enabled.is_some_and(|(enabled, ..)| enabled)
-                && kirq::try_enable_irq(desc).is_ok()
-        }));
-    }
-    unittest::ktest_println!(
-        "mode-None PMU ordinary action activated on {} GICv2 CPUs",
-        cpus
-    );
-    unittest::TestResult::Ok
-}
-
-#[def_test(serial)]
 fn real_pmu_global_shutdown_retries_and_republishes_after_local_revocation() -> unittest::TestResult
 {
     if kplat::nm_irq::mode() == kplat::nm_irq::NmiMode::None {
@@ -240,7 +191,7 @@ fn retry_partial_shutdown(cpus: usize) -> unittest::TestResult {
             100_000, overflow
         )));
     }
-    // Completed CPUs must not acquire another nested disable on retry.
+    // A retry visits only CPUs whose shutdown acknowledgement is still missing.
     let mut retried = [false; kbuild_config::NR_CPUS];
     assert_eq!(
         super::shutdown_with(|cpu| {

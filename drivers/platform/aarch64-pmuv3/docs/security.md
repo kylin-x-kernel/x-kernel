@@ -10,6 +10,13 @@ Omitting `nomem` is intentional: memory publication must not move past delivery
 activation, nor may readiness withdrawal move before hardware stop. ISB completes
 the local context synchronization; it is not remote CPU acknowledgement.
 
+Activation includes EL2 only when the caller executes there, preserving the
+existing EL0/EL1 counting policy. Omitting that inclusion can silently stop a
+VHE host's periodic PMU source and defeat NMI-based progress monitoring. The
+selected event filter must not overwrite the cycle filter. This policy does not
+isolate guest measurements or provide PMU resource arbitration; those remain
+owner responsibilities, as do the existing shared counter-reset effects.
+
 The handler must remain capable of clearing overflow whenever production and
 overflow IRQ delivery are enabled. Breaking this ordering can cause an NMI storm
 that prevents startup/stop from progressing. Software enabled state is neither

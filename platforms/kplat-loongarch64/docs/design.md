@@ -110,9 +110,10 @@ CpuStartIf / PlatformPowerIf (kiface)
 ### Ordinary External Flow
 
 Only external `LevelChip` sources enter PCH configuration. The CPU-local timer
-uses PerCpu flow and the EIOINTC parent uses Legacy; neither configures a PCH
-pin even though their numeric IDs overlap the external namespace. A recording
-configuration callback test verifies that exclusion and external failure
+uses PerCpu flow; the EIOINTC parent IRQ 3 cannot own an action and returns
+`UnsupportedFlow` from selection and checked configuration. Neither configures
+a PCH pin even though their numeric IDs overlap the external namespace. A recording
+configuration callback test verifies that exclusion, parent rejection and external failure
 propagation without touching live registers.
 
 The supported PCH level sources select KIRQ `LevelChip`, not Fasteoi. Linux
@@ -135,8 +136,12 @@ Edge requests, per-CPU external flags, explicit retargeting and external pins
 outside 0..64 are unsupported. The flat binding reserves 3 and 11 for local
 sources; explicitly external descriptors colliding with them are rejected.
 Local timer IRQ 11 uses PerCpu control state; enabling it changes only the
-current CPU's local gate. Parent IRQ 3 retains its separate Legacy handling.
-Non-platform domains/software Lines retain Legacy. HTVEC here is the PCH vector
+current CPU's local gate. Parent IRQ 3 is demultiplexed before generic dispatch,
+not registered as a Line action. Non-platform domains and unsupported software
+identities return `UnsupportedFlow`; there is no Legacy flow fallback.
+The bounded flat Unknown-controller external binding remains supported as Level.
+An unpublished KIRQ candidate with no selected flow is not an executable fallback.
+HTVEC here is the PCH vector
 table, not a separate supported HTVEC parent-controller driver. Multi-node
 EIOINTC, dynamic routing and edge retrigger require separate mechanisms.
 
@@ -237,3 +242,11 @@ the initial value, then restores timer IRQ delivery without enabling a
 countdown. It does not initialize NANOS_PER_TICK or reset the stable counter.
 PM first restores CPU/controller access and IRQ routing with local IRQs masked;
 software deadline arbitration happens later after timekeeping is ready.
+
+## Interrupt Entry Contract
+
+The `IntrManagerIf` dispatch/completion provider uses unsafe methods matching
+KIRQ's entry contract. Dispatch acknowledges the local or external source before
+transferring a no-op completion cookie to generic dispatch. The caller retains
+hardirq context and ordinary IRQ/migration exclusion throughout the call; this
+interface change adds no register transactions or new controller lock.

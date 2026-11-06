@@ -13,15 +13,26 @@ fn handler() -> Handler {
     Arc::new(|_| IrqEvent::HANDLED)
 }
 
+#[def_test]
+fn action_chain_transfer_trait_dependencies() {
+    fn requires_send_sync<T: Send + Sync>() {}
+    fn requires_send<T: Send>() {}
+
+    requires_send_sync::<Handler>();
+    requires_send_sync::<IrqAction>();
+    requires_send_sync::<ActionRecord>();
+    requires_send_sync::<KBox<ActionRecord>>();
+    requires_send::<PreparedAction>();
+    requires_send::<ActionSet>();
+    requires_send::<RetiredAction>();
+}
+
+/// Private fixture removal after every scoped traversal has ended.
 fn remove(actions: &mut ActionSet, token: Option<IrqActionToken>) -> Option<IrqAction> {
-    let list = actions.list();
-    list.with_prepared_take(|prepared| {
-        let retired = actions.withdraw(prepared, token)?;
-        // SAFETY: this test owns the collection exclusively on the preparing
-        // watched task; no reader, writer guard or progress lock remains held.
-        unsafe { retired.reclaim() }.map(ActionRecord::into_action)
-    })
-    .unwrap()
+    let retired = actions.withdraw(token)?;
+    // SAFETY: callers own this private set and have consumed all snapshots;
+    // there are no concurrent readers, pending admissions or short locks.
+    Some(unsafe { retired.reclaim() })
 }
 
 #[def_test]
@@ -63,7 +74,8 @@ fn shared_membership_exceeds_four_and_wrong_removal_preserves_count() {
     assert_eq!(actions.len(), 7);
     let mut seen = [0; 7];
     let mut count = 0;
-    actions.snapshot().with_actions(|action| {
+    // SAFETY: this private set remains alive and unmodified until consumption.
+    unsafe { actions.snapshot() }.with_actions(|action| {
         seen[count] = action.token().id();
         count += 1;
     });
@@ -78,12 +90,13 @@ fn shared_membership_exceeds_four_and_wrong_removal_preserves_count() {
 }
 
 #[def_test]
-fn snapshots_retain_list_without_cloning_handler_owners() {
+fn scoped_snapshot_borrows_without_cloning_handler_owners() {
     let owner = handler();
     let mut actions = ActionSet::new();
     let mut prepared = PreparedAction::shared(owner.clone()).unwrap();
     let token = actions.publish_shared(&mut prepared).unwrap();
-    let snapshot = actions.snapshot();
+    // SAFETY: all nodes and the private set outlive this consuming traversal.
+    let snapshot = unsafe { actions.snapshot() };
     assert_eq!(Arc::strong_count(&owner), 2);
     let mut observed = false;
     snapshot.with_actions(|action| {
@@ -95,35 +108,34 @@ fn snapshots_retain_list_without_cloning_handler_owners() {
     assert_eq!(Arc::strong_count(&owner), 2);
     drop(removed);
     assert_eq!(Arc::strong_count(&owner), 1);
-    let mut calls = 0;
-    snapshot.with_actions(|_| calls += 1);
-    assert_eq!(calls, 0);
 }
 
 #[def_test]
-fn snapshot_keeps_linked_list_alive_after_collection_owner_drops() {
+fn linked_owner_drops_only_after_scoped_snapshot_finishes() {
     let owner = handler();
     let mut actions = ActionSet::new();
     let mut prepared = PreparedAction::regular(owner.clone()).unwrap();
     assert!(actions.publish_regular(&mut prepared));
-    let snapshot = actions.snapshot();
-    drop(actions);
-    assert_eq!(Arc::strong_count(&owner), 2);
+    // SAFETY: the private set is dropped only after this snapshot is consumed.
+    let snapshot = unsafe { actions.snapshot() };
     let mut handled = false;
     snapshot.with_actions(|action| handled = action.run_primary(0).handled());
     assert!(handled);
-    drop(snapshot);
+    assert_eq!(Arc::strong_count(&owner), 2);
+    drop(actions);
     assert_eq!(Arc::strong_count(&owner), 1);
 }
 
 #[def_test]
-fn snapshot_ceiling_excludes_appends_and_regular_republication() {
+fn snapshot_ceiling_excludes_append_reached_through_existing_successor() {
     let mut actions = ActionSet::new();
     let mut first = PreparedAction::shared(handler()).unwrap();
     let first_token = actions.publish_shared(&mut first).unwrap();
     let mut second = PreparedAction::shared(handler()).unwrap();
     let second_token = actions.publish_shared(&mut second).unwrap();
-    let snapshot = actions.snapshot();
+    // SAFETY: appending cannot invalidate any node; no reclamation or set
+    // destruction occurs until this private traversal has been consumed.
+    let snapshot = unsafe { actions.snapshot() };
     let mut appended = PreparedAction::shared(handler()).unwrap();
     let mut appended_token = None;
     let mut seen = [0; 3];
@@ -132,8 +144,8 @@ fn snapshot_ceiling_excludes_appends_and_regular_republication() {
         seen[calls] = action.token().id();
         calls += 1;
         if calls == 1 {
-            // The second node is cached already, but its next link is read
-            // later. Only the ceiling excludes the append reached through it.
+            // Second is cached, but its next is read later, so the ceiling
+            // rather than successor prefetch must exclude this new action.
             appended_token = actions.publish_shared(&mut appended);
         }
     });
@@ -143,20 +155,35 @@ fn snapshot_ceiling_excludes_appends_and_regular_republication() {
     assert!(remove(&mut actions, Some(first_token)).is_some());
     assert!(remove(&mut actions, Some(second_token)).is_some());
     assert!(remove(&mut actions, appended_token).is_some());
-    let mut regular = PreparedAction::regular(handler()).unwrap();
+}
+
+#[def_test]
+fn captured_head_survives_unlink_before_traversal_and_republication() {
+    let owner = handler();
+    let mut actions = ActionSet::new();
+    let mut regular = PreparedAction::regular(owner.clone()).unwrap();
     assert!(actions.publish_regular(&mut regular));
-    let old_regular = actions.snapshot();
-    assert!(remove(&mut actions, None).is_some());
-    let mut regular = PreparedAction::regular(handler()).unwrap();
+    // SAFETY: the detached owner below is retained until delayed traversal
+    // finishes; the private set also outlives both scoped snapshots.
+    let old = unsafe { actions.snapshot() };
+    let retired = actions.withdraw(None).unwrap();
+    let replacement = handler();
+    let mut regular = PreparedAction::regular(replacement.clone()).unwrap();
     assert!(actions.publish_regular(&mut regular));
-    let mut stale_calls = 0;
-    old_regular.with_actions(|_| stale_calls += 1);
-    snapshot.with_actions(|_| stale_calls += 1);
-    assert_eq!(stale_calls, 0);
-    let mut regular_key = None;
-    actions.snapshot().with_actions(|action| regular_key = Some(action.token().id()));
-    assert_eq!(regular_key, Some(0));
+    let mut saw_old = false;
+    old.with_actions(|action| saw_old = Arc::ptr_eq(action.primary(), &owner));
+    assert!(saw_old);
+    let mut saw_new = false;
+    // SAFETY: no mutation or reclamation occurs during this private traversal.
+    unsafe { actions.snapshot() }.with_actions(|action| {
+        saw_new = Arc::ptr_eq(action.primary(), &replacement);
+    });
+    assert!(saw_new);
+    // SAFETY: both snapshots are consumed; no other admission or reader exists.
+    drop(unsafe { retired.reclaim() });
+    assert_eq!(Arc::strong_count(&owner), 1);
     assert!(remove(&mut actions, None).is_some());
+    assert_eq!(Arc::strong_count(&replacement), 1);
 }
 
 #[def_test]
@@ -169,41 +196,36 @@ fn traversal_keeps_withdrawn_cached_successor_until_reclamation() {
     let second_token = actions.publish_shared(&mut second).unwrap();
     let mut third = PreparedAction::shared(handler()).unwrap();
     let third_token = actions.publish_shared(&mut third).unwrap();
-    let snapshot = actions.snapshot();
-    let list = actions.list();
+    // SAFETY: detached second remains owned until both traversals finish;
+    // linked first/third and the private set likewise remain alive.
+    let snapshot = unsafe { actions.snapshot() };
     let mut seen = [0; 3];
     let mut calls = 0;
     let mut retained_during_read = false;
+    let mut retired = None;
+    snapshot.with_actions(|action| {
+        seen[calls] = action.token().id();
+        calls += 1;
+        if action.token() == first_token {
+            retired = actions.withdraw(Some(second_token));
+            retained_during_read = retired.is_some() && Arc::strong_count(&owner) == 2;
+        }
+    });
     let mut new_seen = [0; 2];
     let mut new_calls = 0;
-    let removed = list
-        .with_prepared_take(|prepared| {
-            let mut prepared = Some(prepared);
-            let mut retired = None;
-            snapshot.with_actions(|action| {
-                seen[calls] = action.token().id();
-                calls += 1;
-                if action.token() == first_token {
-                    // The iterator already cached second. Withdraw it without
-                    // reclaiming, then let this read follow its preserved link.
-                    retired = actions.withdraw(prepared.take().unwrap(), Some(second_token));
-                    retained_during_read = retired.is_some() && Arc::strong_count(&owner) == 2;
-                }
-            });
-            actions.snapshot().with_actions(|action| {
-                new_seen[new_calls] = action.token().id();
-                new_calls += 1;
-            });
-            // SAFETY: both traversals ended on the preparing watched task;
-            // no Line/list lock or RCU read scope remains held across the wait.
-            unsafe { retired.unwrap().reclaim() }
-        })
-        .unwrap()
-        .unwrap()
-        .into_action();
+    // SAFETY: all linked nodes are retained through this private traversal.
+    unsafe { actions.snapshot() }.with_actions(|action| {
+        new_seen[new_calls] = action.token().id();
+        new_calls += 1;
+    });
+    // SAFETY: both snapshots are consumed and no other reader/admission exists.
+    let removed = unsafe { retired.unwrap().reclaim() };
     assert!(retained_during_read);
     assert_eq!(calls, 3);
-    assert_eq!(seen, [first_token.id(), second_token.id(), third_token.id()]);
+    assert_eq!(
+        seen,
+        [first_token.id(), second_token.id(), third_token.id()]
+    );
     assert_eq!(new_calls, 2);
     assert_eq!(new_seen, [first_token.id(), third_token.id()]);
     assert_eq!(actions.len(), 2);

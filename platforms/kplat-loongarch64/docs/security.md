@@ -30,6 +30,14 @@ existing flat local IDs 3/11 are not reinterpreted as device sources. Parent ISR
 completion is consumed even if leaf admission fails; PCH CLR is a separate W1C
 operation at 0x80/0x84 and never a read/modify/write or parent acknowledgement.
 
+IRQ 11 retains its fixed PerCpu timer binding. Parent IRQ 3 is rejected by
+selection and checked configuration; dispatch still demultiplexes it before
+generic leaf delivery. Unknown out-of-range and foreign-domain identities are
+rejected with `UnsupportedFlow`, not assigned a permissive fallback flow.
+The existing bounded flat external binding still selects Level. A KIRQ
+candidate without a selected flow grants no backend capability.
+PCI legacy INTx remains a device signaling/routing term, not a Legacy flow.
+
 Checked level programming stays under REGISTER_LOCK with a validated pin and
 preserves unrelated MASK/EDGE/POL bits. A readback failure reports
 ConfigurationFailed; software state is not proof of hardware rollback or drain.
@@ -153,3 +161,11 @@ routing must already be restored. The hook leaves TCFG disabled, does not reset
 the stable counter or conversion ratio, and does not deliver timer callbacks.
 Final deadline arbitration remains a separate PM-ordered task-service operation.
 Real suspend or lost-controller-state recovery is not established by unit tests.
+
+## Interrupt Entry Safety
+
+The unsafe dispatch provider in `src/irq.rs` requires an initialized CPU and a
+captured hardware interrupt under KIRQ's hardirq/IRQ-exclusion contract. Source
+acknowledgement precedes unsafe claim construction; its cookie has no remaining
+hardware completion operation. Completion remains on the entry CPU without
+releasing IRQ/migration exclusion or manufacturing an additional claim.

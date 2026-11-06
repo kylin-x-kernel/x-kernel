@@ -99,7 +99,9 @@ impl UserContext {
             let stval = stval::read();
             match cause {
                 Trap::Interrupt(_) => {
-                    handle_trap!(IRQ, scause.bits());
+                    // SAFETY: supervisor trap entry cleared SIE and enter_user
+                    // restored kernel CPU state; on_user_exit retains the mask.
+                    unsafe { handle_trap!(IRQ, scause.bits()) };
                     ReturnReason::Interrupt
                 }
                 Trap::Exception(E::UserEnvCall) => {

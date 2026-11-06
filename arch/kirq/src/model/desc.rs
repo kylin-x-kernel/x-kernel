@@ -66,10 +66,10 @@ impl IrqEvent {
 
 /// A kernel IRQ handler.
 ///
-/// Handlers run in interrupt context and must not sleep. Normal IRQ handlers
-/// receive the resolved OS-visible [`Virq`]. True NMI delivery passes the raw
-/// hardware number from its typed claim; ordinary IRQ fallback passes the
-/// logical IRQ to the same Line-owned handler. Any `Fn(Virq) -> IrqEvent + Send + Sync`
+/// Handlers run in interrupt context and must not sleep. Both normal IRQ and
+/// NMI handlers receive the retained Line's resolved OS-visible [`Virq`], not
+/// the domain-local hardware number. Normal IRQ dispatch never invokes an
+/// NMI-owned handler. Any `Fn(Virq) -> IrqEvent + Send + Sync`
 /// implements this trait.
 pub trait IrqHandler: Send + Sync {
     /// Service a fired interrupt and report whether it was handled.
@@ -161,8 +161,6 @@ pub struct IrqDesc {
 pub enum IrqDescError {
     /// Preparing unpublished mapping or action storage failed before publication.
     NoMemory,
-    /// Action retirement could not be prepared; no action was withdrawn.
-    RetirementUnavailable,
     /// The hardware number is outside the domain's supported reverse-map range.
     InvalidHwirq { hwirq: Hwirq },
     /// Controller configuration did not complete or its readback did not match.

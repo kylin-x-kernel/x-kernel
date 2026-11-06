@@ -32,8 +32,9 @@ Requests return a shared action token. Regular-action release remains supported
 for compatibility, but is not a fallback for failed shared-action release.
 NoMemory and VirqExhausted map to NoMemory; InvalidHwirq and the remaining
 descriptor errors retain mainline InvalidResource classification.
-This includes RetirementUnavailable: failure to prepare IRQ action reclamation
-does not authorize releasing the device resource or discarding its removal key.
+Action release unlinks and drains the original IRQ Line without allocating
+retirement storage. A rejected release still does not authorize releasing the
+device resource or discarding its removal key.
 
 Ordinary handlers report handled/unhandled. WAKE_THREAD remains handled without
 a threaded wake because this path has no paired thread; threaded entry points
@@ -48,10 +49,26 @@ KIRQ errors: an infallible return must not falsely authorize reclamation.
 The shared result classifier is tested for success, absence and errors.
 A future fallible close must preserve its resource owner on failure.
 
-MSI-X behavior is otherwise unchanged: allocation uses Any affinity and a
-plain virtual IRQ; free_msix still warns on backend rejection and returns ().
-There is no new retry owner, network close protocol or hardware-drain claim.
-Non-x86_64 MSI-X allocation remains Unsupported.
+MSI-X allocation uses Any affinity and a plain virtual IRQ. `try_free_msix`
+returns Ok only when KIRQ releases the reservation; rejection returns Busy and
+the original resource without release side effects. Busy deliberately aggregates
+all false results from the core bool API, including invalid context or identity;
+it does not diagnose the cause or promise that retry will succeed. Non-x86_64
+allocation remains Unsupported, and release returns Unsupported with the resource.
+The inherited `free_msix` compatibility wrapper is terminal: it panics on rejection
+instead of warning and losing ownership. Explicit teardown must retain the returned
+resource and correct the rejection cause before retrying.
+
+Release requires a watched, sleepable task with the RCU service running and no
+spinlocks, IRQ/preemption exclusion or RCU read scope. The caller must stop message
+production, order already-issued messages, detach/drain actions, logically disable
+the line and serialize registration/release. No automatic retry, network close
+protocol, fallible action teardown or device-side hardware drain is added.
+Tests exercise the bool-result classifier, unchanged resource retry and the
+non-x86 Unsupported path. An x86 kernel test allocates through the provider,
+installs an action, verifies release rejection and then removes the action before
+retrying with the original resource. No device receives that MSI message; this
+checks KIRQ reservation ownership, not hardware drain.
 
 ## Extraction review checklist
 
@@ -67,7 +84,7 @@ the following observable changes from the package/path migration:
 | MMIO API safety | Safe trait and safe token release | Implements the extracted unsafe MmioOp contract and unsafe unmap; the underlying iomap/iounmap behavior is unchanged |
 
 NoMemory/InvalidHwirq classification, request rejection as Busy, shared token
-identity, MSI allocation/free behavior, unsupported threaded entry points,
+identity, MSI allocation behavior, unsupported threaded entry points,
 CPU allocation, DMA and time forwarding are preserved. Tests cover selected
 error classifications and unsupported threaded calls, not all hardware paths.
 Shared IRQ vocabulary now uses irq-types through driver-os-api and KIRQ;
@@ -75,9 +92,10 @@ there is no new interrupt controller implementation or second provider.
 
 Source-bit retirement requires consumer-side event routing to remain inside the
 driver; provider conversion tests alone do not establish that migration.
-Likewise, preserving MSI free warnings does not solve rejected-release ownership
-or network close. Those are not silently included in this extraction.
+MSI rejection now returns ownership through the fallible API, but this alone does
+not solve network close or retention across final Drop. Those lifecycle changes
+are not silently included in this contract update.
 
-The provider extraction has not run build, clippy or kernel tests locally.
-Integration validation belongs to the coordinating PR run; these added tests
-are coverage intentions until that run executes them.
+Provider tests distinguish conversion-only fixtures from real KIRQ allocation
+and action lifecycle checks. Neither kind programs a device to issue MSI;
+hardware stop and message-ordering validation belongs to the device owner.

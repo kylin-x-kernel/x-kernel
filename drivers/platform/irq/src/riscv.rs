@@ -214,10 +214,9 @@ fn select_plic_flow(
         return Ok(IrqFlow::PerCpu);
     }
 
-    // Only PLIC is migrated. Other domains and directory-only descriptors keep
-    // their existing contract; either PLIC identity field requires validation.
+    // External sources require a PLIC binding, not a bare hardware number.
     if desc.domain != Some(PLIC_DOMAIN) && desc.controller != IrqController::Plic {
-        return Ok(IrqFlow::Legacy);
+        return Err(kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
     }
     if desc.domain != Some(PLIC_DOMAIN)
         || desc.controller != IrqController::Plic
@@ -534,25 +533,31 @@ impl kirq::IntrManagerIf {
         );
     }
 
-    fn dispatch_irq(irq: usize) -> Option<kirq::Virq> {
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::dispatch_irq`]'s contract.
+    unsafe fn dispatch_irq(irq: usize) -> Option<kirq::Virq> {
         let pending_irq = with_cause!(
             irq,
             @S_TIMER => {
                 trace!("IRQ: timer");
-                Some(kirq::PendingIrq::new(
+                // SAFETY: the captured timer cause requires no PLIC completion;
+                // the caller retains CPU/IRQ exclusion until generic dispatch ends.
+                Some(unsafe { kirq::PendingIrq::new(
                     kirq::IrqRef::Virq(irq),
                     PLIC_COMPLETE_SKIP,
-                ))
+                ) })
             },
             @S_SOFT => {
                 trace!("IRQ: IPI");
                 // SAFETY: the current trap cause is a pending supervisor
                 // software interrupt, so clearing that CSR bit acknowledges it.
                 unsafe { sip::clear_ssoft() };
-                Some(kirq::PendingIrq::new(
+                // SAFETY: this software interrupt was acknowledged above;
+                // its no-op cookie stays on this CPU through generic dispatch.
+                Some(unsafe { kirq::PendingIrq::new(
                     kirq::IrqRef::Virq(irq),
                     PLIC_COMPLETE_SKIP,
-                ))
+                ) })
             },
             @S_EXT => {
                 let mut state = plic().state.lock();
@@ -562,10 +567,12 @@ impl kirq::IntrManagerIf {
                 };
                 trace!("IRQ: external {irq}");
                 let hwirq = irq.get() as usize;
-                Some(kirq::PendingIrq::new(
+                // SAFETY: the PLIC claim is unique; generic dispatch consumes
+                // it on this CPU before the caller releases entry exclusion.
+                Some(unsafe { kirq::PendingIrq::new(
                     kirq::IrqRef::Domain(PLIC_DOMAIN, hwirq),
                     hwirq,
-                ))
+                ) })
             },
             @EX_IRQ => {
                 unreachable!("Device-side IRQs should be handled by triggering the External Interrupt.");
@@ -574,9 +581,13 @@ impl kirq::IntrManagerIf {
         kirq::generic_handle_irq(pending_irq?)
     }
 
-    fn dispatch_nmi(_irq: usize) {}
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::dispatch_nmi`]'s contract.
+    unsafe fn dispatch_nmi(_irq: usize) {}
 
-    fn complete_irq(completion_cookie: usize) {
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::complete_irq`]'s contract.
+    unsafe fn complete_irq(completion_cookie: usize) {
         if completion_cookie == PLIC_COMPLETE_SKIP {
             return;
         }

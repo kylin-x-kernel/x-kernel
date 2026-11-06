@@ -156,17 +156,21 @@ uninstall or CPU-hotplug protocol for this adapter.
 The callback is `kirq::resend::run`, not an ordinary worker-thread callback.
 It runs in non-sleeping softirq/BH context; KIRQ excludes local IRQs/preemption
 while processing each Line's replay. KIRQ owns deduplication, pending/running
-state, the retained original Line, callback eligibility and in-flight drain.
+state, the retained original Line, callback eligibility and execution drain.
+Queue entries retain an Arc and membership flag, not execution admission.
+Under the Line lock, eligible replay takes admission before capturing actions;
+rejected retired, disabled or action-less entries access neither handlers nor chip.
 The Work carries no copied handler, numeric IRQ destination or hardware claim.
 Callbacks run outside executor queue locks; the adapter does not acquire IRQ
 management exclusion or implement controller EOI.
 
-Before binding, KIRQ retains pending queue entries and their drain obligations;
-installation checks and notifies that backlog. Startup and rollback must not
-wait for such IRQ drain before service installation can complete. A wait that
-covers queued replay requires a bound executor able to progress; a wait with
-zero in-flight obligations does not. This is an ordering restriction, not an
-automatic executor-readiness rejection by the wait API. Current
+Before binding, KIRQ retains pending queue entries without in-flight obligations;
+installation checks and notifies that backlog. IRQ sync/free waits for admitted
+claims and running replay, not pending entries, and may return before the executor
+runs. A later executor has no saved action snapshot and cannot borrow an action
+already removed. There is no eager queue cancellation: pending service and eventual
+queued-owner release still require executor progress. The queued flag explicitly
+blocks incompatible flow/source mutation independently of execution admission. Current
 runtime installs services before console input IRQ registration and device
 initialization. The existence of this BH executor does not itself prove hardware
 redelivery or complete IRQ teardown semantics; those remain KIRQ/provider

@@ -138,7 +138,8 @@ fn either_index_preparation_failure_leaves_mapping_unpublished_and_retryable() {
         assert_eq!(calls, expected_calls);
         assert!(crate::descriptor(virq).is_none());
         assert_eq!(crate::translate_hwirq(TEST_DOMAIN, hwirq), None);
-        assert_eq!(crate::try_map(desc), Ok(virq));
+        let binding = crate::runtime::manager::tests_irq::SyntheticLine::mapped(desc);
+        assert_eq!(binding.virq(), virq);
         assert_eq!(crate::translate_hwirq(TEST_DOMAIN, hwirq), Some(virq));
         // This synthetic key has no device or concurrent borrowed reader.
         let removed = IRQ_STATE.lock().remove_test_line(virq);

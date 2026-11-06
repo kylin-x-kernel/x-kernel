@@ -15,7 +15,7 @@ use super::prepare_route_once;
 
 struct Fixture {
     ready: LazyInit<usize>,
-    gate: Mutex<()>,
+    gate: Mutex<bool>,
     has_entered: AtomicBool,
     is_released: AtomicBool,
     has_blocked: AtomicBool,
@@ -42,7 +42,7 @@ unsafe impl TaskScheduleObserver for Fixture {
 fn concurrent_registration(first_succeeds: bool) {
     let fixture = Arc::new(Fixture {
         ready: LazyInit::new(),
-        gate: Mutex::new(()),
+        gate: Mutex::new(false),
         has_entered: AtomicBool::new(false),
         is_released: AtomicBool::new(false),
         has_blocked: AtomicBool::new(false),
@@ -51,16 +51,21 @@ fn concurrent_registration(first_succeeds: bool) {
     let first = fixture.clone();
     let owner = ktask::spawn_task(ktask::TaskInner::new_pidless_kthread(
         move || {
-            let result = prepare_route_once(&first.ready, &first.gate, || {
-                first.attempts.fetch_add(1, Ordering::Relaxed);
-                // Publish entry while holding the production gate; the
-                // controller releases us only after the contender parks.
-                first.has_entered.store(true, Ordering::Release);
-                while !first.is_released.load(Ordering::Acquire) {
-                    ktask::yield_now();
-                }
-                first_succeeds.then_some(27)
-            });
+            let result = prepare_route_once(
+                &first.ready,
+                &first.gate,
+                |_| {
+                    first.attempts.fetch_add(1, Ordering::Relaxed);
+                    // Publish entry while holding the production gate; the
+                    // controller releases us only after the contender parks.
+                    first.has_entered.store(true, Ordering::Release);
+                    while !first.is_released.load(Ordering::Acquire) {
+                        ktask::yield_now();
+                    }
+                    first_succeeds.then_some(27)
+                },
+                || panic!("no action installed by this fixture"),
+            );
             core::assert_eq!(result, first_succeeds);
         },
         "route-register-owner".into(),
@@ -73,10 +78,15 @@ fn concurrent_registration(first_succeeds: bool) {
     let contender = ktask::spawn_task(
         ktask::TaskInner::new_pidless_kthread(
             move || {
-                core::assert!(prepare_route_once(&second.ready, &second.gate, || {
-                    second.attempts.fetch_add(1, Ordering::Relaxed);
-                    Some(27)
-                }));
+                core::assert!(prepare_route_once(
+                    &second.ready,
+                    &second.gate,
+                    |_| {
+                        second.attempts.fetch_add(1, Ordering::Relaxed);
+                        Some(27)
+                    },
+                    || panic!("no action installed by this fixture")
+                ));
                 core::assert_eq!(second.ready.get(), Some(&27));
             },
             "route-register-contender".into(),
@@ -97,10 +107,15 @@ fn concurrent_registration(first_succeeds: bool) {
         if first_succeeds { 1 } else { 2 }
     );
     // Once published, later calls must not invoke initialization again.
-    core::assert!(prepare_route_once(&fixture.ready, &fixture.gate, || {
-        fixture.attempts.fetch_add(1, Ordering::Relaxed);
-        None
-    }));
+    core::assert!(prepare_route_once(
+        &fixture.ready,
+        &fixture.gate,
+        |_| {
+            fixture.attempts.fetch_add(1, Ordering::Relaxed);
+            None
+        },
+        || panic!("published route must not roll back")
+    ));
     core::assert_eq!(
         fixture.attempts.load(Ordering::Relaxed),
         if first_succeeds { 1 } else { 2 }
@@ -115,4 +130,166 @@ fn concurrent_first_registration_waits_for_publication() {
 #[unittest::def_test]
 fn concurrent_registration_retries_after_failed_preparation() {
     concurrent_registration(false);
+}
+
+struct RollbackDrop {
+    gate: Arc<Mutex<bool>>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl Drop for RollbackDrop {
+    fn drop(&mut self) {
+        // A final handler destructor must be able to reenter the route gate.
+        let pending = self
+            .gate
+            .try_lock()
+            .expect("rollback destructor held route gate");
+        core::assert!(!*pending);
+        self.dropped.store(true, Ordering::Release);
+    }
+}
+
+#[unittest::def_test]
+fn failed_rollback_blocks_registration_until_owner_is_released_outside_gate() {
+    let ready = LazyInit::<usize>::new();
+    let gate = Arc::new(Mutex::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let probe = RollbackDrop {
+        gate: gate.clone(),
+        dropped: dropped.clone(),
+    };
+    let mut installed: Option<kirq::Handler> = Some(Arc::new(move |_| {
+        let _ = &probe;
+        kirq::IrqEvent::HANDLED
+    }));
+    let attempts = AtomicUsize::new(0);
+    core::assert!(!prepare_route_once(
+        &ready,
+        &gate,
+        |pending| {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            *pending = true;
+            None
+        },
+        || Err(kirq::IrqDescError::UnknownIrq),
+    ));
+    core::assert!(*gate.lock());
+    core::assert!(ready.get().is_none());
+    core::assert!(!dropped.load(Ordering::Acquire));
+    core::assert!(!prepare_route_once(
+        &ready,
+        &gate,
+        |_| panic!("pending rollback permitted another registration"),
+        || Ok(None),
+    ));
+    core::assert!(*gate.lock());
+    core::assert!(ready.get().is_none());
+    core::assert!(!dropped.load(Ordering::Acquire));
+    core::assert!(prepare_route_once(
+        &ready,
+        &gate,
+        |pending| {
+            core::assert!(!*pending);
+            core::assert!(dropped.load(Ordering::Acquire));
+            attempts.fetch_add(1, Ordering::Relaxed);
+            *pending = true;
+            Some(27)
+        },
+        || Ok(installed.take()),
+    ));
+    core::assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    core::assert_eq!(ready.get(), Some(&27));
+    core::assert!(!*gate.lock());
+}
+
+#[unittest::def_test]
+fn immediate_rollback_releases_owner_outside_gate_and_allows_retry() {
+    let ready = LazyInit::<usize>::new();
+    let gate = Arc::new(Mutex::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let probe = RollbackDrop {
+        gate: gate.clone(),
+        dropped: dropped.clone(),
+    };
+    let mut installed: Option<kirq::Handler> = Some(Arc::new(move |_| {
+        let _ = &probe;
+        kirq::IrqEvent::HANDLED
+    }));
+    core::assert!(!prepare_route_once(
+        &ready,
+        &gate,
+        |pending| {
+            *pending = true;
+            None
+        },
+        || Ok(installed.take()),
+    ));
+    core::assert!(dropped.load(Ordering::Acquire));
+    core::assert!(!*gate.lock());
+    core::assert!(ready.get().is_none());
+    core::assert!(prepare_route_once(
+        &ready,
+        &gate,
+        |pending| {
+            *pending = true;
+            Some(27)
+        },
+        || panic!("successful preparation must not remove its action"),
+    ));
+    core::assert_eq!(ready.get(), Some(&27));
+    core::assert!(!*gate.lock());
+}
+
+#[unittest::def_test]
+fn rollback_destructor_publication_supersedes_outer_preparation() {
+    struct PublishOnDrop {
+        ready: Arc<LazyInit<usize>>,
+        gate: Arc<Mutex<bool>>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for PublishOnDrop {
+        fn drop(&mut self) {
+            core::assert_eq!(self.drops.fetch_add(1, Ordering::Relaxed), 0);
+            core::assert!(prepare_route_once(
+                &self.ready,
+                &self.gate,
+                |pending| {
+                    core::assert!(!*pending);
+                    *pending = true;
+                    Some(27)
+                },
+                || panic!("destructor reentry must not repeat completed rollback"),
+            ));
+        }
+    }
+
+    let ready = Arc::new(LazyInit::<usize>::new());
+    // Model an installed action retained after an earlier rollback failure.
+    let gate = Arc::new(Mutex::new(true));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let probe = PublishOnDrop {
+        ready: ready.clone(),
+        gate: gate.clone(),
+        drops: drops.clone(),
+    };
+    let mut installed: Option<kirq::Handler> = Some(Arc::new(move |_| {
+        let _ = &probe;
+        kirq::IrqEvent::HANDLED
+    }));
+    let mut removals = 0;
+    core::assert!(prepare_route_once(
+        &ready,
+        &gate,
+        |_| panic!("outer initializer ignored destructor publication"),
+        || {
+            removals += 1;
+            Ok(installed.take())
+        },
+    ));
+    core::assert_eq!(removals, 1);
+    core::assert_eq!(drops.load(Ordering::Relaxed), 1);
+    core::assert!(installed.is_none());
+    core::assert_eq!(ready.get(), Some(&27));
+    core::assert!(!*gate.lock());
 }

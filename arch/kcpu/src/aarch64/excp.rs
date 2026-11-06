@@ -168,10 +168,14 @@ fn dispatch_exception(tf: &mut ExceptionContext, kind: ArchTrap, source: ArchTra
         ArchTrap::Irq => {
             #[cfg(feature = "nmi")]
             if use_nmi_path(tf) {
-                handle_trap!(NMI, 0);
+                // SAFETY: the saved mask classifies this hardware entry as NMI;
+                // exception entry excludes ordinary IRQs until trap return.
+                unsafe { handle_trap!(NMI, 0) };
                 return;
             }
-            handle_trap!(IRQ, 0);
+            // SAFETY: hardware exception entry masks ordinary IRQs and saved
+            // state remains live through the adapter's completed-IRQ tail.
+            unsafe { handle_trap!(IRQ, 0) };
         }
         ArchTrap::Synchronous => {
             let esr = ESR_EL1.extract();

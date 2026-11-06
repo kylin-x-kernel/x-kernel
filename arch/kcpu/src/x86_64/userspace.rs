@@ -282,7 +282,9 @@ impl UserContext {
             }
             LEGACY_SYSCALL_VECTOR => ReturnReason::Syscall,
             IRQ_VECTOR_START..=IRQ_VECTOR_END => {
-                handle_trap!(IRQ, vector as _);
+                // SAFETY: the user interrupt gate cleared IF and enter_user
+                // restored kernel CPU state before this saved-vector dispatch.
+                unsafe { handle_trap!(IRQ, vector as _) };
                 ReturnReason::Interrupt
             }
             _ => ReturnReason::Exception(ExceptionInfo {

@@ -3,8 +3,14 @@
 // See LICENSES for license details.
 
 //! Regular IRQ dispatch and action fanout.
+//!
+//! Selects the bound flow, pairs action traversal with execution admission, and
+//! orders the original claim's completion before releasing that admission.
+//! Lookup retains the original Line identity; it does not authorize an action
+//! after withdrawal. Registration and source shutdown remain outside this module.
 
 use alloc::sync::Arc;
+use core::marker::PhantomData;
 
 use kcompletion::DeferredWake;
 use kspin::{NoPreemptIrqSave, SpinNoIrqGuard};
@@ -19,7 +25,6 @@ use crate::{
 pub(super) struct IrqDispatch {
     resolved_irq: Option<crate::Virq>,
     guard: Option<IrqDispatchGuard>,
-    owns_running: bool,
 }
 
 impl IrqDispatch {
@@ -27,16 +32,26 @@ impl IrqDispatch {
     ///
     /// The caller supplies the original claim's completion, on the claiming CPU.
     /// A running fasteoi owner clears running and completes under its original
-    /// Line lock. Legacy completion retains its existing unlocked contract.
-    pub(super) fn complete(self, complete_claim: impl FnOnce()) -> Option<crate::Virq> {
+    /// Line lock. Accepted PerCpu completion retains its unlocked contract.
+    pub(super) fn complete(mut self, complete_claim: impl FnOnce()) -> Option<crate::Virq> {
         let resolved_irq = self.resolved_irq;
-        if let Some(guard) = self.guard.as_ref().filter(|_| self.owns_running) {
+        if let Some(guard) = self
+            .guard
+            .as_mut()
+            .filter(|guard| guard.admission == DispatchAdmission::Running)
+        {
             let mut entry = guard.line.lock();
             entry.is_running = false;
             entry.is_replaying = false;
             complete_claim();
+            // SAFETY: entry was locked directly through this retained Line.
+            let notify = unsafe { super::resend::prepare_locked(&guard.line, &mut entry) };
+            let finished = finish_admission(&mut entry, &mut guard.admission, guard.is_unhandled);
             drop(entry);
-            super::resend::schedule(&guard.line);
+            report_finished(guard.virq, finished);
+            if let Some(notify) = notify {
+                notify();
+            }
         } else {
             complete_claim();
         }
@@ -59,52 +74,57 @@ pub(super) fn dispatch_claim(source: IrqRef, complete_claim: impl FnOnce()) -> O
         complete_claim();
         return Some(virq);
     };
-    let mut entry = line.lock();
+    let entry = line.lock();
     if entry.is_retired() {
         drop(entry);
         // A stale lookup must complete its claim without touching the old chip.
         complete_claim();
         return Some(virq);
     }
-    // Empty Lines retain admission through completion, not just action return.
-    entry.begin_dispatch();
-    let mut guard = IrqDispatchGuard::new(virq, line.clone());
-    // Lookup's RCU scope has ended; this owner and admission retain the original
-    // Line through controller completion, without taking the directory lock.
-
     if entry.has_nmi_action() {
-        let can_dispatch = if entry.flow == IrqFlow::PerCpu {
-            entry.can_run_local_actions()
-        } else {
-            entry.can_run_actions()
-        };
+        // Classification belongs to the irqchip. Never execute an NMI action
+        // under ordinary IRQ context or silently change its hardware-number ABI.
+        // Keep completion under Line exclusion so drain and retirement cannot
+        // pass it; rejection borrows no action and needs no execution credit.
+        complete_claim();
         drop(entry);
-        line.nmi_action.with_current(|handler| {
-            if can_dispatch && let Some(handler) = handler {
-                // Ordinary fallback preserves the logical IRQ callback ABI.
-                guard.is_unhandled = !handler.handle(virq).handled();
-            }
-            complete_claim();
-        });
-        drop(guard);
         return Some(virq);
     }
 
-    match entry.flow {
-        IrqFlow::Level(chip) => handle_level_irq(entry, guard, chip, complete_claim),
-        IrqFlow::Edge(chip) => handle_edge_irq(entry, guard, chip, complete_claim),
-        IrqFlow::Fasteoi(chip) => handle_fasteoi_irq(entry, guard, chip, complete_claim),
-        IrqFlow::Legacy => handle_legacy_irq(entry, guard, complete_claim),
-        IrqFlow::PerCpu => handle_percpu_irq(entry, guard, complete_claim),
+    let Some(flow) = entry.flow else {
+        complete_claim();
+        return Some(virq);
+    };
+    match flow {
+        IrqFlow::Level(chip) => {
+            // SAFETY: lookup paired virq with line; entry comes from line.lock().
+            unsafe { handle_level_irq(entry, &line, virq, chip, complete_claim) }
+        }
+        IrqFlow::Edge(chip) => {
+            // SAFETY: lookup paired virq with line; entry comes from line.lock().
+            unsafe { handle_edge_irq(entry, &line, virq, chip, complete_claim) }
+        }
+        IrqFlow::Fasteoi(chip) => {
+            // SAFETY: lookup paired virq with line; entry comes from line.lock().
+            unsafe { handle_fasteoi_irq(entry, &line, virq, chip, complete_claim) }
+        }
+        IrqFlow::PerCpu => {
+            // SAFETY: lookup paired virq with line; entry comes from line.lock().
+            unsafe { handle_percpu_irq(entry, &line, virq, complete_claim) }
+        }
     }
     Some(virq)
 }
 
-// Each flow consumes the already-held Line guard; admission never crosses an
-// unlocked gap. Release that guard before actions or dispatch-guard destruction.
-fn handle_level_irq(
+// Ordinary rejection completes under Line exclusion, which also serializes
+// drain and resource withdrawal. Accepted execution owns the running interval
+// across the unlocked interval. Each caller passes this exact locked Line.
+/// # Safety
+/// `entry` must lock `line`, and `virq` must identify that same Line.
+unsafe fn handle_level_irq(
     mut entry: SpinNoIrqGuard<'_, IrqStateDesc>,
-    mut guard: IrqDispatchGuard,
+    line: &Arc<IrqLine>,
+    virq: crate::Virq,
     chip: &'static crate::LevelChip,
     complete_claim: impl FnOnce(),
 ) {
@@ -112,13 +132,14 @@ fn handle_level_irq(
     complete_claim();
     if entry.is_running || !entry.can_run_actions() {
         entry.is_pending = true;
-        drop(entry);
-        drop(guard);
         return;
     }
-    entry.is_running = true;
+    entry.begin_running_dispatch();
+    let mut guard = IrqDispatchGuard::new_running(virq, line.clone());
     entry.is_pending = false;
-    let snapshot = entry.snapshot_actions();
+    // SAFETY: dispatch_claim passed this exact locked Line. Admission and
+    // capture occur under that lock; running ownership spans every snapshot use.
+    let snapshot = unsafe { guard.snapshot_actions(&entry) };
     drop(entry);
 
     guard.is_unhandled = run_actions(guard.virq, snapshot);
@@ -129,12 +150,17 @@ fn handle_level_irq(
         entry.is_pending = false;
         (chip.unmask)(entry.desc);
     }
+    let finished = finish_admission(&mut entry, &mut guard.admission, guard.is_unhandled);
     drop(entry);
+    report_finished(virq, finished);
 }
 
-fn handle_edge_irq(
+/// # Safety
+/// `entry` must lock `line`, and `virq` must identify that same Line.
+unsafe fn handle_edge_irq(
     mut entry: SpinNoIrqGuard<'_, IrqStateDesc>,
-    mut guard: IrqDispatchGuard,
+    line: &Arc<IrqLine>,
+    virq: crate::Virq,
     chip: &'static crate::EdgeChip,
     complete_claim: impl FnOnce(),
 ) {
@@ -142,33 +168,42 @@ fn handle_edge_irq(
         entry.is_pending = true;
         (chip.mask)(entry.desc);
         complete_claim();
-        drop(entry);
-        drop(guard);
         return;
     }
-    entry.is_running = true;
+    entry.begin_running_dispatch();
+    let mut guard = IrqDispatchGuard::new_running(virq, line.clone());
     entry.is_pending = false;
     complete_claim();
-    let mut snapshot = entry.snapshot_actions();
+    // SAFETY: entry locks the exact Line retained by guard. Admission was
+    // acquired under that lock and covers every iteration of this owner.
+    let mut snapshot = unsafe { guard.snapshot_actions(&entry) };
     drop(entry);
 
+    let mut is_unhandled = false;
     loop {
-        guard.is_unhandled |= run_actions(guard.virq, snapshot);
+        is_unhandled |= run_actions(guard.virq, snapshot);
         let mut entry = guard.line.lock();
         if !entry.is_pending || !entry.can_run_actions() {
-            entry.is_running = false;
+            let finished = finish_admission(&mut entry, &mut guard.admission, is_unhandled);
+            drop(entry);
+            report_finished(virq, finished);
             break;
         }
         // The running owner consumes coalesced edges, unless disabled/retired.
         (chip.unmask)(entry.desc);
         entry.is_pending = false;
-        snapshot = entry.snapshot_actions();
+        // SAFETY: entry was acquired directly from guard.line; the original
+        // admission remains held across every coalesced-edge traversal.
+        snapshot = unsafe { guard.snapshot_actions(&entry) };
     }
 }
 
-fn handle_fasteoi_irq(
+/// # Safety
+/// `entry` must lock `line`, and `virq` must identify that same Line.
+unsafe fn handle_fasteoi_irq(
     mut entry: SpinNoIrqGuard<'_, IrqStateDesc>,
-    mut guard: IrqDispatchGuard,
+    line: &Arc<IrqLine>,
+    virq: crate::Virq,
     chip: &'static crate::FasteoiChip,
     complete_claim: impl FnOnce(),
 ) {
@@ -183,36 +218,38 @@ fn handle_fasteoi_irq(
         }
         // Reject without clearing another dispatch's running ownership.
         complete_claim();
-        drop(entry);
-        drop(guard);
         return;
     }
-    entry.is_running = true;
+    entry.begin_running_dispatch();
+    let mut guard = IrqDispatchGuard::new_running(virq, line.clone());
     entry.is_pending = false;
-    let snapshot = entry.snapshot_actions();
+    // SAFETY: entry locks the exact Line retained by guard. Admission was
+    // acquired under that lock and remains held through original completion.
+    let snapshot = unsafe { guard.snapshot_actions(&entry) };
     drop(entry);
 
     guard.is_unhandled = run_actions(guard.virq, snapshot);
     IrqDispatch {
         resolved_irq: Some(guard.virq),
         guard: Some(guard),
-        owns_running: true,
     }
     .complete(complete_claim);
 }
 
-fn handle_legacy_irq(
-    mut entry: SpinNoIrqGuard<'_, IrqStateDesc>,
+fn handle_unlocked_actions(
+    entry: SpinNoIrqGuard<'_, IrqStateDesc>,
     mut guard: IrqDispatchGuard,
     complete_claim: impl FnOnce(),
 ) {
-    let snapshot = entry.snapshot_actions();
+    // SAFETY: the PerCpu caller forwards the original Line lock. The guard
+    // retains that Line, and unsafe PerCpu removal requires the source owner
+    // to exclude withdrawal until this entire dispatch returns.
+    let snapshot = unsafe { guard.snapshot_actions(&entry) };
     drop(entry);
     guard.is_unhandled = run_actions(guard.virq, snapshot);
     IrqDispatch {
         resolved_irq: Some(guard.virq),
         guard: Some(guard),
-        owns_running: false,
     }
     .complete(complete_claim);
 }
@@ -220,24 +257,31 @@ fn handle_legacy_irq(
 /// Runs the PerCpu flow in the IRQ dispatch path; sleeping is forbidden.
 /// `dispatch_claim` retains IRQ/preemption exclusion and passes the held Line
 /// SpinNoIrq guard after releasing the directory lock. Actions and controller
-/// completion run only after that Line guard is dropped; the outer context
-/// guard remains held throughout, keeping admission on the claiming CPU.
-fn handle_percpu_irq(
+/// completion run unlocked only for accepted actions. Rejected claims complete
+/// under Line exclusion without admission. The outer context guard remains held
+/// throughout, keeping accepted admission on the claiming CPU.
+///
+/// # Safety
+/// `entry` must lock `line`, and `virq` must identify that same Line.
+unsafe fn handle_percpu_irq(
     entry: SpinNoIrqGuard<'_, IrqStateDesc>,
-    guard: IrqDispatchGuard,
+    line: &Arc<IrqLine>,
+    virq: crate::Virq,
     complete_claim: impl FnOnce(),
 ) {
     if !entry.can_run_local_actions() {
-        drop(entry);
+        // No action is borrowed. The same Line lock used by drain and removal
+        // retains the original completion obligation without an execution credit.
         complete_claim();
-        drop(guard);
         return;
     }
-    // Local admission has no shared running gate; completion remains unlocked.
-    handle_legacy_irq(entry, guard, complete_claim);
+    // The source owner excludes withdrawal until every local execution and
+    // completion has returned. PerCpu flow has no shared running state.
+    let guard = IrqDispatchGuard::new_percpu(virq, line.clone());
+    handle_unlocked_actions(entry, guard, complete_claim);
 }
 
-fn run_actions(virq: crate::Virq, snapshot: super::state::IrqActionSnapshot) -> bool {
+fn run_actions(virq: crate::Virq, snapshot: super::state::IrqActionSnapshot<'_>) -> bool {
     let mut merged_event = IrqEvent::NOT_HANDLED;
     snapshot.with_actions(|action| {
         if action.is_currently_dispatchable() {
@@ -262,73 +306,151 @@ pub(super) fn replay(line: Arc<IrqLine>) {
                   resolved Line"
     )]
     let virq = entry.desc.logical_irq().expect("replay Line has a virq");
-    let mut guard = IrqDispatchGuard::new(virq, line.clone());
     if !entry.is_pending || !entry.can_run_actions() || entry.is_running {
         // A hardware handler may already have serviced the condition, or the
         // owner may be withdrawing. No client snapshot is retained by the queue.
-        drop(entry);
-        drop(guard);
         return;
     }
+    // Queue ownership protects the Line only. Pair action capture with
+    // execution admission under the same lock as withdrawal and drain checks.
+    entry.begin_running_dispatch();
+    let mut guard = IrqDispatchGuard::new_running(virq, line.clone());
     entry.is_pending = false;
-    entry.is_running = true;
     entry.is_replaying = true;
-    let snapshot = entry.snapshot_actions();
+    // SAFETY: entry locks the same retained queue Line cloned into guard; the
+    // guard owns execution admission through replay traversal and completion.
+    let snapshot = unsafe { guard.snapshot_actions(&entry) };
     drop(entry);
     guard.is_unhandled = run_actions(virq, snapshot);
     IrqDispatch {
         resolved_irq: Some(virq),
         guard: Some(guard),
-        owns_running: true,
     }
     .complete(|| {});
 }
 
+/// Distinguishes ordinary running ownership from source-owner-protected PerCpu
+/// traversal. PerCpu is not a shared counter or an independently drainable lease.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DispatchAdmission {
+    PerCpu,
+    Running,
+    Finished,
+}
+
+/// Retains the exact Line and its traversal admission through flow completion.
+/// The ordinary running owner releases waiters on exit; PerCpu lifetime instead
+/// relies on the source owner's exclusion through the complete dispatch return.
 struct IrqDispatchGuard {
     virq: crate::Virq,
     line: Arc<IrqLine>,
     is_unhandled: bool,
+    admission: DispatchAdmission,
+    task_local: PhantomData<*mut ()>,
 }
 
 impl IrqDispatchGuard {
-    fn new(virq: crate::Virq, line: Arc<IrqLine>) -> Self {
+    fn new_percpu(virq: crate::Virq, line: Arc<IrqLine>) -> Self {
         Self {
             virq,
             line,
             is_unhandled: false,
+            admission: DispatchAdmission::PerCpu,
+            task_local: PhantomData,
         }
+    }
+
+    fn new_running(virq: crate::Virq, line: Arc<IrqLine>) -> Self {
+        let mut guard = Self::new_percpu(virq, line);
+        guard.admission = DispatchAdmission::Running;
+        guard
+    }
+
+    /// # Safety
+    /// `entry` must be protected by this guard's exact retained Line lock, not
+    /// another Line with the same numeric IRQ. This guard must own an admission
+    /// on that Line: ordinary running ownership or a PerCpu execution protected
+    /// from withdrawal by the source owner's shutdown protocol. Every snapshot
+    /// access must precede the end of that execution.
+    unsafe fn snapshot_actions<'a>(
+        &'a self,
+        entry: &IrqStateDesc,
+    ) -> super::state::IrqActionSnapshot<'a> {
+        debug_assert_eq!(entry.desc.logical_irq(), Some(self.virq));
+        debug_assert!(match self.admission {
+            DispatchAdmission::PerCpu => entry.flow == Some(IrqFlow::PerCpu),
+            DispatchAdmission::Running => entry.is_running,
+            DispatchAdmission::Finished => false,
+        });
+        // SAFETY: the caller guarantees exact-Line exclusion and admission;
+        // numeric identity above is diagnostic only. The snapshot cannot
+        // outlive its borrow of this guard. The caller also keeps the owned
+        // ordinary admission active through traversal. PerCpu removal instead
+        // requires caller-completed execution exclusion before reclaim.
+        unsafe { entry.snapshot_actions() }
     }
 }
 
 impl Drop for IrqDispatchGuard {
     fn drop(&mut self) {
-        let (wait_set, report) = {
+        if self.admission == DispatchAdmission::Finished
+            || (self.admission == DispatchAdmission::PerCpu && !self.is_unhandled)
+        {
+            // A handled PerCpu claim has no execution state to release.
+            return;
+        }
+        let finished = {
             let mut entry = self.line.lock();
             // Completion owns admission, not directory membership. The retained
             // Line serializes both the predicate and completion publication;
-            // descriptor withdrawal belongs to the control plane after drain.
-            let report = if self.is_unhandled {
-                entry.record_unhandled_dispatch()
-            } else {
-                None
-            };
-            (entry.finish_dispatch(), report)
+            // Ordinary descriptor withdrawal follows drain; PerCpu withdrawal
+            // requires the owner to have already excluded this execution.
+            finish_admission(&mut entry, &mut self.admission, self.is_unhandled)
         };
-        wake_in_flight_zero(wait_set);
-        if let Some(report) = report {
-            warn!(
-                "Unhandled IRQ {} (descriptor lifetime count={}, previous warnings suppressed={}, \
-                 count saturated={}; reports at powers of two and first saturation)",
-                self.virq,
-                report.count,
-                report.suppressed,
-                report.count == u64::MAX,
-            );
-        }
+        report_finished(self.virq, finished);
     }
 }
 
-fn wake_in_flight_zero(wait_set: Option<DeferredWake>) {
+fn finish_admission(
+    entry: &mut IrqStateDesc,
+    admission: &mut DispatchAdmission,
+    is_unhandled: bool,
+) -> (
+    Option<DeferredWake>,
+    Option<super::unhandled::UnhandledIrqReport>,
+) {
+    let wake = match core::mem::replace(admission, DispatchAdmission::Finished) {
+        DispatchAdmission::PerCpu => None,
+        DispatchAdmission::Running => entry.finish_running_dispatch(),
+        DispatchAdmission::Finished => return (None, None),
+    };
+    let report = is_unhandled
+        .then(|| entry.record_unhandled_dispatch())
+        .flatten();
+    (wake, report)
+}
+
+fn report_finished(
+    virq: crate::Virq,
+    (wait_set, report): (
+        Option<DeferredWake>,
+        Option<super::unhandled::UnhandledIrqReport>,
+    ),
+) {
+    wake_execution_idle(wait_set);
+    if let Some(report) = report {
+        warn!(
+            "Unhandled IRQ {} (descriptor lifetime count={}, previous warnings suppressed={}, \
+             count saturated={}; reports at powers of two and first saturation)",
+            virq,
+            report.count,
+            report.suppressed,
+            report.count == u64::MAX,
+        );
+    }
+}
+
+fn wake_execution_idle(wait_set: Option<DeferredWake>) {
     if let Some(wait_set) = wait_set {
         wait_set.wake();
     }

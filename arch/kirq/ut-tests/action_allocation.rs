@@ -103,7 +103,7 @@ fn check_allocation_failure(kind: Registration, is_enabled: bool) -> unittest::T
     let virq = 0x5fd8;
     assert!(!IRQ_STATE.lock().descs.contains_key(&virq));
     let desc = IrqDesc::from_virq(virq);
-    let mut entry = IrqStateDesc::new(desc);
+    let mut entry = IrqStateDesc::test_new(desc);
     let survivor_calls = Arc::new(AtomicUsize::new(0));
     let observed = survivor_calls.clone();
     let survivor: Handler = Arc::new(move |_| {
@@ -168,14 +168,26 @@ fn check_allocation_failure(kind: Registration, is_enabled: bool) -> unittest::T
     assert!(has_unlocked_drop.load(Ordering::Acquire));
     assert_eq!(state(), before);
     assert_eq!(crate::descriptor(virq), Some(desc));
-    let snapshot = line.lock().snapshot_actions();
     let mut seen = 0;
     let mut has_valid_survivor = true;
-    snapshot.with_actions(|action| {
-        has_valid_survivor &=
-            Some(action.token()) == first_token && action.run_primary(virq).handled();
-        seen += 1;
-    });
+    {
+        let snapshot = {
+            let mut entry = line.lock();
+            entry.begin_running_dispatch();
+            // SAFETY: this serial fixture retains the original synthetic Line
+            // and captures under the admission lock. No concurrent mutation or
+            // reclaim exists; the sole handler only increments an atomic. The
+            // consuming traversal ends before finish_running_dispatch and later retry.
+            unsafe { entry.snapshot_actions() }
+        };
+        snapshot.with_actions(|action| {
+            has_valid_survivor &=
+                Some(action.token()) == first_token && action.run_primary(virq).handled();
+            seen += 1;
+        });
+    }
+    let wake = line.lock().finish_running_dispatch();
+    drop(wake);
     assert!(has_valid_survivor);
     assert_eq!(seen, usize::from(first_token.is_some()));
     assert_eq!(survivor_calls.load(Ordering::Relaxed), seen);

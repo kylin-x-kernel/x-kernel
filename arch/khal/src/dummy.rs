@@ -137,8 +137,8 @@ impl kirq::IntrManagerIf {
         None
     }
 
-    fn select_flow(_desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
-        Ok(kirq::IrqFlow::Legacy)
+    fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
+        Err(kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq })
     }
 
     fn prepare_local_irq_work() -> Option<fn()> {
@@ -151,13 +151,19 @@ impl kirq::IntrManagerIf {
 
     fn enable(_desc: kirq::IrqDesc, _enabled: bool) {}
 
-    fn dispatch_irq(_irq: usize) -> Option<kirq::Virq> {
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::dispatch_irq`]'s contract.
+    unsafe fn dispatch_irq(_irq: usize) -> Option<kirq::Virq> {
         None
     }
 
-    fn dispatch_nmi(_irq: usize) {}
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::dispatch_nmi`]'s contract.
+    unsafe fn dispatch_nmi(_irq: usize) {}
 
-    fn complete_irq(_completion_cookie: usize) {}
+    /// # Safety
+    /// The caller must uphold [`kirq::IntrManagerIf::complete_irq`]'s contract.
+    unsafe fn complete_irq(_completion_cookie: usize) {}
 
     fn notify_cpu(_irq: usize, _target: kirq::TargetCpu) {}
 

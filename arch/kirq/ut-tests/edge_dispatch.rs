@@ -42,8 +42,8 @@ impl Fixture {
         REQUESTS.store(0, Ordering::Relaxed);
         ACCEPTS.store(true, Ordering::Relaxed);
         let virq = 0x6e80;
-        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
-        entry.flow = IrqFlow::Edge(&CHIP);
+        let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+        entry.set_flow_for_tests(IrqFlow::Edge(&CHIP));
         let line = Arc::new(IrqLine::new(entry));
         assert!(IRQ_STATE.lock().descs.insert(virq, line.clone()).is_none());
         Self { line, virq }
@@ -76,10 +76,11 @@ fn overlapping_edges_are_acknowledged_once_and_coalesced_by_running_owner() {
             .line
             .lock()
             .install_regular_action(IrqAction::regular(Arc::new(move |_| {
-                assert!(krcu::is_reading());
+                assert!(!krcu::is_reading());
                 let call = called.fetch_add(1, Ordering::Relaxed);
                 let line = weak.upgrade().unwrap();
                 assert!(line.lock().is_running);
+                assert!(!line.lock().execution_idle_completion().is_completed());
                 if call == 0 {
                     assert_eq!(acknowledged.load(Ordering::Relaxed), 1);
                     for _ in 0..2 {
@@ -90,7 +91,10 @@ fn overlapping_edges_are_acknowledged_once_and_coalesced_by_running_owner() {
                     }
                     assert_eq!(called.load(Ordering::Relaxed), 1);
                     assert!(line.lock().is_pending);
-                    assert_eq!(line.lock().in_flight(), 1);
+                    let entry = line.lock();
+                    assert!(entry.is_running);
+                    assert!(entry.has_active_execution());
+                    assert!(!entry.execution_idle_completion().is_completed());
                 } else {
                     assert_eq!(call, 1);
                     assert_eq!(acknowledged.load(Ordering::Relaxed), 3);
@@ -100,7 +104,7 @@ fn overlapping_edges_are_acknowledged_once_and_coalesced_by_running_owner() {
             })))
     );
     fixture.enable();
-    let completion = fixture.line.lock().in_flight_zero_completion();
+    let completion = fixture.line.lock().execution_idle_completion();
     super::dispatch_claim(IrqRef::Virq(virq), || {
         assert!(!krcu::is_reading());
         acks.fetch_add(1, Ordering::Relaxed);
@@ -142,7 +146,7 @@ fn disabled_edge_records_pending_until_successful_hardware_request() {
     super::super::resend::schedule(&fixture.line);
     assert!(fixture.line.lock().is_pending);
     assert!(!fixture.line.lock().is_replay_queued);
-    assert_eq!(fixture.line.lock().in_flight(), 0);
+    assert!(!fixture.line.lock().is_running);
     ACCEPTS.store(true, Ordering::Relaxed);
     super::super::resend::schedule(&fixture.line);
     super::super::resend::schedule(&fixture.line);
@@ -190,7 +194,7 @@ fn handler_disable_keeps_overlapping_edge_pending_without_tail_unmask() {
         fixture
             .line
             .lock()
-            .in_flight_zero_completion()
+            .execution_idle_completion()
             .is_completed()
     );
 }

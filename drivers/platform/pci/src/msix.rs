@@ -232,13 +232,18 @@ pub fn activate_msix(config: &mut PciConfigAccess, bdf: DeviceFunction, cap: &Ms
 }
 
 /// Disables MSI-X and re-enables legacy INTx delivery.
+///
+/// Sets Function Mask and clears MSI-X Enable regardless of discovery-time
+/// state. This is shutdown, not restoration of a previous owner's setup.
+/// The caller still owns device stop, outstanding-message ordering and IRQ
+/// action teardown before releasing its vector allocation.
 pub fn disable_msix<C: ConfigurationAccess>(
     root: &mut PciRoot<C>,
     config: &mut PciConfigAccess,
     bdf: DeviceFunction,
     cap: &MsixCapability,
 ) {
-    restore_msix_message_control(config, bdf, cap);
+    disable_msix_message_control(config, bdf, cap);
 
     let (_, cmd) = root.get_status_command(bdf);
     root.set_command(bdf, cmd & !Command::INTERRUPT_DISABLE);
@@ -248,12 +253,15 @@ pub fn disable_msix<C: ConfigurationAccess>(
 ///
 /// This is used after the PCI root object is no longer available, for example
 /// when tearing down a transport that already owns its copied config accessor.
+/// Like [`disable_msix`], this masks and disables MSI-X rather than restoring
+/// discovery-time state, and re-enables INTx. It does not drain issued messages,
+/// stop DMA, remove IRQ actions or release vector allocations.
 pub fn disable_msix_with_config(
     config: &mut PciConfigAccess,
     bdf: DeviceFunction,
     cap: &MsixCapability,
 ) {
-    restore_msix_message_control(config, bdf, cap);
+    disable_msix_message_control(config, bdf, cap);
 
     let status_command = config.read_word(bdf, STATUS_COMMAND_OFFSET);
     let command = Command::from_bits_truncate(status_command as u16) & !Command::INTERRUPT_DISABLE;
@@ -262,19 +270,17 @@ pub fn disable_msix_with_config(
     config.write_word(bdf, STATUS_COMMAND_OFFSET, u32::from(command.bits()));
 }
 
-fn restore_msix_message_control(
+fn disable_msix_message_control(
     config: &mut PciConfigAccess,
     bdf: DeviceFunction,
     cap: &MsixCapability,
 ) {
-    let mut word = config.read_word(bdf, cap.cap_offset) & !(MSIX_ENABLE | MSIX_FUNCTION_MASK);
-    if cap.enabled {
-        word |= MSIX_ENABLE;
-    }
-    if cap.function_masked {
-        word |= MSIX_FUNCTION_MASK;
-    }
-    config.write_word(bdf, cap.cap_offset, word);
+    let word = config.read_word(bdf, cap.cap_offset);
+    config.write_word(
+        bdf,
+        cap.cap_offset,
+        (word | MSIX_FUNCTION_MASK) & !MSIX_ENABLE,
+    );
 }
 
 /// Configures a single MSI-X table entry.
@@ -307,3 +313,6 @@ pub fn configure_msix_entry(
 
     Some(())
 }
+
+#[cfg(unittest)]
+unittest::path_mod_test!(tests, "../ut-tests/msix.rs");

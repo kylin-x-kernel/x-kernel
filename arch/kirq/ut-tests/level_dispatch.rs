@@ -33,8 +33,8 @@ impl Fixture {
         MASKS.store(0, Ordering::Relaxed);
         UNMASKS.store(0, Ordering::Relaxed);
         let virq = 0x6e90;
-        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
-        entry.flow = IrqFlow::Level(&CHIP);
+        let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+        entry.set_flow_for_tests(IrqFlow::Level(&CHIP));
         let line = Arc::new(IrqLine::new(entry));
         assert!(IRQ_STATE.lock().descs.insert(virq, line.clone()).is_none());
         Self { line, virq }
@@ -64,7 +64,7 @@ fn level_overlap_masks_and_completes_each_claim_without_recursive_actions() {
             .line
             .lock()
             .install_regular_action(IrqAction::regular(Arc::new(move |_| {
-                assert!(krcu::is_reading());
+                assert!(!krcu::is_reading());
                 assert_eq!(MASKS.load(Ordering::Relaxed), 1);
                 assert_eq!(UNMASKS.load(Ordering::Relaxed), 0);
                 called.fetch_add(1, Ordering::Relaxed);
@@ -74,7 +74,10 @@ fn level_overlap_masks_and_completes_each_claim_without_recursive_actions() {
                 let line = weak.upgrade().unwrap();
                 assert!(line.lock().is_running);
                 assert!(line.lock().is_pending);
-                assert_eq!(line.lock().in_flight(), 1);
+                let entry = line.lock();
+                assert!(entry.is_running);
+                assert!(entry.has_active_execution());
+                assert!(!entry.execution_idle_completion().is_completed());
                 crate::IrqEvent::HANDLED
             })))
     );
@@ -88,7 +91,7 @@ fn level_overlap_masks_and_completes_each_claim_without_recursive_actions() {
     let entry = fixture.line.lock();
     assert!(!entry.is_pending);
     assert!(!entry.is_running);
-    assert!(entry.in_flight_zero_completion().is_completed());
+    assert!(entry.execution_idle_completion().is_completed());
 }
 
 #[def_test(serial)]
@@ -128,5 +131,5 @@ fn level_disabled_arrival_and_handler_disable_never_unmask_at_tail() {
     assert_eq!(completed, 2);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(UNMASKS.load(Ordering::Relaxed), 0);
-    assert_eq!(fixture.line.lock().in_flight(), 0);
+    assert!(!fixture.line.lock().is_running);
 }

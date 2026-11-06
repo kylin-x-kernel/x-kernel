@@ -17,7 +17,7 @@ fn missing_prepared_capacity_cannot_publish_half_a_mapping() {
     let desc = IrqDesc::from_hwirq(0x5fb6)
         .with_domain(TEST_DOMAIN)
         .with_virq(virq);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     let mut prepared = super::PreparedPublication::new(virq, None, true).unwrap();
     let resolution = state.plan_resolution(desc.into()).unwrap();
@@ -33,7 +33,7 @@ fn missing_prepared_capacity_cannot_publish_half_a_mapping() {
 fn domain_dispatch_borrows_the_domain_owner_directly() {
     let hwirq = 0x5fb2;
     let desc = IrqDesc::from_hwirq(hwirq).with_domain(TEST_DOMAIN);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     let mapped = state
         .try_resolve_desc(desc, Some(&line))
@@ -71,7 +71,7 @@ fn domain_dispatch_borrows_the_domain_owner_directly() {
 fn dispatch_lookup_preserves_strict_and_identity_misses() {
     let virq = 0x5fb3;
     let desc = IrqDesc::from_virq(virq);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(desc)));
     let mut state = IrqState::new();
     state.try_resolve_desc(desc, Some(&line)).unwrap();
     assert!(
@@ -115,7 +115,7 @@ impl Drop for TestMapping {
 fn published_line_cannot_alias_another_logical_number() {
     let original = IrqDesc::from_virq(0x5fb0);
     let alias = IrqDesc::from_virq(0x5fb1);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(original)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(original)));
     let mut state = IrqState::new();
     assert_eq!(line.logical_irq(), None);
     state.try_resolve_desc(original, Some(&line)).unwrap();
@@ -144,7 +144,8 @@ fn action_removal_keeps_domain_line_and_both_indexes() {
     for is_shared in [false, true] {
         let hwirq = 0x5fa4 + usize::from(is_shared);
         let desc = IrqDesc::from_hwirq(hwirq).with_domain(TEST_DOMAIN);
-        let virq = crate::try_map(desc).unwrap();
+        let binding = crate::runtime::manager::tests_irq::SyntheticLine::mapped(desc);
+        let virq = binding.virq();
         let cleanup = TestMapping(virq);
         let line = IRQ_STATE.lock().descs.get(&virq).unwrap();
         let handler: crate::Handler = Arc::new(|_| IrqEvent::HANDLED);
@@ -186,19 +187,29 @@ fn action_removal_keeps_domain_line_and_both_indexes() {
 #[def_test(serial)]
 fn empty_claim_completion_keeps_domain_line() {
     let hwirq = 0x5fa6;
-    let virq = crate::try_map(IrqDesc::from_hwirq(hwirq).with_domain(TEST_DOMAIN)).unwrap();
+    let binding = crate::runtime::manager::tests_irq::SyntheticLine::mapped(
+        IrqDesc::from_hwirq(hwirq).with_domain(TEST_DOMAIN),
+    );
+    let virq = binding.virq();
     let cleanup = TestMapping(virq);
     let line = IRQ_STATE.lock().descs.get(&virq).unwrap();
     let mut completion_count = 0;
-    let mut in_flight_at_completion = 0;
+    let idle = line.lock().execution_idle_completion();
+    let has_atomic_exclusion = {
+        let _guard = line.lock();
+        line.is_state_locked_for_tests()
+    };
+    let mut completed_under_lock = false;
     let resolved = crate::dispatch::dispatch_claim(IrqRef::Domain(TEST_DOMAIN, hwirq), || {
         completion_count += 1;
-        in_flight_at_completion = line.lock().in_flight();
+        completed_under_lock = idle.is_completed()
+            && !karch::local_irq_enabled()
+            && (!has_atomic_exclusion || line.is_state_locked_for_tests());
     });
     assert_eq!(resolved, Some(virq));
     assert_eq!(completion_count, 1);
-    assert_eq!(in_flight_at_completion, 1);
-    assert_eq!(line.lock().in_flight(), 0);
+    assert!(completed_under_lock);
+    assert!(!line.lock().is_running);
     let retained = IRQ_STATE.lock().descs.get(&virq).unwrap();
     assert!(Arc::ptr_eq(&retained, &line));
     assert_eq!(crate::translate_hwirq(TEST_DOMAIN, hwirq), Some(virq));
@@ -210,7 +221,7 @@ fn domain_enrichment_and_management_completion_preserve_identity() {
     let virq = 0x5fa7;
     let plain = IrqDesc::from_virq(virq);
     let mapped = plain.with_domain(TEST_DOMAIN);
-    let line = Arc::new(IrqLine::new(IrqStateDesc::new(plain)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(plain)));
     let mut state = IrqState::new();
     state.try_resolve_desc(plain, Some(&line)).unwrap();
     line.lock().begin_management();
@@ -231,6 +242,8 @@ fn domain_enrichment_and_management_completion_preserve_identity() {
 fn bare_preparation_survives_action_removal_and_startup_reregistration() {
     for is_shared in [false, true] {
         let virq = crate::DYNAMIC_VIRQ_BASE + 0x5fae + usize::from(is_shared);
+        let _binding =
+            crate::runtime::manager::tests_irq::SyntheticLine::new(IrqDesc::from_virq(virq));
         assert_eq!(crate::try_map(IrqDesc::from_virq(virq)), Ok(virq));
         let _cleanup = TestMapping(virq);
         let line = IRQ_STATE.lock().descs.get(&virq).unwrap();
@@ -275,22 +288,29 @@ fn bare_preparation_survives_action_removal_and_startup_reregistration() {
 fn empty_claim_keeps_prepared_bare_line_for_startup_registration() {
     let virq = crate::DYNAMIC_VIRQ_BASE + 0x5fad;
     assert!(crate::descriptor(virq).is_none());
+    let _binding = crate::runtime::manager::tests_irq::SyntheticLine::new(IrqDesc::from_virq(virq));
     assert_eq!(crate::try_map(IrqDesc::from_virq(virq)), Ok(virq));
     let _cleanup = TestMapping(virq);
     let line = IRQ_STATE.lock().descs.get(&virq).unwrap();
-    let completion = line.lock().in_flight_zero_completion();
-    let mut in_flight_at_completion = 0;
+    let completion = line.lock().execution_idle_completion();
+    let has_atomic_exclusion = {
+        let _guard = line.lock();
+        line.is_state_locked_for_tests()
+    };
+    let mut completed_under_lock = false;
     let mut completions = 0;
     assert_eq!(
         crate::dispatch::dispatch_claim(IrqRef::Virq(virq), || {
             completions += 1;
-            in_flight_at_completion = line.lock().in_flight();
+            completed_under_lock = completion.is_completed()
+                && !karch::local_irq_enabled()
+                && (!has_atomic_exclusion || line.is_state_locked_for_tests());
         }),
         Some(virq)
     );
     assert_eq!(completions, 1);
-    assert_eq!(in_flight_at_completion, 1);
-    assert_eq!(line.lock().in_flight(), 0);
+    assert!(completed_under_lock);
+    assert!(!line.lock().is_running);
     assert!(completion.is_completed());
     assert!(
         IRQ_STATE

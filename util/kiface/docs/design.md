@@ -136,7 +136,13 @@ Generated calls run in whatever context the caller runs in: the facade
 method is a plain inline call through a function symbol with no runtime
 component of its own, imposes no locking, allocation, or scheduling
 assumptions, and is valid wherever both the caller and the provider body
-are valid. The provider side rejects `unsafe` methods, receivers,
+are valid. Unsafe methods preserve their safety qualifier on both facade and
+provider. A hidden per-method constant records the declaration's qualifier;
+the provider checks it in addition to the function-pointer signature, because
+Rust permits coercing a safe function into an unsafe function pointer. A
+qualifier mismatch in either direction fails compilation. Method-level `cfg`
+gates apply equally to the facade method, constant and provider check.
+The provider side rejects receivers,
 generics, `async`, `extern`, variadic signatures, and default bodies at
 macro-expansion time (see the Current Restrictions section of
 `docs/security.md`).

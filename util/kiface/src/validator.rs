@@ -21,13 +21,6 @@ pub(crate) fn validate_signature(sig: &Signature) -> Result<(), Error> {
         ));
     }
 
-    if sig.unsafety.is_some() {
-        return Err(Error::new_spanned(
-            sig,
-            "unsafe interface methods are not supported",
-        ));
-    }
-
     if sig.asyncness.is_some() {
         return Err(Error::new_spanned(
             sig,

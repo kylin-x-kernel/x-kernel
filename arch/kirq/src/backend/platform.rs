@@ -138,8 +138,6 @@ pub enum FasteoiResend {
 /// Validated source flow selected before descriptor publication.
 #[derive(Clone, Copy, Debug)]
 pub enum IrqFlow {
-    /// Existing platform dispatch behavior, not a claim of ordinary-flow parity.
-    Legacy,
     /// Ordinary fasteoi with explicit resend policy; excludes per-CPU and NMI.
     Fasteoi(&'static FasteoiChip),
     /// Edge acknowledgement before handlers, with serialized pending service.
@@ -154,7 +152,7 @@ pub enum IrqFlow {
 impl IrqFlow {
     pub(crate) fn unmask(self) -> Option<fn(IrqDesc)> {
         match self {
-            Self::Legacy | Self::PerCpu => None,
+            Self::PerCpu => None,
             Self::Fasteoi(chip) => Some(chip.unmask),
             Self::Edge(chip) => Some(chip.unmask),
             Self::Level(chip) => Some(chip.unmask),
@@ -165,7 +163,6 @@ impl IrqFlow {
 impl PartialEq for IrqFlow {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Legacy, Self::Legacy) => true,
             (Self::PerCpu, Self::PerCpu) => true,
             (Self::Fasteoi(left), Self::Fasteoi(right)) => core::ptr::eq(*left, *right),
             (Self::Edge(left), Self::Edge(right)) => core::ptr::eq(*left, *right),
@@ -187,69 +184,15 @@ pub enum TargetCpu {
     AllButSelf { me: usize, total: usize },
 }
 
-/// A platform IRQ whose host completion obligation has not yet been consumed.
-///
-/// Completion must happen on the CPU that claimed the interrupt. The guard is
-/// not `Send`, and its `Drop` path completes the interrupt if the generic IRQ
-/// tail did not call [`DispatchedIrq::complete`] explicitly.
-#[derive(Debug)]
-pub struct DispatchedIrq {
-    irq: Virq,
-    completion_cookie: usize,
-    completed: bool,
-    _not_send: PhantomData<*mut ()>,
-}
-
-impl DispatchedIrq {
-    /// Creates a dispatched IRQ with an opaque completion cookie.
-    pub const fn new(irq: Virq, completion_cookie: usize) -> Self {
-        Self {
-            irq,
-            completion_cookie,
-            completed: false,
-            _not_send: PhantomData,
-        }
-    }
-
-    /// Returns the interrupt number claimed by the backend.
-    ///
-    /// This compatibility guard carries an already resolved logical IRQ.
-    /// Controller dispatch uses typed [`PendingIrq`] for both IRQ and NMI.
-    pub const fn irq(&self) -> Virq {
-        self.irq
-    }
-
-    /// Completes the claimed interrupt exactly once.
-    ///
-    /// The generic helper calls this after handler execution. The backend
-    /// performs the remaining host-owned operations for this claim; operations
-    /// already performed during acknowledgement must not be repeated. A
-    /// backend-specific forwarding protocol may leave deactivation to a guest.
-    /// Return does not by itself prove hardware inactivity or device shutdown.
-    pub fn complete(mut self) {
-        self.complete_inner();
-    }
-
-    fn complete_inner(&mut self) {
-        if self.completed {
-            return;
-        }
-        self.completed = true;
-        platform_complete_irq(self.completion_cookie);
-    }
-}
-
-impl Drop for DispatchedIrq {
-    fn drop(&mut self) {
-        self.complete_inner();
-    }
-}
-
 /// A platform claim awaiting generic action dispatch and host completion.
 ///
 /// This guard owns the remaining host completion obligation, not necessarily
 /// all hardware activity. The backend may already have acknowledged the source
 /// or may transfer deactivation through a separate forwarding protocol.
+/// Both normal IRQ and NMI dispatch consume this same type. It is not `Send`;
+/// callers additionally exclude migration until completion on the claiming CPU.
+/// Dropping it completes the claim, but does not unregister an action or stop
+/// the device that produced the interrupt.
 #[derive(Debug)]
 pub struct PendingIrq {
     source: IrqRef,
@@ -259,8 +202,34 @@ pub struct PendingIrq {
 }
 
 impl PendingIrq {
+    /// Pure software fixture with no controller completion obligation.
+    #[cfg(unittest)]
+    pub(crate) const fn simulated(source: IrqRef) -> Self {
+        Self {
+            source,
+            completion_cookie: 0,
+            completed: true,
+            _not_send: PhantomData,
+        }
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn has_no_completion_for_tests(&self) -> bool {
+        self.completed
+    }
+
     /// Creates a pending IRQ claim with an opaque completion cookie.
-    pub const fn new(source: IrqRef, completion_cookie: usize) -> Self {
+    ///
+    /// # Safety
+    /// The caller uniquely owns an acknowledged controller claim (or a
+    /// backend-defined no-completion sentinel). `source` and the cookie must
+    /// describe that claim. Construct inside generic hardirq or effective NMI
+    /// context, with RCU watching active on an initialized CPU. Retain that
+    /// entry scope, controller validity and ordinary IRQ/migration exclusion
+    /// on the claiming CPU until this value is consumed or dropped; do not
+    /// duplicate or independently complete its obligation. Normal-flow
+    /// consumption rejects effective NMI context instead of taking IRQ locks.
+    pub const unsafe fn new(source: IrqRef, completion_cookie: usize) -> Self {
         Self {
             source,
             completion_cookie,
@@ -295,7 +264,9 @@ impl PendingIrq {
             return;
         }
         self.completed = true;
-        platform_complete_irq(self.completion_cookie);
+        // SAFETY: construction transfers one valid claim and requires its CPU,
+        // controller and execution exclusion to remain valid through completion.
+        unsafe { IntrManagerIf::complete_irq(self.completion_cookie) };
     }
 }
 
@@ -338,8 +309,9 @@ pub trait IntrManagerIf {
     ///
     /// Called under registry and Line exclusion, before publishing merged
     /// metadata. Validate controller identity, source range and flow eligibility.
-    /// Existing unmigrated controllers return Legacy. Unsupported combinations
-    /// for a migrated controller return UnsupportedFlow, never a silent fallback.
+    /// Unknown source identities and unsupported controller combinations return
+    /// UnsupportedFlow, never a silent fallback. Explicit platform-local timer
+    /// and IPI identities may use a flat namespace without a controller tag.
     fn select_flow(desc: IrqDesc) -> Result<IrqFlow, crate::IrqDescError>;
 
     /// Configures a controller-local IRQ source from a normalized descriptor.
@@ -380,7 +352,12 @@ pub trait IntrManagerIf {
     /// or dispatch paths while holding those locks or servicing this call.
     fn enable(desc: IrqDesc, on: bool);
 
-    /// Claims, classifies, and dispatches an interrupt taken with IRQs enabled.
+    /// Claims, classifies, and dispatches through the ordinary IRQ entry.
+    ///
+    /// The interrupted context had ordinary IRQs enabled; this method itself
+    /// runs with ordinary IRQs masked, migration excluded and generic hardirq
+    /// context active. A controller may admit NMI nesting without admitting
+    /// ordinary IRQs. It must return with ordinary IRQ exclusion intact.
     ///
     /// After the controller claim and required ack, the backend must call
     /// exactly one generic entry:
@@ -393,15 +370,27 @@ pub trait IntrManagerIf {
     /// therefore mean an NMI-class claim, an unresolved normal claim, or a
     /// spurious vector; dispatch and completion have already happened before
     /// this method returns.
-    fn dispatch_irq(id: usize) -> Option<Virq>;
+    ///
+    /// # Safety
+    /// Enter only from the captured ordinary IRQ on an initialized CPU, with
+    /// hardirq context and watching active and IRQ/migration exclusion retained
+    /// until return. The vector must belong to that architecture entry.
+    unsafe fn dispatch_irq(id: usize) -> Option<Virq>;
 
     /// Claims and dispatches an interrupt taken through the NMI entry path.
     ///
     /// The backend must call [`crate::generic_handle_nmi`] with a
     /// [`PendingIrq`] containing its typed source and completion cookie. Unlike
-    /// [`IntrManagerIf::dispatch_irq`], this path never opens the normal IRQ
-    /// window. It is only called where normal IRQs are already masked.
-    fn dispatch_nmi(id: usize);
+    /// [`IntrManagerIf::dispatch_irq`], this path never enters the normal IRQ
+    /// lifecycle or runs its deferred-work tail. It runs on the initialized entry CPU
+    /// with ordinary IRQs and migration excluded and effective NMI context
+    /// already active. Neither dispatch nor completion may schedule.
+    ///
+    /// # Safety
+    /// Enter only from an architecture-classified NMI with effective NMI
+    /// context and watching active. Retain ordinary IRQ/migration exclusion
+    /// on the initialized entry CPU throughout dispatch and completion.
+    unsafe fn dispatch_nmi(id: usize);
 
     /// Performs the remaining host-owned completion operations for a claim.
     ///
@@ -423,9 +412,19 @@ pub trait IntrManagerIf {
     /// masking a rejected arrival), without clearing another running owner.
     /// Level Lines invoke it after mask/ack and before actions; a backend that
     /// consumed its parent acknowledgement already supplies no tail obligation.
+    /// Normal-IRQ claims rejected for an NMI-owned Line also complete under
+    /// that Line's lock, without invoking the NMI action. Actual NMI entry
+    /// remains lockless and obeys the NMI-context restrictions above.
+    /// Rejected PerCpu claims likewise complete under the Line lock without
+    /// borrowing an action; accepted PerCpu execution completes unlocked.
     /// It must not reenter KIRQ dispatch, management, or registry operations:
     /// the permitted lock order is Line then bounded controller state.
-    fn complete_irq(completion_cookie: usize);
+    ///
+    /// # Safety
+    /// Consume one still-owned completion obligation from this controller on
+    /// its claiming CPU, with ordinary IRQs/migration excluded. Do not reuse
+    /// the cookie except for a backend-defined no-completion sentinel.
+    unsafe fn complete_irq(completion_cookie: usize);
 
     /// Sends an IPI to another CPU.
     ///
@@ -498,21 +497,6 @@ pub(crate) fn set_platform_irq_enabled(desc: IrqDesc, on: bool) {
     if needs_platform_binding(desc) {
         platform_enable(desc, on);
     }
-}
-
-#[inline]
-pub(crate) fn platform_dispatch_irq(id: usize) -> Option<Virq> {
-    IntrManagerIf::dispatch_irq(id)
-}
-
-#[inline]
-pub(crate) fn platform_dispatch_nmi(id: usize) {
-    IntrManagerIf::dispatch_nmi(id)
-}
-
-#[inline]
-fn platform_complete_irq(completion_cookie: usize) {
-    IntrManagerIf::complete_irq(completion_cookie)
 }
 
 #[inline]

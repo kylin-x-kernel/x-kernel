@@ -107,7 +107,6 @@ impl EventOwnerScope<'_> {
         });
         let desc = kirq::gic_level_irq_desc(of::pmu_irq_or(kbuild_config::PMU_IRQ));
         if !shutdown_local_with(
-            super::PERIODIC_IRQ_DISABLED.current(self.pin),
             || {},
             || kirq::try_disable_irq_nosync(desc).is_ok(),
             || {
@@ -133,6 +132,102 @@ impl Drop for EventOwnerScope<'_> {
     fn drop(&mut self) {
         let _ = self.cleanup();
     }
+}
+
+struct FilterRegistersScope {
+    cycle: aarch64_pmuv3::pmuv3::PmuCounter,
+    event: aarch64_pmuv3::pmuv3::PmuCounter,
+    cycle_filter: u64,
+    event_type: u64,
+    selector: u64,
+    control: u64,
+}
+
+impl Drop for FilterRegistersScope {
+    fn drop(&mut self) {
+        use aarch64_pmuv3::{isb, msr};
+
+        // The pinned fixture owns both counters and keeps the PPI closed.
+        // Stop production and clear stale overflow before restoring registers.
+        self.cycle.disable();
+        self.event.disable();
+        msr!(PMOVSCLR_EL0, (1u64 << 31) | 1);
+        msr!(PMSELR_EL0, 0u64);
+        isb!();
+        msr!(PMXEVTYPER_EL0, self.event_type);
+        msr!(PMCCFILTR_EL0, self.cycle_filter);
+        msr!(PMCR_EL0, self.control);
+        msr!(PMSELR_EL0, self.selector);
+        isb!();
+    }
+}
+
+#[def_test(serial)]
+fn counter_filters_include_current_el_without_overwriting_cycle_owner() -> unittest::TestResult {
+    use aarch64_pmuv3::{
+        isb, mrs, msr,
+        pmuv3::{PmuCounter, PmuEvent},
+    };
+
+    let pin = kspin::NoPreemptIrqSave::new();
+    if kplat::nm_irq::mode() == kplat::nm_irq::NmiMode::None
+        || !super::lifecycle::can_start()
+        || super::PMU
+            .get(&pin)
+            .get()
+            .is_some_and(|pmu| pmu.counters.iter().any(Option::is_some))
+    {
+        return unittest::TestResult::Ignored;
+    }
+    // Long periods avoid intentional delivery; no elapsed-time assertion is
+    // involved. Hardware gates must also be vacant before the global PMCR writes.
+    let cycle = PmuCounter::new_cycle_counter(u64::MAX - 1);
+    let event = PmuCounter::new_event_counter(0, u32::MAX as u64, PmuEvent::CpuCycles);
+    if cycle.check_pmu_support().is_err() || event.check_pmu_support().is_err() {
+        return unittest::TestResult::Ignored;
+    }
+    if mrs!(PMCNTENSET_EL0) != 0 || mrs!(PMINTENSET_EL1) != 0 {
+        return unittest::TestResult::Ignored;
+    }
+    let _restore = RestoreVacantSource;
+    assert!(super::shutdown_periodic_source());
+    let cycle_filter = mrs!(PMCCFILTR_EL0);
+    let selector = mrs!(PMSELR_EL0);
+    let control = mrs!(PMCR_EL0);
+    msr!(PMSELR_EL0, 0u64);
+    isb!();
+    let registers = FilterRegistersScope {
+        cycle,
+        event,
+        cycle_filter,
+        event_type: mrs!(PMXEVTYPER_EL0),
+        selector,
+        control,
+    };
+    let expected_filter = if mrs!(CurrentEL) == 8 { 1u64 << 27 } else { 0 };
+    registers.cycle.enable();
+    assert_eq!(mrs!(PMCCFILTR_EL0), expected_filter);
+    registers.cycle.disable();
+
+    // A distinct valid EL1-exclusion bit makes an event-side overwrite visible
+    // even when both counters would otherwise select the same default filter.
+    let sentinel = expected_filter | (1u64 << 31);
+    msr!(PMCCFILTR_EL0, sentinel);
+    isb!();
+    assert_eq!(mrs!(PMCCFILTR_EL0), sentinel);
+    registers.event.enable();
+    assert_eq!(mrs!(PMCCFILTR_EL0), sentinel);
+    assert_eq!(
+        mrs!(PMXEVTYPER_EL0),
+        expected_filter | PmuEvent::CpuCycles as u64
+    );
+    drop(registers);
+    assert_eq!(mrs!(PMCCFILTR_EL0), cycle_filter);
+    assert_eq!(mrs!(PMSELR_EL0), selector);
+    assert_eq!(mrs!(PMCNTENSET_EL0) & ((1u64 << 31) | 1), 0);
+    assert_eq!(mrs!(PMINTENSET_EL1) & ((1u64 << 31) | 1), 0);
+    assert_eq!(mrs!(PMOVSSET_EL0) & ((1u64 << 31) | 1), 0);
+    unittest::TestResult::Ok
 }
 
 #[def_test(serial)]
@@ -178,13 +273,8 @@ fn event_counter_owner_rejects_periodic_arm_and_shutdown_unchanged() -> unittest
         owner.is_installed = true;
     }
     super::enable(0);
-    assert!(super::enable_periodic_irq(kirq::gic_level_irq_desc(irq)));
+    assert!(kirq::try_enable_irq(kirq::gic_level_irq_desc(irq)).is_ok());
     assert!(super::is_enabled(0));
-    assert!(
-        !super::PERIODIC_IRQ_DISABLED
-            .current(&pin)
-            .load(Ordering::Relaxed)
-    );
     for is_arm in [true, false] {
         let stages = if is_arm {
             AFTER_PREPARATION
@@ -198,14 +288,8 @@ fn event_counter_owner_rejects_periodic_arm_and_shutdown_unchanged() -> unittest
             super::shutdown_periodic_source()
         };
         assert!(!accepted);
-        // Neither controller preparation nor teardown was reached, and no
-        // controller-disable credit was consumed by the rejected operation.
+        // Neither controller preparation nor teardown was reached.
         assert_eq!(FAILURES.current(&pin).load(Ordering::Relaxed), stages);
-        assert!(
-            !super::PERIODIC_IRQ_DISABLED
-                .current(&pin)
-                .load(Ordering::Relaxed)
-        );
         let pmu = super::PMU.get(&pin);
         let pmu = pmu.get().unwrap();
         let counter = pmu.counters[0].as_ref().unwrap();
@@ -346,11 +430,6 @@ fn exclusive_periodic_source_can_stop_and_restart_on_this_cpu() -> unittest::Tes
         let pmu = pmu.get().unwrap();
         assert!(pmu.counters[super::CYCLE_COUNTER_IDX as usize].is_none());
         assert!(pmu.overflow_handlers[super::CYCLE_COUNTER_IDX as usize].is_none());
-        assert!(
-            super::PERIODIC_IRQ_DISABLED
-                .current(&guard)
-                .load(Ordering::Relaxed)
-        );
     }
     // Restore the startup-prepared, enabled PPI without taking a counter.
     khal::pmu::enable_irq();
@@ -359,10 +438,8 @@ fn exclusive_periodic_source_can_stop_and_restart_on_this_cpu() -> unittest::Tes
 
 #[def_test]
 fn failed_disable_preserves_retry_without_teardown() {
-    let disabled = AtomicBool::new(false);
     let trace = Cell::new(0);
     let stopped = shutdown_local_with(
-        &disabled,
         || trace.set(trace.get() * 10 + 1),
         || {
             trace.set(trace.get() * 10 + 2);
@@ -374,17 +451,14 @@ fn failed_disable_preserves_retry_without_teardown() {
         },
     );
     assert!(!stopped);
-    assert!(!disabled.load(Ordering::Relaxed));
     assert_eq!(trace.get(), 12);
 }
 
 #[def_test]
-fn teardown_retry_does_not_acquire_another_disable_credit() {
-    let disabled = AtomicBool::new(false);
+fn teardown_retry_repeats_ordered_local_shutdown() {
     let trace = Cell::new(0);
     for succeeds in [false, true] {
         let stopped = shutdown_local_with(
-            &disabled,
             || trace.set(trace.get() * 10 + 1),
             || {
                 trace.set(trace.get() * 10 + 2);
@@ -396,17 +470,14 @@ fn teardown_retry_does_not_acquire_another_disable_credit() {
             },
         );
         assert_eq!(stopped, succeeds);
-        assert!(disabled.load(Ordering::Relaxed));
     }
-    assert_eq!(trace.get(), 12313);
+    assert_eq!(trace.get(), 123123);
 }
 
 #[def_test]
 fn successful_shutdown_orders_producer_before_controller() {
-    let disabled = AtomicBool::new(false);
     let trace = Cell::new(0);
     let stopped = shutdown_local_with(
-        &disabled,
         || trace.set(trace.get() * 10 + 1),
         || {
             trace.set(trace.get() * 10 + 2);

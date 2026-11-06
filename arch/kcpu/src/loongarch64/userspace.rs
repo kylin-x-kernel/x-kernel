@@ -89,7 +89,9 @@ impl UserContext {
         let ret = match estat.cause() {
             Trap::Interrupt(_) => {
                 let interrupt_id: usize = estat.is().trailing_zeros() as usize;
-                handle_trap!(IRQ, interrupt_id);
+                // SAFETY: exception entry cleared CRMD.IE and enter_user
+                // restored kernel CPU state; on_user_exit retains the mask.
+                unsafe { handle_trap!(IRQ, interrupt_id) };
                 ReturnReason::Interrupt
             }
             Trap::Exception(Exception::Syscall) => {

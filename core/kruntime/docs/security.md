@@ -418,7 +418,11 @@ ordinary CPU IRQ delivery remains masked. A preparation error is fatal before
 activation; no rollback of a partially prepared fixed set is attempted because
 boot cannot proceed. These are platform-lifetime identity descriptors, not
 device-local hwirqs translated by guesswork. AP activation reuses them. Startup
-tests observe their identities and phase ordering; they do not establish source
+registration requires resolved PerCpu flow and disabled local slots before
+publishing either action. Runtime uses `try_register_percpu_startup` and never
+falls back to ordinary registration on failure. Each CPU explicitly activates
+its sources only after handler publication. Startup tests observe descriptor
+identities, PerCpu classification and phase ordering; they do not establish source
 quiescence or memory reclamation safety for dynamic device mappings.
 
 ## System power management boundary

@@ -145,10 +145,9 @@ GICv3 reserves ordinary Group 1 SGI15 for irq_work. Preparation rejects an
 out-of-range SGI, a conflict with `IPI_IRQ`, or MPIDR Aff0 >= 16 (the sender
 does not implement the optional range selector). A global `LazyInit<bool>`
 serializes mapping preparation through `kirq::try_map`, followed by one
-`kirq::try_register_startup` call with
-`kirq::IrqRegisterOptions::disabled()`; the permanent handler invokes
-`kirq::irq_work::handle_irq`. Registration and enablement share a descriptor
-marked `IrqFlags::PER_CPU`, identifying the SGI's CPU-local hardware state.
+`kirq::try_register_percpu_startup` call, disabled by contract; the permanent
+handler invokes `kirq::irq_work::handle_irq`. Registration and enablement share
+a descriptor marked `IrqFlags::PER_CPU`, identifying the SGI's CPU-local hardware state.
 The platform owns this mapping for kernel lifetime; APs reuse it. Mapping
 preparation does not configure or enable hardware. If action installation fails,
 the prepared mapping remains reserved rather than being reclaimed during boot.
@@ -156,13 +155,23 @@ Preparation or registration failure is retained and yields
 `None`, without replacing an existing handler. No GIC lock is held while
 entering the generic IRQ registration/control plane.
 
+The dedicated registration requires resolved PerCpu flow, no installed action
+and no enabled local slot. It configures only the calling CPU, never enabling
+delivery automatically. Post-resolution rejection may retain descriptor
+metadata, but does not publish the handler or configure hardware. Disabled slots
+do not prove hardware quiescence or completion of previously admitted claims.
+SGI15 remains an ordinary, kernel-lifetime IRQ; PerCpu registration grants no
+automatic NMI or forwarding capability.
+
 Each CPU disables its SGI, clears the hardware NMI attribute when supported,
 sets edge configuration and ordinary priority `IRQ_THRESHOLD`, then enables
 through `kirq::try_enable(desc, true)` so generic descriptor state and hardware
-agree. This boolean API explicitly forces platform enable on every CPU even
-when the global descriptor is already enabled; `PER_CPU` is metadata, not the
-mechanism that bypasses enabled-state deduplication. Do not replace this call
-with `try_enable_irq`, which does not force platform enable.
+agree. The typed SGI15 descriptor selects `PerCpu`, including with `PER_CPU` set,
+so enable state belongs to the calling CPU's slot, not a global enabled bit.
+Every CPU must perform its own preparation and enablement; the shared handler's
+registration does not enable another CPU's SGI. The existing boolean API forces
+the local hardware enable write even when that CPU's slot is already enabled.
+`try_enable_irq` is depth-aware rather than a force-enable replacement.
 Runtime publishes generic irq_work readiness only after receiving the notifier.
 GICv3 preparation failures log the rejected SGI/affinity, handler registration,
 ordinary-IRQ classification or enablement step before returning `None`. These
@@ -225,6 +234,17 @@ Checked IO-APIC configuration propagates mask/readback failure without publishin
 a new action. Invalid/changed retrigger routing is diagnosed and pending retained;
 retry requires later management progress after the fault is corrected.
 
+Only the fixed raw LAPIC timer/IPI identities select PerCpu. Other unbound or
+foreign identities return `UnsupportedFlow` before register access. None of
+the production GIC, PLIC or x86 selectors provides a Legacy flow fallback.
+KIRQ's unpublished candidate may have no selected flow; that is not a runnable
+software interrupt or a backend capability. Synthetic fixtures must arrange
+their test binding explicitly.
+
+This removal does not remove PCI legacy INTx, the IO-APIC descriptor helper
+`legacy_irq_desc`, or the direct infallible `set_trigger` interface. Those names
+describe existing signaling or APIs, not the removed KIRQ flow.
+
 Linux references are `kernel/irq/chip.c::handle_edge_irq/handle_fasteoi_irq` and
 `arch/x86/kernel/apic/vector.c::apic_retrigger_irq`: retrigger targets the recorded
 CPU/vector under routing exclusion, not the CPU that happens to request replay.
@@ -245,9 +265,10 @@ or root domain. It rejects conflicting controller/domain identity, unavailable
 initialization, special IDs and IDs beyond the discovered standard range before
 KIRQ publishes a mapping or installs an action. Checks precede narrowing from
 `usize`; extended IDs and LPIs are not supported by this provider path.
-Accepted ordinary SPIs use Fasteoi and ordinary SGI/PPI sources use PerCpu.
-Forwarded virtual timer PPI 27 and NMI-fallback PPIs also use PerCpu;
-NMI-tagged SPIs retain Legacy. Range
+Accepted ordinary SPIs use Fasteoi. Explicit GIC SGI/PPI sources select PerCpu,
+including SGIs marked `PER_CPU` and virtual timer PPI 27. An explicit GIC SPI
+marked `PER_CPU` returns `UnsupportedFlow`; this also
+rejects SPI NMI registration, which adds that flag. Range
 admission is separate from hardware trigger readback, masked configuration and
 RWP synchronization; direct low-level calls still require validated hardware IDs.
 
@@ -255,6 +276,19 @@ The limit follows the standard-line distinction used by Linux's GIC drivers
 (`GIC_LINE_NR` versus `GIC_ID_NR` in `irq-gic-v3.c`, and the 1020 clamp in
 `gic_init_bases` in `irq-gic.c`). It does not prove every private ID is wired or
 that firmware describes the right controller instance.
+
+The raw identity compatibility path means no domain and an Unknown controller.
+Raw private INTIDs in `0..32`, including 27, select PerCpu both with and without
+the `PER_CPU` flag. The flag alone does not promote raw IDs outside that range.
+This classification does not validate hardware range or wiring. Other raw and
+foreign identities return `UnsupportedFlow`; a foreign domain is not
+reinterpreted as GIC.
+
+PerCpu flow selects CPU-local execution/control accounting, not an NMI or guest
+forwarding capability. `percpu_nmi` still requires an explicit GIC root-domain
+PPI, GICv3 and an available NMI mechanism. `percpu_forwarding` still requires an
+explicit root-domain PPI on GICv2. Raw private IDs, SGIs and the `PER_CPU` flag
+alone satisfy neither capability contract.
 
 Within that explicit GIC range, standard SPIs (INTID >= 32) reject
 `EdgeFalling` and `LevelLow` with `UnsupportedFlow` before resolution publishes
@@ -271,7 +305,7 @@ neither publishes a new mapping nor changes an existing Line's state.
 ### Checked GIC Configuration
 
 `gicv2::configure` and `gicv3::configure` call `select_gic_flow` before
-register access. They also bound undeclared legacy IDs before narrowing to the
+register access. They also bound admitted raw private IDs before narrowing to the
 vendor `IntId`. Bounds checks precede the `Unknown` trigger no-op: a direct
 oversized descriptor is rejected even when its trigger is unspecified. Priority
 and NMI attributes remain caller policy; configuration changes neither.
@@ -347,7 +381,8 @@ delivery. This tests late events without substituting a synthetic handler call.
 Validated standard SPIs select the static `gic_spi::CHIP` Fasteoi capability.
 Shared and wakeup flags are accepted; MSI, unknown flags, explicit affinity and
 low polarity are rejected. Ordinary SGI/PPI INTIDs, including forwarded virtual
-timer PPI 27 and NMI-fallback PPIs, use PerCpu; NMI-tagged SPIs retain Legacy.
+timer PPI 27 and NMI-tagged PPIs, use PerCpu. Explicit GIC SPIs marked `PER_CPU`
+are rejected with `UnsupportedFlow`, without an alternative flow.
 The publicly reachable chip callbacks revalidate this binding before MMIO:
 invalid mask/unmask inputs are ignored and invalid retrigger returns false.
 NMI registration adds PER_CPU before selection. The only current VMM HW-LR
@@ -501,9 +536,8 @@ or eliminate the generic pending/resend obligation.
 Only descriptors declaring PLIC through their domain or controller enter this
 validation. Conflicting or incomplete PLIC identity is rejected, never silently
 downgraded. On the RISC-V provider, local timer/software causes use PerCpu;
-other non-PLIC descriptors retain Legacy, including
-synthetic descriptors and foreign-domain directory mappings. Legacy preserves
-the unmigrated contract; it does not certify hardware support. PLIC selection before controller publication
+other non-PLIC descriptors return `UnsupportedFlow`, including
+synthetic descriptors and foreign-domain directory mappings. PLIC selection before controller publication
 returns an error rather than touching the boot-only `plic()` invariant. The
 static `FasteoiChip` supplies real source mask/unmask functions; KIRQ must retain
 the validated original binding and serialize these calls with Line state.
@@ -526,3 +560,13 @@ not services provided by this capability. Model tests exercise the production
 selection and priority/route helpers, including masked updates, zero policy,
 enable-default writes and completion restoration; they do not validate physical
 delivery or the generic replay lifecycle.
+
+## Dispatch Contract
+
+`IntrManagerIf` dispatch and completion methods are unsafe provider contracts.
+KIRQ supplies initialized entry CPU, IRQ/migration exclusion and IRQ/NMI context;
+the irqchip acknowledges and classifies the actual source, then transfers its
+unique completion obligation through unsafe `PendingIrq::new`. The matching
+generic entry safely consumes that owner without repeating the unsafe call.
+The raw provider qualifier is preserved by `kiface`, not replaced with
+additional controller locks. Private GIC completion is not a driver-facing API.
