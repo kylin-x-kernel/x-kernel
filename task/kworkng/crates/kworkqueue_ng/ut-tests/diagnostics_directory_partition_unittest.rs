@@ -18,10 +18,7 @@ use crate::{
 
 fn queue(directory: &Directory) -> Arc<Queue> {
     Queue::with_diagnostics_for_test(&[0.into(), 1.into()], 1, |cpu| {
-        directory.register(
-            alloc::format!("cpu{}", cpu.as_usize()).into_boxed_str(),
-            cpu,
-        )
+        directory.register(&alloc::format!("cpu{}", cpu.as_usize()), cpu)
     })
 }
 

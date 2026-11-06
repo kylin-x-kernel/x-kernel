@@ -196,7 +196,8 @@ impl Queue {
     /// Binds execution and named per-CPU diagnostics before exposing the queue.
     /// Has the same context/provider lifetime contract as [`Self::with_dispatch`].
     /// The directory retains only weak diagnostic records, never this queue.
-    /// Names are copied during preparation; submission does not allocate them.
+    /// Names are copied inline during preparation as UTF-8 prefixes of at most
+    /// 31 bytes. They are diagnostic labels, not unique queue identifiers.
     ///
     /// # Panics
     /// Propagates provider closure panics and fatal kernel allocation failures.
@@ -216,7 +217,7 @@ impl Queue {
                 Some(QueueSource::new(queue.clone(), cpu, dispatch, kick))
             },
             |partition| {
-                let record = directory.register(name.into(), partition.cpu_id());
+                let record = directory.register(name, partition.cpu_id());
                 partition.with_diagnostic(record)
             },
         )

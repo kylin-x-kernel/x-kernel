@@ -243,6 +243,10 @@ can still enable `kworkqueue_ng/stall-check` without linking watchdog.
 `self-wait-check` forwards core callback-identity checks. It does not diagnose
 arbitrary dependency cycles or destructor-originated waits. `stall-check` attaches
 named records before queue exposure and implements `watchdog::WorkqueueStallInspectorIf`.
+Diagnostic names are copied inline as UTF-8 prefixes of at most 31 bytes,
+matching Linux's 31-byte workqueue label budget. Truncation affects display
+only; it neither fails queue creation nor changes routing. Name preparation
+does not allocate, while record and queue allocations retain their existing policy.
 Inspection borrows the published services and delegates to the core directory.
 Unready services and a busy diagnostic directory can be skipped; output is warning-only.
 There is no reporting deadline, automatic recovery or GC work. The watchdog task

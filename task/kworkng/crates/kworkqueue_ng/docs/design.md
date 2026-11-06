@@ -12,7 +12,7 @@ detached; construction does not notify providers or admit work.
 
 A private initialized-prefix guard releases initialized owners on early drop.
 Only a fully initialized table can transfer ownership through assume_init.
-Binding retains its sleepable context requirement and existing Arc/name
+Binding retains its sleepable context requirement and existing Arc/registry
 allocations; NOWAIT reservation does not make binding non-sleeping. Diagnostic
 registration may expose weak records before the completed queue is returned.
 
@@ -30,7 +30,31 @@ Sorting and duplicate detection follow reservation, so Allocation(NoMemory)
 can precede DuplicateCpu. KError converts through QueueConfigError::Allocation.
 Failure leaves the input unchanged and returns no configuration. System service
 preparation propagates this error before starting workers or registering sources.
-Diagnostic names and dynamic worker provisioning are unchanged.
+Dynamic worker provisioning is unchanged.
+
+## Inline Diagnostic Names
+
+With `stall-check`, each StallRecord owns an `arrayvec::ArrayString<31>`.
+Registration borrows the caller's name and copies the longest UTF-8 prefix
+that fits, without allocating, sleeping or introducing a failure path for the
+name. The copy happens before taking the diagnostic directory mutex. Each CPU
+record owns its inline copy; no shared-name owner or separate free is needed.
+
+This follows Linux `kernel/workqueue.c`: `workqueue_struct::name` has
+`WQ_NAME_LEN = 32` bytes, with 31 available before the C terminator. Rust needs
+no terminator and truncates only at character boundaries. Unlike Linux's
+`pr_warn_once`, this implementation does not log during truncation. The limit
+is part of the queue creation contract. Long names can collide after truncation;
+names are diagnostic labels, never queue routing keys or lookup identities.
+
+Queue/record Arc creation and the directory Vec still use their existing
+allocation policy. Removing name allocation does not make overall registration
+OOM-safe or relax its sleepable-context requirement. The last strong owner,
+which may be the monitor, drops the record value. Weak references retain the
+Arc allocation, including inline name storage, until pruning or directory
+destruction releases the last weak owner; there is no separate name allocation.
+Tests cover empty and 31/32-byte ASCII names, multibyte boundaries, temporary
+source lifetime, and existing directory/partition destruction protocols.
 
 ## Scope And Ownership
 

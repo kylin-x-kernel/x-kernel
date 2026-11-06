@@ -3703,6 +3703,7 @@ dependencies = [
 name = "kworkqueue_ng"
 version = "0.3.0-dev"
 dependencies = [
+ "arrayvec",
  "intrusive-collections",
  "kalloc-types",
  "kcompletion",

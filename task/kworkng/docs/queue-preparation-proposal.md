@@ -2,6 +2,11 @@
 
 Status: implemented; validation results and the existing UP test limitation follow.
 
+Follow-up: diagnostic names now use inline 31-byte UTF-8 prefixes, as described
+in `crates/kworkqueue_ng/docs/design.md`. References below to name allocation
+describe the partition-migration baseline, not the current name representation.
+Record/source Arc allocations and diagnostic directory growth remain unchanged.
+
 ## Objective and scope
 
 Migrate `kworkqueue_ng::Queue.partitions` from `Box<[Arc<QueuePartition>]>`

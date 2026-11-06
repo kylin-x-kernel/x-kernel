@@ -2,17 +2,30 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Cgroup-v2 device controller semantics.
+//! BPF map snapshots and cgroup-v2 device controller semantics.
 
 use alloc::{sync::Arc, vec, vec::Vec};
 
+use kbpf::{ReadOnlyMemory, Vm, vm::InitialRegs};
+use kcgroup::Cgroup;
 use unittest::{assert, assert_eq, def_test};
 
-use kbpf::vm::InitialRegs;
-use kbpf::{ReadOnlyMemory, Vm};
-
 use super::*;
-use kcgroup::Cgroup;
+
+#[def_test]
+fn map_snapshot_preserves_bytes_across_updates_and_owner_drop() {
+    let map = BpfMap::new(2, 4, 2, 2, 0).unwrap();
+    map.update_elem(0, &[1, 2]).unwrap();
+    map.update_elem(1, &[3, 4]).unwrap();
+    let snapshot = map.snapshot_values();
+    map.update_elem(0, &[5, 6]).unwrap();
+    let updated = map.snapshot_values();
+    assert_eq!(updated.as_ref(), &[5, 6, 3, 4]);
+    drop(map);
+    assert_eq!(snapshot.as_ref(), &[1, 2, 3, 4]);
+    let empty = BpfMap::new(2, 4, 2, 0, 0).unwrap();
+    assert!(empty.snapshot_values().is_empty());
+}
 
 fn root_cgroup() -> Arc<Cgroup> {
     kcgroup::CgroupNamespace::initial().root()
@@ -49,21 +62,16 @@ fn load_program(allow_minor_three: bool) -> Arc<BpfProgram> {
         slot(0x95, 0, 0, 0, 0),
     ];
     Arc::new(BpfProgram::new(
-        insns.concat().into_boxed_slice().into(),
+        Arc::from(insns.concat()),
         15, // BPF_PROG_TYPE_CGROUP_DEVICE (enum bpf_prog_type)
-        Vec::new().into_boxed_slice().into(),
+        Arc::from(Vec::new()),
     ))
 }
 
 /// `(access, major, minor, dev_type)` — the parameter order of
 /// `device::device_allowed`.
 fn write_char_1_3() -> (u32, u32, u32, u32) {
-    (
-        device::DEVICE_ACC_WRITE,
-        1,
-        3,
-        device::DEVICE_TYPE_CHAR,
-    )
+    (device::DEVICE_ACC_WRITE, 1, 3, device::DEVICE_TYPE_CHAR)
 }
 
 /// A single-attach replaces the cgroup's program, and the interpreted policy
@@ -77,23 +85,22 @@ fn attached_program_enforces_device_access() {
 
     // No attachments: everything allowed.
     let (access, major, minor, dev_type) = write_char_1_3();
-    assert!(device::device_allowed(&child, access, major, minor, dev_type));
+    assert!(device::device_allowed(
+        &child, access, major, minor, dev_type
+    ));
 
     device::attach(&child, &program, device::ATTACH_NONE).unwrap();
 
-    let verdict = device::device_program_verdict(
-        &program.insns_shared(),
-        access,
-        major,
-        minor,
-        dev_type,
-    );
+    let verdict =
+        device::device_program_verdict(&program.insns_shared(), access, major, minor, dev_type);
     assert_eq!(
         verdict,
         Ok(1),
         "the matching write must be allowed by the attached program"
     );
-    assert!(device::device_allowed(&child, access, major, minor, dev_type));
+    assert!(device::device_allowed(
+        &child, access, major, minor, dev_type
+    ));
     assert!(
         !device::device_allowed(&child, device::DEVICE_ACC_READ, major, minor, dev_type),
         "a non-matching access bit is denied"
@@ -145,11 +152,15 @@ fn multi_attach_accumulates_and_one_deny_wins() {
     // allows only minor 9, so the write to 1:3 is denied even though the
     // first would allow it — Linux's all-programs-must-allow semantics.
     let (access, major, minor, dev_type) = write_char_1_3();
-    assert!(!device::device_allowed(&target, access, major, minor, dev_type));
+    assert!(!device::device_allowed(
+        &target, access, major, minor, dev_type
+    ));
 
     // Removing the denying program restores the first's verdict.
     device::detach(&target, second_id).unwrap();
-    assert!(device::device_allowed(&target, access, major, minor, dev_type));
+    assert!(device::device_allowed(
+        &target, access, major, minor, dev_type
+    ));
 }
 
 /// The interpreter must decide the same program the same way the host-side
@@ -208,7 +219,9 @@ fn link_attachment_lives_with_the_link_file() {
 
     let file = device::link_file(&target, &program, kcred::initial_cred()).unwrap();
     assert_eq!(device::attached_program_ids(&target).len(), 1);
-    assert!(!device::device_allowed(&target, access, major, minor, dev_type));
+    assert!(!device::device_allowed(
+        &target, access, major, minor, dev_type
+    ));
 
     // Dropping the creating program object must not end the policy: the
     // attached entry owns the instruction bytes.
@@ -280,23 +293,31 @@ fn link_identity_and_program_lifetime() {
     let link_two = device::link_file(&target, &denying, kcred::initial_cred()).unwrap();
     assert_eq!(device::attached_program_ids(&target).len(), 2);
     // Multi semantics: every program must allow, so the denying link wins.
-    assert!(!device::device_allowed(&target, access, major, minor, dev_type));
+    assert!(!device::device_allowed(
+        &target, access, major, minor, dev_type
+    ));
 
     // The entry holds the program object: dropping every user-space
     // descriptor of it keeps the attachment queryable.
     drop(allowing);
     drop(denying);
-    assert!(!device::device_allowed(&target, access, major, minor, dev_type));
+    assert!(!device::device_allowed(
+        &target, access, major, minor, dev_type
+    ));
 
     // Releasing link #1 must not detach link #2's entry.
     drop(link_one);
     assert_eq!(device::attached_program_ids(&target).len(), 1);
-    assert!(!device::device_allowed(&target, access, major, minor, dev_type));
+    assert!(!device::device_allowed(
+        &target, access, major, minor, dev_type
+    ));
 
     // Close link #2 and confirm the policy is gone.
     drop(link_two);
     assert!(device::attached_program_ids(&target).is_empty());
-    assert!(device::device_allowed(&target, access, major, minor, dev_type));
+    assert!(device::device_allowed(
+        &target, access, major, minor, dev_type
+    ));
 
     // A link on a multi-attached cgroup appends; the recorded mode reports
     // ALLOW_MULTI to a non-effective query.
@@ -304,7 +325,10 @@ fn link_identity_and_program_lifetime() {
     device::attach(&target, &program, device::ATTACH_ALLOW_MULTI).unwrap();
     let link_three = device::link_file(&target, &program, kcred::initial_cred()).unwrap();
     assert_eq!(device::attached_program_ids(&target).len(), 2);
-    assert_eq!(device::attachment_flags(&target), device::ATTACH_ALLOW_MULTI);
+    assert_eq!(
+        device::attachment_flags(&target),
+        device::ATTACH_ALLOW_MULTI
+    );
     drop(link_three);
     device::detach(&target, program.id()).unwrap();
     assert!(device::attached_program_ids(&target).is_empty());

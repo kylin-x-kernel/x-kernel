@@ -61,7 +61,8 @@ pub fn bind_queue(
 
 /// Binds execution and named per-CPU diagnostics before exposing a queue.
 /// Has the same context, notification and provider lifetime contract as bind_queue.
-/// Copies the name during preparation; the directory retains weak records, not Queue.
+/// Copies a UTF-8 name prefix of at most 31 bytes inline during preparation;
+/// the directory retains weak records, not Queue. Names need not be unique.
 ///
 /// # Panics
 /// Propagates provider closure panics and fatal kernel allocation failures.

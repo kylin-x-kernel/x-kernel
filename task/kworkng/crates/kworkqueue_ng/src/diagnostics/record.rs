@@ -4,8 +4,7 @@
 
 //! Queue-independent identity and best-effort backlog observation.
 
-use alloc::boxed::Box;
-
+use arrayvec::ArrayString;
 use kcpu_id_map::LogicalCpuId;
 use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
@@ -13,7 +12,7 @@ use ktime_types::{MonotonicInstant, TimeSpan};
 /// Partition owns the record; a monitor may temporarily retain it, never Queue/Work.
 /// It contains only diagnostic data, so its final Drop needs no callback or drain.
 pub(crate) struct StallRecord {
-    pub(super) name: Box<str>,
+    pub(super) name: ArrayString<31>,
     pub(super) cpu: LogicalCpuId,
     state: SpinNoIrq<StallState>,
 }
@@ -24,9 +23,15 @@ struct StallState {
 }
 
 impl StallRecord {
-    pub(super) fn new(name: Box<str>, cpu: LogicalCpuId) -> Self {
+    pub(super) fn new(name: &str, cpu: LogicalCpuId) -> Self {
+        let mut label = ArrayString::new();
+        for character in name.chars() {
+            if label.try_push(character).is_err() {
+                break;
+            }
+        }
         Self {
-            name,
+            name: label,
             cpu,
             state: SpinNoIrq::new(StallState {
                 interval_start: None,

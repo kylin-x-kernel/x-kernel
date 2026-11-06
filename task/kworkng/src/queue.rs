@@ -20,6 +20,9 @@ use crate::{QueueConfig, services};
 /// allowed boot CPUs and per-CPU release allowance; it does not configure workers.
 /// Preparation may allocate, but later prepared submissions do not. The name is
 /// diagnostic identity, not a unique routing key; it need not outlive this call.
+/// With stall diagnostics enabled, each record keeps a UTF-8 prefix of at most
+/// 31 bytes inline. Longer names are truncated and can produce identical labels.
+/// Copying the name does not allocate; record and queue allocation is unchanged.
 ///
 /// The returned Arc grants queue-wide flush and close_and_drain authority. Neither
 /// operation stops shared workers or other queues. Before shutdown, stop/join

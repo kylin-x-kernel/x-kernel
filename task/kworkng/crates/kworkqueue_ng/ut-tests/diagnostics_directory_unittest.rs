@@ -16,7 +16,9 @@ fn now() -> MonotonicInstant {
 #[def_test]
 fn owner_release_during_inspection_needs_no_gc() {
     let directory = Directory::new();
-    let mut owner = Some(directory.register("queue".into(), 0.into()));
+    let source = alloc::string::String::from("1234567890123456789012345678901-extra");
+    let mut owner = Some(directory.register(&source, 0.into()));
+    drop(source);
     let weak = Arc::downgrade(owner.as_ref().unwrap());
     owner
         .as_ref()
@@ -30,7 +32,7 @@ fn owner_release_during_inspection_needs_no_gc() {
         |name, cpu, elapsed| {
             drop(owner.take());
             assert!(weak.upgrade().is_some());
-            assert_eq!(name, "queue");
+            assert_eq!(name, "1234567890123456789012345678901");
             assert_eq!(cpu, 0.into());
             assert_eq!(elapsed, TimeSpan::from_secs(20));
             reports += 1;
@@ -53,7 +55,7 @@ fn owner_release_during_inspection_needs_no_gc() {
 #[def_test]
 fn busy_directory_skips_without_waiting() {
     let directory = Directory::new();
-    let record = directory.register("queue".into(), 0.into());
+    let record = directory.register("queue", 0.into());
     record.publish_interval(Some(MonotonicInstant::ORIGIN));
     let guard = directory.records.lock();
     assert!(!directory.inspect(
@@ -78,9 +80,9 @@ fn busy_directory_skips_without_waiting() {
 #[def_test]
 fn zero_threshold_prunes_without_consuming_warning() {
     let directory = Directory::new();
-    let live = directory.register("live".into(), 0.into());
+    let live = directory.register("live", 0.into());
     live.publish_interval(Some(MonotonicInstant::ORIGIN));
-    let expired = directory.register("expired".into(), 0.into());
+    let expired = directory.register("expired", 0.into());
     drop(expired);
     assert_eq!(directory.records.lock().len(), 2);
 
@@ -112,8 +114,8 @@ fn zero_threshold_prunes_without_consuming_warning() {
 #[def_test]
 fn cpu_filter_and_repeat_limit() {
     let directory = Directory::new();
-    let a = directory.register("a".into(), 0.into());
-    let b = directory.register("b".into(), 1.into());
+    let a = directory.register("a", 0.into());
+    let b = directory.register("b", 1.into());
     a.publish_interval(Some(MonotonicInstant::ORIGIN));
     b.publish_interval(Some(MonotonicInstant::ORIGIN));
     assert!(directory.inspect(
@@ -143,7 +145,7 @@ fn cpu_filter_and_repeat_limit() {
 fn creation_prunes_dead_weak_entries() {
     let directory = Directory::new();
     for _ in 0..64 {
-        let record = directory.register("queue".into(), 0.into());
+        let record = directory.register("queue", 0.into());
         assert_eq!(directory.records.lock().len(), 1);
         let weak = Arc::downgrade(&record);
         drop(record);

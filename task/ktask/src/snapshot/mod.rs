@@ -137,6 +137,7 @@ fn collect_local() {
     COLLECTED.fetch_or(bit, Ordering::Release);
 }
 
+#[cfg(feature = "ipi")]
 fn wait_mask(timeout: ktime_types::TimeSpan) -> usize {
     let expect = present_mask();
     let start = khal::time::monotonic_time();

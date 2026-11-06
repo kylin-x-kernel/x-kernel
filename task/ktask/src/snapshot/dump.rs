@@ -12,11 +12,13 @@
 //! the compact symbol table or fully symbolicated with DWARF. Host-side
 //! symbolication consumes the raw address lines (`xkmake symbolize`).
 
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 use core::fmt;
 
 use kcpu_id_map::LogicalCpuId;
 use khal::context::TrapFrame;
 
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 #[inline(always)]
 pub(crate) fn dump_println(force: bool, args: fmt::Arguments<'_>) {
     if force {

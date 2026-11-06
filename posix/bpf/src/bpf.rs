@@ -415,7 +415,7 @@ fn bpf_prog_load(attr_ptr: usize, size: u32) -> KResult<isize> {
         // The device controller's programs run inside the kernel on every
         // device access; their instructions are interpreted, so map-value
         // binding (load-time only) does not apply.
-        let arc_insns: Arc<[u8]> = insns.into_boxed_slice().into();
+        let arc_insns: Arc<[u8]> = Arc::from(insns);
         let fd = kprocess::current_files().add_file(
             BpfProgram::new_file(arc_insns, prefix.prog_type, Arc::from(Vec::new()), cred)?,
             true,
@@ -425,7 +425,7 @@ fn bpf_prog_load(attr_ptr: usize, size: u32) -> KResult<isize> {
 
     let map_values = bind_program_map_values(&insns)?;
 
-    let arc_insns: Arc<[u8]> = insns.into_boxed_slice().into();
+    let arc_insns: Arc<[u8]> = Arc::from(insns);
     let fd = kprocess::current_files().add_file(
         BpfProgram::new_file(arc_insns, prefix.prog_type, map_values, cred)?,
         true,
@@ -578,7 +578,7 @@ fn bind_program_map_values(insns: &[u8]) -> KResult<Arc<[BpfProgramMapValue]>> {
         values.push(BpfProgramMapValue::new(map_id, map.snapshot_values()));
     }
 
-    Ok(values.into_boxed_slice().into())
+    Ok(Arc::from(values))
 }
 
 #[cfg(feature = "cgroup2")]

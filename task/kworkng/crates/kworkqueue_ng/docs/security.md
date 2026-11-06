@@ -70,11 +70,17 @@ Diagnostic assets exist only with stall-check. Each partition owns an optional
 Arc<StallRecord>; the registry holds Weak references and the monitor temporarily
 upgrades one at a time. Record identity is copied kernel data. It has no Queue,
 Work, business capture or callback reference and no handwritten unsafe operation.
+Names occupy inline ArrayString storage with a 31-byte limit. Copying stops
+before a character that would exceed capacity, preserving UTF-8 without unsafe
+conversion or a separate allocation. Truncation can make labels ambiguous but
+cannot alias queue ownership, routing or lifecycle authority. This is not a
+claim that record Arc allocation or directory Vec growth is recoverable on OOM.
 
 Threat: monitoring races queue destruction and dereferences freed memory.
 Mitigation: ordinary Arc/Weak ownership retains only diagnostic storage during
 inspection. No unregister wait or raw node lifetime protocol is required. The
-record/name can be freed by the final owner, including the task-context monitor;
+last strong owner, including the task-context monitor, drops the record value.
+Weak owners retain its allocation and inline name storage until pruning;
 dead weak allocations are removed on registration or inspection. If monitoring
 and registration both stop, weak slots may remain until directory destruction.
 

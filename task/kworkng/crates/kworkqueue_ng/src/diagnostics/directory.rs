@@ -5,7 +5,6 @@
 //! Weak diagnostic discovery; no queue retention or deferred GC protocol.
 
 use alloc::{
-    boxed::Box,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -32,7 +31,9 @@ impl Directory {
 
     /// Prepare before queue exposure in sleepable task context. Dead weak slots
     /// are removed here as well as during inspection, bounding creation-only churn.
-    pub(crate) fn register(&self, name: Box<str>, cpu: LogicalCpuId) -> Arc<StallRecord> {
+    /// The name is copied inline, keeping a UTF-8 prefix of at most 31 bytes.
+    /// Arc creation and registry growth retain their existing allocation policy.
+    pub(crate) fn register(&self, name: &str, cpu: LogicalCpuId) -> Arc<StallRecord> {
         let record = Arc::new(StallRecord::new(name, cpu));
         let mut records = self.records.lock();
         records.retain(|entry| entry.strong_count() != 0);

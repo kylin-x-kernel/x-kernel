@@ -310,8 +310,13 @@ impl BpfMap {
     }
 
     /// Captures the current flat map value storage for a loaded program.
+    ///
+    /// Clones the bytes under the value lock, then allocates the shared owner
+    /// after releasing it. Both allocations retain the global OOM policy;
+    /// callers must provide an allocation-safe task context.
     pub fn snapshot_values(&self) -> Arc<[u8]> {
-        self.values.lock().clone().into_boxed_slice().into()
+        let values = { self.values.lock().clone() };
+        Arc::from(values)
     }
 
     /// Marks this map immutable to user updates.

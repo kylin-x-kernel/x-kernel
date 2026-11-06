@@ -16,10 +16,11 @@ description = "Prepared work lifecycle and per-CPU queue management"
 ignored = ["kirq"]
 
 [features]
-stall-check = []
+stall-check = ["dep:arrayvec"]
 self-wait-check = []
 
 [dependencies]
+arrayvec = { workspace = true, optional = true }
 kalloc-types.workspace = true
 kcpu_id_map.workspace = true
 kerrno.workspace = true
