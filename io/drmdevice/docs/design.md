@@ -10,27 +10,37 @@ they differ only in the per-open file state and in the ioctl permission bits.
 ## Layering
 
 ```text
-model/            the object model: no VFS, no display driver
-├── device.rs     DrmDevice + DrmMinor (the only DeviceFileOps adapter)
+model/            the card object: no VFS, no display driver
+├── device/       DrmDevice: struct + card-core methods
+│   ├── device.rs struct, construction, device-wide accessors
+│   ├── commit.rs committed KMS state: commit / validate / flush / present
+│   ├── events.rs event-queue front: flip events, read, poll
+│   └── minor.rs  DrmMinor (the only DeviceFileOps adapter)
 ├── file.rs       DrmFile: per-open caps, handles, fb list, auth
-├── ioctl.rs      IOCTLS table + permission check + argument marshalling
+├── scanout.rs    ScanoutSlot: what the host is scanning
 ├── backend.rs    trait Backend — the only hardware boundary
 ├── ids.rs        Id<T> / IdRegistry<T, Tag>
 ├── event.rs      bounded vblank queue + poll
-├── error.rs      DrmError -> errno
-└── protocol.rs   VERSION / SET_VERSION / GET_UNIQUE / GET_CAP / SET_CLIENT_CAP
+└── error.rs      DrmError -> errno
 
-gem.rs            GemObject: backing pages, scanout resource, destructor
-framebuffer.rs    Framebuffer objects and the fb ioctls
-scanout.rs        ScanoutSlot: what the host is scanning
-kms.rs            KmsState, the property table and every KMS ioctl
-blob.rs           property blobs
-auth.rs           master ownership and magic tokens
+ioctl.rs          IOCTLS table + permission check + argument marshalling
+protocol.rs       VERSION / SET_VERSION / GET_UNIQUE / GET_CAP / SET_CLIENT_CAP
+gem.rs            GemObject: backing pages, scanout resource, destructor, and
+                  the dumb-buffer / GEM_CLOSE / PRIME ioctls
+framebuffer.rs    Framebuffer registry and the fb ioctls
+kms/              the committed KMS state and every KMS ioctl
+├── state.rs        KmsState, property application, mode-blob codec
+├── props.rs        PROPS + the property ioctls
+├── modeset.rs      queries / SETCRTC / PAGE_FLIP / ATOMIC
+├── cursor.rs       CURSOR / CURSOR2
+└── vblank.rs       WAIT_VBLANK
+blob.rs           property blobs: registry, legacy-mode slot, blob ioctls
+auth.rs           master ownership, magic tokens and the auth ioctls
 abi/              the Linux UAPI: structures, numbers, constants
 ```
 
 `model` depends on `abi` and on the `Backend` trait, never on `kvfs`, `devfs`
-or `kclass` internals. `device.rs` is the single adapter that converts
+or `kclass` internals. `device/minor.rs` is the single adapter that converts
 `DrmError` to `VfsError` and implements `DeviceFileOps`; a subsystem handler
 cannot touch a VFS type. Its external caller is devfs: `dynamic.rs` publishes
 `DrmDevice::minor(Primary)` on `/dev/dri/cardN` and
@@ -39,10 +49,13 @@ cannot touch a VFS type. Its external caller is devfs: `dynamic.rs` publishes
 
 ## The four single sources of truth
 
-1. **`model/ioctl.rs::IOCTLS`** — every command once: number, name, permission
-   bits and handler. Dispatch is a lookup, not a 37-arm match, and a command
-   without `RENDER_ALLOW` is unreachable from a render node by default.
-2. **`kms.rs::PROPS`** — every property once: id, wire metadata, reader and
+1. **`ioctl.rs::IOCTLS`** — every command once: number, name, permission
+   bits and handler. The name itself is declared on the wire struct's `Ioctl`
+   impl, next to its handler, with the full `DRM_IOCTL_*` name in its doc; the
+   table lists commands in number order. Dispatch is a lookup, not a 37-arm
+   match, and a command without `RENDER_ALLOW` is unreachable from a render
+   node by default.
+2. **`kms/props.rs::PROPS`** — every property once: id, wire metadata, reader and
    optional writer. `OBJ_GETPROPERTIES`, `GETPROPERTY` and the write path all
    consume this table, so metadata cannot disagree with a writer and a property
    cannot be readable but unwritable.
@@ -190,7 +203,7 @@ workqueue is created by this crate.
 
 ## Error model
 
-Handlers and the object model return `DrmError`; `device.rs` maps it to the
+Handlers and the object model return `DrmError`; `device/minor.rs` maps it to the
 errno the syscall layer expects (`EINVAL`, `EOPNOTSUPP`, `ENODEV`, `EBUSY`,
 `EACCES`, `EPERM`, `ENOENT`, `ENOMEM`, `EIO`, `EFAULT`, `EAGAIN`). Unknown
 command numbers are `EOPNOTSUPP`.

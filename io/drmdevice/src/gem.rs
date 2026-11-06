@@ -126,7 +126,10 @@ impl Drop for GemObject {
 #[derive(Clone, Copy, bytemuck::AnyBitPattern, macros::UserRead, macros::UserWrite)]
 pub(crate) struct DrmPrimeFdToHandle(pub(crate) DrmPrimeHandle);
 
+/// `DRM_IOCTL_MODE_CREATE_DUMB`.
 impl Ioctl for DrmModeCreateDumb {
+    const NAME: &'static str = "MODE_CREATE_DUMB";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, c: &mut Self) -> DrmResult<usize> {
         // The backing store is always BGRA8888 (32bpp), but 24bpp requests must
         // still be accepted: libdrm-based clients on the non-atomic path ask for
@@ -146,7 +149,10 @@ impl Ioctl for DrmModeCreateDumb {
     }
 }
 
+/// `DRM_IOCTL_MODE_MAP_DUMB`.
 impl Ioctl for DrmModeMapDumb {
+    const NAME: &'static str = "MODE_MAP_DUMB";
+
     fn handle(_dev: &DrmDevice, file: &Arc<DrmFile>, m: &mut Self) -> DrmResult<usize> {
         // Only an offset this file may map is reported, which mirrors the
         // per-file handle table `mmap` checks again.
@@ -158,7 +164,10 @@ impl Ioctl for DrmModeMapDumb {
     }
 }
 
+/// `DRM_IOCTL_MODE_DESTROY_DUMB`.
 impl Ioctl for DrmModeDestroyDumb {
+    const NAME: &'static str = "MODE_DESTROY_DUMB";
+
     fn handle(_dev: &DrmDevice, file: &Arc<DrmFile>, d: &mut Self) -> DrmResult<usize> {
         // Legacy entry point: an unknown handle stays a silent success, because
         // callers free a dumb buffer without reading the result. The object is
@@ -168,7 +177,10 @@ impl Ioctl for DrmModeDestroyDumb {
     }
 }
 
+/// `DRM_IOCTL_GEM_CLOSE`.
 impl Ioctl for DrmGemClose {
+    const NAME: &'static str = "GEM_CLOSE";
+
     fn handle(_dev: &DrmDevice, file: &Arc<DrmFile>, args: &mut Self) -> DrmResult<usize> {
         // `drm_gem_close_ioctl()` rejects a non-zero `pad` and reports an
         // unknown handle as EINVAL (through `drm_gem_handle_delete()`).
@@ -181,7 +193,10 @@ impl Ioctl for DrmGemClose {
     }
 }
 
+/// `DRM_IOCTL_PRIME_HANDLE_TO_FD`.
 impl Ioctl for DrmPrimeHandle {
+    const NAME: &'static str = "PRIME_HANDLE_TO_FD";
+
     fn handle(_dev: &DrmDevice, file: &Arc<DrmFile>, prime: &mut Self) -> DrmResult<usize> {
         // Protocol stub, as documented in docs/render-node.md: without a dma-buf
         // implementation the "fd" is the handle and GET_CAP keeps
@@ -196,7 +211,10 @@ impl Ioctl for DrmPrimeHandle {
     }
 }
 
+/// `DRM_IOCTL_PRIME_FD_TO_HANDLE`.
 impl Ioctl for DrmPrimeFdToHandle {
+    const NAME: &'static str = "PRIME_FD_TO_HANDLE";
+
     fn handle(_dev: &DrmDevice, file: &Arc<DrmFile>, prime: &mut Self) -> DrmResult<usize> {
         let handle = DumbHandle::from_raw(prime.0.fd as u32);
         if file.handle(handle).is_none() {

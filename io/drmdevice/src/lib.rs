@@ -5,11 +5,11 @@
 //! DRM (Direct Rendering Manager) device subsystem.
 //!
 //! The crate is split along one boundary: [`model`] owns the card object, the
-//! object registries, the committed KMS state and the ioctl table, and knows
-//! nothing about VFS or a specific display driver; the subsystem modules
-//! (`gem`, `framebuffer`, `kms`, `blob`, `auth`, `scanout`) implement one part
-//! of the Linux DRM semantics each, named after the corresponding Linux source
-//! file; `abi` is the wire description and nothing else.
+//! object registries and the committed KMS state, and knows nothing about VFS
+//! or a specific display driver; the domain modules (`ioctl`, `protocol`,
+//! `gem`, `framebuffer`, `kms`, `blob`, `auth`) implement one part of the
+//! Linux DRM semantics each, named after the corresponding Linux source file;
+//! `abi` is the wire description and nothing else.
 //!
 //! A board integrates by handing a display device to [`DrmDevice::new`] and
 //! registering [`DrmDevice::minor`] for each minor it wants to expose. The
@@ -25,9 +25,10 @@ mod auth;
 mod blob;
 mod framebuffer;
 mod gem;
+mod ioctl;
 mod kms;
 mod model;
-mod scanout;
+mod protocol;
 
 pub use model::device::{DrmDevice, HotplugSink, MinorKind};
 
@@ -61,9 +62,10 @@ pub(crate) mod prelude {
     pub(crate) use crate::{
         abi::*,
         auth::*,
-        blob::{Blob, build_in_formats_blob},
+        blob::Blob,
         framebuffer::{DrmModeRmFb, Framebuffer},
         gem::{DrmPrimeFdToHandle, GemObject},
+        ioctl::{Ioctl, report_user_array},
         kms::*,
         model::{
             backend::{BackendCaps, BackendHandle, ClassBackend, Rect, ResourceId, ResourceSpec},
@@ -72,8 +74,7 @@ pub(crate) mod prelude {
             event::{EventQueue, EventReservation},
             file::{AuthState, DrmFile},
             ids::{BlobId, BlobTag, CrtcId, DumbHandle, FbId, FbTag, IdRegistry, PropertyId},
-            ioctl::{Ioctl, report_user_array},
+            scanout::ScanoutSlot,
         },
-        scanout::ScanoutSlot,
     };
 }

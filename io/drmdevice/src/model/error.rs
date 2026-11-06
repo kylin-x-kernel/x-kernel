@@ -5,7 +5,7 @@
 //! DRM error domain.
 //!
 //! Command handlers and the object model report [`DrmError`]; the `DeviceFileOps`
-//! adapter in `device.rs` maps it to the VFS error the syscall layer expects.
+//! adapter in `device/minor.rs` maps it to the VFS error the syscall layer expects.
 //! Keeping the two apart is what lets the ioctl matrix be unit-testable without
 //! a filesystem.
 

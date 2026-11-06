@@ -14,6 +14,12 @@
 //! * argument marshalling follows the direction the entry was built with —
 //!   `rw` for `_IOWR`, `ro` for `_IOR`, `wo` for `_IOW`.
 //!
+//! Tracing one command: a row names its wire struct and number, and the
+//! struct's `Ioctl` impl names the command again right above `handle`, with
+//! its full Linux name (`DRM_IOCTL_*`). Either direction greps to the other:
+//! from the table to the handler, or from an ABI name to the table. Rows are
+//! sorted by command number.
+//!
 //! Linux returns `ENOTTY` for a number that is not in its table; this driver
 //! reports the same class of failure (`EOPNOTSUPP`) so clients probe instead of
 //! assuming support.
@@ -26,6 +32,10 @@ use crate::prelude::*;
 /// request and mutates it. Argument transfer lives in the dispatcher below, so
 /// a handler cannot get the copy direction wrong.
 pub(crate) trait Ioctl: Sized {
+    /// Wire name of the command this request serves (`"MODE_SETCRTC"`), shown
+    /// in diagnostics and tests.
+    const NAME: &'static str;
+
     /// Handles one decoded request.
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, request: &mut Self) -> DrmResult<usize>;
 }
@@ -51,43 +61,37 @@ impl IoctlFlags {
 pub(crate) struct IoctlDesc {
     /// Wire command number.
     pub cmd: u32,
-    /// Command name, for diagnostics and tests.
+    /// Command name, for diagnostics and tests. Wire structs carry it as
+    /// [`Ioctl::NAME`]; the two commands without a request struct pass it in
+    /// [`desc_plain`].
     pub name: &'static str,
     /// Permission bits.
     pub flags: IoctlFlags,
     handler: fn(&DrmDevice, &Arc<DrmFile>, usize) -> DrmResult<usize>,
 }
 
-const fn desc_rw<T: Ioctl + UserRead + UserWrite>(
-    nr: u8,
-    name: &'static str,
-    flags: IoctlFlags,
-) -> IoctlDesc {
+const fn desc_rw<T: Ioctl + UserRead + UserWrite>(nr: u8, flags: IoctlFlags) -> IoctlDesc {
     IoctlDesc {
         cmd: iowr::<T>(DRM_TYPE, nr),
-        name,
+        name: T::NAME,
         flags,
         handler: rw::<T>,
     }
 }
 
-const fn desc_ro<T: Ioctl + Default + UserWrite>(
-    nr: u8,
-    name: &'static str,
-    flags: IoctlFlags,
-) -> IoctlDesc {
+const fn desc_ro<T: Ioctl + Default + UserWrite>(nr: u8, flags: IoctlFlags) -> IoctlDesc {
     IoctlDesc {
         cmd: ior::<T>(DRM_TYPE, nr),
-        name,
+        name: T::NAME,
         flags,
         handler: ro::<T>,
     }
 }
 
-const fn desc_wo<T: Ioctl + UserRead>(nr: u8, name: &'static str, flags: IoctlFlags) -> IoctlDesc {
+const fn desc_wo<T: Ioctl + UserRead>(nr: u8, flags: IoctlFlags) -> IoctlDesc {
     IoctlDesc {
         cmd: iow::<T>(DRM_TYPE, nr),
-        name,
+        name: T::NAME,
         flags,
         handler: wo::<T>,
     }
@@ -107,47 +111,47 @@ const fn desc_plain(
     }
 }
 
-/// The commands this driver implements.
+/// The commands this driver implements, in command-number order.
 pub(crate) static IOCTLS: &[IoctlDesc] = &[
-    desc_rw::<DrmVersion>(0x00, "VERSION", IoctlFlags::RENDER_ALLOW),
-    desc_rw::<DrmUnique>(0x01, "GET_UNIQUE", IoctlFlags::NONE),
-    desc_ro::<DrmAuth>(0x02, "GET_MAGIC", IoctlFlags::NONE),
-    desc_rw::<DrmWaitVblank>(0x3A, "WAIT_VBLANK", IoctlFlags::NONE),
-    desc_rw::<DrmSetVersion>(0x07, "SET_VERSION", IoctlFlags::NONE),
-    desc_wo::<DrmGemClose>(0x09, "GEM_CLOSE", IoctlFlags::RENDER_ALLOW),
-    desc_rw::<DrmGetCap>(0x0C, "GET_CAP", IoctlFlags::RENDER_ALLOW),
-    desc_wo::<DrmSetClientCap>(0x0D, "SET_CLIENT_CAP", IoctlFlags::NONE),
-    desc_wo::<DrmAuthMagic>(0x11, "AUTH_MAGIC", IoctlFlags::MASTER),
+    desc_rw::<DrmVersion>(0x00, IoctlFlags::RENDER_ALLOW),
+    desc_rw::<DrmUnique>(0x01, IoctlFlags::NONE),
+    desc_ro::<DrmAuth>(0x02, IoctlFlags::NONE),
+    desc_rw::<DrmSetVersion>(0x07, IoctlFlags::NONE),
+    desc_wo::<DrmGemClose>(0x09, IoctlFlags::RENDER_ALLOW),
+    desc_rw::<DrmGetCap>(0x0C, IoctlFlags::RENDER_ALLOW),
+    desc_wo::<DrmSetClientCap>(0x0D, IoctlFlags::NONE),
+    desc_wo::<DrmAuthMagic>(0x11, IoctlFlags::MASTER),
     desc_plain(0x1E, "SET_MASTER", IoctlFlags::NONE, set_master_entry),
     desc_plain(0x1F, "DROP_MASTER", IoctlFlags::NONE, drop_master_entry),
-    desc_rw::<DrmPrimeHandle>(0x2D, "PRIME_HANDLE_TO_FD", IoctlFlags::RENDER_ALLOW),
-    desc_rw::<DrmPrimeFdToHandle>(0x2E, "PRIME_FD_TO_HANDLE", IoctlFlags::RENDER_ALLOW),
-    desc_rw::<DrmModeCardRes>(0xA0, "MODE_GETRESOURCES", IoctlFlags::NONE),
-    desc_rw::<DrmModeCrtc>(0xA1, "MODE_GETCRTC", IoctlFlags::NONE),
-    desc_rw::<DrmModeSetCrtc>(0xA2, "MODE_SETCRTC", IoctlFlags::MASTER),
-    desc_rw::<DrmModeCursor>(0xA3, "MODE_CURSOR", IoctlFlags::MASTER),
-    desc_rw::<DrmModeGetEncoder>(0xA6, "MODE_GETENCODER", IoctlFlags::NONE),
-    desc_rw::<DrmModeGetConnector>(0xA7, "MODE_GETCONNECTOR", IoctlFlags::NONE),
-    desc_rw::<DrmModeGetProperty>(0xAA, "MODE_GETPROPERTY", IoctlFlags::NONE),
-    desc_rw::<DrmModeConnectorSetProperty>(0xAB, "MODE_CONNECTOR_SETPROPERTY", IoctlFlags::MASTER),
-    desc_rw::<DrmModeGetBlob>(0xAC, "MODE_GETBLOB", IoctlFlags::NONE),
-    desc_rw::<DrmModeFbCmd>(0xAE, "MODE_GETFB", IoctlFlags::NONE),
-    desc_rw::<DrmModeRmFb>(0xAF, "MODE_RMFB", IoctlFlags::NONE),
-    desc_rw::<DrmModeCrtcPageFlip>(0xB0, "MODE_PAGE_FLIP", IoctlFlags::MASTER),
-    desc_rw::<DrmModeDirtyFb>(0xB1, "MODE_DIRTYFB", IoctlFlags::MASTER),
-    desc_rw::<DrmModeCreateDumb>(0xB2, "MODE_CREATE_DUMB", IoctlFlags::NONE),
-    desc_rw::<DrmModeMapDumb>(0xB3, "MODE_MAP_DUMB", IoctlFlags::NONE),
-    desc_rw::<DrmModeDestroyDumb>(0xB4, "MODE_DESTROY_DUMB", IoctlFlags::NONE),
-    desc_rw::<DrmModeGetPlaneRes>(0xB5, "MODE_GETPLANERES", IoctlFlags::NONE),
-    desc_rw::<DrmModeGetPlane>(0xB6, "MODE_GETPLANE", IoctlFlags::NONE),
-    desc_rw::<DrmModeFbCmd2>(0xB8, "MODE_GETFB2", IoctlFlags::NONE),
-    desc_rw::<DrmModeObjGetProperties>(0xB9, "MODE_OBJ_GETPROPERTIES", IoctlFlags::NONE),
-    desc_rw::<DrmModeObjSetProperty>(0xBA, "MODE_OBJ_SETPROPERTY", IoctlFlags::MASTER),
-    desc_rw::<DrmModeCursor2>(0xBB, "MODE_CURSOR2", IoctlFlags::MASTER),
-    desc_rw::<DrmModeAtomic>(0xBC, "MODE_ATOMIC", IoctlFlags::MASTER),
-    desc_rw::<DrmModeCreateBlob>(0xBD, "MODE_CREATE_BLOB", IoctlFlags::NONE),
-    desc_rw::<DrmModeDestroyBlob>(0xBE, "MODE_DESTROY_BLOB", IoctlFlags::NONE),
-    desc_rw::<DrmModeCloseFb>(0xD0, "MODE_CLOSEFB", IoctlFlags::NONE),
+    desc_rw::<DrmPrimeHandle>(0x2D, IoctlFlags::RENDER_ALLOW),
+    desc_rw::<DrmPrimeFdToHandle>(0x2E, IoctlFlags::RENDER_ALLOW),
+    desc_rw::<DrmWaitVblank>(0x3A, IoctlFlags::NONE),
+    desc_rw::<DrmModeCardRes>(0xA0, IoctlFlags::NONE),
+    desc_rw::<DrmModeCrtc>(0xA1, IoctlFlags::NONE),
+    desc_rw::<DrmModeSetCrtc>(0xA2, IoctlFlags::MASTER),
+    desc_rw::<DrmModeCursor>(0xA3, IoctlFlags::MASTER),
+    desc_rw::<DrmModeGetEncoder>(0xA6, IoctlFlags::NONE),
+    desc_rw::<DrmModeGetConnector>(0xA7, IoctlFlags::NONE),
+    desc_rw::<DrmModeGetProperty>(0xAA, IoctlFlags::NONE),
+    desc_rw::<DrmModeConnectorSetProperty>(0xAB, IoctlFlags::MASTER),
+    desc_rw::<DrmModeGetBlob>(0xAC, IoctlFlags::NONE),
+    desc_rw::<DrmModeFbCmd>(0xAE, IoctlFlags::NONE),
+    desc_rw::<DrmModeRmFb>(0xAF, IoctlFlags::NONE),
+    desc_rw::<DrmModeCrtcPageFlip>(0xB0, IoctlFlags::MASTER),
+    desc_rw::<DrmModeDirtyFb>(0xB1, IoctlFlags::MASTER),
+    desc_rw::<DrmModeCreateDumb>(0xB2, IoctlFlags::NONE),
+    desc_rw::<DrmModeMapDumb>(0xB3, IoctlFlags::NONE),
+    desc_rw::<DrmModeDestroyDumb>(0xB4, IoctlFlags::NONE),
+    desc_rw::<DrmModeGetPlaneRes>(0xB5, IoctlFlags::NONE),
+    desc_rw::<DrmModeGetPlane>(0xB6, IoctlFlags::NONE),
+    desc_rw::<DrmModeFbCmd2>(0xB8, IoctlFlags::NONE),
+    desc_rw::<DrmModeObjGetProperties>(0xB9, IoctlFlags::NONE),
+    desc_rw::<DrmModeObjSetProperty>(0xBA, IoctlFlags::MASTER),
+    desc_rw::<DrmModeCursor2>(0xBB, IoctlFlags::MASTER),
+    desc_rw::<DrmModeAtomic>(0xBC, IoctlFlags::MASTER),
+    desc_rw::<DrmModeCreateBlob>(0xBD, IoctlFlags::NONE),
+    desc_rw::<DrmModeDestroyBlob>(0xBE, IoctlFlags::NONE),
+    desc_rw::<DrmModeCloseFb>(0xD0, IoctlFlags::NONE),
 ];
 
 /// Finds one command by number.
@@ -229,11 +233,13 @@ fn wo<T: Ioctl + UserRead>(dev: &DrmDevice, file: &Arc<DrmFile>, arg: usize) -> 
 }
 
 fn set_master_entry(dev: &DrmDevice, file: &Arc<DrmFile>, _arg: usize) -> DrmResult<usize> {
-    crate::model::device::set_master(dev, file)
+    dev.set_master(file)?;
+    Ok(0)
 }
 
 fn drop_master_entry(dev: &DrmDevice, file: &Arc<DrmFile>, _arg: usize) -> DrmResult<usize> {
-    crate::model::device::drop_master(dev, file)
+    dev.drop_master(file)?;
+    Ok(0)
 }
 
 /// Copies an id array, reporting the required length.

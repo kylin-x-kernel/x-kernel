@@ -9,8 +9,8 @@ use unittest::{assert, assert_eq, def_test};
 
 use crate::{
     MinorKind,
+    ioctl::{IOCTLS, Ioctl, IoctlFlags, check_permission, report_user_array},
     kms::{ObjectType, PROPS, PropKind, apply, atomic_flags_valid, mode_blob_bytes, mode_from_bytes},
-    model::ioctl::{IOCTLS, Ioctl, IoctlFlags, check_permission, report_user_array},
     prelude::*,
 };
 
@@ -126,7 +126,7 @@ fn the_render_allowlist_is_the_linux_one() {
 
 #[def_test]
 fn capabilities_only_claim_what_is_implemented() {
-    use crate::model::{backend::BackendCaps, protocol::capability};
+    use crate::{model::backend::BackendCaps, protocol::capability};
 
     const DRM_CAP_PRIME: u64 = 0x5;
     let caps = BackendCaps { dumb: true };

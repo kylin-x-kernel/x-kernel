@@ -26,7 +26,10 @@ fn copy_version_field(user_ptr: UserPtr<u8>, capacity: usize, value: &str) -> Dr
     Ok(value.len())
 }
 
+/// `DRM_IOCTL_VERSION`.
 impl Ioctl for DrmVersion {
+    const NAME: &'static str = "VERSION";
+
     fn handle(_dev: &DrmDevice, _file: &Arc<DrmFile>, version: &mut Self) -> DrmResult<usize> {
         version.version_major = DRIVER_VERSION_MAJOR;
         version.version_minor = DRIVER_VERSION_MINOR;
@@ -38,7 +41,10 @@ impl Ioctl for DrmVersion {
     }
 }
 
+/// `DRM_IOCTL_SET_VERSION`.
 impl Ioctl for DrmSetVersion {
+    const NAME: &'static str = "SET_VERSION";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, set_version: &mut Self) -> DrmResult<usize> {
         let requested = *set_version;
         // Linux reports the supported versions even for lower-version requests
@@ -79,7 +85,10 @@ impl Ioctl for DrmSetVersion {
     }
 }
 
+/// `DRM_IOCTL_GET_UNIQUE`.
 impl Ioctl for DrmUnique {
+    const NAME: &'static str = "GET_UNIQUE";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, unique: &mut Self) -> DrmResult<usize> {
         let identity = {
             let _masters = dev.master.lock();
@@ -125,14 +134,20 @@ pub(crate) fn capability(capability: u64, caps: BackendCaps) -> u64 {
     }
 }
 
+/// `DRM_IOCTL_GET_CAP`.
 impl Ioctl for DrmGetCap {
+    const NAME: &'static str = "GET_CAP";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, cap: &mut Self) -> DrmResult<usize> {
         cap.value = capability(cap.capability, dev.caps());
         Ok(0)
     }
 }
 
+/// `DRM_IOCTL_SET_CLIENT_CAP`.
 impl Ioctl for DrmSetClientCap {
+    const NAME: &'static str = "SET_CLIENT_CAP";
+
     fn handle(_dev: &DrmDevice, file: &Arc<DrmFile>, cap: &mut Self) -> DrmResult<usize> {
         // Mirror Linux `drm_setclientcap()`: an unknown capability is
         // EOPNOTSUPP, an out-of-range boolean is EINVAL, and the granted value
