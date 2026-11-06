@@ -25,6 +25,8 @@ pub(crate) struct ReadDevice {
     pub(crate) destinations: Mutex<Vec<(u64, usize, usize)>>,
     pub(crate) fail_reads: Mutex<bool>,
     pub(crate) read_failure_block: Mutex<Option<u64>>,
+    pub(crate) pending_reads: Mutex<Option<Vec<block::Bio>>>,
+    pub(crate) queued: ktask::WaitQueue,
 }
 
 impl ReadDevice {
@@ -35,6 +37,8 @@ impl ReadDevice {
             destinations: Mutex::new(Vec::new()),
             fail_reads: Mutex::new(false),
             read_failure_block: Mutex::new(None),
+            pending_reads: Mutex::new(None),
+            queued: ktask::WaitQueue::new(),
         })
     }
 }
@@ -173,15 +177,28 @@ pub(crate) fn read_fixture(
     read_fixture_with_blocks(block_size, device_block_size, 32)
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "CG-021-no-panic-on-reachable-failure: test scenario: malformed synthetic metadata \
-              must abort fixture setup, not mask a read-contract regression"
-)]
 pub(crate) fn read_fixture_with_blocks(
     block_size: usize,
     device_block_size: usize,
     block_count: usize,
+) -> (Ext4SbInfo, Ext4Inode, Arc<ReadDevice>, Vec<u8>) {
+    read_fixture_with_extents(
+        block_size,
+        device_block_size,
+        block_count,
+        &[(0, 3, 20), (4, 0x8002, 23), (6, 1, 25)],
+    )
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: synthetic extent layout must load successfully"
+)]
+pub(crate) fn read_fixture_with_extents(
+    block_size: usize,
+    device_block_size: usize,
+    block_count: usize,
+    extents: &[(u32, u16, u32)],
 ) -> (Ext4SbInfo, Ext4Inode, Arc<ReadDevice>, Vec<u8>) {
     // One group, 32 inodes, three inline extents. Keep the small image
     // read-only: allocation, root-directory and journal fixtures are unrelated.
@@ -218,9 +235,9 @@ pub(crate) fn read_fixture_with_blocks(
     put_u32(inode, 0x1c, (6 * block_size / 512) as u32);
     put_u32(inode, 0x20, crate::disk::inode::EXT4_EXTENTS_FL);
     put_u16(inode, 0x28, 0xf30a);
-    put_u16(inode, 0x2a, 3);
+    put_u16(inode, 0x2a, extents.len() as u16);
     put_u16(inode, 0x2c, 4);
-    for (slot, logical, len, physical) in [(0, 0, 3, 20), (1, 4, 0x8002, 23), (2, 6, 1, 25)] {
+    for (slot, &(logical, len, physical)) in extents.iter().enumerate() {
         let entry = 0x34 + slot * 12;
         put_u32(inode, entry, logical);
         put_u16(inode, entry + 4, len);
@@ -234,6 +251,17 @@ pub(crate) fn read_fixture_with_blocks(
     image[20 * block_size..23 * block_size].copy_from_slice(&expected[..3 * block_size]);
     image[23 * block_size..25 * block_size].fill(0xee); // Unwritten data must not escape.
     image[25 * block_size..26 * block_size].fill(0x7a); // Real partial EOF block.
+
+    expected.fill(0);
+    for &(logical, len, physical) in extents {
+        if len > 0x8000 {
+            continue;
+        }
+        let start = logical as usize * block_size;
+        let end = (start + len as usize * block_size).min(file_len);
+        let physical_start = physical as usize * block_size;
+        expected[start..end].copy_from_slice(&image[physical_start..physical_start + end - start]);
+    }
 
     let device = ReadDevice::new(crate::io::test_block_device(Arc::new(ReadStorage {
         bytes: Mutex::new(image),
@@ -390,7 +418,22 @@ fn aligned_file_read_reports_io_failure_and_retry_reinitializes_output() {
 }
 
 impl block::BioOperations for ReadDevice {
-    fn submit_bio(&self, mut bio: block::Bio) {
+    fn submit_bio(&self, bio: block::Bio) {
+        if bio.operation() == block::BioOperation::Read {
+            let mut guard = self.pending_reads.lock();
+            if let Some(pending) = guard.as_mut() {
+                pending.push(bio);
+                drop(guard);
+                self.queued.notify_all(true);
+                return;
+            }
+        }
+        self.complete_bio(bio);
+    }
+}
+
+impl ReadDevice {
+    pub(crate) fn complete_bio(&self, mut bio: block::Bio) {
         let block_id = bio.sector() / (self.block_size() as u64 / 512);
         let result = match bio.operation() {
             block::BioOperation::Read => {

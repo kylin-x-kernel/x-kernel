@@ -69,6 +69,9 @@ contract. Its private borrowed variants erase a slice lifetime only inside
 builds before publication, wait non-interruptibly, and dispose of vectors before
 returning. Preparation failures occur before device access. Shared write sources
 never produce mutable slices; read submission rejects shared-only storage.
+`into_memory` consumes an owned extent and checks its `Any` type before returning
+the original owner. Borrowed vectors and mismatched types remain unchanged;
+live vector views prevent this transfer through ordinary Rust borrowing.
 
 `BioWait` is neither Send nor Sync. Its shared result state outlives an abandoned
 waiting handle until bio completion returns the memory. Host context validation

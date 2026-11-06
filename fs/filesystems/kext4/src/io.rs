@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{sync::Arc, vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 
 #[cfg(unittest)]
 use block::BlockDeviceOperations;
@@ -96,6 +96,45 @@ impl FilesystemDevice {
 
     pub(crate) const fn block_size(&self) -> usize {
         self.filesystem_block_size
+    }
+
+    /// Submits complete filesystem blocks in their original memory owners.
+    /// The callback runs after device access ends and must not sleep. Before
+    /// submission, a geometry error drops the owners and returns the error.
+    pub(crate) fn submit_read(
+        &self,
+        start: FilesystemBlock,
+        vectors: Vec<block::BioVec>,
+        end_io: impl FnOnce(block::DriverResult, Vec<block::BioVec>) + Send + 'static,
+    ) -> Ext4Result<()> {
+        let len = vectors.iter().try_fold(0usize, |len, vector| {
+            len.checked_add(vector.bytes().len())
+                .ok_or(Ext4Error::Overflow)
+        })?;
+        if len == 0 || !len.is_multiple_of(self.filesystem_block_size) {
+            return Err(Ext4Error::InvalidBufferLength {
+                expected: self.filesystem_block_size,
+                actual: len,
+            });
+        }
+        let blocks = (len / self.filesystem_block_size) as u64;
+        if start.get().checked_add(blocks).ok_or(Ext4Error::Overflow)? > self.filesystem_blocks {
+            return Err(Ext4Error::OutOfBounds);
+        }
+        // Bio sectors are device-view relative 512-byte units. The block core
+        // applies a partition offset once, independently of filesystem geometry.
+        let sector = start
+            .get()
+            .checked_mul((self.filesystem_block_size / block::SECTOR_SIZE as usize) as u64)
+            .ok_or(Ext4Error::Overflow)?;
+        self.device.submit_bio(block::Bio::new(
+            self.device.clone(),
+            sector,
+            block::BioOperation::Read,
+            vectors,
+            end_io,
+        ));
+        Ok(())
     }
 
     pub(crate) fn read_blocks(

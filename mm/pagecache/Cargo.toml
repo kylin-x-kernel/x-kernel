@@ -15,6 +15,7 @@ ignored = ["kirq", "kidentity", "kalloc-types"]
 stats = ["dep:linkme", "ksync/stats"]
 
 [dependencies]
+block = { workspace = true }
 kcompletion.workspace = true
 kidentity.workspace = true
 kalloc-types.workspace = true

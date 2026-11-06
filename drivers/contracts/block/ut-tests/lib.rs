@@ -974,7 +974,16 @@ fn bio_wait_returns_memory_on_device_validation_and_preparation_errors() {
                 .iter()
                 .all(|byte| *byte == if failure == 0 { 0x5a } else { 0x37 })
         );
-        drop(vectors);
+        let vector = vectors.into_iter().next().unwrap();
+        let vector = vector
+            .into_memory::<Box<[u8]>>()
+            .expect_err("a mismatched owner type must return the original extent");
+        let memory = vector
+            .into_memory::<TrackedMemory>()
+            .unwrap_or_else(|_| panic!("completion must return the original typed owner"));
+        assert_eq!(memory.bytes().as_ptr() as usize, address);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        drop(memory);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 }

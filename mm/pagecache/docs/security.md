@@ -200,6 +200,17 @@ Both token forms release the same lock with Release ordering. `FolioRead` is
 not cloneable, retains the allocation, and lends bytes only through `&mut self`.
 Completion consumes it, so safe callers cannot complete twice or retain a byte
 borrow across unlock. DMA owners must retain the token until device access ends.
+Its `BioMemory` implementation exposes the same stable page for both byte views;
+consuming typed recovery from a Bio returns the original lock token. Completion
+must follow DMA retirement, including any device cache synchronization.
+Splitting consumes ownership and partitions the page into non-overlapping
+`FolioReadPart` ranges. Their byte views are constructed directly for those
+ranges, never through a whole-page mutable slice while other parts are in DMA.
+All parts retain the original lock and allocation through one shared completion.
+Arc's final Release/Acquire destruction orders each part's data writes and
+successful-byte accounting before whole-page publication and unlock. Failure
+or abandonment cannot credit bytes; even a synchronous first completion cannot
+unlock while unsubmitted parts remain owned.
 Failure/drop leaves uptodate false. Waiters set the atomic hint and recheck the
 predicate under their IRQ-safe bucket lock; wakeup matches both folio and bit.
 Pinned stack entries remain borrowed until a scoped registration unlinks them.

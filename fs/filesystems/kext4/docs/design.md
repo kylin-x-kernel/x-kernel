@@ -161,11 +161,40 @@ and read-only policy are checked by block core; no device geometry is cached.
 
 部分首尾块继续用 staging buffer；hole 和 unwritten extent 仍只填零，返回长度仍受 inode
 EOF 限制。`read_at` 返回错误时目标缓冲可能已被后端修改，不能把其前缀当作成功读取。
-KExt4's `read_folio` receives a `FolioRead`, reads the whole page synchronously,
-then calls `complete` to publish the result and unlock. Batched readahead calls
-`complete_folio` only after the entire backing read succeeds. A demand retry after
-failure must fully initialize the target page before buffered reads or file
-mappings can use it.
+KExt4's `read_folio` and readahead share `vfs/read.rs`: block mapping runs under
+the core read guard, then `FolioRead` owners move directly into bios. Physically
+contiguous pages are submitted together without waiting for data I/O. Completion
+recovers the original tokens, zeroes bytes beyond the sampled EOF, and publishes
+the whole-page result before unlocking; it takes no inode, mapping, or core lock.
+Holes and unwritten extents are zeroed directly. For 1/2 KiB filesystem blocks,
+fragmented pages and data following a hole split initialization into disjoint
+`FolioReadPart` owners at maximal physical-run boundaries. Adjacent mapped
+blocks share one part and one bio, while consecutive holes/unwritten blocks
+share a zeroed part. A logical hole or physical discontinuity ends a data run;
+physical adjacency across a hole cannot merge the destinations. Submission
+never waits for data I/O. The last part
+releases the page lock; only success for every part publishes uptodate. This
+temporary convergence state exists only for split reads, not in every folio.
+The ownership layers correspond to Linux `fs/ext4/readpage.c`'s
+`ext4_mpage_readpages`/`mpage_end_io` and `fs/buffer.c`'s
+`block_read_full_folio`/`end_buffer_async_read`: ext4 owns block mapping and bio
+submission; the generic cache owns disjoint initialization and whole-folio
+publication. Linux's fragmented fallback submits buffer heads individually;
+this path coalesces adjacent ranges before submission while preserving those
+completion responsibilities. Consuming tokens replace persistent buffer-head
+read flags and the final completion scan for these full-folio reads.
+Filesystem blocks larger than the 4 KiB cache page retain the synchronous
+partial-block reader. Metadata and symlink reads also remain synchronous.
+Failed pages remain non-uptodate until a demand retry fully initializes them.
+
+`ext4_truncate_drains_fragmented_readahead_before_freeing_blocks` uses writable
+1/2 KiB ext4 allocator/journal fixtures and the real VFS truncate entry. Demand
+returns after its own bio, with both fragmented readahead runs retained by the
+test device. After shrink publishes i_size and blocks on that folio, both extent
+mappings and free-block counts remain unchanged, including after a failed first
+part. Only final completion permits block release. Regrowth then verifies the
+retained 17-byte prefix and zeroed tail. The rendezvous observes task state and
+held bios; it has no clock threshold or fixed yield count.
 
 `file/read_tests.rs` 使用 1/2/4 KiB filesystem block 与 512 B/4 KiB device block 组合，覆盖
 对齐直读、非对齐切片回退、短缓冲、hole、unwritten 和非零 17 字节 EOF 尾块；mock 同样拒绝

@@ -26,9 +26,9 @@ pub struct ReadaheadControl<'a> {
     folios: &'a mut dyn ExactSizeIterator<Item = FolioRead>,
 }
 
-impl ReadaheadControl<'_> {
+impl<'a> ReadaheadControl<'a> {
     /// Returns the address space whose backing storage should be read.
-    pub fn mapping(&self) -> &AddressSpace {
+    pub fn mapping(&self) -> &'a AddressSpace {
         self.address_space
     }
 

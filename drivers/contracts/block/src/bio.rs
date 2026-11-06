@@ -5,7 +5,7 @@
 //! Owned I/O descriptions, independent of the submitting task's stack.
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{ops::Range, ptr::NonNull};
+use core::{any::Any, ops::Range, ptr::NonNull};
 
 use crate::{BlockDevice, DriverError, DriverResult, SECTOR_SIZE};
 
@@ -30,7 +30,7 @@ pub enum BioOperation {
 /// and length. Moving the owner must not move the bytes. No other party may
 /// access the storage incompatibly with these borrows, including during DMA.
 /// Destruction must be valid in the bio's completion context.
-pub unsafe trait BioMemory: Send {
+pub unsafe trait BioMemory: Any + Send {
     /// Returns the stable initialized storage.
     fn bytes(&self) -> &[u8];
     /// Returns exclusive access to that same storage.
@@ -121,6 +121,33 @@ impl BioVec {
             memory: Memory::Owned(Box::new(memory)),
             range,
         })
+    }
+
+    /// Recovers the original owner passed to [`Self::from_memory`].
+    ///
+    /// The owner, including bytes outside the selected range, is returned
+    /// without allocating or copying. This consumes the extent, so its byte
+    /// views cannot outlive the transfer back to the completion handler.
+    ///
+    /// # Errors
+    /// Returns this extent unchanged for a different owner type or an extent
+    /// constructed with [`Self::new`] or a synchronous borrowed buffer.
+    pub fn into_memory<M: BioMemory>(self) -> Result<M, Self> {
+        let Self { memory, range } = self;
+        match memory {
+            Memory::Owned(memory) if memory.as_ref().type_id() == core::any::TypeId::of::<M>() => {
+                let memory: Box<dyn Any + Send> = memory;
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: the same owned object's Any \
+                              TypeId was checked against M before the trait-object upcast; \
+                              downcast cannot fail and no callback can replace the owner"
+                )]
+                let memory = memory.downcast::<M>().expect("validated bio memory type");
+                Ok(*memory)
+            }
+            memory => Err(Self { memory, range }),
+        }
     }
 
     /// Adapts scatter memory for a backend requiring one contiguous read buffer.

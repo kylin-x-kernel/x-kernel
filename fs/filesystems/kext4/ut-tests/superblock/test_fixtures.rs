@@ -22,7 +22,23 @@ pub(crate) fn journal_allocator_test_filesystem(
     free_blocks: u32,
     block_bitmap_first_byte: u8,
 ) -> (Ext4SbInfo, Arc<TestDevice>) {
-    let mut image = vec![0; TEST_BLOCK_SIZE * TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT];
+    journal_allocator_test_filesystem_with_block_size(
+        TEST_BLOCK_SIZE,
+        free_blocks,
+        block_bitmap_first_byte,
+    )
+}
+
+pub(crate) fn journal_allocator_test_filesystem_with_block_size(
+    block_size: usize,
+    free_blocks: u32,
+    block_bitmap_first_byte: u8,
+) -> (Ext4SbInfo, Arc<TestDevice>) {
+    let first_data_block = usize::from(block_size == 1024);
+    let descriptor_block = first_data_block + 1;
+    let inode_table_block = descriptor_block + 3;
+    let metadata_end = inode_table_block + (32 * 256usize).div_ceil(block_size);
+    let mut image = vec![0; block_size * TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT];
     let mut superblock_bytes = allocator_superblock_with_geometry(
         TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT as u32,
         32,
@@ -39,32 +55,45 @@ pub(crate) fn journal_allocator_test_filesystem(
         0x24,
         TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT as u32,
     );
+    put_u32(&mut superblock_bytes, 0x14, first_data_block as u32);
+    let log_block_size = (block_size / 1024).trailing_zeros();
+    put_u32(&mut superblock_bytes, 0x18, log_block_size);
+    put_u32(&mut superblock_bytes, 0x1c, log_block_size);
     image[1024..1024 + superblock::SUPERBLOCK_SIZE].copy_from_slice(&superblock_bytes);
 
-    let descriptor = allocator_group_descriptor(free_blocks, TEST_FREE_INODES, 0, 0);
-    image[TEST_BLOCK_SIZE..TEST_BLOCK_SIZE + descriptor.len()].copy_from_slice(&descriptor);
+    let mut descriptor = allocator_group_descriptor(free_blocks, TEST_FREE_INODES, 0, 0);
+    put_u32(&mut descriptor, 0, (descriptor_block + 1) as u32);
+    put_u32(&mut descriptor, 4, (descriptor_block + 2) as u32);
+    put_u32(&mut descriptor, 8, inode_table_block as u32);
+    let descriptor_offset = descriptor_block * block_size;
+    image[descriptor_offset..descriptor_offset + descriptor.len()].copy_from_slice(&descriptor);
 
-    let block_bitmap = &mut image[2 * TEST_BLOCK_SIZE..3 * TEST_BLOCK_SIZE];
+    let bitmap_offset = (descriptor_block + 1) * block_size;
+    let block_bitmap = &mut image[bitmap_offset..bitmap_offset + block_size];
     block_bitmap.fill(0xff);
     block_bitmap[0] = block_bitmap_first_byte;
     let mut remaining = free_blocks.saturating_sub(block_bitmap_first_byte.count_zeros());
-    for block in 8..TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT {
-        if (16..1040).contains(&block) || remaining == 0 {
+    for relative in 8..TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT - first_data_block {
+        let block = first_data_block + relative;
+        if block < metadata_end || (16..1040).contains(&block) || remaining == 0 {
             continue;
         }
-        block_bitmap[block / 8] &= !(1 << (block % 8));
+        block_bitmap[relative / 8] &= !(1 << (relative % 8));
         remaining -= 1;
     }
     assert_eq!(remaining, 0);
 
-    write_allocator_bitmap(&mut image, 3 * TEST_BLOCK_SIZE, &[0xff, 0x03, 0, 0], true);
+    let inode_bitmap_offset = (descriptor_block + 2) * block_size;
+    let inode_bitmap = &mut image[inode_bitmap_offset..inode_bitmap_offset + block_size];
+    inode_bitmap.fill(0xff);
+    inode_bitmap[..4].copy_from_slice(&[0xff, 0x03, 0, 0]);
 
-    let block_device = Arc::new(TestDevice::new(image));
+    let block_device = Arc::new(TestDevice::with_block_size(image, block_size));
     let device: Arc<block::BlockDevice> = crate::io::test_block_device(block_device.clone());
     let filesystem_device = Arc::new(
         FilesystemDevice::open(
             device,
-            TEST_BLOCK_SIZE,
+            block_size,
             TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT as u64,
         )
         .unwrap(),
@@ -141,7 +170,7 @@ pub(crate) fn install_test_journal(
         .write_contiguous_blocks(block, 1, &bytes)
         .unwrap();
     let journal_superblock_bytes = journal_superblock.encoded();
-    let mut journal_block_bytes = vec![0; TEST_BLOCK_SIZE];
+    let mut journal_block_bytes = vec![0; filesystem.device.block_size()];
     journal_block_bytes[..journal_superblock_bytes.len()].copy_from_slice(journal_superblock_bytes);
     filesystem
         .write_contiguous_blocks(journal_block, 1, &journal_block_bytes)
@@ -260,6 +289,7 @@ pub(crate) fn put_be_u32(output: &mut [u8], offset: usize, value: u32) {
 
 pub(crate) struct TestDevice {
     pub(crate) bytes: Mutex<Vec<u8>>,
+    block_size: usize,
     pub(crate) flush_count: Mutex<usize>,
     pub(crate) fail_flush_at: Mutex<Option<usize>>,
     write_count: Mutex<usize>,
@@ -271,8 +301,13 @@ pub(crate) struct TestDevice {
 
 impl TestDevice {
     pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        Self::with_block_size(bytes, TEST_BLOCK_SIZE)
+    }
+
+    fn with_block_size(bytes: Vec<u8>, block_size: usize) -> Self {
         Self {
             bytes: Mutex::new(bytes),
+            block_size,
             flush_count: Mutex::new(0),
             fail_flush_at: Mutex::new(None),
             write_count: Mutex::new(0),
@@ -355,11 +390,11 @@ impl Device for TestDevice {
 
 impl BlockDeviceOperations for TestDevice {
     fn num_blocks(&self) -> u64 {
-        (lock(&self.bytes).len() / TEST_BLOCK_SIZE) as u64
+        (lock(&self.bytes).len() / self.block_size) as u64
     }
 
     fn block_size(&self) -> usize {
-        TEST_BLOCK_SIZE
+        self.block_size
     }
 }
 impl TestDevice {
@@ -367,7 +402,7 @@ impl TestDevice {
         self.wait_while_holds_io();
         let start = usize::try_from(block_id)
             .ok()
-            .and_then(|block| block.checked_mul(TEST_BLOCK_SIZE))
+            .and_then(|block| block.checked_mul(self.block_size))
             .ok_or(DriverError::InvalidInput)?;
         let end = start
             .checked_add(output.len())
@@ -392,7 +427,7 @@ impl TestDevice {
         drop(write_count);
         let start = usize::try_from(block_id)
             .ok()
-            .and_then(|block| block.checked_mul(TEST_BLOCK_SIZE))
+            .and_then(|block| block.checked_mul(self.block_size))
             .ok_or(DriverError::InvalidInput)?;
         let end = start
             .checked_add(input.len())
@@ -1157,7 +1192,11 @@ pub(crate) fn eviction_test_unlinked_inode_with_initialization(
 }
 
 pub(crate) fn install_test_internal_journal(filesystem: &mut Ext4SbInfo, sequence: u32) {
-    install_test_journal(filesystem, test_journal_superblock(sequence));
+    let block_size = filesystem.layout().block_size();
+    let mut bytes = test_journal_superblock_bytes_with_blocks(sequence, 1024);
+    put_be_u32(&mut bytes, 0x0c, block_size);
+    let journal_superblock = JournalSuperblock::decode(&bytes, block_size, 1024, [0; 16]).unwrap();
+    install_test_journal(filesystem, journal_superblock);
 }
 
 /// A mounted ext4 regular file driving the production `Ext4Mount`/VFS entry.

@@ -307,6 +307,7 @@ fn applied_metadata_update(requested: MetadataUpdate, applied: Ext4InodeStat) ->
 }
 
 mod mount;
+mod read;
 
 mod writeback;
 pub(crate) use mount::Ext4Mount;
@@ -1461,40 +1462,9 @@ struct Ext4AddressSpaceOperations;
 
 static EXT4_ADDRESS_SPACE_OPERATIONS: Ext4AddressSpaceOperations = Ext4AddressSpaceOperations;
 
-fn read_backing_at(mapping: &AddressSpace, buf: &mut [u8], offset: u64) -> VfsResult<()> {
-    let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-    let inode = vfs_inode.private::<Ext4Inode>()?;
-    let super_block = vfs_inode.super_block()?;
-    let ext4 = ext4_private(&super_block)?;
-    // Invalidation excludes shrink. Growth after this snapshot must not turn
-    // a completed read into an error; bytes not read are the zero-filled tail.
-    let expected = inode.size().saturating_sub(offset).min(buf.len() as u64) as usize;
-    let read = match inode.kind() {
-        InodeKind::RegularFile => ext4
-            .read()
-            .read_at(inode, offset, buf)
-            .map_err(into_vfs_err),
-        InodeKind::Symlink => ext4
-            .read()
-            .read_link_at(inode, offset, buf)
-            .map_err(into_vfs_err),
-        _ => Err(VfsError::InvalidInput),
-    }?;
-    if read < expected || read > buf.len() {
-        return Err(VfsError::Io);
-    }
-    buf[read..].fill(0);
-    Ok(())
-}
-
 impl AddressSpaceOperations for Ext4AddressSpaceOperations {
-    fn read_folio(&self, mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
-        let offset = folio
-            .index()
-            .checked_mul(PAGE_SIZE_4K as u64)
-            .ok_or(VfsError::InvalidInput)?;
-        let result = read_backing_at(mapping, folio.data(), offset);
-        folio.complete(result)
+    fn read_folio(&self, mapping: &AddressSpace, folio: FolioRead) -> VfsResult<()> {
+        read::submit_folios(mapping, core::iter::once(folio))
     }
 
     fn write_begin(&self, mapping: &AddressSpace, request: WriteBeginRequest) -> VfsResult<()> {
@@ -1539,21 +1509,8 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         if control.count() == 0 {
             return Ok(());
         }
-
-        let offset = control
-            .index()
-            .checked_mul(PAGE_SIZE_4K as u64)
-            .ok_or(VfsError::InvalidInput)?;
-        let len = control
-            .count()
-            .checked_mul(PAGE_SIZE_4K)
-            .ok_or(VfsError::InvalidInput)?;
-        let mut data = vec![0u8; len];
-        read_backing_at(control.mapping(), &mut data, offset)?;
-        for page in data.chunks_exact(PAGE_SIZE_4K) {
-            control.complete_folio(page)?;
-        }
-        Ok(())
+        let mapping = control.mapping();
+        read::submit_folios(mapping, core::iter::from_fn(|| control.next_folio()))
     }
 }
 

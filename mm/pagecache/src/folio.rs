@@ -26,6 +26,8 @@ use crate::{CacheResidency, PageIndex};
 
 mod wait;
 use wait::{FolioWaitBit, WaitMode};
+mod read_parts;
+pub use read_parts::FolioReadPart;
 
 const LOCKED: u8 = 1;
 const WRITEBACK: u8 = 2;
@@ -517,6 +519,8 @@ impl FolioGuard<'_> {
 /// contains no mapping pointer or second read state. Complete it only after all
 /// I/O has relinquished the page; dropping it without completion leaves the
 /// folio non-uptodate and wakes waiters so a later demand read can retry.
+/// Implements [`block::BioMemory`] so submission can transfer this token and
+/// completion can recover it from [`block::BioVec`] without copying the page.
 #[must_use = "complete the folio after I/O or drop it to abandon initialization"]
 pub struct FolioRead {
     folio: Arc<Folio>,
@@ -550,17 +554,37 @@ impl FolioRead {
     /// # Errors
     /// Returns the supplied read error unchanged after releasing the lock.
     pub fn complete(self, result: KResult<()>) -> KResult<()> {
-        if result.is_ok() {
+        self.publish_result(result.is_ok());
+        result
+    }
+
+    fn publish_result(&self, is_success: bool) {
+        if is_success {
             self.folio.flags.fetch_or(UPTODATE, Ordering::Release);
         } else {
             self.folio.flags.fetch_and(!UPTODATE, Ordering::Release);
         }
-        result
     }
 }
 
 impl Drop for FolioRead {
     fn drop(&mut self) {
         self.folio.unlock();
+    }
+}
+
+// SAFETY: the initialization token retains the allocation and exclusive folio
+// lock until completion/drop. Moving the token does not move the page. Both
+// views cover that same initialized allocation; their borrows exclude consuming
+// the token, and Drop unlocks without sleeping in ordinary I/O completion context.
+unsafe impl block::BioMemory for FolioRead {
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: the token owns the stable page and its exclusive lock. This
+        // shared borrow excludes data()/completion until the view expires.
+        unsafe { core::slice::from_raw_parts(self.folio.addr.as_ptr(), PAGE_SIZE_4K) }
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        self.data()
     }
 }

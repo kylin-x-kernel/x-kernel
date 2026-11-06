@@ -111,8 +111,26 @@ hole/unwritten 分支不能读取物理旧数据，部分块和 EOF 不能把
 
 块后端可能先修改目标前缀再返回错误，因此 `read_at` 不保证失败缓冲保持旧值，也不返回
 可发布的成功前缀。调用者必须传播错误，不能置 uptodate 或把失败内容复制到读迭代器。
-单页缓存失败保留不可读的非 uptodate folio；批量预读失败不提交任何新页，未消费 reservation
-由 PageCache 回收。完整重试成功后才允许发布；错误路径的缓冲内容不是有效文件数据。
+Cached pages move into bios through `FolioRead` and complete only after device
+access ends. Contiguous pages belong to one bio. Fragmented subpage reads use
+disjoint part owners: zeroed holes, unwritten extents and device-read runs
+converge before whole-page publication. A failed or abandoned part keeps the
+page stale; pending parts retain the lock even after another part fails. Each
+part spans only adjacent bytes with the same zero-fill policy or contiguous
+physical mapping; grouping cannot bridge a hole or a physical discontinuity.
+Each part zeroes its own EOF tail before completion. Larger-than-page filesystem
+blocks retain the synchronous partial-block reader.
+Failed pages remain non-uptodate until a complete retry succeeds. PageCache
+removes unconsumed reservations, while independently successful pages may become
+readable. Failed buffer contents are not valid file data. Submission holds the
+core read guard to stabilize block mappings; truncate waits for transferred page
+locks before freeing blocks. Completion uses only the bio status, original pages,
+and sampled EOF, without taking inode data, invalidate, or core locks. After
+reading the disk block containing EOF, it zeroes every remaining byte in that page.
+Writable ext4 integration tests retain both tail-page bios after demand returns,
+start a VFS shrink, and verify that mappings and free-block accounting survive
+until the last owner retires, including when another part has already failed.
+The same tests verify that shrink/regrow cannot expose the discarded suffix.
 `vfs/read_tests.rs` 以真实 ext4 + KVFS + PageCache 链路验证上述隔离，并检查重试后的页未被
 标脏、17 字节 EOF 尾部补零。失败读后部分写入的测试还验证完整重新读页先于写入复制，
 只把成功写入后的完整数据标脏，不发布此前失败读污染的前缀。该验证不声称设备 I/O 具备失败原子性。

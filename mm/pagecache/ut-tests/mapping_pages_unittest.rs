@@ -399,6 +399,49 @@ fn transferred_read_completes_without_task_or_mapping_lock_ownership() {
     }
 }
 
+#[def_test]
+fn split_read_publishes_only_after_all_parts_retire() {
+    use alloc::sync::Arc;
+    use kerrno::KError;
+
+    for outcome in 0..3 {
+        let folio = Arc::new(crate::Folio::new_zeroed(7).unwrap());
+        let read = folio.lock().unwrap().into_read(&folio);
+        let read = read.split_at(0).err().unwrap();
+        let (mut first, tail) = read.split_at(1024).unwrap_or_else(|_| panic!("valid split"));
+        let (mut middle, mut last) = tail.split_at(1024).unwrap_or_else(|_| panic!("valid split"));
+        assert_eq!(first.offset(), 0);
+        assert_eq!(middle.offset(), 1024);
+        assert_eq!(last.offset(), 2048);
+        let first_address = first.data().as_ptr() as usize;
+        assert_eq!(middle.data().as_ptr() as usize, first_address + 1024);
+        assert_eq!(last.data().as_ptr() as usize, first_address + 2048);
+        first.data().fill(0x11);
+        last.data().fill(0x33);
+        last.complete(Ok(())).unwrap();
+        assert!(folio.try_lock().is_none());
+        let completion = ktask::spawn(move || {
+            middle.data().fill(0x22);
+            let _irq = kirq::context::test_support::ScopedHardIrqContext::enter();
+            match outcome {
+                0 => middle.complete(Ok(())).unwrap(),
+                1 => core::assert_eq!(middle.complete(Err(KError::Io)), Err(KError::Io)),
+                _ => drop(middle),
+            }
+        });
+        assert_eq!(completion.join(), 0);
+        assert!(folio.try_lock().is_none(), "first part still owns device access");
+        first.complete(Ok(())).unwrap();
+        let mut guard = folio.try_lock().expect("last part must release the lock");
+        assert_eq!(guard.is_uptodate(), outcome == 0);
+        if outcome == 0 {
+            assert!(guard.data()[..1024].iter().all(|&byte| byte == 0x11));
+            assert!(guard.data()[1024..2048].iter().all(|&byte| byte == 0x22));
+            assert!(guard.data()[2048..].iter().all(|&byte| byte == 0x33));
+        }
+    }
+}
+
 #[def_test(serial)]
 fn demand_read_waits_for_owned_completion_and_reports_failure() {
     use alloc::sync::Arc;

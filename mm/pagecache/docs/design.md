@@ -305,6 +305,17 @@ until removal. Success publishes whole-page uptodate before releasing the lock;
 failure or abandonment unlocks without publishing partial data. Completion may
 outlive submission and move between CPUs. It cannot require inode data,
 invalidate or mapping index locks held by a waiting caller.
+The token implements the block contract's `BioMemory`: its original page can
+enter a Bio and return as a typed owner to filesystem completion. This adds no
+folio fields, request registry or driver dependency on pagecache.
+
+For subpage I/O, consuming `FolioRead::split_at` creates disjoint `FolioReadPart`
+owners. Only these reads allocate a temporary shared completion containing the
+original lock token and a count of bytes not successfully initialized. Parts may
+split further or complete in any order. Each successful part credits its bytes
+once; failed or abandoned parts retain their deficit. The last part releases
+the original token, publishing uptodate only if every byte succeeded. No folio
+fields or per-block validity bitmap are added; failed reads retry the whole page.
 
 The folio's atomic flags contain lock, writeback, waiters, dirty, uptodate and
 invalidation bits. Acquire/Release

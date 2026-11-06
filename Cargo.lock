@@ -4218,6 +4218,7 @@ dependencies = [
 name = "pagecache"
 version = "0.3.0-dev"
 dependencies = [
+ "block",
  "intrusive-collections",
  "kalloc",
  "kalloc-types",

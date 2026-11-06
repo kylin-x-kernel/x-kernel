@@ -441,6 +441,8 @@ The existing DMA provider remains responsible for device address/cache constrain
 
 `BioVec` holds ordinary `Box<[u8]>` storage directly; special `BioMemory` owners
 use type erasure and a checked byte range. Invalid ranges return the original owner.
+Completion can recover a special owner with `BioVec::into_memory`; the `Any`
+type check preserves the extent unchanged on mismatch and adds no allocation.
 The memory contract requires stable initialized storage and exclusive access
 responsibility, allowing an allocation or another storage owner's access token.
 The block layer has no folio or filesystem dependency. Synchronous adapters
@@ -453,7 +455,7 @@ and complete early. DMA retirement remains the transport's unsafe obligation.
 A driver that only accepts contiguous data opts into `Bio::read_contiguous`
 or `write_contiguous` (also forwarded by Request): one extent passes directly, scatter uses staging. Device
 address/cache requirements remain with the backend and provider. There is no
-parallel public driver read/write/flush interface. Folio completion transfer,
+parallel public driver read/write/flush interface. Filesystem completion policy,
 merging, FUA and flush sequencing flags remain outside this change.
 
 Constructing an unpublished disk lets tests avoid registering a global device;
