@@ -135,7 +135,8 @@ net/knet/
     │   │   └── iptables_legacy/
     │   │       ├── mod.rs
     │   │       ├── abi.rs
-    │   │       └── encode.rs
+    │   │       ├── encode.rs
+    │   │       └── query.rs
     │   └── filter/
     │       ├── mod.rs
     │       ├── matcher.rs
@@ -438,9 +439,9 @@ network-path and ABI integration.
 
 `netfilter/compat/iptables_legacy` exports tables in the native
 64-bit legacy IPv4 iptables format.
-`abi.rs` defines the fixed ABI layouts; `encode.rs` converts base conditions and
-TCP/UDP/ICMP matches into ABI records and assembles entries with standard targets
-or ERROR chain markers.
+`abi.rs` defines the fixed ABI layouts; `encode.rs` converts table layout metadata
+into `IptGetInfo`, converts base conditions and TCP/UDP/ICMP matches into ABI
+records, and assembles entries with standard targets or ERROR chain markers.
 The caller supplies an exactly sized output buffer and resolves verdicts or jump
 offsets for standard targets.
 Encoding checks ABI field widths, allocates no memory, and zeroes counters,
@@ -452,7 +453,7 @@ Conditions without an equivalent legacy representation return an error.
 policy offsets before output allocation. It resolves targets against those chain
 positions and remains local to one conversion of the immutable source table.
 `ChainLayout` records table-relative byte offsets; an empty chain's rules start
-at its tail. `LegacyFilterTable::try_from` initializes the output from the layout
+at its tail. `LegacyFilterTable::encode` initializes the output from the layout
 and delegates each chain's marker, rules, counters, and tail to `encode_chain`,
 then writes the terminal ERROR entry.
 Jump offsets skip user-chain markers; Continue offsets select the next entry.
@@ -462,6 +463,25 @@ configuration state under its read lock, so rules and counter layout remain
 paired while live counter fields are sampled independently.
 Output and scratch allocation require task context. Failed export discards its
 output and leaves the configuration unchanged.
+
+`query.rs` provides `LegacyTableReader`, which resolves the `filter` name to the
+global configuration. The reader borrows a configuration store without holding
+a lock or pinning a table generation. Each `info()` or `export_entries()` call
+reads the current generation independently: metadata uses only `TableLayout`,
+while entry export validates the requested size and encodes under one read guard.
+A size mismatch returns `EAGAIN`; equal sizes across calls do not imply the same
+generation. Exported bytes remain owned after later configuration changes.
+
+`LegacyExtension` in `encode.rs` defines native record names, sizes, and revisions
+for both encoding and `ExtensionKind::check_revision`. These declarations cover
+the exported record formats; semantic matcher support and rule-import support
+are separate capabilities. `abi_name` reserves the final byte of each fixed-width
+name field for NUL and truncates the preceding prefix at its first NUL.
+`mod.rs` defines `ExtensionKind`, checks revisions, and maps encoding errors to
+kernel errors. An invalid encoder buffer size returns `EIO`, while invalid request
+lengths return `EINVAL` at the POSIX boundary.
+POSIX owns IPv4 socket selection, `CAP_NET_ADMIN`, request lengths, and user
+copies, which run outside filter locks.
 
 ## Calling Constraints and Execution Context
 

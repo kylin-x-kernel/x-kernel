@@ -27,6 +27,8 @@ use linux_raw_sys::net::{
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
 
+use crate::legacy_iptables::LegacyGetOption;
+
 const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
 const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
@@ -387,6 +389,14 @@ pub fn sys_getsockopt(
     // reads, so the sign bit is the test.
     if (optlen as i32) < 0 {
         return Err(KError::InvalidInput);
+    }
+
+    if level == PROTO_IP
+        && let Some(option) = LegacyGetOption::from_raw(optname)
+    {
+        option.get(socket.as_ref(), optval, optlen as usize)?;
+        optlen_ptr.write_vm(optlen)?;
+        return Ok(0);
     }
 
     macro_rules! dispatch {

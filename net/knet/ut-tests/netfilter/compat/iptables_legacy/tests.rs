@@ -92,7 +92,7 @@ fn entry_offsets(table: &LegacyFilterTable) -> Vec<usize> {
 
 #[def_test]
 fn default_table_matches_native_initial_layout() {
-    let table = LegacyFilterTable::try_from(&FilterTable::accept_all()).unwrap();
+    let table = LegacyFilterTable::from_table(&FilterTable::accept_all()).unwrap();
     assert_eq!(table.valid_hooks(), 0x0e);
     assert_eq!(table.hook_entry(), &[0, 0, 152, 304, 0]);
     assert_eq!(table.underflow(), table.hook_entry());
@@ -109,7 +109,7 @@ fn default_table_matches_native_initial_layout() {
 
 #[def_test]
 fn reordered_chains_resolve_jumps_and_empty_chain_tails() {
-    let table = LegacyFilterTable::try_from(&mixed_table()).unwrap();
+    let table = LegacyFilterTable::from_table(&mixed_table()).unwrap();
     assert_eq!(table.hook_entry(), &[0, 2248, 2096, 480, 0]);
     assert_eq!(table.underflow(), &[0, 2552, 2096, 832, 0]);
     assert_eq!(table.entries().len(), 2880);
@@ -159,7 +159,7 @@ fn table_offsets_use_the_full_native_jump_width() {
         Chain::user_defined("EMPTY".to_string(), Vec::new()).unwrap(),
     ])
     .unwrap();
-    let table = LegacyFilterTable::try_from(&table).unwrap();
+    let table = LegacyFilterTable::from_table(&table).unwrap();
     assert_eq!(table.underflow()[1], 68552);
     assert_eq!(table.hook_entry()[3], 68856);
     assert_eq!(verdict_at(&table, 450 * 152), 69184);
@@ -206,7 +206,7 @@ fn counters_follow_rules_and_tails_and_exports_own_their_bytes() {
     }
     assert_eq!(exported.entries(), before);
     assert_eq!(
-        LegacyFilterTable::try_from(retired.table()).unwrap(),
+        LegacyFilterTable::from_table(retired.table()).unwrap(),
         exported
     );
 }

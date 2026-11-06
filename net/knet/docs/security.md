@@ -132,6 +132,19 @@ A configuration read guard keeps rules and counter layout in one generation;
 live counter samples need not be mutually consistent. Export owns its output,
 initializes ERROR counters to zero, and changes no configuration state on error.
 
+Legacy GET requests require `CAP_NET_ADMIN` at the POSIX boundary. Only fixed-size
+request prefixes are copied; the caller's advertised entry size never determines
+an input allocation. Table names and extension revisions are checked before use.
+Responses contain initialized ABI bytes and owned entries, so user copies hold no
+filter lock. Queries currently address the global store, without network-namespace
+isolation, and do not modify rules or counters.
+`LegacyTableReader` holds a configuration reference rather than a table snapshot.
+Each read uses the current generation; an equal-size replacement between metadata
+and entry queries may therefore be observed. Revision queries advertise only the
+declared native record formats, independently of rule-import and target-execution
+support. An encoder buffer-size violation is an internal failure reported as
+`EIO`, rather than an invalid userspace request.
+
 The prepared poller Work and its private NormalQueue live for the kernel
 lifetime. Initialization prepares storage before NIC notification sources can
 call it, and queue startup follows network state initialization. An IRQ-safe

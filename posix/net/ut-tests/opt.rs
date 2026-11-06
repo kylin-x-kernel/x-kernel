@@ -19,6 +19,7 @@ use linux_raw_sys::{
 use posix_types::UserPtr;
 use unittest::{assert_eq, def_test};
 use unittest_support::{TestUserArray, TestUserBuffer, TestUserValue};
+use zerocopy::{FromBytes, IntoBytes};
 
 use super::{
     BPF_JA, BPF_JMP, BPF_RET, IFNAMSIZ, SockFilter, conv::SocketTimeout, encode_bound_device_name,
@@ -509,5 +510,166 @@ fn netlink_cap_ack_option_round_trips_through_the_syscall_layer() {
         Err(KError::from(LinuxError::EINVAL))
     );
 
+    close_socket(fd);
+}
+
+#[def_test(user)]
+fn legacy_filter_gets_report_metadata_entries_and_revision_zero() {
+    let fd = sys_socket(AF_INET, SOCK_DGRAM, 0).unwrap() as i32;
+    let buffer = TestUserBuffer::new(84).unwrap();
+    let mut name = [0; 32];
+    name[..6].copy_from_slice(b"filter");
+    buffer.write_bytes(&name).unwrap();
+    let mut len = TestUserValue::from_value(84u32).unwrap();
+    let len_ptr = UserPtr::from(len.as_user_ptr());
+    assert_eq!(
+        sys_getsockopt(fd, 0, 64, UserPtr::from(buffer.as_user_ptr()), len_ptr),
+        Ok(0)
+    );
+    assert_eq!(len.read(), 84);
+    let info = knet::IptGetInfo::read_from_bytes(&buffer.read_bytes(84).unwrap()).unwrap();
+    assert_eq!(&info.name[..7], b"filter\0");
+    assert_eq!(
+        (info.valid_hooks, info.num_entries, info.size),
+        (0x0e, 4, 632)
+    );
+    assert_eq!(info.hook_entry, [0, 0, 152, 304, 0]);
+    assert_eq!(info.underflow, info.hook_entry);
+
+    let header = knet::IptGetEntries {
+        name,
+        size: info.size,
+        padding: [0x5a; 4],
+    };
+    let total = 40 + info.size as usize;
+    let entries = TestUserBuffer::new(total + 8).unwrap();
+    entries.write_bytes(&vec![0xa5; total + 8]).unwrap();
+    entries.write_bytes(header.as_bytes()).unwrap();
+    len.write(total as u32);
+    assert_eq!(
+        sys_getsockopt(fd, 0, 65, UserPtr::from(entries.as_user_ptr()), len_ptr),
+        Ok(0)
+    );
+    assert_eq!(len.read(), total as u32);
+    let output = entries.read_bytes(total + 8).unwrap();
+    assert_eq!(&output[..40], header.as_bytes());
+    let expected = knet::LegacyTableReader::lookup(&name)
+        .unwrap()
+        .export_entries(info.size)
+        .unwrap();
+    assert_eq!(&output[40..total], expected.entries());
+    assert_eq!(&output[total..], &[0xa5; 8]);
+
+    for (option, extension) in [
+        (66, "tcp"),
+        (66, "udp"),
+        (66, "icmp"),
+        (67, ""),
+        (67, "ERROR"),
+    ] {
+        let mut query = knet::XtGetRevision::default();
+        query.name[..extension.len()].copy_from_slice(extension.as_bytes());
+        buffer.write_bytes(query.as_bytes()).unwrap();
+        len.write(30);
+        assert_eq!(
+            sys_getsockopt(fd, 0, option, UserPtr::from(buffer.as_user_ptr()), len_ptr),
+            Ok(0)
+        );
+        assert_eq!(buffer.read_bytes(30).unwrap(), query.as_bytes());
+        query.revision = 1;
+        buffer.write_bytes(query.as_bytes()).unwrap();
+        assert_eq!(
+            sys_getsockopt(fd, 0, option, UserPtr::from(buffer.as_user_ptr()), len_ptr),
+            Err(LinuxError::EPROTONOSUPPORT.into())
+        );
+        assert_eq!(len.read(), 30);
+    }
+    close_socket(fd);
+}
+
+#[def_test(user)]
+fn legacy_filter_gets_validate_lengths_pointers_and_socket_family() {
+    let fd = sys_socket(AF_INET, SOCK_STREAM, 0).unwrap() as i32;
+    let unix = sys_socket(AF_UNIX, SOCK_DGRAM, 0).unwrap() as i32;
+    let mut len = TestUserValue::from_value(84u32).unwrap();
+    let len_ptr = UserPtr::from(len.as_user_ptr());
+    assert_eq!(
+        sys_getsockopt(unix, 0, 64, UserPtr::default(), len_ptr),
+        Err(LinuxError::ENOPROTOOPT.into())
+    );
+    assert_eq!(
+        sys_getsockopt(fd, 0, 64, UserPtr::default(), len_ptr),
+        Err(KError::BadAddress)
+    );
+    for (option, invalid_len) in [(64, 83), (64, 85), (65, 39), (66, 29), (67, 31)] {
+        len.write(invalid_len);
+        assert_eq!(
+            sys_getsockopt(fd, 0, option, UserPtr::default(), len_ptr),
+            Err(KError::InvalidInput)
+        );
+        assert_eq!(len.read(), invalid_len);
+    }
+    len.write(u32::MAX);
+    assert_eq!(
+        sys_getsockopt(fd, 0, 64, UserPtr::default(), len_ptr),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(
+        sys_getsockopt(-1, 0, 64, UserPtr::default(), UserPtr::default()),
+        Err(KError::BadFileDescriptor)
+    );
+    assert_eq!(
+        sys_getsockopt(fd, 0, 64, UserPtr::default(), UserPtr::default()),
+        Err(KError::BadAddress)
+    );
+
+    let header = knet::IptGetEntries {
+        size: 1,
+        ..Default::default()
+    };
+    let buffer = TestUserBuffer::new(40).unwrap();
+    buffer.write_bytes(header.as_bytes()).unwrap();
+    let ptr = UserPtr::from(buffer.as_user_ptr());
+    len.write(40);
+    assert_eq!(
+        sys_getsockopt(fd, 0, 65, ptr, len_ptr),
+        Err(KError::InvalidInput)
+    );
+    let mut header = header;
+    header.name[..6].copy_from_slice(b"filter");
+    buffer.write_bytes(header.as_bytes()).unwrap();
+    len.write(41);
+    assert_eq!(
+        sys_getsockopt(fd, 0, 65, ptr, len_ptr),
+        Err(LinuxError::EAGAIN.into())
+    );
+    assert_eq!(buffer.read_bytes(40).unwrap(), header.as_bytes());
+    close_socket(unix);
+    close_socket(fd);
+}
+
+#[def_test(user)]
+fn legacy_filter_get_requires_net_admin_even_for_root_uid() {
+    let fd = sys_socket(AF_INET, SOCK_DGRAM, 0).unwrap() as i32;
+    let caller = kprocess::current_user_thread();
+    let saved = caller.cred();
+    let mut cred = caller.prepare_creds();
+    cred.set_capabilities(kcred::CapSets::new(
+        kcred::CapSet::EMPTY,
+        kcred::CapSet::EMPTY,
+        kcred::CapSet::EMPTY,
+    ))
+    .unwrap();
+    let len = TestUserValue::from_value(84u32).unwrap();
+    caller.commit_creds(cred);
+    let result = sys_getsockopt(
+        fd,
+        0,
+        64,
+        UserPtr::default(),
+        UserPtr::from(len.as_user_ptr()),
+    );
+    caller.commit_creds((*saved).clone());
+    assert_eq!(result, Err(LinuxError::EPERM.into()));
     close_socket(fd);
 }

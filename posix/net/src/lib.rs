@@ -18,6 +18,7 @@ extern crate klogger;
 mod addr;
 mod cmsg;
 mod io;
+mod legacy_iptables;
 mod name;
 mod net_ioctl;
 mod opt;

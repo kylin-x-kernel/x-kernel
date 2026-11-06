@@ -4,6 +4,7 @@
 
 use alloc::{string::ToString, vec, vec::Vec};
 
+use kerrno::{KError, LinuxError};
 use unittest::def_test;
 
 use super::*;
@@ -205,10 +206,9 @@ fn entry_sizes_bound_offsets_and_output_writes() {
     encode_entry(&mut output[1..921], &base, &extensions, -2).unwrap();
     assert_eq!(output[0], 0xa5);
     assert_eq!(output[921], 0xa5);
-    assert_eq!(
-        encode_entry(&mut output[1..920], &base, &extensions, -2),
-        Err(EncodeError::BufferSize)
-    );
+    let error = encode_entry(&mut output[1..920], &base, &extensions, -2).unwrap_err();
+    assert_eq!(error, EncodeError::BufferSize);
+    assert_eq!(KError::from(error), LinuxError::EIO.into());
     assert_eq!(
         entry_size(&vec![ExtensionMatch::Tcp(TcpMatch::new()); 1363]),
         Err(EncodeError::EntryTooLarge)

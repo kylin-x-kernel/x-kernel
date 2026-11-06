@@ -4,4 +4,4 @@
 
 //! Wire-format adapters for network-filter policies.
 
-pub(super) mod iptables_legacy;
+pub(crate) mod iptables_legacy;

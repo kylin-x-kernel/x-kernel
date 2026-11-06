@@ -2,18 +2,22 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Encodes legacy entries using jump offsets from the caller.
+//! Encodes legacy table metadata and entries using jump offsets from the caller.
 
 use zerocopy::{Immutable, IntoBytes};
 
-use super::abi::{
-    ERROR_ENTRY_SIZE, IFNAMSIZ, IPT_ENTRY_SIZE, IPT_ICMP_INV, IPT_ICMP_MATCH_SIZE, IPT_INV_DSTIP,
-    IPT_INV_PROTO, IPT_INV_SRCIP, IPT_INV_VIA_IN, IPT_INV_VIA_OUT, IPV4_ADDRESS_SIZE, IptEntry,
-    IptIcmp, IptIp, STANDARD_ENTRY_SIZE, XT_ENTRY_HEADER_SIZE, XT_ERROR_TARGET,
-    XT_ERROR_TARGET_SIZE, XT_STANDARD_TARGET_SIZE, XT_TCP_INV_DSTPT, XT_TCP_INV_FLAGS,
-    XT_TCP_INV_SRCPT, XT_TCP_MATCH_SIZE, XT_UDP_INV_DSTPT, XT_UDP_INV_SRCPT, XT_UDP_MATCH_SIZE,
-    XT_VERDICT_ACCEPT, XT_VERDICT_DROP, XtCounters, XtEntryHeader, XtErrorTarget, XtStandardTarget,
-    XtTcp, XtUdp,
+use super::{
+    ExtensionKind, FILTER_VALID_HOOKS, TableLayout,
+    abi::{
+        ERROR_ENTRY_SIZE, IFNAMSIZ, IPT_ENTRY_SIZE, IPT_ICMP_INV, IPT_ICMP_MATCH_SIZE,
+        IPT_INV_DSTIP, IPT_INV_PROTO, IPT_INV_SRCIP, IPT_INV_VIA_IN, IPT_INV_VIA_OUT,
+        IPV4_ADDRESS_SIZE, IptEntry, IptGetInfo, IptIcmp, IptIp, STANDARD_ENTRY_SIZE,
+        TABLE_NAME_LEN, XT_ENTRY_HEADER_SIZE, XT_ERROR_TARGET_SIZE, XT_STANDARD_TARGET_SIZE,
+        XT_TCP_INV_DSTPT, XT_TCP_INV_FLAGS, XT_TCP_INV_SRCPT, XT_TCP_MATCH_SIZE, XT_UDP_INV_DSTPT,
+        XT_UDP_INV_SRCPT, XT_UDP_MATCH_SIZE, XT_VERDICT_ACCEPT, XT_VERDICT_DROP, XtCounters,
+        XtEntryHeader, XtErrorTarget, XtStandardTarget, XtTcp, XtUdp,
+    },
+    abi_name,
 };
 use crate::netfilter::filter::{
     counter::FilterCounter,
@@ -32,6 +36,98 @@ pub(in crate::netfilter) enum EncodeError {
     TableTooLarge,
     UnsupportedMatch,
     InvalidName,
+}
+
+/// Native record formats exported by this adapter and advertised by revision queries.
+#[derive(Clone, Copy)]
+enum LegacyExtension {
+    Tcp,
+    Udp,
+    Icmp,
+    Standard,
+    Error,
+}
+
+impl LegacyExtension {
+    const ADVERTISED: [Self; 5] = [
+        Self::Tcp,
+        Self::Udp,
+        Self::Icmp,
+        Self::Standard,
+        Self::Error,
+    ];
+
+    fn name(self) -> &'static [u8] {
+        match self {
+            Self::Tcp => b"tcp",
+            Self::Udp => b"udp",
+            Self::Icmp => b"icmp",
+            Self::Standard => abi_name(linux_raw_sys::net::XT_STANDARD_TARGET),
+            Self::Error => abi_name(linux_raw_sys::net::XT_ERROR_TARGET),
+        }
+    }
+
+    fn kind(self) -> ExtensionKind {
+        match self {
+            Self::Tcp | Self::Udp | Self::Icmp => ExtensionKind::Match,
+            Self::Standard | Self::Error => ExtensionKind::Target,
+        }
+    }
+
+    fn revision(self) -> u8 {
+        match self {
+            Self::Tcp | Self::Udp | Self::Icmp | Self::Standard | Self::Error => 0,
+        }
+    }
+
+    fn size(self) -> usize {
+        match self {
+            Self::Tcp => XT_TCP_MATCH_SIZE,
+            Self::Udp => XT_UDP_MATCH_SIZE,
+            Self::Icmp => IPT_ICMP_MATCH_SIZE,
+            Self::Standard => XT_STANDARD_TARGET_SIZE,
+            Self::Error => XT_ERROR_TARGET_SIZE,
+        }
+    }
+
+    fn header(self) -> Result<XtEntryHeader, EncodeError> {
+        let mut header = XtEntryHeader::new(self.size(), self.name())?;
+        header.revision = self.revision();
+        Ok(header)
+    }
+}
+
+impl From<&ExtensionMatch> for LegacyExtension {
+    fn from(extension: &ExtensionMatch) -> Self {
+        match extension {
+            ExtensionMatch::Tcp(_) => Self::Tcp,
+            ExtensionMatch::Udp(_) => Self::Udp,
+            ExtensionMatch::Icmp(_) => Self::Icmp,
+        }
+    }
+}
+
+/// Returns the advertised revision for a native record name and class.
+pub(super) fn extension_revision(kind: ExtensionKind, name: &[u8]) -> Option<u8> {
+    LegacyExtension::ADVERTISED
+        .into_iter()
+        .find(|extension| extension.kind() == kind && extension.name() == name)
+        .map(LegacyExtension::revision)
+}
+
+impl From<&TableLayout> for IptGetInfo {
+    fn from(layout: &TableLayout) -> Self {
+        let mut name = [0; TABLE_NAME_LEN];
+        name[..6].copy_from_slice(b"filter");
+        Self {
+            name,
+            valid_hooks: FILTER_VALID_HOOKS,
+            hook_entry: layout.hook_entry,
+            underflow: layout.underflow,
+            num_entries: layout.num_entries,
+            size: layout.size_bytes as u32,
+        }
+    }
 }
 
 /// Returns the native standard-target code for a terminal verdict.
@@ -85,7 +181,7 @@ pub(super) fn encode_entry(
     write(
         &mut output[offset..],
         &XtStandardTarget {
-            header: XtEntryHeader::new(XT_STANDARD_TARGET_SIZE, b"")?,
+            header: LegacyExtension::Standard.header()?,
             verdict,
             ..Default::default()
         },
@@ -104,17 +200,13 @@ pub(super) fn encode_error_entry(output: &mut [u8], name: &str) -> Result<(), En
     output.fill(0);
     let entry = IptEntry::new(IptIp::default(), IPT_ENTRY_SIZE, output.len())?;
     write(output, &entry)?;
-    target.header = XtEntryHeader::new(XT_ERROR_TARGET_SIZE, XT_ERROR_TARGET)?;
+    target.header = LegacyExtension::Error.header()?;
     target.name[..name.len()].copy_from_slice(name.as_bytes());
     write(&mut output[IPT_ENTRY_SIZE..], &target)
 }
 
 fn extension_size(extension: &ExtensionMatch) -> usize {
-    match extension {
-        ExtensionMatch::Tcp(_) => XT_TCP_MATCH_SIZE,
-        ExtensionMatch::Udp(_) => XT_UDP_MATCH_SIZE,
-        ExtensionMatch::Icmp(_) => IPT_ICMP_MATCH_SIZE,
-    }
+    LegacyExtension::from(extension).size()
 }
 
 /// Writes counters into an entry produced by this encoder.
@@ -133,12 +225,7 @@ impl From<FilterCounter> for XtCounters {
 }
 
 fn encode_extension(output: &mut [u8], extension: &ExtensionMatch) -> Result<(), EncodeError> {
-    let name: &[u8] = match extension {
-        ExtensionMatch::Tcp(_) => b"tcp",
-        ExtensionMatch::Udp(_) => b"udp",
-        ExtensionMatch::Icmp(_) => b"icmp",
-    };
-    let header = XtEntryHeader::new(output.len(), name)?;
+    let header = LegacyExtension::from(extension).header()?;
     write(output, &header)?;
     let data = &mut output[XT_ENTRY_HEADER_SIZE..];
     match extension {

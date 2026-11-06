@@ -4509,6 +4509,7 @@ dependencies = [
  "posix-types",
  "unittest",
  "unittest_support",
+ "zerocopy",
 ]
 
 [[package]]

@@ -37,6 +37,7 @@ osvm.workspace = true
 posix-types.workspace = true
 unittest.workspace = true
 unittest_support.workspace = true
+zerocopy.workspace = true
 
 [lints]
 workspace = true

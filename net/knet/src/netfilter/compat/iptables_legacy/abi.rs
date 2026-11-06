@@ -15,11 +15,53 @@ use core::mem::{align_of, offset_of, size_of};
 use linux_raw_sys::net as linux;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
+use super::HOOK_COUNT;
+
+/// Fixed-width table name in the legacy ABI.
+pub const TABLE_NAME_LEN: usize = linux::XT_TABLE_MAXNAMELEN as usize;
+/// Fixed-width extension name in the legacy ABI.
+pub const EXTENSION_NAME_LEN: usize = linux::XT_EXTENSION_MAXNAMELEN as usize;
+
+/// Native `IPT_SO_GET_INFO` response, including the table name.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+pub struct IptGetInfo {
+    pub name: [u8; TABLE_NAME_LEN],
+    pub valid_hooks: u32,
+    pub hook_entry: [u32; HOOK_COUNT],
+    pub underflow: [u32; HOOK_COUNT],
+    pub num_entries: u32,
+    pub size: u32,
+}
+
+/// Native `IPT_SO_GET_ENTRIES` header; entry bytes follow at offset 40.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+pub struct IptGetEntries {
+    pub name: [u8; TABLE_NAME_LEN],
+    pub size: u32,
+    pub padding: [u8; 4],
+}
+
+/// Native match or target revision query. Successful queries leave it unchanged.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+pub struct XtGetRevision {
+    pub name: [u8; EXTENSION_NAME_LEN],
+    pub revision: u8,
+}
+
+const _: () = {
+    assert!(size_of::<IptGetInfo>() == 84);
+    assert!(size_of::<IptGetEntries>() == 40);
+    assert!(offset_of!(IptGetEntries, size) == 32);
+    assert!(size_of::<XtGetRevision>() == size_of::<linux::xt_get_revision>());
+};
+
 pub(super) const IPV4_ADDRESS_SIZE: usize = size_of::<u32>();
 pub(super) const IFNAMSIZ: usize = linux::IFNAMSIZ as usize;
 const XT_EXTENSION_MAXNAMELEN: usize = linux::XT_EXTENSION_MAXNAMELEN as usize;
 const XT_FUNCTION_MAXNAMELEN: usize = linux::XT_FUNCTION_MAXNAMELEN as usize;
-pub(super) const XT_ERROR_TARGET: &[u8] = linux::XT_ERROR_TARGET;
 
 pub(super) const IPT_INV_VIA_IN: u8 = 0x01;
 pub(super) const IPT_INV_VIA_OUT: u8 = 0x02;

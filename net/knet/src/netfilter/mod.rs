@@ -12,11 +12,14 @@
                   IKIXDM"
     )
 )]
-mod compat;
+pub(crate) mod compat;
 
-#[expect(
-    dead_code,
-    reason = "CG-024-lint-exceptions: dead_code: network-path and legacy iptables consumers of \
-              the private filter evaluator follow in IKIXDM"
+#[cfg_attr(
+    not(unittest),
+    expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: packet-path consumers of the private filter \
+                  evaluator follow in IKIXDM"
+    )
 )]
 mod filter;
