@@ -787,6 +787,13 @@ incoming task, both on UP and SMP. Resumed continuations and first-run task
 entry each finish exactly one handoff; cleanup resolves the current CPU's run
 queue because a resumed task may have migrated. On SMP it also clears the old
 task's on-CPU marker and completes any deferred wake enqueue.
+The first-entry RCU cleanup test selects its successor explicitly through the
+existing scheduler dequeue/install operations under IRQ/preemption exclusion,
+then exercises the real stack switch and `task_entry` cleanup. It keeps a Stop
+work item pending as a competing runnable task: FIFO priority alone cannot
+establish a direct handoff. The test retains both the pre-cleanup predecessor
+and reader-state checks and the post-cleanup reader-state check. Its Stop work
+storage remains owned until a later synchronous Stop item has drained the queue.
 Local NMI observations finish before the interrupted switch resumes and can
 therefore borrow either task across that publication boundary. Atomic pointer publication does
 not synchronize arbitrary mutable task fields or permit remote raw owner upgrades.

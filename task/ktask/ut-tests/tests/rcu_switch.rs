@@ -190,6 +190,33 @@ fn abandoned_reader_is_unlinked_and_reclaimed_after_switch() {
     assert!(passed.load(Ordering::Acquire));
 }
 
+// Model the terminal scheduler transition with an explicitly selected successor.
+// The fixture bypasses scheduling policy, not the real stack switch or either
+// incoming cleanup path. Both tasks are pinned here and publication, dequeue,
+// exit, and installation stay under IRQ/preemption exclusion.
+fn exit_to_first_entry(receiver: crate::KtaskRef) -> ! {
+    let mut rq = crate::run_queue::current_run_queue::<kspin::NoPreemptIrqSave>();
+    let now_ns = khal::time::monotonic_time_nanos();
+    rq.account_current_runtime(now_ns);
+    let outgoing = crate::current();
+    core::assert_eq!(outgoing.cpu_id(), receiver.cpu_id());
+    outgoing.notify_exit(19);
+    #[cfg(feature = "smp")]
+    rq.inner.discharge_home(&outgoing);
+    let next = rq.inner.with_sched_rank(|scheduler| {
+        let next = scheduler
+            .dequeue(&receiver, now_ns)
+            .expect("test receiver is published on the current run queue");
+        drop(scheduler.exit_current(now_ns));
+        scheduler.install_current(next.clone(), now_ns);
+        next
+    });
+    // No owning references may remain on the non-returning outgoing stack.
+    drop(receiver);
+    rq.inner.switch_to(outgoing, next, super::TaskState::Exited);
+    unreachable!("the exited fixture cannot resume");
+}
+
 #[def_test]
 fn first_task_entry_cleans_the_exited_readers_handoff() {
     let before = Arc::new(AtomicBool::new(false));
@@ -199,6 +226,8 @@ fn first_task_entry_cleans_the_exited_readers_handoff() {
     let after_probe = after.clone();
     let finished_probe = finished.clone();
     let cpu = LogicalCpuId::new(0);
+    let stop_work = Arc::new(kspin::SpinNoIrq::new(crate::CpuStopWork::empty()));
+    let outgoing_stop_work = stop_work.clone();
     let abandoned = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
         move || {
             let task = crate::current();
@@ -222,30 +251,21 @@ fn first_task_entry_cleans_the_exited_readers_handoff() {
                 .unwrap(),
             ));
             receiver.set_cpumask(crate::KCpuMask::one_shot_logical(cpu));
-            // FIFO outranks the ordinary supervisor tasks. Keep scheduling
-            // excluded from publication through exit so the receiver's first
-            // switch-in must consume this task's terminal handoff.
             let _guard = kspin::NoPreemptIrqSave::new();
-            {
-                let rq = crate::run_queue::current_run_queue::<kspin::NoPreemptIrqSave>();
-                let changed = rq.inner.with_sched(|scheduler| {
-                    scheduler.set_attr(
-                        &receiver,
-                        ksched::SchedAttr {
-                            policy: ksched::SchedPolicy::Fifo,
-                            rt_priority: ksched::RtPrio::MAX,
-                            ..ksched::SchedAttr::DEFAULT
-                        },
-                        khal::time::monotonic_time_nanos(),
-                    )
-                });
-                core::assert!(changed.is_ok());
-            }
             crate::activate_task(&receiver);
-            // Do not strand a strong owner on the non-returning task's stack.
-            drop(receiver);
+            // A ready Stop task outranks even maximum-priority FIFO. Keep one
+            // pending to ensure this fixture does not rely on policy selection.
+            // The outer test retains the stable slot until a later Stop work
+            // item completes; no code moves or accesses it while queued.
+            core::assert!(crate::stop_one_cpu_nowait(
+                cpu,
+                |_| {},
+                core::ptr::null_mut(),
+                &mut outgoing_stop_work.lock(),
+            ));
+            drop(outgoing_stop_work);
             task.rcu_reader.with_read::<()>(|_| {
-                task.rcu_reader.with_read::<()>(|_| crate::exit(19));
+                task.rcu_reader.with_read::<()>(|_| exit_to_first_entry(receiver));
             });
         },
         "rcu-first-entry-outgoing".into(),
@@ -258,6 +278,11 @@ fn first_task_entry_cleans_the_exited_readers_handoff() {
     while !finished.load(Ordering::Acquire) {
         crate::yield_now();
     }
+    // Stop work is FIFO. Completion of this later item proves that the
+    // queued slot is no longer referenced, even after an assertion failure.
+    let has_drained_stop_work = crate::stop_one_cpu(cpu, |_| {}, core::ptr::null_mut());
+    drop(stop_work);
+    assert!(has_drained_stop_work);
     assert_eq!(status, 19);
     assert!(before.load(Ordering::Acquire));
     assert!(after.load(Ordering::Acquire));
