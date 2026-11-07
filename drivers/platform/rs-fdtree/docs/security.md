@@ -1,5 +1,14 @@
 # rs_fdtree — Security And Reliability
 
+## DMA declaration boundary
+
+The allocation-free DMA iterator checks complete tuple shape and both inclusive
+window ends; a valid range may end at u64::MAX. Consumers must reject any error
+rather than use a partial window set. Coherency markers must be empty booleans
+and cannot conflict; node-local duplicate properties fail strict lookup.
+Neither a range nor a missing property authorizes DMA, supplies a device mask,
+or implies host support for multiple windows/IOMMU routing.
+
 ## Strict property trust boundary
 
 Strict readers reject duplicate or malformed properties before returning values.
@@ -47,6 +56,7 @@ the index adds no mappings or hardware access.
 This analysis covers the entire crate: `src/lib.rs` (`LinuxFdt`,
 `MemReserveIter`), `src/header.rs`, `src/parsing.rs`, `src/node.rs`,
 `src/property.rs`, `src/reference.rs`, `src/index.rs`, `src/address.rs`,
+`src/dma.rs`,
 `src/fwnode_backend/`, `src/error.rs`, and `src/kernel_nodes/`. No modules
 are excluded; everything is reachable from `LinuxFdt::new` /
 `LinuxFdt::from_ptr` and the iterators they produce. `DtBackend` is an

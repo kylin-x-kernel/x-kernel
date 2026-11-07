@@ -10,7 +10,7 @@ use core::{
 
 use kspin::SpinNoIrq;
 use unittest::{assert, assert_eq, assert_ne, def_test};
-use virtio_drivers::{BufferDirection, PhysAddr, transport::DeviceType};
+use virtio_drivers::{BufferDirection, PhysAddr, StaticHal, transport::DeviceType};
 
 use super::*;
 use crate::mock_virtio::{MockHal, MockQueue, MockTransport};
@@ -77,14 +77,14 @@ unsafe impl Hal for TrackedHal {
     }
 }
 
-type Request = RngRequest<TrackedHal, MockTransport>;
+type Request = RngRequest<TrackedHal, MockTransport, StaticHal<TrackedHal>>;
 
 fn request(features: u64) -> (Request, Arc<SpinNoIrq<MockQueue>>) {
     let queue = Arc::new(SpinNoIrq::new(MockQueue::default()));
     let mut transport = MockTransport::new_with_type(DeviceType::EntropySource);
     transport.features = features;
     transport.queue = Some(queue.clone());
-    (Request::new(transport).unwrap(), queue)
+    (Request::new(transport, StaticHal::default()).unwrap(), queue)
 }
 
 /// Emulate one device completion, optionally reporting a malformed used element.
@@ -185,7 +185,7 @@ fn device(
     let mut transport = MockTransport::new_with_type(DeviceType::EntropySource);
     transport.queue = Some(queue.clone());
     let irq = transport.interrupt_status.clone();
-    let device = Device::new(transport, completion).unwrap();
+    let device = Device::new(transport, completion, StaticHal::default()).unwrap();
     (Arc::new(device), queue, irq)
 }
 

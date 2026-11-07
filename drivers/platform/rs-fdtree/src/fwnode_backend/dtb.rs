@@ -12,14 +12,15 @@
 //! remains with the controller driver.
 
 use ::fwnode::{
-    FW_IRQ_SPEC_MAX_PARAMS, FwError, FwIrqSpec, FwMmioResource, FwNode, FwNodeId, FwNodeOps,
-    FwParams, FwProperty, FwPropertyValue, FwReference, FwSource,
+    FW_IRQ_SPEC_MAX_PARAMS, FwDmaError, FwDmaRange, FwDmaRanges, FwDmaWindow, FwError, FwIrqSpec,
+    FwMmioResource, FwNode, FwNodeId, FwNodeOps, FwParams, FwProperty, FwPropertyValue,
+    FwReference, FwSource,
 };
 use lazyinit::LazyInit;
 
 use crate::{
-    AddressError, AddressErrorReason, Cells, FdtNode, LinuxFdt, NodeIndex, PropertyError,
-    ReferenceError,
+    AddressError, AddressErrorReason, Cells, DeviceDmaError, DmaRangeError, DmaRanges, FdtNode,
+    LinuxFdt, NodeIndex, PropertyError, ReferenceError,
 };
 
 /// A borrowed device tree implementing [`FwNodeOps`].
@@ -140,6 +141,79 @@ impl<'s, 'a: 's> FwNodeOps<'s> for DtBackend<'a> {
         }))
     }
 
+    fn dma_ranges(&self, id: FwNodeId) -> Result<FwDmaRanges, FwError> {
+        let node = self.node(id).ok_or(FwError::InvalidNode)?;
+        match node.dma_ranges().map_err(dma_error)? {
+            DmaRanges::Absent => Ok(FwDmaRanges::Absent),
+            DmaRanges::Identity => Ok(FwDmaRanges::Identity),
+            DmaRanges::Windows(windows) => {
+                let mut count = 0;
+                for range in windows {
+                    range.map_err(dma_error)?;
+                    count += 1;
+                }
+                Ok(FwDmaRanges::Windows(count))
+            }
+        }
+    }
+
+    fn dma_range(&self, id: FwNodeId, index: usize) -> Result<Option<FwDmaRange>, FwError> {
+        let node = self.node(id).ok_or(FwError::InvalidNode)?;
+        let DmaRanges::Windows(windows) = node.dma_ranges().map_err(dma_error)? else {
+            return Ok(None);
+        };
+        let mut selected = None;
+        for (current, range) in windows.enumerate() {
+            let range = range.map_err(dma_error)?;
+            if current == index {
+                selected = Some(FwDmaRange {
+                    bus_addr: range.bus_addr,
+                    parent_addr: range.parent_addr,
+                    size: range.size,
+                });
+            }
+        }
+        Ok(selected)
+    }
+
+    fn dma_coherency(&self, id: FwNodeId) -> Result<Option<bool>, FwError> {
+        self.node(id)
+            .ok_or(FwError::InvalidNode)?
+            .dma_coherency()
+            .map_err(property_error)
+    }
+
+    fn dma_window(&self, id: FwNodeId) -> Result<Option<FwDmaWindow>, FwDmaError> {
+        let node = self
+            .node(id)
+            .ok_or(FwDmaError::Firmware(FwError::InvalidNode))?;
+        match node.device_dma_window() {
+            Ok(window) => Ok(window.map(|window| FwDmaWindow {
+                bus_addr: window.bus_addr,
+                cpu_addr: window.cpu_addr,
+                size: window.size,
+            })),
+            // Device tree keeps "no nonempty declaration on the DMA-parent
+            // path" distinct internally, but the neutral contract represents
+            // absence as `Ok(None)`, never as an error. Only malformed or
+            // unsupported descriptions remain errors here.
+            Err(DeviceDmaError::Missing) => Ok(None),
+            Err(DeviceDmaError::Declaration(error)) => Err(FwDmaError::Firmware(dma_error(error))),
+            Err(DeviceDmaError::MultiWindow) => Err(FwDmaError::MultiWindow),
+            Err(DeviceDmaError::UnsupportedParent) => Err(FwDmaError::UnsupportedParent),
+            Err(DeviceDmaError::Iommu) => Err(FwDmaError::Iommu),
+            Err(DeviceDmaError::UnsupportedTranslation) => Err(FwDmaError::UnsupportedTranslation),
+            Err(DeviceDmaError::InvalidWindow) => Err(FwDmaError::InvalidWindow),
+        }
+    }
+
+    fn dma_effective_coherency(&self, id: FwNodeId) -> Result<Option<bool>, FwError> {
+        self.node(id)
+            .ok_or(FwError::InvalidNode)?
+            .inherited_dma_coherency()
+            .map_err(property_error)
+    }
+
     fn irq_spec(&'s self, id: FwNodeId, index: usize) -> Result<Option<FwIrqSpec<'s>>, FwError> {
         let node = self.node(id).ok_or(FwError::InvalidNode)?;
         let Some(spec) = node
@@ -199,6 +273,22 @@ fn address_error(error: AddressError) -> FwError {
         AddressErrorReason::UnsupportedBus | AddressErrorReason::UnsupportedCells(_) => {
             FwError::Unsupported
         }
+        _ => FwError::InvalidValue,
+    }
+}
+
+fn dma_error(error: DmaRangeError) -> FwError {
+    match error {
+        DmaRangeError::Property(PropertyError::Missing) => FwError::Missing,
+        DmaRangeError::UnsupportedCells => FwError::Unsupported,
+        _ => FwError::InvalidValue,
+    }
+}
+
+fn property_error(error: PropertyError) -> FwError {
+    match error {
+        PropertyError::Missing => FwError::Missing,
+        PropertyError::BufferTooSmall { .. } => FwError::BufferTooSmall,
         _ => FwError::InvalidValue,
     }
 }

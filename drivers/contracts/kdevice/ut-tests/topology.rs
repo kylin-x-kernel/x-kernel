@@ -27,6 +27,7 @@ fn sample_record(id: u64, bus_id: BusId, driver_id: DriverId) -> DeviceRecord {
         }),
         transport: None,
         resources: crate::ResourceSet::new(),
+        dma: None,
         driver_name: Some("topology-driver"),
         driver_id: Some(driver_id),
         device_kind: Some(DeviceKind::Char),

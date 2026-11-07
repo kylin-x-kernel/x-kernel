@@ -14,11 +14,14 @@
 
 extern crate alloc;
 
+mod device_dma;
 mod dma;
 mod irq;
 mod memory;
 mod mmio;
 mod time;
+
+pub use device_dma::XKernelDeviceDma;
 
 /// X-Kernel implementation of the OS-agnostic resource provider traits.
 ///

@@ -436,6 +436,16 @@ reclaim competes for the global kdma lock, also used by other DMA operations and
 page-table changes. Lock-wait latency in hard IRQ context is an accepted,
 unbounded-by-this-driver limitation, not a verified latency guarantee.
 
+`DeviceDmaBackend` is an `unsafe` bridge for exactly that reason: it cannot prove
+that the supplied capability is legal under the RNG request lock and in hard IRQ
+context, that it is exclusive to this device, or that map/unmap preserves
+original bytes. The constructor documents those caller obligations; the adapter
+itself only enforces exact release pairing and interval/overflow checks. Queue
+ring memory has no per-descriptor cache-maintenance hook, so the capability must
+provide coherent ring access, not one-time flushing. A duplicate coherent record
+is returned through `free_coherent` rather than dropped, because the provider's
+`DmaAllocation` token has no destructor.
+
 ## Conservative input readiness
 
 Input notification probing never pops/requeues descriptors, because HAL

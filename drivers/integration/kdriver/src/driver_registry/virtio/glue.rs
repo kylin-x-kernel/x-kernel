@@ -84,14 +84,22 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-rng")] {
+        use alloc::sync::Arc;
+
+        use driver_base::DriverError;
+        use driver_os_api::{DeviceDma, DmaInfo, ResError};
+        use driver_os_api_xkernel::XKernelDeviceDma;
+
         pub(super) struct VirtIoRng;
 
         impl VirtIoRng {
+            /// Probe with the legacy static HAL. Only the PCI path, whose
+            /// firmware DMA description is out of scope, uses this.
             pub(super) fn try_new<T: virtio::Transport + Send + 'static>(
                 transport: T,
                 irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::HwrngDeviceImpl> {
-                let irq = irq.ok_or(driver_base::DriverError::InvalidInput)?;
+                let irq = irq.ok_or(DriverError::InvalidInput)?;
                 let device = virtio::VirtIoRngDev::<VirtIoHalImpl, T>::try_new_irq(
                     transport,
                     crate::rng_completion::new_rng_completion(),
@@ -102,6 +110,68 @@ cfg_if! {
                     ),
                 )?;
                 Ok(device)
+            }
+
+            /// Probe an MMIO device through its resolved firmware DMA view.
+            ///
+            /// Every queue ring and request buffer goes through the
+            /// device-scoped capability; there is no static-HAL fallback once a
+            /// firmware view exists.
+            pub(super) fn try_new_with_dma<T: virtio::Transport + Send + 'static>(
+                transport: T,
+                irq: Option<usize>,
+                info: DmaInfo,
+            ) -> DriverResult<kclass::prelude::HwrngDeviceImpl> {
+                let irq = irq.ok_or(DriverError::InvalidInput)?;
+                // `DeviceDmaBackend` requires a capability usable in both
+                // negotiated DMA modes (`access_platform` false and true). This
+                // wiring can neither pin the negotiated feature nor program an
+                // IOMMU-aware translation, so it only admits an identity window:
+                // then the address handed to the device is the same CPU physical
+                // address whether the device bypasses or uses platform DMA.
+                // This is a restriction of this consumer, not a claim that
+                // non-identity windows are invalid; a consumer that controls the
+                // negotiated mode or the IOMMU may use them.
+                if !info.window().is_identity() {
+                    return Err(DriverError::Unsupported);
+                }
+                let capability: Arc<dyn DeviceDma> = Arc::new(
+                    XKernelDeviceDma::new(info).map_err(map_dma_config_error)?,
+                );
+                // SAFETY: `XKernelDeviceDma` documents allocation, mapping and
+                // release as legal in ordinary IRQ context and never NMI. The
+                // RNG completion runs in hard IRQ and only releases mappings;
+                // queue/request allocation happens in this probe context. The
+                // capability is exclusive to this device and stays alive through
+                // every retained `DeviceDmaBackend` clone. The identity-window
+                // check above satisfies the adapter's requirement that the
+                // capability's addresses work in both `access_platform` modes,
+                // and the capability contract guarantees zero-filled coherent
+                // allocations for queue setup.
+                let backend = unsafe { virtio::DeviceDmaBackend::new(capability) };
+                let device =
+                    virtio::VirtIoRngDev::<VirtIoHalImpl, T, virtio::DeviceDmaBackend>::try_new_irq_with_dma(
+                        transport,
+                        crate::rng_completion::new_rng_completion(),
+                        crate::resource::resource_provider(),
+                        driver_os_api::IrqResource::plain(
+                            driver_os_api::Virq::new(irq),
+                            driver_os_api::IrqTrigger::Unknown(0),
+                        ),
+                        backend,
+                    )?;
+                Ok(device)
+            }
+        }
+
+        fn map_dma_config_error(error: ResError) -> DriverError {
+            match error {
+                ResError::InvalidResource => DriverError::InvalidInput,
+                ResError::Unsupported => DriverError::Unsupported,
+                ResError::NoMemory => DriverError::NoMemory,
+                ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
+                ResError::BadState | ResError::NotFound | ResError::MappingFailed
+                | ResError::Io => DriverError::Io,
             }
         }
     }

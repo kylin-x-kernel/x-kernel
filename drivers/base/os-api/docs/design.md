@@ -10,6 +10,25 @@ is separate from DMA; IoPortRange describes ports, not MMIO mappings.
 irq-types supplies shared trigger/controller/domain values to kirq and os-api.
 Domain values do not register or retain a host mapping.
 
+## Device DMA views
+DmaWindow is one fully resolved CPU-to-device window; DmaInfo pairs it with a
+device address mask and the effective coherency decision. Neither type applies
+ancestor translation, reads firmware or supplies defaults. Identity is an
+explicit construction, an absent window is not unlimited, and noncontiguous
+masks, disjoint range maps and IOMMU address spaces are rejected rather than
+approximated. `translate_range` validates the whole interval, including the
+last byte, against both the window and the mask.
+
+DeviceDma is a held, device-scoped capability over one immutable DmaInfo. Every
+allocation and mapping is constrained by that view; it never selects a device
+from ambient state. Coherent allocations are zero-filled over their full
+extent as part of the contract, so queue users never depend on the page
+allocator returning clean memory. Coherent buffers are returned with the
+original release token, and streaming mappings are non-cloneable guards
+carrying the native release hook, so a translated bus address cannot lose its
+reverse mapping. Hosts that cannot implement the window or coherency policy
+return Unsupported.
+
 ## Ownership and context
 IoMap retains its mapping/provider, CoherentMem its exact allocation/provider,
 CpuBuffer its original Layout/provider, and DevIrq its resource/action token.

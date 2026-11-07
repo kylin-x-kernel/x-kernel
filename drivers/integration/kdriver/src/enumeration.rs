@@ -11,6 +11,7 @@
 use alloc::vec::Vec;
 
 use driver_base::DriverResult;
+use driver_os_api::DmaInfo;
 use kdevice::{
     BusId, DeviceDesc, DeviceDescId, DeviceId, DeviceIdentity, DeviceLocation, DiscoveryOrigin,
     ProbeOutcome, ResourceSet, TransportInfo,
@@ -75,8 +76,33 @@ impl EnumerationContext {
         transport: Option<TransportInfo>,
         resources: ResourceSet,
     ) -> DriverResult<DeviceDescId> {
-        let desc = kdevice::device_desc_add_with_parent(
-            bus_id, parent, location, origin, identity, transport, resources,
+        self.register_device_with_dma(
+            bus_id, parent, location, origin, identity, transport, resources, None,
+        )
+    }
+
+    /// Same as [`register_device_with_parent`], plus a resolved DMA view.
+    ///
+    /// `dma` is `None` when the backend established no view; it is never a
+    /// substitute for an explicit identity or coherent policy.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Enumeration supplies the \
+                  complete device descriptor, parent and DMA view in one registration"
+    )]
+    pub fn register_device_with_dma(
+        &mut self,
+        bus_id: BusId,
+        parent: Option<DeviceId>,
+        location: DeviceLocation,
+        origin: DiscoveryOrigin,
+        identity: DeviceIdentity,
+        transport: Option<TransportInfo>,
+        resources: ResourceSet,
+        dma: Option<DmaInfo>,
+    ) -> DriverResult<DeviceDescId> {
+        let desc = kdevice::device_desc_add_with_dma(
+            bus_id, parent, location, origin, identity, transport, resources, dma,
         )?;
         let id = desc.id();
         self.registered_count += 1;

@@ -61,7 +61,7 @@ ranges the drivers granted (see Threat T-02).
 
 ## Unsafe Code
 
-Concentrated in four public unsafe functions plus internal forwardings,
+Concentrated in five public unsafe functions plus internal forwardings,
 each with `# Safety` sections and `SAFETY:` comments:
 
 - `allocate_dma_memory(layout)` — hands out coherent, device-reachable
@@ -71,10 +71,15 @@ each with `# Safety` sections and `SAFETY:` comments:
 - `deallocate_dma_memory(dma, layout)` — matching release; the layout
   must match the allocation.
 - `map_dma_buffer(buffer, direction)` — stages the buffer through the
-  bounce pool. Caller obligations: buffer stays live and exclusively
+  bounce pool for every direction, so RX data is also initialized in the
+  bounce copy. Caller obligations: buffer stays live and exclusively
   owned until `unmap_dma_buffer`, device access stops before unmap.
 - `unmap_dma_buffer(dma_addr, buffer, direction)` — exact-once, matching
   address and length.
+- `cancel_dma_mapping(dma_addr, len)` — releases a mapping that was never
+  published to a device, without copying bounce contents back. Caller
+  obligations: exact live mapping, cancelled once, device never received
+  the address.
 - Internal blocks: `NonNull::new_unchecked` on freshly allocated (never
   null) pages; `copy_nonoverlapping` between distinct live regions of
   caller-declared length; TLSF pool deallocation with a containment

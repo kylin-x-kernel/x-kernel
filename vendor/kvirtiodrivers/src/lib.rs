@@ -6,9 +6,11 @@
 //! # Usage
 //!
 //! You must first implement the [`Hal`] trait, to allocate DMA regions and translate between
-//! physical addresses (as seen by devices) and virtual addresses (as seen by your program). You can
-//! then construct the appropriate transport for the VirtIO device, e.g. for an MMIO device (perhaps
-//! discovered from the device tree):
+//! physical addresses (as seen by devices) and virtual addresses (as seen by your program).
+//! Drivers with a per-device DMA view may instead pass a [`DmaBackend`] to the
+//! `new_with_dma` constructors; the [`StaticHal`] default forwards to [`Hal`] when no such view
+//! exists. You can then construct the appropriate transport for the VirtIO device, e.g. for an
+//! MMIO device (perhaps discovered from the device tree):
 //!
 //! ```
 //! use core::ptr::NonNull;
@@ -66,7 +68,7 @@ pub mod transport;
 use device::socket::SocketError;
 use thiserror::Error;
 
-pub use self::hal::{BufferDirection, Hal, PhysAddr};
+pub use self::hal::{BufferDirection, DmaBackend, Hal, PhysAddr, StaticHal};
 pub use safe_mmio::UniqueMmioPointer;
 
 /// The page size in bytes supported by the library (4 KiB).

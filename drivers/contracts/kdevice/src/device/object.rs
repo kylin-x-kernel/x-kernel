@@ -11,6 +11,7 @@ use core::{
 };
 
 use driver_base::DeviceKind;
+use driver_os_api::DmaInfo;
 use kspin::SpinNoPreempt;
 
 use crate::{
@@ -45,6 +46,8 @@ pub struct DeviceObject {
     identity: DeviceIdentity,
     transport: Option<TransportInfo>,
     resources: ResourceSet,
+    /// Resolved DMA view carried over from discovery, if any.
+    dma: Option<DmaInfo>,
     lifecycle: AtomicU8,
     /// Outstanding in-use references handed out by [`DeviceObject::try_acquire`].
     ///
@@ -101,6 +104,7 @@ impl DeviceObject {
             identity,
             transport,
             resources,
+            dma: None,
             lifecycle: AtomicU8::new(DeviceState::Discovered.as_u8()),
             usage: AtomicUsize::new(0),
             devres: SpinNoPreempt::new(Vec::new()),
@@ -145,9 +149,24 @@ impl DeviceObject {
         self.transport
     }
 
+    /// Attach the DMA view resolved during discovery.
+    ///
+    /// This is a construction-time builder; publish the object only after the
+    /// view is final. `None` means discovery established no view, not that the
+    /// device is unlimited or coherent.
+    pub fn with_dma(mut self, dma: Option<DmaInfo>) -> Self {
+        self.dma = dma;
+        self
+    }
+
     /// Borrow hardware resources associated with this device.
     pub fn resources(&self) -> &ResourceSet {
         &self.resources
+    }
+
+    /// Resolved DMA view, if discovery established one.
+    pub const fn dma(&self) -> Option<DmaInfo> {
+        self.dma
     }
 
     /// Find the first MMIO resource.
@@ -414,6 +433,7 @@ impl DeviceObject {
             identity: self.identity,
             transport: self.transport,
             resources: self.resources.clone(),
+            dma: self.dma,
             driver_name: state.driver_name,
             driver_id: state.driver_id,
             device_kind: state.device_kind,

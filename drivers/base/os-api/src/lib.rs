@@ -12,6 +12,8 @@
 
 extern crate alloc;
 
+use alloc::sync::Arc;
+
 mod dma;
 mod error;
 mod irq;
@@ -19,9 +21,15 @@ mod memory;
 mod mmio;
 mod time;
 
+/// A provider-supplied cleanup action, invoked exactly once.
+///
+/// Hooks must not panic. Their execution context is defined by the guard that
+/// owns them.
+pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
+
 pub use dma::{
-    CoherentArray, CoherentBox, CoherentMem, DmaAllocation, DmaDirection, DmaMapping, DmaOp,
-    DmaSpec,
+    CoherentArray, CoherentBox, CoherentMem, DeviceDma, DmaAllocation, DmaDirection, DmaInfo,
+    DmaMapping, DmaOp, DmaSpec, DmaWindow, StreamingMapping,
 };
 pub use error::{ResError, ResResult};
 pub use irq::{
@@ -33,3 +41,4 @@ pub use mmio::{IoMap, IoPortRange, MmioMapping, MmioOp, MmioRegion};
 pub use time::TimeOp;
 
 unittest::path_mod_test!(tests, "../ut-tests/guards.rs");
+unittest::path_mod_test!(dma_view_tests, "../ut-tests/dma.rs");

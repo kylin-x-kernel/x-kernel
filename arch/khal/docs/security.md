@@ -94,8 +94,15 @@ generic `kirq` API。
    instead of adopting an untranslated address. It exposes the IRQ declaration
    as `Result<Option<FwIrqSpec>, FwError>`, so an unreadable or malformed
    declaration remains an error and is never conflated with an absent IRQ or a
-   raw firmware number. This layer adds no cell decode, unsafe code, mapping or
-   hardware access.
+   raw firmware number. Resolved DMA facts are not snapshotted here: the
+   neutral `FwNode` is retained, and consumers query `dma_window()` /
+   `dma_effective_coherency()` on demand, so the backend performs the
+   firmware-specific DMA-parent walk, ancestor translation and coherency
+   inheritance. Absence crosses the contract as `Ok(None)`, while malformed or
+   unsupported descriptions stay `Result` errors; this layer substitutes no
+   unlimited mask, generic coherency default or ancestor translation. The
+   handle grants no memory or hardware access. This layer adds no cell decode,
+   unsafe code, mapping or hardware access.
 
 本模块不直接处理用户指针、DMA buffer、设备 MMIO 或文件/网络数据。
 

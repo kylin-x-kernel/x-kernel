@@ -1,5 +1,36 @@
 # rs_fdtree — Design
 
+## DMA declarations and resolved windows
+
+The allocation-free DMA module has two levels.
+
+**Local facts.** `parse_dma_ranges` and `FdtNode::dma_ranges` parse a bus node's
+own `dma-ranges` tuples; `FdtNode::dma_coherency` reads only that node's
+boolean flags. They preserve missing versus identity versus multiple windows,
+check tuple arithmetic and reject malformed/duplicate properties. Cell widths
+default to 2 address / 1 size; explicitly unsupported widths are errors.
+
+**DT semantics.** `FdtNode::device_dma_window` applies Linux's DMA-parent walk:
+start at the structural parent, skip empty declarations while the walk
+continues, stop at the first nonempty one, require exactly one window, and
+translate its parent-side address upward through every ancestor `dma-ranges`
+boundary. A missing declaration on the first node is tolerated but a later
+absence is not (mirroring `of_dma_get_range`). The whole `[start, start + size)`
+interval must be contained in each ancestor window; ambiguous overlapping
+ancestor windows are rejected. `interconnects`/`interconnect-names` and
+`iommus`/`iommu-map` are rejected as topology this window cannot represent.
+`FdtNode::inherited_dma_coherency` walks self and ancestors, first explicit
+declaration wins, and absence stays `Ok(None)` (mirroring the walk inside
+`of_dma_is_coherent`, without its platform default).
+
+These results are DT interpretation, not CPU DMA permissions: device masks,
+platform coherency defaults, IOMMU routing and host policy remain with the
+device integration layer and the DMA provider. The fwnode backend exposes both
+results as neutral `FwDmaWindow`/coherency queries. The DT-internal
+`DeviceDmaError::Missing` is converted to `Ok(None)` at that boundary, because
+the neutral contract represents every absence as `Ok(None)`; malformed,
+multi-window, IOMMU and untranslatable descriptions remain typed errors.
+
 ## Strict property and structural access
 
 Strict scalar/string/array reads validate encoding and distinguish duplicate,

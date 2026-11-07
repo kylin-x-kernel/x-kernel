@@ -1,7 +1,10 @@
 #[cfg(test)]
 pub mod fake;
 
-use crate::{Error, PAGE_SIZE, Result};
+mod backend;
+pub use backend::{DmaBackend, StaticHal};
+
+use crate::{PAGE_SIZE, Result};
 use core::{marker::PhantomData, ptr::NonNull};
 
 /// A physical address as used for virtio.
@@ -9,20 +12,23 @@ pub type PhysAddr = u64;
 
 /// A region of contiguous physical memory used for DMA.
 #[derive(Debug)]
-pub struct Dma<H: Hal> {
+pub struct Dma<H: Hal, B: DmaBackend = StaticHal<H>> {
     paddr: PhysAddr,
     vaddr: NonNull<u8>,
     pages: usize,
     access_platform: bool,
+    direction: BufferDirection,
+    backend: B,
     _hal: PhantomData<H>,
 }
 
-// SAFETY: DMA memory can be accessed from any thread.
-unsafe impl<H: Hal> Send for Dma<H> {}
+// SAFETY: DMA memory can be accessed from any thread; the retained backend is Send.
+unsafe impl<H: Hal, B: DmaBackend + Send> Send for Dma<H, B> {}
 
 // SAFETY: `&Dma` only allows pointers and physical addresses to be returned. Any actual access to
 // the memory requires unsafe code, which is responsible for avoiding data races.
-unsafe impl<H: Hal> Sync for Dma<H> {}
+// The retained backend is Sync, so sharing its reference adds no data race.
+unsafe impl<H: Hal, B: DmaBackend + Sync> Sync for Dma<H, B> {}
 
 impl<H: Hal> Dma<H> {
     /// Allocates the given number of pages of physically contiguous memory to be used for DMA in
@@ -30,15 +36,29 @@ impl<H: Hal> Dma<H> {
     ///
     /// The pages will be zeroed.
     pub fn new(pages: usize, direction: BufferDirection, access_platform: bool) -> Result<Self> {
-        let (paddr, vaddr) = H::dma_alloc(pages, direction, access_platform);
-        if paddr == 0 {
-            return Err(Error::DmaError);
+        Self::new_with_dma(pages, direction, access_platform, StaticHal::default())
+    }
+}
+
+impl<H: Hal, B: DmaBackend> Dma<H, B> {
+    /// Allocates DMA memory while retaining the backend responsible for release.
+    pub fn new_with_dma(
+        pages: usize,
+        direction: BufferDirection,
+        access_platform: bool,
+        backend: B,
+    ) -> Result<Self> {
+        if pages == 0 || pages.checked_mul(PAGE_SIZE).is_none() {
+            return Err(crate::Error::InvalidParam);
         }
+        let (paddr, vaddr) = backend.allocate(pages, direction, access_platform)?;
         Ok(Self {
             paddr,
             vaddr,
             pages,
             access_platform,
+            direction,
+            backend,
             _hal: PhantomData,
         })
     }
@@ -62,13 +82,19 @@ impl<H: Hal> Dma<H> {
     }
 }
 
-impl<H: Hal> Drop for Dma<H> {
+impl<H: Hal, B: DmaBackend> Drop for Dma<H, B> {
     fn drop(&mut self) {
-        // SAFETY: The memory was previously allocated by `dma_alloc` in `Dma::new`,
-        // not yet deallocated, and we are passing the values from then.
-        let err =
-            unsafe { H::dma_dealloc(self.paddr, self.vaddr, self.pages, self.access_platform) };
-        assert_eq!(err, 0, "failed to deallocate DMA");
+        // SAFETY: This backend allocated the live region; every argument is
+        // retained unchanged from that allocation and this owner releases it once.
+        unsafe {
+            self.backend.deallocate(
+                self.paddr,
+                self.vaddr,
+                self.pages,
+                self.direction,
+                self.access_platform,
+            );
+        }
     }
 }
 

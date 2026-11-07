@@ -42,6 +42,7 @@ unittest::path_mod_test!(
 mod bus;
 pub mod driver_registry;
 mod enumeration;
+mod firmware_dma;
 mod manager;
 mod resource;
 #[cfg(feature = "hwrng")]

@@ -3,7 +3,8 @@
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs`, `src/manager.rs`,
-`src/enumeration.rs`, `src/resource.rs`, `src/block_completion*.rs`,
+`src/enumeration.rs`, `src/resource.rs`, `src/firmware_dma.rs`,
+`src/block_completion*.rs`,
 `src/block_irq.rs`, `src/bus/`, and `src/driver_registry/` (including
 the VirtIO, block, char, and net driver glue), plus `src/tests/`, which
 is test-only. Reusable concrete drivers behind the registry are audited
@@ -61,6 +62,20 @@ driver-os-api-xkernel / kirq / khal / kdma / memspace / driver crates
   leaves no INTx resource, without excluding later MSI/MSI-X setup. Mapping
   preparation neither installs a handler nor activates hardware. This adapter
   does not dispose a shared route after a failed driver probe.
+- Firmware DMA declarations are untrusted input. `firmware_dma` requires an
+  explicit device mask, walks the DMA-parent path and ancestor windows with
+  checked arithmetic, validates the whole interval, and rejects multi-window,
+  IOMMU, interconnect-redirected, root-boundary and untranslatable topology
+  instead of guessing. A missing `dma-ranges` or coherency declaration is
+  never converted to an unlimited window, identity mapping or coherent
+  default, except by the QEMU `virt` platform policy: a `virtio,mmio` node
+  under a recognized Arm or RISC-V machine root may use the firmware-described
+  RAM interval as an identity window, and RISC-V may use its architecture's
+  `ARCH_DMA_DEFAULT_COHERENT` value. That exception is scoped to the machine
+  root, available nodes and `simple-bus` containers; it is not a general
+  fallback. The resulting `DmaInfo` is a constraint passed to `kdma`; it does
+  not itself authorize a mapping, and `None` means no resolved view. Platform
+  Hwrng probe fails without a view instead of falling back to the static HAL.
 - `kdriver` and `driver-os-api-xkernel` trust `memspace::iomap_device` to reject mappings
   of invalid physical address ranges.
 - `driver-os-api-xkernel` trusts `kdma::allocate_dma_memory` and
@@ -118,6 +133,8 @@ Threat analysis should cover:
 - Whether invalid firmware addresses can make MMIO mappings overwrite critical kernel data.
 - Whether zero addresses left after PCI BAR allocation can bypass checks and map page zero.
 - Whether devres IRQ handlers and `kirq` shared-action tokens have matching lifetimes.
+- Whether malformed, absent or ambiguous firmware DMA ranges can widen a
+  device's reachable memory or mark it incorrectly coherent.
 - Whether mismatched DMA allocation/free layouts can corrupt memory.
 - Whether paired `share`/`unshare` operations in the VirtIO HAL withstand malicious device DMA.
 - Whether devres release ordering during device removal can cause use-after-free.

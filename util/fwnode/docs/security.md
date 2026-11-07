@@ -19,9 +19,22 @@ arbitrary `FwNodeId`. Every backend method must treat an unknown ID as
 an unchecked ID. `FwNodeId::raw()` exposes the encoding for diagnostics and
 for passing it back to the same backend, not for dereferencing.
 
+## DMA Declaration Boundary
+
+Local DMA facts are untrusted firmware input. The contract preserves the
+distinction between an absent declaration, an empty identity declaration and
+explicit windows, and `dma_range` validates the complete declaration before
+returning any window. A range is not a device DMA mask, an ancestor
+translation, a coherency default or an authorization to program a device.
+Backends without DMA facts return `Unsupported`; consumers must not convert
+that error, or an absent declaration, into an implicit permissive default. A
+missing coherency declaration may be resolved only by an explicit, scoped
+platform policy.
+
 ## Scope
 
-The analysis covers `src/lib.rs` and the host tests in `tests/property.rs`.
+The analysis covers `src/lib.rs` and the host tests in `tests/property.rs` and
+`tests/dma.rs`.
 `FwSource` is backend-reported, descriptive metadata; it must never be used as
 an identity or to bypass node validation.
 The crate has no `unsafe` code, no allocation and no dependencies, so there is
@@ -74,6 +87,7 @@ no external-input parsing surface inside it.
 | T-04 | Backend returns data with an invalid handle | Low — missing resource or error | Backend bug or corrupt firmware | The contract does not index; the backend must validate IDs before use. |
 | T-05 | Non-terminating traversal or identity list | Medium — CPU hang in a consumer | Backend violates parent/sibling or `firmware_id` termination | Documented backend obligation; no in-contract bound, because a valid tree size is backend-specific. |
 | T-06 | Handle use after the backend is dropped | High — dangling borrow, compile-time prevented | Caller stores a `FwNode` beyond the backend lifetime | `FwNode<'a>` borrows `&'a dyn FwNodeOps<'a>`; the Rust borrow checker enforces the lifetime. |
+| T-07 | Local DMA declaration treated as host policy | High — unrestricted or incoherent DMA programming | Consumer reads `Absent` or `None` as "anything works" | The contract exposes only local windows and explicit coherency; unsupported backends return `Unsupported`, and mask, ancestry, IOMMU and platform defaults stay with consumers. |
 
 ## Failure Modes
 

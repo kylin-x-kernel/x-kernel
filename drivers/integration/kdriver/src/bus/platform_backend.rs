@@ -13,7 +13,7 @@
 //! firmware-agnostic.
 
 use driver_base::DriverResult;
-use driver_os_api::{IrqOp, IrqResource};
+use driver_os_api::{DmaInfo, IrqOp, IrqResource};
 use kdevice::{
     BusId, BusTypeId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, MmioRegion,
     PlatformIdentity, ResourceDesc, ResourceSet,
@@ -25,6 +25,15 @@ use super::{backend::BusBackend, local_id::LocalIdAlloc};
 use crate::enumeration::EnumerationContext;
 
 const VIRTIO_MMIO_DT_COMPATIBLE: &str = "virtio,mmio";
+
+/// Address capability of a modern direct virtio-mmio transport.
+///
+/// This is a device-transport constraint, not a firmware window: the queue
+/// address registers accept a full-width guest physical address, and the
+/// resolved firmware view still bounds every allocation. The scoped QEMU virt
+/// policy is the only current producer of such a view; no other device class
+/// receives an implicit mask.
+const VIRTIO_MMIO_DMA_MASK: u64 = u64::MAX;
 
 /// Unified platform bus backend covering both firmware-described and
 /// compile-time-known devices.
@@ -141,13 +150,16 @@ impl PlatformBackend {
                     }
                 }
 
-                if let Err(err) = context.register_device(
+                let dma = firmware_dma_view(&dev);
+                if let Err(err) = context.register_device_with_dma(
                     bus_id,
+                    None,
                     location,
                     discovery_origin(dev.source),
                     identity,
                     transport,
                     resources,
+                    dma,
                 ) {
                     log::warn!(
                         "platform: failed to register {:?} from {:?}: {:?}",
@@ -163,6 +175,33 @@ impl PlatformBackend {
         match first_error {
             Some(err) => Err(err),
             None => Ok(()),
+        }
+    }
+}
+
+/// Compose one firmware device's DMA view.
+///
+/// Only DT virtio-mmio devices currently have an explicit mask policy. A
+/// composition failure is logged and leaves the descriptor without a view, so
+/// non-DMA drivers can still bind; it never substitutes an identity window or
+/// a coherent default.
+fn firmware_dma_view(device: &fw::FirmwareDevice) -> Option<DmaInfo> {
+    if device.source != fw::FirmwareSource::DeviceTree
+        || device.firmware_id != VIRTIO_MMIO_DT_COMPATIBLE
+    {
+        return None;
+    }
+    match crate::firmware_dma::from_firmware_with_qemu_virt_mmio_policy(
+        device,
+        VIRTIO_MMIO_DMA_MASK,
+    ) {
+        Ok(dma) => Some(dma),
+        Err(error) => {
+            log::warn!(
+                "platform: no DMA view for {}: {error:?}",
+                device.firmware_id
+            );
+            None
         }
     }
 }

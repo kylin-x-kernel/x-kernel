@@ -12,7 +12,7 @@ use driver_os_api::{DevIrq, IrqEvent, IrqHandler, IrqOp, IrqResource, ResError};
 use hwrng::{HwrngDevice, completion::RngCompletion};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
-    Hal,
+    DmaBackend, Hal, StaticHal,
     device::rng::VirtIORng,
     transport::{InterruptStatus, Transport},
 };
@@ -40,13 +40,13 @@ enum RequestState {
 }
 
 /// Queue state and DMA storage that a submitted request must retain together.
-struct RequestResources<H: Hal, T: Transport> {
-    device: VirtIORng<H, T>,
+struct RequestResources<H: Hal, T: Transport, B: DmaBackend> {
+    device: VirtIORng<H, T, B>,
     buffer: Box<[u8]>,
 }
 
-struct RngRequest<H: Hal, T: Transport> {
-    resources: ManuallyDrop<RequestResources<H, T>>,
+struct RngRequest<H: Hal, T: Transport, B: DmaBackend> {
+    resources: ManuallyDrop<RequestResources<H, T, B>>,
     state: RequestState,
     fault: Option<DriverError>,
 }
@@ -57,12 +57,12 @@ struct RngRequest<H: Hal, T: Transport> {
 // and the owned Box<[u8]> move together without relocating their backing storage.
 // H: Send and T: Send also require the HAL and transport themselves to be
 // transferable; moving the request therefore preserves its pointer validity.
-unsafe impl<H: Hal + Send, T: Transport + Send> Send for RngRequest<H, T> {}
+unsafe impl<H: Hal + Send, T: Transport + Send, B: DmaBackend + Send> Send for RngRequest<H, T, B> {}
 
-impl<H: Hal, T: Transport> RngRequest<H, T> {
-    fn new(transport: T) -> DriverResult<Self> {
+impl<H: Hal, T: Transport, B: DmaBackend> RngRequest<H, T, B> {
+    fn new(transport: T, backend: B) -> DriverResult<Self> {
         let buffer = vec![0; MAX_REQUEST_BYTES].into_boxed_slice();
-        let device = VirtIORng::new(transport).map_err(as_driver_error)?;
+        let device = VirtIORng::new_with_dma(transport, backend).map_err(as_driver_error)?;
         Ok(Self {
             resources: ManuallyDrop::new(RequestResources { device, buffer }),
             state: RequestState::Idle,
@@ -151,7 +151,7 @@ impl<H: Hal, T: Transport> RngRequest<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> Drop for RngRequest<H, T> {
+impl<H: Hal, T: Transport, B: DmaBackend> Drop for RngRequest<H, T, B> {
     fn drop(&mut self) {
         if matches!(self.state, RequestState::Pending(_)) {
             // Emergency fallback for a lost owner, which
@@ -179,8 +179,8 @@ impl<H: Hal, T: Transport> Drop for RngRequest<H, T> {
 /// The `request` SpinNoIrq lock serializes readers and IRQ completion, providing
 /// exclusive access to the queue, buffer, and request state through shared device
 /// references; RngRequest itself does not implement Sync.
-pub struct VirtIoRngDev<H: Hal, T: Transport> {
-    request: SpinNoIrq<RngRequest<H, T>>,
+pub struct VirtIoRngDev<H: Hal, T: Transport, B: DmaBackend = StaticHal<H>> {
+    request: SpinNoIrq<RngRequest<H, T, B>>,
     completion: Arc<dyn RngCompletion>,
     // Drop after `request`, so a normal request cleanup runs before this guard
     // unregisters its completion handler.
@@ -188,17 +188,40 @@ pub struct VirtIoRngDev<H: Hal, T: Transport> {
 }
 
 impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> {
-    /// Register completion delivery before allowing reads.
-    ///
-    /// The returned device owns the IRQ registration. Hardware teardown and
-    /// rebinding are not supported by this adapter yet.
+    /// Register completion delivery before allowing reads, using the static HAL
+    /// for DMA.
     pub fn try_new_irq(
         transport: T,
         completion: Arc<dyn RngCompletion>,
         provider: &'static dyn IrqOp,
         resource: IrqResource,
     ) -> DriverResult<Arc<Self>> {
-        let device = Arc::new(Self::new(transport, completion)?);
+        Self::try_new_irq_with_dma(
+            transport,
+            completion,
+            provider,
+            resource,
+            StaticHal::default(),
+        )
+    }
+}
+
+impl<H: Hal + Send + 'static, T: Transport + Send + 'static, B: DmaBackend + Send + 'static>
+    VirtIoRngDev<H, T, B>
+{
+    /// Register completion delivery before allowing reads.
+    ///
+    /// The returned device owns the IRQ registration and uses `backend` for all
+    /// queue and request DMA. Hardware teardown and rebinding are not supported
+    /// by this adapter yet.
+    pub fn try_new_irq_with_dma(
+        transport: T,
+        completion: Arc<dyn RngCompletion>,
+        provider: &'static dyn IrqOp,
+        resource: IrqResource,
+        backend: B,
+    ) -> DriverResult<Arc<Self>> {
+        let device = Arc::new(Self::new(transport, completion, backend)?);
         let handler: Arc<dyn IrqHandler> = device.clone();
         let weak = Arc::downgrade(&handler);
         let irq = DevIrq::request_with(
@@ -216,18 +239,18 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> 
     }
 }
 
-impl<H: Hal, T: Transport> VirtIoRngDev<H, T> {
-    // Only try_new_irq publishes this object; tests drive its IRQ explicitly.
-    fn new(transport: T, completion: Arc<dyn RngCompletion>) -> DriverResult<Self> {
+impl<H: Hal, T: Transport, B: DmaBackend> VirtIoRngDev<H, T, B> {
+    // Only try_new_irq* publishes this object; tests drive its IRQ explicitly.
+    fn new(transport: T, completion: Arc<dyn RngCompletion>, backend: B) -> DriverResult<Self> {
         Ok(Self {
-            request: SpinNoIrq::new(RngRequest::new(transport)?),
+            request: SpinNoIrq::new(RngRequest::new(transport, backend)?),
             completion,
             irq_guard: SpinNoIrq::new(None),
         })
     }
 }
 
-impl<H: Hal + Send, T: Transport + Send> Device for VirtIoRngDev<H, T> {
+impl<H: Hal + Send, T: Transport + Send, B: DmaBackend + Send> Device for VirtIoRngDev<H, T, B> {
     fn name(&self) -> &str {
         "virtio-rng"
     }
@@ -237,7 +260,9 @@ impl<H: Hal + Send, T: Transport + Send> Device for VirtIoRngDev<H, T> {
     }
 }
 
-impl<H: Hal + Send, T: Transport + Send> HwrngDevice for VirtIoRngDev<H, T> {
+impl<H: Hal + Send, T: Transport + Send, B: DmaBackend + Send> HwrngDevice
+    for VirtIoRngDev<H, T, B>
+{
     fn is_failed(&self) -> bool {
         self.request.lock().fault.is_some()
     }
@@ -267,7 +292,9 @@ impl<H: Hal + Send, T: Transport + Send> HwrngDevice for VirtIoRngDev<H, T> {
     }
 }
 
-impl<H: Hal + Send, T: Transport + Send> IrqHandler for VirtIoRngDev<H, T> {
+impl<H: Hal + Send, T: Transport + Send, B: DmaBackend + Send> IrqHandler
+    for VirtIoRngDev<H, T, B>
+{
     fn handle(&self, _irq: usize) -> IrqEvent {
         let mut request = self.request.lock();
         let status = request.resources.device.ack_interrupt();

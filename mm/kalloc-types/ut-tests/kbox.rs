@@ -39,6 +39,21 @@ fn raw_owner_roundtrip_preserves_address_and_drops_once() {
 }
 
 #[def_test]
+fn leak_preserves_address_metadata_and_skips_drop() {
+    let drops = Cell::new(0);
+    let owned: KBox<[DropProbe<'_>]> =
+        KBox::new_nowait([DropProbe(&drops), DropProbe(&drops)]).unwrap();
+    let address = owned.as_ptr();
+    let leaked = KBox::leak(owned);
+    assert_eq!(leaked.as_ptr(), address);
+    assert_eq!(leaked.len(), 2);
+    assert_eq!(drops.get(), 0);
+    leaked[0].0.set(7);
+    let shared: &[DropProbe<'_>] = leaked;
+    assert_eq!(shared[0].0.get(), 7);
+}
+
+#[def_test]
 fn raw_dst_roundtrip_retains_slice_and_trait_metadata() {
     let drops = Cell::new(0);
     let owned: KBox<[DropProbe<'_>]> =

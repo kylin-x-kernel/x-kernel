@@ -59,7 +59,12 @@ exercise sizes, alignment and initialization.
 
 DMA retains the mainline DmaOp implementation and its caller obligations:
 coherent metadata must be paired exactly, streaming buffers must remain valid,
-and device access must end before release. This migration does not introduce
-per-device DMA policy, new bounce handling or hardware validation. The existing
-zero-bus streaming-release shortcut is unchanged, not certified as a general
-DMA-address rule. Time forwarding retains the host monotonic-clock assumption.
+and device access must end before release. DeviceDma adds one bounded,
+device-scoped view: noncoherent devices are rejected rather than defaulted,
+every coherent allocation is checked over its page-rounded span against both
+the window and mask, and streaming guards retain the native kdma release token
+so the translated address cannot orphan its bounce mapping. It does not add
+IOMMU support, multiple windows, cache maintenance for noncoherent devices or
+hardware validation. The existing zero-bus streaming-release shortcut on the
+legacy DmaOp path is unchanged and is not certified as a general DMA-address
+rule. Time forwarding retains the host monotonic-clock assumption.

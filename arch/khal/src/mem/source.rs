@@ -49,11 +49,13 @@ pub(crate) fn has_described_regions() -> bool {
 }
 
 pub(crate) fn described_ram_regions() -> &'static [MemRange] {
+    try_described_ram_regions().expect("described RAM regions are not initialized")
+}
+
+/// Returns the firmware-described RAM ranges, or `None` before memory init.
+pub fn try_described_ram_regions() -> Option<&'static [MemRange]> {
     let count = DESCRIBED_RAM_COUNT.load(Ordering::Relaxed);
-    DESCRIBED_RAM_REGIONS
-        .get()
-        .map(|regions| &regions[..count])
-        .expect("described RAM regions are not initialized")
+    DESCRIBED_RAM_REGIONS.get().map(|regions| &regions[..count])
 }
 
 pub(crate) fn described_reserved_regions() -> &'static [ReservedRegion] {

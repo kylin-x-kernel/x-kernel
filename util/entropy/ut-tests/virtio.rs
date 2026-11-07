@@ -135,6 +135,7 @@ fn collector_retries_without_new_demand_and_stops_only_on_device_failure() {
             }),
             transport: None,
             resources: kdevice::ResourceSet::new(),
+            dma: None,
             driver: driver.clone(),
         })
         .unwrap();

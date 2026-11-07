@@ -218,6 +218,7 @@ impl BusBackend for PciBackend {
                 }),
                 transport: None,
                 resources: SmallVec::new(),
+                dma: None,
                 driver: pci_host_driver(),
             }) {
                 Ok(host) => {
@@ -319,6 +320,7 @@ impl BusBackend for PciBackend {
                 }),
                 transport: None,
                 resources: SmallVec::new(),
+                dma: None,
                 driver: pci_bridge_driver(),
             }) {
                 Ok(bridge_dev) => {

@@ -454,6 +454,63 @@ input/unsupported enumeration errors and never look like an absent IRQ.
 Provider tests cover mapping error classification and authoritative descriptor
 retention.
 
+### Firmware DMA configuration
+
+`firmware_dma` composes the neutral firmware facts carried by
+`FirmwareDevice` into one `driver_os_api::DmaInfo` and hands it to the device
+core through `register_device_with_dma`; descriptors, records, and device
+objects then expose the same immutable view. The composition is the kdriver
+half of Linux's split: the firmware backend owns DT encoding, the DMA-parent
+relationship, whole-window translation and coherency inheritance; fwnode
+exposes those results as neutral queries; kdriver applies device/bus policy;
+and `kdma` still owns allocation, mapping, and synchronization.
+
+The backend answers `FwNode::dma_window()` and
+`FwNode::dma_effective_coherency()`; this module contains no DT property names,
+ancestor walk or address translation.
+
+Rules enforced by `from_firmware`:
+
+- The device mask is an explicit argument from the device or bus policy. It is
+  never derived from the firmware window, and a firmware window is never
+  applied as a mask.
+- A missing resolved window or coherency declaration is an error, never an
+  unlimited/identity window or an invented default. Absence is carried by the
+  neutral contract as `Ok(None)`; a firmware read error is never converted
+  into absence, and absence is never converted into an error by the backend.
+- The backend reports multi-window declarations, ambiguous ancestor windows,
+  a declaration at the root boundary, `interconnects`/`interconnect-names`
+  DMA-parent redirection and `iommus`/`iommu-map` as typed `fwnode::FwDmaError`
+  variants. They are mapped one-to-one to configuration errors instead of being
+  reduced to a guessed window.
+- The full `[start, start + size)` interval is validated when the neutral
+  window is converted into `driver_os_api::DmaWindow`, including empty and
+  overflowing windows. The backend already validated containment in every
+  ancestor window against the whole interval.
+
+`from_firmware_with_qemu_virt_mmio_policy` adds one narrow platform exception
+for the QEMU `virt` machines that place `virtio,mmio` directly in CPU physical
+space: an available child of the `linux,dummy-virt` (Arm) or `riscv-virtio`
+(RISC-V) root, crossing at most available `simple-bus` containers, may use the
+single firmware-described RAM interval as an identity window when no
+`dma-ranges` exists. Explicit firmware facts and errors take precedence, and an
+ambiguous RAM description is an error.
+
+Coherency remains firmware-derived except on that same scoped RISC-V machine.
+Linux selects `CONFIG_ARCH_DMA_DEFAULT_COHERENT` for RISC-V, so
+`of_dma_is_coherent()` falls back to coherent when no declaration exists;
+`from_firmware_with_qemu_virt_mmio_policy` mirrors that machine/architecture
+default and nothing broader. Arm64 does not select it, so a missing coherency
+declaration remains an error there. Other nodes get no view at all; `None` on a
+device means "no resolved view", never unlimited addressing or implicit
+coherency.
+
+`ut-tests/firmware_dma.rs` exercises composition only — mask independence,
+missing facts, error mapping, window composition bounds and platform scope —
+against a backend that returns already-resolved facts. The DMA-parent walk,
+ancestor translation, topology rejection and coherency inheritance are tested
+in `rs_fdtree`'s own host tests (`tests_dma.rs` and `tests_fwnode.rs`).
+
 ### Driver matching and activation
 
 1. `EnumerationContext::probe_pending` takes all pending descriptors.
@@ -483,6 +540,27 @@ transports:
    - `DeviceKind::Input` → local `virtio/input.rs` activation → devres IRQ registration → PCI INTx enable when applicable → `kclass::publish_input`
    - `DeviceKind::Vsock` → `VirtIoSocket::try_new` → `kclass::publish_vsock`
    - `DeviceKind::Fs9p` → `VirtIo9p::try_new` → `kclass::publish_virtio_9p`
+   - `DeviceKind::Hwrng` (platform/MMIO only) → `VirtIoRng::try_new_with_dma`.
+     The firmware device's resolved `DmaInfo` is wrapped in
+     `XKernelDeviceDma` and `virtio::DeviceDmaBackend`, so every queue ring
+     and request buffer is allocated or mapped through that device's capability.
+     Because the vendor backend requires the same addresses to work whether or
+     not `VIRTIO_F_ACCESS_PLATFORM` is negotiated, this wiring admits only an
+     identity window (the QEMU case) and fails others with `Unsupported`; that
+     is a scoped consumer restriction, not a judgment about the window itself.
+     A platform Hwrng device without a resolved view fails the probe; it never
+     falls back to the static HAL. PCI Hwrng, whose firmware DMA description is
+     out of scope, keeps `VirtIoRng::try_new` and the static HAL.
+
+`DeviceDmaBackend` (in `drivers/devices/virtio/src/device_dma.rs`) is the
+private bridge between `driver_os_api::DeviceDma` and the vendor's raw
+`DmaBackend` tuple ABI. It stores the provider's `DmaAllocation` and
+`StreamingMapping` tokens under exact release keys so allocation and mapping
+release stay paired with the operation that created them. Queue setup requires
+zero-filled allocations; that is part of the `DeviceDma::alloc_coherent`
+contract and implemented by `XKernelDeviceDma`, not assumed from the page
+allocator. The vendor queue and RNG types are generic over the backend, with
+`StaticHal` as the default so existing drivers and tests are unchanged.
 
 ### Resource management (devres)
 

@@ -9,11 +9,14 @@ The framework owns provider custody and resource cleanup ordering.
 
 - MmioOp forwards mapping acquisitions and releases to memspace.
 - DmaOp preserves the mainline kdma coherent and streaming adapter.
+- DeviceDma binds one resolved DmaInfo to kdma: coherent allocations must fit
+  the window and mask over their full page-rounded span, and streaming
+  mappings are translated with a guard that retains the native release token.
 - CpuMemoryOp uses the fallible inherent kalloc allocator, not DMA storage.
 - IrqOp uses KIRQ shared hardirq registration and x86_64 MSI-X allocation.
 - TimeOp forwards to the host monotonic clock.
 
-These implementations live in src/{mmio,dma,memory,irq,time}.rs.
+These implementations live in src/{mmio,dma,device_dma,memory,irq,time}.rs.
 Kernel tests live in ut-tests and are mounted by their source modules.
 
 ## IRQ identity and results

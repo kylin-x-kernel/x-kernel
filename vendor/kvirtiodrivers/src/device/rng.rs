@@ -1,7 +1,8 @@
 //! Driver for VirtIO random number generator devices.
 use super::common::Feature;
 use crate::{
-    Error, Hal, Result,
+    Error, Hal, Result, StaticHal,
+    hal::DmaBackend,
     queue::VirtQueue,
     transport::{InterruptStatus, Transport},
 };
@@ -15,21 +16,32 @@ const SUPPORTED_FEATURES: Feature = Feature::RING_INDIRECT_DESC
     .union(Feature::ACCESS_PLATFORM);
 
 /// Driver for a VirtIO random number generator device.
-pub struct VirtIORng<H: Hal, T: Transport> {
+pub struct VirtIORng<H: Hal, T: Transport, B: DmaBackend = StaticHal<H>> {
     transport: T,
-    queue: VirtQueue<H, QUEUE_SIZE>,
+    queue: VirtQueue<H, QUEUE_SIZE, B>,
 }
 
 impl<H: Hal, T: Transport> VirtIORng<H, T> {
-    /// Create a new driver with the given transport.
-    pub fn new(mut transport: T) -> Result<Self> {
+    /// Create a new driver with the given transport, using the static HAL for DMA.
+    pub fn new(transport: T) -> Result<Self> {
+        Self::new_with_dma(transport, StaticHal::default())
+    }
+}
+
+impl<H: Hal, T: Transport, B: DmaBackend> VirtIORng<H, T, B> {
+    /// Create a new driver whose queue allocation and buffer mappings use `backend`.
+    ///
+    /// The backend must describe the DMA address space of this device. Passing a
+    /// backend for a different device is invalid.
+    pub fn new_with_dma(mut transport: T, backend: B) -> Result<Self> {
         let feat = transport.begin_init(SUPPORTED_FEATURES);
-        let queue = VirtQueue::new(
+        let queue = VirtQueue::new_with_dma(
             &mut transport,
             QUEUE_IDX,
             feat.contains(Feature::RING_INDIRECT_DESC),
             feat.contains(Feature::RING_EVENT_IDX),
             feat.contains(Feature::ACCESS_PLATFORM),
+            backend,
         )?;
         transport.finish_init();
         Ok(Self { transport, queue })
@@ -104,7 +116,7 @@ impl<H: Hal, T: Transport> VirtIORng<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> Drop for VirtIORng<H, T> {
+impl<H: Hal, T: Transport, B: DmaBackend> Drop for VirtIORng<H, T, B> {
     fn drop(&mut self) {
         self.transport.queue_unset(QUEUE_IDX);
     }

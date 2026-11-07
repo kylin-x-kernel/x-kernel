@@ -7,6 +7,7 @@
 use core::fmt::Debug;
 
 use driver_base::DeviceKind;
+use driver_os_api::DmaInfo;
 
 use crate::{BusId, DriverId, ResourceSet};
 
@@ -219,6 +220,12 @@ pub struct DeviceDesc {
     transport: Option<TransportInfo>,
     /// Resources (MMIO, IRQ, ...) described for the device.
     resources: ResourceSet,
+    /// Fully resolved DMA view, when the discovering backend composed one.
+    ///
+    /// `None` means no view was established; it does not mean unlimited
+    /// addressing or coherent DMA. Bus backends that describe DMA must build
+    /// the view from firmware facts and platform policy before registration.
+    dma: Option<DmaInfo>,
 }
 
 impl DeviceDesc {
@@ -267,7 +274,23 @@ impl DeviceDesc {
             identity,
             transport,
             resources,
+            dma: None,
         }
+    }
+
+    /// Record a fully resolved DMA view for this candidate.
+    ///
+    /// The view is immutable once the descriptor is registered with the
+    /// device core, so callers must finish firmware and platform composition
+    /// first.
+    pub fn with_dma(mut self, dma: DmaInfo) -> Self {
+        self.dma = Some(dma);
+        self
+    }
+
+    /// Resolved DMA view, if the discovering backend composed one.
+    pub const fn dma(&self) -> Option<DmaInfo> {
+        self.dma
     }
 
     /// Descriptor ID.
@@ -392,6 +415,8 @@ pub struct DeviceRecord {
     pub transport: Option<TransportInfo>,
     /// Resources (MMIO, IRQ, ...) described for the device.
     pub resources: ResourceSet,
+    /// Resolved DMA view, if the discovering backend composed one.
+    pub dma: Option<DmaInfo>,
     /// Name of the bound driver, once bound.
     pub driver_name: Option<&'static str>,
     /// Id of the bound driver, once bound.

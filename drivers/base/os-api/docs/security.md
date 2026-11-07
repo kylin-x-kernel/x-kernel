@@ -24,6 +24,7 @@ device shutdown is a framework/driver responsibility, not inferred from Drop.
 | Allocation failure | Typed error; failed acquisition registers nothing |
 | DMA still running at drop | Driver stops hardware before cleanup |
 | Invalid release context | Caller follows host provider's synchronous contract |
+| DMA view silently widened | Explicit identity/window constructors; mask validated as contiguous low bits; whole-interval translation checks window and mask; no missing-firmware default |
 
 MSI `try_free_msix` rejection must have no release side effects and returns the
 unchanged resource to its owner. Only success consumes ownership. The terminal

@@ -20,11 +20,13 @@ attribute transitions.
   (`kplat::dma::prepare`). `deallocate_dma_memory` reverses all three
   steps.
 - Temporary mappings: `map_dma_buffer(buffer, direction)` stages the
-  buffer through the coherent bounce pool (copy-in unless the direction is
-  `DeviceToDriver`), tracks the mapping in `active_mappings` keyed by bus
-  address, and fences (`SeqCst`) around the copies. `unmap_dma_buffer`
-  copies data back (unless `DriverToDevice`), removes the tracking entry,
-  and recycles the bounce buffer.
+  buffer through the coherent bounce pool (copy-in for every direction,
+  including `DeviceToDriver`), tracks the mapping in `active_mappings` keyed
+  by bus address, and fences (`SeqCst`) around the copies.
+  `unmap_dma_buffer` copies data back (unless `DriverToDevice`), removes the
+  tracking entry, and recycles the bounce buffer. `cancel_dma_mapping`
+  releases a mapping the device never received without any copy-back, for
+  rollback after a provider-side address check fails.
 - Address translation: `p2b` / `b2p` over the linear
   `kbuild_config::PHYS_BUS_OFFSET` mapping, and `DmaBusAddress` as the
   `u64` bus address wrapper handed to devices.
@@ -141,7 +143,7 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 
 ## Unsafe Code
 
-All unsafe surface is concentrated in four public functions and their
+All unsafe surface is concentrated in five public functions and their
 internal forwardings, each with `# Safety` sections and matching
 `SAFETY:` comments:
 
@@ -151,6 +153,9 @@ internal forwardings, each with `# Safety` sections and matching
 - `map_dma_buffer` / `unmap_dma_buffer` — buffer stays live and
   exclusively owned between the calls; device access stops before
   unmap; exact-once unmap with the matching address and length.
+- `cancel_dma_mapping` — the mapping is still unpublished (the device
+  never received the address); exact-once cancellation with the matching
+  address and length.
 - Internal unsafe blocks: `NonNull::new_unchecked` on freshly allocated
   non-null pages, and `copy_nonoverlapping` between distinct live regions
   of validated length.
@@ -160,7 +165,10 @@ internal forwardings, each with `# Safety` sections and matching
 - Bounce-staged temporary mappings behind a stable API: staging through
   pooled coherent memory keeps driver code simple and safe today; a
   direct-map fast path can be reintroduced later without touching
-  drivers.
+  drivers. Staging is direction-independent so a mapping released without
+  device access (queue-setup rollback) returns the original bytes for RX
+  as well as TX; unpublished failure rollback uses cancellation instead of
+  unmap so it never writes stale pool contents back.
 - Page-granular coherent allocations: page-table attribute updates and
   platform prepare/release hooks stay balanced per allocation, avoiding
   partial-page flag aliasing between coherent and cached uses.

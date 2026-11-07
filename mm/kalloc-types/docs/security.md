@@ -69,6 +69,9 @@ Recovery requires exactly one outstanding ownership right and the original
 non-null, aligned pointer, allocation provenance, type and DST metadata.
 No conflicting references may remain. Repeated recovery, foreign pointers and
 premature recovery during RCU reads violate the unsafe contract.
+`KBox::leak` is the safe alternative that never recovers ownership: the caller
+receives an unbounded borrow, so the allocation and value are intentionally
+retained for the remainder of execution.
 Dynamic drop still computes the layout while the value is valid, then destroys
 it once and frees with the matching backend. ZSTs never allocate or deallocate.
 Tests cover sized/DST address and metadata retention, single destruction,

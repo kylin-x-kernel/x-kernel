@@ -104,6 +104,29 @@ impl<T: ?Sized> KBox<T> {
             owner: PhantomData,
         }
     }
+
+    /// Consumes the owner and returns a mutable reference with an unbounded
+    /// lifetime, leaking the value and its storage.
+    ///
+    /// Neither the allocation nor `T::drop` is performed by this crate. The
+    /// returned reference preserves the value's address and DST metadata; it
+    /// may be coerced to a shared reference. This is the counterpart of
+    /// `Box::leak` for values that must outlive the code that created them,
+    /// such as `'static` test fixtures or boot-time configuration.
+    ///
+    /// # Execution context
+    /// Does not allocate, sleep or touch the allocator. Access through the
+    /// returned reference retains `T`'s own context requirements.
+    pub fn leak<'a>(owned: Self) -> &'a mut T
+    where
+        T: 'a,
+    {
+        // SAFETY: `into_raw` transfers the allocation's sole ownership to this
+        // call, and the owner is consumed so it can never be recovered. No
+        // other reference to the value exists, and the storage is never freed,
+        // so the returned borrow cannot conflict with or outlive an owner.
+        unsafe { &mut *Self::into_raw(owned) }
+    }
 }
 
 impl<T> KBox<T> {

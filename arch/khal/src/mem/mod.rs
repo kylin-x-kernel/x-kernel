@@ -12,6 +12,12 @@ use heapless::Vec;
 use lazyinit::LazyInit;
 pub use memaddr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
 
+/// Physical RAM ranges reported by firmware, before kernel image regions and
+/// reservations are added.
+///
+/// Returns `None` before boot memory initialization. Callers that restrict DMA
+/// to discovered RAM must treat `None` as unknown, not as unlimited memory.
+pub use self::source::try_described_ram_regions as boot_ram_regions;
 pub(crate) use self::source::{
     check_overlap, described_ram_regions, described_reserved_regions, has_described_regions,
     init_described_regions,

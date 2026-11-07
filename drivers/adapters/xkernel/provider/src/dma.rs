@@ -94,7 +94,7 @@ impl DmaOp for XKernelResourceProvider {
 }
 
 /// Translate a driver-os-api DMA direction into the matching `kdma` direction.
-fn map_dma_direction(d: DmaDirection) -> kdma::DmaDirection {
+pub(crate) fn map_dma_direction(d: DmaDirection) -> kdma::DmaDirection {
     match d {
         DmaDirection::DriverToDevice => kdma::DmaDirection::DriverToDevice,
         DmaDirection::DeviceToDriver => kdma::DmaDirection::DeviceToDriver,

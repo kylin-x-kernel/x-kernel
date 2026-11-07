@@ -5,6 +5,7 @@
 use alloc::sync::Arc;
 
 use driver_base::{DeviceKind, DriverResult};
+use driver_os_api::{DmaInfo, DmaWindow};
 use unittest::{assert_eq, def_test};
 
 use super::*;
@@ -38,6 +39,35 @@ impl DeviceDriver for MatchingDriver {
 fn reset_model() -> Arc<BusInstance> {
     let (_bus_type, bus) = crate::reset_and_setup_platform_bus_for_tests("descriptor-test-bus");
     bus
+}
+
+#[def_test(serial)]
+fn test_resolved_dma_view_reaches_descriptor_and_device() {
+    let bus = reset_model();
+    let info = DmaInfo::new(0xffff_ffff, DmaWindow::IDENTITY, true).unwrap();
+    let desc = device_desc_add_with_dma(
+        bus.id(),
+        None,
+        DeviceLocation::PlatformStatic { id: 4 },
+        DiscoveryOrigin::PlatformStatic,
+        DeviceIdentity::Platform(PlatformIdentity {
+            alias: Some("matched"),
+            firmware_id: None,
+        }),
+        None,
+        ResourceSet::new(),
+        Some(info),
+    )
+    .unwrap();
+    assert_eq!(desc.dma(), Some(info));
+
+    register_driver_object(Arc::new(MatchingDriver));
+
+    let records = crate::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].dma, Some(info));
+    let device = crate::find_device(records[0].id).unwrap();
+    assert_eq!(device.dma(), Some(info));
 }
 
 #[def_test(serial)]
@@ -102,6 +132,7 @@ fn test_adopt_active_device_registers_bound_object() {
         }),
         transport: None,
         resources: ResourceSet::new(),
+        dma: None,
         driver,
     })
     .unwrap();

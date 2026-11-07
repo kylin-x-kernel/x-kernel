@@ -268,7 +268,23 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
         #[cfg(feature = "virtio-rng")]
         DeviceKind::Hwrng => {
             use glue::VirtIoRng;
-            kclass::publish_hwrng(parent, VirtIoRng::try_new(transport, irq)?).map(drop)
+
+            // A platform (firmware) device must carry its resolved DMA view;
+            // silently falling back to the static HAL would create a second
+            // production DMA path for the same discovery route. PCI firmware
+            // DMA is outside this migration's scope and keeps the static HAL.
+            let device = match (parent.location(), parent.dma()) {
+                (DeviceLocation::Mmio { .. }, Some(info)) => {
+                    VirtIoRng::try_new_with_dma(transport, irq, info)?
+                }
+                (DeviceLocation::Mmio { .. }, None) => {
+                    log::warn!("virtio-rng: platform device has no resolved firmware DMA view");
+                    return Err(DriverError::Unsupported);
+                }
+                (DeviceLocation::Pci { .. }, _) => VirtIoRng::try_new(transport, irq)?,
+                _ => return Err(DriverError::Unsupported),
+            };
+            kclass::publish_hwrng(parent, device).map(drop)
         }
         _ => Err(DriverError::Unsupported),
     }

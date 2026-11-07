@@ -41,6 +41,8 @@ pub struct ActiveDeviceAdoption {
     pub transport: Option<crate::TransportInfo>,
     /// Resources already acquired for the running device.
     pub resources: ResourceSet,
+    /// Resolved DMA view, when boot code already composed one.
+    pub dma: Option<driver_os_api::DmaInfo>,
     /// Driver that owns the running device and will be recorded as bound.
     pub driver: Arc<DriverObject>,
 }
@@ -192,6 +194,31 @@ pub fn device_desc_add_with_parent(
     transport: Option<crate::TransportInfo>,
     resources: ResourceSet,
 ) -> Result<DeviceDesc, DriverError> {
+    device_desc_add_with_dma(
+        bus_id, parent, location, origin, identity, transport, resources, None,
+    )
+}
+
+/// Same as [`device_desc_add_with_parent`], plus a resolved DMA view.
+///
+/// The backend composes the view from firmware and platform facts before
+/// registration. Passing [`None`] records that no view was established; it
+/// never implies unlimited addressing or coherence.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Registration needs the full \
+              descriptor identity, parent, resources and DMA view in one call"
+)]
+pub fn device_desc_add_with_dma(
+    bus_id: BusId,
+    parent: Option<DeviceId>,
+    location: DeviceLocation,
+    origin: DiscoveryOrigin,
+    identity: DeviceIdentity,
+    transport: Option<crate::TransportInfo>,
+    resources: ResourceSet,
+    dma: Option<driver_os_api::DmaInfo>,
+) -> Result<DeviceDesc, DriverError> {
     init_device_registry();
 
     let (desc, bus_type) = {
@@ -202,6 +229,10 @@ pub fn device_desc_add_with_parent(
         let desc = DeviceDesc::new_with_parent(
             id, bus_id, parent, location, origin, identity, transport, resources,
         );
+        let desc = match dma {
+            Some(dma) => desc.with_dma(dma),
+            None => desc,
+        };
         index.add_device_desc(desc.clone());
         (desc, bus_type)
     };
@@ -257,15 +288,18 @@ fn new_unpublished_device_from_desc(
         (id, bus_type)
     };
     // Allocate the device object outside the registry lock.
-    let device = Arc::new(DeviceObject::new(
-        id,
-        desc.bus_id(),
-        desc.location(),
-        desc.origin(),
-        desc.identity(),
-        desc.transport(),
-        resources,
-    ));
+    let device = Arc::new(
+        DeviceObject::new(
+            id,
+            desc.bus_id(),
+            desc.location(),
+            desc.origin(),
+            desc.identity(),
+            desc.transport(),
+            resources,
+        )
+        .with_dma(desc.dma()),
+    );
     Ok((device, bus_type))
 }
 
@@ -476,15 +510,18 @@ pub fn adopt_active_device(
         adoption.transport,
         adoption.resources.clone(),
     );
-    let device = Arc::new(DeviceObject::new(
-        id,
-        adoption.bus_id,
-        adoption.location,
-        adoption.origin,
-        adoption.identity,
-        adoption.transport,
-        adoption.resources,
-    ));
+    let device = Arc::new(
+        DeviceObject::new(
+            id,
+            adoption.bus_id,
+            adoption.location,
+            adoption.origin,
+            adoption.identity,
+            adoption.transport,
+            adoption.resources,
+        )
+        .with_dma(adoption.dma),
+    );
 
     {
         let mut index = device_registry();

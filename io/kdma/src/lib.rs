@@ -10,8 +10,9 @@
 //! `kdma` is the kernel's DMA memory layer: [`allocate_dma_memory`] and
 //! [`deallocate_dma_memory`] manage coherent, device-reachable memory;
 //! [`map_dma_buffer`] / [`unmap_dma_buffer`] stage ordinary buffers
-//! through a coherent bounce pool for temporary transactions; [`p2b`] /
-//! [`b2p`] convert between physical and bus addresses. See
+//! through a coherent bounce pool for temporary transactions;
+//! [`cancel_dma_mapping`] releases a mapping that was never published. [`p2b`]
+//! / [`b2p`] convert between physical and bus addresses. See
 //! `docs/design.md` for the full boundary contracts.
 //!
 //! # Example
@@ -135,9 +136,9 @@ pub enum DmaDirection {
 /// Maps an existing buffer for temporary DMA access.
 ///
 /// The current backend always stages the mapping through pooled coherent bounce
-/// memory. Keeping this behind `kdma` lets future implementations restore
-/// direct-map optimizations with stricter page-granularity safety checks
-/// without changing driver code.
+/// memory and copies the original bytes for every direction. Keeping this
+/// behind `kdma` lets future implementations restore direct-map optimizations
+/// with stricter page-granularity safety checks without changing driver code.
 ///
 /// # Errors
 ///
@@ -188,6 +189,28 @@ pub unsafe fn unmap_dma_buffer(
             .lock()
             .unmap_dma_buffer(dma_addr, buffer, direction)
     }
+}
+
+/// Releases a mapping that was never handed to a device.
+///
+/// Unlike [`unmap_dma_buffer`], this performs no copy-back: mapping stages the
+/// original bytes for both read and write directions, and only an actual
+/// device transfer may change them. Use this for rollback when the mapping
+/// cannot be published, so a failed device-read mapping cannot clobber the
+/// caller's buffer.
+///
+/// # Safety
+///
+/// `dma_addr` must be the still-active address previously returned by
+/// [`map_dma_buffer`], `len` must equal the mapped length, and the mapping must
+/// be cancelled exactly once. No device may have accessed the address.
+/// # Panics
+///
+/// Panics when `dma_addr` is not active or `len` does not match; both are
+/// caller contract violations.
+pub unsafe fn cancel_dma_mapping(dma_addr: DmaBusAddress, len: usize) {
+    // SAFETY: forwards the caller's never-published mapping contract.
+    unsafe { ALLOCATOR.lock().cancel_dma_mapping(dma_addr, len) }
 }
 
 /// A bus memory address.

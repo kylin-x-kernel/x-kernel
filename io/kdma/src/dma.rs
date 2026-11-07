@@ -157,7 +157,7 @@ impl DmaAllocator {
     pub(crate) unsafe fn map_dma_buffer(
         &mut self,
         buffer: NonNull<[u8]>,
-        direction: DmaDirection,
+        _direction: DmaDirection,
     ) -> AllocResult<DmaInfo> {
         use core::sync::atomic::{Ordering, fence};
 
@@ -169,18 +169,20 @@ impl DmaAllocator {
         fence(Ordering::SeqCst);
         let (dma_info, layout) = self.alloc_bounce_buffer(len)?;
 
-        if direction != DmaDirection::DeviceToDriver {
-            // SAFETY: the bounce buffer and source slice are distinct live
-            // regions of `len` bytes established by the caller and allocator.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    buffer.as_ptr() as *const u8,
-                    dma_info.cpu_addr.as_ptr(),
-                    len,
-                );
-            }
-            fence(Ordering::SeqCst);
+        // Stage the current bytes for every direction, including DeviceToDriver.
+        // The device's writes still overwrite them, but a mapping that is
+        // released without device access (queue-setup rollback) then returns
+        // exactly the original data instead of copied-back pool contents.
+        // SAFETY: the bounce buffer and source slice are distinct live regions
+        // of `len` bytes established by the caller and allocator.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buffer.as_ptr() as *const u8,
+                dma_info.cpu_addr.as_ptr(),
+                len,
+            );
         }
+        fence(Ordering::SeqCst);
 
         if self
             .active_mappings
@@ -200,6 +202,38 @@ impl DmaAllocator {
         );
 
         Ok(dma_info)
+    }
+
+    /// Releases a bounced mapping that the device never received.
+    ///
+    /// The mapping must be unpublished: no device may have accessed its bus
+    /// address. Unlike [`Self::unmap_dma_buffer`] this performs no copy-back,
+    /// so rollback cannot overwrite the original buffer with stale or
+    /// uninitialized bounce contents.
+    ///
+    /// # Safety
+    ///
+    /// `dma_addr` must be the still-active mapping returned by
+    /// [`Self::map_dma_buffer`] and must be cancelled exactly once. The device
+    /// must never have been given the address.
+    pub(crate) unsafe fn cancel_dma_mapping(&mut self, dma_addr: DmaBusAddress, len: usize) {
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: The Safety contract requires dma_addr \
+                      to be the still-active mapping from map_dma_buffer, cancelled exactly once"
+        )]
+        let mapping = self
+            .active_mappings
+            .remove(&dma_addr.as_u64())
+            .unwrap_or_else(|| panic!("DMA mapping is not active: {:?}", dma_addr));
+
+        assert_eq!(
+            len, mapping.len,
+            "DMA buffer length mismatch for {:?}: expected {}, got {}",
+            dma_addr, mapping.len, len
+        );
+
+        self.recycle_bounce_buffer(mapping.cpu_addr, mapping.layout);
     }
 
     /// Unmaps a previously bounced DMA buffer and synchronizes data back.

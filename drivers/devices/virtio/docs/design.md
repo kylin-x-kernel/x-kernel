@@ -632,6 +632,28 @@ readers with completion. No device lock spans host waiting or notification.
 Empty reads do no I/O; wait failures leave submitted DMA storage owned by the
 driver. Short reads retain their unused cached suffix.
 
+### Per-device DMA backend
+
+`device_dma.rs` provides `DeviceDmaBackend`, an implementation of the vendor's
+`DmaBackend` over a `driver_os_api::DeviceDma` capability. `VirtQueue` and
+`VirtIORng` are generic over `B: DmaBackend` (`StaticHal<H>` by default), so a
+caller that holds a resolved device view can route ring allocation and request
+sharing through that one device instead of the static HAL. `VirtIoRngDev` adds
+`try_new_irq_with_dma` for this case; `try_new_irq` retains the static path.
+
+The adapter stores the provider's `DmaAllocation` and `StreamingMapping` tokens
+in exact-key maps and removes them under the record lock, releasing the token
+after the lock is dropped. A rejected duplicate share is released immediately;
+a rejected duplicate coherent allocation is returned through `free_coherent`
+because `DmaAllocation` is a plain record without a drop guard. Allocation
+validates the complete page-rounded interval, both addresses' page alignment,
+and overflow before publishing the tuple. The constructor is `unsafe` because
+the provider's operation context, exclusivity and byte-preservation guarantees
+cannot be checked here.
+
+`ut-tests/device_dma_unittest.rs` covers allocation release, streaming release,
+duplicate rejection and empty-buffer rejection with a counting fake provider.
+
 Completion includes HAL unshare in hard IRQ context. The backend must be
 IRQ-safe and non-sleeping. X-Kernel's backend takes the global kdma allocator
 lock during unmap; one-request reclamation does not imply bounded IRQ latency.

@@ -12,6 +12,11 @@ extern crate alloc;
 mod address;
 #[cfg(feature = "alloc")]
 pub use address::{AddressError, AddressErrorReason, MmioResource};
+mod dma;
+pub use dma::{
+    DeviceDmaError, DeviceDmaWindow, DmaRange, DmaRangeError, DmaRangeIter, DmaRanges,
+    parse_dma_ranges,
+};
 #[cfg(feature = "alloc")]
 mod index;
 #[cfg(feature = "alloc")]

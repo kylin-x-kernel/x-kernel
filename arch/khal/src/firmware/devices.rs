@@ -23,7 +23,10 @@
 //! Common interrupt / PCI host description types live in `of` today and are
 //! re-exported here so callers depend only on `khal::firmware::devices::*`.
 
-pub use fwnode::{FwError, FwIrqSpec};
+pub use fwnode::{
+    FwDmaError, FwDmaRange, FwDmaRanges, FwDmaWindow, FwError, FwIrqSpec, FwMmioResource, FwNode,
+    FwNodeId, FwNodeOps, FwProperty, FwPropertyValue, FwReference, FwSource,
+};
 #[cfg(target_arch = "x86_64")]
 use lazyinit::LazyInit;
 pub use of::{
@@ -56,10 +59,20 @@ pub enum FirmwareSource {
 /// against per-driver firmware ID tables. Resources are optional because not
 /// every firmware node carries them. `source` records which firmware table the
 /// description came from so consumers do not have to hard-code an origin.
+///
+/// Resources are normalized here; firmware-specific interpretation stays
+/// behind the neutral `node` handle. Ancestor translation, the device DMA
+/// mask, coherency defaults and IOMMU routing remain integration policy.
 #[derive(Debug, Clone, Copy)]
 pub struct FirmwareDevice {
     pub firmware_id: &'static str,
     pub source: FirmwareSource,
+    /// Backend-neutral handle to the matched firmware node.
+    ///
+    /// Consumers that need more than the normalized resources below — for
+    /// example the resolved DMA window and effective coherency — query this
+    /// handle rather than depending on a concrete firmware parser.
+    pub node: FwNode<'static>,
     pub mmio: Option<MmioResource>,
     /// The node's first interrupt declaration, still carrying its exact
     /// controller node and complete binding cells. A malformed declaration is
@@ -220,6 +233,7 @@ pub fn for_each_compatible(
         visitor(FirmwareDevice {
             firmware_id,
             source: FirmwareSource::DeviceTree,
+            node,
             mmio,
             irq,
         });

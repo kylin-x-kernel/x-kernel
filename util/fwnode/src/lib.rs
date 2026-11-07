@@ -170,6 +170,101 @@ pub trait FwNodeOps<'a>: Sync + 'a {
         index: usize,
     ) -> Result<Option<FwMmioResource<'a>>, FwError>;
 
+    /// Returns the node's local DMA range declaration.
+    ///
+    /// The declaration is local to this node's bus boundary. A backend must
+    /// keep missing and empty declarations distinct, and must not apply
+    /// ancestor translation, DMA masks, coherent defaults or platform policy.
+    /// Backends without DMA facts return [`FwError::Unsupported`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FwError::InvalidNode`] for an unknown handle,
+    /// [`FwError::Unsupported`] for an encoding this backend cannot interpret,
+    /// or [`FwError::InvalidValue`] for a malformed declaration.
+    fn dma_ranges(&self, id: FwNodeId) -> Result<FwDmaRanges, FwError> {
+        let _ = id;
+        Err(FwError::Unsupported)
+    }
+
+    /// Returns local DMA window `index`, or `None` when there is no such
+    /// window.
+    ///
+    /// Callers should use [`FwNodeOps::dma_ranges`] to distinguish absence,
+    /// identity and explicit windows. This accessor validates the complete
+    /// declaration, so a malformed later tuple cannot be hidden by reading an
+    /// earlier one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FwError::InvalidNode`] for an unknown handle,
+    /// [`FwError::Unsupported`] for an encoding this backend cannot interpret,
+    /// or [`FwError::InvalidValue`] for a malformed declaration.
+    fn dma_range(&self, id: FwNodeId, index: usize) -> Result<Option<FwDmaRange>, FwError> {
+        let _ = (id, index);
+        Err(FwError::Unsupported)
+    }
+
+    /// Returns this node's local coherency declaration.
+    ///
+    /// `Some(true)` and `Some(false)` are explicit firmware declarations.
+    /// `None` means this node declares neither; it is not the platform default
+    /// and must not be interpreted as coherent. Backends without coherency
+    /// facts return [`FwError::Unsupported`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FwError::InvalidNode`] for an unknown handle or
+    /// [`FwError::InvalidValue`] when the declaration is malformed or
+    /// contradictory.
+    fn dma_coherency(&self, id: FwNodeId) -> Result<Option<bool>, FwError> {
+        let _ = id;
+        Err(FwError::Unsupported)
+    }
+
+    /// Resolves the device DMA window using this firmware's parent and
+    /// translation rules.
+    ///
+    /// The backend owns the firmware-specific algorithm: which ancestor
+    /// declares the DMA parent, how an empty or absent declaration is treated,
+    /// how the parent-side address is translated across ancestor boundaries,
+    /// and which firmware properties make a translation unsupported. The
+    /// result is already expressed in CPU physical addresses and remains a
+    /// firmware fact: it is neither a device mask nor a permission to DMA.
+    ///
+    /// `Ok(None)` means firmware describes no usable window, including the
+    /// case where no nonempty declaration exists on the device's DMA-parent
+    /// path. Absence is never an error; backends without DMA facts return
+    /// [`FwDmaError::Firmware`] wrapping [`FwError::Unsupported`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FwDmaError`] for malformed declarations, unsupported topology
+    /// (multi-window, interconnect override, IOMMU) and untranslatable
+    /// windows. A backend must report these explicitly rather than selecting a
+    /// window, treating an absent declaration as identity, or turning absence
+    /// into an error.
+    fn dma_window(&self, id: FwNodeId) -> Result<Option<FwDmaWindow>, FwDmaError> {
+        let _ = id;
+        Err(FwDmaError::Firmware(FwError::Unsupported))
+    }
+
+    /// Resolves the effective coherency declaration by firmware inheritance.
+    ///
+    /// The backend applies this firmware's ancestry rule (for example, the
+    /// nearest explicit declaration on the device's parent chain) and returns
+    /// `Ok(None)` when no ancestor declares anything. No platform default is
+    /// applied here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FwError::InvalidNode`] for an unknown handle or a backend
+    /// error when a declaration cannot be interpreted.
+    fn dma_effective_coherency(&self, id: FwNodeId) -> Result<Option<bool>, FwError> {
+        let _ = id;
+        Err(FwError::Unsupported)
+    }
+
     /// Returns interrupt specifier `index` for this node.
     ///
     /// The returned controller handle and parameter cells are raw firmware
@@ -351,6 +446,52 @@ impl<'a> FwNode<'a> {
         self.ops.mmio_resource(self.id, index)
     }
 
+    /// Returns the node's local DMA range declaration.
+    ///
+    /// # Errors
+    ///
+    /// See [`FwNodeOps::dma_ranges`].
+    pub fn dma_ranges(self) -> Result<FwDmaRanges, FwError> {
+        self.ops.dma_ranges(self.id)
+    }
+
+    /// Returns local DMA window `index`.
+    ///
+    /// # Errors
+    ///
+    /// See [`FwNodeOps::dma_range`].
+    pub fn dma_range(self, index: usize) -> Result<Option<FwDmaRange>, FwError> {
+        self.ops.dma_range(self.id, index)
+    }
+
+    /// Returns the node's local coherency declaration.
+    ///
+    /// # Errors
+    ///
+    /// See [`FwNodeOps::dma_coherency`].
+    pub fn dma_coherency(self) -> Result<Option<bool>, FwError> {
+        self.ops.dma_coherency(self.id)
+    }
+
+    /// Resolves the device DMA window through firmware's own rules.
+    ///
+    /// # Errors
+    ///
+    /// See [`FwNodeOps::dma_window`].
+    pub fn dma_window(self) -> Result<Option<FwDmaWindow>, FwDmaError> {
+        self.ops.dma_window(self.id)
+    }
+
+    /// Resolves the effective coherency declaration through firmware's own
+    /// inheritance rule.
+    ///
+    /// # Errors
+    ///
+    /// See [`FwNodeOps::dma_effective_coherency`].
+    pub fn dma_effective_coherency(self) -> Result<Option<bool>, FwError> {
+        self.ops.dma_effective_coherency(self.id)
+    }
+
     /// Returns interrupt specifier `index`.
     ///
     /// # Errors
@@ -491,6 +632,71 @@ pub struct FwMmioResource<'a> {
     pub size: u64,
     /// Optional firmware resource name.
     pub name: Option<&'a str>,
+}
+
+/// One local DMA window declared between a bus and its parent.
+///
+/// The address fields are firmware facts: `bus_addr` is in the child bus
+/// address space and `parent_addr` is in the immediate parent address space.
+/// Neither field is necessarily a CPU physical address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FwDmaRange {
+    /// First address visible on the child bus.
+    pub bus_addr: u64,
+    /// First address in the parent bus.
+    pub parent_addr: u64,
+    /// Window length in bytes.
+    pub size: u64,
+}
+
+/// The node's local DMA range declaration.
+///
+/// This is a declaration, not a device DMA mask or a permission to program
+/// hardware. Ancestor translation and platform policy belong to the consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FwDmaRanges {
+    /// No local declaration.
+    Absent,
+    /// An empty declaration; identity translation at this boundary only.
+    Identity,
+    /// This many explicit windows, indexed with [`FwNode::dma_range`].
+    Windows(usize),
+}
+
+/// A device DMA window resolved and translated by the firmware backend.
+///
+/// `bus_addr` is the first device-visible address and `cpu_addr` the
+/// corresponding first CPU physical address; `size` is the window length. The
+/// window is not a device mask and does not by itself authorize DMA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FwDmaWindow {
+    /// First address in the device's bus address space.
+    pub bus_addr: u64,
+    /// First CPU physical address corresponding to `bus_addr`.
+    pub cpu_addr: u64,
+    /// Window length in bytes.
+    pub size: u64,
+}
+
+/// Why firmware's DMA description cannot be used.
+///
+/// Absence of a declaration is not represented here; it is `Ok(None)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FwDmaError {
+    /// The backend failed to read or interpret its description.
+    ///
+    /// An absent declaration is not reported here: it is `Ok(None)`.
+    Firmware(FwError),
+    /// The DMA-parent path declares more than one window.
+    MultiWindow,
+    /// A firmware interconnect overrides the structural DMA parent.
+    UnsupportedParent,
+    /// An IOMMU or IOMMU map controls this device's addresses.
+    Iommu,
+    /// The declared window cannot be translated to the CPU address space.
+    UnsupportedTranslation,
+    /// The resolved window is empty, ambiguous or overflows an address space.
+    InvalidWindow,
 }
 
 /// Fixed-capacity firmware parameter cells.

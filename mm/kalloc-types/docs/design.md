@@ -79,9 +79,13 @@ See `tests/README.md` for default and opt-in host/Miri commands.
 
 `KBox::into_raw` transfers the sole owner without touching its pointee;
 `unsafe KBox::from_raw` recovers that owner with the original type, provenance
-and DST metadata. Neither allocates or sleeps. Only pointers originating from
-KBox are accepted; this is not interoperability with standard Box or foreign
-allocators. RCU integrations retain raw ownership until old readers finish.
+and DST metadata. `KBox::leak` instead consumes the owner and yields an
+unbounded borrow, retaining both value and storage without running `T::drop`;
+it is reserved for deliberately permanent data such as `'static` boot state or
+test fixtures. None of these operations allocate or sleep. Only pointers
+originating from KBox are accepted; this is not interoperability with standard
+Box or foreign allocators. RCU integrations retain raw ownership until old
+readers finish.
 
 Bare-metal builds continue using the fallible kalloc backend directly.
 Hosted builds use paired nullable host allocation and deallocation for host/Miri

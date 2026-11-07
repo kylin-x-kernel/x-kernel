@@ -31,6 +31,7 @@ util/fwnode/
 ├── src/
 │   └── lib.rs          # Contract types and object-safe backend trait
 ├── tests/
+│   ├── dma.rs          # Backend DMA-fact defaults
 │   └── property.rs     # Host tests for value interpretation and capacity
 └── Cargo.toml
 ```
@@ -64,6 +65,22 @@ util/fwnode/
   Linux's `IRQ_DOMAIN_IRQ_SPEC_PARAMS` (16), covering current interrupt and
   reference bindings without a heap.
 - `FwMmioResource` is one already-translated CPU-address resource.
+- `FwDmaRange` is one local bus-to-parent DMA window. `FwDmaRanges` reports
+  whether the node has no declaration, an empty identity declaration, or a
+  count of explicit windows; `FwNode::dma_range(index)` reads one validated
+  window. These are local facts only: no ancestor translation, device mask,
+  coherent default, IOMMU routing or host policy is applied in this contract.
+- `FwNode::dma_window()` asks the backend for the device's already-resolved
+  window (`FwDmaWindow`: bus start, CPU start, size) after its native DMA
+  topology rules have been applied. Absence — including no nonempty
+  declaration on the DMA-parent path — is `Ok(None)`, never an error.
+  `FwDmaError` distinguishes firmware read errors from multi-window or
+  IOMMU/interconnect topology, untranslatable windows and invalid windows. The
+  contract exposes the result; it does not define how a backend derives it.
+- `FwNode::dma_effective_coherency()` returns the effective coherency
+  declaration, including backend-native inheritance. `Ok(None)` still means
+  "nothing declares coherency"; applying a platform default remains the
+  consumer's decision.
 - `FwIrqSpec` and `FwReference` pair a target `FwNode` with raw argument
   cells.
 
@@ -77,12 +94,22 @@ order; the controller driver owns the meaning of those cells. Likewise a
 
 Backends are responsible for their own parsing and validation:
 
-- absence is `Ok(None)`;
+- absence is `Ok(None)`, except DMA range state, which keeps `Absent`
+  distinct from an empty `Identity` declaration;
 - malformed content is an error, never silently `false` or empty;
 - unknown handles are `FwError::InvalidNode`;
-- an address encoding the backend cannot translate is
-  `FwError::Unsupported`;
+- an address encoding the backend cannot translate, or a DMA fact the
+  backend does not implement, is `FwError::Unsupported`;
 - a destination that cannot hold the value is `FwError::BufferTooSmall`.
+
+DMA coherency follows the same rule: `Ok(None)` means the node declares
+neither coherent nor noncoherent (after any backend-native inheritance),
+while a backend without DMA facts returns `FwError::Unsupported`. The contract
+supplies no default: a consumer may apply an explicit, scoped platform policy
+to `Ok(None)` (for example an architecture's `ARCH_DMA_DEFAULT_COHERENT`), but
+it must not treat absence as a generic default, and `Unsupported` or any other
+error stays an error and is never converted into absence. Resolved windows use
+`FwDmaError::Firmware(FwError::Unsupported)` for the same purpose.
 
 This distinction lets consumers enumerate resources with `Ok(None)` while
 still surfacing corruption.

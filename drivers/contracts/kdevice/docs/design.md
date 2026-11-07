@@ -163,7 +163,7 @@ drivers/contracts/kdevice/
 | `BusInstance` | Runtime bus instance; controller / devices / drivers lists; probe statistics |
 | `BusTypeObject` | Bus matching domain; manages the pending descriptor queue and registered drivers; delegates matching to the `BusType` trait |
 | `DriverObject` | Registered driver object; bound-device list; probe statistics |
-| `DeviceDesc` | Discovery-phase descriptor; carries bus_id/location/identity/transport/resources |
+| `DeviceDesc` | Discovery-phase descriptor; carries bus_id/location/identity/transport/resources and an optional resolved DMA view |
 | `DeviceDriver` trait | Driver interface: name/device_kind/bus_types/matcher/probe_device/remove/suspend/resume/shutdown |
 | `DeviceMatcher` trait | Open matcher; built-ins PciIdsMatcher/VirtioTypeMatcher/CompatibleAliasMatcher/FirmwareMatchSpec/NeverMatcher |
 | `DeviceEvent` / `DeviceEventKind` | The 5 lifecycle events; bucketed subscribers |
@@ -303,6 +303,13 @@ Key semantics:
   avoids infinite retries;
 - when a device is removed, its descriptor returns to `Pending` with
   `attempted` cleared, giving new drivers a chance.
+
+A descriptor and the device object created from it carry an optional
+`DmaInfo` resolved by the discovering backend. `None` records that no view was
+established; it never means unlimited addressing or coherent DMA. The view is
+immutable once registered, and the probe/adoption paths copy it verbatim, so
+firmware ancestry translation and platform policy stay in the bus backend
+rather than in the device core.
 
 ## Flows
 

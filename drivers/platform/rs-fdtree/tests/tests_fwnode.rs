@@ -6,7 +6,7 @@
 
 mod support;
 
-use fwnode::{FwError, FwNode};
+use fwnode::{FwDmaError, FwDmaRange, FwDmaRanges, FwDmaWindow, FwError, FwNode};
 use rs_fdtree::{DtBackend, LinuxFdt};
 use support::Dtb;
 
@@ -231,4 +231,199 @@ fn rejects_a_handle_from_another_backend() {
 
     assert_ne!(node, other);
     assert_eq!(node.name(), Some("/"));
+}
+
+fn dma_fixture() -> Vec<u8> {
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[1]));
+    blob.property("dma-coherent", &[]);
+    blob.begin("direct");
+    blob.end();
+    blob.begin("identity");
+    blob.property("dma-ranges", &[]);
+    blob.end();
+    blob.begin("windows");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[1]));
+    blob.property(
+        "dma-ranges",
+        &cells(&[0, 0x1000, 0, 0x8000, 0x100, 0, 0x3000, 0, 0x9000, 0x200]),
+    );
+    blob.begin("child");
+    blob.property("dma-noncoherent", &[]);
+    blob.end();
+    blob.end();
+    blob.begin("single");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[1]));
+    blob.property("dma-ranges", &cells(&[0, 0x1000, 0, 0x8000, 0x100]));
+    blob.begin("dev");
+    blob.end();
+    blob.end();
+    blob.begin("bad-tuple");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[1]));
+    blob.property("dma-ranges", &cells(&[0, 0, 0, 0, 0]));
+    blob.end();
+    blob.begin("bad-cells");
+    blob.property("#address-cells", &cells(&[3]));
+    blob.property("dma-ranges", &cells(&[0, 0, 0, 0, 1]));
+    blob.end();
+    blob.begin("partial");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[1]));
+    blob.property(
+        "dma-ranges",
+        &cells(&[0, 0x1000, 0, 0x8000, 0x100, 0, 0x3000, 0, 0x9000, 0]),
+    );
+    blob.end();
+    blob.begin("conflict");
+    blob.property("dma-coherent", &[]);
+    blob.property("dma-noncoherent", &[]);
+    blob.end();
+    blob.begin("duplicate");
+    blob.property("dma-ranges", &[]);
+    blob.property("dma-ranges", &[]);
+    blob.end();
+    blob.end();
+    blob.finish()
+}
+
+#[test]
+fn maps_local_dma_declarations_without_ancestor_policy() {
+    let bytes = dma_fixture();
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let backend = DtBackend::new(tree);
+    let root = backend.root().unwrap();
+
+    assert_eq!(root.dma_coherency(), Ok(Some(true)));
+    let direct = node(root, "direct");
+    assert_eq!(direct.dma_ranges(), Ok(FwDmaRanges::Absent));
+    assert_eq!(direct.dma_range(0), Ok(None));
+    assert_eq!(direct.dma_coherency(), Ok(None));
+
+    let identity = node(root, "identity");
+    assert_eq!(identity.dma_ranges(), Ok(FwDmaRanges::Identity));
+    assert_eq!(identity.dma_range(0), Ok(None));
+
+    let windows = node(root, "windows");
+    assert_eq!(windows.dma_ranges(), Ok(FwDmaRanges::Windows(2)));
+    assert_eq!(
+        windows.dma_range(0),
+        Ok(Some(FwDmaRange {
+            bus_addr: 0x1000,
+            parent_addr: 0x8000,
+            size: 0x100,
+        }))
+    );
+    assert_eq!(
+        windows.dma_range(1),
+        Ok(Some(FwDmaRange {
+            bus_addr: 0x3000,
+            parent_addr: 0x9000,
+            size: 0x200,
+        }))
+    );
+    assert_eq!(windows.dma_range(2), Ok(None));
+    assert_eq!(
+        node(root, "child").dma_coherency(),
+        Ok(Some(false)),
+        "a parent declaration is not inherited through the neutral accessor"
+    );
+}
+
+#[test]
+fn rejects_malformed_local_dma_declarations_without_partial_views() {
+    let bytes = dma_fixture();
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let backend = DtBackend::new(tree);
+    let root = backend.root().unwrap();
+
+    assert_eq!(
+        node(root, "bad-tuple").dma_ranges(),
+        Err(FwError::InvalidValue)
+    );
+    assert_eq!(
+        node(root, "bad-tuple").dma_range(0),
+        Err(FwError::InvalidValue)
+    );
+    assert_eq!(
+        node(root, "bad-cells").dma_ranges(),
+        Err(FwError::Unsupported)
+    );
+    assert_eq!(
+        node(root, "partial").dma_ranges(),
+        Err(FwError::InvalidValue)
+    );
+    assert_eq!(
+        node(root, "partial").dma_range(0),
+        Err(FwError::InvalidValue),
+        "an earlier valid tuple must not hide a malformed later tuple"
+    );
+    for name in ["conflict"] {
+        assert_eq!(
+            node(root, name).dma_coherency(),
+            Err(FwError::InvalidValue),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        node(root, "duplicate").dma_ranges(),
+        Err(FwError::InvalidValue)
+    );
+}
+
+#[test]
+fn root_dma_ranges_without_a_parent_are_not_guessed() {
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[1]));
+    blob.property("dma-ranges", &cells(&[0, 0x1000, 0, 0x8000, 0x100]));
+    blob.end();
+    let bytes = blob.finish();
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let backend = DtBackend::new(tree);
+    let root = backend.root().unwrap();
+
+    assert_eq!(root.dma_ranges(), Err(FwError::InvalidValue));
+    assert_eq!(root.dma_range(0), Err(FwError::InvalidValue));
+}
+
+#[test]
+fn resolved_dma_facts_cross_the_neutral_contract() {
+    let bytes = dma_fixture();
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let backend = DtBackend::new(tree);
+    let root = backend.root().unwrap();
+
+    assert_eq!(
+        node(root, "dev").dma_window(),
+        Ok(Some(FwDmaWindow {
+            bus_addr: 0x1000,
+            cpu_addr: 0x8000,
+            size: 0x100,
+        }))
+    );
+    assert_eq!(node(root, "dev").dma_effective_coherency(), Ok(Some(true)));
+    assert_eq!(
+        node(root, "child").dma_window(),
+        Err(FwDmaError::MultiWindow)
+    );
+    assert_eq!(
+        node(root, "direct").dma_window(),
+        Ok(None),
+        "an absent declaration crosses the neutral boundary as absence, not an error"
+    );
+    assert_eq!(
+        node(root, "child").dma_effective_coherency(),
+        Ok(Some(false))
+    );
+    assert_eq!(
+        node(root, "dev").dma_effective_coherency(),
+        Ok(Some(true)),
+        "the nearest declaration wins over the platform default"
+    );
 }

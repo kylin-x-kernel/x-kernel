@@ -100,9 +100,15 @@ the index.
 Consumers above this module use the root instead of reaching into `of` for
 firmware walks. `khal::firmware::devices::for_each_compatible` iterates
 `FwNode::descendants`, matches `firmware_ids()`, and requests the primary MMIO
-resource and IRQ declaration. The declaration is returned as `FwIrqSpec`
-(controller node plus complete binding cells); this layer does not decode cells
-and reports a malformed declaration as an error instead of "no interrupt".
+resource and the first IRQ declaration. The IRQ declaration is returned as
+`FwIrqSpec` (controller node plus complete binding cells); this layer does not
+decode cells and reports a malformed declaration as an error instead of "no
+interrupt". `FirmwareDevice` also carries the neutral `FwNode`, so the
+bus/device layer can request resolved DMA facts (`dma_window`,
+`dma_effective_coherency`) without depending on a concrete parser. This layer
+does not cache those facts: it keeps only the node handle, avoiding a second
+expression of the same firmware truth. Mask, ancestor translation,
+coherency-default and IOMMU policy remain outside `khal`.
 Controller drivers own cell meaning through their registered domain
 translators. Platform bring-up passes the same root to GIC discovery. The PCI
 `interrupt-map` walk remains in `of` until PCI legacy INTx migrates.
