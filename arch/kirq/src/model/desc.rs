@@ -100,9 +100,13 @@ pub enum IrqSource {
     Unknown,
 }
 
+/// Domain reserved for the first firmware-registered GIC instance.
 pub const GIC_ROOT_DOMAIN: IrqDomainId = IrqDomainId::new(1);
+/// Domain reserved for the first firmware-registered PLIC instance.
 pub const PLIC_ROOT_DOMAIN: IrqDomainId = IrqDomainId::new(2);
+/// Domain owned by the IO-APIC controller.
 pub const IO_APIC_DOMAIN: IrqDomainId = IrqDomainId::new(3);
+/// Domain owned by the MSI controller.
 pub const MSI_DOMAIN: IrqDomainId = IrqDomainId::new(4);
 
 /// Signal polarity described for an interrupt resource.

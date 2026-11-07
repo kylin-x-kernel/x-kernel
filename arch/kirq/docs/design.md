@@ -1231,13 +1231,62 @@ controller association and unknown domains are explicit errors. The
 association is stored inside the owning `IrqDomain` rather than in a second
 fixed-capacity table; lookup copies it out and releases the domain lock before
 translation and mapping. The controller family used in mapped descriptors is
-domain metadata (`IrqDomain::kind`), not a caller-supplied argument, so a
-registration cannot create a contradictory domain/kind pair.
+domain metadata (`IrqDomain::kind`): an `Existing` target keeps the domain's
+stored kind, while a `New` target initializes the new domain's kind once at
+creation. No registration path can overwrite an existing domain's kind, so a
+contradictory domain/kind pair cannot be created.
 
-Phase one has one static domain per controller family. Exact-node association
-distinguishes controllers in lookup, but the static domain set cannot register
-two same-family instances at once; a per-instance domain allocation is a later
-extension.
+Registration places a controller instance in the domain chosen by its boot
+wiring. `IrqDomainTarget::Existing(id)` associates with an existing well-known
+root; the primary GIC and PLIC bring-up paths use this to keep platform-static
+descriptors and legacy consumers on stable identifiers.
+`IrqDomainTarget::New(kind)` allocates a fresh per-instance domain. The generic
+core validates existence, controller uniqueness and allocation; it does not
+infer root reuse from controller family, identity policy or registration order.
+An existing domain keeps its own identity policy; a new domain is always
+created without numeric identity fallback. Registration is boot control-plane
+only and must not be called from IRQ, NMI or bottom-half handlers. `New`
+requires an initialized allocator and uses a non-sleeping `NOWAIT` allocation
+(reported as `NoMemory` on failure); `Existing` allocates nothing.
+
+Because each additional instance receives its own domain, two same-family
+controllers keep independent hardware-number namespaces. Numeric identity
+fallback (`IrqDomain::is_identity`) belongs to an existing compatible root
+only. A newly allocated domain is never identity-mapped: an unmapped hardware
+number stays unresolved instead of resolving to a same-numbered logical Line
+owned by another source. This keeps `(domain, hwirq)` the mapping identity for
+every non-root instance and rejects unmapped claims rather than silently
+borrowing a global number.
+
+`IrqDomain::kind` remains the controller-family metadata used to fill
+`IrqDesc.controller` and feed existing flow validation and legacy descriptor
+paths. It is not an instance identity: a driver that owns one initialized
+controller must admit only the domain identifier returned by its own
+registration, never every domain whose `kind` matches.
+
+The domain registry is append-only. The well-known roots stay in a static set;
+dynamically allocated domains are linked into a singly-linked list through
+`AtomicPtr` links and leaked for the kernel lifetime. Nothing is removed, so a
+published domain, its identifier and its links remain valid; there is no
+fixed-capacity dynamic table and no truncation point at which a controller
+silently loses its namespace. A dynamically allocated domain has its firmware
+association installed before the link that publishes it, so a reader that can
+find the domain also finds its controller binding. Registry traversal takes no
+lock and no RCU scope, which keeps domain lookup and numeric resolution usable
+from interrupt context; control-plane lookup takes only each domain's short
+association lock.
+
+The intrusive list is deliberate rather than a substitute for an existing
+index. `XArray` is the kernel's general sparse index, but its borrowed reads
+require an RCU read scope and its retaining reads require `Arc` ownership. IRQ
+dispatch resolves a domain before it enters the Line read scope, and early
+control-plane mapping can run in contexts where a task read scope is not
+available. Domain entries are created only at boot, are never replaced or
+removed, and number at most a few controllers per platform, so an append-only
+link walked with Acquire loads is sufficient and avoids introducing an RCU
+service dependency or a fallible shared-ownership allocation into domain
+lookup. The list is not used for Line dispatch; per-interrupt work still uses
+the domain's own `XArray` after a single identifier lookup.
 
 `try_map_fwspec` distinguishes the required failure classes: an absent
 declaration is `Ok(None)` from the backend, a malformed declaration is

@@ -58,15 +58,26 @@ pub(crate) fn lookup(source: IrqRef) -> Option<(Virq, Option<Arc<IrqLine>>)> {
 }
 
 enum Storage {
+    /// Borrowed, stateless view of an index owned elsewhere.
+    ///
+    /// A borrowed array has no owned population, so no length is tracked here:
+    /// callers may construct this view for one transaction and drop it without
+    /// pretending to know how many entries the owner already holds.
     Shared(&'static XArray<Arc<IrqLine>>),
     #[cfg(unittest)]
-    Private(XArray<Arc<IrqLine>>),
+    /// Private fixture index whose entry count belongs to this object.
+    Private {
+        array: XArray<Arc<IrqLine>>,
+        count: usize,
+    },
 }
 
 /// A control-plane view of an index, never a second copy of its entries.
+///
+/// Only private fixture storage owns a count. The global directory and every
+/// domain index are borrowed views; their entries outlive any temporary view.
 pub(super) struct LineIndex {
     storage: Storage,
-    count: usize,
 }
 
 impl LineIndex {
@@ -94,7 +105,7 @@ impl LineIndex {
         // Nodes are not pruned, so unrelated hardware readers are unaffected.
         let old = unsafe { self.array().take_quiescent_fixture(*key) };
         if old.is_some() {
-            self.count -= 1;
+            self.note_withdrawn();
         }
         old
     }
@@ -102,15 +113,16 @@ impl LineIndex {
     pub(super) const fn shared(array: &'static XArray<Arc<IrqLine>>) -> Self {
         Self {
             storage: Storage::Shared(array),
-            count: 0,
         }
     }
 
     #[cfg(unittest)]
     pub(super) const fn new() -> Self {
         Self {
-            storage: Storage::Private(XArray::new()),
-            count: 0,
+            storage: Storage::Private {
+                array: XArray::new(),
+                count: 0,
+            },
         }
     }
 
@@ -118,7 +130,25 @@ impl LineIndex {
         match &self.storage {
             Storage::Shared(array) => array,
             #[cfg(unittest)]
-            Storage::Private(array) => array,
+            Storage::Private { array, .. } => array,
+        }
+    }
+
+    /// Entry count for a private fixture index, or `None` for a borrowed view.
+    #[cfg(unittest)]
+    fn private_count(&self) -> Option<&usize> {
+        match &self.storage {
+            Storage::Shared(_) => None,
+            Storage::Private { count, .. } => Some(count),
+        }
+    }
+
+    /// Mutable entry count for a private fixture index, or `None` for a view.
+    #[cfg(unittest)]
+    fn private_count_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.storage {
+            Storage::Shared(_) => None,
+            Storage::Private { count, .. } => Some(count),
         }
     }
 
@@ -130,14 +160,25 @@ impl LineIndex {
         self.get(key).is_some()
     }
 
+    /// Number of entries owned by a private fixture index.
+    ///
+    /// Borrowed views deliberately have no length: entries belong to the array
+    /// owner, not to this temporary view.
     #[cfg(unittest)]
-    pub(super) const fn len(&self) -> usize {
-        self.count
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: only private fixture indexes own a \
+                  population; callers that need a length operate on fixture state"
+    )]
+    pub(super) fn len(&self) -> usize {
+        *self
+            .private_count()
+            .expect("borrowed IRQ index does not own a length")
     }
 
     #[cfg(unittest)]
-    pub(super) const fn is_empty(&self) -> bool {
-        self.count == 0
+    pub(super) fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     #[expect(
@@ -151,7 +192,23 @@ impl LineIndex {
         unsafe { self.array().insert_prepared(line, prepared) }
             .map_err(|(error, _)| error)
             .expect("prevalidated IRQ index vacancy");
-        self.count += 1;
+        self.note_published();
+    }
+
+    /// Records an insertion only for an index that owns its population.
+    fn note_published(&mut self) {
+        #[cfg(unittest)]
+        if let Some(count) = self.private_count_mut() {
+            *count += 1;
+        }
+    }
+
+    /// Records a withdrawal only for an index that owns its population.
+    fn note_withdrawn(&mut self) {
+        #[cfg(unittest)]
+        if let Some(count) = self.private_count_mut() {
+            *count -= 1;
+        }
     }
 
     /// # Safety
@@ -167,7 +224,7 @@ impl LineIndex {
         // retirements are submitted only after restoring that context.
         let pending = unsafe { self.array().withdraw_prepared(key, prepared) };
         if pending.is_some() {
-            self.count -= 1;
+            self.note_withdrawn();
         }
         pending
     }

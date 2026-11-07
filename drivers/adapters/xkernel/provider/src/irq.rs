@@ -140,6 +140,12 @@ fn msix_release_result(
     }
 }
 
+/// Domain for legacy routes that name a controller family but no instance.
+///
+/// The roots stay reserved for the first firmware-registered GIC/PLIC, so this
+/// fallback matches the primary controller. Firmware-described resources use
+/// `try_map_fwspec`, which resolves the exact controller node and therefore
+/// also supports additional same-family instances.
 fn default_irq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
     match controller {
         DevIrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),

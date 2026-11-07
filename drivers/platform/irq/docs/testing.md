@@ -51,6 +51,18 @@ an unrelated earlier panic or a timeout alone is not a pass. No UT success
 marker is expected. The firmware fixture is deliberately incomplete for normal
 device operation and must only be used for this early-failure check.
 
+## Domain Instance Isolation
+
+The GIC test suite registers a second firmware GIC controller with
+`IrqDomainTarget::New`, forcing a dynamically allocated domain, and verifies
+that `select_gic_flow` rejects every source in that domain with
+`UnsupportedFlow`. This proves family metadata is not treated as instance
+ownership; it does not add a second hardware backend. PLIC has the symmetric
+test: it registers a second PLIC instance with `IrqDomainTarget::New` and
+verifies that `select_plic_flow` rejects descriptors carrying that domain even
+though their controller is `Plic`, while the initialized instance's own source
+is still accepted.
+
 ## Early-Transition Coverage Boundary
 
 Normal kernel UT runs after IRQ activation. It must not assert that PMR still

@@ -458,7 +458,7 @@ pub(super) unsafe fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
         // SAFETY: ack_irq classified this unique claim as NMI. The caller
         // retains CPU/ordinary IRQ exclusion through its completion here.
         let pending = unsafe {
-            kirq::PendingIrq::new(kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, irq), cookie)
+            kirq::PendingIrq::new(kirq::IrqRef::Domain(super::gic_domain(), irq), cookie)
         };
         kirq::generic_handle_nmi(pending);
     }
@@ -474,7 +474,7 @@ pub(super) unsafe fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
         // SAFETY: this is the unique normal claim; opening NMI nesting did
         // not admit ordinary IRQs or migration or leave hardirq context.
         let pending = unsafe {
-            kirq::PendingIrq::new(kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, irq), cookie)
+            kirq::PendingIrq::new(kirq::IrqRef::Domain(super::gic_domain(), irq), cookie)
         };
         kirq::generic_handle_irq(pending)
     }

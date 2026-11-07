@@ -25,10 +25,14 @@ After initialization, the driver registers the selected node's exact identity
 with KIRQ. A duplicate domain or controller association is a fatal boot error,
 not a replacement. Registration failure aborts the boot hook because consumers
 would otherwise retain an unmapable firmware description; there is no fallback
-to a compatible-string search. Flow selectors still enforce the runtime
-`STANDARD_INTID_LIMIT` and `riscv,ndev`, so successful translation is not proof
-that hardware implements the source. The legacy PLIC fallback registers no
-firmware domain and cannot be reached through firmware interrupt mapping.
+to a compatible-string search. The returned domain identifier becomes this
+driver instance's admission boundary: GIC and PLIC selection reject any other
+domain, including a same-family domain registered by a second controller, since
+register access still targets the single initialized controller. Flow selectors
+still enforce the runtime `STANDARD_INTID_LIMIT` and `riscv,ndev`, so successful
+translation is not proof that hardware implements the source. The legacy PLIC
+fallback registers no firmware domain and cannot be reached through firmware
+interrupt mapping.
 
 ## Local NMI Boundary
 
@@ -216,6 +220,7 @@ anywhere in this crate.
 | T-06 | NMI irq_work submission re-enters controller or logging locks | High — CPU deadlock | NMI interrupts a GIC/logging critical section | Prepared notifier uses only immutable MPIDR affinity, integer encoding, DSB, the public SGI1R write primitive and ISB; no generic IPI helper, CPU map, lazy state or logging. |
 | T-07 | irq_work SGI reaches the wrong CPU or runs as NMI | Medium — work stranded or drained in forbidden context | Unrepresentable Aff0, SGI/IPI conflict, wrong priority or NMI attribute | Preparation validates SGI < 16, distinct IPI_IRQ and Aff0 < 16; encodes all affinity levels with RS=0/IRM=0; sets ordinary priority and clears supported hardware NMI attributes before enabling. |
 | T-08 | Firmware interrupt cells decode to a different hardware source or trigger | High — interrupt delivered for the wrong device, or a line programmed with unstated semantics | Malformed or hostile device tree interrupt specifier | The owning controller translates with strict cell count, type, range, and sense-bit checks; malformed, unsupported, and invalid-hwirq are distinct errors with no clamping or controller fallback. Runtime flow selectors independently bound the actual hardware range. |
+| T-09 | A second same-family controller's domain is admitted by the singleton driver | High — another instance's source programmed through the first controller's registers | Two firmware controllers of one family; driver selects by family metadata instead of its own instance domain | `select_gic_flow`, `gicv3_nmi::update` and PLIC flow selection compare against the domain recorded for the initialized instance; foreign domains return `UnsupportedFlow`. |
 
 ## Failure Modes
 

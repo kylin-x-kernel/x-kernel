@@ -29,7 +29,7 @@ pub(super) static FORWARDING: kirq::PerCpuForwardingChip = kirq::PerCpuForwardin
 unsafe fn set_forwarding_state(desc: kirq::IrqDesc, state: kirq::PerCpuForwardingState) {
     debug_assert!(!karch::local_irq_enabled());
     debug_assert!(!kirq::context::is_in_nmi());
-    if desc.domain != Some(super::GIC_ROOT_DOMAIN)
+    if !super::is_gic_domain(desc.domain)
         || !(16..32).contains(&desc.hwirq)
         || super::select_gic_flow(desc, super::STANDARD_INTID_LIMIT.get().copied())
             != Ok(kirq::IrqFlow::PerCpu)
@@ -288,7 +288,7 @@ pub(super) unsafe fn dispatch_irq_from_irqson() -> Option<kirq::Virq> {
     // hardirq context and CPU/IRQ exclusion through dispatch and completion.
     let pending = unsafe {
         kirq::PendingIrq::new(
-            kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, hwirq),
+            kirq::IrqRef::Domain(super::gic_domain(), hwirq),
             completion_cookie,
         )
     };

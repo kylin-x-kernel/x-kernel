@@ -568,13 +568,33 @@ the CPU-local NMI owner protocol, or the generic `krcu-list` contracts.
 - `IrqDomainXlate::translate()` 只把绑定 cell 解码为 `IrqHwSpec`，不能分配 virq、
   选择其它 controller 或回调 `kirq`。registry 锁必须在调用 translate 和
   `try_map` 之前释放。
-- `register_irq_domain()` 是 boot-only 且非幂等：同一 domain 的第二个 controller、
-  同一 controller 的第二个 domain、未知 domain 都必须显式报错，不能静默覆盖。
-  关联保存在所属 `IrqDomain` 内，不存在独立的固定容量关联表；boot 期由注册锁串行化。
-- `IrqDomain` 的 controller family 是 domain 元数据；`register_irq_domain()` 不接受
-  调用者另行提供的 kind，`try_map_fwspec()` 使用该权威值填充 descriptor，避免
-  domain 与 controller kind 的矛盾组合。当前静态 domain 集合每族一个，尚不支持
-  同族多实例；精确节点身份只保证 lookup 不串线，不等于多实例注册能力。
+- `register_irq_domain()` 是 boot-only 且非幂等：同一 controller 的第二次关联、
+  `Existing` 目标已有关联、`Existing` 目标不存在、新 domain 分配失败都必须显式
+  报错，不能静默覆盖或回退到其他 root。关联保存在所属 `IrqDomain` 内，不存在
+  独立的固定容量关联表；boot 期由注册锁串行化。
+- `IrqDomain` 的 controller family 是 domain 元数据。`register_irq_domain()` 的
+  `Existing(id)` 保留该 domain 已有的 kind；`New(kind)` 只在新 domain 创建时
+  一次性初始化 kind；任何路径都不能覆盖已存在 domain 的类型。`try_map_fwspec()`
+  使用该权威值填充 descriptor，避免 domain 与 controller kind 的矛盾组合。
+  每个 firmware controller 实例获得独立 domain；同族第二个实例获得新分配的
+  动态 domain，不再与第一个实例共享命名空间。family 只是元数据，不代表任何
+  驱动有权操作该实例：访问单一已初始化控制器的驱动（当前 GIC/PLIC）必须只接纳
+  该实例注册的 domain id，不得用 family 相等代替实例归属。真正支持第二个硬件
+  实例还需要按实例保存寄存器基址/chip 数据的后端。
+- `register_irq_domain()` 只允许启动控制面调用，禁止在 IRQ/NMI/BH handler 中
+  调用。`New` 额外要求 allocator 已就绪并使用非睡眠 `NOWAIT` 分配，失败返回
+  `NoMemory`；`Existing` 不分配内存。
+- 旧 root 的选择是启动接线的显式决定，不在通用注册中根据 controller family、
+  注册顺序或布尔参数推断。`IrqDomainTarget::Existing(id)` 只验证目标存在且尚无
+  固件关联；`IrqDomainTarget::New(kind)` 分配新实例 domain。family 和 identity
+  策略属于被选中的 domain 本身，不是调用者另传的覆盖参数。
+- identity fallback 只属于被显式选中的 well-known root，是旧数值编号的兼容策略。
+  `create_domain()` 创建的动态 domain 一律 `is_identity = false`：未显式映射的
+  hwirq 必须解析失败，不能退化成同号全局 virq 并取到其他来源的 Line。
+- `runtime/index.rs` 中 `LineIndex` 的两种存储必须区分：借用视图
+  （`Storage::Shared`）是无状态、无计数的视图，可临时构造；只有测试私有
+  registry 的 `Storage::Private` 持有 `count`。发布/撤销的计数更新只作用于私有
+  对象，借用视图不得因一次临时查询而增减计数，否则删除会下溢或回绕。
 - `try_map_fwspec()` 必须区分“无声明”（backend 返回 `Ok(None)`）、声明损坏
   （`MalformedSpec`/`InvalidHwirq`）、绑定不支持（`UnsupportedSpec`）、
   controller 未注册（`ControllerNotReady`）和 IRQ core 拒绝（`Map(...)`）；
@@ -819,6 +839,9 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-16 | descriptor 冲突被静默合并 | hwirq/domain/virq/trigger/polarity/controller metadata 不一致 | handler 绑定到错误 IRQ 或平台 configure 错误 | `try_resolve_desc()` / `try_merge()` 运行时返回 `IrqDescError`；两个确定的 trigger/polarity/controller 不会互相覆盖 |
 | T-16b | Firmware controller 身份被猜测匹配 | 用 compatible、family 或数字 node id 代替 `FwNode` | 多实例或多 backend 时中断被路由到错误 controller | `domain/fw.rs` 只按 `FwNode` 的 backend 指针 + node id 精确关联；重复关联显式失败 |
 | T-16c | 固件 cell 由错误 owner 解释 | IRQ core 猜测 trigger，或 controller 返回 logical IRQ | 绑定错误、双份 decoder 或 controller 越权 | `IrqDomainXlate` 只产生 `IrqHwSpec`；`kirq` 负责 domain 关联与逻辑映射；translate 错误按 `IrqXlateError` 分类返回 |
+| T-16d | 新实例继承旧实例的数值 identity fallback | 动态 domain 仍带 `is_identity = true`，第二实例的 hwirq 未映射 | 未映射硬件号解析到全局同号 virq，命中其他来源的 Line | `create_domain()` 固定生成非 identity domain；只有保留 root 保留数值兼容；未映射请求返回 `None` |
+| T-16e | 驱动按 family 接纳其他实例的 domain | 单例 GIC/PLIC 后端接受任意同族 domain，却通过 `desc.hwirq` 操作已初始化控制器 | 第二个实例的中断被配置到第一个控制器寄存器 | `is_gic_domain()`/`current_plic_domain()` 只接受当前实例持有的 domain id；family 相等不等于实例归属 |
+| T-16f | 借用索引视图被当作持有计数的对象 | 每次修改临时构造 `LineIndex::shared()`，成功删除执行 `count -= 1` | 溢出检查下 panic；release 下计数回绕 | 借用视图无状态无计数；仅测试私有 registry 的 `Storage::Private` 持有计数；全局索引 MSI 分配—释放有回归测试 |
 | T-17 | Missing MSI mapping becomes a raw logical IRQ | No `(MSI_DOMAIN, vector)` entry | Wrong handler selected | MSI dispatch uses the strict Domain Line index; a miss never falls back to the raw vector |
 | T-18 | 未注册 domain 被映射成功 | 控制面接受未知 `IrqDomainId` | 驱动拿到永远不可达的 virq | `try_resolve_and_publish()` 在改状态前返回 `UnknownDomain` |
 | T-19 | BH-disabled 被误判为普通 task context | diagnostics 只区分 hardirq/softirq/task | sleepable future callback 可能在 BH-disabled 区间运行 | `InterruptContextLevel::BhDisabled` 和 docs 明确其 non-sleepable 语义 |

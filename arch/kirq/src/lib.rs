@@ -73,7 +73,10 @@ pub use bottom_half::{
 };
 pub use domain::{
     IrqRef,
-    fw::{IrqDomainRegisterError, IrqDomainXlate, IrqHwSpec, IrqXlateError, register_irq_domain},
+    fw::{
+        IrqDomainRegisterError, IrqDomainTarget, IrqDomainXlate, IrqHwSpec, IrqXlateError,
+        register_irq_domain,
+    },
 };
 pub(crate) use model::desc;
 pub use model::desc::{

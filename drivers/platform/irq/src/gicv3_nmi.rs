@@ -12,7 +12,7 @@ pub(crate) static CHIP: kirq::PerCpuNmiChip = kirq::PerCpuNmiChip {
 };
 
 fn update(desc: kirq::IrqDesc, is_nmi: bool) -> Result<(), kirq::IrqDescError> {
-    if desc.domain != Some(kirq::GIC_ROOT_DOMAIN) || !(16..32).contains(&desc.hwirq) {
+    if !super::super::is_gic_domain(desc.domain) || !(16..32).contains(&desc.hwirq) {
         return Err(kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
     }
     let gic = GIC

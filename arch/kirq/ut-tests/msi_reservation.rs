@@ -309,6 +309,33 @@ fn enabled_msi_without_actions_cannot_release_its_reservation() {
 }
 
 #[def_test(serial)]
+fn global_msi_allocation_release_withdraws_the_shared_domain_index() {
+    // These probes use the global directory and the shared test-domain index.
+    // Allocating and releasing them must not depend on a temporary index view
+    // owning a population count: both entries belong to the domain itself.
+    let first = RcuIndexProbe::new(0x5fc0, 0x5fc1);
+    let second = RcuIndexProbe::new(0x5fc2, 0x5fc3);
+    let domain = crate::domain::TEST_DOMAIN;
+    assert_eq!(crate::domain::resolve(domain, 0x5fc1), Some(0x5fc0));
+    assert_eq!(crate::domain::resolve(domain, 0x5fc3), Some(0x5fc2));
+
+    assert!(first.retire());
+    assert_eq!(crate::domain::resolve(domain, 0x5fc1), None);
+    assert_eq!(crate::domain::resolve(domain, 0x5fc3), Some(0x5fc2));
+
+    assert!(second.retire());
+    assert_eq!(crate::domain::resolve(domain, 0x5fc3), None);
+
+    // Reuse both number pairs through fresh identities after release.
+    let first_again = RcuIndexProbe::new(0x5fc0, 0x5fc1);
+    let second_again = RcuIndexProbe::new(0x5fc2, 0x5fc3);
+    assert_eq!(crate::domain::resolve(domain, 0x5fc1), Some(0x5fc0));
+    assert_eq!(crate::domain::resolve(domain, 0x5fc3), Some(0x5fc2));
+    assert!(first_again.retire());
+    assert!(second_again.retire());
+}
+
+#[def_test(serial)]
 fn release_withdraws_both_indexes_before_returning_backend_ownership() {
     // Private indexes exercise real prepared withdrawal, without hardware I/O.
     let domain = crate::domain::TEST_DOMAIN;

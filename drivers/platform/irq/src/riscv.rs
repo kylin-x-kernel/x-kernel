@@ -25,6 +25,7 @@ use firmware::{PlicConfig, PlicSources};
 const PLIC_PADDR: usize = 0x0c00_0000;
 const PLIC_MMIO_SIZE: usize = 0x0400_0000;
 const PLIC_IOMAP_NAME: &str = "plic";
+/// Well-known domain reserved for the first firmware-registered PLIC.
 pub const PLIC_DOMAIN: kirq::IrqDomainId = kirq::PLIC_ROOT_DOMAIN;
 pub const INTC_IRQ_BASE: usize = 1 << (usize::BITS - 1);
 
@@ -40,6 +41,9 @@ static PLIC: LazyInit<PlicController> = LazyInit::new();
 const PLIC_MAX_SOURCE: u32 = 1023;
 
 struct PlicController {
+    /// Hardware-number namespace returned when this PLIC's firmware controller
+    /// node was registered.
+    domain: kirq::IrqDomainId,
     sources: PlicSources,
     state: SpinNoIrq<PlicState>,
 }
@@ -175,6 +179,16 @@ fn plic() -> &'static PlicController {
     PLIC.get().expect("PLIC is not initialized")
 }
 
+/// Domain owned by the initialized PLIC, or the reserved primary before setup.
+///
+/// Admission may run while the legacy layout is still being configured, so the
+/// well-known primary domain is the current instance until initialization
+/// records the registered identifier.
+fn current_plic_domain() -> kirq::IrqDomainId {
+    PLIC.get()
+        .map_or(PLIC_DOMAIN, |controller| controller.domain)
+}
+
 static PLIC_FASTEOI: kirq::FasteoiChip = kirq::FasteoiChip {
     resend: kirq::FasteoiResend::Software,
     mask: |desc| plic().mask(desc.hwirq),
@@ -194,11 +208,14 @@ fn select_plic_flow(
         return Ok(IrqFlow::PerCpu);
     }
 
-    // External sources require a PLIC binding, not a bare hardware number.
-    if desc.domain != Some(PLIC_DOMAIN) && desc.controller != IrqController::Plic {
+    // External sources require a PLIC binding, not a bare hardware number. The
+    // domain must belong to this initialized instance: this driver's register
+    // operations use `desc.hwirq` against the global `plic()` controller, so
+    // admitting another PLIC instance's domain would program the wrong device.
+    if desc.domain.is_none() && desc.controller != IrqController::Plic {
         return Err(kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
     }
-    if desc.domain != Some(PLIC_DOMAIN)
+    if desc.domain != Some(current_plic_domain())
         || desc.controller != IrqController::Plic
         || !(desc.flags - (IrqFlags::SHARED | IrqFlags::WAKEUP_SOURCE)).is_empty()
         || desc.affinity != IrqAffinity::Any
@@ -375,24 +392,40 @@ pub fn init_primary(root: FwNode<'static>) {
     // MMIO window, so the pointer is non-null and references the live register
     // block for the duration of the driver.
     let plic = unsafe { Plic::new(NonNull::new(plic_base.as_usize() as *mut _).unwrap()) };
+    let domain = match controller {
+        Some(controller) => {
+            // This singleton boot path keeps the primary PLIC on the legacy
+            // reserved domain. A future second controller instance must choose
+            // `IrqDomainTarget::New` rather than inheriting this root.
+            let registered = kirq::register_irq_domain(
+                kirq::IrqDomainTarget::Existing(PLIC_DOMAIN),
+                controller,
+                &PLIC_XLATE,
+            );
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the \
+                          firmware-described PLIC controller must be associated with its IRQ \
+                          domain before consumers map interrupts; early IRQ initialization has no \
+                          recovery channel"
+            )]
+            match registered {
+                Ok(domain) => domain,
+                Err(error) => panic!("failed to register PLIC IRQ domain: {error:?}"),
+            }
+        }
+        // The legacy no-DT layout maps through the reserved primary domain,
+        // which remains available without a firmware association.
+        None => PLIC_DOMAIN,
+    };
     PLIC.init_once(PlicController {
+        domain,
         sources,
         state: SpinNoIrq::new(PlicState {
             registers: plic,
             sources: source_state,
         }),
     });
-    if let Some(controller) = controller {
-        #[expect(
-            clippy::panic,
-            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware-described \
-                      PLIC controller must be associated with its IRQ domain before consumers map \
-                      interrupts; early IRQ initialization has no recovery channel"
-        )]
-        if let Err(error) = kirq::register_irq_domain(PLIC_DOMAIN, controller, &PLIC_XLATE) {
-            panic!("failed to register PLIC IRQ domain: {error:?}");
-        }
-    }
 }
 
 fn this_context() -> usize {
@@ -578,7 +611,7 @@ impl kirq::IntrManagerIf {
                 // SAFETY: the PLIC claim is unique; generic dispatch consumes
                 // it on this CPU before the caller releases entry exclusion.
                 Some(unsafe { kirq::PendingIrq::new(
-                    kirq::IrqRef::Domain(PLIC_DOMAIN, hwirq),
+                    kirq::IrqRef::Domain(plic().domain, hwirq),
                     hwirq,
                 ) })
             },

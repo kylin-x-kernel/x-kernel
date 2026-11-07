@@ -387,6 +387,107 @@ fn plic_flow_selection_requires_supported_binding() {
     assert!(super::select_plic_flow(desc, None).is_err());
 }
 
+struct ForeignBackend;
+
+impl fwnode::FwNodeOps<'static> for ForeignBackend {
+    fn source(&self) -> fwnode::FwSource {
+        fwnode::FwSource::Static
+    }
+
+    fn name(&self, _: fwnode::FwNodeId) -> Option<&'static str> {
+        None
+    }
+
+    fn parent(&self, _: fwnode::FwNodeId) -> Option<fwnode::FwNodeId> {
+        None
+    }
+
+    fn first_child(&self, _: fwnode::FwNodeId) -> Option<fwnode::FwNodeId> {
+        None
+    }
+
+    fn next_sibling(&self, _: fwnode::FwNodeId) -> Option<fwnode::FwNodeId> {
+        None
+    }
+
+    fn is_available(&self, _: fwnode::FwNodeId) -> Result<bool, fwnode::FwError> {
+        Ok(true)
+    }
+
+    fn is_interrupt_controller(&self, _: fwnode::FwNodeId) -> Result<bool, fwnode::FwError> {
+        Ok(false)
+    }
+
+    fn firmware_id(&self, _: fwnode::FwNodeId, _: usize) -> Option<&'static str> {
+        None
+    }
+
+    fn property(
+        &self,
+        _: fwnode::FwNodeId,
+        _: &str,
+    ) -> Result<Option<fwnode::FwProperty<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+
+    fn mmio_resource(
+        &self,
+        _: fwnode::FwNodeId,
+        _: usize,
+    ) -> Result<Option<fwnode::FwMmioResource<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+
+    fn irq_spec(
+        &'static self,
+        _: fwnode::FwNodeId,
+        _: usize,
+    ) -> Result<Option<fwnode::FwIrqSpec<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+
+    fn reference(
+        &'static self,
+        _: fwnode::FwNodeId,
+        _: &str,
+        _: usize,
+        _: usize,
+    ) -> Result<Option<fwnode::FwReference<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+}
+
+static FOREIGN_BACKEND: ForeignBackend = ForeignBackend;
+
+#[def_test(serial)]
+fn another_plic_instance_domain_is_not_admitted_by_this_driver() {
+    use kirq::{IrqController, IrqDescError};
+
+    // Force a dynamically allocated domain even though the boot PLIC already
+    // owns the reserved root. Family metadata must not substitute for the
+    // instance identifier returned by this driver's own registration.
+    let controller = fwnode::FwNode::new(&FOREIGN_BACKEND, fwnode::FwNodeId::new(1));
+    let foreign = kirq::register_irq_domain(
+        kirq::IrqDomainTarget::New(IrqController::Plic),
+        controller,
+        &super::PLIC_XLATE,
+    )
+    .expect("foreign PLIC instance registers its own domain");
+    assert_ne!(foreign, super::current_plic_domain());
+
+    let sources = Some(super::firmware::PlicSources { last: 53 });
+    assert!(
+        super::select_plic_flow(super::plic_irq_desc(5), sources).is_ok(),
+        "the initialized instance still accepts its own source"
+    );
+    for hwirq in [1, 5, 53] {
+        assert_eq!(
+            super::select_plic_flow(super::plic_irq_desc(hwirq).with_domain(foreign), sources),
+            Err(IrqDescError::UnsupportedFlow { hwirq })
+        );
+    }
+}
+
 #[def_test]
 fn plic_flow_selection_rejects_unknown_sources_but_preserves_fixed_local_sources() {
     use kirq::{IrqController, IrqDesc, IrqDescError, IrqFlags, IrqFlow, IrqTrigger};

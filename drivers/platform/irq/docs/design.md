@@ -43,7 +43,23 @@ After controller initialization, `init_from_fwnode` calls
 Registration is boot-only and keyed by exact firmware-node identity, so two
 instances of the same controller family remain distinct and a second
 registration is an error. The controller node must outlive the kernel; both
-entry points therefore take `FwNode<'static>`.
+entry points therefore take `FwNode<'static>`. These singleton boot paths
+explicitly select `IrqDomainTarget::Existing(GIC_ROOT_DOMAIN)` or
+`Existing(PLIC_DOMAIN)` to preserve legacy identifiers. A future second
+hardware instance must call with `IrqDomainTarget::New` on its own
+initialization path; KIRQ does not select a legacy root from controller family
+or registration order.
+
+The registered domain is also the driver's admission boundary. This driver is
+the singleton backend for one initialized controller: all programming goes
+through that controller's registers using `desc.hwirq`, not through per-map
+`host_data` as in Linux `irq-gic.c`. Admitting every domain of the GIC family
+would therefore let a second instance's sources program the first controller.
+`select_gic_flow` and the GICv3 NMI path accept only the domain recorded for
+the initialized instance (`is_gic_domain`), and PLIC selection accepts only
+`current_plic_domain()`. A second controller of the same family can register
+its own domain in KIRQ, but this driver rejects it with `UnsupportedFlow` until
+an instance-aware register backend exists.
 
 The controllers own the meaning of their binding cells through
 `kirq::IrqDomainXlate`:

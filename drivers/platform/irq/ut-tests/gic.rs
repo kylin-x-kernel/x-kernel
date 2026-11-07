@@ -263,6 +263,112 @@ fn raw_private_sources_use_local_control_without_granting_special_capabilities()
     }
 }
 
+struct ForeignBackend;
+
+impl fwnode::FwNodeOps<'static> for ForeignBackend {
+    fn source(&self) -> fwnode::FwSource {
+        fwnode::FwSource::Static
+    }
+
+    fn name(&self, _: fwnode::FwNodeId) -> Option<&'static str> {
+        None
+    }
+
+    fn parent(&self, _: fwnode::FwNodeId) -> Option<fwnode::FwNodeId> {
+        None
+    }
+
+    fn first_child(&self, _: fwnode::FwNodeId) -> Option<fwnode::FwNodeId> {
+        None
+    }
+
+    fn next_sibling(&self, _: fwnode::FwNodeId) -> Option<fwnode::FwNodeId> {
+        None
+    }
+
+    fn is_available(&self, _: fwnode::FwNodeId) -> Result<bool, fwnode::FwError> {
+        Ok(true)
+    }
+
+    fn is_interrupt_controller(&self, _: fwnode::FwNodeId) -> Result<bool, fwnode::FwError> {
+        Ok(false)
+    }
+
+    fn firmware_id(&self, _: fwnode::FwNodeId, _: usize) -> Option<&'static str> {
+        None
+    }
+
+    fn property(
+        &self,
+        _: fwnode::FwNodeId,
+        _: &str,
+    ) -> Result<Option<fwnode::FwProperty<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+
+    fn mmio_resource(
+        &self,
+        _: fwnode::FwNodeId,
+        _: usize,
+    ) -> Result<Option<fwnode::FwMmioResource<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+
+    fn irq_spec(
+        &'static self,
+        _: fwnode::FwNodeId,
+        _: usize,
+    ) -> Result<Option<fwnode::FwIrqSpec<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+
+    fn reference(
+        &'static self,
+        _: fwnode::FwNodeId,
+        _: &str,
+        _: usize,
+        _: usize,
+    ) -> Result<Option<fwnode::FwReference<'static>>, fwnode::FwError> {
+        Ok(None)
+    }
+}
+
+static FOREIGN_BACKEND: ForeignBackend = ForeignBackend;
+
+struct ForeignXlate;
+
+impl kirq::IrqDomainXlate for ForeignXlate {
+    fn translate(&self, _: &[u32]) -> Result<kirq::IrqHwSpec, kirq::IrqXlateError> {
+        Err(kirq::IrqXlateError::Unsupported)
+    }
+}
+
+static FOREIGN_XLATE: ForeignXlate = ForeignXlate;
+
+#[def_test(serial)]
+fn another_gic_instance_domain_is_not_admitted_by_this_driver() {
+    use kirq::{IrqController, IrqDescError};
+
+    // Force a dynamically allocated domain: this driver owns only the
+    // singleton GIC whose identifier `gic_domain()` resolves, not every domain
+    // whose metadata says "GIC".
+    let controller = fwnode::FwNode::new(&FOREIGN_BACKEND, fwnode::FwNodeId::new(1));
+    let foreign = kirq::register_irq_domain(
+        kirq::IrqDomainTarget::New(IrqController::Gic),
+        controller,
+        &FOREIGN_XLATE,
+    )
+    .expect("foreign GIC instance registers its own domain");
+    assert_ne!(foreign, super::gic_domain());
+
+    for hwirq in [16, 32, 63] {
+        assert_eq!(
+            super::select_gic_flow(super::level_irq_desc(hwirq).with_domain(foreign), Some(64)),
+            Err(IrqDescError::UnsupportedFlow { hwirq })
+        );
+    }
+}
+
 #[def_test]
 fn repeated_local_initialization_is_rejected_before_hardware_setup() {
     // Kernel tests run after this CPU's mandatory controller preparation.

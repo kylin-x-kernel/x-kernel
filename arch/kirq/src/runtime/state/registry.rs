@@ -82,11 +82,17 @@ pub(in crate::runtime) struct IrqState {
     /// `virq` is the stable key used by registration, unregister, descriptor
     /// queries, and normal action dispatch.
     pub(in crate::runtime) descs: LineIndex,
-    /// Per-domain control-plane state.
+    /// Private per-domain control-plane state for test registries.
     ///
-    /// Each Domain maps hardware numbers directly to the same retained Lines.
+    /// The global registry keeps no copy: each domain owns its own index, and
+    /// [`Self::with_domain_index`] resolves it through the domain registry so
+    /// dynamically allocated per-instance domains need no fixed slot.
     /// Dispatch reads the shared XArray through RCU without registry exclusion.
+    #[cfg(unittest)]
     domain_states: [LineIndex; crate::domain::DOMAIN_COUNT],
+    /// Whether this registry owns the private test indexes above.
+    #[cfg(unittest)]
+    private_domains: bool,
     /// Next dynamically allocated OS-visible IRQ number.
     ///
     /// Caller-provided `virq` values occupy the explicit OS-visible namespace;
@@ -101,16 +107,20 @@ impl IrqState {
     const fn global() -> Self {
         Self {
             descs: LineIndex::shared(&crate::runtime::index::DIRECTORY),
+            // The global registry resolves domain indexes from the domains
+            // themselves; these views keep the const initializer uniform but
+            // are not consulted while `private_domains` is false.
+            #[cfg(unittest)]
             domain_states: [
                 LineIndex::shared(&crate::domain::GIC_IRQ_DOMAIN.lines),
                 LineIndex::shared(&crate::domain::PLIC_IRQ_DOMAIN.lines),
                 LineIndex::shared(&crate::domain::IO_APIC_IRQ_DOMAIN.lines),
                 LineIndex::shared(&crate::domain::MSI_IRQ_DOMAIN.lines),
-                #[cfg(unittest)]
                 LineIndex::shared(&crate::domain::TEST_IRQ_DOMAIN.lines),
-                #[cfg(unittest)]
                 LineIndex::shared(&crate::domain::SECOND_TEST_IRQ_DOMAIN.lines),
             ],
+            #[cfg(unittest)]
+            private_domains: false,
             next_virq: DYNAMIC_VIRQ_BASE,
             #[cfg(unittest)]
             index_observer: None,
@@ -122,9 +132,53 @@ impl IrqState {
         Self {
             descs: LineIndex::new(),
             domain_states: [const { LineIndex::new() }; crate::domain::DOMAIN_COUNT],
+            private_domains: true,
             next_virq: DYNAMIC_VIRQ_BASE,
             index_observer: None,
         }
+    }
+
+    /// Runs `visit` against the control-plane index for `domain`.
+    ///
+    /// Global transactions use the domain's own `lines` array, so a
+    /// dynamically allocated per-instance domain needs no fixed slot. Private
+    /// test registries keep isolated indexes for the well-known domains.
+    ///
+    /// The global path borrows a stateless view: the array owns its entries and
+    /// the population count. A temporary borrowed view must never carry a count,
+    /// because publication and withdrawal mutate the array directly and only a
+    /// private fixture index keeps its own bookkeeping count.
+    fn with_domain_index<R>(
+        &self,
+        domain: IrqDomainId,
+        visit: impl FnOnce(&LineIndex) -> R,
+    ) -> Option<R> {
+        #[cfg(unittest)]
+        if self.private_domains {
+            return self
+                .domain_states
+                .get(crate::domain::slot(domain)?)
+                .map(visit);
+        }
+        Some(visit(&LineIndex::shared(
+            &crate::domain::domain(domain)?.lines,
+        )))
+    }
+
+    fn with_domain_index_mut<R>(
+        &mut self,
+        domain: IrqDomainId,
+        visit: impl FnOnce(&mut LineIndex) -> R,
+    ) -> Option<R> {
+        #[cfg(unittest)]
+        if self.private_domains {
+            return self
+                .domain_states
+                .get_mut(crate::domain::slot(domain)?)
+                .map(visit);
+        }
+        let mut index = LineIndex::shared(&crate::domain::domain(domain)?.lines);
+        Some(visit(&mut index))
     }
 
     pub(in crate::runtime) fn alloc_virq(&mut self) -> Result<Virq, IrqDescError> {
@@ -323,15 +377,7 @@ impl IrqState {
             entry.runtime.remember_desc(stored_desc);
         }
         if let Some((domain, ..)) = mapping_to_insert {
-            #[expect(
-                clippy::expect_used,
-                reason = "CG-021-no-panic-on-reachable-failure: both publication capacities \
-                          validated before either insertion"
-            )]
-            self.domain_states[crate::domain::slot(domain).expect("validated domain")].publish(
-                line.clone(),
-                prepared.domain.take().expect("prepared domain insertion"),
-            );
+            self.publish_domain_mapping(domain, line, prepared);
         }
         #[cfg(unittest)]
         self.observe_index_transition(line, entry);
@@ -386,9 +432,8 @@ impl IrqState {
             crate::IrqRef::Virq(virq) => virq,
             crate::IrqRef::Domain(domain, hwirq) => {
                 if let Some(line) = self
-                    .domain_states
-                    .get(crate::domain::slot(domain)?)
-                    .and_then(|state| state.get(&hwirq))
+                    .with_domain_index(domain, |index| index.get(&hwirq))
+                    .flatten()
                 {
                     return Some((line.logical_irq()?, Some(line)));
                 }
@@ -421,9 +466,33 @@ impl IrqState {
         self.descs.get(&virq).map(|line| line.lock().desc)
     }
 
+    /// Publishes the prepared domain binding into the domain's own index.
+    ///
+    /// The caller validated the domain and both publication capacities while
+    /// holding registry exclusion.
+    fn publish_domain_mapping(
+        &mut self,
+        domain: IrqDomainId,
+        line: &Arc<IrqLine>,
+        prepared: &mut PreparedPublication,
+    ) {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: domain validation and both \
+                      publication capacities completed before either insertion"
+        )]
+        self.with_domain_index_mut(domain, |index| {
+            index.publish(
+                line.clone(),
+                prepared.domain.take().expect("prepared domain insertion"),
+            );
+        })
+        .expect("validated domain index");
+    }
+
     fn domain_virq(&self, domain: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
-        self.domain_states[crate::domain::slot(domain)?]
-            .get(&hwirq)?
+        self.with_domain_index(domain, |index| index.get(&hwirq))
+            .flatten()?
             .logical_irq()
     }
 
@@ -458,8 +527,10 @@ impl IrqState {
             entry.is_retired = true;
             entry.desc
         };
-        if let Some(slot) = desc.domain.and_then(crate::domain::slot) {
-            self.domain_states[slot].remove(&desc.hwirq);
+        if let Some(domain) = desc.domain {
+            self.with_domain_index_mut(domain, |index| {
+                index.remove(&desc.hwirq);
+            });
         }
         self.descs.remove(&virq)
     }
@@ -503,10 +574,13 @@ impl IrqState {
         let reservation = entry.msi_reservation.take()?;
         // SAFETY: caller preflight and registry exclusion span validation and
         // both withdrawals; every pending record is returned for unlocked submit.
-        let domain = if let Some(slot) = desc.domain.and_then(crate::domain::slot) {
-            // SAFETY: the caller's preflight and registry exclusion cover this
-            // withdrawal; its pending record is transferred to the caller.
-            unsafe { self.domain_states[slot].withdraw(desc.hwirq, prepared.domain) }
+        let domain = if let Some(domain) = desc.domain {
+            self.with_domain_index_mut(domain, |index| {
+                // SAFETY: the caller's preflight and registry exclusion cover
+                // this withdrawal; its pending record is returned to the caller.
+                unsafe { index.withdraw(desc.hwirq, prepared.domain) }
+            })
+            .flatten()
         } else {
             None
         };

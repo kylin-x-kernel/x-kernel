@@ -31,6 +31,10 @@ const GICR_FRAME_SIZE: usize = 0x2_0000;
 static GIC_INFO: LazyInit<GicConfig> = LazyInit::new();
 static ACTIVE_GIC: LazyInit<GicVersion> = LazyInit::new();
 static STANDARD_INTID_LIMIT: LazyInit<usize> = LazyInit::new();
+/// Domain returned when the firmware-described GIC was registered. Firmware
+/// consumers always use this instance's namespace; the well-known root remains
+/// the fallback for platform-static boot paths that never registered one.
+static GIC_DOMAIN: LazyInit<kirq::IrqDomainId> = LazyInit::new();
 
 fn standard_intid_limit(typer: u32) -> usize {
     // ITLinesNumber includes the private prefix. IDbits also covers other
@@ -52,12 +56,15 @@ fn select_gic_flow(
         return Ok(IrqFlow::PerCpu);
     }
 
-    // External sources require an explicit GIC identity.
-    if desc.domain != Some(GIC_ROOT_DOMAIN) && desc.controller != IrqController::Gic {
+    // External sources require an explicit GIC identity: either a controller
+    // family on the descriptor or a registered domain owned by a GIC instance.
+    if desc.domain.is_some() && !is_gic_domain(desc.domain) {
         return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
     }
-    if desc.domain.is_some_and(|domain| domain != GIC_ROOT_DOMAIN)
-        || !matches!(desc.controller, IrqController::Unknown | IrqController::Gic)
+    if desc.domain.is_none() && desc.controller != IrqController::Gic {
+        return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
+    }
+    if !matches!(desc.controller, IrqController::Unknown | IrqController::Gic)
         || limit.is_none_or(|limit| desc.hwirq >= limit)
     {
         return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
@@ -91,7 +98,29 @@ kcpu_slot::cpu_slot! {
 unittest::path_mod_test!(tests, "../ut-tests/gic.rs");
 unittest::path_mod_test!(firmware_tests, "../ut-tests/gic_firmware.rs");
 
+/// Well-known domain reserved for the first firmware-registered GIC.
 pub const GIC_ROOT_DOMAIN: kirq::IrqDomainId = kirq::GIC_ROOT_DOMAIN;
+
+/// Domain used for claims on this GIC instance.
+///
+/// `init_from_fwnode` records the identifier returned by registration. The
+/// well-known root keeps platform-static boot paths that initialize the GIC
+/// without firmware working under the same namespace.
+fn gic_domain() -> kirq::IrqDomainId {
+    GIC_DOMAIN.get().copied().unwrap_or(GIC_ROOT_DOMAIN)
+}
+
+/// Whether `domain` is the namespace owned by this GIC instance.
+///
+/// This driver is the singleton backend for one initialized controller; it
+/// accesses that controller's registers through `desc.hwirq` alone. Accepting
+/// any domain of the GIC family would therefore admit a second instance's
+/// sources while programming the first instance. Family membership is not
+/// instance ownership; additional instances need their own controller backend
+/// and register access before they can be admitted here.
+fn is_gic_domain(domain: Option<kirq::IrqDomainId>) -> bool {
+    domain == Some(gic_domain())
+}
 
 pub const fn irq_desc(hwirq: usize, trigger: kirq::IrqTrigger) -> kirq::IrqDesc {
     kirq::gic_irq_desc(hwirq, trigger)
@@ -386,10 +415,20 @@ pub fn init_from_fwnode(root: fwnode::FwNode<'static>) -> Result<(), &'static st
         })?
         .ok_or("no available supported GIC controller in firmware description")?;
     init(config)?;
-    kirq::register_irq_domain(GIC_ROOT_DOMAIN, controller, &GIC_XLATE).map_err(|error| {
+    // Boot wiring explicitly keeps the primary GIC on the legacy root. A future
+    // second hardware instance must choose `IrqDomainTarget::New` on its own
+    // initialization path instead of relying on family-based root selection.
+    let domain = kirq::register_irq_domain(
+        kirq::IrqDomainTarget::Existing(GIC_ROOT_DOMAIN),
+        controller,
+        &GIC_XLATE,
+    )
+    .map_err(|error| {
         error!("failed to register GIC IRQ domain: {error:?}");
         "failed to register GIC IRQ domain"
-    })
+    })?;
+    GIC_DOMAIN.init_once(domain);
+    Ok(())
 }
 
 /// Initializes this CPU's GIC interface during bring-up.
@@ -489,10 +528,7 @@ unsafe fn gic_dispatch_nmi_from_irqsoff(_unused: usize) {
         // SAFETY: the acknowledged claim is unique and consumed on this CPU
         // before returning to the caller's IRQ-masked NMI entry.
         let pending = unsafe {
-            kirq::PendingIrq::new(
-                kirq::IrqRef::Domain(kirq::GIC_ROOT_DOMAIN, hwirq),
-                completion_cookie,
-            )
+            kirq::PendingIrq::new(kirq::IrqRef::Domain(gic_domain(), hwirq), completion_cookie)
         };
         kirq::generic_handle_nmi(pending);
     }
@@ -604,7 +640,7 @@ impl kirq::IntrManagerIf {
     fn percpu_nmi(desc: kirq::IrqDesc) -> Option<&'static kirq::PerCpuNmiChip> {
         #[cfg(any(feature = "nmi-pseudo", feature = "nmi-hardware"))]
         if ACTIVE_GIC.get() == Some(&GicVersion::V3)
-            && desc.domain == Some(GIC_ROOT_DOMAIN)
+            && is_gic_domain(desc.domain)
             && matches!(
                 select_gic_flow(desc, STANDARD_INTID_LIMIT.get().copied()),
                 Ok(kirq::IrqFlow::PerCpu)
@@ -627,7 +663,7 @@ impl kirq::IntrManagerIf {
 
     fn percpu_forwarding(desc: kirq::IrqDesc) -> Option<&'static kirq::PerCpuForwardingChip> {
         (ACTIVE_GIC.get() == Some(&GicVersion::V2)
-            && desc.domain == Some(GIC_ROOT_DOMAIN)
+            && is_gic_domain(desc.domain)
             && (16..32).contains(&desc.hwirq)
             && select_gic_flow(desc, STANDARD_INTID_LIMIT.get().copied())
                 == Ok(kirq::IrqFlow::PerCpu))

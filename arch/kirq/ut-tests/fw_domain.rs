@@ -9,8 +9,8 @@ use fwnode::{
 use unittest::{assert_eq, def_test};
 
 use crate::{
-    FwIrqMapError, IrqController, IrqDesc, IrqDescError, IrqDomainRegisterError, IrqDomainXlate,
-    IrqHwSpec, IrqPolarity, IrqTrigger, IrqXlateError,
+    FwIrqMapError, IrqController, IrqDesc, IrqDescError, IrqDomainId, IrqDomainRegisterError,
+    IrqDomainTarget, IrqDomainXlate, IrqHwSpec, IrqPolarity, IrqTrigger, IrqXlateError,
 };
 
 struct TestBackend {
@@ -25,10 +25,11 @@ impl FwNodeOps<'static> for TestBackend {
     }
 
     fn name(&self, _: FwNodeId) -> Option<&'static str> {
-        Some(if self.tag == 1 {
-            "test-interrupt-controller"
-        } else {
-            "other-interrupt-controller"
+        Some(match self.tag {
+            1 => "test-interrupt-controller",
+            2 => "other-interrupt-controller",
+            3 => "second-instance-interrupt-controller",
+            _ => "root-interrupt-controller",
         })
     }
 
@@ -85,12 +86,19 @@ impl FwNodeOps<'static> for TestBackend {
 
 static TEST_BACKEND: TestBackend = TestBackend { tag: 1 };
 static OTHER_BACKEND: TestBackend = TestBackend { tag: 2 };
+static SECOND_INSTANCE_BACKEND: TestBackend = TestBackend { tag: 3 };
+static ROOT_BACKEND: TestBackend = TestBackend { tag: 4 };
 
 const TEST_NODE: FwNodeId = FwNodeId::new(1);
 
 static TEST_CONTROLLER: FwNode<'static> = FwNode::new(&TEST_BACKEND, TEST_NODE);
 // The same backend-local id in another backend is a different controller.
 static OTHER_CONTROLLER: FwNode<'static> = FwNode::new(&OTHER_BACKEND, TEST_NODE);
+// A second controller of the same family remains a distinct firmware node.
+static SECOND_INSTANCE_CONTROLLER: FwNode<'static> =
+    FwNode::new(&SECOND_INSTANCE_BACKEND, TEST_NODE);
+static ROOT_CONTROLLER: FwNode<'static> = FwNode::new(&ROOT_BACKEND, TEST_NODE);
+static OTHER_ROOT_CONTROLLER: FwNode<'static> = FwNode::new(&ROOT_BACKEND, FwNodeId::new(2));
 
 struct TestXlate;
 
@@ -159,16 +167,63 @@ fn descriptor_merge_adopts_concrete_metadata_and_rejects_conflicts() {
 }
 
 #[def_test(serial)]
-fn firmware_domain_registration_and_translation_use_exact_node_identity() {
-    let domain = crate::domain::TEST_DOMAIN;
-    let other_domain = crate::domain::SECOND_TEST_DOMAIN;
+fn existing_domain_association_is_explicit_and_exclusive() {
+    let domain = crate::domain::SECOND_TEST_DOMAIN;
+    let unassigned = IrqDomainId::new(0x7fff_fffe);
+    assert_eq!(
+        crate::register_irq_domain(
+            IrqDomainTarget::Existing(unassigned),
+            ROOT_CONTROLLER,
+            &TEST_XLATE,
+        )
+        .expect_err("an unknown existing domain is rejected"),
+        IrqDomainRegisterError::UnknownDomain { domain: unassigned }
+    );
 
-    crate::register_irq_domain(domain, TEST_CONTROLLER, &TEST_XLATE)
-        .expect("first association succeeds");
+    assert_eq!(
+        crate::register_irq_domain(
+            IrqDomainTarget::Existing(domain),
+            ROOT_CONTROLLER,
+            &TEST_XLATE,
+        )
+        .expect("boot wiring explicitly selects an existing domain"),
+        domain
+    );
+    let binding = crate::domain::fw::lookup(ROOT_CONTROLLER).expect("root controller associated");
+    assert_eq!(binding.domain, domain);
+    assert_eq!(
+        binding.kind,
+        IrqController::Plic,
+        "an existing domain keeps its own family metadata"
+    );
+    assert!(!crate::domain::domain(domain)
+        .expect("existing domain remains registered")
+        .is_identity());
+
+    assert_eq!(
+        crate::register_irq_domain(
+            IrqDomainTarget::Existing(domain),
+            OTHER_ROOT_CONTROLLER,
+            &TEST_XLATE,
+        )
+        .expect_err("an existing domain accepts only one controller"),
+        IrqDomainRegisterError::DomainAlreadyRegistered { domain }
+    );
+}
+
+#[def_test(serial)]
+fn firmware_domain_registration_and_translation_use_exact_node_identity() {
+    let domain = crate::register_irq_domain(
+        IrqDomainTarget::New(IrqController::Gic),
+        TEST_CONTROLLER,
+        &TEST_XLATE,
+    )
+    .expect("first association succeeds");
 
     let binding = crate::domain::fw::lookup(TEST_CONTROLLER).expect("controller is associated");
     assert_eq!(binding.domain, domain);
     assert_eq!(binding.kind, IrqController::Gic);
+    assert_eq!(crate::domain::domain_kind(domain), Some(IrqController::Gic));
     assert_eq!(
         binding.xlate.translate(&[42, 4]),
         Ok(IrqHwSpec {
@@ -183,18 +238,37 @@ fn firmware_domain_registration_and_translation_use_exact_node_identity() {
     );
 
     assert_eq!(
-        crate::register_irq_domain(domain, TEST_CONTROLLER, &TEST_XLATE)
-            .expect_err("a domain accepts one controller"),
-        IrqDomainRegisterError::DomainAlreadyRegistered { domain }
-    );
-    assert_eq!(
-        crate::register_irq_domain(other_domain, TEST_CONTROLLER, &TEST_XLATE)
-            .expect_err("a controller registers once"),
+        crate::register_irq_domain(
+            IrqDomainTarget::New(IrqController::Gic),
+            TEST_CONTROLLER,
+            &TEST_XLATE,
+        )
+        .expect_err("a controller registers once"),
         IrqDomainRegisterError::ControllerAlreadyRegistered {
             controller: TEST_NODE,
             existing: domain,
         }
     );
+
+    // A second controller of the same family gets its own namespace instead of
+    // colliding with the first instance's domain.
+    let second = crate::register_irq_domain(
+        IrqDomainTarget::New(IrqController::Gic),
+        SECOND_INSTANCE_CONTROLLER,
+        &TEST_XLATE,
+    )
+    .expect("second instance of the same family registers");
+    assert_ne!(second, domain);
+    let second_binding =
+        crate::domain::fw::lookup(SECOND_INSTANCE_CONTROLLER).expect("second controller associated");
+    assert_eq!(second_binding.domain, second);
+    assert_eq!(second_binding.kind, IrqController::Gic);
+
+    // Numeric identity fallback belongs to the reserved root. A newly allocated
+    // instance must require an explicit mapping instead of resolving a bare
+    // hardware number to an unrelated global logical number.
+    assert!(!crate::domain::domain(second).expect("second domain").is_identity());
+    assert_eq!(crate::domain::resolve(second, 42), None);
 
     // Numeric identity alone must not associate a node from another backend.
     assert!(crate::domain::fw::lookup(OTHER_CONTROLLER).is_none());
@@ -247,6 +321,59 @@ fn firmware_domain_registration_and_translation_use_exact_node_identity() {
     assert_eq!(
         crate::try_map_fwspec(spec(&[42, 4]))
             .expect("repeating the original declaration still succeeds")
+            .virq,
+        first.virq
+    );
+
+    // The same hardware number in a second instance is a distinct source. It
+    // must not inherit the first instance's mapping or metadata.
+    assert_eq!(
+        crate::domain::resolve(second, 42),
+        None,
+        "an unmapped instance must not borrow the first instance's mapping"
+    );
+    let second_existing = crate::runtime::manager::tests_irq::SyntheticLine::mapped(
+        IrqDesc::from_hwirq(42).with_domain(second),
+    );
+    assert_ne!(second_existing.virq(), first.virq);
+    let second_mapped = crate::try_map_fwspec(FwIrqSpec {
+        controller: SECOND_INSTANCE_CONTROLLER,
+        params: FwParams::new(&[42, 1]).unwrap(),
+    })
+    .expect("second instance maps its own source");
+    assert_eq!(second_mapped.virq, second_existing.virq());
+    assert_eq!(second_mapped.desc.domain, Some(second));
+    assert_eq!(second_mapped.desc.controller, IrqController::Gic);
+    assert_eq!(second_mapped.desc.trigger, IrqTrigger::EdgeRising);
+    assert_eq!(
+        crate::domain::resolve(second, 42),
+        Some(second_existing.virq())
+    );
+    assert_eq!(crate::domain::resolve(domain, 42), Some(first.virq));
+
+    // A metadata conflict in one instance leaves the other instance intact.
+    assert_eq!(
+        crate::try_map_fwspec(FwIrqSpec {
+            controller: SECOND_INSTANCE_CONTROLLER,
+            params: FwParams::new(&[42, 4]).unwrap(),
+        })
+        .expect_err("conflicting trigger in the second instance is rejected"),
+        FwIrqMapError::Map(IrqDescError::TriggerConflict {
+            existing: IrqTrigger::EdgeRising,
+            newer: IrqTrigger::LevelHigh,
+        })
+    );
+    let first_retained = crate::descriptor(first.virq).expect("first mapping remains");
+    assert_eq!(first_retained.trigger, IrqTrigger::LevelHigh);
+    assert_eq!(first_retained.hwirq, 42);
+
+    // Removing the second instance's line withdraws only its own index entry.
+    drop(second_existing);
+    assert_eq!(crate::domain::resolve(second, 42), None);
+    assert_eq!(crate::domain::resolve(domain, 42), Some(first.virq));
+    assert_eq!(
+        crate::try_map_fwspec(spec(&[42, 4]))
+            .expect("first declaration still maps after the second is released")
             .virq,
         first.virq
     );
