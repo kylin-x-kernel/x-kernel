@@ -35,13 +35,23 @@ end-of-interrupt and raw-APIC-id helpers to the rest of the kernel.
 
 ## Responsibilities
 
-- Local APIC bring-up: `init_primary` (boot CPU — masks the legacy PIC,
-  selects x2APIC vs xAPIC from CPUID, programs timer/error/spurious
+- Local APIC bring-up: `init_local_primary` (boot CPU — masks the legacy
+  PIC, selects x2APIC vs xAPIC from CPUID, programs timer/error/spurious
   vectors, maps the xAPIC MMIO page when needed) and `init_secondary`
   (application CPUs).
-- IO-APIC routing: `configure_irq_checked` (masked trigger/polarity transaction
-  with readback), `set_irq_enabled` (mask/unmask), `irq_trigger_mode` (query),
-  and `retrigger_io_apic` (fixed physical-route delivery).
+- IO-APIC bring-up: `init_io_apic(paddr, policy)` maps the controller,
+  masks every hardware redirection entry, assigns the fixed delivery
+  vector and policy defaults only to pins inside the fixed vector window,
+  publishes the single controller, and returns
+  `IoApicCapabilities { pin_count }`. Pins above the window stay masked
+  with no delivery vector and are not routable in this slice.
+  Production boot calls the split steps through `irq_driver::x86::init`,
+  which validates declarations and capabilities.
+- IO-APIC routing: `configure_pin_checked` (masked trigger/polarity
+  transaction with readback), `set_pin_enabled` (mask/unmask),
+  `pin_trigger_mode` (query), and `retrigger_pin` (fixed physical-route
+  delivery). `IoApicPin` distinguishes a controller pin from a GSI or a
+  CPU vector.
 - Inter-processor interrupts: `send_ipi_self`, `send_ipi_raw`,
   `send_ipi_all_but_self`.
 - MSI-X backend (`kirq::MsiBackendIf` provider): a bitmap allocator over
@@ -53,36 +63,68 @@ end-of-interrupt and raw-APIC-id helpers to the rest of the kernel.
 
 ## Non-Responsibilities
 
-- No IRQ policy or dispatch: vectors, priorities, and dispatch decisions
-  belong to `kirq`; this crate programs registers it is told to program.
-- No interrupt-line discovery: the IO-APIC physical address arrives from
-  platform init (ACPI MADT via `acpi`/`khal`), not from this crate.
+- No generic IRQ policy or dispatch: IRQ objects, actions, flow
+  execution, and synchronization belong to `kirq`; `irq-driver` connects
+  those flows to this crate's operations. CPU vector allocation, the
+  fixed vector layout, and delivery destination encoding stay here, and
+  this crate programs registers it is told to program.
+- No interrupt-line discovery: the IO-APIC address and initial policy
+  arrive from `irq-driver`/platform policy; this crate never parses ACPI
+  or MADT and owns no fallback address.
+- No firmware or bus semantics: pin numbers are not interpreted as ISA or
+  PCI lines. The historical "pins `>= 10` are level/low" rule is an
+  explicit `IoApicInitPolicy::platform_legacy()` input, not backend
+  inference.
 - No timer policy: the local APIC timer vector is configured here, but
   the clock-event semantics live in the platform timer wiring.
 - No legacy PIC ownership beyond bring-up masking: the 8259 is masked
-  during `init_primary` and never touched again.
+  during `init_local_primary` and never touched again.
+
+## Ownership and Host Resources
+
+| State | Owner and lifetime |
+| --- | --- |
+| PIC masking, x2APIC/xAPIC mode, LAPIC vectors | This crate; boot CPU during `init_local_primary` |
+| Per-CPU `LocalApic` handle | This crate; one leaked NOWAIT `KBox` in the CPU-local slot, installed by `init_local_primary`/`init_secondary` |
+| IO-APIC MMIO mapping and register lock | This crate; boot CPU only, one controller in this slice |
+| IO-APIC pin count | Hardware capability returned by `init_io_apic`; runtime support validation belongs to `irq-driver` |
+| MSI/MSI-X vector bitmap and destinations | This crate; exposed through `kirq::MsiBackendIf` |
+| GSI and ISO semantics | Not owned here; firmware discovery and IRQ integration layers |
+
+Host-resource management is separate from hardware operations:
+`memspace::iomap_device` maps the xAPIC page and IO-APIC window, and
+NOWAIT `KBox` allocation plus CPU-slot publication own the per-CPU LAPIC
+handle. Hardware operations are PIC port writes, LAPIC register/MSR
+access, IO-APIC redirection register access, EOI, and IPI issue.
 
 ## Scope
 
 ```text
 arch/x86-apic/
 ├── src/
-│   ├── lib.rs        # LAPIC bring-up, IPIs, IO-APIC access, MSI-X backend
+│   ├── lib.rs        # LAPIC/IO-APIC bring-up, IPIs, MSI-X backend
 │   └── io_apic.rs    # Checked configuration and fixed-route retrigger
+├── ut-tests/pin.rs   # Pin bounds, init policy, capability reporting
 └── Cargo.toml
 ```
 
 ## Architecture
 
 ```text
-init_primary(io_apic_paddr)
+init_local_primary()
   ├─ mask legacy PIC (ports 0x21/0xA1)
   ├─ CPUID: x2APIC ? enable x2APIC : map xAPIC MMIO page ("lapic")
-  ├─ LocalApicBuilder: timer 0xf0 / error 0xf2 / spurious 0xf1
-  └─ map + init IO-APIC  ──> IO_APIC: LazyInit<SpinNoIrq<IoApic>>
+  └─ LocalApicBuilder: timer 0xf0 / error 0xf2 / spurious 0xf1
+
+init_io_apic(io_apic_paddr, policy)
+  ├─ map IO-APIC window ("ioapic")
+  ├─ mask every hardware redirection entry; assign fixed vectors and
+  │  policy defaults only inside the 0..=31 window
+  └─ publish ──> IO_APIC: LazyInit<SpinNoIrq<IoApic>>
+                return IoApicCapabilities { pin_count }
 
 per-CPU: LOCAL_APIC_PTR (kcpu_slot::cpu_slot_cell!) holds a leaked LocalApic handle
-         installed by init_primary / init_secondary
+         installed by init_local_primary / init_secondary
 
 kirq::MsiBackendIf ──> MsixVectorAllocator (bitmap, 0x40..0xf0)
                    ──> compose_msi_message (xAPIC 0xFEE0_0000 form)
@@ -106,9 +148,12 @@ kirq::MsiBackendIf ──> MsixVectorAllocator (bitmap, 0x40..0xf0)
   subsystems (e.g. TLB shootdown, rescheduling); the interrupt id comes
   from the caller, the raw id from `kcpu_id_map` resolution, and the
   direction is this crate -> the target CPU's LAPIC.
-- `configure_irq_checked` / `set_irq_enabled`: called by `kirq` (through
-  `irq-driver`'s `IntrManagerIf`) with a hardware IRQ number; this
-  crate translates it to an IO-APIC redirection entry.
+- `configure_pin_checked` / `set_pin_enabled` / `pin_trigger_mode`:
+  called by `kirq` (through `irq-driver`'s `IntrManagerIf`) after it
+  converts its domain-relative hardware number to `IoApicPin`; this crate
+  programs the corresponding IO-APIC redirection entry. The current
+  IO-APIC domain treats `hwirq` as the pin; GSI translation is a later
+  discovery/integration slice.
 
 ## Fixed Local Vectors
 
@@ -170,10 +215,11 @@ CPU performing the request. There is no other creation or cleanup path.
 
 ## Execution Context
 
-- `init_primary` runs once on the boot CPU during platform bring-up,
-  before interrupts are routed through the APIC; `init_secondary` runs
-  on each application CPU before it enables interrupts.
-- `set_irq_enabled` / `configure_irq` / `irq_trigger_mode` take the
+- `init_local_primary` and `init_io_apic` run once on the boot CPU during
+  platform bring-up, before interrupts are routed through the APIC;
+  `init_secondary` runs on each application CPU before it enables
+  interrupts. `irq_driver::x86::init` calls them in that order.
+- `set_pin_enabled` / `configure_pin` / `pin_trigger_mode` take the
   IO-APIC spin lock and may be called from task or ordinary IRQ context through
   `kirq`. They must not be used from NMI. Checked configuration and retrigger
   have the same restriction.
@@ -188,12 +234,12 @@ CPU performing the request. There is no other creation or cleanup path.
 ## Concurrency Model
 
 - `IO_APIC`: `LazyInit<SpinNoIrq<IoApic>>` — one lock serializes IO-APIC
-  MMIO access; initialized during `init_primary` before runtime masking
-  is used.
+  MMIO access; initialized during `init_io_apic` before runtime masking
+  is used. A second publication is a programming error and panics.
 - `LOCAL_APIC_PTR`: a per-CPU slot holding a deliberately leaked
   `LocalApic` handle; local IRQs stay masked while a `&mut LocalApic` is
   borrowed, excluding overlapping borrows on the same CPU.
-- `IS_X2APIC` / `XAPIC_BASE`: set once at `init_primary`, read with
+- `IS_X2APIC` / `XAPIC_BASE`: set once at `init_local_primary`, read with
   `Relaxed` afterwards.
 - `MSIX_VECTOR_ALLOCATOR`: `SpinNoIrq` protects the allocation bitmap
   (`0x40..0xf0`, 176 vectors) and the per-vector destination bindings together.
@@ -242,16 +288,17 @@ All unsafe blocks are volatile/port access with `SAFETY:` comments:
 
 ## Checked Flow Operations
 
-`io_apic.rs` bounds pins against the physical table and the fixed IO-APIC vector
-window below 0x40. `configure_irq_checked` masks, reads back the mask, programs
-trigger/polarity, verifies those bits and restores prior delivery only on success.
+`IoApicPin` bounds a pin to the fixed IO-APIC vector window below 0x40, and
+`io_apic.rs` further bounds it against the physical table. `configure_pin_checked`
+masks, reads back the mask, programs trigger/polarity, verifies those bits and
+restores prior delivery only on success.
 It preserves vector/destination and refuses changing an active remote-IRR route.
 A failed hardware readback is reported, not treated as a completed barrier;
 mask failure cannot guarantee physical suppression. Generic KIRQ admission
-provides an independent failed-configuration gate. The older `configure_irq`
+provides an independent failed-configuration gate. The older `configure_pin`
 entry remains a low-level unchecked operation and is not used by KIRQ flow.
 
-`retrigger_io_apic` reads the fixed vector and physical destination under IO_APIC
+`retrigger_pin` reads the fixed vector and physical destination under IO_APIC
 exclusion and issues the request before releasing that lock. Level, logical
 destination or mismatched-vector entries are rejected. No new vector is created.
 `MsixVectorAllocator` additionally retains the destination first committed by

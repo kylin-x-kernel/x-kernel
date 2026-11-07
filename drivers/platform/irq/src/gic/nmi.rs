@@ -100,4 +100,4 @@ fn update_locked(
     Ok(())
 }
 
-unittest::path_mod_test!(tests, "../ut-tests/gicv3_nmi.rs");
+unittest::path_mod_test!(tests, "../../ut-tests/gicv3_nmi.rs");

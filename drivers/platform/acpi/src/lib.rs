@@ -6,9 +6,9 @@
 
 #![allow(
     clippy::panic,
-    reason = "CG-021-no-panic-on-reachable-failure: case (b): 16 legacy panics on absent or \
-              malformed firmware tables (RSDP, XSDT/RSDT, MADT and SDT headers) need one parser \
-              failure contract rather than per-site judgement; new code remains reviewed"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): boot-critical firmware corruption \
+              in RSDP and SDT/MADT fixed headers still panics by contract; MADT entry framing \
+              reports typed errors instead, and new code remains reviewed"
 )]
 #![no_std]
 
@@ -111,15 +111,6 @@ pub struct MadtInfo {
     pub flags: u32,
 }
 
-/// Summarized APIC topology extracted from the MADT.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ApicInfo {
-    /// Physical address of the local APIC register block.
-    pub local_apic_address: usize,
-    /// Physical address of the first I/O APIC, if the MADT describes one.
-    pub io_apic_address: Option<usize>,
-}
-
 /// One memory window advertised by a PCI host bridge `_CRS` resource
 /// template.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +136,7 @@ pub struct Pm1aControlBlock {
 }
 
 /// One processor entry from the MADT (type 0).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalApicEntry {
     /// Processor UID as listed by the firmware (often the ACPI UID).
     pub processor_uid: u8,
@@ -163,7 +154,7 @@ impl LocalApicEntry {
 }
 
 /// One I/O APIC entry from the MADT (type 1).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoApicEntry {
     /// I/O APIC id as listed by the firmware.
     pub id: u8,
@@ -173,23 +164,80 @@ pub struct IoApicEntry {
     pub global_system_interrupt_base: u32,
 }
 
+/// One interrupt source override from the MADT (type 2).
+///
+/// The flags are kept raw: trigger and polarity policy belongs to the
+/// architecture integration layer, not to ACPI table parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptSourceOverride {
+    /// Bus the source interrupt belongs to (0 is ISA).
+    pub bus: u8,
+    /// Bus-relative source interrupt number.
+    pub source: u8,
+    /// Global system interrupt it is routed to.
+    pub gsi: u32,
+    /// Raw MPS INTI flags (polarity in bits 0:1, trigger mode in bits 2:3).
+    pub flags: u16,
+}
+
 /// A parsed MADT entry, narrowed to the kinds the kernel consumes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MadtEntry {
     /// Processor entry (MADT type 0).
     LocalApic(LocalApicEntry),
     /// I/O APIC entry (MADT type 1).
     IoApic(IoApicEntry),
+    /// Interrupt source override (MADT type 2).
+    InterruptSourceOverride(InterruptSourceOverride),
+}
+
+/// Why a MADT entry could not be parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MadtParseErrorKind {
+    /// The entry header or declared body runs past the entry region.
+    TruncatedEntry,
+    /// The entry declares a length smaller than the two-byte entry header.
+    InvalidLength,
+    /// A known entry is shorter than its fixed structure.
+    ShortEntry,
+}
+
+/// A MADT framing error and the table-relative offset it was detected at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MadtParseError {
+    /// Offset from the start of the MADT table.
+    pub offset: usize,
+    /// What made the entry unparseable.
+    pub kind: MadtParseErrorKind,
 }
 
 /// Iterator over the variable-length entries of a validated MADT.
 ///
-/// Skips entry kinds the kernel does not model; panics on entries that
-/// would run past the table end.
+/// Entry kinds the kernel does not model are skipped. A malformed entry
+/// yields one [`MadtParseError`] and then ends the iteration; it is never
+/// treated as a panic or silently dropped.
 #[derive(Clone, Copy)]
-pub struct MadtEntryIter {
-    current: usize,
-    end: usize,
+pub struct MadtEntryIter<'a> {
+    entries: &'a [u8],
+    /// Table-relative offset of the first byte of `entries`.
+    base_offset: usize,
+    offset: usize,
+    done: bool,
+}
+
+impl<'a> MadtEntryIter<'a> {
+    /// Iterates over a raw MADT entry region.
+    ///
+    /// `base_offset` is the table-relative offset of `entries[0]` and is
+    /// added to offsets reported in [`MadtParseError`].
+    pub const fn new(entries: &'a [u8], base_offset: usize) -> Self {
+        Self {
+            entries,
+            base_offset,
+            offset: 0,
+            done: false,
+        }
+    }
 }
 
 impl McfgAllocation {
@@ -237,100 +285,35 @@ pub fn find_mcfg_from_init() -> Option<McfgAllocation> {
     find_mcfg(rsdp_addr()?)
 }
 
-/// Finds the MADT using the boot-initialized RSDP.
-///
-/// # Panics
-///
-/// Panics when ACPI was never initialized, when the MADT is shorter than
-/// its fixed header, or when a validated table fails re-validation.
-pub fn find_madt() -> Option<(MadtInfo, MadtEntryIter)> {
-    let (table_addr, header) = find_table(*b"APIC")?;
-    assert!(
-        header.length >= (mem::size_of::<AcpiSdtHeader>() + mem::size_of::<MadtHeader>()) as u32,
-        "ACPI MADT is too short"
-    );
-    let madt_addr = table_addr + mem::size_of::<AcpiSdtHeader>();
-    let madt = ptr_from_addr::<MadtHeader>(madt_addr);
-    let info = MadtInfo {
-        local_apic_address: madt.local_apic_address,
-        flags: madt.flags,
-    };
-    let entries_start = madt_addr + mem::size_of::<MadtHeader>();
-    let entries_end = table_addr + header.length as usize;
-    Some((
-        info,
-        MadtEntryIter {
-            current: entries_start,
-            end: entries_end,
-        },
-    ))
-}
-
 /// Finds the MADT from the boot RSDP.
 ///
-/// # Panics
-///
-/// Panics when [`rsdp_addr`] is `None` (ACPI was never initialized) or
-/// when the MADT is shorter than its fixed header.
-pub fn find_madt_from_init() -> Option<(MadtInfo, MadtEntryIter)> {
-    let rsdp_addr = rsdp_addr().unwrap_or_else(|| panic!("ACPI RSDP is not initialized"));
-    find_madt_from_rsdp(rsdp_addr)
+/// Returns `None` when ACPI was never initialized or the firmware has no
+/// MADT. A structurally invalid MADT header still panics.
+pub fn find_madt_from_init() -> Option<(MadtInfo, MadtEntryIter<'static>)> {
+    find_madt_from_rsdp(rsdp_addr()?)
 }
 
 /// Finds the MADT from an explicit RSDP address.
 ///
-/// # Panics
-///
-/// Panics when the MADT is shorter than its fixed header or fails
-/// header validation.
-pub fn find_madt_from_rsdp(rsdp_addr: usize) -> Option<(MadtInfo, MadtEntryIter)> {
-    let (table_addr, header) = find_table_from_rsdp(rsdp_addr, *b"APIC")?;
+/// Returns `None` when the firmware has no MADT. A structurally invalid
+/// MADT header still panics; corrupt entry framing is reported by the
+/// returned iterator.
+pub fn find_madt_from_rsdp(rsdp_addr: usize) -> Option<(MadtInfo, MadtEntryIter<'static>)> {
+    let (table_addr, header) = find_table_optional_from_rsdp(rsdp_addr, *b"APIC")?;
+    let header_len = mem::size_of::<AcpiSdtHeader>();
     assert!(
-        header.length >= (mem::size_of::<AcpiSdtHeader>() + mem::size_of::<MadtHeader>()) as u32,
+        header.length >= (header_len + MADT_HEADER_SIZE) as u32,
         "ACPI MADT is too short"
     );
-    let madt_addr = table_addr + mem::size_of::<AcpiSdtHeader>();
-    let madt = ptr_from_addr::<MadtHeader>(madt_addr);
+    let table = sdt_bytes(table_addr, header.length);
+    let body = table.get(header_len..)?;
     let info = MadtInfo {
-        local_apic_address: madt.local_apic_address,
-        flags: madt.flags,
+        local_apic_address: u32::from_le_bytes(body.get(0..4)?.try_into().ok()?),
+        flags: u32::from_le_bytes(body.get(4..8)?.try_into().ok()?),
     };
-    let entries_start = madt_addr + mem::size_of::<MadtHeader>();
-    let entries_end = table_addr + header.length as usize;
-    Some((
-        info,
-        MadtEntryIter {
-            current: entries_start,
-            end: entries_end,
-        },
-    ))
-}
-
-/// Returns the local APIC register address from the boot MADT.
-pub fn find_local_apic_address_from_init() -> Option<usize> {
-    find_madt_from_init().map(|(info, _)| info.local_apic_address as usize)
-}
-
-/// Summarizes local APIC and first I/O APIC addresses from the boot MADT.
-pub fn find_apic_from_init() -> Option<ApicInfo> {
-    let (info, entries) = find_madt_from_init()?;
-    let io_apic_address = entries.into_iter().find_map(|entry| match entry {
-        MadtEntry::IoApic(io_apic) => Some(io_apic.address as usize),
-        _ => None,
-    });
-    Some(ApicInfo {
-        local_apic_address: info.local_apic_address as usize,
-        io_apic_address,
-    })
-}
-
-/// Returns the first I/O APIC entry from the boot MADT.
-pub fn find_io_apic_from_init() -> Option<IoApicEntry> {
-    let (_, mut entries) = find_madt_from_init()?;
-    entries.find_map(|entry| match entry {
-        MadtEntry::IoApic(io_apic) => Some(io_apic),
-        _ => None,
-    })
+    let entries_offset = header_len + MADT_HEADER_SIZE;
+    let entries = body.get(MADT_HEADER_SIZE..)?;
+    Some((info, MadtEntryIter::new(entries, entries_offset)))
 }
 
 /// Best-effort: find the primary PCI host bridge's first non-prefetchable
@@ -553,18 +536,28 @@ pub fn find_table_from_rsdp(
     rsdp_addr: usize,
     signature: [u8; 4],
 ) -> Option<(usize, AcpiTableHeader)> {
-    let rsdp = validate_rsdp(rsdp_addr)?;
-    let table_addr = if rsdp.revision >= 2 && rsdp.xsdt_addr != 0 {
-        find_table_xsdt(rsdp.xsdt_addr as usize, signature)
-    } else if rsdp.rsdt_addr != 0 {
-        find_table_rsdt(rsdp.rsdt_addr as usize, signature)
-    } else {
-        panic!("ACPI RSDP does not reference XSDT or RSDT")
-    }
-    .unwrap_or_else(|| {
+    find_table_optional_from_rsdp(rsdp_addr, signature).or_else(|| {
         let signature = core::str::from_utf8(&signature).unwrap_or("????");
         panic!("required ACPI table {signature} is missing")
-    });
+    })
+}
+
+/// Looks up a table without treating an absent table as fatal.
+///
+/// The RSDP and root table must still be structurally valid; only an
+/// absent table signature returns `None`.
+fn find_table_optional_from_rsdp(
+    rsdp_addr: usize,
+    signature: [u8; 4],
+) -> Option<(usize, AcpiTableHeader)> {
+    let rsdp = validate_rsdp(rsdp_addr)?;
+    let table_addr = if rsdp.revision >= 2 && rsdp.xsdt_addr != 0 {
+        find_table_xsdt_optional(rsdp.xsdt_addr as usize, signature)
+    } else if rsdp.rsdt_addr != 0 {
+        find_table_rsdt_optional(rsdp.rsdt_addr as usize, signature)
+    } else {
+        panic!("ACPI RSDP does not reference XSDT or RSDT")
+    }?;
     Some((table_addr, read_sdt_header(table_addr).into()))
 }
 
@@ -613,45 +606,37 @@ fn validate_rsdp(rsdp_addr: usize) -> Option<&'static Rsdp> {
 }
 
 fn find_table_xsdt(xsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
+    find_table_xsdt_optional(xsdt_addr, signature)
+}
+
+fn find_table_xsdt_optional(xsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
     let header = validate_sdt_header(xsdt_addr, Some(*b"XSDT"))?;
-    let entries_len =
-        (header.length as usize - mem::size_of::<AcpiSdtHeader>()) / mem::size_of::<u64>();
-    // SAFETY: `validate_sdt_header` checked the table bounds, so the entry
-    // array starts right after the header and spans `entries_len` u64 entries.
-    let entries = unsafe {
-        slice::from_raw_parts(
-            addr_to_ptr::<u64>(xsdt_addr + mem::size_of::<AcpiSdtHeader>()),
-            entries_len,
-        )
-    };
-    for entry in entries.iter().copied() {
+    let table = sdt_bytes(xsdt_addr, header.length);
+    let entries = table.get(mem::size_of::<AcpiSdtHeader>()..)?;
+    for entry in entries.chunks_exact(mem::size_of::<u64>()) {
+        let entry = u64::from_le_bytes(entry.try_into().ok()?);
         if has_signature(entry as usize, signature) {
             return Some(entry as usize);
         }
     }
-    let signature = core::str::from_utf8(&signature).unwrap_or("????");
-    panic!("required ACPI table {signature} is missing from XSDT")
+    None
 }
 
 fn find_table_rsdt(rsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
+    find_table_rsdt_optional(rsdt_addr, signature)
+}
+
+fn find_table_rsdt_optional(rsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
     let header = validate_sdt_header(rsdt_addr, Some(*b"RSDT"))?;
-    let entries_len =
-        (header.length as usize - mem::size_of::<AcpiSdtHeader>()) / mem::size_of::<u32>();
-    // SAFETY: `validate_sdt_header` checked the table bounds, so the entry
-    // array starts right after the header and spans `entries_len` u32 entries.
-    let entries = unsafe {
-        slice::from_raw_parts(
-            addr_to_ptr::<u32>(rsdt_addr + mem::size_of::<AcpiSdtHeader>()),
-            entries_len,
-        )
-    };
-    for entry in entries.iter().copied() {
+    let table = sdt_bytes(rsdt_addr, header.length);
+    let entries = table.get(mem::size_of::<AcpiSdtHeader>()..)?;
+    for entry in entries.chunks_exact(mem::size_of::<u32>()) {
+        let entry = u32::from_le_bytes(entry.try_into().ok()?);
         if has_signature(entry as usize, signature) {
             return Some(entry as usize);
         }
     }
-    let signature = core::str::from_utf8(&signature).unwrap_or("????");
-    panic!("required ACPI table {signature} is missing from RSDT")
+    None
 }
 
 fn has_signature(table_addr: usize, signature: [u8; 4]) -> bool {
@@ -662,48 +647,100 @@ fn read_sdt_header(table_addr: usize) -> AcpiSdtHeader {
     *ptr_from_addr::<AcpiSdtHeader>(table_addr)
 }
 
-impl Iterator for MadtEntryIter {
-    type Item = MadtEntry;
+impl Iterator for MadtEntryIter<'_> {
+    type Item = Result<MadtEntry, MadtParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.current + mem::size_of::<MadtEntryHeader>() <= self.end {
-            let header = ptr_from_addr::<MadtEntryHeader>(self.current);
-            if header.length < mem::size_of::<MadtEntryHeader>() as u8 {
-                panic!("ACPI MADT entry is too short");
+        while !self.done {
+            let remaining = self.entries.get(self.offset..)?;
+            if remaining.is_empty() {
+                self.done = true;
+                return None;
+            }
+            let offset = self.base_offset + self.offset;
+            if remaining.len() < ENTRY_HEADER_SIZE {
+                self.done = true;
+                return Some(Err(MadtParseError {
+                    offset,
+                    kind: MadtParseErrorKind::TruncatedEntry,
+                }));
             }
 
-            let entry_len = header.length as usize;
-            let entry_addr = self.current;
-            let entry_end = match entry_addr.checked_add(entry_len) {
-                Some(end) if end <= self.end => end,
-                _ => panic!("ACPI MADT entry exceeds table bounds"),
+            let entry_len = remaining[1] as usize;
+            if entry_len < ENTRY_HEADER_SIZE {
+                self.done = true;
+                return Some(Err(MadtParseError {
+                    offset,
+                    kind: MadtParseErrorKind::InvalidLength,
+                }));
+            }
+            let Some(entry) = remaining.get(..entry_len) else {
+                self.done = true;
+                return Some(Err(MadtParseError {
+                    offset,
+                    kind: MadtParseErrorKind::TruncatedEntry,
+                }));
             };
+            self.offset += entry_len;
 
-            self.current = entry_end;
-
-            match header.entry_type {
-                0 if entry_len >= mem::size_of::<MadtLocalApic>() => {
-                    let entry = ptr_from_addr::<MadtLocalApic>(entry_addr);
-                    return Some(MadtEntry::LocalApic(LocalApicEntry {
-                        processor_uid: entry.processor_uid,
-                        apic_id: entry.apic_id,
-                        flags: entry.flags,
-                    }));
-                }
-                1 if entry_len >= mem::size_of::<MadtIoApic>() => {
-                    let entry = ptr_from_addr::<MadtIoApic>(entry_addr);
-                    return Some(MadtEntry::IoApic(IoApicEntry {
-                        id: entry.id,
-                        address: entry.address,
-                        global_system_interrupt_base: entry.global_system_interrupt_base,
-                    }));
-                }
+            let parsed = match remaining[0] {
+                MADT_TYPE_LOCAL_APIC => parse_local_apic(entry),
+                MADT_TYPE_IO_APIC => parse_io_apic(entry),
+                MADT_TYPE_INTERRUPT_SOURCE_OVERRIDE => parse_interrupt_source_override(entry),
+                // Entries the kernel does not model are still framed, so skip
+                // them without interpreting their payload.
                 _ => continue,
+            };
+            match parsed {
+                Ok(parsed) => return Some(Ok(parsed)),
+                Err(kind) => {
+                    // A malformed known entry invalidates the rest of the
+                    // stream: its length no longer proves where the next
+                    // entry starts.
+                    self.done = true;
+                    return Some(Err(MadtParseError { offset, kind }));
+                }
             }
         }
 
         None
     }
+}
+
+fn parse_local_apic(entry: &[u8]) -> Result<MadtEntry, MadtParseErrorKind> {
+    let Some(body) = entry.get(..LOCAL_APIC_ENTRY_SIZE) else {
+        return Err(MadtParseErrorKind::ShortEntry);
+    };
+    Ok(MadtEntry::LocalApic(LocalApicEntry {
+        processor_uid: body[2],
+        apic_id: body[3],
+        flags: u32::from_le_bytes([body[4], body[5], body[6], body[7]]),
+    }))
+}
+
+fn parse_io_apic(entry: &[u8]) -> Result<MadtEntry, MadtParseErrorKind> {
+    let Some(body) = entry.get(..IO_APIC_ENTRY_SIZE) else {
+        return Err(MadtParseErrorKind::ShortEntry);
+    };
+    Ok(MadtEntry::IoApic(IoApicEntry {
+        id: body[2],
+        address: u32::from_le_bytes([body[4], body[5], body[6], body[7]]),
+        global_system_interrupt_base: u32::from_le_bytes([body[8], body[9], body[10], body[11]]),
+    }))
+}
+
+fn parse_interrupt_source_override(entry: &[u8]) -> Result<MadtEntry, MadtParseErrorKind> {
+    let Some(body) = entry.get(..INTERRUPT_SOURCE_OVERRIDE_ENTRY_SIZE) else {
+        return Err(MadtParseErrorKind::ShortEntry);
+    };
+    Ok(MadtEntry::InterruptSourceOverride(
+        InterruptSourceOverride {
+            bus: body[2],
+            source: body[3],
+            gsi: u32::from_le_bytes([body[4], body[5], body[6], body[7]]),
+            flags: u16::from_le_bytes([body[8], body[9]]),
+        },
+    ))
 }
 
 fn parse_mcfg(mcfg_addr: usize) -> Option<McfgAllocation> {
@@ -822,42 +859,20 @@ struct McfgEntryRaw {
     _reserved: u32,
 }
 
-#[repr(C, packed)]
-struct MadtHeader {
-    local_apic_address: u32,
-    flags: u32,
-}
+const MADT_HEADER_SIZE: usize = 8;
+const ENTRY_HEADER_SIZE: usize = 2;
+const LOCAL_APIC_ENTRY_SIZE: usize = 8;
+const IO_APIC_ENTRY_SIZE: usize = 12;
+const INTERRUPT_SOURCE_OVERRIDE_ENTRY_SIZE: usize = 10;
 
-#[repr(C, packed)]
-struct MadtEntryHeader {
-    entry_type: u8,
-    length: u8,
-}
-
-#[repr(C, packed)]
-struct MadtLocalApic {
-    header: MadtEntryHeader,
-    processor_uid: u8,
-    apic_id: u8,
-    flags: u32,
-}
-
-#[repr(C, packed)]
-struct MadtIoApic {
-    header: MadtEntryHeader,
-    id: u8,
-    _reserved: u8,
-    address: u32,
-    global_system_interrupt_base: u32,
-}
+const MADT_TYPE_LOCAL_APIC: u8 = 0;
+const MADT_TYPE_IO_APIC: u8 = 1;
+const MADT_TYPE_INTERRUPT_SOURCE_OVERRIDE: u8 = 2;
 
 const _: () = {
     assert!(mem::size_of::<Rsdp>() == 36);
     assert!(mem::size_of::<AcpiSdtHeader>() == 36);
     assert!(mem::size_of::<McfgEntryRaw>() == 16);
-    assert!(mem::size_of::<MadtHeader>() == 8);
-    assert!(mem::size_of::<MadtLocalApic>() == 8);
-    assert!(mem::size_of::<MadtIoApic>() == 12);
     assert!(str::from_utf8(b"MCFG").is_ok());
     assert!(str::from_utf8(b"APIC").is_ok());
 };

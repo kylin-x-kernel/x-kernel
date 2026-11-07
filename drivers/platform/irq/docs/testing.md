@@ -89,6 +89,12 @@ The host suite checks masked preparation and ESR-write/read/EOI ordering,
 including the legacy maximum-LVT exception. It uses ordinary memory as a
 register fixture, not an emulation of hardware error latching.
 
+The same guest run exercises `x86::discovery`: synthetic MADT byte streams
+cover entry ordering, duplicate addresses/GSIs, reserved flag encodings,
+unknown GSIs, fixed-capacity limits, and framing errors; a live test reads the
+QEMU MADT through `from_acpi` and checks ACPI provenance plus a non-zero
+controller address.
+
 The IRQ-driver tests verify that dedicated spurious/error vectors bypass
 regular claims. Representative non-fixed vectors are forwarded unchanged to
 an injected regular dispatcher; this does not test that backend's domain

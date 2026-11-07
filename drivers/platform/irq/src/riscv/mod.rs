@@ -486,7 +486,7 @@ pub fn activate_local_interrupts() {
     unsafe { sie::set_sext() };
 }
 
-unittest::path_mod_test!(tests, "../ut-tests/riscv.rs");
+unittest::path_mod_test!(tests, "../../ut-tests/riscv.rs");
 
 macro_rules! with_cause {
     (

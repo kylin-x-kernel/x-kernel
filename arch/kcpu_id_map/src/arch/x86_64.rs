@@ -9,7 +9,7 @@ pub(crate) const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
     raw_cpu_id
 }
 
-fn load_raw_cpu_ids_from_madt(entries: acpi::MadtEntryIter) {
+fn load_raw_cpu_ids_from_madt(entries: acpi::MadtEntryIter<'static>) {
     let is_truncated = load_cpu_id_map_from_madt(entries, normalize_raw_id);
     if is_truncated {
         log::warn!(

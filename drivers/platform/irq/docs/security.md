@@ -36,7 +36,7 @@ interrupt mapping.
 
 ## Local NMI Boundary
 
-`src/gicv3_nmi.rs` accepts only standard PPIs in the GIC domain. Its sole unsafe
+`src/gic/nmi.rs` accepts only standard PPIs in the GIC domain. Its sole unsafe
 conversion constructs an IntId after the 16..32 check, preventing truncation or
 out-of-range register indexing. KIRQ supplies retained Line exclusion and CPU
 pinning; the GIC lock serializes the full register transaction. Redistributor
@@ -73,10 +73,10 @@ producer shutdown or completed remote quiescence. Completion timing is unchanged
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs` (architecture
-dispatch), `src/gic.rs`, `src/gic/xlate.rs`, `src/gic_spi.rs`, `src/gicv2.rs`,
-`src/gicv3.rs` (AArch64 GIC),
-`src/riscv.rs` and `src/riscv/firmware.rs` (PLIC), and `src/x86.rs` (IO-APIC
-glue). No modules are
+dispatch), `src/gic/mod.rs`, `src/gic/xlate.rs`, `src/gic/spi.rs`,
+`src/gic/gicv2.rs`, `src/gic/gicv3.rs`, `src/gic/nmi.rs` (AArch64 GIC),
+`src/riscv/mod.rs` and `src/riscv/firmware.rs` (PLIC), and
+`src/x86/mod.rs` and `src/x86/discovery.rs` (IO-APIC glue). No modules are
 excluded; the backend crates (`arm_gic_driver`, `riscv_plic`,
 `x86-apic`) encapsulate their own register access and are audited
 separately — values they return are treated as hardware facts here.
@@ -156,21 +156,21 @@ Every unsafe site is in a backend wrapper with a `SAFETY:` comment; the
 common precondition is that hwirq/interrupt identifiers were validated
 by the caller (`kirq` dispatch or platform init):
 
-- `gicv2.rs::init` -- `Gic::new(gicd_base, gicc_base, None)`: the bases are
+- `gic/gicv2.rs::init` -- `Gic::new(gicd_base, gicc_base, None)`: the bases are
   the iomapped GICv2 MMIO frames from platform discovery.
-- `gicv2.rs::{checked_config,set_trigger,enable,set_prio,retrigger_spi}` --
+- `gic/gicv2.rs::{checked_config,set_trigger,enable,set_prio,retrigger_spi}` --
   `IntId::raw(..)` wraps a validated hardware IRQ number. `init_current_cpu`
   enumerates the fixed private range; `set_forwarding_state` checks the PPI
   range/domain and asserts IRQ/NMI exclusion before changing banked ownership.
   The unittest PPI state/pending helpers receive range-checked IDs from `gic.rs`.
-- `gicv3.rs:25` — `Gic::new(gicd_base, gicr_base)`: bases are the
+- `gic/gicv3.rs:25` — `Gic::new(gicd_base, gicr_base)`: bases are the
   iomapped GICv3 MMIO frames.
-- `gicv3.rs:43/52/60/83/113` — `IntId::raw(..)`: same wrapping
+- `gic/gicv3.rs:43/52/60/83/113` — `IntId::raw(..)`: same wrapping
   precondition; the `:113` site re-wraps an already-acknowledged
   interrupt id for NMI completion.
-- `gicv3.rs:117` — `asm!("isb")` after NMI-window register sequences:
+- `gic/gicv3.rs:117` — `asm!("isb")` after NMI-window register sequences:
   instruction synchronization only.
-- `gicv3.rs:136` — `asm!("mrs ICC_RPR_EL1")`: read-only system
+- `gic/gicv3.rs:136` — `asm!("mrs ICC_RPR_EL1")`: read-only system
   register read used to open the NMI window (feature `nmi-pseudo`).
 - `riscv.rs:65` — `Plic::new(NonNull::new(..).unwrap())`: the mapped
   PLIC MMIO base from platform discovery (`unwrap` panics if the
@@ -182,7 +182,7 @@ by the caller (`kirq` dispatch or platform init):
 - `riscv.rs:181` — `sip::clear_ssoft()`: clears this hart's software
   interrupt pending bit.
 
-`src/x86.rs` contains no unsafe of its own: register access is
+`src/x86/` contains no unsafe of its own: register access is
 delegated to the `x86-apic` crate. There is no user-pointer access
 anywhere in this crate.
 
@@ -256,7 +256,20 @@ anywhere in this crate.
   the backend's audited assembly; this path introduces no new handwritten unsafe.
 - The x86 path delegates register access to `x86-apic` and supports only
   IO-APIC trigger/polarity translation; MSIs are composed by the
-  `x86-apic` backend, not here.
+  `x86-apic` backend, not here. `x86::init` validates the declaration
+  (non-zero address, zero GSI base, known provenance) before touching
+  hardware. Hardware capabilities are validated after IO-APIC
+  publication; a rejection returns `Unsupported` and boot aborts rather
+  than routing through a controller window this runtime cannot
+  represent.
+- `x86::discovery` treats the MADT as untrusted input. The first
+  malformed entry ends the walk and fails it with the offending table
+  offset; invalid or over-capacity controller declarations are skipped
+  and recorded as issues rather than programmed. A duplicate ISA line is
+  recorded and the later mapping wins. Its fixed arrays bound memory use,
+  and it performs no MMIO access. Only `Absent` authorizes the platform's
+  static fallback; a malformed stream or an unsupported topology aborts
+  boot instead of silently using another address.
 - GICv3 `dispatch_nmi` semantics depend on the PMR-based NMI window; on
   platforms without FEAT_NMI/pseudo-NMI support the NMI path is
   inactive (`supports_hardware_nmi` reports `false`).
@@ -301,9 +314,9 @@ recorded management target.
 
 ## GIC Admission Boundary
 
-`src/gic.rs::select_gic_flow` checks explicit GIC controller/domain identity
+`src/gic/mod.rs::select_gic_flow` checks explicit GIC controller/domain identity
 against `STANDARD_INTID_LIMIT`, initialized through the existing driver's
-`typer_raw()` in `src/gicv2.rs` and `src/gicv3.rs`. The limit uses ITLinesNumber,
+`typer_raw()` in `src/gic/gicv2.rs` and `src/gic/gicv3.rs`. The limit uses ITLinesNumber,
 not IDbits, and excludes 1020..1023 plus extended/LPI identifiers. Comparison
 in `usize` rejects oversized values before they could truncate into a valid ID.
 Before controller setup, explicit GIC admission returns `UnsupportedFlow`.
@@ -385,7 +398,7 @@ split alone must not be used to claim hardware rollback or isolation.
 
 ## Ordinary SPI Flow Boundary
 
-`src/gic_spi.rs` is a private controller-operation adapter, not a second IRQ
+`src/gic/spi.rs` is a private controller-operation adapter, not a second IRQ
 state machine. KIRQ retains the original validated binding and serializes
 mask/unmask/retrigger with Line state. Each backend acquires its existing GIC
 lock below that Line lock; no operation reenters KIRQ. No such operation runs
@@ -412,7 +425,7 @@ The `gic_spi` model tests cover access order and timeout reporting, not physical
 hardware or firmware security ownership.
 
 The `cfg(unittest)` helper `gic::pend_local_ppi_for_test` is an unsafe fixture
-boundary in `src/gic.rs`: it admits only GICv2 INTIDs 16..32 before a banked
+boundary in `src/gic/mod.rs`: it admits only GICv2 INTIDs 16..32 before a banked
 pending MMIO write. The caller must own the source, stop its producer, exclude
 local IRQs/migration during the write, and drain delivery and restore source
 state before releasing ownership. This hook does not grant source ownership
@@ -440,8 +453,8 @@ acceptance is not a claim that hardware will replay a completed notification.
 
 ## Dispatch Boundary Safety
 
-The unsafe `IntrManagerIf` providers in `src/gic.rs`, `src/x86.rs` and
-`src/riscv.rs` trust KIRQ's active-entry exclusion. GIC claim helpers retain this
+The unsafe `IntrManagerIf` providers in `src/gic/mod.rs`, `src/x86/mod.rs` and
+`src/riscv/mod.rs` trust KIRQ's active-entry exclusion. GIC claim helpers retain this
 contract through IRQ/NMI classification; x86 transfers the remaining EOI cookie;
 RISC-V transfers a PLIC claim or a local no-completion sentinel. Only the original
 claiming CPU may consume the cookie, once, before entry exclusion ends. Safe

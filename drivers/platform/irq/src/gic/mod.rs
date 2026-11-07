@@ -11,11 +11,8 @@ pub use firmware::{GicConfigError, GicSelection};
 mod xlate;
 use xlate::GIC_XLATE;
 
-#[path = "gicv2.rs"]
 mod gicv2;
-#[path = "gicv3.rs"]
 mod gicv3;
-#[path = "gic_spi.rs"]
 mod spi;
 
 use kirq::TargetCpu;
@@ -95,8 +92,8 @@ kcpu_slot::cpu_slot! {
         core::sync::atomic::AtomicBool::new(false);
 }
 
-unittest::path_mod_test!(tests, "../ut-tests/gic.rs");
-unittest::path_mod_test!(firmware_tests, "../ut-tests/gic_firmware.rs");
+unittest::path_mod_test!(tests, "../../ut-tests/gic.rs");
+unittest::path_mod_test!(firmware_tests, "../../ut-tests/gic_firmware.rs");
 
 /// Well-known domain reserved for the first firmware-registered GIC.
 pub const GIC_ROOT_DOMAIN: kirq::IrqDomainId = kirq::GIC_ROOT_DOMAIN;

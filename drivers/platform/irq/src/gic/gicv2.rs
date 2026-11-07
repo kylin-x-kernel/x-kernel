@@ -53,7 +53,7 @@ unsafe fn set_forwarding_state(desc: kirq::IrqDesc, state: kirq::PerCpuForwardin
     }
 }
 
-unittest::path_mod_test!(config_tests, "../ut-tests/gicv2_config.rs");
+unittest::path_mod_test!(config_tests, "../../ut-tests/gicv2_config.rs");
 
 #[cfg(unittest)]
 pub(super) fn pend_local_ppi_for_test(irq: usize) {

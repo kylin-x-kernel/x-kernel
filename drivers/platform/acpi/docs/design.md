@@ -14,8 +14,10 @@ topology (MADT), PCI ECAM windows (MCFG), the PCI host bridge memory window
   crate-global slot, `desc()` / `rsdp_addr()` read it back.
 - Validate and dereference firmware tables: RSDP signature and checksums
   (basic and extended), SDT header signature, length, and checksum.
-- Parse MADT into `MadtInfo` plus a `MadtEntryIter` over
-  `LocalApic` / `IoApic` entries, and derive `ApicInfo` summaries.
+- Parse MADT into `MadtInfo` plus a slice-backed `MadtEntryIter` over
+  `LocalApic` / `IoApic` / `InterruptSourceOverride` entries. Iteration
+  yields `Result`: a malformed entry is reported with a table-relative
+  offset and ends the walk instead of panicking.
 - Parse MCFG into `McfgAllocation` (first segment-0 allocation) and compute
   the ECAM `(base, size)` range per bus shift of 1 MiB.
 - Best-effort scan of the DSDT for the PCI host bridge `_CRS` memory window
@@ -58,14 +60,16 @@ boot firmware -> init(rsdp_addr) -> LazyInit<AcpiDesc> (global RSDP slot)
                        |
    validate_sdt_header (signature/length/checksum)
                        |
-   typed reads: MADT iter | MCFG entries | DSDT byte scan | FADT offsets
+   typed reads: MADT byte parser | MCFG entries | DSDT byte scan | FADT offsets
 ```
 
-Public data types (`AcpiDesc`, `AcpiTableHeader`, `MadtInfo`, `ApicInfo`,
+Public data types (`AcpiDesc`, `AcpiTableHeader`, `MadtInfo`,
 `McfgAllocation`, `PciHostMemWindow`, `Pm1aControlBlock`,
-`LocalApicEntry`, `IoApicEntry`, `MadtEntry`) are plain `Copy` views;
-raw firmware layouts (`Rsdp`, `AcpiSdtHeader`, `McfgEntryRaw`, `Madt*`) are
-private `repr(C, packed)` types with compile-time size assertions.
+`LocalApicEntry`, `IoApicEntry`, `InterruptSourceOverride`, `MadtEntry`,
+`MadtParseError`) are plain `Copy` views; raw firmware layouts (`Rsdp`,
+`AcpiSdtHeader`, `McfgEntryRaw`) are private `repr(C, packed)` types with
+compile-time size assertions. MADT entries are decoded from a validated
+`&[u8]` with explicit length and structure checks rather than typed reads.
 
 ## Execution Context
 
@@ -98,15 +102,18 @@ Two deliberately different regimes:
   `AcpiInitError::MissingRsdp` for a zero address; `desc`, `rsdp_addr`,
   `find_mcfg`, `find_pci_host_mem_window_from_init`, and
   `find_pm1a_control_block_from_init` return `None` when the described
-  feature is absent or unparseable.
+  feature is absent or unparseable. `find_madt*` returns `None` when ACPI is
+  uninitialized or the firmware has no MADT.
 - Panicking, for boot-critical firmware corruption: `validate_rsdp` panics
   on a zero address, bad `"RSD PTR "` signature, or checksum failure;
   `find_table` / `find_table_from_rsdp` panic when the RSDP is missing or
-  names neither XSDT nor RSDT, when a required table is absent, or when an
-  SDT header is too short, mismatched, or fails its checksum; the MADT
-  iterator panics on entries that are too short or run past the table end.
-  A broken required table aborts boot instead of letting the kernel guess
-  a topology.
+  names neither XSDT nor RSDT, when an explicitly required table is absent,
+  or when an SDT header is too short, mismatched, or fails its checksum.
+  A MADT fixed header that is too short also aborts boot.
+- MADT entry framing is neither panicking nor silently dropped: iteration
+  yields `Err(MadtParseError { offset, kind })` for a truncated entry, an
+  invalid length, or a known entry shorter than its fixed structure, then
+  stops. Callers decide whether a malformed topology is fatal.
 
 ## Firmware Trust Boundary
 
@@ -115,8 +122,10 @@ Firmware tables are external input and are only partially trusted:
 - RSDP: signature plus basic (20-byte) and extended (rev >= 2) checksums.
 - Every SDT: header signature, minimum length, and full-table checksum
   before its body is parsed.
-- MADT entries: per-entry length checked against the remaining table; unknown
-  entry types are skipped.
+- MADT entries: per-entry length checked against the remaining region and
+  against each known entry's fixed structure; unknown entry types are skipped
+  by their declared length. Interrupt source override flags are returned raw,
+  so trigger/polarity policy stays in the consuming architecture layer.
 - PM1a ports: non-zero and `u16`-range checked; ECAM ranges are checked for
   `u64 -> usize` and bus arithmetic overflow (`ecam_region` returns `None`).
 - The DSDT byte scan bounds its search windows (16 KiB `_CRS` search, 8 KiB
@@ -128,16 +137,18 @@ policy decides whether absence (`None`) is fatal.
 
 ## Unsafe Code
 
-All unsafe code is concentrated in four private helpers at the bottom of
+All unsafe code is concentrated in private helpers at the bottom of
 `src/lib.rs`, each with a `SAFETY:` comment:
 
 - `addr_to_ptr` — maps a firmware address into the direct physical map.
 - `ptr_from_addr` — forms a `&'static T` at a validated structure address.
 - `bytes_from_addr` / `sdt_bytes` — form byte slices over validated ranges
   (RSDP length, header-declared table length).
-- `slice::from_raw_parts` call sites in `find_table_xsdt`, `find_table_rsdt`,
-  and `parse_mcfg` — bounded by header lengths validated by
-  `validate_sdt_header`.
+- One `slice::from_raw_parts` call site in `parse_mcfg` — bounded by a
+  header length validated by `validate_sdt_header`.
+
+XSDT/RSDT scanning and MADT entry parsing use safe slices over the
+validated table bytes.
 
 The soundness contract is: addresses come from the firmware-provided RSDP
 chain, every table header is checksum-validated before body access, and
@@ -148,10 +159,11 @@ chain, every table header is checksum-validated before body access, and
 - XSDT preferred, RSDT fallback for RSDP revision >= 2: matches the ACPI
   specification's deprecation of 32-bit entry addresses while keeping
   legacy firmware working.
-- Panic on missing boot-critical tables, `Option` for optional features:
+- Panic on explicit required-table lookups, `None` for absence probes:
   a kernel that guesses CPU topology or ECAM location is worse than one
-  that stops loudly; feature probes (MCFG absence, DSDT window) return
-  `None` so callers can degrade.
+  that stops loudly. `find_madt*`, MCFG absence, and the DSDT window return
+  `None` so callers can choose platform fallback, while entry framing
+  corruption is surfaced through `Result` for the same reason.
 - Panic-free power-off lookup: the PM1a path runs after the kernel is torn
   down, where a panic means a hung machine instead of a clean shutdown.
 - Byte-scan instead of an AML interpreter for the PCI host window: QEMU and

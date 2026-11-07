@@ -220,9 +220,9 @@ allocates or sleeps.
 
 位置：
 
-- `drivers/platform/irq/src/gicv2.rs:167`
-- `drivers/platform/irq/src/gicv3.rs:86`
-- `drivers/platform/irq/src/riscv.rs:83`
+- `drivers/platform/irq/src/gic/gicv2.rs:167`
+- `drivers/platform/irq/src/gic/gicv3.rs:86`
+- `drivers/platform/irq/src/riscv/mod.rs:83`
 
 不变量：
 

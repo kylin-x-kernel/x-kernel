@@ -35,6 +35,43 @@ counts fail discovery instead of falling through to the legacy fixed layout.
 `FwNode`, which primary initialization registers with `PLIC_ROOT_DOMAIN` after
 hardware setup.
 
+## x86 IO-APIC initialization
+
+`x86::init(X86IrqInitConfig)` is the single boot-CPU entry for the x86
+interrupt hardware. The configuration carries one `IoApicDeclaration`
+(`id`, `address`, `gsi_base`), the initial redirection policy, and the
+declaration's `FwSource`. Pure validation runs before any hardware is
+touched: a zero address or unknown provenance is `InvalidInput`, and a
+non-zero GSI base is explicitly `Unsupported` until GSI-to-pin translation
+exists. Initialization then runs `init_local_primary` and `init_io_apic`
+in that order, and finally validates the returned `IoApicCapabilities`
+(pin count in `1..=32`, no `gsi_base + pin_count` overflow). Capability
+failures are `Unsupported` after hardware publication, so the platform
+must abort boot; nothing is rolled back. `x86::init_secondary()` is the
+per-AP counterpart. Platform boot converts discovery output, or its
+logged static fallback when discovery reports `Absent`, into this
+configuration; the unified entry itself does not read firmware. No second
+IRQ registry or domain is created.
+
+`x86::discovery::from_acpi()` is the hardware-free MADT decoder behind
+that platform wiring; its `to_init_config()` converts the retained
+controller declarations into the unified entry's configuration, rejecting
+multi-controller or unrepresentable topologies as `Unsupported`. It walks
+the MADT twice: the
+first pass retains at most 32 IO-APICs; the second interprets overrides
+against the complete controller set, so entry order does not matter and
+skipped declarations consume no capacity. At most 16 legacy overrides
+are retained, one per ISA source. Zero-address, duplicate-address, and
+duplicate-`gsi_base` controllers are skipped; overrides must use the ISA
+bus, a source below 16, and non-reserved polarity/trigger flags. An
+override is accepted only when a retained controller's `gsi_base` is at
+or below its GSI; duplicate ISA lines are last-wins. Discovery does not
+validate pin counts or controller topology — those need hardware. Skips
+are surfaced as `X86DiscoveryIssue`s; the first malformed MADT entry
+returns `X86DiscoveryError::Malformed` and ends the walk, and a MADT
+without a usable controller returns `Absent`. Only `Absent` authorizes
+the platform's static fallback; a malformed stream is fatal.
+
 ## Firmware interrupt binding translation
 
 After controller initialization, `init_from_fwnode` calls
@@ -90,7 +127,7 @@ Runs used a private disk with NET=n, VSOCK=n and ACCEL=n.
 
 `IntrManagerIf::percpu_nmi` selects `PerCpuNmiChip` only for a standard GICv3
 PPI with a platform-validated NMI mechanism. Unsupported controllers return
-None. `gicv3_nmi.rs` owns bounded local attribute transactions under the GIC
+None. `gic/nmi.rs` owns bounded local attribute transactions under the GIC
 lock; KIRQ retains Line exclusion and CPU pinning around these operations.
 The backend uses the selected CPU interface's Redistributor RWP wait, checks
 disabled/inactive state, then programs and reads back priority or NMI attributes.
@@ -121,6 +158,10 @@ configuration so that `kirq` stays architecture-neutral.
   addresses, and map them through `memspace::iomap_device`. The PLIC keeps its
   fixed platform address as the no-firmware fallback, preserving the legacy
   layout.
+- Decode x86 MADT IO-APIC and interrupt-source-override declarations in
+  `x86::discovery`; platform boot turns the retained declarations into the
+  unified entry's configuration, and only `Absent` permits a static
+  fallback.
 - Retain the selected controller node and register its exact identity with
   KIRQ after hardware initialization, together with a binding-specific
   `IrqDomainXlate`. Consumers map firmware interrupts through that identity;
@@ -144,8 +185,11 @@ configuration so that `kirq` stays architecture-neutral.
   belong to `kirq`; backends only program what `kirq` decides.
 - No device discovery: the controller nodes are found by this crate, but
   device IRQ wiring is platform init's job.
-- No x86 I/O-APIC register access: `src/x86.rs` delegates to the
-  `x86-apic` crate and only translates `IrqDesc` trigger/polarity.
+- No x86 I/O-APIC register access: `src/x86/mod.rs` delegates to the
+  `x86-apic` crate, owns boot/AP initialization ordering and declaration
+  validation, and translates `IrqDesc` trigger/polarity.
+  `src/x86/discovery.rs` only decodes firmware and records issues; it
+  maps no MMIO and programs no registers.
 - No software interrupt routing between CPUs beyond the backend's
   `notify_cpu`.
 
@@ -155,14 +199,19 @@ configuration so that `kirq` stays architecture-neutral.
 drivers/platform/irq/
 ├── src/
 │   ├── lib.rs      # architecture dispatch (cfg per target)
-│   ├── gic.rs      # AArch64: discovery, mapping, IntrManagerIf, NMI
-│   ├── gic/xlate.rs # GIC firmware interrupt-cell translation
-│   ├── gicv2.rs    # GICv2 backend (arm_gic_driver)
-│   ├── gicv3.rs    # GICv3 backend (arm_gic_driver)
-│   ├── gic_spi.rs  # ordinary SPI flow operations and transaction adapters
-│   ├── riscv.rs    # RISC-V PLIC backend
-│   ├── riscv/firmware.rs # PLIC firmware discovery and binding decode
-│   └── x86.rs      # x86_64 IO-APIC glue (x86-apic crate)
+│   ├── gic/
+│   │   ├── mod.rs  # AArch64: discovery, mapping, IntrManagerIf, NMI
+│   │   ├── xlate.rs # GIC firmware interrupt-cell translation
+│   │   ├── gicv2.rs # GICv2 backend (arm_gic_driver)
+│   │   ├── gicv3.rs # GICv3 backend (arm_gic_driver)
+│   │   ├── nmi.rs  # GICv3 NMI window
+│   │   └── spi.rs  # ordinary SPI flow operations and transaction adapters
+│   ├── riscv/
+│   │   ├── mod.rs  # RISC-V PLIC backend
+│   │   └── firmware.rs # PLIC firmware discovery and binding decode
+│   └── x86/
+│       ├── mod.rs  # x86_64 init entry and IO-APIC glue (x86-apic crate)
+│       └── discovery.rs # MADT IO-APIC/ISO decoding, no hardware access
 └── Cargo.toml
 ```
 

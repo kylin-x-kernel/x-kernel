@@ -27,15 +27,9 @@ pub use fwnode::{
     FwDmaError, FwDmaRange, FwDmaRanges, FwDmaWindow, FwError, FwIrqSpec, FwMmioResource, FwNode,
     FwNodeId, FwNodeOps, FwProperty, FwPropertyValue, FwReference, FwSource,
 };
-#[cfg(target_arch = "x86_64")]
-use lazyinit::LazyInit;
 pub use of::{
     InterruptControllerKind, InterruptInfo, InterruptTrigger, PciHostCam, PciHostInfo, PciRangeInfo,
 };
-
-/// Cached IO-APIC physical address from ACPI MADT.
-#[cfg(target_arch = "x86_64")]
-static IO_APIC_CACHE: LazyInit<Option<usize>> = LazyInit::new();
 
 /// Which firmware table the device description was read from.
 ///
@@ -185,15 +179,6 @@ pub fn pci_bar_range() -> Option<PciRangeInfo> {
 /// DT-only. ACPI legacy routing comes from `_PRT`; not yet parsed.
 pub fn pci_legacy_irq(bus: u8, device: u8, function: u8, pin: u8) -> Option<InterruptInfo> {
     of::generic_pci_legacy_interrupt(bus, device, function, pin)
-}
-
-/// x86: physical address of the (first) IO-APIC reported by ACPI MADT.
-///
-/// Cached on first call so the MADT walk runs at most once per boot.
-#[cfg(target_arch = "x86_64")]
-pub fn io_apic_paddr() -> Option<usize> {
-    IO_APIC_CACHE.call_once(|| acpi::find_apic_from_init().and_then(|info| info.io_apic_address));
-    *IO_APIC_CACHE.get().expect("IO-APIC cache not initialized")
 }
 
 /// Iterate firmware-described devices, mapping each node to a driver-visible

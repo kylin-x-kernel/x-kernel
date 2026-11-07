@@ -18,13 +18,13 @@ static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
 
 #[cfg(any(feature = "nmi-pseudo", feature = "nmi-hardware"))]
-#[path = "gicv3_nmi.rs"]
+#[path = "nmi.rs"]
 pub(super) mod nmi;
 
 const IRQ_WORK_SGI: u32 = 15;
 static IRQ_WORK_HANDLER_REGISTERED: LazyInit<bool> = LazyInit::new();
 
-unittest::path_mod_test!(config_tests, "../ut-tests/gicv3_config.rs");
+unittest::path_mod_test!(config_tests, "../../ut-tests/gicv3_config.rs");
 
 /// Checks private startup configuration or configures an admitted standard SPI.
 ///

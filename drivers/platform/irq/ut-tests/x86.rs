@@ -90,7 +90,7 @@ fn io_apic_claims_transfer_completion_to_the_selected_generic_flow() {
             let delivery = super::prepare_regular_delivery(
                 x86_apic::IO_APIC_VECTOR_BASE + hwirq,
                 |observed| {
-                    observed_hwirq.set(Some(observed));
+                    observed_hwirq.set(Some(observed.as_usize()));
                     queries.set(queries.get() + 1);
                     trigger
                 },
@@ -239,4 +239,107 @@ fn exception_vectors_do_not_claim_or_complete_an_irq() {
             .is_none()
         );
     }
+}
+
+fn declaration(address: u32, gsi_base: u32) -> super::IoApicDeclaration {
+    super::IoApicDeclaration {
+        id: 0,
+        address,
+        gsi_base,
+    }
+}
+
+#[def_test]
+fn static_configuration_is_accepted_before_hardware_access() {
+    let config = super::X86IrqInitConfig::platform_static(
+        declaration(0xFEC0_0000, 0),
+        super::IoApicInitPolicy::platform_legacy(),
+    );
+    assert_eq!(config.source, fwnode::FwSource::Static);
+    assert_eq!(super::validate_config(&config), Ok(()));
+}
+
+#[def_test]
+fn firmware_configuration_keeps_acpi_provenance() {
+    let config = super::X86IrqInitConfig::from_acpi(
+        declaration(0xFEC0_0000, 0),
+        super::IoApicInitPolicy::platform_legacy(),
+    );
+    assert_eq!(config.source, fwnode::FwSource::Acpi);
+    assert_eq!(super::validate_config(&config), Ok(()));
+}
+
+#[def_test]
+fn zero_address_is_invalid_input() {
+    let config = super::X86IrqInitConfig::platform_static(
+        declaration(0, 0),
+        super::IoApicInitPolicy::platform_legacy(),
+    );
+    assert_eq!(
+        super::validate_config(&config),
+        Err(kerrno::KError::InvalidInput)
+    );
+}
+
+#[def_test]
+fn non_zero_gsi_base_is_explicitly_unsupported() {
+    let config = super::X86IrqInitConfig::platform_static(
+        declaration(0xFEC0_0000, 1),
+        super::IoApicInitPolicy::platform_legacy(),
+    );
+    assert_eq!(
+        super::validate_config(&config),
+        Err(kerrno::KError::Unsupported)
+    );
+}
+
+#[def_test]
+fn unknown_provenance_is_invalid_input() {
+    let config = super::X86IrqInitConfig {
+        controller: declaration(0xFEC0_0000, 0),
+        policy: super::IoApicInitPolicy::platform_legacy(),
+        source: fwnode::FwSource::Unknown,
+    };
+    assert_eq!(
+        super::validate_config(&config),
+        Err(kerrno::KError::InvalidInput)
+    );
+}
+
+#[def_test]
+fn pin_window_must_fit_below_the_msi_vector_pool() {
+    let controller = declaration(0xFEC0_0000, 0);
+    let capabilities = |pin_count| x86_apic::IoApicCapabilities { pin_count };
+    for rejected in [0, 33, 256] {
+        assert_eq!(
+            super::validate_capabilities(&controller, capabilities(rejected)),
+            Err(kerrno::KError::Unsupported),
+            "pin_count={rejected} must not be representable"
+        );
+    }
+    assert_eq!(super::validate_capabilities(&controller, capabilities(32)), Ok(()));
+}
+
+#[def_test]
+fn gsi_base_plus_pin_count_must_not_overflow() {
+    assert_eq!(
+        super::validate_capabilities(
+            &declaration(0xFEC0_0000, u32::MAX),
+            x86_apic::IoApicCapabilities { pin_count: 1 }
+        ),
+        Err(kerrno::KError::Unsupported)
+    );
+}
+
+#[def_test]
+fn acpi_discovery_reports_the_boot_io_apic() {
+    let discovered = super::discovery::from_acpi().expect("QEMU MADT with an IO-APIC");
+    assert_eq!(discovered.source(), fwnode::FwSource::Acpi);
+    assert!(!discovered.io_apics().is_empty());
+    assert!(
+        discovered
+            .io_apics()
+            .iter()
+            .all(|controller| controller.address != 0)
+    );
 }

@@ -3,10 +3,142 @@
 // See LICENSES for license details.
 use core::sync::atomic::Ordering;
 
+use fwnode::FwSource;
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
+use kerrno::{KError, KResult};
 use kirq::{IrqPolarity, IrqTrigger, TargetCpu};
+use memaddr::pa;
+use x86_apic::IoApicPin;
 
 pub const IO_APIC_DOMAIN: kirq::IrqDomainId = kirq::IO_APIC_DOMAIN;
+
+pub mod discovery;
+
+pub use x86_apic::IoApicInitPolicy;
+
+/// One IO-APIC controller declaration consumed by the unified entry.
+///
+/// `id` is the firmware identity and is not used for routing yet. `gsi_base`
+/// is the controller's first GSI; the current single-controller runtime only
+/// supports base zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IoApicDeclaration {
+    pub id: u8,
+    pub address: u32,
+    pub gsi_base: u32,
+}
+
+/// Inputs for the one x86 interrupt-initialization entry.
+///
+/// This is intentionally limited to what the current runtime consumes; it is
+/// not the firmware-discovery container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct X86IrqInitConfig {
+    pub controller: IoApicDeclaration,
+    pub policy: IoApicInitPolicy,
+    pub source: FwSource,
+}
+
+impl X86IrqInitConfig {
+    /// Builds a configuration whose declaration comes from firmware discovery.
+    pub const fn from_acpi(controller: IoApicDeclaration, policy: IoApicInitPolicy) -> Self {
+        Self {
+            controller,
+            policy,
+            source: FwSource::Acpi,
+        }
+    }
+
+    /// Builds a configuration whose declaration comes from platform policy.
+    pub const fn platform_static(controller: IoApicDeclaration, policy: IoApicInitPolicy) -> Self {
+        Self {
+            controller,
+            policy,
+            source: FwSource::Static,
+        }
+    }
+}
+
+/// Rejects configurations that cannot be routed before touching hardware.
+fn validate_config(config: &X86IrqInitConfig) -> KResult<()> {
+    if config.controller.address == 0 {
+        return Err(KError::InvalidInput);
+    }
+    // The runtime has one controller whose hwirq equals the controller pin.
+    // A non-zero base would require GSI-to-pin translation that does not
+    // exist yet, so reject it instead of programming the wrong pins.
+    if config.controller.gsi_base != 0 {
+        return Err(KError::Unsupported);
+    }
+    // Provenance is part of the contract: an unknown source cannot be
+    // attributed to platform policy or firmware discovery.
+    if config.source == FwSource::Unknown {
+        return Err(KError::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Rejects controllers whose pin window this runtime cannot represent.
+fn validate_capabilities(
+    controller: &IoApicDeclaration,
+    capabilities: x86_apic::IoApicCapabilities,
+) -> KResult<()> {
+    let pin_count = u32::from(capabilities.pin_count);
+    let vector_window = x86_apic::MSIX_VECTOR_BASE as u32 - x86_apic::IO_APIC_VECTOR_BASE as u32;
+    if pin_count == 0 || pin_count > vector_window {
+        return Err(KError::Unsupported);
+    }
+    if controller.gsi_base.checked_add(pin_count).is_none() {
+        return Err(KError::Unsupported);
+    }
+    Ok(())
+}
+
+/// Initializes the boot CPU's Local APIC and IO-APIC.
+///
+/// Validation of the declaration is pure and happens before any hardware is
+/// touched. Hardware-capability validation happens after the IO-APIC is
+/// published; on failure the caller must abort boot because hardware
+/// preparation is not rolled back.
+///
+/// # Errors
+///
+/// [`KError::InvalidInput`] for a zero address or unknown provenance,
+/// [`KError::Unsupported`] for a non-zero GSI base, and the backend's errors
+/// for mapping or Local APIC owner allocation. A capability rejection also
+/// returns [`KError::Unsupported`] after hardware initialization.
+///
+/// # Panics
+///
+/// Panics on duplicate Local APIC or IO-APIC publication, as required by the
+/// once-only boot contract.
+pub fn init(config: X86IrqInitConfig) -> KResult<()> {
+    validate_config(&config)?;
+    info!(
+        "Initialize x86 IRQs: IO-APIC {} at {:#010x}, gsi_base={}, source={:?}",
+        config.controller.id, config.controller.address, config.controller.gsi_base, config.source
+    );
+    x86_apic::init_local_primary()?;
+    let capabilities =
+        x86_apic::init_io_apic(pa!(config.controller.address as usize), config.policy)?;
+    validate_capabilities(&config.controller, capabilities)?;
+    Ok(())
+}
+
+/// Brings up the Local APIC on an application CPU.
+///
+/// Runs on each AP after the boot CPU completed [`init`].
+///
+/// # Errors
+///
+/// Propagates Local APIC owner-allocation failure (`NoMemory`).
+///
+/// # Panics
+///
+/// Panics on missing boot-CPU preparation or duplicate per-CPU initialization.
+pub fn init_secondary() -> KResult<()> {
+    x86_apic::init_secondary()
+}
 
 pub const fn legacy_irq_desc(hwirq: usize) -> kirq::IrqDesc {
     kirq::io_apic_irq_desc(hwirq)
@@ -31,7 +163,8 @@ static MSI_EDGE: kirq::EdgeChip = kirq::EdgeChip {
 };
 
 fn retrigger_io(desc: kirq::IrqDesc) -> bool {
-    let accepted = is_io_source(desc) && x86_apic::retrigger_io_apic(desc.hwirq);
+    let accepted = is_io_source(desc)
+        && IoApicPin::try_from_usize(desc.hwirq).is_some_and(x86_apic::retrigger_pin);
     if !accepted {
         warn!(
             "IO-APIC retrigger rejected for hwirq={}: invalid or changed route; pending retained",
@@ -58,6 +191,15 @@ fn is_io_source(desc: kirq::IrqDesc) -> bool {
         && desc.hwirq < usize::from(x86_apic::MSIX_VECTOR_BASE) - x86_apic::IO_APIC_VECTOR_BASE
 }
 
+fn io_pin(desc: kirq::IrqDesc) -> Option<IoApicPin> {
+    // The current IO-APIC domain uses `hwirq` directly as the controller pin.
+    // Firmware GSI-to-pin translation belongs to the discovery slice; this is
+    // deliberately an identity conversion until then.
+    is_io_source(desc)
+        .then(|| IoApicPin::try_from_usize(desc.hwirq))
+        .flatten()
+}
+
 fn is_msi_source(desc: kirq::IrqDesc) -> bool {
     desc.domain == Some(kirq::MSI_DOMAIN)
         && desc.controller == kirq::IrqController::Msi
@@ -67,20 +209,20 @@ fn is_msi_source(desc: kirq::IrqDesc) -> bool {
 }
 
 fn mask_io(desc: kirq::IrqDesc) {
-    if is_io_source(desc) {
-        x86_apic::set_irq_enabled(desc.hwirq, false);
+    if let Some(pin) = io_pin(desc) {
+        x86_apic::set_pin_enabled(pin, false);
     }
 }
 
 fn unmask_io(desc: kirq::IrqDesc) {
-    if is_io_source(desc) {
-        x86_apic::set_irq_enabled(desc.hwirq, true);
+    if let Some(pin) = io_pin(desc) {
+        x86_apic::set_pin_enabled(pin, true);
     }
 }
 
 fn select_x86_flow(
     desc: kirq::IrqDesc,
-    read_trigger: impl FnOnce(usize) -> Option<x86_apic::IoApicTriggerMode>,
+    read_trigger: impl FnOnce(IoApicPin) -> Option<x86_apic::IoApicTriggerMode>,
 ) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
     use kirq::{IrqController, IrqFlags, IrqFlow, IrqTrigger};
     let unsupported = kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq };
@@ -110,7 +252,8 @@ fn select_x86_flow(
     {
         return Err(unsupported);
     }
-    let current = read_trigger(desc.hwirq).ok_or(unsupported)?;
+    let pin = IoApicPin::try_from_usize(desc.hwirq).ok_or(unsupported)?;
+    let current = read_trigger(pin).ok_or(unsupported)?;
     let mode = match desc.trigger {
         IrqTrigger::EdgeRising | IrqTrigger::EdgeFalling => x86_apic::IoApicTriggerMode::Edge,
         IrqTrigger::LevelHigh | IrqTrigger::LevelLow => x86_apic::IoApicTriggerMode::Level,
@@ -136,7 +279,10 @@ fn configure(desc: kirq::IrqDesc) -> Result<(), kirq::IrqDescError> {
         IrqPolarity::Low => x86_apic::IoApicPolarity::Low,
         IrqPolarity::Unknown => x86_apic::IoApicPolarity::High,
     };
-    if x86_apic::configure_irq_checked(desc.hwirq, trigger, polarity) {
+    let Some(pin) = IoApicPin::try_from_usize(desc.hwirq) else {
+        return Err(kirq::IrqDescError::ConfigurationFailed { hwirq: desc.hwirq });
+    };
+    if x86_apic::configure_pin_checked(pin, trigger, polarity) {
         Ok(())
     } else {
         Err(kirq::IrqDescError::ConfigurationFailed { hwirq: desc.hwirq })
@@ -148,7 +294,9 @@ fn enable(irq: usize, enabled: bool) {
         x86_apic::set_local_timer_enabled(enabled);
         return;
     }
-    x86_apic::set_irq_enabled(irq, enabled);
+    if let Some(pin) = IoApicPin::try_from_usize(irq) {
+        x86_apic::set_pin_enabled(pin, enabled);
+    }
 }
 
 fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
@@ -209,7 +357,7 @@ fn dispatch_irq_with<T>(
 unsafe fn dispatch_regular_irq(vector: usize) -> Option<kirq::PendingIrq> {
     let (source, completion_cookie) = prepare_regular_delivery(
         vector,
-        x86_apic::irq_trigger_mode,
+        x86_apic::pin_trigger_mode,
         x86_apic::end_of_interrupt,
     )?;
     // SAFETY: classification transfers this vector's unique remaining EOI
@@ -221,7 +369,7 @@ unsafe fn dispatch_regular_irq(vector: usize) -> Option<kirq::PendingIrq> {
 // only the remaining completion obligation, never a second edge/MSI/local EOI.
 fn prepare_regular_delivery(
     vector: usize,
-    trigger_mode: impl FnOnce(usize) -> Option<x86_apic::IoApicTriggerMode>,
+    trigger_mode: impl FnOnce(IoApicPin) -> Option<x86_apic::IoApicTriggerMode>,
     early_eoi: impl FnOnce(),
 ) -> Option<(kirq::IrqRef, usize)> {
     if vector >= x86_apic::APIC_TIMER_VECTOR as usize {
@@ -235,7 +383,8 @@ fn prepare_regular_delivery(
     }
     if vector >= x86_apic::IO_APIC_VECTOR_BASE {
         let hwirq = vector - x86_apic::IO_APIC_VECTOR_BASE;
-        if trigger_mode(hwirq) == Some(x86_apic::IoApicTriggerMode::Level) {
+        let pin = IoApicPin::try_from_usize(hwirq)?;
+        if trigger_mode(pin) == Some(x86_apic::IoApicTriggerMode::Level) {
             trace!("IRQ {} (level)", hwirq);
             return Some((kirq::IrqRef::Domain(IO_APIC_DOMAIN, hwirq), 1));
         }
@@ -251,7 +400,8 @@ fn complete_delivery(completion_cookie: usize, eoi: impl FnOnce()) {
     }
 }
 
-unittest::path_mod_test!(mod tests, "../ut-tests/x86.rs");
+unittest::path_mod_test!(mod tests, "../../ut-tests/x86.rs");
+unittest::path_mod_test!(mod acpi_madt_tests, "../../ut-tests/acpi_madt.rs");
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
@@ -268,7 +418,7 @@ impl kirq::IntrManagerIf {
     }
 
     fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
-        let flow = select_x86_flow(desc, x86_apic::irq_trigger_mode)?;
+        let flow = select_x86_flow(desc, x86_apic::pin_trigger_mode)?;
         if is_msi_source(desc) && !x86_apic::msi_route_matches(desc.hwirq, desc.affinity) {
             return Err(kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
         }

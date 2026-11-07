@@ -18,6 +18,7 @@ karch = { workspace = true }
 kirq = { workspace = true }
 kbuild_config = { workspace = true }
 kcpu_id_map = { workspace = true }
+kerrno = { workspace = true }
 kiface = { workspace = true }
 kplat = { workspace = true }
 kspin = { workspace = true }
@@ -42,6 +43,7 @@ sbi-rt = { version = "0.0.3", features = ["legacy"] }
 unittest.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
+acpi = { workspace = true }
 x86_apic = { workspace = true }
 unittest.workspace = true
 

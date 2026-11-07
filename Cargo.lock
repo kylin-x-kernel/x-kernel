@@ -2041,6 +2041,7 @@ name = "irq-driver"
 version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
+ "acpi",
  "arm-gic-driver",
  "fwnode",
  "kalloc-types",
@@ -2048,6 +2049,7 @@ dependencies = [
  "kbuild_config",
  "kcpu_id_map",
  "kcpu_slot",
+ "kerrno",
  "kiface",
  "kirq",
  "kplat",
@@ -3037,6 +3039,7 @@ dependencies = [
  "multiboot2",
  "rtc-driver",
  "timer-driver",
+ "unittest",
  "x86-apic",
  "x86_64",
 ]

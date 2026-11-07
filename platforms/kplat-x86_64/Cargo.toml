@@ -46,6 +46,7 @@ multiboot2 = { version = "0.24.1", default-features = false }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = { workspace = true }
+unittest = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-none"]

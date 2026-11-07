@@ -8,6 +8,10 @@ use unittest::def_test;
 
 use super::*;
 
+fn pin(pin: usize) -> IoApicPin {
+    IoApicPin::try_from_usize(pin).expect("test pin within the vector window")
+}
+
 #[derive(Clone, Copy)]
 enum Fault {
     None,
@@ -76,7 +80,7 @@ fn checked_configuration_masks_before_changes_and_preserves_routing() {
         });
         assert!(configure(
             &mut registers,
-            4,
+            pin(4),
             IoApicTriggerMode::Level,
             IoApicPolarity::Low
         ));
@@ -97,7 +101,7 @@ fn failed_readback_never_restores_delivery() {
     registers.fault = Fault::Configuration;
     assert!(!configure(
         &mut registers,
-        4,
+        pin(4),
         IoApicTriggerMode::Level,
         IoApicPolarity::Low
     ));
@@ -112,7 +116,7 @@ fn failed_readback_never_restores_delivery() {
     registers.fault = Fault::None;
     assert!(configure(
         &mut registers,
-        4,
+        pin(4),
         IoApicTriggerMode::Level,
         IoApicPolarity::Low
     ));
@@ -126,7 +130,7 @@ fn failed_mask_or_restore_readback_reports_failure() {
         registers.fault = fault;
         assert!(!configure(
             &mut registers,
-            4,
+            pin(4),
             IoApicTriggerMode::Level,
             IoApicPolarity::Low
         ));
@@ -144,22 +148,24 @@ fn failed_mask_or_restore_readback_reports_failure() {
 fn retrigger_uses_programmed_destination_without_changing_mask() {
     let mut registers = Model::new(IrqFlags::MASKED);
     let mut sent = None;
-    assert!(retrigger(&mut registers, 4, |vector, destination| sent =
+    assert!(retrigger(&mut registers, pin(4), |vector, destination| sent =
         Some((vector, destination))));
     assert_eq!(sent, Some((0x24, 7)));
     assert!(registers.writes.is_empty());
     for flags in [IrqFlags::LEVEL_TRIGGERED, IrqFlags::LOGICAL_DEST] {
         registers.flags = flags;
-        assert!(!retrigger(&mut registers, 4, |_, _| panic!(
+        assert!(!retrigger(&mut registers, pin(4), |_, _| panic!(
             "unsupported route"
         )));
     }
     registers.flags = IrqFlags::empty();
     registers.vector = 0x40;
-    assert!(!retrigger(&mut registers, 4, |_, _| panic!("wrong vector")));
-    for pin in [24, 32, usize::MAX] {
+    assert!(!retrigger(&mut registers, pin(4), |_, _| panic!(
+        "wrong vector"
+    )));
+    for pin in [pin(24), pin(31)] {
         assert!(!retrigger(&mut registers, pin, |_, _| panic!(
-            "invalid pin"
+            "pin beyond hardware table"
         )));
         assert!(!configure(
             &mut registers,
@@ -167,5 +173,74 @@ fn retrigger_uses_programmed_destination_without_changing_mask() {
             IoApicTriggerMode::Edge,
             IoApicPolarity::High
         ));
+    }
+    for pin in [32, usize::MAX] {
+        assert!(IoApicPin::try_from_usize(pin).is_none());
+    }
+}
+
+struct InitModel {
+    max_pin: u8,
+    writes: Vec<(u8, RedirectionTableEntry)>,
+}
+
+impl Registers for InitModel {
+    fn max_pin(&mut self) -> u8 {
+        self.max_pin
+    }
+
+    fn read(&mut self, _pin: u8) -> RedirectionTableEntry {
+        panic!("initial programming must not read redirection entries")
+    }
+
+    fn write(&mut self, pin: u8, entry: RedirectionTableEntry) {
+        self.writes.push((pin, entry));
+    }
+}
+
+#[def_test]
+fn initialization_masks_every_hardware_input_including_pins_without_a_fixed_vector() {
+    let mut model = InitModel {
+        max_pin: 47,
+        writes: Vec::new(),
+    };
+    crate::program_initial_redirection_table(
+        &mut model,
+        47,
+        crate::IoApicInitPolicy::platform_legacy(),
+    );
+
+    assert_eq!(model.writes.len(), 48);
+    for (expected_pin, write) in model.writes.iter().enumerate() {
+        let pin = write.0;
+        let entry = &write.1;
+        assert_eq!(usize::from(pin), expected_pin);
+        assert!(
+            entry.flags().contains(IrqFlags::MASKED),
+            "pin {pin} must be masked during initialization"
+        );
+        if expected_pin <= IoApicPin::MAX {
+            assert_eq!(
+                entry.vector() as usize,
+                IO_APIC_VECTOR_BASE + expected_pin,
+                "pin {pin} must keep its fixed delivery vector"
+            );
+            assert_eq!(entry.dest(), 0);
+            assert!(matches!(entry.mode(), IrqMode::Fixed));
+            let level_low = expected_pin >= 10;
+            assert_eq!(
+                entry.flags().contains(IrqFlags::LEVEL_TRIGGERED),
+                level_low
+            );
+            assert_eq!(entry.flags().contains(IrqFlags::LOW_ACTIVE), level_low);
+        } else {
+            assert_eq!(
+                entry.vector(),
+                0,
+                "pin {pin} has no fixed vector and must not borrow one"
+            );
+            assert!(!entry.flags().contains(IrqFlags::LEVEL_TRIGGERED));
+            assert!(!entry.flags().contains(IrqFlags::LOW_ACTIVE));
+        }
     }
 }

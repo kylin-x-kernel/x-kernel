@@ -63,4 +63,4 @@ pub(super) fn set_pending(registers: &mut impl Registers, intid: IntId) {
     // evidence of delivery, handler completion or a recoverable timeout.
 }
 
-unittest::path_mod_test!(tests, "../ut-tests/gic_spi.rs");
+unittest::path_mod_test!(tests, "../../ut-tests/gic_spi.rs");

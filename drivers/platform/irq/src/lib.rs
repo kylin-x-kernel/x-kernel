@@ -9,7 +9,8 @@
 //!
 //! The primary entry point is the architecture module selected at
 //! compile time — [`gic`] on AArch64 (`gic::init_from_fwnode`,
-//! `gic::init_current_cpu`), `riscv` on RISC-V. The backend is
+//! `gic::init_current_cpu`), `riscv` on RISC-V, and [`x86`] on x86_64
+//! (`x86::init`, `x86::init_secondary`). The backend is
 //! registered with `kirq` through the generated `IntrManagerIf`
 //! provider; platform init only needs the module's `init*` functions.
 //! A production call site is `platforms/kplat-aarch64/src/init.rs`,
@@ -31,6 +32,10 @@
 //! // this CPU can receive and complete GIC lines.
 //! ```
 #![no_std]
+
+#[cfg(unittest)]
+extern crate alloc;
+
 #[macro_use]
 extern crate log;
 

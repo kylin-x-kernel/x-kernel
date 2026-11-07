@@ -6,9 +6,9 @@
 
 use x2apic::ioapic::{IoApic, IrqFlags, IrqMode, RedirectionTableEntry};
 
-use super::{IO_APIC, IO_APIC_VECTOR_BASE, IoApicPolarity, IoApicTriggerMode, MSIX_VECTOR_BASE};
+use super::{IO_APIC, IO_APIC_VECTOR_BASE, IoApicPin, IoApicPolarity, IoApicTriggerMode};
 
-trait Registers {
+pub(super) trait Registers {
     fn max_pin(&mut self) -> u8;
     fn read(&mut self, pin: u8) -> RedirectionTableEntry;
     fn write(&mut self, pin: u8, entry: RedirectionTableEntry);
@@ -16,27 +16,31 @@ trait Registers {
 
 impl Registers for IoApic {
     fn max_pin(&mut self) -> u8 {
-        // SAFETY: Only the permanently mapped IO_APIC under its register lock
-        // implements this private adapter in production.
+        // SAFETY: Only the permanently mapped IO_APIC implements this private
+        // adapter in production. Before publication the initializer owns it
+        // exclusively; afterwards its register lock serializes access.
         unsafe { self.max_table_entry() }
     }
 
     fn read(&mut self, pin: u8) -> RedirectionTableEntry {
-        // SAFETY: Helpers below bound pin by both the vector window and max_pin;
-        // the caller retains the IO-APIC register-select/window lock.
+        // SAFETY: `IoApicPin` bounds the fixed vector window and the helpers
+        // below bound it by max_pin. Before publication the initializer owns
+        // the controller exclusively; afterwards the caller retains the
+        // IO-APIC register-select/window lock.
         unsafe { self.table_entry(pin) }
     }
 
     fn write(&mut self, pin: u8, entry: RedirectionTableEntry) {
-        // SAFETY: The checked pin and permanent mapping remain valid under the
-        // same lock throughout each read/modify/write transaction.
+        // SAFETY: The checked pin and permanent mapping remain valid. Before
+        // publication the initializer owns the controller exclusively; at
+        // runtime the IO-APIC register lock protects each access and the
+        // surrounding read/modify/write transaction.
         unsafe { self.set_table_entry(pin, entry) };
     }
 }
 
-fn valid_pin(registers: &mut impl Registers, pin: usize) -> bool {
-    pin < usize::from(MSIX_VECTOR_BASE) - IO_APIC_VECTOR_BASE
-        && pin <= usize::from(registers.max_pin())
+fn valid_pin(registers: &mut impl Registers, pin: IoApicPin) -> bool {
+    pin.as_usize() <= usize::from(registers.max_pin())
 }
 
 /// Programs trigger/polarity while masked, checks readback, then restores the
@@ -45,8 +49,8 @@ fn valid_pin(registers: &mut impl Registers, pin: usize) -> bool {
 /// Does not change routing or prove that already delivered interrupts drained.
 /// Requires initialized controller state; call in task/ordinary IRQ context,
 /// never NMI, while the source owner excludes competing configuration.
-pub fn configure_irq_checked(
-    pin: usize,
+pub fn configure_pin_checked(
+    pin: IoApicPin,
     trigger: IoApicTriggerMode,
     polarity: IoApicPolarity,
 ) -> bool {
@@ -55,14 +59,14 @@ pub fn configure_irq_checked(
 
 fn configure(
     registers: &mut impl Registers,
-    pin: usize,
+    pin: IoApicPin,
     trigger: IoApicTriggerMode,
     polarity: IoApicPolarity,
 ) -> bool {
     if !valid_pin(registers, pin) {
         return false;
     }
-    let pin = pin as u8;
+    let pin = pin.as_u8();
     let mut entry = registers.read(pin);
     let was_masked = entry.flags().contains(IrqFlags::MASKED);
     entry.set_flags(entry.flags() | IrqFlags::MASKED);
@@ -108,7 +112,7 @@ fn configure(
 /// Fixed IO-APIC vectors are never allocated from the MSI vector pool.
 /// Call in task/ordinary IRQ context after local APIC and IO-APIC preparation,
 /// with source ownership retained. This is not NMI-safe or a delivery drain.
-pub fn retrigger_io_apic(pin: usize) -> bool {
+pub fn retrigger_pin(pin: IoApicPin) -> bool {
     retrigger(&mut *IO_APIC.lock(), pin, |vector, destination| {
         super::send_ipi_raw(
             usize::from(vector),
@@ -117,12 +121,12 @@ pub fn retrigger_io_apic(pin: usize) -> bool {
     })
 }
 
-fn retrigger(registers: &mut impl Registers, pin: usize, send: impl FnOnce(u8, u8)) -> bool {
+fn retrigger(registers: &mut impl Registers, pin: IoApicPin, send: impl FnOnce(u8, u8)) -> bool {
     if !valid_pin(registers, pin) {
         return false;
     }
-    let entry = registers.read(pin as u8);
-    if entry.vector() as usize != IO_APIC_VECTOR_BASE + pin
+    let entry = registers.read(pin.as_u8());
+    if entry.vector() as usize != IO_APIC_VECTOR_BASE + pin.as_usize()
         || entry
             .flags()
             .intersects(IrqFlags::LOGICAL_DEST | IrqFlags::LEVEL_TRIGGERED)

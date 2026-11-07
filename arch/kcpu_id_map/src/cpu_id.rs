@@ -30,7 +30,7 @@ pub(crate) fn load_cpu_id_map_from_fdt(
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn load_cpu_id_map_from_madt(
-    entries: acpi::MadtEntryIter,
+    entries: acpi::MadtEntryIter<'static>,
     normalize_raw_id: fn(RawCpuId) -> RawCpuId,
 ) -> bool {
     load_cpu_id_map(|map| map.load_from_madt(entries, normalize_raw_id))
@@ -215,14 +215,22 @@ impl CpuIdMap {
     #[cfg(target_arch = "x86_64")]
     pub(crate) fn load_from_madt(
         &mut self,
-        entries: acpi::MadtEntryIter,
+        entries: acpi::MadtEntryIter<'static>,
         normalize_raw_id: fn(RawCpuId) -> RawCpuId,
     ) -> bool {
         let raw_cpu_ids = entries.filter_map(|entry| match entry {
-            acpi::MadtEntry::LocalApic(cpu) if cpu.enabled() => {
+            Ok(acpi::MadtEntry::LocalApic(cpu)) if cpu.enabled() => {
                 Some(normalize_raw_id(RawCpuId::new(cpu.apic_id as usize)))
             }
-            _ => None,
+            Ok(_) => None,
+            Err(error) => {
+                log::warn!(
+                    "ACPI MADT parse error at offset {}: {:?}; remaining CPUs ignored",
+                    error.offset,
+                    error.kind
+                );
+                None
+            }
         });
         self.load_from_raw_cpu_ids(raw_cpu_ids)
     }

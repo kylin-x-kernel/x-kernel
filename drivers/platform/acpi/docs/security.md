@@ -53,8 +53,15 @@ assertions (`Rsdp` = 36, `AcpiSdtHeader` = 36, ...).
 
 - No table body is dereferenced before its header passes signature,
   length, and checksum validation.
-- MADT iteration stays within `header.length`; entries shorter than the
-  common header, or extending past the table, panic instead of parsing.
+- MADT iteration stays within `header.length`. A truncated entry, an
+  invalid length, or a known entry shorter than its fixed structure
+  yields one `MadtParseError` carrying the table-relative offset, after
+  which iteration ends. The iterator never panics on entry framing; the
+  consumer decides whether the error is fatal. Current CPU enumeration
+  logs the error and keeps the entries parsed before it.
+- A MADT fixed header shorter than its fixed structure still panics
+  before entry iteration begins, together with the RSDP/SDT header checks
+  above.
 - The DSDT scan never indexes outside its bounded windows and validates
   resource-item lengths before reading fields.
 - The PM1a port is never `0` and never exceeds `u16::MAX`; the ECAM range
@@ -67,7 +74,7 @@ assertions (`Rsdp` = 36, `AcpiSdtHeader` = 36, ...).
 |----|--------|--------|---------|------------------|
 | T-01 | Corrupted RSDP (bad signature/checksum) | High — boot aborts | Firmware or loader corruption | `validate_rsdp` panics before any table is walked; the kernel does not continue with a bogus root pointer. |
 | T-02 | Table claiming a length larger than reality | High — out-of-bounds reads | Corrupted or malicious SDT header | Header length participates in checksum validation; a forged length fails the checksum. `slice` ranges are built from the validated length only. |
-| T-03 | Malformed MADT entry stream | Medium — boot aborts | Firmware bug in entry lengths | The iterator bounds-checks each entry against the table end and panics on violation instead of looping or reading garbage. |
+| T-03 | Malformed MADT entry stream | Medium — topology truncated or boot aborts, depending on the consumer | Firmware bug in entry lengths | The iterator bounds-checks each entry, returns one typed error with the table-relative offset, then stops; it never reads past the table. CPU enumeration logs the error and keeps earlier entries; discovery reports `Malformed` and does not fall back. The fixed MADT header is separately length/checksum-validated and panics before iteration. |
 | T-04 | Wrong-but-valid table content (lying topology) | Medium — wrong APIC/ECAM configuration | Compromised firmware | Not detectable here: checksums pass. Residual risk accepted; platform policy decides fatality of absence, not of lies. |
 | T-05 | PM1a port pointing at an unintended device | Medium — spurious I/O write at power-off | Corrupted FADT | Port must be non-zero and `u16`-sized; the write itself happens in the power-off path where the system is already tearing down. |
 
