@@ -274,6 +274,12 @@ fn concurrent_fsync_and_fallocate_extension_both_succeed() {
     const TAIL_MARGIN: u64 = 512;
     const ROUND_WRITE_LEN: u64 = (TEST_BLOCK_SIZE * 3) as u64;
     const ROUNDS: usize = 4;
+    /// Deterministic delay before the extension task first runs, reproducing
+    /// the host-starvation window observed in CI on an idle host.
+    const EXTENSION_START_DELAY_MS: u64 = 300;
+    /// Upper bound for the park wait. It only guards a test that never reaches
+    /// the device; a slow host delays the event instead of failing the premise.
+    const WAIT_PARK_TIMEOUT_MS: u64 = 10_000;
 
     let (mut filesystem, device) = journal_allocator_test_filesystem(160, 0b0011_1111);
     let private_inode = allocate_checkpointed_regular_inode(&mut filesystem);
@@ -320,29 +326,36 @@ fn concurrent_fsync_and_fallocate_extension_both_succeed() {
         );
 
         // Freezing device I/O parks the extension inside the ext4 core (and
-        // holds the invalidate lock) while writeback samples the visible size;
-        // polling the parked-operation counter keeps the extension first.
+        // holds the invalidate lock) while writeback samples the visible size.
+        // Wait for the device's park notification: a slow host delays the
+        // event, it does not invalidate the premise.
         device.set_holds_io(true);
         let extension_file = file.clone();
         let extension_result: Arc<Mutex<VfsResult<()>>> = Arc::new(Mutex::new(Ok(())));
         let extension_slot = extension_result.clone();
+        let extension_entered = Arc::new(Mutex::new(false));
+        let extension_entered_slot = extension_entered.clone();
         let extension_task = ktask::spawn(move || {
+            ktask::sleep(ktime_types::TimeSpan::from_millis(
+                EXTENSION_START_DELAY_MS,
+            ));
+            *extension_entered_slot.lock() = true;
             *extension_slot.lock() =
                 extension_file.fallocate(FallocateFlags::empty(), 0, extend_to);
         });
-        for _ in 0..100 {
-            if device.held_io_ops() != 0 {
-                break;
-            }
-            ktask::sleep(ktime_types::TimeSpan::from_millis(1));
-        }
+        let park_timed_out = device.wait_for_park(ktime_types::TimeSpan::from_millis(
+            WAIT_PARK_TIMEOUT_MS,
+        ));
         // Fail loudly if the parking premise breaks: without the park this
         // degrades into a scheduler-timing test. The size assert pins the park
         // to before the extension publishes; the buffered write published
         // `write_end`.
         assert!(
-            device.held_io_ops() != 0,
-            "extension did not park on device I/O inside the ext4 core"
+            !park_timed_out,
+            "extension did not park on device I/O inside the ext4 core \
+             (waited {} ms, extension_entered={})",
+            WAIT_PARK_TIMEOUT_MS,
+            *extension_entered.lock()
         );
         assert_eq!(file.size(), write_end);
         let fsync_file = file.clone();

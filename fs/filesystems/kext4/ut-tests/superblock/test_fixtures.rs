@@ -298,6 +298,7 @@ pub(crate) struct TestDevice {
     fail_write_block: Mutex<Option<u64>>,
     holds_io: AtomicBool,
     held_io_ops: AtomicUsize,
+    park_waiters: ktask::WaitQueue,
 }
 
 impl TestDevice {
@@ -316,6 +317,7 @@ impl TestDevice {
             fail_write_block: Mutex::new(None),
             holds_io: AtomicBool::new(false),
             held_io_ops: AtomicUsize::new(0),
+            park_waiters: ktask::WaitQueue::new(),
         }
     }
 
@@ -364,7 +366,25 @@ impl TestDevice {
         self.held_io_ops.load(Ordering::Acquire)
     }
 
+    /// Waits until a device operation is parked in the hold.
+    ///
+    /// - `timeout`: upper bound for the wait; it only guards a test that never
+    ///   reaches the device, so a slow host delays the event instead of failing
+    ///   the premise.
+    ///
+    /// Returns: `true` if the timeout expired without a parked operation.
+    ///
+    /// Locking: blocks the caller on the park wait queue; `wait_while_holds_io`
+    /// notifies it after counting a parked operation.
+    pub(crate) fn wait_for_park(&self, timeout: ktime_types::TimeSpan) -> bool {
+        self.park_waiters
+            .wait_timeout_until(timeout, || self.held_io_ops() != 0)
+    }
+
     /// Parks the caller while the hold is set, counting it as a parked operation.
+    ///
+    /// The parked operation notifies [`Self::wait_for_park`] so the observing
+    /// task does not need a timing-based poll.
     ///
     /// Locking: spins with `yield_now`; another task must clear the hold.
     fn wait_while_holds_io(&self) {
@@ -372,6 +392,7 @@ impl TestDevice {
             return;
         }
         self.held_io_ops.fetch_add(1, Ordering::AcqRel);
+        self.park_waiters.notify_all(true);
         while self.holds_io.load(Ordering::Acquire) {
             ktask::yield_now();
         }
