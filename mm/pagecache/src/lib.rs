@@ -14,6 +14,7 @@ extern crate alloc;
 mod filemap;
 mod folio;
 mod folio_batch;
+mod invalidate;
 mod mapping_pages;
 mod readahead;
 mod truncate;

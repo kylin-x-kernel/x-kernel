@@ -33,8 +33,10 @@ runtime 不能直接引用它。
 - `filemap.rs`：lookup、连续引用批量收集、materialize 和 insert-if-absent；
 - `readahead.rs`: bounded missing-range lookup, page reservation and transfer of read initialization ownership;
 - `truncate.rs`：尺寸变化时的页移除、尾页清零和 final teardown；
+- `invalidate.rs`: byte-range invalidation of clean resident folios, reporting
+  dirty residue as busy;
 - `writeback.rs`：dirty candidate、batch helper、开始/完成协议与结果类型；
-- `tests/`：resident storage、truncate 和 writeback 测试。
+- `tests/`: resident storage, truncate, invalidate, and writeback tests.
 
 ## 架构
 
@@ -92,6 +94,26 @@ growth 和 shrink 在索引锁下取得候选引用，释放索引锁后锁页�
 该方法不更新任何可见长度，也不产生 VM invalidation。Linux
 `i_size_write -> unmap -> truncate page cache -> unmap` 的事务由
 `kvfs::AddressSpace` 负责。
+
+### Byte-range invalidation
+
+`invalidate_pages_range(start, end)` discards clean resident folios in a
+half-open byte range that is rounded outward to folio boundaries:
+
+- an empty or inverted byte range is rejected before folio rounding, so it
+  never discards a folio;
+- folios under writeback are waited for before the folio and index locks are
+  taken, and the identity is rechecked after locking;
+- a folio that is still dirty is left resident and the whole call reports
+  `ResourceBusy`; clean folios are discarded in either outcome;
+- the scan advances a cursor across bounded batches, so a dirty folio does not
+  stall the rest and the range is visited once.
+
+The operation only touches page-cache state. Callers must already have removed
+the user PTEs and completed the matching TLB invalidation for every mapping
+view covering the range, because discarding a folio returns its physical frame
+to the allocator immediately. Serialization with cache population and with
+truncate belongs to the owning `kvfs::AddressSpace`, not to this container.
 
 ### Writeback
 

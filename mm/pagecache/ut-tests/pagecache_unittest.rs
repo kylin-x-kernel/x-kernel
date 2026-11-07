@@ -14,6 +14,8 @@ use memaddr::PAGE_SIZE_4K;
 
 use crate::{Folio, MappingPages, PageIndex};
 
+#[path = "invalidate_unittest.rs"]
+mod invalidate;
 #[path = "mapping_pages_unittest.rs"]
 mod mapping_pages;
 #[path = "residency_unittest.rs"]
@@ -57,36 +59,37 @@ fn write_cached(cache: &MappingPages, offset: u64, src: &[u8]) -> KResult<()> {
 // tests can write back concurrently: notifications match the retained Arc.
 type FolioWaitSignal = (Arc<Folio>, Arc<AtomicBool>, Arc<WaitQueue>);
 static_lock! {
-    static WRITEBACK_WAIT_SIGNAL: Mutex<Option<FolioWaitSignal>> = Mutex::new(None);
+    // Concurrent tests observe distinct folios; matching is by Arc identity.
+    static WRITEBACK_WAIT_SIGNAL: Mutex<Vec<FolioWaitSignal>> = Mutex::new(Vec::new());
 }
 
-struct WritebackWaitObservation;
+struct WritebackWaitObservation {
+    folio: Arc<Folio>,
+}
 
 impl WritebackWaitObservation {
     fn new(folio: Arc<Folio>, entered: Arc<AtomicBool>, events: Arc<WaitQueue>) -> Self {
-        let mut signal = WRITEBACK_WAIT_SIGNAL.lock();
-        assert!(
-            signal.is_none(),
-            "writeback wait observer already installed"
-        );
-        *signal = Some((folio, entered, events));
-        Self
+        WRITEBACK_WAIT_SIGNAL
+            .lock()
+            .push((folio.clone(), entered, events));
+        Self { folio }
     }
 }
 
 impl Drop for WritebackWaitObservation {
     fn drop(&mut self) {
-        WRITEBACK_WAIT_SIGNAL.lock().take();
+        let mut signals = WRITEBACK_WAIT_SIGNAL.lock();
+        signals.retain(|(observed, _, _)| !Arc::ptr_eq(observed, &self.folio));
     }
 }
 
 pub(super) fn observe_writeback_wait(folio: &Folio) {
-    let signal = WRITEBACK_WAIT_SIGNAL.lock();
-    if let Some((observed, entered, events)) = signal.as_ref()
-        && core::ptr::eq(Arc::as_ptr(observed), folio)
-    {
-        entered.store(true, Ordering::Release);
-        events.notify_all(false);
+    let signals = WRITEBACK_WAIT_SIGNAL.lock();
+    for (observed, entered, events) in signals.iter() {
+        if core::ptr::eq(Arc::as_ptr(observed), folio) {
+            entered.store(true, Ordering::Release);
+            events.notify_all(false);
+        }
     }
 }
 

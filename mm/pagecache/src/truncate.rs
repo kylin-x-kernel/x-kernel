@@ -66,7 +66,7 @@ impl MappingPages {
 
     // A cursor of None denotes exhaustion, including a folio at u64::MAX.
     // `end` is exclusive; None covers the whole suffix.
-    fn collect_truncate_folios(
+    pub(super) fn collect_folios_range(
         &self,
         cursor: &mut Option<PageIndex>,
         end: Option<PageIndex>,
@@ -96,7 +96,7 @@ impl MappingPages {
         let mut cursor = Some(first_index);
         let mut batch = FolioBatch::new();
         while cursor.is_some() {
-            self.collect_truncate_folios(&mut cursor, end, &mut batch);
+            self.collect_folios_range(&mut cursor, end, &mut batch);
             let mut state = self.state.lock();
             for candidate in batch.iter() {
                 let Some(mut folio) = candidate.try_lock() else {
@@ -123,7 +123,7 @@ impl MappingPages {
             // locks were released. The owner excludes continuing population.
             // Success requires an empty range: a retry limit or a no-progress
             // exit could leave pages referencing blocks the owner will release.
-            self.collect_truncate_folios(&mut Some(first_index), end, &mut batch);
+            self.collect_folios_range(&mut Some(first_index), end, &mut batch);
             if batch.is_empty() {
                 break;
             }
