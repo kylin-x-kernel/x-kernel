@@ -16,7 +16,7 @@ use kspin::SpinNoPreempt;
 
 use crate::{
     BusId, DeviceId, DeviceIdentity, DeviceLocation, DeviceRecord, DeviceState, DiscoveryOrigin,
-    DriverId, ResourceDesc, ResourceSet, TransportInfo,
+    DriverId, IntxRouteStatus, ResourceDesc, ResourceSet, TransportInfo,
 };
 
 /// Mutable identity fields of a device object protected by a per-object lock.
@@ -48,6 +48,8 @@ pub struct DeviceObject {
     resources: ResourceSet,
     /// Resolved DMA view carried over from discovery, if any.
     dma: Option<DmaInfo>,
+    /// Legacy INTx route status carried over from discovery, if any.
+    intx: Option<IntxRouteStatus>,
     lifecycle: AtomicU8,
     /// Outstanding in-use references handed out by [`DeviceObject::try_acquire`].
     ///
@@ -105,6 +107,7 @@ impl DeviceObject {
             transport,
             resources,
             dma: None,
+            intx: None,
             lifecycle: AtomicU8::new(DeviceState::Discovered.as_u8()),
             usage: AtomicUsize::new(0),
             devres: SpinNoPreempt::new(Vec::new()),
@@ -159,6 +162,16 @@ impl DeviceObject {
         self
     }
 
+    /// Attach the legacy INTx discovery status.
+    ///
+    /// This is a construction-time builder; publish the object only after the
+    /// status is final. `None` means no backend record exists, not that the
+    /// device has a legacy interrupt.
+    pub fn with_intx_route(mut self, status: Option<IntxRouteStatus>) -> Self {
+        self.intx = status;
+        self
+    }
+
     /// Borrow hardware resources associated with this device.
     pub fn resources(&self) -> &ResourceSet {
         &self.resources
@@ -167,6 +180,11 @@ impl DeviceObject {
     /// Resolved DMA view, if discovery established one.
     pub const fn dma(&self) -> Option<DmaInfo> {
         self.dma
+    }
+
+    /// Legacy INTx route status recorded during discovery, if any.
+    pub const fn intx_route(&self) -> Option<IntxRouteStatus> {
+        self.intx
     }
 
     /// Find the first MMIO resource.
@@ -434,6 +452,7 @@ impl DeviceObject {
             transport: self.transport,
             resources: self.resources.clone(),
             dma: self.dma,
+            intx: self.intx,
             driver_name: state.driver_name,
             driver_id: state.driver_id,
             device_kind: state.device_kind,

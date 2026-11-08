@@ -149,6 +149,23 @@ pub enum DiscoveryOrigin {
     PlatformStatic,
 }
 
+/// Outcome of resolving a device's legacy INTx route during discovery.
+///
+/// This is a driver-neutral fact recorded by the discovering bus backend.
+/// Firmware-specific errors stay in that backend; consumers use this status
+/// only to choose a probe-failure policy. The status describes INTx routing,
+/// not whether the device has any usable interrupt (MSI-X may still work).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntxRouteStatus {
+    /// A route was resolved and the corresponding [`crate::ResourceDesc::Irq`]
+    /// resource was attached to the device.
+    Routed,
+    /// The device or firmware explicitly reports no legacy interrupt.
+    NotConnected,
+    /// The route could not be resolved or mapped.
+    Failed,
+}
+
 /// PCI device identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PciIdentity {
@@ -226,6 +243,11 @@ pub struct DeviceDesc {
     /// addressing or coherent DMA. Bus backends that describe DMA must build
     /// the view from firmware facts and platform policy before registration.
     dma: Option<DmaInfo>,
+    /// How the discovering backend resolved this device's legacy INTx route.
+    ///
+    /// `None` means the backend does not record INTx discovery results; it
+    /// does not mean the device has no legacy interrupt.
+    intx: Option<IntxRouteStatus>,
 }
 
 impl DeviceDesc {
@@ -275,7 +297,22 @@ impl DeviceDesc {
             transport,
             resources,
             dma: None,
+            intx: None,
         }
+    }
+
+    /// Record the outcome of legacy INTx route resolution.
+    ///
+    /// Must be called before the descriptor is registered with the device
+    /// core, because the runtime object is built from the stored descriptor.
+    pub fn with_intx_route(mut self, status: IntxRouteStatus) -> Self {
+        self.intx = Some(status);
+        self
+    }
+
+    /// Legacy INTx route status, if the backend recorded one.
+    pub const fn intx_route(&self) -> Option<IntxRouteStatus> {
+        self.intx
     }
 
     /// Record a fully resolved DMA view for this candidate.
@@ -417,6 +454,8 @@ pub struct DeviceRecord {
     pub resources: ResourceSet,
     /// Resolved DMA view, if the discovering backend composed one.
     pub dma: Option<DmaInfo>,
+    /// Legacy INTx route status, if the discovering backend recorded one.
+    pub intx: Option<IntxRouteStatus>,
     /// Name of the bound driver, once bound.
     pub driver_name: Option<&'static str>,
     /// Id of the bound driver, once bound.

@@ -444,13 +444,34 @@ delivery. Domain associations belong to platform/Domain lifetime, not to one
 handler or probe attempt; handler release does not dispose those mappings. No
 KIRQ dependency is added to reusable concrete drivers or firmware parsers.
 
-PCI legacy INTx is the remaining exception: `bus::map_pci_legacy_irq` still
-converts the `of` compatibility layer's decoded controller/hwirq/trigger into
-`IrqRouteDesc` and calls `map_irq`. That path is explicitly legacy and must
-migrate with PCI firmware routing.
+PCI legacy INTx keeps two explicit routes. `bus::map_pci_legacy_irq`
+dispatches on the route kind: a `Gsi` calls `IrqOp::map_gsi`, while a DT
+compatibility `Hwirq` still converts the `of` layer's decoded
+controller/hwirq/trigger into `IrqRouteDesc` and calls `map_irq`. The helper
+returns the provider's `ResError`, so the x86 resolver can log the exact
+mapping failure. A GSI never enters `IrqRouteDesc.hwirq`; the platform resolves
+it to an instance domain and local pin. That DT path is explicitly legacy and
+must migrate with PCI firmware routing.
+
+On x86 the firmware route query is `bus::acpi_owner`, not `pci`: one static
+`OwnerState` owns the retained AML context and the published `PrtTable`, loaded
+once with `\_PIC(1)` and the root `_PRT` during enumeration. The repository
+answers `route(bdf, pin)` from that table only; it never reads PCI config,
+maps an IRQ, evaluates AML, or locks the context. The PCI integration seam is
+`bus::intx::resolve`: it reads `pci::interrupt_pin` (`0x3D`), calls the owner
+only for `DiscoveryOrigin::Acpi`, maps `Gsi` through the provider, and returns
+either the mapped resource or a driver-neutral `kdevice::IntxRouteStatus`
+(`Routed`/`NotConnected`/`Failed`). `bus::pci_backend` attaches the `Irq`
+resource and stores that status on the descriptor; it does not keep a global
+BDF table and does not clear records at enumeration start. The kdriver VirtIO
+integration converts `PciProbeError::NoInterrupt` to a `DriverError` using the
+device's stored status, so an INTx-only device fails visibly instead of
+polling, while a transport failure is never blamed on INTx. Non-x86 keeps the
+`pci::legacy_interrupt_route` + OF static fallback path.
 
 `ut-tests/irq_mapping.rs` checks that unreadable firmware declarations map to
-input/unsupported enumeration errors and never look like an absent IRQ.
+input/unsupported enumeration errors and never look like an absent IRQ, and
+that `Gsi`/`Hwirq` each reach only their own provider entry point.
 Provider tests cover mapping error classification and authoritative descriptor
 retention.
 
@@ -464,6 +485,12 @@ half of Linux's split: the firmware backend owns DT encoding, the DMA-parent
 relationship, whole-window translation and coherency inheritance; fwnode
 exposes those results as neutral queries; kdriver applies device/bus policy;
 and `kdma` still owns allocation, mapping, and synchronization.
+
+The same registration call also carries an optional, driver-neutral
+`kdevice::IntxRouteStatus` from discovery. It travels with the descriptor into
+the runtime object and record, so an activation decision reads the discovery
+result from its own device instead of a global side table. `None` means the
+backend recorded no INTx fact; it never means "no interrupt".
 
 The backend answers `FwNode::dma_window()` and
 `FwNode::dma_effective_coherency()`; this module contains no DT property names,

@@ -25,6 +25,8 @@ use alloc::sync::Arc;
 #[cfg(feature = "virtio")]
 use driver_base::{DeviceKind, DriverError, DriverResult};
 #[cfg(feature = "virtio")]
+use driver_os_api::IrqResource;
+#[cfg(feature = "virtio")]
 use kdevice::{
     BusTypeId, DeviceDriver, DeviceLocation, DeviceMatcher, DeviceObject, VirtioTypeMatcher,
 };
@@ -190,15 +192,28 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
         .map(|(_, info)| info)
         .ok_or(DriverError::BadState)?;
 
-    let (ty, transport, irq) =
-        virtio::probe_pci_device::<glue::VirtIoHalImpl, pci::MmioCam<'static>>(
-            root,
-            bdf,
-            &dev_info,
-            config,
-            crate::resource::resource_provider(),
-        )
-        .ok_or(DriverError::BadState)?;
+    let intx = device.first_irq();
+
+    let probed = virtio::probe_pci_device::<glue::VirtIoHalImpl, pci::MmioCam<'static>>(
+        root,
+        bdf,
+        &dev_info,
+        config,
+        intx,
+        crate::resource::resource_provider(),
+    );
+
+    // Only an explicit "no interrupt" probe result is related to this
+    // device's INTx discovery status. A transport failure stays a transport
+    // failure even when the device also has no routed interrupt.
+    let (ty, transport, irq) = match probed {
+        Ok(probed) => probed,
+        Err(virtio::PciProbeError::NotVirtio) => return Err(DriverError::Unsupported),
+        Err(virtio::PciProbeError::Transport) => return Err(DriverError::Io),
+        Err(virtio::PciProbeError::NoInterrupt) => {
+            return Err(no_interrupt_error(&device, device_kind));
+        }
+    };
 
     if ty != device_kind {
         return Err(DriverError::Unsupported);
@@ -212,6 +227,58 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
     dispatch_virtio_try_new(device, device_kind, transport, Some(irq))
 }
 
+/// Converts an explicit `NoInterrupt` probe result into an activation error.
+///
+/// The discovery status stored on the device is driver-neutral; this policy
+/// layer is the only place that relates it to the activation failure. The
+/// detailed firmware error was logged by the PCI INTx resolver.
+#[cfg(feature = "virtio")]
+fn no_interrupt_error(device: &DeviceObject, device_kind: DeviceKind) -> DriverError {
+    #[cfg(target_arch = "x86_64")]
+    {
+        match device.intx_route() {
+            Some(kdevice::IntxRouteStatus::NotConnected) => {
+                log::warn!(
+                    "virtio {device_kind:?} at {:?}: no interrupt and firmware reports no INTx \
+                     connection",
+                    device.location()
+                );
+                DriverError::Unsupported
+            }
+            Some(kdevice::IntxRouteStatus::Failed) => {
+                log::error!(
+                    "virtio {device_kind:?} at {:?}: no interrupt and INTx route resolution failed",
+                    device.location()
+                );
+                DriverError::Io
+            }
+            Some(kdevice::IntxRouteStatus::Routed) => {
+                log::error!(
+                    "virtio {device_kind:?} at {:?}: no interrupt despite a routed INTx resource",
+                    device.location()
+                );
+                DriverError::Io
+            }
+            None => {
+                log::warn!(
+                    "virtio {device_kind:?} at {:?}: no interrupt and no INTx discovery result",
+                    device.location()
+                );
+                DriverError::Io
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        log::warn!(
+            "virtio {device_kind:?} at {:?}: no interrupt available",
+            device.location()
+        );
+        DriverError::BadState
+    }
+}
+
 #[cfg(feature = "virtio")]
 fn activate_virtio_mmio(device: Arc<DeviceObject>, device_kind: DeviceKind) -> DriverResult<()> {
     let (base, size) = match device.location() {
@@ -220,7 +287,7 @@ fn activate_virtio_mmio(device: Arc<DeviceObject>, device_kind: DeviceKind) -> D
     };
 
     let regs = crate::iomap_mmio(base, size, "virtio-mmio-transport")?;
-    let irq = device.first_irq().map(|resource| resource.virq().raw());
+    let irq = device.first_irq();
     // SAFETY: `regs` was obtained from `iomap_mmio` which maps a valid
     // physical MMIO region, and `size` matches the region size.
     let (ty, transport) =
@@ -238,7 +305,7 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
     parent: Arc<DeviceObject>,
     kind: DeviceKind,
     transport: T,
-    irq: Option<usize>,
+    irq: Option<IrqResource>,
 ) -> DriverResult<()> {
     match kind {
         #[cfg(feature = "virtio-net")]

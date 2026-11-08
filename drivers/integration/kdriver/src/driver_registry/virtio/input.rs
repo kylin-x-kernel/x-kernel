@@ -7,7 +7,7 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use driver_base::{DriverError, DriverResult};
-use driver_os_api::{IrqResource, IrqTrigger};
+use driver_os_api::IrqResource;
 use kdevice::DeviceObject;
 use virtio::Transport;
 
@@ -17,7 +17,7 @@ use crate::resource::DeviceResourceExt;
 pub(super) fn activate_pci<T: Transport + 'static>(
     parent: Arc<DeviceObject>,
     transport: T,
-    irq: usize,
+    irq: IrqResource,
     config: &mut pci::PciConfigAccess,
     bdf: pci::DeviceFunction,
 ) -> DriverResult<()> {
@@ -27,7 +27,7 @@ pub(super) fn activate_pci<T: Transport + 'static>(
 pub(super) fn activate_mmio<T: Transport + 'static>(
     parent: Arc<DeviceObject>,
     transport: T,
-    irq: Option<usize>,
+    irq: Option<IrqResource>,
 ) -> DriverResult<()> {
     activate(
         parent,
@@ -40,14 +40,11 @@ pub(super) fn activate_mmio<T: Transport + 'static>(
 fn activate<T: Transport + 'static>(
     parent: Arc<DeviceObject>,
     transport: T,
-    irq: usize,
+    irq: IrqResource,
     pci_intx: Option<(&mut pci::PciConfigAccess, pci::DeviceFunction)>,
 ) -> DriverResult<()> {
-    let input = virtio::VirtIoInputDev::<VirtIoHalImpl, T>::try_new(transport, irq)?;
-    parent.devm_request_irq(
-        IrqResource::plain(driver_os_api::Virq::new(irq), IrqTrigger::Unknown(0)),
-        input.irq_handler(),
-    )?;
+    let input = virtio::VirtIoInputDev::<VirtIoHalImpl, T>::try_new(transport, irq.virq().raw())?;
+    parent.devm_request_irq(irq, input.irq_handler())?;
 
     if let Some((config, bdf)) = pci_intx {
         // The transport stays masked until the shared handler is registered.

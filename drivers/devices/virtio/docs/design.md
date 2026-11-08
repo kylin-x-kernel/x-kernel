@@ -77,7 +77,7 @@ Feature flags 控制编译哪些设备适配器：
 
 | 组件 | 职责 |
 |------|------|
-| `lib.rs` | 设备探测（`probe_mmio_device` / `probe_pci_device`）、VirtIO 错误到 `DriverError` 的转换、公共类型 re-export |
+| `lib.rs` | 设备探测（`probe_mmio_device` / `probe_pci_device`）、VirtIO 错误到 `DriverError` 的转换、PCI probe 的驱动中立 `PciProbeError`、公共类型 re-export |
 | `blk.rs` / `blk/requests.rs` | `VirtIoBlkDev` 实现 `BlockDeviceOperations`，管理准入、请求及 DMA 回收 |
 | `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
 | `input.rs` | Wraps `VirtIOInput` as `VirtIoInputDev`, which implements `InputDevice`; probes and caches static capability bitmaps and axis metadata, acknowledges the ISR in IRQ context, and asks the input layer to drain events in task context. |
@@ -267,20 +267,28 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 1. 读取 PCI 配置空间，获取设备类型信息
 2. 通过 `virtio_device_type()` 判断是否为 VirtIO 设备，再通过 `as_device_kind()` 映射为 `DeviceKind`
-3. On x86_64, network devices attempt MSI-X setup through `IrqOp`.
-   - Discover the capability, allocate a vector and program the MSI-X table.
-   - If unavailable, use the PCI Interrupt Line fallback through `IrqOp::map_irq`.
-   - Other device classes currently keep their legacy IRQ path.
-4. 其他架构：通过设备树或固定映射获取 IRQ
-   - aarch64：`pci::legacy_interrupt_route()` 获取设备树路由，按触发类型创建 GIC 描述符
+3. `probe_pci_device` 接收发现阶段已映射的 INTx 资源
+   （`Option<IrqResource>`），不再自行读取 Interrupt Line。
+   - x86_64 网络设备先尝试通过 `IrqOp` 建立 MSI-X；不可用时使用传入的
+     INTx 资源。两者都没有时 probe 返回驱动中立的
+     `PciProbeError::NoInterrupt`，由 host 集成层结合设备上的 INTx 发现
+     状态选择失败策略；驱动层不会把寄存器值猜测为 GSI。
+   - 其他设备类型只使用传入的 INTx 资源，不存在 x86 Interrupt Line 回退。
+   - transport 创建失败返回 `PciProbeError::Transport`，与中断不可用分开，
+     不会被误归因为 INTx 路由失败。
+   - 未识别为 VirtIO 的设备返回 `PciProbeError::NotVirtio`。
+4. 其他架构：优先使用发现阶段映射的固件路由资源，缺失时保留兼容回退
+   - aarch64：`pci::legacy_interrupt_route()` 获取设备树路由的
+     `Hwirq` 变体，按触发类型创建 GIC 描述符
    - riscv64：映射为 PLIC 中断
    - loongarch64: the static INTx fallback maps `0x10 + device % 4` through
      `IrqOp::map_irq` as `LoongArchExtioi` / `LevelHigh`, without a domain.
      It returns the provider's virtual IRQ, not the raw hardware number;
      mapping failure leaves the IRQ absent.
 5. 屏蔽输入设备及当前仅轮询的 vsock 路径所使用的 legacy INTx，随后返回
-   `(DeviceKind, PciTransport, irq)`。host 集成层仅在输入设备的共享中断处理程序
-   注册完成后解除其 INTx 屏蔽；vsock 的 INTx 保持屏蔽。
+   `Result<(DeviceKind, PciTransport, IrqResource), PciProbeError>`。host
+   集成层仅在输入设备的共享中断处理程序注册完成后解除其 INTx 屏蔽；vsock
+   的 INTx 保持屏蔽。
 
 ### MMIO 设备探测
 

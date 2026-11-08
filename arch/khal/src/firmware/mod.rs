@@ -20,6 +20,7 @@ const MAX_MEMORY_RAM_REGIONS: usize = 128;
 const MAX_MEMORY_RESERVED_REGIONS: usize = 128;
 const FIRMWARE_RESERVED_NAME: &str = "firmware reserved";
 
+pub use acpi::{AmlHost, HostAccessKind, HostFailure, HostFailureReason};
 pub use fw_node::root as fwnode_root;
 pub use state::{cmdline, dt_log_level, dtb_bytes};
 
@@ -68,10 +69,16 @@ fn firmware_reserved_region_named(start: usize, size: usize, name: &'static str)
 
 #[cfg(target_arch = "x86_64")]
 fn x86_legacy_low_memory_region(_boot_info: &BootInfo) -> ReservedRegion {
+    // The legacy BIOS places the RSDP, the root tables and ACPI tables in the
+    // firmware-reserved F-segment below 1 MiB. Keeping low memory allocatable
+    // would be unsafe, but calling the whole range platform-private would hide
+    // those firmware tables from the ACPI host, which only authorizes table
+    // reads from firmware-reserved memory. It remains read-only to the host:
+    // the ACPI adapter never writes firmware-reserved memory.
     ReservedRegion::new(
         0,
         0x200000,
-        ReservedKind::Platform,
+        ReservedKind::Firmware,
         ReservedSource::Platform,
         "legacy low memory",
     )

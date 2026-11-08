@@ -613,6 +613,78 @@ fn explicit_route_must_agree_with_the_pre_probe_descriptor_owner() {
     assert_eq!(super::validate_legacy_routes(&config, &adjacent), Ok(()));
 }
 
+fn topology_entry(
+    domain: kirq::IrqDomainId,
+    gsi_base: u32,
+    pin_count: u16,
+) -> Option<super::IoApicTopologyEntry> {
+    Some(super::IoApicTopologyEntry {
+        domain,
+        gsi_base,
+        pin_count,
+    })
+}
+
+#[def_test]
+fn gsi_resolves_to_a_local_pin_on_the_primary_domain() {
+    let desc = super::gsi_desc_in(
+        &[topology_entry(super::IO_APIC_DOMAIN, 0, 24)],
+        10,
+        IrqTrigger::LevelLow,
+    )
+    .expect("GSI 10 is inside [0, 24)");
+    assert_eq!(desc.hwirq, 10, "hwirq is the controller-local pin");
+    assert_eq!(desc.trigger, IrqTrigger::LevelLow);
+    assert_eq!(desc.polarity, IrqPolarity::Low);
+    assert_eq!(desc.source, kirq::IrqSource::Acpi);
+    assert_eq!(desc.controller, kirq::IrqController::IoApic);
+    assert_eq!(desc.domain, Some(super::IO_APIC_DOMAIN));
+}
+
+#[def_test]
+fn gsi_selects_the_instance_that_owns_its_range() {
+    let secondary = kirq::IrqDomainId::new(87);
+    let topology = [
+        topology_entry(super::IO_APIC_DOMAIN, 0, 24),
+        topology_entry(secondary, 24, 24),
+    ];
+
+    let second = super::gsi_desc_in(&topology, 28, IrqTrigger::EdgeRising)
+        .expect("GSI 28 is the second instance's pin 4");
+    assert_eq!(second.hwirq, 4);
+    assert_eq!(second.domain, Some(secondary));
+    assert_eq!(second.polarity, IrqPolarity::High);
+
+    let first = super::gsi_desc_in(&topology, 4, IrqTrigger::EdgeRising)
+        .expect("GSI 4 is the first instance's pin 4");
+    assert_eq!(first.hwirq, 4);
+    assert_eq!(first.domain, Some(super::IO_APIC_DOMAIN));
+}
+
+#[def_test]
+fn gsi_below_every_base_or_outside_a_pin_window_has_no_descriptor() {
+    let topology = [
+        topology_entry(super::IO_APIC_DOMAIN, 24, 24),
+        topology_entry(kirq::IrqDomainId::new(87), 40, 24),
+    ];
+    assert!(super::gsi_desc_in(&topology, 10, IrqTrigger::EdgeRising).is_none());
+    assert!(
+        super::gsi_desc_in(&[topology_entry(super::IO_APIC_DOMAIN, 0, 24)], 24, IrqTrigger::EdgeRising)
+            .is_none(),
+        "the probed pin count bounds the half-open range"
+    );
+    assert!(
+        super::gsi_desc_in(&[topology_entry(super::IO_APIC_DOMAIN, 0, 32)], 32, IrqTrigger::EdgeRising)
+            .is_none(),
+        "pin 32 is outside the backend's addressable window"
+    );
+}
+
+#[def_test]
+fn gsi_before_topology_publication_has_no_descriptor() {
+    assert!(super::gsi_desc_in(&[], 10, IrqTrigger::EdgeRising).is_none());
+}
+
 #[def_test]
 fn explicit_route_outside_every_probed_instance_range_is_rejected() {
     let policy = super::IoApicInitPolicy::platform_legacy();

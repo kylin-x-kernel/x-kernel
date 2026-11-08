@@ -8,12 +8,17 @@
 //! Persistent metadata types (`BusId`, `BusTypeId`, `BusInfo`) stay in
 //! `kdevice` as part of the shared model layer.
 
-use driver_base::{DriverError, DriverResult};
+use driver_base::DriverError;
 use driver_os_api::{IrqController, IrqResource, IrqRouteDesc, ResResult};
 use kdevice::IrqTrigger;
-use khal::firmware::devices::{FwError, InterruptControllerKind, InterruptInfo};
+use khal::firmware::devices::{FwError, InterruptControllerKind};
+use pci::LegacyInterruptRoute;
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod acpi_owner;
 pub(crate) mod backend;
+#[cfg(target_arch = "x86_64")]
+mod intx;
 mod local_id;
 pub(crate) mod manager;
 pub(crate) mod pci_backend;
@@ -22,27 +27,39 @@ pub(crate) mod platform_backend;
 
 /// Map a PCI legacy INTx route.
 ///
-/// PCI firmware routing has not migrated to the host provider's firmware
-/// declarations yet: it still receives a decoded
-/// [`InterruptInfo`] from the `of` compatibility layer and guesses the
-/// controller family here. New firmware paths must use `IrqOp::map_fw_irq`,
-/// which preserves the controller node and full binding cells.
+/// The route kind decides the provider entry point: an ACPI GSI is resolved by
+/// the platform through `map_gsi`, while a DT compatibility route keeps the
+/// controller-local `IrqRouteDesc`/`map_irq` path. New firmware paths must use
+/// `IrqOp::map_fw_irq`, which preserves the controller node and full binding
+/// cells.
 fn map_pci_legacy_irq(
-    irq: InterruptInfo,
+    route: LegacyInterruptRoute,
     map_irq: impl FnOnce(IrqRouteDesc) -> ResResult<IrqResource>,
-) -> DriverResult<IrqResource> {
-    let controller = match irq.controller {
+    map_gsi: impl FnOnce(u32, IrqTrigger) -> ResResult<IrqResource>,
+) -> ResResult<IrqResource> {
+    match route {
+        LegacyInterruptRoute::Gsi { gsi, trigger } => {
+            map_gsi(gsi, irq_trigger_from_firmware(trigger))
+        }
+        LegacyInterruptRoute::Hwirq {
+            hwirq,
+            trigger,
+            controller,
+        } => map_irq(IrqRouteDesc {
+            hwirq,
+            trigger: irq_trigger_from_firmware(trigger),
+            controller: irq_controller_from_firmware(controller),
+            domain: None,
+        }),
+    }
+}
+
+fn irq_controller_from_firmware(controller: InterruptControllerKind) -> IrqController {
+    match controller {
         InterruptControllerKind::Gic => IrqController::Gic,
         InterruptControllerKind::Plic => IrqController::Plic,
         InterruptControllerKind::Unknown => IrqController::Unknown,
-    };
-    map_irq(IrqRouteDesc {
-        hwirq: irq.irq,
-        trigger: irq_trigger_from_firmware(irq.trigger),
-        controller,
-        domain: None,
-    })
-    .map_err(crate::resource::map_res_err)
+    }
 }
 
 fn irq_trigger_from_firmware(trigger: khal::firmware::devices::InterruptTrigger) -> IrqTrigger {

@@ -5,14 +5,14 @@
 //! VirtIO PCI transport integration.
 
 use driver_base::DeviceKind;
-use driver_os_api::IrqOp;
 #[cfg(any(not(target_arch = "x86_64"), unittest))]
 use driver_os_api::{IrqController, IrqRouteDesc, IrqTrigger};
+use driver_os_api::{IrqOp, IrqResource};
 use pci::PciConfigAccess;
 #[cfg(not(target_arch = "x86_64"))]
-use pci::legacy_interrupt_route;
-#[cfg(not(target_arch = "x86_64"))]
-use pci::{InterruptControllerKind, InterruptTrigger};
+use pci::{
+    InterruptControllerKind, InterruptTrigger, LegacyInterruptRoute, legacy_interrupt_route,
+};
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 use virtio_drivers::{
@@ -29,7 +29,7 @@ use virtio_drivers::{
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 #[cfg(target_arch = "x86_64")]
-use self::x86_64::{PciIrqState, PciMsixState, legacy_irq_for_bdf, setup_msix};
+use self::x86_64::{PciIrqState, PciMsixState, setup_msix};
 use crate::{VirtIoHal, as_device_kind};
 
 /// PCI transport wrapper with x86 MSI-X queue-vector setup.
@@ -253,18 +253,35 @@ impl Transport for PciTransport {
     }
 }
 
+/// Why probing a PCI VirtIO device produced no usable device.
+///
+/// The variants are deliberately driver-neutral: the caller decides how to
+/// report them and may combine `NoInterrupt` with its own discovery facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PciProbeError {
+    /// The function is not a recognized VirtIO device.
+    NotVirtio,
+    /// No usable interrupt could be established, by MSI-X or legacy INTx.
+    NoInterrupt,
+    /// The PCI transport could not be constructed.
+    Transport,
+}
+
 /// Try to probe a VirtIO PCI device from the given PCI address.
 ///
-/// If the device is recognized, returns the device type and a transport object
-/// for later operations. Otherwise, returns [`None`].
+/// If the device is recognized, returns the device type, a transport object
+/// for later operations, and the interrupt resource it will use.
 pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
     root: &mut PciRoot<C>,
     bdf: DeviceFunction,
     dev_info: &DeviceFunctionInfo,
     config: &mut PciConfigAccess,
+    intx: Option<IrqResource>,
     irq_provider: &'static dyn IrqOp,
-) -> Option<(DeviceKind, PciTransport, usize)> {
-    let dev_kind = virtio_device_type(dev_info).and_then(as_device_kind)?;
+) -> Result<(DeviceKind, PciTransport, IrqResource), PciProbeError> {
+    let dev_kind = virtio_device_type(dev_info)
+        .and_then(as_device_kind)
+        .ok_or(PciProbeError::NotVirtio)?;
 
     #[cfg(target_arch = "x86_64")]
     let (irq, msix) = {
@@ -272,21 +289,27 @@ pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
         // latency fix. Other virtio device kinds keep legacy IRQs until their
         // interrupt behavior is audited with the shared queue-vector setup.
         if dev_kind == DeviceKind::Net {
-            setup_msix::<H, C>(root, bdf, config, irq_provider)
-                .map(|(irq, msix)| (irq, Some(msix)))
-                .or_else(|| legacy_irq_for_bdf(config, bdf, irq_provider).map(|irq| (irq, None)))?
+            match setup_msix::<H, C>(root, bdf, config, irq_provider) {
+                Some((irq, msix)) => (irq, Some(msix)),
+                None => (intx.ok_or(PciProbeError::NoInterrupt)?, None),
+            }
         } else {
-            (legacy_irq_for_bdf(config, bdf, irq_provider)?, None)
+            (intx.ok_or(PciProbeError::NoInterrupt)?, None)
         }
     };
 
     #[cfg(not(target_arch = "x86_64"))]
-    let irq = { legacy_irq_for_bdf(config, bdf, irq_provider)? };
+    let irq = intx
+        .or_else(|| legacy_irq_for_bdf(config, bdf, irq_provider))
+        .ok_or(PciProbeError::NoInterrupt)?;
 
     #[cfg(not(target_arch = "x86_64"))]
     let msix = None;
 
-    let transport = PciTransport::new_with_msix::<H, C>(root, bdf, msix).ok()?;
+    let transport = PciTransport::new_with_msix::<H, C>(root, bdf, msix).map_err(|error| {
+        log::warn!("PCI virtio device at {bdf:?}: transport creation failed: {error:?}");
+        PciProbeError::Transport
+    })?;
     // Display is polled by the scanout path and registers no IRQ handler, so
     // leaving PCI INTx enabled produces an unhandled level IRQ storm. Vsock and
     // input disable it here because they install their own interrupt owner
@@ -298,8 +321,8 @@ pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
         let (_, command) = root.get_status_command(bdf);
         root.set_command(bdf, command | Command::INTERRUPT_DISABLE);
     }
-    log::info!("PCI virtio device at {:?}: IRQ = {}", bdf, irq);
-    Some((dev_kind, transport, irq))
+    log::info!("PCI virtio device at {:?}: IRQ = {}", bdf, irq.virq().raw());
+    Ok((dev_kind, transport, irq))
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -327,20 +350,26 @@ fn legacy_irq_for_bdf(
     config: &PciConfigAccess,
     bdf: DeviceFunction,
     irq_provider: &'static dyn IrqOp,
-) -> Option<usize> {
-    // Prefer firmware-described routing (device-tree / ACPI). The provider's
-    // `map_irq` translates the (hwirq, trigger, controller) route into an
-    // OS-visible virtual IRQ, replacing per-architecture IRQ numbering.
-    // descriptor constructors.
-    if let Some(route) = legacy_interrupt_route(config, bdf) {
+) -> Option<IrqResource> {
+    // Prefer firmware-described routing (device-tree / ACPI). This DT path
+    // only carries controller-local hardware IRQs; the provider's `map_irq`
+    // translates the (hwirq, trigger, controller) route into an OS-visible
+    // virtual IRQ. ACPI GSI routes are resolved on the x86 path.
+    if let Some(route) = legacy_interrupt_route(config, bdf)
+        && let LegacyInterruptRoute::Hwirq {
+            hwirq,
+            trigger,
+            controller,
+        } = route
+    {
         let desc = IrqRouteDesc {
-            hwirq: route.irq,
-            trigger: fw_trigger_to_kind(route.trigger),
-            controller: fw_controller_to_kind(route.controller),
+            hwirq,
+            trigger: fw_trigger_to_kind(trigger),
+            controller: fw_controller_to_kind(controller),
             domain: None,
         };
         if let Ok(irq) = irq_provider.map_irq(desc) {
-            return Some(irq.virq().raw());
+            return Some(irq);
         }
     }
 
@@ -358,7 +387,7 @@ fn legacy_irq_for_bdf(
                 controller: IrqController::Gic,
                 domain: None,
             };
-            Some(irq_provider.map_irq(desc).ok()?.virq().raw())
+            irq_provider.map_irq(desc).ok()
         }
         target_arch = "riscv64" => {
             let desc = IrqRouteDesc {
@@ -367,7 +396,7 @@ fn legacy_irq_for_bdf(
                 controller: IrqController::Plic,
                 domain: None,
             };
-            Some(irq_provider.map_irq(desc).ok()?.virq().raw())
+            irq_provider.map_irq(desc).ok()
         }
     }
 }
@@ -375,8 +404,8 @@ fn legacy_irq_for_bdf(
 #[cfg(any(target_arch = "loongarch64", unittest))]
 fn loongarch_legacy_irq(
     device: u8,
-    map_irq: impl FnOnce(IrqRouteDesc) -> driver_os_api::ResResult<driver_os_api::IrqResource>,
-) -> Option<usize> {
+    map_irq: impl FnOnce(IrqRouteDesc) -> driver_os_api::ResResult<IrqResource>,
+) -> Option<IrqResource> {
     let desc = IrqRouteDesc {
         hwirq: 0x10 + usize::from(device & 3),
         trigger: IrqTrigger::LevelHigh,
@@ -384,7 +413,7 @@ fn loongarch_legacy_irq(
         domain: None,
     };
     // Even an identity mapping must prepare the host's descriptor and flow.
-    Some(map_irq(desc).ok()?.virq().raw())
+    map_irq(desc).ok()
 }
 
 unittest::path_mod_test!(pci_irq_unittest, "../ut-tests/pci_irq_unittest.rs");

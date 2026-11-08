@@ -84,6 +84,17 @@ declared base and probed `pin_count`. No per-GSI map is added at runtime and
 the installed backend retains only the pin count: descriptor operations carry
 the domain (which selects the instance) and the controller-local pin, never a
 GSI.
+
+After installation `init` publishes one immutable topology entry per instance,
+`{ domain, gsi_base, pin_count }`, indexed by backend instance id. This table
+is the only source of truth for instance domains and GSI ranges; dispatch uses
+it to resolve a descriptor domain back to an instance. The allocation-free
+`x86::gsi_desc(gsi, trigger)` scans it with a checked `gsi - gsi_base`
+subtraction, bounds the offset by the probed pin count and the backend's
+32-pin window, and returns a descriptor naming the owning domain and local pin
+(`source = Acpi`). It returns `None` before publication and for any unowned or
+out-of-window GSI. Accepting a bare `IoApic` route through the generic mapping
+path is therefore unnecessary and rejected.
 Platform boot builds the configuration once in `early_driver_init`,
 derives the console descriptor through `config.legacy_irq_desc(4)`, and
 passes the same configuration to `prepare_interrupts`; it no longer

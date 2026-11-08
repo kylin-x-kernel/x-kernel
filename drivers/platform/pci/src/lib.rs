@@ -48,11 +48,25 @@ pub enum PciInitError {
     InvalidBar,
 }
 
+/// Firmware routing for one legacy PCI INTx line.
+///
+/// The variant records what kind of number firmware produced. ACPI names a
+/// platform-wide GSI that only the x86 IRQ integration can resolve; device
+/// tree compatibility routes name a controller-local hardware IRQ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LegacyInterruptRoute {
-    pub irq: usize,
-    pub trigger: fw::InterruptTrigger,
-    pub controller: fw::InterruptControllerKind,
+pub enum LegacyInterruptRoute {
+    /// ACPI GSI. The x86 platform IRQ integration resolves it.
+    Gsi {
+        gsi: u32,
+        trigger: fw::InterruptTrigger,
+    },
+    /// DT compatibility route: a controller-local hardware number.
+    /// This variant is not a neutral contract and will shrink with OF.
+    Hwirq {
+        hwirq: usize,
+        trigger: fw::InterruptTrigger,
+        controller: fw::InterruptControllerKind,
+    },
 }
 
 impl PciInitError {
@@ -188,8 +202,9 @@ impl PciBus {
         // SAFETY: `base_vaddr` maps the entire ECAM window described by `cam`.
         let mmio_cam = unsafe { MmioCam::new(base_vaddr.as_ptr(), cam) };
         let root = PciRoot::new(mmio_cam);
-        // SAFETY: `base_vaddr` maps the entire ECAM window described by `cam`.
-        let config = unsafe { PciConfigAccess::new(base_vaddr.as_ptr(), cam) };
+        // SAFETY: `base_vaddr` maps exactly `ecam_size` bytes, which is the
+        // bound passed to the checked accessor.
+        let config = unsafe { PciConfigAccess::new_bounded(base_vaddr.as_ptr(), cam, ecam_size) };
         Ok(Self {
             root,
             config,
@@ -207,8 +222,9 @@ impl PciBus {
         // SAFETY: `base_vaddr` maps the entire static ECAM window described by `cam`.
         let mmio_cam = unsafe { MmioCam::new(base_vaddr.as_ptr(), cam) };
         let root = PciRoot::new(mmio_cam);
-        // SAFETY: `base_vaddr` maps the entire static ECAM window described by `cam`.
-        let config = unsafe { PciConfigAccess::new(base_vaddr.as_ptr(), cam) };
+        // SAFETY: `base_vaddr` maps exactly `ecam_size` bytes, which is the
+        // bound passed to the checked accessor.
+        let config = unsafe { PciConfigAccess::new_bounded(base_vaddr.as_ptr(), cam, ecam_size) };
         Ok(Self {
             root,
             config,
@@ -260,12 +276,21 @@ pub fn pci_bar_allocation_range() -> Option<(u64, u64, PciConfigSource)> {
     range
 }
 
+/// Reads the Interrupt Pin register (config space offset `0x3D`).
+///
+/// The value is the encoded INTx line (`1` = INTA .. `4` = INTD); `0` means
+/// that the device does not use legacy interrupts and `0xFF` is a reserved
+/// encoding. This helper never reads the Interrupt Line register and never
+/// interprets the pin.
+pub fn interrupt_pin(config: &PciConfigAccess, bdf: DeviceFunction) -> Result<u8, PciConfigError> {
+    Ok(config.try_read(bdf, 0x3D, 1)? as u8)
+}
+
 pub fn legacy_interrupt_route(
     config: &PciConfigAccess,
     bdf: DeviceFunction,
 ) -> Option<LegacyInterruptRoute> {
-    let word = config.read_word(bdf, 0x3C);
-    let pin = ((word >> 8) & 0xff) as u8;
+    let pin = interrupt_pin(config, bdf).ok()?;
     if pin == 0 || pin == 0xff {
         log::info!(
             "PCI legacy IRQ route: bdf={:?} pin not programmed (pin={:#x})",
@@ -276,18 +301,31 @@ pub fn legacy_interrupt_route(
     }
     let irq = fw::pci_legacy_irq(bdf.bus, bdf.device, bdf.function, pin)?;
     log::info!(
-        "PCI legacy IRQ from firmware: bdf={:?} pin=INT{} irq={} trigger={:?} controller={:?}",
+        "PCI legacy IRQ from firmware: bdf={:?} pin=INT{} hwirq={} trigger={:?} controller={:?}",
         bdf,
         pin,
         irq.irq,
         irq.trigger,
         irq.controller
     );
-    Some(LegacyInterruptRoute {
-        irq: irq.irq,
+    Some(LegacyInterruptRoute::Hwirq {
+        hwirq: irq.irq,
         trigger: irq.trigger,
         controller: irq.controller,
     })
+}
+
+/// Why a checked PCI configuration access was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciConfigError {
+    /// Device or function number is outside the PCI encoding.
+    InvalidBdf,
+    /// The width or offset is outside the configuration space.
+    InvalidOffset,
+    /// The access is not one, two, or four bytes wide.
+    UnsupportedWidth,
+    /// The access falls outside the mapped configuration window.
+    OutOfWindow,
 }
 
 /// Provides read/write access to PCI configuration space registers.
@@ -304,10 +342,14 @@ pub fn legacy_interrupt_route(
 pub struct PciConfigAccess {
     mmio_base: usize,
     cam: Cam,
+    window_size: usize,
 }
 
 impl PciConfigAccess {
     /// Creates a new `PciConfigAccess` from a raw MMIO base and CAM type.
+    ///
+    /// The checked accessors treat the full CAM span as mapped. Prefer
+    /// [`Self::new_bounded`] when the mapped window covers fewer buses.
     ///
     /// # Safety
     ///
@@ -318,11 +360,125 @@ impl PciConfigAccess {
     /// wrapper, and no other abstraction may violate MMIO aliasing rules for
     /// the same config window.
     pub unsafe fn new(mmio_base: *mut u8, cam: Cam) -> Self {
+        // SAFETY: the caller provides the same mapping contract as
+        // `new_bounded`; the full CAM span is the documented bound.
+        unsafe { Self::new_bounded(mmio_base, cam, cam.size() as usize) }
+    }
+
+    /// Creates a `PciConfigAccess` that rejects accesses beyond `window_size`.
+    ///
+    /// # Safety
+    ///
+    /// The same requirements as [`Self::new`] apply. `window_size` must not
+    /// exceed the mapped window and must cover every access the caller makes.
+    pub unsafe fn new_bounded(mmio_base: *mut u8, cam: Cam, window_size: usize) -> Self {
         assert!(mmio_base as usize & 0x3 == 0);
+        assert!(window_size > 0);
         Self {
             mmio_base: mmio_base as usize,
             cam,
+            window_size,
         }
+    }
+
+    /// Returns the number of bytes in one function's configuration space.
+    const fn config_size(&self) -> usize {
+        match self.cam {
+            Cam::MmioCam => 0x100,
+            Cam::Ecam => 0x1000,
+        }
+    }
+
+    /// Validates one checked access and returns its word-aligned offset in the
+    /// mapped window.
+    fn checked_word_offset(
+        &self,
+        device_function: DeviceFunction,
+        register_offset: u16,
+        width: usize,
+    ) -> Result<usize, PciConfigError> {
+        if !device_function.valid() {
+            return Err(PciConfigError::InvalidBdf);
+        }
+        if !matches!(width, 1 | 2 | 4) {
+            return Err(PciConfigError::UnsupportedWidth);
+        }
+        let end = register_offset as usize + width;
+        if end > self.config_size() || !(register_offset as usize).is_multiple_of(width) {
+            return Err(PciConfigError::InvalidOffset);
+        }
+
+        let address = self.cam_offset(device_function, register_offset) as usize;
+        let word_end = (address & !0x3) + 4;
+        if word_end > self.window_size {
+            return Err(PciConfigError::OutOfWindow);
+        }
+        Ok(address)
+    }
+
+    /// Reads a configuration register as a zero-extended integer.
+    ///
+    /// `width` must be 1, 2, or 4 and `register_offset` must be naturally
+    /// aligned for that width.
+    pub fn try_read(
+        &self,
+        device_function: DeviceFunction,
+        register_offset: u16,
+        width: usize,
+    ) -> Result<u32, PciConfigError> {
+        let address = self.checked_word_offset(device_function, register_offset, width)?;
+        // SAFETY: validation kept the word inside the mapped window.
+        let pointer = unsafe { (self.mmio_base as *const u32).add(address >> 2) };
+        // SAFETY: the 4-byte-aligned base plus a word-aligned offset is a
+        // valid `u32`.
+        let word = unsafe { pointer.read_volatile() };
+        let shift = (register_offset as usize & 0x3) * 8;
+        Ok(match width {
+            1 => (word >> shift) & 0xff,
+            2 => (word >> shift) & 0xffff,
+            4 => word,
+            _ => 0,
+        })
+    }
+
+    /// Writes a configuration register.
+    ///
+    /// `width` must be 1, 2, or 4 and `register_offset` must be naturally
+    /// aligned for that width. The write is a single access: narrower writes do
+    /// not read-modify-write the enclosing word.
+    pub fn try_write(
+        &self,
+        device_function: DeviceFunction,
+        register_offset: u16,
+        width: usize,
+        value: u32,
+    ) -> Result<(), PciConfigError> {
+        let address = self.checked_word_offset(device_function, register_offset, width)?;
+        let byte_offset = register_offset as usize & 0x3;
+        match width {
+            1 => {
+                // SAFETY: validation kept the access inside the mapped window.
+                let pointer = unsafe { (self.mmio_base as *mut u8).add(address + byte_offset) };
+                // SAFETY: a byte access needs no alignment.
+                unsafe { pointer.write_volatile(value as u8) };
+            }
+            2 => {
+                // SAFETY: validation kept the access inside the mapped window.
+                let pointer =
+                    unsafe { (self.mmio_base as *mut u16).add((address + byte_offset) / 2) };
+                // SAFETY: the base is 4-byte aligned and the halfword offset
+                // preserves 2-byte alignment.
+                unsafe { pointer.write_volatile(value as u16) };
+            }
+            4 => {
+                // SAFETY: validation kept the access inside the mapped window.
+                let pointer = unsafe { (self.mmio_base as *mut u32).add(address >> 2) };
+                // SAFETY: the base and the word offset are 4-byte aligned.
+                unsafe { pointer.write_volatile(value) };
+            }
+            _ => return Err(PciConfigError::UnsupportedWidth),
+        }
+        Ok(())
     }
 
     /// Computes the byte offset of a register within the flat MMIO CAM window.
@@ -566,3 +722,5 @@ impl PciRangeAllocator {
         Some(adjusted & !alignment_mask)
     }
 }
+
+unittest::path_mod_test!(config_access_tests, "../ut-tests/config_access.rs");

@@ -137,6 +137,128 @@ refresh ESR (subject to the legacy maximum-LVT guard), read status, and EOI
 once. The host register-access tests verify this order and the legacy branch;
 they do not emulate the hardware mechanism that latches physical error bits.
 
+## acpi
+
+- Published version: 6.1.1
+- Upstream: https://github.com/rust-osdev/acpi
+- Source revision: `ae81c54b468decc1cb13f877fa2652ab5115426a`
+- Archive SHA-256: `b763acdc1d85c36d61acf97a59938f23202d0e8efe45e8759de10c02db242744`
+- License: `MIT/Apache-2.0` (MIT OR Apache-2.0); original license files are
+  retained.
+- Edition: 2024. Default features: `alloc`, `aml` (`aml` implies `alloc`).
+
+The import commit preserves the published archive byte-for-byte. The archive
+was independently re-fetched from crates.io and re-hashed on 2026-11-08; the
+SHA-256 above is the re-fetched value, not a copy of the previously cached
+archive. Crate consumers must alias it (`acpi-rs`) because the workspace
+already has an internal package named `acpi`. The crate is `#![no_std]` with
+`#![feature(allocator_api)]`, so it needs `RUSTC_BOOTSTRAP=1`; the repository
+`.cargo/config.toml` already sets that for all workspace and host test builds.
+
+### Source Review
+
+The local ACPI follow-up adds `sdt::borrowed`, an allocation-free strict
+slice decoder used by the kernel's early table path. It owns RSDP/root
+validation and MADT/MCFG/FADT/address-descriptor formats; the kernel supplies
+address accessibility and selects failure/compatibility policy. It reuses
+the vendor header and GAS types without requiring full-sized typed mappings
+for short tables. This does not silently change or claim to harden all older
+typed `AcpiTables` paths. Regression coverage also runs without default
+alloc/AML features. The PM1a GAS-offset fix and stricter partial-entry checks
+are behavior changes, not merely file movement.
+
+The imported tree was reviewed line by line before integration. Relevant
+findings, to be accounted for by the consumer:
+
+- `src/lib.rs` accepts the RSDT/XSDT length from firmware when enumerating
+  tables without a minimum header-length check, and `SdtHeader::validate`
+  computes the checksum over the header-declared length, which the caller must
+  have mapped. `table_entries` also assumes a region at least as large as
+  `SdtHeader`.
+- `src/sdt/srat.rs` bounds entries by the table's remaining length, but not by
+  the concrete entry type's size, and a zero-length entry does not advance the
+  cursor.
+- `src/aml/mod.rs` has unchecked arithmetic on firmware-supplied offsets
+  (`region.base + offset`, AML package lengths, multiplication for field
+  accesses), panic paths for unexpected access widths/object types,
+  `unimplemented!`/`todo!` for Bank/Index fields, and `unsafe` method/table
+  parsing over raw table bytes. The AML stream reader itself bounds-checks
+  `next`/`peek`, but package decoding is not uniformly length-checked.
+- `src/aml/pci_routing.rs` indexes `pin_package[0..3]` without checking the
+  package length, and direct GSI entries are interpreted as level/active-low.
+- `src/aml/resource.rs` uses `split_at` on declared lengths, has
+  `unimplemented!` descriptor variants, and `extended_interrupt_descriptor`
+  asserts a single interrupt.
+- `src/address.rs` maps a fixed 4 KiB SystemMemory GAS and `todo!()`s when the
+  access width cannot be decoded; unsupported address spaces are
+  `unimplemented!`.
+- No file, network, process, or environment access exists. The only compile
+  time input is `env!("CARGO_PKG_VERSION")`.
+
+The AML consumer must treat firmware tables as untrusted, pre-validate table
+sizes, and avoid the panicking `_PRT`/`_CRS` helpers noted above until their
+inputs are validated. The same constraints apply to future updates.
+
+### Local Patches
+
+Upstream 6.1.1 omits the OperationRegion base from PCI-config accesses. The
+patch adds `region.base` to the offset in the PciConfig branch of both
+`do_native_region_read` and `do_native_region_write`, so a link `_CRS` field
+over OVMF's `PIRQ` region is read at the declared offset instead of offset 0.
+Upstream fixed this in `7.0.0-pre1`
+(`386035c1badb74e8bd5f3a63b385e77c60d79b1f`) as
+`region.base as u16 + offset as u16`. Re-check on the next stable release and
+remove the override when equivalent behavior is available.
+
+The same tree also carries the host-safety prerequisites for the kernel OSL:
+
+- `Handler::map_physical_region` is fallible
+  (`Result<PhysicalMapping<Self, T>, AcpiError>`), adding
+  `AcpiError::HostMappingFailed`. Table iterators and RSDP search skip a
+  region that cannot be mapped; explicit AML table loads return the error.
+  A host never fabricates a mapping or a shared scratch buffer.
+- Table enumeration, RSDP/RSDT mapping, AML table loading and FACS access use
+  `ReadOnlyPhysicalMapping`, which implements `Deref` but not `DerefMut`.
+  Its private fields are set only through the unsafe
+  `ReadOnlyPhysicalMapping::new`, whose contract is valid, shared and readable;
+  it neither requires writability nor exclusive access, so a header mapping
+  and the later full-table mapping may legally overlap. `Handler` has a
+  separate required read-only mapping entry and a matching unmap entry, so it
+  cannot fall back to the writable constructor. `PhysicalMapping` remains
+  writable for GAS and other hardware regions; its private fields are set only
+  through the unsafe `PhysicalMapping::new`, whose contract covers pointer
+  validity, mapped length, writability and reference exclusivity. Exposing a
+  safe field constructor would let safe code turn a raw pointer plus a handler
+  clone into a writable `DerefMut` target. The OSL's writable entry accepts
+  only ACPI reclaim/NVS memory; firmware-reserved memory is read-only and is
+  accepted only by the read-only entry. Exclusivity is enforced by the host,
+  not asserted in a comment: `AcpiOs` retains the `T` object range of each live
+  writable mapping, rejects a second writable mapping that overlaps it, rejects
+  writable ranges over read-only table ranges, rejects read-only ranges over
+  live writable objects, and releases the object range from
+  `unmap_physical_region`. The vendored writable call sites are `MappedGas`,
+  which keeps its mapping private and uses volatile raw accesses instead of
+  `DerefMut`, and `wake_aps`, which holds a single local mailbox mapping that is
+  dropped before returning.
+- Native `SystemMemory`/`SystemIO`/`PCI_Config` region accesses validate the
+  full `base + offset + width` and the address-space bound before narrowing
+  to the handler's address type; a rejected access returns
+  `AmlError::RegionAccessOutOfRange` without calling the handler.
+
+Run the dependency regression on an x86_64 Linux host:
+
+```sh
+make check_acpi
+```
+
+The fixture evaluates an AML `_CRS` method backed by a PCI-config Field and
+checks that the fake `Handler` observes the region base as the PCI-config
+offset (and the write path does the same). It also evaluates a `SystemIO`
+field at the top of the 16-bit port space and checks that an access past the
+end returns `RegionAccessOutOfRange` without reaching the handler. The PCI
+fixtures must fail against the pristine import and pass with the patches; a
+successful kernel build alone does not exercise these paths.
+
 ## kvirtiodrivers
 
 - Published version: 0.13.5

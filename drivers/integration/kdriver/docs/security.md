@@ -58,8 +58,13 @@ driver-os-api-xkernel / kirq / khal / kdma / memspace / driver crates
   authoritative metadata are exposed; mapping errors never fall back to a raw
   hardware number, and an unreadable declaration is an enumeration error, not
   an absent IRQ. Platform mapping failure prevents device publication.
-  Optional PCI INTx mapping (still on the legacy `map_irq` route) is logged and
-  leaves no INTx resource, without excluding later MSI/MSI-X setup. Mapping
+  PCI INTx mapping failures are logged by the PCI INTx resolver and leave no
+  INTx resource, without excluding later MSI/MSI-X setup. The resolution
+  result is stored on the device as the driver-neutral `IntxRouteStatus`; an
+  INTx-only probe that reports `NoInterrupt` fails with an error derived from
+  that status instead of polling, while a transport-creation failure remains a
+  transport error. On x86 the route comes from the published `_PRT` table;
+  `pci` reads Interrupt Pin (`0x3D`) and never Interrupt Line. Mapping
   preparation neither installs a handler nor activates hardware. This adapter
   does not dispose a shared route after a failed driver probe.
 - Firmware DMA declarations are untrusted input. `firmware_dma` requires an

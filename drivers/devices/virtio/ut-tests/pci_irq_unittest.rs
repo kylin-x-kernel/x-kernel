@@ -23,7 +23,7 @@ fn loongarch_intx_maps_each_slot_and_returns_provider_virq() {
         assert_eq!(desc.controller, IrqController::LoongArchExtioi);
         assert_eq!(desc.trigger, IrqTrigger::LevelHigh);
         assert_eq!(desc.domain, None);
-        assert_eq!(result, Some(virq));
+        assert_eq!(result.map(|resource| resource.virq().raw()), Some(virq));
     }
 }
 

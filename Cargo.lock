@@ -32,8 +32,23 @@ dependencies = [
 name = "acpi"
 version = "0.3.0-dev"
 dependencies = [
+ "acpi 6.1.1",
  "kaddr_layout",
  "lazyinit",
+ "log",
+ "unittest",
+]
+
+[[package]]
+name = "acpi"
+version = "6.1.1"
+dependencies = [
+ "bit_field",
+ "bitflags 2.13.2",
+ "byteorder",
+ "log",
+ "pci_types",
+ "spinning_top",
 ]
 
 [[package]]
@@ -1246,17 +1261,22 @@ dependencies = [
 name = "driver-os-api-xkernel"
 version = "0.3.0-dev"
 dependencies = [
+ "acpi 6.1.1",
  "driver-os-api",
  "fwnode",
+ "irq-driver",
  "kalloc",
  "kdma",
  "khal",
  "kirq",
+ "kspin",
  "ktime_types",
  "log",
  "memaddr",
  "memspace",
+ "pci",
  "unittest",
+ "x86_64",
 ]
 
 [[package]]
@@ -2041,7 +2061,7 @@ name = "irq-driver"
 version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
- "acpi",
+ "acpi 0.3.0-dev",
  "arm-gic-driver",
  "fwnode",
  "kalloc-types",
@@ -2252,7 +2272,7 @@ dependencies = [
 name = "kcpu_id_map"
 version = "0.3.0-dev"
 dependencies = [
- "acpi",
+ "acpi 0.3.0-dev",
  "cpumask",
  "kaddr_layout",
  "kbuild_config",
@@ -2325,6 +2345,7 @@ dependencies = [
 name = "kdriver"
 version = "0.3.0-dev"
 dependencies = [
+ "acpi 0.3.0-dev",
  "block",
  "cfg-if",
  "char_driver",
@@ -2602,7 +2623,7 @@ dependencies = [
 name = "khal"
 version = "0.3.0-dev"
 dependencies = [
- "acpi",
+ "acpi 0.3.0-dev",
  "bitflags 2.13.2",
  "boot-info",
  "cfg-if",
@@ -3017,7 +3038,7 @@ dependencies = [
 name = "kplat-x86_64"
 version = "0.3.0-dev"
 dependencies = [
- "acpi",
+ "acpi 0.3.0-dev",
  "boot-info",
  "console-driver",
  "irq-driver",
@@ -4285,6 +4306,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pci_types"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0c2a105c657261a938ff68ee231c199a3d80eef33976004829de761ef5b1a9b"
+dependencies = [
+ "bit_field",
+ "bitflags 2.13.2",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5392,6 +5423,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "spinning_top"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cf02766a1eb909bc7653557c66b384e44edc3ad979e6257c6173c65ea51bc7d"
+dependencies = [
+ "lock_api",
 ]
 
 [[package]]

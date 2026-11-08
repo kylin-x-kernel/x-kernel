@@ -16,7 +16,12 @@ log.workspace = true
 cpumask = { version = "0.1" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-acpi = { workspace = true }
+# Cargo cannot override default-features on an inherited workspace dependency.
+# This explicit path entry mirrors the workspace path while keeping the
+# post-allocator interpreter feature off: this crate is reachable from the
+# no-allocator x86 boot stub through boot-info and only uses the early static
+# table path.
+acpi = { path = "../../drivers/firmware/acpi", default-features = false }
 
 [target.'cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64"))'.dependencies]
 of = { workspace = true }

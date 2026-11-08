@@ -13,7 +13,7 @@ members = [
     "util/kiface/crates/cpu-api",
     "util/kiface/crates/task-wait-api",
     "core/kpm",
-    "util/fwnode",
+    "drivers/firmware/fwnode",
     # kernel entry
     "entry",
     # boot and loader
@@ -32,6 +32,7 @@ exclude = [
     "vendor/uart_16550",
     "vendor/kvirtiodrivers",
     "vendor/arm-gic-driver",
+    "vendor/acpi",
     # platform-specific boot code that is not intended to be built as part of the main workspace
     "boot/x86_64-linuxboot",
     # build config tools (std crates, not part of the no_std kernel workspace)
@@ -54,6 +55,8 @@ uart_16550 = { path = "vendor/uart_16550" }
 kvirtiodrivers = { path = "vendor/kvirtiodrivers" }
 # Locally maintained GIC dependency; provenance and attribution: vendor/README.md.
 arm-gic-driver = { path = "vendor/arm-gic-driver" }
+# AML interpreter with the PCI-config region-base patch; provenance: vendor/README.md.
+acpi = { path = "vendor/acpi" }
 
 [workspace.metadata.cargo-shear]
 # unittest is used only by cfg(unittest) tests under ut-tests; cargo-shear
@@ -245,7 +248,7 @@ hwrng = { path = "drivers/contracts/hwrng" }
 char_driver = { path = "drivers/contracts/char" }
 display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }
-fwnode = { path = "util/fwnode" }
+fwnode = { path = "drivers/firmware/fwnode" }
 driver_os_api = { path = "drivers/base/os-api", package = "driver-os-api" }
 irq_types = { path = "arch/irq-types", package = "irq-types" }
 kclass = { path = "drivers/contracts/kclass" }
@@ -266,9 +269,10 @@ kdevice_uevent = { path = "drivers/integration/kdevice-uevent", package = "kdevi
 aarch64-pmuv3 = { path = "drivers/platform/aarch64-pmuv3" }
 console_driver = { path = "drivers/platform/console", package = "console-driver" }
 pci = { path = "drivers/platform/pci" }
-rs_fdtree = { path = "drivers/platform/rs-fdtree" }
-acpi = { path = "drivers/platform/acpi" }
-of = { path = "drivers/platform/of" }
+rs_fdtree = { path = "drivers/firmware/rs-fdtree" }
+acpi = { path = "drivers/firmware/acpi" }
+acpi-rs = { package = "acpi", version = "=6.1.1", default-features = false }
+of = { path = "drivers/firmware/of" }
 dice_driver = { path = "drivers/platform/dice", package = "dice-driver" }
 irq_driver = { path = "drivers/platform/irq", package = "irq-driver" }
 rtc_driver = { path = "drivers/platform/rtc", package = "rtc-driver" }

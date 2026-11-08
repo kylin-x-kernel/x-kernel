@@ -10,7 +10,7 @@ use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{
     MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice, NetRxScheduler,
 };
-use driver_os_api::{DevIrq, IrqEvent, IrqOp, IrqResource, IrqTrigger};
+use driver_os_api::{DevIrq, IrqEvent, IrqOp, IrqResource};
 use kspin::{SpinNoIrq, SpinNoPreempt, static_lock};
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 
@@ -102,10 +102,11 @@ fn handle_virtio_net_irq(irq: usize) -> IrqEvent {
 
 fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: usize>(
     irq_provider: &'static dyn IrqOp,
-    irq: usize,
+    irq: IrqResource,
     inner: &Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
     rx_scheduler: &Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
 ) -> DriverResult<usize> {
+    let raw_irq = irq.virq().raw();
     let handle_id = NEXT_IRQ_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
     NET_IRQ_HANDLES
         .lock()
@@ -113,16 +114,15 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
             inner: inner.clone(),
             rx_scheduler: rx_scheduler.clone(),
             id: handle_id,
-            irq,
+            irq: raw_irq,
         }));
 
-    if REGISTERED_NET_IRQS.lock().insert(irq) {
-        let resource = IrqResource::plain(driver_os_api::Virq::new(irq), IrqTrigger::Unknown(0));
-        match DevIrq::request_with(irq_provider, resource, Arc::new(handle_virtio_net_irq)) {
+    if REGISTERED_NET_IRQS.lock().insert(raw_irq) {
+        match DevIrq::request_with(irq_provider, irq, Arc::new(handle_virtio_net_irq)) {
             Ok(guard) => NET_IRQ_GUARDS.lock().push(guard),
             Err(_) => {
                 remove_virtio_net_irq_handle(handle_id);
-                REGISTERED_NET_IRQS.lock().remove(&irq);
+                REGISTERED_NET_IRQS.lock().remove(&raw_irq);
                 return Err(DriverError::ResourceBusy);
             }
         }
@@ -229,9 +229,10 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     /// # Arguments
     ///
     /// - `transport` - The VirtIO transport (MMIO or PCI) for this device.
-    /// - `irq` - Optional IRQ number. If provided, an interrupt handler is
-    ///   registered to acknowledge device interrupts. If omitted, `recv()`
-    ///   acknowledges pending interrupts while polling the receive queue.
+    /// - `irq` - Optional mapped IRQ resource. If provided, an interrupt
+    ///   handler is registered to acknowledge device interrupts. If omitted,
+    ///   `recv()` acknowledges pending interrupts while polling the receive
+    ///   queue.
     ///
     /// # Errors
     ///
@@ -246,7 +247,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     /// expected sequential index (asserts internal consistency).
     pub fn try_new(
         transport: T,
-        irq: Option<usize>,
+        irq: Option<IrqResource>,
         irq_provider: Option<&'static dyn IrqOp>,
     ) -> DriverResult<Self> {
         // 0. Create a new driver instance.
@@ -290,15 +291,16 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
 
         let mut irq_handle_id = None;
         let rx_scheduler = Arc::new(SpinNoIrq::new(None));
-        if let Some(irq) = irq {
+        if let Some(resource) = irq {
             let irq_provider = irq_provider.ok_or(DriverError::InvalidInput)?;
             irq_handle_id = Some(register_virtio_net_irq(
                 irq_provider,
-                irq,
+                resource,
                 &inner,
                 &rx_scheduler,
             )?);
         }
+        let irq = irq.map(|resource| resource.virq().raw());
 
         // 3. Cache immutable device properties.
         let mac = MacAddress(inner.lock().mac_address());

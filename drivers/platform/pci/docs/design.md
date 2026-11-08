@@ -27,9 +27,20 @@ and MSI-X capability setup (`msix` module).
   naturally aligned) plus `pci_bar_allocation_range` source resolution
   (firmware range → kbuild `PCI_RANGES[1]`), and `configure_device` to
   assign unassigned memory BARs and enable IO/MEM/BUS-master command bits.
-- Resolve legacy interrupts: `legacy_interrupt_route` reads the interrupt
-  pin from config space offset `0x3C` and asks the firmware description
-  (`fw::pci_legacy_irq`) for the route, yielding `LegacyInterruptRoute`.
+- Interrupt Pin: `interrupt_pin` reads only the one-byte Interrupt Pin
+  register at config space offset `0x3D` through `try_read`, returning the PCI
+  encoding (`1`..=`4`, `0`, `0xff`) without interpreting it. It never reads
+  Interrupt Line (`0x3C`).
+- Resolve legacy interrupts (non-x86): `legacy_interrupt_route` uses
+  `interrupt_pin` and asks the firmware description (`fw::pci_legacy_irq`) for
+  the route, yielding `LegacyInterruptRoute`. The type keeps route kinds
+  explicit: `Gsi` is an ACPI platform-wide number resolved by the x86 IRQ
+  integration, while `Hwirq` is a DT compatibility route carrying a
+  controller-local number and controller family. DT production wraps
+  `fw::pci_legacy_irq` as `Hwirq`. The ACPI `Gsi` producer is assembled in
+  `kdriver`: `bus::acpi_owner` publishes the `_PRT` lookup, and `bus::intx`
+  consumes this crate's `interrupt_pin` plus that lookup before mapping the
+  route through the provider. `pci` does not create an ACPI context.
 - MSI-X support in `msix`: capability discovery (`find_msix_capability`),
   layout validation against BAR bounds (`validate_msix_layout`),
   table mapping and entry programming on x86_64 (`MsixTable`,

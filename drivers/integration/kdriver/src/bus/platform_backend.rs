@@ -160,6 +160,7 @@ impl PlatformBackend {
                     transport,
                     resources,
                     dma,
+                    None,
                 ) {
                     log::warn!(
                         "platform: failed to register {:?} from {:?}: {:?}",

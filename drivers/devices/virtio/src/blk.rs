@@ -78,7 +78,7 @@ fn vd_name(index: u32) -> String {
 /// # Example
 ///
 /// ```ignore
-/// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
+/// let (kind, transport, irq) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
 /// let blk = Arc::new(VirtIoBlkDev::<HalImpl, _>::try_new(transport)?);
 /// let disk = block::Gendisk::alloc_mq("vda".into(), 253, 0, 1, blk)?;
 /// let mut buf = [0u8; 512];

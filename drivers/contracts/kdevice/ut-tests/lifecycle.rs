@@ -9,7 +9,7 @@ use driver_os_api::{DmaInfo, DmaWindow};
 use unittest::{assert_eq, def_test};
 
 use super::*;
-use crate::{DeviceDriver, DeviceState, PlatformIdentity};
+use crate::{DeviceDriver, DeviceState, IntxRouteStatus, PlatformIdentity};
 
 struct MatchingDriver;
 
@@ -57,6 +57,7 @@ fn test_resolved_dma_view_reaches_descriptor_and_device() {
         None,
         ResourceSet::new(),
         Some(info),
+        None,
     )
     .unwrap();
     assert_eq!(desc.dma(), Some(info));
@@ -68,6 +69,35 @@ fn test_resolved_dma_view_reaches_descriptor_and_device() {
     assert_eq!(records[0].dma, Some(info));
     let device = crate::find_device(records[0].id).unwrap();
     assert_eq!(device.dma(), Some(info));
+}
+
+#[def_test(serial)]
+fn test_intx_status_reaches_descriptor_and_device() {
+    let bus = reset_model();
+    let desc = device_desc_add_with_dma(
+        bus.id(),
+        None,
+        DeviceLocation::PlatformStatic { id: 5 },
+        DiscoveryOrigin::PlatformStatic,
+        DeviceIdentity::Platform(PlatformIdentity {
+            alias: Some("matched"),
+            firmware_id: None,
+        }),
+        None,
+        ResourceSet::new(),
+        None,
+        Some(IntxRouteStatus::NotConnected),
+    )
+    .unwrap();
+    assert_eq!(desc.intx_route(), Some(IntxRouteStatus::NotConnected));
+
+    register_driver_object(Arc::new(MatchingDriver));
+
+    let records = crate::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].intx, Some(IntxRouteStatus::NotConnected));
+    let device = crate::find_device(records[0].id).unwrap();
+    assert_eq!(device.intx_route(), Some(IntxRouteStatus::NotConnected));
 }
 
 #[def_test(serial)]

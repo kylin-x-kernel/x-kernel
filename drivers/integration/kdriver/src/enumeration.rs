@@ -77,18 +77,19 @@ impl EnumerationContext {
         resources: ResourceSet,
     ) -> DriverResult<DeviceDescId> {
         self.register_device_with_dma(
-            bus_id, parent, location, origin, identity, transport, resources, None,
+            bus_id, parent, location, origin, identity, transport, resources, None, None,
         )
     }
 
-    /// Same as [`register_device_with_parent`], plus a resolved DMA view.
+    /// Same as [`register_device_with_parent`], plus DMA and INTx discovery
+    /// facts.
     ///
-    /// `dma` is `None` when the backend established no view; it is never a
-    /// substitute for an explicit identity or coherent policy.
+    /// `dma` and `intx` are `None` when the backend established no such fact;
+    /// they are never substitutes for an explicit identity or coherent policy.
     #[expect(
         clippy::too_many_arguments,
         reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Enumeration supplies the \
-                  complete device descriptor, parent and DMA view in one registration"
+                  complete device descriptor, parent, DMA view and INTx status in one registration"
     )]
     pub fn register_device_with_dma(
         &mut self,
@@ -100,9 +101,10 @@ impl EnumerationContext {
         transport: Option<TransportInfo>,
         resources: ResourceSet,
         dma: Option<DmaInfo>,
+        intx: Option<kdevice::IntxRouteStatus>,
     ) -> DriverResult<DeviceDescId> {
         let desc = kdevice::device_desc_add_with_dma(
-            bus_id, parent, location, origin, identity, transport, resources, dma,
+            bus_id, parent, location, origin, identity, transport, resources, dma, intx,
         )?;
         let id = desc.id();
         self.registered_count += 1;

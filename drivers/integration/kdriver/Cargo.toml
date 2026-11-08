@@ -136,5 +136,8 @@ unittest.workspace = true
 
 kbuild_config = { workspace = true }
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+acpi = { workspace = true }
+
 [lints]
 workspace = true

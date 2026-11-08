@@ -50,7 +50,12 @@ sentinel. `map_fw_irq` is the firmware path: it carries the exact controller
 firmware node and the complete binding cells, and the provider maps them through
 the host IRQ core. A provider must not re-decode cells, guess a controller
 family, or fall back to the raw firmware number; its default is Unsupported.
-`map_irq` remains the family-and-hwirq route path for PCI legacy INTx.
+`map_irq` remains the family-and-hwirq route path for PCI legacy INTx and other
+controller-local routes; `IrqRouteDesc.hwirq` is never a GSI. `map_gsi` resolves
+a firmware-described GSI through the platform's published controller topology
+into the owning domain and local pin; an unowned GSI is InvalidResource, never
+an identity mapping. Providers without a GSI namespace keep the Unsupported
+default.
 Registration and line control resolve both resource shapes by logical number:
 the IRQ core descriptor created by the mapping is authoritative, so retained
 route metadata is never rebuilt into a second descriptor.

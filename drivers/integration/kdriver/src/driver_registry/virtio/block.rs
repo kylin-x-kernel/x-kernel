@@ -8,7 +8,7 @@ use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 
 use block::{Gendisk, GendiskRef, completion::BlockCompletionOperations};
 use driver_base::{Device, DriverError, DriverResult};
-use driver_os_api::{DevIrq, IrqHandler, IrqOp, IrqResource, IrqTrigger};
+use driver_os_api::{DevIrq, IrqHandler, IrqOp, IrqResource};
 use kdevice::{DeviceId, DeviceObject};
 use ksync::{Mutex, static_lock};
 use virtio::{Transport, VirtIoBlkDev, VirtIoHal};
@@ -63,18 +63,11 @@ impl<H: VirtIoHal, T: Transport> Drop for BlockActivation<H, T> {
 pub(super) fn activate<T: Transport + 'static>(
     parent: Arc<DeviceObject>,
     transport: T,
-    irq: Option<usize>,
+    irq: Option<IrqResource>,
 ) -> DriverResult<()> {
     let irq = irq.ok_or(DriverError::InvalidInput)?;
     let device = Arc::new(VirtIoBlkDev::<VirtIoHalImpl, T>::try_new_irq(transport)?);
-    // PCI/MMIO discovery already mapped this virtual IRQ. A plain resource
-    // reuses that mapping; Unknown does not replace its trigger/polarity.
-    activate_device(
-        parent,
-        device,
-        IrqResource::plain(driver_os_api::Virq::new(irq), IrqTrigger::Unknown(0)),
-        crate::resource::resource_provider(),
-    )
+    activate_device(parent, device, irq, crate::resource::resource_provider())
 }
 
 fn activate_device<H: VirtIoHal + 'static, T: Transport + 'static>(

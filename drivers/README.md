@@ -54,10 +54,18 @@ These crates or modules adapt the portable driver contracts to X-Kernel:
 | `kdevice-uevent` | Adapts ordered `kdevice` node lifecycle events to X-Kernel kobject netlink messages and shared sysfs formatting. |
 | `irq-driver`, `timer-driver`, `rtc-driver`, `x86-apic`, `aarch64-pmuv3` | Host/platform driver integration pieces. |
 | `console-driver` | Boot and console integration; ordinary reusable serial drivers should use driver contracts instead. |
-| `pci`, `of`, `acpi`, `dice-driver`, `rs_fdtree` | Firmware, bus, and boot-discovery support. Keep host-specific conversions in adapter code, not in `kdevice` or portable drivers. |
+| `pci`, `dice-driver` | Bus and boot-discovery integration. Keep host-specific conversions in adapter code, not in `kdevice` or portable drivers. |
 
 Adapter crates may depend on host-kernel implementation crates, but should do so
 only to implement or consume driver subsystem contracts.
+
+## Firmware Descriptions
+
+`firmware/` groups `fwnode`, `rs_fdtree`, `acpi`, and the transitional `of`
+compatibility layer. These are not collectively host adapters: contracts,
+description interpretation, and host access have distinct responsibilities.
+See [Firmware Description Layers](firmware/README.md) for their dependency
+direction and the placement of ACPI host services.
 
 ## Portable Concrete Drivers
 

@@ -7,7 +7,7 @@
 //! This module owns the immutable description of the IO-APIC topology and the
 //! once-only transition from firmware declarations to installed controllers.
 //! Runtime descriptor operations live in the parent module's `runtime`
-//! submodule and read only the published domain table.
+//! submodule and read only the published topology table.
 
 use fwnode::FwSource;
 use kerrno::{KError, KResult};
@@ -408,39 +408,70 @@ pub(crate) fn validate_legacy_routes(
     Ok(())
 }
 
-/// Domains of the installed controller instances, indexed by instance id.
+/// One installed controller instance in the published topology.
 ///
-/// Published once after every controller is installed. Dispatch reads this
-/// immutable table without a lock; the primary instance is the well-known
-/// [`IO_APIC_DOMAIN`].
-static IO_APIC_DOMAINS: LazyInit<[Option<kirq::IrqDomainId>; MAX_IO_APICS]> = LazyInit::new();
+/// `gsi_base` and `pin_count` describe the half-open GSI range
+/// `[gsi_base, gsi_base + pin_count)` resolved by [`gsi_desc`]. `pin_count`
+/// is the probed hardware size, not the backend's addressable pin bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IoApicTopologyEntry {
+    pub(crate) domain: kirq::IrqDomainId,
+    pub(crate) gsi_base: u32,
+    pub(crate) pin_count: u16,
+}
+
+/// Installed controller topology, indexed by backend instance id.
+///
+/// Published once after every controller is installed. Dispatch and GSI
+/// resolution read this immutable table without a lock; it is the only
+/// source of truth for instance domains and GSI ranges.
+static IO_APIC_TOPOLOGY: LazyInit<[Option<IoApicTopologyEntry>; MAX_IO_APICS]> = LazyInit::new();
 
 /// Resolves a descriptor domain to its controller instance.
-///
-/// The primary instance always keeps [`IO_APIC_DOMAIN`] and is installed
-/// first, so it resolves even before the published table is available.
-/// Additional instances resolve through the table installed by [`init`].
 pub(crate) fn instance_for_domain(domain: kirq::IrqDomainId) -> Option<IoApicInstanceId> {
-    if domain == IO_APIC_DOMAIN {
-        return IoApicInstanceId::try_from_usize(0);
-    }
-    let index = IO_APIC_DOMAINS
+    let index = IO_APIC_TOPOLOGY
         .get()?
         .iter()
-        .position(|candidate| *candidate == Some(domain))?;
+        .position(|entry| entry.is_some_and(|entry| entry.domain == domain))?;
     IoApicInstanceId::try_from_usize(index)
 }
 
 /// Returns the published domain of one installed controller instance.
-///
-/// Before publication only the primary instance is known, matching the fact
-/// that it is installed first and keeps [`IO_APIC_DOMAIN`].
 pub(crate) fn domain_for_instance(instance: IoApicInstanceId) -> Option<kirq::IrqDomainId> {
-    if let Some(domains) = IO_APIC_DOMAINS.get() {
-        let domain = domains.get(instance.as_usize())?.as_ref()?;
-        return Some(*domain);
-    }
-    (instance.as_usize() == 0).then_some(IO_APIC_DOMAIN)
+    IO_APIC_TOPOLOGY
+        .get()?
+        .get(instance.as_usize())?
+        .map(|entry| entry.domain)
+}
+
+/// Resolves a firmware-described GSI to an IO-APIC descriptor.
+///
+/// Scans the published topology, performs the checked subtraction
+/// `gsi - gsi_base`, and bounds the offset by the probed pin count. The
+/// returned descriptor names the owning instance's domain and the
+/// controller-local pin as `hwirq`; it never carries the GSI as a hardware
+/// IRQ. Returns `None` before publication, for a GSI no instance owns, or for
+/// a pin outside the probed window. Allocation-free and bounded by
+/// [`MAX_IO_APICS`].
+pub fn gsi_desc(gsi: u32, trigger: IrqTrigger) -> Option<kirq::IrqDesc> {
+    gsi_desc_in(IO_APIC_TOPOLOGY.get()?, gsi, trigger)
+}
+
+/// Topology-injected [`gsi_desc`] used by production and tests.
+pub(crate) fn gsi_desc_in(
+    topology: &[Option<IoApicTopologyEntry>],
+    gsi: u32,
+    trigger: IrqTrigger,
+) -> Option<kirq::IrqDesc> {
+    let (entry, pin) = topology.iter().flatten().find_map(|entry| {
+        x86_apic::pin_for_gsi_in_range(gsi, entry.gsi_base, entry.pin_count).map(|pin| (entry, pin))
+    })?;
+    Some(
+        kirq::IrqDesc::new(pin.as_usize(), trigger)
+            .with_source(kirq::IrqSource::Acpi)
+            .with_controller(kirq::IrqController::IoApic)
+            .with_domain(entry.domain),
+    )
 }
 
 /// Initializes the boot CPU's Local APIC and every declared IO-APIC.
@@ -501,11 +532,15 @@ pub fn init(config: X86IrqInitConfig) -> KResult<()> {
         }
     }
 
-    let mut domains = [None; MAX_IO_APICS];
+    let mut topology = [None; MAX_IO_APICS];
     for (index, instance) in config.controllers().enumerate() {
-        domains[index] = Some(instance.domain);
+        topology[index] = Some(IoApicTopologyEntry {
+            domain: instance.domain,
+            gsi_base: instance.declaration.gsi_base,
+            pin_count: capabilities[index].pin_count,
+        });
     }
-    IO_APIC_DOMAINS.init_once(domains);
+    IO_APIC_TOPOLOGY.init_once(topology);
     Ok(())
 }
 

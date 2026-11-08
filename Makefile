@@ -393,6 +393,12 @@ check_uart:
 	@cargo test --manifest-path vendor/arm_pl011/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-uart-host --lib --locked
 	@cargo test --manifest-path vendor/uart_16550/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-uart-host --lib --locked
 
+# The AML fixture reads and writes a PCI-config OperationRegion through _CRS
+# and _SRS; it must observe the region base, not offset 0.
+.PHONY: check_acpi
+check_acpi:
+	@RUSTC_BOOTSTRAP=1 RUSTFLAGS='' CARGO_ENCODED_RUSTFLAGS='' cargo test --manifest-path vendor/acpi/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-acpi-host --lib --locked
+
 # GICv3 is compiled only on AArch64 in the pinned upstream release.
 GIC_TEST_TARGET ?= aarch64-unknown-linux-gnu
 .PHONY: check_gic

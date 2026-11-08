@@ -7,7 +7,9 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use driver_os_api::{IrqHandler, IrqHandlerToken, IrqResource, MsiMessage, ResError, Virq};
+use driver_os_api::{
+    IrqHandler, IrqHandlerToken, IrqResource, IrqTrigger, MsiMessage, ResError, Virq,
+};
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;

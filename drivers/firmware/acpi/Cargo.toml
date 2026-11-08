@@ -1,0 +1,26 @@
+[package]
+name = "acpi"
+description = "ACPI table access helpers."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+default = ["interpreter"]
+# The post-allocator AML context and PRT query. Standalone boot helpers depend
+# on this crate with `default-features = false`; they only use the early static
+# table path and must not link the interpreter or its allocator-backed types.
+interpreter = ["acpi-rs/aml", "dep:log", "dep:unittest"]
+
+[dependencies]
+acpi-rs.workspace = true
+kaddr_layout = { workspace = true }
+lazyinit.workspace = true
+log = { workspace = true, optional = true }
+unittest = { workspace = true, optional = true }
+
+[lints]
+workspace = true

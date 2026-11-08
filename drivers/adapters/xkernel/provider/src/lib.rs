@@ -14,11 +14,14 @@
 
 extern crate alloc;
 
+#[cfg(target_arch = "x86_64")]
+pub mod acpi_osl;
 mod device_dma;
 mod dma;
 mod irq;
 mod memory;
 mod mmio;
+mod port;
 mod time;
 
 pub use device_dma::XKernelDeviceDma;

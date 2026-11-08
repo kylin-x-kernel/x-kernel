@@ -25,5 +25,14 @@ memaddr = { workspace = true }
 memspace = { workspace = true }
 unittest = { workspace = true }
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+acpi-rs = { package = "acpi", version = "=6.1.1", default-features = false, features = [
+    "aml",
+] }
+irq_driver = { workspace = true }
+kspin = { workspace = true }
+pci = { workspace = true }
+x86_64 = { workspace = true }
+
 [lints]
 workspace = true

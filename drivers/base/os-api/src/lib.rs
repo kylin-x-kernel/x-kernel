@@ -19,6 +19,7 @@ mod error;
 mod irq;
 mod memory;
 mod mmio;
+mod port;
 mod time;
 
 /// A provider-supplied cleanup action, invoked exactly once.
@@ -38,6 +39,7 @@ pub use irq::{
 };
 pub use memory::{CpuBuffer, CpuMemoryOp};
 pub use mmio::{IoMap, IoPortRange, MmioMapping, MmioOp, MmioRegion};
+pub use port::{PortOp, PortWidth};
 pub use time::TimeOp;
 
 unittest::path_mod_test!(tests, "../ut-tests/guards.rs");

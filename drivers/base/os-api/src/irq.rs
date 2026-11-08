@@ -223,9 +223,12 @@ pub trait IrqOp: Send + Sync {
 
     /// Translate a discovered interrupt route into an OS-visible IRQ resource.
     ///
-    /// Legacy route mapping by controller family and hardware number. New
-    /// firmware consumers use [`Self::map_fw_irq`], which preserves the exact
-    /// controller node and full binding cells.
+    /// Legacy route mapping by controller family and hardware number.
+    /// [`IrqRouteDesc::hwirq`] is always controller-local; an ACPI route
+    /// carrying a global system interrupt (GSI) must go through
+    /// [`Self::map_gsi`] instead. New firmware consumers use
+    /// [`Self::map_fw_irq`], which preserves the exact controller node and full
+    /// binding cells.
     ///
     /// Default: treat the hardware number as the OS-visible number with no
     /// translation.
@@ -237,6 +240,21 @@ pub trait IrqOp: Send + Sync {
             route.domain,
             route.hwirq,
         ))
+    }
+
+    /// Resolve a firmware-described global system interrupt to an OS-visible
+    /// IRQ resource.
+    ///
+    /// A GSI is a platform-wide number, not a controller-local hardware IRQ.
+    /// The provider resolves it through the host's published controller
+    /// topology into the owning domain and local pin, then maps that
+    /// descriptor like any other route. A GSI that no installed controller
+    /// owns is an invalid resource, never an identity mapping.
+    ///
+    /// Default: unsupported; providers without a GSI namespace return this.
+    fn map_gsi(&self, gsi: u32, trigger: IrqTrigger) -> ResResult<IrqResource> {
+        let _ = (gsi, trigger);
+        Err(ResError::Unsupported)
     }
 
     /// Allocate a PCI MSI-X interrupt resource.

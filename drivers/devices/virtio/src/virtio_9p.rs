@@ -38,7 +38,7 @@ pub trait Virtio9pDevice: Device {
 ///
 /// ```ignore
 /// use virtio::Virtio9pDevice;
-/// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
+/// let (kind, transport, irq) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
 /// let mut dev = VirtIo9pDev::<HalImpl, _>::try_new(transport)?;
 /// let tag = dev.mount_tag();
 /// let mut resp = [0u8; 256];

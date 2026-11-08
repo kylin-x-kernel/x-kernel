@@ -37,9 +37,15 @@ resolve by logical number for registration and line control, so the stored
 descriptor is never bypassed or duplicated.
 
 PlainVirq remains a handle-only lookup. Legacy `map_irq` (PCI INTx) retains its
-GIC/PLIC/IO-APIC root fallback: an explicit domain always wins, only a missing
-domain permits a root, and no root is invented for Unknown, MSI or
-LoongArchExtioi. That family-based path is not used for firmware declarations.
+GIC/PLIC root fallback: an explicit domain always wins, only a missing domain
+permits a root, and no root is invented for Unknown, MSI, LoongArchExtioi or
+IO-APIC. A bare IO-APIC route is rejected as InvalidResource because `hwirq`
+would be a controller-local pin with no controller to name it; ACPI GSI routes
+must use `map_gsi`. On x86, `map_gsi` resolves through
+`irq_driver::x86::gsi_desc`, maps the exact instance domain and local pin, and
+translates a missing GSI to InvalidResource. Other architectures return the
+Unsupported default. That family-based path is not used for firmware
+declarations.
 
 Requests return a shared action token. Regular-action release remains supported
 for compatibility, but is not a fallback for failed shared-action release.

@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use driver_os_api::{IrqEvent, IrqHandlerToken, ResError, ResResult};
+use driver_os_api::{IrqEvent, IrqHandlerToken, IrqTrigger, ResError, ResResult};
 use kdevice::{
     BusId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity, ResourceSet,
 };

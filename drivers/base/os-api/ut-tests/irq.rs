@@ -156,6 +156,14 @@ impl IrqOp for MockIrqProvider {
 }
 
 #[def_test]
+fn gsi_mapping_defaults_to_unsupported() {
+    assert_eq!(
+        MockIrqProvider.map_gsi(10, crate::IrqTrigger::LevelLow),
+        Err(ResError::Unsupported)
+    );
+}
+
+#[def_test]
 fn irq_mapping_retains_shared_vocabulary_and_origin() {
     let trigger: crate::IrqTrigger = irq_types::IrqTrigger::Unknown(0x80);
     let controller: crate::IrqController = irq_types::IrqController::Gic;

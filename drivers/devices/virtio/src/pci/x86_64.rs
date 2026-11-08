@@ -5,7 +5,7 @@
 //! x86 PCI interrupt setup and transport-owned MSI-X allocation cleanup.
 //! IRQ actions and device quiescence remain the device owner's responsibility.
 
-use driver_os_api::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger, MsiResource, ResResult};
+use driver_os_api::{IrqOp, IrqResource, MsiResource, ResResult};
 use pci::{
     PciConfigAccess,
     msix::{self, MsixCapability, MsixTable, MsixTableEntry, PCI_BAR_COUNT},
@@ -329,7 +329,7 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
     bdf: DeviceFunction,
     config: &mut PciConfigAccess,
     irq_provider: &'static dyn IrqOp,
-) -> Option<(usize, PciMsixState)> {
+) -> Option<(IrqResource, PciMsixState)> {
     use core::mem::size_of;
 
     const REQUIRED_MSIX_TABLE_ENTRIES: u16 = 2;
@@ -416,7 +416,7 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
         return None;
     }
 
-    let irq = msi.irq.virq().raw();
+    let irq = msi.irq;
     let msix = PciMsixState {
         common_cfg,
         config: *config,
@@ -426,40 +426,13 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
         msi,
     };
 
-    log::info!("PCI virtio device at {:?}: MSI-X IRQ = {}", bdf, irq);
+    log::info!(
+        "PCI virtio device at {:?}: MSI-X IRQ = {}",
+        bdf,
+        irq.virq().raw()
+    );
 
     Some((irq, msix))
-}
-
-/// Reads the PCI Interrupt Line register (config space offset 0x3C) for the
-/// given device and returns it as a legacy IRQ number.
-///
-/// Returns 0xFF if the register has not been programmed by firmware, which
-/// means the device has no usable legacy IRQ assignment. The caller should
-/// treat 0xFF as "no IRQ".
-pub(super) fn legacy_irq_for_bdf(
-    config: &PciConfigAccess,
-    bdf: DeviceFunction,
-    irq_provider: &'static dyn IrqOp,
-) -> Option<usize> {
-    let word = config.read_word(bdf, 0x3C);
-    let irq_line = (word & 0xFF) as usize;
-    if irq_line == 0xFF || irq_line == 0 {
-        log::warn!(
-            "PCI device {:?}: Interrupt Line not assigned ({:#x}), legacy IRQ unavailable",
-            bdf,
-            irq_line
-        );
-        return None;
-    }
-
-    let desc = IrqRouteDesc {
-        hwirq: irq_line,
-        trigger: IrqTrigger::LevelLow,
-        controller: IrqController::IoApic,
-        domain: None,
-    };
-    Some(irq_provider.map_irq(desc).ok()?.virq().raw())
 }
 
 unittest::path_mod_test!(tests_msix_release, "../../ut-tests/msix_release.rs");

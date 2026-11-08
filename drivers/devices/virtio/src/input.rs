@@ -38,7 +38,7 @@ use crate::as_driver_error;
 /// # Example
 ///
 /// ```ignore
-/// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
+/// let (kind, transport, irq) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
 /// let input = VirtIoInputDev::<HalImpl, _>::try_new(transport, irq)?;
 /// let handler = input.irq_handler();
 /// let event = input.read_event()?;

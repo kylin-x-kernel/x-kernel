@@ -18,7 +18,7 @@ cfg_if! {
         impl VirtIoNet {
             pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
-                irq: Option<usize>,
+                irq: Option<driver_os_api::IrqResource>,
             ) -> DriverResult<kclass::prelude::NetDeviceImpl> {
                 Ok(Box::new(virtio::VirtIoNetDev::<VirtIoHalImpl, T, 64>::try_new(
                     transport,
@@ -37,7 +37,7 @@ cfg_if! {
         impl VirtIoGpu {
             pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
-                _irq: Option<usize>,
+                _irq: Option<driver_os_api::IrqResource>,
             ) -> DriverResult<kclass::prelude::DisplayDeviceImpl> {
                 Ok(Box::new(virtio::VirtIoGpuDev::<VirtIoHalImpl, T>::try_new(
                     transport,
@@ -54,7 +54,7 @@ cfg_if! {
         impl VirtIoSocket {
             pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
-                _irq: Option<usize>,
+                _irq: Option<driver_os_api::IrqResource>,
             ) -> DriverResult<kclass::prelude::VsockDeviceImpl> {
                 Ok(Box::new(virtio::VirtIoVsockDev::<
                     VirtIoHalImpl,
@@ -72,7 +72,7 @@ cfg_if! {
         impl VirtIo9p {
             pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
-                _irq: Option<usize>,
+                _irq: Option<driver_os_api::IrqResource>,
             ) -> DriverResult<kclass::prelude::Virtio9pDeviceImpl> {
                 Ok(Box::new(virtio::VirtIo9pDev::<VirtIoHalImpl, T>::try_new(
                     transport,
@@ -97,17 +97,14 @@ cfg_if! {
             /// firmware DMA description is out of scope, uses this.
             pub(super) fn try_new<T: virtio::Transport + Send + 'static>(
                 transport: T,
-                irq: Option<usize>,
+                irq: Option<driver_os_api::IrqResource>,
             ) -> DriverResult<kclass::prelude::HwrngDeviceImpl> {
                 let irq = irq.ok_or(DriverError::InvalidInput)?;
                 let device = virtio::VirtIoRngDev::<VirtIoHalImpl, T>::try_new_irq(
                     transport,
                     crate::rng_completion::new_rng_completion(),
                     crate::resource::resource_provider(),
-                    driver_os_api::IrqResource::plain(
-                        driver_os_api::Virq::new(irq),
-                        driver_os_api::IrqTrigger::Unknown(0),
-                    ),
+                    irq,
                 )?;
                 Ok(device)
             }
@@ -119,7 +116,7 @@ cfg_if! {
             /// firmware view exists.
             pub(super) fn try_new_with_dma<T: virtio::Transport + Send + 'static>(
                 transport: T,
-                irq: Option<usize>,
+                irq: Option<driver_os_api::IrqResource>,
                 info: DmaInfo,
             ) -> DriverResult<kclass::prelude::HwrngDeviceImpl> {
                 let irq = irq.ok_or(DriverError::InvalidInput)?;
@@ -154,10 +151,7 @@ cfg_if! {
                         transport,
                         crate::rng_completion::new_rng_completion(),
                         crate::resource::resource_provider(),
-                        driver_os_api::IrqResource::plain(
-                            driver_os_api::Virq::new(irq),
-                            driver_os_api::IrqTrigger::Unknown(0),
-                        ),
+                        irq,
                         backend,
                     )?;
                 Ok(device)

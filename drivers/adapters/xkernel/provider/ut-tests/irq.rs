@@ -85,7 +85,6 @@ fn route_domain_overrides_root_and_missing_domain_uses_controller_root() {
     for (controller, root) in [
         (DevIrqController::Gic, kirq::GIC_ROOT_DOMAIN),
         (DevIrqController::Plic, kirq::PLIC_ROOT_DOMAIN),
-        (DevIrqController::IoApic, kirq::IO_APIC_DOMAIN),
     ] {
         let mut route = IrqRouteDesc {
             hwirq: 30,
@@ -98,6 +97,124 @@ fn route_domain_overrides_root_and_missing_domain_uses_controller_root() {
         route.domain = Some(explicit);
         assert_eq!(irq_route_to_kirq_desc(route).domain, Some(explicit));
     }
+}
+
+#[def_test]
+fn ioapic_route_has_no_controller_root_fallback() {
+    let mut route = IrqRouteDesc {
+        hwirq: 4,
+        trigger: DevIrqTrigger::LevelLow,
+        controller: DevIrqController::IoApic,
+        domain: None,
+    };
+    assert_eq!(irq_route_to_kirq_desc(route).domain, None);
+    let explicit = kirq::IrqDomainId::new(87);
+    route.domain = Some(explicit);
+    assert_eq!(irq_route_to_kirq_desc(route).domain, Some(explicit));
+}
+
+#[def_test]
+fn bare_ioapic_route_is_rejected_instead_of_identity_mapped() {
+    let route = IrqRouteDesc {
+        hwirq: 10,
+        trigger: DevIrqTrigger::LevelLow,
+        controller: DevIrqController::IoApic,
+        domain: None,
+    };
+    assert_eq!(
+        XKernelResourceProvider.map_irq(route),
+        Err(ResError::InvalidResource)
+    );
+}
+
+#[def_test]
+fn injected_gsi_resolver_returns_the_exact_descriptor() {
+    let domain = kirq::IrqDomainId::new(87);
+    let seen = core::cell::Cell::new(None);
+    let desc = resolve_gsi_desc(
+        |gsi, trigger| {
+            seen.set(Some((gsi, trigger)));
+            Some(
+                kirq::IrqDesc::new(4, trigger)
+                    .with_controller(DevIrqController::IoApic)
+                    .with_domain(domain),
+            )
+        },
+        28,
+        DevIrqTrigger::LevelLow,
+    )
+    .expect("GSI owned by the injected topology");
+    assert_eq!(seen.get(), Some((28, DevIrqTrigger::LevelLow)));
+    assert_eq!(desc.hwirq, 4);
+    assert_eq!(desc.domain, Some(domain));
+    assert_eq!(desc.controller, DevIrqController::IoApic);
+    assert_eq!(desc.trigger, DevIrqTrigger::LevelLow);
+}
+
+#[def_test]
+fn unowned_gsi_is_an_invalid_resource() {
+    assert_eq!(
+        resolve_gsi_desc(|_, _| None, 200, DevIrqTrigger::EdgeRising),
+        Err(ResError::InvalidResource)
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[def_test]
+fn gsi_resource_retains_the_resolved_instance_domain_and_local_pin() {
+    // A registered secondary-instance domain: only the exact domain and
+    // controller-local pin prove the resource did not fall back to the primary
+    // IO-APIC or reuse the GSI as a hardware IRQ.
+    let domain =
+        kirq::alloc_irq_domain(kirq::IrqController::IoApic).expect("secondary IO-APIC domain");
+    let desc = kirq::IrqDesc::new(4, DevIrqTrigger::LevelLow)
+        .with_controller(DevIrqController::IoApic)
+        .with_domain(domain);
+
+    let mapped = mapped_gsi_resource(desc, 48, DevIrqTrigger::LevelLow);
+
+    assert_eq!(
+        mapped,
+        IrqResource::mapped(
+            Virq::new(48),
+            DevIrqTrigger::LevelLow,
+            DevIrqController::IoApic,
+            Some(domain),
+            4,
+        ),
+        "the resource retains the second instance's domain and local pin 4"
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[def_test(serial)]
+fn map_gsi_maps_a_boot_topology_gsi_through_kirq() {
+    // Take the highest GSI the published boot topology owns that is still
+    // unmapped: device discovery runs before the tests and may already hold
+    // firmware INTx routes (with their own triggers) on the high GSIs, while
+    // the console owns a low legacy line.
+    let (gsi, desc, mapped) = (0..=1024)
+        .rev()
+        .find_map(|gsi| {
+            let desc = irq_driver::x86::gsi_desc(gsi, DevIrqTrigger::LevelLow)?;
+            let mapped = XKernelResourceProvider
+                .map_gsi(gsi, DevIrqTrigger::LevelLow)
+                .ok()?;
+            Some((gsi, desc, mapped))
+        })
+        .expect("boot IO-APIC topology owns at least one free GSI");
+
+    assert_eq!(
+        mapped,
+        IrqResource::mapped(
+            mapped.virq(),
+            DevIrqTrigger::LevelLow,
+            DevIrqController::IoApic,
+            desc.domain,
+            desc.hwirq,
+        ),
+        "the resource retains the boot topology's domain and local pin for GSI {gsi}"
+    );
 }
 
 #[def_test]

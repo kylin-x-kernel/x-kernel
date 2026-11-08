@@ -7,7 +7,7 @@
 //! The module is split by lifetime:
 //!
 //! - `config` describes the boot topology, validates it, probes and installs
-//!   the controllers once, and publishes the instance-domain table.
+//!   the controllers once, and publishes the instance topology table.
 //! - [`discovery`] turns the ACPI MADT into unvalidated declarations.
 //! - `runtime` serves descriptor operations and dispatch after boot.
 //!
@@ -20,11 +20,12 @@ mod runtime;
 
 pub use config::{
     IO_APIC_DOMAIN, IoApicDeclaration, IoApicInstanceConfig, LegacyRoute, LegacyRouteOrigin,
-    MAX_IO_APICS, MAX_LEGACY_IRQS, X86IrqInitConfig, init, init_secondary,
+    MAX_IO_APICS, MAX_LEGACY_IRQS, X86IrqInitConfig, gsi_desc, init, init_secondary,
 };
 #[cfg(unittest)]
 pub(crate) use config::{
-    validate_capabilities, validate_config, validate_legacy_routes, validate_ranges,
+    IoApicTopologyEntry, gsi_desc_in, validate_capabilities, validate_config,
+    validate_legacy_routes, validate_ranges,
 };
 pub(crate) use runtime::complete_delivery;
 use runtime::{configure, dispatch_irq, enable, is_msi_source, notify_cpu, select_x86_flow};

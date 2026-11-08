@@ -195,19 +195,20 @@ pub fn device_desc_add_with_parent(
     resources: ResourceSet,
 ) -> Result<DeviceDesc, DriverError> {
     device_desc_add_with_dma(
-        bus_id, parent, location, origin, identity, transport, resources, None,
+        bus_id, parent, location, origin, identity, transport, resources, None, None,
     )
 }
 
-/// Same as [`device_desc_add_with_parent`], plus a resolved DMA view.
+/// Same as [`device_desc_add_with_parent`], plus DMA and INTx discovery facts.
 ///
-/// The backend composes the view from firmware and platform facts before
+/// The backend composes the DMA view from firmware and platform facts before
 /// registration. Passing [`None`] records that no view was established; it
-/// never implies unlimited addressing or coherence.
+/// never implies unlimited addressing or coherence. An INTx status is likewise
+/// a backend-recorded fact, not an assumption made by the device core.
 #[expect(
     clippy::too_many_arguments,
     reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Registration needs the full \
-              descriptor identity, parent, resources and DMA view in one call"
+              descriptor identity, parent, resources, DMA view and INTx status in one call"
 )]
 pub fn device_desc_add_with_dma(
     bus_id: BusId,
@@ -218,6 +219,7 @@ pub fn device_desc_add_with_dma(
     transport: Option<crate::TransportInfo>,
     resources: ResourceSet,
     dma: Option<driver_os_api::DmaInfo>,
+    intx: Option<crate::IntxRouteStatus>,
 ) -> Result<DeviceDesc, DriverError> {
     init_device_registry();
 
@@ -231,6 +233,10 @@ pub fn device_desc_add_with_dma(
         );
         let desc = match dma {
             Some(dma) => desc.with_dma(dma),
+            None => desc,
+        };
+        let desc = match intx {
+            Some(intx) => desc.with_intx_route(intx),
             None => desc,
         };
         index.add_device_desc(desc.clone());
@@ -298,7 +304,8 @@ fn new_unpublished_device_from_desc(
             desc.transport(),
             resources,
         )
-        .with_dma(desc.dma()),
+        .with_dma(desc.dma())
+        .with_intx_route(desc.intx_route()),
     );
     Ok((device, bus_type))
 }

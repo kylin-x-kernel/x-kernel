@@ -16,6 +16,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use driver_base::DriverResult;
+#[cfg(not(target_arch = "x86_64"))]
 use driver_os_api::IrqOp;
 use kdevice::{
     ActiveDeviceAdoption, BusId, BusTypeId, DeviceDriver, DeviceId, DeviceIdentity, DeviceKind,
@@ -191,6 +192,14 @@ impl BusBackend for PciBackend {
             bus.config_base(),
             bus.bus_end()
         );
+
+        // The ACPI AML owner is created once, before any endpoint is
+        // registered. Its constructor runs `_PIC`/`_PRT` outside any lock.
+        #[cfg(target_arch = "x86_64")]
+        if origin == DiscoveryOrigin::Acpi {
+            let (_, config) = bus.parts_mut();
+            super::acpi_owner::init(*config);
+        }
 
         // The PCI host bridge is a platform device that *owns* the PCI bus.
         // Adopt it on the appropriate platform bus and cross-link with the
@@ -432,23 +441,35 @@ impl BusBackend for PciBackend {
             }
 
             // Legacy INTx routing — only meaningful for devices that have not
-            // negotiated MSI/MSI-X. Best-effort: errors from firmware lookup
-            // are silently ignored because most modern devices use MSI-X.
-            if let Some(route) = pci::legacy_interrupt_route(config, bdf) {
-                let irq = khal::firmware::devices::InterruptInfo {
-                    irq: route.irq,
-                    trigger: route.trigger,
-                    controller: route.controller,
-                };
-                match super::map_pci_legacy_irq(irq, |route| {
-                    crate::resource::resource_provider().map_irq(route)
-                }) {
-                    Ok(mapped) => resources.push(ResourceDesc::Irq(mapped)),
-                    Err(error) => {
-                        log::warn!("PCI backend: {bdf:?} INTx mapping failed: {route:?}: {error:?}")
+            // negotiated MSI/MSI-X. On x86 the route comes from the published
+            // ACPI `_PRT`; the discovery result is stored on the descriptor so
+            // the probe can tell "no interrupt" from "transport failure".
+            #[cfg(target_arch = "x86_64")]
+            let intx = match super::intx::resolve(config, bdf, origin) {
+                Ok(mapped) => {
+                    resources.push(ResourceDesc::Irq(mapped));
+                    Some(kdevice::IntxRouteStatus::Routed)
+                }
+                Err(status) => Some(status),
+            };
+
+            #[cfg(not(target_arch = "x86_64"))]
+            let intx = {
+                if let Some(route) = pci::legacy_interrupt_route(config, bdf) {
+                    let provider = crate::resource::resource_provider();
+                    match super::map_pci_legacy_irq(
+                        route,
+                        |route| provider.map_irq(route),
+                        |gsi, trigger| provider.map_gsi(gsi, trigger),
+                    ) {
+                        Ok(mapped) => resources.push(ResourceDesc::Irq(mapped)),
+                        Err(error) => log::warn!(
+                            "PCI backend: {bdf:?} INTx mapping failed: {route:?}: {error:?}"
+                        ),
                     }
                 }
-            }
+                None
+            };
 
             let location = DeviceLocation::Pci {
                 segment: 0,
@@ -483,8 +504,8 @@ impl BusBackend for PciBackend {
                 subclass: dev_info.subclass,
             });
 
-            context.register_device_with_parent(
-                ep_bus, parent, location, origin, identity, transport, resources,
+            context.register_device_with_dma(
+                ep_bus, parent, location, origin, identity, transport, resources, None, intx,
             )?;
         }
 

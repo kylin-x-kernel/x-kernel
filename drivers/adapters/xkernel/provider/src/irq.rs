@@ -6,11 +6,10 @@
 
 use alloc::sync::Arc;
 
-#[cfg(any(target_arch = "x86_64", unittest))]
-use driver_os_api::IrqTrigger as DevIrqTrigger;
 use driver_os_api::{
     IrqController as DevIrqController, IrqEvent as DevIrqEvent, IrqHandler as DevIrqHandler,
-    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, MsiResource, ResError, ResResult, Virq,
+    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, IrqTrigger as DevIrqTrigger, MsiResource,
+    ResError, ResResult, Virq,
 };
 
 use crate::XKernelResourceProvider;
@@ -79,6 +78,14 @@ impl IrqOp for XKernelResourceProvider {
     }
 
     fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
+        // hwirq is domain-local. An IO-APIC route without its instance domain
+        // cannot say which controller the pin belongs to; mapping it by number
+        // would silently turn a GSI into a pin (or a pin on the wrong
+        // controller). ACPI callers must resolve the GSI through map_gsi.
+        if route.controller == DevIrqController::IoApic && route.domain.is_none() {
+            log::warn!("rejecting IO-APIC IRQ route without a resolved domain: {route:?}");
+            return Err(ResError::InvalidResource);
+        }
         let desc = irq_route_to_kirq_desc(route);
         let virq = kirq::try_map(desc).map_err(|err| {
             log::warn!("failed to map IRQ route {route:?}: {err:?}");
@@ -91,6 +98,19 @@ impl IrqOp for XKernelResourceProvider {
             desc.domain,
             route.hwirq,
         ))
+    }
+
+    fn map_gsi(&self, gsi: u32, trigger: DevIrqTrigger) -> ResResult<IrqResource> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            map_gsi_with(irq_driver::x86::gsi_desc, gsi, trigger)
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (gsi, trigger);
+            Err(ResError::Unsupported)
+        }
     }
 
     fn alloc_msix(&self) -> ResResult<MsiResource> {
@@ -143,18 +163,71 @@ fn msix_release_result(
 /// Domain for legacy routes that name a controller family but no instance.
 ///
 /// The roots stay reserved for the first firmware-registered GIC/PLIC, so this
-/// fallback matches the primary controller. Firmware-described resources use
-/// `try_map_fwspec`, which resolves the exact controller node and therefore
-/// also supports additional same-family instances.
+/// fallback matches the primary controller. IO-APIC routes have no such root
+/// fallback: a GSI must be resolved through `map_gsi`, which names the exact
+/// instance. Firmware-described resources use `try_map_fwspec`, which resolves
+/// the exact controller node and therefore also supports additional
+/// same-family instances.
 fn default_irq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
     match controller {
         DevIrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
         DevIrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
-        DevIrqController::IoApic => Some(kirq::IO_APIC_DOMAIN),
-        DevIrqController::LoongArchExtioi | DevIrqController::Msi | DevIrqController::Unknown => {
-            None
-        }
+        DevIrqController::IoApic
+        | DevIrqController::LoongArchExtioi
+        | DevIrqController::Msi
+        | DevIrqController::Unknown => None,
     }
+}
+
+/// Requires the x86 GSI resolver to own the GSI.
+///
+/// Injected so the provider's error contract is testable without a published
+/// IO-APIC topology.
+#[cfg(any(target_arch = "x86_64", unittest))]
+fn resolve_gsi_desc(
+    resolve: impl FnOnce(u32, DevIrqTrigger) -> Option<kirq::IrqDesc>,
+    gsi: u32,
+    trigger: DevIrqTrigger,
+) -> ResResult<kirq::IrqDesc> {
+    resolve(gsi, trigger).ok_or(ResError::InvalidResource)
+}
+
+/// Maps a resolved GSI descriptor and retains its exact origin.
+///
+/// The resolver is injected so the resolve -> `kirq::try_map` chain can be
+/// exercised independently of a published x86 topology.
+#[cfg(target_arch = "x86_64")]
+fn map_gsi_with(
+    resolve: impl FnOnce(u32, DevIrqTrigger) -> Option<kirq::IrqDesc>,
+    gsi: u32,
+    trigger: DevIrqTrigger,
+) -> ResResult<IrqResource> {
+    let desc = resolve_gsi_desc(resolve, gsi, trigger)?;
+    let virq = kirq::try_map(desc).map_err(|err| {
+        log::warn!("failed to map GSI {gsi}: {err:?}");
+        map_irq_desc_error(err)
+    })?;
+    Ok(mapped_gsi_resource(desc, virq, trigger))
+}
+
+/// Builds the provider resource from the exact descriptor KIRQ mapped.
+///
+/// The controller-local pin and instance domain are copied from the resolver
+/// result. Rebuilding them from the GSI or a controller-family default domain
+/// would alias additional controllers onto the primary instance.
+#[cfg(target_arch = "x86_64")]
+fn mapped_gsi_resource(
+    desc: kirq::IrqDesc,
+    virq: kirq::Virq,
+    trigger: DevIrqTrigger,
+) -> IrqResource {
+    IrqResource::mapped(
+        Virq::new(virq),
+        trigger,
+        DevIrqController::IoApic,
+        desc.domain,
+        desc.hwirq,
+    )
 }
 
 fn map_fw_irq_error(err: kirq::FwIrqMapError) -> ResError {
