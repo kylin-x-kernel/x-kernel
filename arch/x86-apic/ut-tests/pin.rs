@@ -51,3 +51,47 @@ fn capabilities_report_every_hardware_pin() {
         256
     );
 }
+
+#[def_test]
+fn gsi_resolution_uses_range_arithmetic_not_numeric_identity() {
+    assert_eq!(pin_for_gsi_in_range(4, 0, 24).map(IoApicPin::as_u8), Some(4));
+    assert_eq!(pin_for_gsi_in_range(0, 24, 24), None);
+    assert_eq!(
+        pin_for_gsi_in_range(24, 24, 24).map(IoApicPin::as_u8),
+        Some(0)
+    );
+    assert_eq!(
+        pin_for_gsi_in_range(28, 24, 24).map(IoApicPin::as_u8),
+        Some(4)
+    );
+    assert_eq!(pin_for_gsi_in_range(47, 24, 24).map(IoApicPin::as_u8), Some(23));
+    assert_eq!(pin_for_gsi_in_range(48, 24, 24), None);
+}
+
+#[def_test]
+fn gsi_resolution_rejects_offsets_without_a_fixed_vector() {
+    assert_eq!(pin_for_gsi_in_range(31, 0, 32).map(IoApicPin::as_u8), Some(31));
+    assert_eq!(pin_for_gsi_in_range(32, 0, 32), None);
+    // A controller can report more pins than the fixed IO-APIC vector window.
+    assert_eq!(pin_for_gsi_in_range(32, 0, 256), None);
+    assert_eq!(pin_for_gsi_in_range(u32::MAX, 1, 32), None);
+}
+
+#[def_test]
+fn instance_ids_cover_only_the_configured_capacity() {
+    assert_eq!(MAX_IO_APICS, 32);
+    assert_eq!(
+        IoApicInstanceId::try_from_usize(0)
+            .expect("first instance")
+            .as_usize(),
+        0
+    );
+    assert_eq!(
+        IoApicInstanceId::try_from_usize(MAX_IO_APICS - 1)
+            .expect("last instance")
+            .as_usize(),
+        MAX_IO_APICS - 1
+    );
+    assert!(IoApicInstanceId::try_from_usize(MAX_IO_APICS).is_none());
+    assert!(IoApicInstanceId::try_from_usize(usize::MAX).is_none());
+}

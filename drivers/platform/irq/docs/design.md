@@ -38,39 +38,101 @@ hardware setup.
 ## x86 IO-APIC initialization
 
 `x86::init(X86IrqInitConfig)` is the single boot-CPU entry for the x86
-interrupt hardware. The configuration carries one `IoApicDeclaration`
-(`id`, `address`, `gsi_base`), the initial redirection policy, and the
-declaration's `FwSource`. Pure validation runs before any hardware is
-touched: a zero address or unknown provenance is `InvalidInput`, and a
-non-zero GSI base is explicitly `Unsupported` until GSI-to-pin translation
-exists. Initialization then runs `init_local_primary` and `init_io_apic`
-in that order, and finally validates the returned `IoApicCapabilities`
-(pin count in `1..=32`, no `gsi_base + pin_count` overflow). Capability
-failures are `Unsupported` after hardware publication, so the platform
-must abort boot; nothing is rolled back. `x86::init_secondary()` is the
-per-AP counterpart. Platform boot converts discovery output, or its
-logged static fallback when discovery reports `Absent`, into this
-configuration; the unified entry itself does not read firmware. No second
-IRQ registry or domain is created.
+interrupt hardware. The configuration carries up to 32
+`IoApicDeclaration`s (`id`, `address`, `gsi_base`) in installation order,
+one `kirq` domain per instance, the initial redirection policy, the
+declaration's `FwSource`, and the effective ISA -> GSI route table for
+lines `0..=15`. The first instance reuses `IO_APIC_DOMAIN`; each additional
+instance gets a distinct, non-identity domain allocated without a firmware
+namespace node (`kirq::alloc_irq_domain`). Equal local pin numbers on two
+controllers therefore never denote the same source.
+
+Pure validation runs before any hardware is touched: an empty set, zero
+address, duplicate address, or unknown provenance is `InvalidInput`.
+Initialization then runs `init_local_primary`, probes every controller
+with `probe_io_apic` (mapping and reading pin count only), and validates
+the returned `IoApicCapabilities` (pin count in `1..=32`, no
+`gsi_base + pin_count` overflow), every pair of half-open GSI ranges
+`[gsi_base, gsi_base + pin_count)` for overlap, and every explicit
+firmware route against the probed owner. Only after all of that does
+`install_io_apic` program any redirection table, in declaration order; the
+returned instance identifier must match that order. A duplicate address or
+overlapping range is fatal before programming; an explicit route whose
+probed owner differs from the owner selected when its descriptor was built
+is also fatal, because consumers may already retain that descriptor. An
+explicit route outside every probed range is `InvalidInput` after MMIO
+mapping, so the platform must abort boot; mappings are not rolled back.
+Identity defaults that no probed controller can resolve are skipped rather
+than failing boot. `x86::init_secondary()` is the per-AP counterpart.
+Platform boot converts discovery output, or its logged static fallback when
+discovery reports `Absent`, into this configuration; the unified entry
+itself does not read firmware. No second IRQ registry is created.
+
+The effective route table starts with `ISA n -> GSI n`, edge/high.
+Firmware overrides are applied in declaration order, matching Linux
+`mp_override_legacy_irq`: before installing an override, a target GSI `g`
+below 16 that still maps to itself is invalidated; the override then sets
+`ISA s -> GSI g`. Order is significant: `9 -> 9` followed by `4 -> 9`
+leaves ISA 9 invalid, while `4 -> 9` followed by `9 -> 9` restores it as
+a real explicit route. Shared GSIs are therefore not rejected outright.
+`config.legacy_irq_desc` resolves a route's GSI to the instance with the
+highest declared base at or below it (and an offset below the 32-pin
+backend bound), then stores that instance's domain and the local pin in
+the descriptor. Boot validation repeats the resolution with probed pin
+counts, using `x86_apic::pin_for_gsi_in_range` against each instance's
+declared base and probed `pin_count`. No per-GSI map is added at runtime and
+the installed backend retains only the pin count: descriptor operations carry
+the domain (which selects the instance) and the controller-local pin, never a
+GSI.
+Platform boot builds the configuration once in `early_driver_init`,
+derives the console descriptor through `config.legacy_irq_desc(4)`, and
+passes the same configuration to `prepare_interrupts`; it no longer
+hard-codes IRQ 4.
+
+Delivery vectors are not derived from the pin number. Each instance's
+initial redirection entries use vector zero and stay masked, and the first
+successful configuration of an `(instance, pin)` route allocates one
+vector from a shared 32-slot pool. The backend records
+`vector -> (instance, pin)`; dispatch resolves a delivered vector through
+that table, then maps the instance to its domain and uses the local pin as
+`IrqRef::Domain(domain, pin)`. This is what allows two 24-pin controllers
+to coexist in the 32-vector window.
+
+Vector installation and trigger policy are separate decisions. A descriptor
+that states a trigger programs trigger and polarity
+(`IoApicTriggerPolicy::Program`); one whose trigger is unknown keeps the
+firmware-programmed bits (`KeepHardware`) but still receives and verifies a
+delivery vector. Unknown therefore means "do not override the hardware
+configuration", not "no delivery route". A pin is marked configured only after
+that transaction succeeds, and unmasking an unconfigured pin is a no-op, so a
+failed configuration cannot expose a null-vector entry.
 
 `x86::discovery::from_acpi()` is the hardware-free MADT decoder behind
-that platform wiring; its `to_init_config()` converts the retained
-controller declarations into the unified entry's configuration, rejecting
-multi-controller or unrepresentable topologies as `Unsupported`. It walks
-the MADT twice: the
+that platform wiring; its `to_init_config()` converts every retained
+controller declaration and the overrides into the unified entry's
+configuration. It walks the MADT twice: the
 first pass retains at most 32 IO-APICs; the second interprets overrides
-against the complete controller set, so entry order does not matter and
-skipped declarations consume no capacity. At most 16 legacy overrides
+against the complete controller set, so controller/override interleaving
+does not matter and skipped declarations consume no capacity. Override
+declarations themselves are processed in order, as described above. At most 16 legacy overrides
 are retained, one per ISA source. Zero-address, duplicate-address, and
 duplicate-`gsi_base` controllers are skipped; overrides must use the ISA
 bus, a source below 16, and non-reserved polarity/trigger flags. An
 override is accepted only when a retained controller's `gsi_base` is at
-or below its GSI; duplicate ISA lines are last-wins. Discovery does not
-validate pin counts or controller topology — those need hardware. Skips
-are surfaced as `X86DiscoveryIssue`s; the first malformed MADT entry
-returns `X86DiscoveryError::Malformed` and ends the walk, and a MADT
-without a usable controller returns `Absent`. Only `Absent` authorizes
-the platform's static fallback; a malformed stream is fatal.
+or below its GSI, and duplicate ISA lines are last-wins. The superseded
+mapping is captured before target invalidation, so a duplicate's
+`OverriddenIsaMapping` diagnostic is recorded even when removing the previous
+route is what made the duplicate visible. Overrides update
+the effective map in declaration order: an accepted target below 16 that
+still maps to itself has its identity route invalidated, while a later
+explicit override for that line restores it. A level-triggered
+IRQ0 override is decoded as edge, matching Linux's faulty-timer
+workaround. All retained controllers are representable; GSI-range overlap
+and pin counts need hardware, so the unified entry validates them after
+probing. Skips are surfaced as `X86DiscoveryIssue`s; the first malformed
+MADT entry returns `X86DiscoveryError::Malformed` and ends the walk, and a
+MADT without a usable controller returns `Absent`. Only `Absent`
+authorizes the platform's static fallback; a malformed stream is fatal.
 
 ## Firmware interrupt binding translation
 
@@ -173,9 +235,10 @@ configuration so that `kirq` stays architecture-neutral.
   `dispatch_nmi` (GICv3 PMR-protected path), `complete_irq`,
   `notify_cpu`, and `set_prio`.
 - Expose descriptor constructors (`irq_desc`, `level_irq_desc`,
-  `edge_irq_desc`, `plic_irq_desc`, `legacy_irq_desc`) so platform init
-  builds correctly rooted `IrqDesc`s (`GIC_ROOT_DOMAIN`, `PLIC_DOMAIN`,
-  `IO_APIC_DOMAIN`).
+  `edge_irq_desc`, `plic_irq_desc`) so platform init builds correctly
+  rooted `IrqDesc`s (`GIC_ROOT_DOMAIN`, `PLIC_DOMAIN`). x86 ISA consumers
+  instead call `X86IrqInitConfig::legacy_irq_desc`, which applies the
+  effective firmware route and yields an `IO_APIC_DOMAIN` descriptor.
 - Expose GIC-specific NMI capability queries (`supports_hardware_nmi`,
   `set_nmi_attr`).
 
@@ -185,9 +248,11 @@ configuration so that `kirq` stays architecture-neutral.
   belong to `kirq`; backends only program what `kirq` decides.
 - No device discovery: the controller nodes are found by this crate, but
   device IRQ wiring is platform init's job.
-- No x86 I/O-APIC register access: `src/x86/mod.rs` delegates to the
-  `x86-apic` crate, owns boot/AP initialization ordering and declaration
-  validation, and translates `IrqDesc` trigger/polarity.
+- No x86 I/O-APIC register access: `src/x86/mod.rs` wires the provider to
+  the `x86-apic` crate. `src/x86/config.rs` owns boot/AP initialization
+  ordering, declaration validation and domain publication;
+  `src/x86/runtime.rs` owns post-boot descriptor operations, flow selection
+  and dispatch, translating `IrqDesc` trigger/polarity.
   `src/x86/discovery.rs` only decodes firmware and records issues; it
   maps no MMIO and programs no registers.
 - No software interrupt routing between CPUs beyond the backend's
@@ -210,7 +275,9 @@ drivers/platform/irq/
 │   │   ├── mod.rs  # RISC-V PLIC backend
 │   │   └── firmware.rs # PLIC firmware discovery and binding decode
 │   └── x86/
-│       ├── mod.rs  # x86_64 init entry and IO-APIC glue (x86-apic crate)
+│       ├── mod.rs       # provider wiring, public surface, test attachment
+│       ├── config.rs    # boot topology, validation, install, domain publication
+│       ├── runtime.rs   # descriptor ops, flow selection, vector dispatch
 │       └── discovery.rs # MADT IO-APIC/ISO decoding, no hardware access
 └── Cargo.toml
 ```
@@ -223,10 +290,10 @@ kirq (policy) ──IntrManagerIf──> irq-driver
              +---------------------+----------------------+
              | aarch64           | riscv64              | x86_64
              v                   v                      v
-        gic.rs               riscv.rs               x86.rs
+        gic.rs               riscv.rs               x86/{config,runtime}.rs
    config_from_device_tree  PLIC @ 0x0c00_0000    x86-apic crate
-   (DT: interrupt-controller     (DT confirm)      (trigger/polarity
-    + reg regions; v2: GICD+GICC,                    translation)
+   (DT: interrupt-controller     (DT confirm)      (multi-instance GSI
+    + reg regions; v2: GICD+GICC,                    ranges; domain+pin)
      v3: GICD+GICR)
    iomap: gicd/gicc/gicr      iomap: "plic"
              |                   |
@@ -342,7 +409,7 @@ The handler and SGI reservation last for the kernel lifetime. Other users must
 not unregister, disable, reprioritize, or reuse SGI15. CPU hot-unplug and GIC
 reinitialization after readiness are not supported by this lifetime contract.
 
-## x86 Fixed-Vector Dispatch
+## x86 Vector Dispatch
 
 The dedicated LAPIC spurious vector is consumed without EOI. The LAPIC error
 vector delegates ESR capture and one EOI to `x86-apic`. Neither produces a
@@ -358,21 +425,27 @@ acknowledged and recorded pending for the existing running owner or later enable
 
 `prepare_regular_delivery` owns regular-vector classification and early EOI;
 its result transfers only the outstanding completion cookie into `PendingIrq`.
-Tests exercise that production decision path with injected trigger reads and
-EOI operations: both IO-APIC range boundaries, edge/level/unknown trigger,
-MSI/local boundaries and exception vectors. They verify the selected domain,
-exact trigger-query count and early EOI count without issuing a physical EOI.
+Production classification resolves an IO-APIC vector through the backend's
+`vector -> (instance, pin)` table and then to that instance's domain; an
+in-window vector with no live route is acknowledged and dropped rather than
+left in service. Tests exercise the production decision path with injected
+classifiers and EOI operations: both IO-APIC range boundaries, routed and
+unrouted vectors, MSI/local boundaries and exception vectors. They verify the
+selected domain, classifier call count and early EOI count without issuing a
+physical EOI.
 Each accepted model delivery also passes through `complete_delivery`, proving
 one EOI across preparation and completion, rather than only checking a cookie.
-The existing fixed-vector tests separately verify regular/error delegation.
+The dedicated spurious/error tests separately verify regular/error delegation.
 A separate spurious test uses the real backend
 through `kirq::handle_irq` to check return-context balance. Register sequencing
 is tested in the vendored x2apic host suite.
 
 `select_x86_flow` validates explicit IO-APIC/MSI domain and controller identity,
-flags, source range and supported targeting. IO-APIC selection reads the real
-trigger when firmware left it unspecified; a requested trigger is configured
-before action publication. Level uses `FasteoiResend::Level`, edge uses hardware
+flags, source range and supported targeting. For IO-APIC it resolves the
+descriptor's domain to an installed instance (the primary domain maps to
+instance zero even before the published table exists), then reads that
+instance's trigger for the local pin when firmware left it unspecified; a
+requested trigger is configured before action publication. Level uses `FasteoiResend::Level`, edge uses hardware
 retrigger. IO-APIC affinity changes and per-CPU flags are rejected. MSI requires
 an allocated, message-bound vector; its mask belongs to the PCI device owner.
 The public chip callbacks recheck source identity before hardware access.
@@ -387,9 +460,10 @@ KIRQ's unpublished candidate may have no selected flow; that is not a runnable
 software interrupt or a backend capability. Synthetic fixtures must arrange
 their test binding explicitly.
 
-This removal does not remove PCI legacy INTx, the IO-APIC descriptor helper
-`legacy_irq_desc`, or the direct infallible `set_trigger` interface. Those names
-describe existing signaling or APIs, not the removed KIRQ flow.
+This removal does not remove PCI legacy INTx, the boot-configuration route
+lookup `X86IrqInitConfig::legacy_irq_desc`, or the direct infallible
+`set_trigger` interface. Those names describe existing signaling or APIs, not
+the removed KIRQ flow.
 
 Linux references are `kernel/irq/chip.c::handle_edge_irq/handle_fasteoi_irq` and
 `arch/x86/kernel/apic/vector.c::apic_retrigger_irq`: retrigger targets the recorded

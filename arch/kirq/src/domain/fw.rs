@@ -196,10 +196,37 @@ pub fn register_irq_domain(
             *firmware = Some(entry);
             Ok(id)
         }
-        IrqDomainTarget::New(kind) => super::create_domain(kind, entry)
+        IrqDomainTarget::New(kind) => super::create_domain(kind, Some(entry))
             .map(super::IrqDomain::id)
             .ok_or(IrqDomainRegisterError::NoMemory),
     }
+}
+
+/// Allocates a boot-lifetime IRQ domain for a controller instance that has no
+/// firmware namespace node.
+///
+/// Some controllers (for example additional x86 IO-APICs) are described by
+/// firmware records rather than a firmware object model, so [`register_irq_domain`]
+/// cannot be used without fabricating a node. This path allocates the same
+/// kind of non-identity per-instance namespace without any firmware
+/// association. Mapping and dispatch still use the returned identifier as the
+/// instance's domain; controller family metadata alone never proves ownership.
+///
+/// Registration and allocation serialize through the same boot-time lock, so a
+/// domain is reachable with its controller family fully initialized. The
+/// domain is never unregistered or freed.
+///
+/// # Execution context
+///
+/// Control-plane boot wiring only. Callers must not invoke this from an IRQ,
+/// NMI or bottom-half handler; allocation uses a non-sleeping lock and a
+/// `NOWAIT` allocation, so it never sleeps but can fail.
+///
+/// Returns `None` when the allocator is not ready or storage cannot be
+/// reserved. A failed attempt may consume an identifier.
+pub fn alloc_irq_domain(kind: IrqController) -> Option<IrqDomainId> {
+    let _registration = FW_REGISTRATION.lock();
+    super::create_domain(kind, None).map(super::IrqDomain::id)
 }
 
 /// Returns the binding registered for this exact controller node.

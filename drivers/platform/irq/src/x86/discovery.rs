@@ -13,22 +13,22 @@
 //! are skipped and recorded in [`X86ApicDeclarations::issues`], while a
 //! malformed entry fails the whole walk with
 //! [`X86DiscoveryError::Malformed`]. Ordering between IO-APIC and override
-//! entries does not matter.
+//! entries does not matter, but override declarations are interpreted in
+//! order because that order determines the effective ISA -> GSI table.
 
 use acpi::{MadtEntry, MadtEntryIter, MadtParseError};
 use fwnode::FwSource;
-use kerrno::{KError, KResult};
+use kerrno::KResult;
 use kirq::IrqTrigger;
 
-use super::{IoApicDeclaration, IoApicInitPolicy, X86IrqInitConfig};
-
 /// Maximum number of IO-APIC controllers retained from firmware.
-pub const MAX_IO_APICS: usize = 32;
+pub use super::MAX_IO_APICS;
 /// Number of legacy ISA interrupt lines (sources 0..=15).
 ///
 /// Because a retained override always names a distinct source in this range,
 /// this is also the fixed capacity of the override result.
-pub const MAX_LEGACY_IRQS: usize = 16;
+pub use super::MAX_LEGACY_IRQS;
+use super::{IoApicDeclaration, IoApicInitPolicy, X86IrqInitConfig};
 /// Upper bound on recorded discovery issues.
 pub const MAX_ISSUES: usize = 64;
 
@@ -102,6 +102,10 @@ pub struct X86ApicDeclarations {
     io_apic_count: usize,
     overrides: [IrqOverride; MAX_LEGACY_IRQS],
     override_count: usize,
+    /// ISA lines whose effective route is invalidated. Linux clears the
+    /// identity mapping of an override target so two lines never share one GSI
+    /// through different routes; a later explicit override revives the line.
+    invalid_identity: u16,
     issues: [X86DiscoveryIssue; MAX_ISSUES],
     issue_count: usize,
     issues_truncated: bool,
@@ -115,6 +119,7 @@ impl X86ApicDeclarations {
             io_apic_count: 0,
             overrides: [NO_OVERRIDE; MAX_LEGACY_IRQS],
             override_count: 0,
+            invalid_identity: 0,
             issues: [X86DiscoveryIssue::ZeroIoApicAddress { id: 0 }; MAX_ISSUES],
             issue_count: 0,
             issues_truncated: false,
@@ -127,10 +132,12 @@ impl X86ApicDeclarations {
         &self.io_apics[..self.io_apic_count]
     }
 
-    /// Accepted legacy overrides, in first-seen order.
+    /// Effective legacy overrides, in first-seen order.
     ///
     /// A later declaration for the same ISA line replaces the stored mapping
-    /// in place rather than appending a second entry.
+    /// in place rather than appending a second entry. An override that a later
+    /// declaration invalidates is removed, because it no longer contributes an
+    /// effective route.
     pub fn overrides(&self) -> &[IrqOverride] {
         &self.overrides[..self.override_count]
     }
@@ -153,23 +160,34 @@ impl X86ApicDeclarations {
     /// Converts the controller declaration set into the unified entry
     /// configuration.
     ///
-    /// Legacy overrides remain in this set for later routing setup; the boot
-    /// configuration carries only the controller.
+    /// Every retained controller becomes one instance, in firmware order. The
+    /// first instance reuses the well-known IO-APIC domain; later instances
+    /// receive distinct per-instance domains, because their pin number spaces
+    /// are independent. Addresses and GSI ranges are validated by the unified
+    /// entry against probed hardware, not here.
+    ///
+    /// The effective legacy route table was computed in declaration order
+    /// during discovery; replaying its invalidated identity routes and then
+    /// applying the surviving overrides rebuilds that exact table.
     ///
     /// # Errors
     ///
-    /// [`KError::InvalidInput`] when there is no controller (normally
-    /// reported as [`X86DiscoveryError::Absent`] earlier), and
-    /// [`KError::Unsupported`] for more than one controller or a non-zero GSI
-    /// base, which need routing support the current runtime does not have.
+    /// [`KError::InvalidInput`](kerrno::KError::InvalidInput) when there is no
+    /// controller (normally reported as [`X86DiscoveryError::Absent`] earlier)
+    /// or too many controllers for the instance capacity, and
+    /// [`KError::NoMemory`](kerrno::KError::NoMemory) when a per-instance
+    /// domain cannot be allocated.
     pub fn to_init_config(&self, policy: IoApicInitPolicy) -> KResult<X86IrqInitConfig> {
-        match self.io_apics() {
-            [controller] if controller.gsi_base == 0 => {
-                Ok(X86IrqInitConfig::from_acpi(*controller, policy))
+        let mut config = X86IrqInitConfig::from_acpi_controllers(self.io_apics(), policy)?;
+        for isa_irq in 0..MAX_LEGACY_IRQS {
+            if self.invalid_identity & (1u16 << isa_irq) != 0 {
+                config.invalidate_identity_route(isa_irq as u8);
             }
-            [] => Err(KError::InvalidInput),
-            _ => Err(KError::Unsupported),
         }
+        for route in self.overrides() {
+            config.set_legacy_override(route.isa_irq, route.gsi, route.trigger);
+        }
+        Ok(config)
     }
 }
 
@@ -279,18 +297,40 @@ impl X86ApicDeclarations {
             });
             return;
         }
-
-        let trigger = decode_trigger(iso.flags);
-        let existing = self.overrides[..self.override_count]
+        // Capture a duplicate of this ISA line before target invalidation: the
+        // last-wins diagnostic must survive even when invalidating the target
+        // removes the previous override for the same line.
+        let previous_gsi = self.overrides[..self.override_count]
             .iter()
-            .position(|entry| entry.isa_irq == iso.source);
-        if let Some(index) = existing {
-            let previous_gsi = self.overrides[index].gsi;
+            .find(|entry| entry.isa_irq == iso.source)
+            .map(|entry| entry.gsi);
+        // Match Linux `mp_override_legacy_irq`: the target is checked against
+        // the mapping in force at this point in the declaration stream, before
+        // this override is installed. A target still on its identity route is
+        // invalidated so the same GSI is not reachable through two lines. A
+        // later explicit override for the target line can restore it, and an
+        // earlier override that mapped the target elsewhere is left alone.
+        if iso.gsi < MAX_LEGACY_IRQS as u32 {
+            let target = iso.gsi as u8;
+            if self.effective_gsi(target) == Some(iso.gsi) {
+                self.invalidate_identity_route(target);
+            }
+        }
+
+        let trigger = decode_trigger(iso.source, iso.flags);
+        // Installing this route revives a line invalidated earlier.
+        self.invalid_identity &= !(1u16 << iso.source);
+        if let Some(previous_gsi) = previous_gsi {
             self.record_issue(X86DiscoveryIssue::OverriddenIsaMapping {
                 isa_irq: iso.source,
                 previous_gsi,
                 gsi: iso.gsi,
             });
+        }
+        let existing = self.overrides[..self.override_count]
+            .iter()
+            .position(|entry| entry.isa_irq == iso.source);
+        if let Some(index) = existing {
             self.overrides[index] = IrqOverride {
                 isa_irq: iso.source,
                 gsi: iso.gsi,
@@ -316,6 +356,38 @@ impl X86ApicDeclarations {
             .any(|io| io.gsi_base <= gsi)
     }
 
+    /// Effective GSI of one ISA line under the declarations applied so far.
+    fn effective_gsi(&self, isa_irq: u8) -> Option<u32> {
+        debug_assert!(usize::from(isa_irq) < MAX_LEGACY_IRQS);
+        if self.invalid_identity & (1u16 << isa_irq) != 0 {
+            return None;
+        }
+        match self.overrides[..self.override_count]
+            .iter()
+            .find(|route| route.isa_irq == isa_irq)
+        {
+            Some(route) => Some(route.gsi),
+            None => Some(u32::from(isa_irq)),
+        }
+    }
+
+    /// Invalidates one line's currently effective identity route.
+    ///
+    /// Any retained override for the line encoded that identity (its GSI
+    /// equals the line) and is dropped with it.
+    fn invalidate_identity_route(&mut self, isa_irq: u8) {
+        debug_assert!(usize::from(isa_irq) < MAX_LEGACY_IRQS);
+        self.invalid_identity |= 1u16 << isa_irq;
+        let index = self.overrides[..self.override_count]
+            .iter()
+            .position(|route| route.isa_irq == isa_irq);
+        if let Some(index) = index {
+            self.overrides
+                .copy_within(index + 1..self.override_count, index);
+            self.override_count -= 1;
+        }
+    }
+
     fn record_issue(&mut self, issue: X86DiscoveryIssue) {
         warn!("x86 APIC discovery: {issue:?}");
         if self.issue_count < MAX_ISSUES {
@@ -337,8 +409,12 @@ fn iso_flags_reserved(flags: u16) -> bool {
 /// `0b00` and `0b01` both mean the platform default (bus-relative) for that
 /// field, so they map to high/edge. The reserved `0b10` encoding is filtered
 /// out before this runs.
-fn decode_trigger(flags: u16) -> IrqTrigger {
-    let level = flags >> 2 & 0b11 == 0b11;
+///
+/// A level-triggered override for ISA line 0 is treated as edge, matching
+/// Linux `mp_override_legacy_irq`: such firmware entries are faulty and a
+/// level timer causes an interrupt storm. Polarity is still decoded as given.
+fn decode_trigger(isa_irq: u8, flags: u16) -> IrqTrigger {
+    let level = isa_irq != 0 && flags >> 2 & 0b11 == 0b11;
     let low = flags & 0b11 == 0b11;
     match (level, low) {
         (false, false) => IrqTrigger::EdgeRising,

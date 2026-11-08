@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use acpi::MadtEntryIter;
 use fwnode::FwSource;
@@ -14,7 +15,6 @@ use super::{
     from_entries,
 };
 use crate::x86::IoApicDeclaration;
-use kerrno::KError;
 
 const BASE_OFFSET: usize = 44;
 
@@ -196,6 +196,36 @@ fn duplicate_override_for_the_same_isa_line_is_last_wins() {
 }
 
 #[def_test]
+fn repeated_identity_override_still_reports_last_wins() {
+    let mut entries = Vec::new();
+    push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
+    // The second declaration invalidates ISA 9's target route, which removes
+    // the previous override for ISA 9 itself. The duplicate diagnostic must be
+    // captured before that removal.
+    push_iso(&mut entries, 0, 9, 9, 0);
+    push_iso(&mut entries, 0, 9, 9, 0);
+
+    let discovered = discover(&entries).expect("repeated identity override");
+    assert_eq!(discovered.overrides().len(), 1);
+    assert_eq!(discovered.overrides()[0].isa_irq, 9);
+    assert_eq!(discovered.overrides()[0].gsi, 9);
+    assert_eq!(
+        discovered.issues(),
+        &[X86DiscoveryIssue::OverriddenIsaMapping {
+            isa_irq: 9,
+            previous_gsi: 9,
+            gsi: 9,
+        }]
+    );
+
+    let config = discovered
+        .to_init_config(super::IoApicInitPolicy::platform_legacy())
+        .expect("routed controller");
+    let desc = config.legacy_irq_desc(9).expect("explicit ISA 9 route");
+    assert_eq!(desc.hwirq, 9);
+}
+
+#[def_test]
 fn invalid_sources_and_reserved_flags_are_skipped() {
     let mut entries = Vec::new();
     push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
@@ -252,6 +282,24 @@ fn iso_flags_decode_polarity_and_trigger() {
         .map(|override_| override_.trigger)
         .collect();
     assert_eq!(observed, expected);
+}
+
+#[def_test]
+fn faulty_level_timer_override_is_forced_to_edge() {
+    let mut entries = Vec::new();
+    push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
+    // Linux `mp_override_legacy_irq`: IRQ0 level overrides come from faulty
+    // firmware and would storm; other lines keep their decoded trigger.
+    push_iso(&mut entries, 0, 0, 2, 0b1111);
+    push_iso(&mut entries, 0, 1, 9, 0b1111);
+
+    let discovered = discover(&entries).expect("timer override");
+    let observed: Vec<_> = discovered
+        .overrides()
+        .iter()
+        .map(|override_| override_.trigger)
+        .collect();
+    assert_eq!(observed, [IrqTrigger::EdgeFalling, IrqTrigger::LevelLow]);
 }
 
 #[def_test]
@@ -342,26 +390,229 @@ fn single_controller_converts_to_the_init_config() {
         )
     );
     assert_eq!(config.source, FwSource::Acpi);
+    assert_eq!(config.legacy_irq_desc(4).expect("identity route").hwirq, 4);
 }
 
 #[def_test]
-fn conversion_rejects_topologies_without_routing_support() {
+fn conversion_accepts_one_controller_at_a_non_zero_base() {
+    let mut entries = Vec::new();
+    push_io_apic(&mut entries, 0, 0xFEC0_0000, 24);
+    push_iso(&mut entries, 0, 4, 28, 0b1111);
+
+    let discovered = discover(&entries).expect("one controller with a base");
+    let config = discovered
+        .to_init_config(super::IoApicInitPolicy::platform_legacy())
+        .expect("one controller is representable at any base");
+
+    assert_eq!(
+        config.controllers().next().expect("one instance").declaration.gsi_base,
+        24
+    );
+    let desc = config.legacy_irq_desc(4).expect("routed ISA 4");
+    assert_eq!(desc.hwirq, 4, "GSI 28 is local pin 4");
+    assert_eq!(desc.trigger, IrqTrigger::LevelLow);
+}
+
+#[def_test]
+fn conversion_routes_each_controller_to_its_own_instance_domain() {
+    let mut entries = Vec::new();
+    push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
+    push_io_apic(&mut entries, 1, 0xFEC0_1000, 24);
+    // ISA 4 explicitly routed to GSI 28, which belongs to controller B.
+    push_iso(&mut entries, 0, 4, 28, 0b1111);
+
+    let discovered = discover(&entries).expect("two controllers");
+    let config = discovered
+        .to_init_config(super::IoApicInitPolicy::platform_legacy())
+        .expect("multiple controllers are representable");
+    assert_eq!(config.controller_count(), 2);
+
+    let instances: Vec<_> = config.controllers().collect();
+    assert_eq!(instances[0].domain, super::super::IO_APIC_DOMAIN);
+    assert_ne!(instances[0].domain, instances[1].domain);
+
+    // GSI 4 resolves to controller A pin 4; GSI 28 to controller B pin 4.
+    let a = config.legacy_irq_desc(4).expect("routed ISA 4");
+    assert_eq!(a.hwirq, 4);
+    assert_eq!(a.domain, Some(instances[1].domain));
+    assert_eq!(a.trigger, IrqTrigger::LevelLow);
+
+    let capabilities = [
+        x86_apic::IoApicCapabilities { pin_count: 24 },
+        x86_apic::IoApicCapabilities { pin_count: 24 },
+    ];
+    assert_eq!(
+        super::super::validate_ranges(&config, &capabilities),
+        Ok(())
+    );
+    assert_eq!(
+        super::super::validate_legacy_routes(&config, &capabilities),
+        Ok(())
+    );
+}
+
+#[def_test]
+fn identity_route_prefers_the_controller_that_owns_the_gsi() {
     let mut entries = Vec::new();
     push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
     push_io_apic(&mut entries, 1, 0xFEC0_1000, 24);
 
     let discovered = discover(&entries).expect("two controllers");
-    assert!(matches!(
-        discovered.to_init_config(super::IoApicInitPolicy::platform_legacy()),
-        Err(KError::Unsupported)
-    ));
+    let config = discovered
+        .to_init_config(super::IoApicInitPolicy::platform_legacy())
+        .expect("multiple controllers are representable");
+    let instances: Vec<_> = config.controllers().collect();
 
+    // Identity ISA 4 and ISA 12 stay on controller A: B starts at GSI 24, so
+    // its larger base must not capture a lower GSI. The descriptor path uses
+    // only the declared base and the backend's 32-pin bound.
+    assert_eq!(
+        config.legacy_irq_desc(4).expect("ISA 4").domain,
+        Some(instances[0].domain)
+    );
+    assert_eq!(
+        config.legacy_irq_desc(12).expect("ISA 12").domain,
+        Some(instances[0].domain)
+    );
+}
+
+#[def_test]
+fn non_identity_override_replaces_the_default_route() {
     let mut entries = Vec::new();
-    push_io_apic(&mut entries, 0, 0xFEC0_0000, 24);
+    push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
+    push_iso(&mut entries, 0, 4, 9, 0b1111);
 
-    let discovered = discover(&entries).expect("one controller");
-    assert!(matches!(
-        discovered.to_init_config(super::IoApicInitPolicy::platform_legacy()),
-        Err(KError::Unsupported)
-    ));
+    let discovered = discover(&entries).expect("override");
+    let config = discovered
+        .to_init_config(super::IoApicInitPolicy::platform_legacy())
+        .expect("routed controller");
+
+    let desc = config.legacy_irq_desc(4).expect("routed ISA 4");
+    assert_eq!(desc.hwirq, 9);
+    assert_eq!(desc.trigger, IrqTrigger::LevelLow);
+    // Linux invalidates the identity route of the override target so ISA 9
+    // does not alias the same GSI through a different route.
+    assert!(config.legacy_irq_desc(9).is_none());
+}
+
+#[def_test]
+fn duplicate_override_last_wins_for_the_routed_descriptor() {
+    let mut entries = Vec::new();
+    push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
+    push_iso(&mut entries, 0, 4, 5, 0);
+    push_iso(&mut entries, 0, 4, 6, 0b1111);
+
+    let discovered = discover(&entries).expect("duplicate override");
+    let config = discovered
+        .to_init_config(super::IoApicInitPolicy::platform_legacy())
+        .expect("routed controller");
+
+    let desc = config.legacy_irq_desc(4).expect("routed ISA 4");
+    assert_eq!(desc.hwirq, 6);
+    assert_eq!(desc.trigger, IrqTrigger::LevelLow);
+    assert!(config.legacy_irq_desc(5).is_none());
+    assert!(config.legacy_irq_desc(6).is_none());
+}
+
+#[def_test]
+fn chained_overrides_invalidate_each_identity_target() {
+    let mut entries = Vec::new();
+    push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
+    push_iso(&mut entries, 0, 4, 9, 0);
+    push_iso(&mut entries, 0, 9, 10, 0);
+
+    let discovered = discover(&entries).expect("chained overrides");
+    let config = discovered
+        .to_init_config(super::IoApicInitPolicy::platform_legacy())
+        .expect("routed controller");
+
+    assert_eq!(config.legacy_irq_desc(4).expect("ISA 4").hwirq, 9);
+    assert_eq!(config.legacy_irq_desc(9).expect("ISA 9").hwirq, 10);
+    assert!(config.legacy_irq_desc(10).is_none());
+}
+
+#[def_test]
+fn later_override_clears_an_identity_route_restored_earlier() {
+    let mut entries = Vec::new();
+    push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
+    // Linux checks the target's live mapping while processing each ISO:
+    // 9 -> 9 leaves ISA 9 mapped, so the later 4 -> 9 clears it.
+    push_iso(&mut entries, 0, 9, 9, 0);
+    push_iso(&mut entries, 0, 4, 9, 0b1111);
+
+    let discovered = discover(&entries).expect("ordered overrides");
+    assert_eq!(discovered.overrides().len(), 1);
+    assert_eq!(discovered.overrides()[0].isa_irq, 4);
+
+    let config = discovered
+        .to_init_config(super::IoApicInitPolicy::platform_legacy())
+        .expect("routed controller");
+    assert_eq!(config.legacy_irq_desc(4).expect("ISA 4").hwirq, 9);
+    assert!(config.legacy_irq_desc(9).is_none());
+}
+
+#[def_test]
+fn later_explicit_identity_override_restores_an_invalidated_line() {
+    let mut entries = Vec::new();
+    push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
+    // Reverse order: 4 -> 9 invalidates ISA 9, then the explicit 9 -> 9 is a
+    // real later declaration and revives it. Sharing GSI 9 is not rejected.
+    push_iso(&mut entries, 0, 4, 9, 0b1111);
+    push_iso(&mut entries, 0, 9, 9, 0);
+
+    let discovered = discover(&entries).expect("ordered overrides");
+    assert_eq!(discovered.overrides().len(), 2);
+
+    let config = discovered
+        .to_init_config(super::IoApicInitPolicy::platform_legacy())
+        .expect("routed controller");
+    assert_eq!(config.legacy_irq_desc(4).expect("ISA 4").hwirq, 9);
+    let restored = config
+        .legacy_irq_desc(9)
+        .expect("ISA 9 explicitly restored");
+    assert_eq!(restored.hwirq, 9);
+    assert_eq!(restored.trigger, IrqTrigger::EdgeRising);
+}
+
+#[def_test]
+fn routed_descriptor_programs_the_backend_pin_and_firmware_flags() {
+    let mut entries = Vec::new();
+    push_io_apic(&mut entries, 0, 0xFEC0_0000, 0);
+    push_iso(&mut entries, 0, 4, 9, 0b1111);
+
+    let discovered = discover(&entries).expect("non-identity override");
+    let config = discovered
+        .to_init_config(super::IoApicInitPolicy::platform_legacy())
+        .expect("routed controller");
+    assert_eq!(
+        super::super::validate_legacy_routes(
+            &config,
+            &[x86_apic::IoApicCapabilities { pin_count: 24 }]
+        ),
+        Ok(())
+    );
+
+    let desc = config.legacy_irq_desc(4).expect("routed ISA 4");
+    let observed = Cell::new(None);
+    super::super::configure_with(
+        desc,
+        super::super::io_pin,
+        |instance, pin, policy| {
+            observed.set(Some((instance.as_usize(), pin.as_usize(), policy)));
+            true
+        },
+    )
+    .expect("backend accepts the routed pin");
+
+    assert_eq!(
+        observed.get(),
+        Some((
+            0,
+            9,
+            x86_apic::IoApicTriggerPolicy::Program {
+                trigger: x86_apic::IoApicTriggerMode::Level,
+                polarity: x86_apic::IoApicPolarity::Low,
+            },
+        ))
+    );
 }

@@ -81,8 +81,11 @@ fn checked_configuration_masks_before_changes_and_preserves_routing() {
         assert!(configure(
             &mut registers,
             pin(4),
-            IoApicTriggerMode::Level,
-            IoApicPolarity::Low
+            IoApicTriggerPolicy::Program {
+                trigger: IoApicTriggerMode::Level,
+                polarity: IoApicPolarity::Low,
+            },
+            0x24
         ));
         assert_eq!(registers.writes.len(), if masked { 2 } else { 3 });
         assert_eq!(registers.writes[0], IrqFlags::MASKED);
@@ -96,14 +99,32 @@ fn checked_configuration_masks_before_changes_and_preserves_routing() {
 }
 
 #[def_test]
+fn keeping_hardware_trigger_still_installs_a_verified_vector() {
+    let hardware = IrqFlags::MASKED | IrqFlags::LEVEL_TRIGGERED | IrqFlags::LOW_ACTIVE;
+    let mut registers = Model::new(hardware);
+    assert!(configure(
+        &mut registers,
+        pin(4),
+        IoApicTriggerPolicy::KeepHardware,
+        0x24
+    ));
+    assert_eq!(registers.writes.len(), 2);
+    assert!(registers.writes.iter().all(|flags| *flags == hardware));
+    assert_eq!(registers.flags, hardware);
+}
+
+#[def_test]
 fn failed_readback_never_restores_delivery() {
     let mut registers = Model::new(IrqFlags::empty());
     registers.fault = Fault::Configuration;
     assert!(!configure(
         &mut registers,
         pin(4),
-        IoApicTriggerMode::Level,
-        IoApicPolarity::Low
+        IoApicTriggerPolicy::Program {
+            trigger: IoApicTriggerMode::Level,
+            polarity: IoApicPolarity::Low,
+        },
+        0x24
     ));
     assert_eq!(registers.writes.len(), 2);
     assert!(registers.flags.contains(IrqFlags::MASKED));
@@ -117,8 +138,11 @@ fn failed_readback_never_restores_delivery() {
     assert!(configure(
         &mut registers,
         pin(4),
-        IoApicTriggerMode::Level,
-        IoApicPolarity::Low
+        IoApicTriggerPolicy::Program {
+            trigger: IoApicTriggerMode::Level,
+            polarity: IoApicPolarity::Low,
+        },
+        0x24
     ));
     assert!(registers.flags.contains(IrqFlags::MASKED));
 }
@@ -131,8 +155,11 @@ fn failed_mask_or_restore_readback_reports_failure() {
         assert!(!configure(
             &mut registers,
             pin(4),
-            IoApicTriggerMode::Level,
-            IoApicPolarity::Low
+            IoApicTriggerPolicy::Program {
+                trigger: IoApicTriggerMode::Level,
+                polarity: IoApicPolarity::Low,
+            },
+            0x24
         ));
         assert_eq!(registers.writes.len(), expected_writes);
         if matches!(fault, Fault::Mask) {
@@ -148,30 +175,33 @@ fn failed_mask_or_restore_readback_reports_failure() {
 fn retrigger_uses_programmed_destination_without_changing_mask() {
     let mut registers = Model::new(IrqFlags::MASKED);
     let mut sent = None;
-    assert!(retrigger(&mut registers, pin(4), |vector, destination| sent =
+    assert!(retrigger(&mut registers, pin(4), 0x24, |vector, destination| sent =
         Some((vector, destination))));
     assert_eq!(sent, Some((0x24, 7)));
     assert!(registers.writes.is_empty());
     for flags in [IrqFlags::LEVEL_TRIGGERED, IrqFlags::LOGICAL_DEST] {
         registers.flags = flags;
-        assert!(!retrigger(&mut registers, pin(4), |_, _| panic!(
+        assert!(!retrigger(&mut registers, pin(4), 0x24, |_, _| panic!(
             "unsupported route"
         )));
     }
     registers.flags = IrqFlags::empty();
     registers.vector = 0x40;
-    assert!(!retrigger(&mut registers, pin(4), |_, _| panic!(
+    assert!(!retrigger(&mut registers, pin(4), 0x24, |_, _| panic!(
         "wrong vector"
     )));
     for pin in [pin(24), pin(31)] {
-        assert!(!retrigger(&mut registers, pin, |_, _| panic!(
+        assert!(!retrigger(&mut registers, pin, 0x24, |_, _| panic!(
             "pin beyond hardware table"
         )));
         assert!(!configure(
             &mut registers,
             pin,
-            IoApicTriggerMode::Edge,
-            IoApicPolarity::High
+            IoApicTriggerPolicy::Program {
+                trigger: IoApicTriggerMode::Edge,
+                polarity: IoApicPolarity::High,
+            },
+            0x24
         ));
     }
     for pin in [32, usize::MAX] {
@@ -199,12 +229,12 @@ impl Registers for InitModel {
 }
 
 #[def_test]
-fn initialization_masks_every_hardware_input_including_pins_without_a_fixed_vector() {
+fn initialization_masks_every_hardware_input_and_leaves_vectors_unassigned() {
     let mut model = InitModel {
         max_pin: 47,
         writes: Vec::new(),
     };
-    crate::program_initial_redirection_table(
+    crate::io_apic::program_initial_redirection_table(
         &mut model,
         47,
         crate::IoApicInitPolicy::platform_legacy(),
@@ -219,28 +249,53 @@ fn initialization_masks_every_hardware_input_including_pins_without_a_fixed_vect
             entry.flags().contains(IrqFlags::MASKED),
             "pin {pin} must be masked during initialization"
         );
-        if expected_pin <= IoApicPin::MAX {
-            assert_eq!(
-                entry.vector() as usize,
-                IO_APIC_VECTOR_BASE + expected_pin,
-                "pin {pin} must keep its fixed delivery vector"
-            );
-            assert_eq!(entry.dest(), 0);
-            assert!(matches!(entry.mode(), IrqMode::Fixed));
-            let level_low = expected_pin >= 10;
-            assert_eq!(
-                entry.flags().contains(IrqFlags::LEVEL_TRIGGERED),
-                level_low
-            );
-            assert_eq!(entry.flags().contains(IrqFlags::LOW_ACTIVE), level_low);
-        } else {
-            assert_eq!(
-                entry.vector(),
-                0,
-                "pin {pin} has no fixed vector and must not borrow one"
-            );
-            assert!(!entry.flags().contains(IrqFlags::LEVEL_TRIGGERED));
-            assert!(!entry.flags().contains(IrqFlags::LOW_ACTIVE));
-        }
+        assert_eq!(
+            entry.vector(),
+            0,
+            "pin {pin} must wait for a route-assigned vector"
+        );
+        assert_eq!(entry.dest(), 0);
+        assert!(matches!(entry.mode(), IrqMode::Fixed));
+        let level_low = expected_pin >= 10;
+        assert_eq!(
+            entry.flags().contains(IrqFlags::LEVEL_TRIGGERED),
+            level_low
+        );
+        assert_eq!(entry.flags().contains(IrqFlags::LOW_ACTIVE), level_low);
     }
+}
+
+#[def_test]
+fn vector_table_separates_equal_pins_on_different_instances() {
+    let first = IoApicInstanceId::try_from_usize(0).expect("first instance");
+    let second = IoApicInstanceId::try_from_usize(1).expect("second instance");
+    let mut table = VectorTable::new();
+
+    let first_vector = table.allocate(first, pin(4)).expect("free vector");
+    let second_vector = table.allocate(second, pin(4)).expect("free vector");
+    assert_ne!(first_vector, second_vector);
+    assert_eq!(first_vector as usize, IO_APIC_VECTOR_BASE);
+    assert_eq!(second_vector as usize, IO_APIC_VECTOR_BASE + 1);
+    assert_eq!(
+        table.route(first_vector as usize),
+        Some((first, pin(4)))
+    );
+    assert_eq!(
+        table.route(second_vector as usize),
+        Some((second, pin(4)))
+    );
+    assert_eq!(table.route(IO_APIC_VECTOR_BASE + 2), None);
+}
+
+#[def_test]
+fn vector_table_exhaustion_is_reported() {
+    let instance = IoApicInstanceId::try_from_usize(0).expect("instance");
+    let mut table = VectorTable::new();
+    for offset in 0..MAX_IO_APIC_PINS {
+        let assigned = table
+            .allocate(instance, pin(offset))
+            .expect("pool has one slot per pin");
+        assert_eq!(assigned as usize, IO_APIC_VECTOR_BASE + offset);
+    }
+    assert_eq!(table.allocate(instance, pin(0)), None);
 }

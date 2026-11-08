@@ -378,3 +378,34 @@ fn firmware_domain_registration_and_translation_use_exact_node_identity() {
         first.virq
     );
 }
+
+#[def_test]
+fn controller_domain_allocation_without_firmware_is_non_identity() {
+    let first = crate::alloc_irq_domain(IrqController::IoApic)
+        .expect("allocator reserves an instance domain");
+    let second = crate::alloc_irq_domain(IrqController::IoApic)
+        .expect("allocator reserves another instance domain");
+
+    assert_ne!(first, second);
+    assert_ne!(first, crate::IO_APIC_DOMAIN);
+    assert_ne!(second, crate::IO_APIC_DOMAIN);
+    assert_eq!(
+        crate::domain::domain_kind(first),
+        Some(IrqController::IoApic)
+    );
+    assert_eq!(
+        crate::domain::domain_kind(second),
+        Some(IrqController::IoApic)
+    );
+    // No firmware controller association was fabricated.
+    assert!(
+        crate::domain::domain(first)
+            .expect("allocated domain is published")
+            .firmware
+            .lock()
+            .is_none()
+    );
+    // An allocated instance never inherits numeric identity fallback.
+    assert_eq!(crate::domain::resolve(first, 4), None);
+    assert_eq!(crate::domain::resolve(second, 4), None);
+}

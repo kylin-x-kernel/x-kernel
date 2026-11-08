@@ -104,7 +104,9 @@ fn commit_seals_admission_until_existing_handle_stops() {
     );
 }
 
-#[def_test]
+// The poll below assumes the two spawned tasks run promptly. Keep the test out
+// of the parallel pool so scheduler contention cannot exhaust the fixed window.
+#[def_test(serial)]
 fn abort_releases_both_commit_and_admission_waiters() {
     let journal = Arc::new(JournalTransactions::new_with_credit_limit(
         TransactionId::new(30),

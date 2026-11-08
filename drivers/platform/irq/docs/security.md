@@ -256,20 +256,26 @@ anywhere in this crate.
   the backend's audited assembly; this path introduces no new handwritten unsafe.
 - The x86 path delegates register access to `x86-apic` and supports only
   IO-APIC trigger/polarity translation; MSIs are composed by the
-  `x86-apic` backend, not here. `x86::init` validates the declaration
-  (non-zero address, zero GSI base, known provenance) before touching
-  hardware. Hardware capabilities are validated after IO-APIC
-  publication; a rejection returns `Unsupported` and boot aborts rather
-  than routing through a controller window this runtime cannot
-  represent.
+  `x86-apic` backend, not here. `x86::init` first validates the
+  declarations (non-zero, unique address; known provenance), then runs
+  `init_local_primary`, probes every controller without writing a
+  redirection table, and validates capabilities (pin count and
+  `gsi_base + pin_count` overflow), half-open GSI-range overlap, and
+  every explicit firmware route against the probed owner. Only after
+  that complete validation are controllers installed and programmed, in
+  declaration order. A non-zero GSI base is supported; the range is
+  consumed by boot validation rather than retained for runtime routing.
+  Rejection returns `InvalidInput`/`Unsupported` and boot aborts without
+  rolling back MMIO mappings.
 - `x86::discovery` treats the MADT as untrusted input. The first
   malformed entry ends the walk and fails it with the offending table
   offset; invalid or over-capacity controller declarations are skipped
   and recorded as issues rather than programmed. A duplicate ISA line is
-  recorded and the later mapping wins. Its fixed arrays bound memory use,
-  and it performs no MMIO access. Only `Absent` authorizes the platform's
-  static fallback; a malformed stream or an unsupported topology aborts
-  boot instead of silently using another address.
+  recorded with its superseded mapping, captured before target
+  invalidation, and the later mapping wins. Its fixed arrays bound memory
+  use, and it performs no MMIO access. Only `Absent` authorizes the
+  platform's static fallback; a malformed stream or an unsupported
+  topology aborts boot instead of silently using another address.
 - GICv3 `dispatch_nmi` semantics depend on the PMR-based NMI window; on
   platforms without FEAT_NMI/pseudo-NMI support the NMI path is
   inactive (`supports_hardware_nmi` reports `false`).

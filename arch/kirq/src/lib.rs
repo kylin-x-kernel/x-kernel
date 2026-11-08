@@ -75,7 +75,7 @@ pub use domain::{
     IrqRef,
     fw::{
         IrqDomainRegisterError, IrqDomainTarget, IrqDomainXlate, IrqHwSpec, IrqXlateError,
-        register_irq_domain,
+        alloc_irq_domain, register_irq_domain,
     },
 };
 pub(crate) use model::desc;

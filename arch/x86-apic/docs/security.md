@@ -24,11 +24,13 @@ Tests inject owner preparation failure while pinned with IRQs disabled and check
 NOWAIT selection and unchanged CPU-local storage; they do not force global OOM
 or simulate recovery from partially prepared hardware.
 
-This analysis covers the entire crate: `src/lib.rs` (Local APIC bring-up,
-IPIs, MSI-X backend) and `src/io_apic.rs` (checked IO-APIC flow operations). No modules are
-excluded; every unsafe access site is enumerated below. The vector and
-dispatch policy layer above this crate belongs to `kirq` and is audited
-there.
+This analysis covers the entire crate: `src/lib.rs` (shared types and
+constants), `src/local_apic.rs` (Local APIC bring-up and IPIs),
+`src/msix.rs` (MSI-X backend), `src/io_apic.rs` (instance registry and pin
+operations), and `src/io_apic/programming.rs` (register transactions). No
+modules are excluded; every unsafe access site is enumerated below. The
+vector and dispatch policy layer above this crate belongs to `kirq` and is
+audited there.
 
 ## Trust Model
 
@@ -40,11 +42,12 @@ into this crate.
 
 ## External Boundaries
 
-- **IO-APIC MMIO window**: mapped once from the platform-provided
-  physical address (`init_io_apic`). All redirection-table accesses are
-  bounds-checked against `max_table_entry()` before MMIO is touched;
-  values outside `IoApicPin::MAX` cannot be constructed, and pins beyond
-  the hardware table are rejected or no-ops.
+- **IO-APIC MMIO windows**: mapped once per platform-provided controller
+  address (`probe_io_apic`). All redirection-table accesses name an
+  `IoApicInstanceId` and are bounds-checked against that instance's
+  `max_table_entry()` before MMIO is touched; values outside
+  `IoApicPin::MAX` cannot be constructed, and pins beyond the hardware
+  table are rejected or no-ops.
 - **MSI message composition**: the composed address
   (`0xFEE0_0000 | apic_id << 12`) is written by devices into system
   memory and triggers a physical interrupt; an unrepresentable affinity
@@ -86,8 +89,9 @@ starting the dependency's default periodic event before timer-handler readiness.
 Boot callers keep ordinary IRQ delivery disabled throughout preparation;
 clock-event activation remains the timer driver's responsibility.
 
-- `IO_APIC` (`LazyInit<SpinNoIrq<IoApic>>`): the only IO-APIC handle;
-  every redirection write goes through the lock.
+- `IO_APICS` (`LazyInit<SpinNoIrq<IoApicRegistry>>`): every installed
+  IO-APIC handle, its probed pin count, assigned vectors, and configured-pin
+  flags; every redirection access goes through the registry lock.
 - `LOCAL_APIC_PTR` (per-CPU): the exclusive Local APIC handle slot.
 - `MSIX_VECTOR_ALLOCATOR` (`SpinNoIrq` bitmap and destination bindings): the MSI-X vector window
   `0x40..0xf0`; double allocation is structurally impossible (bits are
@@ -103,17 +107,18 @@ clock-event activation remains the timer driver's responsibility.
 
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
-| T-01 | IO-APIC access beyond the table | Medium — MMIO to unmapped register offsets | Caller supplies a pin outside the fixed vector window or beyond the hardware table | `IoApicPin` rejects pins above 31; `set_pin_enabled`, `configure_pin_checked` and `retrigger_pin` bound-check against `max_table_entry()`, and `pin_trigger_mode` returns `None`. |
+| T-01 | IO-APIC access beyond the table | Medium — MMIO to unmapped register offsets | Caller supplies a pin outside the 32-entry window or beyond the hardware table, or names a different instance | `IoApicPin` rejects pins above 31; `set_pin_enabled`, `configure_pin_checked` and `retrigger_pin` resolve the instance and bound-check against its `max_table_entry()`, and `pin_trigger_mode` returns `None`. |
 | T-02 | MSI vector reuse while a device still holds it | Medium: spurious interrupts, cross-device delivery | Unbalanced lifecycle or missing device quiescence | KIRQ retains one non-cloneable reservation per successful allocation and withdraws mappings before consuming it in backend release. The bitmap and destination are cleared under the allocator lock. Device shutdown and late-message ordering remain caller obligations. |
 | T-03 | IPI to a CPU id wider than the xAPIC destination field | Medium — misdirected or dropped IPI | Logical CPU whose raw id exceeds `u8` on the xAPIC path | `apic_id_for_affinity` rejects and logs the target instead of truncating; MSI composition returns `None`. |
 | T-04 | LAPIC access before per-CPU bring-up | Medium — null-pointer panic | `with_local_apic` on a CPU without `init_local_primary`/`init_secondary` | Explicit `assert!` on the per-CPU handle with a named message; fails loudly at the call site. |
 | T-05 | Spurious interrupt through the masked legacy PIC | Low — stray IRQ 8259 line | Legacy device raising a line after masking | 8259 masked at `init_local_primary` before APIC routing takes over; spurious lines cannot reach the kernel path afterwards. |
+| T-06 | Wrong IO-APIC instance programmed | Medium — equal pin on another controller | Instance domain ignored or misresolved at integration | The backend indexes instances by checked `IoApicInstanceId`; every pin operation names one. Non-primary instances receive distinct non-identity domains, and dispatch resolves the delivered vector through the route table before selecting a domain. |
 
 ## Failure Modes
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | APIC MMIO mapping fails at `init_local_primary`/`init_io_apic` | KError returned | Boot fails | 2 | IoMapError converts to InvalidInput, Io or NoMemory; existing hardware and any published LAPIC owner are not rolled back. |
+| F-01 | APIC MMIO mapping fails at `init_local_primary`/`probe_io_apic`/`install_io_apic` | KError returned | Boot fails | 2 | IoMapError converts to InvalidInput, Io or NoMemory; existing hardware and any published LAPIC owner are not rolled back. |
 | F-02 | MSI-X window exhausted | `None` returned to `kirq` | Device stays on a shared line or probe fails | 3 | 176 vectors; exhaustion is logged upstream by `kirq`. |
 | F-03 | `with_local_apic` before bring-up | Panic (named assert) | Offending caller aborts | 2 | Bring-up ordering bug surfaced loudly. |
 | F-04 | Affinity target has no raw APIC id | `None` from `compose_msi_message` | MSI retained or probe degrades | 3 | Logged warning with the CPU number. |
@@ -127,9 +132,9 @@ clock-event activation remains the timer driver's responsibility.
 - No suspend/resume path: APIC state is not saved or restored around
   sleep transitions (`suspend_to_ram` is unsupported platform-wide).
 - Controllers with more than 32 inputs have all hardware entries masked
-  during init, but only pins `0..=31` receive a fixed delivery vector.
-  Higher pins are not routable by this backend until a later discovery
-  slice allocates delivery resources for them.
+  during init, but the route-vector pool and `IoApicPin` cover only pins
+  `0..=31`. Higher pins are not routable by this backend until a later
+  slice widens the vector window.
 
 ## Audit Checklist
 
@@ -141,13 +146,22 @@ clock-event activation remains the timer driver's responsibility.
 
 ## Flow Programming And Retrigger
 
-`src/io_apic.rs::Registers for IoApic` contains the new unsafe register accesses.
-The private adapter is used only with the permanent mapped handle under IO_APIC
-exclusion. `IoApicPin` bounds the fixed vector window, and helpers validate the
-pin against max_table_entry before read/write. Configuration retains that exclusion across mask,
-readback, trigger/polarity writes and optional restore. Failure does not authorize
-unmask, but a hardware refusal to mask cannot be converted into a physical
-quiescence guarantee. Changing remote-IRR trigger/polarity is refused.
+`src/io_apic/programming.rs::Registers for IoApic` contains the unsafe
+register accesses.
+The private adapter is used only with the permanent mapped handle under registry
+exclusion. `IoApicPin` bounds the 32-entry route window, and helpers validate
+the pin against the owning instance's max_table_entry before read/write. The
+vector is assigned from the shared route table on first configuration and
+read back with the trigger/polarity bits. Configuration retains that exclusion
+across mask, readback, vector assignment, optional trigger/polarity writes and
+optional restore. A descriptor without trigger metadata still installs a
+vector (`IoApicTriggerPolicy::KeepHardware`); it does not skip configuration.
+The configured mark describes the most recent configuration transaction: a new
+attempt clears it first and only success sets it again. Unmasking a pin without
+that mark is a no-op, so neither a never-configured pin nor a pin whose last
+reconfiguration failed can enable a null-vector entry. Failure does not
+authorize unmask, but a hardware refusal to mask cannot be converted into a
+physical quiescence guarantee. Changing remote-IRR trigger/polarity is refused.
 
 Retrigger validates fixed physical edge routing and issues an IPI to the stored
 destination/vector while the route owner is locked. MSI composition retains its

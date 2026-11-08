@@ -2,140 +2,405 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Checked IO-APIC programming and fixed-route edge retrigger.
+//! IO-APIC registry, boot lifecycle, GSI resolution, and per-pin operations.
+//!
+//! Controllers are probed without being programmed, validated as a complete
+//! topology, and only then installed in declaration order. The firmware GSI
+//! range is consumed by that validation; an installed instance keeps only the
+//! pins it implements and a per-pin delivery vector. The registry lock
+//! serializes every register access after publication.
+//!
+//! Register-level programming lives in [`programming`]; this module owns the
+//! objects and lifetime transitions around it.
 
+use kcpu_id_map::RawCpuId;
+use kerrno::{KError, KResult};
+use kspin::SpinNoIrq;
+use lazyinit::LazyInit;
+use memaddr::PhysAddr;
+use memspace::iomap_device;
+use programming::{Registers, VectorTable, configure, retrigger};
 use x2apic::ioapic::{IoApic, IrqFlags, IrqMode, RedirectionTableEntry};
 
-use super::{IO_APIC, IO_APIC_VECTOR_BASE, IoApicPin, IoApicPolarity, IoApicTriggerMode};
+#[cfg(unittest)]
+use super::{IO_APIC_VECTOR_BASE, IoApicPolarity};
+use super::{
+    IoApicCapabilities, IoApicInitPolicy, IoApicInstanceId, IoApicPin, IoApicTriggerMode,
+    IoApicTriggerPolicy, MAX_IO_APIC_PINS, MAX_IO_APICS, send_ipi_raw,
+};
 
-pub(super) trait Registers {
-    fn max_pin(&mut self) -> u8;
-    fn read(&mut self, pin: u8) -> RedirectionTableEntry;
-    fn write(&mut self, pin: u8, entry: RedirectionTableEntry);
+mod programming;
+
+static IO_APICS: LazyInit<SpinNoIrq<IoApicRegistry>> = LazyInit::new();
+
+/// One initialized IO-APIC together with the pins it actually implements.
+///
+/// `io_apic` supplies register access; `pin_count` bounds every per-pin
+/// operation. The controller's firmware GSI base is consumed during boot
+/// topology validation and is not needed after installation. `pin_vectors`
+/// records the dynamic delivery vector assigned to each configured pin;
+/// `configured_pins` marks pins whose most recent configuration transaction
+/// succeeded. A reconfiguration attempt clears the mark first, so a failed
+/// attempt cannot leave an old success standing in for the new state. Only
+/// marked pins may be unmasked; a vector that was assigned to an earlier
+/// successful configuration still remains installed.
+struct IoApicController {
+    io_apic: IoApic,
+    pin_count: u16,
+    pin_vectors: [Option<u8>; MAX_IO_APIC_PINS],
+    configured_pins: [bool; MAX_IO_APIC_PINS],
 }
 
-impl Registers for IoApic {
-    fn max_pin(&mut self) -> u8 {
-        // SAFETY: Only the permanently mapped IO_APIC implements this private
-        // adapter in production. Before publication the initializer owns it
-        // exclusively; afterwards its register lock serializes access.
-        unsafe { self.max_table_entry() }
-    }
-
-    fn read(&mut self, pin: u8) -> RedirectionTableEntry {
-        // SAFETY: `IoApicPin` bounds the fixed vector window and the helpers
-        // below bound it by max_pin. Before publication the initializer owns
-        // the controller exclusively; afterwards the caller retains the
-        // IO-APIC register-select/window lock.
-        unsafe { self.table_entry(pin) }
-    }
-
-    fn write(&mut self, pin: u8, entry: RedirectionTableEntry) {
-        // SAFETY: The checked pin and permanent mapping remain valid. Before
-        // publication the initializer owns the controller exclusively; at
-        // runtime the IO-APIC register lock protects each access and the
-        // surrounding read/modify/write transaction.
-        unsafe { self.set_table_entry(pin, entry) };
+impl IoApicController {
+    fn new(io_apic: IoApic, pin_count: u16) -> Self {
+        Self {
+            io_apic,
+            pin_count,
+            pin_vectors: [None; MAX_IO_APIC_PINS],
+            configured_pins: [false; MAX_IO_APIC_PINS],
+        }
     }
 }
 
-fn valid_pin(registers: &mut impl Registers, pin: IoApicPin) -> bool {
-    pin.as_usize() <= usize::from(registers.max_pin())
+/// Bounded registry of initialized IO-APIC instances and vector routes.
+///
+/// The registry lock serializes register access and protects the instance and
+/// vector tables, which are immutable after boot except for the lazy vector
+/// assignment performed by the first configuration of a pin.
+struct IoApicRegistry {
+    instances: [Option<IoApicController>; MAX_IO_APICS],
+    count: usize,
+    vectors: VectorTable,
 }
 
-/// Programs trigger/polarity while masked, checks readback, then restores the
-/// old mask. Failure never intentionally unmasks, but a failed mask readback
-/// cannot guarantee hardware suppression.
+impl IoApicRegistry {
+    const fn new() -> Self {
+        Self {
+            instances: [const { None }; MAX_IO_APICS],
+            count: 0,
+            vectors: VectorTable::new(),
+        }
+    }
+
+    fn controller(&self, instance: IoApicInstanceId) -> Option<&IoApicController> {
+        self.instances.get(instance.as_usize())?.as_ref()
+    }
+
+    fn controller_mut(&mut self, instance: IoApicInstanceId) -> Option<&mut IoApicController> {
+        self.instances.get_mut(instance.as_usize())?.as_mut()
+    }
+
+    fn install(
+        &mut self,
+        mut probed: ProbedIoApic,
+        policy: IoApicInitPolicy,
+    ) -> KResult<IoApicInstanceId> {
+        if self.count >= MAX_IO_APICS {
+            return Err(KError::Unsupported);
+        }
+        let instance = IoApicInstanceId::try_from_usize(self.count).ok_or(KError::Unsupported)?;
+        let max_entry = u8::try_from(probed.pin_count - 1).map_err(|_| KError::InvalidInput)?;
+        program_initial_redirection_table(&mut probed.io_apic, max_entry, policy);
+        info!(
+            "IO-APIC instance {} initialized and masked, gsi_base={}, pins=0-{}",
+            instance.as_usize(),
+            probed.gsi_base,
+            max_entry
+        );
+        self.instances[instance.as_usize()] =
+            Some(IoApicController::new(probed.io_apic, probed.pin_count));
+        self.count += 1;
+        Ok(instance)
+    }
+
+    /// Returns the vector assigned to one pin, assigning a new one on first use.
+    ///
+    /// Vectors are never released: a configured source keeps its delivery
+    /// vector for the kernel lifetime, and the finite pool bounds the number
+    /// of simultaneously configured pins.
+    fn vector_for(&mut self, instance: IoApicInstanceId, pin: IoApicPin) -> Option<u8> {
+        let controller = self.controller(instance)?;
+        if pin.as_usize() >= usize::from(controller.pin_count) {
+            return None;
+        }
+        if let Some(vector) = controller
+            .pin_vectors
+            .get(pin.as_usize())
+            .copied()
+            .flatten()
+        {
+            return Some(vector);
+        }
+        let vector = self.vectors.allocate(instance, pin)?;
+        let controller = self.controller_mut(instance)?;
+        controller.pin_vectors[pin.as_usize()] = Some(vector);
+        Some(vector)
+    }
+
+    fn configure_pin(
+        &mut self,
+        instance: IoApicInstanceId,
+        pin: IoApicPin,
+        policy: IoApicTriggerPolicy,
+    ) -> bool {
+        let Some(vector) = self.vector_for(instance, pin) else {
+            return false;
+        };
+        let Some(controller) = self.controller_mut(instance) else {
+            return false;
+        };
+        // A failed attempt may leave the entry partially programmed. Clear the
+        // previous success before touching hardware so the mark always
+        // describes the most recent transaction, never an older one.
+        controller.configured_pins[pin.as_usize()] = false;
+        let configured = configure(&mut controller.io_apic, pin, policy, vector);
+        controller.configured_pins[pin.as_usize()] = configured;
+        configured
+    }
+
+    fn retrigger_pin(&mut self, instance: IoApicInstanceId, pin: IoApicPin) -> bool {
+        let expected = self.controller(instance).and_then(|controller| {
+            controller
+                .pin_vectors
+                .get(pin.as_usize())
+                .copied()
+                .flatten()
+        });
+        let Some(expected) = expected else {
+            return false;
+        };
+        if self.vectors.route(usize::from(expected)) != Some((instance, pin)) {
+            return false;
+        }
+        let Some(controller) = self.controller_mut(instance) else {
+            return false;
+        };
+        retrigger(
+            &mut controller.io_apic,
+            pin,
+            expected,
+            |vector, destination| {
+                send_ipi_raw(usize::from(vector), RawCpuId::new(usize::from(destination)));
+            },
+        )
+    }
+}
+
+/// A probed IO-APIC that has not been programmed or published.
+///
+/// Probing maps the controller registers and reads its implemented pin count;
+/// it performs no redirection-table write. Boot wiring validates all probed
+/// ranges before installing any instance.
+pub struct ProbedIoApic {
+    io_apic: IoApic,
+    gsi_base: u32,
+    pin_count: u16,
+}
+
+impl ProbedIoApic {
+    /// Hardware capabilities read from this controller.
+    pub const fn capabilities(&self) -> IoApicCapabilities {
+        IoApicCapabilities {
+            pin_count: self.pin_count,
+        }
+    }
+}
+
+/// Resolves a GSI inside one controller range to its local redirection pin.
+///
+/// A GSI is a system route number, not a pin. Resolution is the checked
+/// subtraction `gsi - gsi_base` bounded by the probed pin count; a GSI below
+/// the base or outside the implemented table has no pin on this controller.
+pub const fn pin_for_gsi_in_range(gsi: u32, gsi_base: u32, pin_count: u16) -> Option<IoApicPin> {
+    match gsi.checked_sub(gsi_base) {
+        Some(offset) if offset < pin_count as u32 => IoApicPin::try_from_usize(offset as usize),
+        _ => None,
+    }
+}
+
+/// Assigns the route's delivery vector while masked, optionally programs
+/// trigger/polarity, checks readback, then restores the old mask.
+///
+/// A descriptor that does not state trigger or polarity still needs a delivery
+/// route; [`IoApicTriggerPolicy::KeepHardware`] installs the vector without
+/// rewriting those bits. Failure never intentionally unmasks, but a failed
+/// mask readback cannot guarantee hardware suppression.
 /// Does not change routing or prove that already delivered interrupts drained.
 /// Requires initialized controller state; call in task/ordinary IRQ context,
 /// never NMI, while the source owner excludes competing configuration.
 pub fn configure_pin_checked(
+    instance: IoApicInstanceId,
     pin: IoApicPin,
-    trigger: IoApicTriggerMode,
-    polarity: IoApicPolarity,
+    policy: IoApicTriggerPolicy,
 ) -> bool {
-    configure(&mut *IO_APIC.lock(), pin, trigger, polarity)
-}
-
-fn configure(
-    registers: &mut impl Registers,
-    pin: IoApicPin,
-    trigger: IoApicTriggerMode,
-    polarity: IoApicPolarity,
-) -> bool {
-    if !valid_pin(registers, pin) {
+    let Some(registry) = IO_APICS.get() else {
         return false;
-    }
-    let pin = pin.as_u8();
-    let mut entry = registers.read(pin);
-    let was_masked = entry.flags().contains(IrqFlags::MASKED);
-    entry.set_flags(entry.flags() | IrqFlags::MASKED);
-    registers.write(pin, entry);
-    let mut entry = registers.read(pin);
-    if !entry.flags().contains(IrqFlags::MASKED) {
-        return false;
-    }
-    // Changing an active level route would lose its remote-IRR completion
-    // relationship. Refuse it instead of interpreting software drain as EOI.
-    let mut flags = entry.flags();
-    flags.set(
-        IrqFlags::LEVEL_TRIGGERED,
-        trigger == IoApicTriggerMode::Level,
-    );
-    flags.set(IrqFlags::LOW_ACTIVE, polarity == IoApicPolarity::Low);
-    let configuration = IrqFlags::LEVEL_TRIGGERED | IrqFlags::LOW_ACTIVE;
-    if entry.flags().contains(IrqFlags::REMOTE_IRR)
-        && (entry.flags() & configuration) != (flags & configuration)
-    {
-        return false;
-    }
-    entry.set_flags(flags);
-    registers.write(pin, entry);
-    let mut observed = registers.read(pin);
-    if observed.flags() & (configuration | IrqFlags::MASKED)
-        != flags & (configuration | IrqFlags::MASKED)
-    {
-        return false;
-    }
-    if !was_masked {
-        observed.set_flags(observed.flags() - IrqFlags::MASKED);
-        registers.write(pin, observed);
-        if registers.read(pin).flags().contains(IrqFlags::MASKED) {
-            return false;
-        }
-    }
-    true
+    };
+    registry.lock().configure_pin(instance, pin, policy)
 }
 
 /// Issues edge retrigger to the physical destination/vector read under the
-/// IO-APIC lock. Rejects unsupported or changed routing without sending an IPI.
-/// Fixed IO-APIC vectors are never allocated from the MSI vector pool.
+/// registry lock. Rejects unsupported, changed or reassigned routing without
+/// sending an IPI.
 /// Call in task/ordinary IRQ context after local APIC and IO-APIC preparation,
 /// with source ownership retained. This is not NMI-safe or a delivery drain.
-pub fn retrigger_pin(pin: IoApicPin) -> bool {
-    retrigger(&mut *IO_APIC.lock(), pin, |vector, destination| {
-        super::send_ipi_raw(
-            usize::from(vector),
-            kcpu_id_map::RawCpuId::new(usize::from(destination)),
-        );
+pub fn retrigger_pin(instance: IoApicInstanceId, pin: IoApicPin) -> bool {
+    let Some(registry) = IO_APICS.get() else {
+        return false;
+    };
+    registry.lock().retrigger_pin(instance, pin)
+}
+
+/// Masks or unmasks one input pin of one IO-APIC instance.
+///
+/// The pin must be within that instance's probed redirection table; otherwise
+/// the call is a no-op. Unmasking also requires the pin's most recent
+/// configuration transaction to have succeeded, so a pin that was never given
+/// a delivery vector, or whose last reconfiguration failed, stays suppressed.
+/// The instance is part of the identity: pin 4 on one controller is unrelated
+/// to pin 4 on another.
+pub fn set_pin_enabled(instance: IoApicInstanceId, pin: IoApicPin, enabled: bool) {
+    let Some(registry) = IO_APICS.get() else {
+        return;
+    };
+    let mut registry = registry.lock();
+    let Some(controller) = registry.controller_mut(instance) else {
+        return;
+    };
+    if pin.as_usize() >= usize::from(controller.pin_count)
+        || (enabled && !controller.configured_pins[pin.as_usize()])
+    {
+        return;
+    }
+    if enabled {
+        // SAFETY: The pin is within the probed redirection table, and the
+        // registry lock serializes the register-select/window accesses.
+        unsafe { controller.io_apic.enable_irq(pin.as_u8()) };
+    } else {
+        // SAFETY: The pin is within the probed redirection table, and the
+        // registry lock serializes masking.
+        unsafe { controller.io_apic.disable_irq(pin.as_u8()) };
+    }
+}
+
+/// Returns the programmed trigger mode of one input pin on one instance, or
+/// `None` when the pin is outside that instance's physical table.
+pub fn pin_trigger_mode(instance: IoApicInstanceId, pin: IoApicPin) -> Option<IoApicTriggerMode> {
+    let registry = IO_APICS.get()?;
+    let mut registry = registry.lock();
+    let controller = registry.controller_mut(instance)?;
+    if pin.as_usize() >= usize::from(controller.pin_count) {
+        return None;
+    }
+    // SAFETY: The pin is within the probed redirection table, and the registry
+    // lock serializes the register access.
+    let flags = unsafe { controller.io_apic.table_entry(pin.as_u8()) }.flags();
+    Some(if flags.contains(IrqFlags::LEVEL_TRIGGERED) {
+        IoApicTriggerMode::Level
+    } else {
+        IoApicTriggerMode::Edge
     })
 }
 
-fn retrigger(registers: &mut impl Registers, pin: IoApicPin, send: impl FnOnce(u8, u8)) -> bool {
-    if !valid_pin(registers, pin) {
-        return false;
+/// Maps and probes one IO-APIC without programming it.
+///
+/// The MMIO mapping is established and the implemented redirection-table size
+/// is read. No redirection entry is written, so boot wiring can validate every
+/// controller's range before the first instance is installed. `gsi_base` is
+/// the controller's first firmware GSI and is retained with the probed pin
+/// count for later GSI-to-pin translation.
+/// Requires boot CPU context with IRQs and migration disabled.
+///
+/// # Errors
+/// MMIO errors propagate as InvalidInput, Io or NoMemory.
+pub fn probe_io_apic(io_apic_paddr: PhysAddr, gsi_base: u32) -> KResult<ProbedIoApic> {
+    let io_apic_base = iomap_device(io_apic_paddr, 0x1000, "ioapic")?;
+    // SAFETY: `io_apic_base` is the MMIO mapping for this controller and stays
+    // mapped for the kernel lifetime.
+    let mut io_apic = unsafe { IoApic::new(io_apic_base.as_usize() as u64) };
+    // SAFETY: The newly mapped controller is exclusively owned during probe.
+    let max_entry = unsafe { io_apic.max_table_entry() };
+    let capabilities = IoApicCapabilities::from_max_table_entry(max_entry);
+    info!(
+        "IO-APIC supports {} IRQ inputs (0-{max_entry})",
+        capabilities.pin_count
+    );
+    Ok(ProbedIoApic {
+        io_apic,
+        gsi_base,
+        pin_count: capabilities.pin_count,
+    })
+}
+
+/// Programs and publishes one probed IO-APIC instance.
+///
+/// Every implementable input pin is programmed as masked with no delivery
+/// vector, using trigger and polarity defaults supplied by `policy`. A vector
+/// is assigned when a route on that pin is configured. Instances are published
+/// in installation order; that order is the instance identifier boot wiring
+/// retains for later descriptor operations.
+/// Requires boot CPU context with IRQs and migration disabled.
+///
+/// # Errors
+/// Returns `Unsupported` when the instance array is full, and `InvalidInput`
+/// when the probed pin count cannot be represented as a table index.
+pub fn install_io_apic(
+    probed: ProbedIoApic,
+    policy: IoApicInitPolicy,
+) -> KResult<IoApicInstanceId> {
+    if let Some(registry) = IO_APICS.get() {
+        return registry.lock().install(probed, policy);
     }
-    let entry = registers.read(pin.as_u8());
-    if entry.vector() as usize != IO_APIC_VECTOR_BASE + pin.as_usize()
-        || entry
-            .flags()
-            .intersects(IrqFlags::LOGICAL_DEST | IrqFlags::LEVEL_TRIGGERED)
-        || !matches!(entry.mode(), IrqMode::Fixed)
-    {
-        return false;
+    let mut registry = IoApicRegistry::new();
+    let instance = registry.install(probed, policy)?;
+    IO_APICS.init_once(SpinNoIrq::new(registry));
+    Ok(instance)
+}
+
+/// Resolves a delivery vector to the configured `(instance, pin)` route.
+///
+/// Returns `None` for vectors outside the IO-APIC window and for window
+/// vectors that no configured pin owns.
+pub fn io_apic_route(vector: usize) -> Option<(IoApicInstanceId, IoApicPin)> {
+    IO_APICS.get()?.lock().vectors.route(vector)
+}
+
+fn initial_redirection_flags(pin: u8, policy: IoApicInitPolicy) -> IrqFlags {
+    let level_low = policy
+        .default_level_low_from
+        .is_some_and(|from| pin >= from);
+    if level_low {
+        IrqFlags::LEVEL_TRIGGERED | IrqFlags::LOW_ACTIVE | IrqFlags::MASKED
+    } else {
+        IrqFlags::MASKED
     }
-    send(entry.vector(), entry.dest());
-    true
+}
+
+fn program_initial_redirection_table(
+    registers: &mut impl Registers,
+    max_entry: u8,
+    policy: IoApicInitPolicy,
+) {
+    if usize::from(max_entry) > IoApicPin::MAX {
+        warn!(
+            "IO-APIC reports {} pins; the backend can address only the first {}",
+            u16::from(max_entry) + 1,
+            MAX_IO_APIC_PINS
+        );
+    }
+    for pin in 0..=max_entry {
+        // Every hardware input must be suppressed during bring-up. Delivery
+        // vectors are assigned per configured route, so an entry starts with
+        // vector zero and stays masked: a masked entry cannot deliver the
+        // null vector or collide with another instance's assigned vector.
+        let mut entry = RedirectionTableEntry::default();
+        entry.set_dest(0);
+        entry.set_mode(IrqMode::Fixed);
+        entry.set_flags(initial_redirection_flags(pin, policy));
+        // Write access is bounded by the controller-reported table size and
+        // goes through the IO-APIC register model.
+        registers.write(pin, entry);
+    }
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/io_apic.rs");

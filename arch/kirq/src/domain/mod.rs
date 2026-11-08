@@ -37,7 +37,8 @@ pub(crate) struct IrqDomain {
     pub(crate) lines: XArray<Arc<IrqLine>>,
     is_identity: bool,
     kind: IrqController,
-    /// Set once during boot by `fw::register_irq_domain`.
+    /// Set once during boot by `fw::register_irq_domain`, or left empty for a
+    /// controller instance that has no firmware namespace node.
     pub(crate) firmware: SpinNoIrq<Option<fw::DomainEntry>>,
     /// Next domain in the append-only registry. Written once before the domain
     /// is published to readers.
@@ -148,11 +149,13 @@ static NEXT_DOMAIN_ID: AtomicU32 = AtomicU32::new(DYNAMIC_DOMAIN_ID_BASE);
 
 /// Allocates and publishes a domain already associated with its controller.
 ///
-/// Requires the caller to serialize with other registration writers. The
-/// association is installed before the domain becomes reachable, so a reader
-/// that observes the new domain also observes its firmware binding. The new
-/// domain is leaked for the kernel lifetime; `None` means its storage could not
-/// be reserved. A failed attempt may consume an identifier.
+/// Requires the caller to serialize with other registration writers. A
+/// firmware association, when supplied, is installed before the domain becomes
+/// reachable, so a reader that observes the new domain also observes its
+/// binding. Controller instances without a firmware namespace node pass
+/// `None`; they remain pure hardware-number namespaces. The new domain is
+/// leaked for the kernel lifetime; `None` means its storage could not be
+/// reserved. A failed attempt may consume an identifier.
 ///
 /// Allocated domains require explicit mappings. Numeric identity fallback is a
 /// compatibility policy of a reserved well-known root and is never inherited by
@@ -160,11 +163,11 @@ static NEXT_DOMAIN_ID: AtomicU32 = AtomicU32::new(DYNAMIC_DOMAIN_ID_BASE);
 /// resolve to an unrelated global logical number.
 pub(super) fn create_domain(
     kind: IrqController,
-    entry: fw::DomainEntry,
+    entry: Option<fw::DomainEntry>,
 ) -> Option<&'static IrqDomain> {
     let id = IrqDomainId::new(NEXT_DOMAIN_ID.fetch_add(1, Ordering::Relaxed));
     let domain = KBox::new_with_flags(IrqDomain::new(id, false, kind), AllocFlags::NOWAIT).ok()?;
-    *domain.firmware.lock() = Some(entry);
+    *domain.firmware.lock() = entry;
     let pointer = KBox::into_raw(domain);
     // SAFETY: `into_raw` transfers the sole owner of a live domain. The domain
     // is published below and intentionally never reclaimed, so the reference

@@ -39,19 +39,35 @@ end-of-interrupt and raw-APIC-id helpers to the rest of the kernel.
   PIC, selects x2APIC vs xAPIC from CPUID, programs timer/error/spurious
   vectors, maps the xAPIC MMIO page when needed) and `init_secondary`
   (application CPUs).
-- IO-APIC bring-up: `init_io_apic(paddr, policy)` maps the controller,
-  masks every hardware redirection entry, assigns the fixed delivery
-  vector and policy defaults only to pins inside the fixed vector window,
-  publishes the single controller, and returns
-  `IoApicCapabilities { pin_count }`. Pins above the window stay masked
-  with no delivery vector and are not routable in this slice.
-  Production boot calls the split steps through `irq_driver::x86::init`,
-  which validates declarations and capabilities.
-- IO-APIC routing: `configure_pin_checked` (masked trigger/polarity
-  transaction with readback), `set_pin_enabled` (mask/unmask),
-  `pin_trigger_mode` (query), and `retrigger_pin` (fixed physical-route
-  delivery). `IoApicPin` distinguishes a controller pin from a GSI or a
-  CPU vector.
+- IO-APIC bring-up: `probe_io_apic(paddr, gsi_base)` maps the controller
+  and reads its implemented pin count without programming it;
+  `install_io_apic(probed, policy)` masks every hardware redirection entry,
+  writes policy defaults, and publishes the instance with its probed
+  `pin_count`. The firmware `gsi_base` is consumed by the caller's topology
+  validation before installation. Every entry starts with vector zero and
+  masked; a delivery vector is assigned per configured route later, so two
+  instances never compete for the same vector by pin arithmetic. Pins above
+  the 32-entry backend window stay masked and are not routable. Production
+  boot calls the split steps through `irq_driver::x86::init`, which probes
+  the whole topology and validates addresses, capabilities, GSI ranges, and
+  explicit routes before installing any instance.
+- GSI resolution: `pin_for_gsi_in_range(gsi, gsi_base, pin_count)` performs
+  the checked subtraction `gsi - gsi_base` and bounds the result by the
+  probed pin count. The result is a controller-local `IoApicPin`, never the
+  GSI. A GSI is a firmware route number; it is not a pin and never becomes
+  `IrqDesc::hwirq`. The IRQ integration layer performs this resolution while
+  validating the boot topology; after installation, dispatch resolves the
+  dynamically assigned delivery vector instead of the GSI.
+- IO-APIC routing: `configure_pin_checked(instance, pin, policy)` (masked
+  vector installation with readback and per-route vector assignment),
+  `set_pin_enabled(instance, pin, ..)` (mask/unmask),
+  `pin_trigger_mode(instance, pin)` (query), and
+  `retrigger_pin(instance, pin)` (physical-route delivery through the
+  assigned vector). `IoApicTriggerPolicy::Program` also rewrites
+  trigger/polarity; `KeepHardware` retains the programmed bits while still
+  assigning and verifying a delivery vector. `IoApicInstanceId` and
+  `IoApicPin` together distinguish a source from a GSI, a CPU vector, or an
+  equal pin on another controller.
 - Inter-processor interrupts: `send_ipi_self`, `send_ipi_raw`,
   `send_ipi_all_but_self`.
 - MSI-X backend (`kirq::MsiBackendIf` provider): a bitmap allocator over
@@ -65,9 +81,9 @@ end-of-interrupt and raw-APIC-id helpers to the rest of the kernel.
 
 - No generic IRQ policy or dispatch: IRQ objects, actions, flow
   execution, and synchronization belong to `kirq`; `irq-driver` connects
-  those flows to this crate's operations. CPU vector allocation, the
-  fixed vector layout, and delivery destination encoding stay here, and
-  this crate programs registers it is told to program.
+  those flows to this crate's operations. The IO-APIC delivery-vector
+  pool, the Local APIC vector layout, and delivery destination encoding
+  stay here, and this crate programs registers it is told to program.
 - No interrupt-line discovery: the IO-APIC address and initial policy
   arrive from `irq-driver`/platform policy; this crate never parses ACPI
   or MADT and owns no fallback address.
@@ -86,10 +102,13 @@ end-of-interrupt and raw-APIC-id helpers to the rest of the kernel.
 | --- | --- |
 | PIC masking, x2APIC/xAPIC mode, LAPIC vectors | This crate; boot CPU during `init_local_primary` |
 | Per-CPU `LocalApic` handle | This crate; one leaked NOWAIT `KBox` in the CPU-local slot, installed by `init_local_primary`/`init_secondary` |
-| IO-APIC MMIO mapping and register lock | This crate; boot CPU only, one controller in this slice |
-| IO-APIC pin count | Hardware capability returned by `init_io_apic`; runtime support validation belongs to `irq-driver` |
+| IO-APIC MMIO mappings and register lock | This crate; every installed controller, indexed by `IoApicInstanceId` |
+| IO-APIC probed `pin_count`, per-pin vector and configured mark | This crate; retained per instance under the registry lock. `pin_count` is immutable after publication; vector assignment happens on first configuration, and the configured mark tracks the latest configuration transaction |
+| IO-APIC delivery vectors | This crate; one 32-entry route table shared by all instances, assigned on first configuration |
+| GSI -> (instance, local pin) resolution | Boot integration; `pin_for_gsi_in_range` arithmetic over declared and probed ranges, never a per-GSI table |
+| IO-APIC pin count support policy | `irq-driver`; validates the returned capability |
 | MSI/MSI-X vector bitmap and destinations | This crate; exposed through `kirq::MsiBackendIf` |
-| GSI and ISO semantics | Not owned here; firmware discovery and IRQ integration layers |
+| ISO semantics and ISA -> GSI table | Not owned here; firmware discovery and IRQ integration layers |
 
 Host-resource management is separate from hardware operations:
 `memspace::iomap_device` maps the xAPIC page and IO-APIC window, and
@@ -102,9 +121,12 @@ access, IO-APIC redirection register access, EOI, and IPI issue.
 ```text
 arch/x86-apic/
 ├── src/
-│   ├── lib.rs        # LAPIC/IO-APIC bring-up, IPIs, MSI-X backend
-│   └── io_apic.rs    # Checked configuration and fixed-route retrigger
-├── ut-tests/pin.rs   # Pin bounds, init policy, capability reporting
+│   ├── lib.rs                    # Shared types, constants, module wiring
+│   ├── local_apic.rs             # Per-CPU LAPIC lifecycle, EOI, timer, IPIs
+│   ├── msix.rs                   # MSI-X allocator and kirq backend provider
+│   ├── io_apic.rs                # Registry, probe/install, pin ops, routing
+│   └── io_apic/programming.rs    # Register transactions and route vectors
+├── ut-tests/                     # Pin/instance bounds, GSI ranges, vectors, init
 └── Cargo.toml
 ```
 
@@ -116,12 +138,22 @@ init_local_primary()
   ├─ CPUID: x2APIC ? enable x2APIC : map xAPIC MMIO page ("lapic")
   └─ LocalApicBuilder: timer 0xf0 / error 0xf2 / spurious 0xf1
 
-init_io_apic(io_apic_paddr, policy)
+probe_io_apic(io_apic_paddr, gsi_base)
   ├─ map IO-APIC window ("ioapic")
-  ├─ mask every hardware redirection entry; assign fixed vectors and
-  │  policy defaults only inside the 0..=31 window
-  └─ publish ──> IO_APIC: LazyInit<SpinNoIrq<IoApic>>
-                return IoApicCapabilities { pin_count }
+  └─ read pin_count from the hardware table size (no writes)
+
+install_io_apic(probed, policy)
+  ├─ mask every hardware redirection entry with vector zero
+  ├─ apply policy trigger defaults
+  └─ publish ──> IO_APICS: LazyInit<SpinNoIrq<IoApicRegistry>>
+                instances[id] = { io_apic, pin_count, pin_vectors, configured_pins }
+                return IoApicInstanceId
+
+pin_for_gsi_in_range(gsi, gsi_base, pin_count): checked gsi - gsi_base,
+                  bounded by pin_count -> IoApicPin (used by boot validation)
+io_apic_route(vector): shared VectorTable -> (instance, pin) for dispatch
+configure first use: allocate lowest free vector in 0x20..0x40 for the route
+unmask: only after configure_pin_checked recorded a verified vector
 
 per-CPU: LOCAL_APIC_PTR (kcpu_slot::cpu_slot_cell!) holds a leaked LocalApic handle
          installed by init_local_primary / init_secondary
@@ -148,12 +180,13 @@ kirq::MsiBackendIf ──> MsixVectorAllocator (bitmap, 0x40..0xf0)
   subsystems (e.g. TLB shootdown, rescheduling); the interrupt id comes
   from the caller, the raw id from `kcpu_id_map` resolution, and the
   direction is this crate -> the target CPU's LAPIC.
-- `configure_pin_checked` / `set_pin_enabled` / `pin_trigger_mode`:
-  called by `kirq` (through `irq-driver`'s `IntrManagerIf`) after it
-  converts its domain-relative hardware number to `IoApicPin`; this crate
-  programs the corresponding IO-APIC redirection entry. The current
-  IO-APIC domain treats `hwirq` as the pin; GSI translation is a later
-  discovery/integration slice.
+- `configure_pin_checked` / `set_pin_enabled` / `pin_trigger_mode`: called
+  by `kirq` (through `irq-driver`'s `IntrManagerIf`) after it resolves the
+  descriptor's domain to an instance and its hardware number to
+  `IoApicPin`; this crate programs the corresponding redirection entry.
+  The per-instance domain identifies the controller and `hwirq` is already
+  its local pin; GSI translation happened when the integration layer built
+  the descriptor.
 
 ## Fixed Local Vectors
 
@@ -215,14 +248,14 @@ CPU performing the request. There is no other creation or cleanup path.
 
 ## Execution Context
 
-- `init_local_primary` and `init_io_apic` run once on the boot CPU during
-  platform bring-up, before interrupts are routed through the APIC;
-  `init_secondary` runs on each application CPU before it enables
-  interrupts. `irq_driver::x86::init` calls them in that order.
-- `set_pin_enabled` / `configure_pin` / `pin_trigger_mode` take the
-  IO-APIC spin lock and may be called from task or ordinary IRQ context through
-  `kirq`. They must not be used from NMI. Checked configuration and retrigger
-  have the same restriction.
+- `init_local_primary`, `probe_io_apic`, and `install_io_apic` run once on
+  the boot CPU during platform bring-up, before interrupts are routed
+  through the APIC; `init_secondary` runs on each application CPU before it
+  enables interrupts. `irq_driver::x86::init` calls them in that order.
+- `set_pin_enabled` / `configure_pin_checked` / `pin_trigger_mode` /
+  `retrigger_pin` take the IO-APIC registry spin lock and may be called
+  from task or ordinary IRQ context through `kirq`. They must not be used
+  from NMI.
 - `with_local_apic` masks local interrupts for the borrow duration, so
   LAPIC accesses cannot re-enter from an interrupt handler on the same
   CPU.
@@ -233,9 +266,12 @@ CPU performing the request. There is no other creation or cleanup path.
 
 ## Concurrency Model
 
-- `IO_APIC`: `LazyInit<SpinNoIrq<IoApic>>` — one lock serializes IO-APIC
-  MMIO access; initialized during `init_io_apic` before runtime masking
-  is used. A second publication is a programming error and panics.
+- `IO_APICS`: `LazyInit<SpinNoIrq<IoApicRegistry>>` — one lock serializes
+  MMIO access across all instances and protects the immutable per-instance
+  `pin_count` plus the lazily filled route-vector and configured-pin
+  tables. Instances are published in installation order; the integration
+  layer verifies the returned `IoApicInstanceId` matches that order. A
+  second registry publication is a programming error and panics.
 - `LOCAL_APIC_PTR`: a per-CPU slot holding a deliberately leaked
   `LocalApic` handle; local IRQs stay masked while a `&mut LocalApic` is
   borrowed, excluding overlapping borrows on the same CPU.
@@ -288,19 +324,30 @@ All unsafe blocks are volatile/port access with `SAFETY:` comments:
 
 ## Checked Flow Operations
 
-`IoApicPin` bounds a pin to the fixed IO-APIC vector window below 0x40, and
-`io_apic.rs` further bounds it against the physical table. `configure_pin_checked`
-masks, reads back the mask, programs trigger/polarity, verifies those bits and
-restores prior delivery only on success.
-It preserves vector/destination and refuses changing an active remote-IRR route.
-A failed hardware readback is reported, not treated as a completed barrier;
-mask failure cannot guarantee physical suppression. Generic KIRQ admission
-provides an independent failed-configuration gate. The older `configure_pin`
-entry remains a low-level unchecked operation and is not used by KIRQ flow.
+`IoApicPin` bounds a pin below the 32-entry IO-APIC window, and `io_apic.rs`
+further bounds it against the physical table. `configure_pin_checked` masks,
+reads back the mask, assigns the route's vector on first use, optionally
+programs trigger/polarity, writes the vector, verifies those bits, and
+restores prior delivery only on success. A descriptor without trigger
+metadata uses `IoApicTriggerPolicy::KeepHardware`: it still receives and
+verifies a delivery vector, so "unknown trigger" never means "no route".
+Every configuration attempt clears the pin's configured flag before hardware
+access and sets it only on success, so the flag describes the latest
+transaction rather than an older success. `set_pin_enabled(.., true)` refuses
+pins without it; a failed (re)configuration therefore cannot unmask a
+null-vector entry. The vector is drawn from one
+shared 32-slot table keyed by `(instance, pin)`, so equal pin numbers on
+different controllers receive distinct vectors. It preserves destination and
+refuses changing an active remote-IRR route. A failed hardware readback is
+reported, not treated as a completed barrier; mask failure cannot guarantee
+physical suppression. Generic KIRQ admission provides an independent
+failed-configuration gate.
 
-`retrigger_pin` reads the fixed vector and physical destination under IO_APIC
-exclusion and issues the request before releasing that lock. Level, logical
-destination or mismatched-vector entries are rejected. No new vector is created.
+`retrigger_pin` reads the route's assigned vector and physical destination
+under the `IO_APICS` registry lock and issues the request before releasing it.
+Level, logical destination or mismatched-vector entries are rejected. No new
+vector is created, and a pin that was never successfully configured has no
+assigned vector to retrigger.
 `MsixVectorAllocator` additionally retains the destination first committed by
 message composition; conflicting recomposition fails. `Any` is resolved once
 when producing the message, not again on the replaying CPU. `retrigger_msi`
@@ -309,7 +356,7 @@ target. Admission uses `msi_route_matches`, which rejects explicit CPU affinity
 that disagrees with the message target. This is a snapshot, not a lease.
 KIRQ retains Line/control identity while invoking these operations.
 
-Lock ordering is KIRQ Line -> IO_APIC or MSIX_VECTOR_ALLOCATOR -> CPU-local
+Lock ordering is KIRQ Line -> `IO_APICS` or `MSIX_VECTOR_ALLOCATOR` -> CPU-local
 LAPIC borrow. These operations never call back into KIRQ. Retrigger returns
 request acceptance, not remote completion. The existing MSI API still requires
 the owner to stop/drain the producer before release; target retention does not

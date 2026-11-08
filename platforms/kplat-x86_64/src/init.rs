@@ -11,12 +11,29 @@ use irq_driver::x86::{
 };
 use kbuild_config::TIMER_FREQUENCY_HZ;
 use kerrno::{KError, KResult};
+use klazy::Once;
 use kplat::boot::{BootInfo, PlatformBootIf};
 
 /// Authorized platform fallback when firmware declares no usable IO-APIC.
 const STATIC_IO_APIC_BASE: u32 = 0xFEC0_0000;
+/// Legacy ISA line carrying the boot serial console.
+const CONSOLE_ISA_IRQ: u8 = 4;
+
+/// Boot IO-APIC configuration selected once during early driver init.
+///
+/// The console needs its routed descriptor before the unified IRQ entry runs,
+/// so the same configuration is retained and consumed by `prepare_interrupts`.
+static BOOT_IO_APIC_CONFIG: Once<Result<X86IrqInitConfig, KError>> = Once::new();
 
 /// Platform-relevant outcome of interpreting firmware IO-APIC discovery.
+// The boot configuration embeds the fixed 16-entry legacy route table. This
+// enum is built once during boot and never stored in a collection, so boxing
+// the large variant would add ambiguity and allocation without a benefit.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "single-use boot selection value; boxing the configuration adds allocation for no \
+              ownership or size benefit"
+)]
 enum IoApicBootSource {
     /// Firmware described a controller this runtime can initialize.
     Discovered(X86IrqInitConfig),
@@ -89,15 +106,16 @@ impl PlatformBootIf {
             ),
         );
         kernel_boot::bootln!("timer init");
-        console_driver::init_stdout_ioport(
-            console_driver::boot_console_io_port(),
-            Some(
-                kirq::IrqDesc::new(4, kirq::IrqTrigger::EdgeRising)
-                    .with_source(kirq::IrqSource::PlatformStatic)
-                    .with_controller(kirq::IrqController::IoApic)
-                    .with_domain(kirq::IO_APIC_DOMAIN),
-            ),
-        );
+        let io_apic_config = io_apic_config();
+        // The console is the first legacy-IRQ consumer. Route its ISA line
+        // through the selected boot configuration; if selection failed, stay
+        // polled and let `prepare_interrupts` report the fatal error.
+        let console_irq = io_apic_config
+            .as_ref()
+            .ok()
+            .and_then(|config| config.legacy_irq_desc(CONSOLE_ISA_IRQ));
+        console_driver::init_stdout_ioport(console_driver::boot_console_io_port(), console_irq);
+        BOOT_IO_APIC_CONFIG.call_once(|| io_apic_config);
         kernel_boot::bootln!("console driver init");
         #[cfg(feature = "rtc")]
         {
@@ -117,7 +135,11 @@ impl PlatformBootIf {
     }
 
     fn prepare_interrupts(_boot_info: &BootInfo) -> kerrno::KResult<()> {
-        irq_driver::x86::init(io_apic_config()?)
+        let config = BOOT_IO_APIC_CONFIG
+            .get()
+            .copied()
+            .ok_or(KError::InvalidInput)??;
+        irq_driver::x86::init(config)
     }
 
     #[cfg(feature = "smp")]
