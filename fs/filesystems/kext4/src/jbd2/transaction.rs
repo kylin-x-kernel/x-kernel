@@ -117,18 +117,8 @@ impl RunningTransactionState {
             reserved_credits: self.reserved_credits,
             used_credits: self.used_credits,
             has_unflushed_ordered_data: self.ordered_generation != self.flushed_generation,
-            metadata_blocks: Arc::from(
-                self.metadata_blocks
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            ),
-            revoked_blocks: Arc::from(
-                self.revoked_blocks
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            ),
+            metadata_blocks: Arc::from(self.metadata_blocks.into_iter().collect::<Vec<_>>()),
+            revoked_blocks: Arc::from(self.revoked_blocks.into_iter().collect::<Vec<_>>()),
         }
     }
 

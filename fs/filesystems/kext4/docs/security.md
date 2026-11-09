@@ -10,6 +10,14 @@ this allocation failure precedes orphan mutations. Prior journal replay is not
 undone, and nested mount allocations keep their existing contracts. NOFS still permits reclaim/I/O and is not used as a proof
 that canonical-device initialization can safely be re-entered.
 
+## Shared snapshot allocation boundary
+
+Direct vector-to-`Arc` conversion does not make metadata snapshots fallible:
+vector and shared-slice allocations retain the existing fatal OOM behavior.
+It introduces no `KERNEL` reclaim permission and does not relax the existing
+lock or execution-context requirements. BIO buffers and writeback callback
+owners are outside this conversion cleanup.
+
 ## 信任模型
 
 Allocation requests borrow their actual ext4 inode. A physical goal selects the

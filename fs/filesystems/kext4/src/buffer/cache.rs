@@ -137,7 +137,7 @@ impl MetadataBlockCache {
                 }
                 return Err(error);
             }
-            slot.publish(Arc::from(bytes.into_boxed_slice()));
+            slot.publish(Arc::from(bytes));
         } else {
             slot.wait_until_loaded();
         }
@@ -165,8 +165,7 @@ impl MetadataBlockCache {
         block: FilesystemBlock,
         transaction: TransactionId,
     ) -> Ext4Result<MetadataWriteAccess> {
-        let zeroed_bytes: Arc<[u8]> =
-            Arc::from(vec![0; self.inner.device.block_size()].into_boxed_slice());
+        let zeroed_bytes: Arc<[u8]> = Arc::from(vec![0; self.inner.device.block_size()]);
         let (slot, needs_wait) = {
             let mut entries = lock(&self.inner.entries);
             match entries.blocks.get_mut(&block) {

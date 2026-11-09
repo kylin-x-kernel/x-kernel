@@ -9,6 +9,14 @@ reclaim that could wait for mount completion. No mount-state lock is held at thi
 allocation. NOWAIT is a conservative local policy for that initialization phase,
 not a claim that the whole fill operation is atomic or non-sleeping.
 
+## Shared metadata snapshots
+
+Metadata cache buffers, journal superblock images and frozen transaction lists
+convert owned vectors directly into shared slices with `Arc::from`, without an
+intermediate boxed slice. Mutable preparation still uses `Vec`; published
+snapshots retain their existing `Arc` ownership and lifetime. Metadata updates
+keep the contents lock across transaction validation, copying and publication.
+
 ## Test Layout
 
 Guest unit, component and recovery tests live under `ut-tests/`, mirroring the

@@ -238,7 +238,7 @@ impl MetadataBufferSlot {
                 }
                 let mut updated = Vec::from(bytes.as_ref());
                 let result = update(bytes.as_ref(), &mut updated)?;
-                *bytes = Arc::from(updated.into_boxed_slice());
+                *bytes = Arc::from(updated);
                 *state = MetadataBufferState::Dirty(transaction);
                 Ok(result)
             }

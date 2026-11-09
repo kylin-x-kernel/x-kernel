@@ -801,7 +801,7 @@ impl Ext4SbInfo {
             if self.has_orphan_present() {
                 superblock::set_ext4_orphan_present_feature(superblock_bytes)?;
             }
-            let bytes: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
+            let bytes: Arc<[u8]> = Arc::from(bytes);
             self.metadata_io.replace_checkpoint_bytes(
                 superblock_block,
                 transaction,

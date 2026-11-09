@@ -1893,7 +1893,7 @@ pub(crate) fn replace_metadata_access_bytes(
     access: &MetadataWriteAccess,
     bytes: Vec<u8>,
 ) -> Ext4Result<()> {
-    access.replace_bytes(Arc::from(bytes.into_boxed_slice()))
+    access.replace_bytes(Arc::from(bytes))
 }
 
 pub(crate) fn bitmap_bit_capacity(bitmap: &[u8]) -> Ext4Result<u32> {
