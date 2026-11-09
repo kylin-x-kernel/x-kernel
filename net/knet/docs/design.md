@@ -137,7 +137,8 @@ net/knet/
     │   │       ├── abi.rs
     │   │       ├── decode.rs
     │   │       ├── encode.rs
-    │   │       └── query.rs
+    │   │       ├── query.rs
+    │   │       └── restore.rs
     │   └── filter/
     │       ├── mod.rs
     │       ├── matcher.rs
@@ -436,7 +437,7 @@ task context; table construction and counter collection allocate bounded storage
 The shared store starts with empty ACCEPT chains and remains internal pending
 network-path and ABI integration.
 
-### Legacy IPv4 Table Export
+### Legacy IPv4 Table Compatibility
 
 `netfilter/compat/iptables_legacy` exports tables in the native
 64-bit legacy IPv4 iptables format.
@@ -461,6 +462,26 @@ resolve offsets, construct rules to validate protocol compatibility, and validat
 the resulting chains before publication.
 Decoding requires task context and ignores incoming counters, cache fields, and padding.
 
+`decode.rs` also converts `LegacyTableInput` into a validated `FilterTable`.
+`DecodedTable` converts hook, policy, and jump byte offsets to record indices
+before building `ImportLayout`. Temporary byte positions are then discarded.
+`ImportLayout` checks chain boundaries and maps user-chain entry indices to
+chain IDs. The export-side `TableLayout` computes byte offsets from a validated
+table. Hook entries and ERROR names define chain boundaries in entry order.
+Built-in chains end at their declared unconditional policy; user chains end in an unconditional RETURN,
+followed by another chain or the final ERROR marker. Only next-entry offsets and
+jumps to a user chain's first rule can be restored. Rule, Chain, and FilterTable
+constructors check protocol compatibility, names, resource limits, and cycles.
+Record count and byte limits are derived from the model and supported ABI sizes.
+
+In `restore.rs`, `LegacyFilterReplace` pairs the input table with the expected
+old counter count. Its `replace` method finishes restoration before taking the
+publication lock. It checks the expected old entry count under that lock, then publishes the
+new zero-counter table. Final old counters are collected outside the lock in
+legacy entry order, with zero values for ERROR markers. A validation or count
+conflict leaves the active table and generation unchanged. This internal path
+does not access user memory or maintain ADD_COUNTERS marker state.
+
 `LegacyFilterTable` owns the complete entry array and its hook and policy offsets.
 `TableLayout` computes chain boundaries, total size, entry count, and hook and
 policy offsets before output allocation. It resolves targets against those chain
@@ -471,17 +492,16 @@ and delegates each chain's marker, rules, counters, and tail to `encode_chain`,
 then writes the terminal ERROR entry.
 Jump offsets skip user-chain markers; Continue offsets select the next entry.
 Rule and chain-end counters map to their rule and tail entries; ERROR counters are zero.
-`LegacyFilterTable::export` constructs the owned legacy table from one
-configuration state under its read lock, so rules and counter layout remain
-paired while live counter fields are sampled independently.
-Output and scratch allocation require task context. Failed export discards its
-output and leaves the configuration unchanged.
+Output and scratch allocation require task context. Encoding failures discard
+the output and leave the source table unchanged.
 
 `query.rs` provides `LegacyTableReader`, which resolves the `filter` name to the
 global configuration. The reader borrows a configuration store without holding
 a lock or pinning a table generation. Each `info()` or `export_entries()` call
 reads the current generation independently: metadata uses only `TableLayout`,
 while entry export validates the requested size and encodes under one read guard.
+Rules and counter layout belong to that generation; live counters are sampled
+independently.
 A size mismatch returns `EAGAIN`; equal sizes across calls do not imply the same
 generation. Exported bytes remain owned after later configuration changes.
 

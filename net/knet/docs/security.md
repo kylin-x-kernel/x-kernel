@@ -132,6 +132,17 @@ type 255 normalizes its ignored code range. The owned result contains no user
 pointers and cannot publish rules: graph checks and Rule construction belong to
 table reconstruction. Failures discard partial output without touching live state.
 
+Table decoding bounds the declared record count and total bytes before
+allocating decoded entries. Hook, policy, and jump offsets must identify entry
+starts and are converted to record indices before chain validation. Chains must
+cover all entries exactly once, including their required tails and the final
+ERROR marker. Jump offsets may select only the next record or a user
+chain entry. Semantic constructors reject invalid names, protocols, limits, and
+cycles before publication. `restore.rs` checks the old counter count under the
+publication write lock; failures preserve live state. Old counters are collected only
+after old-generation evaluations have finished. Incoming counters are ignored;
+ERROR counter preservation remains part of the future ADD_COUNTERS adapter.
+
 `TableLayout` checks total byte arithmetic and native offset widths before
 output allocation. Layout and counters are derived from the same immutable table,
 so their chain and rule order agree during encoding. Export uses validated chain

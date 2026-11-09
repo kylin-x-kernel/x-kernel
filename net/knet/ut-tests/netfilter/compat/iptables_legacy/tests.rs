@@ -186,8 +186,7 @@ fn counters_follow_rules_and_tails_and_exports_own_their_bytes() {
         }
     }
     table.add_counters(&counters).unwrap();
-    let config = FilterConfig::new(table);
-    let exported = LegacyFilterTable::export(&config).unwrap();
+    let exported = LegacyFilterTable::from_table(&table).unwrap();
     let before = exported.entries().to_vec();
     let expected = [0, 1, 2, 3, 4, 5, 0, 6, 0, 7, 8, 9, 10, 11, 12, 13, 14, 0];
     for (offset, packets) in entry_offsets(&exported).into_iter().zip(expected) {
@@ -195,24 +194,18 @@ fn counters_follow_rules_and_tails_and_exports_own_their_bytes() {
         assert_eq!(counter.packets, packets);
         assert_eq!(counter.bytes, packets * 123);
     }
-    let (retired, _) = config
-        .replace(FilterTable::accept_all(), |_, _| Ok(()))
-        .unwrap();
-    let replacement = LegacyFilterTable::export(&config).unwrap();
+    let replacement = LegacyFilterTable::from_table(&FilterTable::accept_all()).unwrap();
     assert_eq!(replacement.num_entries(), 4);
     for offset in entry_offsets(&replacement) {
         let counter = entry_at(&replacement, offset).counters;
         assert_eq!((counter.packets, counter.bytes), (0, 0));
     }
     assert_eq!(exported.entries(), before);
-    assert_eq!(
-        LegacyFilterTable::from_table(retired.table()).unwrap(),
-        exported
-    );
+    assert_eq!(LegacyFilterTable::from_table(&table).unwrap(), exported);
 }
 
 #[def_test]
-fn export_propagates_encoding_errors_without_changing_the_state() {
+fn encoding_errors_preserve_table_counters() {
     let invalid = Rule::new(
         BaseMatch {
             protocol: Some(Negated::new(0, false)),
@@ -234,18 +227,13 @@ fn export_propagates_encoding_errors_without_changing_the_state() {
         bytes: 28,
     };
     table.add_counters(&counters).unwrap();
-    let config = FilterConfig::new(table);
-    let generation = config.with_state(|state| state.generation());
     assert_eq!(
-        LegacyFilterTable::export(&config).err(),
+        LegacyFilterTable::from_table(&table).err(),
         Some(EncodeError::UnsupportedMatch)
     );
-    config.with_state(|state| {
-        assert_eq!(state.generation(), generation);
-        assert_eq!(state.collect_counters(), counters);
-        assert_eq!(
-            state.table().chains()[1].rules()[0].base().protocol,
-            Some(Negated::new(0, false))
-        );
-    });
+    assert_eq!(table.collect_counters(), counters);
+    assert_eq!(
+        table.chains()[1].rules()[0].base().protocol,
+        Some(Negated::new(0, false))
+    );
 }

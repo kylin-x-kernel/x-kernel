@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Native 64-bit iptables-legacy entry decoding, table export, and queries.
+//! Native 64-bit iptables-legacy table conversion and management.
 
 use alloc::{vec, vec::Vec};
 
@@ -13,7 +13,6 @@ use linux_raw_sys::net::nf_inet_hooks::{
 
 use crate::netfilter::filter::{
     chain::{Chain, ChainKind, FilterHook},
-    config::FilterConfig,
     counter::ChainCounters,
     matcher::BaseMatch,
     rule::Target,
@@ -24,8 +23,9 @@ mod abi;
 mod decode;
 mod encode;
 mod query;
+mod restore;
 
-use abi::{ERROR_ENTRY_SIZE, STANDARD_ENTRY_SIZE, XT_RETURN};
+use abi::{ERROR_ENTRY_SIZE, STANDARD_ENTRY_SIZE, XT_RETURN, XtCounters};
 pub use abi::{EXTENSION_NAME_LEN, IptGetEntries, IptGetInfo, TABLE_NAME_LEN, XtGetRevision};
 pub(super) use encode::EncodeError;
 pub use query::LegacyTableReader;
@@ -46,8 +46,8 @@ impl ExtensionKind {
     /// Checks a legacy record revision, reserving the final name byte for NUL.
     ///
     /// Returns `ENOENT` for unknown names and `EPROTONOSUPPORT` for unsupported
-    /// revisions of a known record format. Record support does not imply that
-    /// rule import or the corresponding target execution is implemented.
+    /// revisions of a known record format. A supported revision alone does not
+    /// validate a rule or table.
     pub fn check_revision(self, name: &[u8; EXTENSION_NAME_LEN], revision: u8) -> KResult<()> {
         let supported =
             encode::extension_revision(self, abi_name(name)).ok_or(LinuxError::ENOENT)?;
@@ -69,15 +69,6 @@ pub struct LegacyFilterTable {
 }
 
 impl LegacyFilterTable {
-    /// Constructs a legacy table from one configuration generation.
-    ///
-    /// Requires sleepable task context. Allocates owned output and bounded scratch
-    /// storage under the configuration's read lock. Counter fields are sampled
-    /// independently. Encoding errors leave the configuration unchanged.
-    pub(super) fn export(config: &FilterConfig) -> Result<Self, EncodeError> {
-        config.with_state(|state| Self::from_table(state.table()))
-    }
-
     /// Encodes a validated table in chain order and samples its counters.
     ///
     /// Published tables must remain borrowed through `FilterConfig::with_state`.
@@ -110,6 +101,20 @@ impl LegacyFilterTable {
     /// Returns the complete native entry array.
     pub fn entries(&self) -> &[u8] {
         &self.entries
+    }
+
+    /// Collects counters in legacy entry order; ERROR markers have zero counters.
+    fn collect_counters(table: &FilterTable) -> Vec<XtCounters> {
+        let mut counters = Vec::with_capacity(TableLayout::entry_count(table));
+        for (chain, counts) in table.chains().iter().zip(table.collect_counters()) {
+            if matches!(chain.kind(), ChainKind::UserDefined { .. }) {
+                counters.push(XtCounters::default());
+            }
+            counters.extend(counts.rules.into_iter().map(XtCounters::from));
+            counters.push(XtCounters::from(counts.end));
+        }
+        counters.push(XtCounters::default());
+        counters
     }
 
     fn encode(table: &FilterTable, layout: TableLayout) -> Result<Self, EncodeError> {
@@ -187,7 +192,6 @@ impl TableLayout {
         let mut hook_entry = [0; HOOK_COUNT];
         let mut underflow = [0; HOOK_COUNT];
         let mut offset = 0usize;
-        let mut num_entries = 1usize;
         for chain in table.chains() {
             let head_offset = offset;
             let has_marker = matches!(chain.kind(), ChainKind::UserDefined { .. });
@@ -206,7 +210,6 @@ impl TableLayout {
             offset = offset
                 .checked_add(STANDARD_ENTRY_SIZE)
                 .ok_or(EncodeError::TableTooLarge)?;
-            num_entries += chain.rules().len() + 1 + usize::from(has_marker);
             chains.push(ChainLayout {
                 head_offset,
                 rules_offset,
@@ -225,7 +228,8 @@ impl TableLayout {
             .ok_or(EncodeError::TableTooLarge)?;
         // Standard jump targets are signed; this also bounds the unsigned hook offsets.
         i32::try_from(size_bytes).map_err(|_| EncodeError::TableTooLarge)?;
-        let num_entries = u32::try_from(num_entries).map_err(|_| EncodeError::TableTooLarge)?;
+        let num_entries =
+            u32::try_from(Self::entry_count(table)).map_err(|_| EncodeError::TableTooLarge)?;
         Ok(Self {
             chains,
             size_bytes,
@@ -233,6 +237,19 @@ impl TableLayout {
             hook_entry,
             underflow,
         })
+    }
+
+    /// Counts records without allocating or encoding the table.
+    fn entry_count(table: &FilterTable) -> usize {
+        1 + table
+            .chains()
+            .iter()
+            .map(|chain| {
+                chain.rules().len()
+                    + 1
+                    + usize::from(matches!(chain.kind(), ChainKind::UserDefined { .. }))
+            })
+            .sum::<usize>()
     }
 
     fn resolve_target(&self, target: Target, next_offset: usize) -> Result<i32, EncodeError> {

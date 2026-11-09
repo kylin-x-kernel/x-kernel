@@ -39,7 +39,10 @@ fn queries_follow_current_generation_and_exports_remain_owned() {
     assert_eq!(info.underflow, info.hook_entry);
     assert_eq!((info.num_entries, info.size), (4, 632));
     let exported = reader.export_entries(info.size).unwrap();
-    assert_eq!(exported, LegacyFilterTable::export(&config).unwrap());
+    assert_eq!(
+        exported,
+        LegacyFilterTable::from_table(&FilterTable::accept_all()).unwrap()
+    );
 
     config
         .replace(table(Verdict::Drop, Vec::new()), |_, _| Ok(()))
@@ -71,7 +74,14 @@ fn query_counters_match_export_and_encoding_failure_preserves_state() {
         Target::Continue,
     )
     .unwrap();
-    let config = FilterConfig::new(table(Verdict::Accept, vec![rule]));
+    let table = table(Verdict::Accept, vec![rule]);
+    let mut counters = table.collect_counters();
+    counters[0].end = FilterCounter {
+        packets: 7,
+        bytes: 280,
+    };
+    table.add_counters(&counters).unwrap();
+    let config = FilterConfig::new(table);
     let reader = LegacyTableReader { config: &config };
     let before = config.with_state(|state| (state.generation(), state.collect_counters()));
     assert_eq!(reader.info().unwrap().size, 784);
@@ -91,6 +101,7 @@ fn query_counters_match_export_and_encoding_failure_preserves_state() {
         bytes: 280,
     };
     table.add_counters(&counters).unwrap();
+    let expected = LegacyFilterTable::from_table(&table).unwrap();
     config.replace(table, |_, _| Ok(())).unwrap();
     let entries = reader.export_entries(632).unwrap();
     let counter = IptEntry::read_from_prefix(entries.entries())
@@ -98,7 +109,7 @@ fn query_counters_match_export_and_encoding_failure_preserves_state() {
         .0
         .counters;
     assert_eq!((counter.packets, counter.bytes), (7, 280));
-    assert_eq!(entries, LegacyFilterTable::export(&config).unwrap());
+    assert_eq!(entries, expected);
 }
 
 #[def_test]

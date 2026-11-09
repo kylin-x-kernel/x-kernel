@@ -2,40 +2,296 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Decodes legacy entries. Jump offsets are checked later when building the table.
+//! Decodes legacy entries and builds validated filter tables.
 
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::ffi::CStr;
 
 use zerocopy::FromBytes;
 
 use super::{
+    FILTER_VALID_HOOKS, HOOK_COUNT,
     abi::{
         IFNAMSIZ, IPT_ENTRY_SIZE, IPT_ICMP_INV, IPT_INV_DSTIP, IPT_INV_PROTO, IPT_INV_SRCIP,
-        IPT_INV_VIA_IN, IPT_INV_VIA_OUT, IptEntry, IptIcmp, IptIp, XT_ALIGN, XT_ENTRY_HEADER_SIZE,
-        XT_RETURN, XT_TCP_INV_DSTPT, XT_TCP_INV_FLAGS, XT_TCP_INV_SRCPT, XT_UDP_INV_DSTPT,
-        XT_UDP_INV_SRCPT, XT_VERDICT_ACCEPT, XT_VERDICT_DROP, XtEntryHeader, XtErrorTarget,
-        XtStandardTarget, XtTcp, XtUdp,
+        IPT_INV_VIA_IN, IPT_INV_VIA_OUT, IptEntry, IptIcmp, IptIp, STANDARD_ENTRY_SIZE, XT_ALIGN,
+        XT_ENTRY_HEADER_SIZE, XT_RETURN, XT_TCP_INV_DSTPT, XT_TCP_INV_FLAGS, XT_TCP_INV_SRCPT,
+        XT_TCP_MATCH_SIZE, XT_UDP_INV_DSTPT, XT_UDP_INV_SRCPT, XT_VERDICT_ACCEPT, XT_VERDICT_DROP,
+        XtEntryHeader, XtErrorTarget, XtStandardTarget, XtTcp, XtUdp,
     },
     encode::LegacyExtension,
+    linux_hook,
 };
 use crate::{
     ip::{Ipv4Address, Ipv4Cidr},
     netfilter::filter::{
+        chain::{Chain, ChainId, FilterHook},
         matcher::{
             BaseMatch, ExtensionMatch, IcmpMatch, InterfacePattern, Negated, PortRange,
             TcpFlagsCondition, TcpMatch, UdpMatch,
         },
-        rule::{MAX_EXTENSION_MATCHES_PER_RULE, Verdict},
+        rule::{MAX_EXTENSION_MATCHES_PER_RULE, Rule, Target, Verdict},
+        table::{FilterTable, MAX_CHAINS, MAX_RULES},
     },
 };
 
-/// An invalid entry layout or value, or an unsupported match or target.
+/// Invalid entries or table structure, unsupported values, or exceeded limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DecodeError {
     InvalidLayout,
     InvalidValue,
+    InvalidTable,
     Unsupported,
+    TooLarge,
+}
+
+// User-chain markers are bounded by MAX_CHAINS, including built-in chains.
+const MAX_ENTRIES: usize = MAX_RULES + 2 * MAX_CHAINS + 1;
+// TCP and UDP have the largest supported match records.
+const MAX_BYTES: usize =
+    MAX_ENTRIES * (STANDARD_ENTRY_SIZE + MAX_EXTENSION_MATCHES_PER_RULE * XT_TCP_MATCH_SIZE);
+
+/// Copied table fields and entry bytes, without replacement conditions.
+pub(super) struct LegacyTableInput<'a> {
+    pub(super) valid_hooks: u32,
+    pub(super) hook_entry: [u32; HOOK_COUNT],
+    pub(super) underflow: [u32; HOOK_COUNT],
+    pub(super) num_entries: u32,
+    pub(super) entries: &'a [u8],
+}
+
+impl TryFrom<&LegacyTableInput<'_>> for FilterTable {
+    type Error = DecodeError;
+
+    fn try_from(input: &LegacyTableInput<'_>) -> Result<Self, Self::Error> {
+        DecodedTable::decode(input)?.into_table()
+    }
+}
+
+/// A rule action, an unresolved chain call, or a user-chain marker.
+enum EntryTarget {
+    Action(Target),
+    JumpToEntry(usize),
+    ChainMarker(String),
+}
+
+struct TableEntry {
+    base: BaseMatch,
+    extensions: Vec<ExtensionMatch>,
+    target: EntryTarget,
+}
+
+struct ImportedChain {
+    head_entry: usize,
+    first_rule_entry: usize,
+    tail_entry: usize,
+    hook: Option<FilterHook>,
+}
+
+/// Each entry belongs to one chain. Chain order follows the input bytes.
+struct DecodedTable {
+    entries: Vec<TableEntry>,
+    layout: ImportLayout,
+}
+
+impl DecodedTable {
+    fn decode(input: &LegacyTableInput<'_>) -> Result<Self, DecodeError> {
+        if input.valid_hooks != FILTER_VALID_HOOKS || input.num_entries == 0 {
+            return Err(DecodeError::InvalidLayout);
+        }
+        if input.num_entries as usize > MAX_ENTRIES || input.entries.len() > MAX_BYTES {
+            return Err(DecodeError::TooLarge);
+        }
+        let mut entries = Vec::with_capacity(input.num_entries as usize);
+        let mut offsets = Vec::with_capacity(input.num_entries as usize);
+        let mut offset_bytes = 0usize;
+        while offset_bytes < input.entries.len() {
+            if entries.len() == input.num_entries as usize {
+                return Err(DecodeError::InvalidLayout);
+            }
+            let entry = DecodedEntry::decode(&input.entries[offset_bytes..])?;
+            let next = offset_bytes
+                .checked_add(entry.next_offset)
+                .ok_or(DecodeError::TooLarge)?;
+            offsets.push(offset_bytes);
+            entries.push(entry);
+            offset_bytes = next;
+        }
+        if entries.len() != input.num_entries as usize
+            || !matches!(entries.last().map(|entry| &entry.target),
+                Some(DecodedTarget::ErrorTarget(name)) if name == "ERROR")
+        {
+            return Err(DecodeError::InvalidLayout);
+        }
+        entries.pop();
+        offsets.pop();
+        let entry_index_fn = |offset_bytes: u32| {
+            offsets
+                .binary_search(&(offset_bytes as usize))
+                .map_err(|_| DecodeError::InvalidLayout)
+        };
+        let mut chains = Vec::new();
+        for hook in [
+            FilterHook::LocalIn,
+            FilterHook::Forward,
+            FilterHook::LocalOut,
+        ] {
+            let slot = linux_hook(hook);
+            let head_entry = entry_index_fn(input.hook_entry[slot])?;
+            chains.push(ImportedChain {
+                head_entry,
+                first_rule_entry: head_entry,
+                tail_entry: entry_index_fn(input.underflow[slot])?,
+                hook: Some(hook),
+            });
+        }
+        let entries: Vec<_> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let target = match entry.target {
+                    DecodedTarget::Verdict(verdict) => {
+                        EntryTarget::Action(Target::Verdict(verdict))
+                    }
+                    DecodedTarget::Return => EntryTarget::Action(Target::Return),
+                    DecodedTarget::Offset(offset) => {
+                        let target = entry_index_fn(offset.bytes())?;
+                        if target == index + 1 {
+                            EntryTarget::Action(Target::Continue)
+                        } else {
+                            EntryTarget::JumpToEntry(target)
+                        }
+                    }
+                    DecodedTarget::ErrorTarget(name) => EntryTarget::ChainMarker(name),
+                };
+                Ok(TableEntry {
+                    base: entry.base,
+                    extensions: entry.extensions,
+                    target,
+                })
+            })
+            .collect::<Result<_, DecodeError>>()?;
+        drop(offsets);
+        let layout = ImportLayout::new(&entries, chains)?;
+        Ok(Self { entries, layout })
+    }
+
+    fn into_table(self) -> Result<FilterTable, DecodeError> {
+        let mut entries = self.entries.into_iter();
+        let mut chains = Vec::with_capacity(self.layout.chains.len());
+        let mut rule_count = 0usize;
+        for chain in &self.layout.chains {
+            let name = if chain.hook.is_none() {
+                match entries.next().ok_or(DecodeError::InvalidLayout)?.target {
+                    EntryTarget::ChainMarker(name) => Some(name),
+                    _ => return Err(DecodeError::InvalidLayout),
+                }
+            } else {
+                None
+            };
+            rule_count += chain.tail_entry - chain.first_rule_entry;
+            if rule_count > MAX_RULES {
+                return Err(DecodeError::TooLarge);
+            }
+            let mut rules = Vec::with_capacity(chain.tail_entry - chain.first_rule_entry);
+            for record in entries
+                .by_ref()
+                .take(chain.tail_entry - chain.first_rule_entry)
+            {
+                let target = self.layout.resolve_target(&record.target)?;
+                rules.push(
+                    Rule::new(record.base, record.extensions, target)
+                        .map_err(|_| DecodeError::InvalidTable)?,
+                );
+            }
+            let tail_entry = entries.next().ok_or(DecodeError::InvalidLayout)?;
+            let chain = match (chain.hook, name, tail_entry.target) {
+                (Some(hook), None, EntryTarget::Action(Target::Verdict(policy))) => {
+                    Chain::built_in(hook, policy, rules)
+                }
+                (None, Some(name), EntryTarget::Action(Target::Return)) => {
+                    Chain::user_defined(name, rules).map_err(|_| DecodeError::InvalidTable)?
+                }
+                _ => return Err(DecodeError::InvalidLayout),
+            };
+            chains.push(chain);
+        }
+        FilterTable::new(chains).map_err(|_| DecodeError::InvalidTable)
+    }
+}
+
+/// Validated chain boundaries and user-chain entries, all in record indices.
+struct ImportLayout {
+    chains: Vec<ImportedChain>,
+    user_entries: BTreeMap<usize, ChainId>,
+}
+
+impl ImportLayout {
+    fn new(entries: &[TableEntry], mut chains: Vec<ImportedChain>) -> Result<Self, DecodeError> {
+        for (head_entry, record) in entries.iter().enumerate() {
+            if matches!(record.target, EntryTarget::ChainMarker(_)) {
+                if chains.len() == MAX_CHAINS {
+                    return Err(DecodeError::TooLarge);
+                }
+                chains.push(ImportedChain {
+                    head_entry,
+                    first_rule_entry: head_entry + 1,
+                    tail_entry: 0,
+                    hook: None,
+                });
+            }
+        }
+        chains.sort_unstable_by_key(|chain| chain.head_entry);
+        if chains[0].head_entry != 0 {
+            return Err(DecodeError::InvalidLayout);
+        }
+        for index in 0..chains.len() {
+            let end = chains
+                .get(index + 1)
+                .map_or(entries.len(), |chain| chain.head_entry);
+            let chain = &mut chains[index];
+            if chain.first_rule_entry >= end
+                || (chain.hook.is_some() && chain.tail_entry != end - 1)
+            {
+                return Err(DecodeError::InvalidLayout);
+            }
+            chain.tail_entry = end - 1;
+            let tail_entry = &entries[chain.tail_entry];
+            let is_valid_target = matches!(
+                (&tail_entry.target, chain.hook),
+                (EntryTarget::Action(Target::Verdict(_)), Some(_))
+                    | (EntryTarget::Action(Target::Return), None)
+            );
+            if !is_valid_target
+                || tail_entry.base != BaseMatch::default()
+                || !tail_entry.extensions.is_empty()
+            {
+                return Err(DecodeError::InvalidLayout);
+            }
+        }
+        let user_entries: BTreeMap<_, _> = chains
+            .iter()
+            .enumerate()
+            .filter(|(_, chain)| chain.hook.is_none())
+            .map(|(index, chain)| (chain.first_rule_entry, ChainId::from_index(index)))
+            .collect();
+        Ok(Self {
+            chains,
+            user_entries,
+        })
+    }
+
+    fn resolve_target(&self, target: &EntryTarget) -> Result<Target, DecodeError> {
+        Ok(match target {
+            EntryTarget::Action(action) => *action,
+            EntryTarget::JumpToEntry(index) => Target::Jump(
+                *self
+                    .user_entries
+                    .get(index)
+                    .ok_or(DecodeError::InvalidLayout)?,
+            ),
+            EntryTarget::ChainMarker(_) => return Err(DecodeError::InvalidLayout),
+        })
+    }
 }
 
 /// An aligned byte offset from the start of a table.
@@ -356,4 +612,9 @@ fn read<T: FromBytes>(bytes: &[u8]) -> Result<T, DecodeError> {
 unittest::path_mod_test!(
     tests,
     "../../../../ut-tests/netfilter/compat/iptables_legacy/decode/tests.rs"
+);
+
+unittest::path_mod_test!(
+    pub(super) mod table_tests,
+    "../../../../ut-tests/netfilter/compat/iptables_legacy/decode/table.rs"
 );
