@@ -13,6 +13,7 @@ default = ["alloc"]
 alloc = []
 
 [dependencies]
+iov_iter.workspace = true
 kerrno = { workspace = true }
 kio = { workspace = true }
 bytemuck = { version = "1.24", features = [

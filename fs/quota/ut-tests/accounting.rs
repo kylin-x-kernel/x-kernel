@@ -1348,3 +1348,37 @@ fn transfer_clamps_short_source_reservations_and_admits_the_full_target() {
         );
     }
 }
+
+#[def_test]
+fn record_loading_reuses_disk_state_without_allocating_missing_storage() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut quota = io.enable_all(FORMAT);
+    let owner = ids(103)[0];
+    let writes = io.writes.get();
+    quota.read_record(&mut io, owner).unwrap();
+    assert!(!quota.is_cached_active(owner));
+    assert_eq!(io.writes.get(), writes);
+    assert_eq!(quota.next_id(&mut io, QuotaType::User, 0), Ok(None));
+    quota
+        .alloc_space(&mut io, &[owner], 4096, 1, ChargeFlags::RESERVE)
+        .unwrap();
+    assert!(quota.is_cached_active(owner));
+    let writes = io.writes.get();
+    let snapshot = quota.get(&mut io, owner).unwrap();
+    assert_eq!(snapshot.reserved_bytes, 4096);
+    assert_eq!(snapshot.total_bytes(), Ok(4096));
+    assert_eq!(io.writes.get(), writes);
+    quota.claim_space(&mut io, &[owner], 4096).unwrap();
+    quota.sync(&mut io, QuotaType::User).unwrap();
+    let mut cold = io.enable_all(FORMAT);
+    let writes = io.writes.get();
+    cold.read_record(&mut io, owner).unwrap();
+    assert!(cold.is_cached_active(owner));
+    assert_eq!(cold.get(&mut io, owner).unwrap().used_bytes, 4096);
+    assert_eq!(io.writes.get(), writes);
+    quota.suspend_cached(QuotaType::User).unwrap();
+    assert_eq!(
+        quota.read_record(&mut io, owner),
+        Err(LinuxError::ESRCH.into())
+    );
+}

@@ -78,8 +78,8 @@ fn fault_outcome_to_trap_result(outcome: PageFaultOutcome) -> bool {
 // Adapter instantiated by the osvm external-trait entry points.
 struct Vm;
 
-// Bound all fault outcomes, including backends that repeatedly report success
-// without enabling the access. Leave room for staged faults and transient races.
+// Bound completed/COW fault attempts that still do not enable the copy.
+// Admission contention is waited out separately by the live MM fault entry.
 const MAX_USER_PAGE_FAULT_ATTEMPTS: usize = 16;
 
 // Retry only the current user page after returning through the assembly fixup.
@@ -111,15 +111,11 @@ fn copy_user_pages(
             .process()
             .address_space()
             .map_err(|_| MemError::NoAccess)?;
-        let outcome = address_space
-            .lock()
-            .handle_page_fault(VirtAddr::from_usize(address), access_flags);
+        let outcome = address_space.resolve_page_fault(VirtAddr::from_usize(address), access_flags);
         // Retry the copy after each recoverable fault. Shared file writes may
         // first install a read-only PTE, then fault again to enable writing.
         match outcome {
-            PageFaultOutcome::Resolved
-            | PageFaultOutcome::Retry
-            | PageFaultOutcome::CowConflictRetry => continue,
+            PageFaultOutcome::Resolved | PageFaultOutcome::CowConflictRetry => continue,
             _ => return Err(MemError::NoAccess),
         }
     }
@@ -229,12 +225,17 @@ fn atomic_load_u32_inner(addr: usize, resolve_faults: bool) -> MemResult<u32> {
 /// Returns `Ok((true, old))` when `*addr == old` and the store of `new`
 /// succeeded. Returns `Ok((false, observed))` when the word differed from
 /// `old` (no store). Returns `Err` on misalignment, out-of-range address, or
-/// page fault that could not be resolved inside the user-access window.
+/// page fault that could not be resolved in task context.
 ///
 /// This is the primitive futex / robust-list paths need for race-free updates
 /// of userspace futex words.
 pub fn atomic_cmpxchg_u32(addr: usize, old: u32, new: u32) -> MemResult<(bool, u32)> {
-    atomic_cmpxchg_u32_inner(addr, old, new, true)
+    loop {
+        match atomic_cmpxchg_u32_nofault(addr, old, new) {
+            Err(MemError::NoAccess) => fault_in_user_writeable(addr)?,
+            result => return result,
+        }
+    }
 }
 
 /// Atomically compare-exchanges a 32-bit user word without fault resolution.
@@ -245,16 +246,16 @@ pub fn atomic_cmpxchg_u32(addr: usize, old: u32, new: u32) -> MemResult<(bool, u
 /// must keep the store inside the lock, such as `FUTEX_WAKE_OP`, instead call
 /// [`fault_in_user_writeable`] and then retry this nofault operation.
 pub fn atomic_cmpxchg_u32_nofault(addr: usize, old: u32, new: u32) -> MemResult<(bool, u32)> {
-    atomic_cmpxchg_u32_inner(addr, old, new, false)
+    atomic_cmpxchg_u32_inner(addr, old, new)
 }
 
-/// Makes one write-fault attempt for a user word without storing a new value.
+/// Resolves a write fault for a user word without storing a new value.
 ///
 /// This is the slow path for a nofault store that faulted on a present,
 /// write-protected page such as a private page after `fork`. One call invokes
-/// `MmSpace::handle_page_fault` once. `Resolved` means the address can now be
-/// written. A retry-class outcome is also success: another task already
-/// published a new PTE or anonymous page, and the caller repeats its store.
+/// the live MM's task-context resolver. `Resolved` means the address can now be
+/// written. Admission contention is waited out with the MM mutex released.
+/// A COW-conflict outcome is also success: the caller repeats its store.
 /// The caller must not hold a non-sleepable lock.
 ///
 /// # Errors
@@ -277,9 +278,7 @@ pub fn fault_in_user_writeable(addr: usize) -> MemResult<()> {
         .process()
         .address_space()
         .map_err(|_| MemError::NoAccess)?;
-    let outcome = address_space
-        .lock()
-        .handle_page_fault(VirtAddr::from_usize(addr), MappingFlags::WRITE);
+    let outcome = address_space.resolve_page_fault(VirtAddr::from_usize(addr), MappingFlags::WRITE);
     if outcome.is_resolved() || outcome.is_retryable() {
         Ok(())
     } else if outcome == PageFaultOutcome::OutOfMemory {
@@ -289,40 +288,38 @@ pub fn fault_in_user_writeable(addr: usize) -> MemResult<()> {
     }
 }
 
-fn atomic_cmpxchg_u32_inner(
-    addr: usize,
-    old: u32,
-    new: u32,
-    resolve_faults: bool,
-) -> MemResult<(bool, u32)> {
+fn atomic_cmpxchg_u32_inner(addr: usize, old: u32, new: u32) -> MemResult<(bool, u32)> {
     if !addr.is_multiple_of(core::mem::align_of::<u32>()) {
         return Err(MemError::InvalidAddr);
     }
     check_access(addr, core::mem::size_of::<u32>())?;
 
     let mut observed = 0u32;
-    let mut operation = || {
-        // SAFETY: `check_access` validated the 4-byte user range, `addr` is
-        // 4-byte aligned, and `observed` is a live kernel stack slot. The
-        // assembly exception table converts a user-memory fault into a nonzero
-        // return without exposing a raw user pointer to safe Rust.
-        unsafe {
-            user_atomic_cmpxchg_u32(
-                addr as *mut u32,
-                old,
-                new,
-                core::ptr::addr_of_mut!(observed),
-            )
-        }
+    // Keep the architecture-exclusive sequence local to this CPU.
+    let _irq = IrqSave::new();
+    let curr = current_may_uninit();
+    let outer_access = curr
+        .as_ref()
+        .and_then(|task| task.try_as_thread())
+        .filter(|thread| thread.is_accessing_user_memory());
+    if let Some(thread) = outer_access {
+        thread.set_accessing_user_memory(false);
+    }
+    // SAFETY: `check_access` validated the 4-byte user range, `addr` is
+    // 4-byte aligned, and `observed` is a live kernel stack slot. The
+    // assembly exception table converts a user-memory fault into a nonzero
+    // return without exposing a raw user pointer to safe Rust.
+    let failed = unsafe {
+        user_atomic_cmpxchg_u32(
+            addr as *mut u32,
+            old,
+            new,
+            core::ptr::addr_of_mut!(observed),
+        )
     };
-    let failed = if resolve_faults {
-        access_user_memory(operation)
-    } else {
-        // The nofault form is used inside non-sleepable ordering sections.
-        // Keep its architecture-exclusive sequence local to this CPU.
-        let _irq = IrqSave::new();
-        operation()
-    };
+    if let Some(thread) = outer_access {
+        thread.set_accessing_user_memory(true);
+    }
     if unlikely(failed != 0) {
         Err(MemError::NoAccess)
     } else {
@@ -358,6 +355,57 @@ unsafe impl VirtMemIo for Vm {
             // SAFETY: The kernel source has count initialized bytes, and
             // copy_user_pages validated the user destination; user_copy handles faults.
             unsafe { user_copy((start + offset) as _, source, count) }
+        })
+    }
+
+    fn write_mem_nofault(&mut self, start: usize, buf: &[u8]) -> MemResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        check_access(start, buf.len())?;
+        let curr = current();
+        let thread = curr.try_as_thread().ok_or(MemError::NoAccess)?;
+        // Preserve an outer access window, but never resolve a fault in this copy.
+        let was_accessing = thread.is_accessing_user_memory();
+        thread.set_accessing_user_memory(false);
+        let mut copied = 0;
+        while copied < buf.len() {
+            let address = start + copied;
+            // A bulk-copy fixup may report the start of its current batch.
+            // Keep each batch within one user page so a fault in the next page
+            // cannot hide progress and leave the iterator on a writable page.
+            let count = (PAGE_SIZE_4K - address % PAGE_SIZE_4K).min(buf.len() - copied);
+            let source = &buf[copied..copied + count];
+            // SAFETY: the destination lies within one page of the checked user
+            // range, and source contains count initialized bytes. Faults return
+            // through the exception table without forming user references.
+            let remaining = unsafe { user_copy(address as *mut u8, source.as_ptr(), count) };
+            copied += count - remaining;
+            if remaining != 0 {
+                break;
+            }
+        }
+        thread.set_accessing_user_memory(was_accessing);
+        Ok(copied)
+    }
+
+    fn fault_in_writeable(&mut self, start: usize, len: usize) -> MemResult {
+        let curr = current();
+        let thread = curr.try_as_thread().ok_or(MemError::NoAccess)?;
+        let space = thread
+            .process()
+            .address_space()
+            .map_err(|_| MemError::NoAccess)?;
+        let required = MappingFlags::USER | MappingFlags::WRITE;
+        copy_user_pages(start, len, MappingFlags::WRITE, |offset, count| {
+            let address = VirtAddr::from_usize(start + offset);
+            let mm = space.lock();
+            let is_writable = mm.can_access_range(address, count, required)
+                && mm
+                    .page_table()
+                    .query(address)
+                    .is_ok_and(|(_, flags, _)| flags.contains(required));
+            usize::from(!is_writable)
         })
     }
 }

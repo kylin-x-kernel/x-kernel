@@ -68,7 +68,7 @@ impl FileSharedRuntimeInner {
         missing
     }
 
-    fn register_writable_shared_range(&self, range: VirtAddrRange) -> KResult {
+    fn register_writable_shared_range(&self, range: VirtAddrRange, is_new: bool) -> KResult {
         let mut ranges = self.writable_shared_ranges.lock();
         let missing = Self::missing_writable_ranges(range, &ranges);
         let pages = missing
@@ -77,7 +77,11 @@ impl FileSharedRuntimeInner {
             .sum();
         let file = self.source.file();
         file.verify_mode(FMode::WRITE)?;
-        shmem::register_writable_shared_pages(file.path(), pages)?;
+        if is_new {
+            shmem::register_writable_shared_pages(file.path(), pages)?;
+        } else {
+            shmem::duplicate_writable_shared_pages(file.path(), pages)?;
+        }
         ranges.extend(missing);
         Ok(())
     }
@@ -187,6 +191,8 @@ impl FileSharedRuntime {
     fn cloned_runtime(
         &self,
         new_start: VirtAddr,
+        new_len: usize,
+        offset_page: u64,
         new_mm_id: u64,
         new_aspace: &Arc<Mutex<MmSpace>>,
         invalidate: Option<InvalidateHandle>,
@@ -199,8 +205,8 @@ impl FileSharedRuntime {
                 SharedFileSourceSpec {
                     mm_id: new_mm_id,
                     start: new_start,
-                    len: self.0.source.len(),
-                    offset_page: self.0.source.offset_page(),
+                    len: new_len,
+                    offset_page,
                     invalidate: invalidate.clone(),
                 },
             ),
@@ -235,7 +241,7 @@ impl FileSharedRuntime {
         self.check_shared_writable_mapping_allowed(flags)?;
         self.0.register_shared_range(range)?;
         if flags.contains(MappingFlags::WRITE)
-            && let Err(err) = self.0.register_writable_shared_range(range)
+            && let Err(err) = self.0.register_writable_shared_range(range, true)
         {
             self.0.unregister_shared_range(range);
             return Err(err);
@@ -267,7 +273,7 @@ impl FileSharedRuntime {
         self.check_flags(new_flags)?;
         self.check_shared_writable_mapping_allowed(new_flags)?;
         if new_flags.contains(MappingFlags::WRITE) {
-            self.0.register_writable_shared_range(range)?;
+            self.0.register_writable_shared_range(range, true)?;
         } else {
             self.0.unregister_writable_shared_range(range);
         }
@@ -308,17 +314,19 @@ impl FileSharedRuntime {
                 }
             }
             Err(PagingError::NotMapped) => {
-                address_space.with_folio_or_create(pn, |folio| {
-                    pgtbl
-                        .map(
-                            addr,
-                            folio.paddr(),
-                            PageSize::Size4K,
-                            flags - MappingFlags::WRITE,
-                        )
-                        .map_err(map_paging_err)?;
-                    populated = 1;
-                    Ok(())
+                address_space.with_invalidate_read(|| {
+                    address_space.with_folio_or_create(pn, |folio| {
+                        pgtbl
+                            .map(
+                                addr,
+                                folio.paddr(),
+                                PageSize::Size4K,
+                                flags - MappingFlags::WRITE,
+                            )
+                            .map_err(map_paging_err)?;
+                        populated = 1;
+                        Ok(())
+                    })
                 })?;
             }
             Err(_) => return Err(KError::BadAddress),
@@ -360,6 +368,21 @@ impl VmRuntimeOps for FileSharedRuntime {
         self.map_impl(range, flags, pgtbl)
     }
 
+    fn open(&self, range: VirtAddrRange, flags: MappingFlags) -> KResult {
+        self.0.register_shared_range(range)?;
+        let result = (|| {
+            if flags.contains(MappingFlags::WRITE) {
+                self.0.register_writable_shared_range(range, false)?;
+            }
+            self.0.source.extend_view_to(range.end)
+        })();
+        if result.is_err() {
+            self.0.unregister_shared_range(range);
+            self.0.unregister_writable_shared_range(range);
+        }
+        result
+    }
+
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult {
         self.unmap_impl(range, pgtbl)
     }
@@ -387,6 +410,11 @@ impl VmRuntimeOps for FileSharedRuntime {
         self.handle_fault_impl(ctx, flags, pgtbl)
     }
 
+    fn wait_for_fault(&self) -> KResult<()> {
+        self.0.source.file().wait_for_shared_mapping_write();
+        Ok(())
+    }
+
     fn msync(
         &self,
         vma: &VmArea,
@@ -398,26 +426,38 @@ impl VmRuntimeOps for FileSharedRuntime {
 
     fn relocate_for_mremap(
         &self,
-        _source_range: VirtAddrRange,
+        source_range: VirtAddrRange,
         new_start: VirtAddr,
-        _new_len: usize,
+        new_len: usize,
         new_mm_id: u64,
         aspace: &Arc<Mutex<MmSpace>>,
         invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
-        Ok(self.cloned_runtime(new_start, new_mm_id, aspace, invalidate))
+        let offset_page = self.0.source.offset_page()
+            + ((source_range.start - self.0.source.start()) / PAGE_SIZE_4K) as u64;
+        Ok(self.cloned_runtime(
+            new_start,
+            new_len,
+            offset_page,
+            new_mm_id,
+            aspace,
+            invalidate,
+        ))
     }
 
     fn clone_for_fork(
         &self,
-        _range: VirtAddrRange,
+        range: VirtAddrRange,
         _flags: MappingFlags,
         _old_pgtbl: &mut PageTableMut,
         _new_pgtbl: &mut PageTableMut,
         target: ForkCloneTarget<'_>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
         Ok(self.cloned_runtime(
-            self.0.source.start(),
+            range.start,
+            range.size(),
+            self.0.source.offset_page()
+                + ((range.start - self.0.source.start()) / PAGE_SIZE_4K) as u64,
             target.new_mm_id,
             target.new_aspace,
             target.invalidate,

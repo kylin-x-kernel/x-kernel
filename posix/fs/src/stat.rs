@@ -222,7 +222,7 @@ fn statfs(loc: &Path) -> KResult<statfs> {
         f_files: stat.file_count as _,
         f_ffree: stat.free_file_count as _,
         f_fsid: __kernel_fsid_t {
-            val: [0, loc.mount().synthetic_device_id() as _],
+            val: [0, loc.mount().device_id() as _],
         },
         f_namelen: stat.name_length as _,
         f_frsize: stat.fragment_size as _,

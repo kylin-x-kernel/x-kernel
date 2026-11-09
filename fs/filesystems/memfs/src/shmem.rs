@@ -496,6 +496,22 @@ impl ShmemObjectState {
         Ok(())
     }
 
+    fn duplicate_writable_shared_pages(&self, pages: usize) -> VfsResult<()> {
+        if pages == 0 {
+            return Ok(());
+        }
+        // An existing writable mapping already excludes WRITE sealing. FUTURE_WRITE
+        // excludes new mappings, while inherited mappings retain their permissions.
+        let mut writable = self.writable_shared_pages.lock();
+        if *writable == 0 {
+            return Err(kvfs::VfsError::InvalidInput);
+        }
+        *writable = writable
+            .checked_add(pages)
+            .ok_or(kvfs::VfsError::InvalidInput)?;
+        Ok(())
+    }
+
     /// Unregisters active writable `MAP_SHARED` pages.
     fn unregister_writable_shared_pages(&self, pages: usize) {
         if pages == 0 {
@@ -727,6 +743,19 @@ pub fn unregister_shared_pages(location: &Path, pages: usize) {
 pub fn register_writable_shared_pages(location: &Path, pages: usize) -> VfsResult<()> {
     if let Some(state) = state_for_location(location) {
         state.register_writable_shared_pages(pages)?;
+    }
+    Ok(())
+}
+
+/// Adds writable pages inherited from an existing mapping of this location.
+///
+/// Unlike new-map admission, FUTURE_WRITE does not revoke inherited permissions.
+///
+/// # Errors
+/// Returns InvalidInput if no writable mapping exists or the count overflows.
+pub fn duplicate_writable_shared_pages(location: &Path, pages: usize) -> VfsResult<()> {
+    if let Some(state) = state_for_location(location) {
+        state.duplicate_writable_shared_pages(pages)?;
     }
     Ok(())
 }

@@ -166,6 +166,18 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         ),
         Sysno::sync => sys_sync(),
         Sysno::syncfs => sys_syncfs(uctx.arg0() as _),
+        Sysno::quotactl => sys_quotactl(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3(),
+        ),
+        Sysno::quotactl_fd => sys_quotactl_fd(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3(),
+        ),
 
         // file ops
         #[cfg(target_arch = "x86_64")]

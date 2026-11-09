@@ -631,7 +631,7 @@ fn mapping_after_failed_relocation(
             .expect("install test-only destination collision");
         assert!(
             guard
-                .relocate_mapping(&source, target, runtime.len, flags, &mm)
+                .relocate_mapping(&source, target, runtime.len, false, &mm)
                 .is_err()
         );
         assert!(
@@ -1070,14 +1070,13 @@ fn failed_protect_retires_tokens_for_the_already_cleared_prefix() {
 fn relocated_file_mapping_releases_pins_at_destination_without_refault() {
     let (runtime, mm, file) = mapped_readonly_cache_pages("relocated-file-pins", 2);
     let target = runtime.start + 0x20_000;
-    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
     {
         let mut guard = mm.lock();
         let source = guard
             .resolve_mremap_source(runtime.start, runtime.len)
             .expect("source mapping");
         guard
-            .relocate_mapping(&source, target, runtime.len, flags, &mm)
+            .relocate_mapping(&source, target, runtime.len, false, &mm)
             .expect("relocate file mapping");
         let mut bytes = [0];
         guard.read(target, &mut bytes).expect("read moved mapping");
@@ -1103,7 +1102,6 @@ fn relocated_file_mapping_releases_pins_at_destination_without_refault() {
 fn relocated_file_mapping_can_shrink_and_retains_only_destination_pins() {
     let (runtime, mm, _file) = mapped_readonly_cache_pages("relocated-file-pins-shrink", 2);
     let target = runtime.start + 0x40_000;
-    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
     let source_range = VirtAddrRange::from_start_size(runtime.start, runtime.len);
     let target_range = VirtAddrRange::from_start_size(target, PAGE_SIZE_4K);
     let relocated = runtime
@@ -1128,7 +1126,7 @@ fn relocated_file_mapping_can_shrink_and_retains_only_destination_pins() {
             .unmap(runtime.start + PAGE_SIZE_4K, PAGE_SIZE_4K)
             .expect("trim source tail before FIXED relocation");
         guard
-            .relocate_mapping(&source, target, PAGE_SIZE_4K, flags, &mm)
+            .relocate_mapping(&source, target, PAGE_SIZE_4K, false, &mm)
             .expect("relocate shrunken mapping");
         let mut byte = [0];
         guard.read(target, &mut byte).expect("read moved mapping");
@@ -1146,7 +1144,6 @@ fn split_private_file_mapping_mremap_preserves_page_offsets_and_pins() {
     let (runtime, mm, _file) = mapped_readonly_cache_pages("split-relocated-file-pins", 2);
     let source_start = runtime.start + PAGE_SIZE_4K;
     let target = runtime.start + 0x30_000;
-    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
 
     mm.lock()
         .protect(runtime.start, PAGE_SIZE_4K, MappingFlags::USER | MappingFlags::READ)
@@ -1165,7 +1162,7 @@ fn split_private_file_mapping_mremap_preserves_page_offsets_and_pins() {
             .resolve_mremap_source(source_start, PAGE_SIZE_4K)
             .expect("resolve second split VMA");
         guard
-            .relocate_mapping(&source, target, PAGE_SIZE_4K, flags, &mm)
+            .relocate_mapping(&source, target, PAGE_SIZE_4K, false, &mm)
             .expect("relocate second split page");
         assert!(
             guard

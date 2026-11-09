@@ -103,6 +103,12 @@ bitflags! {
 
         /// Inode contents may only be extended by append operations.
         const APPEND_ONLY = 0x0080;
+
+        /// Inode is a quota backing file and must not be charged recursively.
+        const NO_QUOTA = 0x0100;
+
+        /// Automatic access-time updates are disabled for this inode.
+        const NO_ATIME = 0x0200;
     }
 }
 
@@ -735,6 +741,9 @@ impl InodeIdentity {
 /// one attribute state. This is the object-oriented equivalent of embedding
 /// Linux `struct inode` in a filesystem-private inode structure.
 pub trait InodeAttributeOperations: Send + Sync {
+    /// Returns the behavior flags owned by the resident attribute storage.
+    fn flags(&self) -> NodeFlags;
+
     /// Builds a snapshot using the inode number owned by the VFS identity.
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata;
 
@@ -809,6 +818,7 @@ pub trait InodeAttributeOperations: Send + Sync {
 }
 
 struct OwnedInodeAttributes {
+    flags: NodeFlags,
     mode: InodeMode,
     owner: Mutex<InodeOwner>,
     link_count: Mutex<u64>,
@@ -820,8 +830,9 @@ struct OwnedInodeAttributes {
 }
 
 impl OwnedInodeAttributes {
-    fn new(init: VfsInodeInit) -> Self {
+    fn new(init: VfsInodeInit, flags: NodeFlags) -> Self {
         Self {
+            flags,
             mode: InodeMode::new(init.mode),
             owner: Mutex::new(InodeOwner::new(init.uid, init.gid)),
             link_count: Mutex::new(init.link_count),
@@ -963,6 +974,10 @@ impl OwnedInodeAttributes {
 }
 
 impl InodeAttributeOperations for OwnedInodeAttributes {
+    fn flags(&self) -> NodeFlags {
+        self.flags
+    }
+
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
         OwnedInodeAttributes::fill_metadata(self, inode_number, block_size)
     }
@@ -1051,28 +1066,21 @@ impl InodeAttributeOperations for OwnedInodeAttributes {
 struct InodeAttributes {
     operations: Arc<dyn InodeAttributeOperations>,
     operation_flags: AtomicU16,
-    flags: NodeFlags,
     block_bits: u8,
 }
 
 impl InodeAttributes {
     fn new(init: VfsInodeInit, flags: NodeFlags) -> Self {
         Self::from_operations(
-            Arc::new(OwnedInodeAttributes::new(init)),
-            flags,
+            Arc::new(OwnedInodeAttributes::new(init, flags)),
             init.block_bits,
         )
     }
 
-    fn from_operations(
-        operations: Arc<dyn InodeAttributeOperations>,
-        flags: NodeFlags,
-        block_bits: u8,
-    ) -> Self {
+    fn from_operations(operations: Arc<dyn InodeAttributeOperations>, block_bits: u8) -> Self {
         Self {
             operations,
             operation_flags: AtomicU16::new(0),
-            flags,
             block_bits,
         }
     }
@@ -1095,7 +1103,7 @@ impl InodeAttributes {
     }
 
     fn flags(&self) -> NodeFlags {
-        self.flags
+        self.operations.flags()
     }
 
     fn operation_flags(&self) -> u16 {
@@ -1448,7 +1456,6 @@ impl VfsInode {
     /// object instead of maintaining a second VFS attribute copy.
     pub fn new_with_inode_attribute_operations<T>(
         node: Arc<T>,
-        flags: NodeFlags,
         address_space_operations: &'static dyn AddressSpaceOperations,
         mut init: VfsInodeInit,
     ) -> Arc<Self>
@@ -1458,6 +1465,7 @@ impl VfsInode {
         let node_type = init.node_type();
         let private_data: Arc<dyn Any + Send + Sync> = node.clone();
         let inode_operations: Arc<dyn InodeOperations> = node.clone();
+        let flags = node.flags();
         let attribute_operations: Arc<dyn InodeAttributeOperations> = node.clone();
         let (file_operations, address_space_operations) = match node_type {
             NodeType::Directory => {
@@ -1737,8 +1745,7 @@ impl VfsInode {
             parts.init.node_type(),
             "inode attribute operations must preserve the constructed inode type"
         );
-        let attributes =
-            InodeAttributes::from_operations(operations, parts.flags, parts.init.block_bits);
+        let attributes = InodeAttributes::from_operations(operations, parts.init.block_bits);
         Self::from_parts_with_attributes(parts, attributes)
     }
 
@@ -1909,6 +1916,7 @@ impl VfsInode {
     /// [`Self::update_size_after_backing_change`], so cached folios and
     /// mappings are resized or invalidated before this returns.
     pub fn update_metadata(&self, dentry: &Dentry, mut update: MetadataUpdate) -> VfsResult<()> {
+        self.check_mutable()?;
         let changed = update.size.is_some()
             || update.mode.is_some()
             || update.owner.is_some()
@@ -1975,6 +1983,7 @@ impl VfsInode {
     }
 
     pub(crate) fn set_len(&self, len: u64) -> VfsResult<()> {
+        self.check_mutable()?;
         let _data_guard = self.data_lock.write();
         let _invalidate_guard = self.mapping.lock_invalidate_exclusive();
         self.inode_operations.set_len(self, len)?;
@@ -2021,8 +2030,18 @@ impl VfsInode {
         Ok(())
     }
 
-    pub(crate) fn lock_data(&self) -> RwLockWriteGuard<'_, ()> {
+    /// Excludes buffered content mutation while changing backing-file policy.
+    /// Acquire before filesystem-private mutation and mapping invalidation locks.
+    pub fn lock_data(&self) -> RwLockWriteGuard<'_, ()> {
         self.data_lock.write()
+    }
+
+    pub(crate) fn lock_data_shared(&self) -> crate::RwLockReadGuard<'_, ()> {
+        self.data_lock.read()
+    }
+
+    pub(crate) fn try_lock_data_shared(&self) -> VfsResult<crate::RwLockReadGuard<'_, ()>> {
+        self.data_lock.try_read().ok_or(VfsError::WouldBlock)
     }
 
     /// Refreshes mutable cached attributes from a validated backing inode.
@@ -2064,8 +2083,18 @@ impl VfsInode {
         self.attributes.fill_metadata(self.inode())
     }
 
+    pub(crate) fn check_mutable(&self) -> VfsResult<()> {
+        if self.flags().contains(NodeFlags::IMMUTABLE) {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        Ok(())
+    }
+
     /// Checks access through this inode's permission operation.
     pub fn permission(&self, permission: Permission, cred: &Cred) -> VfsResult<()> {
+        if permission.contains(Permission::MAY_WRITE) {
+            self.check_mutable()?;
+        }
         self.inode_operations
             .permission(&MountIdmap, self, permission, cred)
     }
@@ -2401,6 +2430,12 @@ impl VfsInode {
                     .map(|device| device.disk().backing_dev_info().readahead_pages())
             })
             .unwrap_or(block::BackingDevInfo::DEFAULT_RA_PAGES)
+    }
+
+    /// Revokes mapped access, flushes and discards cached contents of a live inode.
+    /// The caller excludes competing writers and holds no MM/completion lock.
+    pub fn invalidate_cached_pages(&self) -> VfsResult<()> {
+        self.mapping.invalidate_cached_pages()
     }
 
     pub(crate) fn address_space(&self) -> Arc<AddressSpace> {

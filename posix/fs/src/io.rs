@@ -37,12 +37,6 @@ impl RewindBytes for VmBytes {
     }
 }
 
-impl RewindBytes for VmBytesMut {
-    fn rewind_bytes(&mut self, count: usize) -> KResult<()> {
-        VmBytesMut::rewind_bytes(self, count)
-    }
-}
-
 impl RewindBytes for IoVectorBufIo {
     fn rewind_bytes(&mut self, count: usize) -> KResult<()> {
         IoVectorBufIo::rewind_bytes(self, count)
@@ -61,25 +55,6 @@ where
 
     fn copy_from_iter(&mut self, dst: &mut [u8]) -> KResult<usize> {
         self.0.read(dst)
-    }
-
-    fn revert(&mut self, count: usize) -> KResult<()> {
-        self.0.rewind_bytes(count)
-    }
-}
-
-struct IoSinkAdapter<T>(T);
-
-impl<T> IovSink for IoSinkAdapter<T>
-where
-    T: Write + IoBufMut + RewindBytes,
-{
-    fn count(&self) -> usize {
-        self.0.remaining_mut()
-    }
-
-    fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {
-        self.0.write(src)
     }
 
     fn revert(&mut self, count: usize) -> KResult<()> {
@@ -107,20 +82,14 @@ fn write_zeros_range(file: &VfsFile, start: u64, end: u64) -> KResult<()> {
 }
 
 // Finalize a complete request, not one step of an aggregate transfer.
-fn read_request_to_io(file: &VfsFile, dst: impl Write + IoBufMut + RewindBytes) -> KResult<usize> {
-    let mut dst = IoSinkAdapter(dst);
+fn read_request_to_io(file: &VfsFile, mut dst: impl IovSink) -> KResult<usize> {
     let mut iter = iov_iter_dest(&mut dst);
     finish_restartable_io(file.read_iter(&mut iter))
 }
 
-fn read_file_at_to_io(
-    file: &VfsFile,
-    dst: impl Write + IoBufMut + RewindBytes,
-    mut offset: u64,
-) -> KResult<usize> {
+fn read_file_at_to_io(file: &VfsFile, mut dst: impl IovSink, mut offset: u64) -> KResult<usize> {
     reject_positioned_stream_io(file)?;
 
-    let mut dst = IoSinkAdapter(dst);
     let mut iter = iov_iter_dest(&mut dst);
     file.read_iter_from(&mut iter, &mut offset)
 }

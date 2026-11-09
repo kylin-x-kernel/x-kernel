@@ -21,6 +21,20 @@ impl MmSpaceInvalidate {
 }
 
 impl MappingViewNotifier for MmSpaceInvalidate {
+    fn try_invalidate(
+        &self,
+        work: &ObjectInvalidateWork,
+        hit: &ObjectViewHit,
+    ) -> kerrno::KResult<bool> {
+        let Some(aligned_hit) = hit.aligned_object_suffix(PageSize::Size4K as u64) else {
+            return Ok(true);
+        };
+        let request = work
+            .request_for_subhit(hit, &aligned_hit)
+            .ok_or(kerrno::KError::InvalidInput)?;
+        self.handle.try_apply(&request)
+    }
+
     fn invalidate(&self, work: &ObjectInvalidateWork, hit: &ObjectViewHit) {
         let Some(aligned_hit) = hit.aligned_object_suffix(PageSize::Size4K as u64) else {
             return;

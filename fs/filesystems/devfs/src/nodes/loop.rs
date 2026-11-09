@@ -357,6 +357,10 @@ impl iov_iter::IovSink for RequestIter<'_> {
         self.remaining
     }
 
+    fn copy_to_iter_nofault(&mut self, src: &[u8]) -> KResult<usize> {
+        self.copy_to_iter(src)
+    }
+
     fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {
         let mut copied = 0;
         while copied < src.len() && self.remaining != 0 {

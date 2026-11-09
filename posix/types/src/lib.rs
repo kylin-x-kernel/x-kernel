@@ -56,6 +56,7 @@ pub mod ipc;
 pub mod net;
 pub mod process;
 pub mod ptr;
+pub mod quota;
 pub mod signal;
 pub mod sync;
 pub mod system;

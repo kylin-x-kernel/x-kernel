@@ -104,3 +104,20 @@ and converts without inspection beyond UTF-8 checks and logs nothing.
 - Adapters must cap `len` before `load_vm_vec` and prefer bounded string loads.
 - New ABI carriers belong in the domain modules with a `SAFETY` comment, not as
   ad-hoc reinterprets in adapters.
+
+## Quota carriers
+
+Quota ABI carriers contain integer fields and fixed-size integer arrays.
+Implicit alignment gaps are represented by explicit initialized padding fields
+before deriving UserRead/UserWrite. Conversions initialize output from explicit
+values or zero defaults; user-provided masks, IDs, units and numeric ranges
+remain the responsibility of the quota syscall adapter and accounting core.
+
+
+## Faultable file-read destinations
+
+The nofault sink validates user addresses through `osvm`, advances only by bytes
+copied, and preserves a prefix when a following segment is invalid. Prefaulting
+never dereferences descriptors as user memory, mutates destination bytes, or pins
+a mapping. The caller invokes it outside the source folio lock and retries with
+another protected copy. Empty segments are skipped without user access.

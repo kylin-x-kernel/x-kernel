@@ -125,7 +125,9 @@ impl FaultContext {
 pub enum FaultOutcome {
     /// Fault was resolved and the mapping is now present.
     Resolved,
-    /// Fault should be retried because the observed state changed.
+    /// Fault admission is temporarily unavailable. Task callers must release
+    /// the MM mutex, wait through the runtime and repeat VMA lookup. This is
+    /// not a claim that any page-table materialization made progress.
     Retry,
     /// Address was outside the address space or did not belong to any VMA.
     Unmapped,

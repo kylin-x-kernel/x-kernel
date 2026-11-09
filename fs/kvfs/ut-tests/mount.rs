@@ -1137,8 +1137,8 @@ fn test_metadata_uses_synthetic_device_identity() {
 
     assert_eq!(root_metadata.inode, 1);
     assert_eq!(child_metadata.inode, 1);
-    assert_eq!(root_metadata.device, root_mount.synthetic_device_id());
-    assert_eq!(child_metadata.device, child_mount.synthetic_device_id());
+    assert_eq!(root_metadata.device, root_mount.device_id());
+    assert_eq!(child_metadata.device, child_mount.device_id());
     assert!(root_metadata.device != child_metadata.device);
 }
 

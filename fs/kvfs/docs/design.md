@@ -997,7 +997,8 @@ zeroes; no sparse policy or readahead is added to generic cache traversal.
 Generic buffered-write limit check 只读取 `SuperBlock` 创建时缓存的最大文件大小。
 需要按 inode 格式进一步收紧范围的文件系统由 `FileOperations::write_iter()` 调用
 `generic_file_write_iter_with_checks()`；该文件系统检查在同一个 inode data critical section
-内、进入 page-cache write 前执行，不把 open-file 写策略下沉到 address-space operation。
+内组合文件系统策略和通用大小限制，进入 page-cache write 前执行，不把 open-file 写策略
+下沉到 address-space operation。
 
 KVFS 在非 special file 的 writable open 进入文件系统 `open` callback 前增加
 inode `write_count`，成功后用 `FMode::WRITER` 记录当前 file 持有该计数，打开
@@ -1487,3 +1488,62 @@ update because those files do not retain an inode writer count. After a
 read-only policy is published, FIFO data I/O may continue while its timestamp
 update is skipped. Ordinary writable files retain their existing admission
 through the open-file writer count and do not recursively acquire this lock.
+
+## Quota control and mutable inode policy
+
+`SuperBlockOperations::quota_operations` selects filesystem control callbacks;
+its default reports no support. `SuperBlock::quota_control` holds the existing
+umount lock, validates lifecycle and class support, and invokes one command.
+On/off use exclusive admission; other commands use shared admission.
+`sync_for_quota` lets admitted callbacks drain writeback without reacquiring
+shutdown exclusion. Quota state and retained files remain in `quota_info`.
+
+`InodeAttributeOperations::flags` supplies filesystem-owned behavior flags from
+resident state. The existing owned-attribute implementation stores construction
+flags, while filesystem attribute implementations store their own flags. The
+common inode wrapper retains no second behavior-flag field. This permits
+quota-file protection to change without another attribute copy. Immutable policy is checked for write permission, cached
+content writes, metadata changes, truncation, fallocate and namespace mutation;
+NO_ATIME suppresses automatic access-time updates. File-data exclusion precedes
+backend mutation locks when publishing protection.
+
+`SuperBlockOperations::show_options` supplies filesystem-specific options to
+proc mount reports. Mounted block-backed metadata uses the existing canonical
+block-device identity, allowing tools to match st_dev to the source device.
+
+Live inode cache invalidation is separate from final eviction. Under the
+address-space invalidate write lock it synchronously revokes every registered
+view's PTEs and completes TLB invalidation, then flushes dirty folios and removes
+cache entries. A busy MM causes a retry after dropping that lock; no cached page
+is detached while revocation remains deferred. Read faults publish shared PTEs
+under the corresponding invalidate read lock.
+
+Regular-file writes and writable open initialization hold shared superblock
+lifecycle admission for the complete operation. Quota enable/disable hold its
+exclusive side through writer initialization or reservation drain and teardown.
+Shared write faults recheck inode mutability under a data read guard. MM callers
+use nonblocking acquisition and retry a busy write fault outside the MM critical
+section, preventing lock inversion with revocation.
+
+Shared write-fault admission waits use the same superblock lifecycle and inode
+data locks as the nonblocking fault checks. `VfsFile::wait_for_shared_mapping_write`
+acquires them in that order outside MM serialization and releases them before
+fresh fault lookup. It grants no write authority and does not cache policy.
+The canonical lock wait queues allow the holder to run without polling budgets.
+
+
+### Buffered reads into faultable destinations
+
+Page-cache reads copy through `IovIterDest::copy_to_iter_nofault` while holding
+the source folio. A short user copy advances the iterator and file offset only
+by its successful prefix. After the folio and policy guards are released, the
+read prepares the next destination prefix through `fault_in_writeable`. A retry
+performs a fresh cache lookup and samples EOF under the folio lock again, so
+invalidation or truncate during the wait cannot expose stale bytes. Permanent
+faults return the completed prefix, or the error when no bytes were copied.
+Kernel-memory short copies still finish the read without a fault retry.
+
+An address-space view guard can extend its existing registration under MM
+serialization. The registry mutex protects the VMA/object spans, preserving the
+registration identity and invalidation notifier. Coordinates are validated before
+publication; invalidation snapshots do not hold this mutex while entering MM.

@@ -84,3 +84,13 @@ crate copies without inspection or logging.
 - Cap user-supplied counts before `load_vec`.
 - Do not hold non-preemptible locks across calls that can fault.
 - New providers must preserve the whole-or-fail `write_mem` contract.
+
+
+## Locked destination copies
+
+`VirtMemIo::write_mem_nofault` is a distinct provider contract: it must not resolve
+faults, must report the copied prefix, and must not transfer bytes on error.
+`VmBytesMut` advances only by that count. `fault_in_writeable` may sleep, leaves
+user contents unchanged, and must run outside folio or backing-provider locks.
+The following copy still uses exception protection because another thread may
+unmap or reprotect the range after preparation.

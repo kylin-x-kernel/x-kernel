@@ -6,6 +6,18 @@ config KFEAT_FS
     help
       Enable the kernel filesystem stack and related runtime support.
 
+config QUOTA
+    bool
+    default y
+    help
+      Built-in VFS quota accounting and control capability.
+
+config QFMT_V2
+    bool
+    default y
+    help
+      Built-in v2 disk-quota file formats, revisions zero and one.
+
 config KFEAT_FS_EXT4
     bool "ext4 filesystem support"
     depends on KFEAT_FS

@@ -19,7 +19,8 @@ use ktime_types::TimeSpan;
 use ktimer::{PosixTimerConfig, PosixTimerCreateNotify, TimerDelivery};
 use memaddr::VirtAddr;
 use memspace::{
-    InvalidateHandle, MmObserver, MmSpace, MremapSource, process_lifetime::MmUserHandle,
+    InvalidateHandle, MmObserver, MmSpace, MremapSource, PageFaultOutcome,
+    process_lifetime::MmUserHandle,
 };
 use posix_types::ITimerType;
 
@@ -55,6 +56,17 @@ impl LiveAddressSpace {
     /// Locks the live address space.
     pub fn lock(&self) -> MutexGuard<'_, MmSpace> {
         self.mm_user.address_space().lock()
+    }
+
+    /// Resolves a fault on the captured MM, waiting without holding its mutex.
+    ///
+    /// Requires sleepable task context with IRQs/preemption enabled and no MM,
+    /// non-sleepable or backing-provider lock. Temporary admission failures are
+    /// waited out before fresh VMA and policy checks. COW conflict outcomes are
+    /// returned to the caller's operation retry; permanent failures retain their
+    /// classification. Exception handlers use the raw locked MM entry instead.
+    pub fn resolve_page_fault(&self, address: VirtAddr, flags: MappingFlags) -> PageFaultOutcome {
+        self.mm_user.resolve_page_fault(address, flags)
     }
 
     /// Runs a mapping operation while holding the live mm user capability.
@@ -116,16 +128,17 @@ impl LiveAddressSpaceMappingGuard<'_> {
     ///
     /// Forwards the validation/allocation errors of
     /// `memspace::MmSpace::relocate_mapping` for the supplied mapping snapshot,
-    /// address, byte size and permissions.
+    /// address, byte size and replacement policy. Fixed replacement removes
+    /// the target and discarded source tail before destination preparation.
     pub fn relocate_mapping(
         &mut self,
         snapshot: &MremapSource,
         new_start: VirtAddr,
         new_size: usize,
-        new_flags: MappingFlags,
+        replace_target: bool,
     ) -> KResult {
         self.guard
-            .relocate_mapping(snapshot, new_start, new_size, new_flags, self.owner)
+            .relocate_mapping(snapshot, new_start, new_size, replace_target, self.owner)
     }
 }
 

@@ -351,3 +351,23 @@ one location guard; callbacks run after it is released. The registry pins inode
 objects through routing removal, preventing address reuse. Bind aliases share
 object subscriptions. Special files do not report parent content events, and
 `IN_EXCL_UNLINK` is applied per watch using the particular dentry's unlink state.
+
+## Disk quota control
+
+Commands, quota types, format IDs, record identities, information masks and
+numeric ranges are validated at the syscall or core administrative boundary.
+Classic unknown record-valid bits are ignored; information masks are strict.
+Only selected input fields are converted, so irrelevant fields cannot reject an
+otherwise valid update. Quota carriers explicitly represent ABI padding and
+initialize every byte copied to user memory.
+
+The current subjective credential authorizes changes and enumeration. Own-user
+queries compare effective UID; group queries compare effective GID and
+supplementary groups, independently of filesystem GID. Descriptor access
+retains descriptor error ordering and target filesystem lifetime. Superblock
+admission serializes quota enable/disable against reconfiguration and shutdown.
+
+Quota format and information queries build owned ABI snapshots under the quota
+state mutex and release it before copying to user memory. Record and extended
+status queries follow the same boundary: a user destination may fault into file
+allocation and quota accounting, so no quota-state or record guard spans copyout.

@@ -521,6 +521,8 @@ pub(crate) struct Ext4SbInfo {
     /// lock.
     group_geometry: Vec<GroupGeometry>,
     statfs_mode: Ext4StatFsMode,
+    /// Quota mount policy: one enforcement/request bit per quota class.
+    pub(crate) quota_mount_options: u8,
     /// Maximum byte size supported by legacy indirect-block inodes.
     pub(crate) bitmap_maxbytes: u64,
     // Linux `ext4_sb_info::s_hash_unsigned`: zero for signed algorithms and
@@ -766,6 +768,7 @@ impl Ext4SbInfo {
             superblock,
             group_geometry,
             statfs_mode: Ext4StatFsMode::Bsd,
+            quota_mount_options: 0,
             bitmap_maxbytes: 0,
             hash_unsigned: 0,
             device: filesystem_device,

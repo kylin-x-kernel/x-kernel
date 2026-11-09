@@ -708,8 +708,12 @@ impl VfsFileBuilder {
                     | NodeType::Fifo
                     | NodeType::Socket
             );
+        let _write_guard = if holds_write_access {
+            Some(location.path().lock_writable_mount()?)
+        } else {
+            None
+        };
         if holds_write_access {
-            let _write_guard = location.path().lock_writable_mount()?;
             location.inode().acquire_write_access();
             self.mode.insert(FMode::WRITER);
         }
@@ -943,6 +947,11 @@ impl VfsFile {
         index: PageIndex,
         update_mapping: impl FnOnce(&mut FolioGuard<'_>) -> VfsResult<R>,
     ) -> VfsResult<R> {
+        let _write_guard = self.path().super_block().try_start_write()?;
+        self.path().check_writable_mount()?;
+        self.verify_mode(FMode::WRITE)?;
+        let _data_guard = self.inode().try_lock_data_shared()?;
+        self.inode().check_mutable()?;
         // Timestamp policy may acquire filesystem locks; keep it outside the folio.
         self.file_update_time()?;
         self.mapping().page_mkwrite(
@@ -955,6 +964,17 @@ impl VfsFile {
             },
             update_mapping,
         )
+    }
+
+    /// Waits for the resources needed by a shared write fault without an MM lock.
+    ///
+    /// Requires sleepable task context with IRQs/preemption enabled and no MM,
+    /// inode-data or non-sleepable lock. Uses the existing admission locks and
+    /// their wait queues. Completion grants no access: the caller must look up
+    /// the current VMA and recheck permissions and inode policy before retrying.
+    pub fn wait_for_shared_mapping_write(&self) {
+        let _write_admission = self.path().super_block().lock_write_admission();
+        let _data_guard = self.inode().lock_data_shared();
     }
 
     /// Writes all dirty cached pages for this file.
@@ -1137,6 +1157,11 @@ impl VfsFile {
 
     /// Writes to this open file from an iterator source using a caller-owned position.
     pub fn write_iter_from(&self, iter: &mut IovIterSource<'_>, pos: &mut u64) -> VfsResult<usize> {
+        let _write_guard = if self.mode().contains(FMode::WRITER) {
+            Some(self.path().lock_writable_mount()?)
+        } else {
+            None
+        };
         if self.is_stream() {
             self.verify_write_area(0, iter.count())?;
             let mut iocb = Kiocb::new(self, 0);
@@ -1173,8 +1198,8 @@ impl VfsFile {
     }
 
     pub(crate) fn file_update_time(&self) -> VfsResult<()> {
-        // Regular writable files retain write admission for their lifetime.
-        // Special files need admission only while changing inode timestamps.
+        // Regular-file write operations already hold write admission.
+        // Special files need admission while changing inode timestamps.
         let _write_guard = if self.mode().contains(FMode::WRITER) {
             None
         } else {
@@ -1382,12 +1407,14 @@ impl VfsFile {
     /// keeps a batch from carrying a stale size snapshot past a disk-size
     /// advance.
     pub fn fallocate(&self, flags: FallocateFlags, offset: u64, len: u64) -> VfsResult<()> {
+        let _write_guard = self.path().lock_writable_mount()?;
         let inode = self.inode();
         let operations = self.operations();
         if !operations.supported_fallocate_modes().contains(flags) {
             return Err(VfsError::from(LinuxError::EOPNOTSUPP));
         }
         let _data_guard = inode.lock_data();
+        inode.check_mutable()?;
         let _invalidate_guard = self.mapping().lock_invalidate_exclusive();
         operations.fallocate(self, flags, offset, len)
     }

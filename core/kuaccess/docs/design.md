@@ -48,19 +48,19 @@ syscall / runtime
 2. `Vm` first checks that the user address is in range.
 3. `copy_user_pages()` splits the copy on 4 KiB user-page boundaries and calls `user_copy` for each piece.
 4. Ordinary copies do not open the in-trap fill window. On a fault, the exception-table fixup returns, and the calling task then calls the current process's `MmSpace::handle_page_fault()`. This avoids waiting for IRQ-driven disk completion while IRQs are masked in exception context.
-5. One progress loop tries the current page fragment first. Success advances the offset and resets that page's fault count. Failure handles at most one fault, then tries the copy again. `Resolved`, `Retry`, and `CowConflictRetry` all allow the copy to be retried. Unmapped, permission, bus, OOM, no-progress, and generic failure return `NoAccess`.
-6. If the copy still fails after `Resolved`, fault handling for the current page continues. That allows a shared-file write to finish in stages: not mapped, then a read-only PTE, then a writable PTE. Each user page may call fault handling at most 16 times. `Resolved` and retry-class outcomes share that budget, and the next page starts again from zero. If the budget is exhausted and the copy still fails, the result is `NoAccess`, so a backend that keeps reporting success or retry without making progress cannot loop forever. The cap stops unbounded retries; it does not measure PTE progress by counting attempts. Continued concurrent changes to the mapping can also exhaust the budget and fail the copy. An already mapped page does not need the address-space lock. A successful return means the whole output has been initialized.
+5. One progress loop tries the current page fragment first. Success advances the offset and resets that page's fault count. Failure invokes the captured live MM's task-context resolver. On admission `Retry`, that resolver retains the current runtime, drops the MM mutex and waits for its resources. Each subsequent attempt performs fresh VMA lookup and permission checks. These waits do not spend the copy's materialization budget.
+6. After `Resolved`, the copy may fault again so shared-file materialization and write permission can finish in stages. Completed/COW attempts that still do not enable a copy retain the per-page bound of 16. Explicit no-progress and permanent faults fail immediately. This protects against a backing provider repeatedly claiming progress without turning temporary lock contention into `NoAccess`. A successful return still means the entire output was initialized.
 
 ### User atomic access
 
 1. Check 4-byte alignment and the user address range.
-2. The faultable form calls the architecture primitive inside the `access_user_memory()` window so MM can resolve a recoverable fault. The nofault form relies on the exception-table fixup to return failure directly.
+2. Faultable loads use the `access_user_memory()` window. Compare-exchange uses the nofault primitive and, after a fault, resolves the write in task context before retrying.
 3. Load uses a naturally aligned read-only 32-bit load. The nofault compare-exchange exclusive/atomic sequence runs under `IrqSave`.
 4. Success returns the observed value or `(exchanged, observed)`. A fault maps to `MemError::NoAccess`.
 
 These primitives give futex and robust-list paths a TOCTOU-free read or update of a user futex word. A read-only load does not require a writable mapping and does not trigger COW.
 
-`fault_in_user_writeable()` makes one write-fault attempt and does not store a new user word. The caller must be in a sleepable task context and must not hold a non-sleepable lock. `Resolved` means the address can now be written. `Retry` and `CowConflictRetry` are also success: another task already published a new PTE or anonymous page, and the caller repeats its store. `OutOfMemory` returns `MemError::OutOfMemory` (`ENOMEM`). Every other result returns `NoAccess`. `FUTEX_WAKE_OP` uses it for a COW page after `fork`: the nofault CAS fails, drops the bucket locks, and returns; the syscall calls this function once, resolves both keys again, and retries the CAS. The new value is still stored only by the CAS while those locks are held.
+`fault_in_user_writeable()` invokes the same task-context resolver without storing a user word. Admission waits release MM serialization, retain the captured active MM user and revalidate the current mapping afterwards. COW conflicts are returned to the caller's operation retry. OOM retains its distinct result; unmapped or denied addresses fail rather than being treated as progress. `FUTEX_WAKE_OP` uses this outside bucket locks before resolving keys again and retrying its nofault CAS.
 
 ### String loads
 
@@ -82,3 +82,20 @@ These primitives give futex and robust-list paths a TOCTOU-free read or update o
 ## Regression tests
 
 `ut-tests/copy_tests.rs` uses an on-demand mapping backend that requires `PreparedTaskWait`. It checks that ordinary-copy fault handling runs in the sleepable task context outside the exception, and covers cross-page reads, a first-touch write fault, read-only protection, and revoking a mapping. The staged write-fault test spans multiple pages and exceeds the per-page recovery budget, checking that the copy is complete after repeated faults on the same page. The no-progress tests cover a bounded exit when the backend keeps reporting success or a COW retry, and an immediate failure on an explicit `NoProgress`. The tests do not depend on real disk or IRQ timing.
+
+
+### Locked copies and prefaulting
+
+`Vm::write_mem_nofault` validates the range and splits architecture copies at
+user-page boundaries. It accumulates completed fragments and stops on the first
+short copy, so a bulk fixup cannot hide an earlier writable page's progress.
+The returned prefix leaves the destination cursor on the page needing fault
+preparation. It temporarily closes any outer user-fault access window and restores
+that window after the copy.
+It never invokes MM or waits for an inode lock. `Vm::fault_in_writeable` instead
+checks VMA permissions and actual writable user PTEs under MM serialization, then
+uses the existing task-context fault driver for missing permissions. The driver
+waits for admission outside MM and retains its materialization progress bound.
+Prefaulting never writes a probe value into the user's buffer and does not pin
+the mapping. The caller must release source folio and backing-provider locks
+before invoking it, then retry through the nofault copy operation.

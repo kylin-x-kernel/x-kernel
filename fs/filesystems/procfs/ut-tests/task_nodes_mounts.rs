@@ -69,12 +69,13 @@ fn test_mounts_uses_effective_readonly_options() {
         mnt_flags: MountFlags::empty(),
         mount_ro: false,
         super_ro: true,
+        filesystem_options: ",usrquota,grpquota".into(),
     };
     let mut buf = alloc::string::String::new();
 
     super::show_mounts(&entry, &mut buf).unwrap();
 
-    assert_eq!(buf, "rootfs / ext4 ro 0 0\n");
+    assert_eq!(buf, "rootfs / ext4 ro,usrquota,grpquota 0 0\n");
 }
 
 #[def_test]
@@ -91,12 +92,13 @@ fn test_mountinfo_separates_mount_and_super_readonly() {
         mnt_flags: MountFlags::empty(),
         mount_ro: false,
         super_ro: true,
+        filesystem_options: ",usrquota,grpquota".into(),
     };
     let mut buf = alloc::string::String::new();
 
     super::show_mountinfo(&entry, &mut buf).unwrap();
 
-    assert_eq!(buf, "1 0 0:1 / / rw - ext4 rootfs ro\n");
+    assert_eq!(buf, "1 0 0:1 / / rw - ext4 rootfs ro,usrquota,grpquota\n");
 }
 
 #[def_test]

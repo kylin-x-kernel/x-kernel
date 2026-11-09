@@ -19,6 +19,7 @@ bitflags.workspace = true
 block = { workspace = true }
 iov_iter.workspace = true
 kcred.workspace = true
+kprocess.workspace = true
 kerrno.workspace = true
 klogger.workspace = true
 kquota.workspace = true

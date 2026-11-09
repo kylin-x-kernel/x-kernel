@@ -59,7 +59,7 @@
 //! Recovery keeps one mount state through journal replay and private-owner
 //! installation. Orphan cleanup then uses unpublished inode components with the
 //! normal truncate/eviction algorithms before root publication.
-//! Internal user/group quota uses the VFS superblock's existing quota owner.
+//! User/group quota uses the VFS superblock's existing quota owner.
 //! Inode/block allocation, delayed reservations, ownership transfer and final
 //! disable share the filesystem's journal and canonical inode identities.
 //! Allocation requests borrow their inode owner; bitmap updates remain separate
@@ -201,18 +201,29 @@ fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
     let flags = (super_block.flags() & !context.sb_flags_mask())
         | (context.sb_flags() & context.sb_flags_mask());
     let ext4 = super_block.private::<vfs::Ext4Mount>()?;
+    if let Some(types) = options.quota_types {
+        let state = ext4.read();
+        if !state.has_quota_feature() {
+            let quota = super_block.quota_info();
+            for kind in kquota::QuotaType::ALL {
+                if types & (1 << kind as u8) == 0 && quota.info(kind).is_some() {
+                    return Err(kvfs::VfsError::InvalidInput);
+                }
+            }
+        }
+    }
     if !flags.contains(kvfs::SuperBlockFlags::RDONLY) {
         ext4.read().ensure_writable().map_err(vfs::into_vfs_err)?;
-        if super_block.flags().contains(kvfs::SuperBlockFlags::RDONLY)
-            && ext4.read().has_quota_feature()
-        {
-            let owner = ext4
-                .read()
-                .vfs_superblock
-                .upgrade()
-                .ok_or(kvfs::VfsError::InvalidData)?;
+        if super_block.flags().contains(kvfs::SuperBlockFlags::RDONLY) {
             let result = (|| -> kvfs::VfsResult<()> {
-                Ext4SuperOperations::activate_internal_quotas(&owner)?;
+                if ext4.read().has_quota_feature() {
+                    let owner = ext4
+                        .read()
+                        .vfs_superblock
+                        .upgrade()
+                        .ok_or(kvfs::VfsError::InvalidData)?;
+                    Ext4SuperOperations::activate_internal_quotas(&owner)?;
+                }
                 {
                     let state = ext4.write(super_block);
                     state.ensure_writable().map_err(vfs::into_vfs_err)?;
@@ -244,6 +255,17 @@ fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
     }
     if let Some(statfs_mode) = options.statfs_mode {
         state.set_statfs_mode(statfs_mode);
+    }
+    if let Some(types) = options.quota_types {
+        state.quota_mount_options = types;
+        if state.has_quota_feature() && !flags.contains(kvfs::SuperBlockFlags::RDONLY) {
+            let mut quota = super_block.quota_info();
+            for kind in kquota::QuotaType::ALL {
+                if quota.info(kind).is_some() {
+                    quota.set_limits_enabled(kind, types & (1 << kind as u8) != 0)?;
+                }
+            }
+        }
     }
     Ok(())
 }

@@ -1076,3 +1076,62 @@ fn fifo_timestamp_mutation_waits_for_readonly_policy_publication() {
     assert_eq!(inode.times().modified_at, before.modified_at);
     assert_eq!(inode.times().changed_at, before.changed_at);
 }
+
+struct WriteAdmissionOperations;
+
+impl crate::InodeOperations for WriteAdmissionOperations {}
+
+impl crate::FileOperations for WriteAdmissionOperations {
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn open(self: Arc<Self>, inode: &VfsInode, _file: &mut crate::VfsFileBuilder) -> VfsResult<()> {
+        core::assert!(inode.super_block()?.umount_lock.try_write().is_none());
+        Ok(())
+    }
+
+    fn write(&self, file: &crate::VfsFile, bytes: &[u8], _offset: u64) -> VfsResult<usize> {
+        core::assert!(file.path().super_block().umount_lock.try_write().is_none());
+        Ok(bytes.len())
+    }
+}
+
+#[def_test]
+fn old_writable_descriptors_reenter_lifecycle_admission_for_each_write() {
+    let sb = crate::nullfs::new_superblock();
+    let mount = crate::Mount::new_root(&sb);
+    let operations = Arc::new(WriteAdmissionOperations);
+    let inode = VfsInode::new_file_with_operations(
+        Arc::new(()),
+        operations.clone(),
+        operations,
+        NodeFlags::PRIVATE,
+        VfsInodeInit::new(
+            9,
+            0,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let dentry = Dentry::new_file_from_inode(inode, None, "write-admission".into());
+    dentry.bind_super_block(&sb);
+    let file = crate::dentry_open(
+        Path::new(mount, dentry),
+        crate::OpenFlags::READ_WRITE.bits(),
+        kcred::initial_cred(),
+    )
+    .unwrap();
+    assert!(sb.umount_lock.try_write().is_some());
+    assert_eq!(file.write(b"one"), Ok(3));
+    assert!(sb.umount_lock.try_write().is_some());
+    assert_eq!(file.write(b"two"), Ok(3));
+}
+
+#[def_test]
+fn mapping_write_admission_reports_contention_without_waiting_under_an_mm_lock() {
+    let sb = crate::nullfs::new_superblock();
+    let guard = sb.umount_lock.write();
+    assert!(matches!(sb.try_start_write(), Err(VfsError::WouldBlock)));
+    drop(guard);
+    assert!(sb.try_start_write().is_ok());
+}

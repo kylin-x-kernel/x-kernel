@@ -390,3 +390,24 @@ sharing, rollback and device-cache synchronization are outside this capability.
 IoMapError converts into KError at callers' kernel error boundaries: InvalidRange
 maps to InvalidInput, MappingFailed to Io, and NoMemory remains NoMemory. The
 conversion does not release mappings or roll back partially initialized hardware.
+
+`InvalidateHandle::try_apply` never waits for the MM mutex. It reports success
+after matching PTE removal and TLB invalidation, including the vacuous case of a
+destroyed MM. File-backed write-fault admission contention is classified as
+`PageFaultOutcome::Retry` so the fault returns from the MM critical section
+before retrying a conflicting filesystem lifecycle or inode policy transition.
+
+`MmUserHandle::resolve_page_fault` is the common sleepable fault entry. On
+admission Retry it retains the existing backing runtime, releases the MM mutex,
+calls `VmRuntimeOps::wait_for_fault`, then looks up the VMA and checks permissions
+again. Raw locked fault handling remains available to exception paths. File
+runtimes wait through their existing filesystem/inode admission resources; no
+parallel wait table or persistent retry state is introduced. COW conflicts and
+permanent faults retain their existing classification.
+
+Relocation derives permissions from its source snapshot and accepts an explicit
+target-replacement policy. Fixed replacement removes the target and discarded
+source tail before preparing the retained source. File runtimes open inherited
+registrations without new-map admission; failures retire destination registrations
+while preserving retained source PTEs. File expansion also uses open and updates
+the existing object-side view range before the VMA extension is published.

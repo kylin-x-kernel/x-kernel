@@ -267,3 +267,14 @@ The migration preserves module visibility, feature gates and execution modes.
 - `ut-tests/lib.rs`: mounted by `src/lib.rs` as `tests`.
 - `ut-tests/memfd.rs`: mounted by `src/memfd.rs` as `tests`.
 - `ut-tests/mmap.rs`: mounted by `src/mmap.rs` as `tests`.
+
+Shared file mapping creation and permission changes run under MM serialization.
+Write faults may return a retry outcome to leave that critical section before a
+lifecycle transition needs to revoke the mapping's PTEs.
+
+`mremap` inherits the existing VMA permissions and runs under MM serialization.
+File expansion and migration update registrations through the runtime open
+callback rather than new-map admission. Fixed replacement removes the target,
+trims a shrinking source, then resolves the remaining source and prepares its
+move. These removals remain effective if a later preparation fails. The syscall
+has no mapping-admission retry around this destructive sequence.

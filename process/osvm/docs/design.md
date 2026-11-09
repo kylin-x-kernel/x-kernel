@@ -99,3 +99,14 @@ errors after advancing the cursor only on success.
 
 No global state, no locks, no Drop behavior. `Vec` results are ordinary
 kernel-heap allocations owned by the caller.
+
+
+## Destination iterators
+
+`VmBytesMut` implements `iov_iter::IovSink` using its existing pointer and length.
+Ordinary copies retain the whole-or-fail provider contract. Its nofault operation
+uses `VirtMemIo::write_mem_nofault` and advances by the returned prefix. Fault
+preparation calls `VirtMemIo::fault_in_writeable` for the next byte without
+advancing the cursor or modifying user contents. Preparing only the next byte
+lets a later invalid page preserve an earlier transferable prefix. Neither
+operation pins mappings or retains an MM reference beyond the call.

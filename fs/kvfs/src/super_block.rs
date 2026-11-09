@@ -284,6 +284,16 @@ impl SuperBlockRegistry {
 /// all inodes in that instance. This boundary must not contain per-open-file
 /// state.
 pub trait SuperBlockOperations: Send + Sync + 'static {
+    /// Returns quota control methods when the filesystem implements quotas.
+    fn quota_operations(&self) -> Option<&dyn crate::QuotaOperations> {
+        None
+    }
+
+    /// Formats filesystem-specific mount options, each with a leading comma.
+    fn show_options(&self, _super_block: &SuperBlock) -> alloc::string::String {
+        alloc::string::String::new()
+    }
+
     /// Returns filesystem statistics.
     fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs>;
 
@@ -555,6 +565,47 @@ pub struct SuperBlock {
 }
 
 impl SuperBlock {
+    /// Runs quota control with shutdown and reconfiguration excluded.
+    ///
+    /// Enabling and disabling quotas require exclusive admission. Other
+    /// commands share admission with ordinary filesystem operations. Unsupported
+    /// filesystems report ENOSYS before checking their quota class.
+    pub fn quota_control<R>(
+        &self,
+        kind: kquota::QuotaType,
+        is_exclusive: bool,
+        control: impl FnOnce(&dyn crate::QuotaOperations) -> kerrno::KResult<R>,
+    ) -> kerrno::KResult<R> {
+        let run = || {
+            if !self.lifecycle.lock().is_available() {
+                return Err(kerrno::LinuxError::ENODEV.into());
+            }
+            let ops = self
+                .ops()
+                .quota_operations()
+                .ok_or(kerrno::LinuxError::ENOSYS)?;
+            if ops.supported_types(self) & (1 << kind as u8) == 0 {
+                return Err(kerrno::LinuxError::EINVAL.into());
+            }
+            control(ops)
+        };
+        if is_exclusive {
+            let _guard = self.umount_lock.write();
+            run()
+        } else {
+            let _guard = self.umount_lock.read();
+            run()
+        }
+    }
+
+    /// Flushes data while exclusive quota lifecycle admission is held.
+    ///
+    /// Only quota lifecycle callbacks may use this method; acquiring shared
+    /// shutdown admission again would deadlock with their exclusive admission.
+    pub fn sync_for_quota(&self) -> VfsResult<()> {
+        self.sync_fs_locked()
+    }
+
     /// Locks the filesystem's canonical quota state.
     ///
     /// The guard may span quota-file I/O in task context. Callers must hold
@@ -572,6 +623,11 @@ impl SuperBlock {
     /// Returns the filesystem type name.
     pub const fn name(&self) -> &'static str {
         self.file_system_type.name()
+    }
+
+    /// Formats the filesystem-specific options currently in effect.
+    pub fn show_options(&self) -> alloc::string::String {
+        self.ops().show_options(self)
     }
 
     /// Returns the canonical filesystem type that constructed this superblock.
@@ -598,7 +654,7 @@ impl SuperBlock {
     }
 
     /// Returns whether this superblock is read-only without issuing `statfs`.
-    pub(crate) fn is_readonly(&self) -> bool {
+    pub fn is_readonly(&self) -> bool {
         self.flags().contains(SuperBlockFlags::RDONLY)
     }
 
@@ -1158,7 +1214,23 @@ impl SuperBlock {
     /// Keeps write admission stable through one ordinary VFS mutation.
     /// Reconfiguration and final shutdown hold the exclusive side.
     pub(crate) fn start_write(&self) -> VfsResult<RwLockReadGuard<'_, ()>> {
-        let guard = self.umount_lock.read();
+        let guard = self.lock_write_admission();
+        if self.is_readonly() {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
+        Ok(guard)
+    }
+
+    /// Waits for lifecycle admission without granting permission to mutate.
+    /// The caller rechecks policy after reacquiring its MM serialization.
+    pub(crate) fn lock_write_admission(&self) -> RwLockReadGuard<'_, ()> {
+        self.umount_lock.read()
+    }
+
+    /// Nonblocking write admission for callers that already hold an MM lock.
+    /// A conflicting lifecycle transition must be retried outside that MM lock.
+    pub(crate) fn try_start_write(&self) -> VfsResult<RwLockReadGuard<'_, ()>> {
+        let guard = self.umount_lock.try_read().ok_or(VfsError::WouldBlock)?;
         if self.is_readonly() {
             return Err(VfsError::ReadOnlyFilesystem);
         }

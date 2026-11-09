@@ -11,7 +11,7 @@ use core::mem::MaybeUninit;
 
 use kerrno::{KError, KResult};
 use kio::prelude::*;
-use osvm::{read_vm_mem, write_vm_mem};
+use osvm::{VmBytesMut, read_vm_mem, write_vm_mem};
 
 use super::IoVec;
 
@@ -123,6 +123,10 @@ impl IoVectorBuf {
 }
 
 /// Sequential reader/writer for I/O vector buffers.
+///
+/// Also implements [`iov_iter::IovSink`], separating nofault destination copies
+/// from sleepable preparation without duplicating the segment cursor. Nofault
+/// errors preserve any prefix already transferred through previous segments.
 pub struct IoVectorBufIo {
     inner: IoVectorBuf,
     start: usize,
@@ -252,6 +256,53 @@ impl IoBuf for IoVectorBufIo {
 impl IoBufMut for IoVectorBufIo {
     fn remaining_mut(&self) -> usize {
         self.inner.len
+    }
+}
+
+impl iov_iter::IovSink for IoVectorBufIo {
+    fn count(&self) -> usize {
+        self.inner.len
+    }
+
+    fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {
+        self.write(src)
+    }
+
+    fn copy_to_iter_nofault(&mut self, src: &[u8]) -> KResult<usize> {
+        let mut copied = 0;
+        while copied < src.len() {
+            self.skip_empty()?;
+            let Some(iov) = self.inner.iovs.get(self.start) else {
+                break;
+            };
+            let len = (iov.iov_len as usize - self.offset).min(src.len() - copied);
+            let mut segment = VmBytesMut::new(iov.iov_base.wrapping_add(self.offset), len);
+            let count = match segment.copy_to_iter_nofault(&src[copied..copied + len]) {
+                Ok(count) => count,
+                Err(_) if copied != 0 => break,
+                Err(error) => return Err(error),
+            };
+            self.offset += count;
+            self.inner.len -= count;
+            copied += count;
+            if count < len {
+                break;
+            }
+        }
+        Ok(copied)
+    }
+
+    fn fault_in_writeable(&mut self, count: usize) -> KResult<bool> {
+        self.skip_empty()?;
+        let Some(iov) = self.inner.iovs.get(self.start) else {
+            return Ok(false);
+        };
+        let len = count.min(iov.iov_len as usize - self.offset);
+        VmBytesMut::new(iov.iov_base.wrapping_add(self.offset), len).fault_in_writeable(len)
+    }
+
+    fn revert(&mut self, count: usize) -> KResult<()> {
+        self.rewind_bytes(count)
     }
 }
 

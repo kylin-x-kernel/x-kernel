@@ -676,19 +676,9 @@ pub fn sys_mremap(
 
         // FIXED path: move to new_addr (handles both shrink and grow)
         if mremap_flags.is_fixed() {
-            // If shrinking, trim source first
-            if new_size < old_size {
-                mapping
-                    .aspace_mut()
-                    .unmap(addr + new_size, old_size - new_size)?;
-            }
             let move_size = old_size.min(new_size);
-            // Unmap target region
-            mapping
-                .aspace_mut()
-                .unmap(VirtAddr::from(new_addr), new_size)?;
             let target_addr = VirtAddr::from(new_addr);
-            mapping.relocate_mapping(&source, target_addr, new_size, mapping_flags)?;
+            mapping.relocate_mapping(&source, target_addr, new_size, true)?;
             if mremap_flags.keeps_source_mapping() {
                 let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
                 mapping.aspace_mut().map_with_max_flags(
@@ -709,7 +699,7 @@ pub fn sys_mremap(
                 .aspace_mut()
                 .find_relocation_target(addr, new_size, page_size)?;
 
-            mapping.relocate_mapping(&source, target_addr, new_size, mapping_flags)?;
+            mapping.relocate_mapping(&source, target_addr, new_size, false)?;
             // The old mapping's role was retired after the PTE transfer; install
             // fresh anonymous backing at the original address.
             let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
@@ -758,7 +748,7 @@ pub fn sys_mremap(
             .aspace_mut()
             .find_relocation_target(addr, new_size, page_size)?;
 
-        mapping.relocate_mapping(&source, target_addr, new_size, mapping_flags)?;
+        mapping.relocate_mapping(&source, target_addr, new_size, false)?;
 
         Ok(target_addr.as_usize() as _)
     })

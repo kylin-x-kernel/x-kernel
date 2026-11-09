@@ -813,3 +813,54 @@ file descriptions carry no inode writer count. The guard spans the read-only
 check and timestamp callback; read-only policy prevents metadata mutation while
 allowing the special file's already-completed data operation. Regular writable
 files reuse their retained writer count instead of taking a nested read guard.
+
+## Quota administration admission
+
+Quota callbacks execute only while the superblock remains available and the
+umount lock excludes shutdown/reconfiguration. Unsupported filesystems return
+ENOSYS; unsupported quota classes return EINVAL before command authorization.
+Lifecycle commands take exclusive admission, without introducing an independent
+quota-control lock. Callbacks must retain mount-before-quota lock order and
+release retained inode references outside filesystem mutation guards.
+
+Mutable attribute-operation flags are read from resident filesystem state.
+Immutable files reject ordinary content and metadata mutation, and namespace
+removal/replacement checks victim policy. A buffered write rechecks protection
+under file-data exclusion, covering descriptors opened before protection was
+published. Quota metadata I/O is an explicit filesystem path and bypasses these
+ordinary-file gates.
+
+Live cache invalidation must not use final eviction: success requires completed
+PTE removal and TLB invalidation before releasing any folio. Deferred-only or
+missing notifiers cannot authorize cache destruction. A failed revocation or
+writeback leaves cache ownership intact; earlier PTE revocation may remain.
+The invalidation guard is released before retrying a busy MM. Callers must not
+hold an MM lock or writeback-completion locks across this operation.
+
+A writable descriptor alone does not authorize later shared mapping writes.
+Write faults recheck the current inode policy under data exclusion. A fault's
+superblock admission and data guard are acquired without waiting under the MM
+lock; transient contention becomes a retry, while immutable policy rejects the
+write. Existing writable PTEs are revoked before quota activation flushes and
+repurposes ordinary file contents.
+
+A nonblocking shared write-fault denial due to contention is not an invalid
+user address. Its sleepable wait phase runs outside the MM mutex on existing
+lifecycle/data lock queues. Acquiring and releasing those resources does not
+replace current VMA, mount or inode policy checks on the subsequent fault.
+
+
+### Destination faults during buffered reads
+
+A destination shared mapping can refer to the source inode itself. Its write
+fault can wait for inode data or superblock admission locks. Buffered reads
+therefore use nofault copies under the source folio lock and run destination
+fault preparation only after releasing it. This prevents a folio-to-inode lock
+inversion with buffered writers. A retry revalidates residency and EOF; neither
+the earlier page reference nor a successful prefault authorizes stale data or
+unchecked access after a concurrent truncate, unmap or permission change.
+
+An address-space view guard can extend its existing registration under MM
+serialization. The registry mutex protects the VMA/object spans, preserving the
+registration identity and invalidation notifier. Coordinates are validated before
+publication; invalidation snapshots do not hold this mutex while entering MM.

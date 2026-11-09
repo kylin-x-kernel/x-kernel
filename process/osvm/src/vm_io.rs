@@ -9,7 +9,7 @@ use core::{mem::MaybeUninit, slice};
 use kerrno::KError;
 use kio::prelude::*;
 
-use crate::{read_vm_mem, write_vm_mem};
+use crate::{MemImpl, VirtMemIo, read_vm_mem, write_vm_mem};
 
 /// A read-only buffer in user-space virtual memory.
 ///
@@ -75,7 +75,9 @@ impl IoBuf for VmBytes {
 
 /// A mutable buffer in user-space virtual memory.
 ///
-/// Implements [`Write`] so it can be passed to socket/file receive operations.
+/// Implements [`Write`] for ordinary receive operations and [`iov_iter::IovSink`]
+/// for file destinations. The sink separates nofault copies from sleepable fault
+/// preparation while sharing this buffer's pointer and remaining length.
 pub struct VmBytesMut {
     /// Pointer to the start of the buffer.
     pub ptr: *mut u8,
@@ -126,5 +128,37 @@ impl Write for VmBytesMut {
 impl IoBufMut for VmBytesMut {
     fn remaining_mut(&self) -> usize {
         self.len
+    }
+}
+
+impl iov_iter::IovSink for VmBytesMut {
+    fn count(&self) -> usize {
+        self.len
+    }
+
+    fn copy_to_iter(&mut self, src: &[u8]) -> kio::Result<usize> {
+        self.write(src)
+    }
+
+    fn copy_to_iter_nofault(&mut self, src: &[u8]) -> kio::Result<usize> {
+        let len = self.len.min(src.len());
+        let copied = MemImpl::new().write_mem_nofault(self.ptr.addr(), &src[..len])?;
+        self.ptr = self.ptr.wrapping_add(copied);
+        self.len -= copied;
+        Ok(copied)
+    }
+
+    fn fault_in_writeable(&mut self, count: usize) -> kio::Result<bool> {
+        if count.min(self.len) == 0 {
+            return Ok(false);
+        }
+        // Prepare the next byte only, so a later invalid page cannot suppress
+        // an otherwise transferable prefix. The next nofault copy spans pages.
+        MemImpl::new().fault_in_writeable(self.ptr.addr(), 1)?;
+        Ok(true)
+    }
+
+    fn revert(&mut self, count: usize) -> kio::Result<()> {
+        self.rewind_bytes(count)
     }
 }

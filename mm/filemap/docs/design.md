@@ -259,3 +259,31 @@ prefetch at most 16 missing file-cache pages through
 optional ELF file prefix; in-memory objects are skipped. A returned error does
 not replace the demand read, and the helper installs no PTE and does not alter
 COW ownership.
+
+Live inode cache invalidation uses the registered file-view notifier's
+`try_invalidate` callback, which returns success only after the MM has removed
+matching PTEs and completed TLB invalidation. A busy MM is reported to the
+address-space owner for retry, without blocking under its invalidate write lock.
+Shared read faults hold the address-space invalidate read lock through cache
+population and PTE publication. Shared mappings check file access and shmem
+seals at creation and permission changes. Write faults check current inode
+policy; transient admission contention is retried after releasing the MM.
+
+File runtime field order drops reverse-mapping registrations before file and
+backing-page references. Thus final file release can trigger filesystem teardown
+under the MM lock without retaining the very view a live cache invalidation is
+waiting to revoke. MM teardown removes PTEs and completes TLB invalidation before
+retiring the runtime's backing references.
+
+The shared file runtime implements the task-context fault wait hook by waiting
+for its retained file's canonical lifecycle/data admission outside the MM lock.
+The runtime reference survives only to keep resources alive during that wait;
+it never installs a PTE or assumes that its original VMA still exists. The MM
+owner repeats lookup, access checks and write preparation afterwards.
+
+Existing shared mappings use the runtime open callback for migration, expansion
+and fork. It duplicates existing writable-page accounting rather than rechecking
+new-map policy, so FUTURE_WRITE permits inherited writable VMAs while blocking
+new ones. Source offsets and view lengths follow the actual VMA range; expansion
+extends the existing reverse-mapping registration. The source adapter no longer
+keeps a duplicate immutable length. Write faults still check current inode policy.

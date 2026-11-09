@@ -182,7 +182,7 @@ fn shared_relocation_releases_seal_registrations(fail_preparation: bool) {
         guard.page_table_mut().modify()
             .map(target + PAGE_SIZE_4K, collision, PageSize::Size4K, flags)
             .expect("force second destination PTE preparation failure");
-        assert!(guard.relocate_mapping(&source, target, len, flags, &mm).is_err());
+        assert!(guard.relocate_mapping(&source, target, len, false, &mm).is_err());
         assert!(guard.find_vma(target).is_none());
         assert!(guard.page_table().query(target).is_err());
         assert_eq!(guard.page_table().query(target + PAGE_SIZE_4K).unwrap().0, collision);
@@ -193,10 +193,26 @@ fn shared_relocation_releases_seal_registrations(fail_preparation: bool) {
         dealloc_frame(collision, PageSize::Size4K);
         guard.unmap(start, len).expect("unmap original source after failed move");
     } else {
-        guard.relocate_mapping(&source, target, len, flags, &mm)
-            .expect("relocate shared file successfully");
+        let target_runtime = memspace::VmRuntimeRef::new_anon_private(target, PageSize::Size4K);
+        guard.map(target, PAGE_SIZE_4K, flags, true, target_runtime).unwrap();
+        let source_frame = guard.page_table().query(start).unwrap().0;
+        shmem::add_seals_for_location(file.path(), linux_raw_sys::general::F_SEAL_FUTURE_WRITE)
+            .expect("future-write sealing preserves existing writable mappings");
+        {
+            let _data = file.inode().lock_data();
+            guard.extend_area(start, PAGE_SIZE_4K)
+                .expect("existing VMA extension does not enter new-map admission");
+            assert_eq!(guard.find_vma(start).unwrap().size(), len + PAGE_SIZE_4K);
+            let source = guard.resolve_mremap_source(start, len + PAGE_SIZE_4K).unwrap();
+            guard.relocate_mapping(&source, target, PAGE_SIZE_4K, true, &mm)
+                .expect("inherit permissions while replacing target and shrinking source");
+        }
         assert!(guard.find_vma(start).is_none());
-        guard.unmap(target, len).expect("unmap destination after successful move");
+        assert!(guard.page_table().query(start + PAGE_SIZE_4K).is_err());
+        assert_eq!(guard.page_table().query(target).unwrap().0, source_frame);
+        guard
+            .unmap(target, PAGE_SIZE_4K)
+            .expect("unmap destination after successful move");
     }
     assert_eq!(shmem::add_seals_for_location(file.path(), F_SEAL_WRITE), Ok(()),
         "retired source and failed destination must not leak writable registrations");
@@ -210,4 +226,74 @@ fn failed_shared_relocation_releases_destination_seal_registrations() {
 #[def_test]
 fn successful_shared_relocation_releases_source_seal_registrations() {
     shared_relocation_releases_seal_registrations(false);
+}
+
+#[def_test]
+fn live_cache_invalidation_removes_shared_ptes_before_releasing_pages() {
+    use alloc::sync::Arc;
+
+    use khal::trap::PageFaultFlags;
+    use memspace::{MmSpace, VmArea};
+
+    let file = page_cache_file("live-shared-cache-invalidation");
+    file.write_from(&vec![0x5a; PAGE_SIZE_4K], &mut 0).unwrap();
+    let mm = Arc::new(Mutex::new(MmSpace::new_user_empty().unwrap()));
+    let start = VirtAddr::from_usize(0x780_000);
+    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+    let mm_id = mm.lock().mm_id();
+    let invalidate = mm.lock().invalidate_handle(&mm);
+    let runtime = super::new_shared_runtime(super::FileSharedRuntimeSpec {
+        start,
+        len: PAGE_SIZE_4K,
+        file: file.clone(),
+        offset: 0,
+        mm_id,
+        invalidate,
+    });
+    let vma = VmArea::new(
+        start,
+        PAGE_SIZE_4K,
+        flags,
+        flags,
+        runtime.backing_info(),
+        0,
+        Some(memspace::FileMappingInfo {
+            offset: 0,
+            inode: file.inode().inode(),
+            path: None,
+        }),
+    );
+    {
+        let mut guard = mm.lock();
+        guard.map_runtime_vma(vma, false, runtime).unwrap();
+        assert!(
+            guard
+                .handle_page_fault(start, PageFaultFlags::READ)
+                .is_resolved()
+        );
+        assert!(
+            guard
+                .handle_page_fault(start, PageFaultFlags::WRITE)
+                .is_resolved()
+        );
+        assert!(
+            guard
+                .page_table()
+                .query(start)
+                .unwrap()
+                .1
+                .contains(MappingFlags::WRITE)
+        );
+    }
+    file.inode().invalidate_cached_pages().unwrap();
+    assert_eq!(file.mapping().nrpages(), 0);
+    let mut guard = mm.lock();
+    assert!(guard.page_table().query(start).is_err());
+    assert!(guard.find_vma(start).is_some());
+    assert!(
+        guard
+            .handle_page_fault(start, PageFaultFlags::READ)
+            .is_resolved()
+    );
+    assert_eq!(file.mapping().nrpages(), 1);
 }

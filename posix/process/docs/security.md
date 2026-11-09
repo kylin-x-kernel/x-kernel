@@ -162,3 +162,8 @@ syscall guard retained. A pending freeze waits on the task subsystem's persisten
 release predicate; ordinary wakes/signals cannot bypass it. This hook does not
 discover tasks, stop creation or make a blocked syscall safe. PM must enumerate
 all non-exempt tasks and enforce those boundaries before power transitions.
+
+An admission wait must run after the architecture user-return boundary restored
+sleepable task context. The live MM capability retains lifetime while provider
+waits run outside MM serialization, and subsequent access uses fresh VMA checks.
+Permanent fault outcomes keep their existing signal mapping.

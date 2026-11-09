@@ -412,3 +412,14 @@ reuse path. Any future recycling policy must preserve leader retention separatel
 from replacement publication before changing that invariant. The count is a slot
 scan, not a global counter or atomic snapshot. No new unsafe code or sleepable
 lock is introduced, and directory metadata locks are not held across the query.
+
+The sleepable live-MM fault entry must be called outside MM, provider and
+non-sleepable locks with IRQs/preemption enabled. It keeps the captured active
+MM user alive while admission waits run, never trusts the pre-wait VMA for an
+access afterwards, and preserves permanent failure classes. Exception handlers
+continue to use raw locked fault handling rather than sleeping in this entry.
+
+The live mapping guard forwards relocation's target-replacement policy while
+permissions stay owned by the source snapshot. MM removes a fixed target and
+discarded source tail before preparing the retained source; these destructive
+steps are not enclosed in a transient admission retry.

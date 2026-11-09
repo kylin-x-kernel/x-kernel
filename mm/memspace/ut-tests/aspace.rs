@@ -157,6 +157,14 @@ fn file_fault_capacity_failure_is_a_bus_error() {
         PageFaultOutcome::BusError
     );
     assert_eq!(
+        aspace.finish_file_backend_fault(start, flags, Err(KError::OperationNotPermitted)),
+        PageFaultOutcome::BusError
+    );
+    assert_eq!(
+        aspace.finish_file_backend_fault(start, flags, Err(KError::WouldBlock)),
+        PageFaultOutcome::Retry
+    );
+    assert_eq!(
         aspace.finish_file_backend_fault(start, flags, Err(KError::NoMemory)),
         PageFaultOutcome::OutOfMemory
     );
@@ -598,7 +606,7 @@ fn relocated_private_mapping_keeps_object_contents_after_source_metadata_drop() 
     let source = mm
         .resolve_mremap_source(start, len)
         .expect("resolve relocation source");
-    mm.relocate_mapping(&source, target, len, flags, &aspace)
+    mm.relocate_mapping(&source, target, len, false, &aspace)
         .expect("relocate private snapshot");
 
     assert!(!mm.can_access_range(start, PAGE_SIZE_4K, flags));
@@ -633,7 +641,7 @@ fn relocated_shared_mapping_preserves_frames_and_refaults_at_destination() {
         mm.page_table().query(start + PAGE_SIZE_4K).unwrap().0,
     ];
     let source = mm.resolve_mremap_source(start, len).expect("shared source snapshot");
-    mm.relocate_mapping(&source, target, len, flags, &aspace)
+    mm.relocate_mapping(&source, target, len, false, &aspace)
         .expect("relocate eagerly populated shared runtime");
     assert!(mm.find_vma(start).is_none());
     for (page, frame) in frames.iter().enumerate() {
@@ -666,7 +674,7 @@ fn shared_relocation_rejects_growth_before_destination_publication() {
     let frame = mm.page_table().query(start).unwrap().0;
     let source = mm.resolve_mremap_source(start, PAGE_SIZE_4K).expect("shared source snapshot");
     assert_eq!(
-        mm.relocate_mapping(&source, target, PAGE_SIZE_4K * 3, flags, &aspace),
+        mm.relocate_mapping(&source, target, PAGE_SIZE_4K * 3, false, &aspace),
         Err(KError::InvalidInput),
         "fixed shared backing cannot supply a larger runtime range",
     );
@@ -726,4 +734,12 @@ fn clear_tolerates_zapped_linear_mapping() {
 
     aspace.clear();
     crate::backend::dealloc_frame(frame, PageSize::Size4K);
+}
+
+#[def_test]
+fn synchronous_invalidation_is_complete_after_mm_destruction() {
+    let mm = Arc::new(Mutex::new(MmSpace::new_user_empty().unwrap()));
+    let handle = mm.lock().invalidate_handle(&mm);
+    drop(mm);
+    assert_eq!(handle.try_apply(&sample_request()), Ok(true));
 }

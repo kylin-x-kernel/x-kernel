@@ -769,8 +769,10 @@ impl Ext4SbInfo {
             .links_count()
             .checked_add(1)
             .ok_or(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit))?;
-        self.update_inode_links_count_ctime_metadata(target, links_count, timestamp, handle)?;
-        self.insert_directory_entry(parent, name, target.number(), file_type, timestamp, handle)
+        // Directory growth may reject quota admission. Publish the target's
+        // persistent link count only after the directory insertion succeeds.
+        self.insert_directory_entry(parent, name, target.number(), file_type, timestamp, handle)?;
+        self.update_inode_links_count_ctime_metadata(target, links_count, timestamp, handle)
     }
 
     fn unlink_in_transaction(

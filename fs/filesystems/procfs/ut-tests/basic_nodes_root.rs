@@ -250,3 +250,33 @@ fn proc_nodes_are_pollable_like_linux() {
         assert!(file.can_poll(), "{path} must be pollable");
     }
 }
+
+#[def_test]
+fn quota_statistics_share_the_existing_filesystem_sysctl_tree() {
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+        let mut root = DirMapping::new();
+        add_root_entries(&mut root, fs.clone());
+        SimpleDir::new_maker(fs, Arc::new(root))
+    })
+    .unwrap();
+    let root = Mount::new_root(&super_block).root_path();
+    for path in [
+        "/sys/fs/quota/allocated_dquots",
+        "/sys/fs/inotify/max_user_watches",
+    ] {
+        let file = Filename::new(path)
+            .open_with_flags_at(
+                &root,
+                &root,
+                OpenFlags::empty().bits(),
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        let mut bytes = [0; 32];
+        let length = file.read(&mut bytes).unwrap();
+        let value = core::str::from_utf8(&bytes[..length]).unwrap();
+        assert!(value.trim().parse::<usize>().is_ok());
+    }
+}

@@ -215,3 +215,12 @@ survivor; the procfs count observes that final membership and never creates an
 accounting-only leader alias. A failed takeover leaves the leader slot intact.
 The advisory count still cannot authorize a TID or prove that a concurrent
 exec transition has completed; it remains a metadata snapshot.
+
+## Quota introspection
+
+Quota cache counts are read-only observations under each superblock's existing
+quota mutex. No backing-file I/O or native filesystem lock is taken while
+counting. Mount-option snapshots use the filesystem operation table; build
+configuration bytes are produced from the resolved build inputs, not runtime
+user data. All three introspection paths expose state rather than accepting
+policy changes.

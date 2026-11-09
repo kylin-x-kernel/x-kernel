@@ -58,10 +58,11 @@ pub type MemResult<T = ()> = Result<T, MemError>;
 ///
 /// # Safety
 ///
-/// Implementers must ensure `read_mem` and `write_mem` only succeed when the
-/// supplied virtual range is accessible for the requested operation, and that
-/// successful reads fully initialize `out`. Implementations must not create
-/// typed references to user memory; they should perform checked byte copies.
+/// Implementers must validate accessibility for each transferred byte and fully
+/// initialize successful reads. Nofault copies must report the exact transferred
+/// prefix without resolving faults, and leave memory unchanged on error.
+/// Implementations must not create typed references to user memory; they perform
+/// checked byte copies. Prefaulting must not modify user bytes.
 #[extern_trait(MemImpl)]
 pub unsafe trait VirtMemIo: 'static {
     /// Creates a provider instance.
@@ -89,6 +90,23 @@ pub unsafe trait VirtMemIo: 'static {
     /// Returns [`MemError::NoAccess`] when any byte of the range is not
     /// writable through the provider's fault-checked path.
     fn write_mem(&mut self, addr: usize, src: &[u8]) -> MemResult;
+    /// Copies a prefix without resolving faults or waiting for backing storage.
+    ///
+    /// Returns the actual transferred count; an inaccessible page ends the copy.
+    /// No user reference may be formed. On error no bytes were transferred.
+    ///
+    /// # Errors
+    /// Returns [`MemError::NoAccess`] for an invalid user range.
+    fn write_mem_nofault(&mut self, addr: usize, src: &[u8]) -> MemResult<usize>;
+
+    /// Resolves write faults over a range without changing its contents.
+    ///
+    /// May sleep. Callers must release folio and backing-provider locks first.
+    /// This does not pin the mapping or guarantee future accessibility.
+    ///
+    /// # Errors
+    /// Returns an access or allocation error if any page cannot become writable.
+    fn fault_in_writeable(&mut self, addr: usize, len: usize) -> MemResult;
 }
 
 /// Reads `out.len()` elements from virtual memory into an uninitialized

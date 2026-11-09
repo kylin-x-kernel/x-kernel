@@ -201,3 +201,8 @@ entry, after syscall/signal handling has released its scoped kernel resources.
 It is outside both IRQ-off architecture transfer callbacks. Only explicitly
 requested tasks block; a task stuck inside a syscall is not falsely counted as
 frozen. Freezing does not set the process interruption bit or fabricate EINTR.
+
+User execution faults use the captured live MM's sleepable resolver. Backing
+admission waits release the MM mutex and block on existing provider resources
+before lookup and permissions are checked again. This is the same wait contract
+used by kernel user-memory copies, without sleeping in architecture trap code.

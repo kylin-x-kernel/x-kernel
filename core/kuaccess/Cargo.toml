@@ -13,7 +13,7 @@ repository.workspace = true
 # architecture registration path and references the linkme crate name directly.
 # `ksync` and `unittest_support` are used by cfg(unittest) tests under ut-tests,
 # which cargo-shear ignores as test-source layout by convention.
-ignored = ["ksync", "linkme", "unittest_support"]
+ignored = ["ksync", "linkme", "unittest_support", "vmobj"]
 
 [dependencies]
 extern-trait = "0.3"
@@ -30,6 +30,7 @@ memspace.workspace = true
 osvm.workspace = true
 unittest.workspace = true
 unittest_support.workspace = true
+vmobj.workspace = true
 
 [lints]
 workspace = true

@@ -297,3 +297,9 @@ holds one invalidate read guard and takes one index snapshot, instead of repeati
 both locks per page. Folio locks still serialize data copying. An unaligned EOF,
 a short sink, or a later initialization error returns the copied prefix and
 advances Kiocb by exactly that prefix. Sparse policy remains in memfs.
+
+Writable shmem mapping inheritance duplicates the existing writable-page count
+without new-map seal admission. A positive existing count excludes WRITE sealing;
+FUTURE_WRITE does not revoke the permissions of inherited mappings. The same
+counter remains the sole owner of WRITE-seal exclusion, with checked addition
+and no separate inherited-permission flag.

@@ -7,9 +7,11 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use khal::paging::MappingFlags;
 use ksync::Mutex;
+use memaddr::VirtAddr;
 
-use crate::{InvalidateHandle, MmSpace};
+use crate::{InvalidateHandle, MmSpace, PageFaultOutcome};
 
 pub(crate) struct MmUserLifetime {
     state: AtomicUsize,
@@ -95,6 +97,39 @@ impl MmUserHandle {
     /// Returns the virtual address space guarded by this active user.
     pub fn address_space(&self) -> &Arc<Mutex<MmSpace>> {
         &self.address_space
+    }
+
+    /// Resolves a task-context fault, waiting for admission outside MM serialization.
+    ///
+    /// The active user retains this MM throughout waits. Each Retry retains only
+    /// the current backing runtime, releases the MM mutex and waits on its
+    /// resources. The next attempt looks up the VMA and checks access anew.
+    /// Admission waits do not constitute failed materialization attempts.
+    ///
+    /// Requires sleepable task context with IRQs/preemption enabled, without an
+    /// MM mutex, a non-sleepable lock or locks needed by the backing provider.
+    /// Exception handlers must use the non-waiting raw MM fault entry instead.
+    pub fn resolve_page_fault(&self, address: VirtAddr, flags: MappingFlags) -> PageFaultOutcome {
+        loop {
+            let (outcome, retry) = {
+                let mut mm = self.address_space.lock();
+                let outcome = mm.handle_page_fault(address, flags);
+                let retry = (outcome == PageFaultOutcome::Retry)
+                    .then(|| mm.fault_retry_runtime(address))
+                    .flatten();
+                (outcome, retry)
+            };
+            if outcome != PageFaultOutcome::Retry {
+                return outcome;
+            }
+            let Some(runtime) = retry else {
+                return PageFaultOutcome::NoProgress;
+            };
+            if let Err(error) = runtime.wait_for_fault() {
+                warn!("Failed to wait for fault admission at {address:?}: {error}");
+                return PageFaultOutcome::Failed;
+            }
+        }
     }
 
     /// Returns the immutable address-space identity.

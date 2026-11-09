@@ -24,6 +24,7 @@ pub(crate) struct ProcMountEntry {
     mnt_flags: MountFlags,
     mount_ro: bool,
     super_ro: bool,
+    filesystem_options: String,
 }
 
 struct ProcMountCollector {
@@ -83,7 +84,8 @@ fn mangle(s: &str) -> String {
 }
 
 fn show_mounts(item: &ProcMountEntry, buf: &mut String) -> core::fmt::Result {
-    let mount_options = format_mount_options(item.mnt_flags, item.mount_ro || item.super_ro);
+    let mut mount_options = format_mount_options(item.mnt_flags, item.mount_ro || item.super_ro);
+    mount_options.push_str(&item.filesystem_options);
     buf.push_str(&format!(
         "{} {} {} {} 0 0\n",
         mangle(&item.source),
@@ -98,7 +100,7 @@ fn show_mountinfo(item: &ProcMountEntry, buf: &mut String) -> core::fmt::Result 
     let mount_options = format_mount_options(item.mnt_flags, item.mount_ro);
     let super_options = if item.super_ro { "ro" } else { "rw" };
     buf.push_str(&format!(
-        "{} {} {}:{} {} {} {} - {} {} {}\n",
+        "{} {} {}:{} {} {} {} - {} {} {}{}\n",
         item.mount_id,
         item.parent_id,
         item.major,
@@ -109,6 +111,7 @@ fn show_mountinfo(item: &ProcMountEntry, buf: &mut String) -> core::fmt::Result 
         item.fs_type,
         mangle(&item.source),
         super_options,
+        item.filesystem_options,
     ));
     Ok(())
 }
@@ -217,8 +220,8 @@ fn make_mount_entry(mount: &Arc<Mount>, parent_id: u64, mount_id: u64) -> ProcMo
     ProcMountEntry {
         mount_id,
         parent_id,
-        major: 0,
-        minor: mount.synthetic_device_id() as u32,
+        major: kvfs::DeviceId(mount.device_id()).major(),
+        minor: kvfs::DeviceId(mount.device_id()).minor(),
         root: "/".to_string(),
         mount_point: mount_point.clone(),
         source: mount_source(mount).unwrap_or_else(|| "none".to_string()),
@@ -226,6 +229,7 @@ fn make_mount_entry(mount: &Arc<Mount>, parent_id: u64, mount_id: u64) -> ProcMo
         mnt_flags,
         mount_ro,
         super_ro,
+        filesystem_options: mount.super_block().show_options(),
     }
 }
 

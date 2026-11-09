@@ -158,6 +158,11 @@ impl<F> QuotaInfo<F> {
         Self::default()
     }
 
+    /// Returns the number of resident quota records.
+    pub fn cached_records(&self) -> usize {
+        self.dquots.len()
+    }
+
     /// Loads a pre-existing quota file, enabling accounting and optionally limits.
     ///
     /// Only USAGE_ENABLED and LIMITS_ENABLED are accepted here; usage must be
@@ -307,6 +312,28 @@ impl<F> QuotaInfo<F> {
         info.inode_grace_seconds = inode_seconds;
         info.tree.is_dirty = true;
         info.sync(io)
+    }
+
+    /// Loads a record into the canonical cache without allocating its storage.
+    ///
+    /// Existing on-disk records become active. An absent record remains inactive
+    /// until acquisition creates its backing storage. No writes are issued;
+    /// disabled or suspended classes return ESRCH.
+    pub fn read_record(&mut self, io: &mut dyn QuotaIo<File = F>, id: QuotaId) -> KResult<()> {
+        self.active_info(id.kind())?;
+        let info = self.info[id.kind().index()]
+            .as_ref()
+            .ok_or(LinuxError::ESRCH)?;
+        if let Entry::Vacant(entry) = self.dquots.entry(id) {
+            let (offset, data) = info.tree.read(io, &info.file, id.id())?;
+            entry.insert(Dquot {
+                data,
+                offset,
+                is_dirty: false,
+                is_active: offset != 0,
+            });
+        }
+        Ok(())
     }
 
     /// Acquires a record and returns its native usage snapshot.
@@ -786,19 +813,7 @@ impl<F> QuotaInfo<F> {
     }
 
     fn acquire(&mut self, io: &mut dyn QuotaIo<File = F>, id: QuotaId) -> KResult<()> {
-        self.active_info(id.kind())?;
-        let info = self.info[id.kind().index()]
-            .as_ref()
-            .ok_or(LinuxError::ESRCH)?;
-        if let Entry::Vacant(entry) = self.dquots.entry(id) {
-            let (offset, data) = info.tree.read(io, &info.file, id.id())?;
-            entry.insert(Dquot {
-                data,
-                offset,
-                is_dirty: false,
-                is_active: offset != 0,
-            });
-        }
+        self.read_record(io, id)?;
         let (info, records) = (&mut self.info[id.kind().index()], &mut self.dquots);
         let info = info.as_mut().ok_or(LinuxError::ESRCH)?;
         let dquot = records.get_mut(&id).ok_or(LinuxError::ESRCH)?;

@@ -73,6 +73,10 @@ impl FileOperations for TestChrdevInode {}
 impl AddressSpaceOperations for TestChrdevInode {}
 
 impl InodeAttributeOperations for TestChrdevInode {
+    fn flags(&self) -> NodeFlags {
+        NodeFlags::NON_CACHEABLE
+    }
+
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
         let mut metadata = self.metadata.lock().clone();
         metadata.inode = inode_number;
@@ -263,7 +267,6 @@ fn filesystem_attribute_operations_are_the_vfs_inode_state() {
     .with_owner_links_and_rdev(0, 0, 1, DeviceId::new(1, 3));
     let inode = VfsInode::new_with_inode_attribute_operations(
         node.clone(),
-        NodeFlags::NON_CACHEABLE,
         empty_address_space_operations(),
         init,
     );
@@ -287,7 +290,6 @@ fn inode_time_updates_use_superblock_timestamp_limits() {
     let inode = super_block.get_or_init_inode(42, || {
         VfsInode::new_with_inode_attribute_operations(
             node.clone(),
-            NodeFlags::NON_CACHEABLE,
             empty_address_space_operations(),
             VfsInodeInit::new(
                 42,
@@ -369,7 +371,6 @@ fn resident_timestamps_follow_values_returned_by_filesystem() {
     let inode = super_block.get_or_init_inode(43, || {
         VfsInode::new_with_inode_attribute_operations(
             node.clone(),
-            NodeFlags::NON_CACHEABLE,
             empty_address_space_operations(),
             VfsInodeInit::new(
                 43,

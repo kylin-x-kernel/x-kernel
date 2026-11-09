@@ -37,10 +37,11 @@ they do not represent a runtime state-transition protocol.
 File-I/O consumers supply kernel slices directly or accept constructed iterators.
 The VFS uses the source alias for writes and the destination alias for reads.
 External implementations provide the source/sink traits; the wrapper invokes
-those implementations. In the current integration, `IoSourceAdapter` and
-`IoSinkAdapter` in the repository's `posix/fs/src/io.rs` adapt byte-access and
-rewind operations. User-memory and iovec access remain their responsibility.
-These are integration relationships, not direct Cargo dependencies of this crate.
+those implementations. `IoSourceAdapter` in `posix/fs` adapts source access and
+rewind operations. `osvm::VmBytesMut` and `posix_types::IoVectorBufIo` implement
+`IovSink` directly, keeping user pointers, segment cursors and fault policy in
+their existing owners. These are integration relationships, not direct Cargo
+dependencies of this crate.
 
 ## Construction and transfer flow
 
@@ -101,3 +102,15 @@ an iterator ends its borrow; it neither frees the backing storage nor drops the
 borrowed adapter. It does not restore the cursor, clear copied data, or perform
 file cleanup. Owners retain responsibility for allocation, data disposal, and
 any resources managed by their adapter.
+
+
+## Locked copies and destination faults
+
+`copy_to_iter_nofault` advances only by the transferred prefix and never invokes
+user fault resolution. The separate `fault_in_writeable` callback may sleep and
+must run outside folio and backing-provider locks. It prepares the next user
+prefix without advancing the cursor; kernel-memory sinks return false because
+there is no fault to resolve. A true result permits retry after releasing and
+reacquiring the source. It does not pin user mappings. No iterator mode flag or
+second cursor is needed; ordinary `copy_to_iter` remains available to consumers
+that can tolerate fault resolution.

@@ -133,3 +133,14 @@
 
 `brk` 不忽略补建/收缩映射的错误；失败时不发布请求的新 heap top，
 避免用户观察到未完成的地址空间变更。
+
+Shared file mapping creation and permission changes run under MM serialization.
+Write faults may return a retry outcome to leave that critical section before a
+lifecycle transition needs to revoke the mapping's PTEs.
+
+`mremap` inherits the existing VMA permissions and runs under MM serialization.
+File expansion and migration update registrations through the runtime open
+callback rather than new-map admission. Fixed replacement removes the target,
+trims a shrinking source, then resolves the remaining source and prepares its
+move. These removals remain effective if a later preparation fails. The syscall
+has no mapping-admission retry around this destructive sequence.

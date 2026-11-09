@@ -283,3 +283,97 @@ fn truncate_partial_page_growth_zeros_cached_old_eof() {
         })
         .unwrap();
 }
+
+struct OnlineNotifier {
+    mapping: Weak<AddressSpace>,
+    attempts: Mutex<usize>,
+}
+
+impl MappingViewNotifier for OnlineNotifier {
+    fn invalidate(&self, _work: &ObjectInvalidateWork, _hit: &ObjectViewHit) {
+        panic!("live invalidation must wait for completed revocation");
+    }
+
+    fn try_invalidate(
+        &self,
+        _work: &ObjectInvalidateWork,
+        _hit: &ObjectViewHit,
+    ) -> VfsResult<bool> {
+        assert_eq!(self.mapping.upgrade().unwrap().nrpages(), 1);
+        let mut attempts = self.attempts.lock();
+        *attempts += 1;
+        Ok(*attempts > 1)
+    }
+}
+
+#[def_test]
+fn online_invalidation_retains_cache_until_revocation_completes() {
+    let inode = VfsInode::new_file_with_address_space(
+        Arc::new(TruncateOps),
+        &TRUNCATE_OPERATIONS,
+        VfsInodeInit::new(
+            7,
+            PAGE_SIZE_4K as u64,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let mapping = inode.address_space();
+    mapping
+        .i_pages
+        .filemap_add_folio(super::folio_from_bytes(0, b"live"))
+        .unwrap();
+    let notifier = Arc::new(OnlineNotifier {
+        mapping: Arc::downgrade(&mapping),
+        attempts: Mutex::new(0),
+    });
+    let _view = mapping.register_view(MappingViewSpec {
+        mm_id: 1,
+        vma_start: 0x4000,
+        vma_len: PAGE_SIZE_4K,
+        object_start: 0,
+        object_len: PAGE_SIZE_4K,
+        kind: MappingViewKind::Shared,
+        notifier: Some(notifier.clone()),
+    });
+    inode.invalidate_cached_pages().unwrap();
+    assert_eq!(*notifier.attempts.lock(), 2);
+    assert_eq!(mapping.nrpages(), 0);
+    assert_eq!(inode.size(), PAGE_SIZE_4K as u64);
+}
+
+#[def_test]
+fn live_invalidation_rejects_deferred_only_notifiers_without_freeing_pages() {
+    let inode = VfsInode::new_file_with_address_space(
+        Arc::new(TruncateOps),
+        &TRUNCATE_OPERATIONS,
+        VfsInodeInit::new(
+            8,
+            PAGE_SIZE_4K as u64,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let mapping = inode.address_space();
+    mapping
+        .i_pages
+        .filemap_add_folio(super::folio_from_bytes(0, b"retained"))
+        .unwrap();
+    let _view = mapping.register_view(MappingViewSpec {
+        mm_id: 1,
+        vma_start: 0x4000,
+        vma_len: PAGE_SIZE_4K,
+        object_start: 0,
+        object_len: PAGE_SIZE_4K,
+        kind: MappingViewKind::Shared,
+        notifier: Some(Arc::new(RecordingNotifier {
+            address_space: Arc::downgrade(&mapping),
+            observed_sizes: Mutex::new(Vec::new()),
+        })),
+    });
+    assert_eq!(
+        inode
+            .invalidate_cached_pages()
+            .map_err(kerrno::LinuxError::from),
+        Err(kerrno::LinuxError::EOPNOTSUPP)
+    );
+    assert_eq!(mapping.nrpages(), 1);
+}

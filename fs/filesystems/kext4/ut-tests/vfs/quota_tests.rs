@@ -84,7 +84,7 @@ fn load_user_quota(super_block: &SuperBlock, inode: &Arc<VfsInode>) {
     let mut handle = journal.begin(credits).unwrap();
     let mut io = Ext4QuotaIo {
         filesystem: &mut state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     };
     let mut header = [0; 2048];
     header[..4].copy_from_slice(&0xd9c0_1f11_u32.to_le_bytes());
@@ -121,7 +121,7 @@ fn quota_payload_is_visible_from_metadata_cache_before_checkpoint() {
     let mut handle = journal.begin(credits).unwrap();
     let mut io = Ext4QuotaIo {
         filesystem: &mut state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     };
     assert_eq!(io.write(&inode, 19, b"quota-data"), Ok(10));
     let mut output = [0xff; 40];
@@ -160,7 +160,7 @@ fn quota_write_rejects_cross_block_requests_before_mutating_metadata() {
     let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
     let mut io = Ext4QuotaIo {
         filesystem: &mut state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     };
     assert_eq!(
         io.write(&inode, TEST_BLOCK_SIZE as u64 - 1, &[1, 2]),
@@ -180,7 +180,7 @@ fn quota_reads_cross_blocks_and_zero_sparse_holes() {
     let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
     let mut io = Ext4QuotaIo {
         filesystem: &mut state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     };
     io.write(&inode, 2 * TEST_BLOCK_SIZE as u64 + 7, b"tail")
         .unwrap();
@@ -212,7 +212,7 @@ fn filesystem_sync_persists_quota_records_using_the_retained_inode() {
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         let mut io = Ext4QuotaIo {
             filesystem: &mut state,
-            handle: &mut handle,
+            handle: Some(&mut handle),
         };
         let mut header = [0; 1024];
         header[..4].copy_from_slice(&0xd9c0_1f11_u32.to_le_bytes());
@@ -247,7 +247,7 @@ fn filesystem_sync_persists_quota_records_using_the_retained_inode() {
     let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
     let mut io = Ext4QuotaIo {
         filesystem: &mut state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     };
     let mut reopened = kquota::QuotaInfo::new();
     reopened
@@ -303,7 +303,7 @@ fn quota_write_initializes_unwritten_blocks_without_exposing_old_contents() {
     private.set_size(TEST_BLOCK_SIZE as u64);
     let mut io = Ext4QuotaIo {
         filesystem: &mut state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     };
     io.write(&inode, 7, b"quota").unwrap();
     let mut output = vec![0xff; TEST_BLOCK_SIZE];
@@ -328,7 +328,7 @@ fn quota_write_checks_credit_bound_before_allocating_a_hole() {
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let mut io = Ext4QuotaIo {
         filesystem: &mut state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     };
     assert_eq!(
         io.write(&inode, 0, b"quota"),
@@ -353,7 +353,7 @@ fn sync_reports_failed_acquisition_without_aborting_or_initializing_the_record()
         let result = super_block.quota_info().get(
             &mut Ext4QuotaIo {
                 filesystem: &mut state,
-                handle: &mut handle,
+                handle: Some(&mut handle),
             },
             owner,
         );
@@ -379,7 +379,7 @@ fn sync_reports_failed_acquisition_without_aborting_or_initializing_the_record()
         let mut handle = journal.begin(credits).unwrap();
         let mut io = Ext4QuotaIo {
             filesystem: &mut state,
-            handle: &mut handle,
+            handle: Some(&mut handle),
         };
         let mut quota = super_block.quota_info();
         quota.get(&mut io, owner).unwrap();
@@ -439,7 +439,7 @@ fn quota_growth_admits_external_xattr_space_for_extra_isize_expansion() {
     let mut handle = journal.begin(credits).unwrap();
     let mut io = Ext4QuotaIo {
         filesystem: &mut state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     };
     io.write(&inode, 0, b"quota").unwrap();
     state.complete_metadata_mutation(handle, Ok(())).unwrap();
@@ -564,7 +564,7 @@ fn owner_usage(super_block: &SuperBlock, state: &mut Ext4SbInfo, uid: u32) -> kq
         .get(
             &mut Ext4QuotaIo {
                 filesystem: state,
-                handle: &mut handle,
+                handle: Some(&mut handle),
             },
             QuotaId::new(QuotaType::User, uid).unwrap(),
         )
@@ -678,7 +678,7 @@ fn quota_limits_reject_inode_and_space_before_bitmap_publication() {
         let mut quota = super_block.quota_info();
         let mut io = Ext4QuotaIo {
             filesystem: &state,
-            handle: &mut handle,
+            handle: Some(&mut handle),
         };
         quota
             .set(
@@ -807,10 +807,10 @@ fn mapped_quota_overwrites_reuse_a_consumed_transaction_credit() {
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let mut io = Ext4QuotaIo {
         filesystem: &state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     };
     io.write(file.inode(), 80, b"one").unwrap();
-    assert_eq!(io.handle.remaining_credits(), 0);
+    assert_eq!(io.handle.as_ref().unwrap().remaining_credits(), 0);
     io.write(file.inode(), 80, b"two").unwrap();
     let mut bytes = [0; 3];
     assert_eq!(io.read(file.inode(), 80, &mut bytes), Ok(3));
@@ -828,7 +828,7 @@ fn a_new_quota_payload_target_still_requires_a_transaction_credit() {
     assert_eq!(
         Ext4QuotaIo {
             filesystem: &state,
-            handle: &mut handle
+            handle: Some(&mut handle)
         }
         .write(file.inode(), 80, b"new"),
         Err(KError::from(LinuxError::ENOSPC).canonicalize())
@@ -858,7 +858,7 @@ fn aborted_suspended_quota_releases_its_file_without_rewriting_recovery_state() 
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
         Ext4QuotaIo {
             filesystem: &state,
-            handle: &mut handle,
+            handle: Some(&mut handle),
         }
         .write(file.inode(), 8191, &[0])
         .unwrap();
@@ -871,7 +871,7 @@ fn aborted_suspended_quota_releases_its_file_without_rewriting_recovery_state() 
         let result = super_block.quota_info().get(
             &mut Ext4QuotaIo {
                 filesystem: &state,
-                handle: &mut handle,
+                handle: Some(&mut handle),
             },
             QuotaId::new(QuotaType::User, 0x0102_0304).unwrap(),
         );
@@ -1243,7 +1243,7 @@ fn owner_initialization_reuses_sparse_quota_blocks_below_eof() {
     let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
     let mut io = Ext4QuotaIo {
         filesystem: &state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     };
     io.write(file.inode(), 32767, &[0]).unwrap();
     io.write(file.inode(), 20, &32_u32.to_le_bytes()).unwrap();
@@ -1280,7 +1280,7 @@ fn corrupt_quota_tree_aborts_before_any_record_can_be_charged() {
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     Ext4QuotaIo {
         filesystem: &state,
-        handle: &mut handle,
+        handle: Some(&mut handle),
     }
     .write(file.inode(), 1024, &1_u32.to_le_bytes())
     .unwrap();
@@ -1481,7 +1481,7 @@ fn preallocation_quota_admission_precedes_consumption_without_delalloc() {
             let mut handle = journal.begin(credits).unwrap();
             let mut io = Ext4QuotaIo {
                 filesystem: &state,
-                handle: &mut handle,
+                handle: Some(&mut handle),
             };
             let mut quota = super_block.quota_info();
             let id = QuotaId::new(QuotaType::User, 1000).unwrap();
@@ -1681,4 +1681,202 @@ fn invalid_quota_numbers_fail_activation_before_record_io() {
         assert!(super_block.quota_info().info(QuotaType::Group).is_none());
         assert_eq!(device.write_count(), writes);
     }
+}
+
+#[def_test]
+fn external_quota_control_retains_one_file_and_restores_inode_policy() {
+    use kvfs::QuotaOperations;
+
+    let (super_block, file, _) = quota_fixture();
+    let inode = file.inode();
+    load_user_quota(&super_block, inode);
+    let retained = super_block.quota_info().unload(QuotaType::User).unwrap();
+    drop(retained);
+    {
+        let mut state = ext4_private(&super_block).unwrap().write(&super_block);
+        state.vfs_superblock = Arc::downgrade(&super_block);
+        state.quota_mount_options = 1;
+    }
+    let writer = kvfs::dentry_open(
+        file.path().clone(),
+        kvfs::OpenFlags::READ_WRITE.bits(),
+        kcred::initial_cred(),
+    )
+    .unwrap();
+    let mut position = 100;
+    assert_eq!(writer.write_from(&[9, 8, 7, 6], &mut position), Ok(4));
+    let ops = &EXT4_SUPER_OPERATIONS;
+    ops.quota_on(
+        &super_block,
+        QuotaType::User,
+        QuotaFormat::VfsV1.id(),
+        inode,
+    )
+    .unwrap();
+    let mut marker = [0; 4];
+    let mut position = 100;
+    assert_eq!(file.read_from(&mut marker, &mut position), Ok(4));
+    assert_eq!(marker, [9, 8, 7, 6]);
+    assert!(inode.flags().contains(
+        kvfs::NodeFlags::NO_QUOTA | kvfs::NodeFlags::IMMUTABLE | kvfs::NodeFlags::NO_ATIME
+    ));
+    assert!(Arc::ptr_eq(
+        super_block
+            .quota_info()
+            .info(QuotaType::User)
+            .unwrap()
+            .file(),
+        inode
+    ));
+    assert_eq!(
+        inode.permission(kvfs::Permission::MAY_WRITE, &kcred::initial_cred()),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(
+        ops.quota_on(
+            &super_block,
+            QuotaType::User,
+            QuotaFormat::VfsV1.id(),
+            inode
+        ),
+        Err(LinuxError::EBUSY.into())
+    );
+    assert_eq!(
+        writer.write(b"ordinary write"),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(writer.write(&[]), Err(VfsError::OperationNotPermitted));
+    assert_eq!(writer.truncate(0), Err(VfsError::OperationNotPermitted));
+    assert_eq!(
+        writer.page_mkwrite(0, |_| Ok(())),
+        Err(VfsError::OperationNotPermitted)
+    );
+    let id = QuotaId::new(QuotaType::User, 1234).unwrap();
+    let value = kquota::Dqblk {
+        space_hard_limit_bytes: 8192,
+        inode_hard_limit: 7,
+        ..kquota::Dqblk::default()
+    };
+    ops.set(
+        &super_block,
+        id,
+        value,
+        kquota::QuotaFields::SPACE_HARD | kquota::QuotaFields::INODE_HARD,
+    )
+    .unwrap();
+    assert_eq!(
+        ops.get(&super_block, id).unwrap().space_hard_limit_bytes,
+        8192
+    );
+    assert_eq!(ops.next(&super_block, QuotaType::User, 1).unwrap().0, id);
+    assert_eq!(
+        ops.next(&super_block, QuotaType::User, 1235)
+            .map_err(LinuxError::from),
+        Err(LinuxError::ENOENT)
+    );
+    ops.set_grace_times(&super_block, QuotaType::User, 19, 23)
+        .unwrap();
+    // An unused record is deleted during final release, after the pre-off sync.
+    let empty_id = QuotaId::new(QuotaType::User, 5678).unwrap();
+    ops.get(&super_block, empty_id).unwrap();
+    ops.quota_off(&super_block, QuotaType::User).unwrap();
+    assert!(super_block.quota_info().info(QuotaType::User).is_none());
+    let mut expected = vec![0; inode.size() as usize];
+    {
+        let state = ext4_private(&super_block).unwrap().read();
+        let io = Ext4QuotaIo {
+            filesystem: &state,
+            handle: None,
+        };
+        assert_eq!(io.read(inode, 0, &mut expected).unwrap(), expected.len());
+    }
+    let mut ordinary = vec![0; expected.len()];
+    assert_eq!(
+        file.read_from(&mut ordinary, &mut 0).unwrap(),
+        expected.len()
+    );
+    assert_eq!(
+        ordinary, expected,
+        "ordinary I/O must see the final released quota tree"
+    );
+    assert!(!inode.flags().intersects(
+        kvfs::NodeFlags::NO_QUOTA | kvfs::NodeFlags::IMMUTABLE | kvfs::NodeFlags::NO_ATIME
+    ));
+    ops.quota_on(
+        &super_block,
+        QuotaType::User,
+        QuotaFormat::VfsV1.id(),
+        inode,
+    )
+    .unwrap();
+    assert_eq!(ops.get(&super_block, id).unwrap().inode_hard_limit, 7);
+    assert_eq!(
+        super_block
+            .quota_info()
+            .info(QuotaType::User)
+            .unwrap()
+            .space_grace_seconds(),
+        19
+    );
+    ops.quota_off(&super_block, QuotaType::User).unwrap();
+}
+
+#[def_test]
+fn malformed_external_quota_header_does_not_abort_the_filesystem() {
+    use kvfs::QuotaOperations;
+
+    let (super_block, file, _) = quota_fixture();
+    let inode = file.inode();
+    load_user_quota(&super_block, inode);
+    drop(super_block.quota_info().unload(QuotaType::User).unwrap());
+    {
+        let mut state = ext4_private(&super_block).unwrap().write(&super_block);
+        let journal = state.metadata_journal().unwrap();
+        let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
+        let mut io = Ext4QuotaIo {
+            filesystem: &state,
+            handle: Some(&mut handle),
+        };
+        // Block one is the required root; a file claiming only one block has
+        // no room for that root despite its otherwise valid magic/version.
+        io.write(inode, 20, &1_u32.to_le_bytes()).unwrap();
+        state.complete_metadata_mutation(handle, Ok(())).unwrap();
+        state.sync_filesystem().unwrap();
+        state.quota_mount_options = 1;
+    }
+    let result = EXT4_SUPER_OPERATIONS.quota_on(
+        &super_block,
+        QuotaType::User,
+        QuotaFormat::VfsV1.id(),
+        inode,
+    );
+    assert_eq!(result.map_err(LinuxError::from), Err(LinuxError::EUCLEAN));
+    assert!(super_block.quota_info().info(QuotaType::User).is_none());
+    assert!(!inode.flags().contains(kvfs::NodeFlags::NO_QUOTA));
+    assert!(!super_block.is_readonly());
+    assert!(
+        !ext4_private(&super_block)
+            .unwrap()
+            .read()
+            .journal
+            .as_ref()
+            .unwrap()
+            .is_aborted()
+    );
+}
+
+#[def_test]
+fn readonly_quota_io_has_no_write_authority() {
+    let (super_block, file, device) = quota_fixture();
+    let writes = device.write_count();
+    let state = ext4_private(&super_block).unwrap().read();
+    let mut io = Ext4QuotaIo {
+        filesystem: &state,
+        handle: None,
+    };
+    assert_eq!(
+        io.write(file.inode(), 0, b"data"),
+        Err(LinuxError::EIO.into())
+    );
+    assert_eq!(device.write_count(), writes);
 }

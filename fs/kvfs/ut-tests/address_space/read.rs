@@ -176,6 +176,10 @@ impl IovSink for ShortSink {
         PAGE_SIZE_4K * 40 - self.copied
     }
 
+    fn copy_to_iter_nofault(&mut self, src: &[u8]) -> KResult<usize> {
+        self.copy_to_iter(src)
+    }
+
     fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {
         let copied = src.len().min(self.limit);
         self.copied += copied;
@@ -201,6 +205,107 @@ fn buffered_read_stops_on_short_or_zero_copy() {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DestinationFault {
+    Retry,
+    Truncate,
+    Deny,
+}
+
+struct FaultingSink<'a> {
+    mapping: &'a AddressSpace,
+    output: Vec<u8>,
+    prefix: usize,
+    faults: usize,
+    action: DestinationFault,
+}
+
+impl IovSink for FaultingSink<'_> {
+    fn count(&self) -> usize {
+        23 - self.output.len()
+    }
+
+    fn copy_to_iter(&mut self, _src: &[u8]) -> KResult<usize> {
+        panic!("buffered reads must not resolve a fault under the source folio lock");
+    }
+
+    fn copy_to_iter_nofault(&mut self, src: &[u8]) -> KResult<usize> {
+        let count = if self.faults == 0 {
+            self.prefix
+        } else {
+            self.count()
+        }
+        .min(src.len());
+        self.output.extend_from_slice(&src[..count]);
+        Ok(count)
+    }
+
+    fn fault_in_writeable(&mut self, _count: usize) -> KResult<bool> {
+        self.faults += 1;
+        let inode = self.mapping.inode().unwrap();
+        {
+            // Taking the writer's locks proves the read released its source
+            // folio before entering a destination backing provider.
+            let _data = inode.lock_data();
+            self.mapping.with_folio(0, |folio| {
+                folio.unwrap().data().fill(0x7b);
+            })?;
+        }
+        match self.action {
+            DestinationFault::Retry => Ok(true),
+            DestinationFault::Truncate => {
+                inode.set_len(self.prefix as u64)?;
+                Ok(true)
+            }
+            DestinationFault::Deny => Err(KError::BadAddress),
+        }
+    }
+}
+
+#[def_test]
+fn buffered_read_faults_outside_folio_lock_and_rechecks_eof() {
+    for prefix in [0, 7] {
+        for action in [
+            DestinationFault::Retry,
+            DestinationFault::Truncate,
+            DestinationFault::Deny,
+        ] {
+            let inode = read_inode(&READ_OPS, PAGE_SIZE_4K);
+            let mapping = inode.address_space();
+            mapping
+                .with_folio_or_create(0, |folio| {
+                    folio.data().fill(0x42);
+                    Ok(())
+                })
+                .unwrap();
+            let mut sink = FaultingSink {
+                mapping: &mapping,
+                output: Vec::new(),
+                prefix,
+                faults: 0,
+                action,
+            };
+            let mut iter = iov_iter_dest(&mut sink);
+            let result = mapping.read_from_page_cache(&mut iter, 0);
+            let expected = match action {
+                DestinationFault::Retry => Ok(23),
+                DestinationFault::Truncate => Ok(prefix),
+                DestinationFault::Deny if prefix == 0 => Err(KError::BadAddress),
+                DestinationFault::Deny => Ok(prefix),
+            };
+            assert_eq!(result, expected);
+            assert_eq!(iter.count(), 23 - expected.unwrap_or(0));
+            assert_eq!(sink.faults, 1);
+            assert_eq!(&sink.output[..prefix], &[0x42; 7][..prefix]);
+            if matches!(action, DestinationFault::Retry) {
+                assert!(sink.output[prefix..].iter().all(|byte| *byte == 0x7b));
+            } else {
+                assert_eq!(sink.output.len(), prefix);
+            }
+        }
+    }
+}
+
 struct InvalidatingSink<'a> {
     mapping: &'a AddressSpace,
     output: Vec<u8>,
@@ -210,6 +315,10 @@ struct InvalidatingSink<'a> {
 impl IovSink for InvalidatingSink<'_> {
     fn count(&self) -> usize {
         PAGE_SIZE_4K * 3 - self.output.len()
+    }
+
+    fn copy_to_iter_nofault(&mut self, src: &[u8]) -> KResult<usize> {
+        self.copy_to_iter(src)
     }
 
     fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {
@@ -769,6 +878,10 @@ fn open_file_readahead_shares_dup_history_but_not_reopened_history() {
     impl IovSink for RetreatOnCopy<'_> {
         fn count(&self) -> usize {
             self.remaining
+        }
+
+        fn copy_to_iter_nofault(&mut self, src: &[u8]) -> KResult<usize> {
+            self.copy_to_iter(src)
         }
 
         fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {

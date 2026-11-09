@@ -563,6 +563,19 @@ impl ObjectInvalidateRequest {
 pub trait MappingViewNotifier: Send + Sync {
     /// Applies object-driven invalidate work to the registered VMA view.
     fn invalidate(&self, work: &ObjectInvalidateWork, hit: &ObjectViewHit);
+
+    /// Attempts synchronous PTE removal and TLB invalidation without waiting
+    /// for the target MM lock. Returns false while that lock is busy. Owners
+    /// must retain backing pages until every affected view reports completion.
+    /// The default rejects synchronous invalidation rather than claiming that
+    /// a deferred notification has completed.
+    fn try_invalidate(
+        &self,
+        _work: &ObjectInvalidateWork,
+        _hit: &ObjectViewHit,
+    ) -> kerrno::KResult<bool> {
+        Err(kerrno::LinuxError::EOPNOTSUPP.into())
+    }
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

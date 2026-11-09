@@ -32,6 +32,9 @@ use crate::runtime::FileRuntimeContext;
 
 #[derive(Clone)]
 pub(crate) struct FilePrivateRuntime {
+    // Reverse mappings retire before backing references can trigger teardown.
+    mapping_view: Option<AddressSpaceViewGuard>,
+    anon_view: Option<AnonPrivateViewGuard>,
     start: VirtAddr,
     len: usize,
     size: PageSize,
@@ -41,8 +44,6 @@ pub(crate) struct FilePrivateRuntime {
     file: Arc<VfsFile>,
     file_start: u64,
     file_end: Option<u64>,
-    mapping_view: Option<AddressSpaceViewGuard>,
-    anon_view: Option<AnonPrivateViewGuard>,
 }
 
 impl FilePrivateRuntime {

@@ -105,3 +105,14 @@ storage owners.
 
 The example does not establish fault recovery, concurrency, or adapter correctness.
 Those properties require validation of each external implementation.
+
+
+## Copy and fault separation
+
+Locked page-cache reads use the mandatory sink nofault operation. Implementers
+must neither invoke backing-provider fault handling nor lose progress: successful
+short copies advance by exactly their prefix, while errors leave the cursor
+unchanged and report no transferred bytes. Fault preparation is a separate,
+sleepable callback with no source slice borrowed. Callers reacquire and validate
+source residency and EOF after that callback; prefaulting never authorizes an
+unchecked later user access.

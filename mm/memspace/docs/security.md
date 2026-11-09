@@ -8,8 +8,10 @@ completion slot, calling consumes its owner, and cancellation or construction
 failure drops captures without invoking the callback. Capture destructors run
 in the dropping caller's context, independently of allocation flags.
 
-Fault dispatch does not release an outer MM lock before invoking a hook.
-Callbacks must not reacquire that lock or assume reclaim-safe execution.
+Raw fault dispatch keeps the outer MM lock while invoking post-populate hooks.
+Those callbacks must not reacquire that lock or assume reclaim-safe execution.
+The separate admission wait hook runs only after the active-MM resolver releases
+MM serialization.
 NOWAIT permits allocation without reclaim but can fail; callers must allocate
 before committing any operation that cannot tolerate loss of its completion
 action. Default KERNEL construction requires sleepable, reclaim-compatible
@@ -217,3 +219,24 @@ the existing kernel layout lock and preserves previous error behavior.
 Coherent is READ|WRITE|UNCACHED|SHARED; Normal is READ|WRITE. The caller owns the
 allocation and quiesces device access before restoration. Allocation, platform
 sharing, rollback and device-cache synchronization are outside this capability.
+
+A busy filesystem write-admission boundary is a retryable file fault, not a
+permanent memory-access failure. The fault must unwind the MM lock before retry;
+otherwise a filesystem transition revoking that same MM can deadlock. Completed
+synchronous object invalidation includes PTE removal and TLB invalidation; an
+already-destroyed MM has no remaining mappings to revoke.
+
+Admission Retry is not materialization progress and must not exhaust a user
+copy's no-progress bound. The active-MM resolver retains lifetime through waits,
+but carries no borrowed VMA/PTE references across MM unlock. A provider returning
+Retry must support the lock-free-of-MM wait hook; unsupported waits fail rather
+than spin indefinitely. Every retry repeats current VMA and permission checks.
+Waiting may block in task context and must not run under an MM or non-sleepable
+lock, or inside an exception handler.
+
+Relocation derives permissions from its source snapshot and accepts an explicit
+target-replacement policy. Fixed replacement removes the target and discarded
+source tail before preparing the retained source. File runtimes open inherited
+registrations without new-map admission; failures retire destination registrations
+while preserving retained source PTEs. File expansion also uses open and updates
+the existing object-side view range before the VMA extension is published.

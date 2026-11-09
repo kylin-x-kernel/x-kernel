@@ -666,7 +666,7 @@ This does not weaken the data or journal flush barriers or add a background work
 Quota files use the canonical VFS inode retained by superblock quota state.
 The trusted caller must validate same-filesystem membership and protect the
 file against ordinary writes before activation. The storage adapter accepts
-an existing mount-state borrow and journal handle in sleepable task context;
+an existing mount-state borrow and, for writes, a journal handle in task context;
 it introduces no unsafe code, persistent owner, atomics or recursive lock.
 Mount write exclusion precedes the quota mutex. It must not execute under
 spinlocks, IRQ/preemption-disable guards, in IRQ or during early boot.
@@ -674,8 +674,8 @@ spinlocks, IRQ/preemption-disable guards, in IRQ or during early boot.
 Quota payload reads use the metadata cache to avoid stale home-block reads
 before checkpoint. Writes reject filesystem-block crossings before mutation,
 check existing extent/inode credit bounds, initialize newly exposed blocks and
-journal payload with mapping/size changes. A format operation must remain in
-one admitted transaction; its caller must complete or abort the handle before
+journal payload with mapping/size changes. A mutating format operation must remain
+in one admitted transaction; its caller must complete or abort the handle before
 releasing the filesystem state. Physical admission includes optional
 extra-isize external-xattr allocation through the existing inode bound; journal
 credit extension alone is insufficient. Native read and write failures are classified
@@ -739,10 +739,53 @@ inode references are released by the mounted owner after its filesystem/quota
 guards end. The core release helper is private to quota integration, preventing
 callers from receiving a file under their own mount guard. Final eviction can
 therefore enter filesystem code safely. Administrative authorization,
-external quota-file protection and project identities are not exposed by this
-stage; no quotactl or implicit privilege bypass is added.
+project identities and inheritance remain unsupported for writable mounts.
+Quota-control authorization is performed by the syscall adapter.
 
 Filesystem range/length checks precede sector-addressed Bio I/O. Live media
 capacity, queue alignment and read-only checks remain in block core; a later
 media shrink returns a device error. Aligned byte reads borrow the destination
 and may partially modify it on failure; partial blocks use staging.
+
+## Quota-control boundary
+
+Quota operations run under superblock shutdown admission. On/off hold its
+exclusive side; queries and record updates share admission. They acquire native
+mount protection before the canonical quota mutex. Backing-file references are
+copied while holding that mutex, then inspected or released after unlocking it;
+status queries therefore cannot invert the native mount/quota lock order.
+
+External activation rejects a foreign superblock, non-regular backing inode,
+duplicate class, or already protected quota file. `NO_QUOTA` excludes payload
+allocation from recursive charging. Persistent immutable/no-atime flags and
+live VFS flag queries prevent ordinary writes, metadata changes, namespace
+removal and automatic atime updates from modifying active quota files.
+Quota-file data exclusion precedes native mount protection. Sync invalidates
+old file-cache pages only after journal and device persistence completes.
+
+Privileged record changes require the current subjective CAP_SYS_ADMIN.
+Own-user and effective-group queries remain available without that capability.
+The integration checks CAP_SYS_RESOURCE for a current user caller before quota
+admission; no opener credential or per-inode permission cache supplies bypass.
+Unsupported project operations remain rejected rather than silently unaccounted.
+
+An external quota header is file input until activation succeeds. Header-format
+rejection is propagated without aborting the filesystem's journal. The read-only
+load has no journal handle, and its I/O adapter retains ordinary filesystem
+I/O/corruption classification. Activated quota updates remain subject to the
+existing metadata transaction and abort rules.
+
+Read contexts cannot write without the optional borrowed journal handle. This
+is write authority, not another journal or quota owner. Record acquisition reads
+existing state before reserving space for a missing record; queries retain the
+same acquisition requirements as accounting. Existing-record updates and grace
+headers need bounded journal credits without physical-growth admission.
+
+Quota file ownership handoff requires both mapping revocation and persistence.
+Activation revokes writable PTEs before flushing ordinary data. Existing writable
+descriptors cannot bypass immutable policy through mmap, mprotect or write faults.
+Each ordinary write reenters shared superblock admission; quota enable/disable
+retain exclusive admission through initialization and teardown. Disable checks
+all reservations before any record removal and drains the final quota metadata
+transaction through checkpoint before restoring ordinary file access. No parallel
+mapping registry, quota file table or compensating policy flags are added.

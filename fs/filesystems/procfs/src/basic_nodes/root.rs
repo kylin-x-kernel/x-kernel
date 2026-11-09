@@ -310,6 +310,19 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                 }
                 SimpleDir::new_maker(fs.clone(), Arc::new(inotify))
             });
+            let mut quota = DirMapping::new();
+            quota.add(
+                "allocated_dquots",
+                SimpleFile::new_regular(fs.clone(), || {
+                    let allocated: usize = kvfs::super_block_registry()
+                        .live_super_blocks()
+                        .iter()
+                        .map(|sb| sb.quota_info().cached_records())
+                        .sum();
+                    Ok(format!("{allocated}\n"))
+                }),
+            );
+            fs_dir.add_dir("quota", SimpleDir::new_maker(fs.clone(), Arc::new(quota)));
             SimpleDir::new_maker(fs.clone(), Arc::new(fs_dir))
         });
 

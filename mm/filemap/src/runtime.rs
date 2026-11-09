@@ -55,11 +55,11 @@ pub(crate) struct SharedFileSourceSpec {
 }
 
 pub(crate) struct SharedFileSourceAdapter {
+    // Detach the view before the last file reference can run filesystem teardown.
+    mapping_view: Option<AddressSpaceViewGuard>,
     start: VirtAddr,
-    len: usize,
     file: Arc<VfsFile>,
     offset_page: u64,
-    _mapping_view: Option<AddressSpaceViewGuard>,
 }
 
 impl SharedFileSourceAdapter {
@@ -79,19 +79,21 @@ impl SharedFileSourceAdapter {
         );
         Self {
             start: spec.start,
-            len: spec.len,
             file,
             offset_page: spec.offset_page,
-            _mapping_view: mapping_view,
+            mapping_view,
         }
+    }
+
+    pub(crate) fn extend_view_to(&self, end: VirtAddr) -> KResult<()> {
+        if let Some(view) = &self.mapping_view {
+            view.extend_to(end.as_usize() as u64)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn start(&self) -> VirtAddr {
         self.start
-    }
-
-    pub(crate) const fn len(&self) -> usize {
-        self.len
     }
 
     pub(crate) const fn offset_page(&self) -> u64 {
@@ -119,16 +121,15 @@ impl SharedFileSourceAdapter {
         file: Arc<VfsFile>,
         mm_id: u64,
         start: VirtAddr,
-        len: usize,
+        _len: usize,
         offset_page: u64,
     ) -> Self {
         let _ = mm_id;
         Self {
             start,
-            len,
             file,
             offset_page,
-            _mapping_view: None,
+            mapping_view: None,
         }
     }
 }

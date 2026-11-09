@@ -22,12 +22,13 @@ mod namei;
 pub mod notify;
 mod open;
 mod path;
+mod quota;
 mod stat;
 mod sync;
 pub mod watch;
 mod xattr;
 
 pub use self::{
-    dir::*, fd_ops::*, io::*, ioctl::*, metadata::*, mount::*, namei::*, open::*, stat::*, sync::*,
-    xattr::*,
+    dir::*, fd_ops::*, io::*, ioctl::*, metadata::*, mount::*, namei::*, open::*, quota::*,
+    stat::*, sync::*, xattr::*,
 };

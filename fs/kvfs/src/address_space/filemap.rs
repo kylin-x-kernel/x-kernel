@@ -187,15 +187,16 @@ impl AddressSpace {
                         .min((PAGE_SIZE_4K - page_off) as u64)
                         as usize;
                     if step == 0 {
-                        return Ok((0, None));
+                        return Ok((0, 0, None));
                     }
-                    let copied = iter.copy_to_iter(&folio.data()[page_off..page_off + step])?;
+                    let copied =
+                        iter.copy_to_iter_nofault(&folio.data()[page_off..page_off + step])?;
                     let window = if copied != 0 {
                         self.readahead_after_copy(folio, offset, requested, ra)
                     } else {
                         None
                     };
-                    Ok((copied, window))
+                    Ok((copied, step.min(requested), window))
                 };
                 let cached = match batch.as_ref() {
                     Some(batch) => batch.with_read_folio(slot, &mut copy),
@@ -212,7 +213,7 @@ impl AddressSpace {
                         }
                     }
                 };
-                let (copied, window) = match result {
+                let (copied, requested, window) = match result {
                     Ok(result) => result,
                     Err(error) if total == 0 => return Err(error),
                     Err(_) => break 'read,
@@ -223,6 +224,17 @@ impl AddressSpace {
                 }
                 offset += copied as u64;
                 total += copied;
+                if copied < requested {
+                    // A destination fault can enter the same inode. Release the
+                    // source folio before waiting, then look up residency and EOF
+                    // again; prefaulting never pins the destination mapping.
+                    match iter.fault_in_writeable(requested - copied) {
+                        Ok(true) => continue 'read,
+                        Ok(false) => break 'read,
+                        Err(error) if total == 0 => return Err(error),
+                        Err(_) => break 'read,
+                    }
+                }
                 if copied < page_remaining || iter.count() == 0 {
                     break 'read;
                 }
@@ -323,22 +335,21 @@ impl AddressSpace {
         iocb: &mut Kiocb<'_>,
         iter: &mut IovIterSource<'_>,
     ) -> VfsResult<usize> {
-        self.write_iter_with_checks(iocb, iter, |_, _| Ok(()))
+        self.write_iter_with_checks(iocb, iter, |iocb, count| {
+            iocb.generic_write_check_limits(count)
+        })
     }
 
     pub(crate) fn write_iter_with_checks(
         &self,
         iocb: &mut Kiocb<'_>,
         iter: &mut IovIterSource<'_>,
-        checks: impl FnOnce(u64, &mut usize) -> VfsResult<()>,
+        checks: impl FnOnce(&Kiocb<'_>, &mut usize) -> VfsResult<()>,
     ) -> VfsResult<usize> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
         let _data_guard = inode.lock_data();
         let mut count = iter.count();
-        self.generic_write_check_limits(iocb, &mut count)?;
-        if count != 0 {
-            checks(iocb.ki_pos(), &mut count)?;
-        }
+        checks(iocb, &mut count)?;
         iter.truncate(count);
         let count = iter.count();
         if count == 0 {
@@ -351,23 +362,6 @@ impl AddressSpace {
         let written = self.perform_write(iocb.ki_pos(), iter, count)?;
         iocb.advance(written);
         Ok(written)
-    }
-
-    fn generic_write_check_limits(&self, iocb: &Kiocb<'_>, count: &mut usize) -> VfsResult<()> {
-        if *count == 0 {
-            return Ok(());
-        }
-
-        let max_file_size = iocb.file().max_file_size();
-        let pos = iocb.ki_pos();
-        if pos >= max_file_size {
-            return Err(VfsError::FileTooLarge);
-        }
-
-        let count_u64 = u64::try_from(*count).map_err(|_| VfsError::InvalidInput)?;
-        let count_u64 = count_u64.min(max_file_size - pos);
-        *count = usize::try_from(count_u64).map_err(|_| VfsError::InvalidInput)?;
-        Ok(())
     }
 
     // The caller holds the inode data lock through rollback to keep size and

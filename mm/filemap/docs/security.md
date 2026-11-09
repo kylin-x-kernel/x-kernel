@@ -124,3 +124,30 @@ cached or dirty pages. Its exclusive `file_end` bounds selected pages, not the
 last page's file contents; the existing private-frame copy still confines ELF BSS
 zero-fill to the newly allocated frame. Returned prefetch errors are followed by
 the authoritative demand read; allocator aborts are not recoverable.
+
+A live cache page must not be released on the strength of a queued reverse-map
+notification. The synchronous notifier reports completed PTE/TLB revocation or
+contention/error. Shared read faults publish their PTE under the cache owner's
+invalidate read guard. Shared mapping creation and permission upgrades check
+file access and shmem seals. A write fault rechecks inode mutability, and its
+VFS policy guard does not wait under the MM lock when a conflicting lifecycle
+or data-policy transition owns the resource.
+
+File runtime field order drops reverse-mapping registrations before file and
+backing-page references. Thus final file release can trigger filesystem teardown
+under the MM lock without retaining the very view a live cache invalidation is
+waiting to revoke. MM teardown removes PTEs and completes TLB invalidation before
+retiring the runtime's backing references.
+
+WouldBlock on a shared write fault requires a backing-resource wait outside MM
+serialization. The runtime uses its existing file reference and VFS admission
+locks, without adding a wait registry or duplicating state. Permission changes
+or unmapping during the wait are checked by the next MM lookup before any PTE
+or user-buffer write can be published.
+
+Existing shared mappings use the runtime open callback for migration, expansion
+and fork. It duplicates existing writable-page accounting rather than rechecking
+new-map policy, so FUTURE_WRITE permits inherited writable VMAs while blocking
+new ones. Source offsets and view lengths follow the actual VMA range; expansion
+extends the existing reverse-mapping registration. The source adapter no longer
+keeps a duplicate immutable length. Write faults still check current inode policy.

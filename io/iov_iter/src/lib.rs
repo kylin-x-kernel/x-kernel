@@ -110,6 +110,30 @@ pub trait IovSink {
     /// those errors and any buffer or cursor changes made before failure.
     fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize>;
 
+    /// Copies without resolving user faults or entering a backing provider.
+    ///
+    /// Advances only by the returned prefix. An inaccessible user page stops
+    /// the copy, including with zero bytes, rather than sleeping to populate it.
+    /// Kernel-memory sinks can delegate to `copy_to_iter` if it cannot fault.
+    ///
+    /// # Errors
+    /// Returns an access error only when no bytes were transferred. Implementers
+    /// must preserve the cursor on error.
+    fn copy_to_iter_nofault(&mut self, src: &[u8]) -> KResult<usize>;
+
+    /// Makes the current destination prefix writable without advancing it.
+    ///
+    /// Call only after releasing folio and backing-provider locks. Returns true
+    /// when user pages were checked and a short nofault copy should be retried.
+    /// Kernel-memory sinks return false because they have no faults to resolve.
+    /// Completion does not pin mappings; subsequent copies must remain nofault.
+    ///
+    /// # Errors
+    /// Returns an access or allocation error when the prefix cannot be prepared.
+    fn fault_in_writeable(&mut self, _count: usize) -> KResult<bool> {
+        Ok(false)
+    }
+
     /// Moves the sink cursor backward by `count` bytes.
     ///
     /// A successful rewind restores that many bytes to the remaining count.
@@ -391,6 +415,48 @@ impl IovIter<'_, IovIterDestDirection> {
     /// An internal direction mismatch triggers an unreachable assertion. Public
     /// constructors preserve the direction invariant. An adapter may also panic.
     pub fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {
+        self.copy_to_iter_with(src, |writer, bytes| writer.copy_to_iter(bytes))
+    }
+
+    /// Copies a prefix without resolving user faults, advancing by that prefix.
+    ///
+    /// Kernel slices use the ordinary copy; adapters obey
+    /// [`IovSink::copy_to_iter_nofault`]. Callers can release their locks and use
+    /// [`Self::fault_in_writeable`] before retrying a short copy.
+    ///
+    /// # Errors
+    /// Propagates adapter errors without advancing the iterator.
+    pub fn copy_to_iter_nofault(&mut self, src: &[u8]) -> KResult<usize> {
+        self.copy_to_iter_with(src, |writer, bytes| writer.copy_to_iter_nofault(bytes))
+    }
+
+    /// Prepares at most `count` remaining bytes without advancing the cursor.
+    ///
+    /// Returns false for kernel slices; adapters follow
+    /// [`IovSink::fault_in_writeable`]. May sleep and must run outside folio and
+    /// backing-provider locks. A later copy must still tolerate mapping changes.
+    ///
+    /// # Errors
+    /// Propagates adapter access or allocation errors.
+    pub fn fault_in_writeable(&mut self, count: usize) -> KResult<bool> {
+        let count = count.min(self.count);
+        if count == 0 {
+            return Ok(false);
+        }
+        match &mut self.inner {
+            IovIterInner::Dest(IovSinkInner::Kvec { .. }) => Ok(false),
+            IovIterInner::Dest(IovSinkInner::Writer(writer)) => writer.fault_in_writeable(count),
+            IovIterInner::Source(_) => {
+                unreachable!("destination iterator stores destination state")
+            }
+        }
+    }
+
+    fn copy_to_iter_with(
+        &mut self,
+        src: &[u8],
+        copy: impl FnOnce(&mut dyn IovSink, &[u8]) -> KResult<usize>,
+    ) -> KResult<usize> {
         let max_len = src.len().min(self.count);
         if max_len == 0 {
             return Ok(0);
@@ -406,9 +472,7 @@ impl IovIter<'_, IovIterDestDirection> {
                 *offset += len;
                 Ok(len)
             }
-            IovIterInner::Dest(IovSinkInner::Writer(writer)) => {
-                writer.copy_to_iter(&src[..max_len])
-            }
+            IovIterInner::Dest(IovSinkInner::Writer(writer)) => copy(*writer, &src[..max_len]),
             IovIterInner::Source(_) => {
                 unreachable!("destination iterator stores destination state")
             }

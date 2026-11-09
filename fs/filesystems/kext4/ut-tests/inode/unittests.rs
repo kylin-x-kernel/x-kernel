@@ -355,6 +355,16 @@ fn inode_state_accessors_reflect_metadata_fields() {
     assert_eq!(disk_size, 200);
     assert!(immutable);
     assert!(append_only);
+
+    assert!(inode.runtime_flags().contains(kvfs::NodeFlags::IMMUTABLE));
+    assert!(inode.runtime_flags().contains(kvfs::NodeFlags::APPEND_ONLY));
+    inode.set_noquota(true);
+    let mut changed = inode.metadata_snapshot();
+    changed.flags = disk_inode::EXT4_NOATIME_FL;
+    inode.publish_metadata(changed).unwrap();
+    let flags = inode.runtime_flags();
+    assert!(flags.contains(kvfs::NodeFlags::NO_QUOTA | kvfs::NodeFlags::NO_ATIME));
+    assert!(!flags.intersects(kvfs::NodeFlags::IMMUTABLE | kvfs::NodeFlags::APPEND_ONLY));
 }
 
 #[def_test]

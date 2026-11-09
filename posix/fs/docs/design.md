@@ -641,3 +641,23 @@ The migration preserves module visibility, feature gates and execution modes.
 - `ut-tests/io_restart_tests.rs`: mounted by `src/io.rs` as `restart_tests`.
 - `ut-tests/io_transfer_count_tests.rs`: mounted by `src/io.rs` as `transfer_count_tests`.
 - `ut-tests/io_copy_file_range_checks_tests.rs`: mounted by `src/io.rs` as `copy_file_range_checks_tests`.
+
+## Disk quota syscalls
+
+`quota.rs` implements quotactl and quotactl_fd. It decodes command/type, resolves
+the mounted block-device superblock or descriptor, checks the current caller,
+and converts classic quota records between 1-KiB limits and native byte counts.
+`quota/xfs.rs` converts the extended status/record ABI, whose space units are
+512-byte blocks. Both paths use the same superblock quota operation table and
+canonical state. Reservations are included in reported usage. Enumeration
+returns the least stored ID at or above the requested ID without wrapping.
+
+Queries for format, information, status and synchronization are unprivileged;
+user/effective-group owners may query their records. Other operations require
+CAP_SYS_ADMIN. A null special pathname with Q_SYNC visits mounted supporting
+filesystems. A filesystem without quota callbacks returns ENOSYS.
+
+Quota format and information queries build owned ABI snapshots under the quota
+state mutex and release it before copying to user memory. Record and extended
+status queries follow the same boundary: a user destination may fault into file
+allocation and quota accounting, so no quota-state or record guard spans copyout.

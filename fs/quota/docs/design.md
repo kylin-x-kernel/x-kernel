@@ -227,3 +227,8 @@ permanently block an otherwise admissible ownership change.
 transaction before class disable. `record_growth_bytes_bound` describes v2
 format growth for filesystem physical/journal admission; it is not a second
 usage or free-space counter.
+
+`read_record` loads existing records into the canonical cache without writes.
+An absent ID stays inactive until acquisition creates its backing record. This
+lets providers distinguish existing payload overwrites from structural growth
+before physical-allocation admission, using the existing active state.

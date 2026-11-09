@@ -128,3 +128,8 @@ Other classes retain their records and backing-file ownership.
 Ownership transfer clamps an undersized source reservation to zero and emits a
 warning. Target admission still includes the full transferred reservation, and
 a refusal in any class leaves both owner sets unchanged.
+
+`read_record` loads existing records into the canonical cache without writes.
+An absent ID stays inactive until acquisition creates its backing record. This
+lets providers distinguish existing payload overwrites from structural growth
+before physical-allocation admission, using the existing active state.

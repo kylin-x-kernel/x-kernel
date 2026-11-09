@@ -753,12 +753,14 @@ impl Mount {
         self.mnt_devname.as_deref()
     }
 
-    /// Returns the temporary VFS device identity exposed for inode metadata.
-    ///
-    /// X-Kernel does not yet have a superblock-level `s_dev` model, so mounted
-    /// filesystems use the mount ID as a stable synthetic device number.
-    pub fn synthetic_device_id(self: &Arc<Self>) -> u64 {
-        self.mnt_id
+    /// Returns the device identity exposed by mounted inode metadata.
+    /// Block-backed filesystems use their canonical backing device number.
+    /// Anonymous mounts retain a major-zero identity.
+    pub fn device_id(self: &Arc<Self>) -> u64 {
+        self.super_block().block_device().map_or_else(
+            || crate::DeviceId::new(0, self.mnt_id as u32).0,
+            |device| device.device_number().0,
+        )
     }
 
     /// Returns this mount's flags.
@@ -1129,7 +1131,8 @@ impl Path {
 
         let mount_flags = self.mnt.flags();
         let super_block_flags = self.super_block().flags();
-        if mount_flags.contains(MountFlags::NOATIME)
+        if self.inode().flags().contains(crate::NodeFlags::NO_ATIME)
+            || mount_flags.contains(MountFlags::NOATIME)
             || super_block_flags.contains(SuperBlockFlags::NOATIME)
             || (self.inode().node_type() == NodeType::Directory
                 && (mount_flags.contains(MountFlags::NODIRATIME)
@@ -1314,7 +1317,7 @@ impl Path {
     /// retirement decision -- must use [`Mount::getattr`].
     pub(crate) fn identity(&self) -> Metadata {
         let mut metadata = self.dentry.vfs_inode().metadata();
-        metadata.device = self.mnt.synthetic_device_id();
+        metadata.device = self.mnt.device_id();
         metadata
     }
 
@@ -1322,7 +1325,7 @@ impl Path {
     pub fn getattr(&self) -> VfsResult<Metadata> {
         let mut metadata =
             self.getattr_nosec(GetattrRequestMask::empty(), GetattrQueryFlags::empty())?;
-        metadata.device = self.mnt.synthetic_device_id();
+        metadata.device = self.mnt.device_id();
         Ok(metadata)
     }
 
@@ -1439,11 +1442,25 @@ impl Path {
             return Err(VfsError::OperationNotPermitted);
         }
         let source_inode = source.inode();
+        if source_inode
+            .flags()
+            .intersects(crate::NodeFlags::IMMUTABLE | crate::NodeFlags::APPEND_ONLY)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
         let _source_guard = source_inode.lock_namespace_exclusive();
         self.inode().link(candidate, &source.dentry)
     }
 
     fn check_sticky(&self, victim: &Self, cred: &Cred) -> VfsResult<()> {
+        if self.inode().flags().contains(crate::NodeFlags::APPEND_ONLY)
+            || victim
+                .inode()
+                .flags()
+                .intersects(crate::NodeFlags::IMMUTABLE | crate::NodeFlags::APPEND_ONLY)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
         let dir = self.metadata();
         if !dir.mode.permission().contains(NodePermission::STICKY) {
             return Ok(());

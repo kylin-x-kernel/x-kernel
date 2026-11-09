@@ -1394,10 +1394,12 @@ Recovery 不创建 resident inode 表。它在 mount/VFS identity 尚未发布�
 ## Quota-file storage and synchronization
 
 `src/quota.rs` implements `kquota::QuotaIo` with a borrowed `Ext4QuotaIo`
-containing a shared `Ext4SbInfo` borrow and the current mutable `JournalHandle`.
+containing a shared `Ext4SbInfo` borrow and optional mutable `JournalHandle`
+write authority.
 Active-handle extent, inode and xattr edits mutate their existing locked state;
 mount admission, recovery and commit retain exclusive lifecycle access.
-This transient pair supplies explicit transaction context; it owns no mount,
+A write context supplies the caller's transaction; a read context has no handle.
+This transient adapter owns no mount,
 file registry or quota state. The superblock's `QuotaInfo<Arc<VfsInode>>`
 retains each backing inode, and I/O borrows that inode's `Ext4Inode` component.
 
@@ -1408,8 +1410,8 @@ filesystem block. New mappings allocate exactly one block without speculative
 preallocation; unwritten mappings are initialized to zero. Payload, extent,
 bitmap and inode size changes enter the caller's journal handle. Inode size
 metadata is dirtied only on growth; mapped overwrites need one payload credit. Ordinary
-PageCache/ordered-data writeback does not carry quota-file contents.
-The caller admits the transaction before quota I/O and completes or aborts it
+PageCache/ordered-data writeback does not carry active quota-file contents.
+The writer admits the transaction before quota I/O and completes or aborts it
 after the complete format operation. Shortage is checked before each payload
 mutation using existing extent/inode credit bounds plus its payload block.
 Physical admission must cover every payload/extent allocation and also
@@ -1510,11 +1512,60 @@ final disable
 invalidates class cache/info without I/O; the original error is returned and
 disk recovery flags and committed journal evidence remain intact. No copied file registry,
 per-inode quota owner array, dirty queue or parallel usage counter is introduced.
-External quota activation, quota-control syscalls, mount limit options and
-project identity/transfer remain outside this stage. Internal accounting defaults
-to usage tracking; explicit core limit state is exercised by allocation tests.
+`usrquota` and `grpquota` select limit enforcement for internal quota files.
+Without the on-disk QUOTA feature, they authorize external quota-file activation
+through the VFS quota operations. Accounting and limits are then loaded together.
+Project identity and inheritance remain unsupported for writable mounts.
 
 The asynchronous allocating and mapped-completion writeback transactions reserve
 owner-record credits at their existing journal admission boundary. Quota claims
 share the unwritten allocation transaction, and completed overwrites reuse
 existing allocation without another charge.
+
+## Quota control and external files
+
+`src/vfs/quota.rs` implements the shared quota operation table. The syscall
+adapter owns command validation, credential checks, and ABI conversions; the
+filesystem owns backing-file admission, transactions, and inode policy. No
+parallel control-state object or file registry is introduced. The mount policy
+mask is retained by `Ext4SbInfo`; usage, enforcement and suspension remain in
+the existing `QuotaInfo` class state.
+
+External activation requires a regular file on the same superblock and a quota
+mount option. Activation excludes file-data mutation, revokes mapped access,
+drains writeback, invalidates cached contents, and marks the resident inode `NO_QUOTA` before
+loading its header. Direct metadata I/O uses the existing journal adapter.
+Persistent immutable/no-atime flags protect the file from ordinary access.
+The resident inode publishes their corresponding runtime behavior flags when
+disk attributes change, preserving independently updated quota-exclusion state.
+Existing writable inodes acquire their records before activation returns.
+
+Quota synchronization drains file and quota writeback, checkpoints the journal,
+and invalidates external quota-file pages so quota tools observe current disk
+records. Disable drains delayed allocation, releases records in bounded
+transactions, unloads the retained file, and restores external-file policy.
+References are released outside native mount protection. Read-only suspension
+retains files and resumes accounting on a writable remount. Final shutdown uses
+the same external-file cleanup, preserving protection after journal abort.
+
+Record acquisition first loads the canonical cache without write authority.
+Existing records need no physical-growth admission; missing records retain the
+format's bounded tree-growth admission before activation. Administrative queries
+use the same acquisition semantics, including creation of missing records.
+Grace updates overwrite the existing header with bounded journal credits and no
+physical-growth admission. ABI limits and identities are checked before mutation.
+Resource-capability bypass is selected from the current user caller at the
+quota integration boundary; kernel writeback consumes existing reservations
+without independently acquiring a user's privilege.
+
+External quota activation first excludes buffered mutation, revokes existing
+mappings, flushes their dirty pages and synchronizes the filesystem before
+reading the file as quota metadata. Ordinary writes and shared write faults
+participate in the superblock lifecycle admission that excludes activation,
+writer initialization, reservation drain and class teardown.
+
+Disable checks the whole class for reservations before releasing any record.
+After the final record/tree/free-list/header updates it commits, checkpoints and
+flushes the metadata domain before unloading the backing file. Under file-data
+exclusion it then invalidates live mapped/cache state, restores external inode
+policy and drains that policy update before admitting ordinary writes again.

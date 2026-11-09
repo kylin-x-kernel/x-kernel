@@ -68,6 +68,32 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Flushes and discards cached pages of a live inode after revoking mappings.
+    ///
+    /// The caller excludes buffered writers and backing-store policy changes.
+    /// Faults are excluded by the invalidate lock. Every registered mapping must
+    /// finish PTE removal and TLB invalidation before writeback and cache removal.
+    /// A busy MM is retried without the invalidate lock, so its fault can unwind.
+    /// Callers must not hold an MM lock or a lock needed by writeback completion.
+    /// Errors leave cache ownership intact, although mappings may be revoked.
+    pub fn invalidate_cached_pages(&self) -> VfsResult<()> {
+        if !ktask::is_sleepable_context() {
+            return Err(VfsError::InvalidInput);
+        }
+        loop {
+            let guard = self.invalidate_lock.write();
+            if !self.try_invalidate_mappings_from(0)? {
+                drop(guard);
+                ktask::yield_now();
+                continue;
+            }
+            self.ops
+                .writepages(self, &mut super::WritebackControl::all(false))?;
+            self.i_pages.truncate_final()?;
+            return Ok(());
+        }
+    }
+
     /// Drops cached pages during final inode teardown.
     ///
     /// Ordinary invalidation still requires dirty data to be written back

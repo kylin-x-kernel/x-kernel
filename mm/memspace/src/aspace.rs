@@ -169,9 +169,11 @@ impl InvalidateHandle {
         true
     }
 
+    /// Removes matching PTEs and completes TLB invalidation if the MM is idle.
+    /// A destroyed MM has no remaining mappings and is already complete.
     pub fn try_apply(&self, request: &ObjectInvalidateRequest) -> KResult<bool> {
         let Some(aspace) = self.aspace.upgrade() else {
-            return Ok(false);
+            return Ok(true);
         };
         let Some(mut aspace) = aspace.try_lock() else {
             return Ok(false);
@@ -454,7 +456,12 @@ impl MmSpace {
         outcome.is_resolved() || outcome.is_retryable()
     }
 
-    fn install_runtime_mapping(&mut self, mut vma: VmArea, runtime: VmRuntimeRef) -> KResult {
+    fn install_runtime_mapping(
+        &mut self,
+        mut vma: VmArea,
+        runtime: VmRuntimeRef,
+        is_new: bool,
+    ) -> KResult {
         // Refuse an overlapping range before the page table is touched and
         // before object views are registered, so a rejected mapping leaves no
         // partial state behind. Callers reach this from syscall paths (`brk`,
@@ -464,7 +471,11 @@ impl MmSpace {
         if self.vmas.overlaps(vma.range()) {
             return Err(KError::AlreadyExists);
         }
-        runtime.map(vma.range(), vma.flags(), &mut self.pgtbl.modify())?;
+        if is_new {
+            runtime.map(vma.range(), vma.flags(), &mut self.pgtbl.modify())?;
+        } else {
+            runtime.open(vma.range(), vma.flags())?;
+        }
         vma.set_runtime(runtime.register_object_views(
             self.mm_id,
             self.deferred_invalidate_handle(),
@@ -509,11 +520,13 @@ impl MmSpace {
         if self.vmas.overlaps(VirtAddrRange::new(current_end, new_end)) {
             return Err(KError::AlreadyExists);
         }
-        runtime.map(
-            VirtAddrRange::from_start_size(current_end, additional),
-            vma.flags(),
-            &mut self.pgtbl.modify(),
-        )?;
+        let extension = VirtAddrRange::from_start_size(current_end, additional);
+        match &runtime {
+            VmRuntimeRef::FileShared(_) | VmRuntimeRef::FilePrivate(_) => {
+                runtime.open(extension, vma.flags())?;
+            }
+            _ => runtime.map(extension, vma.flags(), &mut self.pgtbl.modify())?,
+        }
         self.vmas.extend(start, additional);
         Ok(())
     }
@@ -852,6 +865,11 @@ impl MmSpace {
         self.vmas.find(vaddr)
     }
 
+    pub(crate) fn fault_retry_runtime(&self, address: VirtAddr) -> Option<VmRuntimeRef> {
+        self.find_vma(address)
+            .and_then(|vma| self.runtime_for_vma(vma))
+    }
+
     fn runtime_for_vma(&self, vma: &VmArea) -> Option<VmRuntimeRef> {
         let runtime = vma.runtime()?.clone();
         if runtime.backing_info() != vma.backing() {
@@ -1122,7 +1140,7 @@ impl MmSpace {
         let size = vma.size();
         let flags = vma.flags();
         self.validate_region(start, size)?;
-        self.install_runtime_mapping(vma, runtime)?;
+        self.install_runtime_mapping(vma, runtime, true)?;
         if populate {
             self.populate_area(start, size, flags)?;
         }
@@ -1131,19 +1149,21 @@ impl MmSpace {
 
     /// Relocates the retained part of an existing mapping snapshot.
     ///
-    /// All destination PTEs are prepared before any source PTE is removed.
-    /// On preparation failure, newly installed destination PTEs are removed and
-    /// TLB invalidation completes before the destination VMA/runtime is dropped.
-    /// Source PTEs and backing ownership remain unchanged. On success, only the
-    /// source metadata is retired; its backing has moved to the destination.
+    /// Fixed replacement removes the destination and discarded source tail
+    /// before preparing the move. Those removals persist if later preparation
+    /// fails. Source permissions are inherited; file registration uses open()
+    /// without repeating new-map admission.
     ///
-    /// The caller must trim a discarded source tail before a shrinking move.
+    /// All destination PTEs are prepared before retained source PTEs are removed.
+    /// Failure clears newly prepared destination PTEs and retires destination
+    /// registrations; retained source PTEs and backing remain intact. Successful
+    /// retirement removes only source metadata, not its transferred backing.
     pub fn relocate_mapping(
         &mut self,
         snapshot: &MremapSource,
         new_start: VirtAddr,
         new_size: usize,
-        new_flags: MappingFlags,
+        replace_target: bool,
         owner: &Arc<Mutex<MmSpace>>,
     ) -> KResult {
         self.drain_pending_invalidations();
@@ -1151,6 +1171,26 @@ impl MmSpace {
         let move_size = snapshot.range.size().min(new_size);
         let source_range = VirtAddrRange::from_start_size(snapshot.range.start, move_size);
         self.validate_region(source_range.start, source_range.size())?;
+        let target_range = VirtAddrRange::from_start_size(new_start, new_size);
+        if snapshot.range.overlaps(target_range) {
+            return Err(KError::InvalidInput);
+        }
+        // Fixed replacement discards the target first, then shrinks the source.
+        // Re-resolve the source after those edits because unmapping may split it.
+        let replacement_source;
+        let snapshot = if replace_target {
+            self.unmap(new_start, new_size)?;
+            if new_size < snapshot.range.size() {
+                self.unmap(
+                    snapshot.range.start + new_size,
+                    snapshot.range.size() - new_size,
+                )?;
+            }
+            replacement_source = self.resolve_mremap_source(snapshot.range.start, move_size)?;
+            &replacement_source
+        } else {
+            snapshot
+        };
         // Resolve every fallible source-metadata operation before publishing
         // the destination. Retirement cannot fail after PTE transfer commits.
         let retirement = self
@@ -1170,20 +1210,19 @@ impl MmSpace {
             snapshot.range,
             new_start,
             new_size,
-            new_flags,
+            snapshot.flags(),
             owner,
         )?;
-        if self.vmas.overlaps(vma.range()) {
+        if !replace_target && self.vmas.overlaps(vma.range()) {
             return Err(KError::AlreadyExists);
         }
-        // Anonymous shared runtimes already own their stable page array. Their
-        // normal map() eagerly installs PTEs; relocation must leave publication
-        // to move_pages instead. File runtimes still run map() for permission,
-        // seal and shared-range registration before metadata is published.
-        if !matches!(&runtime, VmRuntimeRef::AnonShared(_)) {
-            runtime.map(vma.range(), vma.flags(), &mut self.pgtbl.modify())?;
+        match &runtime {
+            VmRuntimeRef::FileShared(_) | VmRuntimeRef::FilePrivate(_) => {
+                runtime.open(vma.range(), vma.flags())?;
+            }
+            VmRuntimeRef::AnonShared(_) => {}
+            _ => runtime.map(vma.range(), vma.flags(), &mut self.pgtbl.modify())?,
         }
-        let target_range = vma.range();
         let target_runtime =
             runtime.register_object_views(self.mm_id, self.deferred_invalidate_handle(), &vma);
         vma.set_runtime(target_runtime.clone());
@@ -1598,18 +1637,8 @@ impl MmSpace {
             Ok(completion) => self.finish_backend_fault(vaddr, flags, Ok(completion)),
             Err(err) => match KErrorKind::try_from(err.canonicalize()) {
                 Ok(KErrorKind::NoMemory) => PageFaultOutcome::OutOfMemory,
-                Ok(
-                    KErrorKind::BadAddress
-                    | KErrorKind::InvalidData
-                    | KErrorKind::InvalidInput
-                    | KErrorKind::Io
-                    | KErrorKind::StorageFull
-                    | KErrorKind::UnexpectedEof,
-                ) => PageFaultOutcome::BusError,
-                _ => {
-                    warn!("Failed to populate file-backed pages for {vaddr:?} ({flags:?}): {err}");
-                    PageFaultOutcome::Failed
-                }
+                Ok(KErrorKind::WouldBlock) => PageFaultOutcome::Retry,
+                _ => PageFaultOutcome::BusError,
             },
         }
     }
@@ -1770,7 +1799,7 @@ impl MmSpace {
                 .with_backing(new_runtime.backing_info());
 
             let aspace = guard.deref_mut();
-            aspace.install_runtime_mapping(vma, new_runtime)?;
+            aspace.install_runtime_mapping(vma, new_runtime, false)?;
         }
         drop(guard);
 

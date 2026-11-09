@@ -42,6 +42,7 @@ const XATTR_SECURITY_PREFIX: &[u8] = b"security.";
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Ext4MountOptions {
     pub(crate) statfs_mode: Option<Ext4StatFsMode>,
+    pub(crate) quota_types: Option<u8>,
 }
 
 impl Ext4MountOptions {
@@ -57,6 +58,9 @@ impl Ext4MountOptions {
                 b"" => {}
                 b"minixdf" => options.statfs_mode = Some(Ext4StatFsMode::Minix),
                 b"bsddf" => options.statfs_mode = Some(Ext4StatFsMode::Bsd),
+                b"usrquota" | b"quota" => *options.quota_types.get_or_insert(0) |= 1,
+                b"grpquota" => *options.quota_types.get_or_insert(0) |= 2,
+                b"noquota" => options.quota_types = Some(0),
                 // Linux accepts these explicit positive defaults. KExt4 has no
                 // per-mount state to change for either compatibility spelling.
                 b"acl" | b"user_xattr" => {}
@@ -261,14 +265,6 @@ fn current_ext4_timestamp(_inode: &VfsInode) -> Ext4Timestamp {
     Ext4Timestamp::new(0, 0)
 }
 
-fn node_flags_from_inode(inode: &Ext4Inode) -> kvfs::NodeFlags {
-    let (is_immutable, is_append_only) = inode.inode_attr_flags();
-    let mut flags = kvfs::NodeFlags::empty();
-    flags.set(kvfs::NodeFlags::IMMUTABLE, is_immutable);
-    flags.set(kvfs::NodeFlags::APPEND_ONLY, is_append_only);
-    flags
-}
-
 fn metadata_from_inode(inode: &Ext4Inode, block_size: u64) -> Metadata {
     let stat = inode.stat();
     Metadata {
@@ -308,6 +304,8 @@ fn applied_metadata_update(requested: MetadataUpdate, applied: Ext4InodeStat) ->
 }
 
 mod mount;
+mod quota;
+pub(crate) use quota::can_bypass_quota_limits;
 mod read;
 
 mod writeback;
@@ -351,6 +349,7 @@ impl Ext4SuperOperations {
         let is_read_only = super_block.flags().contains(SuperBlockFlags::RDONLY);
         let mut state = Ext4SbInfo::open(device, true).map_err(into_vfs_err)?;
         state.set_statfs_mode(statfs_mode);
+        state.quota_mount_options = options.quota_types.unwrap_or(0);
         state.vfs_superblock = Arc::downgrade(super_block);
         if !is_read_only {
             state.ensure_writable().map_err(into_vfs_err)?;
@@ -469,6 +468,7 @@ impl Ext4SuperOperations {
             let file = super_block.get_or_try_init_inode(u64::from(number.get()), || {
                 Self::new_vfs_inode(super_block, ext4, private)
             })?;
+            file.private::<Ext4Inode>()?.set_noquota(true);
             let result = ext4
                 .write(super_block)
                 .enable_internal_quota(super_block, kind, &file)
@@ -532,7 +532,6 @@ impl Ext4SuperOperations {
         private: Ext4Inode,
     ) -> VfsResult<Arc<VfsInode>> {
         let node_type = inode_kind_to_vfs(private.kind());
-        let flags = node_flags_from_inode(&private);
         let metadata = metadata_from_inode(&private, super_block.block_size());
         let init = VfsInodeInit::new(
             u64::from(private.number().get()),
@@ -558,7 +557,6 @@ impl Ext4SuperOperations {
         };
         let inode = VfsInode::new_with_inode_attribute_operations(
             Arc::new(private),
-            flags,
             &EXT4_ADDRESS_SPACE_OPERATIONS,
             init,
         );
@@ -578,6 +576,24 @@ impl Ext4SuperOperations {
 }
 
 impl SuperBlockOperations for Ext4SuperOperations {
+    fn show_options(&self, super_block: &SuperBlock) -> String {
+        let mut options = String::new();
+        if let Ok(mount) = ext4_private(super_block) {
+            let types = mount.read().quota_mount_options;
+            if types & 1 != 0 {
+                options.push_str(",usrquota");
+            }
+            if types & 2 != 0 {
+                options.push_str(",grpquota");
+            }
+        }
+        options
+    }
+
+    fn quota_operations(&self) -> Option<&dyn kvfs::QuotaOperations> {
+        Some(self)
+    }
+
     fn put_super(&self, super_block: &SuperBlock) -> VfsResult<()> {
         let quota_result = Self::deactivate_internal_quotas(super_block);
         let filesystem_result = ext4_private(super_block)?
@@ -678,6 +694,10 @@ impl SuperBlockOperations for Ext4SuperOperations {
 }
 
 impl InodeAttributeOperations for Ext4Inode {
+    fn flags(&self) -> kvfs::NodeFlags {
+        self.runtime_flags()
+    }
+
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
         debug_assert_eq!(inode_number, u64::from(self.number().get()));
         metadata_from_inode(self, block_size)
@@ -1682,8 +1702,20 @@ impl FileOperations for Ext4Inode {
         if self.kind() == InodeKind::RegularFile {
             let super_block = ext4_super_block(iocb.file().inode())?;
             let ext4 = ext4_private(&super_block)?;
-            iocb.generic_file_write_iter_with_checks(iter, |pos, count| {
-                check_write_limit(ext4, &super_block, self, pos, count)
+            iocb.generic_file_write_iter_with_checks(iter, |iocb, count| {
+                if iocb
+                    .file()
+                    .inode()
+                    .flags()
+                    .contains(kvfs::NodeFlags::IMMUTABLE)
+                {
+                    return Err(VfsError::OperationNotPermitted);
+                }
+                iocb.generic_write_check_limits(count)?;
+                if *count != 0 {
+                    check_write_limit(ext4, &super_block, self, iocb.ki_pos(), count)?;
+                }
+                Ok(())
             })
         } else {
             Err(VfsError::InvalidInput)

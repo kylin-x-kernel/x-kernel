@@ -138,6 +138,23 @@ impl ConfigGenerator {
             Self::emit_heuristic_const(&mut content, key, value)?;
         }
 
+        let mut text = String::from("# Resolved build configuration\n");
+        let mut keys: Vec<_> = config.keys().collect();
+        keys.sort();
+        for key in keys {
+            let name = key.strip_prefix("CONFIG_").unwrap_or(key);
+            let value = &config[key];
+            if matches!(type_map.get(name), Some(SymbolType::String)) {
+                text.push_str(&format!("CONFIG_{name}={value:?}\n"));
+            } else {
+                text.push_str(&format!("CONFIG_{name}={value}\n"));
+            }
+        }
+        let compressed = gzip_stored(text.as_bytes());
+        content.push_str(&format!(
+            "\n/// Resolved configuration in a deterministic gzip stream.\n\
+             pub const CONFIG_GZIP: &[u8] = &{compressed:?};\n"
+        ));
         write_if_changed(&config_rs_path, &content)?;
 
         println!("📝 Generated config.rs at: {}", config_rs_path.display());
@@ -679,4 +696,30 @@ impl ConfigGenerator {
 
         Ok(format!("({})", formatted.join(", ")))
     }
+}
+
+/// Encodes gzip with stored DEFLATE blocks, requiring no host compression tool.
+fn gzip_stored(input: &[u8]) -> Vec<u8> {
+    let mut output = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255];
+    let mut chunks = input.chunks(u16::MAX as usize).peekable();
+    while let Some(chunk) = chunks.next() {
+        output.push(u8::from(chunks.peek().is_none()));
+        let length = chunk.len() as u16;
+        output.extend_from_slice(&length.to_le_bytes());
+        output.extend_from_slice(&(!length).to_le_bytes());
+        output.extend_from_slice(chunk);
+    }
+    if input.is_empty() {
+        output.extend_from_slice(&[1, 0, 0, 255, 255]);
+    }
+    let mut crc = u32::MAX;
+    for byte in input {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
+        }
+    }
+    output.extend_from_slice(&(!crc).to_le_bytes());
+    output.extend_from_slice(&(input.len() as u32).to_le_bytes());
+    output
 }

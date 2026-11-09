@@ -674,3 +674,14 @@ The migration preserves module visibility, feature gates and execution modes.
 - `ut-tests/stat.rs`: mounted by `src/stat.rs` as `tests_stat`.
 - `ut-tests/thread_cpu_time.rs`: mounted by `src/thread/cpu_time.rs` as `tests`.
 - `ut-tests/process_runtime_runtime_state.rs`: mounted by `src/process_runtime/runtime_state.rs` as `tests`.
+
+`LiveAddressSpace::resolve_page_fault` delegates sleepable fault resolution to
+its existing active MM user. The capability pins the captured image across a
+backing-admission wait. The MM owner drops serialization before the runtime waits,
+then repeats lookup and access checks. User execution faults, ordinary user
+copies and explicit user-word fault-in use this common entry.
+
+The live mapping guard forwards relocation's target-replacement policy while
+permissions stay owned by the source snapshot. MM removes a fixed target and
+discarded source tail before preparing the retained source; these destructive
+steps are not enclosed in a transient admission retry.

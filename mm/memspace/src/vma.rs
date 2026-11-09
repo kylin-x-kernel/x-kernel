@@ -43,7 +43,18 @@ pub trait VmRuntimeOps: Send + Sync {
     fn private_anon_offset_for(&self, _addr: VirtAddr) -> Option<u64> {
         None
     }
+    /// Admits a newly created mapping and initializes its backing state.
     fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult;
+    /// Registers an inherited mapping or an extension of an existing VMA.
+    ///
+    /// Permissions have already been admitted. This updates mapping ownership
+    /// without repeating new-mapping policy checks or installing PTEs.
+    ///
+    /// # Errors
+    /// Returns registration or accounting errors.
+    fn open(&self, _range: VirtAddrRange, _flags: MappingFlags) -> KResult {
+        Ok(())
+    }
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult;
     fn on_protect(
         &self,
@@ -83,6 +94,15 @@ pub trait VmRuntimeOps: Send + Sync {
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
     ) -> FaultCompletionResult;
+    /// Waits for resources that caused a fault to return `FaultOutcome::Retry`.
+    ///
+    /// Called in sleepable task context with the MM mutex released, retaining
+    /// this runtime only for its resource lifetime. It must not publish PTEs or
+    /// treat the original VMA as valid. The caller repeats VMA lookup and policy
+    /// checks afterwards. A provider returning Retry must implement this hook.
+    fn wait_for_fault(&self) -> KResult<()> {
+        Err(kerrno::KError::OperationNotSupported)
+    }
     fn relocate_for_mremap(
         &self,
         source_range: VirtAddrRange,
@@ -317,6 +337,13 @@ impl VmRuntimeRef {
         }
     }
 
+    pub(crate) fn open(&self, range: VirtAddrRange, flags: MappingFlags) -> KResult {
+        match self {
+            Self::FileShared(inner) | Self::FilePrivate(inner) => inner.open(range, flags),
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult {
         match self {
             Self::Linear(inner) => VmRuntimeOps::unmap(inner, range, pgtbl),
@@ -393,6 +420,13 @@ impl VmRuntimeRef {
             Self::AnonPrivate(inner) => VmRuntimeOps::handle_fault(inner, ctx, flags, pgtbl),
             Self::FileShared(inner) => inner.handle_fault(ctx, flags, pgtbl),
             Self::FilePrivate(inner) => inner.handle_fault(ctx, flags, pgtbl),
+        }
+    }
+
+    pub(crate) fn wait_for_fault(&self) -> KResult<()> {
+        match self {
+            Self::FileShared(inner) | Self::FilePrivate(inner) => inner.wait_for_fault(),
+            _ => Err(kerrno::KError::OperationNotSupported),
         }
     }
 

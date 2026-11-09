@@ -2481,6 +2481,7 @@ dependencies = [
  "kcred",
  "kerrno",
  "klogger",
+ "kprocess",
  "kquota",
  "kspin",
  "ksync",
@@ -3588,6 +3589,7 @@ dependencies = [
  "osvm",
  "unittest",
  "unittest_support",
+ "vmobj",
 ]
 
 [[package]]
@@ -4118,6 +4120,7 @@ version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "extern-trait",
+ "iov_iter",
  "kerrno",
  "kio",
 ]
@@ -4484,6 +4487,7 @@ dependencies = [
  "klazy",
  "klogger",
  "kprocess",
+ "kquota",
  "ksync",
  "ktime",
  "ktime_types",
@@ -4601,6 +4605,7 @@ name = "posix-types"
 version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
+ "iov_iter",
  "kalloc-types",
  "kerrno",
  "kio",
@@ -6167,6 +6172,7 @@ dependencies = [
 name = "vmobj"
 version = "0.3.0-dev"
 dependencies = [
+ "kerrno",
  "memaddr",
  "unittest",
 ]

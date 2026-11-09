@@ -124,3 +124,21 @@ The migration preserves module visibility, feature gates and execution modes.
 - `ut-tests/time_abi.rs`: mounted by `src/time/abi.rs` as `tests`.
 - `ut-tests/time_itimer.rs`: mounted by `src/time/itimer.rs` as `tests`.
 - `ut-tests/time_clock_ticks.rs`: mounted by `src/time/clock_ticks.rs` as `tests`.
+
+## Disk quota ABI
+
+`quota` defines the classic if_dqblk, nextdqblk, if_dqinfo and extended disk-quota
+status/record carriers. Classic limits use 1 KiB; extended space fields use
+512-byte basic blocks. Counter, timestamp, identifier and validity semantics
+are interpreted by posix-fs, not by these representation-only carriers.
+Compile-time size checks protect the 64-bit layouts.
+
+
+## File-read destination cursor
+
+`IoVectorBufIo` implements `iov_iter::IovSink` directly. Nofault copies reuse the
+current segment, offset and remaining length, delegating user access to a
+transient `VmBytesMut`. A segment fault stops the copy at its successful prefix;
+an error in a later segment preserves earlier progress. Fault preparation skips
+empty descriptors and prepares the current segment without advancing its cursor.
+There is no additional iterator state or second copy of the iovec descriptors.

@@ -5,7 +5,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     fmt,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use ktime_types::TimestampLimits;
@@ -26,6 +26,26 @@ use crate::{
 
 const EXT4_ENCODED_DEV_MAJOR_MAX: u32 = 0x0fff;
 const EXT4_ENCODED_DEV_MINOR_MAX: u32 = 0x000f_ffff;
+const DISK_NODE_FLAGS: u32 = kvfs::NodeFlags::IMMUTABLE.bits()
+    | kvfs::NodeFlags::APPEND_ONLY.bits()
+    | kvfs::NodeFlags::NO_ATIME.bits();
+
+fn node_flags_from_disk(flags: u32) -> kvfs::NodeFlags {
+    let mut node_flags = kvfs::NodeFlags::empty();
+    node_flags.set(
+        kvfs::NodeFlags::IMMUTABLE,
+        flags & disk_inode::EXT4_IMMUTABLE_FL != 0,
+    );
+    node_flags.set(
+        kvfs::NodeFlags::APPEND_ONLY,
+        flags & disk_inode::EXT4_APPEND_FL != 0,
+    );
+    node_flags.set(
+        kvfs::NodeFlags::NO_ATIME,
+        flags & disk_inode::EXT4_NOATIME_FL != 0,
+    );
+    node_flags
+}
 
 /// Inode file type derived from `i_mode`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -795,6 +815,9 @@ pub struct Ext4InodeStat {
 /// independent reference count.
 pub struct Ext4Inode {
     number: InodeNumber,
+    // Runtime behavior flags are also read while mapping state is locked.
+    // The acquire/release operations publish policy without reentering that lock.
+    runtime_flags: AtomicU32,
     // The sole generic i_size, shared with KVFS through InodeAttributeOperations.
     // Readers need no mapping lock. Every store after construction must hold
     // the state write lock: sizes(), stat(), and extent-proof checks rely on
@@ -814,6 +837,7 @@ impl Ext4Inode {
         let visible_size = metadata.disk_size;
         Self {
             number,
+            runtime_flags: AtomicU32::new(node_flags_from_disk(metadata.flags).bits()),
             visible_size: AtomicU64::new(visible_size),
             state: RwLock::new(Ext4InodeState {
                 metadata,
@@ -935,8 +959,9 @@ impl Ext4Inode {
         persisted: PendingInodeTimestamps,
     ) -> Ext4Result<()> {
         self.update_state(|state| {
+            let flags_changed = metadata.flags != state.metadata.flags;
             if metadata.block != state.metadata.block
-                || metadata.flags != state.metadata.flags
+                || flags_changed
                 || metadata.kind != state.metadata.kind
                 || metadata.disk_size < state.metadata.disk_size
             {
@@ -970,7 +995,16 @@ impl Ext4Inode {
                     *dirty = false;
                 }
             }
+            let flags = flags_changed.then(|| node_flags_from_disk(metadata.flags).bits());
             state.metadata = metadata;
+            if let Some(flags) = flags {
+                // Preserve independently updated runtime-only flags in the same word.
+                let _ = self.runtime_flags.fetch_update(
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                    |current| Some((current & !DISK_NODE_FLAGS) | flags),
+                );
+            }
         });
         Ok(())
     }
@@ -1030,6 +1064,26 @@ impl Ext4Inode {
             debug_assert_eq!(state.orphan, Some(expected));
             state.orphan = None;
         });
+    }
+
+    pub(crate) fn runtime_flags(&self) -> kvfs::NodeFlags {
+        kvfs::NodeFlags::from_bits_retain(self.runtime_flags.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn set_noquota(&self, is_enabled: bool) {
+        if is_enabled {
+            let _ = self
+                .runtime_flags
+                .fetch_or(kvfs::NodeFlags::NO_QUOTA.bits(), Ordering::AcqRel);
+        } else {
+            let _ = self
+                .runtime_flags
+                .fetch_and(!kvfs::NodeFlags::NO_QUOTA.bits(), Ordering::AcqRel);
+        }
+    }
+
+    pub(crate) fn is_noquota(&self) -> bool {
+        self.runtime_flags().contains(kvfs::NodeFlags::NO_QUOTA)
     }
 
     /// Returns this inode's number.
@@ -1246,12 +1300,6 @@ impl Ext4Inode {
     /// Returns whether the inode carries the ext4 append-only flag.
     pub fn is_append_only(&self) -> bool {
         self.with_state(|state| state.is_append_only())
-    }
-
-    /// Returns the ext4 inode attribute flags `(is_immutable, is_append_only)`
-    /// under one state lock.
-    pub fn inode_attr_flags(&self) -> (bool, bool) {
-        self.with_state(|state| (state.is_immutable(), state.is_append_only()))
     }
 
     pub(crate) fn mapping_root(&self) -> InodeMappingRoot {

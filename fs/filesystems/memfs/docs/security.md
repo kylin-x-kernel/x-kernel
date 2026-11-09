@@ -203,3 +203,9 @@ even when native copy writes into an existing destination page at full quota.
 Each bounded batch retains invalidation shared across EOF checks and copying;
 only one folio is locked at a time. Initialization failures remain errors and
 cannot become holes. No StorageFull error is ignored to emulate sparse reads.
+
+Writable shmem mapping inheritance duplicates the existing writable-page count
+without new-map seal admission. A positive existing count excludes WRITE sealing;
+FUTURE_WRITE does not revoke the permissions of inherited mappings. The same
+counter remains the sole owner of WRITE-seal exclusion, with checked addition
+and no separate inherited-permission flag.

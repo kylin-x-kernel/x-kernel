@@ -81,3 +81,10 @@ kvfs::AddressSpace / anon objects
 - 页对齐裁剪这类 object-hit transformation 使用 `ObjectViewHit` helper
   表达，例如 file-backed truncate 的 page-aligned suffix，不在
   `filemap` 内重新构造一套 view/hit。
+
+`MappingViewNotifier::try_invalidate` is the synchronous revocation contract for
+live backing-store transitions. True means the affected PTEs and TLB entries
+are gone, false means the target MM is busy, and errors prohibit page release.
+The default rejects this contract: deferred `invalidate` alone cannot prove
+completion. Object owners reuse the same work/hit coordinates and registered
+views; no second invalidation registry or completion-state table is introduced.

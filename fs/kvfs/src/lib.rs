@@ -32,6 +32,7 @@ pub mod path;
 mod permission;
 pub mod pipe;
 mod poll;
+mod quota;
 mod seq_file;
 mod simple_dir;
 mod simple_file;
@@ -84,6 +85,7 @@ pub(crate) use open_flags::{AccMode, OpenHow, OpenParams};
 pub use pagecache::WritebackRangeResult;
 pub use permission::{Permission, generic_permission, open_access_to_permission};
 pub use poll::poll_file_io;
+pub use quota::QuotaOperations;
 pub use seq_file::{SeqFile, SeqFileInode, SeqIterator, seq_open};
 pub use simple_dir::{
     ChainedDirOps, DirMaker, DirMapping, IntoDirMappingEntry, SimpleDir, SimpleDirEntry,

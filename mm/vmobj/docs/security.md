@@ -36,3 +36,8 @@
 - 手工构造 `ObjectViewHit::new()` 的调用点是否已经证明 hit 完全落在 view 内。
 - object-driven invalidate 是否只通过 `ObjectInvalidateRequest` 进入
   `MmSpace`，而不是保留 file/page-index 风格的旁路入口。
+
+Live backing-page release requires synchronous notifier success for every
+carried view hit. A queued notification is insufficient. Providers that cannot
+prove completed PTE/TLB revocation reject `try_invalidate`; busy targets retain
+backing ownership while callers release fault-exclusion locks before retrying.

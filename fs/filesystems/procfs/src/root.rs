@@ -38,6 +38,10 @@ pub(crate) fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     #[cfg(feature = "sysrq")]
     crate::sysrq_nodes::root::add_root_entries(&mut root, fs.clone());
 
+    root.add(
+        "config.gz",
+        SimpleFile::new_regular(fs.clone(), || Ok(kbuild_config::CONFIG_GZIP.to_vec())),
+    );
     let dynamic_dirs = task_nodes::root::ProcFsHandler::new(fs.clone()).chain(root);
     SimpleDir::new_maker(fs, Arc::new(dynamic_dirs))
 }

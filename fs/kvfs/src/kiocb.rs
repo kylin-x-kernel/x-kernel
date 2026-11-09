@@ -6,7 +6,7 @@
 
 use iov_iter::{IovIterDest, IovIterSource};
 
-use crate::{OpenFlags, VfsFile, VfsResult};
+use crate::{OpenFlags, VfsError, VfsFile, VfsResult};
 
 bitflags::bitflags! {
     /// Per-request I/O flags derived from the open file description.
@@ -107,16 +107,38 @@ impl<'a> Kiocb<'a> {
         mapping.write_iter(self, iter)
     }
 
+    /// Applies the generic file-size limit to a buffered write count.
+    ///
+    /// Call while the inode data lock excludes competing changes to this write.
+    /// An empty request is accepted without checking the file-size limit.
+    ///
+    /// # Errors
+    /// Returns a file-size or range error if the request cannot be represented.
+    pub fn generic_write_check_limits(&self, count: &mut usize) -> VfsResult<()> {
+        if *count == 0 {
+            return Ok(());
+        }
+        let max_file_size = self.file().max_file_size();
+        let pos = self.ki_pos();
+        if pos >= max_file_size {
+            return Err(VfsError::FileTooLarge);
+        }
+
+        let count_u64 = u64::try_from(*count).map_err(|_| VfsError::InvalidInput)?;
+        let count_u64 = count_u64.min(max_file_size - pos);
+        *count = usize::try_from(count_u64).map_err(|_| VfsError::InvalidInput)?;
+        Ok(())
+    }
+
     /// Performs a generic buffered write with open-file-specific checks.
     ///
-    /// `checks` runs after the generic superblock limit check and while the
-    /// inode data lock remains held. A filesystem file operation can narrow
-    /// `count` before the page-cache write starts without adding policy to
-    /// [`crate::AddressSpaceOperations`].
+    /// `checks` runs with the inode data lock held and must apply
+    /// [`Self::generic_write_check_limits`] along with filesystem policy before
+    /// the page-cache write starts. It also runs for an empty request.
     pub fn generic_file_write_iter_with_checks(
         &mut self,
         iter: &mut IovIterSource<'_>,
-        checks: impl FnOnce(u64, &mut usize) -> VfsResult<()>,
+        checks: impl FnOnce(&Kiocb<'_>, &mut usize) -> VfsResult<()>,
     ) -> VfsResult<usize> {
         let mapping = self.file().mapping();
         mapping.write_iter_with_checks(self, iter, checks)
