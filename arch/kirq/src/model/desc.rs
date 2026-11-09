@@ -169,6 +169,8 @@ pub enum IrqDescError {
     InvalidHwirq { hwirq: Hwirq },
     /// Controller configuration did not complete or its readback did not match.
     /// Hardware may have changed; this error does not imply rollback or drain.
+    /// Also reports an unrecovered routing fault from enable; trigger-only
+    /// configuration cannot repair that fault.
     ConfigurationFailed { hwirq: Hwirq },
     /// The source configuration or a live binding change is not supported.
     UnsupportedFlow { hwirq: Hwirq },

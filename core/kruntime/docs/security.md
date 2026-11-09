@@ -16,6 +16,16 @@ Local timer activation must successfully enable the current CPU's KIRQ slot
 before the runtime publishes IRQ readiness. Failure is fatal at boot. Shared
 action installation alone cannot authorize delivery on an unprepared CPU.
 
+The analysis includes `src/cpu_readiness.rs`, which stores independent boot-only
+readiness bits. Only the two runtime startup paths publish their current CPU,
+under startup preemption exclusion after trap/controller preparation, source
+activation and IRQ-exit service setup. Acquire observations pair with Release
+publication of that CPU's preparation. Failed preparation cannot reach the
+publication point. Querying the set does not certify remote execution, current
+IRQ enablement, controller addressability or safe reclamation. No runtime CPU
+removal is supported by this contract; hotplug would require coordination with
+IRQ retargeting before withdrawal, not just clearing readiness.
+
 Native TTY callback allocation failure during late-init handoff is recoverable:
 runtime retains boot-console access and logs a warning. The failed initializer
 does not attach an input notification or poison subsequent retries. This does

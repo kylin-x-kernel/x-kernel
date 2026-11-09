@@ -361,6 +361,9 @@ pub fn enable_irq(spec: impl Into<IrqSpec>) {
 ///
 /// Configuration failure preserves enable/depth and suppresses standard-flow
 /// service until configuration succeeds. Hardware writes are not rolled back.
+/// A routing failure also rejects enable, before changing depth or hardware;
+/// trigger reconfiguration cannot clear it. See [`crate::set_irq_affinity`] for
+/// the explicit disabled-source routing recovery protocol.
 /// For PerCpu flow, only the calling CPU's slot and source gate are changed;
 /// CPU selection remains pinned through the hardware transaction. Local control
 /// is not nested: one enable reopens the gate after any number of local disables.
@@ -447,6 +450,7 @@ fn prepare_enable_plan(
     virq: Virq,
     force_platform_enable: bool,
 ) -> Result<IrqPlatformPlan, IrqDescError> {
+    entry.require_affinity_ready()?;
     require_bound_flow(entry)?;
     reject_teardown(entry, virq, "enable IRQ")?;
     if entry.has_nmi_action() && !entry.has_ready_local_nmi_preparation() {
@@ -992,6 +996,7 @@ fn configure_registration(
     entry: &mut IrqStateDesc,
     apply_plan: &mut impl FnMut(IrqPlatformPlan) -> Result<(), IrqDescError>,
 ) -> Result<bool, IrqDescError> {
+    entry.require_affinity_ready()?;
     let needs_restore = entry.needs_configuration_restore();
     let plan = entry.prepare_reconfigure_if_stale();
     if plan.configure {

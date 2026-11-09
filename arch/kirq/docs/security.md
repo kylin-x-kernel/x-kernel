@@ -1,5 +1,38 @@
 # kirq — 安全与可靠性分析
 
+## Immediate Routing Boundary
+
+This analysis includes `model/affinity.rs`, `backend/affinity.rs` and
+`runtime/affinity.rs`, plus the Line and management admission checks they use.
+Routing updates validate sleepable context before acquiring management exclusion;
+queries reject NMI before taking any ordinary IRQ lock. Both retain the selected
+Line and recheck retirement. The query returns values, not a mapping lease.
+
+The controller is trusted to validate source identity, destination encoding and
+reachability before writes. Its transaction runs bounded and non-sleeping under
+Line exclusion; controller locks nest below Line and must not reenter KIRQ.
+Success must preserve actual suppression or establish `KeepMasked`, and return
+a nonempty effective subset of the supplied ready candidates. An invalid success
+is treated as uncertain programming, not committed as a usable destination.
+
+Post-write failure does not imply rollback, hardware masking or quiescence. The
+separate routing fault blocks action admission, registration and enable; ordinary
+trigger configuration cannot clear it. Disabled-source routing recovery may clear
+only that fault after confirming the new route and suppression. Existing disable
+depth still prevents flow tails or software replay from reopening the source
+before explicit enable. Device shutdown and old-claim completion remain separate
+owner/controller obligations. No new unsafe operation or per-dispatch lifetime
+counter is introduced. Unsupported backends expose no routing capability.
+
+The `cfg(unittest)` helper `tests_irq::retire_reserved_test_line` is solely for
+an explicitly reserved ordinary hardware fixture. The fixture must stop its
+producer, mask and drain delivery, withdraw its action and exclude other mapping
+users before removing both test indexes. The helper rejects busy/enabled, MSI,
+private and NMI-owned Lines and releases the returned owner outside short locks.
+It uses quiescent fixture removal, not GP-delayed retirement, so the caller must
+exclude all borrowed readers of the removed key, not only active actions.
+It is not a production dynamic mapping-disposal API or proof of source vacancy.
+
 ## NMI Action Lifetime Boundary
 
 `runtime/nmi/action.rs::NmiAction` owns one stable `KBox<Handler>`.

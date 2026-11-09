@@ -12,6 +12,7 @@
 
 pub(crate) mod action;
 mod action_set;
+pub(crate) mod affinity;
 pub(crate) mod dispatch;
 pub(crate) mod entry;
 pub(crate) mod index;

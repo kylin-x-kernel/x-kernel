@@ -33,6 +33,28 @@ delivery. The AP runqueue-ready and service-ready rendezvous serve different
 consumers and remain separate. Neither a controller driver nor kirq can infer
 that scheduler, clockevent and worker prerequisites have all completed.
 
+`cpu_readiness.rs` owns per-logical-CPU interrupt readiness and provides
+`kiface_cpu_api::CpuInterruptReadinessIf`. Primary and secondary startup publish
+after local source activation, softirqd/helper setup and local irq_work setup,
+immediately before ordinary CPU IRQ enable. Boot remains non-preemptible through
+this publication. Each independent bit uses Release/Acquire; sampling during
+startup may omit newly prepared CPUs, but never derives readiness from a count
+or from firmware presence. There is no allocation or lock on the query path.
+`SCHED_READY_CPUS` permits task enqueueing; `INITED_CPUS` completes the later
+IPI/watchdog/PMU rendezvous. Neither count substitutes for this identity set.
+In particular, the primary publishes before late-init enables fixed IPI
+notifications; this set must not be used as an IPI transport-ready query.
+
+This is the interrupt-readiness part of Linux's CPU startup ordering:
+`arch/arm64/kernel/smp.c::secondary_start_kernel` and
+`arch/riscv/kernel/smpboot.c::smp_callin` prepare local interrupt facilities and
+publish online before enabling local IRQs. X-Kernel does not yet implement the
+full hotplug/online lifetime protocol. The readiness set only grows at boot;
+it does not promise immediate delivery or that every irqchip can address every
+ready CPU. GIC target maps, PLIC contexts, IO-APIC destinations and LoongArch
+parent routes remain controller-owned checks. PMU source setup must not use the
+later all-services rendezvous as a prerequisite for its own routing setup.
+
 Platform boot hooks select the hardware and invoke controller preparation and
 local source activation. irqchip drivers own register programming and their
 hardware readiness; timer drivers own clockevent programming. kirq owns generic
@@ -327,6 +349,7 @@ core/kruntime/
 ├── src/
 │   ├── lib.rs              # 主核 rust_main、日志适配、中断/分配器、内存区日志
 │   ├── mp.rs               # SMP 从核启动、TLB 单测
+│   ├── cpu_readiness.rs    # Per-CPU interrupt-readiness publication and query
 │   ├── init_setup.rs       # .init_array 构造函数表遍历
 │   └── lang_items.rs       # #[panic_handler]
 ├── Cargo.toml

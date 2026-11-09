@@ -634,6 +634,16 @@ pub fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn immediate_affinity(desc: kirq::IrqDesc) -> Option<&'static kirq::IrqAffinityChip> {
+        (ACTIVE_GIC.get() == Some(&GicVersion::V3)
+            && (32..1020).contains(&desc.hwirq)
+            && matches!(
+                select_gic_flow(desc, STANDARD_INTID_LIMIT.get().copied()),
+                Ok(kirq::IrqFlow::Fasteoi(_))
+            ))
+        .then_some(&gicv3::AFFINITY)
+    }
+
     fn percpu_nmi(desc: kirq::IrqDesc) -> Option<&'static kirq::PerCpuNmiChip> {
         #[cfg(any(feature = "nmi-pseudo", feature = "nmi-hardware"))]
         if ACTIVE_GIC.get() == Some(&GicVersion::V3)

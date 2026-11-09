@@ -8,4 +8,5 @@
 //! do not own live mappings, controller claims or registered actions. Runtime
 //! validates these values against retained Lines before changing live state.
 
+pub(crate) mod affinity;
 pub(crate) mod desc;

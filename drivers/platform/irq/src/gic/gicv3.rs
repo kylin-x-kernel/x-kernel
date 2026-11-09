@@ -17,6 +17,9 @@ use lazyinit::LazyInit;
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
 
+mod affinity;
+pub(super) use affinity::CHIP as AFFINITY;
+
 #[cfg(any(feature = "nmi-pseudo", feature = "nmi-hardware"))]
 #[path = "nmi.rs"]
 pub(super) mod nmi;
@@ -622,3 +625,5 @@ pub(super) fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     // SGI-send ordering.
     aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
 }
+
+unittest::path_mod_test!(delivery_tests, "../../ut-tests/gicv3_affinity_delivery.rs");

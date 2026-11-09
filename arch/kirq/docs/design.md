@@ -1,6 +1,43 @@
 # kirq — 设计文档
 
-## Shared value vocabulary
+## Immediate Runtime Affinity
+
+`runtime/affinity.rs` owns lookup-only routing transactions; `model/affinity.rs`
+defines snapshots/errors and `backend/affinity.rs` defines immediate irqchip
+operations. `set_irq_affinity` uses management admission to retain one Line,
+then its short lock to serialize against source control and flow completion.
+Registry exclusion is not held during chip programming. `irq_affinity` only
+copies the locked observation and never reads hardware or creates a mapping.
+
+Requested policy and effective routing are distinct, as in Linux generic IRQ
+management. The candidate set is the request intersected with runtime's
+`CpuInterruptReadinessIf` observation; the chip additionally checks its concrete
+destination encoding and reachability. Success reports a nonempty subset of
+those candidates without changing disable depth, priority or trigger. Old claims
+still complete at their original controller/CPU. Unknown initial routing remains
+`None`, not `Any`, the ready mask or firmware-present CPUs.
+
+`IntrManagerIf::immediate_affinity` selects permanent operations for the exact
+source. The GICv3 provider supports ordinary standard SPIs; other controller
+providers return `None` until their routing transactions are implemented and
+validated. PerCpu, NMI, MSI and fixed descriptor affinity
+are rejected. The API does not offer a fake pending result: Linux deferred IRQ
+migration requires real ACK/EOI progress, which an immediate-only capability
+cannot supply. Software replay completion is not such a hardware progress point.
+
+Pre-write rejection preserves the preceding snapshot. Hardware failure retains
+the last accepted request, clears effective routing and closes ordinary flow,
+registration and enable admission. Recovery uses existing disable depth:
+disable the source if it is not already logically disabled, retry routing with
+`KeepMasked`, then explicitly enable (or use ordinary auto-enable registration).
+A successful retry does not clear an unrelated trigger-configuration fault.
+Ordinary configuration cannot clear a routing fault or overwrite a route
+established through this API. A fault also forbids descriptor/flow rebinding,
+retaining the original recovery capability even after the last action is gone.
+Source-identity rebinding otherwise invalidates observations. There is no automatic retry worker, action-lifetime
+credit, hardware drain guarantee, or CPU-hotplug protocol in this operation.
+
+## Shared Descriptor Values
 
 IrqTrigger, IrqController and IrqDomainId are re-exported from irq-types with
 unchanged public kirq paths. Only value definitions move; domain, mapping,

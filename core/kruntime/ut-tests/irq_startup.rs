@@ -28,6 +28,11 @@ fn advance(expected: u8, next: u8) {
 }
 
 pub(super) fn record_prepared() {
+    if kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus()
+        .get(khal::percpu::this_cpu_id().as_usize())
+    {
+        HAS_INVALID_ORDER.store(true, Ordering::Release);
+    }
     advance(0, 1);
 }
 
@@ -76,6 +81,15 @@ pub(super) fn record_activation_return() {
     advance(2, 3);
 }
 
+pub(super) fn record_interrupt_ready() {
+    if !kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus()
+        .get(khal::percpu::this_cpu_id().as_usize())
+    {
+        HAS_INVALID_ORDER.store(true, Ordering::Release);
+    }
+    advance(3, 4);
+}
+
 #[def_test]
 fn console_input_is_not_registered_during_local_source_activation() {
     assert!(!HAS_EARLY_CONSOLE_INPUT.load(Ordering::Acquire));
@@ -91,6 +105,6 @@ fn local_sources_activate_after_preparation_and_handler_publication() {
     #[cfg(not(feature = "smp"))]
     let cpu_count = 1;
     for phase in &PHASES[..cpu_count] {
-        assert_eq!(phase.load(Ordering::Acquire), 3);
+        assert_eq!(phase.load(Ordering::Acquire), 4);
     }
 }

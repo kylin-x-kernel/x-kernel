@@ -2,11 +2,34 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! CPU identity, local IRQ masking, exception observations and reschedule transport.
+//! CPU identity, interrupt readiness, local IRQ masking, exception observations
+//! and reschedule transport.
 
 #![no_std]
 
-use kcpu_id_map::LogicalCpuId;
+use kcpu_id_map::{KCpuMask, LogicalCpuId};
+
+/// Boot-time readiness of CPUs to accept ordinary interrupt delivery.
+///
+/// Runtime publishes each CPU after trap/controller preparation, mandatory local
+/// source activation and IRQ-exit service setup. This is distinct from firmware
+/// presence, runqueue publication and completion of all boot services. Fixed
+/// IPI transport has its own readiness contract and is not certified here.
+#[kiface::interface]
+pub trait CpuInterruptReadinessIf {
+    /// Samples CPUs that have published interrupt readiness.
+    ///
+    /// Reads acquire each observed CPU's preparation. Concurrent boot publication
+    /// may be omitted; the result is a conservative set, not a simultaneous global
+    /// snapshot. The provider never allocates, waits, locks or changes IRQ state.
+    ///
+    /// Readiness may be published before local IRQ enable and does not describe
+    /// the current IRQ mask. Controllers must still validate target reachability.
+    /// It is not a remote-execution acknowledgement or a reclamation barrier.
+    /// Current boot-only membership never shrinks: CPU hot-unplug would require
+    /// a separate exclusion protocol before this set could authorize retargeting.
+    fn ready_cpus() -> KCpuMask;
+}
 
 /// Logical CPU identity, without pinning subsequent execution.
 #[kiface::interface]

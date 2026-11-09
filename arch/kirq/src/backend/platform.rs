@@ -295,6 +295,13 @@ pub struct PerCpuNmiChip {
 
 #[kiface::interface]
 pub trait IntrManagerIf {
+    /// Selects immediate affinity operations for this exact source, without
+    /// allocation or register access, under Line exclusion. None means unsupported,
+    /// including controllers whose deferred migration protocol is not installed.
+    /// The returned operations and controller remain valid for kernel life.
+    /// Selection depends on source capability, not current route health: a failed
+    /// transaction must not hide the operations needed to recover that source.
+    fn immediate_affinity(desc: IrqDesc) -> Option<&'static crate::IrqAffinityChip>;
     /// Selects CPU-local NMI control for an admitted descriptor, without writes.
     /// None means the controller cannot provide the local NMI lifecycle.
     fn percpu_nmi(desc: IrqDesc) -> Option<&'static PerCpuNmiChip>;
@@ -332,6 +339,9 @@ pub trait IntrManagerIf {
     /// On failure KIRQ does not publish a new action or commit configuration,
     /// but retains resolved mappings and cannot undo partial hardware effects.
     /// The provider must not restore delivery after a failed configuration.
+    /// If the source exposes immediate affinity operations, configuration must
+    /// preserve the route established by those operations. Descriptor affinity
+    /// metadata is not a replacement for the runtime routing policy.
     fn configure(desc: IrqDesc) -> Result<(), crate::IrqDescError>;
 
     /// Enables or disables a controller-local IRQ source.

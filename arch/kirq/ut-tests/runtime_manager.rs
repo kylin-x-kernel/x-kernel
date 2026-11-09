@@ -314,6 +314,37 @@ pub fn retire_unused_test_line(virq: usize) -> bool {
     removed.is_some()
 }
 
+/// Removes both indexes for an exclusively reserved ordinary hardware fixture.
+///
+/// The fixture owns the source independently of mapping vacancy. It must stop
+/// injection, mask and drain the controller, remove its action, and exclude all
+/// other mapping users before calling. This test-only cleanup is not a dynamic
+/// production mapping lease. MSI, private and NMI sources are not supported.
+pub fn retire_reserved_test_line(virq: usize) -> bool {
+    let removed = {
+        let mut state = IRQ_STATE.lock();
+        let Some(line) = state.descs.get(&virq) else {
+            return false;
+        };
+        let entry = line.lock();
+        if entry.is_msi()
+            || entry.flow == Some(crate::IrqFlow::PerCpu)
+            || entry.has_nmi_action()
+            || entry.has_nmi_shutdown()
+            || !entry.is_unused()
+            || entry.is_enabled_for_tests()
+        {
+            return false;
+        }
+        drop(entry);
+        state.remove_test_line(virq)
+    };
+    // This uses quiescent fixture removal, not GP-delayed retirement: the
+    // caller has excluded all borrowed readers of this key. Destroy the
+    // returned owner outside both short locks.
+    removed.is_some()
+}
+
 /// Synthetic local flow fixture; never performs controller accesses.
 pub struct LocalFlowProbe {
     virq: usize,

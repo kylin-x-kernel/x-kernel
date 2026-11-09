@@ -315,7 +315,8 @@ impl IrqState {
         };
         let flow = entry.select_binding_flow(stored_desc)?;
         // Flow operations and source identity must stay fixed while a handler
-        // or queued service can still use this Line. Validate before mapping writes.
+        // or queued service can still use this Line, or a failed routing operation
+        // still needs its original capability for recovery. Validate before mapping writes.
         if is_existing
             && entry.is_binding_in_use()
             && (entry.flow != Some(flow) || entry.desc != stored_desc)

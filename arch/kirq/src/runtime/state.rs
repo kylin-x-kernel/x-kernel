@@ -343,6 +343,9 @@ intrusive_adapter!(pub(super) ReplayAdapter = Arc<IrqLine>: IrqLine {
 /// that an external interrupt producer has stopped.
 pub(super) struct IrqStateDesc {
     pub(super) desc: IrqDesc,
+    pub(super) affinity: crate::IrqAffinitySnapshot,
+    #[cfg(unittest)]
+    pub(super) test_affinity_chip: Option<&'static crate::IrqAffinityChip>,
     #[cfg(any(target_arch = "x86_64", unittest))]
     msi_reservation: Option<MsiReservation>,
     // Allocation-time storage, consumed only after successful release validation.
@@ -371,6 +374,9 @@ impl IrqStateDesc {
     pub(super) fn new(desc: IrqDesc) -> Self {
         Self {
             desc,
+            affinity: crate::IrqAffinitySnapshot::default(),
+            #[cfg(unittest)]
+            test_affinity_chip: None,
             #[cfg(any(target_arch = "x86_64", unittest))]
             msi_reservation: None,
             #[cfg(any(target_arch = "x86_64", unittest))]
@@ -395,6 +401,15 @@ impl IrqStateDesc {
         if self.desc != desc {
             self.runtime.bump_generation();
         }
+        if self.desc.hwirq != desc.hwirq
+            || self.desc.domain != desc.domain
+            || self.desc.controller != desc.controller
+        {
+            // Metadata rebinding cannot certify a previously established route
+            // or clear a failed programming obligation.
+            self.affinity.requested = None;
+            self.affinity.effective = None;
+        }
         self.desc = desc;
         self.runtime.remember_desc(desc);
     }
@@ -408,6 +423,7 @@ impl IrqStateDesc {
 
     pub(super) fn publish_regular_action(&mut self, prepared: &mut PreparedAction) -> bool {
         self.flow.is_some()
+            && !self.affinity.has_failed_programming
             && !self.is_retired
             && !self.has_nmi_shutdown
             && self.runtime.publish_regular_action(prepared)
@@ -422,18 +438,25 @@ impl IrqStateDesc {
     }
 
     pub(super) fn can_install_regular_action(&self) -> bool {
-        !self.is_retired && !self.has_nmi_shutdown && self.runtime.can_install_regular_action()
+        !self.affinity.has_failed_programming
+            && !self.is_retired
+            && !self.has_nmi_shutdown
+            && self.runtime.can_install_regular_action()
     }
 
     pub(super) fn can_install_nmi_action(&self) -> bool {
-        !self.is_retired
+        !self.affinity.has_failed_programming
+            && !self.is_retired
             && !self.has_nmi_shutdown
             && self.runtime.teardown_depth == 0
             && !self.runtime.has_actions()
     }
 
     pub(super) fn can_install_shared_action(&self) -> bool {
-        !self.is_retired && !self.has_nmi_shutdown && self.runtime.can_install_shared_action()
+        !self.affinity.has_failed_programming
+            && !self.is_retired
+            && !self.has_nmi_shutdown
+            && self.runtime.can_install_shared_action()
     }
 
     pub(super) fn withdraw_action(
@@ -523,7 +546,11 @@ impl IrqStateDesc {
         &mut self,
         prepared: &mut PreparedAction,
     ) -> Option<IrqActionToken> {
-        if self.flow.is_none() || self.is_retired || self.has_nmi_shutdown {
+        if self.affinity.has_failed_programming
+            || self.flow.is_none()
+            || self.is_retired
+            || self.has_nmi_shutdown
+        {
             return None;
         }
         self.runtime.publish_shared_action(prepared)
@@ -599,6 +626,7 @@ impl IrqStateDesc {
         // Logical enable may already be set when a no-action arrival caused
         // flow suppression. Eligibility, not a new enable write, restores it.
         if plan.enable.unwrap_or(self.runtime.is_enabled)
+            && !self.affinity.has_failed_programming
             && plan.disable_depth == 0
             && self.has_actions()
             && !self.is_teardown_in_progress()
@@ -694,6 +722,7 @@ impl IrqStateDesc {
 
     pub(super) fn can_run_actions(&self) -> bool {
         self.flow.is_some()
+            && !self.affinity.has_failed_programming
             && !self.is_retired
             && !self.runtime.is_configuration_failed
             && self.runtime.is_enabled
@@ -715,7 +744,8 @@ impl IrqStateDesc {
     }
 
     fn is_binding_in_use(&self) -> bool {
-        self.has_actions()
+        self.affinity.has_failed_programming
+            || self.has_actions()
             || self.has_active_execution()
             || self.is_replay_queued
             || self.has_enabled_local_cpu()
@@ -787,6 +817,28 @@ impl IrqStateDesc {
 
     pub(super) fn is_retired(&self) -> bool {
         self.is_retired
+    }
+
+    pub(super) fn affinity_chip(&self) -> Option<&'static crate::IrqAffinityChip> {
+        #[cfg(unittest)]
+        if let Some(chip) = self.test_affinity_chip {
+            return Some(chip);
+        }
+        crate::IntrManagerIf::immediate_affinity(self.desc)
+    }
+
+    pub(super) fn is_affinity_disabled(&self) -> bool {
+        self.runtime.disable_depth > 0 || !self.runtime.is_enabled
+    }
+
+    /// Trigger reconfiguration cannot repair a failed routing transaction.
+    pub(super) fn require_affinity_ready(&self) -> Result<(), IrqDescError> {
+        if self.affinity.has_failed_programming {
+            return Err(IrqDescError::ConfigurationFailed {
+                hwirq: self.desc.hwirq,
+            });
+        }
+        Ok(())
     }
 
     /// Pins directory membership for an admitted management transaction.

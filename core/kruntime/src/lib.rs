@@ -86,6 +86,7 @@ mod lang_items;
 #[cfg(feature = "smp")]
 mod mp;
 
+mod cpu_readiness;
 mod init_setup;
 
 use boot_info::BootConsoleTransport;
@@ -964,6 +965,7 @@ fn init_interrupt() {
     // Stop can preempt immediately and `task_entry` enables IRQs. The timer
     // handler above must already be registered.
     ktask::init_percpu_helpers();
+    cpu_readiness::publish_current_cpu();
     // Enable IRQs before starting app
     karch::enable_local_irq();
 }

@@ -1,5 +1,30 @@
 # irq-driver — Security And Reliability
 
+## GICv3 Runtime Routing Boundary
+
+The affinity selector in `src/gic/mod.rs` and the transaction in
+`src/gic/gicv3/affinity.rs` are covered by this analysis.
+KIRQ supplies interrupt-ready candidate CPUs under Line exclusion, outside NMI;
+the backend validates its own source namespace, standard SPI bounds and target
+encoding before writes. CPU masks are policy input, not permission to target a
+different controller instance. The nested GIC lock excludes competing ordinary
+IRQ register transactions and migration for the entire hardware update.
+The safe `IntId::spi` construction follows discovered standard SPI range and
+exact GIC binding validation before converting to an SPI-relative number.
+No new unsafe boundary is introduced. Target reachability relies on the
+singleton controller's successful per-CPU redistributor initialization before
+runtime readiness publication, and on the immutable logical-to-MPIDR map.
+Firmware-present CPUs alone are not accepted as evidence of readiness. There
+is no CPU-hotplug or multi-controller inference in this contract.
+
+Successful routing preserves actual enablement, or verifies suppression for
+`KeepMasked`. It does not modify priority, trigger, action membership or the
+completion cookie. A readback mismatch or disable timeout is an uncertain
+hardware outcome: best-effort masking is not certified quiescence. KIRQ's
+separate routing fault closes software admission until recovery, but source
+owners must still stop generation and drain admitted handlers before releasing
+resources. Routing readback alone does not prove delivery to the selected CPU.
+
 ## GIC firmware resource boundary
 
 Discovery rejects malformed status, untranslated/malformed reg and ranges,

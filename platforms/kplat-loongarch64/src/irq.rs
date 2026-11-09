@@ -137,6 +137,10 @@ impl IrqType {
 }
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn immediate_affinity(_desc: kirq::IrqDesc) -> Option<&'static kirq::IrqAffinityChip> {
+        None
+    }
+
     fn guest_interface() -> Option<kirq::GuestIrqInterface> {
         None
     }

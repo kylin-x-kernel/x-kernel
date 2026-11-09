@@ -9,5 +9,6 @@
 //! Register access and hardware discovery stay in drivers; generic admission,
 //! action ownership and software drain stay in runtime.
 
+pub(crate) mod affinity;
 pub(crate) mod msi;
 pub(crate) mod platform;

@@ -20,6 +20,9 @@
 //! # Interfaces
 //! - Drivers use [`try_map`], registration, enable/disable, and synchronous free.
 //!   Checked operations report context and ownership errors instead of hiding them.
+//! - [`irq_affinity`] / [`set_irq_affinity`] distinguish requested policy from
+//!   confirmed routing. Only sources with an immediate controller capability can
+//!   be changed; per-CPU, NMI and MSI lifecycles remain separate.
 //! - Architecture adapters enter through [`handle_irq`] / [`handle_nmi`]; irqchip
 //!   providers implement [`IntrManagerIf`] and transfer claims using [`PendingIrq`].
 //!   These entry functions and claim construction are unsafe: the adapter must
@@ -55,6 +58,7 @@ mod runtime;
 pub use backend::msi::{MsiBackendIf, MsiBackendToken, MsiReservation};
 pub(crate) use backend::platform;
 pub use backend::{
+    affinity::{IrqAffinityApplyError, IrqAffinityChip, IrqAffinityDelivery},
     msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix},
     platform::{
         EdgeChip, FasteoiChip, FasteoiResend, GuestIrqInterface, Handler, IntrManagerIf, IrqFlow,
@@ -79,11 +83,14 @@ pub use domain::{
     },
 };
 pub(crate) use model::desc;
-pub use model::desc::{
-    GIC_ROOT_DOMAIN, Hwirq, IO_APIC_DOMAIN, IRQ_EVENT_SOURCES, IrqAffinity, IrqController, IrqDesc,
-    IrqDescError, IrqDomainId, IrqEvent, IrqEventSource, IrqFlags, IrqHandler, IrqPolarity,
-    IrqSource, IrqSpec, IrqTrigger, MSI_DOMAIN, PLIC_ROOT_DOMAIN, Virq, gic_edge_irq_desc,
-    gic_irq_desc, gic_level_irq_desc, io_apic_irq_desc, plic_irq_desc,
+pub use model::{
+    affinity::{IrqAffinityError, IrqAffinitySnapshot},
+    desc::{
+        GIC_ROOT_DOMAIN, Hwirq, IO_APIC_DOMAIN, IRQ_EVENT_SOURCES, IrqAffinity, IrqController,
+        IrqDesc, IrqDescError, IrqDomainId, IrqEvent, IrqEventSource, IrqFlags, IrqHandler,
+        IrqPolarity, IrqSource, IrqSpec, IrqTrigger, MSI_DOMAIN, PLIC_ROOT_DOMAIN, Virq,
+        gic_edge_irq_desc, gic_irq_desc, gic_level_irq_desc, io_apic_irq_desc, plic_irq_desc,
+    },
 };
 #[cfg(unittest)]
 pub(crate) use runtime::dispatch;
@@ -92,6 +99,7 @@ pub use runtime::manager::tests_irq;
 pub(crate) use runtime::{action, state};
 pub use runtime::{
     action::IrqActionToken,
+    affinity::{irq_affinity, set_irq_affinity},
     entry::{generic_handle_irq, generic_handle_nmi, handle_irq, handle_nmi},
     manager::{
         FwIrqMapError, IrqRegisterOptions, MappedIrq, PerCpuForwarding, descriptor, disable_irq,

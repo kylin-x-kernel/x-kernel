@@ -1,5 +1,74 @@
 # irq-driver — Design
 
+## GICv3 Runtime SPI Affinity
+
+The GIC provider exposes `IntrManagerIf::immediate_affinity` only for an
+ordinary standard SPI belonging to its initialized GICv3 instance. GICv2,
+private interrupts and unsupported controller instances expose no capability.
+The selector does not access registers. `gic/gicv3/affinity.rs` implements the
+transaction without changing the claim/completion path. KIRQ owns requested/effective masks,
+management serialization and routing-fault admission; this driver owns target
+encoding and the controller transaction. Neither layer creates another mapping
+or changes action ownership during a routing update.
+
+Candidates come from runtime's interrupt-ready set. On this singleton backend,
+each CPU publishes readiness only after its local GICv3 initialization has
+located and prepared the matching redistributor. The immutable logical-to-raw
+CPU map supplies the full MPIDR affinity, not a logical-CPU bit used as a
+hardware destination. This reachability argument relies on that one-controller
+boot contract; a future multi-controller or CPU-hotplug implementation must
+replace it with an explicit per-controller reachability contract.
+
+The transaction follows Linux `drivers/irqchip/irq-gic-v3.c::gic_set_affinity`:
+select a ready destination, preserve the actual enable state, mask if needed,
+write IROUTER, and restore only previously enabled delivery. A `KeepMasked`
+request instead keeps delivery disabled. One GIC lock covers this sequence,
+below the caller's Line lock; no registry lock, allocation, scheduling or KIRQ
+callback occurs within it. Priority, trigger configuration and disable depth
+are not routing state and remain unchanged. An already claimed interrupt still
+completes through the original CPU's DIR path.
+
+This driver additionally checks distributor-disable completion, routing readback
+and enable restoration. RWP is evidence of the disable write's completion, not
+of IROUTER completion or handler drain. A timeout or readback mismatch requests
+masking and reports `HardwareFailure` without claiming rollback or quiescence.
+KIRQ then prevents action execution and enablement until a disabled-source
+routing retry succeeds. Later trigger configuration preserves IROUTER.
+This is immediate routing, not IO-APIC-style deferred migration, CPU hotplug,
+or a guarantee that a device has stopped generating interrupts.
+
+### Affinity Validation
+
+`ut-tests/gicv3_affinity.rs` exercises register ordering and injected failures
+without hardware or timing assumptions. The separate opt-in integration module
+`ut-tests/gicv3_affinity_delivery.rs` exercises actual GIC delivery and records
+the receiving logical CPU. It is skipped unless `KIRQ_TEST_QEMU_VIRT_SPI` names
+an absolute INTID that the operator has reserved exclusively for the fixture.
+Absence of a KIRQ mapping is not proof that a hardware source is unused.
+
+For the stock QEMU 10.0.11 `virt` machine, INTID 240 is outside the devices
+connected by [`a15irqmap`](https://github.com/qemu/qemu/blob/v10.0.11/hw/arm/virt.c):
+the platform bus occupies SPI offsets 112..175 (INTIDs 144..207). This choice
+must be rechecked for another machine, QEMU version, custom wiring or passed
+through devices. The opt-in is not suitable for an arbitrary physical board.
+
+```sh
+cp platforms/kplat-aarch64/qemu_defconfig .config
+make defconfig
+KIRQ_TEST_QEMU_VIRT_SPI=240 timeout 600 make unittest \
+  UNITTEST_CRATE=irq_driver VSOCK=n NET=n
+```
+
+Callback acknowledgement, not elapsed time, drives each delivery phase; an
+external QEMU timeout diagnoses missing progress. SMP execution moves the source
+through every CPU in the sampled ready set. The fixture requires at least two
+ready CPUs by default;
+`KIRQ_TEST_QEMU_VIRT_MIN_CPUS=1` explicitly selects single-CPU coverage, which
+cannot prove cross-CPU routing. An opted-in source with invalid prerequisites
+fails rather than silently skipping the test. The
+fixture restores its hardware state and removes its action and test mapping.
+An emulated delivery pass does not validate physical hardware fault behavior.
+
 ## GIC register discovery
 
 `gic::firmware` is a private binding module, not a new crate. It selects the first
@@ -280,6 +349,7 @@ drivers/platform/irq/
 │   │   ├── xlate.rs # GIC firmware interrupt-cell translation
 │   │   ├── gicv2.rs # GICv2 backend (arm_gic_driver)
 │   │   ├── gicv3.rs # GICv3 backend (arm_gic_driver)
+│   │   ├── gicv3/affinity.rs # immediate ordinary SPI routing transaction
 │   │   ├── nmi.rs  # GICv3 NMI window
 │   │   └── spi.rs  # ordinary SPI flow operations and transaction adapters
 │   ├── riscv/

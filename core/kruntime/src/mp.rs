@@ -179,6 +179,7 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     // enabled, Stop may preempt and enable them from `task_entry`.
     ktask::init_percpu_helpers();
     super::init_local_irq_work();
+    super::cpu_readiness::publish_current_cpu();
     karch::enable_local_irq();
 
     #[cfg(feature = "watchdog")]

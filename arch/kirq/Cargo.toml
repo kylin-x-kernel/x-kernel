@@ -36,6 +36,7 @@ krcu-core = { workspace = true }
 kspin = { workspace = true }
 log = { workspace = true }
 kcpu_slot = { workspace = true }
+kcpu_id_map.workspace = true
 unittest = { workspace = true }
 
 [lints]
