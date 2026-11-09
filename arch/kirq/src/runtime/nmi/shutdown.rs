@@ -79,7 +79,6 @@ impl Drop for NmiShutdown {
 /// Rejects invalid context, absent/non-NMI actions, unsupported non-PerCpu flows
 /// and another outstanding shutdown handle before changing admission.
 pub fn begin_nmi_shutdown(desc: IrqDesc) -> Result<NmiShutdown, IrqDescError> {
-    let mut shutdown = None;
     with_existing_line(IrqSpec::Desc(desc), ManagementMode::Task, |virq, line| {
         let mut entry = line.lock();
         if !entry.has_nmi_action() {
@@ -93,13 +92,11 @@ pub fn begin_nmi_shutdown(desc: IrqDesc) -> Result<NmiShutdown, IrqDescError> {
         if entry.has_nmi_shutdown() {
             return Err(IrqDescError::TeardownInProgress { virq });
         }
-        shutdown = Some(NmiShutdown {
+        Ok(NmiShutdown {
             line: line.clone(),
             desc: entry.desc,
             participants: entry.claim_nmi_shutdown(),
-        });
-        // This is not action removal: the helper must not finish teardown.
-        Ok(None::<()>)
-    })?;
-    shutdown.ok_or(IrqDescError::UnknownIrq)
+        })
+    })?
+    .ok_or(IrqDescError::UnknownIrq)
 }

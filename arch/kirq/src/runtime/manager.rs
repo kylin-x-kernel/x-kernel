@@ -1161,13 +1161,23 @@ fn acquire_management(
 
 /// Management membership pin for one retained Line, separate from its mutex.
 ///
-/// The caller keeps the management mutex guard alive until this drops. Successful
-/// removal releases any teardown credit before scheduling eligible pending work;
-/// neither cleanup step withdraws directory membership or destroys the handler.
+/// The caller keeps the management mutex guard alive until this drops. Normal
+/// completion only releases membership admission; action-removal completion is
+/// explicit and never inferred from an arbitrary management result.
 struct ManagementAdmission<'a> {
     line: &'a Arc<IrqLine>,
     is_active: bool,
-    has_removed_action: bool,
+}
+
+impl ManagementAdmission<'_> {
+    /// Completes a successful withdrawal after its execution drain. Keep the
+    /// removed owner alive until the enclosing management mutex is released.
+    fn finish_action_removal(&mut self) {
+        debug_assert!(self.is_active);
+        finish_management_on_line(self.line, true, |unmask, desc| unmask(desc));
+        self.is_active = false;
+        super::resend::schedule(self.line);
+    }
 }
 
 impl Drop for ManagementAdmission<'_> {
@@ -1175,12 +1185,7 @@ impl Drop for ManagementAdmission<'_> {
         if !self.is_active {
             return;
         }
-        finish_management_on_line(self.line, self.has_removed_action, |unmask, desc| {
-            unmask(desc)
-        });
-        if self.has_removed_action {
-            super::resend::schedule(self.line);
-        }
+        self.line.lock().end_management();
     }
 }
 
@@ -1241,7 +1246,6 @@ pub(super) fn with_registration_line_checked<T>(
         let mut admission = ManagementAdmission {
             line: &line,
             is_active: false,
-            has_removed_action: false,
         };
         // Keep local context protection across the non-LIFO registry/Line
         // handoff. Management exclusion still outlives admission cleanup.
@@ -1283,10 +1287,38 @@ pub(super) fn with_registration_line_checked<T>(
 /// A body that acquires teardown must leave its credit set on successful removal;
 /// completion releases it with admission under the Line lock. Ordinary removal
 /// with surviving actions does not acquire teardown and keeps dispatch enabled.
-pub(super) fn with_existing_line<T>(
+pub(super) fn with_action_removal<T>(
     spec: IrqSpec,
     mode: ManagementMode,
     body_fn: impl FnOnce(Virq, &Arc<IrqLine>) -> Result<Option<T>, IrqDescError>,
+) -> Result<Option<T>, IrqDescError> {
+    with_line_admission(spec, mode, |virq, admission| {
+        let removed = body_fn(virq, admission.line)?;
+        if removed.is_some() {
+            admission.finish_action_removal();
+        }
+        Ok(removed)
+    })
+    .map(Option::flatten)
+}
+
+/// Runs a lookup-only transaction with retained identity and management exclusion.
+/// Missing/stale entries or startup contention return None without invoking the
+/// body. Successful values have no action-removal semantics. All exit paths
+/// release admission without changing teardown, flow masking or pending service.
+/// Return destructor-bearing values so they outlive the management mutex.
+pub(super) fn with_existing_line<T>(
+    spec: IrqSpec,
+    mode: ManagementMode,
+    body_fn: impl FnOnce(Virq, &Arc<IrqLine>) -> Result<T, IrqDescError>,
+) -> Result<Option<T>, IrqDescError> {
+    with_line_admission(spec, mode, |virq, admission| body_fn(virq, admission.line))
+}
+
+fn with_line_admission<T>(
+    spec: IrqSpec,
+    mode: ManagementMode,
+    body_fn: impl FnOnce(Virq, &mut ManagementAdmission<'_>) -> Result<T, IrqDescError>,
 ) -> Result<Option<T>, IrqDescError> {
     validate_management(mode)?;
     let selected = {
@@ -1302,7 +1334,6 @@ pub(super) fn with_existing_line<T>(
     let mut admission = ManagementAdmission {
         line: &line,
         is_active: false,
-        has_removed_action: false,
     };
     {
         let state = IRQ_STATE.lock();
@@ -1320,9 +1351,7 @@ pub(super) fn with_existing_line<T>(
         entry.begin_management();
         admission.is_active = true;
     }
-    let result = body_fn(virq, &line)?;
-    admission.has_removed_action = result.is_some();
-    Ok(result)
+    body_fn(virq, &mut admission).map(Some)
 }
 
 fn reject_teardown(
@@ -1445,7 +1474,7 @@ pub unsafe fn try_free_percpu_irq(
     spec: impl Into<IrqSpec>,
 ) -> Result<Option<Handler>, IrqDescError> {
     can_wait_for_irq_sync("free_percpu_irq")?;
-    with_existing_line(spec.into(), ManagementMode::Task, |virq, line| {
+    with_action_removal(spec.into(), ManagementMode::Task, |virq, line| {
         let Some(retired) =
             withdraw_action_on_line(virq, line, None, true, apply_platform_delivery)?
         else {
@@ -1516,7 +1545,7 @@ fn try_free_irq_inner(
     token: Option<IrqActionToken>,
 ) -> Result<Option<Handler>, IrqDescError> {
     can_wait_for_irq_sync("free_irq")?;
-    with_existing_line(spec, ManagementMode::Task, |virq, line| {
+    with_action_removal(spec, ManagementMode::Task, |virq, line| {
         let Some(retired) =
             withdraw_action_on_line(virq, line, token, false, apply_platform_delivery)?
         else {

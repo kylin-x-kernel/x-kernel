@@ -39,6 +39,102 @@ impl Drop for ScopedTestLine {
     }
 }
 
+#[def_test(serial)]
+fn general_management_results_release_only_membership_admission() {
+    struct ReturnedOwner<'a> {
+        line: Arc<IrqLine>,
+        has_dropped: &'a AtomicBool,
+    }
+
+    impl Drop for ReturnedOwner<'_> {
+        fn drop(&mut self) {
+            core::assert!(self.line.management.try_lock().is_some());
+            core::assert!(self.line.lock().is_unused());
+            self.has_dropped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x5fa0;
+    let cleanup = ScopedTestLine::for_vacant_slot(virq);
+    assert!(cleanup.is_some());
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_new(IrqDesc::from_virq(virq))));
+    IRQ_STATE.lock().descs.insert(virq, line.clone());
+
+    let value = super::with_existing_line(virq.into(), super::ManagementMode::Task, |id, selected| {
+        core::assert_eq!(id, virq);
+        core::assert!(Arc::ptr_eq(selected, &line));
+        core::assert!(!selected.lock().is_unused());
+        Ok(Some(42))
+    })
+    .unwrap();
+    assert_eq!(value, Some(Some(42)));
+    assert!(line.lock().is_unused());
+
+    let failure = IrqDescError::NoIrqAction { virq };
+    let result: Result<Option<()>, _> =
+        super::with_existing_line(virq.into(), super::ManagementMode::Task, |_, selected| {
+            core::assert!(!selected.lock().is_unused());
+            Err(failure)
+        });
+    assert_eq!(result, Err(failure));
+    assert!(line.lock().is_unused());
+    assert!(line.management.try_lock().is_some());
+    let has_dropped = AtomicBool::new(false);
+    let owner = super::with_existing_line(virq.into(), super::ManagementMode::Task, |_, selected| {
+        Ok(ReturnedOwner {
+            line: selected.clone(),
+            has_dropped: &has_dropped,
+        })
+    })
+    .unwrap()
+    .unwrap();
+    assert!(!has_dropped.load(Ordering::Relaxed));
+    drop(owner);
+    assert!(has_dropped.load(Ordering::Relaxed));
+}
+
+#[def_test(serial)]
+fn general_management_preserves_teardown_and_pending_service() {
+    static CHIP: crate::EdgeChip = crate::EdgeChip {
+        mask: |_| panic!("general completion must not mask"),
+        unmask: |_| panic!("general completion must not unmask"),
+        retrigger: |_| panic!("general completion must not request pending service"),
+    };
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x5fa1;
+    let cleanup = ScopedTestLine::for_vacant_slot(virq);
+    assert!(cleanup.is_some());
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    entry.set_flow_for_tests(crate::IrqFlow::Edge(&CHIP));
+    entry.install_shared_action(Arc::new(|_| IrqEvent::HANDLED)).unwrap();
+    let plan = entry.prepare_auto_enable();
+    entry.commit_platform_plan(plan);
+    entry.begin_teardown();
+    entry.is_pending = true;
+    let line = Arc::new(IrqLine::new(entry));
+    IRQ_STATE.lock().descs.insert(virq, line.clone());
+
+    let result = super::with_existing_line(virq.into(), super::ManagementMode::Task, |_, _| {
+        Ok(Some(42))
+    })
+    .unwrap();
+    assert_eq!(result, Some(Some(42)));
+    {
+        let entry = line.lock();
+        assert_eq!(entry.teardown_depth_for_tests(), 1);
+        assert!(entry.is_pending);
+        assert_eq!(entry.action_count(), 1);
+    }
+    let result: Result<Option<()>, _> =
+        super::with_existing_line(virq.into(), super::ManagementMode::Task, |_, _| {
+            Err(IrqDescError::NoIrqAction { virq })
+        });
+    assert_eq!(result, Err(IrqDescError::NoIrqAction { virq }));
+    let entry = line.lock();
+    assert_eq!(entry.teardown_depth_for_tests(), 1);
+    assert!(entry.is_pending);
+    assert_eq!(entry.action_count(), 1);
+}
+
 #[cfg(target_arch = "aarch64")]
 #[def_test(serial)]
 fn invalid_gic_source_is_rejected_before_mapping_or_action_publication() {
@@ -468,11 +564,14 @@ fn shared_withdrawal_restores_pending_service_after_teardown() {
     let removed = take_from_line(&line, Some(removed_token));
     assert!(removed.is_some());
     let completion = line.lock().execution_idle_completion();
-    drop(super::ManagementAdmission {
-        line: &line,
-        is_active: true,
-        has_removed_action: true,
-    });
+    {
+        let _management_guard = line.management.lock();
+        let mut admission = super::ManagementAdmission {
+            line: &line,
+            is_active: true,
+        };
+        admission.finish_action_removal();
+    }
     kiface_task_wait_api::wait_for_completion(&serviced).unwrap();
     kiface_task_wait_api::wait_for_completion(&completion).unwrap();
     assert!(HAS_UNMASKED.load(Ordering::Acquire));
@@ -518,11 +617,14 @@ fn shared_edge_withdrawal_unmasks_before_requesting_hardware_delivery() {
     }
     let removed = take_from_line(&line, Some(token));
     assert!(removed.is_some());
-    drop(super::ManagementAdmission {
-        line: &line,
-        is_active: true,
-        has_removed_action: true,
-    });
+    {
+        let _management_guard = line.management.lock();
+        let mut admission = super::ManagementAdmission {
+            line: &line,
+            is_active: true,
+        };
+        admission.finish_action_removal();
+    }
     assert!(HAS_REQUESTED.load(Ordering::Relaxed));
     assert!(!line.lock().is_pending);
     assert_eq!(line.lock().action_count(), 1);

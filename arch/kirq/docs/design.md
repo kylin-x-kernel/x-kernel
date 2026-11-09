@@ -635,7 +635,7 @@ These are different queue policies, not identical cancellation guarantees.
 Non-last shared withdrawal leaves surviving actions eligible for dispatch and
 replay, subject to their normal enable, configuration and flow state. It adds no
 whole-Line teardown credit. After the retained-Line execution drain,
-`ManagementAdmission::drop` completes admission under the original Line lock,
+`with_action_removal` explicitly completes successful removal under the original Line lock,
 without a registry handoff. Flow restoration is considered only when completion
 actually releases a teardown credit and `can_run_actions` permits it. Ungated
 survivors own their normal flow mask/unmask interval; removal completion must not
@@ -643,6 +643,17 @@ unmask over a running survivor. Pending service is reconsidered after unlocking.
 Unknown-trigger pending can queue replay; explicit level pending follows the
 level rule above. Last-action removal, disable depth or remaining teardown does
 not reopen the source.
+
+`with_existing_line` instead runs a general lookup-only management transaction.
+It retains the selected Line, takes its management mutex, rechecks directory
+identity and pins membership before invoking the body. Its result is only data:
+returning a value does not release teardown, unmask a source or schedule replay.
+`ManagementAdmission::drop` releases only membership admission on ordinary
+success or failure. The removal wrapper explicitly completes teardown and
+admission together before reconsidering pending service, while the same mutex
+is still held. Removed handler owners leave this scope before destruction.
+NMI shutdown preparation uses the general transaction; NMI withdrawal uses the
+removal wrapper. Neither operation creates or replaces an IRQ mapping.
 `is_running` owns accepted Level/Edge/Fasteoi execution and running replay;
 PerCpu execution has no counter and relies on source-owner lifetime protection.
 Normal-IRQ claims for NMI-owned Lines complete under the Line lock

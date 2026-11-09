@@ -1162,8 +1162,11 @@ These checks do not validate IRQ directory membership, hardware quiescence or
 application dependency cycles. KIRQ revalidates retained Line identity after
 acquisition and records admission before releasing the registry lock; explicit
 resource release excludes admitted Lines. A stale remover cannot touch a
-replacement. Admission completion releases admission and any owned teardown
-credit under the original Line lock. Only release of a teardown credit can
+replacement. Ordinary admission completion releases only the membership pin,
+regardless of the returned value. Only an explicit successful action-removal
+completion releases admission and its teardown credit together under the
+original Line lock. Error and rejected-removal paths cannot infer retirement
+from a general transaction result. Only release of a teardown credit can
 trigger flow restoration; non-last shared removal must not unmask over a running
 survivor's flow. It never looks up or
 withdraws a descriptor, and therefore needs no registry lock or non-LIFO guard

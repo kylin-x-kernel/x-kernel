@@ -19,7 +19,8 @@ pub(super) use action::NmiAction;
 pub use shutdown::{NmiShutdown, begin_nmi_shutdown};
 
 use super::manager::{
-    ManagementMode, validate_management, with_existing_line, with_registration_line_checked,
+    ManagementMode, validate_management, with_action_removal, with_existing_line,
+    with_registration_line_checked,
 };
 use crate::{
     IrqDesc, IrqDescError, IrqFlags, IrqRef, IrqSpec,
@@ -249,7 +250,7 @@ fn unregister_nmi_retained(
     retained: Option<&alloc::sync::Arc<crate::state::IrqLine>>,
     mask: impl FnOnce(IrqDesc),
 ) -> bool {
-    let result = with_existing_line(IrqSpec::Desc(desc), ManagementMode::Task, |_, line| {
+    let result = with_action_removal(IrqSpec::Desc(desc), ManagementMode::Task, |_, line| {
         if retained.is_some_and(|original| !alloc::sync::Arc::ptr_eq(original, line)) {
             return Ok(None);
         }
