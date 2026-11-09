@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Native 64-bit iptables-legacy table export and queries.
+//! Native 64-bit iptables-legacy entry decoding, table export, and queries.
 
 use alloc::{vec, vec::Vec};
 
@@ -21,6 +21,7 @@ use crate::netfilter::filter::{
 };
 
 mod abi;
+mod decode;
 mod encode;
 mod query;
 

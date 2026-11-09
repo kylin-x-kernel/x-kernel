@@ -124,6 +124,14 @@ fit a NUL-terminated ABI field, and conditions whose meaning would change in the
 legacy format. The output buffer may be partially written on failure and must
 be discarded. The encoder receives kernel values and does not access user memory.
 
+Entry decoding bounds every record by `next_offset`, keeps extensions before the
+target, and checks their aligned sizes before slicing. Each decode allocates at
+most 16 extension values and fixed-width names. Unsupported conditions are
+rejected rather than weakened; masked-out interface bytes are ignored, and ICMP
+type 255 normalizes its ignored code range. The owned result contains no user
+pointers and cannot publish rules: graph checks and Rule construction belong to
+table reconstruction. Failures discard partial output without touching live state.
+
 `TableLayout` checks total byte arithmetic and native offset widths before
 output allocation. Layout and counters are derived from the same immutable table,
 so their chain and rule order agree during encoding. Export uses validated chain

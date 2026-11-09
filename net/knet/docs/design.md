@@ -135,6 +135,7 @@ net/knet/
     │   │   └── iptables_legacy/
     │   │       ├── mod.rs
     │   │       ├── abi.rs
+    │   │       ├── decode.rs
     │   │       ├── encode.rs
     │   │       └── query.rs
     │   └── filter/
@@ -447,6 +448,18 @@ offsets for standard targets.
 Encoding checks ABI field widths, allocates no memory, and zeroes counters,
 reserved bytes, and padding.
 Conditions without an equivalent legacy representation return an error.
+
+`LegacyExtension` defines the names, revisions, and sizes used by both encoding
+and decoding. `decode.rs` reads one entry from a kernel byte slice into an owned
+`DecodedEntry`.
+It checks record and extension bounds, alignment, revision zero, and the per-rule
+extension limit. ABI conversions preserve supported address, interface, protocol,
+and transport conditions; unsupported masks, flags, options, and targets fail.
+`DecodedTarget` distinguishes verdicts, RETURN, `TableOffset` byte offsets, and
+`ErrorTarget` markers for user chains or the table end. Table reconstruction must
+resolve offsets, construct rules to validate protocol compatibility, and validate
+the resulting chains before publication.
+Decoding requires task context and ignores incoming counters, cache fields, and padding.
 
 `LegacyFilterTable` owns the complete entry array and its hook and policy offsets.
 `TableLayout` computes chain boundaries, total size, entry count, and hook and

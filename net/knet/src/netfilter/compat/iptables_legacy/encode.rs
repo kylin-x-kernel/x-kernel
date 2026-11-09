@@ -38,9 +38,9 @@ pub(in crate::netfilter) enum EncodeError {
     InvalidName,
 }
 
-/// Native record formats exported by this adapter and advertised by revision queries.
+/// Supported legacy match and target formats shared by encoding, decoding, and revision queries.
 #[derive(Clone, Copy)]
-enum LegacyExtension {
+pub(super) enum LegacyExtension {
     Tcp,
     Udp,
     Icmp,
@@ -56,6 +56,13 @@ impl LegacyExtension {
         Self::Standard,
         Self::Error,
     ];
+
+    /// Finds a format by its name without the final NUL byte.
+    pub(super) fn lookup(name: &[u8]) -> Option<Self> {
+        Self::ADVERTISED
+            .into_iter()
+            .find(|extension| extension.name() == name)
+    }
 
     fn name(self) -> &'static [u8] {
         match self {
@@ -74,13 +81,13 @@ impl LegacyExtension {
         }
     }
 
-    fn revision(self) -> u8 {
+    pub(super) fn revision(self) -> u8 {
         match self {
             Self::Tcp | Self::Udp | Self::Icmp | Self::Standard | Self::Error => 0,
         }
     }
 
-    fn size(self) -> usize {
+    pub(super) fn size(self) -> usize {
         match self {
             Self::Tcp => XT_TCP_MATCH_SIZE,
             Self::Udp => XT_UDP_MATCH_SIZE,
