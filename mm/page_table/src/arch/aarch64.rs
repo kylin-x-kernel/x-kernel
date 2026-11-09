@@ -16,7 +16,7 @@
 use memaddr::{PhysAddr, VirtAddr};
 
 use crate::{
-    defs::{PageTableEntry, PagingFlags, PagingMetaData},
+    defs::{PageTableEntry, PagingFlags, PagingMetaData, TlbFlushResult},
     table64::{PageTable64, PageTableMut},
 };
 
@@ -149,12 +149,15 @@ impl From<PagingFlags> for Arm64Attr {
 ///
 /// A `#[repr(transparent)]` wrapper around `u64` that encodes physical
 /// addresses and [`Arm64Attr`] attributes. Physical addresses are masked
-/// to cover bits 12–47 (48-bit physical address space).
+/// to cover bits 12–47 (48-bit physical address space). Software bit 55
+/// records mapping ownership independently of permission flags and address updates.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct A64PageEntry(u64);
 
 impl A64PageEntry {
+    // Linux arm64 PTE_SWBITS_MASK includes bit 55 (PTE_DIRTY).
+    const MANAGED_MASK: u64 = 1 << 55;
     const PADDR_MASK: u64 = 0x0000_ffff_ffff_f000;
 }
 
@@ -181,7 +184,19 @@ impl PageTableEntry for A64PageEntry {
         if is_huge {
             a.remove(Arm64Attr::NON_BLOCK);
         }
-        self.0 = (self.0 & Self::PADDR_MASK) | a.bits();
+        self.0 = (self.0 & (Self::PADDR_MASK | Self::MANAGED_MASK)) | a.bits();
+    }
+
+    fn is_managed(&self) -> bool {
+        self.0 & Self::MANAGED_MASK != 0
+    }
+
+    fn set_managed(&mut self, is_managed: bool) {
+        if is_managed {
+            self.0 |= Self::MANAGED_MASK;
+        } else {
+            self.0 &= !Self::MANAGED_MASK;
+        }
     }
 
     fn is_present(&self) -> bool {
@@ -234,29 +249,32 @@ impl PagingMetaData for A64PagingMetaData {
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_process(vaddr: Option<VirtAddr>) {
+    fn flush_tlb_process(vaddr: Option<VirtAddr>) -> TlbFlushResult {
         // AArch64 Inner Shareable TLBI instructions (vaae1is / vmalle1is)
         // broadcast to all PEs in the same Inner Shareable domain, so no
         // software IPI shootdown is needed.
         karch::flush_tlb(vaddr);
+        Ok(())
     }
 
     #[inline]
-    fn flush_tlb_process_asid(vaddr: Option<VirtAddr>, asid: u16) {
+    fn flush_tlb_process_asid(vaddr: Option<VirtAddr>, asid: u16) -> TlbFlushResult {
         match vaddr {
             Some(va) => karch::flush_tlb_va_asid(va, asid),
             None => karch::flush_tlb_asid(asid),
         }
+        Ok(())
     }
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) -> TlbFlushResult {
         // Same as flush_tlb_process — hardware broadcast already covers
         // all inner-shareable CPUs.  Provided for clarity: kernel page
         // table flushes have the same implementation as user page table
         // flushes on aarch64.
         karch::flush_tlb(vaddr);
+        Ok(())
     }
 }
 

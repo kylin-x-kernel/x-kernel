@@ -1538,7 +1538,7 @@ impl MmSpace {
                     return Err(KError::InvalidInput);
                 }
                 modify
-                    .map(dst + (vaddr - src), paddr, page_size, flags)
+                    .map_raw(dst + (vaddr - src), paddr, page_size, flags)
                     .map_err(map_paging_err)?;
                 prepared.push(vaddr);
             }

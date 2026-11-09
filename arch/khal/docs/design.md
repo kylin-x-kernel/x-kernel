@@ -1,7 +1,8 @@
 # khal — Design
 
 This document covers the IRQ trap-entry adapter, crate test layout, and page-table
-storage adapter. Other HAL subsystems retain their own interface contracts.
+storage and mapping-reference adapters. Other HAL subsystems retain their own
+interface contracts.
 
 The NMI facade also exposes the platform's `shutdown_periodic_nmi`: a local,
 fallible reusable-source shutdown, distinct from terminal `quiesce_nmi`. HAL
@@ -187,13 +188,18 @@ their original source modules using `unittest::path_mod_test!`:
 |---|---|---|---|
 | `src/percpu.rs` | `ut-tests/percpu.rs` | `tests_percpu` | 1 |
 | `src/paging.rs` | `ut-tests/paging.rs` | `tests_paging` | 2 |
-| `src/paging.rs` | `ut-tests/paging_page_refs.rs` | `tests_page_refs` | 3 |
+| `src/paging.rs` | `ut-tests/paging_page_refs.rs` | `tests_page_refs` | 7 |
 | `src/mem/mod.rs` | `ut-tests/mem.rs` | `tests_mem` | 3 |
 | `src/time/mod.rs` | `ut-tests/time.rs` | `tests_time` | 4 |
 | `src/time/epoch.rs` | `ut-tests/time_epoch.rs` | `tests` | 7 |
 
-These 20 cases require `cfg(unittest)` without additional feature, architecture,
-serial or user gates. All four supported platform unittest builds select them.
+These 24 cases require `cfg(unittest)` without additional feature, architecture
+or user gates. The huge-leaf lifetime case runs serially and compares allocation
+usage before unmap and after synchronous retirement, with no independent owner
+masking early release. `inactive_table_destruction_releases_its_live_data_hold`
+additionally leaves a real managed data leaf installed in a never-activated
+tree and checks that Drop restores the allocator usage baseline. All four
+supported platform unittest builds select them.
 CPU identity tests require initialized CPU state. Independent epoch fixtures do
 not freeze the active kernel's global clock. Explicit cfg gates outside the
 mounts prevent non-UT builds from resolving the runtime test macro; they do not
@@ -271,16 +277,19 @@ restore controller access/routing and quiesce competing programming first.
 single-page allocation API and transfers one hold to `page_table` as a PA.
 `dealloc_frame` restores and consumes that exact transfer with
 `PageRef::from_raw(pa, 1)`. The allocation adapter drops the length-one component
-of the generic (PA, page-count) raw pair; the page-table library remains PA-only.
+of the generic (PA, page-count) raw pair; this table-storage interface remains
+PA-only and is separate from the data-reference `(PA, bytes)` provider.
 The original `UsageKind` records only allocation accounting; final `PageRef::drop`
 returns the page and records the release directly in kalloc. Borrowed root entries
 do not own their source table pages and do not restore or release those holds.
 
 The table owner must end hardware use and complete required translation
 retirement before destroying owned storage. The existing AArch64 user-ASID
-invalidation path in `PageTable64::drop` is unchanged. Reference counting retains
-storage; it does not replace address-space exit, remote-CPU coordination or TLB
-shootdown. This stage does not retain references for data PTEs.
+invalidation path in `PageTable64::drop` remains the final reclamation gate:
+failed completion preserves table frames and all unrecovered managed data
+transfers. Reference counting retains storage; it does not replace address-space
+exit, remote-CPU coordination or TLB shootdown. Managed data leaves use the
+separate provider below.
 
 `paging_page_refs.rs` tests the allocator adapter: it checks the handler's raw
 reference transfer and uses the architecture's real `PageTable` to cover tree
@@ -297,3 +306,67 @@ HAL adds a preemption credit and forwards that proof to KIRQ. KIRQ completes
 claims and finishes its context before the normal IRQ adapter performs the
 scheduling checkpoint. Dedicated NMI return has no such checkpoint. These
 adapters do not turn arbitrary task-context calls into valid hardware entries.
+
+## PTE-owned data mapping references
+
+`PagingHandlerImpl::MappingReference` is `kalloc::PageRef`. The adapter reports
+`phys_addr()` and `page_count() * PAGE_SIZE_4K` for the selected handle range.
+A compound view can retain a larger allocation, but only its selected exact
+range is transferred for one aligned base or huge leaf. The caller transfers a
+dedicated mapping hold through the primary `map(reference)`,
+`map_sized(reference, size)` or `replace_if_same(reference)` API and keeps any
+object hold independently.
+
+The provider bridges the existing raw `PageRef` protocol:
+
+| Provider operation in `src/paging.rs` | Transfer |
+|----------------------------------------|----------|
+| `mapping_reference_into_raw(reference)` | Consume `PageRef::into_raw()` and convert its base-page count into the exact selected byte length, returning `(PA, bytes)`. |
+| `unsafe mapping_reference_from_raw(PA, bytes)` | Convert the validated leaf byte length back to base-page count and restore exactly one outstanding transfer with `PageRef::from_raw(PA, pages)`. |
+
+Neither conversion acquires or releases a reference count. Recovery requires
+exclusive ownership of the same unconsumed exact transfer; an arbitrary PA,
+metadata lookup or raw mapping is insufficient. No new `kalloc` dependency is
+introduced in generic `page_table`.
+
+The leaf's normalized PA, size and architecture-private managed category retain
+that transfer. Category is outside public `PagingFlags`, survives retained-leaf
+flag/address updates and is never created by raw installation. Bit selection and
+audit belong to the architecture PTE implementations. A copied PTE or snapshot
+duplicates no hold. There is no permanent per-leaf owner index or heap allocation
+for recording an admitted hold.
+
+The page-table transaction validates the exact range and finishes all fallible
+preparation before transferring and publishing the leaf. On clear/replacement
+it first captures the old leaf, then records invalidation and restores the old
+managed hold into bounded retirement storage. Recovery acquires no new hold.
+Only confirmed completion releases it, with full invalidation for huge leaves.
+Retirement still keeps 16 holds inline and may fallibly spill to at most 256;
+spill OOM or a full batch attempts an intermediate drain while retaining the
+recovered hold. Unconfirmed completion keeps holds and a full retry; unresolved
+guard destruction or an unstorable hold stays pinned. There is no asynchronous
+reaper. Synchronous revocation still uses `try_finish()` and handles its typed
+completion error; retained lifetime does not establish revoked permissions.
+
+Inactive-tree destruction recovers every owned base/huge managed leaf exactly
+once before descriptor-frame release, skipping borrowed roots and honoring the
+final AArch64 user-ASID completion gate. `copy_from` borrows source transfers
+without cloning them and checks the full destination root range for managed
+leaves in owned subtrees before any destructive overwrite. Sources must outlive
+borrowers, and destination managed leaves must first be unmapped and retired.
+
+PA-only callers mechanically use `map_raw`, `map_region_raw`, `remap_raw` and
+`replace_if_same_raw`; backing allocation/field/destructor migration in
+anon/pagecache/filemap/memspace is deferred. These raw installs transfer no
+mapping hold. Raw replacement cannot change a managed leaf's normalized PA;
+same-PA updates preserve category, and permission clearing retires its old hold.
+Existing raw release paths using `finish()` can still release backing after an
+unconfirmed shootdown. The adapter does not make those paths safe: they need a
+separate ownership transfer or retained backing on `try_finish()` error. The
+provider grants no content-access or device-completion authority.
+
+The PageRef regression cases retain real allocator inventory/reuse and
+exact/compound lifetime checks, using `map`, `map_sized` and
+`replace_if_same` for reference-consuming mapping transactions and explicit raw
+names for PA-only fixtures. Inactive test tables do not verify hardware
+shootdown or prove an architecture's private category-bit selection.

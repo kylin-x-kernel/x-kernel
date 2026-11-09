@@ -229,7 +229,7 @@ impl BackendOps for SharedBackend {
             pages_in(range, self.pages.size)?.zip(self.pages_starting_from(range.start))
         {
             pgtbl
-                .map(vaddr, *paddr, self.pages.size, flags)
+                .map_raw(vaddr, *paddr, self.pages.size, flags)
                 .map_err(map_paging_err)?;
         }
         Ok(())
@@ -268,7 +268,7 @@ impl BackendOps for SharedBackend {
             }
             Err(PagingError::NotMapped) => {
                 pgtbl
-                    .map(addr, frame, self.page_size(), flags)
+                    .map_raw(addr, frame, self.page_size(), flags)
                     .map_err(map_paging_err)?;
             }
             Err(_) => return Err(KError::BadAddress),

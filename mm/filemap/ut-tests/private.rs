@@ -499,7 +499,7 @@ fn file_private_cow_rejects_a_pte_from_a_different_folio() {
         pgtbl.unmap(start).expect("replace file PTE for test");
         pgtbl.finish();
         pgtbl
-            .map(start, wrong_frame, PageSize::Size4K, flags - MappingFlags::WRITE)
+            .map_raw(start, wrong_frame, PageSize::Size4K, flags - MappingFlags::WRITE)
             .expect("map unrelated frame");
 
         let write_fault = FaultContext::new(start, PageFaultFlags::WRITE);
@@ -561,7 +561,7 @@ fn file_private_fork_failure_does_not_commit_anonymous_child_references() {
         let blocked_addr = start + blocked_page * PAGE_SIZE_4K;
         {
             let mut new_pgtbl = child_pt.modify();
-            new_pgtbl.map(blocked_addr, collision, PageSize::Size4K, flags)
+            new_pgtbl.map_raw(blocked_addr, collision, PageSize::Size4K, flags)
                 .expect("force a deterministic child mapping failure");
             let mut old_pgtbl = parent_pt.modify();
             assert!(runtime.clone_for_fork(
@@ -627,7 +627,7 @@ fn mapping_after_failed_relocation(
         guard
             .page_table_mut()
             .modify()
-            .map(target + PAGE_SIZE_4K, collision, PageSize::Size4K, flags)
+            .map_raw(target + PAGE_SIZE_4K, collision, PageSize::Size4K, flags)
             .expect("install test-only destination collision");
         assert!(
             guard

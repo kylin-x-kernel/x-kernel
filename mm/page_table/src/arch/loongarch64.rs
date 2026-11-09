@@ -15,6 +15,8 @@
 
 use memaddr::{PhysAddr, VirtAddr};
 
+#[cfg(feature = "smp")]
+use crate::defs::TlbFlushResult;
 use crate::{
     defs::{PageTableEntry, PagingFlags, PagingMetaData},
     table64::{PageTable64, PageTableMut},
@@ -100,12 +102,15 @@ impl From<PagingFlags> for LaFlags {
 ///
 /// A `#[repr(transparent)]` wrapper around `u64` that encodes physical
 /// addresses and [`LaFlags`] attributes. Physical addresses are masked
-/// to cover bits 12–47 (48-bit physical address space).
+/// to cover bits 12–47 (48-bit physical address space). Software bit 11
+/// records mapping ownership independently of permission flags and address updates.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct La64PageEntry(u64);
 
 impl La64PageEntry {
+    // Linux LoongArch64 _PAGE_SPECIAL_SHIFT uses software bit 11.
+    const MANAGED_MASK: u64 = 1 << 11;
     const PADDR_MASK: u64 = 0x0000_ffff_ffff_f000;
 
     /// Constructs a PTE from a raw hardware encoding.
@@ -139,7 +144,19 @@ impl PageTableEntry for La64PageEntry {
         if is_huge {
             f |= LaFlags::GH;
         }
-        self.0 = (self.0 & Self::PADDR_MASK) | f.bits();
+        self.0 = (self.0 & (Self::PADDR_MASK | Self::MANAGED_MASK)) | f.bits();
+    }
+
+    fn is_managed(&self) -> bool {
+        self.0 & Self::MANAGED_MASK != 0
+    }
+
+    fn set_managed(&mut self, is_managed: bool) {
+        if is_managed {
+            self.0 |= Self::MANAGED_MASK;
+        } else {
+            self.0 &= !Self::MANAGED_MASK;
+        }
     }
 
     fn is_present(&self) -> bool {
@@ -151,8 +168,9 @@ impl PageTableEntry for La64PageEntry {
     }
 
     fn is_table(&self) -> bool {
-        // Directory descriptors contain only a nonzero physical address.
-        self.0 != 0 && self.0 & !Self::PADDR_MASK == 0
+        // Software ownership metadata must not affect directory decoding.
+        let descriptor = self.0 & !Self::MANAGED_MASK;
+        descriptor != 0 && descriptor & !Self::PADDR_MASK == 0
     }
 }
 
@@ -182,16 +200,19 @@ impl PagingMetaData for LA64MetaData {
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_process_mask(vaddr: Option<VirtAddr>, target_mask: kcpu_id_map::KCpuMask) {
+    fn flush_tlb_process_mask(
+        vaddr: Option<VirtAddr>,
+        target_mask: kcpu_id_map::KCpuMask,
+    ) -> TlbFlushResult {
         karch::flush_tlb(vaddr);
-        crate::defs::TlbFlushIf::flush_process_mask(vaddr, target_mask);
+        crate::defs::TlbFlushIf::flush_process_mask(vaddr, target_mask)
     }
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) -> TlbFlushResult {
         karch::flush_tlb(vaddr);
-        crate::defs::TlbFlushIf::flush_all_cpus(vaddr);
+        crate::defs::TlbFlushIf::flush_all_cpus(vaddr)
     }
 }
 

@@ -18,12 +18,12 @@ use unittest::def_test;
 
 use crate::{
     PageSize, PageTable64, PageTableEntry, PagingFlags, PagingHandler, PagingMetaData,
-    PteReplaceError,
+    PteReplaceError, TlbFlushResult,
 };
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-struct TestEntry(usize);
+pub(super) struct TestEntry(usize);
 
 impl PageTableEntry for TestEntry {
     const EMPTY: Self = Self(0);
@@ -59,6 +59,14 @@ impl PageTableEntry for TestEntry {
         if is_huge {
             self.0 |= Self::HUGE;
         }
+    }
+
+    fn is_managed(&self) -> bool {
+        self.0 & (1 << 10) != 0
+    }
+
+    fn set_managed(&mut self, is_managed: bool) {
+        self.0 = (self.0 & !(1 << 10)) | (usize::from(is_managed) << 10);
     }
 
     fn bits(self) -> usize {
@@ -111,8 +119,18 @@ impl PagingMetaData for TestMeta {
 
     fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {}
 
+    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
+        Self::flush_tlb(vaddr);
+        Ok(())
+    }
+
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-    fn flush_tlb_process_mask(_vaddr: Option<Self::VirtAddr>, _target_mask: KCpuMask) {}
+    fn flush_tlb_process_mask(
+        _vaddr: Option<Self::VirtAddr>,
+        _target_mask: KCpuMask,
+    ) -> TlbFlushResult {
+        Ok(())
+    }
 }
 
 /// Per-instance provider context owned by a single test case.
@@ -201,6 +219,27 @@ static FRAME_POOL: FramePool = FramePool(UnsafeCell::new(
 struct TestHandler;
 
 impl PagingHandler for TestHandler {
+    type MappingReference = core::convert::Infallible;
+
+    fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr {
+        match *reference {}
+    }
+
+    fn mapping_reference_bytes(reference: &Self::MappingReference) -> usize {
+        match *reference {}
+    }
+
+    fn mapping_reference_into_raw(reference: Self::MappingReference) -> (PhysAddr, usize) {
+        match reference {}
+    }
+
+    unsafe fn mapping_reference_from_raw(
+        _paddr: PhysAddr,
+        _bytes: usize,
+    ) -> Self::MappingReference {
+        unreachable!("raw-only test handler has no transferred mapping holds")
+    }
+
     fn alloc_frame() -> Option<PhysAddr> {
         let index = NEXT_FRAME.fetch_add(1, Ordering::Relaxed);
         if index >= TEST_FRAME_COUNT {
@@ -226,6 +265,27 @@ impl PagingHandler for TestHandler {
 struct OffsetTestHandler;
 #[cfg(any(target_arch = "aarch64", target_arch = "loongarch64"))]
 impl PagingHandler for OffsetTestHandler {
+    type MappingReference = core::convert::Infallible;
+
+    fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr {
+        match *reference {}
+    }
+
+    fn mapping_reference_bytes(reference: &Self::MappingReference) -> usize {
+        match *reference {}
+    }
+
+    fn mapping_reference_into_raw(reference: Self::MappingReference) -> (PhysAddr, usize) {
+        match reference {}
+    }
+
+    unsafe fn mapping_reference_from_raw(
+        _paddr: PhysAddr,
+        _bytes: usize,
+    ) -> Self::MappingReference {
+        unreachable!("raw-only test handler has no transferred mapping holds")
+    }
+
     fn alloc_frame() -> Option<PhysAddr> {
         TestHandler::alloc_frame()
             .map(|frame| paddr(frame.as_usize() - FRAME_POOL.0.get() as usize + PAGE_SIZE_4K))
@@ -263,7 +323,7 @@ fn query_entry_returns_leaf_snapshot() {
     let page = paddr(0x20_0000);
     table
         .modify()
-        .map(
+        .map_raw(
             vaddr(0x4000),
             page,
             PageSize::Size4K,
@@ -285,13 +345,13 @@ fn replace_if_same_commits_only_matching_snapshot() {
     let new_page = paddr(0x31_0000);
     table
         .modify()
-        .map(vaddr(0x8000), old_page, PageSize::Size4K, PagingFlags::READ)
+        .map_raw(vaddr(0x8000), old_page, PageSize::Size4K, PagingFlags::READ)
         .expect("map test page");
     let expected = table.query_entry(vaddr(0x8000)).expect("query entry");
 
     let old_snapshot = table
         .modify()
-        .replace_if_same(
+        .replace_if_same_raw(
             vaddr(0x8000),
             expected,
             new_page,
@@ -318,7 +378,7 @@ fn replace_if_same_reports_changed_without_overwrite() {
     let prepared_page = paddr(0x42_0000);
     table
         .modify()
-        .map(
+        .map_raw(
             vaddr(0xc000),
             original_page,
             PageSize::Size4K,
@@ -328,10 +388,10 @@ fn replace_if_same_reports_changed_without_overwrite() {
     let stale = table.query_entry(vaddr(0xc000)).expect("query entry");
     table
         .modify()
-        .remap(vaddr(0xc000), competing_page, PagingFlags::READ)
+        .remap_raw(vaddr(0xc000), competing_page, PagingFlags::READ)
         .expect("competing remap");
 
-    let result = table.modify().replace_if_same(
+    let result = table.modify().replace_if_same_raw(
         vaddr(0xc000),
         stale,
         prepared_page,
@@ -356,7 +416,7 @@ fn finish_reports_explicit_flush_boundary() {
 
     assert!(!modify.finish().had_pending());
     modify
-        .map(
+        .map_raw(
             vaddr(0x10_0000),
             paddr(0x50_0000),
             PageSize::Size4K,
@@ -391,7 +451,7 @@ fn sparse_unmap_and_drop_skip_nonpresent_arm_huge_leaves() {
         {
             let mut modify = table.modify();
             modify
-                .map(vaddr(0), paddr(0x4000_0000), size, PagingFlags::empty())
+                .map_raw(vaddr(0), paddr(0x4000_0000), size, PagingFlags::empty())
                 .unwrap();
             modify.finish();
             let before = modify
@@ -426,7 +486,7 @@ fn page_table_walks_skip_nonpresent_arm_huge_leaves() {
             PageTable64::<TestMeta, A64PageEntry, OffsetTestHandler>::try_new().unwrap();
         table
             .modify()
-            .map(vaddr(0), paddr(0x4000_0000), size, PagingFlags::empty())
+            .map_raw(vaddr(0), paddr(0x4000_0000), size, PagingFlags::empty())
             .unwrap();
         assert_eq!(table.query(vaddr(0)), Err(crate::PtError::NotMapped));
         assert_eq!(
@@ -448,7 +508,7 @@ fn sparse_unmap_traverses_loongarch_directories_without_valid_bit() {
     let mut modify = table.modify();
     for address in [0, PAGE_SIZE_4K, 2 * PAGE_SIZE_4K] {
         modify
-            .map(
+            .map_raw(
                 vaddr(address),
                 paddr(0x400_0000 + address),
                 PageSize::Size4K,
@@ -471,7 +531,7 @@ fn sparse_unmap_traverses_loongarch_directories_without_valid_bit() {
         paddr(0x400_2000)
     );
     modify
-        .map(
+        .map_raw(
             vaddr(PAGE_SIZE_4K),
             paddr(0x500_0000),
             PageSize::Size4K,
@@ -515,7 +575,7 @@ fn sparse_unmap_preserves_neighbours_across_page_table_boundaries() {
         let mut modify = table.modify();
         for (index, address) in addresses.into_iter().enumerate() {
             modify
-                .map(
+                .map_raw(
                     vaddr(address),
                     paddr(0x100_0000 + index * PAGE_SIZE_4K),
                     PageSize::Size4K,
@@ -549,7 +609,7 @@ fn sparse_unmap_batches_dense_leaf_invalidations() {
     let mut modify = table.modify();
     for index in 0..32 {
         modify
-            .map(
+            .map_raw(
                 vaddr(index * PAGE_SIZE_4K),
                 paddr(0x200_0000 + index * PAGE_SIZE_4K),
                 PageSize::Size4K,
@@ -577,7 +637,7 @@ fn sparse_unmap_rejects_partial_huge_and_accepts_matching_leaves() {
     let mut table = TestPageTable::try_new().unwrap();
     let mut modify = table.modify();
     modify
-        .map(
+        .map_raw(
             vaddr(0x20_0000),
             paddr(0x40_0000),
             PageSize::Size2M,
@@ -585,7 +645,7 @@ fn sparse_unmap_rejects_partial_huge_and_accepts_matching_leaves() {
         )
         .unwrap();
     modify
-        .map(
+        .map_raw(
             vaddr(1 << 30),
             paddr(2 << 30),
             PageSize::Size1G,
@@ -618,7 +678,7 @@ fn sparse_unmap_validates_ranges_before_mutating() {
     let mut table = TestPageTable::try_new().unwrap();
     let mut modify = table.modify();
     modify
-        .map(
+        .map_raw(
             vaddr(0),
             paddr(0x300_0000),
             PageSize::Size4K,
@@ -655,7 +715,7 @@ fn sparse_unmap_error_preserves_huge_leaf_and_prefix_flush() {
     let mut table = TestPageTable::try_new().unwrap();
     let mut modify = table.modify();
     modify
-        .map(
+        .map_raw(
             vaddr(0),
             paddr(0x500_0000),
             PageSize::Size4K,
@@ -663,7 +723,7 @@ fn sparse_unmap_error_preserves_huge_leaf_and_prefix_flush() {
         )
         .unwrap();
     modify
-        .map(
+        .map_raw(
             vaddr(1 << 21),
             paddr(0x600_0000),
             PageSize::Size2M,
@@ -691,12 +751,25 @@ fn sparse_unmap_supports_three_levels_and_high_addresses() {
         const VA_MAX_BITS: usize = 39;
 
         fn flush_tlb(_vaddr: Option<VirtAddr>) {}
+
+        fn flush_tlb_process(vaddr: Option<VirtAddr>) -> TlbFlushResult {
+            Self::flush_tlb(vaddr);
+            Ok(())
+        }
+
+        #[cfg(feature = "smp")]
+        fn flush_tlb_process_mask(
+            vaddr: Option<VirtAddr>,
+            _mask: kcpu_id_map::KCpuMask,
+        ) -> TlbFlushResult {
+            Self::flush_tlb_process(vaddr)
+        }
     }
     let mut table = PageTable64::<ThreeLevelMeta, TestEntry, TestHandler>::try_new().unwrap();
     let mut modify = table.modify();
     let start = usize::MAX - (1usize << 30) + 1;
     modify
-        .map(
+        .map_raw(
             vaddr(start),
             paddr(0x400_0000),
             PageSize::Size4K,
@@ -754,7 +827,7 @@ fn user_page_table_flush_uses_installed_process_mask() {
 
     table
         .modify()
-        .map(
+        .map_raw(
             vaddr(0x20_0000),
             paddr(0x40_0000),
             PageSize::Size4K,
@@ -774,12 +847,12 @@ fn user_page_table_flush_uses_installed_process_mask() {
 mod aarch64_drop {
     use core::{
         ptr::NonNull,
-        sync::atomic::{AtomicU16, AtomicUsize, Ordering},
+        sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
     };
 
     use super::{
         PageSize, PageTable64, PagingFlags, PagingHandler, PagingMetaData, PhysAddr, TestEntry,
-        TestHandler, TestMeta, VirtAddr, def_test, paddr, vaddr,
+        TestHandler, TestMeta, TlbFlushResult, VirtAddr, def_test, paddr, vaddr,
     };
 
     // Only the serial tests below use these probes. The scoped guard resets
@@ -790,6 +863,7 @@ mod aarch64_drop {
     static OTHER_FLUSHES: AtomicUsize = AtomicUsize::new(0);
     static FREED_FRAMES: AtomicUsize = AtomicUsize::new(0);
     static FREED_WITHOUT_ASID_FLUSH: AtomicUsize = AtomicUsize::new(0);
+    static FAIL_ASID_FLUSH: AtomicBool = AtomicBool::new(false);
 
     struct ProbeGuard;
 
@@ -805,6 +879,7 @@ mod aarch64_drop {
             OTHER_FLUSHES.store(0, Ordering::Relaxed);
             FREED_FRAMES.store(0, Ordering::Relaxed);
             FREED_WITHOUT_ASID_FLUSH.store(0, Ordering::Relaxed);
+            FAIL_ASID_FLUSH.store(false, Ordering::Relaxed);
         }
     }
 
@@ -835,19 +910,44 @@ mod aarch64_drop {
             OTHER_FLUSHES.fetch_add(1, Ordering::Relaxed);
         }
 
-        fn flush_tlb_process_asid(vaddr: Option<VirtAddr>, asid: u16) {
+        fn flush_tlb_process_asid(vaddr: Option<VirtAddr>, asid: u16) -> TlbFlushResult {
+            if FAIL_ASID_FLUSH.load(Ordering::Relaxed) {
+                return Err(crate::TlbFlushError::Deferred);
+            }
             if vaddr.is_none() {
                 LAST_ASID.store(asid, Ordering::Relaxed);
                 ASID_FLUSHES.fetch_add(1, Ordering::Relaxed);
             } else {
                 OTHER_FLUSHES.fetch_add(1, Ordering::Relaxed);
             }
+            Ok(())
         }
     }
 
     struct DropHandler;
 
     impl PagingHandler for DropHandler {
+        type MappingReference = core::convert::Infallible;
+
+        fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr {
+            match *reference {}
+        }
+
+        fn mapping_reference_bytes(reference: &Self::MappingReference) -> usize {
+            match *reference {}
+        }
+
+        fn mapping_reference_into_raw(reference: Self::MappingReference) -> (PhysAddr, usize) {
+            match reference {}
+        }
+
+        unsafe fn mapping_reference_from_raw(
+            _paddr: PhysAddr,
+            _bytes: usize,
+        ) -> Self::MappingReference {
+            unreachable!("raw-only test handler has no transferred mapping holds")
+        }
+
         fn alloc_frame() -> Option<PhysAddr> {
             TestHandler::alloc_frame()
         }
@@ -882,7 +982,7 @@ mod aarch64_drop {
     fn map_test_page(table: &mut DropPageTable) {
         table
             .modify()
-            .map(
+            .map_raw(
                 vaddr(0x4000),
                 paddr(0x20_0000),
                 PageSize::Size4K,
@@ -912,6 +1012,23 @@ mod aarch64_drop {
         assert_eq!(OTHER_FLUSHES.load(Ordering::Relaxed), 0);
         assert_eq!(FREED_WITHOUT_ASID_FLUSH.load(Ordering::Relaxed), 0);
         assert_eq!(FREED_FRAMES.load(Ordering::Relaxed), DropMeta::LEVELS);
+    }
+
+    #[def_test(serial)]
+    fn user_drop_keeps_table_storage_when_final_asid_retirement_is_unconfirmed() {
+        let _probe = ProbeGuard::new();
+        let asid = AtomicU16::new(9);
+        let mut table = DropPageTable::try_new().expect("user page table");
+        // SAFETY: asid remains live throughout this inactive test table's
+        // destruction; the callback reads only that test-owned atomic.
+        unsafe { table.set_user_asid_provider(NonNull::from(&asid).cast(), current_asid) };
+        map_test_page(&mut table);
+        FAIL_ASID_FLUSH.store(true, Ordering::Relaxed);
+        drop(table);
+        // TestHandler uses a static frame pool, so pinning these synthetic
+        // transfers does not leak allocator backing or require a global reaper.
+        assert_eq!(FREED_FRAMES.load(Ordering::Relaxed), 0);
+        assert_eq!(ASID_FLUSHES.load(Ordering::Relaxed), 0);
     }
 
     #[def_test(serial)]
@@ -973,6 +1090,19 @@ impl PagingMetaData for FreshMapMeta {
         FRESH_MAP_INVALIDATIONS.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
+        Self::flush_tlb(vaddr);
+        Ok(())
+    }
+
+    #[cfg(feature = "smp")]
+    fn flush_tlb_process_mask(
+        vaddr: Option<Self::VirtAddr>,
+        _mask: kcpu_id_map::KCpuMask,
+    ) -> TlbFlushResult {
+        Self::flush_tlb_process(vaddr)
+    }
+
     fn fence_fresh_map() {
         FRESH_MAP_FENCES.fetch_add(1, Ordering::Relaxed);
     }
@@ -993,7 +1123,7 @@ fn fresh_map_fences_once_without_invalidating() {
     let receipt = {
         let mut guard = table.modify();
         guard
-            .map(
+            .map_raw(
                 vaddr(0x4000),
                 paddr(0x20_0000),
                 PageSize::Size4K,
@@ -1001,7 +1131,7 @@ fn fresh_map_fences_once_without_invalidating() {
             )
             .expect("first fresh map");
         guard
-            .map(
+            .map_raw(
                 vaddr(0x5000),
                 paddr(0x21_0000),
                 PageSize::Size4K,
@@ -1024,7 +1154,7 @@ fn unmap_still_invalidates_on_a_fence_only_architecture() {
     {
         let mut guard = table.modify();
         guard
-            .map(
+            .map_raw(
                 vaddr(0x4000),
                 paddr(0x20_0000),
                 PageSize::Size4K,
@@ -1054,7 +1184,7 @@ fn fresh_map_invalidates_when_architecture_requires_it() {
     let mut table = TestPageTable::try_new_kernel().expect("default-policy page table");
     let mut guard = table.modify();
     guard
-        .map(
+        .map_raw(
             vaddr(0x4000),
             paddr(0x20_0000),
             PageSize::Size4K,

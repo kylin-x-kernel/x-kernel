@@ -16,6 +16,8 @@
 use memaddr::{PhysAddr, VirtAddr};
 pub(crate) use x86_64::structures::paging::page_table::PageTableFlags as PTF;
 
+#[cfg(feature = "smp")]
+use crate::defs::TlbFlushResult;
 use crate::{
     defs::{PageTableEntry, PagingFlags, PagingMetaData},
     table64::{PageTable64, PageTableMut},
@@ -126,14 +128,26 @@ impl From<PagingFlags> for PTF {
 ///
 /// Physical addresses in the PTE are masked to cover bits 12–51
 /// (52-bit physical address space). The C-bit is embedded within this
-/// range when SEV is active.
+/// range when SEV is active. Software bit 9 records mapping ownership
+/// independently of permission flags and address updates.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct X64PageEntry(u64);
 
 impl X64PageEntry {
+    // Linux x86 _PAGE_BIT_SOFTW1 reserves bit 9 for software.
+    const MANAGED_MASK: u64 = 1 << 9;
     const PADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
 }
+
+const _: () = {
+    if let Some(cbit_mask) = SEV_CBIT_MASK {
+        assert!(
+            cbit_mask & X64PageEntry::MANAGED_MASK == 0,
+            "PTE ownership must not overlap the SEV C-bit"
+        );
+    }
+};
 
 impl PageTableEntry for X64PageEntry {
     const EMPTY: Self = Self(0);
@@ -174,11 +188,23 @@ impl PageTableEntry for X64PageEntry {
             f |= PTF::HUGE_PAGE;
         }
         let encoded = EncodedPtePhys::from_page(flags, EncodedPtePhys::from_raw(self.0).paddr());
-        self.0 = f.bits() | encoded.raw()
+        self.0 = (self.0 & Self::MANAGED_MASK) | f.bits() | encoded.raw();
     }
 
     fn bits(self) -> usize {
         self.0 as usize
+    }
+
+    fn is_managed(&self) -> bool {
+        self.0 & Self::MANAGED_MASK != 0
+    }
+
+    fn set_managed(&mut self, is_managed: bool) {
+        if is_managed {
+            self.0 |= Self::MANAGED_MASK;
+        } else {
+            self.0 &= !Self::MANAGED_MASK;
+        }
     }
 
     fn is_present(&self) -> bool {
@@ -209,16 +235,19 @@ impl PagingMetaData for X64PagingMetaData {
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_process_mask(vaddr: Option<VirtAddr>, target_mask: kcpu_id_map::KCpuMask) {
+    fn flush_tlb_process_mask(
+        vaddr: Option<VirtAddr>,
+        target_mask: kcpu_id_map::KCpuMask,
+    ) -> TlbFlushResult {
         karch::flush_tlb(vaddr);
-        crate::defs::TlbFlushIf::flush_process_mask(vaddr, target_mask);
+        crate::defs::TlbFlushIf::flush_process_mask(vaddr, target_mask)
     }
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) -> TlbFlushResult {
         karch::flush_tlb(vaddr);
-        crate::defs::TlbFlushIf::flush_all_cpus(vaddr);
+        crate::defs::TlbFlushIf::flush_all_cpus(vaddr)
     }
 }
 

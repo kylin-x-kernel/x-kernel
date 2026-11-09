@@ -14,18 +14,21 @@
 //! - [`PagingFlags`] — architecture-independent page permission and attribute flags.
 //! - [`PageTableEntry`] — trait for architecture-specific PTE encoding/decoding.
 //! - [`PagingMetaData`] — trait for paging metadata (levels, address bits, TLB flush).
-//! - [`PagingHandler`] — trait for frame allocation and phys-to-virt translation.
+//! - [`PagingHandler`] — table-frame allocation, direct mapping and an opaque
+//!   data lifetime hold for optional managed mappings.
 //! - [`PageSize`] — supported page sizes (4K, 2M, 1G).
 //! - [`PtError`] / [`PtResult`] — error type and `Result` alias.
 //!
 //! # Page table types
 //!
 //! - [`PageTable64`] — read-only page table (query only).
-//! - [`PageTableMut`] — mutable page table access with deferred TLB flushes.
+//! - [`PageTableMut`] — mutable page table access with deferred TLB flushes;
+//!   `map` and `replace_if_same` retain data holds through retirement.
 //! - [`PteSnapshot`] / [`PteReplaceError`] — conditional PTE replacement
 //!   contract for COW-style commit paths.
-//! - [`TlbFlushReceipt`] — explicit flush-finalization receipt used as the
-//!   release-after-flush ordering boundary.
+//! - [`TlbFlushReceipt`] — diagnostic batching information from automatic
+//!   retirement. [`PageTableMut::try_finish`] provides synchronous completion;
+//!   [`TlbFlushError`] describes unavailable, deferred or failed shootdowns.
 //!
 //! # Architecture support
 //!
@@ -47,7 +50,7 @@
 //!
 //! fn example<H: PagingHandler>(pt: &mut X64PageTable<H>) -> PtResult {
 //!     let mut m = pt.modify();
-//!     m.map(vaddr, paddr, PageSize::Size4K, PagingFlags::READ | PagingFlags::WRITE)?;
+//!     m.map(vaddr, page_reference, PagingFlags::READ | PagingFlags::WRITE)?;
 //!     m.finish(); // or just drop `m`
 //!     Ok(())
 //! }
@@ -61,6 +64,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 #[macro_use]
 mod macros;
 
@@ -71,3 +76,5 @@ mod table64;
 pub use arch::*;
 pub use defs::*;
 pub use table64::*;
+
+unittest::path_mod_test!(tests_pte_ownership, "../ut-tests/pte_ownership.rs");

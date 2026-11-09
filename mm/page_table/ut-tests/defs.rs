@@ -40,3 +40,22 @@ fn test_paging_metadata_bounds() {
     assert!(DummyMeta::paddr_is_valid((1 << DummyMeta::PA_MAX_BITS) - 1));
     assert!(!DummyMeta::paddr_is_valid(1 << DummyMeta::PA_MAX_BITS));
 }
+
+#[cfg(feature = "smp")]
+#[def_test]
+fn local_only_metadata_does_not_confirm_a_remote_scope() {
+    let mut targets = kcpu_id_map::KCpuMask::new();
+    targets.set(0, true);
+    assert_eq!(
+        DummyMeta::flush_tlb_process_mask(None, targets),
+        Err(super::TlbFlushError::UnsupportedScope)
+    );
+    assert_eq!(
+        DummyMeta::flush_tlb_process_mask(None, kcpu_id_map::KCpuMask::new()),
+        Ok(())
+    );
+    assert_eq!(
+        DummyMeta::flush_tlb_all_cpus(None),
+        Err(super::TlbFlushError::UnsupportedScope)
+    );
+}

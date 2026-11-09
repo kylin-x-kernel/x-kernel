@@ -180,7 +180,7 @@ fn shared_relocation_releases_seal_registrations(fail_preparation: bool) {
     if fail_preparation {
         let collision = alloc_frame(true, PageSize::Size4K).expect("destination collision frame");
         guard.page_table_mut().modify()
-            .map(target + PAGE_SIZE_4K, collision, PageSize::Size4K, flags)
+            .map_raw(target + PAGE_SIZE_4K, collision, PageSize::Size4K, flags)
             .expect("force second destination PTE preparation failure");
         assert!(guard.relocate_mapping(&source, target, len, false, &mm).is_err());
         assert!(guard.find_vma(target).is_none());

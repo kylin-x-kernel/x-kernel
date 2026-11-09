@@ -46,6 +46,11 @@ impl fmt::Debug for PagingFlags {
 /// - `is_present()` returns `false` for `EMPTY` entries.
 /// - Before using `paddr()`, callers must establish a present leaf or a
 ///   table pointer via `is_table()`; a non-present leaf is not a table.
+/// - `new_page()` and `new_table()` start without a managed category.
+/// - `set_paddr()` and `set_flags()` preserve the software ownership category;
+///   only `set_managed()` or clearing the whole entry changes it.
+/// - The managed category affects neither the physical address nor public
+///   permissions, and setting its bit alone does not acquire a lifetime hold.
 pub trait PageTableEntry: fmt::Debug + Clone + Copy + Sync + Send + Sized {
     /// The sentinel value for an unused entry (all bits zero).
     const EMPTY: Self;
@@ -82,6 +87,14 @@ pub trait PageTableEntry: fmt::Debug + Clone + Copy + Sync + Send + Sized {
     /// - `flags` — new permission and attribute flags.
     /// - `is_huge` — whether this is a huge/superpage entry.
     fn set_flags(&mut self, flags: PagingFlags, is_huge: bool);
+
+    /// Returns whether this leaf owns one transferred mapping hold.
+    /// This software category is independent of access permissions.
+    fn is_managed(&self) -> bool;
+
+    /// Sets the software ownership category of a leaf descriptor.
+    /// Callers must transfer or recover its hold as part of the same transaction.
+    fn set_managed(&mut self, is_managed: bool);
 
     /// Returns the raw bits of this entry.
     fn bits(self) -> usize;
@@ -198,28 +211,52 @@ impl From<PtError> for PteReplaceError {
     }
 }
 
-/// Receipt returned after finalizing pending TLB invalidations.
+/// Work observed at one automatic page-table retirement boundary.
 ///
-/// The receipt is intentionally small: it does not expose architecture flush
-/// details, but it gives higher layers an explicit sequencing point they can
-/// place before releasing frames or object-owned pages that were unmapped.
+/// This is diagnostic batching information, not a completion proof. Managed
+/// holds remain owned internally until invalidation completes. Call
+/// [`crate::PageTableMut::try_finish`] when synchronous invalidation is required.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TlbFlushReceipt {
     had_pending: bool,
 }
 
 impl TlbFlushReceipt {
-    /// Creates a receipt for one finalization boundary.
+    /// Records whether this boundary had pending invalidation work.
     pub(crate) const fn new(had_pending: bool) -> Self {
         Self { had_pending }
     }
 
-    /// Returns `true` if this boundary flushed at least one pending
-    /// invalidation or a full TLB.
+    /// Returns whether this boundary had pending invalidation work.
+    /// Intermediate automatic drains are not included.
     pub const fn had_pending(self) -> bool {
         self.had_pending
     }
 }
+
+/// Why a requested TLB invalidation could not complete synchronously.
+///
+/// These outcomes govern retirement inside the page-table layer. They do not
+/// transfer or release a managed mapping hold. Ordinary managed callers rely on
+/// automatic retention; synchronous operations receive an error from
+/// [`crate::PageTableMut::try_finish`] and must not claim revocation completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlbFlushError {
+    /// Remote CPU services cannot yet accept and acknowledge shootdowns.
+    NotReady,
+    /// A nested request must wait for its initiator's active request to finish.
+    Deferred,
+    /// At least one required target did not acknowledge before the wait ended.
+    TimedOut,
+    /// The metadata provider cannot establish the requested remote scope.
+    UnsupportedScope,
+}
+
+/// Completion result at the architecture/shootdown retirement boundary.
+///
+/// `Ok(())` confirms the whole requested scope. Errors leave backing retirement
+/// pending; local hardware invalidations that always complete return `()`.
+pub type TlbFlushResult = Result<(), TlbFlushError>;
 
 #[cfg(feature = "kerrno")]
 impl From<PtError> for kerrno::KError {
@@ -299,7 +336,9 @@ pub trait PagingMetaData: Sync + Send {
     /// Flushes TLB entry(ies) on the local CPU.
     ///
     /// If `vaddr` is `None`, flushes the entire TLB; otherwise flushes
-    /// only the entry mapping `vaddr`.
+    /// only the entry mapping `vaddr`. The hook must order preceding PTE writes
+    /// and complete the requested invalidation before returning; managed data
+    /// holds can be released immediately afterward.
     fn flush_tlb(vaddr: Option<Self::VirtAddr>);
 
     /// Orders freshly installed page-table entries against other translation
@@ -319,46 +358,63 @@ pub trait PagingMetaData: Sync + Send {
     #[inline]
     fn fence_fresh_map() {}
 
-    /// Flush TLB on CPUs that may still retain the target user address
-    /// space's translations.
+    /// Invalidates translations for this user address space.
     ///
-    /// Default: local-only, backward compatible with single-CPU builds.
-    /// When `feature = "smp"` is enabled, architectures override this to
-    /// also broadcast to remote CPUs.
+    /// `Ok(())` requires synchronous completion, including architectural
+    /// barriers and any required remote acknowledgements. The default supports
+    /// single-CPU use only; SMP providers must establish their full scope.
+    ///
+    /// # Errors
+    /// Returns an error when completion is unavailable, deferred or timed out.
+    /// The default returns UnsupportedScope in SMP builds.
     #[inline]
-    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) {
+    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
         Self::flush_tlb(vaddr);
+        if cfg!(feature = "smp") {
+            Err(TlbFlushError::UnsupportedScope)
+        } else {
+            Ok(())
+        }
     }
 
-    /// Like [`flush_tlb_process`](Self::flush_tlb_process), but targets an
-    /// explicit residency mask for the user address space being modified.
+    /// Invalidates a user address space for an explicit residency mask.
     ///
-    /// Default: local-only, backward compatible with single-CPU builds.
+    /// # Errors
+    /// Returns an error unless the whole requested scope completed. The default
+    /// supports an empty remote scope only; SMP architectures override it.
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_process_mask(vaddr: Option<Self::VirtAddr>, _target_mask: KCpuMask) {
+    fn flush_tlb_process_mask(
+        vaddr: Option<Self::VirtAddr>,
+        target_mask: KCpuMask,
+    ) -> TlbFlushResult {
         Self::flush_tlb(vaddr);
+        if target_mask.is_empty() {
+            Ok(())
+        } else {
+            Err(TlbFlushError::UnsupportedScope)
+        }
     }
 
-    /// Like [`flush_tlb_process`](Self::flush_tlb_process), but scoped to
-    /// `asid` when the architecture supports ASID-tagged TLB entries.
+    /// Invalidates this address space's ASID when supported by the architecture.
+    /// The default delegates to flush_tlb_process without narrowing its scope.
     ///
-    /// Default: ignores `asid` and delegates to `flush_tlb_process`.
+    /// # Errors
+    /// Returns the delegated completion error; no error authorizes backing reuse.
     #[inline]
-    fn flush_tlb_process_asid(vaddr: Option<Self::VirtAddr>, _asid: u16) {
-        Self::flush_tlb_process(vaddr);
+    fn flush_tlb_process_asid(vaddr: Option<Self::VirtAddr>, _asid: u16) -> TlbFlushResult {
+        Self::flush_tlb_process(vaddr)
     }
 
-    /// Flush TLB on **all** online CPUs, regardless of task residency.
-    /// Required for kernel page table modifications whose mappings are
-    /// shared across every process.
+    /// Invalidates kernel translations on all CPUs that can retain them.
+    /// Software shootdown architectures override this hook for the all-CPU scope.
     ///
-    /// Default: same as [`flush_tlb_process`](Self::flush_tlb_process).
-    /// Architectures without hardware broadcast (x86_64, riscv64,
-    /// loongarch64) override this to broadcast to all online CPUs via IPI.
+    /// # Errors
+    /// Returns an error unless every relevant CPU completed invalidation. The
+    /// default supports single-CPU use only.
     #[inline]
-    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) {
-        Self::flush_tlb_process(vaddr);
+    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
+        Self::flush_tlb_process(vaddr)
     }
 }
 
@@ -380,7 +436,11 @@ pub trait TlbFlushIf {
     /// If `vaddr` is `None`, flush the entire TLB; otherwise flush only the
     /// entry mapping `vaddr`.  The local CPU flush is the caller's
     /// responsibility — this method only handles remote CPUs.
-    fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask);
+    ///
+    /// # Errors
+    /// Returns an error when remote completion is unavailable, deferred or timed
+    /// out. Only Ok(()) confirms the requested scope.
+    fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResult;
 
     /// Flush TLB entries on **all** online CPUs, regardless of task
     /// residency.  This is required for modifications to the global kernel
@@ -390,7 +450,11 @@ pub trait TlbFlushIf {
     /// If `vaddr` is `None`, flushes the entire TLB; otherwise flushes only the
     /// entry mapping `vaddr`. The local CPU flush is the caller's
     /// responsibility — this method only handles remote CPUs.
-    fn flush_all_cpus(vaddr: Option<VirtAddr>);
+    ///
+    /// # Errors
+    /// Returns an error when remote completion is unavailable, deferred or timed
+    /// out. Only Ok(()) confirms the requested scope.
+    fn flush_all_cpus(vaddr: Option<VirtAddr>) -> TlbFlushResult;
 }
 
 /// Hooks for allocating and mapping page table frames.
@@ -406,6 +470,38 @@ pub trait TlbFlushIf {
 /// - The virtual address returned by `p2v()` must point to a valid,
 ///   4K-sized, read-write mapping of the physical frame.
 pub trait PagingHandler: Sized {
+    /// One owned lifetime hold for mapped data, separate from table storage.
+    ///
+    /// The value must keep its reported physical range allocated until Drop,
+    /// and Drop must release only this hold. Its address and length must stay
+    /// stable while held and recoverable from their exact raw range. Transferring
+    /// and recovering it must not change its lifetime counts. Drop must not sleep
+    /// in the mutation caller's context.
+    /// This conveys no content access or device completion.
+    /// Handlers supporting only raw mappings can use `core::convert::Infallible`.
+    type MappingReference: Send + Sync;
+
+    /// Returns the first physical byte protected by the supplied hold.
+    fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr;
+
+    /// Returns the contiguous byte length selected by the supplied hold.
+    /// Every byte in that range must remain backed until the hold ends.
+    fn mapping_reference_bytes(reference: &Self::MappingReference) -> usize;
+
+    /// Transfers a hold into its exact physical range without releasing it.
+    /// The returned range must equal the address and byte length reported above.
+    /// A managed leaf records this outstanding transfer until it is recovered.
+    fn mapping_reference_into_raw(reference: Self::MappingReference) -> (PhysAddr, usize);
+
+    /// Recovers one outstanding mapping hold without acquiring another reference.
+    ///
+    /// # Safety
+    /// The exact pair must come from one unconsumed `mapping_reference_into_raw`
+    /// transfer. The caller must own that transfer exclusively and recover it
+    /// exactly once, keeping the resulting hold through required TLB retirement.
+    /// A valid physical address or a metadata lookup alone cannot supply a hold.
+    unsafe fn mapping_reference_from_raw(paddr: PhysAddr, bytes: usize) -> Self::MappingReference;
+
     /// Allocates a 4K-aligned physical frame.
     ///
     /// # Returns

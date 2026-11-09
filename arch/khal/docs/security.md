@@ -1,8 +1,8 @@
 # khal — Security and reliability
 
-This document describes the IRQ adapter trust model and page-table storage
-reference boundary separately. Basic tests do not replace hardware retirement
-protocol verification.
+This document describes the IRQ adapter trust model and page-table storage and
+mapping-reference boundaries separately. Basic tests do not replace hardware
+retirement protocol verification.
 
 `nmi::shutdown_periodic_nmi` forwards the local platform result unchanged. A
 false result cannot authorize source reuse or handler destruction. The caller
@@ -162,7 +162,8 @@ unknown IRQ/NMI warning 和 completion 管理。adapter 返回 `kirq` handler �
 
 - The IRQ analysis covers `src/irq/`; the generic IRQ core threat model belongs
   to `arch/kirq/docs/security.md`. This document also covers the page-table
-  storage adapter in `src/paging.rs` and the time boundaries listed below.
+  storage and mapping-reference adapters in `src/paging.rs` and the time
+  boundaries listed below.
   Those adapter contracts do not establish hardware quiescence or complete
   system-wide retirement protocols.
 
@@ -170,9 +171,15 @@ unknown IRQ/NMI warning 和 completion 管理。adapter 返回 `kirq` handler �
 
 The original eight guest cases under ut-tests/{percpu,paging,mem,time}.rs retain
 their module registration. Nine new time cases use isolated epoch/deadline
-fixtures. Together with three page-storage reference cases, there are 20 cases
-including ut-tests/time_epoch.rs and ut-tests/paging_page_refs.rs. The time
-fixtures contain no handwritten unsafe code. The page-storage transfer test
+fixtures. Together with seven page-reference cases, there are 24 cases including
+ut-tests/time_epoch.rs and ut-tests/paging_page_refs.rs. The huge-leaf case is
+serial and retains no test-owned backing reference across unmap; allocation
+accounting verifies that both exact and compound backing survives until
+`try_finish()` succeeds.
+`inactive_table_destruction_releases_its_live_data_hold` leaves a live managed
+leaf in a never-activated tree and checks that destruction returns its real
+PageRef to allocator inventory. The time fixtures contain no handwritten unsafe
+code. The page-storage transfer test
 uses `unsafe { PageRef::from_raw(pa, 1) }` for its exact outstanding transfer; the
 adjacent SAFETY comment documents ownership and the absence of hardware use.
 These tests do not establish IRQ/NMI concurrency or real platform suspend
@@ -223,16 +230,19 @@ and separate software deadline arbitration. No production PM caller is added.
 single-page allocation API and transfers one hold to `page_table` as a PA.
 `dealloc_frame` restores and consumes that exact transfer with
 `PageRef::from_raw(pa, 1)`. The allocation adapter drops the length-one component
-of the generic (PA, page-count) raw pair; the page-table library remains PA-only.
+of the generic (PA, page-count) raw pair; this table-storage interface remains
+PA-only and is separate from the data-reference `(PA, bytes)` provider.
 The original `UsageKind` records only allocation accounting; final `PageRef::drop`
 returns the page and records the release directly in kalloc. Borrowed root entries
 do not own their source table pages and do not restore or release those holds.
 
 The table owner must end hardware use and complete required translation
 retirement before destroying owned storage. The existing AArch64 user-ASID
-invalidation path in `PageTable64::drop` is unchanged. Reference counting retains
-storage; it does not replace address-space exit, remote-CPU coordination or TLB
-shootdown. This stage does not retain references for data PTEs.
+invalidation path in `PageTable64::drop` remains the final reclamation gate:
+failed completion preserves table frames and all unrecovered managed data
+transfers. Reference counting retains storage; it does not replace address-space
+exit, remote-CPU coordination or TLB shootdown. Managed data leaves use the
+separate provider below.
 
 `ut-tests/paging_page_refs.rs` verifies table-page transfers, inactive tree
 destruction and borrowed root entries that do not release source storage. Raw
@@ -248,3 +258,100 @@ The unsafe functions in `src/irq/manager.rs` require the caller to uphold
 `NoPreempt` guards add CPU pinning for KIRQ dispatch but do not mask IRQs or
 validate a fabricated vector. The ordinary checkpoint runs only after KIRQ
 completion and context cleanup; dedicated NMI return must not schedule.
+
+## PTE-owned data mapping-reference boundary
+
+`PagingHandlerImpl::MappingReference` is `kalloc::PageRef`. The provider reports
+its selected `phys_addr()` and `page_count() * PAGE_SIZE_4K`; the whole selected
+range must remain allocated through Drop. A compound view can retain additional
+backing without transferring that larger range into the leaf. The primary
+`map(reference)`, `map_sized(reference, size)` and
+`replace_if_same(reference)` APIs consume one exact mapping hold; object owners
+retain their own references independently. The capability grants neither
+content access nor device-completion authority and adds no reference counter.
+
+### Unsafe transfer recovery and invariants
+
+`PagingHandlerImpl::mapping_reference_into_raw` in `src/paging.rs` consumes
+`PageRef::into_raw()` and converts its page count into bytes.
+`unsafe PagingHandlerImpl::mapping_reference_from_raw(PA, bytes)` converts
+bytes back to base-page count and invokes `unsafe PageRef::from_raw(PA, pages)`.
+The byte length must equal the validated leaf's exact selected range, be a
+multiple of `PAGE_SIZE_4K`, and describe one exclusively owned outstanding
+transfer. Conversion and recovery do not increment or decrement lifetime counts.
+Restoring the same pair twice, using a larger containing compound allocation, or
+recovering an arbitrary valid PA would violate the provider contract.
+
+The safe transaction paths in `mm/page_table/src/table64.rs` enforce admission
+geometry, address coverage, subtree mutability and slot/snapshot checks before
+raw transfer; no fallible step occurs between transfer and managed publication.
+A private architecture category plus normalized PA and size identify the
+outstanding transfer. Category is excluded from public `PagingFlags`; updates
+that retain the leaf preserve it, and raw installs never create it. Category-bit
+selection requires each architecture's encoding audit. A PTE copy or snapshot
+is descriptive and never acquires an independent hold. No permanent per-leaf
+owner index or index-node heap-OOM path remains.
+
+On removal/replacement, the generic code captures the old leaf before clearing
+or overwriting it, records required invalidation, then calls the unsafe provider
+only for the captured managed category and exact old `(PA, leaf bytes)`. This
+recovers the original hold without acquiring another one and moves it into
+`retired_mapping_refs`. Raw leaves never enter this recovery path; a raw-only
+`Infallible` provider must never restore a mapping reference.
+
+Failed admission or a stale snapshot drops only the unpublished input and leaves
+the current transfer unchanged. Empty initial permissions install no leaf;
+empty matched replacement retires the old managed transfer and drops the new
+unpublished input. A successful replacement returns the old snapshot without
+transferring ownership. `remap_raw` and `replace_if_same_raw` reject a changed
+normalized PA on a managed leaf; same-PA updates and nonempty `protect` preserve
+category, while clearing permissions retires the old transfer.
+
+### Retirement, failure and borrowing
+
+The page-table guard retains recovered holds until confirmed TLB completion,
+including full invalidation for huge leaves removed through interior addresses.
+Retirement remains bounded at 16 inline holds and at most 256 with fallible
+spill. Full capacity or spill OOM attempts an intermediate drain with the
+recovered hold still live. Unconfirmed completion retains holds and a full
+retry; an unstorable hold or unresolved guard Drop stays pinned. Repeated
+failure can exhaust RAM, and no asynchronous reaper is supplied.
+
+Automatic `finish()` / Drop needs no object-owner completion check to retain
+managed mapping holds. `TlbFlushReceipt::had_pending()` describes batching,
+without proving completion. Synchronous revocation still requires successful
+`try_finish()` and handling of `NotReady`, `Deferred`, `TimedOut` or
+`UnsupportedScope`; a live reference cannot substitute for permission
+revocation or remote translation retirement.
+
+Table destruction is separate from active-leaf retirement: the owner must stop
+hardware use and future reactivation, complete required retirement and end
+borrower access. The inactive-tree walk recovers each owned base/huge transfer
+once before freeing its descriptor frame. Borrowed roots are skipped, and the
+existing final AArch64 user-ASID completion gate preserves all frames and
+unrecovered transfers on failure. `copy_from` borrows source transfers without
+cloning; it checks the entire destination root range for managed leaves in
+owned subtrees before any destructive overwrite. Destination managed leaves
+must first be unmapped and retired. Source lifetime, shared-translation
+invalidation and alias synchronization remain caller obligations.
+
+| ID | Threat or failure | Trigger | Control and residual risk |
+|----|-------------------|---------|---------------------------|
+| MP-01 | Invalid or double recovery corrupts lifetime counts. | Wrong byte/page conversion, copied PTE treated as another owner, or recovery of a raw leaf. | Exact-range provider inverse and private category authorize one recovery after old-leaf capture; raw/borrowed entries never supply another transfer. Provider and architecture encoding correctness remain trusted. |
+| MP-02 | Old data is reused under stale translations. | A cleared/replaced mapping loses its last hold before completion. | The recovered hold survives bounded spill/drain failure and unconfirmed completion; unresolved holds stay pinned. This prevents managed reuse but can leak RAM and does not revoke permissions. |
+| MP-03 | Raw backing is released after an unconfirmed shootdown. | An existing PA-only release path uses `finish()`. | Raw names expose the unchanged external lifetime contract. Migration must transfer a mapping hold or retain backing on `try_finish()` failure; that production migration is deferred. |
+
+PA-only callers mechanically use `map_raw`, `map_region_raw`, `remap_raw` and
+`replace_if_same_raw`. Allocation/field/destructor migration for production
+anon/pagecache/filemap/memspace backing is explicitly deferred. A nearby
+`PageRef` does not register a guard-owned hold, and these raw paths retain the
+risk described in MP-03. No alias/fork ownership migration, huge split/merge,
+public cloning interface or content-access protocol is added.
+
+Real `PageRef` inventory/reuse and exact/compound tests remain in
+`ut-tests/paging_page_refs.rs`, using `map`, `map_sized` and
+`replace_if_same` as the reference-consuming handles and explicit raw names for
+PA fixtures. Together with generic transaction fixtures they check ownership
+conservation and release ordering. Their page tables are inactive; the tests do
+not establish real hardware shootdown, private-bit encoding safety or complete
+production backing lifetime correctness.

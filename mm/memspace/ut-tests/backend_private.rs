@@ -235,7 +235,7 @@ fn private_fork_rolls_back_parent_write_protect_when_child_map_fails() {
     {
         let mut pgtbl = child_pt.modify();
         pgtbl
-            .map(
+            .map_raw(
                 start,
                 PhysAddr::from_usize(0x80_0000),
                 PageSize::Size4K,
@@ -403,7 +403,7 @@ fn private_cow_write_fault_reports_retry_when_pte_changed() {
 
         let replacement = PhysAddr::from_usize(0x90_0000);
         old_pgtbl
-            .remap(start, replacement, flags - MappingFlags::WRITE)
+            .remap_raw(start, replacement, flags - MappingFlags::WRITE)
             .expect("simulate competing PTE replacement");
         let result = cow_private_object_page(
             &backend.object,
@@ -474,7 +474,7 @@ fn private_cow_unmapped_write_fault_reports_retry_when_child_map_conflicts() {
     {
         let mut pgtbl = child_retry_pt.modify();
         pgtbl
-            .map(
+            .map_raw(
                 start,
                 PhysAddr::from_usize(0xa0_0000),
                 PageSize::Size4K,

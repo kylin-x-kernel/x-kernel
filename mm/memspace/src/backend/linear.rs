@@ -65,7 +65,7 @@ impl BackendOps for LinearBackend {
         let pa_range = PhysAddrRange::from_start_size(self.pa(range.start), range.size());
         debug!("Linear::map: {range:?} -> {pa_range:?} {flags:?}");
         pgtbl
-            .map_region(range.start, |va| self.pa(va), range.size(), flags, false)
+            .map_region_raw(range.start, |va| self.pa(va), range.size(), flags, false)
             .map_err(map_paging_err)?;
         Ok(())
     }
@@ -101,7 +101,7 @@ impl BackendOps for LinearBackend {
             }
             Err(PagingError::NotMapped) => {
                 pgtbl
-                    .map(addr, expected, self.page_size(), flags)
+                    .map_raw(addr, expected, self.page_size(), flags)
                     .map_err(map_paging_err)?;
             }
             Err(_) => return Err(KError::BadAddress),

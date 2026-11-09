@@ -86,7 +86,7 @@ fn test_finish_triggers_cross_cpu_flush() {
         let test_vaddr = VirtAddr::from(0x7F00_0000usize);
         let mut pt_mut = pt.modify();
         pt_mut
-            .map(
+            .map_raw(
                 test_vaddr,
                 PhysAddr::from(0x8000_0000usize),
                 khal::paging::PageSize::Size4K,
@@ -146,7 +146,7 @@ fn test_shootdown_clears_stale_tlb() {
             let mut aspace = memspace::kernel_layout().lock();
             let mut pt_mut = aspace.page_table_mut().modify();
             pt_mut
-                .map(
+                .map_raw(
                     test_vaddr,
                     p1,
                     khal::paging::PageSize::Size4K,
@@ -178,7 +178,7 @@ fn test_shootdown_clears_stale_tlb() {
             let mut pt_mut = aspace.page_table_mut().modify();
             let _ = pt_mut.unmap(test_vaddr).expect("unmap V");
             pt_mut
-                .map(
+                .map_raw(
                     test_vaddr,
                     p2,
                     khal::paging::PageSize::Size4K,
@@ -274,7 +274,7 @@ fn test_kernel_pt_miss_remote_without_mask() {
             let mut aspace = memspace::kernel_layout().lock();
             let mut pt_mut = aspace.page_table_mut().modify();
             pt_mut
-                .map(
+                .map_raw(
                     test_vaddr,
                     p1,
                     khal::paging::PageSize::Size4K,
@@ -312,7 +312,7 @@ fn test_kernel_pt_miss_remote_without_mask() {
             let mut pt_mut = aspace.page_table_mut().modify();
             let _ = pt_mut.unmap(test_vaddr).expect("unmap V");
             pt_mut
-                .map(
+                .map_raw(
                     test_vaddr,
                     p2,
                     khal::paging::PageSize::Size4K,

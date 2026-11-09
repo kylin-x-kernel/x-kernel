@@ -105,7 +105,7 @@ impl PrivateBackend {
         let object_start = self.object_offset_for(va)?;
         let prepared = self.object.prepare_first_touch_page(object_start)?;
         let frame = alloc_frame(true, self.size)?;
-        if let Err(err) = pgtbl.map(va, frame, self.size, flags) {
+        if let Err(err) = pgtbl.map_raw(va, frame, self.size, flags) {
             dealloc_frame(frame, self.size);
             return Err(map_paging_err(err));
         }
@@ -413,7 +413,7 @@ pub fn cow_private_object_page(
     let released =
         match object.replace_page_if_same_after(object_start, &page, new_frame, size, || {
             pgtbl
-                .replace_if_same(addr, expected, new_frame, flags)
+                .replace_if_same_raw(addr, expected, new_frame, flags)
                 .map(|_| ())
         }) {
             Ok(released) => released,
@@ -466,7 +466,7 @@ fn cow_unmapped_private_object_page(
     copy_private_page(page, new_frame, size);
     let released =
         match object.replace_page_if_same_after(object_start, page, new_frame, size, || {
-            pgtbl.map(addr, new_frame, size, flags)
+            pgtbl.map_raw(addr, new_frame, size, flags)
         }) {
             Ok(released) => released,
             Err(AnonPrivatePageCommitError::Changed)
@@ -522,7 +522,7 @@ pub fn map_existing_private_object_page(
             install_flags - MappingFlags::WRITE
         };
         pgtbl
-            .map(addr, page.phys_addr(), size, page_flags)
+            .map_raw(addr, page.phys_addr(), size, page_flags)
             .map_err(super::map_paging_err)?;
     }
     Ok(ExistingPrivatePageResult::Resolved)
@@ -635,7 +635,7 @@ pub fn clone_private_object_pages_for_fork(
                     )?;
                     return Err(super::map_paging_err(err));
                 }
-                if let Err(err) = new_pgtbl.map(
+                if let Err(err) = new_pgtbl.map_raw(
                     vaddr,
                     shared.handle().phys_addr(),
                     ctx.page_size,

@@ -59,7 +59,27 @@ fn test_handle_shootdown_no_pending() {
 fn test_mark_all_cpus_started_gate() {
     let _all_cpus_started_guard = AllCpusStartedGuard::save();
     reset_request_state();
-    ALL_CPUS_STARTED.store(false, Ordering::Relaxed);
+    ALL_CPUS_STARTED.store(false, Ordering::Release);
+    let mut targets = KCpuMask::new();
+    targets.set(this_cpu_id().as_usize(), true);
+    assert_eq!(TlbFlushIf::flush_process_mask(None, targets), Ok(()));
+    let mut has_remote = false;
+    for_each_present_logical_cpu(|_, cpu, _| {
+        if cpu != this_cpu_id() {
+            targets.set(cpu.as_usize(), true);
+            has_remote = true;
+        }
+    });
+    if has_remote {
+        assert_eq!(
+            TlbFlushIf::flush_process_mask(None, targets),
+            Err(TlbFlushError::NotReady)
+        );
+        assert_eq!(
+            TlbFlushIf::flush_all_cpus(None),
+            Err(TlbFlushError::NotReady)
+        );
+    }
     mark_all_cpus_started();
     assert!(ALL_CPUS_STARTED.load(Ordering::Acquire));
 }
@@ -204,4 +224,21 @@ fn test_dual_initiator_requests_are_isolated() {
         second_slot.targeted_snapshot()[second_cpu.as_usize()],
         false
     );
+}
+
+#[def_test(serial)]
+fn nested_shootdown_reports_incomplete_until_the_outer_retry_runs() {
+    let slot = ActiveShootdownSlot::try_acquire_current().expect("exclusive per-CPU request slot");
+    // A nested request must not publish over the outer slot or authorize page
+    // reuse. No targets are contacted: slot ownership alone drives this case.
+    assert_eq!(
+        flush_remote(None, KCpuMask::new()),
+        Err(TlbFlushError::Deferred)
+    );
+    assert!(slot.take_retry_full_flush());
+}
+
+#[def_test(serial)]
+fn shootdown_without_remote_targets_reports_completion() {
+    assert_eq!(flush_remote(None, KCpuMask::new()), Ok(()));
 }

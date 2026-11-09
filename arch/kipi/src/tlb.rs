@@ -42,7 +42,7 @@ use kirq::TargetCpu;
 use kspin::NoPreempt;
 use ktime_types::TimeSpan;
 use memaddr::VirtAddr;
-use page_table::TlbFlushIf;
+use page_table::{TlbFlushError, TlbFlushIf, TlbFlushResult};
 
 /// Gate: shootdown IPIs are only sent after all APs are running.
 static ALL_CPUS_STARTED: AtomicBool = AtomicBool::new(false);
@@ -354,20 +354,26 @@ pub fn mark_all_cpus_started() {
 
 #[kiface::provide]
 impl TlbFlushIf {
-    fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
-        if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
-            return;
-        }
-        flush_remote(vaddr, target_mask);
+    fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResult {
+        flush_remote_ready(vaddr, target_mask)
     }
 
-    fn flush_all_cpus(vaddr: Option<VirtAddr>) {
-        if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
-            return;
-        }
-
-        flush_remote(vaddr, all_present_cpu_mask());
+    fn flush_all_cpus(vaddr: Option<VirtAddr>) -> TlbFlushResult {
+        flush_remote_ready(vaddr, all_present_cpu_mask())
     }
+}
+
+fn flush_remote_ready(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResult {
+    // APs can already hold translations before all interrupt services are ready.
+    // A closed boot gate therefore cannot confirm a nonempty remote scope.
+    if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
+        let local_cpu = this_cpu_id();
+        if target_mask.iter_logical().any(|cpu| cpu != local_cpu) {
+            return Err(TlbFlushError::NotReady);
+        }
+        return Ok(());
+    }
+    flush_remote(vaddr, target_mask)
 }
 
 fn all_present_cpu_mask() -> KCpuMask {
@@ -402,13 +408,14 @@ fn set_last_handled_pending_epoch(epoch: u64) {
 
 /// Shared shootdown logic: publish `vaddr`, send IPIs to every CPU set in
 /// `target_mask` (except self), and spin-wait for acknowledgement of this
-/// exact request sequence.
-fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
+/// exact request sequence. Reports why completion could not be established
+/// when nesting defers the request or the existing bounded wait expires.
+fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResult {
     let should_retry = {
         let Some(active_slot) = ActiveShootdownSlot::try_acquire_current() else {
             let initiator = this_cpu_id().as_usize();
             REQUEST_SLOTS[initiator].request_retry_full_flush();
-            return;
+            return Err(TlbFlushError::Deferred);
         };
         let my_cpu = this_cpu_id();
 
@@ -471,7 +478,7 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
                             active_slot.acked_snapshot()
                         );
                         karch::flush_tlb(vaddr);
-                        return;
+                        return Err(TlbFlushError::TimedOut);
                     }
                     // Incoming shootdowns must be drained here. `flush_remote`
                     // is often reached with IRQs already off (page-table
@@ -523,8 +530,9 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
     };
 
     if should_retry {
-        flush_remote(None, all_present_cpu_mask());
+        return flush_remote(None, all_present_cpu_mask());
     }
+    Ok(())
 }
 
 /// Handle any pending TLB shootdown requests targeting the current CPU.
@@ -575,7 +583,7 @@ pub fn handle_shootdown() {
 /// Test helper: trigger a TLB shootdown directly through the kiface facade.
 #[cfg(unittest)]
 pub fn trigger_flush_all(vaddr: Option<VirtAddr>) {
-    TlbFlushIf::flush_all_cpus(vaddr);
+    assert_eq!(TlbFlushIf::flush_all_cpus(vaddr), Ok(()));
 }
 
 unittest::path_mod_test!(tlb_unittest, "../ut-tests/tlb_unittest.rs");

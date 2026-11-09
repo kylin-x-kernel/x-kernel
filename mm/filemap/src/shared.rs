@@ -305,7 +305,9 @@ impl FileSharedRuntime {
                 {
                     self.check_shared_write_fault_allowed()?;
                     self.0.source.file().page_mkwrite(pn, |_folio| {
-                        pgtbl.remap(addr, paddr, flags).map_err(map_paging_err)?;
+                        pgtbl
+                            .remap_raw(addr, paddr, flags)
+                            .map_err(map_paging_err)?;
                         populated = 1;
                         KResult::Ok(())
                     })?;
@@ -317,7 +319,7 @@ impl FileSharedRuntime {
                 address_space.with_invalidate_read(|| {
                     address_space.with_folio_or_create(pn, |folio| {
                         pgtbl
-                            .map(
+                            .map_raw(
                                 addr,
                                 folio.paddr(),
                                 PageSize::Size4K,

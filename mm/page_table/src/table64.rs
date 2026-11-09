@@ -30,7 +30,7 @@ use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr};
 
 use crate::defs::{
     PageSize, PageTableEntry, PagingFlags, PagingHandler, PagingMetaData, PtError, PtResult,
-    PteReplaceError, PteSnapshot, TlbFlushReceipt,
+    PteReplaceError, PteSnapshot, TlbFlushReceipt, TlbFlushResult,
 };
 
 const ENTRY_COUNT: usize = 512;
@@ -75,6 +75,9 @@ unsafe impl Send for UserCpuMaskProvider {}
 // externally synchronized residency state.
 unsafe impl Sync for UserCpuMaskProvider {}
 
+mod retirement;
+use retirement::RetiredReferences;
+
 const fn p4_idx(vaddr: usize) -> usize {
     (vaddr >> (12 + 27)) & (ENTRY_COUNT - 1)
 }
@@ -94,8 +97,10 @@ const fn p1_idx(vaddr: usize) -> usize {
 /// A 64-bit page table with configurable metadata and handlers.
 ///
 /// `PageTable64` owns the root page table frame and all recursively allocated
-/// sub-table frames. On [`Drop`], the entire frame tree is deallocated.
-/// Callers must stop hardware use of the page table before dropping it.
+/// sub-table frames. Managed leaves additionally own data lifetime holds;
+/// raw leaves do not. On [`Drop`], the frame tree and remaining data holds are
+/// released. Callers must stop hardware use, exclude future reactivation and
+/// complete required translation retirement before dropping the table.
 /// AArch64 user tables with a registered ASID provider invalidate that ASID's
 /// translations, including intermediate walk-cache entries, before freeing frames.
 ///
@@ -273,7 +278,8 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
     ///
     /// The returned [`PageTableMut`] borrows `&mut self`, ensuring exclusive
     /// access. All mutating operations on the page table must go through this
-    /// type. TLB flushes are deferred until [`PageTableMut::finish`] or `Drop`.
+    /// type. Automatic retirement advances at finish, Drop and bounded drains;
+    /// try_finish provides an explicit synchronous completion boundary.
     pub fn modify(&mut self) -> PageTableMut<'_, M, PTE, H> {
         PageTableMut::new(self)
     }
@@ -338,15 +344,43 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         crate::walk_page_table!(self, vaddr, table_of, next_table, ref)
     }
 
-    fn dealloc_tree(&self, table_paddr: PhysAddr, level: usize) {
-        if level < M::LEVELS - 1 {
-            for entry in self.table_of(table_paddr) {
-                if self.next_table(entry).is_ok() {
-                    self.dealloc_tree(entry.paddr(), level + 1);
-                }
+    fn dealloc_entry(&self, entry: &PTE, level: usize) {
+        if entry.is_unused() {
+            return;
+        }
+        if level == M::LEVELS - 1 || entry.is_huge() {
+            if entry.is_managed() {
+                let bytes = 1usize << (12 + 9 * (M::LEVELS - 1 - level));
+                // SAFETY: This inactive owned subtree is being destroyed once,
+                // after required hardware retirement. Borrowed roots are skipped
+                // by Drop and copy_from rejects live managed destination leaves.
+                drop(unsafe { H::mapping_reference_from_raw(entry.paddr(), bytes) });
             }
+        } else if entry.is_table() {
+            self.dealloc_tree(entry.paddr(), level + 1);
+        }
+    }
+
+    fn dealloc_tree(&self, table_paddr: PhysAddr, level: usize) {
+        for entry in self.table_of(table_paddr) {
+            self.dealloc_entry(entry, level);
         }
         H::dealloc_frame(table_paddr);
+    }
+
+    #[cfg(feature = "copy-from")]
+    fn entry_has_managed_leaf(&self, entry: &PTE, level: usize) -> bool {
+        if entry.is_unused() {
+            return false;
+        }
+        if level == M::LEVELS - 1 || entry.is_huge() {
+            return entry.is_managed();
+        }
+        entry.is_table()
+            && self
+                .table_of(entry.paddr())
+                .iter()
+                .any(|child| self.entry_has_managed_leaf(child, level + 1))
     }
 }
 
@@ -362,7 +396,12 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTabl
             // Leaf invalidations cannot retire cached intermediate table
             // descriptors before their physical frames are reused.
             karch::dsb_ishst();
-            M::flush_tlb_process_asid(None, asid);
+            if M::flush_tlb_process_asid(None, asid).is_err() {
+                // A failed final invalidation cannot authorize reuse of table
+                // frames or mapped data. Preserve all raw frame transfers too.
+                // The unrecovered leaf transfers remain pinned with the tree.
+                return;
+            }
         }
         let root = self.table_of(self.root_paddr);
         #[expect(
@@ -380,9 +419,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTabl
             if self.borrowed_entries.get(i) {
                 continue;
             }
-            if self.next_table(entry).is_ok() {
-                self.dealloc_tree(entry.paddr(), 1);
-            }
+            self.dealloc_entry(entry, 0);
         }
         H::dealloc_frame(self.root_paddr());
     }
@@ -406,14 +443,18 @@ impl<M: PagingMetaData> ToFlush<M> {
 ///
 /// `PageTableMut` borrows `&mut PageTable64` and provides map/unmap/remap/protect
 /// operations. Each mutating operation records the affected virtual address for
-/// deferred TLB flushing. The flushes are executed when [`finish`](Self::finish)
-/// is called or when `PageTableMut` is dropped.
+/// deferred TLB flushing. Managed data holds are retained after leaf removal
+/// until the required synchronous invalidation completes. Finalization occurs
+/// at [`finish`](Self::finish), Drop, or a bounded retirement-storage drain.
 ///
 /// # TLB flush batching
 ///
 /// Up to 16 addresses are flushed individually; beyond
 /// that, a full TLB shootdown is performed. This avoids the overhead of
-/// per-operation TLB invalidation during batch mappings.
+/// per-operation TLB invalidation during batch mappings. Duplicate addresses
+/// share an invalidation; huge-leaf changes conservatively request a full flush.
+/// Retirement storage is independent: 16 inline holds, up to 256 with fallible
+/// heap spill. Reaching that bound or failing to spill completes a batch early.
 ///
 /// # Example
 ///
@@ -421,8 +462,8 @@ impl<M: PagingMetaData> ToFlush<M> {
 /// let mut pt: X64PageTable<H> = PageTable64::try_new()?;
 /// {
 ///     let mut m = pt.modify();
-///     m.map(vaddr, paddr, PageSize::Size4K, PagingFlags::READ | PagingFlags::WRITE)?;
-///     m.map(vaddr2, paddr2, PageSize::Size4K, PagingFlags::READ)?;
+///     m.map(vaddr, reference, PagingFlags::READ | PagingFlags::WRITE)?;
+///     m.map(vaddr2, reference2, PagingFlags::READ)?;
 /// } // Drop flushes TLB automatically
 /// ```
 pub struct PageTableMut<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> {
@@ -431,6 +472,7 @@ pub struct PageTableMut<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHan
     /// Whether an entry was installed into a previously unused slot on an
     /// architecture that needs no invalidation for that transition.
     fresh_map: bool,
+    retired_mapping_refs: RetiredReferences<H::MappingReference>,
     #[cfg(unittest)]
     sparse_entries_visited: usize,
 }
@@ -451,8 +493,58 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             inner,
             flush: ToFlush::None,
             fresh_map: false,
+            retired_mapping_refs: RetiredReferences::new(),
             #[cfg(unittest)]
             sparse_entries_visited: 0,
+        }
+    }
+
+    fn queue_retired_reference(&mut self, reference: H::MappingReference) {
+        if !self.flush.has_pending() {
+            // A multi-hold replacement may have drained while retiring its
+            // first hold. This still-local hold shared that completed change.
+            drop(reference);
+            return;
+        }
+        match self.retired_mapping_refs.try_push(reference) {
+            Ok(()) => {
+                if self.retired_mapping_refs.is_full() {
+                    let _ = self.flush_pending();
+                }
+            }
+            Err(reference) => {
+                // The PTE change is already in the summary. Keep this hold
+                // live through completion, then release it with this batch;
+                // carrying it into the next batch would skew the boundaries.
+                if self.flush_pending().is_ok() {
+                    drop(reference);
+                } else {
+                    // No spill capacity and no confirmed retirement: retaining
+                    // this hold permanently is safer than recycling its page.
+                    core::mem::forget(reference);
+                }
+            }
+        }
+    }
+
+    fn retire_mapping_reference(&mut self, old_entry: PTE, size: PageSize) {
+        if old_entry.is_managed() {
+            // SAFETY: The removed owned leaf uniquely held this exact transfer.
+            // Its PTE change is already queued for invalidation; the recovered
+            // hold is moved into retirement before it can be released.
+            let reference =
+                unsafe { H::mapping_reference_from_raw(old_entry.paddr(), size as usize) };
+            self.queue_retired_reference(reference);
+        }
+    }
+
+    fn flush_leaf(&mut self, vaddr: M::VirtAddr, size: PageSize) {
+        if size.is_huge() {
+            // A huge leaf can have cached translations throughout its range;
+            // one base-page invalidation is not a portable retirement boundary.
+            self.flush = ToFlush::Full;
+        } else {
+            self.flush(vaddr);
         }
     }
 
@@ -464,7 +556,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
                 self.flush = ToFlush::Addresses(addresses);
             }
             ToFlush::Addresses(ref mut addrs) => {
-                if addrs.try_push(vaddr).is_err() {
+                if !addrs.contains(&vaddr) && addrs.try_push(vaddr).is_err() {
                     self.flush = ToFlush::Full;
                 }
             }
@@ -502,7 +594,26 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         }
     }
 
+    fn ensure_mutable_subtree(&self, vaddr: M::VirtAddr) -> PtResult {
+        #[cfg(feature = "copy-from")]
+        {
+            let address = vaddr.into();
+            let index = if M::LEVELS == 3 {
+                p3_idx(address)
+            } else {
+                p4_idx(address)
+            };
+            if self.inner.borrowed_entries.get(index) {
+                return Err(PtError::InvalidAddress);
+            }
+        }
+        #[cfg(not(feature = "copy-from"))]
+        let _ = vaddr;
+        Ok(())
+    }
+
     fn get_entry_mut(&mut self, vaddr: M::VirtAddr) -> PtResult<(&mut PTE, PageSize)> {
+        self.ensure_mutable_subtree(vaddr)?;
         crate::walk_page_table!(self, vaddr, table_of_mut, next_table_mut, mut)
     }
 
@@ -511,6 +622,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         vaddr: M::VirtAddr,
         page_size: PageSize,
     ) -> PtResult<&mut PTE> {
+        self.ensure_mutable_subtree(vaddr)?;
         crate::walk_page_table_create!(self, vaddr, page_size)
     }
 
@@ -531,13 +643,18 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// The target entry must be unused; mapping over an existing entry returns
     /// [`PtError::AlreadyMapped`].
     ///
+    /// This installs no mapping hold. The backing owner must keep the entire
+    /// range live through removal and confirmed invalidation; `finish()` alone
+    /// is not a release proof. Use [`map`](Self::map) or
+    /// [`map_sized`](Self::map_sized) to transfer that responsibility here.
+    ///
     /// # Errors
     ///
     /// - [`PtError::AlreadyMapped`] — `vaddr` is already mapped.
     /// - [`PtError::NoMemory`] — frame allocation for an intermediate table failed.
     /// - [`PtError::MappedToHugePage`] — an intermediate entry is a huge page.
     /// - [`PtError::InvalidAddress`] — `vaddr` or `paddr` is outside the valid address range.
-    pub fn map(
+    pub fn map_raw(
         &mut self,
         vaddr: M::VirtAddr,
         paddr: PhysAddr,
@@ -560,17 +677,169 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         // they only owe the other walkers an ordered entry write, which
         // `finish` emits once for the whole batch.
         if M::INVALID_TO_VALID_NEEDS_TLBI {
-            self.flush(vaddr);
+            self.flush_leaf(vaddr, page_size);
         } else {
             self.fresh_map = true;
         }
         Ok(())
     }
 
-    /// Remaps an existing mapping to a new physical address with new flags.
+    /// Maps one 4 KiB data page while retaining its supplied lifetime hold.
+    ///
+    /// Unmapping, sparse invalidation and protection that clears the PTE move
+    /// the hold to the retirement batch. It is dropped only after `finish`
+    /// completes the required invalidation. Dropping an inactive page table
+    /// also releases its remaining holds under the table's destruction contract.
+    /// A failed map releases the supplied hold without installing a leaf. Page contents require separate access
+    /// synchronization.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`map_sized`](Self::map_sized).
+    /// The selected hold must describe exactly one base page.
+    pub fn map(
+        &mut self,
+        vaddr: M::VirtAddr,
+        reference: impl Into<H::MappingReference>,
+        flags: PagingFlags,
+    ) -> PtResult {
+        self.map_sized(vaddr, reference.into(), PageSize::Size4K, flags)
+    }
+
+    /// Maps one leaf with a hold covering exactly its contiguous physical size.
+    ///
+    /// The reference covers every backing base page of a 4 KiB or larger leaf.
+    /// It is retired after invalidation, without splitting a huge leaf or using
+    /// reference counts as a compound-page protocol. Empty flags install no
+    /// leaf and drop the supplied hold after validation; an existing present
+    /// mapping still returns AlreadyMapped. A caller that later restores
+    /// access must retain its backing independently for fault rematerialization.
+    ///
+    /// # Errors
+    /// Returns NotAligned for mismatched reference size or alignment, and the
+    /// same errors as map_raw for invalid addresses, occupied leaves or table-frame
+    /// allocation. Borrowed subtrees reject mutation with InvalidAddress.
+    ///
+    /// Table-frame allocation is the only allocation needed for admission;
+    /// the leaf itself records the transferred hold without an owner index.
+    pub fn map_sized(
+        &mut self,
+        vaddr: M::VirtAddr,
+        reference: H::MappingReference,
+        size: PageSize,
+        flags: PagingFlags,
+    ) -> PtResult {
+        let paddr = Self::validate_reference(vaddr, &reference, size)?;
+        self.ensure_mutable_subtree(vaddr)?;
+        if flags.is_empty() {
+            return match self.query(vaddr) {
+                Ok(_) => Err(PtError::AlreadyMapped),
+                Err(PtError::NotMapped) => Ok(()),
+                Err(error) => Err(error),
+            };
+        }
+        let entry = self.get_entry_mut_or_create(vaddr, size)?;
+        if !entry.is_unused() {
+            return Err(PtError::AlreadyMapped);
+        }
+        let mut replacement = PTE::new_page(paddr, flags, size.is_huge());
+        replacement.set_managed(true);
+        // All fallible preparation finished. The descriptor now owns this
+        // exact transfer; publishing it does not acquire another reference.
+        let _transfer = H::mapping_reference_into_raw(reference);
+        *entry = replacement;
+        if M::INVALID_TO_VALID_NEEDS_TLBI {
+            self.flush_leaf(vaddr, size);
+        } else {
+            self.fresh_map = true;
+        }
+        Ok(())
+    }
+
+    fn validate_reference(
+        vaddr: M::VirtAddr,
+        reference: &H::MappingReference,
+        size: PageSize,
+    ) -> PtResult<PhysAddr> {
+        let address = vaddr.into();
+        let paddr = H::mapping_reference_paddr(reference);
+        if H::mapping_reference_bytes(reference) != size as usize
+            || !size.is_aligned(address)
+            || !paddr.is_aligned(size)
+        {
+            return Err(PtError::NotAligned);
+        }
+        let last_va = address
+            .checked_add(size as usize - 1)
+            .ok_or(PtError::InvalidAddress)?;
+        let last_pa = paddr
+            .as_usize()
+            .checked_add(size as usize - 1)
+            .ok_or(PtError::InvalidAddress)?;
+        if !M::vaddr_is_valid(address)
+            || !M::vaddr_is_valid(last_va)
+            || !M::paddr_is_valid(paddr.as_usize())
+            || !M::paddr_is_valid(last_pa)
+        {
+            return Err(PtError::InvalidAddress);
+        }
+        Ok(paddr)
+    }
+
+    /// Replaces a matching leaf and its data hold as one mapping transaction.
+    ///
+    /// The new hold is retained before PTE mutation. A compare failure leaves
+    /// the previous hold untouched; success retires the old hold until invalidation
+    /// is confirmed. Empty flags clear the old leaf and release the unpublished
+    /// new hold. The replacement must preserve the leaf size.
+    ///
+    /// # Errors
+    /// Returns Changed on a stale snapshot or PageTable for invalid size/address.
+    pub fn replace_if_same(
+        &mut self,
+        vaddr: M::VirtAddr,
+        expected: PteSnapshot,
+        reference: H::MappingReference,
+        flags: PagingFlags,
+    ) -> Result<PteSnapshot, PteReplaceError> {
+        let size = expected.page_size();
+        let paddr = Self::validate_reference(vaddr, &reference, size)?;
+        let (entry, actual_size) = match self.get_entry_mut(vaddr) {
+            Ok(value) => value,
+            Err(PtError::NotMapped) => return Err(PteReplaceError::Changed { current: None }),
+            Err(error) => return Err(error.into()),
+        };
+        if !entry.is_present() {
+            return Err(PteReplaceError::Changed { current: None });
+        }
+        let current = PteSnapshot::from_entry(entry, actual_size);
+        if actual_size != size || !expected.matches_entry(entry) {
+            return Err(PteReplaceError::Changed {
+                current: Some(current),
+            });
+        }
+        let old_entry = *entry;
+        if flags.is_empty() {
+            entry.clear();
+            // No new leaf owns the incoming hold; it remains a local owner.
+            drop(reference);
+        } else {
+            let mut replacement = PTE::new_page(paddr, flags, size.is_huge());
+            replacement.set_managed(true);
+            let _transfer = H::mapping_reference_into_raw(reference);
+            *entry = replacement;
+        }
+        self.flush_leaf(vaddr, size);
+        self.retire_mapping_reference(old_entry, size);
+        Ok(current)
+    }
+
+    /// Updates an externally owned mapping using its raw physical address.
     ///
     /// The virtual address must already be mapped. The page size is preserved
-    /// from the existing mapping.
+    /// from the existing mapping. A managed leaf can keep its physical range
+    /// and change permissions; changing that range requires
+    /// [`replace_if_same`](Self::replace_if_same) with a new hold.
+    /// Empty flags clear the leaf and retire its hold after invalidation.
     ///
     /// # Returns
     ///
@@ -581,8 +850,10 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// - [`PtError::NotMapped`] — `vaddr` is not mapped.
     /// - [`PtError::MappedToHugePage`] — an intermediate entry is a huge page
     ///   that blocks walking to the leaf.
-    /// - [`PtError::InvalidAddress`] — `vaddr` or `paddr` is outside the valid address range.
-    pub fn remap(
+    /// - [`PtError::InvalidAddress`] — an address is out of range, the subtree
+    ///   is borrowed, or a managed leaf would change its normalized PA without
+    ///   supplying a new hold through replace_if_same.
+    pub fn remap_raw(
         &mut self,
         vaddr: M::VirtAddr,
         paddr: PhysAddr,
@@ -598,22 +869,41 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         if !entry.is_present() {
             return Err(PtError::NotMapped);
         }
-        entry.set_paddr(paddr);
-        entry.set_flags(flags, size.is_huge());
-        self.flush(vaddr);
+        let paddr = paddr.align_down(size);
+        if entry.is_managed() && entry.paddr() != paddr {
+            return Err(PtError::InvalidAddress);
+        }
+        let old_entry = *entry;
+        if flags.is_empty() {
+            entry.clear();
+        } else {
+            entry.set_paddr(paddr);
+            entry.set_flags(flags, size.is_huge());
+        }
+        self.flush_leaf(vaddr, size);
+        if flags.is_empty() {
+            self.retire_mapping_reference(old_entry, size);
+        }
         Ok(size)
     }
 
     /// Replaces a present mapping only if the leaf entry still equals
     /// `expected`.
     ///
-    /// This is the page-table commit primitive for COW-style transactions:
+    /// This address-only commit does not acquire a mapping hold. A raw backing
+    /// owner remains responsible for retirement; owned replacement uses
+    /// [`replace_if_same`](Self::replace_if_same).
+    ///
+    /// This is the page-table commit primitive for raw COW-style transactions:
     /// higher layers may allocate or prepare a replacement page first, then
     /// commit the PTE only if the mapping observed before preparation has not
     /// changed. A changed PTE is reported without overwriting the current
     /// mapping, so callers can drop prepared resources and retry.
     ///
-    /// The replacement preserves the page size from `expected`.
+    /// The replacement preserves the page size from `expected` and normalizes
+    /// the PA to that size. A managed leaf rejects a different physical range
+    /// without a replacement hold. Empty flags clear the leaf and retire its hold
+    /// after invalidation. A stale snapshot leaves both PTE and hold unchanged.
     ///
     /// # Returns
     ///
@@ -624,7 +914,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// - [`PteReplaceError::Changed`] — the current entry no longer matches.
     /// - [`PteReplaceError::PageTable`] — invalid address, invalid physical
     ///   address, or page-table walk failure.
-    pub fn replace_if_same(
+    pub fn replace_if_same_raw(
         &mut self,
         vaddr: M::VirtAddr,
         expected: PteSnapshot,
@@ -654,16 +944,30 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             });
         }
 
-        entry.set_paddr(paddr.align_down(expected.page_size()));
-        entry.set_flags(flags, expected.page_size().is_huge());
-        self.flush(vaddr);
+        let paddr = paddr.align_down(size);
+        if entry.is_managed() && entry.paddr() != paddr {
+            return Err(PteReplaceError::PageTable(PtError::InvalidAddress));
+        }
+        let old_entry = *entry;
+        if flags.is_empty() {
+            entry.clear();
+        } else {
+            entry.set_paddr(paddr);
+            entry.set_flags(flags, size.is_huge());
+        }
+        self.flush_leaf(vaddr, size);
+        if flags.is_empty() {
+            self.retire_mapping_reference(old_entry, size);
+        }
         Ok(current)
     }
 
     /// Changes the permission flags of an existing mapping.
     ///
     /// The virtual address must already be mapped (present). The page size
-    /// and physical address are preserved.
+    /// and physical address are preserved. Empty flags clear the leaf and
+    /// retire its managed hold after invalidation; an object needing later
+    /// fault rematerialization must keep its own backing reference.
     ///
     /// # Returns
     ///
@@ -682,12 +986,16 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         if !entry.is_present() {
             return Err(PtError::NotMapped);
         }
+        let old_entry = *entry;
         if flags.is_empty() {
             entry.clear();
         } else {
             entry.set_flags(flags, size.is_huge());
         }
-        self.flush(vaddr);
+        self.flush_leaf(vaddr, size);
+        if flags.is_empty() {
+            self.retire_mapping_reference(old_entry, size);
+        }
         Ok(size)
     }
 
@@ -696,6 +1004,8 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// # Returns
     ///
     /// The previous `(physical_address, flags, page_size)` of the unmapped entry.
+    /// This tuple transfers no ownership. Managed data holds remain in the
+    /// retirement batch until invalidation; raw backing remains caller-owned.
     ///
     /// # Errors
     ///
@@ -712,8 +1022,10 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         }
         let paddr = entry.paddr();
         let flags = entry.flags();
+        let old_entry = *entry;
         entry.clear();
-        self.flush(vaddr);
+        self.flush_leaf(vaddr, size);
+        self.retire_mapping_reference(old_entry, size);
         Ok((paddr, flags, size))
     }
 
@@ -738,7 +1050,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     ///
     /// On partial failure, previously mapped pages within the region are **not**
     /// rolled back. The caller is responsible for cleanup.
-    pub fn map_region(
+    pub fn map_region_raw(
         &mut self,
         vaddr: M::VirtAddr,
         phys_getter: impl Fn(M::VirtAddr) -> PhysAddr,
@@ -783,7 +1095,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             } else {
                 PageSize::Size4K
             };
-            self.map(v_addr, p_addr, p_size, flags)?;
+            self.map_raw(v_addr, p_addr, p_size, flags)?;
 
             vaddr_val += p_size as usize;
             rem_size -= p_size as usize;
@@ -880,6 +1192,8 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             }
             // Directory entries need not carry a leaf's present bit (LoongArch).
             if !entry.is_unused() {
+                // Reject borrowing before constructing any mutable child view.
+                self.ensure_mutable_subtree(start.into())?;
                 if shift == 12 || entry.is_huge() {
                     if !entry.is_present() {
                         start = next;
@@ -888,8 +1202,10 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
                     if span != page_size as usize {
                         return Err(PtError::MappedToHugePage);
                     }
+                    let old_entry = *entry;
                     entry.clear();
-                    self.flush(start.into());
+                    self.flush_leaf(start.into(), page_size);
+                    self.retire_mapping_reference(old_entry, page_size);
                 } else if entry.is_table() {
                     match self.next_table_mut(entry) {
                         Ok(child) => {
@@ -945,7 +1261,13 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// # Safety contract (caller responsibility)
     ///
     /// The source page table must outlive this page table. If the source is
-    /// dropped first, the borrowed entries will point to freed frames. Before
+    /// dropped first, the borrowed entries will point to freed frames. Source
+    /// managed data holds are borrowed with those entries, never duplicated.
+    /// Borrowers may query but cannot mutate shared subtrees; modify them through
+    /// the source, invalidating every borrower (for example a kernel broadcast).
+    /// The destination must be inactive when replacing root entries. Existing
+    /// managed destination leaves in those subtrees must first be unmapped;
+    /// pending managed retirements must already have completed. Before
     /// overwriting any target-owned subtree, the caller must end its hardware
     /// use and complete translation retirement; this operation reclaims that
     /// subtree immediately. Fresh inactive target tables need no retirement.
@@ -958,6 +1280,10 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         if size == 0 {
             return;
         }
+        assert!(
+            self.retired_mapping_refs.is_empty(),
+            "managed mappings must be fully retired before borrowing a subtree"
+        );
         let src_table = self.table_of(other.root_paddr);
         let dst_table = self.table_of_mut(self.root_paddr);
         let index_fn = if M::LEVELS == 3 {
@@ -969,6 +1295,13 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         };
         let start_idx = index_fn(start.into());
         let end_idx = index_fn(start.into() + size - 1) + 1;
+        assert!(
+            (start_idx..end_idx).all(|index| {
+                self.inner.borrowed_entries.get(index)
+                    || !self.inner.entry_has_managed_leaf(&dst_table[index], 0)
+            }),
+            "managed mappings must be unmapped before borrowing a subtree"
+        );
         for i in start_idx..end_idx {
             let entry = &mut dst_table[i];
             if !self.inner.borrowed_entries.set(i, true) && self.next_table(entry).is_ok() {
@@ -978,67 +1311,104 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         }
     }
 
-    /// Flushes all pending TLB entries and resets the flush state.
+    /// Advances automatic retirement for the pending page-table changes.
     ///
-    /// - If ≤ 16 addresses were recorded, each is flushed individually.
-    /// - If more than 16 addresses were recorded, a full TLB shootdown is performed.
+    /// Managed holds are released only after confirmed invalidation. If the
+    /// backend cannot complete, the guard retains those holds and a full retry.
+    /// The receipt describes pending work, not completion; callers releasing
+    /// their own managed owners do not have to inspect a completion flag.
     ///
-    /// This method is also called automatically on `Drop`.
+    /// Automatic retention covers only holds transferred through `map`,
+    /// `map_sized` or `replace_if_same`. Keeping a `PageRef` beside a
+    /// raw mapping does not register a mapping hold with this guard.
+    ///
+    /// Use try_finish when permission revocation, raw backing release or another
+    /// synchronous operation must complete before the caller proceeds. Its error
+    /// requires the caller to retain raw backing and withhold completion. Drop
+    /// and bounded retirement drains also advance automatic retirement.
     pub fn finish(&mut self) -> TlbFlushReceipt {
+        let receipt = TlbFlushReceipt::new(self.flush.has_pending());
+        // The guard owns the retry and all retained holds on error. Automatic
+        // callers do not consume this internal completion result.
+        let _ = self.flush_pending();
+        receipt
+    }
+
+    /// Completes pending invalidation before allowing a synchronous operation
+    /// to proceed. Success is a completion boundary, including automatic drains
+    /// already performed by this guard; failure retains a full retry and all
+    /// managed holds still awaiting retirement.
+    ///
+    /// # Errors
+    /// Returns the backend's completion error when remote services are not
+    /// ready, a nested request is deferred, a target times out, or the provider
+    /// cannot establish the requested scope. The caller must not claim that
+    /// permissions were revoked or release raw backing on error.
+    pub fn try_finish(&mut self) -> Result<TlbFlushReceipt, crate::TlbFlushError> {
+        let receipt = TlbFlushReceipt::new(self.flush.has_pending());
+        self.flush_pending()?;
+        Ok(receipt)
+    }
+
+    #[cfg(not(docsrs))]
+    fn invalidate_pending(&self) -> TlbFlushResult {
+        if self.inner.is_kernel {
+            return match &self.flush {
+                ToFlush::None => Ok(()),
+                ToFlush::Addresses(addrs) => addrs
+                    .iter()
+                    .try_for_each(|vaddr| M::flush_tlb_all_cpus(Some(*vaddr))),
+                ToFlush::Full => M::flush_tlb_all_cpus(None),
+            };
+        }
+        #[cfg(target_arch = "aarch64")]
+        let asid = self.current_user_asid();
+        #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+        let target_mask = self.current_user_cpu_mask();
+        let invalidate = |vaddr| {
+            #[cfg(target_arch = "aarch64")]
+            {
+                M::flush_tlb_process_asid(vaddr, asid)
+            }
+            #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+            {
+                M::flush_tlb_process_mask(vaddr, target_mask)
+            }
+            #[cfg(not(any(target_arch = "aarch64", feature = "smp")))]
+            {
+                M::flush_tlb_process(vaddr)
+            }
+        };
+        match &self.flush {
+            ToFlush::None => Ok(()),
+            ToFlush::Addresses(addrs) => {
+                addrs.iter().try_for_each(|vaddr| invalidate(Some(*vaddr)))
+            }
+            ToFlush::Full => invalidate(None),
+        }
+    }
+
+    fn flush_pending(&mut self) -> TlbFlushResult {
         let had_pending = self.flush.has_pending();
         #[cfg(not(docsrs))]
-        if self.inner.is_kernel {
-            // Kernel page table: flush ALL online CPUs — the mapping is
-            // shared across every process, so every CPU may hold stale
-            // TLB entries.
-            match &self.flush {
-                ToFlush::None => {}
-                ToFlush::Addresses(addrs) => {
-                    for vaddr in addrs.iter() {
-                        M::flush_tlb_all_cpus(Some(*vaddr));
-                    }
-                }
-                ToFlush::Full => {
-                    M::flush_tlb_all_cpus(None);
-                }
-            }
-        } else {
-            // User page table: invalidate stale entries for this address
-            // space's ASID (AArch64) or residency mask (other arches).
-            #[cfg(target_arch = "aarch64")]
-            let asid = self.current_user_asid();
-            #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-            let target_mask = self.current_user_cpu_mask();
-            match &self.flush {
-                ToFlush::None => {}
-                ToFlush::Addresses(addrs) => {
-                    for vaddr in addrs.iter() {
-                        #[cfg(target_arch = "aarch64")]
-                        M::flush_tlb_process_asid(Some(*vaddr), asid);
-                        #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-                        M::flush_tlb_process_mask(Some(*vaddr), target_mask);
-                        #[cfg(not(any(target_arch = "aarch64", feature = "smp")))]
-                        M::flush_tlb_process(Some(*vaddr));
-                    }
-                }
-                ToFlush::Full => {
-                    #[cfg(target_arch = "aarch64")]
-                    M::flush_tlb_process_asid(None, asid);
-                    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-                    M::flush_tlb_process_mask(None, target_mask);
-                    #[cfg(not(any(target_arch = "aarch64", feature = "smp")))]
-                    M::flush_tlb_process(None);
-                }
-            }
-        }
-        // A pending invalidation provides the architecture's publication barrier,
-        // so only a flush-free fresh mapping needs its dedicated fence.
-        if self.fresh_map && !had_pending {
+        let completion = self.invalidate_pending();
+        #[cfg(docsrs)]
+        let completion: TlbFlushResult = Ok(());
+        // A successful invalidation supplies the publication barrier. A failed
+        // hook may not have issued one, so publish fresh entries independently.
+        if self.fresh_map && (!had_pending || completion.is_err()) {
             M::fence_fresh_map();
         }
         self.fresh_map = false;
-        self.flush = ToFlush::None;
-        TlbFlushReceipt::new(had_pending)
+        if completion.is_ok() {
+            self.flush = ToFlush::None;
+            self.retired_mapping_refs.clear();
+        } else {
+            // A prefix of addresses or CPUs may have completed. Retrying the
+            // full scope is required before any remaining hold can end.
+            self.flush = ToFlush::Full;
+        }
+        completion
     }
 }
 
@@ -1046,8 +1416,12 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop
     for PageTableMut<'_, M, PTE, H>
 {
     fn drop(&mut self) {
-        self.finish();
+        if self.flush_pending().is_err() {
+            self.retired_mapping_refs.forget_holds();
+        }
     }
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/table64.rs");
+
+unittest::path_mod_test!(tests_owned, "../ut-tests/owned_mappings.rs");

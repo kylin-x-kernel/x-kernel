@@ -518,3 +518,29 @@ services must not be dismantled using their own callback transport.
 - `ActiveShootdownSlot` 通过 `Drop` 自动清除 active 状态，防止异常路径遗留 slot 占用；
 - `kipi` 本身不拥有跨 CPU 长生命周期的内存池或设备资源，主要资源都是
   per-CPU 队列和原子状态。
+
+
+## Shootdown completion status for managed data retirement
+
+The `TlbFlushIf` provider returns `TlbFlushResult` at the internal shootdown /
+retirement boundary. `Ok(())` confirms every requested remote target's exact
+published request, including any required full retry. Local hardware invalidation
+remains synchronous and returns `()`; the architecture metadata hook performs it
+before requesting remote completion.
+
+Before `mark_all_cpus_started`, APs may already cache kernel translations but
+cannot all acknowledge notifications. A request with a remote target therefore
+returns `NotReady`, not successful completion. A scope with no remote target
+needs no IPI and succeeds after the architecture's local invalidation.
+
+Same-CPU nesting marks the outer request for a full retry and returns `Deferred`;
+a future outer retry is not present completion proof. The bounded give-up path
+logs and returns `TimedOut`. Request publication, resend and acknowledgement
+ordering are unchanged. The page-table layer owns failed batches and retains or
+pins managed holds; managed object owners do not consume per-flush booleans.
+Synchronous revocation uses `PageTableMut::try_finish` and handles an error rather
+than claiming that stale access was revoked. Raw release still needs such a
+confirmed boundary until its owners are migrated.
+
+Tests cover the closed boot gate with local-only and remote scopes, nested slot
+ownership and empty remote masks without timing assertions or online-CPU mutation.

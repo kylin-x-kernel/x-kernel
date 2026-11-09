@@ -125,7 +125,7 @@ impl FilePrivateRuntime {
             }
             copied += step;
         }
-        if let Err(err) = pgtbl.map(va, frame, self.size, flags) {
+        if let Err(err) = pgtbl.map_raw(va, frame, self.size, flags) {
             dealloc_frame(frame, self.size);
             return Err(memspace::backend::map_paging_err(err));
         }
@@ -313,7 +313,7 @@ impl FilePrivateRuntime {
             }
             if let Err(err) = prepared.commit_after(frame, self.size, || {
                 pgtbl
-                    .replace_if_same(addr, expected, frame, flags)
+                    .replace_if_same_raw(addr, expected, frame, flags)
                     .map(|_| ())
             }) {
                 dealloc_frame(frame, self.size);

@@ -19,6 +19,27 @@ use crate::mem::p2v;
 pub struct PagingHandlerImpl;
 
 impl PagingHandler for PagingHandlerImpl {
+    type MappingReference = PageRef;
+
+    fn mapping_reference_paddr(reference: &PageRef) -> PhysAddr {
+        reference.phys_addr()
+    }
+
+    fn mapping_reference_bytes(reference: &PageRef) -> usize {
+        reference.page_count() * memaddr::PAGE_SIZE_4K
+    }
+
+    fn mapping_reference_into_raw(reference: PageRef) -> (PhysAddr, usize) {
+        let (paddr, pages) = reference.into_raw();
+        (paddr, pages * memaddr::PAGE_SIZE_4K)
+    }
+
+    unsafe fn mapping_reference_from_raw(paddr: PhysAddr, bytes: usize) -> PageRef {
+        // SAFETY: The handler contract supplies the exact outstanding transfer;
+        // its byte length was validated against one aligned leaf before admission.
+        unsafe { PageRef::from_raw(paddr, bytes / memaddr::PAGE_SIZE_4K) }
+    }
+
     fn alloc_frame() -> Option<PhysAddr> {
         assert!(
             kalloc::is_page_allocator_ready(),

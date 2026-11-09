@@ -101,7 +101,7 @@ impl PinnedFolio {
             return Err(KError::InvalidInput);
         }
         page_table
-            .map(vaddr, paddr, PageSize::Size4K, flags)
+            .map_raw(vaddr, paddr, PageSize::Size4K, flags)
             .map_err(|error| match error {
                 PagingError::NoMemory => KError::NoMemory,
                 PagingError::NotAligned => KError::InvalidInput,
