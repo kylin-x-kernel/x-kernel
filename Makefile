@@ -198,7 +198,7 @@ justrun:
 
 debug: build
 	@set -eu; \
-	elf="$$($(XKMAKE) config bundle-elf --target-dir "$(TARGET_DIR)")"; \
+	elf="$$($(XKMAKE) config bundle-debug-elf --target-dir "$(TARGET_DIR)")"; \
 	$(XKMAKE) run --no-build $(XKMAKE_BUILD_ARGS) $(XKMAKE_RUN_ARGS) $(XKMAKE_ARGS) -- $(RUN_QEMU_ARGS) -s -S & \
 	qemu_pid=$$!; \
 	trap 'kill $$qemu_pid 2>/dev/null || true' EXIT INT TERM; \
@@ -210,7 +210,7 @@ debug: build
 
 disasm:
 	@set -eu; \
-	elf="$$($(XKMAKE) config bundle-elf --target-dir "$(TARGET_DIR)")"; \
+	elf="$$($(XKMAKE) config bundle-debug-elf --target-dir "$(TARGET_DIR)")"; \
 	test -f "$$elf" || { echo "kernel bundle not found: $$elf; run 'make build' first"; exit 1; }; \
 	$(OBJDUMP) "$$elf" | less
 

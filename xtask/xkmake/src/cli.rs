@@ -88,6 +88,7 @@ pub(crate) enum ConfigField {
     CrossCompile,
     BundleDir,
     BundleElf,
+    BundleDebugElf,
     BundleBin,
     BundleLinuxboot,
     BundleUefi,

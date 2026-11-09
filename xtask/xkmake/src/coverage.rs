@@ -278,7 +278,7 @@ fn write_text_report(bundle: &Bundle, artifacts: &CoverageArtifacts) -> Result<(
     command
         .current_dir(&context.workspace_root)
         .arg("report")
-        .arg(&context.bundle_elf)
+        .arg(&context.bundle_debug_elf)
         .arg(format!("--instr-profile={}", artifacts.profdata.display()))
         .arg(format!("--ignore-filename-regex={COVERAGE_IGNORE_REGEX}"))
         .arg(&context.workspace_root)
@@ -292,7 +292,7 @@ fn export_lcov(bundle: &Bundle, artifacts: &CoverageArtifacts) -> Result<()> {
     command
         .current_dir(&context.workspace_root)
         .arg("export")
-        .arg(&context.bundle_elf)
+        .arg(&context.bundle_debug_elf)
         .arg(format!("--instr-profile={}", artifacts.profdata.display()))
         .args(["--format=lcov"])
         .arg(format!("--ignore-filename-regex={COVERAGE_IGNORE_REGEX}"))

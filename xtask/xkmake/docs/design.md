@@ -39,7 +39,7 @@ xkmake ------> xconfig ------> .config / config.rs / Cargo config
    |
    +---------> Cargo --------> kernel ELF
    |                            |
-   |                            +--> kernel.debug.elf（未剥离，符号化输入）
+   |                            +--> kernel.debug.elf（完整符号、DWARF 和覆盖率映射）
    |
    +-- 按需嵌入 DWARF（KFEAT_DWARF）/ 自举符号表（KFEAT_SYMTAB）
    |      + rust-objcopy(外部)
@@ -79,8 +79,10 @@ LCOV 到 Cobertura XML 的转换是 unittest 覆盖率流程的内部阶段，�
 7. 若现有 bundle 的稳定构建来源、配置 hash、输入时间、产物名称、大小和
    mtime 顺序仍匹配，则作为可信本地缓存直接复用，并保留原有构建时间；
    普通 build 不重新扫描完整 ELF。
-8. 否则在临时路径复制 ELF、按需嵌入 DWARF（KFEAT_DWARF），再原地填充
-   linker 预留的 `.note.xkernel.build-info` 与 `.note.gnu.build-id`；自动
+8. 否则在临时路径保存完整 Cargo ELF 供 Host 分析；启动 ELF 按需嵌入
+   DWARF（KFEAT_DWARF），再由 `rust-objcopy --strip-all` 移除非加载调试与
+   覆盖率映射。x86 保留引导器查找的 `rust_entry` 和 `boot_stack_top`。
+   最后原地填充 linker 预留的 `.note.xkernel.build-info` 与 `.note.gnu.build-id`；自动
    构建时间在此时取当前 UTC 时间，而不是参与前置缓存判断。
 9. Build ID 对 build-info 已写入、Build ID descriptor 清零后的全部
    `PT_LOAD` 内容计算 SHA-256。
@@ -100,10 +102,16 @@ LCOV 到 Cobertura XML 的转换是 unittest 覆盖率流程的内部阶段，�
 
 每个 bundle 包含两类 ELF：
 
-- `kernel.elf`：启动/调试 ELF。KFEAT_DWARF 时嵌入 DWARF 可加载段，否则
-  与 Cargo 产物一致；
+- `kernel.elf`：精简的启动 ELF，保留加载段及 x86 必需的两个引导符号。
+  KFEAT_DWARF 时嵌入的可加载调试段、KFEAT_SYMTAB 的运行时符号表，以及
+  unittest 的运行时 profile 数据和计数器均保留；
 - `kernel.debug.elf`：**始终**是未加工的 Cargo 产物（非 alloc `.debug_*`
-  完整保留），是 `xkmake symbolize` 的符号化输入。
+  及 `__llvm_covfun` / `__llvm_covmap` 完整保留），供 Host 符号化、GDB、
+  反汇编和覆盖率报告使用。`config bundle-debug-elf` 提供该产物的路径。
+
+LinuxBoot 和 UEFI 都封装 `kernel.elf`；文件中的 Host 调试数据不再进入
+启动时的源镜像保留区。bundle 格式 v8 强制重建旧版本产物，避免复用
+尚未精简的启动 ELF。
 
 ### 符号表自举（KFEAT_SYMTAB）
 

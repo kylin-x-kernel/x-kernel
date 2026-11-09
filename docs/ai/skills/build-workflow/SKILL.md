@@ -109,6 +109,7 @@ The canonical output is a bundle:
 target/xkmake/<platform>/<profile>/
 ├── bundle.toml
 ├── kernel.elf
+├── kernel.debug.elf
 └── kernel.bin
 ```
 
@@ -123,6 +124,7 @@ Successful builds also refresh compatibility copies in the repository root:
 
 ```text
 xkernel_<platform>.elf
+xkernel_<platform>.debug.elf
 xkernel_<platform>.bin
 xkernel_<platform>.bzimg      # x86_64 only
 xkernel_<platform>.uefi.img   # x86_64 only
@@ -131,8 +133,15 @@ xkernel_<platform>.uefi.img   # x86_64 only
 The bundle remains the canonical output; Jenkins and existing repository tools
 use the root-level names for artifact handoff compatibility.
 
-Each bundle ELF contains an allocated `.note.xkernel.build-info` note and a
-SHA-256 `.note.gnu.build-id`. Inspect them with:
+`kernel.elf` is the compact boot ELF. It retains loadable data, including
+runtime coverage counters and explicitly enabled runtime debug information;
+x86 also retains the two loader symbols `rust_entry` and `boot_stack_top`.
+LinuxBoot and UEFI consume this ELF. `kernel.debug.elf` is the complete Cargo
+ELF used for host symbolication, GDB, disassembly and LLVM coverage reports;
+keep it with the matching profile data when archiving test artifacts.
+
+The boot ELF contains the finalized allocated `.note.xkernel.build-info` note
+and SHA-256 `.note.gnu.build-id`. Inspect them with:
 
 ```bash
 readelf -n target/xkmake/<platform>/<profile>/kernel.elf
@@ -419,7 +428,8 @@ are removed before processing so they cannot be mistaken for current output.
 
 `make justrun` runs an existing bundle without invoking Cargo.
 `make debug` builds first, starts QEMU with the GDB stub paused, and attaches
-the configured `GDB` command. `make disasm` consumes the bundle ELF.
+the configured `GDB` command with `kernel.debug.elf`. `make disasm` consumes
+the same complete ELF so instruction listings retain function names.
 
 `make ci-test` builds the kernel, clones or updates the Starry test harness
 into the ignored `ci-test/` directory, and runs its complete `ci-test` suite

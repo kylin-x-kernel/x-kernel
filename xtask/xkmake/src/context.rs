@@ -127,6 +127,7 @@ pub(crate) fn print_config(args: &ConfigArgs) -> Result<()> {
         ConfigField::CrossCompile => println!("{}", config.arch().cross_compile_prefix()),
         ConfigField::BundleDir => println!("{}", bundle_dir.display()),
         ConfigField::BundleElf => println!("{}", bundle_dir.join("kernel.elf").display()),
+        ConfigField::BundleDebugElf => println!("{}", bundle_dir.join("kernel.debug.elf").display()),
         ConfigField::BundleBin => println!("{}", bundle_dir.join("kernel.bin").display()),
         ConfigField::BundleLinuxboot => {
             println!("{}", bundle_dir.join("kernel.bzimg").display())

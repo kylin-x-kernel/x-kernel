@@ -65,7 +65,8 @@ Lint 继承检查只读：调用 `cargo metadata --no-deps` 并解析成员 mani
 旧 profile 即使能够被 LLVM 解码，也不能替代 guest 的本轮持久化标记。
 标记是可信测试内核的完成协议，不是针对恶意 guest 的真实性证明。
 `debugfs` 请求中的 guest 与 host 路径会按其命令词法转义；报告命令均以
-结构化参数执行，LCOV 到 Cobertura 的转换在 XKMake 进程内完成。
+结构化参数执行，使用同一 bundle 的完整 `kernel.debug.elf` 解释 profile，
+LCOV 到 Cobertura 的转换在 XKMake 进程内完成。
 
 `dylint --facts-out <dir>` deletes and rewrites `<dir>/crates`,
 `manifest.json` and `status.json`; the directory is given explicitly by the
@@ -104,6 +105,11 @@ so the dependencies' other lints stay silenced by `--cap-lints allow`.
   开启时泄露面是函数符号名，不含行号与源码路径；
 - 无论何种模式，内核始终能输出原始地址 backtrace，Host 侧还原不依赖
   运行时任何调试数据。
+- 启动 ELF 使用 `rust-objcopy --strip-all` 移除非加载的宿主分析信息；
+  `PT_LOAD` 数据、BSS 布局、per-CPU 模板和运行时 profile 数据保持不变。
+  x86 仅额外保留引导契约要求的 `rust_entry` 与 `boot_stack_top` 静态符号。
+  Host DWARF 和覆盖率映射只保存在完整分析 ELF 中，避免随 ELF 启动载荷
+  被复制、保留并占用早期可用 RAM。
 
 ## unsafe 代码清单
 

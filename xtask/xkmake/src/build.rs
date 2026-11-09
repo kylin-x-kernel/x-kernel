@@ -58,7 +58,7 @@ const X86_ROOT_ARTIFACTS: &[RootArtifactKind] = &[
     RootArtifactKind::Linuxboot,
     RootArtifactKind::Uefi,
 ];
-const BUNDLE_FORMAT_VERSION: u32 = 7;
+const BUNDLE_FORMAT_VERSION: u32 = 8;
 
 impl RootArtifactKind {
     fn source(self, context: &BuildContext) -> &std::path::Path {
@@ -450,15 +450,19 @@ fn create_bundle(
 
     fs::create_dir_all(&context.bundle_dir).with_path(&context.bundle_dir)?;
     let pending = PendingBundle::create(context);
-    // `kernel.debug.elf` is the pristine unstripped Cargo artifact and the
-    // symbolication input for `xkmake symbolize`; `kernel.elf` is the boot
-    // ELF, which may receive DWARF injection and build metadata.
+    // Host symbolication and coverage need the complete linked ELF. Boot media
+    // carry only runtime data and the symbols required by their loader.
     fs::copy(&context.cargo_elf, &pending.kernel_elf).with_path(&context.cargo_elf)?;
     fs::copy(&context.cargo_elf, &pending.kernel_debug_elf).with_path(&context.cargo_elf)?;
 
     if context.config.is_enabled("KFEAT_DWARF") {
         embed_dwarf(context, &pending.kernel_elf)?;
     }
+    strip_boot_elf(
+        &pending.kernel_elf,
+        context.config.arch(),
+        context.verbosity,
+    )?;
     let build_info = build_info.materialize()?;
     let build_id = image_metadata::finalize(&pending.kernel_elf, &build_info)?;
     create_raw_image(context, &pending.kernel_elf, &pending.kernel_bin)?;
@@ -520,6 +524,18 @@ fn embed_dwarf(context: &BuildContext, kernel_elf: &std::path::Path) -> Result<(
         println!("+ embed DWARF sections into {}", kernel_elf.display());
     }
     crate::dwarf_embed::embed_dwarf(kernel_elf)
+}
+
+fn strip_boot_elf(kernel_elf: &Path, arch: KernelArch, verbosity: u8) -> Result<()> {
+    let mut command = Process::new("rust-objcopy", false, verbosity);
+    command.arg("--strip-all");
+    if arch == KernelArch::X86_64 {
+        // x86-boot-common resolves these two symbols before entering the kernel.
+        command
+            .arg("--keep-symbol=rust_entry")
+            .arg("--keep-symbol=boot_stack_top");
+    }
+    command.arg(kernel_elf).run()
 }
 
 fn create_raw_image(
@@ -759,7 +775,131 @@ fn config_hash(context: &BuildContext) -> String {
 
 #[cfg(test)]
 mod tests {
+    use goblin::elf::{Elf, program_header::PT_LOAD};
+
     use super::*;
+
+    fn linked_test_elf(directory: &Path) -> PathBuf {
+        let host_elf = directory.join("kernel.debug.elf");
+        let metadata = directory.join("host-metadata");
+        fs::write(&metadata, [0xa5; 4096]).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let mut fixture = Process::new("rust-objcopy", false, 0);
+        for name in [".debug_boot_fixture", "__llvm_covfun", "__llvm_covmap"] {
+            fixture.arg(format!("--add-section={name}={}", metadata.display()));
+        }
+        fixture
+            .arg("--add-symbol=rust_entry=.text:0,global")
+            .arg("--add-symbol=boot_stack_top=.bss:0,global")
+            .arg("--add-symbol=unused_boot_symbol=.text:1,global")
+            .arg(&executable)
+            .arg(&host_elf)
+            .run()
+            .unwrap();
+        host_elf
+    }
+
+    fn assert_load_segments_preserved(linked_bytes: &[u8], boot_bytes: &[u8]) {
+        let linked = Elf::parse(linked_bytes).unwrap();
+        let boot = Elf::parse(boot_bytes).unwrap();
+        assert_eq!(boot.entry, linked.entry);
+        let expected_segments: Vec<_> = linked
+            .program_headers
+            .iter()
+            .filter(|segment| segment.p_type == PT_LOAD)
+            .collect();
+
+        let actual_segments: Vec<_> = boot
+            .program_headers
+            .iter()
+            .filter(|segment| segment.p_type == PT_LOAD)
+            .collect();
+        assert_eq!(actual_segments.len(), expected_segments.len());
+        for (expected, actual) in expected_segments.iter().zip(actual_segments) {
+            assert_eq!(
+                (
+                    actual.p_vaddr,
+                    actual.p_paddr,
+                    actual.p_filesz,
+                    actual.p_memsz,
+                    actual.p_flags,
+                    actual.p_align
+                ),
+                (
+                    expected.p_vaddr,
+                    expected.p_paddr,
+                    expected.p_filesz,
+                    expected.p_memsz,
+                    expected.p_flags,
+                    expected.p_align
+                ),
+            );
+            // Native PIE fixtures map the ELF header. Its section-table
+            // location changes when host-only sections are removed.
+            let header_size = if expected.p_offset == 0 {
+                u64::from(linked.header.e_ehsize)
+            } else {
+                0
+            };
+            assert_eq!(
+                Sha256::digest(
+                    &boot_bytes[(actual.p_offset + header_size) as usize
+                        ..(actual.p_offset + actual.p_filesz) as usize]
+                ),
+                Sha256::digest(
+                    &linked_bytes[(expected.p_offset + header_size) as usize
+                        ..(expected.p_offset + expected.p_filesz) as usize]
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn boot_elf_preserves_loaded_bytes_and_only_required_static_symbols() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let host_elf = linked_test_elf(directory.path());
+        let linked_bytes = fs::read(&host_elf).unwrap();
+        let linked = Elf::parse(&linked_bytes).unwrap();
+
+        for arch in [KernelArch::X86_64, KernelArch::Aarch64] {
+            let boot_elf = directory.path().join("kernel.elf");
+            fs::copy(&host_elf, &boot_elf).unwrap();
+            strip_boot_elf(&boot_elf, arch, 0).unwrap();
+            let boot_bytes = fs::read(&boot_elf).unwrap();
+            let boot = Elf::parse(&boot_bytes).unwrap();
+            assert_load_segments_preserved(&linked_bytes, &boot_bytes);
+            for name in [".debug_boot_fixture", "__llvm_covfun", "__llvm_covmap"] {
+                assert!(
+                    linked.section_headers.iter().any(|section| {
+                        linked.shdr_strtab.get_at(section.sh_name) == Some(name)
+                    })
+                );
+                assert!(
+                    !boot
+                        .section_headers
+                        .iter()
+                        .any(|section| { boot.shdr_strtab.get_at(section.sh_name) == Some(name) })
+                );
+            }
+            for name in ["rust_entry", "boot_stack_top", "unused_boot_symbol"] {
+                let symbol = boot
+                    .syms
+                    .iter()
+                    .find(|symbol| boot.strtab.get_at(symbol.st_name) == Some(name));
+                let is_required = arch == KernelArch::X86_64 && name != "unused_boot_symbol";
+                assert_eq!(symbol.is_some(), is_required, "{arch:?}: {name}");
+                if let Some(symbol) = symbol {
+                    let original = linked
+                        .syms
+                        .iter()
+                        .find(|symbol| linked.strtab.get_at(symbol.st_name) == Some(name))
+                        .unwrap();
+                    assert_eq!(symbol.st_value, original.st_value);
+                }
+            }
+            assert_eq!(fs::read(&host_elf).unwrap(), linked_bytes);
+        }
+    }
 
     #[test]
     fn direct_platforms_publish_elf_debug_elf_and_bin() {
