@@ -285,10 +285,9 @@ fn build_and_start_rv64(
         .max(1);
 
     let cfg = VmConfig::new(base, MEM_SIZE, nr_vcpus);
-    let mut vm: Vm<CurrentArch> = Vm::new(cfg).ok_or(VfsError::NoMemory)?;
+    let vm: Vm<CurrentArch> = Vm::new(cfg).ok_or(VfsError::NoMemory)?;
 
-    {
-        let gm = vm.shared().guest_mem().ok_or(VfsError::NoSuchDevice)?;
+    let Some(load_result) = vm.shared().with_guest_mem_locked(|gm| -> VfsResult<()> {
         let kernel_size =
             loader::load_image_to_guest(gm, kernel_path, kernel_load).map_err(|err| {
                 log::error!(
@@ -348,7 +347,11 @@ fn build_and_start_rv64(
             dtb_size,
             dtb_load,
         );
-    }
+        Ok(())
+    }) else {
+        return Err(VfsError::NoSuchDevice);
+    };
+    load_result?;
 
     // Console UART + its RX/TX channels. Installing the TX channel switches
     // guest output from the host kernel log into the channel drained by this
@@ -365,7 +368,7 @@ fn build_and_start_rv64(
         };
 
     // Unmap emulated MMIO ranges so guest accesses trap into the VMM.
-    unmap_rv64_mmio(&mut vm)?;
+    unmap_rv64_mmio(&vm)?;
 
     // PLIC + timer validation devices, and the UART interrupt line.
     setup_rv64_devices(&vm, &uart)?;
@@ -416,8 +419,8 @@ fn build_and_start_rv64(
 }
 
 #[cfg(target_arch = "riscv64")]
-fn unmap_rv64_mmio(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
-    use kvmm::{mm::GuestMem, vdev::riscv64::irq};
+fn unmap_rv64_mmio(vm: &Vm<CurrentArch>) -> VfsResult<()> {
+    use kvmm::vdev::riscv64::irq;
 
     let ranges = [
         (
@@ -438,13 +441,8 @@ fn unmap_rv64_mmio(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
         ),
     ];
 
-    let Some(gm) = vm.guest_mem_mut() else {
-        log::error!("[kvmm-api] guest_mem_mut unavailable for MMIO unmap");
-        return Err(VfsError::NoSuchDevice);
-    };
-
     for (name, mmio_base, size) in ranges {
-        if !gm.unmap_range(mmio_base, size) {
+        if !vm.unmap_guest_region(mmio_base, size) {
             log::error!(
                 "[kvmm-api] failed to unmap MMIO range {} @ {:#x}+{:#x}",
                 name,
@@ -545,10 +543,9 @@ fn build_and_start_aarch64(
         .max(1);
 
     let cfg = VmConfig::new(base, MEM_SIZE, nr_vcpus);
-    let mut vm: Vm<CurrentArch> = Vm::new(cfg).ok_or(VfsError::NoMemory)?;
+    let vm: Vm<CurrentArch> = Vm::new(cfg).ok_or(VfsError::NoMemory)?;
 
-    {
-        let gm = vm.shared().guest_mem().ok_or(VfsError::NoSuchDevice)?;
+    let Some(load_result) = vm.shared().with_guest_mem_locked(|gm| -> VfsResult<()> {
         let kernel_size =
             loader::load_image_to_guest(gm, kernel_path, kernel_load).map_err(|err| {
                 log::error!(
@@ -608,7 +605,11 @@ fn build_and_start_aarch64(
             dtb_size,
             dtb_load,
         );
-    }
+        Ok(())
+    }) else {
+        return Err(VfsError::NoSuchDevice);
+    };
+    load_result?;
 
     // Console PL011 + its RX/TX channels. The PL011 is itself the MmioDevice
     // (no separate front-end wrapper as on riscv64). Installing the TX channel
@@ -622,11 +623,10 @@ fn build_and_start_aarch64(
     }
 
     // Unmap emulated MMIO ranges so guest accesses trap into the VMM.
-    unmap_aarch64_mmio(&mut vm)?;
+    unmap_aarch64_mmio(&vm)?;
 
-    // GIC: emulated GICD, GICC→GICV passthrough, host-only GICH. Must run while
-    // the shared Arc is still unique (before create_vcpu clones it).
-    setup_gic(&mut vm)?;
+    // GIC: emulated GICD, GICC→GICV passthrough, host-only GICH.
+    setup_gic(&vm)?;
 
     if let Some(irq_sender) = vm.shared().devices().irq_sender() {
         let dma = kvmm::vdev::dma::make_guest_dma(Arc::clone(vm.shared()));
@@ -677,17 +677,11 @@ fn build_and_start_aarch64(
 /// Unmap every registered emulated MMIO range from second-stage translation so
 /// guest accesses fault out to the VMM.
 #[cfg(target_arch = "aarch64")]
-fn unmap_aarch64_mmio(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
-    use kvmm::mm::GuestMem;
-
+fn unmap_aarch64_mmio(vm: &Vm<CurrentArch>) -> VfsResult<()> {
     let ranges = vm.shared().devices().mmio_ranges();
-    let Some(gm) = vm.guest_mem_mut() else {
-        log::error!("[kvmm-api] guest_mem_mut unavailable for MMIO unmap");
-        return Err(VfsError::NoSuchDevice);
-    };
 
     for (name, mmio_base, size) in ranges {
-        if !gm.unmap_range(mmio_base, size) {
+        if !vm.unmap_guest_region(mmio_base, size) {
             log::error!(
                 "[kvmm-api] failed to unmap MMIO range {} @ {:#x}+{:#x}",
                 name,
@@ -704,10 +698,10 @@ fn unmap_aarch64_mmio(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
 /// CPU interface (GICC) through to the hardware virtual interface (GICV), and
 /// create the vGIC (GICH list-register injector).
 #[cfg(target_arch = "aarch64")]
-fn setup_gic(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
+fn setup_gic(vm: &Vm<CurrentArch>) -> VfsResult<()> {
     use kalloc_types::{AllocFlags, KBox};
     use kvmm::{
-        mm::{GuestMem, GuestPerm},
+        mm::GuestPerm,
         vdev::{
             IrqController, IrqSender, VcpuWaker,
             aarch64::{vgic, vgicd, vtimer},
@@ -752,8 +746,7 @@ fn setup_gic(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
         return Err(VfsError::NoSuchDevice);
     }
     // Map only GICV's two CPU-interface pages, not the surrounding aperture.
-    let gm = vm.guest_mem_mut().ok_or(VfsError::NoSuchDevice)?;
-    if !gm.map_region(GICC_BASE, cpu_paddr as u64, 0x2000, GuestPerm::DeviceRw) {
+    if !vm.map_guest_region(GICC_BASE, cpu_paddr as u64, 0x2000, GuestPerm::DeviceRw) {
         return Err(VfsError::NoSuchDevice);
     }
 

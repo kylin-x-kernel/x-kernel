@@ -111,7 +111,40 @@ this in practice for Linux guests.
   the reader's poll timeout.
 * The global `VM_REGISTRY` (used by `/proc/kvmm`) still lives in `kvmm`. VMs
    booted through this device register there via `Vm::register`, so they appear
-  in `/proc/kvmm`.
+   in `/proc/kvmm`.
+
+### `KvmDevice` — lkvm compatibility (`/dev/kvm`)
+
+`KvmDevice` exposes a Linux KVM-shaped fd topology for kvmtool/lkvm bring-up:
+
+| fd type    | Created by       | Supported operations |
+|------------|------------------|----------------------|
+| system fd  | `open("/dev/kvm")` | `KVM_GET_API_VERSION`, `KVM_CHECK_EXTENSION`, `KVM_GET_VCPU_MMAP_SIZE`, `KVM_CREATE_VM` |
+| VM fd      | `KVM_CREATE_VM`  | `KVM_SET_USER_MEMORY_REGION`, `KVM_CREATE_IRQCHIP`, `KVM_ARM_SET_DEVICE_ADDR`, `KVM_ARM_PREFERRED_TARGET`, `KVM_CREATE_VCPU` |
+| vCPU fd    | `KVM_CREATE_VCPU` | `KVM_ARM_VCPU_INIT`, `KVM_GET_ONE_REG`, `KVM_SET_ONE_REG`, `KVM_RUN`, `mmap(kvm_run)` |
+
+The compatibility path deliberately does not reuse `/dev/kvmm-vm`'s image
+loader. lkvm owns the guest image layout in its own userspace address space and
+passes RAM through `KVM_SET_USER_MEMORY_REGION`; `kvmm-api` translates those
+host user pages into stage-2 mappings with `Vm::map_guest_region`. The VM uses
+`Vm::new_unreserved`, so the VMM does not allocate a duplicate kernel-owned RAM
+reservation for lkvm-managed memory.
+
+Mappings are installed and revoked through `Vm::map_guest_region` and
+`Vm::unmap_guest_region`, which serialize stage-2 updates without requiring
+exclusive ownership of the VM. Memslots may therefore be registered after vCPUs
+have been created. Deleting a slot, or replacing one with a different range,
+revokes the old mappings before the ioctl returns; a mapping that fails halfway
+is rolled back, so a failed ioctl never leaves a partially installed slot.
+
+The first supported target is aarch64 lkvm. `KVM_RUN` drives the vCPU on the
+caller thread and reports userspace MMIO exits through the mapped `struct
+kvm_run` page. PSCI shutdown is translated to `KVM_EXIT_SYSTEM_EVENT`, while
+guest MMIO not claimed by kernel-side virtual devices is returned as
+`KVM_EXIT_MMIO` for lkvm to emulate. The current IRQ-chip support wires the
+legacy GICv2 control path after lkvm supplies GICD/GICC addresses; unsupported
+device-control ioctls return `Unsupported`/`InvalidInput` rather than pretending
+to succeed.
 
 ## Future direction
 
@@ -125,5 +158,5 @@ benchmark or a proof of every asynchronous wakeup interleaving.
 
 * Add an event-driven console wakeup (`poll` wait queue woken on TX push) if
   the poll-timeout first-byte latency proves too coarse for interactive use.
-* Add a KVM-compatible ioctl device (`kvm_device.rs`) alongside the fd-bound
-  Linux boot device.
+* Extend `/dev/kvm` beyond the current aarch64 lkvm subset: multi-vCPU CPU_ON,
+  richer device-control ioctls, and non-aarch64 KVM register ABI support.

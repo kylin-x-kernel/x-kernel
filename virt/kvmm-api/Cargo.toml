@@ -23,14 +23,22 @@ kalloc-types.workspace = true
 unittest.workspace = true
 kirq.workspace = true
 log.workspace = true
+anon_inodefs.workspace = true
+kalloc.workspace = true
 kaddr_layout.workspace = true
 kcred.workspace = true
+khal.workspace = true
+kprocess.workspace = true
 ksync.workspace = true
+ktask.workspace = true
+ktime_types.workspace = true
 kvfs.workspace = true
 kpoll.workspace = true
 kvmm.workspace = true
 fs_context.workspace = true
 linux-raw-sys.workspace = true
+memaddr.workspace = true
+posix-types.workspace = true
 
 # Guest device models are wired per target architecture.
 [target.'cfg(target_arch = "riscv64")'.dependencies]
@@ -49,7 +57,6 @@ vdev-vpl011.workspace = true
 vdev-virtio-blk.workspace = true
 vdev-virtio-net.workspace = true
 memspace.workspace = true
-memaddr.workspace = true
 
 [lints]
 workspace = true

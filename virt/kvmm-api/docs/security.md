@@ -13,11 +13,11 @@ LR capacity return NoSuchDevice; fixed QEMU addresses are not a fallback.
 The permanent host timer action is shared infrastructure, while residency and
 its weak wake route belong to each vCPU. Preparing it does not enable delivery.
 
-`/dev/kvmm-vm` is a privileged control device. Anyone able to open it can
-create a VM that consumes host physical RAM and CPU time. Access is governed
-by the devfs node's permissions; the device itself performs no capability
-check beyond that. Treat open access as equivalent to the ability to run the
-VMM.
+`/dev/kvmm-vm` and `/dev/kvm` are privileged control devices. Anyone able to
+open them can create a VM that consumes host physical RAM and CPU time. Access
+is governed by the devfs node permissions; the devices themselves perform no
+capability check beyond that. Treat open access as equivalent to the ability to
+run the VMM.
 
 ## Resource lifetime
 
@@ -54,6 +54,14 @@ guest memory base. The guest-visible physical base is translated to an
 allocator-chosen host physical backing range, so the control plane does not need
 to reserve a hard-coded host physical address.
 
+The `/dev/kvm` lkvm path uses a different ownership model: userspace owns the
+RAM backing and passes page ranges with `KVM_SET_USER_MEMORY_REGION`. The kernel
+validates slot alignment, guest range bounds, and that each userspace page is
+currently mapped before installing stage-2 entries. This is enough for initial
+lkvm bring-up, but it does not yet install mmu-notifiers or pin the user pages;
+therefore `/dev/kvm` must remain privileged until page lifetime and invalidation
+are implemented.
+
 ## Input handling
 
 * The boot command is parsed from the first `write`. Malformed input returns
@@ -84,6 +92,13 @@ to reserve a hard-coded host physical address.
   reservation instead of aliasing RAM. A production control plane should enforce
   quotas and a real address allocator.
 * riscv64 and aarch64 are supported; other architectures reject boot.
+* `/dev/kvm` currently targets the aarch64 lkvm subset. Unsupported KVM ioctls
+  return errors; they are not silently treated as successful no-ops.
+* `/dev/kvm` memslots map current userspace pages into stage-2 but do not pin
+  those pages or install an mmu-notifier, so a userspace `munmap`/remap after
+  registration is not observed. Explicit `KVM_SET_USER_MEMORY_REGION` deletion
+  or replacement does revoke the old stage-2 range before returning. Restrict
+  access to trusted callers until the memory-lifetime model is completed.
 * The console TX FIFO is bounded and drops on overflow (see Input handling), so
   guest output under burst can be truncated. This is a fidelity limit, not a
   safety one; a production path wanting loss-free capture would add backpressure

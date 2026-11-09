@@ -8,10 +8,7 @@
 //! execute in VS-mode via `sret`, trapping back on `ecall` or faults.
 
 use super::VmmArch;
-use crate::{
-    mm::GuestMem,
-    vcpu::{ExitAction, Vcpu},
-};
+use crate::vcpu::{ExitAction, Vcpu};
 
 core::arch::global_asm!(include_str!("hext_vcpu.S"));
 core::arch::global_asm!(include_str!("guest_test.S"));
@@ -46,6 +43,10 @@ const SBI_BASE_PROBE_EXTENSION: u64 = 3;
 const SBI_EXT_TIME: u64 = 0x5449_4d45;
 const SBI_EXT_RFENCE: u64 = 0x5246_4e43;
 const SBI_TIME_SET_TIMER: u64 = 0;
+const SBI_EXT_SRST: u64 = 0x5352_5354;
+const SBI_SRST_RESET: u64 = 0;
+const SBI_SRST_SHUTDOWN: u64 = 1;
+const SBI_LEGACY_SHUTDOWN: u64 = 0x08;
 
 /// hstatus.VTW bit (trap WFI in VS-mode).
 const HSTATUS_VTW: u64 = 1 << 21;
@@ -154,17 +155,17 @@ fn set_hvip_bits(mask: u64, pending: bool) {
 }
 
 /// Set or clear VS external interrupt pending on the current pCPU.
-pub(crate) fn set_virtual_external_irq_pending(pending: bool) {
+pub fn set_virtual_external_irq_pending(pending: bool) {
     set_hvip_bits(HVIP_VSEIP, pending);
 }
 
 /// Set or clear VS timer interrupt pending on the current pCPU.
-pub(crate) fn set_virtual_timer_irq_pending(pending: bool) {
+pub fn set_virtual_timer_irq_pending(pending: bool) {
     set_hvip_bits(HVIP_VSTIP, pending);
 }
 
 /// Read the RISC-V time counter used by guest `rdtime` and SBI timer deadlines.
-pub(crate) fn read_time() -> u64 {
+pub fn read_time() -> u64 {
     let val: u64;
     // SAFETY: reading the time CSR is a side-effect-free counter read.
     unsafe { core::arch::asm!("csrr {}, time", out(reg) val) };
@@ -226,7 +227,20 @@ fn handle_wfi(vcpu: &mut Vcpu<RiscvHext>) -> ExitAction {
     ExitAction::Resume
 }
 
-fn handle_vs_ecall(vcpu: &mut Vcpu<RiscvHext>) -> ExitAction {
+/// Outcome of servicing a VS-mode `ecall`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SbiOutcome {
+    /// The call was serviced in-kernel and the guest should resume.
+    Handled,
+    /// The guest asked to power off or reset the VM.
+    Shutdown,
+}
+
+/// Service a VS-mode `ecall`: an SBI call or an X-Kernel guest hypercall.
+///
+/// The guest PC is advanced past the `ecall` instruction, and SBI return
+/// values are written into `a0`/`a1`.
+pub fn handle_sbi_ecall(vcpu: &mut Vcpu<RiscvHext>) -> SbiOutcome {
     let ext = vcpu.arch.gprs[17]; // a7
     let func = vcpu.arch.gprs[16]; // a6
     let arg0 = vcpu.arch.gprs[10]; // a0
@@ -239,23 +253,35 @@ fn handle_vs_ecall(vcpu: &mut Vcpu<RiscvHext>) -> ExitAction {
             // if arg0.is_multiple_of(20) {
             //     log::info!("[HEXT] ECALL_PRINT: iter={} (riscv64)", arg0);
             // }
-            ExitAction::Resume
+            SbiOutcome::Handled
         }
         GUEST_ECALL_DONE => {
             log::info!("[HEXT] ECALL_DONE: guest exiting (riscv64)");
-            ExitAction::VmExit
+            SbiOutcome::Shutdown
         }
         SBI_LEGACY_SET_TIMER => {
             vcpu.arch.timer_deadline = arg0;
-            ExitAction::Resume
+            SbiOutcome::Handled
         }
         SBI_LEGACY_CONSOLE_PUTCHAR => {
             sbi_console_putchar(arg0 as u8);
-            ExitAction::Resume
+            SbiOutcome::Handled
         }
         SBI_LEGACY_CONSOLE_GETCHAR => {
             vcpu.arch.gprs[10] = u64::MAX;
-            ExitAction::Resume
+            SbiOutcome::Handled
+        }
+        SBI_LEGACY_SHUTDOWN => {
+            log::info!("[HEXT] legacy SBI shutdown (riscv64)");
+            SbiOutcome::Shutdown
+        }
+        SBI_EXT_SRST if func == SBI_SRST_RESET || func == SBI_SRST_SHUTDOWN => {
+            // A guest `poweroff`/`reboot` arrives here. Answer SBI_SUCCESS
+            // first: the guest treats SRST as never returning on success.
+            log::info!("[HEXT] SBI SRST func={} (riscv64)", func);
+            vcpu.arch.gprs[10] = SBI_SUCCESS;
+            vcpu.arch.gprs[11] = 0;
+            SbiOutcome::Shutdown
         }
         SBI_EXT_BASE => {
             let value = match func {
@@ -266,6 +292,7 @@ fn handle_vs_ecall(vcpu: &mut Vcpu<RiscvHext>) -> ExitAction {
                     SBI_EXT_BASE
                     | SBI_EXT_TIME
                     | SBI_EXT_RFENCE
+                    | SBI_EXT_SRST
                     | SBI_LEGACY_CONSOLE_PUTCHAR
                     | SBI_LEGACY_CONSOLE_GETCHAR => 1,
                     _ => 0,
@@ -273,25 +300,25 @@ fn handle_vs_ecall(vcpu: &mut Vcpu<RiscvHext>) -> ExitAction {
                 _ => {
                     vcpu.arch.gprs[10] = SBI_ERR_NOT_SUPPORTED;
                     vcpu.arch.gprs[11] = 0;
-                    return ExitAction::Resume;
+                    return SbiOutcome::Handled;
                 }
             };
             vcpu.arch.gprs[10] = SBI_SUCCESS;
             vcpu.arch.gprs[11] = value;
-            ExitAction::Resume
+            SbiOutcome::Handled
         }
         SBI_EXT_TIME if func == SBI_TIME_SET_TIMER => {
             vcpu.arch.timer_deadline = arg0;
             vcpu.arch.gprs[10] = SBI_SUCCESS;
             vcpu.arch.gprs[11] = 0;
-            ExitAction::Resume
+            SbiOutcome::Handled
         }
         SBI_EXT_RFENCE => {
             // Single-vCPU VMs have no remote harts to synchronize. Linux still
             // probes and may call RFENCE, so report success for the no-op case.
             vcpu.arch.gprs[10] = SBI_SUCCESS;
             vcpu.arch.gprs[11] = 0;
-            ExitAction::Resume
+            SbiOutcome::Handled
         }
         _ => {
             log::warn!(
@@ -301,8 +328,15 @@ fn handle_vs_ecall(vcpu: &mut Vcpu<RiscvHext>) -> ExitAction {
             );
             vcpu.arch.gprs[10] = SBI_ERR_NOT_SUPPORTED;
             vcpu.arch.gprs[11] = 0;
-            ExitAction::Resume
+            SbiOutcome::Handled
         }
+    }
+}
+
+fn handle_vs_ecall(vcpu: &mut Vcpu<RiscvHext>) -> ExitAction {
+    match handle_sbi_ecall(vcpu) {
+        SbiOutcome::Handled => ExitAction::Resume,
+        SbiOutcome::Shutdown => ExitAction::VmExit,
     }
 }
 
@@ -396,8 +430,7 @@ fn decode_compressed_mmio_access(inst: u16, is_store_fault: bool) -> Option<Mmio
 }
 
 fn read_guest_u16(vcpu: &Vcpu<RiscvHext>, gpa: u64) -> Option<u16> {
-    let guest_mem = vcpu.vm.guest_mem()?;
-    let hpa = guest_mem.gpa_to_hpa(gpa)?;
+    let hpa = vcpu.vm.gpa_to_hpa(gpa)?;
     let src = kaddr_layout::p2v(hpa as usize) as *const u16;
     // SAFETY: `hpa` came from a valid guest RAM translation and the read is
     // bounded to one unaligned instruction halfword.
@@ -405,8 +438,7 @@ fn read_guest_u16(vcpu: &Vcpu<RiscvHext>, gpa: u64) -> Option<u16> {
 }
 
 fn read_guest_u32(vcpu: &Vcpu<RiscvHext>, gpa: u64) -> Option<u32> {
-    let guest_mem = vcpu.vm.guest_mem()?;
-    let hpa = guest_mem.gpa_to_hpa(gpa)?;
+    let hpa = vcpu.vm.gpa_to_hpa(gpa)?;
     let src = kaddr_layout::p2v(hpa as usize) as *const u32;
     // SAFETY: `hpa` came from the VM's valid guest RAM translation and this
     // reads exactly one naturally aligned instruction word for MMIO decode.
@@ -414,8 +446,7 @@ fn read_guest_u32(vcpu: &Vcpu<RiscvHext>, gpa: u64) -> Option<u32> {
 }
 
 fn read_guest_u64(vcpu: &Vcpu<RiscvHext>, gpa: u64) -> Option<u64> {
-    let guest_mem = vcpu.vm.guest_mem()?;
-    let hpa = guest_mem.gpa_to_hpa(gpa)?;
+    let hpa = vcpu.vm.gpa_to_hpa(gpa)?;
     let src = kaddr_layout::p2v(hpa as usize) as *const u64;
     // SAFETY: `hpa` came from a valid guest RAM translation and the read is
     // bounded to one unaligned page-table entry.
@@ -493,6 +524,97 @@ fn mmio_instruction(vcpu: &Vcpu<RiscvHext>) -> Option<u64> {
     }
 }
 
+/// A guest MMIO access decoded from a G-stage fault.
+#[derive(Debug, Clone, Copy)]
+pub struct GuestMmioAccess {
+    /// Guest physical address the guest tried to access.
+    pub gpa: u64,
+    pub is_write: bool,
+    /// Access width in bytes (1, 2, 4 or 8).
+    pub size: u8,
+    /// Value to be written, or 0 for a read.
+    pub value: u64,
+    /// Index of the source/destination register in `gprs`; 0 for x0, whose
+    /// writeback hardware discards.
+    pub reg: usize,
+    /// Length of the faulting instruction in bytes (2 if compressed, else 4).
+    pub inst_len: u64,
+}
+
+/// Outcome of a G-stage fault.
+#[derive(Debug, Clone, Copy)]
+pub enum MmioFaultOutcome {
+    /// A kernel-side virtual device claimed the access. The destination
+    /// register and the guest PC have already been updated.
+    Handled(GuestMmioAccess),
+    /// Nothing in the kernel claimed it. The caller must emulate the access
+    /// and resume the guest: the `/dev/kvm` path bounces it to the VMM as
+    /// `KVM_EXIT_MMIO`, so the PC is deliberately left on the faulting
+    /// instruction.
+    Userspace(GuestMmioAccess),
+    /// The faulting instruction could not be fetched or decoded.
+    Undecodable,
+}
+
+/// Decode a G-stage fault (scause 20/21/23) and offer it to the MMIO bus.
+///
+/// The faulting instruction is fetched from guest memory, which is why
+/// [`GuestMem::gpa_to_hpa`] must be a real translation.
+///
+/// [`GuestMem::gpa_to_hpa`]: crate::mm::GuestMem::gpa_to_hpa
+pub fn handle_mmio_fault(vcpu: &mut Vcpu<RiscvHext>) -> MmioFaultOutcome {
+    // scause 23 is the store/AMO guest-page fault; 20 is the instruction
+    // fetch fault and 21 the load fault.
+    let is_store_fault = vcpu.arch.scause_save & !(1u64 << 63) == 23;
+    let gpa = (vcpu.arch.htval_save << 2) | (vcpu.arch.stval_save & 0xFFF);
+
+    let Some(inst) = mmio_instruction(vcpu) else {
+        log::error!(
+            "[HEXT] failed to fetch MMIO instruction: pc={:#x} htinst={:#x}",
+            vcpu.arch.pc,
+            vcpu.arch.htinst_save,
+        );
+        return MmioFaultOutcome::Undecodable;
+    };
+    let Some(access) = decode_mmio_access(inst, is_store_fault) else {
+        log::error!(
+            "[HEXT] unsupported MMIO instruction: inst={:#x} gpa={:#x} pc={:#x}",
+            inst,
+            gpa,
+            vcpu.arch.pc,
+        );
+        return MmioFaultOutcome::Undecodable;
+    };
+
+    let value = if access.is_write {
+        vcpu.arch.gprs[access.reg]
+    } else {
+        0
+    };
+
+    let decoded = GuestMmioAccess {
+        gpa,
+        is_write: access.is_write,
+        size: access.size,
+        value,
+        reg: access.reg,
+        inst_len: access.inst_len,
+    };
+
+    let mut bus = vcpu.vm.mmio_bus().lock();
+    if let Some(val) = bus.handle_for_vcpu(gpa, access.is_write, access.size, value, vcpu.vcpu_id) {
+        drop(bus);
+        if !access.is_write && access.reg != 0 {
+            vcpu.arch.gprs[access.reg] = val;
+        }
+        vcpu.arch.pc += access.inst_len;
+        return MmioFaultOutcome::Handled(decoded);
+    }
+    drop(bus);
+
+    MmioFaultOutcome::Userspace(decoded)
+}
+
 impl VmmArch for RiscvHext {
     type ArchVcpu = RiscvVcpu;
     type GuestMem = crate::mm::gstage::GStage;
@@ -562,57 +684,26 @@ impl VmmArch for RiscvHext {
                 }
                 20 | 21 | 23 => {
                     vcpu.exit_category = crate::vcpu_state::EXIT_CAT_MMIO;
-                    let gpa = (vcpu.arch.htval_save << 2) | (vcpu.arch.stval_save & 0xFFF);
-                    let Some(inst) = mmio_instruction(vcpu) else {
-                        log::error!(
-                            "[HEXT] failed to fetch MMIO instruction: pc={:#x} htinst={:#x}",
-                            vcpu.arch.pc,
-                            vcpu.arch.htinst_save,
-                        );
-                        return ExitAction::Exit;
-                    };
-                    let Some(access) = decode_mmio_access(inst, code == 23) else {
-                        log::error!(
-                            "[HEXT] unsupported MMIO instruction: inst={:#x} cause={} gpa={:#x} \
-                             pc={:#x}",
-                            inst,
-                            code,
-                            gpa,
-                            vcpu.arch.pc,
-                        );
-                        return ExitAction::Exit;
-                    };
-                    let value = if access.is_write {
-                        vcpu.arch.gprs[access.reg]
-                    } else {
-                        0
-                    };
-
-                    let mut bus = vcpu.vm.mmio_bus().lock();
-                    if let Some(val) =
-                        bus.handle_for_vcpu(gpa, access.is_write, access.size, value, vcpu.vcpu_id)
-                    {
-                        drop(bus);
-                        if !access.is_write && access.reg != 0 {
-                            vcpu.arch.gprs[access.reg] = val;
+                    match handle_mmio_fault(vcpu) {
+                        MmioFaultOutcome::Handled(_) => ExitAction::Resume,
+                        MmioFaultOutcome::Userspace(access) => {
+                            // Nothing claimed the access. The /dev/kvmm-vm path
+                            // has no userspace to bounce to, so it stops here;
+                            // the /dev/kvm path returns it as KVM_EXIT_MMIO.
+                            log::error!(
+                                "[HEXT] G-stage {} fault: gpa={:#x} pc={:#x}",
+                                if access.is_write {
+                                    "write"
+                                } else {
+                                    "read/fetch"
+                                },
+                                access.gpa,
+                                vcpu.arch.pc,
+                            );
+                            ExitAction::Exit
                         }
-
-                        vcpu.arch.pc += access.inst_len;
-                        return ExitAction::Resume;
+                        MmioFaultOutcome::Undecodable => ExitAction::Exit,
                     }
-                    drop(bus);
-
-                    log::error!(
-                        "[HEXT] G-stage {} fault: gpa={:#x} pc={:#x}",
-                        if access.is_write {
-                            "write"
-                        } else {
-                            "read/fetch"
-                        },
-                        gpa,
-                        vcpu.arch.pc,
-                    );
-                    ExitAction::Exit
                 }
                 _ => {
                     vcpu.exit_category = crate::vcpu_state::EXIT_CAT_OTHER;

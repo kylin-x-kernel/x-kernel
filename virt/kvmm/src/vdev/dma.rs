@@ -31,21 +31,25 @@ impl<A: VmmArch> VmGuestDma<A> {
         mut copy: impl FnMut(usize, *mut u8) -> Result<(), DmaError>,
     ) -> Result<(), DmaError> {
         let vm = self.vm.upgrade().ok_or(DmaError::NoGuestMem)?;
-        let guest_mem = vm.guest_mem().ok_or(DmaError::NoGuestMem)?;
-        let mut done = 0usize;
-        while len != 0 {
-            let hpa = guest_mem.gpa_to_hpa(gpa).ok_or(DmaError::AddressFault)?;
-            let page_left = (PAGE_SIZE - (gpa & (PAGE_SIZE - 1))) as usize;
-            let chunk = len.min(page_left);
-            let va = kaddr_layout::p2v(hpa as usize) as *mut u8;
-            copy(done, va)?;
-            done = done.checked_add(chunk).ok_or(DmaError::RangeOverflow)?;
-            gpa = gpa
-                .checked_add(chunk as u64)
-                .ok_or(DmaError::RangeOverflow)?;
-            len -= chunk;
-        }
-        Ok(())
+        // Hold the mapping lock across the walk so a concurrent memslot update
+        // cannot change the tables between translations.
+        vm.with_guest_mem_locked(|guest_mem| -> Result<(), DmaError> {
+            let mut done = 0usize;
+            while len != 0 {
+                let hpa = guest_mem.gpa_to_hpa(gpa).ok_or(DmaError::AddressFault)?;
+                let page_left = (PAGE_SIZE - (gpa & (PAGE_SIZE - 1))) as usize;
+                let chunk = len.min(page_left);
+                let va = kaddr_layout::p2v(hpa as usize) as *mut u8;
+                copy(done, va)?;
+                done = done.checked_add(chunk).ok_or(DmaError::RangeOverflow)?;
+                gpa = gpa
+                    .checked_add(chunk as u64)
+                    .ok_or(DmaError::RangeOverflow)?;
+                len -= chunk;
+            }
+            Ok(())
+        })
+        .ok_or(DmaError::NoGuestMem)?
     }
 }
 

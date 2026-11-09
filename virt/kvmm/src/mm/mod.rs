@@ -138,20 +138,33 @@ pub trait GuestMem: Sized {
     fn new(mem_base: u64, mem_size: u64, hpa_base: u64, vmid: u32) -> Option<Self>;
 
     /// Map a region of guest physical address space.
-    fn map_region(&mut self, gpa: u64, hpa: u64, size: u64, perm: GuestPerm) -> bool;
+    ///
+    /// This takes `&self` because implementations update the page-table pages
+    /// they own through raw pointers; callers must serialize it with
+    /// [`unmap_range`](Self::unmap_range) and with software table walks. Use
+    /// `Vm::map_guest_region` rather than calling this directly.
+    fn map_region(&self, gpa: u64, hpa: u64, size: u64, perm: GuestPerm) -> bool;
 
     /// Translate a guest physical address to a host physical address.
     fn gpa_to_hpa(&self, gpa: u64) -> Option<u64>;
 
     /// Write the page table root into the hardware register so the
     /// second-stage translation takes effect for subsequent guest entries.
+    ///
+    /// Only immutable per-VM state (root table address, VMID) is read, so this
+    /// may run concurrently with `map_region`/`unmap_range`.
     fn activate(&self);
 
     /// Remove mappings for the given GPA range so that guest accesses trap.
     ///
-    /// The range is rounded outward to the page table granularity (e.g. 2 MiB
-    /// blocks on AArch64 Stage-2). Returns `true` on success.
-    fn unmap_range(&mut self, _gpa: u64, _size: u64) -> bool {
+    /// The range is rounded outward to 4 KiB pages, but never to a larger
+    /// page-table block: partial ranges are handled at the smallest supported
+    /// granularity. Entries that are already invalid are treated as success.
+    /// Returns `true` on success.
+    ///
+    /// Like [`map_region`](Self::map_region), callers must serialize this with
+    /// other table mutations; use `Vm::unmap_guest_region`.
+    fn unmap_range(&self, _gpa: u64, _size: u64) -> bool {
         false
     }
 }

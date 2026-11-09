@@ -16,7 +16,6 @@ use vdev_test_mmio::{TEST_MMIO_GPA, TEST_MMIO_SIZE, TestMmioDevice};
 
 use crate::{
     arch::VmmArch,
-    mm::GuestMem,
     vcpu::{Vcpu, spawn_vcpu_thread, vmm_run_vcpu},
     vm::{Vm, VmConfig},
 };
@@ -270,7 +269,7 @@ fn selftest_guest_mem_impl<A: VmmArch + 'static>() -> bool {
 
     let cfg: VmConfig = VmConfig::new(0, 0x1_0000_0000, 1);
 
-    let mut vm: Vm<A> = match Vm::new(cfg) {
+    let vm: Vm<A> = match Vm::new(cfg) {
         Some(vm) => vm,
         None => {
             log::error!("[vmm] guest-mem selftest: vm_create failed");
@@ -283,8 +282,8 @@ fn selftest_guest_mem_impl<A: VmmArch + 'static>() -> bool {
         return false;
     };
     vm.shared().devices().register_mmio(device);
-    if let Some(gm) = vm.guest_mem_mut() {
-        gm.unmap_range(TEST_MMIO_GPA, TEST_MMIO_SIZE);
+    if !vm.unmap_guest_region(TEST_MMIO_GPA, TEST_MMIO_SIZE) {
+        log::warn!("[vmm] guest-mem selftest: test MMIO unmap failed");
     }
 
     let mut vcpu = vm.create_vcpu(0);
@@ -331,7 +330,7 @@ fn selftest_multi_vm_impl() -> bool {
     }
 
     for vm_idx in 0..NUM_VMS {
-        let mut vm: Vm<CurrentArch> = match Vm::new(VmConfig::new(0, 0x1_0000_0000, 1)) {
+        let vm: Vm<CurrentArch> = match Vm::new(VmConfig::new(0, 0x1_0000_0000, 1)) {
             Some(vm) => vm,
             None => {
                 log::error!("[vmm] multi-vm selftest: vm_create failed for VM{}", vm_idx);
@@ -343,8 +342,8 @@ fn selftest_multi_vm_impl() -> bool {
             return false;
         };
         vm.shared().devices().register_mmio(device);
-        if let Some(gm) = vm.guest_mem_mut() {
-            gm.unmap_range(TEST_MMIO_GPA, TEST_MMIO_SIZE);
+        if !vm.unmap_guest_region(TEST_MMIO_GPA, TEST_MMIO_SIZE) {
+            log::warn!("[vmm] multi-vm selftest: test MMIO unmap failed");
         }
 
         let mut vcpu = vm.create_vcpu(0);
@@ -439,7 +438,7 @@ mod unsupported {
         }
 
         fn map_region(
-            &mut self,
+            &self,
             _gpa: u64,
             _hpa: u64,
             _size: u64,

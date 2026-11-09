@@ -99,7 +99,7 @@ impl Stage2 {
     /// If the slot is already a table, reuses it. If it is a 2 MiB block,
     /// splits it into 512 identity 4 KiB pages. If it is invalid, allocates a
     /// zeroed (all-invalid) L3 table. Returns null on allocation failure.
-    fn ensure_l3_table(&mut self, l1_idx: usize, l2_idx: usize) -> *mut u64 {
+    fn ensure_l3_table(&self, l1_idx: usize, l2_idx: usize) -> *mut u64 {
         let l1_va = kaddr_layout::p2v(self.l1_page.phys_addr().as_usize()) as *const u64;
         // SAFETY: the caller checked l1_idx < L1_ENTRIES, so the offset stays
         // inside the owned L1 page.
@@ -158,6 +158,92 @@ impl Stage2 {
         aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
         flush_stage2_tlb();
         l3_va
+    }
+
+    /// Invalidate one live Stage-2 descriptor and clean its cache line.
+    ///
+    /// # Safety
+    ///
+    /// `entry_ptr` must point to an aligned, initialized descriptor that is
+    /// reachable from a page table owned by this VM.
+    unsafe fn invalidate_entry(entry_ptr: *mut u64) {
+        // SAFETY: the caller guarantees a live, aligned descriptor.
+        unsafe { entry_ptr.write(0) };
+        // SAFETY: cleaning a live page-table entry's cache line only publishes
+        // the invalidation to the table walker.
+        unsafe { core::arch::asm!("dc civac, {}", in(reg) entry_ptr) };
+    }
+
+    /// Drop a whole 2 MiB block descriptor.
+    fn unmap_block(&self, l2_va: *mut u64, l2_idx: usize) {
+        // SAFETY: l2_va points to a live L2 table; l2_idx < L2_ENTRIES.
+        let entry_ptr = unsafe { l2_va.add(l2_idx) };
+        // SAFETY: entry_ptr is the aligned, valid block descriptor.
+        unsafe { Self::invalidate_entry(entry_ptr) };
+    }
+
+    /// Split a 2 MiB block and clear the leaves intersecting the request.
+    fn unmap_partial_block(
+        &self,
+        l1_idx: usize,
+        l2_idx: usize,
+        block_start: u64,
+        from: u64,
+        to: u64,
+    ) -> bool {
+        let l3_va = self.ensure_l3_table(l1_idx, l2_idx);
+        if l3_va.is_null() {
+            return false;
+        }
+        let first = ((from - block_start) >> 12) as usize;
+        let last = ((to - block_start) >> 12) as usize;
+        for idx in first..last {
+            // SAFETY: l3_va points to a live L3 table; idx < L3_ENTRIES.
+            let entry_ptr = unsafe { l3_va.add(idx) };
+            // SAFETY: entry_ptr is an aligned leaf descriptor.
+            unsafe { entry_ptr.write(0) };
+        }
+        flush_pt_page(l3_va as *const u8);
+        true
+    }
+
+    /// Clear the intersecting leaves of an existing L3 table.
+    ///
+    /// The table and its L2 reference are dropped once no leaf remains, after
+    /// a TLB invalidation so the allocator cannot reuse a still-referenced
+    /// page.
+    fn unmap_l3_slot(&self, l2_va: *mut u64, l2_idx: usize, l3_pa: u64, first: usize, last: usize) {
+        let l3_va = kaddr_layout::p2v(l3_pa as usize) as *mut u64;
+        let mut remaining = 0;
+        for idx in 0..L3_ENTRIES {
+            // SAFETY: l3_va points to a live L3 table; idx < L3_ENTRIES.
+            let entry_ptr = unsafe { l3_va.add(idx) };
+            // SAFETY: entry_ptr is an aligned, initialized entry.
+            let entry = unsafe { entry_ptr.read() };
+            if entry & LPAE_VALID == 0 {
+                continue;
+            }
+            if idx < first || idx >= last {
+                remaining += 1;
+                continue;
+            }
+            // SAFETY: entry_ptr is an aligned leaf descriptor.
+            unsafe { entry_ptr.write(0) };
+        }
+        flush_pt_page(l3_va as *const u8);
+
+        if remaining != 0 {
+            return;
+        }
+        // SAFETY: l2_va points to a live L2 table; l2_idx < L2_ENTRIES.
+        let slot = unsafe { l2_va.add(l2_idx) };
+        // SAFETY: slot is the aligned descriptor that referenced this table.
+        unsafe { Self::invalidate_entry(slot) };
+        aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
+        flush_stage2_tlb();
+        // SAFETY: l3_pa was allocated by ensure_l3_table and is no longer
+        // reachable after the invalidation above.
+        unsafe { free_pt_page(l3_pa) };
     }
 }
 
@@ -246,7 +332,7 @@ impl GuestMem for Stage2 {
         })
     }
 
-    fn map_region(&mut self, gpa: u64, hpa: u64, size: u64, perm: GuestPerm) -> bool {
+    fn map_region(&self, gpa: u64, hpa: u64, size: u64, perm: GuestPerm) -> bool {
         let start = gpa & !0xFFF;
         let hpa_base = hpa & !0xFFF;
         let end = (gpa + size + 0xFFF) & !0xFFF;
@@ -291,12 +377,12 @@ impl GuestMem for Stage2 {
         aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
         flush_stage2_tlb();
 
-        log::info!(
-            "[stage2] map_region gpa={:#x} → hpa={:#x} size={:#x}",
-            gpa,
-            hpa,
-            size,
-        );
+        // log::info!(
+        //     "[stage2] map_region gpa={:#x} → hpa={:#x} size={:#x}",
+        //     gpa,
+        //     hpa,
+        //     size,
+        // );
         true
     }
 
@@ -330,49 +416,76 @@ impl GuestMem for Stage2 {
         }
     }
 
-    fn unmap_range(&mut self, gpa: u64, size: u64) -> bool {
-        let block_size: u64 = 1 << 21; // 2 MiB
-        let start = gpa & !(block_size - 1);
-        let end = (gpa + size + block_size - 1) & !(block_size - 1);
+    fn unmap_range(&self, gpa: u64, size: u64) -> bool {
+        const PAGE_SIZE: u64 = 1 << 12;
+        const BLOCK_SIZE: u64 = 1 << 21;
+
+        if size == 0 {
+            return true;
+        }
+        let Some(end) = gpa
+            .checked_add(size)
+            .and_then(|end| end.checked_add(PAGE_SIZE - 1))
+        else {
+            return false;
+        };
+        // Round both ends to whole pages. Never round up to a 2 MiB block: a
+        // memslot may revoke only part of one, and clearing the whole block
+        // would also revoke neighbouring RAM.
+        let start = gpa & !(PAGE_SIZE - 1);
+        let end = end & !(PAGE_SIZE - 1);
 
         let l1_va = kaddr_layout::p2v(self.l1_page.phys_addr().as_usize()) as *const u64;
-
         let mut addr = start;
         while addr < end {
             let l1_idx = (addr >> 30) as usize;
             let l2_idx = ((addr >> 21) & 0x1FF) as usize;
-
             if l1_idx >= L1_ENTRIES {
                 return false;
             }
 
-            // SAFETY: l1_idx < L1_ENTRIES was checked above, so the offset stays
-            // inside the owned L1 page.
-            let l1_entry_ptr = unsafe { l1_va.add(l1_idx) };
-            // SAFETY: l1_entry_ptr is an aligned, initialized L1 descriptor.
-            let l1_entry = unsafe { l1_entry_ptr.read() };
-            if l1_entry & LPAE_VALID == 0 {
-                addr += block_size;
+            let block_start = addr & !(BLOCK_SIZE - 1);
+            let block_end = block_start + BLOCK_SIZE;
+            let range_end = end.min(block_end);
+
+            // SAFETY: l1_idx < L1_ENTRIES was checked above.
+            let l1_ptr = unsafe { l1_va.add(l1_idx) };
+            // SAFETY: l1_ptr is an aligned, initialized L1 descriptor.
+            let l1_entry = unsafe { l1_ptr.read() };
+            if l1_entry & LPAE_VALID == 0 || l1_entry & LPAE_TABLE == 0 {
+                addr = range_end;
                 continue;
             }
 
-            let l2_pa = l1_entry & LPAE_ADDR_MASK;
-            let l2_va = kaddr_layout::p2v(l2_pa as usize) as *mut u64;
-            // SAFETY: l2_idx is a 9-bit index (< L2_ENTRIES), so the offset stays
-            // inside the L2 page referenced by the valid L1 descriptor.
-            let entry_ptr = unsafe { l2_va.add(l2_idx) };
-            // SAFETY: entry_ptr is an aligned descriptor in a live L2 page owned
-            // by this Stage2; &mut self serializes table updates.
-            unsafe { entry_ptr.write(0) };
-            // Flush the cache line so the table walker sees the invalidation.
-            // SAFETY: cleaning the cache line of a mapped page-table entry at EL2
-            // has no memory-safety effect beyond making the write visible.
-            unsafe { core::arch::asm!("dc civac, {}", in(reg) entry_ptr) };
-            aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
+            let l2_va = kaddr_layout::p2v((l1_entry & LPAE_ADDR_MASK) as usize) as *mut u64;
+            // SAFETY: l2_va points to a live L2 table; l2_idx < L2_ENTRIES.
+            let l2_ptr = unsafe { l2_va.add(l2_idx) };
+            // SAFETY: l2_ptr is an aligned, initialized L2 descriptor.
+            let l2_entry = unsafe { l2_ptr.read() };
+            if l2_entry & LPAE_VALID == 0 {
+                addr = range_end;
+                continue;
+            }
 
-            addr += block_size;
+            if l2_entry & LPAE_TABLE == 0 {
+                // 2 MiB block: drop it whole only when the request covers it
+                // entirely, otherwise split it and clear the requested pages.
+                if addr == block_start && range_end == block_end {
+                    self.unmap_block(l2_va, l2_idx);
+                } else if !self.unmap_partial_block(l1_idx, l2_idx, block_start, addr, range_end) {
+                    return false;
+                }
+            } else {
+                let first = ((addr - block_start) >> 12) as usize;
+                let last = ((range_end - block_start) >> 12) as usize;
+                self.unmap_l3_slot(l2_va, l2_idx, l2_entry & LPAE_ADDR_MASK, first, last);
+            }
+
+            addr = range_end;
         }
 
+        // Ensure all descriptor writes are visible before TLB invalidation.
+        aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
         flush_stage2_tlb();
         true
     }

@@ -59,6 +59,7 @@ fn word_index(off: u64, base: u64) -> Option<usize> {
 
 /// Emulated GIC distributor for one VM.
 pub struct Vgicd {
+    base: u64,
     /// Byte-addressable register backing store (read-back correctness).
     regs: KBox<[u8; REG_SIZE]>,
     /// Per-vCPU GICC/GICH state and pending injection backend.
@@ -70,9 +71,23 @@ impl Vgicd {
     /// Bind caller-owned register storage and reset it to zero.
     /// Prepare this storage before acquiring host MMIO mappings.
     /// This constructor does not allocate; the caller retains the allocation policy.
-    pub fn new(vgic: Arc<Vgic>, nr_vcpus: usize, mut regs: KBox<[u8; REG_SIZE]>) -> Self {
+    pub fn new(vgic: Arc<Vgic>, nr_vcpus: usize, regs: KBox<[u8; REG_SIZE]>) -> Self {
+        Self::new_at(GICD_BASE, vgic, nr_vcpus, regs)
+    }
+
+    /// Bind caller-owned register storage at an explicit distributor base.
+    ///
+    /// The base comes from the VMM's `KVM_ARM_SET_DEVICE_ADDR` on the lkvm
+    /// compatibility path, so the emulated GICD window matches the guest DTB.
+    pub fn new_at(
+        base: u64,
+        vgic: Arc<Vgic>,
+        nr_vcpus: usize,
+        mut regs: KBox<[u8; REG_SIZE]>,
+    ) -> Self {
         regs.fill(0);
         Self {
+            base,
             regs,
             vgic,
             nr_vcpus,
@@ -150,7 +165,7 @@ impl MmioDevice for Vgicd {
     }
 
     fn mmio_range(&self) -> (u64, u64) {
-        (GICD_BASE, GICD_SIZE)
+        (self.base, GICD_SIZE)
     }
 
     fn read(&self, offset: u64, size: u8) -> u64 {

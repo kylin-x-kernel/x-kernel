@@ -296,10 +296,15 @@ impl VmmArch for Aarch64Vhe {
     }
 
     fn enter_guest(vcpu: &mut Vcpu<Self>) -> bool {
+        // A vCPU driven on a caller thread (`/dev/kvm` KVM_RUN) has no
+        // kvmm-owned task to carry a schedule observer, so it deliberately has
+        // no `TimerResidency`; it relies on the entry-time vtimer check
+        // instead of host forwarding. A residency that was installed but
+        // failed to initialize still refuses to run.
         if vcpu
             .timer_residency
             .as_ref()
-            .is_none_or(|timer| timer.has_failed())
+            .is_some_and(|timer| timer.has_failed())
         {
             return false;
         }

@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
 use crate::{
     arch::VmmArch,
-    mm::{GuestMem, GuestRamReservation, mmio::MmioBus},
+    mm::{GuestMem, GuestPerm, GuestRamReservation, mmio::MmioBus},
     vcpu::{MAX_VCPUS, Vcpu},
     vcpu_state::{VcpuRunState, VcpuStats},
     vdev::VmDevices,
@@ -82,7 +82,11 @@ pub struct VmShared<A: VmmArch> {
 
 struct VmGuestMemory<A: VmmArch> {
     mapper: A::GuestMem,
-    _reservation: GuestRamReservation,
+    /// Serializes page-table mutations and software table walks. Entry-time
+    /// [`GuestMem::activate`] does not take it: it only reads immutable
+    /// per-VM state.
+    mapping: ksync::Mutex<()>,
+    _reservation: Option<GuestRamReservation>,
 }
 
 /// Reference-counted handle to a VM's shared state.
@@ -93,8 +97,43 @@ impl<A: VmmArch> VmShared<A> {
         &self.cfg
     }
 
+    /// Borrow guest memory for entry-time activation.
+    ///
+    /// [`GuestMem::activate`] reads only immutable per-VM state (the root
+    /// table address and VMID), so this accessor stays lock-free and is safe
+    /// to call with IRQs masked. Any access that reads page-table contents —
+    /// translation, mapping or unmapping — must instead go through
+    /// [`with_guest_mem_locked`](Self::with_guest_mem_locked) or the
+    /// [`map_guest_region`](Self::map_guest_region)/
+    /// [`unmap_guest_region`](Self::unmap_guest_region) helpers.
     pub fn guest_mem(&self) -> Option<&A::GuestMem> {
         self.guest_mem.as_ref().map(|guest_mem| &guest_mem.mapper)
+    }
+
+    /// Run `f` with the mapping lock held.
+    ///
+    /// Callers must not call back into any mapping helper from `f`.
+    pub fn with_guest_mem_locked<R>(&self, f: impl FnOnce(&A::GuestMem) -> R) -> Option<R> {
+        let guest_mem = self.guest_mem.as_ref()?;
+        let _guard = guest_mem.mapping.lock();
+        Some(f(&guest_mem.mapper))
+    }
+
+    /// Translate a guest physical address while holding the mapping lock.
+    pub fn gpa_to_hpa(&self, gpa: u64) -> Option<u64> {
+        self.with_guest_mem_locked(|guest_mem| guest_mem.gpa_to_hpa(gpa))?
+    }
+
+    /// Map a host physical range into this VM's guest physical address space.
+    pub fn map_guest_region(&self, gpa: u64, hpa: u64, size: u64, perm: GuestPerm) -> bool {
+        self.with_guest_mem_locked(|guest_mem| guest_mem.map_region(gpa, hpa, size, perm))
+            .is_some_and(|mapped| mapped)
+    }
+
+    /// Revoke guest physical mappings so subsequent guest accesses trap.
+    pub fn unmap_guest_region(&self, gpa: u64, size: u64) -> bool {
+        self.with_guest_mem_locked(|guest_mem| guest_mem.unmap_range(gpa, size))
+            .is_some_and(|unmapped| unmapped)
     }
 
     pub fn mmio_bus(&self) -> &ksync::Mutex<MmioBus> {
@@ -299,14 +338,13 @@ pub struct Vm<A: VmmArch> {
 }
 
 impl<A: VmmArch + 'static> Vm<A> {
-    /// Create a new VM with the given configuration.
-    pub fn new(cfg: VmConfig) -> Option<Self> {
+    fn build(cfg: VmConfig, reserve_ram: bool) -> Option<Self> {
         if cfg.nr_vcpus == 0 || cfg.nr_vcpus > MAX_VCPUS {
             log::error!("[vmm] vm_create: invalid nr_vcpus={}", cfg.nr_vcpus);
             return None;
         }
 
-        let guest_mem = if cfg.mem_size > 0 {
+        let guest_mem = if cfg.mem_size > 0 && reserve_ram {
             let Some(guest_ram) = crate::mm::reserve_guest_ram(cfg.mem_base, cfg.mem_size) else {
                 log::error!("[vmm] vm_create: guest RAM reservation failed");
                 return None;
@@ -320,7 +358,19 @@ impl<A: VmmArch + 'static> Vm<A> {
             };
             Some(VmGuestMemory {
                 mapper,
-                _reservation: guest_ram,
+                mapping: ksync::Mutex::new(()),
+                _reservation: Some(guest_ram),
+            })
+        } else if cfg.mem_size > 0 {
+            let vmid = crate::mm::alloc_vmid();
+            let Some(mapper) = A::GuestMem::new(0, 0, 0, vmid) else {
+                log::error!("[vmm] vm_create: guest_mem alloc failed");
+                return None;
+            };
+            Some(VmGuestMemory {
+                mapper,
+                mapping: ksync::Mutex::new(()),
+                _reservation: None,
             })
         } else {
             None
@@ -354,11 +404,21 @@ impl<A: VmmArch + 'static> Vm<A> {
         Some(Self { shared })
     }
 
+    /// Create a new VM with kernel-owned backing RAM for the configured guest range.
+    pub fn new(cfg: VmConfig) -> Option<Self> {
+        Self::build(cfg, true)
+    }
+
+    /// Create a new VM whose RAM is supplied later by userspace memslots.
+    pub fn new_unreserved(cfg: VmConfig) -> Option<Self> {
+        Self::build(cfg, false)
+    }
+
     /// Publish this VM in the global registry so it appears in `/proc/kvmm`.
     ///
-    /// Call this once, after any `guest_mem_mut()`-based setup — the registry
-    /// holds a `Weak`, and an outstanding `Weak` would make `Arc::get_mut`
-    /// (used by [`guest_mem_mut`](Self::guest_mem_mut)) fail.
+    /// Guest-memory mapping no longer depends on exclusive ownership of the
+    /// shared state, so this may be called before or after mapping and vCPU
+    /// creation.
     pub fn register(&self) {
         register_vm(&(self.shared.clone() as Arc<dyn VmInfo>));
     }
@@ -373,12 +433,18 @@ impl<A: VmmArch + 'static> Vm<A> {
         Vcpu::new(id, Arc::clone(&self.shared))
     }
 
-    /// Get mutable access to the guest memory (only valid before vCPUs are created).
-    pub fn guest_mem_mut(&mut self) -> Option<&mut A::GuestMem> {
-        Arc::get_mut(&mut self.shared)?
-            .guest_mem
-            .as_mut()
-            .map(|guest_mem| &mut guest_mem.mapper)
+    /// Map a host physical range into this VM's guest physical address space.
+    ///
+    /// Unlike the former `guest_mem_mut` path, this does not require the VM's
+    /// shared state to be uniquely owned, so memslots may be registered after
+    /// vCPU creation.
+    pub fn map_guest_region(&self, gpa: u64, hpa: u64, size: u64, perm: GuestPerm) -> bool {
+        self.shared.map_guest_region(gpa, hpa, size, perm)
+    }
+
+    /// Revoke guest physical mappings so subsequent guest accesses trap.
+    pub fn unmap_guest_region(&self, gpa: u64, size: u64) -> bool {
+        self.shared.unmap_guest_region(gpa, size)
     }
 
     /// Activate the second-stage page table for a specific vCPU.

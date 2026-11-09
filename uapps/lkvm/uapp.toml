@@ -1,0 +1,17 @@
+[package]
+name = "lkvm"
+description = "Install an externally built kvmtool/lkvm binary"
+enabled = true
+order = 20
+
+[prepare]
+commands = [
+  "test -x /tmp/opencode/kvmtool/lkvm-static",
+  "mkdir -p out",
+  "cp /tmp/opencode/kvmtool/lkvm-static out/lkvm",
+]
+
+[[install]]
+src = "out/lkvm"
+dest = "/usr/local/bin/lkvm"
+mode = "0755"

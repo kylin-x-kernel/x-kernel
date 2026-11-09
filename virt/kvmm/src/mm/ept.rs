@@ -163,7 +163,7 @@ impl GuestMem for Ept {
         })
     }
 
-    fn map_region(&mut self, _gpa: u64, _hpa: u64, _size: u64, _perm: GuestPerm) -> bool {
+    fn map_region(&self, _gpa: u64, _hpa: u64, _size: u64, _perm: GuestPerm) -> bool {
         false
     }
 
@@ -179,7 +179,7 @@ impl GuestMem for Ept {
         // obtain the value and writes it to the VMCS.
     }
 
-    fn unmap_range(&mut self, gpa: u64, size: u64) -> bool {
+    fn unmap_range(&self, gpa: u64, size: u64) -> bool {
         let block_size: u64 = 1 << 21; // 2 MiB
         let start = gpa & !(block_size - 1);
         let end = (gpa + size + block_size - 1) & !(block_size - 1);
