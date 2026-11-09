@@ -29,8 +29,8 @@ use kvfs::VfsFile;
 use linux_raw_sys::{
     general::timespec,
     net::{
-        MSG_CTRUNC, MSG_DONTWAIT, MSG_ERRQUEUE, MSG_OOB, MSG_PEEK, MSG_TRUNC, SCM_CREDENTIALS,
-        SCM_RIGHTS, SOL_SOCKET, cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t,
+        MSG_CMSG_CLOEXEC, MSG_CTRUNC, MSG_DONTWAIT, MSG_ERRQUEUE, MSG_OOB, MSG_PEEK, MSG_TRUNC,
+        SCM_CREDENTIALS, SCM_RIGHTS, SOL_SOCKET, cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t,
     },
 };
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
@@ -215,6 +215,7 @@ fn push_socket_cmsg(
     resources: &kprocess::CurrentFiles,
     builder: &mut CMsgBuilder<'_>,
     ancillary: SocketAncillary,
+    cloexec: bool,
 ) -> KResult<bool> {
     match ancillary {
         SocketAncillary::Rights { fds } => builder.push(SOL_SOCKET, SCM_RIGHTS, |data| {
@@ -231,7 +232,7 @@ fn push_socket_cmsg(
                 .into_iter()
                 .zip(data[..body_len].chunks_exact_mut(size_of::<i32>()))
             {
-                let fd = resources.add_file(f, false)?;
+                let fd = resources.add_file(f, cloexec)?;
                 chunk.copy_from_slice(&fd.to_ne_bytes());
                 written += size_of::<i32>();
             }
@@ -627,7 +628,12 @@ fn recv_impl(
                 warn!("received unexpected ancillary");
                 continue;
             };
-            let push_result = push_socket_cmsg(&resources, &mut builder, ancillary);
+            let push_result = push_socket_cmsg(
+                &resources,
+                &mut builder,
+                ancillary,
+                flags & MSG_CMSG_CLOEXEC != 0,
+            );
 
             match push_result {
                 Ok(true) => {}
@@ -646,9 +652,7 @@ fn recv_impl(
 
     if let Some(msg_flags) = output.msg_flags {
         *msg_flags |= recv_truncate_to_msg_flag(reported_flags);
-        if flags & MSG_ERRQUEUE != 0 {
-            *msg_flags |= MSG_ERRQUEUE;
-        }
+        *msg_flags |= flags & (MSG_CMSG_CLOEXEC | MSG_ERRQUEUE);
         if cmsg_truncated || ancillary_discarded {
             // `scm_detach_fds` reports MSG_CTRUNC whenever fd-carrying control
             // data could not be emitted, including the empty-buffer case:
