@@ -2310,6 +2310,7 @@ dependencies = [
  "driver-os-api",
  "driver_base",
  "fwnode",
+ "kmutex",
  "kspin",
  "lazyinit",
  "log",

@@ -13,40 +13,58 @@
 //!
 //! # Lock-order discipline
 //!
-//! Driver-core uses several spinlock-protected objects: the registry
-//! (`DeviceRegistry`), bus instances (`BusInstance`), bus types
-//! (`BusTypeObject`), driver objects (`DriverObject`), and per-device state
-//! inside `DeviceObject`. To prevent deadlocks, all code paths that need to
-//! touch more than one of these must observe the following order:
+//! Driver-core uses one sleepable lock per discovery descriptor plus several
+//! spinlock-protected objects: the registry (`DeviceRegistry`), bus instances
+//! (`BusInstance`), bus types (`BusTypeObject`), driver objects
+//! (`DriverObject`), and per-device state inside `DeviceObject`. To prevent
+//! deadlocks, all code paths that need to touch more than one of these must
+//! observe the following order:
 //!
-//! 1. **Registry first**: take the registry guard, take/snapshot the `Arc`
-//!    handles you need, then drop the registry guard before reaching into
-//!    any per-object lock.
-//! 2. **Never re-enter the registry from inside a per-object lock**. Per-
-//!    object methods (`BusInstance::add_device`, `BusTypeObject::*`,
-//!    `DriverObject::*`, `DeviceObject::*`) must not call back into
-//!    `device_registry()`.
-//! 3. **Lifecycle subscriber callbacks** run outside every driver-core lock.
-//!    Callbacks must not call back into `device_registry()` or any
-//!    driver-core mutator (`probe_device_desc`, `remove_device_*`, etc.) on
-//!    the same thread; doing so risks reentrant locking and ordering loops.
+//! 1. **Descriptor binding lock first**. Each descriptor owns a sleepable
+//!    `kmutex` that serializes binding and removal. It is taken outside every
+//!    spinlock (blocking acquisition would otherwise disable preemption for
+//!    an unbounded time); holding it may then take the registry and
+//!    per-object locks. No path may acquire it while holding a spinlock, and
+//!    only its holder may set or clear the descriptor's `Probing` state.
+//! 2. **Registry next**: take the registry guard, snapshot the `Arc` handles
+//!    you need, then drop the registry guard before reaching into a
+//!    bus-instance lock that can block or nest further.
+//! 3. **Per-object order** is `bus.devices` -> `bus.drivers` and
+//!    `bus.devices` -> `DeviceObject` state. There is deliberately no path
+//!    from `DeviceObject` state back into the registry or a bus instance.
+//! 4. **Never re-enter the registry from inside a per-object lock**. Per-
+//!    object methods (`BusInstance::attach_bound_device`,
+//!    `BusTypeObject::*`, `DriverObject::*`, `DeviceObject::*`) must not call
+//!    back into `device_registry()`.
+//! 5. **Lifecycle subscriber callbacks** run outside the registry and all
+//!    per-object spinlocks, but they may still run while the emitting path
+//!    holds the descriptor binding lock (probe, adoption, registration scan,
+//!    removal). Callbacks must not call any driver-core mutator
+//!    (`probe_device_desc`, `register_driver_object`, `remove_device_*`,
+//!    etc.) on the same thread: probing the same descriptor returns `Busy`,
+//!    while paths that block, such as removal, would self-deadlock.
 //!    Subscribers should snapshot what they need (e.g. via
 //!    `find_device(id)`) and defer non-trivial work.
 //!
 //! # Execution context
 //!
-//! Every driver-core lock above is a **preempt-disabling** spinlock
-//! (`kspin::SpinNoPreempt`), not an IRQ-disabling one. It keeps the current
-//! task from being preempted while held, but it does **not** mask interrupts.
-//! Consequently none of the driver-core mutators or registry accessors are
-//! safe to call from hard-IRQ context: an interrupt taken while a CPU holds
-//! one of these locks could re-enter the same lock and self-deadlock.
+//! The descriptor binding lock is a `kmutex` and requires sleepable task
+//! context; waiting on it may block the calling task. All other driver-core
+//! locks are **preempt-disabling** spinlocks (`kspin::SpinNoPreempt`), not
+//! IRQ-disabling ones. They keep the current task from being preempted while
+//! held, but they do **not** mask interrupts. Consequently none of the
+//! driver-core mutators or registry accessors are safe to call from hard-IRQ
+//! context: an interrupt taken while a CPU holds one of these locks could
+//! re-enter the same lock and self-deadlock.
 //!
 //! Therefore:
 //!
 //! - Call driver-core APIs (`probe_device_desc`, `remove_device_*`, registry
 //!   lookups, `DeviceObject`/`BusInstance`/`DriverObject` mutators, lifecycle
 //!   dispatch) only from task/thread context.
+//! - `probe_device_desc` reports `ProbeOutcome::Busy` only for same-context
+//!   recursion (checked with `kmutex::Mutex::is_owned_by_current`). A
+//!   different task blocks on the binding lock and rechecks the state instead.
 //! - IRQ handlers must stay off these paths. An interrupt handler should only
 //!   acknowledge the device and wake the consumer/task that will then perform
 //!   any device-model work outside IRQ context.
@@ -88,9 +106,11 @@ pub use device_node::{
 pub use driver::{
     CompatibleAliasMatcher, DeviceDriver, DeviceMatcher, DriverId, DriverInfo, DriverObject,
     FirmwareMatchSpec, MatchResult, NeverMatcher, PciDeviceId, PciIdsMatcher, ProbeStats,
-    VirtioTypeMatcher, priority,
+    VirtioTypeMatcher,
 };
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+#[cfg(unittest)]
+pub use lifecycle::test_hooks;
 pub use lifecycle::{
     ActiveDeviceAdoption, ProbeOutcome, adopt_active_device, attach_device_parent,
     detach_device_parent, device_desc_add,

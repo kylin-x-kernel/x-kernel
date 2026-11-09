@@ -66,7 +66,7 @@ drivers/contracts/kdevice/
     ├── driver/
     │   └── mod.rs                # DriverId, DriverInfo, DriverObject,
     │                             #   DeviceDriver trait, DeviceMatcher impls,
-    │                             #   ProbeStats, priority module
+    │                             #   MatchResult, ProbeStats
     ├── lifecycle/
     │   ├── mod.rs                # lifecycle orchestration:
     │   │                         #   register_bus_instance, register_driver_object,
@@ -161,7 +161,7 @@ drivers/contracts/kdevice/
 | `DeviceObject` | Core runtime device object; `AtomicU8` lifecycle state + CAS transitions; devres cleanup list; usage count |
 | `DeviceUse` | RAII guard; blocks device removal while held |
 | `BusInstance` | Runtime bus instance; controller / devices / drivers lists; probe statistics |
-| `BusTypeObject` | Bus matching domain; manages the pending descriptor queue and registered drivers; delegates matching to the `BusType` trait |
+| `BusTypeObject` | Bus matching domain; tracks bus instances and registered drivers and delegates matching to the `BusType` trait. Descriptors awaiting a driver are discovered from the registry's `Pending`/`Probing` state, not from a second queue |
 | `DriverObject` | Registered driver object; bound-device list; probe statistics |
 | `DeviceDesc` | Discovery-phase descriptor; carries bus_id/location/identity/transport/resources, an optional resolved DMA view, and an optional firmware-node handle |
 | `DeviceDescSpec` | Finalized registration aggregate consumed by `device_desc_add`; the only public registration input |
@@ -257,12 +257,15 @@ rejected instead of backfilling synthetic add events.
 | From | To | Trigger |
 |----|----|----------|
 | — | Discovered | `device_desc_add` or `adopt_active_device` creates the DeviceObject |
-| Discovered | Matched | `probe_device_desc` finds the best-matching driver |
-| Matched | Bound | `bind_device_to_driver` records driver_id/name/kind |
+| Discovered | Matched | `probe_device_desc` selects the first matching candidate |
+| Matched | Bound | the publish path records driver_id/name/kind before visibility |
 | Bound | Active | `DeviceDriver::probe_device` returns `Ok(())` |
-| Bound | Discovered (requeue) | probe failed; desc requeued, device object dropped |
-| Active/MBound/Bound | Removing | `remove_device_managed` CAS succeeds |
+| Matched/Bound | Removed | candidate probe failed; the unpublished object is discarded |
+| Active/Matched/Bound | Removing | `remove_device_managed` CAS succeeds |
 | Removing | Removed | driver.remove + bus_type.remove + run_cleanups complete |
+
+`adopt_active_device` prepares Matched/Bound metadata before publication, so
+its object is never observable in `Discovered`.
 
 The `begin_removing` CAS loop uses `compare_exchange_weak`:
 
@@ -299,11 +302,18 @@ The `begin_removing` CAS loop uses `compare_exchange_weak`:
 
 Key semantics:
 
-- the `Probing` state prevents concurrent probes of the same descriptor;
-- the `attempted` list records failed drivers so reprobe skips them and
-  avoids infinite retries;
-- when a device is removed, its descriptor returns to `Pending` with
-  `attempted` cleared, giving new drivers a chance.
+- every descriptor owns one stable sleepable `kmutex`, created by
+  `device_desc_add` and cloned by the registry. It outlives candidate
+  rebuilds, failed probes, requeue and removal, and it is never stored on
+  `DeviceObject` (a failed candidate's object is discarded).
+- only the binding-lock holder may move `Pending` to `Probing` or back, so the
+  state can be trusted by a waiter that acquires the lock and re-reads it.
+- a `Bound` descriptor whose live device is Active/Removing/Removed is
+  terminal: a concurrent `probe_device_desc` returns `Skipped` after recheck;
+  a `Bound` descriptor whose device is still non-terminal is a broken
+  invariant (`BadState`).
+- when a device is removed, its descriptor returns to `Pending`, so the same
+  descriptor identity can be bound again with a fresh `DeviceId`.
 
 A descriptor and the device object created from it carry an optional
 `DmaInfo` resolved by the discovering backend. `None` records that no view was
@@ -360,23 +370,36 @@ adoption; the production platform-discovery wiring is covered in `kdriver`.
 
 ### Probe pipeline
 
-`probe_device_desc(id)` → `probe_device_desc_with_drivers(desc, candidates)`:
+`probe_device_desc(id)` binds at most once and reports one `ProbeOutcome`:
 
-1. Check `desc_probe_outcome`: if the descriptor is already `Bound` and the
-   device is terminal (Active/Removing/Removed), return Skipped.
-2. CAS the descriptor to `Probing` (concurrency guard).
-3. Get the candidate driver list from the `bus_type`.
-4. Match with `match_desc`, selecting the highest-priority driver
-   (excluding drivers already in `attempted`).
-5. No matching driver → requeue and return `Requeue`.
-6. Create the `DeviceObject` from the descriptor (allocate DeviceId,
-   construct the object).
-7. Run the standard event sequence: `mark_matched` → `bind_to_driver`.
-8. Call `driver.ops().probe_device(device)`:
-   - success → `publish_desc_device`: write the global index, add to the
-     BusInstance, attach parent, fire Published + Activated events.
-   - failure → `device.run_cleanups()` (devres LIFO) + `detach_driver()` +
-     record the failed driver in `attempted` + requeue.
+1. Fetch the descriptor's binding-lock handle. If this task already owns the
+   lock, return `Busy` immediately (same-context recursion); a different task
+   never sees `Busy`.
+2. Acquire the binding lock, blocking in sleepable task context, then re-read
+   the descriptor state:
+   - missing descriptor → `Err(InvalidInput)`;
+   - `Pending` → claim it (set `Probing`);
+   - terminal bound device (Active/Removing/Removed) → `Skipped`;
+   - `Probing` or non-terminal bound device → `Err(BadState)` (invariant
+     violation; only the lock holder may set `Probing`).
+3. Snapshot the bus type's candidate drivers once for this round, then walk
+   them in registration order:
+   - `match_desc` returns `NoMatch` → skip (no probe attempt);
+   - build one unpublished `DeviceObject`, silently prepare Matched/Bound
+     metadata, account the attempt, and call `probe_device`;
+   - success → publish and activate (below), stop the round → `Activated`;
+   - failure → `run_cleanups`, `detach_driver`, `mark_removed` (no events),
+     and continue with the next candidate. Every candidate is tried at most
+     once per round.
+4. A candidate construction/core-preparation failure requeues the descriptor
+   and returns `Err`; ordinary probe failures do not.
+5. No matching driver at all → requeue, `Unmatched`. At least one matching
+   driver was probed and all failed → requeue, `Unclaimed`.
+
+On success the order is fixed: registry add + descriptor bind, bus
+`attach_bound_device` (devices then drivers, with binding metadata already
+set), parent attach, `driver.attach_device`, Matched/Bound/Published events,
+then `activate_device`. The descriptor stays `Bound(device_id)`.
 
 ### Adoption path
 
@@ -385,55 +408,88 @@ runs, such as the boot console or the PCI host bridge.
 
 1. Verify the target bus exists and the driver's `bus_types` include the
    target bus's `bus_type`.
-2. Allocate `desc_id` and `device_id`.
-3. Construct `DeviceDesc` + `DeviceObject` (skipping match/probe), with
-   `firmware_node = None` on both: adoption is not firmware discovery.
-4. Run the same standard event sequence as probe:
-   Matched → Bound → Published → Activated.
-5. Attach the parent if the adoption names one.
+2. Allocate `desc_id` and `device_id`, then construct `DeviceDesc` +
+   `DeviceObject` (skipping match/probe), with `firmware_node = None` on
+   both: adoption is not firmware discovery.
+3. Prepare Matched/Bound metadata while the object is still unpublished.
+4. Create a fresh binding lock and `try_lock` it. Adoption runs inside the
+   bus-manager spinlock, so it must never block; a failed `try_lock` on this
+   unpublished entry is a broken invariant (`BadState`).
+5. Publish the descriptor/device, attach the bus association, parent and
+   driver, announce Matched/Bound/Published, activate, then drop the lock.
+   A concurrent remove blocks on the lock until the publication window is
+   closed.
 
 ### Remove path
 
-`remove_device_managed(id)`:
+`remove_device_managed(id)` serializes with binding through the unique
+descriptor's binding lock:
 
-1. Look up device, driver, and bus_type from the registry.
-2. `device.begin_removing()` — the single commit point:
-   - CAS into `Removing`; rejects `Removing`/`Removed` states and non-zero
-     usage.
-3. Call `driver.ops().remove(device)` — best-effort; errors are logged and
-   do not stop the removal.
-4. Call `bus_type.remove(device)` — best-effort.
-5. `device.run_cleanups()` — devres cleanup in LIFO order.
-6. `remove_device_from_index(id)` — remove from the registry, update
-   BusInstance/DriverObject, detach parent/child, fire the Removed event.
+1. Before waiting: the device must exist (`InvalidInput`) and exactly one
+   descriptor must be bound to it (`BadState` otherwise). Snapshot that
+   descriptor's binding lock.
+2. Acquire the binding lock (blocking). Then re-read:
+   - device disappeared → `ResourceBusy` (another remover won);
+   - descriptor no longer bound to this device → `BadState`;
+   - snapshot driver/bus type.
+3. `device.begin_removing()` — the single commit point. It runs after the
+   lock is acquired and rejects `Removing`/`Removed` states and non-zero
+   usage with `ResourceBusy`.
+4. Under the lock: `driver.ops().remove(device)` and
+   `bus_type.remove(device)` (best-effort; errors logged, removal proceeds),
+   then `device.run_cleanups()` (devres LIFO).
+5. `remove_device_from_index`: take the device out of the registry, requeue
+   the descriptor only if it is still bound to this device, clear stale
+   descriptor parent links, snapshot bus/driver/parent/children. Then detach
+   the bus association and the shared driver entry atomically (the driver is
+   kept if another device on that bus still references it), detach the
+   driver/device metadata, leave the descriptor `Pending`, detach the
+   parent and clear children parent pointers, and fire `Removed`.
+6. Drop the binding lock only after `Removed`; a blocked binder then
+   rechecks, sees `Pending`, and may bind the same descriptor to a new
+   `DeviceId`.
 
 ### Descriptor rescan after driver registration
 
-`register_driver_object` immediately scans all pending descriptors in the
-new driver's bus_types:
+`register_driver_object` immediately scans descriptors that still await a
+binding in the new driver's bus types:
 
-1. Collect pending descriptor ids from each `BusTypeObject`.
-2. Call `probe_device_desc_with_drivers` per descriptor (candidates
-   limited to the newly registered driver).
-3. This removes driver load-order problems: a driver registered later
-   still finds already-discovered devices.
+1. Snapshot `(desc_id, binding lock)` pairs under the registry lock. The
+   snapshot includes both `Pending` and `Probing` descriptors.
+2. For each pair: skip only descriptors currently being bound by the same
+   context (`is_owned_by_current`, logged); otherwise acquire the binding
+   lock and recheck. Terminal-bind descriptors are skipped; `Pending` ones
+   are claimed and probed with candidates limited to the new driver.
+3. Acquiring the lock may wait for an in-flight probe. Rechecking afterwards
+   is what makes a later registration see the final state instead of a stale
+   snapshot. This removes driver load-order problems: a driver registered
+   later still finds already-discovered devices.
 
 ## Lock Ordering Rules
 
-The driver core uses multiple `SpinNoPreempt`-protected objects. To
-prevent deadlock, every path must follow:
+The driver core uses one sleepable binding lock per descriptor plus multiple
+`SpinNoPreempt`-protected objects. To prevent deadlock, every path must
+follow:
 
 ```text
-1. Registry (DeviceRegistry)     ← always acquired first
-2. BusInstance / BusTypeObject   ← after snapshotting Arcs, drop the
-                                    registry guard before accessing
-3. DeviceObject / DriverObject   ← innermost
+1. Descriptor binding lock (kmutex)  ← outermost; taken outside spinlocks
+2. Registry (DeviceRegistry)         ← may be taken while holding (1)
+3. BusInstance                       ← devices → drivers
+4. BusTypeObject / DriverObject /    ← innermost; DeviceObject state may be
+   DeviceObject state                   read under BusInstance.devices
 ```
 
 **Rules**:
 
+- acquire the descriptor binding lock only in sleepable task context and only
+  while holding no spinlock. Holding it may take the registry and per-object
+  locks; the reverse order is forbidden.
 - take the registry guard → snapshot the needed `Arc` handles →
-  **drop the registry guard** → access per-object locks.
+  **drop the registry guard** before taking a `BusInstance` lock; do not hold
+  the registry while blocking.
+- per-object order is `bus.devices` → `bus.drivers`, and `bus.devices` →
+  `DeviceObject` state. No path goes from `DeviceObject` state back to the
+  registry or a bus instance.
 - **Forbidden**: calling back into `device_registry()` while holding a
   per-object lock.
 - **Forbidden**: calling driver-core mutators from a lifecycle subscriber
@@ -449,6 +505,12 @@ write.
 
 ## Concurrency Model
 
+- **Descriptor binding lock**: one `kmutex::Mutex<()>` per descriptor entry,
+  stable across candidate rebuilds/failures/requeue/removal and shared by
+  every path that can bind or unbind that descriptor. It serializes probe,
+  driver-registration rescans, adoption publication and removal. The registry
+  only clones its `Arc`; blocking acquisition happens outside the registry
+  lock.
 - **`DeviceRegistry`**: one global `SpinNoPreempt`; all lookup/add/remove
   happen under it.
 - **`DeviceNodeRegistry`**: a separate global `SpinNoPreempt` protects node
@@ -461,14 +523,15 @@ write.
   `usage` uses `AtomicUsize`.
 - **`DriverObject`**: `bound_devices` under `SpinNoPreempt`; probe
   statistics in `AtomicU64`.
-- **`BusTypeObject`**: buses/pending_descriptors/drivers lists each under
-  `SpinNoPreempt`.
+- **`BusTypeObject`**: buses/drivers lists each under `SpinNoPreempt`.
 - **`ProbeCounters`**: `AtomicU64` with `Relaxed` ordering (statistics
   only).
 - **Id allocators**: `AtomicU64` + `Relaxed`, outside the registry lock.
 
-All locks are `SpinNoPreempt` (preemption disabled, interrupts enabled), so
-**none of this may be called from interrupt context**.
+Except for the descriptor binding lock, all locks are `SpinNoPreempt`
+(preemption disabled, interrupts enabled). The binding lock is a sleepable
+`kmutex`, so binding, adoption and removal require task context; waiting on it
+may block. **None of this may be called from interrupt context.**
 
 ## Design Decisions
 
@@ -482,8 +545,9 @@ exchange for:
 
 - descriptors can match repeatedly (after device removal the descriptor
   returns to Pending, letting a new driver take over);
-- the descriptor's `attempted` list tracks failed drivers and avoids
-  repeated probes;
+- each binding round tries every candidate in registration order once and
+  stops at the first successful probe, so a later registration cannot
+  overtake a binding that is in flight;
 - a `DeviceObject` is created only at probe time; unmatched devices never
   pay for a runtime object.
 
@@ -540,24 +604,46 @@ for:
 filtering. Simpler, but dispatch would walk every subscriber and filter by
 event kind.
 
+### Per-descriptor binding lock instead of priority/all-or-nothing
+
+**Choice**: one stable sleepable lock per descriptor serializes every binder.
+A round walks the candidate snapshot in registration order, stops at the first
+successful probe, and rolls each failed candidate back before trying the next.
+
+**Trade-off**: cross-thread contention blocks a task instead of failing fast,
+in exchange for:
+
+- no priority or "already attempted" bookkeeping that could starve a driver
+  or make the winner depend on timing;
+- a waiter always re-reads the descriptor after the lock, so it never
+  double-binds or observes a half-published device;
+- same-context recursion is still rejected (`Busy`) instead of self-
+  deadlocking `kmutex`.
+
+**Rejected alternatives**: priority ordering (ties and late registration make
+the outcome timing-dependent) and returning `Busy` on cross-thread contention
+(callers would have to invent a retry loop).
+
 ### Probe failure rollback: devres LIFO + detach_driver
 
-**Choice**: on probe failure:
+**Choice**: on a candidate's probe failure:
 
 1. `device.run_cleanups()` — run driver-registered devres (LIFO);
 2. `device.detach_driver()` — clear the driver binding;
-3. record the failed driver in `attempted`;
-4. requeue the descriptor.
+3. `device.mark_removed()` — make an accidentally retained object terminal;
+4. continue with the next candidate; when all fail, requeue the descriptor.
 
 **Trade-off**: every probe failure pays a full rollback, in exchange for:
 
 - partially initialized devices never leak resources (devres guarantees
   cleanup);
-- the attempted list prevents retrying the same driver forever;
-- the requeue lets the next reprobe try a different driver.
+- no event is emitted for a candidate that was never published, so
+  subscribers never observe a failed `DeviceId`;
+- the requeue lets the next reprobe try the same candidate set again.
 
-**Rejected alternative**: dropping the descriptor on probe failure. That
-cannot support "several drivers may match one device, tried by priority".
+**Rejected alternative**: keeping the failed driver in an `attempted` list.
+That avoids retrying one driver, but also suppresses legitimate retries after
+transient probe failures and complicates removal/requeue semantics.
 
 ### Registry + Arc snapshot pattern (instead of nested locks)
 

@@ -401,7 +401,11 @@ impl DeviceDesc {
 pub enum DeviceState {
     /// Discovered on a bus but not yet bound to a driver.
     Discovered = 0,
-    /// At least one driver matched and the probe pipeline is evaluating candidates.
+    /// A driver matched and its binding metadata was prepared, but the
+    /// device has not been announced as bound/active yet.
+    ///
+    /// Set by the binding-lock holder while the object is still unpublished,
+    /// so an observer never sees a device that lacks a driver identity.
     Matched    = 1,
     /// Bound to a driver.
     Bound      = 2,

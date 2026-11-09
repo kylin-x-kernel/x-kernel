@@ -609,6 +609,7 @@ Callers:
 | T-15 | Incorrect conversion between devres and kernel IRQ types causes bad IRQ configuration, lost handled results, or unwoken IRQ threads | Medium | The `driver-os-api-xkernel` adapter omits trigger/controller/handled/wake-thread fields | `driver-os-api-xkernel` centralizes `driver_os_api` to `kirq` conversion; device-specific queue routing stays in the driver, and the IRQ core does not depend on devres. |
 | T-16 | VirtIO input is published before its interrupt action is usable | Medium | Input construction succeeds but IRQ registration fails or races publication | `virtio/input.rs` requires an IRQ, registers its devres action first, and calls `publish_input` only after registration succeeds. |
 | T-17 | A stale or forged firmware-node handle lets probe read another device's properties | Medium | A handle is constructed for storage that has been freed, or one backend is confused with another | `FwNode` equality includes the backend pointer and local id; fallible backend queries return `FwError::InvalidNode` for unknown handles (infallible `name`/`parent` accessors return `None`); only boot-static backends are published; `kdriver` copies the handle resolved during discovery and never re-searches by name or compatible. |
+| T-18 | Two enumeration/driver-registration paths bind the same descriptor, producing duplicate devices or a deadlock | Medium | A backend rescans while a probe or another registration scan is in flight | `kdevice` serializes binders on the descriptor's stable binding lock; `kdriver` treats `Busy` (same-task recursion only) and core errors as "leave Pending, log, retry later", and `Skipped` as already bound. |
 
 Impact levels:
 
@@ -622,7 +623,7 @@ Impact levels:
 |----|--------------|-------|--------------|---------------|----------|------------|
 | F-01 | PCI bus enumeration fails | ECAM/MmioCam mapping failure or inaccessible configuration space | All PCI devices unavailable | PCI-dependent functions such as virtio-blk/net/gpu are unavailable | 2 | Log an error and return when `PciBus::new` fails, without blocking platform bus enumeration. |
 | F-02 | Firmware provides no device description | Missing DT/ACPI tables or `has_device_description()` returns `false` | No devices registered through firmware enumeration | Only static devices remain, such as ramdisk and compile-time AHCI/sdmmc | 3 | Static device discovery is independent of firmware; log at info level. |
-| F-03 | One device fails probe | The driver's `probe_device` returns an error | That device unavailable | Other devices on the same bus activate normally | 4 | Log the probe error at warn level and place the device in the unclaimed list; continue with subsequent devices. |
+| F-03 | One device fails probe | Every matching driver's `probe_device` returns an error | That descriptor stays `Pending`; no runtime object leaks | Other devices on the same bus activate normally; a later probe or driver registration may retry | 4 | `kdevice` rolls each candidate back and requeues; `kdriver` logs the `Unclaimed` outcome and places the descriptor in the unclaimed list, then continues with subsequent devices. |
 | F-04 | PCI BAR allocator uninitialized | `pci_bar_allocation_range()` returns `None` and a device has unassigned memory BARs | The PCI device is skipped | One PCI device unavailable | 3 | `configure_pci_device_if_needed` returns `NoMemory`, and the device is skipped. |
 | F-05 | VirtIO MMIO discovery returns no device | No VirtIO device in the region or a `MagicValue` mismatch | The MMIO region is skipped | Other platform devices unaffected | 4 | `probe_mmio_device` and then `virtio_mmio_registration` return `None`; log at trace level and skip the region. |
 | F-06 | IRQ handler registration fails | `kirq` rejects a shared action or its action limit is reached | The device cannot receive interrupts | Block and input devices are not published; no polling fallback | 3 | `request_irq` returns `Busy`; partial activation is dropped before probe returns an error. |
@@ -656,6 +657,19 @@ Severity levels:
   returns the corresponding error.
 - Unmatched devices enter the `unclaimed` list. `info!` logs their identity,
   location, and origin to help diagnose missing drivers.
+- There is no blacklist: a descriptor whose matching candidates all failed
+  stays eligible for a later probe or registration scan, and the probe
+  statistics are cumulative diagnostics rather than a cooldown.
+- Driver registration delegates to the `kdevice` scan, which waits on a
+  descriptor currently being bound by another task and rechecks after the
+  wait. Registration attempted from inside the same descriptor's probe is
+  logged and skipped, not retried automatically.
+- Re-entry across descriptors is not detected at runtime:
+  `is_owned_by_current()` only diagnoses the descriptor whose lock the current
+  task holds. Two tasks can each hold one descriptor lock and register a
+  driver, then wait on each other's descriptor. No global hold tracking exists;
+  auditing production probe and remove hooks for `register_driver_object` is
+  the current gate.
 - Except for the `expect` in `VirtIoHalImpl::mmio_phys_to_virt`, which runs only after
   the VirtIO transport has confirmed device presence, unsafe failure paths return
   `Result` or log errors.

@@ -2,12 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU32, Ordering};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use driver_base::{DeviceKind, DriverError, DriverResult};
 use fwnode::{FwError, FwIrqSpec, FwNode, FwNodeId, FwNodeOps, FwProperty, FwReference};
 use driver_os_api::{DmaInfo, DmaWindow};
+use kspin::SpinNoPreempt;
+use lazyinit::LazyInit;
 use unittest::{assert_eq, def_test};
 
 use super::*;
@@ -125,7 +127,7 @@ fn test_unmatched_descriptor_probe_does_not_create_runtime_object() {
     .unwrap();
 
     assert_eq!(crate::device_records_snapshot().len(), 0);
-    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Requeue);
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unmatched);
     assert_eq!(crate::device_records_snapshot().len(), 0);
 }
 
@@ -491,4 +493,973 @@ fn test_failed_probe_retry_preserves_descriptor_and_node() {
         crate::device_registry().find_device_desc(desc.id()).unwrap().id(),
         desc.id()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Candidate ordering, rollback, and binding-lock fixtures.
+// ---------------------------------------------------------------------------
+
+type ProbeFn = dyn Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync;
+
+struct TestDriver {
+    name: &'static str,
+    bus_types: &'static [BusTypeId],
+    matcher: Box<dyn crate::DeviceMatcher>,
+    probe: Arc<ProbeFn>,
+}
+
+impl DeviceDriver for TestDriver {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Char
+    }
+
+    fn bus_types(&self) -> &'static [BusTypeId] {
+        self.bus_types
+    }
+
+    fn matcher(&self) -> &dyn crate::DeviceMatcher {
+        self.matcher.as_ref()
+    }
+
+    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+        (self.probe)(device)
+    }
+}
+
+fn platform_driver(
+    name: &'static str,
+    matcher: impl crate::DeviceMatcher,
+    probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
+) -> Arc<dyn DeviceDriver> {
+    Arc::new(TestDriver {
+        name,
+        bus_types: &[BusTypeId::PLATFORM],
+        matcher: Box::new(matcher),
+        probe: Arc::new(probe),
+    })
+}
+
+struct CountingMatcher {
+    alias: &'static str,
+    calls: Arc<AtomicUsize>,
+}
+
+impl crate::DeviceMatcher for CountingMatcher {
+    fn matches(&self, desc: &DeviceDesc) -> MatchResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if desc.identity()
+            == DeviceIdentity::Platform(PlatformIdentity {
+                alias: Some(self.alias),
+                firmware_id: None,
+            })
+        {
+            MatchResult::Match
+        } else {
+            MatchResult::NoMatch
+        }
+    }
+}
+
+static TRACE: LazyInit<SpinNoPreempt<Vec<&'static str>>> = LazyInit::new();
+
+fn trace_slot() -> &'static SpinNoPreempt<Vec<&'static str>> {
+    TRACE.call_once(|| SpinNoPreempt::new(Vec::new()));
+    TRACE.get().unwrap()
+}
+
+fn trace_reset() {
+    trace_slot().lock().clear();
+}
+
+fn trace_push(entry: &'static str) {
+    trace_slot().lock().push(entry);
+}
+
+fn trace_snapshot() -> Vec<&'static str> {
+    trace_slot().lock().clone()
+}
+
+fn platform_desc(bus: &BusInstance, location_id: u16, alias: &'static str) -> DeviceDesc {
+    device_desc_add(DeviceDescSpec {
+        bus_id: bus.id(),
+        parent: None,
+        location: DeviceLocation::PlatformStatic { id: location_id },
+        origin: DiscoveryOrigin::PlatformStatic,
+        identity: DeviceIdentity::Platform(PlatformIdentity {
+            alias: Some(alias),
+            firmware_id: None,
+        }),
+        transport: None,
+        resources: ResourceSet::new(),
+        dma: None,
+        intx: None,
+        firmware_node: None,
+    })
+    .unwrap()
+}
+
+fn device_for_desc(id: DeviceDescId) -> Option<Arc<DeviceObject>> {
+    crate::device_registry().find_device_for_desc(id)
+}
+
+macro_rules! assert_desc_pending {
+    ($id:expr) => {
+        assert_eq!(
+            crate::device_registry().device_desc_state($id),
+            Some(crate::registry::DeviceDescState::Pending)
+        );
+    };
+}
+
+macro_rules! assert_trace {
+    ($expected:expr) => {{
+        let trace = trace_snapshot();
+        assert_eq!(trace.as_slice(), $expected);
+    }};
+}
+
+#[def_test(serial)]
+fn test_first_matching_driver_wins_in_registration_order() {
+    let bus = reset_model();
+    trace_reset();
+
+    let a = register_driver_object(platform_driver(
+        "ordered-a",
+        crate::CompatibleAliasMatcher("ordered"),
+        |_| {
+            trace_push("A-probe");
+            Ok(())
+        },
+    ));
+    let b = register_driver_object(platform_driver(
+        "ordered-b",
+        crate::CompatibleAliasMatcher("ordered"),
+        |_| {
+            trace_push("B-probe");
+            Ok(())
+        },
+    ));
+    let c = register_driver_object(platform_driver(
+        "ordered-c",
+        crate::CompatibleAliasMatcher("ordered"),
+        |_| {
+            trace_push("C-probe");
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 20, "ordered");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    assert_trace!(&["A-probe"]);
+    assert_eq!(
+        a.probe_stats(),
+        crate::ProbeStats {
+            attempts: 1,
+            failures: 0,
+        }
+    );
+    assert_eq!(b.probe_stats().attempts, 0);
+    assert_eq!(c.probe_stats().attempts, 0);
+}
+
+#[def_test(serial)]
+fn test_unmatched_descriptor_does_not_call_probe() {
+    let bus = reset_model();
+    trace_reset();
+    let driver = register_driver_object(platform_driver(
+        "unmatched-no-probe",
+        crate::CompatibleAliasMatcher("other-alias"),
+        |_| {
+            trace_push("probe");
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 21, "wanted-alias");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unmatched);
+    assert_eq!(driver.probe_stats().attempts, 0);
+    assert!(trace_snapshot().is_empty());
+    assert!(crate::device_records_snapshot().is_empty());
+}
+
+#[def_test(serial)]
+fn test_overlapping_matchers_use_registration_order() {
+    let bus = reset_model();
+    trace_reset();
+
+    let _first = register_driver_object(platform_driver(
+        "overlap-first",
+        crate::CompatibleAliasMatcher("overlap"),
+        |_| {
+            trace_push("first");
+            Ok(())
+        },
+    ));
+    let _second = register_driver_object(platform_driver(
+        "overlap-second",
+        crate::CompatibleAliasMatcher("overlap"),
+        |_| {
+            trace_push("second");
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 22, "overlap");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    assert_trace!(&["first"]);
+    assert_eq!(
+        device_for_desc(desc.id())
+            .unwrap()
+            .driver_name(),
+        Some("overlap-first")
+    );
+}
+
+#[def_test(serial)]
+fn test_failed_candidate_cleanup_precedes_next_probe() {
+    let bus = reset_model();
+    trace_reset();
+
+    let a = register_driver_object(platform_driver(
+        "cleanup-a",
+        crate::CompatibleAliasMatcher("cleanup"),
+        |device| {
+            trace_push("A-probe");
+            device.add_cleanup(|| trace_push("A-cleanup"));
+            Err(DriverError::Io)
+        },
+    ));
+    let b = register_driver_object(platform_driver(
+        "cleanup-b",
+        crate::CompatibleAliasMatcher("cleanup"),
+        |_| {
+            trace_push("B-probe");
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 23, "cleanup");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    assert_trace!(&["A-probe", "A-cleanup", "B-probe"]);
+    assert_eq!(
+        a.probe_stats(),
+        crate::ProbeStats {
+            attempts: 1,
+            failures: 1,
+        }
+    );
+    assert_eq!(
+        b.probe_stats(),
+        crate::ProbeStats {
+            attempts: 1,
+            failures: 0,
+        }
+    );
+    assert_eq!(
+        bus.probe_stats(),
+        crate::ProbeStats {
+            attempts: 2,
+            failures: 1,
+        }
+    );
+    assert!(a.bound_devices_snapshot().is_empty());
+
+    let bound = device_for_desc(desc.id()).unwrap();
+    let bound_on_b = b.bound_devices_snapshot();
+    assert_eq!(bound_on_b.as_slice(), [bound.id()]);
+    assert_eq!(bus.devices_snapshot().len(), 1);
+    assert_eq!(bus.devices_snapshot()[0].id(), bound.id());
+    let driver_ids = bus
+        .drivers_snapshot()
+        .iter()
+        .map(|driver| driver.id())
+        .collect::<Vec<_>>();
+    assert_eq!(driver_ids.as_slice(), [b.id()]);
+}
+
+#[def_test(serial)]
+fn test_all_candidates_fail_leaves_no_runtime_residue() {
+    let bus = reset_model();
+    trace_reset();
+
+    let a = register_driver_object(platform_driver(
+        "allfail-a",
+        crate::CompatibleAliasMatcher("allfail"),
+        |device| {
+            trace_push("A-probe");
+            device.add_cleanup(|| trace_push("A-cleanup"));
+            Err(DriverError::Io)
+        },
+    ));
+    let b = register_driver_object(platform_driver(
+        "allfail-b",
+        crate::CompatibleAliasMatcher("allfail"),
+        |device| {
+            trace_push("B-probe");
+            device.add_cleanup(|| trace_push("B-cleanup"));
+            Err(DriverError::Io)
+        },
+    ));
+
+    let desc = platform_desc(&bus, 24, "allfail");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unclaimed);
+    assert_trace!(&["A-probe", "A-cleanup", "B-probe", "B-cleanup"]);
+    assert!(crate::device_records_snapshot().is_empty());
+    assert!(device_for_desc(desc.id()).is_none());
+    assert!(a.bound_devices_snapshot().is_empty());
+    assert!(b.bound_devices_snapshot().is_empty());
+    assert!(bus.devices_snapshot().is_empty());
+    assert!(bus.drivers_snapshot().is_empty());
+    assert_desc_pending!(desc.id());
+}
+
+#[def_test(serial)]
+fn test_explicit_retry_reruns_original_drivers() {
+    let bus = reset_model();
+    trace_reset();
+
+    register_driver_object(platform_driver(
+        "retry-a",
+        crate::CompatibleAliasMatcher("retry"),
+        |_| {
+            trace_push("A-probe");
+            Err(DriverError::Io)
+        },
+    ));
+    register_driver_object(platform_driver(
+        "retry-b",
+        crate::CompatibleAliasMatcher("retry"),
+        |_| {
+            trace_push("B-probe");
+            Err(DriverError::Io)
+        },
+    ));
+
+    let desc = platform_desc(&bus, 25, "retry");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unclaimed);
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unclaimed);
+    assert_trace!(&["A-probe", "B-probe", "A-probe", "B-probe"]);
+    assert_desc_pending!(desc.id());
+}
+
+#[def_test(serial)]
+fn test_device_first_and_driver_first_share_binding() {
+    let bus = reset_model();
+
+    let a = register_driver_object(platform_driver(
+        "route-a",
+        crate::CompatibleAliasMatcher("route-a"),
+        |_| Ok(()),
+    ));
+    let desc_a = platform_desc(&bus, 30, "route-a");
+    let lock_a_before = crate::device_registry()
+        .binding_for_desc(desc_a.id())
+        .unwrap();
+    assert_eq!(
+        probe_device_desc(desc_a.id()).unwrap(),
+        ProbeOutcome::Activated
+    );
+    let lock_a_after = crate::device_registry()
+        .binding_for_desc(desc_a.id())
+        .unwrap();
+    assert!(Arc::ptr_eq(&lock_a_before, &lock_a_after));
+    let device_a = device_for_desc(desc_a.id()).unwrap();
+    assert_eq!(device_a.driver_name(), Some("route-a"));
+    assert_eq!(device_a.state(), DeviceState::Active);
+
+    let desc_b = platform_desc(&bus, 31, "route-b");
+    let lock_b_before = crate::device_registry()
+        .binding_for_desc(desc_b.id())
+        .unwrap();
+    let _b = register_driver_object(platform_driver(
+        "route-b",
+        crate::CompatibleAliasMatcher("route-b"),
+        |_| Ok(()),
+    ));
+    let lock_b_after = crate::device_registry()
+        .binding_for_desc(desc_b.id())
+        .unwrap();
+    assert!(Arc::ptr_eq(&lock_b_before, &lock_b_after));
+    let device_b = device_for_desc(desc_b.id()).unwrap();
+    assert_eq!(device_b.driver_name(), Some("route-b"));
+    assert_eq!(device_b.state(), DeviceState::Active);
+    let bound_on_a = a.bound_devices_snapshot();
+    assert_eq!(bound_on_a.as_slice(), [device_a.id()]);
+}
+
+#[def_test(serial)]
+fn test_binding_lock_survives_candidate_rebuild_and_requeue() {
+    let bus = reset_model();
+
+    register_driver_object(platform_driver(
+        "lock-a",
+        crate::CompatibleAliasMatcher("lock"),
+        |_| Err(DriverError::Io),
+    ));
+    register_driver_object(platform_driver(
+        "lock-b",
+        crate::CompatibleAliasMatcher("lock"),
+        |_| Err(DriverError::Io),
+    ));
+
+    let desc = platform_desc(&bus, 32, "lock");
+    let initial = crate::device_registry()
+        .binding_for_desc(desc.id())
+        .unwrap();
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unclaimed);
+    let after_first = crate::device_registry()
+        .binding_for_desc(desc.id())
+        .unwrap();
+    assert!(Arc::ptr_eq(&initial, &after_first));
+
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unclaimed);
+    let after_retry = crate::device_registry()
+        .binding_for_desc(desc.id())
+        .unwrap();
+    assert!(Arc::ptr_eq(&initial, &after_retry));
+    assert_desc_pending!(desc.id());
+}
+
+#[def_test(serial)]
+fn test_new_driver_does_not_preempt_bound_device() {
+    let bus = reset_model();
+
+    let _a = register_driver_object(platform_driver(
+        "preempt-a",
+        crate::CompatibleAliasMatcher("preempt"),
+        |_| Ok(()),
+    ));
+    let desc = platform_desc(&bus, 33, "preempt");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+
+    let b = register_driver_object(platform_driver(
+        "preempt-b",
+        crate::CompatibleAliasMatcher("preempt"),
+        |_| Ok(()),
+    ));
+    assert_eq!(b.probe_stats().attempts, 0);
+    assert!(b.bound_devices_snapshot().is_empty());
+    assert_eq!(
+        device_for_desc(desc.id())
+            .unwrap()
+            .driver_name(),
+        Some("preempt-a")
+    );
+}
+
+#[def_test(serial)]
+fn test_scan_includes_probing_descriptor() {
+    let bus = reset_model();
+
+    let pending = platform_desc(&bus, 40, "scan-pending");
+    let probing = platform_desc(&bus, 41, "scan-probing");
+    let binding = crate::device_registry()
+        .binding_for_desc(probing.id())
+        .unwrap();
+    let guard = binding.lock();
+    assert!(
+        crate::device_registry()
+            .mark_device_desc_probing(probing.id())
+            .is_some()
+    );
+
+    let awaiting = crate::device_registry()
+        .descriptors_awaiting_binding(&[BusTypeId::PLATFORM]);
+    let ids = awaiting.iter().map(|entry| entry.id).collect::<Vec<_>>();
+    assert!(ids.contains(&pending.id()));
+    assert!(ids.contains(&probing.id()));
+
+    drop(guard);
+    crate::device_registry().requeue_device_desc(probing.id());
+}
+
+#[def_test(serial)]
+fn test_same_descriptor_registration_is_diagnosed_locally() {
+    let bus = reset_model();
+    trace_reset();
+
+    let registrations = Arc::new(AtomicUsize::new(0));
+    let registrations_in_probe = registrations.clone();
+    register_driver_object(platform_driver(
+        "local-a",
+        crate::CompatibleAliasMatcher("local"),
+        move |_| {
+            trace_push("A-probe");
+            if registrations_in_probe.fetch_add(1, Ordering::SeqCst) == 0 {
+                register_driver_object(platform_driver(
+                    "local-b",
+                    crate::CompatibleAliasMatcher("local"),
+                    |_| {
+                        trace_push("B-probe");
+                        Ok(())
+                    },
+                ));
+            }
+            Err(DriverError::Io)
+        },
+    ));
+
+    let desc = platform_desc(&bus, 42, "local");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unclaimed);
+    assert_trace!(&["A-probe"]);
+    let b = crate::find_driver_by_name("local-b").unwrap();
+    assert_eq!(b.probe_stats().attempts, 0);
+    assert!(b.bound_devices_snapshot().is_empty());
+
+    // The explicit retry is the only path that lets B attempt this
+    // descriptor; the local diagnostic never auto-retries it.
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    assert_trace!(&["A-probe", "A-probe", "B-probe"]);
+    assert_eq!(
+        device_for_desc(desc.id())
+            .unwrap()
+            .driver_name(),
+        Some("local-b")
+    );
+}
+
+static CHILD_DESC: AtomicU64 = AtomicU64::new(u64::MAX);
+
+#[def_test(serial)]
+fn test_probe_registers_child_without_binding_lock() {
+    let bus = reset_model();
+    let bus_id = bus.id();
+    CHILD_DESC.store(u64::MAX, Ordering::SeqCst);
+
+    register_driver_object(platform_driver(
+        "child-parent",
+        crate::CompatibleAliasMatcher("parent"),
+        move |_| {
+            let child = device_desc_add(DeviceDescSpec {
+                bus_id,
+                parent: None,
+                location: DeviceLocation::PlatformStatic { id: 43 },
+                origin: DiscoveryOrigin::PlatformStatic,
+                identity: DeviceIdentity::Platform(PlatformIdentity {
+                    alias: Some("child"),
+                    firmware_id: None,
+                }),
+                transport: None,
+                resources: ResourceSet::new(),
+                dma: None,
+                intx: None,
+                firmware_node: None,
+            })
+            .unwrap();
+            CHILD_DESC.store(child.id().raw(), Ordering::SeqCst);
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 44, "parent");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+
+    let child_id = DeviceDescId::new(CHILD_DESC.load(Ordering::SeqCst));
+    assert_desc_pending!(child_id);
+    assert!(device_for_desc(child_id).is_none());
+}
+
+#[def_test(serial)]
+fn test_nonmatching_driver_evaluated_once_per_round() {
+    let bus = reset_model();
+    trace_reset();
+
+    let a = register_driver_object(platform_driver(
+        "round-a",
+        crate::CompatibleAliasMatcher("round"),
+        |_| {
+            trace_push("A-probe");
+            Err(DriverError::Io)
+        },
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let b = register_driver_object(platform_driver(
+        "round-b",
+        CountingMatcher {
+            alias: "never",
+            calls: calls.clone(),
+        },
+        |_| {
+            trace_push("B-probe");
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 45, "round");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unclaimed);
+    assert_eq!(a.probe_stats().attempts, 1);
+    assert_eq!(b.probe_stats().attempts, 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unclaimed);
+    assert_eq!(a.probe_stats().attempts, 2);
+    assert_eq!(b.probe_stats().attempts, 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_trace!(&["A-probe", "A-probe"]);
+}
+
+#[def_test(serial)]
+fn test_core_preparation_failure_is_an_error() {
+    let bus = reset_model();
+    trace_reset();
+
+    let a = register_driver_object(platform_driver(
+        "core-a",
+        crate::CompatibleAliasMatcher("core"),
+        |device| {
+            trace_push("A-probe");
+            device.add_cleanup(|| trace_push("A-cleanup"));
+            Err(DriverError::Io)
+        },
+    ));
+    let b = register_driver_object(platform_driver(
+        "core-b",
+        crate::CompatibleAliasMatcher("core"),
+        |_| {
+            trace_push("B-probe");
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 46, "core");
+    // Let A's candidate be built and probed; fail B's construction.
+    crate::test_hooks::fail_device_construction_after(1);
+    assert_eq!(
+        probe_device_desc(desc.id()),
+        Err(DriverError::NoMemory)
+    );
+    assert_trace!(&["A-probe", "A-cleanup"]);
+    assert!(crate::device_records_snapshot().is_empty());
+    assert!(a.bound_devices_snapshot().is_empty());
+    assert!(b.bound_devices_snapshot().is_empty());
+    assert_desc_pending!(desc.id());
+}
+
+#[def_test(serial)]
+fn test_no_candidate_does_not_report_success() {
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 47, "no-candidate");
+    let outcome = probe_device_desc(desc.id()).unwrap();
+    assert_eq!(outcome, ProbeOutcome::Unmatched);
+    assert!(!outcome.activated());
+    assert!(crate::device_records_snapshot().is_empty());
+    assert!(device_for_desc(desc.id()).is_none());
+}
+
+static NODE_OBSERVATIONS: LazyInit<SpinNoPreempt<Vec<u32>>> = LazyInit::new();
+
+fn node_observation_slot() -> &'static SpinNoPreempt<Vec<u32>> {
+    NODE_OBSERVATIONS.call_once(|| SpinNoPreempt::new(Vec::new()));
+    NODE_OBSERVATIONS.get().unwrap()
+}
+
+fn record_observed_node(device: &DeviceObject) {
+    node_observation_slot()
+        .lock()
+        .push(device.firmware_node().map_or(u32::MAX, |node| node.id().raw()));
+}
+
+#[def_test(serial)]
+fn test_failed_attempts_keep_descriptor_identity_and_fwnode() {
+    let bus = reset_model();
+    node_observation_slot().lock().clear();
+
+    register_driver_object(platform_driver(
+        "node-fail",
+        crate::CompatibleAliasMatcher("node-shared"),
+        |device| {
+            record_observed_node(&device);
+            Err(DriverError::Io)
+        },
+    ));
+    register_driver_object(platform_driver(
+        "node-win",
+        crate::CompatibleAliasMatcher("node-shared"),
+        |device| {
+            record_observed_node(&device);
+            Ok(())
+        },
+    ));
+
+    let node = fake_node();
+    let desc = node_desc(&bus, 48, "node-shared", Some(node));
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    let observed = node_observation_slot().lock();
+    assert_eq!(observed.as_slice(), [FAKE_NODE_RAW, FAKE_NODE_RAW]);
+    assert_eq!(
+        crate::device_registry().find_device_desc(desc.id()).unwrap().id(),
+        desc.id()
+    );
+    let bound = device_for_desc(desc.id()).unwrap();
+    assert_eq!(bound.firmware_node(), Some(node));
+    assert_eq!(bound.driver_name(), Some("node-win"));
+}
+
+static EVENT_TRACE: LazyInit<SpinNoPreempt<Vec<(crate::DeviceEventKind, DeviceId)>>> =
+    LazyInit::new();
+
+fn event_trace_slot() -> &'static SpinNoPreempt<Vec<(crate::DeviceEventKind, DeviceId)>> {
+    EVENT_TRACE.call_once(|| SpinNoPreempt::new(Vec::new()));
+    EVENT_TRACE.get().unwrap()
+}
+
+fn event_id(event: crate::DeviceEvent) -> DeviceId {
+    match event {
+        crate::DeviceEvent::Published { id }
+        | crate::DeviceEvent::Matched { id }
+        | crate::DeviceEvent::Removed { id } => id,
+        crate::DeviceEvent::Bound { id, .. } | crate::DeviceEvent::Activated { id, .. } => id,
+    }
+}
+
+fn subscribe_all_events() {
+    for kind in [
+        crate::DeviceEventKind::Published,
+        crate::DeviceEventKind::Matched,
+        crate::DeviceEventKind::Bound,
+        crate::DeviceEventKind::Activated,
+        crate::DeviceEventKind::Removed,
+    ] {
+        crate::subscribe_device_event_kind(
+            kind,
+            Arc::new(|event| event_trace_slot().lock().push((event.kind(), event_id(event)))),
+        );
+    }
+}
+
+static FAILED_EVENT_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+
+#[def_test(serial)]
+fn test_failed_attempt_has_no_lifecycle_events() {
+    let bus = reset_model();
+    event_trace_slot().lock().clear();
+    subscribe_all_events();
+    FAILED_EVENT_ID.store(u64::MAX, Ordering::SeqCst);
+
+    register_driver_object(platform_driver(
+        "events-fail",
+        crate::CompatibleAliasMatcher("events"),
+        |device| {
+            FAILED_EVENT_ID.store(device.id().raw(), Ordering::SeqCst);
+            Err(DriverError::Io)
+        },
+    ));
+    register_driver_object(platform_driver(
+        "events-win",
+        crate::CompatibleAliasMatcher("events"),
+        |_| Ok(()),
+    ));
+
+    let desc = platform_desc(&bus, 49, "events");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+
+    let failed_id = DeviceId::new(FAILED_EVENT_ID.load(Ordering::SeqCst));
+    let bound = device_for_desc(desc.id()).unwrap();
+    let trace = event_trace_slot().lock().clone();
+    assert!(
+        trace.iter().all(|(_, id)| *id != failed_id),
+        "failed candidate leaked an event: {trace:?}"
+    );
+    let success_kinds = trace
+        .iter()
+        .filter(|(_, id)| *id == bound.id())
+        .map(|(kind, _)| *kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        success_kinds.as_slice(),
+        [
+            crate::DeviceEventKind::Matched,
+            crate::DeviceEventKind::Bound,
+            crate::DeviceEventKind::Published,
+            crate::DeviceEventKind::Activated,
+        ]
+    );
+}
+
+static FAILED_DEVICE: LazyInit<SpinNoPreempt<Option<Arc<DeviceObject>>>> = LazyInit::new();
+
+fn failed_device_slot() -> &'static SpinNoPreempt<Option<Arc<DeviceObject>>> {
+    FAILED_DEVICE.call_once(|| SpinNoPreempt::new(None));
+    FAILED_DEVICE.get().unwrap()
+}
+
+#[def_test(serial)]
+fn test_failed_object_external_reference_is_terminal() {
+    let bus = reset_model();
+    *failed_device_slot().lock() = None;
+
+    register_driver_object(platform_driver(
+        "terminal-fail",
+        crate::CompatibleAliasMatcher("terminal"),
+        |device| {
+            *failed_device_slot().lock() = Some(device.clone());
+            Err(DriverError::Io)
+        },
+    ));
+    register_driver_object(platform_driver(
+        "terminal-win",
+        crate::CompatibleAliasMatcher("terminal"),
+        |_| Ok(()),
+    ));
+
+    let desc = platform_desc(&bus, 50, "terminal");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+
+    let failed = failed_device_slot().lock().take().unwrap();
+    let failed_id = failed.id();
+    assert_eq!(failed.state(), DeviceState::Removed);
+    assert_eq!(failed.driver_id(), None);
+    assert!(failed.try_acquire().is_none());
+    assert!(crate::find_device(failed_id).is_none());
+
+    let bound = device_for_desc(desc.id()).unwrap();
+    assert_ne!(bound.id(), failed_id);
+}
+
+static RECURSIVE_DESC: AtomicU64 = AtomicU64::new(u64::MAX);
+static RECURSIVE_PROBES: AtomicUsize = AtomicUsize::new(0);
+static INNER_OUTCOME: LazyInit<SpinNoPreempt<Option<ProbeOutcome>>> = LazyInit::new();
+
+fn inner_outcome_slot() -> &'static SpinNoPreempt<Option<ProbeOutcome>> {
+    INNER_OUTCOME.call_once(|| SpinNoPreempt::new(None));
+    INNER_OUTCOME.get().unwrap()
+}
+
+#[def_test(serial)]
+fn test_same_device_recursive_probe_returns_busy() {
+    let bus = reset_model();
+    RECURSIVE_PROBES.store(0, Ordering::SeqCst);
+    *inner_outcome_slot().lock() = None;
+
+    register_driver_object(platform_driver(
+        "recursive",
+        crate::CompatibleAliasMatcher("recursive"),
+        |_| {
+            RECURSIVE_PROBES.fetch_add(1, Ordering::SeqCst);
+            let id = DeviceDescId::new(RECURSIVE_DESC.load(Ordering::SeqCst));
+            *inner_outcome_slot().lock() = Some(probe_device_desc(id).unwrap());
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 51, "recursive");
+    RECURSIVE_DESC.store(desc.id().raw(), Ordering::SeqCst);
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    assert_eq!(*inner_outcome_slot().lock(), Some(ProbeOutcome::Busy));
+    assert_eq!(RECURSIVE_PROBES.load(Ordering::SeqCst), 1);
+}
+
+#[def_test(serial)]
+fn test_remove_unbinds_and_requeues_descriptor() {
+    let bus = reset_model();
+    trace_reset();
+
+    let driver = register_driver_object(platform_driver(
+        "remove-a",
+        crate::CompatibleAliasMatcher("remove"),
+        |device| {
+            trace_push("probe");
+            device.add_cleanup(|| trace_push("cleanup"));
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 52, "remove");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    let old_id = device_for_desc(desc.id()).unwrap().id();
+
+    assert_eq!(remove_device_managed(old_id), Ok(()));
+    assert!(crate::find_device(old_id).is_none());
+    assert!(crate::device_records_snapshot().is_empty());
+    assert!(bus.devices_snapshot().is_empty());
+    assert!(bus.drivers_snapshot().is_empty());
+    assert!(driver.bound_devices_snapshot().is_empty());
+    assert_desc_pending!(desc.id());
+    assert_trace!(&["probe", "cleanup"]);
+
+    // The descriptor identity survives removal and may be bound again; the
+    // new runtime object gets a fresh `DeviceId`.
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    let new_id = device_for_desc(desc.id()).unwrap().id();
+    assert_ne!(new_id, old_id);
+}
+
+#[def_test(serial)]
+fn test_bus_driver_listing_survives_shared_removal() {
+    let bus = reset_model();
+
+    let driver = register_driver_object(platform_driver(
+        "shared-bus",
+        crate::CompatibleAliasMatcher("shared-bus"),
+        |_| Ok(()),
+    ));
+
+    let first_desc = platform_desc(&bus, 53, "shared-bus");
+    let second_desc = platform_desc(&bus, 54, "shared-bus");
+    assert_eq!(
+        probe_device_desc(first_desc.id()).unwrap(),
+        ProbeOutcome::Activated
+    );
+    assert_eq!(
+        probe_device_desc(second_desc.id()).unwrap(),
+        ProbeOutcome::Activated
+    );
+    let first_id = device_for_desc(first_desc.id()).unwrap().id();
+    let second_id = device_for_desc(second_desc.id()).unwrap().id();
+
+    assert_eq!(remove_device_managed(first_id), Ok(()));
+    let driver_ids = bus
+        .drivers_snapshot()
+        .iter()
+        .map(|driver| driver.id())
+        .collect::<Vec<_>>();
+    assert_eq!(driver_ids.as_slice(), [driver.id()]);
+    let device_ids = bus
+        .devices_snapshot()
+        .iter()
+        .map(|device| device.id())
+        .collect::<Vec<_>>();
+    assert_eq!(device_ids.as_slice(), [second_id]);
+
+    assert_eq!(remove_device_managed(second_id), Ok(()));
+    assert!(bus.drivers_snapshot().is_empty());
+    assert!(bus.devices_snapshot().is_empty());
+}
+
+#[def_test(serial)]
+fn test_bus_attach_sees_binding_metadata() {
+    let bus = reset_model();
+
+    let driver = register_driver_object(platform_driver(
+        "attach-meta",
+        crate::CompatibleAliasMatcher("attach-meta"),
+        |_| Ok(()),
+    ));
+
+    let desc = platform_desc(&bus, 55, "attach-meta");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    let adopted = adopt_active_device(ActiveDeviceAdoption {
+        bus_id: bus.id(),
+        parent: None,
+        location: DeviceLocation::PlatformStatic { id: 56 },
+        origin: DiscoveryOrigin::PlatformStatic,
+        identity: DeviceIdentity::Platform(PlatformIdentity {
+            alias: Some("adopted-meta"),
+            firmware_id: None,
+        }),
+        transport: None,
+        resources: ResourceSet::new(),
+        dma: None,
+        driver,
+    })
+    .unwrap();
+
+    assert_eq!(adopted.driver_name(), Some("attach-meta"));
+    let listed = bus.devices_snapshot();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().all(|device| device.driver_id().is_some()));
 }

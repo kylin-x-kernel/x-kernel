@@ -45,6 +45,9 @@ display = ["dep:display", "kclass/display"]
 input = ["dep:input", "kclass/input"]
 vsock = ["dep:vsock", "kclass/vsock"]
 dma-trace = ["dep:kdma", "kdma/dma-trace"]
+# Dedicated test-only feature for the descriptor binding cross-thread
+# regressions. It must not ride on a concrete driver feature such as `block`.
+unittest-threads = ["dep:ktask", "dep:ksync"]
 
 # Concrete driver selection now gates directly on Cargo features; there is no
 # build.rs-generated cfg translation layer anymore.

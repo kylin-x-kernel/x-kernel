@@ -441,9 +441,7 @@ impl DeviceMatcher for AliasMatcher {
     fn matches(&self, desc: &DeviceDesc) -> MatchResult {
         match desc.identity() {
             DeviceIdentity::Platform(platform) if platform.alias == Some(self.0) => {
-                MatchResult::Match {
-                    priority: kdevice::priority::EXACT,
-                }
+                MatchResult::Match
             }
             _ => MatchResult::NoMatch,
         }

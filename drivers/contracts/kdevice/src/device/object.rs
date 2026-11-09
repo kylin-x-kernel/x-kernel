@@ -317,14 +317,18 @@ impl DeviceObject {
 
     /// Mark the device as matched.
     ///
-    /// Driver-core-internal: call via `lifecycle::dispatch::mark_device_matched`.
+    /// Driver-core-internal: call via
+    /// `lifecycle::dispatch::prepare_device_binding` while the object is still
+    /// unpublished.
     pub(crate) fn mark_matched(&self) {
         self.store_state(DeviceState::Matched);
     }
 
     /// Bind this device to a driver object.
     ///
-    /// Driver-core-internal: call via `lifecycle::dispatch::bind_device_to_driver`.
+    /// Driver-core-internal: call via
+    /// `lifecycle::dispatch::prepare_device_binding` while the object is still
+    /// unpublished.
     pub(crate) fn bind_driver(
         &self,
         driver_id: DriverId,

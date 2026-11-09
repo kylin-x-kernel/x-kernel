@@ -62,7 +62,17 @@ impl EnumerationContext {
             match kdevice::probe_device_desc(desc.id()) {
                 Ok(ProbeOutcome::Activated) => activated += 1,
                 Ok(ProbeOutcome::Skipped) => {}
-                Ok(ProbeOutcome::Requeue | ProbeOutcome::Unclaimed) => self.add_unclaimed(desc),
+                Ok(ProbeOutcome::Unmatched | ProbeOutcome::Unclaimed) => self.add_unclaimed(desc),
+                Ok(ProbeOutcome::Busy) => {
+                    // Same-context re-entry means a probe path tried to bind
+                    // the descriptor it is already handling. The descriptor
+                    // remains Pending and a later pass can retry it.
+                    log::warn!(
+                        "descriptor {:?} is already being bound on this task",
+                        desc.id()
+                    );
+                    self.add_unclaimed(desc);
+                }
                 Err(err) => {
                     log::warn!(
                         "failed to probe descriptor {:?} ({:?} at {:?}): {:?}",
@@ -102,3 +112,7 @@ impl Default for EnumerationContext {
 }
 
 unittest::path_mod_test!(enumeration_unittest, "../ut-tests/enumeration_unittest.rs");
+unittest::path_mod_test!(
+    descriptor_binding_unittest,
+    "../ut-tests/descriptor_binding_unittest.rs"
+);

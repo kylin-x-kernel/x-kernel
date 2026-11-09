@@ -101,6 +101,19 @@ impl BusManager {
             }
         }
     }
+
+    /// Test hook: the PCI backend's held host/bridge driver handles.
+    #[cfg(unittest)]
+    pub(crate) fn pci_driver_handles(
+        &self,
+    ) -> Option<(
+        alloc::sync::Arc<kdevice::DriverObject>,
+        alloc::sync::Arc<kdevice::DriverObject>,
+    )> {
+        self.backends
+            .iter()
+            .find_map(|(_, backend)| backend.pci_driver_handles())
+    }
 }
 
 impl Default for BusManager {
@@ -114,6 +127,11 @@ impl Default for BusManager {
 ///
 /// Registers built-in bus type matchers (PCI and Platform) before creating bus
 /// instances, so that each backend finds its pre-registered matcher.
+///
+/// Constructing the default PCI backend also registers its synthetic
+/// host/bridge drivers. Registration allocates and retries descriptors already
+/// pending for those bus types, so call this from a sleepable context: do not
+/// hold a spinlock or any other lock that forbids sleeping.
 pub fn default_bus_manager() -> BusManager {
     use alloc::sync::Arc;
 
@@ -137,3 +155,8 @@ pub fn default_bus_manager() -> BusManager {
 
     manager
 }
+
+unittest::path_mod_test!(
+    default_manager_unittest,
+    "../../ut-tests/default_manager.rs"
+);

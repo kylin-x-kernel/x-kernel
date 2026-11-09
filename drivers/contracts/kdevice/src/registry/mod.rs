@@ -7,6 +7,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use kmutex::Mutex;
 use kspin::{SpinNoPreempt, SpinNoPreemptGuard};
 use lazyinit::LazyInit;
 
@@ -57,20 +58,34 @@ pub(crate) enum DeviceDescState {
 struct DeviceDescEntry {
     desc: DeviceDesc,
     state: DeviceDescState,
-    /// Drivers that have already been probed against this descriptor and
-    /// failed. Used so reprobe passes move on to the next-best candidate
-    /// instead of endlessly reselecting the same failing driver.
-    attempted: Vec<DriverId>,
+    /// Serializes binding attempts for this descriptor.
+    ///
+    /// The object is stable across candidate rebuilds, probe failures and
+    /// requeue/remove, so every path that can bind or unbind this descriptor
+    /// contends on the same lock. It is deliberately not stored on
+    /// `DeviceObject`: a failed candidate's object is discarded, while the
+    /// descriptor outlives it. The registry only clones the `Arc`; blocking
+    /// acquisition happens outside the registry spinlock.
+    binding: Arc<Mutex<()>>,
 }
 
 impl DeviceDescEntry {
-    fn pending(desc: DeviceDesc) -> Self {
+    fn pending(desc: DeviceDesc, binding: Arc<Mutex<()>>) -> Self {
         Self {
             desc,
             state: DeviceDescState::Pending,
-            attempted: Vec::new(),
+            binding,
         }
     }
+}
+
+/// Descriptor ID plus its binding lock handle.
+///
+/// Used by paths that snapshot descriptors under the registry lock and must
+/// then acquire each descriptor's binding lock outside it.
+pub(crate) struct DescBindingRef {
+    pub id: DeviceDescId,
+    pub binding: Arc<Mutex<()>>,
 }
 
 /// Short-lock index for long-lived driver-core objects.
@@ -126,12 +141,42 @@ impl DeviceRegistry {
         self.descriptors.get(&id).map(|entry| entry.desc.clone())
     }
 
-    /// Find a descriptor only if it is still waiting for a matching driver.
-    pub(crate) fn find_pending_device_desc(&self, id: DeviceDescId) -> Option<DeviceDesc> {
+    /// Clone the binding lock handle for a descriptor.
+    ///
+    /// Callers acquire the returned lock outside the registry lock.
+    pub(crate) fn binding_for_desc(&self, id: DeviceDescId) -> Option<Arc<Mutex<()>>> {
+        self.descriptors.get(&id).map(|entry| entry.binding.clone())
+    }
+
+    /// Snapshot descriptors that still need a binding attempt on one of
+    /// `bus_types`.
+    ///
+    /// Includes both `Pending` and `Probing` descriptors. A descriptor that is
+    /// being bound right now must not be omitted: the scanner acquires its
+    /// binding lock, waits for the current attempt, and rechecks the state.
+    /// Collecting the IDs and lock handles under the registry lock is safe;
+    /// blocking on them is not.
+    pub(crate) fn descriptors_awaiting_binding(
+        &self,
+        bus_types: &[BusTypeId],
+    ) -> Vec<DescBindingRef> {
         self.descriptors
-            .get(&id)
-            .filter(|entry| entry.state == DeviceDescState::Pending)
-            .map(|entry| entry.desc.clone())
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(
+                    entry.state,
+                    DeviceDescState::Pending | DeviceDescState::Probing
+                )
+            })
+            .filter(|(_, entry)| {
+                self.find_bus(entry.desc.bus_id())
+                    .is_some_and(|bus| bus_types.contains(&bus.bus_type()))
+            })
+            .map(|(id, entry)| DescBindingRef {
+                id: *id,
+                binding: entry.binding.clone(),
+            })
+            .collect()
     }
 
     /// Return the descriptor-first lifecycle state.
@@ -153,16 +198,33 @@ impl DeviceRegistry {
         self.devices.get(&id).cloned()
     }
 
-    pub(crate) fn add_device_desc(&mut self, desc: DeviceDesc) {
+    /// Register a descriptor with the binding lock object that will serialize
+    /// every attempt to bind it.
+    ///
+    /// The caller constructs `binding` before taking the registry lock; the
+    /// lock is never created or acquired here. Re-registering an existing ID
+    /// refreshes the descriptor copy but keeps the existing lock object and
+    /// lifecycle state.
+    pub(crate) fn add_device_desc_with_binding(
+        &mut self,
+        desc: DeviceDesc,
+        binding: Arc<Mutex<()>>,
+    ) {
         match self.descriptors.get_mut(&desc.id()) {
             Some(existing) => existing.desc = desc,
             None => {
                 let id = desc.id();
-                self.descriptors.insert(id, DeviceDescEntry::pending(desc));
+                self.descriptors
+                    .insert(id, DeviceDescEntry::pending(desc, binding));
             }
         }
     }
 
+    /// Claim a `Pending` descriptor for a binding attempt.
+    ///
+    /// The caller must already hold the descriptor's binding lock. Moving the
+    /// state to `Probing` is only valid for the lock holder, which is what
+    /// makes the state safe to re-read after waiting.
     pub(crate) fn mark_device_desc_probing(&mut self, id: DeviceDescId) -> Option<DeviceDesc> {
         let entry = self.descriptors.get_mut(&id)?;
         if entry.state != DeviceDescState::Pending {
@@ -180,23 +242,53 @@ impl DeviceRegistry {
         }
     }
 
-    /// Record that `driver_id` was probed against the descriptor and failed,
-    /// so subsequent reprobe passes skip it and try the next-best candidate.
-    pub(crate) fn mark_device_desc_attempted(&mut self, id: DeviceDescId, driver_id: DriverId) {
-        if let Some(entry) = self.descriptors.get_mut(&id)
-            && !entry.attempted.contains(&driver_id)
-        {
-            entry.attempted.push(driver_id);
+    /// Restore `Pending` only if the descriptor is still bound to
+    /// `device_id`.
+    ///
+    /// The caller holds the descriptor's binding lock and rechecks after any
+    /// wait, so this cannot requeue a descriptor that another path already
+    /// rebound to a newer device.
+    pub(crate) fn requeue_device_desc_if_bound(
+        &mut self,
+        id: DeviceDescId,
+        device_id: DeviceId,
+    ) -> bool {
+        match self.descriptors.get_mut(&id) {
+            Some(entry) if entry.state == DeviceDescState::Bound(device_id) => {
+                entry.state = DeviceDescState::Pending;
+                true
+            }
+            _ => false,
         }
     }
 
-    /// Snapshot the set of drivers already attempted (and failed) for a
-    /// descriptor.
-    pub(crate) fn device_desc_attempted(&self, id: DeviceDescId) -> Vec<DriverId> {
-        self.descriptors
-            .get(&id)
-            .map(|entry| entry.attempted.clone())
-            .unwrap_or_default()
+    /// Whether `id` is still bound to exactly `device_id`.
+    pub(crate) fn device_desc_is_bound_to(&self, id: DeviceDescId, device_id: DeviceId) -> bool {
+        matches!(
+            self.descriptors.get(&id).map(|entry| entry.state),
+            Some(DeviceDescState::Bound(bound)) if bound == device_id
+        )
+    }
+
+    /// Return the unique descriptor currently bound to `device_id`.
+    ///
+    /// Exactly one descriptor must own a published device. Zero or multiple
+    /// matches mean the 1:1 invariant is broken; callers treat that as
+    /// `BadState` and must not perform partial teardown.
+    pub(crate) fn descriptor_bound_to_device(&self, device_id: DeviceId) -> Option<DescBindingRef> {
+        let mut found = None;
+        for (id, entry) in &self.descriptors {
+            if entry.state == DeviceDescState::Bound(device_id) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(DescBindingRef {
+                    id: *id,
+                    binding: entry.binding.clone(),
+                });
+            }
+        }
+        found
     }
 
     pub(crate) fn bind_device_desc(&mut self, desc_id: DeviceDescId, device_id: DeviceId) {
@@ -214,20 +306,6 @@ impl DeviceRegistry {
                 entry.desc.clear_parent();
             }
         }
-    }
-
-    pub(crate) fn requeue_device_descs_for_device(&mut self, id: DeviceId) -> Vec<DeviceDescId> {
-        let mut desc_ids = Vec::new();
-        for entry in self.descriptors.values_mut() {
-            if entry.state == DeviceDescState::Bound(id) {
-                entry.state = DeviceDescState::Pending;
-                // The device was torn down; allow previously-failed drivers to
-                // be reconsidered on the next probe round.
-                entry.attempted.clear();
-                desc_ids.push(entry.desc.id());
-            }
-        }
-        desc_ids
     }
 
     /// Find a bus object.

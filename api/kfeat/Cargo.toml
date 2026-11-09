@@ -23,6 +23,7 @@ kernel-tests = [
     "dep:krcu-list-kernel-tests",
     "dep:kxarray",
     "dep:kxarray-kernel-tests",
+    "kdriver/unittest-threads",
     "kvmm?/kernel-tests",
     "kvmm-api?/kernel-tests",
 ]

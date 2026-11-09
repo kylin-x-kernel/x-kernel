@@ -31,6 +31,21 @@ pub trait BusBackend: Send {
         Ok(())
     }
 
+    /// Test hook: driver handles the backend holds for enumeration.
+    ///
+    /// Only the default PCI backend returns its synthetic host/bridge
+    /// handles; every other backend keeps the default. Compiled only for
+    /// unit tests so the production trait stays unchanged.
+    #[cfg(unittest)]
+    fn pci_driver_handles(
+        &self,
+    ) -> Option<(
+        alloc::sync::Arc<kdevice::DriverObject>,
+        alloc::sync::Arc<kdevice::DriverObject>,
+    )> {
+        None
+    }
+
     /// Enumerate devices on this bus and register them in `context`.
     fn enumerate(&mut self, context: &mut EnumerationContext, bus_id: BusId) -> DriverResult;
 

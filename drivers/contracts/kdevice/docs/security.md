@@ -99,15 +99,18 @@ The threat analysis should focus on:
 **kdevice contains no unsafe code.**
 
 The whole crate (~3500 lines) is 100% safe Rust. All concurrency control
-uses the standard safe abstractions: `SpinNoPreempt`, `AtomicU8`,
-`AtomicU64`, `AtomicUsize`, and `Arc`.
+uses reviewed safe abstractions: the descriptor's `kmutex::Mutex`, and
+`SpinNoPreempt`, `AtomicU8`, `AtomicU64`, `AtomicUsize`, and `Arc` for the
+rest.
 
 ## Memory-Safety Invariants
 
-1. **Lock-ordering rule**: Registry → (drop guard) → per-object. Every
-   caller must follow it. `DeviceRegistry::find_bus_type` documents its
-   panic-on-missing behavior and requires bus types to be registered at
-   init time.
+1. **Lock-ordering rule**: descriptor binding lock → Registry → (drop guard)
+   → per-object (`bus.devices` → `bus.drivers`; `bus.devices` →
+   `DeviceObject` state). The binding lock is a sleepable `kmutex` and must
+   be acquired outside every spinlock. Every caller must follow this order.
+   `DeviceRegistry::find_bus_type` documents its panic-on-missing behavior
+   and requires bus types to be registered at init time.
 2. **DeviceObject::begin_removing atomicity**: the CAS loop is the only
    `→Removing` commit point. After a successful CAS the transition is
    irreversible, and the usage count must be checked to be zero.
@@ -117,12 +120,17 @@ uses the standard safe abstractions: `SpinNoPreempt`, `AtomicU8`,
    they guarantee: either `begin_removing` is rejected while a `DeviceUse`
    exists, or after `begin_removing` succeeds, `try_acquire` sees a
    non-Active state and rolls the count back.
-4. **DeviceDesc Probing mutual exclusion**: `mark_device_desc_probing`
-   CASes `Pending → Probing` only, preventing concurrent probes of the
-   same descriptor.
-5. **Subscriber contract**: subscriber callbacks run without driver-core
-   locks and must not call mutators. Violations can deadlock or corrupt
-   re-entrant state.
+4. **DeviceDesc Probing mutual exclusion**: only the holder of the
+   descriptor's binding lock may call `mark_device_desc_probing` (which
+   accepts `Pending → Probing` only) or requeue it. Every binder acquires
+   that lock and re-reads the state, so concurrent probes serialize and a
+   waiter never trusts a pre-wait snapshot. Same-context recursion is
+   rejected with `ProbeOutcome::Busy` before the recursive `kmutex`
+   acquisition.
+5. **Subscriber contract**: subscriber callbacks run without registry or
+   per-object spinlocks, but the emitting path still holds the transitioning
+   descriptor's binding lock; callbacks must not call mutators. Violations
+   can deadlock or corrupt re-entrant state.
 6. **Arc lifetime**: every object crossing a lock boundary is shared via
    `Arc`. Objects stay alive after the registry guard drops, preventing
    use-after-free.
@@ -158,6 +166,14 @@ uses the standard safe abstractions: `SpinNoPreempt`, `AtomicU8`,
     runtime backend; publication policy must restrict nodes to boot-static
     storage. An invalid handle is a typed backend error, and a missing node is
     `None`, never a default handle.
+15. **Publish/remove binding window**: the binding metadata (Matched/Bound) is
+    prepared before a device becomes visible, and the binding lock is held
+    from before registry publication until after `Activated` (probe/adoption)
+    or until after `Removed` and all relation teardown (remove). A remover
+    therefore never observes a half-published device, and a waiter never
+    rebinds a half-removed one. Bus publication attaches the device and its
+    driver in one `devices → drivers` critical section; bus detachment keeps
+    the shared driver entry while any remaining device still references it.
 
 ## Thread Safety
 
@@ -169,6 +185,7 @@ uses the standard safe abstractions: `SpinNoPreempt`, `AtomicU8`,
 | `BusInstance` | `Arc<BusInstance>` is `Send + Sync` | internal `SpinNoPreempt` guards all mutable fields |
 | `BusTypeObject` | `Arc<BusTypeObject>` is `Send + Sync` | internal `SpinNoPreempt` |
 | `DriverObject` | `Arc<DriverObject>` is `Send + Sync` | internal `SpinNoPreempt` + `AtomicU64` |
+| Descriptor binding lock | `Arc<kmutex::Mutex<()>>` is `Send + Sync` | sleepable lock; acquired only outside spinlocks |
 | `DeviceTopology` | plain `Vec` data, `Send` | immutable snapshot, `Sync` |
 | `DeviceEventSubscribers` | `Vec<Arc<dyn Fn>>` is `Send` | serialized through `DeviceRegistry`'s `SpinNoPreempt` |
 
@@ -178,7 +195,7 @@ uses the standard safe abstractions: `SpinNoPreempt`, `AtomicU8`,
 |------|----------|----------|----------|----------|
 | T-01 | Lock-ordering violation deadlocks | High | Calling `device_registry()` while holding a per-object lock | Lock-ordering rules documented; `BusInstance`/`DeviceObject` methods are `pub(crate)` to limit direct use |
 | T-02 | `begin_removing` vs `try_acquire` race causes use-after-free | High | Timing: `try_acquire` fetch_add lands, then `begin_removing` CAS succeeds before the state check | `try_acquire` does `fetch_add` then checks state, rolling back with `fetch_sub` if not Active; `begin_removing` checks usage after its CAS. The two are mutually exclusive |
-| T-03 | Same descriptor probed concurrently | Medium | Two paths probe the same `DeviceDescId` at once | `mark_device_desc_probing` succeeds only on Pending→Probing; the concurrent loser sees Probing and returns Requeue |
+| T-03 | Same descriptor probed concurrently | Medium | Two tasks probe the same `DeviceDescId` at once | Both serialize on the descriptor's binding lock; the waiter re-reads the state and returns `Skipped` for a terminal binding or probes a `Pending` one. Same-task recursion returns `Busy` without re-locking. |
 | T-04 | Subscriber callback panic blocks later subscribers | Medium | One callback panics; later ones are skipped | No `catch_unwind` today; callbacks run in iteration order; subscriber quality relied upon |
 | T-05 | Subscriber callback calls a mutator, deadlocking | High | A subscriber calls `probe_device_desc` and friends | Not enforced by code: the subscriber contract is documentation-only (`lifecycle/subscribers.rs` has no runtime check), so prevention relies on auditing subscriber implementations — recorded here as an accepted, audit-enforced rule. |
 | T-06 | ID counter overflow | High — a kernel panic prevents identity reuse after exhaustion | `AtomicU64` reaches `u64::MAX` | `fetch_add_u64` panics instead of returning a duplicate id; exhaustion is practically unreachable at a 64-bit width. |
@@ -191,6 +208,8 @@ uses the standard safe abstractions: `SpinNoPreempt`, `AtomicU8`,
 | T-13 | Filesystem projections disagree about device identity | Medium — `/dev` and `/sys` could describe different devices | A consumer independently derives names or numbers | `DeviceNode` is the single immutable source consumed by both devfs and sysfs; allocation templates are private to kdevice |
 | T-14 | Concurrent registration and removal invert add/remove events | Medium — listeners retain a ghost node after observing remove followed by add | Removal begins after registry insertion but before add callbacks finish | Publishing transitions to `RemovePending`; the add-publishing thread emits add first, then performs the complete ordered removal sequence |
 | T-15 | A stale or invalid firmware-node handle reaches a probe | Medium — probe reads another node or fails late | Backend-local ids are reused or a descriptor outlives its backend | `FwNode` equality includes the backend pointer; fallible backend queries must return `FwError::InvalidNode` for unknown ids (infallible name/parent accessors return `None`); the `'static` type bound keeps boot backends alive for the kernel lifetime |
+| T-16 | Remove races a probe/adoption and tears down the new identity | High — new device loses its bus/driver relations or a half-removed object is rebound | Remove waits for the binding lock, then a binder acquires it before teardown completes | Remove holds the descriptor binding lock from the commit point through `Removed`; a binder waits, rechecks, and only then sees `Pending` |
+| T-17 | Shared driver entry removed while a concurrent publish still uses it | Medium — bus driver list loses an active driver | Last-device remove overlaps a publish on the same bus | `detach_device_and_orphan_driver` checks remaining `driver_id()` values under the same `bus.devices` guard that removes the device, so it never removes a driver another device still references |
 
 Impact levels:
 
@@ -210,8 +229,8 @@ Impact levels:
 | F-06 | `device_records_snapshot` memory pressure with many devices | Thousands of active devices require a large `Vec` | Slower snapshot; possible OOM | Affects snapshot consumers (e.g. /proc reads) | 4 | The BTreeMap iterator yields records in id order; callers can paginate |
 | F-07 | Same DeviceId added twice | Two adoptions reusing an id | The second `add_device` replaces the first entry | The old DeviceObject may drop while external `Arc` holders persist | 4 | The id allocator is monotonic; adoption allocates a fresh id every time |
 | F-08 | `desc.parent` points at a removed parent | Parent device removed before the child is published | `attach_device_parent` runs after publish; parent may be gone | Child has no parent; device tree incomplete | 4 | `attach_device_parent` failure logs a warning and does not block child activation |
-| F-09 | BusInstance.devices inconsistent with DeviceRegistry.devices | One path updated only one side | Snapshots may miss or include stale devices | Inconsistent query results | 3 | `add_device` updates both inside the registry lock; remove likewise |
-| F-10 | Descriptor `attempted` list grows without bound | Many drivers fail to match one descriptor | attempted `Vec` grows | Per-descriptor memory grows | 4 | Device removal clears `attempted` on requeue; the list is bounded by the driver count |
+| F-09 | BusInstance.devices inconsistent with DeviceRegistry.devices | One path updated only one side | Snapshots may miss or include stale devices | Inconsistent query results | 3 | Publish adds to the registry and then to the bus under the binding lock; remove deletes from the registry and atomically detaches from the bus under the same lock, then fires `Removed` |
+| F-10 | Same-task recursive probe self-deadlocks the binding lock | A probe calls `probe_device_desc` for its own descriptor | `kmutex` would panic on recursive locking | Probe path aborts | 3 | `probe_device_desc` checks `is_owned_by_current()` and returns `Busy`; the registration scan skips local re-entry with a warning |
 | F-11 | Device-node class index range is exhausted | More than 32 input or 64 DRM primary devices are active | New node registration returns `ResourceBusy` | The runtime device remains active but has no Linux node projection | 3 | Existing assignments remain unchanged; kclass logs the failure |
 | F-12 | Device-node subscriber panics | Projection callback has a kernel bug | Later callbacks do not run | One or more filesystem projections may miss the transition before panic aborts | 2 | Callbacks run without registry locks; panic isolation is unavailable in the current panic=abort kernel |
 
@@ -231,12 +250,20 @@ Severity levels:
   take down hot paths.
 - All lifecycle APIs return `Result<_, DriverError>` (`InvalidInput` /
   `BadState` / `ResourceBusy` / `Unsupported`, ...).
+- `ResourceBusy` means the call did not commit a new binding or teardown:
+  another remover may already have won, or references are still outstanding,
+  so this call performed no partial transition. A caller may retry later, but
+  the interface guarantees no eventual completion and runs no automatic retry.
 - Errors from `driver.remove()` and `bus_type.remove()` inside
   `remove_device_managed` are only logged and never stop the removal
   ("remove never fails" semantics).
-- A probe failure runs the full rollback (`run_cleanups` +
-  `detach_driver` + requeue), so a partially initialized device is never
-  leaked.
+- A candidate probe failure runs the full rollback (`run_cleanups` +
+  `detach_driver` + `mark_removed`) and continues with the next candidate;
+  when the round ends the descriptor is requeued. A partially initialized
+  device is never leaked and never receives lifecycle events.
+- The descriptor binding lock is released only after the terminal lifecycle
+  step (`Activated`, or `Removed` plus relation teardown), so a waiting
+  binder never observes an intermediate publication/removal state.
 - Subscriber callback panics are unprotected, but x-kernel runs
   `#![no_std]` without unwinding (panic = abort), so later subscribers
   cannot be silently skipped.

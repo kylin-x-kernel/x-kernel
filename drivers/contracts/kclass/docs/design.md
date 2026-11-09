@@ -171,6 +171,14 @@ registration does. Hotplug re-registration must first remove the old
 object through the `Removed` lifecycle and then publish a new object; a
 resident runtime is never silently replaced.
 
+Publishing is all-or-nothing from the driver's point of view: a driver that
+returns an error from `probe_device` after calling `publish_<class>` must
+revoke every capability it already published before returning. The framework
+performs no rollback of class publications after the hook returns, and
+residue that is merely invisible to callers (for example because the parent
+is not yet active) is not a rollback. Every successful publish must therefore
+be undone explicitly on the error path.
+
 ## Flows
 
 ### Publish flow

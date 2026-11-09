@@ -11,10 +11,12 @@ pub(crate) mod subscribers;
 use alloc::{sync::Arc, vec::Vec};
 
 use driver_base::DriverError;
+use kmutex::Mutex;
 
 use self::{
     dispatch::{
-        activate_device, bind_device_to_driver, dispatch_device_event, mark_device_matched,
+        activate_device, announce_device_bound, announce_device_matched, dispatch_device_event,
+        prepare_device_binding,
     },
     event::DeviceEvent,
 };
@@ -47,8 +49,6 @@ pub struct ActiveDeviceAdoption {
     pub driver: Arc<DriverObject>,
 }
 
-type UnpublishedDescDevice = (Arc<DeviceObject>, Arc<BusTypeObject>);
-
 /// Result of one driver-core probe attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeOutcome {
@@ -56,9 +56,16 @@ pub enum ProbeOutcome {
     Activated,
     /// The device was already active or removed and was not reprobed.
     Skipped,
-    /// No registered driver matched this device.
-    Requeue,
-    /// Matching drivers existed but none succeeded; the descriptor remains unclaimed.
+    /// The current execution context already holds this descriptor's binding
+    /// lock, so the recursive attempt was rejected without waiting.
+    ///
+    /// This is not a completed attempt and is never returned for cross-thread
+    /// contention: another task waits on the lock and rechecks the state.
+    Busy,
+    /// No driver in this round's candidate snapshot matched; no probe ran.
+    Unmatched,
+    /// At least one matching candidate was probed and all failed normally.
+    /// The descriptor is back to `Pending` and may be retried.
     Unclaimed,
 }
 
@@ -69,36 +76,73 @@ impl ProbeOutcome {
     }
 }
 
+/// Deterministic interleaving points used by unit tests.
+///
+/// These seams exist only in `cfg(unittest)` builds. A callback may block (for
+/// example on a test `ksync` semaphore) because every pause point is outside
+/// registry/bus spinlocks. The probe, adoption, and remove points are inside
+/// the relevant binding critical section; the registration-scan point fires
+/// just before that scan takes the lock.
+#[cfg(unittest)]
+#[path = "binding_hooks.rs"]
+pub mod test_hooks;
+
 fn bus_type_for_desc(desc: &DeviceDesc) -> Option<Arc<BusTypeObject>> {
     let index = device_registry();
     let bus = index.find_bus(desc.bus_id())?;
     Some(index.find_bus_type(bus.bus_type()))
 }
 
-fn pending_descriptors_for_bus_types(bus_types: &[BusTypeId]) -> Vec<DeviceDesc> {
-    // Lock-order discipline: snapshot the BusTypeObject Arcs under the
-    // registry guard, drop it, then read pending descriptor IDs from each
-    // bus-type object. Holding the registry guard while taking per-object
-    // locks would invert the documented order (registry -> per-object
-    // snapshot only).
-    let bus_type_objs: Vec<Arc<BusTypeObject>> = {
-        let index = device_registry();
-        bus_types
-            .iter()
-            .copied()
-            .map(|bus_type| index.find_bus_type(bus_type))
-            .collect()
-    };
-    let desc_ids = bus_type_objs
-        .iter()
-        .flat_map(|bus_type| bus_type.pending_descriptors_snapshot())
-        .collect::<Vec<_>>();
+/// Candidate set for one binding round.
+enum ProbeCandidates {
+    /// Device-first path: the descriptor's bus type in registration order.
+    BusType,
+    /// Driver-first path: only the newly registered driver.
+    Only { driver: Arc<DriverObject> },
+}
 
-    let index = device_registry();
-    desc_ids
-        .into_iter()
-        .filter_map(|desc_id| index.find_pending_device_desc(desc_id))
-        .collect()
+/// Re-read a descriptor after waiting for its binding lock.
+///
+/// The caller must hold the binding lock. `Some` carries the `Pending`
+/// descriptor the caller may claim and probe; `None` means the descriptor is
+/// bound to a device that is already terminal. `Probing` here means the state
+/// invariant was broken (only the lock holder may set it), and a `Bound`
+/// device that is not terminal means publication did not finish before the
+/// lock was released.
+fn inspect_locked_desc(id: DeviceDescId) -> Result<Option<DeviceDesc>, DriverError> {
+    let (state, desc, device) = {
+        let index = device_registry();
+        let state = index
+            .device_desc_state(id)
+            .ok_or(DriverError::InvalidInput)?;
+        let desc = match state {
+            DeviceDescState::Pending => index.find_device_desc(id),
+            _ => None,
+        };
+        let device = match state {
+            DeviceDescState::Bound(device_id) => index.find_device(device_id),
+            _ => None,
+        };
+        (state, desc, device)
+    };
+
+    match state {
+        DeviceDescState::Pending => desc.map(Some).ok_or(DriverError::InvalidInput),
+        DeviceDescState::Probing => Err(DriverError::BadState),
+        DeviceDescState::Bound(_) => match device {
+            Some(device)
+                if matches!(
+                    device.state(),
+                    crate::DeviceState::Active
+                        | crate::DeviceState::Removing
+                        | crate::DeviceState::Removed
+                ) =>
+            {
+                Ok(None)
+            }
+            _ => Err(DriverError::BadState),
+        },
+    }
 }
 
 /// Register a bus instance and attach it to its bus type.
@@ -125,6 +169,18 @@ pub fn register_bus_instance(bus_type_id: BusTypeId, name: &'static str) -> Arc<
 }
 
 /// Register a driver object and attach it to every supported bus type.
+///
+/// After the driver is attached, every `Pending` or `Probing` descriptor whose
+/// bus type is in `driver.bus_types()` is given one binding attempt against this
+/// driver alone. Each attempt takes that descriptor's binding lock, rechecks the
+/// state after any wait, and skips the descriptor if another task bound it
+/// first. A descriptor whose lock is already held by the current task (for
+/// example a probe registering a helper driver) is also skipped, because
+/// waiting on it would self-deadlock. Failures are logged and leave the
+/// descriptor `Pending`; registration still returns the new driver.
+///
+/// A probe must not call this function for drivers that should bind to the
+/// descriptor being probed; that recursion is rejected by the binding lock.
 pub fn register_driver_object(ops: Arc<dyn crate::DeviceDriver>) -> Arc<DriverObject> {
     init_device_registry();
 
@@ -146,14 +202,70 @@ pub fn register_driver_object(ops: Arc<dyn crate::DeviceDriver>) -> Arc<DriverOb
         bus_type.attach_driver(driver.clone());
     }
 
+    let awaiting = {
+        let index = device_registry();
+        index.descriptors_awaiting_binding(driver.bus_types())
+    };
+
     let mut activated_from_desc = 0usize;
-    for desc in pending_descriptors_for_bus_types(driver.bus_types()) {
-        match probe_device_desc_with_drivers(desc, alloc::vec![driver.clone()]) {
+    for desc_ref in awaiting {
+        // A driver registered from inside a probe already holds that
+        // descriptor's lock. Reject only this local recursion; a descriptor
+        // held by another task is not `Busy`, it is waited for below.
+        if desc_ref.binding.is_owned_by_current() {
+            log::warn!(
+                "driver {} registered while descriptor {:?} is being bound by the current \
+                 context; skipping that descriptor",
+                driver.name(),
+                desc_ref.id,
+            );
+            continue;
+        }
+
+        #[cfg(unittest)]
+        test_hooks::pause(test_hooks::BindingPause::RegisterScanBeforeLock {
+            desc_id: desc_ref.id,
+        });
+
+        let _guard = desc_ref.binding.lock();
+        let desc = match inspect_locked_desc(desc_ref.id) {
+            Ok(Some(desc)) => desc,
+            Ok(None) => continue,
+            Err(error) => {
+                log::warn!(
+                    "driver {} descriptor {:?} recheck after wait failed: {:?}",
+                    driver.name(),
+                    desc_ref.id,
+                    error,
+                );
+                continue;
+            }
+        };
+
+        if device_registry()
+            .mark_device_desc_probing(desc_ref.id)
+            .is_none()
+        {
+            log::warn!(
+                "driver {} descriptor {:?} could not be claimed for probe",
+                driver.name(),
+                desc_ref.id,
+            );
+            continue;
+        }
+
+        match probe_desc_round(
+            desc,
+            ProbeCandidates::Only {
+                driver: driver.clone(),
+            },
+        ) {
             Ok(outcome) if outcome.activated() => activated_from_desc += 1,
             Ok(_) => {}
             Err(error) => log::warn!(
-                "driver {} descriptor reprobe failed: {:?}",
+                "driver {} descriptor {:?} probe failed: {:?}",
                 driver.name(),
+                desc_ref.id,
                 error
             ),
         }
@@ -172,74 +284,45 @@ pub fn register_driver_object(ops: Arc<dyn crate::DeviceDriver>) -> Arc<DriverOb
 /// Register a discovery-stage device descriptor without creating a runtime object.
 ///
 /// The specification is consumed as one finalized discovery result: the device
-/// core assigns the descriptor id, stores its own copy and queues it for
-/// probing. That copy is the only source for rebuilding runtime objects, so a
-/// retried probe keeps the same association. `firmware_node: None` records that
+/// core assigns the descriptor id and stores its own copy in `Pending` state.
+/// That copy is the only source for rebuilding runtime objects, so a retried
+/// probe keeps the same association. `firmware_node: None` records that
 /// discovery established no association; it does not make the device invalid.
 pub fn device_desc_add(spec: DeviceDescSpec) -> Result<DeviceDesc, DriverError> {
     init_device_registry();
 
-    let (desc, bus_type) = {
+    // The binding lock belongs to the descriptor entry, but it must be
+    // constructed before entering the registry lock and must not be acquired
+    // there.
+    let binding = Arc::new(Mutex::new(()));
+    let desc = {
         let mut index = device_registry();
-        let bus = index
-            .find_bus(spec.bus_id)
-            .ok_or(DriverError::InvalidInput)?;
-        let bus_type = index.find_bus_type(bus.bus_type());
+        if index.find_bus(spec.bus_id).is_none() {
+            return Err(DriverError::InvalidInput);
+        }
         let id = index.alloc_device_desc_id();
         let desc = DeviceDesc::from_spec(id, spec);
-        index.add_device_desc(desc.clone());
-        (desc, bus_type)
+        index.add_device_desc_with_binding(desc.clone(), binding);
+        desc
     };
 
-    bus_type.enqueue_pending_descriptor(desc.id());
     Ok(desc)
 }
 
-fn desc_probe_outcome(id: DeviceDescId) -> Option<Result<ProbeOutcome, DriverError>> {
-    let (state, device) = {
-        let index = device_registry();
-        let state = index.device_desc_state(id)?;
-        let device = match state {
-            DeviceDescState::Bound(_) => index.find_device_for_desc(id),
-            _ => None,
-        };
-        (state, device)
-    };
-
-    match state {
-        DeviceDescState::Pending => None,
-        DeviceDescState::Probing => Some(Ok(ProbeOutcome::Requeue)),
-        DeviceDescState::Bound(_) => Some(match device {
-            Some(device)
-                if matches!(
-                    device.state(),
-                    crate::DeviceState::Active
-                        | crate::DeviceState::Removing
-                        | crate::DeviceState::Removed
-                ) =>
-            {
-                Ok(ProbeOutcome::Skipped)
-            }
-            Some(_) => Ok(ProbeOutcome::Requeue),
-            None => Err(DriverError::BadState),
-        }),
+fn new_unpublished_device_from_desc(desc: &DeviceDesc) -> Result<Arc<DeviceObject>, DriverError> {
+    #[cfg(unittest)]
+    if test_hooks::take_device_construction_failure() {
+        return Err(DriverError::NoMemory);
     }
-}
-
-fn new_unpublished_device_from_desc(
-    desc: &DeviceDesc,
-) -> Result<UnpublishedDescDevice, DriverError> {
     // Clone the descriptor's resources before taking the registry lock so the
     // (potentially heap-allocating) snapshot does not run under the lock.
     let resources = desc.resources_snapshot();
-    let (id, bus_type) = {
+    let id = {
         let mut index = device_registry();
-        let bus = index
-            .find_bus(desc.bus_id())
-            .ok_or(DriverError::InvalidInput)?;
-        let bus_type = index.find_bus_type(bus.bus_type());
-        let id = index.alloc_device_id();
-        (id, bus_type)
+        if index.find_bus(desc.bus_id()).is_none() {
+            return Err(DriverError::InvalidInput);
+        }
+        index.alloc_device_id()
     };
     // Allocate the device object outside the registry lock.
     let device = Arc::new(
@@ -256,13 +339,12 @@ fn new_unpublished_device_from_desc(
         .with_intx_route(desc.intx_route())
         .with_firmware_node(desc.firmware_node()),
     );
-    Ok((device, bus_type))
+    Ok(device)
 }
 
 fn publish_desc_device(
     desc_id: DeviceDescId,
     device: Arc<DeviceObject>,
-    bus_type: Arc<BusTypeObject>,
     driver: Arc<DriverObject>,
 ) {
     // Lock-order discipline: snapshot the bus instance Arc under the registry
@@ -274,154 +356,148 @@ fn publish_desc_device(
         index.find_bus(device.bus_id())
     };
     if let Some(bus) = bus_instance {
-        bus.add_device(device.clone());
-        bus.add_driver(driver);
+        bus.attach_bound_device(device, driver);
     }
-    bus_type.remove_pending_descriptor(desc_id);
 }
 
 fn requeue_desc(desc_id: DeviceDescId) {
     device_registry().requeue_device_desc(desc_id);
 }
 
-fn drivers_for_desc(desc: &DeviceDesc) -> Vec<Arc<DriverObject>> {
-    let Some(bus_type) = bus_type_for_desc(desc) else {
-        return Vec::new();
-    };
-    bus_type.drivers_snapshot()
-}
-
-fn probe_device_desc_with_drivers(
+/// Run one binding round with the descriptor's binding lock already held.
+///
+/// Candidates are evaluated in snapshot order. Each matching driver gets one
+/// fresh unpublished `DeviceObject`; a failed probe is fully rolled back before
+/// the next candidate starts, and the first success stops the round. Ordinary
+/// probe failures are reported as `Unclaimed` (logged and counted), never as a
+/// core error; core preparation failures requeue the descriptor and return
+/// `Err`.
+fn probe_desc_round(
     desc: DeviceDesc,
-    candidates: Vec<Arc<DriverObject>>,
+    candidates: ProbeCandidates,
 ) -> Result<ProbeOutcome, DriverError> {
-    if let Some(outcome) = desc_probe_outcome(desc.id()) {
-        return outcome;
-    }
-
     let Some(bus_type) = bus_type_for_desc(&desc) else {
+        requeue_desc(desc.id());
         return Err(DriverError::InvalidInput);
     };
 
-    if device_registry()
-        .mark_device_desc_probing(desc.id())
-        .is_none()
-    {
-        return Ok(ProbeOutcome::Requeue);
-    }
-
-    // Best-match-only: pick the single highest-priority matching driver and
-    // bind it against one unpublished DeviceObject. Allocating a fresh
-    // DeviceId per candidate would conflate "one device" with "one probe
-    // attempt" and leak orphan IDs into subscribers; instead, on probe
-    // failure we requeue the descriptor and let the next reprobe pass try a
-    // different driver. Drivers already attempted (and failed) for this
-    // descriptor are excluded so we advance to the next-best candidate
-    // instead of reselecting the same failing driver forever.
-    let attempted = device_registry().device_desc_attempted(desc.id());
-    let best = candidates
-        .into_iter()
-        .filter(|driver| !attempted.contains(&driver.id()))
-        .filter_map(|driver| {
-            let ops = driver.ops();
-            match bus_type.match_desc(ops.as_ref(), &desc) {
-                MatchResult::Match { priority } => Some((driver, priority)),
-                MatchResult::NoMatch => None,
-            }
-        })
-        .max_by_key(|candidate| candidate.1);
-
-    let Some((driver, _priority)) = best else {
-        requeue_desc(desc.id());
-        return Ok(ProbeOutcome::Requeue);
+    let drivers = match candidates {
+        ProbeCandidates::BusType => bus_type.drivers_snapshot(),
+        ProbeCandidates::Only { driver } => alloc::vec![driver],
     };
 
-    let (device, publish_bus_type) = match new_unpublished_device_from_desc(&desc) {
-        Ok(unpublished) => unpublished,
-        Err(error) => {
-            requeue_desc(desc.id());
-            return Err(error);
+    let mut probed = false;
+    for driver in drivers {
+        let ops = driver.ops();
+        if matches!(
+            bus_type.match_desc(ops.as_ref(), &desc),
+            MatchResult::NoMatch
+        ) {
+            continue;
         }
-    };
 
-    // Drive the normal probe path through the same dispatch helpers used by
-    // adopt_active_device, so subscribers always see the canonical sequence
-    // Matched -> Bound -> Published -> Activated regardless of how the
-    // object reached the driver core.
-    mark_device_matched(device.as_ref());
-    bind_device_to_driver(
-        device.as_ref(),
-        driver.id(),
-        driver.name(),
-        driver.device_kind(),
-    );
+        let device = match new_unpublished_device_from_desc(&desc) {
+            Ok(device) => device,
+            Err(error) => {
+                requeue_desc(desc.id());
+                return Err(error);
+            }
+        };
 
-    let ops = driver.ops();
-    // Account this probe attempt on both the driver and its bus instance so
-    // repeated failures are observable via topology/procfs (review item O6).
-    let bus_instance = device_registry().find_bus(desc.bus_id());
-    driver.record_probe_attempt();
-    if let Some(bus) = &bus_instance {
-        bus.record_probe_attempt();
-    }
-    match ops.probe_device(device.clone()) {
-        Ok(()) => {
-            publish_desc_device(desc.id(), device.clone(), publish_bus_type, driver.clone());
-            if let Some(parent_id) = desc.parent()
-                && let Err(err) = attach_device_parent(parent_id, device.id())
-            {
-                log::warn!(
-                    "failed to attach device {:?} under parent {:?}: {:?}",
-                    device.id(),
-                    parent_id,
-                    err,
+        // The driver's probe may construct class-layer state that reads the
+        // binding metadata, but subscribers must not see it before the
+        // registry and bus publish the device.
+        prepare_device_binding(
+            device.as_ref(),
+            driver.id(),
+            driver.name(),
+            driver.device_kind(),
+        );
+
+        // Account every real probe attempt on both the driver and its bus
+        // instance so repeated failures stay observable.
+        let bus_instance = device_registry().find_bus(desc.bus_id());
+        driver.record_probe_attempt();
+        if let Some(bus) = &bus_instance {
+            bus.record_probe_attempt();
+        }
+        probed = true;
+
+        match ops.probe_device(device.clone()) {
+            Ok(()) => {
+                publish_desc_device(desc.id(), device.clone(), driver.clone());
+                if let Some(parent_id) = desc.parent()
+                    && let Err(err) = attach_device_parent(parent_id, device.id())
+                {
+                    log::warn!(
+                        "failed to attach device {:?} under parent {:?}: {:?}",
+                        device.id(),
+                        parent_id,
+                        err,
+                    );
+                }
+                driver.attach_device(device.id());
+                announce_device_matched(device.as_ref());
+                announce_device_bound(device.as_ref(), driver.device_kind());
+                dispatch_device_event(DeviceEvent::Published { id: device.id() });
+                activate_device(device.as_ref(), driver.device_kind());
+                return Ok(ProbeOutcome::Activated);
+            }
+            Err(error) => {
+                log::info!(
+                    "driver {} probe failed for descriptor {:?}: {:?}",
+                    driver.name(),
+                    desc.id(),
+                    error,
                 );
+                driver.record_probe_failure();
+                if let Some(bus) = &bus_instance {
+                    bus.record_probe_failure();
+                }
+                // Roll this candidate back completely before trying the next
+                // one. No event is emitted: the object was never published, so
+                // subscribers must never observe this DeviceId.
+                device.run_cleanups();
+                device.detach_driver();
+                device.mark_removed();
             }
-            driver.attach_device(device.id());
-            dispatch_device_event(DeviceEvent::Published { id: device.id() });
-            activate_device(device.as_ref(), driver.device_kind());
-            Ok(ProbeOutcome::Activated)
-        }
-        Err(error) => {
-            log::info!(
-                "driver {} probe failed for descriptor {:?}: {:?}",
-                driver.name(),
-                desc.id(),
-                error,
-            );
-            driver.record_probe_failure();
-            if let Some(bus) = &bus_instance {
-                bus.record_probe_failure();
-            }
-            // Roll back driver binding metadata so the unpublished object is
-            // dropped without leaving Bound state visible anywhere. Run any
-            // devres cleanups the driver registered before it failed so a
-            // partially-initialized probe cannot leak resources.
-            device.run_cleanups();
-            device.detach_driver();
-            // Record the failed driver so reprobe passes skip it and move on
-            // to the next-best candidate.
-            device_registry().mark_device_desc_attempted(desc.id(), driver.id());
-            requeue_desc(desc.id());
-            log::debug!(
-                "descriptor {:?} probe exhausted candidates: {:?}",
-                desc.id(),
-                error,
-            );
-            // Preserve the original error context for callers that want to
-            // surface the probe failure root cause.
-            let _ = error;
-            Ok(ProbeOutcome::Unclaimed)
         }
     }
+
+    requeue_desc(desc.id());
+    Ok(if probed {
+        ProbeOutcome::Unclaimed
+    } else {
+        ProbeOutcome::Unmatched
+    })
 }
 
 /// Probe one registered descriptor through the descriptor-first driver path.
+///
+/// The caller must be in a sleepable task context: cross-thread contention is
+/// resolved by blocking on the descriptor's binding lock and re-reading its
+/// state, not by returning [`ProbeOutcome::Busy`]. `Busy` only reports
+/// same-context recursion (for example a probe probing its own descriptor).
 pub fn probe_device_desc(id: DeviceDescId) -> Result<ProbeOutcome, DriverError> {
-    let desc = device_registry()
-        .find_device_desc(id)
+    let binding = device_registry()
+        .binding_for_desc(id)
         .ok_or(DriverError::InvalidInput)?;
-    probe_device_desc_with_drivers(desc.clone(), drivers_for_desc(&desc))
+    if binding.is_owned_by_current() {
+        return Ok(ProbeOutcome::Busy);
+    }
+
+    let _guard = binding.lock();
+    #[cfg(unittest)]
+    test_hooks::pause(test_hooks::BindingPause::ProbeHoldingLock { desc_id: id });
+    match inspect_locked_desc(id)? {
+        None => Ok(ProbeOutcome::Skipped),
+        Some(desc) => {
+            if device_registry().mark_device_desc_probing(id).is_none() {
+                return Err(DriverError::BadState);
+            }
+            probe_desc_round(desc, ProbeCandidates::BusType)
+        }
+    }
 }
 
 /// Adopt a device that boot code already initialized, skipping descriptor match/probe.
@@ -435,6 +511,12 @@ pub fn probe_device_desc(id: DeviceDescId) -> Result<ProbeOutcome, DriverError> 
 /// runs before any subscriber is registered the dispatches are simply no-ops.
 /// The caller is responsible for completing subsystem-level registration
 /// (e.g. `publish_char`).
+///
+/// Publication holds the new descriptor's binding lock from before the device
+/// is visible until `Activated`. Because adoption also runs under the bus
+/// manager spinlock, the lock is taken with a non-blocking `try_lock`; if the
+/// attempt fails the device is not published and the call returns
+/// [`DriverError::BadState`].
 pub fn adopt_active_device(
     adoption: ActiveDeviceAdoption,
 ) -> Result<Arc<DeviceObject>, DriverError> {
@@ -485,31 +567,39 @@ pub fn adopt_active_device(
         .with_firmware_node(None),
     );
 
-    {
-        let mut index = device_registry();
-        index.add_device_desc(desc);
-        index.add_device(device.clone());
-        index.bind_device_desc(desc_id, device.id());
-    }
-
-    // Bus instance must be mutated outside the registry guard per the
-    // lock-order discipline.
-    if let Some(bus) = bus_instance {
-        bus.add_device(device.clone());
-        bus.add_driver(driver.clone());
-    }
-
-    // Drive the canonical lifecycle event sequence through the same dispatch
-    // helpers used by the probe path so subscribers observe an adopted device
-    // identically: Matched -> Bound -> Published -> Activated.
-    mark_device_matched(device.as_ref());
-    bind_device_to_driver(
+    // Prepare the binding metadata before the object becomes visible. From
+    // this point on a concurrent remove can safely inspect `driver_id()` once
+    // it finds the device on the bus.
+    prepare_device_binding(
         device.as_ref(),
         driver.id(),
         driver.name(),
         driver.device_kind(),
     );
-    driver.attach_device(device.id());
+
+    // The entry is not published yet, so nobody else can hold or contend for
+    // this lock. `try_lock` keeps adoption non-blocking while it runs inside
+    // the bus-manager spinlock; failure is a broken invariant, not a race.
+    let binding = Arc::new(Mutex::new(()));
+    let Some(_guard) = binding.try_lock() else {
+        return Err(DriverError::BadState);
+    };
+
+    {
+        let mut index = device_registry();
+        // The registry gets its own handle to the same mutex; the local `Arc`
+        // must stay alive because `_guard` borrows it through the end of the
+        // publication window.
+        index.add_device_desc_with_binding(desc, binding.clone());
+        index.add_device(device.clone());
+        index.bind_device_desc(desc_id, device.id());
+    }
+
+    // Bus instance must be mutated outside the registry guard per the
+    // lock-order discipline. Metadata is already set (see above).
+    if let Some(bus) = bus_instance {
+        bus.attach_bound_device(device.clone(), driver.clone());
+    }
 
     if let Some(parent_id) = adoption.parent
         && let Err(err) = attach_device_parent(parent_id, device.id())
@@ -521,7 +611,18 @@ pub fn adopt_active_device(
             err,
         );
     }
+    driver.attach_device(device.id());
 
+    #[cfg(unittest)]
+    test_hooks::pause(test_hooks::BindingPause::AdoptionBeforeActivate {
+        device_id: device.id(),
+    });
+
+    // Announce the canonical sequence only after the device is queryable, and
+    // hold the descriptor lock through activation so a remove cannot commit
+    // inside the publication window.
+    announce_device_matched(device.as_ref());
+    announce_device_bound(device.as_ref(), driver.device_kind());
     dispatch_device_event(DeviceEvent::Published { id: device.id() });
     activate_device(device.as_ref(), driver.device_kind());
 
@@ -566,20 +667,31 @@ pub fn detach_device_parent(child_id: DeviceId) -> Result<(), DriverError> {
     Ok(())
 }
 
-/// Mark a device removed in the object index and notify driver-core observers.
-pub(crate) fn remove_device_from_index(id: DeviceId) {
+/// Remove a device from the object index and finish unbinding its relations.
+///
+/// The caller holds the descriptor's binding lock and must have committed the
+/// removal with `DeviceObject::begin_removing`. The descriptor is restored to
+/// `Pending` here, but the binding lock is still held while the old device's
+/// bus/driver/parent relations are torn down and `Removed` is dispatched, so a
+/// waiter cannot start a new binding against a half-cleaned old identity.
+pub(crate) fn remove_device_from_index(desc_id: DeviceDescId, id: DeviceId) {
     // Lock-order discipline: take Arc snapshots under the registry guard,
-    // drop the guard, then mutate per-object state. This avoids the
-    // registry -> per-object nesting that was previously inverting the
-    // documented lock order.
-    let (device, bus, bus_type, driver, parent, pending_descs, children) = {
+    // drop the guard, then mutate per-object state.
+    let (device, bus, driver, parent, children) = {
         let mut index = device_registry();
         let Some(device) = index.remove_device(id) else {
             return;
         };
         let bus = index.find_bus(device.bus_id());
-        let bus_type = bus.as_ref().map(|bus| index.find_bus_type(bus.bus_type()));
-        let pending_descs = index.requeue_device_descs_for_device(id);
+        // Recheck under the lock: never requeue a descriptor that was rebound
+        // to a newer device while this removal waited for the lock.
+        if !index.requeue_device_desc_if_bound(desc_id, id) {
+            log::error!(
+                "descriptor {:?} was not bound to removed device {:?}",
+                desc_id,
+                id,
+            );
+        }
         // Any descriptor still pointing at this device as its parent is now
         // stale; clear the linkage so a later reprobe does not try to attach
         // under a removed parent.
@@ -597,36 +709,28 @@ pub(crate) fn remove_device_from_index(id: DeviceId) {
             .into_iter()
             .filter_map(|child_id| index.find_device(child_id))
             .collect::<alloc::vec::Vec<_>>();
-        (
-            device,
-            bus,
-            bus_type,
-            driver,
-            parent,
-            pending_descs,
-            children,
-        )
+        (device, bus, driver, parent, children)
     };
 
+    #[cfg(unittest)]
+    test_hooks::pause(test_hooks::BindingPause::RemoveAfterRequeue {
+        desc_id,
+        device_id: id,
+    });
+
+    // Detach the device and opportunistically orphan the shared driver entry
+    // in one bus critical section. Metadata is still present, which is what
+    // lets the bus decide whether another device still uses this driver.
     if let Some(bus) = &bus {
-        bus.remove_device(id);
-    }
-    // Drop bound-driver metadata before announcing removal so a Removed
-    // subscriber that inspects the object never observes a Bound/Active
-    // state with no driver pointer.
-    device.detach_driver();
-    device.mark_removed();
-    if let Some(bus_type) = bus_type {
-        for desc_id in pending_descs {
-            bus_type.enqueue_pending_descriptor(desc_id);
-        }
+        bus.detach_device_and_orphan_driver(id, driver.as_ref().map(|driver| driver.id()));
     }
     if let Some(driver) = driver {
         driver.detach_device(id);
-        if let Some(bus) = bus {
-            bus.remove_driver(driver.id());
-        }
     }
+    // Clear bound-driver metadata only after the bus no longer lists the
+    // device, then announce removal.
+    device.detach_driver();
+    device.mark_removed();
     if let Some(parent) = parent {
         parent.detach_child(id);
     }
@@ -639,10 +743,40 @@ pub(crate) fn remove_device_from_index(id: DeviceId) {
 }
 
 /// Run the driver-core remove path for a live device.
+///
+/// The caller must be in a sleepable task context. Removal serializes with
+/// binding through the unique descriptor's binding lock: while this function
+/// waits, an in-flight probe or adoption finishes first, and only after this
+/// removal releases the lock (after `Removed`) may a new binding start.
+///
+/// [`DriverError::ResourceBusy`] means this call did not commit a teardown:
+/// another remover may already have won, or references to the device are
+/// still outstanding. The caller may retry later; no eventual completion is
+/// guaranteed.
 pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
+    // Locate the unique descriptor backing this device before waiting. Zero or
+    // multiple descriptors mean the 1:1 invariant is broken; do not touch the
+    // device in that case.
+    let desc_ref = {
+        let index = device_registry();
+        index.find_device(id).ok_or(DriverError::InvalidInput)?;
+        index
+            .descriptor_bound_to_device(id)
+            .ok_or(DriverError::BadState)?
+    };
+
+    let _guard = desc_ref.binding.lock();
+
+    // Re-read everything after the wait; the snapshots taken before it may be
+    // stale. A device that disappeared here was removed by another task.
     let (device, driver, bus_type) = {
         let index = device_registry();
-        let device = index.find_device(id).ok_or(DriverError::InvalidInput)?;
+        let Some(device) = index.find_device(id) else {
+            return Err(DriverError::ResourceBusy);
+        };
+        if !index.device_desc_is_bound_to(desc_ref.id, id) {
+            return Err(DriverError::BadState);
+        }
         let driver = device
             .driver_id()
             .and_then(|driver_id| index.find_driver(driver_id));
@@ -654,8 +788,9 @@ pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
 
     // `begin_removing` is the single commit point: it atomically claims the
     // device for removal (or fails with `ResourceBusy` if another remove is
-    // already in flight). Crucially it must run *before* any teardown so we
-    // never start tearing down a device twice.
+    // already in flight or references are outstanding). It must run after the
+    // descriptor lock is acquired, so an in-flight publish cannot mark the
+    // device active after we commit.
     if !device.begin_removing() {
         return Err(DriverError::ResourceBusy);
     }
@@ -694,7 +829,7 @@ pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
     // chance to release things itself.
     device.run_cleanups();
 
-    remove_device_from_index(id);
+    remove_device_from_index(desc_ref.id, id);
     Ok(())
 }
 

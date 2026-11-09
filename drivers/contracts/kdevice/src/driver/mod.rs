@@ -20,6 +20,10 @@ use crate::{
 /// Snapshotted via [`DriverObject::probe_stats`] and
 /// [`crate::BusInstance::probe_stats`] to help diagnose drivers or buses
 /// with repeated probe failures (see review item D2).
+///
+/// Counters are cumulative for the lifetime of the object and are diagnostics
+/// only: they never suppress a candidate, blacklist a driver, or prevent a
+/// later retry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProbeStats {
     /// Total probe attempts dispatched.
@@ -96,22 +100,16 @@ pub struct DriverInfo {
 }
 
 /// Result of a driver's match attempt against a discovery descriptor.
+///
+/// Matching is no longer scored. Candidates are evaluated in registration
+/// order and the first successful probe wins, so a matcher only reports
+/// whether the driver supports the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchResult {
     /// The driver does not support this device.
     NoMatch,
-    /// The driver can handle this device. Higher priority wins.
-    Match { priority: u8 },
-}
-
-/// Standard match priorities used by built-in driver descriptors.
-pub mod priority {
-    /// Generic fallback match.
-    pub const FALLBACK: u8 = 1;
-    /// Generic bus-class match.
-    pub const GENERIC: u8 = 5;
-    /// Stable exact-ID match.
-    pub const EXACT: u8 = 10;
+    /// The driver can handle this device.
+    Match,
 }
 
 /// PCI vendor/device ID pair for matching.
@@ -188,9 +186,7 @@ impl DeviceMatcher for PciIdsMatcher {
             .iter()
             .any(|id| id.vendor_id == pci.vendor_id && id.device_id == pci.device_id)
         {
-            MatchResult::Match {
-                priority: priority::EXACT,
-            }
+            MatchResult::Match
         } else {
             MatchResult::NoMatch
         }
@@ -207,9 +203,7 @@ impl DeviceMatcher for VirtioTypeMatcher {
     fn matches(&self, desc: &DeviceDesc) -> MatchResult {
         match desc.transport() {
             Some(TransportInfo::Virtio { device_type }) if device_type == self.device_type => {
-                MatchResult::Match {
-                    priority: priority::EXACT,
-                }
+                MatchResult::Match
             }
             _ => MatchResult::NoMatch,
         }
@@ -222,9 +216,7 @@ pub struct CompatibleAliasMatcher(pub &'static str);
 impl CompatibleAliasMatcher {
     fn match_alias(&self, platform: &PlatformIdentity) -> MatchResult {
         if platform.alias == Some(self.0) {
-            MatchResult::Match {
-                priority: priority::EXACT,
-            }
+            MatchResult::Match
         } else {
             MatchResult::NoMatch
         }
@@ -247,19 +239,13 @@ impl DeviceMatcher for FirmwareMatchSpec {
         };
         match (desc.origin(), platform.firmware_id, platform.alias) {
             (DiscoveryOrigin::DeviceTree, Some(id), _) if self.match_dt(id).is_some() => {
-                MatchResult::Match {
-                    priority: priority::EXACT,
-                }
+                MatchResult::Match
             }
             (DiscoveryOrigin::Acpi, Some(id), _) if self.match_acpi(id).is_some() => {
-                MatchResult::Match {
-                    priority: priority::EXACT,
-                }
+                MatchResult::Match
             }
             (DiscoveryOrigin::PlatformStatic, _, Some(name)) if name == self.alias => {
-                MatchResult::Match {
-                    priority: priority::EXACT,
-                }
+                MatchResult::Match
             }
             _ => MatchResult::NoMatch,
         }

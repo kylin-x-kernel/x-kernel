@@ -14,6 +14,7 @@ fwnode.workspace = true
 driver_os_api.workspace = true
 smallvec.workspace = true
 driver_base.workspace = true
+kmutex.workspace = true
 kspin.workspace = true
 lazyinit.workspace = true
 log.workspace = true

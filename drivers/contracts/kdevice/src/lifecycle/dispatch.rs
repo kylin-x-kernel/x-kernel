@@ -10,8 +10,9 @@
 //! `subscribe_device_removed`, and the convenience wrappers in
 //! [`subscribers`](super::subscribers) run on the thread that issued the
 //! triggering lifecycle transition (e.g. inside `probe`, `remove`,
-//! `adopt_active_device`). They run with **no** driver-core lock held, but
-//! they MUST NOT call back into the driver core synchronously:
+//! `adopt_active_device`). No registry or per-object spinlock is held while
+//! they run, but the emitting path does hold the transitioning descriptor's
+//! binding lock. They MUST NOT call back into the driver core synchronously:
 //!
 //! - Do not call `device_registry()` from a subscriber.
 //! - Do not invoke `probe_device_desc`, `remove_device_*`,
@@ -66,20 +67,29 @@ pub(crate) fn dispatch_device_event(event: DeviceEvent) {
     dispatch_event(&callbacks, event);
 }
 
-/// Mark a device matched and notify driver-core observers.
-pub(crate) fn mark_device_matched(device: &DeviceObject) {
-    device.mark_matched();
-    dispatch_device_event(DeviceEvent::Matched { id: device.id() });
-}
-
-/// Bind a device to a driver and notify driver-core observers.
-pub(crate) fn bind_device_to_driver(
+/// Silently prepare the `Matched`/`Bound` metadata of an unpublished device.
+///
+/// No event is dispatched and the object is not yet queryable through the
+/// registry when the publish path calls this. Drivers rely on the binding
+/// metadata being visible from inside `probe_device` (class construction
+/// needs it), while subscribers must only observe it after publication.
+pub(crate) fn prepare_device_binding(
     device: &DeviceObject,
     driver_id: DriverId,
     driver_name: &'static str,
     kind: DeviceKind,
 ) {
+    device.mark_matched();
     device.bind_driver(driver_id, driver_name, kind);
+}
+
+/// Announce a prepared `Matched` transition after the device is published.
+pub(crate) fn announce_device_matched(device: &DeviceObject) {
+    dispatch_device_event(DeviceEvent::Matched { id: device.id() });
+}
+
+/// Announce a prepared `Bound` transition after the device is published.
+pub(crate) fn announce_device_bound(device: &DeviceObject, kind: DeviceKind) {
     dispatch_device_event(DeviceEvent::Bound {
         id: device.id(),
         kind,

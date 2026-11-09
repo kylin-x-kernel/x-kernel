@@ -161,6 +161,24 @@ outside that guarantee.
 | VirtIO driver family | Each VirtIO device type yields two `DeviceDriver` descriptors (PCI/MMIO) sharing one activation path |
 | Platform driver family | ramdisk, AHCI, bcm2835-sdhci, sdmmc, fxmac, and other platform device drivers |
 
+`DriverRegistrar` delegates to `kdevice::register_driver_object`, which
+immediately scans the descriptors that still await a binding — both `Pending`
+and `Probing` — instead of only those that were pending at registration time.
+The scan takes each descriptor's binding lock and rechecks its state after any
+wait, so a driver registered while a probe is in flight observes the final
+outcome rather than a stale snapshot. A descriptor currently held by the
+registering context itself (registration from inside that descriptor's probe)
+is logged and skipped; it is not retried automatically. Cross-descriptor
+re-entry, where two tasks each hold a different descriptor lock and register,
+is not detected at runtime; auditing production call sites is the current
+gate (see `security.md`).
+
+A probe may register child descriptors with `device_desc_add`, which does not
+take a binding lock. That call guarantees only that the descriptor was
+recorded; automatic discovery and binding of the new child by the outer
+pipeline is not yet proven. Transports that create child devices must add an
+explicit trigger rather than assuming the child will be probed.
+
 The disabled AHCI integration only admits the SDK on an explicitly
 hardware-coherent DMA host (currently x86_64). Its SDK `flush_dcache` callback
 is an ordering barrier, not cache clean/invalidate. Non-coherent hosts are
@@ -292,7 +310,9 @@ This is the main path, driven by `init_drivers()` → `discover_unified()`:
    `EnumerationContext::register_device`.
 2. **Driver matching**: `EnumerationContext::probe_pending()` runs
    `kdevice::probe_device_desc` for every descriptor, matching against
-   registered `DeviceDriver`s by `bus_type` + `matcher`.
+   registered `DeviceDriver`s by `bus_type` + `matcher`. Candidates are tried
+   in registration order and the first successful probe wins; later
+   registration cannot overtake a binding that is already in flight.
 3. **Binding and activation**: on a match, `DeviceDriver::probe_device` is
    called; the driver performs hardware initialization and publishes the
    runtime device into the `kclass` registries.
@@ -580,14 +600,20 @@ in `rs_fdtree`'s own host tests (`tests_dma.rs` and `tests_fwnode.rs`).
 ### Driver matching and activation
 
 1. `EnumerationContext::probe_pending` takes all pending descriptors.
-2. For each descriptor it calls `kdevice::probe_device_desc`:
-   - filter drivers by `bus_type`;
-   - call `DeviceDriver::matcher().matches(identity)` to test the match;
-   - on a match, run bind → activate.
+2. For each descriptor it calls `kdevice::probe_device_desc`, which:
+   - takes the descriptor's binding lock (cross-task contention blocks and
+     rechecks; same-task recursion returns `Busy`);
+   - snapshots the bus type's drivers and walks them in registration order;
+   - filters by `bus_type`, then calls `DeviceDriver::matcher().matches(identity)`;
+   - on a match, probes that driver and stops at the first success.
 3. Successfully activated devices have their runtime objects published to
    the matching `kclass` registries.
-4. Unmatched (`Unclaimed`) or requeue-requested (`Requeue`) descriptors
-   enter the `unclaimed` list.
+4. `Skipped` descriptors are already bound/terminal and are not reported.
+   `Unmatched` (no candidate matched), `Unclaimed` (all matching candidates
+   failed), `Busy` (same-thread recursion; remains `Pending`) and `Err`
+   (core preparation failure; remains `Pending`) descriptors enter the
+   `unclaimed` list for logging. A later explicit probe or driver
+   registration can retry them.
 
 ### VirtIO device activation
 

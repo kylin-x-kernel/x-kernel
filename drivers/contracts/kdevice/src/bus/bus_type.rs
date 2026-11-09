@@ -10,8 +10,8 @@ use driver_base::DriverResult;
 use kspin::SpinNoPreempt;
 
 use crate::{
-    BusId, DeviceDesc, DeviceDescId, DeviceDriver, DeviceIdentity, DeviceLocation, DeviceObject,
-    DriverObject, MatchResult,
+    BusId, DeviceDesc, DeviceDriver, DeviceIdentity, DeviceLocation, DeviceObject, DriverObject,
+    MatchResult,
 };
 
 /// Driver-core bus type identifier.
@@ -134,13 +134,14 @@ impl BusType for PlatformBusTypeMatcher {
 
 /// Linux-like bus type object.
 ///
-/// Manages bus instances, pending descriptors and registered drivers for
-/// one matching domain. The matching strategy is delegated to a `BusType`
-/// implementation, allowing hot-loadable modules to plug in custom logic.
+/// Manages bus instances and registered drivers for one matching domain.
+/// Descriptors waiting for a driver live only in the device registry, whose
+/// `Pending`/`Probing` state is the single source of truth. The matching
+/// strategy is delegated to a `BusType` implementation, allowing
+/// hot-loadable modules to plug in custom logic.
 pub struct BusTypeObject {
     matcher: Arc<dyn BusType>,
     buses: SpinNoPreempt<Vec<BusId>>,
-    pending_descriptors: SpinNoPreempt<Vec<DeviceDescId>>,
     drivers: SpinNoPreempt<Vec<Arc<DriverObject>>>,
 }
 
@@ -150,7 +151,6 @@ impl BusTypeObject {
         Self {
             matcher,
             buses: SpinNoPreempt::new(Vec::new()),
-            pending_descriptors: SpinNoPreempt::new(Vec::new()),
             drivers: SpinNoPreempt::new(Vec::new()),
         }
     }
@@ -209,22 +209,6 @@ impl BusTypeObject {
         self.buses.lock().contains(&id)
     }
 
-    /// Queue a discovery descriptor that still needs a matching driver.
-    pub fn enqueue_pending_descriptor(&self, id: DeviceDescId) {
-        let mut pending = self.pending_descriptors.lock();
-        if !pending.contains(&id) {
-            pending.push(id);
-        }
-    }
-
-    /// Remove a descriptor from the pending match queue.
-    pub fn remove_pending_descriptor(&self, id: DeviceDescId) {
-        let mut pending = self.pending_descriptors.lock();
-        if let Some(pos) = pending.iter().position(|current| *current == id) {
-            pending.swap_remove(pos);
-        }
-    }
-
     /// Attach a driver object to this matching domain.
     pub fn attach_driver(&self, driver: Arc<DriverObject>) {
         let mut drivers = self.drivers.lock();
@@ -237,9 +221,6 @@ impl BusTypeObject {
     pub fn drivers_snapshot(&self) -> Vec<Arc<DriverObject>> {
         self.drivers.lock().clone()
     }
-
-    /// Snapshot descriptors waiting for a matching driver.
-    pub fn pending_descriptors_snapshot(&self) -> Vec<DeviceDescId> {
-        self.pending_descriptors.lock().clone()
-    }
 }
+
+unittest::path_mod_test!(tests, "../../ut-tests/bus_match.rs");

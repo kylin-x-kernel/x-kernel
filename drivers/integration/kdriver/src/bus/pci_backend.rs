@@ -66,7 +66,7 @@ impl DeviceDriver for PciHostDriver {
     }
 }
 
-/// Lazily-registered handle to the shared `PciHostDriver` driver object.
+/// Register-once slot for the shared `PciHostDriver` driver object.
 static PCI_HOST_DRIVER: LazyInit<Arc<DriverObject>> = LazyInit::new();
 
 fn pci_host_driver() -> Arc<DriverObject> {
@@ -107,7 +107,7 @@ impl DeviceDriver for PciBridgeDriver {
     }
 }
 
-/// Lazily-registered handle to the shared `PciBridgeDriver` driver object.
+/// Register-once slot for the shared `PciBridgeDriver` driver object.
 static PCI_BRIDGE_DRIVER: LazyInit<Arc<DriverObject>> = LazyInit::new();
 
 fn pci_bridge_driver() -> Arc<DriverObject> {
@@ -134,12 +134,25 @@ struct BridgeEntry {
 /// PCI bus discovery backend.
 pub(crate) struct PciBackend {
     cam: Cam,
+    host_driver: Arc<DriverObject>,
+    bridge_driver: Arc<DriverObject>,
 }
 
 impl PciBackend {
     /// Create a PCI backend with the given CAM type.
+    ///
+    /// The synthetic host/bridge drivers are registered here, at assembly
+    /// time, because `register_driver_object` allocates and may probe pending
+    /// descriptors. `BusManager` and `default_bus_manager()` are public and
+    /// callers may enumerate without going through `DeviceManager`, so
+    /// enumeration itself must never register or acquire these handles
+    /// lazily.
     pub(crate) fn new(cam: Cam) -> Self {
-        Self { cam }
+        Self {
+            cam,
+            host_driver: pci_host_driver(),
+            bridge_driver: pci_bridge_driver(),
+        }
     }
 
     /// Auto-detect the right CAM type based on feature flags.
@@ -155,6 +168,11 @@ impl BusBackend for PciBackend {
 
     fn bus_type_id(&self) -> BusTypeId {
         BusTypeId::PCI
+    }
+
+    #[cfg(unittest)]
+    fn pci_driver_handles(&self) -> Option<(Arc<DriverObject>, Arc<DriverObject>)> {
+        Some((self.host_driver.clone(), self.bridge_driver.clone()))
     }
 
     #[expect(
@@ -228,7 +246,7 @@ impl BusBackend for PciBackend {
                 transport: None,
                 resources: SmallVec::new(),
                 dma: None,
-                driver: pci_host_driver(),
+                driver: self.host_driver.clone(),
             }) {
                 Ok(host) => {
                     host.set_child_bus(Some(bus_id));
@@ -330,7 +348,7 @@ impl BusBackend for PciBackend {
                 transport: None,
                 resources: SmallVec::new(),
                 dma: None,
-                driver: pci_bridge_driver(),
+                driver: self.bridge_driver.clone(),
             }) {
                 Ok(bridge_dev) => {
                     log::info!(

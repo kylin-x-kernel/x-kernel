@@ -9,7 +9,7 @@ use alloc::{sync::Arc, vec::Vec};
 use kspin::SpinNoPreempt;
 
 use crate::{
-    DeviceId, DeviceObject, DriverObject,
+    DeviceId, DeviceObject, DriverId, DriverObject,
     driver::{ProbeCounters, ProbeStats},
 };
 
@@ -101,10 +101,27 @@ impl BusInstance {
         *self.controller.lock() = controller;
     }
 
-    /// Attach a live device object to this bus instance.
+    /// Attach a published device and its driver in one critical section.
     ///
-    /// Driver-core-internal: invoked by the publish path, not by drivers.
-    pub(crate) fn add_device(&self, device: Arc<DeviceObject>) {
+    /// Driver-core-internal: invoked by the publish path (probe and adoption)
+    /// after the registry has published the device and its binding metadata
+    /// is visible via [`DeviceObject::driver_id`]. Taking `devices` then
+    /// `drivers` as one critical section keeps the association consistent
+    /// with a concurrent remove, which cannot remove the shared driver entry
+    /// while this device is visible.
+    pub(crate) fn attach_bound_device(&self, device: Arc<DeviceObject>, driver: Arc<DriverObject>) {
+        // Unit tests pin the metadata-before-bus-attach invariant directly:
+        // both publish paths must set `driver_id` before making the device
+        // visible on the bus.
+        #[cfg(unittest)]
+        assert!(
+            device.driver_id().is_some(),
+            "bus attach requires binding metadata to be set first"
+        );
+        debug_assert!(
+            device.driver_id().is_some(),
+            "bus attach requires binding metadata to be set first"
+        );
         let mut devices = self.devices.lock();
         if let Some(existing) = devices
             .iter_mut()
@@ -114,42 +131,50 @@ impl BusInstance {
         } else {
             devices.push(device);
         }
-    }
 
-    /// Detach a device from this bus instance by ID.
-    ///
-    /// Driver-core-internal: invoked by the remove path, not by drivers.
-    pub(crate) fn remove_device(&self, id: DeviceId) -> Option<Arc<DeviceObject>> {
-        let mut devices = self.devices.lock();
-        devices
-            .iter()
-            .position(|device| device.id() == id)
-            .map(|pos| devices.swap_remove(pos))
-    }
-
-    /// Devices currently attached to this bus instance.
-    pub fn devices_snapshot(&self) -> Vec<Arc<DeviceObject>> {
-        self.devices.lock().clone()
-    }
-
-    /// Attach a driver that has bound devices on this bus instance.
-    ///
-    /// Driver-core-internal: invoked by the publish path, not by drivers.
-    pub(crate) fn add_driver(&self, driver: Arc<DriverObject>) {
         let mut drivers = self.drivers.lock();
         if !drivers.iter().any(|current| current.id() == driver.id()) {
             drivers.push(driver);
         }
     }
 
-    /// Detach a driver from this bus instance by ID.
+    /// Detach a device and orphan its driver association in one critical
+    /// section.
     ///
-    /// Driver-core-internal: invoked by the remove path, not by drivers.
-    pub(crate) fn remove_driver(&self, id: crate::DriverId) {
-        let mut drivers = self.drivers.lock();
-        if let Some(pos) = drivers.iter().position(|current| current.id() == id) {
-            drivers.swap_remove(pos);
+    /// Driver-core-internal: invoked by the remove path after
+    /// `begin_removing()` succeeded and before the device's binding metadata
+    /// is cleared. The shared driver entry is removed only when no remaining
+    /// device on this bus is still bound to it; checking and removing under
+    /// the same `devices` guard prevents a concurrent publish from being
+    /// missed.
+    pub(crate) fn detach_device_and_orphan_driver(
+        &self,
+        id: DeviceId,
+        driver: Option<DriverId>,
+    ) -> Option<Arc<DeviceObject>> {
+        let mut devices = self.devices.lock();
+        let removed = devices
+            .iter()
+            .position(|device| device.id() == id)
+            .map(|pos| devices.swap_remove(pos));
+
+        if let Some(driver_id) = driver {
+            let still_bound = devices
+                .iter()
+                .any(|device| device.driver_id() == Some(driver_id));
+            if !still_bound {
+                let mut drivers = self.drivers.lock();
+                if let Some(pos) = drivers.iter().position(|current| current.id() == driver_id) {
+                    drivers.swap_remove(pos);
+                }
+            }
         }
+        removed
+    }
+
+    /// Devices currently attached to this bus instance.
+    pub fn devices_snapshot(&self) -> Vec<Arc<DeviceObject>> {
+        self.devices.lock().clone()
     }
 
     /// Drivers that have bound devices on this bus instance.
