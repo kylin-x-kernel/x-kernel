@@ -5,6 +5,7 @@
 //! Component invariants exercised in the kernel with synthetic metadata.
 
 use alloc::{string::String, sync::Arc, vec};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use kvfs::{
     Dentry, FallocateFlags, Mount, OpenFlags, SuperBlock, SuperBlockFlags, VfsResult, dentry_open,
@@ -260,6 +261,59 @@ fn fallocate_first_batch_enospc_beyond_eof_keeps_size() {
     assert_eq!(fx.inode().disk_size(), 0);
 }
 
+/// Time and CPU markers around the extension task's first run and the park
+/// wait. Each value is written from the task or CPU that witnesses it and is
+/// read only by the progress path to separate a task kept runnable but never
+/// scheduled from a task whose sleep never completes.
+///
+/// The values are best-effort point-in-time snapshots: a reader may observe
+/// them one update behind the writer. They carry no correctness contract; the
+/// `extension_entered` flag stays the only synchronized fact. A CPU marker of
+/// `u64::MAX` means the matching event has not happened yet.
+struct ParkDiagnostics {
+    spawn_ns: AtomicU64,
+    entry_ns: AtomicU64,
+    entry_cpu: AtomicU64,
+    wake_ns: AtomicU64,
+    wake_cpu: AtomicU64,
+    wait_start_ns: AtomicU64,
+}
+
+impl ParkDiagnostics {
+    /// Builds a fresh marker set for one park wait, with the not-run
+    /// `u64::MAX` sentinel on both CPU markers.
+    fn new() -> Self {
+        Self {
+            spawn_ns: AtomicU64::new(0),
+            entry_ns: AtomicU64::new(0),
+            entry_cpu: AtomicU64::new(u64::MAX),
+            wake_ns: AtomicU64::new(0),
+            wake_cpu: AtomicU64::new(u64::MAX),
+            wait_start_ns: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Returns the current monotonic time in nanoseconds since boot.
+fn monotonic_ns() -> u64 {
+    ktask::monotonic_time().as_nanos_u64_saturating()
+}
+
+/// Returns the logical index of the CPU this task is running on.
+fn current_cpu_index() -> u64 {
+    ktask::current().cpu_id().as_usize() as u64
+}
+
+/// Renders a stored CPU index, mapping the `u64::MAX` not-run sentinel to
+/// `none` so logs never misread "no run yet" as CPU 0.
+fn cpu_or_none(value: u64) -> alloc::string::String {
+    if value == u64::MAX {
+        alloc::string::String::from("none")
+    } else {
+        alloc::format!("{value}")
+    }
+}
+
 /// Regression test for the fallocate/writeback size-publication race.
 ///
 /// The device I/O hold parks the extension inside the ext4 core before it
@@ -277,9 +331,11 @@ fn concurrent_fsync_and_fallocate_extension_both_succeed() {
     /// Deterministic delay before the extension task first runs, reproducing
     /// the host-starvation window observed in CI on an idle host.
     const EXTENSION_START_DELAY_MS: u64 = 300;
-    /// Upper bound for the park wait. It only guards a test that never reaches
-    /// the device; a slow host delays the event instead of failing the premise.
-    const WAIT_PARK_TIMEOUT_MS: u64 = 10_000;
+    /// Progress cadence for the park wait. The test carries no local bailout:
+/// each slice only wakes the observer to print how the extension task is
+/// progressing, and a run that never parks is ended by the suite's own
+/// watchdog with those lines left behind as evidence.
+    const HEARTBEAT_INTERVAL_MS: u64 = 10_000;
 
     let (mut filesystem, device) = journal_allocator_test_filesystem(160, 0b0011_1111);
     let private_inode = allocate_checkpointed_regular_inode(&mut filesystem);
@@ -335,28 +391,54 @@ fn concurrent_fsync_and_fallocate_extension_both_succeed() {
         let extension_slot = extension_result.clone();
         let extension_entered = Arc::new(Mutex::new(false));
         let extension_entered_slot = extension_entered.clone();
+        let diag = Arc::new(ParkDiagnostics::new());
+        let diag_task = diag.clone();
         let extension_task = ktask::spawn(move || {
+            diag_task.entry_ns.store(monotonic_ns(), Ordering::Release);
+            diag_task
+                .entry_cpu
+                .store(current_cpu_index(), Ordering::Release);
             ktask::sleep(ktime_types::TimeSpan::from_millis(
                 EXTENSION_START_DELAY_MS,
             ));
+            diag_task.wake_ns.store(monotonic_ns(), Ordering::Release);
+            diag_task
+                .wake_cpu
+                .store(current_cpu_index(), Ordering::Release);
             *extension_entered_slot.lock() = true;
             *extension_slot.lock() =
                 extension_file.fallocate(FallocateFlags::empty(), 0, extend_to);
         });
-        let park_timed_out = device.wait_for_park(ktime_types::TimeSpan::from_millis(
-            WAIT_PARK_TIMEOUT_MS,
-        ));
-        // Fail loudly if the parking premise breaks: without the park this
-        // degrades into a scheduler-timing test. The size assert pins the park
-        // to before the extension publishes; the buffered write published
-        // `write_end`.
-        assert!(
-            !park_timed_out,
-            "extension did not park on device I/O inside the ext4 core \
-             (waited {} ms, extension_entered={})",
-            WAIT_PARK_TIMEOUT_MS,
-            *extension_entered.lock()
-        );
+        diag.spawn_ns.store(monotonic_ns(), Ordering::Release);
+        diag.wait_start_ns.store(monotonic_ns(), Ordering::Release);
+        // The test sets no local deadline: every slice only wakes the observer
+        // to publish how the extension task is progressing. A run that never
+        // parks ends through the suite's own watchdog with these lines kept as
+        // evidence, so a slow host delays the event without failing the premise.
+        while device.wait_for_park(ktime_types::TimeSpan::from_millis(
+            HEARTBEAT_INTERVAL_MS,
+        )) {
+            let elapsed_ns =
+                monotonic_ns().saturating_sub(diag.wait_start_ns.load(Ordering::Acquire));
+            let spawn_ns = diag.spawn_ns.load(Ordering::Acquire);
+            let entry_ns = diag.entry_ns.load(Ordering::Acquire);
+            let wake_ns = diag.wake_ns.load(Ordering::Acquire);
+            unittest::ktest_println!(
+                "falloc park heartbeat: elapsed={}ms extension_entered={} \
+                 state={:?} held_io_ops={} spawn_to_entry={}ms \
+                 entry_to_wake={}ms entry_cpu={} wake_cpu={}",
+                elapsed_ns / 1_000_000,
+                *extension_entered.lock(),
+                extension_task.state(),
+                device.held_io_ops(),
+                entry_ns.saturating_sub(spawn_ns) / 1_000_000,
+                wake_ns.saturating_sub(entry_ns) / 1_000_000,
+                cpu_or_none(diag.entry_cpu.load(Ordering::Acquire)),
+                cpu_or_none(diag.wake_cpu.load(Ordering::Acquire)),
+            );
+        }
+        // The size assert pins the park to before the extension publishes; the
+        // buffered write published `write_end`.
         assert_eq!(file.size(), write_end);
         let fsync_file = file.clone();
         let fsync_result: Arc<Mutex<VfsResult<()>>> = Arc::new(Mutex::new(Ok(())));
