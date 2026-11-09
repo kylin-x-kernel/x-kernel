@@ -2,11 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Common device model types for x-kernel.
+//! Device core for x-kernel.
 //!
-//! This crate hosts stable, shared device-model concepts that should be
-//! reusable by `kdriver` and higher-level subsystems without forcing them to
-//! depend on the driver orchestration layer.
+//! This crate hosts the shared device model and owns the device registry,
+//! lifecycle orchestration, binding/removal serialization and topology
+//! snapshots. It is framework core rather than a pure interface crate:
+//! `kdriver` and `kclass` consume it, and it does not depend on the driver
+//! orchestration layer.
 //! It also owns stable Linux-facing device-node identity: class index,
 //! major/minor number, `devname`, and the immutable metadata projected by
 //! `devfs` and `sysfs`.

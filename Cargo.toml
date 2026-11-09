@@ -251,8 +251,8 @@ driver_base = { path = "drivers/contracts/driver_base" }
 fwnode = { path = "drivers/firmware/fwnode" }
 driver_os_api = { path = "drivers/base/os-api", package = "driver-os-api" }
 irq_types = { path = "arch/irq-types", package = "irq-types" }
-kclass = { path = "drivers/contracts/kclass" }
-kdevice = { path = "drivers/contracts/kdevice" }
+kclass = { path = "drivers/base/kclass" }
+kdevice = { path = "drivers/base/kdevice" }
 input = { path = "drivers/contracts/input" }
 net = { path = "drivers/contracts/net" }
 vsock = { path = "drivers/contracts/vsock" }

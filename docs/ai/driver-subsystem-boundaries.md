@@ -36,8 +36,9 @@ host kernel adapter
 - OS-neutral driver crates must not depend on host-kernel crates such as
   `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or `kwork`.
 - Concrete driver code must not call host-kernel APIs directly. It must use
-  driver subsystem contracts such as `driver_os_api`, `driver_base`, `kclass`, and
-  device-class traits.
+  driver subsystem contracts such as `driver_os_api`, `driver_base`, and
+  device-class traits, and the framework core (`kclass`) for runtime
+  publication.
 - Host-specific adapter crates may depend on host-kernel crates only to
   implement driver subsystem contracts. Current examples are
   `driver-os-api-xkernel`, irqchip drivers, timer drivers, and X-Kernel integration
@@ -60,14 +61,28 @@ not to OS providers. The old device-res crate is retired.
 Driver crates are grouped by role. See `drivers/README.md` for the local crate
 inventory.
 
-- **Contracts and model**: `driver_base`, `driver-os-api`, `kdevice`, `kclass`,
-  and device class crates such as `block`, `char_driver`, `display`, `input`,
-  `net`, and `vsock`.
+- **Framework core**: `kdevice` (device core: registry, binding/removal
+  orchestration, lifecycle and topology) and `kclass` (typed runtime class
+  publication and availability), both under `drivers/base/`. `driver-os-api`
+  also lives there because it supplies host capability contracts and ownership
+  guards, not device state.
+- **Capability contracts**: `driver_base` and device class crates such as
+  `block`, `char_driver`, `display`, `input`, `net`, and `vsock`. These mainly
+  declare interfaces; some, such as `block`, still contain subsystem runtime
+  state. They do not own the framework registries or binding state described
+  above.
 - **Portable concrete drivers**: reusable hardware/protocol drivers such as
   `virtio`. These crates consume contracts and implement device class traits.
 - **X-Kernel adapters and integration**: `driver-os-api-xkernel`, `kdriver`, and
   platform/host integration drivers such as `irq-driver`, `timer-driver`,
   `rtc-driver`, `x86-apic`, and early `console-driver` paths.
+
+Directory placement does not by itself prove clean separation. The
+`kclass` `virtio-9p` feature still depends on and re-exports the concrete
+`virtio::Virtio9pDevice`; that coupling remains known debt after the move to
+`drivers/base/`. `kdevice` also still carries bus matchers. Both need separate
+consumer and ownership analysis. See `drivers/base/README.md` for the current
+dependency facts and exceptions.
 
 ## Review Checklist
 

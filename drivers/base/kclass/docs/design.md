@@ -2,10 +2,17 @@
 
 ## Purpose
 
-`kclass` is x-kernel's typed runtime device class layer. Built on top of
-the `kdevice` device core, it provides type-safe publication, enumeration,
-lookup, and availability-subscription interfaces for each device category
-(net / block / char / hwrng / display / input / vsock / 9p).
+`kclass` is x-kernel's typed runtime device class layer, located in
+`drivers/base/`. Built on top of the `kdevice` device core, it provides
+type-safe publication, enumeration, lookup, and availability-subscription
+interfaces for each device category (net / block / char / hwrng / display /
+input / vsock / 9p). It lives in `drivers/base/` because it owns the typed
+class registries and the activation bridge from `kdevice`, not only the class
+trait declarations.
+
+The `virtio-9p` feature still depends on and re-exports the concrete
+`virtio::Virtio9pDevice`. That is known coupling debt (see
+`drivers/base/README.md`); the directory move did not change it.
 
 After a successful probe, a driver publishes its runtime capability into
 the matching class registry through `publish_<class>()`; subsystems (such
@@ -53,7 +60,7 @@ future availability notifications.
 ## Scope
 
 ```text
-drivers/contracts/kclass/
+drivers/base/kclass/
 ├── Cargo.toml
 ├── docs/
 │   ├── design.md

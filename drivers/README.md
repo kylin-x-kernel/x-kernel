@@ -6,10 +6,10 @@ contract it is implementing or consuming.
 ## Layers
 
 ```text
-                  driver contracts and device model
+              driver framework core and contracts
                ┌────────────────────────────────────┐
-               │ driver_base / driver-os-api / kdevice │
-               │ kclass / block / net / char / ...  │
+               │ kdevice / kclass / driver-os-api   │
+               │ driver_base / block / net / char / ... │
                └───────────────┬────────────────────┘
                                │
         ┌──────────────────────┴──────────────────────┐
@@ -25,23 +25,36 @@ contracts. They must not call into each other through private implementation
 details, and portable concrete drivers must not call X-Kernel host APIs
 directly.
 
+## Driver Framework Core
+
+[base/](base/README.md) holds the crates that own device/class registries and
+runtime state, plus `driver-os-api`, which supplies host capability contracts
+without owning device registries:
+
+| Crate | Role |
+|------|------|
+| `kdevice` | Device core: bus/device/driver model, resource descriptions, topology, lifecycle, binding/removal orchestration and device-managed cleanup helpers/storage. |
+| `kclass` | Runtime publication layer for typed device classes, class availability events, and the activation bridge from `kdevice`. |
+| `driver-os-api` | OS-neutral MMIO, IRQ, DMA, CPU memory and time contracts with owning guards. |
+
+See [base/README.md](base/README.md) for current dependency facts, prohibited
+dependencies, and the known `kclass` virtio-9p coupling.
+
 ## Driver Contracts
 
-These crates define the portable driver framework and the contracts between
-drivers and a host kernel:
+These crates primarily define capability contracts between drivers, kernel
+subsystems and a host kernel; some class crates still carry subsystem runtime
+implementations (see [base/README.md](base/README.md)):
 
 | Crate | Role |
 |------|------|
 | `driver_base` | Common driver error/result and base device trait. |
-| `driver-os-api` | OS-neutral MMIO, IRQ, DMA, CPU memory and time contracts with owning guards. |
-| `kdevice` | Shared bus/device/driver model, resource descriptions, topology, lifecycle and device-managed cleanup helpers/storage. |
-| `kclass` | Runtime publication layer for typed device classes. |
 | `block`, `char_driver`, `display`, `input`, `net`, `vsock`, `hwrng` | Device class contracts that concrete drivers implement and kernel subsystems consume. |
 
-These crates should stay OS-neutral. They may depend on other driver contract
-crates and small shared utility crates, but not on host-kernel implementation
-crates such as `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or
-`kwork`.
+Framework core and contract crates should stay OS-neutral. They may depend on
+other driver crates and small shared utility crates, but not on host-kernel
+implementation crates such as `khal`, `kirq`, `memspace`, `kdma`, `kruntime`,
+`ktask`, or `kwork`.
 
 ## X-Kernel Adapters
 

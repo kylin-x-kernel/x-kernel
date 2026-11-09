@@ -4,6 +4,10 @@
 
 //! Typed runtime device classes built on top of the device core.
 //!
+//! This crate owns the per-class runtime registries, publication/lookup,
+//! availability notifications and the activation bridge from `kdevice` events.
+//! It is framework core rather than a set of pure class contracts.
+//!
 //! The generic class-device handle and registry mechanics live in the internal
 //! `generic` module. This crate root wires those mechanics to concrete
 //! block/net/char/hwrng/display/input/vsock/9P operation traits.

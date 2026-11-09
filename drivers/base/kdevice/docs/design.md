@@ -5,10 +5,12 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
 ## Purpose
 
-`kdevice` is x-kernel's shared device-model type crate. It provides the
-stable type definitions for the bus / device / driver triple, the global
+`kdevice` is x-kernel's device core, located in `drivers/base/`. It provides
+the stable type definitions for the bus / device / driver triple, the global
 object registries, the lifecycle state machine, Linux-compatible device-node
-identity assignment, and event distribution infrastructure.
+identity assignment, and event distribution infrastructure. It lives in
+`drivers/base/` rather than `drivers/contracts/` because it owns registries
+and binding/removal orchestration, not only interface declarations.
 
 `kdevice` is the bottom of the device-driver stack — `kdriver` (driver
 orchestration) and `kclass` (the typed class layer) are built on top of
@@ -42,7 +44,7 @@ Rust's type system and ownership model:
 ## Scope
 
 ```text
-drivers/contracts/kdevice/
+drivers/base/kdevice/
 ├── Cargo.toml
 ├── docs/
 │   ├── design.md
