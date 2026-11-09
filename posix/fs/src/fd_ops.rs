@@ -38,9 +38,12 @@ bitflags! {
     }
 }
 
-/// Closes a range of file descriptors.
-pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
-    if first < 0 || last < first {
+/// Closes or marks close-on-exec an inclusive unsigned descriptor range.
+///
+/// Linux accepts `UINT_MAX` as an open-ended upper bound. Ranges above the
+/// signed descriptor domain are empty, but still perform a requested unshare.
+pub fn sys_close_range(first: u32, last: u32, flags: u32) -> KResult<isize> {
+    if last < first {
         return Err(KError::InvalidInput);
     }
     let flags = CloseRangeFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
@@ -50,6 +53,11 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
     if flags.contains(CloseRangeFlags::UNSHARE) {
         resources.unshare_fd_table()?;
     }
+
+    let Ok(first) = i32::try_from(first) else {
+        return Ok(0);
+    };
+    let last = i32::try_from(last).unwrap_or(i32::MAX);
 
     if flags.contains(CloseRangeFlags::CLOEXEC) {
         resources.set_cloexec_range(first, last)?;

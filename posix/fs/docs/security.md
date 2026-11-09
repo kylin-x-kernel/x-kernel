@@ -138,7 +138,8 @@ kfd resources / kvfs / device and pipe implementations
 仍可能因偏移不可写返回 EFAULT；copy_file_range 则仅在正数完成后回写。
 
 1. `O_CLOEXEC`、`FD_CLOEXEC` 和 `close_range(CLOEXEC)` 必须只影响 descriptor flags，
-   不应改变底层 `FileLike` 对象。
+   不应改变底层 `FileLike` 对象。`close_range` 在 syscall 边界验证无符号范围后
+   才转换到有符号 fd 编号；接受 `UINT_MAX` 不能使空范围跳过请求的文件表隔离。
 2. `O_NONBLOCK` 和 `F_SETFL(O_NONBLOCK)` 必须修改 open file description 的
    `VfsFile::f_flags`，`nonblocking()` 只能从该字段派生。
 3. `AT_EMPTY_PATH` 是空路径解析的必要条件；只有实际的空字符串与

@@ -599,6 +599,9 @@ KVFS 传输层的检查阶段完成（见 `fs/kvfs/docs/design.md`）。
 资源释放依赖下层对象：
 
 - `close`/`close_range` 从当前进程 fd 表移除 `Arc<dyn FileLike>`；
+- `close_range` 的两个范围参数遵守 Linux `unsigned int` ABI，接受 `UINT_MAX`
+  作为开放上界；向有符号 fd 表转换时裁剪上界。超出 fd 表编号域的空范围仍保留
+  `CLOSE_RANGE_UNSHARE` 的文件表隔离效果，不将无效顺序或未知 flags 当作成功。
 - fd 复制和打开路径通过 `Arc` 共享文件、目录、pipe 或设备对象；
 - 临时 `Vec`、路径 `String`、`CString` 和中间 I/O 缓冲区在函数返回时释放；
 - mount/unmount 的 topology 由 `kvfs::Path` 和 `Mount` 管理；`VfsMount` 最后释放时归还
