@@ -2308,6 +2308,7 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-os-api",
  "driver_base",
+ "fwnode",
  "kspin",
  "lazyinit",
  "log",

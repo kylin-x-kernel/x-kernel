@@ -11,11 +11,7 @@
 use alloc::vec::Vec;
 
 use driver_base::DriverResult;
-use driver_os_api::DmaInfo;
-use kdevice::{
-    BusId, DeviceDesc, DeviceDescId, DeviceId, DeviceIdentity, DeviceLocation, DiscoveryOrigin,
-    ProbeOutcome, ResourceSet, TransportInfo,
-};
+use kdevice::{DeviceDesc, DeviceDescId, DeviceDescSpec, ProbeOutcome};
 
 /// Context used while bus backends enumerate device descriptors.
 ///
@@ -44,68 +40,13 @@ impl EnumerationContext {
         self.unclaimed.push(desc);
     }
 
-    /// Add a newly enumerated descriptor to the shared device core.
-    pub fn register_device(
-        &mut self,
-        bus_id: BusId,
-        location: DeviceLocation,
-        origin: DiscoveryOrigin,
-        identity: DeviceIdentity,
-        transport: Option<TransportInfo>,
-        resources: ResourceSet,
-    ) -> DriverResult<DeviceDescId> {
-        self.register_device_with_parent(
-            bus_id, None, location, origin, identity, transport, resources,
-        )
-    }
-
-    /// Same as [`register_device`], but records a parent device the resulting
-    /// runtime object will be attached under once it is published.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Enumeration supplies the \
-                  complete device descriptor and parent relationship in one registration"
-    )]
-    pub fn register_device_with_parent(
-        &mut self,
-        bus_id: BusId,
-        parent: Option<DeviceId>,
-        location: DeviceLocation,
-        origin: DiscoveryOrigin,
-        identity: DeviceIdentity,
-        transport: Option<TransportInfo>,
-        resources: ResourceSet,
-    ) -> DriverResult<DeviceDescId> {
-        self.register_device_with_dma(
-            bus_id, parent, location, origin, identity, transport, resources, None, None,
-        )
-    }
-
-    /// Same as [`register_device_with_parent`], plus DMA and INTx discovery
-    /// facts.
+    /// Add one finalized discovery result to the shared device core.
     ///
-    /// `dma` and `intx` are `None` when the backend established no such fact;
-    /// they are never substitutes for an explicit identity or coherent policy.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Enumeration supplies the \
-                  complete device descriptor, parent, DMA view and INTx status in one registration"
-    )]
-    pub fn register_device_with_dma(
-        &mut self,
-        bus_id: BusId,
-        parent: Option<DeviceId>,
-        location: DeviceLocation,
-        origin: DiscoveryOrigin,
-        identity: DeviceIdentity,
-        transport: Option<TransportInfo>,
-        resources: ResourceSet,
-        dma: Option<DmaInfo>,
-        intx: Option<kdevice::IntxRouteStatus>,
-    ) -> DriverResult<DeviceDescId> {
-        let desc = kdevice::device_desc_add_with_dma(
-            bus_id, parent, location, origin, identity, transport, resources, dma, intx,
-        )?;
+    /// The specification is consumed as-is. Registration stores the descriptor
+    /// copy that later probe attempts rebuild from, so a retried probe keeps
+    /// the same firmware-node association.
+    pub fn register_device(&mut self, spec: DeviceDescSpec) -> DriverResult<DeviceDescId> {
+        let desc = kdevice::device_desc_add(spec)?;
         let id = desc.id();
         self.registered_count += 1;
         self.pending.push(desc);

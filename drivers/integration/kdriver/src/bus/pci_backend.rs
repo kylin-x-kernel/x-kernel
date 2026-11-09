@@ -504,9 +504,18 @@ impl BusBackend for PciBackend {
                 subclass: dev_info.subclass,
             });
 
-            context.register_device_with_dma(
-                ep_bus, parent, location, origin, identity, transport, resources, None, intx,
-            )?;
+            context.register_device(kdevice::DeviceDescSpec {
+                bus_id: ep_bus,
+                parent,
+                location,
+                origin,
+                identity,
+                transport,
+                resources,
+                dma: None,
+                intx,
+                firmware_node: None,
+            })?;
         }
 
         Ok(())

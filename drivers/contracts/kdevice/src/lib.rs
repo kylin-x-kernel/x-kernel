@@ -69,9 +69,9 @@ pub use bus::{
 };
 pub use device::{
     desc::{
-        DeviceDesc, DeviceDescId, DeviceId, DeviceIdentity, DeviceLocation, DeviceNumber,
-        DeviceRecord, DeviceState, DiscoveryOrigin, IntxRouteStatus, PciIdentity, PlatformIdentity,
-        TransportInfo,
+        DeviceDesc, DeviceDescId, DeviceDescSpec, DeviceId, DeviceIdentity, DeviceLocation,
+        DeviceNumber, DeviceRecord, DeviceState, DiscoveryOrigin, IntxRouteStatus, PciIdentity,
+        PlatformIdentity, TransportInfo,
     },
     handles::{BusHandle, DeviceCore, DriverCore},
     object::{DeviceObject, DeviceUse},
@@ -93,7 +93,7 @@ pub use driver::{
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 pub use lifecycle::{
     ActiveDeviceAdoption, ProbeOutcome, adopt_active_device, attach_device_parent,
-    detach_device_parent, device_desc_add, device_desc_add_with_dma, device_desc_add_with_parent,
+    detach_device_parent, device_desc_add,
     dispatch::{subscribe_device_event_kind, subscribe_device_removed},
     event::{DeviceEvent, DeviceEventKind},
     probe_device_desc, register_bus_instance, register_driver_object, remove_device_managed,

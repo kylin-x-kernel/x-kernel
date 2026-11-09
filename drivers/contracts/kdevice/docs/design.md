@@ -163,7 +163,8 @@ drivers/contracts/kdevice/
 | `BusInstance` | Runtime bus instance; controller / devices / drivers lists; probe statistics |
 | `BusTypeObject` | Bus matching domain; manages the pending descriptor queue and registered drivers; delegates matching to the `BusType` trait |
 | `DriverObject` | Registered driver object; bound-device list; probe statistics |
-| `DeviceDesc` | Discovery-phase descriptor; carries bus_id/location/identity/transport/resources and an optional resolved DMA view |
+| `DeviceDesc` | Discovery-phase descriptor; carries bus_id/location/identity/transport/resources, an optional resolved DMA view, and an optional firmware-node handle |
+| `DeviceDescSpec` | Finalized registration aggregate consumed by `device_desc_add`; the only public registration input |
 | `DeviceDriver` trait | Driver interface: name/device_kind/bus_types/matcher/probe_device/remove/suspend/resume/shutdown |
 | `DeviceMatcher` trait | Open matcher; built-ins PciIdsMatcher/VirtioTypeMatcher/CompatibleAliasMatcher/FirmwareMatchSpec/NeverMatcher |
 | `DeviceEvent` / `DeviceEventKind` | The 5 lifecycle events; bucketed subscribers |
@@ -311,6 +312,50 @@ immutable once registered, and the probe/adoption paths copy it verbatim, so
 firmware ancestry translation and platform policy stay in the bus backend
 rather than in the device core.
 
+### Firmware-node association
+
+`DeviceDescSpec` is the single registration input. It carries
+`firmware_node: Option<FwNode<'static>>`; `DeviceDesc` stores the handle
+privately and exposes it only through the crate-internal `firmware_node()`
+getter. Probe copies the stored handle into the `DeviceObject` it constructs,
+and `DeviceObject::firmware_node()` is the only public read access. The core
+never searches firmware again, re-matches a compatible string, or re-parses a
+property to rebuild the association. A failed probe keeps the descriptor and
+its handle, so every retry attempt for that descriptor observes the same node.
+
+Association ownership follows `FwNode` semantics: it is a `Copy` borrowed
+handle (backend operations pointer + backend-local id), not an `Arc`, refcount
+or owned firmware object. `'static` in the handle type means the backend must
+outlive the kernel device model; this design supports boot-static firmware
+backends only. The bound does not by itself forbid deliberately leaking a
+dynamic backend, so publication policy must still restrict nodes to boot-static
+storage. A backend cannot be unloaded, and a node handle must not be retained
+past backend destruction. Consumers query nodes in normal task/process context
+during discovery or probe; `kdevice` holds no backend lock and never calls
+backend operations itself, and the contract does not declare backends
+interrupt-safe.
+
+The node is descriptive association, not identity: matching still uses
+`DeviceIdentity` plus `DiscoveryOrigin`. Platform-static devices and PCI
+endpoints pass `firmware_node: None` explicitly, and adoption also stores
+`None` because it is a boot/runtime handoff rather than firmware discovery.
+Absence is a normal state: a descriptor without a node binds and probes exactly
+as before, and a probe must not substitute a default node.
+
+Only one registration entry is kept. `DeviceDescSpec` replaced the previous
+`DeviceDesc::new`/`new_with_parent`/`with_intx_route`/`with_dma` builders and
+the split `device_desc_add_with_dma`/`device_desc_add_with_parent` functions.
+Keeping those would have preserved two ways to register and a second place to
+forget `firmware_node`.
+
+Only `device_descs_snapshot` retains the private descriptor handle; the
+`DeviceRecord` snapshot and the topology snapshot are metadata views and do not
+carry a firmware node. Cloning a descriptor snapshot copies the handle but not
+the backend, so the copy still points at the original boot-static backend.
+Registry and per-object locks protect the copied handle, not backend queries.
+`kdevice` unit tests cover descriptor/object/probe copying, retry, absence and
+adoption; the production platform-discovery wiring is covered in `kdriver`.
+
 ## Flows
 
 ### Probe pipeline
@@ -341,7 +386,8 @@ runs, such as the boot console or the PCI host bridge.
 1. Verify the target bus exists and the driver's `bus_types` include the
    target bus's `bus_type`.
 2. Allocate `desc_id` and `device_id`.
-3. Construct `DeviceDesc` + `DeviceObject` (skipping match/probe).
+3. Construct `DeviceDesc` + `DeviceObject` (skipping match/probe), with
+   `firmware_node = None` on both: adoption is not firmware discovery.
 4. Run the same standard event sequence as probe:
    Matched → Bound → Published → Activated.
 5. Attach the parent if the adoption names one.

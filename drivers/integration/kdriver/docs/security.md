@@ -67,6 +67,22 @@ driver-os-api-xkernel / kirq / khal / kdma / memspace / driver crates
   `pci` reads Interrupt Pin (`0x3D`) and never Interrupt Line. Mapping
   preparation neither installs a handler nor activates hardware. This adapter
   does not dispose a shared route after a failed driver probe.
+- Firmware node handles are untrusted only in the sense that the tree they point
+  at is firmware-authored. `kdriver` never fabricates or re-searches a handle:
+  `register_firmware_device` stores the handle already associated by
+  `khal::firmware::devices::for_each_compatible` on the descriptor, and probe
+  reads the same handle from the `DeviceObject`. The handle is a borrowed
+  `(backend, local id)` pair, not an owned object; the backend must keep its
+  storage alive and return `Err(FwError::InvalidNode)` from fallible queries
+  for any handle it does not recognise. Infallible accessors such as `name` and
+  `parent` return `Option` and therefore report `None` for both an absent
+  relationship and an invalid handle. Property access follows the fwnode
+  contract: absent or out-of-range values are `Ok(None)`, malformed values are
+  `InvalidValue`,
+  and unsupported operations are `Unsupported` — a missing value is never
+  replaced with a default. Because a `'static` handle cannot by itself prove
+  boot-static storage, publication is restricted to boot-static firmware
+  backends.
 - Firmware DMA declarations are untrusted input. `firmware_dma` requires an
   explicit device mask, walks the DMA-parent path and ancestor windows with
   checked arithmetic, validates the whole interval, and rejects multi-window,
@@ -115,7 +131,9 @@ values in PCI BAR registers.
 The module directly or indirectly interacts with these boundaries:
 
 - **Firmware input:** DT compatible strings, ACPI HID/CID, MMIO physical addresses,
-  IRQ line numbers, and firmware source types (`DeviceTree` / `ACPI`).
+  IRQ line numbers, firmware source types (`DeviceTree` / `ACPI`), and firmware
+  node handles whose properties and parent links are exposed to drivers
+  unchanged through the fwnode contract.
 - **PCI configuration space:** Vendor:device IDs, class/subclass, BAR addresses and
   sizes, header types, bridge secondary/subordinate bus numbers, and legacy INTx routing.
 - **VirtIO MMIO registers:** Discovery registers such as `MagicValue`, `Version`,
@@ -544,6 +562,17 @@ Callers:
 11. **Device identity allowlist:** VirtIO PCI device IDs are translated through the
     `pci_device_id_to_virtio_type` allowlist. Unknown IDs are registered as generic
     PCI devices without binding a VirtIO driver.
+12. **Firmware-node handle validity:** A `FwNode` is a `Copy` borrow of a backend
+    and a local node id. `kdriver` stores and copies the handle but never
+    dereferences backend storage directly. Fallible queries (`property`,
+    `mmio_resource`, `irq_spec`, `is_available`, and similar) return a typed
+    `FwError` for an unrecognised handle; infallible structural accessors
+    (`name`, `parent`, `first_child`, `next_sibling`) return `Option` and
+    cannot distinguish an invalid handle from an absent relationship.
+    Handles reach probe only from the producer that resolved them during
+    firmware discovery, and only boot-static backends are published, so the
+    borrow remains valid for the kernel lifetime. A `None` handle means the
+    device has no firmware description and is never defaulted or re-looked-up.
 
 ## Thread Safety
 
@@ -579,6 +608,7 @@ Callers:
 | T-14 | Static platform device addresses such as AHCI_PADDR are misconfigured at compile time | Low | `kbuild_config` constants specify invalid physical addresses | `iomap_first_mmio` validates through `devm_iomap` and `iomap_device`; mapping failure prevents driver activation. |
 | T-15 | Incorrect conversion between devres and kernel IRQ types causes bad IRQ configuration, lost handled results, or unwoken IRQ threads | Medium | The `driver-os-api-xkernel` adapter omits trigger/controller/handled/wake-thread fields | `driver-os-api-xkernel` centralizes `driver_os_api` to `kirq` conversion; device-specific queue routing stays in the driver, and the IRQ core does not depend on devres. |
 | T-16 | VirtIO input is published before its interrupt action is usable | Medium | Input construction succeeds but IRQ registration fails or races publication | `virtio/input.rs` requires an IRQ, registers its devres action first, and calls `publish_input` only after registration succeeds. |
+| T-17 | A stale or forged firmware-node handle lets probe read another device's properties | Medium | A handle is constructed for storage that has been freed, or one backend is confused with another | `FwNode` equality includes the backend pointer and local id; fallible backend queries return `FwError::InvalidNode` for unknown handles (infallible `name`/`parent` accessors return `None`); only boot-static backends are published; `kdriver` copies the handle resolved during discovery and never re-searches by name or compatible. |
 
 Impact levels:
 
@@ -602,6 +632,7 @@ Impact levels:
 | F-10 | Rescan produces duplicate device descriptors | The backend uses the default `rescan` hook and reruns full `enumerate` | `kdevice` may reject duplicates or create redundant descriptors | Incomplete hot-plug support | 3 | Default `rescan` reruns `enumerate`; backends may override it with incremental scanning. |
 | F-11 | VirtIO transport type differs from the driver's declaration | Reported `DeviceKind` differs from the matched driver's `device_type` | Driver probe returns `Unsupported` | The device enters the unclaimed list | 4 | `activate_virtio_device` validates the type again in PCI/MMIO activation paths. |
 | F-12 | Quiesce fails to stop device interrupts | Incorrect bus backend `quiesce` implementation or delayed hardware response | Interrupts continue arriving during shutdown | IRQ handlers may access released resources | 2 | Devres resources are released during remove, not quiesce; quiesce only masks interrupt sources. |
+| F-13 | A device reaches probe without a firmware node | Static registration, PCI enumeration or adoption intentionally passes `None`, or discovery had no node | Probe cannot read firmware properties | Driver must rely on static configuration or fail with its own error; no incorrect association is invented | 4 | `None` is the documented normal case; probe queries firmware only when a handle is present and never falls back to a name/compatible lookup. |
 
 Severity levels:
 
@@ -663,6 +694,10 @@ Production deployments should control exposure through log levels.
   it reads only compatible/HID/CID, MMIO, and IRQ resources.
 - PCI hot-plug is supported only through full re-enumeration with `rescan`.
   There is no native hot-plug event handling or PCIe AER / hot-plug controller driver.
+- Firmware-node association assumes boot-static firmware storage. Backends are
+  borrowed, not owned or reference-counted; there is no teardown path for a
+  dynamically created backend, and `FwNode`'s `'static` bound cannot detect one
+  that is deliberately leaked. Dynamic firmware-node providers are out of scope.
 
 ## Audit Checklist
 
@@ -688,6 +723,11 @@ When modifying this module, verify:
   register the corresponding platform driver.
 - New `DeviceDriver::probe_device` implementations return `DriverError` on failure
   rather than panicking.
+- New firmware-node producers pass the node through `DeviceDescSpec` /
+  `register_firmware_device` instead of omitting it or looking the node up again;
+  new producers of a device without firmware description pass `firmware_node: None`
+  explicitly. Probe code reads `DeviceObject::firmware_node()` and must not
+  construct a second property parser or search the firmware tree by compatible.
 - New `VirtIoHal` methods preserve `share`/`unshare` and `dma_alloc`/`dma_dealloc` pairing.
 
 ## Hardware entropy completion provider

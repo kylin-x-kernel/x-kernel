@@ -2,7 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kdevice::PlatformIdentity;
+use kdevice::{
+    DeviceDescSpec, DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity,
+    ResourceSet,
+};
 use unittest::{assert_eq, def_test};
 
 use super::*;
@@ -18,17 +21,21 @@ fn test_register_device_creates_descriptor_without_runtime_record() {
 
     let mut context = EnumerationContext::new();
     let id = context
-        .register_device(
-            bus.id(),
-            DeviceLocation::PlatformStatic { id: 1 },
-            DiscoveryOrigin::PlatformStatic,
-            DeviceIdentity::Platform(PlatformIdentity {
+        .register_device(DeviceDescSpec {
+            bus_id: bus.id(),
+            parent: None,
+            location: DeviceLocation::PlatformStatic { id: 1 },
+            origin: DiscoveryOrigin::PlatformStatic,
+            identity: DeviceIdentity::Platform(PlatformIdentity {
                 alias: Some("test-device"),
                 firmware_id: None,
             }),
-            None,
-            ResourceSet::new(),
-        )
+            transport: None,
+            resources: ResourceSet::new(),
+            dma: None,
+            intx: None,
+            firmware_node: None,
+        })
         .unwrap();
 
     let desc = kdevice::find_device_desc(id).unwrap();
@@ -43,17 +50,21 @@ fn test_probe_pending_requeues_unmatched_descriptor() {
 
     let mut context = EnumerationContext::new();
     context
-        .register_device(
-            bus.id(),
-            DeviceLocation::PlatformStatic { id: 2 },
-            DiscoveryOrigin::PlatformStatic,
-            DeviceIdentity::Platform(PlatformIdentity {
+        .register_device(DeviceDescSpec {
+            bus_id: bus.id(),
+            parent: None,
+            location: DeviceLocation::PlatformStatic { id: 2 },
+            origin: DiscoveryOrigin::PlatformStatic,
+            identity: DeviceIdentity::Platform(PlatformIdentity {
                 alias: Some("test-device"),
                 firmware_id: None,
             }),
-            None,
-            ResourceSet::new(),
-        )
+            transport: None,
+            resources: ResourceSet::new(),
+            dma: None,
+            intx: None,
+            firmware_node: None,
+        })
         .unwrap();
 
     assert_eq!(context.probe_pending(), 0);

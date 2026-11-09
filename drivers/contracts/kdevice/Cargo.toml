@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+fwnode.workspace = true
 driver_os_api.workspace = true
 smallvec.workspace = true
 driver_base.workspace = true

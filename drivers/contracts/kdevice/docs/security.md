@@ -47,8 +47,15 @@ below.
   (subscriber contract).
 - `kdevice` trusts `kclass` to register device nodes only for active runtime
   capabilities and to provide bounded, driver-derived class metadata.
+- `kdevice` trusts the firmware backends behind `FwNodeOps<'static>` to keep
+  their storage alive for the kernel lifetime and to answer only for handles
+  they issued. In fallible queries an unknown handle must surface as
+  `FwError::InvalidNode`, not as memory unsafety; infallible accessors such as
+  `name` and `parent` return `None`. The handle itself is opaque to
+  `kdevice`.
 - `kdevice` is called only from process/task context (it uses no
-  IRQ-safe locks).
+  IRQ-safe locks). Firmware-node queries are also normal-context operations;
+  the contract does not make backends interrupt-safe.
 
 ## External Boundaries / Attack Surface
 
@@ -143,6 +150,14 @@ uses the standard safe abstractions: `SpinNoPreempt`, `AtomicU8`,
     projection deletion. A removal request that overlaps add publication is
     retained as `RemovePending` and completed by the add-publishing thread, so
     callbacks cannot observe remove before add.
+14. **Firmware-node handles are borrowed, not owned**: `FwNode<'static>` is a
+    `Copy` handle containing the backend `FwNodeOps` reference and a
+    backend-local id. `kdevice` copies it descriptor → object and never
+    dereferences backend storage. The `'static` bound prevents storing a
+    short-lived backend borrow, but it does not detect a deliberately leaked
+    runtime backend; publication policy must restrict nodes to boot-static
+    storage. An invalid handle is a typed backend error, and a missing node is
+    `None`, never a default handle.
 
 ## Thread Safety
 
@@ -175,6 +190,7 @@ uses the standard safe abstractions: `SpinNoPreempt`, `AtomicU8`,
 | T-12 | A class index or core ID is reused before projections remove the old node | Medium — stale files or operations could collide with a replacement node | Hot-unplug races a new device in the same class | Removing nodes remain in the registry and unavailable; same-ID registration returns `ResourceBusy`, and the index is released only after `Removed` callbacks return |
 | T-13 | Filesystem projections disagree about device identity | Medium — `/dev` and `/sys` could describe different devices | A consumer independently derives names or numbers | `DeviceNode` is the single immutable source consumed by both devfs and sysfs; allocation templates are private to kdevice |
 | T-14 | Concurrent registration and removal invert add/remove events | Medium — listeners retain a ghost node after observing remove followed by add | Removal begins after registry insertion but before add callbacks finish | Publishing transitions to `RemovePending`; the add-publishing thread emits add first, then performs the complete ordered removal sequence |
+| T-15 | A stale or invalid firmware-node handle reaches a probe | Medium — probe reads another node or fails late | Backend-local ids are reused or a descriptor outlives its backend | `FwNode` equality includes the backend pointer; fallible backend queries must return `FwError::InvalidNode` for unknown ids (infallible name/parent accessors return `None`); the `'static` type bound keeps boot backends alive for the kernel lifetime |
 
 Impact levels:
 
@@ -255,6 +271,9 @@ itself (all logging belongs to upper layers such as `kdriver`).
   multi-level device tree would need a recursive children structure.
 - No IOMMU or device-isolation type abstractions; those belong to kernel
   adaptation layers.
+- Firmware-node association supports boot-static backends only. There is no
+  ownership, refcount or teardown protocol for a dynamically unloaded backend,
+  so such a backend must not be published as `FwNode<'static>`.
 
 ## Audit Checklist
 
@@ -269,6 +288,9 @@ When modifying this module, verify:
 - New subscriber event kinds update `DeviceEventKind::COUNT` and
   `index()`.
 - New registry queries never hold a per-object lock.
+- Discovery fields are carried by `DeviceDescSpec` and copied descriptor →
+  object → probe explicitly; do not reintroduce a second registration entry or
+  a re-lookup of firmware data inside probe.
 - Device-node names and numbers remain private allocation policy in kdevice;
   projection crates consume `DeviceNode` without reassigning identity.
 - Node removal keeps the class index reserved until every projection callback

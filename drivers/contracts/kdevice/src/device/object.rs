@@ -12,6 +12,7 @@ use core::{
 
 use driver_base::DeviceKind;
 use driver_os_api::DmaInfo;
+use fwnode::FwNode;
 use kspin::SpinNoPreempt;
 
 use crate::{
@@ -50,6 +51,8 @@ pub struct DeviceObject {
     dma: Option<DmaInfo>,
     /// Legacy INTx route status carried over from discovery, if any.
     intx: Option<IntxRouteStatus>,
+    /// Firmware node associated with this device at discovery, if any.
+    firmware_node: Option<FwNode<'static>>,
     lifecycle: AtomicU8,
     /// Outstanding in-use references handed out by [`DeviceObject::try_acquire`].
     ///
@@ -108,6 +111,7 @@ impl DeviceObject {
             resources,
             dma: None,
             intx: None,
+            firmware_node: None,
             lifecycle: AtomicU8::new(DeviceState::Discovered.as_u8()),
             usage: AtomicUsize::new(0),
             devres: SpinNoPreempt::new(Vec::new()),
@@ -172,6 +176,16 @@ impl DeviceObject {
         self
     }
 
+    /// Attach the firmware node recorded for this device at discovery.
+    ///
+    /// This is a construction-time builder used by the device core when it
+    /// rebuilds a runtime object from its descriptor. There is no
+    /// post-publication replacement path. The handle is borrowed, not owned.
+    pub(crate) fn with_firmware_node(mut self, node: Option<FwNode<'static>>) -> Self {
+        self.firmware_node = node;
+        self
+    }
+
     /// Borrow hardware resources associated with this device.
     pub fn resources(&self) -> &ResourceSet {
         &self.resources
@@ -185,6 +199,21 @@ impl DeviceObject {
     /// Legacy INTx route status recorded during discovery, if any.
     pub const fn intx_route(&self) -> Option<IntxRouteStatus> {
         self.intx
+    }
+
+    /// Firmware node associated with this device at discovery, if any.
+    ///
+    /// This is the same association the descriptor received at registration;
+    /// a probe (including a retry) reads properties and references from this
+    /// handle instead of searching firmware again. `None` means discovery
+    /// established no association; it does not make the device invalid. The
+    /// returned handle is borrowed and remains valid only under the backend's
+    /// lifetime contract (boot-static backends today). Querying it follows the
+    /// backend's own execution-context rules; holding a handle is not
+    /// permission to access hardware or call the backend from an arbitrary
+    /// context.
+    pub const fn firmware_node(&self) -> Option<FwNode<'static>> {
+        self.firmware_node
     }
 
     /// Find the first MMIO resource.

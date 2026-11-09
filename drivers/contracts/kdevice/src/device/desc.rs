@@ -8,6 +8,7 @@ use core::fmt::Debug;
 
 use driver_base::DeviceKind;
 use driver_os_api::DmaInfo;
+use fwnode::FwNode;
 
 use crate::{BusId, DriverId, ResourceSet};
 
@@ -215,10 +216,54 @@ pub enum DeviceIdentity {
     Platform(PlatformIdentity),
 }
 
+/// Input for registering one discovery-stage device.
+///
+/// A specification is consumed by [`crate::device_desc_add`]. Its fields must
+/// be final before registration; the device core assigns the descriptor id and
+/// stores its own copy. It contains no runtime lifecycle state and no concrete
+/// firmware backend type.
+#[derive(Debug, Clone)]
+pub struct DeviceDescSpec {
+    /// Bus instance the device was discovered on.
+    pub bus_id: BusId,
+    /// Parent device (controller / bridge), if discovery named one.
+    pub parent: Option<DeviceId>,
+    /// Where on the bus hierarchy the device lives.
+    pub location: DeviceLocation,
+    /// Which firmware source described the device.
+    pub origin: DiscoveryOrigin,
+    /// Bus-specific identity used for driver matching.
+    pub identity: DeviceIdentity,
+    /// Upper-layer transport descriptor, if any.
+    pub transport: Option<TransportInfo>,
+    /// Resources (MMIO, IRQ, ...) described for the device.
+    pub resources: ResourceSet,
+    /// Fully resolved DMA view, when the discovering backend composed one.
+    ///
+    /// `None` means no view was established; it does not mean unlimited
+    /// addressing or coherent DMA.
+    pub dma: Option<DmaInfo>,
+    /// How the discovering backend resolved this device's legacy INTx route.
+    ///
+    /// `None` means the backend does not record INTx discovery results; it
+    /// does not mean the device has no legacy interrupt.
+    pub intx: Option<IntxRouteStatus>,
+    /// Firmware node that described this device, if discovery associated one.
+    ///
+    /// The backend must pass the exact node it already resolved for the
+    /// device; registration never searches the firmware tree again. `None`
+    /// means no association was established; it does not make the device
+    /// invalid. The handle is borrowed, not an owned reference, and only
+    /// boot-static backends are supported. Probe consumes it through
+    /// [`crate::DeviceObject::firmware_node`].
+    pub firmware_node: Option<FwNode<'static>>,
+}
+
 /// Discovery-stage device description.
 ///
 /// A descriptor represents a device candidate and its resources. It is not a
 /// runtime device instance and must not carry bound-driver or lifecycle state.
+/// It is constructed only by registering a [`DeviceDescSpec`].
 #[derive(Debug, Clone)]
 pub struct DeviceDesc {
     /// Descriptor id assigned by the backend's enumeration context.
@@ -248,66 +293,29 @@ pub struct DeviceDesc {
     /// `None` means the backend does not record INTx discovery results; it
     /// does not mean the device has no legacy interrupt.
     intx: Option<IntxRouteStatus>,
+    /// Firmware node associated with this device at discovery.
+    firmware_node: Option<FwNode<'static>>,
 }
 
 impl DeviceDesc {
-    /// Build a new discovery-stage device description.
-    pub fn new(
-        id: DeviceDescId,
-        bus_id: BusId,
-        location: DeviceLocation,
-        origin: DiscoveryOrigin,
-        identity: DeviceIdentity,
-        transport: Option<TransportInfo>,
-        resources: ResourceSet,
-    ) -> Self {
-        Self::new_with_parent(
-            id, bus_id, None, location, origin, identity, transport, resources,
-        )
-    }
-
-    /// Build a descriptor that records a parent device for adoption.
+    /// Build a descriptor from a finalized registration specification.
     ///
-    /// The parent linkage is materialized once the descriptor is published as
-    /// a runtime `DeviceObject` (either through the probe path or boot
-    /// adoption). Backends use this to publish endpoints as children of a
-    /// controller they already adopted.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Construct one device \
-                  descriptor from its identity, parent, resources and matching metadata"
-    )]
-    pub fn new_with_parent(
-        id: DeviceDescId,
-        bus_id: BusId,
-        parent: Option<DeviceId>,
-        location: DeviceLocation,
-        origin: DiscoveryOrigin,
-        identity: DeviceIdentity,
-        transport: Option<TransportInfo>,
-        resources: ResourceSet,
-    ) -> Self {
+    /// Device-core-internal: the only public registration path is
+    /// [`crate::device_desc_add`], which assigns the descriptor id first.
+    pub(crate) fn from_spec(id: DeviceDescId, spec: DeviceDescSpec) -> Self {
         Self {
             id,
-            bus_id,
-            parent,
-            location,
-            origin,
-            identity,
-            transport,
-            resources,
-            dma: None,
-            intx: None,
+            bus_id: spec.bus_id,
+            parent: spec.parent,
+            location: spec.location,
+            origin: spec.origin,
+            identity: spec.identity,
+            transport: spec.transport,
+            resources: spec.resources,
+            dma: spec.dma,
+            intx: spec.intx,
+            firmware_node: spec.firmware_node,
         }
-    }
-
-    /// Record the outcome of legacy INTx route resolution.
-    ///
-    /// Must be called before the descriptor is registered with the device
-    /// core, because the runtime object is built from the stored descriptor.
-    pub fn with_intx_route(mut self, status: IntxRouteStatus) -> Self {
-        self.intx = Some(status);
-        self
     }
 
     /// Legacy INTx route status, if the backend recorded one.
@@ -315,19 +323,18 @@ impl DeviceDesc {
         self.intx
     }
 
-    /// Record a fully resolved DMA view for this candidate.
-    ///
-    /// The view is immutable once the descriptor is registered with the
-    /// device core, so callers must finish firmware and platform composition
-    /// first.
-    pub fn with_dma(mut self, dma: DmaInfo) -> Self {
-        self.dma = Some(dma);
-        self
-    }
-
     /// Resolved DMA view, if the discovering backend composed one.
     pub const fn dma(&self) -> Option<DmaInfo> {
         self.dma
+    }
+
+    /// Firmware node associated with this descriptor, if discovery set one.
+    ///
+    /// Device-core-internal: runtime consumers use
+    /// [`crate::DeviceObject::firmware_node`]. The descriptor copy exists so a
+    /// retried probe rebuilds the runtime object from the same association.
+    pub(crate) fn firmware_node(&self) -> Option<FwNode<'static>> {
+        self.firmware_node
     }
 
     /// Descriptor ID.

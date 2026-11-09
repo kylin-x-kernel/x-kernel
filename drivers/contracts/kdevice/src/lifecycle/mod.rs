@@ -19,9 +19,9 @@ use self::{
     event::DeviceEvent,
 };
 use crate::{
-    BusId, BusInstance, BusTypeId, BusTypeObject, DeviceDesc, DeviceDescId, DeviceId,
-    DeviceIdentity, DeviceLocation, DeviceObject, DiscoveryOrigin, DriverObject, MatchResult,
-    ResourceSet, device_registry, init_device_registry, registry::DeviceDescState,
+    BusId, BusInstance, BusTypeId, BusTypeObject, DeviceDesc, DeviceDescId, DeviceDescSpec,
+    DeviceId, DeviceIdentity, DeviceLocation, DeviceObject, DiscoveryOrigin, DriverObject,
+    MatchResult, ResourceSet, device_registry, init_device_registry, registry::DeviceDescState,
 };
 
 /// Description of a boot/runtime handoff object that is already active before
@@ -170,75 +170,23 @@ pub fn register_driver_object(ops: Arc<dyn crate::DeviceDriver>) -> Arc<DriverOb
 }
 
 /// Register a discovery-stage device descriptor without creating a runtime object.
-pub fn device_desc_add(
-    bus_id: BusId,
-    location: DeviceLocation,
-    origin: DiscoveryOrigin,
-    identity: DeviceIdentity,
-    transport: Option<crate::TransportInfo>,
-    resources: ResourceSet,
-) -> Result<DeviceDesc, DriverError> {
-    device_desc_add_with_parent(
-        bus_id, None, location, origin, identity, transport, resources,
-    )
-}
-
-/// Same as [`device_desc_add`], but records a parent device the resulting
-/// runtime object will be attached under.
-pub fn device_desc_add_with_parent(
-    bus_id: BusId,
-    parent: Option<DeviceId>,
-    location: DeviceLocation,
-    origin: DiscoveryOrigin,
-    identity: DeviceIdentity,
-    transport: Option<crate::TransportInfo>,
-    resources: ResourceSet,
-) -> Result<DeviceDesc, DriverError> {
-    device_desc_add_with_dma(
-        bus_id, parent, location, origin, identity, transport, resources, None, None,
-    )
-}
-
-/// Same as [`device_desc_add_with_parent`], plus DMA and INTx discovery facts.
 ///
-/// The backend composes the DMA view from firmware and platform facts before
-/// registration. Passing [`None`] records that no view was established; it
-/// never implies unlimited addressing or coherence. An INTx status is likewise
-/// a backend-recorded fact, not an assumption made by the device core.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Registration needs the full \
-              descriptor identity, parent, resources, DMA view and INTx status in one call"
-)]
-pub fn device_desc_add_with_dma(
-    bus_id: BusId,
-    parent: Option<DeviceId>,
-    location: DeviceLocation,
-    origin: DiscoveryOrigin,
-    identity: DeviceIdentity,
-    transport: Option<crate::TransportInfo>,
-    resources: ResourceSet,
-    dma: Option<driver_os_api::DmaInfo>,
-    intx: Option<crate::IntxRouteStatus>,
-) -> Result<DeviceDesc, DriverError> {
+/// The specification is consumed as one finalized discovery result: the device
+/// core assigns the descriptor id, stores its own copy and queues it for
+/// probing. That copy is the only source for rebuilding runtime objects, so a
+/// retried probe keeps the same association. `firmware_node: None` records that
+/// discovery established no association; it does not make the device invalid.
+pub fn device_desc_add(spec: DeviceDescSpec) -> Result<DeviceDesc, DriverError> {
     init_device_registry();
 
     let (desc, bus_type) = {
         let mut index = device_registry();
-        let bus = index.find_bus(bus_id).ok_or(DriverError::InvalidInput)?;
+        let bus = index
+            .find_bus(spec.bus_id)
+            .ok_or(DriverError::InvalidInput)?;
         let bus_type = index.find_bus_type(bus.bus_type());
         let id = index.alloc_device_desc_id();
-        let desc = DeviceDesc::new_with_parent(
-            id, bus_id, parent, location, origin, identity, transport, resources,
-        );
-        let desc = match dma {
-            Some(dma) => desc.with_dma(dma),
-            None => desc,
-        };
-        let desc = match intx {
-            Some(intx) => desc.with_intx_route(intx),
-            None => desc,
-        };
+        let desc = DeviceDesc::from_spec(id, spec);
         index.add_device_desc(desc.clone());
         (desc, bus_type)
     };
@@ -305,7 +253,8 @@ fn new_unpublished_device_from_desc(
             resources,
         )
         .with_dma(desc.dma())
-        .with_intx_route(desc.intx_route()),
+        .with_intx_route(desc.intx_route())
+        .with_firmware_node(desc.firmware_node()),
     );
     Ok((device, bus_type))
 }
@@ -507,15 +456,20 @@ pub fn adopt_active_device(
         (bus_instance, desc_id, id)
     };
 
-    let desc = DeviceDesc::new_with_parent(
+    let desc = DeviceDesc::from_spec(
         desc_id,
-        adoption.bus_id,
-        adoption.parent,
-        adoption.location,
-        adoption.origin,
-        adoption.identity,
-        adoption.transport,
-        adoption.resources.clone(),
+        DeviceDescSpec {
+            bus_id: adoption.bus_id,
+            parent: adoption.parent,
+            location: adoption.location,
+            origin: adoption.origin,
+            identity: adoption.identity,
+            transport: adoption.transport,
+            resources: adoption.resources.clone(),
+            dma: adoption.dma,
+            intx: None,
+            firmware_node: None,
+        },
     );
     let device = Arc::new(
         DeviceObject::new(
@@ -527,7 +481,8 @@ pub fn adopt_active_device(
             adoption.transport,
             adoption.resources,
         )
-        .with_dma(adoption.dma),
+        .with_dma(adoption.dma)
+        .with_firmware_node(None),
     );
 
     {

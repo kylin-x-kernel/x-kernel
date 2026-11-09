@@ -47,6 +47,33 @@ impl PlatformBackend {
             id_alloc: LocalIdAlloc::new(),
         }
     }
+
+    /// Register a compile-time-known platform device.
+    ///
+    /// These devices have no firmware description to associate, so the node is
+    /// explicitly `None` rather than omitted from the registration path.
+    fn register_static_device(
+        context: &mut EnumerationContext,
+        bus_id: BusId,
+        location: DeviceLocation,
+        identity: DeviceIdentity,
+        resources: ResourceSet,
+    ) -> DriverResult<()> {
+        context
+            .register_device(kdevice::DeviceDescSpec {
+                bus_id,
+                parent: None,
+                location,
+                origin: DiscoveryOrigin::PlatformStatic,
+                identity,
+                transport: None,
+                resources,
+                dma: None,
+                intx: None,
+                firmware_node: None,
+            })
+            .map(|_| ())
+    }
 }
 
 impl BusBackend for PlatformBackend {
@@ -68,6 +95,95 @@ impl BusBackend for PlatformBackend {
 // -- Firmware enumeration (formerly PlatformFirmwareBackend) ------------------
 
 impl PlatformBackend {
+    /// Register one firmware-described platform device.
+    ///
+    /// Deliberate skips (unsupported/empty virtio slot, missing MMIO for the
+    /// virtio transport) return `Ok(())`; allocation, IRQ-mapping and
+    /// registration failures return the error so the caller can keep the first
+    /// one while continuing to the remaining nodes. The firmware node already
+    /// carried by `dev` is stored as-is; this path never searches nodes again.
+    fn register_firmware_device(
+        &mut self,
+        context: &mut EnumerationContext,
+        bus_id: BusId,
+        dev: &fw::FirmwareDevice,
+    ) -> DriverResult<()> {
+        let mut resources: ResourceSet = smallvec![];
+        if let Some(mmio) = dev.mmio {
+            resources.push(ResourceDesc::Mmio(MmioRegion {
+                base: mmio.base,
+                size: mmio.size,
+            }));
+        }
+
+        let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {
+            match dev.mmio {
+                #[cfg(feature = "virtio")]
+                Some(mmio) => virtio_mmio_registration(mmio),
+                #[cfg(not(feature = "virtio"))]
+                Some(_) => None,
+                None => {
+                    log::warn!(
+                        "platform: skipping {} node without MMIO resource",
+                        VIRTIO_MMIO_DT_COMPATIBLE
+                    );
+                    None
+                }
+            }
+        } else {
+            let id = self.id_alloc.alloc()?;
+            Some((
+                DeviceLocation::FirmwareNode { id },
+                DeviceIdentity::Platform(PlatformIdentity {
+                    alias: None,
+                    firmware_id: Some(dev.firmware_id),
+                }),
+                None,
+            ))
+        };
+
+        let Some((location, identity, transport)) = registration else {
+            return Ok(());
+        };
+
+        match map_firmware_irq(dev) {
+            Ok(Some(mapped)) => resources.push(ResourceDesc::Irq(mapped)),
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!(
+                    "platform: IRQ mapping failed for {}: {error:?}",
+                    dev.firmware_id
+                );
+                return Err(error);
+            }
+        }
+
+        let dma = firmware_dma_view(dev);
+        let spec = kdevice::DeviceDescSpec {
+            bus_id,
+            parent: None,
+            location,
+            origin: discovery_origin(dev.source),
+            identity,
+            transport,
+            resources,
+            dma,
+            intx: None,
+            firmware_node: Some(dev.node),
+        };
+        context
+            .register_device(spec)
+            .map(|_| ())
+            .inspect_err(|err| {
+                log::warn!(
+                    "platform: failed to register {:?} from {:?}: {:?}",
+                    identity,
+                    dev.source,
+                    err
+                );
+            })
+    }
+
     fn enumerate_firmware(
         &mut self,
         context: &mut EnumerationContext,
@@ -94,80 +210,10 @@ impl PlatformBackend {
                 }
             },
             |dev| {
-                let mut resources: ResourceSet = smallvec![];
-                if let Some(mmio) = dev.mmio {
-                    resources.push(ResourceDesc::Mmio(MmioRegion {
-                        base: mmio.base,
-                        size: mmio.size,
-                    }));
-                }
-                let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {
-                    match dev.mmio {
-                        #[cfg(feature = "virtio")]
-                        Some(mmio) => virtio_mmio_registration(mmio),
-                        #[cfg(not(feature = "virtio"))]
-                        Some(_) => None,
-                        None => {
-                            log::warn!(
-                                "platform: skipping {} node without MMIO resource",
-                                VIRTIO_MMIO_DT_COMPATIBLE
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    let id = match self.id_alloc.alloc() {
-                        Ok(id) => id,
-                        Err(error) => {
-                            first_error.get_or_insert(error);
-                            return;
-                        }
-                    };
-                    Some((
-                        DeviceLocation::FirmwareNode { id },
-                        DeviceIdentity::Platform(PlatformIdentity {
-                            alias: None,
-                            firmware_id: Some(dev.firmware_id),
-                        }),
-                        None,
-                    ))
-                };
-
-                let Some((location, identity, transport)) = registration else {
-                    return;
-                };
-
-                match map_firmware_irq(&dev) {
-                    Ok(Some(mapped)) => resources.push(ResourceDesc::Irq(mapped)),
-                    Ok(None) => {}
-                    Err(error) => {
-                        log::warn!(
-                            "platform: IRQ mapping failed for {}: {error:?}",
-                            dev.firmware_id
-                        );
-                        first_error.get_or_insert(error);
-                        return;
-                    }
-                }
-
-                let dma = firmware_dma_view(&dev);
-                if let Err(err) = context.register_device_with_dma(
-                    bus_id,
-                    None,
-                    location,
-                    discovery_origin(dev.source),
-                    identity,
-                    transport,
-                    resources,
-                    dma,
-                    None,
-                ) {
-                    log::warn!(
-                        "platform: failed to register {:?} from {:?}: {:?}",
-                        identity,
-                        dev.source,
-                        err
-                    );
+                // Production discovery and the helper test share this exact
+                // path: the node stored on the descriptor is the one firmware
+                // already associated, never a re-lookup by compatible/name.
+                if let Err(err) = self.register_firmware_device(context, bus_id, &dev) {
                     first_error.get_or_insert(err);
                 }
             },
@@ -327,20 +373,17 @@ impl PlatformBackend {
         // this alias and reuses the port printk already drives.
         #[cfg(feature = "serial-ns16550-ioport")]
         {
-            use kdevice::{
-                DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity, ResourceSet,
-            };
-            context.register_device(
+            use kdevice::{DeviceIdentity, DeviceLocation, PlatformIdentity, ResourceSet};
+            Self::register_static_device(
+                context,
                 bus_id,
                 DeviceLocation::PlatformStatic {
                     id: self.id_alloc.alloc()?,
                 },
-                DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
                     alias: Some("serial-ns16550-ioport"),
                     firmware_id: None,
                 }),
-                None,
                 ResourceSet::new(),
             )?;
         }
@@ -348,20 +391,17 @@ impl PlatformBackend {
         // --- ramdisk ---
         #[cfg(feature = "ramdisk")]
         {
-            use kdevice::{
-                DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity, ResourceSet,
-            };
-            context.register_device(
+            use kdevice::{DeviceIdentity, DeviceLocation, PlatformIdentity, ResourceSet};
+            Self::register_static_device(
+                context,
                 bus_id,
                 DeviceLocation::PlatformStatic {
                     id: self.id_alloc.alloc()?,
                 },
-                DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
                     alias: Some("ramdisk"),
                     firmware_id: None,
                 }),
-                None,
                 ResourceSet::new(),
             )?;
         }
@@ -373,24 +413,22 @@ impl PlatformBackend {
         #[cfg(feature = "ahci")]
         if !firmware_present {
             use kdevice::{
-                DeviceIdentity, DeviceLocation, DiscoveryOrigin, MmioRegion, PlatformIdentity,
-                ResourceDesc,
+                DeviceIdentity, DeviceLocation, MmioRegion, PlatformIdentity, ResourceDesc,
             };
             use smallvec::smallvec;
 
             use crate::driver_registry::firmware_specs::AHCI;
 
-            context.register_device(
+            Self::register_static_device(
+                context,
                 bus_id,
                 DeviceLocation::PlatformStatic {
                     id: self.id_alloc.alloc()?,
                 },
-                DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
                     alias: Some(AHCI.alias),
                     firmware_id: None,
                 }),
-                None,
                 smallvec![ResourceDesc::Mmio(MmioRegion {
                     base: kbuild_config::AHCI_PADDR,
                     size: 0x1000,
@@ -401,22 +439,19 @@ impl PlatformBackend {
         // --- bcm2835-sdhci ---
         #[cfg(feature = "bcm2835-sdhci")]
         if !firmware_present {
-            use kdevice::{
-                DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity, ResourceSet,
-            };
+            use kdevice::{DeviceIdentity, DeviceLocation, PlatformIdentity, ResourceSet};
 
             use crate::driver_registry::firmware_specs::BCM2835_SDHCI;
-            context.register_device(
+            Self::register_static_device(
+                context,
                 bus_id,
                 DeviceLocation::PlatformStatic {
                     id: self.id_alloc.alloc()?,
                 },
-                DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
                     alias: Some(BCM2835_SDHCI.alias),
                     firmware_id: None,
                 }),
-                None,
                 ResourceSet::new(),
             )?;
         }
@@ -425,24 +460,22 @@ impl PlatformBackend {
         #[cfg(feature = "sdmmc")]
         if !firmware_present {
             use kdevice::{
-                DeviceIdentity, DeviceLocation, DiscoveryOrigin, MmioRegion, PlatformIdentity,
-                ResourceDesc,
+                DeviceIdentity, DeviceLocation, MmioRegion, PlatformIdentity, ResourceDesc,
             };
             use smallvec::smallvec;
 
             use crate::driver_registry::firmware_specs::SDMMC;
 
-            context.register_device(
+            Self::register_static_device(
+                context,
                 bus_id,
                 DeviceLocation::PlatformStatic {
                     id: self.id_alloc.alloc()?,
                 },
-                DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
                     alias: Some(SDMMC.alias),
                     firmware_id: None,
                 }),
-                None,
                 smallvec![ResourceDesc::Mmio(MmioRegion {
                     base: kbuild_config::SDMMC_PADDR,
                     size: 0x1000,
@@ -467,3 +500,12 @@ impl PlatformBackend {
         Ok(())
     }
 }
+
+unittest::path_mod_test!(
+    platform_backend_unittest,
+    "../../ut-tests/platform_backend_unittest.rs"
+);
+unittest::path_mod_test!(
+    platform_firmware_node_unittest,
+    "../../ut-tests/platform_firmware_node.rs"
+);
