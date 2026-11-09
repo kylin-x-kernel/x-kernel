@@ -508,9 +508,7 @@ fn create_access_skips_device_read_and_requires_full_initialization() {
     let mut bytes = vec![0; TEST_BLOCK_SIZE];
     bytes[0] = 0xc1;
     bytes[TEST_BLOCK_SIZE - 1] = 0x1c;
-    access
-        .replace_bytes(Arc::from(bytes.into_boxed_slice()))
-        .unwrap();
+    access.replace_bytes(Arc::from(bytes)).unwrap();
 
     assert_eq!(
         cache.buffer_state(block).unwrap(),
@@ -914,9 +912,7 @@ fn metadata_io_create_reuses_block_with_only_revoke_skipped_checkpoint_snapshot(
     let third = metadata_io.create_access(block, &mut third_handle).unwrap();
     let mut bytes = vec![0; TEST_BLOCK_SIZE];
     bytes[0] = 0x87;
-    third
-        .replace_bytes(Arc::from(bytes.into_boxed_slice()))
-        .unwrap();
+    third.replace_bytes(Arc::from(bytes)).unwrap();
     drop(third);
     drop(third_handle);
     let third_commit = journal.force_commit(third_transaction).unwrap();
@@ -1174,9 +1170,7 @@ fn checkpoint_committed_writes_created_initialized_metadata_without_reading_old_
     let mut bytes = vec![0; TEST_BLOCK_SIZE];
     bytes[0] = 0xca;
     bytes[TEST_BLOCK_SIZE - 1] = 0xfe;
-    access
-        .replace_bytes(Arc::from(bytes.into_boxed_slice()))
-        .unwrap();
+    access.replace_bytes(Arc::from(bytes)).unwrap();
     drop(access);
     drop(handle);
 

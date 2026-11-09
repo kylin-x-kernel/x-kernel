@@ -134,6 +134,7 @@ checked through the configured kernel's `make clippy` during this migration.
 | [CG-045-non-time-integer-units](CG-045-non-time-integer-units.md) | SHOULD | ai | — |
 | [CG-046-atomic-ordering-rationale](CG-046-atomic-ordering-rationale.md) | SHOULD | ai | — |
 | [CG-047-kconfig-feature-ownership](CG-047-kconfig-feature-ownership.md) | MUST | ai | — |
+| [CG-048-direct-owner-conversion](CG-048-direct-owner-conversion.md) | SHOULD | ai | — |
 
 ### Candidates not yet ruled
 

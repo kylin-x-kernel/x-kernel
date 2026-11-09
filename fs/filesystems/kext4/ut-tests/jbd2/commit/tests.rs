@@ -459,7 +459,7 @@ fn rejects_blocks_that_do_not_match_commit_record() {
         committed_blocks(&[(FilesystemBlock::new(700), vec![0x77; BLOCK_SIZE])]);
     blocks[0] = JournalCommitBlock::new(
         FilesystemBlock::new(701),
-        Arc::from(vec![0x77; BLOCK_SIZE].into_boxed_slice()),
+        Arc::from(vec![0x77; BLOCK_SIZE]),
     );
 
     assert_eq!(
@@ -911,9 +911,7 @@ fn committed_blocks_with_sequence(
     let commit = journal.force_commit(transaction).unwrap();
     let blocks = input
         .iter()
-        .map(|(target, bytes)| {
-            JournalCommitBlock::new(*target, Arc::from(bytes.clone().into_boxed_slice()))
-        })
+        .map(|(target, bytes)| JournalCommitBlock::new(*target, Arc::from(bytes.clone())))
         .collect();
     (commit, blocks)
 }
