@@ -5,12 +5,19 @@
 //! GICv2 backend.
 
 use arm_gic_driver::v2::*;
+use kcpu_id_map::{LogicalCpuId, RawCpuId, raw_cpu_id};
 use kirq::TargetCpu;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
+mod affinity;
+pub(super) use affinity::CHIP as AFFINITY;
+
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
+/// Banked CPU-interface target routes, recorded before each CPU publishes
+/// interrupt readiness. GICv2 target bits are not logical CPU numbers.
+static CPU_TARGETS: CpuTargetMap = CpuTargetMap::new();
 const PRIVATE_IRQ_COUNT: u32 = 32;
 
 kcpu_slot::cpu_slot_cell! {
@@ -54,6 +61,11 @@ unsafe fn set_forwarding_state(desc: kirq::IrqDesc, state: kirq::PerCpuForwardin
 }
 
 unittest::path_mod_test!(config_tests, "../../ut-tests/gicv2_config.rs");
+unittest::path_mod_test!(target_tests, "../../ut-tests/gicv2_target.rs");
+unittest::path_mod_test!(
+    affinity_delivery_tests,
+    "../../ut-tests/gicv2_affinity_delivery.rs"
+);
 
 #[cfg(unittest)]
 pub(super) fn pend_local_ppi_for_test(irq: usize) {
@@ -189,9 +201,54 @@ fn configure_locked(
     })
 }
 
-pub(super) fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
+/// Looks up the target capability recorded for one logical CPU.
+///
+/// The routing API speaks logical CPU identities. Existing CPU-map ownership
+/// supplies the stable hardware identity that the GICv2 target map is keyed by;
+/// this function never treats a logical index as a target bit.
+fn target_for_logical_cpu(
+    logical_cpu: LogicalCpuId,
+    targets: &CpuTargetMap,
+    hardware_cpu_id: impl FnOnce(LogicalCpuId) -> Option<RawCpuId>,
+) -> Option<CpuInterfaceTarget> {
+    let hardware_cpu_id = hardware_cpu_id(logical_cpu)?.as_usize();
+    targets.cpu_interface_target_for_hardware_cpu(hardware_cpu_id)
+}
+
+/// Records one CPU-interface association without overwriting an established one.
+fn record_cpu_target(
+    targets: &CpuTargetMap,
+    logical_cpu: LogicalCpuId,
+    hardware_cpu_id: usize,
+    target: CpuInterfaceTarget,
+) -> Result<(), &'static str> {
+    targets
+        .record_cpu_interface_target(logical_cpu.as_usize(), hardware_cpu_id, target)
+        .map_err(|error| match error {
+            CpuTargetMapError::InvalidLogicalCpu => {
+                "GICv2 logical CPU exceeds the CPU-interface range"
+            }
+            CpuTargetMapError::InvalidTarget => {
+                "GICv2 CPU target is not one implemented CPU-interface bit"
+            }
+            CpuTargetMapError::ConflictingRoute => "conflicting GICv2 CPU target association",
+        })
+}
+
+fn record_current_cpu_target(target: CpuInterfaceTarget) -> Result<(), &'static str> {
+    let logical_cpu = kplat::cpu::id();
+    let hardware_cpu_id = raw_cpu_id(logical_cpu)
+        .ok_or("GICv2 CPU has no hardware identity")?
+        .as_usize();
+    record_cpu_target(&CPU_TARGETS, logical_cpu, hardware_cpu_id, target)
+}
+
+pub(super) fn init(
+    gicd_base: memaddr::VirtAddr,
+    gicc_base: memaddr::VirtAddr,
+) -> Result<(), &'static str> {
     if GIC.get().is_some() {
-        return;
+        return Ok(());
     }
     info!("Initialize GICv2...");
     let gicd_base = VirtAddr::new(gicd_base.into());
@@ -199,16 +256,35 @@ pub(super) fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
     // SAFETY: both distributor and CPU interface bases come from platform
     // discovery and point at the mapped GICv2 MMIO frames for this machine.
     let mut gic = unsafe { Gic::new(gicd_base, gicc_base, None) };
-    gic.init();
+    gic.set_cpu_target_map(&CPU_TARGETS);
+    // Discovery precedes the vendor's distributor reset; a failure therefore
+    // leaves the controller untouched. The boot target is seeded here so the
+    // published controller always has its boot CPU association.
+    let boot_target = gic
+        .try_init()
+        .map_err(|_| "failed to discover boot GICv2 CPU target")?;
+    record_current_cpu_target(boot_target)?;
     super::remember_standard_intid_limit(gic.typer_raw());
     GIC.init_once(SpinNoIrq::new(gic));
     let cpu = GIC.lock().cpu_interface();
     TRAP_OP.init_once(cpu.trap_operations());
+    Ok(())
 }
 
-pub(super) fn init_current_cpu() {
+pub(super) fn init_current_cpu() -> Result<(), &'static str> {
     debug!("Initialize GICv2 CPU Interface...");
-    let gic = GIC.lock();
+    let gic = GIC.get().ok_or("GICv2 is not initialized")?;
+    // Configuration starts with local IRQ delivery masked and before runtime
+    // publishes this CPU as interrupt-ready. Discovery and registration thus
+    // complete before any affinity candidate can name this CPU.
+    let target = {
+        let gic = gic.lock();
+        gic.cpu_interface()
+            .discover_target()
+            .map_err(|_| "failed to discover current GICv2 CPU target")?
+    };
+    record_current_cpu_target(target)?;
+    let gic = gic.lock();
     // These Distributor registers are banked: global initialization on the
     // primary cannot reset an AP's private state. Match Linux gic_cpu_config
     // before opening the CPU interface. GICv2 SGI enable bits can be RAO/WI;
@@ -225,6 +301,7 @@ pub(super) fn init_current_cpu() {
     // to 0xa0. It neither borrows the GIC lock nor touches shared SPI state.
     cpu.init_current_cpu();
     cpu.set_eoi_mode_ns(true);
+    Ok(())
 }
 
 pub(super) fn set_trigger(interrupt_id: usize, edge: bool) {

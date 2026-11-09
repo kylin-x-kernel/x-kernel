@@ -1,5 +1,36 @@
 # irq-driver — Security And Reliability
 
+## GICv2 Runtime Routing Boundary
+
+The affinity selector in `src/gic/mod.rs` and the transaction in
+`src/gic/gicv2/affinity.rs` are covered by this analysis. KIRQ supplies
+interrupt-ready candidate logical CPUs under Line exclusion, outside NMI; the
+backend validates its own GIC domain, standard SPI range and discovered target
+before any register write. The immutable logical-to-raw CPU map supplies the
+hardware identity used to look up the banked CPU-interface target; a logical CPU
+number is never written as a target bit.
+
+Per-CPU GICv2 initialization discovers the banked target before resetting local
+private state and before runtime publishes readiness. The target map rejects
+out-of-range logical CPUs, non-one-hot targets and conflicting associations
+without replacing an established route. Discovery or registration failure
+aborts CPU bring-up instead of silently advertising routing capability. An
+implicit uniprocessor target is recorded only for the boot CPU, and its RAZ/WI
+`GICD_ITARGETSR` is never read back as if it encoded a destination.
+
+The nested GIC lock excludes competing ordinary IRQ register transactions and
+migration for the whole update, below the caller's Line lock. No new unsafe
+boundary is introduced. The GICv2 target byte does not have the GICv3 RWP
+protocol: `Preserve` writes and reads back the target without changing
+enablement, while `KeepMasked` first verifies suppression and leaves delivery
+masked. A pre-write rejection has no MMIO side effect. A readback mismatch
+requests masking and reports uncertain hardware state; it is neither rollback
+nor proof of hardware quiescence. An already claimed interrupt still completes
+on its original CPU through its original completion cookie. The opt-in delivery
+fixture drains before moving, so it does not exercise an in-flight claim racing
+a target update; that remains an unverified acceptance item. There is no CPU
+hotplug or multi-controller inference in this contract.
+
 ## GICv3 Runtime Routing Boundary
 
 The affinity selector in `src/gic/mod.rs` and the transaction in
@@ -99,7 +130,8 @@ producer shutdown or completed remote quiescence. Completion timing is unchanged
 
 This analysis covers the entire crate: `src/lib.rs` (architecture
 dispatch), `src/gic/mod.rs`, `src/gic/xlate.rs`, `src/gic/spi.rs`,
-`src/gic/gicv2.rs`, `src/gic/gicv3.rs`, `src/gic/nmi.rs` (AArch64 GIC),
+`src/gic/gicv2.rs`, `src/gic/gicv2/affinity.rs`, `src/gic/gicv3.rs`,
+`src/gic/nmi.rs` (AArch64 GIC),
 `src/riscv/mod.rs` and `src/riscv/firmware.rs` (PLIC), and
 `src/x86/mod.rs` and `src/x86/discovery.rs` (IO-APIC glue). No modules are
 excluded; the backend crates (`arm_gic_driver`, `riscv_plic`,

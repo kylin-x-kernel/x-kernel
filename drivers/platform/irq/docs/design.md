@@ -1,10 +1,101 @@
 # irq-driver — Design
 
+## GICv2 Runtime SPI Affinity
+
+The GIC provider exposes `IntrManagerIf::immediate_affinity` for an ordinary
+standard SPI belonging to its initialized GICv2 instance. Private sources,
+foreign domains, unsupported flags and IDs outside the discovered standard
+distributor range expose no capability. `gic/gicv2/affinity.rs` implements the
+transaction; KIRQ retains the only Line mapping, requested/effective policy and
+routing-fault admission.
+
+Each CPU's local GICv2 initialization discovers its own banked
+`GICD_ITARGETSR` capability before resetting private state or letting runtime
+publish interrupt readiness. The immutable logical-to-raw CPU map supplies the
+hardware identity, and the target map records logical CPU, hardware identity
+and the discovered CPU-interface bit. Repeated identical discovery is
+idempotent. A conflicting association, an out-of-range logical CPU or an
+ambiguous discovery fails CPU bring-up instead of silently advertising a
+routable target. A uniprocessor GIC records its implicit target only for the
+boot CPU; zero target bits never mean that every CPU is reachable.
+
+Candidate selection consumes runtime's interrupt-ready set and chooses the
+first candidate with a recorded target. Linux `gic_set_affinity` selects an
+online CPU and writes that CPU's `gic_cpu_map` byte; it does not mask for a
+GICv3-style RWP. This backend follows the GICv2 protocol: `Preserve` writes the
+single target byte and verifies its readback without touching the enable
+register, trigger, priority, action ownership or disable depth. `KeepMasked`
+first establishes and verifies suppression, then writes the route and leaves
+delivery masked. For an implicit uniprocessor target, `GICD_ITARGETSR` is
+RAZ/WI, so `Preserve` performs no MMIO and `KeepMasked` only verifies
+suppression through the implemented enable register.
+
+A pre-write rejection leaves state unchanged. A readback mismatch requests
+masking and reports `HardwareFailure`; it does not claim rollback, hardware
+quiescence or a successful route. KIRQ's existing fault recovery still requires
+a disabled-source routing retry before explicit enablement. Attaching the target
+map does not change `send_sgi` or the existing IPI transport, which keeps its
+own target-list path.
+
+### GICv2 Affinity Validation
+
+`ut-tests/gicv2_target.rs` covers CPU-identity lookup, duplicate/conflicting
+discovery, out-of-range and non-one-hot rejection. `ut-tests/gicv2_affinity.rs`
+drives the production routing transaction with injected registers. It covers
+non-identity logical CPU to target-bit mappings, candidate filtering, implicit
+uniprocessor behavior, mask/readback failure ordering, and the narrow
+register-operation surface (enable and target only). Lifecycle, action ownership
+and disable-depth invariants remain covered by the existing KIRQ affinity tests;
+this register fixture does not reimplement them. Register fakes model only
+hardware and contain no alternate routing algorithm.
+
+`ut-tests/gicv2_affinity_delivery.rs` is an opt-in QEMU integration test that
+proves actual delivery and migration. It is skipped unless
+`KIRQ_TEST_QEMU_GICV2_SPI` names an absolute INTID reserved exclusively by the
+operator. For the stock QEMU 10.0.11 `virt` machine, INTID 240 is outside the
+default device wiring described for the GICv3 fixture below; recheck the exact
+machine and passed-through devices before use. The test requires at least two
+ready CPUs by default; `KIRQ_TEST_QEMU_GICV2_MIN_CPUS=1` explicitly selects
+single-runtime-CPU coverage. The boot target type is not derived from the
+ready-CPU count: a multi-interface GIC can expose `Explicit` with only CPU0
+started. By default the fixture accepts either `Explicit` or
+`ImplicitUniprocessor`. `KIRQ_TEST_QEMU_GICV2_EXPECT_TARGET` explicitly requires
+`implicit`, `explicit`, or `any`, and only that declaration makes the fixture
+assert a specific discovered type. A single-CPU run of an SMP-enabled image is
+still not a true UP kernel build. An opted-in source with invalid prerequisites
+fails rather than silently skipping.
+
+The unittest boot also needs the configured root block device. The commands
+below use the Makefile's default `disk.img`, which must already exist.
+
+```sh
+cp platforms/kplat-aarch64/qemu_defconfig .config
+make defconfig
+KIRQ_TEST_QEMU_GICV2_SPI=240 KIRQ_TEST_QEMU_GICV2_EXPECT_TARGET=explicit \
+  timeout 600 make unittest UNITTEST_CRATE=irq_driver VSOCK=n NET=n SMP=2 \
+  QEMU_ARGS="-machine virt,gic-version=2"
+
+KIRQ_TEST_QEMU_GICV2_SPI=240 KIRQ_TEST_QEMU_GICV2_MIN_CPUS=1 \
+  KIRQ_TEST_QEMU_GICV2_EXPECT_TARGET=implicit timeout 600 make unittest \
+  UNITTEST_CRATE=irq_driver VSOCK=n NET=n SMP=1 \
+  QEMU_ARGS="-machine virt,gic-version=2"
+```
+
+The fixture stops its source, synchronizes and drains admitted handlers, removes
+its action and test mapping, restores target/priority/trigger state, and never
+clears an active bit to fabricate a drain. Because it drains each claim before
+moving the route, it does not cover an in-flight claim whose completion races a
+target update. The routing transaction does not read or rewrite the completion
+cookie and GICv2 completion remains on the claiming CPU, but that
+completion-during-migration property is not exercised here and remains an
+unverified acceptance item. Emulated delivery does not validate physical GICv2
+fault behavior.
+
 ## GICv3 Runtime SPI Affinity
 
-The GIC provider exposes `IntrManagerIf::immediate_affinity` only for an
-ordinary standard SPI belonging to its initialized GICv3 instance. GICv2,
-private interrupts and unsupported controller instances expose no capability.
+The GIC provider exposes `IntrManagerIf::immediate_affinity` for an ordinary
+standard SPI belonging to its initialized GICv3 instance. Private interrupts,
+foreign domains and unsupported controller instances expose no capability.
 The selector does not access registers. `gic/gicv3/affinity.rs` implements the
 transaction without changing the claim/completion path. KIRQ owns requested/effective masks,
 management serialization and routing-fault admission; this driver owns target

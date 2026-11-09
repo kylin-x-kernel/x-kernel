@@ -359,9 +359,11 @@ fn validate_config(config: GicConfig) -> Result<(), &'static str> {
 ///
 /// # Errors
 /// Returns an error when the firmware-described register layout is not
-/// supported by this backend, or a local CPU initialization or boot-context
-/// error. Global controller setup may already have taken effect; an error does
-/// not roll it back.
+/// supported by this backend, GICv2 cannot discover or publish a consistent
+/// boot CPU-interface target, or a local CPU initialization or boot-context
+/// error occurs. GICv2 target discovery precedes its distributor reset, so
+/// that failure leaves the controller untouched; failures after setup may
+/// leave global effects in place because boot has no rollback path.
 ///
 /// # Panics
 /// Panics on conflicting configuration, invalid MMIO configuration or a fatal
@@ -379,7 +381,7 @@ pub fn init(config: GicConfig) -> Result<(), &'static str> {
     }
 
     match config.version {
-        GicVersion::V2 => gicv2::init(config.map_gicd(), config.map_gicc()),
+        GicVersion::V2 => gicv2::init(config.map_gicd(), config.map_gicc())?,
         GicVersion::V3 => gicv3::init(config.map_gicd(), config.map_gicr()),
     }
 
@@ -441,11 +443,14 @@ pub fn init_from_fwnode(root: fwnode::FwNode<'static>) -> Result<(), &'static st
 /// read-as-one/write-ignored; CPU IRQ masking protects the preparation phase.
 ///
 /// # Errors
-/// Returns a GICv3 CPU-interface initialization error before setting EOI mode
-/// or publishing PMR readiness. Partial hardware setup is not rolled back;
-/// callers must not activate sources or continue CPU bring-up after failure.
-/// Also rejects IRQ-enabled entry or a repeated initialization attempt before
-/// touching local controller registers, including retries after failure.
+/// On GICv3, returns a CPU-interface initialization error before setting EOI
+/// mode or publishing PMR readiness. On GICv2, returns an error when the local
+/// CPU-interface target cannot be discovered or recorded consistently; that
+/// check precedes the destructive local reset. Partial hardware setup is not
+/// rolled back; callers must not activate sources or continue CPU bring-up
+/// after failure. Also rejects IRQ-enabled entry or a repeated initialization
+/// attempt before touching local controller registers, including retries after
+/// failure.
 ///
 /// # Panics
 /// Panics if global controller initialization has not run.
@@ -463,7 +468,7 @@ pub fn init_current_cpu() -> Result<(), &'static str> {
         return Err("local GIC initialization already attempted");
     }
     match version {
-        GicVersion::V2 => gicv2::init_current_cpu(),
+        GicVersion::V2 => gicv2::init_current_cpu()?,
         GicVersion::V3 => {
             gicv3::init_current_cpu()?;
             // PMR (ICC_PMR_EL1) only exists on GICv3; on a degraded build
@@ -635,13 +640,19 @@ pub fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
 #[kiface::provide]
 impl kirq::IntrManagerIf {
     fn immediate_affinity(desc: kirq::IrqDesc) -> Option<&'static kirq::IrqAffinityChip> {
-        (ACTIVE_GIC.get() == Some(&GicVersion::V3)
-            && (32..1020).contains(&desc.hwirq)
-            && matches!(
+        let version = ACTIVE_GIC.get()?;
+        if !(32..1020).contains(&desc.hwirq)
+            || !matches!(
                 select_gic_flow(desc, STANDARD_INTID_LIMIT.get().copied()),
                 Ok(kirq::IrqFlow::Fasteoi(_))
-            ))
-        .then_some(&gicv3::AFFINITY)
+            )
+        {
+            return None;
+        }
+        match version {
+            GicVersion::V2 => Some(&gicv2::AFFINITY),
+            GicVersion::V3 => Some(&gicv3::AFFINITY),
+        }
     }
 
     fn percpu_nmi(desc: kirq::IrqDesc) -> Option<&'static kirq::PerCpuNmiChip> {
