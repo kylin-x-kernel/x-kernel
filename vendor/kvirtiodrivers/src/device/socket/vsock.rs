@@ -18,7 +18,11 @@ pub(crate) const RX_QUEUE_IDX: u16 = 0;
 pub(crate) const TX_QUEUE_IDX: u16 = 1;
 const EVENT_QUEUE_IDX: u16 = 2;
 
-pub(crate) const QUEUE_SIZE: usize = 8;
+/// Virtqueue depth used for RX, TX, and event queues.
+///
+/// Matches the 128-entry depth exposed by QEMU's vhost-vsock device and used
+/// by the Linux guest driver.
+pub(crate) const QUEUE_SIZE: usize = 128;
 const SUPPORTED_FEATURES: Feature = Feature::RING_EVENT_IDX
     .union(Feature::RING_INDIRECT_DESC)
     .union(Feature::VERSION_1)
@@ -530,7 +534,7 @@ mod tests {
         )));
         let transport = FakeTransport {
             device_type: DeviceType::Socket,
-            max_queue_size: 32,
+            max_queue_size: QUEUE_SIZE as u32,
             device_features: 0,
             state: state.clone(),
         };

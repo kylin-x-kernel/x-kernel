@@ -938,6 +938,10 @@ Ordinary logs omit payload contents, while trace logs record Ethernet frame byte
 - `NetlinkSocket::send_inner` bounds the input by the effective `sk_sndbuf` before copying it into a `Vec`; `PacketSocket::send` copies before later protocol checks. Receive-queue quotas do not cap these transient send allocations; upstream request-size and workload limits remain relevant.
 - The reverse TIPC forwarding map currently has an empty UUID allowlist, accepting every client admitted by the TIPC service. Per-client isolation requires a nonempty mapping or external service policy.
 - `VsockConnectionManager::handle_raw_event` trusts the provider's typed events and copies only available receive bytes. A receive length larger than the supplied body is not rejected, and a full connection ring drops excess bytes. Record completeness depends on the provider and flow-control contract.
+- Each vsock connection reserves a 256 KiB receive ring, and the shared
+  virtio-vsock RX queue holds 128 buffers of 8192 bytes. These storage costs are
+  bounded per connection and device, but scale with the number of live
+  connections.
 - The unsafe callback functions identified in the test-only inventory have incomplete function-level safety documentation. Existing local block comments are recorded above; missing callback contracts remain a source follow-up.
 - Driver RX recycling errors propagate through `KError` to the service, which
   reports them and ends the RX round. Cleanup of a consumed buffer remains the

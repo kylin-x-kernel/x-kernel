@@ -26,6 +26,11 @@ use vsock::{VsockConnectionInfo, VsockDevice, VsockTransportEvent, VsockTranspor
 use crate::as_driver_error;
 
 /// Per-vsock RX virtqueue buffer size.
+///
+/// This intentionally does not mirror Linux's 4 KiB RX SKB allocation. The
+/// vsock-TIPC bridge currently derives TIPC message boundaries from RX events,
+/// so a 4 KiB buffer adds vhost splits for records larger than 4 KiB. Keep the
+/// 8 KiB buffer to preserve the existing message-boundary behavior.
 const RX_BUFFER_SIZE: usize = 8192;
 
 /// Low-level VirtIO vsock device.

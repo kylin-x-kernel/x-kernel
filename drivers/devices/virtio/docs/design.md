@@ -1,64 +1,67 @@
-# VirtIO — 设计文档
+# VirtIO — Design
 
-## 定位
+## Purpose
 
-本模块是 x-kernel 的 VirtIO 驱动适配层，将 [`virtio-drivers`] crate 提供的各类
-VirtIO 设备封装为 [`driver_base`] 系列 trait 的实现。块设备、网络、显示、输入、
-vsock、9p 等子系统通过本模块访问 VirtIO 虚拟设备。
+This crate is X-Kernel's VirtIO driver adaptation layer. It wraps VirtIO devices
+provided by the `virtio-drivers` crate in implementations of the `driver_base`
+trait family. Block, network, display, input, vsock, and 9p subsystems use this
+crate to access VirtIO virtual devices.
 
-本 crate 属于可复用具体驱动层。它不能直接依赖 X-Kernel host API；需要的 DMA、
-IRQ 映射和时间能力必须通过 `virtio_drivers::Hal` 或 `driver_os_api` provider
-contract 传入。
+The crate is a reusable concrete-driver layer and cannot depend directly on
+X-Kernel host APIs. DMA, IRQ mapping, and time capabilities must be supplied
+through `virtio_drivers::Hal` or `driver_os_api` provider contracts.
 
-## 背景
+## Background
 
-x-kernel 运行在裸机 `no_std` 环境中，需要通过 VirtIO 协议与虚拟机监控器（VMM）
-通信来使用虚拟设备。`virtio-drivers` crate 提供了 VirtIO 协议的基础实现（队列管理、
-配置空间访问等），但其接口与 x-kernel 的驱动框架（`driver_base` 系列 trait）不一致，
-因此需要本适配层进行桥接，使上层子系统无需关心 VirtIO 协议细节。
+X-Kernel runs in a bare-metal `no_std` environment and uses the VirtIO protocol
+to communicate with a virtual machine monitor (VMM). The `virtio-drivers` crate
+provides the base VirtIO implementation, including queue management and
+configuration-space access, but its interfaces do not match X-Kernel's
+`driver_base` trait family. This crate bridges those interfaces so upper layers
+do not need to depend on VirtIO protocol details.
 
-## 范围
+## Scope
 
-涉及的源文件：
+The documented source files are:
 
-```
+```text
 drivers/devices/virtio/
 ├── src/
-│   ├── lib.rs          # 设备探测、错误转换、公共 re-export
-│   ├── blk.rs          # VirtIO Block 适配器
-│   ├── gpu.rs          # VirtIO GPU 适配器
-│   ├── input.rs        # VirtIO Input 适配器
-│   ├── net.rs          # VirtIO Net 适配器（含 IRQ 管理）
-│   ├── socket.rs       # VirtIO Vsock 适配器
-│   ├── virtio_9p.rs    # VirtIO 9p 适配器
-│   └── mock_virtio.rs  # 单元测试 Mock（Hal + Transport）
+│   ├── lib.rs          # device probing, error conversion, public re-exports
+│   ├── blk.rs          # VirtIO Block adapter
+│   ├── gpu.rs          # VirtIO GPU adapter
+│   ├── input.rs        # VirtIO Input adapter
+│   ├── net.rs          # VirtIO Net adapter with IRQ management
+│   ├── socket.rs       # VirtIO Vsock adapter
+│   ├── virtio_9p.rs    # VirtIO 9p adapter
+│   └── mock_virtio.rs  # unit-test HAL and transport mocks
 └── Cargo.toml
 ```
 
-Feature flags 控制编译哪些设备适配器：
+Feature flags select the device adapters compiled into the crate:
 
-| Feature   | 启用的设备 | 额外依赖 |
-|-----------|-----------|----------|
-| `block`   | blk       | `block` crate |
-| `gpu`     | gpu       | `alloc`, `display` crate |
-| `input`   | input     | `alloc`, `input` crate |
-| `net`     | net       | `alloc`, `net` crate |
-| `socket`  | socket    | `alloc`, `vsock` crate |
+| Feature | Enabled device | Additional dependencies |
+| --- | --- | --- |
+| `block` | blk | `block` crate |
+| `gpu` | gpu | `alloc`, `display` crate |
+| `input` | input | `alloc`, `input` crate |
+| `net` | net | `alloc`, `net` crate |
+| `socket` | socket | `alloc`, `vsock` crate |
 | `virtio-9p` | virtio_9p | `alloc` |
 
-## 架构
+## Architecture
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│                             上层子系统                                │
-│      (块设备层 / 网络栈 / 显示框架 / 输入子系统 / vsock / 9p)             │
-└───────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────—┘
+│                           Upper subsystems                           │
+│       (block / network / display / input / vsock / 9p)              │
+└───────┬──────────┬──────────┬──────────┬──────────┬──────────┬───────┘
         │          │          │          │          │          │
       Block      Display    Input       Net       Vsock      9p API
       Device     Device     Device      Device    Device     Device
         │          │          │          │          │          │
 ┌───────┴──────────┴──────────┴──────────┴──────────┴──────────┴───────┐
-│                          virtio (本模块)                              │
+│                          virtio (this crate)                         │
 │                                                                      │
 │  ┌───────┐  ┌───────┐  ┌───────┐  ┌───────┐  ┌───────┐  ┌───────┐    │
 │  │  Blk  │  │  Gpu  │  │ Input │  │  Net  │  │ Sock  │  │  9p   │    │
@@ -68,497 +71,593 @@ Feature flags 控制编译哪些设备适配器：
 │  ┌───┴──────────┴──────────┴──────────┴──────────┴──────────┴───────┐│
 │  │                   lib.rs (probe / error / re-export)             ││
 │  └───────────────────────────────┬──────────────────────────────────┘│
-└──────────────────────────────────┼─────────────────────────────────——┘
+└──────────────────────────────────┼───────────────────────────────────┘
                                    │
                           virtio-drivers crate
                                    │
                           VirtIO Transport (MMIO / PCI)
 ```
 
-| 组件 | 职责 |
-|------|------|
-| `lib.rs` | 设备探测（`probe_mmio_device` / `probe_pci_device`）、VirtIO 错误到 `DriverError` 的转换、PCI probe 的驱动中立 `PciProbeError`、公共类型 re-export |
-| `blk.rs` / `blk/requests.rs` | `VirtIoBlkDev` 实现 `BlockDeviceOperations`，管理准入、请求及 DMA 回收 |
-| `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
-| `input.rs` | Wraps `VirtIOInput` as `VirtIoInputDev`, which implements `InputDevice`; probes and caches static capability bitmaps and axis metadata, acknowledges the ISR in IRQ context, and asks the input layer to drain events in task context. |
-| `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack 和网络 RX scheduler 调度 |
-| `socket.rs` | 将 `VirtIOSocket` 封装为实现 `VsockDevice` 的原始包收发适配器 `VirtIoVsockDev`；连接状态由 `net/knet` 的 `VSOCK_CONN_MANAGER` 持有 |
-| `virtio_9p.rs` | 将 `VirtIO9p` 封装为实现 `Virtio9pDevice` 的 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
-| `mock_virtio.rs` | 提供 `MockHal` 和 `MockTransport`，用于单元测试 |
+| Component | Responsibility |
+| --- | --- |
+| `lib.rs` | Device probing (`probe_mmio_device` / `probe_pci_device`), VirtIO-error to `DriverError` conversion, driver-neutral `PciProbeError`, and public re-exports |
+| `blk.rs` / `blk/requests.rs` | `VirtIoBlkDev` implements `BlockDeviceOperations` and manages admission, requests, and DMA reclamation |
+| `gpu.rs` | Wraps `VirtIOGpu` in `VirtIoGpuDev`, which implements `DisplayDevice` |
+| `input.rs` | Wraps `VirtIOInput` in `VirtIoInputDev`, which implements `InputDevice`; probes and caches static capability bitmaps and axis metadata, acknowledges the ISR in IRQ context, and asks the input layer to drain events in task context |
+| `net.rs` | Wraps `VirtIONetRaw` in `VirtIoNetDev`, which implements `NetDevice` and manages RX/TX buffers, IRQ acknowledgement, and network RX scheduling |
+| `socket.rs` | Wraps `VirtIOSocket` in the raw packet adapter `VirtIoVsockDev`, which implements `VsockDevice`; connection state is owned by `VSOCK_CONN_MANAGER` in `net/knet` |
+| `virtio_9p.rs` | Wraps `VirtIO9p` in `VirtIo9pDev`, which implements `Virtio9pDevice` and provides `mount_tag()` and `request()` |
+| `mock_virtio.rs` | Provides `MockHal` and `MockTransport` for unit tests |
 
-## 调用约束 / 执行上下文
+## Calling Constraints And Execution Context
 
-`virtio` 位于平台传输层与上层子系统之间，
-调用者需要满足以下执行约束：
+`virtio` sits between platform transports and upper subsystems. Callers must
+satisfy the following constraints:
 
-- **依赖平台已完成设备枚举与映射**：
-  `probe_mmio_device` 要求 MMIO 寄存器区已经映射且地址有效；
-  `probe_pci_device` 要求 PCI 配置空间、BAR 和 IRQ 路由可访问。
-- **初始化路径依赖早期启动环境**：
-  设备探测、feature 协商、virtqueue 分配和 IRQ 注册
-  通常发生在启动期或驱动注册期，
-  需要底层内存分配、DMA 支持和中断设施已经可用。
-- **PCI vsock 使用轮询**：`probe_pci_device` 在驱动初始化前设置该 PCI
-  function 的 `Command::INTERRUPT_DISABLE`，禁止其 INTx 输出。收发继续由
-  vsock 轮询路径推进；不屏蔽控制器上的共享 IRQ，也不影响 blk 等设备。
-  `VirtIoVsockDev` 不上报 IRQ 编号。此策略仅覆盖 PCI INTx，不能视为
-  MMIO 或未来 MSI-X vsock 的通用中断禁用机制。
-- **普通设备操作不应在错误的中断语境中执行**：
-  块设备同步 I/O、9p 请求、GPU flush、
-  网络缓冲区回收等路径可能持有锁或等待设备完成，
-  不应假设适用于任意不可睡眠上下文。
-- **网络设备的 IRQ 与正常路径并发访问
-  依赖 `SpinNoIrq`**：
-  调用者不应绕过现有封装直接并发访问 `InnerDev`。
-- **网络 IRQ handler 只做设备级快速处理**：
-  virtio-net IRQ handler 按 resolved IRQ 过滤对应设备 handle，
-  ack 设备中断后只调用上层通过 `driver_net::NetRxScheduler`
-  attach 的 RX 调度能力，不直接运行协议栈或 socket 唤醒逻辑。
-- **输入设备的 IRQ handler 仅确认中断**：
-  `VirtIoInputIrqHandler` 可在硬中断上下文运行。它获取设备的 `SpinNoIrq`，
-  读取并清除 VirtIO ISR；共享中断线上的 ISR 为空时返回 `NOT_HANDLED`。
-  该处理程序不会消费输入事件、分配内存或进入 VFS；队列消费仍在任务上下文完成。
-- **设备对象的共享安全依赖 trait 约束和内部封装**：
-  blk 使用内部锁保护队列和请求状态；其他非 net 设备主要通过 `&mut self` 独占访问；
-  net 设备依赖内部锁和 token-buffer 对应关系维持正确性。
-- **上层必须尊重 handle 生命周期**：
-  例如 net 设备返回的 TX/RX handle
-  必须按约定回收，不能重复消费或跨设备混用。
+- **The platform must have completed device enumeration and mapping.**
+  `probe_mmio_device` requires a valid mapped MMIO register region.
+  `probe_pci_device` requires accessible PCI configuration space, BARs, and
+  IRQ routes.
+- **Initialization depends on the early boot environment.** Device probing,
+  feature negotiation, virtqueue allocation, and IRQ registration normally run
+  during boot or driver registration and require memory allocation, DMA
+  support, and interrupt facilities to be available.
+- **PCI vsock is polled.** Before driver initialization, `probe_pci_device`
+  sets `Command::INTERRUPT_DISABLE` on the PCI function to suppress INTx.
+  Transmit and receive progress through the vsock polling path. This does not
+  mask the shared IRQ at the interrupt controller and does not affect devices
+  such as blk. `VirtIoVsockDev` does not report an IRQ number. The policy only
+  covers PCI INTx and is not a generic interrupt-disable mechanism for MMIO or
+  future MSI-X vsock devices.
+- **Ordinary device operations must not run in an inappropriate interrupt
+  context.** Synchronous block I/O, 9p requests, GPU flushes, and network
+  buffer reclamation may hold locks or wait for device completion. They must
+  not be assumed safe in arbitrary non-sleepable contexts.
+- **Network IRQ and normal-path concurrency rely on `SpinNoIrq`.** Callers must
+  not bypass the existing wrappers and access `InnerDev` concurrently.
+- **The VirtIO-net IRQ handler performs only device-level fast work.** It
+  filters device handles by resolved IRQ, acknowledges the device interrupt,
+  and calls only the RX scheduling capability attached by the network layer
+  through `driver_net::NetRxScheduler`. It does not run the protocol stack or
+  socket wake logic directly.
+- **The VirtIO input IRQ handler only acknowledges interrupts.**
+  `VirtIoInputIrqHandler` may run in hard-IRQ context. It acquires the device's
+  `SpinNoIrq`, reads and clears the VirtIO ISR, and returns `NOT_HANDLED` when
+  the shared line reports no interrupt for this device. It does not consume
+  input events, allocate memory, or enter the VFS. Queue consumption remains in
+  task context.
+- **Shared safety depends on trait bounds and internal encapsulation.** blk
+  uses internal locks for queues and request state. Other non-network devices
+  are primarily accessed through exclusive `&mut self`. Network devices rely
+  on internal locking and token-buffer correspondence.
+- **Upper layers must respect handle lifetimes.** For example, TX/RX handles
+  returned by the network device must be reclaimed exactly as specified and
+  must not be consumed twice or mixed across devices.
 
-## 状态机
+## State Machines
 
-### 设备生命周期
+### Device Lifecycle
 
-```
+```text
 Uninitialized ──probe──> Probed ──try_new──> Ready ──ops──> Active
                               │                  │
-                              │    try_new 失败   │  设备错误
-                              └─────Error────────> Failed
+                              │   try_new error  │  device error
+                              └──────Error───────> Failed
 ```
 
-| 从 | 到 | 触发条件 |
-|----|----|----------|
-| Uninitialized | Probed | `probe_mmio_device` / `probe_pci_device` 识别到 VirtIO 设备 |
-| Probed | Ready | `try_new()` 成功初始化设备（协商 feature、分配队列） |
-| Probed | Failed | `try_new()` 失败（设备不支持、DMA 分配失败等） |
-| Ready | Active | 首次调用驱动操作（如 `read_block`、`send` 等） |
-| Active | Failed | 设备返回不可恢复错误 |
+| From | To | Trigger |
+| --- | --- | --- |
+| Uninitialized | Probed | `probe_mmio_device` / `probe_pci_device` identifies a VirtIO device |
+| Probed | Ready | `try_new()` negotiates features and allocates queues |
+| Probed | Failed | `try_new()` fails because the device is unsupported or DMA allocation fails |
+| Ready | Active | The first driver operation, such as `read_block` or `send`, is invoked |
+| Active | Failed | The device returns an unrecoverable error |
 
 ### Block Request State
 
-The host uses `try_new_irq`; `try_new` remains explicit early-boot polling,
-never a fallback after failed IRQ setup. Both use the same owned request queue.
-IRQ construction disables queue interrupts until activation is ready.
+The host uses `try_new_irq`. `try_new` remains the explicit early-boot polling
+constructor and is never a fallback after IRQ setup fails. Both constructors
+use the same owned request queue. IRQ construction disables queue interrupts
+until activation is ready.
 
-Pending FIFO and submitted-token ownership retain a boxed `VirtioRequest` with
-one common `block::Request`, protocol header/response and queue links. There is
-no driver-local waiter or second result state machine. Request owns the transfer
-cursor; the private node owns only protocol/transport resources. Terminal callbacks
-run after descriptor and DMA retirement, outside the device lock.
+The pending FIFO and submitted-token ownership retain a boxed `VirtioRequest`
+containing one common `block::Request`, the protocol header/response, and queue
+links. There is no driver-local waiter or second result state machine. The
+request owns the transfer cursor; the private node owns only
+protocol/transport resources. Terminal callbacks run after descriptor and DMA
+retirement, outside the device lock.
 
-### GPU 设备 scanout resource 状态
+### GPU Scanout Resource State
 
-```
+```text
 Uninit ──probe/query resolution──> Ready
 Ready ──create_scanout_resource──> ResourceAttached
 ResourceAttached ──present_scanout_resource──> ScanningOut
 ScanningOut ──present_scanout_resource(same resource/geometry)──> ScanningOut
 ScanningOut ──present_scanout_resource(new resource/geometry)──> ScanningOut
 ResourceAttached / ScanningOut ──destroy_scanout_resource──> Ready
-Ready / ResourceAttached / ScanningOut ──设备错误──> Failed
+Ready / ResourceAttached / ScanningOut ──device error──> Failed
 ```
 
-| 从 | 到 | 触发条件 |
-|----|----|----------|
-| Uninit | Ready | `try_new()` 完成 feature 协商、virtqueue 初始化并查询分辨率 |
-| Ready | ResourceAttached | DRM dumb buffer backing 被创建并 attach 到 virtio-gpu 2D resource |
-| ResourceAttached | ScanningOut | DRM modeset/page-flip 触发 transfer-to-host、set-scanout 和 flush |
-| ScanningOut | ScanningOut | 同一 resource 与几何参数重复提交时复用已有 scanout 绑定；切换 resource 或几何参数时重新设置绑定 |
-| ResourceAttached / ScanningOut | Ready | dumb buffer 销毁，resource detach/unref |
-| Ready / ResourceAttached / ScanningOut | Failed | 设备返回不可恢复错误 |
+| From | To | Trigger |
+| --- | --- | --- |
+| Uninit | Ready | `try_new()` negotiates features, initializes virtqueues, and queries display resolution |
+| Ready | ResourceAttached | The DRM dumb-buffer backing is created and attached to a virtio-gpu 2D resource |
+| ResourceAttached | ScanningOut | A DRM modeset/page flip issues transfer-to-host, set-scanout, and flush |
+| ScanningOut | ScanningOut | Repeated presentation of the same resource and geometry reuses the existing scanout binding; another resource or geometry reprograms the binding |
+| ResourceAttached / ScanningOut | Ready | The dumb buffer is destroyed and the resource is detached/unreferenced |
+| Ready / ResourceAttached / ScanningOut | Failed | The device returns an unrecoverable error |
 
-> GPU 驱动不再在 `try_new()` 中创建固定 framebuffer。像素内存由 DRM dumb buffer
-> 分配并 mmap 给用户态，virtio-gpu resource 直接 attach 这段 backing。page flip
-> 只提交 transfer-to-host、set-scanout 和 resource-flush 命令，不再做 CPU framebuffer copy。
+> The GPU driver no longer creates a fixed framebuffer in `try_new()`. Pixel
+> memory is allocated by DRM dumb buffers and mmaped to userspace; the
+> virtio-gpu resource attaches that backing directly. A page flip only submits
+> transfer-to-host, set-scanout, and resource-flush commands and performs no CPU
+> framebuffer copy.
 
-### Input 设备事件队列状态
+### Input Event Queue State
 
-```
-Empty ──设备产生事件──> HasEvent ──read_event──> Empty
-                          │                        │
-                          │  read_event (无事件)    │  返回 WouldBlock
+```text
+Empty ──device event──> HasEvent ──read_event──> Empty
+                          │                         │
+                          │ read_event (no event)   │ return WouldBlock
                           └──> WouldBlock ──────────┘
 ```
 
-| 从 | 到 | 触发条件 |
-|----|----|----------|
-| Empty | HasEvent | 设备产生输入事件，VirtIO 队列中存在待读取事件 |
-| HasEvent | Empty | `read_event()` 成功弹出事件 |
-| Empty | WouldBlock | `read_event()` 调用时队列无事件，返回 `DriverError::WouldBlock` |
-| WouldBlock | HasEvent | 设备产生新事件 |
+| From | To | Trigger |
+| --- | --- | --- |
+| Empty | HasEvent | The device produces an input event and the VirtIO queue contains a pending event |
+| HasEvent | Empty | `read_event()` successfully pops an event |
+| Empty | WouldBlock | `read_event()` finds no queued event and returns `DriverError::WouldBlock` |
+| WouldBlock | HasEvent | The device produces a new event |
 
-> 输入设备为轮询模型：`read_event()` 非阻塞地从 VirtIO 队列弹出事件，
-> 无事件时返回 `WouldBlock`，由上层决定轮询策略。
+> Input devices use a polling model. `read_event()` non-blockingly pops an
+> event from the VirtIO queue, returns `WouldBlock` when none is available, and
+> leaves the polling policy to the upper layer.
 
-### 网络设备缓冲区状态
+### Network Buffer State
 
-```
+```text
 Free ──alloc_tx_buf──> Allocated ──send──> InFlight ──recycle_tx──> Free
   │                                                               │
   └───────────────────── recv + recycle_rx ────────────────────────┘
 ```
 
-| 从 | 到 | 触发条件 |
-|----|----|----------|
-| Free | Allocated | `alloc_tx_buf()` 从 `free_tx_bufs` 取出缓冲区 |
-| Allocated | InFlight | `send()` 将缓冲区提交到 VirtIO 队列 |
-| InFlight | Free | `recycle_tx()` 回收已发送完成的缓冲区 |
-| Free (rx) | InFlight (rx) | `try_new()` 中 `receive_begin()` 将 rx 缓冲区提交到队列 |
-| InFlight (rx) | Free (rx) | `recv()` + `recycle_rx()` 取回并重新提交 rx 缓冲区 |
+| From | To | Trigger |
+| --- | --- | --- |
+| Free | Allocated | `alloc_tx_buf()` removes a buffer from `free_tx_bufs` |
+| Allocated | InFlight | `send()` submits the buffer to the VirtIO queue |
+| InFlight | Free | `recycle_tx()` reclaims a completed transmit buffer |
+| Free (RX) | InFlight (RX) | `try_new()` calls `receive_begin()` to submit RX buffers |
+| InFlight (RX) | Free (RX) | `recv()` and `recycle_rx()` reclaim and resubmit an RX buffer |
 
-### Vsock 连接状态
+### Vsock Connection State
 
-```
-Closed ──listen──> Listening ──connect──> Connecting ──Connected事件──> Established
+```text
+Closed ──listen──> Listening ──connect──> Connecting ──Connected event──> Established
   │                    │                                          │
-  │                    │    ConnectionRequest                      │  recv / send
-  │                    └──> Accept ──accept──> Established          │
+  │                    │              ConnectionRequest           │  recv / send
+  │                    └──> Accept ──accept──> Established         │
   │                                                               │
-  │    disconnect / abort                                         │  Disconnected事件
+  │    disconnect / abort                                         │  Disconnected event
   └───────────────────────────────────────────────────────────────> Closed
 ```
 
-| 从 | 到 | 触发条件 |
-|----|----|----------|
-| Closed | Listening | `listen(src_port)` 开始监听端口 |
-| Listening | Established | 收到 `ConnectionRequest` 事件，上层调用 `connect()` 接受 |
-| Closed | Connecting | `connect(cid)` 主动发起连接 |
-| Connecting | Established | 收到 `Connected` 事件 |
-| Established | Established | `send()` / `recv()` 数据传输；`recv()` 后自动 `update_credit()` |
-| Established | Closed | 收到 `Disconnected` 事件，或调用 `disconnect()` / `abort()` |
-| Any | Closed | `abort()` 强制关闭（`force_close`），不等待对端确认 |
+| From | To | Trigger |
+| --- | --- | --- |
+| Closed | Listening | `listen(src_port)` starts listening on a port |
+| Listening | Established | A `ConnectionRequest` arrives and the upper layer calls `connect()` to accept it |
+| Closed | Connecting | `connect(cid)` initiates an outbound connection |
+| Connecting | Established | A `Connected` event arrives |
+| Established | Established | `send()` / `recv()` transfer data; `recv()` automatically updates credit |
+| Established | Closed | A `Disconnected` event arrives, or `disconnect()` / `abort()` is called |
+| Any | Closed | `abort()` force-closes the connection with `force_close` without waiting for peer acknowledgement |
 
-> Vsock 连接由 `VsockConnectionManager` 内部管理，本模块通过 `poll_event()` 获取
-> 事件并翻译为上层 `VsockDriverEventType`。`recv()` 后自动调用 `update_credit()`
-> 通知对端可用缓冲区大小。
+> `VsockConnectionManager` owns vsock connection state. This crate obtains
+> events through `poll_event()` and translates them into upper-layer
+> `VsockDriverEventType` values. After `recv()`, `update_credit()` advertises
+> updated receive-buffer capacity to the peer.
 
-### 9p 设备请求状态
+### 9p Request State
 
-```
-Idle ──request──> Waiting ──设备响应──> ResponseReady ──返回──> Idle
+```text
+Idle ──request──> Waiting ──device response──> ResponseReady ──return──> Idle
                        │
-                       │  设备错误
+                       │  device error
                        └──> Failed
 ```
 
-| 从 | 到 | 触发条件 |
-|----|----|----------|
-| Idle | Waiting | 调用 `request()`，将 9p 请求提交到 VirtIO 队列 |
-| Waiting | ResponseReady | 设备返回响应数据 |
-| ResponseReady | Idle | `request()` 将响应拷贝到 `resp` 缓冲区并返回写入字节数 |
-| Waiting | Failed | 设备返回错误或响应缓冲区不足 |
+| From | To | Trigger |
+| --- | --- | --- |
+| Idle | Waiting | `request()` submits a 9p request to the VirtIO queue |
+| Waiting | ResponseReady | The device returns response data |
+| ResponseReady | Idle | `request()` copies the response into `resp` and returns the byte count |
+| Waiting | Failed | The device returns an error or the response buffer is too small |
 
-> 9p 设备为同步请求/响应模型：`request()` 阻塞等待设备响应，无超时机制。
-> `mount_tag()` 可随时调用，不受请求状态影响。
+> The 9p device uses a synchronous request/response model. `request()` blocks
+> for a device response and has no timeout. `mount_tag()` may be called at any
+> time and is independent of request state.
 
-## 算法流程
+## Algorithms
 
-### PCI 设备探测
+### PCI Device Probe
 
-1. 读取 PCI 配置空间，获取设备类型信息
-2. 通过 `virtio_device_type()` 判断是否为 VirtIO 设备，再通过 `as_device_kind()` 映射为 `DeviceKind`
-3. `probe_pci_device` 接收发现阶段已映射的 INTx 资源
-   （`Option<IrqResource>`），不再自行读取 Interrupt Line。
-   - x86_64 网络设备先尝试通过 `IrqOp` 建立 MSI-X；不可用时使用传入的
-     INTx 资源。两者都没有时 probe 返回驱动中立的
-     `PciProbeError::NoInterrupt`，由 host 集成层结合设备上的 INTx 发现
-     状态选择失败策略；驱动层不会把寄存器值猜测为 GSI。
-   - 其他设备类型只使用传入的 INTx 资源，不存在 x86 Interrupt Line 回退。
-   - transport 创建失败返回 `PciProbeError::Transport`，与中断不可用分开，
-     不会被误归因为 INTx 路由失败。
-   - 未识别为 VirtIO 的设备返回 `PciProbeError::NotVirtio`。
-4. 其他架构：优先使用发现阶段映射的固件路由资源，缺失时保留兼容回退
-   - aarch64：`pci::legacy_interrupt_route()` 获取设备树路由的
-     `Hwirq` 变体，按触发类型创建 GIC 描述符
-   - riscv64：映射为 PLIC 中断
+1. Read PCI configuration space to obtain device type information.
+2. Use `virtio_device_type()` to identify a VirtIO device and `as_device_kind()`
+   to map it into `DeviceKind`.
+3. `probe_pci_device` receives the INTx resource mapped during discovery as an
+   `Option<IrqResource>` and does not read Interrupt Line itself.
+   - On x86_64, network devices first try to establish MSI-X through `IrqOp`
+     and use the provided INTx resource if MSI-X is unavailable. If neither is
+     available, probing returns the driver-neutral
+     `PciProbeError::NoInterrupt`. The host integration layer chooses the
+     failure policy using the device's discovery-time INTx state; the driver
+     layer never interprets a register value as a GSI.
+   - Other device kinds use only the provided INTx resource. There is no x86
+     Interrupt Line fallback.
+   - Transport-construction failure returns `PciProbeError::Transport`, which
+     remains distinct from interrupt unavailability and is not misclassified
+     as an INTx routing failure.
+   - A device that is not recognized as VirtIO returns
+     `PciProbeError::NotVirtio`.
+4. On other architectures, prefer the firmware route mapped during discovery
+   and retain compatibility fallbacks when it is absent.
+   - aarch64: `pci::legacy_interrupt_route()` obtains the device-tree `Hwirq`
+     route and builds a GIC descriptor using the declared trigger type.
+   - riscv64: map the route to a PLIC interrupt.
    - loongarch64: the static INTx fallback maps `0x10 + device % 4` through
-     `IrqOp::map_irq` as `LoongArchExtioi` / `LevelHigh`, without a domain.
-     It returns the provider's virtual IRQ, not the raw hardware number;
-     mapping failure leaves the IRQ absent.
-5. 屏蔽输入设备及当前仅轮询的 vsock 路径所使用的 legacy INTx，随后返回
-   `Result<(DeviceKind, PciTransport, IrqResource), PciProbeError>`。host
-   集成层仅在输入设备的共享中断处理程序注册完成后解除其 INTx 屏蔽；vsock
-   的 INTx 保持屏蔽。
+     `IrqOp::map_irq` as `LoongArchExtioi` / `LevelHigh` without a domain. It
+     returns the provider's virtual IRQ, not the raw hardware number; mapping
+     failure leaves the IRQ absent.
+5. Mask legacy INTx for input devices and the currently polled vsock path, then
+   return `Result<(DeviceKind, PciTransport, IrqResource), PciProbeError>`. The
+   host integration layer unmasks input INTx only after its shared interrupt
+   handler is registered; vsock INTx remains masked.
 
-### MMIO 设备探测
+### MMIO Device Probe
 
-1. 将内存基地址转换为 `VirtIOHeader` 指针（`NonNull::new` 确保非空）
-2. 创建 `MmioTransport`，验证魔数（`0x74726976`）和版本（仅支持版本 2）
-3. 映射设备类型为 `DeviceKind`（通过 `as_device_kind()`）
-4. 返回 `(DeviceKind, MmioTransport)`
+1. Convert the memory base address into a `VirtIOHeader` pointer.
+   `NonNull::new` rejects null.
+2. Create `MmioTransport` and validate the magic value (`0x74726976`) and
+   version (only version 2 is supported).
+3. Map the device type to `DeviceKind` through `as_device_kind()`.
+4. Return `(DeviceKind, MmioTransport)`.
 
-### Block Reads, Writes And Flushes
+### Block Reads, Writes, And Flushes
 
-`BlkMqOperations::queue_rq` accepts the common Request, prepares its protocol
-node and enqueues it. QueueFull retains the node in FIFO order; completion reclaims
-a finite used batch and refills from pending requests without caller intervention.
-A successful transfer prefix advances Request's cursor. Only the final prefix or
-an error completes the common request. No-op flush completes without a token.
+`BlkMqOperations::queue_rq` accepts the common `Request`, prepares its protocol
+node, and enqueues it. `QueueFull` retains the node in FIFO order. Completion
+reclaims a finite used batch and refills from pending requests without caller
+intervention. A successful transfer prefix advances the request cursor. Only
+the final prefix or an error completes the common request. A no-op flush
+completes without a token.
 
-The library's scatter submission/completion APIs preserve byte ranges through
-virtqueue descriptors. Segment count and size are negotiated; requests exceeding
-a chain's limits continue from the common cursor. An otherwise indescribable
-fragmented sector uses a preallocated 512-byte bounce, never a request-sized copy.
-The adapter rejects a per-segment limit below 512 bytes with Unsupported during
-initialization because that fallback requires one segment. The library's SG API
-only requires sector alignment of the combined request length.
-Descriptor arrays are temporary stack views, not another owner/request registry.
-The HAL still performs device-specific DMA mapping, including its existing bounce
-pool; indirect descriptor allocation remains a transport cost.
+The library's scatter submission and completion APIs preserve byte ranges
+through virtqueue descriptors. Segment count and size are negotiated; requests
+exceeding a chain's limits continue from the common cursor. An otherwise
+indescribable fragmented sector uses a preallocated 512-byte bounce buffer, not
+a request-sized copy. The adapter rejects a per-segment limit below 512 bytes
+with `Unsupported` during initialization because the fallback requires one
+segment. The library's SG API only requires sector alignment of the combined
+request length. Descriptor arrays are temporary stack views, not another
+owner/request registry. The HAL still performs device-specific DMA mapping,
+including its existing bounce pool; indirect-descriptor allocation remains a
+transport cost.
 
-Unknown/out-of-range tokens and unproven descriptor reclamation are fatal invariant
-violations. IO_ERR/UNSUPPORTED after pop become ordinary driver errors. NotReady
-is ambiguous and fails closed. The IRQ constructor rejects panic-unwind builds.
-The host supplies non-sleeping DMA/completion capabilities and serializes completion
-passes; caller-side waits use the common block adapter only.
+Unknown or out-of-range tokens and unproven descriptor reclamation are fatal
+invariant violations. `IO_ERR` and `UNSUPPORTED` after `pop_used` become
+ordinary driver errors. `NotReady` is ambiguous and fails closed. The IRQ
+constructor rejects panic-unwind builds. The host supplies non-sleeping
+DMA/completion capabilities and serializes completion passes; caller-side waits
+use only the common block adapter.
 
-### GPU 设备 scanout resource
+### GPU Scanout Resources
 
-**初始化流程**：
+**Initialization:**
 
-1. `try_new(transport)`：协商 feature、分配 control/cursor virtqueue
-2. `GET_DISPLAY_INFO`：查询显示分辨率 `(width, height)`
-3. Wrap `width` and `height` in `DisplayInfo { width, height }`; from then on only
-   `refresh_info()` updates it (see "Display size changes" below).
-   virtio-gpu 是 scanout-only 设备，不暴露直接 framebuffer 映射——`DisplayDevice`
-   trait 不再包含 `fb()` / 直接映射字段，所有像素输出经 scanout resource 路径
-   （由 `fbdevice` 的 fbdev emulation 和 `drmdevice` 共享使用）。
+1. `try_new(transport)` negotiates features and allocates the control and cursor
+   virtqueues.
+2. `GET_DISPLAY_INFO` queries display resolution `(width, height)`.
+3. The driver stores `width` and `height` in `DisplayInfo { width, height }`.
+   Only `refresh_info()` updates the cached value afterward.
 
-**resource-backed 显示流程**：
+The virtio-gpu device is scanout-only and exposes no direct framebuffer
+mapping. The `DisplayDevice` trait has no `fb()` or direct-mapping field. All
+pixel output uses the scanout-resource path shared by `fbdevice` emulation and
+`drmdevice`.
 
-1. DRM `CREATE_DUMB` 分配连续 guest pages，并调用 `create_scanout_resource()`
-2. virtio-gpu 发送 `RESOURCE_CREATE_2D` 和 `RESOURCE_ATTACH_BACKING`
-3. 用户态 mmap dumb buffer 并写入像素
-4. DRM modeset/page-flip 调用 `present_scanout_resource()`
-5. virtio-gpu 发送 `TRANSFER_TO_HOST_2D`、`SET_SCANOUT` 和 `RESOURCE_FLUSH`
-6. DRM `DESTROY_DUMB` 调用 `destroy_scanout_resource()`，发送 detach/unref
+**Resource-backed display flow:**
 
-> resource ID 由 DRM 层分配并随 dumb buffer 生命周期释放；virtio-gpu 驱动负责把这些
-> resource 命令串行提交到 control virtqueue。
+1. DRM `CREATE_DUMB` allocates contiguous guest pages and calls
+   `create_scanout_resource()`.
+2. virtio-gpu sends `RESOURCE_CREATE_2D` and `RESOURCE_ATTACH_BACKING`.
+3. Userspace mmaps the dumb buffer and writes pixels.
+4. A DRM modeset/page flip calls `present_scanout_resource()`.
+5. virtio-gpu sends `TRANSFER_TO_HOST_2D`, `SET_SCANOUT`, and
+   `RESOURCE_FLUSH`.
+6. DRM `DESTROY_DUMB` calls `destroy_scanout_resource()` to detach and
+   unreference the resource.
 
-### Display size changes
+> DRM allocates resource IDs and releases them with the dumb-buffer lifetime.
+> The virtio-gpu driver serializes these resource commands on the control
+> virtqueue.
 
-When the host changes the console size (for example by resizing the QEMU
-window), it sets `VIRTIO_GPU_EVENT_DISPLAY` in the config-space `events_read`
-word. This driver registers no interrupt for the display device (`pci.rs`
-deliberately masks the Display INTx), so the query path polls instead:
+### Display Size Changes
 
-1. `DisplayDevice::refresh_info()` reads `events_read`, acknowledges the bits it
-   consumed by writing `events_clear`, and issues `GET_DISPLAY_INFO` again.
-2. When the size differs from the cached value it updates `DisplayInfo` and
+When the host changes the console size, for example by resizing the QEMU
+window, it sets `VIRTIO_GPU_EVENT_DISPLAY` in the configuration-space
+`events_read` word. The driver registers no interrupt for the display device
+because `pci.rs` deliberately masks Display INTx, so the query path polls:
+
+1. `DisplayDevice::refresh_info()` reads `events_read`, acknowledges consumed
+   bits by writing `events_clear`, and issues `GET_DISPLAY_INFO` again.
+2. If the size differs from the cached value, it updates `DisplayInfo` and
    returns `Some(new)`; otherwise it returns `None`.
-3. `drmdevice` calls it before `GETCONNECTOR`, so the new size appears as a
-   mode named `<width>x<height>` on the connector, and `GETRESOURCES` reports
+3. `drmdevice` calls `refresh_info()` before `GETCONNECTOR`, so the new size
+   appears as a `<width>x<height>` connector mode, and `GETRESOURCES` reports
    the capability envelope rather than the current size.
 
-`refresh_info()` issues control virtqueue requests, so it may only run in
-process context and never from interrupt handling.
+`refresh_info()` issues control-virtqueue requests and therefore may run only in
+process context, never from interrupt handling.
 
-### 输入设备事件读取
+### Input Event Reads
 
-**初始化流程**：
+**Initialization:**
 
-1. `try_new(transport, irq)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
-2. `name()`：读取设备名称字符串（失败则使用 `"<unknown>"`）
-3. `ids()`：读取设备 ID（bustype / vendor / product / version），封装为 `InputDeviceId`
+1. `try_new(transport, irq)` calls `InnerDev::new(transport)`, which negotiates
+   features and allocates VirtIO queues.
+2. `name()` reads the device-name string and uses `"<unknown>"` on failure.
+3. `ids()` reads bustype, vendor, product, and version into `InputDeviceId`.
 
-**事件读取流程**：
+**Event-read flow:**
 
-1. 调用 `read_event()` → `inner.pop_pending_event()`
-2. 若队列有待读取事件：返回 `Event { event_type, code, value }`
-3. 若队列为空：返回 `DriverError::WouldBlock`；`inputdev` 在设备通知后负责延迟取事件
+1. `read_event()` calls `inner.pop_pending_event()`.
+2. If an event is pending, return `Event { event_type, code, value }`.
+3. If the queue is empty, return `DriverError::WouldBlock`. `inputdev` performs
+   deferred event retrieval after device notification.
 
-**能力查询流程**：
+**Capability query:**
 
-1. 调用 `get_event_bits(ty, out)` → `inner.query_config_select(EvBits, ty, out)`
-2. 设备将事件位图写入 `out` 缓冲区
-3. 返回 `true`（有数据）或 `false`（无数据）
+1. `get_event_bits(ty, out)` calls
+   `inner.query_config_select(EvBits, ty, out)`.
+2. The device writes its event bitmap into `out`.
+3. The call returns `true` when data is available and `false` otherwise.
 4. `try_new` also probes `EvBits(EV_ABS)`, `AbsInfo`, and `PROP_BITS`. It
    decodes the five `__s32` fields of every advertised axis into immutable
    `AbsInfo` values and copies the property bitmap into a fixed-length cache.
-   Later `EVIOCGABS`/`EVIOCGPROP` calls do not touch config space.
+   Later `EVIOCGABS` and `EVIOCGPROP` calls do not touch configuration space.
 5. `abs_info(code)` returns only cached static axis metadata. `inputdev`
-   maintains the scalar axis position from the `EV_ABS` stream; the driver
-   does not duplicate event state.
+   maintains scalar axis position from the `EV_ABS` stream; the driver does not
+   duplicate event state.
 
-A failed config query is treated as "not advertised": probing still completes,
-`abs_info` returns `None`, and `inputdev` applies Linux zero-filled
-`input_absinfo` semantics for an unadvertised axis. `EV_ABS` support itself is
-decided by the event bitmap, so a device without absolute axes never enters
-the per-axis query path.
+A failed configuration query is treated as "not advertised": probing still
+completes, `abs_info` returns `None`, and `inputdev` applies Linux
+zero-filled `input_absinfo` semantics for the unadvertised axis. The event
+bitmap decides whether `EV_ABS` is supported, so devices without absolute axes
+never enter the per-axis query path.
 
-### 网络设备收发
+### Network Transmit And Receive
 
-**初始化流程**：
+**Initialization:**
 
-1. `try_new(transport, irq)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
-2. 创建 `NetBufPool`（容量 `2 * QS`，缓冲区长度 1526 字节）
-3. 填充所有 rx 缓冲区：对每个 `rx_buffers[i]`，调用 `receive_begin()` 提交到接收队列，验证 `token == i`
-4. 预分配所有 tx 缓冲区：对每个缓冲区，调用 `fill_buffer_header()` 填充帧头，存入 `free_tx_bufs`
-5. 若提供 `irq`，调用 `register_virtio_net_irq()` 注册中断回调
+1. `try_new(transport, irq)` calls `InnerDev::new(transport)` to negotiate
+   features and allocate VirtIO queues.
+2. Create `NetBufPool` with capacity `2 * QS` and 1526-byte buffers.
+3. Fill every RX buffer by calling `receive_begin()` for each
+   `rx_buffers[i]`, verifying `token == i`.
+4. Preallocate every TX buffer by filling its frame header with
+   `fill_buffer_header()` and placing it in `free_tx_bufs`.
+5. If `irq` is provided, call `register_virtio_net_irq()` to register the
+   interrupt callback.
 
-**发送流程**：
+**Transmit:**
 
-1. 调用 `alloc_tx_buf(size)` 从 `free_tx_bufs` 栈中弹出缓冲区，设置 `payload_len`
-2. 上层填充数据后调用 `send()` → `transmit_begin(frame)` 提交到 VirtIO 发送队列
-3. 将 `NetBuf` 存入 `tx_buffers[token]`，确保缓冲区在设备使用期间存活
-4. 中断到来时调用 `recycle_tx()`：循环调用 `poll_transmit()` 获取已完成令牌，`transmit_complete()` 释放缓冲区，回收至 `free_tx_bufs`
+1. `alloc_tx_buf(size)` pops a buffer from `free_tx_bufs` and sets
+   `payload_len`.
+2. After the upper layer fills the payload, `send()` calls
+   `transmit_begin(frame)` to submit it to the VirtIO TX queue.
+3. Store the `NetBuf` in `tx_buffers[token]` so it remains alive while the
+   device owns it.
+4. On interrupt, `recycle_tx()` loops over completed tokens from
+   `poll_transmit()`, calls `transmit_complete()` to release each buffer, and
+   returns it to `free_tx_bufs`.
 
-**接收流程**：
+**Receive:**
 
-1. IRQ 模式由 handler 调用 `ack_interrupt()` 确认设备事件并调度 RX，任务上下文调用 `recv()` 后直接通过 `poll_receive()` 获取令牌；纯轮询模式没有 IRQ handler，由 `recv()` 调用 `ack_interrupt()` 后查询接收队列
-2. 从 `rx_buffers[token]` 取出缓冲区，调用 `receive_complete()` 读取帧头和包长度
-3. 设置 `hdr_len` 和 `payload_len`，返回 `NetBufHandle`
-4. 上层处理完毕后调用 `recycle_rx()`：`receive_begin()` 重新提交缓冲区，存回 `rx_buffers[new_token]`
+1. In IRQ mode, the handler calls `ack_interrupt()` and schedules RX; task
+   context calls `recv()` and obtains a completed token through
+   `poll_receive()`. In polling mode there is no IRQ handler; `recv()` calls
+   `ack_interrupt()` and then queries the receive queue.
+2. Take the buffer from `rx_buffers[token]` and call `receive_complete()` to
+   obtain the header length and packet length.
+3. Return a `NetBufHandle` carrying `hdr_len` and `payload_len`.
+4. After upper-layer processing, `recycle_rx()` calls `receive_begin()` to
+   resubmit the buffer and stores it back in `rx_buffers[new_token]`.
 
-**IRQ 处理流程**：
+**IRQ handling:**
 
-1. `register_virtio_net_irq(irq, irq_provider, inner)`：将 `VirtIoNetIrqHandle` 存入全局 `NET_IRQ_HANDLES`
-2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `DevIrq::request_with(irq_provider, resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
-3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，确认中断后直接调度 RX 工作并返回 `IrqEvent::HANDLED`，没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
-4. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间新到达但尚未调度的设备事件；未注册 IRQ 时，由 `recv()` 在纯轮询路径中确认中断
+1. `register_virtio_net_irq(irq, irq_provider, inner)` stores a
+   `VirtIoNetIrqHandle` in global `NET_IRQ_HANDLES`.
+2. On the first registration for an IRQ, `REGISTERED_NET_IRQS` deduplicates it
+   and `DevIrq::request_with(irq_provider, resource,
+   Arc::new(handle_virtio_net_irq))` registers the action. The returned guard is
+   stored in `NET_IRQ_GUARDS`.
+3. `handle_virtio_net_irq()` iterates over handles, calls `ack_interrupt()`, and
+   schedules RX work when a handle acknowledges the interrupt. It returns
+   `IrqEvent::HANDLED` if a handle acknowledged the interrupt and
+   `IrqEvent::NOT_HANDLED` otherwise.
+4. With a registered IRQ, only the IRQ handler calls `ack_interrupt()`. This
+   prevents the RX task from clearing a newly arrived, not-yet-scheduled device
+   event. Without a registered IRQ, `recv()` acknowledges interrupts in the
+   polling path.
 
-### VirtIO 输入设备中断流程
+### VirtIO Input Interrupt Flow
 
-1. `VirtIoInputDev::try_new(transport, irq)` 初始化两个输入队列，缓存设备标识信息，
-   并记录解析后的 IRQ。
-2. host 集成层获取 `irq_handler()`，通过 `driver_os_api` 契约注册处理程序，
-   随后再发布 class 设备。
-3. 硬中断处理程序检查回调传入的 IRQ，在共享的 `SpinNoIrq` 保护下确认 transport
-   ISR，并且仅在 ISR 非空时认领该中断线。只有队列中断才调用已安装的
-   `InputEventNotifier`；配置中断不会伪造输入事件通知。
-4. `inputdev` 在任务上下文中调用 `read_event()`，通过 `pop_pending_event()`
-   取出已完成事件并重新提交描述符，然后按输入帧分发给各个设备文件。
+1. `VirtIoInputDev::try_new(transport, irq)` initializes both input queues,
+   caches device identity, and records the resolved IRQ.
+2. The host integration layer obtains `irq_handler()`, registers it through the
+   `driver_os_api` contract, and only then publishes the class device.
+3. The hard-IRQ handler validates the callback IRQ, acknowledges the transport
+   ISR under the shared `SpinNoIrq`, and claims the interrupt only when the ISR
+   is nonempty. Only queue interrupts invoke the installed
+   `InputEventNotifier`; configuration interrupts never fabricate input-event
+   notifications.
+4. `inputdev` calls `read_event()` in task context, removes completed events
+   with `pop_pending_event()`, resubmits descriptors, and distributes input
+   frames to device files.
 
-中断处理程序和 `VirtIoInputDev` 共享同一个 `Arc<VirtIoInputState>`。底层 transport
-与 notifier 分别由 `SpinNoIrq` 保护，调用 notifier 时不持有 transport 锁。已发布的
-输入设备和已注册的 IRQ action 都释放引用后，transport 才会被销毁；可复用驱动无需依赖
-host IRQ 核心或工作队列。
+The IRQ handler and `VirtIoInputDev` share one
+`Arc<VirtIoInputState>`. The transport and notifier each use `SpinNoIrq`, and
+the notifier is called without holding the transport lock. The transport is
+destroyed only after both the published input device and the registered IRQ
+action release their references. The reusable driver does not depend on the
+host IRQ core or a workqueue.
 
-### Vsock 原始传输适配器
+### Vsock Raw Transport Adapter
 
-`socket.rs` 不再维护连接表、监听集合、接收缓冲区等状态；
-它只把 `VirtIOSocket` 包装成 `VirtIoVsockDev`，实现 xkernel 的 `VsockDevice` trait，
-提供 virtio-vsock 包级别的能力：
+`socket.rs` does not maintain connection tables, listen sets, receive buffers,
+or other connection state. It wraps `VirtIOSocket` in `VirtIoVsockDev`, which
+implements X-Kernel's `VsockDevice` trait and provides packet-level
+virtio-vsock operations:
 
-- `connect` / `accept`：发送连接请求或响应控制包；
-- `send` / `shutdown` / `force_close`：发送数据包、优雅关闭或强制 RST；
-- `credit_update`：发送 credit 更新；
-- `poll_event`：从 RX virtqueue 取出一个原始事件，把事件类型和 payload 交给调用者处理；
-- `guest_cid`：返回设备配置的 guest CID。
+- `connect` / `accept`: send connection-request or response control packets.
+- `send` / `shutdown` / `force_close`: send data, perform graceful shutdown, or
+  send a forced reset.
+- `credit_update`: send a credit update.
+- `poll_event`: remove one raw event from the RX virtqueue and pass its event
+  type and payload to the caller.
+- `guest_cid`: return the configured guest CID.
 
-`VsockDevice` 是低层 packet transport trait；`kdriver` 通过现有的 `VsockDevice` class
-注册表发布 `VirtIoVsockDev`。`net/knet` 的 `VSOCK_CONN_MANAGER` 直接消费该 trait，
-负责连接、监听、缓冲、credit 等所有连接语义。
+`VsockDevice` is a low-level packet-transport trait. `kdriver` publishes
+`VirtIoVsockDev` through the existing `VsockDevice` class registry.
+`VSOCK_CONN_MANAGER` in `net/knet` consumes the trait directly and owns all
+connection, listening, buffer, and credit semantics.
 
-**初始化流程**：
+RX, TX, and event queues use 128 entries, matching QEMU 8.2.4's
+`vhost-vsock` capability and the depth used by the Linux guest driver. Each RX
+buffer intentionally remains 8192 bytes instead of using Linux's 4 KiB RX SKB
+budget. The vsock-TIPC bridge currently derives TIPC message boundaries from RX
+events, and a 4 KiB buffer increases the number of vhost splits for records
+larger than 4 KiB. The 8 KiB buffer preserves the current message-boundary
+behavior. The buffer includes the 44-byte virtio-vsock header, leaving a
+maximum payload of 8148 bytes.
 
-1. `try_new(transport)` → `VirtIOSocket::new(transport)`：协商 feature、分配 VirtIO 队列；
-2. 返回 `VirtIoVsockDev`，内部用 `SpinNoIrq` 串行化对 `VirtIOSocket` 的访问。
+**Initialization:**
 
-**包收发流程**：
+1. `try_new(transport)` calls `VirtIOSocket::new(transport)` to negotiate
+   features and allocate VirtIO queues.
+2. It returns `VirtIoVsockDev`, which uses `SpinNoIrq` to serialize access to
+   `VirtIOSocket`.
 
-1. 发送：`send(info, buf)` → 用 `VsockConnectionInfo` 构造底层 `ConnectionInfo` → `inner.send(buf, &mut ci)`；
-2. 接收：`poll_event(handler)` → `inner.poll()` 获取 `VsockEvent` → 翻译为 `VsockTransportEvent` + payload → 调用 `handler` 处理事件；
-3. 控制动作：`handler` 在回调内直接调用 `VsockDevice` 方法（如 `accept`、`force_close`、`credit_update`）发送响应包，回调在 virtqueue 锁外执行。
+**Packet paths:**
 
-**连接状态归属**：
+1. Transmit: `send(info, buf)` converts `VsockConnectionInfo` into the lower
+   layer's `ConnectionInfo` and calls `inner.send(buf, &mut ci)`.
+2. Receive: `poll_event(handler)` calls `inner.poll()`, translates the
+   `VsockEvent` into a `VsockTransportEvent` plus payload, and invokes
+   `handler`.
+3. Control actions: while handling an event, `handler` may call `VsockDevice`
+   methods such as `accept`, `force_close`, and `credit_update` to send response
+   packets. The callback runs after the virtqueue lock is released.
 
-- 本模块不维护连接表；
-- 连接状态由 `net/knet` 的 `VSOCK_CONN_MANAGER` 统一持有；
-- 本模块只负责把 virtio 包推进/取出队列。连接信息（含 `tx_cnt`）由 `VsockConnectionInfo` 携带，从 manager 传入。
+**Connection-state ownership:**
 
-**连接关闭流程**：
+- This crate does not maintain a connection table.
+- `VSOCK_CONN_MANAGER` in `net/knet` owns connection state.
+- This crate only submits packets to or removes packets from virtqueues.
+  `VsockConnectionInfo`, including `tx_cnt`, is supplied by the manager.
 
-1. 优雅关闭：`shutdown(cid)` → 发送 `VIRTIO_VSOCK_OP_SHUTDOWN`；
-2. 强制关闭/拒绝：`force_close(cid)` → 发送 `VIRTIO_VSOCK_OP_RST`。
+**Close paths:**
 
-### 9p 设备请求
+1. Graceful close: `shutdown(cid)` sends `VIRTIO_VSOCK_OP_SHUTDOWN`.
+2. Forced close or rejection: `force_close(cid)` sends `VIRTIO_VSOCK_OP_RST`.
 
-**初始化流程**：
+### 9p Requests
 
-1. `try_new(transport)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
-2. 设备就绪后即可通过 `mount_tag()` 获取挂载标签
+**Initialization:**
 
-**请求/响应流程**：
+1. `try_new(transport)` calls `InnerDev::new(transport)` to negotiate features
+   and allocate VirtIO queues.
+2. Once the device is ready, `mount_tag()` returns the mount tag.
 
-1. 调用 `request(req, resp)` → `inner.request(req, resp)`
-2. 将 9p 请求字节写入 VirtIO 队列
-3. 阻塞等待设备响应
-4. 响应数据写入 `resp` 缓冲区，返回写入字节数
+**Request/response flow:**
 
-> 9p 设备为同步请求/响应模型，`request()` 阻塞等待设备响应，无超时机制。
-> `mount_tag()` 可随时调用，不受请求状态影响。
+1. `request(req, resp)` calls `inner.request(req, resp)`.
+2. The 9p request bytes are written to the VirtIO queue.
+3. The call blocks for the device response.
+4. Response bytes are copied into `resp`, and the written byte count is
+   returned.
 
-## 并发模型
+> The 9p device uses a synchronous request/response model. `request()` blocks
+> for a device response and has no timeout. `mount_tag()` may be called at any
+> time and is independent of request state.
 
-- **blk**: submissions and completions use one device SpinNoIrq for queue/state;
-  all caller waits and terminal callbacks occur outside it. IRQ acknowledgement uses
-  the same lock; the host serializes per-device completion passes.
-- **gpu / socket / virtio_9p**：所有操作通过 `&mut self` 独占访问，
-  调用者负责串行化，模块内部无锁。
-- **input**：`VirtIoInputState` 使用 `Arc<SpinNoIrq<_>>` 封装底层设备。
-  硬中断上下文中的中断确认与任务上下文中的能力查询或事件访问互斥；
-  任务不会持有该锁等待。
-- **net**：`InnerDev` 被 `Arc<SpinNoIrq<...>>` 包裹，因为 IRQ 回调在中断上下文中
-  访问设备（`ack_interrupt`），与正常收发路径并发。全局静态变量
-  `NET_IRQ_HANDLES`、`NET_IRQ_GUARDS` 和 `REGISTERED_NET_IRQS` 也使用 `SpinNoIrq` 保护。
-- **IRQ 注册**：`register_virtio_net_irq()` 在 `NET_IRQ_HANDLES` 中注册回调句柄，
-  同一 IRQ 仅注册一次（通过 `REGISTERED_NET_IRQS` 去重）。`DevIrq::request_with()` 返回的
-  guard 存入 `NET_IRQ_GUARDS`，设备 Drop 时自动注销。
+## Concurrency Model
 
-## 设计决策
+- **blk:** Submission and completion use one device `SpinNoIrq` for queue and
+  state. Caller waits and terminal callbacks occur outside it. IRQ
+  acknowledgement uses the same lock, and the host serializes per-device
+  completion passes.
+- **gpu / socket / virtio_9p:** All operations require exclusive `&mut self`
+  access. The caller serializes operations; the module has no internal lock.
+- **input:** `VirtIoInputState` wraps the lower device in `Arc<SpinNoIrq<_>>`.
+  IRQ acknowledgement in hard-IRQ context is mutually exclusive with capability
+  queries and event access in task context. Tasks never hold the lock while
+  waiting.
+- **net:** `InnerDev` is wrapped in `Arc<SpinNoIrq<...>>` because IRQ callbacks
+  access the device through `ack_interrupt()` concurrently with normal
+  transmit and receive paths. The global `NET_IRQ_HANDLES`, `NET_IRQ_GUARDS`,
+  and `REGISTERED_NET_IRQS` state is also protected by `SpinNoIrq`.
+- **IRQ registration:** `register_virtio_net_irq()` stores callback handles in
+  `NET_IRQ_HANDLES` and registers each IRQ only once through
+  `REGISTERED_NET_IRQS`. The `DevIrq` guard returned by
+  `DevIrq::request_with()` is stored in `NET_IRQ_GUARDS` and unregistered when
+  the device is dropped.
 
-### 为什么用适配器模式而非直接实现
+## Design Decisions
 
-`virtio-drivers` crate 的设备类型（如 `VirtIOBlk<H, T>`）是泛型结构体，
-直接为其实现 `driver_base` 的 trait 会违反孤儿规则（orphan rule）。
-因此采用 newtype 适配器模式，在每个子模块中定义自己的包装类型。
+### Adapter Pattern Instead Of Direct Trait Implementations
 
-### 为什么手动实现 Send/Sync
+The `virtio-drivers` device types, such as `VirtIOBlk<H, T>`, are generic
+structs. Implementing the `driver_base` traits directly for them would violate
+the orphan rule. Each submodule therefore defines a newtype adapter.
 
-`virtio-drivers` 的设备类型内部包含 `PhantomData` 等标记，编译器无法自动推导
-`Send`/`Sync`。但 VirtIO 设备在 x-kernel 中确实可以跨线程传递和共享引用
-（通过锁保护），因此手动 `unsafe impl Send/Sync`。
+### Manual `Send` And `Sync` Implementations
 
-### 为什么 net 的 IRQ 处理使用全局静态变量
+`virtio-drivers` device types contain markers such as `PhantomData`, so the
+compiler cannot infer `Send` and `Sync` automatically. X-Kernel does allow
+VirtIO devices to move across threads and share references under the documented
+locking rules, so the adapters provide manual `unsafe impl Send/Sync` blocks
+with explicit safety arguments.
 
-中断处理函数 `handle_virtio_net_irq` 作为返回 `IrqEvent` 的回调注册，但仍需访问
-所有网络设备实例。使用全局 `NET_IRQ_HANDLES` 存储所有网络设备的 IRQ 回调句柄，
-中断到来时遍历所有句柄执行 `ack_interrupt()`。
-`NET_IRQ_GUARDS` 持有 `DevIrq` guard，确保设备 Drop 时自动注销中断。
+### Global State For VirtIO-net IRQs
 
-## Drop / 资源释放
+The `handle_virtio_net_irq` callback must return `IrqEvent` and must also find
+all network-device instances. `NET_IRQ_HANDLES` stores every network-device IRQ
+callback handle. When an interrupt arrives, the handler iterates over the
+handles and calls `ack_interrupt()`. `NET_IRQ_GUARDS` retains the `DevIrq`
+guards so the interrupt action is unregistered when the device is dropped.
 
-### MSI-X allocation ownership
+## Drop And Resource Release
+
+### MSI-X Allocation Ownership
 
 `PciMsixState` retains the exact `MsiResource` returned by its provider. A
-configuration/vector failure disables MSI-X and moves that owner into
-`PciIrqState::Failed(Some(...))`; it does not release a vector that might still
-have an action installed. Repeating failure cannot discard the owner.
+configuration or vector failure disables MSI-X and moves that owner into
+`PciIrqState::Failed(Some(...))`; it does not release a vector that may still
+have an installed action. Repeated failure cannot discard the owner.
 
 The explicit x86 `PciTransport::try_release_msix` entry permanently closes
 MSI-X delivery before asking `IrqOp::try_free_msix` to release the allocation.
 Success consumes the allocation and leaves a terminal failed/closed transport.
 Rejection returns the original resource to the disabled transport for retry;
-it cannot resume config/queue vector setup or reactivate MSI-X. Repeated release
-after success is a no-op. A legacy transport is unchanged.
+it cannot resume configuration or queue-vector setup or reactivate MSI-X.
+Repeated release after success is a no-op. Legacy transports are unchanged.
 
 The caller must first stop submissions, establish device/message quiescence,
 and detach/drain all IRQ actions in sleepable task context. MSI-X masking alone
-does not establish DMA or outstanding-message quiescence. The current net Drop
-removes its registration before its transport fields are dropped, but this is
-not a general hot-unplug/reset protocol for all device classes.
+does not establish DMA or outstanding-message quiescence. The current network
+Drop path removes its registration before dropping transport fields, but this is
+not a general hot-unplug or reset protocol for every device class.
 
 Transport Drop and initialization rollback have no error-return channel. They
 use the provider's infallible `free_msix` contract, which does not return after
@@ -569,115 +668,131 @@ table-programming rollback occur before action registration; their normal
 release still requires the provider's valid task context.
 
 `ut-tests/msix_release.rs` checks configuration failure, repeated failure,
-rejected release and retry against a private fake provider and RAM-backed
+rejected release, and retry against a private fake provider and RAM-backed
 configuration space. It does not claim hardware message-drain coverage.
 
-`VirtIoNetDev` 实现了自定义 `Drop`：在设备销毁时调用 `unregister_virtio_net_irq()`
-注销 IRQ 回调，释放 `NET_IRQ_GUARDS` 中对应的 guard。其他设备适配器未实现自定义
-`Drop`，设备资源（DMA 缓冲区、VirtIO 队列）的释放依赖 `virtio-drivers` 内部类型的
-`Drop` 实现。当设备结构体离开作用域时，`InnerDev` 的 `Drop` 会自动通知设备重置
-并释放 DMA 内存。
+### Device-Specific Drop
 
-输入设备的 IRQ 由 host 通过 devres 注册。PCI 输入设备随后添加用于屏蔽 INTx 的
-devres 清理动作，因此 LIFO 析构会先阻止新的设备中断，再释放 IRQ action。
-释放 action 时会等待正在执行的回调结束，并丢弃中断处理程序持有的共享状态引用。
-已发布的 class 设备持有另一份引用；取消发布并丢弃该引用后，底层 transport 和队列
-随之清理。
+`VirtIoNetDev` implements `Drop` to call `unregister_virtio_net_irq()` and
+release the corresponding guard from `NET_IRQ_GUARDS`. Other device adapters do
+not customize `Drop`; DMA buffers and VirtIO queues are released by the
+`Drop` implementations of the underlying `virtio-drivers` types. When a device
+structure leaves scope, `InnerDev::drop` resets the device and releases DMA
+memory.
 
-For IRQ block instances, host activation keeps the device alive through admitted
-I/O drain, device IRQ suppression, native DevIrq release and reclaimer stop.
-BlockState represents Live by is_accepting with Some(transport), Closing by
-!is_accepting with Some(transport), and Closed by !is_accepting with None.
-Active-request accounting spans admission through the terminal callback, including
-requests awaiting descriptors. Closing rejects new submissions with Io while the
-completion path continues to drain accepted requests. begin_close receives a fresh closing-task signal; finish_close requires
-drained requests and stopped callbacks, takes InnerDev under the lock and
-drops it outside the lock in task context. Retained Gendisk references own only
-inert state; cached geometry/read-only queries never require a live transport.
-No concrete driver imports ktask/kirq.
+Input-device IRQs are registered by the host through devres. PCI input devices
+also add a devres cleanup action that masks INTx, so LIFO destruction first
+stops new device interrupts and then releases the IRQ action. Releasing the
+action waits for any running callback to finish and drops the shared-state
+reference held by the handler. The published class device retains another
+reference; after withdrawal and release of that reference, the lower transport
+and queues are cleaned up.
+
+For IRQ block instances, host activation keeps the device alive through
+admitted-I/O drain, device IRQ suppression, native `DevIrq` release, and
+reclaimer stop. `BlockState` represents:
+
+- Live as `is_accepting` with `Some(transport)`.
+- Closing as `!is_accepting` with `Some(transport)`.
+- Closed as `!is_accepting` with `None`.
+
+Active-request accounting spans admission through the terminal callback,
+including requests awaiting descriptors. Closing rejects new submissions with
+`Io` while the completion path continues to drain accepted requests.
+`begin_close` receives a fresh closing-task signal. `finish_close` requires
+drained requests and stopped callbacks, takes `InnerDev` under the lock, and
+drops it outside the lock in task context. Retained `Gendisk` references own
+only inert state; cached geometry and read-only queries never require a live
+transport. No concrete driver imports `ktask` or `kirq`.
 
 Request tests live in `ut-tests/blk_requests_unittest.rs` and remain a child of
-the requests module. They cover queue refill, retained memory, scatter addresses,
-transfer limits, errors and close drain using real dependency descriptors.
+the requests module. They cover queue refill, retained memory, scatter
+addresses, transfer limits, errors, and close drain using real dependency
+descriptors.
 
-## IRQ-driven RNG adapter
+## IRQ-Driven RNG Adapter
 
-`rng.rs` provides `VirtIoRngDev`, implementing `HwrngDevice` through the
-nonblocking request and completion APIs in `kvirtiodrivers` 0.13.4. Production
-probe registers its IRQ before publishing it in the Hwrng class. The old Char
-adapter and polling timeout have been removed.
+`rng.rs` provides `VirtIoRngDev`, which implements `HwrngDevice` through the
+nonblocking request and completion APIs in `kvirtiodrivers` 0.13.5. Production
+probing registers the completion IRQ before publishing the device in the Hwrng
+class. The old Char adapter and polling timeout have been removed.
+
 Only VirtIO RNG devices with a usable IRQ are supported. Missing IRQ resources
-or failure to register the completion IRQ cause probe to fail, and the device
+or failure to register the completion IRQ cause probing to fail, and the device
 is not published in the Hwrng class. This intentionally narrows compatibility
 relative to the old polling adapter; there is no polling fallback.
 `driver_virtio_rng` enables Hwrng through `kdriver/virtio-rng`; neither its
 Cargo feature nor `KFEAT_DRIVER_VIRTIO_RNG` requires the Char subsystem.
-The driver defaults to disabled globally. QEMU/crosvm defconfigs enable it
-explicitly; bare-metal configurations such as RK3588 do not inherit it.
-The driver switch does not enable the entropy consumer. Select
+
+The driver is disabled globally by default. QEMU and crosvm defconfigs enable
+it explicitly; bare-metal configurations such as RK3588 do not inherit it. The
+driver switch does not enable the entropy consumer. Select
 `KFEAT_ENTROPY_VIRTIO_RNG` separately to connect Hwrng devices to the pool;
 Kconfig requires `KFEAT_DRIVER_VIRTIO_RNG` for this source.
 
-`RngRequest` owns a 256-byte Box and its `VirtIORng` queue together. Its state
-moves from Idle to Pending(token), then to Readable(remaining: Range<usize>) after reclaim,
-and back to Idle when cached bytes are consumed. `NotReady` preserves Pending
-without a fault or reader notification; a later completion IRQ can reclaim the
-same submission. `WrongToken` is terminal: with one outstanding request it is
-an invalid completion, not an out-of-order result to retry. Submission errors
-for a full queue or invalid fixed buffer likewise indicate broken invariants.
-A stored fault is terminal and exposed through `HwrngDevice::is_failed`.
-Host wait errors do not set it. Subsequent reads can join the same Pending
-request or consume bytes already reclaimed by IRQ after a wait error.
-Only `read` submits; readers never poll the used ring. The hard IRQ handler
-acks status, attempts at most one completion for a queue interrupt, drops the
-request lock and then notifies waiters. Copying cached bytes to the caller and
-submitting the next request happen in task context.
+`RngRequest` owns a 256-byte `Box` and its `VirtIORng` queue together. Its state
+moves from `Idle` to `Pending(token)`, then to
+`Readable(remaining: Range<usize>)` after reclaim, and back to `Idle` when
+cached bytes are consumed. `NotReady` preserves `Pending` without a fault or
+reader notification; a later completion IRQ can reclaim the same submission.
+`WrongToken` is terminal: with one outstanding request it represents an invalid
+completion, not an out-of-order result to retry. Submission errors for a full
+queue or an invalid fixed buffer likewise indicate broken invariants.
+
+A stored fault is terminal and exposed through `HwrngDevice::is_failed`. Host
+wait errors do not set it. Subsequent reads can join the same pending request
+or consume bytes already reclaimed by IRQ after a wait error. Only `read`
+submits, and readers never poll the used ring. The hard-IRQ handler
+acknowledges status, attempts at most one completion for a queue interrupt,
+drops the request lock, and then notifies waiters. Copying cached bytes to the
+caller and submitting the next request happen in task context.
 
 The host injects `RngCompletion` and an IRQ provider. `try_new_irq` installs a
 weak callback before enabling completion interrupts. The device owns the IRQ
 guard; the weak callback avoids an ownership cycle. `SpinNoIrq` serializes
 readers with completion. No device lock spans host waiting or notification.
-Empty reads do no I/O; wait failures leave submitted DMA storage owned by the
-driver. Short reads retain their unused cached suffix.
+Empty reads perform no I/O; wait failures leave submitted DMA storage owned by
+the driver. Short reads retain their unused cached suffix.
 
-### Per-device DMA backend
+### Per-Device DMA Backend
 
 `device_dma.rs` provides `DeviceDmaBackend`, an implementation of the vendor's
 `DmaBackend` over a `driver_os_api::DeviceDma` capability. `VirtQueue` and
 `VirtIORng` are generic over `B: DmaBackend` (`StaticHal<H>` by default), so a
-caller that holds a resolved device view can route ring allocation and request
-sharing through that one device instead of the static HAL. `VirtIoRngDev` adds
-`try_new_irq_with_dma` for this case; `try_new_irq` retains the static path.
+caller with a resolved device view can route ring allocation and request
+sharing through that device instead of the static HAL.
+`VirtIoRngDev::try_new_irq_with_dma` supports this case; `try_new_irq` retains
+the static path.
 
 The adapter stores the provider's `DmaAllocation` and `StreamingMapping` tokens
-in exact-key maps and removes them under the record lock, releasing the token
+in exact-key maps and removes them under the record lock, releasing each token
 after the lock is dropped. A rejected duplicate share is released immediately;
 a rejected duplicate coherent allocation is returned through `free_coherent`
 because `DmaAllocation` is a plain record without a drop guard. Allocation
 validates the complete page-rounded interval, both addresses' page alignment,
 and overflow before publishing the tuple. The constructor is `unsafe` because
-the provider's operation context, exclusivity and byte-preservation guarantees
+the provider's operation context, exclusivity, and byte-preservation guarantees
 cannot be checked here.
 
 `ut-tests/device_dma_unittest.rs` covers allocation release, streaming release,
-duplicate rejection and empty-buffer rejection with a counting fake provider.
+duplicate rejection, and empty-buffer rejection with a counting fake provider.
 
-Completion includes HAL unshare in hard IRQ context. The backend must be
+Completion includes HAL unshare in hard-IRQ context. The backend must be
 IRQ-safe and non-sleeping. X-Kernel's backend takes the global kdma allocator
 lock during unmap; one-request reclamation does not imply bounded IRQ latency.
-This change preserves inline reclaim and does not introduce a softirq path.
+This design preserves inline reclamation and introduces no softirq path.
 
-Device removal/rebinding is unsupported. Dropping a Pending request retains
-its queue and buffer rather than freeing live DMA storage; normal idle/readable
-requests are released. Tests emulate ring completion and IRQ delivery to check
-reclaim-before-wake, short reads, spurious interrupts, malformed completions,
-wait failures, and retention of outstanding storage without real-device timing.
+Device removal and rebinding are unsupported. Dropping a `Pending` request
+retains its queue and buffer rather than freeing live DMA storage; normal idle
+and readable requests are released. Tests emulate ring completion and IRQ
+delivery to check reclaim-before-wake, short reads, spurious interrupts,
+malformed completions, wait failures, and retention of outstanding storage
+without real-device timing.
 
-## Conservative input readiness
+## Conservative Input Readiness
 
-Virtio input keeps a sticky readiness hint in an atomic. The IRQ handler
-acknowledges this device's interrupt status and sets the hint; the timer-side
-readiness probe only reads that hint and never touches the ISR. Neither path
-pops or recycles descriptors. Event reads set the hint
-from the actual dequeue result, so an empty queue clears it only after a task
-observes it.
+VirtIO input keeps a sticky readiness hint in an atomic. The IRQ handler
+acknowledges this device's interrupt status and sets the hint. The timer-side
+readiness probe only reads the hint and never touches the ISR. Neither path
+pops or recycles descriptors. Event reads set the hint from the actual dequeue
+result, so an empty queue clears it only after a task observes it.

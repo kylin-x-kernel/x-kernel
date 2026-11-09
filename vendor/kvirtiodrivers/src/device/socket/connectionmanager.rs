@@ -494,7 +494,7 @@ mod tests {
         )));
         let transport = FakeTransport {
             device_type: DeviceType::Socket,
-            max_queue_size: 32,
+            max_queue_size: QUEUE_SIZE as u32,
             device_features: 0,
             state: state.clone(),
         };
@@ -708,7 +708,7 @@ mod tests {
         )));
         let transport = FakeTransport {
             device_type: DeviceType::Socket,
-            max_queue_size: 32,
+            max_queue_size: QUEUE_SIZE as u32,
             device_features: 0,
             state: state.clone(),
         };

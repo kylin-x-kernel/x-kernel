@@ -19,7 +19,10 @@ use ktask::{WaitQueue, future::block_on_interruptible};
 use ktime_types::TimeSpan;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 
-pub(crate) const VSOCK_RX_BUFFER_SIZE: usize = 128 * 1024; // 128KB receive buffer
+/// Default per-connection receive window advertised to the peer as `buf_alloc`.
+///
+/// Matches Linux's `VSOCK_DEFAULT_BUFFER_SIZE`.
+pub(crate) const VSOCK_RX_BUFFER_SIZE: usize = 256 * 1024;
 const VSOCK_ACCEPT_QUEUE_SIZE: usize = 128; // accept queue size
 
 /// connection states

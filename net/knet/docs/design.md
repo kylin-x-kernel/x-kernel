@@ -1671,6 +1671,11 @@ When `vsock_tipc_bridge` is enabled, `bridge` and AF_VSOCK share `VSOCK_CONN_MAN
 
 During initialization, `net/knet`'s `init_vsock()` obtains the raw virtio-vsock device from kclass and registers it with `VSOCK_CONN_MANAGER` through `connection_manager::register_vsock_dev()`. The manager maintains connection and listener tables, credits, and the bridge event queue, and polls the raw RX virtqueue through `poll_event()`. For ordinary ports, it performs accept and force_close operations, writes data into connection receive buffers, and updates credits. For bridge ports and connections, it queues `ConnectionRequest`, `Connected`, `Received`, `Disconnected`, and `CreditUpdate` events for `VsockBridge::rx_task` to consume through `pop_bridge_event()`.
 
+Each connection reserves a 256 KiB receive ring and advertises that capacity as
+`buf_alloc`, matching Linux's `VSOCK_DEFAULT_BUFFER_SIZE`. Credit updates use the
+existing `buf_alloc / 4` watermark, which is therefore 64 KiB, matching Linux's
+credit-update low watermark.
+
 AF_VSOCK accesses the manager through socket-facing helpers in `connection_manager`. `bridge::init()` registers ports 0–4 from `BRIDGE_PORT_MAP`, which the manager listens on while queueing bridge events. Bridge operations use `listen_bridge_port`, `create_bridge_connection`, `send_bridge`, `recv_bridge`, `disconnect_bridge`, and `abort_bridge` to listen, create connections, exchange data, and close connections.
 
 Host-to-TA connections use the following port mapping:
