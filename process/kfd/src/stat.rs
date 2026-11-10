@@ -14,7 +14,7 @@ use linux_raw_sys::general::{
 /// Kernel stat structure containing file metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct Kstat {
-    /// Device identifier containing this inode.
+    /// Linux `dev_t`-encoded device number containing this inode.
     pub dev: u64,
     /// Inode number.
     pub ino: u64,
@@ -126,6 +126,7 @@ impl From<Kstat> for statx {
                 __reserved: 0,
             }
         }
+        let device_number = DeviceId(value.dev);
         let mut statx = statx {
             stx_mask: STATX_BASIC_STATS,
             stx_blksize: value.blksize as _,
@@ -145,8 +146,8 @@ impl From<Kstat> for statx {
             stx_mtime: time_to_statx(&value.mtime),
             stx_rdev_major: value.rdev.major(),
             stx_rdev_minor: value.rdev.minor(),
-            stx_dev_major: (value.dev >> 32) as _,
-            stx_dev_minor: value.dev as _,
+            stx_dev_major: device_number.major(),
+            stx_dev_minor: device_number.minor(),
             stx_mnt_id: 0,
             stx_dio_mem_align: 0,
             stx_dio_offset_align: 0,
