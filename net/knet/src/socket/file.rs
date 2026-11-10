@@ -115,7 +115,12 @@ impl SocketFileOps {
 }
 
 impl FileOperations for SocketFileOps {
-    fn fsync(&self, _file: &VfsFile, _data_only: bool) -> VfsResult<()> {
+    fn fsync(
+        &self,
+        _file: &VfsFile,
+        _range: core::ops::Range<u64>,
+        _data_only: bool,
+    ) -> VfsResult<()> {
         Err(kvfs::VfsError::InvalidInput)
     }
 

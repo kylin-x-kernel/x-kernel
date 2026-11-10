@@ -303,7 +303,12 @@ impl ChrdevFileOperations {
 }
 
 impl FileOperations for ChrdevFileOperations {
-    fn fsync(&self, _file: &VfsFile, _data_only: bool) -> VfsResult<()> {
+    fn fsync(
+        &self,
+        _file: &VfsFile,
+        _range: core::ops::Range<u64>,
+        _data_only: bool,
+    ) -> VfsResult<()> {
         Err(VfsError::InvalidInput)
     }
 
@@ -435,7 +440,12 @@ impl FileOperations for DefaultBlkdevFileOperations {
         Ok(())
     }
 
-    fn fsync(&self, file: &VfsFile, _data_only: bool) -> VfsResult<()> {
+    fn fsync(
+        &self,
+        file: &VfsFile,
+        _range: core::ops::Range<u64>,
+        _data_only: bool,
+    ) -> VfsResult<()> {
         file_block_device(file)?.flush().map_err(map_block_error)
     }
 }

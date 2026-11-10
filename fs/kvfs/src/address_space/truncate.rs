@@ -123,8 +123,10 @@ impl AddressSpace {
                 ktask::yield_now();
                 continue;
             }
-            self.ops
-                .writepages(self, &mut super::WritebackControl::all(false))?;
+            // Drain without reentering the invalidate lock, and retain failed data.
+            self.write_and_wait_range_with(0..u64::MAX, |control| {
+                self.ops.writepages(self, control)
+            })?;
             self.i_pages.truncate_final()?;
             return Ok(());
         }

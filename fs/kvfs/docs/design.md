@@ -286,14 +286,22 @@ staged→确认→只消费确认前缀的管道语义或定位读写搬运至�
 调用者不得持位置锁进入管道操作，
 等待管道自身就绪时不持管道锁或文件位置锁。
 
-`VfsFile::fsync` 先拒绝 `FMode::PATH`（`EBADF`），再把 `data_only` 原样传给
-文件 operation，并原样传播后端错误。只读打开本身不禁止同步。
-`FileOperations::fsync` 保留兼容性的成功空操作，不承诺数据已持久化。
-pipe、FIFO、socket 和通用字符设备操作表显式返回 `EINVAL`，不按 inode 类型在
-syscall 层统一拒绝。字符设备 open 若替换操作表，同步由最终安装的操作表决定。
-已有 kext4、块设备和 simple-directory/nullfs 同步回调不变；memfs 显式提供成功空操作。
-FAT、9p 和其他未覆盖同步的后端保持既有返回行为。它们的真实持久化能力、匿名事件
-对象及其他伪文件的同步语义仍需单独完善；本次不通过全局修改默认值扩大影响范围。
+`VfsFile::fsync(data_only)` delegates to `fsync_range(0..u64::MAX, data_only)`.
+Both use the one `FileOperations::fsync(file, range, data_only)` capability.
+Ranges are half-open bytes; backwards ranges return `EINVAL`, empty ranges still
+reach the filesystem, and the full sentinel never requires adding one to MAX.
+Path-only files fail with `EBADF` before dispatch; readonly opens may sync.
+Invalid range/context does not consume the file's error cursor. After dispatch,
+the backend error takes precedence while recorded mapping history is observed.
+
+Missing fsync capability returns `EINVAL`. Pipe, FIFO, socket and generic character
+devices explicitly reject it; replacement character operation tables decide their
+own support. Memfs, simple directories and nullfs explicitly succeed for volatile
+storage. Block files perform the real device flush, including on empty ranges.
+9p forwards the intent to server fid fsync and may synchronize more than the
+requested range. Ext4 composes data completion with its metadata/journal/device
+duties. All synchronous entry points require sleepable task context, no held
+spinlock or IRQ/preemption guard, and no current userspace process.
 
 ## Captured Poll Sources
 
@@ -1379,8 +1387,10 @@ synchronous API counts completed pages. Callback return does not mean completion
 The filesystem bounds in-flight work, drains I/O, completes folios in task context,
 and protects inode/extent lifetime. Invalidate shared protection covers the call
 and is not transferred to deferred completion. Filesystems therefore need their
-own drain protocol. `All` waits for its target; `None` may return after bounded
-admission.
+own drain protocol. Raw `writepages` is submission in either mode: an
+implementation may complete inline or return with owned I/O pending. Neither mode
+expresses fsync/fdatasync intent. `WritebackControl` contains only the range,
+submission mode, page budget and skipped count.
 
 Cross-task completion uses `retain_writeback_completion` to retain the complete
 `AddressSpace` and validate that the batch belongs to its embedded `i_pages`.
@@ -1580,3 +1590,32 @@ An address-space view guard can extend its existing registration under MM
 serialization. The registry mutex protects the VMA/object spans, preserving the
 registration identity and invalidation notifier. Coordinates are validated before
 publication; invalidation snapshots do not hold this mutex while entering MM.
+
+## Bounded data write-and-wait
+
+`AddressSpace::write_and_wait_range` samples the current mapping-error generation,
+then captures the highest intersecting resident index under the existing page
+index mutex. Clean pages carrying older WRITEBACK remain part of that target.
+The helper clips the exclusive byte endpoint with overflow-safe arithmetic and
+uses exactly that finite range for ALL submission and subsequent WRITEBACK wait.
+A later append above the target cannot extend either stage. An empty resident
+target bypasses raw submission; a file fsync still invokes the filesystem hook.
+The bound is invocation-local and grants neither EOF authority nor a content
+snapshot. There is no added persistent field, coordination owner or lock.
+
+Submission errors do not skip waiting or the final nonconsuming error-generation
+check; the first error remains authoritative. The invalidate read guard covers
+submission only and is released before the generic wait. Filesystems still drain
+their own detached/queued obligations before releasing backing mappings.
+
+Live cache invalidation already owns invalidate exclusion for writing. It uses
+the same data write-and-wait algorithm with direct submission under that existing
+guard, before discarding cache pages. Target capture, completion waits and error
+precedence are shared; failed data remains cached for retry.
+
+`VfsFile::writeback_mapping`/`writeback_mapping_range`, inode/dentry sync, FIEMAP_SYNC
+and superblock data sync use this data-completion boundary. They do not themselves
+commit a journal or flush a device. Filesystem durability belongs to the file
+fsync or superblock sync hook. Scan accounting, TOWRITE selection and buffered EOF
+handoff remain the following F2 work; repeated dirtying through writable PTEs
+remains dependent on G.

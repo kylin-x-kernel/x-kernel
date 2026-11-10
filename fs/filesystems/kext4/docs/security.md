@@ -645,9 +645,10 @@ four batches per occurrence, removing slots and waking waiters before releasing
 captures. Synchronous callers retain the inode, release submission protection,
 wait for their target prefix, and flush completion work before shutdown proceeds.
 
-DataOnly errors acknowledge only a contiguous prefix whose metadata settled;
+VFS writeback always uses DataOnly and acknowledges only a contiguous prefix whose metadata settled;
 successful BIOs alone cannot clean pages after conversion/accounting failure.
-FullMetadata data errors retain the abort policy. Original device errors precede
+Full fsync no longer changes data-error handling through writeback control.
+Real metadata/journal failures retain the abort policy. Original device errors precede
 prefix-settlement errors; unsuccessful ranges stay dirty. Preparation and
 submission failures are recorded before releasing completion ownership, without
 running post-I/O metadata settlement. Queue throttling is not an error. Both
@@ -692,6 +693,10 @@ marks the superblock read-only before releasing mount exclusion; another write
 guard for that mount cannot overlap this publication. Any abort source moved
 outside mount protection must publish superblock read-only state at its own
 failure boundary rather than depending on a later guard drop.
+
+File-range fsync waits for the requested data before filesystem persistence; an
+empty range still runs journal/device sync. Generic data wait does not flush the
+device and does not advance an open file's error cursor.
 
 Full fsync, syncfs/unmount inode metadata writeback and linked-inode eviction stage
 pending timestamps. Data-only mapped overwrite may omit a timestamp-only transaction;

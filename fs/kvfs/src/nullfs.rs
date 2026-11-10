@@ -136,8 +136,13 @@ impl FileOperations for NullFsRoot {
         generic_read_dir(buf, offset)
     }
 
-    fn fsync(&self, _file: &VfsFile, data_only: bool) -> VfsResult<()> {
-        noop_fsync(data_only)
+    fn fsync(
+        &self,
+        _file: &VfsFile,
+        _range: core::ops::Range<u64>,
+        _data_only: bool,
+    ) -> VfsResult<()> {
+        noop_fsync()
     }
 }
 

@@ -109,14 +109,19 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
         Err(VfsError::NoSuchDevice)
     }
 
-    /// Writes all dirty pages known to this address space.
+    /// Submits dirty pages selected by the supplied control.
     ///
-    /// [`AddressSpace`] holds its invalidate lock for reading across this
-    /// callback, including backing-store I/O. Implementations may block, but
-    /// must not enter the inode truncate path or otherwise require the
-    /// invalidate lock exclusively.
+    /// Return may precede owned I/O completion, including for ALL. Data waiting
+    /// and filesystem metadata/journal/device persistence are separate duties.
+    ///
+    /// [`AddressSpace`] holds its invalidate lock across this callback, normally
+    /// for reading; live cache invalidation owns it exclusively. Implementations
+    /// may block, but must not enter the inode truncate path or otherwise require
+    /// the invalidate lock exclusively.
     /// Buffered-write rollback may wait for writeback while holding the inode
     /// data lock, so this callback and its I/O completion must not acquire it.
+    /// I/O completion must also avoid invalidate locks: live cache invalidation
+    /// retains exclusive admission while waiting for it.
     fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
         mapping.writeback_cached_folios(control, |_, _, _| Err(VfsError::NoSuchDevice))
     }

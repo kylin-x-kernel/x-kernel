@@ -475,9 +475,10 @@ impl MsyncRequest {
             (false, true) => MsyncWriteback::Async,
             (false, false) => MsyncWriteback::Unspecified,
         };
-        Ok(MsyncPolicy::new(writeback)
-            .with_invalidate(self.flags.contains(MsyncFlags::INVALIDATE))
-            .with_data_only(true))
+        Ok(
+            MsyncPolicy::new(writeback)
+                .with_invalidate(self.flags.contains(MsyncFlags::INVALIDATE)),
+        )
     }
 }
 
@@ -787,8 +788,7 @@ pub fn sys_msync(addr: usize, length: usize, flags: u32) -> KResult<isize> {
     }
     let process = current_user_process();
     let aspace_ref = process.address_space()?;
-    let mut aspace = aspace_ref.lock();
-    aspace.msync_range(request.start, request.length, request.policy()?)?;
+    aspace_ref.msync_range(request.start, request.length, request.policy()?)?;
     Ok(0)
 }
 

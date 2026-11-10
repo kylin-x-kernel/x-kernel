@@ -1449,47 +1449,72 @@ impl MmSpace {
         Ok(())
     }
 
-    /// Synchronizes file-backed shared mappings intersecting `start..start+size`.
+    /// Walks shared file mappings while releasing MM serialization for persistence.
     ///
-    /// This mirrors Linux `msync()` range walking: holes are recorded as an
-    /// address error, but later VMAs in the range are still processed unless a
-    /// stronger runtime/provider error occurs.
-    pub fn msync_range(&mut self, start: VirtAddr, size: usize, policy: MsyncPolicy) -> KResult {
-        self.drain_pending_invalidations();
-        self.validate_region(start, size)?;
-        if size == 0 {
-            return Ok(());
-        }
-
-        let range = VirtAddrRange::from_start_size(start, size);
-        let overlapped_vmas = self.vmas.collect_overlapping(range);
+    /// The caller retains an active MM user throughout this sleepable operation.
+    /// Only the current file runtime and its byte range survive an unlock; every
+    /// subsequent VMA is looked up anew, as in Linux `mm/msync.c`. Holes yield
+    /// ENOMEM after processing later mappings, unless a persistence error wins.
+    pub(crate) fn msync_range(
+        address_space: &Mutex<Self>,
+        start: VirtAddr,
+        size: usize,
+        policy: MsyncPolicy,
+    ) -> KResult {
+        let mut aspace = address_space.lock();
+        aspace.drain_pending_invalidations();
+        aspace.validate_region(start, size)?;
+        let end = start + size;
         let mut cursor = start;
-        let mut saw_hole = overlapped_vmas.is_empty();
+        let mut saw_hole = false;
 
-        for vma in overlapped_vmas {
+        while cursor < end {
+            let Some(vma) = aspace.vmas.find_at_or_after(cursor) else {
+                return Err(KError::NoMemory);
+            };
             if vma.start() > cursor {
+                // Linux returns immediately for plain MS_ASYNC at a hole.
+                if policy.is_async() && !policy.has_invalidate() {
+                    return Err(KError::NoMemory);
+                }
                 saw_hole = true;
+                cursor = vma.start();
+                if cursor >= end {
+                    break;
+                }
             }
-            let overlap = VirtAddrRange::new(cursor.max(vma.start()), range.end.min(vma.end()));
-            if !overlap.is_empty() {
-                // TODO: when mlock is implemented, check VM_LOCKED and
-                // return EBUSY for MS_INVALIDATE as Linux does.
-                let runtime = self.runtime_for_vma(&vma).ok_or(KError::BadAddress)?;
-                runtime.msync(&vma, overlap, policy)?;
-            }
-            cursor = cursor.max(vma.end());
-            if cursor >= range.end {
-                break;
+            let overlap_end = end.min(vma.end());
+            // TODO: when mlock is implemented, check VM_LOCKED and
+            // return EBUSY for MS_INVALIDATE as Linux does.
+            if policy.is_sync()
+                && let VmRuntimeRef::FileShared(runtime) =
+                    aspace.runtime_for_vma(vma).ok_or(KError::BadAddress)?
+            {
+                let file_start = vma.file_offset_for(cursor).ok_or(KError::InvalidInput)?;
+                let file_end = file_start
+                    .checked_add((overlap_end - cursor) as u64)
+                    .ok_or(KError::InvalidInput)?;
+                cursor = overlap_end;
+                drop(aspace);
+                let result = runtime.msync(file_start..file_end);
+                // Final file release can wait for writeback, just like fsync.
+                drop(runtime);
+                result?;
+                if cursor == end {
+                    break;
+                }
+                aspace = address_space.lock();
+                aspace.drain_pending_invalidations();
+            } else {
+                cursor = overlap_end;
             }
         }
 
-        if cursor < range.end {
-            saw_hole = true;
-        }
         if saw_hole {
-            return Err(KError::NoMemory);
+            Err(KError::NoMemory)
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     /// Extend an existing memory area in place.

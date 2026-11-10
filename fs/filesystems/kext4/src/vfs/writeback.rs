@@ -38,7 +38,6 @@ struct CompletionContext {
     super_block: Arc<SuperBlock>,
     completion: Mutex<Option<OwnedWritebackCompletion<AddressSpace>>>,
     offset: u64,
-    intent: Ext4SyncIntent,
     kind: CompletionKind,
 }
 
@@ -70,16 +69,18 @@ impl CompletionContext {
             .map_err(|_| crate::Ext4Error::Device(block::DriverError::BadState))?;
         let mut state = ext4.write(&self.super_block);
         match self.kind {
-            CompletionKind::Mapped => {
-                state.finish_mapped_writeback(&self.private, self.offset, data, self.intent, || {
-                    self.inode.write_count() != 0
-                })
-            }
+            CompletionKind::Mapped => state.finish_mapped_writeback(
+                &self.private,
+                self.offset,
+                data,
+                Ext4SyncIntent::DataOnly,
+                || self.inode.write_count() != 0,
+            ),
             CompletionKind::Ordered => state.finish_prepared_writeback(
                 &self.private,
                 self.offset,
                 data,
-                self.intent,
+                Ext4SyncIntent::DataOnly,
                 || self.inode.write_count() != 0,
             ),
         }
@@ -115,7 +116,6 @@ struct WritebackPass {
     inode: Arc<VfsInode>,
     private: Arc<Ext4Inode>,
     super_block: Arc<SuperBlock>,
-    intent: Ext4SyncIntent,
     sync_mode: WritebackSyncMode,
     is_throttled: bool,
     pending_mapped: Vec<PendingMappedBatch>,
@@ -144,7 +144,7 @@ impl WritebackPass {
                     offset,
                     batch.data(),
                     self.inode.size(),
-                    self.intent,
+                    Ext4SyncIntent::DataOnly,
                     || self.inode.write_count() != 0,
                 );
             if let Err(failure) = result {
@@ -166,7 +166,7 @@ impl WritebackPass {
                 offset,
                 batch.data(),
                 self.inode.size(),
-                self.intent,
+                Ext4SyncIntent::DataOnly,
             )
             .map_err(into_vfs_err)
             .inspect_err(|&error| self.record_error(error))?;
@@ -183,7 +183,6 @@ impl WritebackPass {
             super_block: self.super_block.clone(),
             completion: Mutex::new(Some(completion)),
             offset,
-            intent: self.intent,
             kind,
         };
         let plan = match plan {
@@ -211,7 +210,7 @@ impl WritebackPass {
                         offset,
                         data.len(),
                         self.inode.size(),
-                        self.intent,
+                        Ext4SyncIntent::DataOnly,
                     )
                     .map_err(into_vfs_err)
                     .inspect_err(|&error| context.record_error(error))?
@@ -262,7 +261,6 @@ pub(super) fn writepages(mapping: &AddressSpace, control: &mut WritebackControl)
         super_block: inode.super_block()?,
         inode: inode.clone(),
         private: private.clone(),
-        intent: Ext4SyncIntent::from_data_only(control.is_data_only()),
         sync_mode: control.sync_mode(),
         is_throttled: false,
         pending_mapped: Vec::new(),

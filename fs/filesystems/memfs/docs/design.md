@@ -187,6 +187,10 @@ Both limits use zero for unlimited throughout parsing and accounting;
 
 ### 文件同步
 
+The single `FileOperations::fsync` callback accepts a half-open byte range and
+`data_only`. MemoryNode explicitly accepts full, partial and empty ranges for
+both intents; no persistent device or required data I/O exists.
+
 `MemoryNode` 为内存文件和目录显式提供 `fsync/fdatasync` 成功的空操作，
 包括 tmpfs、ramfs 和基于 shmem 的 memfd；这些对象没有持久化设备，
 同步不能通过清除或驱逐 dirty folio 丢弃唯一的数据副本。

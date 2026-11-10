@@ -65,6 +65,35 @@ fn file_area(start: usize, size: usize, page_offset: u64, file_offset: u64) -> V
     )
 }
 
+#[def_test]
+fn file_offset_translation_rejects_overflow() {
+    let area = file_area(0x10000, PAGE_SIZE_4K * 2, 0, u64::MAX - PAGE_SIZE_4K as u64);
+    assert_eq!(
+        area.file_offset_for(vaddr(0x10000 + PAGE_SIZE_4K)),
+        Some(u64::MAX)
+    );
+    assert_eq!(
+        area.file_offset_for(vaddr(0x10000 + PAGE_SIZE_4K + 1)),
+        None
+    );
+}
+
+#[def_test]
+fn backing_offset_translation_does_not_fall_back_after_file_overflow() {
+    let area = file_area(0x10000, PAGE_SIZE_4K * 2, 0, u64::MAX - PAGE_SIZE_4K as u64);
+    assert_eq!(area.backing_offset_for(vaddr(0x11000)), Some(u64::MAX));
+    assert_eq!(area.backing_offset_for(vaddr(0x11001)), None);
+    assert_eq!(area.file_offset_for(vaddr(0xffff)), None);
+    assert_eq!(area.backing_offset_for(vaddr(0xffff)), None);
+
+    let area = test_area(0x10000, PAGE_SIZE_4K * 2, u64::MAX / PAGE_SIZE_4K as u64);
+    assert_eq!(area.backing_offset_for(vaddr(0x10fff)), Some(u64::MAX));
+    assert_eq!(area.backing_offset_for(vaddr(0x11000)), None);
+    assert_eq!(area.backing_offset_for(vaddr(0xffff)), None);
+    let area = test_area(0x10000, PAGE_SIZE_4K, u64::MAX / PAGE_SIZE_4K as u64 + 1);
+    assert_eq!(area.backing_offset_for(vaddr(0x10000)), None);
+}
+
 fn ranges(set: &VmAreaSet) -> alloc::vec::Vec<(usize, usize, u64)> {
     set.iter()
         .map(|area| {

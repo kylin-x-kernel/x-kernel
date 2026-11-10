@@ -76,7 +76,7 @@ backends construct no post-populate hooks.
 - `VmArea::backing()` 与 `VmRuntimeRef::backing_info()` 必须一致。
 - `mprotect` 更新 VMA current permission 时，present PTE flags 必须使用
   `VmRuntimeOps::on_protect()` 返回值；不能无条件把 requested flags 直接写入页表。
-- `msync_range()` 只能让 shared file runtime 执行 writeback；anonymous、
+- `msync_range()` 只能让 shared file runtime 执行文件范围 datasync（含文件系统持久化）；anonymous、
   linear 和 private file mappings 不能写回 file source。
 - `FilePrivate` backing 必须同时保留 file source object、anon result object 和
   anon lineage。
@@ -115,8 +115,12 @@ backends construct no post-populate hooks.
 - `PageTable::modify()` enforces one mutable page-table guard at a time.
 - file/anon object locks must not be acquired while holding `InvalidateSink`'s
   spinlock.
-- `msync_range()` may block through file-backed runtime/provider sync and is
-  only valid in process context.
+- `MmUserHandle::msync_range()` retains the active MM user across sleepable
+  persistence. Callers must not hold MM or provider locks. MM releases its mutex
+  before the file runtime hook and looks up each subsequent VMA after relocking;
+  only an owned runtime and checked file byte range cross that unlock.
+- File-coordinate overflow must not select anonymous fallback coordinates;
+  anonymous page-to-byte translation also rejects multiplication/addition overflow.
 - Scheduling adds the CPU to the new `MmCpuResidency` before activating its
   root; old-MM CPU bits remain conservative rather than being cleared at each
   switch. Page-table flush paths must not reconstruct the target set.
@@ -240,3 +244,7 @@ source tail before preparing the retained source. File runtimes open inherited
 registrations without new-map admission; failures retire destination registrations
 while preserving retained source PTEs. File expansion also uses open and updates
 the existing object-side view range before the VMA extension is published.
+
+The unlocked `msync` interval includes final runtime/file-reference destruction.
+A concurrent unmap and close can leave that temporary reference as the last
+owner, so reacquiring MM first could block all mappings during file release.

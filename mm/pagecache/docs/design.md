@@ -376,3 +376,23 @@ clears the writeback bit and its index mark under the same index lock, then wake
 waiters after releasing that lock. Lock statistics count one successful
 acquisition and one contention on the first actual block; task snapshots expose
 the waiting folio address until parking returns.
+
+
+## Finite data-completion targets
+
+`MappingPages::capture_writeback_range` validates a half-open byte range and
+samples its highest resident index through the existing BTreeMap range endpoint.
+The resident tree includes clean pages with older in-flight WRITEBACK, so a dirty
+index alone would be insufficient. The result clips an overflow-safe exclusive
+page endpoint to the requested end; an absent target becomes `start..start`.
+`0..u64::MAX` remains a valid full-file sentinel even for its final partial page.
+No page references, index lock, extra field or copied EOF survive the capture.
+
+KVFS passes the same invocation-local target to submission and
+`wait_on_writeback_range`. Higher indexes inserted later cannot extend its wait.
+The target bounds work rather than freezing contents or identity; normal folio
+revalidation and the filesystem's backing-map lifetime protection still apply.
+Capture and wait require sleepable task context, with no current-process
+requirement. Pagecache reports no journal/device durability and owns no fsync
+intent or per-open error cursor. Existing scan selection/accounting remains
+unchanged in F1; TOWRITE and buffered EOF handoff belong to F2.

@@ -2153,9 +2153,9 @@ impl VfsInode {
         self.inode_operations.remove_xattr(dentry, self, name)
     }
 
-    /// Synchronizes the file to disk.
-    pub fn sync(&self, data_only: bool) -> VfsResult<()> {
-        self.mapping.writepages(data_only)
+    /// Writes and waits for inode data without journal or device persistence.
+    pub fn sync(&self) -> VfsResult<()> {
+        self.mapping.write_and_wait_range(0..u64::MAX)
     }
 
     /// Returns the flags of the node.

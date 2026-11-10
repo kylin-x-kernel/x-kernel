@@ -1108,7 +1108,12 @@ fn move_copy_chunk(
 }
 
 impl FileOperations for MemoryNode {
-    fn fsync(&self, _file: &VfsFile, _data_only: bool) -> VfsResult<()> {
+    fn fsync(
+        &self,
+        _file: &VfsFile,
+        _range: core::ops::Range<u64>,
+        _data_only: bool,
+    ) -> VfsResult<()> {
         // Memory-backed files and directories have no persistent writeback.
         // Special inodes install their own operation tables during VFS open.
         Ok(())

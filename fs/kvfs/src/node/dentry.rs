@@ -381,8 +381,8 @@ impl Dentry {
     }
 
     /// Synchronizes the instantiated dentry's inode data.
-    pub fn sync(&self, data_only: bool) -> VfsResult<()> {
-        self.vfs_inode().sync(data_only)
+    pub fn sync(&self) -> VfsResult<()> {
+        self.vfs_inode().sync()
     }
 }
 

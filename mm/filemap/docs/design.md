@@ -72,11 +72,12 @@ FileSharedRuntime
   -> map shared folio into PTE
 
 msync(MS_SYNC)
-  -> MmSpace::msync_range()
+  -> MmUserHandle::msync_range() -> MmSpace::msync_range()
   -> FileSharedRuntime::msync()
-  -> VfsInode::i_mapping / AddressSpace::writepages_range()
-  -> AddressSpaceOperations::writepages()
-  -> AddressSpace-owned page-cache writeback
+  -> VfsFile::fsync_range(file_range, true)
+  -> filesystem FileOperations::fsync()
+  -> AddressSpace::write_and_wait_range()
+  -> filesystem metadata/journal/device persistence
 
 FilePrivateRuntime
   -> Arc<kvfs::VfsFile>
@@ -187,12 +188,18 @@ sys_mmap
 
 ### `msync`
 
-1. `posix/mm` validates raw `MS_*` flags and calls `MmSpace::msync_range()`.
-2. `MmSpace` walks VMAs and dispatches shared file overlaps to the runtime.
-3. `FileSharedRuntime` converts the VMA overlap to a file object byte range.
-4. `AddressSpaceOperations::writepages()` writes back intersecting dirty folios
-   through the inode-owned page cache.
-5. Private file mappings are not synced because post-write pages are owned by
+1. `posix/mm` validates raw `MS_*` flags and enters the captured live MM capability.
+2. `MmSpace` finds one VMA and checks its file byte range under the MM mutex.
+3. MM retains the shared file runtime and releases its mutex before calling the
+   hook. The runtime receives only the checked file range, never a borrowed VMA.
+   MM reacquires its mutex and looks up the next VMA afresh after each sync.
+4. `MS_SYNC` calls the existing open file's `fsync_range(range, true)`. The
+   filesystem writes and waits for intersecting dirty folios, then supplies the
+   metadata, journal and device persistence required for datasync. Backend or
+   recorded writeback failures propagate through the file's existing error cursor.
+5. `MS_ASYNC` and unspecified writeback remain no-ops; MM carries no separate
+   datasync flag because Linux MS_SYNC always selects datasync.
+6. Private file mappings are not synced because post-write pages are owned by
    `AnonPrivateObject`.
 
 ## Current Compatibility Boundary
@@ -216,7 +223,10 @@ Not supported by the current filemap runtime:
 
 - shared-file readahead, adaptive/asynchronous readahead and fault-around;
 - hole-punch/collapse-range;
-- DAX, THP, reclaim, swap, memcg, NUMA.
+- DAX, THP, reclaim, swap, memcg, NUMA;
+- dirty-PTE harvesting and write-protection rearming after writeback (Issue G).
+  Range-fsync dispatch alone does not make repeated stores through an already
+  writable PTE visible to the folio dirty index.
 
 ## 只读文件页的映射所有权
 

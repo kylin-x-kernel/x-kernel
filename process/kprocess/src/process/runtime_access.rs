@@ -19,7 +19,7 @@ use ktime_types::TimeSpan;
 use ktimer::{PosixTimerConfig, PosixTimerCreateNotify, TimerDelivery};
 use memaddr::VirtAddr;
 use memspace::{
-    InvalidateHandle, MmObserver, MmSpace, MremapSource, PageFaultOutcome,
+    InvalidateHandle, MmObserver, MmSpace, MremapSource, MsyncPolicy, PageFaultOutcome,
     process_lifetime::MmUserHandle,
 };
 use posix_types::ITimerType;
@@ -56,6 +56,15 @@ impl LiveAddressSpace {
     /// Locks the live address space.
     pub fn lock(&self) -> MutexGuard<'_, MmSpace> {
         self.mm_user.address_space().lock()
+    }
+
+    /// Synchronizes shared file mappings on the captured live MM.
+    ///
+    /// Requires sleepable task context without MM or provider locks. The active
+    /// MM user survives persistence waits, which release MM serialization.
+    /// Returns validation, unmapped-range or filesystem errors.
+    pub fn msync_range(&self, start: VirtAddr, size: usize, policy: MsyncPolicy) -> KResult {
+        self.mm_user.msync_range(start, size, policy)
     }
 
     /// Resolves a fault on the captured MM, waiting without holding its mutex.

@@ -685,3 +685,8 @@ The live mapping guard forwards relocation's target-replacement policy while
 permissions stay owned by the source snapshot. MM removes a fixed target and
 discarded source tail before preparing the retained source; these destructive
 steps are not enclosed in a transient admission retry.
+
+`LiveAddressSpace::msync_range()` delegates through its existing `MmUserHandle`.
+The captured image stays live across file persistence, while memspace drops its
+mutex for the runtime hook and repeats VMA lookup after each synchronous range.
+No process-binding lock or new sync request state spans that wait.

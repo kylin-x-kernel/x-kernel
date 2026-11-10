@@ -37,6 +37,15 @@ impl crate::InodeOperations for FailingSyncOperations {}
 impl crate::FileOperations for FailingSyncOperations {}
 
 impl crate::AddressSpaceOperations for FailingSyncOperations {
+    fn read_folio(
+        &self,
+        _mapping: &crate::AddressSpace,
+        mut folio: pagecache::FolioRead,
+    ) -> VfsResult<()> {
+        folio.data().fill(0);
+        folio.complete(Ok(()))
+    }
+
     fn writepages(
         &self,
         mapping: &crate::AddressSpace,
@@ -117,11 +126,18 @@ fn filesystem_sync_attempts_all_stages_and_keeps_the_first_error() {
                 &FAILING_SYNC_OPERATIONS,
                 VfsInodeInit::new(
                     number,
-                    0,
+                    4096,
                     Umode::new(NodeType::RegularFile, NodePermission::default()),
                 ),
             );
             inode.bind_super_block(&sb);
+            inode
+                .address_space()
+                .with_folio_or_create(0, |folio| {
+                    folio.mark_dirty();
+                    Ok(())
+                })
+                .unwrap();
             inode
         });
         assert_eq!(

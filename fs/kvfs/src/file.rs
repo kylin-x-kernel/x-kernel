@@ -10,6 +10,7 @@
 use alloc::{string::String, sync::Arc};
 use core::{
     any::Any,
+    ops::Range,
     sync::atomic::{AtomicU32, Ordering},
 };
 
@@ -348,12 +349,14 @@ pub trait FileOperations: Send + Sync + 'static {
     /// Synchronizes this file's data and optionally metadata.
     ///
     /// `data_only` may omit metadata that is not needed to retrieve file data.
-    /// The default remains a successful no-op for compatibility with existing
-    /// backends; it does not promise persistence. Backends with storage must
-    /// implement synchronization explicitly. Unsupported special-file operation
-    /// tables override this method to return [`VfsError::InvalidInput`] (`EINVAL`).
-    fn fsync(&self, _file: &VfsFile, _data_only: bool) -> VfsResult<()> {
-        Ok(())
+    /// The half-open `range` selects data; `0..u64::MAX` selects the whole file.
+    /// Empty data ranges still require applicable metadata and barrier duties.
+    /// Implementations compose data write-and-wait with filesystem persistence.
+    /// The default is unsupported (`EINVAL`); volatile backends must explicitly
+    /// provide their successful no-op. Requires sleepable task context without
+    /// spinlocks or IRQ/preemption guards; no current process is required.
+    fn fsync(&self, _file: &VfsFile, _range: Range<u64>, _data_only: bool) -> VfsResult<()> {
+        Err(VfsError::InvalidInput)
     }
 
     /// fallocate mode bits this backend accepts, mirroring Linux per-filesystem
@@ -993,19 +996,21 @@ impl VfsFile {
         let _data_guard = self.inode().lock_data_shared();
     }
 
-    /// Writes all dirty cached pages for this file.
-    pub fn writeback_mapping(&self, data_only: bool) -> VfsResult<()> {
-        self.mapping().writepages(data_only)
+    /// Writes and waits for cached file data without filesystem persistence.
+    pub fn writeback_mapping(&self) -> VfsResult<()> {
+        self.mapping().write_and_wait_range(0..u64::MAX)
     }
 
-    /// Writes dirty cached pages intersecting `[start, start + len)`.
-    pub fn writeback_mapping_range(
-        &self,
-        start: u64,
-        len: usize,
-        data_only: bool,
-    ) -> VfsResult<()> {
-        self.mapping().writepages_range(start, len, data_only)
+    /// Writes and waits for cached data intersecting `[start, start + len)`.
+    /// Does not commit filesystem metadata or flush a device.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` on range overflow, otherwise data writeback errors.
+    pub fn writeback_mapping_range(&self, start: u64, len: usize) -> VfsResult<()> {
+        let end = start
+            .checked_add(len as u64)
+            .ok_or(VfsError::InvalidInput)?;
+        self.mapping().write_and_wait_range(start..end)
     }
 
     /// Returns the maximum regular-file size allowed for this open file.
@@ -1400,10 +1405,32 @@ impl VfsFile {
     /// Returns [`VfsError::BadFileDescriptor`] for a path-only open, otherwise
     /// propagates the file operation's synchronization error unchanged.
     pub fn fsync(&self, data_only: bool) -> VfsResult<()> {
+        self.fsync_range(0..u64::MAX, data_only)
+    }
+
+    /// Synchronizes data in `range` and the required filesystem metadata.
+    ///
+    /// Uses a half-open range; an empty range still dispatches filesystem sync.
+    /// `data_only` may omit metadata unrelated to retrieving the file's data.
+    /// Requires sleepable task context without spinlocks or IRQ/preemption
+    /// guards; no current process is required. Backend errors take precedence
+    /// while this file's independent writeback-error cursor is advanced.
+    ///
+    /// # Errors
+    /// Returns `BadFileDescriptor` for a path-only open, `InvalidInput` for a
+    /// backwards range, nonsleepable context or missing filesystem capability,
+    /// otherwise the backend or a recorded writeback error.
+    pub fn fsync_range(&self, range: Range<u64>, data_only: bool) -> VfsResult<()> {
         if self.is_path() {
             return Err(VfsError::BadFileDescriptor);
         }
-        let result = self.operations().fsync(self, data_only);
+        if range.start > range.end {
+            return Err(VfsError::InvalidInput);
+        }
+        if !ktask::is_sleepable_context() {
+            return Err(VfsError::InvalidInput);
+        }
+        let result = self.operations().fsync(self, range, data_only);
         let recorded = self
             .mapping()
             .writeback_errors()

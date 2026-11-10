@@ -359,6 +359,8 @@ fn tmpfs_fsync_preserves_file_contents_and_accepts_directories() {
     assert_eq!(file.write(b"sync-data"), Ok(9));
     for data_only in [false, true] {
         assert_eq!(file.fsync(data_only), Ok(()));
+        assert_eq!(file.fsync_range(2..2, data_only), Ok(()));
+        assert_eq!(file.fsync_range(1..4, data_only), Ok(()));
     }
     let mut contents = [0; 9];
     assert_eq!(file.read_from(&mut contents, &mut 0), Ok(9));
@@ -372,6 +374,7 @@ fn tmpfs_fsync_preserves_file_contents_and_accepts_directories() {
     .unwrap();
     for data_only in [false, true] {
         assert_eq!(directory.fsync(data_only), Ok(()));
+        assert_eq!(directory.fsync_range(0..0, data_only), Ok(()));
     }
 }
 

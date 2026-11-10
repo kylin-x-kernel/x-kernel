@@ -233,3 +233,16 @@ container cannot free a page still in use by I/O. Dirty updates cannot resurrect
 an invalidated page. Owners must explicitly drain before releasing any resource
 not retained by their I/O owner. Context admission errors precede mandatory
 resize/writeback mutation; callbacks must restore the admitted task context.
+
+
+## Bounded wait selection
+
+Finite-target capture uses one logarithmic resident-tree endpoint lookup under
+the existing index mutex. Clean old WRITEBACK cannot disappear merely because
+its dirty mark was cleared at submission. The caller must use the same captured
+range for submission and waiting and still protect detached filesystem-owned
+work until required completion. Saturating endpoint arithmetic plus clipping
+preserves the full u64::MAX sentinel without overflow. The target is local to
+one operation, never an EOF authority or promise that every new write is covered.
+No index/content lock is held across completion waits; no fsync intent or new
+persistent coordination state is introduced.

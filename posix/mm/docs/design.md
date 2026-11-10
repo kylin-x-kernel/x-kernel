@@ -46,7 +46,7 @@ sys_madvise(raw args)
 
 sys_msync(raw args)
   -> MsyncRequest::from_raw()
-  -> MmSpace::msync_range()
+  -> LiveAddressSpace::msync_range() -> MmUserHandle::msync_range()
 
 sys_brk(raw addr)
   -> BrkRequest
@@ -178,7 +178,7 @@ VMA-side runtime 把该 advice 转成 private-anon object 的
 ### msync
 
 `msync` 执行 ABI request validation 后，把非空范围交给
-`MmSpace::msync_range()`：
+既有 `LiveAddressSpace::msync_range()` capability，保留 active MM user：
 
 - `addr` 必须 4K 对齐；
 - `len == 0` 成功且不进入 MM；
@@ -187,9 +187,13 @@ VMA-side runtime 把该 advice 转成 private-anon object 的
 - `MS_SYNC` 通过 `memspace` 的 VMA walk 只同步 shared file mapping；
 - `MS_INVALIDATE` 返回不支持，因为 locked-page / invalidate 语义尚未接入。
 
-实际 dirty folio 写回由 shared file runtime 进入 VFS
-`AddressSpaceOperations::writepages()` 完成。`posix-mm` 不直接访问 page
-cache、filemap runtime 或 VMA 内部状态。
+MM 在锁内把当前 VMA overlap 转换为经过溢出校验的半开文件字节范围，保留当前
+runtime 引用后释放 MM mutex，再调用既有文件的
+`VfsFile::fsync_range(range, true)`。文件系统完成数据写入、等待和 datasync
+所需的元数据/journal/设备持久化。`MsyncPolicy` 只保存 MS_* 的写回模式与
+invalidate 标志，不另存恒为 true 的 datasync 字段。`posix-mm` 不直接访问
+page cache、filemap runtime 或 VMA 内部状态。同步后 MM 重新加锁、重新查找下一段 VMA，
+不会持有整段请求的旧映射快照；并发 unmap/mmap 不受文件持久化阻塞。
 
 ### mremap relocation
 

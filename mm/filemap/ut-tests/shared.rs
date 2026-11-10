@@ -140,6 +140,91 @@ fn shared_file_source_adapter_and_private_runtime_agree_on_file_object() {
     assert_eq!(adapter.object(), file_object);
 }
 
+struct SyncTestOperations {
+    calls: Mutex<Vec<(core::ops::Range<u64>, bool)>>,
+    failure: Mutex<Option<kvfs::VfsError>>,
+}
+
+impl kvfs::InodeOperations for SyncTestOperations {}
+
+struct SyncTestSuperOperations;
+
+impl kvfs::SuperBlockOperations for SyncTestSuperOperations {
+    fn statfs(&self, _super_block: &kvfs::SuperBlock) -> kvfs::VfsResult<kvfs::StatFs> {
+        Ok(kvfs::libfs::simple_statfs(0))
+    }
+}
+
+impl kvfs::FileOperations for SyncTestOperations {
+    fn fsync(
+        &self,
+        _file: &kvfs::VfsFile,
+        range: core::ops::Range<u64>,
+        data_only: bool,
+    ) -> kvfs::VfsResult<()> {
+        self.calls.lock().push((range, data_only));
+        self.failure.lock().map_or(Ok(()), Err)
+    }
+}
+
+#[def_test]
+fn msync_sync_dispatches_file_range_datasync_and_propagates_persistence_failure() {
+    use alloc::sync::Arc;
+
+    use kvfs::{
+        Dentry, Mount, NodeFlags, NodePermission, NodeType, Path, Umode, VfsInode, VfsInodeInit,
+    };
+    use memspace::VmRuntimeOps;
+
+    let operations = Arc::new(SyncTestOperations {
+        calls: Mutex::new(Vec::new()),
+        failure: Mutex::new(None),
+    });
+    let inode = VfsInode::new_file_with_operations(
+        operations.clone(),
+        operations.clone(),
+        operations.clone(),
+        NodeFlags::PRIVATE,
+        VfsInodeInit::new(
+            2,
+            0,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    static FS_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::internal("filemap-sync-test");
+    let super_block = kvfs::SuperBlock::new(&FS_TYPE, &SyncTestSuperOperations, |super_block| {
+        let inode = super_block.get_or_init_inode(2, || inode);
+        Dentry::new_file_from_inode(inode, None, "msync-range".into())
+    });
+    let mount = Mount::new_root(&super_block);
+    let file = kvfs::dentry_open(
+        Path::new(mount, super_block.root_dir()),
+        0,
+        kcred::initial_cred(),
+    )
+    .unwrap();
+    let start = VirtAddr::from_usize(0x50_000);
+    let runtime = super::FileSharedRuntime(Arc::new(FileSharedRuntimeInner {
+        source: SharedFileSourceAdapter::new_without_view(
+            file.clone(),
+            1,
+            start,
+            3 * PAGE_SIZE_4K,
+            2,
+        ),
+        shared_ranges: Mutex::new(Vec::new()),
+        writable_shared_ranges: Mutex::new(Vec::new()),
+    }));
+    let range = (3 * PAGE_SIZE_4K) as u64..(4 * PAGE_SIZE_4K) as u64;
+    assert_eq!(runtime.msync(range.clone()), Ok(()));
+    assert_eq!(
+        *operations.calls.lock(),
+        vec![((3 * PAGE_SIZE_4K) as u64..(4 * PAGE_SIZE_4K) as u64, true)]
+    );
+    *operations.failure.lock() = Some(kvfs::VfsError::Io);
+    assert_eq!(runtime.msync(range), Err(kerrno::KError::Io));
+}
+
 fn shared_relocation_releases_seal_registrations(fail_preparation: bool) {
     use alloc::sync::Arc;
 

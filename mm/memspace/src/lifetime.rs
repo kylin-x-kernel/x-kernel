@@ -11,7 +11,7 @@ use khal::paging::MappingFlags;
 use ksync::Mutex;
 use memaddr::VirtAddr;
 
-use crate::{InvalidateHandle, MmSpace, PageFaultOutcome};
+use crate::{InvalidateHandle, MmSpace, MsyncPolicy, PageFaultOutcome};
 
 pub(crate) struct MmUserLifetime {
     state: AtomicUsize,
@@ -97,6 +97,20 @@ impl MmUserHandle {
     /// Returns the virtual address space guarded by this active user.
     pub fn address_space(&self) -> &Arc<Mutex<MmSpace>> {
         &self.address_space
+    }
+
+    /// Synchronizes shared file mappings while retaining this active MM user.
+    ///
+    /// Requires sleepable task context without the MM mutex or provider locks.
+    /// Persistence runs without MM serialization; later mappings are looked up
+    /// afresh after each wait. Returns range, hole or filesystem errors.
+    pub fn msync_range(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        policy: MsyncPolicy,
+    ) -> kerrno::KResult {
+        MmSpace::msync_range(&self.address_space, start, size, policy)
     }
 
     /// Resolves a task-context fault, waiting for admission outside MM serialization.

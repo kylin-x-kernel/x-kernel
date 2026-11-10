@@ -5,6 +5,7 @@
 //! KVFS integration for ext4 mount and inode-private objects.
 
 use alloc::{string::String, sync::Arc, vec, vec::Vec};
+use core::ops::Range;
 
 use iov_iter::{IovIterDest, IovIterSource};
 use kerrno::LinuxError;
@@ -1758,10 +1759,10 @@ impl FileOperations for Ext4Inode {
         }
     }
 
-    fn fsync(&self, file: &VfsFile, data_only: bool) -> VfsResult<()> {
+    fn fsync(&self, file: &VfsFile, range: Range<u64>, data_only: bool) -> VfsResult<()> {
         // Each caller waits for its data before selecting a metadata target;
         // only the transaction layer can reuse an earlier commit's progress.
-        kvfs::libfs::simple_fsync_noflush(file, data_only)?;
+        file.mapping().write_and_wait_range(range)?;
         let super_block = ext4_super_block(file.inode())?;
         let ext4 = ext4_private(&super_block)?;
         let mut state = ext4.write(&super_block);

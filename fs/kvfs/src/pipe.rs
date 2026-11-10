@@ -790,7 +790,12 @@ fn register_pipe_poll(
 struct PipeFileOperations;
 
 impl FileOperations for PipeFileOperations {
-    fn fsync(&self, _file: &VfsFile, _data_only: bool) -> VfsResult<()> {
+    fn fsync(
+        &self,
+        _file: &VfsFile,
+        _range: core::ops::Range<u64>,
+        _data_only: bool,
+    ) -> VfsResult<()> {
         Err(KError::InvalidInput)
     }
 
@@ -874,7 +879,12 @@ impl FileOperations for PipeFileOperations {
 struct FifoFileOperations;
 
 impl FileOperations for FifoFileOperations {
-    fn fsync(&self, _file: &VfsFile, _data_only: bool) -> VfsResult<()> {
+    fn fsync(
+        &self,
+        _file: &VfsFile,
+        _range: core::ops::Range<u64>,
+        _data_only: bool,
+    ) -> VfsResult<()> {
         Err(KError::InvalidInput)
     }
 

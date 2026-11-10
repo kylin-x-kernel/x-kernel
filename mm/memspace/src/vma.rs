@@ -5,7 +5,7 @@
 //! Linux-aligned VMA/backing descriptors.
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
-use core::fmt;
+use core::{fmt, ops::Range};
 
 use anon::{AnonLineageId, AnonSharedObject};
 use kerrno::KResult;
@@ -80,13 +80,14 @@ pub trait VmRuntimeOps: Send + Sync {
     ) -> KResult<bool> {
         Ok(false)
     }
-    fn msync(
-        &self,
-        _vma: &VmArea,
-        _range: VirtAddrRange,
-        _policy: MsyncPolicy,
-    ) -> KResult<MsyncRuntimeResult> {
-        Ok(MsyncRuntimeResult::NotApplicable)
+    /// Synchronizes a shared file mapping's byte range with datasync semantics.
+    ///
+    /// MM has validated the mapping and translated its range under serialization.
+    /// Called in sleepable task context with the MM mutex released. This reference
+    /// retains the file, not the VMA; implementations must not rely on that mapping
+    /// still existing or re-enter MM to recover its file coordinates.
+    fn msync(&self, _file_range: Range<u64>) -> KResult {
+        Ok(())
     }
     fn handle_fault(
         &self,
@@ -147,17 +148,15 @@ pub enum MsyncWriteback {
 pub struct MsyncPolicy {
     writeback: MsyncWriteback,
     invalidate: bool,
-    data_only: bool,
 }
 
 impl MsyncPolicy {
     /// Creates a policy with the given writeback mode, without
-    /// `MS_INVALIDATE`, and with metadata sync included.
+    /// `MS_INVALIDATE`.
     pub const fn new(writeback: MsyncWriteback) -> Self {
         Self {
             writeback,
             invalidate: false,
-            data_only: false,
         }
     }
 
@@ -165,13 +164,6 @@ impl MsyncPolicy {
     #[must_use]
     pub const fn with_invalidate(mut self, invalidate: bool) -> Self {
         self.invalidate = invalidate;
-        self
-    }
-
-    /// Returns this policy with metadata sync skipped when `data_only` is set.
-    #[must_use]
-    pub const fn with_data_only(mut self, data_only: bool) -> Self {
-        self.data_only = data_only;
         self
     }
 
@@ -189,20 +181,6 @@ impl MsyncPolicy {
     pub const fn has_invalidate(self) -> bool {
         self.invalidate
     }
-
-    /// Returns whether metadata sync can be skipped.
-    pub const fn is_data_only(self) -> bool {
-        self.data_only
-    }
-}
-
-/// Result of a VMA runtime `msync()` hook.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MsyncRuntimeResult {
-    /// The runtime has no file-backed sync work for this range.
-    NotApplicable,
-    /// The runtime handled the sync request.
-    Synced,
 }
 
 /// Lightweight runtime execution reference attached to a VMA instance.
@@ -390,21 +368,6 @@ impl VmRuntimeRef {
             Self::AnonPrivate(inner) => VmRuntimeOps::madvise_dontneed(inner, vma, range, pgtbl),
             Self::FileShared(inner) => inner.madvise_dontneed(vma, range, pgtbl),
             Self::FilePrivate(inner) => inner.madvise_dontneed(vma, range, pgtbl),
-        }
-    }
-
-    pub(crate) fn msync(
-        &self,
-        vma: &VmArea,
-        range: VirtAddrRange,
-        policy: MsyncPolicy,
-    ) -> KResult<MsyncRuntimeResult> {
-        match self {
-            Self::Linear(inner) => VmRuntimeOps::msync(inner, vma, range, policy),
-            Self::AnonShared(inner) => VmRuntimeOps::msync(inner, vma, range, policy),
-            Self::AnonPrivate(inner) => VmRuntimeOps::msync(inner, vma, range, policy),
-            Self::FileShared(inner) => inner.msync(vma, range, policy),
-            Self::FilePrivate(inner) => inner.msync(vma, range, policy),
         }
     }
 
@@ -829,19 +792,23 @@ impl VmArea {
     }
 
     /// Returns the precise file byte offset for the given address, if this is
-    /// a file-backed VMA with known file metadata.
+    /// a file-backed VMA with known file metadata and the offset fits in `u64`.
     pub fn file_offset_for(&self, addr: VirtAddr) -> Option<u64> {
-        let rel = addr.as_usize().saturating_sub(self.start().as_usize()) as u64;
-        self.file.as_ref().map(|file| file.offset + rel)
+        let rel = addr.as_usize().checked_sub(self.start().as_usize())? as u64;
+        self.file
+            .as_ref()
+            .and_then(|file| file.offset.checked_add(rel))
     }
 
     /// Returns the backing-object byte offset for the given address.
     pub fn backing_offset_for(&self, addr: VirtAddr) -> Option<u64> {
-        if let Some(offset) = self.file_offset_for(addr) {
-            return Some(offset);
+        if self.file.is_some() {
+            return self.file_offset_for(addr);
         }
         let rel = addr.as_usize().checked_sub(self.start().as_usize())? as u64;
-        Some(self.page_offset() * PAGE_SIZE_4K as u64 + rel)
+        self.page_offset()
+            .checked_mul(PAGE_SIZE_4K as u64)?
+            .checked_add(rel)
     }
 
     fn next_page_offset(&self) -> Option<u64> {
@@ -1016,8 +983,18 @@ impl VmAreaSet {
 
     /// Finds the VMA containing `addr`.
     pub fn find(&self, addr: VirtAddr) -> Option<&VmArea> {
-        let candidate = self.areas.range(..=addr).last().map(|(_, area)| area)?;
+        let candidate = self
+            .areas
+            .range(..=addr)
+            .next_back()
+            .map(|(_, area)| area)?;
         candidate.range().contains(addr).then_some(candidate)
+    }
+
+    /// Finds the VMA containing `addr`, or the first VMA after it.
+    pub(crate) fn find_at_or_after(&self, addr: VirtAddr) -> Option<&VmArea> {
+        self.find(addr)
+            .or_else(|| self.areas.range(addr..).next().map(|(_, area)| area))
     }
 
     /// Returns whether `range` overlaps any existing VMA.

@@ -874,3 +874,290 @@ fn synchronous_invalidation_is_complete_after_mm_destruction() {
     drop(mm);
     assert_eq!(handle.try_apply(&sample_request()), Ok(true));
 }
+
+// No PTEs are needed: these fixtures exercise VMA ownership and sync dispatch.
+struct MsyncTestRuntime {
+    backing: crate::VmBackingInfo,
+    sync: alloc::boxed::Box<dyn Fn(core::ops::Range<u64>) -> KResult + Send + Sync>,
+}
+
+impl crate::VmRuntimeOps for MsyncTestRuntime {
+    fn backing_info(&self) -> crate::VmBackingInfo {
+        self.backing
+    }
+
+    fn map(
+        &self,
+        _: memaddr::VirtAddrRange,
+        _: MappingFlags,
+        _: &mut khal::paging::PageTableMut,
+    ) -> KResult {
+        Ok(())
+    }
+
+    fn unmap(&self, _: memaddr::VirtAddrRange, _: &mut khal::paging::PageTableMut) -> KResult {
+        Ok(())
+    }
+
+    fn on_protect(
+        &self,
+        _: memaddr::VirtAddrRange,
+        flags: MappingFlags,
+        _: &mut khal::paging::PageTableMut,
+    ) -> KResult<MappingFlags> {
+        Ok(flags)
+    }
+
+    fn msync(&self, range: core::ops::Range<u64>) -> KResult {
+        (self.sync)(range)
+    }
+
+    fn handle_fault(
+        &self,
+        _: crate::FaultContext,
+        _: MappingFlags,
+        _: &mut khal::paging::PageTableMut,
+    ) -> crate::backend::FaultCompletionResult {
+        Err(KError::BadAddress)
+    }
+
+    fn relocate_for_mremap(
+        &self,
+        _: memaddr::VirtAddrRange,
+        _: VirtAddr,
+        _: usize,
+        _: u64,
+        _: &Arc<Mutex<MmSpace>>,
+        _: Option<crate::InvalidateHandle>,
+    ) -> KResult<Arc<dyn crate::VmRuntimeOps>> {
+        Err(KError::OperationNotSupported)
+    }
+
+    fn clone_for_fork(
+        &self,
+        _: memaddr::VirtAddrRange,
+        _: MappingFlags,
+        _: &mut khal::paging::PageTableMut,
+        _: &mut khal::paging::PageTableMut,
+        _: crate::ForkCloneTarget<'_>,
+    ) -> KResult<Arc<dyn crate::VmRuntimeOps>> {
+        Err(KError::OperationNotSupported)
+    }
+}
+
+fn map_msync_file(
+    mm: &mut MmSpace,
+    start: usize,
+    pages: usize,
+    offset: u64,
+    shared: bool,
+    sync: impl Fn(core::ops::Range<u64>) -> KResult + Send + Sync + 'static,
+) {
+    let object = VmObjectId::File(FileObjectId::from_raw(start as u64));
+    let backing = crate::VmBackingInfo::new(
+        if shared {
+            VmBackingKind::FileShared { object }
+        } else {
+            VmBackingKind::FilePrivate {
+                file_object: object,
+                anon_object: VmObjectId::Anon(vmobj::AnonObjectId::from_raw(start as u64)),
+                anon_lineage: anon::AnonPrivateObject::new_root().lineage(),
+            }
+        },
+        PageSize::Size4K,
+    );
+    let runtime = Arc::new(MsyncTestRuntime {
+        backing,
+        sync: alloc::boxed::Box::new(sync),
+    });
+    let runtime = if shared {
+        VmRuntimeRef::new_file_shared(runtime)
+    } else {
+        VmRuntimeRef::new_file_private(runtime)
+    };
+    let vma = VmArea::new(
+        VirtAddr::from_usize(start),
+        pages * PAGE_SIZE_4K,
+        MappingFlags::READ,
+        MappingFlags::READ,
+        backing,
+        offset / PAGE_SIZE_4K as u64,
+        Some(crate::FileMappingInfo {
+            offset,
+            inode: start as u64,
+            path: None,
+        }),
+    );
+    mm.map_runtime_vma(vma, false, runtime).unwrap();
+}
+
+#[def_test]
+fn msync_unlocks_for_io_and_relooks_up_after_concurrent_mapping_replacement() {
+    let mm = Arc::new(Mutex::new(new_test_aspace()));
+    let owner = Arc::downgrade(&mm);
+    let calls = Arc::new(Mutex::new(alloc::vec::Vec::new()));
+    let seen = calls.clone();
+    map_msync_file(
+        &mut mm.lock(),
+        0x1000,
+        2,
+        2 * PAGE_SIZE_4K as u64,
+        true,
+        move |range| {
+            seen.lock().push(range);
+            let mm = owner.upgrade().unwrap();
+            let mut guard = mm
+                .try_lock()
+                .expect("msync must release MM serialization during persistence");
+            // Retire even the current VMA; its file runtime must survive this sync.
+            guard
+                .unmap(VirtAddr::from_usize(0x1000), 3 * PAGE_SIZE_4K)
+                .unwrap();
+            let next_seen = seen.clone();
+            let next_owner = Arc::downgrade(&mm);
+            map_msync_file(
+                &mut guard,
+                0x3000,
+                1,
+                8 * PAGE_SIZE_4K as u64,
+                true,
+                move |range| {
+                    assert!(next_owner.upgrade().unwrap().try_lock().is_some());
+                    next_seen.lock().push(range);
+                    Ok(())
+                },
+            );
+            Ok(())
+        },
+    );
+    map_msync_file(&mut mm.lock(), 0x3000, 1, 0, true, |_| {
+        panic!("stale VMA must not be synchronized")
+    });
+    assert_eq!(
+        MmSpace::msync_range(
+            &mm,
+            VirtAddr::from_usize(0x2000),
+            2 * PAGE_SIZE_4K,
+            crate::MsyncPolicy::new(crate::MsyncWriteback::Sync)
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        *calls.lock(),
+        alloc::vec![
+            3 * PAGE_SIZE_4K as u64..4 * PAGE_SIZE_4K as u64,
+            8 * PAGE_SIZE_4K as u64..9 * PAGE_SIZE_4K as u64
+        ]
+    );
+}
+
+#[def_test]
+fn msync_preserves_hole_error_precedence_and_skips_non_sync_and_private_mappings() {
+    let mm = Mutex::new(new_test_aspace());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    map_msync_file(&mut mm.lock(), 0x2000, 1, 0, true, move |_| {
+        seen.fetch_add(1, Ordering::Relaxed);
+        Err(KError::Io)
+    });
+    for mode in [
+        crate::MsyncWriteback::Async,
+        crate::MsyncWriteback::Unspecified,
+    ] {
+        assert_eq!(
+            MmSpace::msync_range(
+                &mm,
+                VirtAddr::from_usize(0x1000),
+                2 * PAGE_SIZE_4K,
+                crate::MsyncPolicy::new(mode)
+            ),
+            Err(KError::NoMemory)
+        );
+        assert_eq!(
+            MmSpace::msync_range(
+                &mm,
+                VirtAddr::from_usize(0x2000),
+                PAGE_SIZE_4K,
+                crate::MsyncPolicy::new(mode)
+            ),
+            Ok(())
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    let sync = crate::MsyncPolicy::new(crate::MsyncWriteback::Sync);
+    assert_eq!(
+        MmSpace::msync_range(&mm, VirtAddr::from_usize(0x1000), 2 * PAGE_SIZE_4K, sync),
+        Err(KError::Io)
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    map_msync_file(&mut mm.lock(), 0x3000, 1, 0, false, |_| {
+        panic!("private mappings must not call fsync")
+    });
+    assert_eq!(
+        MmSpace::msync_range(&mm, VirtAddr::from_usize(0x3000), PAGE_SIZE_4K, sync),
+        Ok(())
+    );
+    assert_eq!(
+        MmSpace::msync_range(&mm, VirtAddr::from_usize(0x3000), 2 * PAGE_SIZE_4K, sync),
+        Err(KError::NoMemory)
+    );
+    let seen = calls.clone();
+    map_msync_file(&mut mm.lock(), 0x5000, 1, 0, true, move |_| {
+        seen.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    });
+    assert_eq!(
+        MmSpace::msync_range(&mm, VirtAddr::from_usize(0x4000), 2 * PAGE_SIZE_4K, sync),
+        Err(KError::NoMemory)
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+struct MsyncFileRelease {
+    mm: alloc::sync::Weak<Mutex<MmSpace>>,
+    releases: Arc<AtomicUsize>,
+}
+
+impl Drop for MsyncFileRelease {
+    fn drop(&mut self) {
+        let mm = self.mm.upgrade().unwrap();
+        assert!(
+            mm.try_lock().is_some(),
+            "final file release must run outside MM serialization"
+        );
+        self.releases.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[def_test]
+fn msync_releases_the_last_file_reference_before_relocking_for_the_next_vma() {
+    let mm = Arc::new(Mutex::new(new_test_aspace()));
+    let releases = Arc::new(AtomicUsize::new(0));
+    let file = MsyncFileRelease {
+        mm: Arc::downgrade(&mm),
+        releases: releases.clone(),
+    };
+    map_msync_file(&mut mm.lock(), 0x1000, 1, 0, true, move |_| {
+        let mm = file.mm.upgrade().unwrap();
+        mm.lock()
+            .unmap(VirtAddr::from_usize(0x1000), PAGE_SIZE_4K)
+            .unwrap();
+        assert_eq!(file.releases.load(Ordering::Relaxed), 0);
+        // Keep the whole final-release fixture in the runtime's capture.
+        let _file = &file;
+        Ok(())
+    });
+    map_msync_file(&mut mm.lock(), 0x2000, 1, 0, false, |_| {
+        panic!("private sync")
+    });
+    assert_eq!(
+        MmSpace::msync_range(
+            &mm,
+            VirtAddr::from_usize(0x1000),
+            2 * PAGE_SIZE_4K,
+            crate::MsyncPolicy::new(crate::MsyncWriteback::Sync)
+        ),
+        Ok(())
+    );
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
+}

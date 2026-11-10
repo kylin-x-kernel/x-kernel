@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{sync::Arc, vec, vec::Vec};
+use core::ops::Range;
 
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
@@ -11,8 +12,8 @@ use kvfs::{FMode, VfsFile};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memfs::shmem;
 use memspace::{
-    FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, MsyncPolicy, MsyncRuntimeResult,
-    VmArea, VmBackingInfo, VmBackingKind, VmRuntimeOps, VmRuntimeRef,
+    FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmBackingInfo, VmBackingKind,
+    VmRuntimeOps, VmRuntimeRef,
     backend::{FaultCompletion, FaultCompletionResult, map_paging_err, pages_in},
 };
 
@@ -336,29 +337,6 @@ impl FileSharedRuntime {
 
         Ok(FaultCompletion::from_populate((populated, None)))
     }
-
-    fn msync_impl(
-        &self,
-        vma: &VmArea,
-        range: VirtAddrRange,
-        policy: MsyncPolicy,
-    ) -> KResult<MsyncRuntimeResult> {
-        // MS_ASYNC (and MS_INVALIDATE) are no-ops at the VMA level —
-        // Linux never actually evicts or zaps pages for MS_INVALIDATE
-        // because the page cache is globally coherent.
-        if !policy.is_sync() {
-            return Ok(MsyncRuntimeResult::Synced);
-        }
-        let object_start = vma
-            .file_offset_for(range.start)
-            .ok_or(KError::InvalidInput)?;
-        self.0.source.file().writeback_mapping_range(
-            object_start,
-            range.size(),
-            policy.is_data_only(),
-        )?;
-        Ok(MsyncRuntimeResult::Synced)
-    }
 }
 
 impl VmRuntimeOps for FileSharedRuntime {
@@ -417,13 +395,9 @@ impl VmRuntimeOps for FileSharedRuntime {
         Ok(())
     }
 
-    fn msync(
-        &self,
-        vma: &VmArea,
-        range: VirtAddrRange,
-        policy: MsyncPolicy,
-    ) -> KResult<MsyncRuntimeResult> {
-        self.msync_impl(vma, range, policy)
+    fn msync(&self, file_range: Range<u64>) -> KResult {
+        self.0.source.file().fsync_range(file_range, true)?;
+        Ok(())
     }
 
     fn relocate_for_mremap(

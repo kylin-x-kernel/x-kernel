@@ -46,6 +46,12 @@ the server returned, and a zero-length reply before the folio window is covered
 fails the fault with `EIO`. A failed folio stays non-uptodate, so a truncated or
 malicious reply cannot publish a partially filled page.
 
+The existing owned `FolioRead` token retains exclusive initialization access
+through all fid operations. Both success and failure explicitly complete that
+token after server I/O; success alone publishes uptodate state. A premature empty
+reply after a filled prefix fails and unlocks the folio, so a subsequent fault
+retries rather than exposing partial data or waiting on an abandoned lock.
+
 ## Truncate cache invalidation
 
 A successful `TSETATTR` truncate is a backing-store size change made outside
@@ -101,6 +107,11 @@ v9fs 只共享 `Arc<P9Client>`/`Arc<P9Fid>`，不增加与协议状态分离的 
 
 ## 故障管理
 
+The range-fsync callback always contacts the existing open fid, including empty
+ranges; it never substitutes local cache completion for server persistence.
+The server receives the exact datasync intent and may synchronize more bytes
+than requested because the protocol has no range field. Server errors propagate.
+
 `p9` 的 typed `KError` 直接传播为 VFS error。namespace/I/O failure 不使用 path-based retry；
 unlink/rename 只按 Linux dotl semantics 对 `EOPNOTSUPP` 使用 protocol fallback，statfs 只对
 `ENOSYS` 回退。
@@ -124,3 +135,8 @@ unlink/rename 只按 Linux dotl semantics 对 `EOPNOTSUPP` 使用 protocol fallb
 - namespace operation 是否保持 Linux fid role、fallback condition 和 wire order；
 - new inode 是否在 qid/attribute validation 后才发布；
 - 新字段是否对应 Linux semantics 或 KVFS/Rust ownership 的必要边界。
+
+TFSYNC is a server persistence barrier and cannot certify local dirty mmap data.
+The local `write_and_wait_range` must succeed first. Missing local writeback
+support propagates its error without sending TFSYNC; the file's existing
+writeback-error cursor retains its ordinary observation semantics.

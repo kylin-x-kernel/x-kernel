@@ -5,6 +5,10 @@
 //! Partial writeback completion and retry tests.
 
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
+use core::{
+    ops::Range,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use ksync::Mutex;
 use memaddr::PAGE_SIZE_4K;
@@ -12,7 +16,7 @@ use pagecache::FolioRead;
 use unittest::def_test;
 
 use super::{
-    super::{AddressSpace, AddressSpaceOperations, WritebackControl},
+    super::{AddressSpace, AddressSpaceOperations, WritebackControl, WritebackSyncMode},
     TruncateOps,
 };
 use crate::{
@@ -84,7 +88,7 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
         .write_cached_bytes(0, &input)
         .expect("populate dirty page-cache batch");
 
-    let mut control = WritebackControl::all(false).with_nr_to_write(2);
+    let mut control = WritebackControl::all().with_nr_to_write(2);
     assert_eq!(
         address_space.writepages_control(&mut control),
         Err(VfsError::InvalidInput)
@@ -141,7 +145,7 @@ fn single_folio_failure_preserves_control_progress_for_retry() {
     );
     let mapping = inode.address_space();
     mapping.write_cached_bytes(0, &input).unwrap();
-    let mut control = WritebackControl::all(false).with_nr_to_write(3);
+    let mut control = WritebackControl::all().with_nr_to_write(3);
     let _invalidate_guard = mapping.invalidate_lock.read();
     let result = mapping.writeback_cached_folios(&mut control, |index, _, _| {
         if index == 1 {
@@ -172,4 +176,302 @@ fn single_folio_failure_preserves_control_progress_for_retry() {
             })
             .unwrap();
     }
+}
+
+type PendingWriteback = (
+    u64,
+    Vec<u8>,
+    pagecache::OwnedWritebackCompletion<AddressSpace>,
+);
+
+struct DeferredWritebackOps {
+    calls: Mutex<Vec<Range<u64>>>,
+    pending: Mutex<Vec<PendingWriteback>>,
+    fail_on_call: Option<usize>,
+    append_on_call: Option<usize>,
+    ready: ktask::WaitQueue,
+    submitted: AtomicUsize,
+}
+
+impl DeferredWritebackOps {
+    fn submit(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
+        mapping.submit_cached_ranges(control, PAGE_SIZE_4K, |batch| {
+            let offset = batch.offset();
+            let (data, completion) = batch.into_parts();
+            let completion = mapping.retain_writeback_completion(completion)?;
+            self.pending.lock().push((offset, data, completion));
+            Ok(())
+        })
+    }
+
+    fn complete(&self, mapping: &AddressSpace, offset: u64, error: Option<VfsError>) {
+        let mut pending = self.pending.lock();
+        let position = pending
+            .iter()
+            .position(|(start, ..)| *start == offset)
+            .unwrap();
+        let (_, data, completion) = pending.remove(position);
+        drop(pending);
+        if let Some(error) = error {
+            mapping.writeback_errors().record(error);
+        }
+        completion
+            .complete(if error.is_some() { 0 } else { data.len() })
+            .unwrap();
+    }
+}
+
+impl AddressSpaceOperations for DeferredWritebackOps {
+    fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
+        folio.data().fill(0);
+        folio.complete(Ok(()))
+    }
+
+    fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
+        let call = {
+            let mut calls = self.calls.lock();
+            calls.push(control.range_start()..control.range_end());
+            calls.len()
+        };
+        if self.append_on_call == Some(call) {
+            let append_offset = (PAGE_SIZE_4K * 2) as u64;
+            mapping.write_cached_bytes(append_offset, &[0x7a; PAGE_SIZE_4K])?;
+            mapping.inode().unwrap().set_size((PAGE_SIZE_4K * 3) as u64);
+            let mut appended = WritebackControl::range(append_offset, PAGE_SIZE_4K)?;
+            self.submit(mapping, &mut appended)?;
+        }
+        self.submit(mapping, control)?;
+        self.submitted.store(call, Ordering::Release);
+        self.ready.notify_all(false);
+        if self.fail_on_call == Some(call) {
+            Err(VfsError::StorageFull)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn deferred_mapping(
+    fail_on_call: Option<usize>,
+    append_on_call: Option<usize>,
+) -> (Arc<VfsInode>, &'static DeferredWritebackOps) {
+    let operations: &'static DeferredWritebackOps = Box::leak(Box::new(DeferredWritebackOps {
+        calls: Mutex::new(Vec::new()),
+        pending: Mutex::new(Vec::new()),
+        fail_on_call,
+        append_on_call,
+        ready: ktask::WaitQueue::new(),
+        submitted: AtomicUsize::new(0),
+    }));
+    let inode = VfsInode::new_file_with_address_space_and_flags(
+        Arc::new(TruncateOps),
+        NodeFlags::ALWAYS_CACHE,
+        operations,
+        VfsInodeInit::new(
+            30,
+            PAGE_SIZE_4K as u64,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    (inode, operations)
+}
+
+// Observe the actual parking transition, never a fixed number of yields.
+fn assert_waiting(task: &ktask::KtaskRef, finished: &AtomicBool) {
+    while !task.state().is_blocked() && !finished.load(Ordering::Acquire) {
+        ktask::yield_now();
+    }
+    assert!(!finished.load(Ordering::Acquire));
+}
+
+#[def_test]
+fn raw_zero_budget_and_empty_range_bypass_filesystem_dispatch() {
+    let (inode, operations) = deferred_mapping(None, None);
+    let mapping = inode.address_space();
+    mapping.write_cached_bytes(0, b"dirty").unwrap();
+    let mut zero = WritebackControl::all().with_nr_to_write(0);
+    assert_eq!(mapping.writepages_control(&mut zero), Ok(()));
+    assert_eq!(mapping.writepages_range(1, 0), Ok(()));
+    assert!(operations.calls.lock().is_empty());
+    assert!(operations.pending.lock().is_empty());
+    assert_eq!(
+        mapping.writepages_range(u64::MAX, 1),
+        Err(VfsError::InvalidInput)
+    );
+    assert_eq!(
+        mapping.write_and_wait_range(core::ops::Range { start: 5, end: 4 }),
+        Err(VfsError::InvalidInput)
+    );
+    assert_eq!(mapping.write_and_wait_range(3..3), Ok(()));
+    assert!(operations.calls.lock().is_empty());
+}
+
+#[def_test]
+fn data_write_and_wait_covers_clean_old_writeback_and_new_errors_after_submission_failure() {
+    for (fail_submission, mode) in [
+        (false, WritebackSyncMode::None),
+        (true, WritebackSyncMode::All),
+    ] {
+        let (inode, operations) = deferred_mapping(fail_submission.then_some(2), None);
+        let mapping = inode.address_space();
+        mapping.write_cached_bytes(0, b"old").unwrap();
+        let mut raw = WritebackControl::all().with_sync_mode(mode);
+        mapping.writepages_control(&mut raw).unwrap();
+        mapping
+            .i_pages
+            .with_folio(0, |folio| {
+                let folio = folio.unwrap();
+                assert!(!folio.is_dirty());
+                assert!(folio.is_under_writeback());
+            })
+            .unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let result = Arc::new(Mutex::new(None));
+        let waiting_mapping = mapping.clone();
+        let waiting_finished = finished.clone();
+        let waiting_result = result.clone();
+        let task = ktask::spawn(move || {
+            *waiting_result.lock() = Some(waiting_mapping.write_and_wait_range(0..u64::MAX));
+            waiting_finished.store(true, Ordering::Release);
+        });
+        operations
+            .ready
+            .wait_until(|| operations.submitted.load(Ordering::Acquire) == 2);
+        assert_waiting(&task, &finished);
+        operations.complete(&mapping, 0, Some(VfsError::Io));
+        assert_eq!(task.join(), 0);
+        assert_eq!(
+            *result.lock(),
+            Some(Err(if fail_submission {
+                VfsError::StorageFull
+            } else {
+                VfsError::Io
+            }))
+        );
+        let cursor = mapping.writeback_errors().sample();
+        assert_eq!(mapping.writeback_errors().check(cursor), Err(VfsError::Io));
+        assert_eq!(mapping.write_and_wait_range(0..0), Ok(()));
+    }
+}
+
+#[def_test]
+fn live_invalidation_waits_for_owned_writeback_and_retains_failed_data() {
+    for (fail_submission, completion_error) in [
+        (false, None),
+        (false, Some(VfsError::Io)),
+        (true, Some(VfsError::Io)),
+    ] {
+        let (inode, operations) = deferred_mapping(fail_submission.then_some(1), None);
+        let mapping = inode.address_space();
+        mapping.write_cached_bytes(0, b"retained").unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let result = Arc::new(Mutex::new(None));
+        let invalidating_inode = inode.clone();
+        let invalidating_finished = finished.clone();
+        let invalidating_result = result.clone();
+        let task = ktask::spawn(move || {
+            *invalidating_result.lock() = Some(invalidating_inode.invalidate_cached_pages());
+            invalidating_finished.store(true, Ordering::Release);
+        });
+        operations
+            .ready
+            .wait_until(|| operations.submitted.load(Ordering::Acquire) == 1);
+        assert_waiting(&task, &finished);
+        assert_eq!(mapping.nrpages(), 1);
+        operations.complete(&mapping, 0, completion_error);
+        assert_eq!(task.join(), 0);
+        let expected_error = if fail_submission {
+            Some(VfsError::StorageFull)
+        } else {
+            completion_error
+        };
+        assert_eq!(*result.lock(), Some(expected_error.map_or(Ok(()), Err)));
+        if expected_error.is_some() {
+            assert_eq!(mapping.nrpages(), 1);
+            mapping
+                .i_pages
+                .with_folio(0, |folio| {
+                    let folio = folio.unwrap();
+                    assert!(folio.is_dirty());
+                    assert!(!folio.is_under_writeback());
+                    assert_eq!(&folio.data()[..8], b"retained");
+                })
+                .unwrap();
+        } else {
+            assert_eq!(mapping.nrpages(), 0);
+        }
+    }
+}
+
+#[def_test]
+fn finite_data_target_submits_and_waits_the_same_bound_during_append() {
+    let (inode, operations) = deferred_mapping(None, Some(1));
+    let mapping = inode.address_space();
+    mapping.write_cached_bytes(0, b"captured").unwrap();
+    let finished = Arc::new(AtomicBool::new(false));
+    let result = Arc::new(Mutex::new(None));
+    let waiting_mapping = mapping.clone();
+    let waiting_finished = finished.clone();
+    let waiting_result = result.clone();
+    let task = ktask::spawn(move || {
+        *waiting_result.lock() = Some(waiting_mapping.write_and_wait_range(0..u64::MAX));
+        waiting_finished.store(true, Ordering::Release);
+    });
+    operations
+        .ready
+        .wait_until(|| operations.submitted.load(Ordering::Acquire) == 1);
+    assert_waiting(&task, &finished);
+    assert_eq!(*operations.calls.lock(), vec![0..PAGE_SIZE_4K as u64]);
+    operations.complete(&mapping, 0, None);
+    assert_eq!(task.join(), 0);
+    assert_eq!(*result.lock(), Some(Ok(())));
+    assert!(finished.load(Ordering::Acquire));
+    mapping
+        .i_pages
+        .with_folio(2, |folio| assert!(folio.unwrap().is_under_writeback()))
+        .unwrap();
+    operations.complete(&mapping, (PAGE_SIZE_4K * 2) as u64, None);
+}
+
+#[def_test]
+fn data_range_sync_rounds_to_intersecting_folios() {
+    let operations: &'static PrefixRetryWritebackOps =
+        Box::leak(Box::new(PrefixRetryWritebackOps {
+            state: Mutex::new(PrefixRetryState {
+                fail_once: false,
+                calls: 0,
+                durable: Vec::new(),
+            }),
+        }));
+    let inode = VfsInode::new_file_with_address_space_and_flags(
+        Arc::new(TruncateOps),
+        NodeFlags::ALWAYS_CACHE,
+        operations,
+        VfsInodeInit::new(
+            31,
+            (PAGE_SIZE_4K * 3) as u64,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let mapping = inode.address_space();
+    mapping
+        .write_cached_bytes(0, &[0x61; PAGE_SIZE_4K * 3])
+        .unwrap();
+    mapping
+        .write_and_wait_range(PAGE_SIZE_4K as u64 - 1..PAGE_SIZE_4K as u64 + 1)
+        .unwrap();
+    for (index, dirty) in [(0, false), (1, false), (2, true)] {
+        mapping
+            .i_pages
+            .with_folio(index, |folio| {
+                let folio = folio.unwrap();
+                assert_eq!(folio.is_dirty(), dirty);
+                assert!(!folio.is_under_writeback());
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        operations.state.lock().durable,
+        vec![0x61; PAGE_SIZE_4K * 2]
+    );
 }

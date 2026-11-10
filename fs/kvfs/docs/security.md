@@ -893,3 +893,28 @@ An address-space view guard can extend its existing registration under MM
 serialization. The registry mutex protects the VMA/object spans, preserving the
 registration identity and invalidation notifier. Coordinates are validated before
 publication; invalidation snapshots do not hold this mutex while entering MM.
+
+## Data completion and persistence boundaries
+
+Raw writepages return is not a persistence acknowledgement. Initial zero budget
+and empty range are rejected as data work before filesystem admission; explicit
+file synchronization still checks capability and runs filesystem barriers.
+`write_and_wait_range` validates range and sleepability before observing errors
+or cache indexes, captures a finite resident bound including old clean WRITEBACK,
+and waits that same bound even after submission failure. Index/invalidate locks
+are absent from the completion wait. New completion failures are recorded before
+WRITEBACK ends and checked without consuming another open file's observer.
+
+Missing filesystem fsync support is EINVAL, rather than unearned success. Volatile
+backends explicitly succeed; block-device sync always issues its actual flush.
+The file wrapper validates backwards ranges before backend dispatch or advancing
+its cursor; an empty data range still dispatches and observes errors. Generic data
+completion does not replace filesystem drain-before-block-release protection,
+metadata settlement or device barriers. A captured target bounds work; it does
+not certify writable-PTE dirty detection or eliminate the separate G requirement.
+
+Live cache invalidation holds exclusive invalidate admission while submitting
+and waiting, without reacquiring the shared entry guard. Submission success alone
+cannot authorize cache destruction: completion errors are observed before any
+dirty retry data is discarded. Submission failure keeps precedence while earlier
+owned I/O is still drained and cache ownership remains intact.

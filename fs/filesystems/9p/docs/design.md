@@ -124,6 +124,12 @@ a zero-length reply before the window is covered as `VfsError::Io`; the folio
 stays non-uptodate instead of caching a hole. This path lets executables and
 shared libraries on 9P demand-page like Linux `v9fs_vfs_read_folio()`.
 
+The callback consumes the existing `FolioRead` initialization token. This
+cacheless server adapter performs its fid reads synchronously, then completes
+the token with the final result. Whole-window success includes zeroing the EOF
+tail; every failure leaves the folio non-uptodate and releases its lock for retry.
+No separate read state or completion owner is introduced.
+
 Plain `read()`/`write()` still use the opened fid's `TREAD`/`TWRITE` and bypass
 the page cache. Writable `MAP_SHARED` remains unsupported because there is no
 `write_begin`/`write_end`/`writepages` implementation.
@@ -149,7 +155,9 @@ directory iteration 把服务端 qid 转换为 inode number，并把服务端 `d
 
 `statfs` 使用 root inode fid 的 `TSTATFS`；仅在服务端明确表示 unsupported 时回退到
 `simple_statfs`。`sync_fs` 没有 superblock-owned dirty state，opened object 的 durability 由
-per-fid `TFSYNC` 表达。
+per-fid `TFSYNC` 表达。The range-aware VFS callback forwards `data_only` unchanged.
+9P fsync has no byte-range operand, so partial and empty VFS ranges conservatively
+synchronize the whole opened fid; no local writeback or second sync hook is added.
 
 ## 并发模型
 
@@ -168,3 +176,10 @@ v9fs 自身不增加全局或 session 级锁。一个 mount 的 inode/file fids 
 superblock private data 持有 mount client；inode 持有 lookup fid；opened file 的 typed private
 data 持有独立 opened fid。各宿主对象释放其最后一个 `Arc<P9Fid>` 时由协议层 clunk，v9fs
 不复制 clunk 状态或实现额外 release wrapper。
+
+File fsync first writes and waits for the requested local mapping range, then
+issues the protocol's whole-fid TFSYNC. This follows Linux
+`v9fs_file_fsync_dotl()` and prevents server success from hiding unsent local
+mmap data. Cacheless 9P currently has no dirty-folio writeback provider: dirty
+shared mappings return the local writeback error before TFSYNC; clean or
+non-overlapping ranges still reach the server.

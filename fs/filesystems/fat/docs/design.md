@@ -92,3 +92,21 @@ runs without the superblock registry mutex, but the canonical device is claimed
 and its superblock is nascent. Reclaim must not acquire a dependency on completion
 of that mount. This matches the existing private-owner policy. NoMemory remains
 a VFS allocation error rather than passing through the FAT IO error adapter.
+
+## Explicit synchronization capability
+
+The published axfatfs dependency does not provide the open-inode directory-entry
+lifecycle required for Linux-compatible unlink/rename with file fsync. F1 does
+not enable FAT file/directory fsync while that prerequisite is missing. These
+operations use the VFS default InvalidInput result; fdatasync, shared MS_SYNC and
+loop flush propagate the corresponding failure instead of claiming persistence.
+The previous generic page-cache writeback success did not persist FAT's private
+metadata or device buffers. This is a known capability limitation pending the
+independent upstream API work, not an alternate persistence implementation.
+
+The kernel keeps the published dependency and carries no vendored source, local
+patch or fork revision. Upstream supplies format/entry mechanisms; a later FAT
+integration change will own inode references, association indexing, namespace
+serialization and final cluster reclamation in the kernel.
+
+Upstream prerequisite: https://github.com/arceos-hypervisor/axfatfs/pull/4.

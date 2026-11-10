@@ -80,8 +80,12 @@ to `posix/mm`.
 
 ## Known Limitations
 
-- `MS_INVALIDATE`, exact range fsync, and locked-page `EBUSY`
-  semantics are not implemented.
+- `MS_SYNC` forwards the translated half-open file range to filesystem
+  datasync; filesystem metadata/journal/flush failures propagate to the caller.
+  Filesystems may conservatively persist more metadata or remote data.
+- Dirty-PTE harvesting and write-protection rearming after writeback remain
+  Issue G: later stores through an already writable PTE may not redirty a folio.
+- `MS_INVALIDATE` and locked-page `EBUSY` semantics are not implemented.
 - Linux-style refusal to add `F_SEAL_WRITE` while writable shared mappings are
   already active is implemented through KFS shmem writable-shared-page
   accounting and filemap runtime registration.
@@ -151,3 +155,7 @@ new-map policy, so FUTURE_WRITE permits inherited writable VMAs while blocking
 new ones. Source offsets and view lengths follow the actual VMA range; expansion
 extends the existing reverse-mapping registration. The source adapter no longer
 keeps a duplicate immutable length. Write faults still check current inode policy.
+
+The `msync` runtime hook runs without the MM mutex and takes an already checked
+file byte range. Its owned runtime retains the source open file even if its VMA
+is concurrently removed. It must not recover coordinates from live VMA state.

@@ -514,7 +514,11 @@ impl MemoryBlockDevice {
     fn flush(&self) -> block::DriverResult {
         self.flushes
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        Ok(())
+        if self.fail_io.load(core::sync::atomic::Ordering::Relaxed) {
+            Err(DriverError::Io)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -1444,4 +1448,20 @@ fn block_file_preserves_ioctl_only_mode_and_allows_raw_readonly_open() {
     drop(raw);
     assert_eq!(backend.releases.load(Ordering::Relaxed), 2);
     block::del_gendisk(device.device_number()).unwrap();
+}
+
+#[def_test(serial)]
+fn range_fsync_on_block_file_flushes_even_empty_ranges_and_reports_device_errors() {
+    let fixture = BlockIoFixture::new(512);
+    let (file, _) = open_block_device_file(fixture.device.device_number()).unwrap();
+    for (count, data_only) in [(1, false), (2, true)] {
+        assert_eq!(file.fsync_range(0..0, data_only), Ok(()));
+        assert_eq!(fixture.backend.flushes.load(Ordering::Relaxed), count);
+    }
+    fixture.backend.fail_io.store(true, Ordering::Relaxed);
+    assert_eq!(file.fsync_range(3..17, true), Err(VfsError::Io));
+    assert_eq!(fixture.backend.flushes.load(Ordering::Relaxed), 3);
+    fixture.backend.fail_io.store(false, Ordering::Relaxed);
+    assert_eq!(file.fsync(false), Ok(()));
+    assert_eq!(fixture.backend.flushes.load(Ordering::Relaxed), 4);
 }

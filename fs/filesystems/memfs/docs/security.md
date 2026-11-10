@@ -160,6 +160,8 @@ policy at the boot boundary; ordinary mounts and memfd propagate the error.
 
 - 读写和 truncate 错误通过 `VfsResult` 返回。
 - 内存文件的同步成功只表示无需持久化 I/O，不承诺断电保存；同步不得丢弃内容页。
+  Half-open partial and empty ranges use the same explicit volatile fsync capability;
+  VFS rejects backwards ranges before dispatch.
   特殊文件的同步能力由打开后安装的专用 operation table 决定。
 - inode/mapping 绑定缺失必须返回错误，不能静默创建不一致的第二对象。
 - quota admission 的容量拒绝作为文件系统 `StorageFull` 错误传播。候选物理页和

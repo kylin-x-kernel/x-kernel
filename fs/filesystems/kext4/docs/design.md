@@ -1319,11 +1319,15 @@ the successful prefix. This mode never rewrites data or allocates holes; it shar
 credits, transaction restart, and committed-prefix accounting with `Write` mode.
 Data completion is not durability; the pre-commit data barrier remains required.
 
-DataOnly failures settle only the contiguous successful prefix. If prefix
+KVFS writeback always selects the private DataOnly policy: allocation, unwritten
+conversion and i_disksize publication remain required, while timestamp-only
+metadata belongs to full file sync. Writeback control carries no fsync intent.
+Data failures settle only the contiguous successful prefix. If prefix
 metadata settlement also fails, folio completion uses the settled length while
 preserving the original device error. Failed ranges remain unwritten or retain
-their old mapping and stay dirty. FullMetadata data failure still aborts the
-journal and leaves the whole batch dirty. Real preparation, submission, and
+their old mapping and stay dirty. The VFS data path no longer drives the private
+FullMetadata-only data-error abort branch; real metadata/journal failures still
+follow the existing abort policy. Real preparation, submission, and
 completion failures enter both KVFS mapping and superblock error channels before
 releasing cache completion or waking folio waiters. Preparation failure does not
 run post-I/O metadata completion. Queue-capacity throttling is not an I/O error.
@@ -1367,6 +1371,14 @@ or clean pass must not reintroduce old mapping errors into syncfs. Each file's
 fsync/syncfs cursor independently reports its channel's history; later opens still
 inherit unseen errors. Direct submission errors take precedence, after all
 required drains and error checks have run.
+
+Range fsync first calls `AddressSpace::write_and_wait_range` for its half-open
+byte range, then stages timestamps for full sync and performs the existing inode
+journal/device persistence. Empty data ranges still execute filesystem sync;
+invalid reversed ranges are rejected by KVFS before dispatch. The filesystem may
+persist additional metadata. Raw writepages remains a submission contract even
+when the existing All implementation completes data inline; neither raw writeback
+nor a generic data wait alone supplies durability.
 
 Background triggering, asynchronous readahead, global writeback throttling, and
 sync targets for non-regular inodes, and separate fdatasync metadata targets

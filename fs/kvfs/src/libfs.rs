@@ -12,8 +12,8 @@ use memaddr::PAGE_SIZE_4K;
 use crate::{
     AddressSpace, Dentry, DentryOperations, FileSystemType, GetattrQueryFlags, GetattrRequestMask,
     LockedDentry, MAX_LFS_FILESIZE, Metadata, MountIdmap, NodeFlags, NodePermission, NodeType,
-    Path, RenameFlags, StatFs, SuperBlock, SuperBlockOperations, Umode, VfsError, VfsFile,
-    VfsInode, VfsInodeInit, VfsResult, WriteEndRequest, d_really_is_positive, path::MAX_NAME_LEN,
+    Path, RenameFlags, StatFs, SuperBlock, SuperBlockOperations, Umode, VfsError, VfsInode,
+    VfsInodeInit, VfsResult, WriteEndRequest, d_really_is_positive, path::MAX_NAME_LEN,
 };
 
 const PSEUDO_FS_ROOT_INO: u64 = 1;
@@ -203,11 +203,6 @@ pub fn simple_getattr(
     Ok(stat)
 }
 
-/// `simple_fsync_noflush`: write dirty file data without forcing a device flush.
-pub fn simple_fsync_noflush(file: &VfsFile, data_only: bool) -> VfsResult<()> {
-    file.writeback_mapping(data_only)
-}
-
 /// `simple_write_end`: finish a buffered write for a libfs-style in-memory file.
 ///
 /// This is the `fs/libfs.c` helper used by ramfs-like address-space
@@ -237,7 +232,7 @@ pub(crate) fn generic_read_dir(_buf: &mut [u8], _offset: u64) -> VfsResult<usize
 }
 
 /// `noop_fsync`: generic fsync implementation for in-memory metadata.
-pub(crate) fn noop_fsync(_data_only: bool) -> VfsResult<()> {
+pub(crate) fn noop_fsync() -> VfsResult<()> {
     Ok(())
 }
 

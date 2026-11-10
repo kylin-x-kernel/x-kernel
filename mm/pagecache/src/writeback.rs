@@ -228,6 +228,38 @@ enum FolioMark {
 }
 
 impl MappingPages {
+    /// Captures the finite resident-page target within a half-open byte range.
+    ///
+    /// The existing tree includes clean folios with in-flight writeback. Only
+    /// its highest intersecting index is sampled, under the index lock; no
+    /// reference or lock survives this call. The bound limits later submission
+    /// and waiting, not file size or the contents selected by either operation.
+    /// Requires sleepable task context, without a current-process requirement.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` for a backwards range or nonsleepable context.
+    pub fn capture_writeback_range(&self, range: Range<u64>) -> KResult<Range<u64>> {
+        if range.start > range.end {
+            return Err(KError::InvalidInput);
+        }
+        if !ktask::is_sleepable_context() {
+            return Err(KError::InvalidInput);
+        }
+        if range.is_empty() {
+            return Ok(range);
+        }
+        let (start_index, end_index) = byte_range_to_page_range(range.clone());
+        let state = self.state.lock();
+        let Some((&last_index, _)) = state.entries.range(start_index..end_index).next_back() else {
+            return Ok(range.start..range.start);
+        };
+        let end = last_index
+            .saturating_add(1)
+            .saturating_mul(PAGE_SIZE_4K as u64)
+            .min(range.end);
+        Ok(range.start..end)
+    }
+
     /// Waits for tagged resident writeback discovered while scanning a byte range.
     ///
     /// Scans the half-open range once in ascending index order. Writeback started

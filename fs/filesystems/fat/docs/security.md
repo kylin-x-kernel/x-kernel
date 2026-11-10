@@ -97,3 +97,14 @@ The first buffer is freed if the second allocation fails. The existing KVFS
 initialization-failure path unregisters the nascent superblock and wakes waiters;
 this change does not add a separate cache or claim-release protocol. NOWAIT only
 constrains buffer allocation, not subsequent filesystem IO or nested allocations.
+
+## Synchronization limitation
+
+FAT currently has no file/directory fsync capability with the published axfatfs
+API. VFS fsync/fdatasync return InvalidInput, and MS_SYNC/loop flush propagate
+failure. No code path may turn those errors into successful persistence. Enabling
+this capability requires upstream entry detach/reattach and final-reclamation
+mechanisms so an open unlinked or renamed handle cannot flush an obsolete slot.
+No local dependency override is retained while that prerequisite is developed.
+
+Upstream prerequisite: https://github.com/arceos-hypervisor/axfatfs/pull/4.

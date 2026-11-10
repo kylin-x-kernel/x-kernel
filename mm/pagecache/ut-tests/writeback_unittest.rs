@@ -867,3 +867,39 @@ fn owned_completion_retains_mapping_owner_until_finish_or_drop() {
         assert!(folio.is_invalidated());
     }
 }
+
+#[def_test]
+fn captured_writeback_target_is_bounded_and_preserves_requested_endpoints() {
+    let cache = new_cache();
+    assert_eq!(cache.capture_writeback_range(3..9), Ok(3..3));
+    assert_eq!(
+        cache.capture_writeback_range(core::ops::Range { start: 9, end: 3 }),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(cache.capture_writeback_range(7..7), Ok(7..7));
+    write_cached(&cache, 0, b"low").unwrap();
+    let page = PAGE_SIZE_4K as u64;
+    let captured = cache.capture_writeback_range(1..u64::MAX).unwrap();
+    assert_eq!(captured, 1..page);
+    write_cached(&cache, page * 2, b"later").unwrap();
+    assert_eq!(captured, 1..page);
+    assert_eq!(
+        cache.capture_writeback_range(page + 1..page * 3),
+        Ok(page + 1..page * 3)
+    );
+    assert_eq!(
+        cache.capture_writeback_range(page * 2 + 1..page * 2 + 2),
+        Ok(page * 2 + 1..page * 2 + 2)
+    );
+}
+
+#[def_test]
+fn captured_full_range_sentinel_does_not_overflow_the_last_page() {
+    let cache = new_cache();
+    write_cached(&cache, u64::MAX - 1, b"x").unwrap();
+    assert_eq!(cache.capture_writeback_range(0..u64::MAX), Ok(0..u64::MAX));
+    assert_eq!(
+        cache.capture_writeback_range(u64::MAX - 1..u64::MAX),
+        Ok(u64::MAX - 1..u64::MAX)
+    );
+}

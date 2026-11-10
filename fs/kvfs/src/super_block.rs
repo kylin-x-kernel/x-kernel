@@ -1415,13 +1415,13 @@ impl SuperBlock {
         node::wait_for_inode_evictions(self);
     }
 
-    /// Starts writeback for dirty inode page-cache state on this superblock.
-    fn writeback_inodes(inodes: &[Arc<VfsInode>], data_only: bool) -> VfsResult<()> {
+    /// Writes and waits for inode page-cache data on this superblock.
+    fn writeback_inodes(inodes: &[Arc<VfsInode>]) -> VfsResult<()> {
         let mut first_error = None;
         // Shutdown must drain every inode, including after another inode fails.
         // Completion workers may still own these inodes and mount state.
         for inode in inodes {
-            if let Err(error) = inode.sync(data_only) {
+            if let Err(error) = inode.sync() {
                 first_error.get_or_insert(error);
             }
         }
@@ -1429,8 +1429,8 @@ impl SuperBlock {
     }
 
     /// Writes back filesystem-owned metadata for live inodes on this superblock.
-    fn writeback_inode_metadata(&self, inodes: &[Arc<VfsInode>], data_only: bool) -> VfsResult<()> {
-        let mut control = WritebackControl::all(data_only);
+    fn writeback_inode_metadata(&self, inodes: &[Arc<VfsInode>]) -> VfsResult<()> {
+        let mut control = WritebackControl::all();
         let mut first_error = None;
         for inode in inodes {
             if let Err(error) = self.ops().write_inode(inode.as_ref(), &mut control) {
@@ -1454,8 +1454,8 @@ impl SuperBlock {
 
     pub(crate) fn sync_fs_locked(&self) -> VfsResult<()> {
         let inodes = self.live_inodes();
-        let data = Self::writeback_inodes(&inodes, false);
-        let metadata = self.writeback_inode_metadata(&inodes, false);
+        let data = Self::writeback_inodes(&inodes);
+        let metadata = self.writeback_inode_metadata(&inodes);
         // Complete every stage even after an earlier error. Filesystem hooks
         // retain their own abort checks; the first failure stays authoritative.
         let filesystem = self.ops().sync_fs(self);

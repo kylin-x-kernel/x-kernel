@@ -264,13 +264,20 @@ shared backends, and intermediate page-table reclamation are unchanged.
 
 ### `msync`
 
-`MmSpace::msync_range()` owns Linux-style VMA range traversal for `msync`.
-It records unmapped holes as `NoMemory` while still dispatching later mapped
-VMAs in the range.
+`MmUserHandle::msync_range()` retains the active MM user while
+`MmSpace::msync_range()` owns Linux-style VMA traversal. Under the MM mutex it
+finds the current VMA and translates the overlap into a checked half-open file
+byte range. It retains only that file runtime, releases the mutex for datasync,
+then reacquires it and looks up the next VMA anew. Concurrent unmap or replacement
+cannot invalidate the retained file or make later sync use a stale VMA snapshot.
 
-Only shared file runtimes perform writeback. Anonymous, linear, and private
-file runtimes return not-applicable through the runtime hook, so private COW
-pages are never written back to the source file.
+Holes yield `NoMemory` after later mappings are processed unless a filesystem
+error takes precedence. Plain `MS_ASYNC` returns at the first hole, as Linux does.
+The validated `MsyncPolicy` carries only writeback mode and invalidate intent.
+MM dispatches only `MS_SYNC` on shared file mappings; anonymous, linear, private
+file and non-sync requests do not enter a persistence hook. Private COW pages
+cannot be written back to the source. MM owns neither persistence state nor a
+separate data/metadata policy; the runtime calls the existing file's datasync.
 
 `MS_INVALIDATE` returns not supported in the current model because locked VMA
 and invalidate semantics are not represented yet.
@@ -415,3 +422,12 @@ source tail before preparing the retained source. File runtimes open inherited
 registrations without new-map admission; failures retire destination registrations
 while preserving retained source PTEs. File expansion also uses open and updates
 the existing object-side view range before the VMA extension is published.
+
+File byte-coordinate overflow returns `None` from VMA translation and cannot
+fall back to anonymous coordinates. Anonymous backing offsets use checked page
+multiplication and byte addition; addresses below the VMA start are rejected.
+
+The current runtime is explicitly released before MM is reacquired for the next
+VMA. This is part of the persistence boundary: dropping the last file reference
+may run a filesystem release callback and wait for writeback, just as Linux
+`fput()` after `vfs_fsync_range()` must run outside mmap serialization.

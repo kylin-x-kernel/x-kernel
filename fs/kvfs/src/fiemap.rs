@@ -132,7 +132,7 @@ impl<'a> FiemapExtentInfo<'a> {
         }
 
         if self.flags.contains(FiemapFlags::SYNC) {
-            inode.sync(true)?;
+            inode.sync()?;
         }
         Ok(())
     }

@@ -42,7 +42,8 @@
 - `MS_ASYNC | MS_SYNC` 冲突组合必须拒绝；unknown `msync` flags 也必须拒绝。
 - `MS_INVALIDATE` 必须返回不支持，直到 locked VMA 与 invalidate 语义存在。
 - `posix-mm` 不得直接访问 pagecache 或 filemap runtime internals；`msync`
-  必须通过 `MmSpace::msync_range()` 进入 MM。
+  必须通过捕获的 `LiveAddressSpace::msync_range()` 进入 MM，保留 active user；
+  syscall 不持有 MM mutex 执行文件持久化。
 - `mremap` move must preserve the ownership split between VMA metadata,
   present PTE residency, and backing object pages.
 - `memfd_create` 返回的文件对象必须持有有效 `Location`。
@@ -91,7 +92,7 @@
 | `mprotect` grow flag 不支持 | `PROT_GROWSDOWN` 或 `PROT_GROWSUP` | 返回错误 | protect 失败，不修改 PTE/VMA |
 | `MADV_DONTNEED` 范围非法 | 地址未映射、未页对齐、或 `addr + len` 溢出 | 返回错误 | advice 失败，不修改对象 |
 | `msync` flag 不支持 | unknown flags 或 `MS_ASYNC | MS_SYNC` 组合 | 返回错误 | sync 失败，不修改对象 |
-| shared file writeback 失败 | VFS `AddressSpaceOperations::writepages()` 失败 | 返回错误，dirty bit 保留 | syscall 失败，调用者可重试 |
+| shared file sync 失败 | 文件范围 datasync 的数据、元数据、journal 或设备持久化失败 | 传播文件系统/文件错误游标结果，未完成数据保留重试状态 | syscall 失败，调用者可重试 |
 
 ## 故障管理
 
@@ -110,8 +111,10 @@
   地址未对齐或范围溢出时返回。
 - `mmap` 的 maximum permission 与 current permission 分离；shared file
   映射的 may-permission 受文件打开权限约束。
-- `msync` 支持 shared file dirty folio writeback；exact range fsync、
+- `MS_SYNC` 已进入 shared file 范围 datasync；文件系统可保守同步更多范围。
   `MS_INVALIDATE` 和 locked-page `EBUSY` 语义未实现。
+- dirty-PTE 收集与写回后重新写保护属于 Issue G；不能据此声称已经覆盖
+  同一可写 PTE 上不再触发缺页的连续 mmap 写入。
 - file-backed writable `MAP_SHARED` 由 `filemap` runtime 通过 write-fault
   dirty tracking 支持。
 

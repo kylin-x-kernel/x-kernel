@@ -423,3 +423,7 @@ The live mapping guard forwards relocation's target-replacement policy while
 permissions stay owned by the source snapshot. MM removes a fixed target and
 discarded source tail before preparing the retained source; these destructive
 steps are not enclosed in a transient admission retry.
+
+Shared-mapping sync retains the captured `MmUserHandle` and must enter without
+MM/provider locks from sleepable task context. File persistence runs outside the
+MM mutex; process exit/exec cannot retarget or tear down that captured MM user.

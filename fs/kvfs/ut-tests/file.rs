@@ -159,7 +159,7 @@ fn captured_poll_source_filters_cancels_and_expires() {
 }
 
 struct SyncOperations {
-    intents: Mutex<Vec<bool>>,
+    intents: Mutex<Vec<(Range<u64>, bool)>>,
 }
 
 struct ShortWriteOperations;
@@ -238,8 +238,8 @@ fn scalar_write_iter_rewinds_unaccepted_bytes() {
 }
 
 impl FileOperations for SyncOperations {
-    fn fsync(&self, _file: &VfsFile, data_only: bool) -> VfsResult<()> {
-        self.intents.lock().push(data_only);
+    fn fsync(&self, _file: &VfsFile, range: Range<u64>, data_only: bool) -> VfsResult<()> {
+        self.intents.lock().push((range, data_only));
         if data_only {
             Err(VfsError::StorageFull)
         } else {
@@ -249,10 +249,10 @@ impl FileOperations for SyncOperations {
 }
 
 #[def_test]
-fn fsync_keeps_legacy_backend_default_success() {
+fn fsync_without_backend_capability_returns_einval() {
     let file = sync_test_file(Arc::new(EmptyFileOperations), FMode::READ);
     for data_only in [false, true] {
-        assert_eq!(file.fsync(data_only), Ok(()));
+        assert_eq!(file.fsync(data_only), Err(VfsError::InvalidInput));
     }
 }
 
@@ -277,7 +277,10 @@ fn fsync_preserves_sync_intent_and_backend_errors_on_readonly_file() {
     let file = sync_test_file(operations.clone(), FMode::READ);
     assert_eq!(file.fsync(false), Err(VfsError::Io));
     assert_eq!(file.fsync(true), Err(VfsError::StorageFull));
-    assert_eq!(*operations.intents.lock(), vec![false, true]);
+    assert_eq!(
+        *operations.intents.lock(),
+        vec![(0..u64::MAX, false), (0..u64::MAX, true)]
+    );
 }
 
 #[def_test]
@@ -311,4 +314,70 @@ fn fsync_backend_error_keeps_priority_and_consumes_recorded_failure() {
             .check_and_advance(&mut cursor),
         Ok(())
     );
+}
+
+struct VolatileSyncOperations {
+    calls: Mutex<Vec<(Range<u64>, bool)>>,
+}
+
+impl FileOperations for VolatileSyncOperations {
+    fn fsync(&self, _file: &VfsFile, range: Range<u64>, data_only: bool) -> VfsResult<()> {
+        self.calls.lock().push((range, data_only));
+        Ok(())
+    }
+}
+
+#[def_test]
+fn range_fsync_dispatches_empty_clean_and_full_ranges_with_explicit_capability() {
+    let operations = Arc::new(VolatileSyncOperations {
+        calls: Mutex::new(Vec::new()),
+    });
+    let file = sync_test_file(operations.clone(), FMode::READ);
+    assert_eq!(file.fsync_range(7..7, true), Ok(()));
+    assert_eq!(file.fsync_range(13..4097, false), Ok(()));
+    assert_eq!(file.fsync(false), Ok(()));
+    assert_eq!(
+        *operations.calls.lock(),
+        vec![(7..7, true), (13..4097, false), (0..u64::MAX, false)]
+    );
+}
+
+#[def_test]
+fn invalid_sync_range_does_not_dispatch_or_consume_file_errors() {
+    let operations = Arc::new(VolatileSyncOperations {
+        calls: Mutex::new(Vec::new()),
+    });
+    let file = sync_test_file(operations.clone(), FMode::READ);
+    file.mapping().writeback_errors().record(VfsError::Io);
+    let cursor = *file.writeback_error_cursor.lock();
+    assert_eq!(
+        file.fsync_range(core::ops::Range { start: 8, end: 3 }, true),
+        Err(VfsError::InvalidInput)
+    );
+    assert!(operations.calls.lock().is_empty());
+    assert_eq!(*file.writeback_error_cursor.lock(), cursor);
+    assert_eq!(file.fsync_range(3..3, true), Err(VfsError::Io));
+    assert_eq!(file.fsync_range(3..3, true), Ok(()));
+}
+
+#[def_test]
+fn successful_range_sync_preserves_independent_open_error_observers() {
+    let operations = Arc::new(VolatileSyncOperations {
+        calls: Mutex::new(Vec::new()),
+    });
+    let file = sync_test_file(operations.clone(), FMode::READ);
+    let other = VfsFileBuilder::from_path_state(
+        file.path().clone(),
+        FMode::READ,
+        OpenFlags::empty(),
+        operations,
+        kcred::initial_cred(),
+    )
+    .finish()
+    .unwrap();
+    file.mapping().writeback_errors().record(VfsError::Io);
+    assert_eq!(file.fsync_range(0..0, true), Err(VfsError::Io));
+    assert_eq!(file.fsync(true), Ok(()));
+    assert_eq!(other.fsync(false), Err(VfsError::Io));
+    assert_eq!(other.fsync(false), Ok(()));
 }
