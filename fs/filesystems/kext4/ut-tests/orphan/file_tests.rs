@@ -8,7 +8,6 @@ use unittest::def_test;
 
 use super::*;
 use crate::{
-    Ext4Timestamp,
     disk::inode::EXT4_EXTENTS_FL,
     jbd2::{JournalTransactions, TransactionId},
     superblock::test_fixtures::{checksummed_orphan_test_filesystem, orphan_test_filesystem},
@@ -168,13 +167,14 @@ fn recovery_orphan_propagates_unsupported_inode_format() {
     let journal = JournalTransactions::new(TransactionId::new(1003));
     let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
     let transaction = handle.id();
+    // EXT4_EXTENTS_FL is immutable for a resident inode, so rewrite the on-disk
+    // flags directly; recovery re-reads the inode from disk.
+    let legacy_flags = inode.flags() & !EXT4_EXTENTS_FL;
     filesystem
-        .update_inode_flags_timestamps_metadata(
-            &inode,
-            inode.flags() & !EXT4_EXTENTS_FL,
-            Ext4Timestamp::new(1003, 0),
-            &mut handle,
-        )
+        .update_dirty_inode_metadata(&inode, &mut handle, move |_filesystem, inode_bytes| {
+            inode_bytes[0x20..0x24].copy_from_slice(&legacy_flags.to_le_bytes());
+            Ok(())
+        })
         .unwrap();
     // A legacy inode must contain block pointers, not the old extent header.
     let block = filesystem.inode_table_entry_block(inode.number()).unwrap();

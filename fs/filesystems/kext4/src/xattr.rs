@@ -720,7 +720,7 @@ impl Ext4SbInfo {
                 Ok(())
             },
         )?;
-        Ok((inode_table_block, inode_table_bytes, updated_inode))
+        Ok((inode_table_block, inode_table_bytes, updated_inode.metadata))
     }
 
     fn create_external_xattr_block(
@@ -843,7 +843,7 @@ impl Ext4SbInfo {
         self.drop_external_xattr_block(inode, block, handle)?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        self.publish_inode_metadata(inode, updated_inode.metadata)
     }
 
     fn read_inline_xattrs(&self, inode: &Ext4Inode, output: &mut Vec<Ext4Xattr>) -> Ext4Result<()> {

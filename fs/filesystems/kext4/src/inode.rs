@@ -5,7 +5,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     fmt,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
 };
 
 use ktime_types::TimestampLimits;
@@ -26,9 +26,6 @@ use crate::{
 
 const EXT4_ENCODED_DEV_MAJOR_MAX: u32 = 0x0fff;
 const EXT4_ENCODED_DEV_MINOR_MAX: u32 = 0x000f_ffff;
-const DISK_NODE_FLAGS: u32 = kvfs::NodeFlags::IMMUTABLE.bits()
-    | kvfs::NodeFlags::APPEND_ONLY.bits()
-    | kvfs::NodeFlags::NO_ATIME.bits();
 
 fn node_flags_from_disk(flags: u32) -> kvfs::NodeFlags {
     let mut node_flags = kvfs::NodeFlags::empty();
@@ -491,13 +488,10 @@ pub(crate) struct EncodedTimestamp {
 /// remains owned by KVFS.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Ext4InodeMetadata {
-    kind: InodeKind,
-    mode: u16,
     uid: u32,
     gid: u32,
     disk_size: u64,
     blocks: u64,
-    flags: u32,
     block: [u8; disk_inode::INODE_BLOCK_BYTES],
     file_acl: u64,
     extra_isize: u16,
@@ -510,12 +504,24 @@ pub(crate) struct Ext4InodeMetadata {
 }
 
 impl Ext4InodeMetadata {
+    /// Returns whether a symlink keeps its target bytes in `i_block`.
+    ///
+    /// - `kind`: resident inode kind; only symlinks can be fast symlinks.
+    /// - `flags`: raw `i_flags`; an inline-data inode is never a fast symlink.
+    /// - `filesystem_block_size`: filesystem block size in bytes.
+    /// - `has_ea_inode_feature`: whether the filesystem accounts EA blocks.
+    ///
+    /// Returns: `true` when the target is stored inline in `i_block`.
+    ///
+    /// Errors: `Overflow` when the EA block count exceeds `blocks`.
     fn is_fast_symlink(
         &self,
+        kind: InodeKind,
+        flags: u32,
         filesystem_block_size: u32,
         has_ea_inode_feature: bool,
     ) -> Ext4Result<bool> {
-        if self.kind != InodeKind::Symlink || self.flags & disk_inode::EXT4_INLINE_DATA_FL != 0 {
+        if kind != InodeKind::Symlink || flags & disk_inode::EXT4_INLINE_DATA_FL != 0 {
             return Ok(false);
         }
         let ea_blocks = if self.file_acl == 0 {
@@ -534,29 +540,31 @@ impl Ext4InodeMetadata {
         })
     }
 
-    fn from_raw(raw: disk_inode::RawInode, allow_zero_links: bool) -> Ext4Result<Self> {
+    fn from_raw(
+        raw: disk_inode::RawInode,
+        allow_zero_links: bool,
+    ) -> Ext4Result<DecodedInodeFields> {
         if raw.links_count() == 0 && !allow_zero_links {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
         let kind = InodeKind::from_mode(raw.mode())?;
-        if raw.flags() & disk_inode::EXT4_INLINE_DATA_FL != 0 {
+        let permissions = raw.mode() & 0o7777;
+        let flags = raw.flags();
+        if flags & disk_inode::EXT4_INLINE_DATA_FL != 0 {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InlineData));
         }
-        if raw.flags() & disk_inode::EXT4_ENCRYPT_FL != 0 {
+        if flags & disk_inode::EXT4_ENCRYPT_FL != 0 {
             return Err(Ext4Error::Unsupported(UnsupportedKind::EncryptedName));
         }
-        if raw.flags() & disk_inode::EXT4_CASEFOLD_FL != 0 {
+        if flags & disk_inode::EXT4_CASEFOLD_FL != 0 {
             return Err(Ext4Error::Unsupported(UnsupportedKind::CasefoldName));
         }
 
-        Ok(Self {
-            kind,
-            mode: raw.mode(),
+        let metadata = Self {
             uid: raw.uid(),
             gid: raw.gid(),
             disk_size: raw.size(),
             blocks: raw.blocks(),
-            flags: raw.flags(),
             block: *raw.block(),
             file_acl: raw.file_acl(),
             extra_isize: raw.extra_isize(),
@@ -575,8 +583,35 @@ impl Ext4InodeMetadata {
                 raw.mtime(),
                 raw.mtime_extra(),
             ))?,
+        };
+        Ok(DecodedInodeFields {
+            kind,
+            flags,
+            permissions,
+            metadata,
         })
     }
+}
+
+/// The fields produced by one `from_raw` decode of an on-disk inode.
+///
+/// This is transient and never resident: `from_raw` is its only producer, and
+/// the caller immediately routes the four parts to their resident owners —
+/// `kind` to the immutable `Ext4Inode.kind`, `flags` to the sole-resident
+/// `Ext4Inode.flags` atomic, `permissions` to the `Ext4Inode.permissions`
+/// atomic, and `metadata` to `Ext4InodeState.metadata` — so no copy of these
+/// fields survives past the decode boundary.
+pub(crate) struct DecodedInodeFields {
+    /// File type from `i_mode`; routed to the immutable `Ext4Inode.kind`.
+    pub(crate) kind: InodeKind,
+    /// Raw `i_flags`; routed to the sole-resident `Ext4Inode.flags` atomic.
+    pub(crate) flags: u32,
+    /// POSIX permission and special bits (`i_mode & 0o7777`), type bits
+    /// excluded; routed to the `Ext4Inode.permissions` atomic.
+    pub(crate) permissions: u16,
+    /// Remaining on-disk fields without the type, flags, and permissions;
+    /// routed to `Ext4InodeState.metadata`.
+    pub(crate) metadata: Ext4InodeMetadata,
 }
 
 /// Bounded, disposable extent-status proofs for reservation preparation.
@@ -585,6 +620,8 @@ impl Ext4InodeMetadata {
 #[derive(Default)]
 struct ExtentStatusTree {
     ranges: BTreeMap<u64, ExtentStatus>,
+    /// End of the contiguous written prefix `[0, covered_prefix_end)`.
+    covered_prefix_end: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -625,16 +662,21 @@ impl ExtentStatusTree {
         if start >= end || self.contains_written(start, end) {
             return;
         }
+        // True when a merge or eviction removed range evidence inside the
+        // published prefix; the prefix is then recomputed instead of extended.
+        let mut prefix_lost = false;
         if let Some((&previous_start, &status)) = self.ranges.range(..=start).next_back()
             && status.kind == ExtentStatusKind::Written
             && previous_start + status.len >= start
         {
             start = previous_start;
             end = end.max(previous_start + status.len);
+            prefix_lost |= previous_start < self.covered_prefix_end;
             self.ranges.remove(&previous_start);
         }
         while let Some((&next_start, &status)) = self.ranges.range(start..=end).next() {
             end = end.max(next_start + status.len);
+            prefix_lost |= next_start < self.covered_prefix_end;
             self.ranges.remove(&next_start);
         }
         // Evict the shortest range when full, shedding the least coverage; ties
@@ -647,6 +689,7 @@ impl ExtentStatusTree {
         if self.ranges.len() >= Self::MAX_RANGES
             && let Some((&shortest, _)) = self.ranges.iter().min_by_key(|(_, status)| status.len)
         {
+            prefix_lost |= shortest < self.covered_prefix_end;
             self.ranges.remove(&shortest);
         }
         self.ranges.insert(
@@ -656,11 +699,36 @@ impl ExtentStatusTree {
                 kind: ExtentStatusKind::Written,
             },
         );
+        if prefix_lost {
+            self.refresh_covered_prefix();
+        } else if start <= self.covered_prefix_end {
+            self.covered_prefix_end = self.covered_prefix_end.max(end);
+        }
+    }
+
+    /// Recomputes the contiguous written prefix after a proof was dropped.
+    ///
+    /// Returns: nothing; the stored prefix shrinks to the surviving coverage.
+    fn refresh_covered_prefix(&mut self) {
+        let mut prefix_end = 0;
+        for (&range_start, status) in &self.ranges {
+            if status.kind != ExtentStatusKind::Written || range_start > prefix_end {
+                break;
+            }
+            prefix_end = prefix_end.max(range_start.saturating_add(status.len));
+        }
+        self.covered_prefix_end = prefix_end;
+    }
+
+    /// Returns the exclusive end of the contiguous written prefix.
+    fn covered_prefix_end(&self) -> u64 {
+        self.covered_prefix_end
     }
 
     /// Drops reconstructible proofs, never delayed-allocation reservations.
     fn clear(&mut self) {
         self.ranges.clear();
+        self.covered_prefix_end = 0;
     }
 }
 
@@ -784,22 +852,6 @@ impl Ext4InodeState {
     pub(crate) fn disk_size(&self) -> u64 {
         self.metadata.disk_size
     }
-
-    /// Returns whether the inode carries the ext4 immutable flag.
-    ///
-    /// No locking here: only valid while the caller already holds the inode-state
-    /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
-    pub(crate) fn is_immutable(&self) -> bool {
-        self.metadata.flags & disk_inode::EXT4_IMMUTABLE_FL != 0
-    }
-
-    /// Returns whether the inode carries the ext4 append-only flag.
-    ///
-    /// No locking here: only valid while the caller already holds the inode-state
-    /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
-    pub(crate) fn is_append_only(&self) -> bool {
-        self.metadata.flags & disk_inode::EXT4_APPEND_FL != 0
-    }
 }
 
 /// A transient, lightweight inode attribute snapshot.
@@ -840,15 +892,34 @@ pub struct Ext4InodeStat {
 /// independent reference count.
 pub struct Ext4Inode {
     number: InodeNumber,
-    // Runtime behavior flags are also read while mapping state is locked.
-    // The acquire/release operations publish policy without reentering that lock.
-    runtime_flags: AtomicU32,
+    /// File type decoded once at inode load, like Linux `inode->i_mode`.
+    /// The on-disk type bits never change for a resident inode, so readers
+    /// use this plain field without the inode-state lock.
+    kind: InodeKind,
+    /// POSIX permission and special (setuid/setgid/sticky) bits, i.e.
+    /// `i_mode & 0o7777`; the type bits live only in `kind`. `mode()` composes
+    /// the two into the full `i_mode` at the stat/encode boundary. The single
+    /// writer (`set_permission`) publishes with a release store and readers
+    /// load lock-free.
+    permissions: AtomicU16,
+    /// Raw ext4 `i_flags`, the sole copy (`EXT4_EXTENTS_FL`, `EXT4_INDEX_FL`, ...).
+    /// It stays in the on-disk flag domain; the VFS `NodeFlags` are projected
+    /// from it on read in `node_flags`. `EXT4_EXTENTS_FL` is immutable after
+    /// load; the single writer publishes under the inode-state write lock and
+    /// readers load lock-free.
+    flags: AtomicU32,
+    /// Runtime-only quota switch, kept out of the disk flag domain (Linux
+    /// `S_NOQUOTA`). Written by `set_noquota`, read lock-free.
+    no_quota: AtomicBool,
     // The sole generic i_size, shared with KVFS through InodeAttributeOperations.
     // Readers need no mapping lock. Every store after construction must hold
     // the state write lock: sizes(), stat(), and extent-proof checks rely on
     // that exclusion to sample i_size with the corresponding mapping state.
     visible_size: AtomicU64,
     state: RwLock<Ext4InodeState>,
+    // Exclusive end in bytes of the file prefix whose blocks are proven
+    // allocated and initialized. Zero means no proof is published.
+    initialized_extent_end: AtomicU64,
     writeback_lock: Mutex<()>,
     writeback_io: Arc<crate::writeback_io::InodeWritebackIo>,
     /// Speculative prealloc spaces owned by this inode (Linux:
@@ -858,11 +929,20 @@ pub struct Ext4Inode {
 }
 
 impl Ext4Inode {
-    fn new(number: InodeNumber, metadata: Ext4InodeMetadata) -> Self {
+    fn new(
+        number: InodeNumber,
+        kind: InodeKind,
+        flags: u32,
+        permissions: u16,
+        metadata: Ext4InodeMetadata,
+    ) -> Self {
         let visible_size = metadata.disk_size;
         Self {
             number,
-            runtime_flags: AtomicU32::new(node_flags_from_disk(metadata.flags).bits()),
+            kind,
+            permissions: AtomicU16::new(permissions),
+            flags: AtomicU32::new(flags),
+            no_quota: AtomicBool::new(false),
             visible_size: AtomicU64::new(visible_size),
             state: RwLock::new(Ext4InodeState {
                 metadata,
@@ -876,6 +956,7 @@ impl Ext4Inode {
                 is_extra_isize_expansion_disabled: false,
                 orphan: None,
             }),
+            initialized_extent_end: AtomicU64::new(0),
             writeback_lock: Mutex::new(()),
             writeback_io: Arc::new(crate::writeback_io::InodeWritebackIo::new()),
             prealloc_map: InodePreallocMap::new(),
@@ -976,7 +1057,7 @@ impl Ext4Inode {
     /// is tracked together with the inode-table entry.
     pub(crate) fn sync_transaction(&self) -> Option<Arc<RuntimeTransaction>> {
         self.with_state(|state| {
-            if state.metadata.kind == InodeKind::RegularFile {
+            if self.kind == InodeKind::RegularFile {
                 state.sync_transaction.clone()
             } else {
                 None
@@ -1003,13 +1084,10 @@ impl Ext4Inode {
             // Xattr/recovery paths can therefore retain conservative sync until
             // they explicitly provide the transaction covering their mutation.
             state.sync_transaction = transaction;
-            let flags_changed = metadata.flags != state.metadata.flags;
             if metadata.block != state.metadata.block
-                || flags_changed
-                || metadata.kind != state.metadata.kind
                 || metadata.disk_size < state.metadata.disk_size
             {
-                state.extent_status.clear();
+                self.clear_extent_proofs(state);
             }
             // Mapping/xattr publications must not restore older on-disk times
             // over an automatic update made while metadata I/O was in flight.
@@ -1039,16 +1117,7 @@ impl Ext4Inode {
                     *dirty = false;
                 }
             }
-            let flags = flags_changed.then(|| node_flags_from_disk(metadata.flags).bits());
             state.metadata = metadata;
-            if let Some(flags) = flags {
-                // Preserve independently updated runtime-only flags in the same word.
-                let _ = self.runtime_flags.fetch_update(
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                    |current| Some((current & !DISK_NODE_FLAGS) | flags),
-                );
-            }
         });
         Ok(())
     }
@@ -1074,7 +1143,7 @@ impl Ext4Inode {
     /// The caller holds exclusive mount access through `&mut Ext4SbInfo`.
     pub(crate) fn invalidate_extent_status(&self) {
         self.update_state(|state| {
-            state.extent_status.clear();
+            self.clear_extent_proofs(state);
             // An external leaf rewrite need not publish an inode-table entry.
             // Until that mutation reports an owner, fsync must use the mount's
             // running transaction rather than an older inode-table target.
@@ -1082,9 +1151,58 @@ impl Ext4Inode {
         });
     }
 
+    /// Drops the inode's reconstructible extent proofs and the published
+    /// initialized-prefix summary in one step.
+    ///
+    /// - `state`: the inode state; the caller holds the inode-state write lock.
+    ///
+    /// Returns: nothing.
+    ///
+    /// Locking: caller must hold the inode-state write lock.
+    fn clear_extent_proofs(&self, state: &mut Ext4InodeState) {
+        state.extent_status.clear();
+        self.initialized_extent_end.store(0, Ordering::Release);
+    }
+
+    /// Publishes the lock-free initialized-prefix proof when the extent-status
+    /// tree currently proves a contiguous written prefix.
+    ///
+    /// - `state`: the inode state; the caller holds the inode-state write lock.
+    /// - `block_size`: filesystem block size in bytes.
+    ///
+    /// Returns: nothing; the published end only grows.
+    ///
+    /// Locking: caller must hold the inode-state write lock. Evicting a proof
+    /// never revokes an already published prefix because eviction does not
+    /// change the mapping; only [`clear_extent_proofs`](Self::clear_extent_proofs)
+    /// resets it.
+    fn publish_initialized_extent_end(&self, state: &Ext4InodeState, block_size: u32) {
+        let block_size = u64::from(block_size);
+        if block_size == 0 {
+            return;
+        }
+        let Some(proven_end) = state
+            .extent_status
+            .covered_prefix_end()
+            .checked_mul(block_size)
+        else {
+            // Overflow would over-report the proof; withhold it instead.
+            return;
+        };
+        if proven_end != 0 {
+            self.initialized_extent_end
+                .fetch_max(proven_end, Ordering::AcqRel);
+        }
+    }
+
     #[cfg(unittest)]
-    fn cache_initialized_blocks(&self, start: u64, end: u64) {
-        self.update_state(|state| state.extent_status.cache_written(start, end));
+    pub(crate) fn cache_initialized_blocks(&self, start: u64, end: u64) {
+        // Unit-test inode fixtures use 4 KiB blocks.
+        const BLOCK_SIZE: u32 = 4096;
+        self.update_state(|state| {
+            state.extent_status.cache_written(start, end);
+            self.publish_initialized_extent_end(state, BLOCK_SIZE);
+        });
     }
 
     #[cfg(unittest)]
@@ -1108,11 +1226,7 @@ impl Ext4Inode {
         has_huge_file: bool,
     ) -> Ext4Result<bool> {
         self.with_state(|state| {
-            regular_file_extent_mutation_supported(
-                state.metadata.kind,
-                state.metadata.flags,
-                has_huge_file,
-            )?;
+            regular_file_extent_mutation_supported(self.kind, self.flags(), has_huge_file)?;
             Ok(state.has_initialized_overwrite(start.get(), count, block_size, self.size()))
         })
     }
@@ -1139,24 +1253,41 @@ impl Ext4Inode {
         });
     }
 
-    pub(crate) fn runtime_flags(&self) -> kvfs::NodeFlags {
-        kvfs::NodeFlags::from_bits_retain(self.runtime_flags.load(Ordering::Acquire))
-    }
-
-    pub(crate) fn set_noquota(&self, is_enabled: bool) {
-        if is_enabled {
-            let _ = self
-                .runtime_flags
-                .fetch_or(kvfs::NodeFlags::NO_QUOTA.bits(), Ordering::AcqRel);
-        } else {
-            let _ = self
-                .runtime_flags
-                .fetch_and(!kvfs::NodeFlags::NO_QUOTA.bits(), Ordering::AcqRel);
+    /// Composes the VFS `NodeFlags`: disk-projected bits derived on read from
+    /// the raw `flags` atomic, plus the runtime-only `NO_QUOTA`.
+    ///
+    /// Returns: the inode's VFS node flags; disk bits are re-derived each call,
+    /// so no cached projection can drift from `flags`.
+    ///
+    /// Locking: lock-free; reads the `flags` and `no_quota` atoms, which are
+    /// independent facts and not a single snapshot.
+    pub(crate) fn node_flags(&self) -> kvfs::NodeFlags {
+        let mut node_flags = node_flags_from_disk(self.flags.load(Ordering::Acquire));
+        if self.no_quota.load(Ordering::Acquire) {
+            node_flags.insert(kvfs::NodeFlags::NO_QUOTA);
         }
+        node_flags
     }
 
+    /// Sets the runtime-only quota bypass flag, like Linux setting or clearing
+    /// `S_NOQUOTA` on the VFS inode.
+    ///
+    /// - `enabled`: whether quota accounting is bypassed for this inode.
+    ///
+    /// Returns: nothing.
+    ///
+    /// Locking: lock-free; readers use an acquire load.
+    pub(crate) fn set_noquota(&self, enabled: bool) {
+        self.no_quota.store(enabled, Ordering::Release);
+    }
+
+    /// Returns whether quota accounting is bypassed for this inode.
+    ///
+    /// Returns: `true` when the runtime-only `NO_QUOTA` flag is set.
+    ///
+    /// Locking: lock-free; reads the `no_quota` atomic.
     pub(crate) fn is_noquota(&self) -> bool {
-        self.runtime_flags().contains(kvfs::NodeFlags::NO_QUOTA)
+        self.no_quota.load(Ordering::Acquire)
     }
 
     /// Returns this inode's number.
@@ -1165,13 +1296,23 @@ impl Ext4Inode {
     }
 
     /// Returns this inode's kind.
+    ///
+    /// Returns: the file type decoded when the inode was loaded.
+    ///
+    /// Locking: lock-free; the type bits are immutable for a resident inode.
     pub fn kind(&self) -> InodeKind {
-        self.with_metadata(|metadata| metadata.kind)
+        self.kind
     }
 
     /// Returns the raw Linux mode bits.
+    ///
+    /// Returns: the full `i_mode`, composed from the immutable type bits and
+    /// the current permission bits.
+    ///
+    /// Locking: lock-free; reads the immutable `kind` and the `permissions`
+    /// atomic.
     pub fn mode(&self) -> u16 {
-        self.with_metadata(|metadata| metadata.mode)
+        self.kind.mode_bits() | self.permissions.load(Ordering::Acquire)
     }
 
     /// Returns the inode owner's user ID.
@@ -1232,7 +1373,7 @@ impl Ext4Inode {
     pub fn set_size(&self, size: u64) {
         self.update_state(|state| {
             if size < self.size() {
-                state.extent_status.clear();
+                self.clear_extent_proofs(state);
             }
             self.visible_size.store(size, Ordering::Release);
         });
@@ -1243,12 +1384,12 @@ impl Ext4Inode {
         self.with_state(|state| {
             let metadata = &state.metadata;
             Ext4InodeStat {
-                mode: metadata.mode,
+                mode: self.mode(),
                 uid: metadata.uid,
                 gid: metadata.gid,
                 size: self.size(),
                 blocks: metadata.blocks,
-                rdev: device_id_from_metadata(metadata),
+                rdev: device_id_from_metadata(self.kind, metadata),
                 links_count: metadata.links_count,
                 atime: metadata.atime,
                 ctime: metadata.ctime,
@@ -1257,12 +1398,18 @@ impl Ext4Inode {
         })
     }
 
-    /// Updates permission bits in the single resident inode state.
+    /// Sets the POSIX permission and special bits, like Linux `chmod` updating
+    /// only `i_mode` below the type mask.
+    ///
+    /// - `permission`: new `i_mode` bits; type bits are ignored (`& 0o7777`).
+    ///
+    /// Returns: nothing.
+    ///
+    /// Locking: lock-free; readers use an acquire load. The stored value never
+    /// carries type bits, so the immutable `kind` cannot be diverged.
     pub fn set_permission(&self, permission: u16) {
-        self.update_state(|state| {
-            state.metadata.mode =
-                (state.metadata.mode & disk_inode::S_IFMT) | (permission & !disk_inode::S_IFMT);
-        });
+        self.permissions
+            .store(permission & 0o7777, Ordering::Release);
     }
 
     /// Updates the owner in the single resident inode state.
@@ -1322,7 +1469,7 @@ impl Ext4Inode {
     /// regular inode. Other inode kinds keep their journaled update path.
     pub(crate) fn update_regular_write_timestamps(&self, timestamp: Ext4Timestamp) -> bool {
         self.update_state(|state| {
-            if state.metadata.kind != InodeKind::RegularFile {
+            if self.kind != InodeKind::RegularFile {
                 return false;
             }
             state.publish_write_timestamps(timestamp);
@@ -1345,12 +1492,11 @@ impl Ext4Inode {
         timestamp: Ext4Timestamp,
     ) -> Option<usize> {
         self.update_state(|state| {
-            debug_assert_eq!(state.metadata.kind, InodeKind::RegularFile);
+            debug_assert_eq!(self.kind, InodeKind::RegularFile);
             if count == 0 {
                 return Some(0);
             }
-            let max_size =
-                inode_max_file_size(state.metadata.flags, extent_max_size, || bitmap_max_size);
+            let max_size = inode_max_file_size(self.flags(), extent_max_size, || bitmap_max_size);
             if offset >= max_size {
                 return None;
             }
@@ -1388,23 +1534,74 @@ impl Ext4Inode {
     }
 
     /// Returns the raw ext4 inode flags.
+    ///
+    /// Returns: `i_flags` published by the last [`set_flags`](Self::set_flags).
+    ///
+    /// Locking: lock-free; the single writer publishes under the inode-state
+    /// write lock and readers use an acquire load.
     pub fn flags(&self) -> u32 {
-        self.with_metadata(|metadata| metadata.flags)
+        self.flags.load(Ordering::Acquire)
+    }
+
+    /// Returns an error when publishing `flags` would change the immutable
+    /// `EXT4_EXTENTS_FL` mapping-format bit.
+    ///
+    /// - `flags`: candidate `i_flags`; non-format bits may differ freely.
+    ///
+    /// Returns: nothing when the update keeps the mapping format.
+    ///
+    /// Errors: `Corrupt` when `EXT4_EXTENTS_FL` would change, which would
+    /// invalidate the lock-free mapping-interpreter reads.
+    ///
+    /// Locking: lock-free; reads the `flags` atomic.
+    pub(crate) fn ensure_flags_publishable(&self, flags: u32) -> Ext4Result<()> {
+        if (flags ^ self.flags.load(Ordering::Acquire)) & disk_inode::EXT4_EXTENTS_FL != 0 {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
+        }
+        Ok(())
+    }
+
+    /// Publishes the inode's raw `i_flags` after an on-disk flags update.
+    ///
+    /// - `flags`: the new `i_flags` written to disk; the mapping-format bit
+    ///   `EXT4_EXTENTS_FL` must equal the resident value.
+    ///
+    /// Returns: nothing.
+    ///
+    /// Errors: `Corrupt` when `EXT4_EXTENTS_FL` changed, which would invalidate
+    /// the lock-free mapping-interpreter reads that depend on its immutability.
+    ///
+    /// Locking: caller must not hold the inode-state lock; this takes the write
+    /// lock internally.
+    pub(crate) fn set_flags(&self, flags: u32) -> Ext4Result<()> {
+        self.update_state(|_state| {
+            self.ensure_flags_publishable(flags)?;
+            self.flags.store(flags, Ordering::Release);
+            Ok(())
+        })
     }
 
     /// Returns whether the inode carries the ext4 immutable flag.
+    ///
+    /// Returns: `true` when `EXT4_IMMUTABLE_FL` is set.
+    ///
+    /// Locking: lock-free; reads the published `i_flags` atomic.
     pub fn is_immutable(&self) -> bool {
-        self.with_state(|state| state.is_immutable())
+        self.flags() & disk_inode::EXT4_IMMUTABLE_FL != 0
     }
 
     /// Returns whether the inode carries the ext4 append-only flag.
+    ///
+    /// Returns: `true` when `EXT4_APPEND_FL` is set.
+    ///
+    /// Locking: lock-free; reads the published `i_flags` atomic.
     pub fn is_append_only(&self) -> bool {
-        self.with_state(|state| state.is_append_only())
+        self.flags() & disk_inode::EXT4_APPEND_FL != 0
     }
 
     pub(crate) fn mapping_root(&self) -> InodeMappingRoot {
         self.with_metadata(|metadata| InodeMappingRoot {
-            inode_flags: metadata.flags,
+            inode_flags: self.flags(),
             bytes: metadata.block,
             generation: metadata.generation,
         })
@@ -1470,9 +1667,11 @@ impl Ext4Inode {
     /// Linux `ext4_can_truncate`: classification is independent of which
     /// on-disk mapping formats this implementation can currently mutate.
     pub(crate) fn can_truncate(&self, block_size: u32, has_ea_inode: bool) -> Ext4Result<bool> {
-        self.with_metadata(|metadata| match metadata.kind {
+        self.with_metadata(|metadata| match self.kind {
             InodeKind::RegularFile | InodeKind::Directory => Ok(true),
-            InodeKind::Symlink => Ok(!metadata.is_fast_symlink(block_size, has_ea_inode)?),
+            InodeKind::Symlink => {
+                Ok(!metadata.is_fast_symlink(self.kind, self.flags(), block_size, has_ea_inode)?)
+            }
             _ => Ok(false),
         })
     }
@@ -1483,17 +1682,23 @@ impl Ext4Inode {
         has_ea_inode_feature: bool,
     ) -> Ext4Result<Option<Vec<u8>>> {
         let metadata = self.metadata_snapshot();
-        if metadata.kind != InodeKind::Symlink {
+        if self.kind != InodeKind::Symlink {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
         }
-        if metadata.flags & disk_inode::EXT4_INLINE_DATA_FL != 0 {
+        let flags = self.flags();
+        if flags & disk_inode::EXT4_INLINE_DATA_FL != 0 {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InlineData));
         }
-        if metadata.flags & disk_inode::EXT4_ENCRYPT_FL != 0 {
+        if flags & disk_inode::EXT4_ENCRYPT_FL != 0 {
             return Err(Ext4Error::Unsupported(UnsupportedKind::EncryptedName));
         }
 
-        let is_fast = metadata.is_fast_symlink(filesystem_block_size, has_ea_inode_feature)?;
+        let is_fast = metadata.is_fast_symlink(
+            self.kind,
+            flags,
+            filesystem_block_size,
+            has_ea_inode_feature,
+        )?;
         if is_fast {
             Ok(Some(
                 Self::validate_fast_symlink_target(&metadata)?.to_vec(),
@@ -1525,7 +1730,7 @@ impl Ext4Inode {
 
     /// Returns the device number encoded in a character or block device inode.
     pub fn device_id(&self) -> Option<Ext4DeviceId> {
-        self.with_metadata(device_id_from_metadata)
+        self.with_metadata(|metadata| device_id_from_metadata(self.kind, metadata))
     }
 
     /// Returns whether this inode uses the ext4 extent-tree format.
@@ -1596,10 +1801,27 @@ impl Ext4Inode {
             .get()
             .checked_add(block_count)
             .ok_or(Ext4Error::Overflow)?;
+        // The whole range lies inside the prefix proven allocated and
+        // initialized, so the slow path below would only re-prove it and return
+        // without reserving: its mapping walk finds every block `Mapped` (never a
+        // hole), leaves `reserved_data_blocks` unchanged, and returns `Ok(())`.
+        // A published prefix also implies the slow path already passed the
+        // regular-file extent-mutation admission check, and `kind` plus
+        // `EXT4_EXTENTS_FL` are immutable. This bypass deliberately does not
+        // repeat the bookkeeping self-check (`reserved_data_blocks >
+        // delalloc_reserved_blocks`); that defensive guard still runs for every
+        // range that misses the prefix.
+        let block_size = u64::from(sb.layout().block_size());
+        if let Some(range_end_bytes) = end.checked_mul(block_size)
+            && range_end_bytes != 0
+            && range_end_bytes <= self.initialized_extent_end.load(Ordering::Acquire)
+        {
+            return Ok(());
+        }
         self.update_state(|state| {
             regular_file_extent_mutation_supported(
-                state.metadata.kind,
-                state.metadata.flags,
+                self.kind,
+                self.flags(),
                 sb.superblock().features().has_huge_file(),
             )?;
             if state.has_initialized_overwrite(
@@ -1608,6 +1830,7 @@ impl Ext4Inode {
                 sb.layout().block_size(),
                 self.size(),
             ) {
+                self.publish_initialized_extent_end(state, sb.layout().block_size());
                 return Ok(());
             }
             if state.reserved_data_blocks > sb.delalloc_reserved_blocks() {
@@ -1617,7 +1840,7 @@ impl Ext4Inode {
                 return Ok(());
             }
             let root = InodeMappingRoot {
-                inode_flags: state.metadata.flags,
+                inode_flags: self.flags(),
                 bytes: state.metadata.block,
                 generation: state.metadata.generation,
             };
@@ -1656,6 +1879,7 @@ impl Ext4Inode {
                     logical = next;
                 }
             }
+            self.publish_initialized_extent_end(state, sb.layout().block_size());
 
             let new_reserved_data_blocks =
                 validate_unreserved_delalloc_extents_in_state(state, &holes)?;
@@ -1803,6 +2027,7 @@ impl fmt::Debug for Ext4Inode {
         formatter
             .debug_struct("Ext4Inode")
             .field("number", &self.number())
+            .field("flags", &self.flags())
             .field("metadata", &self.metadata_snapshot())
             .finish_non_exhaustive()
     }
@@ -1942,8 +2167,8 @@ pub(crate) fn regular_file_extent_mutation_supported(
     Ok(())
 }
 
-fn device_id_from_metadata(metadata: &Ext4InodeMetadata) -> Option<Ext4DeviceId> {
-    if metadata.kind != InodeKind::CharacterDevice && metadata.kind != InodeKind::BlockDevice {
+fn device_id_from_metadata(kind: InodeKind, metadata: &Ext4InodeMetadata) -> Option<Ext4DeviceId> {
+    if kind != InodeKind::CharacterDevice && kind != InodeKind::BlockDevice {
         return None;
     }
 
@@ -2088,8 +2313,13 @@ impl Ext4SbInfo {
         allow_zero_links: bool,
         validate_block_root: bool,
     ) -> Ext4Result<Ext4Inode> {
-        let metadata = Ext4InodeMetadata::from_raw(raw, allow_zero_links)?;
-        let inode = Ext4Inode::new(number, metadata);
+        let DecodedInodeFields {
+            kind,
+            flags,
+            permissions,
+            metadata,
+        } = Ext4InodeMetadata::from_raw(raw, allow_zero_links)?;
+        let inode = Ext4Inode::new(number, kind, flags, permissions, metadata);
         if validate_block_root {
             self.validate_inode_block_root(&inode)?;
         }
@@ -2332,7 +2562,7 @@ impl Ext4SbInfo {
         block_bytes: &mut [u8],
         number: InodeNumber,
         update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
-    ) -> Ext4Result<Ext4InodeMetadata> {
+    ) -> Ext4Result<DecodedInodeFields> {
         self.update_inode_table_entry_inner(block_bytes, number, true, update)
     }
 
@@ -2341,7 +2571,7 @@ impl Ext4SbInfo {
         block_bytes: &mut [u8],
         inode: &Ext4Inode,
         update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
-    ) -> Ext4Result<Ext4InodeMetadata> {
+    ) -> Ext4Result<DecodedInodeFields> {
         self.update_inode_table_entry_inner(
             block_bytes,
             inode.number(),
@@ -2356,7 +2586,7 @@ impl Ext4SbInfo {
         number: InodeNumber,
         allow_zero_links: bool,
         update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
-    ) -> Ext4Result<Ext4InodeMetadata> {
+    ) -> Ext4Result<DecodedInodeFields> {
         let location = self.inode_location(number)?;
         let inode_bytes = inode_entry_mut(block_bytes, location)?;
         let raw = disk_inode::RawInode::decode(inode_bytes)?;
@@ -2406,6 +2636,11 @@ impl Ext4SbInfo {
     /// Xattr mutation and zero-link eviction use lower-level table-entry
     /// helpers so they do not recurse into migration. Owner changes expand
     /// first, then transfer the resulting complete allocation to the new owner.
+    ///
+    /// The `update` closure must not change `i_flags`: its sole resident owner is
+    /// the [`Ext4Inode::flags`] atomic, which only `set_flags` publishes, and this
+    /// path does not synchronize it. Flag changes must go through
+    /// [`update_inode_flags_timestamps_metadata`](Self::update_inode_flags_timestamps_metadata).
     pub(crate) fn update_dirty_inode_metadata(
         &self,
         inode: &Ext4Inode,
@@ -2431,7 +2666,7 @@ impl Ext4SbInfo {
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
         inode.publish_metadata_with_timestamps(
-            updated_inode,
+            updated_inode.metadata,
             timestamps,
             Some(handle.transaction()?),
         )
@@ -2603,11 +2838,12 @@ impl Ext4SbInfo {
         let timestamps = inode.pending_timestamps();
         let block = self.inode_table_entry_block(inode.number())?;
         let mut bytes = self.read_metadata_block(block)?.as_ref().to_vec();
-        let metadata =
+        let permission = update.mode;
+        let decoded =
             self.update_referenced_inode_table_entry(&mut bytes, inode, |inode_bytes| {
                 timestamps.encode(inode_bytes)?;
                 let raw = disk_inode::RawInode::decode(inode_bytes)?;
-                if let Some(mode) = update.mode {
+                if let Some(mode) = permission {
                     put_u16(inode_bytes, 0x00, (raw.mode() & disk_inode::S_IFMT) | mode)?;
                 }
                 if let Some((uid, gid)) = update.owner {
@@ -2647,7 +2883,15 @@ impl Ext4SbInfo {
         }
         let access = self.metadata_io.write_access(block, handle)?;
         self.replace_inode_table_entry(&access, inode.number(), &bytes)?;
-        inode.publish_metadata_with_timestamps(metadata, timestamps, Some(handle.transaction()?))
+        inode.publish_metadata_with_timestamps(
+            decoded.metadata,
+            timestamps,
+            Some(handle.transaction()?),
+        )?;
+        if let Some(permission) = permission {
+            inode.set_permission(permission);
+        }
+        Ok(())
     }
 
     pub(crate) fn update_inode_flags_timestamps_metadata(
@@ -2657,10 +2901,15 @@ impl Ext4SbInfo {
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
+        // Reject a mapping-format change before touching the on-disk entry, so a
+        // rejected update cannot leave the journal carrying flags the resident
+        // atomic refuses to adopt.
+        inode.ensure_flags_publishable(flags)?;
         self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
             put_u32(inode_bytes, 0x20, flags)?;
             update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
-        })
+        })?;
+        inode.set_flags(flags)
     }
 
     pub(crate) fn update_inode_links_count_metadata(
@@ -2717,7 +2966,7 @@ impl Ext4SbInfo {
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
         inode.publish_metadata_with_timestamps(
-            updated_inode,
+            updated_inode.metadata,
             timestamps,
             Some(handle.transaction()?),
         )

@@ -292,13 +292,14 @@ fn delayed_allocation_rejects_legacy_inode_before_reserving_space() {
     let journal = JournalTransactions::new(TransactionId::new(390));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let transaction = handle.id();
+    // EXT4_EXTENTS_FL is immutable for a resident inode, so rewrite the on-disk
+    // flags and reload instead of flipping the bit in place.
+    let legacy_flags = inode.flags() & !crate::disk::inode::EXT4_EXTENTS_FL;
     filesystem
-        .update_inode_flags_timestamps_metadata(
-            &inode,
-            inode.flags() & !crate::disk::inode::EXT4_EXTENTS_FL,
-            crate::Ext4Timestamp::new(9, 0),
-            &mut handle,
-        )
+        .update_dirty_inode_metadata(&inode, &mut handle, move |_filesystem, inode_bytes| {
+            inode_bytes[0x20..0x24].copy_from_slice(&legacy_flags.to_le_bytes());
+            Ok(())
+        })
         .expect("prepare an extents-enabled filesystem containing one legacy inode");
     drop(handle);
     let commit = journal.force_commit(transaction).unwrap();
@@ -307,13 +308,32 @@ fn delayed_allocation_rejects_legacy_inode_before_reserving_space() {
         .checkpoint_committed(&commit)
         .unwrap();
     journal.finish_checkpoint_for_test(&commit).unwrap();
-    assert!(!inode.has_extents());
 
+    let legacy = filesystem.internal_iget(inode.number()).unwrap();
+    assert!(!legacy.has_extents());
     assert_eq!(
-        filesystem.reserve_delalloc_range(&inode, LogicalBlock::new(0), 1),
+        filesystem.reserve_delalloc_range(&legacy, LogicalBlock::new(0), 1),
         Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode))
     );
+    assert!(!legacy.has_delalloc_reservations());
+    assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
+}
+
+#[def_test]
+fn proven_initialized_prefix_skips_reservation_without_accounting() {
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    // Test fixtures use 4 KiB blocks, matching `cache_initialized_blocks`.
+    inode.cache_initialized_blocks(0, 1);
+
+    // The whole request lies inside the proven prefix, so the fast path returns
+    // without entering the inode-state critical section or touching accounting.
+    assert_eq!(
+        filesystem.reserve_delalloc_range(&inode, LogicalBlock::new(0), 1),
+        Ok(())
+    );
     assert!(!inode.has_delalloc_reservations());
+    assert_eq!(inode.reserved_data_blocks(), 0);
     assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
 }
 

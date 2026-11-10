@@ -693,7 +693,7 @@ impl SuperBlockOperations for Ext4SuperOperations {
 
 impl InodeAttributeOperations for Ext4Inode {
     fn flags(&self) -> kvfs::NodeFlags {
-        self.runtime_flags()
+        self.node_flags()
     }
 
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
@@ -1625,6 +1625,10 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
     fn write_begin(&self, mapping: &AddressSpace, request: WriteBeginRequest) -> VfsResult<()> {
         let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
         let inode = vfs_inode.private::<Ext4Inode>()?;
+        // The kind check is lock-free; reservation re-validates the same
+        // regular-file capability inside its inode-state critical section, except
+        // on the proven-prefix fast path, which can only be published after that
+        // check already passed.
         if inode.kind() != InodeKind::RegularFile {
             return Err(VfsError::InvalidInput);
         }

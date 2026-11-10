@@ -1148,7 +1148,7 @@ fn failed_extra_isize_expansion_does_not_publish_chown() {
     update_test_inode_extra_isize(&mut state, &inode, 0, &mut handle);
     let block = state.inode_table_entry_block(inode.number()).unwrap();
     let mut bytes = state.read_metadata_block(block).unwrap().as_ref().to_vec();
-    let metadata = state
+    let decoded = state
         .update_referenced_inode_table_entry(&mut bytes, &inode, |entry| {
             entry[128..132].copy_from_slice(&0xea03_0000_u32.to_le_bytes());
             Ok(())
@@ -1156,7 +1156,7 @@ fn failed_extra_isize_expansion_does_not_publish_chown() {
         .unwrap();
     let access = state.metadata_io.write_access(block, &mut handle).unwrap();
     crate::superblock::replace_metadata_access_bytes(&access, bytes).unwrap();
-    state.publish_inode_metadata(&inode, metadata).unwrap();
+    state.publish_inode_metadata(&inode, decoded.metadata).unwrap();
     state.complete_metadata_mutation(handle, Ok(())).unwrap();
     state.sync_filesystem().unwrap();
     assert_eq!(

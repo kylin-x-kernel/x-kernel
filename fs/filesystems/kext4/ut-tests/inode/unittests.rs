@@ -52,7 +52,9 @@ fn initialized_write_admission_keeps_mapping_format_validation() {
         inode.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, false),
         Ok(true)
     );
-    inode.update_state(|state| state.metadata.flags |= disk_inode::EXT4_HUGE_FILE_FL);
+    inode
+        .set_flags(inode.flags() | disk_inode::EXT4_HUGE_FILE_FL)
+        .unwrap();
     assert_eq!(
         inode.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, false),
         Err(Ext4Error::Corrupt(CorruptKind::InvalidInode))
@@ -61,9 +63,11 @@ fn initialized_write_admission_keeps_mapping_format_validation() {
         inode.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, true),
         Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile))
     );
-    inode.update_state(|state| state.metadata.flags = 0);
+    // A legacy (non-extent) inode is built directly: the extents bit is
+    // immutable on a resident inode, so it cannot be flipped off in place.
+    let legacy = test_inode_with_flags(0, disk_inode::S_IFREG | 0o644, regular_inode_metadata());
     assert_eq!(
-        inode.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, false),
+        legacy.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, false),
         Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode))
     );
 }
@@ -166,22 +170,41 @@ fn eviction_prefers_the_shortest_range_over_the_lowest_offset() {
 }
 
 fn test_inode(metadata: Ext4InodeMetadata) -> Ext4Inode {
-    Ext4Inode::new(InodeNumber::new(12), metadata)
+    test_inode_with_mode(disk_inode::S_IFREG | 0o644, metadata)
+}
+
+fn test_inode_with_mode(mode: u16, metadata: Ext4InodeMetadata) -> Ext4Inode {
+    let kind = InodeKind::from_mode(mode).expect("test inode mode decodes");
+    // Regular files in these fixtures are extents-backed, as on a modern ext4.
+    let flags = if kind == InodeKind::RegularFile {
+        disk_inode::EXT4_EXTENTS_FL
+    } else {
+        0
+    };
+    Ext4Inode::new(InodeNumber::new(12), kind, flags, mode & 0o7777, metadata)
+}
+
+fn test_inode_with_flags(flags: u32, mode: u16, metadata: Ext4InodeMetadata) -> Ext4Inode {
+    let kind = InodeKind::from_mode(mode).expect("test inode mode decodes");
+    Ext4Inode::new(InodeNumber::new(12), kind, flags, mode & 0o7777, metadata)
 }
 
 pub(crate) fn allocation_test_inode(number: u32) -> Ext4Inode {
-    Ext4Inode::new(InodeNumber::new(number), regular_inode_metadata())
+    Ext4Inode::new(
+        InodeNumber::new(number),
+        InodeKind::RegularFile,
+        disk_inode::EXT4_EXTENTS_FL,
+        0o644,
+        regular_inode_metadata(),
+    )
 }
 
 fn regular_inode_metadata() -> Ext4InodeMetadata {
     Ext4InodeMetadata {
-        kind: InodeKind::RegularFile,
-        mode: disk_inode::S_IFREG | 0o644,
         uid: 0,
         gid: 0,
         disk_size: 0,
         blocks: 0,
-        flags: disk_inode::EXT4_EXTENTS_FL,
         block: [0; disk_inode::INODE_BLOCK_BYTES],
         file_acl: 0,
         extra_isize: 0,
@@ -228,9 +251,7 @@ fn automatic_write_timestamps_preserve_precision_and_pending_fields() {
     assert_eq!(inode.mtime(), newer);
     assert_eq!(inode.ctime(), newer);
 
-    let mut metadata = regular_inode_metadata();
-    metadata.kind = InodeKind::Directory;
-    let directory = test_inode(metadata);
+    let directory = test_inode_with_mode(disk_inode::S_IFDIR | 0o644, regular_inode_metadata());
     assert!(!directory.update_regular_write_timestamps(newer));
     assert!(!directory.has_dirty_timestamps());
     assert_eq!(directory.mtime(), timestamp(0, 0));
@@ -247,16 +268,14 @@ fn orphan_truncation_classifies_inode_kind_and_symlink_storage() {
         (InodeKind::CharacterDevice, false),
         (InodeKind::BlockDevice, false),
     ] {
-        let mut metadata = regular_inode_metadata();
-        metadata.kind = kind;
-        assert_eq!(test_inode(metadata).can_truncate(4096, false), Ok(expected));
+        let inode = test_inode_with_mode(kind.mode_bits() | 0o644, regular_inode_metadata());
+        assert_eq!(inode.can_truncate(4096, false), Ok(expected));
     }
     let mut metadata = regular_inode_metadata();
-    metadata.kind = InodeKind::Symlink;
     metadata.disk_size = 9;
     metadata.file_acl = 1;
     metadata.blocks = 8;
-    let inode = test_inode(metadata);
+    let inode = test_inode_with_mode(disk_inode::S_IFLNK, metadata);
     assert_eq!(inode.can_truncate(4096, false), Ok(false));
     inode.update_state(|state| state.metadata.blocks += 8);
     assert_eq!(inode.can_truncate(4096, false), Ok(true));
@@ -292,7 +311,9 @@ fn initialized_extended_inode_preserves_epoch_and_nanoseconds() {
     .unwrap();
 
     let metadata =
-        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false).unwrap();
+        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
+            .unwrap()
+            .metadata;
     assert_eq!(metadata.atime, timestamp);
     assert_eq!(metadata.ctime, timestamp);
     assert_eq!(metadata.mtime, timestamp);
@@ -314,7 +335,9 @@ fn initialized_legacy_inode_clamps_post_2038_timestamp() {
     .unwrap();
 
     let metadata =
-        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false).unwrap();
+        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
+            .unwrap()
+            .metadata;
     let maximum = Ext4Timestamp::new(i32::MAX as i64, 0);
     assert_eq!(metadata.atime, maximum);
     assert_eq!(metadata.ctime, maximum);
@@ -359,36 +382,29 @@ fn inode_state_accessors_reflect_metadata_fields() {
     let mut metadata = regular_inode_metadata();
     metadata.uid = 7;
     metadata.gid = 9;
-    metadata.flags = disk_inode::EXT4_IMMUTABLE_FL | disk_inode::EXT4_APPEND_FL;
-    let inode = test_inode(metadata);
+    let inode = test_inode_with_flags(
+        disk_inode::EXT4_IMMUTABLE_FL | disk_inode::EXT4_APPEND_FL,
+        disk_inode::S_IFREG | 0o644,
+        metadata,
+    );
 
     inode.set_size(100);
     inode.update_state(|state| state.metadata.disk_size = 200);
 
-    let (uid, gid, size, disk_size, immutable, append_only) = inode.with_state(|state| {
-        (
-            state.uid(),
-            state.gid(),
-            inode.size(),
-            state.disk_size(),
-            state.is_immutable(),
-            state.is_append_only(),
-        )
-    });
+    let (uid, gid, size, disk_size) =
+        inode.with_state(|state| (state.uid(), state.gid(), inode.size(), state.disk_size()));
     assert_eq!(uid, 7);
     assert_eq!(gid, 9);
     assert_eq!(size, 100);
     assert_eq!(disk_size, 200);
-    assert!(immutable);
-    assert!(append_only);
+    assert!(inode.is_immutable());
+    assert!(inode.is_append_only());
 
-    assert!(inode.runtime_flags().contains(kvfs::NodeFlags::IMMUTABLE));
-    assert!(inode.runtime_flags().contains(kvfs::NodeFlags::APPEND_ONLY));
+    assert!(inode.node_flags().contains(kvfs::NodeFlags::IMMUTABLE));
+    assert!(inode.node_flags().contains(kvfs::NodeFlags::APPEND_ONLY));
     inode.set_noquota(true);
-    let mut changed = inode.metadata_snapshot();
-    changed.flags = disk_inode::EXT4_NOATIME_FL;
-    inode.publish_metadata(changed).unwrap();
-    let flags = inode.runtime_flags();
+    inode.set_flags(disk_inode::EXT4_NOATIME_FL).unwrap();
+    let flags = inode.node_flags();
     assert!(flags.contains(kvfs::NodeFlags::NO_QUOTA | kvfs::NodeFlags::NO_ATIME));
     assert!(!flags.intersects(kvfs::NodeFlags::IMMUTABLE | kvfs::NodeFlags::APPEND_ONLY));
 }
@@ -589,4 +605,155 @@ mod concurrent {
         assert_eq!(inode.sizes(), (SHRUNK_SIZE, GROWN_SIZE));
         assert!(!inode.has_initialized_overwrite(0, 1, 4096));
     }
+}
+
+#[def_test]
+fn covered_prefix_tracks_only_the_contiguous_written_run() {
+    let mut cache = ExtentStatusTree::default();
+    cache.cache_written(4, 6);
+    assert_eq!(cache.covered_prefix_end(), 0);
+    cache.cache_written(2, 4);
+    assert_eq!(cache.covered_prefix_end(), 0);
+    cache.cache_written(0, 2);
+    assert_eq!(cache.covered_prefix_end(), 6);
+    cache.cache_written(6, 8);
+    assert_eq!(cache.covered_prefix_end(), 8);
+    cache.clear();
+    assert_eq!(cache.covered_prefix_end(), 0);
+}
+
+#[def_test]
+fn covered_prefix_shrinks_when_eviction_drops_its_lowest_range() {
+    let mut cache = ExtentStatusTree::default();
+    for index in 0..ExtentStatusTree::MAX_RANGES as u64 {
+        cache.cache_written(index * 2, index * 2 + 1);
+    }
+    assert_eq!(cache.covered_prefix_end(), 1);
+    // Distant insertion evicts the shortest (lowest-offset) range, so the
+    // stored prefix must be recomputed from the surviving proofs.
+    let far = ExtentStatusTree::MAX_RANGES as u64 * 4;
+    cache.cache_written(far, far + 1);
+    assert_eq!(cache.covered_prefix_end(), 0);
+}
+
+#[def_test]
+fn initialized_extent_end_publishes_the_proven_prefix_and_clears_on_shrink() {
+    let mut metadata = regular_inode_metadata();
+    metadata.disk_size = 4 * 4096;
+    let inode = test_inode(metadata);
+    inode.cache_initialized_blocks(2, 4);
+    assert_eq!(
+        inode.initialized_extent_end.load(Ordering::Acquire),
+        0,
+        "a run that does not start at zero is not a prefix proof"
+    );
+    inode.cache_initialized_blocks(0, 2);
+    assert_eq!(
+        inode.initialized_extent_end.load(Ordering::Acquire),
+        4 * 4096
+    );
+    inode.set_size(4096);
+    assert_eq!(inode.initialized_extent_end.load(Ordering::Acquire), 0);
+    inode.invalidate_extent_status();
+    assert_eq!(inode.initialized_extent_end.load(Ordering::Acquire), 0);
+}
+
+#[def_test]
+fn kind_is_immutable_and_flags_follow_set_flags() {
+    let mut metadata = regular_inode_metadata();
+    metadata.disk_size = 4096;
+    let inode = test_inode_with_flags(0, disk_inode::S_IFREG | 0o644, metadata);
+    assert_eq!(inode.kind(), InodeKind::RegularFile);
+    assert!(!inode.has_extents());
+
+    // `i_flags` has a single resident copy: the single writer publishes the new
+    // value and the lock-free reader follows. Non-format bits change at runtime.
+    inode.set_flags(disk_inode::EXT4_INDEX_FL).unwrap();
+    assert!(inode.has_indexed_directory());
+    assert!(!inode.has_extents());
+    assert_eq!(inode.kind(), InodeKind::RegularFile);
+
+    // The mapping-format bit is immutable once the inode is loaded, so a change
+    // to `EXT4_EXTENTS_FL` is rejected and the resident flags stay unchanged.
+    assert!(inode
+        .set_flags(disk_inode::EXT4_INDEX_FL | disk_inode::EXT4_EXTENTS_FL)
+        .is_err());
+    assert!(!inode.has_extents());
+    assert!(inode.has_indexed_directory());
+}
+
+#[def_test]
+fn mode_composes_kind_and_permissions() {
+    let inode = test_inode_with_flags(
+        0,
+        disk_inode::S_IFDIR | 0o750,
+        regular_inode_metadata(),
+    );
+    assert_eq!(inode.kind(), InodeKind::Directory);
+    assert_eq!(inode.mode(), disk_inode::S_IFDIR | 0o750);
+    assert_eq!(inode.stat().mode, disk_inode::S_IFDIR | 0o750);
+    assert_eq!(
+        InodeKind::from_mode(inode.mode()).ok(),
+        Some(InodeKind::Directory)
+    );
+}
+
+#[def_test]
+fn set_permission_preserves_type_and_masks_type_bits() {
+    let inode = test_inode(regular_inode_metadata());
+    assert_eq!(inode.mode(), disk_inode::S_IFREG | 0o644);
+
+    // chmod supplies permission bits only; the immutable type is preserved.
+    inode.set_permission(0o755);
+    assert_eq!(inode.mode(), disk_inode::S_IFREG | 0o755);
+    assert_eq!(inode.kind(), InodeKind::RegularFile);
+
+    // A caller passing type bits is masked; the resident `kind` cannot move.
+    inode.set_permission(disk_inode::S_IFDIR | 0o600);
+    assert_eq!(inode.mode(), disk_inode::S_IFREG | 0o600);
+    assert_eq!(inode.kind(), InodeKind::RegularFile);
+}
+
+#[def_test]
+fn ensure_flags_publishable_rejects_mapping_format_change() {
+    let inode = test_inode_with_flags(
+        disk_inode::EXT4_EXTENTS_FL,
+        disk_inode::S_IFREG | 0o644,
+        regular_inode_metadata(),
+    );
+    // Non-format bits may change; the mapping-format bit may not.
+    assert!(inode
+        .ensure_flags_publishable(disk_inode::EXT4_EXTENTS_FL | disk_inode::EXT4_INDEX_FL)
+        .is_ok());
+    assert_eq!(
+        inode.ensure_flags_publishable(disk_inode::EXT4_INDEX_FL),
+        Err(Ext4Error::Corrupt(CorruptKind::InvalidInode))
+    );
+    // A rejected pre-check leaves the resident flags untouched.
+    assert!(inode.has_extents());
+}
+
+#[def_test]
+fn from_raw_splits_mode_and_recomposes() {
+    let mut bytes = [0; 256];
+    encode_initialized_inode(
+        &mut bytes,
+        InodeNumber::new(11),
+        InodeInitialization::regular_file(0o640, 1000, 1001),
+        32,
+        false,
+        false,
+        0,
+    )
+    .unwrap();
+
+    let decoded =
+        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
+            .unwrap();
+    assert_eq!(decoded.kind, InodeKind::RegularFile);
+    assert_eq!(decoded.permissions, 0o640);
+    assert_eq!(
+        decoded.kind.mode_bits() | decoded.permissions,
+        disk_inode::S_IFREG | 0o640
+    );
 }

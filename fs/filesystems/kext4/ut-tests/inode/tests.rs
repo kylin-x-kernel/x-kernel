@@ -270,24 +270,25 @@ fn symlink_inode(
     file_acl: u64,
     block: [u8; disk_inode::INODE_BLOCK_BYTES],
 ) -> Ext4Inode {
-    test_inode(Ext4InodeMetadata {
-        kind: InodeKind::Symlink,
-        mode: disk_inode::S_IFLNK,
-        uid: 0,
-        gid: 0,
-        disk_size: size,
-        blocks,
+    test_inode_with_flags(
         flags,
-        block,
-        file_acl,
-        extra_isize: 0,
-        inline_xattr: alloc::vec::Vec::new(),
-        generation: 0,
-        links_count: 1,
-        atime: timestamp(0, 0),
-        ctime: timestamp(0, 0),
-        mtime: timestamp(0, 0),
-    })
+        disk_inode::S_IFLNK,
+        Ext4InodeMetadata {
+            uid: 0,
+            gid: 0,
+            disk_size: size,
+            blocks,
+            block,
+            file_acl,
+            extra_isize: 0,
+            inline_xattr: alloc::vec::Vec::new(),
+            generation: 0,
+            links_count: 1,
+            atime: timestamp(0, 0),
+            ctime: timestamp(0, 0),
+            mtime: timestamp(0, 0),
+        },
+    )
 }
 
 fn special_inode(
@@ -295,14 +296,11 @@ fn special_inode(
     mode: u16,
     block: [u8; disk_inode::INODE_BLOCK_BYTES],
 ) -> Ext4Inode {
-    test_inode(Ext4InodeMetadata {
-        kind,
-        mode,
+    let metadata = Ext4InodeMetadata {
         uid: 0,
         gid: 0,
         disk_size: 0,
         blocks: 0,
-        flags: 0,
         block,
         file_acl: 0,
         extra_isize: 0,
@@ -312,22 +310,25 @@ fn special_inode(
         atime: timestamp(0, 0),
         ctime: timestamp(0, 0),
         mtime: timestamp(0, 0),
-    })
+    };
+    Ext4Inode::new(InodeNumber::new(12), kind, 0, mode & 0o7777, metadata)
 }
 
 fn test_inode(metadata: Ext4InodeMetadata) -> Ext4Inode {
-    Ext4Inode::new(InodeNumber::new(12), metadata)
+    test_inode_with_flags(disk_inode::EXT4_EXTENTS_FL, disk_inode::S_IFREG | 0o644, metadata)
+}
+
+fn test_inode_with_flags(flags: u32, mode: u16, metadata: Ext4InodeMetadata) -> Ext4Inode {
+    let kind = InodeKind::from_mode(mode).expect("test inode mode decodes");
+    Ext4Inode::new(InodeNumber::new(12), kind, flags, mode & 0o7777, metadata)
 }
 
 fn regular_inode_metadata() -> Ext4InodeMetadata {
     Ext4InodeMetadata {
-        kind: InodeKind::RegularFile,
-        mode: disk_inode::S_IFREG | 0o644,
         uid: 0,
         gid: 0,
         disk_size: 0,
         blocks: 0,
-        flags: disk_inode::EXT4_EXTENTS_FL,
         block: [0; disk_inode::INODE_BLOCK_BYTES],
         file_acl: 0,
         extra_isize: 0,
@@ -343,11 +344,13 @@ fn regular_inode_metadata() -> Ext4InodeMetadata {
 #[def_test]
 fn buffered_write_preparation_preserves_timestamps_on_size_rejection() {
     for has_extents in [false, true] {
-        let mut metadata = regular_inode_metadata();
-        if !has_extents {
-            metadata.flags &= !disk_inode::EXT4_EXTENTS_FL;
-        }
-        let inode = test_inode(metadata);
+        let metadata = regular_inode_metadata();
+        let flags = if has_extents {
+            disk_inode::EXT4_EXTENTS_FL
+        } else {
+            0
+        };
+        let inode = test_inode_with_flags(flags, disk_inode::S_IFREG | 0o644, metadata);
         let before = (inode.atime(), inode.mtime(), inode.ctime());
         let limit = if has_extents { 8192 } else { 4096 };
         let written_at = timestamp(123, 456);

@@ -586,7 +586,7 @@ pub(crate) fn update_test_inode_links_count(
         )
         .unwrap();
     replace_metadata_access_bytes(&inode_table_access, inode_table_bytes).unwrap();
-    filesystem.publish_inode_metadata(inode, updated).unwrap();
+    filesystem.publish_inode_metadata(inode, updated.metadata).unwrap();
 }
 
 pub(crate) fn set_allocator_feature_bits(
@@ -1054,7 +1054,7 @@ pub(crate) fn update_test_inode_extra_isize(
         })
         .unwrap();
     replace_metadata_access_bytes(&inode_table_access, inode_table_bytes).unwrap();
-    filesystem.publish_inode_metadata(inode, updated).unwrap();
+    filesystem.publish_inode_metadata(inode, updated.metadata).unwrap();
 }
 
 pub(crate) fn set_allocator_default_hash_version(filesystem: &mut Ext4SbInfo, hash_version: u8) {

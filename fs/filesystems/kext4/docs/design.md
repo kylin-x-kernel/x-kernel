@@ -371,6 +371,59 @@ inode-state 锁；看到一次尺寸发布的读者也能看到该发布之前�
 `i_size`、`i_disksize` 的不同发布阶段合并成事务；两者在 writeback/truncate 期间可以不同。
 这把锁是当前 ext4 状态的同步实现，不能让通用 `i_size` 单值读取依赖它。
 
+`kind` is decoded once from the on-disk `i_mode` at inode load (iget) and stored as a plain
+`Ext4Inode` field that never changes afterwards. The raw `i_flags` has a single resident copy,
+the `Ext4Inode` atomic; it is decoded alongside `kind` and never stored in the resident
+metadata. Non-format bits change at runtime (e.g. setting `EXT4_INDEX_FL` when a directory
+gains an index) and are published only by `set_flags` under the inode-state write lock. The
+generic `update_dirty_inode_metadata` raw-byte path must not touch `i_flags` because it does not
+synchronize the atomic; flag changes go through `update_inode_flags_timestamps_metadata`, which
+rejects a mapping-format change before writing the entry. The mapping-format bit
+`EXT4_EXTENTS_FL` is immutable for a resident inode after iget/create:
+lock-free readers such as `has_extents()` select the mapping interpreter from it, so `set_flags`
+rejects a format-bit change as corruption rather than silently diverging. Write paths read the
+plain field for `S_ISREG` and the atomic for `EXT4_EXTENTS_FL` without taking the inode-state
+lock, matching Linux's read pattern, where `ext4_iget` fills `inode->i_mode` and `ei->i_flags`
+once and both are read lock-free at runtime.
+
+The on-disk `i_mode` is split the same way instead of kept as a full resident copy: the type bits
+live only in the immutable `kind`, and the permission/special bits (`i_mode & 0o7777`) live in the
+`permissions` atomic. `mode()` composes the two into the full 16-bit `i_mode` at the stat and encode
+boundaries; `set_permission` publishes only permission bits with a release store and masks any type
+bits, so it cannot move the type. The chmod setattr path publishes the new on-disk mode and then
+calls `set_permission` with the same value, keeping disk and resident permission bits in lockstep.
+This removes the former `metadata.mode` copy whose type bits duplicated `kind`; the type invariant
+is now a construction-time fact (decoded once by `from_raw`, never rewritten) rather than a debug
+assertion. Linux keeps type and permissions in the single `inode->i_mode` and tests the type with
+`S_IS*`; the split is an equivalent mapping where the type is a frozen classifier and the permission
+bitmask is the mutable part.
+
+The VFS `NodeFlags` returned by `InodeAttributeOperations::flags()` are not cached: `node_flags()`
+re-derives the disk-projected bits (immutable / append-only / no-atime) from the raw `flags` atomic
+on every read and adds the runtime-only `NO_QUOTA`. `NO_QUOTA` lives in its own `no_quota` atomic
+(the Linux `S_NOQUOTA` analogue), is set or cleared independently, and is never projected from disk.
+Deriving on read keeps the VFS view coherent with `flags` without a second resident copy or a
+cross-atomic synchronization window.
+
+The extent-status proof tree additionally tracks the contiguous written prefix
+`[0, covered_prefix_end)`; as the prefix grows, the inode atomically publishes
+`initialized_extent_end` (in bytes). A delalloc reservation that falls entirely inside that
+prefix returns immediately without taking the inode-state write lock — the slow path would only
+re-prove the same range and return the same way. Losing a proof to capacity eviction does not
+retract the published prefix (the mapping is unchanged); only explicit proof invalidation
+(shrink truncate, mapping changes during metadata publication, `invalidate_extent_status`
+after an extent mutation) resets the prefix, and only through the protected
+`clear_extent_proofs`.
+
+The prefix is published and cleared under the inode-state write lock but read lock-free on the
+reservation fast path. Clearing wins any ordering that matters: extent mutations clear the prefix
+(`begin_extent_mutation`) before rewriting the tree, and shrink or inode-table block / disk-size
+changes clear it while holding the same write lock. A reader that loads the old value therefore
+does so before the mapping changes, when the prefix is still valid; a reader that loads after the
+clear sees zero and takes the slow path. The fast path deliberately skips the slow path's
+delalloc bookkeeping self-check (`reserved_data_blocks > delalloc_reserved_blocks`), which still
+guards every range outside the prefix.
+
 上层 inode data 锁对应 Linux `i_rwsem` 的尺寸事务串行化；truncate 另持 mapping
 invalidation 排他锁。`write_end_set_size()` 在页内容准备完成后发布增长，
 `truncate_setsize()` 按发布尺寸、PTE unmap、PageCache resize、再次 unmap 的次序执行，

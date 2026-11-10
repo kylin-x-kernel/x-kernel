@@ -37,6 +37,9 @@ fn pointer_mapped_directory_keeps_in_place_insertion() {
     filesystem
         .complete_metadata_mutation(handle, Ok(()))
         .unwrap();
+    // Reload the rewritten inode: the extents bit is immutable per resident
+    // object, so the pointer-mapped form must come from a fresh iget.
+    let root = filesystem.internal_iget(InodeNumber::new(2)).unwrap();
     assert!(!root.has_extents());
     let target = filesystem
         .create_regular_file(&root, b"target", 0o644, 0, 0, timestamp)
