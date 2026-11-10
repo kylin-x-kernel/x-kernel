@@ -11,4 +11,8 @@ mod auxv;
 mod info;
 mod user_stack;
 
-pub use self::{auxv::*, info::*, user_stack::app_stack_region};
+pub use self::{
+    auxv::*,
+    info::*,
+    user_stack::{app_stack_region, app_stack_region_with_auxv},
+};

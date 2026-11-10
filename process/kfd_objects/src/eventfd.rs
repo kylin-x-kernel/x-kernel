@@ -66,6 +66,26 @@ impl EventFd {
         )
     }
 
+    /// Adds `value` to the counter as a kernel producer would (`eventfd_signal`).
+    ///
+    /// Returns the counter's previous value. The update saturates at
+    /// `u64::MAX - 1` instead of failing: a kernel notification has no reader
+    /// to report `EAGAIN` to, and Linux's `eventfd_signal` never blocks a
+    /// producer for a full counter.
+    pub fn signal(&self, value: u64) -> u64 {
+        let value = value.min(u64::MAX - 1);
+        // The closure always returns `Some`, so the update cannot fail; the
+        // previous value is only informational, so a miss reports zero.
+        let previous = self
+            .count
+            .fetch_update(Ordering::Release, Ordering::Acquire, |count| {
+                Some(count.saturating_add(value).min(u64::MAX - 1))
+            })
+            .unwrap_or(0);
+        self.poll_rx.wake();
+        previous
+    }
+
     /// Returns the eventfd object attached to an eventfd file.
     ///
     /// # Errors

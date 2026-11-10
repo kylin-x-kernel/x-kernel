@@ -14,6 +14,8 @@ name = "driver_os_api_xkernel"
 
 [dependencies]
 driver_os_api = { workspace = true }
+kcompletion.workspace = true
+ktask.workspace = true
 fwnode = { workspace = true }
 kalloc = { workspace = true }
 kdma = { workspace = true }

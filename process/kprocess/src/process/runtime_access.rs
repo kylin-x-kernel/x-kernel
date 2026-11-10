@@ -151,6 +151,8 @@ pub struct ProcessExecUpdate {
     pub(super) cmdline: Arc<Vec<String>>,
     /// Opened backing executable file, exposed through `/proc/<pid>/exe`.
     pub(super) exe_file: Option<Arc<kvfs::VfsFile>>,
+    /// Auxiliary vector, exposed through `/proc/<pid>/auxv`.
+    pub(super) auxv: Vec<u8>,
     #[cfg(feature = "tee")]
     pub(super) ta_head_bytes: Vec<u8>,
 }
@@ -164,6 +166,7 @@ impl ProcessExecUpdate {
             exe_path,
             cmdline,
             exe_file: None,
+            auxv: Vec::new(),
             #[cfg(feature = "tee")]
             ta_head_bytes: Vec::new(),
         }
@@ -179,6 +182,12 @@ impl ProcessExecUpdate {
     /// Installs the opened backing executable file for `/proc/<pid>/exe`.
     pub fn with_exe_file(mut self, exe_file: Arc<kvfs::VfsFile>) -> Self {
         self.exe_file = Some(exe_file);
+        self
+    }
+
+    /// Installs the auxiliary vector for `/proc/<pid>/auxv`.
+    pub fn with_auxv(mut self, auxv: Vec<u8>) -> Self {
+        self.auxv = auxv;
         self
     }
 
@@ -568,6 +577,16 @@ impl Process {
         self.runtime().map(|runtime| runtime.cmdline())
     }
 
+    /// Returns the saved auxiliary vector while runtime remains attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns `KError::NoSuchProcess` when the weak process runtime can no longer
+    /// be upgraded.
+    pub fn auxv(&self) -> KResult<Arc<Vec<u8>>> {
+        self.runtime().map(|runtime| runtime.auxv())
+    }
+
     /// Returns the current process umask while runtime remains attached.
     ///
     /// # Errors
@@ -836,9 +855,10 @@ impl Process {
         exe_path: String,
         cmdline: Arc<Vec<String>>,
         exe_file: Option<Arc<kvfs::VfsFile>>,
+        auxv: Vec<u8>,
     ) -> KResult<()> {
         self.runtime()
-            .map(|runtime| runtime.set_exec_metadata(exe_path, cmdline, exe_file))
+            .map(|runtime| runtime.set_exec_metadata(exe_path, cmdline, exe_file, auxv))
     }
 
     /// Applies the process-shared post-exec state transition.
@@ -867,7 +887,12 @@ impl Process {
         runtime.with_tipc_handles(|handles| handles.write().uctx_handle_close_all());
         #[cfg(feature = "tee")]
         runtime.clear_tee_runtime_private();
-        runtime.set_exec_metadata(update.exe_path, update.cmdline, update.exe_file);
+        runtime.set_exec_metadata(
+            update.exe_path,
+            update.cmdline,
+            update.exe_file,
+            update.auxv,
+        );
         #[cfg(unittest)]
         if let Some(hits) = update.failure_hits {
             hits.fetch_add(1, Ordering::Relaxed);

@@ -341,7 +341,8 @@ fn exec_request(
     // consumed by installation.
     let exe_file = prepared.executable_file();
     let exec_update = kprocess::ProcessExecUpdate::new(absolute_path.clone(), Arc::new(args))
-        .with_exe_file(exe_file);
+        .with_exe_file(exe_file)
+        .with_auxv(prepared.auxv_bytes().to_vec());
     #[cfg(unittest)]
     let (prepared, exec_update) = if let Some(probe) = probe.as_deref_mut() {
         probe.attach_failure_probes(prepared, exec_update)

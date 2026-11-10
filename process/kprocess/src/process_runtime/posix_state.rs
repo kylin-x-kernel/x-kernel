@@ -16,6 +16,8 @@ pub(super) struct ExecMetadata {
     cmdline: Arc<Vec<String>>,
     /// Opened backing executable file, followed by `/proc/<pid>/exe`.
     exe_file: Option<Arc<kvfs::VfsFile>>,
+    /// Auxiliary vector in `/proc/<pid>/auxv` wire form.
+    auxv: Arc<Vec<u8>>,
 }
 
 impl ExecMetadata {
@@ -24,11 +26,13 @@ impl ExecMetadata {
         exe_path: String,
         cmdline: Arc<Vec<String>>,
         exe_file: Option<Arc<kvfs::VfsFile>>,
+        auxv: Arc<Vec<u8>>,
     ) -> Self {
         Self {
             exe_path,
             cmdline,
             exe_file,
+            auxv,
         }
     }
 
@@ -46,6 +50,11 @@ impl ExecMetadata {
     pub(super) fn exe_file(&self) -> Option<Arc<kvfs::VfsFile>> {
         self.exe_file.clone()
     }
+
+    /// Returns the saved auxiliary vector.
+    pub(super) fn auxv(&self) -> Arc<Vec<u8>> {
+        self.auxv.clone()
+    }
 }
 
 /// POSIX-facing state shared by all threads in a process.
@@ -58,7 +67,12 @@ impl ProcessPosixState {
     /// Creates a new [`ProcessPosixState`].
     pub(super) fn new(exe_path: String, cmdline: Arc<Vec<String>>) -> Self {
         Self {
-            exec_metadata: RwLock::new(ExecMetadata::new(exe_path, cmdline, None)),
+            exec_metadata: RwLock::new(ExecMetadata::new(
+                exe_path,
+                cmdline,
+                None,
+                Arc::new(Vec::new()),
+            )),
             oom_score_adj: AtomicI32::new(0),
         }
     }
@@ -74,6 +88,7 @@ impl ProcessPosixState {
         exe_path: String,
         cmdline: Arc<Vec<String>>,
         exe_file: Option<Arc<kvfs::VfsFile>>,
+        auxv: Vec<u8>,
     ) {
         // Replace first and drop the old snapshot outside the write lock: the
         // replaced `ExecMetadata` owns an `Arc<VfsFile>` whose release path can
@@ -81,7 +96,7 @@ impl ProcessPosixState {
         // would invert the lock order against readers of `/proc/<pid>/exe`.
         let replaced = core::mem::replace(
             &mut *self.exec_metadata.write(),
-            ExecMetadata::new(exe_path, cmdline, exe_file),
+            ExecMetadata::new(exe_path, cmdline, exe_file, Arc::new(auxv)),
         );
         drop(replaced);
     }

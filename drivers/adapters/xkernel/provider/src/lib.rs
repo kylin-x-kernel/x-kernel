@@ -23,6 +23,7 @@ mod memory;
 mod mmio;
 mod port;
 mod time;
+mod wait;
 
 pub use device_dma::XKernelDeviceDma;
 

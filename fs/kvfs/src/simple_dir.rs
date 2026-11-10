@@ -19,8 +19,8 @@ use ksync::Mutex;
 use crate::{
     Dentry, DeviceId, DirContext, DirEntrySink, FileDirOperations, FileOperations,
     InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
-    NodePermission, NodeType, SeqFileInode, Umode, VfsError, VfsFile, VfsInode, VfsResult,
-    inode_init_owner,
+    NodePermission, NodeType, RenameFlags, SeqFileInode, Umode, VfsError, VfsFile, VfsInode,
+    VfsResult, inode_init_owner,
     libfs::{generic_read_dir, noop_fsync},
     path::{DOT, DOTDOT},
     simple_fs::{SimpleFs, SimpleFsNode},
@@ -185,8 +185,27 @@ pub trait SimpleDirOps: Send + Sync + 'static {
         Err(VfsError::OperationNotPermitted)
     }
 
+    /// Removes the VFS-resolved non-directory child from the backing store.
+    fn unlink(&self, _dir: &VfsInode, _victim: &LockedDentry<'_>) -> VfsResult<()> {
+        Err(VfsError::OperationNotPermitted)
+    }
+
     /// Removes the VFS-resolved directory child from the backing store.
     fn rmdir(&self, _dir: &VfsInode, _victim: &LockedDentry<'_>) -> VfsResult<()> {
+        Err(VfsError::OperationNotPermitted)
+    }
+
+    /// Renames `old` to `new` inside the backing store.
+    ///
+    /// `new` may name an existing non-directory child, which is replaced. Callers
+    /// validate the paths against the VFS first; this callback only moves the
+    /// entry it already resolved.
+    fn rename(
+        &self,
+        _old: &LockedDentry<'_>,
+        _new: &LockedDentry<'_>,
+        _flags: RenameFlags,
+    ) -> VfsResult<()> {
         Err(VfsError::OperationNotPermitted)
     }
 
@@ -237,6 +256,23 @@ impl SimpleDirOps for DirMapping {
             }),
         );
         Ok(lookup.file_from_inode(name, inode))
+    }
+
+    fn unlink(&self, _dir: &VfsInode, victim: &LockedDentry<'_>) -> VfsResult<()> {
+        if self.remove_child(victim.name()) {
+            Ok(())
+        } else {
+            Err(VfsError::NotFound)
+        }
+    }
+
+    fn rename(
+        &self,
+        old: &LockedDentry<'_>,
+        new: &LockedDentry<'_>,
+        _flags: RenameFlags,
+    ) -> VfsResult<()> {
+        self.rename_child(old.name(), new.name())
     }
 }
 
@@ -303,6 +339,23 @@ impl DirMapping {
     /// Returns the number of children in the mapping.
     pub fn child_count(&self) -> usize {
         self.entries.lock().len()
+    }
+
+    /// Removes a child from the mapping.
+    pub fn remove_child(&self, name: &str) -> bool {
+        self.entries.lock().remove(name).is_some()
+    }
+
+    /// Moves `old` to `new`, replacing an existing `new` entry.
+    ///
+    /// This is the backing-store part of `rename(2)`: the entry is taken out and
+    /// reinserted under the new name in one critical section, so a reader never
+    /// observes both names or neither.
+    pub fn rename_child(&self, old: &str, new: &str) -> VfsResult<()> {
+        let mut entries = self.entries.lock();
+        let entry = entries.remove(old).ok_or(VfsError::NotFound)?;
+        entries.insert(new.to_owned(), entry);
+        Ok(())
     }
 
     fn lookup_child_with_parent(&self, parent: Option<Dentry>, name: &str) -> VfsResult<Dentry> {
@@ -596,20 +649,30 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         Err(VfsError::OperationNotPermitted)
     }
 
-    fn unlink(&self, _dir: &crate::VfsInode, _dentry: &LockedDentry<'_>) -> VfsResult<()> {
-        Err(VfsError::OperationNotPermitted)
+    fn unlink(&self, dir: &crate::VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
+        self.dir.ops.unlink(dir, dentry)
     }
 
     fn rename(
         &self,
         _idmap: &crate::MountIdmap,
-        _old_dir: &crate::VfsInode,
-        _old_dentry: &LockedDentry<'_>,
-        _new_dir: &crate::VfsInode,
-        _new_dentry: &LockedDentry<'_>,
-        _flags: crate::RenameFlags,
+        old_dir: &crate::VfsInode,
+        old_dentry: &LockedDentry<'_>,
+        new_dir: &crate::VfsInode,
+        new_dentry: &LockedDentry<'_>,
+        flags: crate::RenameFlags,
     ) -> VfsResult<()> {
-        Err(VfsError::OperationNotPermitted)
+        if !core::ptr::eq(old_dir, new_dir) {
+            // A simple directory has one backing mapping; a cross-directory
+            // rename would update the source map with the destination name.
+            return Err(VfsError::OperationNotSupported);
+        }
+        if !flags.is_empty() {
+            // The backing mapping has no atomic exchange/whiteout operation;
+            // reject the extended modes instead of silently replacing an entry.
+            return Err(VfsError::OperationNotSupported);
+        }
+        self.dir.ops.rename(old_dentry, new_dentry, flags)
     }
 }
 

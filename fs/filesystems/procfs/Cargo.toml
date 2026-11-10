@@ -41,6 +41,7 @@ kprocess.workspace = true
 ktask.workspace = true
 ktty.workspace = true
 ktime_types.workspace = true
+ktime.workspace = true
 ktracing.workspace = true
 log.workspace = true
 memaddr.workspace = true

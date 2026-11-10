@@ -28,5 +28,5 @@ pub(crate) const USER_LAYOUT: UserLayoutConsts = UserLayoutConsts {
     user_heap_size_max: 0x2000_0000,
     signal_trampoline: 0x6000_1000,
     user_stack_top: 0x7fff_0000_0000,
-    user_stack_size: 0x8_0000,
+    user_stack_size: 0x80_0000,
 };

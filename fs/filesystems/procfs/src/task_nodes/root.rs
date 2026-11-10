@@ -861,6 +861,133 @@ fn proc_exe_link_child(
     Ok(lookup.file_from_inode(name, inode))
 }
 
+/// Magic link backing `/proc/<pid>/root`.
+struct ProcRootLink {
+    node: SimpleFsNode,
+    task: WeakKtaskRef,
+}
+
+impl ProcRootLink {
+    fn new(fs: Arc<SimpleFs>, task: WeakKtaskRef) -> Arc<Self> {
+        Arc::new(Self {
+            node: SimpleFsNode::new(
+                fs,
+                NodeType::Symlink,
+                NodePermission::from_bits_truncate(0o777),
+            ),
+            task,
+        })
+    }
+
+    fn check_access(&self) -> VfsResult<()> {
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let target = task.as_thread();
+        if target.is_exiting() || target.process().is_exited() {
+            return Err(VfsError::NotFound);
+        }
+        if let Some(caller) = ktask::current().try_as_thread() {
+            kprocess::ptrace::check_read_fs_creds_access(caller, target)
+                .map_err(|_| VfsError::OperationNotPermitted)?;
+        }
+        Ok(())
+    }
+
+    fn target_path(&self) -> VfsResult<Path> {
+        self.check_access()?;
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let process = task.as_thread().process();
+        let fs_context = process.fs_context().map_err(|_| VfsError::NotFound)?;
+        Ok(fs_context.lock().root().clone())
+    }
+
+    fn target_len(&self) -> VfsResult<u64> {
+        Ok(0)
+    }
+}
+
+impl InodeOperations for ProcRootLink {
+    fn symlink_operations(&self) -> Option<&dyn InodeSymlinkOperations> {
+        Some(self)
+    }
+
+    fn getattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        path: Option<&kvfs::Path>,
+        request_mask: kvfs::GetattrRequestMask,
+        query_flags: kvfs::GetattrQueryFlags,
+    ) -> VfsResult<Metadata> {
+        let mut metadata = self.node.getattr(idmap, path, request_mask, query_flags)?;
+        metadata.size = self.target_len()?;
+        Ok(metadata)
+    }
+
+    fn setattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<MetadataUpdate> {
+        self.node.setattr(idmap, dentry, update)
+    }
+}
+
+impl InodeSymlinkOperations for ProcRootLink {
+    fn get_link(
+        &self,
+        _dentry: Option<&Dentry>,
+        _inode: &kvfs::VfsInode,
+        _done: &mut kvfs::DelayedCall,
+    ) -> VfsResult<String> {
+        self.target_path()?.display_path()
+    }
+}
+
+impl FileOperations for ProcRootLink {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        let target = self.target_path()?.display_path()?;
+        let data = target.as_bytes();
+        if offset >= data.len() as u64 {
+            return Ok(0);
+        }
+        let data = &data[offset as usize..];
+        let read = data.len().min(buf.len());
+        buf[..read].copy_from_slice(&data[..read]);
+        Ok(read)
+    }
+
+    fn magic_link(self: Arc<Self>) -> Option<Arc<dyn MagicLinkOps>> {
+        Some(self)
+    }
+}
+
+impl MagicLinkOps for ProcRootLink {
+    fn readlink_display(&self) -> VfsResult<String> {
+        self.target_path()?.display_path()
+    }
+
+    fn follow(&self, _intent: LookupIntent, flags: LookupFlags) -> VfsResult<ResolvedObject> {
+        if flags.rejects_magic_links() || !flags.follows_final() {
+            return Err(VfsError::FilesystemLoop);
+        }
+        Ok(ResolvedObject::location(self.target_path()?))
+    }
+}
+
+fn proc_root_link_child(
+    lookup: SimpleDirLookup<'_>,
+    name: &str,
+    link: Arc<ProcRootLink>,
+) -> VfsResult<Dentry> {
+    let init = link.node.inode_init().with_size(link.target_len()?);
+    let inode = VfsInode::new_file_with_flags(link, NodeFlags::NON_CACHEABLE, init);
+    Ok(lookup.file_from_inode(name, inode))
+}
+
 struct ThreadFdDir {
     fs: Arc<SimpleFs>,
     task: WeakKtaskRef,
@@ -1358,6 +1485,8 @@ impl SimpleDirOps for ThreadDir {
                 "cmdline",
                 "comm",
                 "exe",
+                "root",
+                "auxv",
                 "fd",
                 "fdinfo",
             ]
@@ -1584,7 +1713,41 @@ impl SimpleDirOps for ThreadDir {
                     }),
                 ),
             ),
+            "auxv" => {
+                let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
+                let owner = task.as_thread().real_cred();
+                lookup.file(
+                    name,
+                    SimpleFile::new_snapshot_with_owner(
+                        fs.clone(),
+                        NodePermission::OWNER_READ,
+                        owner.euid(),
+                        owner.egid(),
+                        {
+                            let task_weak = task_weak.clone();
+                            move || {
+                                let task = upgrade_task(&task_weak)?;
+                                // Linux exposes auxv only to a reader that may
+                                // inspect the target task and keeps the file
+                                // readable by the target's effective uid. The
+                                // snapshot captures this image generation when
+                                // the descriptor is opened.
+                                if let Some(caller) = ktask::current().try_as_thread() {
+                                    kprocess::ptrace::check_read_fs_creds_access(
+                                        caller,
+                                        task.as_thread(),
+                                    )
+                                    .map_err(|_| VfsError::PermissionDenied)?;
+                                }
+                                let auxv = task.as_thread().process().auxv()?;
+                                Ok((*auxv).clone())
+                            }
+                        },
+                    ),
+                )
+            }
             "exe" => proc_exe_link_child(lookup, name, ProcExeLink::new(fs.clone(), task_weak)),
+            "root" => proc_root_link_child(lookup, name, ProcRootLink::new(fs.clone(), task_weak)),
             "fd" => {
                 let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
                 Ok(lookup.dir(

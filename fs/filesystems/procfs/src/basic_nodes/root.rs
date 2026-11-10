@@ -6,8 +6,9 @@ use alloc::{format, string::String, sync::Arc};
 use core::fmt::Write;
 
 use kbuild_config::ARCH;
-use kcpu_id_map::for_each_present_logical_cpu;
+use kcpu_id_map::{for_each_present_logical_cpu, nr_cpus};
 use kfd_objects::inotify_limits::InotifyLimit;
+use kprocess::{TaskStat, procfs};
 use kvfs::{
     CommandFile, Dentry, DirMapping, GetattrQueryFlags, GetattrRequestMask, InodeOperations,
     Metadata, MetadataUpdate, MountIdmap, NodeFlags, NodePermission, Path, Permission, SimpleDir,
@@ -128,6 +129,46 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                 }
             });
             Ok(info)
+        }),
+    );
+    root.add(
+        "stat",
+        SimpleFile::new_regular(fs.clone(), || {
+            // Linux exposes aggregate CPU time in USER_HZ ticks. This kernel
+            // does not yet account per-thread CPU time (`TaskStat::utime` and
+            // `stime` stay zero), so the aggregate reports no busy time and
+            // idle is wall-clock uptime times the CPU count. `intr`, `ctxt`,
+            // `processes` and `softirq` are not tracked either and stay zero;
+            // `procs_running` is sampled from task state. The per-CPU lines a
+            // full SMP kernel prints are not synthesized here.
+            const USER_HZ: u64 = 100;
+            let mut user = 0u64;
+            let mut system = 0u64;
+            let mut running = 0u64;
+            for process in procfs::visible_processes() {
+                for tid in procfs::thread_ids(&process) {
+                    let Ok(task) = procfs::thread_task(tid) else {
+                        continue;
+                    };
+                    let stat = TaskStat::from_thread(&task);
+                    user = user.saturating_add(stat.utime);
+                    system = system.saturating_add(stat.stime);
+                    if stat.state == 'R' {
+                        running = running.saturating_add(1);
+                    }
+                }
+            }
+            let uptime_ns = ktime::boottime().as_nanos_u64_saturating();
+            let uptime_ticks = uptime_ns / (1_000_000_000 / USER_HZ);
+            let idle = uptime_ticks
+                .saturating_mul(nr_cpus() as u64)
+                .saturating_sub(user.saturating_add(system));
+            let btime = ktime::realtime().unix_seconds() - (uptime_ns / 1_000_000_000) as i64;
+            Ok(format!(
+                "cpu  {user} 0 {system} {idle} 0 0 0 0 0 0\nintr 0\nctxt 0\nbtime \
+                 {btime}\nprocesses 0\nprocs_running {running}\nprocs_blocked 0\nsoftirq 0 0 0 0 \
+                 0 0 0 0 0 0 0\n"
+            ))
         }),
     );
     root.add(

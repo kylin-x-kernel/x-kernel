@@ -160,8 +160,20 @@ impl SimpleFile {
         ops: Arc<dyn SimpleFileOps>,
         file_operations: Arc<dyn FileOperations>,
     ) -> Arc<Self> {
+        Self::new_with_options_owner(fs, ty, permission, 0, 0, ops, file_operations)
+    }
+
+    fn new_with_options_owner(
+        fs: Arc<SimpleFs>,
+        ty: NodeType,
+        permission: NodePermission,
+        uid: u32,
+        gid: u32,
+        ops: Arc<dyn SimpleFileOps>,
+        file_operations: Arc<dyn FileOperations>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            node: SimpleFsNode::new(fs, ty, permission),
+            node: SimpleFsNode::new_with_owner(fs, ty, permission, uid, gid),
             ops,
             file_operations,
         })
@@ -192,6 +204,26 @@ impl SimpleFile {
             fs,
             NodeType::RegularFile,
             NodePermission::default(),
+            ops.clone(),
+            Arc::new(SnapshotFileOperations(ops)),
+        )
+    }
+
+    /// Creates a per-open snapshot file with explicit mode and owner.
+    pub fn new_snapshot_with_owner(
+        fs: Arc<SimpleFs>,
+        permission: NodePermission,
+        uid: u32,
+        gid: u32,
+        ops: impl SimpleFileOps,
+    ) -> Arc<Self> {
+        let ops: Arc<dyn SimpleFileOps> = Arc::new(ops);
+        Self::new_with_options_owner(
+            fs,
+            NodeType::RegularFile,
+            permission,
+            uid,
+            gid,
             ops.clone(),
             Arc::new(SnapshotFileOperations(ops)),
         )

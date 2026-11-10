@@ -9,7 +9,9 @@ use core::{ffi::CStr, iter};
 
 use filemap::new_file_private_vma;
 use kcred::Cred;
-use kernel_elf_parser::{AuxEntry, AuxType, ElfHeaders, ElfHeadersBuilder, app_stack_region};
+use kernel_elf_parser::{
+    AuxEntry, AuxType, ElfHeaders, ElfHeadersBuilder, app_stack_region_with_auxv,
+};
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize};
 use ksync::{Mutex, static_lock};
@@ -295,6 +297,10 @@ pub struct PreparedExecImage {
     interpreter: Option<PreparedElfImage>,
     layout: ExecLayoutPlan,
     stack_data: Vec<u8>,
+    /// The auxiliary vector exactly as written on the initial stack, in
+    /// `Elf_auxv_t` wire form and terminated by `AT_NULL`. `/proc/<pid>/auxv`
+    /// republishes these bytes, as Linux does from `mm->saved_auxv`.
+    auxv: Vec<u8>,
     entry: VirtAddr,
     user_sp: VirtAddr,
     #[cfg(unittest)]
@@ -328,6 +334,11 @@ impl PreparedExecImage {
     /// backing file alive independently of the ELF cache.
     pub fn executable_file(&self) -> Arc<VfsFile> {
         self.executable.cache_entry.borrow_file().clone()
+    }
+
+    /// Returns the auxiliary vector in `/proc/<pid>/auxv` wire form.
+    pub fn auxv_bytes(&self) -> &[u8] {
+        &self.auxv
     }
 }
 
@@ -584,7 +595,7 @@ impl ElfLoader {
         )?;
         let entry = exec_entry(&executable, interpreter.as_ref(), &layout)?;
         let auxv = initial_aux_vector(&executable.image, &layout, binprm.cred())?;
-        let (user_sp, stack_data) = prepare_initial_stack(
+        let (user_sp, stack_data, auxv_bytes) = prepare_initial_stack(
             binprm.args(),
             binprm.envs(),
             &auxv,
@@ -595,6 +606,7 @@ impl ElfLoader {
             interpreter,
             layout,
             stack_data,
+            auxv: auxv_bytes,
             entry,
             user_sp,
             #[cfg(unittest)]
@@ -705,19 +717,20 @@ fn prepare_initial_stack(
     envs: &[String],
     auxv: &[AuxEntry],
     execfn: &str,
-) -> KResult<(VirtAddr, Vec<u8>)> {
+) -> KResult<(VirtAddr, Vec<u8>, Vec<u8>)> {
     let ustack_top = VirtAddr::from_usize(kaddr_layout::USER_STACK_TOP);
     let ustack_size = kaddr_layout::USER_STACK_SIZE;
     let mut random_bytes = [0_u8; 16];
     entropy::fill_random(&mut random_bytes);
-    let stack_data = app_stack_region(args, envs, auxv, ustack_top.into(), &random_bytes, execfn)
-        .map_err(|_| KError::ArgumentListTooLong)?;
+    let (stack_data, auxv_bytes) =
+        app_stack_region_with_auxv(args, envs, auxv, ustack_top.into(), &random_bytes, execfn)
+            .map_err(|_| KError::ArgumentListTooLong)?;
     if stack_data.len() > ustack_size {
         return Err(KError::ArgumentListTooLong);
     }
     let user_sp = ustack_top - stack_data.len();
 
-    Ok((user_sp, stack_data))
+    Ok((user_sp, stack_data, auxv_bytes))
 }
 
 /// Resolves and validates an executable, including its complete initial stack.

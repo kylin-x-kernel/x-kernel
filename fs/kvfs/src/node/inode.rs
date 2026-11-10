@@ -1978,7 +1978,12 @@ impl VfsInode {
         self.attributes.size()
     }
 
-    pub(crate) fn set_size(&self, size: u64) {
+    /// Sets the cached size a `stat` reports.
+    ///
+    /// This is the kernel-side equivalent of `inode->i_size`: pseudo
+    /// filesystems use it to describe a node whose size is known when the node
+    /// is created (a live block device's capacity, an exported dma-buf).
+    pub fn set_size(&self, size: u64) {
         self.attributes.set_size(size);
     }
 

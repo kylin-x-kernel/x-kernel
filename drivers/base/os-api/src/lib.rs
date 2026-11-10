@@ -21,6 +21,7 @@ mod memory;
 mod mmio;
 mod port;
 mod time;
+mod wait;
 
 /// A provider-supplied cleanup action, invoked exactly once.
 ///
@@ -41,6 +42,7 @@ pub use memory::{CpuBuffer, CpuMemoryOp};
 pub use mmio::{IoMap, IoPortRange, MmioMapping, MmioOp, MmioRegion};
 pub use port::{PortOp, PortWidth};
 pub use time::TimeOp;
+pub use wait::WaitOp;
 
 unittest::path_mod_test!(tests, "../ut-tests/guards.rs");
 unittest::path_mod_test!(dma_view_tests, "../ut-tests/dma.rs");

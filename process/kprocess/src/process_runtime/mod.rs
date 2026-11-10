@@ -364,6 +364,11 @@ impl ProcessRuntime {
         self.exec_metadata().cmdline().clone()
     }
 
+    /// Returns the auxiliary vector saved at exec.
+    pub(crate) fn auxv(&self) -> Arc<Vec<u8>> {
+        self.exec_metadata().auxv()
+    }
+
     /// Returns the process OOM score adjustment.
     pub(crate) fn oom_score_adj(&self) -> i32 {
         self.posix_state.oom_score_adj()
@@ -380,9 +385,10 @@ impl ProcessRuntime {
         exe_path: String,
         cmdline: Arc<Vec<String>>,
         exe_file: Option<Arc<kvfs::VfsFile>>,
+        auxv: Vec<u8>,
     ) {
         self.posix_state
-            .set_exec_metadata(exe_path, cmdline, exe_file);
+            .set_exec_metadata(exe_path, cmdline, exe_file, auxv);
     }
 
     /// Returns a live address-space capability if user mappings are still active.
@@ -726,6 +732,7 @@ fn finish_fork_runtime(
         String::from(exec_metadata.exe_path()),
         exec_metadata.cmdline().clone(),
         exec_metadata.exe_file(),
+        (*exec_metadata.auxv()).clone(),
     );
 
     Ok(process_runtime)

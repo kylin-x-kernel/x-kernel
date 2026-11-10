@@ -27,6 +27,39 @@ unsafe impl SyncWake for CompletionWake {
     }
 }
 
+impl CompletionWait {
+    /// Clones the task's IRQ-safe notifier as a standard `Waker`.
+    ///
+    /// A wake source may store this waker in its own registry: the clone keeps
+    /// its own strong task reference, rides the same wake latch as
+    /// [`Self::notifier`], and revives nothing once this handle is dropped.
+    pub fn notifier_waker(&self) -> core::task::Waker {
+        core::task::Waker::from(alloc::sync::Arc::new(SharedWake(self.wake.clone())))
+    }
+}
+
+impl Clone for CompletionWake {
+    fn clone(&self) -> Self {
+        Self {
+            task: self.task.clone(),
+            woke: SpinNoIrq::new(*self.woke.lock()),
+        }
+    }
+}
+
+/// [`CompletionWake`] behind an `Arc`, so it can back a cloned waker.
+struct SharedWake(CompletionWake);
+
+impl alloc::task::Wake for SharedWake {
+    fn wake(self: alloc::sync::Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &alloc::sync::Arc<Self>) {
+        self.0.notify();
+    }
+}
+
 /// Task-bound resources for allocation-free synchronous waits.
 ///
 /// Only the preparing task may use this handle; it is neither Send nor Sync.

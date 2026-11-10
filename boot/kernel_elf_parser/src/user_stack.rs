@@ -63,6 +63,24 @@ pub fn app_stack_region(
     random_bytes: &[u8; 16],
     execfn: &str,
 ) -> Result<Vec<u8>, &'static str> {
+    app_stack_region_with_auxv(args, envs, auxv, sp, random_bytes, execfn)
+        .map(|(stack, _auxv)| stack)
+}
+
+/// Builds the initial stack and returns the exact auxiliary vector embedded in
+/// it, including the helper-owned `AT_RANDOM`, `AT_EXECFN` and `AT_NULL` entries.
+///
+/// `/proc/<pid>/auxv` must publish this returned vector, not the pre-helper
+/// input: the two otherwise disagree exactly where the process observes its
+/// random bytes and executable name.
+pub fn app_stack_region_with_auxv(
+    args: &[String],
+    envs: &[String],
+    auxv: &[AuxEntry],
+    sp: usize,
+    random_bytes: &[u8; 16],
+    execfn: &str,
+) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
     // Accept callers that already terminate their input, but rebuild the
     // terminal entry after helper-owned entries so none are hidden behind it.
     let auxv = &auxv[..auxv
@@ -155,5 +173,14 @@ pub fn app_stack_region(
     let (first, second) = data.as_slices();
     result.extend_from_slice(first);
     result.extend_from_slice(second);
-    Ok(result)
+
+    let mut final_auxv = auxv.as_bytes().to_vec();
+    if !has_random {
+        final_auxv.extend_from_slice(AuxEntry::new(AuxType::RANDOM, random_bytes_pos).as_bytes());
+    }
+    if !has_execfn {
+        final_auxv.extend_from_slice(AuxEntry::new(AuxType::EXECFN, execfn_pos).as_bytes());
+    }
+    final_auxv.extend_from_slice(AuxEntry::new(AuxType::NULL, 0).as_bytes());
+    Ok((result, final_auxv))
 }

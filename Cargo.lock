@@ -1253,6 +1253,7 @@ version = "0.3.0-dev"
 dependencies = [
  "fwnode",
  "irq-types",
+ "kcompletion",
  "ktime_types",
  "unittest",
 ]
@@ -1266,10 +1267,12 @@ dependencies = [
  "fwnode",
  "irq-driver",
  "kalloc",
+ "kcompletion",
  "kdma",
  "khal",
  "kirq",
  "kspin",
+ "ktask",
  "ktime_types",
  "log",
  "memaddr",
@@ -4726,6 +4729,7 @@ dependencies = [
  "kns",
  "kprocess",
  "ktask",
+ "ktime",
  "ktime_types",
  "ktracing",
  "ktty",

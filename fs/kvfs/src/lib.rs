@@ -16,6 +16,7 @@ mod address_space;
 mod fiemap;
 mod file;
 mod file_ra;
+mod file_slot;
 mod file_system_type;
 mod filename;
 mod fs_context;
@@ -52,6 +53,8 @@ pub use file::{
     FMode, FileDirOperations, FileMappingOperations, FileOperations, FilePollSource, VfsFile,
     VfsFileBuilder,
 };
+pub(crate) use file_slot::FileSlots;
+pub use file_slot::{DMA_BUF_SLOT, FileSlot};
 pub use file_system_type::{
     FileSystemType, FileSystemTypeFlags, FsContextOperations, GetTreeFn, InitFsContextFn,
     ReconfigureFn, get_filesystem_type, register_filesystem, registered_filesystems,

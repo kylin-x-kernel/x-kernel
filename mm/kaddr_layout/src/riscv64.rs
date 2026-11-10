@@ -35,7 +35,7 @@ pub(crate) const LAYOUT: LayoutConsts = LayoutConsts {
 //   0x0000_0000_6000_1000 ┄┄┘ ← SIGNAL_TRAMPOLINE
 //                            ·
 //   0x0000_0000_4_0000_0000┄┐ ← USER_STACK_TOP
-//          ↑ 0x8_0000       │   USER_STACK_SIZE = 512 KiB
+//          ↑ 0x80_0000      |   USER_STACK_SIZE = 8 MiB
 //   0x0000_003F_FFFF_F000 ┄┄┘ ← USER_SPACE_BASE + USER_SPACE_SIZE
 
 pub(crate) const USER_LAYOUT: UserLayoutConsts = UserLayoutConsts {
@@ -47,5 +47,5 @@ pub(crate) const USER_LAYOUT: UserLayoutConsts = UserLayoutConsts {
     user_heap_size_max: 0x2000_0000,
     signal_trampoline: 0x6000_1000,
     user_stack_top: 0x4_0000_0000,
-    user_stack_size: 0x8_0000,
+    user_stack_size: 0x80_0000,
 };

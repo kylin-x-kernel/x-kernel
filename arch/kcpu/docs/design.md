@@ -241,11 +241,10 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
   用户指针，不会因用户空间地址错误而 panic。
 - **`active_exception_context()`**：可在任意上下文调用（包括 NMI 类上下文），
   返回 best-effort 快照。
-- **`in_exception_context()`**: masks ordinary IRQs around CPU-slot selection
-  and the pointer-presence load, then restores the original mask. Callers need
-  no exclusion for this boolean snapshot. It does not dereference the frame,
-  alter preemption accounting, or invoke scheduler/RCU checks. Protection for
-  a subsequent queue operation or reader removal remains the caller's duty.
+- **`in_exception_context()`**：在读取 CPU slot 和指针存在性期间屏蔽普通 IRQ，
+  随后恢复原屏蔽状态。调用者无需为该布尔快照额外做排除；它不解引用 trap frame，
+  不调整抢占计数，也不调用调度器或 RCU 检查。后续队列操作或 reader 移除的保护
+  仍由调用者负责。
 - **FP/SIMD 保存恢复**：受 `fp-simd` feature 控制。未启用时跳过 FP 状态操作。
 - **TLS 边界**：内核任务不分配 TLS，也不在调度时切换 TLS 寄存器。
   用户态 TLS 仍属于 `UserContext`，由用户态进入/退出路径保存恢复。
@@ -435,7 +434,7 @@ RISC-V 的 `sstatus.FS` 字段跟踪 FP 状态（Off/Initial/Clean/Dirty）。
 `FpState::switch_to` 利用这一机制：仅当 `FS::Dirty` 时保存，
 恢复时根据目标状态决定是恢复、清零还是跳过。避免不必要的 FP 寄存器操作。
 
-## Drop / 资源释放
+## 析构与资源释放
 
 本 crate 的类型主要为寄存器快照和上下文容器，不持有需要显式释放的资源。
 唯一的 RAII 守卫是 `ExceptionContextGuard`，在 `Drop` 时尝试恢复安装时记录的
@@ -443,14 +442,11 @@ per-CPU 活跃 trapframe 指针为前一个值。调度器在当前 CPU 切离�
 会挂起并清空本 CPU slot，任务被切回后恢复到新的当前 CPU，避免旧 CPU stale 标记
 和恢复后 trap handler 后半段缺失异常上下文标记。
 
-## Interrupt Callback Boundary
+## 中断回调边界
 
-`excp::IRQ` and `excp::NMI` store `unsafe fn(usize) -> bool` callbacks. The
-architecture owns captured trap state and ordinary IRQ exclusion before invoking
-the HAL adapter; the callback type does not permit an arbitrary safe Rust call
-to impersonate an interrupt. Kernel and user-return call sites retain their
-existing entry masks. Ordinary deferred work may briefly enable IRQs after
-claim completion and must restore the mask before return. The ordinary adapter
-owns its completed-IRQ scheduling tail;
-dedicated NMI callbacks must return without scheduling. Page-fault callbacks
-retain their separate safe signature.
+`excp::IRQ` 和 `excp::NMI` 保存 `unsafe fn(usize) -> bool` 回调。架构层负责
+在调用 HAL 适配器前持有已捕获的 trap 状态和普通 IRQ 排除；该回调类型不允许
+任意安全 Rust 调用冒充中断。内核态与用户态返回路径继续使用各自的入口屏蔽。
+普通延迟工作可以在完成中断认领后短暂开启 IRQ，但返回前必须恢复屏蔽状态；
+普通适配器负责完成中断后的调度尾部，专用 NMI 回调则必须在不排队的情况下
+返回。缺页回调保留其独立的安全签名。

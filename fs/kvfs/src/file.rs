@@ -22,8 +22,9 @@ use log::warn;
 use pagecache::{FolioGuard, PageIndex};
 
 use crate::{
-    AddressSpace, DirContext, FallocateFlags, Kiocb, MagicLinkOps, MmapMapper, Mutex, MutexGuard,
-    NodeFlags, NodeType, OpenFlags, Path, TypeMap, VfsError, VfsInode, VfsResult,
+    AddressSpace, DirContext, FallocateFlags, FileSlot, FileSlots, Kiocb, MagicLinkOps, MmapMapper,
+    Mutex, MutexGuard, NodeFlags, NodeType, OpenFlags, Path, TypeMap, VfsError, VfsInode,
+    VfsResult,
 };
 
 /// A captured, event-filtered wait source independent of current file readiness.
@@ -550,6 +551,7 @@ pub struct VfsFileBuilder {
     operations: Option<Arc<dyn FileOperations>>,
     location: Option<FileLocation>,
     private_data: TypeMap,
+    slots: FileSlots,
     flags: OpenFlags,
     position: u64,
     /// FIFO writer-generation snapshot, corresponding to Linux `file::f_pipe`.
@@ -570,6 +572,7 @@ impl VfsFileBuilder {
             operations: None,
             location: None,
             private_data: TypeMap::default(),
+            slots: FileSlots::default(),
             flags: open_flags,
             position: 0,
             pipe_generation: 0,
@@ -777,6 +780,15 @@ impl VfsFileBuilder {
         self.private_data.insert_arc(value);
     }
 
+    /// Stores a kernel-wide framework object in `slot` on the new file.
+    ///
+    /// This is how a creator (a dma-buf exporter, for example) publishes an
+    /// object that any other subsystem must find through the descriptor, as
+    /// Linux lets a subsystem own a file through its `f_op`.
+    pub fn set_slot(&mut self, slot: FileSlot, value: Arc<dyn Any + Send + Sync>) {
+        self.slots.insert(slot, value);
+    }
+
     /// Sets the open-file nonblocking flag.
     pub fn set_nonblocking(&mut self, flag: bool) {
         if flag {
@@ -793,6 +805,7 @@ impl VfsFileBuilder {
             operations,
             location,
             private_data,
+            slots,
             flags,
             position,
             pipe_generation,
@@ -810,6 +823,7 @@ impl VfsFileBuilder {
             operations,
             location,
             private_data: Mutex::new(private_data),
+            slots: Mutex::new(slots),
             flags: AtomicU32::new(flags.bits()),
             position: Mutex::new(position),
             readahead: Mutex::new(readahead),
@@ -828,6 +842,8 @@ pub struct VfsFile {
     operations: Arc<dyn FileOperations>,
     location: FileLocation,
     private_data: Mutex<TypeMap>,
+    /// Kernel-wide framework slots ([`crate::FileSlot`]).
+    slots: Mutex<FileSlots>,
     flags: AtomicU32,
     position: Mutex<u64>,
     pub(crate) readahead: Mutex<crate::file_ra::FileRaState>,
@@ -1308,6 +1324,31 @@ impl VfsFile {
         T: Any + Send + Sync + 'static,
     {
         self.private_data.lock().get::<T>()
+    }
+
+    /// Stores a kernel-wide framework object in `slot` on this open file.
+    ///
+    /// A slot is the file-level contract between subsystems that do not share
+    /// types (see [`FileSlot`]); a creator installs it, every reader finds it.
+    pub fn set_slot(&self, slot: FileSlot, value: Arc<dyn Any + Send + Sync>) {
+        self.slots.lock().insert(slot, value);
+    }
+
+    /// Returns the framework object stored in `slot` as a dynamic object.
+    ///
+    /// The caller performs the narrowing it needs (`downcast` for a concrete
+    /// type, or a runtime cast for a trait object), so one slot can be read by
+    /// crates that share no types.
+    pub fn slot_dyn(&self, slot: FileSlot) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.slots.lock().get(slot)
+    }
+
+    /// Returns the framework object stored in `slot`, downcast to `T`.
+    pub fn slot_get<T>(&self, slot: FileSlot) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.slots.lock().get(slot)?.downcast::<T>().ok()
     }
 
     /// Closes a descriptor reference for the given files owner. POSIX locks
