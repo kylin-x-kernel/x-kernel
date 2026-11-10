@@ -79,6 +79,10 @@ pub struct Scheduler<T, Owner: SharedOwner<SchedTask<T>> = Arc<SchedTask<T>>> {
 impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
     /// Build an empty scheduler whose Idle fallback is `idle`.
     ///
+    /// Allocates the Fair augmentation context during queue initialization;
+    /// the kernel allocator must already be available. Scheduling operations
+    /// reuse that context without per-edit allocation.
+    ///
     /// Fair requests use [`crate::DEFAULT_SLICE_NS`].
     pub fn new(idle: Owner, now_ns: u64) -> Self {
         Self {

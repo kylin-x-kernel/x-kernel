@@ -29,15 +29,15 @@ construction, work queues, or scheduling policy. `owner.rs` implements the
 contract for `Arc` and `DeferredArc`. `ksched` depends on `kfinalize` ownership
 types, not on `kworkng` or `ktask`.
 
-The Fair pair of trees and their caches, both Deadline trees, the RT list,
+The owning Fair ready tree and its cache, both Deadline trees, the RT list,
 Idle, and `current` all store the same owner type. There is no extra `Arc`
 wrapper mixed in, and no runtime enum or virtual dispatch. `OwnerPointerOps`
 delegates the library's raw transfer to `SharedOwner`. Entity field projection
 still uses the existing `offset_of` and must not build an owning pointer from
-`&SchedTask`. Clones inside a tree are still performed by the library's
-`clone_pointer`. The original counts of held `Arc`s and their release points
-still hold for a `DeferredArc` instance. Only the destruction policy of the
-last reference differs.
+`&SchedTask`. The first-deadline cache is refreshed through the owning tree's
+`clone_first`. Fair wraps one intrusive-collections RBTree with one owner
+per linked task; both `Arc` and `DeferredArc` use the existing
+Adapter/PointerOps round trip. No auxiliary borrowed index remains.
 
 Each scheduler uses one owner type. The type checker blocks a direct enqueue
 across different owners. The outer caller decides when to construct a
@@ -49,16 +49,18 @@ algorithm.
 full allocation provenance from `Owner::as_ptr`. A narrow pointer derived from
 `&SchedTask` cannot recover a `DeferredArc` header. A real RT queue reproduced
 that under Miri. The fix keeps O(1) removal and adds neither a pointer field
-nor an extra reference. Fair and Deadline still find the library-owned node by
-key. Queue ownership counts are unchanged.
+nor an extra reference. Fair and Deadline find their owning node by key. Fair recovers only the count originally transferred through its adapter,
+never an owner reconstructed from a borrowed task reference.
 
-A 64-bit host layout measurement (a `usize` test payload) shows a default
-`Scheduler` of 1872 bytes and a Deferred-owner instance of 1952 bytes, 80 bytes
-more, from five existing owner stores growing wider. `SchedTask<usize>` stays
-296 bytes. `OwnerPointerOps` adds no runtime field or allocation. These are not
-measured `TaskInner` costs and do not include per-task `DeferredArc` metadata.
-They are not a cross-platform ABI or performance guarantee. No formal
-throughput or latency measurement was taken.
+Fair now embeds one `FairLink` in place of the two original RB links.
+It stores parent/children, subtree minimum vruntime, dirty-list metadata and
+an atomic membership/color byte; it does not duplicate task keys or vruntime. The first-deadline
+cache and buddy may retain extra owners, but there is no secondary tree or
+`first_vruntime` owner cache. Layout is target-specific and not an ABI promise.
+One private Arc context is allocated at queue construction and shared only
+by the wrapper and its bound library adapter. Queue edits allocate nothing.
+The library-backed revision has not been executed or performance-measured;
+results for the earlier AVL or hand-balanced versions do not validate it.
 
 A running task leaves its current RQ for more reasons than yield: preempt,
 block, migrate, and exit. If each path cleaned scheduler state on its own, the
@@ -75,6 +77,7 @@ task/ksched/
 │   ├── config.rs       # Fair request, RR slice, RT bandwidth, DL budget and admission margin
 │   ├── policy.rs       # SchedClass rank, user policy, RtPrio, DlParams
 │   ├── entity.rs       # SchedTask, FairEntity, RtEntity, DeadlineEntity, RQ token
+│   ├── fair_tree.rs    # RBTreeOps augmentation over intrusive-collections
 │   ├── owner.rs        # SharedOwner and intrusive PointerOps adapter
 │   ├── ready_list.rs   # Intrusive FIFO for RT and O(1) removal
 │   ├── class.rs        # ClassOps
@@ -120,7 +123,7 @@ pick_next: Stop -> Deadline -> RT -> Fair -> Idle
 | `StopClass` | At most one waiter per RQ; no time slice; not stealable |
 | `DeadlineClass` | Two intrusive RB trees (ready / throttled); CBS budget; EDF selection; per-RQ bandwidth admission |
 | `RtClass` | Intrusive FIFO at priorities `1..=99`; RR slice; RT bandwidth throttle |
-| `FairClass` | Two intrusive RB trees, lag, NEXT_BUDDY, request |
+| `FairClass` | One owning augmented RB tree, lag, NEXT_BUDDY, request |
 | `IdleClass` | One pinned idle task per RQ; not queued |
 | `Scheduler::curr` | The running task's `Arc`, returned on `leave` |
 
@@ -380,25 +383,32 @@ snapshot.
   `account_sleep`, so callers do not have to remember a hidden invariant.
 - The unwired metadata-split scheduler is gone. Production and unit tests
   both use the entity embedded in the task.
-- The EEVDF ready index uses two RB trees from intrusive-collections 0.10.2,
-  ordered by `(deadline, id)` and `(vruntime, id)`, indexing the same entity
-  directly. There is no id lookup table. Each entity preinstalls two
-  `RBTreeAtomicLink`s. Enqueue, removal, and lookup do not allocate index
-  memory. The RT `1..=99` queues reuse `ready_list`: an
-  `intrusive-collections` `LinkedListAtomicLink`, the highest priority found
-  from a bitmap, and O(1) removal by queue identity. Fair does not use that
-  list. The dependency enables a nightly feature so the scheduler can stay
-  const-constructible, supported by the repository's existing
-  `RUSTC_BOOTSTRAP` build environment.
-- Each tree caches the earliest entity, so the common minimum query is O(1).
-  Insertion updates the cache by comparison. Removing the minimum updates it
-  from the cursor successor. Insert and delete stay O(log N). The library's
-  `front` is not itself O(1).
-- Eligible pick returns immediately when the first deadline node is eligible.
-  Otherwise it walks the eligible prefix of the vruntime order, O(log N + E),
-  without collecting a temporary `Vec`. Id order, lag, weight accounting,
-  `curr`, buddy/WF_SYNC, preemption, and the slice algorithm stay. Steal
-  keeps deadline order and the existing predicate signature.
+- Fair wraps intrusive-collections 0.10.2's owning `RBTree`. `BoundAdapter`
+  delegates projection, key access and PointerOps to the original Fair adapter;
+  its custom `RBTreeOps` supplies typed links and records structural changes.
+  The library performs all balancing, rotations, recoloring and raw-owner
+  recovery. There is no local copy of those algorithms or dependency fork.
+- Child setters append a node once to an embedded dirty list in O(1). They do
+  not follow parent paths, since rotations/transplants temporarily expose
+  incomplete topology. After one complete insert/remove, repair each dirty
+  node's final ancestor path. In the pinned library, insertion/deletion use a
+  constant number of rotations and child-pointer edits, so these repairs cost
+  O(log N). Ancestor updates do not stop early: a different pending child may
+  still have a stale summary. Changes to library mutation behavior require
+  re-auditing this complexity argument.
+- The private context mirrors the root through `set_parent(node, None)` and
+  root release. It is a borrowed pointer into the same owning RBTree, not a
+  second index. The root summary supplies minimum ready vruntime in O(1).
+  The existing earliest-deadline cache preserves the O(1) eligible-head path;
+  fallback prunes by subtree minima along one O(log N) root-to-leaf path.
+- Keys and vruntime remain immutable while linked. Nice/placement changes
+  remove and reinsert the node. No full-tree summary rebuild, temporary vector
+  or per-edit heap allocation is used. Dirty-list storage is embedded in each
+  link; the one per-queue context is allocated before scheduling operations.
+- Deadline/enqueue-id order, lag, weight sums, current-task accounting,
+  buddy/WF_SYNC and request semantics remain. Steal walks the same tree in
+  deadline order and transfers the selected owner's library-held count;
+  rejecting a candidate does not clone an owner.
 - EEVDF virtual time (`vruntime` / `deadline` / `vlag`) uses a fixed-width
   `i64`. Wall time (`slice_ns` / `request_ns` / `elapsed_ns`) uses `u64`.
   The two sides convert only through `vruntime_delta` /
@@ -408,47 +418,40 @@ snapshot.
 
 ## Drop / resource release
 
-`FairClass`'s two trees and earliest caches, and `next_buddy`, hold `Arc`s of
-queued tasks. `StopClass`'s waiter slot holds at most one more. `Scheduler::curr`
-holds the running task's `Arc` and no longer holds it after leave. The idle
-slot pins each RQ's idle task and is released with `Scheduler`. Tree `Drop`
-uses the library's `clear()` and does not call `get_key`, so it does not read
-an `RqCell` on an unlocked path.
+The library RBTree owns one PointerOps count per Fair node. Insert, cursor
+removal, minimum-cache cloning and ordered iteration use the library APIs;
+`fair_tree.rs` implements no raw-owner recovery or reference-count cloning.
+The bound adapter delegates the original full-provenance field projection,
+so ownership does not pass through a narrowed `&SchedTask` pointer.
 
-The plugin scheduler's ready queue holds `Arc`s of Ready tasks. The running
-task's owner lives on the `ktask` side (the current-task pointer, wait/waker,
-migration helper, exited list). The algorithm's `curr` snapshot is cleared on
-`leave_current` and does not extend the task's lifetime.
+Normal library unlink marks the node `RETIRED`, which still reports linked.
+The wrapper holds the returned owner while draining dirty references; retired
+nodes are skipped during ancestor repair. Only after repair finishes does
+membership become UNLINKED with Release, allowing another tree's Acquire to
+reuse storage. This closes the unlink-to-repair early-reuse window even when
+another holder observes the atomic membership flag. The removed owner's
+backing allocation remains live throughout.
 
-Each EEVDF tree holds one existing `Arc`. Each of the two earliest caches
-holds one more when needed. While both indexes are removed and the caches are
-updated, the returned reference is kept, so releasing the extra references
-does not run the entity's final destructor. A non-empty scheduler `Drop` lets
-the trees clear links and holdings normally. `fast_clear` must not be used.
-Both links must be removed before migration. While queued, deadline,
-vruntime, and id do not change. `set_priority` removes the task from the
-trees before changing the key.
+Nonempty wrapper Drop switches link operations to clearing mode before
+calling library `clear()`. Clear saves children, releases each link directly
+and drops its count; it never queries task keys/vruntime. The wrapper discards
+pending-list pointers without following them after clear, then the empty
+library tree and private context drop normally. No retired/dirty node pointer
+may be followed after its backing owner is released.
 
-The index is serialized by the existing scheduler lock. `AtomicLink` does not
-mean a lock-free tree. Removal by entity looks up the key and then checks the
-address. Another entity with the same key is not removed. `set_priority` on
-the wrong scheduler returns false for a foreign entity that is still linked,
-so it does not modify another tree's sort fields.
+## Augmentation validation
 
-The library's `intrusive_adapter!` macro cannot express `EevdfEntity`'s const
-generic, so the private `EntityAdapter` implements `Adapter` with two
-compile-time field projections of the same template. There is no runtime
-mode. Field offsets use `core::mem::offset_of!`. `Arc` conversion is done by
-`DefaultPointerOps`. Cache references come from the safe
-`cursor.clone_pointer`. Reference counts are not restored by hand.
+The [native/Miri fixture](../tests/fair-tree/README.md) compiles the wrapper
+against the pinned library with an Arc adapter. Prepared checks cover library
+red-black invariants, parent/root consistency, dirty-list draining, summaries,
+successor transplants, reuse, owner release and a linear selection oracle.
+Guest regressions cover actual Scheduler picks, Arc/DeferredArc, nice,
+preemption, wake and migration.
 
-While EEVDF steal inspects nodes one by one, it builds a
-`ManuallyDrop<Arc<_>>` temporary borrow view from the cursor's `get_ptr`, so
-a miss does not touch the atomic reference count. The predicate receives only
-`&Arc`. On a hit it clones one real strong reference, ends the cursor borrow,
-and then takes the existing `remove_task` path. Throughout the scan the tree
-keeps its original strong reference. Neither a normal return nor a panic
-releases the borrowed reference.
+Only type and formatting checks have run for this library-backed revision.
+The prepared tests, guest execution and Miri have not run. Earlier AVL or
+hand-balanced-tree results are not validation of this implementation, and no
+RQ hold-time, throughput or wake-latency improvement has been measured.
 
 ## RT queues
 

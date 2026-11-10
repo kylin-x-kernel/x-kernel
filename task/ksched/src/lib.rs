@@ -9,6 +9,7 @@ mod classes;
 mod clock;
 mod config;
 mod entity;
+mod fair_tree;
 mod owner;
 mod policy;
 mod ready_list;
@@ -21,6 +22,8 @@ unittest::path_mod_test!(
     mod tests,
     "../ut-tests/scheduler.rs"
 );
+
+unittest::path_mod_test!(mod tests_fair_tree, "../ut-tests/fair_tree.rs");
 
 extern crate alloc;
 

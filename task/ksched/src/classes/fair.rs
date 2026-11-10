@@ -11,25 +11,22 @@
 //! `vruntime ≤ V` — it has not run ahead of its share. Among eligible tasks,
 //! the earliest deadline runs.
 //!
-//! Ready waiters live in two intrusive RB trees on the same
-//! [`SchedTask`]: deadline order for pick, vruntime order for the eligible
-//! prefix. Links are stored on the entity, so enqueue does not allocate an
-//! index node.
+//! One owning intrusive red-black tree orders waiters by deadline and caches
+//! subtree minimum vruntime. Eligible selection follows one O(log N) path;
+//! the embedded link serves ordering, eligibility and task lifetime together.
 
 use core::ptr::NonNull;
 
-use intrusive_collections::{Adapter, DefaultLinkOps, KeyAdapter, RBTree, RBTreeAtomicLink};
+use intrusive_collections::{Adapter, DefaultLinkOps, KeyAdapter};
 
 use crate::{
     class::{ClassOps, EnqueueKind, LeaveReason},
     clock::RqClock,
     entity::{QueueSeat, RqLocked, SchedTask},
+    fair_tree::{DeadlineKey, FairLink, FairTree, FairTreeAdapter},
     owner::{OwnerPointerOps, SharedOwner},
     policy::{NICE_0_WEIGHT, SchedAttr, SchedClass, SchedError},
 };
-
-/// Ready-tree key: `(deadline, enqueue_id)`. Equal deadlines are FIFO.
-type DeadlineKey = (i64, u64);
 
 /// Convert wall-clock nanoseconds into virtual time.
 ///
@@ -64,41 +61,33 @@ fn is_eligible(vruntime: i64, avg_vruntime: i64) -> bool {
     vruntime <= avg_vruntime
 }
 
-/// `intrusive_adapter!` cannot name `SchedTask`'s const-free generic, so the
-/// two field projections share one adapter. `DEADLINE` selects the deadline
-/// tree; otherwise the adapter indexes by vruntime.
-struct FairAdapter<T, Owner: SharedOwner<SchedTask<T>>, const DEADLINE: bool> {
-    link_ops: <RBTreeAtomicLink as DefaultLinkOps>::Ops,
+/// Owner-preserving adapter for the deadline-ordered ready tree.
+struct FairAdapter<T, Owner: SharedOwner<SchedTask<T>>> {
+    link_ops: <FairLink as DefaultLinkOps>::Ops,
     pointer_ops: OwnerPointerOps<SchedTask<T>, Owner>,
 }
 
-impl<T, Owner: SharedOwner<SchedTask<T>>, const D: bool> FairAdapter<T, Owner, D> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> FairAdapter<T, Owner> {
     const NEW: Self = Self {
-        link_ops: <RBTreeAtomicLink as DefaultLinkOps>::NEW,
+        link_ops: <FairLink as DefaultLinkOps>::NEW,
         pointer_ops: OwnerPointerOps::new(),
     };
-    const OFFSET: usize = if D {
-        core::mem::offset_of!(SchedTask<T>, fair.deadline_link)
-    } else {
-        core::mem::offset_of!(SchedTask<T>, fair.vruntime_link)
-    };
+    const OFFSET: usize = core::mem::offset_of!(SchedTask<T>, fair.ready_link);
 }
 
-// SAFETY: each adapter projects one actual `RBTreeAtomicLink` field of
+// SAFETY: each adapter projects one actual `FairLink` field of
 // `SchedTask<T>`. `get_link` / `get_value` invert the same field offset
 // inside the live entity allocation and do not change ownership.
 // `OwnerPointerOps` holds each tree's independent owner.
-unsafe impl<T, Owner: SharedOwner<SchedTask<T>>, const D: bool> Adapter
-    for FairAdapter<T, Owner, D>
-{
-    type LinkOps = <RBTreeAtomicLink as DefaultLinkOps>::Ops;
+unsafe impl<T, Owner: SharedOwner<SchedTask<T>>> Adapter for FairAdapter<T, Owner> {
+    type LinkOps = <FairLink as DefaultLinkOps>::Ops;
     type PointerOps = OwnerPointerOps<SchedTask<T>, Owner>;
 
     /// # Safety
     ///
     /// `link` must have been produced by this adapter's `get_link` on a
     /// still-live `SchedTask<T>`.
-    unsafe fn get_value(&self, link: NonNull<RBTreeAtomicLink>) -> *const SchedTask<T> {
+    unsafe fn get_value(&self, link: NonNull<FairLink>) -> *const SchedTask<T> {
         // SAFETY: Adapter requires a link previously projected by this
         // adapter; subtracting the same field offset recovers the live
         // owning allocation.
@@ -108,7 +97,7 @@ unsafe impl<T, Owner: SharedOwner<SchedTask<T>>, const D: bool> Adapter
     /// # Safety
     ///
     /// `value` must point to a live, initialized `SchedTask<T>`.
-    unsafe fn get_link(&self, value: *const SchedTask<T>) -> NonNull<RBTreeAtomicLink> {
+    unsafe fn get_link(&self, value: *const SchedTask<T>) -> NonNull<FairLink> {
         // SAFETY: Adapter supplies a live entity; OFFSET selects its
         // aligned, initialized link field without creating an exclusive
         // entity reference.
@@ -131,45 +120,44 @@ unsafe impl<T, Owner: SharedOwner<SchedTask<T>>, const D: bool> Adapter
     }
 }
 
-impl<'a, T, Owner: SharedOwner<SchedTask<T>>, const D: bool> KeyAdapter<'a>
-    for FairAdapter<T, Owner, D>
-{
+impl<'a, T, Owner: SharedOwner<SchedTask<T>>> KeyAdapter<'a> for FairAdapter<T, Owner> {
     type Key = DeadlineKey;
 
     fn get_key(&self, task: &'a SchedTask<T>) -> Self::Key {
         // SAFETY: `KeyAdapter::get_key` is only invoked by
-        // `intrusive_collections` 0.10.2 insert / find / range / cursor
-        // walks. Those run from `FairClass` methods that already hold
+        // the owning FairTree's insert, find and eligibility
+        // queries. Those run from `FairClass` methods that already hold
         // `RqLocked` from the Scheduler entry. Linked sort keys are
         // immutable until the entity is unlinked.
         //
-        // Tree teardown does not call `get_key`: `RBTree::drop` is
-        // `clear()`, and `clear_recurse` only walks `left`/`right`,
-        // `release_link`, and `PointerOps::from_raw`. Cursor types have
-        // no `Drop` impl. So a non-empty `Scheduler` drop without the
-        // RQ lock does not race on `RqCell`. Atomic keys are unnecessary.
+        // Tree teardown reads only topology, releases links and recovers
+        // retained PointerOps owners. It never reads keys or vruntime, so an
+        // unlocked exclusive Scheduler drop does not access RqCell fields.
         let tok = unsafe { RqLocked::assume() };
-        if D {
-            (task.fair().deadline.get(tok), task.fair().tree_id.get(tok))
-        } else {
-            (task.fair().vruntime.get(tok), task.fair().tree_id.get(tok))
-        }
+        (task.fair().deadline.get(tok), task.fair().tree_id.get(tok))
+    }
+}
+
+// SAFETY: the accessor is one non-panicking RqCell read under the owning RQ.
+// FairClass removes a node before changing its key/vruntime and never reenters
+// the tree from either scheduling-field accessor.
+unsafe impl<T, Owner: SharedOwner<SchedTask<T>>> FairTreeAdapter for FairAdapter<T, Owner> {
+    fn vruntime(&self, task: &SchedTask<T>) -> i64 {
+        // SAFETY: augmentation is updated/queried only by FairClass while its
+        // owning RQ is locked. Tree Drop never requests scheduling fields.
+        task.fair().vruntime.get(unsafe { RqLocked::assume() })
     }
 }
 
 /// Per-CPU EEVDF ready queue.
 ///
-/// Waiters sit in two intrusive trees on the same entity: deadline order
-/// for pick, vruntime order for the eligible prefix. The runner stays off
-/// both trees; pick and preemption take it as `curr` when **V** must
-/// include it. Putting the runner back before a preemption probe lets the
+/// Waiters live in one owning augmented tree. The runner stays off the tree;
+/// pick and preemption take it as `curr` when **V** must include it. Putting the runner back before a preemption probe lets the
 /// two swap on deadline repeatedly.
 pub(crate) struct FairClass<T, Owner: SharedOwner<SchedTask<T>>> {
-    ready: RBTree<FairAdapter<T, Owner, true>>,
-    vruntime_tree: RBTree<FairAdapter<T, Owner, false>>,
-    /// Cached minima: `RBTree::front` itself is O(log N).
+    ready: FairTree<FairAdapter<T, Owner>>,
+    /// Cached minimum: finding the leftmost node itself takes O(log N).
     first_deadline: Option<Owner>,
-    first_vruntime: Option<Owner>,
     queued: usize,
     /// Placement floor. Includes the off-tree runner so an ahead waiter
     /// cannot freeze this above the real average.
@@ -190,12 +178,10 @@ pub(crate) struct FairClass<T, Owner: SharedOwner<SchedTask<T>>> {
 }
 
 impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
-    pub(crate) const fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            ready: RBTree::new(FairAdapter::NEW),
-            vruntime_tree: RBTree::new(FairAdapter::NEW),
+            ready: FairTree::new(FairAdapter::NEW),
             first_deadline: None,
-            first_vruntime: None,
             queued: 0,
             min_vruntime: 0,
             sum_wv: 0,
@@ -296,10 +282,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
     }
 
     fn update_min_vruntime(&mut self, curr: Option<&SchedTask<T>>, tok: RqLocked) {
-        let tree_min = self
-            .first_vruntime
-            .as_ref()
-            .map(|task| task.fair().vruntime.get(tok));
+        let tree_min = self.ready.min_vruntime();
         let candidate = match (curr, tree_min) {
             (Some(curr), Some(tree_min)) => curr.fair().vruntime.get(tok).min(tree_min),
             (Some(curr), None) => curr.fair().vruntime.get(tok),
@@ -317,8 +300,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
 
     fn contains(&self, task: &SchedTask<T>, tok: RqLocked) -> bool {
         self.ready
-            .find(&Self::deadline_key(task, tok))
-            .get()
+            .find(Self::deadline_key(task, tok))
             .is_some_and(|found| core::ptr::eq(found, task))
     }
 
@@ -329,25 +311,14 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
         let deadline = task.fair().deadline.get(tok);
         let weight = Self::weight(&task, tok);
         task.set_seat(QueueSeat::from_sched_class(SchedClass::Fair), tok);
-        debug_assert!(!task.fair().deadline_link.is_linked());
-        debug_assert!(!task.fair().vruntime_link.is_linked());
+        debug_assert!(!task.fair().ready_link.is_linked());
         self.ready.insert(task.clone());
-        self.vruntime_tree.insert(task.clone());
         if self
             .first_deadline
             .as_ref()
             .is_none_or(|first| (deadline, id) < Self::deadline_key(first, tok))
         {
             self.first_deadline = Some(task.clone());
-        }
-        if self.first_vruntime.as_ref().is_none_or(|first| {
-            (vruntime, id)
-                < (
-                    first.fair().vruntime.get(tok),
-                    first.fair().tree_id.get(tok),
-                )
-        }) {
-            self.first_vruntime = Some(task);
         }
         self.queued += 1;
         self.sum_wv += vruntime as i128 * weight as i128;
@@ -367,39 +338,16 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
         queued_weight: Option<i64>,
         tok: RqLocked,
     ) -> Option<Owner> {
-        let mut cursor = self.ready.find_mut(&key);
-        let task = cursor.remove()?;
+        let task = self.ready.remove(key)?;
         if self
             .first_deadline
             .as_ref()
             .is_some_and(|first| Owner::ptr_eq(first, &task))
         {
-            self.first_deadline = cursor.as_cursor().clone_pointer();
+            self.first_deadline = self.ready.clone_first();
         }
-        let id = task.fair().tree_id.get(tok);
         let weight = queued_weight.unwrap_or_else(|| Self::weight(&task, tok));
         let vruntime = task.fair().vruntime.get(tok);
-        let mut cursor = self.vruntime_tree.find_mut(&(vruntime, id));
-        assert!(
-            cursor
-                .get()
-                .is_some_and(|found| core::ptr::eq(found, Owner::as_ptr(&task))),
-            "EEVDF vruntime tree out of sync with ready for task {id}"
-        );
-        #[expect(
-            clippy::unwrap_used,
-            reason = "CG-021-no-panic-on-reachable-failure: the preceding assertion proves this \
-                      cursor points to the ready task in the vruntime tree"
-        )]
-        let secondary = cursor.remove().unwrap();
-        if self
-            .first_vruntime
-            .as_ref()
-            .is_some_and(|first| Owner::ptr_eq(first, &task))
-        {
-            self.first_vruntime = cursor.as_cursor().clone_pointer();
-        }
-        drop(secondary);
         task.set_seat(QueueSeat::Detached, tok);
         self.queued = self.queued.saturating_sub(1);
         self.sum_wv -= vruntime as i128 * weight as i128;
@@ -412,14 +360,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
         if is_eligible(first.fair().vruntime.get(tok), avg) {
             return Some(Self::deadline_key(first, tok));
         }
-        // PLACE_LAG negative lag parks ineligible tasks at the deadline
-        // front, so walking deadline order would be O(n). Scan the
-        // vruntime eligible prefix instead.
-        self.vruntime_tree
-            .iter()
-            .take_while(|task| is_eligible(task.fair().vruntime.get(tok), avg))
-            .map(|task| Self::deadline_key(task, tok))
-            .min()
+        self.ready.earliest_eligible(avg)
     }
 
     fn clear_buddy(&mut self) {
@@ -525,9 +466,28 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
         if !self.contains(task, tok) {
             return None;
         }
-        self.clear_buddy_if(task);
-        let lag = self.avg_vruntime(curr, tok) - task.fair().vruntime.get(tok);
-        let removed = self.dequeue_entity(Self::deadline_key(task, tok), tok)?;
+        self.dequeue_key_with_lag(Self::deadline_key(task, tok), curr, tok)
+    }
+
+    fn dequeue_key_with_lag(
+        &mut self,
+        key: DeadlineKey,
+        curr: Option<&SchedTask<T>>,
+        tok: RqLocked,
+    ) -> Option<Owner> {
+        let (lag, is_buddy) = {
+            let task = self.ready.find(key)?;
+            (
+                self.avg_vruntime(curr, tok) - task.fair().vruntime.get(tok),
+                self.next_buddy
+                    .as_ref()
+                    .is_some_and(|buddy| core::ptr::eq(&**buddy, task)),
+            )
+        };
+        if is_buddy {
+            self.clear_buddy();
+        }
+        let removed = self.dequeue_entity(key, tok)?;
         removed.fair().vlag.set(
             Self::clamp_vlag(
                 lag,
@@ -578,11 +538,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
             reason = "CG-021-no-panic-on-reachable-failure: earliest_eligible returns a key from \
                       this unchanged, locked ready tree"
         )]
-        let peer = self
-            .ready
-            .find(&key)
-            .get()
-            .expect("eligible key is in ready");
+        let peer = self.ready.find(key).expect("eligible key is in ready");
         !is_eligible(curr.fair().vruntime.get(tok), avg) || !Self::entity_before(curr, peer, tok)
     }
 
@@ -661,15 +617,14 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Ow
         _clk: &RqClock,
         tok: RqLocked,
     ) -> Option<Owner> {
-        let mut cursor = self.ready.front();
-        let task = loop {
-            match cursor.get() {
-                Some(queued) if want(queued) => break cursor.clone_pointer()?,
-                Some(_) => cursor.move_next(),
-                None => return None,
-            }
-        };
-        self.dequeue_with_lag(&task, curr, tok)
+        let key = self
+            .ready
+            .iter()
+            .find(|queued| want(queued))
+            .map(|task| Self::deadline_key(task, tok))?;
+        // Removal transfers the tree's owner directly; rejected candidates
+        // never create a temporary owner or change a reference count.
+        self.dequeue_key_with_lag(key, curr, tok)
     }
 
     fn pick_next(&mut self, _clk: &RqClock, tok: RqLocked) -> Option<Owner> {
@@ -894,23 +849,16 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
     pub(crate) fn ready_indices_valid_for_test(&self) -> bool {
         // SAFETY: ksched unittests are single-threaded.
         let tok = unsafe { RqLocked::assume() };
-        let same_members = self.ready.iter().all(|task| {
-            self.vruntime_tree
-                .find(&(task.fair().vruntime.get(tok), task.fair().tree_id.get(tok)))
-                .get()
-                .is_some_and(|other| core::ptr::eq(task, other))
-        });
-        let same_first = |tree_front: Option<&SchedTask<T>>, cached: Option<&Owner>| {
-            tree_front.map(core::ptr::from_ref) == cached.map(Owner::as_ptr)
-        };
-        same_members
-            && self.ready.iter().count() == self.vruntime_tree.iter().count()
+        self.ready.valid_for_test()
             && self.ready.iter().count() == self.queued
-            && same_first(self.ready.front().get(), self.first_deadline.as_ref())
-            && same_first(
-                self.vruntime_tree.front().get(),
-                self.first_vruntime.as_ref(),
-            )
+            && self.ready.first().map(core::ptr::from_ref)
+                == self.first_deadline.as_ref().map(Owner::as_ptr)
+            && self
+                .ready
+                .iter()
+                .map(|task| task.fair().vruntime.get(tok))
+                .min()
+                == self.ready.min_vruntime()
             && self.total_weight
                 == self
                     .ready

@@ -410,6 +410,40 @@ fn eevdf_steal_fair_only() {
 }
 
 #[def_test]
+fn eevdf_augmented_selection_matches_deadline_oracle() {
+    const N: usize = 129;
+    let tasks: alloc::vec::Vec<_> = (0..N).map(task).collect();
+    let mut active = [true; N];
+    let mut scheduler = sched();
+    for (id, task) in tasks.iter().enumerate() {
+        task.set_vruntime_for_test((id % 17) as i64 - 8);
+        task.set_deadline_for_test(((id * 13) % 23) as i64 - 11);
+        scheduler.fair_mut().inject_ready_for_test(task.clone());
+    }
+    for _ in 0..N {
+        let avg = scheduler.fair_mut().avg_vruntime_for_test(None);
+        let expected = tasks.iter().enumerate()
+            .filter(|(id, task)| active[*id] && task.vruntime_for_test() <= avg)
+            .min_by_key(|(_, task)| (task.deadline_for_test(),
+                task.fair().tree_id.get(SchedTask::<usize>::test_token())))
+            .map(|(id, _)| id).unwrap();
+        assert_eq!(pick_id(&mut scheduler, 0), expected);
+        active[expected] = false;
+        scheduler.exit_current(0);
+        assert!(scheduler.fair_mut().ready_indices_valid_for_test());
+        assert_eq!(Arc::strong_count(&tasks[expected]), 1);
+    }
+    unittest::ktest_println!(
+        "EEVDF layout: augmented RB link={} B, RB link={} B, task={} B, Arc scheduler={} B, Deferred scheduler={} B",
+        core::mem::size_of::<crate::fair_tree::FairLink>(),
+        core::mem::size_of::<intrusive_collections::RBTreeAtomicLink>(),
+        core::mem::size_of::<SchedTask<usize>>(),
+        core::mem::size_of::<Scheduler<usize>>(),
+        core::mem::size_of::<DeferredScheduler>(),
+    );
+}
+
+#[def_test]
 fn eevdf_intrusive_identity_and_release() {
     let mut left = sched();
     let mut right = sched();

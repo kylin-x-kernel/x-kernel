@@ -13,6 +13,7 @@ use core::{
 use intrusive_collections::RBTreeAtomicLink;
 
 use crate::{
+    fair_tree::FairLink,
     policy::{Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy},
     ready_list::{ReadyItem, ReadyLinks},
 };
@@ -145,10 +146,8 @@ pub(crate) struct FairEntity {
     pub(crate) request_ns: RqCell<u64>,
     pub(crate) weight: RqCell<u32>,
     pub(crate) tree_id: RqCell<u64>,
-    /// Link in the deadline-ordered ready tree.
-    pub(crate) deadline_link: RBTreeAtomicLink,
-    /// Link in the vruntime-ordered tree used for the eligible prefix.
-    pub(crate) vruntime_link: RBTreeAtomicLink,
+    /// One owning deadline tree, augmented with subtree minimum vruntime.
+    pub(crate) ready_link: FairLink,
 }
 
 /// FIFO/RR leftover quantum. Present on every task so a class switch does not allocate.
@@ -232,8 +231,7 @@ impl FairEntity {
             request_ns: RqCell::new(request_ns),
             weight: RqCell::new(Nice::DEFAULT.weight()),
             tree_id: RqCell::new(0),
-            deadline_link: RBTreeAtomicLink::new(),
-            vruntime_link: RBTreeAtomicLink::new(),
+            ready_link: FairLink::new(),
         }
     }
 }

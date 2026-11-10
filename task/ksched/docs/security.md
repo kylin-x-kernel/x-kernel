@@ -45,19 +45,19 @@ library may clone a node reference with a temporary `ManuallyDrop` owner. The
 temporary view does not consume the count the queue retains. The real owner
 covers every use. The adapter must keep the full pointer provenance of
 `into_raw`. The inverse of the field projection is what recovers a
-`DeferredArc` payload header. Each owner in the cache, the dual index, and
-`current` is counted independently. A non-empty queue destructor unlinks one
+`DeferredArc` payload header. Each owning tree/cache and `current` retains its own count. Fair uses one
+library-owned tree with a borrowed root mirror and no secondary index. A non-empty queue destructor unlinks one
 by one. It does not `fast_clear`, and it does not destroy a Deferred payload
-in place. Host, Miri, and guest tests of the three real queue kinds cover
-this boundary.
+in place. Existing owner probes cover the earlier queue implementations; the new
+Fair tree still needs its own prepared probes executed.
 
 RT removal by task must use `&Owner`'s raw pointer. A pointer derived from
 `&SchedTask` must not cross the payload header. Miri reported a borrow-stack
 violation on that path. After the fix to `Owner::as_ptr`, the RT and core raw
-cases pass strict-provenance Miri. The intrusive-collections 0.10.2 used by
-Fair and Deadline encodes parent and color as integer pointers. Those were
-verified only in the default provenance mode, and the warning remains. They
-are not a strict-provenance pass. Alias and leak checks stay enabled.
+cases pass strict-provenance Miri. Deadline's intrusive-collections 0.10.2 RB trees encode parent/color as
+integer pointers; their existing checks used default provenance mode and
+are not a strict-provenance pass. Fair supplies typed parent pointers and a separate color byte through
+custom RBTreeOps; the library-backed revision has not run under Miri.
 
 `ksched` does not touch user memory, devices, or firmware input directly. The
 attack surface is mainly:
@@ -80,7 +80,7 @@ attack surface is mainly:
 ## Unsafe inventory
 
 The Deadline class adds `DlAdapter<T, const READY: bool>`, matching
-`FairAdapter`. `get_link` / `get_value` project fields forward and back on
+`FairAdapter`'s field-projection pattern. `get_link` / `get_value` project fields forward and back on
 the same `SchedTask<T>` with `core::mem::offset_of!`, onto
 `deadline.ready_link` and `deadline.throttled_link`.
 
@@ -115,8 +115,7 @@ The owner word is not the list's synchronization lock. `Relaxed` is enough
 for the identity check. Operations on the same queue already have exclusive
 access. Another queue can write only its own address or zero, and cannot
 forge this queue's address. Taking a link across queues depends on the
-library's atomic link operations. No link or identity field is public. No
-hand-written `Send` or `Sync` is added.
+library's atomic link operations. No link or identity field is public. The ready-list adapter adds no hand-written `Send` or `Sync`.
 
 `ReadyList::steal` borrows the task through the cursor `get`. The predicate
 receives only `&T`. It does not restore a temporary `Arc` and does not
@@ -125,34 +124,49 @@ predicate. On a hit the owner mark is cleared first, the task borrow ends,
 and `remove` then transfers the list's existing owning reference. A rejection
 or a predicate panic does not move list ownership.
 
-EEVDF adds two raw pointer projections on the private `EntityAdapter`.
-`get_link` adds the `offset_of` of the field this adapter selected to a live
-entity pointer. `get_value` inverts a link pointer previously produced by
-that adapter. The offset comes from the same concrete `EevdfEntity<T, S>`
-type. It does not assume Rust field order or rebuild an address from an
-integer. The tree manages ownership with the library's
-`DefaultPointerOps<Arc<_>>`. There is no raw borrowed index.
-The adapter locates fields. It is not the tree's balancing algorithm. The
-macro does not support const generics, so the adapter is implemented
-explicitly.
-EEVDF steal has a separate raw-ownership audit point. It takes the tree-owned
-`Arc` data pointer from the cursor's `get_ptr` (not from `&T`).
-`ManuallyDrop` only borrows that strong reference. The predicate receives
-only `&Arc`. The tree borrow covers the whole predicate call and blocks
-removal and destruction. A panic does not release the borrowed strong
-reference. Only a hit clones a truly owned `Arc`. After the temporary view
-ends, the path is `remove_task`. The temporary view is not used after
-removal, and the borrowed reference is not handed to the caller.
+`FairAdapter` projects `fair.ready_link`, a `FairLink` embedded in
+`SchedTask<T>`. Both directions preserve the original PointerOps provenance.
+`BoundAdapter` delegates exactly that projection, pointer ownership and key
+lookup, replacing only link operations. Adapter instances are retained in one
+private Arc context; no clone-equivalence assumption about adapters is needed.
+`KeyAdapter::get_key` and `FairTreeAdapter::vruntime` require the owning RQ;
+exclusive clear/drop never invokes those scheduling accessors.
+`FairTreeAdapter` is unsafe: its vruntime accessor must not panic or reenter
+the tree while pending removed-node references are being repaired. Production
+uses one RqCell read; the probe adapters read immutable scalar fields.
 
-`FairClass` has its own `FairAdapter`. It projects `fair.deadline_link` and
-`fair.vruntime_link` inside `SchedTask<T>`, not the plugin `EevdfEntity`.
-`get_link` and `get_value` invert the same field `offset_of` and do not
-change `Arc` ownership. Each tree holds one `Arc`.
-`KeyAdapter::get_key` calls `RqLocked::assume()` from a safe function.
-Insert, lookup, and cursors enter only from `FairClass` methods that already
-hold the token. `RBTree`'s `Drop` uses `clear()` and does not call
-`get_key`, so destroying a non-empty `Scheduler` does not read an `RqCell`
-without the lock.
+`fair_tree.rs`'s custom RBTreeOps stores the exact children, parent and color
+requested by intrusive-collections. Structural setters cannot panic or
+allocate; child edits record dirty nodes without following transient parents.
+After the library completes balancing, the wrapper repairs summaries through
+final ancestry. Root changes are mirrored by parent-to-None and root release;
+the mirror has no independent owner and is never read during an in-flight edit.
+All insertion/deletion balancing and owner recovery stay in the library.
+
+Unsafe pointer access is confined to live embedded links and the original
+adapter inverse projection in `Context::value`. Linked nodes are retained by
+the library tree. A removed node remains RETIRED until the wrapper consumes
+its dirty-list entry while holding the returned owner. Atomic membership
+remains occupied during this interval, preventing another tree from acquiring
+and overwriting pending metadata. The final UNLINKED Release follows repair
+and pairs with Acquire on reuse. Color changes never expose an unlinked state.
+
+FairLink's Cell metadata and MutationState are shared only inside one wrapper
+and its bound adapter, serialized by RQ/exclusive mutation. Their Send/Sync
+arguments depend on those private context handles never escaping. Moving a
+wrapper moves both handles and all owners together; shared wrapper access
+requires Sync adapter/value/owner bounds. Atomic membership alone is safe to
+observe remotely and does not publish scheduling metadata.
+
+Drop enables clearing mode, drains the library tree, and discards pending
+pointers without dereferencing them after owner destruction. Clearing mode
+releases links immediately because no summary repair follows; normal removal
+instead retains the node reservation through repair. The library tree is
+empty before either private context handle can become the final owner.
+
+Prepared invariant/oracle/ownership probes have not been executed for this
+revision. Type checking alone does not establish augmentation or lifetime
+correctness; prior AVL/hand-balanced-tree results do not validate this wrapper.
 
 `RqCell`'s `get` and `set` read and write an `UnsafeCell`. A read requires a
 valid pointer, an initialized value, and no concurrent write. A write also
@@ -191,18 +205,18 @@ again.
 
 ## Memory-safety invariants
 
-1. Each of an EEVDF Ready task's two trees holds one `Arc`. The two earliest
-   caches and `next_buddy` may hold more. After the trees unlink, the
-   returned holding covers release of the extra references. The entity must
-   not be finally destroyed early.
+1. The library retains one owner per Fair node. Normal removal holds its
+   returned owner and RETIRED reservation through dirty repair. Drop uses
+   clearing mode and never follows pending references after releasing owners.
 2. EEVDF `curr` must not hold an `Arc`. It stores only a scheduling snapshot.
 3. `curr` must be empty before `pick_next_task` (`leave_current` has run).
 4. Exit must not set PLACE_LAG. Block and Migrate must set it for the later
    `enqueue_task`.
 5. After a running entity's scheduling fields change, the `curr` snapshot
    must be refreshed.
-6. The two EEVDF trees have the same members. Sort fields do not change
-   while linked. A priority change removes the task from both trees first.
+6. Fair has one library-owned tree. Linked keys/vruntime remain immutable;
+   all completed edits drain the dirty list and repair final ancestor paths.
+   The root mirror and summary agree with the library topology.
 7. Removal by entity checks the key and the pointer identity first. It does
    not infer membership from `is_linked`. `set_priority` on the wrong queue
    must not modify an entity linked elsewhere. A double enqueue is a caller
@@ -233,7 +247,7 @@ comes from `ktask`'s per-CPU RQ lock and the IRQ/preemption constraints.
 | T-04 | The source RQ still counts a task's weight after migration | Medium | Migrate does not clear current accounting | Migrate goes through `leave_current` and clears the snapshot |
 | T-05 | A stale `curr` snapshot causes the wrong preemption or placement | Medium | A running entity's fields change without a refresh | `update_current` / `set_priority` refresh; test helpers sync explicitly |
 | T-06 | Idle-pull steals an entity that is still `on_cpu` | High | A remote `steal_ready_task` after yield/preempt enqueued the task | The scheduler removes only a ready waiter; the `ktask` predicate rejects `on_cpu` and does not `pick_next` |
-| T-07 | A leftover link in either tree or the cache selects or holds the wrong task | High | Removal, a key change, or `Drop` misses one link | Both trees unlink under the same lock; the cursor successor updates the cache; normal tree `Drop`; membership, reference, and re-entry tests |
+| T-07 | A stale Fair link, summary or cache selects or holds the wrong task | High | Removal, key changes, balancing or Drop violate tree invariants | Library balancing; RQ-serialized final-path repair; RETIRED reuse barrier; prepared invariant, oracle, ownership and reuse probes |
 | T-08 | `Scheduler` writes an `RqCell` without the RQ lock | High | The caller breaks the lock contract | Documented; the token is built only at a `Scheduler` entry and at unpublished init |
 | T-09 | The arbiter `curr` `Arc` is the only reference after Block | High | The caller does not hold the task separately | `leave` releases the arbiter reference; the caller must hold the task |
 | T-10 | A second Stop task appears on the same RQ | High | A repeated activate, a mistaken enqueue, or `install_current` while a waiter exists | `enqueue` and `set_curr` assert when the slot is already occupied |
@@ -303,8 +317,14 @@ No user data. The crate operates only on kernel task scheduling metadata.
 - [ ] Tests cover the five dispositions and pick-without-leave.
 - [ ] `steal_ready_task` goes through `remove_task` and does not install
       `curr`.
-- [ ] The EEVDF pair of trees and the earliest caches agree, and every key
-      change unlinks first.
+- [ ] Every linked key/vruntime change removes the Fair node first; final
+      path repair drains all dirty entries and agrees with the mirrored root.
+- [ ] Normal unlink retains the owner and RETIRED reservation through repair;
+      release never permits early reuse of pending metadata.
+- [ ] Owner transfer/cache cloning stay in the library and delegate the original
+      adapter projection. No tree balancing is duplicated in ksched.
+- [ ] Nonempty Drop uses clearing mode, reads no scheduling fields, and never
+      dereferences discarded pending pointers after owners are released.
 - [ ] A queued task that changes nice subtracts the old weight contribution
       before enqueueing at the new weight, and removal leaves no residual
       charge.
