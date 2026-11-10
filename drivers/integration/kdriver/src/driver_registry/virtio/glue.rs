@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! VirtIO device probing and HAL integration.
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 use core::ptr::NonNull;
 
 use cfg_if::cfg_if;
@@ -32,17 +32,64 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-gpu")] {
+        use driver_os_api::{IrqEvent, IrqHandler, IrqResource};
+
         pub(super) struct VirtIoGpu;
 
         impl VirtIoGpu {
             pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
-                _irq: Option<driver_os_api::IrqResource>,
             ) -> DriverResult<kclass::prelude::DisplayDeviceImpl> {
                 Ok(Box::new(virtio::VirtIoGpuDev::<VirtIoHalImpl, T>::try_new(
                     transport,
                 )?))
             }
+        }
+
+        pub(super) fn install_irq(
+            parent: &Arc<kdevice::DeviceObject>,
+            display: &kclass::ClassDevice<kclass::prelude::DisplayDeviceImpl>,
+            irq: IrqResource,
+        ) -> DriverResult<()> {
+            use crate::resource::DeviceResourceExt;
+            use kclass::prelude::DisplayDevice;
+
+            let device_id = display.id();
+            let work_display = display.clone();
+            let display = display.clone();
+            let work = kworkng::WorkHandle::new(move || {
+                if work_display.refresh_info().is_none() {
+                    return;
+                }
+                let Some(node) = kdevice::device_nodes_snapshot()
+                    .into_iter()
+                    .find(|node| node.core_id() == device_id)
+                else {
+                    return;
+                };
+                kdevice_uevent::publish_drm_hotplug(&node);
+            })
+            .map_err(|_| DriverError::NoMemory)?;
+            let virq = irq.virq().raw();
+            let handler: Arc<dyn IrqHandler> = Arc::new(move |fired: usize| {
+                if fired != virq {
+                    return IrqEvent::NOT_HANDLED;
+                }
+                let status = display.ack_irq();
+                if status.is_empty() {
+                    // Shared level-triggered lines may fire for another owner;
+                    // do not claim an interrupt this device did not report.
+                    return IrqEvent::NOT_HANDLED;
+                }
+                if status.config {
+                    // The work callback refreshes the display and publishes the
+                    // uevent in task context; hard IRQ only acknowledges and
+                    // coalesces the hint.
+                    let _ = work.queue_default(None);
+                }
+                IrqEvent::HANDLED
+            });
+            parent.devm_request_irq(irq, handler)
         }
     }
 }
@@ -84,8 +131,6 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-rng")] {
-        use alloc::sync::Arc;
-
         use driver_base::DriverError;
         use driver_os_api::{DeviceDma, DmaInfo, ResError};
         use driver_os_api_xkernel::XKernelDeviceDma;

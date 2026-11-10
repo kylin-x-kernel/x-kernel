@@ -270,6 +270,14 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) graphic: bool,
 
+    /// Horizontal resolution advertised by the virtio-gpu device.
+    #[arg(long, value_name = "PIXELS")]
+    pub(crate) gpu_xres: Option<u32>,
+
+    /// Vertical resolution advertised by the virtio-gpu device.
+    #[arg(long, value_name = "PIXELS")]
+    pub(crate) gpu_yres: Option<u32>,
+
     /// Preferred host port forwarded to guest TCP and UDP port 5555. When
     /// the port is busy, candidates 10 ports apart are probed up to 1000
     /// above the preferred port (e.g. 61005, 61015, ..., 62005).

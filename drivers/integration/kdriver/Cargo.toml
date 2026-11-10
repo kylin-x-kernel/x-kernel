@@ -63,7 +63,7 @@ virtio = ["dep:virtio", "dep:kalloc"]
 
 virtio-blk = ["block", "virtio", "virtio/block"]
 virtio-net = ["net", "virtio", "virtio/net"]
-virtio-gpu = ["display", "virtio", "virtio/gpu"]
+virtio-gpu = ["display", "virtio", "virtio/gpu", "dep:kworkng", "dep:kdevice_uevent"]
 virtio-input = ["input", "virtio", "virtio/input"]
 virtio-socket = ["vsock", "virtio", "virtio/socket"]
 virtio-9p = ["virtio", "virtio/virtio-9p", "kclass/virtio-9p"]
@@ -108,6 +108,8 @@ driver_base = { workspace = true }
 karch = { workspace = true }
 kclass = { workspace = true }
 kdevice = { workspace = true }
+kdevice_uevent = { workspace = true, optional = true }
+kworkng = { workspace = true, optional = true }
 block = { workspace = true, optional = true }
 hwrng = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }

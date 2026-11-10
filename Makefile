@@ -22,7 +22,11 @@
 #                           non-VMM kernels (y/n; default: n on macOS, y
 #                           elsewhere). KFEAT_VMM=y forces QEMU TCG because CI
 #                           hosts normally do not support nested virtualization.
-#     - GRAPHIC             Enable graphical output + virtio-gpu (y/n)
+#     - GRAPHIC             Enable graphical output + virtio-gpu (y/n). A
+#                           graphical run also gets a display backend and the
+#                           virtio keyboard/mouse devices unless QEMU_ARGS
+#                           already overrides them.
+#     - GPU_XRES/GPU_YRES   Resolution advertised by virtio-gpu (default: 1920x1080)
 #     - UEFI                Boot x86_64 via OVMF `.uefi.img` instead of LinuxBoot (y/n)
 #     - MEM                 Guest memory size (default 1g)
 #     - SMP                 Number of vCPUs (default: configured NR_CPUS)
@@ -119,9 +123,26 @@ ACCEL ?= y
 endif
 UEFI ?= n
 GRAPHIC ?= n
+GPU_XRES ?= 1920
+GPU_YRES ?= 1080
 MEM ?=
 SMP ?=
 QEMU_ARGS ?=
+
+# A graphical run needs a display backend and the virtio input devices the
+# compositor reads. Both are part of the `--graphic` contract, so GRAPHIC=y is
+# enough; an explicit -display/-device in QEMU_ARGS still wins.
+ifeq ($(filter y,$(GRAPHIC)),y)
+ifeq ($(findstring -display,$(QEMU_ARGS)),)
+override QEMU_ARGS += -display gtk,gl=on,zoom-to-fit=on
+endif
+ifeq ($(findstring -device virtio-keyboard,$(QEMU_ARGS)),)
+override QEMU_ARGS += -device virtio-keyboard-pci
+endif
+ifeq ($(findstring -device virtio-mouse,$(QEMU_ARGS)),)
+override QEMU_ARGS += -device virtio-mouse-pci
+endif
+endif
 
 UAPPS ?= all
 UAPP_DIR ?= $(CURDIR)/uapps
@@ -154,6 +175,8 @@ XKMAKE_RUN_ARGS := \
 	$(if $(filter n,$(VSOCK)),--no-vsock) \
 	$(if $(filter n,$(ACCEL)),--no-accel) \
 	$(if $(filter y,$(GRAPHIC)),--graphic) \
+	$(if $(strip $(GPU_XRES)),--gpu-xres "$(GPU_XRES)") \
+	$(if $(strip $(GPU_YRES)),--gpu-yres "$(GPU_YRES)") \
 	$(if $(strip $(MEM)),--memory "$(MEM)") \
 	$(if $(strip $(SMP)),--smp "$(SMP)")
 

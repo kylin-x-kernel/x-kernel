@@ -534,9 +534,19 @@ fn add_devices(
     }
 
     if needs_graphic {
+        // The graphical contract is a virgl-capable device: compositors such as
+        // niri render through EGL, which needs the 3D resource path rather than
+        // the 2D scanout-only device.
+        let mut device = format!("virtio-gpu-gl-{suffix}");
+        if let Some(xres) = args.gpu_xres {
+            device.push_str(&format!(",xres={xres}"));
+        }
+        if let Some(yres) = args.gpu_yres {
+            device.push_str(&format!(",yres={yres}"));
+        }
         command
             .arg("-device")
-            .arg(format!("virtio-gpu-{suffix}"))
+            .arg(device)
             .args(["-vga", "none", "-serial", "mon:stdio"]);
     }
 

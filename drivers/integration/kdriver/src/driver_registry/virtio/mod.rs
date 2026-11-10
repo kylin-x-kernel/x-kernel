@@ -318,7 +318,11 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
         #[cfg(feature = "virtio-gpu")]
         DeviceKind::Display => {
             use glue::VirtIoGpu;
-            kclass::publish_display(parent, VirtIoGpu::try_new(transport, irq)?).map(drop)
+            let display = kclass::publish_display(parent.clone(), VirtIoGpu::try_new(transport)?)?;
+            if let Some(irq) = irq {
+                glue::install_irq(&parent, &display, irq)?;
+            }
+            Ok(())
         }
         #[cfg(feature = "virtio-input")]
         DeviceKind::Input => input::activate_mmio(parent, transport, irq),

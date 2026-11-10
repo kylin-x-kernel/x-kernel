@@ -1,8 +1,0 @@
-#!/bin/sh
-set -eu
-
-if command -v xterm >/dev/null 2>&1; then
-    exec xterm "$@"
-fi
-
-exec weston-simple-shm "$@"
