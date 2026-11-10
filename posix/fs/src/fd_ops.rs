@@ -181,8 +181,11 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             Ok(0)
         }
         _ => {
+            // Linux resolves the descriptor before rejecting an unknown
+            // command, so a bad fd is EBADF and a known fd is EINVAL.
+            kprocess::current_files().get_file(fd)?;
             warn!("unsupported fcntl parameters: cmd: {cmd}");
-            Ok(0)
+            Err(KError::InvalidInput)
         }
     }
 }
