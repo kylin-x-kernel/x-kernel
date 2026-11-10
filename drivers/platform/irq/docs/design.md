@@ -182,18 +182,37 @@ invokes the existing `init(config)` path, then registers the exact node with
 KIRQ. `from_madt` for ACPI and `from_static` for board tables are future peers
 that produce the same selection.
 
-## PLIC register discovery
+## PLIC register discovery and context identity
 
-`riscv::firmware` is a private binding module on the same model. It selects the
-first available PLIC-compatible node that the backend also reports as an
-interrupt controller (`FwNode::is_interrupt_controller`), consumes its
-translated first `reg` interval, and reads
-`riscv,ndev` through the backend-neutral property API. A disabled node is
-skipped; malformed availability, register resources, address widths, or source
-counts fail discovery instead of falling through to the legacy fixed layout.
-`PlicConfig::from_fwnode` returns both the configuration and the selected
-`FwNode`, which primary initialization registers with `PLIC_ROOT_DOMAIN` after
-hardware setup.
+`riscv/firmware.rs` is a private binding module. It selects the first available
+PLIC-compatible node that the backend also reports as an interrupt controller,
+consumes its translated first `reg` interval, reads `riscv,ndev`, and walks the
+raw `interrupts-extended` entries into `PlicConfig`. It preserves raw context
+indices and skips placeholder arguments, M-mode entries, unavailable CPUs and
+non-supervisor-external contexts. Malformed references and missing CPU
+identities are errors; firmware never maps a hardware CPU to a logical CPU,
+builds a runtime context table or defines register geometry.
+
+`riscv/context.rs` owns the immutable logical-CPU-indexed context table. It
+maps firmware declarations through the existing CPU map, skips valid hardware
+identities outside the runtime CPU set, enforces logical/hardware/index
+uniqueness and rejects an empty result. `riscv/registers.rs` owns the register
+layout: priority bytes, the `0x80` per-context enable stride, the `0x1000`
+context-local stride, the `15872` context bound and the required MMIO aperture.
+Every register access is a bounds-checked, 32-bit-aligned volatile access; the
+driver does not construct a whole-block Rust reference, so a shorter
+firmware-mapped window does not imply access to bytes outside that mapping. The
+register-window constructor rejects a base that is not four-byte aligned or a
+length that is not a whole number of registers. An internal offset that bypasses
+the validated layout is a diagnosed invariant failure, never zero, `false` or a
+silently discarded write.
+
+`riscv/legacy.rs` is the explicit no-firmware platform adapter. It supplies the
+historical `hart_id * 2 + 1` declarations to the same context builder and
+register validator; it is selected only when firmware describes no PLIC node.
+`PlicConfig::from_fwnode` returns the configuration and raw declarations, and
+primary initialization builds and validates the context table before mapping the
+register window and publishing the IRQ domain.
 
 ## x86 IO-APIC initialization
 
@@ -444,8 +463,12 @@ drivers/platform/irq/
 │   │   ├── nmi.rs  # GICv3 NMI window
 │   │   └── spi.rs  # ordinary SPI flow operations and transaction adapters
 │   ├── riscv/
-│   │   ├── mod.rs  # RISC-V PLIC backend
-│   │   └── firmware.rs # PLIC firmware discovery and binding decode
+│   │   ├── mod.rs       # RISC-V PLIC backend and provider wiring
+│   │   ├── firmware.rs  # PLIC firmware discovery and binding declarations
+│   │   ├── context.rs   # controller-owned logical-CPU context table
+│   │   ├── registers.rs # register geometry and bounds-checked MMIO
+│   │   ├── affinity.rs  # immediate ordinary-source routing transaction
+│   │   └── legacy.rs    # explicit no-firmware context declarations
 │   └── x86/
 │       ├── mod.rs       # provider wiring, public surface, test attachment
 │       ├── config.rs    # boot topology, validation, install, domain publication
@@ -469,7 +492,7 @@ kirq (policy) ──IntrManagerIf──> irq-driver
      v3: GICD+GICR)
    iomap: gicd/gicc/gicr      iomap: "plic"
              |                   |
-        gicv2/gicv3.rs (arm_gic_driver)   riscv_plic
+        gicv2/gicv3.rs (arm_gic_driver)   riscv/{registers,context}.rs
 ```
 
 ## Execution Context
@@ -512,17 +535,22 @@ Reproducible boot checks and their coverage limits are in [testing.md](testing.m
 
 ## RISC-V Local Preparation And Activation
 
-`init_current_cpu_context` clears the supported source enable bits in the
-current hart's context, then sets its PLIC threshold to zero under the same
-IRQ-safe controller lock. Like Linux PLIC context setup, this removes inherited
-routes before activation. It leaves global priorities, pending state and claim
-completion unchanged. It runs once before any source is enabled on that context,
-not as a runtime reset. The primary prepares its context after
-global PLIC discovery, and each AP prepares its own context during local setup.
+`init_current_cpu_context` selects the current CPU's context from the
+controller's authoritative table, clears the supported source enable bits in
+that context, then sets its PLIC threshold to zero under the same IRQ-safe
+controller lock. Like Linux PLIC context setup, this removes inherited routes
+before activation. It leaves global priorities, pending state and claim
+completion unchanged. It returns an error when the CPU has no context, and
+rejects a repeated preparation because that would disable live routes. Only
+after the register transaction succeeds is the CPU recorded in the prepared
+mask. Primary context failure is fatal boot; an AP failure aborts that CPU's
+bring-up and prevents runtime readiness publication.
 `activate_local_interrupts` only sets SSIE/STIE/SEIE, without repeating PLIC
 preparation or opening the global SSTATUS.SIE gate. Runtime owns that final
 gate and must install handlers before permitting delivery. Timer programming
-remains a separate timer-driver operation.
+remains a separate timer-driver operation. Claim, enable and completion read
+the same context table, so the firmware and legacy paths cannot disagree about
+the current context.
 
 ## Local irq_work Notification
 
@@ -821,8 +849,10 @@ models are not physical delivery, MMIO fault or hardware-quiescence proofs.
 - GIC backend state lives in `LazyInit<SpinNoIrq<Gic>>`; each backend's
   global `init` returns if the GIC is already initialized.
 - PLIC state lives in `LazyInit<PlicController>`, which publishes the immutable
-  source bound together with its `registers: SpinNoIrq<Plic>` lock. Primary
-  initialization installs this controller before per-CPU context preparation.
+  source bound and logical-CPU context table together with its
+  `state: SpinNoIrq<PlicState>` lock. `PlicState` contains the register window,
+  per-source routing state and the prepared-CPU mask. Primary initialization
+  installs this controller before per-CPU context preparation.
 - `remember_config` asserts that a re-supplied GIC configuration is
   byte-identical to the initialized one, catching inconsistent platform
   init instead of silently reprogramming.
@@ -872,20 +902,23 @@ models are not physical delivery, MMIO fault or hardware-quiescence proofs.
 ## PLIC Source Bounds
 
 At primary initialization a discovered PLIC node must provide exactly one
-nonzero `riscv,ndev` cell, at most 1023 (the riscv_plic 0.2.0 register-array
-limit). Missing or malformed metadata on a discovered node stops boot rather
-than selecting the legacy address fallback. Only absence of a compatible node
-uses that fallback, with the library capacity as its source bound; this does
+nonzero `riscv,ndev` cell, at most the register layer's 1023-source limit.
+Missing or malformed metadata on a discovered node stops boot rather than
+selecting the legacy address fallback. Only absence of a compatible node uses
+that fallback, with the register-layer capacity as its source bound; this does
 not discover which sources physically exist. A private `PlicController` owns
-the immutable bound and the IRQ-safe register lock, published together through
-one `LazyInit`. Its methods own external-source enable, priority and completion
-transactions; CPU-local context selection remains inside the register lock.
+the immutable bound, the context table and the IRQ-safe register lock,
+published together through one `LazyInit`. Its methods own external-source
+enable, priority and completion transactions; CPU-local context selection
+remains inside the register lock.
 Enable, priority and completion paths validate source
 ids without truncation before accessing indexed registers. Completion cookie
 zero remains the local timer/IPI no-completion sentinel.
 
-Source validation does not change the existing hart-to-context convention or
-prove MMIO aperture coverage. Flow suppression is described separately below.
+Source validation is independent of context admission: the context table and
+register aperture are validated before controller publication, and the legacy
+fixed layout is confined to the no-firmware path. Flow suppression is described
+separately below.
 
 ## Source Enable Identity
 
@@ -897,22 +930,59 @@ instance routing or make logical enable equivalent to temporary flow unmask.
 
 ## PLIC Effective Target
 
-The first external-source enable selects the current prepared context, preserving
-the previous initial placement policy. A bounded target table is allocated at
-primary initialization, before controller publication, and shares the controller
-lock with registers. Subsequent enable/disable uses that recorded context even
-when the management task has migrated. Disable before first enable has no route
-to clear and does not select a target. Completion still uses the claiming CPU's
-context, not the management target.
+The first external-source enable selects the current CPU's prepared context
+from the same authoritative table unless immediate affinity has already selected
+a target. A bounded target table is allocated at primary initialization, before
+controller publication, and shares the controller lock with registers.
+Subsequent enable/disable uses that recorded context even when the management
+task has migrated. Disable before first enable has no route to clear and does
+not select a target. Completion still uses the claiming CPU's context, not the
+management target.
 
-This follows Linux's separation of effective routing from the CPU issuing a
-management operation, but does not implement Linux's affinity selection policy.
-Bindings last for the controller lifetime, including source disable/re-enable
-and action replacement. No dynamic retargeting, CPU-offline handling or explicit
-affinity support is added; a bound CPU must remain available. The table is indexed
-by validated hardware source, not reusable logical IRQ. There is no allocation
-on enable/disable or completion. Enable still sets configured priority to 6;
-flow masking controls when that policy becomes effective in hardware.
+The target table is indexed by validated hardware source, not reusable logical
+IRQ. There is no allocation on enable/disable, affinity or completion. Enable
+still sets configured priority to 6; flow masking controls when that policy
+becomes effective in hardware. Affinity itself never writes priority, changes
+the mask policy or changes KIRQ disable depth.
+
+### PLIC Runtime Affinity
+
+The provider exposes `IntrManagerIf::immediate_affinity` only for an ordinary
+PLIC Fasteoi source that passes the same flow selection as dispatch. The
+transaction runs under the existing Line exclusion and controller lock. It
+offers only interrupt-ready candidates, then requires the candidate to be in
+the controller's prepared-CPU mask and to have an authoritative context. A
+candidate set with no such target is rejected before any register read or
+write.
+
+The old target context's actual enable bit is sampled. If the target changes,
+the old bit is suppressed and verified, the new target is recorded, and the
+new context is suppressed to remove stale firmware/prior-route enablement.
+`Preserve` re-enables the new context only when the old context was actually
+enabled; `KeepMasked` always leaves the new context disabled. A same-target
+`Preserve` does not create a needless disable window. A same-target
+`KeepMasked` still verifies suppression.
+
+Failure handling is deliberately state-specific:
+
+- Failure while suppressing the old context leaves the recorded target on the
+  old context, so a later recovery disable closes that context. No new-context
+  enable write occurred.
+- Once the new target is recorded, any later suppression or enable failure
+  leaves the target on the new context. The old context was already suppressed
+  when that recording happened; recovery disable therefore closes the context
+  whose enable write may have failed, without claiming the old route is restored.
+- A post-write failure returns `HardwareFailure`; it does not claim source
+  quiescence, restore delivery or complete an old claim. KIRQ owns admission
+  closure and recovery sequencing.
+
+Affinity does not complete or migrate an outstanding claim. A claim made on
+the old CPU still completes on that CPU's context; the new context's enable
+bit and the recorded target remain independent of that completion. The
+deterministic model tests cover target selection, old/new suppression,
+Preserve/KeepMasked, failure-target retention and unchanged priority/mask
+policy. They do not prove physical delivery, hardware quiescence or multi-CPU
+claim overlap.
 
 ## PLIC Fasteoi Capability And Priority
 

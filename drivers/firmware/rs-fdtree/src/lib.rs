@@ -27,8 +27,10 @@ mod fwnode_backend;
 #[cfg(feature = "fwnode")]
 pub use fwnode_backend::DtBackend;
 
+mod cpu;
 mod property;
 
+pub use cpu::{CpuNode, CpuNodeError};
 pub use property::{Cells, PropertyError};
 
 mod error;

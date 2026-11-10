@@ -60,7 +60,9 @@ controller kind, generic PCI host bridge facts, the PMU IRQ, and the
   `SysconControl` physical address plus write value.
 - Provide CPU node helpers: `is_cpu_node`, `is_enabled_cpu_node`,
   `cpu_node_reg`, `enabled_cpu_nodes`, and `dice_region` /
-  `interrupt_controller` passthroughs.
+  `interrupt_controller` passthroughs. Node classification and `reg` identity
+  decoding delegate to `rs_fdtree::CpuNode`; `of` does not maintain a second
+  CPU parsing rule. `is_enabled_cpu_node` remains the OF-level status policy.
 
 ## Non-Responsibilities
 
@@ -102,7 +104,7 @@ LazyInit<LinuxFdt<'static>>  (one global DTB, lifetime 'static)
     chosen / model / compatible / syscon-poweroff -> plain data
 ```
 
-Re-exports `rs_fdtree::{Chosen, Dice, FdtError, FdtNode,
+Re-exports `rs_fdtree::{Chosen, CpuNode, Dice, FdtError, FdtNode,
 InterruptController, LinuxFdt, MemoryRegion, NodeProperty, RegIter}` so
 callers need only this crate.
 

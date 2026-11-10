@@ -20,7 +20,7 @@ use lazyinit::LazyInit;
 
 use crate::{
     AddressError, AddressErrorReason, Cells, DeviceDmaError, DmaRangeError, DmaRanges, FdtNode,
-    LinuxFdt, NodeIndex, PropertyError, ReferenceError,
+    LinuxFdt, NodeIndex, PropertyError, ReferenceError, cpu::CpuNode,
 };
 
 /// A borrowed device tree implementing [`FwNodeOps`].
@@ -125,6 +125,14 @@ impl<'s, 'a: 's> FwNodeOps<'s> for DtBackend<'a> {
             name: property.name,
             value: FwPropertyValue::Bytes(property.value),
         }))
+    }
+
+    fn hardware_cpu_id(&self, id: FwNodeId) -> Result<Option<u64>, FwError> {
+        let node = self.node(id).ok_or(FwError::InvalidNode)?;
+        let Some(cpu) = CpuNode::from_node(node) else {
+            return Ok(None);
+        };
+        cpu.hardware_id().map_err(|_| FwError::InvalidValue)
     }
 
     fn mmio_resource(

@@ -4,8 +4,12 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
+use core::ptr::NonNull;
 use riscv::register::sie;
 use unittest::{assert, assert_eq, def_test};
+
+use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId};
 
 use super::{NonZeroU32, PlicCompletion, complete_plic_claim};
 
@@ -628,6 +632,20 @@ fn plic_fixture(ndev: Option<u32>) -> alloc::vec::Vec<u8> {
     plic_fixture_with(ndev, None, true)
 }
 
+fn add_test_cpu(blob: &mut Dtb, name: &str, phandle: u32, reg: Option<&[u8]>) {
+    blob.begin(name);
+    blob.property("device_type", b"cpu\0");
+    if let Some(reg) = reg {
+        blob.property("reg", reg);
+    }
+    blob.begin("interrupt-controller");
+    blob.property("interrupt-controller", &[]);
+    blob.property("#interrupt-cells", &cells(&[1]));
+    blob.property("phandle", &cells(&[phandle]));
+    blob.end();
+    blob.end();
+}
+
 fn plic_fixture_with(
     ndev: Option<u32>,
     status: Option<&[u8]>,
@@ -637,6 +655,12 @@ fn plic_fixture_with(
     blob.begin("");
     blob.property("#address-cells", &cells(&[2]));
     blob.property("#size-cells", &cells(&[2]));
+    blob.begin("cpus");
+    blob.property("#address-cells", &cells(&[1]));
+    blob.property("#size-cells", &cells(&[0]));
+    add_test_cpu(&mut blob, "cpu@0", 1, Some(&cells(&[0])));
+    add_test_cpu(&mut blob, "cpu@1", 2, Some(&cells(&[1])));
+    blob.end();
     blob.begin("soc");
     blob.property("compatible", b"simple-bus\0");
     blob.property("#address-cells", &cells(&[2]));
@@ -649,12 +673,49 @@ fn plic_fixture_with(
     }
     blob.property("#interrupt-cells", &cells(&[1]));
     blob.property("reg", &cells(&[0, 0x0c00_0000, 0, 0x0400_0000]));
+    blob.property(
+        "interrupts-extended",
+        &cells(&[1, 0x0b, 1, 9, 2, 0x0b, 2, 9]),
+    );
     if let Some(status) = status {
         blob.property("status", status);
     }
     if let Some(ndev) = ndev {
         blob.property("riscv,ndev", &cells(&[ndev]));
     }
+    blob.end();
+    blob.end();
+    blob.end();
+    blob.finish()
+}
+
+fn plic_context_fixture(
+    cpus: &[(u32, Option<&[u8]>)],
+    entries: &[u32],
+    size: u32,
+) -> alloc::vec::Vec<u8> {
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.begin("cpus");
+    blob.property("#address-cells", &cells(&[1]));
+    blob.property("#size-cells", &cells(&[0]));
+    for (index, (phandle, reg)) in cpus.iter().enumerate() {
+        let name = alloc::format!("cpu{index}");
+        add_test_cpu(&mut blob, &name, *phandle, *reg);
+    }
+    blob.end();
+    blob.begin("soc");
+    blob.property("compatible", b"simple-bus\0");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[2]));
+    blob.property("ranges", &[]);
+    blob.begin("interrupt-controller@c000000");
+    blob.property("compatible", b"riscv,plic0\0");
+    blob.property("interrupt-controller", &[]);
+    blob.property("#interrupt-cells", &cells(&[1]));
+    blob.property("reg", &cells(&[0, 0x0c00_0000, 0, size]));
+    blob.property("riscv,ndev", &cells(&[53]));
+    blob.property("interrupts-extended", &cells(entries));
     blob.end();
     blob.end();
     blob.end();
@@ -703,6 +764,462 @@ fn plic_discovery_honors_controller_and_availability_declarations() {
             .is_none()
     );
     assert!(plic_region(&plic_fixture_with(Some(53), Some(b"\x01"), true)).is_err());
+}
+
+fn parse_declarations(
+    bytes: &[u8],
+) -> Result<Vec<super::context::PlicContextDecl>, super::firmware::PlicConfigError> {
+    let tree = rs_fdtree::LinuxFdt::new(bytes).unwrap();
+    let backend = rs_fdtree::DtBackend::new(tree);
+    let root = backend.root().unwrap();
+    let plic = root
+        .descendants()
+        .find(|node| node.name() == Some("interrupt-controller@c000000"))
+        .unwrap();
+    super::firmware::parse_contexts(plic, plic.id())
+}
+
+fn build_contexts(
+    declarations: &[super::context::PlicContextDecl],
+    size: usize,
+    map_cpu: impl FnMut(u64) -> Option<LogicalCpuId>,
+) -> Result<super::context::PlicContexts, super::context::PlicContextError> {
+    super::context::PlicContexts::build(declarations, size, map_cpu)
+}
+
+fn parsed_contexts(
+    bytes: &[u8],
+    map_cpu: impl FnMut(u64) -> Option<LogicalCpuId>,
+) -> Result<super::context::PlicContexts, super::context::PlicContextError> {
+    let declarations = parse_declarations(bytes).unwrap();
+    build_contexts(&declarations, 0x0400_0000, map_cpu)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ContextAccess {
+    Enable(bool),
+    InitContext(usize),
+    Complete(usize),
+}
+
+struct ContextModel {
+    context: usize,
+    enabled: bool,
+    threshold: u32,
+    accesses: Vec<ContextAccess>,
+}
+
+impl ContextModel {
+    fn new(context: usize, enabled: bool) -> Self {
+        Self {
+            context,
+            enabled,
+            threshold: u32::MAX,
+            accesses: Vec::new(),
+        }
+    }
+}
+
+impl PlicCompletion for ContextModel {
+    fn is_enabled(&self, _: NonZeroU32, context: usize) -> bool {
+        core::assert_eq!(context, self.context);
+        self.enabled
+    }
+
+    fn set_enabled(&mut self, _: NonZeroU32, context: usize, enabled: bool) {
+        core::assert_eq!(context, self.context);
+        self.enabled = enabled;
+        self.accesses.push(ContextAccess::Enable(enabled));
+    }
+
+    fn complete(&mut self, context: usize, _: NonZeroU32) {
+        core::assert_eq!(context, self.context);
+        self.accesses.push(ContextAccess::Complete(context));
+    }
+}
+
+impl super::PlicContextRegisters for ContextModel {
+    fn init_by_context(&mut self, context: usize) {
+        core::assert_eq!(context, self.context);
+        self.threshold = 0;
+        self.accesses.push(ContextAccess::InitContext(context));
+    }
+}
+
+#[def_test]
+fn plic_register_layout_owns_enable_stride_and_aperture() {
+    assert_eq!(super::registers::PlicRegisters::enable_context_end(0), Some(0x2080));
+    assert_eq!(super::registers::PlicRegisters::enable_context_end(1), Some(0x2100));
+    assert_eq!(super::registers::PlicRegisters::required_aperture(0), Some(0x200008));
+    assert_eq!(super::registers::PlicRegisters::required_aperture(1), Some(0x201008));
+    assert_eq!(
+        super::registers::PlicRegisters::validate_context(1, 0x2000),
+        None
+    );
+    assert_eq!(
+        super::registers::PlicRegisters::validate_context(
+            super::registers::MAX_CONTEXT,
+            0x0400_0000
+        ),
+        None
+    );
+}
+
+struct RegisterFixture {
+    _words: Vec<u32>,
+    base: *mut u32,
+    registers: super::registers::PlicRegisters,
+}
+
+impl RegisterFixture {
+    fn new() -> Self {
+        let mut words = alloc::vec![0u32; 0x202008 / 4 + 2];
+        let base = words.as_mut_ptr();
+        let registers = {
+            // SAFETY: `words` provides an aligned live backing store of
+            // `words.len() * 4` bytes; the vector is retained and never
+            // reallocated while the register view exists.
+            unsafe {
+                super::registers::PlicRegisters::new(
+                    NonNull::new(base.cast::<u8>()).unwrap(),
+                    words.len() * 4,
+                )
+                .unwrap()
+            }
+        };
+        Self {
+            _words: words,
+            base,
+            registers,
+        }
+    }
+
+    fn word(&self, index: usize) -> u32 {
+        let register = self.base.wrapping_add(index);
+        // SAFETY: `index` stays inside the retained backing allocation, and no
+        // Rust reference to that allocation is live during this volatile read.
+        unsafe { register.read_volatile() }
+    }
+
+    fn set_word(&mut self, index: usize, value: u32) {
+        let register = self.base.wrapping_add(index);
+        // SAFETY: `index` stays inside the retained backing allocation, and no
+        // Rust reference to that allocation is live during this volatile write.
+        unsafe { register.write_volatile(value) };
+    }
+}
+
+#[def_test]
+fn plic_register_window_rejects_unaligned_and_invalid_lengths() {
+    let mut words = [0u32; 4];
+    let aligned = NonNull::new(words.as_mut_ptr().cast::<u8>()).unwrap();
+    let unaligned = NonNull::new(words.as_mut_ptr().cast::<u8>().wrapping_add(1)).unwrap();
+    let unaligned_result = {
+        // SAFETY: the pointer is non-null and the length is bounded by `words`;
+        // construction must reject the unaligned base.
+        unsafe { super::registers::PlicRegisters::new(unaligned, 8) }
+    };
+    assert!(matches!(
+        unaligned_result,
+        Err(super::registers::PlicRegisterError::UnalignedBase)
+    ));
+    let invalid_length = {
+        // SAFETY: see above; only the length is deliberately invalid here.
+        unsafe { super::registers::PlicRegisters::new(aligned, 6) }
+    };
+    assert!(matches!(
+        invalid_length,
+        Err(super::registers::PlicRegisterError::InvalidWindow)
+    ));
+    let valid = {
+        // SAFETY: aligned non-null storage with a whole number of registers.
+        unsafe { super::registers::PlicRegisters::new(aligned, 8) }
+    };
+    assert!(valid.is_ok());
+}
+
+#[def_test]
+fn plic_register_access_uses_owned_layout_and_preserves_adjacent_bits() {
+    let mut fixture = RegisterFixture::new();
+    let source1 = NonZeroU32::new(1).unwrap();
+    let source30 = NonZeroU32::new(30).unwrap();
+    let source31 = NonZeroU32::new(31).unwrap();
+    let source32 = NonZeroU32::new(32).unwrap();
+    let source9 = NonZeroU32::new(9).unwrap();
+
+    fixture.registers.write_priority(source31, 0x11);
+    fixture.registers.write_priority(source32, 0x22);
+    assert_eq!(fixture.word(31), 0x11);
+    assert_eq!(fixture.word(32), 0x22);
+    assert_eq!(fixture.registers.read_priority(source31), 0x11);
+    assert_eq!(fixture.registers.read_priority(source32), 0x22);
+
+    fixture.registers.set_enabled(source31, 0, true);
+    assert!(fixture.registers.is_enabled(source31, 0));
+    assert!(!fixture.registers.is_enabled(source32, 0));
+    assert_eq!(fixture.word(0x2000 / 4) & (1 << 31), 1 << 31);
+    fixture.registers.set_enabled(source32, 0, true);
+    assert!(fixture.registers.is_enabled(source31, 0));
+    assert!(fixture.registers.is_enabled(source32, 0));
+    assert_eq!(fixture.word(0x2000 / 4 + 1) & 1, 1);
+
+    fixture.registers.set_enabled(source30, 0, true);
+    assert!(fixture.registers.is_enabled(source30, 0));
+    fixture.registers.set_enabled(source30, 0, false);
+    assert!(!fixture.registers.is_enabled(source30, 0));
+    assert!(fixture.registers.is_enabled(source31, 0));
+    assert_eq!(fixture.word(0x2000 / 4) & (1 << 31), 1 << 31);
+
+    fixture.registers.set_enabled(source1, 3, true);
+    assert!(fixture.registers.is_enabled(source1, 3));
+    assert_eq!(fixture.word((0x2000 + 3 * 0x80) / 4) & 2, 2);
+    assert!(!fixture.registers.is_enabled(source1, 0));
+
+    let context2 = 0x20_0000 + 2 * 0x1000;
+    fixture.set_word(context2 / 4, u32::MAX);
+    fixture.registers.init_by_context(2);
+    assert_eq!(fixture.word(context2 / 4), 0);
+    fixture.set_word(context2 / 4 + 1, 7);
+    assert_eq!(
+        fixture.registers.claim(2).map(|source| source.get()),
+        Some(7)
+    );
+    fixture.registers.complete(2, source9);
+    assert_eq!(fixture.word(context2 / 4 + 1), 9);
+
+    assert_eq!(
+        super::registers::PlicRegisters::validate_context(0, 0x1000),
+        None
+    );
+    assert_eq!(
+        super::registers::PlicRegisters::validate_context(0, 0x200008),
+        Some(0x200008)
+    );
+}
+
+#[def_test]
+fn plic_contexts_preserve_raw_indices_across_sparse_and_mixed_entries() {
+    let cpu0 = cells(&[0x100]);
+    let cpu1 = cells(&[0x105]);
+    let bytes = plic_context_fixture(
+        &[(1, Some(&cpu0)), (2, Some(&cpu1))],
+        &[2, 9, 1, 0x0b, 1, 9, 2, 0x0b],
+        0x0400_0000,
+    );
+    let has_second_cpu = kbuild_config::NR_CPUS >= 2;
+    let contexts = parsed_contexts(&bytes, |hardware_cpu_id| match hardware_cpu_id {
+        0x100 => Some(LogicalCpuId::new(0)),
+        0x105 if has_second_cpu => Some(LogicalCpuId::new(1)),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(contexts.get(LogicalCpuId::new(0)).unwrap().index, 2);
+    if has_second_cpu {
+        assert_eq!(contexts.get(LogicalCpuId::new(1)).unwrap().index, 0);
+    }
+    assert_eq!(contexts.iter().count(), if has_second_cpu { 2 } else { 1 });
+}
+
+#[def_test]
+fn plic_contexts_skip_argument_placeholder_without_compacting_indices() {
+    let cpu = cells(&[0x100]);
+    let bytes = plic_context_fixture(
+        &[(1, Some(&cpu))],
+        &[1, u32::MAX, 1, 9],
+        0x0400_0000,
+    );
+    let declarations = parse_declarations(&bytes).unwrap();
+    assert_eq!(declarations.len(), 1);
+    assert_eq!(declarations[0].index, 1);
+    let contexts = build_contexts(&declarations, 0x0400_0000, |_| {
+        Some(LogicalCpuId::new(0))
+    })
+    .unwrap();
+    assert_eq!(contexts.get(LogicalCpuId::new(0)).unwrap().index, 1);
+}
+
+#[def_test]
+fn plic_contexts_skip_hardware_ids_outside_the_runtime_cpu_set() {
+    let cpu0 = cells(&[0x100]);
+    let cpu1 = cells(&[0x105]);
+    let bytes = plic_context_fixture(
+        &[(1, Some(&cpu0)), (2, Some(&cpu1))],
+        &[1, 9, 2, 9],
+        0x0400_0000,
+    );
+    let contexts = parsed_contexts(&bytes, |hardware_cpu_id| {
+        (hardware_cpu_id == 0x100).then_some(LogicalCpuId::new(0))
+    })
+    .unwrap();
+    assert_eq!(contexts.iter().count(), 1);
+    assert_eq!(contexts.get(LogicalCpuId::new(0)).unwrap().index, 0);
+}
+
+#[def_test]
+fn plic_context_parsing_rejects_missing_identities_and_bad_phandles() {
+    let cpu = cells(&[0x100]);
+    let missing = plic_context_fixture(&[(1, None)], &[1, 9], 0x0400_0000);
+    assert!(matches!(
+        parse_declarations(&missing),
+        Err(super::firmware::PlicConfigError::MissingCpuIdentity { index: 0, .. })
+    ));
+
+    let bad_phandle = plic_context_fixture(
+        &[(1, Some(&cpu))],
+        &[9, 9],
+        0x0400_0000,
+    );
+    assert!(matches!(
+        parse_declarations(&bad_phandle),
+        Err(super::firmware::PlicConfigError::Context { index: 0, .. })
+    ));
+}
+
+#[def_test]
+fn plic_context_build_rejects_duplicates_and_empty_results() {
+    let cpu = cells(&[0x100]);
+    let duplicate = plic_context_fixture(
+        &[(1, Some(&cpu))],
+        &[1, 9, 1, 9],
+        0x0400_0000,
+    );
+    let declarations = parse_declarations(&duplicate).unwrap();
+    assert!(matches!(
+        build_contexts(&declarations, 0x0400_0000, |_| Some(LogicalCpuId::new(0))),
+        Err(super::context::PlicContextError::Conflicting { index: 1 })
+    ));
+
+    let no_context = plic_context_fixture(&[(1, Some(&cpu))], &[1, 0x0b], 0x0400_0000);
+    let declarations = parse_declarations(&no_context).unwrap();
+    assert!(matches!(
+        build_contexts(&declarations, 0x0400_0000, |_| Some(LogicalCpuId::new(0))),
+        Err(super::context::PlicContextError::NoContext)
+    ));
+}
+
+#[def_test]
+fn plic_context_build_validates_aperture_before_register_access() {
+    let cpu = cells(&[0]);
+    let bytes = plic_context_fixture(
+        &[(1, Some(&cpu))],
+        &[1, 0x0b, 1, 9],
+        0x2000,
+    );
+    let declarations = parse_declarations(&bytes).unwrap();
+    assert!(matches!(
+        build_contexts(&declarations, 0x2000, |_| Some(LogicalCpuId::new(0))),
+        Err(super::context::PlicContextError::InvalidAperture {
+            index: 1,
+            required: 0x20_1008,
+        })
+    ));
+}
+
+#[def_test]
+fn plic_context_boundary_checks_are_nonmutating() {
+    let last_context = super::context::PlicContext {
+        logical_cpu: LogicalCpuId::new(0),
+        hardware_cpu_id: 0x100,
+        index: super::registers::MAX_CONTEXT - 1,
+    };
+    let mut last = super::context::PlicContexts::new();
+    assert_eq!(last.insert(last_context), Ok(()));
+
+    let first_invalid = super::context::PlicContext {
+        logical_cpu: LogicalCpuId::new(0),
+        hardware_cpu_id: 0x101,
+        index: super::registers::MAX_CONTEXT,
+    };
+    let mut invalid = super::context::PlicContexts::new();
+    let before = invalid;
+    assert_eq!(invalid.insert(first_invalid), Err(()));
+    assert_eq!(invalid, before);
+}
+
+#[def_test]
+fn production_context_preparation_checks_duplicate_and_register_write_order() {
+    let context = super::context::PlicContext {
+        logical_cpu: LogicalCpuId::new(0),
+        hardware_cpu_id: 0x100,
+        index: 3,
+    };
+    let mut model = ContextModel::new(3, false);
+    let mut prepared = KCpuMask::new();
+    assert_eq!(
+        super::prepare_plic_context(
+            &mut model,
+            &mut prepared,
+            LogicalCpuId::new(0),
+            context,
+            super::PlicSources { last: 7 },
+        ),
+        Ok(())
+    );
+    assert_eq!(model.threshold, 0);
+    assert!(prepared.get_logical(LogicalCpuId::new(0)));
+    let mut expected: Vec<_> = (0..7).map(|_| ContextAccess::Enable(false)).collect();
+    expected.push(ContextAccess::InitContext(3));
+    assert_eq!(model.accesses, expected);
+
+    let accesses = model.accesses.len();
+    assert_eq!(
+        super::prepare_plic_context(
+            &mut model,
+            &mut prepared,
+            LogicalCpuId::new(0),
+            context,
+            super::PlicSources { last: 7 },
+        ),
+        Err("PLIC context already initialized")
+    );
+    assert_eq!(model.accesses.len(), accesses);
+    assert!(prepared.get_logical(LogicalCpuId::new(0)));
+}
+
+#[def_test]
+fn completion_uses_the_context_selected_from_the_table() {
+    let declarations = [super::context::PlicContextDecl {
+        index: 2,
+        hardware_cpu_id: 0x100,
+    }];
+    let contexts = build_contexts(&declarations, 0x0400_0000, |_| {
+        Some(LogicalCpuId::new(0))
+    })
+    .unwrap();
+    let context = contexts.get(LogicalCpuId::new(0)).unwrap();
+    assert_eq!(context.index, 2);
+
+    let source = NonZeroU32::new(5).unwrap();
+    let mut model = ContextModel::new(context.index, false);
+    super::complete_plic_claim(&mut model, context.index, source);
+    assert_eq!(
+        model.accesses,
+        [
+            ContextAccess::Enable(true),
+            ContextAccess::Complete(2),
+            ContextAccess::Enable(false),
+        ]
+    );
+    assert!(!model.enabled);
+}
+
+#[def_test]
+fn legacy_plic_contexts_preserve_the_fixed_hart_layout() {
+    let declarations = super::legacy::declarations().unwrap();
+    let contexts = build_contexts(&declarations, super::PLIC_MMIO_SIZE, |hardware_cpu_id| {
+        let raw = usize::try_from(hardware_cpu_id).ok()?;
+        kcpu_id_map::logical_cpu_id(kcpu_id_map::RawCpuId::new(raw))
+    })
+    .unwrap();
+    let logical_cpu = kplat::cpu::id();
+    let hardware_cpu_id = kcpu_id_map::raw_cpu_id(logical_cpu).unwrap().as_usize();
+    let context = contexts.get(logical_cpu).unwrap();
+    assert_eq!(context.index, hardware_cpu_id * 2 + 1);
+    assert_eq!(
+        context.hardware_cpu_id,
+        u64::try_from(hardware_cpu_id).unwrap()
+    );
+    assert_eq!(contexts.iter().count(), kcpu_id_map::nr_cpus());
 }
 
 #[def_test]

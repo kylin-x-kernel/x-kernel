@@ -42,6 +42,21 @@ The fwnode adapter's `is_interrupt_controller` answers from the node's
 `interrupt-controller` declaration, so controller drivers consume the semantic
 without matching the property name themselves.
 
+## Hardware CPU identity
+
+The `CpuNode` view in `src/cpu.rs` is a DT interpretation, not a kernel CPU
+mapping. It accepts only nodes declaring `device_type = "cpu"`, then decodes
+`reg` using the parent's `#address-cells`. A missing `#address-cells` keeps the
+existing X-Kernel CPU-node convention of one address cell; a present but
+malformed property is an error. One- and two-cell identities fit the neutral
+result; other widths, truncated payloads and extra cells are `InvalidValue`.
+Zero is a valid hardware identity, and nodes without a processor declaration or
+`reg` are `Ok(None)`. The `fwnode` adapter exposes this view as the neutral
+`hardware_cpu_id` fact. The transitional `of` crate's `is_cpu_node` and
+`cpu_node_reg` helpers delegate to this same view instead of keeping a second
+CPU `reg` decoder. Neither layer performs a logical-CPU lookup, `RawCpuId`
+conversion, MMIO translation or controller admission.
+
 ## DT address interpretation
 
 FdtNode::is_available accepts absent/ok/okay status, rejects malformed properties,
@@ -154,6 +169,7 @@ drivers/firmware/rs-fdtree/
 │   ├── header.rs         # FdtHeader layout, magic and block ranges
 │   ├── parsing.rs        # FdtData cursor, big-endian ints, CStr
 │   ├── node.rs           # FdtNode, NodeProperty, RegIter, region iterators
+│   ├── cpu.rs            # Private CPU-node view and identity decoding
 │   ├── property.rs       # Strict property encoding reads, borrowed Cells
 │   ├── reference.rs      # Phandle lookup, references, interrupt specifiers
 │   ├── index.rs          # Optional alloc-backed node/phandle index

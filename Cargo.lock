@@ -2095,7 +2095,6 @@ dependencies = [
  "memaddr",
  "memspace",
  "riscv",
- "riscv_plic",
  "rs_fdtree",
  "sbi-rt",
  "unittest",
@@ -5031,15 +5030,6 @@ name = "riscv_goldfish"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07aac72f95e774476db82916d79f2d303191310393830573c1ab5c821b21660a"
-
-[[package]]
-name = "riscv_plic"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e701d1c6ea06c35a19cb80d213fab87d264798f9bac0aed2730c0e86d297394a"
-dependencies = [
- "tock-registers 0.10.1",
-]
 
 [[package]]
 name = "rlsf"

@@ -9,6 +9,18 @@ and cannot conflict; node-local duplicate properties fail strict lookup.
 Neither a range nor a missing property authorizes DMA, supplies a device mask,
 or implies host support for multiple windows/IOMMU routing.
 
+## Hardware CPU identity boundary
+
+The `CpuNode` view (used by the `fwnode` adapter and the transitional `of`
+helpers) decodes a CPU hardware identity only from a node declaring
+`device_type = "cpu"`, using the parent-declared address-cell width. It checks
+the property length and cell alignment before reading, supports only one- and
+two-cell identities, requires exactly the declared address cells, and reports
+other widths, truncation or extra cells as `InvalidValue`. It does not look up
+a logical CPU, construct a `RawCpuId`, map MMIO or decide controller
+reachability. A zero identity remains a valid hardware value; absence and
+malformed declarations stay distinct.
+
 ## Strict property trust boundary
 
 Strict readers reject duplicate or malformed properties before returning values.
@@ -55,8 +67,8 @@ the index adds no mappings or hardware access.
 
 This analysis covers the entire crate: `src/lib.rs` (`LinuxFdt`,
 `MemReserveIter`), `src/header.rs`, `src/parsing.rs`, `src/node.rs`,
-`src/property.rs`, `src/reference.rs`, `src/index.rs`, `src/address.rs`,
-`src/dma.rs`,
+`src/cpu.rs`, `src/property.rs`, `src/reference.rs`, `src/index.rs`,
+`src/address.rs`, `src/dma.rs`,
 `src/fwnode_backend/`, `src/error.rs`, and `src/kernel_nodes/`. No modules
 are excluded; everything is reachable from `LinuxFdt::new` /
 `LinuxFdt::from_ptr` and the iterators they produce. `DtBackend` is an

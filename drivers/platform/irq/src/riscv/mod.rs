@@ -4,11 +4,12 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
 use core::{num::NonZeroU32, ptr::NonNull};
 
 use fwnode::FwNode;
 use kalloc_types::{AllocFlags, KBox};
-use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
+use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId, RawCpuId, logical_cpu_id, raw_cpu_id};
 use kirq::TargetCpu;
 use kplat::cpu::id as this_cpu_id;
 use kspin::SpinNoIrq;
@@ -16,11 +17,16 @@ use lazyinit::LazyInit;
 use memaddr::PhysAddr;
 use memspace::iomap_device;
 use riscv::register::{sie, sip};
-use riscv_plic::Plic;
 use sbi_rt::HartMask;
 
+mod affinity;
+mod context;
 mod firmware;
+mod legacy;
+mod registers;
+use context::{PlicContext, PlicContextDecl, PlicContexts};
 use firmware::{PlicConfig, PlicSources};
+use registers::{MAX_SOURCE, PlicRegisters};
 
 const PLIC_PADDR: usize = 0x0c00_0000;
 const PLIC_MMIO_SIZE: usize = 0x0400_0000;
@@ -37,21 +43,22 @@ pub const S_EXT: usize = INTC_IRQ_BASE + 9;
 /// PLIC interrupt numbers start at 1, so 0 is safe as a sentinel.
 const PLIC_COMPLETE_SKIP: usize = 0;
 static PLIC: LazyInit<PlicController> = LazyInit::new();
-// riscv_plic 0.2.0 indexes a 1024-entry priority array; entry zero is reserved.
-const PLIC_MAX_SOURCE: u32 = 1023;
 
 struct PlicController {
     /// Hardware-number namespace returned when this PLIC's firmware controller
     /// node was registered.
     domain: kirq::IrqDomainId,
     sources: PlicSources,
+    contexts: PlicContexts,
     state: SpinNoIrq<PlicState>,
 }
 
 struct PlicState {
-    registers: Plic,
+    registers: PlicRegisters,
     // Controller-lifetime bindings; disable does not imply affinity migration.
     sources: KBox<[PlicSourceState]>,
+    /// CPUs whose local context preparation completed successfully.
+    prepared: KCpuMask,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -125,7 +132,9 @@ impl PlicController {
         };
         trace!("PLIC set enable: {source} {enabled}");
         let mut state = self.state.lock();
-        let PlicState { registers, sources } = &mut *state;
+        let PlicState {
+            registers, sources, ..
+        } = &mut *state;
         sources[source.get() as usize].set_enabled(registers, this_context(), source, enabled);
     }
 
@@ -134,7 +143,9 @@ impl PlicController {
             return;
         };
         let mut state = self.state.lock();
-        let PlicState { registers, sources } = &mut *state;
+        let PlicState {
+            registers, sources, ..
+        } = &mut *state;
         sources[source.get() as usize].set_priority(registers, source, priority.into());
     }
 
@@ -143,7 +154,9 @@ impl PlicController {
             return;
         };
         let mut state = self.state.lock();
-        let PlicState { registers, sources } = &mut *state;
+        let PlicState {
+            registers, sources, ..
+        } = &mut *state;
         sources[source.get() as usize].mask(registers, source);
     }
 
@@ -152,7 +165,9 @@ impl PlicController {
             return;
         };
         let mut state = self.state.lock();
-        let PlicState { registers, sources } = &mut *state;
+        let PlicState {
+            registers, sources, ..
+        } = &mut *state;
         sources[source.get() as usize].unmask(registers, source);
     }
 
@@ -235,13 +250,13 @@ trait PlicPriorityRegisters {
     fn write_priority(&mut self, source: NonZeroU32, priority: u32);
 }
 
-impl PlicPriorityRegisters for Plic {
+impl PlicPriorityRegisters for PlicRegisters {
     fn read_priority(&self, source: NonZeroU32) -> u32 {
-        self.get_priority(source)
+        PlicRegisters::read_priority(self, source)
     }
 
     fn write_priority(&mut self, source: NonZeroU32, priority: u32) {
-        self.set_priority(source, priority);
+        PlicRegisters::write_priority(self, source, priority);
     }
 }
 
@@ -268,21 +283,27 @@ fn set_plic_route(
     }
 }
 
-impl PlicCompletion for Plic {
+impl PlicCompletion for PlicRegisters {
     fn is_enabled(&self, source: NonZeroU32, context: usize) -> bool {
-        Plic::is_enabled(self, source, context)
+        PlicRegisters::is_enabled(self, source, context)
     }
 
     fn set_enabled(&mut self, source: NonZeroU32, context: usize, enabled: bool) {
-        if enabled {
-            self.enable(source, context);
-        } else {
-            self.disable(source, context);
-        }
+        PlicRegisters::set_enabled(self, source, context, enabled);
     }
 
     fn complete(&mut self, context: usize, source: NonZeroU32) {
-        Plic::complete(self, context, source);
+        PlicRegisters::complete(self, context, source);
+    }
+}
+
+trait PlicContextRegisters: PlicCompletion {
+    fn init_by_context(&mut self, context: usize);
+}
+
+impl PlicContextRegisters for PlicRegisters {
+    fn init_by_context(&mut self, context: usize) {
+        PlicRegisters::init_by_context(self, context);
     }
 }
 
@@ -321,7 +342,7 @@ impl kirq::IrqDomainXlate for PlicXlate {
         let &[source] = params else {
             return Err(kirq::IrqXlateError::Malformed);
         };
-        if source == 0 || source > PLIC_MAX_SOURCE {
+        if source == 0 || source > MAX_SOURCE {
             return Err(kirq::IrqXlateError::InvalidHwirq);
         }
         Ok(kirq::IrqHwSpec {
@@ -346,24 +367,34 @@ pub fn init_primary(root: FwNode<'static>) {
     )]
     let selection = PlicConfig::from_fwnode(root)
         .unwrap_or_else(|err| panic!("invalid PLIC configuration: {err:?}"));
-    // Preserve the legacy no-DT layout. This is a library capacity bound, not
-    // discovery of the number of physically implemented sources.
-    let (paddr, size, sources, controller) = match selection {
+    // Preserve the legacy no-DT layout only when firmware describes no PLIC.
+    // Its context numbering is a fixed platform convention, not a generic fact.
+    let (paddr, size, sources, controller, declarations) = match selection {
         Some(PlicConfig {
             paddr,
             size,
             sources,
             controller,
-        }) => (paddr, size, sources, Some(controller)),
+            contexts,
+        }) => (paddr, size, sources, Some(controller), contexts),
         None => (
             PhysAddr::from_usize(PLIC_PADDR),
             PLIC_MMIO_SIZE,
-            PlicSources {
-                last: PLIC_MAX_SOURCE,
-            },
+            PlicSources { last: MAX_SOURCE },
             None,
+            legacy_plic_declarations(),
         ),
     };
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: controller context identity \
+                  or register aperture validation failed before controller publication"
+    )]
+    let contexts = PlicContexts::build(&declarations, size, |hardware_cpu_id| {
+        let raw = usize::try_from(hardware_cpu_id).ok()?;
+        logical_cpu_id(RawCpuId::new(raw))
+    })
+    .unwrap_or_else(|error| panic!("invalid PLIC contexts: {error}"));
     #[expect(
         clippy::expect_used,
         reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: PLIC source state is required \
@@ -388,10 +419,17 @@ pub fn init_primary(root: FwNode<'static>) {
         reason = "CG-021-no-panic-on-reachable-failure: iomap_device succeeded and returned the \
                   live non-null PLIC MMIO mapping"
     )]
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the mapped PLIC window must \
+                  be aligned for 32-bit MMIO and represent a whole number of registers"
+    )]
     // SAFETY: `plic_base` comes from a successful `iomap_device` of the PLIC
-    // MMIO window, so the pointer is non-null and references the live register
-    // block for the duration of the driver.
-    let plic = unsafe { Plic::new(NonNull::new(plic_base.as_usize() as *mut _).unwrap()) };
+    // MMIO window, so the pointer is non-null and valid for at least `size`
+    // bytes for the duration of the driver.
+    let plic =
+        unsafe { PlicRegisters::new(NonNull::new(plic_base.as_usize() as *mut u8).unwrap(), size) }
+            .unwrap_or_else(|error| panic!("invalid PLIC register window: {error}"));
     let domain = match controller {
         Some(controller) => {
             // This singleton boot path keeps the primary PLIC on the legacy
@@ -421,29 +459,44 @@ pub fn init_primary(root: FwNode<'static>) {
     PLIC.init_once(PlicController {
         domain,
         sources,
+        contexts,
         state: SpinNoIrq::new(PlicState {
             registers: plic,
             sources: source_state,
+            prepared: KCpuMask::new(),
         }),
     });
 }
 
+#[expect(
+    clippy::panic,
+    reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the legacy PLIC context layout \
+              must be derivable for every present CPU; early IRQ initialization has no recovery \
+              channel"
+)]
+fn legacy_plic_declarations() -> Vec<PlicContextDecl> {
+    match legacy::declarations() {
+        Ok(declarations) => declarations,
+        Err(error) => panic!("failed to derive legacy PLIC contexts: {error}"),
+    }
+}
+
+/// Returns this CPU's authoritative PLIC context index.
+///
+/// Runtime publishes interrupt readiness only after local preparation, so a
+/// dispatch or completion on a ready CPU must have a context here.
 fn this_context() -> usize {
     let logical_cpu_id = this_cpu_id();
     #[expect(
-        clippy::panic,
-        reason = "CG-021-no-panic-on-reachable-failure: The current CPU's logical id was assigned \
-                  from the present-CPU map at entry, so it has a raw hart id"
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Runtime publishes CPU interrupt readiness \
+                  only after the local PLIC context was prepared and recorded"
     )]
-    let hart_id = raw_cpu_id(logical_cpu_id)
-        .unwrap_or_else(|| {
-            panic!(
-                "missing raw CPU id mapping for current logical CPU {}",
-                logical_cpu_id.as_usize()
-            )
-        })
-        .as_usize();
-    hart_id * 2 + 1
+    plic()
+        .contexts
+        .get(logical_cpu_id)
+        .expect("interrupt-ready CPU has no PLIC context")
+        .index
 }
 
 fn send_ipi_to_raw_hart(raw_hart_id: usize) {
@@ -457,17 +510,51 @@ fn send_ipi_to_raw_hart(raw_hart_id: usize) {
     }
 }
 
+/// Prepares one selected context and publishes it as prepared only last.
+///
+/// The duplicate check precedes every register write. A failure leaves the
+/// prepared mask unchanged; the CPU must not continue to interrupt readiness.
+fn prepare_plic_context(
+    registers: &mut impl PlicContextRegisters,
+    prepared: &mut KCpuMask,
+    logical_cpu: LogicalCpuId,
+    context: PlicContext,
+    sources: PlicSources,
+) -> Result<(), &'static str> {
+    if prepared.get_logical(logical_cpu) {
+        return Err("PLIC context already initialized");
+    }
+    disable_plic_sources(registers, context.index, sources);
+    registers.init_by_context(context.index);
+    prepared.set_logical(logical_cpu, true);
+    Ok(())
+}
+
 /// Prepare this hart's PLIC context with all supported external sources disabled.
 ///
 /// Called once per hart after global PLIC setup, with CPU IRQ delivery still
 /// masked and before any source is enabled on this context. This is not a
 /// runtime reset: invoking it after registration would disable live routes.
-pub fn init_current_cpu_context() {
+pub fn init_current_cpu_context() -> Result<(), &'static str> {
     let controller = plic();
+    let logical_cpu_id = this_cpu_id();
+    let context = controller
+        .contexts
+        .get(logical_cpu_id)
+        .ok_or("current CPU has no PLIC context")?;
     let mut state = controller.state.lock();
-    let context = this_context();
-    disable_plic_sources(&mut state.registers, context, controller.sources);
-    state.registers.init_by_context(context);
+    let PlicState {
+        registers,
+        prepared,
+        ..
+    } = &mut *state;
+    prepare_plic_context(
+        registers,
+        prepared,
+        logical_cpu_id,
+        context,
+        controller.sources,
+    )
 }
 
 /// Enable this hart's software, timer and external interrupt sources.
@@ -513,8 +600,15 @@ macro_rules! with_cause {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
-    fn immediate_affinity(_desc: kirq::IrqDesc) -> Option<&'static kirq::IrqAffinityChip> {
-        None
+    fn immediate_affinity(desc: kirq::IrqDesc) -> Option<&'static kirq::IrqAffinityChip> {
+        let controller = PLIC.get()?;
+        if !matches!(
+            select_plic_flow(desc, Some(controller.sources)),
+            Ok(kirq::IrqFlow::Fasteoi(_))
+        ) {
+            return None;
+        }
+        Some(&affinity::CHIP)
     }
 
     fn guest_interface() -> Option<kirq::GuestIrqInterface> {

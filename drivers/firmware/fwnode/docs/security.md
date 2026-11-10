@@ -31,6 +31,18 @@ that error, or an absent declaration, into an implicit permissive default. A
 missing coherency declaration may be resolved only by an explicit, scoped
 platform policy.
 
+## Hardware CPU Identity Boundary
+
+`FwNode::hardware_cpu_id` is a firmware fact decoded by the backend. A value of
+zero is a valid hardware identity, `None` means the node is not a processor or
+declares no identity, and a malformed declaration is `InvalidValue`; backends
+without the capability return `Unsupported`. The contract does not map the
+value to a logical CPU, a `RawCpuId`, a node identity or an ACPI Processor UID,
+and it grants no controller reachability. Consumers must range-check the value,
+apply their architecture's identity mapping and exclude CPUs outside the
+running set. Treating absence or a valid-but-unmapped identity as a routing
+target would select the wrong CPU.
+
 ## Scope
 
 The analysis covers `src/lib.rs` and the host tests in `tests/property.rs` and
@@ -76,6 +88,10 @@ no external-input parsing surface inside it.
   interpretation to the backend. Consumers must not test a firmware property
   name themselves, and a backend must report a malformed declaration as
   `FwError` rather than `Ok(false)`, so corruption cannot look like absence.
+- `FwNode::hardware_cpu_id` delegates processor-node and cell-width decoding to
+  the backend. The contract preserves the distinction between zero identity,
+  absence, malformed declaration and unsupported backend; it never substitutes
+  a logical CPU index for the hardware identity.
 
 ## Threat Analysis
 

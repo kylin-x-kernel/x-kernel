@@ -154,6 +154,29 @@ pub trait FwNodeOps<'a>: Sync + 'a {
     /// error if the node's property stream is malformed.
     fn property(&self, id: FwNodeId, name: &str) -> Result<Option<FwProperty<'a>>, FwError>;
 
+    /// Returns this node's firmware-declared hardware CPU identity.
+    ///
+    /// The identity is an architecture-defined hardware CPU number, not a
+    /// logical CPU index, firmware-node identity or ACPI Processor UID. For
+    /// example, a device-tree RISC-V CPU node reports its hart ID here.
+    /// Consumers must not use this value as a `RawCpuId` without the owning
+    /// architecture's mapping and validation.
+    ///
+    /// `Some(id)` is a successfully decoded identity; zero is valid. `None`
+    /// means the node is not a processor node or declares no identity.
+    /// Malformed declarations return [`FwError::InvalidValue`]. Backends that
+    /// do not implement this capability return [`FwError::Unsupported`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FwError::InvalidNode`] for an unknown handle,
+    /// [`FwError::InvalidValue`] for a malformed identity declaration, or
+    /// [`FwError::Unsupported`] when the backend does not provide this fact.
+    fn hardware_cpu_id(&self, id: FwNodeId) -> Result<Option<u64>, FwError> {
+        let _ = id;
+        Err(FwError::Unsupported)
+    }
+
     /// Returns MMIO resource `index` in firmware order.
     ///
     /// An out-of-range index is `Ok(None)`, which lets callers enumerate
@@ -435,6 +458,18 @@ impl<'a> FwNode<'a> {
     /// See [`FwNodeOps::property`].
     pub fn property(self, name: &str) -> Result<Option<FwProperty<'a>>, FwError> {
         self.ops.property(self.id, name)
+    }
+
+    /// Returns this node's firmware-declared hardware CPU identity.
+    ///
+    /// This is an architecture-defined hardware CPU number; it is not a
+    /// logical CPU index, node identity or ACPI Processor UID.
+    ///
+    /// # Errors
+    ///
+    /// See [`FwNodeOps::hardware_cpu_id`].
+    pub fn hardware_cpu_id(self) -> Result<Option<u64>, FwError> {
+        self.ops.hardware_cpu_id(self.id)
     }
 
     /// Returns MMIO resource `index`.

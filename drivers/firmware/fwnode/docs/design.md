@@ -58,6 +58,13 @@ drivers/firmware/fwnode/
   the node as an interrupt controller. Consumers must not test a firmware
   property name themselves; the device-tree backend answers from its own
   controller declaration, and future backends use their native representation.
+- `FwNode::hardware_cpu_id` returns an architecture-defined hardware CPU
+  identity, such as a RISC-V hart ID, already decoded by the backend. It is not
+  a logical CPU index, `FwNodeId`, or ACPI Processor UID. `Some(0)` is a valid
+  identity; `None` means the node is not a processor node or declares no
+  identity; malformed declarations are `InvalidValue`; backends without the
+  capability return `Unsupported`. The contract does not map the value to a
+  `RawCpuId` or establish controller reachability.
 - `FwProperty` / `FwPropertyValue` carry a property in its firmware
   representation. Accessors (`as_u32`, `as_u64`, `as_str`, `as_bool`) interpret
   only unambiguous encodings and return `FwError::InvalidValue` otherwise.
@@ -101,6 +108,12 @@ Backends are responsible for their own parsing and validation:
 - an address encoding the backend cannot translate, or a DMA fact the
   backend does not implement, is `FwError::Unsupported`;
 - a destination that cannot hold the value is `FwError::BufferTooSmall`.
+
+Hardware CPU identity follows the same split. The backend owns the native
+processor-node representation and cell decoding; the contract carries only the
+opaque `u64` fact and its absence/error semantics. Architecture code that maps
+that hardware identity to a logical CPU, or rejects an identity outside the
+running CPU set, remains with the consumer.
 
 DMA coherency follows the same rule: `Ok(None)` means the node declares
 neither coherent nor noncoherent (after any backend-native inheritance),

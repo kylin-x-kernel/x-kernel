@@ -233,6 +233,106 @@ fn rejects_a_handle_from_another_backend() {
     assert_eq!(node.name(), Some("/"));
 }
 
+fn hardware_cpu_fixture(
+    address_cells: Option<&[u8]>,
+    device_type: Option<&[u8]>,
+    reg: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.begin("cpus");
+    if let Some(value) = address_cells {
+        blob.property("#address-cells", value);
+    }
+    blob.property("#size-cells", &cells(&[0]));
+    blob.begin("cpu@0");
+    if let Some(value) = device_type {
+        blob.property("device_type", value);
+    }
+    if let Some(value) = reg {
+        blob.property("reg", value);
+    }
+    blob.end();
+    blob.end();
+    blob.end();
+    blob.finish()
+}
+
+fn cpu_hardware_id(
+    address_cells: Option<&[u8]>,
+    device_type: Option<&[u8]>,
+    reg: Option<&[u8]>,
+) -> Result<Option<u64>, FwError> {
+    let bytes = hardware_cpu_fixture(address_cells, device_type, reg);
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let backend = DtBackend::new(tree);
+    let root = backend.root().unwrap();
+    node(root, "cpu@0").hardware_cpu_id()
+}
+
+#[test]
+fn decodes_one_cell_hardware_cpu_identity_including_zero() {
+    for identity in [0u32, 5, u32::MAX] {
+        assert_eq!(
+            cpu_hardware_id(
+                Some(&cells(&[1])),
+                Some(b"cpu\0"),
+                Some(&cells(&[identity])),
+            ),
+            Ok(Some(u64::from(identity)))
+        );
+    }
+}
+
+#[test]
+fn decodes_two_cell_hardware_cpu_identity() {
+    assert_eq!(
+        cpu_hardware_id(
+            Some(&cells(&[2])),
+            Some(b"cpu\0"),
+            Some(&cells(&[1, 0x2345_6789])),
+        ),
+        Ok(Some(0x1_2345_6789))
+    );
+}
+
+#[test]
+fn hardware_cpu_identity_absence_is_none() {
+    assert_eq!(
+        cpu_hardware_id(Some(&cells(&[1])), Some(b"memory\0"), Some(&cells(&[0])),),
+        Ok(None)
+    );
+    assert_eq!(
+        cpu_hardware_id(Some(&cells(&[1])), Some(b"cpu\0"), None),
+        Ok(None)
+    );
+    // The X-Kernel CPU-node convention treats a missing #address-cells as one
+    // address cell, matching the existing `of` CPU identity helper.
+    assert_eq!(
+        cpu_hardware_id(None, Some(b"cpu\0"), Some(&cells(&[7]))),
+        Ok(Some(7))
+    );
+}
+
+#[test]
+fn rejects_malformed_hardware_cpu_identity() {
+    let cases = [
+        (cells(&[0]), cells(&[0])),
+        (cells(&[3]), cells(&[0, 0, 0])),
+        (cells(&[2]), cells(&[0])),
+        (cells(&[1]), Vec::from([0, 1])),
+        (cells(&[1]), cells(&[5, 0])),
+        (Vec::from([0, 1]), cells(&[0])),
+    ];
+    for (address_cells, reg) in cases {
+        assert_eq!(
+            cpu_hardware_id(Some(&address_cells), Some(b"cpu\0"), Some(&reg)),
+            Err(FwError::InvalidValue),
+            "#address-cells={address_cells:?} reg={reg:?}"
+        );
+    }
+}
+
 fn dma_fixture() -> Vec<u8> {
     let mut blob = Dtb::new();
     blob.begin("");

@@ -26,7 +26,13 @@ impl PlatformBootIf {
         )]
         let root = khal::firmware::fwnode_root().expect("firmware root node unavailable");
         irq_driver::riscv::init_primary(root);
-        irq_driver::riscv::init_current_cpu_context();
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the primary PLIC context \
+                      must be prepared before local interrupt delivery or runtime readiness"
+        )]
+        irq_driver::riscv::init_current_cpu_context()
+            .expect("primary PLIC context preparation failed");
         #[expect(
             clippy::expect_used,
             reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: stdout configuration \
@@ -58,8 +64,10 @@ impl PlatformBootIf {
 
     #[cfg(feature = "smp")]
     fn prepare_local_interrupts(_logical_cpu_id: LogicalCpuId) -> kerrno::KResult<()> {
-        irq_driver::riscv::init_current_cpu_context();
-        Ok(())
+        irq_driver::riscv::init_current_cpu_context().map_err(|error| {
+            error!("secondary PLIC context preparation failed: {error}");
+            kerrno::KError::BadState
+        })
     }
 
     fn activate_local_interrupts() -> kerrno::KResult<()> {

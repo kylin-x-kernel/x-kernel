@@ -13,8 +13,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use lazyinit::LazyInit;
 use memaddr::PhysAddr;
 pub use rs_fdtree::{
-    Chosen, Dice, FdtError, FdtNode, InterruptController, LinuxFdt, MemoryRegion, NodeProperty,
-    PropertyError, RegIter,
+    Chosen, CpuNode, Dice, FdtError, FdtNode, InterruptController, LinuxFdt, MemoryRegion,
+    NodeProperty, PropertyError, RegIter,
 };
 
 /// Failure to initialize the global device-tree handle.
@@ -131,7 +131,7 @@ pub fn property_u32(node: FdtNode<'static, 'static>, name: &str) -> Option<u32> 
 
 /// Returns whether the node declares `device_type = "cpu"`.
 pub fn is_cpu_node(node: FdtNode<'_, '_>) -> bool {
-    node.property_str("device_type") == Some("cpu")
+    CpuNode::from_node(node).is_some()
 }
 
 /// Returns whether the node is a CPU node whose `status` is not `disabled`.
@@ -141,11 +141,11 @@ pub fn is_enabled_cpu_node(node: FdtNode<'_, '_>) -> bool {
 
 /// Returns the first `reg` address of a CPU node, honoring the parent's
 /// `#address-cells` width.
+///
+/// This is the same CPU identity parser used by the fwnode backend; `of` does
+/// not keep a second interpretation of CPU nodes.
 pub fn cpu_node_reg(node: FdtNode<'_, '_>) -> Option<u64> {
-    if !is_cpu_node(node) {
-        return None;
-    }
-    node_reg(node)
+    CpuNode::from_node(node)?.hardware_id().ok().flatten()
 }
 
 /// The first `reg` address of a node, honoring the parent's

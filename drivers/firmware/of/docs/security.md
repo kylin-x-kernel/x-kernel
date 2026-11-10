@@ -8,8 +8,11 @@ no forwarding API for these operations and no longer rescans `interrupts`,
 `interrupts-extended` or `interrupt-parent`. `decode_irq_cells` and
 `decode_fdt_irq_spec` consume already-resolved controller cells and only
 apply the transitional GIC/PLIC binding meaning; both reject malformed cell
-counts and map them to `None`. Existing boot-pointer ownership and legacy
-query boundaries below are unchanged.
+counts and map them to `None`. CPU node classification and `reg` identity
+decoding also delegate to `rs_fdtree::CpuNode`; `of` keeps only the
+enabled-status policy and maps malformed identity declarations to `None`.
+Existing boot-pointer ownership and legacy query boundaries below are
+unchanged.
 
 ## Scope
 

@@ -132,9 +132,11 @@ This analysis covers the entire crate: `src/lib.rs` (architecture
 dispatch), `src/gic/mod.rs`, `src/gic/xlate.rs`, `src/gic/spi.rs`,
 `src/gic/gicv2.rs`, `src/gic/gicv2/affinity.rs`, `src/gic/gicv3.rs`,
 `src/gic/nmi.rs` (AArch64 GIC),
-`src/riscv/mod.rs` and `src/riscv/firmware.rs` (PLIC), and
+`src/riscv/mod.rs`, `src/riscv/firmware.rs`, `src/riscv/context.rs`,
+`src/riscv/registers.rs`, `src/riscv/affinity.rs` and `src/riscv/legacy.rs`
+(PLIC), and
 `src/x86/mod.rs` and `src/x86/discovery.rs` (IO-APIC glue). No modules are
-excluded; the backend crates (`arm_gic_driver`, `riscv_plic`,
+excluded; the backend crates (`arm_gic_driver`,
 `x86-apic`) encapsulate their own register access and are audited
 separately — values they return are treated as hardware facts here.
 
@@ -154,13 +156,22 @@ network/file data path in this crate.
   must match a known GIC list, and each detected version must supply
   its required regions (v2: GICD+GICC; v3: GICD+GICR). Failure:
   `None` — platform init applies its own fallback or abort policy.
-- **PLIC region**: `PlicConfig::from_fwnode` selects the first available
-  `sifive,plic-1.0.0` / `riscv,plic0` node that the backend reports as an
-  interrupt controller, and supplies its translated `reg` resource and
-  `riscv,ndev`; malformed availability, register resources or source counts
+- **PLIC region and contexts**: `PlicConfig::from_fwnode` selects the first
+  available `sifive,plic-1.0.0` / `riscv,plic0` node that the backend reports
+  as an interrupt controller, and supplies its translated `reg` resource,
+  `riscv,ndev` and raw `interrupts-extended` declarations. Firmware parsing
+  preserves raw indices, skips the binding's `-1` argument placeholder, M-mode
+  entries, unavailable CPUs and non-supervisor-external entries, and requires a
+  firmware-decoded hardware identity for each S-mode CPU. The controller-owned
+  context table then maps hardware identities to the runtime CPU set and owns
+  logical/hardware/index uniqueness. Malformed or dangling references, missing
+  identities, duplicate associations, no usable S-mode context, out-of-range
+  context indices or a mapped window too small for the used context registers
   abort initialization instead of being guessed or falling back to the fixed
-  layout. Without firmware, the legacy fixed address `0x0c00_0000` and the
-  library source bound are retained.
+  layout. The register layer owns the `0x80` enable stride, `0x1000`
+  context-local stride and 15872-context bound. Without firmware, the legacy
+  fixed address `0x0c00_0000`, register-layer source bound and explicit
+  `hart_id * 2 + 1` declarations are retained.
 - **Controller MMIO windows**: mapped once through
   `memspace::iomap_device`; all later access stays inside the mapped
   apertures.
@@ -229,14 +240,18 @@ by the caller (`kirq` dispatch or platform init):
   instruction synchronization only.
 - `gic/gicv3.rs:136` — `asm!("mrs ICC_RPR_EL1")`: read-only system
   register read used to open the NMI window (feature `nmi-pseudo`).
-- `riscv.rs:65` — `Plic::new(NonNull::new(..).unwrap())`: the mapped
-  PLIC MMIO base from platform discovery (`unwrap` panics if the
-  address were null, which the iomap contract excludes).
-- `riscv.rs:86` — `asm!("fence rw, rw")`: orders MMIO setup before the
+- `riscv/registers.rs` — `PlicRegisters::new` plus each bounds-checked
+  `read_volatile`/`write_volatile`: the base and size come from the successful
+  `iomap_device` of the PLIC MMIO window. Construction rejects an unaligned base
+  and a non-register-aligned length; every access is checked against the mapped
+  length before the volatile operation. The driver never forms a whole-block
+  `PLICRegs` reference. Invalid internal offsets are explicit invariant failures,
+  not zero reads, false state or discarded writes.
+- `riscv/mod.rs` — `asm!("fence rw, rw")`: orders MMIO setup before the
   hart may take external interrupts.
-- `riscv.rs:100/141` — SBI timer programming (`sbiret` handling):
-  forwards the supervisor timer deadline to M-mode.
-- `riscv.rs:181` — `sip::clear_ssoft()`: clears this hart's software
+- `riscv/mod.rs` — SBI timer programming (`sbiret` handling): forwards the
+  supervisor timer deadline to M-mode.
+- `riscv/mod.rs` — `sip::clear_ssoft()`: clears this hart's software
   interrupt pending bit.
 
 `src/x86/` contains no unsafe of its own: register access is
@@ -255,15 +270,16 @@ anywhere in this crate.
   Mapping is prepared before action installation without enabling delivery.
   Either preparation or installation failure prevents notifier publication;
   an already prepared mapping remains platform-owned for kernel lifetime.
-- `PLIC` (`LazyInit<PlicController>`): the source bound and PLIC register handle;
-  access before init panics with a named `expect`.
-  Its inner `SpinNoIrq<PlicState>` lock protects registers and effective targets,
-  excluding local IRQ delivery and migration while selecting the
-  claiming context and executing enable/check/complete/restore. A disabled
-  source is temporarily enabled only to satisfy the controller completion
-  contract, then restored before unlocking. Concurrent source-control updates
-  use the same lock, so restoration cannot overwrite a newer enable decision.
-  This does not imply device shutdown or hardware quiescence after software drain.
+- `PLIC` (`LazyInit<PlicController>`): the source bound, immutable context table
+  and PLIC register handle; access before init panics with a named `expect`.
+  Its inner `SpinNoIrq<PlicState>` lock protects registers, effective targets and
+  the prepared-CPU mask, excluding local IRQ delivery and migration while
+  selecting the claiming context and executing enable/check/complete/restore. A
+  disabled source is temporarily enabled only to satisfy the controller
+  completion contract, then restored before unlocking. Concurrent source-control
+  updates use the same lock, so restoration cannot overwrite a newer enable
+  decision. This does not imply device shutdown or hardware quiescence after
+  software drain.
 
 ## Threat Analysis
 
@@ -363,17 +379,42 @@ globals. Source validation and rejection diagnostics precede the register lock.
 External enable, priority and completion ids must be nonzero, within the initialized
 bound and representable without truncation. Invalid ids return before indexed
 register access. The no-DT fallback enforces library capacity, not physical
-source discovery. Context-index and MMIO-mapping validity remain separate
-platform obligations; source validation does not establish either property.
+source discovery. The context table and register aperture are validated before
+controller publication: used raw indices must fit the register-layer model and
+the declared window must cover every used enable, threshold and claim register.
+Source validation does not replace those context checks, and a valid hardware
+CPU identity outside the runtime set is not treated as a routing target.
 
 The effective-target table is allocated before publication with one slot per
-supported source plus reserved slot zero. Target selection and enable-bit writes
-are serialized by the same controller lock. Management-task migration cannot
-redirect a later disable to another context. Context preparation must precede
-first enable; bound CPUs must remain available for the controller lifetime.
-Hot-unplug and runtime retargeting are not supported by this fixed-target policy.
-Claim completion remains local to the claiming CPU and does not rewrite the
-recorded management target.
+supported source plus reserved slot zero. Target selection, immediate affinity
+and enable-bit writes are serialized by the same controller lock. Management-task
+migration cannot redirect a later disable to another context. Context preparation
+must precede first enable; bound CPUs must remain available for the controller
+lifetime. CPU hot-unplug is not supported. Immediate affinity can retarget an
+ordinary source only to a prepared, interrupt-ready context.
+
+The affinity transaction validates the source/flow and selects a prepared
+candidate before any register read or write; an unreachable candidate set is
+`Rejected` with zero register writes. It samples the old context's actual enable
+bit, suppresses the old context, records the new target and suppresses stale
+enablement on the new context. `Preserve` re-enables only if the old context was
+actually enabled; `KeepMasked` leaves the new context disabled. No priority, mask
+policy or KIRQ disable depth is changed.
+
+A failure while suppressing the old context leaves the recorded target on the
+old context and performs no new-context write. Once the new target is recorded,
+a later suppression or enable failure leaves the target on the new context; the
+recovery disable therefore clears that context, while the old context was
+already suppressed. `HardwareFailure` does not claim quiescence, restore the old
+route or complete an outstanding claim. Claim completion remains local to the
+claiming CPU and does not rewrite the recorded target or enable state.
+
+The logical-CPU context table is immutable after controller publication and is
+validated against the declared MMIO window before any register access. The
+prepared-CPU mask is updated under the controller lock only after a CPU's
+context transaction succeeds; a failed or repeated preparation cannot make the
+CPU a routing target. Claim, enable and completion use the same table, so a
+firmware-decoded context and the legacy no-firmware layout cannot disagree.
 
 ## GIC Admission Boundary
 
