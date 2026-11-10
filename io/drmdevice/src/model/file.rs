@@ -19,6 +19,7 @@ use ksync::Mutex;
 use super::{
     device::{DrmDevice, MinorKind},
     ids::{DumbHandle, FbId},
+    syncobj::SyncobjTable,
 };
 use crate::{auth::DrmMaster, gem::GemObject};
 
@@ -34,6 +35,8 @@ pub(crate) struct DrmFile {
     /// Capabilities negotiated through `SET_CLIENT_CAP`, indexed by the Linux
     /// `DRM_CLIENT_CAP_*` value.
     caps: AtomicU64,
+    /// The blank this file observed last (`file_priv->vblank`).
+    pub(crate) vblank: Mutex<crate::model::vblank::SequenceTracker>,
     /// GEM handles owned by this file, exactly like `file_priv->object_idr`.
     pub(crate) handles: Mutex<BTreeMap<DumbHandle, Arc<GemObject>>>,
     /// Framebuffers created by this file (`file_priv->fbs`); removed on close.
@@ -50,8 +53,26 @@ pub(crate) struct DrmFile {
             alloc::sync::Arc<crate::blob::Blob>,
         >,
     >,
+    /// virtio-gpu 3D context state owned by this open file.
+    ///
+    /// Linux keeps exactly one context per file (`virtio_gpu_fpriv`): it is
+    /// created on first use or by `CONTEXT_INIT`, and every buffer and submit
+    /// from this file belongs to it. The state is kept whole instead of split
+    /// across the core file model so the virtio-gpu ABI stays in one module.
+    pub(crate) virtgpu: Mutex<crate::virtgpu::VirtgpuFile>,
+    /// Syncobjs created by this file (`file_priv->syncobj_table`).
+    ///
+    /// Closing the file drops the table, which releases every object it owned;
+    /// a fence a descriptor or another object still references stays alive
+    /// through that reference.
+    pub(crate) syncobjs: Mutex<SyncobjTable>,
     /// Authentication binding and master ownership.
     pub(crate) auth: Mutex<AuthState>,
+    /// Name the client attached to itself through `SET_CLIENT_NAME`.
+    ///
+    /// Linux keeps it for tracking and debugging (`file_priv->client_name`);
+    /// nothing reads it back, so this file records it and that is all.
+    pub(crate) client_name: Mutex<alloc::string::String>,
 }
 
 /// Authentication state of one file.
@@ -64,6 +85,11 @@ pub(crate) struct AuthState {
     pub owns_master_object: bool,
     /// Magic token issued to this file, if any.
     pub magic: Option<u32>,
+    /// Whether the file has been authenticated with `AUTH_MAGIC`.
+    ///
+    /// This is `file_priv->authenticated`: it is what `DRM_AUTH` commands
+    /// check, and it is per file.
+    pub authenticated: bool,
 }
 
 impl DrmFile {
@@ -73,10 +99,14 @@ impl DrmFile {
             dev,
             kind,
             caps: AtomicU64::new(0),
+            vblank: Mutex::new(crate::model::vblank::SequenceTracker::default()),
             handles: Mutex::new(BTreeMap::new()),
             blobs: Mutex::new(BTreeMap::new()),
             fbs: Mutex::new(BTreeSet::new()),
+            virtgpu: Mutex::new(crate::virtgpu::VirtgpuFile::default()),
+            syncobjs: Mutex::new(SyncobjTable::new()),
             auth: Mutex::new(auth),
+            client_name: Mutex::new(alloc::string::String::new()),
         })
     }
 
@@ -105,15 +135,29 @@ impl DrmFile {
         self.handles.lock().get(&handle).cloned()
     }
 
-    /// Finds an owned handle by its mmap offset, in bytes.
-    pub(crate) fn handle_by_offset_bytes(
+    /// The object a `mmap` offset names (`drm_gem_object_lookup` by offset).
+    ///
+    /// This is `drm_vma_offset_lookup_locked` plus the handle check: the
+    /// card's offset namespace says which object owns the offset, and the
+    /// file must still hold a handle to it. A null object (a fresh import
+    /// that was never bound to a handle) is reported as `None`, so a client
+    /// cannot map a buffer it never received.
+    pub(crate) fn object_by_offset(&self, offset_bytes: u64) -> Option<Arc<GemObject>> {
+        self.object_by_offset_range(offset_bytes, 1)
+    }
+
+    /// The object that covers the mapping `[offset, offset + bytes)`.
+    pub(crate) fn object_by_offset_range(
         &self,
         offset_bytes: u64,
-    ) -> Option<(DumbHandle, Arc<GemObject>)> {
+        bytes: u64,
+    ) -> Option<Arc<GemObject>> {
+        let range = self.dev.vma.lookup_exact(offset_bytes, bytes)?;
+        let object = self.dev.object_at_offset(range.offset)?;
         self.handles
             .lock()
-            .iter()
-            .find(|(_, object)| object.offset_bytes() == offset_bytes)
-            .map(|(handle, object)| (*handle, object.clone()))
+            .values()
+            .any(|known| Arc::ptr_eq(known, &object))
+            .then_some(object)
     }
 }

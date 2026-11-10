@@ -6,6 +6,19 @@ use unittest::{assert_eq, assert_ne, def_test};
 
 use super::*;
 
+/// A minimal connector snapshot for a test DRM card.
+fn drm_metadata() -> kdevice::DrmDeviceNodeMetadata {
+    kdevice::DrmDeviceNodeMetadata::new(
+        String::from("Virtual-1"),
+        String::from("connected"),
+        String::from("On"),
+        String::from("1280x800\n"),
+        // A recognisable prefix: the EDID header every descriptor starts with,
+        // so a projection that rewrites the bytes is caught.
+        alloc::vec![0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00],
+    )
+}
+
 #[def_test]
 fn pci_paths_are_derived_from_bus_location() {
     let path = kdevice_uevent::physical_device_path(DeviceLocation::Pci {
@@ -126,10 +139,11 @@ fn symlink_targets_are_relative_to_the_link_parent() {
 fn drm_nodes_project_a_render_minor() {
     let node = kdevice::register_device_node(
         kdevice::DeviceId::new(9002),
-        kdevice::DeviceNodeClass::Drm,
+        kdevice::DeviceNodeClass::Drm(drm_metadata()),
         String::from("display"),
         String::from("test"),
         kdevice::DeviceLocation::PlatformStatic { id: 9002 },
+        None,
     )
     .expect("a DRM node must register");
     let minor = kdevice::DRM_RENDER_MINOR_BASE + node.index();
@@ -148,6 +162,44 @@ fn drm_nodes_project_a_render_minor() {
     };
 
     assert!(tree.contains_key(&format!("dev/char/226:{}", node.index())));
+
+    // The connector is a class entry named after the card (`card0-Virtual-1`)
+    // and its attributes are the connector's state.
+    assert!(
+        tree.contains_key("class/drm/card0-Virtual-1"),
+        "the connector class entry must exist"
+    );
+    // The class entry has to resolve to the connector's own directory: linking
+    // it to the card would make every attribute unreadable through the link,
+    // which is exactly what `cat /sys/class/drm/card0-Virtual-1/status` does.
+    let Some(TreeEntry::Symlink(target)) = tree.get("class/drm/card0-Virtual-1") else {
+        panic!("the connector class entry must be a symlink");
+    };
+    assert_eq!(
+        target, "../../devices/platform/static9002/drm/card0-Virtual-1",
+        "the class entry must point at the connector directory"
+    );
+    for attribute in ["status", "dpms", "modes", "edid", "enabled"] {
+        assert!(
+            tree.contains_key(&format!(
+                "devices/platform/static9002/drm/card0-Virtual-1/{attribute}"
+            )),
+            "{attribute} must be projected"
+        );
+    }
+    // `edid` is binary: the bytes must come back exactly as the device reported
+    // them. A text attribute (`status`) is newline-terminated; `edid` is not.
+    let Some(TreeEntry::Attribute(_, edid)) =
+        tree.get("devices/platform/static9002/drm/card0-Virtual-1/edid")
+    else {
+        panic!("edid must be an attribute");
+    };
+    let expected = drm_metadata().edid().to_vec();
+    assert_eq!(
+        edid.as_slice(),
+        expected.as_slice(),
+        "the edid attribute is the raw descriptor"
+    );
 
     kdevice::unregister_device_node(node.core_id());
 }

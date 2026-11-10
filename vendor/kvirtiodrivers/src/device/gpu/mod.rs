@@ -4,7 +4,7 @@ mod edid;
 
 pub use self::edid::Edid;
 
-use crate::config::{ReadOnly, WriteOnly, read_config};
+use crate::config::{ReadOnly, WriteOnly, read_config, write_config};
 use crate::hal::{BufferDirection, Dma, Hal, PhysAddr};
 use crate::queue::VirtQueue;
 use crate::transport::{InterruptStatus, Transport};
@@ -61,6 +61,9 @@ pub struct VirtIOGpu<H: Hal, T: Transport> {
     /// Whether `VIRTIO_GPU_F_RESOURCE_BLOB` was negotiated (blob resources,
     /// dma-buf sharing, host-visible memory).
     has_resource_blob: bool,
+    /// Whether `VIRTIO_GPU_F_CONTEXT_INIT` was negotiated (per-file context
+    /// types; `VIRTGPU_PARAM_CONTEXT_INIT`).
+    has_context_init: bool,
 }
 
 impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
@@ -99,6 +102,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
         let has_edid = negotiated_features.contains(Features::EDID);
         let has_virgl = negotiated_features.contains(Features::VIRGL);
         let has_resource_blob = negotiated_features.contains(Features::RESOURCE_BLOB);
+        let has_context_init = negotiated_features.contains(Features::CONTEXT_INIT);
 
         info!(
             "GPU features: negotiated={:?}, has_virgl={}, has_edid={}, has_resource_blob={}",
@@ -116,7 +120,28 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
             access_platform,
             has_virgl,
             has_resource_blob,
+            has_context_init,
         })
+    }
+
+    /// Whether the host raised the display-changed event since it was last
+    /// acknowledged.
+    ///
+    /// This is the `VIRTIO_GPU_EVENT_DISPLAY` bit of the config-space
+    /// `events_read` register. Reading it does not acknowledge anything: the
+    /// device clears the bit when the driver writes `events_clear`.
+    pub fn display_changed(&mut self) -> bool {
+        read_config!(self.transport, Config, events_read)
+            .map(|events| events & EVENT_DISPLAY != 0)
+            .unwrap_or(false)
+    }
+
+    /// Acknowledge the display-changed event (`VIRTIO_GPU_EVENT_DISPLAY`).
+    ///
+    /// After this the device stops reporting the event until the display
+    /// configuration changes again.
+    pub fn ack_display_event(&mut self) -> bool {
+        write_config!(self.transport, Config, events_clear, EVENT_DISPLAY).is_ok()
     }
 
     /// Acknowledge interrupt.
@@ -500,6 +525,11 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     /// required for host-visible memory and dma-buf sharing (PRIME).
     pub fn has_resource_blob(&self) -> bool {
         self.has_resource_blob
+    }
+
+    /// Whether the host negotiated `VIRTIO_GPU_F_CONTEXT_INIT`.
+    pub fn has_context_init(&self) -> bool {
+        self.has_context_init
     }
 
     /// Returns `Err` if the VIRGL feature was not negotiated. All 3D commands

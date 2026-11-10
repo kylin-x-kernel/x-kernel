@@ -190,6 +190,21 @@ impl<T> ClassDevice<T> {
         f(&self.inner.runtime)
     }
 
+    /// Selects an object stored inside the runtime capability.
+    ///
+    /// The runtime capability owns the selected object and never moves or
+    /// replaces it while published, so the borrow is valid for the lifetime of
+    /// this handle. This form exists because the borrow checker rejects
+    /// returning a sub-borrow through a plain `with` closure: the closure's
+    /// result type cannot mention the borrow's lifetime.
+    pub fn select<'a, U: ?Sized + 'a, R>(
+        &'a self,
+        select: impl FnOnce(&'a T) -> Option<&'a U>,
+        map: impl FnOnce(Option<&'a U>) -> R,
+    ) -> R {
+        map(select(&self.inner.runtime))
+    }
+
     /// Whether the parent device is active and not removed.
     pub fn is_available(&self) -> bool {
         self.inner.parent.state() == DeviceState::Active

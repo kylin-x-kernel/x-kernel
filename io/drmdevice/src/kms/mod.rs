@@ -27,8 +27,9 @@ mod props;
 mod state;
 mod vblank;
 
-pub(crate) use modeset::{DrmModeSetCrtc, current_mode};
+pub(crate) use modeset::{DrmModeSetCrtc, DrmModeSetGamma, current_mode};
 pub(crate) use props::{PROPS, PropKind, property};
 pub(crate) use state::{
     KmsState, ObjectType, apply, atomic_flags_valid, mode_blob_bytes, mode_from_bytes,
 };
+pub(crate) use vblank::{wait_vblank_crtc_valid, wait_vblank_flags_valid};

@@ -615,6 +615,9 @@ impl<C: ConfigurationAccess> Iterator for BusDeviceIterator<C> {
                 let revision = class_revision as u8;
                 let bist_type_latency_cache = self.configuration_access.read_word(current, 12);
                 let header_type = HeaderType::from((bist_type_latency_cache >> 16) as u8 & 0x7f);
+                // Subsystem IDs live at 0x2c; the DRM core and libdrm publish
+                // them as `subsystem_vendor`/`subsystem_device`.
+                let subsystem = self.configuration_access.read_word(current, 0x2c);
                 return Some((
                     current,
                     DeviceFunctionInfo {
@@ -624,6 +627,8 @@ impl<C: ConfigurationAccess> Iterator for BusDeviceIterator<C> {
                         subclass,
                         prog_if,
                         revision,
+                        subsystem_vendor_id: subsystem as u16,
+                        subsystem_device_id: (subsystem >> 16) as u16,
                         header_type,
                     },
                 ));
@@ -673,6 +678,10 @@ pub struct DeviceFunctionInfo {
     pub prog_if: u8,
     /// The PCI revision ID.
     pub revision: u8,
+    /// The PCI subsystem vendor ID.
+    pub subsystem_vendor_id: u16,
+    /// The PCI subsystem device ID.
+    pub subsystem_device_id: u16,
     /// The type of PCI device.
     pub header_type: HeaderType,
 }

@@ -32,9 +32,15 @@ extern crate log;
 
 extern crate alloc;
 
+mod fb;
+
 use alloc::sync::Arc;
 
-use display::{DisplayDevice, DisplayInfo, ScanoutFormat, ScanoutRect, ScanoutResource};
+use display::{
+    DisplayDevice, DisplayInfo, ScanoutBacking, ScanoutFormat, ScanoutRect, ScanoutResource,
+    ScanoutWindow,
+};
+pub use fb::{FB_PAN_STEPS, FrameBuffer};
 use kalloc::{PageRef, UsageKind, alloc_zeroed_pages_exact_ref};
 use kclass::{ClassDevice, DisplayDeviceImpl, display_devices as class_display_devices};
 use khal::mem::p2v;
@@ -48,6 +54,19 @@ const BYTES_PER_PIXEL: usize = 4;
 
 /// Driver-local resource id for the framebuffer's scanout resource.
 const FB_RESOURCE_ID: u32 = 1;
+
+struct ShadowBacking<'a> {
+    _pages: &'a PageRef,
+    range: memaddr::PhysAddrRange,
+}
+
+// SAFETY: the shadow allocation is owned by the framebuffer emulation and is
+// retained until the display resource is destroyed.
+unsafe impl ScanoutBacking for ShadowBacking<'_> {
+    fn range(&self) -> memaddr::PhysAddrRange {
+        self.range
+    }
+}
 
 /// Runtime state for the emulated framebuffer, established once during
 /// [`fb_init`] against the primary display device.
@@ -80,16 +99,34 @@ pub fn fb_init() {
 
     FB.init_once(SpinNoIrq::new(None));
 
+    // Display registration races this call in both directions: a PCI display
+    // that probed earlier is in the class registry now, a later one arrives
+    // through the availability callback, exactly like the input devices.
+    kclass::subscribe_display_available(Arc::new(on_display_available));
+    if class_display_devices().is_empty() {
+        info!("fbdev: no display registered yet; waiting for one");
+    }
     if let Err(e) = try_setup() {
+        debug!("fbdev: initial setup did not run: {:?}", e);
+    }
+}
+
+fn on_display_available(device: ClassDevice<DisplayDeviceImpl>) {
+    if FB.lock().is_some() {
+        return;
+    }
+    if let Err(e) = try_setup_with(device) {
         warn!("fbdev emulation unavailable: {:?}", e);
     }
 }
 
 fn try_setup() -> Result<(), ()> {
-    // Pick the primary display device. Display device registration races with
-    // fb_init in general, but the kclass registry is seeded before fb_init
-    // runs in the boot sequence; a missing device here means no display at all.
+    // Pick the primary display device, when one already probed.
     let device = class_display_devices().into_iter().next().ok_or(())?;
+    try_setup_with(device)
+}
+
+fn try_setup_with(device: ClassDevice<DisplayDeviceImpl>) -> Result<(), ()> {
     let info = device.info();
     if info.width == 0 || info.height == 0 {
         warn!("primary display reported zero resolution; skipping fbdev");
@@ -113,7 +150,12 @@ fn try_setup() -> Result<(), ()> {
 
     // FbEmulation retains the page hold for the lifetime of the host resource.
     // Publish only the requested byte range, excluding allocator rounding slack.
-    let paddr = shadow.phys_addr().as_usize() as u64;
+    let range = memaddr::PhysAddrRange::try_from_start_size(shadow.phys_addr(), shadow_len_bytes)
+        .ok_or(())?;
+    let backing = ShadowBacking {
+        _pages: &shadow,
+        range,
+    };
     let resource = ScanoutResource {
         id: FB_RESOURCE_ID,
         width: info.width,
@@ -122,7 +164,8 @@ fn try_setup() -> Result<(), ()> {
         pitch: (info.width as usize * BYTES_PER_PIXEL) as u32,
         format: ScanoutFormat::Bgra8888,
     };
-    if let Err(e) = device.create_scanout_resource(resource, paddr, shadow_len_bytes as u32) {
+    let created = device.create_scanout_resource(resource, &ScanoutWindow::new(&backing));
+    if let Err(e) = created {
         warn!("create_scanout_resource failed on primary display: {:?}", e);
         return Err(());
     }
@@ -201,6 +244,6 @@ pub fn fb_present() -> bool {
         height: fb.info.height,
     };
     fb.device
-        .present_scanout_resource(FB_RESOURCE_ID, rect)
+        .present_scanout_resource(FB_RESOURCE_ID, rect, false)
         .is_ok()
 }

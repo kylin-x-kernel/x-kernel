@@ -16,7 +16,8 @@ use kdevice::{
 use klazy::Once;
 use ksync::Mutex;
 use kvfs::{
-    Dentry, DeviceId, SimpleDirLookup, SimpleDirOps, SimpleFs, VfsError, VfsResult, cdev_del,
+    Dentry, DeviceId, DirMapping, LockedDentry, SimpleDir, SimpleDirLookup, SimpleDirOps, SimpleFs,
+    Umode, VfsError, VfsInode, VfsResult, cdev_del,
 };
 use lazyinit::LazyInit;
 
@@ -125,14 +126,19 @@ fn display_files(
     let file = DeviceFile::new_character(
         fs.clone(),
         number,
-        card.minor(drmdevice::MinorKind::Primary),
+        card.minor(drmdevice::MinorKind::Primary, number.minor()),
     )?;
     // The render node is a second minor over the same `DrmCard`: it shares the
     // GEM/KMS objects and differs only in the per-open file state and in the
     // ioctl allowlist enforced by the driver.
     let render_file = match render {
         Some(render) => {
-            match DeviceFile::new_character(fs, render, card.minor(drmdevice::MinorKind::Render)) {
+            let unit = render.minor();
+            match DeviceFile::new_character(
+                fs,
+                render,
+                card.minor(drmdevice::MinorKind::Render, unit),
+            ) {
                 Ok(file) => Some(file),
                 Err(error) => {
                     // Do not leave the primary character device registered without
@@ -247,21 +253,125 @@ pub(crate) fn initialize(fs: Arc<SimpleFs>) {
     });
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct DynamicDeviceDir {
-    kind: DeviceNodeKind,
+pub(crate) struct WritableDir {
+    fs: Arc<SimpleFs>,
+    mapping: Mutex<DirMapping>,
 }
 
-impl DynamicDeviceDir {
-    pub(crate) const fn input() -> Self {
+impl WritableDir {
+    pub(crate) fn new(fs: Arc<SimpleFs>, mapping: DirMapping) -> Self {
         Self {
-            kind: DeviceNodeKind::Input,
+            fs,
+            mapping: Mutex::new(mapping),
+        }
+    }
+}
+
+impl SimpleDirOps for WritableDir {
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        let names: Vec<Cow<'a, str>> = {
+            let mapping = self.mapping.lock();
+            SimpleDirOps::child_names(&*mapping)?
+                .map(|name| Cow::Owned(name.into_owned()))
+                .collect()
+        };
+        Ok(KBox::new(names.into_iter())?)
+    }
+
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
+        SimpleDirOps::lookup_child(&*self.mapping.lock(), lookup, name)
+    }
+
+    fn create_inode_child(
+        &self,
+        lookup: SimpleDirLookup<'_>,
+        name: &str,
+        inode: Arc<VfsInode>,
+    ) -> VfsResult<Dentry> {
+        SimpleDirOps::create_inode_child(&*self.mapping.lock(), lookup, name, inode)
+    }
+
+    fn mkdir(
+        &self,
+        _dir: &VfsInode,
+        name: &str,
+        mode: Umode,
+        cred: &kcred::Cred,
+    ) -> VfsResult<Arc<VfsInode>> {
+        let inode = SimpleDir::new_inode_with_owner(
+            self.fs.clone(),
+            Arc::new(Self::new(self.fs.clone(), DirMapping::new())),
+            mode.permission(),
+            cred.fsuid(),
+            cred.fsgid(),
+        );
+        let stored = inode.clone();
+        self.mapping.lock().add_child(name, move |lookup, name| {
+            Ok(lookup.dir_from_inode(name, stored.clone()))
+        });
+        Ok(inode)
+    }
+
+    fn unlink(&self, _dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
+        if self.mapping.lock().remove_child(dentry.name()) {
+            Ok(())
+        } else {
+            Err(VfsError::NotFound)
         }
     }
 
-    pub(crate) const fn drm() -> Self {
+    fn rmdir(&self, _dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
+        if self.mapping.lock().remove_child(dentry.name()) {
+            Ok(())
+        } else {
+            Err(VfsError::NotFound)
+        }
+    }
+
+    fn rename(
+        &self,
+        old: &LockedDentry<'_>,
+        new: &LockedDentry<'_>,
+        flags: kvfs::RenameFlags,
+    ) -> VfsResult<()> {
+        // udev creates a device link under a temporary name and renames it into
+        // place, so a rename inside one writable directory must work. Exchange,
+        // whiteout and no-replace are not needed by that flow.
+        if flags.intersects(
+            kvfs::RenameFlags::NOREPLACE
+                .union(kvfs::RenameFlags::EXCHANGE)
+                .union(kvfs::RenameFlags::WHITEOUT),
+        ) {
+            return Err(VfsError::OperationNotSupported);
+        }
+        self.mapping.lock().rename_child(old.name(), new.name())
+    }
+}
+
+pub(crate) struct DynamicDeviceDir {
+    kind: DeviceNodeKind,
+    writable: Arc<DirMapping>,
+}
+
+impl DynamicDeviceDir {
+    pub(crate) fn input(fs: Arc<SimpleFs>) -> Self {
+        let mut writable = DirMapping::new();
+        for name in ["by-id", "by-path"] {
+            writable.add_dir(
+                name,
+                SimpleDir::new_maker(fs.clone(), Arc::new(DirMapping::new())),
+            );
+        }
+        Self {
+            kind: DeviceNodeKind::Input,
+            writable: Arc::new(writable),
+        }
+    }
+
+    pub(crate) fn drm() -> Self {
         Self {
             kind: DeviceNodeKind::Drm,
+            writable: Arc::new(DirMapping::new()),
         }
     }
 
@@ -290,7 +400,7 @@ impl DynamicDeviceDir {
 
 impl SimpleDirOps for DynamicDeviceDir {
     fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        let names: Vec<Cow<'a, str>> = projection()
+        let mut names: Vec<Cow<'a, str>> = projection()
             .lock()
             .records
             .values()
@@ -306,27 +416,60 @@ impl SimpleDirOps for DynamicDeviceDir {
                 primary.into_iter().chain(render)
             })
             .collect();
+        names.extend(self.writable.child_names()?);
         Ok(KBox::new(names.into_iter())?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
-        let file = projection()
-            .lock()
-            .records
-            .values()
-            .find_map(|record| {
-                if self.local_name(&record.node) == Some(name) {
-                    Some(record.file.clone())
-                } else if record.render_file.is_some()
-                    && self.render_name(&record.node).as_deref() == Some(name)
-                {
-                    record.render_file.clone()
-                } else {
-                    None
-                }
-            })
-            .ok_or(VfsError::NotFound)?;
-        Ok(device_dentry(lookup, name, file))
+        let file = projection().lock().records.values().find_map(|record| {
+            if self.local_name(&record.node) == Some(name) {
+                Some(record.file.clone())
+            } else if record.render_file.is_some()
+                && self.render_name(&record.node).as_deref() == Some(name)
+            {
+                record.render_file.clone()
+            } else {
+                None
+            }
+        });
+        if let Some(file) = file {
+            return Ok(device_dentry(lookup, name, file));
+        }
+        SimpleDirOps::lookup_child(self.writable.as_ref(), lookup, name)
+    }
+
+    fn create_inode_child(
+        &self,
+        lookup: SimpleDirLookup<'_>,
+        name: &str,
+        inode: Arc<kvfs::VfsInode>,
+    ) -> VfsResult<Dentry> {
+        self.writable.create_inode_child(lookup, name, inode)
+    }
+
+    fn unlink(&self, _dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
+        if self.writable.remove_child(dentry.name()) {
+            Ok(())
+        } else {
+            Err(VfsError::NotFound)
+        }
+    }
+
+    fn rmdir(&self, _dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
+        if self.writable.remove_child(dentry.name()) {
+            Ok(())
+        } else {
+            Err(VfsError::NotFound)
+        }
+    }
+
+    fn rename(
+        &self,
+        old: &LockedDentry<'_>,
+        new: &LockedDentry<'_>,
+        _flags: kvfs::RenameFlags,
+    ) -> VfsResult<()> {
+        self.writable.rename_child(old.name(), new.name())
     }
 
     fn supports_dentry_cache(&self) -> bool {

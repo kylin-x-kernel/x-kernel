@@ -31,10 +31,17 @@ fn actions_accept_only_the_linux_kobject_set() {
 fn drm_render_node_has_its_own_uevent_projection() {
     let node = kdevice::register_device_node(
         kdevice::DeviceId::new(9001),
-        kdevice::DeviceNodeClass::Drm,
+        kdevice::DeviceNodeClass::Drm(kdevice::DrmDeviceNodeMetadata::new(
+            String::from("Virtual-1"),
+            String::from("connected"),
+            String::from("On"),
+            String::from("1280x800\n"),
+            Vec::new(),
+        )),
         String::from("display"),
         String::from("test"),
         kdevice::DeviceLocation::PlatformStatic { id: 9001 },
+        None,
     )
     .expect("a DRM node must register");
     let render_minor = kdevice::DRM_RENDER_MINOR_BASE + node.index();

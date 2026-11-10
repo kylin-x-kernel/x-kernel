@@ -17,7 +17,7 @@ use driver_base::{DriverError, DriverResult};
 use kspin::{SpinNoPreempt, SpinNoPreemptGuard};
 use lazyinit::LazyInit;
 
-use crate::{DeviceId, DeviceLocation, DeviceNumber};
+use crate::{DeviceId, DeviceLocation, DeviceNumber, PciIdentity};
 
 const INPUT_MAJOR: u32 = 13;
 const INPUT_EVENT_MINOR_BASE: u32 = 64;
@@ -89,6 +89,61 @@ impl InputDeviceNodeId {
     }
 }
 
+/// The connector description of a DRM card, used by sysfs projection.
+///
+/// Linux publishes one `class/drm/cardN-<connector>` entry per connector
+/// (`card0-Virtual-1`), and its attributes are the connector's state. This is
+/// the snapshot a DRM class device supplies when it is published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrmDeviceNodeMetadata {
+    name: String,
+    status: String,
+    dpms: String,
+    modes: String,
+    edid: Vec<u8>,
+}
+
+impl DrmDeviceNodeMetadata {
+    /// Creates a connector snapshot.
+    ///
+    /// `status`, `dpms` and `modes` are already in the form the sysfs
+    /// attributes take, since their content is the producer's decision.
+    pub fn new(name: String, status: String, dpms: String, modes: String, edid: Vec<u8>) -> Self {
+        Self {
+            name,
+            status,
+            dpms,
+            modes,
+            edid,
+        }
+    }
+
+    /// Connector name, as it appears in the class entry (`Virtual-1`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The `status` attribute's text.
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    /// The `dpms` attribute's text.
+    pub fn dpms(&self) -> &str {
+        &self.dpms
+    }
+
+    /// The `modes` attribute's text.
+    pub fn modes(&self) -> &str {
+        &self.modes
+    }
+
+    /// The `edid` attribute's bytes.
+    pub fn edid(&self) -> &[u8] {
+        &self.edid
+    }
+}
+
 /// Input identity and capability data used by sysfs projection consumers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputDeviceNodeMetadata {
@@ -156,15 +211,15 @@ impl InputDeviceNodeMetadata {
 pub enum DeviceNodeClass {
     /// Input device with identity and capability metadata.
     Input(InputDeviceNodeMetadata),
-    /// DRM primary device.
-    Drm,
+    /// DRM primary device with its connector description.
+    Drm(DrmDeviceNodeMetadata),
 }
 
 impl DeviceNodeClass {
     const fn kind(&self) -> DeviceNodeKind {
         match self {
             Self::Input(_) => DeviceNodeKind::Input,
-            Self::Drm => DeviceNodeKind::Drm,
+            Self::Drm(_) => DeviceNodeKind::Drm,
         }
     }
 }
@@ -300,7 +355,9 @@ pub struct DeviceNode {
     name: String,
     driver_name: String,
     location: DeviceLocation,
+    pci: Option<PciIdentity>,
     input: Option<InputDeviceNodeMetadata>,
+    drm: Option<DrmDeviceNodeMetadata>,
     lifecycle: Arc<DeviceNodeLifecycle>,
 }
 
@@ -316,6 +373,15 @@ impl DeviceNode {
     /// Driver-core identity for the backing device.
     pub const fn core_id(&self) -> DeviceId {
         self.core_id
+    }
+
+    /// PCI identity of the parent device, when it lives on a PCI bus.
+    ///
+    /// sysfs publishes the PCI attributes (`vendor`, `device`,
+    /// `subsystem_vendor`, `subsystem_device`, `class`) from this snapshot;
+    /// libdrm identifies a DRM device through them.
+    pub const fn pci_identity(&self) -> Option<PciIdentity> {
+        self.pci
     }
 
     /// Projected device-node class.
@@ -378,6 +444,11 @@ impl DeviceNode {
     /// Input-specific metadata, when this is an input device.
     pub fn input_metadata(&self) -> Option<&InputDeviceNodeMetadata> {
         self.input.as_ref()
+    }
+
+    /// DRM-specific metadata, when this is a DRM card.
+    pub fn drm_metadata(&self) -> Option<&DrmDeviceNodeMetadata> {
+        self.drm.as_ref()
     }
 
     /// Returns whether this exact node publication still accepts operations.
@@ -467,6 +538,7 @@ impl DeviceNodeRegistry {
         name: String,
         driver_name: String,
         location: DeviceLocation,
+        pci: Option<PciIdentity>,
     ) -> DriverResult<(
         DeviceNode,
         Vec<DeviceNodeCallback>,
@@ -491,9 +563,14 @@ impl DeviceNodeRegistry {
             name,
             driver_name,
             location,
-            input: match class {
-                DeviceNodeClass::Input(metadata) => Some(metadata),
-                DeviceNodeClass::Drm => None,
+            pci,
+            input: match &class {
+                DeviceNodeClass::Input(metadata) => Some(metadata.clone()),
+                DeviceNodeClass::Drm(_) => None,
+            },
+            drm: match class {
+                DeviceNodeClass::Drm(metadata) => Some(metadata),
+                DeviceNodeClass::Input(_) => None,
             },
             lifecycle: Arc::new(DeviceNodeLifecycle::new()),
         };
@@ -636,9 +713,10 @@ pub fn register_device_node(
     name: String,
     driver_name: String,
     location: DeviceLocation,
+    pci: Option<PciIdentity>,
 ) -> DriverResult<DeviceNode> {
     let (node, subscribers, publisher, is_new) =
-        device_node_registry().register(core_id, class, name, driver_name, location)?;
+        device_node_registry().register(core_id, class, name, driver_name, location, pci)?;
     if !is_new {
         return Ok(node);
     }

@@ -15,12 +15,17 @@ use crate::prelude::*;
 pub(super) struct DrmMinor {
     device: Arc<DrmDevice>,
     kind: MinorKind,
+    /// The node's minor number, the identity of the card's `EVENT` unit.
+    unit: u32,
 }
 
 impl DrmMinor {
     /// Creates the handle for one minor of `device`.
-    pub(super) fn new(device: Arc<DrmDevice>, kind: MinorKind) -> Self {
-        Self { device, kind }
+    ///
+    /// `unit` is the node's minor number: Linux derives the card's `EVENT`
+    /// unit from it, so `cardN` and `renderD*` of one device share it.
+    pub(super) fn new(device: Arc<DrmDevice>, kind: MinorKind, unit: u32) -> Self {
+        Self { device, kind, unit }
     }
 
     fn resolve(&self) -> DrmResult<Arc<DrmDevice>> {
@@ -73,7 +78,9 @@ impl DeviceFileOps for DrmMinor {
         let state = file
             .private_data_get::<DrmFile>()
             .ok_or(VfsError::InvalidInput)?;
-        Ok(crate::ioctl::dispatch(&device, &state, cmd, arg)?)
+        Ok(crate::ioctl::dispatch(
+            &device, &state, self.unit, cmd, arg,
+        )?)
     }
 
     fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
@@ -83,20 +90,36 @@ impl DeviceFileOps for DrmMinor {
             .private_data_get::<DrmFile>()
             .ok_or(VfsError::InvalidInput)?;
         let offset_bytes = mapper.offset() as u64;
-        // The offset table is per open file: a render node cannot map a buffer
-        // it never created, and a handle is the only way to name the buffer.
-        let (_, object) = state
-            .handle_by_offset_bytes(offset_bytes)
+        // The card's offset namespace names the object and must contain the
+        // whole mapping; the per-file handle table then decides whether this
+        // file may map it, so a render node cannot map a buffer it never
+        // received.
+        let object = state
+            .object_by_offset_range(offset_bytes, PAGE_SIZE_4K as u64)
             .ok_or(VfsError::InvalidInput)?;
-        let pages = object.pages();
-        let phys = pages.phys_addr();
-        let size_bytes = object.length_bytes();
-        let range = PhysAddrRange::from_start_size(phys, size_bytes);
+        let range_start = state
+            .dev
+            .vma
+            .lookup(offset_bytes)
+            .ok_or(VfsError::InvalidInput)?;
+        // `drm_gem_mmap` maps from the client's own offset inside the object.
+        let within = offset_bytes - range_start.offset;
+        let (phys, size_bytes) = object.memory_range();
+        if within >= size_bytes as u64 {
+            return Err(VfsError::InvalidInput);
+        }
+        let phys = memaddr::PhysAddr::from(
+            usize::try_from(phys)
+                .map_err(|_| VfsError::InvalidInput)?
+                .checked_add(within as usize)
+                .ok_or(VfsError::InvalidInput)?,
+        );
+        let range = PhysAddrRange::from_start_size(phys, size_bytes - within as usize);
         // Retain only after the mapper accepts the range: the retention table
         // lives for the device's lifetime, so retaining before a failed mmap
         // (for example an over-long request) would pin the GEM backing forever.
         mapper.map_physical(range)?;
-        device.retain_mapping(offset_bytes, pages);
+        device.retain_mapping(offset_bytes, object.clone());
         Ok(())
     }
 

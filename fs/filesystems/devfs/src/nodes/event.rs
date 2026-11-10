@@ -664,7 +664,7 @@ impl DeviceFileOps for EventDev {
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "input",
-        SimpleDir::new_maker(fs, Arc::new(DynamicDeviceDir::input())),
+        SimpleDir::new_maker(fs.clone(), Arc::new(DynamicDeviceDir::input(fs))),
     );
 }
 

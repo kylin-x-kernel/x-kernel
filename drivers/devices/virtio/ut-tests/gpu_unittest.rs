@@ -158,7 +158,15 @@ impl GpuQueue {
         // SAFETY: the response descriptor grants this device the advertised writable capacity.
         unsafe { response.write_bytes(0, response_desc.len as usize) };
         // SAFETY: CtrlHeader's byte representation is the response wire format.
-        let header = CtrlHeader::with_type(reply);
+        let mut header = CtrlHeader::with_type(reply);
+        // A fenced request is answered only once earlier commands are done, and
+        // the host echoes its fence id; the mock answers in order, so echoing
+        // is the whole contract it needs to follow.
+        let request_header = CtrlHeader::read_from_prefix(request_bytes).unwrap().0;
+        if request_header.flags & super::GPU_FLAG_FENCE != 0 {
+            header.flags |= super::GPU_FLAG_FENCE;
+            header.fence_id = request_header.fence_id;
+        }
         // SAFETY: the response buffer is writable and at least a header long.
         unsafe { core::ptr::copy_nonoverlapping(header.as_bytes().as_ptr(), response, header.as_bytes().len()) };
         if command_id == 0x100 {
@@ -354,4 +362,13 @@ fn production_scanout_binding_tracks_resource_and_rect_through_destroy() {
             resource_id: 8,
         }
     );
+}
+
+#[def_test]
+fn dropping_a_resource_waits_for_every_earlier_command() {
+    let (mut gpu, _queue) = new_gpu();
+    // The unref carries a fence, so its answer proves every earlier command is
+    // done; Linux relies on exactly this ordering before it frees a resource
+    // whose frames may still be on the wire.
+    gpu.resource_unref(7).expect("fenced unref");
 }

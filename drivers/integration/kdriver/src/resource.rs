@@ -28,9 +28,11 @@ pub(crate) fn resource_provider() -> &'static XKernelResourceProvider {
 pub(crate) fn map_res_err(err: ResError) -> DriverError {
     match err {
         ResError::InvalidResource => DriverError::InvalidInput,
-        ResError::MappingFailed | ResError::Io | ResError::BadState | ResError::NotFound => {
-            DriverError::Io
-        }
+        ResError::MappingFailed
+        | ResError::Io
+        | ResError::BadState
+        | ResError::NotFound
+        | ResError::Interrupted => DriverError::Io,
         ResError::NoMemory => DriverError::NoMemory,
         ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,

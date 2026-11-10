@@ -22,6 +22,8 @@ pub(crate) struct DumbTag;
 pub(crate) struct CrtcTag;
 /// Tag of property ids.
 pub(crate) struct PropertyTag;
+/// Tag of syncobj handles (per open file, like GEM handles).
+pub(crate) struct SyncobjTag;
 
 pub(crate) type FbId = Id<FbTag>;
 pub(crate) type BlobId = Id<BlobTag>;
@@ -153,5 +155,12 @@ impl<T, Tag> IdRegistry<T, Tag> {
     /// Whether `id` names a live object.
     pub(crate) fn contains(&self, id: Id<Tag>) -> bool {
         self.entries.contains_key(&id.raw())
+    }
+
+    /// Every live entry, in id order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (Id<Tag>, &T)> {
+        self.entries
+            .iter()
+            .map(|(raw, value)| (Id::from_raw(*raw), value))
     }
 }

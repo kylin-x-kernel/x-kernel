@@ -165,7 +165,7 @@ cfg_if! {
                 ResError::NoMemory => DriverError::NoMemory,
                 ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
                 ResError::BadState | ResError::NotFound | ResError::MappingFailed
-                | ResError::Io => DriverError::Io,
+                | ResError::Io | ResError::Interrupted => DriverError::Io,
             }
         }
     }

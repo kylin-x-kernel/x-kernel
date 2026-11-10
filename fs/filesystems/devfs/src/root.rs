@@ -35,5 +35,5 @@ pub(crate) fn builder(fs: Arc<SimpleFs>, console: Arc<ktty::tty::NTtyDriver>) ->
     #[cfg(feature = "vmm")]
     nodes::kvmm_vm::add_root_entries(&mut root, fs.clone());
 
-    SimpleDir::new_maker(fs, Arc::new(root))
+    SimpleDir::new_maker(fs.clone(), Arc::new(dynamic::WritableDir::new(fs, root)))
 }

@@ -19,16 +19,6 @@ impl DrmDevice {
         self.events.reserve_flip()
     }
 
-    /// Current vblank sequence number.
-    pub(crate) fn vblank_sequence(&self) -> u32 {
-        self.events.sequence()
-    }
-
-    /// Advances the vblank sequence after a wait.
-    pub(crate) fn advance_vblank(&self, count: u32) {
-        self.events.advance(count);
-    }
-
     pub(super) fn read_events(&self, buf: &mut [u8]) -> DrmResult<usize> {
         self.backend()?;
         self.events.read(buf)

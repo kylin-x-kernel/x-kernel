@@ -11,6 +11,10 @@ categories.workspace = true
 
 [dependencies]
 driver_base = { workspace = true }
+ktime_types.workspace = true
+kvfs.workspace = true
+memaddr.workspace = true
+kpoll.workspace = true
 unittest.workspace = true
 
 [lints]

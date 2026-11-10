@@ -1182,7 +1182,6 @@ dependencies = [
  "lazyinit",
  "linux-raw-sys",
  "macros",
- "memaddr",
  "osvm",
  "posix-types",
  "tee_crypto 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1244,6 +1243,10 @@ name = "display"
 version = "0.3.0-dev"
 dependencies = [
  "driver_base",
+ "kpoll",
+ "ktime_types",
+ "kvfs",
+ "memaddr",
  "unittest",
 ]
 
@@ -1290,13 +1293,17 @@ version = "0.3.0-dev"
 name = "drmdevice"
 version = "0.3.0-dev"
 dependencies = [
+ "anon_inodefs",
  "bytemuck",
  "display",
  "kalloc",
  "kclass",
  "kcred",
+ "kfd_objects",
  "khal",
  "kpoll",
+ "kprocess",
+ "kspin",
  "ksync",
  "ktask",
  "ktime_types",
@@ -1553,11 +1560,16 @@ dependencies = [
  "display",
  "kalloc",
  "kclass",
+ "kcred",
+ "kerrno",
  "khal",
  "kspin",
+ "kvfs",
  "lazyinit",
  "log",
  "memaddr",
+ "osvm",
+ "unittest",
 ]
 
 [[package]]
@@ -6156,7 +6168,6 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "virtio"
 version = "0.3.0-dev"
 dependencies = [
- "bitflags 2.13.2",
  "block",
  "display",
  "driver-os-api",

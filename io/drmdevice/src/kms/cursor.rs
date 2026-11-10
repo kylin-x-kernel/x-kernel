@@ -10,7 +10,12 @@ use crate::prelude::*;
 impl Ioctl for DrmModeCursor {
     const NAME: &'static str = "MODE_CURSOR";
 
-    fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, cursor: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        dev: &DrmDevice,
+        file: &Arc<DrmFile>,
+        _unit: u32,
+        cursor: &mut Self,
+    ) -> DrmResult<usize> {
         set_cursor(
             dev,
             file,
@@ -29,7 +34,12 @@ impl Ioctl for DrmModeCursor {
 impl Ioctl for DrmModeCursor2 {
     const NAME: &'static str = "MODE_CURSOR2";
 
-    fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, cursor: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        dev: &DrmDevice,
+        file: &Arc<DrmFile>,
+        _unit: u32,
+        cursor: &mut Self,
+    ) -> DrmResult<usize> {
         // The hotspot only matters to a hardware cursor plane, which this driver
         // does not expose; validating it would reject requests the device
         // treats as a plain move.

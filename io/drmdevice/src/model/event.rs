@@ -8,7 +8,6 @@
 //! single readiness source for both the event queue and device removal.
 
 use alloc::collections::VecDeque;
-use core::sync::atomic::{AtomicU32, Ordering};
 
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
@@ -20,7 +19,6 @@ use crate::abi::*;
 pub(crate) struct EventQueue {
     events: Mutex<EventState>,
     poll: PollSet,
-    sequence: AtomicU32,
 }
 
 /// Queued records plus capacity already promised to in-flight flips.
@@ -48,7 +46,6 @@ impl EventQueue {
                 reserved: 0,
             }),
             poll: PollSet::new(),
-            sequence: AtomicU32::new(0),
         }
     }
 
@@ -68,16 +65,6 @@ impl EventQueue {
         })
     }
 
-    /// Current vblank sequence number.
-    pub(crate) fn sequence(&self) -> u32 {
-        self.sequence.load(Ordering::Acquire)
-    }
-
-    /// Advances the sequence after a synchronised wait.
-    pub(crate) fn advance(&self, count: u32) {
-        self.sequence.fetch_add(count, Ordering::AcqRel);
-    }
-
     /// Wakes waiters, e.g. after the display disappeared.
     pub(crate) fn wake(&self) {
         self.poll.wake();
@@ -86,13 +73,19 @@ impl EventQueue {
 
 impl EventReservation<'_> {
     /// Publishes the flip-complete event using the slot reserved earlier.
-    pub(crate) fn commit(mut self, crtc_id: u32, user_data: u64) {
-        let sequence = self
-            .queue
-            .sequence
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1);
-        let now = khal::time::monotonic_time().span_since_origin();
+    ///
+    /// The caller names the blank that completed the flip. A page flip on a
+    /// display without a blank timeline completes with its commit, which
+    /// publishes sequence `0` and the current instant, as Linux's
+    /// `drm_crtc_send_vblank_event` does for a device without vblank.
+    pub(crate) fn commit_with(
+        mut self,
+        crtc_id: u32,
+        user_data: u64,
+        sequence: u32,
+        timestamp: ktime_types::TimeSpan,
+    ) {
+        let now = timestamp;
         let event = DrmEventVblank {
             base: DrmEvent {
                 event_type: DRM_EVENT_FLIP_COMPLETE,

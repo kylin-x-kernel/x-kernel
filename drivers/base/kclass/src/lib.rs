@@ -23,7 +23,7 @@ extern crate alloc;
 
 #[cfg(feature = "input")]
 use alloc::collections::BTreeMap;
-use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kdevice::{DeviceEvent, DeviceEventKind, DeviceId, DeviceObject};
@@ -161,6 +161,10 @@ macro_rules! class_registry {
                     String::from(device.name()),
                     String::from(device.driver_name()),
                     device.location(),
+                    match device.parent().identity() {
+                        kdevice::DeviceIdentity::Pci(pci) => Some(pci),
+                        kdevice::DeviceIdentity::Platform(_) => None,
+                    },
                 )
             {
                 log::warn!(
@@ -336,7 +340,32 @@ impl ClassRuntimeMetadata for HwrngDeviceImpl {}
 #[cfg(feature = "display")]
 impl ClassRuntimeMetadata for DisplayDeviceImpl {
     fn device_node_class(&self) -> Option<kdevice::DeviceNodeClass> {
-        Some(kdevice::DeviceNodeClass::Drm)
+        // The connector snapshot is the same information `GETCONNECTOR`
+        // reports: one virtual connector, named after its type.
+        let info = self.info();
+        let edid = self.edid().unwrap_or_default();
+        let status = if self.is_connected() {
+            "connected"
+        } else {
+            "disconnected"
+        };
+        let modes = if self.is_connected() {
+            format!("{}x{}\n", info.width, info.height)
+        } else {
+            String::new()
+        };
+        Some(kdevice::DeviceNodeClass::Drm(
+            kdevice::DrmDeviceNodeMetadata::new(
+                display::connector_name(
+                    display::VIRTUAL_CONNECTOR_NAME,
+                    display::VIRTUAL_CONNECTOR_TYPE_ID,
+                ),
+                String::from(status),
+                String::from("On"),
+                modes,
+                edid,
+            ),
+        ))
     }
 }
 
@@ -417,8 +446,16 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
         self.with(|device| device.info())
     }
 
+    fn driver_info(&self) -> display::DriverInfo {
+        self.with(|device| device.driver_info())
+    }
+
     fn refresh_info(&self) -> Option<DisplayInfo> {
         self.with(|device| device.refresh_info())
+    }
+
+    fn ack_irq(&self) -> display::DisplayIrqStatus {
+        self.with(|device| device.ack_irq())
     }
 
     fn need_flush(&self) -> bool {
@@ -432,10 +469,9 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
     fn create_scanout_resource(
         &self,
         resource: display::ScanoutResource,
-        paddr: u64,
-        length: u32,
+        window: &display::ScanoutWindow<'_>,
     ) -> DriverResult {
-        self.with(|device| device.create_scanout_resource(resource, paddr, length))
+        self.with(|device| device.create_scanout_resource(resource, window))
     }
 
     fn destroy_scanout_resource(&self, resource_id: u32) -> DriverResult {
@@ -446,12 +482,27 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
         &self,
         resource_id: u32,
         rect: display::ScanoutRect,
+        host_rendered: bool,
     ) -> DriverResult {
-        self.with(|device| device.present_scanout_resource(resource_id, rect))
+        self.with(|device| device.present_scanout_resource(resource_id, rect, host_rendered))
     }
 
-    fn flush_scanout_resource(&self, resource_id: u32, rect: display::ScanoutRect) -> DriverResult {
-        self.with(|device| device.flush_scanout_resource(resource_id, rect))
+    fn flush_scanout_resource(
+        &self,
+        resource_id: u32,
+        rect: display::ScanoutRect,
+        host_rendered: bool,
+    ) -> DriverResult {
+        self.with(|device| device.flush_scanout_resource(resource_id, rect, host_rendered))
+    }
+
+    fn vblank_source(&self) -> Option<&dyn display::VblankSource> {
+        // The class handle owns the driver object that implements the source,
+        // and this select ties the borrow to the handle's lifetime.
+        self.select(
+            |device| device.vblank_source(),
+            |source| source.map(|source| source as &dyn display::VblankSource),
+        )
     }
 }
 

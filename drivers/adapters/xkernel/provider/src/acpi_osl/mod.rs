@@ -156,7 +156,10 @@ impl AcpiOs {
             ResError::InvalidResource | ResError::BadState => HostFailureReason::OutOfRange,
             ResError::NoMemory => HostFailureReason::Allocation,
             ResError::Io | ResError::MappingFailed => HostFailureReason::Io,
-            ResError::Busy | ResError::AlreadyExists | ResError::NotFound => HostFailureReason::Io,
+            ResError::Busy
+            | ResError::AlreadyExists
+            | ResError::NotFound
+            | ResError::Interrupted => HostFailureReason::Io,
         };
         self.record(access, address, width, reason);
     }

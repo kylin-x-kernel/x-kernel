@@ -40,7 +40,6 @@ kvfs.workspace = true
 macros.workspace = true
 
 linux-raw-sys = { workspace = true, features = ["ioctl"] }
-memaddr.workspace = true
 osvm.workspace = true
 posix-types.workspace = true
 chrono = { version = "0.4.41", default-features = false }

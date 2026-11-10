@@ -9,7 +9,7 @@
 //! state and what is on screen cannot disagree. The KMS ioctls in `kms.rs`
 //! reach the committed state only through these methods.
 
-use crate::prelude::*;
+use crate::{model::scanout::PendingRetire, prelude::*};
 
 impl DrmDevice {
     /// Committed KMS state snapshot.
@@ -40,6 +40,7 @@ impl DrmDevice {
         mutate: impl FnOnce(&mut KmsState) -> DrmResult<()>,
     ) -> DrmResult<()> {
         let _commit = self.commit.lock();
+        let was_active = self.state.lock().crtc_active != 0;
         let mut next = self.state.lock().clone();
         mutate(&mut next)?;
         if !next.plane_fb_id.is_none() && !self.has_framebuffer(next.plane_fb_id) {
@@ -66,7 +67,10 @@ impl DrmDevice {
         if !keeps_legacy_blob {
             self.clear_legacy_mode_blob();
         }
+        let still_active = next.crtc_active != 0;
+        let refresh = refresh_hz(&next);
         *self.state.lock() = next;
+        self.sync_vblank_timer(was_active, still_active, refresh);
         Ok(())
     }
 
@@ -96,6 +100,7 @@ impl DrmDevice {
         mode: Arc<Blob>,
     ) -> DrmResult<()> {
         let _commit = self.commit.lock();
+        let was_active = self.state.lock().crtc_active != 0;
         if !next.plane_fb_id.is_none() && !self.has_framebuffer(next.plane_fb_id) {
             return Err(DrmError::InvalidInput);
         }
@@ -105,8 +110,16 @@ impl DrmDevice {
             FbId::default()
         };
         self.present_locked(presented)?;
+        let mut next = next;
+        // A legacy modeset has no in-fence or out-fence of its own, so the
+        // published state carries neither forward.
+        next.plane_in_fence = None;
+        next.req_out_fence_ptr = 0;
+        let still_active = next.crtc_active != 0;
+        let refresh = refresh_hz(&next);
         *self.state.lock() = next;
         self.replace_legacy_mode_blob(mode_blob, mode);
+        self.sync_vblank_timer(was_active, still_active, refresh);
         Ok(())
     }
 
@@ -141,6 +154,7 @@ impl DrmDevice {
                 width,
                 height,
             },
+            object.is_host_rendered(),
         )
     }
 
@@ -158,20 +172,26 @@ impl DrmDevice {
         // failure here must not leave the slot pointing at a resource that was
         // never presented.
         let backend = self.backend()?;
-        let resource = object.resource()?;
-        let rollback = object.clone();
-        let previous = self.scanout.lock().install(fb, object);
+        let (resource, owned) = self.scanout_resource(fb, &object)?;
+        let host_rendered = object.is_host_rendered();
+        let rollback = PendingRetire::new(object.clone(), owned);
+        log::debug!(
+            "drm: presenting {fb:?} resource {resource:?} owned {owned:?} \
+             host_rendered={host_rendered}"
+        );
+        let previous = self.scanout.lock().install(fb, object, owned);
         let rect = Rect {
             x: 0,
             y: 0,
             width,
             height,
         };
-        match backend.present(resource, rect) {
+        match backend.present(resource, rect, host_rendered) {
             Ok(()) => {
                 // The host now scans the new resource; the previous one (and
                 // any resource from an earlier failed present) can be retired.
-                ScanoutSlot::release_retained(previous);
+                log::debug!("drm: present ok for {fb:?}, retiring previous");
+                ScanoutSlot::release_replaced(previous);
                 Ok(())
             }
             Err(error) => {
@@ -182,4 +202,71 @@ impl DrmDevice {
             }
         }
     }
+
+    /// The resource a framebuffer presents, and the slot's ownership of it.
+    ///
+    /// A framebuffer that covers its object's whole memory presents the
+    /// object's own resource; every other one gets a resource for its window,
+    /// created on first use and destroyed when the host stops scanning it.
+    fn scanout_resource(
+        &self,
+        fb: FbId,
+        object: &Arc<GemObject>,
+    ) -> DrmResult<(ResourceId, Option<ResourceId>)> {
+        let whole = self
+            .framebuffers
+            .lock()
+            .get(fb)
+            .is_some_and(|framebuffer| framebuffer.covers_object());
+        if whole {
+            return Ok((object.resource()?, None));
+        }
+        let framebuffer = self
+            .framebuffers
+            .lock()
+            .get(fb)
+            .map(|framebuffer| (framebuffer.geometry(), framebuffer.offset().unwrap_or(0)));
+        let Some((geometry, offset)) = framebuffer else {
+            return Err(DrmError::NotFound);
+        };
+        let resource = self.next_resource_id();
+        object.create_view_resource(geometry, offset, resource)?;
+        Ok((resource, Some(resource)))
+    }
+}
+
+impl DrmDevice {
+    /// Starts or stops the timer-fallback timeline with the CRTC.
+    ///
+    /// Linux arms vblank in the CRTC enable path (`drm_crtc_vblank_on`) and
+    /// disarms it on disable; the timer fallback follows the same edge and
+    /// refreshes its rate while the CRTC stays active. Pending flips cannot
+    /// reach a stopped clock, so disabling the CRTC completes them now.
+    fn sync_vblank_timer(&self, was_active: bool, is_active: bool, refresh: u32) {
+        if is_active {
+            // A real display source and the timer fallback must not advance
+            // the same timeline: only create the timer when the backend has
+            // no source to subscribe to.
+            if self.start_scanout_source().is_ok() {
+                self.stop_vblank_timer();
+            } else {
+                self.start_vblank_timer(refresh);
+            }
+        } else if was_active {
+            self.stop_vblank_timer();
+            self.complete_flips();
+        }
+    }
+}
+
+/// The refresh rate the timer fallback should tick at.
+///
+/// The committed mode carries the rate; a card without a mode falls back to
+/// 60 Hz, the rate the driver's synthesized timing runs at.
+fn refresh_hz(state: &KmsState) -> u32 {
+    state
+        .crtc_mode
+        .as_ref()
+        .and_then(|(_, blob)| crate::kms::mode_from_bytes(blob.bytes().as_slice()))
+        .map_or(60, |mode| mode.vrefresh.max(1))
 }

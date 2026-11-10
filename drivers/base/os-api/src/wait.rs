@@ -4,9 +4,7 @@
 
 //! Host-provided sleeping for drivers that wait on a device completion.
 
-use alloc::sync::Arc;
-
-use kcompletion::SyncWake;
+use kcompletion::WaitQueue;
 
 use crate::ResError;
 
@@ -16,16 +14,16 @@ use crate::ResError;
 /// this instead of polling. The host owns parking and signal policy; the
 /// driver owns the predicate and the state it reads.
 pub trait WaitOp: Send + Sync {
-    /// Parks the calling task until `wake` is notified.
+    /// Parks the calling task until `queue` is notified.
     ///
-    /// The driver notifies `wake` after publishing the state its waiter
-    /// reads, so a notification that races the park is still observed. The
-    /// call returns once that notification (or a task interrupt) has ended the
-    /// sleep; the caller rechecks its own state then.
+    /// The driver owns `queue` and calls `notify_all` after publishing the
+    /// state its waiter reads. The call returns once that notification (or a
+    /// task interrupt) has ended the sleep; the caller rechecks its own state.
     ///
     /// # Errors
     ///
     /// Returns [`ResError::Busy`] when no task can be parked in the current
-    /// context.
-    fn sleep(&self, wake: Arc<dyn SyncWake + Send>) -> Result<(), ResError>;
+    /// context, and [`ResError::Interrupted`] when a fatal signal ends the
+    /// park.
+    fn sleep(&self, queue: &WaitQueue) -> Result<(), ResError>;
 }

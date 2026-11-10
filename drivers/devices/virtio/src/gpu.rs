@@ -4,45 +4,68 @@
 
 //! VirtIO GPU driver adapter.
 
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use display::{DisplayDevice, DisplayInfo, ScanoutRect, ScanoutResource};
+use display::{
+    CapsetInfo, DisplayDevice, DisplayInfo, DisplayIrqStatus, DriverInfo, GpuCommand, GpuFenceId,
+    ResourceCreate3D, ScanoutRect, ScanoutResource, Transfer3D,
+};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
-    Hal, PAGE_SIZE,
-    config::{ReadOnly, WriteOnly, read_config, write_config},
-    queue::VirtQueue,
-    transport::Transport,
+    Hal,
+    device::gpu::{GpuBox, Rect, VirtIOGpu},
+    transport::{InterruptStatus, Transport},
 };
-use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 
-const QUEUE_SIZE: u16 = 2;
-const QUEUE_TRANSMIT: u16 = 0;
-const QUEUE_CURSOR: u16 = 1;
+/// The scanout this adapter presents to.
 const SCANOUT_ID: u32 = 0;
-/// Config-space event bit the host sets when the display configuration changed.
-const EVENT_DISPLAY: u32 = 1 << 0;
+
+/// The Linux-compatible identity of this driver.
+const DRIVER_NAME: &str = "virtio_gpu";
+const DRIVER_DATE: &str = "2026-06-02";
+const DRIVER_DESC: &str = "X-Kernel simple DRM driver";
+
+/// The resource and rectangle the host was last asked to scan out.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Binding {
+    resource: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl Binding {
+    const fn new(resource_id: u32, rect: Rect) -> Self {
+        Self {
+            resource: resource_id,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
+    }
+}
 
 #[derive(Default)]
 struct ScanoutBinding {
-    active: Option<(u32, Rect)>,
+    active: Option<Binding>,
 }
 
 impl ScanoutBinding {
     fn needs_set_scanout(&self, resource_id: u32, rect: Rect) -> bool {
-        self.active != Some((resource_id, rect))
+        self.active != Some(Binding::new(resource_id, rect))
     }
 
     fn publish(&mut self, resource_id: u32, rect: Rect) {
-        self.active = Some((resource_id, rect));
+        self.active = Some(Binding::new(resource_id, rect));
     }
 
     fn clear_if_matches(&mut self, resource_id: u32) {
         if self
             .active
-            .is_some_and(|(active_resource, _)| active_resource == resource_id)
+            .is_some_and(|active| active.resource == resource_id)
         {
             self.active = None;
         }
@@ -75,26 +98,44 @@ pub struct VirtIoGpuDev<H: Hal, T: Transport> {
     /// relaxed load/store is enough: the value publishes no other state, and a
     /// reader that observes a stale size is corrected by the next refresh.
     info: AtomicU64,
-    inner: SpinNoIrq<VirtIoGpu2d<H, T>>,
+    inner: SpinNoIrq<VirtIoGpuInner<H, T>>,
 }
 
-// SAFETY: VirtIoGpuDev serializes access to the inner VirtIoGpu2d through its own
-// `SpinNoIrq` lock. The inner type is not auto Send/Sync due to PhantomData,
-// but it is safe to transfer across threads and share behind that lock.
+/// The vendor device plus the adapter state that is not part of the device.
+struct VirtIoGpuInner<H: Hal, T: Transport> {
+    gpu: VirtIOGpu<H, T>,
+    /// The resource the host was last asked to scan out.
+    scanout: ScanoutBinding,
+    /// Whether the 3D feature was negotiated.
+    has_virgl: bool,
+}
+
+// SAFETY: VirtIoGpuDev serializes access to the inner device through its own
+// `SpinNoIrq` lock, so the device is only ever touched by one context at a
+// time. `VirtIOGpu` is not `Send`/`Sync` because it owns raw queue memory.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoGpuDev<H, T> {}
 // SAFETY: shared references are synchronized by the same `SpinNoIrq` lock, so
-// immutable aliasing across threads does not permit unsynchronized device access.
+// immutable aliasing across threads cannot reach the device concurrently.
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoGpuDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
     /// Creates a new driver instance and reads the display resolution.
     pub fn try_new(transport: T) -> DriverResult<Self> {
-        let mut device = VirtIoGpu2d::new(transport).map_err(crate::as_driver_error)?;
-        let (width, height) = device.resolution().map_err(crate::as_driver_error)?;
+        let gpu = VirtIOGpu::new(transport).map_err(crate::as_driver_error)?;
+        let has_virgl = gpu.has_virgl();
+        let mut inner = VirtIoGpuInner {
+            gpu,
+            scanout: ScanoutBinding::default(),
+            has_virgl,
+        };
+        let (width, height) = inner.gpu.resolution().map_err(crate::as_driver_error)?;
+        if inner.has_virgl {
+            log::info!("virtio-gpu: 3D (virgl) feature negotiated");
+        }
 
         Ok(Self {
             info: AtomicU64::new(pack_display_info(DisplayInfo { width, height })),
-            inner: SpinNoIrq::new(device),
+            inner: SpinNoIrq::new(inner),
         })
     }
 }
@@ -114,26 +155,33 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
         unpack_display_info(self.info.load(Ordering::Relaxed))
     }
 
+    fn driver_info(&self) -> DriverInfo {
+        DriverInfo {
+            name: DRIVER_NAME,
+            date: DRIVER_DATE,
+            desc: DRIVER_DESC,
+        }
+    }
+
     fn refresh_info(&self) -> Option<DisplayInfo> {
         let mut inner = self.inner.lock();
         // The host reports a display change by setting the event bit in the
-        // config space; there is no interrupt for it here, so the query paths
-        // ask for it explicitly and acknowledge what they consumed.
-        match inner.take_display_event() {
-            Ok(true) => {}
-            Ok(false) => return None,
-            Err(err) => {
-                log::warn!("virtio-gpu: cannot read the display event: {err:?}");
-                return None;
-            }
+        // config space. Reading it does not acknowledge it: the device keeps
+        // the bit set until the driver writes `events_clear`, so every query
+        // would otherwise observe the same stale change forever.
+        if !inner.gpu.display_changed() {
+            return None;
         }
-        let (width, height) = match inner.resolution() {
+        let (width, height) = match inner.gpu.resolution() {
             Ok(resolution) => resolution,
             Err(err) => {
                 log::warn!("virtio-gpu: cannot read the display size: {err:?}");
                 return None;
             }
         };
+        if !inner.gpu.ack_display_event() {
+            log::warn!("virtio-gpu: cannot acknowledge the display event");
+        }
 
         // The device lock above serializes refreshes, so the compare and the
         // store cannot race another refresh; the relaxed access only has to
@@ -155,6 +203,15 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
         Some(refreshed)
     }
 
+    fn ack_irq(&self) -> DisplayIrqStatus {
+        let mut inner = self.inner.lock();
+        let status = inner.gpu.ack_interrupt();
+        DisplayIrqStatus {
+            queue: status.contains(InterruptStatus::QUEUE_INTERRUPT),
+            config: status.contains(InterruptStatus::DEVICE_CONFIGURATION_INTERRUPT),
+        }
+    }
+
     fn need_flush(&self) -> bool {
         false
     }
@@ -166,484 +223,323 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
     fn create_scanout_resource(
         &self,
         resource: ScanoutResource,
-        paddr: u64,
-        length: u32,
+        window: &display::ScanoutWindow<'_>,
     ) -> DriverResult {
-        if length == 0 || resource.pitch == 0 {
+        if resource.pitch == 0 {
             return Err(DriverError::InvalidInput);
         }
-        self.inner
-            .lock()
-            .create_resource(resource, paddr, length)
+        if resource.format != display::ScanoutFormat::Bgra8888 {
+            return Err(DriverError::InvalidInput);
+        }
+        let mut inner = self.inner.lock();
+        inner
+            .gpu
+            .resource_create_2d(resource.id, resource.width, resource.height)
+            .map_err(crate::as_driver_error)?;
+        let range = window.range();
+        let length = u32::try_from(range.end.as_usize() - range.start.as_usize())
+            .map_err(|_| DriverError::InvalidInput)?;
+        inner
+            .gpu
+            .resource_attach_backing(resource.id, range.start.as_usize() as u64, length)
             .map_err(crate::as_driver_error)
     }
 
     fn destroy_scanout_resource(&self, resource_id: u32) -> DriverResult {
-        self.inner
-            .lock()
-            .destroy_resource(resource_id)
-            .map_err(crate::as_driver_error)
-    }
-
-    fn present_scanout_resource(&self, resource_id: u32, rect: ScanoutRect) -> DriverResult {
-        self.inner
-            .lock()
-            .present_resource(resource_id, rect)
-            .map_err(crate::as_driver_error)
-    }
-
-    fn flush_scanout_resource(&self, resource_id: u32, rect: ScanoutRect) -> DriverResult {
-        self.inner
-            .lock()
-            .flush_resource(resource_id, rect)
-            .map_err(crate::as_driver_error)
-    }
-}
-
-// NOTE on protocol duplication: the command types below and the request/command
-// methods above mirror the private internals of `virtio-drivers`
-// (`kvirtiodrivers` 0.13.1, `device::gpu::VirtIOGpu`). The upstream methods we
-// need (resource_create_2d / set_scanout / transfer_to_host_2d / resource_flush
-// / attach/detach/unref) are private there, and the crate is a registry
-// dependency this PR cannot extend, so the scanout subset is kept locally. It
-// is deliberately trimmed: no EDID, cursor, or framebuffer-DMA paths, and a
-// minimal QUEUE_SIZE of 2. This also documents the exact wire format we rely
-// on instead of depending on upstream internals shifting.
-
-struct VirtIoGpu2d<H: Hal, T: Transport> {
-    transport: T,
-    control_queue: VirtQueue<H, { QUEUE_SIZE as usize }>,
-    _cursor_queue: VirtQueue<H, { QUEUE_SIZE as usize }>,
-    queue_buf_send: Box<[u8]>,
-    queue_buf_recv: Box<[u8]>,
-    /// Resource currently bound to scanout 0, protected by the GPU state lock.
-    active_scanout: ScanoutBinding,
-}
-
-impl<H: Hal, T: Transport> VirtIoGpu2d<H, T> {
-    fn new(mut transport: T) -> virtio_drivers::Result<Self> {
-        let negotiated_features = transport.begin_init(SUPPORTED_FEATURES);
-
-        let events_read = read_config!(transport, Config, events_read)?;
-        let num_scanouts = read_config!(transport, Config, num_scanouts)?;
-        log::info!(
-            "virtio-gpu: events_read={:#x}, num_scanouts={:#x}",
-            events_read,
-            num_scanouts
-        );
-
-        let control_queue = VirtQueue::new(
-            &mut transport,
-            QUEUE_TRANSMIT,
-            negotiated_features.contains(Features::RING_INDIRECT_DESC),
-            negotiated_features.contains(Features::RING_EVENT_IDX),
-            negotiated_features.contains(Features::ACCESS_PLATFORM),
-        )?;
-        let cursor_queue = VirtQueue::new(
-            &mut transport,
-            QUEUE_CURSOR,
-            negotiated_features.contains(Features::RING_INDIRECT_DESC),
-            negotiated_features.contains(Features::RING_EVENT_IDX),
-            negotiated_features.contains(Features::ACCESS_PLATFORM),
-        )?;
-
-        let queue_buf_send = FromZeros::new_box_zeroed_with_elems(PAGE_SIZE).unwrap();
-        let queue_buf_recv = FromZeros::new_box_zeroed_with_elems(PAGE_SIZE).unwrap();
-
-        transport.finish_init();
-
-        Ok(Self {
-            transport,
-            control_queue,
-            _cursor_queue: cursor_queue,
-            queue_buf_send,
-            queue_buf_recv,
-            active_scanout: ScanoutBinding::default(),
-        })
-    }
-
-    /// Reads and acknowledges the display-change event.
-    ///
-    /// Returns `true` when the host reported a display change that has not
-    /// been acknowledged yet. Acknowledging is what stops the host from
-    /// re-reporting the same change on the next call.
-    fn take_display_event(&mut self) -> virtio_drivers::Result<bool> {
-        let events = read_config!(self.transport, Config, events_read)?;
-        if events & EVENT_DISPLAY == 0 {
-            return Ok(false);
-        }
-        write_config!(self.transport, Config, events_clear, EVENT_DISPLAY)?;
-        Ok(true)
-    }
-
-    fn resolution(&mut self) -> virtio_drivers::Result<(u32, u32)> {
-        let display_info = self.get_display_info()?;
-        if display_info.enabled == 0 {
-            // Host disabled this scanout: rect is all-zero, which would
-            // surface to DRM/fbdev as a bogus 0x0 mode.
-            return Err(virtio_drivers::Error::IoError);
-        }
-        Ok((display_info.rect.width, display_info.rect.height))
-    }
-
-    fn create_resource(
-        &mut self,
-        resource: ScanoutResource,
-        paddr: u64,
-        length: u32,
-    ) -> virtio_drivers::Result {
-        if resource.format != display::ScanoutFormat::Bgra8888 {
-            return Err(virtio_drivers::Error::InvalidParam);
-        }
-        self.resource_create_2d(resource.id, resource.width, resource.height)?;
-        self.resource_attach_backing(resource.id, paddr, length)
-    }
-
-    fn destroy_resource(&mut self, resource_id: u32) -> virtio_drivers::Result {
-        self.resource_detach_backing(resource_id)?;
-        let result = self.resource_unref(resource_id);
+        let mut inner = self.inner.lock();
+        inner
+            .gpu
+            .resource_detach_backing(resource_id)
+            .map_err(crate::as_driver_error)?;
+        let result = inner.gpu.resource_unref(resource_id);
         if result.is_ok() {
-            self.active_scanout.clear_if_matches(resource_id);
+            inner.scanout.clear_if_matches(resource_id);
         }
-        result
+        result.map_err(crate::as_driver_error)
     }
 
-    fn flush_resource(&mut self, resource_id: u32, rect: ScanoutRect) -> virtio_drivers::Result {
-        // Transfer the updated pixels and flush them. Deliberately no
-        // SET_SCANOUT: a dirty flush must not change the scanout binding.
+    fn present_scanout_resource(
+        &self,
+        resource_id: u32,
+        rect: ScanoutRect,
+        host_rendered: bool,
+    ) -> DriverResult {
+        // Every present flushes the resource; a guest-rendered resource also
+        // transfers its updated pixels first. SET_SCANOUT is needed only when
+        // the active resource or scanout rectangle changes. These commands
+        // remain synchronous, and transfer must complete before a new scanout
+        // binding is installed.
+        //
+        // A host-rendered (3D/virgl) resource has no guest pixels to push:
+        // transferring its pages would overwrite the texture the host just
+        // rendered into, which is exactly how a compositor's output went
+        // black. Linux presents such a resource without a 2D transfer.
         let rect = Rect {
             x: rect.x,
             y: rect.y,
             width: rect.width,
             height: rect.height,
         };
-        self.transfer_to_host_2d(rect, 0, resource_id)?;
-        self.resource_flush(rect, resource_id)
-    }
-
-    fn present_resource(&mut self, resource_id: u32, rect: ScanoutRect) -> virtio_drivers::Result {
-        // Every present transfers the updated pixels and flushes the resource.
-        // SET_SCANOUT is needed only when the active resource or scanout
-        // rectangle changes. These commands remain synchronous, and transfer
-        // must complete before a new scanout binding is installed.
-        let rect = Rect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-        };
+        let mut inner = self.inner.lock();
         let result = (|| {
-            self.transfer_to_host_2d(rect, 0, resource_id)?;
-            if self.active_scanout.needs_set_scanout(resource_id, rect) {
-                self.set_scanout(rect, SCANOUT_ID, resource_id)?;
-                self.active_scanout.publish(resource_id, rect);
+            if !host_rendered {
+                inner
+                    .gpu
+                    .transfer_to_host_2d(rect, 0, resource_id)
+                    .map_err(crate::as_driver_error)?;
             }
-            self.resource_flush(rect, resource_id)
+            if inner.scanout.needs_set_scanout(resource_id, rect) {
+                inner
+                    .gpu
+                    .set_scanout(rect, SCANOUT_ID, resource_id)
+                    .map_err(crate::as_driver_error)?;
+                inner.scanout.publish(resource_id, rect);
+            }
+            inner
+                .gpu
+                .resource_flush(rect, resource_id)
+                .map_err(crate::as_driver_error)
         })();
         if result.is_err() {
-            self.active_scanout.clear();
+            inner.scanout.clear();
         }
         result
     }
 
-    fn request<Req: IntoBytes + Immutable, Rsp: FromBytes>(
-        &mut self,
-        req: Req,
-    ) -> virtio_drivers::Result<Rsp> {
-        // The send buffer is PAGE_SIZE while every request here is a fixed
-        // ~32-byte struct, so the conversion cannot fail in practice; still,
-        // propagate instead of panicking on malformed device-side data.
-        req.write_to_prefix(&mut self.queue_buf_send)
-            .map_err(|_| virtio_drivers::Error::IoError)?;
-        self.control_queue.add_notify_wait_pop(
-            &[&self.queue_buf_send],
-            &mut [&mut self.queue_buf_recv],
-            &mut self.transport,
-        )?;
-        Rsp::read_from_prefix(&self.queue_buf_recv)
-            .map(|(rsp, _)| rsp)
-            .map_err(|_| virtio_drivers::Error::IoError)
-    }
-
-    fn get_display_info(&mut self) -> virtio_drivers::Result<RespDisplayInfo> {
-        let info: RespDisplayInfo =
-            self.request(CtrlHeader::with_type(Command::GET_DISPLAY_INFO))?;
-        info.header.check_type(Command::OK_DISPLAY_INFO)?;
-        Ok(info)
-    }
-
-    fn resource_create_2d(
-        &mut self,
+    fn flush_scanout_resource(
+        &self,
         resource_id: u32,
-        width: u32,
-        height: u32,
-    ) -> virtio_drivers::Result {
-        let rsp: CtrlHeader = self.request(ResourceCreate2D {
-            header: CtrlHeader::with_type(Command::RESOURCE_CREATE_2D),
-            resource_id,
-            format: Format::B8G8R8A8UNORM,
-            width,
-            height,
-        })?;
-        rsp.check_type(Command::OK_NODATA)
+        rect: ScanoutRect,
+        host_rendered: bool,
+    ) -> DriverResult {
+        // Transfer the updated pixels and flush them. Deliberately no
+        // SET_SCANOUT: a dirty flush must not change the scanout binding.
+        // A host-rendered resource is already current on the host, so only the
+        // flush is needed.
+        let rect = Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
+        let mut inner = self.inner.lock();
+        if !host_rendered {
+            inner
+                .gpu
+                .transfer_to_host_2d(rect, 0, resource_id)
+                .map_err(crate::as_driver_error)?;
+        }
+        inner
+            .gpu
+            .resource_flush(rect, resource_id)
+            .map_err(crate::as_driver_error)
     }
 
-    fn set_scanout(
-        &mut self,
-        rect: Rect,
-        scanout_id: u32,
-        resource_id: u32,
-    ) -> virtio_drivers::Result {
-        let rsp: CtrlHeader = self.request(SetScanout {
-            header: CtrlHeader::with_type(Command::SET_SCANOUT),
-            rect,
-            scanout_id,
-            resource_id,
-        })?;
-        rsp.check_type(Command::OK_NODATA)
+    fn gpu(&self) -> Option<&dyn GpuCommand> {
+        self.has_virgl().then_some(self as &dyn GpuCommand)
     }
 
-    fn resource_flush(&mut self, rect: Rect, resource_id: u32) -> virtio_drivers::Result {
-        let rsp: CtrlHeader = self.request(ResourceFlush {
-            header: CtrlHeader::with_type(Command::RESOURCE_FLUSH),
-            rect,
-            resource_id,
-            _padding: 0,
-        })?;
-        rsp.check_type(Command::OK_NODATA)
+    fn has_resource_blob(&self) -> bool {
+        self.inner.lock().gpu.has_resource_blob()
     }
 
-    fn transfer_to_host_2d(
-        &mut self,
-        rect: Rect,
-        offset: u64,
-        resource_id: u32,
-    ) -> virtio_drivers::Result {
-        let rsp: CtrlHeader = self.request(TransferToHost2D {
-            header: CtrlHeader::with_type(Command::TRANSFER_TO_HOST_2D),
-            rect,
-            offset,
-            resource_id,
-            _padding: 0,
-        })?;
-        rsp.check_type(Command::OK_NODATA)
+    fn has_context_init(&self) -> bool {
+        self.inner.lock().gpu.has_context_init()
     }
 
-    fn resource_attach_backing(
-        &mut self,
+    fn edid(&self) -> Option<::alloc::vec::Vec<u8>> {
+        let mut inner = self.inner.lock();
+        match inner.gpu.get_edid(SCANOUT_ID) {
+            Ok(edid) => Some(edid.bytes().to_vec()),
+            // A host that did not negotiate EDID, or has no descriptor for
+            // this scanout, has nothing to publish.
+            Err(_) => None,
+        }
+    }
+
+    fn is_connected(&self) -> bool {
+        let info = self.info();
+        info.width != 0 && info.height != 0
+    }
+}
+
+impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
+    /// Whether the VIRGL feature was negotiated.
+    fn has_virgl(&self) -> bool {
+        self.inner.lock().has_virgl
+    }
+}
+
+impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
+    fn is_available(&self) -> bool {
+        self.has_virgl()
+    }
+
+    fn capset_info(&self, index: u32) -> DriverResult<Option<CapsetInfo>> {
+        let mut inner = self.inner.lock();
+        match inner.gpu.get_capset_info(index) {
+            Ok(info) => Ok(Some(CapsetInfo {
+                id: info.capset_id,
+                max_version: info.capset_max_version,
+                max_size: info.capset_max_size,
+            })),
+            // The host answers past the last capset with an error; that is
+            // the end of the list, not a fault.
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn capset(&self, id: u32, version: u32, size: u32) -> DriverResult<alloc::vec::Vec<u8>> {
+        let mut inner = self.inner.lock();
+        inner
+            .gpu
+            .get_capset(id, version, size)
+            .map_err(crate::as_driver_error)
+    }
+
+    fn create_context(&self, ctx_id: u32, name: &str, context_init: u32) -> DriverResult {
+        let mut inner = self.inner.lock();
+        inner
+            .gpu
+            .ctx_create(ctx_id, name, context_init)
+            .map_err(crate::as_driver_error)
+    }
+
+    fn destroy_context(&self, ctx_id: u32) -> DriverResult {
+        let mut inner = self.inner.lock();
+        inner
+            .gpu
+            .ctx_destroy(ctx_id)
+            .map_err(crate::as_driver_error)
+    }
+
+    fn create_resource_3d(&self, request: ResourceCreate3D) -> DriverResult {
+        let mut inner = self.inner.lock();
+        inner
+            .gpu
+            .resource_create_3d(
+                request.ctx_id,
+                request.resource_id,
+                request.target,
+                request.format,
+                request.bind,
+                request.width,
+                request.height,
+                request.depth,
+                request.array_size,
+                request.last_level,
+                request.nr_samples,
+                request.flags,
+            )
+            .map_err(crate::as_driver_error)
+    }
+
+    fn transfer_to_host_3d(&self, request: Transfer3D) -> DriverResult {
+        let mut inner = self.inner.lock();
+        inner
+            .gpu
+            .transfer_to_host_3d(
+                request.ctx_id,
+                request.resource_id,
+                gpu_box(&request),
+                request.offset,
+                request.level,
+                request.stride,
+                request.layer_stride,
+            )
+            .map_err(crate::as_driver_error)
+    }
+
+    fn transfer_from_host_3d(&self, request: Transfer3D) -> DriverResult {
+        let mut inner = self.inner.lock();
+        inner
+            .gpu
+            .transfer_from_host_3d(
+                request.ctx_id,
+                request.resource_id,
+                gpu_box(&request),
+                request.offset,
+                request.level,
+                request.stride,
+                request.layer_stride,
+            )
+            .map_err(crate::as_driver_error)
+    }
+
+    fn submit(&self, ctx_id: u32, fence: GpuFenceId, cmds: &[u8]) -> DriverResult {
+        let mut inner = self.inner.lock();
+        let result = inner
+            .gpu
+            .submit_3d(ctx_id, fence, cmds)
+            .map_err(crate::as_driver_error);
+        // The host may have completed the stream before it answered; the
+        // completion that matters is the one the fence reports, which the
+        // caller observes through its own descriptor.
+        result
+    }
+
+    fn attach_resource(&self, ctx_id: u32, resource_id: u32) -> DriverResult {
+        let mut inner = self.inner.lock();
+        inner
+            .gpu
+            .ctx_attach_resource(ctx_id, resource_id)
+            .map_err(crate::as_driver_error)
+    }
+
+    unsafe fn attach_backing(
+        &self,
         resource_id: u32,
         paddr: u64,
-        length: u32,
-    ) -> virtio_drivers::Result {
-        let rsp: CtrlHeader = self.request(ResourceAttachBacking {
-            header: CtrlHeader::with_type(Command::RESOURCE_ATTACH_BACKING),
-            resource_id,
-            nr_entries: 1,
-            addr: paddr,
-            length,
-            _padding: 0,
-        })?;
-        rsp.check_type(Command::OK_NODATA)
+        length_bytes: u32,
+    ) -> DriverResult {
+        let mut inner = self.inner.lock();
+        inner
+            .gpu
+            .resource_attach_backing(resource_id, paddr, length_bytes)
+            .map_err(crate::as_driver_error)
     }
 
-    fn resource_detach_backing(&mut self, resource_id: u32) -> virtio_drivers::Result {
-        let rsp: CtrlHeader = self.request(ResourceDetachBacking {
-            header: CtrlHeader::with_type(Command::RESOURCE_DETACH_BACKING),
-            resource_id,
-            _padding: 0,
-        })?;
-        rsp.check_type(Command::OK_NODATA)
-    }
-
-    fn resource_unref(&mut self, resource_id: u32) -> virtio_drivers::Result {
-        let rsp: CtrlHeader = self.request(ResourceUnref {
-            header: CtrlHeader::with_type(Command::RESOURCE_UNREF),
-            resource_id,
-            _padding: 0,
-        })?;
-        rsp.check_type(Command::OK_NODATA)
-    }
-}
-
-impl<H: Hal, T: Transport> Drop for VirtIoGpu2d<H, T> {
-    fn drop(&mut self) {
-        self.transport.queue_unset(QUEUE_TRANSMIT);
-        self.transport.queue_unset(QUEUE_CURSOR);
-    }
-}
-
-#[repr(C)]
-struct Config {
-    events_read: ReadOnly<u32>,
-    events_clear: WriteOnly<u32>,
-    num_scanouts: ReadOnly<u32>,
-}
-
-bitflags::bitflags! {
-    #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-    struct Features: u64 {
-        const VIRGL                 = 1 << 0;
-        const EDID                  = 1 << 1;
-        const NOTIFY_ON_EMPTY       = 1 << 24;
-        const ANY_LAYOUT            = 1 << 27;
-        const RING_INDIRECT_DESC    = 1 << 28;
-        const RING_EVENT_IDX        = 1 << 29;
-        const UNUSED                = 1 << 30;
-        const VERSION_1             = 1 << 32;
-        const ACCESS_PLATFORM       = 1 << 33;
-        const RING_PACKED           = 1 << 34;
-        const IN_ORDER              = 1 << 35;
-        const ORDER_PLATFORM        = 1 << 36;
-        const SR_IOV                = 1 << 37;
-        const NOTIFICATION_DATA     = 1 << 38;
-    }
-}
-
-const SUPPORTED_FEATURES: Features = Features::RING_EVENT_IDX
-    .union(Features::RING_INDIRECT_DESC)
-    .union(Features::VERSION_1);
-
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Eq, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq)]
-struct Command(u32);
-
-impl Command {
-    const GET_DISPLAY_INFO: Command = Command(0x100);
-    const OK_DISPLAY_INFO: Command = Command(0x1101);
-    const OK_NODATA: Command = Command(0x1100);
-    const RESOURCE_ATTACH_BACKING: Command = Command(0x106);
-    const RESOURCE_CREATE_2D: Command = Command(0x101);
-    const RESOURCE_DETACH_BACKING: Command = Command(0x107);
-    const RESOURCE_FLUSH: Command = Command(0x104);
-    const RESOURCE_UNREF: Command = Command(0x102);
-    const SET_SCANOUT: Command = Command(0x103);
-    const TRANSFER_TO_HOST_2D: Command = Command(0x105);
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
-struct CtrlHeader {
-    hdr_type: Command,
-    flags: u32,
-    fence_id: u64,
-    ctx_id: u32,
-    _padding: u32,
-}
-
-impl CtrlHeader {
-    fn with_type(hdr_type: Command) -> CtrlHeader {
-        CtrlHeader {
-            hdr_type,
-            flags: 0,
-            fence_id: 0,
-            ctx_id: 0,
-            _padding: 0,
-        }
-    }
-
-    fn check_type(&self, expected: Command) -> virtio_drivers::Result {
-        if self.hdr_type == expected {
-            Ok(())
-        } else {
-            Err(virtio_drivers::Error::IoError)
+    unsafe fn create_blob(
+        &self,
+        ctx_id: u32,
+        resource_id: u32,
+        blob_mem: u32,
+        blob_flags: u32,
+        size: u64,
+        blob_id: u64,
+        paddr: u64,
+        length_bytes: u32,
+    ) -> DriverResult {
+        let mut inner = self.inner.lock();
+        // SAFETY: the caller owns the window and hands it to a GEM object that
+        // keeps the pages allocated and unshared; the object's destructor
+        // unrefs the resource before the pages are freed, which is exactly the
+        // lifetime `resource_create_blob` demands of the entry list.
+        unsafe {
+            inner
+                .gpu
+                .resource_create_blob(
+                    ctx_id,
+                    resource_id,
+                    blob_mem,
+                    blob_flags,
+                    size,
+                    blob_id,
+                    &[(paddr, length_bytes as usize)],
+                )
+                .map_err(crate::as_driver_error)
         }
     }
 }
 
-#[repr(C)]
-#[derive(
-    Debug, Copy, Clone, Default, Eq, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq,
-)]
-struct Rect {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+/// The box of one 3D transfer as the device describes it.
+const fn gpu_box(request: &Transfer3D) -> GpuBox {
+    GpuBox {
+        x: request.x,
+        y: request.y,
+        z: request.z,
+        w: request.w,
+        h: request.h,
+        d: request.d,
+    }
 }
-
-#[repr(C)]
-#[derive(Debug, FromBytes, Immutable, KnownLayout)]
-struct RespDisplayInfo {
-    header: CtrlHeader,
-    rect: Rect,
-    enabled: u32,
-    flags: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-struct ResourceCreate2D {
-    header: CtrlHeader,
-    resource_id: u32,
-    format: Format,
-    width: u32,
-    height: u32,
-}
-
-#[repr(u32)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-enum Format {
-    #[expect(
-        clippy::upper_case_acronyms,
-        reason = "CG-032-camel-case-types: pixel format name mirrors the virtio GPU hardware \
-                  format B8G8R8A8_UNORM"
-    )]
-    B8G8R8A8UNORM = 1,
-}
-
-#[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-struct ResourceAttachBacking {
-    header: CtrlHeader,
-    resource_id: u32,
-    nr_entries: u32,
-    addr: u64,
-    length: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
-struct ResourceDetachBacking {
-    header: CtrlHeader,
-    resource_id: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
-struct ResourceUnref {
-    header: CtrlHeader,
-    resource_id: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
-struct SetScanout {
-    header: CtrlHeader,
-    rect: Rect,
-    scanout_id: u32,
-    resource_id: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
-struct TransferToHost2D {
-    header: CtrlHeader,
-    rect: Rect,
-    offset: u64,
-    resource_id: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
-struct ResourceFlush {
-    header: CtrlHeader,
-    rect: Rect,
-    resource_id: u32,
-    _padding: u32,
-}
-
-unittest::path_mod_test!(gpu_unittest, "../ut-tests/gpu_unittest.rs");

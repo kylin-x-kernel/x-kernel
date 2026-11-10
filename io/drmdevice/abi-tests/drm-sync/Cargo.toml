@@ -1,0 +1,9 @@
+[package]
+name = "drm-sync-regression"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "sync.rs"

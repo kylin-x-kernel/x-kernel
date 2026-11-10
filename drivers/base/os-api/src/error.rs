@@ -17,6 +17,8 @@ pub enum ResError {
     Busy,
     /// The host does not support this kind of resource.
     Unsupported,
+    /// A signal ended the operation before it completed.
+    Interrupted,
     /// The capability is not in a state that permits this operation.
     BadState,
     /// A named capability is already registered.

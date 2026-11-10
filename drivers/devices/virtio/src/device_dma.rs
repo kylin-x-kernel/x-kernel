@@ -283,7 +283,7 @@ fn map_error(error: ResError) -> Error {
         ResError::Unsupported => Error::Unsupported,
         ResError::NoMemory => Error::DmaError,
         ResError::Busy | ResError::AlreadyExists => Error::AlreadyUsed,
-        ResError::BadState | ResError::NotFound => Error::NotReady,
+        ResError::BadState | ResError::NotFound | ResError::Interrupted => Error::NotReady,
         ResError::MappingFailed | ResError::Io => Error::IoError,
     }
 }

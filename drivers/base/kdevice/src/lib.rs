@@ -101,9 +101,10 @@ pub use device::{
 };
 pub use device_node::{
     DRM_RENDER_MINOR_BASE, DeviceNode, DeviceNodeCallback, DeviceNodeClass, DeviceNodeEvent,
-    DeviceNodeKind, DeviceNodeLifecycleCallback, DeviceNodeLifecycleEvent, InputDeviceNodeId,
-    InputDeviceNodeMetadata, device_nodes_snapshot, install_device_node_lifecycle_publisher,
-    register_device_node, subscribe_device_nodes, unregister_device_node,
+    DeviceNodeKind, DeviceNodeLifecycleCallback, DeviceNodeLifecycleEvent, DrmDeviceNodeMetadata,
+    InputDeviceNodeId, InputDeviceNodeMetadata, device_nodes_snapshot,
+    install_device_node_lifecycle_publisher, register_device_node, subscribe_device_nodes,
+    unregister_device_node,
 };
 pub use driver::{
     CompatibleAliasMatcher, DeviceDriver, DeviceMatcher, DriverId, DriverInfo, DriverObject,

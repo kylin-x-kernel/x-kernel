@@ -6,6 +6,17 @@ use unittest::{assert_eq, def_test};
 
 use super::*;
 
+/// A minimal connector snapshot for a test DRM card.
+fn drm_metadata() -> DrmDeviceNodeMetadata {
+    DrmDeviceNodeMetadata::new(
+        String::from("Virtual-1"),
+        String::from("connected"),
+        String::from("On"),
+        String::from("1280x800\n"),
+        Vec::new(),
+    )
+}
+
 #[def_test]
 fn node_kind_assigns_linux_name_and_number() {
     let input = DeviceNodeKind::Input;
@@ -30,19 +41,21 @@ fn render_node_derives_from_the_primary_index() {
     let (_first, ..) = registry
         .register(
             DeviceId::new(6),
-            DeviceNodeClass::Drm,
+            DeviceNodeClass::Drm(drm_metadata()),
             String::from("first"),
             String::from("test"),
             DeviceLocation::PlatformStatic { id: 6 },
+            None,
         )
         .expect("the first DRM node must fit");
     let (node, ..) = registry
         .register(
             DeviceId::new(7),
-            DeviceNodeClass::Drm,
+            DeviceNodeClass::Drm(drm_metadata()),
             String::from("display"),
             String::from("test"),
             DeviceLocation::PlatformStatic { id: 7 },
+            None,
         )
         .expect("a DRM node must fit");
     assert_ne!(node.index(), 0, "the test needs a non-zero card index");
@@ -73,6 +86,7 @@ fn render_node_derives_from_the_primary_index() {
             String::from("keyboard"),
             String::from("test"),
             DeviceLocation::PlatformStatic { id: 8 },
+            None,
         )
         .expect("an input node must fit");
     assert_eq!(input.render_device_number(), None);
@@ -94,10 +108,11 @@ fn removal_keeps_the_old_index_reserved_until_callbacks_finish() {
     let (original, ..) = registry
         .register(
             DeviceId::new(0),
-            DeviceNodeClass::Drm,
+            DeviceNodeClass::Drm(drm_metadata()),
             String::from("original"),
             String::from("test"),
             DeviceLocation::PlatformStatic { id: 0 },
+            None,
         )
         .expect("original node must fit");
     assert!(registry.finish_publish(&original).is_none());
@@ -109,19 +124,21 @@ fn removal_keeps_the_old_index_reserved_until_callbacks_finish() {
     assert!(!removed.is_available());
     let duplicate = registry.register(
         original.core_id(),
-        DeviceNodeClass::Drm,
+        DeviceNodeClass::Drm(drm_metadata()),
         String::from("duplicate"),
         String::from("test"),
         DeviceLocation::PlatformStatic { id: 0 },
+            None,
     );
     assert_eq!(duplicate.err(), Some(DriverError::ResourceBusy));
     let (replacement, ..) = registry
         .register(
             DeviceId::new(1),
-            DeviceNodeClass::Drm,
+            DeviceNodeClass::Drm(drm_metadata()),
             String::from("replacement"),
             String::from("test"),
             DeviceLocation::PlatformStatic { id: 1 },
+            None,
         )
         .expect("replacement node must fit while the old index is reserved");
     assert_eq!(replacement.index(), 1);
@@ -130,10 +147,11 @@ fn removal_keeps_the_old_index_reserved_until_callbacks_finish() {
     let (later, ..) = registry
         .register(
             DeviceId::new(2),
-            DeviceNodeClass::Drm,
+            DeviceNodeClass::Drm(drm_metadata()),
             String::from("later"),
             String::from("test"),
             DeviceLocation::PlatformStatic { id: 2 },
+            None,
         )
         .expect("the released index must be reusable");
     assert_eq!(later.index(), 0);
@@ -164,10 +182,11 @@ fn removal_requested_during_add_preserves_lifecycle_order() {
     let (node, subscribers, publisher, is_new) = registry
         .register(
             DeviceId::new(0),
-            DeviceNodeClass::Drm,
+            DeviceNodeClass::Drm(drm_metadata()),
             String::from("device"),
             String::from("test"),
             DeviceLocation::PlatformStatic { id: 0 },
+            None,
         )
         .unwrap();
     assert!(is_new);

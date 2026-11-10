@@ -7,9 +7,15 @@ exposed as two minors: the modesetting node (`/dev/dri/cardN`) and the render
 node (`/dev/dri/renderD{128+N}`). Both nodes resolve to the same `DrmDevice`;
 they differ only in the per-open file state and in the ioctl permission bits.
 
+The card also carries the kernel-side synchronization objects a modern client
+needs (G2 of the graphics alignment plan): dma-fences, dma-resv
+implicit ordering, `sync_file`, the `SYNCOBJ_*` family and a real dma-buf
+export/import path. They are described in *Synchronization* below.
+
 ## Layering
 
 ```text
+<<<<<<< HEAD
 model/            the card object: no VFS, no display driver
 ├── device/       DrmDevice: struct + card-core methods
 │   ├── device.rs struct, construction, device-wide accessors
@@ -36,6 +42,40 @@ kms/              the committed KMS state and every KMS ioctl
 └── vblank.rs       WAIT_VBLANK
 blob.rs           property blobs: registry, legacy-mode slot, blob ioctls
 auth.rs           master ownership, magic tokens and the auth ioctls
+=======
+model/            the object model: no VFS, no display driver
+├── device.rs     DrmDevice + DrmMinor (the only DeviceFileOps adapter)
+├── file.rs       DrmFile: per-open caps, handles, fb list, syncobjs, auth
+├── ioctl.rs      IOCTLS table + permission check + argument marshalling
+├── backend.rs    trait Backend — the only hardware boundary
+├── ids.rs        Id<T> / IdRegistry<T, Tag>
+├── event.rs      bounded vblank queue + poll
+├── error.rs      DrmError -> errno
+├── protocol.rs   VERSION / SET_VERSION / GET_UNIQUE / GET_CAP / SET_CLIENT_CAP
+├── flip.rs       OutFence/Flip: the completion point of one commit
+├── syncobj.rs    syncobj values, the per-file handle table and its waits
+├── dma_buf.rs    dma-buf export/import, attachments, DMA_BUF_IOCTL_*
+├── dma_buf_file.rs  the descriptor a dma-buf is shared through
+└── sync_ioctl.rs SYNC_IOC_* / DMA_BUF_IOCTL_* descriptor commands
+
+sync/             the fence layer; each module mirrors a Linux source file
+├── dma_fence.rs  fences, callbacks, waiters (dma_fence.c)
+├── fence_list.rs immutable published fence sets
+├── fence_array.rs a set merged into one fence (dma-fence-array.c)
+├── dma_resv.rs   implicit ordering of one buffer (dma-resv.c)
+├── sync_file.rs  a fence exported as a file (sync_file.c)
+├── fence_access.rs  fd -> fence, merge, install (the sync_file user surface)
+├── wakeable.rs   a poll source a fence can wake
+└── wait.rs       task-context waits and signals
+
+syncobj/          SYNCOBJ_* ioctls (drm_syncobj.c)
+gem.rs            GemObject: backing pages, reservation, scanout resource
+framebuffer.rs    Framebuffer objects and the fb ioctls
+scanout.rs        ScanoutSlot: binding and scanned resource
+kms.rs            KmsState, the property table and every KMS ioctl
+blob.rs           property blobs
+auth.rs           master ownership and magic tokens
+>>>>>>> feat/drm-g2-dma-fence
 abi/              the Linux UAPI: structures, numbers, constants
 ```
 
@@ -65,6 +105,10 @@ cannot touch a VFS type. Its external caller is devfs: `dynamic.rs` publishes
 4. **`Arc<GemObject>`** — resource lifetime. A handle, a framebuffer and the
    scanout slot each hold a reference; the last one to drop destroys the
    resource. There is no reference counting bookkeeping in the driver.
+5. **`sync::dma_fence::DmaFence`** — completion. Every observable completion
+   userspace can wait for (a flip reaching the display, a commit that failed,
+   a buffer that is still written) is a fence, and every wait goes through
+   `sync::wait`; no module polls a completion by hand.
 
 ## Device, minor, file
 
@@ -110,13 +154,59 @@ framebuffer's resource without touching the binding. There is no `fb_id == 0`
 case: zero and every other unknown id return `ENOENT`, as in Linux.
 
 The scanout slot keeps three separate facts: `bound` (the plane's logical
-framebuffer, zero when disabled), `retained` (the resource the host may still be
-scanning) and `uncertain` (resources whose present failed, so the host may have
-switched to them even though the call reported an error). Unbinding the plane clears `bound` and keeps `retained`, because
-this driver has no call that stops the host from scanning; the retained
-reference is dropped only after a *new* resource has been successfully
-presented. On a failed present the previous contents are restored, so a failure
-never frees pixels the host is still scanning.
+framebuffer, zero when disabled), `scanning` (the framebuffer of the resource
+the host was last asked to display, which outlives `bound`) and `uncertain`
+(resources whose present failed, so the host may have switched to them even
+though the call reported an error). Unbinding the plane clears `bound` and keeps
+`scanning`, because this driver has no call that stops the host from scanning;
+the scanned resource is dropped only after a *new* resource has been
+successfully presented. On a failed present the previous contents are restored,
+so a failure never frees pixels the host is still scanning. Keeping the binding
+separate from the scanned resource is what lets a removal, a file close and a
+failed rollback each describe the same screen truthfully.
+
+### Fences on the commit path
+
+A commit userspace can wait for allocates its completion point **before** it
+touches the scanout (`model/flip.rs::OutFence`): the page-flip event slot and the
+out-fence. The whole `Flip` is then handed to `DrmDevice::commit_flip`, which is
+the only place a flip is completed:
+
+- success — a card with a blank timeline queues the flip and completes event
+  and fence together on the blank that scans it out; a card without one
+  completes both with the commit (`drm_crtc_send_vblank_event` on a device
+  without vblank);
+- failure — `Flip::fail` completes the out-fence with the ioctl's errno and the
+  event slot is released unused;
+- a flip dropped without being completed (a caller that gave up) also fails the
+  out-fence, so no descriptor this driver handed out is ever left pending.
+
+`MODE_ATOMIC` and `MODE_PAGE_FLIP` differ in how the descriptor reaches the
+client, not in what it means: the atomic path names a `u64` address in
+`OUT_FENCE_PTR`, the legacy request may carry `out_fence_ptr` in its larger wire
+structure. Both write the number only after the commit accepted the flip; a
+failed commit leaves `-1` in the caller's word, `TEST_ONLY` always writes `-1`,
+and an unwritable address is `EFAULT` exactly as `put_user` reports it in
+`drm_atomic_uapi.c`.
+
+Before the commit locks anything it waits for two fence sets:
+
+- the explicit `IN_FENCE_FD` of the plane, resolved to a fence when the property
+  is applied and validated there (`EINVAL` for a descriptor that is not a
+  sync_file), so a client may close the descriptor immediately;
+- the framebuffer's reservation with `DMA_RESV_USAGE_READ`, which is
+  `drm_gem_plane_helper_prepare_fb`'s rule: scanning the buffer out reads the
+  memory, so it must wait for every writer. Linux gives explicit fencing
+  precedence over implicit fencing, and so does this driver: an `IN_FENCE_FD`
+  replaces, rather than adds to, the reservation's writers.
+
+The wait is a task-context wait (`sync/wait.rs`), never a spin, and happens
+before the commit lock is taken, so no sleepable operation runs under it.
+
+A committed flip also records itself as the framebuffer's exclusive work
+(`DrmDevice::reserve_display` writes the same fence into the framebuffer's
+reservation), which is what makes a client that fills the buffer wait for the
+display before it overwrites the pixels.
 
 ## Object lifecycle
 
@@ -136,8 +226,26 @@ never frees pixels the host is still scanning.
   instead of leaving them in the registry.
 - `mmap` resolves the offset through the file's handle table and retains the
   backing pages, because the mapping interface has no unmap notification.
-- PRIME is a handle round-trip stub; `DRM_CAP_PRIME` stays `0` until a real
-  dma-buf implementation exists.
+- `PRIME_HANDLE_TO_FD` exports the object's backing as a real dma-buf
+  descriptor (`model/dma_buf.rs`): it carries the object's pages and its
+  reservation, so the descriptor keeps the memory alive after the handle is
+  closed. `PRIME_FD_TO_HANDLE` creates this card's object for an imported
+  dma-buf over the *same* pages and the *same* reservation (the memory is guest
+  memory and both names describe one bus master's view), records an attachment
+  that the object owns, and returns a new handle. A descriptor that is not one
+  of this driver's dma-bufs is `EINVAL`.
+
+  One card has one import per dma-buf (`drm_gem_prime_import`'s attachment
+  lookup): the second import of the same buffer — through another descriptor
+  or through a re-export of it — resolves to the object the file already
+  holds, so a backing is never addressable under two handles in one file, and
+  `DESTROY_DUMB` refuses an imported handle (forgetting its mapping offset
+  would break a later import). An attachment is released with the object that
+  owns it, which is the detach. `DMA_BUF_IOCTL_SYNC` waits for the
+  reservation before a CPU start, `DMA_BUF_IOCTL_INFO` reports the size, and
+  `DMA_BUF_IOCTL_EXPORT/IMPORT_SYNC_FILE` move the reservation's fence through a
+  sync_file. `DRM_CAP_PRIME` reports import and export only because both are
+  implemented.
 - Client property blobs are owned by the creating file and the id registry.
   `DESTROY_BLOB` accepts only an id in the calling file's set: an existing id
   owned by another file, or a driver-owned system blob, is `EPERM`, while an
@@ -152,6 +260,115 @@ never frees pixels the host is still scanning.
   property attached to another object class; the single-property ioctls keep
   Linux's `EINVAL` initializer for a property that is not attached to the
   addressed object, while an unknown object is still `ENOENT`.
+
+## Synchronization
+
+The fence layer (`src/sync`) is written against Linux's dma-fence sources, one
+module per source file. It is the only way this card expresses completion, and
+every ioctl that userspace can wait on builds on it.
+
+### Fences
+
+A `DmaFence` starts pending, reaches a terminal state exactly once, keeps the
+error it finished with, and records its completion instant. Waiting is done
+through Linux's callback list: a callback either tells a collection that it is
+one step closer to complete (`MemberDone` for a fence array, `ChainPremise` and
+`ChainWork` for a chain node), signals an eventfd relation, or wakes a waiter
+(`Wake`, `Wakeable` for a poll source). Callbacks run after the fence's lock is
+released, so a chain may complete a fence that refers back to its premise.
+
+Completion capabilities are lock-free: `DmaFence::new_owned` returns the fence
+and the single `FenceSignal` that completes it. Dropping that capability does
+**not** complete the fence, because a drop cannot distinguish "the work was
+lost" from "the capability was released together with the fence itself", and a
+fence that completes during its own last release would run callbacks against an
+object whose owners are being torn down. Who owns the capability is therefore
+explicit: a commit's out-fence is owned by its `Flip`, which fails it on any
+failure path; a fence array keeps its head's capability for the array's lifetime.
+
+The card creates fences in four namespaces: anonymous (out-fences and implicit
+work, `new_anonymous_fence`), a private one for already signaled fences,
+`MERGE_CONTEXT` for fence arrays built by `sync_file` merging, and the driver
+context reported in `sync_file_info`. Every fence has a unique
+`(context, seqno)` pair.
+
+### Reservations and arrays
+
+`DmaResv` holds the exclusive and shared fences of one backing. `set_write_fence`
+replaces the exclusive set, `add_read_fence` extends the shared one, and
+`snapshot(usage)` returns the set a consumer with that usage must wait for. The
+lists are immutable (`FenceList`) and published by pointer replacement, so a
+reader always gets a complete set and a writer never mutates a set a consumer may
+still be waiting on.
+
+`FenceArray` merges a set into one fence. The head completes when every member
+did and reports the first member failure; it never completes early, because this
+driver's arrays only merge client fences and display dependencies, where an early
+completion would expose memory another member still uses. An empty or
+single-fence set is not wrapped (`dma_fence_unwrap`).
+
+### sync_file and syncobj
+
+A `SyncFile` owns one fence and is the only way a fence crosses the user/kernel
+boundary. It is readable once the fence completed, and `read`, `poll`,
+`SYNC_IOC_FILE_INFO` and `SYNC_IOC_MERGE` behave as in `sync_file.c` (a merge
+returns a fence array of both files).
+
+A `Syncobj` (`model/syncobj.rs`) holds either one fence or a timeline of
+points. Setting a value chains it onto the value it replaces: the new value is
+signaled only after the old one completed. That one rule gives `FD_TO_HANDLE`,
+`TIMELINE_SIGNAL` and `TRANSFER` their Linux meaning (a replacement cannot lose
+the dependency it replaced). A replacement also pokes the waiters parked on the
+old value, because only a re-read can observe the new one; waiting is therefore
+a loop of "observe, register, park, re-observe", never a single park on a fence
+that may have been replaced.
+
+`SYNCOBJ_WAIT` and `SYNCOBJ_TIMELINE_WAIT` follow `drm_syncobj_wait_ioctl`: a
+signal and an expired timeout are successful waits (no `first_signaled` index),
+`WAIT_ALL` reports no index, and an object that can never become available is
+`EINVAL` for the infinite wait. `timeout_nsec` accepts all three forms the ABI
+defines: `-1` waits forever, `0` polls, a positive value waits that long, and
+`DRM_TIME_ABSTIME` treats the value as an absolute CLOCK_MONOTONIC instant. The
+deadline is enforced by one sleeping timer per wait (`sync/wait.rs`), the same
+mechanism that honours a `dma_fence_set_deadline` hint a producer published.
+`HANDLE_TO_FD` names the descriptor after the object, `FD_TO_HANDLE` keeps its
+own reference so the descriptor can be closed at once, and `QUERY` reports the
+newest available timeline point. A binary replacement is
+`drm_syncobj_replace_fence` (the new fence is the whole value, verified against
+`drm_syncobj.c`); only a timeline point becomes a chain node.
+
+`SYNCOBJ_EVENTFD` ties an eventfd to a timeline point of one `EVENT` unit (the
+node the command arrived through). The relation is armed on the object's
+current value and re-armed on every value installed afterwards, so the eventfd
+counts points instead of firing once; a value that makes the point available
+signals the eventfd once, on the same completion that made it available. The
+only defined flag is `WAIT_AVAILABLE`, which signals at registration; any
+other bit and a non-zero `pad` are `EINVAL`, as in `drm_syncobj_eventfd_ioctl`.
+
+`sync_file` follows `sync_file.c` after a line-by-line check against the source:
+a count-only `SYNC_IOC_FILE_INFO` (`num_fences == 0`) reports the count and the
+whole file's status without a buffer, a record request requires
+`num_fences >= count` (`EINVAL` otherwise), an odd `flags` or `pad` is
+`EINVAL`, `status` is `dma_fence_get_status` (0 active, 1 signaled, negative
+error), the file's name is `sync_file_get_name` (the merge's user name, or
+`<driver>-<timeline>-<context>-<seqno>`), and `SYNC_IOC_SET_DEADLINE` publishes
+a CLOCK_MONOTONIC deadline (`pad` guarded, `EINVAL`). `SYNC_IOC_MERGE` merges
+the unwrapped leaves of both files, drops duplicates, and reports a closed or
+foreign `fd2` as `ENOENT`. The file has no `read` operation, as in Linux, and
+`poll` arms its wake callback on the first poll.
+
+### Descriptor commands
+
+`SYNC_IOC_*` and `DMA_BUF_IOCTL_*` are issued on a descriptor, not on the card,
+so they never reach the DRM ioctl table: `sync_file.rs` and `dma_buf_file.rs`
+dispatch them to `model/sync_ioctl.rs`, which validates the arguments and copies
+them with the same user-memory helpers the DRM ioctls use.
+
+### Capabilities
+
+`DRM_CAP_PRIME`, `DRM_CAP_SYNCOBJ` and `DRM_CAP_SYNCOBJ_TIMELINE` are reported
+because their commands are implemented end to end. `DRM_CAP_CRTC_IN_VBLANK_EVENT`
+stays tied to a display that reports scanouts (G1), unchanged by this layer.
 
 ## Connector dimensions
 
@@ -195,11 +412,29 @@ per-file blob set is also taken under `commit` by `DESTROY_BLOB` and release
 `commit`, after the device registry lock. The master lock is never taken while
 holding a file lock except in the documented order in `open`/`release`.
 
+The fence layer adds one lock family with its own rules:
+
+- A `DmaFence`'s callback list is an IRQ-safe spinlock, because a device or a
+  timer may complete a fence from interrupt context. A callback runs after the
+  lock is released and must stay short.
+- Callbacks never take a sleepable lock: a fence array's check, a chain's
+  completion check, an eventfd signal and a waiter's `wake` only touch their own
+  atomics and spinlocks or enqueue a task.
+- A `Syncobj`'s value, waiter list and event list are IRQ-safe spinlocks taken
+  together; a chain node or event is registered after all of them are released,
+  so the fence lock is ordered before the syncobj lock and never after it.
+- A wait (`sync/wait.rs`) parks the task only in sleepable context, outside all
+  of the locks above. The parked future re-evaluates on every poll: it checks
+  the fence outcome first and then installs its waker, so a completion that
+  races the check is seen by the same poll instead of being missed.
+
 ## Execution context
 
 All entry points run in process syscall context through `DeviceFileOps`. They
-may allocate, copy user memory, and acquire sleepable mutexes. No task or
-workqueue is created by this crate.
+may allocate, copy user memory, and acquire sleepable mutexes. A fence wait
+(`SYNCOBJ_WAIT`, `read()` of a sync_file, `DMA_BUF_IOCTL_SYNC`) may sleep the
+calling task; fence completion callbacks may run in interrupt context. No task
+or workqueue of its own is created by this crate.
 
 ## Error model
 
@@ -210,8 +445,25 @@ command numbers are `EOPNOTSUPP`.
 
 ## Known limitations
 
-- No command submission (execbuf/virgl) and no dma-buf: PRIME is a stub and
-  `DRM_CAP_PRIME` is `0`.
+- No command submission (execbuf/virgl); fences express display and reservation
+  completion only.
+- A `SYNCOBJ_EVENTFD` relation is cleared only when the eventfd or the object
+  is released; Linux also clears it on `drm_syncobj_array` argument reuse,
+  which this driver has no equivalent of.
+- The `dma-buf` command table matches `dma-buf.c`: `DMA_BUF_IOCTL_SYNC`
+  validates exactly `DMA_BUF_SYNC_VALID_FLAGS_MASK`, `DMA_BUF_SET_NAME` caps
+  the name at `DMA_BUF_NAME_LEN`, `EXPORT/IMPORT_SYNC_FILE` accept only the
+  direction bits, and `poll` reports `EPOLLIN` for the exclusive work and
+  `EPOLLOUT` for every user. `DMA_BUF_IOCTL_INFO` is not a Linux ioctl (the
+  size is `lseek(SEEK_END)`); it stays as an X-Kernel extension because the
+  ABI test and existing clients use it.
+- `dma_fence_chain` (replaceable timeline point objects) is not implemented:
+  timeline points are chained by callback instead, and `QUERY` reports the
+  newest available point by walking the timeline.
+- PRIME crosses this card only. A dma-buf is the exporter's guest pages plus its
+  reservation, which another card on the same bus could import; a host-private
+  resource could not, and this driver never creates one.
+- The fence layer keeps no per-fence `/proc` or debugfs view.
 - One CRTC, connector, plane and encoder.
 - `DRM_AUTH` is not enforced per command; `MASTER` and the render allowlist are,
   and mastership is answered by the device, not by per-file state.
@@ -226,5 +478,48 @@ command numbers are `EOPNOTSUPP`.
   (including its pages); this is the memory cost of never freeing pixels the
   host may still scan, and it ends at the first successful present.
 - The portable unit tests cover the permission matrix, the capability table, the
-  mode-blob encoding and the FakeBackend invariants; the rest is covered by the
-  on-target `abi-tests/`.
+  mode-blob encoding, the FakeBackend invariants, fences, arrays, reservations
+  and syncobjs; the rest is covered by the on-target `abi-tests/` (including
+  `drm-sync` for this layer).
+
+## The dma-buf object
+
+A dma-buf descriptor carries its export in the open file's framework slot
+(`kvfs::DMA_BUF_SLOT`), typed by `display::DmaBufSlot`. Every importer —
+`PRIME_FD_TO_HANDLE` here, a second display engine, a media device — reads it
+the same way, instead of asking this driver whether the descriptor happens to
+have been created by it. That is the kernel-wide equivalent of Linux's
+`dma_buf` plus its `f_op`.
+
+- `PRIME_HANDLE_TO_FD` publishes the export when it creates the descriptor;
+  the slot keeps the `Arc<DmaBuf>` for the descriptor's lifetime.
+- `PRIME_FD_TO_HANDLE` resolves the descriptor first (`ENOENT` when it is not
+  a dma-buf, as a failed `dma_buf_get` is), then imports. This card's own
+  buffer takes the fast path over its own pages and reservation; any other
+  export is attached, mapped and imported over the reported window, and an
+  export that cannot serve an importer is `EOPNOTSUPP`.
+- An imported window owns no pages (`PageRef` only exists for memory the
+  allocator accounts); the object keeps the attachment, and dropping the
+  object detaches.
+
+## The mmap offset namespace
+
+`MAP_DUMB` and `mmap` name an object by a *virtual offset*, not by its handle
+(`drm_vma_offset_manager.c`). `model/vma.rs` owns that namespace: offsets are
+allocated once per object, page aligned, never reused, and each counts as a
+reservation of its range; the present `mmap` path resolves the client's offset
+through it (`state.object_by_offset`) and then requires the calling file to
+hold
+a handle for the object, so a render node still cannot map a buffer it never
+received. The offset is held by a weak entry: a stale offset after the object
+is gone resolves to nothing instead of a later buffer, and an offset past the
+object's last page is not the object's mapping either.
+
+The offset a dma-buf import used to take from the exporter's own numbering is
+now allocated per import from this namespace, so two imports of one buffer in
+two files never collide on an offset.
+
+The other half of the Linux design — unmapping a `vma` and revoking its
+offset when a client unmaps — has no hook in this kernel's VFS, so mappings
+keep the object alive until the card goes away. That boundary is unchanged
+and is recorded here rather than papered over.

@@ -119,6 +119,19 @@ PA comes from PageRef; only the VA query performs a direct-map conversion.
   DRM compositor for the single physical scanout and cause flicker;
   fbdev emulation defers to a DRM master and presents only on explicit
   request (write or `FBIOPAN_DISPLAY`).
+- `FBIOPAN_DISPLAY` presents and reports success, but never pans: the shadow
+  is exactly one full-screen buffer with `xpanstep == ypanstep == ywrapstep
+  == 0` in `FBIOGET_FSCREENINFO`, so a client that reads those steps (as
+  Linux clients do) knows there is nothing to pan. Linux would answer
+  `EINVAL` for a non-zero pan offset; this driver accepts the call as
+  "present the shadow", which is the only effect a pan can have here. The
+  difference is deliberate and is why the offsets are reported as zero
+  rather than as a supported but ignored range.
+- A DRM master that is actively presenting owns the scanout: an fbdev
+  present between two compositor commits would be overwritten by the next
+  commit, so a mixed session does not flicker — it shows the compositor's
+  frame until the next fbdev request, which is the same ordering a
+  compositor has with any other client of the plane.
 - Shadow allocated contiguous and page-aligned: one region serves both
   userspace `mmap` and a single host resource description, with pitch
   equal to `width * 4` (packed rows).

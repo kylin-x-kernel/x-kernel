@@ -182,3 +182,16 @@ tree update and its cache invalidation ordered against other device callbacks.
 - Capability files use Linux's high-word-first hexadecimal format.
 - Uevent files use a command-file operation so one node supports readable
   properties and validated action replay.
+
+## DRM class entries
+
+A DRM card is projected as `class/drm/cardN` (and `renderD*`) from the card's
+device node. The connector is projected next to it, as Linux does: a symlink
+`class/drm/cardN-<connector>` into the card's device directory plus a
+`cardN-<connector>/` directory carrying `status`, `dpms`, `modes`, `enabled`
+and `edid`. The attribute contents are the connector snapshot the DRM class
+device supplies when it is published (`DrmDeviceNodeMetadata`), so sysfs never
+reaches into the display driver itself: a device that stops reporting a
+connector stops has its entry removed with the node, and a card that has no
+connector metadata gets no connector entry.
+

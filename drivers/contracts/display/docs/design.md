@@ -117,6 +117,31 @@ All fallible operations return `driver_base::DriverResult`:
   implementers return their own errors for invalid descriptors, resource
   exhaustion, or an unknown resource id.
 
+## dma-buf Objects
+
+`dmabuf.rs` publishes the object behind a dma-buf descriptor. Linux's
+`struct dma_buf` is what an exporter offers and every importer reaches; this
+crate owns the kernel-wide version of it because the exporter (a DRM driver)
+and the importer (any display or media device) must name the same type without
+depending on each other.
+
+- The object is stored in the open file's framework slot
+  (`kvfs::DMA_BUF_SLOT`), a slot any subsystem can read by name. A descriptor
+  without an object is not a dma-buf.
+- `ExportedDmaBuf` is the shared half: identity, exporter name, size,
+  `attach`/`detach`/`map`, the fences for one usage, the poll source and the
+  single ordering fence. This is `struct dma_buf` without its private data.
+- `DmaBufObject::as_any` is the exporter's narrowing step, the equivalent of
+  `dma_buf->ops == &drm_gem_prime_dmabuf_ops` followed by reading
+  `dma_buf->priv`.
+- A `MappedMemory` is a physical window: an importer that can address the
+  guest's memory consumes it directly; an export with no such memory returns
+  `DriverError::Unsupported` from `map` rather than a window it cannot
+  guarantee.
+
+Importers treat every export the same way: take an attachment, map it, and
+report "cannot use this buffer" as *unsupported*, never as "not a buffer".
+
 ## Design Decisions
 
 - Two-tier trait: mandatory simple flush plus optional guest-memory
@@ -129,6 +154,10 @@ All fallible operations return `driver_base::DriverResult`:
 - Single `Bgra8888` format initially: it is the layout virtio-gpu 2D
   resources and simple framebuffers agree on; widening `ScanoutFormat`
   is additive and does not change the trait.
+- dma-buf objects live behind the VFS slot rather than behind driver-specific
+  file operations: X-Kernel files are not owned by one subsystem, so the slot
+  is the one place an exporter and an importer can agree on without sharing
+  types.
 - Re-export `driver_base` types: consistent with the sibling contract
   crates (`char`, `input`, `net`, `block`), one error vocabulary and one
   import root for implementers.

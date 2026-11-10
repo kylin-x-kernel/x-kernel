@@ -82,6 +82,8 @@ fn pci_identity() -> DeviceIdentity {
         device_id: 0x1042,
         class: 0,
         subclass: 0,
+        subsystem_vendor_id: 0,
+        subsystem_device_id: 0,
     })
 }
 

@@ -51,6 +51,25 @@ fn independent_event_clients_receive_the_same_frame() {
 }
 
 #[def_test]
+fn non_multiple_read_buffer_returns_only_whole_events() {
+    let client = EventClient::new();
+    let input_frame = frame();
+    for _ in 0..MAX_CLIENT_EVENTS / input_frame.len() {
+        client.receive_frame(&input_frame);
+    }
+
+    let mut buf = [0xa5u8; 4096];
+    let event_size = size_of::<InputEvent>();
+    let expected = buf.len() / event_size * event_size;
+    assert_eq!(client.read(&mut buf), Ok(expected));
+    assert!(buf[expected..].iter().all(|byte| *byte == 0xa5));
+    assert_eq!(
+        client.state.lock().events.len(),
+        MAX_CLIENT_EVENTS - expected / event_size
+    );
+}
+
+#[def_test]
 fn slow_event_client_reports_overflow_without_affecting_peer() {
     let slow = EventClient::new();
     let fast = EventClient::new();

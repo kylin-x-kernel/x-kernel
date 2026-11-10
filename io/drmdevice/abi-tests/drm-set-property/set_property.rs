@@ -174,6 +174,9 @@ mod tests {
     /// The connector's single property together with the value it currently
     /// holds, so the test can put it back and leave the device as it found it.
     fn connector_property(file: &File, connector_id: u32) -> (u32, u64) {
+        // A connector exposes its writable `CRTC_ID` (first in the table) plus
+        // immutable `EDID` and `max bpc`. Asking for one entry reports the
+        // total in `count_props` and fills the first, which is `CRTC_ID`.
         let mut prop_ids = [0u32; 1];
         let mut prop_values = [0u64; 1];
         let mut request = ObjGetProperties {
@@ -185,9 +188,9 @@ mod tests {
             abi_pad: 0,
         };
         ioctl_arg(file, OBJ_GET_PROPERTIES, &mut request).expect("OBJ_GET_PROPERTIES");
-        assert_eq!(
-            request.count_props, 1,
-            "a connector must expose exactly its CRTC_ID property"
+        assert!(
+            request.count_props >= 1,
+            "a connector exposes its CRTC_ID property"
         );
         (prop_ids[0], prop_values[0])
     }

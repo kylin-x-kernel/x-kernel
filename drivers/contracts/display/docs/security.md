@@ -26,6 +26,12 @@ implementers, recorded below for driver audits.
   it is owned by callers and drivers, not by this crate.
 - No user-space input reaches this crate.
 
+- A dma-buf's `map` hands an importer a physical window owned by the
+  exporter. The exporter must only report memory that stays valid while an
+  attachment exists; the importer must not take ownership of it. The object
+  reaches other processes through a file descriptor, so the window is as
+  public as the descriptor is.
+
 ## Unsafe Code
 
 None. The crate contains no `unsafe`, no FFI, and no inline assembly.

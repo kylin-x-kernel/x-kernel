@@ -1,0 +1,9 @@
+[package]
+name = "evdev-regression"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "evdev.rs"

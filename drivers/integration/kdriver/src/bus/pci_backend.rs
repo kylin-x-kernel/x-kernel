@@ -344,6 +344,8 @@ impl BusBackend for PciBackend {
                     device_id: bridge.info.device_id,
                     class: bridge.info.class,
                     subclass: bridge.info.subclass,
+                    subsystem_vendor_id: bridge.info.subsystem_vendor_id,
+                    subsystem_device_id: bridge.info.subsystem_device_id,
                 }),
                 transport: None,
                 resources: SmallVec::new(),
@@ -520,6 +522,8 @@ impl BusBackend for PciBackend {
                 device_id: dev_info.device_id,
                 class: dev_info.class,
                 subclass: dev_info.subclass,
+                subsystem_vendor_id: dev_info.subsystem_vendor_id,
+                subsystem_device_id: dev_info.subsystem_device_id,
             });
 
             context.register_device(kdevice::DeviceDescSpec {

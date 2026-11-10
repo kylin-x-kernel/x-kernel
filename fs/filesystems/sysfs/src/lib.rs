@@ -33,6 +33,7 @@ use alloc::{
     format,
     string::{String, ToString},
     sync::Arc,
+    vec,
     vec::Vec,
 };
 
@@ -102,6 +103,12 @@ enum TreeEntry {
     Attribute(Arc<ProjectedDevice>, Vec<u8>),
     Symlink(String),
     Uevent(Arc<ProjectedDevice>, UeventScope),
+    RawUevent {
+        path: String,
+        subsystem: String,
+        properties: Vec<(String, String)>,
+        contents: Vec<u8>,
+    },
 }
 
 impl TreeEntry {
@@ -118,6 +125,25 @@ impl TreeEntry {
             (Self::Symlink(left), Self::Symlink(right)) => left == right,
             (Self::Uevent(left, left_scope), Self::Uevent(right, right_scope)) => {
                 Arc::ptr_eq(left, right) && left_scope == right_scope
+            }
+            (
+                Self::RawUevent {
+                    path: left_path,
+                    subsystem: left_subsystem,
+                    properties: left_properties,
+                    contents: left_contents,
+                },
+                Self::RawUevent {
+                    path: right_path,
+                    subsystem: right_subsystem,
+                    properties: right_properties,
+                    contents: right_contents,
+                },
+            ) => {
+                left_path == right_path
+                    && left_subsystem == right_subsystem
+                    && left_properties == right_properties
+                    && left_contents == right_contents
             }
             _ => false,
         }
@@ -455,6 +481,17 @@ fn append_line(value: &str) -> Vec<u8> {
     bytes
 }
 
+fn render_uevent(properties: &[(String, String)]) -> Vec<u8> {
+    let mut contents = String::new();
+    for (key, value) in properties {
+        contents.push_str(key);
+        contents.push('=');
+        contents.push_str(value);
+        contents.push('\n');
+    }
+    contents.into_bytes()
+}
+
 fn bitmap_text(bytes: &[u8]) -> Vec<u8> {
     append_line(&kdevice_uevent::bitmap_value(bytes))
 }
@@ -612,6 +649,47 @@ fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Proje
         class_link.clone(),
         TreeEntry::Symlink(relative_symlink(&class_link, &card)),
     );
+    // Linux publishes one class entry per connector, named after the card and
+    // the connector (`card0-Virtual-1`), and its attributes are the
+    // connector's state.
+    if let Some(connector) = node.drm_metadata() {
+        // The class entry links to the connector's *own* directory
+        // (`.../drm/card0-Virtual-1`), which is where its attributes live;
+        // linking to the card would hide every one of them.
+        let directory = format!("{card}-{}", connector.name());
+        let connector_leaf = format!("{class_link}-{}", connector.name());
+        add_entry(
+            tree,
+            connector_leaf.clone(),
+            TreeEntry::Symlink(relative_symlink(&connector_leaf, &directory)),
+        );
+        add_directory(tree, &directory);
+        for (attribute, contents) in [
+            ("status", String::from(connector.status())),
+            ("dpms", String::from(connector.dpms())),
+            ("modes", String::from(connector.modes())),
+            ("enabled", String::from("enabled")),
+        ] {
+            let mut contents = contents.into_bytes();
+            if !contents.ends_with(b"\n") {
+                contents.push(b'\n');
+            }
+            add_entry(
+                tree,
+                format!("{directory}/{attribute}"),
+                TreeEntry::Attribute(projected.clone(), contents),
+            );
+        }
+        // `edid` is raw binary, not a text attribute: Linux writes exactly the
+        // descriptor bytes, and `edid-decode` reads them back verbatim. A
+        // trailing newline would make the byte count one past the descriptor
+        // and shift every extension block.
+        add_entry(
+            tree,
+            format!("{directory}/edid"),
+            TreeEntry::Attribute(projected.clone(), connector.edid().to_vec()),
+        );
+    }
 
     // The render node is a second minor of the same card, not a second device:
     // its `dev`, `uevent`, char-device link and class link are projected from
@@ -680,6 +758,11 @@ fn add_drm_render_entries(
     );
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: the tree projection is one linear pass that builds \
+              directories and leaves together; splitting it would duplicate the path walk"
+)]
 fn build_tree(
     nodes: &BTreeMap<kdevice::DeviceId, Arc<ProjectedDevice>>,
     characters: &[kvfs::CharacterDeviceRegistration],
@@ -719,19 +802,20 @@ fn build_tree(
                 append_line(&format!("{}:{}", device.major(), device.minor())),
             ),
         );
+        let properties = vec![
+            ("MAJOR".to_string(), device.major().to_string()),
+            ("MINOR".to_string(), device.minor().to_string()),
+            ("DEVNAME".to_string(), registration.name().to_string()),
+        ];
         add_entry(
             &mut tree,
             format!("{leaf}/uevent"),
-            TreeEntry::CharacterAttribute(
-                registration.clone(),
-                format!(
-                    "MAJOR={}\nMINOR={}\nDEVNAME={}\n",
-                    device.major(),
-                    device.minor(),
-                    registration.name()
-                )
-                .into_bytes(),
-            ),
+            TreeEntry::RawUevent {
+                path: leaf.clone(),
+                subsystem: registration.class().to_string(),
+                contents: render_uevent(&properties),
+                properties,
+            },
         );
         for (source, target) in [
             (format!("{class}/{}", registration.name()), leaf.clone()),
@@ -773,6 +857,69 @@ fn build_tree(
                 &format!("bus/{bus}/drivers/{}", node.driver_name()),
             )),
         );
+        // Linux publishes the PCI identity on the device directory; libdrm's
+        // `drmProcessPciDevice` reads these four files to recognize a device,
+        // and refuses the node (`ENODEV`) when any is missing.
+        if let Some(pci) = node.pci_identity() {
+            for (name, value) in [
+                ("vendor", pci.vendor_id),
+                ("device", pci.device_id),
+                ("subsystem_vendor", pci.subsystem_vendor_id),
+                ("subsystem_device", pci.subsystem_device_id),
+            ] {
+                add_entry(
+                    &mut tree,
+                    format!("devices/{physical}/{name}"),
+                    TreeEntry::Attribute(projected.clone(), append_line(&format!("0x{value:04x}"))),
+                );
+            }
+            let class = (u32::from(pci.class) << 16) | (u32::from(pci.subclass) << 8);
+            add_entry(
+                &mut tree,
+                format!("devices/{physical}/class"),
+                TreeEntry::Attribute(projected.clone(), append_line(&format!("0x{class:06x}"))),
+            );
+            // Linux's PCI `uevent` carries `PCI_SLOT_NAME`; libdrm parses the
+            // BDF out of it when it builds a DRM device's bus info.
+            let mut properties = vec![
+                ("PCI_CLASS".to_string(), format!("{class:06X}")),
+                (
+                    "PCI_ID".to_string(),
+                    format!("{:04X}:{:04X}", pci.vendor_id, pci.device_id),
+                ),
+                (
+                    "PCI_SUBSYS_ID".to_string(),
+                    format!(
+                        "{:04X}:{:04X}",
+                        pci.subsystem_vendor_id, pci.subsystem_device_id
+                    ),
+                ),
+            ];
+            if let DeviceLocation::Pci {
+                segment,
+                bus: pci_bus,
+                device: pci_device,
+                function,
+            } = node.location()
+            {
+                properties.push((
+                    "PCI_SLOT_NAME".to_string(),
+                    format!("{segment:04x}:{pci_bus:02x}:{pci_device:02x}.{function}"),
+                ));
+            }
+            properties.push(("DRIVER".to_string(), node.driver_name().to_string()));
+            let path = format!("devices/{physical}/uevent");
+            add_entry(
+                &mut tree,
+                path.clone(),
+                TreeEntry::RawUevent {
+                    path,
+                    subsystem: "pci".to_string(),
+                    contents: render_uevent(&properties),
+                    properties,
+                },
+            );
+        }
         match node.kind() {
             DeviceNodeKind::Input => add_input_entries(&mut tree, projected),
             DeviceNodeKind::Drm => add_drm_entries(&mut tree, projected),
@@ -895,6 +1042,35 @@ impl SimpleDirOps for SysfsDirectory {
                             })
                             .and_then(|result| result)
                             .map(|()| None),
+                    }
+                });
+                lookup.file(
+                    name,
+                    SimpleFile::new_regular_with_permission(
+                        self.fs.clone(),
+                        UEVENT_PERMISSION,
+                        file,
+                    ),
+                )
+            }
+            TreeEntry::RawUevent {
+                path,
+                subsystem,
+                properties,
+                contents,
+            } => {
+                let file = CommandFile::new(move |operation| -> VfsResult<Option<Vec<u8>>> {
+                    match operation {
+                        SimpleFileOperation::Read => Ok(Some(contents.clone())),
+                        SimpleFileOperation::Write { data, .. } => {
+                            let action = core::str::from_utf8(data)
+                                .map_err(|_| VfsError::InvalidInput)?
+                                .trim_matches(['\0', '\n', '\r', ' ']);
+                            let action = UeventAction::try_from(action)
+                                .map_err(|()| VfsError::InvalidInput)?;
+                            kdevice_uevent::publish_raw(action, &path, &subsystem, &properties);
+                            Ok(None)
+                        }
                     }
                 });
                 lookup.file(

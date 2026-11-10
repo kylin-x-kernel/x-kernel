@@ -49,9 +49,11 @@ fn staging(provider: &dyn CpuMemoryOp, bytes: usize) -> DriverResult<CpuBuffer<'
         ResError::Unsupported => DriverError::Unsupported,
         ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
         ResError::InvalidResource => DriverError::InvalidInput,
-        ResError::MappingFailed | ResError::Io | ResError::BadState | ResError::NotFound => {
-            DriverError::Io
-        }
+        ResError::MappingFailed
+        | ResError::Io
+        | ResError::BadState
+        | ResError::NotFound
+        | ResError::Interrupted => DriverError::Io,
     })
 }
 

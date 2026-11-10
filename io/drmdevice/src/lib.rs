@@ -11,6 +11,12 @@
 //! Linux DRM semantics each, named after the corresponding Linux source file;
 //! `abi` is the wire description and nothing else.
 //!
+//! `sync` is the card's fence layer (`dma_fence`, `dma_resv`, `sync_file` and
+//! their wait and fd surface). Every completion userspace can observe — a page
+//! flip reaching the display, a commit that failed, a reservation that still
+//! holds a buffer — is a fence from that layer, and every kernel wait goes
+//! through it. `syncobj` is the client-owned container ioctl family on top.
+//!
 //! A board integrates by handing a display device to [`DrmDevice::new`] and
 //! registering [`DrmDevice::minor`] for each minor it wants to expose. The
 //! `model::backend` trait is the only hardware boundary, so the object model is
@@ -23,12 +29,18 @@ extern crate alloc;
 pub(crate) mod abi;
 mod auth;
 mod blob;
+mod decimal;
+mod edid;
 mod framebuffer;
 mod gem;
 mod ioctl;
 mod kms;
+mod legacy;
 mod model;
 mod protocol;
+mod sync;
+mod syncobj;
+mod virtgpu;
 
 pub use model::device::{DrmDevice, HotplugSink, MinorKind};
 
@@ -52,6 +64,8 @@ pub(crate) mod prelude {
     pub(crate) use kclass::{ClassDevice, DisplayDeviceImpl};
     pub(crate) use kpoll::{IoEvents, PollContext, PollRegisterError};
     pub(crate) use ksync::Mutex;
+    pub(crate) use ktask::{completion::CompletionWait, future::block_on_interruptible};
+    pub(crate) use ktime_types::TimeSpan;
     pub(crate) use kvfs::{
         DeviceFileOps, MmapMapper, NodeFlags, VfsError, VfsFile, VfsFileBuilder, VfsInode,
         VfsResult,

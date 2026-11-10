@@ -13,6 +13,11 @@
 
 use crate::prelude::*;
 
+/// The color depth of this card's output, in bits per channel.
+const MAX_BPC: u64 = 8;
+/// The lowest depth the output accepts (`max bpc` range lower bound).
+const MIN_BPC: u64 = 8;
+
 /// How a property is described on the wire.
 pub(crate) enum PropKind {
     /// Enumerated values with names.
@@ -24,8 +29,9 @@ pub(crate) enum PropKind {
         /// Maximum.
         max: u64,
     },
-    /// Id of another object.
-    Object,
+    /// Id of another object, with the object type it accepts as its one
+    /// enum value (`drm_property_create_object`).
+    Object(u64),
     /// Id of a blob.
     Blob,
 }
@@ -77,6 +83,20 @@ const PLANE_TYPE_ENUMS: &[DrmModePropertyEnum] = &[
     enum_entry(2, b"Cursor"),
 ];
 
+/// The `DPMS` enum, the names and numbers `drm_connector.c` creates.
+const DPMS_ENUMS: &[DrmModePropertyEnum] = &[
+    enum_entry(DRM_MODE_DPMS_ON, b"On"),
+    enum_entry(DRM_MODE_DPMS_STANDBY, b"Standby"),
+    enum_entry(DRM_MODE_DPMS_SUSPEND, b"Suspend"),
+    enum_entry(DRM_MODE_DPMS_OFF, b"Off"),
+];
+
+/// The `link-status` enum, `Good` before a client reported a failed commit.
+const LINK_STATUS_ENUMS: &[DrmModePropertyEnum] = &[
+    enum_entry(DRM_MODE_LINK_STATUS_GOOD, b"Good"),
+    enum_entry(DRM_MODE_LINK_STATUS_BAD, b"Bad"),
+];
+
 const fn range(name: &'static str, min: u64, max: u64) -> PropKind {
     let _ = name;
     PropKind::Range { min, max }
@@ -115,6 +135,136 @@ const fn read_crtc_w(state: &KmsState, _dev: &DrmDevice) -> u64 {
 }
 const fn read_crtc_h(state: &KmsState, _dev: &DrmDevice) -> u64 {
     state.plane_crtc_h
+}
+fn read_in_fence(_state: &KmsState, _dev: &DrmDevice) -> u64 {
+    // The descriptor is consumed by the write and resolved to a fence there,
+    // so there is never one to read back.
+    u64::MAX
+}
+const fn read_out_fence_ptr(_state: &KmsState, _dev: &DrmDevice) -> u64 {
+    // Like Linux's `drm_atomic_crtc_get_property`, the stored pointer is
+    // never reported back.
+    0
+}
+
+fn read_damage_clips(state: &KmsState, _dev: &DrmDevice) -> u64 {
+    state
+        .plane_damage_clips
+        .as_ref()
+        .map_or(0, |(id, _)| id.raw() as u64)
+}
+fn read_edid(_state: &KmsState, dev: &DrmDevice) -> u64 {
+    dev.connector_edid_blob().map_or(0, |id| id.raw() as u64)
+}
+fn read_max_bpc(state: &KmsState, _dev: &DrmDevice) -> u64 {
+    // The output carries 8 bits per channel; a client may still write the
+    // depth it wants, which is how Linux's writable `max bpc` behaves.
+    if state.conn_max_bpc == 0 {
+        MAX_BPC
+    } else {
+        state.conn_max_bpc
+    }
+}
+
+/// Records the connector's `max bpc`.
+///
+/// The range advertises the one depth the output supports, so a write of 8 is
+/// accepted and anything else is out of range.
+fn write_max_bpc(state: &mut KmsState, value: u64, _dev: &DrmDevice) -> DrmResult<()> {
+    if value < MIN_BPC || value > MAX_BPC {
+        return Err(DrmError::InvalidInput);
+    }
+    state.conn_max_bpc = value;
+    Ok(())
+}
+
+const fn read_conn_dpms(state: &KmsState, _dev: &DrmDevice) -> u64 {
+    state.conn_dpms
+}
+
+/// Records the connector's `DPMS` value.
+///
+/// Every state a client may select is accepted and remembered: the output has
+/// no power state of its own, so the value is what a reader observes, the way
+/// a virtual output under Linux keeps the property even though nothing is
+/// powered down.
+fn write_conn_dpms(state: &mut KmsState, value: u64, _dev: &DrmDevice) -> DrmResult<()> {
+    if value > DRM_MODE_DPMS_MAX {
+        return Err(DrmError::InvalidInput);
+    }
+    state.conn_dpms = value;
+    Ok(())
+}
+
+fn read_conn_link_status(state: &KmsState, _dev: &DrmDevice) -> u64 {
+    // The state starts empty; a connector that never reported a failed link
+    // is `Good`, which is also the value Linux initializes the property to.
+    if state.conn_link_status == 0 {
+        DRM_MODE_LINK_STATUS_GOOD
+    } else {
+        state.conn_link_status
+    }
+}
+
+/// Records the connector's `link-status`.
+///
+/// A client writes `BAD` to tell the kernel its last commit failed and asks
+/// for the modeset fallback; this card has no link, so the value is bookkeeping
+/// that the next `GETCONNECTOR` reports back.
+fn write_conn_link_status(state: &mut KmsState, value: u64, _dev: &DrmDevice) -> DrmResult<()> {
+    // Linux ignores the "no change" value 0 that a client can echo back when
+    // it copies the current properties into a test commit.
+    if value == 0 {
+        return Ok(());
+    }
+    if value != DRM_MODE_LINK_STATUS_GOOD && value != DRM_MODE_LINK_STATUS_BAD {
+        return Err(DrmError::InvalidInput);
+    }
+    state.conn_link_status = value;
+    Ok(())
+}
+
+const fn read_conn_non_desktop(_state: &KmsState, _dev: &DrmDevice) -> u64 {
+    0
+}
+
+/// Records the `FB_DAMAGE_CLIPS` blob of the plane.
+///
+/// Zero clears it, which is how a client says "the whole framebuffer changed".
+/// The blob must be one this file created, like every property blob.
+fn write_damage_clips(state: &mut KmsState, value: u64, dev: &DrmDevice) -> DrmResult<()> {
+    let id = BlobId::from_raw(value as u32);
+    if id.is_none() {
+        state.plane_damage_clips = None;
+        return Ok(());
+    }
+    let blob = dev.blob(id).ok_or(DrmError::InvalidInput)?;
+    state.plane_damage_clips = Some((id, blob));
+    Ok(())
+}
+
+/// Records an `IN_FENCE_FD` value on the plane's state.
+///
+/// The fence is resolved now, so a descriptor that is closed after the call
+/// still orders the commit: the kernel keeps its own reference. `-1` clears a
+/// previously recorded fence, which is what a client that wants implicit
+/// fencing only asks for.
+fn write_in_fence(state: &mut KmsState, value: u64, _dev: &DrmDevice) -> DrmResult<()> {
+    let fence = crate::sync::fence_access::input_fence(value as i64)?;
+    state.plane_in_fence = fence;
+    Ok(())
+}
+
+/// Records an `OUT_FENCE_PTR` value on the CRTC's state.
+///
+/// The value is the userspace address the commit's fence descriptor is
+/// written to; Linux validates it while the value is copied back, which is
+/// where the commit path does it too.
+fn write_out_fence_ptr(state: &mut KmsState, value: u64, _dev: &DrmDevice) -> DrmResult<()> {
+    // Linux treats a null pointer as "no out-fence" and any other value as an
+    // address it writes once during the commit.
+    state.req_out_fence_ptr = value;
+    Ok(())
 }
 fn read_in_formats(_state: &KmsState, dev: &DrmDevice) -> u64 {
     dev.ensure_in_formats_blob().map_or(0, |id| id.raw() as u64)
@@ -238,7 +388,7 @@ pub(crate) static PROPS: &[PropDesc] = &[
         name: "FB_ID",
         flags: DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC,
         object: ObjectType::Plane,
-        kind: PropKind::Object,
+        kind: PropKind::Object(DRM_MODE_OBJECT_FB as u64),
         read: read_plane_fb,
         write: Some(write_plane_fb),
     },
@@ -247,7 +397,7 @@ pub(crate) static PROPS: &[PropDesc] = &[
         name: "CRTC_ID",
         flags: DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC,
         object: ObjectType::Plane,
-        kind: PropKind::Object,
+        kind: PropKind::Object(DRM_MODE_OBJECT_CRTC as u64),
         read: read_plane_crtc,
         write: Some(write_plane_crtc),
     },
@@ -324,6 +474,26 @@ pub(crate) static PROPS: &[PropDesc] = &[
         write: Some(write_crtc_h),
     },
     PropDesc {
+        id: PropertyId::from_raw(PROP_PLANE_IN_FENCE_FD),
+        name: "IN_FENCE_FD",
+        flags: DRM_MODE_PROP_SIGNED_RANGE | DRM_MODE_PROP_ATOMIC,
+        object: ObjectType::Plane,
+        // `DRM_MODE_PROP_SIGNED_RANGE` with the range `-1 ..= INT_MAX`, as
+        // `drm_mode_config_init()` creates it.
+        kind: range("IN_FENCE_FD", u64::MAX, i32::MAX as u64),
+        read: read_in_fence,
+        write: Some(write_in_fence),
+    },
+    PropDesc {
+        id: PropertyId::from_raw(PROP_PLANE_FB_DAMAGE_CLIPS),
+        name: "FB_DAMAGE_CLIPS",
+        flags: DRM_MODE_PROP_ATOMIC | DRM_MODE_PROP_BLOB,
+        object: ObjectType::Plane,
+        kind: PropKind::Blob,
+        read: read_damage_clips,
+        write: Some(write_damage_clips),
+    },
+    PropDesc {
         id: PropertyId::from_raw(PROP_PLANE_IN_FORMATS),
         name: "IN_FORMATS",
         flags: DRM_MODE_PROP_BLOB | DRM_MODE_PROP_IMMUTABLE,
@@ -351,13 +521,69 @@ pub(crate) static PROPS: &[PropDesc] = &[
         write: Some(write_crtc_mode),
     },
     PropDesc {
+        id: PropertyId::from_raw(PROP_CRTC_OUT_FENCE_PTR),
+        name: "OUT_FENCE_PTR",
+        flags: DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC,
+        object: ObjectType::Crtc,
+        kind: range("OUT_FENCE_PTR", 0, u64::MAX),
+        read: read_out_fence_ptr,
+        write: Some(write_out_fence_ptr),
+    },
+    PropDesc {
         id: PropertyId::from_raw(PROP_CONN_CRTC_ID),
         name: "CRTC_ID",
         flags: DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC,
         object: ObjectType::Connector,
-        kind: PropKind::Object,
+        kind: PropKind::Object(DRM_MODE_OBJECT_CRTC as u64),
         read: read_conn_crtc,
         write: Some(write_conn_crtc),
+    },
+    PropDesc {
+        id: PropertyId::from_raw(PROP_CONN_EDID),
+        name: "EDID",
+        flags: DRM_MODE_PROP_BLOB | DRM_MODE_PROP_IMMUTABLE,
+        object: ObjectType::Connector,
+        kind: PropKind::Blob,
+        read: read_edid,
+        write: None,
+    },
+    PropDesc {
+        id: PropertyId::from_raw(PROP_CONN_MAX_BPC),
+        name: "max bpc",
+        flags: DRM_MODE_PROP_RANGE,
+        object: ObjectType::Connector,
+        // Linux's `max bpc` is writable; compositors set it as part of their
+        // output configuration, and rejecting the write fails the commit.
+        kind: range("max bpc", MIN_BPC, MAX_BPC),
+        read: read_max_bpc,
+        write: Some(write_max_bpc),
+    },
+    PropDesc {
+        id: PropertyId::from_raw(PROP_CONN_DPMS),
+        name: "DPMS",
+        flags: DRM_MODE_PROP_ENUM,
+        object: ObjectType::Connector,
+        kind: PropKind::Enum(DPMS_ENUMS),
+        read: read_conn_dpms,
+        write: Some(write_conn_dpms),
+    },
+    PropDesc {
+        id: PropertyId::from_raw(PROP_CONN_LINK_STATUS),
+        name: "link-status",
+        flags: DRM_MODE_PROP_ENUM,
+        object: ObjectType::Connector,
+        kind: PropKind::Enum(LINK_STATUS_ENUMS),
+        read: read_conn_link_status,
+        write: Some(write_conn_link_status),
+    },
+    PropDesc {
+        id: PropertyId::from_raw(PROP_CONN_NON_DESKTOP),
+        name: "non-desktop",
+        flags: DRM_MODE_PROP_RANGE | DRM_MODE_PROP_IMMUTABLE,
+        object: ObjectType::Connector,
+        kind: range("non-desktop", 0, 1),
+        read: read_conn_non_desktop,
+        write: None,
     },
 ];
 
@@ -409,7 +635,12 @@ fn object_for(obj_id: u32, obj_type: u32) -> DrmResult<ObjectType> {
 impl Ioctl for DrmModeConnectorSetProperty {
     const NAME: &'static str = "MODE_CONNECTOR_SETPROPERTY";
 
-    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, req: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        dev: &DrmDevice,
+        _file: &Arc<DrmFile>,
+        _unit: u32,
+        req: &mut Self,
+    ) -> DrmResult<usize> {
         if req.connector_id != CONNECTOR_ID {
             return Err(DrmError::NotFound);
         }
@@ -421,7 +652,12 @@ impl Ioctl for DrmModeConnectorSetProperty {
 impl Ioctl for DrmModeObjSetProperty {
     const NAME: &'static str = "MODE_OBJ_SETPROPERTY";
 
-    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, req: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        dev: &DrmDevice,
+        _file: &Arc<DrmFile>,
+        _unit: u32,
+        req: &mut Self,
+    ) -> DrmResult<usize> {
         let object = object_for(req.obj_id, req.obj_type)?;
         set_one_property(dev, object, req.prop_id, req.value)
     }
@@ -431,7 +667,7 @@ impl Ioctl for DrmModeObjSetProperty {
 impl Ioctl for DrmModeObjGetProperties {
     const NAME: &'static str = "MODE_OBJ_GETPROPERTIES";
 
-    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, q: &mut Self) -> DrmResult<usize> {
+    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, _unit: u32, q: &mut Self) -> DrmResult<usize> {
         let object = object_for(q.obj_id, q.obj_type)?;
         let state = dev.kms_state();
         let ids: Vec<u32> = properties_of(object).map(|prop| prop.id.raw()).collect();
@@ -449,7 +685,12 @@ impl Ioctl for DrmModeObjGetProperties {
 impl Ioctl for DrmModeGetProperty {
     const NAME: &'static str = "MODE_GETPROPERTY";
 
-    fn handle(_dev: &DrmDevice, _file: &Arc<DrmFile>, g: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        _dev: &DrmDevice,
+        _file: &Arc<DrmFile>,
+        _unit: u32,
+        g: &mut Self,
+    ) -> DrmResult<usize> {
         let desc = property(PropertyId::from_raw(g.prop_id)).ok_or(DrmError::NotFound)?;
         g.flags = desc.flags;
         g.name = [0; DRM_PROP_NAME_LEN];
@@ -465,7 +706,13 @@ impl Ioctl for DrmModeGetProperty {
                 g.count_values = report_user_array(g.values_ptr, g.count_values, &[min, max])?;
                 g.count_enum_blobs = 0;
             }
-            PropKind::Object | PropKind::Blob => {
+            PropKind::Object(object_type) => {
+                // `drm_mode_getproperty_ioctl` reports the accepted object
+                // type as the property's one value; drm-rs indexes it.
+                g.count_values = report_user_array(g.values_ptr, g.count_values, &[object_type])?;
+                g.count_enum_blobs = 0;
+            }
+            PropKind::Blob => {
                 g.count_values = 0;
                 g.count_enum_blobs = 0;
             }

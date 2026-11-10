@@ -59,6 +59,12 @@ pub(crate) struct KmsState {
     pub crtc_mode: Option<(BlobId, Arc<Blob>)>,
     /// Connector `CRTC_ID`.
     pub conn_crtc_id: CrtcId,
+    /// Connector `max bpc`: the colour depth a client asked for.
+    pub conn_max_bpc: u64,
+    /// Connector `DPMS`, a `DRM_MODE_DPMS_*` value (`ON` when fresh).
+    pub conn_dpms: u64,
+    /// Connector `link-status`, `GOOD` or `BAD`.
+    pub conn_link_status: u64,
     /// Plane `FB_ID`.
     pub plane_fb_id: FbId,
     /// Plane `CRTC_ID`.
@@ -79,6 +85,20 @@ pub(crate) struct KmsState {
     pub plane_crtc_w: u64,
     /// Plane `CRTC_H`.
     pub plane_crtc_h: u64,
+    /// Plane `IN_FENCE_FD`, resolved to the fence when the property is
+    /// written.
+    ///
+    /// Kept as a resolved fence, never as the descriptor: the descriptor may
+    /// be closed before the commit runs.
+    pub plane_in_fence: Option<Arc<crate::sync::dma_fence::DmaFence>>,
+    /// Plane `FB_DAMAGE_CLIPS`: the blob naming the changed rectangles.
+    pub plane_damage_clips: Option<(BlobId, Arc<Blob>)>,
+    /// CRTC `OUT_FENCE_PTR`: the userspace address the commit's fence
+    /// descriptor is written to.
+    ///
+    /// Request-scoped only: the commit path reads it from the request and the
+    /// published state never carries it forward.
+    pub req_out_fence_ptr: u64,
 }
 
 /// Applies one property value to `state`.
@@ -113,10 +133,14 @@ pub(crate) fn apply(
 /// event in the same call is contradictory; Linux rejects that combination
 /// with `EINVAL` rather than silently dropping the event.
 pub(crate) fn atomic_flags_valid(flags: u32, reserved: u64) -> bool {
+    // `DRM_MODE_PAGE_FLIP_ASYNC` is part of Linux's mask and is refused below
+    // by the caller, so a device without async flips answers `EINVAL` for it
+    // instead of "unknown flag".
     let known = DRM_MODE_ATOMIC_TEST_ONLY
         | DRM_MODE_ATOMIC_NONBLOCK
         | DRM_MODE_ATOMIC_ALLOW_MODESET
-        | DRM_MODE_PAGE_FLIP_EVENT;
+        | DRM_MODE_PAGE_FLIP_EVENT
+        | DRM_MODE_PAGE_FLIP_ASYNC;
     flags & !known == 0
         && reserved == 0
         && !(flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 && flags & DRM_MODE_PAGE_FLIP_EVENT != 0)

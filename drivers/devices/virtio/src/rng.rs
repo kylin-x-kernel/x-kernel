@@ -24,9 +24,11 @@ const MAX_REQUEST_BYTES: usize = 256;
 fn map_irq_error(error: ResError) -> DriverError {
     match error {
         ResError::InvalidResource => DriverError::InvalidInput,
-        ResError::MappingFailed | ResError::Io | ResError::BadState | ResError::NotFound => {
-            DriverError::Io
-        }
+        ResError::MappingFailed
+        | ResError::Io
+        | ResError::BadState
+        | ResError::NotFound
+        | ResError::Interrupted => DriverError::Io,
         ResError::NoMemory => DriverError::NoMemory,
         ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,

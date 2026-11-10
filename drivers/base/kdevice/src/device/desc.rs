@@ -178,6 +178,10 @@ pub struct PciIdentity {
     pub class: u8,
     /// PCI subclass code within the base class.
     pub subclass: u8,
+    /// PCI subsystem vendor id from the configuration-space subsystem register.
+    pub subsystem_vendor_id: u16,
+    /// PCI subsystem device id from the configuration-space subsystem register.
+    pub subsystem_device_id: u16,
 }
 
 /// Platform device identity, carrying firmware and kernel-internal identifiers.

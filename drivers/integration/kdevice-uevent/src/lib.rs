@@ -316,20 +316,36 @@ pub fn publish(action: UeventAction, node: &DeviceNode, scope: UeventScope) {
     let Some(path) = uevent_path(node, scope) else {
         return;
     };
-    publish_object(action, &path, node, &uevent_properties(node, scope));
+    publish_object(
+        action,
+        &path,
+        subsystem_name(node),
+        &uevent_properties(node, scope),
+    );
+}
+
+/// Publishes a userspace-requested uevent for a sysfs object that the device
+/// model does not represent as an input/DRM [`DeviceNode`].
+pub fn publish_raw(
+    action: UeventAction,
+    path: &str,
+    subsystem: &str,
+    properties: &[(String, String)],
+) {
+    publish_object(action, path, subsystem, properties);
 }
 
 fn publish_object(
     action: UeventAction,
     path: &str,
-    node: &DeviceNode,
+    subsystem: &str,
     properties: &[(String, String)],
 ) {
     let action = action.as_str();
     let devpath = format!("/{path}");
     let mut payload = format!("{action}@{devpath}\0ACTION={action}\0DEVPATH={devpath}\0");
     payload.push_str("SUBSYSTEM=");
-    payload.push_str(subsystem_name(node));
+    payload.push_str(subsystem);
     payload.push('\0');
     for (key, value) in properties {
         payload.push_str(key);
@@ -358,7 +374,12 @@ pub fn publish_drm_hotplug(node: &DeviceNode) {
     // The Linux kernel adds this to the uevent environment so a listener can
     // tell a connector change from an unrelated change on the same object.
     properties.push(("HOTPLUG".to_string(), "1".to_string()));
-    publish_object(UeventAction::Change, &path, node, &properties);
+    publish_object(
+        UeventAction::Change,
+        &path,
+        subsystem_name(node),
+        &properties,
+    );
 }
 
 /// Publishes the render minor of a DRM node when the node has one.

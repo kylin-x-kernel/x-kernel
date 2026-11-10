@@ -4,6 +4,7 @@
 
 //! Allocation-free task waits for synchronous completion and predicate queues.
 
+use alloc::sync::Arc;
 use core::marker::PhantomData;
 
 use kcompletion::{Completion, SyncWake, WaitQueue};
@@ -14,7 +15,8 @@ use crate::{KtaskRef, TaskState, current, select_wake_run_queue};
 
 struct CompletionWake {
     task: KtaskRef,
-    woke: SpinNoIrq<bool>,
+    /// Shared latch: every waker/notifier clone observes the same wake hint.
+    woke: Arc<SpinNoIrq<bool>>,
 }
 
 // SAFETY: notify borrows only this live, lock-protected latch and strong task
@@ -42,7 +44,7 @@ impl Clone for CompletionWake {
     fn clone(&self) -> Self {
         Self {
             task: self.task.clone(),
-            woke: SpinNoIrq::new(*self.woke.lock()),
+            woke: self.woke.clone(),
         }
     }
 }
@@ -149,7 +151,7 @@ impl CompletionWait {
         Ok(Self {
             wake: CompletionWake {
                 task: curr.clone(),
-                woke: SpinNoIrq::new(false),
+                woke: Arc::new(SpinNoIrq::new(false)),
             },
             _task_bound: PhantomData,
         })

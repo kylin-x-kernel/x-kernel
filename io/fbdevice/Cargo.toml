@@ -11,11 +11,16 @@ repository.workspace = true
 display.workspace = true
 kalloc.workspace = true
 kclass = { workspace = true, features = ["display"] }
+kcred.workspace = true
+kerrno.workspace = true
 khal.workspace = true
+kvfs.workspace = true
+osvm.workspace = true
 kspin.workspace = true
 lazyinit.workspace = true
 log.workspace = true
 memaddr.workspace = true
+unittest.workspace = true
 
 [lints]
 workspace = true

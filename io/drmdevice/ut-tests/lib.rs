@@ -10,9 +10,41 @@ use unittest::{assert, assert_eq, def_test};
 use crate::{
     MinorKind,
     ioctl::{IOCTLS, Ioctl, IoctlFlags, check_permission, report_user_array},
-    kms::{ObjectType, PROPS, PropKind, apply, atomic_flags_valid, mode_blob_bytes, mode_from_bytes},
+    kms::{
+        ObjectType, PROPS, PropKind, apply, atomic_flags_valid, mode_blob_bytes, mode_from_bytes,
+        wait_vblank_crtc_valid, wait_vblank_flags_valid,
+    },
+    model::vblank::{SequenceTracker, TickHandler, VblankClockState, VblankRequest, resolve_absolute, resolve_relative},
+    model::syncobj::{Syncobj, SyncobjHandle, SyncobjTable},
     prelude::*,
+    sync::{
+        dma_fence::{DmaFence, SyncContext, Wait, new_anonymous_fence},
+        dma_resv::{DmaResv, ResvUsage},
+        fence_access::fence_array,
+        fence_chain,
+        fence_array::FenceArray,
+        fence_list::{FenceList, first_error, is_signaled as list_is_signaled},
+    },
 };
+
+/// The resource layout a test framebuffer names: its object's whole memory.
+///
+/// A framebuffer's geometry is independent of its object's, so every test that
+/// drives the commit path by hand states it.
+fn object_spec(object: &Arc<GemObject>) -> crate::model::backend::ResourceSpec {
+    object.spec()
+}
+
+/// A framebuffer geometry that is not its object's whole memory.
+///
+/// Tests that need the framebuffer to own a scanout resource of its own use
+/// this: half the object's height at the same stride.
+fn window_spec(object: &Arc<GemObject>) -> crate::model::backend::ResourceSpec {
+    crate::model::backend::ResourceSpec {
+        height: object.height() / 2,
+        ..object.spec()
+    }
+}
 
 #[def_test]
 fn command_numbers_are_unique() {
@@ -43,12 +75,64 @@ fn resource_array_rejects_a_null_destination() {
 }
 
 #[def_test]
+fn command_numbers_match_the_uapi_header() {
+    // Pinned from `include/uapi/drm/drm.h`, not derived from the table under
+    // test: a command that drifts to another number is invisible to a
+    // libdrm-built client (the ioctl either lands on another command or on
+    // nothing at all), so the numbers are asserted literally.
+    // (name, number, request size): the number encodes the size, so a struct
+    // that changes shape must fail here rather than at runtime in a client.
+    let expected: &[(&str, u8, u16)] = &[
+        ("VERSION", 0x00, 64),
+        ("GEM_CLOSE", 0x09, 8),
+        ("GEM_FLINK", 0x0A, 8),
+        ("GEM_OPEN", 0x0B, 16),
+        ("GET_CAP", 0x0C, 16),
+        ("PRIME_HANDLE_TO_FD", 0x2D, 12),
+        ("PRIME_FD_TO_HANDLE", 0x2E, 12),
+        ("MODE_ADDFB2", 0xB8, 104),
+        ("MODE_OBJ_GETPROPERTIES", 0xB9, 32),
+        ("MODE_CURSOR2", 0xBB, 36),
+        ("MODE_ATOMIC", 0xBC, 56),
+        ("SYNCOBJ_CREATE", 0xBF, 8),
+        ("SYNCOBJ_DESTROY", 0xC0, 8),
+        ("SYNCOBJ_HANDLE_TO_FD", 0xC1, 16),
+        ("SYNCOBJ_FD_TO_HANDLE", 0xC2, 16),
+        ("SYNCOBJ_WAIT", 0xC3, 40),
+        ("SYNCOBJ_RESET", 0xC4, 16),
+        ("SYNCOBJ_SIGNAL", 0xC5, 16),
+        ("SYNCOBJ_TIMELINE_WAIT", 0xCA, 48),
+        ("SYNCOBJ_QUERY", 0xCB, 24),
+        ("SYNCOBJ_TRANSFER", 0xCC, 32),
+        ("SYNCOBJ_TIMELINE_SIGNAL", 0xCD, 24),
+        ("MODE_GETFB2", 0xCE, 104),
+        ("SYNCOBJ_EVENTFD", 0xCF, 24),
+        ("MODE_CLOSEFB", 0xD0, 8),
+    ];
+    for (name, number, size) in expected {
+        let desc = IOCTLS
+            .iter()
+            .find(|desc| desc.name == *name)
+            .unwrap_or_else(|| panic!("{name} must be in the table"));
+        let encoded_size = ((desc.cmd >> 16) & 0x3fff) as u16;
+        assert_eq!(
+            encoded_size, *size,
+            "{name} has the wrong request size"
+        );
+        assert_eq!(
+            (desc.cmd & 0xff) as u8, *number,
+            "{name} has the wrong command number"
+        );
+    }
+}
+
+#[def_test]
 fn render_nodes_only_accept_render_allowed_commands() {
     // `(command x node)` matrix: on a render node the answer is exactly the
     // `DRM_RENDER_ALLOW` bit, and the failure is EACCES (`PermissionDenied`).
     for desc in IOCTLS {
         let allowed = desc.flags.contains(IoctlFlags::RENDER_ALLOW);
-        let result = check_permission(MinorKind::Render, desc.flags, true);
+        let result = check_permission(MinorKind::Render, desc.flags, true, false);
         assert_eq!(
             result.is_ok(),
             allowed,
@@ -67,10 +151,48 @@ fn render_nodes_only_accept_render_allowed_commands() {
 }
 
 #[def_test]
+fn auth_commands_need_an_authenticated_client() {
+    // From Linux's table: `GEM_FLINK` and `GEM_OPEN` are `DRM_AUTH`, not
+    // `DRM_RENDER_ALLOW`, so an anonymous primary client cannot issue them and
+    // a render client (which is exempt from `DRM_AUTH`) still cannot either.
+    let auth = ["GEM_FLINK", "GEM_OPEN"];
+    for desc in IOCTLS {
+        if !auth.contains(&desc.name) {
+            continue;
+        }
+        assert!(
+            desc.flags.contains(IoctlFlags::AUTH),
+            "{} must carry DRM_AUTH",
+            desc.name
+        );
+        assert_eq!(
+            check_permission(MinorKind::Primary, desc.flags, false, false),
+            Err(DrmError::PermissionDenied),
+            "{} needs an authenticated client",
+            desc.name
+        );
+        assert!(
+            check_permission(MinorKind::Primary, desc.flags, false, true).is_ok(),
+            "{} must be allowed once authenticated",
+            desc.name
+        );
+        // `DRM_AUTH` exempts render clients, but the command is not
+        // `DRM_RENDER_ALLOW`, so a render node still refuses it.
+        assert_eq!(
+            check_permission(MinorKind::Render, desc.flags, false, false),
+            Err(DrmError::PermissionDenied),
+            "{} is not render-allowed",
+            desc.name
+        );
+    }
+}
+
+#[def_test]
 fn master_commands_require_ownership_on_the_primary_node() {
     // Pinned from Linux's `drm_ioctl.c` table, not derived from the flags under
     // test: a command that silently lost its MASTER bit must fail here.
     let expected = [
+        "SET_VERSION",
         "MODE_SETCRTC",
         "MODE_CURSOR",
         "MODE_CONNECTOR_SETPROPERTY",
@@ -80,6 +202,16 @@ fn master_commands_require_ownership_on_the_primary_node() {
         "MODE_CURSOR2",
         "MODE_ATOMIC",
         "AUTH_MAGIC",
+        "MODE_SETPLANE",
+        "MODE_SETGAMMA",
+        "SET_UNIQUE",
+        "ATTACHMODE",
+        "DETACHMODE",
+        "BLOCK",
+        "UNBLOCK",
+        "ADD_DRAW",
+        "RM_DRAW",
+        "UPDATE_DRAW",
     ];
     for desc in IOCTLS {
         let expected_master = expected.contains(&desc.name);
@@ -89,14 +221,16 @@ fn master_commands_require_ownership_on_the_primary_node() {
             "{} disagrees with the Linux master flag",
             desc.name
         );
+        // Master answers `MASTER` on its own; every other command is checked
+        // as an authenticated client, since `DRM_AUTH` commands need that.
         assert_eq!(
-            check_permission(MinorKind::Primary, desc.flags, false).is_ok(),
+            check_permission(MinorKind::Primary, desc.flags, false, true).is_ok(),
             !expected_master,
             "{} disagrees with the master permission",
             desc.name
         );
         assert!(
-            check_permission(MinorKind::Primary, desc.flags, true).is_ok(),
+            check_permission(MinorKind::Primary, desc.flags, true, true).is_ok(),
             "{} must be allowed to the master",
             desc.name
         );
@@ -112,6 +246,20 @@ fn the_render_allowlist_is_the_linux_one() {
         "GEM_CLOSE",
         "PRIME_HANDLE_TO_FD",
         "PRIME_FD_TO_HANDLE",
+        "SYNCOBJ_CREATE",
+        "SYNCOBJ_DESTROY",
+        "SYNCOBJ_SIGNAL",
+        "SYNCOBJ_RESET",
+        "SYNCOBJ_WAIT",
+        "SYNCOBJ_TIMELINE_SIGNAL",
+        "SYNCOBJ_TIMELINE_WAIT",
+        "SYNCOBJ_HANDLE_TO_FD",
+        "SYNCOBJ_FD_TO_HANDLE",
+        "SYNCOBJ_TRANSFER",
+        "SYNCOBJ_QUERY",
+        "SYNCOBJ_EVENTFD",
+        "SET_CLIENT_NAME",
+        "GEM_CHANGE_HANDLE",
     ];
     let mut actual: alloc::vec::Vec<&str> = IOCTLS
         .iter()
@@ -129,14 +277,25 @@ fn capabilities_only_claim_what_is_implemented() {
     use crate::{model::backend::BackendCaps, protocol::capability};
 
     const DRM_CAP_PRIME: u64 = 0x5;
-    let caps = BackendCaps { dumb: true };
+    let caps = BackendCaps {
+        dumb: true,
+        ..Default::default()
+    };
     assert_eq!(capability(DRM_CAP_DUMB_BUFFER, caps), 1);
     // Xorg's modesetting driver only enables ShadowFB (and therefore DIRTYFB)
     // when this is 1; Linux virtio-gpu reports the same value.
     assert_eq!(capability(DRM_CAP_DUMB_PREFER_SHADOW, caps), 1);
-    // No dma-buf implementation, so PRIME must stay unadvertised.
-    assert_eq!(capability(DRM_CAP_PRIME, caps), 0);
-    assert_eq!(capability(0xffff, caps), 0);
+    // Import and export are one dma-buf implementation behind
+    // `PRIME_HANDLE_TO_FD` / `PRIME_FD_TO_HANDLE`.
+    assert_eq!(capability(DRM_CAP_PRIME, caps), 3);
+    // The whole `SYNCOBJ_*` family is in the ioctl table.
+    assert_eq!(capability(DRM_CAP_SYNCOBJ, caps), 1);
+    assert_eq!(capability(DRM_CAP_SYNCOBJ_TIMELINE, caps), 1);
+    // Linux answers 1 unconditionally: the event always carries the CRTC id,
+    // whether the timeline is hardware- or timer-driven.
+    assert_eq!(capability(DRM_CAP_CRTC_IN_VBLANK_EVENT, caps), 1);
+    // An unknown capability is refused, not answered with 0.
+    assert_eq!(capability(0xffff, caps), u64::MAX);
 }
 
 #[def_test]
@@ -203,7 +362,7 @@ fn setcrtc_with_mode_and_no_framebuffer_is_enoent() {
 
     // This is a mode request with a missing framebuffer, not a disable.
     assert_eq!(
-        DrmModeSetCrtc::handle(&dev, &file, &mut request),
+        DrmModeSetCrtc::handle(&dev, &file, 0, &mut request),
         Err(DrmError::NotFound)
     );
 }
@@ -290,15 +449,17 @@ impl Backend for FakeBackend {
     }
 
     fn caps(&self) -> BackendCaps {
-        BackendCaps { dumb: true }
+        BackendCaps {
+            dumb: true,
+            ..Default::default()
+        }
     }
 
     fn create_resource(
         &self,
         _id: ResourceId,
         _spec: ResourceSpec,
-        _paddr: u64,
-        _length: u32,
+        _window: &display::ScanoutWindow<'_>,
     ) -> DrmResult<()> {
         self.created.fetch_add(1, Ordering::Relaxed);
         if self.fail_next_create.swap(false, Ordering::Relaxed) {
@@ -312,7 +473,7 @@ impl Backend for FakeBackend {
         Ok(())
     }
 
-    fn present(&self, _id: ResourceId, _rect: Rect) -> DrmResult<()> {
+    fn present(&self, _id: ResourceId, _rect: Rect, _host_rendered: bool) -> DrmResult<()> {
         if self
             .fail_next_present
             .swap(false, core::sync::atomic::Ordering::Relaxed)
@@ -323,7 +484,7 @@ impl Backend for FakeBackend {
         Ok(())
     }
 
-    fn flush(&self, _id: ResourceId, _rect: Rect) -> DrmResult<()> {
+    fn flush(&self, _id: ResourceId, _rect: Rect, _host_rendered: bool) -> DrmResult<()> {
         self.flushed.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -350,7 +511,7 @@ fn removed_framebuffer_stays_alive_while_it_is_scanned() {
     let (dev, backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&file, object.clone()).expect("fb");
+    let fb = dev.add_framebuffer(&file, object.clone(), object_spec(&object), 0).expect("fb");
     bind(&dev, fb).expect("present");
     assert_eq!(backend.presented(), 1);
 
@@ -367,7 +528,7 @@ fn removed_framebuffer_stays_alive_while_it_is_scanned() {
 
     // The next successful present is the moment the host stops scanning it.
     let next = GemObject::create(&dev, 64, 64).expect("dumb");
-    let next_fb = dev.add_framebuffer(&file, next).expect("fb");
+    let next_fb = dev.add_framebuffer(&file, next.clone(), object_spec(&next), 0).expect("fb");
     bind(&dev, next_fb).expect("present");
     assert_eq!(
         backend.destroyed(),
@@ -381,12 +542,12 @@ fn dropping_master_revokes_master_only_commands() {
     let (dev, _backend) = fake_device();
     let first = dev.open_file(MinorKind::Primary).expect("open");
     assert!(dev.is_master(&first), "the first open owns the card");
-    assert!(check_permission(first.kind, IoctlFlags::MASTER, dev.is_master(&first)).is_ok());
+    assert!(check_permission(first.kind, IoctlFlags::MASTER, dev.is_master(&first), false).is_ok());
 
     dev.drop_master(&first).expect("drop master");
     assert!(!dev.is_master(&first), "DROP_MASTER must end ownership");
     assert_eq!(
-        check_permission(first.kind, IoctlFlags::MASTER, dev.is_master(&first)),
+        check_permission(first.kind, IoctlFlags::MASTER, dev.is_master(&first), false),
         Err(DrmError::PermissionDenied),
         "a former master must not issue master-only commands"
     );
@@ -405,7 +566,7 @@ fn dirty_flush_never_rebinds_the_scanout() {
     let (dev, backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&file, object).expect("fb");
+    let fb = dev.add_framebuffer(&file, object.clone(), object_spec(&object), 0).expect("fb");
     bind(&dev, fb).expect("present");
     let presented = backend.presented();
 
@@ -466,7 +627,7 @@ fn failed_present_keeps_both_resources_alive_until_the_next_present() {
     // First target presented, then removed from the registry: only the scanout
     // slot keeps its resource alive.
     let first = GemObject::create(&dev, 64, 64).expect("dumb");
-    let first_fb = dev.add_framebuffer(&file, first).expect("fb");
+    let first_fb = dev.add_framebuffer(&file, first.clone(), object_spec(&first), 0).expect("fb");
     bind(&dev, first_fb).expect("present");
     dev.remove_framebuffer(&file, first_fb).expect("rmfb");
     assert_eq!(backend.destroyed(), 0);
@@ -474,7 +635,7 @@ fn failed_present_keeps_both_resources_alive_until_the_next_present() {
     // A failed present means the host may have switched anyway: the attempted
     // resource must stay alive as well.
     let second = GemObject::create(&dev, 64, 64).expect("dumb");
-    let second_fb = dev.add_framebuffer(&file, second).expect("fb");
+    let second_fb = dev.add_framebuffer(&file, second.clone(), window_spec(&second), 0).expect("fb");
     backend
         .fail_next_present
         .store(true, core::sync::atomic::Ordering::Relaxed);
@@ -488,9 +649,474 @@ fn failed_present_keeps_both_resources_alive_until_the_next_present() {
 
     // The next successful present settles both.
     let third = GemObject::create(&dev, 64, 64).expect("dumb");
-    let third_fb = dev.add_framebuffer(&file, third).expect("fb");
+    let third_fb = dev.add_framebuffer(&file, third.clone(), object_spec(&third), 0).expect("fb");
+    // The third present retired the first target's object resource; the
+    // failed window resource is still uncertain until a present succeeds for
+    // the framebuffer that owns it.
     bind(&dev, third_fb).expect("present");
-    assert_eq!(backend.destroyed(), 2);
+    assert_eq!(
+        backend.destroyed(),
+        1,
+        "a failed present's resource stays until its own framebuffer presents"
+    );
+    // Presenting the window framebuffer again settles the uncertain resource:
+    // the host now scans the very resource the failed attempt left behind,
+    // then a successful present releases the previous one.
+    dev.remove_framebuffer(&file, third_fb).expect("rmfb");
+    let fourth_fb = dev
+        .add_framebuffer(&file, second.clone(), window_spec(&second), 0)
+        .expect("fb");
+    // The failed attempt's window resource stays uncertain until a present
+    // succeeds: the host may have switched to it, so it can only be released
+    // once another present is known to have taken over the scanout.
+    bind(&dev, fourth_fb).expect("present");
+    let after_success = backend.destroyed();
+    // It is released by the *next* successful present, which is the point at
+    // which the host is known to have moved on.
+    let fifth = GemObject::create(&dev, 64, 64).expect("dumb");
+    let fifth_fb = dev
+        .add_framebuffer(&file, fifth.clone(), object_spec(&fifth), 0)
+        .expect("fb");
+    bind(&dev, fifth_fb).expect("present");
+    assert_eq!(
+        backend.destroyed(),
+        after_success + 1,
+        "the uncertain window resource is settled by a later present"
+    );
+}
+
+/// A dma-buf another exporter produced, as this crate's importer sees it.
+///
+/// The test's exporter is a separate type from `DrmBuf`, which is the point:
+/// the importer reaches it only through the kernel-wide contract, the way a
+/// second display engine in another driver would.
+struct ForeignExport {
+    start: usize,
+    len: usize,
+    /// Attachments taken and not yet detached, so the test can check pairing.
+    attachments: core::sync::atomic::AtomicUsize,
+    poll: kpoll::PollSet,
+}
+
+impl display::ExportedDmaBuf for ForeignExport {
+    fn identity(&self) -> usize {
+        self as *const Self as usize
+    }
+
+    fn exporter(&self) -> &str {
+        "foreign-exporter"
+    }
+
+    fn size(&self) -> u64 {
+        self.len as u64
+    }
+
+    fn attach(&self, _importer: u64) -> Result<display::DmaBufAttachment, display::DriverError> {
+        self.attachments
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        Ok(display::DmaBufAttachment {
+            export: self.identity(),
+        })
+    }
+
+    fn detach(&self, _attachment: &display::DmaBufAttachment) {
+        self.attachments
+            .fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn map(&self, _attachment: &display::DmaBufAttachment) -> Result<display::MappedMemory, display::DriverError> {
+        Ok(display::MappedMemory {
+            start: self.start as u64,
+            len: self.len as u64,
+        })
+    }
+
+    fn fences(&self, _write: bool) -> Vec<Arc<dyn core::any::Any + Send + Sync>> {
+        Vec::new()
+    }
+
+    fn poll(&self) -> &kpoll::PollSet {
+        &self.poll
+    }
+
+    fn fence_or_signaled(&self) -> Arc<dyn core::any::Any + Send + Sync> {
+        crate::sync::dma_fence::new_signaled_fence() as Arc<dyn core::any::Any + Send + Sync>
+    }
+}
+
+impl display::DmaBufObject for ForeignExport {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+#[def_test(serial)]
+fn a_foreign_dmabuf_is_imported_through_the_kernel_contract() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+    // Memory this card never allocated: a window the host exporter reports.
+    let pages =
+        alloc_zeroed_pages_exact_ref(1, PAGE_SIZE_4K, UsageKind::Global).expect("pages");
+    let export = Arc::new(ForeignExport {
+        start: pages.phys_addr().as_usize(),
+        len: PAGE_SIZE_4K,
+        attachments: core::sync::atomic::AtomicUsize::new(0),
+        poll: kpoll::PollSet::new(),
+    });
+
+    // The importer sees only the exported object, as a second driver would.
+    let as_object: Arc<dyn display::DmaBufObject> = export.clone();
+    let attachment = as_object.attach(dev.card_id()).expect("attach");
+    let window = as_object.map(&attachment).expect("map");
+    assert_eq!(window.len as usize, PAGE_SIZE_4K);
+
+    // The import never attached: it is handed an attachment the importer
+    // already took, exactly like `drm_gem_prime_import_dev` after
+    // `dma_buf_attach`.
+    let object = GemObject::import_window(
+        &dev,
+        window,
+        crate::model::backend::ResourceSpec {
+            width: (PAGE_SIZE_4K / 4) as u32,
+            height: 1,
+            pitch: PAGE_SIZE_4K as u32,
+            format: ScanoutFormat::Bgra8888,
+        },
+        crate::sync::dma_resv::DmaResv::new(),
+        crate::gem::ForeignAttachment::new(&as_object, attachment),
+    )
+    .expect("import");
+
+    // The import reads the window, not pages of its own.
+    assert_eq!(object.memory_range().0, export.start as u64);
+    assert!(object.pages().is_none(), "a foreign import owns no pages");
+    let handle = object.import_handle();
+    file.handles.lock().insert(handle, object.clone());
+    assert_eq!(file.handles.lock().len(), 1);
+
+    // Dropping the object detaches from the exporter exactly once.
+    assert_eq!(
+        export.attachments.load(core::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    file.handles.lock().clear();
+    drop(object);
+    assert_eq!(
+        export.attachments.load(core::sync::atomic::Ordering::Relaxed),
+        0,
+        "the object's lifetime is the attachment's lifetime"
+    );
+}
+
+#[def_test]
+fn flink_names_an_object_once_and_open_reaches_it_from_another_file() {
+    let (dev, _backend) = fake_device();
+    let first = dev.open_file(MinorKind::Primary).expect("open");
+    let second = dev.open_file(MinorKind::Primary).expect("open");
+    let object = GemObject::create(&dev, 32, 16).expect("dumb");
+    let handle = object.handle();
+    first.handles.lock().insert(handle, object.clone());
+
+    let mut flink = DrmGemFlink {
+        handle: handle.raw(),
+        ..Default::default()
+    };
+    DrmGemFlink::handle(&dev, &first, 0, &mut flink).expect("flink");
+    assert_ne!(flink.name, 0, "an object gets a global name");
+    let mut again = DrmGemFlink {
+        handle: handle.raw(),
+        ..Default::default()
+    };
+    DrmGemFlink::handle(&dev, &first, 0, &mut again).expect("flink");
+    assert_eq!(again.name, flink.name, "flink is idempotent per object");
+
+    // Another file reaches the same object through the name.
+    let mut open = DrmGemOpen {
+        name: flink.name,
+        ..Default::default()
+    };
+    DrmGemOpen::handle(&dev, &second, 0, &mut open).expect("open");
+    assert_eq!(open.size, object.size_bytes());
+    let opened = second
+        .handles
+        .lock()
+        .get(&DumbHandle::from_raw(open.handle))
+        .cloned()
+        .expect("handle in the second file");
+    assert!(Arc::ptr_eq(&opened, &object), "one object, two handles");
+
+    // A name holds no reference: with every handle gone it stops resolving.
+    first.handles.lock().clear();
+    second.handles.lock().clear();
+    drop(opened);
+    drop(object);
+    let mut stale = DrmGemOpen {
+        name: flink.name,
+        ..Default::default()
+    };
+    assert_eq!(
+        DrmGemOpen::handle(&dev, &second, 0, &mut stale),
+        Err(DrmError::NotFound),
+        "a dead object's name does not resolve"
+    );
+}
+
+#[def_test]
+fn the_mmap_offset_names_the_object_inside_the_card_namespace() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Render).expect("open");
+    let object = GemObject::create(&dev, 8, 8).expect("dumb");
+    let offset = object.offset_bytes();
+    assert_eq!(
+        offset % PAGE_SIZE_4K as u64,
+        0,
+        "an offset is page aligned, as drm_vma_offset_add requires"
+    );
+
+    // The namespace resolves the offset before any handle exists, but `mmap`
+    // additionally requires the file to hold a handle for it.
+    let range = dev.vma.lookup(offset).expect("the offset is registered");
+    assert_eq!(range.offset, offset);
+    assert!(file.object_by_offset(offset).is_none(), "no handle yet");
+
+    file.handles.lock().insert(object.handle(), object.clone());
+    let found = file
+        .object_by_offset(offset)
+        .expect("the handle makes the offset mappable");
+    assert!(Arc::ptr_eq(&found, &object));
+
+    // A mapping that starts inside the object resolves to it; a mapping that
+    // would run past the object's end does not (`drm_vma_offset_exact_lookup`),
+    // and neither does an offset outside the namespace.
+    let big = GemObject::create(&dev, 64, 64).expect("dumb");
+    file.handles.lock().insert(big.handle(), big.clone());
+    assert!(
+        file.object_by_offset(big.offset_bytes() + PAGE_SIZE_4K as u64)
+            .is_some(),
+        "a tail of the allocation is still the object"
+    );
+    assert!(
+        file.object_by_offset(big.offset_bytes() + big.length_bytes() as u64)
+            .is_none(),
+        "past the allocation is nobody's offset"
+    );
+    assert!(
+        file.object_by_offset_range(
+            big.offset_bytes() + big.length_bytes() as u64 - PAGE_SIZE_4K as u64,
+            PAGE_SIZE_4K as u64 * 2,
+        )
+        .is_none(),
+        "a mapping may not run past the object"
+    );
+    assert!(
+        file.object_by_offset_range(
+            big.offset_bytes() + big.length_bytes() as u64 - PAGE_SIZE_4K as u64,
+            PAGE_SIZE_4K as u64,
+        )
+        .is_some(),
+        "the last page alone is inside the object"
+    );
+    file.handles.lock().remove(&big.handle());
+    drop(big);
+    assert!(
+        file.object_by_offset(offset + (1 << 40)).is_none(),
+        "an offset outside the namespace maps nothing"
+    );
+
+    // Releasing the object frees the binding, so a stale offset maps nothing.
+    file.handles.lock().clear();
+    drop(found);
+    drop(object);
+    assert!(dev.vma.lookup(offset).is_none());
+    assert!(file.object_by_offset(offset).is_none());
+}
+
+#[def_test]
+fn virtgpu_commands_need_a_device_that_negotiated_them() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Render).expect("open");
+
+    // The fake backend has no 3D channel: the commands that need one refuse
+    // instead of pretending, and they do so before touching any user memory.
+    let mut context = crate::virtgpu::DrmVirtgpuContextInit {
+        num_params: 0,
+        abi_pad: 0,
+        ctx_set_params: 0,
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut context),
+        Err(DrmError::OpNotSupported)
+    );
+    let mut exec = crate::virtgpu::DrmVirtgpuExecbuffer {
+        flags: 0,
+        size: 4,
+        ..Default::default()
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut exec),
+        Err(DrmError::OpNotSupported)
+    );
+    let mut blob = crate::virtgpu::DrmVirtgpuResourceCreateBlob::default();
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut blob),
+        Err(DrmError::OpNotSupported)
+    );
+
+    // `GETPARAM` and the other object commands do not need the channel; an
+    // unknown parameter is EINVAL, as Linux answers it, whatever the device.
+    let mut unknown = crate::virtgpu::DrmVirtgpuGetparam {
+        param: 0xffff,
+        value: 0,
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut unknown),
+        Err(DrmError::InvalidInput)
+    );
+    let mut map = crate::virtgpu::DrmVirtgpuMap {
+        offset: 0,
+        handle: 0,
+        abi_pad: 0,
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut map),
+        Err(DrmError::InvalidInput),
+        "an unknown handle maps nothing"
+    );
+}
+
+#[def_test]
+fn the_standard_property_set_is_present_and_consistent() {
+    // Every property a client probes must exist once, and a property that
+    // reports a writable value must have a writer that accepts it.
+    let mut ids = alloc::vec::Vec::new();
+    for prop in PROPS {
+        assert!(!ids.contains(&prop.id), "{} has a duplicate id", prop.name);
+        ids.push(prop.id);
+        if prop.write.is_some() {
+            assert!(
+                prop.flags & DRM_MODE_PROP_IMMUTABLE == 0,
+                "{} is immutable but writable",
+                prop.name
+            );
+        } else {
+            assert!(
+                prop.flags & DRM_MODE_PROP_IMMUTABLE != 0,
+                "{} has no writer and is not immutable",
+                prop.name
+            );
+        }
+    }
+    for name in [
+        "type",
+        "SRC_X",
+        "SRC_Y",
+        "SRC_W",
+        "SRC_H",
+        "CRTC_X",
+        "CRTC_Y",
+        "CRTC_W",
+        "CRTC_H",
+        "FB_ID",
+        "IN_FENCE_FD",
+        "OUT_FENCE_PTR",
+        "CRTC_ID",
+        "FB_DAMAGE_CLIPS",
+        "ACTIVE",
+        "MODE_ID",
+        "IN_FORMATS",
+    ] {
+        assert!(
+            PROPS.iter().any(|prop| prop.name == name),
+            "the standard property {name} must exist"
+        );
+    }
+}
+
+#[def_test]
+fn a_connector_without_edid_reports_unknown_size_and_no_blob() {
+    // The fake backend has no descriptor: the connector reports no physical
+    // size (zero is "unknown", not an invented DPI) and no `EDID` blob.
+    let (dev, _backend) = fake_device();
+    assert!(dev.edid().is_none());
+    assert!(dev.connector_edid_blob().is_none());
+    assert!(dev.is_connected(), "the fake display always has a mode");
+}
+
+#[def_test]
+fn atomic_requests_follow_linux_flag_and_capability_rules() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+
+    // An atomic request without the capability is EINVAL (Linux), not
+    // "unsupported".
+    let mut request = DrmModeAtomic {
+        flags: 0,
+        ..Default::default()
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut request),
+        Err(DrmError::InvalidInput),
+        "a client without DRM_CLIENT_CAP_ATOMIC gets EINVAL"
+    );
+    file.grant_cap(crate::model::file::CLIENT_CAP_ATOMIC);
+
+    // A flag word carrying `DRM_MODE_PAGE_FLIP_ASYNC` is refused: this card
+    // does not flip asynchronously.
+    let mut async_flip = DrmModeAtomic {
+        flags: DRM_MODE_PAGE_FLIP_ASYNC,
+        ..Default::default()
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut async_flip),
+        Err(DrmError::InvalidInput),
+        "async flips are not supported"
+    );
+
+    // Test-only plus an event is contradictory in Linux too.
+    let mut contradictory = DrmModeAtomic {
+        flags: DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_PAGE_FLIP_EVENT,
+        ..Default::default()
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut contradictory),
+        Err(DrmError::InvalidInput)
+    );
+}
+
+#[def_test]
+fn page_flip_refuses_flags_linux_refuses() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+    let object = GemObject::create(&dev, 64, 48).expect("dumb");
+    let fb = dev
+        .add_framebuffer(&file, object.clone(), object_spec(&object), 0)
+        .expect("fb");
+
+    // A target flip needs `PAGE_FLIP_TARGET`; this card has no
+    // `page_flip_target`, so Linux refuses the flag outright.
+    let mut target = DrmModeCrtcPageFlip {
+        crtc_id: CRTC_ID,
+        fb_id: fb.raw(),
+        flags: DRM_MODE_PAGE_FLIP_TARGET_ABSOLUTE,
+        ..Default::default()
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut target),
+        Err(DrmError::InvalidInput)
+    );
+
+    // The legacy structure's fourth word is reserved and must be zero.
+    let mut reserved = DrmModeCrtcPageFlip {
+        crtc_id: CRTC_ID,
+        fb_id: fb.raw(),
+        flags: 0,
+        abi_pad: 5,
+        ..Default::default()
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut reserved),
+        Err(DrmError::InvalidInput)
+    );
 }
 
 #[def_test]
@@ -498,7 +1124,7 @@ fn closefb_refuses_a_framebuffer_that_is_still_bound() {
     let (dev, _backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&file, object).expect("fb");
+    let fb = dev.add_framebuffer(&file, object.clone(), object_spec(&object), 0).expect("fb");
     bind(&dev, fb).expect("present");
 
     assert_eq!(
@@ -516,7 +1142,7 @@ fn another_file_cannot_remove_a_framebuffer() {
     let owner = dev.open_file(MinorKind::Primary).expect("open");
     let other = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&owner, object).expect("fb");
+    let fb = dev.add_framebuffer(&owner, object.clone(), object_spec(&object), 0).expect("fb");
 
     // Linux looks the id up in `file_priv->fbs`, so a foreign id is
     // indistinguishable from an unknown one.
@@ -647,7 +1273,7 @@ fn page_flip_on_a_disabled_crtc_is_rejected_without_binding() {
     let (dev, backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&file, object).expect("fb");
+    let fb = dev.add_framebuffer(&file, object.clone(), object_spec(&object), 0).expect("fb");
     let mut request = DrmModeCrtcPageFlip {
         crtc_id: CRTC_ID,
         fb_id: fb.raw(),
@@ -655,7 +1281,7 @@ fn page_flip_on_a_disabled_crtc_is_rejected_without_binding() {
     };
 
     assert_eq!(
-        DrmModeCrtcPageFlip::handle(&dev, &file, &mut request),
+        DrmModeCrtcPageFlip::handle(&dev, &file, 0, &mut request),
         Err(DrmError::InvalidInput),
         "the ioctl must reject a flip on a disabled CRTC"
     );
@@ -747,7 +1373,7 @@ fn object_properties_accept_the_wildcard_type() {
         ..Default::default()
     };
     assert_eq!(
-        DrmModeObjGetProperties::handle(&dev, &file, &mut request),
+        DrmModeObjGetProperties::handle(&dev, &file, 0, &mut request),
         Ok(0)
     );
     assert!(
@@ -762,7 +1388,7 @@ fn object_properties_accept_the_wildcard_type() {
         ..Default::default()
     };
     assert_eq!(
-        DrmModeObjGetProperties::handle(&dev, &file, &mut wrong),
+        DrmModeObjGetProperties::handle(&dev, &file, 0, &mut wrong),
         Err(DrmError::NotFound)
     );
 
@@ -772,7 +1398,7 @@ fn object_properties_accept_the_wildcard_type() {
         ..Default::default()
     };
     assert_eq!(
-        DrmModeObjGetProperties::handle(&dev, &file, &mut unknown),
+        DrmModeObjGetProperties::handle(&dev, &file, 0, &mut unknown),
         Err(DrmError::NotFound),
         "the wildcard type must not invent an object for an unknown id"
     );
@@ -792,7 +1418,7 @@ fn get_blob_short_buffer_is_a_size_probe() {
         data: UserPtr::default(),
     };
 
-    let result = <DrmModeGetBlob as Ioctl>::handle(&dev, &file, &mut request);
+    let result = <DrmModeGetBlob as Ioctl>::handle(&dev, &file, 0, &mut request);
     assert_eq!(
         result,
         Ok(0),
@@ -833,7 +1459,7 @@ fn oversized_atomic_object_count_is_refused_before_loading() {
         ..Default::default()
     };
     assert_eq!(
-        <DrmModeAtomic as Ioctl>::handle(&dev, &file, &mut request),
+        <DrmModeAtomic as Ioctl>::handle(&dev, &file, 0, &mut request),
         Err(DrmError::NoMemory)
     );
 }
@@ -851,13 +1477,13 @@ fn connector_without_physical_dimensions_reports_unknown_size() {
             mm_height: u32::MAX,
             ..Default::default()
         };
-        DrmModeGetConnector::handle(&dev, &file, &mut connector).expect("connector");
+        DrmModeGetConnector::handle(&dev, &file, 0, &mut connector).expect("connector");
         assert_eq!((connector.mm_width, connector.mm_height), (0, 0));
         assert_eq!(connector.count_modes, 1);
         assert_eq!(connector.connection, DRM_MODE_CONNECTED);
 
         let mut resources = DrmModeCardRes::default();
-        DrmModeCardRes::handle(&dev, &file, &mut resources).expect("resources");
+        DrmModeCardRes::handle(&dev, &file, 0, &mut resources).expect("resources");
         // The reported range is the capability envelope, not this mode's size:
         // a client pins its screen bounds to it at startup, so it has to stay
         // wider than any size the host may resize to later.
@@ -892,7 +1518,7 @@ fn connector_mode_tracks_a_host_resize() {
     // that grew the window could never ask for the larger size again.
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let mut resources = DrmModeCardRes::default();
-    DrmModeCardRes::handle(&dev, &file, &mut resources).expect("resources");
+    DrmModeCardRes::handle(&dev, &file, 0, &mut resources).expect("resources");
     assert_eq!((resources.max_width, resources.max_height), (8192, 8192));
 }
 
@@ -951,7 +1577,7 @@ fn connector_invalid_id_does_not_publish_physical_dimensions() {
             ..Default::default()
         };
         assert_eq!(
-            DrmModeGetConnector::handle(&dev, &file, &mut connector),
+            DrmModeGetConnector::handle(&dev, &file, 0, &mut connector),
             Err(DrmError::NotFound)
         );
         assert_eq!((connector.mm_width, connector.mm_height), (123, 456));
@@ -964,20 +1590,20 @@ fn getresources_framebuffer_count_is_per_open_file() {
     let owner = dev.open_file(MinorKind::Primary).expect("owner");
     let other = dev.open_file(MinorKind::Primary).expect("other");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let first = dev.add_framebuffer(&owner, object.clone()).expect("fb");
-    let second = dev.add_framebuffer(&owner, object.clone()).expect("fb");
-    let foreign = dev.add_framebuffer(&other, object).expect("foreign");
+    let first = dev.add_framebuffer(&owner, object.clone(), object_spec(&object), 0).expect("fb");
+    let second = dev.add_framebuffer(&owner, object.clone(), object_spec(&object), 0).expect("fb");
+    let foreign = dev.add_framebuffer(&other, object.clone(), object_spec(&object), 0).expect("foreign");
 
     let mut request = DrmModeCardRes::default();
-    DrmModeCardRes::handle(&dev, &owner, &mut request).expect("owner query");
+    DrmModeCardRes::handle(&dev, &owner, 0, &mut request).expect("owner query");
     assert_eq!(request.count_fbs, 2);
     request = DrmModeCardRes::default();
-    DrmModeCardRes::handle(&dev, &other, &mut request).expect("other query");
+    DrmModeCardRes::handle(&dev, &other, 0, &mut request).expect("other query");
     assert_eq!(request.count_fbs, 1);
 
     dev.remove_framebuffer(&owner, first).expect("rmfb");
     request = DrmModeCardRes::default();
-    DrmModeCardRes::handle(&dev, &owner, &mut request).expect("after remove");
+    DrmModeCardRes::handle(&dev, &owner, 0, &mut request).expect("after remove");
     assert_eq!(request.count_fbs, 1);
     dev.remove_framebuffer(&owner, second).expect("rmfb");
     dev.remove_framebuffer(&other, foreign).expect("rmfb");
@@ -988,13 +1614,13 @@ fn getresources_count_query_does_not_access_the_id_buffer() {
     let (dev, _backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&file, object).expect("fb");
+    let fb = dev.add_framebuffer(&file, object.clone(), object_spec(&object), 0).expect("fb");
     let mut request = DrmModeCardRes {
         fb_id_ptr: UserPtr::from(1_usize),
         ..Default::default()
     };
 
-    DrmModeCardRes::handle(&dev, &file, &mut request).expect("length query");
+    DrmModeCardRes::handle(&dev, &file, 0, &mut request).expect("length query");
     assert_eq!(request.count_fbs, 1);
     // Reset output counts so an unrelated null array cannot cause EFAULT.
     request = DrmModeCardRes {
@@ -1003,7 +1629,7 @@ fn getresources_count_query_does_not_access_the_id_buffer() {
         ..Default::default()
     };
     assert_eq!(
-        DrmModeCardRes::handle(&dev, &file, &mut request),
+        DrmModeCardRes::handle(&dev, &file, 0, &mut request),
         Err(DrmError::BadAddress),
         "a nonzero capacity must access the nonempty output"
     );
@@ -1020,7 +1646,7 @@ fn getresources_empty_list_ignores_even_a_max_capacity_bad_pointer() {
         ..Default::default()
     };
 
-    DrmModeCardRes::handle(&dev, &file, &mut request).expect("empty query");
+    DrmModeCardRes::handle(&dev, &file, 0, &mut request).expect("empty query");
     assert_eq!(request.count_fbs, 0);
 }
 
@@ -1029,7 +1655,7 @@ fn gem_backing_holder_keeps_exact_pages_alive_after_the_object_is_destroyed() {
     let (dev, backend) = fake_device();
     // 65 * 33 * 4 bytes requires three pages and rounds raw inventory to four.
     let object = GemObject::create(&dev, 65, 33).unwrap();
-    let mapped = object.pages();
+    let mapped = object.pages().expect("an owned object hands out its pages");
     assert_eq!(mapped.page_count(), 3);
     assert_eq!(object.length_bytes(), 3 * PAGE_SIZE_4K);
     assert_eq!(mapped.retained_range().size(), 3 * PAGE_SIZE_4K);
@@ -1122,32 +1748,45 @@ fn drm_mmap_retains_exact_backing_after_handle_and_object_destruction() {
     let (dev, backend) = fake_device();
     let state = dev.open_file(MinorKind::Render).unwrap();
     let file = mmap_test_file(state.clone());
-    let minor = dev.minor(MinorKind::Render);
+    let minor = dev.minor(MinorKind::Render, 0);
     // Three requested pages distinguish the mapping length from four raw pages.
     let object = GemObject::create(&dev, 65, 33).unwrap();
-    let paddr = object.pages().phys_addr();
-    let backing = Arc::downgrade(&object.pages());
+    let pages = object.pages().expect("owned pages");
+    let backing = Arc::downgrade(&pages);
+    drop(pages);
+    let offset_bytes = object.offset_bytes();
     let handle = object.handle();
     let mut mapper = RecordingMmapMapper {
-        offset_bytes: object.offset_bytes() as usize,
+        offset_bytes: offset_bytes as usize,
         range: None,
         requested_length: None,
     };
     state.handles.lock().insert(handle, object.clone());
     minor.mmap(&file, &mut mapper).unwrap();
-    let range = mapper.range.unwrap();
-    assert_eq!(range.start, paddr);
-    assert_eq!(range.size(), 3 * PAGE_SIZE_4K);
+    assert_eq!(mapper.range.unwrap().size(), 3 * PAGE_SIZE_4K);
 
+    // The mapping, not the handle, is what the card keeps: the retention table
+    // names the mapped object by the mapping's offset.
+    let retained = dev
+        .retained_mapping(offset_bytes)
+        .expect("mmap must retain the object");
+    assert!(Arc::ptr_eq(&retained, &object));
+    drop(retained);
+    assert_eq!(backend.destroyed(), 0);
+
+    // The handle and the test's own reference go away. Whatever else still
+    // names the object, the mapping's retention must keep the pages alive.
     drop(state.take_handle(handle).unwrap());
     drop(object);
-    assert_eq!(backend.destroyed(), 1);
-    // No test-owned strong page reference survives the object. Only the mmap
-    // path can retain this backing; removing retain_mapping makes upgrade fail.
+    assert!(
+        dev.retained_mapping(offset_bytes).is_some(),
+        "the mapping keeps the object after every other owner is gone"
+    );
     let retained = backing.upgrade().expect("mmap must retain GEM backing");
     assert_eq!(retained.page_count(), 3);
     assert_eq!(retained.retained_range().size(), 3 * PAGE_SIZE_4K);
     drop(retained);
+
     drop(minor);
     drop(file);
     drop(state);
@@ -1162,12 +1801,12 @@ fn drm_mmap_retains_exact_backing_after_handle_and_object_destruction() {
 #[def_test(serial)]
 fn oversized_drm_mmap_does_not_retain_gem_backing() {
     let before = kalloc::global_allocator().usages().get(UsageKind::Global);
-    let (dev, backend) = fake_device();
+    let (dev, _backend) = fake_device();
     let state = dev.open_file(MinorKind::Render).unwrap();
     let file = mmap_test_file(state.clone());
-    let minor = dev.minor(MinorKind::Render);
+    let minor = dev.minor(MinorKind::Render, 0);
     let object = GemObject::create(&dev, 65, 33).unwrap();
-    let backing = Arc::downgrade(&object.pages());
+    let backing = Arc::downgrade(&object.pages().expect("owned pages"));
     let handle = object.handle();
     let mut mapper = RecordingMmapMapper {
         offset_bytes: object.offset_bytes() as usize,
@@ -1182,9 +1821,9 @@ fn oversized_drm_mmap_does_not_retain_gem_backing() {
     ));
     assert!(mapper.range.is_none());
 
+
     drop(state.take_handle(handle).unwrap());
     drop(object);
-    assert_eq!(backend.destroyed(), 1);
     assert!(
         backing.upgrade().is_none(),
         "a failed mmap must not retain GEM backing for the device lifetime"
@@ -1213,11 +1852,630 @@ fn failed_scanout_creation_reclaims_all_exact_backing_pages() {
         before
     );
     let retry = GemObject::create(&dev, 65, 33).unwrap();
-    assert_eq!(retry.pages().page_count(), 3);
+    assert_eq!(retry.pages().expect("owned pages").page_count(), 3);
     drop(retry);
     assert_eq!(backend.destroyed(), 1);
     assert_eq!(
         kalloc::global_allocator().usages().get(UsageKind::Global),
         before
     );
+}
+
+// ---------------------------------------------------------------------------
+// Vertical blanking: request resolution and completion on the timeline.
+// ---------------------------------------------------------------------------
+
+/// A tick handler for tests that inspect a clock without a card.
+struct NoTicks;
+
+impl TickHandler for NoTicks {
+    fn on_tick(&self) {}
+}
+
+/// What a display reports its blanks to.
+type BlankCallback = Arc<dyn Fn(display::VblankTick) + Send + Sync>;
+
+/// A display that reports its own blanks.
+struct ReportingBackend {
+    inner: FakeBackend,
+    emitted: Mutex<core::cell::RefCell<Option<BlankCallback>>>,
+}
+
+impl ReportingBackend {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: FakeBackend::default(),
+            emitted: Mutex::new(core::cell::RefCell::new(None)),
+        })
+    }
+
+    /// Reports one blank, as the display's completion would.
+    fn emit(&self, sequence: u32) {
+        let callback = self
+            .emitted
+            .lock()
+            .borrow()
+            .clone()
+            .expect("the card subscribed before the display reported a blank");
+        callback(display::VblankTick {
+            sequence,
+            timestamp: ktime_types::MonotonicInstant::from_span_since_origin(
+                TimeSpan::from_millis(16),
+            ),
+        });
+    }
+}
+
+impl Backend for ReportingBackend {
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn info(&self) -> DisplayInfo {
+        self.inner.info()
+    }
+
+    fn caps(&self) -> BackendCaps {
+        self.inner.caps()
+    }
+
+    fn vblank_source(&self) -> Option<&dyn display::VblankSource> {
+        Some(self)
+    }
+
+    fn create_resource(
+        &self,
+        id: ResourceId,
+        spec: ResourceSpec,
+        window: &display::ScanoutWindow<'_>,
+    ) -> DrmResult<()> {
+        self.inner.create_resource(id, spec, window)
+    }
+
+    fn destroy_resource(&self, id: ResourceId) -> DrmResult<()> {
+        self.inner.destroy_resource(id)
+    }
+
+    fn present(&self, id: ResourceId, rect: Rect, host_rendered: bool) -> DrmResult<()> {
+        self.inner.present(id, rect, host_rendered)
+    }
+
+    fn flush(&self, id: ResourceId, rect: Rect, host_rendered: bool) -> DrmResult<()> {
+        self.inner.flush(id, rect, host_rendered)
+    }
+}
+
+impl display::VblankSource for ReportingBackend {
+    fn origin(&self) -> display::VblankOrigin {
+        display::VblankOrigin::Scanout
+    }
+
+    fn subscribe(&self, callback: BlankCallback) -> display::DriverResult<()> {
+        *self.emitted.lock().borrow_mut() = Some(callback);
+        Ok(())
+    }
+}
+
+#[def_test]
+fn a_card_without_a_source_drives_the_timeline_from_its_timer() {
+    // Linux virtio-gpu has no blank interrupt and uses
+    // `DRM_CRTC_VBLANK_TIMER_FUNCS`; a card whose display reports no blanking
+    // still has a timeline, so `WAIT_VBLANK` is servable.
+    let (dev, _backend) = fake_device();
+    assert!(dev.vblank_supported());
+}
+
+#[def_test]
+fn a_display_that_reports_blanks_drives_the_timeline() {
+    let backend = ReportingBackend::new();
+    let dev = DrmDevice::new_with_backend(backend.clone());
+    assert!(dev.vblank_supported());
+    backend.emit(7);
+    assert_eq!(dev.vblank_clock().tick().sequence, 7);
+}
+
+#[def_test]
+fn relative_wait_counts_from_the_files_cursor() {
+    let mut tracker = SequenceTracker::default();
+    assert_eq!(resolve_relative(&mut tracker, 10, 0), VblankRequest::AtNext);
+    assert_eq!(resolve_relative(&mut tracker, 10, 1), VblankRequest::AtNext);
+    assert_eq!(resolve_relative(&mut tracker, 12, 4), VblankRequest::Ahead(3));
+}
+
+#[def_test]
+fn absolute_targets_resolve_in_the_clients_wrap_domain() {
+    let mut tracker = SequenceTracker::default();
+    assert_eq!(resolve_absolute(&mut tracker, 100, 100), VblankRequest::Past);
+    assert_eq!(resolve_absolute(&mut tracker, 100, 99), VblankRequest::Past);
+    assert_eq!(resolve_absolute(&mut tracker, 100, 101), VblankRequest::AtNext);
+    assert_eq!(resolve_absolute(&mut tracker, 100, 104), VblankRequest::Ahead(4));
+}
+
+#[def_test]
+fn the_flag_word_is_checked_before_anything_else() {
+    assert!(wait_vblank_flags_valid(DRM_VBLANK_RELATIVE | DRM_VBLANK_NONBLOCK));
+    assert!(!wait_vblank_flags_valid(0x8000));
+    assert!(!wait_vblank_flags_valid(DRM_VBLANK_RELATIVE | 0x20));
+    assert!(wait_vblank_crtc_valid(DRM_VBLANK_HIGH_CRTC, 0));
+    assert!(!wait_vblank_crtc_valid(DRM_VBLANK_HIGH_CRTC, 0x0100));
+}
+
+#[def_test]
+fn a_clock_without_ticks_reports_its_state() {
+    let clock = VblankClockState::new();
+    let handler = NoTicks;
+    clock.report(
+        41,
+        ktime_types::MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1)),
+        &handler,
+    );
+    assert_eq!(clock.tick().sequence, 41);
+    assert_eq!(VblankRequest::AtNext.target(41), 42);
+    assert!(!clock.reached(42));
+    assert!(!clock.reached(43), "a target two blanks ahead is still ahead");
+    assert!(clock.reached(40));
+}
+
+// ---------------------------------------------------------------------------
+// Synchronization: fences, reservations, fence arrays and syncobjs.
+//
+// The layer below the ioctls is reachable without a display: fences, their
+// chains and their waiters are plain objects, so the rules the ioctls rely on
+// (once-signaled, error propagation, replaced values, dependency order) are
+// proven here instead of only on target.
+// ---------------------------------------------------------------------------
+
+/// Counts wakes delivered to a fence waiter, without a task to park.
+struct WakeCounter(AtomicUsize);
+
+impl alloc::task::Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A waker that only counts how often a waiter was woken.
+fn counting_waker() -> (Arc<WakeCounter>, core::task::Waker) {
+    let counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = core::task::Waker::from(counter.clone());
+    (counter, waker)
+}
+
+fn fence_list(fences: &[Arc<DmaFence>]) -> Arc<FenceList> {
+    FenceList::new(fences.to_vec())
+}
+
+/// The one-element set of `fence`.
+fn one(fence: &Arc<DmaFence>) -> Arc<FenceList> {
+    FenceList::new(alloc::vec![fence.clone()])
+}
+
+#[def_test(serial)]
+fn a_fence_signals_once_and_keeps_its_first_outcome() {
+    let (fence, signal) = new_anonymous_fence();
+    assert!(!fence.is_signaled());
+    assert_eq!(fence.error(), 0);
+
+    assert_eq!(signal.signal(), 0, "no callbacks is still the first signal");
+    assert!(fence.is_signaled());
+    assert_eq!(signal.signal(), 0, "a second signal runs nothing");
+    assert_eq!(signal.signal_error(22), 0, "an error cannot override success");
+    assert_eq!(fence.error(), 0, "the fence reports its first outcome");
+    assert!(fence.timestamp().is_some(), "completion is timestamped");
+}
+
+#[def_test(serial)]
+fn an_error_fence_reports_the_error() {
+    let (fence, signal) = new_anonymous_fence();
+    signal.signal_error(16);
+    assert!(fence.is_signaled());
+    assert_eq!(fence.error(), 16);
+    assert_eq!(signal.signal(), 0, "success cannot clear an error");
+    assert_eq!(fence.error(), 16);
+}
+
+#[def_test(serial)]
+fn releasing_an_uncompleted_fence_does_not_complete_it() {
+    // A lock-free capability cannot tell "lost" from "the fence itself is gone"
+    // on drop, so it never completes the fence: the owner that loses the work
+    // reports it explicitly (`Flip::fail` on the commit path).
+    let (fence, signal) = new_anonymous_fence();
+    let second = fence.clone();
+    drop(signal);
+    assert!(!fence.is_signaled());
+    assert!(!second.is_signaled());
+}
+
+#[def_test(serial)]
+fn a_callback_runs_once_at_the_terminal_state() {
+    let (first, first_signal) = new_anonymous_fence();
+    let (second, second_signal) = new_anonymous_fence();
+    let (counter, waker) = counting_waker();
+    let waiter = Wait::new();
+
+    // Registering on a pending fence defers the wake until it completes.
+    assert_eq!(waiter.outcome(&one(&first), &waker), None);
+    assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+    first_signal.signal();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    first_signal.signal();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1, "one wake per completion");
+    assert_eq!(
+        waiter.outcome(&fence_list(&[first]), &waker),
+        Some(0),
+        "a completed fence decides the wait"
+    );
+
+    // Registering on a completed fence runs the callback immediately.
+    second_signal.signal();
+    assert_eq!(waiter.outcome(&fence_list(&[second]), &waker), Some(0));
+}
+
+#[def_test(serial)]
+fn a_failed_fence_reports_its_errno_to_the_wait() {
+    let (fence, signal) = new_anonymous_fence();
+    let (_counter, waker) = counting_waker();
+    let waiter = Wait::new();
+    assert_eq!(waiter.outcome(&one(&fence), &waker), None);
+    signal.signal_error(16);
+    assert_eq!(
+        waiter.outcome(&fence_list(&[fence]), &waker),
+        Some(16),
+        "the producer's errno is the wait's answer"
+    );
+    assert_eq!(DrmError::from_fence(16), DrmError::Busy);
+    assert_eq!(DrmError::from_fence(999), DrmError::Io);
+}
+
+#[def_test(serial)]
+fn a_chain_node_completes_after_its_premise_and_its_work() {
+    // `dma_fence_chain`: the node is done only once both the work it contains
+    // and the timeline node before it completed.
+    let (premise, premise_signal) = new_anonymous_fence();
+    let (work, work_signal) = new_anonymous_fence();
+    let node = fence_chain::node(Some(premise.clone()), work.clone());
+    fence_chain::link(&node, node.chain_prev().as_ref());
+    assert!(!node.is_signaled(), "a chain waits for both dependencies");
+
+    work_signal.signal();
+    assert!(!node.is_signaled(), "the premise is still pending");
+    premise_signal.signal();
+    assert!(node.is_signaled(), "both dependencies completed the node");
+    assert_eq!(node.error(), 0);
+}
+
+#[def_test(serial)]
+fn a_chain_node_reports_the_premise_failure_first() {
+    let (premise, premise_signal) = new_anonymous_fence();
+    let (work, work_signal) = new_anonymous_fence();
+    let node = fence_chain::node(Some(premise), work);
+    fence_chain::link(&node, node.chain_prev().as_ref());
+    // The work fails first, but the node still waits for its premise.
+    work_signal.signal_error(11);
+    assert!(!node.is_signaled());
+    // The premise fails too: the node reports the premise's error first.
+    premise_signal.signal_error(16);
+    assert!(node.is_signaled());
+    assert_eq!(node.error(), 16);
+}
+
+#[def_test(serial)]
+fn a_chain_walks_past_completed_premises_to_the_pending_work() {
+    let (first, first_signal) = new_anonymous_fence();
+    let (work, work_signal) = new_anonymous_fence();
+    let inner = fence_chain::node(Some(first.clone()), work.clone());
+    fence_chain::link(&inner, Some(&first));
+    // Chain the inner node: its premise is a chain node again, which is what a
+    // second replacement in a timeline builds.
+    let outer = fence_chain::node(None, work.clone());
+    fence_chain::link(&outer, Some(&inner));
+    outer.set_chain_prev(Some(inner.clone()));
+
+    first_signal.signal();
+    // The inner node is still pending on its work, so the walk stops there.
+    let pending = fence_chain::walk(&outer).expect("the inner node is still pending");
+    assert!(Arc::ptr_eq(&pending, &inner));
+    work_signal.signal();
+    // Both chains completed: the walk passes every finished link.
+    assert!(inner.is_signaled());
+    assert!(outer.is_signaled());
+    assert!(fence_chain::walk(&outer).is_none());
+}
+
+#[def_test(serial)]
+fn a_fence_array_completes_when_every_member_does() {
+    let ((first, first_signal), (second, second_signal)) = (
+        new_anonymous_fence(),
+        new_anonymous_fence(),
+    );
+    let list = fence_list(&[first.clone(), second.clone()]);
+    assert!(
+        !list_is_signaled(&list),
+        "one pending member keeps the set pending"
+    );
+    first_signal.signal();
+    assert!(!list_is_signaled(&list));
+    second_signal.signal();
+    assert!(list_is_signaled(&list));
+
+    // The merge of an already complete set completes as soon as its members
+    // are registered, and its head reports that state to whoever observes it.
+    assert!(
+        fence_array(&list).is_signaled(),
+        "the merge of completed fences is done"
+    );
+    let single = fence_array(&one(&first));
+    assert!(
+        Arc::ptr_eq(&single, &first),
+        "a one-fence merge is the fence itself"
+    );
+    let empty = fence_array(&FenceList::empty());
+    assert!(empty.is_signaled(), "an empty merge is already done");
+}
+
+// The head fence of a set is only reachable through its array: the array owns
+// the head strongly and the head refers back weakly. A unit test that builds
+// the set by dropping its array would therefore observe a released fence (whose
+// memory `Arc` may have recycled), so the array form is exercised through the
+// array itself and the set semantics through its members.
+#[def_test(serial)]
+fn a_fence_array_member_set_is_the_completion_condition() {
+    let ((first, first_signal), (second, second_signal)) =
+        (new_anonymous_fence(), new_anonymous_fence());
+    let array = FenceArray::new(
+        alloc::vec![first.clone(), second.clone()],
+        SyncContext::new(3),
+        0,
+    );
+    let merged = array.head().clone();
+    assert!(!array.is_complete(), "two pending members are not complete");
+    assert!(!merged.is_signaled(), "the head waits for the whole set");
+
+    second_signal.signal_error(11);
+    assert!(!array.is_complete());
+    assert!(
+        !merged.is_signaled(),
+        "a failed member does not complete the merge early"
+    );
+    first_signal.signal();
+    assert!(array.is_complete());
+    assert!(merged.is_signaled());
+    assert_eq!(merged.error(), 11, "the merge reports the member failure");
+    assert!(
+        Arc::ptr_eq(merged.array().as_ref().expect("the head knows its array"), &array),
+        "the head names the array it completes"
+    );
+}
+
+#[def_test(serial)]
+fn a_pending_fence_with_a_recorded_error_stays_pending() {
+    // `first_error` only reports completed failures; a pending premise must
+    // not end a wait on a fence that may still succeed.
+    let (fence, signal) = new_anonymous_fence();
+    let list = one(&fence);
+    assert_eq!(first_error(&list), 0);
+    signal.signal_error(19);
+    assert_eq!(first_error(&list), 19);
+}
+
+#[def_test(serial)]
+fn a_reservation_orders_writers_and_readers() {
+    let resv = DmaResv::new();
+    let (write, write_signal) = new_anonymous_fence();
+    let _previous = resv.set_write_fence(write.clone());
+    let (read, read_signal) = new_anonymous_fence();
+    let _previous = resv.add_read_fence(read.clone());
+
+    let writers = resv.snapshot(ResvUsage::Read);
+    assert_eq!(writers.fences().len(), 1, "readers wait only for writers");
+    assert!(Arc::ptr_eq(&writers.fences()[0], &write));
+
+    let everything = resv.snapshot(ResvUsage::Write);
+    assert_eq!(everything.fences().len(), 2, "writers wait for everything");
+
+    write_signal.signal();
+    read_signal.signal();
+    assert!(list_is_signaled(&everything));
+}
+
+#[def_test(serial)]
+fn a_replaced_write_fence_stops_being_reported() {
+    let resv = DmaResv::new();
+    let (first, first_signal) = new_anonymous_fence();
+    let (second, second_signal) = new_anonymous_fence();
+    let _first_replaced = resv.set_write_fence(first);
+    let _second_replaced = resv.set_write_fence(second.clone());
+    let current = resv.snapshot(ResvUsage::Write);
+    assert_eq!(current.fences().len(), 1);
+    assert!(Arc::ptr_eq(&current.fences()[0], &second));
+    drop(first_signal);
+    second_signal.signal();
+    assert!(list_is_signaled(&current));
+}
+
+#[def_test(serial)]
+fn a_syncobj_value_is_chained_onto_the_one_it_replaces() {
+    let object = Syncobj::new_binary();
+    assert!(object.binary_fence().is_none(), "a new object has no value");
+
+    let (first, first_signal) = new_anonymous_fence();
+    object.replace_binary(first.clone());
+    assert!(Arc::ptr_eq(&object.binary_fence().unwrap(), &first));
+
+    // A replacement does not lose the first dependency: the installed value
+    // is a chain node over it, so it only completes after the premise did.
+    let (second, second_signal) = new_anonymous_fence();
+    // A binary replacement is `drm_syncobj_replace_fence`: the new fence is
+    // the whole value, and the replaced one is no longer part of it.
+    object.replace_binary(second.clone());
+    let value = object.binary_fence().unwrap();
+    assert!(Arc::ptr_eq(&value, &second), "the value is the replacement");
+    first_signal.signal_error(22);
+    assert!(!value.is_signaled(), "the replaced fence does not gate it");
+    second_signal.signal();
+    assert!(value.is_signaled());
+}
+
+#[def_test(serial)]
+fn a_timeline_answers_every_earlier_point() {
+    let object = Syncobj::new_binary();
+    let (fence, signal) = new_anonymous_fence();
+    object.set_timeline(7, fence.clone());
+    // Completing point 7 completes every earlier point of the same timeline,
+    // and a later request waits for the next point to be signaled.
+    assert!(
+        Arc::ptr_eq(&object.timeline_fence(3).unwrap(), &fence),
+        "a later point covers an earlier one"
+    );
+    assert!(Arc::ptr_eq(&object.timeline_fence(7).unwrap(), &fence));
+    assert!(
+        object.timeline_fence(9).is_none(),
+        "a point past the furthest signal is not available yet"
+    );
+    assert_eq!(object.available_point(), 0);
+    signal.signal();
+    assert_eq!(object.available_point(), 7);
+
+    let (first, _first_signal) = new_anonymous_fence();
+    object.replace_binary(first);
+    assert!(
+        object.timeline_fence(7).is_none(),
+        "a binary value has no points"
+    );
+}
+
+#[def_test(serial)]
+fn resetting_a_syncobj_clears_its_value() {
+    let object = Syncobj::new_binary();
+    let (fence, _signal) = new_anonymous_fence();
+    object.set_timeline(4, fence);
+    object.reset();
+    assert!(object.timeline_fence(4).is_none(), "a reset timeline has no points");
+    assert_eq!(object.available_point(), 0);
+
+    let (fence, _signal) = new_anonymous_fence();
+    object.replace_binary(fence);
+    object.reset();
+    assert!(object.binary_fence().is_none());
+}
+
+#[def_test(serial)]
+fn a_syncobj_replacement_pokes_a_waiting_task() {
+    let object = Syncobj::new_binary();
+    let (counter, waker) = counting_waker();
+    let waiter = Wait::new();
+    let (fence, _signal) = new_anonymous_fence();
+    object.replace_binary(fence.clone());
+    assert_eq!(waiter.outcome(&fence_list(&[fence]), &waker), None);
+    object.watch(waiter.waiter());
+    let (replacement, replacement_signal) = new_anonymous_fence();
+    object.replace_binary(replacement.clone());
+    // The old value was replaced and may never complete; the waiter was poked
+    // so that its next evaluation observes the new value.
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    replacement_signal.signal();
+    let value = object.binary_fence().unwrap();
+    assert!(Arc::ptr_eq(&value, &replacement), "the replacement is the value");
+    assert!(value.is_signaled());
+}
+
+#[def_test(serial)]
+fn a_syncobj_table_names_one_object_per_file() {
+    let mut table = SyncobjTable::new();
+    let object = Syncobj::new_binary();
+    let handle = table.insert(object.clone()).expect("insert");
+    assert!(Arc::ptr_eq(&table.get(handle).unwrap(), &object));
+    assert_eq!(
+        table.get(SyncobjHandle::from_raw(1000)).err(),
+        Some(DrmError::NotFound)
+    );
+    assert!(table.remove(handle).is_ok());
+    assert_eq!(table.get(handle).err(), Some(DrmError::NotFound));
+}
+
+#[def_test(serial)]
+fn an_eventfd_is_signaled_when_its_point_becomes_available() {
+    let object = Syncobj::new_binary();
+    let eventfd = kfd_objects::eventfd::EventFd::new(0, false);
+    let event = crate::model::syncobj_signal::EventFdSignal::new(eventfd.clone(), 128, 1, 0);
+    object.add_event(&event);
+    // Nothing is installed yet, so there is nothing to arm.
+    assert!(object.timeline_fence(1).is_none());
+
+    let (fence, signal) = new_anonymous_fence();
+    object.set_timeline(1, fence);
+    let value = object.timeline_fence(1).expect("the point is installed");
+    assert!(!value.is_signaled());
+    // Completion of the installed value increments the eventfd.
+    signal.signal();
+    assert!(value.is_signaled());
+    assert!(
+        kpoll::Pollable::poll(eventfd.as_ref()).contains(IoEvents::IN),
+        "the eventfd became readable"
+    );
+}
+
+/// One EDID detailed timing descriptor: 1024x768@60, the classic layout.
+fn dtd_1024x768_60() -> [u8; 18] {
+    // Pixel clock 65.0 MHz, htotal 1344, vtotal 806, hsync at 1048 wide 136,
+    // vsync at 771 wide 6.
+    let mut dtd = [0u8; 18];
+    let clock = 6_500;
+    dtd[0] = (clock & 0xff) as u8;
+    dtd[1] = (clock >> 8) as u8;
+    dtd[2] = 0x00; // hactive low
+    dtd[3] = 0x40; // hblank low (320)
+    dtd[4] = 0x41; // hactive 1024 high nibble, hblank high nibble
+    dtd[5] = 0x00; // vactive low
+    dtd[6] = 0x26; // vblank low (38)
+    dtd[7] = 0x30; // vactive 768 high nibble, vblank high nibble
+    dtd[8] = 0x18; // hsync offset 24
+    dtd[9] = 0x88; // hsync width 136
+    dtd[10] = 0x36; // vsync offset 3, vsync width 6
+    dtd[11] = 0x00; // all sync high bits fit in one byte
+    dtd
+}
+
+#[def_test]
+fn edid_detailed_timings_decode_a_descriptor() {
+    let mut edid = [0u8; 128];
+    edid[54..72].copy_from_slice(&dtd_1024x768_60());
+    let timings = crate::edid::detailed_timings(&edid);
+    assert!(timings.len() == 1, "one descriptor slot is filled");
+    let timing = timings[0];
+    assert!(timing.clock == 65_000, "pixel clock in kHz");
+    assert!(timing.hdisplay == 1024 && timing.htotal == 1344);
+    assert!(timing.vdisplay == 768 && timing.vtotal == 806);
+    assert!(timing.hsync_start == 1048 && timing.hsync_end == 1184);
+    assert!(timing.vsync_start == 771 && timing.vsync_end == 777);
+    assert!(!timing.interlaced, "the flag byte is zero");
+}
+
+#[def_test]
+fn edid_descriptor_slots_stop_at_the_first_monitor_descriptor() {
+    let mut edid = [0u8; 128];
+    edid[54..72].copy_from_slice(&dtd_1024x768_60());
+    // A name descriptor starts with a zero pixel clock.
+    edid[72] = 0;
+    edid[75] = b'A';
+    assert!(crate::edid::detailed_timings(&edid).len() == 1);
+}
+
+#[def_test]
+fn edid_mode_names_its_geometry_and_refresh() {
+    let mut edid = [0u8; 128];
+    edid[54..72].copy_from_slice(&dtd_1024x768_60());
+    let modes = crate::edid::modes(&edid);
+    assert!(modes.len() == 1);
+    let mode = modes[0];
+    let name = mode.name.iter().position(|byte| *byte == 0).unwrap_or(0);
+    let name = core::str::from_utf8(&mode.name[..name]).unwrap_or("");
+    assert!(name == "1024x768", "name is {name}");
+    assert!(mode.vrefresh == 60, "refresh is {}", mode.vrefresh);
+    assert!(mode.kind == DRM_MODE_TYPE_PREFERRED as u32);
+    assert!(mode.clock == 65_000);
 }

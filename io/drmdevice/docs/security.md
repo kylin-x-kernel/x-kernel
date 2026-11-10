@@ -3,8 +3,14 @@
 ## Analysis scope
 
 This analysis covers the entire crate: `src/lib.rs`, `src/abi/`, `src/model/`,
+<<<<<<< HEAD
 `src/ioctl.rs`, `src/protocol.rs`, `src/gem.rs`, `src/framebuffer.rs`,
 `src/kms/`, `src/blob.rs`, and `src/auth.rs`. No source module is excluded. KVFS typed
+=======
+`src/sync/`, `src/syncobj/`, `src/kms.rs`, `src/gem.rs`,
+`src/framebuffer.rs`, `src/scanout.rs`, `src/blob.rs`, and `src/auth.rs`. No
+source module is excluded. KVFS typed
+>>>>>>> feat/drm-g2-dma-fence
 user-copy and mmap primitives, `kclass` device-handle validity, and the display
 backend contract remain the responsibility of their provider crates:
 `model::backend::ClassBackend` is the only code here that calls the display
@@ -20,9 +26,20 @@ display handle is trusted kernel state supplied by devfs.
 
 ## Unsafe code
 
-The crate contains no unsafe blocks, FFI, or inline assembly. Hardware access
-is delegated through the `DisplayDevice` contract. User memory is accessed
-through `UserRead`, `UserWrite`, and `UserPtr` abstractions.
+The crate has three unsafe sites, none of which touches memory the resource
+model does not already own. Hardware access is delegated through the
+`DisplayDevice` contract and user memory is accessed through `UserRead`,
+`UserWrite` and `UserPtr`.
+
+| site | invariant | enforced by |
+|---|---|---|
+| `model/device.rs::DrmDevice::finish_flip` → `take_reservation` | The lifetime-erased `EventReservation<'static>` only outlives its borrow of the card's event queue for as long as the card lives. | The card owns the event queue and the flip queue; every reservation is published or dropped by the card, and the card cannot be released while an open file exists. |
+| `sync/wait.rs::Expiry::arm` → `Timer::start` | The timer runs on an initialized CPU from sleepable syscall context, and its handler only takes a waker. | Every fence wait is entered from an ioctl or a descriptor read; the handler does one `SpinNoIrq` take and one `Waker::wake`. |
+| `ut-tests` (test builds only) | A `PageRef`-owned page stays mapped while the test reads it. | The test keeps the owner alive for the read; excluded from production builds. |
+
+A fence's callback list is an IRQ-safe spinlock: a device or a timer may
+complete a fence from interrupt context, so every callback is written to be
+short, non-blocking and free of sleepable locks.
 
 ## Invariants
 
@@ -75,6 +92,35 @@ through `UserRead`, `UserWrite`, and `UserPtr` abstractions.
 - The vblank event queue remains bounded by `MAX_EVENTS`.  A page flip
   reserves its completion slot before presenting, so a full queue fails with
   `ENOMEM` instead of reporting success after dropping the event.
+- Every fence is created pending with a unique `(context, seqno)` pair and
+  reaches a terminal state at most once; a completed fence never changes state
+  or error again, so a waiter that reads it twice reads the same answer.
+- A fence's completion capability (`FenceSignal`) cannot be reconstructed or
+  copied from a fence. The party that owns a completion reports its loss
+  explicitly (a failed commit fails its out-fence), so an out-fence descriptor
+  handed to userspace always becomes readable; a fence whose *callers* are all
+  gone is released with them.
+- A merge of one fence is that fence (no wrapper), so a client cannot smuggle a
+  second identity into a single-fence dependency.
+- `SYNCOBJ_*` requests validate every flag before touching an object and copy
+  every handle array (bounded by `DRM_SYNCOBJ_MAX_HANDLES`) before the first
+  wait, so a malformed request cannot leave a partially applied transfer or a
+  task parked on an unknown handle.
+- `IN_FENCE_FD` and `SYNC_IOC_*` resolve descriptors through the calling
+  process's table and reject anything that is not one of this driver's
+  sync_files or dma-bufs with `EINVAL`; no fence fd from another subsystem is
+  accepted, and a foreign fd is never dereferenced.
+- `OUT_FENCE_PTR` and `out_fence_ptr` are userspace addresses written exactly
+  once, with a single `s32`, after the commit succeeded; a dry run, a failed
+  commit and an unmapped address (`EFAULT`) never leak a descriptor number.
+- A fence records an error only when it is completed; a pending fence that was
+  released while carrying an error cannot make a waiter report success.
+- `DMA_BUF_IOCTL_SYNC` validates its direction bits before touching the
+  reservation, and the wait it performs is interruptible.
+- A dma-buf has one import per card and one export per object; a repeated
+  import resolves to the existing object or the file's existing handle, so a
+  client cannot make one backing hold two mapping offsets or leave an import
+  attached that no object owns.
 - DRM magic tokens are scoped to one master, consumed once, and removed when
   their file closes or changes master.
 - AUTH_MAGIC requires the active master and reads its argument without copying
@@ -107,6 +153,13 @@ Mutable object groups have separate mutexes. Atomics allocate monotonic ids and
 publish the build-once system blob. Removal is observed through the class
 handle's availability state and does not mutate another card's local tables.
 
+The fence layer adds IRQ-safe spinlocks: a fence's callback list (completion
+may come from an interrupt handler) and a syncobj's value and waiter list.
+Callbacks run after the fence's lock is released and never take a sleepable
+lock; a syncobj registers the chain callback for a replaced value only after
+releasing its own locks, so the fence lock is always taken before the syncobj
+lock and never after it. A task wait parks outside all of them.
+
 ## Threat analysis
 
 | ID | Threat | Impact | Trigger | Existing control |
@@ -117,6 +170,10 @@ handle's availability state and does not mutate another card's local tables.
 | T-04 | Open fd targets a newly registered display | High — operations affect the wrong display and corrupt visible device state | Hot-unplug followed by card-index reuse | Each `DrmDevice` owns one concrete class handle and returns `ENODEV` after removal; both minors of the card share it. |
 | T-05 | Event queue exhausts memory | Medium — unbounded kernel-memory growth and service denial | Repeated event-producing ioctls | Queue length is capped at `MAX_EVENTS`. |
 | T-06 | Reuse or cross-master use of a DRM magic token | Medium — unauthorized client authentication | Forged, replayed, or stale AUTH_MAGIC request | Tokens live in one master registry, require its active owner, are single-use, and are removed on file close or master change. |
+| T-07 | A fence waiter never wakes (lost completion) | Medium — a client task hangs in `SYNCOBJ_WAIT` or a read | Work that stops reporting its completion | Only the owner of a completion can lose it, and every such owner reports the loss explicitly (a failed commit fails its out-fence, a dropped signal does not complete a fence); a fence replaced in a syncobj pokes its waiters. Residual risk: an unbounded wait on work that never reports is parked forever, as in Linux, which is why only the infinite `SYNCOBJ_WAIT` timeout is accepted. |
+| T-08 | Hostile syncobj counts or handles | Medium — unbounded work or partial state | Crafted `count_handles` or unknown handles | The count is refused above `DRM_SYNCOBJ_MAX_HANDLES` before the array is read, and every handle is resolved before the first side effect. |
+| T-09 | A fence descriptor from another subsystem is passed as `IN_FENCE_FD` or to `FD_TO_HANDLE` | Medium — a foreign file is dereferenced or a fence is forged | Crafted fd number | Fds are resolved through the calling task's table and must be one of this driver's sync_files (or dma-bufs); anything else is `EINVAL`. |
+| T-10 | A failed commit leaves its out-fence pending | Low — a client blocks on a descriptor that never becomes readable | Write fault, event queue full, an invalid final state | `Flip` fails the fence with the ioctl's errno on every failure path, including a caller that drops it. |
 
 ## Failure modes and effects
 
@@ -129,8 +186,13 @@ handle's availability state and does not mutate another card's local tables.
 
 ## Known limitations
 
-- No command submission (execbuf/virgl) and no DMA-BUF implementation: PRIME is
-  a handle round-trip stub and `DRM_CAP_PRIME` is reported as `0`.
+- No command submission (execbuf/virgl). Fences express display and reservation
+  completion only.
+- `SYNCOBJ_EVENTFD` is `EOPNOTSUPP`; `DRM_TIME_ABSTIME` waits are rejected.
+  Neither reports success for work it does not do.
+- PRIME crosses this card only: an exported dma-buf is this driver's guest
+  memory plus its reservation. A resource the guest cannot read (a host-only
+  BAR) is not exported, and another subsystem's dma-buf is not imported.
 - The render node (`/dev/dri/renderD*`) is restricted to the commands marked
   `DRM_RENDER_ALLOW` in the ioctl table; everything else is `EACCES`. It is
   never master and gets a private master, so identity and authentication ioctls

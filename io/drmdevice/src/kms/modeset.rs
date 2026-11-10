@@ -10,7 +10,13 @@
 
 use alloc::sync::Arc;
 
-use crate::{model::file::CLIENT_CAP_ATOMIC, prelude::*};
+use super::props::PROPS;
+use crate::{
+    decimal::write_decimal,
+    model::{file::CLIENT_CAP_ATOMIC, flip::OutFence},
+    prelude::*,
+    sync::fence_list::FenceList,
+};
 
 /// `DRM_IOCTL_MODE_SETCRTC`: the wire request is a `drm_mode_crtc`.
 #[repr(transparent)]
@@ -36,32 +42,6 @@ fn display_resolution(dev: &DrmDevice) -> (u32, u32) {
         .unwrap_or((640, 480))
 }
 
-/// Writes the decimal form of `value` at `cursor`, returning the new cursor.
-///
-/// The mode name lives in a fixed 32-byte array and this runs on the ioctl
-/// path, so the conversion must not allocate.
-fn write_decimal(out: &mut [u8], mut cursor: usize, value: u32) -> usize {
-    let mut digits = [0u8; 10];
-    let mut len = 0;
-    let mut rest = value;
-    loop {
-        digits[len] = b'0' + (rest % 10) as u8;
-        len += 1;
-        rest /= 10;
-        if rest == 0 {
-            break;
-        }
-    }
-    while len > 0 {
-        len -= 1;
-        if cursor < out.len() {
-            out[cursor] = digits[len];
-            cursor += 1;
-        }
-    }
-    cursor
-}
-
 /// Synthesizes the connector's single mode from the visible display size.
 ///
 /// The name tracks the pixel size instead of being a constant: a host resize
@@ -82,17 +62,20 @@ fn mode_for_size(w: u32, h: u32) -> DrmModeModeInfo {
         cursor += 1;
     }
     let _ = write_decimal(&mut name, cursor, h);
+    let htotal = w.saturating_add(160);
+    let vtotal = h.saturating_add(30);
+    let clock = htotal.saturating_mul(vtotal).saturating_mul(60) / 1000;
     DrmModeModeInfo {
-        clock: 0,
+        clock,
         hdisplay: w as u16,
-        hsync_start: w as u16,
-        hsync_end: w as u16,
-        htotal: w as u16,
+        hsync_start: (w + 8) as u16,
+        hsync_end: (w + 40) as u16,
+        htotal: htotal as u16,
         hskew: 0,
         vdisplay: h as u16,
-        vsync_start: h as u16,
-        vsync_end: h as u16,
-        vtotal: h as u16,
+        vsync_start: (h + 3) as u16,
+        vsync_end: (h + 6) as u16,
+        vtotal: vtotal as u16,
         vscan: 0,
         vrefresh: 60,
         flags: 0,
@@ -105,7 +88,7 @@ fn mode_for_size(w: u32, h: u32) -> DrmModeModeInfo {
 impl Ioctl for DrmModeCardRes {
     const NAME: &'static str = "MODE_GETRESOURCES";
 
-    fn handle(_dev: &DrmDevice, file: &Arc<DrmFile>, r: &mut Self) -> DrmResult<usize> {
+    fn handle(_dev: &DrmDevice, file: &Arc<DrmFile>, _unit: u32, r: &mut Self) -> DrmResult<usize> {
         // Snapshot only this open file's IDs. Bound allocation by both the
         // actual list and the caller's capacity; count-only queries allocate
         // nothing. Drop the list lock before potentially faulting user copies.
@@ -139,7 +122,12 @@ impl Ioctl for DrmModeCardRes {
 impl Ioctl for DrmModeCrtc {
     const NAME: &'static str = "MODE_GETCRTC";
 
-    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, crtc: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        dev: &DrmDevice,
+        _file: &Arc<DrmFile>,
+        _unit: u32,
+        crtc: &mut Self,
+    ) -> DrmResult<usize> {
         if crtc.crtc_id != CRTC_ID {
             return Err(DrmError::NotFound);
         }
@@ -173,7 +161,12 @@ impl Ioctl for DrmModeCrtc {
 impl Ioctl for DrmModeSetCrtc {
     const NAME: &'static str = "MODE_SETCRTC";
 
-    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, crtc: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        dev: &DrmDevice,
+        _file: &Arc<DrmFile>,
+        _unit: u32,
+        crtc: &mut Self,
+    ) -> DrmResult<usize> {
         let c = &crtc.0;
         if c.crtc_id != CRTC_ID {
             return Err(DrmError::NotFound);
@@ -218,6 +211,9 @@ impl Ioctl for DrmModeSetCrtc {
             crtc_active: 1,
             crtc_mode: Some((mode_id, mode_blob.clone())),
             conn_crtc_id: CRTC,
+            conn_max_bpc: 8,
+            conn_dpms: DRM_MODE_DPMS_ON,
+            conn_link_status: DRM_MODE_LINK_STATUS_GOOD,
             plane_fb_id: fb,
             plane_crtc_id: CRTC,
             plane_src_x: 0,
@@ -228,6 +224,9 @@ impl Ioctl for DrmModeSetCrtc {
             plane_crtc_y: 0,
             plane_crtc_w: mode.hdisplay as u64,
             plane_crtc_h: mode.vdisplay as u64,
+            plane_in_fence: None,
+            plane_damage_clips: None,
+            req_out_fence_ptr: 0,
         };
         // The driver created this blob for the modeset; adopting it under the
         // commit lock retires the previous one without racing another modeset.
@@ -245,7 +244,12 @@ impl Ioctl for DrmModeSetCrtc {
 impl Ioctl for DrmModeGetEncoder {
     const NAME: &'static str = "MODE_GETENCODER";
 
-    fn handle(_dev: &DrmDevice, _file: &Arc<DrmFile>, e: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        _dev: &DrmDevice,
+        _file: &Arc<DrmFile>,
+        _unit: u32,
+        e: &mut Self,
+    ) -> DrmResult<usize> {
         if e.encoder_id != ENCODER_ID {
             return Err(DrmError::NotFound);
         }
@@ -261,7 +265,7 @@ impl Ioctl for DrmModeGetEncoder {
 impl Ioctl for DrmModeGetConnector {
     const NAME: &'static str = "MODE_GETCONNECTOR";
 
-    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, c: &mut Self) -> DrmResult<usize> {
+    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, _unit: u32, c: &mut Self) -> DrmResult<usize> {
         if c.connector_id != CONNECTOR_ID {
             return Err(DrmError::NotFound);
         }
@@ -271,26 +275,105 @@ impl Ioctl for DrmModeGetConnector {
         // and the geometry below come from the same snapshot, so a concurrent
         // resize cannot make them disagree.
         let _ = dev.refresh_info();
+        let connected = dev.is_connected();
         let (width, height) = display_resolution(dev);
         c.encoder_id = ENCODER_ID;
         c.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
-        c.connector_type_id = 1;
-        c.connection = DRM_MODE_CONNECTED;
-        // DisplayInfo supplies pixels, not physical dimensions or EDID.
-        // Zero denotes an unknown physical size; deriving millimetres from
-        // the visible mode would invent a DPI for userspace.
-        c.mm_width = 0;
-        c.mm_height = 0;
+        c.connector_type_id = display::VIRTUAL_CONNECTOR_TYPE_ID;
+        c.connection = if connected {
+            DRM_MODE_CONNECTED
+        } else {
+            DRM_MODE_DISCONNECTED
+        };
+        // A display with a descriptor reports its physical size; one without
+        // reports zero, which is "unknown" and not an invented DPI.
+        let (mm_width, mm_height) = edid_physical_size(dev);
+        c.mm_width = mm_width;
+        c.mm_height = mm_height;
         c.subpixel = 0;
+        // An unplugged connector offers no mode: `drm_mode_getconnector` lists
+        // whatever the connector's mode list holds, and a disconnected output
+        // holds none, so reporting one would tell a compositor to enable a
+        // CRTC nothing is attached to.
         c.count_encoders = report_user_array(c.encoders_ptr, c.count_encoders, &[ENCODER_ID])?;
+        // The mode list comes from the display: its EDID detailed timings
+        // when it has any, the visible geometry otherwise. This is the
+        // `drm_edid_connector_add_modes` / `drm_cvt_mode` split of
+        // `virtio_gpu_conn_get_modes`.
+        let modes = connector_modes(dev, connected, width, height);
         if !c.modes_ptr.is_null() && c.count_modes > 0 {
-            c.modes_ptr
-                .write_vm(mode_for_size(width, height))
-                .map_err(|_| DrmError::BadAddress)?;
+            let copy = (c.count_modes as usize).min(modes.len());
+            if copy != 0 {
+                c.modes_ptr
+                    .write_vm_slice(&modes[..copy])
+                    .map_err(|_| DrmError::BadAddress)?;
+            }
         }
-        c.count_modes = 1;
-        c.count_props = 0;
+        c.count_modes = modes.len() as u32;
+        // The connector's properties travel with the connector: Linux's
+        // `drm_mode_getconnector` fills the id/value arrays, not only
+        // `OBJ_GETPROPERTIES`.
+        let state = dev.kms_state();
+        let (props, values) = connector_properties(&state, dev);
+        report_user_array(c.props_ptr, c.count_props, &props)?;
+        report_user_array(c.prop_values_ptr, c.count_props, &values)?;
+        c.count_props = props.len() as u32;
         Ok(0)
+    }
+}
+
+/// The mode list a connected connector reports.
+///
+/// The display's EDID detailed timings are the source of truth when the
+/// display provides any; the visible geometry is the fallback for a display
+/// without a descriptor, and an unconnected connector lists nothing.
+fn connector_modes(
+    dev: &DrmDevice,
+    connected: bool,
+    width: u32,
+    height: u32,
+) -> Vec<DrmModeModeInfo> {
+    if !connected {
+        return Vec::new();
+    }
+    if let Some(edid) = dev.edid() {
+        let modes = crate::edid::modes(&edid);
+        if !modes.is_empty() {
+            return modes;
+        }
+    }
+    alloc::vec![mode_for_size(width, height)]
+}
+
+/// Snapshots the connector's property ids and their current values.
+///
+/// The order is the property table's order, the same order
+/// `OBJ_GETPROPERTIES` reports, so a client that reads the connector one way
+/// and the values the other cannot disagree with itself.
+fn connector_properties(state: &KmsState, dev: &DrmDevice) -> (Vec<u32>, Vec<u64>) {
+    let mut ids = Vec::new();
+    let mut values = Vec::new();
+    for desc in PROPS {
+        if desc.object != ObjectType::Connector {
+            continue;
+        }
+        ids.push(desc.id.raw());
+        values.push((desc.read)(state, dev));
+    }
+    (ids, values)
+}
+
+/// The connector's physical size in millimetres, from its EDID.
+///
+/// This is byte 21/22 of the base block (centimetres). A device without a
+/// descriptor reports zeros, which userspace reads as "unknown".
+fn edid_physical_size(dev: &DrmDevice) -> (u32, u32) {
+    let Some(edid) = dev.edid() else {
+        return (0, 0);
+    };
+    match (edid.get(21), edid.get(22)) {
+        (Some(&width), Some(&height)) => (u32::from(width) * 10, u32::from(height) * 10),
+        _ => (0, 0),
     }
 }
 
@@ -298,7 +381,24 @@ impl Ioctl for DrmModeGetConnector {
 impl Ioctl for DrmModeCrtcPageFlip {
     const NAME: &'static str = "MODE_PAGE_FLIP";
 
-    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, f: &mut Self) -> DrmResult<usize> {
+    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, _unit: u32, f: &mut Self) -> DrmResult<usize> {
+        // `drm_mode_page_flip_ioctl` refuses an unknown flag bit, a target
+        // other than a page flip, and an async flip on a card without async
+        // flips — all with `EINVAL`, before it looks anything up.
+        if f.flags & !DRM_MODE_PAGE_FLIP_FLAGS != 0 {
+            return Err(DrmError::InvalidInput);
+        }
+        if f.flags & DRM_MODE_PAGE_FLIP_TARGET != 0 {
+            return Err(DrmError::InvalidInput);
+        }
+        if f.flags & DRM_MODE_PAGE_FLIP_ASYNC != 0 {
+            return Err(DrmError::InvalidInput);
+        }
+        // The legacy structure has no sequence field; its fourth word is
+        // reserved and must be zero.
+        if f.abi_pad != 0 {
+            return Err(DrmError::InvalidInput);
+        }
         if f.crtc_id != CRTC_ID {
             return Err(DrmError::NotFound);
         }
@@ -327,7 +427,12 @@ impl Ioctl for DrmModeCrtcPageFlip {
             Ok(())
         })?;
         if let Some(event) = event {
-            event.commit(CRTC_ID, f.user_data);
+            event.commit_with(
+                CRTC_ID,
+                f.user_data,
+                0,
+                khal::time::monotonic_time().span_since_origin(),
+            );
         }
         Ok(0)
     }
@@ -337,7 +442,12 @@ impl Ioctl for DrmModeCrtcPageFlip {
 impl Ioctl for DrmModeGetPlaneRes {
     const NAME: &'static str = "MODE_GETPLANERES";
 
-    fn handle(_dev: &DrmDevice, _file: &Arc<DrmFile>, r: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        _dev: &DrmDevice,
+        _file: &Arc<DrmFile>,
+        _unit: u32,
+        r: &mut Self,
+    ) -> DrmResult<usize> {
         r.count_planes = report_user_array(r.plane_id_ptr, r.count_planes, &[PLANE_ID])?;
         Ok(0)
     }
@@ -347,7 +457,7 @@ impl Ioctl for DrmModeGetPlaneRes {
 impl Ioctl for DrmModeGetPlane {
     const NAME: &'static str = "MODE_GETPLANE";
 
-    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, p: &mut Self) -> DrmResult<usize> {
+    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, _unit: u32, p: &mut Self) -> DrmResult<usize> {
         if p.plane_id != PLANE_ID {
             return Err(DrmError::InvalidInput);
         }
@@ -366,44 +476,76 @@ impl Ioctl for DrmModeGetPlane {
 impl Ioctl for DrmModeAtomic {
     const NAME: &'static str = "MODE_ATOMIC";
 
-    fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, a: &mut Self) -> DrmResult<usize> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: one atomic request validates and applies as a single \
+                  unit; splitting it would duplicate rollback bookkeeping"
+    )]
+    fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, _unit: u32, a: &mut Self) -> DrmResult<usize> {
         // A client that never negotiated the atomic capability is told the path
         // is unavailable so it falls back to the legacy one.
+        // `drm_mode_atomic_ioctl`: a client that never enabled the atomic
+        // capability is told `EINVAL` (not `EOPNOTSUPP`; the capability check
+        // is a request error), and an async flip is refused on a card that
+        // does not flip asynchronously.
         if !file.has_cap(CLIENT_CAP_ATOMIC) {
-            return Err(DrmError::OpNotSupported);
+            return Err(DrmError::InvalidInput);
         }
         if !atomic_flags_valid(a.flags, a.reserved) {
             return Err(DrmError::InvalidInput);
+        }
+        if a.flags & DRM_MODE_PAGE_FLIP_ASYNC != 0 {
+            return Err(DrmError::InvalidInput);
+        }
+        if a.flags & DRM_MODE_ATOMIC_NONBLOCK != 0 {
+            // The submit path still waits for in-fences synchronously; do not
+            // accept a flag that promises an asynchronous commit.
+            return Err(DrmError::OpNotSupported);
         }
         let n = a.count_objs as usize;
         if n > MAX_ATOMIC_OBJECTS {
             return Err(DrmError::NoMemory);
         }
-        let objs: Vec<u32> = a
-            .objs_ptr
-            .load_vm_vec(n)
-            .map_err(|_| DrmError::BadAddress)?;
-        let counts: Vec<u32> = a
-            .count_props_ptr
-            .load_vm_vec(n)
-            .map_err(|_| DrmError::BadAddress)?;
+        // A commit may name no objects at all (niri issues one while cleaning
+        // up connectors); a null pointer with a zero count is not a fault.
+        let objs: Vec<u32> = if n == 0 {
+            Vec::new()
+        } else {
+            a.objs_ptr
+                .load_vm_vec(n)
+                .map_err(|_| DrmError::BadAddress)?
+        };
+        let counts: Vec<u32> = if n == 0 {
+            Vec::new()
+        } else {
+            a.count_props_ptr
+                .load_vm_vec(n)
+                .map_err(|_| DrmError::BadAddress)?
+        };
         let total = counts
             .iter()
             .try_fold(0usize, |total, count| total.checked_add(*count as usize));
         let Some(total) = total.filter(|total| *total <= MAX_ATOMIC_PROPERTIES) else {
             return Err(DrmError::NoMemory);
         };
-        let props: Vec<u32> = a
-            .props_ptr
-            .load_vm_vec(total)
-            .map_err(|_| DrmError::BadAddress)?;
-        let values: Vec<u64> = a
-            .prop_values_ptr
-            .load_vm_vec(total)
-            .map_err(|_| DrmError::BadAddress)?;
+        let (props, values): (Vec<u32>, Vec<u64>) = if total == 0 {
+            (Vec::new(), Vec::new())
+        } else {
+            (
+                a.props_ptr
+                    .load_vm_vec(total)
+                    .map_err(|_| DrmError::BadAddress)?,
+                a.prop_values_ptr
+                    .load_vm_vec(total)
+                    .map_err(|_| DrmError::BadAddress)?,
+            )
+        };
 
         // The object/property walk is replayed against the state the commit
         // lock protects, so no concurrent commit can be silently reverted.
+        // It is also where the explicit in-fence is validated: a bad
+        // descriptor reports EINVAL, exactly as Linux's `sync_file_get_fence`
+        // path does.
         let apply_all = |state: &mut KmsState| -> DrmResult<()> {
             let mut index = 0;
             for (object_index, &object_id) in objs.iter().enumerate() {
@@ -412,26 +554,368 @@ impl Ioctl for DrmModeAtomic {
                     let prop = PropertyId::from_raw(props[index]);
                     let value = values[index];
                     index += 1;
-                    if !apply(state, object, prop, value, dev)? {
-                        return Err(DrmError::NotFound);
+                    match apply(state, object, prop, value, dev) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            log::debug!(
+                                "drm: atomic object {object_id:#x} prop {:#x} not attached",
+                                prop.raw()
+                            );
+                            return Err(DrmError::NotFound);
+                        }
+                        Err(error) => {
+                            log::debug!(
+                                "drm: atomic object {object_id:#x} prop {:#x} value {value:#x} \
+                                 rejected: {error:?}",
+                                prop.raw()
+                            );
+                            return Err(error);
+                        }
                     }
                 }
             }
             Ok(())
         };
+        // The fences the commit waits for are frozen here: re-applying after a
+        // wait would read different property values than the ones the caller
+        // sent, and the wait must target the commit the client described.
+        let previous = dev.kms_state();
+        let mut requested = previous.clone();
+        apply_all(&mut requested)?;
+        // `drm_atomic_check_only` refuses a commit that needs a full modeset
+        // unless the client allowed one. The modeset-shaped changes of this
+        // card are `CRTC.ACTIVE` and the mode the `MODE_ID` blob names.
+        let needs_modeset = requested.crtc_active != previous.crtc_active
+            || requested.crtc_mode.as_ref().map(|(id, _)| id.raw())
+                != previous.crtc_mode.as_ref().map(|(id, _)| id.raw());
+        if a.flags & DRM_MODE_ATOMIC_ALLOW_MODESET == 0 && needs_modeset {
+            return Err(DrmError::InvalidInput);
+        }
+        let fails = |_dev: &DrmDevice, error: DrmError| -> DrmResult<usize> {
+            // The request only mutated its private `requested` snapshot until
+            // commit_flip publishes it. A failure must not roll the globally
+            // committed state back over another client's successful commit.
+            Err(error)
+        };
         if a.flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 {
-            dev.validate_with(apply_all)?;
+            // Only the fences are touched by a dry run: the out-fence address
+            // is checked to be writable, and a non-null one is set to -1 as
+            // Linux does; the in-fence was already resolved by `apply`. A
+            // failed check also restores the previous fences, as Linux's
+            // `drm_atomic_state` teardown does.
+            if let Err(error) = dev.validate_with(apply_all) {
+                return fails(dev, error);
+            }
+            if let Some(slot) = request_out_fence(dev, &props, &values)? {
+                // A dry run never returns a fence; Linux reports the commit as
+                // successful and leaves -1 in the caller's word.
+                slot.write(-1);
+            }
             return Ok(0);
         }
+        // Both fence sets are awaited before the commit locks anything: the
+        // explicit in-fence first, then the framebuffer's implicit writers, as
+        // `drm_atomic_commit` orders the plane's explicit fence and
+        // `prepare_fb`.
+        if let Err(error) = wait_explicit_fence(dev, &requested) {
+            return fails(dev, error);
+        }
+        if let Err(error) = wait_implicit_fences(dev, &requested) {
+            return fails(dev, error);
+        }
+        // The event is reserved before the commit for the same reason as a
+        // legacy flip: a full queue must fail the commit, not drop a
+        // completion after the scanout already changed.
         let event = if a.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
             Some(dev.reserve_flip_event().ok_or(DrmError::NoMemory)?)
         } else {
             None
         };
-        dev.commit_with(apply_all)?;
-        if let Some(event) = event {
-            event.commit(CRTC_ID, a.user_data);
+        // The commit's fence exists before the commit, so the commit, its
+        // page-flip event and its out-fence share one completion point. The
+        // same fence is recorded on the framebuffer's reservation as this
+        // card's display work, which is what makes the next writer of that
+        // buffer wait for the display.
+        let out = OutFence::new(event, a.user_data, dev.driver_info().name);
+        let slot = request_out_fence(dev, &props, &values)?;
+        let flip = out.into_flip();
+        let fence = flip
+            .fence_signal
+            .as_ref()
+            .map(|signal| signal.fence().clone());
+        let out_fd = match (&slot, &fence) {
+            (Some(slot), Some(fence)) => {
+                // Check the user word and allocate the descriptor before the
+                // irreversible scanout change; both failures leave the screen
+                // untouched. A failed commit below closes the preinstalled fd.
+                slot.write_or_fault(-1)?;
+                let fd = crate::sync::fence_access::install(fence, &kprocess::current_cred())?;
+                Some((slot, fd))
+            }
+            _ => None,
+        };
+        if let Some(fence) = &fence {
+            dev.reserve_display(requested.plane_fb_id, fence.clone());
+        }
+        if let Err(error) = dev.commit_flip(apply_all, flip) {
+            if let Some((_, fd)) = out_fd {
+                let _ = kprocess::current_files().close_file(fd);
+            }
+            return fails(dev, error);
+        }
+        if let Some((slot, fd)) = out_fd {
+            slot.write(fd);
         }
         Ok(0)
+    }
+}
+
+/// The `OUT_FENCE_PTR` address one atomic request names, if any.
+///
+/// Linux records the pointer as part of the CRTC state while the properties are
+/// applied and validates it once, when the fence descriptor is written. This
+/// driver resolves it from the request directly, which keeps the published
+/// state free of a userspace address; the value never reaches a commit.
+fn request_out_fence(
+    _dev: &DrmDevice,
+    props: &[u32],
+    values: &[u64],
+) -> DrmResult<Option<OutFenceSlot>> {
+    let mut slot = None;
+    for (prop, value) in props.iter().zip(values) {
+        if *prop != PROP_CRTC_OUT_FENCE_PTR {
+            continue;
+        }
+        // Linux's atomic property walk lets a repeated property overwrite the
+        // earlier value, so the last one wins.
+        slot = (*value != 0).then(|| OutFenceSlot::new(*value));
+    }
+    Ok(slot)
+}
+
+/// The userspace word a commit's out-fence descriptor is written to.
+///
+/// The word is written as `s32`, exactly like `put_user(fd, out_fence_ptr)`:
+/// a caller that passes a misaligned or unwritable address gets `EFAULT` from
+/// the write, never a partial kernel structure.
+struct OutFenceSlot {
+    /// The userspace address of the `s32`.
+    address: usize,
+}
+
+impl OutFenceSlot {
+    /// Records one `OUT_FENCE_PTR` value.
+    const fn new(address: u64) -> Self {
+        Self {
+            address: address as usize,
+        }
+    }
+
+    /// Writes the descriptor number, or `-1` for "no fence".
+    ///
+    /// A dry run reports "no fence" through this word; a failed write there is
+    /// not fatal, as Linux only logs it.
+    fn write(&self, fd: i32) {
+        let user = UserPtr::<i32>::from(self.address);
+        if user.write_vm(fd).is_err() {
+            log::debug!("drm: cannot write out-fence {fd} to {:#x}", self.address);
+        }
+    }
+
+    /// Writes a committed flip's descriptor, failing with `EFAULT` when the
+    /// caller's word is not writable.
+    ///
+    /// `drm_atomic_uapi`'s `setup_out_fence` performs this `put_user` **before**
+    /// installing the descriptor, so an unwritable address fails the request
+    /// without leaking a fence; this checks the same way by writing first and
+    /// installing only after the write succeeded.
+    fn write_or_fault(&self, fd: i32) -> DrmResult<()> {
+        UserPtr::<i32>::from(self.address)
+            .write_vm(fd)
+            .map_err(|_| DrmError::BadAddress)
+    }
+}
+
+/// Waits for the fences one commit must observe before it reaches the screen.
+///
+/// This is the implicit-fence rule of `drm_gem_plane_helper_prepare_fb`: the
+/// framebuffer's reservation must have no outstanding writer, because scanning
+/// it out is a read of the same memory. The explicit `IN_FENCE_FD` is not
+/// part of this set: Linux gives explicit fencing precedence over implicit
+/// fencing, so a client that declared its own ordering is not additionally
+/// clamped by the buffer's reservation.
+///
+/// The call happens before the commit takes the commit lock and before the
+/// kernel waits on it, so no lock is held across the sleep.
+pub(crate) fn wait_implicit_fences(dev: &DrmDevice, state: &KmsState) -> DrmResult<()> {
+    if state.plane_fb_id.is_none() {
+        return Ok(());
+    }
+    let Some(object) = dev
+        .framebuffer_object(state.plane_fb_id)
+        .map(|(object, ..)| object)
+    else {
+        return Ok(());
+    };
+    let fences = object
+        .resv()
+        .snapshot(crate::sync::dma_resv::ResvUsage::Read);
+    crate::sync::wait::wait_for_fences(&fences)
+}
+
+/// Waits for the explicit `IN_FENCE_FD` fence of a commit, if there is one.
+///
+/// Linux attaches the explicit fence to the plane state while the properties
+/// are applied and the atomic helper waits for it before the plane is
+/// prepared; this driver waits here, in the same order relative to the
+/// commit.
+pub(crate) fn wait_explicit_fence(dev: &DrmDevice, state: &KmsState) -> DrmResult<()> {
+    let _ = dev;
+    let Some(fence) = &state.plane_in_fence else {
+        return Ok(());
+    };
+    let fences = FenceList::new(alloc::vec![fence.clone()]);
+    crate::sync::wait::wait_for_fences(&fences)
+}
+
+/// `DRM_IOCTL_MODE_SETPLANE`.
+impl Ioctl for DrmModeSetPlane {
+    const NAME: &'static str = "MODE_SETPLANE";
+
+    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, _unit: u32, p: &mut Self) -> DrmResult<usize> {
+        if p.plane_id != PLANE_ID {
+            return Err(DrmError::NotFound);
+        }
+        let crtc = CrtcId::from_raw(p.crtc_id);
+        let fb = FbId::from_raw(p.fb_id);
+        // A disable names neither a CRTC nor a framebuffer; naming only one is
+        // malformed, as `drm_mode_setplane` judges.
+        if crtc.is_none() || fb.is_none() {
+            if !crtc.is_none() || !fb.is_none() {
+                return Err(DrmError::InvalidInput);
+            }
+            dev.commit_with(|state| {
+                state.plane_fb_id = FbId::default();
+                state.plane_crtc_id = CrtcId::default();
+                Ok(())
+            })?;
+            return Ok(0);
+        }
+        if crtc.raw() != CRTC_ID {
+            return Err(DrmError::NotFound);
+        }
+        if !dev.has_framebuffer(fb) {
+            return Err(DrmError::NotFound);
+        }
+        let src_x = u64::from(p.src_x);
+        let src_y = u64::from(p.src_y);
+        dev.commit_with(|state| {
+            state.plane_fb_id = fb;
+            state.plane_crtc_id = CRTC;
+            state.plane_src_x = src_x;
+            state.plane_src_y = src_y;
+            state.plane_src_w = u64::from(p.src_w);
+            state.plane_src_h = u64::from(p.src_h);
+            state.plane_crtc_x = i64::from(p.crtc_x);
+            state.plane_crtc_y = i64::from(p.crtc_y);
+            state.plane_crtc_w = u64::from(p.crtc_w);
+            state.plane_crtc_h = u64::from(p.crtc_h);
+            Ok(())
+        })?;
+        Ok(0)
+    }
+}
+
+/// The gamma table both gamma commands name.
+///
+/// The card has no gamma LUT (`GETPLANE` reports `gamma_size == 0`), so both
+/// accept only a zero-sized table: Linux answers with the LUT a client asked
+/// for and this one has none to give.
+fn check_gamma(dev: &DrmDevice, lut: &DrmModeCrtcLut) -> DrmResult<()> {
+    if lut.crtc_id != CRTC_ID {
+        return Err(DrmError::NotFound);
+    }
+    if lut.gamma_size != 0 {
+        return Err(DrmError::InvalidInput);
+    }
+    let _ = dev;
+    Ok(())
+}
+
+/// `DRM_IOCTL_MODE_GETGAMMA`.
+impl Ioctl for DrmModeCrtcLut {
+    const NAME: &'static str = "MODE_GETGAMMA";
+
+    fn handle(
+        dev: &DrmDevice,
+        _file: &Arc<DrmFile>,
+        _unit: u32,
+        lut: &mut Self,
+    ) -> DrmResult<usize> {
+        check_gamma(dev, lut)?;
+        Ok(0)
+    }
+}
+
+/// `DRM_IOCTL_MODE_SETGAMMA`.
+#[repr(transparent)]
+#[derive(
+    Debug, Default, Clone, Copy, bytemuck::AnyBitPattern, macros::UserRead, macros::UserWrite,
+)]
+pub(crate) struct DrmModeSetGamma(pub(crate) DrmModeCrtcLut);
+
+impl Ioctl for DrmModeSetGamma {
+    const NAME: &'static str = "MODE_SETGAMMA";
+
+    fn handle(
+        dev: &DrmDevice,
+        _file: &Arc<DrmFile>,
+        _unit: u32,
+        lut: &mut Self,
+    ) -> DrmResult<usize> {
+        check_gamma(dev, &lut.0)?;
+        Ok(0)
+    }
+}
+
+/// `DRM_IOCTL_CRTC_GET_SEQUENCE`.
+///
+/// The sequence lives on the vblank timeline, and this card has none: the
+/// answer is the same `EOPNOTSUPP` a `WAIT_VBLANK` receives, which is what a
+/// client that probed `DRM_CAP_CRTC_IN_VBLANK_EVENT` expects.
+impl Ioctl for DrmCrtcGetSequence {
+    const NAME: &'static str = "CRTC_GET_SEQUENCE";
+
+    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, _unit: u32, r: &mut Self) -> DrmResult<usize> {
+        if r.crtc_id != CRTC_ID {
+            return Err(DrmError::NotFound);
+        }
+        if !dev.vblank_supported() {
+            return Err(DrmError::OpNotSupported);
+        }
+        r.active = u32::from(dev.kms_state().crtc_active != 0);
+        let (sequence, timestamp) = dev.vblank_clock().tick_report();
+        r.sequence = u64::from(sequence);
+        r.sequence_ns = timestamp.as_nanos_u64_saturating() as i64;
+        Ok(0)
+    }
+}
+
+/// `DRM_IOCTL_CRTC_QUEUE_SEQUENCE`: refused for the same reason, since a
+/// sequence event needs the timeline it fires on.
+impl Ioctl for DrmCrtcQueueSequence {
+    const NAME: &'static str = "CRTC_QUEUE_SEQUENCE";
+
+    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, _unit: u32, r: &mut Self) -> DrmResult<usize> {
+        if r.crtc_id != CRTC_ID {
+            return Err(DrmError::NotFound);
+        }
+        if r.flags & !(DRM_CRTC_SEQUENCE_RELATIVE | DRM_CRTC_SEQUENCE_NEXT_ON_MISS) != 0 {
+            return Err(DrmError::InvalidInput);
+        }
+        if !dev.vblank_supported() {
+            return Err(DrmError::OpNotSupported);
+        }
+        Err(DrmError::OpNotSupported)
     }
 }

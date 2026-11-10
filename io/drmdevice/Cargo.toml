@@ -12,12 +12,16 @@ documentation.workspace = true
 [dependencies]
 kcred.workspace = true
 bytemuck.workspace = true
+anon_inodefs.workspace = true
 display.workspace = true
 kalloc.workspace = true
 kclass = { workspace = true, features = ["display"] }
 khal.workspace = true
+kfd_objects.workspace = true
+kprocess.workspace = true
 ktime_types.workspace = true
 kpoll.workspace = true
+kspin.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 kvfs.workspace = true

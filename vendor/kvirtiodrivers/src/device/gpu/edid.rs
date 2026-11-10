@@ -172,6 +172,17 @@ impl Edid {
     /// Get the preferred detailed timing from the EDID data.
     ///
     /// Returns the first Detailed Timing Descriptor.
+    /// The descriptor bytes the host reported for this output.
+    ///
+    /// The base block comes first, followed by any extension blocks; the
+    /// length is `edid.size`, which a host may report as a prefix of the
+    /// buffer.
+    pub fn bytes(&self) -> &[u8] {
+        let size = (self.size as usize).min(self.data.len());
+        &self.data[..size]
+    }
+
+    /// Parse the preferred (first detailed) timing out of the descriptor.
     pub fn preferred_timing(&self) -> Result<DetailedTiming> {
         self.first_detailed_timing().ok_or(Error::IoError)
     }

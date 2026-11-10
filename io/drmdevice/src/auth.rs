@@ -83,6 +83,13 @@ pub(crate) struct ActiveMaster {
     pub(crate) owner: Weak<DrmFile>,
 }
 
+impl DrmFile {
+    /// Whether this file passed `AUTH_MAGIC`.
+    pub(crate) fn is_authenticated(&self) -> bool {
+        self.auth.lock().authenticated
+    }
+}
+
 impl DrmDevice {
     /// Acquires ownership for `file`, or succeeds if it already owns the card.
     pub(crate) fn set_master(&self, file: &Arc<DrmFile>) -> DrmResult<()> {
@@ -181,6 +188,7 @@ impl DrmDevice {
                     master: Arc::new(DrmMaster::default()),
                     owns_master_object: false,
                     magic: None,
+                    authenticated: false,
                 },
             )
         } else {
@@ -206,6 +214,7 @@ impl DrmDevice {
                             master,
                             owns_master_object: false,
                             magic: None,
+                            authenticated: false,
                         },
                     )
                 }
@@ -218,6 +227,7 @@ impl DrmDevice {
                             master: master.clone(),
                             owns_master_object: true,
                             magic: None,
+                            authenticated: false,
                         },
                     );
                     masters.active = Some(ActiveMaster {
@@ -237,7 +247,12 @@ impl DrmDevice {
 impl Ioctl for DrmAuth {
     const NAME: &'static str = "GET_MAGIC";
 
-    fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, auth: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        dev: &DrmDevice,
+        file: &Arc<DrmFile>,
+        _unit: u32,
+        auth: &mut Self,
+    ) -> DrmResult<usize> {
         let masters = dev.master.lock();
         let mut binding = file.auth.lock();
         if !masters
@@ -282,7 +297,12 @@ impl Ioctl for DrmAuth {
 impl Ioctl for DrmAuthMagic {
     const NAME: &'static str = "AUTH_MAGIC";
 
-    fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, auth: &mut Self) -> DrmResult<usize> {
+    fn handle(
+        dev: &DrmDevice,
+        file: &Arc<DrmFile>,
+        _unit: u32,
+        auth: &mut Self,
+    ) -> DrmResult<usize> {
         // Keep active-master ownership stable through token consumption. The
         // target Arc outlives the lock scope so its final drop cannot re-enter
         // `DrmFile` teardown while the master-state lock is held.
@@ -303,6 +323,8 @@ impl Ioctl for DrmAuthMagic {
                 .and_then(|target| target.upgrade())
                 .ok_or(DrmError::InvalidInput)?;
         }
+        // The client is now authenticated: `DRM_AUTH` commands accept it.
+        file.auth.lock().authenticated = true;
         Ok(0)
     }
 }
@@ -313,6 +335,6 @@ impl Ioctl for DrmAuthMagic {
 pub(crate) struct DrmAuthMagic(DrmAuth);
 
 /// Builds the name a master reports to `GET_UNIQUE`.
-pub(crate) fn driver_unique_name() -> String {
-    format!("{DRIVER_NAME}:0")
+pub(crate) fn driver_unique_name(driver_name: &str) -> String {
+    format!("{driver_name}:0")
 }
