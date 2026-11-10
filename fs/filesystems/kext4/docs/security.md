@@ -197,9 +197,21 @@ The same tests verify that shrink/regrow cannot expose the discarded suffix.
   普通 transaction 上界按 journal descriptor/commit/revoke 开销保守限制，不能用固定
   operation 数代替容量约束。显式 filesystem sync 必须先提交 running transaction，再推进
   committed checkpoint queue。
-- inode sync/datasync tid 应属于 VFS runtime inode identity。当前接口尚未承载该状态，因此
-  `fsync/fdatasync` 保守提交整个 running transaction 并 flush；不得以 inode number 为 key
-  在 journal 中保存 mount-wide cursor，以免 inode number 复用继承旧 durability 状态。
+- Resident `Ext4InodeState` owns each regular inode's metadata target and records
+  the handle's transaction identity at publication. Retain the transaction Arc
+  and inspect its phase; long-lived tids must not alias across sequence wrap.
+  Unattributed publication and extent mutation invalidate the target until later
+  inode-table staging restores it. Unknown targets and non-regular inodes use
+  conservative running-transaction commit. Committed targets still flush later
+  data and check abort. Targets replace neither cache drain, full-sync timestamp
+  staging, mount exclusion, nor independent KVFS error observation.
+  Legacy orphan link staging advances the operation's resident inode target
+  only after successful metadata publication and leaves dirty timestamps pending.
+  A predecessor-only chain splice is recovery bookkeeping owned by the removal
+  transaction, not a change to that predecessor's file attributes or mappings.
+  It may retain the predecessor's old target: an uncommitted removal leaves the
+  old chain and its allocated inode recoverable together. No temporary inode
+  object or second resident-inode registry substitutes for the canonical owner.
 - 释放 bitmap 位之前，分配器必须按块组和 freeing transaction ID 登记待复用区间；
   区间、统计与 bitmap/cache 发布归同一 allocator owner、受同一锁保护。JBD2 不保存物理
   空间记录；文件系统胶水仅在提交持久化成功后、释放 journal 锁后通知分配器解除该事务的
@@ -506,14 +518,16 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
   哈希的 create/unlink/rename 等操作返回 `EOPNOTSUPP`。
 - KVFS unmount 已在 topology detach 前后同步 VFS 与 journal 状态，但阻止新引用/写入、
   lazy unmount、freeze 和后台 worker drain 仍需最终 lifecycle gate。
-- 精准 per-inode `fsync/fdatasync` 等待需要 KVFS runtime inode 承载 sync/datasync tid；当前
-  保守提交整个 running transaction，正确但可能额外提交无关 inode 的 metadata。
+- Regular inodes have metadata transaction targets, but fsync and fdatasync do
+  not yet distinguish timestamp-only and data-required metadata. Directories,
+  missing targets, and unattributed mutations may still commit unrelated metadata.
 - 新增或扩展 mutation 时必须继续证明所有预期失败可在首次 metadata access 前发现；若无法
   做到，需要实现 path-local 显式 unwind，不能恢复 operation savepoint。遗漏路径会保守地
   abort 整个 running transaction，保证正确性但降低该次 mount 的可用性。
 - Owned data BIOs and task-context completion cover allocation, unwritten extents,
   and append. Partial initialized-block reads and metadata I/O remain synchronous;
-  background triggering and precise per-inode sync targets remain future work.
+  background triggering, wider inode-target coverage, and mount-lock separation
+  remain future work.
 - Birth and consume of speculative prealloc spaces are wired into the writeback path: the Hole branch consumes
   a registered space first and, only on a miss, allocates and registers the surplus inside the same allocator
   lock section; the reclaim side (close, eviction, shrink, writeback settlement), group-scan exclusion and the
@@ -663,11 +677,81 @@ Automatic write updates check journal writability before publishing, then compar
 and update both timestamps and dirty bits under one inode-state write lock. They
 preserve timestamp precision, pending atime, and already-dirty unchanged fields.
 
+Writability queries use the transaction engine's atomic `has_abort_error`
+projection rather than acquiring its shared transaction mutex. Abort retains the
+first error under that mutex and publishes the projection before unlocking and
+waking waiters. Only a successful empty-state replay reset clears it. The atomic
+query does not expose transaction data or authorize later metadata mutation:
+those operations retain their locked abort checks. A buffered write that races
+abort can pass a check before publication, as with the previous locked query;
+subsequent checks reject the published abort. This adds no timestamp batching,
+precision loss, or change to the superblock read-only publication boundary.
+Mounted abort callers, including asynchronous writeback metadata completion,
+retain the mount write guard through atomic abort publication. The guard's Drop
+marks the superblock read-only before releasing mount exclusion; another write
+guard for that mount cannot overlap this publication. Any abort source moved
+outside mount protection must publish superblock read-only state at its own
+failure boundary rather than depending on a later guard drop.
+
 Full fsync, syncfs/unmount inode metadata writeback and linked-inode eviction stage
 pending timestamps. Data-only mapped overwrite may omit a timestamp-only transaction;
 a later full fsync must still persist timestamps with no dirty folios remaining.
 This does not weaken the data or journal flush barriers or add a background worker.
 
+Buffered write admission checks live immutable policy even for empty requests,
+before generic size limits, and publishes automatic timestamps only after the
+size and journal checks plus the Path read-only check. It uses the VFS inode's
+representable current time and the same resident dirty-field update as `update_time`.
+This VFS policy also applies with `KFEAT_FS_TIMES=n`: disabling the adapter feature
+must not replace an existing write timestamp with a synthetic epoch value. Shared
+writable faults and explicit timestamp updates retain the same VFS policy.
+It does not suppress timestamps or coarsen their precision. Journal abort may race
+a completed admission check, as before; write-begin and later metadata mutation
+retain their own authoritative rejection points. Shared write faults and explicit
+setattr keep their existing paths.
+
+Buffered preparation selects the extent/bitmap size limit and publishes mtime/ctime
+under one inode-state write lock. The mounted capability snapshot contains only
+immutable geometry/format limits and a strong reference to the same journal;
+abort is checked live, never cached. Empty or rejected
+requests do not modify timestamps; clipping uses the remaining representable file
+range without offset addition. These guards are released before data copy or I/O.
+
+An initialized-range hit may skip mount protection at write-begin, but still checks
+journal abort and supported inode format. KVFS data/invalidate protection excludes
+truncate and fallocate, and the inode-state lock observes size, reservations and
+mapping-proof invalidation together. Holes, unwritten extents, extensions, partial
+EOF blocks, pending reservations and cache misses retain the existing slow path.
+The hit does not allocate or remove blocks, change reservation accounting, submit
+data or claim durability. Each fsync retains its own data wait, timestamp staging,
+transaction target, device barrier and error cursor checks. Tests require a cached
+overwrite to complete while mount mutation protection is held, then verify its
+bytes on the backing device after fsync; format and aborted-journal rejection are
+tested separately.
+
+Stable mapped overwrite completion skips inode-table rewriting when no timestamp
+is dirty: mapping and disk size are already protected by submission exclusion.
+It still registers ordered-data flush for every successful range, even if an earlier
+transaction committed the inode metadata. A later timestamp update remains dirty
+for the next range or final full fsync. Data/barrier failures retain the existing
+error recording and journal abort behavior; clean metadata never implies durable data.
+
+## Fsync transaction and data coverage
+
+Every file synchronization waits for its data and applies its own metadata intent
+before synchronizing the tracked transaction. Transaction progress can avoid a
+duplicate journal commit; it cannot cover data written after that commit. The
+already-committed target and no-new-transaction paths therefore retain device
+flushes. Full fsync must stage dirty timestamps even after fdatasync cleaned the
+PageCache. Journal abort is checked before accepting a committed target.
+
+KVFS retains per-open error cursors independently of transaction completion, so
+a successful retry does not erase another file's unobserved failure. There is no
+inode request batch, saved batch result or coordinator lock. Existing submission
+guards and drain-before-truncate/release rules still protect concurrent mapping
+changes; missing device completion can stall data waits and is never treated as
+successful persistence. Tests exercise overlapping full/data-only requests,
+per-open failure observation and later data barriers after an earlier commit.
 
 ## Quota metadata I/O boundary
 

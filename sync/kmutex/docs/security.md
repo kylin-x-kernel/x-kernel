@@ -20,6 +20,13 @@ There is no direct user-memory, MMIO/PIO, DMA, firmware, filesystem, network,
 assembly or device-input boundary. Lock contention can indirectly reflect
 external workload. The crate cannot establish scheduler progress on its own.
 
+The typed `Mutex::with_config` constructor accepts the same trusted spin
+bounds as the raw constructor and preserves runtime lock-class registration
+with statistics enabled. A pause-only budget still ends in the existing
+blocking path; callers must remain in sleepable context even when the normal
+critical section is short. It does not disable preemption or recover a
+descheduled or abandoned owner.
+
 ## Unsafe inventory and invariants
 
 `src/mutex.rs` implements unsafe `lock_api::RawMutex`: Acquire CAS from zero

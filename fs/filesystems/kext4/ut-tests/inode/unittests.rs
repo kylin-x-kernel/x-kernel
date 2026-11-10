@@ -43,6 +43,32 @@ fn initialized_ranges_cover_random_overwrites_without_bridging_holes() {
 }
 
 #[def_test]
+fn initialized_write_admission_keeps_mapping_format_validation() {
+    let mut metadata = regular_inode_metadata();
+    metadata.disk_size = 4096;
+    let inode = test_inode(metadata);
+    inode.cache_initialized_blocks(0, 1);
+    assert_eq!(
+        inode.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, false),
+        Ok(true)
+    );
+    inode.update_state(|state| state.metadata.flags |= disk_inode::EXT4_HUGE_FILE_FL);
+    assert_eq!(
+        inode.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, false),
+        Err(Ext4Error::Corrupt(CorruptKind::InvalidInode))
+    );
+    assert_eq!(
+        inode.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, true),
+        Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile))
+    );
+    inode.update_state(|state| state.metadata.flags = 0);
+    assert_eq!(
+        inode.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, false),
+        Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode))
+    );
+}
+
+#[def_test]
 fn initialized_overwrites_exclude_extensions_and_pending_reservations() {
     let mut metadata = regular_inode_metadata();
     metadata.disk_size = 2 * 4096 + 1;

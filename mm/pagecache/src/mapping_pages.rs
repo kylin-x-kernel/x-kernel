@@ -10,7 +10,7 @@ use alloc::{
 };
 
 use kerrno::KResult;
-use ksync::Mutex;
+use ksync::{Mutex, SpinConfig};
 
 use crate::{Folio, FolioGuard, PageIndex};
 
@@ -99,12 +99,22 @@ impl MappingPages {
         Self {
             #[cfg(unittest)]
             allocation_gate: Mutex::new(None),
-            state: Mutex::new(MappingPagesState {
-                entries: BTreeMap::new(),
-                residency,
-                dirty_marks: BTreeSet::new(),
-                writeback_marks: BTreeSet::new(),
-            }),
+            // Cached hits only traverse the tree and retain a folio. Yielding
+            // after a few pauses makes unrelated readers pay scheduler latency
+            // for these short holds. Bound the pauses, then park as usual for
+            // longer mutations or a descheduled owner.
+            state: Mutex::with_config(
+                MappingPagesState {
+                    entries: BTreeMap::new(),
+                    residency,
+                    dirty_marks: BTreeSet::new(),
+                    writeback_marks: BTreeSet::new(),
+                },
+                SpinConfig {
+                    max_spins: 10,
+                    spin_before_yield: 10,
+                },
+            ),
         }
     }
 

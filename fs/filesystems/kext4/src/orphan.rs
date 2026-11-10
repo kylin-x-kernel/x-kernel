@@ -311,7 +311,7 @@ impl Ext4SbInfo {
         inode.bind_orphan(location)?;
         let head = self.orphan_head();
         let result = self
-            .update_inode_orphan_next(inode.number(), head, handle)
+            .update_inode_orphan_next(inode, head, handle)
             .and_then(|()| self.set_orphan_head(Some(inode.number()), handle));
         if let Err(error) = result {
             inode.clear_orphan(location);
@@ -470,10 +470,10 @@ impl Ext4SbInfo {
             let next = self.orphan_next(number)?;
             if number == inode.number() {
                 match previous {
-                    Some(previous) => self.update_inode_orphan_next(previous, next, handle)?,
+                    Some(previous) => self.update_orphan_chain_link(previous, next, handle)?,
                     None => self.set_orphan_head(next, handle)?,
                 }
-                self.update_inode_orphan_next(inode.number(), None, handle)?;
+                self.update_inode_orphan_next(inode, None, handle)?;
                 inode.clear_orphan(OrphanLocation::LegacyList);
                 return Ok(());
             }

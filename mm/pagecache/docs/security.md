@@ -65,6 +65,10 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 folio tree/dirty index 与 folio data 分层加锁。需要同时核对两层状态时，锁顺序固定为
 folio lock → MappingPages state lock；索引锁下只允许非阻塞 try_lock，失败必须释放
 索引锁再等待。folio access closure 持页锁完成 dirty index reconciliation。writeback 和缓冲缺页读取的文件系统 I/O 在 tree lock 外执行。
+
+索引 mutex 竞争时的 pause-only 自旋有固定预算，预算耗尽后仍通过原有等待队列
+阻塞和唤醒；不禁用抢占，也不把索引临界区改成不可睡眠区域。较长的索引更新、
+residency admission 和 owner 被调度走仍受 mutex 原有的执行上下文与进展约束。
 The buffered-read owner holds the shared invalidate lock to coordinate EOF,
 page reservation and submission. The transferred folio lock makes truncate wait
 for completion before clearing the tail or detaching the page; completion itself

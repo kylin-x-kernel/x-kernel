@@ -153,12 +153,22 @@ impl Ext4SbInfo {
             )?;
             let mut handle = journal.begin(credits)?;
             let result = handle.require_ordered_data_flush().and_then(|()| {
-                self.update_regular_inode_write_metadata(
-                    inode,
-                    inode.disk_size(),
-                    RegularWriteMetadata::SizeOnly,
-                    &mut handle,
-                )
+                // Preparation proved that this overwrite changes neither size
+                // nor mappings. Only resident timestamps can still need an
+                // inode-table update; rewriting the same entry for every dirty
+                // range otherwise repeats journal and checksum work. Each range
+                // still registers its ordered-data barrier, including when a
+                // concurrent commit consumed an earlier range's dependency.
+                if inode.has_dirty_timestamps() {
+                    self.update_regular_inode_write_metadata(
+                        inode,
+                        inode.disk_size(),
+                        RegularWriteMetadata::SizeOnly,
+                        &mut handle,
+                    )
+                } else {
+                    Ok(())
+                }
             });
             self.complete_metadata_mutation(handle, result)?;
         }

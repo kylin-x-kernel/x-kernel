@@ -996,9 +996,10 @@ zeroes; no sparse policy or readahead is added to generic cache traversal.
 
 Generic buffered-write limit check 只读取 `SuperBlock` 创建时缓存的最大文件大小。
 需要按 inode 格式进一步收紧范围的文件系统由 `FileOperations::write_iter()` 调用
-`generic_file_write_iter_with_checks()`；该文件系统检查在同一个 inode data critical section
-内组合文件系统策略和通用大小限制，进入 page-cache write 前执行，不把 open-file 写策略
-下沉到 address-space operation。
+`generic_file_write_iter_with_prepare()`；该回调在同一个 inode data critical section
+内组合文件系统策略、通用大小限制和自动时间戳发布，进入 page-cache write 前执行，
+不把 open-file 写策略下沉到 address-space operation。
+空请求也执行策略检查；被拒绝或裁剪后为空的请求不更新时间戳。
 
 KVFS 在非 special file 的 writable open 进入文件系统 `open` callback 前增加
 inode `write_count`，成功后用 `FMode::WRITER` 记录当前 file 持有该计数，打开
@@ -1420,8 +1421,16 @@ and shutdown cannot skip remaining drain/flush stages because one stage failed.
 
 ## Buffered-write timestamp publication
 
-Buffered writes and shared writable faults call `file_update_time()` outside folio
-protection. Filesystems may implement automatic `InodeOperations::update_time` with
+Generic buffered writes and shared writable faults call `file_update_time()` outside folio
+protection. `Kiocb::generic_file_write_iter_with_prepare` instead lets a filesystem
+combine its admission checks and automatic timestamp publication in one callback.
+It runs once under the inode data lock and before folio locking or data copying,
+including for an empty request. It applies filesystem policy and generic size
+limits in the required order, may narrow the accepted count, and must finish
+fallible checks before publishing timestamps for a nonempty write; KVFS does not
+repeat `file_update_time` for this path. This is a filesystem-owned preparation
+contract, not an option for skipping timestamp semantics.
+Filesystems may implement automatic `InodeOperations::update_time` with
 resident attribute publication and deferred persistence; explicit setattr remains
 a separate contract. The automatic callback owns comparison and publication and must
 finish fallible checks before changing resident values. KVFS does not republish them.

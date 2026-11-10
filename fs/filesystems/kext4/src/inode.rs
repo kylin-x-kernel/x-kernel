@@ -19,7 +19,7 @@ use crate::{
     disk::{checksum, extent as disk_extent, inode as disk_inode},
     extent::InodeMappingRoot,
     file::RegularWriteMetadata,
-    jbd2::{JournalCredits, JournalHandle},
+    jbd2::{JournalCredits, JournalHandle, RuntimeTransaction},
     prealloc_space::InodePreallocMap,
     sync::{self, Mutex, RwLock},
 };
@@ -45,6 +45,21 @@ fn node_flags_from_disk(flags: u32) -> kvfs::NodeFlags {
         flags & disk_inode::EXT4_NOATIME_FL != 0,
     );
     node_flags
+}
+
+/// Selects the mapping-format limit without fetching the legacy limit for extents.
+/// Callers obtaining flags from a resident inode release its lock before the
+/// fallback callback, which may need mount protection.
+pub(crate) fn inode_max_file_size(
+    flags: u32,
+    extent_max_size: u64,
+    bitmap_max_size: impl FnOnce() -> u64,
+) -> u64 {
+    if flags & disk_inode::EXT4_EXTENTS_FL != 0 {
+        extent_max_size
+    } else {
+        bitmap_max_size()
+    }
 }
 
 /// Inode file type derived from `i_mode`.
@@ -693,6 +708,9 @@ impl PendingInodeTimestamps {
 
 struct Ext4InodeState {
     metadata: Ext4InodeMetadata,
+    // None requires conservative mount-wide sync. A transaction identity stays
+    // meaningful even when a cold resident inode outlives journal sequence wrap.
+    sync_transaction: Option<Arc<RuntimeTransaction>>,
     has_dirty_atime: bool,
     has_dirty_mtime: bool,
     has_dirty_ctime: bool,
@@ -715,6 +733,13 @@ pub(crate) enum OrphanLocation {
 }
 
 impl Ext4InodeState {
+    fn publish_write_timestamps(&mut self, timestamp: Ext4Timestamp) {
+        self.has_dirty_mtime |= self.metadata.mtime != timestamp;
+        self.has_dirty_ctime |= self.metadata.ctime != timestamp;
+        self.metadata.mtime = timestamp;
+        self.metadata.ctime = timestamp;
+    }
+
     // The caller samples visible_size while holding the inode-state lock,
     // which excludes both size publication and mapping/proof changes.
     fn has_initialized_overwrite(
@@ -841,6 +866,7 @@ impl Ext4Inode {
             visible_size: AtomicU64::new(visible_size),
             state: RwLock::new(Ext4InodeState {
                 metadata,
+                sync_transaction: None,
                 has_dirty_atime: false,
                 has_dirty_mtime: false,
                 has_dirty_ctime: false,
@@ -945,20 +971,38 @@ impl Ext4Inode {
         self.with_state(|state| state.metadata.clone())
     }
 
+    /// Metadata durability target sampled under mount mutation exclusion.
+    /// Directory contents retain mount-wide sync until their journal ownership
+    /// is tracked together with the inode-table entry.
+    pub(crate) fn sync_transaction(&self) -> Option<Arc<RuntimeTransaction>> {
+        self.with_state(|state| {
+            if state.metadata.kind == InodeKind::RegularFile {
+                state.sync_transaction.clone()
+            } else {
+                None
+            }
+        })
+    }
+
     fn with_metadata<T>(&self, read: impl FnOnce(&Ext4InodeMetadata) -> T) -> T {
         self.with_state(|state| read(&state.metadata))
     }
 
     fn publish_metadata(&self, metadata: Ext4InodeMetadata) -> Ext4Result<()> {
-        self.publish_metadata_with_timestamps(metadata, PendingInodeTimestamps::default())
+        self.publish_metadata_with_timestamps(metadata, PendingInodeTimestamps::default(), None)
     }
 
     fn publish_metadata_with_timestamps(
         &self,
         mut metadata: Ext4InodeMetadata,
         persisted: PendingInodeTimestamps,
+        transaction: Option<Arc<RuntimeTransaction>>,
     ) -> Ext4Result<()> {
         self.update_state(|state| {
+            // Publication without an owner invalidates older sync evidence.
+            // Xattr/recovery paths can therefore retain conservative sync until
+            // they explicitly provide the transaction covering their mutation.
+            state.sync_transaction = transaction;
             let flags_changed = metadata.flags != state.metadata.flags;
             if metadata.block != state.metadata.block
                 || flags_changed
@@ -1025,11 +1069,17 @@ impl Ext4Inode {
         })
     }
 
-    /// Forgets initialized-range proofs before any extent-tree mutation,
+    /// Forgets initialized-range and sync-target proofs before extent mutation,
     /// including mutations of external leaves that leave the inode root intact.
     /// The caller holds exclusive mount access through `&mut Ext4SbInfo`.
     pub(crate) fn invalidate_extent_status(&self) {
-        self.update_state(|state| state.extent_status.clear());
+        self.update_state(|state| {
+            state.extent_status.clear();
+            // An external leaf rewrite need not publish an inode-table entry.
+            // Until that mutation reports an owner, fsync must use the mount's
+            // running transaction rather than an older inode-table target.
+            state.sync_transaction = None;
+        });
     }
 
     #[cfg(unittest)]
@@ -1041,6 +1091,29 @@ impl Ext4Inode {
     fn has_initialized_overwrite(&self, start: u64, count: u64, block_size: u32) -> bool {
         self.with_state(|state| {
             state.has_initialized_overwrite(start, count, block_size, self.size())
+        })
+    }
+
+    /// Checks whether a buffered write needs no mapping lookup or reservation.
+    ///
+    /// The caller holds KVFS data or invalidate protection against truncate and fallocate,
+    /// and checks journal/mount writability separately. The inode-state guard
+    /// observes mapping invalidation and size changes together. Misses retain
+    /// the mount-protected reservation path, including partial EOF blocks.
+    pub(crate) fn check_initialized_overwrite(
+        &self,
+        start: LogicalBlock,
+        count: u64,
+        block_size: u32,
+        has_huge_file: bool,
+    ) -> Ext4Result<bool> {
+        self.with_state(|state| {
+            regular_file_extent_mutation_supported(
+                state.metadata.kind,
+                state.metadata.flags,
+                has_huge_file,
+            )?;
+            Ok(state.has_initialized_overwrite(start.get(), count, block_size, self.size()))
         })
     }
 
@@ -1252,11 +1325,38 @@ impl Ext4Inode {
             if state.metadata.kind != InodeKind::RegularFile {
                 return false;
             }
-            state.has_dirty_mtime |= state.metadata.mtime != timestamp;
-            state.has_dirty_ctime |= state.metadata.ctime != timestamp;
-            state.metadata.mtime = timestamp;
-            state.metadata.ctime = timestamp;
+            state.publish_write_timestamps(timestamp);
             true
+        })
+    }
+
+    /// Clips a regular buffered write and publishes its automatic timestamps
+    /// under the same state lock that selects its mapping-format size limit.
+    ///
+    /// The caller holds KVFS data protection and has checked mount/journal
+    /// writability. `None` means the nonempty write starts at or beyond the
+    /// limit; rejected and empty requests leave timestamps unchanged.
+    pub(crate) fn prepare_buffered_write(
+        &self,
+        offset: u64,
+        count: usize,
+        extent_max_size: u64,
+        bitmap_max_size: u64,
+        timestamp: Ext4Timestamp,
+    ) -> Option<usize> {
+        self.update_state(|state| {
+            debug_assert_eq!(state.metadata.kind, InodeKind::RegularFile);
+            if count == 0 {
+                return Some(0);
+            }
+            let max_size =
+                inode_max_file_size(state.metadata.flags, extent_max_size, || bitmap_max_size);
+            if offset >= max_size {
+                return None;
+            }
+            let remaining = usize::try_from(max_size - offset).unwrap_or(usize::MAX);
+            state.publish_write_timestamps(timestamp);
+            Some(count.min(remaining))
         })
     }
 
@@ -2141,7 +2241,7 @@ impl Ext4SbInfo {
         metadata: Ext4InodeMetadata,
         timestamps: PendingInodeTimestamps,
     ) -> Ext4Result<()> {
-        inode.publish_metadata_with_timestamps(metadata, timestamps)
+        inode.publish_metadata_with_timestamps(metadata, timestamps, None)
     }
 
     pub(crate) fn is_public_inode_number(&self, number: InodeNumber) -> bool {
@@ -2330,7 +2430,11 @@ impl Ext4SbInfo {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
-        inode.publish_metadata_with_timestamps(updated_inode, timestamps)
+        inode.publish_metadata_with_timestamps(
+            updated_inode,
+            timestamps,
+            Some(handle.transaction()?),
+        )
     }
 
     /// Stages automatic timestamps once per inode writeback, not per write.
@@ -2543,7 +2647,7 @@ impl Ext4SbInfo {
         }
         let access = self.metadata_io.write_access(block, handle)?;
         self.replace_inode_table_entry(&access, inode.number(), &bytes)?;
-        inode.publish_metadata_with_timestamps(metadata, timestamps)
+        inode.publish_metadata_with_timestamps(metadata, timestamps, Some(handle.transaction()?))
     }
 
     pub(crate) fn update_inode_flags_timestamps_metadata(
@@ -2612,7 +2716,11 @@ impl Ext4SbInfo {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
-        inode.publish_metadata_with_timestamps(updated_inode, timestamps)
+        inode.publish_metadata_with_timestamps(
+            updated_inode,
+            timestamps,
+            Some(handle.transaction()?),
+        )
     }
 
     pub(crate) fn update_inode_blocks_metadata(
@@ -2626,7 +2734,26 @@ impl Ext4SbInfo {
         })
     }
 
+    /// Stages this resident inode's orphan link without acknowledging dirty times.
     pub(crate) fn update_inode_orphan_next(
+        &self,
+        inode: &Ext4Inode,
+        next: Option<InodeNumber>,
+        handle: &mut JournalHandle<'_>,
+    ) -> Ext4Result<()> {
+        let transaction = handle.transaction()?;
+        self.update_orphan_chain_link(inode.number(), next, handle)?;
+        inode.update_state(|state| state.sync_transaction = Some(transaction));
+        Ok(())
+    }
+
+    /// Updates recovery-chain bookkeeping in the caller's transaction.
+    /// A predecessor splice belongs to the removal transaction. It changes no
+    /// file attributes or mappings and need not advance that predecessor's fsync
+    /// target. If the transaction is not committed,
+    /// recovery sees the old link and the still-allocated removed inode together.
+    /// Updates to the operation's resident inode use `update_inode_orphan_next`.
+    pub(crate) fn update_orphan_chain_link(
         &self,
         inode: InodeNumber,
         next: Option<InodeNumber>,

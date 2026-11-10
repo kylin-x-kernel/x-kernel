@@ -130,18 +130,30 @@ impl<'a> Kiocb<'a> {
         Ok(())
     }
 
-    /// Performs a generic buffered write with open-file-specific checks.
+    /// Performs a buffered write with filesystem-owned admission and timestamps.
     ///
-    /// `checks` runs with the inode data lock held and must apply
-    /// [`Self::generic_write_check_limits`] along with filesystem policy before
-    /// the page-cache write starts. It also runs for an empty request.
-    pub fn generic_file_write_iter_with_checks(
+    /// `prepare` runs once under the inode data lock, before any folio lock or
+    /// copy, including for an empty request. It must apply filesystem policy
+    /// and [`Self::generic_write_check_limits`] in the required order, and may
+    /// narrow `count`. After all fallible admission checks, it must publish
+    /// automatic timestamps for an accepted nonempty request using this inode's
+    /// timestamp limits. Empty or rejected requests must not update timestamps.
+    /// The generic path does not repeat publication. Preparation must not grow
+    /// `count`.
+    ///
+    /// This lets a filesystem reuse its write-admission context for resident
+    /// timestamp updates. Other filesystems should use `generic_file_write_iter`.
+    ///
+    /// # Errors
+    /// Propagates preparation and buffered-copy errors. A preparation error
+    /// publishes no page-cache data and does not advance I/O.
+    pub fn generic_file_write_iter_with_prepare(
         &mut self,
         iter: &mut IovIterSource<'_>,
-        checks: impl FnOnce(&Kiocb<'_>, &mut usize) -> VfsResult<()>,
+        prepare: impl FnOnce(&Kiocb<'_>, &mut usize) -> VfsResult<()>,
     ) -> VfsResult<usize> {
         let mapping = self.file().mapping();
-        mapping.write_iter_with_checks(self, iter, checks)
+        mapping.write_iter_with_prepare(self, iter, prepare)
     }
 }
 

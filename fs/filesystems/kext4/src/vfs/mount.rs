@@ -4,12 +4,14 @@
 
 //! Mounted core access and its safe metadata-cache maintenance boundary.
 
+use alloc::sync::Arc;
 use core::ops::{Deref, DerefMut};
 
-use kvfs::SuperBlock;
+use kvfs::{SuperBlock, TimestampLimits};
 
 use crate::{
-    Ext4SbInfo,
+    Ext4Error, Ext4Result, Ext4SbInfo,
+    journal::MountedJournal,
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
@@ -25,14 +27,49 @@ const METADATA_CACHE_SCAN_LIMIT: usize = 64;
 /// Without cache demand, maintenance only reads a hint and skips the cache lock.
 pub(crate) struct Ext4Mount {
     state: RwLock<Ext4SbInfo>,
+    // Geometry and journal identity are frozen before mount publication.
+    // Buffered writes must not wait for persistence to read these capabilities.
+    bitmap_max_file_size: u64,
+    timestamp_limits: TimestampLimits,
+    has_huge_file: bool,
+    journal: Option<Arc<MountedJournal>>,
 }
 
 impl Ext4Mount {
     /// Installs one core state with its mount access and maintenance boundary.
     pub(crate) fn new(state: Ext4SbInfo) -> Self {
         Self {
+            bitmap_max_file_size: state.bitmap_max_file_size(),
+            timestamp_limits: state.timestamp_limits(),
+            has_huge_file: state.superblock().features().has_huge_file(),
+            journal: state.journal.clone(),
             state: RwLock::new(state),
         }
+    }
+
+    /// Checks the retained journal's live abort state without mount exclusion.
+    /// VFS mount writability remains a separate check at write admission.
+    pub(crate) fn ensure_writable(&self) -> Ext4Result<()> {
+        if self
+            .journal
+            .as_ref()
+            .is_some_and(|journal| journal.is_aborted())
+        {
+            return Err(Ext4Error::JournalAborted);
+        }
+        Ok(())
+    }
+
+    pub(crate) const fn bitmap_max_file_size(&self) -> u64 {
+        self.bitmap_max_file_size
+    }
+
+    pub(crate) const fn timestamp_limits(&self) -> TimestampLimits {
+        self.timestamp_limits
+    }
+
+    pub(crate) const fn has_huge_file(&self) -> bool {
+        self.has_huge_file
     }
 
     /// Enters a shared core operation; may sleep until mutations complete.
@@ -85,6 +122,11 @@ impl DerefMut for Ext4MountWriteGuard<'_> {
 
 impl Drop for Ext4MountWriteGuard<'_> {
     fn drop(&mut self) {
+        // Mounted abort paths, including writeback metadata completion, hold
+        // this write guard until abort has published its atomic projection.
+        // The same mount cannot have another write guard dropping in between.
+        // Any future abort outside mount protection must publish superblock
+        // read-only state itself, rather than relying on an unrelated drop.
         if self
             .0
             .journal

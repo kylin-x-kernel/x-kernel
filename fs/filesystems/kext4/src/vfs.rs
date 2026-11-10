@@ -567,11 +567,9 @@ impl Ext4SuperOperations {
     }
 
     fn max_file_size(ext4: &Ext4Mount, super_block: &SuperBlock, inode: &Ext4Inode) -> u64 {
-        if inode.has_extents() {
-            super_block.max_file_size()
-        } else {
-            ext4.read().bitmap_max_file_size()
-        }
+        crate::inode::inode_max_file_size(inode.flags(), super_block.max_file_size(), || {
+            ext4.bitmap_max_file_size()
+        })
     }
 }
 
@@ -611,7 +609,7 @@ impl SuperBlockOperations for Ext4SuperOperations {
         )]
         let ext4 = ext4_private(super_block)
             .expect("ext4 fill_super must install private state before timestamp capabilities");
-        ext4.read().timestamp_limits()
+        ext4.timestamp_limits()
     }
 
     fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
@@ -1048,8 +1046,20 @@ fn reserve_delalloc_range(
     let Some((first, block_count)) = logical_block_range(pos, len, block_size)? else {
         return Ok(());
     };
-    // read lock: the mount lock only borrows &Ext4SbInfo here. Scan-to-insert
-    // atomicity comes from the per-inode Ext4InodeState write lock held across
+    ext4.ensure_writable().map_err(into_vfs_err)?;
+    if inode
+        .check_initialized_overwrite(
+            LogicalBlock::new(first),
+            block_count,
+            block_size as u32,
+            ext4.has_huge_file(),
+        )
+        .map_err(into_vfs_err)?
+    {
+        return Ok(());
+    }
+    // Cache misses still need mapping and accounting validation under mount
+    // protection. Scan-to-insert atomicity comes from the inode-state lock held across
     // Ext4Inode::reserve_delalloc_range, so reserves on different inodes never
     // queue behind each other. Holders of the mount write lock (writeback,
     // fsync, set_len) still exclude this shared guard.
@@ -1702,19 +1712,30 @@ impl FileOperations for Ext4Inode {
         if self.kind() == InodeKind::RegularFile {
             let super_block = ext4_super_block(iocb.file().inode())?;
             let ext4 = ext4_private(&super_block)?;
-            iocb.generic_file_write_iter_with_checks(iter, |iocb, count| {
-                if iocb
-                    .file()
-                    .inode()
-                    .flags()
-                    .contains(kvfs::NodeFlags::IMMUTABLE)
-                {
+            iocb.generic_file_write_iter_with_prepare(iter, |iocb, count| {
+                let file = iocb.file();
+                if file.inode().flags().contains(kvfs::NodeFlags::IMMUTABLE) {
                     return Err(VfsError::OperationNotPermitted);
                 }
                 iocb.generic_write_check_limits(count)?;
-                if *count != 0 {
-                    check_write_limit(ext4, &super_block, self, iocb.ki_pos(), count)?;
+                if *count == 0 {
+                    return Ok(());
                 }
+                ext4.ensure_writable().map_err(into_vfs_err)?;
+                file.path().check_writable_mount()?;
+                // Reuse the format/limit lookup's inode-state critical section
+                // for timestamps, rather than acquiring it again per write.
+                *count = self
+                    .prepare_buffered_write(
+                        iocb.ki_pos(),
+                        *count,
+                        super_block.max_file_size(),
+                        ext4.bitmap_max_file_size(),
+                        // Match file_update_time/page_mkwrite even without
+                        // `times`: VFS owns clock sampling and range clipping.
+                        system_time_to_ext4(file.inode().current_time()),
+                    )
+                    .ok_or(VfsError::FileTooLarge)?;
                 Ok(())
             })
         } else {
@@ -1723,6 +1744,8 @@ impl FileOperations for Ext4Inode {
     }
 
     fn fsync(&self, file: &VfsFile, data_only: bool) -> VfsResult<()> {
+        // Each caller waits for its data before selecting a metadata target;
+        // only the transaction layer can reuse an earlier commit's progress.
         kvfs::libfs::simple_fsync_noflush(file, data_only)?;
         let super_block = ext4_super_block(file.inode())?;
         let ext4 = ext4_private(&super_block)?;

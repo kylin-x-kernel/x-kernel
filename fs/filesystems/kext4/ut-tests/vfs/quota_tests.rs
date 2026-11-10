@@ -1746,6 +1746,10 @@ fn external_quota_control_retains_one_file_and_restores_inode_policy() {
         Err(VfsError::OperationNotPermitted)
     );
     assert_eq!(writer.write(&[]), Err(VfsError::OperationNotPermitted));
+    assert_eq!(
+        writer.write_from(b"x", &mut writer.max_file_size()),
+        Err(VfsError::OperationNotPermitted)
+    );
     assert_eq!(writer.truncate(0), Err(VfsError::OperationNotPermitted));
     assert_eq!(
         writer.page_mkwrite(0, |_| Ok(())),

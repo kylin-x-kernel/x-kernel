@@ -744,6 +744,16 @@ fallible checks before publishing values. Its default publishes only timestamps
 confirmed by `setattr`; explicit setattr retains the separate returned-field contract.
 Mount read-only and atime/relatime checks remain at the Path boundary.
 
+The filesystem-owned buffered-write preparation callback replaces both extra
+admission checks and automatic timestamp dispatch. Its caller must preserve
+mount/journal write rejection and inode timestamp limits, and publish mtime/ctime
+before exposing changed data. Preparation also checks policy for empty requests
+and applies generic size limits in the filesystem's required order. Empty or
+rejected requests must not publish timestamps. The callback may only reduce the
+accepted byte count;
+failure prevents page-cache copying and I/O-position advancement. Shared writable
+faults retain the ordinary `file_update_time` path.
+
 ## Quota state boundary
 
 The superblock's `quota_info()` guard serializes its single generic quota

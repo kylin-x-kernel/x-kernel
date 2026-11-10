@@ -341,6 +341,38 @@ fn regular_inode_metadata() -> Ext4InodeMetadata {
 }
 
 #[def_test]
+fn buffered_write_preparation_preserves_timestamps_on_size_rejection() {
+    for has_extents in [false, true] {
+        let mut metadata = regular_inode_metadata();
+        if !has_extents {
+            metadata.flags &= !disk_inode::EXT4_EXTENTS_FL;
+        }
+        let inode = test_inode(metadata);
+        let before = (inode.atime(), inode.mtime(), inode.ctime());
+        let limit = if has_extents { 8192 } else { 4096 };
+        let written_at = timestamp(123, 456);
+        assert_eq!(
+            inode.prepare_buffered_write(limit, 1, 8192, 4096, written_at),
+            None
+        );
+        assert_eq!(
+            inode.prepare_buffered_write(u64::MAX, 0, 8192, 4096, written_at),
+            Some(0)
+        );
+        assert_eq!((inode.atime(), inode.mtime(), inode.ctime()), before);
+        assert!(!inode.has_dirty_timestamps());
+        assert_eq!(
+            inode.prepare_buffered_write(limit - 3, usize::MAX, 8192, 4096, written_at),
+            Some(3)
+        );
+        assert_eq!(inode.mtime(), written_at);
+        assert_eq!(inode.ctime(), written_at);
+        assert_eq!(inode.atime(), timestamp(0, 0));
+        assert!(inode.has_dirty_timestamps());
+    }
+}
+
+#[def_test]
 fn extra_isize_expansion_failure_state_is_resident_and_resettable() {
     let inode = test_inode(regular_inode_metadata());
     assert!(!inode.is_extra_isize_expansion_disabled());

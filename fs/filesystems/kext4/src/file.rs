@@ -264,16 +264,36 @@ impl Ext4SbInfo {
 
     /// Commits metadata needed by this inode without forcing a checkpoint.
     ///
-    /// KExt4 currently commits the whole running transaction because sync tids
-    /// belong to the runtime inode rather than the mount-wide journal. The VFS
-    /// inode will own targeted cursors once mutation completion reports tids;
-    /// committing the shared transaction is conservative and correct meanwhile.
+    /// The caller drains required data and stages full-sync timestamps first,
+    /// under the existing VFS ordering. Both intents conservatively use the
+    /// inode's latest metadata target; timestamp-only targets are not separated.
+    /// Without tracked ownership, retain mount-wide commit. An already committed
+    /// target still needs a device barrier for later data-only overwrites.
     pub(crate) fn sync_inode(
         &mut self,
-        _inode: &Ext4Inode,
+        inode: &Ext4Inode,
         _intent: Ext4SyncIntent,
     ) -> Ext4Result<()> {
-        let result = match self.commit_running_metadata_transaction() {
+        let result = self.sync_inode_transaction(inode);
+        result.map_err(|error| self.fail_journal_operation(error))
+    }
+
+    fn sync_inode_transaction(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
+        // Prior durable metadata does not hide a later journal failure.
+        self.ensure_writable()?;
+        if let Some(transaction) = inode.sync_transaction() {
+            if transaction.is_committed() {
+                // A different inode may have committed this target before we
+                // took the mount lock. Do not commit its newer transaction too.
+                // Keep the barrier: mapped data can be newer than the target.
+                return self.flush_device();
+            }
+            return self.commit_metadata_transaction_with_policy(
+                transaction.id(),
+                crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            );
+        }
+        match self.commit_running_metadata_transaction() {
             Ok(true) => Ok(()),
             Ok(false) => {
                 // A mapped overwrite may dirty only file data and therefore have no
@@ -281,8 +301,7 @@ impl Ext4SbInfo {
                 self.flush_device()
             }
             Err(error) => Err(error),
-        };
-        result.map_err(|error| self.fail_journal_operation(error))
+        }
     }
 
     /// Reads bytes from a regular file inode.

@@ -8,6 +8,34 @@ use super::*;
 use crate::FilesystemBlock;
 
 #[def_test]
+fn retained_transaction_completion_survives_sequence_reuse() {
+    let journal = JournalTransactions::new(TransactionId::new(u32::MAX));
+    let handle = journal.begin(JournalCredits::new(1)).unwrap();
+    let target = handle.transaction().unwrap();
+    assert!(!target.is_committed());
+    handle.stop().unwrap();
+    let commit = journal.force_commit(target.id()).unwrap();
+    assert!(!target.is_committed());
+    journal.start_checkpoint_for_test(&commit).unwrap();
+    assert!(target.is_committed());
+    journal.finish_checkpoint_for_test(&commit).unwrap();
+    assert!(target.is_committed());
+
+    let next = journal.begin(JournalCredits::new(1)).unwrap();
+    assert_eq!(next.id(), TransactionId::new(0));
+    assert!(!next.transaction().unwrap().is_committed());
+    next.stop().unwrap();
+    let next_commit = journal.force_commit(TransactionId::new(0)).unwrap();
+    journal.finish_checkpoint_for_test(&next_commit).unwrap();
+    // Simulate a full sequence-space cycle without billions of transactions.
+    journal.reset_after_replay(target.id()).unwrap();
+    let reused = journal.begin(JournalCredits::new(1)).unwrap();
+    assert_eq!(reused.id(), target.id());
+    assert!(!reused.transaction().unwrap().is_committed());
+    assert!(target.is_committed());
+}
+
+#[def_test]
 fn handles_share_running_transaction_and_consume_credits() {
     let journal = JournalTransactions::new(TransactionId::new(3));
     let mut first = journal.begin(JournalCredits::new(2)).unwrap();
@@ -155,11 +183,13 @@ fn metadata_update_cancels_revoke_in_same_transaction() {
 #[def_test]
 fn abort_blocks_new_and_existing_handles() {
     let journal = JournalTransactions::new(TransactionId::new(1));
+    assert_eq!(journal.ensure_writable(), Ok(()));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
 
     journal.abort(Ext4Error::Device(block::DriverError::Io));
 
     assert!(journal.is_aborted());
+    assert_eq!(journal.ensure_writable(), Err(Ext4Error::JournalAborted));
     assert_eq!(
         journal.begin(JournalCredits::new(1)).map(|_| ()),
         Err(Ext4Error::JournalAborted)
@@ -168,6 +198,32 @@ fn abort_blocks_new_and_existing_handles() {
         handle.consume_metadata_credit(FilesystemBlock::new(1)),
         Err(Ext4Error::JournalAborted)
     );
+}
+
+#[def_test]
+fn replay_reset_reopens_write_admission_only_when_transaction_state_is_empty() {
+    let journal = JournalTransactions::new(TransactionId::new(1));
+    let first_error = Ext4Error::Device(block::DriverError::Io);
+    journal.abort(first_error);
+    journal.abort(Ext4Error::NoSpace);
+    assert_eq!(lock(&journal.inner).aborted, Some(first_error));
+    assert_eq!(journal.ensure_writable(), Err(Ext4Error::JournalAborted));
+
+    journal.reset_after_replay(TransactionId::new(10)).unwrap();
+    assert!(!journal.is_aborted());
+    assert_eq!(journal.ensure_writable(), Ok(()));
+    let handle = journal.begin(JournalCredits::new(1)).unwrap();
+    assert_eq!(handle.id(), TransactionId::new(10));
+
+    journal.abort(first_error);
+    assert_eq!(
+        journal.reset_after_replay(TransactionId::new(20)),
+        Err(Ext4Error::JournalBusy)
+    );
+    assert!(journal.is_aborted());
+    assert_eq!(journal.ensure_writable(), Err(Ext4Error::JournalAborted));
+    assert_eq!(lock(&journal.inner).aborted, Some(first_error));
+    handle.stop().unwrap();
 }
 
 #[def_test]

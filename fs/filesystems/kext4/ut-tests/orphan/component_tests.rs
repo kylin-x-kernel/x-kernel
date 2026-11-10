@@ -15,7 +15,7 @@ use crate::{
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     superblock::test_fixtures::{
         TEST_BLOCK_SIZE, TEST_FREE_BLOCKS, allocate_checkpointed_regular_inode,
-        allocator_test_filesystem, install_test_internal_journal,
+        allocator_test_filesystem, install_credit_limited_journal, install_test_internal_journal,
         journal_allocator_test_filesystem, set_allocator_feature_bits,
         update_test_inode_links_count,
     },
@@ -52,6 +52,69 @@ fn removing_orphan_tail_does_not_restore_stale_predecessor_next() {
         .checkpoint_committed(&commit)
         .unwrap();
     journal.finish_checkpoint_for_test(&commit).unwrap();
+}
+
+#[def_test]
+fn orphan_removal_tracks_owner_without_advancing_predecessor_sync() {
+    let (mut filesystem, _device) =
+        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let first = allocate_checkpointed_regular_inode(&mut filesystem);
+    let second = allocate_checkpointed_regular_inode(&mut filesystem);
+    // The v1 fallback commits on handle completion; this case needs a deferred
+    // removal so fsync can distinguish its owner from the predecessor.
+    install_credit_limited_journal(&mut filesystem, 754, 32, true);
+    let credits = JournalCredits::new(4);
+    let journal = filesystem
+        .metadata_journal_for_mutation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
+        .unwrap();
+    let mut handle = journal.begin(credits).unwrap();
+    filesystem.add_orphan(&first, &mut handle).unwrap();
+    filesystem.add_orphan(&second, &mut handle).unwrap();
+    filesystem
+        .complete_metadata_mutation(handle, Ok(()))
+        .unwrap();
+    filesystem
+        .sync_inode(&second, Ext4SyncIntent::DataOnly)
+        .unwrap();
+    let predecessor_target = second.sync_transaction().unwrap();
+    assert!(predecessor_target.is_committed());
+    assert!(Arc::ptr_eq(
+        &first.sync_transaction().unwrap(),
+        &predecessor_target
+    ));
+
+    let timestamp = crate::Ext4Timestamp::new(123, 456);
+    first.set_mtime(timestamp);
+    let mut handle = journal.begin(credits).unwrap();
+    filesystem.remove_orphan(&first, &mut handle).unwrap();
+    filesystem
+        .complete_metadata_mutation(handle, Ok(()))
+        .unwrap();
+    let removed_target = first.sync_transaction().unwrap();
+    assert!(!removed_target.is_committed());
+    assert_eq!(first.mtime(), timestamp);
+    assert!(first.has_dirty_timestamps());
+    assert_eq!(filesystem.orphan_head(), Some(second.number()));
+    assert_eq!(filesystem.raw_inode(second.number()).unwrap().dtime(), 0);
+    assert_eq!(filesystem.raw_inode(first.number()).unwrap().dtime(), 0);
+
+    // A predecessor's fsync need not persist another inode's removal. The
+    // removed inode's target owns both link updates and does drive that commit.
+    filesystem
+        .sync_inode(&second, Ext4SyncIntent::DataOnly)
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &second.sync_transaction().unwrap(),
+        &predecessor_target
+    ));
+    assert!(!removed_target.is_committed());
+    filesystem
+        .sync_inode(&first, Ext4SyncIntent::DataOnly)
+        .unwrap();
+    assert!(removed_target.is_committed());
 }
 
 #[def_test]

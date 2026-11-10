@@ -57,13 +57,14 @@ fn test_mutex_nested_lock_deadlock_detection() {
 
 #[def_test]
 fn test_mutex_with_custom_spin_config() {
-    // Test mutex with custom spin configuration
-    let mutex = Mutex::const_new(
-        crate::RawMutex::with_config(SpinConfig {
+    #[cfg(feature = "stats")]
+    let constructor_line = line!() + 1;
+    let mutex = Mutex::with_config(
+        42,
+        SpinConfig {
             max_spins: 20,
             spin_before_yield: 5,
-        }),
-        42,
+        },
     );
 
     let guard = mutex.lock();
@@ -73,6 +74,44 @@ fn test_mutex_with_custom_spin_config() {
     // Test modification
     *mutex.lock() = 100;
     assert_eq!(*mutex.lock(), 100);
+
+    #[cfg(feature = "stats")]
+    {
+        let entry = klockstat::snapshot().into_iter().find(|entry| {
+            matches!(entry.location, klockstat::LockLocation::Caller(location)
+                if location.file() == file!() && location.line() == constructor_line)
+        });
+        assert!(entry.is_some(), "configured mutex must retain its init-site class");
+        if let Some(entry) = entry {
+            assert_eq!(entry.kind, "Mutex");
+            assert_eq!(entry.acquisitions, 3);
+            assert_eq!(entry.contentions, 0);
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
+#[def_test]
+fn test_pause_only_mutex_parks_and_wakes() {
+    let mutex = Arc::new(Mutex::with_config(
+        0,
+        SpinConfig {
+            max_spins: 10,
+            spin_before_yield: 10,
+        },
+    ));
+    let guard = mutex.lock();
+    let waiting_mutex = mutex.clone();
+    let waiter = ktask::spawn(move || *waiting_mutex.lock() += 1);
+
+    // Retain ownership while the waiter exhausts its bounded spin budget.
+    // Observing the actual blocked state avoids a timing-dependent assertion.
+    while waiter.state() != ktask::TaskState::Blocked {
+        ktask::yield_now();
+    }
+    drop(guard);
+    waiter.join();
+    assert_eq!(*mutex.lock(), 1);
 }
 
 #[def_test]

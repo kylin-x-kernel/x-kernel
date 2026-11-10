@@ -113,6 +113,13 @@ Acquisitions are counted on both the fast CAS and the wait-lock re-check path.
 `RawMutex::new` uses the no-op class; `Mutex::new` binds the caller's init-site
 class under `stats` and is otherwise const. Explicit stats constructors remain.
 
+`Mutex::with_config(value, config)` selects a per-lock spin policy and retains
+the same caller-site class registration as `Mutex::new` under `stats`. It is
+const only without `stats`; runtime callers do not need an untracked raw-lock
+constructor. Equal spin and yield thresholds use bounded pauses before the
+ordinary queue-and-park path. This neither changes the default policy nor
+adds an acquisition fairness or owner-progress guarantee.
+
 `watchdog` gates invocation, not declaration, of all diagnostic hooks.
 `lock_acquired(address)` clears waiting diagnostics and records ownership for
 both acquisition paths. `lock_waiting(address)` lets the host record its clock

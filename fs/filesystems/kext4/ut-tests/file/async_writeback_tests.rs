@@ -102,6 +102,37 @@ fn mapped_overwrite_probe_falls_back_before_io_for_holes_unwritten_and_growth() 
 }
 
 #[def_test]
+fn data_only_overwrite_after_metadata_commit_still_requires_barrier() {
+    let (mut filesystem, inode, device) = mapped_overwrite_fixture();
+    filesystem
+        .commit_regular_inode_write_metadata(&inode, inode.size(), RegularWriteMetadata::SizeOnly)
+        .unwrap();
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::FullMetadata)
+        .unwrap();
+    assert!(inode.sync_transaction().unwrap().is_committed());
+    let _writeback = inode.lock_writeback_submission();
+    let input = vec![0xa7; TEST_BLOCK_SIZE];
+    let result = filesystem
+        .prepare_mapped_writeback(&inode, 0, &input, inode.size(), Ext4SyncIntent::DataOnly)
+        .unwrap()
+        .unwrap()
+        .submit(input)
+        .unwrap()
+        .wait();
+    filesystem
+        .finish_mapped_writeback(&inode, 0, result, Ext4SyncIntent::DataOnly, || true)
+        .unwrap();
+    let flushes = device.flush_count();
+    device.fail_flush_at(flushes + 1);
+    assert_eq!(
+        filesystem.sync_inode(&inode, Ext4SyncIntent::DataOnly),
+        Err(Ext4Error::Device(DriverError::Io))
+    );
+    assert_eq!(device.flush_count(), flushes + 1);
+}
+
+#[def_test]
 fn mapped_bio_failure_reports_prefix_and_drains_later_requests() {
     let (filesystem, inode, device) = mapped_overwrite_fixture();
     let _writeback = inode.lock_writeback_submission();

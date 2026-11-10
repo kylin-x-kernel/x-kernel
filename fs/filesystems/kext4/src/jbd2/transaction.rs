@@ -13,7 +13,10 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::fmt;
+use core::{
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use ksync::{Mutex, MutexGuard};
 use ktask::WaitQueue;
@@ -184,6 +187,15 @@ pub(crate) struct RuntimeTransaction {
 }
 
 impl RuntimeTransaction {
+    /// Tests durable completion without comparing a potentially stale sequence id.
+    /// Resident inodes may retain this identity across arbitrary journal wraps.
+    pub(crate) fn is_committed(&self) -> bool {
+        matches!(
+            *lock(&self.phase),
+            TransactionPhase::Checkpoint { .. } | TransactionPhase::Finished
+        )
+    }
+
     fn new(id: TransactionId) -> Self {
         Self {
             id,
@@ -374,6 +386,12 @@ impl JournalCheckpoint {
 pub(crate) struct JournalTransactions {
     state_waiters: WaitQueue,
     max_reserved_credits: u32,
+    #[cfg(unittest)]
+    test_credit_limit: Mutex<Option<u32>>,
+    /// Read-only projection of `inner.aborted` for write admission checks.
+    /// Abort and replay reset publish it under `inner` before releasing the
+    /// lock. Transaction mutations still check the error under that lock.
+    has_abort_error: AtomicBool,
     inner: Mutex<JournalInner>,
 }
 
@@ -410,6 +428,9 @@ impl JournalTransactions {
         Self {
             state_waiters: WaitQueue::new(),
             max_reserved_credits,
+            #[cfg(unittest)]
+            test_credit_limit: Mutex::new(None),
+            has_abort_error: AtomicBool::new(false),
             inner: Mutex::new(JournalInner {
                 aborted: None,
                 next_transaction: first_transaction,
@@ -444,12 +465,29 @@ impl JournalTransactions {
             checkpointed_through: previous_transaction(first_transaction),
             closing: None,
         };
+        // Publish the completed replay reset to lockless writability checks.
+        self.has_abort_error.store(false, Ordering::Release);
         Ok(())
     }
 
     /// Whether one handle fits an empty transaction, independent of current use.
-    pub(crate) const fn can_fit_handle(&self, credits: JournalCredits) -> bool {
-        credits.get() <= self.max_reserved_credits
+    pub(crate) fn can_fit_handle(&self, credits: JournalCredits) -> bool {
+        credits.get() <= self.credit_limit()
+    }
+
+    fn credit_limit(&self) -> u32 {
+        #[cfg(unittest)]
+        if let Some(limit) = *lock(&self.test_credit_limit) {
+            return limit;
+        }
+        self.max_reserved_credits
+    }
+
+    /// Injects admission pressure without replacing a mounted journal's identity.
+    /// The fixture serializes injection with its handles and persistence.
+    #[cfg(unittest)]
+    pub(crate) fn set_credit_limit_for_test(&self, credits: u32) {
+        *lock(&self.test_credit_limit) = Some(credits);
     }
 
     /// Whether an issued transaction has passed durable commit. Its id must be
@@ -531,7 +569,7 @@ impl JournalTransactions {
             };
         }
         let (active_handles, reserved_credits) = running.running_state()?;
-        if active_handles != 0 || reserved_credits < self.max_reserved_credits {
+        if active_handles != 0 || reserved_credits < self.credit_limit() {
             return Ok(None);
         }
         Ok(Some(running.id()))
@@ -569,12 +607,18 @@ impl JournalTransactions {
 
     /// Returns whether this journal has been aborted.
     pub(crate) fn is_aborted(&self) -> bool {
-        lock(&self.inner).aborted.is_some()
+        // Pairs with abort/reset publication; this does not grant access to
+        // transaction state or replace its locked mutation checks.
+        self.has_abort_error.load(Ordering::Acquire)
     }
 
-    /// Rejects writes after journal abort without maintaining a second flag.
+    /// Rejects writes after abort without serializing healthy buffered writers.
     pub(crate) fn ensure_writable(&self) -> Ext4Result<()> {
-        check_not_aborted(&lock(&self.inner))
+        if self.is_aborted() {
+            Err(Ext4Error::JournalAborted)
+        } else {
+            Ok(())
+        }
     }
 
     /// Validates admission by a caller that serializes complete mutations.
@@ -597,6 +641,11 @@ impl JournalTransactions {
     pub(crate) fn abort(&self, error: Ext4Error) {
         let mut inner = lock(&self.inner);
         inner.aborted.get_or_insert(error);
+        // Publish the first error before unlocking or waking waiters. A
+        // concurrent admission check may precede this store, just as it could
+        // precede abort's lock acquisition; metadata mutation rechecks under
+        // `inner` and cannot pass an already-published abort.
+        self.has_abort_error.store(true, Ordering::Release);
         drop(inner);
         self.notify_state_waiters();
     }
@@ -704,8 +753,7 @@ impl JournalTransactions {
         {
             return Err(Ext4Error::InvalidJournalTransaction);
         }
-        let target =
-            journal_checkpoint_target_blocks(superblock, commit, self.max_reserved_credits)?;
+        let target = journal_checkpoint_target_blocks(superblock, commit, self.credit_limit())?;
         let newest = inner
             .checkpoint_transactions
             .back()
@@ -992,6 +1040,18 @@ pub(crate) struct JournalHandle<'a> {
 }
 
 impl<'a> JournalHandle<'a> {
+    /// Retains the transaction identity while this live handle prevents freezing.
+    pub(crate) fn transaction(&self) -> Ext4Result<Arc<RuntimeTransaction>> {
+        let inner = lock(&self.journal.inner);
+        check_not_aborted(&inner)?;
+        inner
+            .running
+            .as_ref()
+            .filter(|transaction| transaction.id() == self.id)
+            .cloned()
+            .ok_or(Ext4Error::InvalidJournalTransaction)
+    }
+
     /// Returns the transaction id used by metadata buffers.
     pub(crate) const fn id(&self) -> TransactionId {
         self.id
@@ -1054,7 +1114,7 @@ impl<'a> JournalHandle<'a> {
                 .reserved_credits
                 .checked_add(credits.get())
                 .ok_or(Ext4Error::Overflow)?;
-            if projected_credits > self.journal.max_reserved_credits {
+            if projected_credits > self.journal.credit_limit() {
                 return Err(Ext4Error::InsufficientJournalCredits);
             }
             running.reserve(credits)?;

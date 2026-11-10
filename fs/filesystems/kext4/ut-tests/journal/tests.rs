@@ -843,11 +843,142 @@ fn inode_sync_conservatively_commits_the_current_running_transaction() {
     drop(filesystem);
 }
 
+fn stage_inode_sync_target(filesystem: &mut Ext4SbInfo, inode: &Ext4Inode) -> TransactionId {
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
+    let transaction = handle.id();
+    let result = filesystem.update_dirty_inode_metadata(inode, &mut handle, |_, _| Ok(()));
+    filesystem
+        .complete_metadata_mutation(handle, result)
+        .unwrap();
+    transaction
+}
+
+#[def_test]
+fn inode_sync_leaves_newer_unrelated_transaction_running() {
+    let (mut filesystem, device) = revoke_journal_test_filesystem(1200);
+    let inode = allocate_regular_inode(&mut filesystem);
+    let first = stage_inode_sync_target(&mut filesystem, &inode);
+    let journal = filesystem.metadata_journal().unwrap();
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::FullMetadata)
+        .unwrap();
+    assert!(journal.is_committed(first));
+
+    let _other = allocate_regular_inode(&mut filesystem);
+    let unrelated = journal.transactions.running_transaction().unwrap().unwrap();
+    assert_ne!(unrelated, first);
+    for intent in [Ext4SyncIntent::FullMetadata, Ext4SyncIntent::DataOnly] {
+        let writes = device.write_count();
+        let flushes = device.flush_count();
+        filesystem.sync_inode(&inode, intent).unwrap();
+        assert_eq!(
+            journal.transactions.running_transaction().unwrap(),
+            Some(unrelated)
+        );
+        assert_eq!(device.write_count(), writes);
+        // Data may have been overwritten since the target committed.
+        assert_eq!(device.flush_count(), flushes + 1);
+    }
+
+    // A new mutation on the original inode must replace its completed target.
+    assert_eq!(stage_inode_sync_target(&mut filesystem, &inode), unrelated);
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::DataOnly)
+        .unwrap();
+    assert!(journal.is_committed(unrelated));
+    assert_eq!(journal.transactions.running_transaction().unwrap(), None);
+    filesystem.sync_filesystem().unwrap();
+    let _other = allocate_regular_inode(&mut filesystem);
+    let writes_after_allocation = device.write_count();
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::FullMetadata)
+        .unwrap();
+    // A target stays valid after its checkpoint payload has been retired.
+    assert!(
+        journal
+            .transactions
+            .running_transaction()
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(device.write_count(), writes_after_allocation);
+}
+
+#[def_test]
+fn inode_sync_completed_target_preserves_flush_errors_and_abort() {
+    let (mut filesystem, device) = revoke_journal_test_filesystem(1210);
+    let inode = allocate_regular_inode(&mut filesystem);
+    stage_inode_sync_target(&mut filesystem, &inode);
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::FullMetadata)
+        .unwrap();
+    let _other = allocate_regular_inode(&mut filesystem);
+    device.fail_flush_at(device.flush_count() + 1);
+    assert_eq!(
+        filesystem.sync_inode(&inode, Ext4SyncIntent::DataOnly),
+        Err(Ext4Error::Device(DriverError::Io))
+    );
+    let flushes = device.flush_count();
+    assert_eq!(
+        filesystem.sync_inode(&inode, Ext4SyncIntent::FullMetadata),
+        Err(Ext4Error::JournalAborted)
+    );
+    assert_eq!(device.flush_count(), flushes);
+}
+
+#[def_test]
+fn inode_sync_invalidated_mapping_target_uses_conservative_commit() {
+    let (mut filesystem, _device) = revoke_journal_test_filesystem(1220);
+    let inode = allocate_regular_inode(&mut filesystem);
+    stage_inode_sync_target(&mut filesystem, &inode);
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::FullMetadata)
+        .unwrap();
+    let _other = allocate_regular_inode(&mut filesystem);
+    let journal = filesystem.metadata_journal().unwrap();
+    inode.invalidate_extent_status();
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::DataOnly)
+        .unwrap();
+    assert_eq!(journal.transactions.running_transaction().unwrap(), None);
+}
+
+#[def_test]
+fn inode_sync_does_not_reuse_target_after_xattr_publication() {
+    let (mut filesystem, _device) = revoke_journal_test_filesystem(1230);
+    let inode = allocate_regular_inode(&mut filesystem);
+    stage_inode_sync_target(&mut filesystem, &inode);
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::FullMetadata)
+        .unwrap();
+    filesystem
+        .set_xattr(
+            &inode,
+            crate::Ext4XattrNamespace::User,
+            b"sync-target",
+            b"new-value",
+            crate::Ext4Timestamp::new(42, 0),
+        )
+        .unwrap();
+    let journal = filesystem.metadata_journal().unwrap();
+    let transaction = journal.transactions.running_transaction().unwrap().unwrap();
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::FullMetadata)
+        .unwrap();
+    assert!(journal.is_committed(transaction));
+}
+
 /// Restrict transaction credits without inventing an invalid short journal.
 pub(crate) fn limit_transaction_credits(filesystem: &mut Ext4SbInfo, credits: u32) {
     let journal = Arc::get_mut(filesystem.journal.as_mut().unwrap()).unwrap();
     journal.transactions =
         JournalTransactions::new_with_credit_limit(journal.superblock().sequence(), credits);
+}
+
+/// Keeps the mounted journal and existing transaction identities during injection.
+pub(crate) fn override_mounted_transaction_credits(filesystem: &Ext4SbInfo, credits: u32) {
+    filesystem.journal.as_ref().unwrap().transactions.set_credit_limit_for_test(credits);
 }
 
 #[def_test]

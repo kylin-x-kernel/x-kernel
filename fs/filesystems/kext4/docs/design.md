@@ -527,12 +527,32 @@ evidence 并重载最新 mutable metadata state。所有 policy 记录在 frozen
 全部连续性校验完成后才写入 journal superblock。这里仍逐事务写回 frozen image，尚未实现
 跨事务 metadata block 写回合并。
 
-精准 `fsync`/`fdatasync` transaction id 的所有权不在 journal 的 inode-number 全局表，而应在
-VFS runtime inode identity 上，对应 Linux inode 内的 sync/datasync tid。现有 KVFS inode 尚未
-提供该运行态字段以及“mutation 完成后发布 tid”的接口，因此 KExt4 当前采用保守语义：kext4 KVFS 层
-先回写目标 inode 的 PageCache，core 再提交当时的整个 running transaction 并 flush 设备。
-这保证 durability，但可能连带提交无关 inode 的 metadata。待共享 VFS runtime inode 接口具备
-后，再实现目标 transaction 等待；不能重新引入按 inode number 索引的 mount-wide cursor map。
+regular inode 的同步目标保存在 VFS inode 组合持有的 `Ext4InodeState` 中，不在 journal 中
+建立 inode-number 全局表。普通 inode-table staging 和 zero-link staging 在发布 metadata
+时同时保存 handle 所属 `RuntimeTransaction` 的 `Arc`。已提交状态由该对象的
+Checkpoint/Finished phase 判断，不用长期保存的 32 位 tid 与当前 sequence 作大小比较；
+inode 长期驻留、checkpoint 退休和 sequence 回绕不会使旧目标重新指向新事务。每个 inode
+只保留最新目标；checkpoint 退休仍释放该对象的 frozen metadata payload。
+
+`fsync` 先完成所需 PageCache writeback，full fsync 再 stage dirty timestamps，随后在
+mount 写锁内检查目标。未提交目标只提交其所属事务；已提交目标不再连带提交别的 inode
+新建的 running transaction，但仍执行 device flush，因为此后可能有不带 metadata 的
+mapped overwrite。`fdatasync` 暂时使用同一个 metadata 目标，不区分 timestamp-only 事务。
+无目标的加载 inode、目录和其他非 regular inode 保留 mount-wide commit/flush。
+未报告 transaction 的 metadata publication（包括 xattr）使旧目标失效；extent mutation
+先使旧目标失效，只有后续 inode-table staging 才恢复目标，覆盖 external leaf-only rewrite。
+Legacy orphan 链指针更新分为两类：当前操作的 resident inode 在 inode-table 更新成功后
+登记 handle 的事务，不覆盖常驻时间戳，也不确认尚未 staging 的 dirty 时间戳。删除非头部
+节点时，前驱只有 inode number；对其 `dtime` 链指针的拼接属于删除事务的内部恢复账目，
+不改变前驱的文件属性或映射，因此不推进前驱的 fsync 目标，也不创建临时 inode 来模拟
+常驻对象。拼接与被移除 inode 的链更新及适用的释放操作在同一事务中提交；事务未提交时，
+恢复仍看到旧链和未由该事务释放的 inode。该例外不适用于前驱自身的属性或 extent 修改。
+journal abort 在任何目标判断前检查；commit/flush 错误沿用原有 abort 和 VFS 错误观察路径。
+mount 写锁仍覆盖提交和 flush，本步骤不拆分锁，也不省略数据屏障。
+已挂载路径的 abort（包括异步回写的元数据完成）在 mount 写 guard 内执行；abort 返回前
+发布原子投影，guard 的 Drop 在释放同一把写锁前观察它并标记 superblock 只读。同一 mount
+不能同时有另一份写 guard 在投影发布中途执行 Drop。将来移出 mount 锁的 abort 出口必须
+自行发布 superblock 只读状态，不能依赖另一次访问碰巧触发 Drop。
 `syncfs` 和 KVFS unmount writeback 仍提交 running transaction 并 drain 全部 checkpoint。
 当前 ordered-data dependency 由 running transaction 的 `ordered_generation` 和
 `flushed_generation` 记录：发布 metadata 的 writeback batch 在成功的数据 write 后递增
@@ -775,6 +795,16 @@ journal 的 abort 状态是写入禁用依据。`Ext4MountWriteGuard` 借用调�
 remount 为可写前同样校验 journal abort，失败不应用挂载选项或清除只读标志。缓存写入
 校验与 delalloc reservation 也检查同一个 abort 状态，避免 VFS 标志更新窗口允许继续
 标脏；不保存额外的 superblock 引用或 read-only 字段。
+
+`JournalTransactions::ensure_writable()` and `is_aborted()` read the journal's
+`has_abort_error` projection, avoiding repeated shared transaction-mutex access
+from healthy buffered writes. The first error remains in `inner.aborted`. Abort
+stores that error under the mutex, publishes the flag with Release, then unlocks
+and wakes waiters. Acquire observers do not access transaction data through the
+flag. Admission, credits, and phase changes keep their locked abort checks. Only
+a successful empty-state replay reset clears the error and projection under the
+same mutex; failed reset leaves both unchanged. A concurrent admission check may
+precede abort publication and does not grant writability for the entire write.
 
 `ut-tests/namei/` 的预算回归覆盖原地插入、碎片化 inline/external extent 的 link/rename、
 HTree 转换、转换后立即分裂及带外部 extent 的已有 HTree leaf split。特殊路径在各自额度
@@ -1249,6 +1279,13 @@ data dependencies, and settle reservations without generic extent conversion or
 transaction restart. Both synchronous and deferred overwrite completion use this
 path, reading current metadata so timestamp changes during data I/O survive.
 
+Preparation proves stable size and mappings, so FullMetadata completion rewrites
+the inode-table entry only while resident timestamps are dirty. Every successful
+range still joins the current transaction's ordered-data dependency; a barrier
+from a previously committed transaction cannot cover later I/O. Later timestamp
+updates are staged by another range or full fsync. Failure and reservation
+settlement retain their existing rules.
+
 Aligned `All` overwrites use `BioWait` in the submitting task, with no completion
 work allocation or queueing. Submission protection lasts through all local
 completions; BIO waits hold no mount guard. Drain local batches before allocation
@@ -1277,7 +1314,8 @@ inherit unseen errors. Direct submission errors take precedence, after all
 required drains and error checks have run.
 
 Background triggering, asynchronous readahead, global writeback throttling, and
-precise per-inode transaction sync targets remain outside this stage.
+sync targets for non-regular inodes, and separate fdatasync metadata targets
+remain outside this stage.
 
 ## 设计决策
 
@@ -1316,16 +1354,42 @@ precise per-inode transaction sync targets remain outside this stage.
 
 ### 自动写入时间戳的延迟持久化
 
-Buffered writes and shared writable faults retain KVFS `file_update_time()`.
+Buffered writes use KVFS `generic_file_write_iter_with_prepare` to combine ext4
+size admission, journal/mount writability checks, and automatic timestamp
+publication. The callback runs under the inode data lock, before folio locking
+and user-data copying; zero-length or rejected writes do not update timestamps.
+It checks live immutable policy before generic size limits, including for empty
+requests, so already-open quota files remain protected during quota activation.
+Shared writable faults retain KVFS `file_update_time()`. Both entries use VFS
+`current_time()` and its superblock range and precision clipping, including when
+`KFEAT_FS_TIMES=n`. This feature does not
+disable VFS write-time or explicit timestamp updates; the adapter's optional
+timestamp helper must not substitute epoch values for these updates.
 For regular-file automatic mtime/ctime updates, `InodeOperations::update_time`
-checks journal writability, then checks the inode kind, compares and updates both
-timestamps, and marks changed fields dirty under one resident-state write lock.
-KVFS neither reads an old snapshot nor republishes callback results; no journal
-handle is needed. Unchanged values create no new dirty fields and preserve
-existing dirty state and superblock timestamp precision. Other timestamp updates
-use KVFS `generic_update_time`, also used by the default callback, to publish only
-fields confirmed by `setattr`. Explicit setattr/utimensat retains its journaled
-mutation path.
+checks journal writability,
+then compares and updates both fields and their dirty bits under one resident-state
+write lock. KVFS neither reads an old snapshot nor republishes callback results.
+Unchanged values preserve existing dirty state and superblock timestamp precision.
+Other timestamp updates use KVFS `generic_update_time`, also used by the default
+callback, to publish only fields confirmed by `setattr`. Explicit setattr/utimensat
+retains its journaled mutation path.
+
+`prepare_buffered_write` reads the mapping format, applies its file-size limit,
+and updates timestamps under one inode-state write lock. `Ext4Mount` retains the
+immutable timestamp/bitmap-size capabilities, huge-file feature and journal
+identity established before mount publication. Buffered admission reads the live
+journal abort projection through this retained identity and checks VFS writability;
+it does not acquire mount protection while holding the inode data lock.
+
+Write-begin first checks the existing initialized-range cache under inode-state
+protection. A supported extent inode with complete initialized blocks below both
+visible and disk size, and no delayed reservations, needs no mapping lookup or
+allocation. This hit can proceed while journal persistence owns mount. KVFS data
+protection (or invalidate protection for writable faults) excludes truncate and
+fallocate; mapping mutation invalidates the cached proof under the inode-state
+lock. Cache misses, holes, unwritten extents, partial EOF blocks and extensions
+retain mount-protected mapping and reservation validation. Folio misses still use
+the normal backing read. No new cache or synchronization request state is added.
 
 每次 inode-table mutation 先捕获待写时间戳，在自己的显式字段修改之前合入；
 staging 后只确认捕获值，I/O 期间再次变化的字段保留最新内存值和 dirty 状态。
@@ -1337,6 +1401,23 @@ folio，仍执行此步骤。Mapped data-only overwrite 可只刷数据，不为
 KVFS `write_inode` hook 为 syncfs/unmount 补写 metadata-only dirty inode；linked inode
 最终 eviction 也先 stage 时间戳。时间戳在内存中立即可见与磁盘持久化是两个阶段，
 后台 inode writeback 不在本变更范围内。
+
+### Fsync data waiting and transaction progress
+
+Each fsync/fdatasync caller completes its own PageCache writeback and in-flight
+data wait. Full fsync also stages pending timestamps before selecting the inode's
+metadata transaction target. There is no inode request queue or allocated fsync
+batch: transaction state owns commit progress, and MountedJournal serializes
+persistence. A target already committed by another caller requires no repeated
+journal commit, but still requires a device flush for potentially newer data.
+An inode without a tracked target retains the conservative mount-wide fallback.
+
+KVFS checks each open file's independent error cursor after its filesystem callback.
+Concurrent full/data-only requests keep their own metadata intent and data wait;
+an earlier caller's completed scan cannot satisfy a later caller's dirty data.
+Existing submission exclusion and truncate/close/eviction drains protect mapping
+changes. This removes request batching without adding a background commit worker
+or relaxing the current mount/persistence lock order.
 
 Namespace removal 在修改目录项之前验证 inode 的数据回收格式。`unlink`、`rmdir` 和覆盖式
 `rename` 在链接数归零时分配 orphan-file slot，满时使用 legacy list；删除仍有其他硬链接的

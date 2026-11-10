@@ -67,6 +67,11 @@ writeback 候选，不提供写回许可，也不引入第二份 folio 状态。
 - 不依赖 current process；
 - owner 必须在调用 resize/writeback 算法时提供已串行化的 inode 状态。
 
+共享页索引使用可睡眠 mutex，竞争时先执行最多 10 轮有界指数退避，再进入原有
+等待队列。此锁的自旋预算内不主动 yield，避免已缓存页的短暂 tree lookup 竞争
+变成调度延迟；长 mutation 或 owner 被调度走时仍可阻塞。该策略只作用于页索引，
+不改变全局 mutex 默认值、锁序、folio 身份复核或文件读写语义。
+
 ## 算法流程
 
 ### Materialize

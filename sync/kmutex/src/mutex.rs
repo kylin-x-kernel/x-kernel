@@ -206,13 +206,23 @@ impl RawMutex {
     /// Creates a [`RawMutex`] bound to `stats`.
     #[inline(always)]
     pub const fn new_with_stats(stats: &'static klockstat::LockClassStats) -> Self {
-        Self {
-            owner_id: AtomicU64::new(0),
-            wait_state: SpinNoPreempt::new(WaitState::new()),
-            config: SpinConfig {
+        Self::with_config_and_stats(
+            SpinConfig {
                 max_spins: 10,
                 spin_before_yield: 3,
             },
+            stats,
+        )
+    }
+
+    const fn with_config_and_stats(
+        config: SpinConfig,
+        stats: &'static klockstat::LockClassStats,
+    ) -> Self {
+        Self {
+            owner_id: AtomicU64::new(0),
+            wait_state: SpinNoPreempt::new(WaitState::new()),
+            config,
             stats,
         }
     }
@@ -460,6 +470,38 @@ impl<T> Mutex<T> {
     pub fn new(val: T) -> Self {
         let stats = klockstat::class_for_init_site(core::panic::Location::caller(), "Mutex");
         Self::new_with_stats(val, stats)
+    }
+
+    /// Creates a mutex with a caller-selected bounded spin policy.
+    ///
+    /// `config` has the same bounds and backoff semantics as [`SpinConfig`].
+    /// Blocking acquisition still requires sleepable task context. Equal
+    /// `max_spins` and `spin_before_yield` values skip voluntary yields during
+    /// the spin budget, then use the ordinary blocking wait queue.
+    #[inline(always)]
+    #[cfg(not(feature = "stats"))]
+    pub const fn with_config(val: T, config: SpinConfig) -> Self {
+        Self(lock_api::Mutex::const_new(
+            RawMutex::with_config(config),
+            val,
+        ))
+    }
+
+    /// Creates a configured mutex bound to this init site's lock class.
+    ///
+    /// `config` has the same bounds and backoff semantics as [`SpinConfig`].
+    /// Blocking acquisition still requires sleepable task context. Equal
+    /// `max_spins` and `spin_before_yield` values skip voluntary yields during
+    /// the spin budget, then use the ordinary blocking wait queue.
+    #[inline(always)]
+    #[cfg(feature = "stats")]
+    #[track_caller]
+    pub fn with_config(val: T, config: SpinConfig) -> Self {
+        let stats = klockstat::class_for_init_site(core::panic::Location::caller(), "Mutex");
+        Self(lock_api::Mutex::const_new(
+            RawMutex::with_config_and_stats(config, stats),
+            val,
+        ))
     }
 
     /// Creates a [`Mutex`] bound to `stats`.

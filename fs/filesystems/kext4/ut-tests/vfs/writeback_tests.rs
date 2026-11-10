@@ -194,6 +194,34 @@ fn overwrite_fixture_with_len(len: usize) -> (Arc<SuperBlock>, Arc<VfsFile>, Arc
 }
 
 #[def_test]
+fn cached_buffered_overwrite_does_not_wait_for_mount_persistence() {
+    let (mount, file, device) = overwrite_fixture_with_pages(1);
+    let input = vec![0x71; PAGE_SIZE_4K];
+    file.write_from(&input, &mut 0).unwrap();
+    file.fsync(false).unwrap();
+    let flushes = device.storage.flush_count();
+    let input = vec![0x72; PAGE_SIZE_4K];
+    {
+        // A journal executor may hold mount while waiting for storage. A
+        // resident initialized overwrite needs neither mapping nor allocation.
+        let _state = ext4_private(&mount).unwrap().write(&mount);
+        let mut offset = 0;
+        assert_eq!(file.write_from(&input, &mut offset), Ok(input.len()));
+        assert_eq!(offset, input.len() as u64);
+    }
+    assert_eq!(device.storage.flush_count(), flushes);
+    file.fsync(false).unwrap();
+    assert!(device.storage.flush_count() > flushes);
+    let mut output = vec![0; input.len()];
+    let private = file.inode().private::<Ext4Inode>().unwrap();
+    assert_eq!(
+        ext4_private(&mount).unwrap().read().read_at(private, 0, &mut output),
+        Ok(input.len())
+    );
+    assert_eq!(output, input);
+}
+
+#[def_test]
 fn mapped_writepages_releases_mount_protection_and_preserves_sync_barriers() {
     for data_only in [false, true] {
         let (mount, file, device) = overwrite_fixture_with_pages(1);
@@ -236,6 +264,48 @@ fn mapped_writepages_releases_mount_protection_and_preserves_sync_barriers() {
             // An already-active journal retains exactly the ordered-data and
             // commit barriers, without a per-range data-phase flush.
             assert_eq!(device.storage.flush_count() - flushes, 2);
+        }
+    }
+}
+
+#[def_test]
+fn clean_inode_overwrite_retains_data_barrier_after_an_earlier_commit() {
+    for fail_barrier in [false, true] {
+        let (mount, file, device) = overwrite_fixture_with_pages(1);
+        let input = vec![0x57; PAGE_SIZE_4K];
+        file.write_from(&input, &mut 0).unwrap();
+        let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+        {
+            // A metadata operation can stage/commit the timestamps before this
+            // dirty folio is written. Its earlier barrier cannot cover later I/O.
+            let mut state = ext4_private(&mount).unwrap().write(&mount);
+            state.write_inode_timestamps(&inode).unwrap();
+            state
+                .sync_inode(&inode, Ext4SyncIntent::FullMetadata)
+                .unwrap();
+        }
+        assert!(!inode.has_dirty_timestamps());
+        let flushes = device.storage.flush_count();
+        file.mapping().writepages(false).unwrap();
+        assert_eq!(device.storage.flush_count(), flushes);
+        if fail_barrier {
+            device.storage.fail_flush_at(flushes + 1);
+            assert_eq!(file.fsync(false), Err(VfsError::Io));
+            assert!(mount.flags().contains(SuperBlockFlags::RDONLY));
+        } else {
+            let writes = device.storage.write_count();
+            file.fsync(false).unwrap();
+            // The metadata target already committed. Persist later data with
+            // one barrier, without writing an otherwise empty journal commit.
+            assert_eq!(device.storage.flush_count() - flushes, 1);
+            assert_eq!(device.storage.write_count(), writes);
+            let mut output = vec![0; PAGE_SIZE_4K];
+            ext4_private(&mount)
+                .unwrap()
+                .read()
+                .read_at(&inode, 0, &mut output)
+                .unwrap();
+            assert_eq!(output, input);
         }
     }
 }
@@ -487,14 +557,24 @@ fn assert_write_timestamps_persisted(
 
 #[def_test]
 fn buffered_writes_update_timestamps_before_writeback() {
+    // Run with and without `times`: buffered writes retain the VFS policy in
+    // both configurations, including updates of existing on-disk timestamps.
     for data_only in [false, true] {
         // New allocation, mapped overwrite, and append all use the write entry.
         for (pages, mut offset) in [(0, 0), (1, 0), (1, PAGE_SIZE_4K as u64)] {
             let (mount, file, _device) = overwrite_fixture_with_pages(pages);
             set_old_write_timestamps(&mount, &file);
+            file.fsync(false).unwrap();
+            let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+            let stored = ext4_private(&mount)
+                .unwrap()
+                .read()
+                .load_inode_private(inode.number())
+                .unwrap();
+            assert_eq!(stored.mtime(), Ext4Timestamp::new(1, 0));
+            assert_eq!(stored.ctime(), Ext4Timestamp::new(1, 0));
             assert_eq!(file.write_from(&[], &mut 0), Ok(0));
             assert!(file.write_from(b"x", &mut (i64::MAX as u64)).is_err());
-            let inode = file.inode().downcast::<Ext4Inode>().unwrap();
             assert_eq!(inode.mtime(), Ext4Timestamp::new(1, 0));
             assert_eq!(inode.ctime(), Ext4Timestamp::new(1, 0));
             let before = file.inode().current_time();
@@ -570,6 +650,21 @@ fn automatic_write_timestamps_reject_aborted_journal_before_publication() {
         error
     );
     let dentry = Dentry::new_file_from_inode(file.inode().clone(), None, String::from("timestamp"));
+    let mut offset = 0;
+    assert_eq!(
+        file.write_from(b"rejected", &mut offset),
+        Err(VfsError::ReadOnlyFilesystem)
+    );
+    assert_eq!(offset, 0);
+    assert_eq!(inode.times(), before);
+    file.mapping()
+        .with_folio(0, |folio| {
+            if let Some(folio) = folio {
+                assert!(!folio.is_dirty());
+                assert!(folio.data().iter().all(|byte| *byte == 0x41));
+            }
+        })
+        .unwrap();
     assert!(
         inode
             .update_time(
@@ -671,6 +766,71 @@ impl OverwriteDevice {
                 self.storage.submit_bio(bio);
             }
         }
+    }
+}
+
+#[def_test]
+fn overlapping_fsync_callers_wait_for_data_and_keep_independent_errors() {
+    for fail_data in [false, true] {
+        let (mount, file, device) = overwrite_fixture_with_pages(1);
+        let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+        let observer = file
+            .alloc_clone(
+                kvfs::FMode::READ | kvfs::FMode::WRITE,
+                OpenFlags::READ_WRITE,
+                inode.clone(),
+            )
+            .unwrap();
+        let input = vec![0x69; PAGE_SIZE_4K];
+        file.write_from(&input, &mut 0).unwrap();
+        let written = inode.mtime();
+        *device.hold_writes.lock() = true;
+        let mut control =
+            kvfs::WritebackControl::all(true).with_sync_mode(kvfs::WritebackSyncMode::None);
+        file.mapping().writepages_control(&mut control).unwrap();
+        assert_eq!(device.delayed.lock().len(), 1);
+
+        // Stop both callers at admission, after their error snapshots and
+        // before the held I/O completes. This makes overlap deterministic.
+        let submission = inode.lock_writeback_submission();
+        let flushes = device.storage.flush_count();
+        let mut waiters = Vec::new();
+        for (caller, data_only) in [(file.clone(), true), (observer.clone(), false)] {
+            waiters.push(ktask::spawn(move || {
+                assert_eq!(
+                    caller.fsync(data_only),
+                    if fail_data { Err(VfsError::Io) } else { Ok(()) }
+                );
+            }));
+        }
+        for waiter in &waiters {
+            while waiter.state() != ktask::TaskState::Blocked {
+                assert_ne!(waiter.state(), ktask::TaskState::Exited);
+                ktask::yield_now();
+            }
+        }
+        assert_eq!(device.storage.flush_count(), flushes);
+        device.finish_held(fail_data);
+        inode.writeback_io().drain();
+        *device.hold_writes.lock() = false;
+        drop(submission);
+        for waiter in waiters {
+            assert_eq!(waiter.join(), 0);
+        }
+        if !fail_data {
+            assert!(!inode.has_dirty_timestamps());
+        }
+        // Each fd has consumed its own failure. A successful retry must also
+        // fulfill full-sync metadata requirements after data-only writeback.
+        assert_eq!(file.fsync(true), Ok(()));
+        assert_eq!(observer.fsync(false), Ok(()));
+        let state = ext4_private(&mount).unwrap().read();
+        let reloaded = state.load_inode_private(inode.number()).unwrap();
+        assert_eq!(reloaded.mtime(), written);
+        assert_eq!(reloaded.ctime(), written);
+        let mut output = vec![0; input.len()];
+        state.read_at(&inode, 0, &mut output).unwrap();
+        assert_eq!(output, input);
     }
 }
 
@@ -1078,7 +1238,7 @@ fn failed_async_allocation_retries_existing_unwritten_blocks() {
         if fail_metadata {
             let mut state = ext4_private(&mount).unwrap().write(&mount);
             state.sync_filesystem().unwrap();
-            crate::journal::tests::limit_transaction_credits(&mut state, 39);
+            crate::journal::tests::override_mounted_transaction_credits(&state, 39);
         }
         device.finish_held(!fail_metadata);
         private.writeback_io().drain();
@@ -1100,8 +1260,8 @@ fn failed_async_allocation_retries_existing_unwritten_blocks() {
             .unwrap();
         *device.hold_writes.lock() = false;
         if fail_metadata {
-            crate::journal::tests::limit_transaction_credits(
-                &mut ext4_private(&mount).unwrap().write(&mount),
+            crate::journal::tests::override_mounted_transaction_credits(
+                &ext4_private(&mount).unwrap().write(&mount),
                 341,
             );
         }

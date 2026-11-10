@@ -335,30 +335,31 @@ impl AddressSpace {
         iocb: &mut Kiocb<'_>,
         iter: &mut IovIterSource<'_>,
     ) -> VfsResult<usize> {
-        self.write_iter_with_checks(iocb, iter, |iocb, count| {
-            iocb.generic_write_check_limits(count)
+        self.write_iter_with_prepare(iocb, iter, |iocb, count| {
+            iocb.generic_write_check_limits(count)?;
+            if *count != 0 {
+                iocb.file().file_update_time()?;
+            }
+            Ok(())
         })
     }
 
-    pub(crate) fn write_iter_with_checks(
+    pub(crate) fn write_iter_with_prepare(
         &self,
         iocb: &mut Kiocb<'_>,
         iter: &mut IovIterSource<'_>,
-        checks: impl FnOnce(&Kiocb<'_>, &mut usize) -> VfsResult<()>,
+        prepare: impl FnOnce(&Kiocb<'_>, &mut usize) -> VfsResult<()>,
     ) -> VfsResult<usize> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
         let _data_guard = inode.lock_data();
         let mut count = iter.count();
-        checks(iocb, &mut count)?;
+        prepare(iocb, &mut count)?;
         iter.truncate(count);
         let count = iter.count();
         if count == 0 {
             return Ok(0);
         }
 
-        // Filesystems may defer persistence, but writes must publish timestamps
-        // before taking folio locks or exposing modified data.
-        iocb.file().file_update_time()?;
         let written = self.perform_write(iocb.ki_pos(), iter, count)?;
         iocb.advance(written);
         Ok(written)
