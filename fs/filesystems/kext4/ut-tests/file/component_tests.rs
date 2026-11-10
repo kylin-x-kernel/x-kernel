@@ -29,12 +29,13 @@ use crate::{
 
 #[def_test]
 fn unwritten_conversion_no_space_before_metadata_does_not_abort_journal() {
+    let allocator_inode = allocation_test_inode(12);
     let (mut filesystem, _device) =
         journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     let setup = JournalTransactions::new(TransactionId::new(722));
     let mut handle = setup.begin(JournalCredits::new(1024)).unwrap();
-    let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 6, &mut handle);
     for (logical, start, count) in [(0, 0, 3), (4, 3, 1), (6, 4, 1), (8, 5, 1)] {
         filesystem
             .insert_extent_mapping(
@@ -51,7 +52,7 @@ fn unwritten_conversion_no_space_before_metadata_does_not_abort_journal() {
     while filesystem.free_blocks_count() != 0 {
         spare = Some(
             filesystem
-                .allocate_block(&allocation_test_inode(12), None, &mut handle)
+                .allocate_block(&allocator_inode, None, &mut handle)
                 .unwrap()
                 .block(),
         );
@@ -100,7 +101,7 @@ fn unwritten_conversion_no_space_before_metadata_does_not_abort_journal() {
     // Free one unrelated block, then retry on the same mounted journal.
     let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
     filesystem
-        .release_allocated_block(&allocation_test_inode(12), spare.unwrap(), &mut handle)
+        .release_allocated_block(&allocator_inode, spare.unwrap(), &mut handle)
         .unwrap();
     filesystem
         .complete_metadata_mutation(handle, Ok(()))
@@ -209,7 +210,7 @@ fn delayed_allocation_only_reserves_holes_between_allocated_blocks() {
         let inode = allocate_checkpointed_regular_inode(&mut filesystem);
         let journal = JournalTransactions::new(TransactionId::new(389));
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
-        let physical = allocate_contiguous_blocks(&mut filesystem, 2, &mut handle);
+        let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 2, &mut handle);
         filesystem
             .insert_extent_mapping(
                 &inode,
@@ -596,7 +597,7 @@ fn ordered_writeback_preserves_prealloc_budget_across_five_restarts() {
         )
         .unwrap();
     let inode = Arc::new(filesystem.internal_iget(allocation.inode()).unwrap());
-    let physical = allocate_contiguous_blocks(&mut filesystem, 5, &mut handle);
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 5, &mut handle);
     for (index, logical) in [1u64, 3, 5, 7, 9].into_iter().enumerate() {
         filesystem
             .insert_extent_mapping(
@@ -690,7 +691,7 @@ fn ordered_writeback_restarts_across_hole_mapped_and_unwritten_runs() {
         )
         .unwrap();
     let inode = Arc::new(filesystem.internal_iget(allocation.inode()).unwrap());
-    let physical = allocate_contiguous_blocks(&mut filesystem, 2, &mut handle);
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 2, &mut handle);
     filesystem
         .insert_extent_mapping(
             &inode,
@@ -770,7 +771,7 @@ fn mapped_full_metadata_writeback_fits_the_eight_credit_boundary() {
         )
         .unwrap();
     let inode = Arc::new(filesystem.internal_iget(allocation.inode()).unwrap());
-    let physical = allocate_contiguous_blocks(&mut filesystem, 1, &mut handle);
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 1, &mut handle);
     filesystem
         .insert_extent_mapping(
             &inode,
@@ -881,7 +882,7 @@ fn ordered_writeback_credits_follow_fragmented_unwritten_runs() {
         )
         .unwrap();
     let inode = Arc::new(filesystem.internal_iget(allocation.inode()).unwrap());
-    let physical = allocate_contiguous_blocks(&mut filesystem, 8, &mut handle);
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 8, &mut handle);
     for logical in 0..8u64 {
         let state = if logical % 2 == 0 {
             ExtentMappingState::Initialized
@@ -1169,7 +1170,7 @@ fn writeback_settlement_re_reads_the_writer_gate_at_each_settlement() {
     let transaction = handle.id();
     for logical in [8u64, 10, 12, 14, 16] {
         let physical = filesystem
-            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .allocate_block(&inode, None, &mut handle)
             .unwrap()
             .block();
         filesystem
@@ -1229,7 +1230,6 @@ fn ordered_writeback_converts_unwritten_extent_and_zero_fills_partial_block() {
     let journal = JournalTransactions::new(TransactionId::new(721));
     let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
     let transaction = handle.id();
-    let physical = allocate_contiguous_blocks(&mut filesystem, 1, &mut handle);
     let allocation = filesystem
         .allocate_inode(
             None,
@@ -1238,6 +1238,7 @@ fn ordered_writeback_converts_unwritten_extent_and_zero_fills_partial_block() {
         )
         .unwrap();
     let inode = Arc::new(filesystem.internal_iget(allocation.inode()).unwrap());
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 1, &mut handle);
     filesystem
         .insert_extent_mapping(
             &inode,
@@ -1363,12 +1364,13 @@ fn writeback_without_growth_preserves_pending_frees(
     write_block: u64,
     reusable_blocks: u64,
 ) {
+    let allocator_inode = allocation_test_inode(12);
     let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     inode.disable_extra_isize_expansion();
     let setup = JournalTransactions::new(TransactionId::new(760));
     let mut handle = setup.begin(JournalCredits::new(1024)).unwrap();
-    let physical = allocate_contiguous_blocks(&mut filesystem, initial_blocks, &mut handle);
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, initial_blocks, &mut handle);
     filesystem
         .insert_extent_mapping(
             &inode,
@@ -1383,7 +1385,7 @@ fn writeback_without_growth_preserves_pending_frees(
     while filesystem.free_blocks_count() > reusable_blocks {
         spare = Some(
             filesystem
-                .allocate_block(&allocation_test_inode(12), None, &mut handle)
+                .allocate_block(&allocator_inode, None, &mut handle)
                 .unwrap()
                 .block(),
         );
@@ -1408,7 +1410,7 @@ fn writeback_without_growth_preserves_pending_frees(
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
-        .release_allocated_block(&allocation_test_inode(12), spare.unwrap(), &mut handle)
+        .release_allocated_block(&allocator_inode, spare.unwrap(), &mut handle)
         .unwrap();
     let transaction = handle.id();
     handle.stop().unwrap();
@@ -1474,6 +1476,7 @@ fn readmission_failure_preserves_prefix(
     fail_commit: bool,
     completed_blocks: usize,
 ) {
+    let allocator_inode = allocation_test_inode(12);
     let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     inode.disable_extra_isize_expansion();
@@ -1481,7 +1484,7 @@ fn readmission_failure_preserves_prefix(
     let mut handle = setup.begin(JournalCredits::new(1024)).unwrap();
     let physical = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &inode,
             Some(crate::FilesystemBlock::new(6)),
             &mut handle,
         )
@@ -1500,7 +1503,7 @@ fn readmission_failure_preserves_prefix(
         .unwrap();
     let spare = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(crate::FilesystemBlock::new(7)),
             &mut handle,
         )
@@ -1511,7 +1514,7 @@ fn readmission_failure_preserves_prefix(
         while filesystem.free_blocks_count() > 4 {
             filesystem
                 .allocate_block(
-                    &allocation_test_inode(12),
+                    &allocator_inode,
                     Some(crate::FilesystemBlock::new(12)),
                     &mut handle,
                 )
@@ -1538,7 +1541,7 @@ fn readmission_failure_preserves_prefix(
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
-        .release_allocated_block(&allocation_test_inode(12), spare, &mut handle)
+        .release_allocated_block(&allocator_inode, spare, &mut handle)
         .unwrap();
     handle.stop().unwrap();
     filesystem

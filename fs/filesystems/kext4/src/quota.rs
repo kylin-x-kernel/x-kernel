@@ -303,10 +303,10 @@ impl Ext4SbInfo {
         uid: u32,
         gid: u32,
         handle: &mut JournalHandle<'_>,
-    ) -> Ext4Result<()> {
+    ) -> Ext4Result<Option<[Option<kquota::DquotRef>; 3]>> {
         if !self.has_quota_accounting() || self.is_quota_inode(inode.number()) || inode.is_noquota()
         {
-            return Ok(());
+            return Ok(None);
         }
         let stat = inode.stat();
         let allocated = stat
@@ -337,12 +337,16 @@ impl Ext4SbInfo {
                 can_bypass_limits,
             )
             .map_err(quota_error)?;
+        let mut records = [None, None, None];
+        for id in to {
+            records[id.kind() as usize] = quota.cached_ref(id).map_err(quota_error)?;
+        }
         for id in from.into_iter().chain(to) {
-            if quota.info(id.kind()).is_some() {
+            if quota.info(id.kind()).is_some_and(kquota::Dqinfo::is_active) {
                 quota.sync_dquot(&mut io, id).map_err(quota_error)?;
             }
         }
-        Ok(())
+        Ok(Some(records))
     }
 
     fn has_quota_accounting(&self) -> bool {
@@ -380,6 +384,10 @@ impl Ext4SbInfo {
             .ok_or(Ext4Error::Overflow)
     }
 
+    fn inode_block_sectors(&self, blocks: u64) -> i128 {
+        i128::from(blocks) * i128::from(self.layout().block_size() / 512)
+    }
+
     /// Initializes each owner record before entering inode or allocator locks.
     pub(crate) fn initialize_owner_quotas(&mut self, uid: u32, gid: u32) -> Ext4Result<()> {
         self.initialize_owner_quotas_with_policy(
@@ -408,9 +416,7 @@ impl Ext4SbInfo {
                 let Some(info) = quota.info(id.kind()) else {
                     continue;
                 };
-                if info.state().contains(kquota::QuotaState::SUSPENDED)
-                    || quota.is_cached_active(id)
-                {
+                if !info.is_active() || quota.is_cached_active(id) {
                     continue;
                 }
                 quota
@@ -480,7 +486,29 @@ impl Ext4SbInfo {
             return Ok(());
         }
         let stat = inode.stat();
-        self.initialize_owner_quotas_with_policy(stat.uid, stat.gid, policy)
+        self.initialize_owner_quotas_with_policy(stat.uid, stat.gid, policy)?;
+        self.bind_inode_quotas(inode)
+    }
+
+    /// Binds records already acquired before entering a metadata transaction.
+    pub(crate) fn bind_inode_quotas(&self, inode: &Ext4Inode) -> Ext4Result<()> {
+        if !self.has_quota_accounting() || self.is_quota_inode(inode.number()) || inode.is_noquota()
+        {
+            return Ok(());
+        }
+        let super_block = self
+            .vfs_superblock
+            .upgrade()
+            .ok_or(Ext4Error::InvalidInodeState)?;
+        inode.update_quota_records(|uid, gid, reserved, records| {
+            if inode.is_noquota() {
+                return Ok(());
+            }
+            let ids = owner_ids(uid, gid)?;
+            let bytes = self.quota_blocks_bytes(reserved)?;
+            let mut quota = super_block.quota_info();
+            quota.bind_cached(&ids, bytes, records).map_err(quota_error)
+        })
     }
 
     fn with_owner_quota(
@@ -499,9 +527,7 @@ impl Ext4SbInfo {
         let mut quota = super_block.quota_info();
         let ids = owner_ids(uid, gid)?;
         for &id in &ids {
-            if quota
-                .info(id.kind())
-                .is_some_and(|info| !info.state().contains(kquota::QuotaState::SUSPENDED))
+            if quota.info(id.kind()).is_some_and(kquota::Dqinfo::is_active)
                 && !quota.is_cached_active(id)
             {
                 return Err(Ext4Error::InvalidInodeState);
@@ -510,7 +536,29 @@ impl Ext4SbInfo {
         update(&mut quota, &ids).map_err(quota_error)
     }
 
-    pub(crate) fn reserve_quota_space(&self, uid: u32, gid: u32, blocks: u64) -> Ext4Result<()> {
+    fn with_inode_quota(
+        &self,
+        records: &[Option<kquota::DquotRef>; 3],
+        update: impl FnOnce(
+            &mut QuotaInfo<Arc<VfsInode>>,
+            &[Option<kquota::DquotRef>; 3],
+        ) -> KResult<()>,
+    ) -> Ext4Result<()> {
+        if !self.has_quota_accounting() || records.iter().all(Option::is_none) {
+            return Ok(());
+        }
+        let super_block = self
+            .vfs_superblock
+            .upgrade()
+            .ok_or(Ext4Error::InvalidInodeState)?;
+        update(&mut super_block.quota_info(), records).map_err(quota_error)
+    }
+
+    pub(crate) fn reserve_quota_space(
+        &self,
+        records: &[Option<kquota::DquotRef>; 3],
+        blocks: u64,
+    ) -> Ext4Result<()> {
         if blocks == 0 {
             return Ok(());
         }
@@ -520,23 +568,22 @@ impl Ext4SbInfo {
             kquota::ChargeFlags::BYPASS_LIMITS,
             crate::vfs::can_bypass_quota_limits(),
         );
-        self.with_owner_quota(uid, gid, |quota, ids| {
-            quota.reserve_space_cached(ids, bytes, ktime::realtime().unix_seconds(), flags)
+        self.with_inode_quota(records, |quota, records| {
+            quota.reserve_space_refs(records, bytes, ktime::realtime().unix_seconds(), flags)
         })
     }
 
     pub(crate) fn release_quota_reservation(
         &self,
-        uid: u32,
-        gid: u32,
+        records: &[Option<kquota::DquotRef>; 3],
         blocks: u64,
     ) -> Ext4Result<()> {
         if blocks == 0 {
             return Ok(());
         }
         let bytes = self.quota_blocks_bytes(blocks)?;
-        self.with_owner_quota(uid, gid, |quota, ids| {
-            quota.release_space_cached(ids, bytes)
+        self.with_inode_quota(records, |quota, records| {
+            quota.release_space_refs(records, bytes)
         })
     }
 
@@ -544,33 +591,47 @@ impl Ext4SbInfo {
         &self,
         inode: &Ext4Inode,
         blocks: u64,
-        handle: &mut JournalHandle<'_>,
+        _handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
         if blocks == 0 {
             return Ok(());
         }
+        let sectors = self.inode_block_sectors(blocks);
         if !self.has_quota_accounting() || self.is_quota_inode(inode.number()) || inode.is_noquota()
         {
-            return Ok(());
+            return inode.update_allocated_blocks(sectors, |_| Ok(()));
         }
-        let stat = inode.stat();
         let bytes = self.quota_blocks_bytes(blocks)?;
         let mut flags = kquota::ChargeFlags::WARN;
         flags.set(
             kquota::ChargeFlags::BYPASS_LIMITS,
             crate::vfs::can_bypass_quota_limits(),
         );
-        self.with_owner_quota(stat.uid, stat.gid, |quota, ids| {
-            quota.alloc_space(
-                &mut Ext4QuotaIo {
-                    filesystem: self,
-                    handle: Some(handle),
-                },
-                ids,
-                bytes,
-                ktime::realtime().unix_seconds(),
-                flags,
-            )
+        inode.update_allocated_blocks(sectors, |records| {
+            self.with_inode_quota(records, |quota, records| {
+                quota.alloc_space_refs(records, bytes, ktime::realtime().unix_seconds(), flags)
+            })
+        })
+    }
+
+    pub(crate) fn validate_free_quota_space(
+        &self,
+        inode: &Ext4Inode,
+        blocks: u64,
+    ) -> Ext4Result<()> {
+        if blocks == 0 {
+            return Ok(());
+        }
+        let sectors = self.inode_block_sectors(blocks);
+        if !self.has_quota_accounting() || self.is_quota_inode(inode.number()) || inode.is_noquota()
+        {
+            return inode.validate_allocated_blocks(-sectors, |_| Ok(()));
+        }
+        let bytes = self.quota_blocks_bytes(blocks)?;
+        inode.validate_allocated_blocks(-sectors, |records| {
+            self.with_inode_quota(records, |quota, records| {
+                quota.validate_free_space_refs(records, bytes)
+            })
         })
     }
 
@@ -578,35 +639,29 @@ impl Ext4SbInfo {
         &self,
         inode: &Ext4Inode,
         blocks: u64,
-        handle: &mut JournalHandle<'_>,
+        _handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
         if blocks == 0 {
             return Ok(());
         }
+        let sectors = self.inode_block_sectors(blocks);
         if !self.has_quota_accounting() || self.is_quota_inode(inode.number()) || inode.is_noquota()
         {
-            return Ok(());
+            return inode.update_allocated_blocks(-sectors, |_| Ok(()));
         }
-        let stat = inode.stat();
         let bytes = self.quota_blocks_bytes(blocks)?;
-        self.with_owner_quota(stat.uid, stat.gid, |quota, ids| {
-            quota.free_space(
-                &mut Ext4QuotaIo {
-                    filesystem: self,
-                    handle: Some(handle),
-                },
-                ids,
-                bytes,
-                false,
-            )
+        inode.update_allocated_blocks(-sectors, |records| {
+            self.with_inode_quota(records, |quota, records| {
+                quota.free_space_refs(records, bytes)
+            })
         })
     }
 
-    pub(crate) fn claim_quota_space(
+    pub(crate) fn claim_quota_reservation(
         &self,
         inode: &Ext4Inode,
+        records: &[Option<kquota::DquotRef>; 3],
         blocks: u64,
-        handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
         if blocks == 0 {
             return Ok(());
@@ -615,17 +670,9 @@ impl Ext4SbInfo {
         {
             return Ok(());
         }
-        let stat = inode.stat();
         let bytes = self.quota_blocks_bytes(blocks)?;
-        self.with_owner_quota(stat.uid, stat.gid, |quota, ids| {
-            quota.claim_space(
-                &mut Ext4QuotaIo {
-                    filesystem: self,
-                    handle: Some(handle),
-                },
-                ids,
-                bytes,
-            )
+        self.with_inode_quota(records, |quota, records| {
+            quota.claim_space_refs(records, bytes)
         })
     }
 
@@ -666,6 +713,15 @@ impl Ext4SbInfo {
         })
     }
 
+    pub(crate) fn free_inode_quota(&self, inode: &Ext4Inode) -> Ext4Result<()> {
+        if self.is_quota_inode(inode.number()) || inode.is_noquota() {
+            return Ok(());
+        }
+        inode.with_quota_records(|records| {
+            self.with_inode_quota(records, |quota, records| quota.free_inode_refs(records))
+        })
+    }
+
     pub(crate) fn sync_owner_quotas(
         &self,
         uid: u32,
@@ -697,8 +753,21 @@ impl Ext4SbInfo {
         {
             return Ok(());
         }
-        let stat = inode.stat();
-        self.sync_owner_quotas(stat.uid, stat.gid, handle)
+        inode.with_quota_records(|records| {
+            self.with_inode_quota(records, |quota, records| {
+                let mut io = Ext4QuotaIo {
+                    filesystem: self,
+                    handle: Some(handle),
+                };
+                for record in records.iter().flatten() {
+                    let id = record.lock().id();
+                    if quota.info(id.kind()).is_some_and(kquota::Dqinfo::is_active) {
+                        quota.sync_dquot(&mut io, id)?;
+                    }
+                }
+                Ok(())
+            })
+        })
     }
 }
 
@@ -800,11 +869,12 @@ impl Ext4SbInfo {
         }
         self.sync_quotas(super_block).map_err(quota_error)?;
         for kind in QuotaType::ALL {
-            let is_active = super_block
+            // Deactivated classes may still have records awaiting release.
+            let needs_release = super_block
                 .quota_info()
                 .info(kind)
                 .is_some_and(|info| !info.state().contains(kquota::QuotaState::SUSPENDED));
-            if is_active {
+            if needs_release {
                 self.release_internal_quota_records(super_block, kind)?;
             }
         }
@@ -868,12 +938,65 @@ impl Ext4SbInfo {
 }
 
 impl crate::vfs::Ext4Mount {
+    pub(crate) fn suspend_internal_quotas(&self, super_block: &SuperBlock) -> Ext4Result<()> {
+        let inodes = super_block.live_inodes();
+        // An inode already in final eviction cannot be pinned by the snapshot.
+        super_block.wait_for_inode_evictions();
+        let result = {
+            let mut state = self.write(super_block);
+            (|| {
+                let quota = super_block.quota_info();
+                for kind in QuotaType::ALL {
+                    if quota.info(kind).is_some() {
+                        quota.check_no_reservations(kind).map_err(quota_error)?;
+                    }
+                }
+                drop(quota);
+                for inode in &inodes {
+                    inode
+                        .private::<Ext4Inode>()
+                        .map_err(quota_error)?
+                        .drop_quota_records(None);
+                }
+                state.suspend_internal_quotas(super_block)
+            })()
+        };
+        drop(inodes);
+        result
+    }
+
     /// Disables one class and releases its backing inode after mount protection.
     pub(crate) fn disable_internal_quota(
         &self,
         super_block: &SuperBlock,
         kind: QuotaType,
     ) -> Ext4Result<()> {
+        let inodes = super_block.live_inodes();
+        let deactivated: Ext4Result<bool> = {
+            let _state = self.write(super_block);
+            (|| {
+                let mut quota = super_block.quota_info();
+                if quota.info(kind).is_none() {
+                    return Ok(false);
+                }
+                quota.deactivate(kind).map_err(quota_error)?;
+                drop(quota);
+                for inode in &inodes {
+                    inode
+                        .private::<Ext4Inode>()
+                        .map_err(quota_error)?
+                        .drop_quota_records(Some(kind));
+                }
+                Ok(true)
+            })()
+        };
+        drop(inodes);
+        if !deactivated? {
+            return Ok(());
+        }
+        // An inode whose last reference disappeared before the snapshot still
+        // owns its quota records until eviction finishes.
+        super_block.wait_for_inode_evictions();
         let (result, file) = self
             .write(super_block)
             .disable_internal_quota(super_block, kind);
@@ -891,6 +1014,11 @@ impl crate::vfs::Ext4Mount {
                         state.sync_filesystem().map_err(into_vfs_err)?;
                     }
                     inode.set_noquota(false);
+                    if file.write_count() != 0 {
+                        self.write(super_block)
+                            .initialize_inode_quotas(inode)
+                            .map_err(into_vfs_err)?;
+                    }
                 }
             }
             Ok::<(), kerrno::KError>(())

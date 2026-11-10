@@ -553,6 +553,7 @@ fn allocate_accounted_inode(state: &mut Ext4SbInfo, uid: u32) -> Arc<Ext4Inode> 
         .unwrap();
     let inode = state.internal_iget(allocation.inode()).unwrap();
     state.complete_metadata_mutation(handle, Ok(())).unwrap();
+    state.bind_inode_quotas(&inode).unwrap();
     Arc::new(inode)
 }
 
@@ -597,8 +598,10 @@ fn internal_quota_uses_canonical_inode_and_hides_it_from_namespace_lookup() {
 #[def_test]
 fn internal_quota_claims_delalloc_once_and_chown_transfers_usage_and_reservations() {
     let (super_block, _file, _device) = internal_quota_fixture();
+    let vfs_inode = accounted_vfs_inode(&super_block, 1000);
+    let path = inode_path(&super_block, &vfs_inode);
+    let inode = vfs_inode.downcast::<Ext4Inode>().unwrap();
     let mut state = ext4_private(&super_block).unwrap().write(&super_block);
-    let inode = allocate_accounted_inode(&mut state, 1000);
     let block_size = u64::from(state.layout().block_size());
     state
         .reserve_delalloc_range(&inode, LogicalBlock::new(0), 2)
@@ -612,23 +615,54 @@ fn internal_quota_claims_delalloc_once_and_chown_transfers_usage_and_reservation
         ),
         (1, 0, 2 * block_size as i64)
     );
+    assert_eq!(path.getattr().unwrap().blocks * 512, 2 * block_size);
     inode.set_size(block_size);
-    state
-        .writeback_ordered_at_with_prealloc_budget(
-            &inode,
-            0,
-            &vec![0x5a; block_size as usize],
-            block_size,
-            crate::Ext4SyncIntent::FullMetadata,
-            0,
-            || true,
-        )
-        .unwrap();
+    drop(state);
+    let quota = super_block.quota_info();
+    let writer = {
+        let super_block = super_block.clone();
+        let inode = inode.clone();
+        ktask::spawn(move || {
+            ext4_private(&super_block)
+                .unwrap()
+                .write(&super_block)
+                .writeback_ordered_at_with_prealloc_budget(
+                    &inode,
+                    0,
+                    &vec![0x5a; block_size as usize],
+                    block_size,
+                    crate::Ext4SyncIntent::FullMetadata,
+                    0,
+                    || true,
+                )
+                .unwrap();
+        })
+    };
+    while !writer.state().is_blocked() {
+        assert_ne!(writer.state(), ktask::TaskState::Exited);
+        ktask::yield_now();
+    }
+    let observed = Arc::new(ksync::Mutex::new(None));
+    let reader = {
+        let path = path.clone();
+        let observed = observed.clone();
+        ktask::spawn(move || *observed.lock() = Some(path.getattr().unwrap().blocks))
+    };
+    while !reader.state().is_blocked() {
+        assert_ne!(reader.state(), ktask::TaskState::Exited);
+        ktask::yield_now();
+    }
+    drop(quota);
+    writer.join();
+    reader.join();
+    assert_eq!(*observed.lock(), Some(2 * block_size / 512));
+    let mut state = ext4_private(&super_block).unwrap().write(&super_block);
     let allocated = owner_usage(&super_block, &mut state, 1000);
     assert_eq!(
         (allocated.used_bytes, allocated.reserved_bytes),
         (block_size as i64, block_size as i64)
     );
+    assert_eq!(path.getattr().unwrap().blocks * 512, 2 * block_size);
     assert_eq!(state.delalloc_reserved_blocks(), 1);
     state
         .update_inode_metadata(
@@ -653,6 +687,7 @@ fn internal_quota_claims_delalloc_once_and_chown_transfers_usage_and_reservation
         .unwrap();
     let new = owner_usage(&super_block, &mut state, 2000);
     assert_eq!((new.used_bytes, new.reserved_bytes), (0, 0));
+    assert_eq!(path.getattr().unwrap().blocks, 0);
 }
 
 #[def_test]
@@ -728,6 +763,7 @@ fn quota_limits_reject_inode_and_space_before_bitmap_publication() {
         state.allocate_blocks_for_write(exact, &mut handle),
         Err(Ext4Error::Quota(LinuxError::EDQUOT))
     );
+    assert_eq!(inode.blocks(), 0);
     assert!(!handle.has_updates());
     assert_eq!(
         (state.free_inodes_count(), state.free_blocks_count()),
@@ -746,6 +782,19 @@ fn quota_limits_reject_inode_and_space_before_bitmap_publication() {
         .allocate_blocks_for_write(partial, &mut handle)
         .unwrap();
     assert_eq!(allocated.block_count().get(), 1);
+    let used_bytes = super_block
+        .quota_info()
+        .get(
+            &mut Ext4QuotaIo {
+                filesystem: &state,
+                handle: Some(&mut handle),
+            },
+            id,
+        )
+        .unwrap()
+        .used_bytes;
+    assert_eq!(inode.blocks() * 512, block_size);
+    assert_eq!(used_bytes, block_size as i64);
     state
         .release_allocated_block(
             &inode,
@@ -753,6 +802,7 @@ fn quota_limits_reject_inode_and_space_before_bitmap_publication() {
             &mut handle,
         )
         .unwrap();
+    assert_eq!(inode.blocks(), 0);
     state.complete_metadata_mutation(handle, Ok(())).unwrap();
     assert!(!state.journal.as_ref().unwrap().is_aborted());
     let usage = owner_usage(&super_block, &mut state, 1000);
@@ -972,7 +1022,8 @@ fn suspension_releases_mixed_records_but_retains_the_quota_file() {
     let (super_block, file, device) = internal_quota_fixture();
     {
         let mut state = ext4_private(&super_block).unwrap().write(&super_block);
-        let _inode = allocate_accounted_inode(&mut state, 1000);
+        let inode = allocate_accounted_inode(&mut state, 1000);
+        inode.drop_quota_records(None);
         state.initialize_owner_quotas(2000, 2000).unwrap();
         state.suspend_internal_quotas(&super_block).unwrap();
         state.sync_filesystem().unwrap();
@@ -988,6 +1039,62 @@ fn suspension_releases_mixed_records_but_retains_the_quota_file() {
     Ext4SuperOperations::deactivate_internal_quotas(&super_block).unwrap();
     assert_eq!(device.write_count(), writes);
     assert!(super_block.quota_info().info(QuotaType::User).is_none());
+}
+
+#[def_test]
+fn suspension_waits_for_eviction_to_release_quota_reservations() {
+    let (super_block, _quota_file, _) = internal_quota_fixture();
+    let inode = accounted_vfs_inode(&super_block, 1000);
+    let private = inode.downcast::<Ext4Inode>().unwrap();
+    ext4_private(&super_block)
+        .unwrap()
+        .read()
+        .reserve_delalloc_range(&private, LogicalBlock::new(0), 1)
+        .unwrap();
+    let writeback = private.lock_writeback_submission();
+    let eviction = ktask::spawn(move || drop(inode));
+    while !eviction.state().is_blocked() {
+        assert_ne!(eviction.state(), ktask::TaskState::Exited);
+        ktask::yield_now();
+    }
+    let result = Arc::new(ksync::Mutex::new(None));
+    let suspension = {
+        let super_block = super_block.clone();
+        let result = result.clone();
+        ktask::spawn(move || {
+            *result.lock() = Some(
+                ext4_private(&super_block)
+                    .unwrap()
+                    .suspend_internal_quotas(&super_block),
+            );
+        })
+    };
+    let was_blocked = loop {
+        match suspension.state() {
+            ktask::TaskState::Blocked => break true,
+            ktask::TaskState::Exited => break false,
+            _ => ktask::yield_now(),
+        }
+    };
+    drop(writeback);
+    eviction.join();
+    suspension.join();
+    assert!(was_blocked);
+    assert_eq!(*result.lock(), Some(Ok(())));
+    assert!(
+        !super_block
+            .quota_info()
+            .info(QuotaType::User)
+            .unwrap()
+            .is_active()
+    );
+    ext4_private(&super_block)
+        .unwrap()
+        .read()
+        .resume_internal_quotas(&super_block)
+        .unwrap();
+    drop(private);
+    Ext4SuperOperations::deactivate_internal_quotas(&super_block).unwrap();
 }
 
 #[def_test]
@@ -1345,17 +1452,162 @@ fn shared_xattr_copy_on_write_releases_the_old_owner_reference_charge() {
         owner_usage(&super_block, &mut state, 1000).used_bytes,
         block_size as i64
     );
+    assert!(inode.sync_transaction().is_none());
     state
         .update_inode_metadata(
             &inode,
             crate::Ext4InodeMetadataUpdate::new(Ext4Timestamp::new(3, 0)).with_owner(2000, 2000),
         )
         .unwrap();
+    assert!(inode.sync_transaction().is_some());
     assert_eq!(owner_usage(&super_block, &mut state, 1000).used_bytes, 0);
     assert_eq!(
         owner_usage(&super_block, &mut state, 2000).used_bytes,
         block_size as i64
     );
+    let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
+    state
+        .update_unlinked_inode_metadata(&inode, None, Ext4Timestamp::new(4, 0), &mut handle)
+        .unwrap();
+    state.complete_metadata_mutation(handle, Ok(())).unwrap();
+    state.eviction_prepare(&inode).unwrap();
+    assert_eq!(inode.file_acl_block(), 0);
+    assert_eq!(inode.blocks(), 0);
+    assert_eq!(state.raw_inode(inode.number()).unwrap().blocks(), 0);
+    assert_eq!(owner_usage(&super_block, &mut state, 2000).used_bytes, 0);
+    assert!(state.eviction_release_batch(&inode, 1).unwrap().1);
+    state.eviction_finish(&inode, Ext4Timestamp::new(5, 0)).unwrap();
+}
+
+#[def_test]
+fn external_xattr_rejects_invalid_accounting_before_releasing_blocks() {
+    use crate::{
+        CorruptKind, Ext4Error, UnsupportedKind,
+        disk::features::{CompatFeatures, ReadOnlyCompatFeatures},
+        superblock::test_fixtures::set_allocator_feature_bits,
+    };
+
+    let original = vec![1; 400];
+    let replacement = vec![2; 400];
+    for shared in [false, true] {
+        for huge in [false, true] {
+            for (value, eviction) in [
+                (None, false),
+                (Some(b"inline".as_slice()), false),
+                (Some(replacement.as_slice()), false),
+                (None, true),
+            ] {
+                // A private block can be rewritten in place and is not released.
+                if !shared && value.is_some_and(|value| value.len() == replacement.len()) {
+                    continue;
+                }
+                let (super_block, _quota_file, _) = internal_quota_fixture();
+                let mut state = ext4_private(&super_block).unwrap().write(&super_block);
+                state.sync_filesystem().unwrap();
+                set_allocator_feature_bits(
+                    &mut state,
+                    CompatFeatures::empty(),
+                    ReadOnlyCompatFeatures::HUGE_FILE,
+                );
+                state.metadata_io.invalidate_all();
+                let inode = allocate_accounted_inode(&mut state, 1000);
+                state
+                    .set_xattr(
+                        &inode,
+                        crate::Ext4XattrNamespace::User,
+                        b"large",
+                        &original,
+                        Ext4Timestamp::new(1, 0),
+                    )
+                    .unwrap();
+                let block = FilesystemBlock::new(inode.file_acl_block());
+                let journal = state.metadata_journal().unwrap();
+                if shared {
+                    let mut bytes = state.read_metadata_block(block).unwrap().as_ref().to_vec();
+                    bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+                    let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
+                    let access = state.metadata_io.write_access(block, &mut handle).unwrap();
+                    crate::superblock::replace_metadata_access_bytes(&access, bytes).unwrap();
+                    state.complete_metadata_mutation(handle, Ok(())).unwrap();
+                }
+                inode.disable_extra_isize_expansion();
+                let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
+                if huge {
+                    state
+                        .update_inode_flags_timestamps_metadata(
+                            &inode,
+                            inode.flags() | crate::disk::inode::EXT4_HUGE_FILE_FL,
+                            Ext4Timestamp::new(2, 0),
+                            &mut handle,
+                        )
+                        .unwrap();
+                } else {
+                    inode
+                        .update_allocated_blocks(-i128::from(inode.blocks()), |_| Ok(()))
+                        .unwrap();
+                    state.update_inode_blocks_metadata(&inode, &mut handle).unwrap();
+                }
+                state.complete_metadata_mutation(handle, Ok(())).unwrap();
+                if eviction {
+                    inode.set_links_count(0);
+                }
+
+                let group = state.block_group_for_block(block).unwrap();
+                let bitmap = FilesystemBlock::new(state.group_geometry(group).unwrap().block_bitmap());
+                let before_bitmap = state.read_metadata_block(bitmap).unwrap().as_ref().to_vec();
+                let before_block = state.read_metadata_block(block).unwrap().as_ref().to_vec();
+                let before_free = state.free_blocks_count();
+                let before_blocks = inode.blocks();
+                let before_quota = owner_usage(&super_block, &mut state, 1000).used_bytes;
+                assert_eq!(before_quota, i64::from(state.layout().block_size()));
+                let result = if eviction {
+                    state.eviction_prepare(&inode)
+                } else if let Some(value) = value {
+                    state.set_xattr(
+                        &inode,
+                        crate::Ext4XattrNamespace::User,
+                        b"large",
+                        value,
+                        Ext4Timestamp::new(3, 0),
+                    )
+                } else {
+                    state.remove_xattr(
+                        &inode,
+                        crate::Ext4XattrNamespace::User,
+                        b"large",
+                        Ext4Timestamp::new(3, 0),
+                    )
+                };
+                let expected = if huge {
+                    Ext4Error::Unsupported(UnsupportedKind::HugeFile)
+                } else if eviction {
+                    Ext4Error::Corrupt(CorruptKind::InvalidInode)
+                } else {
+                    Ext4Error::Overflow
+                };
+                assert_eq!(result, Err(expected));
+                assert!(!journal.is_aborted());
+                assert!(state.ensure_writable().is_ok());
+                assert_eq!(inode.file_acl_block(), block.get());
+                assert_eq!(inode.blocks(), before_blocks);
+                assert!(inode.orphan_location().is_none());
+                assert_eq!(state.free_blocks_count(), before_free);
+                assert_eq!(
+                    state.read_metadata_block(bitmap).unwrap().as_ref(),
+                    before_bitmap.as_slice()
+                );
+                assert_eq!(
+                    state.read_metadata_block(block).unwrap().as_ref(),
+                    before_block.as_slice()
+                );
+                assert_eq!(owner_usage(&super_block, &mut state, 1000).used_bytes, before_quota);
+                assert_eq!(
+                    state.get_xattr(&inode, crate::Ext4XattrNamespace::User, b"large"),
+                    Ok(Some(original.clone()))
+                );
+            }
+        }
+    }
 }
 
 #[def_test]
@@ -1551,6 +1803,7 @@ fn cold_owner_readonly_lookup_survives_journal_abort_without_quota_io() {
             )
             .unwrap();
         state.sync_filesystem().unwrap();
+        inode.drop_quota_records(None);
         {
             let mut quota = super_block.quota_info();
             quota.suspend_cached(QuotaType::User).unwrap();
@@ -1596,6 +1849,7 @@ fn cold_readonly_inode_initializes_quota_at_xattr_mutation() {
     let number = {
         let mut state = ext4_private(&super_block).unwrap().write(&super_block);
         let inode = allocate_accounted_inode(&mut state, 1000);
+        inode.drop_quota_records(None);
         state.suspend_internal_quotas(&super_block).unwrap();
         state.resume_internal_quotas(&super_block).unwrap();
         state.sync_filesystem().unwrap();
@@ -1648,6 +1902,7 @@ fn delalloc_space_refusal_refunds_quota_and_preserves_remount_admission() {
         assert_eq!(inode.reserved_data_blocks(), 0);
         let usage = owner_usage(&super_block, &mut state, 1000);
         assert_eq!((usage.used_bytes, usage.reserved_bytes), (0, 0));
+        inode.drop_quota_records(None);
         inode
     };
     remount_quota_filesystem(&super_block, true).unwrap();

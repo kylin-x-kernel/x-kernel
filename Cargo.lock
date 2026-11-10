@@ -3158,6 +3158,7 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "kerrno",
+ "ksync",
  "log",
  "unittest",
 ]

@@ -765,6 +765,8 @@ I/O without recursive charging or caller-held lock reentry. Administrative
 authorization, ID mapping, backing-file protection and transaction recovery
 remain integration obligations. Ext4 enables internal user/group usage accounting
 from its superblock quota inode fields.
+Inode snapshots pin live identities and must be released outside locks needed
+by eviction. Waiting for evictions must likewise happen outside those locks.
 
 ## Notification-interest lifetime
 

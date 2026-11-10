@@ -27,7 +27,7 @@ mod tree;
 mod types;
 mod v2;
 
-pub use accounting::{Dqinfo, QuotaInfo};
+pub use accounting::{Dqinfo, Dquot, DquotRef, QuotaInfo};
 use kerrno::{KError, KResult, LinuxError};
 pub use types::{ChargeFlags, Dqblk, QuotaFields, QuotaFormat, QuotaId, QuotaState, QuotaType};
 

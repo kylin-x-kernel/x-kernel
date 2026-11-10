@@ -391,6 +391,7 @@ fn fragmented_truncate_fixture(
             )
             .unwrap();
         assert_eq!(allocation.first_block().get(), physical.get());
+        private.add_allocated_bytes((len_blocks * block_size) as u64);
         filesystem
             .insert_extent_mapping(
                 &private,
@@ -408,13 +409,6 @@ fn fragmented_truncate_fixture(
             .unwrap();
         expected[logical * block_size..(logical + len_blocks) * block_size].copy_from_slice(&data);
     }
-    filesystem
-        .update_inode_blocks_metadata(
-            &private,
-            ((blocks_per_page + 2) * block_size / 512) as u64,
-            &mut handle,
-        )
-        .unwrap();
     filesystem
         .update_regular_inode_write_metadata(
             &private,

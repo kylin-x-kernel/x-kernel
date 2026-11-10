@@ -956,13 +956,14 @@ pub(crate) fn allocator_test_filesystem_with_options(
 
 pub(crate) fn allocate_contiguous_blocks(
     filesystem: &mut Ext4SbInfo,
+    inode: &Ext4Inode,
     count: u32,
     handle: &mut crate::jbd2::JournalHandle<'_>,
 ) -> PhysicalBlock {
     let mut first = None;
     for index in 0..count {
         let allocation = filesystem
-            .allocate_block(&allocation_test_inode(12), None, handle)
+            .allocate_block(inode, None, handle)
             .unwrap();
         if index == 0 {
             first = Some(allocation.block());
@@ -1185,6 +1186,7 @@ pub(crate) fn eviction_test_unlinked_inode_with_initialization(
         assert_eq!(allocation.first_block().get(), next_physical.get());
         let physical = allocation.first_block();
         next_physical = FilesystemBlock::new(next_physical.get() + u64::from(*len));
+        inode.add_allocated_bytes(u64::from(*len) * u64::from(filesystem.layout().block_size()));
         filesystem
             .insert_extent_mapping(
                 &inode,

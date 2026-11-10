@@ -416,8 +416,7 @@ impl Ext4SbInfo {
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<InodeAllocation> {
         let allocation = self.release_inode_bitmap(inode, handle)?;
-        let stat = inode.stat();
-        self.free_quota_inode(stat.uid, stat.gid, handle)?;
+        self.free_inode_quota(inode)?;
         self.sync_inode_quotas(inode, handle)?;
         Ok(allocation)
     }

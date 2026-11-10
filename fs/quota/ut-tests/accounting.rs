@@ -13,6 +13,68 @@ use crate::{
 const FORMAT: QuotaFormat = QuotaFormat::VfsV1;
 
 #[def_test]
+fn inode_records_import_reservations_again_after_class_reactivation() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut quota = io.enable_all(FORMAT);
+    let owners = ids(1000);
+    for owner in &owners[..2] {
+        quota.get(&mut io, *owner).unwrap();
+    }
+    let mut existing = [None, None, None];
+    quota
+        .bind_cached(&owners[1..2], i64::MAX, &mut existing)
+        .unwrap();
+    let mut rejected = [None, None, None];
+    assert_eq!(
+        quota.bind_cached(&owners[..2], 1, &mut rejected),
+        Err(KError::from(LinuxError::EOVERFLOW))
+    );
+    assert!(rejected.iter().all(Option::is_none));
+    assert_eq!(quota.get(&mut io, owners[0]).unwrap().reserved_bytes, 0);
+    quota.release_space_refs(&existing, i64::MAX).unwrap();
+    drop(existing);
+    let mut records = [None, None, None];
+    quota.bind_cached(&owners[..2], 4096, &mut records).unwrap();
+    quota
+        .reserve_space_refs(&records, 1024, 1, ChargeFlags::WARN)
+        .unwrap();
+    assert!(quota.info(QuotaType::User).unwrap().is_active());
+    quota.deactivate(QuotaType::User).unwrap();
+    assert!(!quota.info(QuotaType::User).unwrap().is_active());
+    records[0] = None;
+    let file = quota.disable(&mut io, QuotaType::User).unwrap();
+    quota
+        .reserve_space_refs(&records, 1024, 1, ChargeFlags::WARN)
+        .unwrap();
+    quota
+        .enable(
+            &mut io,
+            QuotaType::User,
+            &file,
+            FORMAT,
+            QuotaState::USAGE_ENABLED | QuotaState::LIMITS_ENABLED,
+        )
+        .unwrap();
+    quota.get(&mut io, owners[0]).unwrap();
+    quota.bind_cached(&owners[..2], 6144, &mut records).unwrap();
+    assert_eq!(quota.get(&mut io, owners[0]).unwrap().reserved_bytes, 6144);
+    assert_eq!(quota.get(&mut io, owners[1]).unwrap().reserved_bytes, 6144);
+
+    quota
+        .alloc_space_refs(&records, 4096, 1, ChargeFlags::WARN)
+        .unwrap();
+    quota.validate_free_space_refs(&records, 1024).unwrap();
+    let mut wrong_class = records.clone();
+    wrong_class[0] = records[1].clone();
+    assert_eq!(
+        quota.validate_free_space_refs(&wrong_class, 1024),
+        Err(KError::from(LinuxError::EINVAL))
+    );
+    assert_eq!(quota.get(&mut io, owners[0]).unwrap().used_bytes, 4096);
+    assert_eq!(quota.get(&mut io, owners[1]).unwrap().used_bytes, 4096);
+}
+
+#[def_test]
 fn quota_classes_keep_the_same_numeric_id_independent() {
     let mut io = MemoryFiles::new(FORMAT);
     let mut quota = io.enable_all(FORMAT);

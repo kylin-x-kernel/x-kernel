@@ -242,8 +242,7 @@ fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
         }
     } else if !super_block.flags().contains(kvfs::SuperBlockFlags::RDONLY) {
         context.sync_filesystem()?;
-        ext4.write(super_block)
-            .suspend_internal_quotas(super_block)
+        ext4.suspend_internal_quotas(super_block)
             .map_err(vfs::into_vfs_err)?;
         ext4.write(super_block)
             .sync_filesystem()

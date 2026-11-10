@@ -125,21 +125,16 @@ impl Ext4SbInfo {
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<u32> {
         self.begin_extent_mutation(inode)?;
-        let metadata_freed = if plan.remaining.is_empty() {
-            plan.path.prune_empty_leaf(self, inode, handle)?
+        if plan.remaining.is_empty() {
+            plan.path.prune_empty_leaf(self, inode, handle)?;
         } else {
             plan.path
                 .rewrite_leaf(self, inode, &plan.remaining, handle)?;
-            0
-        };
+        }
         for extent in plan.released {
             self.release_extent_data_blocks(inode, extent, handle)?;
         }
-        self.update_inode_extent_block_delta(
-            inode,
-            -i128::from(metadata_freed + u64::from(plan.freed)),
-            handle,
-        )?;
+        self.update_inode_blocks_metadata(inode, handle)?;
         Ok(plan.freed)
     }
 
@@ -489,21 +484,12 @@ impl Ext4SbInfo {
         let header = path.leaf_header()?;
         let mut extents = path.decode_leaf_extents(self, inode)?;
         insert_extent_run(&mut extents, new_extents)?;
-        let new_metadata_blocks = if extents.len() > usize::from(header.max()) {
-            path.split_leaf(self, inode, &extents, handle)?
+        if extents.len() > usize::from(header.max()) {
+            path.split_leaf(self, inode, &extents, handle)?;
         } else {
             path.rewrite_leaf(self, inode, &extents, handle)?;
-            0
-        };
-        let added_blocks = new_extents.iter().try_fold(0u64, |blocks, extent| {
-            blocks
-                .checked_add(u64::from(extent.len))
-                .ok_or(Ext4Error::Overflow)
-        })?;
-        let allocated_delta = added_blocks
-            .checked_add(new_metadata_blocks)
-            .ok_or(Ext4Error::Overflow)?;
-        self.update_inode_extent_block_delta(inode, i128::from(allocated_delta), handle)
+        }
+        self.update_inode_blocks_metadata(inode, handle)
     }
 
     fn inline_extent_root_growth_is_supported(
@@ -659,7 +645,10 @@ impl Ext4SbInfo {
             path.rewrite_leaf(self, inode, &extents, handle)?;
             0
         };
-        self.update_inode_extent_block_delta(inode, i128::from(new_metadata_blocks), handle)
+        if new_metadata_blocks != 0 {
+            self.update_inode_blocks_metadata(inode, handle)?;
+        }
+        Ok(())
     }
 
     /// Removes `range` when it is contained in a single leaf path.
@@ -699,28 +688,18 @@ impl Ext4SbInfo {
             return Ok(false);
         }
 
-        let released_data_blocks = released.iter().try_fold(0u64, |blocks, extent| {
-            blocks
-                .checked_add(u64::from(extent.len))
-                .ok_or(Ext4Error::Overflow)
-        })?;
-
-        let metadata_delta = if extents.is_empty() {
-            -i128::from(path.prune_empty_leaf(self, inode, handle)?)
+        if extents.is_empty() {
+            path.prune_empty_leaf(self, inode, handle)?;
         } else if extents.len() > usize::from(header.max()) {
-            i128::from(path.split_leaf(self, inode, &extents, handle)?)
+            path.split_leaf(self, inode, &extents, handle)?;
         } else {
             path.rewrite_leaf(self, inode, &extents, handle)?;
-            0
-        };
+        }
 
         for extent in released {
             self.release_extent_data_blocks(inode, extent, handle)?;
         }
-        let delta = metadata_delta
-            .checked_sub(i128::from(released_data_blocks))
-            .ok_or(Ext4Error::Overflow)?;
-        self.update_inode_extent_block_delta(inode, delta, handle)?;
+        self.update_inode_blocks_metadata(inode, handle)?;
         Ok(true)
     }
 
@@ -1049,16 +1028,10 @@ impl Ext4SbInfo {
             return Ok(None);
         }
 
-        let old_metadata_blocks =
-            u64::try_from(collected.metadata_blocks.len()).map_err(|_| Ext4Error::Overflow)?;
-        let old_allocated_blocks = extent_tree_allocated_blocks(&old_extents, old_metadata_blocks)?;
-        let rewrite_metadata_blocks = self.rewrite_extent_tree(inode, &extents, handle)?;
+        self.rewrite_extent_tree(inode, &extents, handle)?;
         Ok(Some(ExtentMutationState {
-            rewrite_metadata_blocks,
-            old_allocated_blocks,
             released_data,
             metadata_blocks: collected.metadata_blocks,
-            extents,
         }))
     }
 
@@ -1084,13 +1057,7 @@ impl Ext4SbInfo {
                 self.release_allocated_metadata_block_without_revoke(inode, block, handle)?;
             }
         }
-        self.update_inode_extent_block_accounting(
-            inode,
-            state.old_allocated_blocks,
-            &state.extents,
-            state.rewrite_metadata_blocks,
-            handle,
-        )
+        self.update_inode_blocks_metadata(inode, handle)
     }
 
     pub(crate) fn collect_extent_tree(&self, inode: &Ext4Inode) -> Ext4Result<CollectedExtentTree> {
@@ -1194,18 +1161,17 @@ impl Ext4SbInfo {
         inode: &Ext4Inode,
         extents: &[MutableExtent],
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<u64> {
+    ) -> Ext4Result<()> {
         let generation = decode_header(&inode.raw_i_block())?.generation();
         let inline_capacity = usize::from(disk_extent::inline_extent_capacity()?);
         if extents.len() <= inline_capacity {
             self.rewrite_inode_extent_root(inode, handle, |i_block| {
                 encode_inline_leaf_root(i_block, generation, extents, |_, _| true)
             })?;
-            return Ok(0);
+            return Ok(());
         }
 
-        let created = self.create_extent_tree_blocks(inode, generation, extents, handle)?;
-        let children = created.root_children;
+        let children = self.create_extent_tree_blocks(inode, generation, extents, handle)?;
         let root_depth = children
             .first()
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?
@@ -1218,7 +1184,7 @@ impl Ext4SbInfo {
         self.rewrite_inode_extent_root(inode, handle, |i_block| {
             encode_inline_index_root(i_block, generation, root_depth, &children, |_, _| true)
         })?;
-        Ok(created.metadata_blocks)
+        Ok(())
     }
 
     fn rewrite_inode_extent_root(
@@ -1244,7 +1210,7 @@ impl Ext4SbInfo {
         generation: u32,
         extents: &[MutableExtent],
         handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<CreatedExtentTree> {
+    ) -> Ext4Result<Vec<ExtentTreeBlockRef>> {
         let block_size = self.device.block_size();
         let leaf_capacity = usize::from(disk_extent::extent_block_capacity(block_size)?);
         if leaf_capacity == 0 {
@@ -1252,10 +1218,8 @@ impl Ext4SbInfo {
         }
 
         let mut level = Vec::new();
-        let mut metadata_blocks = 0u64;
         for chunk in extents.chunks(leaf_capacity) {
             let block = self.allocate_extent_tree_block(inode, chunk.first().copied(), handle)?;
-            metadata_blocks = metadata_blocks.checked_add(1).ok_or(Ext4Error::Overflow)?;
             let access = self
                 .metadata_io
                 .create_access(FilesystemBlock::new(block.get()), handle)?;
@@ -1286,7 +1250,6 @@ impl Ext4SbInfo {
             let mut next_level = Vec::new();
             for chunk in level.chunks(index_capacity) {
                 let block = self.allocate_extent_tree_block(inode, None, handle)?;
-                metadata_blocks = metadata_blocks.checked_add(1).ok_or(Ext4Error::Overflow)?;
                 let access = self
                     .metadata_io
                     .create_access(FilesystemBlock::new(block.get()), handle)?;
@@ -1311,38 +1274,7 @@ impl Ext4SbInfo {
             }
             level = next_level;
         }
-        Ok(CreatedExtentTree {
-            root_children: level,
-            metadata_blocks,
-        })
-    }
-
-    fn update_inode_extent_block_accounting(
-        &self,
-        inode: &Ext4Inode,
-        old_allocated_blocks: u64,
-        extents: &[MutableExtent],
-        metadata_blocks: u64,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<()> {
-        let new_allocated_blocks = extent_tree_allocated_blocks(extents, metadata_blocks)?;
-        let delta = i128::from(new_allocated_blocks)
-            .checked_sub(i128::from(old_allocated_blocks))
-            .ok_or(Ext4Error::Overflow)?;
-        self.update_inode_extent_block_delta(inode, delta, handle)
-    }
-
-    fn update_inode_extent_block_delta(
-        &self,
-        inode: &Ext4Inode,
-        delta: i128,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<()> {
-        if delta == 0 {
-            return Ok(());
-        }
-        let blocks = inode_blocks_after_extent_delta(inode, self.layout().block_size(), delta)?;
-        self.update_inode_blocks_metadata(inode, blocks, handle)
+        Ok(level)
     }
 
     fn allocate_extent_tree_block(
@@ -2121,17 +2053,8 @@ impl ExtentPath {
 /// Intermediate state between collecting/rewriting an extent tree and
 /// releasing (or collecting) the old blocks.
 struct ExtentMutationState {
-    rewrite_metadata_blocks: u64,
-    old_allocated_blocks: u64,
     released_data: Vec<MutableExtent>,
     metadata_blocks: Vec<PhysicalBlock>,
-    extents: Vec<MutableExtent>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct CreatedExtentTree {
-    root_children: Vec<ExtentTreeBlockRef>,
-    metadata_blocks: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2400,41 +2323,6 @@ fn clear_extent_entries(bytes: &mut [u8], header: disk_extent::ExtentHeader) -> 
 
 fn logical_block_u32(logical: LogicalBlock) -> Ext4Result<u32> {
     u32::try_from(logical.get()).map_err(|_| Ext4Error::Overflow)
-}
-
-fn extent_tree_allocated_blocks(
-    extents: &[MutableExtent],
-    metadata_blocks: u64,
-) -> Ext4Result<u64> {
-    extents.iter().try_fold(metadata_blocks, |blocks, extent| {
-        blocks
-            .checked_add(u64::from(extent.len))
-            .ok_or(Ext4Error::Overflow)
-    })
-}
-
-fn inode_blocks_after_extent_delta(
-    inode: &Ext4Inode,
-    block_size: u32,
-    fs_block_delta: i128,
-) -> Ext4Result<u64> {
-    if inode.flags() & disk_inode::EXT4_HUGE_FILE_FL != 0 {
-        return Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile));
-    }
-    if !block_size.is_multiple_of(512) {
-        return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockSize));
-    }
-    let sectors_per_block = i128::from(block_size / 512);
-    let sector_delta = fs_block_delta
-        .checked_mul(sectors_per_block)
-        .ok_or(Ext4Error::Overflow)?;
-    let blocks = i128::from(inode.blocks())
-        .checked_add(sector_delta)
-        .ok_or(Ext4Error::Overflow)?;
-    if blocks < 0 {
-        return Err(Ext4Error::Overflow);
-    }
-    u64::try_from(blocks).map_err(|_| Ext4Error::Overflow)
 }
 
 fn extent_tree_logical_end() -> u64 {

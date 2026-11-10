@@ -427,6 +427,8 @@ fn sync_filesystem_drains_pending_metadata_checkpoint() {
 
 #[def_test]
 fn successful_operations_share_running_transaction_until_sync() {
+    let allocator_inode = allocation_test_inode(12);
+
     let (mut filesystem, _device) = revoke_journal_test_filesystem(501);
     let credits = JournalCredits::new(4);
     let block_goal = FilesystemBlock::new(6);
@@ -441,7 +443,7 @@ fn successful_operations_share_running_transaction_until_sync() {
     let transaction = first_handle.id();
     let first_allocation = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(block_goal),
             &mut first_handle,
         )
@@ -465,7 +467,7 @@ fn successful_operations_share_running_transaction_until_sync() {
     assert_eq!(second_handle.id(), transaction);
     let second_allocation = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(block_goal),
             &mut second_handle,
         )
@@ -493,14 +495,14 @@ fn successful_operations_share_running_transaction_until_sync() {
     let mut cleanup_handle = cleanup_journal.begin(cleanup_credits).unwrap();
     filesystem
         .release_allocated_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             first_allocation.block(),
             &mut cleanup_handle,
         )
         .expect("release first block");
     filesystem
         .release_allocated_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             second_allocation.block(),
             &mut cleanup_handle,
         )
@@ -514,6 +516,8 @@ fn successful_operations_share_running_transaction_until_sync() {
 
 #[def_test]
 fn journal_queue_checkpoints_shared_metadata_in_one_batch() {
+    let allocator_inode = allocation_test_inode(12);
+
     let (mut filesystem, device) = revoke_journal_test_filesystem(502);
     let journal = filesystem
         .metadata_journal()
@@ -525,7 +529,7 @@ fn journal_queue_checkpoints_shared_metadata_in_one_batch() {
     let first_transaction = first_handle.id();
     let first_allocation = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(block_goal),
             &mut first_handle,
         )
@@ -545,7 +549,7 @@ fn journal_queue_checkpoints_shared_metadata_in_one_batch() {
     let second_transaction = second_handle.id();
     let second_allocation = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(block_goal),
             &mut second_handle,
         )
@@ -592,14 +596,14 @@ fn journal_queue_checkpoints_shared_metadata_in_one_batch() {
     let cleanup_transaction = cleanup_handle.id();
     filesystem
         .release_allocated_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             first_allocation.block(),
             &mut cleanup_handle,
         )
         .expect("release first test block");
     filesystem
         .release_allocated_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             second_allocation.block(),
             &mut cleanup_handle,
         )
@@ -983,12 +987,14 @@ pub(crate) fn override_mounted_transaction_credits(filesystem: &Ext4SbInfo, cred
 
 #[def_test]
 fn allocation_admission_commits_frees_before_reuse_without_checkpoint() {
+    let allocator_inode = allocation_test_inode(12);
+
     let (mut filesystem, _) = revoke_journal_test_filesystem(990);
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
     let allocation = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut handle,
         )
@@ -997,7 +1003,7 @@ fn allocation_admission_commits_frees_before_reuse_without_checkpoint() {
     filesystem.sync_filesystem().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
-        .release_allocated_block(&allocation_test_inode(12), allocation.block(), &mut handle)
+        .release_allocated_block(&allocator_inode, allocation.block(), &mut handle)
         .unwrap();
     handle.stop().unwrap();
     assert_eq!(filesystem.pending_checkpoint_count(), 0);
@@ -1011,7 +1017,7 @@ fn allocation_admission_commits_frees_before_reuse_without_checkpoint() {
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     let reused = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut handle,
         )
@@ -1021,12 +1027,14 @@ fn allocation_admission_commits_frees_before_reuse_without_checkpoint() {
 
 #[def_test]
 fn failed_freeing_commit_aborts_allocation_admission() {
+    let allocator_inode = allocation_test_inode(12);
+
     let (mut filesystem, device) = revoke_journal_test_filesystem(995);
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
     let allocation = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut handle,
         )
@@ -1035,7 +1043,7 @@ fn failed_freeing_commit_aborts_allocation_admission() {
     filesystem.sync_filesystem().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
-        .release_allocated_block(&allocation_test_inode(12), allocation.block(), &mut handle)
+        .release_allocated_block(&allocator_inode, allocation.block(), &mut handle)
         .unwrap();
     handle.stop().unwrap();
     device.fail_flush_at(device.flush_count() + 1);
@@ -1054,13 +1062,16 @@ fn failed_freeing_commit_aborts_allocation_admission() {
 
 #[def_test]
 fn allocation_admission_makes_the_last_freed_block_available() {
+    let allocator_inode = allocation_test_inode(12);
+    allocator_inode.add_allocated_bytes(TEST_BLOCK_SIZE as u64);
+
     let (mut filesystem, _) = journal_allocator_test_filesystem(0, 0xff);
     install_credit_limited_journal(&mut filesystem, 998, 32, true);
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
         .release_allocated_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             crate::PhysicalBlock::new(6),
             &mut handle,
         )
@@ -1076,7 +1087,7 @@ fn allocation_admission_makes_the_last_freed_block_available() {
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     let allocation = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut handle,
         )
@@ -1087,12 +1098,14 @@ fn allocation_admission_makes_the_last_freed_block_available() {
 
 #[def_test]
 fn allocation_with_spare_space_keeps_freeing_transaction_open() {
+    let allocator_inode = allocation_test_inode(12);
+
     let (mut filesystem, device) = revoke_journal_test_filesystem(1002);
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
     let old = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut handle,
         )
@@ -1101,7 +1114,7 @@ fn allocation_with_spare_space_keeps_freeing_transaction_open() {
     filesystem.sync_filesystem().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
-        .release_allocated_block(&allocation_test_inode(12), old.block(), &mut handle)
+        .release_allocated_block(&allocator_inode, old.block(), &mut handle)
         .unwrap();
     let transaction = handle.id();
     handle.stop().unwrap();
@@ -1117,7 +1130,7 @@ fn allocation_with_spare_space_keeps_freeing_transaction_open() {
     assert_eq!(handle.id(), transaction);
     let next = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut handle,
         )
@@ -1131,13 +1144,16 @@ fn allocation_with_spare_space_keeps_freeing_transaction_open() {
 
 #[def_test]
 fn bounded_allocation_pressure_commit_failure_keeps_frees_unavailable() {
+    let allocator_inode = allocation_test_inode(12);
+    allocator_inode.add_allocated_bytes(TEST_BLOCK_SIZE as u64);
+
     let (mut filesystem, device) = journal_allocator_test_filesystem(0, 0xff);
     install_credit_limited_journal(&mut filesystem, 1003, 32, true);
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
         .release_allocated_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             crate::PhysicalBlock::new(6),
             &mut handle,
         )
@@ -1162,6 +1178,8 @@ fn bounded_allocation_pressure_commit_failure_keeps_frees_unavailable() {
 
 #[def_test]
 fn allocation_reclaims_speculative_space_before_committing_frees() {
+    let allocator_inode = allocation_test_inode(12);
+
     let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     install_credit_limited_journal(&mut filesystem, 1004, 32, true);
@@ -1169,13 +1187,13 @@ fn allocation_reclaims_speculative_space_before_committing_frees() {
     let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
     let old = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut handle,
         )
         .unwrap();
     filesystem
-        .release_allocated_block(&allocation_test_inode(12), old.block(), &mut handle)
+        .release_allocated_block(&allocator_inode, old.block(), &mut handle)
         .unwrap();
     let transaction = handle.id();
     handle.stop().unwrap();
@@ -1195,7 +1213,7 @@ fn allocation_reclaims_speculative_space_before_committing_frees() {
     assert_eq!(handle.id(), transaction);
     let allocation = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut handle,
         )
@@ -1207,12 +1225,14 @@ fn allocation_reclaims_speculative_space_before_committing_frees() {
 
 #[def_test]
 fn partial_release_aborts_on_failure() {
+    let allocator_inode = allocation_test_inode(12);
+
     let (mut filesystem, _) = revoke_journal_test_filesystem(1010);
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
     let block = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut handle,
         )
@@ -1222,12 +1242,12 @@ fn partial_release_aborts_on_failure() {
     filesystem.sync_filesystem().unwrap();
     let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
     filesystem
-        .release_allocated_block(&allocation_test_inode(12), block, &mut handle)
+        .release_allocated_block(&allocator_inode, block, &mut handle)
         .unwrap();
     // The next bitmap bit was already free: abort instead of retaining a
     // usable transaction with a partially executed release reservation.
     let result = filesystem.release_allocated_block(
-        &allocation_test_inode(12),
+        &allocator_inode,
         crate::PhysicalBlock::new(block.get() + 1),
         &mut handle,
     );

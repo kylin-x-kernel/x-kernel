@@ -127,14 +127,15 @@ fn in_place_namespace_updates_do_not_commit_pending_frees() {
         .unwrap();
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    let allocator_inode = allocation_test_inode(12);
     let block = filesystem
-        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .allocate_block(&allocator_inode, None, &mut handle)
         .unwrap();
     handle.stop().unwrap();
     filesystem.sync_filesystem().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
-        .release_allocated_block(&allocation_test_inode(12), block.block(), &mut handle)
+        .release_allocated_block(&allocator_inode, block.block(), &mut handle)
         .unwrap();
     let transaction = handle.id();
     handle.stop().unwrap();

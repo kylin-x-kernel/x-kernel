@@ -645,49 +645,53 @@ impl SuperBlockOperations for Ext4SuperOperations {
     }
 
     fn evict_inode(&self, inode: &VfsInode) -> VfsResult<()> {
-        default_evict_inode(inode)?;
         let private = inode.private::<Ext4Inode>()?;
-        let _writeback_guard = private.lock_writeback();
-        let super_block = inode.super_block()?;
-        let ext4 = ext4_private(&super_block)?;
-        let state = ext4.read();
-        if state.is_quota_inode(private.number()) {
-            return Ok(());
-        }
-        // Drop the spaces on every eviction, link count included: unlink comes
-        // through here too, and only this call releases the group twin's strong
-        // owner reference. Must run before release_all_delalloc: the latter can
-        // fail, and a space must never outlive its owner. Linux:
-        // `ext4_discard_preallocations` at its eviction sites.
-        //
-        // Unconditional on purpose: this is the last guarantee that a twin
-        // cannot outlive its owner, and a "no inode-side entry" short-circuit
-        // would trust an invariant that drift only logs in release builds.
-        state.release_preallocs(private);
-        state.release_all_delalloc(private).map_err(into_vfs_err)?;
-        drop(state);
-        if inode.link_count() != 0 {
-            ext4.write(&super_block)
-                .write_inode_timestamps(private)
-                .map_err(into_vfs_err)?;
-            return Ok(());
-        }
-        let timestamp = current_ext4_timestamp(inode);
-        ext4.write(&super_block)
-            .eviction_prepare(private)
-            .map_err(into_vfs_err)?;
-        loop {
-            let (_, is_done) = ext4
-                .write(&super_block)
-                .eviction_release_batch(private, EVICTION_BATCH_BLOCKS)
-                .map_err(into_vfs_err)?;
-            if is_done {
-                break;
+        let result = (|| {
+            default_evict_inode(inode)?;
+            let _writeback_guard = private.lock_writeback();
+            let super_block = inode.super_block()?;
+            let ext4 = ext4_private(&super_block)?;
+            let state = ext4.read();
+            if state.is_quota_inode(private.number()) {
+                return Ok(());
             }
-        }
-        ext4.write(&super_block)
-            .eviction_finish(private, timestamp)
-            .map_err(into_vfs_err)
+            // Drop the spaces on every eviction, link count included: unlink comes
+            // through here too, and only this call releases the group twin's strong
+            // owner reference. Must run before release_all_delalloc: the latter can
+            // fail, and a space must never outlive its owner. Linux:
+            // `ext4_discard_preallocations` at its eviction sites.
+            //
+            // Unconditional on purpose: this is the last guarantee that a twin
+            // cannot outlive its owner, and a "no inode-side entry" short-circuit
+            // would trust an invariant that drift only logs in release builds.
+            state.release_preallocs(private);
+            state.release_all_delalloc(private).map_err(into_vfs_err)?;
+            drop(state);
+            if inode.link_count() != 0 {
+                ext4.write(&super_block)
+                    .write_inode_timestamps(private)
+                    .map_err(into_vfs_err)?;
+                return Ok(());
+            }
+            let timestamp = current_ext4_timestamp(inode);
+            ext4.write(&super_block)
+                .eviction_prepare(private)
+                .map_err(into_vfs_err)?;
+            loop {
+                let (_, is_done) = ext4
+                    .write(&super_block)
+                    .eviction_release_batch(private, EVICTION_BATCH_BLOCKS)
+                    .map_err(into_vfs_err)?;
+                if is_done {
+                    break;
+                }
+            }
+            ext4.write(&super_block)
+                .eviction_finish(private, timestamp)
+                .map_err(into_vfs_err)
+        })();
+        private.drop_quota_records(None);
+        result
     }
 }
 
@@ -1208,9 +1212,16 @@ impl InodeOperations for Ext4Inode {
         _request_mask: kvfs::GetattrRequestMask,
         _query_flags: kvfs::GetattrQueryFlags,
     ) -> VfsResult<Metadata> {
-        path.map(kvfs::Path::inode)
+        let mut metadata = path
+            .map(kvfs::Path::inode)
             .map(|inode| inode.metadata())
-            .ok_or(VfsError::InvalidInput)
+            .ok_or(VfsError::InvalidInput)?;
+        if self.kind() == InodeKind::RegularFile {
+            metadata.blocks = self
+                .blocks_with_delalloc(metadata.block_size)
+                .map_err(into_vfs_err)?;
+        }
+        Ok(metadata)
     }
 
     fn setattr(

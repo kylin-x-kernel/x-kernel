@@ -1119,7 +1119,9 @@ Delayed-allocation admission 使用 primary superblock 的 free-block counter �
 blocks 和 core mount aggregate。reserve/release/truncate/writeback/eviction 只能调用 core 的
 区间 API，由 core 在各自临界区内原子更新 inode 区间、per-inode count 和 mount
 aggregate（inode 侧在 per-inode 状态锁内，mount 总量在独立 delalloc 锁内）；
-bridge 不读取或调整任一计数。该 counter 与 group descriptor 由同一
+writeback 结算时，同一 inode 状态锁内将配额预留转为已用、增加已分配块数并移除已结算
+的延迟预留，`getattr` 读取的已分配量和剩余预留不会重复计算同一块。bridge 不读取或调整
+任一计数。该 counter 与 group descriptor 由同一
 allocation/release mutation 更新，因此 admission 与显式 `statfs()` 都直接读该常
 数时间 aggregate，不遍历 group descriptor（避免持锁 O(组数) 折叠阻塞全局分配）。
 目录分配的 Orlov goal 选择同样只读常数时间 aggregate：allocator 锁内一次取得
@@ -1595,7 +1597,9 @@ for writes until project identity and inheritance are integrated. Read-only
 project mounts retain orphan/recovery evidence instead of performing unaccounted
 cleanup. Filesystem sync also preserves this unsupported mount state without
 clearing recovery features. Read-only remount drains writeback and releases
-cached records in bounded transactions before suspending accounting. Suspension
+cached records in bounded transactions before suspending accounting. After
+pinning its live inode snapshot, suspension waits for earlier inode evictions
+without holding mount mutation protection. Suspension
 retains the canonical quota files and class information; final shutdown alone unloads them. Failed
 read-write initialization restores suspension so a later remount can retry.
 Resident inode construction and read-only open do not acquire owner records or
@@ -1622,7 +1626,24 @@ allocation policy and reserves owner-record writeback credits for each batch. Ra
 retain their physical role. Up to four affected inodes contribute user/group
 record credits to an ordinary mutation.
 
-Delayed-allocation admission updates cached quota reservations while holding the
+Physical allocation, reservation claims and releases update the resident inode's
+allocated sectors together with its cached quota records under the inode state
+lock. The block allocator refunds both counters when allocation fails or returns
+a shorter run. Extent and external-xattr updates persist the resident block
+count in the same transaction as their metadata changes; quota backing inodes
+still maintain their own block count without charging themselves.
+External-xattr detach and shared-block replacement validate the inode sector
+count and bound quota records under mount mutation protection before releasing
+the old reference or allocating its replacement. Eviction performs the same
+validation before publishing orphan state.
+Regular-file `stat` includes delayed-allocation reservations alongside allocated
+sectors, while the persisted inode block count contains only allocated space.
+
+Each resident inode binds its user and group records to the quota cache before
+mutations. Binding imports the inode's existing delayed reservations, and
+ownership changes publish the new records with the new owner. Newly allocated
+directory and symlink inodes bind already acquired records during their initial
+transaction. Delayed-allocation admission updates cached reservations while holding the
 existing inode state lock, before allocator/delalloc aggregate locks. It performs
 no quota-file I/O. Range validation and inode-counter overflow checks precede
 quota and mount admission. After admission, extent and counter publication cannot
@@ -1653,7 +1674,7 @@ prevent unlocked file release or processing later classes. After journal abort,
 final disable
 invalidates class cache/info without I/O; the original error is returned and
 disk recovery flags and committed journal evidence remain intact. No copied file registry,
-per-inode quota owner array, dirty queue or parallel usage counter is introduced.
+dirty queue or parallel usage counter is introduced.
 `usrquota` and `grpquota` select limit enforcement for internal quota files.
 Without the on-disk QUOTA feature, they authorize external quota-file activation
 through the VFS quota operations. Accounting and limits are then loaded together.
@@ -1706,7 +1727,10 @@ reading the file as quota metadata. Ordinary writes and shared write faults
 participate in the superblock lifecycle admission that excludes activation,
 writer initialization, reservation drain and class teardown.
 
-Disable checks the whole class for reservations before releasing any record.
+Disable stops class accounting and detaches resident inode records before
+release. Outstanding reservations stay on their inodes and are imported on a
+subsequent activation; an eviction already in progress finishes before record
+release. Read-only suspension instead requires reservations to be drained.
 After the final record/tree/free-list/header updates it commits, checkpoints and
 flushes the metadata domain before unloading the backing file. Under file-data
 exclusion it then invalidates live mapped/cache state, restores external inode

@@ -34,6 +34,10 @@ crate. No unsafe code or custom synchronization primitive is introduced.
 - A reservation is never encoded as allocated disk space. Failed claims
   or reclaims cannot move only a subset of the participating quota classes.
   Reclaim cannot transfer more than an active record's allocated usage.
+- An inode and the cache share one record per bound class. The provider binds
+  and drops references under its inode lifecycle locks and imports outstanding
+  reservations once on binding. Deactivation prevents further class charges
+  before record release; other classes retain their state.
 - Active-record dirty state is cleared only after its write succeeds.
   An initial acquisition remains inactive until its record and file header
   have both been written successfully. Writeback rejects inactive dirty
@@ -51,7 +55,7 @@ IRQ-disable or preemption-disable guards, or from IRQ/early-boot contexts.
 The provider receives the retained backing file and may mutably borrow the
 current filesystem transaction. It must not reenter the same quota state. The filesystem must use
 one lock order for quota administration, inode operations and direct quota I/O.
-No second quota lock or atomic counter mirrors a field in the protected state.
+The per-record mutex protects the shared record; it does not mirror a counter.
 
 ## Threat analysis
 
@@ -75,7 +79,7 @@ No second quota lock or atomic counter mirrors a field in the protected state.
 | F3 | Quota limit or expired grace refuses a charge | `EDQUOT` | No usage or deadline change for any participating class |
 | F4 | Record overwrite or file-info write fails | First error returned with failed dirty state retained | Independent dirty records are still attempted; explicit synchronization can retry pending writes |
 | F5 | Structural update fails after some writes | Error and possibly changed graph/free-list state | Caller must abort/recover its transaction domain before normal work continues |
-| F6 | Disable/suspend/release has reservations | `EBUSY` | Backing state stays owned until the filesystem drains reservations |
+| F6 | Disable/suspend/release has reservations or bound inode references | `EBUSY` | The provider drains reservations for suspension or deactivates and detaches the class before release |
 | F7 | State is dropped without successful disable | In-memory dirty state is lost | No hidden destructor I/O; owning filesystem must perform explicit shutdown |
 
 ## Privacy and limitations
@@ -101,7 +105,7 @@ by the filesystem's transaction implementation.
 - Keep filesystem/quota state singular and the backing-file context stable.
 - Verify authorization and namespace mapping before invoking administrative APIs.
 - Keep block units at the format boundary; account native space in bytes.
-- Drain delayed reservations before suspension or disabling.
+- Drain reservations before suspension; deactivate and detach before disabling.
 - Do not use ordinary overwrite retry as structural recovery.
 - Keep `QuotaIo` outside recursive charging and caller-held lock reentry.
 - Complete explicit synchronization/disable before final owner destruction.
@@ -110,6 +114,8 @@ Cached reservation operations never call a provider while the caller holds its
 inode reservation lock. Missing active records fail atomically. Ownership
 transfer validates both owner sets and all three classes before publishing
 candidates, including outstanding reservations in new-owner admission.
+Space-release validation uses the same record checks without publishing the
+candidate values; the filesystem must serialize it with the subsequent release.
 
 A free-entry head replacement is published after its data-block write succeeds.
 A failed first write leaves the head unchanged; failures after earlier neighbor

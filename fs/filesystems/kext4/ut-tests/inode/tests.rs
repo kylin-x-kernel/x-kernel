@@ -409,6 +409,11 @@ fn delayed_allocation_extents_merge_split_and_count_blocks() {
             .unwrap(),
         2
     );
+    assert_eq!(
+        inode.remove_delalloc_extent_with(5, 10, |_, _| Err(Ext4Error::Overflow)),
+        Err(Ext4Error::Overflow)
+    );
+    assert_eq!(inode.reserved_data_blocks(), 9);
     assert_eq!(inode.remove_delalloc_extent(5, 10).unwrap(), 5);
     assert_eq!(
         inode.unreserved_delalloc_extents(0, 13),

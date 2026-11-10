@@ -1391,7 +1391,11 @@ impl SuperBlock {
         Ok(())
     }
 
-    fn live_inodes(&self) -> Vec<Arc<VfsInode>> {
+    /// Returns a snapshot of the live inodes attached to this superblock.
+    ///
+    /// The returned references may run inode eviction when dropped; callers
+    /// must release them outside locks needed by filesystem eviction.
+    pub fn live_inodes(&self) -> Vec<Arc<VfsInode>> {
         let mut live = Vec::new();
         self.inodes.lock().retain(|inode| match inode.upgrade() {
             Some(inode) => {
@@ -1401,6 +1405,14 @@ impl SuperBlock {
             None => false,
         });
         live
+    }
+
+    /// Waits for inode evictions already in progress on this superblock.
+    ///
+    /// Callers must not hold locks needed by filesystem eviction. New
+    /// evictions can still start after this method returns.
+    pub fn wait_for_inode_evictions(&self) {
+        node::wait_for_inode_evictions(self);
     }
 
     /// Starts writeback for dirty inode page-cache state on this superblock.

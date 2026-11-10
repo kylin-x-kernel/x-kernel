@@ -784,6 +784,7 @@ struct Ext4InodeState {
     has_dirty_ctime: bool,
     delayed_extents: BTreeMap<u64, u64>,
     reserved_data_blocks: u64,
+    dquots: [Option<kquota::DquotRef>; 3],
     extent_status: ExtentStatusTree,
     is_extra_isize_expansion_disabled: bool,
     orphan: Option<OrphanLocation>,
@@ -806,6 +807,17 @@ impl Ext4InodeState {
         self.has_dirty_ctime |= self.metadata.ctime != timestamp;
         self.metadata.mtime = timestamp;
         self.metadata.ctime = timestamp;
+    }
+
+    fn allocated_blocks_after(&self, sectors: i128, flags: u32) -> Ext4Result<u64> {
+        if flags & disk_inode::EXT4_HUGE_FILE_FL != 0 {
+            return Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile));
+        }
+        i128::from(self.metadata.blocks)
+            .checked_add(sectors)
+            .and_then(|blocks| u64::try_from(blocks).ok())
+            .filter(|blocks| blocks >> 48 == 0)
+            .ok_or(Ext4Error::Overflow)
     }
 
     // The caller samples visible_size while holding the inode-state lock,
@@ -952,6 +964,7 @@ impl Ext4Inode {
                 has_dirty_ctime: false,
                 delayed_extents: BTreeMap::new(),
                 reserved_data_blocks: 0,
+                dquots: [None, None, None],
                 extent_status: ExtentStatusTree::default(),
                 is_extra_isize_expansion_disabled: false,
                 orphan: None,
@@ -1040,6 +1053,61 @@ impl Ext4Inode {
         f(&mut state)
     }
 
+    pub(crate) fn with_quota_records<R>(
+        &self,
+        f: impl FnOnce(&[Option<kquota::DquotRef>; 3]) -> R,
+    ) -> R {
+        self.with_state(|state| f(&state.dquots))
+    }
+
+    pub(crate) fn update_quota_records<R>(
+        &self,
+        f: impl FnOnce(u32, u32, u64, &mut [Option<kquota::DquotRef>; 3]) -> R,
+    ) -> R {
+        self.update_state(|state| {
+            f(
+                state.metadata.uid,
+                state.metadata.gid,
+                state.reserved_data_blocks,
+                &mut state.dquots,
+            )
+        })
+    }
+
+    pub(crate) fn update_allocated_blocks(
+        &self,
+        sectors: i128,
+        update_quota: impl FnOnce(&[Option<kquota::DquotRef>; 3]) -> Ext4Result<()>,
+    ) -> Ext4Result<()> {
+        self.update_state(|state| {
+            let blocks = state.allocated_blocks_after(sectors, self.flags())?;
+            update_quota(&state.dquots)?;
+            state.metadata.blocks = blocks;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn validate_allocated_blocks(
+        &self,
+        sectors: i128,
+        validate_quota: impl FnOnce(&[Option<kquota::DquotRef>; 3]) -> Ext4Result<()>,
+    ) -> Ext4Result<()> {
+        self.with_state(|state| {
+            state.allocated_blocks_after(sectors, self.flags())?;
+            validate_quota(&state.dquots)
+        })
+    }
+
+    pub(crate) fn drop_quota_records(&self, kind: Option<kquota::QuotaType>) {
+        self.update_state(|state| {
+            for quota_type in kquota::QuotaType::ALL {
+                if kind.is_none_or(|kind| kind == quota_type) {
+                    state.dquots[quota_type as usize] = None;
+                }
+            }
+        });
+    }
+
     /// This inode's speculative prealloc map. The lock inside is a leaf owned
     /// by the prealloc-space module, which is also the only code that locks
     /// it; see [`crate::prealloc_space`] for the lock order and the mutation
@@ -1075,9 +1143,19 @@ impl Ext4Inode {
 
     fn publish_metadata_with_timestamps(
         &self,
+        metadata: Ext4InodeMetadata,
+        persisted: PendingInodeTimestamps,
+        transaction: Option<Arc<RuntimeTransaction>>,
+    ) -> Ext4Result<()> {
+        self.publish_metadata_and_quotas(metadata, persisted, transaction, None)
+    }
+
+    fn publish_metadata_and_quotas(
+        &self,
         mut metadata: Ext4InodeMetadata,
         persisted: PendingInodeTimestamps,
         transaction: Option<Arc<RuntimeTransaction>>,
+        records: Option<[Option<kquota::DquotRef>; 3]>,
     ) -> Ext4Result<()> {
         self.update_state(|state| {
             // Publication without an owner invalidates older sync evidence.
@@ -1118,6 +1196,9 @@ impl Ext4Inode {
                 }
             }
             state.metadata = metadata;
+            if let Some(records) = records {
+                state.dquots = records;
+            }
         });
         Ok(())
     }
@@ -1533,6 +1614,16 @@ impl Ext4Inode {
         self.with_metadata(|metadata| metadata.blocks)
     }
 
+    pub(crate) fn blocks_with_delalloc(&self, block_size: u64) -> Ext4Result<u64> {
+        self.with_state(|state| {
+            state
+                .reserved_data_blocks
+                .checked_mul(block_size / 512)
+                .and_then(|reserved| state.metadata.blocks.checked_add(reserved))
+                .ok_or(Ext4Error::Overflow)
+        })
+    }
+
     /// Returns the raw ext4 inode flags.
     ///
     /// Returns: `i_flags` published by the last [`set_flags`](Self::set_flags).
@@ -1896,7 +1987,7 @@ impl Ext4Inode {
             // stale free/reserved view and over-reserve the mount-wide total,
             // starving later writes and underreporting statfs. Lock order stays
             // allocator then delalloc, matching statfs.
-            sb.reserve_quota_space(state.metadata.uid, state.metadata.gid, reserved)?;
+            sb.reserve_quota_space(&state.dquots, reserved)?;
             let admission = (|| {
                 let allocator = sync::mutex_lock(&sb.allocator);
                 let mut delalloc_reserved_blocks = sync::mutex_lock(&sb.delalloc_reserved_blocks);
@@ -1913,9 +2004,7 @@ impl Ext4Inode {
                 Ok(())
             })();
             if let Err(error) = admission {
-                if let Err(cleanup_error) =
-                    sb.release_quota_reservation(state.metadata.uid, state.metadata.gid, reserved)
-                {
+                if let Err(cleanup_error) = sb.release_quota_reservation(&state.dquots, reserved) {
                     error!(
                         "KExt4 delayed reservation rollback after {error:?} failed: \
                          {cleanup_error:?}"
@@ -1942,6 +2031,15 @@ impl Ext4Inode {
     }
 
     fn remove_delalloc_extent(&self, start: u64, end: u64) -> Ext4Result<u64> {
+        self.remove_delalloc_extent_with(start, end, |_, _| Ok(()))
+    }
+
+    fn remove_delalloc_extent_with(
+        &self,
+        start: u64,
+        end: u64,
+        before_remove: impl FnOnce(&mut Ext4InodeState, u64) -> Ext4Result<()>,
+    ) -> Ext4Result<u64> {
         if start >= end {
             return Ok(0);
         }
@@ -1965,6 +2063,7 @@ impl Ext4Inode {
                 .reserved_data_blocks
                 .checked_sub(released)
                 .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
+            before_remove(state, released)?;
 
             for (extent_start, extent_end) in overlapping {
                 state.delayed_extents.remove(&extent_start);
@@ -2398,8 +2497,7 @@ impl Ext4SbInfo {
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
         drop(delalloc_reserved_blocks);
-        let stat = inode.stat();
-        self.release_quota_reservation(stat.uid, stat.gid, released)
+        inode.with_quota_records(|records| self.release_quota_reservation(records, released))
     }
 
     /// Removes reservations already converted into physical allocation.
@@ -2410,7 +2508,15 @@ impl Ext4SbInfo {
         count: u64,
     ) -> Ext4Result<()> {
         let end = start.get().checked_add(count).ok_or(Ext4Error::Overflow)?;
-        let released = inode.remove_delalloc_extent(start.get(), end)?;
+        let released = inode.remove_delalloc_extent_with(start.get(), end, |state, released| {
+            if released != 0 {
+                let sectors = i128::from(released) * i128::from(self.layout().block_size() / 512);
+                let blocks = state.allocated_blocks_after(sectors, inode.flags())?;
+                self.claim_quota_reservation(inode, &state.dquots, released)?;
+                state.metadata.blocks = blocks;
+            }
+            Ok(())
+        })?;
         let mut reserved = sync::mutex_lock(&self.delalloc_reserved_blocks);
         *reserved = reserved
             .checked_sub(released)
@@ -2435,8 +2541,7 @@ impl Ext4SbInfo {
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
         drop(delalloc_reserved_blocks);
-        let stat = inode.stat();
-        self.release_quota_reservation(stat.uid, stat.gid, released)
+        inode.with_quota_records(|records| self.release_quota_reservation(records, released))
     }
 
     /// Releases every delayed-allocation reservation owned by an inode.
@@ -2452,8 +2557,7 @@ impl Ext4SbInfo {
             .checked_sub(released)
             .ok_or(Ext4Error::InvalidDelayedAllocationState)?;
         drop(delalloc_reserved_blocks);
-        let stat = inode.stat();
-        self.release_quota_reservation(stat.uid, stat.gid, released)
+        inode.with_quota_records(|records| self.release_quota_reservation(records, released))
     }
 
     pub(crate) fn publish_inode_metadata(
@@ -2576,7 +2680,10 @@ impl Ext4SbInfo {
             block_bytes,
             inode.number(),
             inode.links_count() == 0,
-            update,
+            |bytes| {
+                update_inode_blocks_bytes(bytes, inode.blocks())?;
+                update(bytes)
+            },
         )
     }
 
@@ -2878,15 +2985,18 @@ impl Ext4SbInfo {
                     update.ctime,
                 )
             })?;
-        if let Some((uid, gid)) = update.owner {
-            self.transfer_inode_quotas(inode, uid, gid, handle)?;
-        }
+        let records = if let Some((uid, gid)) = update.owner {
+            self.transfer_inode_quotas(inode, uid, gid, handle)?
+        } else {
+            None
+        };
         let access = self.metadata_io.write_access(block, handle)?;
         self.replace_inode_table_entry(&access, inode.number(), &bytes)?;
-        inode.publish_metadata_with_timestamps(
+        inode.publish_metadata_and_quotas(
             decoded.metadata,
             timestamps,
             Some(handle.transaction()?),
+            records,
         )?;
         if let Some(permission) = permission {
             inode.set_permission(permission);
@@ -2955,6 +3065,7 @@ impl Ext4SbInfo {
             &mut inode_table_bytes,
             inode.number(),
             |inode_bytes| {
+                update_inode_blocks_bytes(inode_bytes, inode.blocks())?;
                 timestamps.encode(inode_bytes)?;
                 put_u16(inode_bytes, 0x1a, 0)?;
                 if let Some(size) = size {
@@ -2975,12 +3086,9 @@ impl Ext4SbInfo {
     pub(crate) fn update_inode_blocks_metadata(
         &self,
         inode: &Ext4Inode,
-        blocks: u64,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        self.update_dirty_inode_metadata(inode, handle, |_filesystem, inode_bytes| {
-            update_inode_blocks_bytes(inode_bytes, blocks)
-        })
+        self.update_dirty_inode_metadata(inode, handle, |_filesystem, _inode_bytes| Ok(()))
     }
 
     /// Stages this resident inode's orphan link without acknowledging dirty times.
@@ -3315,7 +3423,7 @@ fn update_inode_size_bytes(output: &mut [u8], size: u64) -> Ext4Result<()> {
     put_u32(output, 0x6c, (size >> 32) as u32)
 }
 
-fn update_inode_blocks_bytes(output: &mut [u8], blocks: u64) -> Ext4Result<()> {
+pub(crate) fn update_inode_blocks_bytes(output: &mut [u8], blocks: u64) -> Ext4Result<()> {
     if blocks >> 48 != 0 {
         return Err(Ext4Error::Overflow);
     }

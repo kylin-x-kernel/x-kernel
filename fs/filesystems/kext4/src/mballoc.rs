@@ -720,7 +720,6 @@ impl Ext4SbInfo {
         let allocated = u64::from(allocation.block_count().get());
         let claimed = reserved(allocation.block_count().get())?;
         self.free_quota_space(request.inode, charged - (allocated - claimed), handle)?;
-        self.claim_quota_space(request.inode, claimed, handle)?;
         if let Some(start) = request.logical_start {
             self.consume_delalloc_range(request.inode, start, allocated)?;
         }

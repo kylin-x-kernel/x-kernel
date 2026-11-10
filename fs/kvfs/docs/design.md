@@ -1452,6 +1452,9 @@ Quota operations may sleep. Their backing-file I/O must bypass charging and
 must not reenter the same quota owner or reacquire a caller-held filesystem
 lock. Filesystem integration must establish one lock order and explicitly
 flush/disable quota before final owner destruction.
+The inode snapshot and eviction wait let a filesystem detach inode-held records
+before releasing its quota cache. Snapshots are dropped without locks needed by
+eviction, and the wait itself holds no filesystem mutation lock.
 
 ## Bounded private-fault readahead
 

@@ -21,7 +21,9 @@ outside this crate.
 kvfs::SuperBlock
   `-- Mutex<QuotaInfo<Arc<VfsInode>>>
         |-- [Option<Dqinfo<Arc<VfsInode>>>; 3] -- file, state, grace durations, QuotaTree
-        `-- BTreeMap<QuotaId, Dquot> -- native usage, disk offset, flags
+        `-- BTreeMap<QuotaId, DquotRef> -- shared records, native usage, disk offset, flags
+
+filesystem inode -- DquotRef --> cached record
 
 filesystem's existing quota files -- QuotaIo --> v2 codec / radix tree
 ```
@@ -34,16 +36,16 @@ The reference semantic boundaries are `include/linux/quota.h`,
 | --- | --- |
 | `QuotaInfo<F>` | Per-filesystem `quota_info` plus that filesystem's dquot cache |
 | `Dqinfo<F>` | Per-class file reference and `mem_dqinfo` with accounting/enforcement/suspension bits |
-| `Dquot` | `dquot` native data, stable disk offset, dirty and active bits |
+| `Dquot` | `dquot` identity, native data, stable disk offset, dirty and active bits |
 | `Dqblk` | `mem_dqblk`, including transient reserved space |
-| `QuotaId` | `kqid`; the cache key is the only stored record identity |
+| `QuotaId` | `kqid`; the cache key identifies the same record held by inodes |
 | `QuotaTree` | Selected format, `qtree_mem_dqinfo` block count and two on-disk free-list heads |
 
 There are no independent managers, mount owners, staging objects or cached
 copies of inode ownership. Tree depth, block size and entry size are derived
 from the selected format, rather than retained as duplicate fields. The
-presence of loaded file information represents usage-enabled state; that bit
-is derived by the public state accessor rather than stored a second time. The
+loaded file information persists while accounting is being deactivated, so
+the usage bit also governs whether bound records accept accounting. The
 selected format is stored once in `QuotaTree`. Each loaded `Dqinfo<F>` owns
 one canonical file reference, folding file presence into the loaded-class
 invariant rather than maintaining a separate optional file array. KVFS uses
@@ -59,7 +61,8 @@ may sleep and are task-context only. They do not require a process identity.
 No spinlock, IRQ-disable guard or preemption-disable guard may span them.
 
 Exclusive access to `QuotaInfo` serializes cache, usage, deadlines and format
-metadata together. The VFS uses a sleepable mutex. The filesystem must establish
+metadata together. A record's mutex protects its state while the cache and
+inodes share the record. The VFS uses a sleepable quota mutex. The filesystem must establish
 a consistent order with its own locks; its direct quota-file I/O must not
 reenter accounting or reacquire any caller-held filesystem lock. The core
 does not obtain current credentials or a current clock. Callers pass real-time
@@ -101,10 +104,12 @@ Writeback never retries tree insertion on an inactive record. An independent rec
 complete even when an earlier record repeatedly fails. It does not provide a device
 flush or transaction commit. `release` writes a retained nonempty record or
 deletes an unused one, then removes its cache entry. A later operation can
-reacquire it; callers receive value snapshots, never references into the cache.
+reacquire it. Release requires inode references to have been dropped first.
 
 Suspension flushes first and skips later accounting while keeping loaded
-state. `suspend_cached` performs only the state transition after the provider
+state. `Dqinfo::is_active` reports whether usage accounting is enabled and
+not suspended; releasing a loaded class can still be required after deactivation.
+`suspend_cached` performs only the state transition after the provider
 has drained reservations and synchronized/released records in its own bounded
 transactions. It invalidates clean cached snapshots and failed inactive
 acquisitions, retaining dirty active records for recovery. A failed resume can
@@ -123,9 +128,12 @@ it does not claim that discarded dirty usage became durable. The provider
 preserves disk recovery evidence after abort. Normal `unload` still rejects
 cached records or dirty information and never bypasses successful writeback.
 
-Suspend, disable and release refuse outstanding reservations with
-`EBUSY`, so the filesystem must first drain delayed allocation. Destruction
-does not perform implicit I/O; the filesystem owns successful final disable.
+Suspend, disable and release refuse outstanding reservations or inode record
+references with `EBUSY`. To disable an active class without draining every
+inode reservation, the provider first deactivates accounting, drops the
+class's in-memory reservation totals and detaches inode references. Inode
+reservations remain with their owners and are imported if the class is enabled
+again. Destruction performs no implicit I/O; the filesystem owns final disable.
 
 ## Accounting algorithms
 
@@ -135,6 +143,10 @@ computed in a fixed three-element stack array. Only after all checks succeed
 are the candidates installed. Thus an `EDQUOT` or arithmetic failure cannot
 leave a partial user/group/project usage charge or a newly started deadline.
 This transient calculation adds no persistent phase or rollback fields.
+Filesystem callers can instead charge the records bound to an inode. Binding
+imports that inode's outstanding reservation once while the provider holds its
+reservation lock. Those references must belong to the same quota owner and
+class slots passed to the accounting operation.
 
 Limits and usage are signed native counters measured in bytes or inodes.
 Zero limits mean unlimited. Hard limits refuse growth strictly above the
@@ -211,6 +223,10 @@ e2fsprogs-generated quota file checks interoperability; its provenance and
 regeneration commands are next to the fixture.
 
 ## Cached reservations and ownership transfer
+
+`validate_free_space_refs` prepares the same cached record updates as a space
+release without publishing them. The filesystem serializes this validation
+with the eventual release and its metadata changes.
 
 `reserve_space_cached` and `release_space_cached` update existing acquired
 records without I/O; active missing records return `ESRCH` before any candidate

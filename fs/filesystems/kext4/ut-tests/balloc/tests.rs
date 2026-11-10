@@ -14,6 +14,8 @@ use crate::{
 
 #[def_test]
 fn allocation_goals_in_second_group_round_trip_accounting() {
+    let allocator_inode = allocation_test_inode(12);
+
     let (filesystem, device) = allocator_multigroup_test_filesystem(&[
         AllocatorGroupSpec {
             free_blocks: 26,
@@ -39,14 +41,14 @@ fn allocation_goals_in_second_group_round_trip_accounting() {
     let transaction = handle.id();
     let block = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(42)),
             &mut handle,
         )
         .unwrap();
     assert!((32..64).contains(&block.block().get()));
     filesystem
-        .release_allocated_block(&allocation_test_inode(12), block.block(), &mut handle)
+        .release_allocated_block(&allocator_inode, block.block(), &mut handle)
         .unwrap();
     let inode = filesystem
         .allocate_inode(

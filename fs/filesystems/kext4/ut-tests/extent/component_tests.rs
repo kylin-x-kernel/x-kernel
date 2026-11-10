@@ -11,7 +11,7 @@ use unittest::def_test;
 use crate::{
     BlockCount, FilesystemBlock, LogicalBlock, PhysicalBlock,
     extent::ExtentMappingState,
-    inode::{InodeInitialization, allocation_test_inode},
+    inode::InodeInitialization,
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     superblock::test_fixtures::{
         AllocatorGroupSpec, TEST_BLOCK_SIZE, TEST_FREE_BLOCKS, TEST_FREE_INODES,
@@ -26,9 +26,6 @@ fn inline_extent_mutation_journals_inode_table_update() {
     let journal = JournalTransactions::new(TransactionId::new(451));
     let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
 
-    let block = filesystem
-        .allocate_block(&allocation_test_inode(12), None, &mut handle)
-        .unwrap();
     let inode_allocation = filesystem
         .allocate_inode(
             None,
@@ -39,6 +36,9 @@ fn inline_extent_mutation_journals_inode_table_update() {
     let inode = filesystem
         .internal_iget(inode_allocation.inode())
         .expect("read initialized inode");
+    let block = filesystem
+        .allocate_block(&inode, None, &mut handle)
+        .unwrap();
 
     filesystem
         .insert_inline_extent_mapping(
@@ -82,7 +82,7 @@ fn extent_root_grow_without_revoke_journals_only_live_leaf_block() {
 
     for logical in [0, 2, 4, 6, 8, 10] {
         let block = filesystem
-            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .allocate_block(&inode, None, &mut handle)
             .unwrap();
         filesystem
             .insert_extent_mapping(
@@ -161,7 +161,7 @@ fn extent_point_mutations_keep_existing_leaf_block() {
 
     for logical in [0, 2, 4, 6, 8] {
         let block = filesystem
-            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .allocate_block(&inode, None, &mut handle)
             .unwrap();
         filesystem
             .insert_extent_mapping(
@@ -179,7 +179,7 @@ fn extent_point_mutations_keep_existing_leaf_block() {
         | (u64::from(le_u16(&inode.raw_i_block(), index_offset + 0x08)) << 32);
 
     let data = filesystem
-        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .allocate_block(&inode, None, &mut handle)
         .unwrap();
     filesystem
         .insert_extent_mapping(
@@ -249,7 +249,7 @@ fn extent_leaf_split_leaves_space_in_reused_leaf() {
 
     for logical in 0..=leaf_capacity {
         let block = filesystem
-            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .allocate_block(&inode, None, &mut handle)
             .unwrap();
         filesystem
             .insert_extent_mapping(
@@ -265,7 +265,7 @@ fn extent_leaf_split_leaves_space_in_reused_leaf() {
     assert_eq!(le_u16(&inode.raw_i_block(), 0x02), 2);
 
     let inserted = filesystem
-        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .allocate_block(&inode, None, &mut handle)
         .unwrap();
     filesystem
         .insert_extent_mapping(
@@ -294,7 +294,6 @@ fn extent_unwritten_conversion_splits_only_requested_range() {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let journal = JournalTransactions::new(TransactionId::new(462));
     let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
-    let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
     let inode_allocation = filesystem
         .allocate_inode(
             None,
@@ -303,6 +302,7 @@ fn extent_unwritten_conversion_splits_only_requested_range() {
         )
         .unwrap();
     let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 6, &mut handle);
 
     filesystem
         .insert_extent_mapping(
@@ -354,7 +354,6 @@ fn allocation_goal_after_previous_extent_uses_requested_logical_block() {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let journal = JournalTransactions::new(TransactionId::new(463));
     let mut handle = journal.begin(JournalCredits::new(128)).unwrap();
-    let physical = allocate_contiguous_blocks(&mut filesystem, 10, &mut handle);
     let inode_allocation = filesystem
         .allocate_inode(
             None,
@@ -363,6 +362,7 @@ fn allocation_goal_after_previous_extent_uses_requested_logical_block() {
         )
         .unwrap();
     let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 10, &mut handle);
     filesystem
         .insert_extent_mapping(
             &inode,
@@ -387,7 +387,6 @@ fn extent_remove_range_splits_mapping_and_releases_data_blocks() {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let journal = JournalTransactions::new(TransactionId::new(463));
     let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
-    let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
     let inode_allocation = filesystem
         .allocate_inode(
             None,
@@ -396,6 +395,7 @@ fn extent_remove_range_splits_mapping_and_releases_data_blocks() {
         )
         .unwrap();
     let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 6, &mut handle);
     let free_after_allocation = filesystem.free_blocks_count();
 
     filesystem
@@ -448,7 +448,6 @@ fn extent_remove_range_splits_full_inline_leaf() {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let journal = JournalTransactions::new(TransactionId::new(4631));
     let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
-    let physical = allocate_contiguous_blocks(&mut filesystem, 3, &mut handle);
     let inode_allocation = filesystem
         .allocate_inode(
             None,
@@ -457,6 +456,7 @@ fn extent_remove_range_splits_full_inline_leaf() {
         )
         .unwrap();
     let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 3, &mut handle);
     filesystem
         .insert_extent_mapping(
             &inode,
@@ -469,7 +469,7 @@ fn extent_remove_range_splits_full_inline_leaf() {
         .unwrap();
     for logical in [4, 6, 8] {
         let block = filesystem
-            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .allocate_block(&inode, None, &mut handle)
             .unwrap();
         filesystem
             .insert_extent_mapping(
@@ -515,7 +515,6 @@ fn extent_truncate_releases_tail_range() {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let journal = JournalTransactions::new(TransactionId::new(464));
     let mut handle = journal.begin(JournalCredits::new(256)).unwrap();
-    let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
     let inode_allocation = filesystem
         .allocate_inode(
             None,
@@ -524,6 +523,7 @@ fn extent_truncate_releases_tail_range() {
         )
         .unwrap();
     let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 6, &mut handle);
     let free_after_allocation = filesystem.free_blocks_count();
 
     filesystem
@@ -584,7 +584,7 @@ fn extent_mutation_splits_multiple_leaf_blocks() {
 
     for logical in 0..350u64 {
         let block = filesystem
-            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .allocate_block(&inode, None, &mut handle)
             .unwrap();
         filesystem
             .insert_extent_mapping(

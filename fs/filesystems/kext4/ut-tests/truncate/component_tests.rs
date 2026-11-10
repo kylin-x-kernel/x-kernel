@@ -292,7 +292,7 @@ fn preallocation_discard_drops_only_initialized_beyond_disk_size() {
             )
             .unwrap();
         let mut handle = journal.begin(credits).unwrap();
-        let stale_physical = allocate_contiguous_blocks(&mut guard, 2, &mut handle);
+        let stale_physical = allocate_contiguous_blocks(&mut guard, &inode, 2, &mut handle);
         let result = guard.insert_extent_mapping(
             &inode,
             LogicalBlock::new(8),

@@ -8,7 +8,10 @@ use crate::{
     ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock, PhysicalBlock,
     UnsupportedKind,
     disk::{checksum, codec, inode as disk_inode, xattr as disk_xattr},
-    inode::{Ext4Inode, Ext4InodeMetadata, Ext4Timestamp, update_inode_ctime_bytes},
+    inode::{
+        Ext4Inode, Ext4InodeMetadata, Ext4Timestamp, update_inode_blocks_bytes,
+        update_inode_ctime_bytes,
+    },
     jbd2::{JournalCredits, JournalHandle},
     superblock::replace_metadata_access_bytes,
 };
@@ -403,6 +406,7 @@ impl Ext4SbInfo {
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
         let old_external_block = inode.file_acl_block();
+        self.validate_xattr_storage_transition(inode, &plan)?;
         let new_external_block = match plan.external_block_action {
             ExternalXattrBlockAction::None => {
                 if !plan.storage.external.is_empty() || preallocated_external_block.is_some() {
@@ -455,6 +459,29 @@ impl Ext4SbInfo {
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
         self.publish_inode_metadata_with_timestamps(inode, updated_inode, timestamps)
+    }
+
+    fn validate_xattr_storage_transition(
+        &self,
+        inode: &Ext4Inode,
+        plan: &InodeXattrStoragePlan,
+    ) -> Ext4Result<()> {
+        if inode.file_acl_block() != 0
+            && matches!(
+                plan.external_block_action,
+                ExternalXattrBlockAction::None | ExternalXattrBlockAction::Allocate
+            )
+        {
+            self.validate_free_quota_space(inode, 1)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_external_xattr_release(&self, inode: &Ext4Inode) -> Ext4Result<()> {
+        if inode.file_acl_block() != 0 {
+            self.validate_free_quota_space(inode, 1)?;
+        }
+        Ok(())
     }
 
     fn xattr_mutation_plan(
@@ -588,6 +615,15 @@ impl Ext4SbInfo {
             return Ok(());
         }
 
+        match self.validate_xattr_storage_transition(inode, &plan) {
+            Ok(()) => {}
+            Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile)) => {
+                inode.disable_extra_isize_expansion();
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+
         let total_credits = xattr_mutation_credit_count(
             old_layout,
             plan.storage.layout(),
@@ -669,7 +705,6 @@ impl Ext4SbInfo {
         timestamp: Option<Ext4Timestamp>,
         timestamps: crate::inode::PendingInodeTimestamps,
     ) -> Ext4Result<(FilesystemBlock, Vec<u8>, Ext4InodeMetadata)> {
-        let old_external_block = inode.file_acl_block();
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -703,15 +738,8 @@ impl Ext4SbInfo {
                 encode_inline_xattrs(&plan.storage.inline, inline_xattr_bytes)?;
                 update_inode_xattr_block_bytes(
                     inode_bytes,
-                    &raw,
-                    InodeXattrBlockUpdate {
-                        file_acl: new_external_block.map_or(0, FilesystemBlock::get),
-                        current_blocks: inode.blocks(),
-                        had_external_block: old_external_block != 0,
-                        has_external_block: new_external_block.is_some(),
-                        block_size: self.layout().block_size(),
-                        has_64bit: self.superblock().features().has_64bit(),
-                    },
+                    new_external_block.map_or(0, FilesystemBlock::get),
+                    self.superblock().features().has_64bit(),
                 )?;
                 timestamps.encode(inode_bytes)?;
                 if let Some(timestamp) = timestamp {
@@ -825,22 +853,15 @@ impl Ext4SbInfo {
             &mut inode_table_bytes,
             inode,
             |inode_bytes| {
-                let raw = disk_inode::RawInode::decode(inode_bytes)?;
                 update_inode_xattr_block_bytes(
                     inode_bytes,
-                    &raw,
-                    InodeXattrBlockUpdate {
-                        file_acl: 0,
-                        current_blocks: inode.blocks(),
-                        had_external_block: true,
-                        has_external_block: false,
-                        block_size: self.layout().block_size(),
-                        has_64bit: self.superblock().features().has_64bit(),
-                    },
-                )
+                    0,
+                    self.superblock().features().has_64bit(),
+                )?;
+                self.drop_external_xattr_block(inode, block, handle)?;
+                update_inode_blocks_bytes(inode_bytes, inode.blocks())
             },
         )?;
-        self.drop_external_xattr_block(inode, block, handle)?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
         self.publish_inode_metadata(inode, updated_inode.metadata)
@@ -1676,57 +1697,19 @@ fn xattr_block_checksum(block: u64, checksum_seed: u32, bytes: &[u8]) -> Ext4Res
     Ok(actual)
 }
 
-struct InodeXattrBlockUpdate {
-    file_acl: u64,
-    current_blocks: u64,
-    had_external_block: bool,
-    has_external_block: bool,
-    block_size: u32,
-    has_64bit: bool,
-}
-
 fn update_inode_xattr_block_bytes(
     inode_bytes: &mut [u8],
-    raw: &disk_inode::RawInode,
-    update: InodeXattrBlockUpdate,
+    file_acl: u64,
+    has_64bit: bool,
 ) -> Ext4Result<()> {
-    if update.file_acl > u64::from(u32::MAX) && !update.has_64bit {
+    if file_acl > u64::from(u32::MAX) && !has_64bit {
         return Err(Ext4Error::Overflow);
     }
-    if update.file_acl >> 48 != 0 {
+    if file_acl >> 48 != 0 {
         return Err(Ext4Error::Overflow);
     }
-    put_u32(inode_bytes, 0x68, update.file_acl as u32)?;
-    put_u16(inode_bytes, 0x70, (update.file_acl >> 32) as u16)?;
-
-    let block_sectors = u64::from(update.block_size) / 512;
-    let blocks = match (update.had_external_block, update.has_external_block) {
-        (false, true) => {
-            if raw.flags() & disk_inode::EXT4_HUGE_FILE_FL != 0 {
-                return Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile));
-            }
-            update
-                .current_blocks
-                .checked_add(block_sectors)
-                .ok_or(Ext4Error::Overflow)?
-        }
-        (true, false) => {
-            if raw.flags() & disk_inode::EXT4_HUGE_FILE_FL != 0 {
-                return Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile));
-            }
-            update
-                .current_blocks
-                .checked_sub(block_sectors)
-                .ok_or(Ext4Error::Overflow)?
-        }
-        _ => update.current_blocks,
-    };
-    put_u32(inode_bytes, disk_inode::BLOCKS_LO_OFFSET, blocks as u32)?;
-    put_u16(
-        inode_bytes,
-        disk_inode::BLOCKS_HI_OFFSET,
-        (blocks >> 32) as u16,
-    )
+    put_u32(inode_bytes, 0x68, file_acl as u32)?;
+    put_u16(inode_bytes, 0x70, (file_acl >> 32) as u16)
 }
 
 fn encode_xattr_entry(

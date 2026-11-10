@@ -660,6 +660,7 @@ impl Ext4SbInfo {
             handle,
         )?;
         let child = self.internal_iget(allocation.inode())?;
+        self.bind_inode_quotas(&child)?;
         self.initialize_directory_data_block(&child, parent.number(), timestamp, handle)?;
         self.insert_directory_entry(
             parent,
@@ -674,6 +675,7 @@ impl Ext4SbInfo {
             .checked_add(1)
             .ok_or(Ext4Error::Overflow)?;
         self.update_inode_links_count_metadata(parent, parent_links, timestamp, handle)?;
+        child.drop_quota_records(None);
         Ok(child)
     }
 
@@ -744,6 +746,7 @@ impl Ext4SbInfo {
             handle,
         )?;
         let child = self.internal_iget(allocation.inode())?;
+        self.bind_inode_quotas(&child)?;
         self.initialize_symlink_data_block(&child, target, handle)?;
         self.insert_directory_entry(
             parent,
@@ -753,6 +756,7 @@ impl Ext4SbInfo {
             timestamp,
             handle,
         )?;
+        child.drop_quota_records(None);
         Ok(child)
     }
 
@@ -956,6 +960,7 @@ impl Ext4SbInfo {
         self.ensure_unlinked_inode_eviction_supported(inode)?;
         self.validate_inode_timestamp_update(inode, timestamp)?;
         self.initialize_inode_quotas_with_policy(inode, recovery_flag_policy)?;
+        self.validate_external_xattr_release(inode)?;
 
         let credits = Ext4Credits::final_eviction(self, inode)?;
         let credits = self.quota_metadata_credits(credits);
@@ -991,6 +996,7 @@ impl Ext4SbInfo {
         }
         self.ensure_unlinked_inode_eviction_supported(inode)?;
         self.initialize_inode_quotas(inode)?;
+        self.validate_external_xattr_release(inode)?;
 
         let credits = Ext4Credits::eviction_prepare(inode)?;
         let credits = self.quota_metadata_credits(credits);

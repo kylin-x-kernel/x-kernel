@@ -136,6 +136,9 @@ fn block_allocator_journals_bitmap_group_and_superblock_updates() {
 
 #[def_test]
 fn block_allocator_releases_allocated_block_through_same_metadata_path() {
+    let allocator_inode = allocation_test_inode(12);
+    allocator_inode.add_allocated_bytes(TEST_BLOCK_SIZE as u64);
+
     let (filesystem, device) = allocator_test_filesystem(25, 0b0111_1111);
     let journal = JournalTransactions::new(TransactionId::new(201));
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
@@ -143,7 +146,7 @@ fn block_allocator_releases_allocated_block_through_same_metadata_path() {
 
     let released = filesystem
         .release_allocated_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             PhysicalBlock::new(6),
             &mut handle,
         )
@@ -170,6 +173,9 @@ fn block_allocator_releases_allocated_block_through_same_metadata_path() {
 
 #[def_test]
 fn block_allocator_releases_metadata_block_with_revoke_record() {
+    let allocator_inode = allocation_test_inode(12);
+    allocator_inode.add_allocated_bytes(TEST_BLOCK_SIZE as u64);
+
     let (filesystem, device) = allocator_test_filesystem(25, 0b0111_1111);
     let journal = JournalTransactions::new(TransactionId::new(202));
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
@@ -177,7 +183,7 @@ fn block_allocator_releases_metadata_block_with_revoke_record() {
 
     let released = filesystem
         .release_allocated_metadata_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             PhysicalBlock::new(6),
             &mut handle,
         )
@@ -457,12 +463,15 @@ fn block_allocator_skips_bitmap_checksum_without_metadata_csum() {
 
 #[def_test]
 fn freed_block_is_unavailable_until_commit_even_after_cache_rebuild() {
+    let allocator_inode = allocation_test_inode(12);
+    allocator_inode.add_allocated_bytes(TEST_BLOCK_SIZE as u64);
+
     let (filesystem, _) = allocator_test_filesystem(25, 0b0111_1111);
     let journal = JournalTransactions::new(TransactionId::new(991));
     let mut handle = journal.begin(JournalCredits::new(12)).unwrap();
     filesystem
         .release_allocated_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             PhysicalBlock::new(6),
             &mut handle,
         )
@@ -472,7 +481,7 @@ fn freed_block_is_unavailable_until_commit_even_after_cache_rebuild() {
     filesystem.reset_block_allocation_caches();
     let allocation = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut handle,
         )
@@ -504,7 +513,7 @@ fn freed_block_is_unavailable_until_commit_even_after_cache_rebuild() {
         .complete(commit.id());
     let allocation = filesystem
         .allocate_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             Some(FilesystemBlock::new(6)),
             &mut next,
         )
@@ -514,12 +523,15 @@ fn freed_block_is_unavailable_until_commit_even_after_cache_rebuild() {
 
 #[def_test]
 fn range_release_rejects_already_free_bits_before_publication() {
+    let allocator_inode = allocation_test_inode(12);
+    allocator_inode.add_allocated_bytes(TEST_BLOCK_SIZE as u64);
+
     let (filesystem, _) = allocator_test_filesystem(25, 0b0111_1111);
     let journal = JournalTransactions::new(TransactionId::new(992));
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     assert_eq!(
         filesystem.release_allocated_block_range(
-            &allocation_test_inode(12),
+            &allocator_inode,
             PhysicalBlock::new(6),
             crate::BlockCount::new(2),
             crate::balloc::BlockReleaseKind::Data,
@@ -537,7 +549,7 @@ fn range_release_rejects_already_free_bits_before_publication() {
     );
     filesystem
         .release_allocated_block(
-            &allocation_test_inode(12),
+            &allocator_inode,
             PhysicalBlock::new(6),
             &mut handle,
         )

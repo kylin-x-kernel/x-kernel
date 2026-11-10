@@ -52,11 +52,13 @@ impl kvfs::QuotaOperations for crate::vfs::Ext4SuperOperations {
         file.invalidate_cached_pages()?;
         sb.sync_for_quota()?;
         inode.set_noquota(true);
+        inode.drop_quota_records(None);
         let result = (|| {
             let mut state = mount.write(sb);
             state.ensure_writable().map_err(into_vfs_err)?;
-            // Ordinary file writes may have replaced quota payloads since the
-            // previous activation. The preceding sync drained their journal.
+            // Drain mutations made since the VFS sync before discarding the
+            // metadata cache shared with ordinary file writes.
+            state.sync_filesystem().map_err(into_vfs_err)?;
             state.metadata_io.invalidate_all();
             // The selected file remains input until its header is accepted.
             // The read context cannot write or begin a filesystem mutation.
@@ -75,9 +77,18 @@ impl kvfs::QuotaOperations for crate::vfs::Ext4SuperOperations {
                 .map_err(into_vfs_err)
         })();
         if let Err(error) = result {
-            let retained = sb.quota_info().invalidate(kind);
-            inode.set_noquota(false);
-            drop(retained);
+            drop(data_guard);
+            if let Err(cleanup) = mount.disable_internal_quota(sb, kind) {
+                warn!("KExt4 failed to undo quota activation after {error:?}: {cleanup:?}");
+            }
+            if sb.quota_info().info(kind).is_none() {
+                inode.set_noquota(false);
+                if file.write_count() != 0
+                    && let Err(cleanup) = mount.write(sb).initialize_inode_quotas(inode)
+                {
+                    warn!("KExt4 failed to restore quota records after {error:?}: {cleanup:?}");
+                }
+            }
             return Err(error);
         }
         // Existing writable descriptors can allocate without reopening their

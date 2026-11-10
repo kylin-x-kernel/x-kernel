@@ -27,7 +27,7 @@ fn mapped_overwrite_fixture() -> (Ext4SbInfo, Ext4Inode, Arc<TestDevice>) {
     let inode = allocate_checkpointed_regular_inode(&mut filesystem);
     let setup = JournalTransactions::new(TransactionId::new(931));
     let mut handle = setup.begin(JournalCredits::new(32)).unwrap();
-    let physical = allocate_contiguous_blocks(&mut filesystem, 3, &mut handle);
+    let physical = allocate_contiguous_blocks(&mut filesystem, &inode, 3, &mut handle);
     for (logical, relative, state) in [
         (0, 0, ExtentMappingState::Initialized),
         (1, 2, ExtentMappingState::Initialized),

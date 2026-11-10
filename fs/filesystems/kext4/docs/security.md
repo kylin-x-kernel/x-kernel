@@ -791,7 +791,8 @@ ownership cycle. Unsupported project accounting rejects writable admission;
 compatible read-only images retain recovery evidence without orphan edits,
 including during sync and final shutdown.
 
-Acquisition precedes inode reservation locks; cached reservation updates cannot
+Acquisition precedes inode reservation locks; each inode binds the same record
+as the cache and imports existing reservations under its state lock. Cached updates cannot
 perform quota-file I/O. Extent and inode-counter validation precede all
 reservation admission; successful admission has no fallible publication step.
 Rollback failures are logged without replacing the original admission or
@@ -805,6 +806,9 @@ fresh physical runs. Rejection leaves the hint and bitmap intact; successful
 allocation consumes reservations once. Failed published operations
 abort rather than reusing partial state. Ownership transfer includes both
 allocated and reserved bytes and persists quota records with the inode owner.
+Allocated-sector changes and quota record changes share the inode state lock;
+overflow and quota admission failures leave both unchanged. Quota backing inodes
+update their own sector count without recursively charging quota records.
 Shared external-xattr reference release frees one owner's usage even if the
 physical block is retained; copy-on-write cannot accumulate a duplicate charge.
 Fallocate batches include quota-record credits alongside allocator metadata.
@@ -820,9 +824,14 @@ not leave accounting active on a read-only superblock. Lookup and read-only
 open require no quota acquisition or writable journal, including after abort.
 Writable open and metadata/namespace mutations acquire their affected owners
 before changing allocation state; journal-abort checks still reject mutation.
+External-xattr release validates the inode block count and bound quota records
+before changing a block bitmap or shared reference count; unsupported inode
+accounting and invalid counts cannot partially publish that release.
 
 Final disable drains inode I/O and completion captures before taking mount
-mutation protection, then drains cached records with bounded transactions. Suspended
+mutation protection, then drains cached records with bounded transactions.
+Suspension waits for in-flight inode eviction outside mount mutation protection
+before detaching inode records. Suspended
 classes unload without quota-file writes. If the journal has aborted, final
 release invalidates the quiesced class cache and file information without I/O.
 Writeback failure is returned separately from file ownership, all classes are
@@ -877,7 +886,9 @@ Quota file ownership handoff requires both mapping revocation and persistence.
 Activation revokes writable PTEs before flushing ordinary data. Existing writable
 descriptors cannot bypass immutable policy through mmap, mprotect or write faults.
 Each ordinary write reenters shared superblock admission; quota enable/disable
-retain exclusive admission through initialization and teardown. Disable checks
-all reservations before any record removal and drains the final quota metadata
+retain exclusive admission through initialization and teardown. Disable stops
+class accounting, detaches inode references and waits for in-progress evictions
+before removing records. Reservations remain with their inodes for a later
+activation. Disable drains the final quota metadata
 transaction through checkpoint before restoring ordinary file access. No parallel
 mapping registry, quota file table or compensating policy flags are added.
