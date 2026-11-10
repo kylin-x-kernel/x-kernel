@@ -1485,7 +1485,24 @@ The poller revisits an entry after a new packet arrives or whenever its SYN queu
 
 TCP's `bound_endpoint` mutex protects one socket's local binding. `TCP_BOUND_ENDPOINTS` uses a mutex to serialize port-conflict accounting, and the ephemeral-port cursor is separately mutex-protected. Raw socket local and peer addresses and TTL use `RwLock`s; their smoltcp buffers remain under `SOCKET_SET`.
 
-`ABSTRACT_BINDINGS` and `PATH_BINDINGS` use separate mutexes for Unix address lookup. Each `BindEntry` contains independently locked stream and datagram binding slots. `UnixDomainSocket` protects its local and peer addresses with mutexes. Datagram transports protect the receiver and binding slot with mutexes and the connected peer and local address with `RwLock`s; `async_channel` and poll sets handle queued delivery and notifications.
+`ABSTRACT_BINDINGS` and `PATH_BINDINGS` use separate mutexes for Unix address lookup. Each `BindEntry` contains independently locked stream, datagram, and seqpacket binding slots. `UnixDomainSocket` protects its local address and abstract registration together in `Mutex<LocalBinding>` and its peer address with a separate mutex. Datagram transports protect the receiver and binding slot with mutexes and the connected peer and local address with `RwLock`s; `async_channel` and poll sets handle queued delivery and notifications.
+
+A family-only Unix bind requests an automatically allocated abstract address.
+The Unix socket serializes allocation with its local-binding mutex, tries five
+hexadecimal bytes from a randomized starting point, and retries occupied slots
+for its transport type. A repeated automatic bind preserves an existing address.
+The address and registration are installed together after transport binding
+succeeds. Explicit empty abstract names remain separate from automatic allocation.
+Allocation follows the existing pre-connection transport bind path; naming
+already-connected stream or socketpair endpoints and `SO_PASSCRED`-triggered
+automatic binding are not implemented.
+
+Each abstract binding attempt reserves an owner under `ABSTRACT_BINDINGS`, then
+releases that lock before entering transport code. Failed attempts release the
+reservation; successful sockets retain it until their transport has dropped and
+cleared its slot. The last reservation removes the name from the registry.
+Lookup snapshots do not own reservations, and accepted sockets inherit the local
+address without taking ownership of the listener's registration.
 
 Unix stream synchronization is divided by responsibility:
 

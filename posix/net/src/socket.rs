@@ -178,6 +178,8 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<
     // Linux `netlink_bind` instead owns both the family and length checks.
     let addr = if socket.socket_family() == AF_NETLINK as i32 {
         SocketAddrEx::Netlink(NetlinkAddr::read_from_user(addr, addrlen)?)
+    } else if socket.socket_family() == AF_UNIX as i32 {
+        crate::addr::read_unix_bind_addr(addr, addrlen)?
     } else {
         SocketAddrEx::read_from_user(addr, addrlen)?
     };

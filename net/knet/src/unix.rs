@@ -183,8 +183,48 @@ struct PathBindEntry {
     bind: Arc<BindEntry>,
 }
 
+struct AbstractBindEntry {
+    bind: Arc<BindEntry>,
+    owners: usize,
+}
+
+/// Owns a binding reservation until bind fails or the bound transport is dropped.
+struct AbstractBinding {
+    name: Arc<[u8]>,
+    bind: Arc<BindEntry>,
+}
+
+impl AbstractBinding {
+    fn reserve(name: Arc<[u8]>) -> Self {
+        let mut bindings = ABSTRACT_BINDINGS.lock();
+        let entry = bindings
+            .entry(name.clone())
+            .or_insert_with(|| AbstractBindEntry {
+                bind: Arc::new(BindEntry::default()),
+                owners: 0,
+            });
+        entry.owners += 1;
+        Self {
+            name,
+            bind: entry.bind.clone(),
+        }
+    }
+}
+
+impl Drop for AbstractBinding {
+    fn drop(&mut self) {
+        let mut bindings = ABSTRACT_BINDINGS.lock();
+        if let Some(entry) = bindings.get_mut(&self.name) {
+            entry.owners -= 1;
+            if entry.owners == 0 {
+                bindings.remove(&self.name);
+            }
+        }
+    }
+}
+
 lazy_static! {
-    static ref ABSTRACT_BINDINGS: Mutex<HashMap<Arc<[u8]>, Arc<BindEntry>>> =
+    static ref ABSTRACT_BINDINGS: Mutex<HashMap<Arc<[u8]>, AbstractBindEntry>> =
         Mutex::new(HashMap::new());
     static ref PATH_BINDINGS: Mutex<HashMap<usize, PathBindEntry>> = Mutex::new(HashMap::new());
 }
@@ -232,7 +272,7 @@ pub(crate) fn lookup_bind_entry<R>(
             let entry = ABSTRACT_BINDINGS
                 .lock()
                 .get(name)
-                .cloned()
+                .map(|entry| entry.bind.clone())
                 .ok_or(KError::ConnectionRefused)?;
             f(entry.as_ref())
         }
@@ -267,21 +307,18 @@ pub(crate) fn lookup_bind_entry<R>(
         }
     }
 }
-fn lookup_or_create_bind_entry<R>(
+fn lookup_or_create_bind_entry(
     addr: &UnixAddr,
     mode: NodePermission,
     cred: &kcred::Cred,
-    f: impl FnOnce(&BindEntry) -> KResult<R>,
-) -> KResult<R> {
+    f: impl FnOnce(&BindEntry) -> KResult,
+) -> KResult<Option<AbstractBinding>> {
     match addr {
         UnixAddr::Unbound => Err(KError::InvalidInput),
         UnixAddr::Abstract(name) => {
-            let entry = ABSTRACT_BINDINGS
-                .lock()
-                .entry(name.clone())
-                .or_insert_with(|| Arc::new(BindEntry::default()))
-                .clone();
-            f(entry.as_ref())
+            let binding = AbstractBinding::reserve(name.clone());
+            f(binding.bind.as_ref())?;
+            Ok(Some(binding))
         }
         UnixAddr::Path(path) => {
             let fs_struct = kprocess::current_fs_context();
@@ -309,7 +346,8 @@ fn lookup_or_create_bind_entry<R>(
                     .bind
                     .clone()
             };
-            f(entry.as_ref())
+            f(entry.as_ref())?;
+            Ok(None)
         }
     }
 }
@@ -338,10 +376,18 @@ impl UnixSocketType {
     }
 }
 
+#[derive(Default)]
+struct LocalBinding {
+    addr: UnixAddr,
+    // Accepted sockets keep the address without owning its registration.
+    _abstract_binding: Option<AbstractBinding>,
+}
+
 pub struct UnixDomainSocket {
+    // Drop the transport (and clear its slot) before releasing the registration.
     transport: UnixTransport,
     socket_type: UnixSocketType,
-    local_endpoint: Mutex<UnixAddr>,
+    local_binding: Mutex<LocalBinding>,
     peer_endpoint: Mutex<UnixAddr>,
 }
 impl UnixDomainSocket {
@@ -360,7 +406,10 @@ impl UnixDomainSocket {
                 // The accepted socket keeps the listener's type, as Linux keeps the
                 // listening socket's `sk_type` for the connection it hands back.
                 socket_type: self.socket_type,
-                local_endpoint: Mutex::new(self.local_endpoint.lock().clone()),
+                local_binding: Mutex::new(LocalBinding {
+                    addr: self.local_binding.lock().addr.clone(),
+                    ..LocalBinding::default()
+                }),
                 peer_endpoint: Mutex::new(peer_endpoint),
             },
         )))
@@ -370,7 +419,7 @@ impl UnixDomainSocket {
         Self {
             transport: transport.into(),
             socket_type,
-            local_endpoint: Mutex::new(UnixAddr::Unbound),
+            local_binding: Mutex::new(LocalBinding::default()),
             peer_endpoint: Mutex::new(UnixAddr::Unbound),
         }
     }
@@ -408,23 +457,72 @@ impl UnixDomainSocket {
     /// Kernel callers use this entry because they do not have a current user
     /// task. User-facing bind enters through [`SocketOps::bind`], which takes
     /// one snapshot of the current task credential before calling this method.
+    /// An unbound address requests automatic allocation in the abstract namespace.
+    /// Repeating that request preserves an existing local binding.
+    ///
+    /// # Execution context
+    ///
+    /// Requires sleepable task context with IRQs and preemption enabled and no
+    /// spinlocks held. Automatic allocation may read entropy sources and yield
+    /// while retrying occupied names. Pathname binding also requires a current
+    /// filesystem context; abstract binding can run on a kernel task.
     pub fn bind_with_cred(
         &self,
         local_endpoint: SocketAddrEx,
         cred: &kcred::Cred,
         mode: NodePermission,
     ) -> KResult {
-        let local_endpoint = local_endpoint.into_unix()?;
-        let mut local_guard = self.local_endpoint.lock();
-        if matches!(&*local_guard, UnixAddr::Unbound) {
+        let mut local_endpoint = local_endpoint.into_unix()?;
+        let mut local_binding = self.local_binding.lock();
+        let is_autobind = matches!(&local_endpoint, UnixAddr::Unbound);
+        if !matches!(&local_binding.addr, UnixAddr::Unbound) {
+            return if is_autobind {
+                Ok(())
+            } else {
+                Err(KError::InvalidInput)
+            };
+        }
+        let binding = if is_autobind {
+            let (addr, binding) = self.autobind()?;
+            local_endpoint = addr;
+            Some(binding)
+        } else {
             lookup_or_create_bind_entry(&local_endpoint, mode, cred, |slot| {
                 self.transport.bind(slot, &local_endpoint)
-            })?;
-            *local_guard = local_endpoint;
-        } else {
-            return Err(KError::InvalidInput);
-        }
+            })?
+        };
+        *local_binding = LocalBinding {
+            addr: local_endpoint,
+            _abstract_binding: binding,
+        };
         Ok(())
+    }
+
+    fn autobind(&self) -> KResult<(UnixAddr, AbstractBinding)> {
+        const NAME_COUNT: u32 = 1 << 20;
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+
+        let mut seed = [0; 4];
+        entropy::fill_random(&mut seed);
+        let start = u32::from_ne_bytes(seed);
+        for offset in 0..NAME_COUNT {
+            let mut number = start.wrapping_add(offset) & (NAME_COUNT - 1);
+            let mut name = [0; 5];
+            for byte in name.iter_mut().rev() {
+                *byte = HEX[(number & 0xf) as usize];
+                number >>= 4;
+            }
+            let binding = AbstractBinding::reserve(Arc::from(name));
+            let addr = UnixAddr::Abstract(binding.name.clone());
+            match self.transport.bind(&binding.bind, &addr) {
+                Ok(()) => return Ok((addr, binding)),
+                Err(error) if error.canonicalize() == KError::AddrInUse => {}
+                Err(error) => return Err(error),
+            }
+            drop(binding);
+            ktask::yield_now();
+        }
+        Err(KError::StorageFull)
     }
 
     /// Starts listening with an explicit snapshot of this listener's identity.
@@ -473,7 +571,7 @@ impl UnixDomainSocket {
         cred: &kcred::Cred,
         peer_credentials: &PeerCredentials,
     ) -> KResult {
-        let local_endpoint = self.local_endpoint.lock().clone();
+        let local_endpoint = self.local_binding.lock().addr.clone();
         lookup_bind_entry(&remote_addr, cred, |slot| {
             self.transport
                 .connect(slot, &local_endpoint, options, peer_credentials)
@@ -549,7 +647,7 @@ impl SocketOps for UnixDomainSocket {
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {
-        Ok(SocketAddrEx::Unix(self.local_endpoint.lock().clone()))
+        Ok(SocketAddrEx::Unix(self.local_binding.lock().addr.clone()))
     }
 
     fn peer_addr(&self) -> KResult<SocketAddrEx> {

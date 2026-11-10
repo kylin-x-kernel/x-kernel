@@ -9,7 +9,7 @@ use linux_raw_sys::net::{
     __kernel_sa_family_t, AF_UNSPEC, MSG_DONTWAIT, MSG_OOB, mmsghdr, msghdr, sockaddr_un,
 };
 use posix_types::{IoVec, UserConstPtr, net::socket_addr::sockaddr_nl};
-use unittest::{assert_eq, def_test};
+use unittest::{assert, assert_eq, assert_ne, def_test};
 use unittest_support::TestUserArray;
 
 use super::*;
@@ -23,6 +23,65 @@ fn inet_raw_protocol_rejects_values_above_u8() {
         inet_raw_protocol(256).unwrap_err(),
         KError::from(LinuxError::EINVAL)
     );
+}
+
+#[def_test(user)]
+fn unix_family_only_bind_allocates_an_abstract_address() {
+    let address = sockaddr_un {
+        sun_family: AF_UNIX as u16,
+        sun_path: [0; 108],
+    };
+    let input = TestUserArray::from_array([address]).unwrap();
+    let address_ptr = UserConstPtr::from(input.as_user_ptr().cast::<sockaddr>().cast_const());
+    let family_len = size_of::<__kernel_sa_family_t>() as u32;
+
+    for socket_type in [SOCK_DGRAM, SOCK_STREAM, SOCK_SEQPACKET] {
+        let first = sys_socket(AF_UNIX, socket_type, 0).unwrap() as i32;
+        let second = sys_socket(AF_UNIX, socket_type, 0).unwrap() as i32;
+        let local = TestUserArray::from_array([address]).unwrap();
+        let mut local_len = TestUserArray::from_array([size_of::<sockaddr_un>() as u32]).unwrap();
+        assert_eq!(sys_bind(first, address_ptr, family_len), Ok(0));
+        let mut get_address = |fd| {
+            local_len.write([size_of::<sockaddr_un>() as u32]);
+            sys_getsockname(
+                fd,
+                UserPtr::from(local.as_user_ptr().cast()),
+                UserPtr::from(local_len.as_user_ptr()),
+            )
+            .unwrap();
+            (local.read()[0], local_len.read()[0])
+        };
+        let (first_address, first_len) = get_address(first);
+        assert_eq!(first_len, family_len + 6);
+        assert_eq!(first_address.sun_path[0], 0);
+        let name_bytes: &[u8] = bytemuck::cast_slice(&first_address.sun_path[1..6]);
+        assert!(name_bytes.iter().all(u8::is_ascii_hexdigit));
+        assert_eq!(sys_bind(first, address_ptr, family_len), Ok(0));
+        assert_eq!(
+            get_address(first).0.sun_path[..6],
+            first_address.sun_path[..6]
+        );
+        assert_eq!(sys_bind(second, address_ptr, family_len), Ok(0));
+        assert_ne!(
+            get_address(second).0.sun_path[..6],
+            first_address.sun_path[..6]
+        );
+        kprocess::current_files().close_file(first).unwrap();
+        kprocess::current_files().close_file(second).unwrap();
+
+        // A leading NUL with no following bytes binds the explicit empty name.
+        let empty = sys_socket(AF_UNIX, socket_type, 0).unwrap() as i32;
+        assert_eq!(sys_bind(empty, address_ptr, family_len + 1), Ok(0));
+        local_len.write([size_of::<sockaddr_un>() as u32]);
+        sys_getsockname(
+            empty,
+            UserPtr::from(local.as_user_ptr().cast()),
+            UserPtr::from(local_len.as_user_ptr()),
+        )
+        .unwrap();
+        assert_eq!(local_len.read()[0], family_len + 1);
+        kprocess::current_files().close_file(empty).unwrap();
+    }
 }
 
 #[def_test(user)]

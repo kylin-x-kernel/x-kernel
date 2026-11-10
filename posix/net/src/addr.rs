@@ -197,6 +197,21 @@ fn unix_addr_bytes(addr: &UnixAddr) -> Vec<u8> {
     buf
 }
 
+/// Reads a local Unix address, including a family-only autobind request.
+pub(crate) fn read_unix_bind_addr(
+    addr: UserConstPtr<sockaddr>,
+    addrlen: socklen_t,
+) -> KResult<SocketAddrEx> {
+    // A family-only address requests automatic binding only at the bind entry.
+    // Destination parsing must still require at least one sun_path byte.
+    if addrlen as usize == size_of::<__kernel_sa_family_t>()
+        && read_family(addr, addrlen)? as u32 == AF_UNIX
+    {
+        return Ok(SocketAddrEx::Unix(UnixAddr::Unbound));
+    }
+    SocketAddrEx::read_from_user(addr, addrlen)
+}
+
 /// SocketAddrExt implementation for Unix domain socket addresses
 impl SocketAddrExt for UnixAddr {
     /// Read Unix domain socket address from user space
