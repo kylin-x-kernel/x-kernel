@@ -68,6 +68,40 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Unmaps every view covering `[start, end)` and discards the clean cached
+    /// folios in the same range.
+    ///
+    /// - `start`: inclusive byte offset.
+    /// - `end`: exclusive byte offset; an empty or inverted range is a no-op.
+    ///
+    /// Returns: `true` when the range held no cached folio or when every
+    /// covering view completed invalidation and every folio was discarded;
+    /// `false` when a target address space was busy, in which case nothing is
+    /// discarded.
+    ///
+    /// Errors: `ResourceBusy` when a folio stayed dirty after the round; clean
+    /// folios are discarded before that error is returned. `OperationNotSupported`
+    /// when a covering view has no notifier. `InvalidInput` outside sleepable
+    /// task context.
+    ///
+    /// Locking: holds the address-space invalidate lock exclusively across unmap
+    /// and discard. The caller must not hold an address-space lock nor a lock
+    /// required by writeback completion. May sleep waiting for writeback.
+    pub fn invalidate_range(&self, start: u64, end: u64) -> VfsResult<bool> {
+        if start >= end {
+            return Ok(true);
+        }
+        if !ktask::is_sleepable_context() {
+            return Err(VfsError::InvalidInput);
+        }
+        let _invalidate_guard = self.invalidate_lock.write();
+        if !self.try_invalidate_mappings_range(start, Some(end))? {
+            return Ok(false);
+        }
+        self.i_pages.invalidate_pages_range(start, end)?;
+        Ok(true)
+    }
+
     /// Flushes and discards cached pages of a live inode after revoking mappings.
     ///
     /// The caller excludes buffered writers and backing-store policy changes.
@@ -75,6 +109,8 @@ impl AddressSpace {
     /// finish PTE removal and TLB invalidation before writeback and cache removal.
     /// A busy MM is retried without the invalidate lock, so its fault can unwind.
     /// Callers must not hold an MM lock or a lock needed by writeback completion.
+    /// The writeback op runs directly, not through the public writepages wrapper,
+    /// so it does not re-enter the invalidate read lock under the write lock.
     /// Errors leave cache ownership intact, although mappings may be revoked.
     pub fn invalidate_cached_pages(&self) -> VfsResult<()> {
         if !ktask::is_sleepable_context() {
@@ -82,7 +118,7 @@ impl AddressSpace {
         }
         loop {
             let guard = self.invalidate_lock.write();
-            if !self.try_invalidate_mappings_from(0)? {
+            if !self.try_invalidate_mappings_range(0, None)? {
                 drop(guard);
                 ktask::yield_now();
                 continue;

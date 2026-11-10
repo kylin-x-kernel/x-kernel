@@ -2,14 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 
 use khal::paging::{MappingFlags, PageSize};
 use ksync::Mutex;
 use memaddr::{PAGE_SIZE_4K, VirtAddr};
-use memspace::VmBackingKind;
+use memspace::{MmSpace, VmBackingKind};
 use unittest::def_test;
-use vmobj::VmObjectId;
+use vmobj::{
+    FileObjectId, MappingView, MappingViewId, MappingViewKind, MappingViewNotifier,
+    MappingViewRange, ObjectInvalidateWork, ObjectViewHit, VmObjectId,
+};
 
 use super::FileSharedRuntimeInner;
 use crate::{
@@ -88,6 +91,7 @@ fn shared_and_private_runtime_share_same_file_source_object() {
         0,
         Some(PAGE_SIZE_4K as u64),
         MappingFlags::READ | MappingFlags::WRITE,
+        None,
     )
     .expect("private file vma");
 
@@ -125,6 +129,7 @@ fn shared_file_source_adapter_and_private_runtime_agree_on_file_object() {
         0,
         Some(PAGE_SIZE_4K as u64),
         MappingFlags::READ | MappingFlags::WRITE,
+        None,
     )
     .expect("private file vma");
 
@@ -296,4 +301,88 @@ fn live_cache_invalidation_removes_shared_ptes_before_releasing_pages() {
             .is_resolved()
     );
     assert_eq!(file.mapping().nrpages(), 1);
+}
+
+struct NotifierFixture {
+    mm: Arc<Mutex<MmSpace>>,
+    notifier: Arc<crate::invalidate::MmSpaceInvalidate>,
+    view: MappingView,
+    object: VmObjectId,
+}
+
+fn notifier_fixture() -> NotifierFixture {
+    let start = VirtAddr::from_usize(0x40_0000);
+    let mm = Arc::new(Mutex::new(
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 4)
+            .expect("test address space should be constructible"),
+    ));
+    let handle = mm.lock().invalidate_handle(&mm);
+    let view = MappingView::new(
+        MappingViewId::from_raw(1),
+        1,
+        MappingViewRange {
+            vma_start: 0x40_0000,
+            vma_len: PAGE_SIZE_4K,
+            object_start: 0,
+            object_len: PAGE_SIZE_4K,
+        },
+        MappingViewKind::Shared,
+    );
+    NotifierFixture {
+        mm,
+        notifier: crate::invalidate::MmSpaceInvalidate::new(handle),
+        view,
+        object: VmObjectId::File(FileObjectId::from_raw(11)),
+    }
+}
+
+#[def_test]
+fn try_invalidate_rejects_hit_without_a_whole_page() {
+    let fixture = notifier_fixture();
+    let hit = ObjectViewHit::new(fixture.view.clone(), 1, PAGE_SIZE_4K - 1);
+    let work = ObjectInvalidateWork::new(
+        fixture.object,
+        1,
+        PAGE_SIZE_4K - 1,
+        vec![hit.clone()],
+    );
+
+    assert!(
+        !fixture
+            .notifier
+            .try_invalidate(&work, &hit)
+            .expect("a partial hit is not an error")
+    );
+}
+
+#[def_test]
+fn try_invalidate_reports_pending_while_address_space_is_busy() {
+    let fixture = notifier_fixture();
+    let hit = ObjectViewHit::new(fixture.view.clone(), 0, PAGE_SIZE_4K);
+    let work = ObjectInvalidateWork::new(fixture.object, 0, PAGE_SIZE_4K, vec![hit.clone()]);
+    let guard = fixture.mm.lock();
+
+    assert!(
+        !fixture
+            .notifier
+            .try_invalidate(&work, &hit)
+            .expect("a busy address space is not an error")
+    );
+
+    drop(guard);
+}
+
+#[def_test]
+fn try_invalidate_reports_complete_for_a_destroyed_address_space() {
+    let fixture = notifier_fixture();
+    let hit = ObjectViewHit::new(fixture.view.clone(), 0, PAGE_SIZE_4K);
+    let work = ObjectInvalidateWork::new(fixture.object, 0, PAGE_SIZE_4K, vec![hit.clone()]);
+    drop(fixture.mm);
+
+    assert!(
+        fixture
+            .notifier
+            .try_invalidate(&work, &hit)
+            .expect("a destroyed address space is already complete")
+    );
 }

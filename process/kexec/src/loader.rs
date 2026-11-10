@@ -7,7 +7,7 @@
 use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
 use core::{ffi::CStr, iter};
 
-use filemap::new_file_private_vma;
+use filemap::{PrivateFileViewSpec, new_file_private_vma};
 use kcred::Cred;
 use kernel_elf_parser::{
     AuxEntry, AuxType, ElfHeaders, ElfHeadersBuilder, app_stack_region_with_auxv,
@@ -355,7 +355,12 @@ impl PreparedElfImage {
     }
 }
 
-fn map_elf(uspace: &mut MmSpace, load_bias: usize, prepared: &PreparedElfImage) -> KResult {
+fn map_elf(
+    uspace: &mut MmSpace,
+    load_bias: usize,
+    prepared: &PreparedElfImage,
+    view: Option<&PrivateFileViewSpec<'_>>,
+) -> KResult {
     let file = prepared.cache_entry.borrow_file();
 
     for segment in prepared.image.segments() {
@@ -397,6 +402,7 @@ fn map_elf(uspace: &mut MmSpace, load_bias: usize, prepared: &PreparedElfImage) 
             segment.file_start,
             Some(segment.file_data_end.min(file.size())),
             flags,
+            view.cloned(),
         )?;
         uspace.map_runtime_vma(vma, false, runtime)?;
     }
@@ -615,17 +621,21 @@ impl ElfLoader {
     }
 }
 
-fn map_prepared_image(uspace: &mut MmSpace, prepared: &PreparedExecImage) -> KResult {
+fn map_prepared_image(
+    uspace: &mut MmSpace,
+    prepared: &PreparedExecImage,
+    view: Option<&PrivateFileViewSpec<'_>>,
+) -> KResult {
     let executable_bias = prepared.layout.executable_bias();
 
     ksignal::map_signal_trampoline(uspace)?;
 
-    map_elf(uspace, executable_bias, &prepared.executable)?;
+    map_elf(uspace, executable_bias, &prepared.executable, view)?;
     if let (Some(interpreter), Some(interpreter_bias)) = (
         prepared.interpreter.as_ref(),
         prepared.layout.interpreter_bias(),
     ) {
-        map_elf(uspace, interpreter_bias, interpreter)?;
+        map_elf(uspace, interpreter_bias, interpreter, view)?;
     }
 
     Ok(())
@@ -782,6 +792,11 @@ pub fn prepare_user_app_request(request: ExecRequest) -> KResult<PreparedExecIma
 
 /// Installs a prepared image into an exclusively borrowed, user-empty MM.
 ///
+/// - `uspace`: target address space; must have no user VMAs yet.
+/// - `prepared`: the prepared executable and interpreter image.
+/// - `view`: when `Some`, registers each file-backed segment for cache
+///   invalidation using the supplied live handle.
+///
 /// May allocate and block in sleepable task context. The caller supplies valid
 /// kernel mappings; this function neither clears old mappings nor switches MM,
 /// publishes a process, or selects fatal-error policy. No current user is needed.
@@ -798,11 +813,12 @@ pub fn prepare_user_app_request(request: ExecRequest) -> KResult<PreparedExecIma
 pub fn load_prepared_user_app(
     uspace: &mut MmSpace,
     prepared: PreparedExecImage,
+    view: Option<PrivateFileViewSpec<'_>>,
 ) -> KResult<(VirtAddr, VirtAddr)> {
     if uspace.vmas().next().is_some() {
         return Err(KError::InvalidInput);
     }
-    map_prepared_image(uspace, &prepared)?;
+    map_prepared_image(uspace, &prepared, view.as_ref())?;
     #[cfg(unittest)]
     if let Some(probe) = &prepared.partial_probe {
         assert!(uspace.find_vma(prepared.entry).is_some_and(|vma| {

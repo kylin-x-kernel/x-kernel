@@ -1530,6 +1530,27 @@ cache entries. A busy MM causes a retry after dropping that lock; no cached page
 is detached while revocation remains deferred. Read faults publish shared PTEs
 under the corresponding invalidate read lock.
 
+`AddressSpace::invalidate_range()` is the byte-range counterpart for
+backing-store transitions such as direct I/O. It holds the same invalidate write
+lock, rounds the request outward to page boundaries so partial leading and
+trailing pages are unmapped whole, and treats every covering view's synchronous
+revocation as a precondition. A busy MM returns `Ok(false)` with no folio
+discarded; a covering view without a notifier is rejected with
+`OperationNotSupported`. Only after every view reports completion does it
+discard clean folios in the range. A folio that stayed dirty is reported as
+`ResourceBusy` after the clean ones were already discarded, matching Linux
+partial invalidation.
+
+Buffered `write()` and the mmap write fault share one exclusion boundary: the
+folio instantiation and dirty window of the write path holds the invalidate read
+lock, matching `page_mkwrite`, so a truncate or range invalidation holding the
+write lock cannot discard a page between its residency check and its dirty
+publication. Registered views cover page-aligned file ranges only: a partial tail
+page is COW or zero-filled and owns no cache reference, so the view ends on the
+page boundary instead of reaching into that anonymous tail. Executable images
+register their private file views at load with a live invalidation handle, so the
+same invalidation reaches text segments the loader maps directly from the cache.
+
 Regular-file writes and writable open initialization hold shared superblock
 lifecycle admission for the complete operation. Quota enable/disable hold its
 exclusive side through writer initialization or reservation drain and teardown.

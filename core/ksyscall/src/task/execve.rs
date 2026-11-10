@@ -17,11 +17,15 @@ use alloc::{
 use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult, LinuxError};
-use kexec::{ExecRequest, load_prepared_user_app, prepare_user_app_request};
+use kexec::{
+    ExecRequest, PreparedExecImage, PrivateFileViewSpec, load_prepared_user_app,
+    prepare_user_app_request,
+};
 use khal::uspace::UserContext;
 use ktask::current;
 use kuaccess::vm_load_string;
 use kvfs::{Filename, LookupFlags, LookupIntent};
+use memaddr::VirtAddr;
 use osvm::load_vec_until_null;
 use posix_process::exec_de_thread;
 
@@ -285,6 +289,35 @@ fn commit_exec_credentials(thread: &kprocess::CurrentThread, exec_fs: &kprocess:
     thread.commit_creds(exec_cred);
 }
 
+/// Loads the prepared image into the process address space, registering its
+/// private file views for cache invalidation.
+///
+/// - `process`: target process whose address space receives the image.
+/// - `prepared`: the prepared executable and interpreter image.
+///
+/// Returns: the image entry point and initial user stack pointer.
+///
+/// Errors: `InvalidInput` when user VMAs already exist; other errors propagate
+/// unchanged.
+///
+/// Locking: holds the address-space mutex while mapping and registering; must
+/// not be called while already holding it.
+fn load_exec_image(
+    process: &kprocess::Process,
+    prepared: PreparedExecImage,
+) -> KResult<(VirtAddr, VirtAddr)> {
+    let aspace = process.address_space()?;
+    aspace.with_mapping_owner(move |mut mapping| {
+        let observer = mapping.observer();
+        let view = PrivateFileViewSpec {
+            mm_id: mapping.aspace().mm_id(),
+            observer: &observer,
+            invalidate: mapping.invalidate_handle(),
+        };
+        load_prepared_user_app(mapping.aspace_mut(), prepared, Some(view))
+    })
+}
+
 /// Executes a prepared request by swapping the caller's address space and
 /// register context for the new program.
 ///
@@ -402,10 +435,7 @@ fn exec_request(
         if let Some(probe) = probe.as_deref_mut() {
             probe.on_activated()?;
         }
-        let image = {
-            let aspace = process.address_space()?;
-            load_prepared_user_app(&mut aspace.lock(), prepared)?
-        };
+        let image = load_exec_image(&process, prepared)?;
         curr.set_name(entry_name.as_str());
         let updated = thread.apply_exec_update(exec_update);
         #[cfg(unittest)]

@@ -366,9 +366,12 @@ impl AddressSpace {
     }
 
     // The caller holds the inode data lock through rollback to keep size and
-    // competing writes stable. Rollback may wait for concurrent writeback;
-    // filesystem callbacks have returned before cache shrink, so their locks
-    // are released. Writeback completion must not depend on the data lock.
+    // competing writes stable. The folio instantiation and dirty window also
+    // holds the invalidate read lock, matching `page_mkwrite`, so truncate and
+    // direct-I/O invalidation serialize against buffered writes. Rollback may
+    // wait for concurrent writeback; filesystem callbacks have returned before
+    // cache shrink, so their locks are released. Writeback completion must not
+    // depend on the data lock.
     fn perform_write(
         &self,
         offset: u64,
@@ -395,19 +398,25 @@ impl AddressSpace {
                 return write_prefix_or_error(written, error);
             }
             let grew_cache = prepared_end > visible_len;
-            if grew_cache {
-                self.i_pages
-                    .resize_cached_folios(visible_len, prepared_end)?;
-            }
             let mut copied = 0;
-            let copy_result = self.with_folio_or_create(index, |folio| {
-                let data = folio.data();
-                copied = iter.copy_from_iter(&mut data[page_off..page_off + step])?;
-                if copied != 0 {
-                    self.dirty_folio(folio)?;
+            // Hold the invalidate read lock across folio instantiation and
+            // dirtying so truncate and direct-I/O invalidation cannot discard
+            // the page between its residency check and dirty publication.
+            let copy_result = {
+                let _invalidate_guard = self.invalidate_lock.read();
+                if grew_cache {
+                    self.i_pages
+                        .resize_cached_folios(visible_len, prepared_end)?;
                 }
-                Ok(())
-            });
+                self.with_folio_or_create(index, |folio| {
+                    let data = folio.data();
+                    copied = iter.copy_from_iter(&mut data[page_off..page_off + step])?;
+                    if copied != 0 {
+                        self.dirty_folio(folio)?;
+                    }
+                    Ok(())
+                })
+            };
             if let Err(error) = copy_result {
                 iter.revert(copied)?;
                 if let Err(cancel_error) =

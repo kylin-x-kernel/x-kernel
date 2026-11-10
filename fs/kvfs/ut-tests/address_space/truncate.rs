@@ -25,7 +25,7 @@ use super::{
 };
 use crate::{
     Dentry, FileOperations, InodeOperations, MetadataUpdate, NodeFlags, NodePermission, NodeType,
-    Umode, VfsInode, VfsInodeInit, VfsResult,
+    Umode, VfsError, VfsInode, VfsInodeInit, VfsResult,
 };
 
 struct CacheOnlyFileOps;
@@ -376,4 +376,162 @@ fn live_invalidation_rejects_deferred_only_notifiers_without_freeing_pages() {
         Err(kerrno::LinuxError::EOPNOTSUPP)
     );
     assert_eq!(mapping.nrpages(), 1);
+}
+
+struct RangeNotifier {
+    result: bool,
+    observed: Mutex<Vec<(u64, usize)>>,
+}
+
+impl MappingViewNotifier for RangeNotifier {
+    fn invalidate(&self, _work: &ObjectInvalidateWork, _hit: &ObjectViewHit) {}
+
+    fn try_invalidate(
+        &self,
+        _work: &ObjectInvalidateWork,
+        hit: &ObjectViewHit,
+    ) -> kerrno::KResult<bool> {
+        self.observed
+            .lock()
+            .push((hit.object_start(), hit.object_len()));
+        Ok(self.result)
+    }
+}
+
+fn range_inode(id: u64) -> (Arc<VfsInode>, Arc<AddressSpace>) {
+    let inode = VfsInode::new_file_with_address_space(
+        Arc::new(TruncateOps),
+        &TRUNCATE_OPERATIONS,
+        VfsInodeInit::new(
+            id,
+            (PAGE_SIZE_4K * 2) as u64,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let mapping = inode.address_space();
+    (inode, mapping)
+}
+
+fn register_range_view(
+    mapping: &Arc<AddressSpace>,
+    object_len: usize,
+    result: bool,
+) -> (Arc<RangeNotifier>, crate::AddressSpaceViewGuard) {
+    let notifier = Arc::new(RangeNotifier {
+        result,
+        observed: Mutex::new(Vec::new()),
+    });
+    let view = mapping.register_view(MappingViewSpec {
+        mm_id: 1,
+        vma_start: 0x4000,
+        vma_len: object_len,
+        object_start: 0,
+        object_len,
+        kind: MappingViewKind::Shared,
+        notifier: Some(notifier.clone()),
+    });
+    (notifier, view)
+}
+
+#[def_test]
+fn invalidate_range_reports_busy_without_discarding() {
+    let (_inode, mapping) = range_inode(20);
+    mapping
+        .i_pages
+        .filemap_add_folio(super::folio_from_bytes(0, b"kept"))
+        .unwrap();
+    let (_notifier, _view) = register_range_view(&mapping, PAGE_SIZE_4K, false);
+
+    assert!(!mapping.invalidate_range(0, PAGE_SIZE_4K as u64).unwrap());
+    assert_eq!(mapping.nrpages(), 1);
+}
+
+#[def_test]
+fn invalidate_range_discards_clean_folios_after_unmap_completes() {
+    let (_inode, mapping) = range_inode(21);
+    mapping
+        .i_pages
+        .filemap_add_folio(super::folio_from_bytes(0, b"stale"))
+        .unwrap();
+    let (_notifier, _view) = register_range_view(&mapping, PAGE_SIZE_4K, true);
+
+    assert!(mapping.invalidate_range(0, PAGE_SIZE_4K as u64).unwrap());
+    assert_eq!(mapping.nrpages(), 0);
+}
+
+#[def_test]
+fn invalidate_range_keeps_dirty_folios_and_reports_busy() {
+    let (_inode, mapping) = range_inode(22);
+    mapping
+        .write_cached_bytes(0, b"dirty")
+        .expect("cache write should dirty the folio");
+    let (_notifier, _view) = register_range_view(&mapping, PAGE_SIZE_4K, true);
+
+    assert!(matches!(
+        mapping.invalidate_range(0, PAGE_SIZE_4K as u64),
+        Err(VfsError::ResourceBusy)
+    ));
+    assert_eq!(mapping.nrpages(), 1);
+}
+
+#[def_test]
+fn invalidate_range_ignores_empty_and_inverted_ranges() {
+    let (_inode, mapping) = range_inode(23);
+    mapping
+        .i_pages
+        .filemap_add_folio(super::folio_from_bytes(0, b"kept"))
+        .unwrap();
+
+    assert!(mapping.invalidate_range(PAGE_SIZE_4K as u64, PAGE_SIZE_4K as u64).unwrap());
+    assert!(mapping.invalidate_range(PAGE_SIZE_4K as u64, 0).unwrap());
+    assert_eq!(mapping.nrpages(), 1);
+}
+
+#[def_test]
+fn invalidate_range_clips_the_view_hit_to_the_requested_range() {
+    let (_inode, mapping) = range_inode(24);
+    mapping
+        .i_pages
+        .filemap_add_folio(super::folio_from_bytes(0, b"first"))
+        .unwrap();
+    mapping
+        .i_pages
+        .filemap_add_folio(super::folio_from_bytes(1, b"second"))
+        .unwrap();
+    let (notifier, _view) = register_range_view(&mapping, PAGE_SIZE_4K * 2, true);
+
+    assert!(mapping.invalidate_range(0, PAGE_SIZE_4K as u64).unwrap());
+    assert_eq!(*notifier.observed.lock(), [(0, PAGE_SIZE_4K)]);
+    assert_eq!(mapping.nrpages(), 1);
+}
+
+#[def_test]
+fn invalidate_range_rejects_views_without_notifier() {
+    let (_inode, mapping) = range_inode(25);
+    let _view = mapping.register_view(MappingViewSpec {
+        mm_id: 1,
+        vma_start: 0x4000,
+        vma_len: PAGE_SIZE_4K,
+        object_start: 0,
+        object_len: PAGE_SIZE_4K,
+        kind: MappingViewKind::Shared,
+        notifier: None,
+    });
+
+    assert!(matches!(
+        mapping.invalidate_range(0, PAGE_SIZE_4K as u64),
+        Err(VfsError::OperationNotSupported)
+    ));
+}
+
+#[def_test]
+fn try_invalidate_mappings_range_treats_inverted_range_as_empty() {
+    let (_inode, mapping) = range_inode(26);
+    let (_notifier, _view) = register_range_view(&mapping, PAGE_SIZE_4K, false);
+
+    assert!(
+        mapping
+            .try_invalidate_mappings_range(PAGE_SIZE_4K as u64, Some(0))
+            .unwrap()
+    );
 }

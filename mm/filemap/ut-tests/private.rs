@@ -1197,3 +1197,43 @@ fn split_private_file_mapping_mremap_preserves_page_offsets_and_pins() {
         .expect("unmap remaining first page");
     assert!(runtime.file_pages.lock().is_empty());
 }
+
+#[def_test]
+fn non_aligned_file_end_view_rounds_to_page_boundary() {
+    use alloc::sync::Arc;
+    let file = page_cache_file("non-aligned-tail-view");
+    let data_len = 0x1100usize;
+    file.write_from(&vec![0x5a; data_len], &mut 0)
+        .expect("seed non-aligned file");
+    let mm = Arc::new(ksync::Mutex::new(
+        memspace::MmSpace::new_user_empty().expect("new mm"),
+    ));
+    let observer = memspace::MmObserver::new(&mm);
+    let mm_id = mm.lock().mm_id();
+    let invalidate = observer.invalidate_handle();
+    let spec = crate::PrivateFileViewSpec {
+        mm_id,
+        observer: &observer,
+        invalidate,
+    };
+    let start = VirtAddr::from_usize(0x600_000);
+    let (_vma, _runtime) = crate::new_file_private_vma(
+        start,
+        2 * PAGE_SIZE_4K,
+        PageSize::Size4K,
+        file.clone(),
+        0,
+        Some(data_len as u64),
+        MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE,
+        Some(spec),
+    )
+    .expect("private file vma");
+
+    // The partial tail page is anonymous, so the file view must stop at the
+    // page boundary; a non-aligned end would make invalidation construct a
+    // page-unaligned zap range and fail with InvalidInput.
+    assert_eq!(
+        file.mapping().registered_object_ranges(),
+        vec![(0, PAGE_SIZE_4K as u64)]
+    );
+}

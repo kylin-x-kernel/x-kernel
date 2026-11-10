@@ -43,6 +43,7 @@ mod lru_cache;
 
 #[cfg(unittest)]
 pub use elf_image::tests::executable_bytes as test_executable_bytes;
+pub use filemap::PrivateFileViewSpec;
 #[cfg(unittest)]
 pub use loader::PartialInstallProbe;
 

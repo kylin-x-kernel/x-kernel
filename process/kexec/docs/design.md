@@ -148,7 +148,11 @@ interpreter. Segment virtual/file starts are aligned down to 4 KiB; their page
 offset relationship was already validated during preparation.
 `new_file_private_vma` receives file offset and `p_offset + p_filesz` as the
 file-data boundary, preserving prefix, zero-tail, and private-mapping semantics
-through MM rather than implementing a second loader-specific memory owner.
+through MM rather than implementing a second loader-specific memory owner. The
+loader passes a live view context (`mm_id`, observer, invalidate handle) so each
+file-backed segment registers a private file view in the inode address space,
+letting cache invalidation reach text pages mapped directly from the cache. The
+registered range is page-aligned; the partial tail page stays anonymous.
 Auxiliary entries describe the main image and interpreter base and include the
 credential snapshot's `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, and explicit
 `AT_SECURE`. `app_stack_region` adds `AT_RANDOM` backed by the kernel entropy

@@ -11,13 +11,46 @@ use alloc::{
 
 use fs_context::copy_init_fs_struct;
 use kcred::initial_cred;
-use kexec::{ExecRequest, load_prepared_user_app, prepare_user_app_request};
+use kexec::{
+    ExecRequest, PreparedExecImage, PrivateFileViewSpec, load_prepared_user_app,
+    prepare_user_app_request,
+};
 use khal::uspace::UserContext;
 use kprocess::{UserThreadRuntimeAction, build_process_thread, publish_user_task};
 use ksync::Mutex;
+use memaddr::VirtAddr;
 use posix_fs::file::add_stdio;
 
 use crate::runtime::run_user_thread_loop;
+
+/// Installs the prepared init image into `uspace`, registering its private file
+/// views for cache invalidation.
+///
+/// - `uspace`: the init address space.
+/// - `prepared`: the prepared executable and interpreter image.
+///
+/// Returns: the image entry point and initial user stack pointer.
+///
+/// Locking: holds the address-space mutex while mapping and registering.
+fn load_init_image(
+    uspace: &Arc<Mutex<memspace::MmSpace>>,
+    prepared: PreparedExecImage,
+) -> (VirtAddr, VirtAddr) {
+    let mut guard = uspace.lock();
+    let observer = memspace::MmObserver::new(uspace);
+    let view = PrivateFileViewSpec {
+        mm_id: guard.mm_id(),
+        observer: &observer,
+        invalidate: guard.invalidate_handle(uspace),
+    };
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the PID 1 image cannot be \
+                  loaded into its address space; init spawning has no error return or recovery"
+    )]
+    load_prepared_user_app(&mut guard, prepared, Some(view))
+        .unwrap_or_else(|e| panic!("Failed to load init image: {e}"))
+}
 
 /// Spawns the initial user program as a fresh PID 1 user task.
 ///
@@ -56,8 +89,9 @@ pub fn spawn_init_process(
         kidentity::allocate_root_pid_handle().expect("failed to allocate init PID handle");
     assert_eq!(pid_handle.root_nr(), 1, "init must be the first root PID");
 
-    let mut uspace =
-        memspace::MmSpace::new_user_empty().expect("Failed to create user address space");
+    let uspace = Arc::new(Mutex::new(
+        memspace::MmSpace::new_user_empty().expect("Failed to create user address space"),
+    ));
 
     let cred = initial_cred();
     // Resolve the executable through the shared `ExecRequest` path so that the
@@ -101,16 +135,10 @@ pub fn spawn_init_process(
         cred.clone(),
     ))
     .unwrap_or_else(|e| panic!("Failed to prepare init image: {e}"));
-    #[expect(
-        clippy::panic,
-        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the PID 1 image cannot be \
-                  loaded into its address space; init spawning has no error return or recovery"
-    )]
-    let (entry_vaddr, ustack_top) = load_prepared_user_app(&mut uspace, prepared)
-        .unwrap_or_else(|e| panic!("Failed to load init image: {e}"));
+    let (entry_vaddr, ustack_top) = load_init_image(&uspace, prepared);
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
-    let page_table_root = uspace.page_table_hw_root();
+    let page_table_root = uspace.lock().page_table_hw_root();
 
     let fs_context = copy_init_fs_struct();
     let process = kprocess::Process::new_init_with_task_number(pid_handle.clone());
@@ -128,7 +156,7 @@ pub fn spawn_init_process(
         pid_handle.clone(),
         path,
         Arc::new(args.to_vec()),
-        Arc::new(Mutex::new(uspace)),
+        uspace,
         fs_context,
         Default::default(),
         cred,

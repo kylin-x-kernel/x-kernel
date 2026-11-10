@@ -296,6 +296,137 @@ fn invalidate_sink_removes_exact_enqueued_request() {
     assert!(sink.pop_front().is_none());
 }
 
+struct ViewInvalidationFixture {
+    mm: Arc<Mutex<MmSpace>>,
+    handle: InvalidateHandle,
+    request: ObjectInvalidateRequest,
+}
+
+fn view_invalidation_fixture() -> ViewInvalidationFixture {
+    let vma_start = 0x40_0000usize;
+    let start = VirtAddr::from(vma_start);
+    let mm = Arc::new(Mutex::new(
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 4)
+            .expect("test address space should be constructible"),
+    ));
+    let runtime = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+    let object = match runtime.backing_info().kind() {
+        VmBackingKind::AnonymousPrivate { object } => object,
+        _ => panic!("fixture runtime must carry an anonymous private backing object"),
+    };
+    mm.lock()
+        .map(
+            start,
+            PAGE_SIZE_4K,
+            MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE,
+            false,
+            runtime,
+        )
+        .expect("mapping should succeed");
+    let handle = mm.lock().invalidate_handle(&mm);
+    let view = MappingView::new(
+        MappingViewId::from_raw(1),
+        mm.lock().mm_id(),
+        MappingViewRange {
+            vma_start: vma_start as u64,
+            vma_len: PAGE_SIZE_4K,
+            object_start: 0,
+            object_len: PAGE_SIZE_4K,
+        },
+        MappingViewKind::Private,
+    );
+    let hit = ObjectViewHit::new(view, 0, PAGE_SIZE_4K);
+    ViewInvalidationFixture {
+        mm,
+        handle,
+        request: ObjectInvalidateRequest::new(object, hit),
+    }
+}
+
+#[def_test]
+fn live_handle_applies_present_pte_and_reports_success() {
+    let fixture = view_invalidation_fixture();
+    let page = VirtAddr::from_usize(0x40_0000);
+    assert!(
+        fixture
+            .mm
+            .lock()
+            .handle_page_fault(page, PageFaultFlags::WRITE)
+            .is_resolved()
+    );
+    assert!(fixture.mm.lock().page_table().query(page).is_ok());
+
+    assert!(
+        fixture
+            .handle
+            .try_apply(&fixture.request)
+            .expect("idle address space applies the request")
+    );
+
+    assert!(fixture.mm.lock().page_table().query(page).is_err());
+    assert!(fixture.mm.lock().invalidate_sink.pop_front().is_none());
+}
+
+#[def_test]
+fn busy_address_space_reports_pending() {
+    let fixture = view_invalidation_fixture();
+    let guard = fixture.mm.lock();
+
+    assert!(
+        !fixture
+            .handle
+            .try_apply(&fixture.request)
+            .expect("busy probe does not fail")
+    );
+
+    drop(guard);
+}
+
+#[def_test]
+fn deferred_handle_keeps_request_queued_until_drain() {
+    let fixture = view_invalidation_fixture();
+    let handle = fixture.mm.lock().deferred_invalidate_handle();
+
+    assert!(
+        !handle
+            .try_apply(&fixture.request)
+            .expect("deferred probe does not fail")
+    );
+    assert!(
+        !handle
+            .submit(fixture.request.clone())
+            .expect("deferred submit does not fail")
+    );
+
+    let (id, queued) = fixture
+        .mm
+        .lock()
+        .invalidate_sink
+        .pop_front()
+        .expect("deferred request must stay queued");
+    assert_eq!(queued, fixture.request);
+    fixture.mm.lock().invalidate_sink.requeue_back(id, queued);
+    fixture.mm.lock().drain_pending_invalidations();
+    assert!(fixture.mm.lock().invalidate_sink.pop_front().is_none());
+}
+
+#[def_test]
+fn destroyed_address_space_reports_complete() {
+    let start = VirtAddr::from(0x40_0000usize);
+    let mm = Arc::new(Mutex::new(
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 4)
+            .expect("test address space should be constructible"),
+    ));
+    let handle = mm.lock().invalidate_handle(&mm);
+    drop(mm);
+
+    assert!(
+        handle
+            .try_apply(&sample_request())
+            .expect("a destroyed address space is already complete")
+    );
+}
+
 #[def_test]
 fn fault_adapter_treats_retry_outcomes_as_handled() {
     assert!(MmSpace::page_fault_outcome_is_handled(

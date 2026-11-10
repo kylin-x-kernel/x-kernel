@@ -40,7 +40,6 @@ pub(crate) struct FileRuntimeContext<'a> {
 pub(crate) struct AddressSpaceViewSpec {
     pub mm_id: u64,
     pub start: VirtAddr,
-    pub len: usize,
     pub object_start: u64,
     pub object_len: usize,
     pub kind: MappingViewKind,
@@ -71,7 +70,6 @@ impl SharedFileSourceAdapter {
             AddressSpaceViewSpec {
                 mm_id: spec.mm_id,
                 start: spec.start,
-                len: spec.len,
                 object_start: spec.offset_page * PageSize::Size4K as u64,
                 object_len: spec.len,
                 kind: MappingViewKind::Shared,
@@ -139,12 +137,23 @@ pub(crate) fn register_address_space_view(
     handle: InvalidateHandle,
     spec: AddressSpaceViewSpec,
 ) -> Option<AddressSpaceViewGuard> {
+    let page = PageSize::Size4K as u64;
+    // Shared file mappings cover whole pages; normalize both ends so a
+    // non-page-aligned caller can never make invalidation build a page-unaligned
+    // zap range, which `try_invalidate` rejects.
+    let object_start = spec.object_start - spec.object_start % page;
+    let end = spec.object_start.saturating_add(spec.object_len as u64);
+    let len =
+        usize::try_from((end - end % page).saturating_sub(object_start)).unwrap_or(usize::MAX);
+    if len == 0 {
+        return None;
+    }
     Some(address_space.register_view(MappingViewSpec {
         mm_id: spec.mm_id,
         vma_start: spec.start.as_usize() as u64,
-        vma_len: spec.len,
-        object_start: spec.object_start,
-        object_len: spec.object_len,
+        vma_len: len,
+        object_start,
+        object_len: len,
         kind: spec.kind,
         notifier: Some(MmSpaceInvalidate::new(handle)),
     }))
@@ -196,7 +205,43 @@ pub(crate) fn build_file_vma(spec: FileVmaSpec, backing: VmBackingInfo) -> VmAre
     )
 }
 
+/// View-registration inputs for a private file mapping created outside mmap.
+///
+/// Carries the owning address-space identity, its observer, and the live
+/// invalidation handle used to register the file view.
+#[derive(Clone)]
+pub struct PrivateFileViewSpec<'a> {
+    /// Owning address-space identity.
+    pub mm_id: u64,
+    /// Observer used to mint per-view invalidation callbacks.
+    pub observer: &'a MmObserver,
+    /// Synchronous invalidation handle for the target address space.
+    pub invalidate: InvalidateHandle,
+}
+
 /// Creates a private file-backed VMA metadata record and runtime from an open file.
+///
+/// - `start`: VMA start address.
+/// - `len`: VMA byte length.
+/// - `page_size`: page size of the VMA.
+/// - `file`: backing file.
+/// - `offset`: file byte offset where the VMA begins.
+/// - `file_end`: exclusive file byte end; `None` spans the whole VMA.
+/// - `flags`: mapping protection flags.
+/// - `view`: when `Some`, registers the file view for cache invalidation; the
+///   exec loader passes a live handle so invalidation can certify completion.
+///
+/// Returns: the VMA metadata record and its runtime.
+///
+/// Errors: propagate from runtime construction.
+///
+/// Locking: takes the inode address-space views lock when registering; no
+/// address-space lock.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CG-024-lint-exceptions: loader geometry, backing range, and view context form one \
+              installation call"
+)]
 pub fn new_file_private_vma(
     start: VirtAddr,
     len: usize,
@@ -205,8 +250,22 @@ pub fn new_file_private_vma(
     offset: u64,
     file_end: Option<u64>,
     flags: MappingFlags,
+    view: Option<PrivateFileViewSpec<'_>>,
 ) -> KResult<(VmArea, VmRuntimeRef)> {
-    let runtime = new_private_runtime(start, len, page_size, file.clone(), offset, file_end, None)?;
+    let context = view.map(|view| FileRuntimeContext {
+        mm_id: view.mm_id,
+        observer: view.observer,
+        invalidate: view.invalidate,
+    });
+    let runtime = new_private_runtime(
+        start,
+        len,
+        page_size,
+        file.clone(),
+        offset,
+        file_end,
+        context,
+    )?;
     let vma = build_file_vma(
         FileVmaSpec {
             start,

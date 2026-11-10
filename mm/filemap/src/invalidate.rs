@@ -27,8 +27,15 @@ impl MappingViewNotifier for MmSpaceInvalidate {
         hit: &ObjectViewHit,
     ) -> kerrno::KResult<bool> {
         let Some(aligned_hit) = hit.aligned_object_suffix(PageSize::Size4K as u64) else {
-            return Ok(true);
+            // No whole page is attributable to this hit, so the leading PTE
+            // cannot be removed and completion is unproven.
+            return Ok(false);
         };
+        if aligned_hit.object_start() != hit.object_start() {
+            // A truncated head page keeps its PTE, so only a whole-hit zap can
+            // certify that this view is complete.
+            return Ok(false);
+        }
         let request = work
             .request_for_subhit(hit, &aligned_hit)
             .ok_or(kerrno::KError::InvalidInput)?;

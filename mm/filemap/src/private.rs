@@ -431,6 +431,21 @@ impl FilePrivateRuntime {
         Ok(FaultCompletion::from_populate((1, None)))
     }
 
+    /// Registers this private file mapping in the inode address space so cache
+    /// invalidation can reach the file-backed pages it maps.
+    ///
+    /// - `file`: mapped executable or data file.
+    /// - `file_start`: file byte offset where the view begins.
+    /// - `file_end`: exclusive file byte end; only whole pages are recorded.
+    /// - `context`: owning address-space identity and invalidate handle; `None`
+    ///   skips registration.
+    /// - `start`: VMA start address.
+    /// - `len`: VMA byte length.
+    ///
+    /// Returns: the registration guard, or `None` when no context is supplied
+    /// or the page-aligned file range is empty.
+    ///
+    /// Locking: takes the inode address-space views lock; no address-space lock.
     fn register_mapping_view(
         file: &Arc<VfsFile>,
         file_start: u64,
@@ -441,7 +456,13 @@ impl FilePrivateRuntime {
     ) -> Option<AddressSpaceViewGuard> {
         let context = context?;
         let address_space = file.mapping();
-        let object_start = file_start / PageSize::Size4K as u64 * PageSize::Size4K as u64;
+        let page = PageSize::Size4K as u64;
+        let object_start = file_start / page * page;
+        // Only whole pages inside `file_end` are directly cache-mapped
+        // (`try_map_readonly_file_page`); the partial tail page is COW or
+        // zero-filled and holds no cache reference, so the rmap view stops at
+        // the page boundary instead of reaching into that anonymous tail.
+        let file_end = file_end.map(|end| end - end % page);
         let len = match file_end {
             Some(end) => end.saturating_sub(object_start).min(len as u64) as usize,
             None => len,

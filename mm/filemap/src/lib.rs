@@ -35,5 +35,5 @@ pub(crate) enum FileMappingMode {
 
 pub use self::{
     mmap::{FileMmapRequest, mmap_private_file, mmap_shared_file},
-    runtime::new_file_private_vma,
+    runtime::{PrivateFileViewSpec, new_file_private_vma},
 };

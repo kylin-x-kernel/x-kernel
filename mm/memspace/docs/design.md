@@ -393,9 +393,13 @@ conversion does not release mappings or roll back partially initialized hardware
 
 `InvalidateHandle::try_apply` never waits for the MM mutex. It reports success
 after matching PTE removal and TLB invalidation, including the vacuous case of a
-destroyed MM. File-backed write-fault admission contention is classified as
-`PageFaultOutcome::Retry` so the fault returns from the MM critical section
-before retrying a conflicting filesystem lifecycle or inode policy transition.
+destroyed MM. Handles created for view registration before an owned `Arc<MmSpace>`
+exists are deferred: they carry no address-space pointer, so `try_apply` reports
+incomplete instead of claiming the vacuous destroyed-MM success, and `submit`
+leaves the request for the owning address space to drain. File-backed write-fault
+admission contention is classified as `PageFaultOutcome::Retry` so the fault
+returns from the MM critical section before retrying a conflicting filesystem
+lifecycle or inode policy transition.
 
 `MmUserHandle::resolve_page_fault` is the common sleepable fault entry. On
 admission Retry it retains the existing backing runtime, releases the MM mutex,

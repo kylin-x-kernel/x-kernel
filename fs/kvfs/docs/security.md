@@ -849,6 +849,23 @@ writeback leaves cache ownership intact; earlier PTE revocation may remain.
 The invalidation guard is released before retrying a busy MM. Callers must not
 hold an MM lock or writeback-completion locks across this operation.
 
+`AddressSpace::invalidate_range()` applies the same rule to a byte range: a
+busy target MM reports `Ok(false)` and no folio is released, a covering view
+without a notifier is rejected with `OperationNotSupported`, and only fully
+revoked views allow clean-folio discard. A dirty folio reported as
+`ResourceBusy` may follow clean folios that were already discarded, so a caller
+must treat the range as not fully invalidated and must not assume the cache
+still holds every folio.
+
+Buffered writes publish or dirty cache folios only while holding the invalidate
+read lock, so an invalidation that holds it exclusively cannot report completion
+while a concurrent writer can still make the range dirty again. A registered
+view never spans a partial tail page: that page is anonymous and must survive a
+file invalidation, so rounding the view to the page boundary keeps file
+invalidation from zapping user data in an executable's BSS tail. Executable text
+mapped directly from the cache is registered like any other private file view, so
+a file overwrite or truncate cannot leave those PTEs pointing at stale pages.
+
 A writable descriptor alone does not authorize later shared mapping writes.
 Write faults recheck the current inode policy under data exclusion. A fault's
 superblock admission and data guard are acquired without waiting under the MM

@@ -157,7 +157,9 @@ impl InvalidateSink {
 #[derive(Clone)]
 pub struct InvalidateHandle {
     sink: Weak<InvalidateSink>,
-    aspace: Weak<Mutex<MmSpace>>,
+    /// `None` for a deferred handle that only enqueues; `Some` for a handle
+    /// that may apply synchronously while its address space is alive.
+    aspace: Option<Weak<Mutex<MmSpace>>>,
 }
 
 impl InvalidateHandle {
@@ -170,9 +172,13 @@ impl InvalidateHandle {
     }
 
     /// Removes matching PTEs and completes TLB invalidation if the MM is idle.
-    /// A destroyed MM has no remaining mappings and is already complete.
+    /// A destroyed MM has no remaining mappings and is already complete; a
+    /// deferred handle only enqueues and never reports synchronous completion.
     pub fn try_apply(&self, request: &ObjectInvalidateRequest) -> KResult<bool> {
-        let Some(aspace) = self.aspace.upgrade() else {
+        let Some(aspace) = self.aspace.as_ref() else {
+            return Ok(false);
+        };
+        let Some(aspace) = aspace.upgrade() else {
             return Ok(true);
         };
         let Some(mut aspace) = aspace.try_lock() else {
@@ -249,14 +255,14 @@ impl MmSpace {
     pub fn invalidate_handle(&self, aspace: &Arc<Mutex<MmSpace>>) -> InvalidateHandle {
         InvalidateHandle {
             sink: Arc::downgrade(&self.invalidate_sink),
-            aspace: Arc::downgrade(aspace),
+            aspace: Some(Arc::downgrade(aspace)),
         }
     }
 
     pub(crate) fn deferred_invalidate_handle(&self) -> InvalidateHandle {
         InvalidateHandle {
             sink: Arc::downgrade(&self.invalidate_sink),
-            aspace: Weak::new(),
+            aspace: None,
         }
     }
 

@@ -75,7 +75,7 @@ fn loads_pure_bss_beyond_eof_as_zeroed_anonymous_memory() {
     let prepared =
         super::prepare_user_app_request(image_request(probe_bss_fixture(0), vec![])).unwrap();
     let mut mm = MmSpace::new_user_empty().unwrap();
-    super::load_prepared_user_app(&mut mm, prepared).unwrap();
+    super::load_prepared_user_app(&mut mm, prepared, None).unwrap();
     let start = VirtAddr::from_usize(0x41f000);
     let vma = mm.find_vma(start).unwrap();
     assert_eq!(vma.start(), start);
@@ -100,7 +100,7 @@ fn pure_bss_preserves_shared_page_file_bytes_and_program_headers() {
     let expected = data[0x1000..0x1800].to_vec();
     let prepared = super::prepare_user_app_request(image_request(data, vec![])).unwrap();
     let mut mm = MmSpace::new_user_empty().unwrap();
-    super::load_prepared_user_app(&mut mm, prepared).unwrap();
+    super::load_prepared_user_app(&mut mm, prepared, None).unwrap();
     let start = VirtAddr::from_usize(0x401000);
     assert!(matches!(
         mm.find_vma(start).unwrap().backing().kind(),
@@ -131,7 +131,7 @@ fn pure_bss_shared_page_crossing_eof_preserves_only_file_bytes() {
         })
         .unwrap();
     let mut mm = MmSpace::new_user_empty().unwrap();
-    super::load_prepared_user_app(&mut mm, prepared).unwrap();
+    super::load_prepared_user_app(&mut mm, prepared, None).unwrap();
     let start = VirtAddr::from_usize(0x401000);
     assert!(matches!(
         mm.find_vma(start).unwrap().backing().kind(),
@@ -183,7 +183,7 @@ fn prepared_image_survives_cache_clear_and_rejections_preserve_installed_mm() {
     let mut mm = MmSpace::new_user_empty().expect("empty user MM");
     assert!(mm.vmas().next().is_none());
     assert_eq!(
-        super::load_prepared_user_app(&mut mm, prepared),
+        super::load_prepared_user_app(&mut mm, prepared, None),
         Ok((expected_entry, expected_sp))
     );
     // Inspect the installed ELF mapping permissions.
@@ -205,7 +205,7 @@ fn prepared_image_survives_cache_clear_and_rejections_preserve_installed_mm() {
     let second = super::prepare_user_app_request(image_request(executable_bytes(), vec![]))
         .expect("prepare second fixture");
     assert_eq!(
-        super::load_prepared_user_app(&mut mm, second),
+        super::load_prepared_user_app(&mut mm, second, None),
         Err(KError::InvalidInput)
     );
     assert_eq!(mm.vmas().count(), vma_count);

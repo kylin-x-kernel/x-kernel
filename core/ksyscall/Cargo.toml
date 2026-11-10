@@ -53,6 +53,7 @@ kseccomp.workspace = true
 krlimit.workspace = true
 ksignal.workspace = true
 kspin.workspace = true
+memaddr.workspace = true
 memspace.workspace = true
 osvm.workspace = true
 linux_sysno.workspace = true
