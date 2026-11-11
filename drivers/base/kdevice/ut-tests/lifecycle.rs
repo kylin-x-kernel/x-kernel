@@ -1388,7 +1388,8 @@ fn test_remove_unbinds_and_requeues_descriptor() {
 
     let desc = platform_desc(&bus, 52, "remove");
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
-    let old_id = device_for_desc(desc.id()).unwrap().id();
+    let old_device = device_for_desc(desc.id()).unwrap();
+    let old_id = old_device.id();
 
     assert_eq!(remove_device_managed(old_id), Ok(()));
     assert!(crate::find_device(old_id).is_none());
@@ -1399,11 +1400,24 @@ fn test_remove_unbinds_and_requeues_descriptor() {
     assert_desc_pending!(desc.id());
     assert_trace!(&["probe", "cleanup"]);
 
+    // An external holder of the old object observes a terminal binding: the
+    // old binding's cleanup has run and no new reference can be admitted.
+    assert_eq!(old_device.state(), DeviceState::Removed);
+    assert!(old_device.try_acquire().is_none());
+
     // The descriptor identity survives removal and may be bound again; the
-    // new runtime object gets a fresh `DeviceId`.
+    // new runtime object gets a fresh `DeviceId` and an independent binding.
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
-    let new_id = device_for_desc(desc.id()).unwrap().id();
-    assert_ne!(new_id, old_id);
+    let new_device = device_for_desc(desc.id()).unwrap();
+    assert_ne!(new_device.id(), old_id);
+    assert_eq!(new_device.state(), DeviceState::Active);
+    assert!(new_device.try_acquire().is_some());
+
+    // Rebinding never revives the old binding or re-runs its cleanup: the
+    // trace is the first probe, the old binding's cleanup, and the new probe.
+    assert_eq!(old_device.state(), DeviceState::Removed);
+    assert!(old_device.try_acquire().is_none());
+    assert_trace!(&["probe", "cleanup", "probe"]);
 }
 
 #[def_test(serial)]

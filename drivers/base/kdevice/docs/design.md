@@ -34,7 +34,9 @@ Rust's type system and ownership model:
 - **Type safety**: bus instances, device objects, and driver objects are
   separate Rust types, shared via `Arc`, with mutable state protected by
   `SpinNoPreempt`;
-- **Explicit ownership**: `DeviceObject` owns its devres cleanup entries;
+- **Explicit ownership**: each `DeviceObject` combines device facts with one
+  non-replaceable `BindingRuntime` that owns this binding's lifecycle,
+  usage admission, driver metadata and devres cleanup entries;
   `DeviceRegistry` owns the global indexes; lifecycle transitions are
   atomic through `AtomicU8` + CAS;
 - **Event-driven**: lifecycle events (Published/Matched/Bound/Activated/
@@ -57,10 +59,12 @@ drivers/base/kdevice/
     │                             #   PciBusTypeMatcher, PlatformBusTypeMatcher
     ├── device/
     │   ├── mod.rs                # device submodule root
+    │   ├── binding.rs            # private BindingRuntime: lifecycle, usage,
+    │   │                         #   driver metadata, devres of one binding
     │   ├── desc.rs               # DeviceDesc, DeviceId, DeviceLocation,
     │   │                         #   DeviceIdentity, DeviceState, DeviceRecord
-    │   ├── object.rs             # DeviceObject (core runtime object),
-    │   │                         #   DeviceUse (RAII usage-count guard)
+    │   ├── object.rs             # DeviceObject (device facts + relations +
+    │   │                         #   BindingRuntime), DeviceUse guard
     │   ├── handles.rs            # BusHandle, DeviceCore, DriverCore
     │   └── resource.rs           # resource type re-exports
     ├── device_node.rs            # DeviceNode identity, class allocators,
@@ -141,12 +145,12 @@ drivers/base/kdevice/
     │  │   subscribers: DeviceEventSubscribers │    │
     │  └──────────────────────────────────────┘    │
     │                                              │
-    │  ┌──────────┐ ┌───────────┐ ┌────────────┐  │
+    │  ┌───────────┐ ┌────────────┐ ┌────────────┐  │
     │  │BusInstance│ │DeviceObject│ │DriverObject│  │
-    │  │(per-bus  │ │(per-device│ │(per-driver │  │
-    │  │SpinLock) │ │SpinLock + │ │SpinLock +  │  │
-    │  │          │ │AtomicU8)  │ │AtomicU64)  │  │
-    │  └──────────┘ └───────────┘ └────────────┘  │
+    │  │(per-bus   │ │(facts +    │ │(per-driver │  │
+    │  │SpinLock)  │ │relations + │ │SpinLock +  │  │
+    │  │           │ │binding rt) │ │AtomicU64)  │  │
+    │  └───────────┘ └────────────┘ └────────────┘  │
     │                                              │
     │  ┌──────────────────────────────────────┐    │
     │  │   topology::DeviceTopology            │    │
@@ -160,7 +164,8 @@ drivers/base/kdevice/
 |------|------|
 | `DeviceRegistry` | Global object index; BTreeMaps for descriptors/devices/buses/drivers; id allocation |
 | `DeviceNodeRegistry` | Linux-compatible class index, device number, `devname`, and node lifecycle authority; orders projection callbacks around one host lifecycle publisher |
-| `DeviceObject` | Core runtime device object; `AtomicU8` lifecycle state + CAS transitions; devres cleanup list; usage count |
+| `DeviceObject` | Device facts, immutable after construction, plus topology relations under `SpinNoPreempt`; combines one `BindingRuntime` |
+| `BindingRuntime` (private) | Per-binding state owner: `AtomicU8` lifecycle + CAS, usage count, driver metadata under `SpinNoPreempt`, devres cleanup list |
 | `DeviceUse` | RAII guard; blocks device removal while held |
 | `BusInstance` | Runtime bus instance; controller / devices / drivers lists; probe statistics |
 | `BusTypeObject` | Bus matching domain; tracks bus instances and registered drivers and delegates matching to the `BusType` trait. Descriptors awaiting a driver are discovered from the registry's `Pending`/`Probing` state, not from a second queue |
@@ -172,6 +177,47 @@ drivers/base/kdevice/
 | `DeviceEvent` / `DeviceEventKind` | The 5 lifecycle events; bucketed subscribers |
 | `DeviceTopology` | Read-only topology snapshot; bus/driver-filtered iterators |
 | Lifecycle API | `register_bus_instance`, `register_driver_object`, `probe_device_desc`, `adopt_active_device`, `remove_device_managed` (unbind/requeue), `unregister_device_desc` (remove registration) |
+
+## Binding runtime ownership
+
+A `DeviceObject` separates long-lived device facts from one driver binding:
+
+| Owner | State |
+| --- | --- |
+| `DeviceObject` | `id`, bus/location/origin/identity/transport, resources, DMA view, INTx route, firmware node (all fixed after construction) |
+| `DeviceObject.relations` | `parent`, `children`, `child_bus` under one `SpinNoPreempt`; managed by the lifecycle layer/backend, not by `BindingRuntime`. The existing removal path still performs its relation cleanup |
+| `BindingRuntime` | `lifecycle` (`AtomicU8`), `usage` (`AtomicUsize`), driver metadata (`driver_id`/`driver_name`/`device_kind`) under `SpinNoPreempt`, devres cleanup `Vec` under `SpinNoPreempt` |
+
+`BindingRuntime` is a private value field of `DeviceObject`, never an `Option`,
+`Arc`, or replaceable slot. It has no replace/reset/into-inner API and is not
+exported from the crate, so the binding lives exactly as long as the object.
+In the current model every probe candidate and every rebind gets a new
+`DeviceObject` and `DeviceId`; reusing the same object for a second binding is
+not supported.
+
+`DeviceUse` still holds `Arc<DeviceObject>`, so the guard's `Drop` decrements
+the one binding that existed when the guard was acquired. This is safe only
+because the binding is non-replaceable. A future stable-object design that
+supports swapping bindings must move guard ownership to the specific binding
+(for example an `Arc<BindingRuntime>`), not keep delegating to "the current
+binding".
+
+`record_snapshot` returns a **grouped snapshot**, not one atomic snapshot.
+Driver metadata (`driver_id`/`driver_name`/`device_kind`) is sampled under
+`binding.meta` as one group; `parent`/`child_bus` are sampled under the
+relations lock as another; the lifecycle state is a separate atomic read taken
+before the metadata lock. Each group is internally consistent, but the three
+samples may come from different instants. Immutable device facts are copied
+from the object. Consumers use records for diagnostics, enumeration and
+filtering, not as a cross-group transaction.
+
+Cleanup ownership moves with the binding. `run_cleanups` takes the current
+`Vec` under the devres lock, releases the lock, then runs items LIFO; each item
+in that batch runs once. A cleanup registered by a running callback enters the
+next batch and is not run by the same call, so only a call with no new
+registrations is a no-op. Explicit lifecycle orchestration still owns teardown;
+`BindingRuntime` has no `Drop` side effects and does not replace
+`driver.remove`/`bus_type.remove` ordering.
 
 ## Device-node identity lifecycle
 
@@ -245,7 +291,7 @@ rejected instead of backfilling synthetic add events.
                                │ remove_device_managed()
                                ▼
                          ┌────────────┐
-                         │  Removing  │  ← begin_removing() CAS commit point;
+                         │  Removing  │  ← begin_removing() closes admission;
                          │            │     driver.remove() + bus_type.remove()
                          │            │     + run_cleanups()
                          └─────┬──────┘
@@ -263,7 +309,7 @@ rejected instead of backfilling synthetic add events.
 | Matched | Bound | the publish path records driver_id/name/kind before visibility |
 | Bound | Active | `DeviceDriver::probe_device` returns `Ok(())` |
 | Matched/Bound | Removed | candidate probe failed; the unpublished object is discarded |
-| Active/Matched/Bound | Removing | `remove_device_managed` CAS succeeds |
+| Active/Matched/Bound | Removing | `begin_removing` closes admission and sees zero usage |
 | Removing | Removed | driver.remove + bus_type.remove + run_cleanups complete |
 
 `adopt_active_device` prepares Matched/Bound metadata before publication, so
@@ -273,8 +319,12 @@ The `begin_removing` CAS loop uses `compare_exchange_weak`:
 
 - only `Active`/`Bound`/`Matched`/`Discovered` may transition to `Removing`;
 - an existing `Removing` or `Removed` state is rejected (re-entry guard);
-- a non-zero usage count rolls back and returns `ResourceBusy`;
-- after a successful CAS the transition is irreversible.
+- the CAS into `Removing` only **closes admission** for new `DeviceUse`
+  references; it is not the teardown commit point;
+- a non-zero usage count restores the prior state, returns `ResourceBusy`, and
+  commits no teardown — the caller may retry;
+- only `begin_removing() == true` (CAS succeeded and usage was zero) gates the
+  lifecycle layer's irreversible teardown.
 
 ### DeviceDesc lifecycle (descriptor-first path)
 
@@ -443,9 +493,11 @@ descriptor's binding lock:
    - device disappeared → `ResourceBusy` (another remover won);
    - descriptor no longer bound to this device → `BadState`;
    - snapshot driver/bus type.
-3. `device.begin_removing()` — the single commit point. It runs after the
-   lock is acquired and rejects `Removing`/`Removed` states and non-zero
-   usage with `ResourceBusy`.
+3. `device.begin_removing()` — admission gate and lifecycle commit condition.
+   It runs after the lock is acquired, closes admission by entering
+   `Removing`, and rejects `Removing`/`Removed` states and non-zero usage with
+   `ResourceBusy`. On `ResourceBusy` the prior state is restored and no
+   teardown is committed; only a `true` return lets the steps below proceed.
 4. Under the lock: `driver.ops().remove(device)` and
    `bus_type.remove(device)` (best-effort; errors logged, removal proceeds),
    then `device.run_cleanups()` (devres LIFO).
@@ -484,9 +536,9 @@ retracts a discovery registration. It shares the removal sequence with
    still `Bound(device_id)` instead of requeueing it, all before the binding
    lock is released.
 4. `begin_removing` failure returns `ResourceBusy` with the descriptor,
-   binding and cleanup state untouched, so the caller may retry. After a
-   successful commit, a delete miss is reported as `BadState`; the teardown
-   still completes and is never rolled back to `Active`.
+   binding and cleanup state untouched, so the caller may retry. Once
+   `begin_removing()` returns `true`, a delete miss is reported as `BadState`;
+   the teardown still completes and is never rolled back to `Active`.
 
 There is no window in which the descriptor is written back to `Pending` and
 can be reclaimed by a competitor. A `Pending` unregister emits no lifecycle
@@ -520,8 +572,9 @@ follow:
 1. Descriptor binding lock (kmutex)  ← outermost; taken outside spinlocks
 2. Registry (DeviceRegistry)         ← may be taken while holding (1)
 3. BusInstance                       ← devices → drivers
-4. BusTypeObject / DriverObject /    ← innermost; DeviceObject state may be
-   DeviceObject state                   read under BusInstance.devices
+4. BusTypeObject / DriverObject /    ← innermost; exactly one DeviceObject
+   one DeviceObject leaf lock        leaf lock at a time: relations OR
+                                     binding.meta OR binding.devres
 ```
 
 **Rules**:
@@ -533,10 +586,15 @@ follow:
   **drop the registry guard** before taking a `BusInstance` lock; do not hold
   the registry while blocking.
 - per-object order is `bus.devices` → `bus.drivers`, and `bus.devices` →
-  `DeviceObject` state. No path goes from `DeviceObject` state back to the
-  registry or a bus instance.
+  one `DeviceObject` leaf lock. No path holds two of `relations`,
+  `binding.meta` or `binding.devres` at the same time, so the grouped
+  `record_snapshot` releases `binding.meta` before taking `relations`, and
+  `run_cleanups` releases `binding.devres` before running callbacks. No path
+  goes from a `DeviceObject` lock back to the registry or a bus instance.
 - **Forbidden**: calling back into `device_registry()` while holding a
   per-object lock.
+- **Forbidden**: running a callback, doing I/O, or releasing a resource while
+  holding `relations`, `binding.meta` or `binding.devres`.
 - **Forbidden**: calling driver-core mutators from a lifecycle subscriber
   callback.
 - The device-node registry is independent of `DeviceRegistry`. Callers must
@@ -544,9 +602,11 @@ follow:
   registering or unregistering a `DeviceNode`; `kclass` performs this from the
   lock-free event callback path.
 
-The `DeviceObject::begin_removing` CAS loop needs no per-object spinlock —
+The `BindingRuntime::begin_removing` CAS loop needs no per-object spinlock —
 the lifecycle field is an `AtomicU8`, allowing lock-free reads plus a CAS
-write.
+write. The metadata and devres locks are separate leaf locks in the same
+binding runtime; sharing a runtime does not combine them into one critical
+section.
 
 ## Concurrency Model
 
@@ -563,9 +623,12 @@ write.
   clones after the lock is released.
 - **`BusInstance`**: internal device/driver/controller lists each under
   `SpinNoPreempt`.
-- **`DeviceObject`**: `lifecycle` is an `AtomicU8` + CAS (lock-free read
-  path); `state` (parent/children/driver binding) uses `SpinNoPreempt`;
-  `usage` uses `AtomicUsize`.
+- **`DeviceObject`**: immutable facts plus `relations` (`parent`/`children`/
+  `child_bus`) under one `SpinNoPreempt`; combines one `BindingRuntime`.
+- **`BindingRuntime`**: `lifecycle` is an `AtomicU8` + CAS (lock-free read
+  path); `usage` is `AtomicUsize`; driver metadata (`meta`) and the devres
+  list each use their own `SpinNoPreempt`. A device object therefore has three
+  leaf spinlocks instead of two; no path nests them.
 - **`DriverObject`**: `bound_devices` under `SpinNoPreempt`; probe
   statistics in `AtomicU64`.
 - **`BusTypeObject`**: buses/drivers lists each under `SpinNoPreempt`.
@@ -619,14 +682,15 @@ impossible.
 ### AtomicU8 lifecycle + CAS transitions
 
 **Choice**: `DeviceState` is a `#[repr(u8)]` enum stored in
-`DeviceObject::lifecycle` as an `AtomicU8`.
+`BindingRuntime::lifecycle` as an `AtomicU8`.
 
 **Trade-off**: a CAS loop is more complex than a plain spinlock, in
 exchange for:
 
 - hot-path `state()` reads take no per-object lock;
-- `begin_removing` is a lock-free CAS commit point, avoiding complex
-  teardown decisions while holding a spinlock;
+- `begin_removing` closes admission lock-free and avoids teardown decisions
+  while holding a spinlock; a non-zero usage count reverts the CAS, and only
+  the successful `true` return gates teardown;
 - `try_acquire` uses `fetch_add` + state check, forming a correct
   concurrency protocol with `begin_removing`.
 
@@ -698,7 +762,8 @@ guard, then access per-object data.
 **Trade-off**: every cross-object access takes and drops the registry
 guard (extra boilerplate), in exchange for:
 
-- no deadlock risk (registry lock and per-object locks never nest);
+- no deadlock risk: a per-object lock never calls back into the registry,
+  and the per-object leaf locks never nest;
 - `Arc` keeps objects alive after the registry guard drops (reference
   counting).
 
@@ -707,10 +772,14 @@ lock is simple but slow; nesting deadlocks easily.
 
 ## Drop / Resource Release
 
-- `DeviceUse::drop` decrements `DeviceObject::usage`; `begin_removing` may
-  proceed once the count reaches zero.
+- `DeviceUse::drop` decrements its object's `BindingRuntime::usage`;
+  `begin_removing` may proceed once the count reaches zero. This delegation is
+  valid only while the binding is non-replaceable.
 - `DeviceObject` does not implement `Drop` — cleanup is driven explicitly
   by `remove_device_managed` (devres LIFO).
+- `BindingRuntime` does not implement `Drop` either. Dropping it only frees
+  the remaining callback boxes; it is not a substitute for explicit teardown
+  and does not imply hardware is quiesced.
 - `DeviceRegistry` does not implement `Drop` — it is a global static.
 - `DeviceTopology` is a plain data snapshot; dropping it frees the `Vec`s.
 
@@ -720,8 +789,10 @@ ResourceDesc/ResourceSet belong to device::resource. device::managed acquires
 driver-os-api guards through explicit providers and registers them directly with
 DeviceObject::add_cleanup. DeviceResource and the unused ResourceProvider
 aggregate are removed without a replacement facade.
-Cleanup remains framework-triggered, LIFO and outside the devres lock.
-Failed acquisition registers nothing; repeated drains are empty. Raw MMIO/DMA
+Cleanup remains framework-triggered, LIFO and outside the binding's devres
+lock; the batch belongs to that binding's runtime. Failed acquisition
+registers nothing. A second drain with no new registrations is empty; cleanup
+registered by a running callback waits for the next drain. Raw MMIO/DMA
 views expire at cleanup. Hardware/users must be quiesced first and release must
 run in the provider's permitted context. Allocation policy and legacy
 remove-error handling are unchanged.

@@ -395,11 +395,11 @@ impl DeviceDesc {
     }
 }
 
-/// Device lifecycle state tracked by the live device object.
+/// Device lifecycle state tracked by the live device object's binding runtime.
 ///
-/// The `#[repr(u8)]` annotation lets `DeviceObject` store the lifecycle as
+/// The `#[repr(u8)]` annotation lets `BindingRuntime` store the lifecycle as
 /// an `AtomicU8` so hot read paths (`state()`, `is_removing()`) can avoid
-/// taking the per-object spinlock.
+/// taking a spinlock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DeviceState {
@@ -447,15 +447,23 @@ impl DeviceState {
 }
 
 /// Metadata-only snapshot of a live device object.
+///
+/// The record is assembled from grouped samples rather than one global
+/// critical section: `parent`/`child_bus` come from one relations snapshot,
+/// while `driver_name`/`driver_id`/`device_kind` come from one binding
+/// snapshot. Each group is internally consistent, but the two groups (and the
+/// lock-free `state` read) may originate from different instants. Display-only
+/// consumers must not treat cross-group combinations as a transaction.
 #[derive(Debug, Clone)]
 pub struct DeviceRecord {
     /// Globally-unique device id.
     pub id: DeviceId,
     /// Bus instance the device lives on.
     pub bus_id: BusId,
-    /// Parent controller / bridge device, if any.
+    /// Parent controller / bridge device, from the relations snapshot.
     pub parent: Option<DeviceId>,
     /// Bus instance produced by this device, if it is a controller / bridge.
+    /// From the same relations snapshot as `parent`.
     pub child_bus: Option<BusId>,
     /// Where on the bus hierarchy the device lives.
     pub location: DeviceLocation,
@@ -471,13 +479,14 @@ pub struct DeviceRecord {
     pub dma: Option<DmaInfo>,
     /// Legacy INTx route status, if the discovering backend recorded one.
     pub intx: Option<IntxRouteStatus>,
-    /// Name of the bound driver, once bound.
+    /// Name of the bound driver, once bound. From the binding snapshot.
     pub driver_name: Option<&'static str>,
-    /// Id of the bound driver, once bound.
+    /// Id of the bound driver, once bound. From the same binding snapshot.
     pub driver_id: Option<DriverId>,
-    /// Device kind reported at publish, once active.
+    /// Device kind reported at publish, once active. From the same binding
+    /// snapshot.
     pub device_kind: Option<DeviceKind>,
-    /// Current lifecycle state.
+    /// Lifecycle state sampled before the binding metadata group.
     pub state: DeviceState,
 }
 

@@ -18,7 +18,8 @@
 //! Driver-core uses one sleepable lock per discovery descriptor plus several
 //! spinlock-protected objects: the registry (`DeviceRegistry`), bus instances
 //! (`BusInstance`), bus types (`BusTypeObject`), driver objects
-//! (`DriverObject`), and per-device state inside `DeviceObject`. To prevent
+//! (`DriverObject`), and per-object leaf locks inside `DeviceObject`
+//! (`relations`, plus the binding's `meta` and `devres`). To prevent
 //! deadlocks, all code paths that need to touch more than one of these must
 //! observe the following order:
 //!
@@ -32,8 +33,10 @@
 //!    you need, then drop the registry guard before reaching into a
 //!    bus-instance lock that can block or nest further.
 //! 3. **Per-object order** is `bus.devices` -> `bus.drivers` and
-//!    `bus.devices` -> `DeviceObject` state. There is deliberately no path
-//!    from `DeviceObject` state back into the registry or a bus instance.
+//!    `bus.devices` -> one `DeviceObject` leaf lock. The three leaves
+//!    (`relations`, `binding.meta`, `binding.devres`) are never held
+//!    together. There is deliberately no path from a `DeviceObject` lock
+//!    back into the registry or a bus instance.
 //! 4. **Never re-enter the registry from inside a per-object lock**. Per-
 //!    object methods (`BusInstance::attach_bound_device`,
 //!    `BusTypeObject::*`, `DriverObject::*`, `DeviceObject::*`) must not call

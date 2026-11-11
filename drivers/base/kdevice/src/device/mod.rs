@@ -4,6 +4,7 @@
 
 //! Device descriptors, objects, handles, and resource metadata.
 
+mod binding;
 pub mod desc;
 pub mod handles;
 /// Device-owned cleanup through explicit capability providers.

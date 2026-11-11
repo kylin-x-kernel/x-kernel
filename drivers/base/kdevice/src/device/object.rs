@@ -5,26 +5,26 @@
 //! Long-lived device object, equivalent to the kernel's central device fact.
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{
-    ops::Deref,
-    sync::atomic::{AtomicU8, AtomicUsize, Ordering},
-};
+use core::ops::Deref;
 
 use driver_base::DeviceKind;
 use driver_os_api::DmaInfo;
 use fwnode::FwNode;
 use kspin::SpinNoPreempt;
 
+use super::binding::BindingRuntime;
 use crate::{
     BusId, DeviceId, DeviceIdentity, DeviceLocation, DeviceRecord, DeviceState, DiscoveryOrigin,
     DriverId, IntxRouteStatus, ResourceDesc, ResourceSet, TransportInfo,
 };
 
-/// Mutable identity fields of a device object protected by a per-object lock.
+/// Topology relations of a device object protected by a per-object lock.
 ///
-/// The lifecycle state is kept outside this struct in an `AtomicU8` so hot
-/// read paths can read it without taking the lock.
-struct DeviceObjectState {
+/// These are device facts managed by the lifecycle layer, not by the binding
+/// runtime: `BindingRuntime` does not own or clear them. The existing shared
+/// removal path still detaches the device from its parent and clears the
+/// parent pointer of its surviving children.
+struct DeviceRelations {
     parent: Option<DeviceId>,
     children: Vec<DeviceId>,
     /// Bus instance this device produces, if it is a bus controller / bridge.
@@ -33,9 +33,6 @@ struct DeviceObjectState {
     /// endpoints sit beneath the bridge in the device tree. Endpoint and
     /// leaf devices leave this `None`.
     child_bus: Option<BusId>,
-    driver_name: Option<&'static str>,
-    driver_id: Option<DriverId>,
-    device_kind: Option<DeviceKind>,
 }
 
 /// Long-lived device object owned by the driver core.
@@ -53,19 +50,16 @@ pub struct DeviceObject {
     intx: Option<IntxRouteStatus>,
     /// Firmware node associated with this device at discovery, if any.
     firmware_node: Option<FwNode<'static>>,
-    lifecycle: AtomicU8,
-    /// Outstanding in-use references handed out by [`DeviceObject::try_acquire`].
+    /// Device-tree relations; owned by the lifecycle layer, not by the binding
+    /// runtime.
+    relations: SpinNoPreempt<DeviceRelations>,
+    /// Runtime state, in-use admission, driver metadata and cleanup batch of
+    /// this object's single driver binding.
     ///
-    /// Removal is gated on this dropping back to zero so a consumer holding a
-    /// live reference (an opened handle, an in-flight operation) cannot have
-    /// the device torn down underneath it.
-    usage: AtomicUsize,
-    /// Driver-registered cleanup callbacks ("devres"), run in LIFO order when
-    /// a probe fails or the device is removed. Lets a driver attach resource
-    /// teardown (free IRQ, release queues, ...) to the device's lifetime so a
-    /// failed probe or removal cannot leak it.
-    devres: SpinNoPreempt<Vec<Box<dyn FnOnce() + Send>>>,
-    state: SpinNoPreempt<DeviceObjectState>,
+    /// This is a plain value field, never an `Option`, `Arc`, or replaceable
+    /// slot: the binding instance lives and dies with the object. See
+    /// [`DeviceUse`] for the transitional ownership invariant.
+    binding: BindingRuntime,
 }
 
 impl DeviceObject {
@@ -112,17 +106,12 @@ impl DeviceObject {
             dma: None,
             intx: None,
             firmware_node: None,
-            lifecycle: AtomicU8::new(DeviceState::Discovered.as_u8()),
-            usage: AtomicUsize::new(0),
-            devres: SpinNoPreempt::new(Vec::new()),
-            state: SpinNoPreempt::new(DeviceObjectState {
+            relations: SpinNoPreempt::new(DeviceRelations {
                 parent: None,
                 children: Vec::new(),
                 child_bus: None,
-                driver_name: None,
-                driver_id: None,
-                device_kind: None,
             }),
+            binding: BindingRuntime::new(),
         }
     }
 
@@ -232,19 +221,20 @@ impl DeviceObject {
         })
     }
 
-    /// Current lifecycle state — lock-free atomic read.
+    /// Current lifecycle state of the object's binding — lock-free atomic
+    /// read.
     ///
     /// The atomic is only ever written via [`DeviceState::as_u8`], so an
     /// undecodable value is impossible barring memory corruption; such a value
     /// is treated as [`DeviceState::Removed`] so callers stop operating on the
     /// object instead of panicking on a hot read path.
     pub fn state(&self) -> DeviceState {
-        DeviceState::from_u8(self.lifecycle.load(Ordering::Acquire)).unwrap_or(DeviceState::Removed)
+        self.binding.state()
     }
 
     /// Current parent device ID.
     pub fn parent(&self) -> Option<DeviceId> {
-        self.state.lock().parent
+        self.relations.lock().parent
     }
 
     /// Set or clear this object's parent relation.
@@ -252,7 +242,7 @@ impl DeviceObject {
     /// Driver-core-internal: parenting is managed by the lifecycle layer
     /// (`attach_device_parent` / removal), never by drivers directly.
     pub(crate) fn set_parent(&self, parent: Option<DeviceId>) {
-        self.state.lock().parent = parent;
+        self.relations.lock().parent = parent;
     }
 
     /// Bus instance produced by this device, if any.
@@ -262,7 +252,7 @@ impl DeviceObject {
     /// from a controller device to its child bus without scanning every
     /// `BusInstance`.
     pub fn child_bus(&self) -> Option<BusId> {
-        self.state.lock().child_bus
+        self.relations.lock().child_bus
     }
 
     /// Record (or clear) the bus instance this device produces.
@@ -271,48 +261,47 @@ impl DeviceObject {
     /// the controller. The matching back-link lives on
     /// [`crate::BusInstance::set_controller`].
     pub fn set_child_bus(&self, child_bus: Option<BusId>) {
-        self.state.lock().child_bus = child_bus;
+        self.relations.lock().child_bus = child_bus;
     }
 
     /// Snapshot direct children.
     pub fn children_snapshot(&self) -> Vec<DeviceId> {
-        self.state.lock().children.clone()
+        self.relations.lock().children.clone()
     }
 
     /// Attach a direct child to this device.
     pub(crate) fn attach_child(&self, child: DeviceId) {
-        let mut state = self.state.lock();
-        if !state.children.contains(&child) {
-            state.children.push(child);
+        let mut relations = self.relations.lock();
+        if !relations.children.contains(&child) {
+            relations.children.push(child);
         }
     }
 
     /// Detach a direct child from this device.
     pub(crate) fn detach_child(&self, child: DeviceId) {
-        let mut state = self.state.lock();
-        if let Some(pos) = state.children.iter().position(|current| *current == child) {
-            state.children.swap_remove(pos);
+        let mut relations = self.relations.lock();
+        if let Some(pos) = relations
+            .children
+            .iter()
+            .position(|current| *current == child)
+        {
+            relations.children.swap_remove(pos);
         }
     }
 
     /// Bound driver ID, if any.
     pub fn driver_id(&self) -> Option<DriverId> {
-        self.state.lock().driver_id
+        self.binding.driver_id()
     }
 
     /// Bound driver name, if any.
     pub fn driver_name(&self) -> Option<&'static str> {
-        self.state.lock().driver_name
+        self.binding.driver_name()
     }
 
     /// Device subsystem kind, if known.
     pub fn device_kind(&self) -> Option<DeviceKind> {
-        self.state.lock().device_kind
-    }
-
-    /// Store a new lifecycle state with release ordering.
-    fn store_state(&self, new_state: DeviceState) {
-        self.lifecycle.store(new_state.as_u8(), Ordering::Release);
+        self.binding.device_kind()
     }
 
     /// Mark the device as matched.
@@ -321,7 +310,7 @@ impl DeviceObject {
     /// `lifecycle::dispatch::prepare_device_binding` while the object is still
     /// unpublished.
     pub(crate) fn mark_matched(&self) {
-        self.store_state(DeviceState::Matched);
+        self.binding.mark_matched();
     }
 
     /// Bind this device to a driver object.
@@ -335,13 +324,7 @@ impl DeviceObject {
         driver_name: &'static str,
         kind: DeviceKind,
     ) {
-        {
-            let mut state = self.state.lock();
-            state.driver_id = Some(driver_id);
-            state.driver_name = Some(driver_name);
-            state.device_kind = Some(kind);
-        }
-        self.store_state(DeviceState::Bound);
+        self.binding.bind(driver_id, driver_name, kind);
     }
 
     /// Detach any bound driver metadata.
@@ -349,53 +332,20 @@ impl DeviceObject {
     /// Driver-core-internal: invoked by the remove path so a device leaving
     /// the registry never observes a `Bound`/`Active` state with no driver.
     pub(crate) fn detach_driver(&self) {
-        let mut state = self.state.lock();
-        state.driver_id = None;
-        state.driver_name = None;
-        state.device_kind = None;
+        self.binding.detach();
     }
 
     /// Atomically transition into `Removing`. Returns `false` if removal was
     /// already in progress (the lifecycle state is already `Removing` or
     /// `Removed`) or if the device still has outstanding in-use references
     /// handed out by [`DeviceObject::try_acquire`].
+    ///
+    /// Entering `Removing` only closes admission for new references. If
+    /// references are still outstanding, the previous state is restored and no
+    /// teardown is committed; the caller may retry later. A `true` return is
+    /// the lifecycle layer's gate for irreversible teardown.
     pub(crate) fn begin_removing(&self) -> bool {
-        // CAS loop allows concurrent readers and other transitions to make
-        // progress without holding the per-object spinlock.
-        let mut current = self.lifecycle.load(Ordering::Acquire);
-        let prior;
-        loop {
-            // An undecodable discriminant can only mean corruption; treat it as
-            // already-removed and decline the transition rather than panicking.
-            let Some(cur_state) = DeviceState::from_u8(current) else {
-                return false;
-            };
-            if matches!(cur_state, DeviceState::Removing | DeviceState::Removed) {
-                return false;
-            }
-            match self.lifecycle.compare_exchange_weak(
-                current,
-                DeviceState::Removing.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    prior = cur_state;
-                    break;
-                }
-                Err(observed) => current = observed,
-            }
-        }
-
-        // The state is now `Removing`, which makes `try_acquire` reject new
-        // references. If any are still outstanding we must NOT proceed: no
-        // teardown has happened yet (this is the commit point), so it is safe
-        // to revert to the prior state and report the device as busy.
-        if self.usage.load(Ordering::Acquire) != 0 {
-            self.store_state(prior);
-            return false;
-        }
-        true
+        self.binding.begin_removing()
     }
 
     /// Whether this object is currently in the `Removing` state — lock-free.
@@ -410,18 +360,11 @@ impl DeviceObject {
     /// refuses to tear the device down, so callers can safely operate on it
     /// for the lifetime of the guard.
     pub fn try_acquire(self: &Arc<Self>) -> Option<DeviceUse> {
-        // Optimistically take the reference, then verify the device is still
-        // usable. Ordering the increment before the state check means a
-        // concurrent `begin_removing` either observes our count (and backs
-        // off) or has already moved the state out of `Active` (and we back
-        // off) — never both proceeding.
-        self.usage.fetch_add(1, Ordering::AcqRel);
-        if matches!(self.state(), DeviceState::Active) {
+        if self.binding.try_acquire() {
             Some(DeviceUse {
                 device: self.clone(),
             })
         } else {
-            self.usage.fetch_sub(1, Ordering::AcqRel);
             None
         }
     }
@@ -438,47 +381,54 @@ impl DeviceObject {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.devres.lock().push(Box::new(cleanup));
+        self.binding.add_cleanup(Box::new(cleanup));
     }
 
-    /// Run and drain all registered cleanup callbacks in LIFO order.
+    /// Run and drain the current cleanup batch in LIFO order.
     ///
     /// Driver-core-internal: invoked on probe failure and by the remove path.
     /// The callbacks are taken out of the lock before running so a callback is
-    /// free to touch the device without re-entering the devres lock.
+    /// free to touch the device without re-entering the devres lock. A cleanup
+    /// registered by a running callback belongs to the next batch; only a call
+    /// with no new registrations is a no-op.
     pub(crate) fn run_cleanups(&self) {
-        let mut cleanups = core::mem::take(&mut *self.devres.lock());
-        while let Some(cleanup) = cleanups.pop() {
-            cleanup();
-        }
+        self.binding.run_cleanups();
     }
 
     /// Mark this device as active.
     ///
     /// Driver-core-internal: call via `lifecycle::dispatch::activate_device`.
     pub(crate) fn mark_active(&self, kind: DeviceKind) {
-        self.state.lock().device_kind = Some(kind);
-        self.store_state(DeviceState::Active);
+        self.binding.activate(kind);
     }
 
     /// Mark this device as removed.
     ///
     /// Driver-core-internal: called by the remove path.
     pub(crate) fn mark_removed(&self) {
-        self.store_state(DeviceState::Removed);
+        self.binding.mark_removed();
     }
 
     /// Snapshot this object into metadata form.
+    ///
+    /// This is a **grouped snapshot**, not a single atomic snapshot of the
+    /// whole record: driver metadata is sampled as one group under
+    /// `binding.meta`, `parent`/`child_bus` as one relations group, and the
+    /// lifecycle state as a separate atomic read taken before the metadata
+    /// lock. Each group is internally consistent, but the three samples may
+    /// come from different instants. `location/origin/identity/...` are
+    /// immutable for the object's lifetime.
     pub fn record_snapshot(&self) -> DeviceRecord {
-        // Read lifecycle outside the per-object lock to keep the critical
-        // section minimal.
-        let lifecycle = self.state();
-        let state = self.state.lock();
+        let binding = self.binding.snapshot();
+        let (parent, child_bus) = {
+            let relations = self.relations.lock();
+            (relations.parent, relations.child_bus)
+        };
         DeviceRecord {
             id: self.id,
             bus_id: self.bus_id,
-            parent: state.parent,
-            child_bus: state.child_bus,
+            parent,
+            child_bus,
             location: self.location,
             origin: self.origin,
             identity: self.identity,
@@ -486,10 +436,10 @@ impl DeviceObject {
             resources: self.resources.clone(),
             dma: self.dma,
             intx: self.intx,
-            driver_name: state.driver_name,
-            driver_id: state.driver_id,
-            device_kind: state.device_kind,
-            state: lifecycle,
+            driver_name: binding.driver_name,
+            driver_id: binding.driver_id,
+            device_kind: binding.device_kind,
+            state: binding.state,
         }
     }
 }
@@ -512,6 +462,15 @@ impl core::fmt::Debug for DeviceObject {
 /// Created by [`DeviceObject::try_acquire`]. The device cannot be removed while
 /// any `DeviceUse` is alive; dropping the guard releases the reference and lets
 /// a pending removal proceed.
+///
+/// # Transitional ownership invariant
+///
+/// The guard borrows the whole object, but the reference it releases is the
+/// object's single, non-replaceable binding runtime: the binding is a plain
+/// value field, never reset or swapped, so the count acquired here is always
+/// the count released on drop. Reusing a `DeviceObject` across bindings would
+/// break that assumption; a future stable-object design must move guard
+/// ownership to the specific binding instead of delegating to the current one.
 pub struct DeviceUse {
     device: Arc<DeviceObject>,
 }
@@ -533,6 +492,6 @@ impl Deref for DeviceUse {
 
 impl Drop for DeviceUse {
     fn drop(&mut self) {
-        self.device.usage.fetch_sub(1, Ordering::AcqRel);
+        self.device.binding.release_use();
     }
 }
