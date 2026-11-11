@@ -187,15 +187,19 @@ def ciBuilderImage() {
     return 'kennard/x-kernel-builder:v3.1'
 }
 
-def ciBuilderDockerArgs() {
+def ciBuilderDockerArgs(String seccompProfile = 'unconfined') {
+    // Docker Workflow tokenizes this argument string; quote the agent workspace path.
+    def seccompOption = "seccomp=${seccompProfile}".replace('\\', '\\\\').replace('"', '\\"')
     return '--dns 223.5.5.5 ' +
+        // Older hosts charge concurrent io_uring queues to the shared UID's memlock budget.
+        '--ulimit memlock=67108864:67108864 ' +
         '--mount type=volume,dst=/xkernel-target ' +
         '--mount type=volume,src=xkernel-cargo-home-v2,dst=/xkernel-cache/cargo ' +
         // Keep Rustup temporary files and toolchains on the same filesystem.
         '--mount type=volume,src=xkernel-rustup-home-v5,dst=/usr/local/rustup ' +
         '--mount type=volume,src=xkernel-rootfs-cache-v2,dst=/xkernel-cache/rootfs ' +
         '--device=/dev/kvm --device=/dev/vhost-vsock --group-add 36 ' +
-        '--security-opt seccomp=unconfined --security-opt no-new-privileges=true'
+        "--security-opt \"${seccompOption}\" --security-opt no-new-privileges=true"
 }
 
 def ciSourceStashName() {
@@ -335,7 +339,12 @@ def withArchCiAgent(String arch, Closure body) {
         try {
             prepareArchCiWorkspace(arch)
             def legRootWs = pwd()
-            docker.image(ciBuilderImage()).inside(ciBuilderDockerArgs()) {
+            // The ARM builder's host kernel misreports io_uring polls on signalfd.
+            // Select by node, since the floating riscv64 leg can also run there.
+            def seccompProfile = env.NODE_NAME == nativeGuestAgentLabels().aarch64
+                ? "${legRootWs}/.ci/source/scripts/ci/no-io-uring-seccomp.json"
+                : 'unconfined'
+            docker.image(ciBuilderImage()).inside(ciBuilderDockerArgs(seccompProfile)) {
                 withCiRootWs(legRootWs) {
                     body.call()
                 }

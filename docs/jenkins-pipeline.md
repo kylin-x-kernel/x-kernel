@@ -73,6 +73,31 @@ xkernel-agent docker vhost-vsock container-vsock
 `0660`。流水线只显式传入这两个设备并执行 `--group-add 36`，不使用
 `--privileged`、root 用户或 Docker Socket。
 
+builder 容器在创建时通过 `--ulimit memlock=67108864:67108864`，将锁页内存的
+软、硬上限统一设为 64 MiB；harness 日测和压力重跑流水线使用相同配置。这是
+允许使用的上限，不会预先占用 64 MiB，也不改变 guest RAM 大小。
+
+旧宿主内核会对同一 UID 的 io_uring 队列合计计费。多个容器都以 UID `1000`
+运行时，继承的 64 KiB 默认上限会使并发 QEMU 在启动时报告
+`Failed to initialize io_uring: Cannot allocate memory`，即使宿主机仍有充足的
+可用内存。该配置属于容器运行契约，不能通过 Dockerfile 中的 `RUN ulimit`
+持久设置。新建容器后，以实际 Jenkins 用户验证：
+
+```bash
+ulimit -Sl
+ulimit -Hl
+# 两项均应输出 65536，单位为 KiB。
+```
+
+`xkernel-arm64-01` 当前的宿主内核会把 io_uring 轮询空 signalfd 时的错误结果
+误报为可读，导致 QEMU 事件循环空转。该节点的 arch leg 容器使用
+`scripts/ci/no-io-uring-seccomp.json`：除让 `io_uring_setup` 返回 `ENOSYS` 外，
+其他系统调用保持允许。QEMU 初始化 io_uring 失败后回退到 epoll；64 MiB 的
+memlock 限额继续生效。配置按宿主节点选择，因此浮动的 riscv64 leg 如果落在
+该节点也会应用；Prepare、Post 和其他节点仍使用 `seccomp=unconfined`。
+过滤器作用于该容器内所有进程，显式依赖 io_uring 的程序也会收到 `ENOSYS`。
+宿主内核修复并验证后，应移除这一临时兼容措施。
+
 ## Workspace
 
 Prepare、每个 arch leg 和 Post 各有独立 workspace 与独立 builder 容器。
