@@ -1,5 +1,60 @@
 # kcpu — 安全与可靠性分析
 
+## Cross-architecture CPU identification boundary
+
+`src/cpuinfo.rs` publishes immutable, bounded per-logical-CPU snapshots through
+`klazy::Once`. Missing slots return `None` without initialization or waiting;
+readers perform no register access or firmware parsing. CPU-local detection runs
+before scheduling, while RISC-V firmware publication may identify unstarted APs.
+No reset/hotplug lifetime or global migration-safe feature intersection is claimed.
+
+AArch64/LoongArch register reads use the existing architecture dependency's safe
+read interfaces; this adds no local unsafe code. Numeric identity fields cannot
+inject text. RISC-V accepts only selected ISA names into a fixed bitmap, never
+copies firmware strings into procfs, bounds numeric properties to 32/64-bit
+cells, and uses the existing CPU map before indexing. Missing identity properties
+remain unknown. Malformed firmware cannot create procfs lines or enable an
+unrecognized extension. Firmware's hardware assertions remain trusted.
+
+FP/SIMD claims require supported kernel context preservation; SVE, RISC-V V/Zve,
+and LoongArch LSX/LASX are omitted. This reporting policy does not enable those
+units, constrain userspace instruction execution, change hwprobe, or update ELF
+auxiliary-vector capabilities. Callers must account for per-CPU differences and
+the independent contracts of those interfaces.
+
+## x86_64 CPU capability reporting
+
+CPUID is hardware/hypervisor input. `cpuinfo.rs` uses raw-cpuid's optional
+getters to gate leaf queries and stores fixed-size identity data. The library
+is no_std and introduces no allocation or new local unsafe boundary. CPUID
+answers must remain stable during CPU-local bring-up; their correctness itself
+remains trusted.
+
+`cpuid_text` retains printable-ASCII validation, NUL termination and whitespace
+normalization. The library's invalid UTF-8 vendor placeholder exceeds the
+12-byte bounded destination and remains `unknown`; the brand placeholder is
+explicitly rejected. Brand raw bytes are checked before accepting `as_str()`
+because its trim would otherwise hide control characters at the ends. That
+scan stops at the first NUL, including across leaf boundaries. A non-printable
+byte before NUL produces `unknown`, so an injected newline cannot forge a flag
+line. The vendor getter conservatively rejects invalid UTF-8 anywhere in its
+12 bytes, including after NUL. A base/extended-family sum exceeding u8 is
+rejected before calling the library's u8 addition; signature fields are then
+unavailable rather than wrapping or panicking.
+
+Per-CPU identity is published via `klazy::Once`, with no new unsafe code or
+custom atomic publication protocol. Identification runs only on its owning CPU
+before scheduling; readers never execute CPUID on behalf of a remote CPU and
+never wait for an unstarted CPU. Missing snapshots confer no capabilities.
+
+The capability API exposes only an explicit subset. It suppresses floating-point
+and SIMD capabilities when their state is not managed. XSAVE-dependent flags
+require the boot-selected state mask and their hardware dependencies. This
+prevents procfs consumers from selecting AVX paths that cannot be preserved. It does not prevent
+userspace from querying CPUID directly or executing unsupported instructions.
+The snapshot is per CPU, not a system-wide intersection or scheduling guarantee.
+
+
 ## 概述
 
 `kcpu` 是 x-kernel 中直接操作 CPU 特权级硬件的底层 crate，涉及大量
@@ -175,7 +230,7 @@ unsafe extern "C" fn context_switch(_current_stack: &mut u64, _next_stack: &u64)
 
 ### 5. FP 状态保存/恢复（各架构 ctx.rs）
 
-- x86_64：`_fxsave64` / `_fxrstor64` 内联指令。
+- x86_64：标准 `_xsave64` / `_xrstor64`；无 XSAVE 时回退 `_fxsave64` / `_fxrstor64`。
 - aarch64：`fpstate_save` / `fpstate_restore` naked 函数。
 - riscv：`save_fp_registers` / `restore_fp_registers` naked 函数。
 - loongarch64：`save_fp_registers` / `restore_fp_registers` naked 函数。
@@ -185,25 +240,21 @@ unsafe extern "C" fn context_switch(_current_stack: &mut u64, _next_stack: &u64)
 **为何安全**：`FpState`/`FpuState`/`FxStateBlock` 的布局通过
 `static_assertions` 或 `repr(C, align(...))` 保证与指令期望一致。
 
-### 5a. x86_64 信号帧 FP/SIMD 恢复（`x86_64/userspace.rs`）
+### 5a. x86_64 信号帧 FP/SIMD 恢复（`x86_64/xstate.rs`）
 
-信号处理函数可能在用户态使用 XMM/MXCSR，因此 `UserRestorableContext`
-在信号投递时用 `FXSAVE` 抓取被中断的 FP/SIMD 状态，并在 `rt_sigreturn`
-时用 `FXRSTOR` 恢复（`FxStateBlock` 为 `repr(C, align(16))`，信号帧字段
-由 Rust 布局保证 16 字节对齐）。
+`rt_sigreturn` 在 syscall 边界用 checked copy 读取 `ucontext` 和 FP 字节。
+先验证长度（最大 836 字节）、两处 magic、支持的 xfeatures、XSTATE_BV、
+零 XCOMP_BV 和保留字段，再恢复到 64 字节对齐的内核自有 `ExtendedState`。
+任何用户指针都不直接传给 XRSTOR。短帧、未映射帧和非法 header 触发进程
+SIGSEGV；RIP/RSP 和代码段也在更改寄存器前校验，RFLAGS 仅允许用户状态位。
 
-**不变量**：从用户可写信号帧取回的 `MXCSR` 必须清除不受支持的位后才能
-执行 `FXRSTOR`。
+MXCSR 仍按本项目原有兼容策略与启动时可信 mask 相与（硬件返回 0 时使用
+0xffbf），不同于 Linux 对非法 MXCSR 的拒绝策略。BSP 发布保存格式和 mask；
+每个 AP 验证兼容性并安装相同 XCR0 后才能调度。新建、exec 和信号处理器
+使用确定的初始状态；信号捕获使用全初始化存储，避免泄露未写入的扩展区域。
+用户可编辑自己的 x87/SSE/YMM 数据，无法通过 header 启用 AVX-512/AMX。
 
-**为何安全**：`MXCSR` 是 `FXRSTOR` 唯一的数据相关 `#GP` 来源（除对齐外）。
-内核在首次使用时对 CPU 执行一次 `FXSAVE` 得到受信任的 `MXCSR` feature
-mask 并缓存（mask 为 0 时回退到架构默认 `0x0000ffbf`，与 Linux
-`fpu__init_system_mxcsr` 一致）；恢复前执行 `saved.sse_mxcsr &= mask`，
-因此被篡改的帧不会让内核在 `FXRSTOR` 中触发 `#GP`。其余 `FXSAVE` 字段
-不会被 `FXRSTOR` 校验。注意：64 位 Linux 对非法 `MXCSR` 采取拒绝并投递
-`SIGSEGV` 的策略，这里选择掩码清除，使 `rt_sigreturn` 保持不可失败。
-
-### 6. `ExtendedState::default`（`x86_64/ctx.rs:310`）
+### 6. `ExtendedState::default`（`x86_64/xstate.rs`）
 
 ```rust
 FxStateBlock {
@@ -389,10 +440,10 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
 | T-08 | `ExceptionContextGuard` 嵌套导致 per-CPU 指针被覆盖 | 低 | trap handler 执行期间再次触发异常 | `swap` 语义保存前一个值，guard drop 时用 CAS 恢复；深层嵌套通过 guard 链正确恢复，且不会覆盖后续新 trap |
 | T-09 | LoongArch64 用户态构造恶意非对齐指令字 | 高 | 用户态程序执行非对齐访问，故障指令字被 `emulate_unaligned` 解码为意外操作 | `emulate_unaligned` 仅修改指令编码中指定的目标寄存器；未匹配操作码返回错误不修改任何状态；操作码掩码仅匹配已知指令类型 |
 | T-10 | `init_trap()` 被重复调用导致硬件状态不一致 | 中 | 二次调用覆盖 GDT/IDT/向量表等已激活的硬件结构 | 由调用者保证仅调用一次（boot 阶段单线程执行）；无运行时防护 |
-| T-11 | x86_64 `orig_rax` 被恶意篡改导致 syscall 重启异常 | 中 | 用户态通过信号处理器修改 trap frame 中的 `orig_rax` | `orig_rax` 仅在 `syscall_entry` 汇编中写入；信号帧保存 `UserRestorableContext` 窄状态，不从用户栈恢复 `orig_rax`；x86_64 `EnterUserFrame.kernel_rsp` 也不进入用户信号帧；signal delivery 代码通过 `syscall_restart_error()` 判断重启条件 |
+| T-11 | x86_64 `orig_rax` 被恶意篡改导致 syscall 重启异常 | 中 | 用户态通过信号处理器修改 trap frame 中的 `orig_rax` | `orig_rax` 仅在 `syscall_entry` 汇编中写入；x86_64 信号帧只导出 Linux ABI 状态，恢复时重置 `orig_rax`；x86_64 `EnterUserFrame.kernel_rsp` 也不进入用户信号帧；signal delivery 代码通过 `syscall_restart_error()` 判断重启条件 |
 | T-12 | `rollback_syscall` 在非 syscall 上下文调用 | 低 | 信号处理代码误判上下文类型 | `is_from_syscall()` 检查 `orig_rax != u64::MAX`，非 syscall 上下文时 `rollback_syscall()` 和 `restart_with_syscall()` 为 no-op |
 | T-13 | IRQ 被误分类为 NMI（或反之） | 高 | `use_nmi_path` 的 SPSR.I / 入口 PMR 判断错误，或机制 readiness 标志（`pmr::is_ready` / `allint_active`）错误 | NMI handler 在错误上下文约束下执行（如普通 IRQ 按 NMI 规则），或 Superpriority NMI 被当普通 IRQ 丢失优先级 | 分类依赖硬件状态快照 + readiness 双重门控；降级构建永不触碰 NMI 寄存器；NMI path 保持 ALLINT/PMR 防嵌套 |
-| T-14 | x86_64 用户态构造恶意信号帧 FP 状态使内核 `FXRSTOR` 触发 `#GP` | 高 | 用户在 `rt_sigreturn` 前篡改信号帧中的 `MXCSR` 为保留位 | 内核态 `#GP`，若不可恢复则系统崩溃 | `MXCSR` 在执行 `FXRSTOR` 前与内核缓存的可信 feature mask 按位与，清除不受支持的位；`FxStateBlock` 的 16 字节对齐由 `repr(C, align(16))` 与信号帧字段天然对齐共同保证；其余 `FXSAVE` 字段不被 `FXRSTOR` 校验 |
+| T-14 | x86_64 恶意 FP 信号帧使 XRSTOR 触发内核异常 | 高 | 用户修改 MXCSR/header/长度/指针 | 内核异常或数据泄露 | checked copy、最大长度限制、feature/header/magic 校验、可信 MXCSR mask、64 字节对齐的私有存储；无效帧投递 SIGSEGV |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -445,8 +496,8 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
 4. **`context_switch` 无栈溢出检测**：新任务的内核栈必须有足够空间容纳
    `ContextSwitchFrame`，否则 `prepare_initial_frame` 写越界。
 
-5. **x86_64 不支持 XSAVE**：使用 FXSAVE/FXRSTOR，不支持 AVX 等
-   扩展状态。依赖扩展状态的任务会丢失 YMM/ZMM 寄存器。
+5. **x86_64 扩展状态范围**：仅支持 x87/SSE/YMM；AVX-512、AMX 和 supervisor
+   状态不启用、不报告。AP 必须兼容 BSP 的保存格式；不提供异构 CPU 降级或热插拔协商。
 
 6. **riscv64 hwprobe snapshot 依赖固件描述**：RISC-V capability snapshot
    只报告 device tree 或内核地址布局中可确定的信息。未描述的 vendor id

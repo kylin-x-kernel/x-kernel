@@ -280,3 +280,47 @@ fn quota_statistics_share_the_existing_filesystem_sysctl_tree() {
         assert!(value.trim().parse::<usize>().is_ok());
     }
 }
+
+#[def_test(serial)]
+fn cpuinfo_supports_partial_reads_and_rejects_writes() {
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+        let mut root = DirMapping::new();
+        add_root_entries(&mut root, fs.clone());
+        SimpleDir::new_maker(fs, Arc::new(root))
+    })
+    .unwrap();
+    let root = Mount::new_root(&super_block).root_path();
+    let file = Filename::new("/cpuinfo")
+        .open_with_flags_at(
+            &root,
+            &root,
+            OpenFlags::READ_WRITE.bits(),
+            NodePermission::empty(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        )
+        .unwrap();
+    let mut result = alloc::vec::Vec::new();
+    let mut buffer = [0u8; 17];
+    let mut position = 0;
+    loop {
+        let count = file.read_from(&mut buffer, &mut position).unwrap();
+        if count == 0 {
+            break;
+        }
+        result.extend_from_slice(&buffer[..count]);
+    }
+    let text = core::str::from_utf8(&result).unwrap();
+    assert!(text.starts_with("processor\t:"));
+    assert!(text.ends_with('\n'));
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("processor\t:"))
+            .count(),
+        kcpu_id_map::nr_cpus()
+    );
+    assert_eq!(
+        file.write(b"flags: avx\n"),
+        Err(VfsError::BadFileDescriptor)
+    );
+}

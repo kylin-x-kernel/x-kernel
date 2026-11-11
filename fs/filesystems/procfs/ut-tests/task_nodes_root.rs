@@ -177,19 +177,28 @@ fn test_task_status_includes_process_name_and_snapshot_fields() {
 fn test_cpu_mask_format_uses_runtime_width_and_list_trim() {
     let mut mask = KCpuMask::new();
     mask.set(0, true);
-    mask.set(2, true);
+    // CpuMask<1> uses a boolean representation rather than independent bits.
+    // Synthetic runtime widths must stay within the configured mask capacity.
+    let width = kbuild_config::NR_CPUS.min(4);
+    let trimmed_width = kbuild_config::NR_CPUS.min(2);
+    let (expected_mask, expected_list) = if width > 2 {
+        mask.set(2, true);
+        ("5", "0,2")
+    } else {
+        ("1", "0")
+    };
 
     // Linux's `%*pb` derives its high-chunk width from `nr_cpu_ids`; bits
     // outside that runtime set are not printed.
-    assert_eq!(format_cpu_mask(mask, 4), "5");
-    assert_eq!(format_cpu_list(mask, 4), "0,2");
-    assert_eq!(format_cpu_mask(mask, 2), "1");
-    assert_eq!(format_cpu_list(mask, 2), "0");
+    assert_eq!(format_cpu_mask(mask, width), expected_mask);
+    assert_eq!(format_cpu_list(mask, width), expected_list);
+    assert_eq!(format_cpu_mask(mask, trimmed_width), "1");
+    assert_eq!(format_cpu_list(mask, trimmed_width), "0");
 
     // An empty mask prints as `0` in the compact form and as an empty list,
     // matching Linux's `bitmap_string`/`bitmap_list_string` pair.
-    assert_eq!(format_cpu_mask(KCpuMask::new(), 4), "0");
-    assert_eq!(format_cpu_list(KCpuMask::new(), 4), "");
+    assert_eq!(format_cpu_mask(KCpuMask::new(), width), "0");
+    assert_eq!(format_cpu_list(KCpuMask::new(), width), "");
 }
 
 #[def_test]
@@ -671,7 +680,9 @@ fn only_the_net_namespace_node_pins_a_namespace() {
     let net = task.as_thread().process().net_ns().unwrap();
     let (inode, pinned) = namespace_identity(ProcNsKind::Net, &task).unwrap();
     assert!(
-        pinned.as_ref().is_some_and(|pinned| Arc::ptr_eq(pinned, &net)),
+        pinned
+            .as_ref()
+            .is_some_and(|pinned| Arc::ptr_eq(pinned, &net)),
         "ns/net pins the process's own namespace object"
     );
     // The inode number and the pin describe the same snapshot of that

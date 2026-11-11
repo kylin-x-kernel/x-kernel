@@ -7,7 +7,9 @@
 #[macro_use]
 mod macros;
 
+mod cpuinfo;
 mod ctx;
+pub use cpuinfo::{CpuFeature, CpuInfo};
 mod current;
 mod excp;
 mod unaligned;

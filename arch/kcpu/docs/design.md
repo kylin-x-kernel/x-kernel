@@ -1,5 +1,106 @@
 # kcpu — 设计文档
 
+## x86_64 CPU identity and capability snapshots
+
+`src/cpuinfo.rs` owns one `klazy::Once<CpuInfo>` per logical CPU on every architecture;
+`src/x86_64/cpuinfo.rs` owns x86 identification and policy. Snapshots are
+indexed within `NR_CPUS`. Each BSP/AP calls identification from `init_trap`,
+after per-CPU publication and before it can schedule. Initialization must not
+migrate. The workspace `raw-cpuid` 11.6 dependency owns vendor/brand assembly,
+vendor-specific family/model/stepping decoding and optional-leaf discovery.
+Detection accepts a `CpuIdReader`; production uses the native reader, while
+tests supply deterministic readers. Identity and the decoded signature are
+copied into fixed-size storage; there are no production allocations.
+
+The existing capability words retain leaf 1 EDX/ECX and leaf 7.0 EBX/ECX in
+that order. The library's feature objects have no raw-bitmap accessor, so each
+supported feature leaf is re-read through the same reader during bring-up.
+This preserves unnamed bits and the existing OS state policy without another
+per-feature table. The library also probes leaf 7.1, whose flags are unused.
+Brand bytes receive a separate printable-ASCII scan before accepting the
+library's trimmed string; procfs readers still perform no CPUID queries.
+
+This follows Linux v6.12's separation between per-CPU identification and
+capability filtering in [common.c](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/cpu/common.c)
+and presentation in [proc.c](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/cpu/proc.c).
+`cpu_info(LogicalCpuId)` performs a nonblocking acquire through `Once::get`;
+uninitialized/out-of-range CPUs return `None`. Published snapshots are immutable
+and are not refreshed by hotplug or microcode updates. Per-CPU flags do not
+promise that instructions are usable on every CPU to which a task can migrate.
+
+Only a named subset is exposed through `CpuFeature`; procfs owns Linux flag
+spellings. FP/SIMD requires the `fp-simd` build feature, CR4.OSFXSR, CR0.EM clear,
+and hardware FPU/FXSR support. SSE-dependent instructions also require SSE/SSE2.
+XSAVE/AVX/AVX2/FMA/F16C additionally require the state contract selected by
+`xstate.rs`; raw CPUID bits alone never enable their procfs flags.
+
+## Other architectures and adding CPU identification
+
+The common `cpu_info(LogicalCpuId)` API returns the selected architecture's
+`CpuInfo`; architecture-specific identity accessors and `CpuFeature` variants
+express the native contract without putting Linux presentation strings in kcpu.
+The common publication table provides the same nonblocking `None` behavior for
+unidentified/out-of-range CPUs on all architectures.
+
+- AArch64 `src/aarch64/cpuinfo.rs` captures MIDR_EL1, ID_AA64PFR0_EL1 and
+  ID_AA64ISAR0_EL1 during each CPU's trap initialization. FP/Advanced SIMD and
+  dependent crypto require `fp-simd` context preservation. CRC32 and LSE atomics
+  are stateless. Reserved feature encodings and SVE are not reported.
+- RISC-V `src/riscv/cpuinfo.rs` consumes enabled firmware CPU nodes during
+  `init_hwprobe_from_fdt`, sharing the validated raw-to-logical mapping with
+  hwprobe. It accepts legacy `riscv,isa` and modern ISA-base/extension properties,
+  stores optional firmware architecture IDs, and publishes a selected usable ISA
+  subset. Identification can precede AP startup. It does not read machine-mode
+  `misa`/identity CSRs from supervisor mode or lazily initialize from procfs.
+  Missing firmware leaves the snapshot absent. F/D require both hardware
+  extensions and the kernel's double-precision context implementation; V/Zve
+  state is not supported. The existing hwprobe ABI and bitmap remain unchanged.
+- LoongArch `src/loongarch64/cpuinfo.rs` captures CPUCFG0/1/2 during each CPU's
+  trap initialization. CPUCFG provides PRID rather than a marketing model string;
+  procfs prints the raw identifier. Scalar FP requires the supported SP/DP state
+  format and `fp-simd`; LSX/LASX and binary-translation state are not reported.
+
+To add an architecture, implement its private `cpuinfo.rs`, re-export `CpuInfo`
+and `CpuFeature` from the architecture module, and publish through
+`crate::cpuinfo` once the identity source and usable-state policy are ready.
+CPU-local register detection must run after CPU-area publication, before
+scheduling, without migration. Firmware detection must map and validate each CPU
+ID before publication. Add synthetic register/firmware tests and extend procfs's
+per-architecture formatter and spelling table. Keep hardware filtering in kcpu
+and Linux field names in procfs. Update both crates' design/security documents.
+
+These are per-CPU diagnostic snapshots, not Linux's system-wide capability
+intersection. AT_HWCAP/AT_HWCAP2 generation and scheduler placement policy remain
+separate; this change does not synchronize those interfaces with cpuinfo.
+
+## x86_64 extended state
+
+Following Linux v6.12's [xstate initialization](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/fpu/xstate.c)
+and [signal ABI](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/fpu/signal.c), the BSP selects FXSAVE
+or standard XSAVE, enabling x87/SSE and, when CPUID leaf 0xD validates the
+256-byte component at offset 576, YMM state. Every AP installs the same XCR0
+mask before scheduling; an incompatible AP is rejected before tasks can migrate.
+AVX-512, AMX and supervisor components remain disabled. No XSAVEOPT/compacted
+format is used. `ExtendedState` is an initialized, 832-byte, 64-byte-aligned
+object with private headers; task switches eagerly save/restore it with IRQs
+disabled. FXSAVE-only CPUs continue to use the first 512 bytes.
+
+Fork/clone captures the creator's live FP registers in `prepare_user_entry` and
+restores them on the child's first entry. Exec installs clean x87/SSE/YMM state.
+Signal delivery captures fresh storage and exports Linux software metadata,
+standard XSAVE header and trailing magic via `mcontext.fpregs`. Handlers start
+with clean FP state; nested signals own separate snapshots. The syscall boundary
+copies user bytes before `from_signal_bytes` validates length, feature mask,
+magic and reserved header words. Legacy signal frames initialize absent YMM
+state. Signal handlers may edit supported state; FS/GS bases are not restored
+from a private user-writable extension.
+
+`ut-tests/x86_xstate.rs` covers discovery, malformed frames, actual YMM save and
+restore, and nested snapshots. The shared Starry harness case
+`x86-xstate-semantics` executes AVX2 across concurrent task switches, fork,
+exec, nested alternate-stack signals and forged-frame rejection.
+
+
 ## 定位
 
 `kcpu` 为 x-kernel 提供多架构 CPU 特权指令与结构抽象。它是内核硬件抽象层的
@@ -30,6 +131,8 @@ arch/kcpu/
 │   ├── userspace_common.rs           # ReturnReason、异常表修正
 │   ├── x86_64/
 │   │   ├── mod.rs                    # 导出 ExceptionContext(=TrapFrame)、TaskContext、测试挂载
+│   │   ├── xstate.rs                 # 系统保存格式、XSAVE/FXSAVE、Linux 信号 FP 编解码
+│   │   ├── cpuinfo.rs                # 每 CPU 身份、受内核状态支持约束的能力快照
 │   │   ├── ctx.rs                    # ExceptionContext（含 orig_rax）、ContextSwitchFrame、TaskContext
 │   │   ├── excp.rs / excp.S          # trap 入口、IRQ/PageFault 分发、syscall_entry
 │   │   ├── instrs.rs / copy_user.S   # user_copy + 异常表条目
@@ -82,14 +185,15 @@ guest 测试通过 `unittest::path_mod_test!` 挂载到原父模块，文件位�
 | `aarch64.rs` | 7 | AArch64 |
 | `aarch64_current_unittest.rs` | 1 | AArch64，原有文件改为 path 挂载 |
 | `x86_64.rs` | 6 | x86_64 |
+| `x86_cpuinfo.rs` | 13 | x86_64 |
+| `x86_xstate.rs` | 3 | x86_64（YMM 用例需要 `fp-simd`） |
 | `x86_64_userspace.rs` | 2 | x86_64 且 `fp-simd` |
 | `riscv.rs` | 4 | riscv32 或 riscv64 |
 | `riscv_hwprobe.rs` | 7 | riscv32 或 riscv64，其中 2 例为 serial |
 | `loongarch64.rs` | 5 | LoongArch64 |
 
-跨全部门控共 44 例、11 个模块，其中 7 例保留 serial，无 user 用例。
-单架构 guest 数量为 AArch64 20、x86_64 18（启用 `fp-simd` 后 20）、
-RISC-V 23、LoongArch64 17。`src/aarch64/userspace.rs` 原有 `cfg(test)`
+实际 guest 用例数量由架构、feature 和测试过滤条件共同决定，以运行时注册清单为准。
+`src/aarch64/userspace.rs` 原有 `cfg(test)`
 挂载的 `tests/host/aarch64_userspace_host.rs` 保持不变，2 个 host 用例不转换为 guest。
 
 ## 架构
@@ -183,12 +287,10 @@ EnterUserFrame    (x86_64 私有 trap-return 汇编帧)
       │           - 不进入 UserContext，也不进入用户可见 signal frame
 
 UserRestorableContext
-      │           信号帧保存的类型，包含 ABI `mcontext_t` 未覆盖且允许从用户
-      │           信号帧恢复的用户态语义状态；不包含 x86_64 EnterUserFrame
-      │           私有字段或 syscall restart scratch 字段。
-      │           x86_64 额外携带一份 FXSAVE 快照（x87/MMX/XMM/MXCSR），
-      │           使被信号打断的 FP/SIMD 状态在处理函数运行后仍可恢复；
-      │           其他架构仅携带各自所需的窄状态。
+      │           x86_64 用于 fork/clone 继承段基址及完整 x87/SSE/YMM 快照，
+      │           始终保存在内核；信号使用 Linux ABI 的独立 fpregs 区域。
+      │           其他架构携带 ABI `mcontext_t` 未覆盖的窄状态并用于信号帧。
+      │           不包含 EnterUserFrame 私有字段或 syscall restart scratch。
 
 TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换)
                   x86_64:      { kstack_top, rsp, cr3, ext_state? }
@@ -398,7 +500,7 @@ kernel stack restore slot、trap frame stack alignment 等汇编私有不变量�
 
 信号处理不直接把完整 `UserContext` 放入用户栈。`UContext/MContext` 承载
 用户 ABI 寄存器状态，`UserRestorableContext` 补充 ABI 上下文未覆盖的状态
-（x86_64 为段基址与 FXSAVE FP/SIMD 快照），避免 x86_64
+（非 x86 架构的补充状态；x86_64 使用独立 Linux fpregs 区域），避免 x86_64
 `EnterUserFrame.kernel_rsp` 等内核私有字段泄露到 signal frame 或被 `sigreturn`
 恢复。每个信号帧持有独立的 FP 快照，因此嵌套信号也能逐层恢复被中断的 FP/SIMD
 状态。

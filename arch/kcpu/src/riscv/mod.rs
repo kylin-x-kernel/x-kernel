@@ -7,7 +7,9 @@
 #[macro_use]
 mod macros;
 
+mod cpuinfo;
 mod ctx;
+pub use cpuinfo::{CpuFeature, CpuInfo};
 mod current;
 pub use current::{current_task_ptr, set_current_task_ptr};
 mod excp;

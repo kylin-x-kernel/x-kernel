@@ -9,13 +9,12 @@
 
 //! x86_64 context structures for traps and task switching.
 
-use core::{
-    arch::naked_asm,
-    fmt::{self, Debug, Formatter},
-};
+use core::{arch::naked_asm, fmt::Debug};
 
 use memaddr::VirtAddr;
 use x86_64::registers::mxcsr::MxCsr;
+
+use super::xstate::ExtendedState;
 
 /// Saved registers when a trap (interrupt or exception) occurs.
 #[repr(C)]
@@ -328,44 +327,6 @@ impl FxStateBlock {
             xmm_space: [0; 32],
             _padding: [0; 12],
         }
-    }
-}
-
-/// Extended state of a task, such as FP/SIMD states.
-pub struct ExtendedState {
-    /// Memory region for the FXSAVE/FXRSTOR instruction.
-    pub fxsave_area: FxStateBlock,
-}
-
-#[cfg(feature = "fp-simd")]
-impl ExtendedState {
-    /// Saves the current extended states from CPU to this structure.
-    #[inline]
-    pub fn save(&mut self) {
-        // SAFETY: `fxsave_area` is a valid 512-byte `FxStateBlock` with 16-byte alignment, matching FXSAVE64 requirements.
-        unsafe { core::arch::x86_64::_fxsave64(&mut self.fxsave_area as *mut _ as *mut u8) }
-    }
-
-    /// Restores the extended states from this structure to CPU.
-    #[inline]
-    pub fn restore(&self) {
-        // SAFETY: `fxsave_area` contains previously saved FXSAVE state with valid layout.
-        unsafe { core::arch::x86_64::_fxrstor64(&self.fxsave_area as *const _ as *const u8) }
-    }
-
-    /// Returns the extended state with initialized values.
-    pub const fn default() -> Self {
-        Self {
-            fxsave_area: FxStateBlock::initial(),
-        }
-    }
-}
-
-impl Debug for ExtendedState {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.debug_struct("The struct ExtendedState")
-            .field("fxsave_block is", &self.fxsave_area)
-            .finish()
     }
 }
 

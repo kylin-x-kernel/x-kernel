@@ -7,7 +7,7 @@ cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {
         mod x86_64;
         pub use self::x86_64::*;
-        pub(crate) use self::x86_64::SIGNAL_FRAME_ALIGN;
+        pub(crate) use self::x86_64::setup_signal_frame;
     } else if #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))] {
         mod riscv;
         pub use self::riscv::*;

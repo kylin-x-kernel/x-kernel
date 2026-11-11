@@ -4,26 +4,29 @@
 
 //! Thread-level signal handling and user context setup.
 use alloc::sync::Arc;
-use core::{
-    alloc::Layout,
-    mem::offset_of,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use kalloc_types::AllocFlags;
-use kcpu::userspace::{UserContext, UserRestorableContext};
+use kcpu::userspace::UserContext;
 use kerrno::{KResult, LinuxError};
 use kspin::SpinNoIrq;
-use osvm::VirtMutPtr;
+#[cfg(not(target_arch = "x86_64"))]
+use {
+    core::{alloc::Layout, mem::offset_of},
+    kcpu::userspace::UserRestorableContext,
+    osvm::VirtMutPtr,
+};
 
 use super::ProcessSignalManager;
+#[cfg(not(target_arch = "x86_64"))]
+use crate::arch::UContext;
 use crate::{
     DefaultSignalAction, Dequeued, SignalAction, SignalActionFlags, SignalDisposition, SignalInfo,
     SignalNotification, SignalOsAction, SignalSet, SignalStack, Signo, SlotId,
-    TimerSignalRejection, TimerSignalSendOutcome,
-    arch::{self, UContext},
+    TimerSignalRejection, TimerSignalSendOutcome, arch,
 };
 
+#[cfg(not(target_arch = "x86_64"))]
 struct SignalFrame {
     ucontext: UContext,
     siginfo: SignalInfo,
@@ -32,9 +35,9 @@ struct SignalFrame {
 
 unittest::path_mod_test!(receipt_tests, "../../ut-tests/timer_receipt.rs");
 
-// The x86_64 restorable context holds an FXSAVE block that `restore` feeds to
-// `FXRSTOR`, which requires 16-byte alignment. Rust's field layout keeps
-// `saved` naturally aligned inside the frame; this guards that invariant.
+// Non-x86 architectures retain their naturally aligned restorable payload.
+// x86 uses the Linux fpregs pointer and an independently aligned XSAVE region.
+#[cfg(not(target_arch = "x86_64"))]
 const _: () = assert!(
     core::mem::offset_of!(SignalFrame, saved) % core::mem::align_of::<UserRestorableContext>() == 0,
     "signal-frame restorable state must be naturally aligned"
@@ -269,49 +272,57 @@ impl ThreadSignalManager {
             SignalDisposition::Ignore => None,
             SignalDisposition::Handler(handler) => {
                 prepare_syscall_restart_for_signal(uctx, action.flags);
-                let layout = Layout::new::<SignalFrame>();
-                let stack = self.stack.lock();
-                let sp = if stack.disabled() || !action.flags.contains(SignalActionFlags::ONSTACK) {
+                let stack = self.stack.lock().clone();
+                let sp = if stack.disabled()
+                    || stack.contains_sp(uctx.sp())
+                    || !action.flags.contains(SignalActionFlags::ONSTACK)
+                {
                     uctx.sp()
                 } else {
-                    stack.sp + stack.size
+                    let Some(top) = stack.sp.checked_add(stack.size) else {
+                        return Some(SignalOsAction::CoreDump);
+                    };
+                    top
                 };
-                drop(stack);
-
-                let frame_align = layout.align().max(arch::SIGNAL_FRAME_ALIGN);
-                let aligned_sp = (sp - layout.size()) & !(frame_align - 1);
-
-                let frame_ptr = aligned_sp as *mut SignalFrame;
-                if frame_ptr
-                    .write_vm(SignalFrame {
-                        ucontext: UContext::new(uctx, restore_blocked),
-                        siginfo: sig.clone(),
-                        saved: uctx.save_user_restorable(),
-                    })
-                    .is_err()
-                {
-                    return Some(SignalOsAction::CoreDump);
-                }
-
-                uctx.set_ip(handler as usize);
-                uctx.set_sp(aligned_sp);
-                uctx.set_arg0(signo as _);
-                uctx.set_arg1(aligned_sp + offset_of!(SignalFrame, siginfo));
-                uctx.set_arg2(aligned_sp + offset_of!(SignalFrame, ucontext));
-
                 let restorer = action
                     .restorer
                     .map_or(self.proc.default_restorer, |f| f as _);
                 #[cfg(target_arch = "x86_64")]
                 {
-                    let new_sp = uctx.sp() - 8;
-                    if (new_sp as *mut usize).write_vm(restorer).is_err() {
+                    let Ok((info_addr, uc_addr)) =
+                        arch::setup_signal_frame(uctx, restore_blocked, sig, &stack, sp, restorer)
+                    else {
                         return Some(SignalOsAction::CoreDump);
-                    }
-                    uctx.set_sp(new_sp);
+                    };
+                    uctx.set_arg1(info_addr);
+                    uctx.set_arg2(uc_addr);
                 }
                 #[cfg(not(target_arch = "x86_64"))]
-                uctx.set_ra(restorer);
+                {
+                    let layout = Layout::new::<SignalFrame>();
+                    let frame_align = layout.align().max(arch::SIGNAL_FRAME_ALIGN);
+                    let Some(frame_sp) = sp.checked_sub(layout.size()) else {
+                        return Some(SignalOsAction::CoreDump);
+                    };
+                    let aligned_sp = frame_sp & !(frame_align - 1);
+                    let frame_ptr = aligned_sp as *mut SignalFrame;
+                    if frame_ptr
+                        .write_vm(SignalFrame {
+                            ucontext: UContext::new(uctx, restore_blocked),
+                            siginfo: sig.clone(),
+                            saved: uctx.save_user_restorable(),
+                        })
+                        .is_err()
+                    {
+                        return Some(SignalOsAction::CoreDump);
+                    }
+                    uctx.set_sp(aligned_sp);
+                    uctx.set_arg1(aligned_sp + offset_of!(SignalFrame, siginfo));
+                    uctx.set_arg2(aligned_sp + offset_of!(SignalFrame, ucontext));
+                    uctx.set_ra(restorer);
+                }
+                uctx.set_ip(handler as usize);
+                uctx.set_arg0(signo as _);
 
                 let mut add_blocked = action.mask;
                 if !action.flags.contains(SignalActionFlags::NODEFER) {
@@ -421,6 +432,7 @@ impl ThreadSignalManager {
     /// user mode. The restored mask comes from the user-writable frame, so it
     /// passes through the same write entry that drops the unblockable signals
     /// (Linux `do_sigreturn` -> `set_current_blocked`).
+    #[cfg(not(target_arch = "x86_64"))]
     pub fn restore(&self, uctx: &mut UserContext) {
         let frame_ptr = uctx.sp() as *const SignalFrame;
         // SAFETY: pointer is valid

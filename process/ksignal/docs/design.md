@@ -1017,14 +1017,15 @@ guarantee or Linux GFP_ATOMIC equivalence.
 - Handler functions are typed `unsafe extern "C" fn(i32)` and stored as an
   address; the kernel never calls them directly — it only writes a user
   frame — so no kernel-side indirect call risk is introduced.
-- The signal frame embeds both the ABI `ucontext_t`/`siginfo_t` (user-visible
-  layout, musl-compatible register numbering) and a private
-  `UserRestorableContext` carrying the state `mcontext_t` does not cover:
-  segment bases plus, on x86_64, an `FXSAVE` snapshot of the interrupted
-  x87/MMX/XMM/MXCSR state. Each frame owns its snapshot, so nested signals
-  restore the FP/SIMD state layer by layer. The region is written into the
-  user-writable frame, so `restore` treats it as untrusted input (x86_64
-  clears unsupported `MXCSR` bits before `FXRSTOR`).
+- On x86_64 the frame has Linux's 304-byte kernel `ucontext`, `siginfo`, and a
+  separate 64-byte-aligned FP area referenced by `mcontext.fpregs`. It carries
+  legacy FXSAVE or standard XSAVE metadata plus x87/SSE/YMM. Delivery reserves
+  the red zone, checks alternate-stack bounds, writes initialized regions
+  individually, and initializes the handler's FP state. Nested handlers use
+  the current stack position instead of overwriting the alternate-stack top.
+  `ksyscall` copies and validates the frame before restoring registers, mask
+  and FP state. Other architectures retain `UserRestorableContext` in their
+  frame. No private kernel execution context is exported.
 - x86_64 pushes the restorer address on the user stack to match the
   kernel-only `SA_RESTORER` ABI; other architectures use the return-address
   register.

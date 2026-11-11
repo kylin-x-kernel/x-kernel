@@ -15,14 +15,13 @@ use x86_64::{
     registers::{
         control::Cr2,
         model_specific::{Efer, EferFlags, KernelGsBase, LStar, SFMask, Star},
-        mxcsr::MxCsr,
         rflags::RFlags,
     },
     structures::idt::ExceptionVector,
 };
 
 use super::{
-    FxStateBlock, TrapFrame,
+    ExtendedState, TrapFrame,
     excp::{IRQ_VECTOR_END, IRQ_VECTOR_START, LEGACY_SYSCALL_VECTOR, err_code_to_flags},
     gdt,
 };
@@ -52,55 +51,16 @@ struct EnterUserFrame {
     tf: TrapFrame,
 }
 
-/// User-space state saved outside the ABI `mcontext_t` signal payload.
+/// Kernel-owned state captured when preparing a new user task.
 ///
-/// Besides the segment bases this carries a full `FXSAVE` snapshot of the
-/// x87/MMX/XMM/MXCSR state. A caught signal handler may clobber the live
-/// FP/SIMD registers, so the interrupted state must be captured per signal
-/// frame (including nested signals) and restored on `rt_sigreturn`.
+/// Segment bases accompany the x87/SSE/YMM snapshot inherited by fork/clone.
+/// Signal delivery instead exports the Linux FP payload through `fpregs`.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct UserRestorableContext {
     fs_base: u64,
     gs_base: u64,
-    fp: FxStateBlock,
-}
-
-/// Fallback `MXCSR` feature mask for CPUs whose `FXSAVE` reports none.
-///
-/// Every `MXCSR` bit the `x86_64` crate models except denormals-are-zero.
-/// Linux `fpu__init_system_mxcsr()` uses the same fallback for CPUs that
-/// leave `mxcsr_mask` zero.
-#[cfg(feature = "fp-simd")]
-const MXCSR_FALLBACK_FEATURE_MASK: u32 = MxCsr::all().bits() & !MxCsr::DENORMALS_ARE_ZEROS.bits();
-
-/// Returns the trusted `MXCSR` feature mask reported by `FXSAVE`.
-///
-/// A signal frame lives in user memory and can be corrupted before
-/// `rt_sigreturn`, so the mask stored inside a frame cannot be trusted. It is
-/// probed once from the CPU and cached; CPUs that report no mask use
-/// [`MXCSR_FALLBACK_FEATURE_MASK`].
-#[cfg(feature = "fp-simd")]
-fn mxcsr_feature_mask() -> u32 {
-    use core::sync::atomic::{AtomicU32, Ordering};
-
-    static MASK: AtomicU32 = AtomicU32::new(0);
-
-    let cached = MASK.load(Ordering::Relaxed);
-    if cached != 0 {
-        return cached;
-    }
-
-    let mut probe = FxStateBlock::initial();
-    // SAFETY: `probe` is a 16-byte aligned `FxStateBlock`, matching FXSAVE64.
-    unsafe { core::arch::x86_64::_fxsave64(&mut probe as *mut _ as *mut u8) };
-    let mask = if probe.sse_mxcsr_mask == 0 {
-        MXCSR_FALLBACK_FEATURE_MASK
-    } else {
-        probe.sse_mxcsr_mask
-    };
-    MASK.store(mask, Ordering::Relaxed);
-    mask
+    fp: ExtendedState,
 }
 
 pub(super) const KERNEL_RSP_TO_TRAPFRAME_OFFSET: usize =
@@ -108,7 +68,24 @@ pub(super) const KERNEL_RSP_TO_TRAPFRAME_OFFSET: usize =
 
 const _: () = assert!(KERNEL_RSP_TO_TRAPFRAME_OFFSET == core::mem::size_of::<u64>());
 
+/// Installs clean x87/SSE/YMM state for a signal handler or new executable.
+pub fn reset_fp_state() {
+    #[cfg(feature = "fp-simd")]
+    ExtendedState::default().restore();
+}
+
+/// Restores a validated, kernel-owned FP snapshot on signal return.
+pub fn restore_fp_state(state: &ExtendedState) {
+    #[cfg(feature = "fp-simd")]
+    state.restore();
+}
+
 impl UserContext {
+    /// Code selector installed by this kernel's 64-bit user GDT entry.
+    pub const USER_CODE_SELECTOR: u64 = gdt::UCODE64.0 as u64;
+    /// Data/stack selector installed by this kernel's user GDT entry.
+    pub const USER_DATA_SELECTOR: u64 = gdt::UDATA.0 as u64;
+
     /// Creates a new context with the given entry point, user stack pointer,
     /// and the argument.
     pub fn new(entry: usize, ustack_top: VirtAddr, arg0: usize) -> Self {
@@ -134,18 +111,11 @@ impl UserContext {
         self.fs_base as _
     }
 
-    /// Saves user-restorable state that is not carried by signal `mcontext_t`.
+    /// Captures the creator's live FP state and the new task's segment bases.
     ///
-    /// Captures the live FP/SIMD state while the interrupted user context is
-    /// still current, so a signal handler's own FP/SIMD use cannot leak back
-    /// into the interrupted code after `rt_sigreturn`.
+    /// Call while the creator is current, before publishing the new task.
     pub fn save_user_restorable(&self) -> UserRestorableContext {
-        let mut fp = FxStateBlock::initial();
-        #[cfg(feature = "fp-simd")]
-        // SAFETY: `fp` is a 16-byte aligned `FxStateBlock`, matching FXSAVE64.
-        unsafe {
-            core::arch::x86_64::_fxsave64(&mut fp as *mut _ as *mut u8)
-        };
+        let fp = ExtendedState::capture();
         UserRestorableContext {
             fs_base: self.fs_base,
             gs_base: self.gs_base,
@@ -153,12 +123,10 @@ impl UserContext {
         }
     }
 
-    /// Restores user state that is not carried by signal `mcontext_t`.
+    /// Installs a kernel-owned snapshot on the new task's first user entry.
     ///
-    /// The FP/SIMD block comes from a user-writable signal frame, so unsupported
-    /// `MXCSR` bits are cleared against the trusted feature mask before
-    /// `FXRSTOR`; an unvalidated value would otherwise raise `#GP` in kernel
-    /// mode. The remaining `FXSAVE` fields cannot fault `FXRSTOR`.
+    /// No user memory is read here. Signal return uses validated FP decoding
+    /// and does not restore FS/GS bases from a private signal-frame extension.
     pub fn restore_user_restorable(&mut self, saved: UserRestorableContext) {
         self.fs_base = saved.fs_base;
         self.gs_base = saved.gs_base;
@@ -167,11 +135,7 @@ impl UserContext {
 
         #[cfg(feature = "fp-simd")]
         {
-            let mut fp = saved.fp;
-            fp.sse_mxcsr &= mxcsr_feature_mask();
-            // SAFETY: `fp` is a 16-byte aligned `FxStateBlock` with a validated
-            // MXCSR, matching FXRSTOR64.
-            unsafe { core::arch::x86_64::_fxrstor64(&fp as *const _ as *const u8) };
+            saved.fp.restore();
         }
     }
 
@@ -196,6 +160,8 @@ impl UserContext {
     /// (`cs`/`ss`/`rflags`, `rip`, `rsp`, `fs_base`) are left for the caller
     /// to re-establish via `set_ip`/`set_sp`/`set_tls`.
     pub fn reset_for_exec(&mut self) {
+        #[cfg(feature = "fp-simd")]
+        ExtendedState::default().restore();
         self.rax = 0;
         self.rcx = 0;
         self.rdx = 0;

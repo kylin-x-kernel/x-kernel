@@ -31,8 +31,12 @@ kcpu_slot = { workspace = true }
 static_assertions = "1.1.0"
 unittest.workspace = true
 kerrno = { workspace = true }
+kcpu_id_map.workspace = true
+kbuild_config.workspace = true
+klazy.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
+raw-cpuid.workspace = true
 lazyinit = "0.2"
 x86 = "0.52"
 x86_64 = { workspace = true }
@@ -43,9 +47,6 @@ tock-registers = "0.9"
 
 [target.'cfg(any(target_arch = "riscv32", target_arch = "riscv64"))'.dependencies]
 kaddr_layout = { workspace = true }
-kbuild_config = { workspace = true }
-kcpu_id_map = { workspace = true }
-klazy = { workspace = true }
 of = { workspace = true }
 riscv = "0.14"
 

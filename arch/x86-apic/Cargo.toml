@@ -27,7 +27,7 @@ lazyinit = "0.2"
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = { workspace = true }
 x2apic = "0.5"
-raw-cpuid = "11.5"
+raw-cpuid.workspace = true
 unittest.workspace = true
 
 [package.metadata.docs.rs]

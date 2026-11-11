@@ -4,4 +4,5 @@
 
 //! Basic procfs root nodes.
 
+mod cpuinfo;
 pub(crate) mod root;

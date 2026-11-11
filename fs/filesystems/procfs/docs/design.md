@@ -1,5 +1,56 @@
 # procfs - Design
 
+## CPU information
+
+`src/basic_nodes/cpuinfo.rs` formats `/proc/cpuinfo`; `root.rs` only registers
+the read-only SimpleFile. Each present logical CPU retains its original ID and
+one blank-line-separated section. The legacy `cpu cores` field still means total
+present logical CPUs, not physical cores per package; `architecture` is retained.
+These compatibility fields and present-CPU enumeration are not a claim of full
+Linux topology/hotplug compatibility (Linux normally enumerates online CPUs).
+
+On x86_64, procfs reads `kcpu::cpu_info` snapshots, adding `vendor_id`, `cpu family`,
+`model`, `stepping`, `model name`, and `flags`. A present CPU that has not completed
+identification has unknown identity and an empty flags line, never another CPU's
+snapshot. No CPUID instruction runs during file reads. Linux v6.12
+[cpufeatures.h](https://github.com/torvalds/linux/blob/v6.12/arch/x86/include/asm/cpufeatures.h)
+provides the names, including `pni` for SSE3. The table is a subset: absent names
+do not prove hardware absence. CPU/OS support filtering belongs to kcpu, not
+procfs. AVX/XSAVE-related flags require kcpu's enabled state contract as well
+as the corresponding hardware bits; FXSAVE fallback CPUs omit them.
+
+SimpleFile retains its generated-file partial-read behavior: each read regenerates
+the text and slices it at the supplied offset. CPU snapshots are immutable after
+bring-up, but opening during AP identification can observe changing output.
+
+All architectures consume the same `kcpu::cpu_info(LogicalCpuId)` entry point:
+
+- AArch64 prints Linux `Features`, `CPU implementer`, `CPU architecture`,
+  `CPU variant`, `CPU part` and `CPU revision` fields from its register snapshot.
+- RISC-V prints the selected ISA subset as a Linux `isa` string plus optional
+  firmware `mvendorid`, `marchid` and `mimpid`. Base letters remain contiguous;
+  multi-letter extensions have underscore separators. Unsupported vector state
+  is omitted. Firmware identification may precede AP startup; absent snapshots
+  have an empty ISA line and unknown IDs.
+- LoongArch prints `CPU Family`, `Model Name`, `CPU Revision`, `ISA` and
+  `Features`. CPUCFG has no marketing name, so `Model Name` identifies the raw
+  PRID explicitly. Unknown implementers are not relabeled as Loongson.
+
+Linux v6.12's per-architecture cpuinfo implementations define these field names.
+Snapshots and usable-feature filtering belong to kcpu; procfs only selects
+presentation names. Feature tables are conservative subsets, not complete Linux
+cpuinfo implementations. In particular, arm64 Linux normally reports the common
+HWCAP intersection, while these fields describe each CPU's snapshot. ELF
+AT_HWCAP/AT_HWCAP2 remains independent and is not changed by this procfs adapter.
+
+Regression tests in `ut-tests/cpuinfo.rs` check section identity, naming and
+unsupported flags; `basic_nodes_root.rs` exercises short VFS reads and write
+rejection. kcpu tests inject CPUID values to cover positive and negative feature
+cases without depending on the test host's CPU model. Cross-architecture tests
+check field presence, unknown identities, feature spelling uniqueness and
+state-policy filtering; common kcpu tests cover sparse snapshot slots.
+
+
 ## Fallible superblock preparation
 
 Procfs constructors return VfsResult and use SimpleFs's KERNEL allocation for
@@ -51,7 +102,8 @@ Paths in this table are relative to `fs/filesystems/procfs/`.
 | `src/task_nodes/root.rs` | PID/TID directories, task metadata, maps, FD magic links, fdinfo rendering (including inotify watches), namespaces, process controls |
 | `src/task_nodes/mounts.rs` | Mount-tree traversal and mounts/mountinfo/mountstats formatting |
 | `src/task_nodes/tee.rs` | Feature-gated TA metadata through `tee_task_iface` |
-| `src/basic_nodes/root.rs` | Boot command line, CPU/filesystem information, kernel settings and the `/proc/sys/fs/inotify` live limits |
+| `src/basic_nodes/root.rs` | Boot command line, root entry registration, filesystem information, kernel settings and the `/proc/sys/fs/inotify` live limits |
+| `src/basic_nodes/cpuinfo.rs` | Per-CPU text formatting and Linux feature-name table over kcpu snapshots |
 | `src/mem_nodes/root.rs` | Allocator-derived memory statistics |
 | `src/device_nodes/root.rs` | Device, bus, driver, and topology views through `kdevice` |
 | `src/trace_nodes/root.rs` | Trace records, event metadata and enable controls through `ktracing` |

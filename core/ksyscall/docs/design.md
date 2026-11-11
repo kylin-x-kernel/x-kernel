@@ -1,5 +1,14 @@
 # ksyscall design
 
+## x86_64 signal return
+
+`sys_rt_sigreturn` owns checked user copies of the 304-byte Linux kernel
+ucontext and bounded FP payload. It validates RIP/RSP/code selector and asks
+kcpu to decode the copied FXSAVE/XSAVE bytes before publishing registers, blocked
+mask and live x87/SSE/YMM state. A missing FP pointer installs initial state.
+Malformed or unmapped input queues SIGSEGV to the current thread; no user pointer reaches XRSTOR.
+
+
 ## Network Namespace Owner Preparation
 
 Clone prepares an unpublished `knet::netns::PreparedStack` for NEWNET after

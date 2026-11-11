@@ -1,5 +1,15 @@
 # ksyscall security and reliability
 
+## x86_64 signal-return input
+
+Signal-frame pointers, lengths, register values and xstate bytes are untrusted.
+Checked copies occur before any context mutation. kcpu accepts only bounded,
+standard-format supported xstate; the syscall adapter checks canonical user
+RIP/RSP and user CS. Privileged RFLAGS cannot be imported. Invalid frames raise
+SIGSEGV on the current thread rather than a privileged restore fault; MXCSR keeps the existing mask
+sanitization compatibility policy.
+
+
 ## Network Namespace Allocation Failure
 
 NoMemory from NEWNET device-owner preparation propagates before clone creates

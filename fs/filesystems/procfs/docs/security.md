@@ -1,5 +1,31 @@
 # procfs - Security and Reliability
 
+## CPU information boundary
+
+`/proc/cpuinfo` is read-only, including for privileged writers through the
+SimpleFile closure backend. It consumes immutable, policy-filtered kcpu snapshots
+and printable sanitized identity strings. It does not claim AVX/XSAVE support
+from raw hardware bits or substitute the reader's CPU for a missing snapshot.
+An empty/missing flag means not reported, not necessarily absent from hardware.
+Each flags line describes that CPU only; consumers must account for migration.
+
+Formatting is bounded by the present CPU count and fixed feature table, with no
+CPUID, architecture-register or remote-CPU calls on the read path. It retains existing String allocation
+behavior. Identity (vendor/model) is diagnostic public information, not an
+attestation or authorization input. Each read regenerates text from the published snapshots; an AP completing
+identification between reads can change output length. No cross-read atomic
+snapshot or CPU-hotplug contract is claimed.
+
+The same boundary applies to AArch64, RISC-V and LoongArch output. Register IDs
+are formatted numerically; RISC-V firmware strings are reduced to kcpu's fixed
+extension bitmap before publication, never interpolated. Missing identity IDs
+remain unknown and unidentified CPUs have no reported capabilities. Vector units
+without context preservation are omitted. LoongArch model text labels the PRID
+explicitly rather than inventing a marketing name. These per-CPU fields are
+diagnostic; they do not replace the independently generated ELF auxiliary vector
+or guarantee feature availability after migration.
+
+
 ## Superblock-owner failure
 
 Private-owner allocation failure returns NoMemory through get_tree before any

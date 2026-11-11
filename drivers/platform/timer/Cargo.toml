@@ -35,7 +35,7 @@ kspin.workspace = true
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 kernel_boot = { workspace = true }
 int_ratio = { workspace = true }
-raw-cpuid = "11.5"
+raw-cpuid.workspace = true
 x2apic = "0.5"
 x86_64 = { workspace = true }
 x86_apic = { workspace = true }

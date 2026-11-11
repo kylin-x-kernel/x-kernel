@@ -1,5 +1,21 @@
 # posix-process — Security and reliability
 
+## Synchronous signal-frame faults
+
+The fault API accepts only kernel-generated fault information in the current
+user task. It queues to that thread, or terminates the group when delivery is
+blocked/ignored, so malformed sigreturn state cannot be resumed merely because
+a sibling accepted a process-directed notification.
+
+## x86_64 FP ownership
+
+Fork/clone snapshots are kernel-owned and captured while the creator is current.
+The child restores its own inherited copy before user entry; no user-writable
+signal-frame extension is reused for this transfer. Ordinary context switches
+preserve all enabled xstate, and exec installs initial FP state so the new image
+does not observe the previous program's vector registers.
+
+
 Fatal trap signals explicitly permit bit-only fallback on owner exhaustion;
 this policy is not selected by an untrusted SI_KERNEL code. The call retains
 its existing kernel-fatal-delivery role and direct-exit fallback. No allocator

@@ -107,7 +107,12 @@ struct RiscvHwprobe {
 
 static RISCV_HWPROBE: RiscvHwprobe = RiscvHwprobe::new();
 
-/// Initializes the RISC-V hwprobe CPU snapshot from the firmware device tree.
+/// Initializes hwprobe and per-CPU identity snapshots from the firmware tree.
+///
+/// The primary CPU calls this after CPU-map initialization, before scheduling
+/// and AP startup. No process or locks are needed; do not call from IRQ context
+/// or race another initialization source. Firmware nodes can identify unstarted
+/// CPUs; missing nodes leave their cpuinfo slots absent.
 pub fn init_hwprobe_from_fdt(fdt: &of::LinuxFdt<'_>) {
     RISCV_HWPROBE.init_from_fdt(fdt);
 }
@@ -179,6 +184,7 @@ impl RiscvHwprobe {
             }
 
             cpus[index] = parse_cpu_node(node);
+            super::cpuinfo::init_cpu_info(logical_cpu_id, node);
         }
 
         self.cpus.call_once(|| cpus);

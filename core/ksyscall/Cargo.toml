@@ -37,6 +37,7 @@ kfutex.workspace = true
 kbuild_config = { workspace = true }
 kcred.workspace = true
 kerrno.workspace = true
+kio.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
 ktime.workspace = true
@@ -76,7 +77,7 @@ num_enum = { version = "0.7", default-features = false }
 unittest.workspace = true
 unittest_support.workspace = true
 
-[target.'cfg(target_arch = "riscv64")'.dependencies]
+[target.'cfg(any(target_arch = "riscv64", target_arch = "x86_64"))'.dependencies]
 kcpu.workspace = true
 
 [lints]

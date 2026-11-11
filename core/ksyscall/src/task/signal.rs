@@ -260,10 +260,50 @@ pub(crate) fn sys_rt_tgsigqueueinfo(
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigreturn.2.html>.
 pub(crate) fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Err(error) = restore_x86_signal(uctx) {
+            // Like Linux's badframe path, malformed user state raises SIGSEGV
+            // instead of reaching XRSTOR/IRET with unchecked hardware operands.
+            posix_process::raise_current_thread_fault(SignalInfo::new_kernel(Signo::SIGSEGV))?;
+            return Err(error);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
     kprocess::current_user_thread()
         .signal_manager()
         .restore(uctx);
     Ok(uctx.retval() as isize)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn restore_x86_signal(uctx: &mut UserContext) -> KResult<()> {
+    let uc = UserConstPtr::<ksignal::arch::UContext>::from(uctx.sp()).read_vm()?;
+    uc.mcontext.validate()?;
+    let fp_addr = uc.mcontext.fpregs;
+    let fp = if fp_addr == 0 {
+        kcpu::ExtendedState::default()
+    } else {
+        let mut bytes = [0u8; kcpu::SIGNAL_FP_BYTES];
+        let prefix = UserConstPtr::<[u8; 512]>::from(fp_addr).read_vm()?;
+        bytes[..512].copy_from_slice(&prefix);
+        let length = kcpu::signal_fp_length(&prefix)?;
+        if length > 512 {
+            // The length was bounded by kcpu before copying any extension.
+            use kio::Read;
+            let address = fp_addr.checked_add(512).ok_or(KError::BadAddress)?;
+            osvm::VmBytes::new(address as *const u8, length - 512)
+                .read_exact(&mut bytes[512..length])?;
+        }
+        kcpu::ExtendedState::from_signal_bytes(&bytes[..length])?
+    };
+    // Publish only fully copied and validated state; no user references survive.
+    uc.mcontext.restore(uctx);
+    kprocess::current_user_thread()
+        .signal_manager()
+        .set_blocked(uc.sigmask);
+    kcpu::userspace::restore_fp_state(&fp);
+    Ok(())
 }
 
 /// Waits for a signal from a specified set with an optional timeout.

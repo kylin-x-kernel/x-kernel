@@ -7,8 +7,12 @@
 /// Initializes trap handling on the current CPU.
 ///
 /// In detail, it initializes the exception vector on LoongArch64 platforms.
+/// Also publishes CPU identity and usable features after per-CPU publication,
+/// before scheduling/IRQ delivery. Must not migrate or sleep; no process or
+/// caller-held locks are required.
 pub fn init_trap() {
     crate::userspace_common::init_exception_table();
+    crate::cpuinfo::init_current_cpu_info(super::CpuInfo::detect);
     // SAFETY: `exception_entry_base` is defined in `excp.S`.
     // `karch::init_trap_state` sets the exception entry base CSR.
     unsafe {

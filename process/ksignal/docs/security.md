@@ -197,7 +197,7 @@ treats payload fields as raw bits and never dereferences pointer-like values
 | ID | Threat | Severity | Trigger | Response |
 |---|---|---|---|---|
 | T-01 | Handler frame overwrite of unmapped/guard user stack | Medium | `SA_ONSTACK` with invalid `sigaltstack`, or stack exhaustion at dispatch | Frame write uses checked `write_vm`; failure is converted to `CoreDump` fatal exit instead of a kernel fault |
-| T-02 | `sigreturn` on a corrupted/forged frame | Medium | user changes `sp` or overwrites frame memory, then calls `rt_sigreturn` | Context restore treats frame contents as data; register/pc/sp are re-entered through the normal user-return path so a bad frame cannot corrupt kernel state. `saved` is user-writable, so on x86_64 the restored `MXCSR` is masked against the trusted feature mask before `FXRSTOR` (avoids kernel `#GP`); `sigmask` is range-limited by `SignalSet`. Residual risk: user can forge its own register/FP state, which is also true on Linux |
+| T-02 | `sigreturn` on a forged frame | High | user alters pointers, registers or FP header | x86_64 copies and validates the complete supported state before commit; invalid frames cause SIGSEGV. MXCSR is sanitized, privileged RFLAGS are preserved, and unblockable signals are removed from the mask. Other architectures retain their existing restore path |
 | T-03 | Invalid signal number from user input reaching decode | Medium | invalid or truncating raw numeric argument, or unvalidated imported `siginfo` | `ksyscall` uses `Signo::from_raw` before producing signal payloads; primitive negative or out-of-width values cannot wrap into a valid signal. Zero probes stay separate. `SignalInfo::signo` still documents and relies on its existing validated-payload caller contract |
 | T-04 | Stale POSIX timer signal delivered after timer rearm | Low | timer signal dequeued after `timer_settime` changed the timer | typed timer receipts carry sequence authority to the unlocked kprocess validator; ordinary ABI payloads cannot invoke it |
 | T-05 | Signal flood exhausting kernel memory | Medium | unbounded `rt_sigqueueinfo`/timer expirations | Ordinary standard sends coalesce while any record is pending; each prepared timer can hold one record even for a standard signo. Queued timer storage is reserved at creation. Ordinary realtime growth remains unbounded; Linux resource-limit parity is not claimed |
@@ -288,12 +288,11 @@ data is processed or logged.
 - `SignalOsAction::Stop`/`Continue` are reported, but job-control stop state
   is approximated by the posix runtime (documented there: stop currently
   exits with code 1).
-- FPU/vector state is not carried in the ABI `fpregs` (x86_64 zeroes
-  `fpregs_mem`); restoration goes through `UserRestorableContext`, which on
-  x86_64 holds an `FXSAVE` snapshot. Because that snapshot is read back from
-  the user-writable frame, `restore` clears unsupported `MXCSR` bits against a
-  cached trusted feature mask before `FXRSTOR`.
-- `restore` trusts a mapped frame at `sp`; a corrupted frame produces a user
+- x86_64 exposes editable Linux `fpregs`, including YMM state only when enabled.
+  `ksyscall` copies the frame and checks user registers; `kcpu` bounds and
+  validates the copied xstate payload before XRSTOR. Invalid frames raise
+  SIGSEGV. MXCSR retains the existing trusted-mask sanitization policy.
+- On other architectures `restore` still trusts a mapped frame at `sp`; a corrupted frame produces a user
   fault after return rather than a kernel-side checked error. The restored
   mask is user-controlled, so it goes through the same blocked-mask write entry
   as `rt_sigprocmask`, which drops `SIGKILL`/`SIGSTOP` (Linux `do_sigreturn` ->

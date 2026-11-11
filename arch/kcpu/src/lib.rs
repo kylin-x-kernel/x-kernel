@@ -48,7 +48,9 @@ pub use active_exception_context::{
     suspend_active_exception_context, with_active_exception_context,
 };
 
+mod cpuinfo;
 mod userspace_common;
+pub use cpuinfo::cpu_info;
 
 unittest::path_mod_test!(tests_current_task, "../ut-tests/lib.rs");
 

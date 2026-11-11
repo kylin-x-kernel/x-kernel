@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 use unittest::def_test;
+use x86_64::registers::mxcsr::MxCsr;
 
 use super::*;
 
@@ -62,14 +63,16 @@ fn test_user_restorable_context_round_trips_fp_state() {
 #[def_test]
 fn test_restore_masks_unsupported_mxcsr_bits() {
     let mut ctx = UserContext::new(0x1004, VirtAddr::from_usize(0x2000), 7);
+    let (mut bytes, len) = ExtendedState::capture().signal_bytes();
+    bytes[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
     let mut saved = ctx.save_user_restorable();
-    saved.fp.sse_mxcsr = u32::MAX;
+    saved.fp = ExtendedState::from_signal_bytes(&bytes[..len]).unwrap();
 
     // Must not raise #GP in kernel mode.
     ctx.restore_user_restorable(saved);
 
     assert_eq!(
-        x86_64::registers::mxcsr::read().bits() & !mxcsr_feature_mask(),
+        x86_64::registers::mxcsr::read().bits() & !super::super::xstate::mxcsr_mask(),
         0,
         "unsupported MXCSR bits must be cleared before FXRSTOR"
     );

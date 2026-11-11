@@ -373,6 +373,7 @@ syn = { version = "2.0", features = ["full"] }
 virtio-drivers = { version = "=0.13.5", default-features = false, package = "kvirtiodrivers" }
 # Pinned: 0.15.5's `nightly`->`step_trait` (pulled in by `x2apic`) needs Step methods absent from rustc 1.95.0; bump after nightly-2026-07-10+.
 x86_64 = { version = "=0.15.4", features = ["instructions"] }
+raw-cpuid = { version = "11.6", default-features = false }
 ktracepoint = "0.5"
 static-keys = "0.8"
 weak-map = "0.1.1"

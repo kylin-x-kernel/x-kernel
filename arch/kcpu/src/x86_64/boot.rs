@@ -5,7 +5,9 @@
 /// Initializes trap handling on the current CPU.
 ///
 /// In detail, it initializes the GDT, IDT on x86_64 platforms and relevant
-/// model-specific registers to configure the handler for `syscall` instruction.
+/// model-specific registers to configure the handler for `syscall` instruction,
+/// then publishes the current CPU identity and usable capability snapshot.
+/// Call during CPU bring-up before scheduling; execution must not migrate.
 ///
 /// # Notes
 /// Before calling this function, the per-CPU slot area must have been published
@@ -16,4 +18,6 @@ pub fn init_trap() {
     super::gdt::init();
     super::idt::init();
     super::userspace::init_syscall();
+    super::xstate::init();
+    super::cpuinfo::init_cpu_info();
 }

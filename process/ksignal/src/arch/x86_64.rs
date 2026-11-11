@@ -4,6 +4,9 @@
 
 //! x86_64 signal frame layout and trampoline.
 use kcpu::userspace::UserContext;
+use kerrno::{KError, KResult};
+use osvm::VirtMutPtr;
+use posix_types::UserRead;
 
 use crate::{SignalSet, SignalStack};
 
@@ -25,7 +28,7 @@ signal_trampoline:
 );
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 /// Machine context in the Linux x86_64 `mcontext_t` ABI.
 ///
 /// The register array is kept private so callers use
@@ -34,7 +37,8 @@ pub struct MContext {
     // Match Linux x86_64/musl `mcontext_t` so user-space signal handlers can
     // read and edit `uc_mcontext.gregs[...]` (notably `MC_PC` for cancellation).
     gregs: [i64; 23],
-    fpregs: usize,
+    /// User address of a legacy FXSAVE or Linux XSAVE signal payload.
+    pub fpregs: usize,
     _reserved1: [u64; 8],
 }
 
@@ -106,7 +110,19 @@ impl MContext {
         }
     }
 
-    /// Restore a user context from this machine context.
+    /// Checks the supported 64-bit user return ABI before changing registers.
+    pub fn validate(&self) -> KResult<()> {
+        let canonical = |value: i64| value >= 0 && (value as u64) < (1u64 << 47);
+        if !canonical(self.gregs[Self::REG_RIP])
+            || !canonical(self.gregs[Self::REG_RSP])
+            || self.gregs[Self::REG_CSGSFS] & 0xffff != UserContext::USER_CODE_SELECTOR as i64
+        {
+            return Err(KError::InvalidInput);
+        }
+        Ok(())
+    }
+
+    /// Restore a validated user context from this machine context.
     pub fn restore(&self, uctx: &mut UserContext) {
         uctx.r8 = self.gregs[Self::REG_R8] as _;
         uctx.r9 = self.gregs[Self::REG_R9] as _;
@@ -125,8 +141,13 @@ impl MContext {
         uctx.rcx = self.gregs[Self::REG_RCX] as _;
         uctx.rsp = self.gregs[Self::REG_RSP] as _;
         uctx.rip = self.gregs[Self::REG_RIP] as _;
-        uctx.rflags = self.gregs[Self::REG_EFL] as _;
-        uctx.cs = (self.gregs[Self::REG_CSGSFS] as u64 & 0xffff) as _;
+        // Linux FIX_EFLAGS: only arithmetic/status/debug user flags may change.
+        const USER_FLAGS: u64 = 0x50dd5;
+        uctx.rflags = (uctx.rflags & !USER_FLAGS) | (self.gregs[Self::REG_EFL] as u64 & USER_FLAGS);
+        // This kernel supports only 64-bit user code, never kernel selectors.
+        uctx.cs = UserContext::USER_CODE_SELECTOR;
+        uctx.ss = UserContext::USER_DATA_SELECTOR;
+        uctx.orig_rax = u64::MAX;
         uctx.error_code = self.gregs[Self::REG_ERR] as _;
         uctx.vector = self.gregs[Self::REG_TRAPNO] as _;
     }
@@ -134,21 +155,18 @@ impl MContext {
 
 /// User-visible `ucontext_t` frame for x86_64 signal handlers (musl layout).
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct UContext {
-    /// `uc_flags`; written as zero by the kernel.
+    /// `uc_flags`; UC_FP_XSTATE is set when the FP pointer names XSAVE state.
     pub flags: usize,
     /// `uc_link`; not used by signal frames and written as zero.
     pub link: usize,
     /// `uc_stack` snapshot of the alternate stack state.
-    pub stack: SignalStack,
+    pub stack: SignalStackAbi,
     /// `uc_mcontext` general-purpose register snapshot.
     pub mcontext: MContext,
     /// `uc_sigmask` restored into the thread blocked set at `sigreturn`.
     pub sigmask: SignalSet,
-    /// Floating-point state save area; currently zeroed because FPU state is
-    /// restored through `UserRestorableContext`, not this frame.
-    pub fpregs_mem: [u64; 64],
 }
 
 impl UContext {
@@ -157,10 +175,81 @@ impl UContext {
         Self {
             flags: 0,
             link: 0,
-            stack: SignalStack::default(),
+            stack: SignalStackAbi::from_stack(&SignalStack::default(), 0),
             mcontext: MContext::new(uctx),
             sigmask,
-            fpregs_mem: [0; 64],
         }
     }
 }
+
+/// Linux x86_64 stack_t layout, including explicit initialized padding.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SignalStackAbi {
+    sp: usize,
+    flags: u32,
+    padding: u32,
+    size: usize,
+}
+
+impl SignalStackAbi {
+    fn from_stack(stack: &SignalStack, sp: usize) -> Self {
+        Self {
+            sp: stack.sp,
+            flags: stack.flags_for_sp(sp),
+            padding: 0,
+            size: stack.size,
+        }
+    }
+}
+
+// SAFETY: repr(C) UContext consists only of integer fields, integer arrays,
+// and SignalSet's transparent u64. Every copied bit pattern is representable;
+// user registers and xstate are validated separately before hardware use.
+unsafe impl UserRead for UContext {}
+
+const _: () = assert!(core::mem::size_of::<UContext>() == 304);
+const _: () = assert!(core::mem::offset_of!(UContext, mcontext) == 40);
+
+/// Writes the Linux x86_64 rt frame at the signal-delivery user boundary.
+/// Each region is copied separately, so alignment gaps never expose kernel
+/// stack padding. The FP pointer is 64-byte aligned; handler RSP is 8 mod 16.
+pub(crate) fn setup_signal_frame(
+    uctx: &mut UserContext,
+    mask: SignalSet,
+    sig: &crate::SignalInfo,
+    stack: &SignalStack,
+    sp: usize,
+    restorer: usize,
+) -> KResult<(usize, usize)> {
+    let (fp, fp_len) = kcpu::ExtendedState::capture().signal_bytes();
+    let fp_addr = sp.checked_sub(128 + fp_len).ok_or(KError::BadAddress)? & !63;
+    let info_addr = fp_addr
+        .checked_sub(core::mem::size_of::<crate::SignalInfo>())
+        .ok_or(KError::BadAddress)?;
+    let uc_addr = info_addr
+        .checked_sub(core::mem::size_of::<UContext>())
+        .ok_or(KError::BadAddress)?
+        & !(SIGNAL_FRAME_ALIGN - 1);
+    let handler_sp = uc_addr.checked_sub(8).ok_or(KError::BadAddress)?;
+    if !stack.disabled()
+        && (stack.contains_sp(uctx.sp()) || sp == stack.sp.saturating_add(stack.size))
+        && handler_sp < stack.sp
+    {
+        return Err(KError::BadAddress);
+    }
+    let mut uc = UContext::new(uctx, mask);
+    uc.stack = SignalStackAbi::from_stack(stack, uctx.sp());
+    uc.flags = usize::from(kcpu::enabled_xstate_mask() != 0);
+    uc.mcontext.fpregs = fp_addr;
+    osvm::write_vm_mem(fp_addr as *mut u8, &fp[..fp_len])?;
+    (info_addr as *mut crate::SignalInfo).write_vm(sig.clone())?;
+    (uc_addr as *mut UContext).write_vm(uc)?;
+    (handler_sp as *mut usize).write_vm(restorer)?;
+    uctx.set_sp(handler_sp);
+    // A handler gets clean FP state; the interrupted state lives in its frame.
+    kcpu::userspace::reset_fp_state();
+    Ok((info_addr, uc_addr))
+}
+
+unittest::path_mod_test!(tests, "../../ut-tests/x86_frame.rs");

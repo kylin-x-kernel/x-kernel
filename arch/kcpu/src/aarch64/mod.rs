@@ -4,7 +4,9 @@
 
 //! AArch64 CPU context, trap, and userspace support.
 
+mod cpuinfo;
 mod ctx;
+pub use cpuinfo::{CpuFeature, CpuInfo};
 mod current;
 pub use current::{current_task_ptr, set_current_task_ptr};
 
@@ -36,9 +38,12 @@ fn enable_user_timer_access() {
 /// Initializes trap handling on the current CPU.
 ///
 /// In detail, it initializes the exception vector, and sets `TTBR0_EL1` to 0 to
-/// block low address access.
+/// block low address access, and publishes CPU identity and usable features.
+/// Requires a published per-CPU area and runs before scheduling/IRQ delivery;
+/// execution must not migrate or sleep. No current process or locks are needed.
 pub fn init_trap() {
     crate::userspace_common::init_exception_table();
+    crate::cpuinfo::init_current_cpu_info(CpuInfo::detect);
     enable_user_timer_access();
     unsafe extern "C" {
         fn exception_vector_base();

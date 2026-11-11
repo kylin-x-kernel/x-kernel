@@ -1,5 +1,21 @@
 # posix-process — Design
 
+## Synchronous signal-frame faults
+
+`raise_current_thread_fault` queues kernel-generated faults on the current
+thread's user-return path. No sibling can consume the notification. If blocked
+or ignored, it terminates the group with signal status instead of resuming an
+invalid sigreturn frame. Existing process-directed fatal delivery stays separate.
+
+## x86_64 child FP inheritance
+
+`prepare_user_entry` captures the creator's current x87/SSE/YMM state before
+publication and retains it in the prepared entry closure. On first execution,
+the child installs it before the user loop; subsequent task switches use kcpu's
+eager save/restore. The snapshot carries the child's already-selected FS/GS
+bases, including clone TLS setup. Exec resets FP state through UserContext.
+
+
 Fatal trap delivery explicitly constructs a kernel_fallback notification before
 calling the fallible signal manager. NOWAIT owner exhaustion may lose detailed
 siginfo but must preserve the pending bit; it is not treated as an ordinary

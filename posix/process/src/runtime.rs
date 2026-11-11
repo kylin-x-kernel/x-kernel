@@ -37,7 +37,15 @@ pub fn prepare_user_entry(
     set_child_tid: usize,
     dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
 ) -> KResult<PreparedTaskEntry> {
+    #[cfg(target_arch = "x86_64")]
+    let inherited = uctx.save_user_restorable();
     PreparedTaskEntry::new(move || {
+        #[cfg(target_arch = "x86_64")]
+        let uctx = {
+            let mut uctx = uctx;
+            uctx.restore_user_restorable(inherited);
+            uctx
+        };
         run_user_thread_loop(uctx, set_child_tid, dispatch_syscall);
     })
 }
@@ -618,6 +626,23 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
         do_exit_from_signal(signo as i32);
     }
 
+    Ok(())
+}
+
+/// Queues a synchronous fault for the current thread on its user-return path.
+///
+/// Unlike process-directed delivery, another thread cannot consume this fault.
+/// If the fault is blocked or ignored, terminates the group with signal status.
+/// The caller must be the current user task, outside interrupt/locked context,
+/// and must pass kernel-generated fault information, never supplied siginfo.
+pub fn raise_current_thread_fault(sig: SignalInfo) -> KResult<()> {
+    let signo = sig.signo();
+    if !current_user_thread()
+        .signal_manager()
+        .send_signal(ksignal::SignalNotification::kernel_fallback(sig))?
+    {
+        do_exit_from_signal(128 + signo as i32);
+    }
     Ok(())
 }
 
