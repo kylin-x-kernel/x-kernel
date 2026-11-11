@@ -58,6 +58,8 @@ pub(crate) struct NeighborUpdatePolicy {
 /// reports the matched FIB entry rather than the constructed output type.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Ipv4OutputRoute {
+    /// Effective destination after resolving an unspecified target.
+    pub(crate) destination: Ipv4Address,
     pub(crate) fib_entry: Option<Rule>,
     pub(crate) table: u8,
     pub(crate) route_type: u8,
@@ -208,7 +210,7 @@ impl Router {
         }
     }
 
-    /// Resolves an IPv4 output route for a non-dump `RTM_GETROUTE` query.
+    /// Resolves the effective IPv4 destination, source, and output route.
     ///
     /// This follows Linux's output lookup order: validate an explicit source,
     /// apply the output-interface shortcuts, handle the zero-destination
@@ -284,6 +286,7 @@ impl Router {
 
         let route = if zero_destination {
             Ipv4OutputRoute {
+                destination: lookup_dst,
                 fib_entry: None,
                 table: 0,
                 route_type: ROUTE_TYPE_LOCAL,
@@ -295,6 +298,7 @@ impl Router {
             self.output_route_from_fib(*rule, dst, flow_source)
         } else if let Some(output) = output_oif {
             Ipv4OutputRoute {
+                destination: dst,
                 fib_entry: None,
                 table: 0,
                 route_type: ROUTE_TYPE_UNICAST,
@@ -330,6 +334,7 @@ impl Router {
                 .ipv4_address_owner(source)
                 .ok_or(LinuxError::ENETUNREACH)?;
             return Ok(Some(Ipv4OutputRoute {
+                destination: dst,
                 fib_entry: None,
                 table: 0,
                 route_type: 0,
@@ -348,6 +353,7 @@ impl Router {
                 })
                 .unwrap_or(Ipv4Address::UNSPECIFIED);
             return Ok(Some(Ipv4OutputRoute {
+                destination: dst,
                 fib_entry: None,
                 table: 0,
                 route_type: 0,
@@ -389,6 +395,7 @@ impl Router {
             });
         }
         Ipv4OutputRoute {
+            destination: dst,
             fib_entry: Some(rule),
             table,
             route_type,

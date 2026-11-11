@@ -5,7 +5,7 @@
 use alloc::{sync::Arc, vec};
 
 use ::core::net::{SocketAddr, SocketAddrV4};
-use unittest::def_test;
+use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 use crate::ip::Ipv4Address;
@@ -146,10 +146,14 @@ fn connected_pcb_takes_lookup_precedence() {
     register_udp_pcb(bound);
 
     let connected_state = UdpSocketState::new();
-    connected_state.set_local_endpoint(Some(local));
-    connected_state.set_peer_endpoint(Some((remote, local.addr)));
+    let wildcard = endpoint(Ipv4Address::UNSPECIFIED, local.port);
+    connected_state.set_local_endpoint(Some(wildcard));
     let connected = UdpPcb::new(connected_state);
     register_udp_pcb(connected.clone());
+    connected
+        .state
+        .set_peer_endpoint(Some((remote, local.addr)));
+    assert_eq!(connected.state.local_endpoint(), Some(local));
 
     let selected = lookup_udp_pcb(
         socket_addr(Ipv4Address::new(10, 0, 0, 2), 8080),
@@ -158,6 +162,22 @@ fn connected_pcb_takes_lookup_precedence() {
     .expect("connected PCB should match");
 
     assert!(Arc::ptr_eq(&selected, &connected));
+    assert!(
+        lookup_udp_pcb(
+            socket_addr(Ipv4Address::new(10, 0, 0, 3), local.port),
+            socket_addr(Ipv4Address::new(192, 0, 2, 1), remote.port),
+        )
+        .is_none()
+    );
+    connected.state.set_peer_endpoint(None);
+    assert_eq!(connected.state.local_endpoint(), Some(wildcard));
+    assert!(
+        lookup_udp_pcb(
+            socket_addr(Ipv4Address::new(10, 0, 0, 3), local.port),
+            socket_addr(Ipv4Address::new(192, 0, 2, 1), remote.port),
+        )
+        .is_some()
+    );
     clear_registry();
 }
 

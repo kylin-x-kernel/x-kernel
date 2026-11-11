@@ -15,7 +15,11 @@ use kerrno::{KResult, k_bail};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
-use super::{output::ipv4_to_core, pcb::UdpPcb, state::UdpSocketState};
+use super::{
+    output::ipv4_to_core,
+    pcb::UdpPcb,
+    state::{UdpSocketState, effective_local_endpoint},
+};
 use crate::ip::{IpAddress, IpEndpoint, IpListenEndpoint};
 
 const UDP_REGISTRY_BUCKETS: usize = 256;
@@ -281,7 +285,9 @@ impl UdpPcbBucket {
         let mut selected = None;
         let mut selected_score = 0;
         for record in records {
-            let local_endpoint = record.local_endpoint;
+            // Use one connection snapshot for both local and remote matching.
+            let peer = record.pcb.state.peer_endpoint();
+            let local_endpoint = effective_local_endpoint(record.local_endpoint, peer);
             if !local_endpoint_matches(local_endpoint, local_addr) {
                 continue;
             }
@@ -289,7 +295,7 @@ impl UdpPcbBucket {
                 continue;
             }
 
-            let Some(score) = delivery_score(&record.pcb.state, local_endpoint, remote_addr) else {
+            let Some(score) = delivery_score(peer, local_endpoint, remote_addr) else {
                 continue;
             };
             if score > selected_score {
@@ -306,7 +312,10 @@ impl UdpPcbBucket {
         };
 
         records.iter().any(|record| {
-            let existing_endpoint = listen_endpoint(record.local_endpoint);
+            let existing_endpoint = listen_endpoint(effective_local_endpoint(
+                record.local_endpoint,
+                record.pcb.state.peer_endpoint(),
+            ));
             udp_bind_entries_conflict(
                 existing_endpoint,
                 record.reuse_address,
@@ -458,12 +467,12 @@ fn bucket_index_for_port(port: u16) -> usize {
 }
 
 fn delivery_score(
-    state: &UdpSocketState,
+    peer: Option<(IpEndpoint, IpAddress)>,
     local_endpoint: IpEndpoint,
     remote_addr: SocketAddr,
 ) -> Option<u8> {
     let is_specific_local = !local_endpoint.addr.is_unspecified();
-    match state.peer_endpoint() {
+    match peer {
         Some((peer, _)) if endpoint_matches_addr(peer, remote_addr) => {
             Some(if is_specific_local { 4 } else { 3 })
         }

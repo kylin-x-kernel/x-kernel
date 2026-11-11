@@ -603,8 +603,45 @@ impl Service {
             .map(ip::to_smoltcp_ip_address)
     }
 
+    #[cfg(unittest)]
     pub(crate) fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
         self.router.lock().output_route_source(dst_addr, 0)
+    }
+
+    /// Resolves the source and effective destination before transport state or
+    /// packet checksums are committed. Non-IPv4 traffic retains its source lookup.
+    pub(crate) fn resolve_ip_output(
+        &self,
+        dst: IpAddress,
+        src: Option<IpAddress>,
+        oif: i32,
+    ) -> KResult<(IpAddress, IpAddress)> {
+        let router = self.router.lock();
+        match dst {
+            IpAddress::Ipv4(dst) => {
+                let src = match src {
+                    Some(IpAddress::Ipv4(src)) => Some(src),
+                    Some(_) => return Err(LinuxError::EAFNOSUPPORT.into()),
+                    None => None,
+                };
+                let route = router.lookup_ipv4_output(
+                    dst,
+                    src,
+                    NetDeviceId::from_optional_ifindex(oif)?,
+                )?;
+                Ok((
+                    IpAddress::Ipv4(route.source.ok_or(LinuxError::ENETUNREACH)?),
+                    IpAddress::Ipv4(route.destination),
+                ))
+            }
+            _ => {
+                let source = match src {
+                    Some(source) => source,
+                    None => router.output_route_source(&dst, oif)?,
+                };
+                Ok((source, dst))
+            }
+        }
     }
 
     pub(crate) fn lookup_ipv4_output(
@@ -632,15 +669,28 @@ impl Service {
         oif: i32,
         allow_broadcast: bool,
         packet: &mut Option<Vec<u8>>,
-        prepare: impl FnOnce(&mut [u8], IpAddress, Option<usize>) -> KResult,
+        prepare: impl FnOnce(&mut [u8], IpAddress, IpAddress, Option<usize>) -> KResult,
     ) -> KResult {
         let mut router = self.router.lock();
+        let IpAddress::Ipv4(destination) = *dst_addr else {
+            return Err(LinuxError::EAFNOSUPPORT.into());
+        };
+        let source = match bound_src {
+            Some(IpAddress::Ipv4(source)) => Some(source),
+            Some(_) => return Err(LinuxError::EAFNOSUPPORT.into()),
+            None => None,
+        };
+        let route = router.lookup_ipv4_output(
+            destination,
+            source,
+            NetDeviceId::from_optional_ifindex(oif)?,
+        )?;
+        let dst_addr = &IpAddress::Ipv4(route.destination);
         if router.ipv4_dest_requires_broadcast(dst_addr) && !allow_broadcast {
             return Err(KError::from(LinuxError::EACCES));
         }
         let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
-        let route_source = router.output_route_source(dst_addr, oif)?;
-        let source_addr = bound_src.unwrap_or(route_source);
+        let source_addr = IpAddress::Ipv4(route.source.ok_or(LinuxError::ENETUNREACH)?);
         let is_loopback = router.is_loopback_destination(dst_addr);
 
         if !is_loopback {
@@ -658,6 +708,7 @@ impl Service {
         prepare(
             packet.as_deref_mut().ok_or(KError::InvalidInput)?,
             source_addr,
+            *dst_addr,
             route_mtu,
         )?;
         let packet = packet.take().ok_or(KError::InvalidInput)?;

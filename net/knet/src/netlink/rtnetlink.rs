@@ -791,11 +791,7 @@ fn get_route_ipv4(
     }
 
     let dst = attrs.dst.unwrap_or(Ipv4Address::UNSPECIFIED);
-    let oif = if attrs.oif == 0 {
-        None
-    } else {
-        Some(NetDeviceId::new(attrs.oif as i32).ok_or(LinuxError::ENODEV)?)
-    };
+    let oif = NetDeviceId::from_optional_ifindex(attrs.oif as i32)?;
     let route = SERVICE.lookup_ipv4_output(dst, attrs.src, oif)?;
 
     let table = if request.flags & wire_route::FLAG_LOOKUP_TABLE != 0 {

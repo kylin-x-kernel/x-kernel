@@ -686,6 +686,14 @@ Accepted children start in `Connected`; `accept` leaves the listening socket in 
 
 These setters assign the result from their arguments and current endpoint fields. The lifecycle records socket setup and readiness, independently of the PCB's registry membership.
 
+The stored local endpoint remains the original binding. While connected,
+`local_endpoint()` combines its port with the source address stored alongside
+the peer. Address queries and send-source selection use that effective endpoint.
+The registry derives the same local address from one peer/source snapshot for
+receive matching and bind-conflict checks, without taking a sleepable state lock
+in `NetRx`. Clearing the peer restores the original explicit binding; automatic
+bindings are removed by disconnect.
+
 ### Unix Seqpacket Transport
 
 `SOCK_SEQPACKET` is connection-oriented like a stream socket and
@@ -1337,6 +1345,14 @@ Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/servic
 ### TX Routing
 
 UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue after fragmentation and capacity checks. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
+
+TCP connection setup and UDP connect/send resolve IPv4 endpoints through the
+same output lookup used by route queries. Its result carries the effective
+destination as well as the source and output device. A zero destination becomes
+the selected local source, falling back to the loopback address when no source
+was specified or selected. This happens before TCP peer state or UDP/IP checksums
+are created. Source and interface constraints are validated during lookup;
+wildcard bind addresses retain their listening meaning.
 
 **Algorithm 3. TX Routing**
 

@@ -390,6 +390,18 @@ fn local_address_output_survives_owner_link_down_without_oif() {
         label: None,
     };
     router.add_ipv4_addr(owner, entry).unwrap();
+    for (source, output, expected) in [
+        (None, None, Ipv4Address::LOOPBACK),
+        (Some(entry.addr.address()), None, entry.addr.address()),
+        (None, Some(owner), entry.addr.address()),
+    ] {
+        let route = router
+            .lookup_ipv4_output(Ipv4Address::UNSPECIFIED, source, output)
+            .unwrap();
+        assert_eq!(route.destination, expected);
+        assert_eq!(route.source, Some(expected));
+        assert_eq!(route.oif, loopback);
+    }
     router
         .devices
         .get_mut_by_id(owner)

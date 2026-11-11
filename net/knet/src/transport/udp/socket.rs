@@ -204,26 +204,25 @@ impl UdpSocket {
                     self.state().bound_dev_if(),
                     allow_broadcast,
                     &mut packet,
-                    |packet, source_addr, route_mtu| {
+                    |packet, source_addr, destination, route_mtu| {
                         let mtu_discovery = *self.pcb.mtu_discovery.read();
                         let dont_fragment =
                             should_set_dont_fragment(mtu_discovery, packet_len, route_mtu);
-                        self.write_datagram(packet, remote_endpoint, source_addr, dont_fragment)
+                        self.write_datagram(
+                            packet,
+                            IpEndpoint {
+                                addr: destination,
+                                ..remote_endpoint
+                            },
+                            source_addr,
+                            dont_fragment,
+                        )
                     },
                 )?;
                 network_poller().notify(PollReason::Tx);
                 network_poller().assist_once();
                 Ok(payload_len)
             })
-    }
-
-    fn source_addr_for(&self, remote_addr: IpAddress) -> KResult<IpAddress> {
-        if let Some(local) = self.state().local_endpoint()
-            && !local.addr.is_unspecified()
-        {
-            return Ok(local.addr);
-        }
-        SERVICE.get_source_address(&remote_addr)
     }
 
     fn write_datagram(
@@ -436,9 +435,15 @@ impl SocketOps for UdpSocket {
             self.bind_ephemeral()?;
         }
 
-        let remote_endpoint = IpEndpoint::from(remote_addr);
+        let mut remote_endpoint = IpEndpoint::from(remote_addr);
         validate_remote_endpoint(remote_endpoint)?;
-        let source_addr = self.source_addr_for(remote_endpoint.addr)?;
+        let source = self
+            .state()
+            .local_endpoint()
+            .and_then(|local| (!local.addr.is_unspecified()).then_some(local.addr));
+        let (source_addr, destination) =
+            SERVICE.resolve_ip_output(remote_endpoint.addr, source, self.state().bound_dev_if())?;
+        remote_endpoint.addr = destination;
         self.state()
             .set_peer_endpoint(Some((remote_endpoint, source_addr)));
 
@@ -523,7 +528,7 @@ fn validate_remote_endpoint(endpoint: IpEndpoint) -> KResult {
     if !matches!(endpoint.addr, IpAddress::Ipv4(_)) {
         return Err(KError::from(LinuxError::EAFNOSUPPORT));
     }
-    if endpoint.port == 0 || endpoint.addr.is_unspecified() {
+    if endpoint.port == 0 {
         k_bail!(InvalidInput, "invalid address");
     }
     Ok(())

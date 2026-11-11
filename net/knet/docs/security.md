@@ -718,6 +718,14 @@ Reassembly state is limited to 64 queues, a 4 MiB high watermark, a 3 MiB low wa
 
 ### 17. UDP Receive Boundary
 
+Connected UDP lookup applies the source address selected by connect as the local
+receive address, using the same peer/source snapshot for both sides of the tuple.
+Address queries and transmission use that effective source while retaining the
+original bind for disconnect. IPv4 zero destinations are resolved to a local
+address before transport peer state or packet checksums are published; they are
+not sent unchanged through a default route. Explicit source and output-device
+constraints are checked by the shared IPv4 output lookup.
+
 The parser validates UDP length, checksum, and payload boundaries. Each PCB receive queue holds at most 1024 datagrams.
 PCB creation reserves pointer-sized `PreparedUdpPacket` slots for this limit.
 The loopback send path must parse the datagram before disabling BH and store the result in the control metadata of the existing `PacketBuf`.

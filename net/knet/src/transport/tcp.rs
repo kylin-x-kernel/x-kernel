@@ -577,14 +577,15 @@ impl SocketOps for TcpSocket {
                 }
             })?
             .transit(State::Connecting, || {
-                // TODO: check remote addr unreachable
-                // let (bound_endpoint, remote_endpoint) = self.get_endpoint_pair(remote_addr)?;
-                let remote_endpoint = IpEndpoint::from(remote_addr);
+                let mut remote_endpoint = IpEndpoint::from(remote_addr);
                 let mut bound_endpoint = *self.bound_endpoint.lock();
-                if bound_endpoint.addr.is_none() {
-                    bound_endpoint.addr =
-                        Some(SERVICE.get_smoltcp_source_address(&remote_endpoint.addr)?);
-                }
+                let (source, destination) = SERVICE.resolve_ip_output(
+                    crate::ip::from_smoltcp_ip_address(remote_endpoint.addr),
+                    bound_endpoint.addr.map(crate::ip::from_smoltcp_ip_address),
+                    self.general.bound_dev_if(),
+                )?;
+                remote_endpoint.addr = crate::ip::to_smoltcp_ip_address(destination);
+                bound_endpoint.addr = Some(crate::ip::to_smoltcp_ip_address(source));
                 if bound_endpoint.port == 0 {
                     let local_addr = bound_endpoint
                         .addr
@@ -608,8 +609,7 @@ impl SocketOps for TcpSocket {
                             smol::ConnectError::Unaddressable => {
                                 k_err_type!(ConnectionRefused, "unaddressable")
                             }
-                        })?;
-                    Ok::<(), KError>(())
+                        })
                 };
                 if let Err(err) = result {
                     if should_register {

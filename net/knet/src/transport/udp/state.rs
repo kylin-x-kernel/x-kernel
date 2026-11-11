@@ -26,6 +26,20 @@ use crate::{
 /// Internet endpoint used by the current transport backend boundary.
 pub(crate) type InetEndpoint = IpEndpoint;
 
+/// Keeps the bind address intact while a connection selects a concrete source.
+pub(super) fn effective_local_endpoint(
+    bound: InetEndpoint,
+    peer: Option<(InetEndpoint, IpAddress)>,
+) -> InetEndpoint {
+    match peer {
+        Some((_, source)) => InetEndpoint {
+            addr: source,
+            ..bound
+        },
+        None => bound,
+    }
+}
+
 /// UDP socket lifecycle tracked by the socket layer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UdpSocketLifecycle {
@@ -83,7 +97,8 @@ impl UdpSocketState {
     }
 
     pub(crate) fn local_endpoint(&self) -> Option<InetEndpoint> {
-        *self.local_endpoint.read()
+        let bound = (*self.local_endpoint.read())?;
+        Some(effective_local_endpoint(bound, self.peer_endpoint()))
     }
 
     pub(crate) fn set_local_endpoint(&self, endpoint: Option<InetEndpoint>) {

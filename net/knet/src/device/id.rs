@@ -4,6 +4,8 @@
 
 //! Stable network interface identifiers.
 
+use kerrno::LinuxError;
+
 /// A network interface index, independent of its position in the device table.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct NetDeviceId(i32);
@@ -16,6 +18,16 @@ impl NetDeviceId {
             Some(Self(ifindex))
         } else {
             None
+        }
+    }
+
+    /// Converts an optional interface index: zero is unspecified and a negative
+    /// index is `ENODEV`. A positive ID does not establish device existence.
+    pub(crate) fn from_optional_ifindex(ifindex: i32) -> Result<Option<Self>, LinuxError> {
+        if ifindex == 0 {
+            Ok(None)
+        } else {
+            Self::new(ifindex).map(Some).ok_or(LinuxError::ENODEV)
         }
     }
 
