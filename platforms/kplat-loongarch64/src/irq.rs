@@ -2,7 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kirq::TargetCpu;
+use kcpu_id_map::{KCpuMask, KCpuMaskExt, raw_cpu_id};
+use kirq::{IrqAffinityApplyError, IrqAffinityDelivery, TargetCpu};
 use loongArch64::register::{
     ecfg::{self, LineBasedInterrupt},
     ticlr,
@@ -18,6 +19,46 @@ static EXTERNAL_LEVEL: kirq::LevelChip = kirq::LevelChip {
     mask_ack: mask_external,
     unmask: unmask_external,
 };
+
+const EXTERNAL_ROUTE_MODE: eiointc::EiointcRouteMode =
+    eiointc::EiointcRouteMode::FixedNodeCoreSingleNode;
+
+fn external_affinity_target(
+    candidates: &KCpuMask,
+) -> Option<(kcpu_id_map::LogicalCpuId, kcpu_id_map::RawCpuId)> {
+    candidates.iter_logical().find_map(|cpu| {
+        let raw = raw_cpu_id(cpu)?;
+        (eiointc::raw_cpu_supported(raw.as_usize())).then_some((cpu, raw))
+    })
+}
+
+fn apply_external_affinity(
+    desc: kirq::IrqDesc,
+    candidates: &KCpuMask,
+    delivery: IrqAffinityDelivery,
+) -> Result<KCpuMask, IrqAffinityApplyError> {
+    if !eiointc::supports_affinity() || !eiointc::current_cpu_can_route() {
+        return Err(IrqAffinityApplyError::Rejected);
+    }
+    let (cpu, raw) = external_affinity_target(candidates).ok_or(IrqAffinityApplyError::Rejected)?;
+    match eiointc::retarget_irq(
+        desc.hwirq,
+        raw.as_usize(),
+        delivery == IrqAffinityDelivery::KeepMasked,
+    ) {
+        Ok(()) => Ok(KCpuMask::one_shot_logical(cpu)),
+        Err(eiointc::RetargetError::Rejected) => Err(IrqAffinityApplyError::Rejected),
+        Err(eiointc::RetargetError::HardwareFailure) => Err(IrqAffinityApplyError::HardwareFailure),
+    }
+}
+
+static EXTERNAL_AFFINITY: kirq::IrqAffinityChip = kirq::IrqAffinityChip {
+    apply: apply_external_affinity,
+};
+
+fn external_affinity_source(desc: kirq::IrqDesc) -> bool {
+    eiointc::supports_affinity() && matches!(select_flow(desc), Ok(kirq::IrqFlow::Level(_)))
+}
 
 fn mask_external(desc: kirq::IrqDesc) {
     // Close the producer before its parent. Level PCH sources have no leaf
@@ -99,18 +140,28 @@ fn configure_with(
     }
 }
 
-// External vectors target CPU0; an unpinned SMP test may run elsewhere.
+// Boot routes external vectors to CPU0; affinity may target raw CPUs 0..3.
+// An unpinned SMP test may run elsewhere.
 #[cfg(not(feature = "smp"))]
 unittest::path_mod_test!(tests, "../ut-tests/irq.rs");
 
 pub(crate) fn init() {
     // Keep the parent closed while replacing firmware's routing/source state.
     ecfg::set_lie(ecfg::read().lie() & !LineBasedInterrupt::HWI1);
-    eiointc::init();
+    eiointc::init(EXTERNAL_ROUTE_MODE);
     pch_pic::init();
     // EIOINTC routes external vectors to CPU0 HWI1. Device masks remain
     // downstream; without this parent gate no enabled device can interrupt.
-    ecfg::set_lie(ecfg::read().lie() | LineBasedInterrupt::HWI1);
+    prepare_local_external_parent();
+}
+
+/// Opens this CPU's EIOINTC parent line while preserving every other LIE bit.
+///
+/// The boot CPU calls this after controller initialization; each AP calls it
+/// from `prepare_local_interrupts` before publishing interrupt readiness.
+pub(crate) fn prepare_local_external_parent() {
+    let old = ecfg::read().lie();
+    ecfg::set_lie(old | LineBasedInterrupt::HWI1);
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IrqType {
@@ -141,8 +192,8 @@ impl kirq::IntrManagerIf {
         None
     }
 
-    fn immediate_affinity(_desc: kirq::IrqDesc) -> Option<&'static kirq::IrqAffinityChip> {
-        None
+    fn immediate_affinity(desc: kirq::IrqDesc) -> Option<&'static kirq::IrqAffinityChip> {
+        external_affinity_source(desc).then_some(&EXTERNAL_AFFINITY)
     }
 
     fn guest_interface() -> Option<kirq::GuestIrqInterface> {

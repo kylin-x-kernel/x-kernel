@@ -61,6 +61,9 @@ impl PlatformBootIf {
 
     #[cfg(feature = "smp")]
     fn prepare_local_interrupts(_logical_cpu_id: kcpu_id_map::LogicalCpuId) -> kerrno::KResult<()> {
+        // EIOINTC parent HWI1 is CPU-local. Controllers were initialized by the
+        // boot CPU before AP startup; readiness is published only after this.
+        crate::irq::prepare_local_external_parent();
         Ok(())
     }
 

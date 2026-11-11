@@ -132,7 +132,7 @@ cannot guarantee physical suppression. Other source bits remain unchanged.
 Unknown firmware trigger means the platform's established level default;
 unknown polarity follows explicit LevelLow, otherwise defaults high.
 
-Edge requests, per-CPU external flags, explicit retargeting and external pins
+Edge requests, per-CPU external flags, multi-node retargeting and external pins
 outside 0..64 are unsupported. The flat binding reserves 3 and 11 for local
 sources; explicitly external descriptors colliding with them are rejected.
 Local timer IRQ 11 uses PerCpu control state; enabling it changes only the
@@ -142,19 +142,22 @@ identities return `UnsupportedFlow`; there is no Legacy flow fallback.
 The bounded flat Unknown-controller external binding remains supported as Level.
 An unpublished KIRQ candidate with no selected flow is not an executable fallback.
 HTVEC here is the PCH vector
-table, not a separate supported HTVEC parent-controller driver. Multi-node
-EIOINTC, dynamic routing and edge retrigger require separate mechanisms.
+table, not a separate supported HTVEC parent-controller driver. This platform
+provides only a fixed single-node EIOINTC route transaction; multi-node
+routing, CPU-encoded/virtual EIOINTC and edge retrigger require separate
+mechanisms.
 
 ### Boot And Runtime Context
 
-The EIOINTC routes external vectors to CPU0 HWI1. Preparation first closes
+The EIOINTC routes external vectors through HWI1. Preparation first closes
 HWI1, clears all four EIOINTC enable banks before programming routing, and
 masks both PCH PIC banks before setting each bank's edge/polarity state.
-After initializing both
-controllers, `irq::init` enables that parent in CPU0's `ECFG.LIE`, preserving
-other enabled CPU lines. Individual device lines remain gated by EIOINTC and
-PCH PIC; enabling a device alone cannot open the CPU parent gate.
-PCH activation writes the HTVEC mapping before unmasking the source.
+After initializing both controllers, `irq::init` enables HWI1 in the boot
+CPU's `ECFG.LIE`, preserving other enabled CPU lines. Each AP opens its own
+HWI1 from `prepare_local_interrupts`, before KIRQ readiness publication.
+Individual device lines remain gated by EIOINTC and PCH PIC; enabling a device
+alone cannot open the CPU parent gate. PCH activation writes the HTVEC mapping
+before unmasking the source.
 
 Linux `drivers/irqchip/irq-loongson-pch-pic.c::pch_pic_reset` likewise writes
 every PCH mask bank explicitly. Linux's EIOINTC router initialization enables
@@ -178,6 +181,41 @@ separate allocation/routing/activation lifecycle, not a wider PCH range check.
 - `power_off` runs at the power-down terminal; after the S5 write
   returns it halts rather than assuming success.
 
+## External IRQ Affinity
+
+The platform exposes `IntrManagerIf::immediate_affinity` only for the existing
+external PCH level namespace and only after the EIOINTC capability gate is
+open. The transaction belongs to EIOINTC: it captures and masks the target
+vector's ENABLE bit, rewrites the 8-bit route field while preserving the other
+three vectors in the 32-bit ROUTE register, verifies readback, and restores the
+incoming ENABLE state or keeps it masked. PCH PIC, PCH CLR/HTVEC, BOUNCE,
+NODEMAP, IPMAP, trigger/polarity and KIRQ disable depth are not changed by this
+transaction.
+
+The platform selects `EiointcRouteMode::FixedNodeCoreSingleNode` explicitly.
+This is a fixed-platform contract, not hardware detection: it does not identify
+or automatically reject CPU-encoded/virtual EIOINTC variants. The gate also
+requires EIOINTC initialization with ENABLE/ROUTE readback confirmation, and a
+present CPU map whose raw IDs all fit node0 (0..3). Readback proves register
+content, not node identity; the single-node fact is the explicit platform
+contract, not a runtime probe. Missing CPU maps and multi-node topologies
+simply close affinity capability; they do not turn into a boot failure. Each
+apply additionally checks the executing CPU and target raw IDs locally, because
+IOCSR route access is node-local and a target check alone is insufficient.
+
+The route byte is `1 << raw_cpu_id` for this four-core node. No logical CPU
+number is used as a route bit. `KeepMasked` verifies the EIO vector remains
+suppressed and does not touch PCH. `Preserve` restores the actual incoming ENABLE
+bit. A restore readback failure immediately requests suppression again and
+returns HardwareFailure even if the new route was written; cleanup failure is
+recorded as unconfirmed, never described as safe.
+
+`prepare_local_external_parent()` opens only this CPU's ECFG.LIE HWI1 bit while
+preserving other LIE bits. The boot CPU calls it after EIOINTC/PCH initialization;
+each AP calls it from `prepare_local_interrupts` before KIRQ readiness is
+published. The existing readiness set is therefore sufficient for target
+admission; no second online/prepared mask is added.
+
 ## Concurrency Model
 
 - Platform state uses `LazyInit` one-shot slots (clock conversion, PCH
@@ -195,10 +233,10 @@ separate allocation/routing/activation lifecycle, not a wider PCH range check.
   NMI control. The guard excludes local IRQ/preemption for the full IOCSR
   transaction. EIO ISR sampling and single-bit W1C completion do not take the
   configuration lock; no read-modify-write is introduced for pending bits.
-- This retains the current QEMU single-router, CPU0 external-delivery model.
-  A lock does not retarget local IOCSR accesses to another node. Multi-node
-  routing, AP interrupt steering and affinity require their own target-aware
-  protocol; adding this lock does not claim that support.
+- The QEMU single-node route supports raw CPUs 0..3 after their local HWI1 is
+  prepared. A lock does not retarget local IOCSR accesses to another node;
+  multi-node routing and remote-node sends remain unsupported and close the
+  capability rather than being approximated.
 - Linux `drivers/irqchip/irq-loongson-pch-pic.c` serializes mask RMW under
   `pic_lock`; `irq-loongson-eiointc.c` serializes mask/route/unmask under
   `affinity_lock`. Its multi-node `csr_any_send` routing and no-op ordinary

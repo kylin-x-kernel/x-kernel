@@ -119,3 +119,41 @@ fn parent_claim_is_consumed_before_leaf_dispatch_including_rejected_vectors() {
         None
     );
 }
+
+#[def_test]
+fn local_parent_gate_preparation_only_adds_hwi1() {
+    let before = super::ecfg::read().lie();
+    super::prepare_local_external_parent();
+    let after = super::ecfg::read().lie();
+    assert!(after.contains(super::LineBasedInterrupt::HWI1));
+    assert_eq!(
+        (before.bits() ^ after.bits()) & !super::LineBasedInterrupt::HWI1.bits(),
+        0
+    );
+}
+
+#[def_test]
+fn external_affinity_capability_excludes_reserved_and_non_level_sources() {
+    use kirq::{IrqController, IrqDesc, IrqTrigger};
+    let external = IrqDesc::new(17, IrqTrigger::LevelHigh)
+        .with_controller(IrqController::LoongArchExtioi);
+    let capability_expected = super::eiointc::supports_affinity();
+    // The QEMU ls2k2000 model is the supported fixed platform; if its
+    // ENABLE/ROUTE readback or CPU map is unavailable, the gate must be
+    // visible here rather than silently leaving the feature untested.
+    assert!(capability_expected);
+    assert!(super::eiointc::current_cpu_can_route());
+    assert_eq!(
+        kirq::IntrManagerIf::immediate_affinity(external).is_some(),
+        capability_expected
+    );
+    for desc in [
+        IrqDesc::from_virq(super::TIMER_IRQ),
+        IrqDesc::from_virq(super::EIOINTC_IRQ),
+        IrqDesc::new(64, IrqTrigger::LevelHigh),
+        IrqDesc::new(17, IrqTrigger::EdgeRising),
+        kirq::gic_level_irq_desc(17),
+    ] {
+        assert!(kirq::IntrManagerIf::immediate_affinity(desc).is_none());
+    }
+}

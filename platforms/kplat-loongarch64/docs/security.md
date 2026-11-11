@@ -29,6 +29,12 @@ retargeted and explicitly external reserved-ID requests fail before MMIO. The
 existing flat local IDs 3/11 are not reinterpreted as device sources. Parent ISR
 completion is consumed even if leaf admission fails; PCH CLR is a separate W1C
 operation at 0x80/0x84 and never a read/modify/write or parent acknowledgement.
+Affinity capability is separate from ordinary admission: it is exposed only
+after the fixed-platform EIOINTC mode/init gate and single-node present-CPU
+check pass. A failed gate disables affinity but does not turn a normal boot into
+a panic. Each transaction additionally checks the executing and target CPU raw
+IDs; local IOCSR access is not assumed valid from a CPU outside the supported
+node.
 
 IRQ 11 retains its fixed PerCpu timer binding. Parent IRQ 3 is rejected by
 selection and checked configuration; dispatch still demultiplexes it before
@@ -47,10 +53,12 @@ default-UP QEMU does not establish AP or multi-node routing correctness.
 
 Startup does not trust firmware's source masks: HWI1 is closed during
 controller preparation, all EIOINTC enable banks are cleared, and both PCH
-mask banks are set before the parent is reopened. Recording tests check the
-mask-before-configuration sequence and both PCH bank offsets. Device activation
-installs its HTVEC entry before unmasking. Pending state is retained; these
-operations do not prove a device has stopped producing interrupts.
+mask banks are set before the parent is reopened. The boot CPU opens HWI1 after
+controller initialization; each AP opens its own HWI1 in
+`prepare_local_interrupts` before KIRQ readiness publication. Recording tests
+check the mask-before-configuration sequence and both PCH bank offsets. Device
+activation installs its HTVEC entry before unmasking. Pending state is retained;
+these operations do not prove a device has stopped producing interrupts.
 
 The device tree and the architectural registers are the two external
 inputs. The DTB is structurally validated by `rs_fdtree`/`of`; the
@@ -131,17 +139,21 @@ no user-space input.
   implemented for this platform.
 - `suspend_to_ram` is unsupported (`KError::OperationNotSupported`);
   the GED register could express S3 but no wakeup path exists.
-- Only the QEMU virt-class EIOINTC + PCH PIC hierarchy is supported;
-  other LoongArch interrupt topologies are out of scope.
-- Locking does not establish remote-node IOCSR addressing. The current
-  single-router/default-UP coverage does not validate AP control or multi-node
-  register targeting; those need explicit routing and CPU/node ownership.
+- Only the QEMU `ls2k2000-eiointc` fixed node/core hierarchy with raw CPUs
+  0..3 is supported. CPU-encoded/virtual EIOINTC, multi-node and other
+  LoongArch topologies are out of scope; unsupported topology closes affinity
+  capability without failing ordinary boot.
+- Locking does not establish remote-node IOCSR addressing. Local route access
+  is valid only from a CPU in the supported node; the transaction rejects other
+  executing CPUs before writes.
 
 ## Audit Checklist
 
-- CPU0's HWI1 parent gate is enabled after EIOINTC/PCH PIC initialization;
-  otherwise pending device interrupts cannot complete blocked I/O. Device
-  registration still controls the downstream per-device masks.
+- The boot CPU's HWI1 parent gate is enabled after EIOINTC/PCH PIC
+  initialization; each AP's HWI1 is enabled in `prepare_local_interrupts`
+  before readiness publication. Otherwise pending device interrupts cannot
+  complete blocked I/O or reach an affinity target. Device registration still
+  controls the downstream per-device masks.
 - Backend hwirq range gates remain ahead of any IOCSR/MMIO access.
 - Register-transaction locks cover the entire RMW, not separate reads/writes;
   retain lock order from IRQ line state to the controller and never the reverse.
