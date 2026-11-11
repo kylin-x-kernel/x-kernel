@@ -69,10 +69,14 @@ Clone adapters use `new_user_task` with matching `PidHandle` and `Thread` values
 The returned task is still unpublished: the caller completes process publication
 before activation. Its closure enters `run_user_thread_loop`, which calls the
 provided dispatcher for syscalls and `MmSpace::handle_page_fault` for faults.
-`BusError` maps to SIGBUS; other unresolved faults map to SIGSEGV. Retryable faults
-retry user execution after checking preemption. Signal delivery is delegated to
-`Thread::signal_manager`; fatal and stop actions call `do_exit`, while continue
-actions leave the running thread alive.
+`BusError` maps to `SIGBUS/BUS_ADRERR`, `AccessDenied` to `SIGSEGV/SEGV_ACCERR`,
+and other unresolved faults to `SIGSEGV/SEGV_MAPERR`; the faulting virtual
+address is carried in `si_addr`. Fatal fault signals are queued on the faulting
+thread, not the process-wide pending set, so synchronous handlers observe the
+thread-local state they installed. Retryable faults retry user execution after
+checking preemption. Signal delivery is delegated to `Thread::signal_manager`;
+fatal and stop actions call `do_exit`, while continue actions leave the running
+thread alive.
 
 A concrete integration example is `spawn_init_process` in `src/init_process.rs`:
 it shows identity/runtime preparation, task construction, publication and the

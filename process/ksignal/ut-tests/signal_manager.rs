@@ -32,6 +32,22 @@ fn new_thread_manager() -> alloc::sync::Arc<ThreadSignalManager> {
 }
 
 #[def_test]
+fn fault_signals_carry_code_and_fault_address() {
+    let address = 0x2000_usize;
+    let cases = [
+        (Signo::SIGBUS, linux_raw_sys::general::BUS_ADRERR, address),
+        (Signo::SIGSEGV, linux_raw_sys::general::SEGV_MAPERR, address),
+        (Signo::SIGSEGV, linux_raw_sys::general::SEGV_ACCERR, address),
+    ];
+    for (signo, code, address) in cases {
+        let info = SignalInfo::new_fault(signo, code as i32, address);
+        assert_eq!(info.signo(), signo);
+        assert_eq!(info.code(), code as i32);
+        assert_eq!(info.fault_address(), Some(address));
+    }
+}
+
+#[def_test]
 fn realtime_queue_exhaustion_preserves_existing_pending_state() {
     for code in [
         linux_raw_sys::general::SI_QUEUE,

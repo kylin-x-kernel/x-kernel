@@ -588,6 +588,12 @@ sender data, or expose uninitialized union/padding bytes. No allocation occurs
 on dequeue. Standard and ordinary realtime SI_USER admission may produce this
 state; prepared receipts and other realtime codes must not silently degrade.
 
+Synchronous memory faults use `SignalInfo::new_fault`, which populates the
+`_sigfault` union arm with the faulting address exposed through `si_addr` and a
+positive `SEGV_*`/`BUS_*` code. Generic kernel-originated delivery keeps
+`new_kernel`/`SI_KERNEL` semantics and must not be used for faults, because
+handlers that recover a fault rely on both `si_addr` and the precise code.
+
 No independently counted no-information instance survives beside a detailed
 record. As in Linux `collect_signal`, an ordinary owner OOM followed by a
 prepared timer enqueue can be represented solely by the timer record and the

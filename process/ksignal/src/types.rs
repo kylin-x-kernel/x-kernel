@@ -564,6 +564,19 @@ impl SignalInfo {
         result
     }
 
+    /// Constructs a synchronous memory-fault signal.
+    ///
+    /// `code` is the positive Linux fault code selected by the fault cause
+    /// (`SEGV_MAPERR`, `SEGV_ACCERR` or `BUS_ADRERR`), and `address` is the
+    /// faulting virtual address exposed to user space through `si_addr`.
+    pub fn new_fault(signo: Signo, code: i32, address: usize) -> Self {
+        let mut result = Self::empty();
+        result.set_signo(signo);
+        result.set_code(code);
+        result.sifields_mut()._sigfault._addr = address as *mut _;
+        result
+    }
+
     /// Constructs a user-originated signal with a code and pid.
     ///
     /// The `pid` is stored in the `si_pid` slot shared by the user-signal
@@ -627,6 +640,18 @@ impl SignalInfo {
     /// Returns the stored errno value.
     pub fn errno(&self) -> i32 {
         self.header().si_errno
+    }
+
+    /// Returns the faulting address carried by a synchronous fault signal.
+    ///
+    /// Only positive fault codes (`SEGV_*` / `BUS_*`) populate `si_addr`;
+    /// kernel-originated `SI_KERNEL` signals have no fault address.
+    pub fn fault_address(&self) -> Option<usize> {
+        (self.code() > 0).then(|| {
+            // SAFETY: positive fault codes select the `_sigfault` union arm
+            // populated by `new_fault`.
+            unsafe { self.sifields()._sigfault._addr as usize }
+        })
     }
 
     /// Returns the timer ID carried by a `SI_TIMER` signal.

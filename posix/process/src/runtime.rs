@@ -13,14 +13,17 @@ use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kidentity::PidHandle;
 use kprocess::{
-    AsThread, CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction, current_user_process,
+    AsThread, CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction,
     current_user_process_address_space, current_user_thread, poll_cpu_timers_for, process_exit,
     process_signals, scheduler,
 };
 use ksignal::{SignalInfo, SignalOsAction, SignalSet, Signo};
 use ktask::{PreparedTaskEntry, TaskInner, current};
 use kuaccess::{atomic_cmpxchg_u32, atomic_load_u32};
-use linux_raw_sys::general::{FUTEX_OWNER_DIED, FUTEX_TID_MASK, FUTEX_WAITERS, ROBUST_LIST_LIMIT};
+use linux_raw_sys::general::{
+    BUS_ADRERR, FUTEX_OWNER_DIED, FUTEX_TID_MASK, FUTEX_WAITERS, ROBUST_LIST_LIMIT, SEGV_ACCERR,
+    SEGV_MAPERR,
+};
 use linux_sysno::Sysno;
 use memspace::PageFaultOutcome;
 use osvm::{VirtMutPtr, VirtPtr};
@@ -129,9 +132,12 @@ pub(crate) fn run_user_thread_loop(
                     ktask::check_preempt_pending();
                     continue;
                 } else if !outcome.is_resolved() {
-                    let signo = match outcome {
-                        PageFaultOutcome::BusError => Signo::SIGBUS,
-                        _ => Signo::SIGSEGV,
+                    // Linux distinguishes backing-store rejection from a
+                    // protection or unmapped-address fault through si_code.
+                    let (signo, code) = match outcome {
+                        PageFaultOutcome::BusError => (Signo::SIGBUS, BUS_ADRERR as i32),
+                        PageFaultOutcome::AccessDenied => (Signo::SIGSEGV, SEGV_ACCERR as i32),
+                        _ => (Signo::SIGSEGV, SEGV_MAPERR as i32),
                     };
                     let exe_path = thr.process().exe_path().unwrap_or_default();
                     warn!(
@@ -144,7 +150,7 @@ pub(crate) fn run_user_thread_loop(
                         outcome,
                         flags,
                     );
-                    raise_signal_fatal(SignalInfo::new_kernel(signo))
+                    raise_signal_fatal(SignalInfo::new_fault(signo, code, addr.as_usize()))
                         .expect("Failed to send fatal fault signal");
                 }
             }
@@ -634,27 +640,30 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     }
 }
 
-/// Queues a fatal signal for the current process or starts group exit.
+/// Queues a fatal signal for the current thread or exits the thread.
 ///
-/// Runs in current-user-thread context. If no thread accepts the signal or its
-/// target cannot be interrupted, calls [`do_exit`] with the signal number.
+/// Runs in current-user-thread context. Synchronous faults must be delivered to
+/// the faulting thread: user handlers such as Smithay's SIGBUS guard keep
+/// thread-local state, so queueing through the process-wide pending set could
+/// run the handler on a thread that cannot recover the fault. If the current
+/// thread does not accept the signal, calls [`do_exit`] with the signal number.
 ///
 /// # Errors
 ///
-/// Forwards `Process::signal_manager` errors when the process runtime is gone.
+/// Forwards thread signal-manager errors when the runtime is gone.
 ///
 /// # Panics
 ///
-/// The current-process accessor panics outside a user-thread runtime.
+/// The current-user-thread accessor panics outside a user-thread runtime.
 pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
     let signo = sig.signo();
-    info!("Send fatal signal {signo:?} to the current process");
-    let process = current_user_process();
-    if let Some(tid) = process
-        .signal_manager()?
+    info!("Send fatal signal {signo:?} to the current thread");
+    let thr = current_user_thread();
+    if thr
+        .signal_manager()
         .send_signal(ksignal::SignalNotification::kernel_fallback(sig))?
-        && process_signals::interrupt_thread(tid).is_ok()
     {
+        ktask::signal_task(&current());
     } else {
         do_exit_from_signal(signo as i32);
     }
