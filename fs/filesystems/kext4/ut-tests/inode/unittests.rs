@@ -203,6 +203,7 @@ fn regular_inode_metadata() -> Ext4InodeMetadata {
     Ext4InodeMetadata {
         uid: 0,
         gid: 0,
+        project_id: 0,
         disk_size: 0,
         blocks: 0,
         block: [0; disk_inode::INODE_BLOCK_BYTES],
@@ -311,7 +312,7 @@ fn initialized_extended_inode_preserves_epoch_and_nanoseconds() {
     .unwrap();
 
     let metadata =
-        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
+        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false, false)
             .unwrap()
             .metadata;
     assert_eq!(metadata.atime, timestamp);
@@ -335,7 +336,7 @@ fn initialized_legacy_inode_clamps_post_2038_timestamp() {
     .unwrap();
 
     let metadata =
-        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
+        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false, false)
             .unwrap()
             .metadata;
     let maximum = Ext4Timestamp::new(i32::MAX as i64, 0);
@@ -748,7 +749,7 @@ fn from_raw_splits_mode_and_recomposes() {
     .unwrap();
 
     let decoded =
-        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
+        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false, false)
             .unwrap();
     assert_eq!(decoded.kind, InodeKind::RegularFile);
     assert_eq!(decoded.permissions, 0o640);

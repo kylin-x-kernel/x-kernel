@@ -127,6 +127,11 @@ impl FeatureSet {
             .contains(ReadOnlyCompatFeatures::HUGE_FILE)
     }
 
+    pub(crate) const fn has_project(self) -> bool {
+        self.read_only_compat
+            .contains(ReadOnlyCompatFeatures::PROJECT)
+    }
+
     pub(crate) const fn has_extra_isize(self) -> bool {
         self.read_only_compat
             .contains(ReadOnlyCompatFeatures::EXTRA_ISIZE)
@@ -209,17 +214,7 @@ impl FeatureSet {
 
     /// Checks features required by inode and allocation mutations.
     pub(crate) fn validate_writable(self) -> Ext4Result<()> {
-        self.validate_mount()?;
-        let quota_features = self
-            .read_only_compat
-            .intersection(ReadOnlyCompatFeatures::PROJECT);
-        if !quota_features.is_empty() {
-            return Err(Ext4Error::UnsupportedFeature {
-                class: FeatureClass::ReadOnlyCompatible,
-                bits: quota_features.bits(),
-            });
-        }
-        Ok(())
+        self.validate_mount()
     }
 }
 

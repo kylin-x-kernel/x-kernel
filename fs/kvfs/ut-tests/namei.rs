@@ -30,7 +30,7 @@ static TEST_SUPER_BLOCK_OPERATIONS: TestSuperBlock = TestSuperBlock;
 static TEST_FILE_SYSTEM_TYPE: crate::FileSystemType = crate::FileSystemType::internal("namei-test");
 
 impl SuperBlockOperations for TestSuperBlock {
-    fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, _super_block: &SuperBlock, _dentry: &crate::Dentry) -> VfsResult<StatFs> {
         Ok(StatFs {
             fs_type: 0,
             block_size: 4096,

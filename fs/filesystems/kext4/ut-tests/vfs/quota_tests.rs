@@ -71,6 +71,10 @@ fn quota_fixture_at(
 }
 
 fn load_user_quota(super_block: &SuperBlock, inode: &Arc<VfsInode>) {
+    load_quota(super_block, inode, QuotaType::User);
+}
+
+fn load_quota(super_block: &SuperBlock, inode: &Arc<VfsInode>, kind: QuotaType) {
     let mut state = ext4_private(super_block).unwrap().write(super_block);
     let credits = JournalCredits::new(256);
     let required_blocks = 2 + state.inode_extra_isize_allocation_blocks(inode.private().unwrap());
@@ -87,7 +91,12 @@ fn load_user_quota(super_block: &SuperBlock, inode: &Arc<VfsInode>) {
         handle: Some(&mut handle),
     };
     let mut header = [0; 2048];
-    header[..4].copy_from_slice(&0xd9c0_1f11_u32.to_le_bytes());
+    let magic: u32 = match kind {
+        QuotaType::User => 0xd9c0_1f11,
+        QuotaType::Group => 0xd9c0_1927,
+        QuotaType::Project => 0xd9c0_3f14,
+    };
+    header[..4].copy_from_slice(&magic.to_le_bytes());
     header[4..8].copy_from_slice(&1_u32.to_le_bytes());
     header[20..24].copy_from_slice(&2_u32.to_le_bytes());
     io.write(inode, 0, &header).unwrap();
@@ -95,7 +104,7 @@ fn load_user_quota(super_block: &SuperBlock, inode: &Arc<VfsInode>) {
         .quota_info()
         .enable(
             &mut io,
-            QuotaType::User,
+            kind,
             inode,
             QuotaFormat::VfsV1,
             QuotaState::USAGE_ENABLED,
@@ -456,8 +465,8 @@ fn quota_growth_admits_external_xattr_space_for_extra_isize_expansion() {
 }
 
 #[def_test]
-fn project_feature_writable_mount_rejection_precedes_storage_writes() {
-    use crate::{Ext4Error, FeatureClass, disk::ReadOnlyCompatFeatures};
+fn project_feature_allows_writable_mount() {
+    use crate::disk::ReadOnlyCompatFeatures;
 
     {
         let flags = ReadOnlyCompatFeatures::PROJECT;
@@ -467,10 +476,7 @@ fn project_feature_writable_mount_rejection_precedes_storage_writes() {
         image[offset..offset + 4].copy_from_slice(&flags.bits().to_le_bytes());
         let device = Arc::new(TestDevice::new(image));
         let result = Ext4SbInfo::mount(crate::io::test_block_device(device.clone()));
-        assert!(matches!(result, Err(Ext4Error::UnsupportedFeature {
-            class: FeatureClass::ReadOnlyCompatible, bits,
-        }) if bits == flags.bits()));
-        assert_eq!(device.write_count(), 0);
+        assert!(result.is_ok());
     }
 }
 
@@ -490,10 +496,7 @@ fn quota_feature_read_only_preparation_preserves_storage() {
             Ext4SbInfo::open(crate::io::test_block_device(device.clone()), true).unwrap();
         let replay = state.prepare_recovery().unwrap();
         state.finish_recovery(replay).unwrap();
-        assert_eq!(
-            state.ensure_writable().is_err(),
-            flags.contains(ReadOnlyCompatFeatures::PROJECT)
-        );
+        assert!(state.ensure_writable().is_ok());
         assert_eq!(device.write_count(), 0);
         assert_eq!(device.bytes(), image);
     }
@@ -534,7 +537,7 @@ fn internal_quota_fixture() -> (Arc<SuperBlock>, Arc<VfsFile>, Arc<TestDevice>) 
 }
 
 fn allocate_accounted_inode(state: &mut Ext4SbInfo, uid: u32) -> Arc<Ext4Inode> {
-    state.initialize_owner_quotas(uid, uid).unwrap();
+    state.initialize_owner_quotas(uid, uid, 0).unwrap();
     let credits = state.quota_metadata_credits(JournalCredits::new(128));
     let journal = state
         .metadata_journal_for_allocation(
@@ -558,6 +561,10 @@ fn allocate_accounted_inode(state: &mut Ext4SbInfo, uid: u32) -> Arc<Ext4Inode> 
 }
 
 fn owner_usage(super_block: &SuperBlock, state: &mut Ext4SbInfo, uid: u32) -> kquota::Dqblk {
+    quota_usage(super_block, state, QuotaType::User, uid)
+}
+
+fn quota_usage(super_block: &SuperBlock, state: &mut Ext4SbInfo, kind: QuotaType, id: u32) -> kquota::Dqblk {
     let journal = state.journal.as_ref().unwrap().clone();
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let data = super_block
@@ -567,11 +574,121 @@ fn owner_usage(super_block: &SuperBlock, state: &mut Ext4SbInfo, uid: u32) -> kq
                 filesystem: state,
                 handle: Some(&mut handle),
             },
-            QuotaId::new(QuotaType::User, uid).unwrap(),
+            QuotaId::new(kind, id).unwrap(),
         )
         .unwrap();
     state.complete_metadata_mutation(handle, Ok(())).unwrap();
     data
+}
+
+#[def_test]
+fn immutable_project_attributes_follow_the_project_feature() {
+    use crate::disk::{
+        CompatFeatures, ReadOnlyCompatFeatures,
+        inode::{EXT4_APPEND_FL, EXT4_CASEFOLD_FL, EXT4_IMMUTABLE_FL},
+    };
+    use crate::superblock::test_fixtures::set_allocator_feature_bits;
+
+    let (super_block, file, _) = quota_fixture();
+    let vfs_inode = file.inode();
+    let inode = vfs_inode.downcast::<Ext4Inode>().unwrap();
+    let now = current_ext4_timestamp(vfs_inode);
+    let initial_ctime = Ext4Timestamp::new(now.seconds().saturating_sub(3600), now.nanos());
+    {
+        let mut state = ext4_private(&super_block).unwrap().write(&super_block);
+        assert!(!state.superblock().features().has_project());
+        state
+            .set_inode_user_flags(
+                &inode,
+                inode.flags() | EXT4_IMMUTABLE_FL,
+                initial_ctime,
+            )
+            .unwrap();
+    }
+    let attributes = kvfs::FileAttr {
+        flags: inode.flags(),
+        project_id: 42,
+        flags_valid: false,
+    };
+    let cred = kcred::initial_cred();
+    assert_eq!(
+        file.path().fileattr_set(attributes, &cred),
+        Err(VfsError::OperationNotSupported)
+    );
+    assert_ne!(inode.stat().ctime, initial_ctime);
+    assert_eq!(inode.project_id(), 0);
+
+    {
+        let mut state = ext4_private(&super_block).unwrap().write(&super_block);
+        state.sync_filesystem().unwrap();
+        set_allocator_feature_bits(
+            &mut state,
+            CompatFeatures::empty(),
+            ReadOnlyCompatFeatures::PROJECT,
+        );
+        state.metadata_io.invalidate_all();
+    }
+    assert_eq!(
+        file.path().fileattr_set(attributes, &cred),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(
+        file.path().fileattr_set(
+            kvfs::FileAttr {
+                flags: attributes.flags | EXT4_APPEND_FL,
+                project_id: 0,
+                ..attributes
+            },
+            &cred,
+        ),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(
+        file.path().fileattr_set(
+            kvfs::FileAttr {
+                flags: attributes.flags | EXT4_CASEFOLD_FL,
+                flags_valid: true,
+                ..attributes
+            },
+            &cred,
+        ),
+        Err(VfsError::OperationNotSupported)
+    );
+}
+
+#[def_test]
+fn project_change_transfers_inode_and_delalloc_reservation() {
+    use crate::disk::{CompatFeatures, ReadOnlyCompatFeatures};
+    use crate::superblock::test_fixtures::set_allocator_feature_bits;
+
+    let (super_block, file, _) = quota_fixture();
+    load_quota(&super_block, file.inode(), QuotaType::Project);
+    let mut state = ext4_private(&super_block).unwrap().write(&super_block);
+    state.sync_filesystem().unwrap();
+    set_allocator_feature_bits(&mut state, CompatFeatures::empty(), ReadOnlyCompatFeatures::PROJECT);
+    state.metadata_io.invalidate_all();
+    state.vfs_superblock = Arc::downgrade(&super_block);
+    state.quota_mount_options = 4;
+    file.inode().private::<Ext4Inode>().unwrap().set_noquota(true);
+
+    let inode = allocate_accounted_inode(&mut state, 1000);
+    let block_size = i64::from(state.layout().block_size());
+    state.reserve_delalloc_range(&inode, LogicalBlock::new(0), 1).unwrap();
+    let before = quota_usage(&super_block, &mut state, QuotaType::Project, 0);
+    assert_eq!((before.used_inodes, before.reserved_bytes), (1, block_size));
+
+    state.set_inode_project_id(&inode, 42, Ext4Timestamp::new(1, 0)).unwrap();
+    assert_eq!(inode.project_id(), 42);
+    assert_eq!(state.raw_inode(inode.number()).unwrap().project_id(), Some(42));
+    assert_eq!(state.internal_iget(inode.number()).unwrap().project_id(), 42);
+    let old = quota_usage(&super_block, &mut state, QuotaType::Project, 0);
+    let new = quota_usage(&super_block, &mut state, QuotaType::Project, 42);
+    assert_eq!((old.used_inodes, old.reserved_bytes), (0, 0));
+    assert_eq!((new.used_inodes, new.reserved_bytes), (1, block_size));
+
+    state.release_all_delalloc(&inode).unwrap();
+    assert_eq!(quota_usage(&super_block, &mut state, QuotaType::Project, 42).reserved_bytes, 0);
+    inode.drop_quota_records(None);
 }
 
 #[def_test]
@@ -699,7 +816,7 @@ fn quota_limits_reject_inode_and_space_before_bitmap_publication() {
     };
     let (super_block, _file, _device) = internal_quota_fixture();
     let mut state = ext4_private(&super_block).unwrap().write(&super_block);
-    state.initialize_owner_quotas(1000, 1000).unwrap();
+    state.initialize_owner_quotas(1000, 1000, 0).unwrap();
     let block_size = u64::from(state.layout().block_size());
     let id = QuotaId::new(QuotaType::User, 1000).unwrap();
     let journal = state
@@ -1024,7 +1141,7 @@ fn suspension_releases_mixed_records_but_retains_the_quota_file() {
         let mut state = ext4_private(&super_block).unwrap().write(&super_block);
         let inode = allocate_accounted_inode(&mut state, 1000);
         inode.drop_quota_records(None);
-        state.initialize_owner_quotas(2000, 2000).unwrap();
+        state.initialize_owner_quotas(2000, 2000, 0).unwrap();
         state.suspend_internal_quotas(&super_block).unwrap();
         state.sync_filesystem().unwrap();
     }
@@ -1249,7 +1366,7 @@ fn failed_extra_isize_expansion_does_not_publish_chown() {
     let (super_block, _quota_file, _) = internal_quota_fixture();
     let mut state = ext4_private(&super_block).unwrap().write(&super_block);
     let inode = allocate_accounted_inode(&mut state, 1000);
-    state.initialize_owner_quotas(2000, 2000).unwrap();
+    state.initialize_owner_quotas(2000, 2000, 0).unwrap();
     let journal = state.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
     update_test_inode_extra_isize(&mut state, &inode, 0, &mut handle);
@@ -1277,7 +1394,7 @@ fn failed_extra_isize_expansion_does_not_publish_chown() {
 }
 
 #[def_test]
-fn unsupported_readonly_sync_preserves_orphan_recovery_evidence() {
+fn project_readonly_recovery_cleans_orphan_state() {
     use crate::{
         disk::ReadOnlyCompatFeatures,
         superblock::test_fixtures::recovery_orphan_file_test_filesystem,
@@ -1294,12 +1411,12 @@ fn unsupported_readonly_sync_preserves_orphan_recovery_evidence() {
     let mut state = Ext4SbInfo::open(crate::io::test_block_device(device.clone()), true).unwrap();
     let replay = state.prepare_recovery().unwrap();
     state.finish_recovery(replay).unwrap();
-    assert!(state.has_orphan_present());
+    assert!(!state.has_orphan_present());
     assert_eq!(state.orphan_file_empty(), Ok(true));
     state.sync_filesystem().unwrap();
-    assert!(state.has_orphan_present());
-    assert_eq!(device.write_count(), 0);
-    assert_eq!(device.bytes(), image);
+    assert!(!state.has_orphan_present());
+    assert!(device.write_count() > 0);
+    assert_ne!(device.bytes(), image);
 }
 
 #[def_test]
@@ -1368,7 +1485,7 @@ fn owner_initialization_reuses_sparse_quota_blocks_below_eof() {
     state
         .enable_internal_quota(&super_block, QuotaType::User, file.inode())
         .unwrap();
-    state.initialize_owner_quotas(1000, 1000).unwrap();
+    state.initialize_owner_quotas(1000, 1000, 0).unwrap();
     for logical in [4, 6] {
         assert!(matches!(
             state.map_blocks(inode, LogicalBlock::new(logical)).unwrap(),
@@ -1394,7 +1511,7 @@ fn corrupt_quota_tree_aborts_before_any_record_can_be_charged() {
     state.complete_metadata_mutation(handle, Ok(())).unwrap();
     state.sync_filesystem().unwrap();
     assert_eq!(
-        state.initialize_owner_quotas(1000, 1000),
+        state.initialize_owner_quotas(1000, 1000, 0),
         Err(crate::Ext4Error::Corrupt(crate::CorruptKind::InvalidQuota))
     );
     assert!(state.journal.as_ref().unwrap().is_aborted());

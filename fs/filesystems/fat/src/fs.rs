@@ -161,7 +161,7 @@ impl SuperBlockOperations for FatSuperOperations {
         FAT_TIMESTAMP_LIMITS
     }
 
-    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, super_block: &SuperBlock, _dentry: &kvfs::Dentry) -> VfsResult<StatFs> {
         let fs = super_block.private::<Arc<FatFilesystem>>()?.inner.lock();
         let stats = fs.inner.stats().map_err(into_vfs_err)?;
         Ok(StatFs {

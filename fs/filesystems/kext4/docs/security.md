@@ -785,16 +785,15 @@ policy on write failure and still attempts journal drain; dirty record state
 for active records is only cleared after its quota-file write succeeds. A later commit failure
 requires filesystem recovery even if in-memory dirty bits were cleared.
 
-Internal user/group quota activates from validated allocated regular-file inode
+Internal user/group/project quota activates from validated allocated regular-file inode
 numbers before recovery can change allocation. Activation validates the reserved
 user/group numbers and rejects malformed quota identities with EUCLEAN before
 quota-file I/O; invalid identities never exempt ordinary inodes from charging.
 Quota identities are excluded
 from namespace lookup even when already cached, and only those identities bypass
 charging. A weak back-reference reaches the sole VFS quota owner without an
-ownership cycle. Unsupported project accounting rejects writable admission;
-compatible read-only images retain recovery evidence without orphan edits,
-including during sync and final shutdown.
+ownership cycle. Project identity is read from the inode only when the filesystem
+advertises the project feature.
 
 Acquisition precedes inode reservation locks; each inode binds the same record
 as the cache and imports existing reservations under its state lock. Cached updates cannot
@@ -844,9 +843,8 @@ processed, and recovery evidence is preserved on disk. Retained quota
 inode references are released by the mounted owner after its filesystem/quota
 guards end. The core release helper is private to quota integration, preventing
 callers from receiving a file under their own mount guard. Final eviction can
-therefore enter filesystem code safely. Administrative authorization,
-project identities and inheritance remain unsupported for writable mounts.
-Quota-control authorization is performed by the syscall adapter.
+therefore enter filesystem code safely. Quota-control authorization is
+performed by the syscall adapter.
 
 Filesystem range/length checks precede sector-addressed Bio I/O. Live media
 capacity, queue alignment and read-only checks remain in block core; a later
@@ -873,7 +871,13 @@ Privileged record changes require the current subjective CAP_SYS_ADMIN.
 Own-user and effective-group queries remain available without that capability.
 The integration checks CAP_SYS_RESOURCE for a current user caller before quota
 admission; no opener credential or per-inode permission cache supplies bypass.
-Unsupported project operations remain rejected rather than silently unaccounted.
+Project-ID changes transfer allocated and reserved usage before the new ID is
+published. Project-inherit directories reject links and renames whose project
+IDs differ, preventing an operation from bypassing the directory's quota domain.
+Attribute changes require inode ownership or CAP_FOWNER; changing immutable or
+append-only flags remains unsupported until mapped-write exclusion is complete.
+For an inode that remains immutable, project identity is checked only when the
+filesystem supports the project feature.
 
 An external quota header is file input until activation succeeds. Header-format
 rejection is propagated without aborting the filesystem's journal. The read-only

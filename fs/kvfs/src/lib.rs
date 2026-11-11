@@ -71,7 +71,7 @@ pub use mount::{
 pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open, may_mknod};
 pub use node::{
     CharacterDeviceRegistration, Dentry, DentryNotification, DentryOperations, DeviceAccess,
-    DeviceAccessPolicy, DeviceFileOps, DirContext, DirEntrySink, FiemapCapability,
+    DeviceAccessPolicy, DeviceFileOps, DirContext, DirEntrySink, FiemapCapability, FileAttr,
     GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations, InodeDirOperations,
     InodeFiemapOperations, InodeLookupFlags, InodeOperations, InodeSymlinkOperations,
     InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,

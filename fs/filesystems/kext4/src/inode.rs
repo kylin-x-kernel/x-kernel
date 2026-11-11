@@ -96,6 +96,17 @@ impl InodeKind {
         matches!(self, Self::Directory)
     }
 
+    pub(crate) const fn mask_flags(self, flags: u32) -> u32 {
+        const REGULAR_EXCLUDED: u32 =
+            0x0003_0000 | disk_inode::EXT4_CASEFOLD_FL | disk_inode::EXT4_PROJINHERIT_FL;
+        const OTHER_ALLOWED: u32 = 0x0000_0040 | disk_inode::EXT4_NOATIME_FL;
+        match self {
+            Self::Directory => flags,
+            Self::RegularFile => flags & !REGULAR_EXCLUDED,
+            _ => flags & OTHER_ALLOWED,
+        }
+    }
+
     const fn mode_bits(self) -> u16 {
         match self {
             Self::Fifo => disk_inode::S_IFIFO,
@@ -116,6 +127,8 @@ pub(crate) struct InodeInitialization {
     permissions: u16,
     uid: u32,
     gid: u32,
+    project_id: u32,
+    inherited_flags: u32,
     size: u64,
     block: [u8; disk_inode::INODE_BLOCK_BYTES],
     uses_extent_tree: bool,
@@ -140,6 +153,8 @@ impl InodeInitialization {
             permissions,
             uid,
             gid,
+            project_id: 0,
+            inherited_flags: 0,
             size: 0,
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             uses_extent_tree: false,
@@ -155,6 +170,8 @@ impl InodeInitialization {
             permissions,
             uid,
             gid,
+            project_id: 0,
+            inherited_flags: 0,
             size: 0,
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             uses_extent_tree: false,
@@ -179,6 +196,8 @@ impl InodeInitialization {
             permissions: 0o777,
             uid,
             gid,
+            project_id: 0,
+            inherited_flags: 0,
             size: u64::try_from(target.len()).map_err(|_| Ext4Error::Overflow)?,
             block,
             uses_extent_tree: false,
@@ -197,6 +216,8 @@ impl InodeInitialization {
             permissions: 0o777,
             uid,
             gid,
+            project_id: 0,
+            inherited_flags: 0,
             size: u64::try_from(target_len).map_err(|_| Ext4Error::Overflow)?,
             block: [0; disk_inode::INODE_BLOCK_BYTES],
             uses_extent_tree: true,
@@ -228,6 +249,8 @@ impl InodeInitialization {
             permissions,
             uid,
             gid,
+            project_id: 0,
+            inherited_flags: 0,
             size: 0,
             block,
             uses_extent_tree: false,
@@ -241,6 +264,18 @@ impl InodeInitialization {
         self.uid = uid;
         self.gid = gid;
         self
+    }
+
+    pub(crate) fn with_parent(mut self, parent: &Ext4Inode, has_project: bool) -> Self {
+        const INHERITED: u32 = 0x6201_c4cf;
+        let flags = parent.flags() & INHERITED;
+        self.project_id = parent.inherited_project_id(has_project);
+        self.inherited_flags = self.kind.mask_flags(flags);
+        self
+    }
+
+    pub(crate) const fn project_id(self) -> u32 {
+        self.project_id
     }
 
     pub(crate) const fn with_timestamp(mut self, timestamp: Ext4Timestamp) -> Self {
@@ -490,6 +525,7 @@ pub(crate) struct EncodedTimestamp {
 pub(crate) struct Ext4InodeMetadata {
     uid: u32,
     gid: u32,
+    project_id: u32,
     disk_size: u64,
     blocks: u64,
     block: [u8; disk_inode::INODE_BLOCK_BYTES],
@@ -543,6 +579,7 @@ impl Ext4InodeMetadata {
     fn from_raw(
         raw: disk_inode::RawInode,
         allow_zero_links: bool,
+        has_project: bool,
     ) -> Ext4Result<DecodedInodeFields> {
         if raw.links_count() == 0 && !allow_zero_links {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
@@ -563,6 +600,11 @@ impl Ext4InodeMetadata {
         let metadata = Self {
             uid: raw.uid(),
             gid: raw.gid(),
+            project_id: if has_project {
+                raw.project_id().unwrap_or(0)
+            } else {
+                0
+            },
             disk_size: raw.size(),
             blocks: raw.blocks(),
             block: *raw.block(),
@@ -1062,12 +1104,13 @@ impl Ext4Inode {
 
     pub(crate) fn update_quota_records<R>(
         &self,
-        f: impl FnOnce(u32, u32, u64, &mut [Option<kquota::DquotRef>; 3]) -> R,
+        f: impl FnOnce(u32, u32, u32, u64, &mut [Option<kquota::DquotRef>; 3]) -> R,
     ) -> R {
         self.update_state(|state| {
             f(
                 state.metadata.uid,
                 state.metadata.gid,
+                state.metadata.project_id,
                 state.reserved_data_blocks,
                 &mut state.dquots,
             )
@@ -1477,6 +1520,18 @@ impl Ext4Inode {
                 mtime: metadata.mtime,
             }
         })
+    }
+
+    pub(crate) fn project_id(&self) -> u32 {
+        self.with_metadata(|metadata| metadata.project_id)
+    }
+
+    pub(crate) fn inherited_project_id(&self, has_project: bool) -> u32 {
+        if has_project && self.flags() & disk_inode::EXT4_PROJINHERIT_FL != 0 {
+            self.project_id()
+        } else {
+            0
+        }
     }
 
     /// Sets the POSIX permission and special bits, like Linux `chmod` updating
@@ -2417,7 +2472,11 @@ impl Ext4SbInfo {
             flags,
             permissions,
             metadata,
-        } = Ext4InodeMetadata::from_raw(raw, allow_zero_links)?;
+        } = Ext4InodeMetadata::from_raw(
+            raw,
+            allow_zero_links,
+            self.superblock().features().has_project(),
+        )?;
         let inode = Ext4Inode::new(number, kind, flags, permissions, metadata);
         if validate_block_root {
             self.validate_inode_block_root(&inode)?;
@@ -2708,7 +2767,11 @@ impl Ext4SbInfo {
             self.superblock().checksum_seed(),
         )?;
         let raw = disk_inode::RawInode::decode(inode_bytes)?;
-        Ext4InodeMetadata::from_raw(raw, allow_zero_links)
+        Ext4InodeMetadata::from_raw(
+            raw,
+            allow_zero_links,
+            self.superblock().features().has_project(),
+        )
     }
 
     /// Publishes only the prepared inode entry, preserving neighboring inodes
@@ -2921,7 +2984,7 @@ impl Ext4SbInfo {
 
         self.initialize_inode_quotas(inode)?;
         if let Some((uid, gid)) = update.owner {
-            self.initialize_owner_quotas(uid, gid)?;
+            self.initialize_owner_quotas(uid, gid, inode.project_id())?;
         }
         let credits = JournalCredits::new(2);
         let credits = self.quota_metadata_credits(credits);
@@ -2986,7 +3049,7 @@ impl Ext4SbInfo {
                 )
             })?;
         let records = if let Some((uid, gid)) = update.owner {
-            self.transfer_inode_quotas(inode, uid, gid, handle)?
+            self.transfer_inode_quotas(inode, uid, gid, inode.project_id(), handle)?
         } else {
             None
         };
@@ -3002,6 +3065,104 @@ impl Ext4SbInfo {
             inode.set_permission(permission);
         }
         Ok(())
+    }
+
+    pub(crate) fn set_inode_project_id(
+        &mut self,
+        inode: &Ext4Inode,
+        project_id: u32,
+        timestamp: Ext4Timestamp,
+    ) -> Ext4Result<()> {
+        if !self.superblock().features().has_project() {
+            return if project_id == 0 {
+                Ok(())
+            } else {
+                Err(Ext4Error::Unsupported(UnsupportedKind::ProjectId))
+            };
+        }
+        if project_id == inode.project_id() {
+            return Ok(());
+        }
+        if project_id == u32::MAX {
+            return Err(Ext4Error::Quota(kerrno::LinuxError::EINVAL));
+        }
+        if self.is_quota_inode(inode.number()) || inode.is_noquota() {
+            return Err(Ext4Error::Quota(kerrno::LinuxError::EPERM));
+        }
+
+        self.initialize_inode_quotas(inode)?;
+        if !initialized_inode_extra_field_fits(inode.extra_isize(), disk_inode::PROJID_OFFSET) {
+            let credits = self.quota_metadata_credits(JournalCredits::new(2));
+            let journal = self.metadata_journal_for_allocation(
+                credits,
+                crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+                self.inode_extra_isize_allocation_blocks(inode),
+            )?;
+            let mut handle = journal.begin(credits)?;
+            let result = self.try_expand_inode_extra_isize(inode, &mut handle);
+            self.complete_metadata_mutation(handle, result)?;
+            if !initialized_inode_extra_field_fits(inode.extra_isize(), disk_inode::PROJID_OFFSET) {
+                return Err(Ext4Error::Unsupported(UnsupportedKind::ProjectId));
+            }
+        }
+
+        let stat = inode.stat();
+        self.initialize_owner_quotas(stat.uid, stat.gid, project_id)?;
+        let credits = self.quota_metadata_credits(JournalCredits::new(2));
+        let journal = self.metadata_journal_for_allocation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            0,
+        )?;
+        let mut handle = journal.begin(credits)?;
+        let result = (|| {
+            let timestamps = inode.pending_timestamps();
+            let block = self.inode_table_entry_block(inode.number())?;
+            let mut bytes = self.read_metadata_block(block)?.as_ref().to_vec();
+            let decoded = self.update_referenced_inode_table_entry(&mut bytes, inode, |bytes| {
+                timestamps.encode(bytes)?;
+                put_u32(bytes, disk_inode::PROJID_OFFSET, project_id)?;
+                update_inode_ctime_bytes(bytes, timestamp)
+            })?;
+            let records =
+                self.transfer_inode_quotas(inode, stat.uid, stat.gid, project_id, &mut handle)?;
+            let access = self.metadata_io.write_access(block, &mut handle)?;
+            self.replace_inode_table_entry(&access, inode.number(), &bytes)?;
+            inode.publish_metadata_and_quotas(
+                decoded.metadata,
+                timestamps,
+                Some(handle.transaction()?),
+                records,
+            )
+        })();
+        self.complete_metadata_mutation(handle, result)
+    }
+
+    pub(crate) fn set_inode_user_flags(
+        &mut self,
+        inode: &Ext4Inode,
+        flags: u32,
+        timestamp: Ext4Timestamp,
+    ) -> Ext4Result<()> {
+        if self.is_quota_inode(inode.number()) || inode.is_noquota() {
+            return Err(Ext4Error::Quota(kerrno::LinuxError::EPERM));
+        }
+        inode.ensure_flags_publishable(flags)?;
+        self.initialize_inode_quotas(inode)?;
+        let credits = self.quota_metadata_credits(JournalCredits::new(2));
+        let journal = self.metadata_journal_for_allocation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            self.inode_extra_isize_allocation_blocks(inode),
+        )?;
+        let mut handle = journal.begin(credits)?;
+        let result = self
+            .update_dirty_inode_metadata(inode, &mut handle, |_, bytes| {
+                put_u32(bytes, 0x20, flags)?;
+                update_inode_ctime_bytes(bytes, timestamp)
+            })
+            .and_then(|()| inode.set_flags(flags));
+        self.complete_metadata_mutation(handle, result)
     }
 
     pub(crate) fn update_inode_flags_timestamps_metadata(
@@ -3338,6 +3499,11 @@ fn encode_initialized_inode(
     if output.len() >= disk_inode::EXTRA_ISIZE_OFFSET + 2 {
         put_u16(output, disk_inode::EXTRA_ISIZE_OFFSET, extra_isize)?;
     }
+    if initialized_inode_extra_field_fits(extra_isize, disk_inode::PROJID_OFFSET) {
+        put_u32(output, disk_inode::PROJID_OFFSET, initialization.project_id)?;
+    } else if initialization.project_id != 0 {
+        return Err(Ext4Error::Unsupported(UnsupportedKind::ProjectId));
+    }
     update_inode_checksum(output, number, has_metadata_checksum, checksum_seed)
 }
 
@@ -3358,11 +3524,12 @@ fn initialized_inode_flags(
     if uses_extent_tree && !has_extents_feature {
         return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode));
     }
-    Ok(if uses_extent_tree {
-        disk_inode::EXT4_EXTENTS_FL
-    } else {
-        0
-    })
+    Ok(initialization.inherited_flags
+        | if uses_extent_tree {
+            disk_inode::EXT4_EXTENTS_FL
+        } else {
+            0
+        })
 }
 
 fn update_inode_checksum(

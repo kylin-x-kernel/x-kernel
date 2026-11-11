@@ -11,7 +11,7 @@ block accounting remain outside this crate.
 The implementation covers user, group and project identities, record
 acquisition/release, administrative field masks, hard and soft limits, grace
 periods, delayed-allocation reservations, synchronization, suspension and
-disable. Both format IDs 2 and 4 are supported. Ext4 enables internal user/group
+disable. Both format IDs 2 and 4 are supported. Ext4 enables internal user/group/project
 usage accounting; syscall authorization and external-file activation remain
 outside this crate.
 
@@ -121,6 +121,9 @@ releases unused entries, drops the cache and file information, and returns
 the retained file reference for that class. The filesystem must release the
 returned file after leaving its locks, so final inode eviction cannot
 recursively acquire mount or quota state.
+For filesystem-owned quota files, enforcement can be enabled or disabled
+independently of usage accounting. Enabling several classes validates every
+selected class before publishing the state changes.
 `invalidate` is the terminal no-I/O release after the provider has quiesced
 operations and either synchronized or irreversibly aborted its mutation domain.
 It removes class records and file information and returns the retained file;

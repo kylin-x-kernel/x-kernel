@@ -31,9 +31,9 @@ pub(super) fn control(
     address: usize,
 ) -> KResult<()> {
     match command {
-        // These commands require optional filesystem callbacks for toggling
-        // system-file accounting or removing quota storage.
-        Q_XQUOTAON | Q_XQUOTAOFF | Q_XQUOTARM => {
+        Q_XQUOTAON => ops.quota_enable(sb, UserConstPtr::<u32>::from(address).read_vm()?),
+        Q_XQUOTAOFF => ops.quota_disable(sb, UserConstPtr::<u32>::from(address).read_vm()?),
+        Q_XQUOTARM => {
             let _flags = UserConstPtr::<u32>::from(address).read_vm()?;
             Err(LinuxError::ENOSYS.into())
         }

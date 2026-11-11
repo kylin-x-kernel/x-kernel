@@ -150,7 +150,11 @@ impl kvfs::InodeOperations for SyncTestOperations {}
 struct SyncTestSuperOperations;
 
 impl kvfs::SuperBlockOperations for SyncTestSuperOperations {
-    fn statfs(&self, _super_block: &kvfs::SuperBlock) -> kvfs::VfsResult<kvfs::StatFs> {
+    fn statfs(
+        &self,
+        _super_block: &kvfs::SuperBlock,
+        _dentry: &kvfs::Dentry,
+    ) -> kvfs::VfsResult<kvfs::StatFs> {
         Ok(kvfs::libfs::simple_statfs(0))
     }
 }

@@ -61,6 +61,7 @@ impl Ext4MountOptions {
                 b"bsddf" => options.statfs_mode = Some(Ext4StatFsMode::Bsd),
                 b"usrquota" | b"quota" => *options.quota_types.get_or_insert(0) |= 1,
                 b"grpquota" => *options.quota_types.get_or_insert(0) |= 2,
+                b"prjquota" => *options.quota_types.get_or_insert(0) |= 4,
                 b"noquota" => options.quota_types = Some(0),
                 // Linux accepts these explicit positive defaults. KExt4 has no
                 // per-mount state to change for either compatibility spelling.
@@ -172,6 +173,7 @@ pub(super) fn into_vfs_err(error: Ext4Error) -> VfsError {
         Ext4Error::JournalAborted => LinuxError::EROFS,
         Ext4Error::AlreadyExists => LinuxError::EEXIST,
         Ext4Error::NotFound => LinuxError::ENOENT,
+        Ext4Error::CrossProject => LinuxError::EXDEV,
         Ext4Error::DirectoryNotEmpty => LinuxError::ENOTEMPTY,
         Ext4Error::InvalidName
         | Ext4Error::InvalidBufferLength { .. }
@@ -351,6 +353,9 @@ impl Ext4SuperOperations {
         let mut state = Ext4SbInfo::open(device, true).map_err(into_vfs_err)?;
         state.set_statfs_mode(statfs_mode);
         state.quota_mount_options = options.quota_types.unwrap_or(0);
+        if state.quota_mount_options & 4 != 0 && !state.superblock().features().has_project() {
+            return Err(VfsError::InvalidInput);
+        }
         state.vfs_superblock = Arc::downgrade(super_block);
         if !is_read_only {
             state.ensure_writable().map_err(into_vfs_err)?;
@@ -433,7 +438,7 @@ impl Ext4SuperOperations {
             state
                 .validate_internal_quota_inodes()
                 .map_err(into_vfs_err)?;
-            for kind in [kquota::QuotaType::User, kquota::QuotaType::Group] {
+            for kind in kquota::QuotaType::ALL {
                 if super_block.quota_info().info(kind).is_some() {
                     continue;
                 }
@@ -475,7 +480,7 @@ impl Ext4SuperOperations {
                 .enable_internal_quota(super_block, kind, &file)
                 .map_err(into_vfs_err);
             if result.is_err() {
-                for loaded in [kquota::QuotaType::User, kquota::QuotaType::Group] {
+                for loaded in kquota::QuotaType::ALL {
                     if enabled & (1 << loaded as u8) == 0 {
                         continue;
                     }
@@ -585,6 +590,9 @@ impl SuperBlockOperations for Ext4SuperOperations {
             if types & 2 != 0 {
                 options.push_str(",grpquota");
             }
+            if types & 4 != 0 {
+                options.push_str(",prjquota");
+            }
         }
         options
     }
@@ -613,10 +621,10 @@ impl SuperBlockOperations for Ext4SuperOperations {
         ext4.timestamp_limits()
     }
 
-    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, super_block: &SuperBlock, dentry: &kvfs::Dentry) -> VfsResult<StatFs> {
         let ext4 = ext4_private(super_block)?;
         let stat = ext4.read().statfs().map_err(into_vfs_err)?;
-        Ok(StatFs {
+        let mut result = StatFs {
             fs_type: 0xef53,
             block_size: stat.block_size,
             blocks: stat.blocks,
@@ -626,7 +634,12 @@ impl SuperBlockOperations for Ext4SuperOperations {
             free_file_count: stat.files_free,
             name_length: stat.max_name_len,
             fragment_size: stat.fragment_size,
-        })
+        };
+        let inode = dentry.inode_ref();
+        let private = inode.private::<Ext4Inode>()?;
+        // Keep the filesystem-wide statistics if the project record is unavailable.
+        let _ = quota::apply_project_statfs(super_block, private, &mut result);
+        Ok(result)
     }
 
     fn sync_fs(&self, super_block: &SuperBlock) -> VfsResult<()> {
@@ -1128,6 +1141,56 @@ fn finish_delalloc_write(
 }
 
 impl InodeOperations for Ext4Inode {
+    fn fileattr_get(&self, _inode: &VfsInode) -> VfsResult<kvfs::FileAttr> {
+        const VISIBLE_FLAGS: u32 = 0x725b_dfff;
+        let mut flags = self.flags() & VISIBLE_FLAGS;
+        if self.kind() == InodeKind::RegularFile {
+            flags &= !crate::disk::inode::EXT4_PROJINHERIT_FL;
+        }
+        Ok(kvfs::FileAttr {
+            flags,
+            project_id: self.project_id(),
+            flags_valid: true,
+        })
+    }
+
+    fn fileattr_set(&self, inode: &VfsInode, attributes: kvfs::FileAttr) -> VfsResult<()> {
+        use crate::disk::inode::{EXT4_IMMUTABLE_FL, EXT4_NOATIME_FL, EXT4_PROJINHERIT_FL};
+
+        const VISIBLE_FLAGS: u32 = 0x725b_dfff;
+        const MODIFIABLE_FLAGS: u32 = 0x624b_c0ff;
+        const SUPPORTED_FLAGS: u32 = EXT4_NOATIME_FL | 0x0000_0040 | EXT4_PROJINHERIT_FL;
+        if attributes.flags & !VISIBLE_FLAGS != 0 {
+            return Err(VfsError::OperationNotSupported);
+        }
+        let old = self.flags();
+        let requested_flags = attributes.flags & MODIFIABLE_FLAGS;
+        let flags = (old & !SUPPORTED_FLAGS) | (attributes.flags & SUPPORTED_FLAGS);
+        if self.kind().mask_flags(requested_flags) != requested_flags {
+            return Err(VfsError::OperationNotSupported);
+        }
+        let super_block = inode.super_block()?;
+        let ext4 = ext4_private(&super_block)?;
+        if old & requested_flags & EXT4_IMMUTABLE_FL != 0
+            && ((old ^ requested_flags) & !EXT4_IMMUTABLE_FL != 0
+                || ext4.read().superblock().features().has_project()
+                    && self.project_id() != attributes.project_id)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        if (old ^ requested_flags) & MODIFIABLE_FLAGS & !SUPPORTED_FLAGS != 0 {
+            return Err(VfsError::OperationNotSupported);
+        }
+        let mut state = ext4.write(&super_block);
+        let timestamp = current_ext4_timestamp(inode);
+        state
+            .set_inode_user_flags(self, flags, timestamp)
+            .map_err(into_vfs_err)?;
+        state
+            .set_inode_project_id(self, attributes.project_id, timestamp)
+            .map_err(into_vfs_err)
+    }
+
     fn update_time(
         &self,
         idmap: &kvfs::MountIdmap,

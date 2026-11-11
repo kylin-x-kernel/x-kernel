@@ -18,6 +18,7 @@ pub(crate) const CHECKSUM_HI_OFFSET: usize = 0x82;
 pub(crate) const CTIME_EXTRA_OFFSET: usize = 0x84;
 pub(crate) const MTIME_EXTRA_OFFSET: usize = 0x88;
 pub(crate) const ATIME_EXTRA_OFFSET: usize = 0x8c;
+pub(crate) const PROJID_OFFSET: usize = 0x9c;
 pub(crate) const EXT4_ROOT_INO: u32 = 2;
 pub(crate) const EXT4_USR_QUOTA_INO: u32 = 3;
 pub(crate) const EXT4_GRP_QUOTA_INO: u32 = 4;
@@ -40,6 +41,7 @@ pub(crate) const EXT4_INDEX_FL: u32 = 0x0000_1000;
 pub(crate) const EXT4_HUGE_FILE_FL: u32 = 0x0004_0000;
 pub(crate) const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
 pub(crate) const EXT4_INLINE_DATA_FL: u32 = 0x1000_0000;
+pub(crate) const EXT4_PROJINHERIT_FL: u32 = 0x2000_0000;
 pub(crate) const EXT4_CASEFOLD_FL: u32 = 0x4000_0000;
 #[cfg(unittest)]
 pub(crate) const EXT4_EA_INODE_FL: u32 = 0x0020_0000;
@@ -64,6 +66,7 @@ pub(crate) struct RawInode {
     atime_extra: Option<u32>,
     ctime_extra: Option<u32>,
     mtime_extra: Option<u32>,
+    project_id: Option<u32>,
     checksum_lo: u16,
     extra_isize: u16,
     checksum_hi: u16,
@@ -115,6 +118,7 @@ impl RawInode {
         let ctime_extra = decode_extra_u32(input, extra_isize, CTIME_EXTRA_OFFSET)?;
         let mtime_extra = decode_extra_u32(input, extra_isize, MTIME_EXTRA_OFFSET)?;
         let atime_extra = decode_extra_u32(input, extra_isize, ATIME_EXTRA_OFFSET)?;
+        let project_id = decode_extra_u32(input, extra_isize, PROJID_OFFSET)?;
 
         Ok(Self {
             mode,
@@ -135,6 +139,7 @@ impl RawInode {
             atime_extra,
             ctime_extra,
             mtime_extra,
+            project_id,
             checksum_lo,
             extra_isize,
             checksum_hi,
@@ -219,6 +224,10 @@ impl RawInode {
 
     pub(crate) const fn extra_isize(&self) -> u16 {
         self.extra_isize
+    }
+
+    pub(crate) const fn project_id(&self) -> Option<u32> {
+        self.project_id
     }
 
     pub(crate) const fn checksum_hi(&self) -> u16 {

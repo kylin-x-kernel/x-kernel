@@ -88,14 +88,29 @@ impl Ext4SbInfo {
         initialization: InodeInitialization,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<InodeAllocation> {
-        self.charge_quota_inode(initialization.uid(), initialization.gid(), handle)?;
+        self.charge_quota_inode(
+            initialization.uid(),
+            initialization.gid(),
+            initialization.project_id(),
+            handle,
+        )?;
         match self.allocate_inode_in_groups(parent, child_name, initialization, handle) {
             Ok(allocation) => {
-                self.sync_owner_quotas(initialization.uid(), initialization.gid(), handle)?;
+                self.sync_owner_quotas(
+                    initialization.uid(),
+                    initialization.gid(),
+                    initialization.project_id(),
+                    handle,
+                )?;
                 Ok(allocation)
             }
             Err(error) => {
-                self.free_quota_inode(initialization.uid(), initialization.gid(), handle)?;
+                self.free_quota_inode(
+                    initialization.uid(),
+                    initialization.gid(),
+                    initialization.project_id(),
+                    handle,
+                )?;
                 Err(error)
             }
         }

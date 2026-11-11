@@ -63,7 +63,7 @@ impl crate::AddressSpaceOperations for FailingSyncOperations {
 }
 
 impl SuperBlockOperations for FailingSyncOperations {
-    fn statfs(&self, _sb: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, _sb: &SuperBlock, _dentry: &crate::Dentry) -> VfsResult<StatFs> {
         Err(VfsError::Unsupported)
     }
 
@@ -157,7 +157,7 @@ fn filesystem_sync_attempts_all_stages_and_keeps_the_first_error() {
 }
 
 impl SuperBlockOperations for TestSuperOperations {
-    fn statfs(&self, super_block: &SuperBlock) -> crate::VfsResult<StatFs> {
+    fn statfs(&self, super_block: &SuperBlock, _dentry: &crate::Dentry) -> crate::VfsResult<StatFs> {
         if super_block.private::<TestPrivate>()?.0 != 0x5f5f_494e_464f {
             return Err(crate::VfsError::InvalidInput);
         }
@@ -322,7 +322,7 @@ fn test_statfs() -> StatFs {
 }
 
 impl SuperBlockOperations for BdevTestSuperOperations {
-    fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, _super_block: &SuperBlock, _dentry: &crate::Dentry) -> VfsResult<StatFs> {
         Ok(test_statfs())
     }
 }
@@ -332,7 +332,7 @@ struct BlockingShutdownOperations;
 static BLOCKING_SHUTDOWN_OPERATIONS: BlockingShutdownOperations = BlockingShutdownOperations;
 
 impl SuperBlockOperations for BlockingShutdownOperations {
-    fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, _super_block: &SuperBlock, _dentry: &crate::Dentry) -> VfsResult<StatFs> {
         Ok(test_statfs())
     }
 
@@ -980,7 +980,7 @@ struct FinalReleaseState {
 }
 
 impl SuperBlockOperations for FinalReleaseOperations {
-    fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, _super_block: &SuperBlock, _dentry: &crate::Dentry) -> VfsResult<StatFs> {
         Ok(test_statfs())
     }
 

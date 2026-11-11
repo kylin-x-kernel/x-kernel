@@ -38,7 +38,7 @@ impl SuperBlockOperations for NullFs {
         crate::TimestampLimits::NANOSECOND
     }
 
-    fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, _super_block: &SuperBlock, _dentry: &crate::Dentry) -> VfsResult<StatFs> {
         Ok(simple_statfs(NULLFS_MAGIC))
     }
 }

@@ -369,6 +369,17 @@ pub fn generic_update_time(
     Ok(())
 }
 
+/// Miscellaneous inode attributes used by filesystem attribute operations.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FileAttr {
+    /// Filesystem flags in the `FS_*_FL` representation.
+    pub flags: u32,
+    /// Filesystem project identifier.
+    pub project_id: u32,
+    /// Whether the caller supplied the flags-only representation.
+    pub flags_valid: bool,
+}
+
 /// Inode operation table installed on VFS inodes.
 pub trait InodeOperations: Send + Sync + 'static {
     /// Supplies filesystem-owned cache admission and removal accounting.
@@ -413,6 +424,16 @@ pub trait InodeOperations: Send + Sync + 'static {
     /// Returns FIEMAP operations when this inode exposes extent mappings.
     fn fiemap_operations(&self) -> Option<&dyn InodeFiemapOperations> {
         None
+    }
+
+    /// Reads filesystem-specific flags and project identity.
+    fn fileattr_get(&self, _inode: &VfsInode) -> VfsResult<FileAttr> {
+        Err(VfsError::from(kerrno::LinuxError::ENOTTY))
+    }
+
+    /// Applies filesystem-specific flags and project identity.
+    fn fileattr_set(&self, _inode: &VfsInode, _attributes: FileAttr) -> VfsResult<()> {
+        Err(VfsError::from(kerrno::LinuxError::ENOTTY))
     }
 
     /// Updates inode metadata and returns the values actually applied.
@@ -2114,6 +2135,14 @@ impl VfsInode {
         self.inode_operations
             .as_ref()
             .getattr(&MountIdmap, Some(path), request_mask, query_flags)
+    }
+
+    pub(crate) fn fileattr_get(&self) -> VfsResult<FileAttr> {
+        self.inode_operations.fileattr_get(self)
+    }
+
+    pub(crate) fn fileattr_set(&self, attributes: FileAttr) -> VfsResult<()> {
+        self.inode_operations.fileattr_set(self, attributes)
     }
 
     /// Returns this inode's optional FIEMAP capability.

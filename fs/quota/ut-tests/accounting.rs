@@ -1168,6 +1168,9 @@ fn backing_file_is_retained_through_suspend_and_failed_disable() {
     assert_eq!(Arc::strong_count(&file), 2);
     quota.suspend(&mut io, QuotaType::User).unwrap();
     assert_eq!(Arc::strong_count(&file), 2);
+    quota.enable_limits(1 << 1).unwrap();
+    assert!(quota.info(QuotaType::User).unwrap().state().contains(QuotaState::LIMITS_ENABLED));
+    quota.disable_limits(1 << 1).unwrap();
     quota.resume(QuotaType::User).unwrap();
     quota.alloc_inode(&mut io, &[ids(9)[0]], 0, false).unwrap();
     io.has_short_writes.set(true);
@@ -1331,7 +1334,9 @@ fn transfer_moves_allocated_and_reserved_usage_atomically_across_classes() {
         assert_eq!(quota.get(&mut io, old[index]).unwrap().reserved_bytes, 2048);
         assert_eq!(quota.get(&mut io, new[index]).unwrap().used_inodes, 0);
     }
-    quota.set_limits_enabled(QuotaType::Project, false).unwrap();
+    quota.disable_limits(1 << 5).unwrap();
+    assert_eq!(quota.enable_limits((1 << 1) | (1 << 5)), Err(KError::from(LinuxError::EEXIST)));
+    assert!(!quota.info(QuotaType::Project).unwrap().state().contains(QuotaState::LIMITS_ENABLED));
     quota
         .transfer(&mut io, (&old, &new), 4096, 2048, 2, false)
         .unwrap();
@@ -1351,6 +1356,8 @@ fn transfer_moves_allocated_and_reserved_usage_atomically_across_classes() {
             (1, 4096, 2048)
         );
     }
+    quota.enable_limits(1 << 5).unwrap();
+    assert!(quota.info(QuotaType::Project).unwrap().state().contains(QuotaState::LIMITS_ENABLED));
 }
 
 #[def_test]

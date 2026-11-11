@@ -295,7 +295,7 @@ pub trait SuperBlockOperations: Send + Sync + 'static {
     }
 
     /// Returns filesystem statistics.
-    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs>;
+    fn statfs(&self, super_block: &SuperBlock, dentry: &Dentry) -> VfsResult<StatFs>;
 
     /// Returns the timestamp representation supported by this filesystem.
     ///
@@ -648,9 +648,14 @@ impl SuperBlock {
             .clone()
     }
 
-    /// Returns filesystem statistics for this superblock.
+    /// Returns filesystem statistics for the root of this superblock.
     pub fn stat(&self) -> VfsResult<StatFs> {
-        self.ops().statfs(self)
+        self.stat_dentry(&self.root_dir())
+    }
+
+    /// Returns filesystem statistics for a dentry on this superblock.
+    pub fn stat_dentry(&self, dentry: &Dentry) -> VfsResult<StatFs> {
+        self.ops().statfs(self, dentry)
     }
 
     /// Returns whether this superblock is read-only without issuing `statfs`.

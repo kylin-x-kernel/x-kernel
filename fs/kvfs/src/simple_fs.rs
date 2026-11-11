@@ -125,7 +125,7 @@ impl SuperBlockOperations for SimpleSuperOperations {
         crate::TimestampLimits::NANOSECOND
     }
 
-    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, super_block: &SuperBlock, _dentry: &crate::Dentry) -> VfsResult<StatFs> {
         Ok(simple_statfs(
             super_block.private::<Arc<SimpleFs>>()?.fs_type,
         ))

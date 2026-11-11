@@ -10,7 +10,7 @@ use core::ffi::c_char;
 use kcred::Cred;
 use kerrno::{KResult, LinuxError};
 use kquota::{Dqblk, QuotaFields, QuotaId, QuotaState, QuotaType};
-use kvfs::{NodeType, SuperBlock, VfsInode};
+use kvfs::{NodeType, QuotaOperations, SuperBlock, VfsInode};
 use linux_raw_sys::general::AT_FDCWD;
 use posix_types::{
     UserConstPtr, UserPtr,
@@ -151,17 +151,13 @@ fn control(
     address: usize,
     file: Option<&KResult<Arc<VfsInode>>>,
 ) -> KResult<()> {
-    sb.quota_control(kind, matches!(command, Q_QUOTAON | Q_QUOTAOFF), |ops| {
+    let is_exclusive = matches!(command, Q_QUOTAON | Q_QUOTAOFF | Q_XQUOTAON | Q_XQUOTAOFF);
+    sb.quota_control(kind, is_exclusive, |ops| {
         check_permission(cred, command, kind, id)?;
         match command {
             Q_SYNC => ops.sync(sb, kind),
-            Q_QUOTAON => {
-                let file = file
-                    .ok_or(LinuxError::EINVAL)?
-                    .as_ref()
-                    .map_err(|error| *error)?;
-                ops.quota_on(sb, kind, id, file)
-            }
+            Q_QUOTAON => quota_on(sb, ops, kind, id, file),
+            Q_QUOTAOFF if ops.has_system_files(sb) => ops.quota_disable(sb, 2 << (kind as u32 * 2)),
             Q_QUOTAOFF => ops.quota_off(sb, kind),
             Q_GETFMT => {
                 let format = {
@@ -249,6 +245,23 @@ fn control(
             _ => xfs::control(sb, ops, command, kind, id, address),
         }
     })
+}
+
+fn quota_on(
+    sb: &SuperBlock,
+    ops: &dyn QuotaOperations,
+    kind: QuotaType,
+    format_id: u32,
+    file: Option<&KResult<Arc<VfsInode>>>,
+) -> KResult<()> {
+    if ops.has_system_files(sb) {
+        return ops.quota_enable(sb, 2 << (kind as u32 * 2));
+    }
+    let file = file
+        .ok_or(LinuxError::EINVAL)?
+        .as_ref()
+        .map_err(|error| *error)?;
+    ops.quota_on(sb, kind, format_id, file)
 }
 
 fn to_abi(value: Dqblk) -> KResult<IfDqblk> {

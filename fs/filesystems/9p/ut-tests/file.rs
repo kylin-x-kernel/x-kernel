@@ -211,7 +211,7 @@ fn incomplete_folio_read_stays_non_uptodate_and_retries() {
 struct SyncTestSuperOperations;
 
 impl kvfs::SuperBlockOperations for SyncTestSuperOperations {
-    fn statfs(&self, _: &kvfs::SuperBlock) -> VfsResult<kvfs::StatFs> {
+    fn statfs(&self, _: &kvfs::SuperBlock, _: &kvfs::Dentry) -> VfsResult<kvfs::StatFs> {
         Ok(kvfs::libfs::simple_statfs(0))
     }
 }

@@ -20,7 +20,7 @@ pub use device::{
 };
 pub use dir::{DirContext, DirEntrySink};
 pub use inode::{
-    FiemapCapability, GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations,
+    FiemapCapability, FileAttr, GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations,
     InodeDirOperations, InodeFiemapOperations, InodeLookupFlags, InodeOperations,
     InodeSymlinkOperations, InodeUpdateTime, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
     WeakVfsInode, empty_inode_operations, generic_update_time, get_next_ino, inode_init_owner,

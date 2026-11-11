@@ -70,6 +70,8 @@ pub enum UnsupportedKind {
     ExtentMutation,
     /// The inode uses huge-file block accounting semantics.
     HugeFile,
+    /// The inode does not have room for a project identifier.
+    ProjectId,
     /// The inode owns an external xattr block that this mutation path cannot free yet.
     ExternalXattrBlock,
     /// The inode link count has reached the supported ext4 hard-link limit.
@@ -171,6 +173,8 @@ pub enum Ext4Error {
     AlreadyExists,
     /// The requested directory entry does not exist.
     NotFound,
+    /// A directory requires a different project identity.
+    CrossProject,
     /// The requested directory removal target still contains children.
     DirectoryNotEmpty,
     /// A caller-provided ext4 name is not valid for this operation.
@@ -237,6 +241,7 @@ impl fmt::Display for Ext4Error {
             Self::NoSpace => formatter.write_str("no free ext4 space is available"),
             Self::AlreadyExists => formatter.write_str("ext4 directory entry already exists"),
             Self::NotFound => formatter.write_str("ext4 directory entry was not found"),
+            Self::CrossProject => formatter.write_str("ext4 project identity mismatch"),
             Self::DirectoryNotEmpty => formatter.write_str("ext4 directory is not empty"),
             Self::InvalidName => formatter.write_str("invalid ext4 directory entry name"),
             Self::InvalidDelayedAllocationState => {

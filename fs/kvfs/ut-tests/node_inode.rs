@@ -190,7 +190,7 @@ static SECOND_RESOLUTION_FILE_SYSTEM_TYPE: crate::FileSystemType =
     crate::FileSystemType::internal("timestamp-limits-test");
 
 impl SuperBlockOperations for SecondResolutionSuperBlockOperations {
-    fn statfs(&self, _super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, _super_block: &SuperBlock, _dentry: &crate::Dentry) -> VfsResult<StatFs> {
         Ok(StatFs {
             fs_type: 0,
             block_size: 512,

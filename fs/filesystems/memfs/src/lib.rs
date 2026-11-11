@@ -408,7 +408,7 @@ impl SuperBlockOperations for MemorySuperOperations {
         kvfs::TimestampLimits::NANOSECOND
     }
 
-    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, super_block: &SuperBlock, _dentry: &kvfs::Dentry) -> VfsResult<StatFs> {
         let fs = super_block.private::<Arc<MemoryFs>>()?;
         let mut stat = simple_statfs(fs.fs_type);
         stat.block_size =

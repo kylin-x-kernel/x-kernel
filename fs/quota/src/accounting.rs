@@ -389,6 +389,63 @@ impl<F> QuotaInfo<F> {
         Ok(())
     }
 
+    /// Enables enforcement for the classes selected by the quota-control flags.
+    pub fn enable_limits(&mut self, flags: u32) -> KResult<()> {
+        const ACCOUNTING: u32 = 0x15;
+        let flags = flags & !ACCOUNTING;
+        if flags == 0 {
+            return Err(LinuxError::EINVAL.into());
+        }
+        for kind in QuotaType::ALL {
+            if flags & (2 << (kind as u32 * 2)) == 0 {
+                continue;
+            }
+            let info = self
+                .info(kind)
+                .filter(|info| info.state.contains(QuotaState::USAGE_ENABLED))
+                .ok_or(LinuxError::EINVAL)?;
+            if info.state.contains(QuotaState::LIMITS_ENABLED) {
+                return Err(LinuxError::EEXIST.into());
+            }
+        }
+        for kind in QuotaType::ALL {
+            if flags & (2 << (kind as u32 * 2)) != 0
+                && let Some(info) = &mut self.info[kind.index()]
+            {
+                info.state.insert(QuotaState::LIMITS_ENABLED);
+            }
+        }
+        Ok(())
+    }
+
+    /// Disables enforcement while retaining filesystem-owned quota accounting.
+    pub fn disable_limits(&mut self, mut flags: u32) -> KResult<()> {
+        const ACCOUNTING: u32 = 0x15;
+        if flags & ACCOUNTING != 0 {
+            return Err(LinuxError::EOPNOTSUPP.into());
+        }
+        for kind in QuotaType::ALL {
+            let bit = 2 << (kind as u32 * 2);
+            if !self
+                .info(kind)
+                .is_some_and(|info| info.state.contains(QuotaState::LIMITS_ENABLED))
+            {
+                flags &= !bit;
+            }
+        }
+        if flags == 0 {
+            return Err(LinuxError::EEXIST.into());
+        }
+        for kind in QuotaType::ALL {
+            if flags & (2 << (kind as u32 * 2)) != 0
+                && let Some(info) = &mut self.info[kind.index()]
+            {
+                info.state.remove(QuotaState::LIMITS_ENABLED);
+            }
+        }
+        Ok(())
+    }
+
     /// Changes grace durations for subsequent crossings, preserving active deadlines.
     ///
     /// Writes the updated file information before returning. A failed write

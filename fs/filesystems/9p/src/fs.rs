@@ -83,7 +83,7 @@ impl SuperBlockOperations for V9fsSuperOperations {
         kvfs::TimestampLimits::new(1, 0, session.client.timestamp_max_seconds())
     }
 
-    fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
+    fn statfs(&self, super_block: &SuperBlock, _dentry: &kvfs::Dentry) -> VfsResult<StatFs> {
         let root = super_block.root_dir();
         let inode = root.downcast::<V9fsInode>()?;
         let stats = match inode.statfs() {

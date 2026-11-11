@@ -44,7 +44,7 @@ posix/fs/
 │   ├── xattr.rs        # set/get/list/remove xattr syscall families
 │   ├── mount.rs        # mount/umount2
 │   ├── stat.rs         # stat/fstatat/statx/access/statfs
-│   ├── ioctl.rs        # ioctl dispatch、FIONBIO 与 FIEMAP ABI handling
+│   ├── ioctl.rs        # ioctl dispatch、file attributes 与 FIEMAP ABI handling
 │   └── sync.rs         # sync/syncfs
 └── docs/
     ├── design.md
@@ -91,7 +91,7 @@ core/ksyscall
 | `xattr` | 实现 pathname、no-follow 和 fd 三种目标形式的 set/get/list/remove xattr，复制有界输入名称和值，并用单个有界 writer 处理 list size query/`ERANGE` |
 | `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，按注册的 `FileSystemType` 查找实现，并处理非递归 bind 与 remount |
 | `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
-| `ioctl` | 处理 `FIONBIO`、inode FIEMAP，并把其它命令转交 `FileLike::ioctl`；未识别命令返回 `ENOTTY`，仅 `debug!` 记录 |
+| `ioctl` | 处理 `FIONBIO`、inode FIEMAP 和文件属性，并把其它命令转交 `FileLike::ioctl`；未识别命令返回 `ENOTTY`，仅 `debug!` 记录 |
 | `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
 
 ## Content modification notifications
@@ -654,6 +654,8 @@ and converts classic quota records between 1-KiB limits and native byte counts.
 512-byte blocks. Both paths use the same superblock quota operation table and
 canonical state. Reservations are included in reported usage. Enumeration
 returns the least stored ID at or above the requested ID without wrapping.
+System quota files retain accounting while quota-on and quota-off commands
+toggle enforcement; external files continue through their activation callbacks.
 
 Queries for format, information, status and synchronization are unprivileged;
 user/effective-group owners may query their records. Other operations require

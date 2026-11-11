@@ -13,14 +13,82 @@ use kvfs::{SuperBlock, VfsInode};
 use super::into_vfs_err;
 use crate::{Ext4Inode, quota::Ext4QuotaIo};
 
+pub(super) fn apply_project_statfs(
+    super_block: &SuperBlock,
+    inode: &Ext4Inode,
+    stat: &mut kvfs::StatFs,
+) -> KResult<()> {
+    if inode.flags() & crate::disk::inode::EXT4_PROJINHERIT_FL == 0 {
+        return Ok(());
+    }
+    let limits_enabled = super_block
+        .quota_info()
+        .info(QuotaType::Project)
+        .is_some_and(|info| {
+            info.is_active() && info.state().contains(kquota::QuotaState::LIMITS_ENABLED)
+        });
+    if !limits_enabled {
+        return Ok(());
+    }
+    let id = kquota::QuotaId::new(QuotaType::Project, inode.project_id())?;
+    let data = super_block
+        .private::<crate::vfs::Ext4Mount>()?
+        .write(super_block)
+        .quota_record_operation(super_block, id, |quota, io| quota.get(io, id))?;
+
+    let min_limit = |soft: i64, hard: i64| match (soft, hard) {
+        (0, hard) => hard,
+        (soft, 0) => soft,
+        (soft, hard) => soft.min(hard),
+    };
+    let block_size = u64::from(stat.block_size);
+    let block_limit = u64::try_from(min_limit(
+        data.space_soft_limit_bytes,
+        data.space_hard_limit_bytes,
+    ))
+    .map_err(|_| LinuxError::EIO)?
+        / block_size;
+    if block_limit != 0 {
+        let used = u64::try_from(data.total_bytes()?).map_err(|_| LinuxError::EIO)? / block_size;
+        let free = block_limit.saturating_sub(used);
+        stat.blocks = stat.blocks.min(block_limit);
+        stat.blocks_free = stat.blocks_free.min(free);
+        stat.blocks_available = stat.blocks_available.min(free);
+    }
+    let inode_limit = u64::try_from(min_limit(data.inode_soft_limit, data.inode_hard_limit))
+        .map_err(|_| LinuxError::EIO)?;
+    if inode_limit != 0 {
+        let used = u64::try_from(data.used_inodes).map_err(|_| LinuxError::EIO)?;
+        stat.file_count = stat.file_count.min(inode_limit);
+        stat.free_file_count = stat.free_file_count.min(inode_limit.saturating_sub(used));
+    }
+    Ok(())
+}
+
 impl kvfs::QuotaOperations for crate::vfs::Ext4SuperOperations {
     fn supported_types(&self, _sb: &SuperBlock) -> u8 {
-        (1 << QuotaType::User as u8) | (1 << QuotaType::Group as u8)
+        (1 << QuotaType::User as u8)
+            | (1 << QuotaType::Group as u8)
+            | (1 << QuotaType::Project as u8)
     }
 
     fn has_system_files(&self, sb: &SuperBlock) -> bool {
         sb.private::<crate::vfs::Ext4Mount>()
             .is_ok_and(|mount| mount.read().has_quota_feature())
+    }
+
+    fn quota_enable(&self, sb: &SuperBlock, flags: u32) -> KResult<()> {
+        if !self.has_system_files(sb) {
+            return Err(LinuxError::ENOSYS.into());
+        }
+        sb.quota_info().enable_limits(flags)
+    }
+
+    fn quota_disable(&self, sb: &SuperBlock, flags: u32) -> KResult<()> {
+        if !self.has_system_files(sb) {
+            return Err(LinuxError::ENOSYS.into());
+        }
+        sb.quota_info().disable_limits(flags)
     }
 
     fn quota_on(

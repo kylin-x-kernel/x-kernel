@@ -203,6 +203,9 @@ fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
     let ext4 = super_block.private::<vfs::Ext4Mount>()?;
     if let Some(types) = options.quota_types {
         let state = ext4.read();
+        if types & 4 != 0 && !state.superblock().features().has_project() {
+            return Err(kvfs::VfsError::InvalidInput);
+        }
         if !state.has_quota_feature() {
             let quota = super_block.quota_info();
             for kind in kquota::QuotaType::ALL {

@@ -276,6 +276,7 @@ fn symlink_inode(
         Ext4InodeMetadata {
             uid: 0,
             gid: 0,
+            project_id: 0,
             disk_size: size,
             blocks,
             block,
@@ -299,6 +300,7 @@ fn special_inode(
     let metadata = Ext4InodeMetadata {
         uid: 0,
         gid: 0,
+        project_id: 0,
         disk_size: 0,
         blocks: 0,
         block,
@@ -327,6 +329,7 @@ fn regular_inode_metadata() -> Ext4InodeMetadata {
     Ext4InodeMetadata {
         uid: 0,
         gid: 0,
+        project_id: 0,
         disk_size: 0,
         blocks: 0,
         block: [0; disk_inode::INODE_BLOCK_BYTES],

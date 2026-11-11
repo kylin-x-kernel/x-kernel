@@ -1590,7 +1590,7 @@ errors after publication use the existing abort boundary. Final filesystem
 synchronization is still attempted. Lock order is mount state then quota state;
 backing I/O uses the already borrowed state and cannot reacquire the mount.
 
-Internal user/group quota files are selected by the decoded superblock inode
+Internal user/group/project quota files are selected by the decoded superblock inode
 numbers. Activation validates user inode 3, group inode 4 and the non-reserved
 project range before loading any class; malformed identities report EUCLEAN.
 Their canonical VFS references live only in `SuperBlock::quota_info`.
@@ -1604,11 +1604,7 @@ propagates the enclosing recovery policy through journal admission and handle
 completion, retaining evidence until the whole cleanup finishes. A clean read-only mount
 loads no quota files and performs no accounting writes. Recovery may temporarily
 enable supported accounting, then releases records and files and drains the
-journal before publishing a read-only mount. Project quota remains unsupported
-for writes until project identity and inheritance are integrated. Read-only
-project mounts retain orphan/recovery evidence instead of performing unaccounted
-cleanup. Filesystem sync also preserves this unsupported mount state without
-clearing recovery features. Read-only remount drains writeback and releases
+journal before publishing a read-only mount. Read-only remount drains writeback and releases
 cached records in bounded transactions before suspending accounting. After
 pinning its live inode snapshot, suspension waits for earlier inode evictions
 without holding mount mutation protection. Suspension
@@ -1635,7 +1631,7 @@ dirty usage records in the same handle as bitmap changes. Dropping a shared
 external-xattr reference releases that inode owner's charge even when the
 physical block remains allocated for other inodes. Fallocate uses the same
 allocation policy and reserves owner-record writeback credits for each batch. Raw bitmap operations
-retain their physical role. Up to four affected inodes contribute user/group
+retain their physical role. Up to four affected inodes contribute user/group/project
 record credits to an ordinary mutation.
 
 Physical allocation, reservation claims and releases update the resident inode's
@@ -1651,7 +1647,7 @@ validation before publishing orphan state.
 Regular-file `stat` includes delayed-allocation reservations alongside allocated
 sectors, while the persisted inode block count contains only allocated space.
 
-Each resident inode binds its user and group records to the quota cache before
+Each resident inode binds its user, group and project records to the quota cache before
 mutations. Binding imports the inode's existing delayed reservations, and
 ownership changes publish the new records with the new owner. Newly allocated
 directory and symlink inodes bind already acquired records during their initial
@@ -1687,10 +1683,15 @@ final disable
 invalidates class cache/info without I/O; the original error is returned and
 disk recovery flags and committed journal evidence remain intact. No copied file registry,
 dirty queue or parallel usage counter is introduced.
-`usrquota` and `grpquota` select limit enforcement for internal quota files.
+`usrquota`, `grpquota` and `prjquota` select limit enforcement for internal quota files.
 Without the on-disk QUOTA feature, they authorize external quota-file activation
 through the VFS quota operations. Accounting and limits are then loaded together.
-Project identity and inheritance remain unsupported for writable mounts.
+Project quota requires the on-disk project feature. A new child inherits the
+project ID when its parent has the project-inherit flag; directories also inherit
+the flag. Links and renames into such directories require matching project IDs.
+Changing an inode's project ID transfers its allocated space, delayed-allocation
+reservations and inode charge together, before publishing the new identity.
+Project-limited directories report their available resources through `statfs`.
 
 The asynchronous allocating and mapped-completion writeback transactions reserve
 owner-record credits at their existing journal admission boundary. Quota claims

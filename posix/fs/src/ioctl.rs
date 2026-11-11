@@ -11,7 +11,13 @@ use kvfs::{
     FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags, OpenFlags, VfsError,
     VfsFile, VfsResult,
 };
-use linux_raw_sys::ioctl::{FIONBIO, FS_IOC_FIEMAP, TCGETS, TIOCGWINSZ};
+use linux_raw_sys::{
+    general as fs_flags,
+    ioctl::{
+        FIONBIO, FS_IOC_FIEMAP, FS_IOC_FSGETXATTR, FS_IOC_FSSETXATTR, FS_IOC_GETFLAGS,
+        FS_IOC_SETFLAGS, TCGETS, TIOCGWINSZ,
+    },
+};
 use posix_types::{UserConstPtr, UserPtr, UserRead, UserWrite};
 
 #[repr(C)]
@@ -34,6 +40,120 @@ struct FiemapExtent {
     reserved64: [u64; 2],
     flags: u32,
     reserved: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, UserRead, UserWrite)]
+struct Fsxattr {
+    xflags: u32,
+    extsize: u32,
+    nextents: u32,
+    project_id: u32,
+    cowextsize: u32,
+    pad: [u8; 8],
+}
+
+const FILEATTR_FLAGS: [(u32, u32); 8] = [
+    (fs_flags::FS_SYNC_FL, fs_flags::FS_XFLAG_SYNC),
+    (fs_flags::FS_IMMUTABLE_FL, fs_flags::FS_XFLAG_IMMUTABLE),
+    (fs_flags::FS_APPEND_FL, fs_flags::FS_XFLAG_APPEND),
+    (fs_flags::FS_NODUMP_FL, fs_flags::FS_XFLAG_NODUMP),
+    (fs_flags::FS_NOATIME_FL, fs_flags::FS_XFLAG_NOATIME),
+    (fs_flags::FS_DAX_FL, fs_flags::FS_XFLAG_DAX),
+    (fs_flags::FS_PROJINHERIT_FL, fs_flags::FS_XFLAG_PROJINHERIT),
+    (fs_flags::FS_VERITY_FL, 0x0002_0000),
+];
+
+fn ioctl_fileattr(file: &VfsFile, cmd: u32, arg: usize) -> KResult<isize> {
+    let path = file.path();
+    match cmd {
+        FS_IOC_GETFLAGS => {
+            UserPtr::<u32>::from(arg).write_vm(path.fileattr_get()?.flags)?;
+        }
+        FS_IOC_SETFLAGS => {
+            let flags = UserConstPtr::<u32>::from(arg).read_vm()?;
+            path.fileattr_set(
+                kvfs::FileAttr {
+                    flags,
+                    project_id: 0,
+                    flags_valid: true,
+                },
+                &kprocess::current_cred(),
+            )?;
+        }
+        FS_IOC_FSGETXATTR => {
+            let attributes = path.fileattr_get()?;
+            let xflags = FILEATTR_FLAGS.iter().fold(0, |flags, &(common, xflag)| {
+                flags
+                    | if attributes.flags & common != 0 {
+                        xflag
+                    } else {
+                        0
+                    }
+            });
+            UserPtr::<Fsxattr>::from(arg).write_vm(Fsxattr {
+                xflags,
+                extsize: 0,
+                nextents: 0,
+                project_id: attributes.project_id,
+                cowextsize: 0,
+                pad: [0; 8],
+            })?;
+        }
+        FS_IOC_FSSETXATTR => {
+            let attributes = UserConstPtr::<Fsxattr>::from(arg).read_vm()?;
+            const KNOWN_XFLAGS: u32 = fs_flags::FS_XFLAG_REALTIME
+                | fs_flags::FS_XFLAG_PREALLOC
+                | fs_flags::FS_XFLAG_IMMUTABLE
+                | fs_flags::FS_XFLAG_APPEND
+                | fs_flags::FS_XFLAG_SYNC
+                | fs_flags::FS_XFLAG_NOATIME
+                | fs_flags::FS_XFLAG_NODUMP
+                | fs_flags::FS_XFLAG_RTINHERIT
+                | fs_flags::FS_XFLAG_PROJINHERIT
+                | fs_flags::FS_XFLAG_NOSYMLINKS
+                | fs_flags::FS_XFLAG_EXTSIZE
+                | fs_flags::FS_XFLAG_EXTSZINHERIT
+                | fs_flags::FS_XFLAG_NODEFRAG
+                | fs_flags::FS_XFLAG_FILESTREAM
+                | fs_flags::FS_XFLAG_DAX
+                | fs_flags::FS_XFLAG_COWEXTSIZE
+                | fs_flags::FS_XFLAG_HASATTR
+                | 0x000e_0000;
+            if attributes.xflags & !KNOWN_XFLAGS != 0 {
+                return Err(KError::OperationNotSupported);
+            }
+            if attributes.xflags & fs_flags::FS_XFLAG_EXTSIZE != 0 && !file.is_regular_file()
+                || attributes.xflags & fs_flags::FS_XFLAG_EXTSZINHERIT != 0 && !file.is_dir()
+                || attributes.xflags & fs_flags::FS_XFLAG_COWEXTSIZE != 0
+                    && !file.is_dir()
+                    && !file.is_regular_file()
+                || attributes.xflags & fs_flags::FS_XFLAG_DAX != 0
+                    && !file.is_dir()
+                    && !file.is_regular_file()
+            {
+                return Err(KError::InvalidInput);
+            }
+            let flags = FILEATTR_FLAGS.iter().fold(0, |flags, &(common, xflag)| {
+                flags
+                    | if attributes.xflags & xflag != 0 {
+                        common
+                    } else {
+                        0
+                    }
+            });
+            path.fileattr_set(
+                kvfs::FileAttr {
+                    flags,
+                    project_id: attributes.project_id,
+                    flags_valid: false,
+                },
+                &kprocess::current_cred(),
+            )?;
+        }
+        _ => return Err(KError::InvalidInput),
+    }
+    Ok(0)
 }
 
 const FIEMAP_MAX_EXTENTS: u32 = u32::MAX / size_of::<FiemapExtent>() as u32;
@@ -120,6 +240,12 @@ fn ioctl_fiemap(file: &VfsFile, ioctl_arg: usize) -> KResult<isize> {
 pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
     debug!("sys_ioctl <= fd: {fd}, cmd: {cmd}, arg: {arg}");
     let f = kprocess::current_files().get_file(fd)?;
+    if matches!(
+        cmd,
+        FS_IOC_GETFLAGS | FS_IOC_SETFLAGS | FS_IOC_FSGETXATTR | FS_IOC_FSSETXATTR
+    ) {
+        return ioctl_fileattr(&f, cmd, arg);
+    }
     if cmd == FS_IOC_FIEMAP {
         return ioctl_fiemap(&f, arg);
     }

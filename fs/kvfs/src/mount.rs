@@ -24,7 +24,7 @@ use ktime_types::TimeSpan;
 pub struct MountIdmap;
 
 use crate::{
-    Dentry, DentryKey, DeviceId, FMode, FileOperations, FsContext, GetattrQueryFlags,
+    Dentry, DentryKey, DeviceId, FMode, FileAttr, FileOperations, FsContext, GetattrQueryFlags,
     GetattrRequestMask, InodeUpdateTime, Metadata, MetadataUpdate, Mutex, NodeFlags,
     NodePermission, NodeType, OpenFlags, Permission, RemovedEntry, RenameFlags, RenameOutcome,
     SetattrTime, StatFs, SuperBlock, SuperBlockFlags, Umode, VfsError, VfsFile, VfsFileBuilder,
@@ -712,7 +712,7 @@ impl Mount {
 
     /// Returns filesystem statistics for this mount.
     pub fn filesystem_stat(&self) -> VfsResult<StatFs> {
-        self.super_block().stat()
+        self.super_block().stat_dentry(&self.mnt.mnt_root)
     }
 
     /// Allocates an opened pseudo file on this mount.
@@ -901,7 +901,53 @@ impl Path {
 
     /// Returns filesystem statistics for this path.
     pub fn filesystem_stat(&self) -> VfsResult<StatFs> {
-        self.super_block().stat()
+        self.super_block().stat_dentry(&self.dentry)
+    }
+
+    /// Reads filesystem-specific file attributes for this path.
+    pub fn fileattr_get(&self) -> VfsResult<FileAttr> {
+        self.inode().fileattr_get()
+    }
+
+    /// Changes filesystem-specific file attributes for this path.
+    pub fn fileattr_set(&self, mut attributes: FileAttr, cred: &Cred) -> VfsResult<()> {
+        use linux_raw_sys::general::{
+            FS_APPEND_FL, FS_DAX_FL, FS_IMMUTABLE_FL, FS_NOATIME_FL, FS_NODUMP_FL,
+            FS_PROJINHERIT_FL, FS_SYNC_FL, FS_VERITY_FL,
+        };
+
+        const COMMON: u32 = FS_SYNC_FL
+            | FS_IMMUTABLE_FL
+            | FS_APPEND_FL
+            | FS_NODUMP_FL
+            | FS_NOATIME_FL
+            | FS_DAX_FL
+            | FS_PROJINHERIT_FL
+            | FS_VERITY_FL;
+
+        let _write_guard = self.lock_writable_mount()?;
+        let inode = self.inode();
+        if cred.fsuid() != inode.metadata().uid && !cred.has_cap_fowner() {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        let _namespace_guard = inode.lock_namespace_exclusive();
+        let _data_guard = inode.lock_data();
+        let old = inode.fileattr_get()?;
+        if attributes.flags_valid {
+            attributes.project_id = old.project_id;
+        } else {
+            attributes.flags =
+                (attributes.flags & !FS_VERITY_FL) | (old.flags & (!COMMON | FS_VERITY_FL));
+        }
+        if (old.flags ^ attributes.flags) & (FS_IMMUTABLE_FL | FS_APPEND_FL) != 0
+            && !cred.has_cap(kcred::CAP_LINUX_IMMUTABLE)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        if attributes.project_id != old.project_id && attributes.project_id == u32::MAX {
+            return Err(VfsError::InvalidInput);
+        }
+        inode.fileattr_set(attributes)
     }
 
     /// Synchronizes the filesystem containing this path.

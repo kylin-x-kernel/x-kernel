@@ -6,7 +6,7 @@
 
 use alloc::sync::Arc;
 
-use kerrno::KResult;
+use kerrno::{KResult, LinuxError};
 use kquota::{Dqblk, QuotaFields, QuotaId, QuotaType};
 
 use crate::{SuperBlock, VfsInode};
@@ -33,6 +33,16 @@ pub trait QuotaOperations: Send + Sync {
 
     /// Disables enforcement, and external accounting, after draining writeback.
     fn quota_off(&self, sb: &SuperBlock, kind: QuotaType) -> KResult<()>;
+
+    /// Enables limit enforcement for filesystem-owned quota files.
+    fn quota_enable(&self, _sb: &SuperBlock, _flags: u32) -> KResult<()> {
+        Err(LinuxError::ENOSYS.into())
+    }
+
+    /// Disables limit enforcement for filesystem-owned quota files.
+    fn quota_disable(&self, _sb: &SuperBlock, _flags: u32) -> KResult<()> {
+        Err(LinuxError::ENOSYS.into())
+    }
 
     /// Flushes the selected class; a disabled class is a successful no-op.
     fn sync(&self, sb: &SuperBlock, kind: QuotaType) -> KResult<()>;

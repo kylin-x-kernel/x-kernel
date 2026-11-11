@@ -1456,7 +1456,7 @@ formats, while the concrete filesystem supplies direct backing-file I/O and
 transactions. Each loaded class retains the canonical VFS inode in that
 state, so filesystem integration needs no second class-to-inode array.
 Suspension and failed disable retain that reference; successful disable returns
-it for release after writeback and after leaving filesystem locks. Ext4 enables internal user/group usage accounting on mount.
+it for release after writeback and after leaving filesystem locks. Ext4 enables internal user/group/project usage accounting on mount.
 
 Quota operations may sleep. Their backing-file I/O must bypass charging and
 must not reenter the same quota owner or reacquire a caller-held filesystem
@@ -1519,6 +1519,10 @@ umount lock, validates lifecycle and class support, and invokes one command.
 On/off use exclusive admission; other commands use shared admission.
 `sync_for_quota` lets admitted callbacks drain writeback without reacquiring
 shutdown exclusion. Quota state and retained files remain in `quota_info`.
+`statfs` passes the queried dentry to the filesystem, allowing its result to
+reflect a project-inherit directory's quota. File-attribute operations use the
+inode's filesystem callbacks, with ownership and capability checks at the VFS
+boundary and the inode mutation locks held across validation and publication.
 
 `InodeAttributeOperations::flags` supplies filesystem-owned behavior flags from
 resident state. The existing owned-attribute implementation stores construction

@@ -224,7 +224,11 @@ impl Ext4SbInfo {
         gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4Inode> {
-        self.initialize_owner_quotas(uid, gid)?;
+        self.initialize_owner_quotas(
+            uid,
+            gid,
+            parent.inherited_project_id(self.superblock().features().has_project()),
+        )?;
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -259,7 +263,11 @@ impl Ext4SbInfo {
         gid: u32,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4Inode> {
-        self.initialize_owner_quotas(uid, gid)?;
+        self.initialize_owner_quotas(
+            uid,
+            gid,
+            parent.inherited_project_id(self.superblock().features().has_project()),
+        )?;
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -346,7 +354,11 @@ impl Ext4SbInfo {
         if !self.superblock().features().has_extents() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode));
         }
-        self.initialize_owner_quotas(uid, gid)?;
+        self.initialize_owner_quotas(
+            uid,
+            gid,
+            parent.inherited_project_id(self.superblock().features().has_project()),
+        )?;
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -387,7 +399,6 @@ impl Ext4SbInfo {
         let initialization = InodeInitialization::special(kind, permissions, device, uid, gid)?
             .with_timestamp(timestamp);
         let file_type = directory_file_type_for_inode_kind(kind);
-        self.initialize_owner_quotas(uid, gid)?;
         self.create_initialized_child(parent, name, initialization, file_type, timestamp)
     }
 
@@ -399,6 +410,11 @@ impl Ext4SbInfo {
         target: &Ext4Inode,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<()> {
+        if parent.flags() & disk_inode::EXT4_PROJINHERIT_FL != 0
+            && parent.project_id() != target.project_id()
+        {
+            return Err(Ext4Error::CrossProject);
+        }
         self.ensure_namespace_mutation_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -528,6 +544,11 @@ impl Ext4SbInfo {
         replaced: Option<&Ext4Inode>,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<()> {
+        if target_parent.flags() & disk_inode::EXT4_PROJINHERIT_FL != 0
+            && target_parent.project_id() != moved.project_id()
+        {
+            return Err(Ext4Error::CrossProject);
+        }
         self.ensure_namespace_mutation_supported(source_parent, source_name)?;
         self.ensure_namespace_mutation_supported(target_parent, target_name)?;
         let same_parent = source_parent.number() == target_parent.number();
@@ -627,7 +648,9 @@ impl Ext4SbInfo {
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
             name,
-            InodeInitialization::regular_file(permissions, uid, gid).with_timestamp(timestamp),
+            InodeInitialization::regular_file(permissions, uid, gid)
+                .with_timestamp(timestamp)
+                .with_parent(parent, self.superblock().features().has_project()),
             handle,
         )?;
         let child = self.internal_iget(allocation.inode())?;
@@ -656,7 +679,9 @@ impl Ext4SbInfo {
         let allocation = self.allocate_named_inode(
             Some(parent.number()),
             name,
-            InodeInitialization::directory(permissions, uid, gid).with_timestamp(timestamp),
+            InodeInitialization::directory(permissions, uid, gid)
+                .with_timestamp(timestamp)
+                .with_parent(parent, self.superblock().features().has_project()),
             handle,
         )?;
         let child = self.internal_iget(allocation.inode())?;
@@ -687,7 +712,13 @@ impl Ext4SbInfo {
         file_type: DirectoryFileType,
         timestamp: Ext4Timestamp,
     ) -> Ext4Result<Ext4Inode> {
-        self.initialize_owner_quotas(initialization.uid(), initialization.gid())?;
+        let initialization =
+            initialization.with_parent(parent, self.superblock().features().has_project());
+        self.initialize_owner_quotas(
+            initialization.uid(),
+            initialization.gid(),
+            initialization.project_id(),
+        )?;
         self.ensure_namespace_create_supported(parent, name)?;
         if self.lookup_bytes(parent, name)?.is_some() {
             return Err(Ext4Error::AlreadyExists);
@@ -742,7 +773,8 @@ impl Ext4SbInfo {
             Some(parent.number()),
             name,
             InodeInitialization::block_mapped_symlink(target.len(), uid, gid)?
-                .with_timestamp(timestamp),
+                .with_timestamp(timestamp)
+                .with_parent(parent, self.superblock().features().has_project()),
             handle,
         )?;
         let child = self.internal_iget(allocation.inode())?;
