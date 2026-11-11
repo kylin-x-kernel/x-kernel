@@ -27,7 +27,7 @@ use linux_raw_sys::net::{
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
 
-use crate::legacy_iptables::LegacyGetOption;
+use crate::legacy_iptables::{LegacyGetOption, LegacySetOption};
 
 const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
@@ -483,6 +483,15 @@ pub fn sys_setsockopt(
 
     let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
+    if level == PROTO_IP
+        && let Some(option) = LegacySetOption::from_raw(optname)
+    {
+        if (optlen as i32) < 0 {
+            return Err(KError::InvalidInput);
+        }
+        option.set(socket.as_ref(), optval, optlen as usize)?;
+        return Ok(0);
+    }
     if level == SOL_SOCKET && optname == SO_ATTACH_FILTER {
         if !supports_kobject_filter_compat(socket.as_ref()) {
             return Err(KError::OperationNotSupported);

@@ -141,7 +141,8 @@ chain entry. Semantic constructors reject invalid names, protocols, limits, and
 cycles before publication. `restore.rs` checks the old counter count under the
 publication write lock; failures preserve live state. Old counters are collected only
 after old-generation evaluations have finished. Incoming counters are ignored;
-ERROR counter preservation remains part of the future ADD_COUNTERS adapter.
+ERROR counters are saved separately by the compatibility layer and matched to
+the publication generation.
 
 `TableLayout` checks total byte arithmetic and native offset widths before
 output allocation. Layout and counters are derived from the same immutable table,
@@ -149,7 +150,8 @@ so their chain and rule order agree during encoding. Export uses validated chain
 IDs and preserves the table's resource limits.
 A configuration read guard keeps rules and counter layout in one generation;
 live counter samples need not be mutually consistent. Export owns its output,
-initializes ERROR counters to zero, and changes no configuration state on error.
+includes saved ERROR counters for that generation, and changes no configuration
+state on error.
 
 Legacy GET requests require `CAP_NET_ADMIN` at the POSIX boundary. Only fixed-size
 request prefixes are copied; the caller's advertised entry size never determines
@@ -157,12 +159,21 @@ an input allocation. Table names and extension revisions are checked before use.
 Responses contain initialized ABI bytes and owned entries, so user copies hold no
 filter lock. Queries currently address the global store, without network-namespace
 isolation, and do not modify rules or counters.
-`LegacyTableReader` holds a configuration reference rather than a table snapshot.
+`LegacyTableHandle` holds a configuration reference rather than a table snapshot.
 Each read uses the current generation; an equal-size replacement between metadata
 and entry queries may therefore be observed. Revision queries advertise only the
 declared native record formats, independently of rule-import and target-execution
 support. An encoder buffer-size violation is an internal failure reported as
 `EIO`, rather than an invalid userspace request.
+
+Legacy SET requests also require an IPv4 socket and `CAP_NET_ADMIN`. The POSIX layer
+copies size-checked entries or counters before calling the table handle, and keeps user output
+pointers at the syscall boundary. Table replacement validates the new table before installing it,
+and counter updates check the full entry count before changing any counter. The
+compatibility mutex is always locked before the configuration lock, keeping saved
+`ERROR` counters in sync with rule counters across management calls. Packet matching
+never reads `ERROR` counters. Copying old counters to user memory happens after all locks are
+released; if that copy fails after the new table is installed, the call still returns success.
 
 The prepared poller Work and its private NormalQueue live for the kernel
 lifetime. Initialization prepares storage before NIC notification sources can

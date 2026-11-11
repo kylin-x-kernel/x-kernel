@@ -51,11 +51,37 @@ pub struct XtGetRevision {
     pub revision: u8,
 }
 
+/// Native `IPT_SO_SET_REPLACE` header; entry bytes follow at offset 96.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+pub struct IptReplace {
+    pub name: [u8; TABLE_NAME_LEN],
+    pub valid_hooks: u32,
+    pub num_entries: u32,
+    pub size: u32,
+    pub hook_entry: [u32; HOOK_COUNT],
+    pub underflow: [u32; HOOK_COUNT],
+    pub num_counters: u32,
+    pub counters: u64,
+}
+
+/// Native `IPT_SO_SET_ADD_COUNTERS` header; counters follow at offset 40.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+pub struct XtCountersInfo {
+    pub name: [u8; TABLE_NAME_LEN],
+    pub num_counters: u32,
+    pub padding: [u8; 4],
+}
+
 const _: () = {
     assert!(size_of::<IptGetInfo>() == 84);
     assert!(size_of::<IptGetEntries>() == 40);
     assert!(offset_of!(IptGetEntries, size) == 32);
     assert!(size_of::<XtGetRevision>() == size_of::<linux::xt_get_revision>());
+    assert!(size_of::<IptReplace>() == 96);
+    assert!(offset_of!(IptReplace, counters) == 88);
+    assert!(size_of::<XtCountersInfo>() == size_of::<linux::xt_counters_info>());
 };
 
 pub(super) const IPV4_ADDRESS_SIZE: usize = size_of::<u32>();
@@ -96,11 +122,12 @@ pub(super) struct IptIp {
     pub(super) inverse_flags: u8,
 }
 
+/// Packet and byte counters for one legacy entry.
 #[repr(C)]
 #[derive(Clone, Copy, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
-pub(super) struct XtCounters {
-    pub(super) packets: u64,
-    pub(super) bytes: u64,
+pub struct XtCounters {
+    pub packets: u64,
+    pub bytes: u64,
 }
 
 #[repr(C)]

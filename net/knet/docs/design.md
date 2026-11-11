@@ -434,8 +434,7 @@ advance under the publication write lock only on successful replacement.
 Generation exhaustion rejects publication rather than reusing an earlier value.
 Rejected updates preserve the current state. These operations require sleepable
 task context; table construction and counter collection allocate bounded storage.
-The shared store starts with empty ACCEPT chains and remains internal pending
-network-path and ABI integration.
+The global store starts with empty ACCEPT chains.
 
 ### Legacy IPv4 Table Compatibility
 
@@ -478,11 +477,18 @@ In `restore.rs`, `LegacyFilterReplace` pairs the input table with the expected
 old counter count. Its `replace` method finishes restoration before taking the
 publication lock. It checks the expected old entry count under that lock, then publishes the
 new zero-counter table. Final old counters are collected outside the lock in
-legacy entry order, with zero values for ERROR markers. A validation or count
-conflict leaves the active table and generation unchanged. This internal path
-does not access user memory or maintain ADD_COUNTERS marker state.
+legacy entry order. A validation or count conflict keeps the current state unchanged.
+`LegacyTableHandle` implements writes in `restore.rs`. `ADD_COUNTERS` requires one counter per entry
+and sends rule and chain-end counters to `FilterConfig::add_counters`. `ERROR` entry counters
+are saved in the compatibility layer with their table generation. A mutex
+serializes writes and entry exports before either takes the configuration lock;
+packet matching needs only the configuration lock. Table replacement clears the saved `ERROR`
+counters after returning the old counters. New tables ignore input counters.
+The shared marker-counter mutex is initialized lazily on the first table lookup,
+allowing its constructor to register a lock class when lock statistics are enabled.
 
 `LegacyFilterTable` owns the complete entry array and its hook and policy offsets.
+`collect_counters` and `split_counters` map counters between legacy entries and semantic chains.
 `TableLayout` computes chain boundaries, total size, entry count, and hook and
 policy offsets before output allocation. It resolves targets against those chain
 positions and remains local to one conversion of the immutable source table.
@@ -491,13 +497,14 @@ at its tail. `LegacyFilterTable::encode` initializes the output from the layout
 and delegates each chain's marker, rules, counters, and tail to `encode_chain`,
 then writes the terminal ERROR entry.
 Jump offsets skip user-chain markers; Continue offsets select the next entry.
-Rule and chain-end counters map to their rule and tail entries; ERROR counters are zero.
+Rule and chain-end counters map to their rule and tail entries, while `ERROR` entries
+use the passed marker counters (zero for standalone encoding, or the saved totals during export).
 Output and scratch allocation require task context. Encoding failures discard
 the output and leave the source table unchanged.
 
-`query.rs` provides `LegacyTableReader`, which resolves the `filter` name to the
-global configuration. The reader borrows a configuration store without holding
-a lock or pinning a table generation. Each `info()` or `export_entries()` call
+`mod.rs` defines `LegacyTableHandle` and resolves the `filter` name to the global
+configuration. Query methods live in `query.rs`. The shared handle holds no lock
+or table snapshot. Each `info()` or `export_entries()` call
 reads the current generation independently: metadata uses only `TableLayout`,
 while entry export validates the requested size and encodes under one read guard.
 Rules and counter layout belong to that generation; live counters are sampled
@@ -515,6 +522,12 @@ kernel errors. An invalid encoder buffer size returns `EIO`, while invalid reque
 lengths return `EINVAL` at the POSIX boundary.
 POSIX owns IPv4 socket selection, `CAP_NET_ADMIN`, request lengths, and user
 copies, which run outside filter locks.
+`SET_REPLACE` accepts a 96-byte native header and the declared entries, allowing
+extra bytes at the end of the request. `ADD_COUNTERS` uses a 40-byte header and an exact counter
+array. Memory allocation is checked against the table limits before copying user input.
+A wrong old entry count returns `EAGAIN`; a wrong `ADD_COUNTERS` count returns
+`EINVAL`. Once a new table is installed, a failed copy of old counters to user memory
+does not undo the update or change its success return.
 
 ## Calling Constraints and Execution Context
 

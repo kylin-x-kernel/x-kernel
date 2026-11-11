@@ -45,9 +45,9 @@ pub(super) enum DecodeError {
 }
 
 // User-chain markers are bounded by MAX_CHAINS, including built-in chains.
-const MAX_ENTRIES: usize = MAX_RULES + 2 * MAX_CHAINS + 1;
+pub(super) const MAX_ENTRIES: usize = MAX_RULES + 2 * MAX_CHAINS + 1;
 // TCP and UDP have the largest supported match records.
-const MAX_BYTES: usize =
+pub(super) const MAX_BYTES: usize =
     MAX_ENTRIES * (STANDARD_ENTRY_SIZE + MAX_EXTENSION_MATCHES_PER_RULE * XT_TCP_MATCH_SIZE);
 
 /// Copied table fields and entry bytes, without replacement conditions.

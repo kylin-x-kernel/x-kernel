@@ -553,7 +553,7 @@ fn legacy_filter_gets_report_metadata_entries_and_revision_zero() {
     assert_eq!(len.read(), total as u32);
     let output = entries.read_bytes(total + 8).unwrap();
     assert_eq!(&output[..40], header.as_bytes());
-    let expected = knet::LegacyTableReader::lookup(&name)
+    let expected = knet::LegacyTableHandle::lookup(&name)
         .unwrap()
         .export_entries(info.size)
         .unwrap();
@@ -671,5 +671,274 @@ fn legacy_filter_get_requires_net_admin_even_for_root_uid() {
     );
     caller.commit_creds((*saved).clone());
     assert_eq!(result, Err(LinuxError::EPERM.into()));
+    close_socket(fd);
+}
+
+#[def_test(user, serial)]
+fn legacy_filter_writes_round_trip_counters_and_commit_before_copyout() {
+    let fd = sys_socket(AF_INET, SOCK_DGRAM, 0).unwrap() as i32;
+    let mut name = [0; 32];
+    name[..6].copy_from_slice(b"filter");
+    let reader = knet::LegacyTableHandle::lookup(&name).unwrap();
+    let info = reader.info().unwrap();
+    let wire = reader.export_entries(info.size).unwrap();
+    let counters = TestUserBuffer::new(info.num_entries as usize * 16).unwrap();
+    let mut header = knet::IptReplace {
+        name,
+        valid_hooks: info.valid_hooks,
+        num_entries: info.num_entries,
+        size: info.size,
+        hook_entry: info.hook_entry,
+        underflow: info.underflow,
+        num_counters: info.num_entries,
+        counters: counters.as_user_ptr::<u8>() as u64,
+    };
+    let len = 96 + wire.entries().len();
+    let request = TestUserBuffer::new(len + 8).unwrap();
+    let mut bytes = header.as_bytes().to_vec();
+    bytes.extend_from_slice(wire.entries());
+    bytes.extend_from_slice(&[0x5a; 8]);
+    request.write_bytes(&bytes).unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            0,
+            64,
+            request.as_user_ptr::<u8>().cast_const().into(),
+            (len + 8) as u32
+        ),
+        Ok(0)
+    );
+    assert_eq!(
+        counters.read_bytes(info.num_entries as usize * 16).unwrap(),
+        vec![0; info.num_entries as usize * 16]
+    );
+    assert_eq!(request.read_bytes(len + 8).unwrap(), bytes);
+
+    let update = knet::XtCountersInfo {
+        name,
+        num_counters: info.num_entries,
+        padding: [0x5a; 4],
+    };
+    let mut updates = update.as_bytes().to_vec();
+    for index in 0..info.num_entries {
+        updates.extend_from_slice(
+            knet::XtCounters {
+                packets: u64::from(index) + 1,
+                bytes: u64::from(index) + 100,
+            }
+            .as_bytes(),
+        );
+    }
+    let add = TestUserBuffer::new(updates.len()).unwrap();
+    add.write_bytes(&updates).unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            0,
+            65,
+            add.as_user_ptr::<u8>().cast_const().into(),
+            updates.len() as u32
+        ),
+        Ok(0)
+    );
+    assert_eq!(add.read_bytes(updates.len()).unwrap(), updates);
+    let counted = reader.export_entries(info.size).unwrap();
+    let get_header = knet::IptGetEntries {
+        name,
+        size: info.size,
+        padding: [0; 4],
+    };
+    let get = TestUserBuffer::new(40 + info.size as usize).unwrap();
+    get.write_bytes(get_header.as_bytes()).unwrap();
+    let get_len = TestUserValue::from_value(40 + info.size).unwrap();
+    assert_eq!(
+        sys_getsockopt(
+            fd,
+            0,
+            65,
+            get.as_user_ptr::<u8>().into(),
+            get_len.as_user_ptr().into()
+        ),
+        Ok(0)
+    );
+    let output = get.read_bytes(40 + info.size as usize).unwrap();
+    assert_eq!(&output[40..], counted.entries());
+    header.name = [b'x'; 32];
+    request.write_bytes(header.as_bytes()).unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            0,
+            64,
+            request.as_user_ptr::<u8>().cast_const().into(),
+            len as u32
+        ),
+        Err(LinuxError::ENOENT.into())
+    );
+    header.name = name;
+    assert_ne!(counted.entries(), wire.entries());
+    // A wrong expected entry count must leave both rule and ERROR entry counters unchanged.
+    header.num_counters -= 1;
+    request.write_bytes(header.as_bytes()).unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            0,
+            64,
+            request.as_user_ptr::<u8>().cast_const().into(),
+            len as u32
+        ),
+        Err(LinuxError::EAGAIN.into())
+    );
+    assert_eq!(reader.export_entries(info.size).unwrap(), counted);
+    header.num_counters += 1;
+    request.write_bytes(header.as_bytes()).unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            0,
+            64,
+            request.as_user_ptr::<u8>().cast_const().into(),
+            len as u32
+        ),
+        Ok(0)
+    );
+    assert_eq!(
+        counters.read_bytes(info.num_entries as usize * 16).unwrap(),
+        updates[40..]
+    );
+    assert_eq!(reader.export_entries(info.size).unwrap(), wire);
+    header.counters = 0;
+    request.write_bytes(header.as_bytes()).unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            0,
+            64,
+            request.as_user_ptr::<u8>().cast_const().into(),
+            len as u32
+        ),
+        Ok(0)
+    );
+    assert_eq!(reader.export_entries(info.size).unwrap(), wire);
+    close_socket(fd);
+}
+
+#[def_test(user)]
+fn legacy_filter_writes_check_access_lengths_and_allocation_bounds() {
+    let fd = sys_socket(AF_INET, SOCK_DGRAM, 0).unwrap() as i32;
+    let unix = sys_socket(AF_UNIX, SOCK_DGRAM, 0).unwrap() as i32;
+    for option in [64, 65] {
+        assert_eq!(
+            sys_setsockopt(-1, 0, option, Default::default(), 96),
+            Err(KError::BadFileDescriptor)
+        );
+        assert_eq!(
+            sys_setsockopt(unix, 0, option, Default::default(), 96),
+            Err(LinuxError::ENOPROTOOPT.into())
+        );
+        assert_eq!(
+            sys_setsockopt(fd, 0, option, Default::default(), u32::MAX),
+            Err(KError::InvalidInput)
+        );
+        assert_eq!(
+            sys_setsockopt(fd, 0, option, Default::default(), 128),
+            Err(KError::BadAddress)
+        );
+    }
+    for (option, len) in [(64, 95), (65, 40)] {
+        assert_eq!(
+            sys_setsockopt(fd, 0, option, Default::default(), len),
+            Err(KError::InvalidInput)
+        );
+    }
+    let buffer = TestUserBuffer::new(96).unwrap();
+    for (header, len, expected) in [
+        (
+            knet::IptReplace {
+                size: u32::MAX,
+                ..Default::default()
+            },
+            u32::MAX / 2,
+            LinuxError::E2BIG.into(),
+        ),
+        (
+            knet::IptReplace {
+                size: 632,
+                num_counters: 4,
+                ..Default::default()
+            },
+            96,
+            KError::InvalidInput,
+        ),
+        (knet::IptReplace::default(), 96, KError::InvalidInput),
+    ] {
+        buffer.write_bytes(header.as_bytes()).unwrap();
+        assert_eq!(
+            sys_setsockopt(
+                fd,
+                0,
+                64,
+                buffer.as_user_ptr::<u8>().cast_const().into(),
+                len
+            ),
+            Err(expected)
+        );
+    }
+    for count in [0, 1, u32::MAX] {
+        let header = knet::XtCountersInfo {
+            num_counters: count,
+            ..Default::default()
+        };
+        buffer.write_bytes(header.as_bytes()).unwrap();
+        assert_eq!(
+            sys_setsockopt(
+                fd,
+                0,
+                65,
+                buffer.as_user_ptr::<u8>().cast_const().into(),
+                72
+            ),
+            Err(KError::InvalidInput)
+        );
+    }
+    let page = TestUserBuffer::new(4096).unwrap();
+    let replace_ptr = page.as_user_ptr::<u8>().wrapping_add(4096 - 96);
+    let header = knet::IptReplace {
+        size: 152,
+        num_entries: 1,
+        num_counters: 4,
+        ..Default::default()
+    };
+    osvm::write_vm_bytes(replace_ptr, header.as_bytes()).unwrap();
+    assert_eq!(
+        sys_setsockopt(fd, 0, 64, replace_ptr.cast_const().into(), 96 + 152),
+        Err(KError::BadAddress)
+    );
+    let add_ptr = page.as_user_ptr::<u8>().wrapping_add(4096 - 40);
+    let header = knet::XtCountersInfo {
+        num_counters: 4,
+        ..Default::default()
+    };
+    osvm::write_vm_bytes(add_ptr, header.as_bytes()).unwrap();
+    assert_eq!(
+        sys_setsockopt(fd, 0, 65, add_ptr.cast_const().into(), 40 + 64),
+        Err(KError::BadAddress)
+    );
+    let caller = kprocess::current_user_thread();
+    let saved = caller.cred();
+    let mut cred = caller.prepare_creds();
+    cred.set_capabilities(kcred::CapSets::new(
+        kcred::CapSet::EMPTY,
+        kcred::CapSet::EMPTY,
+        kcred::CapSet::EMPTY,
+    ))
+    .unwrap();
+    caller.commit_creds(cred);
+    let results = [64, 65].map(|option| sys_setsockopt(fd, 0, option, Default::default(), 96));
+    caller.commit_creds((*saved).clone());
+    assert_eq!(results, [Err(LinuxError::EPERM.into()); 2]);
+    close_socket(unix);
     close_socket(fd);
 }

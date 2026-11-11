@@ -4,14 +4,18 @@
 
 use alloc::{vec, vec::Vec};
 
+use ksync::Mutex;
 use unittest::def_test;
 use zerocopy::FromBytes;
 
 use super::*;
 use crate::netfilter::{
-    compat::iptables_legacy::{EXTENSION_NAME_LEN, ExtensionKind, abi::IptEntry},
+    compat::iptables_legacy::{
+        EXTENSION_NAME_LEN, ExtensionKind, TABLE_NAME_LEN, abi::IptEntry, restore::MarkerCounters,
+    },
     filter::{
         chain::{Chain, FilterHook},
+        config::FilterConfig,
         counter::FilterCounter,
         matcher::{BaseMatch, Negated},
         rule::{Rule, Target, Verdict},
@@ -31,7 +35,11 @@ fn table(policy: Verdict, rules: Vec<Rule>) -> FilterTable {
 #[def_test]
 fn queries_follow_current_generation_and_exports_remain_owned() {
     let config = FilterConfig::new(FilterTable::accept_all());
-    let reader = LegacyTableReader { config: &config };
+    let markers = Mutex::new(MarkerCounters::default());
+    let reader = LegacyTableHandle {
+        config: &config,
+        markers: &markers,
+    };
     let info = reader.info().unwrap();
     assert_eq!(&info.name[..7], b"filter\0");
     assert_eq!(info.valid_hooks, 0x0e);
@@ -82,7 +90,11 @@ fn query_counters_match_export_and_encoding_failure_preserves_state() {
     };
     table.add_counters(&counters).unwrap();
     let config = FilterConfig::new(table);
-    let reader = LegacyTableReader { config: &config };
+    let markers = Mutex::new(MarkerCounters::default());
+    let reader = LegacyTableHandle {
+        config: &config,
+        markers: &markers,
+    };
     let before = config.with_state(|state| (state.generation(), state.collect_counters()));
     assert_eq!(reader.info().unwrap().size, 784);
     assert_eq!(
@@ -117,11 +129,11 @@ fn table_lookup_and_revision_queries_use_fixed_width_c_names() {
     let mut name = [0; TABLE_NAME_LEN];
     name[..6].copy_from_slice(b"filter");
     name[7..].fill(0xff);
-    let reader = LegacyTableReader::lookup(&name).unwrap();
+    let reader = LegacyTableHandle::lookup(&name).unwrap();
     let info = reader.info().unwrap();
     assert!(reader.export_entries(info.size).is_ok());
     assert_eq!(
-        LegacyTableReader::lookup(&[b'x'; TABLE_NAME_LEN]).err(),
+        LegacyTableHandle::lookup(&[b'x'; TABLE_NAME_LEN]).err(),
         Some(LinuxError::ENOENT.into())
     );
     for (kind, names) in [

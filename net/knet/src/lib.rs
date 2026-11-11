@@ -57,8 +57,9 @@ use lazyinit::LazyInit;
 pub(crate) use link::{buf, wire};
 pub use link::{packet, send_link_frame};
 pub use netfilter::compat::iptables_legacy::{
-    EXTENSION_NAME_LEN, ExtensionKind, IptGetEntries, IptGetInfo, LegacyFilterTable,
-    LegacyTableReader, TABLE_NAME_LEN, XtGetRevision,
+    EXTENSION_NAME_LEN, ExtensionKind, IptGetEntries, IptGetInfo, IptReplace, LegacyFilterReplace,
+    LegacyFilterTable, LegacyTableHandle, TABLE_NAME_LEN, XtCounters, XtCountersInfo,
+    XtGetRevision,
 };
 pub(crate) use network::ipv4;
 pub(crate) use runtime::{poller, service};

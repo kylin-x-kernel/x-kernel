@@ -7,13 +7,15 @@
 use alloc::{vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
+use ksync::Mutex;
 use linux_raw_sys::net::nf_inet_hooks::{
     NF_INET_FORWARD, NF_INET_LOCAL_IN, NF_INET_LOCAL_OUT, NF_INET_NUMHOOKS,
 };
 
 use crate::netfilter::filter::{
     chain::{Chain, ChainKind, FilterHook},
-    counter::ChainCounters,
+    config::{self, FilterConfig, FilterConfigError},
+    counter::{ChainCounters, FilterCounter},
     matcher::BaseMatch,
     rule::Target,
     table::FilterTable,
@@ -25,15 +27,43 @@ mod encode;
 mod query;
 mod restore;
 
-use abi::{ERROR_ENTRY_SIZE, STANDARD_ENTRY_SIZE, XT_RETURN, XtCounters};
-pub use abi::{EXTENSION_NAME_LEN, IptGetEntries, IptGetInfo, TABLE_NAME_LEN, XtGetRevision};
+use abi::{ERROR_ENTRY_SIZE, STANDARD_ENTRY_SIZE, XT_RETURN};
+pub use abi::{
+    EXTENSION_NAME_LEN, IptGetEntries, IptGetInfo, IptReplace, TABLE_NAME_LEN, XtCounters,
+    XtCountersInfo, XtGetRevision,
+};
 pub(super) use encode::EncodeError;
-pub use query::LegacyTableReader;
+pub use restore::LegacyFilterReplace;
+use restore::{MARKER_COUNTERS, MarkerCounters};
 
 const HOOK_COUNT: usize = NF_INET_NUMHOOKS as usize;
 const FILTER_VALID_HOOKS: u32 = (1 << NF_INET_LOCAL_IN as u32)
     | (1 << NF_INET_FORWARD as u32)
     | (1 << NF_INET_LOCAL_OUT as u32);
+
+/// Access to the current legacy filter table and its counters.
+///
+/// Operations require sleepable task context. The handle holds no lock or snapshot;
+/// each operation accesses the current table.
+pub struct LegacyTableHandle<'a> {
+    config: &'a FilterConfig,
+    markers: &'a Mutex<MarkerCounters>,
+}
+
+impl LegacyTableHandle<'static> {
+    /// Finds the global `filter` table by its ABI name.
+    ///
+    /// The last name byte is reserved for NUL. Returns `ENOENT` for unknown names.
+    pub fn lookup(name: &[u8; TABLE_NAME_LEN]) -> KResult<Self> {
+        if abi_name(name) != b"filter" {
+            return Err(LinuxError::ENOENT.into());
+        }
+        Ok(Self {
+            config: config::global(),
+            markers: &MARKER_COUNTERS,
+        })
+    }
+}
 
 /// The extension class selected by a legacy revision query.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,10 +102,10 @@ impl LegacyFilterTable {
     /// Encodes a validated table in chain order and samples its counters.
     ///
     /// Published tables must remain borrowed through `FilterConfig::with_state`.
-    /// ERROR marker counters are zero. Errors discard the partially built output.
+    /// `ERROR` entry counters are set to zero. If encoding fails, the partial output is dropped.
     fn from_table(table: &FilterTable) -> Result<Self, EncodeError> {
         let layout = TableLayout::new(table)?;
-        Self::encode(table, layout)
+        Self::encode(table, &layout, &[])
     }
 
     /// Returns the supported hook mask.
@@ -103,21 +133,52 @@ impl LegacyFilterTable {
         &self.entries
     }
 
-    /// Collects counters in legacy entry order; ERROR markers have zero counters.
-    fn collect_counters(table: &FilterTable) -> Vec<XtCounters> {
+    /// Collects counters in legacy entry order, filling `ERROR` entries from `markers`.
+    fn collect_counters(table: &FilterTable, markers: &[FilterCounter]) -> Vec<XtCounters> {
+        let mut markers = markers.iter().copied().map(XtCounters::from);
         let mut counters = Vec::with_capacity(TableLayout::entry_count(table));
         for (chain, counts) in table.chains().iter().zip(table.collect_counters()) {
             if matches!(chain.kind(), ChainKind::UserDefined { .. }) {
-                counters.push(XtCounters::default());
+                counters.push(markers.next().unwrap_or_default());
             }
             counters.extend(counts.rules.into_iter().map(XtCounters::from));
             counters.push(XtCounters::from(counts.end));
         }
-        counters.push(XtCounters::default());
+        counters.push(markers.next().unwrap_or_default());
         counters
     }
 
-    fn encode(table: &FilterTable, layout: TableLayout) -> Result<Self, EncodeError> {
+    fn split_counters(
+        table: &FilterTable,
+        counters: &[XtCounters],
+    ) -> Result<(Vec<ChainCounters>, Vec<FilterCounter>), FilterConfigError> {
+        if counters.len() != TableLayout::entry_count(table) {
+            return Err(FilterConfigError::InvalidCounterShape);
+        }
+        let mut input = counters.iter().map(|counter| FilterCounter {
+            packets: counter.packets,
+            bytes: counter.bytes,
+        });
+        let mut chains = Vec::with_capacity(table.chains().len());
+        let mut markers = Vec::new();
+        for chain in table.chains() {
+            if matches!(chain.kind(), ChainKind::UserDefined { .. }) {
+                markers.push(input.next().ok_or(FilterConfigError::InvalidCounterShape)?);
+            }
+            let rules = input.by_ref().take(chain.rules().len()).collect();
+            let end = input.next().ok_or(FilterConfigError::InvalidCounterShape)?;
+            chains.push(ChainCounters { rules, end });
+        }
+        markers.push(input.next().ok_or(FilterConfigError::InvalidCounterShape)?);
+        Ok((chains, markers))
+    }
+
+    fn encode(
+        table: &FilterTable,
+        layout: &TableLayout,
+        markers: &[FilterCounter],
+    ) -> Result<Self, EncodeError> {
+        let mut markers = markers.iter().copied();
         let mut result = Self {
             valid_hooks: FILTER_VALID_HOOKS,
             hook_entry: layout.hook_entry,
@@ -130,12 +191,13 @@ impl LegacyFilterTable {
         for ((chain, chain_layout), counters) in
             table.chains().iter().zip(&layout.chains).zip(counters)
         {
-            result.encode_chain(chain, chain_layout, counters, &layout)?;
+            let marker = matches!(chain.kind(), ChainKind::UserDefined { .. })
+                .then(|| markers.next().unwrap_or_default());
+            result.encode_chain(chain, chain_layout, counters, marker, layout)?;
         }
-        encode::encode_error_entry(
-            &mut result.entries[layout.size_bytes - ERROR_ENTRY_SIZE..],
-            "ERROR",
-        )?;
+        let tail = &mut result.entries[layout.size_bytes - ERROR_ENTRY_SIZE..];
+        encode::encode_error_entry(tail, "ERROR")?;
+        encode::encode_counter(tail, markers.next().unwrap_or_default())?;
         Ok(result)
     }
 
@@ -144,13 +206,13 @@ impl LegacyFilterTable {
         chain: &Chain,
         chain_layout: &ChainLayout,
         counters: ChainCounters,
+        marker: Option<FilterCounter>,
         layout: &TableLayout,
     ) -> Result<(), EncodeError> {
         if let ChainKind::UserDefined { name } = chain.kind() {
-            encode::encode_error_entry(
-                &mut self.entries[chain_layout.head_offset..chain_layout.rules_offset],
-                name,
-            )?;
+            let entry = &mut self.entries[chain_layout.head_offset..chain_layout.rules_offset];
+            encode::encode_error_entry(entry, name)?;
+            encode::encode_counter(entry, marker.unwrap_or_default())?;
         }
 
         let mut offset = chain_layout.rules_offset;
