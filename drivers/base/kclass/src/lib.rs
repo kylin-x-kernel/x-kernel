@@ -224,6 +224,18 @@ macro_rules! class_registries {
             )+
         }
 
+        /// Remove class entries for `id` without going through the device-event
+        /// bridge.
+        ///
+        /// Tests that reset the device registry clear the bridge's one-shot
+        /// `Removed` subscription but cannot reset the one-shot initializer.
+        /// Those tests may call this after `remove_device_managed` to release
+        /// the class runtime explicitly.
+        #[cfg(unittest)]
+        pub fn remove_class_device_for_tests(id: DeviceId) {
+            remove_class_device(id);
+        }
+
         $(
             class_registry!(
                 $feature,

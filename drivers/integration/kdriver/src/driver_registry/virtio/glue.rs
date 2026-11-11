@@ -108,6 +108,23 @@ cfg_if! {
                     T,
                 >::try_new(transport)?))
             }
+
+            /// Constructs a socket through the test counting HAL.
+            ///
+            /// Everything else, including the production HAL, the RX buffer
+            /// size and the provider/bounce-pool paths, is identical to
+            /// [`Self::try_new`]. Only the synthetic MMIO fixture dispatches
+            /// here, so the caller attributes these counts to that scenario.
+            #[cfg(unittest)]
+            pub(super) fn try_new_counting<T: virtio::Transport + 'static>(
+                transport: T,
+                _irq: Option<driver_os_api::IrqResource>,
+            ) -> DriverResult<kclass::prelude::VsockDeviceImpl> {
+                Ok(Box::new(virtio::VirtIoVsockDev::<
+                    super::virtio_mmio_support::CountingVirtIoHal,
+                    T,
+                >::try_new(transport)?))
+            }
         }
     }
 }

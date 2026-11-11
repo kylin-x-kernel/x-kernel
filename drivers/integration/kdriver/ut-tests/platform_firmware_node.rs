@@ -23,7 +23,7 @@ use kdevice::{
 };
 use khal::firmware::devices::{
     FirmwareDevice, FirmwareSource, FwError, FwIrqSpec, FwMmioResource, FwNode, FwNodeId,
-    FwNodeOps, FwProperty, FwPropertyValue, FwReference, FwSource,
+    FwNodeOps, FwProperty, FwPropertyValue, FwReference, FwSource, MmioResource,
 };
 use kspin::SpinNoPreempt;
 use ksync::static_lock;
@@ -225,8 +225,71 @@ fn dt_device() -> (FirmwareDevice, FwNode<'static>) {
             firmware_id: "fwnode-test",
             source: FirmwareSource::DeviceTree,
             node,
-            mmio: None,
+            mmio: Ok(None),
             irq: Ok(None),
+        },
+        node,
+    )
+}
+
+/// Synthetic tree for the virtio-mmio discovery path:
+///
+/// ```text
+/// / {
+///     #address-cells = <1>;
+///     #size-cells = <1>;
+///     virtio@1000 {
+///         compatible = "virtio,mmio";
+///         reg = <0x1000 0x200>;
+///     };
+/// };
+/// ```
+fn virtio_mmio_tree() -> Vec<u8> {
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.property("#address-cells", &cells(&[1]));
+    blob.property("#size-cells", &cells(&[1]));
+    blob.begin("virtio@1000");
+    blob.property("compatible", b"virtio,mmio\0");
+    blob.property("reg", &cells(&[0x1000, 0x200]));
+    blob.end();
+    blob.end();
+    blob.finish()
+}
+
+/// Builds a real-DT-backed `virtio,mmio` device whose normalized MMIO range is
+/// read from the fixture's `reg` property.
+fn dt_virtio_device() -> (FirmwareDevice, FwNode<'static>) {
+    let bytes: &'static [u8] = KBox::leak(
+        KBox::from_slice(&virtio_mmio_tree()).expect("fixture allocation failed"),
+    );
+    let tree = LinuxFdt::new(bytes).expect("fixture is a valid device tree");
+    let backend: &'static DtBackend<'static> =
+        KBox::leak(KBox::new(DtBackend::new(tree)).expect("fixture allocation failed"));
+    let node = backend
+        .root()
+        .expect("fixture has a root")
+        .descendants()
+        .find(|node| {
+            node.firmware_ids()
+                .any(|id| id == VIRTIO_MMIO_COMPATIBLE)
+        })
+        .expect("fixture has a virtio,mmio device");
+    let resource = node
+        .mmio_resource(0)
+        .expect("reg is readable")
+        .expect("reg is declared");
+
+    (
+        FirmwareDevice {
+            firmware_id: VIRTIO_MMIO_COMPATIBLE,
+            source: FirmwareSource::DeviceTree,
+            node,
+            mmio: Ok(Some(MmioResource {
+                base: usize::try_from(resource.base).expect("64-bit target"),
+                size: usize::try_from(resource.size).expect("64-bit target"),
+            })),
+            irq: node.irq_spec(0),
         },
         node,
     )
@@ -324,6 +387,46 @@ fn real_dt_node_reaches_probe_through_platform_registration() {
     assert_eq!(records.len(), 1);
     let bound = kdevice::find_device(records[0].id).unwrap();
     assert_eq!(bound.firmware_node(), Some(node));
+}
+
+#[def_test(serial)]
+fn real_dt_virtio_mmio_is_registered_as_a_description_only() {
+    let (device, _node) = dt_virtio_device();
+    let (mut backend, mut context, bus_id) = setup();
+
+    backend
+        .register_firmware_device(&mut context, bus_id, &device)
+        .unwrap();
+    assert_eq!(context.registered_count(), 1);
+
+    let descs = kdevice::device_descs_snapshot();
+    assert_eq!(descs.len(), 1);
+    let desc = &descs[0];
+    assert_eq!(
+        desc.location(),
+        DeviceLocation::Mmio {
+            base: 0x1000,
+            size: 0x200,
+        }
+    );
+    assert_eq!(
+        desc.identity(),
+        DeviceIdentity::Platform(PlatformIdentity {
+            alias: None,
+            firmware_id: Some(VIRTIO_MMIO_COMPATIBLE),
+        })
+    );
+    // Discovery describes the node; it does not read the device header. The
+    // descriptor-level firmware-node accessor is device-core-internal; the
+    // node association is covered by the probe-path test above.
+    assert_eq!(desc.transport(), None);
+    assert_eq!(desc.resources().len(), 1);
+
+    // No driver in this test claims the descriptor, so probing it publishes
+    // nothing — the description alone is the discovery result.
+    assert_eq!(context.probe_pending(), 0);
+    assert_eq!(context.unclaimed_count(), 1);
+    assert!(kdevice::device_records_snapshot().is_empty());
 }
 
 // -- A2: source-neutral fake backend, same consumer --------------------------

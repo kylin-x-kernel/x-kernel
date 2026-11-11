@@ -21,6 +21,7 @@ kalloc = { workspace = true }
 kdma = { workspace = true }
 kirq = { workspace = true }
 khal = { workspace = true }
+ksync = { workspace = true }
 ktime_types = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }

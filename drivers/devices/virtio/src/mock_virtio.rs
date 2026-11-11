@@ -99,6 +99,8 @@ pub struct MockTransport {
     /// Optional selector-aware config-space responder for multi-query probes.
     pub config_handler: Option<Arc<ConfigHandler>>,
     pub status: RefCell<DeviceStatus>,
+    /// Every status written, in order, shared with the test that observes it.
+    pub status_history: Arc<kspin::SpinNoIrq<alloc::vec::Vec<DeviceStatus>>>,
     pub features: u64,
     pub config_space: Arc<kspin::SpinNoIrq<[u8; 256]>>,
     pub config_read_count: Arc<AtomicUsize>,
@@ -126,6 +128,7 @@ impl MockTransport {
             device_type,
             config_handler: None,
             status: RefCell::new(DeviceStatus::empty()),
+            status_history: Arc::new(kspin::SpinNoIrq::new(alloc::vec::Vec::new())),
             features: 0,
             config_space: Arc::new(kspin::SpinNoIrq::new([0; 256])),
             config_read_count: Arc::new(AtomicUsize::new(0)),
@@ -154,7 +157,9 @@ impl Transport for MockTransport {
     fn write_driver_features(&mut self, _features: u64) {}
 
     fn max_queue_size(&mut self, _queue: u16) -> u32 {
-        32
+        // Large enough for every device implementation under test; for example
+        // the vsock queues are 128 entries.
+        256
     }
 
     fn notify(&mut self, _queue: u16) {}
@@ -165,6 +170,7 @@ impl Transport for MockTransport {
 
     fn set_status(&mut self, status: DeviceStatus) {
         *self.status.borrow_mut() = status;
+        self.status_history.lock().push(status);
     }
 
     fn set_guest_page_size(&mut self, _guest_page_size: u32) {}

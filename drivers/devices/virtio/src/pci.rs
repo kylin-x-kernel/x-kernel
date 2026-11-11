@@ -204,6 +204,13 @@ impl Transport for PciTransport {
         }
     }
 
+    fn reset(&mut self) {
+        // Forward instead of relying on the trait default: this wrapper's
+        // `set_status` also drives MSI-X state, while the inner transport owns
+        // the write-zero-and-poll reset semantics.
+        self.inner.reset();
+    }
+
     fn set_guest_page_size(&mut self, guest_page_size: u32) {
         self.inner.set_guest_page_size(guest_page_size);
     }

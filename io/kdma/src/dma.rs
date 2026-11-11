@@ -30,6 +30,27 @@ pub(crate) struct DmaAllocator {
     active_mappings: BTreeMap<u64, BounceMapping>,
     #[cfg(feature = "dma-trace")]
     coherent_allocs: BTreeMap<usize, CoherentAllocation>,
+    /// Test-only in-use coherent allocations, keyed by CPU address.
+    #[cfg(unittest)]
+    test_coherent_allocs: BTreeMap<usize, usize>,
+}
+
+/// Read-only snapshot of in-use DMA resources, for unit-test baselines.
+#[cfg(unittest)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DmaTestStats {
+    /// Number of active streaming (bounce) mappings.
+    pub active_mappings: usize,
+    /// Total bytes of active streaming (bounce) mappings.
+    pub active_mapping_bytes: usize,
+    /// Bounce-pool bytes currently allocated.
+    pub bounce_used_bytes: usize,
+    /// Bounce-pool total size, or zero before it is initialized.
+    pub bounce_total_bytes: usize,
+    /// Number of active coherent allocations.
+    pub coherent_allocations: usize,
+    /// Total bytes of active coherent allocations.
+    pub coherent_bytes: usize,
 }
 
 #[cfg(feature = "dma-trace")]
@@ -55,6 +76,8 @@ impl DmaAllocator {
             active_mappings: BTreeMap::new(),
             #[cfg(feature = "dma-trace")]
             coherent_allocs: BTreeMap::new(),
+            #[cfg(unittest)]
+            test_coherent_allocs: BTreeMap::new(),
         }
     }
 
@@ -93,6 +116,11 @@ impl DmaAllocator {
             bus_addr: v2b(vaddr),
         };
         self.trace_coherent_alloc(dma_info, num_pages);
+        #[cfg(unittest)]
+        self.test_coherent_allocs.insert(
+            dma_info.cpu_addr.as_ptr() as usize,
+            num_pages * PAGE_SIZE_4K,
+        );
         Ok(dma_info)
     }
 
@@ -135,6 +163,9 @@ impl DmaAllocator {
         if !self.trace_coherent_free(dma, num_pages) {
             return;
         }
+        #[cfg(unittest)]
+        self.test_coherent_allocs
+            .remove(&(dma.cpu_addr.as_ptr() as usize));
         let virt_raw = dma.cpu_addr.as_ptr() as usize;
         let size = num_pages * PAGE_SIZE_4K;
         let vaddr = va!(virt_raw);
@@ -145,6 +176,20 @@ impl DmaAllocator {
         let _ = self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal);
 
         global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+    }
+
+    /// Returns a read-only snapshot of in-use DMA resources for test baselines.
+    #[cfg(unittest)]
+    pub(crate) fn test_stats(&self) -> DmaTestStats {
+        let (bounce_used_bytes, bounce_total_bytes) = self.bounce_pool.test_used_total_bytes();
+        DmaTestStats {
+            active_mappings: self.active_mappings.len(),
+            active_mapping_bytes: self.active_mappings.values().map(|m| m.len).sum(),
+            bounce_used_bytes,
+            bounce_total_bytes,
+            coherent_allocations: self.test_coherent_allocs.len(),
+            coherent_bytes: self.test_coherent_allocs.values().sum(),
+        }
     }
 
     /// Maps an existing CPU buffer through the bounce pool for a temporary DMA transaction.

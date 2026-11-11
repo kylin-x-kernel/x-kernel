@@ -26,6 +26,19 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU16, Ordering, fence};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 
+/// The outcome of [`VirtQueue::add_notify_wait_pop_checked`].
+///
+/// If `token` is `Some`, the buffers passed to that call are still published to
+/// the device and remain owned by the queue. The caller must keep them valid,
+/// stop the device, and detach them by token before releasing the buffers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SyncError {
+    /// The error which occurred.
+    pub error: Error,
+    /// The published token, if publication had already happened.
+    pub token: Option<u16>,
+}
+
 /// The mechanism for bulk data transport on virtio devices.
 ///
 /// Each device can have zero or more virtqueues.
@@ -59,6 +72,10 @@ pub struct VirtQueue<H: Hal, const SIZE: usize, B: DmaBackend = StaticHal<H>> {
     num_used: u16,
     /// The head desc index of the free list.
     free_head: u16,
+    /// Per-head in-flight state. This is the single authority for whether a
+    /// head's buffers are still owned by the device; `num_used` only counts
+    /// descriptors and cannot answer that.
+    in_use: [bool; SIZE],
     /// Our trusted copy of `desc` that the device can't access.
     desc_shadow: [Descriptor; SIZE],
     /// Our trusted copy of `avail.idx`.
@@ -171,6 +188,7 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
             queue_idx: idx,
             num_used: 0,
             free_head: 0,
+            in_use: [false; SIZE],
             desc_shadow,
             avail_idx: 0,
             last_used_idx: 0,
@@ -230,6 +248,10 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
         };
         #[cfg(not(feature = "alloc"))]
         let head = self.add_direct(inputs, outputs)?;
+
+        // The head stays in flight until `recycle_descriptors` unshares it; a
+        // failed pop in particular must not make these buffers look free.
+        self.in_use[usize::from(head)] = true;
 
         let avail_slot = self.avail_idx & (SIZE as u16 - 1);
         // SAFETY: `self.avail` is properly aligned, dereferenceable and initialised.
@@ -424,6 +446,56 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
         unsafe { self.pop_used(token, inputs, outputs) }
     }
 
+    /// Add buffers, notify the device, wait for them to be used, and pop them,
+    /// reporting whether publication happened if an error occurs.
+    ///
+    /// This assumes that the device isn't processing any other buffers at the
+    /// same time. It busy-waits until an element appears in the used ring; it
+    /// has no timeout, and the caller remains responsible for stopping a device
+    /// which does not respond.
+    ///
+    /// # Safety
+    ///
+    /// The buffers must stay valid and must not be otherwise accessed until one
+    /// of these is true:
+    ///
+    /// - `Ok` is returned; the queue has unshared them.
+    /// - `Err` with `token: Some` is returned, and the caller has stopped the
+    ///   device and detached that token with [`Self::detach_unused_buffer`].
+    /// - `Err` with `token: None` is returned; nothing was published, so the
+    ///   buffers may be released immediately.
+    pub unsafe fn add_notify_wait_pop_checked<'a>(
+        &mut self,
+        inputs: &'a [&'a [u8]],
+        outputs: &'a mut [&'a mut [u8]],
+        transport: &mut impl Transport,
+    ) -> core::result::Result<u32, SyncError> {
+        // SAFETY: The caller keeps the buffers valid for the whole call and,
+        // after a published error, until the detach obligation is met.
+        let token = match unsafe { self.add(inputs, outputs) } {
+            Ok(token) => token,
+            Err(error) => return Err(SyncError { error, token: None }),
+        };
+
+        if self.should_notify() {
+            transport.notify(self.queue_idx);
+        }
+
+        while !self.can_pop() {
+            spin_loop();
+        }
+
+        // SAFETY: These are the same buffers as passed to `add` above and they
+        // are still valid; on failure the returned token records their state.
+        match unsafe { self.pop_used(token, inputs, outputs) } {
+            Ok(len) => Ok(len),
+            Err(error) => Err(SyncError {
+                error,
+                token: Some(token),
+            }),
+        }
+    }
+
     /// Advise the device whether used buffer notifications are needed.
     ///
     /// See Virtio v1.1 2.6.7 Used Buffer Notification Suppression
@@ -600,6 +672,45 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
                 panic!("Descriptor chain was longer than expected.");
             }
         }
+
+        self.in_use[usize::from(head)] = false;
+    }
+
+    /// Returns the number of heads still owned by the device.
+    ///
+    /// This counts publication, not descriptor use: a head whose pop failed
+    /// with [`Error::WrongToken`] is still outstanding.
+    pub fn outstanding_heads(&self) -> usize {
+        self.in_use.iter().filter(|&&in_use| in_use).count()
+    }
+
+    /// Unshares and frees the buffers of one published head which the device
+    /// will not complete on its own.
+    ///
+    /// Returns `false` without touching anything if `token` is not an
+    /// outstanding head.
+    ///
+    /// # Safety
+    ///
+    /// The device must have stopped accessing this queue and its buffers, and
+    /// the caller must not use this queue again afterwards. The buffers in
+    /// `inputs` and `outputs` must be the ones passed to the `add` call which
+    /// returned `token`, and must still be valid and exclusively held.
+    pub unsafe fn detach_unused_buffer<'a>(
+        &mut self,
+        token: u16,
+        inputs: &'a [&'a [u8]],
+        outputs: &'a mut [&'a mut [u8]],
+    ) -> bool {
+        let index = usize::from(token);
+        if index >= SIZE || !self.in_use[index] {
+            return false;
+        }
+        // SAFETY: The caller stopped device access and supplied the matching buffers.
+        unsafe {
+            self.recycle_descriptors(token, inputs, outputs);
+        }
+        true
     }
 
     /// If the given token is next on the device used queue, pops it and returns the total buffer
@@ -970,6 +1081,26 @@ fn take_first_mut<'a, T>(slice: &mut &'a mut [T]) -> Option<&'a mut T> {
     let (first, rem) = take(slice).split_first_mut()?;
     *slice = rem;
     Some(first)
+}
+
+/// Rewrites the id of the most recently published used-ring entry.
+///
+/// Test-only helper for simulating a device which completes a different
+/// descriptor chain than the driver submitted.
+#[cfg(test)]
+pub(crate) fn fake_corrupt_last_used_id<const QUEUE_SIZE: usize>(
+    queue_device_area: *mut u8,
+    id: u16,
+) {
+    let used_ring = queue_device_area as *mut UsedRing<QUEUE_SIZE>;
+    // SAFETY: The caller passes the device area of a configured fake queue and
+    // at least one used entry has been published.
+    unsafe {
+        let used_idx = (*used_ring).idx.load(Ordering::Acquire);
+        assert_ne!(used_idx, 0);
+        let slot = used_idx.wrapping_sub(1) & (QUEUE_SIZE as u16 - 1);
+        (*used_ring).ring[slot as usize].id = u32::from(id);
+    }
 }
 
 /// Simulates the device reading from a VirtIO queue and writing a response back, for use in tests.

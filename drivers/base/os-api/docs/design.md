@@ -43,6 +43,18 @@ hardware and consumer accesses first; provider release obeys its context
 contract. IRQ detach/drain must complete before dependent storage is reclaimed.
 Neither guards nor raw addresses authorize access after shutdown.
 
+## MMIO range claims
+MmioClaimOp is the host-side registry for exclusive physical MMIO ranges. A
+successful `claim_mmio` returns an opaque MmioClaimToken for
+`[base, base + size)`; any overlapping live token is refused with Busy, and a
+failed call transfers no ownership. MmioClaim owns the exact token and releases
+that acquisition on drop, so release never normalizes a region. Implementations
+perform the overlap check and insertion as one operation and may allocate while
+claiming; callers use sleepable probe/removal task context rather than IRQ or
+preemption-disabled context. The contract is limited to its participants:
+mappings made through other entry points, and owners that never claim, are not
+arbitrated, so a claim is not system-wide MMIO exclusivity.
+
 ## IRQ
 IrqRouteDesc is an unresolved legacy route. IrqResource distinguishes plain
 resolved virq from a mapped virq carrying its origin, without a zero-number

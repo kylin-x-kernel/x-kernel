@@ -80,6 +80,12 @@ impl BouncePool {
         }
     }
 
+    /// Returns `(used_bytes, total_bytes)` of the bounce allocator.
+    #[cfg(unittest)]
+    pub(super) fn test_used_total_bytes(&self) -> (usize, usize) {
+        (self.allocator.used_bytes(), self.allocator.total_bytes())
+    }
+
     fn contains_cpu_addr(&self, cpu_addr: usize) -> bool {
         self.region.as_ref().is_some_and(|region| {
             (region.cpu_addr..region.cpu_addr + region.size).contains(&cpu_addr)

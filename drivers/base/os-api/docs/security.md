@@ -13,6 +13,9 @@ device shutdown is a framework/driver responsibility, not inferred from Drop.
   allocation must remain valid until guard release.
 - Raw DMA tuples require caller pairing. Never free memory
   while hardware or escaped callbacks can still access it.
+- `MmioClaimOp::release_mmio` is unsafe: the token must be an unreleased
+  acquisition from the same provider. MmioClaim releases exactly once on drop
+  and never constructs a token itself.
 
 ## Failure analysis
 | Risk | Mitigation / owner |
@@ -24,6 +27,8 @@ device shutdown is a framework/driver responsibility, not inferred from Drop.
 | Allocation failure | Typed error; failed acquisition registers nothing |
 | DMA still running at drop | Driver stops hardware before cleanup |
 | Invalid release context | Caller follows host provider's synchronous contract |
+| Two participants access one MMIO range | Token claim refuses any overlap while the first owner lives; failure transfers nothing and release is by exact token |
+| Claim mistaken for system-wide exclusivity | Only claim participants are arbitrated; other mapping entry points and non-participating drivers remain outside the contract |
 | DMA view silently widened | Explicit identity/window constructors; mask validated as contiguous low bits; whole-interval translation checks window and mask; no missing-firmware default |
 
 MSI `try_free_msix` rejection must have no release side effects and returns the

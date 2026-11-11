@@ -430,8 +430,11 @@ Registered ──► early_init() ──► enumerate() ──► probe_pending(
    / ACPI).
    - For each node, query the registered `FirmwareMatchSpec`s (AHCI,
      sdmmc, fxmac, ...) for compatible matching.
-   - VirtIO MMIO is special-cased: the `virtio,mmio` compatible is
-     detected and the MMIO region mapped to probe the VirtIO device type.
+   - VirtIO MMIO is special-cased: every `virtio,mmio` node is registered
+     from its description alone. A node with a first MMIO range gets a
+     `DeviceLocation::Mmio`; one without it gets a `FirmwareNode` location so
+     probe can reject it. Neither path records a `TransportInfo` or reads a
+     register. Empty slots and unknown device ids are not filtered here.
    - Build the `ResourceSet` (MMIO + IRQ) and register through the
      `EnumerationContext`.
      After selecting a supported device, map its firmware declaration through
@@ -439,7 +442,11 @@ Registered ──► early_init() ──► enumerate() ──► probe_pending(
      cells unchanged. Failure — including an unreadable or malformed
      declaration, an unready controller, or a conflict — skips that device and
      records an enumeration error; no unmapped numeric fallback is published.
-     Empty/unsupported VirtIO MMIO slots do not allocate IRQ mappings.
+     Because empty and unknown `virtio,mmio` slots are no longer filtered at
+     enumeration, their IRQ declarations are mapped like any other firmware
+     device; the mapping stays attached to the `Pending` descriptor and is
+     unused (and not released) until generic device teardown handles it. This
+     is the accepted cost of describing devices before probing them.
    - `PlatformBackend::register_firmware_device` is the single per-device
      helper used by production enumeration and by the integration tests. It
      preserves the firmware node already carried by `FirmwareDevice` and stores
@@ -624,7 +631,34 @@ transports:
    `PciBus`, and run `probe_pci_device`, confirming the transport's
    reported `DeviceKind` matches the driver's declaration.
 2. **MMIO path**: extract the physical address and size from
-   `DeviceLocation::Mmio`, `iomap_mmio`, then run `probe_mmio_device`.
+   `DeviceLocation::Mmio`, claim that physical range through
+   `resource::claim_mmio_region` (the shared `driver_os_api::MmioClaimOp`
+   contract, implemented by the X-Kernel provider), then `iomap_mmio`.
+   The claim is acquired
+   before any register access and stays owned by the mapping guard, so a
+   duplicate descriptor registered by a rescan cannot identify or open a
+   range that a live transport still owns; an overlapping claim fails with
+   `ResourceBusy` before any register access. Claim coverage is limited to
+   participants of the shared contract: `memspace::iomap_device`,
+   `kdriver::iomap_mmio`, `devm_iomap` and non-VirtIO drivers do not join it,
+   so this is not system-wide MMIO exclusivity. `virtio::identify_mmio_device`
+   then validates the header and returns the raw device id **read-only** —
+   it constructs no transport and writes no status register. The raw id is
+   compared with the driver's declared type: an empty slot (id 0) or any
+   other type fails with `Unsupported` before any device state exists. Only
+   on an exact match does `virtio::open_mmio_transport` construct the
+   transport and hand it to the dispatcher. `iomap_mmio` takes one mapping
+   reference per call (cached hits included). The reference moves into
+   `virtio::OwnedMmioTransport`, whose transport field is dropped before its
+   mapping guard, so the region is unmapped only after the transport's last
+   access and `Drop` reset, and the claim is released after the unmap;
+   failed candidates drop the guard on return. Unmapping is not decided from
+   the dispatch result. Removing a published device drops its class runtime
+   first, so a VSOCK or sound device owner unsets its queues, resets the
+   device, and releases RX mappings and queue rings before the transport (and
+   therefore the claim) is dropped; other device kinds still rely on their
+   transport `Drop` alone. The teardown order and its evidence are described
+   in `drivers/devices/virtio/docs/design.md`.
 3. **Dispatch**: `dispatch_virtio_try_new` dispatches on `DeviceKind`:
    - `DeviceKind::Net` → `VirtIoNet::try_new` → `kclass::publish_net`
    - `DeviceKind::Block` → `block::activate` → IRQ setup → `kclass::publish_block`
@@ -813,9 +847,15 @@ requires rolling back a registered `DeviceObject` mid-probe on failure.
 **Trade-off**: twice the descriptor count (6 device types × 2 = 12), in
 exchange for:
 
-- the matcher (`VirtioTypeMatcher`) works on the VirtIO type code rather
-  than PCI vendor/device ids or DT compatibles, so devices discovered via
-  PCI and MMIO both match the same functional driver;
+- PCI descriptors carry the VirtIO type in `TransportInfo`, so the PCI
+  driver uses `VirtioTypeMatcher` on the type code rather than PCI
+  vendor/device ids;
+- platform descriptors only carry the `virtio,mmio` firmware identity, so
+  the MMIO driver uses a `FirmwareMatchSpec` for that compatible and decides
+  the concrete type during probe from the read-only header. Every enabled
+  MMIO function driver therefore attempts every `virtio,mmio` descriptor;
+  wrong candidates fail read-only and the descriptor stays `Pending` for the
+  next candidate;
 - the PCI vs MMIO activation differences are sealed inside
   `activate_virtio_pci` / `activate_virtio_mmio`; the upper
   `dispatch_virtio_try_new` is fully transport-agnostic.

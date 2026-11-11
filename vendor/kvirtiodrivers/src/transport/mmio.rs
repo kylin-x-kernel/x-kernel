@@ -68,6 +68,79 @@ pub enum MmioError {
     /// The MMIO region size was smaller than the header size we expect.
     #[error("MMIO region too small")]
     MmioRegionTooSmall,
+    /// The MMIO base pointer was not aligned for the header layout.
+    #[error("MMIO base pointer is not properly aligned")]
+    Misaligned,
+}
+
+/// Read-only identification fields of a VirtIO MMIO header.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct MmioHeaderInfo {
+    /// The version of the VirtIO MMIO transport supported by the device.
+    pub version: MmioVersion,
+    /// The raw VirtIO device ID reported by the device.
+    ///
+    /// Zero and IDs this crate does not support are preserved as-is; it is up
+    /// to the caller to decide whether they identify a device worth driving.
+    pub device_id: u32,
+}
+
+/// The raw fields needed to identify a device, read before any validation.
+struct RawHeader {
+    magic: u32,
+    version: u32,
+    device_id: u32,
+}
+
+fn read_raw_header(header: &UniqueMmioPointer<'_, VirtIOHeader>) -> RawHeader {
+    RawHeader {
+        magic: field_shared!(header, magic).read(),
+        version: field_shared!(header, version).read(),
+        device_id: field_shared!(header, device_id).read(),
+    }
+}
+
+/// Reads the identifying fields of a VirtIO MMIO header without side effects.
+///
+/// Unlike [`MmioTransport::new`], this neither constructs a transport nor
+/// writes any register, so it is safe to use while deciding whether to drive a
+/// device. The device ID is returned raw: zero and unknown IDs are ordinary
+/// successful results, not errors.
+///
+/// # Safety
+///
+/// `reg_base` must point to a valid, mapped MMIO region of at least `mmio_size`
+/// bytes that remains valid for the duration of the call, and the caller must
+/// have exclusive access to that region for the whole call. This function
+/// creates a [`UniqueMmioPointer`] over the header, so no other alias may read
+/// or write the same registers while the call is in progress. Reads are
+/// volatile; no writes are performed and no pointer escapes.
+pub unsafe fn read_mmio_header(
+    reg_base: NonNull<u8>,
+    mmio_size: usize,
+) -> Result<MmioHeaderInfo, MmioError> {
+    // `pointer::is_aligned_to` is still unstable on the pinned toolchain, so
+    // check the address directly.
+    if (reg_base.as_ptr() as usize) % align_of::<VirtIOHeader>() != 0 {
+        return Err(MmioError::Misaligned);
+    }
+    if mmio_size.checked_sub(CONFIG_SPACE_OFFSET).is_none() {
+        return Err(MmioError::MmioRegionTooSmall);
+    }
+
+    // SAFETY: The caller promises that `reg_base` is a valid MMIO region of at
+    // least `mmio_size` bytes, and we checked that it is properly aligned.
+    let header = unsafe { UniqueMmioPointer::new(reg_base.cast::<VirtIOHeader>()) };
+    let raw = read_raw_header(&header);
+
+    if raw.magic != MAGIC_VALUE {
+        return Err(MmioError::BadMagic(raw.magic));
+    }
+    let version = raw.version.try_into()?;
+    Ok(MmioHeaderInfo {
+        version,
+        device_id: raw.device_id,
+    })
 }
 
 /// MMIO Device Register Interface, both legacy and modern.
@@ -311,13 +384,13 @@ impl<'a> MmioTransport<'a> {
         header: UniqueMmioPointer<'a, VirtIOHeader>,
         config_space: UniqueMmioPointer<'a, [u8]>,
     ) -> Result<Self, MmioError> {
-        let magic = field_shared!(header, magic).read();
-        if magic != MAGIC_VALUE {
-            return Err(MmioError::BadMagic(magic));
+        let raw = read_raw_header(&header);
+        if raw.magic != MAGIC_VALUE {
+            return Err(MmioError::BadMagic(raw.magic));
         }
-        let device_id = field_shared!(header, device_id).read();
-        let device_type = DeviceType::try_from(device_id).map_err(MmioError::InvalidDeviceID)?;
-        let version = field_shared!(header, version).read().try_into()?;
+        let device_type =
+            DeviceType::try_from(raw.device_id).map_err(MmioError::InvalidDeviceID)?;
+        let version = raw.version.try_into()?;
         Ok(Self {
             header,
             version,
@@ -376,6 +449,15 @@ impl Transport for MmioTransport<'_> {
 
     fn set_status(&mut self, status: DeviceStatus) {
         field!(self.header, status).write(status);
+    }
+
+    fn reset(&mut self) {
+        // Writing 0 to device_status resets the device. Wait for the readback
+        // so a compliant device has stopped using the old queues before the
+        // caller releases them. This is the device-side stop only; host IRQ
+        // callbacks are a separate concern (see `Transport::reset`).
+        self.set_status(DeviceStatus::empty());
+        while self.get_status() != DeviceStatus::empty() {}
     }
 
     fn set_guest_page_size(&mut self, guest_page_size: u32) {
@@ -543,7 +625,120 @@ impl Transport for MmioTransport<'_> {
 
 impl Drop for MmioTransport<'_> {
     fn drop(&mut self) {
-        // Reset the device when the transport is dropped.
-        self.set_status(DeviceStatus::empty())
+        // Reset the device when the transport is dropped. This is the last
+        // MMIO access and must happen before the caller's mapping is released.
+        self.reset()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Returns a byte pointer to `header` for use with [`read_mmio_header`].
+    fn header_pointer(header: &mut VirtIOHeader) -> NonNull<u8> {
+        let ptr = UniqueMmioPointer::from(header).ptr();
+        NonNull::new(ptr.cast_mut().cast::<u8>()).unwrap()
+    }
+
+    #[test]
+    fn reads_modern_header() {
+        let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, 1, 0, 0, 4);
+        let info = unsafe { read_mmio_header(header_pointer(&mut header), CONFIG_SPACE_OFFSET) }
+            .unwrap();
+        assert_eq!(
+            info,
+            MmioHeaderInfo {
+                version: MmioVersion::Modern,
+                device_id: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn reads_legacy_header() {
+        let mut header = VirtIOHeader::make_fake_header(LEGACY_VERSION, 2, 0, 0, 4);
+        let info = unsafe { read_mmio_header(header_pointer(&mut header), CONFIG_SPACE_OFFSET) }
+            .unwrap();
+        assert_eq!(info.version, MmioVersion::Legacy);
+        assert_eq!(info.device_id, 2);
+    }
+
+    #[test]
+    fn rejects_bad_magic() {
+        let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, 1, 0, 0, 4);
+        header.magic = ReadPure(0xdead_beef);
+        assert_eq!(
+            unsafe { read_mmio_header(header_pointer(&mut header), CONFIG_SPACE_OFFSET) },
+            Err(MmioError::BadMagic(0xdead_beef))
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_versions() {
+        for version in [0, 3, u32::MAX] {
+            let mut header = VirtIOHeader::make_fake_header(version, 1, 0, 0, 4);
+            assert_eq!(
+                unsafe { read_mmio_header(header_pointer(&mut header), CONFIG_SPACE_OFFSET) },
+                Err(MmioError::UnsupportedVersion(version))
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_short_region() {
+        let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, 1, 0, 0, 4);
+        assert_eq!(
+            unsafe { read_mmio_header(header_pointer(&mut header), CONFIG_SPACE_OFFSET - 1) },
+            Err(MmioError::MmioRegionTooSmall)
+        );
+    }
+
+    #[test]
+    fn rejects_misaligned_base() {
+        // `u8` arrays have alignment 1, so use an explicitly aligned buffer and
+        // offset into it to produce a misaligned base.
+        #[repr(align(4))]
+        struct AlignedRegion([u8; CONFIG_SPACE_OFFSET]);
+
+        let mut region = AlignedRegion([0; CONFIG_SPACE_OFFSET]);
+        let base = NonNull::new(region.0.as_mut_ptr()).unwrap();
+        // SAFETY: `add` stays inside the allocation; the pointer is never
+        // dereferenced because the alignment check rejects it first.
+        let misaligned = unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) };
+        assert_eq!(
+            unsafe { read_mmio_header(misaligned, CONFIG_SPACE_OFFSET) },
+            Err(MmioError::Misaligned)
+        );
+    }
+
+    #[test]
+    fn preserves_empty_and_unknown_ids() {
+        for device_id in [0, 0xffff_ffff] {
+            let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, device_id, 0, 0, 4);
+            let info =
+                unsafe { read_mmio_header(header_pointer(&mut header), CONFIG_SPACE_OFFSET) }
+                    .unwrap();
+            assert_eq!(info.device_id, device_id);
+        }
+    }
+
+    #[test]
+    fn identification_never_writes_status() {
+        let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, 1, 0, 0, 4);
+        header.status = ReadPureWrite(DeviceStatus::DRIVER_OK);
+
+        let info = unsafe { read_mmio_header(header_pointer(&mut header), CONFIG_SPACE_OFFSET) }
+            .unwrap();
+        assert_eq!(info.device_id, 1);
+        assert_eq!(header.status.0, DeviceStatus::DRIVER_OK);
+
+        // The error paths must not reset the device either.
+        header.magic = ReadPure(0);
+        assert_eq!(
+            unsafe { read_mmio_header(header_pointer(&mut header), CONFIG_SPACE_OFFSET) },
+            Err(MmioError::BadMagic(0))
+        );
+        assert_eq!(header.status.0, DeviceStatus::DRIVER_OK);
     }
 }

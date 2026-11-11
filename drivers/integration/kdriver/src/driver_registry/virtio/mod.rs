@@ -25,14 +25,15 @@ use alloc::sync::Arc;
 #[cfg(feature = "virtio")]
 use driver_base::{DeviceKind, DriverError, DriverResult};
 #[cfg(feature = "virtio")]
-use driver_os_api::IrqResource;
+use driver_os_api::{IrqResource, MmioClaim};
 #[cfg(feature = "virtio")]
 use kdevice::{
-    BusTypeId, DeviceDriver, DeviceLocation, DeviceMatcher, DeviceObject, VirtioTypeMatcher,
+    BusTypeId, DeviceDesc, DeviceDriver, DeviceLocation, DeviceMatcher, DeviceObject,
+    FirmwareMatchSpec, MatchResult, VirtioTypeMatcher,
 };
 
 #[cfg(feature = "virtio")]
-use self::ids::virtio_type;
+use self::ids::{VIRTIO_MMIO_COMPATIBLE, virtio_type};
 #[cfg(feature = "virtio")]
 use crate::driver_registry::BoxedDriver;
 
@@ -40,12 +41,38 @@ use crate::driver_registry::BoxedDriver;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Matcher chosen by the transport the driver is registered for.
+///
+/// PCI descriptors carry the VirtIO type discovered from config space, so the
+/// PCI driver keeps [`VirtioTypeMatcher`]. Platform descriptors only carry the
+/// `virtio,mmio` firmware identity; the concrete type is decided during probe.
+enum VirtioMatcher {
+    Pci(VirtioTypeMatcher),
+    Mmio(FirmwareMatchSpec),
+}
+
+impl DeviceMatcher for VirtioMatcher {
+    fn matches(&self, desc: &DeviceDesc) -> MatchResult {
+        match self {
+            Self::Pci(matcher) => matcher.matches(desc),
+            Self::Mmio(matcher) => matcher.matches(desc),
+        }
+    }
+
+    fn firmware_spec(&self) -> Option<&FirmwareMatchSpec> {
+        match self {
+            Self::Pci(_) => None,
+            Self::Mmio(spec) => Some(spec),
+        }
+    }
+}
+
 struct VirtioDriver {
     name: &'static str,
     kind: DeviceKind,
     device_type: u32,
     bus_type: BusTypeId,
-    matcher: VirtioTypeMatcher,
+    matcher: VirtioMatcher,
 }
 
 impl DeviceDriver for VirtioDriver {
@@ -70,7 +97,7 @@ impl DeviceDriver for VirtioDriver {
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
-        activate_virtio_device(device, self.kind, self.device_type)
+        activate_virtio_device(device, self.bus_type, self.kind, self.device_type)
     }
 
     fn remove(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
@@ -89,12 +116,23 @@ fn make_virtio_driver(
     device_type: u32,
     bus_type: BusTypeId,
 ) -> BoxedDriver {
+    let matcher = if bus_type == BusTypeId::PCI {
+        VirtioMatcher::Pci(VirtioTypeMatcher { device_type })
+    } else {
+        VirtioMatcher::Mmio(FirmwareMatchSpec {
+            // The alias is only consulted for platform-static devices; using
+            // the driver name keeps this matcher from matching one by accident.
+            alias: name,
+            dt_compatibles: &[VIRTIO_MMIO_COMPATIBLE],
+            acpi_ids: &[],
+        })
+    };
     Arc::new(VirtioDriver {
         name,
         kind,
         device_type,
         bus_type,
-        matcher: VirtioTypeMatcher { device_type },
+        matcher,
     })
 }
 
@@ -113,10 +151,14 @@ macro_rules! virtio_driver_pair {
 }
 
 // ---------------------------------------------------------------------------
-// Shared activate logic (PCI path — type already known)
+// Shared activate logic
 // ---------------------------------------------------------------------------
 
-/// Activate a VirtIO device whose type is known (PCI path).
+/// Activate a VirtIO device using the path selected by its bus.
+///
+/// The PCI path already knows the VirtIO type from config space; the platform
+/// path must identify the device from its read-only MMIO header before it can
+/// decide.
 #[cfg(feature = "virtio")]
 #[expect(
     clippy::allow_attributes,
@@ -130,23 +172,21 @@ macro_rules! virtio_driver_pair {
 )]
 fn activate_virtio_device(
     device: Arc<DeviceObject>,
+    bus_type: BusTypeId,
     device_kind: DeviceKind,
     vtype: u32,
 ) -> DriverResult<()> {
-    match device.location() {
-        DeviceLocation::Pci { .. } => activate_virtio_pci(device, device_kind),
-        DeviceLocation::Mmio { .. }
-            if matches!(
-                device.transport(),
-                Some(kdevice::TransportInfo::Virtio { device_type }) if device_type == vtype
-            ) =>
-        {
-            activate_virtio_mmio(device, device_kind)
-        }
-        _ => {
-            log::warn!("virtio probe: unsupported location {:?}", device.location());
-            Err(DriverError::Unsupported)
-        }
+    if bus_type == BusTypeId::PCI {
+        activate_virtio_pci(device, device_kind)
+    } else if bus_type == BusTypeId::PLATFORM {
+        activate_virtio_mmio(device, device_kind, vtype)
+    } else {
+        log::warn!(
+            "virtio {device_kind:?} at {:?}: unsupported bus type {}",
+            device.location(),
+            bus_type.name()
+        );
+        Err(DriverError::Unsupported)
     }
 }
 
@@ -279,25 +319,260 @@ fn no_interrupt_error(device: &DeviceObject, device_kind: DeviceKind) -> DriverE
     }
 }
 
+/// Decision made from a read-only MMIO header read.
 #[cfg(feature = "virtio")]
-fn activate_virtio_mmio(device: Arc<DeviceObject>, device_kind: DeviceKind) -> DriverResult<()> {
-    let (base, size) = match device.location() {
-        DeviceLocation::Mmio { base, size } => (base, size),
-        _ => return Err(DriverError::InvalidInput),
-    };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MmioMatch {
+    /// The header reports the type this driver handles.
+    Match,
+    /// The header reports no device (VirtIO device ID 0).
+    EmptySlot,
+    /// The header reports a different, supported device.
+    Mismatch { found: u32 },
+}
 
-    let regs = crate::iomap_mmio(base, size, "virtio-mmio-transport")?;
-    let irq = device.first_irq();
-    // SAFETY: `regs` was obtained from `iomap_mmio` which maps a valid
-    // physical MMIO region, and `size` matches the region size.
-    let (ty, transport) =
-        unsafe { virtio::probe_mmio_device(regs.as_ptr(), size) }.ok_or(DriverError::BadState)?;
+/// Classifies a raw MMIO device ID against the type a driver declares.
+#[cfg(feature = "virtio")]
+fn classify_mmio_device(device_id: u32, expected: u32) -> MmioMatch {
+    match device_id {
+        0 => MmioMatch::EmptySlot,
+        found if found == expected => MmioMatch::Match,
+        found => MmioMatch::Mismatch { found },
+    }
+}
 
-    if ty != device_kind {
-        return Err(DriverError::Unsupported);
+/// Converts a read-only identification error into a driver error.
+#[cfg(feature = "virtio")]
+fn mmio_error(error: virtio::MmioError) -> DriverError {
+    match error {
+        virtio::MmioError::MmioRegionTooSmall | virtio::MmioError::Misaligned => {
+            DriverError::InvalidInput
+        }
+        _ => DriverError::Io,
+    }
+}
+
+/// One reference to an MMIO mapping obtained from [`crate::iomap_mmio`],
+/// together with the exclusive claim on the mapped physical range.
+///
+/// [`crate::iomap_mmio`] takes a reference on every call, including cached
+/// hits, so the probe owns exactly this reference. The successful transport
+/// owns this guard, which makes the release happen after the transport's last
+/// register access and its `Drop` reset; failed probes drop it on return.
+/// The claim is released after `iounmap` because fields drop in declaration
+/// order after this type's `Drop` body.
+#[cfg(feature = "virtio")]
+struct MmioMapping {
+    vaddr: memaddr::VirtAddr,
+    _claim: MmioClaim,
+}
+
+#[cfg(feature = "virtio")]
+impl MmioMapping {
+    fn new(vaddr: memaddr::VirtAddr, claim: MmioClaim) -> Self {
+        Self {
+            vaddr,
+            _claim: claim,
+        }
+    }
+}
+
+#[cfg(feature = "virtio")]
+impl Drop for MmioMapping {
+    fn drop(&mut self) {
+        let _ = memspace::iounmap(self.vaddr);
+    }
+}
+
+/// Probe-time access to a VirtIO MMIO region.
+///
+/// The production implementation maps a physical region and holds the shared
+/// [`MmioClaim`] on its range; unit tests substitute a fixture so the real
+/// candidate chain, claim ordering and decision order can be exercised without
+/// hardware.
+#[cfg(feature = "virtio")]
+trait MmioAccess {
+    /// Transport opened by [`MmioAccess::open`].
+    type Transport: virtio::Transport + Send + 'static;
+
+    /// Identifies the device from read-only header fields.
+    fn identify(&mut self, size: usize) -> Result<virtio::MmioIdentification, DriverError>;
+
+    /// Opens the transport. Must only be called after identification matched.
+    fn open(self, size: usize) -> DriverResult<Self::Transport>;
+
+    /// Whether this access source is the synthetic unit-test fixture.
+    ///
+    /// Only used to select a test-only counting HAL for the same production
+    /// driver construction. The production implementation keeps this false.
+    #[cfg(unittest)]
+    fn is_fixture(&self) -> bool {
+        false
+    }
+}
+
+/// A mapped MMIO region plus the reference that keeps it mapped.
+#[cfg(feature = "virtio")]
+struct MappedMmio {
+    regs: core::ptr::NonNull<u8>,
+    mapping: MmioMapping,
+}
+
+#[cfg(feature = "virtio")]
+impl MmioAccess for MappedMmio {
+    type Transport = virtio::OwnedMmioTransport<MmioMapping>;
+
+    fn identify(&mut self, size: usize) -> Result<virtio::MmioIdentification, DriverError> {
+        // SAFETY: `regs` is the valid, aligned mapping described by
+        // `mmio.size`. `mapping` holds the shared exclusive claim on this
+        // physical range from before this call. Every participant of the
+        // `driver_os_api::MmioClaimOp` contract is refused overlapping claims,
+        // including a duplicate descriptor that `DeviceManager::rescan` may
+        // register while a live transport still owns the range. Discovery no
+        // longer maps or reads VirtIO MMIO registers, and no transport or
+        // interrupt handler exists for this descriptor before this call, so no
+        // other participant can alias the region while the read-only
+        // `UniqueMmioPointer` exists.
+        unsafe { virtio::identify_mmio_device(self.regs, size) }.map_err(|error| {
+            log::warn!("read-only MMIO identification failed: {error:?}");
+            mmio_error(error)
+        })
     }
 
+    fn open(self, size: usize) -> DriverResult<Self::Transport> {
+        // SAFETY: Same mapping and exclusive-claim argument as `identify`; the
+        // header matched this driver, so this is the device it describes. The
+        // returned transport owns `mapping`, so both the mapping and its claim
+        // outlive the transport's last access and `Drop`.
+        let transport =
+            unsafe { virtio::open_mmio_transport(self.regs, size) }.map_err(|error| {
+                log::warn!("failed to open MMIO transport: {error:?}");
+                mmio_error(error)
+            })?;
+        Ok(virtio::OwnedMmioTransport::new(transport, self.mapping))
+    }
+}
+
+/// Runs the shared MMIO decision sequence: identify read-only, reject a
+/// non-matching ID, and only then open the transport and dispatch it.
+///
+/// `access` only abstracts the mapping and transport source. In particular,
+/// `open` is not called unless the raw device ID matched, so a wrong candidate
+/// cannot construct a transport whose `Drop` resets the device.
+#[cfg(feature = "virtio")]
+fn activate_mmio_with<A: MmioAccess>(
+    device: Arc<DeviceObject>,
+    device_kind: DeviceKind,
+    vtype: u32,
+    size: usize,
+    mut access: A,
+) -> DriverResult<()> {
+    let identification = access.identify(size)?;
+
+    match classify_mmio_device(identification.device_id, vtype) {
+        MmioMatch::Match => {}
+        MmioMatch::EmptySlot => {
+            log::debug!(
+                "virtio {device_kind:?} at {:?}: empty MMIO slot",
+                device.location()
+            );
+            return Err(DriverError::Unsupported);
+        }
+        MmioMatch::Mismatch { found } => {
+            log::debug!(
+                "virtio {device_kind:?} at {:?}: device ID {found} is not virtio type {vtype}",
+                device.location()
+            );
+            return Err(DriverError::Unsupported);
+        }
+    }
+
+    #[cfg(unittest)]
+    let fixture = access.is_fixture();
+    let irq = device.first_irq();
+    let transport = access.open(size)?;
+    #[cfg(unittest)]
+    if fixture {
+        return dispatch_fixture_try_new(device, device_kind, transport, irq);
+    }
     dispatch_virtio_try_new(device, device_kind, transport, irq)
+}
+
+/// Dispatches a fixture-opened transport.
+///
+/// VSOCK uses the counting wrapper over the production HAL so the test can
+/// attribute DMA calls to this scenario; every other device keeps the
+/// production dispatch unchanged.
+#[cfg(all(feature = "virtio", unittest))]
+fn dispatch_fixture_try_new<T: virtio::Transport + Send + 'static>(
+    parent: Arc<DeviceObject>,
+    kind: DeviceKind,
+    transport: T,
+    irq: Option<IrqResource>,
+) -> DriverResult<()> {
+    match kind {
+        #[cfg(feature = "virtio-socket")]
+        DeviceKind::Vsock => {
+            use glue::VirtIoSocket;
+            kclass::publish_vsock(parent, VirtIoSocket::try_new_counting(transport, irq)?).map(drop)
+        }
+        _ => dispatch_virtio_try_new(parent, kind, transport, irq),
+    }
+}
+
+/// Activate a platform VirtIO device after identifying it read-only.
+///
+/// Every enabled MMIO driver matches every `virtio,mmio` descriptor, so this
+/// runs for each candidate in registration order. Until the device ID matches,
+/// only the magic/version/ID fields are read; the transport (whose `Drop`
+/// resets the device) is constructed only for the driver that owns the device.
+#[cfg(feature = "virtio")]
+fn activate_virtio_mmio(
+    device: Arc<DeviceObject>,
+    device_kind: DeviceKind,
+    vtype: u32,
+) -> DriverResult<()> {
+    let Some(mmio) = device.first_mmio() else {
+        log::warn!(
+            "virtio {device_kind:?} at {:?}: platform device has no MMIO resource",
+            device.location()
+        );
+        return Err(DriverError::InvalidInput);
+    };
+
+    // Claim the physical range through the shared resource contract before any
+    // register access. The descriptor binding lock cannot establish physical
+    // exclusivity: a rescan may register a second descriptor with a fresh lock
+    // for the same firmware node while a live transport still owns the range.
+    let claim =
+        crate::resource::claim_mmio_region(mmio, "virtio-mmio-probe").inspect_err(|error| {
+            log::warn!(
+                "virtio {device_kind:?} at {:?}: cannot claim MMIO region {:#x}+{:#x}: {error:?}",
+                device.location(),
+                mmio.base,
+                mmio.size,
+            );
+        })?;
+
+    // The unit-test fixture replaces only the register source. It receives the
+    // production claim, so the claim-before-access order stays under test.
+    #[cfg(unittest)]
+    if let Some(access) = virtio_mmio_support::fixture_for(mmio.base) {
+        return activate_mmio_with(
+            device,
+            device_kind,
+            vtype,
+            mmio.size,
+            access.with_claim(claim),
+        );
+    }
+
+    let regs = crate::iomap_mmio(mmio.base, mmio.size, "virtio-mmio-probe")?;
+    let access = MappedMmio {
+        regs,
+        mapping: MmioMapping::new(memaddr::VirtAddr::from_mut_ptr(regs.as_ptr()), claim),
+    };
+    activate_mmio_with(device, device_kind, vtype, mmio.size, access)
 }
 
 #[cfg(feature = "virtio")]
@@ -471,3 +746,20 @@ const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[
 pub(crate) fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {
     crate::driver_registry::register_factories(registrar, DRIVER_FACTORIES);
 }
+
+#[cfg(all(feature = "virtio", unittest))]
+unittest::path_mod_test!(
+    virtio_mmio_support,
+    "../../../ut-tests/virtio_mmio_support.rs"
+);
+
+#[cfg(all(feature = "virtio", feature = "virtio-socket", unittest))]
+unittest::path_mod_test!(
+    virtio_mmio_claim_unittest,
+    "../../../ut-tests/virtio_mmio_claim.rs"
+);
+
+unittest::path_mod_test!(
+    virtio_mmio_match_unittest,
+    "../../../ut-tests/virtio_mmio_match.rs"
+);

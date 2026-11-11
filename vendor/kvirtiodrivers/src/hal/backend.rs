@@ -126,7 +126,14 @@ unsafe impl<H: Hal> DmaBackend for StaticHal<H> {
         access_platform: bool,
     ) -> Result<PhysAddr> {
         // SAFETY: The caller upholds the same buffer contract as Hal::share.
-        Ok(unsafe { H::share(buffer, direction, access_platform) })
+        let paddr = unsafe { H::share(buffer, direction, access_platform) };
+        // Hal::share uses zero as its failure sentinel. Do not publish a
+        // zero mapping as if it were a successful device address.
+        if paddr == 0 {
+            Err(Error::DmaError)
+        } else {
+            Ok(paddr)
+        }
     }
 
     unsafe fn unshare(

@@ -2,8 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Shared mapping for the VirtIO PCI device ids currently supported by
-//! kdriver.
+//! Shared mapping for the VirtIO device ids currently supported by kdriver.
 //!
 //! The PCI bus backend turns a supported VirtIO PCI device id into a VirtIO
 //! type code carried by `PciIdentity::virtio_type`; the matching driver
@@ -11,7 +10,12 @@
 //! constants defined here so supported VirtIO PCI mappings are updated in
 //! exactly one place.
 
-use driver_base::DeviceKind;
+/// Device-tree `compatible` string of a VirtIO MMIO transport node.
+///
+/// Shared by platform discovery (which registers the descriptor) and the
+/// MMIO driver descriptors (which match it); identification of the concrete
+/// device happens later, during probe.
+pub(crate) const VIRTIO_MMIO_COMPATIBLE: &str = "virtio,mmio";
 
 /// VirtIO device type codes (see VirtIO spec § 4.1.2).
 pub(crate) mod virtio_type {
@@ -40,22 +44,6 @@ pub(crate) fn pci_device_id_to_virtio_type(device_id: u16) -> Option<u32> {
         0x1052 => Some(virtio_type::INPUT),
         0x1053 => Some(virtio_type::VSOCK),
         _ => None,
-    }
-}
-
-/// Translate the driver-framework device kind reported by a VirtIO transport
-/// probe into the VirtIO device type code used by descriptor matching.
-pub(crate) const fn device_kind_to_virtio_type(kind: DeviceKind) -> Option<u32> {
-    match kind {
-        DeviceKind::Net => Some(virtio_type::NET),
-        DeviceKind::Block => Some(virtio_type::BLOCK),
-        DeviceKind::Char => None,
-        DeviceKind::Display => Some(virtio_type::GPU),
-        DeviceKind::Input => Some(virtio_type::INPUT),
-        DeviceKind::Vsock => Some(virtio_type::VSOCK),
-        DeviceKind::Fs9p => Some(virtio_type::NINEP),
-        DeviceKind::Hwrng => Some(virtio_type::RNG),
-        DeviceKind::Bus => None,
     }
 }
 

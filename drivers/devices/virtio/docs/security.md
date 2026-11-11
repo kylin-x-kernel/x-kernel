@@ -15,14 +15,15 @@ Upper subsystems (block / network / display / input / vsock / 9p)
    │ safe API: VirtIoBlkDev, VirtIoGpuDev, VirtIoInputDev,
    │          VirtIoNetDev, VirtIoVsockDev, VirtIo9pDev
    │          probe_pci_device()
-   │ unsafe API: probe_mmio_device()
+   │ unsafe API: identify_mmio_device(), open_mmio_transport()
    │
    v
 ┌──────────────────────────────────────────────────────────────┐
 │  virtio                                                      │
 │                                                              │
 │  ┌── unsafe boundary ──────────────────────────────────────┐ │
-│  │ probe_mmio_device: MmioTransport::new()                 │ │
+│  │ identify_mmio_device: read-only header reads            │ │
+│  │ open_mmio_transport: MmioTransport::new()               │ │
 │  │ net.rs: NetBuf::from_handle()                           │ │
 │  │ net.rs: receive_begin() / receive_complete()            │ │
 │  │ net.rs: transmit_begin() / transmit_complete()          │ │
@@ -33,9 +34,10 @@ Upper subsystems (block / network / display / input / vsock / 9p)
 
 - **Callers of safe APIs:** The module is trusted to maintain its invariants,
   and device operations must not cause undefined behavior.
-- **Callers of unsafe APIs:** The caller of `probe_mmio_device` must provide a
-  valid MMIO address. The caller of `probe_pci_device` must provide accessible
-  PCI configuration space.
+- **Callers of unsafe APIs:** The caller of `identify_mmio_device` and
+  `open_mmio_transport` must provide a valid, properly aligned MMIO address.
+  The caller of `probe_pci_device` must provide accessible PCI configuration
+  space.
 
 ## External Boundaries And Attack Surface
 
@@ -169,24 +171,58 @@ configuration words on the ioctl path.
 
 ## Unsafe Code Inventory
 
-### 1. `probe_mmio_device` (`lib.rs:110`)
+### 1. `identify_mmio_device` and `open_mmio_transport` (`lib.rs`)
 
 ```rust
-let transport = unsafe { MmioTransport::new(header, reg_size) }.ok()?;
+let info = unsafe { read_mmio_header(reg_base, reg_size) }?;  // read-only
+// caller compares info.device_id with the driver's declared type
+let transport = unsafe { open_mmio_transport(reg_base, reg_size) }?; // after match
 ```
 
-**Invariant:** `reg_base` points to a valid VirtIO MMIO register region of at
-least `reg_size` bytes.
+**Invariant:** `reg_base` points to a valid, aligned VirtIO MMIO register
+region of at least `reg_size` bytes. For `identify_mmio_device` the caller must
+also have **exclusive access** to that region for the duration of the call,
+because `read_mmio_header` creates a `UniqueMmioPointer` over the header; no
+other mapping, transport or interrupt handler may access the same registers
+while it exists. For `open_mmio_transport` the region must remain valid and
+exclusive for the transport's lifetime.
 
-**Why it is safe:** `MmioTransport::new` validates the magic value and version
-and returns an error on mismatch. The caller, the platform initialization code,
-guarantees that the MMIO address comes from firmware or the device tree and
-remains valid for the device lifetime.
+**Why it is safe:** `read_mmio_header` checks alignment and the
+`CONFIG_SPACE_OFFSET` minimum size, then reads only `magic`, `version` and
+`device_id`. It constructs no transport, so `Drop` cannot reset the device and
+zero/unknown ids are returned as ordinary values. `MmioTransport::new`
+additionally validates the magic value, device id and version before handing
+back a transport. The caller, the platform initialization code, guarantees the
+MMIO address comes from firmware and remains mapped.
+
+**Mapping ownership:** `OwnedMmioTransport<G, T = MmioTransport<'static>>`
+wraps an opened transport and the guard `G` that owns its mapping and its range
+claim. Its `transport` field is declared before the guard, so the transport is
+dropped first (final register access and reset) and the mapping is released
+only afterwards. The guard must hold the `iomap_device` reference; releasing it
+is never decided from a dispatch result. The guard's `Drop` unmaps first and
+releases the range claim afterwards. Releasing that final reference runs the
+claim release, so it must happen in normal, sleepable task context with local
+IRQs enabled and without a spin or preemption guard, even when it occurs
+outside the remove function. The `T` parameter defaults to the production
+transport; unit tests substitute a mock backend without changing the ownership
+or drop order.
 
 **Callers:**
 
-- Platform initialization code, where firmware or the device tree guarantees a
-  valid address.
+- `kdriver::activate_virtio_mmio`, where firmware or the device tree
+  guarantees a valid address and `iomap_mmio` established the mapping. Before
+  the first register read it acquires an exclusive claim on
+  `[base, base + size)` through `driver_os_api::MmioClaimOp`, implemented by
+  the host provider. The table rejects every overlapping live claim,
+  including one from a duplicate descriptor that `DeviceManager::rescan` may
+  register while the previous transport is still alive, so a second probe
+  cannot read or open the same physical range. The claim moves into the
+  transport owner and is released only after the transport is dropped. The
+  descriptor binding lock only serializes users of one descriptor and is not
+  the physical-exclusivity proof. Only contract participants are arbitrated:
+  other mapping entry points and drivers that do not claim are outside this
+  guarantee.
 
 ### 2. VirtIO GPU Scanout Resource Backing (`gpu.rs:166-188`)
 
@@ -353,14 +389,58 @@ contracts.
 - net: Internal `SpinNoIrq` state protects all shared access, making
   `Send`/`Sync` safe under the constructor and handle-lifetime contracts.
 
+### 9. VirtIO Queue Publication And Detach Contracts (`vendor/kvirtiodrivers/src/queue.rs`, `queue/owning.rs`, `device/socket/vsock.rs`)
+
+```rust
+pub unsafe fn add_notify_wait_pop_checked<'a>(
+    &mut self,
+    inputs: &'a [&'a [u8]],
+    outputs: &'a mut [&'a mut [u8]],
+    transport: &mut impl Transport,
+) -> core::result::Result<u32, SyncError>;
+
+pub unsafe fn detach_unused_buffer<'a>(&mut self, token: u16, ...) -> bool;
+pub unsafe fn fill(&mut self) -> Result<()>;
+pub unsafe fn detach_all_after_stop(&mut self);
+```
+
+**Invariant:** `add_notify_wait_pop_checked` may return while the queue still
+owns a published descriptor chain and its DMA mappings. The caller must keep
+the buffers valid until one of these holds: `Ok` (the queue unshared them);
+`Err` with `token: Some(_)` after it stopped the device and detached that
+token; or `Err` with `token: None` (nothing was published). After `fill`
+returns `Ok`, or returns `Err` after publishing anything, the owning device
+must reset before the queue is dropped. `detach_all_after_stop` and
+`detach_unused_buffer` may only run after device-side stop, and the queue must
+not be used afterwards.
+
+**Why it is safe:** `VirtQueue::in_use` is the authoritative publication state;
+a head is marked in use after `add` succeeds and cleared only by
+`recycle_descriptors`. The checked API returns the token on any post-publication
+failure. The vsock wrapper handles that case by resetting the transport before
+touching the request, detaching the TX token with the original buffers, then
+detaching all RX buffers, and setting a sticky `failed` flag; later `send` and
+`poll` calls return `IoError` without queue access. `OwningQueue` clears each
+buffer slot after detaching it, so `Drop` sees an empty list and cannot unshare
+or free twice. `SyncError::token` is `None` for an `add` failure, so VSOCK
+returns the original error without reset or poison. Constant
+`[None; SIZE]` storage uses `NonNull<[u8; N]>` because the queue owns the
+allocation, and `fill` only leaks a `Box` after `add` succeeded.
+
 ## Memory-Safety Invariants
 
 1. **Buffer-token correspondence:** The buffers in `rx_buffers[token]` and
    `tx_buffers[token]` must match the buffers associated with the same token in
    the VirtIO queue. A violation makes the device read or write the wrong
    memory.
-2. **MMIO address validity:** `reg_base` passed to `probe_mmio_device` must point
-   to a valid MMIO register region that remains mapped for the device lifetime.
+2. **MMIO address validity and exclusivity:** `reg_base` passed to
+   `identify_mmio_device` must point to a valid MMIO register region for the
+   duration of the call, with no other alias accessing it (its header read is
+   an exclusive `UniqueMmioPointer`); the region passed to
+   `open_mmio_transport` must remain mapped and exclusive for the device
+   lifetime. The kdriver call site establishes exclusivity with the shared
+   range-claim contract described above, not with the per-descriptor binding
+   lock; non-participants are not arbitrated.
 3. **NetBuf handle uniqueness:** Every caller of `NetBuf::from_handle` must
    provide a valid handle that has not already been consumed.
 
@@ -388,19 +468,21 @@ All manual `Send` and `Sync` implementations rely on these guarantees:
 
 | ID | Threat | Impact | Trigger | Mitigation |
 | --- | --- | --- | --- | --- |
-| T-01 | `probe_mmio_device` accesses invalid memory because the caller supplied a bad MMIO address | High | The caller supplies an unmapped or incorrect physical address | Platform initialization validates the address; `MmioTransport::new` validates the magic value. |
+| T-01 | `identify_mmio_device` / `open_mmio_transport` access invalid memory because the caller supplied a bad MMIO address | High | The caller supplies an unmapped or incorrect physical address | Platform initialization validates the address; identification checks alignment, minimum size and magic before reading; `MmioTransport::new` validates magic, device id and version. |
 | T-02 | A network buffer token mismatch makes the device DMA into the wrong memory | High | `rx_buffers` or `tx_buffers` indices do not match VirtIO queue tokens | `try_new()` checks initial mappings with `assert_eq!(token, i as u16)`; `recycle_rx` and `recycle_tx` verify `is_some()`. |
 | T-03 | `NetBuf::from_handle` receives an invalid or duplicate handle | High | The network stack reuses a consumed handle | The caller guarantees handle uniqueness; `from_handle` is unsafe and transfers the proof obligation to the caller. |
 | T-04 | Scanout-resource backing dangles | High | Backing is released before `destroy_scanout_resource` | DRM/fbdev retain the backing through `PageRef` from attachment through destruction; destruction failures are logged. |
 | T-05 | IRQ context and normal paths concurrently access a network device | Medium | An IRQ callback runs concurrently with `send` or `recv` | `InnerDev` is protected by `SpinNoIrq`; every access is mutually exclusive. |
 | T-06 | The device is used after IRQ registration fails | Medium | `register_virtio_net_irq` returns `ResourceBusy` | `try_new()` propagates the error and does not create the device. |
 | T-07 | `free_tx_bufs` is exhausted and transmission fails | Low | All TX buffers are in flight | `alloc_tx_buf` returns `DriverError::NoMemory`; the upper layer waits for `recycle_tx` and retries. |
-| T-08 | `probe_mmio_device` receives a null pointer | High | `reg_base` is null | `NonNull::new(...).unwrap()` panics; callers must provide a non-null address. |
+| T-08 | A rejected MMIO candidate is reset or otherwise modified during identification | Medium | Every enabled MMIO driver probes each `virtio,mmio` slot, including slots owned by another driver | `identify_mmio_device` uses `read_mmio_header`, which performs no write and constructs no transport; `open_mmio_transport` (whose `Drop` resets the device) runs only after an exact id match. |
 | T-09 | A malicious VMM returns an oversized `pkt_len` through a VirtIO device | High | `receive_complete` returns a packet length larger than the buffer capacity | `recv()` checks `hdr_len + pkt_len <= capacity` before writing `NetBuf` metadata and returns `DriverError::InvalidInput` on overflow; `NetBuf::set_payload_len` has a development-time `debug_assert`. |
 | T-10 | A malicious VMM returns a forged 9p response | Medium | Data returned by `request()` violates the 9p protocol | The upper 9p filesystem validates response format; this module does not parse response content. |
 | T-11 | A malicious VMM returns an oversized `mount_tag` | Medium | `VirtIO9p::mount_tag()` returns an overlong string | `virtio-drivers` reads it from configuration space, whose field length is bounded by the device configuration contract. |
 | T-12 | The block layer does not enforce VirtIO read-only capability | Medium | The VMM negotiates `VIRTIO_BLK_F_RO`, but the block core treats the disk as writable | `VirtIoBlkDev` propagates inherent read-only capability to the block core and rejects writes again at the lower write entry. |
 | T-13 | The input handler claims a shared IRQ belonging to another device | Medium | The shared line fires while the input device's ISR is empty | The handler validates the configured IRQ, acknowledges only this device's ISR, and returns `NOT_HANDLED` when the status is empty. |
+| T-14 | A vsock TX completion reports a different descriptor chain than the driver submitted | High | A malicious or broken device corrupts the used-ring id | `add_notify_wait_pop_checked` reports `WrongToken` with the published token; VSOCK resets the device, detaches the TX token with its original buffers, detaches all RX buffers, and poisons the socket so later queue operations return `IoError`; `Drop` cannot unshare them twice. |
+| T-15 | A DMA mapping or ring allocation leaks during destroy, construction failure or partial RX publication | Medium | An error path returns while a published buffer or ring is still owned | The device owner resets before releasing queues; `OwningQueue::fill` states the reset-before-drop obligation; detach clears slots so `Drop` is idempotent; tests compare share/unshare, alloc/dealloc and provider/bounce baselines. |
 
 ## Failure Modes And Effects Analysis (FMEA)
 
@@ -413,7 +495,7 @@ All manual `Send` and `Sync` implementations rely on these guarantees:
 | F-05 | GPU framebuffer refresh fails | Device flush returns an error | Display content is not updated | Display failure | 3 | Return `DriverError`; the upper layer may retry. |
 | F-06 | Vsock connection is lost | Peer close or transport error | Connection disappears | Vsock communication stops | 3 | `poll_event` returns `Disconnected`; the upper layer reconnects. |
 | F-07 | 9p request times out | The device does not respond | File operation hangs | Filesystem unavailable | 2 | No timeout exists in this layer; timeout handling depends on the upper layer. |
-| F-08 | `probe_mmio_device` panics | Null pointer input | Initialization aborts | Boot fails | 1 | Callers must validate the address. |
+| F-08 | MMIO identification fails | Region smaller than `0x100`, misaligned base, bad magic or unsupported version | The candidate returns `Io`/`InvalidInput`; no transport is built and the device is not reset | The device stays unbound; other candidates are unaffected | 3 | `read_mmio_header` reports `MmioRegionTooSmall`, `Misaligned`, `BadMagic` or `UnsupportedVersion`; the caller logs and continues. |
 | F-09 | Network-buffer token mismatch | Internal state inconsistency | DMA targets the wrong address | Memory corruption | 1 | Use `assert_eq!` and `is_some()` checks; return `BadState` where recoverable. |
 | F-10 | Network RX event is lost | Both IRQ and task context call `ack_interrupt()`, and task context clears a newly arrived event | VirtIO RX stalls and the unhandled IRQ retriggers | TCP receive window drops to zero and host-to-guest traffic times out | 2 | When an IRQ is registered, only the handler calls `ack_interrupt()`; `recv()` consumes completed queue entries. Polling mode acknowledges from `recv()`. |
 | F-11 | A write is issued to an inherently read-only block device | An upper layer bypasses or has not yet established the block-device view | The write is rejected | The filesystem remains read-only and media is unmodified | 3 | Both polling and IRQ `write_block()` paths return `DriverError::ReadOnly` before submission. |
@@ -424,8 +506,8 @@ All manual `Send` and `Sync` implementations rely on these guarantees:
 - **Error codes:** All device operations map `virtio_drivers::Error` through
   `as_driver_error()` into `DriverError`, giving upper layers one error model.
 - **Panic policy:**
-  - `probe_mmio_device` panics when `reg_base` is null. This is a nonrecoverable
-    boot-stage configuration error.
+  - `identify_mmio_device` and `open_mmio_transport` do not panic; invalid
+    regions and headers are returned as `MmioError`.
   - `try_new()` panics when `receive_begin` returns an unexpected token,
     indicating an internal consistency failure.
   - Other paths do not panic proactively and propagate errors through
@@ -464,6 +546,32 @@ isolation mechanisms against observation by another virtual machine.
 3. **Hard-coded input physical location:** `physical_location()` returns the
    fixed string `"virtio0/input0"` and does not reflect the actual device
    topology.
+4. **Reset has no timeout:** `Transport::reset` busy-polls the status readback.
+   The vsock TX path may hold `SpinNoIrq`, so a non-responsive device can cause
+   an unbounded IRQs-disabled wait. The teardown contract does not claim to
+   solve availability or to recover from such a device.
+5. **Reset is device-side evidence only:** a status readback that observes the
+   empty status does not prove that host IRQ callbacks already in flight have
+   returned. VSOCK is polled, registers no IRQ callback and suppresses INTx
+   during probe, so it has no host callback to synchronize. IRQ-driven
+   adapters must establish host-side quiescence themselves.
+6. **Other drivers still use the unchecked wait:** `add_notify_wait_pop`
+   retains its previous busy-wait/no-timeout behavior and reports post-
+   publication errors without a token. This change converts only the vsock TX
+   path to the checked API; a wrong token in another caller can leave a mapping
+   unreleased until that caller resets and tears the queue down. Treating those
+   consumers as fixed would be inaccurate.
+7. **Publication is an unsafe contract, not a type invariant:** `fill`,
+   `add_notify_wait_pop_checked` and the detach APIs rely on the owner resetting
+   before drop. The type system cannot enforce it; VSOCK and sound uphold it.
+8. **Test evidence is software-only:** the counting HAL, recording transport
+   and mock MMIO transport verify ordering, counts and failure injection. They
+   do not prove hardware cache maintenance, IOMMU behavior, or that a real
+   device stops DMA on reset.
+9. **Provider counters are process-wide:** the `kdma` test snapshots read
+   global allocator state. Scenarios which compare them run as `serial` tests,
+   compare only the fields they own, and tolerate the one-time bounce-pool
+   initialization region.
 
 ## Audit Checklist
 
@@ -474,7 +582,9 @@ When modifying this crate, verify:
 - [ ] New atomic operations use orderings at least as strong as existing
   requirements.
 - [ ] Drop handling covers every state. Network devices implement custom Drop;
-  other devices rely on the dependency's Drop behavior.
+  vsock and sound rely on the vendor owner's `queue_unset` → `reset` →
+  detach/unshare/free order; other devices rely on the dependency's Drop
+  behavior.
 - [ ] Every new panic path has a corresponding panic guard or equivalent
   protection.
 - [ ] The input IRQ handler acknowledges only this device's nonempty ISR and

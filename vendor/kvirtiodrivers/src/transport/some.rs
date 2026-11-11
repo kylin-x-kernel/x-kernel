@@ -67,6 +67,11 @@ impl Transport for SomeTransport<'_> {
         dispatch!(self, set_status, status)
     }
 
+    fn reset(&mut self) {
+        // Forward so an inner transport's reset implementation is preserved.
+        dispatch!(self, reset)
+    }
+
     fn set_guest_page_size(&mut self, guest_page_size: u32) {
         dispatch!(self, set_guest_page_size, guest_page_size)
     }

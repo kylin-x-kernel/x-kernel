@@ -29,8 +29,6 @@ use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 ///
 /// Currently, only audio playback functionality has been implemented.
 pub struct VirtIOSound<H: Hal, T: Transport> {
-    transport: T,
-
     control_queue: VirtQueue<H, { QUEUE_SIZE as usize }>,
     event_queue: OwningQueue<H, { QUEUE_SIZE as usize }, { size_of::<VirtIOSndEvent>() }>,
     tx_queue: VirtQueue<H, { QUEUE_SIZE as usize }>,
@@ -59,6 +57,39 @@ pub struct VirtIOSound<H: Hal, T: Transport> {
     pcm_states: Vec<PCMState>,
 
     token_buf: BTreeMap<u16, Vec<u8>>, // store token and its input buf
+
+    /// Declared last so queues and their DMA mappings are released before the
+    /// transport which the device can still access.
+    transport: T,
+}
+
+/// Runs `$expr`; on failure stops the device before returning the error.
+///
+/// The result is bound before the match so the mutable borrow taken by `$expr`
+/// ends before `reset` is called.
+macro_rules! try_or_reset {
+    ($transport:ident, $expr:expr) => {{
+        let result = $expr;
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                $transport.reset();
+                return Err(error);
+            }
+        }
+    }};
+}
+
+impl<H: Hal, T: Transport> Drop for VirtIOSound<H, T> {
+    fn drop(&mut self) {
+        // Clear device-visible queue pointers, then stop the device before the
+        // field destructors release ring and buffer memory.
+        self.transport.queue_unset(CONTROL_QUEUE_IDX);
+        self.transport.queue_unset(EVENT_QUEUE_IDX);
+        self.transport.queue_unset(TX_QUEUE_IDX);
+        self.transport.queue_unset(RX_QUEUE_IDX);
+        self.transport.reset();
+    }
 }
 
 impl<H: Hal, T: Transport> VirtIOSound<H, T> {
@@ -70,39 +101,57 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
             negotiated_features
         );
 
-        let control_queue = VirtQueue::new(
-            &mut transport,
-            CONTROL_QUEUE_IDX,
-            negotiated_features.contains(Feature::RING_INDIRECT_DESC),
-            negotiated_features.contains(Feature::RING_EVENT_IDX),
-            negotiated_features.contains(Feature::ACCESS_PLATFORM),
-        )?;
-        let event_queue = OwningQueue::new(VirtQueue::new(
-            &mut transport,
-            EVENT_QUEUE_IDX,
-            negotiated_features.contains(Feature::RING_INDIRECT_DESC),
-            negotiated_features.contains(Feature::RING_EVENT_IDX),
-            negotiated_features.contains(Feature::ACCESS_PLATFORM),
-        )?)?;
-        let tx_queue = VirtQueue::new(
-            &mut transport,
-            TX_QUEUE_IDX,
-            negotiated_features.contains(Feature::RING_INDIRECT_DESC),
-            negotiated_features.contains(Feature::RING_EVENT_IDX),
-            negotiated_features.contains(Feature::ACCESS_PLATFORM),
-        )?;
-        let rx_queue = VirtQueue::new(
-            &mut transport,
-            RX_QUEUE_IDX,
-            negotiated_features.contains(Feature::RING_INDIRECT_DESC),
-            negotiated_features.contains(Feature::RING_EVENT_IDX),
-            negotiated_features.contains(Feature::ACCESS_PLATFORM),
-        )?;
+        let control_queue = try_or_reset!(
+            transport,
+            VirtQueue::new(
+                &mut transport,
+                CONTROL_QUEUE_IDX,
+                negotiated_features.contains(Feature::RING_INDIRECT_DESC),
+                negotiated_features.contains(Feature::RING_EVENT_IDX),
+                negotiated_features.contains(Feature::ACCESS_PLATFORM),
+            )
+        );
+        let event_queue = try_or_reset!(
+            transport,
+            VirtQueue::new(
+                &mut transport,
+                EVENT_QUEUE_IDX,
+                negotiated_features.contains(Feature::RING_INDIRECT_DESC),
+                negotiated_features.contains(Feature::RING_EVENT_IDX),
+                negotiated_features.contains(Feature::ACCESS_PLATFORM),
+            )
+        );
+        let tx_queue = try_or_reset!(
+            transport,
+            VirtQueue::new(
+                &mut transport,
+                TX_QUEUE_IDX,
+                negotiated_features.contains(Feature::RING_INDIRECT_DESC),
+                negotiated_features.contains(Feature::RING_EVENT_IDX),
+                negotiated_features.contains(Feature::ACCESS_PLATFORM),
+            )
+        );
+        let rx_queue = try_or_reset!(
+            transport,
+            VirtQueue::new(
+                &mut transport,
+                RX_QUEUE_IDX,
+                negotiated_features.contains(Feature::RING_INDIRECT_DESC),
+                negotiated_features.contains(Feature::RING_EVENT_IDX),
+                negotiated_features.contains(Feature::ACCESS_PLATFORM),
+            )
+        );
 
         // read configuration space
-        let jacks = read_config!(transport, VirtIOSoundConfig, jacks)?;
-        let streams = read_config!(transport, VirtIOSoundConfig, streams)?;
-        let chmaps = read_config!(transport, VirtIOSoundConfig, chmaps)?;
+        let jacks = try_or_reset!(transport, read_config!(transport, VirtIOSoundConfig, jacks));
+        let streams = try_or_reset!(
+            transport,
+            read_config!(transport, VirtIOSoundConfig, streams)
+        );
+        let chmaps = try_or_reset!(
+            transport,
+            read_config!(transport, VirtIOSoundConfig, chmaps)
+        );
         info!(
             "[sound device] config: jacks: {}, streams: {}, chmaps: {}",
             jacks, streams, chmaps
@@ -117,6 +166,18 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
             pcm_parameters.push(PcmParameters::default());
         }
 
+        // Everything which can fail or panic happens before this publication
+        // point; after it the only remaining steps are `finish_init` and
+        // `notify`.
+        let mut event_queue = OwningQueue::empty(event_queue);
+        // SAFETY: This constructor is the device owner. If filling fails it
+        // resets before returning; the local queues are dropped after that
+        // reset and the transport parameter is dropped last.
+        if let Err(error) = unsafe { event_queue.fill() } {
+            transport.reset();
+            return Err(error);
+        }
+
         transport.finish_init();
 
         if event_queue.should_notify() {
@@ -124,7 +185,6 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
         }
 
         Ok(VirtIOSound {
-            transport,
             control_queue,
             event_queue,
             tx_queue,
@@ -143,6 +203,7 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
             token_rsp: BTreeMap::new(),
             pcm_states: vec![],
             token_buf: BTreeMap::new(),
+            transport,
         })
     }
 

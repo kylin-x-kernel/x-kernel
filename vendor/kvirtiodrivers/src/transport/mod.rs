@@ -42,6 +42,29 @@ pub trait Transport {
     /// Sets the device status.
     fn set_status(&mut self, status: DeviceStatus);
 
+    /// Stops the device and waits until it acknowledges the reset.
+    ///
+    /// Returns only after a subsequent status read observes the empty status.
+    /// For a compliant device this means it has stopped accessing the old
+    /// queues and buffers; that is the device-side precondition for releasing
+    /// them. It does **not** mean that host IRQ callbacks already in flight
+    /// have returned: IRQ/handler quiescence is a separate host-side
+    /// responsibility and is not implied by a status read.
+    ///
+    /// The wait is a busy poll, not a sleep. If called with interrupts
+    /// disabled, a device that never acknowledges causes an unbounded
+    /// IRQ-disabled busy wait. There is no timeout.
+    ///
+    /// Callers must not touch the queues or buffers of this device after this
+    /// returns, except to destroy them.
+    ///
+    /// Ref: virtio 2.6.1 Device Reset; cf. Linux `vp_reset` which waits for
+    /// the status readback.
+    fn reset(&mut self) {
+        self.set_status(DeviceStatus::empty());
+        while self.get_status() != DeviceStatus::empty() {}
+    }
+
     /// Sets the guest page size.
     fn set_guest_page_size(&mut self, guest_page_size: u32);
 

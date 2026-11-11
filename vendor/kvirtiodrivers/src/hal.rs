@@ -161,6 +161,11 @@ pub unsafe trait Hal {
     /// This may involve mapping the buffer into an IOMMU, giving the host permission to access the
     /// memory, or copying it to a special region where it can be accessed.
     ///
+    /// A return value of `0` means that sharing failed and no mapping was retained. A successful
+    /// share must return a nonzero physical address; implementations must not report success with
+    /// zero. Callers must not publish or unshare a mapping whose share returned zero; `unshare` is
+    /// already expected to treat zero as "no mapping".
+    ///
     /// # Safety
     ///
     /// The buffer must be a valid pointer to a non-empty memory range which will not be accessed by

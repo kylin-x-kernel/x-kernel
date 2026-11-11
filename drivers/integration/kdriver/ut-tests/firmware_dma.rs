@@ -136,7 +136,7 @@ fn device(ops: &'static FakeOps, id: u32) -> FirmwareDevice {
         firmware_id: "test,dma",
         source: FirmwareSource::DeviceTree,
         node: FwNode::new(ops, FwNodeId::new(id)),
-        mmio: None,
+        mmio: Ok(None),
         irq: Ok(None),
     }
 }
@@ -530,7 +530,7 @@ fn dt_device(bytes: Vec<u8>) -> FirmwareDevice {
         firmware_id: "virtio,mmio",
         source: FirmwareSource::DeviceTree,
         node,
-        mmio: None,
+        mmio: Ok(None),
         irq: Ok(None),
     }
 }

@@ -22,9 +22,9 @@ use khal::firmware::devices as fw;
 use smallvec::smallvec;
 
 use super::{backend::BusBackend, local_id::LocalIdAlloc};
-use crate::enumeration::EnumerationContext;
-
-const VIRTIO_MMIO_DT_COMPATIBLE: &str = "virtio,mmio";
+use crate::{
+    driver_registry::virtio::ids::VIRTIO_MMIO_COMPATIBLE, enumeration::EnumerationContext,
+};
 
 /// Address capability of a modern direct virtio-mmio transport.
 ///
@@ -97,8 +97,12 @@ impl BusBackend for PlatformBackend {
 impl PlatformBackend {
     /// Register one firmware-described platform device.
     ///
-    /// Deliberate skips (unsupported/empty virtio slot, missing MMIO for the
-    /// virtio transport) return `Ok(())`; allocation, IRQ-mapping and
+    /// The MMIO declaration is validated before any other side effect: a
+    /// malformed declaration rejects the node without allocating an id or
+    /// mapping an IRQ. `virtio,mmio` nodes are registered from their
+    /// description alone — with an MMIO range they receive a `Mmio` location,
+    /// without one a `FirmwareNode` location. No register is accessed here;
+    /// the function driver identifies the device during probe. IRQ, DMA and
     /// registration failures return the error so the caller can keep the first
     /// one while continuing to the remaining nodes. The firmware node already
     /// carried by `dev` is stored as-is; this path never searches nodes again.
@@ -108,42 +112,37 @@ impl PlatformBackend {
         bus_id: BusId,
         dev: &fw::FirmwareDevice,
     ) -> DriverResult<()> {
+        let mmio = match dev.mmio {
+            Ok(mmio) => mmio,
+            Err(error) => {
+                log::warn!(
+                    "platform: malformed MMIO declaration for {}: {error:?}",
+                    dev.firmware_id
+                );
+                return Err(super::firmware_error_to_driver(error));
+            }
+        };
+
         let mut resources: ResourceSet = smallvec![];
-        if let Some(mmio) = dev.mmio {
+        if let Some(mmio) = mmio {
             resources.push(ResourceDesc::Mmio(MmioRegion {
                 base: mmio.base,
                 size: mmio.size,
             }));
         }
 
-        let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {
-            match dev.mmio {
-                #[cfg(feature = "virtio")]
-                Some(mmio) => virtio_mmio_registration(mmio),
-                #[cfg(not(feature = "virtio"))]
-                Some(_) => None,
-                None => {
-                    log::warn!(
-                        "platform: skipping {} node without MMIO resource",
-                        VIRTIO_MMIO_DT_COMPATIBLE
-                    );
-                    None
-                }
-            }
-        } else {
-            let id = self.id_alloc.alloc()?;
-            Some((
-                DeviceLocation::FirmwareNode { id },
-                DeviceIdentity::Platform(PlatformIdentity {
-                    alias: None,
-                    firmware_id: Some(dev.firmware_id),
-                }),
-                None,
-            ))
-        };
-
-        let Some((location, identity, transport)) = registration else {
-            return Ok(());
+        let identity = DeviceIdentity::Platform(PlatformIdentity {
+            alias: None,
+            firmware_id: Some(dev.firmware_id),
+        });
+        let location = match (dev.firmware_id, mmio) {
+            (VIRTIO_MMIO_COMPATIBLE, Some(mmio)) => DeviceLocation::Mmio {
+                base: mmio.base,
+                size: mmio.size,
+            },
+            _ => DeviceLocation::FirmwareNode {
+                id: self.id_alloc.alloc()?,
+            },
         };
 
         match map_firmware_irq(dev) {
@@ -165,7 +164,7 @@ impl PlatformBackend {
             location,
             origin: discovery_origin(dev.source),
             identity,
-            transport,
+            transport: None,
             resources,
             dma,
             intx: None,
@@ -201,8 +200,8 @@ impl PlatformBackend {
 
         fw::for_each_compatible(
             |compatible| {
-                if compatible == VIRTIO_MMIO_DT_COMPATIBLE {
-                    Some(VIRTIO_MMIO_DT_COMPATIBLE)
+                if compatible == VIRTIO_MMIO_COMPATIBLE {
+                    Some(VIRTIO_MMIO_COMPATIBLE)
                 } else {
                     firmware_specs
                         .iter()
@@ -234,7 +233,7 @@ impl PlatformBackend {
 /// a coherent default.
 fn firmware_dma_view(device: &fw::FirmwareDevice) -> Option<DmaInfo> {
     if device.source != fw::FirmwareSource::DeviceTree
-        || device.firmware_id != VIRTIO_MMIO_DT_COMPATIBLE
+        || device.firmware_id != VIRTIO_MMIO_COMPATIBLE
     {
         return None;
     }
@@ -272,65 +271,6 @@ fn map_firmware_irq(device: &fw::FirmwareDevice) -> DriverResult<Option<IrqResou
             Err(super::firmware_error_to_driver(error))
         }
     }
-}
-
-#[cfg(feature = "virtio")]
-fn virtio_mmio_registration(
-    mmio: fw::MmioResource,
-) -> Option<(
-    DeviceLocation,
-    DeviceIdentity,
-    Option<kdevice::TransportInfo>,
-)> {
-    let regs = match crate::iomap_mmio(mmio.base, mmio.size, "virtio-mmio-discovery") {
-        Ok(regs) => regs,
-        Err(err) => {
-            log::warn!(
-                "platform: failed to map {} at {:#x}: {:?}",
-                VIRTIO_MMIO_DT_COMPATIBLE,
-                mmio.base,
-                err
-            );
-            return None;
-        }
-    };
-
-    // SAFETY: `regs` was obtained from `iomap_mmio` which maps a valid
-    // physical MMIO region, and `mmio.size` matches the region size.
-    let Some((device_kind, _transport)) =
-        (unsafe { virtio::probe_mmio_device(regs.as_ptr(), mmio.size) })
-    else {
-        log::trace!(
-            "platform: skipping empty {} slot at {:#x}",
-            VIRTIO_MMIO_DT_COMPATIBLE,
-            mmio.base,
-        );
-        return None;
-    };
-
-    let Some(device_type) =
-        crate::driver_registry::virtio::ids::device_kind_to_virtio_type(device_kind)
-    else {
-        log::debug!(
-            "platform: skipping unsupported {} kind {:?} at {:#x}",
-            VIRTIO_MMIO_DT_COMPATIBLE,
-            device_kind,
-            mmio.base,
-        );
-        return None;
-    };
-
-    Some((
-        DeviceLocation::Mmio {
-            base: mmio.base,
-            size: mmio.size,
-        },
-        DeviceIdentity::Platform(PlatformIdentity {
-            alias: None,
-            firmware_id: Some(VIRTIO_MMIO_DT_COMPATIBLE),
-        }),
-        Some(kdevice::TransportInfo::Virtio { device_type }),
-    ))
 }
 
 fn discovery_origin(source: fw::FirmwareSource) -> DiscoveryOrigin {

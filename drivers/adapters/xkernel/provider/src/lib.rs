@@ -16,6 +16,7 @@ extern crate alloc;
 
 #[cfg(target_arch = "x86_64")]
 pub mod acpi_osl;
+mod claim;
 mod device_dma;
 mod dma;
 mod irq;
@@ -26,11 +27,16 @@ mod time;
 mod wait;
 
 pub use device_dma::XKernelDeviceDma;
+/// Read-only in-use DMA resource snapshot for unit-test baselines.
+#[cfg(unittest)]
+pub use kdma::{DmaTestStats, dma_test_stats};
 
 /// X-Kernel implementation of the OS-agnostic resource provider traits.
 ///
-/// The type is intentionally stateless. The driver framework owns the
-/// long-lived instance and passes it explicitly to `driver_os_api`.
+/// The dispatch type itself is stateless and the framework owns its long-lived
+/// instance. Process-wide host arbitration that a capability requires, such as
+/// physical MMIO range claims, is kept in the adapter module that implements
+/// it rather than in the type.
 #[derive(Debug, Default)]
 pub struct XKernelResourceProvider;
 

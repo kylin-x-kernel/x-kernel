@@ -34,7 +34,7 @@ kdriver
        |   Probe (MMIO -> vaddr)
        +-- IxgbeHalImpl
        |   DMA and MMIO address translation
-       +-- virtio::probe_mmio_device
+       +-- virtio::identify_mmio_device / open_mmio_transport
            Raw MMIO register reads
    |
    | Validated mappings, IRQ handler closures, DMA buffers
@@ -101,8 +101,9 @@ driver-os-api-xkernel / kirq / khal / kdma / memspace / driver crates
   of invalid physical address ranges.
 - `driver-os-api-xkernel` trusts `kdma::allocate_dma_memory` and
   `kdma::deallocate_dma_memory` to handle matching, valid `(cpu_addr, bus_addr)` pairs.
-- `kdriver` trusts `virtio::probe_mmio_device` to perform the required volatile-read
-  safety checks before accessing MMIO registers.
+- `kdriver` trusts `virtio::identify_mmio_device` and
+  `virtio::open_mmio_transport` to perform the required volatile-read safety
+  checks before accessing MMIO registers.
 - `kdriver` trusts each driver crate (`block::ahci`, `block::sdmmc`, and `net::ixgbe`)
   to define the safety preconditions of its `new(vaddr)` entry point correctly.
 - External callers in the `kruntime` boot path trust that `init_drivers` runs after
@@ -367,49 +368,107 @@ Callers:
 
 ### 4. VirtIO MMIO Discovery During Platform Enumeration
 
-Location: `src/bus/platform_backend.rs:193`
+Location: `src/bus/platform_backend.rs` (`register_firmware_device`)
+
+Discovery performs no MMIO access for `virtio,mmio` nodes. It records the
+firmware description — `DeviceLocation::Mmio { base, size }` when the node
+declares a first MMIO range, otherwise `FirmwareNode { id }` — together with
+the platform identity `firmware_id = "virtio,mmio"` and `transport: None`.
+
+Invariants:
+
+- The MMIO declaration is validated first: an unreadable or unrepresentable
+  range rejects the node before any id allocation, IRQ mapping, or
+  registration, and the error is returned to the caller.
+- Empty slots, unknown device ids and missing MMIO ranges are not filtered
+  at enumeration.
+- The firmware node already resolved by discovery is stored unchanged.
+
+Safety rationale:
+
+- There is no unsafe register access in this phase, so no MMIO mapping
+  validity or register semantics are assumed here.
+
+### 5. VirtIO MMIO Identification During Driver Activation
+
+Location: `src/driver_registry/virtio/mod.rs` (`activate_virtio_mmio`)
 
 ```rust
-(unsafe { virtio::probe_mmio_device(regs.as_ptr(), mmio.size) })
+let claim = crate::resource::claim_mmio_region(mmio, "virtio-mmio-probe")?;
+let regs = crate::iomap_mmio(mmio.base, mmio.size, "virtio-mmio-probe")?;
+let access = MappedMmio {
+    regs,
+    mapping: MmioMapping::new(VirtAddr::from_mut_ptr(regs.as_ptr()), claim),
+};
+activate_mmio_with(device, device_kind, vtype, mmio.size, access)
+// identify (read-only) -> classify
+//   no match: `access` drops, releasing the claim and mapping reference
+//   match: `access.open()` moves both into `OwnedMmioTransport`
 ```
 
 Invariants:
 
-- `regs` comes from `iomap_mmio(mmio.base, mmio.size, "virtio-mmio-discovery")`,
-  which validates the mapping.
-- `mmio.size` matches the size used to create the mapping.
-- Discovery reads only registers defined as read-only by the VirtIO specification,
-  such as `MagicValue`, `Version`, and `DeviceID`.
+- `regs` comes from `iomap_mmio`, which validates the mapping.
+- **Exclusive access is range-scoped, not descriptor-scoped.**
+  `read_mmio_header` creates a `UniqueMmioPointer`, whose contract forbids
+  other aliases that access the region while it exists. The descriptor
+  binding lock cannot establish that: `DeviceManager::rescan` re-enumerates
+  (`manager.rs`), the platform backend's default rescan calls `enumerate`
+  again (`bus/backend.rs`), and `device_desc_add` gives every registration a
+  fresh descriptor and binding lock (`lifecycle/mod.rs`). A live transport
+  and a new descriptor for the same firmware range therefore have unrelated
+  locks and could otherwise access the same registers.
+  The shared `driver_os_api::MmioClaimOp` contract closes that path:
+  `activate_virtio_mmio` claims `[base, base + size)` through
+  `resource::claim_mmio_region` before the first register read, and the host
+  provider's table rejects any overlapping live claim with `ResourceBusy`
+  without touching the registers. The claim is released only after the
+  transport is dropped (`MmioMapping` unmaps, then its `_claim` field drops),
+  so no second probe or transport can alias the range during identification
+  or the device lifetime. Duplicate descriptors from rescan are still an
+  existing hotplug-removal debt; they now fail safely instead of aliasing
+  registers.
+  This exclusivity is scoped to claim participants. `memspace::iomap_device`,
+  `kdriver::iomap_mmio`, `devm_iomap` and drivers that do not call the claim
+  contract are not arbitrated, so the claim is not proof of system-wide MMIO
+  ownership.
+- `iomap_mmio` takes one mapping reference per successful call, including
+  cached hits. The reference is owned by `MmioMapping`. On success that
+  guard moves into `OwnedMmioTransport`, whose `transport` field is
+  declared first, so the transport's final access and `Drop` reset complete
+  before the guard unmaps. On identification/classification/open failure the
+  guard drops and releases its reference. No path decides unmapping from
+  `dispatch_virtio_try_new`'s return value.
+- That ordering bounds transport access; it does not by itself order the
+  device owner's DMA releases. Removing a published device drops the class
+  runtime first, so a VSOCK or sound owner unsets each queue, resets the
+  device, then detaches/unshares/frees RX buffers and releases queue rings
+  before the transport, mapping and claim are dropped. The reset return value
+  proves the device stopped accessing shared memory (status readback); it does
+  not by itself prove host-side IRQ callbacks have quiesced. VSOCK is polled
+  and registers no IRQ callback. The reset has no timeout and busy-polls, so
+  removal can wait with interrupts disabled. The MMIO integration tests assert
+  that the production HAL and provider counters return to their pre-probe
+  baseline after removal.
+- `identify_mmio_device` checks alignment, minimum region size (`0x100`),
+  magic and protocol version, and reads only `magic`, `version` and
+  `device_id`. It constructs no `MmioTransport`, so it cannot write
+  `DeviceStatus`; identification never resets the device.
+- The raw device id is compared with the driver's declared type before any
+  transport exists. An empty slot (id 0), a different known type, or an
+  unknown id returns `Unsupported` with no side effect.
+- `open_mmio_transport` runs only after an exact id match, with the same
+  region, size and claim preconditions identification already checked.
 
 Safety rationale:
 
-- Success from `iomap_mmio` means that the physical address lies in a valid MMIO window
-  and the mapping has been established.
-- The safety precondition of `virtio::probe_mmio_device` requires `regs` to point to
-  a valid, accessible MMIO region large enough for a complete VirtIO MMIO register frame.
-
-Callers:
-
-- `PlatformBackend::enumerate_firmware` through `virtio_mmio_registration`.
-
-### 5. VirtIO MMIO Discovery During Driver Activation
-
-Location: `src/driver_registry/virtio/mod.rs:194`
-
-```rust
-unsafe { virtio::probe_mmio_device(regs.as_ptr(), size) }.ok_or(DriverError::BadState)?;
-```
-
-Invariants:
-
-- `regs` comes from `iomap_mmio(base, size, "virtio-mmio-transport")`.
-- This path runs only for `DeviceLocation::Mmio` after the transport type has matched.
-- `size` comes from `DeviceLocation::Mmio.size` and matches the value recorded during
-  platform enumeration.
-
-Safety rationale:
-
-- The same as item 4.
+- Success from `iomap_mmio` means the physical address lies in a valid MMIO
+  window and the mapping has been established.
+- Both unsafe calls require `regs` to point to a valid, accessible MMIO
+  region of at least `mmio.size` bytes; the size is the one recorded during
+  enumeration and used to create the mapping.
+- The mapping remains valid while the transport exists because the transport
+  owns the guard that holds the `iomap_mmio` reference and the range claim.
 
 Callers:
 
@@ -603,7 +662,7 @@ Callers:
 | T-09 | A PCI BAR allocator race assigns the same MMIO address to two devices | Medium | Concurrent BAR allocation is not serialized correctly | `PCI_BAR_ALLOCATOR` is protected by `SpinNoPreempt`, and allocation occurs under the lock. |
 | T-10 | The serial driver remaps the stdout UART's MMIO and creates duplicate ownership | Medium | The serial driver calls `devm_iomap` again for the stdout node | Serial probe uses `take_early_port` and `SerialIdent` to adopt the early stdout instance without a second mapping. |
 | T-11 | Incorrect devres release ordering frees resources while a device still uses them | Medium | The driver's remove callback returns without stopping device DMA | Devres LIFO cleanup preserves release ordering; the driver's remove callback is responsible for stopping the device. |
-| T-12 | VirtIO MMIO discovery reads unmapped or invalid registers | Medium | Firmware advertises `virtio,mmio` but no VirtIO device exists at the physical address | `probe_mmio_device` first checks `MagicValue` and returns `None` if the VirtIO protocol is not present. |
+| T-12 | VirtIO MMIO probe reads unmapped or invalid registers | Medium | Firmware advertises `virtio,mmio` but no VirtIO device exists at the physical address | `identify_mmio_device` checks alignment, minimum size, `MagicValue` and version, reads only read-only header fields, and performs no write; a missing protocol fails the candidate. |
 | T-13 | An unchecked firmware IRQ number is registered on the wrong vector | Medium | `kirq::register` does not validate the IRQ number sufficiently | Depends on the platform IRQ backend and `kirq` descriptor handling; IRQ numbers passed by `kdriver` come from firmware or PCI INTx routing. |
 | T-14 | Static platform device addresses such as AHCI_PADDR are misconfigured at compile time | Low | `kbuild_config` constants specify invalid physical addresses | `iomap_first_mmio` validates through `devm_iomap` and `iomap_device`; mapping failure prevents driver activation. |
 | T-15 | Incorrect conversion between devres and kernel IRQ types causes bad IRQ configuration, lost handled results, or unwoken IRQ threads | Medium | The `driver-os-api-xkernel` adapter omits trigger/controller/handled/wake-thread fields | `driver-os-api-xkernel` centralizes `driver_os_api` to `kirq` conversion; device-specific queue routing stays in the driver, and the IRQ core does not depend on devres. |
@@ -625,13 +684,13 @@ Impact levels:
 | F-02 | Firmware provides no device description | Missing DT/ACPI tables or `has_device_description()` returns `false` | No devices registered through firmware enumeration | Only static devices remain, such as ramdisk and compile-time AHCI/sdmmc | 3 | Static device discovery is independent of firmware; log at info level. |
 | F-03 | One device fails probe | Every matching driver's `probe_device` returns an error | That descriptor stays `Pending`; no runtime object leaks | Other devices on the same bus activate normally; a later probe or driver registration may retry | 4 | `kdevice` rolls each candidate back and requeues; `kdriver` logs the `Unclaimed` outcome and places the descriptor in the unclaimed list, then continues with subsequent devices. |
 | F-04 | PCI BAR allocator uninitialized | `pci_bar_allocation_range()` returns `None` and a device has unassigned memory BARs | The PCI device is skipped | One PCI device unavailable | 3 | `configure_pci_device_if_needed` returns `NoMemory`, and the device is skipped. |
-| F-05 | VirtIO MMIO discovery returns no device | No VirtIO device in the region or a `MagicValue` mismatch | The MMIO region is skipped | Other platform devices unaffected | 4 | `probe_mmio_device` and then `virtio_mmio_registration` return `None`; log at trace level and skip the region. |
+| F-05 | VirtIO MMIO probe finds no matching device | Empty slot (id 0), a different or unknown device id, or a `MagicValue` mismatch | The candidate fails with `Unsupported`/`Io` and the descriptor stays `Pending` | Other platform devices and candidates are unaffected | 4 | The raw id is classified before any transport is constructed; identification is read-only, so a failed candidate cannot reset the device. Log the raw id and continue with the next candidate. |
 | F-06 | IRQ handler registration fails | `kirq` rejects a shared action or its action limit is reached | The device cannot receive interrupts | Block and input devices are not published; no polling fallback | 3 | `request_irq` returns `Busy`; partial activation is dropped before probe returns an error. |
 | F-07 | PCI host bridge adoption fails | Platform bus unregistered or `adopt_active_device` fails | PCI devices have no host bridge parent | PCI endpoints are still enumerated, but the device tree is incomplete | 3 | Log a warning and continue enumeration with a parentless layout. |
 | F-08 | Static device MMIO mapping fails | Invalid `kbuild_config` address or absent hardware | The static device unavailable | Other devices on the same bus unaffected | 3 | `iomap_first_mmio` returns an error, and probe fails. |
 | F-09 | Bus-type matcher is not ready when a driver registers | `register_bus_type` runs after driver registration | No device matches the driver | Devices enter the unclaimed list | 2 | `default_bus_manager` registers bus-type matchers before bus backends; drivers are then registered in `DeviceManager::new`. |
 | F-10 | Rescan produces duplicate device descriptors | The backend uses the default `rescan` hook and reruns full `enumerate` | `kdevice` may reject duplicates or create redundant descriptors | Incomplete hot-plug support | 3 | Default `rescan` reruns `enumerate`; backends may override it with incremental scanning. |
-| F-11 | VirtIO transport type differs from the driver's declaration | Reported `DeviceKind` differs from the matched driver's `device_type` | Driver probe returns `Unsupported` | The device enters the unclaimed list | 4 | `activate_virtio_device` validates the type again in PCI/MMIO activation paths. |
+| F-11 | VirtIO transport type differs from the driver's declaration | Reported `DeviceKind` (PCI) or raw MMIO device id differs from the matched driver's `device_type` | Driver probe returns `Unsupported` before constructing a transport | The device enters the unclaimed list | 4 | `activate_virtio_pci` revalidates the transport type; `activate_virtio_mmio` compares the read-only raw id and only then opens the transport. |
 | F-12 | Quiesce fails to stop device interrupts | Incorrect bus backend `quiesce` implementation or delayed hardware response | Interrupts continue arriving during shutdown | IRQ handlers may access released resources | 2 | Devres resources are released during remove, not quiesce; quiesce only masks interrupt sources. |
 | F-13 | A device reaches probe without a firmware node | Static registration, PCI enumeration or adoption intentionally passes `None`, or discovery had no node | Probe cannot read firmware properties | Driver must rely on static configuration or fail with its own error; no incorrect association is invented | 4 | `None` is the documented normal case; probe queries firmware only when a handle is present and never falls back to a name/compatible lookup. |
 
@@ -708,6 +767,10 @@ Production deployments should control exposure through log levels.
   it reads only compatible/HID/CID, MMIO, and IRQ resources.
 - PCI hot-plug is supported only through full re-enumeration with `rescan`.
   There is no native hot-plug event handling or PCIe AER / hot-plug controller driver.
+- Explicit device-owner teardown (queue unset and reset before buffer/ring
+  release) exists only for VSOCK and sound. Other VirtIO device kinds rely on
+  their pre-existing transport/queue `Drop` paths and have not been audited
+  for the same ordering guarantee.
 - Firmware-node association assumes boot-static firmware storage. Backends are
   borrowed, not owned or reference-counted; there is no teardown path for a
   dynamically created backend, and `FwNode`'s `'static` bound cannot detect one

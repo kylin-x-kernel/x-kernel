@@ -5,14 +5,31 @@ use super::error::SocketError;
 use super::protocol::{
     Feature, StreamShutdown, VirtioVsockConfig, VirtioVsockHdr, VirtioVsockOp, VsockAddr,
 };
-use crate::Result;
 use crate::config::read_config;
 use crate::hal::Hal;
-use crate::queue::{OwningQueue, VirtQueue};
+use crate::queue::{OwningQueue, SyncError, VirtQueue};
 use crate::transport::Transport;
+use crate::{Error, Result};
 use core::mem::size_of;
-use log::debug;
+use log::{debug, error};
 use zerocopy::{FromBytes, IntoBytes};
+
+/// Runs `$expr`; on failure stops the device before returning the error.
+///
+/// The result is bound before the match so the mutable borrow taken by `$expr`
+/// ends before `reset` is called.
+macro_rules! try_or_reset {
+    ($transport:ident, $expr:expr) => {{
+        let result = $expr;
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                $transport.reset();
+                return Err(error);
+            }
+        }
+    }};
+}
 
 pub(crate) const RX_QUEUE_IDX: u16 = 0;
 pub(crate) const TX_QUEUE_IDX: u16 = 1;
@@ -261,8 +278,8 @@ pub enum VsockEventType {
 /// bigger than `size_of::<VirtioVsockHdr>()`.
 pub struct VirtIOSocket<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize = DEFAULT_RX_BUFFER_SIZE>
 {
-    transport: T,
-    /// Virtqueue to receive packets.
+    /// Virtqueue to receive packets. Drops (detach/unshare/free) before the
+    /// rings and transport.
     rx: OwningQueue<H, QUEUE_SIZE, RX_BUFFER_SIZE>,
     tx: VirtQueue<H, { QUEUE_SIZE }>,
     /// Virtqueue to receive events from the device.
@@ -270,6 +287,12 @@ pub struct VirtIOSocket<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize = DEFA
     /// The guest_cid field contains the guest’s context ID, which uniquely identifies
     /// the device for its lifetime. The upper 32 bits of the CID are reserved and zeroed.
     guest_cid: u64,
+    /// Set once the device has been stopped after a fatal TX failure. No queue
+    /// operation is allowed after that.
+    failed: bool,
+    /// Declared last so the queues and their DMA mappings are released before
+    /// the transport which the device can still access.
+    transport: T,
 }
 
 impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> Drop
@@ -281,6 +304,8 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> Drop
         self.transport.queue_unset(RX_QUEUE_IDX);
         self.transport.queue_unset(TX_QUEUE_IDX);
         self.transport.queue_unset(EVENT_QUEUE_IDX);
+        // Device-side stop before the field destructors release queue memory.
+        self.transport.reset();
     }
 }
 
@@ -291,49 +316,72 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
 
         let negotiated_features = transport.begin_init(SUPPORTED_FEATURES);
 
-        let guest_cid = transport.read_consistent(|| {
-            Ok(
-                (read_config!(transport, VirtioVsockConfig, guest_cid_low)? as u64)
-                    | ((read_config!(transport, VirtioVsockConfig, guest_cid_high)? as u64) << 32),
-            )
-        })?;
+        let guest_cid = try_or_reset!(
+            transport,
+            transport.read_consistent(|| {
+                Ok(
+                    (read_config!(transport, VirtioVsockConfig, guest_cid_low)? as u64)
+                        | ((read_config!(transport, VirtioVsockConfig, guest_cid_high)? as u64)
+                            << 32),
+                )
+            })
+        );
         debug!("guest cid: {guest_cid:?}");
 
-        let rx = VirtQueue::new(
-            &mut transport,
-            RX_QUEUE_IDX,
-            negotiated_features.contains(Feature::RING_INDIRECT_DESC),
-            negotiated_features.contains(Feature::RING_EVENT_IDX),
-            negotiated_features.contains(Feature::ACCESS_PLATFORM),
-        )?;
-        let tx = VirtQueue::new(
-            &mut transport,
-            TX_QUEUE_IDX,
-            negotiated_features.contains(Feature::RING_INDIRECT_DESC),
-            negotiated_features.contains(Feature::RING_EVENT_IDX),
-            negotiated_features.contains(Feature::ACCESS_PLATFORM),
-        )?;
-        let event = VirtQueue::new(
-            &mut transport,
-            EVENT_QUEUE_IDX,
-            negotiated_features.contains(Feature::RING_INDIRECT_DESC),
-            negotiated_features.contains(Feature::RING_EVENT_IDX),
-            negotiated_features.contains(Feature::ACCESS_PLATFORM),
-        )?;
+        let rx = try_or_reset!(
+            transport,
+            VirtQueue::new(
+                &mut transport,
+                RX_QUEUE_IDX,
+                negotiated_features.contains(Feature::RING_INDIRECT_DESC),
+                negotiated_features.contains(Feature::RING_EVENT_IDX),
+                negotiated_features.contains(Feature::ACCESS_PLATFORM),
+            )
+        );
+        let tx = try_or_reset!(
+            transport,
+            VirtQueue::new(
+                &mut transport,
+                TX_QUEUE_IDX,
+                negotiated_features.contains(Feature::RING_INDIRECT_DESC),
+                negotiated_features.contains(Feature::RING_EVENT_IDX),
+                negotiated_features.contains(Feature::ACCESS_PLATFORM),
+            )
+        );
+        let event = try_or_reset!(
+            transport,
+            VirtQueue::new(
+                &mut transport,
+                EVENT_QUEUE_IDX,
+                negotiated_features.contains(Feature::RING_INDIRECT_DESC),
+                negotiated_features.contains(Feature::RING_EVENT_IDX),
+                negotiated_features.contains(Feature::ACCESS_PLATFORM),
+            )
+        );
 
-        let rx = OwningQueue::new(rx)?;
+        let mut rx = OwningQueue::empty(rx);
+        // SAFETY: This constructor is the device owner. If filling fails or any
+        // later step fails, it resets before returning; its local queues are
+        // dropped after that reset and the transport parameter is dropped last.
+        if let Err(error) = unsafe { rx.fill() } {
+            transport.reset();
+            return Err(error);
+        }
 
+        // No fallible operation is allowed after buffers are published, so the
+        // reset obligation above covers the only failure path.
         transport.finish_init();
         if rx.should_notify() {
             transport.notify(RX_QUEUE_IDX);
         }
 
         Ok(Self {
-            transport,
             rx,
             tx,
             event,
             guest_cid,
+            failed: false,
+            transport,
         })
     }
 
@@ -422,6 +470,9 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
         &mut self,
         handler: impl FnOnce(VsockEvent, &[u8]) -> Result<Option<VsockEvent>>,
     ) -> Result<Option<VsockEvent>> {
+        if self.failed {
+            return Err(Error::IoError);
+        }
         self.rx.poll(&mut self.transport, |buffer| {
             let (header, body) = read_header_and_body(buffer)?;
             VsockEvent::from_header(&header).and_then(|event| handler(event, body))
@@ -471,17 +522,58 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
     }
 
     fn send_packet_to_tx_queue(&mut self, header: &VirtioVsockHdr, buffer: &[u8]) -> Result {
-        let _len = if buffer.is_empty() {
-            self.tx
-                .add_notify_wait_pop(&[header.as_bytes()], &mut [], &mut self.transport)?
+        if self.failed {
+            return Err(Error::IoError);
+        }
+
+        // Both arrays are bound here so `inputs` outlives the checked call and
+        // any detach which follows it in this frame.
+        let header_only = [header.as_bytes()];
+        let header_and_body = [header.as_bytes(), buffer];
+        let inputs: &[&[u8]] = if buffer.is_empty() {
+            &header_only
         } else {
-            self.tx.add_notify_wait_pop(
-                &[header.as_bytes(), buffer],
-                &mut [],
-                &mut self.transport,
-            )?
+            &header_and_body
         };
-        Ok(())
+
+        // SAFETY: `inputs` borrows `header` (a caller-owned stack value) and
+        // `buffer` (the caller's slice), both of which stay valid for this
+        // frame. If publication already happened when this returns an error, we
+        // stop the device and detach the token below before the borrows end.
+        let result = unsafe {
+            self.tx
+                .add_notify_wait_pop_checked(inputs, &mut [], &mut self.transport)
+        };
+        match result {
+            Ok(_) => Ok(()),
+            Err(SyncError {
+                error,
+                token: None,
+            }) => Err(error),
+            Err(SyncError {
+                error,
+                token: Some(token),
+            }) => {
+                // Stop the device before touching the published request. The
+                // transport reset is the device-side evidence that it no longer
+                // accesses the old queues and buffers.
+                self.transport.reset();
+                // SAFETY: The device has been reset. `inputs` is the same
+                // buffer set passed to the failing `add` and is still valid.
+                unsafe {
+                    self.tx.detach_unused_buffer(token, inputs, &mut []);
+                }
+                // SAFETY: The device has been reset, and this socket will not
+                // use these queues again. Releasing RX here is device-level
+                // cleanup, not a queue-local rollback.
+                unsafe {
+                    self.rx.detach_all_after_stop();
+                }
+                self.failed = true;
+                error!("vsock TX failed after publication, device stopped: {error:?}");
+                Err(Error::IoError)
+            }
+        }
     }
 }
 
@@ -508,15 +600,321 @@ fn read_header_and_body(buffer: &[u8]) -> Result<(VirtioVsockHdr, &[u8])> {
 mod tests {
     use super::*;
     use crate::{
+        BufferDirection, PhysAddr,
         config::ReadOnly,
         hal::fake::FakeHal,
+        queue::fake_corrupt_last_used_id,
         transport::{
-            DeviceType,
+            DeviceStatus, DeviceType, InterruptStatus,
             fake::{FakeTransport, QueueStatus, State},
         },
     };
-    use alloc::{sync::Arc, vec};
+    use alloc::{sync::Arc, vec, vec::Vec};
+    use core::{cell::RefCell, ptr::NonNull};
     use std::sync::Mutex;
+    use zerocopy::Immutable;
+
+    /// DMA calls observed through [`CountingHal`].
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct Counts {
+        alloc: usize,
+        dealloc: usize,
+        share: usize,
+        unshare: usize,
+        fail_alloc_at: Option<usize>,
+        fail_share_at: Option<usize>,
+    }
+
+    /// Ordered evidence shared by the counting HAL and the recording transport.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Event {
+        Alloc,
+        Dealloc,
+        Share,
+        Unshare,
+        Notify(u16),
+        QueueUnset(u16),
+        Reset,
+        TransportDrop,
+    }
+
+    thread_local! {
+        static COUNTS: RefCell<Counts> = RefCell::new(Counts::default());
+        static EVENTS: RefCell<Vec<Event>> = RefCell::new(Vec::new());
+    }
+
+    fn trace(event: Event) {
+        EVENTS.with(|events| events.borrow_mut().push(event));
+    }
+
+    fn events() -> Vec<Event> {
+        EVENTS.with(|events| events.borrow().clone())
+    }
+
+    fn counts() -> Counts {
+        COUNTS.with(|counts| *counts.borrow())
+    }
+
+    fn reset_harness() {
+        COUNTS.with(|counts| *counts.borrow_mut() = Counts::default());
+        EVENTS.with(|events| events.borrow_mut().clear());
+    }
+
+    /// Makes the given one-based `share` call fail.
+    fn fail_share_at(call: usize) {
+        COUNTS.with(|counts| counts.borrow_mut().fail_share_at = Some(call));
+    }
+
+    /// Makes the given one-based `dma_alloc` call fail.
+    fn fail_alloc_at(call: usize) {
+        COUNTS.with(|counts| counts.borrow_mut().fail_alloc_at = Some(call));
+    }
+
+    fn clear_failures() {
+        COUNTS.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            counts.fail_alloc_at = None;
+            counts.fail_share_at = None;
+        });
+    }
+
+    fn position(events: &[Event], event: Event) -> usize {
+        events
+            .iter()
+            .position(|candidate| *candidate == event)
+            .unwrap_or_else(|| panic!("{event:?} missing from {events:?}"))
+    }
+
+    fn last_position(events: &[Event], event: Event) -> usize {
+        events
+            .iter()
+            .rposition(|candidate| *candidate == event)
+            .unwrap_or_else(|| panic!("{event:?} missing from {events:?}"))
+    }
+
+    fn count_events(events: &[Event], event: Event) -> usize {
+        events.iter().filter(|candidate| **candidate == event).count()
+    }
+
+    /// HAL which counts and orders DMA operations and can inject failures.
+    ///
+    /// Every successful operation is forwarded to [`FakeHal`], so the queue,
+    /// buffer and mapping objects under test are the real ones.
+    struct CountingHal;
+
+    // SAFETY: every operation forwards to `FakeHal`, which upholds the `Hal`
+    // contract. Counting only observes arguments; injected failures return the
+    // documented failure sentinel and release nothing.
+    unsafe impl Hal for CountingHal {
+        fn dma_alloc(
+            pages: usize,
+            direction: BufferDirection,
+            access_platform: bool,
+        ) -> (PhysAddr, NonNull<u8>) {
+            let fail = COUNTS.with(|counts| {
+                let mut counts = counts.borrow_mut();
+                counts.alloc += 1;
+                counts.fail_alloc_at == Some(counts.alloc)
+            });
+            trace(Event::Alloc);
+            if fail {
+                (0, NonNull::dangling())
+            } else {
+                <FakeHal as Hal>::dma_alloc(pages, direction, access_platform)
+            }
+        }
+
+        unsafe fn dma_dealloc(
+            paddr: PhysAddr,
+            vaddr: NonNull<u8>,
+            pages: usize,
+            access_platform: bool,
+        ) -> i32 {
+            COUNTS.with(|counts| counts.borrow_mut().dealloc += 1);
+            trace(Event::Dealloc);
+            // SAFETY: forwarded unchanged; the caller upholds the allocation contract.
+            unsafe { <FakeHal as Hal>::dma_dealloc(paddr, vaddr, pages, access_platform) }
+        }
+
+        unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
+            // SAFETY: forwarded unchanged; the caller supplies a valid MMIO range.
+            unsafe { <FakeHal as Hal>::mmio_phys_to_virt(paddr, size) }
+        }
+
+        unsafe fn share(
+            buffer: NonNull<[u8]>,
+            direction: BufferDirection,
+            access_platform: bool,
+        ) -> PhysAddr {
+            let fail = COUNTS.with(|counts| {
+                let mut counts = counts.borrow_mut();
+                counts.share += 1;
+                counts.fail_share_at == Some(counts.share)
+            });
+            trace(Event::Share);
+            if fail {
+                0
+            } else {
+                // SAFETY: forwarded unchanged; the caller keeps the buffer valid.
+                unsafe { <FakeHal as Hal>::share(buffer, direction, access_platform) }
+            }
+        }
+
+        unsafe fn unshare(
+            paddr: PhysAddr,
+            buffer: NonNull<[u8]>,
+            direction: BufferDirection,
+            access_platform: bool,
+        ) {
+            COUNTS.with(|counts| counts.borrow_mut().unshare += 1);
+            trace(Event::Unshare);
+            // SAFETY: forwarded unchanged; the caller stopped device access and
+            // keeps the buffer valid.
+            unsafe { <FakeHal as Hal>::unshare(paddr, buffer, direction, access_platform) }
+        }
+    }
+
+    /// Transport wrapper which records lifecycle operations and can complete TX.
+    struct RecordingTransport {
+        inner: FakeTransport<VirtioVsockConfig>,
+        complete_tx: bool,
+        corrupt_tx_id: Option<u16>,
+    }
+
+    impl RecordingTransport {
+        fn new(device_features: u64) -> (Self, Arc<Mutex<State<VirtioVsockConfig>>>) {
+            let state = Arc::new(Mutex::new(State::new(
+                vec![
+                    QueueStatus::default(),
+                    QueueStatus::default(),
+                    QueueStatus::default(),
+                ],
+                VirtioVsockConfig {
+                    guest_cid_low: ReadOnly::new(66),
+                    guest_cid_high: ReadOnly::new(0),
+                },
+            )));
+            (
+                Self {
+                    inner: FakeTransport {
+                        device_type: DeviceType::Socket,
+                        max_queue_size: QUEUE_SIZE as u32,
+                        device_features,
+                        state: state.clone(),
+                    },
+                    complete_tx: false,
+                    corrupt_tx_id: None,
+                },
+                state,
+            )
+        }
+    }
+
+    impl Drop for RecordingTransport {
+        fn drop(&mut self) {
+            trace(Event::TransportDrop);
+        }
+    }
+
+    impl Transport for RecordingTransport {
+        fn device_type(&self) -> DeviceType {
+            self.inner.device_type()
+        }
+
+        fn read_device_features(&mut self) -> u64 {
+            self.inner.read_device_features()
+        }
+
+        fn write_driver_features(&mut self, features: u64) {
+            self.inner.write_driver_features(features);
+        }
+
+        fn max_queue_size(&mut self, queue: u16) -> u32 {
+            self.inner.max_queue_size(queue)
+        }
+
+        fn notify(&mut self, queue: u16) {
+            trace(Event::Notify(queue));
+            self.inner.notify(queue);
+            if queue == TX_QUEUE_IDX && (self.complete_tx || self.corrupt_tx_id.is_some()) {
+                let state = self.inner.state.clone();
+                let mut state = state.lock().unwrap();
+                state.read_from_queue::<QUEUE_SIZE>(TX_QUEUE_IDX);
+                if let Some(id) = self.corrupt_tx_id {
+                    let queue = &state.queues[usize::from(TX_QUEUE_IDX)];
+                    fake_corrupt_last_used_id::<QUEUE_SIZE>(queue.device_area as *mut u8, id);
+                }
+            }
+        }
+
+        fn get_status(&self) -> DeviceStatus {
+            self.inner.get_status()
+        }
+
+        fn set_status(&mut self, status: DeviceStatus) {
+            self.inner.set_status(status);
+        }
+
+        fn set_guest_page_size(&mut self, size: u32) {
+            self.inner.set_guest_page_size(size);
+        }
+
+        fn requires_legacy_layout(&self) -> bool {
+            self.inner.requires_legacy_layout()
+        }
+
+        fn queue_set(
+            &mut self,
+            queue: u16,
+            size: u32,
+            descriptors: PhysAddr,
+            driver_area: PhysAddr,
+            device_area: PhysAddr,
+        ) {
+            self.inner
+                .queue_set(queue, size, descriptors, driver_area, device_area);
+        }
+
+        fn queue_unset(&mut self, queue: u16) {
+            trace(Event::QueueUnset(queue));
+            self.inner.queue_unset(queue);
+        }
+
+        fn queue_used(&mut self, queue: u16) -> bool {
+            self.inner.queue_used(queue)
+        }
+
+        fn ack_interrupt(&mut self) -> InterruptStatus {
+            self.inner.ack_interrupt()
+        }
+
+        fn read_config_generation(&self) -> u32 {
+            self.inner.read_config_generation()
+        }
+
+        fn read_config_space<T: FromBytes + IntoBytes>(&self, offset: usize) -> Result<T> {
+            self.inner.read_config_space(offset)
+        }
+
+        fn write_config_space<T: IntoBytes + Immutable>(
+            &mut self,
+            offset: usize,
+            value: T,
+        ) -> Result<()> {
+            self.inner.write_config_space(offset, value)
+        }
+
+        fn reset(&mut self) {
+            trace(Event::Reset);
+            Transport::reset(&mut self.inner);
+        }
+    }
+
+    fn connection() -> ConnectionInfo {
+        let mut connection = ConnectionInfo::new(VsockAddr { cid: 3, port: 1024 }, 42);
+        connection.set_peer_buf_alloc(4096);
+        connection
+    }
 
     #[test]
     fn config() {
@@ -541,5 +939,256 @@ mod tests {
         let socket =
             VirtIOSocket::<FakeHal, FakeTransport<VirtioVsockConfig>>::new(transport).unwrap();
         assert_eq!(socket.guest_cid(), 0x00_0000_0042);
+    }
+
+    #[test]
+    fn drop_stops_device_before_releasing_unconsumed_rx_buffers() {
+        reset_harness();
+        let (transport, state) = RecordingTransport::new(0);
+        let socket = VirtIOSocket::<CountingHal, RecordingTransport>::new(transport).unwrap();
+        assert_eq!(counts().share, QUEUE_SIZE);
+        assert_eq!(counts().alloc, 6);
+        assert_eq!(counts().unshare, 0);
+
+        drop(socket);
+
+        let counts = counts();
+        assert_eq!(counts.share, QUEUE_SIZE);
+        assert_eq!(counts.unshare, QUEUE_SIZE);
+        assert_eq!(counts.alloc, 6);
+        assert_eq!(counts.dealloc, 6);
+
+        let events = events();
+        assert_eq!(count_events(&events, Event::QueueUnset(RX_QUEUE_IDX)), 1);
+        assert_eq!(count_events(&events, Event::QueueUnset(TX_QUEUE_IDX)), 1);
+        assert_eq!(count_events(&events, Event::QueueUnset(EVENT_QUEUE_IDX)), 1);
+        let reset = position(&events, Event::Reset);
+        let last_unset = last_position(&events, Event::QueueUnset(EVENT_QUEUE_IDX));
+        let first_unshare = position(&events, Event::Unshare);
+        let last_unshare = last_position(&events, Event::Unshare);
+        let transport_drop = position(&events, Event::TransportDrop);
+        assert!(last_unset < reset, "{events:?}");
+        assert!(reset < first_unshare, "{events:?}");
+        assert!(last_unshare < transport_drop, "{events:?}");
+        assert_eq!(count_events(&events, Event::Unshare), QUEUE_SIZE);
+        assert_eq!(
+            state.lock().unwrap().status_history.last().copied(),
+            Some(DeviceStatus::empty())
+        );
+    }
+
+    #[test]
+    fn completed_rx_buffer_is_reused_and_released_once() {
+        reset_harness();
+        let (transport, state) = RecordingTransport::new(0);
+        let mut socket =
+            VirtIOSocket::<CountingHal, RecordingTransport>::new(transport).unwrap();
+
+        let header = VirtioVsockHdr {
+            op: VirtioVsockOp::CreditUpdate.into(),
+            ..Default::default()
+        };
+        state
+            .lock()
+            .unwrap()
+            .write_to_queue::<QUEUE_SIZE>(RX_QUEUE_IDX, header.as_bytes());
+
+        assert_eq!(socket.poll(|_event, _body| Ok(None)), Ok(None));
+        let counts_after_poll = counts();
+        assert_eq!(counts_after_poll.unshare, 1);
+        assert_eq!(counts_after_poll.share, QUEUE_SIZE + 1);
+
+        drop(socket);
+        let counts = counts();
+        assert_eq!(counts.share, QUEUE_SIZE + 1);
+        assert_eq!(counts.unshare, QUEUE_SIZE + 1);
+        assert_eq!(counts.dealloc, 6);
+    }
+
+    #[test]
+    fn rx_fill_failure_resets_before_releasing_published_buffers() {
+        for fail_at in [1, 65] {
+            reset_harness();
+            let (transport, state) = RecordingTransport::new(0);
+            fail_share_at(fail_at);
+
+            let result = VirtIOSocket::<CountingHal, RecordingTransport>::new(transport);
+            assert!(result.is_err(), "fill should fail at share {fail_at}");
+
+            let counts = counts();
+            assert_eq!(counts.share, fail_at);
+            assert_eq!(counts.unshare, fail_at - 1);
+            assert_eq!(counts.alloc, 6);
+            assert_eq!(counts.dealloc, 6);
+
+            let events = events();
+            let reset = position(&events, Event::Reset);
+            if fail_at == 1 {
+                // Nothing was published, so a correct implementation has
+                // nothing to unshare before the partially built queues and
+                // transport are dropped.
+                assert_eq!(count_events(&events, Event::Unshare), 0, "{events:?}");
+            } else {
+                // Every published buffer was unshared after the reset which
+                // stopped the device, and before the transport was dropped.
+                assert!(reset < position(&events, Event::Unshare), "{events:?}");
+                assert!(
+                    last_position(&events, Event::Unshare)
+                        < position(&events, Event::TransportDrop),
+                    "{events:?}"
+                );
+            }
+            assert!(reset < position(&events, Event::TransportDrop), "{events:?}");
+            assert_eq!(
+                state.lock().unwrap().status_history.last().copied(),
+                Some(DeviceStatus::empty())
+            );
+        }
+    }
+
+    #[test]
+    fn indirect_tx_unshares_every_mapping_once() {
+        reset_harness();
+        let features = (Feature::RING_INDIRECT_DESC | Feature::VERSION_1).bits();
+        let (mut transport, _state) = RecordingTransport::new(features);
+        transport.complete_tx = true;
+        let mut socket =
+            VirtIOSocket::<CountingHal, RecordingTransport>::new(transport).unwrap();
+        let mut connection = connection();
+
+        socket.send(&[0xaa; 4], &mut connection).unwrap();
+
+        // One indirect list plus the header and body mappings.
+        let counts_after_send = counts();
+        assert_eq!(counts_after_send.share, QUEUE_SIZE + 3);
+        assert_eq!(counts_after_send.unshare, 3);
+
+        drop(socket);
+        let counts_after_drop = counts();
+        assert_eq!(counts_after_drop.share, QUEUE_SIZE + 3);
+        assert_eq!(counts_after_drop.unshare, QUEUE_SIZE + 3);
+        assert_eq!(counts_after_drop.dealloc, 6);
+    }
+
+    #[test]
+    fn wrong_token_stops_device_and_releases_every_outstanding_buffer() {
+        reset_harness();
+        let (mut transport, _state) = RecordingTransport::new(0);
+        transport.complete_tx = true;
+        transport.corrupt_tx_id = Some(1);
+        let mut socket =
+            VirtIOSocket::<CountingHal, RecordingTransport>::new(transport).unwrap();
+        let mut connection = connection();
+
+        assert_eq!(
+            socket.send(&[0xaa; 4], &mut connection),
+            Err(Error::IoError)
+        );
+
+        let counts_after_failure = counts();
+        assert_eq!(counts_after_failure.share, QUEUE_SIZE + 2);
+        assert_eq!(counts_after_failure.unshare, QUEUE_SIZE + 2);
+
+        let events_after_failure = events();
+        assert_eq!(count_events(&events_after_failure, Event::Reset), 1);
+        assert!(
+            position(&events_after_failure, Event::Reset)
+                < position(&events_after_failure, Event::Unshare),
+            "{events_after_failure:?}"
+        );
+
+        let event_count = events_after_failure.len();
+        let count_snapshot = counts();
+        assert_eq!(socket.poll(|_event, _body| Ok(None)), Err(Error::IoError));
+        assert_eq!(
+            socket.send(&[0xbb; 4], &mut connection),
+            Err(Error::IoError)
+        );
+        assert_eq!(counts(), count_snapshot);
+        assert_eq!(events().len(), event_count);
+
+        drop(socket);
+        assert_eq!(counts().unshare, QUEUE_SIZE + 2);
+
+        let events_after_drop = events();
+        assert_eq!(count_events(&events_after_drop, Event::Reset), 2);
+        assert!(
+            last_position(&events_after_drop, Event::Unshare)
+                < position(&events_after_drop, Event::TransportDrop),
+            "{events_after_drop:?}"
+        );
+    }
+
+    #[test]
+    fn unpublished_tx_failure_does_not_stop_the_device() {
+        reset_harness();
+        let (mut transport, _state) = RecordingTransport::new(0);
+        transport.complete_tx = true;
+        let mut socket =
+            VirtIOSocket::<CountingHal, RecordingTransport>::new(transport).unwrap();
+        let mut connection = connection();
+
+        fail_share_at(QUEUE_SIZE + 1);
+        assert_eq!(
+            socket.send(&[0xaa; 4], &mut connection),
+            Err(Error::DmaError)
+        );
+        assert_eq!(count_events(&events(), Event::Reset), 0);
+        assert_eq!(counts().unshare, 0);
+
+        clear_failures();
+        socket.send(&[0xbb; 4], &mut connection).unwrap();
+        assert_eq!(counts().share, QUEUE_SIZE + 3);
+        assert_eq!(counts().unshare, 2);
+
+        drop(socket);
+        assert_eq!(counts().unshare, QUEUE_SIZE + 2);
+        assert_eq!(counts().dealloc, 6);
+    }
+
+    #[test]
+    fn ring_allocation_failure_releases_partial_queue() {
+        reset_harness();
+        let (transport, _state) = RecordingTransport::new(0);
+        fail_alloc_at(2);
+
+        assert!(VirtIOSocket::<CountingHal, RecordingTransport>::new(transport).is_err());
+
+        let counts = counts();
+        assert_eq!(counts.alloc, 2);
+        assert_eq!(counts.dealloc, 1);
+        assert_eq!(counts.share, 0);
+        assert_eq!(counts.unshare, 0);
+        assert_eq!(count_events(&events(), Event::Reset), 1);
+    }
+
+    #[test]
+    fn next_queue_allocation_failure_releases_existing_queues_after_reset() {
+        reset_harness();
+        let (transport, state) = RecordingTransport::new(0);
+        fail_alloc_at(5);
+
+        assert!(VirtIOSocket::<CountingHal, RecordingTransport>::new(transport).is_err());
+
+        let counts = counts();
+        assert_eq!(counts.alloc, 5);
+        assert_eq!(counts.dealloc, 4);
+        assert_eq!(counts.share, 0);
+        assert_eq!(counts.unshare, 0);
+
+        let events = events();
+        assert_eq!(count_events(&events, Event::Reset), 1);
+        assert!(
+            position(&events, Event::Reset) < position(&events, Event::Dealloc),
+            "{events:?}"
+        );
+        assert!(
+            last_position(&events, Event::Dealloc) < position(&events, Event::TransportDrop),
+            "{events:?}"
+        );
+        assert_eq!(
+            state.lock().unwrap().status_history.last().copied(),
+            Some(DeviceStatus::empty())
+        );
     }
 }

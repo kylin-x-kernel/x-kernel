@@ -202,6 +202,14 @@ impl Transport for HypPciTransport {
         configwrite!(self.common_cfg, device_status, status.bits() as u8);
     }
 
+    fn reset(&mut self) {
+        // PCI-style reset: write 0 and wait for the readback. There is no Drop
+        // reset for this transport, so device owners must call this explicitly
+        // before releasing queues/buffers.
+        self.set_status(DeviceStatus::empty());
+        while self.get_status() != DeviceStatus::empty() {}
+    }
+
     fn set_guest_page_size(&mut self, _guest_page_size: u32) {
         // No-op, the PCI transport doesn't care.
     }

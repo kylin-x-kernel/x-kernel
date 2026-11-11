@@ -264,6 +264,14 @@ impl Transport for PciTransport {
         field!(self.common_cfg, device_status).write(status.bits() as u8);
     }
 
+    fn reset(&mut self) {
+        // Writing 0 to device_status resets the device. Wait for the readback
+        // to flush the status write and device writes; the device-side stop is
+        // the release precondition. Host IRQ callbacks are separate.
+        self.set_status(DeviceStatus::empty());
+        while self.get_status() != DeviceStatus::empty() {}
+    }
+
     fn set_guest_page_size(&mut self, _guest_page_size: u32) {
         // No-op, the PCI transport doesn't care.
     }
@@ -379,8 +387,7 @@ unsafe impl Sync for PciTransport {}
 impl Drop for PciTransport {
     fn drop(&mut self) {
         // Reset the device when the transport is dropped.
-        self.set_status(DeviceStatus::empty());
-        while self.get_status() != DeviceStatus::empty() {}
+        self.reset()
     }
 }
 
@@ -542,6 +549,8 @@ mod tests {
                 subclass: 0,
                 prog_if: 0,
                 revision: 0,
+                subsystem_vendor_id: 0,
+                subsystem_device_id: 0,
                 header_type: bus::HeaderType::Standard,
             }),
             Some(DeviceType::Block)
@@ -559,6 +568,8 @@ mod tests {
                 subclass: 0,
                 prog_if: 0,
                 revision: 0,
+                subsystem_vendor_id: 0,
+                subsystem_device_id: 0,
                 header_type: bus::HeaderType::Standard,
             }),
             None
@@ -573,6 +584,8 @@ mod tests {
                 subclass: 0,
                 prog_if: 0,
                 revision: 0,
+                subsystem_vendor_id: 0,
+                subsystem_device_id: 0,
                 header_type: bus::HeaderType::Standard,
             }),
             None

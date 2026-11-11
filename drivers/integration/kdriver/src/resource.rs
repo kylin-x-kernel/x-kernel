@@ -14,7 +14,7 @@ use core::ptr::NonNull;
 use driver_base::{DriverError, DriverResult};
 use driver_os_api::{
     DmaSpec, IrqHandler as DevIrqHandler, IrqResource, IrqThreadHandler as DevIrqThreadHandler,
-    MmioRegion, ResError,
+    MmioClaim, MmioRegion, ResError,
 };
 use driver_os_api_xkernel::XKernelResourceProvider;
 use kdevice::DeviceObject;
@@ -37,6 +37,17 @@ pub(crate) fn map_res_err(err: ResError) -> DriverError {
         ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,
     }
+}
+
+/// Claim a physical MMIO range through the framework-owned provider.
+///
+/// The provider rejects any overlapping live claim with `ResourceBusy` before
+/// the range is accessed. The returned guard releases
+/// the range on drop; callers must retain it until their last register access
+/// has ended. This does not arbitrate against code paths that do not use the
+/// shared claim contract.
+pub(crate) fn claim_mmio_region(region: MmioRegion, name: &'static str) -> DriverResult<MmioClaim> {
+    MmioClaim::claim_with(resource_provider(), region, name).map_err(map_res_err)
 }
 
 /// Map an MMIO region and tie its lifetime to `device`.

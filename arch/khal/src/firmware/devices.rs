@@ -67,7 +67,13 @@ pub struct FirmwareDevice {
     /// example the resolved DMA window and effective coherency — query this
     /// handle rather than depending on a concrete firmware parser.
     pub node: FwNode<'static>,
-    pub mmio: Option<MmioResource>,
+    /// The node's first MMIO range, normalized for this target.
+    ///
+    /// `Ok(None)` means the node declares no first MMIO range; a declaration
+    /// that cannot be read or represented as `usize` is reported instead of
+    /// being folded into "absent". Consumers must distinguish the two, exactly
+    /// as they do for `irq`.
+    pub mmio: Result<Option<MmioResource>, FwError>,
     /// The node's first interrupt declaration, still carrying its exact
     /// controller node and complete binding cells. A malformed declaration is
     /// reported, not silently treated as "no interrupt": downstream mapping
@@ -75,7 +81,7 @@ pub struct FirmwareDevice {
     pub irq: Result<Option<FwIrqSpec<'static>>, FwError>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MmioResource {
     pub base: usize,
     pub size: usize,
@@ -205,22 +211,35 @@ pub fn for_each_compatible(
             continue;
         };
 
-        let mmio = node
-            .mmio_resource(0)
-            .ok()
-            .flatten()
-            .map(|resource| MmioResource {
-                base: resource.base as usize,
-                size: resource.size as usize,
-            });
-        let irq = node.irq_spec(0);
-
-        visitor(FirmwareDevice {
-            firmware_id,
-            source: FirmwareSource::DeviceTree,
-            node,
-            mmio,
-            irq,
-        });
+        visitor(firmware_device_from_node(node, firmware_id));
     }
 }
+
+/// Build the normalized description of one firmware node.
+///
+/// Resource reads stay fallible: an unreadable declaration is preserved as an
+/// error, and `u64 -> usize` conversion is checked rather than truncated.
+fn firmware_device_from_node(node: FwNode<'static>, firmware_id: &'static str) -> FirmwareDevice {
+    let mmio = match node.mmio_resource(0) {
+        Ok(None) => Ok(None),
+        Ok(Some(resource)) => usize::try_from(resource.base)
+            .and_then(|base| usize::try_from(resource.size).map(|size| MmioResource { base, size }))
+            .map(Some)
+            .map_err(|_| FwError::InvalidValue),
+        Err(error) => Err(error),
+    };
+    let irq = node.irq_spec(0);
+
+    FirmwareDevice {
+        firmware_id,
+        source: FirmwareSource::DeviceTree,
+        node,
+        mmio,
+        irq,
+    }
+}
+
+unittest::path_mod_test!(
+    firmware_devices_unittest,
+    "../../ut-tests/firmware_devices.rs"
+);

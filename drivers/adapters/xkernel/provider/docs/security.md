@@ -53,6 +53,15 @@ MMIO mappings hold the acquisition returned by memspace; unsafe unmap requires
 that exact live token and no remaining accesses. This is a mapping reference,
 not proof of exclusive physical-range ownership.
 
+Exclusive physical-range ownership is a separate contract. Claim entries are
+kept under one task-context mutex with no IRQ-handler accessor; a claim checks
+overlap, reserves capacity and inserts in one critical section, and every
+failure path leaves the table unchanged. Release matches the opaque token
+exactly, so an unknown or stale token cannot release another owner's range;
+such a token logs a warning and is otherwise ignored. The table is
+process-wide but contract-scoped: code that never claims, and mappings made through other
+entry points, are not excluded. It is not a system-wide MMIO ownership proof.
+
 CPU storage uses the fallible allocator and original pointer/Layout release;
 it performs no DMA sharing or page-attribute conversion. Existing memory tests
 exercise sizes, alignment and initialization.

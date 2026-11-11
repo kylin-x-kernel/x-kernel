@@ -422,6 +422,15 @@ check_uart:
 check_acpi:
 	@RUSTC_BOOTSTRAP=1 RUSTFLAGS='' CARGO_ENCODED_RUSTFLAGS='' cargo test --manifest-path vendor/acpi/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-acpi-host --lib --locked
 
+# Host tests for the read-only VirtIO MMIO identification path. The crate is
+# outside the workspace, so it needs its own manifest and target directory.
+# Unlike the other vendored crates, its upstream .gitignore excludes Cargo.lock
+# (library convention), so cargo resolves the host-test graph on first use; the
+# kernel build still uses the workspace lock for the same crate.
+.PHONY: check_virtio
+check_virtio:
+	@cargo test --manifest-path vendor/kvirtiodrivers/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-virtio-host --lib
+
 # GICv3 is compiled only on AArch64 in the pinned upstream release.
 GIC_TEST_TARGET ?= aarch64-unknown-linux-gnu
 .PHONY: check_gic

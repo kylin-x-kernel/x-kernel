@@ -55,6 +55,17 @@ use alloc_engine::AllocResult;
 use memaddr::PhysAddr;
 
 use self::dma::ALLOCATOR;
+#[cfg(unittest)]
+pub use self::dma::DmaTestStats;
+
+/// Returns a read-only snapshot of in-use DMA resources.
+///
+/// This exists only for unit-test baselines. It does not change allocation or
+/// release paths.
+#[cfg(unittest)]
+pub fn dma_test_stats() -> DmaTestStats {
+    ALLOCATOR.lock().test_stats()
+}
 
 /// Converts a physical address to a bus address.
 ///

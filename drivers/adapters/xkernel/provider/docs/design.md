@@ -1,13 +1,16 @@
 # driver-os-api-xkernel — Design
 
 This crate migrates the mainline device-res host provider to driver-os-api.
-XKernelResourceProvider is the single stateless host implementation; there is
-no NativeIrq entry, device-model dependency, provider registry or new bus policy.
-The framework owns provider custody and resource cleanup ordering.
+XKernelResourceProvider is the single host implementation and its dispatch type
+is stateless; process-wide arbitration is kept in the adapter module that
+implements it. There is no NativeIrq entry, device-model dependency, provider
+registry or new bus policy. The framework owns provider custody and resource
+cleanup ordering.
 
 ## Capabilities
 
 - MmioOp forwards mapping acquisitions and releases to memspace.
+- MmioClaimOp keeps a process-wide table of exclusive physical MMIO ranges.
 - DmaOp preserves the mainline kdma coherent and streaming adapter.
 - DeviceDma binds one resolved DmaInfo to kdma: coherent allocations must fit
   the window and mask over their full page-rounded span, and streaming
@@ -16,8 +19,23 @@ The framework owns provider custody and resource cleanup ordering.
 - IrqOp uses KIRQ shared hardirq registration and x86_64 MSI-X allocation.
 - TimeOp forwards to the host monotonic clock.
 
-These implementations live in src/{mmio,dma,device_dma,memory,irq,time}.rs.
+These implementations live in src/{claim,mmio,dma,device_dma,memory,irq,time}.rs.
 Kernel tests live in ut-tests and are mounted by their source modules.
+
+## MMIO range claims
+
+The adapter stores claimed ranges as `(region, end, token, name)` entries in a
+module-level `ksync::Mutex<Vec<_>>`; `claim` and `release` run only from driver
+probe and device-removal task context, so the table is not read by IRQ handlers
+and does not need a spinlock that disables interrupts. Zero-sized and
+overflowing ranges are rejected before locking. The overlap scan, token
+allocation and insertion happen in one critical section; capacity is reserved
+fallibly so insertion cannot panic under the lock, and allocation failure
+returns NoMemory with nothing inserted. Release matches the opaque token exactly
+and removes that entry; an unknown token is logged and ignored rather than
+panicking or releasing a different range. The table is a minimal range
+arbitrator, not a Linux-style resource tree, and arbitration covers only
+callers of this contract.
 
 ## IRQ identity and results
 
@@ -101,6 +119,7 @@ the following observable changes from the package/path migration:
 | Missing release action | Ok(None) logged a warning and returned | Both regular/shared release reject absence; the infallible outer entry panics; missing_release_action_cannot_authorize_cleanup tests the classifier, not a live panic |
 | Handler event metadata | Claimed events forwarded the source bitmap | Only handled/unhandled reaches KIRQ; source bits are zero, and WAKE_THREAD still does not create a threaded wake; ordinary_events_do_not_create_threaded_wakes_or_source_bits covers conversion |
 | MMIO API safety | Safe trait and safe token release | Implements the extracted unsafe MmioOp contract and unsafe unmap; the underlying iomap/iounmap behavior is unchanged |
+| MMIO range ownership | Mainline had no general physical-range claim | New MmioClaimOp table with token release; covers only claim participants and does not replace memspace mapping refcounts |
 
 NoMemory/InvalidHwirq classification, request rejection as Busy, shared token
 identity, MSI allocation behavior, unsupported threaded entry points,

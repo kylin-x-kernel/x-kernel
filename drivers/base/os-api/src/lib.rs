@@ -14,6 +14,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
+mod claim;
 mod dma;
 mod error;
 mod irq;
@@ -29,6 +30,7 @@ mod wait;
 /// owns them.
 pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
 
+pub use claim::{MmioClaim, MmioClaimOp, MmioClaimToken};
 pub use dma::{
     CoherentArray, CoherentBox, CoherentMem, DeviceDma, DmaAllocation, DmaDirection, DmaInfo,
     DmaMapping, DmaOp, DmaSpec, DmaWindow, StreamingMapping,
@@ -46,3 +48,4 @@ pub use wait::WaitOp;
 
 unittest::path_mod_test!(tests, "../ut-tests/guards.rs");
 unittest::path_mod_test!(dma_view_tests, "../ut-tests/dma.rs");
+unittest::path_mod_test!(claim_tests, "../ut-tests/claim.rs");

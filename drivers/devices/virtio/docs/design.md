@@ -80,7 +80,7 @@ Feature flags select the device adapters compiled into the crate:
 
 | Component | Responsibility |
 | --- | --- |
-| `lib.rs` | Device probing (`probe_mmio_device` / `probe_pci_device`), VirtIO-error to `DriverError` conversion, driver-neutral `PciProbeError`, and public re-exports |
+| `lib.rs` | MMIO identification and transport construction (`identify_mmio_device` / `open_mmio_transport`), PCI probing (`probe_pci_device`), raw device-id to `DeviceKind` mapping, VirtIO-error to `DriverError` conversion, driver-neutral `PciProbeError`, and public re-exports |
 | `blk.rs` / `blk/requests.rs` | `VirtIoBlkDev` implements `BlockDeviceOperations` and manages admission, requests, and DMA reclamation |
 | `gpu.rs` | Wraps `VirtIOGpu` in `VirtIoGpuDev`, which implements `DisplayDevice` |
 | `input.rs` | Wraps `VirtIOInput` in `VirtIoInputDev`, which implements `InputDevice`; probes and caches static capability bitmaps and axis metadata, acknowledges the ISR in IRQ context, and asks the input layer to drain events in task context |
@@ -95,9 +95,20 @@ Feature flags select the device adapters compiled into the crate:
 satisfy the following constraints:
 
 - **The platform must have completed device enumeration and mapping.**
-  `probe_mmio_device` requires a valid mapped MMIO register region.
-  `probe_pci_device` requires accessible PCI configuration space, BARs, and
-  IRQ routes.
+  `identify_mmio_device` and `open_mmio_transport` require a valid mapped
+  MMIO register region, and the caller must have exclusive access to it:
+  identification creates a `UniqueMmioPointer` over the header and the
+  transport owns the registers for its lifetime. kdriver establishes this
+  with an exclusive claim from the shared `driver_os_api::MmioClaimOp`
+  contract, acquired before the first register read and held until the
+  transport is dropped; a duplicate descriptor registered by a rescan cannot
+  alias a live transport. The contract arbitrates only its participants, so
+  it is not system-wide MMIO ownership.
+  Identification reads only
+  the header fields (`magic`, `version`, `device_id`) and never writes device
+  status; `open_mmio_transport` constructs the transport only after the
+  caller has confirmed the type. `probe_pci_device` requires accessible PCI
+  configuration space, BARs, and IRQ routes.
 - **Initialization depends on the early boot environment.** Device probing,
   feature negotiation, virtqueue allocation, and IRQ registration normally run
   during boot or driver registration and require memory allocation, DMA
@@ -147,7 +158,7 @@ Uninitialized ──probe──> Probed ──try_new──> Ready ──ops─�
 
 | From | To | Trigger |
 | --- | --- | --- |
-| Uninitialized | Probed | `probe_mmio_device` / `probe_pci_device` identifies a VirtIO device |
+| Uninitialized | Probed | `identify_mmio_device` confirms the MMIO device type and `open_mmio_transport` provides the transport, or `probe_pci_device` produces one |
 | Probed | Ready | `try_new()` negotiates features and allocates queues |
 | Probed | Failed | `try_new()` fails because the device is unsupported or DMA allocation fails |
 | Ready | Active | The first driver operation, such as `read_block` or `send`, is invoked |
@@ -674,11 +685,60 @@ configuration space. It does not claim hardware message-drain coverage.
 ### Device-Specific Drop
 
 `VirtIoNetDev` implements `Drop` to call `unregister_virtio_net_irq()` and
-release the corresponding guard from `NET_IRQ_GUARDS`. Other device adapters do
-not customize `Drop`; DMA buffers and VirtIO queues are released by the
-`Drop` implementations of the underlying `virtio-drivers` types. When a device
-structure leaves scope, `InnerDev::drop` resets the device and releases DMA
-memory.
+release the corresponding guard from `NET_IRQ_GUARDS`.
+
+`VirtIoVsockDev` and `VirtIoSoundDev` rely on the vendor device owner's `Drop`
+(`VirtIOSocket` / `VirtIOSound`) for queue teardown. That owner performs, in
+order:
+
+1. detach every queue from the transport (`queue_unset`);
+2. reset the device (`Transport::reset`, which writes the empty status and
+   returns only after a status read observes it);
+3. drop its fields in declaration order: RX buffers (`OwningQueue` detaches
+   every outstanding token, unshares it and frees the allocation), the
+   remaining queue rings, and finally the transport.
+
+`transport` is the last declared field, so the final device-visible register
+access (the reset) precedes unmapping and range-claim release. `OwningQueue`
+never resets the device itself: its `Drop` only detaches and frees after its
+owner established device-side stop.
+
+Initialization rollback follows the same rule. Once `OwningQueue::fill` has
+published any RX buffer, any later failure resets the device before the
+partially constructed queue and transport are dropped. A failure inside `fill`
+also resets before the already published buffers are released; earlier
+publications are not rolled back inside the queue.
+
+Other device adapters (block, net, GPU, 9p, input, RNG) keep their existing
+release paths; this change does not convert them.
+
+### Teardown Consumer Audit
+
+| Consumer | Stop precondition | Release path | This round | Remaining risk | Verification |
+| --- | --- | --- | --- | --- | --- |
+| VSOCK `VirtIOSocket` | Owner `Drop` runs `queue_unset` ×3 then `reset`; a fatal published TX failure resets before detaching; a failed `fill` resets before its locals drop. | `OwningQueue::Drop` detaches every outstanding token, unshares and frees; remaining rings, then transport (last field). | Field order, owner reset, checked TX token, `failed` poison, `fill` rollback. | Reset busy-polls with no timeout and may hold `SpinNoIrq`; it is device-side evidence only. VSOCK is polled and registers no IRQ callback. | Vendor UTs: `drop_stops_device_before_releasing_unconsumed_rx_buffers`, `completed_rx_buffer_is_reused_and_released_once`, `rx_fill_failure_resets_before_releasing_published_buffers`, `indirect_tx_unshares_every_mapping_once`, `wrong_token_stops_device_and_releases_every_outstanding_buffer`, `unpublished_tx_failure_does_not_stop_the_device`, `ring_allocation_failure_releases_partial_queue`, `next_queue_allocation_failure_releases_existing_queues_after_reset`; the kdriver MMIO integration tests assert HAL and provider baselines. |
+| sound `VirtIOSound` | Owner `Drop` runs `queue_unset` ×4 then `reset`; queue creation and config-read failures reset before return; an `OwningQueue::fill` failure resets. | `event_queue` `OwningQueue::Drop` detaches, unshares and frees; other rings, then transport (last field). | Field order, owner reset, `try_or_reset!` around creation and config reads, deferred `fill`. | No behavioral UT covers the sound teardown path; the reset limitations above apply. | Compile-time contract only this round; no sound failure-injection test. |
+| Unchecked `add_notify_wait_pop` callers: vendor `console`, `blk`, `rtc`, `rng`, `gpu`, `virtio_9p`, `net/dev_raw`, sound control queue, and the driver GPU wrapper | Each caller's existing owner/transport `Drop`; only some transports reset in `Drop` (`MmioTransport`, `PciTransport`), and `HypPciTransport` requires an explicit reset. | Success recycles descriptors; a post-publication error returns no token, so the chain stays published until the queue and transport are destroyed. | None: the old helper keeps its signature and semantics. | A wrong token or post-publication error can leave a mapping and buffer unreleased until teardown; these paths were not converted or individually audited. | Existing per-device tests unchanged; no new wrong-token coverage for these consumers. |
+| Transport wrappers: `SomeTransport`, `OwnedMmioTransport`, driver `PciTransport`, `HypPciTransport`, mock/test transports | A wrapper must forward rather than reimplement reset. | Each wrapper reaches its inner transport, which performs the status write and readback poll. | Explicit forwarding added to `SomeTransport`, `OwnedMmioTransport` and driver `PciTransport`; explicit reset added to `HypPciTransport`. | A wrapper that failed to forward would lose an inner override; `HypPciTransport` still depends on its owner calling reset before release. | The vsock recording transport observes the wrapper call; the MMIO integration tests observe the reset write through the mock transport. |
+
+### Reset Semantics And Evidence
+
+`Transport::reset` writes the empty status and busy-polls the status field
+until it reads empty. For a compliant device this is device-side evidence that
+it stopped accessing the old queues and buffers; it is the precondition for
+`queue_unset`, detach, unshare and freeing. It is not host-side evidence:
+returning from the status read does not prove that a host IRQ callback already
+in flight has returned, because the readback synchronizes device state, not
+host execution. Adapters which use IRQ callbacks must establish host-side
+quiescence separately; block does so through admitted-I/O drain, IRQ
+suppression and `DevIrq` release. The vsock adapter is polled and registers no
+IRQ callback; probing also suppresses its INTx, so it has no host callback to
+synchronize.
+
+The poll has no timeout. If the caller runs with IRQs disabled — the vsock TX
+path may hold `SpinNoIrq` — a non-responsive device produces an unbounded
+IRQs-off busy wait. This is an accepted availability limitation; the teardown
+contract does not claim to detect or recover from it.
 
 Input-device IRQs are registered by the host through devres. PCI input devices
 also add a devres cleanup action that masks INTx, so LIFO destruction first
