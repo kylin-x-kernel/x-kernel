@@ -262,6 +262,25 @@ impl DeviceRegistry {
         }
     }
 
+    /// Remove a descriptor only if it is still in `expected`.
+    ///
+    /// The caller holds the descriptor's binding lock, so no binding-state
+    /// transition can race this check-and-delete. Returning `None` means the
+    /// state did not match (or the entry was already gone); callers treat that
+    /// as a broken invariant, not as a normal race.
+    pub(crate) fn remove_device_desc_if_state(
+        &mut self,
+        id: DeviceDescId,
+        expected: DeviceDescState,
+    ) -> Option<DeviceDesc> {
+        match self.descriptors.get(&id) {
+            Some(entry) if entry.state == expected => {
+                self.descriptors.remove(&id).map(|entry| entry.desc)
+            }
+            _ => None,
+        }
+    }
+
     /// Whether `id` is still bound to exactly `device_id`.
     pub(crate) fn device_desc_is_bound_to(&self, id: DeviceDescId, device_id: DeviceId) -> bool {
         matches!(

@@ -104,17 +104,20 @@ enum ProbeCandidates {
 /// Re-read a descriptor after waiting for its binding lock.
 ///
 /// The caller must hold the binding lock. `Some` carries the `Pending`
-/// descriptor the caller may claim and probe; `None` means the descriptor is
-/// bound to a device that is already terminal. `Probing` here means the state
-/// invariant was broken (only the lock holder may set it), and a `Bound`
-/// device that is not terminal means publication did not finish before the
-/// lock was released.
+/// descriptor the caller may claim and probe; `None` means the descriptor was
+/// unregistered while the caller waited or is bound to a device that is
+/// already terminal. `Probing` here means the state invariant was broken
+/// (only the lock holder may set it), and a `Bound` device that is not
+/// terminal means publication did not finish before the lock was released.
 fn inspect_locked_desc(id: DeviceDescId) -> Result<Option<DeviceDesc>, DriverError> {
     let (state, desc, device) = {
         let index = device_registry();
-        let state = index
-            .device_desc_state(id)
-            .ok_or(DriverError::InvalidInput)?;
+        let Some(state) = index.device_desc_state(id) else {
+            // The descriptor's registration was removed by another task while
+            // this caller waited for its binding lock. That is a legal race,
+            // not a broken invariant.
+            return Ok(None);
+        };
         let desc = match state {
             DeviceDescState::Pending => index.find_device_desc(id),
             _ => None,
@@ -667,27 +670,57 @@ pub fn detach_device_parent(child_id: DeviceId) -> Result<(), DriverError> {
     Ok(())
 }
 
+/// What happens to the discovery descriptor when its bound device is removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DescDisposition {
+    /// Unbind: restore `Pending` so the descriptor may be bound again.
+    Requeue,
+    /// Unregister: delete the descriptor registration for good.
+    Delete,
+}
+
 /// Remove a device from the object index and finish unbinding its relations.
 ///
 /// The caller holds the descriptor's binding lock and must have committed the
-/// removal with `DeviceObject::begin_removing`. The descriptor is restored to
-/// `Pending` here, but the binding lock is still held while the old device's
-/// bus/driver/parent relations are torn down and `Removed` is dispatched, so a
-/// waiter cannot start a new binding against a half-cleaned old identity.
-pub(crate) fn remove_device_from_index(desc_id: DeviceDescId, id: DeviceId) {
+/// removal with `DeviceObject::begin_removing`. The descriptor is requeued or
+/// deleted here according to `disposition`, but the binding lock is still held
+/// while the old device's bus/driver/parent relations are torn down and
+/// `Removed` is dispatched, so a waiter cannot start a new binding against a
+/// half-cleaned old identity.
+///
+/// `Delete` reports `BadState` if the descriptor was not in the expected
+/// `Bound(id)` state when the index was updated; the teardown itself is still
+/// completed because `begin_removing` is irreversible. `Requeue` keeps the
+/// historical log-and-continue behavior.
+fn remove_device_from_index(
+    desc_id: DeviceDescId,
+    id: DeviceId,
+    disposition: DescDisposition,
+) -> Result<(), DriverError> {
     // Lock-order discipline: take Arc snapshots under the registry guard,
     // drop the guard, then mutate per-object state.
-    let (device, bus, driver, parent, children) = {
+    let (device, bus, driver, parent, children, disposition_applied) = {
         let mut index = device_registry();
         let Some(device) = index.remove_device(id) else {
-            return;
+            // Unreachable for both callers: they rechecked under the binding
+            // lock immediately before committing the removal.
+            return match disposition {
+                DescDisposition::Requeue => Ok(()),
+                DescDisposition::Delete => Err(DriverError::BadState),
+            };
         };
         let bus = index.find_bus(device.bus_id());
-        // Recheck under the lock: never requeue a descriptor that was rebound
+        // Recheck under the lock: never touch a descriptor that was rebound
         // to a newer device while this removal waited for the lock.
-        if !index.requeue_device_desc_if_bound(desc_id, id) {
+        let disposition_applied = match disposition {
+            DescDisposition::Requeue => index.requeue_device_desc_if_bound(desc_id, id),
+            DescDisposition::Delete => index
+                .remove_device_desc_if_state(desc_id, DeviceDescState::Bound(id))
+                .is_some(),
+        };
+        if !disposition_applied {
             log::error!(
-                "descriptor {:?} was not bound to removed device {:?}",
+                "descriptor {:?} did not match the expected disposition for removed device {:?}",
                 desc_id,
                 id,
             );
@@ -709,7 +742,7 @@ pub(crate) fn remove_device_from_index(desc_id: DeviceDescId, id: DeviceId) {
             .into_iter()
             .filter_map(|child_id| index.find_device(child_id))
             .collect::<alloc::vec::Vec<_>>();
-        (device, bus, driver, parent, children)
+        (device, bus, driver, parent, children, disposition_applied)
     };
 
     #[cfg(unittest)]
@@ -740,41 +773,129 @@ pub(crate) fn remove_device_from_index(desc_id: DeviceDescId, id: DeviceId) {
         child.set_parent(None);
     }
     dispatch_device_event(DeviceEvent::Removed { id });
+
+    if disposition_applied || disposition == DescDisposition::Requeue {
+        Ok(())
+    } else {
+        // Unregistration could not delete the registration it just tore down.
+        // The device is already irreversible removed, so report the broken
+        // invariant instead of pretending the descriptor no longer exists.
+        Err(DriverError::BadState)
+    }
 }
 
-/// Run the driver-core remove path for a live device.
+/// Unregister a discovery descriptor and tear down any device bound from it.
 ///
-/// The caller must be in a sleepable task context. Removal serializes with
-/// binding through the unique descriptor's binding lock: while this function
-/// waits, an in-flight probe or adoption finishes first, and only after this
-/// removal releases the lock (after `Removed`) may a new binding start.
+/// Unlike [`remove_device_managed`], this function removes the descriptor's
+/// registration instead of restoring it to `Pending`: after it succeeds the
+/// old [`DeviceDescId`] cannot be probed, matched, or rebound, even through a
+/// scan snapshot taken before the call. Re-discovery must allocate a new
+/// descriptor. A `Pending` descriptor is deleted without creating an object
+/// or emitting any event; a `Bound` one runs the normal remove sequence and
+/// emits exactly one `Removed`.
 ///
-/// [`DriverError::ResourceBusy`] means this call did not commit a teardown:
-/// another remover may already have won, or references to the device are
-/// still outstanding. The caller may retry later; no eventual completion is
-/// guaranteed.
-pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
-    // Locate the unique descriptor backing this device before waiting. Zero or
-    // multiple descriptors mean the 1:1 invariant is broken; do not touch the
-    // device in that case.
-    let desc_ref = {
+/// The caller must be in a sleepable task context and must not already hold
+/// this descriptor's binding lock (for example from a probe or `Removed`
+/// subscriber); that recursion returns [`DriverError::ResourceBusy`] instead
+/// of deadlocking. A concurrent unregister or unbind that wins while this
+/// call waits for the lock is a legal race: if the registration is already
+/// gone the call returns `Ok(())` without further teardown.
+///
+/// [`DriverError::ResourceBusy`] from the commit point means no teardown was
+/// committed: the descriptor and binding are unchanged, and the caller may
+/// retry later. [`DriverError::BadState`] means an internal lifecycle
+/// invariant did not hold; when it is reported after the commit point the
+/// device has still been torn down and must not be treated as usable.
+pub fn unregister_device_desc(id: DeviceDescId) -> Result<(), DriverError> {
+    let binding = device_registry()
+        .binding_for_desc(id)
+        .ok_or(DriverError::InvalidInput)?;
+    if binding.is_owned_by_current() {
+        // `kmutex::Mutex` panics on recursive acquisition. Reject same-context
+        // re-entry before blocking; a different task waits below.
+        return Err(DriverError::ResourceBusy);
+    }
+
+    let _guard = binding.lock();
+    #[cfg(unittest)]
+    test_hooks::pause(test_hooks::BindingPause::UnregisterHoldingLock { desc_id: id });
+
+    enum Target {
+        Absent,
+        Pending,
+        Probing,
+        Bound(DeviceId),
+    }
+
+    // Read the state and its backing object in one registry critical section,
+    // like `inspect_locked_desc`. The binding lock excludes every writer, so
+    // this decision is stable until the deletion below (which rechecks it).
+    let target = {
         let index = device_registry();
-        index.find_device(id).ok_or(DriverError::InvalidInput)?;
-        index
-            .descriptor_bound_to_device(id)
-            .ok_or(DriverError::BadState)?
+        match index.device_desc_state(id) {
+            None => Target::Absent,
+            Some(DeviceDescState::Pending) => Target::Pending,
+            Some(DeviceDescState::Probing) => Target::Probing,
+            Some(DeviceDescState::Bound(device_id)) => {
+                // 1:1 invariant: exactly this descriptor owns a live device.
+                if index.find_device(device_id).is_none()
+                    || index
+                        .descriptor_bound_to_device(device_id)
+                        .map(|desc_ref| desc_ref.id)
+                        != Some(id)
+                {
+                    return Err(DriverError::BadState);
+                }
+                Target::Bound(device_id)
+            }
+        }
     };
 
-    let _guard = desc_ref.binding.lock();
+    match target {
+        // Another unregister (or an unbind followed by one) removed the
+        // registration while this task waited. No teardown is left to do.
+        Target::Absent => Ok(()),
+        // Only the binding-lock holder may leave a descriptor in `Probing`;
+        // seeing it here means the lifecycle invariant is broken.
+        Target::Probing => Err(DriverError::BadState),
+        Target::Pending => {
+            if device_registry()
+                .remove_device_desc_if_state(id, DeviceDescState::Pending)
+                .is_none()
+            {
+                log::error!("descriptor {:?} was not Pending under its binding lock", id);
+                return Err(DriverError::BadState);
+            }
+            Ok(())
+        }
+        Target::Bound(device_id) => {
+            remove_bound_device_locked(id, device_id, DescDisposition::Delete)
+        }
+    }
+}
 
+/// Commit and run the removal sequence for a descriptor/device binding.
+///
+/// The caller holds the binding lock and has resolved `desc_id` to a live
+/// `device_id`. Everything is re-read after the wait; an unbind that finds
+/// the device already gone returns [`DriverError::ResourceBusy`], while an
+/// unregister treats that as an invariant break.
+fn remove_bound_device_locked(
+    desc_id: DeviceDescId,
+    device_id: DeviceId,
+    disposition: DescDisposition,
+) -> Result<(), DriverError> {
     // Re-read everything after the wait; the snapshots taken before it may be
     // stale. A device that disappeared here was removed by another task.
     let (device, driver, bus_type) = {
         let index = device_registry();
-        let Some(device) = index.find_device(id) else {
-            return Err(DriverError::ResourceBusy);
+        let Some(device) = index.find_device(device_id) else {
+            return match disposition {
+                DescDisposition::Requeue => Err(DriverError::ResourceBusy),
+                DescDisposition::Delete => Err(DriverError::BadState),
+            };
         };
-        if !index.device_desc_is_bound_to(desc_ref.id, id) {
+        if !index.device_desc_is_bound_to(desc_id, device_id) {
             return Err(DriverError::BadState);
         }
         let driver = device
@@ -809,7 +930,7 @@ pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
         log::error!(
             "driver {} remove() failed for device {:?}: {:?}; proceeding with removal",
             driver.name(),
-            id,
+            device_id,
             error,
         );
     }
@@ -819,7 +940,7 @@ pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
     {
         log::error!(
             "bus-type remove() failed for device {:?}: {:?}; proceeding with removal",
-            id,
+            device_id,
             error,
         );
     }
@@ -829,8 +950,34 @@ pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
     // chance to release things itself.
     device.run_cleanups();
 
-    remove_device_from_index(desc_ref.id, id);
-    Ok(())
+    remove_device_from_index(desc_id, device_id, disposition)
+}
+
+/// Run the driver-core remove path for a live device.
+///
+/// The caller must be in a sleepable task context. Removal serializes with
+/// binding through the unique descriptor's binding lock: while this function
+/// waits, an in-flight probe or adoption finishes first, and only after this
+/// removal releases the lock (after `Removed`) may a new binding start.
+///
+/// [`DriverError::ResourceBusy`] means this call did not commit a teardown:
+/// another remover may already have won, or references to the device are
+/// still outstanding. The caller may retry later; no eventual completion is
+/// guaranteed.
+pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
+    // Locate the unique descriptor backing this device before waiting. Zero or
+    // multiple descriptors mean the 1:1 invariant is broken; do not touch the
+    // device in that case.
+    let desc_ref = {
+        let index = device_registry();
+        index.find_device(id).ok_or(DriverError::InvalidInput)?;
+        index
+            .descriptor_bound_to_device(id)
+            .ok_or(DriverError::BadState)?
+    };
+
+    let _guard = desc_ref.binding.lock();
+    remove_bound_device_locked(desc_ref.id, id, DescDisposition::Requeue)
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/lifecycle.rs");

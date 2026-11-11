@@ -506,6 +506,7 @@ struct TestDriver {
     bus_types: &'static [BusTypeId],
     matcher: Box<dyn crate::DeviceMatcher>,
     probe: Arc<ProbeFn>,
+    remove: Option<Arc<ProbeFn>>,
 }
 
 impl DeviceDriver for TestDriver {
@@ -528,6 +529,13 @@ impl DeviceDriver for TestDriver {
     fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
         (self.probe)(device)
     }
+
+    fn remove(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+        match &self.remove {
+            Some(remove) => remove(device),
+            None => Ok(()),
+        }
+    }
 }
 
 fn platform_driver(
@@ -535,11 +543,21 @@ fn platform_driver(
     matcher: impl crate::DeviceMatcher,
     probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
 ) -> Arc<dyn DeviceDriver> {
+    platform_driver_with_remove(name, matcher, probe, |_| Ok(()))
+}
+
+fn platform_driver_with_remove(
+    name: &'static str,
+    matcher: impl crate::DeviceMatcher,
+    probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
+    remove: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
+) -> Arc<dyn DeviceDriver> {
     Arc::new(TestDriver {
         name,
         bus_types: &[BusTypeId::PLATFORM],
         matcher: Box::new(matcher),
         probe: Arc::new(probe),
+        remove: Some(Arc::new(remove)),
     })
 }
 
@@ -1386,6 +1404,277 @@ fn test_remove_unbinds_and_requeues_descriptor() {
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
     let new_id = device_for_desc(desc.id()).unwrap().id();
     assert_ne!(new_id, old_id);
+}
+
+#[def_test(serial)]
+fn test_unregister_pending_removes_registration_without_objects() {
+    let bus = reset_model();
+    trace_reset();
+    event_trace_slot().lock().clear();
+    subscribe_all_events();
+
+    let matcher_calls = Arc::new(AtomicUsize::new(0));
+    register_driver_object(platform_driver(
+        "unreg-pending",
+        CountingMatcher {
+            alias: "unreg-pending",
+            calls: matcher_calls.clone(),
+        },
+        |_| {
+            trace_push("probe");
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 60, "unreg-pending");
+    assert_eq!(unregister_device_desc(desc.id()), Ok(()));
+    assert!(crate::find_device_desc(desc.id()).is_none());
+    assert!(
+        crate::device_descs_snapshot()
+            .iter()
+            .all(|registered| registered.id() != desc.id())
+    );
+    assert!(crate::device_records_snapshot().is_empty());
+    assert!(trace_snapshot().is_empty());
+    assert!(event_trace_slot().lock().is_empty());
+
+    // A completed unregister removes the entry, so a later probe cannot even
+    // acquire the binding handle: it is `InvalidInput`, not `Skipped`.
+    assert_eq!(
+        probe_device_desc(desc.id()),
+        Err(DriverError::InvalidInput)
+    );
+    assert_eq!(matcher_calls.load(Ordering::SeqCst), 0);
+    assert!(trace_snapshot().is_empty());
+
+    // Sequential repeat is a missing ID, distinct from the concurrent overlap
+    // that returns `Ok(())` after waiting on the lock.
+    assert_eq!(
+        unregister_device_desc(desc.id()),
+        Err(DriverError::InvalidInput)
+    );
+}
+
+#[def_test(serial)]
+fn test_unregister_bound_runs_exactly_one_teardown() {
+    let bus = reset_model();
+    trace_reset();
+    event_trace_slot().lock().clear();
+    subscribe_all_events();
+
+    let driver = register_driver_object(platform_driver_with_remove(
+        "unreg-bound",
+        crate::CompatibleAliasMatcher("unreg-bound"),
+        |device| {
+            trace_push("probe");
+            device.add_cleanup(|| trace_push("cleanup"));
+            Ok(())
+        },
+        |_| {
+            trace_push("remove");
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 61, "unreg-bound");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    let device = device_for_desc(desc.id()).unwrap();
+    let id = device.id();
+    assert_eq!(
+        event_trace_slot().lock().len(),
+        4,
+        "probe must emit Matched/Bound/Published/Activated"
+    );
+    event_trace_slot().lock().clear();
+
+    assert_eq!(unregister_device_desc(desc.id()), Ok(()));
+    assert!(crate::find_device(id).is_none());
+    assert!(crate::find_device_desc(desc.id()).is_none());
+    assert!(crate::device_records_snapshot().is_empty());
+    assert!(bus.devices_snapshot().is_empty());
+    assert!(bus.drivers_snapshot().is_empty());
+    assert!(driver.bound_devices_snapshot().is_empty());
+    assert_eq!(trace_snapshot(), alloc::vec!["probe", "remove", "cleanup"]);
+    assert_eq!(device.state(), DeviceState::Removed);
+    assert_eq!(device.driver_id(), None);
+    assert!(device.try_acquire().is_none());
+    let events = event_trace_slot().lock().clone();
+    assert_eq!(
+        events.as_slice(),
+        [(crate::DeviceEventKind::Removed, id)]
+    );
+
+    // The old identity is gone for good, not merely pending.
+    assert_eq!(
+        probe_device_desc(desc.id()),
+        Err(DriverError::InvalidInput)
+    );
+    assert!(bus.devices_snapshot().is_empty());
+}
+
+#[def_test(serial)]
+fn test_unregister_busy_with_live_device_use() {
+    let bus = reset_model();
+    trace_reset();
+
+    register_driver_object(platform_driver(
+        "unreg-busy",
+        crate::CompatibleAliasMatcher("unreg-busy"),
+        |device| {
+            trace_push("probe");
+            device.add_cleanup(|| trace_push("cleanup"));
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 62, "unreg-busy");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    let device = device_for_desc(desc.id()).unwrap();
+    let id = device.id();
+    let lease = device.try_acquire().unwrap();
+
+    assert_eq!(
+        unregister_device_desc(desc.id()),
+        Err(DriverError::ResourceBusy)
+    );
+    assert_eq!(device.state(), DeviceState::Active);
+    assert_eq!(device_for_desc(desc.id()).unwrap().id(), id);
+    assert_eq!(crate::find_device(id).unwrap().state(), DeviceState::Active);
+    assert_eq!(trace_snapshot(), alloc::vec!["probe"]);
+
+    drop(lease);
+    assert_eq!(unregister_device_desc(desc.id()), Ok(()));
+    assert!(crate::find_device(id).is_none());
+    assert!(crate::find_device_desc(desc.id()).is_none());
+    assert_eq!(trace_snapshot(), alloc::vec!["probe", "cleanup"]);
+}
+
+static SAME_TASK_UNREGISTER_DESC: AtomicU64 = AtomicU64::new(u64::MAX);
+static SAME_TASK_UNREGISTER_RESULT: LazyInit<SpinNoPreempt<Option<Result<(), DriverError>>>> =
+    LazyInit::new();
+
+fn same_task_unregister_result_slot() -> &'static SpinNoPreempt<Option<Result<(), DriverError>>> {
+    SAME_TASK_UNREGISTER_RESULT.call_once(|| SpinNoPreempt::new(None));
+    SAME_TASK_UNREGISTER_RESULT.get().unwrap()
+}
+
+#[def_test(serial)]
+fn test_same_task_unregister_while_holding_binding_lock_is_busy() {
+    let bus = reset_model();
+    *same_task_unregister_result_slot().lock() = None;
+
+    register_driver_object(platform_driver(
+        "same-task-unreg",
+        crate::CompatibleAliasMatcher("same-task-unreg"),
+        |_| {
+            let id = DeviceDescId::new(SAME_TASK_UNREGISTER_DESC.load(Ordering::SeqCst));
+            *same_task_unregister_result_slot().lock() = Some(unregister_device_desc(id));
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 63, "same-task-unreg");
+    SAME_TASK_UNREGISTER_DESC.store(desc.id().raw(), Ordering::SeqCst);
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+
+    assert_eq!(
+        *same_task_unregister_result_slot().lock(),
+        Some(Err(DriverError::ResourceBusy))
+    );
+    let device = device_for_desc(desc.id()).unwrap();
+    assert_eq!(device.state(), DeviceState::Active);
+    assert!(crate::find_device_desc(desc.id()).is_some());
+}
+
+#[def_test(serial)]
+fn test_unbind_semantics_survive_and_unregister_is_final() {
+    let bus = reset_model();
+    trace_reset();
+
+    register_driver_object(platform_driver(
+        "unreg-after-unbind",
+        crate::CompatibleAliasMatcher("unreg-after-unbind"),
+        |device| {
+            trace_push("probe");
+            device.add_cleanup(|| trace_push("cleanup"));
+            Ok(())
+        },
+    ));
+
+    let desc = platform_desc(&bus, 64, "unreg-after-unbind");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    let old_id = device_for_desc(desc.id()).unwrap().id();
+
+    // The existing unbind path still requeues and permits a fresh binding.
+    assert_eq!(remove_device_managed(old_id), Ok(()));
+    assert_desc_pending!(desc.id());
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    let new_id = device_for_desc(desc.id()).unwrap().id();
+    assert_ne!(new_id, old_id);
+
+    // Unregister is final: no requeue, no old-ID rebinding.
+    assert_eq!(unregister_device_desc(desc.id()), Ok(()));
+    assert!(crate::find_device(new_id).is_none());
+    assert!(crate::find_device_desc(desc.id()).is_none());
+    assert_eq!(
+        probe_device_desc(desc.id()),
+        Err(DriverError::InvalidInput)
+    );
+}
+
+#[def_test(serial)]
+fn test_unregister_adopted_nodeless_device() {
+    let bus = reset_model();
+    let driver = register_driver_object(platform_driver(
+        "unreg-adopt",
+        crate::CompatibleAliasMatcher("unreg-adopt"),
+        |_| Ok(()),
+    ));
+
+    let device = adopt_active_device(ActiveDeviceAdoption {
+        bus_id: bus.id(),
+        parent: None,
+        location: DeviceLocation::PlatformStatic { id: 65 },
+        origin: DiscoveryOrigin::PlatformStatic,
+        identity: DeviceIdentity::Platform(PlatformIdentity {
+            alias: Some("unreg-adopt"),
+            firmware_id: None,
+        }),
+        transport: None,
+        resources: ResourceSet::new(),
+        dma: None,
+        driver,
+    })
+    .unwrap();
+    let id = device.id();
+    assert!(device.firmware_node().is_none());
+    let desc_id = crate::device_descs_snapshot()[0].id();
+
+    assert_eq!(unregister_device_desc(desc_id), Ok(()));
+    assert!(crate::find_device(id).is_none());
+    assert!(crate::find_device_desc(desc_id).is_none());
+    assert_eq!(device.state(), DeviceState::Removed);
+    assert!(device.try_acquire().is_none());
+}
+
+#[def_test(serial)]
+fn test_registry_descriptor_delete_requires_expected_state() {
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 66, "delete-state");
+
+    let wrong = crate::registry::DeviceDescState::Bound(DeviceId::new(9999));
+    assert!(
+        crate::device_registry()
+            .remove_device_desc_if_state(desc.id(), wrong)
+            .is_none()
+    );
+    assert!(crate::find_device_desc(desc.id()).is_some());
+
+    let removed = crate::device_registry()
+        .remove_device_desc_if_state(desc.id(), crate::registry::DeviceDescState::Pending);
+    assert!(removed.is_some());
+    assert_eq!(removed.unwrap().id(), desc.id());
+    assert!(crate::find_device_desc(desc.id()).is_none());
 }
 
 #[def_test(serial)]

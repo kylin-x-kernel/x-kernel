@@ -30,8 +30,11 @@ pub enum BindingPause {
     /// Adoption published the device and holds its binding lock, before
     /// `Activated` is dispatched.
     AdoptionBeforeActivate { device_id: DeviceId },
-    /// Remove restored the descriptor to `Pending` but has not torn down
-    /// the old bus/driver relations yet.
+    /// `unregister_device_desc` acquired the binding lock and is about to
+    /// re-read the descriptor state.
+    UnregisterHoldingLock { desc_id: DeviceDescId },
+    /// Remove applied the descriptor disposition (requeued it, or deleted the
+    /// registration) but has not torn down the old bus/driver relations yet.
     RemoveAfterRequeue {
         desc_id: DeviceDescId,
         device_id: DeviceId,

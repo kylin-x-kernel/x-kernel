@@ -43,8 +43,9 @@
 //!    holds the descriptor binding lock (probe, adoption, registration scan,
 //!    removal). Callbacks must not call any driver-core mutator
 //!    (`probe_device_desc`, `register_driver_object`, `remove_device_*`,
-//!    etc.) on the same thread: probing the same descriptor returns `Busy`,
-//!    while paths that block, such as removal, would self-deadlock.
+//!    `unregister_device_desc`, etc.) on the same thread: probing the same
+//!    descriptor returns `Busy`, while paths that block, such as removal,
+//!    would self-deadlock.
 //!    Subscribers should snapshot what they need (e.g. via
 //!    `find_device(id)`) and defer non-trivial work.
 //!
@@ -120,6 +121,7 @@ pub use lifecycle::{
     dispatch::{subscribe_device_event_kind, subscribe_device_removed},
     event::{DeviceEvent, DeviceEventKind},
     probe_device_desc, register_bus_instance, register_driver_object, remove_device_managed,
+    unregister_device_desc,
 };
 pub(crate) use registry::device_registry;
 pub use registry::{

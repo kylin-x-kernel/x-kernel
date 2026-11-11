@@ -122,10 +122,12 @@ rest.
    non-Active state and rolls the count back.
 4. **DeviceDesc Probing mutual exclusion**: only the holder of the
    descriptor's binding lock may call `mark_device_desc_probing` (which
-   accepts `Pending → Probing` only) or requeue it. Every binder acquires
-   that lock and re-reads the state, so concurrent probes serialize and a
-   waiter never trusts a pre-wait snapshot. Same-context recursion is
-   rejected with `ProbeOutcome::Busy` before the recursive `kmutex`
+   accepts `Pending → Probing` only), requeue it, or delete its registration.
+   Every binder acquires that lock and re-reads the state, so concurrent
+   probes/unregisters serialize and a waiter never trusts a pre-wait
+   snapshot. A descriptor unregistered while a probe or scan waited is
+   treated as a legal race and skipped. Same-context recursion is rejected
+   with `ProbeOutcome::Busy` / `ResourceBusy` before the recursive `kmutex`
    acquisition.
 5. **Subscriber contract**: subscriber callbacks run without registry or
    per-object spinlocks, but the emitting path still holds the transitioning
@@ -210,6 +212,9 @@ rest.
 | T-15 | A stale or invalid firmware-node handle reaches a probe | Medium — probe reads another node or fails late | Backend-local ids are reused or a descriptor outlives its backend | `FwNode` equality includes the backend pointer; fallible backend queries must return `FwError::InvalidNode` for unknown ids (infallible name/parent accessors return `None`); the `'static` type bound keeps boot backends alive for the kernel lifetime |
 | T-16 | Remove races a probe/adoption and tears down the new identity | High — new device loses its bus/driver relations or a half-removed object is rebound | Remove waits for the binding lock, then a binder acquires it before teardown completes | Remove holds the descriptor binding lock from the commit point through `Removed`; a binder waits, rechecks, and only then sees `Pending` |
 | T-17 | Shared driver entry removed while a concurrent publish still uses it | Medium — bus driver list loses an active driver | Last-device remove overlaps a publish on the same bus | `detach_device_and_orphan_driver` checks remaining `driver_id()` values under the same `bus.devices` guard that removes the device, so it never removes a driver another device still references |
+| T-18 | A stale scan/probe snapshot rebinds a descriptor that was unregistered | High — owner may have released transport/hardware resources; rebinding probes freed hardware | Explicit probe or driver-registration scan holds a pre-unregister snapshot | Unregister takes the same descriptor binding lock, deletes the registration under it, and every probe/scan rechecks after acquiring the lock: missing entry → `Skipped`/`continue`, never a new `DeviceObject` |
+| T-19 | Same-task unregister from a probe/remove hook self-deadlocks or panics | Medium — kernel panic/abort | A callback calls `unregister_device_desc` while its caller holds the descriptor lock | `unregister_device_desc` checks `is_owned_by_current()` before locking and returns `ResourceBusy`; a different task blocks and rechecks |
+| T-20 | Unregister reports success although descriptor deletion failed | Medium — caller believes the old ID is gone and releases transport resources | Lifecycle invariant broken between the state check and the delete | `Pending` delete mismatch returns `BadState`; after a committed `Bound` removal a delete miss still completes teardown but returns `BadState`. No rollback to `Active`, no recovery path |
 
 Impact levels:
 
@@ -230,7 +235,7 @@ Impact levels:
 | F-07 | Same DeviceId added twice | Two adoptions reusing an id | The second `add_device` replaces the first entry | The old DeviceObject may drop while external `Arc` holders persist | 4 | The id allocator is monotonic; adoption allocates a fresh id every time |
 | F-08 | `desc.parent` points at a removed parent | Parent device removed before the child is published | `attach_device_parent` runs after publish; parent may be gone | Child has no parent; device tree incomplete | 4 | `attach_device_parent` failure logs a warning and does not block child activation |
 | F-09 | BusInstance.devices inconsistent with DeviceRegistry.devices | One path updated only one side | Snapshots may miss or include stale devices | Inconsistent query results | 3 | Publish adds to the registry and then to the bus under the binding lock; remove deletes from the registry and atomically detaches from the bus under the same lock, then fires `Removed` |
-| F-10 | Same-task recursive probe self-deadlocks the binding lock | A probe calls `probe_device_desc` for its own descriptor | `kmutex` would panic on recursive locking | Probe path aborts | 3 | `probe_device_desc` checks `is_owned_by_current()` and returns `Busy`; the registration scan skips local re-entry with a warning |
+| F-10 | Same-task recursive probe/unregister self-deadlocks the binding lock | A probe or hook calls `probe_device_desc`/`unregister_device_desc` for the descriptor it is binding | `kmutex` would panic on recursive locking | Probe/unregister path aborts | 3 | Both check `is_owned_by_current()` before locking and return `Busy`/`ResourceBusy`; the registration scan skips local re-entry with a warning |
 | F-11 | Device-node class index range is exhausted | More than 32 input or 64 DRM primary devices are active | New node registration returns `ResourceBusy` | The runtime device remains active but has no Linux node projection | 3 | Existing assignments remain unchanged; kclass logs the failure |
 | F-12 | Device-node subscriber panics | Projection callback has a kernel bug | Later callbacks do not run | One or more filesystem projections may miss the transition before panic aborts | 2 | Callbacks run without registry locks; panic isolation is unavailable in the current panic=abort kernel |
 
@@ -255,8 +260,12 @@ Severity levels:
   so this call performed no partial transition. A caller may retry later, but
   the interface guarantees no eventual completion and runs no automatic retry.
 - Errors from `driver.remove()` and `bus_type.remove()` inside
-  `remove_device_managed` are only logged and never stop the removal
-  ("remove never fails" semantics).
+  `remove_device_managed` / `unregister_device_desc` are only logged and
+  never stop the removal ("remove never fails" semantics).
+- `unregister_device_desc` never reports success for a failed registration
+  deletion: a `Pending` mismatch returns `BadState`; after a committed
+  `Bound` removal, a delete miss completes teardown and still returns
+  `BadState` (the device is terminal, not rolled back to `Active`).
 - A candidate probe failure runs the full rollback (`run_cleanups` +
   `detach_driver` + `mark_removed`) and continues with the next candidate;
   when the round ends the descriptor is requeued. A partially initialized

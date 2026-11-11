@@ -171,7 +171,7 @@ drivers/base/kdevice/
 | `DeviceMatcher` trait | Open matcher; built-ins PciIdsMatcher/VirtioTypeMatcher/CompatibleAliasMatcher/FirmwareMatchSpec/NeverMatcher |
 | `DeviceEvent` / `DeviceEventKind` | The 5 lifecycle events; bucketed subscribers |
 | `DeviceTopology` | Read-only topology snapshot; bus/driver-filtered iterators |
-| Lifecycle API | `register_bus_instance`, `register_driver_object`, `probe_device_desc`, `adopt_active_device`, `remove_device_managed` |
+| Lifecycle API | `register_bus_instance`, `register_driver_object`, `probe_device_desc`, `adopt_active_device`, `remove_device_managed` (unbind/requeue), `unregister_device_desc` (remove registration) |
 
 ## Device-node identity lifecycle
 
@@ -295,11 +295,13 @@ The `begin_removing` CAS loop uses `compare_exchange_weak`:
               │Bound(id) │ │ Pending  │◄┘ requeue
               └──────────┘ └──────────┘
                     │
-                    │ remove_device_from_index
-                    ▼
-              ┌──────────┐
-              │ Pending  │  ← device removed, descriptor re-opened
-              └──────────┘
+          ┌─────────┴─────────┐
+          │                   │
+          │ unbind: requeue   │ unregister: delete
+          ▼                   ▼
+    ┌──────────┐        ┌────────────┐
+    │ Pending  │        │ (absent)   │
+    └──────────┘        └────────────┘
 ```
 
 Key semantics:
@@ -314,8 +316,14 @@ Key semantics:
   terminal: a concurrent `probe_device_desc` returns `Skipped` after recheck;
   a `Bound` descriptor whose device is still non-terminal is a broken
   invariant (`BadState`).
-- when a device is removed, its descriptor returns to `Pending`, so the same
-  descriptor identity can be bound again with a fresh `DeviceId`.
+- `remove_device_managed` unbinds: when a device is removed, its descriptor
+  returns to `Pending`, so the same descriptor identity can be bound again
+  with a fresh `DeviceId`.
+- `unregister_device_desc` is final: it deletes the descriptor registration
+  (and tears down a bound device through the same remove sequence). After it
+  returns, the old `DeviceDescId` is absent, so `probe_device_desc` reports
+  `InvalidInput` and scan snapshots skip it; re-discovery must allocate a new
+  descriptor. No tombstone or second identity is kept.
 
 A descriptor and the device object created from it carry an optional
 `DmaInfo` resolved by the discovering backend. `None` records that no view was
@@ -374,12 +382,13 @@ adoption; the production platform-discovery wiring is covered in `kdriver`.
 
 `probe_device_desc(id)` binds at most once and reports one `ProbeOutcome`:
 
-1. Fetch the descriptor's binding-lock handle. If this task already owns the
-   lock, return `Busy` immediately (same-context recursion); a different task
-   never sees `Busy`.
+1. Fetch the descriptor's binding-lock handle. A missing handle means the
+   registration does not exist (never registered or already unregistered) →
+   `Err(InvalidInput)`. If this task already owns the lock, return `Busy`
+   immediately (same-context recursion); a different task never sees `Busy`.
 2. Acquire the binding lock, blocking in sleepable task context, then re-read
    the descriptor state:
-   - missing descriptor → `Err(InvalidInput)`;
+   - missing descriptor (unregistered while this task waited) → `Skipped`;
    - `Pending` → claim it (set `Probing`);
    - terminal bound device (Active/Removing/Removed) → `Skipped`;
    - `Probing` or non-terminal bound device → `Err(BadState)` (invariant
@@ -451,6 +460,39 @@ descriptor's binding lock:
    rechecks, sees `Pending`, and may bind the same descriptor to a new
    `DeviceId`.
 
+### Unregister path
+
+`unregister_device_desc(desc_id)` is the transport/owner-side operation that
+retracts a discovery registration. It shares the removal sequence with
+`remove_device_managed` but deletes the descriptor instead of requeueing it:
+
+1. Fetch the binding-lock handle; missing → `InvalidInput`. If this task
+   already holds it, return `ResourceBusy` before blocking (the recursive
+   `kmutex` acquisition would panic).
+2. Acquire the lock, then read state and backing-device existence in one
+   registry critical section. The binding lock excludes every writer, so the
+   decision is stable until deletion.
+   - absent (unregistered by another task while waiting) → `Ok(())`;
+   - `Pending` → delete with a state recheck in the delete critical section;
+     a mismatch returns `BadState` and emits/hooks nothing;
+   - `Probing` → `BadState` (only the lock holder may leave it `Probing`);
+   - `Bound(device_id)` → require the device to exist and to be the unique
+     device owned by this descriptor, otherwise `BadState`.
+3. For `Bound`, run the same commit/teardown as the remove path
+   (`begin_removing`, driver/bus remove, cleanups, bus/driver/parent detach,
+   one `Removed`). The shared index step then deletes the descriptor if it is
+   still `Bound(device_id)` instead of requeueing it, all before the binding
+   lock is released.
+4. `begin_removing` failure returns `ResourceBusy` with the descriptor,
+   binding and cleanup state untouched, so the caller may retry. After a
+   successful commit, a delete miss is reported as `BadState`; the teardown
+   still completes and is never rolled back to `Active`.
+
+There is no window in which the descriptor is written back to `Pending` and
+can be reclaimed by a competitor. A `Pending` unregister emits no lifecycle
+events and creates no object; a `Bound` one emits exactly the existing remove
+sequence.
+
 ### Descriptor rescan after driver registration
 
 `register_driver_object` immediately scans descriptors that still await a
@@ -460,8 +502,9 @@ binding in the new driver's bus types:
    snapshot includes both `Pending` and `Probing` descriptors.
 2. For each pair: skip only descriptors currently being bound by the same
    context (`is_owned_by_current`, logged); otherwise acquire the binding
-   lock and recheck. Terminal-bind descriptors are skipped; `Pending` ones
-   are claimed and probed with candidates limited to the new driver.
+   lock and recheck. Descriptors unregistered after the snapshot and
+   terminal-bind descriptors are skipped; `Pending` ones are claimed and
+   probed with candidates limited to the new driver.
 3. Acquiring the lock may wait for an in-flight probe. Rechecking afterwards
    is what makes a later registration see the final state instead of a stale
    snapshot. This removes driver load-order problems: a driver registered

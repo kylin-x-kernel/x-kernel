@@ -12,11 +12,12 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use driver_base::{DeviceKind, DriverError, DriverResult};
+use kalloc_types::KBox;
 use kdevice::{
     self, ActiveDeviceAdoption, BusInstance, BusTypeId, CompatibleAliasMatcher, DeviceDesc,
     DeviceDescSpec, DeviceDriver, DeviceEvent, DeviceEventKind, DeviceId, DeviceIdentity,
     DeviceLocation, DeviceMatcher, DeviceObject, DeviceRecord, DeviceState, DiscoveryOrigin,
-    PlatformIdentity, ProbeOutcome, ResourceSet,
+    MatchResult, PlatformIdentity, ProbeOutcome, ResourceSet,
 };
 use kspin::SpinNoPreempt;
 use ksync::Semaphore;
@@ -28,7 +29,7 @@ type ProbeFn = dyn Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync;
 
 struct ThreadDriver {
     name: &'static str,
-    matcher: CompatibleAliasMatcher,
+    matcher: KBox<dyn DeviceMatcher>,
     probe: Arc<ProbeFn>,
 }
 
@@ -46,7 +47,7 @@ impl DeviceDriver for ThreadDriver {
     }
 
     fn matcher(&self) -> &dyn DeviceMatcher {
-        &self.matcher
+        self.matcher.as_ref()
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
@@ -59,11 +60,35 @@ fn driver(
     alias: &'static str,
     probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
 ) -> Arc<dyn DeviceDriver> {
+    driver_with_matcher(name, CompatibleAliasMatcher(alias), probe)
+}
+
+fn driver_with_matcher(
+    name: &'static str,
+    matcher: impl DeviceMatcher,
+    probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
+) -> Arc<dyn DeviceDriver> {
+    let matcher: KBox<dyn DeviceMatcher> =
+        KBox::new(matcher).expect("test driver matcher allocation failed");
     Arc::new(ThreadDriver {
         name,
-        matcher: CompatibleAliasMatcher(alias),
+        matcher,
         probe: Arc::new(probe),
     })
+}
+
+/// Alias matcher that counts evaluations, so a test can prove a stale
+/// descriptor snapshot was skipped before matching (not merely before probe).
+struct CountingAliasMatcher {
+    alias: &'static str,
+    calls: Arc<AtomicUsize>,
+}
+
+impl DeviceMatcher for CountingAliasMatcher {
+    fn matches(&self, desc: &DeviceDesc) -> MatchResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        CompatibleAliasMatcher(self.alias).matches(desc)
+    }
 }
 
 fn setup() -> Arc<BusInstance> {
@@ -151,6 +176,22 @@ fn event_position(trace: &EventTrace, kind: DeviceEventKind, id: DeviceId) -> Op
         .lock()
         .iter()
         .position(|(event_kind, event_id)| *event_kind == kind && *event_id == id)
+}
+
+fn event_kinds(trace: &EventTrace, id: DeviceId) -> Vec<DeviceEventKind> {
+    trace
+        .lock()
+        .iter()
+        .filter(|(_, event_id)| *event_id == id)
+        .map(|(kind, _)| *kind)
+        .collect()
+}
+
+fn removed_count(trace: &EventTrace, id: DeviceId) -> usize {
+    event_kinds(trace, id)
+        .into_iter()
+        .filter(|kind| *kind == DeviceEventKind::Removed)
+        .count()
 }
 
 /// Upper bound, in scheduler yields, for every handshake in this file.
@@ -829,4 +870,513 @@ fn test_bus_driver_listing_survives_shared_removal_race() {
     assert_eq!(kdevice::remove_device_managed(second_id), Ok(()));
     assert!(bus.drivers_snapshot().is_empty());
     assert!(bus.devices_snapshot().is_empty());
+}
+
+#[def_test(serial)]
+fn test_probe_that_waited_on_deleted_descriptor_skips() {
+    let bus = setup();
+    let desc = desc(&bus, 70, "waited-delete");
+    let id = desc.id();
+
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let (unreg_entered, unreg_release) = (entered.clone(), release.clone());
+    test_hooks::install_pause_hook(Arc::new(move |point| {
+        if let BindingPause::UnregisterHoldingLock { desc_id } = point
+            && desc_id == id
+        {
+            unreg_entered.release();
+            unreg_release.acquire();
+        }
+    }));
+
+    let unregister_result = cell();
+    let unregister_slot = unregister_result.clone();
+    let unregister =
+        ktask::spawn(move || set_cell(&unregister_slot, kdevice::unregister_device_desc(id)));
+    let unregister_paused = wait_permit(&entered);
+    if !unregister_paused {
+        release.release();
+        let _ = reap(&unregister);
+        test_hooks::clear_pause_hook();
+        assert!(
+            unregister_paused,
+            "unregister never reached UnregisterHoldingLock"
+        );
+    }
+
+    // The probe obtains the old descriptor's lock handle before the deletion
+    // and is parked behind the unregister holder.
+    let probe_outcome = cell();
+    let probe_slot = probe_outcome.clone();
+    let probe = ktask::spawn(move || {
+        set_cell(&probe_slot, kdevice::probe_device_desc(id));
+    });
+    let probe_blocked = wait_until_blocked(&probe);
+    release.release();
+    let unregister_code = reap(&unregister);
+    let probe_code = reap(&probe);
+    test_hooks::clear_pause_hook();
+
+    assert_eq!(
+        probe_blocked,
+        Ok(()),
+        "probe was not parked on the unregister-held binding lock: {probe_blocked:?}"
+    );
+    assert_eq!(unregister_code, Ok(0));
+    assert_eq!(probe_code, Ok(0));
+    assert_eq!(get_cell(&unregister_result), Some(Ok(())));
+    assert_eq!(get_cell(&probe_outcome), Some(Ok(ProbeOutcome::Skipped)));
+    assert!(kdevice::find_device_desc(id).is_none());
+}
+
+#[def_test(serial)]
+fn test_unregister_waits_for_inflight_probe_success() {
+    let bus = setup();
+    let trace = subscribe_events();
+    let probes = Arc::new(AtomicUsize::new(0));
+    let count = probes.clone();
+    kdevice::register_driver_object(driver("unreg-probe-ok", "unreg-probe-ok", move |_| {
+        count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }));
+
+    let desc = desc(&bus, 71, "unreg-probe-ok");
+    let id = desc.id();
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let (probe_entered, probe_release) = (entered.clone(), release.clone());
+    test_hooks::install_pause_hook(Arc::new(move |point| {
+        if let BindingPause::ProbeHoldingLock { desc_id } = point
+            && desc_id == id
+        {
+            probe_entered.release();
+            probe_release.acquire();
+        }
+    }));
+
+    let probe_outcome = cell();
+    let probe_slot = probe_outcome.clone();
+    let probe = ktask::spawn(move || {
+        set_cell(&probe_slot, kdevice::probe_device_desc(id).unwrap());
+    });
+    let probe_paused = wait_permit(&entered);
+    if !probe_paused {
+        release.release();
+        let _ = reap(&probe);
+        test_hooks::clear_pause_hook();
+        assert!(probe_paused, "probe never reached ProbeHoldingLock");
+    }
+
+    let unregister_result = cell();
+    let unregister_slot = unregister_result.clone();
+    let unregister =
+        ktask::spawn(move || set_cell(&unregister_slot, kdevice::unregister_device_desc(id)));
+    let unregister_blocked = wait_until_blocked(&unregister);
+
+    release.release();
+    let probe_code = reap(&probe);
+    let unregister_code = reap(&unregister);
+    test_hooks::clear_pause_hook();
+
+    assert_eq!(
+        unregister_blocked,
+        Ok(()),
+        "unregister was not parked on the probe-held binding lock: {unregister_blocked:?}"
+    );
+    assert_eq!(probe_code, Ok(0));
+    assert_eq!(unregister_code, Ok(0));
+    assert_eq!(get_cell(&probe_outcome), Some(ProbeOutcome::Activated));
+    assert_eq!(get_cell(&unregister_result), Some(Ok(())));
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+
+    let records = kdevice::device_records_snapshot();
+    assert!(records.is_empty());
+    assert!(kdevice::find_device_desc(id).is_none());
+    let device_id = trace
+        .lock()
+        .iter()
+        .find(|(kind, _)| *kind == DeviceEventKind::Activated)
+        .map(|(_, device_id)| *device_id)
+        .expect("probe must activate the device before unregister removes it");
+    assert_eq!(
+        event_kinds(&trace, device_id),
+        alloc::vec![
+            DeviceEventKind::Matched,
+            DeviceEventKind::Bound,
+            DeviceEventKind::Published,
+            DeviceEventKind::Activated,
+            DeviceEventKind::Removed,
+        ]
+    );
+    assert_eq!(removed_count(&trace, device_id), 1);
+}
+
+#[def_test(serial)]
+fn test_unregister_waits_for_inflight_probe_failure() {
+    let bus = setup();
+    let trace = subscribe_events();
+    let probes = Arc::new(AtomicUsize::new(0));
+    let count = probes.clone();
+    kdevice::register_driver_object(driver("unreg-probe-fail", "unreg-probe-fail", move |_| {
+        count.fetch_add(1, Ordering::SeqCst);
+        Err(DriverError::Io)
+    }));
+
+    let desc = desc(&bus, 72, "unreg-probe-fail");
+    let id = desc.id();
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let (probe_entered, probe_release) = (entered.clone(), release.clone());
+    test_hooks::install_pause_hook(Arc::new(move |point| {
+        if let BindingPause::ProbeHoldingLock { desc_id } = point
+            && desc_id == id
+        {
+            probe_entered.release();
+            probe_release.acquire();
+        }
+    }));
+
+    let probe_outcome = cell();
+    let probe_slot = probe_outcome.clone();
+    let probe = ktask::spawn(move || {
+        set_cell(&probe_slot, kdevice::probe_device_desc(id).unwrap());
+    });
+    let probe_paused = wait_permit(&entered);
+    if !probe_paused {
+        release.release();
+        let _ = reap(&probe);
+        test_hooks::clear_pause_hook();
+        assert!(probe_paused, "probe never reached ProbeHoldingLock");
+    }
+
+    let unregister_result = cell();
+    let unregister_slot = unregister_result.clone();
+    let unregister =
+        ktask::spawn(move || set_cell(&unregister_slot, kdevice::unregister_device_desc(id)));
+    let unregister_blocked = wait_until_blocked(&unregister);
+
+    release.release();
+    let probe_code = reap(&probe);
+    let unregister_code = reap(&unregister);
+    test_hooks::clear_pause_hook();
+
+    assert_eq!(
+        unregister_blocked,
+        Ok(()),
+        "unregister was not parked on the probe-held binding lock: {unregister_blocked:?}"
+    );
+    assert_eq!(probe_code, Ok(0));
+    assert_eq!(unregister_code, Ok(0));
+    assert_eq!(get_cell(&probe_outcome), Some(ProbeOutcome::Unclaimed));
+    assert_eq!(get_cell(&unregister_result), Some(Ok(())));
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+
+    assert!(kdevice::device_records_snapshot().is_empty());
+    assert!(kdevice::find_device_desc(id).is_none());
+    assert!(
+        trace.lock().is_empty(),
+        "failed probe and unregister must not emit lifecycle events"
+    );
+}
+
+#[def_test(serial)]
+fn test_registration_scan_skips_after_unregister() {
+    let bus = setup();
+    let desc = desc(&bus, 73, "scan-unreg");
+    let id = desc.id();
+
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let (scan_entered, scan_release) = (entered.clone(), release.clone());
+    test_hooks::install_pause_hook(Arc::new(move |point| {
+        if let BindingPause::RegisterScanBeforeLock { desc_id } = point
+            && desc_id == id
+        {
+            scan_entered.release();
+            scan_release.acquire();
+        }
+    }));
+
+    let probes = Arc::new(AtomicUsize::new(0));
+    let count = probes.clone();
+    let matcher_calls = Arc::new(AtomicUsize::new(0));
+    let scan_driver = driver_with_matcher(
+        "scan-after-unreg",
+        CountingAliasMatcher {
+            alias: "scan-unreg",
+            calls: matcher_calls.clone(),
+        },
+        move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+    );
+    let scan = ktask::spawn(move || {
+        kdevice::register_driver_object(scan_driver);
+    });
+    let scan_paused = wait_permit(&entered);
+    if !scan_paused {
+        release.release();
+        let _ = reap(&scan);
+        test_hooks::clear_pause_hook();
+        assert!(
+            scan_paused,
+            "registration scan never reached RegisterScanBeforeLock"
+        );
+    }
+
+    // The scan is paused before taking the lock; unregister deletes the
+    // registration, so the scan must not match or probe the stale descriptor.
+    let unregister_result = kdevice::unregister_device_desc(id);
+    release.release();
+    let scan_code = reap(&scan);
+    test_hooks::clear_pause_hook();
+
+    assert_eq!(unregister_result, Ok(()));
+    assert_eq!(scan_code, Ok(0));
+    assert_eq!(probes.load(Ordering::SeqCst), 0);
+    assert_eq!(matcher_calls.load(Ordering::SeqCst), 0);
+    assert!(kdevice::device_records_snapshot().is_empty());
+    assert!(kdevice::find_device_desc(id).is_none());
+}
+
+#[def_test(serial)]
+fn test_unbind_then_unregister_tears_down_once() {
+    let bus = setup();
+    let trace = subscribe_events();
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    let cleanup_count = cleanups.clone();
+    kdevice::register_driver_object(driver("unbind-first", "unbind-first", move |device| {
+        let cleanup_count = cleanup_count.clone();
+        device.add_cleanup(move || {
+            cleanup_count.fetch_add(1, Ordering::SeqCst);
+        });
+        Ok(())
+    }));
+
+    let desc = desc(&bus, 74, "unbind-first");
+    let id = desc.id();
+    assert_eq!(
+        kdevice::probe_device_desc(id).unwrap(),
+        ProbeOutcome::Activated
+    );
+    let device_id = bound_record(&bus, &desc).unwrap().id;
+
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let (remove_entered, remove_release) = (entered.clone(), release.clone());
+    let target_device = device_id;
+    test_hooks::install_pause_hook(Arc::new(move |point| {
+        if let BindingPause::RemoveAfterRequeue {
+            device_id: paused_id,
+            ..
+        } = point
+            && paused_id == target_device
+        {
+            remove_entered.release();
+            remove_release.acquire();
+        }
+    }));
+
+    let remove_result = cell();
+    let remove_slot = remove_result.clone();
+    let remover = ktask::spawn(move || {
+        set_cell(&remove_slot, kdevice::remove_device_managed(device_id));
+    });
+    let remove_paused = wait_permit(&entered);
+    if !remove_paused {
+        release.release();
+        let _ = reap(&remover);
+        test_hooks::clear_pause_hook();
+        assert!(remove_paused, "remove never reached RemoveAfterRequeue");
+    }
+
+    let unregister_result = cell();
+    let unregister_slot = unregister_result.clone();
+    let unregister =
+        ktask::spawn(move || set_cell(&unregister_slot, kdevice::unregister_device_desc(id)));
+    let unregister_blocked = wait_until_blocked(&unregister);
+
+    release.release();
+    let remover_code = reap(&remover);
+    let unregister_code = reap(&unregister);
+    test_hooks::clear_pause_hook();
+
+    assert_eq!(
+        unregister_blocked,
+        Ok(()),
+        "unregister was not parked on the remove-held binding lock: {unregister_blocked:?}"
+    );
+    assert_eq!(remover_code, Ok(0));
+    assert_eq!(unregister_code, Ok(0));
+    assert_eq!(get_cell(&remove_result), Some(Ok(())));
+    assert_eq!(get_cell(&unregister_result), Some(Ok(())));
+    assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+    assert_eq!(removed_count(&trace, device_id), 1);
+    assert!(kdevice::find_device(device_id).is_none());
+    assert!(kdevice::find_device_desc(id).is_none());
+}
+
+#[def_test(serial)]
+fn test_unregister_then_unbind_returns_busy_without_second_teardown() {
+    let bus = setup();
+    let trace = subscribe_events();
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    let cleanup_count = cleanups.clone();
+    kdevice::register_driver_object(driver("unreg-first", "unreg-first", move |device| {
+        let cleanup_count = cleanup_count.clone();
+        device.add_cleanup(move || {
+            cleanup_count.fetch_add(1, Ordering::SeqCst);
+        });
+        Ok(())
+    }));
+
+    let desc = desc(&bus, 75, "unreg-first");
+    let id = desc.id();
+    assert_eq!(
+        kdevice::probe_device_desc(id).unwrap(),
+        ProbeOutcome::Activated
+    );
+    let device_id = bound_record(&bus, &desc).unwrap().id;
+
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let (unreg_entered, unreg_release) = (entered.clone(), release.clone());
+    test_hooks::install_pause_hook(Arc::new(move |point| {
+        if let BindingPause::UnregisterHoldingLock { desc_id } = point
+            && desc_id == id
+        {
+            unreg_entered.release();
+            unreg_release.acquire();
+        }
+    }));
+
+    let unregister_result = cell();
+    let unregister_slot = unregister_result.clone();
+    let unregister =
+        ktask::spawn(move || set_cell(&unregister_slot, kdevice::unregister_device_desc(id)));
+    let unregister_paused = wait_permit(&entered);
+    if !unregister_paused {
+        release.release();
+        let _ = reap(&unregister);
+        test_hooks::clear_pause_hook();
+        assert!(
+            unregister_paused,
+            "unregister never reached UnregisterHoldingLock"
+        );
+    }
+
+    // The unbind path looks up the still-present device/descriptor, takes the
+    // same binding lock, and is parked behind the unregister holder.
+    let remove_result = cell();
+    let remove_slot = remove_result.clone();
+    let remover = ktask::spawn(move || {
+        set_cell(&remove_slot, kdevice::remove_device_managed(device_id));
+    });
+    let remover_blocked = wait_until_blocked(&remover);
+
+    release.release();
+    let unregister_code = reap(&unregister);
+    let remover_code = reap(&remover);
+    test_hooks::clear_pause_hook();
+
+    assert_eq!(
+        remover_blocked,
+        Ok(()),
+        "unbind was not parked on the unregister-held binding lock: {remover_blocked:?}"
+    );
+    assert_eq!(unregister_code, Ok(0));
+    assert_eq!(remover_code, Ok(0));
+    assert_eq!(get_cell(&unregister_result), Some(Ok(())));
+    assert_eq!(
+        get_cell(&remove_result),
+        Some(Err(DriverError::ResourceBusy))
+    );
+    assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+    assert_eq!(removed_count(&trace, device_id), 1);
+    assert!(kdevice::find_device(device_id).is_none());
+    assert!(kdevice::find_device_desc(id).is_none());
+}
+
+#[def_test(serial)]
+fn test_double_unregister_tears_down_once() {
+    let bus = setup();
+    let trace = subscribe_events();
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    let cleanup_count = cleanups.clone();
+    kdevice::register_driver_object(driver("double-unreg", "double-unreg", move |device| {
+        let cleanup_count = cleanup_count.clone();
+        device.add_cleanup(move || {
+            cleanup_count.fetch_add(1, Ordering::SeqCst);
+        });
+        Ok(())
+    }));
+
+    let desc = desc(&bus, 76, "double-unreg");
+    let id = desc.id();
+    assert_eq!(
+        kdevice::probe_device_desc(id).unwrap(),
+        ProbeOutcome::Activated
+    );
+    let device_id = bound_record(&bus, &desc).unwrap().id;
+
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let pause_hits = Arc::new(AtomicUsize::new(0));
+    let (first_entered, first_release, hits) =
+        (entered.clone(), release.clone(), pause_hits.clone());
+    test_hooks::install_pause_hook(Arc::new(move |point| {
+        // Pause only the first unregister. The second one must be proven to
+        // wait on the binding lock, not on this hook; after the first resumes
+        // it enters the same point and must pass straight through.
+        if let BindingPause::UnregisterHoldingLock { desc_id } = point
+            && desc_id == id
+            && hits.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            first_entered.release();
+            first_release.acquire();
+        }
+    }));
+
+    let first_result = cell();
+    let first_slot = first_result.clone();
+    let first = ktask::spawn(move || {
+        set_cell(&first_slot, kdevice::unregister_device_desc(id));
+    });
+    let first_paused = wait_permit(&entered);
+    if !first_paused {
+        release.release();
+        let _ = reap(&first);
+        test_hooks::clear_pause_hook();
+        assert!(first_paused, "first unregister never reached UnregisterHoldingLock");
+    }
+
+    // Proof that the second call acquired the handle before the deletion: it
+    // is parked on the binding lock held by the paused first call.
+    let second_result = cell();
+    let second_slot = second_result.clone();
+    let second = ktask::spawn(move || {
+        set_cell(&second_slot, kdevice::unregister_device_desc(id));
+    });
+    let second_blocked = wait_until_blocked(&second);
+
+    release.release();
+    let first_code = reap(&first);
+    let second_code = reap(&second);
+    test_hooks::clear_pause_hook();
+
+    assert_eq!(
+        second_blocked,
+        Ok(()),
+        "second unregister did not wait on the binding lock: {second_blocked:?}"
+    );
+    assert_eq!(first_code, Ok(0));
+    assert_eq!(second_code, Ok(0));
+    assert_eq!(get_cell(&first_result), Some(Ok(())));
+    assert_eq!(get_cell(&second_result), Some(Ok(())));
+    assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+    assert_eq!(removed_count(&trace, device_id), 1);
+    assert!(kdevice::find_device(device_id).is_none());
+    assert!(kdevice::find_device_desc(id).is_none());
 }
