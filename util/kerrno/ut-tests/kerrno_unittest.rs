@@ -55,6 +55,7 @@ const KIND_LINUX_PAIRS: &[(KErrorKind, LinuxError)] = &[
     (KErrorKind::Unsupported, LinuxError::ENOSYS),
     (KErrorKind::WouldBlock, LinuxError::EAGAIN),
     (KErrorKind::WriteZero, LinuxError::EIO),
+    (KErrorKind::Deadlock, LinuxError::EDEADLK),
 ];
 
 #[def_test]
@@ -134,7 +135,7 @@ fn test_linuxerror_to_kerrorkind_mapping_and_error_cases() {
 
     assert_eq!(
         KErrorKind::try_from(LinuxError::EDEADLK),
-        Err(LinuxError::EDEADLK)
+        Ok(KErrorKind::Deadlock)
     );
 }
 
@@ -149,9 +150,15 @@ fn test_kerror_debug_display_and_canonicalize() {
     assert!(format!("{linux:?}").contains("LinuxError"));
     assert_eq!(linux.canonicalize(), KError::from(KErrorKind::BrokenPipe));
 
-    let unmapped = KError::from(LinuxError::EDEADLK);
-    assert_eq!(unmapped.canonicalize(), unmapped);
-    assert_eq!(KErrorKind::try_from(unmapped), Err(LinuxError::EDEADLK));
+    let deadlock = KError::from(LinuxError::EDEADLK);
+    assert_eq!(
+        deadlock.canonicalize(),
+        KError::from(KErrorKind::Deadlock)
+    );
+    assert_eq!(
+        KErrorKind::try_from(deadlock),
+        Ok(KErrorKind::Deadlock)
+    );
 }
 
 #[def_test]

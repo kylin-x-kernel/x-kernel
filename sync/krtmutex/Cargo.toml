@@ -1,0 +1,20 @@
+[package]
+name = "krtmutex"
+description = "Priority-inheritance mutex with a scheduler provider boundary"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+intrusive-collections.workspace = true
+kerrno.workspace = true
+kiface-task-api.workspace = true
+klazy.workspace = true
+kspin.workspace = true
+
+[lints]
+workspace = true

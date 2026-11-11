@@ -177,6 +177,11 @@ pub enum KErrorKind {
     /// Stale state: the caller's revision/epoch check failed against the
     /// current state (Linux `ESTALE`, e.g. `bpf` compare-and-swap detach).
     Stale,
+    /// The operation would deadlock (Linux `EDEADLK`).
+    ///
+    /// Priority inheritance reports this when a task waits for a lock it
+    /// already owns, or the owner chain returns to the waiter.
+    Deadlock,
 }
 
 impl KErrorKind {
@@ -231,6 +236,7 @@ impl KErrorKind {
             WriteZero => "Write zero",
             FileTooLarge => "File too large",
             IoWaitInterrupted => "File wait interrupted",
+            Deadlock => "Resource deadlock",
         }
     }
 
@@ -293,6 +299,7 @@ impl KErrorKind {
             45 => FileTooLarge,
             46 => IoWaitInterrupted,
             47 => Stale,
+            48 => Deadlock,
             _ => return None,
         })
     }
@@ -360,6 +367,7 @@ impl From<KErrorKind> for LinuxError {
             UnexpectedEof | WriteZero => LinuxError::EIO,
             Unsupported => LinuxError::ENOSYS,
             WouldBlock => LinuxError::EAGAIN,
+            Deadlock => LinuxError::EDEADLK,
         }
     }
 }
@@ -412,6 +420,7 @@ impl TryFrom<LinuxError> for KErrorKind {
             LinuxError::EMFILE => TooManyOpenFiles,
             LinuxError::ENOSYS => Unsupported,
             LinuxError::EAGAIN => WouldBlock,
+            LinuxError::EDEADLK => Deadlock,
             _ => {
                 return Err(e);
             }

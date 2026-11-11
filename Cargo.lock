@@ -3248,6 +3248,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "krtmutex"
+version = "0.3.0-dev"
+dependencies = [
+ "intrusive-collections",
+ "kerrno",
+ "kiface-task-api",
+ "klazy",
+ "kspin",
+]
+
+[[package]]
 name = "kruntime"
 version = "0.3.0-dev"
 dependencies = [

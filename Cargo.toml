@@ -22,6 +22,7 @@ members = [
     "task/kworkng/crates/kworkqueue_ng",
     "task/kworkng",
     "task/ktimer-core",
+    "sync/krtmutex",
     "tee/tee_crypto",
     "tee/xdice",
 ]
