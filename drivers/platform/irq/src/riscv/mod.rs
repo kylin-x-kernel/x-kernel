@@ -600,6 +600,10 @@ macro_rules! with_cause {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn deferred_affinity(_desc: kirq::IrqDesc) -> Option<&'static kirq::IrqDeferredAffinityChip> {
+        None
+    }
+
     fn immediate_affinity(desc: kirq::IrqDesc) -> Option<&'static kirq::IrqAffinityChip> {
         let controller = PLIC.get()?;
         if !matches!(

@@ -42,6 +42,14 @@ impl kirq::IntrManagerIf {
         None
     }
 
+    fn deferred_affinity(desc: kirq::IrqDesc) -> Option<&'static kirq::IrqDeferredAffinityChip> {
+        if runtime::io_pin(desc).is_some() && !runtime::is_msi_source(desc) {
+            Some(&runtime::IO_DEFERRED)
+        } else {
+            None
+        }
+    }
+
     fn guest_interface() -> Option<kirq::GuestIrqInterface> {
         None
     }

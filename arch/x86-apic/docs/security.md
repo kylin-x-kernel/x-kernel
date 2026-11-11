@@ -163,6 +163,15 @@ reconfiguration failed can enable a null-vector entry. Failure does not
 authorize unmask, but a hardware refusal to mask cannot be converted into a
 physical quiescence guarantee. Changing remote-IRR trigger/polarity is refused.
 
+Deferred destination changes validate a physical Fixed RTE before any write.
+Edge changes mask, write/readback destination and restore the incoming mask
+before EOI. Level prepare masks and returns only a local mask-state token;
+finish after EOI refuses to change destination while Remote IRR is still set,
+then writes/verifies and restores suppression. A failed mask/write/readback is
+reported as failure with the entry left masked where possible; it is not
+rollback, hardware quiescence or a successful route. The controller owns no
+affinity pending table, and no register write occurs during request acceptance.
+
 Retrigger validates fixed physical edge routing and issues an IPI to the stored
 destination/vector while the route owner is locked. MSI composition retains its
 target in the same locked allocator that owns the vector bit; free clears both.

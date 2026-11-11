@@ -19,6 +19,10 @@ pub struct IrqAffinitySnapshot {
     pub effective: Option<KCpuMask>,
     /// Hardware may have changed; enable and ordinary flow admission are closed.
     pub has_failed_programming: bool,
+    /// A request has been accepted but its effective routing is not yet confirmed.
+    ///
+    /// `requested` is the policy target; there is no separate pending mask.
+    pub is_pending: bool,
 }
 
 /// Failure of a lookup-only ordinary IRQ routing operation.

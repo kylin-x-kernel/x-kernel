@@ -20,9 +20,9 @@
 //! # Interfaces
 //! - Drivers use [`try_map`], registration, enable/disable, and synchronous free.
 //!   Checked operations report context and ownership errors instead of hiding them.
-//! - [`irq_affinity`] / [`set_irq_affinity`] distinguish requested policy from
-//!   confirmed routing. Only sources with an immediate controller capability can
-//!   be changed; per-CPU, NMI and MSI lifecycles remain separate.
+//! - [`irq_affinity`] / [`set_irq_affinity`] distinguish requested, pending and
+//!   confirmed routing. Sources may expose an immediate or ACK/EOI-driven
+//!   deferred controller capability; per-CPU, NMI and MSI lifecycles remain separate.
 //! - Architecture adapters enter through [`handle_irq`] / [`handle_nmi`]; irqchip
 //!   providers implement [`IntrManagerIf`] and transfer claims using [`PendingIrq`].
 //!   These entry functions and claim construction are unsafe: the adapter must
@@ -58,7 +58,10 @@ mod runtime;
 pub use backend::msi::{MsiBackendIf, MsiBackendToken, MsiReservation};
 pub(crate) use backend::platform;
 pub use backend::{
-    affinity::{IrqAffinityApplyError, IrqAffinityChip, IrqAffinityDelivery},
+    affinity::{
+        IrqAffinityApplyError, IrqAffinityChip, IrqAffinityDelivery, IrqAffinityPrepare,
+        IrqDeferredAffinityChip,
+    },
     msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix},
     platform::{
         EdgeChip, FasteoiChip, FasteoiResend, GuestIrqInterface, Handler, IntrManagerIf, IrqFlow,

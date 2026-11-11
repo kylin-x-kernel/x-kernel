@@ -1,29 +1,47 @@
 # kirq — 设计文档
 
-## Immediate Runtime Affinity
+## Runtime Affinity
 
 `runtime/affinity.rs` owns lookup-only routing transactions; `model/affinity.rs`
-defines snapshots/errors and `backend/affinity.rs` defines immediate irqchip
-operations. `set_irq_affinity` uses management admission to retain one Line,
-then its short lock to serialize against source control and flow completion.
-Registry exclusion is not held during chip programming. `irq_affinity` only
-copies the locked observation and never reads hardware or creates a mapping.
+defines snapshots/errors and `backend/affinity.rs` defines immediate and
+deferred irqchip operations. `set_irq_affinity` uses management admission to
+retain one Line, then its short lock to serialize against source control and
+flow completion. Registry exclusion is not held during chip programming.
+`irq_affinity` only copies the locked observation and never reads hardware or
+creates a mapping.
 
-Requested policy and effective routing are distinct, as in Linux generic IRQ
-management. The candidate set is the request intersected with runtime's
-`CpuInterruptReadinessIf` observation; the chip additionally checks its concrete
-destination encoding and reachability. Success reports a nonempty subset of
-those candidates without changing disable depth, priority or trigger. Old claims
-still complete at their original controller/CPU. Unknown initial routing remains
-`None`, not `Any`, the ready mask or firmware-present CPUs.
+`IrqAffinitySnapshot` separates requested policy, effective routing, the
+`is_pending` accepted-but-not-effective state, and hardware failure. `Ok`
+from `set_irq_affinity` means the request was accepted; callers must inspect
+`is_pending` before treating the request as effective. Immediate GIC/PLIC
+transactions return `is_pending = false`. Deferred transactions store no
+second pending mask: the pending target is `requested`.
 
-`IntrManagerIf::immediate_affinity` selects permanent operations for the exact
-source. The GICv3 provider supports ordinary standard SPIs; other controller
-providers return `None` until their routing transactions are implemented and
-validated. PerCpu, NMI, MSI and fixed descriptor affinity
-are rejected. The API does not offer a fake pending result: Linux deferred IRQ
-migration requires real ACK/EOI progress, which an immediate-only capability
-cannot supply. Software replay completion is not such a hardware progress point.
+`IntrManagerIf::immediate_affinity` selects permanent immediate operations for
+the exact source. `IntrManagerIf::deferred_affinity` selects a controller that
+needs real ACK/EOI progress. PerCpu, NMI, MSI and fixed descriptor affinity are
+rejected. A deferred request is validated and recorded without writing the RTE
+and without masking the old route; the old route remains usable until a real
+hardware completion. Replacing the request replaces `requested`/pending, but
+cannot clear a latched routing failure.
+
+The generic flow layer only connects the two real completion points:
+
+- edge ACK: KIRQ invokes the backend transaction before EOI, then EOI, then
+  resumes action handling. The backend masks, writes/verifies destination and
+  restores mask before returning; KIRQ commits effective before EOI.
+- level Fasteoi: KIRQ invokes prepare before EOI (mask), performs EOI, then
+  invokes finish. The backend checks Remote IRR after EOI; still-set keeps the
+  request pending without changing destination, while clear permits the
+  verified write and mask restoration.
+
+The generic layer does not interpret APIC registers. `IrqDispatch::complete`
+is the hardware-claim path; replay uses a distinct `complete_software_only`
+path, so an empty completion closure cannot be mistaken for EOI. Replay and a
+completion without a matching Line never advance deferred state. No worker,
+timer, pending table, or in-flight counter is introduced. A pending request may
+remain indefinitely when no further interrupt arrives, and queries expose that
+state.
 
 Pre-write rejection preserves the preceding snapshot. Hardware failure retains
 the last accepted request, clears effective routing and closes ordinary flow,
@@ -34,8 +52,25 @@ A successful retry does not clear an unrelated trigger-configuration fault.
 Ordinary configuration cannot clear a routing fault or overwrite a route
 established through this API. A fault also forbids descriptor/flow rebinding,
 retaining the original recovery capability even after the last action is gone.
-Source-identity rebinding otherwise invalidates observations. There is no automatic retry worker, action-lifetime
-credit, hardware drain guarantee, or CPU-hotplug protocol in this operation.
+
+Ordinary disable retains pending. Last-action withdrawal cancels pending and
+reconciles `requested` to `effective` (or `None` when no route was confirmed)
+without clearing a routing failure. Retaining a Line for later re-registration
+does not resurrect the cancelled request; a new affinity request is required.
+Line retirement stops deferred progress and old completions cannot affect a
+later Line. Source-identity rebinding otherwise invalidates observations.
+
+A failed route retried while disabled is accepted as pending while the fault
+stays latched. Activation and registration preflight recognize only that narrow
+`pending + currently disabled` recovery state; they do not relax the general
+enable guard. Regular/shared registration still publishes no action until the
+masked prepare/finish pair verifies the route; a failed recovery returns without
+publishing. Configuration/enable then runs the same pair without a real EOI. A
+verified finish clears the fault before unmask. If the pair cannot complete and
+no confirmed old route exists, activation fails closed. If a confirmed old route
+exists, it may resume service while the request remains pending. This decision
+uses current suppression and confirmed route availability, not
+`effective == None` as an activation-history proxy.
 
 ## Shared Descriptor Values
 
@@ -730,8 +765,8 @@ ordering, not a claim that every controller has equivalent EOI semantics.
 | --- | --- | --- | --- |
 | GICv2: `drivers/platform/irq/src/gic/gicv2.rs`, `claim_irq` | Ack, reject spurious, EOI priority drop | DIR using the claim cookie unless this CPU's `FORWARDED_PPIS` delegates deactivation to a guest | Ordinary SPIs select Fasteoi; SGIs and PPIs, including raw timer 27 and explicitly tagged private sources, select PerCpu. Flow selection does not permit normal-IRQ invocation of an NMI owner. Explicit GIC SPIs tagged PER_CPU are rejected during flow selection. GICv2 does not provide NMI preparation. The resident guest HW LR owns delegated deactivation; detached sources return to host completion. |
 | GICv3: `drivers/platform/irq/src/gic/gicv3.rs`, `ack_irq` | Ack, classify NMI, EOI priority drop | `complete_irq` issues DIR | Ordinary SPIs select Fasteoi independently of claim classification. SGIs and PPIs, including raw timer 27 and explicitly tagged private sources, select PerCpu; explicit GIC SPIs tagged PER_CPU are rejected during flow selection. NMI-class claims enter generic NMI. Normal-IRQ claims for NMI-owned Lines complete without handler invocation. Guest forwarding is not supported by this backend. |
-| x86 IO-APIC level: `drivers/platform/irq/src/x86/mod.rs`, `dispatch_regular_irq` | Decode vector, retain nonzero completion cookie | LAPIC EOI under Line lock after Fasteoi handlers | Selected Fasteoi gates admission; validated hardware level reasserts after unmask. |
-| x86 IO-APIC edge and MSI-X: same provider | Transfer nonzero EOI cookie to generic Edge | LAPIC EOI under Line lock before handlers, or after masking a rejected arrival | Overlapping arrivals latch pending for the running owner. Re-enable retriggers using the recorded backend target/vector, not an arbitrary self-IPI. MSI device masking/release remains owner-controlled. |
+| x86 IO-APIC level: `drivers/platform/irq/src/x86/mod.rs`, `dispatch_regular_irq` | Decode vector, retain nonzero completion cookie | Deferred prepare before LAPIC EOI, then finish under the same Line exclusion after Fasteoi handlers | Selected Fasteoi gates admission; Remote IRR still set keeps the affinity request pending without changing destination; validated hardware level reasserts after unmask. |
+| x86 IO-APIC edge and MSI-X: same provider | Transfer nonzero EOI cookie to generic Edge | For IO-APIC affinity, deferred destination transaction completes before LAPIC EOI; MSI has no IO-APIC destination transaction | IO-APIC edge migration follows Linux ACK-before-EOI order; overlapping arrivals latch pending for the running owner. Re-enable retriggers using the recorded backend target/vector, not an arbitrary self-IPI. MSI device masking/release remains owner-controlled. |
 | x86 local timer/IPI vectors: same provider | LAPIC EOI before generic dispatch | Zero cookie: no further EOI | PerCpu controls local admission independently; remote producer shutdown remains an owner obligation. |
 | RISC-V PLIC: `drivers/platform/irq/src/riscv/mod.rs`, `dispatch_irq` | Claim under PLIC lock; release before generic admission | Complete original claim on its claiming context under the retained Fasteoi Line lock | Validated standard PLIC uses Fasteoi with KIRQ pending/replay; fixed effective target and priority masking remain provider-owned. |
 | RISC-V local timer/software causes: same provider | Software cause clears SSIP; timer service handles its own deadline | Skip cookie: no PLIC completion | PerCpu classification permits concurrent handlers with independent local SIE gating. |

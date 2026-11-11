@@ -639,6 +639,10 @@ pub fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn deferred_affinity(_desc: kirq::IrqDesc) -> Option<&'static kirq::IrqDeferredAffinityChip> {
+        None
+    }
+
     fn immediate_affinity(desc: kirq::IrqDesc) -> Option<&'static kirq::IrqAffinityChip> {
         let version = ACTIVE_GIC.get()?;
         if !(32..1020).contains(&desc.hwirq)

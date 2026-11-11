@@ -450,7 +450,7 @@ fn prepare_enable_plan(
     virq: Virq,
     force_platform_enable: bool,
 ) -> Result<IrqPlatformPlan, IrqDescError> {
-    entry.require_affinity_ready()?;
+    entry.require_affinity_activation_ready()?;
     require_bound_flow(entry)?;
     reject_teardown(entry, virq, "enable IRQ")?;
     if entry.has_nmi_action() && !entry.has_ready_local_nmi_preparation() {
@@ -973,6 +973,7 @@ fn register_prepared_locked(
         return Ok(false);
     }
     let needs_restore = configure_registration(entry, &mut apply_plan)?;
+    super::affinity::apply_deferred_before_activation(entry)?;
     let installed = entry.publish_regular_action(prepared);
     debug_assert!(installed, "duplicate regular action was checked above");
     let mut plan = if options.should_auto_enable() {
@@ -996,7 +997,7 @@ fn configure_registration(
     entry: &mut IrqStateDesc,
     apply_plan: &mut impl FnMut(IrqPlatformPlan) -> Result<(), IrqDescError>,
 ) -> Result<bool, IrqDescError> {
-    entry.require_affinity_ready()?;
+    entry.require_affinity_activation_ready()?;
     let needs_restore = entry.needs_configuration_restore();
     let plan = entry.prepare_reconfigure_if_stale();
     if plan.configure {
@@ -1011,6 +1012,7 @@ fn apply_configuration_plan(
     plan: IrqPlatformPlan,
     apply_plan: impl FnOnce(IrqPlatformPlan) -> Result<(), IrqDescError>,
 ) -> Result<(), IrqDescError> {
+    super::affinity::apply_deferred_before_activation(entry)?;
     if let Err(error) = apply_plan(plan) {
         if plan.configure {
             entry.mark_configuration_failed();
@@ -1091,6 +1093,7 @@ fn register_shared_prepared_locked(
         return Ok(None);
     }
     let needs_restore = configure_registration(entry, &mut apply_plan)?;
+    super::affinity::apply_deferred_before_activation(entry)?;
     let was_first_action = !entry.has_actions();
     let Some(token) = entry.publish_shared_action(prepared) else {
         warn!("register shared handler for IRQ {virq} failed");
@@ -1609,6 +1612,9 @@ fn withdraw_action_on_line(
     let Some(removed_action) = removed_action else {
         return Ok(None);
     };
+    if !entry.has_actions() {
+        entry.cancel_pending_affinity();
+    }
     let disable_plan = entry.prepare_disable_if_no_actions();
     // New snapshots cannot observe withdrawal until the last-action mask has
     // completed. Ordinary old snapshots remain covered by Line drain; PerCpu

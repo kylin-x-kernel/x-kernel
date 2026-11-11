@@ -95,6 +95,27 @@ unknown GSIs, fixed-capacity limits, and framing errors; a live test reads the
 QEMU MADT through `from_acpi` and checks ACPI provenance plus a non-zero
 controller address.
 
+The x86-apic register-model tests also cover the deferred retarget protocol:
+edge mask/destination/readback/restore, `KeepMasked`, physical-Fixed and logical
+destination rejection, destination-write failure, and both level outcomes. The
+private `Registers::remote_irr` observation lets the model keep the read-only
+bit out of the vendored RTE layout: IRR set leaves destination unchanged and
+keeps the request pending; clearing it permits the verified write. This is a
+production-transaction branch, not a real MMIO timing proof.
+
+KIRQ tests cover accepted-but-pending snapshots, pre-EOI edge completion,
+post-EOI level completion, persistent pending, masked activation/recovery,
+pending cancellation and immediate non-pending GIC/PLIC behavior. Replay has a
+separate software-only regression that would panic if it entered prepare/finish.
+Regular and shared registration are exercised through the public paths from a
+failed Line that satisfies member-install eligibility: logical suppression,
+pending recovery, and no blocked teardown. Successful masked recovery publishes
+the new action; a failed regular recovery publishes no action, and a failed
+shared recovery returns no token and leaves an existing shared action count
+unchanged. The shared case can retain an existing action while the recovery
+admission runs. These are not hardware-drained or physical Line lifecycle
+proofs, and they do not replace Ticket07 delivery/EOI validation.
+
 The IRQ-driver tests verify that dedicated spurious/error vectors bypass
 regular claims. Representative non-fixed vectors are forwarded unchanged to
 an injected regular dispatcher; this does not test that backend's domain

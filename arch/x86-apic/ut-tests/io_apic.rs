@@ -18,6 +18,7 @@ enum Fault {
     Configuration,
     Mask,
     Restore,
+    Destination,
 }
 
 struct Model {
@@ -26,6 +27,7 @@ struct Model {
     destination: u8,
     writes: Vec<IrqFlags>,
     fault: Fault,
+    remote_irr: bool,
 }
 
 impl Model {
@@ -36,6 +38,7 @@ impl Model {
             destination: 7,
             writes: Vec::new(),
             fault: Fault::None,
+            remote_irr: false,
         }
     }
 }
@@ -57,7 +60,6 @@ impl Registers for Model {
     fn write(&mut self, pin: u8, entry: RedirectionTableEntry) {
         assert_eq!(pin, 4);
         assert_eq!(entry.vector(), self.vector);
-        assert_eq!(entry.dest(), self.destination);
         self.writes.push(entry.flags());
         match self.fault {
             Fault::Configuration => self
@@ -65,8 +67,18 @@ impl Registers for Model {
                 .set(IrqFlags::MASKED, entry.flags().contains(IrqFlags::MASKED)),
             Fault::Mask if entry.flags().contains(IrqFlags::MASKED) => {}
             Fault::Restore if !entry.flags().contains(IrqFlags::MASKED) => {}
-            _ => self.flags = entry.flags(),
+            Fault::Destination if entry.dest() != self.destination => {
+                // Simulate a rejected destination write while letting the
+                // accompanying mask write proceed.
+            }
+            _ => {
+                self.destination = entry.dest();
+                self.flags = entry.flags();
+            }
         }
+    }
+    fn remote_irr(&mut self, _pin: u8) -> bool {
+        self.remote_irr
     }
 }
 
@@ -298,4 +310,65 @@ fn vector_table_exhaustion_is_reported() {
         assert_eq!(assigned as usize, IO_APIC_VECTOR_BASE + offset);
     }
     assert_eq!(table.allocate(instance, pin(0)), None);
+}
+
+#[def_test]
+fn edge_retarget_masks_writes_destination_and_restores_delivery() {
+    let mut registers = Model::new(IrqFlags::empty());
+    assert!(super::programming::retarget_edge(&mut registers, pin(4), 9, false));
+    assert_eq!(registers.destination, 9);
+    assert!(!registers.flags.contains(IrqFlags::MASKED));
+    assert_eq!(registers.writes[0], IrqFlags::MASKED);
+}
+
+#[def_test]
+fn edge_retarget_keep_masked_stays_suppressed() {
+    let mut registers = Model::new(IrqFlags::empty());
+    assert!(super::programming::retarget_edge(&mut registers, pin(4), 9, true));
+    assert_eq!(registers.destination, 9);
+    assert!(registers.flags.contains(IrqFlags::MASKED));
+}
+
+#[def_test]
+fn level_retarget_keeps_pending_while_remote_irr_is_set() {
+    let mut registers = Model::new(IrqFlags::LEVEL_TRIGGERED);
+    registers.remote_irr = true;
+    let was_masked = super::programming::prepare_retarget_mask(&mut registers, pin(4)).unwrap();
+    assert!(!was_masked);
+    assert_eq!(
+        super::programming::finish_level(&mut registers, pin(4), 9, was_masked, false),
+        IoApicRetargetResult::Pending
+    );
+    assert_eq!(registers.destination, 7);
+    assert!(!registers.flags.contains(IrqFlags::MASKED));
+
+    registers.remote_irr = false;
+    let was_masked = super::programming::prepare_retarget_mask(&mut registers, pin(4)).unwrap();
+    assert_eq!(
+        super::programming::finish_level(&mut registers, pin(4), 9, was_masked, false),
+        IoApicRetargetResult::Complete
+    );
+    assert_eq!(registers.destination, 9);
+    assert!(!registers.flags.contains(IrqFlags::MASKED));
+}
+
+#[def_test]
+fn logical_destination_rejects_retarget_before_any_write() {
+    let mut registers = Model::new(IrqFlags::LOGICAL_DEST);
+    assert_eq!(
+        super::programming::prepare_retarget_mask(&mut registers, pin(4)),
+        None
+    );
+    assert!(!super::programming::retarget_edge(&mut registers, pin(4), 9, false));
+    assert_eq!(registers.destination, 7);
+    assert!(registers.writes.is_empty());
+}
+
+#[def_test]
+fn destination_write_failure_leaves_masked_without_claiming_retarget() {
+    let mut registers = Model::new(IrqFlags::empty());
+    registers.fault = Fault::Destination;
+    assert!(!super::programming::retarget_edge(&mut registers, pin(4), 9, false));
+    assert_eq!(registers.destination, 7);
+    assert!(registers.flags.contains(IrqFlags::MASKED));
 }

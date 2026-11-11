@@ -283,6 +283,96 @@ pub fn set_pin_enabled(instance: IoApicInstanceId, pin: IoApicPin, enabled: bool
     }
 }
 
+/// Result of a level retarget after EOI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IoApicRetargetResult {
+    /// Destination was written and verified; delivery restoration followed the
+    /// caller's logical/mask constraint.
+    Complete,
+    /// Remote IRR is still set. Destination was not changed; the caller keeps
+    /// the request pending.
+    Pending,
+    /// A mask, write or readback failed after possible hardware mutation.
+    Failed,
+}
+
+fn entry_accepts_physical_retarget(entry: &RedirectionTableEntry) -> bool {
+    matches!(entry.mode(), IrqMode::Fixed) && !entry.flags().contains(IrqFlags::LOGICAL_DEST)
+}
+
+/// Checks that a pin is a physical Fixed RTE and can be retargeted.
+///
+/// This is a pre-write validation for a deferred affinity request. It does not
+/// mask, write destination or claim that an active level source may move now.
+pub fn retarget_supported(instance: IoApicInstanceId, pin: IoApicPin) -> bool {
+    let Some(registry) = IO_APICS.get() else {
+        return false;
+    };
+    let mut registry = registry.lock();
+    let Some(controller) = registry.controller_mut(instance) else {
+        return false;
+    };
+    if pin.as_usize() >= usize::from(controller.pin_count) {
+        return false;
+    }
+    entry_accepts_physical_retarget(&controller.io_apic.read(pin.as_u8()))
+}
+
+/// Completes an edge destination transaction before EOI.
+///
+/// The RTE is masked across destination write/readback and restored according
+/// to its original mask unless `keep_masked` is requested. The vector, trigger
+/// and polarity bits are preserved. Returns `false` on any failed mask/write/
+/// readback, leaving the entry at least requested-masked where possible.
+pub fn retarget_edge(
+    instance: IoApicInstanceId,
+    pin: IoApicPin,
+    destination: u8,
+    keep_masked: bool,
+) -> bool {
+    let Some(registry) = IO_APICS.get() else {
+        return false;
+    };
+    let mut registry = registry.lock();
+    let Some(controller) = registry.controller_mut(instance) else {
+        return false;
+    };
+    programming::retarget_edge(controller, pin, destination, keep_masked)
+}
+
+/// Masks a level pin before EOI and returns its original mask state.
+///
+/// `None` means the pin/entry is invalid or the mask write/readback failed.
+/// The returned value is only a local transaction token; KIRQ owns the pending
+/// affinity request itself.
+pub fn prepare_level_retarget(instance: IoApicInstanceId, pin: IoApicPin) -> Option<bool> {
+    let registry = IO_APICS.get()?;
+    let mut registry = registry.lock();
+    let controller = registry.controller_mut(instance)?;
+    programming::prepare_retarget_mask(controller, pin)
+}
+
+/// Finishes a prepared level retarget after EOI.
+///
+/// Remote IRR set means the source is still active for the old destination;
+/// destination is not changed and the caller retains the pending request.
+pub fn finish_level_retarget(
+    instance: IoApicInstanceId,
+    pin: IoApicPin,
+    destination: u8,
+    was_masked: bool,
+    keep_masked: bool,
+) -> IoApicRetargetResult {
+    let Some(registry) = IO_APICS.get() else {
+        return IoApicRetargetResult::Failed;
+    };
+    let mut registry = registry.lock();
+    let Some(controller) = registry.controller_mut(instance) else {
+        return IoApicRetargetResult::Failed;
+    };
+    programming::finish_level(controller, pin, destination, was_masked, keep_masked)
+}
+
 /// Returns the programmed trigger mode of one input pin on one instance, or
 /// `None` when the pin is outside that instance's physical table.
 pub fn pin_trigger_mode(instance: IoApicInstanceId, pin: IoApicPin) -> Option<IoApicTriggerMode> {

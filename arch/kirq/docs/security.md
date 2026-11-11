@@ -1,6 +1,6 @@
 # kirq — 安全与可靠性分析
 
-## Immediate Routing Boundary
+## Runtime Routing Boundary
 
 This analysis includes `model/affinity.rs`, `backend/affinity.rs` and
 `runtime/affinity.rs`, plus the Line and management admission checks they use.
@@ -9,11 +9,28 @@ queries reject NMI before taking any ordinary IRQ lock. Both retain the selected
 Line and recheck retirement. The query returns values, not a mapping lease.
 
 The controller is trusted to validate source identity, destination encoding and
-reachability before writes. Its transaction runs bounded and non-sleeping under
-Line exclusion; controller locks nest below Line and must not reenter KIRQ.
-Success must preserve actual suppression or establish `KeepMasked`, and return
-a nonempty effective subset of the supplied ready candidates. An invalid success
-is treated as uncertain programming, not committed as a usable destination.
+reachability before writes. An immediate transaction runs bounded and
+non-sleeping under Line exclusion; controller locks nest below Line and must not
+reenter KIRQ. Success must preserve actual suppression or establish
+`KeepMasked`, and return a nonempty effective subset of the supplied ready
+candidates. An invalid success is treated as uncertain programming, not
+committed as a usable destination.
+
+Deferred requests are accepted only after the backend validates a nonempty
+ready candidate set; accepting one writes no RTE and masks no line, so the old
+route remains usable. `requested` is the pending target and no second pending
+mask exists. `Ok` means accepted; `is_pending` is the only observation that the
+request is not yet effective. A replacement request cannot clear a latched
+routing failure.
+
+The generic flow layer invokes deferred preparation only for a real hardware
+claim and only with the Line lock held. Hardware completion and software-only
+replay use separate `IrqDispatch` methods: replay cannot pass an empty closure
+into the EOI path. Edge migration completes before EOI. Level preparation masks
+before EOI and finish runs after EOI; Remote IRR still set is a retry condition,
+not a programming failure. Replay, no-Line completion and software simulation
+never advance pending. A pending request may remain indefinitely; there is no
+worker, poll, allocation or in-flight counter.
 
 Post-write failure does not imply rollback, hardware masking or quiescence. The
 separate routing fault blocks action admission, registration and enable; ordinary
@@ -21,8 +38,23 @@ trigger configuration cannot clear it. Disabled-source routing recovery may clea
 only that fault after confirming the new route and suppression. Existing disable
 depth still prevents flow tails or software replay from reopening the source
 before explicit enable. Device shutdown and old-claim completion remain separate
-owner/controller obligations. No new unsafe operation or per-dispatch lifetime
-counter is introduced. Unsupported backends expose no routing capability.
+owner/controller obligations.
+
+Ordinary disable retains pending. Last-action withdrawal cancels pending and
+sets `requested = effective` (or `None` if no route was confirmed) without
+clearing a hardware failure. A retained Line that is re-registered does not
+restore the cancelled request, and an old completion cannot advance it.
+Retirement clears the Line's routing state; a later Line is independent.
+
+A failed route can accept a deferred retry only while the source is disabled.
+Activation and registration preflight admit that exact `pending + disabled`
+state without relaxing the general fault gate, but action publication remains
+after the masked recovery result: a failed pair returns no action and no token.
+Configuration/enable runs the masked prepare/finish pair without a real EOI;
+only verified completion clears the fault before unmask. If no confirmed old
+route exists and the pair cannot complete, activation fails closed rather than
+using `effective == None` as proof that hardware was never active. A confirmed
+old route may resume while the request stays pending.
 
 The `cfg(unittest)` helper `tests_irq::retire_reserved_test_line` is solely for
 an explicitly reserved ordinary hardware fixture. The fixture must stop its

@@ -348,6 +348,18 @@ under the `IO_APICS` registry lock and issues the request before releasing it.
 Level, logical destination or mismatched-vector entries are rejected. No new
 vector is created, and a pin that was never successfully configured has no
 assigned vector to retrigger.
+Deferred affinity reuses the same registry lock and RTE protocol. `retarget_supported`
+pre-writes only validates a physical Fixed entry. `retarget_edge` masks the RTE,
+writes and verifies the destination and mask, and restores the incoming mask
+unless `KeepMasked` is requested. `prepare_level_retarget` masks and returns the
+original mask state as a local transaction token; `finish_level_retarget` reads
+Remote IRR after EOI. While Remote IRR is set it leaves the destination
+unchanged, restores the mask and reports Pending; once clear it writes/verifies
+the destination and restores suppression. No controller-side pending table is
+created: KIRQ owns the request, while the token is passed through one
+completion. Logical destination, non-Fixed delivery and writes that fail
+readback are rejected/failed without claiming rollback or quiescence.
+
 `MsixVectorAllocator` additionally retains the destination first committed by
 message composition; conflicting recomposition fails. `Any` is resolved once
 when producing the message, not again on the replaying CPU. `retrigger_msi`

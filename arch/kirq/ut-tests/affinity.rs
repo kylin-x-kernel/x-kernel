@@ -43,6 +43,47 @@ static WRONG_TARGET: IrqAffinityChip = IrqAffinityChip {
 static MUST_NOT_APPLY: IrqAffinityChip = IrqAffinityChip {
     apply: unexpected_apply,
 };
+static DEFERRED: crate::IrqDeferredAffinityChip = crate::IrqDeferredAffinityChip {
+    accept: |_, _| Ok(()),
+    prepare: |_, _, _| Ok(crate::IrqAffinityPrepare::Pending(7)),
+    finish: |_, token, _| {
+        core::assert_eq!(token, 7);
+        Ok(Some(kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus()))
+    },
+};
+
+static DEFERRED_STILL_PENDING: crate::IrqDeferredAffinityChip = crate::IrqDeferredAffinityChip {
+    accept: |_, _| Ok(()),
+    prepare: |_, _, _| Ok(crate::IrqAffinityPrepare::Pending(9)),
+    finish: |_, token, _| {
+        core::assert_eq!(token, 9);
+        Ok(None)
+    },
+};
+
+static DEFERRED_COMPLETE_CANDIDATES: crate::IrqDeferredAffinityChip =
+    crate::IrqDeferredAffinityChip {
+        accept: |_, _| Ok(()),
+        prepare: |_, candidates, _| Ok(crate::IrqAffinityPrepare::Complete(*candidates)),
+        finish: |_, _, _| panic!("completed edge transaction must not finish"),
+    };
+
+static DEFERRED_FAIL: crate::IrqDeferredAffinityChip = crate::IrqDeferredAffinityChip {
+    accept: |_, _| Ok(()),
+    prepare: |_, _, _| Err(IrqAffinityApplyError::HardwareFailure),
+    finish: |_, _, _| Err(IrqAffinityApplyError::HardwareFailure),
+};
+
+static DEFERRED_EDGE: crate::IrqDeferredAffinityChip = crate::IrqDeferredAffinityChip {
+    accept: |_, _| Ok(()),
+    prepare: |_, _, _| {
+        Ok(crate::IrqAffinityPrepare::Complete(
+            kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus(),
+        ))
+    },
+    finish: |_, _, _| Err(IrqAffinityApplyError::Rejected),
+};
+
 
 #[expect(
     clippy::panic,
@@ -81,6 +122,7 @@ fn requested_policy_is_distinct_from_confirmed_ready_destinations() {
     let snapshot = apply(&mut entry, &requested, ready).unwrap();
     assert_eq!(snapshot.requested, Some(requested));
     assert_eq!(snapshot.effective, Some(ready));
+    assert!(!snapshot.is_pending);
     assert!(!snapshot.has_failed_programming);
     assert_eq!(entry.desc, before);
     assert!(!entry.is_enabled_for_tests());
@@ -310,6 +352,160 @@ impl Drop for QueryFixture {
 }
 
 #[def_test(serial)]
+fn enable_runs_masked_deferred_recovery_before_unmask() {
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x6f40;
+    assert!(!IRQ_STATE.lock().descs.contains_key(&virq));
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    assert!(!ready.is_empty());
+    let mut state = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    state.test_deferred_affinity = Some(&DEFERRED);
+    assert!(
+        state
+            .install_shared_action(Arc::new(|_| IrqEvent::HANDLED))
+            .is_some()
+    );
+    state.affinity.requested = Some(ready);
+    state.affinity.effective = None;
+    state.affinity.has_failed_programming = true;
+    state.affinity.is_pending = true;
+    let plan = state.prepare_register_disabled();
+    state.commit_platform_plan(plan);
+    let fixture = QueryFixture { virq, line: Arc::new(IrqLine::new(state)) };
+    IRQ_STATE.lock().descs.insert(virq, fixture.line.clone());
+
+    crate::try_enable_irq(virq).unwrap();
+    let entry = fixture.line.lock();
+    assert!(entry.is_enabled_for_tests());
+    assert_eq!(entry.affinity.effective, Some(ready));
+    assert!(!entry.affinity.has_failed_programming);
+    assert!(!entry.affinity.is_pending);
+}
+
+#[def_test(serial)]
+fn failed_pending_line_registers_disabled_after_masked_recovery() {
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x6f42;
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    let mut state = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    state.desc = IrqDesc::from_virq(virq);
+    state.test_deferred_affinity = Some(&DEFERRED);
+    state.affinity.requested = Some(ready);
+    state.affinity.effective = None;
+    state.affinity.has_failed_programming = true;
+    state.affinity.is_pending = true;
+    let fixture = QueryFixture { virq, line: Arc::new(IrqLine::new(state)) };
+    IRQ_STATE.lock().descs.insert(virq, fixture.line.clone());
+
+    assert!(crate::try_register_disabled(virq, Arc::new(|_| IrqEvent::HANDLED)).unwrap());
+    let entry = fixture.line.lock();
+    assert_eq!(entry.action_count(), 1);
+    assert_eq!(entry.affinity.effective, Some(ready));
+    assert!(!entry.affinity.has_failed_programming);
+    assert!(!entry.affinity.is_pending);
+}
+
+#[def_test(serial)]
+fn failed_pending_line_registers_shared_after_masked_recovery() {
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x6f43;
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    let mut state = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    state.desc = IrqDesc::from_virq(virq);
+    state.test_deferred_affinity = Some(&DEFERRED);
+    state.affinity.requested = Some(ready);
+    state.affinity.effective = None;
+    state.affinity.has_failed_programming = true;
+    state.affinity.is_pending = true;
+    let fixture = QueryFixture { virq, line: Arc::new(IrqLine::new(state)) };
+    IRQ_STATE.lock().descs.insert(virq, fixture.line.clone());
+
+    assert!(
+        crate::try_register_shared(virq, Arc::new(|_| IrqEvent::HANDLED))
+            .unwrap()
+            .is_some()
+    );
+    let entry = fixture.line.lock();
+    assert_eq!(entry.action_count(), 1);
+    assert_eq!(entry.affinity.effective, Some(ready));
+    assert!(!entry.affinity.has_failed_programming);
+    assert!(!entry.affinity.is_pending);
+}
+
+#[def_test(serial)]
+fn failed_recovery_registration_publishes_no_action() {
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x6f44;
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    let mut state = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    state.desc = IrqDesc::from_virq(virq);
+    state.test_deferred_affinity = Some(&DEFERRED_FAIL);
+    state.affinity.requested = Some(ready);
+    state.affinity.effective = None;
+    state.affinity.has_failed_programming = true;
+    state.affinity.is_pending = true;
+    let fixture = QueryFixture { virq, line: Arc::new(IrqLine::new(state)) };
+    IRQ_STATE.lock().descs.insert(virq, fixture.line.clone());
+
+    assert!(crate::try_register_disabled(virq, Arc::new(|_| IrqEvent::HANDLED)).is_err());
+    let entry = fixture.line.lock();
+    assert_eq!(entry.action_count(), 0);
+    assert!(entry.affinity.has_failed_programming);
+    assert!(!entry.affinity.is_pending);
+}
+
+#[def_test(serial)]
+fn shared_recovery_failure_keeps_existing_action_and_returns_no_token() {
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x6f45;
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    let mut state = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    state.desc = IrqDesc::from_virq(virq);
+    state.test_deferred_affinity = Some(&DEFERRED_FAIL);
+    assert!(
+        state
+            .install_shared_action(Arc::new(|_| IrqEvent::HANDLED))
+            .is_some()
+    );
+    let plan = state.prepare_register_disabled();
+    state.commit_platform_plan(plan);
+    state.affinity.requested = Some(ready);
+    state.affinity.effective = None;
+    state.affinity.has_failed_programming = true;
+    state.affinity.is_pending = true;
+    let fixture = QueryFixture { virq, line: Arc::new(IrqLine::new(state)) };
+    IRQ_STATE.lock().descs.insert(virq, fixture.line.clone());
+
+    assert!(crate::try_register_shared(virq, Arc::new(|_| IrqEvent::HANDLED)).is_err());
+    let entry = fixture.line.lock();
+    assert_eq!(entry.action_count(), 1);
+    assert!(entry.affinity.has_failed_programming);
+    assert!(!entry.affinity.is_pending);
+}
+
+#[def_test(serial)]
+fn last_action_cancels_pending_and_reregistration_does_not_revive_it() {
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x6f41;
+    assert!(!IRQ_STATE.lock().descs.contains_key(&virq));
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    let mut state = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    state.test_deferred_affinity = Some(&DEFERRED);
+    let token = state
+        .install_shared_action(Arc::new(|_| IrqEvent::HANDLED))
+        .unwrap();
+    let plan = state.prepare_auto_enable();
+    state.commit_platform_plan(plan);
+    assert!(apply(&mut state, &ready, ready).unwrap().is_pending);
+    let fixture = QueryFixture { virq, line: Arc::new(IrqLine::new(state)) };
+    IRQ_STATE.lock().descs.insert(virq, fixture.line.clone());
+
+    drop(crate::try_free_irq_action(virq, token).unwrap());
+    {
+        let entry = fixture.line.lock();
+        assert!(!entry.affinity.is_pending);
+        assert_eq!(entry.affinity.requested, entry.affinity.effective);
+    }
+    assert!(crate::try_register_disabled(virq, Arc::new(|_| IrqEvent::HANDLED)).unwrap());
+    assert!(!fixture.line.lock().affinity.is_pending);
+    drop(crate::try_free_irq(virq).unwrap());
+}
+
+#[def_test(serial)]
 fn actionless_route_fault_preserves_binding_for_disabled_recovery() {
     let virq = crate::DYNAMIC_VIRQ_BASE + 0x6f21;
     assert!(!IRQ_STATE.lock().descs.contains_key(&virq));
@@ -436,4 +632,116 @@ fn public_enable_and_registration_cannot_bypass_routing_fault() {
     crate::try_enable_irq(virq).unwrap();
     assert!(fixture.line.lock().can_run_actions());
     drop(crate::try_free_irq(virq).unwrap());
+}
+
+#[def_test]
+fn deferred_request_stays_pending_until_completion_finishes() {
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f30));
+    entry.test_deferred_affinity = Some(&DEFERRED);
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    let accepted = apply(&mut entry, &ready, ready).unwrap();
+    assert_eq!(accepted.requested, Some(ready));
+    assert_eq!(accepted.effective, None);
+    assert!(accepted.is_pending);
+    assert!(!accepted.has_failed_programming);
+
+    let token = super::prepare_deferred_affinity(&mut entry).unwrap();
+    assert_eq!(token, 7);
+    assert!(entry.affinity.is_pending);
+    super::finish_deferred_affinity(&mut entry, token);
+    assert_eq!(entry.affinity.requested, Some(ready));
+    assert_eq!(entry.affinity.effective, Some(ready));
+    assert!(!entry.affinity.is_pending);
+    assert!(!entry.affinity.has_failed_programming);
+}
+
+#[def_test]
+fn a_new_deferred_request_replaces_the_pending_target() {
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f33));
+    entry.test_deferred_affinity = Some(&DEFERRED_COMPLETE_CANDIDATES);
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    let mut cpus = ready.iter_logical();
+    let first_cpu = cpus.next().expect("at least one ready CPU");
+    let second_cpu = cpus.next().unwrap_or(first_cpu);
+    let first = cpu_mask(first_cpu.as_usize());
+    let second = cpu_mask(second_cpu.as_usize());
+    assert!(apply(&mut entry, &first, ready).unwrap().is_pending);
+    let snapshot = apply(&mut entry, &second, ready).unwrap();
+    assert_eq!(snapshot.requested, Some(second));
+    assert!(snapshot.is_pending);
+    assert_eq!(snapshot.effective, None);
+
+    assert_eq!(super::prepare_deferred_affinity(&mut entry), None);
+    assert_eq!(entry.affinity.effective, Some(second));
+    assert!(!entry.affinity.is_pending);
+    if second != first {
+        assert_ne!(entry.affinity.effective, Some(first));
+    }
+}
+
+#[def_test]
+fn edge_deferred_transaction_completes_before_eoi() {
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f31));
+    entry.test_deferred_affinity = Some(&DEFERRED_EDGE);
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    let accepted = apply(&mut entry, &ready, ready).unwrap();
+    assert!(accepted.is_pending);
+    assert_eq!(super::prepare_deferred_affinity(&mut entry), None);
+    assert_eq!(entry.affinity.effective, Some(ready));
+    assert!(!entry.affinity.is_pending);
+}
+
+#[def_test]
+fn first_activation_applies_pending_without_an_old_eoi() {
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f34));
+    entry.test_deferred_affinity = Some(&DEFERRED);
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    assert!(apply(&mut entry, &ready, ready).unwrap().is_pending);
+    super::apply_deferred_before_activation(&mut entry).unwrap();
+    assert_eq!(entry.affinity.effective, Some(ready));
+    assert!(!entry.affinity.is_pending);
+}
+
+#[def_test]
+fn cancelling_pending_reconciles_requested_with_effective() {
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f32));
+    entry.test_deferred_affinity = Some(&DEFERRED);
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    entry.affinity.requested = Some(ready);
+    entry.affinity.effective = Some(ready);
+    entry.affinity.is_pending = true;
+    entry.cancel_pending_affinity();
+    assert_eq!(entry.affinity.requested, Some(ready));
+    assert_eq!(entry.affinity.effective, Some(ready));
+    assert!(!entry.affinity.is_pending);
+}
+
+#[def_test]
+fn masked_recovery_activation_clears_failure_without_an_old_eoi() {
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f35));
+    entry.test_deferred_affinity = Some(&DEFERRED);
+    let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    entry.affinity.requested = Some(ready);
+    entry.affinity.effective = None;
+    entry.affinity.has_failed_programming = true;
+    entry.affinity.is_pending = true;
+    assert!(entry.require_affinity_activation_ready().is_ok());
+    super::apply_deferred_before_activation(&mut entry).unwrap();
+    assert_eq!(entry.affinity.effective, Some(ready));
+    assert!(!entry.affinity.has_failed_programming);
+    assert!(!entry.affinity.is_pending);
+}
+
+#[def_test]
+fn confirmed_old_route_can_activate_while_finish_stays_pending() {
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f36));
+    entry.test_deferred_affinity = Some(&DEFERRED_STILL_PENDING);
+    let ready = cpu_mask(0);
+    entry.affinity.requested = Some(ready);
+    entry.affinity.effective = Some(ready);
+    entry.affinity.is_pending = true;
+    super::apply_deferred_before_activation(&mut entry).unwrap();
+    assert_eq!(entry.affinity.effective, Some(ready));
+    assert!(entry.affinity.is_pending);
+    assert!(!entry.affinity.has_failed_programming);
 }

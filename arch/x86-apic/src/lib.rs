@@ -72,8 +72,9 @@ mod local_apic;
 mod msix;
 
 pub use io_apic::{
-    ProbedIoApic, configure_pin_checked, install_io_apic, io_apic_route, pin_for_gsi_in_range,
-    pin_trigger_mode, probe_io_apic, retrigger_pin, set_pin_enabled,
+    IoApicRetargetResult, ProbedIoApic, configure_pin_checked, finish_level_retarget,
+    install_io_apic, io_apic_route, pin_for_gsi_in_range, pin_trigger_mode, prepare_level_retarget,
+    probe_io_apic, retarget_edge, retarget_supported, retrigger_pin, set_pin_enabled,
 };
 pub use local_apic::{
     end_of_interrupt, handle_error_interrupt, init_local_primary, init_secondary, raw_apic_id,

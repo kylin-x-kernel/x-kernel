@@ -1,5 +1,30 @@
 # irq-driver — Design
 
+## IO-APIC Deferred Affinity
+
+The x86 provider exposes `IntrManagerIf::deferred_affinity` only for an
+IO-APIC descriptor that resolves to a configured instance/pin and is not an MSI
+source. KIRQ owns requested/effective/pending; the provider validates a
+physical Fixed RTE, selects the first ready logical CPU whose raw APIC id fits
+the 8-bit destination field, and performs the register transaction under the
+IO-APIC registry lock.
+
+Acceptance writes no RTE and masks no line. Edge deferred preparation masks,
+writes and verifies destination and restores the incoming mask before EOI; KIRQ
+commits effective before the EOI callback. Level preparation masks and returns
+an opaque local token containing destination, selected CPU and the original
+mask state. After EOI, finish reads Remote IRR under the same lock: still set
+leaves destination unchanged and keeps the request pending; clear writes and
+verifies destination and restores the mask. The provider stores no pending
+table and never calls KIRQ lifecycle code.
+
+Replay and completions without a matching Line never reach the provider. A
+failed mask/write/readback becomes `HardwareFailure`; KIRQ latches the routing
+fault, while the original claim still completes. Logical destination,
+non-Fixed delivery, an out-of-range CPU/APIC id, or an unknown instance/pin is
+rejected before writes. Ordinary disable retains pending; last-action
+withdrawal cancels it and reconciles requested with effective.
+
 ## GICv2 Runtime SPI Affinity
 
 The GIC provider exposes `IntrManagerIf::immediate_affinity` for an ordinary

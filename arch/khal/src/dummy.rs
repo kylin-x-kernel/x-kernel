@@ -125,6 +125,10 @@ impl PlatformPowerIf {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn deferred_affinity(_desc: kirq::IrqDesc) -> Option<&'static kirq::IrqDeferredAffinityChip> {
+        None
+    }
+
     fn immediate_affinity(_desc: kirq::IrqDesc) -> Option<&'static kirq::IrqAffinityChip> {
         None
     }

@@ -43,7 +43,7 @@ impl IrqDispatch {
             let mut entry = guard.line.lock();
             entry.is_running = false;
             entry.is_replaying = false;
-            complete_claim();
+            complete_with_deferred_affinity(&mut entry, complete_claim);
             // SAFETY: entry was locked directly through this retained Line.
             let notify = unsafe { super::resend::prepare_locked(&guard.line, &mut entry) };
             let finished = finish_admission(&mut entry, &mut guard.admission, guard.is_unhandled);
@@ -57,6 +57,45 @@ impl IrqDispatch {
         }
         drop(self);
         resolved_irq
+    }
+
+    /// Releases a software-only traversal that owns no hardware claim.
+    ///
+    /// Replay uses this separate path so an empty completion closure can never
+    /// be confused with a real EOI. No deferred-affinity phase is invoked.
+    pub(super) fn complete_software_only(mut self) -> Option<crate::Virq> {
+        let resolved_irq = self.resolved_irq;
+        if let Some(guard) = self
+            .guard
+            .as_mut()
+            .filter(|guard| guard.admission == DispatchAdmission::Running)
+        {
+            let mut entry = guard.line.lock();
+            entry.is_running = false;
+            entry.is_replaying = false;
+            // SAFETY: entry was locked directly through this retained Line.
+            let notify = unsafe { super::resend::prepare_locked(&guard.line, &mut entry) };
+            let finished = finish_admission(&mut entry, &mut guard.admission, guard.is_unhandled);
+            drop(entry);
+            report_finished(guard.virq, finished);
+            if let Some(notify) = notify {
+                notify();
+            }
+        }
+        drop(self);
+        resolved_irq
+    }
+}
+
+/// Runs a real hardware completion with the deferred-affinity pre/post phases.
+///
+/// Callers must hold the Line lock and own an actual hardware claim. The helper
+/// is not used for replay or for completions without a Line.
+fn complete_with_deferred_affinity(entry: &mut IrqStateDesc, complete_claim: impl FnOnce()) {
+    let token = super::affinity::prepare_deferred_affinity(entry);
+    complete_claim();
+    if let Some(token) = token {
+        super::affinity::finish_deferred_affinity(entry, token);
     }
 }
 
@@ -129,7 +168,7 @@ unsafe fn handle_level_irq(
     complete_claim: impl FnOnce(),
 ) {
     (chip.mask_ack)(entry.desc);
-    complete_claim();
+    complete_with_deferred_affinity(&mut entry, complete_claim);
     if entry.is_running || !entry.can_run_actions() {
         entry.is_pending = true;
         return;
@@ -167,13 +206,13 @@ unsafe fn handle_edge_irq(
     if entry.is_running || !entry.can_run_actions() {
         entry.is_pending = true;
         (chip.mask)(entry.desc);
-        complete_claim();
+        complete_with_deferred_affinity(&mut entry, complete_claim);
         return;
     }
     entry.begin_running_dispatch();
     let mut guard = IrqDispatchGuard::new_running(virq, line.clone());
     entry.is_pending = false;
-    complete_claim();
+    complete_with_deferred_affinity(&mut entry, complete_claim);
     // SAFETY: entry locks the exact Line retained by guard. Admission was
     // acquired under that lock and covers every iteration of this owner.
     let mut snapshot = unsafe { guard.snapshot_actions(&entry) };
@@ -216,8 +255,13 @@ unsafe fn handle_fasteoi_irq(
             entry.is_pending = true;
             (chip.mask)(entry.desc);
         }
-        // Reject without clearing another dispatch's running ownership.
-        complete_claim();
+        // Replay owns no hardware claim; release its admission without running
+        // deferred hardware phases. A rejected real claim still performs EOI.
+        if entry.is_replaying {
+            complete_claim();
+            return;
+        }
+        complete_with_deferred_affinity(&mut entry, complete_claim);
         return;
     }
     entry.begin_running_dispatch();
@@ -326,7 +370,7 @@ pub(super) fn replay(line: Arc<IrqLine>) {
         resolved_irq: Some(virq),
         guard: Some(guard),
     }
-    .complete(|| {});
+    .complete_software_only();
 }
 
 /// Distinguishes ordinary running ownership from source-owner-protected PerCpu

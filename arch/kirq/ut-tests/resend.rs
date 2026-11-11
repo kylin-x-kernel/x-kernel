@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use intrusive_collections::LinkedList;
 use kcompletion::Completion;
+use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId};
 use kspin::SpinNoIrq;
 use unittest::def_test;
 
@@ -102,6 +103,12 @@ fn serving_softirq_replay_borrows_actions_under_admission_without_rcu() {
     assert!(!line.lock().is_running);
     assert!(!line.lock().is_replaying);
 }
+
+static REPLAY_DEFERRED: crate::IrqDeferredAffinityChip = crate::IrqDeferredAffinityChip {
+    accept: |_, _| Ok(()),
+    prepare: |_, _, _| panic!("software replay must not prepare hardware"),
+    finish: |_, _, _| panic!("software replay must not finish hardware"),
+};
 
 static HARDWARE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 static HARDWARE_ACCEPTS: AtomicBool = AtomicBool::new(true);
@@ -1063,4 +1070,31 @@ fn batch_limit_leaves_one_line_and_notifies_for_successor() {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(!line.lock().is_running);
     }
+}
+
+#[def_test(serial)]
+fn software_replay_does_not_advance_deferred_affinity() {
+    let (line, calls) = fixture(0x5f70);
+    let ready = {
+        let mut mask = KCpuMask::new();
+        mask.set_logical(LogicalCpuId::new(0), true);
+        mask
+    };
+    {
+        let mut entry = line.lock();
+        entry.test_deferred_affinity = Some(&REPLAY_DEFERRED);
+        entry.affinity.requested = Some(ready);
+        entry.affinity.is_pending = true;
+    }
+    let queue = queue();
+    schedule_on(&queue, &line);
+    {
+        let _pin = kspin::NoPreemptIrqSave::new();
+        let _softirq = crate::context::SoftIrqContextGuard::enter();
+        super::run_on(&queue);
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    let entry = line.lock();
+    assert!(entry.affinity.is_pending);
+    assert!(!entry.is_replaying);
 }

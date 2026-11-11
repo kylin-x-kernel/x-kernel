@@ -302,6 +302,9 @@ pub trait IntrManagerIf {
     /// Selection depends on source capability, not current route health: a failed
     /// transaction must not hide the operations needed to recover that source.
     fn immediate_affinity(desc: IrqDesc) -> Option<&'static crate::IrqAffinityChip>;
+
+    /// Returns a deferred routing capability for an ordinary source, if any.
+    fn deferred_affinity(desc: IrqDesc) -> Option<&'static crate::IrqDeferredAffinityChip>;
     /// Selects CPU-local NMI control for an admitted descriptor, without writes.
     /// None means the controller cannot provide the local NMI lifecycle.
     fn percpu_nmi(desc: IrqDesc) -> Option<&'static PerCpuNmiChip>;

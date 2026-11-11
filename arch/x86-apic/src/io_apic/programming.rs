@@ -61,6 +61,14 @@ pub(super) trait Registers {
     fn max_pin(&mut self) -> u8;
     fn read(&mut self, pin: u8) -> RedirectionTableEntry;
     fn write(&mut self, pin: u8, entry: RedirectionTableEntry);
+
+    /// Observes the read-only Remote IRR bit for a pin.
+    ///
+    /// Production reads the RTE, where the bit is not writable. Tests can
+    /// override only this observation without fabricating a private RTE layout.
+    fn remote_irr(&mut self, pin: u8) -> bool {
+        self.read(pin).flags().contains(IrqFlags::REMOTE_IRR)
+    }
 }
 
 impl Registers for IoApic {
@@ -169,6 +177,120 @@ pub(super) fn configure(
         }
     }
     true
+}
+
+fn entry_accepts_physical(entry: &RedirectionTableEntry) -> bool {
+    matches!(entry.mode(), IrqMode::Fixed) && !entry.flags().contains(IrqFlags::LOGICAL_DEST)
+}
+
+/// Masks one valid physical RTE and returns the original mask state.
+pub(super) fn prepare_retarget_mask(
+    registers: &mut impl Registers,
+    pin: IoApicPin,
+) -> Option<bool> {
+    if !valid_pin(registers, pin) {
+        return None;
+    }
+    let entry = registers.read(pin.as_u8());
+    if !entry_accepts_physical(&entry) {
+        return None;
+    }
+    let was_masked = entry.flags().contains(IrqFlags::MASKED);
+    if !was_masked {
+        let mut masked = registers.read(pin.as_u8());
+        masked.set_flags(masked.flags() | IrqFlags::MASKED);
+        registers.write(pin.as_u8(), masked);
+        if !registers
+            .read(pin.as_u8())
+            .flags()
+            .contains(IrqFlags::MASKED)
+        {
+            return None;
+        }
+    }
+    Some(was_masked)
+}
+
+fn restore_mask(
+    registers: &mut impl Registers,
+    pin: IoApicPin,
+    was_masked: bool,
+    keep_masked: bool,
+) -> bool {
+    if was_masked || keep_masked {
+        return registers
+            .read(pin.as_u8())
+            .flags()
+            .contains(IrqFlags::MASKED);
+    }
+    let mut entry = registers.read(pin.as_u8());
+    entry.set_flags(entry.flags() - IrqFlags::MASKED);
+    registers.write(pin.as_u8(), entry);
+    !registers
+        .read(pin.as_u8())
+        .flags()
+        .contains(IrqFlags::MASKED)
+}
+
+/// Completes an edge RTE destination transaction before EOI.
+pub(super) fn retarget_edge(
+    registers: &mut impl Registers,
+    pin: IoApicPin,
+    destination: u8,
+    keep_masked: bool,
+) -> bool {
+    let Some(was_masked) = prepare_retarget_mask(registers, pin) else {
+        return false;
+    };
+    let expected_vector = registers.read(pin.as_u8()).vector();
+    let mut updated = registers.read(pin.as_u8());
+    updated.set_dest(destination);
+    registers.write(pin.as_u8(), updated);
+    let observed = registers.read(pin.as_u8());
+    if observed.dest() != destination
+        || observed.vector() != expected_vector
+        || !entry_accepts_physical(&observed)
+    {
+        return false;
+    }
+    restore_mask(registers, pin, was_masked, keep_masked)
+}
+
+/// Finishes a level RTE transaction after EOI.
+pub(super) fn finish_level(
+    registers: &mut impl Registers,
+    pin: IoApicPin,
+    destination: u8,
+    was_masked: bool,
+    keep_masked: bool,
+) -> super::IoApicRetargetResult {
+    if !valid_pin(registers, pin) {
+        return super::IoApicRetargetResult::Failed;
+    }
+    let observed = registers.read(pin.as_u8());
+    if registers.remote_irr(pin.as_u8()) {
+        return if restore_mask(registers, pin, was_masked, keep_masked) {
+            super::IoApicRetargetResult::Pending
+        } else {
+            super::IoApicRetargetResult::Failed
+        };
+    }
+    let expected_vector = observed.vector();
+    let mut updated = registers.read(pin.as_u8());
+    updated.set_dest(destination);
+    registers.write(pin.as_u8(), updated);
+    let readback = registers.read(pin.as_u8());
+    if readback.dest() != destination
+        || readback.vector() != expected_vector
+        || !entry_accepts_physical(&readback)
+    {
+        return super::IoApicRetargetResult::Failed;
+    }
+    if restore_mask(registers, pin, was_masked, keep_masked) {
+        super::IoApicRetargetResult::Complete
+    } else {
+        super::IoApicRetargetResult::Failed
+    }
 }
 
 /// Issues edge retrigger to the physical destination/vector read from the

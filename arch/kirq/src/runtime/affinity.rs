@@ -2,12 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Lookup-only routing transactions and confirmed per-Line affinity state.
+//! Lookup-only routing transactions and per-Line affinity state.
 //!
 //! Management admission retains identity; the short Line lock serializes chip
-//! writes against enable, disable and flow tails. No routing operation borrows
-//! actions, drains old claims or changes disable depth. Deferred controller
-//! migration must supply real hardware progress before joining this interface.
+//! writes against enable, disable and flow tails. Immediate writes and deferred
+//! ACK/EOI progress share this state; neither borrows actions, drains old claims
+//! nor changes disable depth. Pending is accepted without a hardware write and
+//! is advanced only from a real completion path.
 
 use kcpu_id_map::KCpuMask;
 
@@ -41,7 +42,7 @@ pub fn irq_affinity(virq: Virq) -> Result<IrqAffinitySnapshot, IrqAffinityError>
     Ok(entry.affinity)
 }
 
-/// Immediately applies an ordinary source's routing policy in sleepable context.
+/// Applies an ordinary source's routing policy in sleepable context.
 ///
 /// The entire shared Line is routed, not one action. Only ready CPUs are offered
 /// to the controller; the requested mask is retained separately from the
@@ -53,7 +54,9 @@ pub fn irq_affinity(virq: Virq) -> Result<IrqAffinitySnapshot, IrqAffinityError>
 /// logically disabled (including a never-enabled Line), then a successful routing
 /// retry. Delivery resumes only through normal explicit enable/registration.
 /// Neither failure nor software exclusion guarantees physical-source quiescence.
-/// This immediate-only entry rejects sources requiring deferred migration.
+/// An immediate controller reports effective routing in the same call. A
+/// deferred controller accepts the request with `is_pending`; only a later
+/// edge ACK or level EOI can make it effective.
 pub fn set_irq_affinity(
     virq: Virq,
     requested: &KCpuMask,
@@ -67,7 +70,12 @@ pub fn set_irq_affinity(
     .ok_or(IrqAffinityError::Management(IrqDescError::UnknownIrq))?
 }
 
-fn check_source(entry: &IrqStateDesc) -> Result<&'static crate::IrqAffinityChip, IrqAffinityError> {
+enum AffinitySource {
+    Immediate(&'static crate::IrqAffinityChip),
+    Deferred(&'static crate::IrqDeferredAffinityChip),
+}
+
+fn check_source(entry: &IrqStateDesc) -> Result<AffinitySource, IrqAffinityError> {
     if entry.is_retired() {
         return Err(IrqAffinityError::Management(IrqDescError::UnknownIrq));
     }
@@ -85,7 +93,13 @@ fn check_source(entry: &IrqStateDesc) -> Result<&'static crate::IrqAffinityChip,
     if entry.desc.affinity != IrqAffinity::Any {
         return Err(IrqAffinityError::OwnerFixed);
     }
-    entry.affinity_chip().ok_or(IrqAffinityError::Unsupported)
+    if let Some(chip) = entry.affinity_chip() {
+        return Ok(AffinitySource::Immediate(chip));
+    }
+    entry
+        .deferred_affinity_chip()
+        .map(AffinitySource::Deferred)
+        .ok_or(IrqAffinityError::Unsupported)
 }
 
 fn apply(
@@ -93,7 +107,7 @@ fn apply(
     requested: &KCpuMask,
     ready: KCpuMask,
 ) -> Result<IrqAffinitySnapshot, IrqAffinityError> {
-    let chip = check_source(entry)?;
+    let source = check_source(entry)?;
     if entry.is_teardown_in_progress() || entry.is_nmi_closing() {
         return Err(IrqAffinityError::Management(
             IrqDescError::TeardownInProgress {
@@ -113,23 +127,159 @@ fn apply(
     } else {
         IrqAffinityDelivery::Preserve
     };
-    let result = (chip.apply)(entry.desc, &eligible, delivery);
-    match result {
-        Ok(effective) if !effective.is_empty() && (effective & eligible) == effective => {
-            entry.affinity = IrqAffinitySnapshot {
-                requested: Some(*requested),
-                effective: Some(effective),
-                has_failed_programming: false,
-            };
-            Ok(entry.affinity)
+    match source {
+        AffinitySource::Immediate(chip) => {
+            let result = (chip.apply)(entry.desc, &eligible, delivery);
+            match result {
+                Ok(effective) if !effective.is_empty() && (effective & eligible) == effective => {
+                    entry.affinity = IrqAffinitySnapshot {
+                        requested: Some(*requested),
+                        effective: Some(effective),
+                        has_failed_programming: false,
+                        is_pending: false,
+                    };
+                    Ok(entry.affinity)
+                }
+                Err(IrqAffinityApplyError::Rejected) => Err(IrqAffinityError::Rejected),
+                // A malformed success also cannot certify routing. Keep the previous
+                // accepted policy but never expose an unproven hardware destination.
+                Ok(_) | Err(IrqAffinityApplyError::HardwareFailure) => {
+                    entry.affinity.effective = None;
+                    entry.affinity.has_failed_programming = true;
+                    entry.affinity.is_pending = false;
+                    Err(IrqAffinityError::HardwareFailure)
+                }
+            }
         }
-        Err(IrqAffinityApplyError::Rejected) => Err(IrqAffinityError::Rejected),
-        // A malformed success also cannot certify routing. Keep the previous
-        // accepted policy but never expose an unproven hardware destination.
-        Ok(_) | Err(IrqAffinityApplyError::HardwareFailure) => {
+        AffinitySource::Deferred(chip) => match (chip.accept)(entry.desc, &eligible) {
+            Ok(()) => {
+                entry.affinity.requested = Some(*requested);
+                entry.affinity.is_pending = true;
+                Ok(entry.affinity)
+            }
+            Err(IrqAffinityApplyError::Rejected) => Err(IrqAffinityError::Rejected),
+            Err(IrqAffinityApplyError::HardwareFailure) => {
+                entry.affinity.effective = None;
+                entry.affinity.has_failed_programming = true;
+                entry.affinity.is_pending = false;
+                Err(IrqAffinityError::HardwareFailure)
+            }
+        },
+    }
+}
+
+/// Runs deferred hardware progress while the source is actually suppressed.
+///
+/// This is used only from configuration/enable/recovery paths, where no real
+/// EOI is guaranteed. It is gated by the current logical suppression state,
+/// not by `effective == None`: a disabled Line with an already-confirmed route
+/// still needs its pending target attempted. If the controller cannot finish
+/// while Remote IRR remains set, a confirmed old route may resume service and
+/// the request stays pending; without a confirmed route activation fails closed.
+pub(super) fn apply_deferred_before_activation(
+    entry: &mut IrqStateDesc,
+) -> Result<(), IrqDescError> {
+    if !entry.affinity.is_pending || !entry.is_affinity_disabled() {
+        return Ok(());
+    }
+    let token = prepare_deferred_affinity(entry);
+    if let Some(token) = token {
+        finish_deferred_affinity(entry, token);
+    }
+    if entry.affinity.has_failed_programming {
+        return Err(IrqDescError::ConfigurationFailed {
+            hwirq: entry.desc.hwirq,
+        });
+    }
+    if entry.affinity.is_pending && entry.affinity.effective.is_none() {
+        return Err(IrqDescError::ConfigurationFailed {
+            hwirq: entry.desc.hwirq,
+        });
+    }
+    Ok(())
+}
+
+/// Runs the pre-EOI phase for an accepted deferred request.
+///
+/// Returns an opaque token only when the backend prepared a level transaction
+/// that must be finished after EOI. Edge (`Complete`) commits effective here;
+/// a hardware failure latches admission closed but never suppresses the
+/// original EOI obligation.
+pub(super) fn prepare_deferred_affinity(entry: &mut IrqStateDesc) -> Option<usize> {
+    if !entry.affinity.is_pending {
+        return None;
+    }
+    let chip = entry.deferred_affinity_chip()?;
+    let requested = entry.affinity.requested?;
+    let candidates = requested & kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    if candidates.is_empty() {
+        return None;
+    }
+    let delivery = if entry.is_affinity_disabled() {
+        IrqAffinityDelivery::KeepMasked
+    } else {
+        IrqAffinityDelivery::Preserve
+    };
+    match (chip.prepare)(entry.desc, &candidates, delivery) {
+        Ok(crate::IrqAffinityPrepare::Complete(effective))
+            if !effective.is_empty() && (effective & candidates) == effective =>
+        {
+            entry.affinity.effective = Some(effective);
+            entry.affinity.has_failed_programming = false;
+            entry.affinity.is_pending = false;
+            None
+        }
+        Ok(crate::IrqAffinityPrepare::Pending(token)) => Some(token),
+        Ok(crate::IrqAffinityPrepare::Complete(_)) => {
             entry.affinity.effective = None;
             entry.affinity.has_failed_programming = true;
-            Err(IrqAffinityError::HardwareFailure)
+            entry.affinity.is_pending = false;
+            None
+        }
+        Err(IrqAffinityApplyError::Rejected) => None,
+        Err(IrqAffinityApplyError::HardwareFailure) => {
+            entry.affinity.effective = None;
+            entry.affinity.has_failed_programming = true;
+            entry.affinity.is_pending = false;
+            None
+        }
+    }
+}
+
+/// Runs the post-EOI phase for a prepared level transaction.
+pub(super) fn finish_deferred_affinity(entry: &mut IrqStateDesc, token: usize) {
+    let Some(chip) = entry.deferred_affinity_chip() else {
+        return;
+    };
+    let Some(requested) = entry.affinity.requested else {
+        return;
+    };
+    let candidates = requested & kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+    if candidates.is_empty() {
+        return;
+    }
+    let delivery = if entry.is_affinity_disabled() {
+        IrqAffinityDelivery::KeepMasked
+    } else {
+        IrqAffinityDelivery::Preserve
+    };
+    match (chip.finish)(entry.desc, token, delivery) {
+        Ok(Some(effective)) if !effective.is_empty() && (effective & candidates) == effective => {
+            entry.affinity.effective = Some(effective);
+            entry.affinity.has_failed_programming = false;
+            entry.affinity.is_pending = false;
+        }
+        Ok(Some(_)) => {
+            entry.affinity.effective = None;
+            entry.affinity.has_failed_programming = true;
+            entry.affinity.is_pending = false;
+        }
+        Ok(None) => {}
+        Err(IrqAffinityApplyError::Rejected) => {}
+        Err(IrqAffinityApplyError::HardwareFailure) => {
+            entry.affinity.effective = None;
+            entry.affinity.has_failed_programming = true;
+            entry.affinity.is_pending = false;
         }
     }
 }

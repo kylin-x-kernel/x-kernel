@@ -346,6 +346,8 @@ pub(super) struct IrqStateDesc {
     pub(super) affinity: crate::IrqAffinitySnapshot,
     #[cfg(unittest)]
     pub(super) test_affinity_chip: Option<&'static crate::IrqAffinityChip>,
+    #[cfg(unittest)]
+    pub(super) test_deferred_affinity: Option<&'static crate::IrqDeferredAffinityChip>,
     #[cfg(any(target_arch = "x86_64", unittest))]
     msi_reservation: Option<MsiReservation>,
     // Allocation-time storage, consumed only after successful release validation.
@@ -377,6 +379,8 @@ impl IrqStateDesc {
             affinity: crate::IrqAffinitySnapshot::default(),
             #[cfg(unittest)]
             test_affinity_chip: None,
+            #[cfg(unittest)]
+            test_deferred_affinity: None,
             #[cfg(any(target_arch = "x86_64", unittest))]
             msi_reservation: None,
             #[cfg(any(target_arch = "x86_64", unittest))]
@@ -438,10 +442,16 @@ impl IrqStateDesc {
     }
 
     pub(super) fn can_install_regular_action(&self) -> bool {
-        !self.affinity.has_failed_programming
+        (!self.affinity.has_failed_programming || self.can_attempt_deferred_recovery())
             && !self.is_retired
             && !self.has_nmi_shutdown
             && self.runtime.can_install_regular_action()
+    }
+
+    /// A failed route may re-enter registration only for the masked retry that
+    /// the activation path will resolve before publishing the action.
+    fn can_attempt_deferred_recovery(&self) -> bool {
+        self.affinity.is_pending && self.is_affinity_disabled()
     }
 
     pub(super) fn can_install_nmi_action(&self) -> bool {
@@ -453,7 +463,7 @@ impl IrqStateDesc {
     }
 
     pub(super) fn can_install_shared_action(&self) -> bool {
-        !self.affinity.has_failed_programming
+        (!self.affinity.has_failed_programming || self.can_attempt_deferred_recovery())
             && !self.is_retired
             && !self.has_nmi_shutdown
             && self.runtime.can_install_shared_action()
@@ -827,6 +837,24 @@ impl IrqStateDesc {
         crate::IntrManagerIf::immediate_affinity(self.desc)
     }
 
+    pub(super) fn deferred_affinity_chip(&self) -> Option<&'static crate::IrqDeferredAffinityChip> {
+        #[cfg(unittest)]
+        if let Some(chip) = self.test_deferred_affinity {
+            return Some(chip);
+        }
+        crate::IntrManagerIf::deferred_affinity(self.desc)
+    }
+
+    /// Withdraws an accepted-but-not-effective request when the last action
+    /// leaves. The confirmed route becomes the requested policy; a hardware
+    /// failure stays latched and is not cleared by cancellation.
+    pub(super) fn cancel_pending_affinity(&mut self) {
+        if self.affinity.is_pending {
+            self.affinity.requested = self.affinity.effective;
+            self.affinity.is_pending = false;
+        }
+    }
+
     pub(super) fn is_affinity_disabled(&self) -> bool {
         self.runtime.disable_depth > 0 || !self.runtime.is_enabled
     }
@@ -834,6 +862,19 @@ impl IrqStateDesc {
     /// Trigger reconfiguration cannot repair a failed routing transaction.
     pub(super) fn require_affinity_ready(&self) -> Result<(), IrqDescError> {
         if self.affinity.has_failed_programming {
+            return Err(IrqDescError::ConfigurationFailed {
+                hwirq: self.desc.hwirq,
+            });
+        }
+        Ok(())
+    }
+
+    /// Like [`Self::require_affinity_ready`], but admits a masked deferred
+    /// retry so activation can run the controller's recovery transaction.
+    pub(super) fn require_affinity_activation_ready(&self) -> Result<(), IrqDescError> {
+        if self.affinity.has_failed_programming
+            && !(self.affinity.is_pending && self.is_affinity_disabled())
+        {
             return Err(IrqDescError::ConfigurationFailed {
                 hwirq: self.desc.hwirq,
             });

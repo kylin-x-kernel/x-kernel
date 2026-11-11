@@ -11,8 +11,11 @@
 
 use core::sync::atomic::Ordering;
 
-use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
-use kirq::{IrqPolarity, IrqTrigger, TargetCpu};
+use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId, raw_cpu_id};
+use kirq::{
+    IrqAffinityApplyError, IrqAffinityDelivery, IrqAffinityPrepare, IrqPolarity, IrqTrigger,
+    TargetCpu,
+};
 use x86_apic::{IoApicInstanceId, IoApicPin};
 
 use super::config::{domain_for_instance, instance_for_domain};
@@ -89,6 +92,99 @@ fn unmask_io(desc: kirq::IrqDesc) {
         x86_apic::set_pin_enabled(instance, pin, true);
     }
 }
+
+/// Encodes the selected logical CPU, physical destination and original mask
+/// state into the opaque level token. The token is local to the completion
+/// transaction; KIRQ owns the pending request itself.
+fn encode_level_token(cpu: LogicalCpuId, destination: u8, was_masked: bool) -> usize {
+    cpu.as_usize() | (usize::from(destination) << 8) | (usize::from(was_masked) << 16)
+}
+
+fn decode_level_token(token: usize) -> Option<(LogicalCpuId, u8, bool)> {
+    let cpu = token & 0xff;
+    let destination = u8::try_from((token >> 8) & 0xff).ok()?;
+    let was_masked = (token >> 16) & 1 != 0;
+    Some((LogicalCpuId::new(cpu), destination, was_masked))
+}
+
+fn deferred_target(
+    desc: kirq::IrqDesc,
+    candidates: &KCpuMask,
+) -> Option<(IoApicInstanceId, IoApicPin, LogicalCpuId, u8)> {
+    let (instance, pin) = io_pin(desc)?;
+    if !x86_apic::retarget_supported(instance, pin) {
+        return None;
+    }
+    candidates.iter_logical().find_map(|cpu| {
+        if cpu.as_usize() > usize::from(u8::MAX) {
+            return None;
+        }
+        let apic_id = u8::try_from(raw_cpu_id(cpu)?.as_usize()).ok()?;
+        Some((instance, pin, cpu, apic_id))
+    })
+}
+
+fn deferred_accept(
+    desc: kirq::IrqDesc,
+    candidates: &KCpuMask,
+) -> Result<(), IrqAffinityApplyError> {
+    deferred_target(desc, candidates)
+        .map(|_| ())
+        .ok_or(IrqAffinityApplyError::Rejected)
+}
+
+fn deferred_prepare(
+    desc: kirq::IrqDesc,
+    candidates: &KCpuMask,
+    delivery: IrqAffinityDelivery,
+) -> Result<IrqAffinityPrepare, IrqAffinityApplyError> {
+    let (instance, pin, cpu, destination) =
+        deferred_target(desc, candidates).ok_or(IrqAffinityApplyError::Rejected)?;
+    let keep_masked = delivery == IrqAffinityDelivery::KeepMasked;
+    match x86_apic::pin_trigger_mode(instance, pin) {
+        Some(x86_apic::IoApicTriggerMode::Edge) => {
+            if x86_apic::retarget_edge(instance, pin, destination, keep_masked) {
+                Ok(IrqAffinityPrepare::Complete(KCpuMask::one_shot_logical(
+                    cpu,
+                )))
+            } else {
+                Err(IrqAffinityApplyError::HardwareFailure)
+            }
+        }
+        Some(x86_apic::IoApicTriggerMode::Level) => {
+            let was_masked = x86_apic::prepare_level_retarget(instance, pin)
+                .ok_or(IrqAffinityApplyError::HardwareFailure)?;
+            Ok(IrqAffinityPrepare::Pending(encode_level_token(
+                cpu,
+                destination,
+                was_masked,
+            )))
+        }
+        None => Err(IrqAffinityApplyError::Rejected),
+    }
+}
+
+fn deferred_finish(
+    desc: kirq::IrqDesc,
+    token: usize,
+    delivery: IrqAffinityDelivery,
+) -> Result<Option<KCpuMask>, IrqAffinityApplyError> {
+    let (instance, pin) = io_pin(desc).ok_or(IrqAffinityApplyError::Rejected)?;
+    let (cpu, destination, was_masked) =
+        decode_level_token(token).ok_or(IrqAffinityApplyError::Rejected)?;
+    let keep_masked = delivery == IrqAffinityDelivery::KeepMasked;
+    match x86_apic::finish_level_retarget(instance, pin, destination, was_masked, keep_masked) {
+        x86_apic::IoApicRetargetResult::Complete => Ok(Some(KCpuMask::one_shot_logical(cpu))),
+        x86_apic::IoApicRetargetResult::Pending => Ok(None),
+        x86_apic::IoApicRetargetResult::Failed => Err(IrqAffinityApplyError::HardwareFailure),
+    }
+}
+
+pub(crate) static IO_DEFERRED: kirq::IrqDeferredAffinityChip = kirq::IrqDeferredAffinityChip {
+    accept: deferred_accept,
+    prepare: deferred_prepare,
+    finish: deferred_finish,
+};
 
 pub(crate) fn select_x86_flow(
     desc: kirq::IrqDesc,
