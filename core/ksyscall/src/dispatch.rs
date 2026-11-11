@@ -981,21 +981,29 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 fn evaluate_seccomp(uctx: &mut UserContext) -> Option<UserThreadRuntimeAction> {
     use kseccomp::Decision;
 
-    let thread = kprocess::current_user_thread();
-    let data = kseccomp::SeccompData::new(
-        uctx.sysno() as i32,
-        audit_arch(),
-        uctx.ip() as u64,
-        [
-            uctx.arg0() as u64,
-            uctx.arg1() as u64,
-            uctx.arg2() as u64,
-            uctx.arg3() as u64,
-            uctx.arg4() as u64,
-            uctx.arg5() as u64,
-        ],
-    );
-    let decision = thread.seccomp().evaluate(&data);
+    // Borrow the current thread instead of cloning a task handle. The disabled
+    // case returns before building the `seccomp_data` snapshot, so an
+    // unconfined process pays one lock-free mode load and no argument copying.
+    let decision = kprocess::with_current_user_thread(|thread| {
+        let seccomp = thread.seccomp();
+        if seccomp.is_disabled() {
+            return Decision::Allow;
+        }
+        let data = kseccomp::SeccompData::new(
+            uctx.sysno() as i32,
+            audit_arch(),
+            uctx.ip() as u64,
+            [
+                uctx.arg0() as u64,
+                uctx.arg1() as u64,
+                uctx.arg2() as u64,
+                uctx.arg3() as u64,
+                uctx.arg4() as u64,
+                uctx.arg5() as u64,
+            ],
+        );
+        seccomp.evaluate(&data)
+    });
 
     match decision {
         Decision::Allow => None,
@@ -1006,19 +1014,19 @@ fn evaluate_seccomp(uctx: &mut UserContext) -> Option<UserThreadRuntimeAction> {
         Decision::KillProcess => {
             // Kill the whole process (`SECCOMP_RET_KILL_PROCESS`, or a strict
             // mode violation, which Linux terminates with `SIGKILL`).
-            posix_process::do_exit(seccomp_kill_signal(&thread), true);
+            posix_process::do_exit(seccomp_kill_signal(&kprocess::current_user_thread()), true);
             Some(UserThreadRuntimeAction::Continue)
         }
         Decision::KillThread => {
             // Kill only the current thread.
-            posix_process::do_exit(seccomp_kill_signal(&thread), false);
+            posix_process::do_exit(seccomp_kill_signal(&kprocess::current_user_thread()), false);
             Some(UserThreadRuntimeAction::Continue)
         }
         Decision::Unsupported => {
             // `SECCOMP_RET_TRAP`, or a value with no recognised action, cannot
             // be honoured; Linux terminates the thread with SIGSYS rather than
             // letting the syscall through.
-            posix_process::do_exit(seccomp_kill_signal(&thread), false);
+            posix_process::do_exit(seccomp_kill_signal(&kprocess::current_user_thread()), false);
             Some(UserThreadRuntimeAction::Continue)
         }
         Decision::UserNotif | Decision::Trace => {

@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::sync::{Arc, Weak};
+use core::sync::atomic::Ordering;
 
 use kerrno::{KError, KResult};
 use kidentity::PidHandle;
@@ -10,7 +11,7 @@ use ksignal::Signo;
 use kspin::SpinNoIrq;
 use linked_list_r4l::{GetLinks, Links};
 
-use super::{INIT_PROC, Process, ProcessExitState};
+use super::{INIT_PROC, NO_VISIBLE_PARENT, Process, ProcessExitState};
 use crate::{
     ForkParent, Pid, ProcessGroup, ProcessGroupMemberSlot, Session, process_domain,
     publication::process_publication,
@@ -423,6 +424,13 @@ impl Process {
         slot.publish(self);
         self.parent_relation
             .set_current_parent(parent, exit_signal, slot.clone());
+        // Keep the lock-free `getppid(2)` cache coherent with the new parent
+        // under the same domain write lock that changed the relation.
+        let visible_parent = parent
+            .leader_task_number
+            .number_in(self.leader_task_number.active_ns())
+            .unwrap_or(NO_VISIBLE_PARENT);
+        self.visible_parent.store(visible_parent, Ordering::Release);
         parent.children.lock().push_back(slot);
     }
 }

@@ -2401,6 +2401,23 @@ fn test_lifecycle_accumulates_exited_thread_and_child_cpu_time() {
 }
 
 #[def_test(serial)]
+fn test_visible_parent_pid_tracks_parent_relation_cache() {
+    let init = ensure_init();
+    let child_task_number =
+        kidentity::allocate_root_pid_handle().expect("child leader identity should allocate");
+    let child = init.fork_with_task_number(child_task_number, Some(ksignal::Signo::SIGCHLD));
+
+    assert_eq!(child.visible_parent_pid(), Some(init.pid()));
+
+    let sibling_task_number =
+        kidentity::allocate_root_pid_handle().expect("sibling leader identity should allocate");
+    let sibling = init.fork_with_task_number(sibling_task_number, Some(ksignal::Signo::SIGCHLD));
+
+    assert_eq!(sibling.visible_parent_pid(), Some(init.pid()));
+    assert_eq!(child.visible_parent_pid(), Some(init.pid()));
+}
+
+#[def_test(serial)]
 fn test_published_task_lookup_matches_published_user_thread() {
     let process = ensure_init().fork(740);
     let task = publish_test_thread(&process, process.pid());

@@ -111,7 +111,7 @@ their existing Arc ownership.
 | `ptrace::check_read_real_creds_access` | Caller/target threads into access decision | Same-process access succeeds; otherwise caller real IDs must match target real/effective/saved IDs and target permitted capabilities must be contained in the caller's permitted set. Effective `CAP_SYS_PTRACE` overrides both checks. Failure returns OperationNotPermitted. |
 | `ptrace::check_read_fs_creds_access` | Caller/target threads into `/proc/<pid>/fdinfo/<fd>` read authorization | Same-thread-group access succeeds; otherwise caller fsuid/fsgid must match all target real/effective/saved UID/GID values and target permitted capabilities must be contained in the caller's effective set. Effective `CAP_SYS_PTRACE` overrides both checks. Failure returns OperationNotPermitted, which procfs maps to `EACCES`. |
 | Cgroup migration | Target group and authorization callback into membership transaction | Requires published members/source, runs callback under stable process cgroup gate, then delegates atomic group migration. Callback decides filesystem-owned authorization. |
-| Current-thread and credential helpers | Current TaskInner into a Thread/credential view | Dereference/downcast requires a user runtime. `current_fs_context` alone falls back to initial fs for kernel tasks. Commit asserts no subjective override before replacing both credential pointers. |
+| Current-thread and credential helpers | Current TaskInner into a Thread/credential view | Dereference/downcast requires a user runtime. Read-only helpers (`with_current_user_thread`, PID/TID accessors) borrow the current task instead of cloning a task handle, so hot syscall paths add no reference-count traffic. `current_fs_context` alone falls back to initial fs for kernel tasks. Commit asserts no subjective override before replacing both credential pointers. |
 | `Process::address_space` / mapping closure | Runtime active-mm handle into MM operations | Refuses missing runtime/mm user with NoSuchProcess. `LiveAddressSpace` retains an active user; MM owns address/range checks. |
 | Thread robust/clear-child pointer setters | User-originated addresses stored as integers | No dereference/validation here; `posix-process` performs fault-aware access and bounded robust cleanup on exit. |
 | Exec metadata and timer APIs | Kernel-prepared path/argv/heap/timer configuration into runtime | Caller/loader validates image metadata; ktimer validates timer requests. Missing runtime returns NoSuchProcess; close-on-exec errors propagate. |
@@ -243,10 +243,13 @@ frame writes/user return. The structural pin does not authorize either operation
 ASID root preparation changes CPU-local allocator state and must accompany a
 matching hardware activation; read-only observations must not prepare a root.
 
-Per-thread CPU accounting uses `SpinNoPreempt` for non-sleeping scheduler updates
-and synchronized remote samples; interrupt handlers must not access this state.
-Aggregate counters are relaxed atomics.
-Their snapshots are not transactionally tied to every directory/resource field.
+Per-thread CPU accounting is lock-free: the trap boundary publishes only the
+current mode, and settlement at tick, switch or sample serializes through a
+compare-exchange on the interval origin before updating relaxed accumulator
+atomics. The timer IRQ may settle the interrupted task's counters, so the state
+must never require a sleeping or IRQ-unsafe lock. Aggregate counters are relaxed
+atomics. Their snapshots are not transactionally tied to every
+directory/resource field.
 `ExecMetadata` atomically replaces its pair, while separate getters can straddle
 updates. Typed timer dequeue receipts validate timer sequence through ktimer;
 ordinary userspace SI_TIMER fields do not select that completion path. The

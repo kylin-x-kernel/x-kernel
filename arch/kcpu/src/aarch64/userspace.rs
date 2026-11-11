@@ -23,6 +23,16 @@ pub use crate::userspace_common::{ExceptionKind, ReturnReason};
 
 #[unsafe(no_mangle)]
 extern "C" fn kcpu_prepare_enter_user_irq() {
+    // Only an NMI build needs work at the final EL0 handoff. Pseudo-NMI masks
+    // normal IRQs through ICC_PMR_EL1 and hardware NMI masks delivery through
+    // ALLINT; `eret` restores neither, so both must be fixed up here before the
+    // user window opens.
+    //
+    // A DAIF-only build needs nothing: `disable_local_irq` already masked
+    // PSTATE.I and the following `eret` restores the user value from SPSR_EL1,
+    // so an extra `DAIF.I` write here is redundant. Skipping it keeps the
+    // syscall return path free of a cross-crate call and a register write.
+    #[cfg(feature = "nmi")]
     karch::prepare_enter_user_irq();
 }
 

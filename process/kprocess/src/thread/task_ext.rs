@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 use kcpu_id_map::LogicalCpuId;
 use ktask::{TaskInner, UserTaskRuntime};
 
-use super::{CpuTimeState, Thread};
+use super::Thread;
 
 /// Helper trait to access the thread from a task.
 pub trait AsThread {
@@ -44,12 +44,18 @@ impl UserTaskRuntime for Thread {
     fn on_enter(&self) {
         // Exit cleanup can block after the final CPU time was published.
         if !self.is_exiting() {
-            self.set_cpu_state(CpuTimeState::Kernel);
+            self.activate_cpu_time();
         }
     }
 
     fn on_leave(&self) {
-        self.set_cpu_state(CpuTimeState::Inactive);
+        self.deactivate_cpu_time();
+    }
+
+    fn on_cpu_time_tick(&self, now_ns: u64) {
+        self.settle_cpu_time_at(ktime_types::MonotonicInstant::from_span_since_origin(
+            ktime_types::TimeSpan::from_nanos(now_ns),
+        ));
     }
 
     fn set_user_mm_resident_cpu(&self, cpu_id: LogicalCpuId) {

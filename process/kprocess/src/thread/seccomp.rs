@@ -5,6 +5,7 @@
 //! Per-thread seccomp mode and classic-BPF filter chain.
 
 use alloc::{sync::Arc, vec, vec::Vec};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use kerrno::{KError, KResult};
 use kseccomp::{Action, Decision, SeccompData, SeccompFilter};
@@ -41,9 +42,16 @@ struct SeccompState {
 /// while syscall entry evaluates against the chain. The `SpinNoIrq` guard
 /// keeps both mutation and read paths cheap on the syscall hot path; the
 /// evaluation path never allocates, so it stays safe under that lock.
+///
+/// [`SeccompContext::mode_cache`] mirrors [`SeccompState::mode`] so syscall
+/// entry can skip the lock entirely while the thread is disabled, which is the
+/// overwhelmingly common case. It is written under the same lock as the state
+/// it mirrors, so a reader that observes a non-disabled mode also takes the
+/// lock and reads a consistent chain.
 #[derive(Debug)]
 pub struct SeccompContext {
     state: SpinNoIrq<SeccompState>,
+    mode_cache: AtomicU8,
 }
 
 impl SeccompContext {
@@ -54,7 +62,24 @@ impl SeccompContext {
                 mode: SeccompMode::Disabled,
                 filters: Vec::new(),
             }),
+            mode_cache: AtomicU8::new(SeccompMode::Disabled as u8),
         }
+    }
+
+    /// Returns whether the thread has no seccomp policy active.
+    ///
+    /// Lock-free: lets syscall entry skip building the `seccomp_data` snapshot
+    /// and taking the chain lock for an unconfined process.
+    pub fn is_disabled(&self) -> bool {
+        self.mode_cache.load(Ordering::Acquire) == SeccompMode::Disabled as u8
+    }
+
+    /// Publishes `mode` as the lock-free fast-path projection.
+    ///
+    /// Must be called with `self.state` locked, after the state it mirrors has
+    /// been updated.
+    fn publish_mode(&self, mode: SeccompMode) {
+        self.mode_cache.store(mode as u8, Ordering::Release);
     }
 
     /// Returns the current mode.
@@ -104,6 +129,7 @@ impl SeccompContext {
                     SeccompFilter::strict_allowlist(&nrs).map_err(|_| KError::InvalidInput)?;
                 state.filters = vec![Arc::new(filter)];
                 state.mode = SeccompMode::Strict;
+                self.publish_mode(SeccompMode::Strict);
                 Ok(())
             }
         }
@@ -135,6 +161,7 @@ impl SeccompContext {
         }
         state.filters.push(filter);
         state.mode = SeccompMode::Filter;
+        self.publish_mode(SeccompMode::Filter);
         Ok(())
     }
 
@@ -150,6 +177,7 @@ impl SeccompContext {
         let mut state = self.state.lock();
         state.mode = mode;
         state.filters = filters;
+        self.publish_mode(mode);
     }
 
     /// Reports whether this context can be brought to `caller`'s chain by a
@@ -178,6 +206,7 @@ impl SeccompContext {
         state.filters = caller_chain;
         if state.mode == SeccompMode::Disabled {
             state.mode = SeccompMode::Filter;
+            self.publish_mode(SeccompMode::Filter);
         }
         true
     }
@@ -186,9 +215,13 @@ impl SeccompContext {
     ///
     /// With no filters installed the decision is always [`Decision::Allow`].
     /// Otherwise every filter runs and the highest-precedence result wins.
-    /// The fold allocates nothing: this runs on every syscall entry while the
-    /// chain lock is held.
+    /// A disabled context returns `Allow` from the lock-free mode cache without
+    /// taking the chain lock, so an unconfined process pays one atomic load per
+    /// syscall.
     pub fn evaluate(&self, data: &SeccompData) -> Decision {
+        if self.mode_cache.load(Ordering::Acquire) == SeccompMode::Disabled as u8 {
+            return Decision::Allow;
+        }
         let state = self.state.lock();
         kseccomp::highest_priority(
             state.filters.iter().map(|filter| {

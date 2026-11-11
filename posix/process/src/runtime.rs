@@ -94,7 +94,9 @@ pub(crate) fn run_user_thread_loop(
         let _ = ktask::freezer::checkpoint();
         let reason = uctx.run(
             || {
-                thr.set_cpu_state(CpuTimeState::User);
+                // Publish user mode only; the interval is settled by the next
+                // tick, context switch or query, not on this boundary.
+                thr.record_cpu_time_mode(CpuTimeState::User);
                 // SAFETY: UserContext masks IRQs and performs only audited
                 // RCU-free architecture transfer after this callback. The loop
                 // holds no RCU scope; task/thread references have independent ownership.
@@ -103,11 +105,13 @@ pub(crate) fn run_user_thread_loop(
             || {
                 // SAFETY: UserContext restores kernel context on the same CPU
                 // with IRQs masked, before dispatching any returned trap. Restore
-                // watching before accounting can access ordinary kernel state.
+                // watching before dispatching the trap.
                 unsafe { krcu::exit_user_quiescent() };
-                thr.set_cpu_state(CpuTimeState::Kernel);
             },
         );
+        // The trap has been taken; the rest of this iteration is kernel work.
+        // Publish it for the next tick so long kernel work settles as stime.
+        thr.record_cpu_time_mode(CpuTimeState::Kernel);
         let mut runtime_action = UserThreadRuntimeAction::Continue;
 
         match reason {
@@ -189,6 +193,14 @@ pub(crate) fn run_user_thread_loop(
         // following futex wait would not observe it.
         curr.clear_interrupt();
 
+        // One probe decides whether the return tail has any work at all. When
+        // it is clear, the loop goes straight back through `uctx.run`, whose
+        // `enter_user_quiescent` already finishes deferred RCU reader cleanup
+        // before the eret. This is the common syscall-return path.
+        if !syscall_return_has_work(&thr, &uctx, runtime_action) {
+            continue;
+        }
+
         // The handler path dequeues a signal before entering userspace, so this
         // check cannot see that same instance again. A signal queued while the
         // handler blocked it becomes deliverable once `rt_sigreturn` restores
@@ -206,6 +218,27 @@ pub(crate) fn run_user_thread_loop(
             ktask::check_preempt_pending();
         });
     }
+}
+
+/// Returns whether the user-return tail has work beyond a plain re-entry.
+///
+/// Packs the independent lock-free projections into one probe: a deliverable
+/// signal, an interrupted task, an armed CPU timer, a pending reschedule, a
+/// signal-return restart decision, and a syscall restart errno. A `false`
+/// result lets the loop skip signal scanning, timer polling, the scheduling
+/// checkpoint and restart handling. Deferred RCU cleanup is not skipped: the
+/// next `enter_user_quiescent` runs it before returning to userspace.
+fn syscall_return_has_work(
+    thr: &Thread,
+    uctx: &UserContext,
+    runtime_action: UserThreadRuntimeAction,
+) -> bool {
+    runtime_action != UserThreadRuntimeAction::Continue
+        || thr.signal_manager().may_have_signal()
+        || current().is_interrupted()
+        || thr.has_armed_cpu_timers()
+        || ktask::needs_resched()
+        || uctx.syscall_restart_error().is_some()
 }
 
 /// Robust futex list node for robust mutexes.
@@ -543,7 +576,7 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     // the global TID. Close its accounting interval before process cleanup and
     // parent-visible completion; the current runtime remains installed.
     thr.set_exit();
-    thr.set_cpu_state(CpuTimeState::Inactive);
+    thr.deactivate_cpu_time();
     let (thread_utime, thread_stime) = thr.sample_cpu_time();
     process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
 

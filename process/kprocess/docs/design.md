@@ -95,7 +95,11 @@ belongs to `memspace`; fd/resources, filesystem context and namespaces belong
 to `kfd`/`kresources`, `fs_context` and `kns`. `kidentity` owns `PidHandle`
 allocation and namespace number projection; kernel-internal PID/TID values here
 stay root/global, while the user-visible getpid/getppid/fork views project into
-the caller's active PID namespace. Concrete controlling-terminal behavior belongs to TTY
+the caller's active PID namespace. The `getppid(2)` projection is cached per
+process (`visible_parent`, `u32::MAX` = none) and refreshed under the
+`process_domain` write lock whenever the parent relation is attached or
+reparented, so the syscall reads one atomic instead of the domain and relation
+locks. Concrete controlling-terminal behavior belongs to TTY
 implementations of `ControllingTerminal`.
 
 ## Source scope and architecture
@@ -260,12 +264,18 @@ signal fields are a compatibility view: they expose only the low 31 bits, as
 Linux's obsolete `do_task_stat` fields do.
 
 CPU accounting uses `Inactive`, `Kernel`, and `User` states, following Linux
-generic vtime. Switch-out settles the interval; switch-in starts kernel time.
-User transitions are marked at `UserContext::run` boundaries before IRQ dispatch.
-Sampling settles the elapsed interval under `SpinNoPreempt`, advancing
-`last_wall` so later samples cannot count the same interval again.
-The existing exit flag prevents restarting finalized accounting during cleanup.
-Separate IRQ/steal/guest accounting remains outside this model.
+generic vtime. The user/kernel boundary only publishes the current mode with one
+relaxed atomic store; it takes no lock and reads no clock, so the syscall fast
+path stays lock-free. Settlement instead happens at the local timer tick, at
+context switch (switch-in starts a fresh interval, switch-out settles it) and on
+demand when sampling. A settlement charges the unsettled interval to the mode
+that is current when it runs, giving the user/kernel split tick-level
+resolution; long kernel work still settles as kernel time because the trap path
+publishes `Kernel` for it. Settlement is a compare-exchange on `last_wall`
+followed by an accumulator update, so concurrent local and remote settlements
+cannot charge the same interval twice. The existing exit flag prevents
+restarting finalized accounting during cleanup. Separate IRQ/steal/guest
+accounting remains outside this model.
 
 ## Execution context and calling constraints
 
@@ -305,8 +315,9 @@ of an already Published identity leaves it published. Cleanup removes only the
 same slot when it is Vacant/Retired, protecting reused PID/TID bindings. A
 `PublishedUserTask` owns a rollback record until activation consumes it.
 
-Thread accounting uses None/User/Kernel: each state change charges elapsed time
-to the prior state before selecting the next. Thread exit and no-new-privileges
+Thread accounting uses Inactive/User/Kernel. A mode change only publishes the
+next state; elapsed time is charged to the mode current at the next tick,
+switch, or sample. Thread exit and no-new-privileges
 are separately published atomic flags. Group/session changes create or select a
 group and publish group/session identity together; existing-group movement
 requires the same session. The syscall owner checks additional leader/ID rules.
@@ -316,9 +327,12 @@ filter chain). It is installed only through `seccomp(2)` on the owning thread
 (or a `TSYNC` broadcast to published siblings, which first requires every
 sibling's chain to be a prefix of the caller's and re-validates that prefix
 under each sibling's own lock before replacing its chain, so a synchronization
-can never remove a restriction) and evaluated at syscall entry by `ksyscall`. A mode
-transition Linux refuses (`STRICT` ↔ `FILTER`) fails with `EINVAL` rather than
-replacing the chain, and the whole chain is bounded by Linux
+can never remove a restriction) and evaluated at syscall entry by `ksyscall`. A
+lock-free mode cache mirrors the state mode so a disabled thread returns
+`Allow` from one atomic load and skips building the `seccomp_data` snapshot
+entirely; the cache is republished under the same lock whenever the mode
+changes, so a non-disabled reader always re-locks and sees a consistent chain. A mode transition Linux refuses (`STRICT` ↔ `FILTER`) fails with `EINVAL`
+rather than replacing the chain, and the whole chain is bounded by Linux
 `MAX_INSNS_PER_PATH`. `fork`/`clone` copy the parent chain so children inherit
 the restriction; seccomp state survives exec (filters only ever remove allowlist
 membership).

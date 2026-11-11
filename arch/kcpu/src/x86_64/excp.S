@@ -123,7 +123,7 @@ syscall_entry:
 .Lexit_user:
     PUSH_GENERAL_REGS
 
-    # Restore kernel context from EnterUserFrame.kernel_rsp, stored immediately
+    # Restore kernel context from UserContext.kernel_rsp, stored immediately
     # before the TrapFrame that hardware and this entry code fill.
     mov     rsp, [rsp - {kernel_rsp_to_trapframe_offset}]
     POP_KERNEL_CTX

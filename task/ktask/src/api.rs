@@ -456,6 +456,14 @@ pub fn on_timer_fire() {
     // even though schedule/soft/knet IRQs are arriving.
     crate::timers::run_timer_irq_note();
 
+    // Sample the interrupted user task's CPU time here instead of at each
+    // user/kernel boundary: the mode published by the trap path tells whether
+    // this tick should charge user or kernel time.
+    let current_task = current_may_uninit();
+    if let Some(runtime) = current_task.as_ref().and_then(|task| task.user_runtime()) {
+        runtime.on_cpu_time_tick(now_ns);
+    }
+
     let sched_due = {
         let sched_ns = NEXT_SCHED_DEADLINE_NS.load_current();
         sched_ns != 0 && now_ns >= sched_ns

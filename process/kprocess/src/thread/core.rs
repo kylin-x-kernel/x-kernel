@@ -10,10 +10,10 @@ use kcgroup::{Cgroup, TaskCharge, TaskMembership};
 use kcred::Cred;
 use kerrno::KResult;
 use ksignal::{SignalStack, api::ThreadSignalManager};
-use kspin::{SpinNoIrq, SpinNoPreempt};
+use kspin::SpinNoIrq;
 use ksync::{Mutex, RwLock};
 use ktask::KtaskRef;
-use ktime_types::TimeSpan;
+use ktime_types::{MonotonicInstant, TimeSpan};
 #[cfg(feature = "tee")]
 use tee_task_iface::TeeSessionCtxTrait;
 
@@ -179,7 +179,7 @@ pub struct Thread {
     clear_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
     signal: Arc<ThreadSignalManager>,
-    time: SpinNoPreempt<CpuTimeStatistics>,
+    time: CpuTimeStatistics,
     nice: AtomicI32,
     scheduler: Mutex<SchedulerState>,
     is_exiting: AtomicBool,
@@ -279,7 +279,7 @@ impl Thread {
                 cred: RwLock::new(cred),
                 clear_child_tid: AtomicUsize::new(0),
                 robust_list_head: AtomicUsize::new(0),
-                time: SpinNoPreempt::new(CpuTimeStatistics::new()),
+                time: CpuTimeStatistics::new(),
                 nice: AtomicI32::new(NiceValue::default().as_i32()),
                 scheduler: Mutex::new(SchedulerState::default()),
                 is_exiting: AtomicBool::new(false),
@@ -735,11 +735,10 @@ impl Thread {
 
     /// Settles the elapsed interval and returns sampled user and kernel CPU time.
     ///
-    /// May sample another thread; serializes with scheduling and user/kernel
-    /// transitions under a non-sleeping lock with preemption disabled.
-    /// Must not be called from interrupt context.
+    /// May sample another thread; settlement uses the lock-free accounting
+    /// atomics, so it is safe from any context that may read another thread.
     pub fn sample_cpu_time(&self) -> (TimeSpan, TimeSpan) {
-        self.time.lock().sample(khal::time::monotonic_time())
+        self.time.sample(khal::time::monotonic_time())
     }
 
     /// Returns the sum of user and kernel CPU time consumed by this thread.
@@ -748,15 +747,38 @@ impl Thread {
         utime.saturating_add(stime)
     }
 
-    /// Settles the current interval and changes the CPU-accounting state.
+    /// Publishes the CPU-accounting mode at a user/kernel boundary.
     ///
-    /// Called for this thread at scheduling and user/kernel boundaries with
-    /// IRQs masked, or to close its final interval during exit. Never sleeps.
-    /// Must not be called from interrupt context.
-    pub fn set_cpu_state(&self, state: CpuTimeState) {
-        self.time
-            .lock()
-            .set_state(state, khal::time::monotonic_time());
+    /// This is one relaxed store: the elapsed interval is settled later at a
+    /// timer tick, a context switch or a query. Keeping the boundary lock-free
+    /// and clock-free removes it from the syscall fast path.
+    pub fn record_cpu_time_mode(&self, state: CpuTimeState) {
+        self.time.record_mode(state);
+    }
+
+    /// Settles the unsettled interval up to the given monotonic timestamp.
+    ///
+    /// Called from the timer tick with the interrupted task's current mode.
+    pub fn settle_cpu_time_at(&self, now: MonotonicInstant) {
+        self.time.settle(now);
+    }
+
+    /// Starts a fresh accounting interval after this thread is switched in.
+    pub fn activate_cpu_time(&self) {
+        self.time.activate(khal::time::monotonic_time());
+    }
+
+    /// Settles and closes the accounting interval before this thread switches out.
+    pub fn deactivate_cpu_time(&self) {
+        self.time.deactivate(khal::time::monotonic_time());
+    }
+
+    /// Returns whether this thread's process has an armed CPU timer.
+    ///
+    /// Lets the user-return fast path decide whether timer polling is needed
+    /// without reaching into the process runtime.
+    pub fn has_armed_cpu_timers(&self) -> bool {
+        self.process().cpu_timers_armed()
     }
 
     /// Temporarily swaps the blocked-signal mask while executing `f`.

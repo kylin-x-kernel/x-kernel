@@ -27,28 +27,37 @@ use super::{
 };
 pub use crate::userspace_common::{ExceptionKind, ReturnReason};
 
+kcpu_slot::cpu_slot_cell! {
+    /// Per-CPU cache of the FS base currently programmed into hardware.
+    ///
+    /// The kernel never uses `FS_BASE`, so the user value can stay in hardware
+    /// across syscalls and context switches; this only lets the return path skip
+    /// a redundant `wrmsr` when the value is already current. `u64::MAX` means
+    /// "unknown", forcing the first write on this CPU.
+    static APPLIED_FS_BASE: u64 = u64::MAX;
+}
+kcpu_slot::cpu_slot_cell! {
+    /// Per-CPU cache of `KERNEL_GS_BASE`, which holds the user GS base while
+    /// the kernel runs (the value `swapgs` moves back into `GS_BASE` on return).
+    static APPLIED_GS_BASE: u64 = u64::MAX;
+}
+
 /// Context to enter user space.
+///
+/// `kernel_rsp` sits immediately before `tf` on purpose: the entry assembly
+/// treats `&kernel_rsp` as its private frame, storing the Rust caller's kernel
+/// stack there and using `tf` in place as the temporary trap stack (TSS.rsp0
+/// points to the end of `tf`). Keeping both in this struct lets the user return
+/// avoid copying the whole trap frame around the user window.
 #[derive(Debug, Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct UserContext {
+    kernel_rsp: u64,
     tf: TrapFrame,
     /// FS Segment Base
     pub fs_base: u64,
     /// GS Segment Base
     pub gs_base: u64,
-}
-
-/// Private frame used by `enter_user` while running user space.
-///
-/// The x86_64 entry assembly uses `tf` as a temporary trap stack: TSS.rsp0
-/// points to the end of `tf`, and hardware trap frames grow down into it.
-/// `kernel_rsp` is kept immediately before `tf` so the return path can recover
-/// the Rust caller's kernel stack without storing that private value in
-/// [`UserContext`] or any user-visible signal frame.
-#[repr(C, align(16))]
-struct EnterUserFrame {
-    kernel_rsp: u64,
-    tf: TrapFrame,
 }
 
 /// Kernel-owned state captured when preparing a new user task.
@@ -64,7 +73,7 @@ pub struct UserRestorableContext {
 }
 
 pub(super) const KERNEL_RSP_TO_TRAPFRAME_OFFSET: usize =
-    core::mem::offset_of!(EnterUserFrame, tf) - core::mem::offset_of!(EnterUserFrame, kernel_rsp);
+    core::mem::offset_of!(UserContext, tf) - core::mem::offset_of!(UserContext, kernel_rsp);
 
 const _: () = assert!(KERNEL_RSP_TO_TRAPFRAME_OFFSET == core::mem::size_of::<u64>());
 
@@ -91,6 +100,7 @@ impl UserContext {
     pub fn new(entry: usize, ustack_top: VirtAddr, arg0: usize) -> Self {
         use x86_64::registers::rflags::RFlags;
         Self {
+            kernel_rsp: 0,
             tf: TrapFrame {
                 rdi: arg0 as _,
                 rip: entry as _,
@@ -200,7 +210,7 @@ impl UserContext {
         on_user_exit: impl FnOnce(),
     ) -> ReturnReason {
         unsafe extern "C" {
-            unsafe fn enter_user(frame: &mut EnterUserFrame);
+            unsafe fn enter_user(frame: &mut UserContext);
         }
 
         assert_eq!(self.cs, gdt::UCODE64.0 as _);
@@ -209,26 +219,27 @@ impl UserContext {
         karch::disable_local_irq();
 
         on_user_enter();
-        let kernel_fs_base = karch::read_thread_pointer();
-        // SAFETY: Setting FS base to the user value; the kernel value is saved and restored after `enter_user` returns.
-        unsafe { karch::write_thread_pointer(self.fs_base as _) };
-        KernelGsBase::write(x86_64::VirtAddr::new_truncate(self.gs_base));
+        // The kernel does not use `FS_BASE`, and every path that changes the
+        // user bases (`arch_prctl`, exec, signal restore) updates these fields
+        // directly, so nothing needs to be read back from hardware. Only publish
+        // a base when this CPU is not already running with it, which makes a
+        // syscall loop on one task free of MSR accesses entirely.
+        if APPLIED_FS_BASE.load_current() != self.fs_base {
+            // SAFETY: `self.fs_base` is the validated user TLS base for this thread.
+            unsafe { karch::write_thread_pointer(self.fs_base as _) };
+            APPLIED_FS_BASE.store_current(self.fs_base);
+        }
+        if APPLIED_GS_BASE.load_current() != self.gs_base {
+            KernelGsBase::write(x86_64::VirtAddr::new_truncate(self.gs_base));
+            APPLIED_GS_BASE.store_current(self.gs_base);
+        }
 
-        let mut frame = EnterUserFrame {
-            kernel_rsp: 0,
-            tf: self.tf,
-        };
+        // SAFETY: `enter_user` uses `&self.kernel_rsp` as its private frame and
+        // `self.tf` in place as the user trap stack. `self.tf` was initialized
+        // by `new()` or restored from validated signal state with user segment
+        // selectors, and the hardware trap frame stays inside `tf`.
+        unsafe { enter_user(self) };
 
-        // SAFETY: `enter_user` switches to user mode using the private
-        // `EnterUserFrame` layout above. `self.tf` was initialized by `new()` or
-        // restored from validated signal state with user segment selectors.
-        unsafe { enter_user(&mut frame) };
-        self.tf = frame.tf;
-
-        self.gs_base = KernelGsBase::read().as_u64();
-        self.fs_base = karch::read_thread_pointer() as _;
-        // SAFETY: Restoring the kernel FS base that was saved before entering user mode.
-        unsafe { karch::write_thread_pointer(kernel_fs_base) };
         on_user_exit();
 
         #[expect(

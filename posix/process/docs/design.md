@@ -96,18 +96,26 @@ across its exit cleanup.
 ## Runtime and teardown flow
 
 `UserContext::run` owns the IRQ-masked user-transfer boundary. Its entry callback
-finishes user-time accounting, then calls `krcu::enter_user_quiescent`; its
-return callback calls `krcu::exit_user_quiescent` before kernel-time accounting.
-This follows Linux's accounting-before-EQS / watching-before-accounting order.
-The return callback precedes architecture IRQ dispatch as well as syscall/fault
-processing in this loop. No RCU read scope or protected borrow may span user
+publishes user mode, then calls `krcu::enter_user_quiescent`; its return callback
+calls `krcu::exit_user_quiescent` with no accounting work. The entry callback
+publishes user mode as a single lock-free store, not a settlement, so the
+boundary never reads the clock or takes a lock. Kernel mode is published only
+after `run` returns, once the trap has actually been taken, so a timer tick that
+arrives from userspace settles the interrupted interval as user time. The return callback precedes architecture IRQ
+dispatch as well as syscall/fault processing in this loop. No RCU read scope or protected borrow may span user
 execution; retained task/thread references use independent ownership. RCU
 system state, GP service and private read-admission policy belong to `krcu`,
 with algorithms in `krcu-core`, not POSIX. `ktask` retains task reader storage
 and scheduler boundaries. No public consumer read interface is opened here.
 
 The loop alternates user execution, trap handling, kernel CPU accounting and
-signal checks. The loop clears the previous trap's interrupt flag before the
+signal checks. After the trap, one lock-free probe packs the independent
+return-work projections — deliverable signal, interrupted task, armed CPU
+timer, pending reschedule, signal-return action and syscall restart errno. When
+it is clear, the loop skips signal scanning, timer polling, the scheduling
+checkpoint and restart handling and goes straight back through `uctx.run`;
+`enter_user_quiescent` still finishes deferred RCU reader cleanup before the
+eret. The loop clears the previous trap's interrupt flag before the
 normal pending-signal check. A later clear happens only when another scan
 will follow it. Clearing after the last scan would let a concurrent group-exit
 sender queue SIGKILL and set the flag in between, then lose that notification

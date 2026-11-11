@@ -38,6 +38,10 @@ use crate::{
     process_domain, publication::PublishedProcessSlot,
 };
 
+/// Sentinel stored in [`Process::visible_parent`] when the parent has no PID
+/// projection in the child's active namespace.
+pub(crate) const NO_VISIBLE_PARENT: u32 = u32::MAX;
+
 /// Stable process identity with parent/group relations, exit state and runtime capabilities.
 pub struct Process {
     /// Stable process-leader PID handle. Future PID namespace work should keep
@@ -80,6 +84,15 @@ pub struct Process {
     /// Wait parent contract and preallocated child-list relation slots. Mutate
     /// only under `process_domain` write lock.
     parent_relation: ParentRelation,
+    /// Cached `getppid(2)` value: the parent's PID in this process's active PID
+    /// namespace, or [`NO_VISIBLE_PARENT`].
+    ///
+    /// Depends only on the parent relation and the parent's PID projections, so
+    /// it is recomputed under the `process_domain` write lock whenever the
+    /// relation is attached or reparented. Letting the syscall fast path read
+    /// one atomic avoids the process-domain read lock and the parent relation
+    /// lock on every `getppid`.
+    visible_parent: AtomicU32,
 
     /// Current process group and published membership slot. Group moves are
     /// committed through `ProcessPublication` so group membership and PGID/SID
@@ -134,10 +147,12 @@ impl Process {
     /// `pid_nr_ns` semantics: a `CLONE_NEWPID` child's parent holds no
     /// projection in the child's namespace, so `getppid(2)` reads 0 there.
     /// Use [`Process::parent`] for the identity itself.
+    ///
+    /// Reads the relation-maintained cache, so it takes no lock and is safe on
+    /// the `getppid(2)` fast path.
     pub fn visible_parent_pid(&self) -> Option<Pid> {
-        let observer = self.leader_task_number.active_ns();
-        let parent = self.parent()?;
-        parent.leader_task_number.number_in(observer)
+        let raw = self.visible_parent.load(Ordering::Acquire);
+        (raw != NO_VISIBLE_PARENT).then_some(raw)
     }
 
     /// Translates a caller-visible PID into the root/global number the
@@ -389,6 +404,14 @@ impl Process {
         );
         let parent_relation = ParentRelation::prepare(pid, parent.as_ref(), exit_signal);
         let group_membership = GroupMembership::prepare(group.clone(), pid);
+        let visible_parent = parent
+            .as_ref()
+            .and_then(|parent| {
+                parent
+                    .leader_task_number
+                    .number_in(leader_task_number.active_ns())
+            })
+            .unwrap_or(NO_VISIBLE_PARENT);
 
         Arc::new(Process {
             leader_task_number,
@@ -403,6 +426,7 @@ impl Process {
             child_subreaper: AtomicBool::new(false),
             children: SpinNoIrq::new(List::new()),
             parent_relation,
+            visible_parent: AtomicU32::new(visible_parent),
             group_membership,
             runtime_ref: SpinNoIrq::new(None),
             pid_publication_slot: SpinNoIrq::new(None),

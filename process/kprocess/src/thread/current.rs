@@ -11,7 +11,7 @@ use ksync::Mutex;
 use ktask::current;
 
 use super::{AsThread, CurrentThread, Thread};
-use crate::{LiveAddressSpace, Process, Tid};
+use crate::{LiveAddressSpace, Pid, Process, Tid};
 
 impl Deref for CurrentThread {
     type Target = Thread;
@@ -53,7 +53,17 @@ pub fn current_user_thread() -> CurrentThread {
 
 /// Returns the current user-visible thread identifier.
 pub fn current_user_tid() -> Tid {
-    current_user_thread().tid()
+    with_current_user_thread(Thread::tid)
+}
+
+/// Returns the current process's visible PID without cloning a task handle.
+pub fn current_user_pid() -> Pid {
+    with_current_user_thread(|thread| thread.process().visible_pid())
+}
+
+/// Returns the current process's visible parent PID, or `0` when it has none.
+pub fn current_user_ppid() -> Pid {
+    with_current_user_thread(|thread| thread.process().visible_parent_pid().unwrap_or(0))
 }
 
 /// Returns the current filesystem context for shared current-path helpers.
@@ -119,9 +129,13 @@ pub fn current_user_process() -> Arc<Process> {
 }
 
 /// Executes a closure with the current user thread.
+///
+/// Borrows the current task instead of cloning a task handle, so hot syscall
+/// paths that only read thread/process state pay no reference-count traffic.
 pub fn with_current_user_thread<R>(f: impl FnOnce(&Thread) -> R) -> R {
-    let thread = current_user_thread();
-    f(&thread)
+    let task = current();
+    let thread = task.try_as_thread().expect("kernel task");
+    f(thread)
 }
 
 /// Current-task descriptor access, applying the process's live descriptor limit.

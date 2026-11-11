@@ -215,7 +215,7 @@ impl ThreadSignalManager {
     /// counting both queues under this thread's own blocked mask.
     ///
     /// A projection, not the state: it may over-report and never under-reports.
-    fn may_have_signal(&self) -> bool {
+    pub fn may_have_signal(&self) -> bool {
         self.hint.load(Ordering::Acquire)
     }
 
