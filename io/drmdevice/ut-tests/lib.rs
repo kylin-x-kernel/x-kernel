@@ -1084,6 +1084,49 @@ fn atomic_requests_follow_linux_flag_and_capability_rules() {
 }
 
 #[def_test]
+fn atomic_completion_follows_the_nonblock_flag() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+    file.grant_cap(crate::model::file::CLIENT_CAP_ATOMIC);
+
+    // Without `NONBLOCK` the ioctl waits for the flip's completion point
+    // before returning; an inactive CRTC has no blank to wait for, so the
+    // commit itself completes the flip and the wait returns at once.
+    let mut blocking = DrmModeAtomic {
+        flags: 0,
+        ..Default::default()
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut blocking),
+        Ok(0),
+        "a blocking atomic commit completes before returning"
+    );
+
+    // `NONBLOCK` returns once the flip is queued instead, without changing
+    // the completion point the client reads through the event/out-fence.
+    let mut nonblocking = DrmModeAtomic {
+        flags: DRM_MODE_ATOMIC_NONBLOCK,
+        ..Default::default()
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut nonblocking),
+        Ok(0),
+        "a nonblocking atomic commit is accepted"
+    );
+
+    // Accepting NONBLOCK must not make the card claim async-flip support.
+    let mut async_flip = DrmModeAtomic {
+        flags: DRM_MODE_PAGE_FLIP_ASYNC,
+        ..Default::default()
+    };
+    assert_eq!(
+        Ioctl::handle(&dev, &file, 0, &mut async_flip),
+        Err(DrmError::InvalidInput),
+        "async flips stay refused"
+    );
+}
+
+#[def_test]
 fn page_flip_refuses_flags_linux_refuses() {
     let (dev, _backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");

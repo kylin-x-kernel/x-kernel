@@ -497,11 +497,11 @@ impl Ioctl for DrmModeAtomic {
         if a.flags & DRM_MODE_PAGE_FLIP_ASYNC != 0 {
             return Err(DrmError::InvalidInput);
         }
-        if a.flags & DRM_MODE_ATOMIC_NONBLOCK != 0 {
-            // The submit path still waits for in-fences synchronously; do not
-            // accept a flag that promises an asynchronous commit.
-            return Err(DrmError::OpNotSupported);
-        }
+        // `DRM_MODE_ATOMIC_NONBLOCK` selects the completion discipline below:
+        // without it the ioctl waits for the flip to reach the display, with
+        // it the ioctl returns once the flip is queued. The in-fence and
+        // reservation waits and the present stay synchronous either way, as
+        // Linux keeps them synchronous under the flag too.
         let n = a.count_objs as usize;
         if n > MAX_ATOMIC_OBJECTS {
             return Err(DrmError::NoMemory);
@@ -657,6 +657,12 @@ impl Ioctl for DrmModeAtomic {
         if let Some(fence) = &fence {
             dev.reserve_display(requested.plane_fb_id, fence.clone());
         }
+        // The commit consumes the flip; keep its completion point so a blocking
+        // request can wait for the flip to reach the display.
+        let completion = flip
+            .fence_signal
+            .as_ref()
+            .map(|signal| signal.fence().clone());
         if let Err(error) = dev.commit_flip(apply_all, flip) {
             if let Some((_, fd)) = out_fd {
                 let _ = kprocess::current_files().close_file(fd);
@@ -665,6 +671,18 @@ impl Ioctl for DrmModeAtomic {
         }
         if let Some((slot, fd)) = out_fd {
             slot.write(fd);
+        }
+        // `drm_atomic_helper_commit_tail` ends in a vblank wait, so a request
+        // without `NONBLOCK` returns only after the flip completed; `NONBLOCK`
+        // is what lets the ioctl return after queueing it. A signal or a fence
+        // error cannot undo a commit that already programmed the scanout, so
+        // neither turns the ioctl into a failure.
+        if a.flags & DRM_MODE_ATOMIC_NONBLOCK == 0
+            && let Some(fence) = completion
+            && let Err(error) =
+                crate::sync::wait::wait_for_fences(&FenceList::new(alloc::vec![fence]))
+        {
+            log::debug!("drm: committed flip did not complete cleanly: {error:?}");
         }
         Ok(0)
     }

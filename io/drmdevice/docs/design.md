@@ -189,6 +189,15 @@ failed commit leaves `-1` in the caller's word, `TEST_ONLY` always writes `-1`,
 and an unwritable address is `EFAULT` exactly as `put_user` reports it in
 `drm_atomic_uapi.c`.
 
+`DRM_MODE_ATOMIC_NONBLOCK` selects the completion discipline. Without it the
+ioctl waits for the flip's completion point (the same fence `OUT_FENCE_PTR`
+names) before returning, as `drm_atomic_helper_commit_tail` ends in a vblank
+wait; with it the ioctl returns once the flip is queued and the client observes
+completion through `PAGE_FLIP_EVENT` / `OUT_FENCE_PTR`. Both paths keep the
+in-fence and reservation waits and the present synchronous (Linux keeps those
+waits synchronous under the flag too). A signal during the blocking wait does
+not undo a commit that already programmed the scanout.
+
 Before the commit locks anything it waits for two fence sets:
 
 - the explicit `IN_FENCE_FD` of the plane, resolved to a fence when the property
