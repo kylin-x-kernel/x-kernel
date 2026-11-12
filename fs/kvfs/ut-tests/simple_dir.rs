@@ -134,6 +134,46 @@ fn child_names_failure_does_not_publish_dot_entries() {
     assert_eq!(accepted, 0);
 }
 
+#[def_test]
+fn vanished_child_does_not_abort_directory_read() {
+    for error in [VfsError::NotFound, VfsError::Io] {
+        let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+            let mut entries = DirMapping::new();
+            entries.add_child("gone", move |_, _| Err(error));
+            entries.add(
+                "live",
+                crate::SimpleFile::new_regular(fs.clone(), || Ok("content")),
+            );
+            SimpleDir::new_maker(fs, Arc::new(entries))
+        })
+        .unwrap();
+        let root = Mount::new_root(&super_block).root_path();
+        let file = crate::dentry_open(root, 0, kcred::initial_cred()).unwrap();
+        let mut names = Vec::new();
+        let mut sink = |name: &str, _, _, cookie| {
+            names.push((name.to_owned(), cookie));
+            true
+        };
+        let mut context = DirContext::new(0, &mut sink);
+        let result = file.iterate_dir(&mut context);
+        if error == VfsError::NotFound {
+            assert_eq!(result, Ok(3));
+            assert_eq!(context.pos(), 4);
+            assert_eq!(file.iterate_dir(&mut context), Ok(0));
+            assert_eq!(
+                names,
+                [
+                    (".".to_owned(), 1),
+                    ("..".to_owned(), 2),
+                    ("live".to_owned(), 4)
+                ]
+            );
+        } else {
+            assert_eq!(result, Err(VfsError::Io));
+        }
+    }
+}
+
 struct LinkCountOps {
     value: AtomicU64,
     fail: bool,

@@ -142,6 +142,9 @@ pub trait SimpleDirOps: Send + Sync + 'static {
     /// behavior; this does not make the entire enumeration fallible on OOM.
     fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>>;
     /// Look up a child directory or file by name.
+    ///
+    /// Directory reads skip `NotFound` when a child disappears after the name
+    /// snapshot. Other lookup errors still propagate to the reader.
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry>;
 
     /// Samples a dynamic directory link count for each metadata query.
@@ -475,7 +478,11 @@ impl<O: SimpleDirOps> SimpleDir<O> {
                     .parent()
                     .map_or_else(|| dir.metadata(), |parent| parent.metadata()),
                 other => {
-                    let entry = dir.lookup(other)?;
+                    let entry = match dir.lookup(other) {
+                        Ok(entry) => entry,
+                        Err(VfsError::NotFound) => continue,
+                        Err(error) => return Err(error),
+                    };
                     entry.metadata()
                 }
             };

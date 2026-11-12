@@ -80,6 +80,10 @@ and no non-sleepable RCU section or lock required by reclaim/IO/FS callbacks.
 There is no current held-lock reason to restrict these allocations to NOWAIT or
 NOFS; future callers must preserve this contract.
 
+A dynamic child may disappear between its name snapshot and lookup. Directory
+reads skip only `NotFound` for that child and retain the later entries' cookies.
+Snapshot-construction errors and other lookup failures still propagate.
+
 ## Fallible mount-transaction private state
 
 `FsContext` owns both private-state slots through `KBox<dyn Any + Send + Sync>`.

@@ -1,5 +1,12 @@
 # kvfs - 安全与可靠性分析
 
+## Dynamic directory disappearance
+
+An exited procfs child can vanish after `child_names` returns its snapshot.
+SimpleDir skips that child's `NotFound` while enumerating subsequent live
+entries. It does not suppress permission, allocation or I/O errors, and direct
+lookup of the missing child retains its normal failure behavior.
+
 ## Parallel lookup result publication
 
 The parent children mutex protects both candidate membership and the decision
