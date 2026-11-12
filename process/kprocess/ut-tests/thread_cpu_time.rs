@@ -59,6 +59,21 @@ fn test_cpu_time_ticks_split_user_and_kernel_time() {
 }
 
 #[def_test]
+fn test_cpu_time_final_publication_drops_later_intervals() {
+    let time = CpuTimeStatistics::new();
+    time.activate(at(0));
+    assert!(!time.is_final());
+    time.finalize(at(50));
+    assert!(time.is_final());
+    assert_eq!(time.output(), (TimeSpan::ZERO, TimeSpan::from_nanos(50)));
+
+    // A switch-in after publication must not reopen the interval.
+    time.activate(at(80));
+    time.settle(at(100));
+    assert_eq!(time.output(), (TimeSpan::ZERO, TimeSpan::from_nanos(50)));
+}
+
+#[def_test]
 fn test_cpu_time_boundary_only_publishes_mode() {
     let time = CpuTimeStatistics::new();
     time.activate(at(10));

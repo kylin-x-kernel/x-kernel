@@ -26,22 +26,43 @@ use crate::{
 const BUCKET_COUNT: usize = 256;
 const HASH_MIX: u64 = 0x9e37_79b9_7f4a_7c15;
 
+#[path = "pi.rs"]
+mod pi;
+pub use pi::PiFutexContext;
+
+struct BucketState {
+    waiters: VecDeque<Arc<FutexWaiter>>,
+    pi: pi::PiStates,
+}
+
+impl BucketState {
+    fn require_non_pi(&self, key: FutexKey) -> KResult<()> {
+        if self.pi.contains_key(&key.pi_index()) {
+            return Err(KError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+
 struct FutexBucket {
-    waiters: SpinNoPreempt<VecDeque<Arc<FutexWaiter>>>,
+    state: SpinNoPreempt<BucketState>,
 }
 
 impl FutexBucket {
     fn new() -> Self {
         Self {
-            waiters: SpinNoPreempt::new(VecDeque::with_capacity(8)),
+            state: SpinNoPreempt::new(BucketState {
+                waiters: VecDeque::with_capacity(8),
+                pi: Default::default(),
+            }),
         }
     }
 }
 
 /// Global futex waiter table.
 ///
-/// Buckets live for the lifetime of the kernel. Only waiters are allocated,
-/// so empty futex keys do not leave reclaimable table entries behind.
+/// Buckets live for the lifetime of the kernel. Ordinary waiters and PI states
+/// have separate lifetimes; free PI states are retired after their last call.
 pub(crate) struct FutexTable {
     buckets: [FutexBucket; BUCKET_COUNT],
     hash_seed: u64,
@@ -113,14 +134,20 @@ impl FutexTable {
 
     /// Wakes at most `count` waiters matching `key` and `mask`.
     pub(crate) fn wake(&self, key: FutexKey, count: usize, mask: u32) -> usize {
+        self.wake_checked(key, count, mask).unwrap_or(0)
+    }
+
+    fn wake_checked(&self, key: FutexKey, count: usize, mask: u32) -> KResult<usize> {
         if count == 0 {
-            return 0;
+            return Ok(0);
         }
 
         let bucket_id = self.bucket_id(key);
         let mut selected = 0;
         {
-            let queue = self.bucket(bucket_id).waiters.lock();
+            let bucket = self.bucket(bucket_id).state.lock();
+            bucket.require_non_pi(key)?;
+            let queue = &bucket.waiters;
             for waiter in queue.iter() {
                 let (waiter_key, ..) = waiter.route_unlocked();
                 if selected < count
@@ -133,7 +160,7 @@ impl FutexTable {
             }
         }
         self.drain_inactive(bucket_id);
-        selected
+        Ok(selected)
     }
 
     /// Applies an atomic operation to `uaddr2`, wakes `source_count` waiters,
@@ -179,31 +206,40 @@ impl FutexTable {
         let source_id = self.bucket_id(source);
         let target_id = self.bucket_id(target);
         let result = if source_id == target_id {
-            let mut queue = self.bucket(source_id).waiters.lock();
+            let mut bucket = self.bucket(source_id).state.lock();
+            bucket.require_non_pi(source)?;
+            bucket.require_non_pi(target)?;
+            let queue = &mut bucket.waiters;
             let old = Self::apply_wake_op_locked(uaddr2, operation)?;
-            let mut count = Self::mark_wake_locked(&mut queue, source, source_count, u32::MAX);
+            let mut count = Self::mark_wake_locked(queue, source, source_count, u32::MAX);
             if operation.compare(old) {
-                count += Self::mark_wake_locked(&mut queue, target, target_count, u32::MAX);
+                count += Self::mark_wake_locked(queue, target, target_count, u32::MAX);
             }
             count
         } else if source_id.0 < target_id.0 {
-            let mut source_queue = self.bucket(source_id).waiters.lock();
-            let mut target_queue = self.bucket(target_id).waiters.lock();
+            let mut source_bucket = self.bucket(source_id).state.lock();
+            let mut target_bucket = self.bucket(target_id).state.lock();
+            source_bucket.require_non_pi(source)?;
+            target_bucket.require_non_pi(target)?;
+            let source_queue = &mut source_bucket.waiters;
+            let target_queue = &mut target_bucket.waiters;
             let old = Self::apply_wake_op_locked(uaddr2, operation)?;
-            let mut count =
-                Self::mark_wake_locked(&mut source_queue, source, source_count, u32::MAX);
+            let mut count = Self::mark_wake_locked(source_queue, source, source_count, u32::MAX);
             if operation.compare(old) {
-                count += Self::mark_wake_locked(&mut target_queue, target, target_count, u32::MAX);
+                count += Self::mark_wake_locked(target_queue, target, target_count, u32::MAX);
             }
             count
         } else {
-            let mut target_queue = self.bucket(target_id).waiters.lock();
-            let mut source_queue = self.bucket(source_id).waiters.lock();
+            let mut target_bucket = self.bucket(target_id).state.lock();
+            let mut source_bucket = self.bucket(source_id).state.lock();
+            source_bucket.require_non_pi(source)?;
+            target_bucket.require_non_pi(target)?;
+            let source_queue = &mut source_bucket.waiters;
+            let target_queue = &mut target_bucket.waiters;
             let old = Self::apply_wake_op_locked(uaddr2, operation)?;
-            let mut count =
-                Self::mark_wake_locked(&mut source_queue, source, source_count, u32::MAX);
+            let mut count = Self::mark_wake_locked(source_queue, source, source_count, u32::MAX);
             if operation.compare(old) {
-                count += Self::mark_wake_locked(&mut target_queue, target, target_count, u32::MAX);
+                count += Self::mark_wake_locked(target_queue, target, target_count, u32::MAX);
             }
             count
         };
@@ -234,27 +270,27 @@ impl FutexTable {
         let source_id = self.bucket_id(source);
         let target_id = self.bucket_id(target);
         let result = if source_id == target_id {
-            let mut queue = self.bucket(source_id).waiters.lock();
+            let mut bucket = self.bucket(source_id).state.lock();
+            bucket.require_non_pi(source)?;
+            bucket.require_non_pi(target)?;
+            let queue = &mut bucket.waiters;
             if let Some((uaddr, expected)) = compare {
                 Self::compare_locked(uaddr, expected)?;
             }
-            Self::requeue_same_bucket(
-                &mut queue,
-                source,
-                target,
-                target_id,
-                wake_count,
-                requeue_count,
-            )
+            Self::requeue_same_bucket(queue, source, target, target_id, wake_count, requeue_count)
         } else if source_id.0 < target_id.0 {
-            let mut source_queue = self.bucket(source_id).waiters.lock();
-            let mut target_queue = self.bucket(target_id).waiters.lock();
+            let mut source_bucket = self.bucket(source_id).state.lock();
+            let mut target_bucket = self.bucket(target_id).state.lock();
+            source_bucket.require_non_pi(source)?;
+            target_bucket.require_non_pi(target)?;
+            let source_queue = &mut source_bucket.waiters;
+            let target_queue = &mut target_bucket.waiters;
             if let Some((uaddr, expected)) = compare {
                 Self::compare_locked(uaddr, expected)?;
             }
             Self::requeue_distinct_buckets(
-                &mut source_queue,
-                &mut target_queue,
+                source_queue,
+                target_queue,
                 source,
                 target,
                 target_id,
@@ -262,14 +298,18 @@ impl FutexTable {
                 requeue_count,
             )
         } else {
-            let mut target_queue = self.bucket(target_id).waiters.lock();
-            let mut source_queue = self.bucket(source_id).waiters.lock();
+            let mut target_bucket = self.bucket(target_id).state.lock();
+            let mut source_bucket = self.bucket(source_id).state.lock();
+            source_bucket.require_non_pi(source)?;
+            target_bucket.require_non_pi(target)?;
+            let source_queue = &mut source_bucket.waiters;
+            let target_queue = &mut target_bucket.waiters;
             if let Some((uaddr, expected)) = compare {
                 Self::compare_locked(uaddr, expected)?;
             }
             Self::requeue_distinct_buckets(
-                &mut source_queue,
-                &mut target_queue,
+                source_queue,
+                target_queue,
                 source,
                 target,
                 target_id,
@@ -413,13 +453,14 @@ impl FutexTable {
                 return true;
             }
             let (_, bucket_id, generation) = waiter.route();
-            let mut queue = self.bucket(bucket_id).waiters.lock();
+            let mut bucket = self.bucket(bucket_id).state.lock();
+            let queue = &mut bucket.waiters;
             // Must use the locked snapshot: this bucket may be stale if the
             // waiter was already requeued elsewhere, so bucket-lock exclusion
             // alone does not cover `requeue_to` writers.
             let (_, current_bucket, current_generation) = waiter.route();
             if bucket_id != current_bucket || generation != current_generation {
-                drop(queue);
+                drop(bucket);
                 continue;
             }
             if waiter.try_cancel() {
@@ -437,7 +478,8 @@ impl FutexTable {
     fn drain_inactive(&self, bucket_id: BucketId) {
         let mut to_wake = Vec::new();
         {
-            let mut queue = self.bucket(bucket_id).waiters.lock();
+            let mut bucket = self.bucket(bucket_id).state.lock();
+            let queue = &mut bucket.waiters;
             let len = queue.len();
             for _ in 0..len {
                 #[expect(
@@ -469,7 +511,11 @@ impl FutexTable {
     pub(crate) fn enqueue_waiter_for_test(&self, key: FutexKey, waiter: Arc<FutexWaiter>) {
         let bucket_id = self.bucket_id(key);
         waiter.mark_queued();
-        self.bucket(bucket_id).waiters.lock().push_back(waiter);
+        self.bucket(bucket_id)
+            .state
+            .lock()
+            .waiters
+            .push_back(waiter);
     }
 
     #[cfg(unittest)]
@@ -516,12 +562,16 @@ impl Future for FutexWaitFuture {
             cx.waker().clone(),
         ));
         {
-            let mut queue = self.table.bucket(self.bucket).waiters.lock();
+            let mut bucket = self.table.bucket(self.bucket).state.lock();
+            if let Err(error) = bucket.require_non_pi(self.key) {
+                return Poll::Ready(Err(error));
+            }
+            let queue = &mut bucket.waiters;
             match atomic_u32_eq_nofault(self.uaddr, self.expected) {
                 Ok(true) => {}
                 Ok(false) => return Poll::Ready(Ok(false)),
                 Err(_) => {
-                    drop(queue);
+                    drop(bucket);
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
                 }
@@ -621,6 +671,14 @@ impl GlobalFutexTable {
     /// The number of waiters transitioned to the woken state.
     pub fn wake(self, key: FutexKey, count: usize, mask: u32) -> usize {
         FUTEX_TABLE.wake(key, count, mask)
+    }
+
+    /// Wakes ordinary waiters, rejecting a key occupied by PI state.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` for a PI key.
+    pub fn wake_checked(self, key: FutexKey, count: usize, mask: u32) -> KResult<usize> {
+        FUTEX_TABLE.wake_checked(key, count, mask)
     }
 
     /// Applies an atomic operation to `uaddr2`, wakes `source_count` waiters,

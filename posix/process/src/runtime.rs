@@ -323,6 +323,7 @@ fn handle_futex_death(
     offset: i64,
     tid: Tid,
     is_pending: bool,
+    is_pi: bool,
 ) -> KResult<()> {
     let address = (entry as u64)
         .checked_add_signed(offset)
@@ -331,7 +332,7 @@ fn handle_futex_death(
     let Some(has_waiters) = mark_futex_owner_died(address, tid, is_pending)? else {
         return Ok(());
     };
-    if !has_waiters {
+    if is_pi || !has_waiters {
         return Ok(());
     }
 
@@ -365,8 +366,7 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
             break;
         };
         if entry_address != pending_address
-            && !entry_is_pi
-            && handle_futex_death(entry_address, offset, tid, false).is_err()
+            && handle_futex_death(entry_address, offset, tid, false, entry_is_pi).is_err()
         {
             break;
         }
@@ -379,9 +379,9 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
         ktask::yield_now();
     }
 
-    if !pending_address.is_null() && !pending_is_pi {
+    if !pending_address.is_null() {
         // Robust-list cleanup is best effort; a stale user pointer must not stop exit.
-        let _ = handle_futex_death(pending_address, offset, tid, true);
+        let _ = handle_futex_death(pending_address, offset, tid, true, pending_is_pi);
     }
 }
 
@@ -553,6 +553,11 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
         exit_robust_list(head, thr.tid());
     }
 
+    // Publish exit before the bucket sweep: a new user PI state rechecks this
+    // flag while holding its bucket lock, closing attachment-after-sweep races.
+    thr.set_exit();
+    kfutex::global_table().exit_pi(&curr.clone());
+
     let clear_child_tid = thr.clear_child_tid() as *mut u32;
     if clear_child_tid.write_vm(0).is_ok() {
         let key = process.address_space().and_then(|address_space| {
@@ -581,8 +586,7 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     // Membership removal reserves the sole last-thread continuation and retires
     // the global TID. Close its accounting interval before process cleanup and
     // parent-visible completion; the current runtime remains installed.
-    thr.set_exit();
-    thr.deactivate_cpu_time();
+    thr.finalize_cpu_time();
     let (thread_utime, thread_stime) = thr.sample_cpu_time();
     process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
 

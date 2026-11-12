@@ -16,6 +16,7 @@ kerrno.workspace = true
 klazy.workspace = true
 kspin.workspace = true
 ktask.workspace = true
+krtmutex.workspace = true
 kuaccess.workspace = true
 linux-raw-sys = { workspace = true, default-features = false, features = ["no_std", "general"] }
 memspace.workspace = true

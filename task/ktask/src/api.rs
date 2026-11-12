@@ -733,6 +733,8 @@ pub enum SchedAttrUpdateError<E> {
 /// `update` leaves the live attribute unchanged. [`Ok`] submits that attribute
 /// through [`ksched::Scheduler::set_attr`] and kicks the CPU before the lock
 /// drops.
+/// Refreshes the PI wait chain after releasing RQ/entity locks and before
+/// enabling preemption. Call without PI graph or other scheduler locks held.
 ///
 /// Returns the attribute that was stored.
 ///

@@ -21,12 +21,8 @@ use crate::task::sys_restart_syscall;
 
 const WAIT_BITSET_MASK: u32 = 0x1;
 
-const OTHER_PI_FUTEX_COMMANDS: [u32; 4] = [
-    FUTEX_TRYLOCK_PI,
-    FUTEX_WAIT_REQUEUE_PI,
-    FUTEX_CMP_REQUEUE_PI,
-    FUTEX_LOCK_PI2,
-];
+const OTHER_PI_FUTEX_COMMANDS: [u32; 3] =
+    [FUTEX_WAIT_REQUEUE_PI, FUTEX_CMP_REQUEUE_PI, FUTEX_LOCK_PI2];
 
 /// Command 14 is outside the defined futex operation range.
 const UNKNOWN_FUTEX_COMMAND: u32 = 14;
@@ -343,51 +339,303 @@ fn test_wake_op_readonly_mapping_returns_efault() {
 }
 
 #[def_test(user, serial)]
-fn test_lock_pi_returns_eopnotsupp_before_address_validation() {
-    // Address 0 is invalid. Answering the musl feature probe before key
-    // resolution is what lets PulseAudio see a clean "PI unavailable" result.
-    let err = sys_futex(
-        UserPtr::from(0usize),
-        FUTEX_LOCK_PI | FUTEX_PRIVATE_FLAG,
-        0,
-        0,
-        UserPtr::from(0usize),
-        0,
-    )
-    .expect_err("FUTEX_LOCK_PI must not be implemented");
-    assert_eq!(LinuxError::from(err), LinuxError::EOPNOTSUPP);
+fn test_pi_commands_acquire_persist_and_unlock_the_user_word() {
+    let word = TestUserValue::<u32>::from_value(0).unwrap();
+    let tid = current_user_thread().tid();
+    assert_eq!(
+        pi_command(word.as_user_ptr() as usize, FUTEX_LOCK_PI, 0),
+        Ok(0)
+    );
+    assert_eq!(word.read(), tid);
+    for command in [FUTEX_LOCK_PI, FUTEX_TRYLOCK_PI] {
+        let error = pi_command(word.as_user_ptr() as usize, command, 0).unwrap_err();
+        assert_eq!(LinuxError::from(error), LinuxError::EDEADLK);
+    }
+    assert_eq!(
+        pi_command(word.as_user_ptr() as usize, FUTEX_UNLOCK_PI, 0),
+        Ok(0)
+    );
+    assert_eq!(word.read(), 0);
+    assert_eq!(
+        pi_command(word.as_user_ptr() as usize, FUTEX_TRYLOCK_PI, 0),
+        Ok(0)
+    );
+    assert_eq!(
+        pi_command(word.as_user_ptr() as usize, FUTEX_UNLOCK_PI, 0),
+        Ok(0)
+    );
 }
 
 #[def_test(user, serial)]
-fn test_lock_pi_with_realtime_flag_still_returns_eopnotsupp() {
-    // The realtime gate would reject this unsupported flag combination. The
-    // PI probe check must run first so the fallback errno is stable.
-    let err = sys_futex(
-        UserPtr::from(0usize),
-        FUTEX_LOCK_PI | FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME,
-        0,
-        0,
-        UserPtr::from(0usize),
-        0,
-    )
-    .expect_err("FUTEX_LOCK_PI with realtime must not fall through");
-    assert_eq!(LinuxError::from(err), LinuxError::EOPNOTSUPP);
+fn test_pi_commands_validate_addresses_and_owners() {
+    for command in [FUTEX_LOCK_PI, FUTEX_TRYLOCK_PI, FUTEX_UNLOCK_PI] {
+        let error = pi_command(0, command, 0).unwrap_err();
+        assert_eq!(LinuxError::from(error), LinuxError::EFAULT);
+    }
+    let word = TestUserValue::<u32>::from_value(linux_raw_sys::general::FUTEX_TID_MASK).unwrap();
+    let address = word.as_user_ptr() as usize;
+    assert_eq!(
+        LinuxError::from(pi_command(address, FUTEX_TRYLOCK_PI, 0).unwrap_err()),
+        LinuxError::ESRCH
+    );
+    assert_eq!(
+        LinuxError::from(pi_command(address, FUTEX_UNLOCK_PI, 0).unwrap_err()),
+        LinuxError::EPERM
+    );
+    assert_eq!(
+        LinuxError::from(pi_command(address + 1, FUTEX_LOCK_PI, 0).unwrap_err()),
+        LinuxError::EINVAL
+    );
 }
 
 #[def_test(user, serial)]
-fn test_unlock_pi_stays_enosys_for_glibc_support_probe() {
-    // glibc's pthread_mutex_init probes FUTEX_UNLOCK_PI and treats only
-    // ENOSYS as missing PI support; it aborts on an unexpected errno.
-    let err = sys_futex(
-        UserPtr::from(0usize),
-        FUTEX_UNLOCK_PI,
+fn test_legacy_pi_commands_reject_explicit_realtime_flag() {
+    for command in [FUTEX_LOCK_PI, FUTEX_TRYLOCK_PI, FUTEX_UNLOCK_PI] {
+        let error = pi_command(0, command | FUTEX_CLOCK_REALTIME, 0).unwrap_err();
+        assert_eq!(LinuxError::from(error), LinuxError::ENOSYS);
+    }
+}
+
+fn pi_command(address: usize, command: u32, timeout: usize) -> kerrno::KResult<isize> {
+    sys_futex(
+        UserPtr::from(address),
+        command | FUTEX_PRIVATE_FLAG,
         0,
-        0,
+        timeout,
         UserPtr::from(0usize),
         0,
     )
-    .expect_err("FUTEX_UNLOCK_PI must remain unimplemented");
-    assert_eq!(LinuxError::from(err), LinuxError::ENOSYS);
+}
+
+fn pi_worker(body: impl FnOnce() + Send + 'static, priority: u8) -> ktask::KtaskRef {
+    let prepared = current_user_thread().prepare_thread_clone().unwrap();
+    let root = prepared.page_table_root();
+    let (thread, number) = prepared.into_parts();
+    let mut task = ktask::TaskInner::new_user(
+        ktask::PreparedTaskEntry::new_nowait(move || {
+            body();
+            posix_process::do_exit(0, false);
+        })
+        .unwrap(),
+        "pi-syscall-worker".into(),
+        number,
+        thread,
+    );
+    task.ctx_mut().set_page_table_root(root);
+    let mut mask = ktask::KCpuMask::new();
+    mask.set(khal::percpu::this_cpu_id().as_usize(), true);
+    task.set_cpumask(mask);
+    kprocess::publish_user_task_with(task, |child| {
+        if priority != 0 {
+            ktask::init_task_sched_attr(
+                child,
+                ktask::SchedAttr {
+                    policy: ktask::SchedPolicy::Fifo,
+                    rt_priority: ktask::RtPrio::new(i32::from(priority)).unwrap(),
+                    ..ktask::SchedAttr::DEFAULT
+                },
+            )
+            .unwrap();
+        }
+        Ok(())
+    })
+    .unwrap()
+    .activate()
+}
+
+#[def_test(user, serial)]
+fn test_pi_contention_updates_word_before_handoff_and_restores_priority() {
+    let word = TestUserValue::<u32>::from_value(0).unwrap();
+    let address = word.as_user_ptr() as usize;
+    pi_command(address, FUTEX_LOCK_PI, 0).unwrap();
+    let worker = pi_worker(
+        move || {
+            core::assert_eq!(
+                LinuxError::from(pi_command(address, FUTEX_TRYLOCK_PI, 0).unwrap_err()),
+                LinuxError::EAGAIN
+            );
+            core::assert_eq!(pi_command(address, FUTEX_LOCK_PI, 0), Ok(0));
+            let value = kuaccess::atomic_load_u32(address).unwrap();
+            core::assert_eq!(
+                value & linux_raw_sys::general::FUTEX_TID_MASK,
+                current_user_thread().tid()
+            );
+            core::assert_eq!(pi_command(address, FUTEX_UNLOCK_PI, 0), Ok(0));
+        },
+        30,
+    );
+    while !matches!(
+        worker.state(),
+        ktask::TaskState::Blocked | ktask::TaskState::Exited
+    ) {
+        ktask::yield_now();
+    }
+    let was_blocked = worker.state() == ktask::TaskState::Blocked;
+    let donation = ktask::current().pi_donor_priority_snapshot();
+    let waiters = word.read() & linux_raw_sys::general::FUTEX_WAITERS;
+    let ordinary_wake = sys_futex(
+        UserPtr::from(address),
+        linux_raw_sys::general::FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
+        1,
+        0,
+        UserPtr::from(0usize),
+        0,
+    );
+    pi_command(address, FUTEX_UNLOCK_PI, 0).unwrap();
+    let status = worker.join();
+    unittest::assert!(was_blocked);
+    assert_eq!(donation, 30);
+    assert_eq!(waiters, linux_raw_sys::general::FUTEX_WAITERS);
+    assert_eq!(
+        LinuxError::from(ordinary_wake.unwrap_err()),
+        LinuxError::EINVAL
+    );
+    assert_eq!(status, 0);
+    assert_eq!(word.read(), 0);
+    assert_eq!(ktask::current().pi_donor_priority_snapshot(), 0);
+}
+
+#[def_test(user, serial)]
+fn test_pi_absolute_timeout_and_interruption_withdraw_waiters() {
+    let word = TestUserValue::<u32>::from_value(0).unwrap();
+    let address = word.as_user_ptr() as usize;
+    let deadline = TestUserValue::from_value(timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    })
+    .unwrap();
+    let deadline_address = deadline.as_user_ptr() as usize;
+    pi_command(address, FUTEX_LOCK_PI, 0).unwrap();
+    let worker = pi_worker(
+        move || {
+            let error = pi_command(address, FUTEX_LOCK_PI, deadline_address).unwrap_err();
+            core::assert_eq!(LinuxError::from(error), LinuxError::ETIMEDOUT);
+            ktask::current().interrupt();
+            let error = pi_command(address, FUTEX_LOCK_PI, 0).unwrap_err();
+            ktask::current().clear_interrupt();
+            core::assert_eq!(LinuxError::from(error), LinuxError::ERESTARTNOINTR);
+        },
+        30,
+    );
+    let status = worker.join();
+    let donation = ktask::current().pi_donor_priority_snapshot();
+    pi_command(address, FUTEX_UNLOCK_PI, 0).unwrap();
+    assert_eq!(status, 0);
+    assert_eq!(donation, 0);
+    assert_eq!(word.read(), 0);
+}
+
+#[def_test(user, serial)]
+fn test_pi_owner_exit_hands_off_with_owner_died() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicU32, Ordering};
+    let word = TestUserValue::<u32>::from_value(0).unwrap();
+    let address = word.as_user_ptr() as usize;
+    let phase = Arc::new((AtomicU32::new(0), ktask::WaitQueue::new()));
+    let owner = pi_worker(
+        {
+            let phase = phase.clone();
+            move || {
+                pi_command(address, FUTEX_LOCK_PI, 0).unwrap();
+                phase.0.store(1, Ordering::Release);
+                phase.1.notify_all(false);
+                phase.1.wait_until(|| phase.0.load(Ordering::Acquire) == 2);
+            }
+        },
+        0,
+    );
+    phase.1.wait_until(|| phase.0.load(Ordering::Acquire) == 1);
+    let observed = Arc::new(AtomicU32::new(0));
+    let waiter = pi_worker(
+        {
+            let observed = observed.clone();
+            move || {
+                pi_command(address, FUTEX_LOCK_PI, 0).unwrap();
+                observed.store(
+                    kuaccess::atomic_load_u32(address).unwrap(),
+                    Ordering::Release,
+                );
+                pi_command(address, FUTEX_UNLOCK_PI, 0).unwrap();
+            }
+        },
+        30,
+    );
+    while !matches!(
+        waiter.state(),
+        ktask::TaskState::Blocked | ktask::TaskState::Exited
+    ) {
+        ktask::yield_now();
+    }
+    phase.0.store(2, Ordering::Release);
+    phase.1.notify_all(false);
+    let statuses = [owner.join(), waiter.join()];
+    assert_eq!(statuses, [0, 0]);
+    assert_eq!(
+        observed.load(Ordering::Acquire) & linux_raw_sys::general::FUTEX_OWNER_DIED,
+        linux_raw_sys::general::FUTEX_OWNER_DIED
+    );
+    assert_eq!(word.read(), 0);
+}
+
+#[def_test(user, serial)]
+fn test_pi_robust_owner_exit_marks_an_uncontended_word() {
+    let word = TestUserValue::<u32>::from_value(0).unwrap();
+    let address = word.as_user_ptr() as usize;
+    let mut node = TestUserValue::from_value([0usize]).unwrap();
+    let node_address = node.as_user_ptr() as usize;
+    // Native robust-list layout: next pointer, signed futex offset, pending.
+    let head =
+        TestUserValue::from_value([node_address | 1, address.wrapping_sub(node_address), 0usize])
+            .unwrap();
+    let head_address = head.as_user_ptr() as usize;
+    node.write([head_address]);
+    let owner = pi_worker(
+        move || {
+            pi_command(address, FUTEX_LOCK_PI, 0).unwrap();
+            current_user_thread().set_robust_list_head(head_address);
+        },
+        0,
+    );
+    let status = owner.join();
+    assert_eq!(status, 0);
+    assert_eq!(word.read(), linux_raw_sys::general::FUTEX_OWNER_DIED);
+    pi_command(address, FUTEX_LOCK_PI, 0).unwrap();
+    pi_command(address, FUTEX_UNLOCK_PI, 0).unwrap();
+}
+
+#[def_test(user, serial)]
+fn test_pi_acquisition_faults_in_a_writable_cow_word() {
+    let address = map_private_anonymous_word(0);
+    let cow_share = current_user_process_address_space()
+        .lock()
+        .try_clone()
+        .unwrap();
+    unittest::assert!(!pte_flags(address).contains(MappingFlags::WRITE));
+    pi_command(address, FUTEX_TRYLOCK_PI, 0).unwrap();
+    assert_eq!(
+        kuaccess::atomic_load_u32(address).unwrap(),
+        current_user_thread().tid()
+    );
+    pi_command(address, FUTEX_UNLOCK_PI, 0).unwrap();
+    assert_eq!(kuaccess::atomic_load_u32(address).unwrap(), 0);
+    drop(cow_share);
+}
+
+#[def_test(user, serial)]
+fn test_pi_owner_died_fastpath_and_readonly_fault() {
+    let word = TestUserValue::<u32>::from_value(linux_raw_sys::general::FUTEX_OWNER_DIED).unwrap();
+    let address = word.as_user_ptr() as usize;
+    pi_command(address, FUTEX_LOCK_PI, 0).unwrap();
+    assert_eq!(
+        word.read(),
+        current_user_thread().tid() | linux_raw_sys::general::FUTEX_OWNER_DIED
+    );
+    pi_command(address, FUTEX_UNLOCK_PI, 0).unwrap();
+    let page = map_private_anonymous_word(0);
+    posix_mm::sys_mprotect(page, khal::mem::PAGE_SIZE_4K, PROT_READ).unwrap();
+    let error = pi_command(page, FUTEX_TRYLOCK_PI, 0).unwrap_err();
+    assert_eq!(LinuxError::from(error), LinuxError::EFAULT);
+    assert_eq!(kuaccess::atomic_load_u32(page).unwrap(), 0);
 }
 
 #[def_test(user, serial)]

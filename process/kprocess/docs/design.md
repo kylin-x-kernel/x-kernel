@@ -387,8 +387,10 @@ the final published task. Repeated exits return false; every later task
 publication into the reserved process is rejected. After releasing the lock,
 this entry retires the exiting task's global TID publication and returns whether
 it reserved cleanup. It accepts no callback and performs no subsystem cleanup.
-The caller marks the thread exiting, records final CPU time, then performs
-explicit last-thread stages: optional `exit_tee`, signal-handler and mm teardown,
+The caller marks the thread exiting before PI cleanup, keeps CPU accounting
+open across later blocking cleanup, records final CPU time after membership
+retirement, then performs explicit last-thread stages: optional `exit_tee`,
+signal-handler and mm teardown,
 optional runtime cleanup, fs/ns detach, and finally `complete_process_exit`.
 The TID is no longer an external lookup or signal target during those stages;
 current-thread runtime access and the process identity remain available until

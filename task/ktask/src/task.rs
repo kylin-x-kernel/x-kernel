@@ -399,6 +399,7 @@ pub struct TaskInner {
     need_resched: AtomicBool,
     preempt_disable_count: AtomicUsize,
     pub(crate) rcu_reader: krcu_core::TaskReader,
+    pub(crate) pi_node: krtmutex::PiTaskNode<crate::pi::TaskPiHost>,
     #[cfg(unittest)]
     preempt_check_probe: tests_preempt_check::Probe,
 
@@ -999,6 +1000,7 @@ impl TaskInner {
             need_resched: AtomicBool::new(false),
             preempt_disable_count: AtomicUsize::new(0),
             rcu_reader: krcu_core::TaskReader::new(),
+            pi_node: krtmutex::PiTaskNode::new(),
             #[cfg(unittest)]
             preempt_check_probe: tests_preempt_check::Probe::new(),
             wake_sync_depth: AtomicUsize::new(0),

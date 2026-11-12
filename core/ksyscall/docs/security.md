@@ -452,3 +452,11 @@ Console-verbosity actions stay unimplemented on purpose: Linux's inverted
 change console verbosity through a path that looks like a read. Console
 control remains on `/proc/sys/kernel/printk`, whose write side has its own
 privilege check and spec validation.
+
+## PI futex adapter
+
+The three legacy PI commands delegate user-word transactions to `kfutex`.
+The context resolves a live published user owner and exposes its nonblocking
+exit flag; arbitrary user TIDs never become raw task references. Ordinary
+WAKE uses the checked API so it cannot select PI state. PI faults retry outside
+bucket/graph locks; `ERESTARTNOINTR` is returned only after cancellation wins.

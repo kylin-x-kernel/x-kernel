@@ -51,6 +51,7 @@ unittest::path_mod_test!(tests_timer_irq, "../ut-tests/tests_timer_irq.rs");
 mod api;
 mod lock_owner;
 mod park;
+mod pi;
 mod run_queue;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
@@ -74,6 +75,7 @@ pub use self::{
     api::{sleep, sleep_until, yield_now, *},
     completion::wait_for_completion,
     lock_owner::{LockOwner, LockOwnerState, can_optimistic_spin},
+    pi::TaskPiHost,
     softirqd::init_current_cpu as init_softirqd_current_cpu,
     stop_machine::{CpuStopWork, stop_one_cpu, stop_one_cpu_nowait},
     timers::{CancelResult, Expiration, Timer, TimerControl, TimerHandler},

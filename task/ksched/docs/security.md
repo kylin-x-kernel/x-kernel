@@ -287,8 +287,9 @@ No user data. The crate operates only on kernel task scheduling metadata.
   boost. This crate does not authenticate the caller; a boost is trusted the
   same way a user attribute is trusted after the syscall layer has checked
   it. A boosted Fair task is charged to this RQ's RT bandwidth and does not
-  rotate as `SCHED_RR`. Deadline dispatch ignores the boost. No production
-  caller invokes `set_pi_boost` yet.
+  rotate as `SCHED_RR`. Deadline dispatch ignores the boost.
+  `ktask::TaskPiHost` submits boosts through the migration-aware owner-RQ lock
+  and reads the atomic donation snapshot under the PI graph lock.
 - `SCHED_RESET_ON_FORK` is stored on `SchedAttr`. On clone, an RT or Deadline
   child returns to `SCHED_NORMAL` at nice 0. A Fair child zeros only a
   negative nice. A Deadline parent without the flag cannot fork (`EAGAIN`).

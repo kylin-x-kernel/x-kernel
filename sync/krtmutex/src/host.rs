@@ -44,6 +44,8 @@ pub trait PiHost: Sized + 'static {
     ///
     /// Called with no graph lock held; the host may take run-queue locks.
     /// Publish the updated donation level before returning.
+    /// Must not voluntarily block: lock handoff calls this with preemption
+    /// disabled until the new owner has been woken.
     /// Returns whether the task's donation level changed, which tells the
     /// graph to continue along the chain.
     fn set_boost(task: &Self::Task, priority: u8) -> bool;

@@ -1,5 +1,12 @@
 # ktask — Security and reliability
 
+## Priority inheritance
+
+`TaskPiHost` uses counted task references and pointer identity. Graph-held
+callbacks take no scheduler locks; boosts use the owner-RQ/entity guard and
+retry migration. Policy updates release these locks before PI-chain refresh.
+The adapter adds no unsafe operations, user-word protocol or owner-death recovery.
+
 ## Scheduler Entry Ownership
 
 The unittest-only sleep probe registration is scoped to one retained task

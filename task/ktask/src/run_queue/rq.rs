@@ -1144,6 +1144,20 @@ pub(crate) fn set_task_nice(task: &KtaskRef, prio: isize) -> bool {
     true
 }
 
+/// Apply a boost on the task's owner RQ and report a changed donation level.
+///
+/// Call without PI graph or scheduler locks. The owner-RQ guard retries
+/// concurrent migration and publishes the new dispatch before it is dropped.
+pub(crate) fn set_task_pi_boost(task: &KtaskRef, prio: ksched::RtPrio) -> bool {
+    let now_ns = khal::time::monotonic_time_nanos();
+    let mut locked = task_rq_lock::<kspin::NoPreemptIrqSave>(task);
+    let before = task.pi_donor_priority_snapshot();
+    let decision = locked.scheduler().set_pi_boost(task, prio, now_ns);
+    let is_changed = before != task.pi_donor_priority_snapshot();
+    locked.kick(decision);
+    is_changed
+}
+
 /// Read `task`'s attributes under the run queue that owns it.
 pub(crate) fn sched_getattr(task: &KtaskRef) -> ksched::SchedAttr {
     let mut locked = task_rq_lock::<kspin::NoPreemptIrqSave>(task);
@@ -1158,12 +1172,18 @@ pub(crate) fn sched_update_attr<E>(
     task: &KtaskRef,
     update: impl FnOnce(&mut ksched::SchedAttr) -> Result<(), E>,
 ) -> Result<ksched::SchedAttr, crate::api::SchedAttrUpdateError<E>> {
+    // Keep a committed policy change and its PI-chain refresh in the same
+    // non-preemptible operation, while releasing RQ locks before graph entry.
+    let _preempt = kspin::NoPreempt::new();
     let now_ns = khal::time::monotonic_time_nanos();
     let mut locked = task_rq_lock::<kspin::NoPreemptIrqSave>(task);
     let mut attr = locked.scheduler().attr(task);
     update(&mut attr).map_err(crate::api::SchedAttrUpdateError::Rejected)?;
     commit_sched_attr(locked, task, attr, now_ns)
         .map_err(crate::api::SchedAttrUpdateError::Sched)?;
+    // commit consumes the RQ guard; PI may now enter the graph and submit
+    // boosts to other owners without nesting graph and run-queue locks.
+    krtmutex::adjust_waiter_priority::<crate::pi::TaskPiHost>(task);
     Ok(attr)
 }
 

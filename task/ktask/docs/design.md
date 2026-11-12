@@ -1,5 +1,14 @@
 # ktask — Design
 
+## Priority inheritance
+
+`pi::TaskPiHost` binds `krtmutex` to `KtaskRef` and the `PiTaskNode` embedded
+in every task. Graph callbacks read the atomic donation snapshot; boost updates
+use the migration-aware owner-RQ lock. `sched_update_attr` releases RQ/entity
+locks before refreshing the PI wait chain, retaining preemption exclusion
+until both updates finish. `ksync::RtMutex<T>` exposes the bound mutex.
+User attributes and fork inheritance exclude boosts; RT bandwidth still applies.
+
 ## Scheduling Observers
 
 CPU-local resource consumers can attach one

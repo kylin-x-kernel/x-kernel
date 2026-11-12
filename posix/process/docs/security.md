@@ -28,7 +28,7 @@ Protected assets are the current thread's identity, saved user context, address
 space ownership, runtime handles and parent-visible completion. `kprocess`
 provides identity/publication and owner-slot synchronization, `memspace` handles
 faults/mappings, `kuaccess`/`osvm` perform fault-aware user access, and `kfutex`
-resolves futex keys. This crate orders those operations; it does not validate
+resolves futex keys and performs PI exit handoff. This crate orders those operations; it does not validate
 executable formats or maintain process registries itself.
 
 ## External boundaries and validation
@@ -63,8 +63,9 @@ resolution, and signal return must not restart an already restored context.
 
 `exit_robust_list` reads the registered userspace head and linked nodes through
 `read_vm`; failed reads stop the walk. Pointer low-bit tags distinguish PI
-entries, which are skipped. The walk stops at the sentinel or
-`ROBUST_LIST_LIMIT`, then separately handles a nonnull non-PI pending entry.
+entries. Both kinds are marked, but only ordinary entries use plain wake.
+The walk stops at the sentinel or `ROBUST_LIST_LIMIT`, then separately handles
+a nonnull pending entry.
 `handle_futex_death` checks signed address addition/conversion and uses
 fault-aware atomic access. It changes only a word whose owner TID matches; the
 pending unlocked-word case can wake a waiter without changing ownership.
@@ -123,7 +124,7 @@ must retain the ordering described in the design document.
 
 | ID | Threat / asset | Severity | Trigger | Existing response and residual risk |
 |---|---|---|---|---|
-| T-01 | Invalid or cyclic robust list consumes kernel work or touches invalid memory. | Medium | An exiting thread supplies malformed nodes or concurrent changes. | Fault-aware reads stop on error and `ROBUST_LIST_LIMIT` bounds traversal; PI entries are skipped and their cleanup is not implemented here. |
+| T-01 | Invalid or cyclic robust list consumes kernel work or touches invalid memory. | Medium | An exiting thread supplies malformed nodes or concurrent changes. | Fault-aware reads stop on error and `ROBUST_LIST_LIMIT` bounds traversal; PI entries use PI exit handoff rather than plain wake. |
 | T-02 | Futex cleanup changes another owner's lock word. | High | A word is reused or ownership changes during exit. | Compare owner TID, then compare-exchange; retry when the observed word changes. Key resolution is delegated to `kfutex`. |
 | T-03 | Faulting file mappings deliver the wrong signal. | Medium | A file-backed access is beyond the backing object's valid extent. | Map `PageFaultOutcome::BusError` to SIGBUS; MM owns the classification. |
 | T-04 | Process completion exposes still-held resources. | Medium | Last-thread teardown notifies a waiter before detach. | Release mm/files/fs/ns and IPC state before `complete_process_exit`; logged cleanup failures remain a diagnostic limitation. |
@@ -148,7 +149,7 @@ Arguments/environment and robust-list contents are userspace data. Bootstrap
 passes them to loading/runtime metadata; fault logs include executable path,
 PID and instruction/stack/fault addresses, which require trusted log access.
 There is no local redaction or core-file generation. Stop and CoreDump actions
-are simplified, and PI robust-futex cleanup is skipped.
+are simplified; robust-futex cleanup remains best effort on memory faults.
 
 ## Audit checklist
 
@@ -184,3 +185,10 @@ An admission wait must run after the architecture user-return boundary restored
 sleepable task context. The live MM capability retains lifetime while provider
 waits run outside MM serialization, and subsequent access uses fresh VMA checks.
 Permanent fault outcomes keep their existing signal mapping.
+
+PI cleanup publishes the Thread exit flag before scanning futex buckets and
+before TID retirement. That flag does not close CPU accounting: switch-in
+still opens an interval until the exit sample is published. Contenders recheck
+the flag under the same bucket lock, so exit cannot miss a newly adopted state. The sweep does not access another
+process's user mapping; the acquiring waiter repairs OWNER_DIED through its own
+address. Robust-list faults remain best effort and do not skip the PI sweep.

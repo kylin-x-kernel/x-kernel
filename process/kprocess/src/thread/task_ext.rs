@@ -42,10 +42,9 @@ impl UserTaskRuntime for Thread {
     }
 
     fn on_enter(&self) {
-        // Exit cleanup can block after the final CPU time was published.
-        if !self.is_exiting() {
-            self.activate_cpu_time();
-        }
+        // `activate_cpu_time` ignores a thread whose exit sample is already
+        // published. `is_exiting` is set earlier and must not skip the interval.
+        self.activate_cpu_time();
     }
 
     fn on_leave(&self) {

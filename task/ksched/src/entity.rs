@@ -260,6 +260,8 @@ pub struct SchedTask<T> {
     class: AtomicU8,
     /// Lock-free RT priority for CPU placement. `0` when not RT.
     rt_prio: AtomicU8,
+    /// Complete donation level for PI readers that cannot take an RQ lock.
+    pi_donor_prio: AtomicU8,
     // Written only by the owning RQ's charge path; atomic for remote readers.
     sum_exec_runtime_ns: AtomicU64,
     seat: RqCell<QueueSeat>,
@@ -292,6 +294,7 @@ impl<T> SchedTask<T> {
             inner,
             class: AtomicU8::new(class.as_u8()),
             rt_prio: AtomicU8::new(attr.rt_priority.get()),
+            pi_donor_prio: AtomicU8::new(0),
             sum_exec_runtime_ns: AtomicU64::new(0),
             seat: RqCell::new(QueueSeat::Detached),
             attr: RqCell::new(attr),
@@ -346,6 +349,17 @@ impl<T> SchedTask<T> {
     /// scheduler lock.
     pub fn rt_priority_snapshot(&self) -> u8 {
         self.rt_prio.load(Ordering::Acquire)
+    }
+
+    /// Effective donation level without taking the owning run-queue lock.
+    ///
+    /// Deadline donates `99`, RT donates its effective priority (including
+    /// inheritance), and all other classes donate `0`. One atomic snapshot
+    /// avoids pairing a class with a priority from a different policy update.
+    /// Acquire pairs with `publish_dispatch`'s Release store. This snapshot
+    /// does not grant access to the RQ-protected scheduling attributes.
+    pub fn pi_donor_priority_snapshot(&self) -> u8 {
+        self.pi_donor_prio.load(Ordering::Acquire)
     }
 
     /// `true` when this task is the per-CPU idle class.
@@ -440,6 +454,14 @@ impl<T> SchedTask<T> {
         };
         self.rt_prio.store(prio, Ordering::Release);
         self.set_class(class, tok);
+        let donor_prio = match class {
+            SchedClass::Deadline => RtPrio::MAX.get(),
+            SchedClass::Rt => prio,
+            _ => 0,
+        };
+        // Publish one complete level to PI graph readers. They must never
+        // take an RQ lock or combine independently changing class/RT bytes.
+        self.pi_donor_prio.store(donor_prio, Ordering::Release);
     }
 
     pub(crate) fn set_class(&self, class: SchedClass, _tok: RqLocked) {

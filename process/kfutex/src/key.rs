@@ -26,6 +26,24 @@ enum FutexKeyKind {
 }
 
 impl FutexKey {
+    /// Collision-free ordering projection for the per-bucket PI index.
+    pub(crate) fn pi_index(self) -> (u8, u64, u64, usize) {
+        match self.0 {
+            FutexKeyKind::Private { mm_id, address } => (0, mm_id, 0, address),
+            FutexKeyKind::Shared {
+                object,
+                page_index,
+                offset_in_page,
+            } => {
+                let (kind, id) = match object {
+                    VmObjectId::File(id) => (1, id.raw()),
+                    VmObjectId::Anon(id) => (2, id.raw()),
+                };
+                (kind, id, page_index, usize::from(offset_in_page))
+            }
+        }
+    }
+
     /// Resolves a private futex key without consulting VMA metadata.
     ///
     /// Used for `FUTEX_PRIVATE_FLAG`: only alignment / user-range checks are

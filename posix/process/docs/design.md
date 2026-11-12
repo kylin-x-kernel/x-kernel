@@ -172,8 +172,9 @@ every Go program that execs (runc init, containerd-shim) fails.
    actually removes the final published member. It releases the lock and retires
    the global TID publication before returning. Repeated exits cannot qualify
    again, and later task publication into the reserved process is rejected.
-4. Mark the thread exiting, close its CPU-accounting interval and accumulate
-   final thread CPU time.
+4. Close the CPU-accounting interval and accumulate final thread CPU time.
+   The exit flag is published earlier, before the PI sweep; switch-in keeps
+   charging cleanup until this close.
 5. For the last thread, run the optional named `exit_tee` stage. It calls
    `tee_ta_release_sessions` after TID retirement, with the current user runtime
    still installed and the filesystem context available for the manager path.
@@ -218,8 +219,8 @@ Keeping IPC cleanup here avoids a `kprocess` dependency on `posix-ipc` while
 preserving release-before-parent-notification ordering. Page-fault classification
 comes from MM so architecture trap code need not understand file-backed EOF.
 Stop currently terminates the group with exit code 1; CoreDump terminates with
-128 plus the signal number and does not write a core image. PI-tagged robust
-entries are skipped. Cleanup errors are generally logged or ignored so teardown
+128 plus the signal number and does not write a core image. Cleanup errors
+are generally logged or ignored so teardown
 can continue; these are current limitations, not complete Linux compatibility.
 
 ## PM cooperative safe point
@@ -234,3 +235,11 @@ User execution faults use the captured live MM's sleepable resolver. Backing
 admission waits release the MM mutex and block on existing provider resources
 before lookup and permissions are checked again. This is the same wait contract
 used by kernel user-memory copies, without sleeping in architecture trap code.
+
+## PI futex exit
+
+After robust-list marking, `do_exit` publishes the Thread exit flag and calls
+`kfutex::exit_pi` before retiring its TID. PI-tagged robust entries are marked
+but never passed to ordinary wake. Kernel ownership is handed off independently
+of user mappings; each waiter repairs its word before returning to userspace.
+The exit flag and bucket-locked adoption check prevent attachment after sweep.

@@ -773,6 +773,14 @@ impl Thread {
         self.time.deactivate(khal::time::monotonic_time());
     }
 
+    /// Publishes the exit sample and refuses later switch-in intervals.
+    ///
+    /// Distinct from [`Self::set_exit`]: that flag is visible to PI adoption
+    /// while this thread can still be charged for cleanup.
+    pub fn finalize_cpu_time(&self) {
+        self.time.finalize(khal::time::monotonic_time());
+    }
+
     /// Returns whether this thread's process has an armed CPU timer.
     ///
     /// Lets the user-return fast path decide whether timer polling is needed

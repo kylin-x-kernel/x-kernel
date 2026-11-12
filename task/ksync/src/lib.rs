@@ -7,6 +7,7 @@
 //! This crate provides blocking synchronization primitives for kernel tasks:
 //!
 //! - [`Mutex`]: Mutual exclusion lock with configurable spinning
+//! - [`RtMutex`]: Sleeping mutex with priority inheritance and deadlock detection
 //! - [`RwLock`]: Reader-writer lock (allows multiple readers or one writer)
 //! - [`Semaphore`]: Counting semaphore for resource management
 //! - [`spin`]: Re-export of `kspin` for spinlocks
@@ -87,6 +88,15 @@
 #![cfg_attr(not(test), no_std)]
 
 pub use kspin as spin;
+
+/// Priority-inheritance mutex bound to the kernel task scheduler.
+///
+/// Requires sleepable task context. `lock` returns errors for recursive locking
+/// or owner-chain cycles. Waits have no timeout and are not interruptible.
+pub type RtMutex<T> = krtmutex::RtMutex<ktask::TaskPiHost, T>;
+
+/// Task-bound guard returned by [`RtMutex`]; releases the lock on drop.
+pub type RtMutexGuard<'a, T> = krtmutex::RtMutexGuard<'a, ktask::TaskPiHost, T>;
 
 unittest::path_mod_test!(lib_unittest, "../ut-tests/lib_unittest.rs");
 unittest::path_mod_test!(

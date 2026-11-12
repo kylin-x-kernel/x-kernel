@@ -1526,6 +1526,7 @@ fn pi_boost_fair_runs_as_fifo_rt_without_changing_user_attr() {
     assert_eq!(s.attr(&boosted).rt_priority, RtPrio::NONE);
     assert_eq!(boosted.sched_class(), SchedClass::Rt);
     assert_eq!(boosted.rt_priority_snapshot(), 8);
+    assert_eq!(boosted.pi_donor_priority_snapshot(), 8);
     // An unboosted Fair wake leaves this RT runner in place. Resched here is
     // the same-class probe seeing priority 8 above the runner's 5.
     let woke = s.enqueue(boosted, EnqueueKind::Wake { sync: false }, 0);
@@ -1596,6 +1597,7 @@ fn pi_clear_restores_user_attr_changed_while_boosted() {
     s.set_pi_boost(&t, RtPrio::NONE, 0);
     assert_eq!(t.sched_class(), SchedClass::Fair);
     assert_eq!(t.rt_priority_snapshot(), 0);
+    assert_eq!(t.pi_donor_priority_snapshot(), 0);
     assert_eq!(s.attr(&t).nice, Nice::new(7).unwrap());
 }
 
@@ -1606,12 +1608,14 @@ fn pi_deadline_keeps_its_class_until_set_attr_leaves() {
     s.set_attr(&t, dl_attr(), 0).unwrap();
     s.set_pi_boost(&t, boost(99), 0);
     assert_eq!(t.sched_class(), SchedClass::Deadline);
+    assert_eq!(t.pi_donor_priority_snapshot(), 99);
     assert_eq!(t.rt_priority_snapshot(), 0);
     assert_eq!(s.attr(&t).policy, SchedPolicy::Deadline);
     s.set_attr(&t, SchedAttr::DEFAULT, 0).unwrap();
     assert_eq!(s.attr(&t).policy, SchedPolicy::Normal);
     assert_eq!(t.sched_class(), SchedClass::Rt);
     assert_eq!(t.rt_priority_snapshot(), 99);
+    assert_eq!(t.pi_donor_priority_snapshot(), 99);
 }
 
 #[def_test]

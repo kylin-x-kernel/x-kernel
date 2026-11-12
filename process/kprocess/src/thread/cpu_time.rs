@@ -4,7 +4,7 @@
 
 //! Thread CPU-time accounting state.
 
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use ktime_types::{MonotonicInstant, TimeSpan};
 
@@ -50,6 +50,9 @@ pub(crate) struct CpuTimeStatistics {
     /// switch-in; a settle from there simply establishes the origin.
     last_wall_ns: AtomicU64,
     mode: AtomicU8,
+    /// Set when exit publishes the final sample. Switch-in must not reopen
+    /// an interval after that; `Thread::is_exiting` is raised earlier for PI.
+    finalized: AtomicBool,
 }
 
 impl CpuTimeStatistics {
@@ -60,6 +63,7 @@ impl CpuTimeStatistics {
             stime_ns: AtomicU64::new(0),
             last_wall_ns: AtomicU64::new(0),
             mode: AtomicU8::new(CpuTimeState::Inactive as u8),
+            finalized: AtomicBool::new(false),
         }
     }
 
@@ -113,9 +117,24 @@ impl CpuTimeStatistics {
     ///
     /// The off-CPU gap since [`Self::deactivate`] is discarded, not charged.
     pub(crate) fn activate(&self, now: MonotonicInstant) {
+        // Exit raises `is_exiting` before PI cleanup, which can still be
+        // scheduled. Only the final publication refuses a new interval.
+        if self.is_final() {
+            return;
+        }
         self.last_wall_ns
             .store(now.as_nanos_u64_saturating(), Ordering::Release);
         self.record_mode(CpuTimeState::Kernel);
+    }
+
+    /// Closes accounting for exit. Later switch-ins do not reopen it.
+    pub(crate) fn finalize(&self, now: MonotonicInstant) {
+        self.finalized.store(true, Ordering::Release);
+        self.deactivate(now);
+    }
+
+    pub(crate) fn is_final(&self) -> bool {
+        self.finalized.load(Ordering::Acquire)
     }
 
     /// Settles the running interval and marks the thread inactive.

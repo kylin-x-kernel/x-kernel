@@ -45,6 +45,7 @@ pub(crate) use migrate::enforce_affinity_placement;
 pub(crate) use placement::{select_run_queue, select_wake_run_queue};
 pub(crate) use rq::{
     finish_task_switch, kick_running_task, sched_getattr, sched_update_attr, set_task_nice,
+    set_task_pi_boost,
 };
 #[cfg(feature = "sched_stat")]
 pub(crate) use stats::note_timer_irq;

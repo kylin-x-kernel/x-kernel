@@ -48,8 +48,8 @@ are `kuaccess` calls, not unsafe in this crate.
 6. User accesses inside bucket locks must use nofault APIs; page-fault
    handling must never run while holding a bucket spinlock.
 7. Scheduler wakers are invoked only after the bucket lock is released.
-8. Robust owner-death state lives in the user word only; the kernel keeps
-   no mirrored owner-death cache that could go stale.
+8. PI owner-death metadata records a kernel handoff awaiting user-word repair;
+   each repair rechecks both the state identity and the observed word.
 
 ## Lock ordering
 
@@ -103,16 +103,11 @@ handle is a zero-sized `Copy` value.
 
 ## Privacy analysis
 
-No user data beyond 32-bit futex words is read. This crate logs nothing;
-`ksyscall` emits one diagnostic when it first rejects `FUTEX_LOCK_PI`.
+No user data beyond 32-bit futex words is read. This crate logs nothing.
 
 ## Known limitations
 
-- Non-PI futex only; `FUTEX_LOCK_PI` returns `EOPNOTSUPP` and the other PI
-  commands return `ENOSYS` at the syscall layer, so no PI request reaches this
-  crate. The `LOCK_PI` errno is solely a musl/PulseAudio fallback compatibility
-  choice, not PI mutex support; glibc's `UNLOCK_PI` support probe requires
-  `ENOSYS`.
+- PI2 and PI requeue are not implemented.
 - Realtime absolute waits are converted once at syscall entry to a
   monotonic-relative duration; wall-clock jumps during the wait do not
   re-adjust an already-queued deadline.
@@ -127,3 +122,23 @@ No user data beyond 32-bit futex words is read. This crate logs nothing;
   covered by a unit test.
 - Cancellation must re-validate route generation under the bucket lock.
 - Wakers must never be invoked while a bucket lock is held.
+
+## PI ownership
+
+`pi.rs` owns PI state; table code only stores its index and checks exclusions.
+Internal commands accept trusted task references. User commands obtain owners
+through `PiFutexContext`, recheck the word and exit flag under the bucket lock,
+and reject inconsistent ownership. All lock-held user accesses are nofault;
+fault-in and mapping re-resolution occur outside locks. A failed ownership
+repair releases its raw grant instead of stranding donation.
+
+Lock order is bucket -> PI graph. Deferred effects propagate priorities and
+wake only after bucket unlock, retaining preemption exclusion through delivery.
+No graph callback takes a bucket or scheduler lock. Cancellation losing to
+handoff retains ownership and reports success. User callers revalidate Arc
+identity before mutation, allowing a free entry to retire despite lookup pins.
+User entries with no call/waiter remaining retire even if owned; later
+contention adopts the word owner again. Raw destruction runs outside the bucket.
+Internal commands retain entries until free and unpinned. Hosts publish exit before the
+bucket sweep, preventing a new state from adopting an owner after its sweep.
+Exit scans the fixed bucket set; it does not introduce a hot-path task scan.

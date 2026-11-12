@@ -157,7 +157,9 @@ An RT policy runs at the greater of its own priority and `pi_prio`. Deadline
 keeps its class; a stored boost is applied only after `set_attr` leaves
 Deadline. `publish_dispatch` stores `rt_priority_snapshot` and then
 `class`, both with Release, so a remote reader that observes the new class
-also observes the new priority.
+also observes the new priority. `pi_donor_priority_snapshot` publishes one
+complete donation byte for PI readers: Deadline 99, effective RT priority, or
+zero for other classes, without taking an RQ lock.
 `Scheduler::attr` and `SchedAttr::for_fork` read the user attribute, so
 `sched_getattr` and fork do not observe the boost. `init_attr_unpublished`
 clears it.

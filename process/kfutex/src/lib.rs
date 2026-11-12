@@ -10,6 +10,9 @@
 //! built from [`FutexKey::resolve`] (VMA-aware) or
 //! [`FutexKey::resolve_private`] (`FUTEX_PRIVATE_FLAG` fast path), and
 //! `FUTEX_WAKE_OP` operands decode through [`FutexWakeOp::decode`].
+//! `lock_pi` / `trylock_pi` / `unlock_pi` expose kernel PI ownership from a
+//! key and validated task references. User variants synchronize the lock word
+//! through process services provided by [`PiFutexContext`].
 //!
 //! The crate owns only the concurrency core: syscall ABI decoding, count
 //! clamping, timeouts, and robust-list processing belong to `ksyscall` and
@@ -24,4 +27,8 @@ mod table;
 mod waiter;
 mod wake_op;
 
-pub use self::{key::FutexKey, table::global_table, wake_op::FutexWakeOp};
+pub use self::{
+    key::FutexKey,
+    table::{PiFutexContext, global_table},
+    wake_op::FutexWakeOp,
+};

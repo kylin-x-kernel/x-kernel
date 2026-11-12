@@ -27,6 +27,7 @@ kalloc-types.workspace = true
 kiface-time-api.workspace = true
 kcompletion.workspace = true
 kmutex.workspace = true
+krtmutex.workspace = true
 kiface-task-api.workspace = true
 kiface-task-wait-api.workspace = true
 kerrno.workspace = true

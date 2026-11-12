@@ -22,6 +22,7 @@ stats = ["dep:klockstat", "dep:linkme", "klockstat/stats", "kmutex/stats", "kspi
 [dependencies]
 ktask.workspace = true
 kmutex.workspace = true
+krtmutex.workspace = true
 event-listener.workspace = true
 kspin.workspace = true
 klockstat = { workspace = true, optional = true }

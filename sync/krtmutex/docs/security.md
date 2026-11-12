@@ -11,9 +11,10 @@ the write of a boost into the scheduler. The level must be that task's own
 effective priority, including any boost it already inherited. `set_boost`
 must not take a run-queue lock while the graph lock is held.
 
-The graph does not read user memory and does not accept a caller-supplied
-owner. The owner is the current task that successfully called `lock` or
-`try_lock`.
+The graph does not read user memory. `RtMutex` selects the current task;
+`RawRtMutex` additionally accepts a validated live owner from a trusted host.
+Its wait is task-bound and borrows the raw lock; success or a grant winning
+cancellation requires explicit unlock. Raw ownership protects no Rust data.
 
 ## External boundaries
 
@@ -45,6 +46,8 @@ critical section is visible in the function signatures.
 
 - A waiter's `Arc` keeps the lock state alive while the waiter is linked.
 - Handoff and waker registration share the graph lock, so a wakeup is not lost.
+- Preemption stays disabled through deboost and wake delivery, preventing a
+  medium-priority peer from delaying the new owner before it becomes runnable.
 - `wake` and `set_boost` are not called under the graph lock, so they do not invert the order with a run-queue lock.
 - Every submitted boost is rechecked against the highest donor; stale writes
   retry before propagation returns or follows the owner chain.
@@ -92,8 +95,8 @@ the reference the host gives the graph. It is not written to a log.
 
 - Every inheritance lock shares one global graph lock.
 - Waiters are allocated while that lock is held.
-- The API cannot lock on behalf of another task, and a wait cannot be
-  cancelled, timed out, or interrupted by a signal.
+- Enqueueing on behalf of another task is unsupported. `RtMutex::lock` is
+  uninterruptible; raw waits expose cancellation for a host timeout/signal wrapper.
 - Deadline bandwidth is not inherited. A Deadline waiter donates RT `99`.
 
 ## Audit checklist
@@ -103,3 +106,9 @@ the reference the host gives the graph. It is not written to a log.
 - A waiter's key is changed only after it is unlinked from both trees.
 - A failed enqueue leaves no `blocked_on` and no tree node.
 - The guard is still not `Send`.
+
+Deferred raw operations return task-bound `PiEffects`. Callers release their
+wait-source locks before dropping effects, polling or cancelling a wait.
+`unlock_deferred` invokes a trusted nofault commit under the graph lock before
+ownership transfer; a commit error leaves graph state unchanged. Its callback
+must not block, allocate, acquire graph/scheduler locks or unwind.

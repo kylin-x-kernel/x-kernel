@@ -5,8 +5,10 @@
 //! The inheritance graph: lock waiter trees, per-task donor trees and the
 //! chain walk that keeps boosts equal to the highest donation.
 //!
-//! One global lock guards every tree. Host callbacks that may take run-queue
-//! locks, and waker calls, run only after that lock is released.
+//! One global lock guards every tree. It is `SpinNoPreempt`: every accessor
+//! runs in task context, so there is no IRQ contender. Host callbacks that
+//! may take run-queue locks, and waker calls, run only after that lock is
+//! released.
 
 use alloc::sync::Arc;
 use core::{
@@ -18,7 +20,7 @@ use core::{
 
 use intrusive_collections::{KeyAdapter, RBTree, RBTreeAtomicLink, intrusive_adapter};
 use kerrno::{KError, KErrorKind, KResult};
-use kspin::SpinNoIrq;
+use kspin::SpinNoPreempt;
 
 use crate::PiHost;
 
@@ -28,7 +30,9 @@ const MAX_PI_DEPTH: usize = 1024;
 
 static NEXT_SEQ: AtomicU64 = AtomicU64::new(1);
 
-static PI_GRAPH: SpinNoIrq<()> = SpinNoIrq::new(());
+kspin::static_lock! {
+    static PI_GRAPH: SpinNoPreempt<()> = SpinNoPreempt::new(());
+}
 
 /// Proof that [`PI_GRAPH`] is held. Graph fields are reachable only through it.
 pub(crate) struct GraphToken(());
@@ -112,8 +116,9 @@ impl<H: PiHost> Waiter<H> {
         // SAFETY: `PI_GRAPH` is held.
         unsafe {
             *self.is_granted.get() = true;
-            (*self.waker.get()).take()
         }
+        // SAFETY: `PI_GRAPH` is still held, excluding waker registration.
+        unsafe { (*self.waker.get()).take() }
     }
 
     pub(crate) fn is_queued(&self) -> bool {
@@ -181,6 +186,11 @@ impl<H: PiHost> LockState<H> {
         }
     }
 
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "CG-024-lint-exceptions: clippy::mut_from_ref: PI_GRAPH owns this cell; the \
+                  token proves exclusion and graph callers do not retain overlapping borrows"
+    )]
     pub(crate) fn inner(&self, _: &GraphToken) -> &mut LockInner<H> {
         // SAFETY: `GraphToken` exists only while `PI_GRAPH` is held, which is
         // not re-entered, so no other reference to the cell is live.
@@ -235,12 +245,21 @@ impl<H: PiHost> PiTaskNode<H> {
 
     #[expect(
         clippy::mut_from_ref,
-        reason = "the donor tree is owned by `PI_GRAPH`, which the token proves held"
+        reason = "CG-024-lint-exceptions: clippy::mut_from_ref: the donor tree is owned by \
+                  PI_GRAPH, which the token proves held; graph callers do not overlap borrows"
     )]
     fn donors(&self, _: &GraphToken) -> &mut RBTree<DonorAdapter<H>> {
         // SAFETY: `PI_GRAPH` is held and not re-entered.
         unsafe { &mut *self.donors.get() }
     }
+}
+
+pub(crate) fn next_owner<H: PiHost>(lock: &LockState<H>, token: &GraphToken) -> Option<H::Task> {
+    lock.inner(token)
+        .waiters
+        .front()
+        .get()
+        .map(|waiter| waiter.task.clone())
 }
 
 fn donor_boost<H: PiHost>(task: &H::Task, token: &GraphToken) -> u8 {
@@ -312,10 +331,10 @@ fn refresh_top<H: PiHost>(lock: &LockState<H>, token: &GraphToken) {
     if is_same {
         return;
     }
-    if let Some(old) = inner.top.take() {
-        if let Some(owner) = inner.owner.as_ref() {
-            unlink_donor(owner, &old, token);
-        }
+    if let Some(old) = inner.top.take()
+        && let Some(owner) = inner.owner.as_ref()
+    {
+        unlink_donor(owner, &old, token);
     }
     if let (Some(front), Some(owner)) = (front.as_ref(), inner.owner.as_ref()) {
         link_donor(owner, front, token);
@@ -361,10 +380,10 @@ pub(crate) struct Transfer<H: PiHost> {
 /// Gives the lock to its front waiter, or leaves it free with no waiters.
 pub(crate) fn transfer<H: PiHost>(lock: &LockState<H>, token: &GraphToken) -> Transfer<H> {
     let inner = lock.inner(token);
-    if let Some(top) = inner.top.take() {
-        if let Some(owner) = inner.owner.as_ref() {
-            unlink_donor(owner, &top, token);
-        }
+    if let Some(top) = inner.top.take()
+        && let Some(owner) = inner.owner.as_ref()
+    {
+        unlink_donor(owner, &top, token);
     }
     let old_owner = inner.owner.take();
     let next = inner.waiters.front_mut().remove();

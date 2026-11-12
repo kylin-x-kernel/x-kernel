@@ -5,13 +5,23 @@
 `krtmutex` owns a sleeping mutex with priority inheritance. A waiter lends its
 priority to the owner, and through the owner to whatever that owner waits for.
 The scheduler implements `PiHost`: it embeds one `PiTaskNode` in each task,
-reports a donation level, and applies the boost. No host is linked yet.
+reports a donation level, and applies the boost. `ktask::TaskPiHost` supplies
+the kernel provider, exposed through `ksync::RtMutex<T>`.
 
 The lock algorithm does not depend on `ktask` or `khal`. Blocking uses
 `kiface_task_api::TaskExecutionIf::block_on`.
 
-Ordinary futex `WAIT`/`WAKE` does not enter this crate. An API that enqueues
-on behalf of another task is not provided yet.
+Ordinary futex `WAIT`/`WAKE` does not enter this crate. `RawRtMutex` exposes
+the same graph without Rust data or a guard: it adopts a validated live owner,
+enrolls the current task through `PiWait`, and releases an explicit owner.
+Successful waits retain ownership; `cancel` consumes a wait and returns false
+when handoff won, retaining that grant. Dropping an unfinished wait instead
+withdraws or passes on a grant. Ordinary raw operations require task context with no external wait-source or
+scheduler locks. The deferred variants permit bucket -> graph nesting:
+enrollment and external ownership commit occur under the graph lock, then
+`PiEffects` is dropped after bucket unlock to publish boosts and wakes. Commit
+callbacks must not block, allocate, reenter graph/scheduler locks or unwind.
+Explicit-task PI requeue is not provided.
 
 ## Architecture
 
@@ -49,8 +59,10 @@ boot and interrupt context are unsupported.
 
 `PiHost::donor_priority` runs under the graph lock and must not take a
 run-queue lock. `PiHost::set_boost` runs after that lock is released, so the
-host may take run-queue locks. The host calls `adjust_waiter_priority` after
-`sched_setattr` has dropped its run-queue lock.
+host may take run-queue locks, but it must not voluntarily block.
+`PiEffects` drop calls it with preemption disabled from deboost through wake
+delivery. The host calls `adjust_waiter_priority` after `sched_setattr` has
+dropped its run-queue lock.
 
 The guard is not `Send`. The owning task may migrate between CPUs, but another
 task cannot take the guard. Locking a mutex this task already owns returns
@@ -74,6 +86,8 @@ maximum donor level, or `0` when it has no donors.
 4. The current task sleeps through `block_on`. Handoff moves the lock to the
    front waiter and takes its waker under the graph lock. `wake` runs only
    after that lock is released and both boosts have been propagated.
+   Preemption stays disabled until wake delivery, so deboost cannot dispatch
+   a medium-priority peer before the new owner becomes runnable.
 5. After `sched_setattr` changes a waiting task's policy,
    `adjust_waiter_priority` re-sorts its key and propagates from the owner.
 
@@ -85,7 +99,8 @@ to the highest waiter and recomputes both boosts.
 
 ## Concurrency
 
-One global `PI_GRAPH` (`SpinNoIrq`) guards every waiter tree and donor tree.
+One global `PI_GRAPH` (`SpinNoPreempt`) guards every waiter tree and donor tree.
+Access is task context only, so the lock does not mask IRQs.
 The critical section only edits those trees and calls `donor_priority`.
 `set_boost` and `Waker::wake` run after the graph lock is released, so they
 do not deadlock with a task blocked in `schedule` that already holds its
@@ -100,8 +115,8 @@ dropping per-lock locks. Every inheritance lock shares it.
 
 - The graph and the scheduler are separate. Policy stays in `PiHost`. The
   graph only compares levels in `0..=99`.
-- This version exposes only the current-task `RtMutex<T>`. Explicit-task
-  locking and a cancellable wait belong with futex PI.
+- `RtMutex<T>` owns Rust data and an RAII guard. `RawRtMutex` reuses its
+  graph and wait implementation for explicit ownership and cancellation.
 - One global graph lock, rather than a wait lock per mutex plus a pi lock
   per task.
 - `const fn new` is possible because the shared state is a lazy `Arc`. A

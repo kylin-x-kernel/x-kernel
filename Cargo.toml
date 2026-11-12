@@ -156,6 +156,7 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc",
 kpoll = { path = "task/kpoll" }
 kcompletion = { path = "sync/kcompletion" }
 kmutex = { path = "sync/kmutex" }
+krtmutex = { path = "sync/krtmutex" }
 kiface-task-api = { path = "util/kiface/crates/task-api" }
 kiface-mm-api = { path = "util/kiface/crates/mm-api" }
 kiface-logging-api = { path = "util/kiface/crates/logging-api" }

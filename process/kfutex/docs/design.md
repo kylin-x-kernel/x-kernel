@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`kfutex` owns the concurrency semantics of non-PI futexes: the canonical
+`kfutex` owns ordinary futex concurrency and kernel PI ownership: the canonical
 key, the global fixed bucket table, the waiter state machine, and the
 linearization rules of wait/wake/requeue/wake-op. Syscall ABI decoding,
 timeout-flag parsing, count clamping, and robust-list walking stay in
@@ -10,17 +10,11 @@ timeout-flag parsing, count clamping, and robust-list walking stay in
 latter drives robust owner-death notification through this crate's key
 resolution and wake primitives.
 
-PI futexes are out of scope for the current stage; until the scheduler
-provides real priorities and a donation graph, PI state must not be mixed
-into the non-PI buckets. `ksyscall` rejects `FUTEX_LOCK_PI` with
-`EOPNOTSUPP` before resolving a key and leaves the other PI commands on
-Linux's `ENOSYS` path, so no PI request reaches this crate. The single-command
-exception is a musl/PulseAudio compatibility choice rather than PI support:
-musl's `pthread_mutexattr_setprotocol` returns the `LOCK_PI` probe errno to
-PulseAudio, which only accepts `EOPNOTSUPP` as "PI unavailable" and otherwise
-aborts instead of using a non-PI mutex. Only `LOCK_PI` may use that errno:
-glibc's `pthread_mutex_init` probes `UNLOCK_PI`, treats only `ENOSYS` as
-missing PI support, and aborts on an unexpected errno.
+The three PI commands use `krtmutex::RawRtMutex`. Internal calls accept a
+canonical key and validated owner; user calls also synchronize TID, WAITERS and
+OWNER_DIED through nofault atomics. `PiFutexContext` supplies process lookup,
+exit-state and mapping services without making `kfutex` depend on `kprocess`.
+Syscall decoding and robust-list traversal remain in their existing owners.
 
 ## Scope
 
@@ -28,9 +22,11 @@ missing PI support, and aborts on an unexpected errno.
 process/kfutex/src/
 ├── key.rs       canonical private/shared key
 ├── table.rs     static buckets, compound operations, GlobalFutexTable handle
+├── pi.rs        PI state definitions, internal commands and retirement
+├── pi_user.rs   user-word PI transactions and exit handoff
 ├── waiter.rs    Arc waiter, route, and checked terminal-state transitions
 ├── wake_op.rs   FUTEX_WAKE_OP decode/arithmetic
-└── lib.rs       re-exports (FutexKey, global_table, FutexWakeOp)
+└── lib.rs       re-exports (FutexKey, global_table, PiFutexContext, FutexWakeOp)
 ```
 
 ```text
@@ -43,8 +39,42 @@ MmSpace::resolve_futex_backing
 global FutexTable[256]  (lazy, hash-seeded, permanent)
           |
           v
-SpinNoPreempt<VecDeque<Arc<FutexWaiter>>>
+SpinNoPreempt<BucketState>
+  ├── ordinary VecDeque<Arc<FutexWaiter>>
+  └── PI BTreeMap<key projection, PiState>
 ```
+
+## PI state and common table
+
+`table.rs` owns bucket storage and ordinary operations; `pi.rs` owns the PI
+index/value types, ownership and reclamation. `pi_user.rs` implements the user
+protocol. Ordinary and PI state are separate, but share the bucket lock so a
+key cannot acquire both kinds of waiter. Ordinary enrollment, checked wake,
+requeue and wake-op reject active PI keys; ordinary wake never grants PI ownership.
+
+An uncontended user acquisition CASes the word without creating kernel state.
+A contender looks up the owner outside locks, then under the bucket lock
+rechecks the word and owner's exit flag, sets WAITERS and publishes an adopted
+raw lock. Enrollment takes bucket -> PI graph; donation and wake effects run
+only after bucket unlock. Unlock commits the next TID before graph handoff.
+`PiEffects` retains preemption exclusion until donation and wake delivery finish.
+Timeout/signal returns an error only when cancellation wins over handoff.
+
+Fault-in runs outside locks and retries with a newly resolved key. Acquired
+waiters revalidate the key and repair their user word before returning; failed
+repair passes ownership on. Exit first publishes the task-exiting flag, then
+sweeps buckets and hands owned locks on with owner-death metadata. A waiter
+repairs through its own mapping, including a shared alias in another process.
+
+Internal commands pin entries until free and unpinned. User entries retire when
+no call/waiter remains; their word retains ownership for later adoption. Free
+user entries may also be detached with lookups in flight: every subsequent user mutation rechecks Arc
+identity under the bucket lock. This permits userspace fast acquisition after
+an unlock publishes zero without splitting a live kernel owner.
+
+This separation follows Linux's shared hash-bucket synchronization and distinct
+[PI implementation](https://github.com/torvalds/linux/blob/master/kernel/futex/pi.c).
+Our separate per-bucket PI index avoids changing the ordinary waiter type.
 
 ## Key contract
 
@@ -118,9 +148,8 @@ next).
 ## Bucket lifetime and lock ordering
 
 The 256 buckets are created once on first futex use (lazily seeded from the
-monotonic clock) and live forever. There is no dynamic key-to-entry cache,
-so empty keys need no reclamation and no entry-drop-vs-wake use-after-free
-window exists.
+monotonic clock) and live forever. Ordinary keys need no reclamation; PI entry retirement follows the pin and
+identity-validation rules above.
 
 Two-bucket operations always lock the lower index first. Waiter route
 metadata is mutated only while holding the covering bucket lock(s); the
@@ -130,17 +159,16 @@ cancellation path must re-validate its snapshot inside the lock.
 
 The concrete `FutexTable` is crate-private; `global_table()` returns the
 zero-sized `GlobalFutexTable` handle exposing `wait`, `wake`, `wake_op`,
-and `requeue`. This keeps the table type out of the public API while
-method chaining stays unchanged.
+`requeue`, checked wake, internal PI operations, user PI operations and exit
+cleanup. The concrete table stays private.
 
 ## Robust mutex interaction
 
-Robust owner death is encoded only into the user futex word: preserve
-`FUTEX_WAITERS`, clear the TID, set `FUTEX_OWNER_DIED`, then optionally
-wake one waiter based on the WAITERS bit — the walk lives in
-`posix/process` (`exit_robust_list`) and `ksyscall`. `kfutex` keeps no
-kernel-side `owner_dead` flag, and plain `FUTEX_WAIT` never returns
-`EOWNERDEAD`; pthread mutex protocols produce that error in user space.
+The robust-list walker preserves WAITERS, clears TID and sets OWNER_DIED in
+the word. Ordinary entries may wake one waiter; PI entries use the subsequent
+PI exit sweep instead. Plain WAIT never returns EOWNERDEAD; pthread protocols
+interpret the word and produce that result in userspace. The PI metadata
+retains owner death until the next waiter has repaired its own mapping.
 
 ## Testing
 
@@ -158,3 +186,7 @@ The migration preserves module visibility, feature gates and execution modes.
 - `ut-tests/wake_op.rs`: mounted by `src/wake_op.rs` as `tests`.
 - `ut-tests/waiter.rs`: mounted by `src/waiter.rs` as `tests`.
 - `ut-tests/table.rs`: mounted by `src/table.rs` as `tests`.
+
+- `ut-tests/pi.rs`: internal PI ownership, donation, cancellation and pin lifetime.
+- `ksyscall/ut-tests/sync/futex/tests.rs`: user PI word, errors, contention,
+  timeout, interruption, faults and owner exit.

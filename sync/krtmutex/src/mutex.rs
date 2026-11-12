@@ -110,6 +110,13 @@ impl<H: PiHost, T: ?Sized> RtMutex<H, T> {
 
     /// Queues `task`, or records that it owns a lock which became free.
     fn queue(&self, task: &H::Task) -> KResult<Wait<H>> {
+        let (wait, effects) = self.queue_deferred(task)?;
+        drop(effects);
+        Ok(wait)
+    }
+
+    fn queue_deferred(&self, task: &H::Task) -> KResult<(Wait<H>, PiEffects<H>)> {
+        let preempt = kspin::NoPreempt::new();
         let state = self.state();
         let queued = with_graph(|token| {
             if H::node(task).blocked(token).is_some() {
@@ -126,15 +133,17 @@ impl<H: PiHost, T: ?Sized> RtMutex<H, T> {
             Ok(Some((waiter, owner)))
         })?;
         let Some((waiter, owner)) = queued else {
-            return Ok(Wait {
-                pending: Some(Pending::Acquired(state.clone())),
-            });
+            return Ok((
+                Wait {
+                    pending: Some(Pending::Acquired(state.clone())),
+                },
+                PiEffects::new(None, None, None, preempt),
+            ));
         };
         let wait = Wait {
             pending: Some(Pending::Queued(waiter)),
         };
-        graph::propagate::<H>(owner);
-        Ok(wait)
+        Ok((wait, PiEffects::new(Some(owner), None, None, preempt)))
     }
 }
 
@@ -158,22 +167,74 @@ impl<H: PiHost, T: ?Sized> Drop for RtMutex<H, T> {
 }
 
 fn release<H: PiHost>(state: &LockState<H>, owner: &H::Task) -> KResult<()> {
+    drop(release_deferred(state, owner, |_| Ok(()))?);
+    Ok(())
+}
+
+fn release_deferred<H: PiHost>(
+    state: &LockState<H>,
+    owner: &H::Task,
+    commit: impl FnOnce(Option<&H::Task>) -> KResult<()>,
+) -> KResult<PiEffects<H>> {
+    let preempt = kspin::NoPreempt::new();
     let transfer = with_graph(|token| {
         if !state.is_owned_by(owner, token) {
             return Err(KError::from(KErrorKind::OperationNotPermitted));
         }
+        let next = graph::next_owner(state, token);
+        commit(next.as_ref())?;
         Ok(graph::transfer(state, token))
     })?;
-    if let Some(old) = transfer.old_owner {
-        graph::propagate::<H>(old);
+    Ok(PiEffects::new(
+        transfer.old_owner,
+        transfer.new_owner,
+        transfer.waker,
+        preempt,
+    ))
+}
+
+/// Deferred donation and wake delivery, retaining the current preemption credit.
+///
+/// Drop only after releasing external wait-source locks. This keeps deboost
+/// from dispatching a peer before the new owner has been made runnable.
+#[must_use = "drop after releasing the wait-source lock to publish boosts and wakes"]
+pub struct PiEffects<H: PiHost> {
+    old: Option<H::Task>,
+    new: Option<H::Task>,
+    waker: Option<core::task::Waker>,
+    _preempt: kspin::NoPreempt,
+    _task_bound: PhantomData<*const ()>,
+}
+
+impl<H: PiHost> PiEffects<H> {
+    fn new(
+        old: Option<H::Task>,
+        new: Option<H::Task>,
+        waker: Option<core::task::Waker>,
+        preempt: kspin::NoPreempt,
+    ) -> Self {
+        Self {
+            old,
+            new,
+            waker,
+            _preempt: preempt,
+            _task_bound: PhantomData,
+        }
     }
-    if let Some(new) = transfer.new_owner {
-        graph::propagate::<H>(new);
+}
+
+impl<H: PiHost> Drop for PiEffects<H> {
+    fn drop(&mut self) {
+        if let Some(old) = self.old.take() {
+            graph::propagate::<H>(old);
+        }
+        if let Some(new) = self.new.take() {
+            graph::propagate::<H>(new);
+        }
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
     }
-    if let Some(waker) = transfer.waker {
-        waker.wake();
-    }
-    Ok(())
 }
 
 enum Pending<H: PiHost> {
@@ -297,5 +358,137 @@ impl<H: PiHost, T: ?Sized> RtMutex<H, T> {
             return Err(KError::from(KErrorKind::OperationNotPermitted));
         };
         release(state, &H::current())
+    }
+}
+
+/// Priority-inheritance ownership without protected Rust data or an RAII guard.
+///
+/// Used by futex cores whose ownership survives a syscall return. Operations
+/// require task context; release all ownership before retiring the task.
+pub struct RawRtMutex<H: PiHost> {
+    mutex: RtMutex<H, ()>,
+}
+
+impl<H: PiHost> RawRtMutex<H> {
+    /// Creates a lock with an optional validated, live owner supplied by its caller.
+    pub fn new(owner: Option<H::Task>) -> Self {
+        let mutex = RtMutex::new(());
+        let state = mutex.state();
+        with_graph(|token| state.inner(token).owner = owner);
+        Self { mutex }
+    }
+
+    /// Tests identity under the graph lock without borrowing task state.
+    pub fn is_owned_by(&self, owner: &H::Task) -> bool {
+        with_graph(|token| self.mutex.state().is_owned_by(owner, token))
+    }
+
+    /// Enrolls under a caller's wait-source lock, deferring scheduler effects.
+    ///
+    /// # Errors
+    /// Returns the same errors as `begin_lock`. Drop the effects after releasing
+    /// the external lock, before polling or cancelling the returned wait.
+    pub fn begin_lock_deferred(&self) -> KResult<(PiWait<'_, H>, PiEffects<H>)> {
+        let (wait, effects) = self.mutex.queue_deferred(&H::current())?;
+        Ok((
+            PiWait {
+                wait,
+                _task_bound: PhantomData,
+            },
+            effects,
+        ))
+    }
+
+    /// Commits external ownership before handoff while the graph lock is held.
+    ///
+    /// `commit` must not block, allocate, acquire scheduler/graph locks or unwind.
+    /// Drop the returned effects only after releasing the external source lock.
+    ///
+    /// # Errors
+    /// Returns `OperationNotPermitted` for a mismatched owner, or the commit
+    /// error with ownership and waiter state unchanged.
+    pub fn unlock_deferred(
+        &self,
+        owner: &H::Task,
+        commit: impl FnOnce(Option<&H::Task>) -> KResult<()>,
+    ) -> KResult<PiEffects<H>> {
+        release_deferred(self.mutex.state(), owner, commit)
+    }
+
+    /// Enrolls the current task and immediately propagates its donation.
+    ///
+    /// Await the returned task-bound future before accessing the protected
+    /// resource. Dropping an unfinished wait withdraws it and any grant.
+    /// Call without scheduler or external wait-source locks held.
+    ///
+    /// # Errors
+    /// Returns `Deadlock` for recursion/cycles or `BadState` for a second PI wait.
+    pub fn begin_lock(&self) -> KResult<PiWait<'_, H>> {
+        Ok(PiWait {
+            wait: self.mutex.queue(&H::current())?,
+            _task_bound: PhantomData,
+        })
+    }
+
+    /// Acquires for the current task without waiting; `false` means contention.
+    ///
+    /// # Errors
+    /// Returns `Deadlock` when the current task already owns the lock.
+    pub fn try_lock(&self) -> KResult<bool> {
+        self.mutex.try_acquire(&H::current())
+    }
+
+    /// Releases a validated owner, including an owner being retired by its host.
+    ///
+    /// Call without scheduler or external wait-source locks held.
+    ///
+    /// # Errors
+    /// Returns `OperationNotPermitted` when `owner` does not own this lock.
+    pub fn unlock(&self, owner: &H::Task) -> KResult<()> {
+        release(self.mutex.state(), owner)
+    }
+
+    /// Whether an owner is installed, including a grant not yet polled.
+    pub fn is_locked(&self) -> bool {
+        with_graph(|token| self.mutex.state().inner(token).owner.is_some())
+    }
+}
+
+/// Task-bound enrollment in a [`RawRtMutex`]; success retains ownership.
+pub struct PiWait<'a, H: PiHost> {
+    wait: Wait<H>,
+    _task_bound: PhantomData<(&'a RawRtMutex<H>, *const ())>,
+}
+
+impl<H: PiHost> PiWait<'_, H> {
+    /// Consumes the wait, returning whether cancellation beat lock handoff.
+    ///
+    /// `false` means this task owns the lock and must explicitly unlock it.
+    /// Call without scheduler or external wait-source locks held.
+    pub fn cancel(mut self) -> bool {
+        let Some(pending) = self.wait.pending.take() else {
+            return false;
+        };
+        let Pending::Queued(waiter) = pending else {
+            return false;
+        };
+        let (is_cancelled, owner) = with_graph(|token| {
+            if waiter.is_granted(token) {
+                return (false, None);
+            }
+            (true, graph::dequeue(&waiter, token))
+        });
+        if let Some(owner) = owner {
+            graph::propagate::<H>(owner);
+        }
+        is_cancelled
+    }
+}
+
+impl<H: PiHost> Future for PiWait<'_, H> {
+    type Output = KResult<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().wait).poll(cx)
     }
 }

@@ -11,8 +11,9 @@
 //! [`PiTaskNode`] in every task, report donation levels and apply boosts.
 //! Blocking uses `kiface_task_api::TaskExecutionIf::block_on`.
 //!
-//! Operations act on the current task. A futex layer that must enqueue another
-//! task has to grow a separate explicit-task API; this crate does not provide one.
+//! [`RawRtMutex`] adopts a validated owner and exposes a cancellable current-task
+//! [`PiWait`], retaining ownership after success until an explicit unlock.
+//! Enqueueing another task for PI requeue is not provided.
 //!
 //! ```ignore
 //! // `Host` is the scheduler's `PiHost`; in sleepable task context:
@@ -30,4 +31,4 @@ mod mutex;
 
 pub use graph::{PiTaskNode, adjust_waiter_priority};
 pub use host::PiHost;
-pub use mutex::{RtMutex, RtMutexGuard};
+pub use mutex::{PiEffects, PiWait, RawRtMutex, RtMutex, RtMutexGuard};
