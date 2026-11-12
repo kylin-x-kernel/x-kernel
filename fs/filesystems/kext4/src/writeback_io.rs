@@ -4,9 +4,13 @@
 
 //! Bounded in-flight data ownership and task-context completion per inode.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 
 use block::completion::BioResult;
+use kalloc_types::KBox;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
 use ktask::WaitQueue;
@@ -14,8 +18,8 @@ use kworkng::{SubmitError, WorkHandle};
 
 use crate::{Ext4Error, Ext4Result, Ext4WritebackError, Ext4WritebackResult};
 
-type CompletionWork = WorkHandle<Box<dyn Fn() + Send + Sync>>;
-type FinishWriteback = Box<dyn Fn(Ext4WritebackResult) + Send + Sync>;
+type CompletionWork = WorkHandle<KBox<dyn Fn() + Send + Sync>>;
+type FinishWriteback = KBox<dyn Fn(Ext4WritebackResult) + Send + Sync>;
 pub(crate) const MAX_INFLIGHT_BATCHES: usize = 4;
 
 struct QueueState {
@@ -46,19 +50,34 @@ impl InodeWritebackIo {
     }
 
     /// Prepares all worker resources before publishing device ownership.
+    ///
+    /// Requires sleepable task context for WorkHandle preparation. The callback
+    /// owner uses NOWAIT: callers hold inode submission exclusion and this path
+    /// holds the worker initialization mutex, neither proven reclaim-safe.
+    /// Owner failure leaves worker initialization retryable; nested WorkHandle,
+    /// Arc and Vec allocations retain their existing fatal OOM behavior.
     pub(crate) fn prepare(self: &Arc<Self>, lengths: Vec<usize>) -> Ext4Result<Arc<WritebackIo>> {
-        let mut work = self.work.lock();
-        if work.is_none() {
-            let weak = Arc::downgrade(self);
-            let callback: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        self.prepare_with(lengths, |weak| {
+            let callback: KBox<dyn Fn() + Send + Sync> = KBox::new_nowait(move || {
                 if let Some(queue) = weak.upgrade() {
                     queue.complete_ready();
                 }
-            });
-            *work = Some(
-                WorkHandle::new(callback)
-                    .map_err(|_| Ext4Error::Device(block::DriverError::BadState))?,
-            );
+            })?;
+            WorkHandle::new(callback).map_err(|_| Ext4Error::Device(block::DriverError::BadState))
+        })
+    }
+
+    /// Uses the same admission path with an injectable worker preparation step.
+    /// The preparation step runs under the initialization mutex and must not
+    /// enter reclaim; all other context requirements match `prepare`.
+    pub(crate) fn prepare_with(
+        self: &Arc<Self>,
+        lengths: Vec<usize>,
+        prepare_work: impl FnOnce(Weak<Self>) -> Ext4Result<CompletionWork>,
+    ) -> Ext4Result<Arc<WritebackIo>> {
+        let mut work = self.work.lock();
+        if work.is_none() {
+            *work = Some(prepare_work(Arc::downgrade(self))?);
         }
         let work = work
             .as_ref()
@@ -182,8 +201,9 @@ pub(crate) struct WritebackIo {
 
 impl WritebackIo {
     /// Called once, before queue installation or submission of any data BIO.
-    pub(crate) fn set_finish(&self, finish: impl Fn(Ext4WritebackResult) + Send + Sync + 'static) {
-        *self.finish.lock() = Some(Box::new(finish));
+    /// Transfers an already prepared owner without allocating.
+    pub(crate) fn set_finish(&self, finish: FinishWriteback) {
+        *self.finish.lock() = Some(finish);
     }
 
     pub(crate) fn end_io(&self, index: usize, result: BioResult) {

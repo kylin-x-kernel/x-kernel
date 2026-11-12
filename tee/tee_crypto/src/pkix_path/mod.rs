@@ -132,7 +132,7 @@ pub struct DerError {
     /// Cached Display rendering of `inner`, preserved across serde
     /// round-trips so that the diagnostic message survives even when
     /// `inner` cannot be reconstructed.
-    message: BoxStr,
+    message: alloc::string::String,
 }
 
 // Hand-written `PartialEq` / `Eq` compare only the cached Display
@@ -149,15 +149,6 @@ impl PartialEq for DerError {
     }
 }
 impl Eq for DerError {}
-
-// Internal: use a Box<str> so the struct is `Clone` cheaply and we keep
-// the heap allocation small. A type alias keeps the `#[cfg(not(feature
-// = "std"))]` use-statements in the rest of the file unchanged. Defined
-// here to localise the no_std-vs-std import.
-#[cfg(not(feature = "std"))]
-type BoxStr = alloc::boxed::Box<str>;
-#[cfg(feature = "std")]
-type BoxStr = std::boxed::Box<str>;
 
 impl DerError {
     /// Construct a `DerError` from a real `der::Error`.
@@ -178,7 +169,7 @@ impl DerError {
         // Pre-render the Display message so it survives serde round-trips
         // even when `inner` cannot be reconstructed on the deserialize side.
         #[cfg(feature = "std")]
-        let message = e.to_string().into_boxed_str();
+        let message = e.to_string();
         #[cfg(not(feature = "std"))]
         let message = {
             use core::fmt::Write as _;
@@ -187,7 +178,7 @@ impl DerError {
             // = (), no I/O); write! against a String returns Ok unless
             // allocation fails.
             let _ = write!(&mut s, "{}", e);
-            s.into_boxed_str()
+            s
         };
         Self {
             inner: Some(e),
@@ -239,7 +230,7 @@ const _: () = {
             let Wire { message } = Wire::deserialize(d)?;
             Ok(Self {
                 inner: None,
-                message: message.into_owned().into_boxed_str(),
+                message: message.into_owned(),
             })
         }
     }

@@ -27,6 +27,18 @@ use tee_crypto::{
 };
 
 #[test]
+fn der_diagnostic_preserves_display_and_clone_equality() {
+    let original = der::Error::from(der::ErrorKind::Failed);
+    let expected = original.to_string();
+    let diagnostic = tee_crypto::pkix::DerError::new(original);
+    let cloned = diagnostic.clone();
+    assert_eq!(diagnostic.to_string(), expected);
+    assert_eq!(diagnostic, cloned);
+    drop(diagnostic);
+    assert_eq!(cloned.to_string(), expected);
+}
+
+#[test]
 fn stitch_ecdsa_p256_sha256_message_der() {
     let mut rng = common::seeded_rng(301);
     let sk = P256SigningKey::try_generate_from_rng(&mut rng).expect("keygen");

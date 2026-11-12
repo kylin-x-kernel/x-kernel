@@ -112,6 +112,11 @@ at public boundaries.
 
 ## Error Details
 
+PKIX `DerError` keeps its rendered diagnostic in a `String`. Formatting,
+cloning, and deserializing that string still use the existing infallible
+allocator contract. Removing the conversion to `Box<str>` adds no allocation
+permissions and does not make error construction safe under allocator OOM.
+
 `CryptoError::Backend(BackendError)` records the failing backend operation
 class without storing backend error strings. This keeps the public error model
 stable and avoids creating string-based protocols for upper layers.

@@ -2,17 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{
-    boxed::Box,
-    sync::{Arc, Weak},
-};
-use core::task::Waker;
+use alloc::sync::{Arc, Weak};
+use core::{mem::MaybeUninit, task::Waker};
 
 use char_driver::CharDevice;
 use console_driver::{
     runtime::stdout_console,
     serial::{self, SerialPort},
 };
+use kalloc_types::{AllocFlags, KBox};
 use kclass::{CharDeviceImpl, ClassDevice};
 use kerrno::KResult;
 use klazy::Once;
@@ -41,19 +39,39 @@ pub struct ConsoleConnection {
 // Only consoles without an input IRQ need periodic backend progress. The
 // input Work publishes readability; this timer never wakes file waiters.
 struct ConsoleInputPoller {
-    work: DelayedWorkHandle<Box<dyn Fn() + Send + Sync>>,
+    work: DelayedWorkHandle<KBox<dyn Fn() + Send + Sync>>,
 }
 
 impl ConsoleInputPoller {
-    fn new(input_waker: Waker) -> Arc<Self> {
-        Arc::new_cyclic(|weak: &Weak<Self>| {
-            let weak = weak.clone();
-            let callback: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-                if let Some(poller) = weak.upgrade() {
-                    input_waker.wake_by_ref();
-                    poller.queue();
+    /// Requires late-init sleepable task context with normal workers available.
+    /// Reserves callback storage with NOWAIT before cyclic-owner construction:
+    /// native Once initialization and the caller's VT mutex must not enter reclaim.
+    /// Failure releases the supplied waker without constructing or queueing work.
+    fn new(input_waker: Waker) -> KResult<Arc<Self>> {
+        Self::new_with_callback(
+            move |weak| {
+                move || {
+                    if let Some(poller) = weak.upgrade() {
+                        input_waker.wake_by_ref();
+                        poller.queue();
+                    }
                 }
-            });
+            },
+            KBox::<_>::new_uninit_with_flags,
+        )
+    }
+
+    fn new_with_callback<F>(
+        build: impl FnOnce(Weak<Self>) -> F,
+        reserve: impl FnOnce(AllocFlags) -> KResult<KBox<MaybeUninit<F>>>,
+    ) -> KResult<Arc<Self>>
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        let storage = reserve(AllocFlags::NOWAIT)?;
+        Ok(Arc::new_cyclic(|weak: &Weak<Self>| {
+            let callback: KBox<F> = KBox::write(storage, build(weak.clone()));
+            let callback: KBox<dyn Fn() + Send + Sync> = callback;
             #[expect(
                 clippy::expect_used,
                 reason = "CG-021-no-panic-on-reachable-failure: native input Work was already \
@@ -62,7 +80,7 @@ impl ConsoleInputPoller {
             let work = DelayedWorkHandle::new(callback)
                 .expect("console input polling requires normal workers");
             Self { work }
-        })
+        }))
     }
 
     fn queue(&self) {
@@ -95,11 +113,20 @@ impl ConsoleConnection {
             .expect("failed to connect console input notification");
     }
 
-    fn poll_input(&self, waker: Waker) {
-        let poller = ConsoleInputPoller::new(waker.clone());
+    fn poll_input(&self, waker: Waker) -> KResult<()> {
+        self.poll_input_with(waker, ConsoleInputPoller::new)
+    }
+
+    fn poll_input_with(
+        &self,
+        waker: Waker,
+        prepare: impl FnOnce(Waker) -> KResult<Arc<ConsoleInputPoller>>,
+    ) -> KResult<()> {
+        let poller = prepare(waker.clone())?;
         poller.queue();
         *self.input_poller.lock() = Some(poller);
         waker.wake_by_ref();
+        Ok(())
     }
 
     fn try_handoff(&self) {
@@ -248,7 +275,7 @@ fn new_n_tty() -> KResult<Arc<NTtyDriver>> {
     if has_input_irq {
         connection.attach_input(waker);
     } else {
-        connection.poll_input(waker);
+        connection.poll_input(waker)?;
     }
     Ok(tty)
 }

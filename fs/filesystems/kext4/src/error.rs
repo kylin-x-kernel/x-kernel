@@ -159,6 +159,8 @@ pub enum CorruptKind {
 /// Errors returned while decoding or mounting an ext4 filesystem.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Ext4Error {
+    /// Preparing an owned allocation failed before resource admission.
+    Allocation(kerrno::KError),
     /// The block driver rejected an I/O operation.
     Device(DriverError),
     /// The journal has aborted and no further metadata mutation is allowed.
@@ -229,9 +231,16 @@ impl From<DriverError> for Ext4Error {
     }
 }
 
+impl From<kerrno::KError> for Ext4Error {
+    fn from(error: kerrno::KError) -> Self {
+        Self::Allocation(error)
+    }
+}
+
 impl fmt::Display for Ext4Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Allocation(error) => write!(formatter, "owner allocation error: {error:?}"),
             Self::Quota(error) => write!(formatter, "quota error: {error:?}"),
             Self::Device(error) => write!(formatter, "block device error: {error}"),
             Self::JournalAborted => formatter.write_str("ext4 journal has aborted"),

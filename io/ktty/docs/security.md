@@ -20,6 +20,19 @@ work shutdown, PTY hangup and identifier-lifetime tests cover successful paths.
 Arc, buffer and workqueue-internal allocations remain infallible; this migration
 does not establish end-to-end OOM safety or a NOFAIL guarantee.
 
+## Polling Callback Reservation
+
+The no-input-IRQ poller reserves its KBox callback storage with NOWAIT before
+constructing the cyclic Arc. This prevents a new reclaim entry while native Once
+initialization or a caller's VT output lock is active. It does not make the whole
+initialization path IRQ-safe or eliminate nested infallible allocations.
+
+Local failure-injection tests verify that reservation failure skips callback
+construction, releases waker captures, leaves the connection slot empty and does
+not notify input. A private Once fixture verifies retry and weak cyclic ownership
+without modifying the native singleton or starting a periodic timer. These tests
+do not force global OOM or validate timer scheduling latency.
+
 ## Scope
 
 This analysis covers the entire `ktty` crate: `src/lib.rs`, `src/port.rs`,

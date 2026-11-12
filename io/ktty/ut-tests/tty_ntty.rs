@@ -11,6 +11,75 @@ use unittest::def_test;
 
 use super::*;
 
+struct PollerWakeProbe(AtomicUsize);
+
+impl alloc::task::Wake for PollerWakeProbe {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[def_test]
+fn poller_owner_failure_does_not_publish_or_notify_and_releases_waker() {
+    let connection = ConsoleConnection::new();
+    let wake_probe = Arc::new(PollerWakeProbe(AtomicUsize::new(0)));
+    let built = core::cell::Cell::new(false);
+    let result = connection.poll_input_with(Waker::from(wake_probe.clone()), |waker| {
+        ConsoleInputPoller::new_with_callback(
+            |_| {
+                built.set(true);
+                move || waker.wake_by_ref()
+            },
+            |flags| {
+                assert_eq!(flags, AllocFlags::NOWAIT);
+                Err(kerrno::KError::NoMemory)
+            },
+        )
+    });
+    assert_eq!(result, Err(kerrno::KError::NoMemory));
+    assert!(!built.get());
+    assert!(connection.input_poller.lock().is_none());
+    assert_eq!(wake_probe.0.load(Ordering::Relaxed), 0);
+    assert_eq!(Arc::strong_count(&wake_probe), 1);
+}
+
+#[def_test]
+fn poller_reservation_failure_leaves_once_retryable_without_a_strong_cycle() {
+    let once = Once::new();
+    let failed = once.try_call_once(|| {
+        ConsoleInputPoller::new_with_callback(
+            |_| || {},
+            |_| Err(kerrno::KError::NoMemory),
+        )
+    });
+    assert!(matches!(failed, Err(kerrno::KError::NoMemory)));
+    assert!(once.get().is_none());
+
+    let weak_owner = core::cell::RefCell::new(Weak::new());
+    let built = core::cell::Cell::new(0);
+    let poller = once
+        .try_call_once(|| {
+            ConsoleInputPoller::new_with_callback(
+                |weak| {
+                    assert!(weak.upgrade().is_none());
+                    *weak_owner.borrow_mut() = weak.clone();
+                    built.set(built.get() + 1);
+                    move || { drop(weak.upgrade()); }
+                },
+                |flags| {
+                    assert_eq!(flags, AllocFlags::NOWAIT);
+                    KBox::<_>::new_uninit_with_flags(flags)
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(built.get(), 1);
+    assert!(Arc::ptr_eq(&weak_owner.borrow().upgrade().unwrap(), poller));
+    poller.work.shutdown().unwrap();
+    drop(once);
+    assert!(weak_owner.borrow().upgrade().is_none());
+}
+
 struct RuntimeIo {
     calls: Arc<AtomicUsize>,
     fails: bool,

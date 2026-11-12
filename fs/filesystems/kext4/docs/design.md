@@ -9,6 +9,23 @@ reclaim that could wait for mount completion. No mount-state lock is held at thi
 allocation. NOWAIT is a conservative local policy for that initialization phase,
 not a claim that the whole fill operation is atomic or non-sleeping.
 
+## Prepared writeback callback owners
+
+The per-inode completion worker and per-batch finish callback use `KBox` owners.
+Both owner allocations use NOWAIT: writeback submission holds inode submission
+exclusion, and worker initialization additionally holds its initialization mutex.
+These paths are sleepable tasks, but reclaim could need the same writeback
+resources. NOWAIT does not make WorkHandle preparation or the full path atomic.
+
+Worker preparation failure leaves the cached handle absent and retryable. Finish
+storage is reserved before moving the callback, installing the request or
+submitting BIOs. On reservation failure, the caller records the error before
+the still-local finish callback drops and releases/redirties cache completion
+captures. Successful reservation is initialized in place without another
+allocation. Existing ordered completion and task-context capture release remain
+unchanged. `Ext4Error::Allocation` preserves the kernel error through `From` and
+the existing VFS conversion, including NoMemory.
+
 ## Shared metadata snapshots
 
 Metadata cache buffers, journal superblock images and frozen transaction lists

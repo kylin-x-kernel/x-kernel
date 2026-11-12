@@ -5,6 +5,10 @@
 //! Stable physical preparation and ordered publication after owned data I/O.
 
 use alloc::{sync::Arc, vec, vec::Vec};
+use core::mem::MaybeUninit;
+
+use kalloc_types::{AllocFlags, KBox};
+use kerrno::KResult;
 
 use super::{
     AllocatedWriteRun, OrderedWritebackData, PartialBlockWrite, block_count_for_byte_span,
@@ -50,16 +54,48 @@ impl PreparedWriteback {
     /// blocks are zero padded, including the unused tail of an appended page.
     /// Preparation failures call `record_error` before dropping `finish` and its
     /// cache completion. Neither callback runs in BIO end-I/O context.
-    pub(crate) fn submit(
+    ///
+    /// Requires sleepable task context with inode submission serialized. Owner
+    /// reservation uses NOWAIT because reclaim may need that submission lock.
+    /// Reservation failure records the error before releasing completion captures
+    /// and precedes queue installation and every BIO submission.
+    pub(crate) fn submit<F>(
         self,
         input: Vec<u8>,
         queue: &Arc<crate::writeback_io::InodeWritebackIo>,
-        finish: impl Fn(Ext4WritebackResult) + Send + Sync + 'static,
+        finish: F,
         record_error: impl Fn(Ext4Error),
-    ) -> Ext4Result<()> {
+    ) -> Ext4Result<()>
+    where
+        F: Fn(Ext4WritebackResult) + Send + Sync + 'static,
+    {
+        self.submit_with_storage(
+            input,
+            queue,
+            finish,
+            record_error,
+            KBox::<F>::new_uninit_with_flags,
+        )
+    }
+
+    pub(super) fn submit_with_storage<F>(
+        self,
+        input: Vec<u8>,
+        queue: &Arc<crate::writeback_io::InodeWritebackIo>,
+        finish: F,
+        record_error: impl Fn(Ext4Error),
+        reserve: impl FnOnce(AllocFlags) -> KResult<KBox<MaybeUninit<F>>>,
+    ) -> Ext4Result<()>
+    where
+        F: Fn(Ext4WritebackResult) + Send + Sync + 'static,
+    {
         let io = queue
             .prepare(self.runs.iter().map(|run| run.mapping.write_len).collect())
             .inspect_err(|&error| record_error(error))?;
+        let storage = reserve(AllocFlags::NOWAIT)
+            .map_err(Ext4Error::from)
+            .inspect_err(|&error| record_error(error))?;
+        let finish: KBox<F> = KBox::write(storage, finish);
         io.set_finish(finish);
         let prepared = self
             .prepare_bios(input, &io)

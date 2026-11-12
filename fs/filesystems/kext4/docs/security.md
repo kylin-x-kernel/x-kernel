@@ -10,6 +10,22 @@ this allocation failure precedes orphan mutations. Prior journal replay is not
 undone, and nested mount allocations keep their existing contracts. NOFS still permits reclaim/I/O and is not used as a proof
 that canonical-device initialization can safely be re-entered.
 
+## Writeback callback allocation boundary
+
+Callback owner OOM returns NoMemory before queue sequence/slot publication and
+before any data BIO submission. The finish callback is not moved into a fallible
+constructor: failed reservation first records the error, then releases captures
+in the submitting task. Worker initialization remains retryable; an already
+prepared worker is reused. Prior unwritten extent allocation is not rolled back
+by this owner change and retains the existing retry contract.
+
+Tests inject failure into private worker preparation and finish reservation, not
+the global allocator. They check unpublished state, retry, NOWAIT reservation,
+error-before-capture-drop ordering, no submitted data writes and exactly-once
+completion/capture destruction on retry. WorkHandle storage, Arc/Vec allocations,
+BIO callbacks and BIO buffers keep their existing allocation contracts; this is
+not end-to-end OOM safety. NOWAIT does not promise NMI safety or bounded latency.
+
 ## Shared snapshot allocation boundary
 
 Direct vector-to-`Arc` conversion does not make metadata snapshots fallible:

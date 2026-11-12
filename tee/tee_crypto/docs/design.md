@@ -7,6 +7,12 @@ TA builds.
 
 ## Goals
 
+PKIX `DerError` retains its rendered diagnostic as the original `String`,
+without converting it to `Box<str>`. Display, textual equality, cloning, and
+the serde message field retain their semantics. This avoids a capacity-shrink
+conversion, but retains the capacity word and any spare buffer capacity;
+it is not a zero-allocation or fallible-allocation change.
+
 - Provide stable, typed Rust APIs for the algorithms required by `rust-libutee`
   and TEE tests.
 - Keep backend dependencies behind small wrapper modules so callers do not

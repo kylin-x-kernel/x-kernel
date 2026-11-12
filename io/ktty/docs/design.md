@@ -29,6 +29,15 @@ retains the existing boot console. VT output propagates preparation failure.
 The former public VT lazy value is likewise replaced by `vt_console()`; its
 manual input mode does not allocate a callback owner.
 
+For consoles without an input IRQ, the periodic poller's callback owner is also
+a KBox. Its sized storage is reserved with NOWAIT before entering Arc::new_cyclic;
+the cyclic initializer only writes that storage and prepares the existing delayed
+work handle. Reservation failure constructs no poller, queues no work, installs
+no connection slot and issues no initial wake. The error propagates through
+native_tty's retryable Once. Weak self-capture and the existing 10 ms requeue
+behavior are unchanged. Arc and delayed-work internal allocations retain their
+existing contracts and normal-worker availability remains a precondition.
+
 ## Guest Test Layout
 
 Guest tests live in crate-root `ut-tests/`, mounted with
@@ -43,11 +52,11 @@ the previously included port, connection and PTY fixtures.
 | `terminal::termios::termios_tests` | `terminal_termios.rs` | 7 |
 | `tty::tests` | `tty.rs` | 2 |
 | `tty::tests_pty` | `tty_pty.rs` | 7 |
-| `tty::ntty::tests` | `tty_ntty.rs` | 5 |
+| `tty::ntty::tests` | `tty_ntty.rs` | 7 |
 | `tty::pty_pair::tests` | `pty_lifecycle.rs` | 9 |
 | `tty::vt::tests` | `tty_vt.rs` | 5 |
 
-The eight modules contain 59 cases, with no additional architecture/feature
+The eight modules contain 61 cases, with no additional architecture/feature
 gates. Ten cases retain `serial`, four retain `user`, and three carry both.
 These totals count `#[def_test]` registrations in the eight listed source files,
 not successful executions in a particular guest run. The PTY lifecycle module

@@ -22,6 +22,108 @@ use crate::{
     },
 };
 
+struct FinishDropProbe(Arc<ksync::Mutex<alloc::vec::Vec<&'static str>>>);
+
+impl FinishDropProbe {
+    fn record_call(&self) {
+        self.0.lock().push("call");
+    }
+}
+
+impl Drop for FinishDropProbe {
+    fn drop(&mut self) {
+        self.0.lock().push("drop");
+    }
+}
+
+#[def_test]
+fn worker_preparation_failure_leaves_queue_unpublished_and_retryable() {
+    let queue = Arc::new(crate::writeback_io::InodeWritebackIo::new());
+    let result = queue.prepare_with(vec![512], |weak| {
+        assert!(weak.upgrade().is_some());
+        Err(kerrno::KError::NoMemory.into())
+    });
+    assert!(matches!(result, Err(Ext4Error::Allocation(kerrno::KError::NoMemory))));
+    assert_eq!(Arc::weak_count(&queue), 0);
+    assert_eq!(queue.snapshot(), 0);
+    assert!(queue.has_capacity());
+
+    let io = queue.prepare(vec![512]).unwrap();
+    assert_eq!(queue.snapshot(), 0);
+    let another = queue
+        .prepare_with(vec![1024], |_| panic!("prepared worker must be reused"))
+        .unwrap();
+    drop((io, another));
+}
+
+#[def_test]
+fn allocation_errors_preserve_kernel_error_mapping() {
+    for error in [kerrno::KError::NoMemory, kerrno::KError::InvalidInput] {
+        let ext4_error = Ext4Error::from(error);
+        assert_eq!(ext4_error, Ext4Error::Allocation(error));
+        assert_eq!(crate::vfs::into_vfs_err(ext4_error), error);
+    }
+}
+
+#[def_test]
+fn finish_owner_failure_records_error_before_capture_drop_and_allows_retry() {
+    let (filesystem, inode, device) = mapped_overwrite_fixture();
+    let submission = inode.lock_writeback_submission();
+    let input = vec![0x79; 2 * TEST_BLOCK_SIZE];
+    let queue = inode.writeback_io();
+    let writes = device.write_count();
+    let sequence = queue.snapshot();
+    let events = Arc::new(ksync::Mutex::new(vec![]));
+    let probe = FinishDropProbe(events.clone());
+    let plan = filesystem
+        .prepare_mapped_writeback(&inode, 0, &input, inode.size(), Ext4SyncIntent::DataOnly)
+        .unwrap()
+        .unwrap()
+        .into_async();
+    let result = plan.submit_with_storage(
+        input.clone(),
+        queue,
+        move |_| probe.record_call(),
+        |error| {
+            assert_eq!(error, Ext4Error::Allocation(kerrno::KError::NoMemory));
+            events.lock().push("error");
+        },
+        |flags| {
+            assert_eq!(flags, kalloc_types::AllocFlags::NOWAIT);
+            Err(kerrno::KError::NoMemory)
+        },
+    );
+    assert_eq!(result, Err(Ext4Error::Allocation(kerrno::KError::NoMemory)));
+    assert_eq!(*events.lock(), vec!["error", "drop"]);
+    assert_eq!(device.write_count(), writes);
+    assert_eq!(queue.snapshot(), sequence);
+    assert!(queue.has_capacity());
+
+    let retry_events = Arc::new(ksync::Mutex::new(vec![]));
+    let probe = FinishDropProbe(retry_events.clone());
+    filesystem
+        .prepare_mapped_writeback(&inode, 0, &input, inode.size(), Ext4SyncIntent::DataOnly)
+        .unwrap()
+        .unwrap()
+        .into_async()
+        .submit(
+            input,
+            queue,
+            move |result| {
+                assert_eq!(result, Ok(2 * TEST_BLOCK_SIZE));
+                probe.record_call();
+            },
+            |error| panic!("unexpected preparation failure: {error:?}"),
+        )
+        .unwrap();
+    queue.drain();
+    drop(submission);
+    queue.flush_completions().unwrap();
+    assert_eq!(device.write_count(), writes + 2);
+    assert_eq!(queue.snapshot(), sequence + 1);
+    assert_eq!(*retry_events.lock(), vec!["call", "drop"]);
+}
+
 fn mapped_overwrite_fixture() -> (Ext4SbInfo, Ext4Inode, Arc<TestDevice>) {
     let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = allocate_checkpointed_regular_inode(&mut filesystem);

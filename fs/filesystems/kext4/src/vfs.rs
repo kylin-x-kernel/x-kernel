@@ -168,6 +168,7 @@ fn into_xattr_vfs_err(err: Ext4Error) -> VfsError {
 
 pub(super) fn into_vfs_err(error: Ext4Error) -> VfsError {
     let linux_error = match error {
+        Ext4Error::Allocation(error) => error.into(),
         Ext4Error::Quota(error) => error,
         Ext4Error::NoSpace | Ext4Error::InsufficientJournalCredits => LinuxError::ENOSPC,
         Ext4Error::JournalAborted => LinuxError::EROFS,
