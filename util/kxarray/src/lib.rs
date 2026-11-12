@@ -93,6 +93,8 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+#[cfg(test)]
+use core::sync::atomic::AtomicUsize;
 use core::{
     marker::PhantomData,
     sync::atomic::{AtomicPtr, Ordering},
@@ -108,7 +110,7 @@ mod owner;
 mod prepared;
 mod retirement;
 
-use node::{MAX_HEIGHT, Node, PreparedNodes, height_for};
+use node::{FANOUT, MAX_HEIGHT, Node, PreparedNodes, RADIX_BITS, height_for};
 pub use owner::EntryOwner;
 pub use prepared::{PendingRetirement, PreparedInsert, PreparedRemove};
 use retirement::Retirement;
@@ -161,6 +163,25 @@ pub struct XArray<P: EntryOwner> {
     preparation_hook: SpinNoPreempt<Option<tests::PreparationHook<P>>>,
     #[cfg(unittest)]
     publication_hook: SpinNoPreempt<Option<tests::PublicationHook<P>>>,
+    #[cfg(test)]
+    next_slot_inspections: AtomicUsize,
+}
+
+/// Test-only traversal counter used to prove sparse slot scanning.
+struct TraversalCounter<'a> {
+    #[cfg(test)]
+    value: Option<&'a AtomicUsize>,
+    #[cfg(not(test))]
+    _marker: PhantomData<&'a ()>,
+}
+
+impl TraversalCounter<'_> {
+    fn inspect_slot(&self) {
+        #[cfg(test)]
+        if let Some(value) = self.value {
+            value.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl<P: EntryOwner> Default for XArray<P> {
@@ -181,6 +202,8 @@ impl<P: EntryOwner> XArray<P> {
             preparation_hook: SpinNoPreempt::new(None),
             #[cfg(unittest)]
             publication_hook: SpinNoPreempt::new(None),
+            #[cfg(test)]
+            next_slot_inspections: AtomicUsize::new(0),
         }
     }
 
@@ -830,6 +853,63 @@ impl<P: EntryOwner> XArray<P> {
     }
 }
 
+/// # Safety
+/// The array's writer lock retains every node traversed. `node.height` must be
+/// in `1..=MAX_HEIGHT`; debug builds assert this. `prefix` contains the already
+/// selected high bits of this node's subtree and `start` is a global key within
+/// that subtree's coverage.
+unsafe fn next_in_node(
+    node: &Node,
+    start: usize,
+    prefix: usize,
+    counter: &TraversalCounter<'_>,
+) -> Option<(usize, *mut ())> {
+    debug_assert!((1..=MAX_HEIGHT).contains(&node.height));
+    if node.is_empty() {
+        return None;
+    }
+    let shift = (node.height - 1) * RADIX_BITS;
+    let slots = if node.height == MAX_HEIGHT {
+        // The top level is partial whenever key width is not a multiple of
+        // RADIX_BITS. Never construct an overflowing subtree end.
+        1usize << (usize::BITS - shift)
+    } else {
+        FANOUT
+    };
+    let start_slot = (start >> shift) & (FANOUT - 1);
+    if start_slot >= slots {
+        return None;
+    }
+    for slot in start_slot..slots {
+        counter.inspect_slot();
+        // SAFETY: writer exclusion retains this node and its published slots.
+        let entry = node.slots[slot].load(Ordering::Acquire);
+        if entry.is_null() {
+            continue;
+        }
+        let slot_prefix = prefix | (slot << shift);
+        if node.height == 1 {
+            if slot_prefix >= start {
+                return Some((slot_prefix, entry));
+            }
+            continue;
+        }
+        let child_start = if slot == start_slot {
+            start
+        } else {
+            slot_prefix
+        };
+        let child = entry.cast::<Node>();
+        // SAFETY: writer exclusion retains this published child subtree.
+        let child = unsafe { &*child };
+        // SAFETY: the child and all descendants are retained by writer exclusion.
+        if let Some(found) = unsafe { next_in_node(child, child_start, slot_prefix, counter) } {
+            return Some(found);
+        }
+    }
+    None
+}
+
 impl<T: Send + Sync> XArray<Arc<T>> {
     /// Removes a quiescent synthetic fixture without pruning shared radix nodes.
     ///
@@ -840,7 +920,7 @@ impl<T: Send + Sync> XArray<Arc<T>> {
     /// Exclude all readers and competing writers of this key, including readers
     /// retaining a borrowed payload after lookup. Owned Arc results may survive.
     /// Call only from allocator-capable task context, never IRQ/NMI/BH.
-    #[cfg(unittest)]
+    #[cfg(any(unittest, test))]
     pub unsafe fn take_quiescent_fixture(&self, index: usize) -> Option<Arc<T>> {
         let _guard = self.writers.lock();
         let mut raw = self.root.load(Ordering::Acquire);
@@ -894,6 +974,60 @@ impl<T: Send + Sync> XArray<Arc<T>> {
         // SAFETY: consume only the newly acquired reference. The returned owner
         // is constructed before writer exclusion ends and is dropped by its caller.
         Some(unsafe { Arc::from_raw(raw) })
+    }
+
+    /// Returns the least occupied key greater than or equal to `start`.
+    ///
+    /// The search is inclusive and sparse. Recursion depth is bounded by the
+    /// immutable radix height; total work depends on the nodes and slots
+    /// visited, not on the numeric key range. It scans published slot pointers
+    /// but never loops over numeric keys. The returned owner is an independent strong reference acquired
+    /// under writer exclusion and may outlive both the array and the lookup.
+    ///
+    /// Weak consistency applies between calls: an entry inserted behind the
+    /// cursor may be missed, and a returned entry may be removed immediately
+    /// afterwards. `usize::MAX` is a valid inclusive bound and terminal key;
+    /// callers advance with `checked_add(1)` rather than wraparound.
+    ///
+    /// Call from task/control context only, never from IRQ, NMI, serving
+    /// softirq, a BH-disabled task, or an active RCU read scope. It does not
+    /// allocate or wait for a sleeping lock, but acquiring the writer lock and
+    /// releasing its guard can run the normal preemption checkpoint; this is
+    /// not a no-schedule primitive. Do not recursively acquire this array's
+    /// writer lock. Other subsystem locks follow their own protocols.
+    pub fn get_next_owned_locked(&self, start: usize) -> Option<(usize, Arc<T>)> {
+        let _guard = self.writers.lock();
+        let raw = self.root.load(Ordering::Acquire);
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: writer exclusion retains the live root.
+        let root = unsafe { &*raw };
+        if !root.covers(start) {
+            return None;
+        }
+        let counter = TraversalCounter {
+            #[cfg(test)]
+            value: Some(&self.next_slot_inspections),
+            #[cfg(not(test))]
+            _marker: PhantomData,
+        };
+        // SAFETY: writer exclusion retains every traversed node and payload.
+        let (key, owner) = unsafe { next_in_node(root, start, 0, &counter) }?;
+        let owner = owner.cast::<T>();
+        // SAFETY: the stored Arc owner cannot be withdrawn under writer
+        // exclusion; consume only the newly acquired reference.
+        unsafe { Arc::increment_strong_count(owner) };
+        // SAFETY: the increment above establishes one reference for `from_raw`;
+        // writer exclusion prevents withdrawal while it is consumed.
+        let owner = unsafe { Arc::from_raw(owner) };
+        Some((key, owner))
+    }
+
+    /// Number of slot pointers inspected by the test-only sparse counter.
+    #[cfg(test)]
+    pub(crate) fn next_slot_inspections(&self) -> usize {
+        self.next_slot_inspections.load(Ordering::Relaxed)
     }
 
     /// Acquires an independent strong reference while the stored owner is protected.

@@ -38,8 +38,7 @@ pub fn irq_affinity(virq: Virq) -> Result<IrqAffinitySnapshot, IrqAffinityError>
     let line = { IRQ_STATE.lock().descs.get(&virq) }
         .ok_or(IrqAffinityError::Management(IrqDescError::UnknownIrq))?;
     let entry = line.lock();
-    check_source(&entry)?;
-    Ok(entry.affinity)
+    snapshot_locked(&entry)
 }
 
 /// Applies an ordinary source's routing policy in sleepable context.
@@ -64,7 +63,7 @@ pub fn set_irq_affinity(
     with_existing_line(virq.into(), ManagementMode::Task, |_, line| {
         let mut entry = line.lock();
         let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
-        Ok(apply(&mut entry, requested, ready))
+        Ok(apply_locked(&mut entry, requested, ready))
     })
     .map_err(IrqAffinityError::Management)?
     .ok_or(IrqAffinityError::Management(IrqDescError::UnknownIrq))?
@@ -102,7 +101,22 @@ fn check_source(entry: &IrqStateDesc) -> Result<AffinitySource, IrqAffinityError
         .ok_or(IrqAffinityError::Unsupported)
 }
 
-fn apply(
+/// Copies affinity from an already locked Line state.
+///
+/// The caller owns the short Line lock. This helper never reacquires it and only
+/// returns the historical coherent snapshot; it is not a mapping lease.
+pub(super) fn snapshot_locked(
+    entry: &IrqStateDesc,
+) -> Result<IrqAffinitySnapshot, IrqAffinityError> {
+    check_source(entry)?;
+    Ok(entry.affinity)
+}
+
+/// Applies one affinity transaction to an already locked Line state.
+///
+/// The caller must hold management admission and the short Line lock. An Arc
+/// identity alone is not permission to program hardware.
+pub(super) fn apply_locked(
     entry: &mut IrqStateDesc,
     requested: &KCpuMask,
     ready: KCpuMask,

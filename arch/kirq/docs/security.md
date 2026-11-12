@@ -65,6 +65,33 @@ It uses quiescent fixture removal, not GP-delayed retirement, so the caller must
 exclude all borrowed readers of the removed key, not only active actions.
 It is not a production dynamic mapping-disposal API or proof of source vacancy.
 
+## Sparse Handle Identity Boundary
+
+`runtime/handle.rs` is an identity and enumeration boundary, not a new routing
+authority. The XArray operation returns the least present Arc at or after the
+inclusive start while holding only the array writer lock; KIRQ checks
+retirement after releasing it. An entry can be inserted behind the cursor or
+retire immediately after observation, so callers must treat successive results
+as weakly consistent and revalidate every handle.
+
+Enumeration rejects NMI, hardirq, serving-softirq, BH-disabled task and active
+RCU reader before acquiring the array lock. It does not require sleepable task
+context, does not allocate and cannot be used from a read scope. A stale handle
+query or set is rejected as `UnknownIrq`; it never operates on a same-number
+successor. Query holds `IRQ_STATE -> Line`, validates the retained Arc and
+retirement, and copies only the locked snapshot. It does not take management
+exclusion because it programs no hardware.
+
+Setter admission acquires the retained Line's management mutex before
+`IRQ_STATE`, validates the original Arc, checks retirement, and calls
+`begin_management`. It releases the Line before `IRQ_STATE`, runs the affinity
+transaction under a fresh Line guard, and ends admission before releasing the
+management mutex. The `is_managed` membership bit, not the mutex alone, prevents
+eligible retirement between short-lock scopes. The controller transaction
+remains the existing `apply_locked` path with all source, ready-CPU, failure and
+deferred rules unchanged. The handle API provides no credentials and no
+capability bypass; procfs and source-owner policy remain outside this module.
+
 ## NMI Action Lifetime Boundary
 
 `runtime/nmi/action.rs::NmiAction` owns one stable `KBox<Handler>`.

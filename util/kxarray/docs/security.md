@@ -52,6 +52,23 @@ grant IRQ/NMI access or RCU participation. Host tests inject each allocation
 failure and count cleanup, change root shape before commit, and verify zero
 allocations during success/conflict with exact returned-payload identity.
 
+`get_next_owned_locked` reuses the same writer exclusion as withdrawal and
+Arc acquisition. Its recursive successor walk is bounded by `MAX_HEIGHT`; it
+inspects live slot pointers and does not iterate the numeric key space or add
+shared bookkeeping. The top level is partial, so the implementation counts
+represented slots instead of computing an end bound, and `usize::MAX` is a
+valid final candidate. The retained Arc is installed before unlocking and no
+payload owner is dropped under the lock. A null root or out-of-coverage start
+stops safely; an empty slot is skipped and the search continues. Total work
+depends on visited nodes/slots, while recursion depth is bounded by the radix
+height. The operation must run in initialized task/control
+context, not IRQ/NMI/serving-softirq, a BH-disabled task or an active RCU read
+scope. It does not allocate or wait on a sleeping lock, but guard release can
+run the normal preemption checkpoint; callers must not recursively acquire the
+Array writer lock. Entries may be inserted or removed between calls, so a
+caller cannot treat successive results as a global snapshot. The retained
+identity does not authorize hardware control or replace later retirement checks.
+
 `src/lib.rs::get_owned_locked` protects raw traversal and Arc acquisition with
 the same writer lock used by all detach operations. The shared array borrow
 excludes destruction, and the stored owner stays live until the extra strong

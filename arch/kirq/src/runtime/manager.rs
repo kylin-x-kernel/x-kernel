@@ -22,6 +22,8 @@ use kspin::{NoPreemptIrqSave, SpinNoIrq};
 pub(super) use tests_action_helpers::{
     register_locked, register_shared_locked, take_from_line, take_from_state, withdraw_on_line,
 };
+#[cfg(unittest)]
+pub(crate) use tests_management_identity::publish_replaced_on_acquisition;
 
 #[cfg(unittest)]
 pub(super) use super::entry::{
@@ -1336,11 +1338,41 @@ fn with_line_admission<T>(
     let Some((virq, line)) = selected else {
         return Ok(None);
     };
-    let Some(_management_guard) = acquire_management(&line, mode)? else {
+    admit_retained_line(virq, &line, mode, body_fn)
+}
+
+/// Runs a control transaction against a caller-retained Line identity.
+///
+/// The management mutex is acquired before the registry lock. The expected Arc
+/// must still be the directory entry for `virq`; otherwise the operation returns
+/// `None` without invoking the body or touching a same-number successor. After
+/// registry and Line release, the body runs with management admission only; it
+/// must acquire the Line lock itself for state or hardware access. The mutex is
+/// held across membership begin/end, while `is_managed` prevents eligible
+/// retirement between short-lock scopes.
+pub(super) fn with_retained_line<T>(
+    virq: Virq,
+    line: &Arc<IrqLine>,
+    mode: ManagementMode,
+    body_fn: impl FnOnce(Virq, &Arc<IrqLine>) -> Result<T, IrqDescError>,
+) -> Result<Option<T>, IrqDescError> {
+    validate_management(mode)?;
+    admit_retained_line(virq, line, mode, |virq, admission| {
+        body_fn(virq, admission.line)
+    })
+}
+
+fn admit_retained_line<T>(
+    virq: Virq,
+    line: &Arc<IrqLine>,
+    mode: ManagementMode,
+    body_fn: impl FnOnce(Virq, &mut ManagementAdmission<'_>) -> Result<T, IrqDescError>,
+) -> Result<Option<T>, IrqDescError> {
+    let Some(_management_guard) = acquire_management(line, mode)? else {
         return Ok(None);
     };
     let mut admission = ManagementAdmission {
-        line: &line,
+        line,
         is_active: false,
     };
     {
@@ -1348,7 +1380,7 @@ fn with_line_admission<T>(
         if !state
             .descs
             .get(&virq)
-            .is_some_and(|current| Arc::ptr_eq(&current, &line))
+            .is_some_and(|current| Arc::ptr_eq(&current, line))
         {
             return Ok(None);
         }

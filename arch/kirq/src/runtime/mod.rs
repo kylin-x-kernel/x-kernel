@@ -15,6 +15,7 @@ mod action_set;
 pub(crate) mod affinity;
 pub(crate) mod dispatch;
 pub(crate) mod entry;
+pub(crate) mod handle;
 pub(crate) mod index;
 pub(crate) mod manager;
 pub(crate) mod nmi;

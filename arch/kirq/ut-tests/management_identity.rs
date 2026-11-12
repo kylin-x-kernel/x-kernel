@@ -748,7 +748,7 @@ fn registration_does_not_recreate_line_withdrawn_before_admission() {
     assert_eq!(Arc::strong_count(&handler), 1);
 }
 
-struct ScopedReplacement {
+pub(crate) struct ScopedReplacement {
     original: Arc<IrqLine>,
 }
 
@@ -769,7 +769,7 @@ impl Drop for ScopedReplacement {
     }
 }
 
-fn publish_replaced_on_acquisition(
+pub(crate) fn publish_replaced_on_acquisition(
     virq: usize,
     replacement: &Arc<IrqLine>,
 ) -> (Arc<IrqLine>, ScopedReplacement) {
@@ -781,13 +781,11 @@ fn publish_replaced_on_acquisition(
         original: original.clone(),
         replacement: replacement.clone(),
     };
-    core::assert!(
-        IRQ_STATE
-            .lock()
-            .descs
-            .insert(virq, original.clone())
-            .is_none()
-    );
+    {
+        let mut state = IRQ_STATE.lock();
+        core::assert!(!state.descs.contains_key(&virq));
+        core::assert!(state.descs.insert(virq, original.clone()).is_none());
+    }
     {
         let mut pending = REPLACE_BEFORE_ADMISSION.lock();
         core::assert!(pending.is_none());

@@ -12,8 +12,9 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
-    sync::Barrier,
+    sync::{Barrier, mpsc},
     thread,
+    time::Duration,
 };
 
 use super::*;
@@ -441,4 +442,240 @@ fn root_growth_preserves_an_existing_payload_borrow() {
         // SAFETY: the array retains this aligned ZST owner throughout the borrow.
         assert_eq!(unsafe { raw.as_ref() }, Some(&()));
     }
+}
+
+#[test]
+fn next_owned_locked_is_inclusive_sparse_and_monotonic() {
+    let array = XArray::<Arc<usize>>::new();
+    let keys = [0usize, 63, 64, 4095, 4096, 1usize << 60, usize::MAX];
+    for key in keys {
+        // SAFETY: host task-equivalent fixture with primitive nonblocking owners.
+        assert!(unsafe { array.insert_with_flags(key, Arc::new(key), AllocFlags::NOWAIT) }.is_ok());
+    }
+
+    assert_eq!(array.get_next_owned_locked(0).map(|(key, _)| key), Some(0));
+    assert_eq!(array.get_next_owned_locked(1).map(|(key, _)| key), Some(63));
+    assert_eq!(
+        array.get_next_owned_locked(63).map(|(key, _)| key),
+        Some(63)
+    );
+    assert_eq!(
+        array.get_next_owned_locked(64).map(|(key, _)| key),
+        Some(64)
+    );
+    assert_eq!(
+        array.get_next_owned_locked(65).map(|(key, _)| key),
+        Some(4095)
+    );
+    assert_eq!(
+        array.get_next_owned_locked(4096).map(|(key, _)| key),
+        Some(4096)
+    );
+    assert_eq!(
+        array
+            .get_next_owned_locked((1usize << 60) + 1)
+            .map(|(key, _)| key),
+        Some(usize::MAX)
+    );
+    assert_eq!(
+        array.get_next_owned_locked(usize::MAX).map(|(key, _)| key),
+        Some(usize::MAX)
+    );
+    assert_eq!(
+        *array.get_next_owned_locked(usize::MAX).unwrap().1,
+        usize::MAX
+    );
+
+    let mut cursor = 0usize;
+    let mut seen = Vec::new();
+    while let Some((key, owner)) = array.get_next_owned_locked(cursor) {
+        assert_eq!(*owner, key);
+        seen.push(key);
+        cursor = match key.checked_add(1) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    assert_eq!(seen, keys);
+}
+
+#[test]
+fn next_owned_locked_empty_and_after_root_cover_are_none() {
+    let array = XArray::<Arc<usize>>::new();
+    assert!(array.get_next_owned_locked(0).is_none());
+    assert!(array.get_next_owned_locked(usize::MAX).is_none());
+    // SAFETY: host fixture; primitive owner.
+    assert!(unsafe { array.insert_with_flags(7, Arc::new(7), AllocFlags::NOWAIT) }.is_ok());
+    assert!(array.get_next_owned_locked(8).is_none());
+    assert_eq!(array.get_next_owned_locked(7).map(|(key, _)| key), Some(7));
+}
+
+#[test]
+fn next_owned_locked_survives_withdrawal_and_keeps_retained_owner() {
+    let array = XArray::<Arc<usize>>::new();
+    for key in [0usize, 64, usize::MAX] {
+        // SAFETY: host fixture; primitive owner.
+        assert!(unsafe { array.insert_with_flags(key, Arc::new(key), AllocFlags::NOWAIT) }.is_ok());
+    }
+    let retained = array.get_next_owned_locked(0).unwrap().1;
+    // SAFETY: host fixture excludes all other readers; test-only quiescent removal.
+    let removed = unsafe { array.take_quiescent_fixture(0) }.unwrap();
+    assert_eq!(*removed, 0);
+    drop(removed);
+    assert_eq!(*retained, 0);
+    assert_eq!(Arc::strong_count(&retained), 1);
+    assert_eq!(array.get_next_owned_locked(0).map(|(key, _)| key), Some(64));
+    // SAFETY: same test-only quiescent removal.
+    assert!(unsafe { array.take_quiescent_fixture(64) }.is_some());
+    // SAFETY: same test-only quiescent removal.
+    assert!(unsafe { array.take_quiescent_fixture(usize::MAX) }.is_some());
+    assert!(array.get_next_owned_locked(0).is_none());
+}
+
+#[test]
+fn next_owned_locked_does_not_allocate() {
+    let array = XArray::<Arc<usize>>::new();
+    // SAFETY: host fixture; primitive owner.
+    assert!(
+        unsafe { array.insert_with_flags(usize::MAX, Arc::new(1), AllocFlags::NOWAIT) }.is_ok()
+    );
+    ALLOCATION_COUNTS.with(|counts| counts.set(Some((0, 0))));
+    let found = array.get_next_owned_locked(0);
+    let counts = ALLOCATION_COUNTS.with(|counts| counts.replace(None));
+    assert_eq!(counts, Some((0, 0)));
+    assert_eq!(found.unwrap().0, usize::MAX);
+}
+
+#[test]
+fn next_owned_locked_scans_slots_not_the_numeric_key_range() {
+    let array = XArray::<Arc<usize>>::new();
+    for key in [1usize << 60, usize::MAX] {
+        // SAFETY: host fixture; primitive owner.
+        assert!(unsafe { array.insert_with_flags(key, Arc::new(key), AllocFlags::NOWAIT) }.is_ok());
+    }
+    let before = array.next_slot_inspections();
+    assert_eq!(
+        array.get_next_owned_locked(0).map(|(key, _)| key),
+        Some(1usize << 60)
+    );
+    let inspected = array.next_slot_inspections() - before;
+    assert!(
+        inspected < 128,
+        "sparse traversal inspected {inspected} slots for high keys"
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GrowthStage {
+    LowPublished,
+    HighPublished,
+}
+
+#[test]
+fn next_owned_locked_overlaps_root_growth_with_exact_sparse_results() {
+    const LOW: [usize; 5] = [0, 1, 63, 64, 65];
+    const HIGH: [usize; 4] = [1usize << 10, 1usize << 20, 1usize << 60, usize::MAX];
+    const STAGE_TIMEOUT: Duration = Duration::from_secs(30);
+    let array = XArray::<Arc<usize>>::new();
+    let (published, stages) = mpsc::channel::<GrowthStage>();
+    thread::scope(|threads| {
+        let writer = threads.spawn({
+            let array = &array;
+            // The sole sender moves into the writer. A writer panic drops it and
+            // disconnects the reader immediately instead of leaving the outer
+            // scope holding a live sender.
+            move || {
+                for key in LOW {
+                    // SAFETY: real host SMP writer exclusion and primitive owner.
+                    assert!(
+                        unsafe { array.insert_with_flags(key, Arc::new(key), AllocFlags::NOWAIT) }
+                            .is_ok()
+                    );
+                }
+                // One-way notification: the writer never waits for the reader, so a
+                // reader assertion failure cannot strand this thread in scope join.
+                let _ = published.send(GrowthStage::LowPublished);
+                for key in HIGH {
+                    // SAFETY: real host SMP writer exclusion and primitive owner.
+                    assert!(
+                        unsafe { array.insert_with_flags(key, Arc::new(key), AllocFlags::NOWAIT) }
+                            .is_ok()
+                    );
+                }
+                let _ = published.send(GrowthStage::HighPublished);
+            }
+        });
+
+        assert_eq!(
+            stages.recv_timeout(STAGE_TIMEOUT).unwrap(),
+            GrowthStage::LowPublished
+        );
+        // These queries are known to follow the low insertion stage. High keys
+        // are larger than every bound here, so a concurrent high branch cannot
+        // change the expected successor.
+        for (start, expected) in [(0, 0), (1, 1), (2, 63), (64, 64), (65, 65)] {
+            let (key, owner) = array.get_next_owned_locked(start).unwrap();
+            assert_eq!(key, expected);
+            assert_eq!(*owner, key);
+        }
+
+        assert_eq!(
+            stages.recv_timeout(STAGE_TIMEOUT).unwrap(),
+            GrowthStage::HighPublished
+        );
+        // These starts exercise newly published high branches and gaps.
+        for (start, expected) in [
+            (2, 63),
+            (66, 1usize << 10),
+            (1usize << 10, 1usize << 10),
+            (1usize << 20, 1usize << 20),
+            ((1usize << 60) + 1, usize::MAX),
+            (usize::MAX, usize::MAX),
+        ] {
+            let (key, owner) = array.get_next_owned_locked(start).unwrap();
+            assert_eq!(key, expected);
+            assert_eq!(*owner, key);
+        }
+        writer.join().unwrap();
+    });
+
+    let expected = [LOW.as_slice(), HIGH.as_slice()].concat();
+    let mut actual = Vec::new();
+    let mut cursor = 0usize;
+    while let Some((key, owner)) = array.get_next_owned_locked(cursor) {
+        assert_eq!(*owner, key);
+        actual.push(key);
+        cursor = match key.checked_add(1) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn next_owned_locked_rejects_keys_beyond_a_small_root() {
+    let array = XArray::<Arc<usize>>::new();
+    // SAFETY: host fixture; primitive owner.
+    assert!(unsafe { array.insert_with_flags(7, Arc::new(7), AllocFlags::NOWAIT) }.is_ok());
+    assert!(array.get_next_owned_locked(8).is_none());
+    assert!(array.get_next_owned_locked(64).is_none());
+    assert!(array.get_next_owned_locked(usize::MAX).is_none());
+}
+
+#[test]
+fn next_owned_locked_owner_survives_array_destruction() {
+    let array = XArray::<Arc<usize>>::new();
+    let external = Arc::new(9);
+    // SAFETY: host fixture; primitive owner.
+    assert!(
+        unsafe { array.insert_with_flags(usize::MAX, external.clone(), AllocFlags::NOWAIT) }
+            .is_ok()
+    );
+    let retained = array.get_next_owned_locked(usize::MAX).unwrap().1;
+    drop(array);
+    assert!(Arc::ptr_eq(&retained, &external));
+    assert_eq!(*retained, 9);
+    drop(retained);
+    assert_eq!(Arc::strong_count(&external), 1);
 }

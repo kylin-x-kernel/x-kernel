@@ -23,6 +23,9 @@
 //! - [`irq_affinity`] / [`set_irq_affinity`] distinguish requested, pending and
 //!   confirmed routing. Sources may expose an immediate or ACK/EOI-driven
 //!   deferred controller capability; per-CPU, NMI and MSI lifecycles remain separate.
+//! - [`lookup_irq_line`] / [`next_irq_line`] provide sparse, identity-retained
+//!   Line handles for kernel control consumers. They do not create mappings or
+//!   grant user authority; every operation revalidates the original Line.
 //! - Architecture adapters enter through [`handle_irq`] / [`handle_nmi`]; irqchip
 //!   providers implement [`IntrManagerIf`] and transfer claims using [`PendingIrq`].
 //!   These entry functions and claim construction are unsafe: the adapter must
@@ -104,6 +107,7 @@ pub use runtime::{
     action::IrqActionToken,
     affinity::{irq_affinity, set_irq_affinity},
     entry::{generic_handle_irq, generic_handle_nmi, handle_irq, handle_nmi},
+    handle::{IrqLineHandle, lookup_irq_line, next_irq_line},
     manager::{
         FwIrqMapError, IrqRegisterOptions, MappedIrq, PerCpuForwarding, descriptor, disable_irq,
         disable_irq_nosync, enable, enable_irq, free_irq, free_irq_action,

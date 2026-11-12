@@ -238,3 +238,40 @@ fn removal_releases_only_the_arrays_arc_reference() {
     assert_eq!(Arc::strong_count(&old), 2);
     assert_eq!(*retained, 7);
 }
+
+#[def_test]
+fn next_owned_follows_real_withdrawal_and_pruning() {
+    let array = XArray::<Arc<usize>>::new();
+    let external = Arc::new(0);
+    for key in [0usize, 64, usize::MAX] {
+        let owner = if key == 0 { external.clone() } else { Arc::new(key) };
+        // SAFETY: watched task; primitive Arc release has no blocking callback.
+        assert!(unsafe { array.insert_with_flags(key, owner, AllocFlags::NOWAIT) }.is_ok());
+    }
+
+    let retained = array.get_next_owned_locked(0).unwrap().1;
+    assert!(Arc::ptr_eq(&retained, &external));
+    // SAFETY: watched task outside scopes/locks, permanent RCU service.
+    assert_eq!(unsafe { array.remove_with_flags(0, AllocFlags::NOWAIT) }, Ok(true));
+    assert_eq!(array.get_next_owned_locked(0).map(|(key, _)| key), Some(64));
+    // SAFETY: same admitted context.
+    assert_eq!(unsafe { array.remove_with_flags(64, AllocFlags::NOWAIT) }, Ok(true));
+    assert_eq!(
+        array.get_next_owned_locked(0).map(|(key, _)| key),
+        Some(usize::MAX)
+    );
+    assert_eq!(
+        // SAFETY: same admitted context; last primitive owner has a nonblocking release.
+        unsafe { array.remove_with_flags(usize::MAX, AllocFlags::NOWAIT) },
+        Ok(true)
+    );
+    assert!(array.get_next_owned_locked(0).is_none());
+    assert!(array.root.load(Ordering::Acquire).is_null());
+    drop(array);
+    // SAFETY: callbacks own independent references and do not await this task.
+    assert!(unsafe { krcu::drain_callbacks() }.is_ok());
+    assert_eq!(*retained, 0);
+    assert_eq!(Arc::strong_count(&external), 2);
+    drop(retained);
+    assert_eq!(Arc::strong_count(&external), 1);
+}

@@ -119,7 +119,7 @@ fn requested_policy_is_distinct_from_confirmed_ready_destinations() {
         requested |= cpu_mask(1);
     }
     let before = entry.desc;
-    let snapshot = apply(&mut entry, &requested, ready).unwrap();
+    let snapshot = apply_locked(&mut entry, &requested, ready).unwrap();
     assert_eq!(snapshot.requested, Some(requested));
     assert_eq!(snapshot.effective, Some(ready));
     assert!(!snapshot.is_pending);
@@ -127,7 +127,7 @@ fn requested_policy_is_distinct_from_confirmed_ready_destinations() {
     assert_eq!(entry.desc, before);
     assert!(!entry.is_enabled_for_tests());
     entry.test_affinity_chip = Some(&SELECT_FIRST);
-    let selected = apply(&mut entry, &requested, requested).unwrap();
+    let selected = apply_locked(&mut entry, &requested, requested).unwrap();
     assert_eq!(selected.requested, Some(requested));
     assert_eq!(selected.effective, Some(ready));
 }
@@ -144,7 +144,7 @@ fn routing_preserves_shared_tokens_owners_and_handler_delivery() {
     let depth = entry.disable_depth_for_tests();
     let generation = entry.generation_for_tests();
     let mask = cpu_mask(0);
-    assert!(apply(&mut entry, &mask, mask).is_ok());
+    assert!(apply_locked(&mut entry, &mask, mask).is_ok());
     assert_eq!(entry.action_count(), 2);
     assert_eq!(entry.disable_depth_for_tests(), depth);
     assert_eq!(entry.generation_for_tests(), generation);
@@ -179,14 +179,14 @@ fn routing_preserves_shared_tokens_owners_and_handler_delivery() {
 fn empty_ready_intersection_and_controller_rejection_preserve_policy() {
     let mut entry = entry(&ACCEPT_MASKED);
     let mask = cpu_mask(0);
-    let previous = apply(&mut entry, &mask, mask).unwrap();
+    let previous = apply_locked(&mut entry, &mask, mask).unwrap();
     entry.test_affinity_chip = Some(&MUST_NOT_APPLY);
     assert_eq!(
-        apply(&mut entry, &mask, KCpuMask::new()),
+        apply_locked(&mut entry, &mask, KCpuMask::new()),
         Err(IrqAffinityError::NoReadyCpu)
     );
     assert_eq!(
-        apply(&mut entry, &KCpuMask::new(), mask),
+        apply_locked(&mut entry, &KCpuMask::new(), mask),
         Err(IrqAffinityError::NoReadyCpu)
     );
     assert_eq!(entry.affinity, previous);
@@ -197,7 +197,7 @@ fn empty_ready_intersection_and_controller_rejection_preserve_policy() {
         mask
     };
     assert_eq!(
-        apply(&mut entry, &request, request),
+        apply_locked(&mut entry, &request, request),
         Err(IrqAffinityError::Rejected)
     );
     assert_eq!(entry.affinity, previous);
@@ -211,11 +211,11 @@ fn hardware_failure_closes_admission_until_disabled_recovery_and_explicit_enable
     let plan = entry.prepare_auto_enable();
     entry.commit_platform_plan(plan);
     let mask = cpu_mask(0);
-    let previous = apply(&mut entry, &mask, mask).unwrap();
+    let previous = apply_locked(&mut entry, &mask, mask).unwrap();
     assert!(entry.can_run_actions());
     entry.test_affinity_chip = Some(&FAIL);
     assert_eq!(
-        apply(&mut entry, &mask, mask),
+        apply_locked(&mut entry, &mask, mask),
         Err(IrqAffinityError::HardwareFailure)
     );
     assert_eq!(entry.affinity.requested, previous.requested);
@@ -230,7 +230,7 @@ fn hardware_failure_closes_admission_until_disabled_recovery_and_explicit_enable
     assert_eq!(Arc::strong_count(&owner), 2);
     entry.test_affinity_chip = Some(&MUST_NOT_APPLY);
     assert_eq!(
-        apply(&mut entry, &mask, mask),
+        apply_locked(&mut entry, &mask, mask),
         Err(IrqAffinityError::RecoveryRequiresDisable)
     );
 
@@ -239,7 +239,7 @@ fn hardware_failure_closes_admission_until_disabled_recovery_and_explicit_enable
     let depth = entry.disable_depth_for_tests();
     assert!(depth > 0);
     entry.test_affinity_chip = Some(&ACCEPT_MASKED);
-    assert_eq!(apply(&mut entry, &mask, mask).unwrap(), previous);
+    assert_eq!(apply_locked(&mut entry, &mask, mask).unwrap(), previous);
     assert_eq!(entry.disable_depth_for_tests(), depth);
     assert!(!entry.is_enabled_for_tests());
     assert!(!entry.can_run_actions());
@@ -265,10 +265,10 @@ fn malformed_success_faults_without_inventing_an_effective_route() {
             continue;
         }
         let mut entry = entry(&ACCEPT_MASKED);
-        let previous = apply(&mut entry, &mask, mask).unwrap();
+        let previous = apply_locked(&mut entry, &mask, mask).unwrap();
         entry.test_affinity_chip = Some(chip);
         assert_eq!(
-            apply(&mut entry, &mask, mask),
+            apply_locked(&mut entry, &mask, mask),
             Err(IrqAffinityError::HardwareFailure)
         );
         assert_eq!(entry.affinity.requested, previous.requested);
@@ -281,7 +281,7 @@ fn malformed_success_faults_without_inventing_an_effective_route() {
         entry.test_affinity_chip = Some(&REJECT);
         let fault = entry.affinity;
         assert_eq!(
-            apply(&mut entry, &mask, mask),
+            apply_locked(&mut entry, &mask, mask),
             Err(IrqAffinityError::Rejected)
         );
         assert_eq!(entry.affinity, fault);
@@ -295,33 +295,33 @@ fn source_owned_and_unbound_routes_reject_before_chip_access() {
         let mut entry = entry(&MUST_NOT_APPLY);
         entry.desc = entry.desc.with_flags(flags);
         assert_eq!(
-            apply(&mut entry, &mask, mask),
+            apply_locked(&mut entry, &mask, mask),
             Err(IrqAffinityError::Unsupported)
         );
     }
     let mut percpu = entry(&MUST_NOT_APPLY);
     percpu.set_flow_for_tests(IrqFlow::PerCpu);
     assert_eq!(
-        apply(&mut percpu, &mask, mask),
+        apply_locked(&mut percpu, &mask, mask),
         Err(IrqAffinityError::Unsupported)
     );
     let mut fixed = entry(&MUST_NOT_APPLY);
     fixed.desc = fixed.desc.with_affinity(IrqAffinity::Cpu(0));
     assert_eq!(
-        apply(&mut fixed, &mask, mask),
+        apply_locked(&mut fixed, &mask, mask),
         Err(IrqAffinityError::OwnerFixed)
     );
     let mut nmi = entry(&MUST_NOT_APPLY);
     nmi.set_flow_for_tests(IrqFlow::PerCpu);
     nmi.install_nmi_action();
     assert_eq!(
-        apply(&mut nmi, &mask, mask),
+        apply_locked(&mut nmi, &mask, mask),
         Err(IrqAffinityError::Unsupported)
     );
     let mut unbound = IrqStateDesc::new(IrqDesc::from_virq(0x6f21));
     unbound.test_affinity_chip = Some(&MUST_NOT_APPLY);
     assert_eq!(
-        apply(&mut unbound, &mask, mask),
+        apply_locked(&mut unbound, &mask, mask),
         Err(IrqAffinityError::Unsupported)
     );
 }
@@ -490,7 +490,7 @@ fn last_action_cancels_pending_and_reregistration_does_not_revive_it() {
         .unwrap();
     let plan = state.prepare_auto_enable();
     state.commit_platform_plan(plan);
-    assert!(apply(&mut state, &ready, ready).unwrap().is_pending);
+    assert!(apply_locked(&mut state, &ready, ready).unwrap().is_pending);
     let fixture = QueryFixture { virq, line: Arc::new(IrqLine::new(state)) };
     IRQ_STATE.lock().descs.insert(virq, fixture.line.clone());
 
@@ -513,10 +513,10 @@ fn actionless_route_fault_preserves_binding_for_disabled_recovery() {
     let desc = IrqDesc::from_virq(virq);
     state.desc = desc;
     let mask = cpu_mask(0);
-    let confirmed = apply(&mut state, &mask, mask).unwrap();
+    let confirmed = apply_locked(&mut state, &mask, mask).unwrap();
     state.test_affinity_chip = Some(&FAIL);
     assert_eq!(
-        apply(&mut state, &mask, mask),
+        apply_locked(&mut state, &mask, mask),
         Err(IrqAffinityError::HardwareFailure)
     );
     let fault = state.affinity;
@@ -550,7 +550,7 @@ fn actionless_route_fault_preserves_binding_for_disabled_recovery() {
     let repaired = {
         let mut entry = fixture.line.lock();
         entry.test_affinity_chip = Some(&ACCEPT_MASKED);
-        apply(&mut entry, &mask, mask)
+        apply_locked(&mut entry, &mask, mask)
     };
     assert_eq!(repaired.unwrap(), confirmed);
     let (depth, is_enabled, desc_after) = {
@@ -639,7 +639,7 @@ fn deferred_request_stays_pending_until_completion_finishes() {
     let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f30));
     entry.test_deferred_affinity = Some(&DEFERRED);
     let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
-    let accepted = apply(&mut entry, &ready, ready).unwrap();
+    let accepted = apply_locked(&mut entry, &ready, ready).unwrap();
     assert_eq!(accepted.requested, Some(ready));
     assert_eq!(accepted.effective, None);
     assert!(accepted.is_pending);
@@ -665,8 +665,8 @@ fn a_new_deferred_request_replaces_the_pending_target() {
     let second_cpu = cpus.next().unwrap_or(first_cpu);
     let first = cpu_mask(first_cpu.as_usize());
     let second = cpu_mask(second_cpu.as_usize());
-    assert!(apply(&mut entry, &first, ready).unwrap().is_pending);
-    let snapshot = apply(&mut entry, &second, ready).unwrap();
+    assert!(apply_locked(&mut entry, &first, ready).unwrap().is_pending);
+    let snapshot = apply_locked(&mut entry, &second, ready).unwrap();
     assert_eq!(snapshot.requested, Some(second));
     assert!(snapshot.is_pending);
     assert_eq!(snapshot.effective, None);
@@ -684,7 +684,7 @@ fn edge_deferred_transaction_completes_before_eoi() {
     let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f31));
     entry.test_deferred_affinity = Some(&DEFERRED_EDGE);
     let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
-    let accepted = apply(&mut entry, &ready, ready).unwrap();
+    let accepted = apply_locked(&mut entry, &ready, ready).unwrap();
     assert!(accepted.is_pending);
     assert_eq!(super::prepare_deferred_affinity(&mut entry), None);
     assert_eq!(entry.affinity.effective, Some(ready));
@@ -696,7 +696,7 @@ fn first_activation_applies_pending_without_an_old_eoi() {
     let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f34));
     entry.test_deferred_affinity = Some(&DEFERRED);
     let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
-    assert!(apply(&mut entry, &ready, ready).unwrap().is_pending);
+    assert!(apply_locked(&mut entry, &ready, ready).unwrap().is_pending);
     super::apply_deferred_before_activation(&mut entry).unwrap();
     assert_eq!(entry.affinity.effective, Some(ready));
     assert!(!entry.affinity.is_pending);

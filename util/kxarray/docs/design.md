@@ -15,6 +15,24 @@ lock contexts without a running RCU service. IRQ/NMI/serving-softirq callers
 must retain the scoped read path: they cannot wait on an interrupted writer's
 preemption-only lock. Guard release may run the normal scheduling checkpoint.
 
+`get_next_owned_locked` is the sparse inclusive successor operation for
+`XArray<Arc<T>>`. It takes the writer lock, walks only the current downward
+path and scans each reached node's slot pointers from the start slot to the
+valid slot limit. Empty slots are skipped by testing their pointers; there is
+no occupancy bitmap and no numeric key loop. A null root or a start outside
+the root's key coverage yields no result. Empty slots are skipped and scanning
+continues. The partial top level uses the number
+of representable slots rather than subtree-end arithmetic, so `usize::MAX` is a
+valid inclusive start and terminal key. The returned index and retained Arc
+refer to the same entry observed under writer exclusion. The owner is acquired
+before unlocking and can outlive the lookup; calls are weakly consistent with
+respect to later insertions/removals, and callers advance by `checked_add(1)`.
+No payload Drop, allocation, callback or RCU wait occurs under the lock.
+The acquisition path requires initialized CPU-local synchronization but not a
+running RCU service. It is task/control-only: IRQ, NMI, serving-softirq,
+BH-disabled tasks and active RCU readers use other access paths. Guard release
+may run the normal preemption checkpoint; this is not a no-schedule primitive.
+
 Nodes contain 64 atomic slots, an immutable height, writer-serialized occupancy
 accounting and an embedded retirement callback. Height one stores raw
 payload owners; higher nodes store child-node owners. There are no pointer tags,

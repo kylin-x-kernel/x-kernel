@@ -72,6 +72,33 @@ exists, it may resume service while the request remains pending. This decision
 uses current suppression and confirmed route availability, not
 `effective == None` as an activation-history proxy.
 
+## Sparse Line Access And Retained Identity
+
+`runtime/handle.rs` owns the opaque `IrqLineHandle` and the public
+`lookup_irq_line` / `next_irq_line` operations. `next_irq_line` is inclusive and
+uses the XArray's sparse successor under array writer exclusion; it skips
+retired candidates only after releasing that exclusion, advances with
+`checked_add(1)`, and treats `usize::MAX` as terminal. Enumeration is
+task/control-only, rejects NMI, hardirq, serving-softirq, BH-disabled task and
+active RCU readers before taking the array lock, and creates no mapping or
+action.
+
+The handle retains the exact Line Arc observed in `DIRECTORY`; the virq is a
+label, not identity or permission. Query validates the directory Arc and the
+Line's retired bit under `IRQ_STATE -> Line`, then copies affinity from the
+already-locked state through `snapshot_locked`; it never calls a second
+Line-locking helper. It is a historical observation, not a mapping lease.
+
+Set uses `with_retained_line`: acquire the expected Line's management mutex,
+take `IRQ_STATE`, verify `descs[virq]` is still the same Arc, take the Line,
+reject retirement, call `begin_management`, release Line then `IRQ_STATE`, and
+run `apply_locked` under a fresh Line guard. Management admission is ended on
+every exit before the mutex is released. `is_managed` keeps `is_unused()`
+false across the gap between short locks; the mutex alone is not the exclusion
+proof. A stale handle returns `UnknownIrq` before hardware and never redirects
+to a replacement Line. This access is trusted kernel control, not user
+authorization or source-owner policy.
+
 ## Shared Descriptor Values
 
 IrqTrigger, IrqController and IrqDomainId are re-exported from irq-types with

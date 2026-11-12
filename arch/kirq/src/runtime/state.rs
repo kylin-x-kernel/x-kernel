@@ -829,6 +829,11 @@ impl IrqStateDesc {
         self.is_retired
     }
 
+    #[cfg(unittest)]
+    pub(super) fn set_retired_for_tests(&mut self) {
+        self.is_retired = true;
+    }
+
     pub(super) fn affinity_chip(&self) -> Option<&'static crate::IrqAffinityChip> {
         #[cfg(unittest)]
         if let Some(chip) = self.test_affinity_chip {
