@@ -254,7 +254,7 @@ impl<G: BaseGuard> WakeRunQueueRef<G> {
     #[inline]
     pub(crate) fn unblock_task(self, task: KtaskRef, resched: bool) {
         let state = task.state();
-        if state.is_blocked() {
+        if state.is_blocked() && state != TaskState::Frozen {
             self.unblock_task_in_state(task, state, resched);
         }
     }

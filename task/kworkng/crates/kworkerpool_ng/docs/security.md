@@ -122,3 +122,38 @@ Its receipt stays alive until the deferred task wake runs outside the control lo
 Callers may only observe or wait on the permanent receipt, never complete or reinit
 it. CompletionWait validates task context without registration or waiter allocation;
 source and receipt allocation at setup remains necessary.
+
+## Cooperative service policy
+
+The opt-in policy is immutable and belongs to an entire dedicated service set.
+Default services retain KeepRunning, so this change does not implicitly freeze
+workers required by PM/RTC/recovery. A caller choosing Cooperative must audit
+all bound sources and exclude callback dependency cycles with frozen tasks.
+Freezing a shared PM dependency is still a configuration deadlock and is bounded
+only during the existing task-freeze preparation, not during arbitrary recovery.
+
+Worker checkpoints hold no dispatch/pool lock, source inspection or acquired
+execution. Callback and terminal-resource cleanup return before acknowledgment.
+Manager checkpoints hold no pool lock or in-progress task operation. Idle waits
+use the task subsystem's opt-in publication/blocking handshake; ordinary work,
+retirement and timer wakes cannot bypass a confirmed freeze. Frozen tasks retain
+pending demand and stop state. Thaw precedes provider stop/join; queue teardown
+and producer exclusion remain independent integration responsibilities.
+
+No new unsafe block or raw pointer is introduced. Unit fixtures cover an idle
+worker, a blocked claimed callback that must not confirm, deferred demand,
+repeated freezing, manager stop deferred until thaw, and unchanged default
+policy. They use scoped task/provider owners and join workers/managers; the
+existing boot scheduler/timer facilities remain permanently installed.
+
+SMP cooperative task freezing uses ktask's dedicated Frozen state and
+incoming-stack confirmation; a work notification cannot release the task.
+Round identity and release-before-park are owned by ktask. Callback dependencies,
+service separation for recovery, and stop-after-thaw remain caller obligations.
+This does not add CPU parking, interrupt exclusion or a physical sleep backend.
+
+The manager stop regression starts an independent joined stop caller, observes
+its published stop request and blocked wait while the manager remains Frozen,
+then checks completion only after thaw. The default-policy rejection probe uses
+the actual default constructor and a positive five-second freeze budget so a zero deadline cannot mask accidental
+cooperative opt-in. Public joined-stop APIs explicitly require thaw-before-join.

@@ -78,6 +78,6 @@ mod source_detachment;
 mod source;
 
 mod normal;
-pub use normal::{NormalRuntimeError, NormalServices};
+pub use normal::{NormalFreezePolicy, NormalRuntimeError, NormalServices};
 mod pool;
 mod worker;

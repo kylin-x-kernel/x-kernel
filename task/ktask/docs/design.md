@@ -1556,31 +1556,39 @@ thresholds; they do not prove real S3 or simultaneous multi-CPU suspension.
 
 ## Cooperative freezer
 
-`freezer::freeze_tasks` requests an explicit stable set on a single present CPU.
-The coordinator and idle tasks are rejected, as are duplicate targets. A global
-atomic admits one attempt and gives inactive checkpoints a constant-time fast
-path. Requests and task references are allocated before publication; each task
-has one task-only request slot under `SpinNoPreempt`, also inspected by the
-scheduler's exit path. IRQ handlers never access it. Preemption exclusion keeps
-a target checkpoint from preempting the owner while it holds that target's slot.
-This low-level explicit-set API does not scan task lists or veto dispatch.
+`freezer::freeze_tasks` requests an explicit stable set across present CPUs.
+The coordinator, idle tasks and duplicate targets are rejected. One atomic
+admits a round and gives inactive checkpoints a constant-time fast path.
+Requests and strong task references are allocated before publication; request
+slots use `SpinNoIrq` because incoming-stack switch completion also reads them.
+Slot locks are released before scheduler wakeup or final reference destruction.
 
-A checkpoint prepares an allocation-free completion wait, publishes an
-acknowledgment and waits for the round's persistent release predicate. The
-coordinator waits with IRQs and MONOTONIC running, using an allocation-free completion notification queue,
-a prepared owned deadline timer and asynchronous cancellation. The deadline
-timer is synchronously drained before returning the guard. It accepts an explicit
-acknowledgment or permanent Exited state, never arbitrary Blocked state. On the
-sole CPU, it cannot execute concurrently with the acknowledging task's body.
-A wake between acknowledgment and park cannot permit ordinary work: the task
-must still pass the release predicate. Signals and unrelated wakes do not thaw.
+At an audited checkpoint the target records entry into its particular request,
+then parks in `TaskState::Frozen`. Ordinary wakeups, work and signals cannot
+transition that state to Ready. Only release of the owning round, or the
+post-block release recheck, uses a state-specific wake. Business wake latches
+remain independent and are consumed after thaw. This prevents ordinary wakes
+from resuming freezer control code while a successful guard is retained.
 
-`FrozenTasks` retains targets and round state, is not transferable between tasks,
-and removes every request before reopening admission. Its Drop publishes thaw
-and wakes waiters outside request-slot locks. Timeout/cancellation use the same
-cleanup before returning; a completed guard ignores later cancellation until
-its owner drops it. Slot references are moved out before destruction. Atomics
-use release/acquire for confirmation, cancellation, thaw and attempt ownership.
+On the incoming stack, after outgoing RCU/observer work, `SwitchCompletion`
+captures the request identity before clearing on_cpu permits remote enqueue.
+It publishes confirmation after the outgoing stack and scheduler handoff have
+completed. Capturing the identity prevents a delayed old completion from
+confirming a subsequent request. Completed exit is a separate monotonic flag,
+published on the incoming stack; Exited alone is insufficient. Registry
+retirement also follows this terminal boundary, keeping exit tails in snapshots.
+The coordinator waits with IRQs and MONOTONIC running and an owned deadline timer;
+that timer is synchronously drained before returning the guard. An opt-in idle
+wait receives a rescheduling wake; running targets receive a reschedule kick
+without application signal delivery. Missing safe points/IPI progress time out.
+
+`FrozenTasks` retains targets and round state and is task-bound. Drop removes
+requests, publishes persistent release and explicitly wakes Frozen targets.
+A release racing park is rechecked after Frozen publication using the existing
+blocked-state handshake; it cannot strand a late arrival. A delayed checkpoint
+retains its old request and observes that round's release, not a new slot.
+Timeout/cancellation use this same path. Cancellation after success does not
+release the guard. This is task quiescence, not CPU/IRQ/device suspension.
 
 First entry and POSIX return-to-user are audited safe points. Kernel workers
 must call `checkpoint` explicitly after releasing dependencies needed by PM.
@@ -1595,9 +1603,10 @@ complete snapshot of scheduler-admitted tasks, independent of the optional,
 bounded diagnostic registry. `TaskInner::prepare_owner` allocates one intrusive
 registration containing a weak task owner. The boot task is registered during
 bring-up; every public `activate_task` registers before scheduler enqueue.
-Permanent exit and final task destruction retire the registration in O(1).
-Detached tasks are not admitted and are not freeze targets. Private SMP
-migration trampolines are outside the supported single-present-CPU topology.
+Completed exit and final task destruction retire the registration in O(1).
+Detached tasks are not admitted and are not freeze targets. Private affinity
+migration trampolines remain scheduler infrastructure; freezing ordinary tasks
+does not certify that this infrastructure or its CPUs are stopped.
 
 The IRQ-safe registry lock covers activation admission, membership and closure.
 An activation racing closure is either registered before the snapshot, or kept
@@ -1633,3 +1642,39 @@ using X-Kernel's cooperative checkpoints rather than Linux's freezer internals.
 It does not implement SMP rendezvous, wakeup sources, device control or firmware
 entry. Tests exercise actual scheduler admission, complete selection, deferred
 lifetime, timeout, cancellation and recovery without freezing hardware clocks.
+
+### Freezer-aware prepared task parking
+
+`PreparedTaskWait::park_freezable` is an explicit kernel-worker safe point.
+Ordinary `park`, completion waits, blocked syscalls and callback waits retain
+normal behavior. Each task has one independent `is_freezer_wait` atomic flag;
+a scoped guard sets it only across this call and clears it on return/unwind.
+No new persistent waker registration or allocation is added to the park path.
+
+The freezer publishes a request under the IRQ-safe request lock,
+then wakes the task only when that flag is set, with the slot lock released.
+The waiter checks a checkpoint before parking, rechecks its request through the
+existing scheduler blocked-state handshake, and checks a checkpoint after wake.
+Thus a request either prevents parking or wakes the blocked participant; it
+cannot be lost between the first checkpoint and scheduler blocking. The
+request's own persistent release predicate still prevents ordinary work/stop
+wakes or cancellation from returning a confirmed task before thaw. Prepared
+business-wake hints remain latched independently of the freezer wake.
+
+The stop predicate under the run-queue lock only reads the short request slot;
+no request publisher retains that slot while entering the scheduler. Flag
+release/acquire and request-lock ordering cover entry concurrent with publication.
+Task freezing supports present CPUs with initialized schedulers and IPI delivery;
+it does not add reversible CPU parking or platform sleep. Call only without resources
+needed by PM/recovery. A busy callback must complete before opting in.
+
+### SMP acceptance coverage
+
+The private-worker integration fixture starts one real, affinity-pinned worker
+on every present CPU, records each callback's actual CPU, freezes the complete
+set, delivers work and ordinary wakes while held, and checks exact callback
+counts after three thaw cycles. The SMP case is ignored only on a UP topology.
+Existing callback-boundary, cancellation, idle-wait and manager-stop tests also
+execute on SMP. A switch observer asserts that confirmation has not been
+published on the outgoing stack; a staged completion test checks stale-round
+identity. None of these fixtures powers down CPUs or changes global clocks.

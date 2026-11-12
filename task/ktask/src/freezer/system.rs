@@ -12,7 +12,7 @@ use ktime_types::TimeSpan;
 use linked_list_r4l::{GetLinks, Links, List};
 
 use super::{FreezeCancellation, FreezeError, FrozenTasks, freeze_tasks};
-use crate::{KtaskRef, TaskInner, TaskState, WeakKtaskRef};
+use crate::{KtaskRef, TaskInner, WeakKtaskRef};
 
 enum Publication {
     Prepared,
@@ -115,10 +115,10 @@ pub(crate) fn retire(task: &TaskInner) {
 }
 
 /// Keeps scheduler admission closed while taking a complete active-task snapshot.
-struct PublicationGate(PhantomData<*mut ()>);
+pub(super) struct PublicationGate(PhantomData<*mut ()>);
 
 impl PublicationGate {
-    fn acquire() -> Result<Self, FreezeError> {
+    pub(super) fn acquire() -> Result<Self, FreezeError> {
         let mut registry = REGISTRY.lock();
         if registry.is_closed {
             return Err(FreezeError::Busy);
@@ -127,7 +127,7 @@ impl PublicationGate {
         Ok(Self(PhantomData))
     }
 
-    fn snapshot(&self) -> Vec<KtaskRef> {
+    pub(super) fn snapshot(&self) -> Vec<KtaskRef> {
         // Closing admission prevents growth; retirements may only shrink it.
         // Allocate outside the IRQ-safe list lock, then fill without growing.
         let capacity = REGISTRY.lock().active.iter().count();
@@ -193,7 +193,7 @@ pub struct SystemFrozenTasks {
 /// acknowledgments. This API does not stop CPUs, IRQs, devices or workqueues.
 ///
 /// # Errors
-/// Returns context/topology, exemption, contention or cooperative-freezer errors.
+/// Returns context, exemption, contention or cooperative-freezer errors.
 /// Every ordinary failure releases admission and all installed freeze requests.
 pub fn freeze_system_tasks(
     exempt: &[KtaskRef],
@@ -203,10 +203,18 @@ pub fn freeze_system_tasks(
     if !crate::is_sleepable_context() {
         return Err(FreezeError::InvalidContext);
     }
-    if kcpu_id_map::nr_cpus() != 1 {
-        return Err(FreezeError::MultipleCpus);
-    }
     let gate = PublicationGate::acquire()?;
+    freeze_with_gate(gate, exempt, timeout, cancellation)
+}
+
+// Consume an already-closed gate so exemption selection in private scheduler
+// fixtures can share the same admission interval as the production freeze.
+fn freeze_with_gate(
+    gate: PublicationGate,
+    exempt: &[KtaskRef],
+    timeout: TimeSpan,
+    cancellation: &FreezeCancellation,
+) -> Result<SystemFrozenTasks, FreezeError> {
     let current = crate::current().clone();
     let mut tasks = gate.snapshot();
     for (index, task) in exempt.iter().enumerate() {
@@ -216,14 +224,19 @@ pub fn freeze_system_tasks(
             || exempt[..index]
                 .iter()
                 .any(|other| KtaskRef::ptr_eq(other, task))
-            || !tasks.iter().any(|active| KtaskRef::ptr_eq(active, task))
+            || (!task
+                .is_exit_complete
+                .load(core::sync::atomic::Ordering::Acquire)
+                && !tasks.iter().any(|active| KtaskRef::ptr_eq(active, task)))
         {
             return Err(FreezeError::InvalidTaskSet);
         }
     }
     tasks.retain(|task| {
         !KtaskRef::ptr_eq(task, &current)
-            && task.state() != TaskState::Exited
+            && !task
+                .is_exit_complete
+                .load(core::sync::atomic::Ordering::Acquire)
             && !exempt.iter().any(|other| KtaskRef::ptr_eq(other, task))
     });
     let frozen = freeze_tasks(&tasks, timeout, cancellation)?;

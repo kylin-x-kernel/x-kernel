@@ -12,7 +12,8 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::WaitQueue;
 
-pub(super) static SERIAL: klazy::Lazy<kmutex::Mutex<()>> = klazy::Lazy::new(|| kmutex::Mutex::new(()));
+pub(super) static SERIAL: klazy::Lazy<kmutex::Mutex<()>> =
+    klazy::Lazy::new(|| kmutex::Mutex::new(()));
 
 pub(super) fn wait_for_request(progress: &Progress, task: &KtaskRef) {
     CompletionWait::prepare()
@@ -20,12 +21,9 @@ pub(super) fn wait_for_request(progress: &Progress, task: &KtaskRef) {
         .wait_until(&progress.changed, || task.freeze_request.lock().is_some());
 }
 
-#[def_test]
+#[def_test(serial)]
 fn entry_acknowledges_and_ordinary_wakeup_cannot_thaw() {
     let _serial = SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let ran = Arc::new(AtomicBool::new(false));
     let worker_ran = ran.clone();
     let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
@@ -63,12 +61,9 @@ fn entry_acknowledges_and_ordinary_wakeup_cannot_thaw() {
     drop(freeze_tasks(&[], TimeSpan::ZERO, &FreezeCancellation::new()).unwrap());
 }
 
-#[def_test]
+#[def_test(serial)]
 fn blocked_task_is_not_acknowledged_and_timeout_cleans_requests() {
     let _serial = SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let ready = Arc::new(WaitQueue::new());
     let released = Arc::new(AtomicBool::new(false));
     let started = Arc::new(AtomicBool::new(false));
@@ -93,12 +88,9 @@ fn blocked_task_is_not_acknowledged_and_timeout_cleans_requests() {
     assert_eq!(task.try_join().unwrap(), 0);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn cancellation_wakes_owner_and_releases_partial_freeze() {
     let _serial = SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let release = Arc::new(AtomicBool::new(false));
     let queue = Arc::new(WaitQueue::new());
     let started = Arc::new(AtomicBool::new(false));
@@ -148,12 +140,9 @@ fn cancellation_wakes_owner_and_releases_partial_freeze() {
     assert!(ran.load(Ordering::Acquire));
 }
 
-#[def_test]
+#[def_test(serial)]
 fn validation_rejects_self_duplicates_and_pre_cancelled_attempt() {
     let _serial = SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
         || {},
         "freeze-invalid".into(),
@@ -186,8 +175,8 @@ fn validation_rejects_self_duplicates_and_pre_cancelled_attempt() {
     );
 }
 
-#[def_test]
-fn freezer_checks_context_before_topology_and_does_not_park_remote_tasks() {
+#[def_test(serial)]
+fn freezer_rejects_invalid_context_and_accepts_empty_smp_set() {
     let _serial = SERIAL.lock();
     let cancellation = FreezeCancellation::new();
     {
@@ -197,20 +186,12 @@ fn freezer_checks_context_before_topology_and_does_not_park_remote_tasks() {
             Err(FreezeError::InvalidContext)
         ));
     }
-    if kcpu_id_map::nr_cpus() != 1 {
-        assert!(matches!(
-            freeze_tasks(&[], TimeSpan::ZERO, &cancellation),
-            Err(FreezeError::MultipleCpus)
-        ));
-    }
+    drop(freeze_tasks(&[], TimeSpan::ZERO, &cancellation).unwrap());
 }
 
-#[def_test]
+#[def_test(serial)]
 fn exit_notifies_waiting_coordinator_without_false_blocked_acknowledgment() {
     let _serial = SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let started = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));
     let queue = Arc::new(WaitQueue::new());
@@ -245,12 +226,9 @@ fn exit_notifies_waiting_coordinator_without_false_blocked_acknowledgment() {
     assert_eq!(releaser.try_join().unwrap(), 0);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn running_kernel_worker_acknowledges_at_explicit_safe_point() {
     let _serial = SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let started = Arc::new(AtomicBool::new(false));
     let proceed = Arc::new(AtomicBool::new(false));
     let ran = Arc::new(AtomicBool::new(false));
@@ -287,4 +265,89 @@ fn running_kernel_worker_acknowledges_at_explicit_safe_point() {
     assert_eq!(task.try_join().unwrap(), 0);
     assert_eq!(releaser.try_join().unwrap(), 0);
     assert!(ran.load(Ordering::Acquire));
+}
+
+struct FreezeSwitchProbe(AtomicBool);
+
+// SAFETY: callbacks only inspect the current task's IRQ-safe request slot and
+// atomics. They do not allocate, wait, schedule or acquire scheduler locks.
+unsafe impl kiface_task_api::TaskScheduleObserver for FreezeSwitchProbe {
+    unsafe fn schedule_in(&self, _: kcpu_id_map::LogicalCpuId) {}
+
+    unsafe fn schedule_out(
+        &self,
+        _: kcpu_id_map::LogicalCpuId,
+        _: kiface_task_api::ScheduleOutReason,
+    ) {
+        let task = crate::current();
+        if task.state() == TaskState::Frozen {
+            let request = task.freeze_request.lock().clone().unwrap();
+            core::assert!(!request.is_confirmed.load(Ordering::Acquire));
+            self.0.store(true, Ordering::Release);
+        }
+    }
+}
+
+#[def_test(serial)]
+fn confirmation_follows_outgoing_observer_and_completed_stack_switch() {
+    let _serial = SERIAL.lock();
+    let probe = Arc::new(FreezeSwitchProbe(AtomicBool::new(false)));
+    let task = crate::prepare_task(
+        crate::TaskInner::new_pidless_kthread(|| {}, "freeze-switch".into(), 0x4000)
+            .with_schedule_observer(probe.clone()),
+    );
+    let cancellation = FreezeCancellation::new();
+    let progress = cancellation.clone();
+    let target = task.clone();
+    let activator = crate::spawn(move || {
+        wait_for_request(&progress.0, &target);
+        crate::activate_task(&target);
+    });
+    let frozen = freeze_tasks(
+        core::slice::from_ref(&task),
+        TimeSpan::from_secs(30),
+        &cancellation,
+    )
+    .unwrap();
+    assert!(probe.0.load(Ordering::Acquire));
+    assert_eq!(task.state(), TaskState::Frozen);
+    #[cfg(feature = "smp")]
+    assert!(!task.on_cpu());
+    drop(frozen);
+    assert_eq!(task.try_join().unwrap(), 0);
+    assert_eq!(activator.try_join().unwrap(), 0);
+}
+
+#[def_test(serial)]
+fn late_switch_completion_cannot_confirm_a_replacement_request() {
+    let _serial = SERIAL.lock();
+    let _admission = Admission::acquire().unwrap();
+    let make_request = || {
+        Arc::new(Request {
+            round: Arc::new(Round {
+                progress: FreezeCancellation::new().0,
+                is_released: AtomicBool::new(false),
+            }),
+            is_confirmed: AtomicBool::new(false),
+            has_entered: AtomicBool::new(true),
+        })
+    };
+    // An unpublished task models the old handoff without racing a real CPU.
+    let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
+        || {},
+        "freeze-round-identity".into(),
+        0x4000,
+    ));
+    let old = make_request();
+    *task.freeze_request.lock() = Some(old.clone());
+    task.set_state(TaskState::Frozen);
+    let completion = SwitchCompletion::prepare(&task);
+    old.round.is_released.store(true, Ordering::Release);
+    let next = make_request();
+    *task.freeze_request.lock() = Some(next.clone());
+    completion.complete(&task);
+    assert!(old.is_confirmed.load(Ordering::Acquire));
+    assert!(!next.is_confirmed.load(Ordering::Acquire));
+    task.freeze_request.lock().take();
+    task.set_state(TaskState::Ready);
 }

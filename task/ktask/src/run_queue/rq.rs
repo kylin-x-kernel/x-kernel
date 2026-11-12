@@ -537,7 +537,11 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         if stop() {
             // Placement can select a remote idle CPU, so deferred enqueue
             // must retain the reschedule request as well as the wake itself.
-            crate::wake_task(curr, true);
+            super::select_wake_run_queue::<kspin::NoPreemptIrqSave>(curr).unblock_task_in_state(
+                curr.clone(),
+                state,
+                true,
+            );
         }
         *woke = false;
         drop(woke);
@@ -1084,20 +1088,20 @@ pub(crate) unsafe fn finish_task_switch() {
             );
         }
     }
+    let completion = crate::freezer::SwitchCompletion::prepare(&prev_task);
     #[cfg(feature = "smp")]
     {
         // The caller excludes migration and runs on the destination
         // CPU. Its run queue may differ from the suspended caller's queue.
         let current_rq = super::current_run_queue_ref();
-        clear_prev_task_on_cpu(current_rq, prev_task);
+        clear_prev_task_on_cpu(current_rq, &prev_task);
     }
-    #[cfg(not(feature = "smp"))]
-    drop(prev_task);
+    completion.complete(&prev_task);
 }
 
 /// Releases the on-CPU marker and completes any deferred wake enqueue.
 #[cfg(feature = "smp")]
-fn clear_prev_task_on_cpu(current_rq: &RunQueue, prev_task: KtaskRef) {
+fn clear_prev_task_on_cpu(current_rq: &RunQueue, prev_task: &KtaskRef) {
     prev_task.set_on_cpu(false);
     // Matching Dekker store-load fence; see `TaskInner::arm_wake_enqueue`.
     core::sync::atomic::fence(Ordering::SeqCst);
@@ -1116,14 +1120,14 @@ fn clear_prev_task_on_cpu(current_rq: &RunQueue, prev_task: KtaskRef) {
         prev_task.state()
     );
 
-    let target_cpu = claim_wake_cpu(&prev_task);
+    let target_cpu = claim_wake_cpu(prev_task);
     let is_local = target_cpu == current_rq.cpu_id;
     let target_rq = if is_local {
         current_rq
     } else {
         get_run_queue(target_cpu.as_usize())
     };
-    if let Some(decision) = target_rq.enqueue_ready_task(prev_task, is_wake_sync)
+    if let Some(decision) = target_rq.enqueue_ready_task(prev_task.clone(), is_wake_sync)
         && resched
     {
         target_rq.kick(decision);

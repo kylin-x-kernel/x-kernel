@@ -27,7 +27,7 @@ use kcpu_id_map::LogicalCpuId;
 use kerrno::KResult;
 use khal::context::TaskContext;
 use kpoll::PollSet;
-use kspin::{SpinNoIrq, SpinNoPreempt};
+use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
 
 use crate::{KCpuMask, KTask, KtaskRef, completion::CompletionWait};
@@ -98,6 +98,8 @@ pub enum TaskState {
     BlockedInterruptible = 5,
     /// Task waits for an event or an uncatchable termination request.
     BlockedKillable      = 6,
+    /// Held at a cooperative freezer checkpoint; only its owner may release it.
+    Frozen               = 7,
 }
 
 impl TaskState {
@@ -105,7 +107,7 @@ impl TaskState {
     pub const fn is_blocked(self) -> bool {
         matches!(
             self,
-            Self::Blocked | Self::BlockedInterruptible | Self::BlockedKillable
+            Self::Blocked | Self::BlockedInterruptible | Self::BlockedKillable | Self::Frozen
         )
     }
 }
@@ -355,8 +357,12 @@ pub struct TaskInner {
 
     entry: Cell<Option<TaskEntry>>,
     state: AtomicU8,
-    // Task-only access needs preemption exclusion; no IRQ handler reads this slot.
-    pub(crate) freeze_request: SpinNoPreempt<Option<Arc<crate::freezer::Request>>>,
+    // Shared by task-context request publication and the IRQ-off switch tail.
+    pub(crate) freeze_request: kspin::SpinNoIrq<Option<Arc<crate::freezer::Request>>>,
+    // Only explicit freezer-aware parking opts into request-driven task wakeup.
+    pub(crate) is_freezer_wait: AtomicBool,
+    /// Published on the incoming stack after terminal switch cleanup.
+    pub(crate) is_exit_complete: AtomicBool,
     pub(crate) suspend_registration: klazy::Once<Arc<crate::freezer::system::Registration>>,
 
     /// CPU affinity mask.
@@ -434,6 +440,7 @@ impl From<u8> for TaskState {
             4 => Self::Exited,
             5 => Self::BlockedInterruptible,
             6 => Self::BlockedKillable,
+            7 => Self::Frozen,
             _ => unreachable!(),
         }
     }
@@ -769,7 +776,8 @@ impl TaskInner {
                 TaskState::Running | TaskState::Ready => ScheduleOutReason::Runnable,
                 TaskState::Blocked
                 | TaskState::BlockedInterruptible
-                | TaskState::BlockedKillable => ScheduleOutReason::Blocked,
+                | TaskState::BlockedKillable
+                | TaskState::Frozen => ScheduleOutReason::Blocked,
                 TaskState::Exited => ScheduleOutReason::Exited,
             };
             // SAFETY: switch_to calls here only for an actual switch, while
@@ -981,7 +989,9 @@ impl TaskInner {
             start_time_ns: khal::time::monotonic_time_nanos(),
             entry: Cell::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
-            freeze_request: SpinNoPreempt::new(None),
+            freeze_request: kspin::SpinNoIrq::new(None),
+            is_freezer_wait: AtomicBool::new(false),
+            is_exit_complete: AtomicBool::new(false),
             suspend_registration: klazy::Once::new(),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
@@ -1279,8 +1289,7 @@ impl TaskInner {
     pub(crate) fn notify_exit(&self, exit_code: i32) {
         self.exit_code.store(exit_code, Ordering::Release);
         self.set_state(TaskState::Exited);
-        crate::freezer::system::retire(self);
-        crate::freezer::notify_exit(self);
+        // Registry retirement and freezer notification follow actual switch-out.
         self.wait_for_exit.complete_all();
     }
 

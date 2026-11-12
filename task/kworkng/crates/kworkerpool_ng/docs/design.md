@@ -224,3 +224,35 @@ DeferredWake, then wakes tasks after unlocking. Callers use the allocation-free
 ktask::completion::CompletionWait adapter; there is no poll registration. Normal
 worker/manager demand parking still uses PreparedTaskWait because it waits on demand,
 not a completion receipt. Source controls and receipt Arcs still allocate at setup.
+
+## Opt-in cooperative normal-service freezing
+
+`NormalServices::start_with_policy` fixes a `NormalFreezePolicy` for the whole
+prepared service set before manager or worker publication. `start` continues
+using `KeepRunning`; kernel shared defaults are unchanged. `Cooperative` is for
+dedicated sources whose callbacks, payload cleanup and provider retirement can
+finish without other frozen tasks. Keep PM/RTC/recovery work on separate service
+sets. There is no mutable queue-level switch or implicit policy inferred from
+names. The low-level binding API is unchanged; `NormalQueue` defaults do not
+switch providers through this API.
+
+Each cooperative worker checks a checkpoint at the top of its loop, outside
+dispatch and pool locks and after the previously acquired execution has returned.
+Idle parking uses `PreparedTaskWait::park_freezable`, allowing request publication
+to wake an idle task without business demand. Selection or a running callback
+is never acknowledged mid-operation; a missing callback completion causes the
+coordinator to time out. Freeze and work notifications remain independent:
+published demand and stop requests survive until thaw, then the existing loop
+rechecks its protected worker phase. KeepRunning workers retain ordinary parking.
+
+The cooperative manager uses the same unlocked loop/idle boundaries. It retains
+its timer and worker references while frozen; the timer only delivers its
+prepared wake hint. Stop/join must occur after thaw. Startup still completes CPU
+coverage or joins rollback, and no shared services are replaced by tests.
+This API supplies task cooperation only: it does not stop producers or pause
+queues/IRQs, discover PM exemptions, wire kpm, or implement SMP suspend.
+
+SMP regression coverage pins independent real workers to every present CPU and
+records their callback CPU IDs. Three freeze/notify/thaw rounds verify Frozen
+state, exact completion counts, persistent business demand and cleanup. These
+software tests keep all CPUs online; they do not establish SMP platform suspend.

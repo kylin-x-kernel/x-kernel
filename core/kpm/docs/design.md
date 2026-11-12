@@ -1,5 +1,8 @@
 # kpm — System power management
 
+See the [SMP freeze audit and staged proposal](smp-freeze-proposal.md) for
+multicore preparation work. The platform-suspend entry remains UP-only.
+
 ## Ownership
 
 `kpm` owns system suspend/resume orchestration and the platform handoff contract.

@@ -112,6 +112,45 @@ impl PreparedTaskWait {
     /// Panics if called by another task or outside sleepable context. The
     /// preparing task must release all locks that forbid sleeping before park.
     pub fn park(&mut self) {
+        self.validate_park();
+        self.kwaker.park();
+    }
+
+    /// Parks a kernel worker at an explicitly audited freezer safe point.
+    ///
+    /// Unlike ordinary parking, a freeze request can wake this wait without an
+    /// external work notification. Requests are confirmed before parking and
+    /// after wake; a confirmed task cannot return until thaw. Wake hints arriving
+    /// while frozen remain latched. Callers must recheck work/stop predicates.
+    /// No signals are consumed and no EINTR is generated.
+    ///
+    /// Requires a kernel task with no locks, RCU scopes, callback payload or
+    /// device operations needed by PM/recovery retained across this call. This
+    /// is opt-in: ordinary waits and blocked callbacks never acknowledge freezes.
+    ///
+    /// # Errors
+    /// Returns InvalidContext for user tasks or non-sleepable context, before
+    /// opting into wakeup or acknowledging a request.
+    ///
+    /// # Panics
+    /// Panics if called by a task other than the preparing task.
+    pub fn park_freezable(&mut self) -> Result<(), crate::freezer::FreezeError> {
+        if !crate::is_sleepable_context() || self.task.user_runtime().is_some() {
+            return Err(crate::freezer::FreezeError::InvalidContext);
+        }
+        self.validate_park();
+        let _registration = FreezerWait::new(&self.task.is_freezer_wait);
+        crate::freezer::checkpoint()?;
+        crate::park::park_task_unless(
+            &self.kwaker.woke,
+            TaskState::Blocked,
+            || self.task.freeze_request.lock().is_some(),
+            || {},
+        );
+        crate::freezer::checkpoint()
+    }
+
+    fn validate_park(&self) {
         let curr = current();
         assert!(
             curr.ptr_eq(&self.task),
@@ -121,7 +160,21 @@ impl PreparedTaskWait {
             crate::is_sleepable_context(),
             "prepared wait cannot park in this context"
         );
-        self.kwaker.park();
+    }
+}
+
+struct FreezerWait<'a>(&'a core::sync::atomic::AtomicBool);
+
+impl<'a> FreezerWait<'a> {
+    fn new(active: &'a core::sync::atomic::AtomicBool) -> Self {
+        active.store(true, core::sync::atomic::Ordering::Release);
+        Self(active)
+    }
+}
+
+impl Drop for FreezerWait<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, core::sync::atomic::Ordering::Release);
     }
 }
 

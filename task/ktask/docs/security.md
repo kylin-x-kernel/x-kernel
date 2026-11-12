@@ -864,17 +864,28 @@ caller can freeze clocks. Cancellation removes all requests and wakes partial
 acknowledgments. Once a confirmed guard is returned, cancellation cannot thaw
 it under hardware recovery. Its owner must drop it only when resources are safe.
 
-Per-task request slots use `SpinNoPreempt`: publication, checkpoint, cleanup
-and scheduler exit are task-only accessors, even though exit already masks IRQs.
-IRQ handlers never touch these slots. Preemption must remain excluded while
-a slot is held, preventing a target checkpoint from preempting its owner. No allocation, blocking, wake callback or final
-reference destruction occurs under those slot locks. Round/task ownership is
-strong and acyclic; task-local completion wait storage remains pinned and owned
-across scheduler blocking. One unsafe owned-timer start is justified by initialized task-context admission
-and an allocation-free completion-only IRQ callback; the timer is drained before
-returning a freeze guard. There are no new Send/Sync impls.
-Single-present-CPU admission excludes concurrent target execution; SMP freezing
-requires a separate remote rendezvous and cannot reuse this guarantee.
+Per-task request slots use `SpinNoIrq`: publication, checkpoint, cleanup and
+incoming-stack completion can run on different CPUs. No slot holder enters the
+scheduler, waits, allocates or destroys its final Arc under that lock. Scheduler
+blocking takes the wake latch before the request predicate; publishers release
+the slot before taking scheduler locks. The existing deferred-wake/on_cpu
+handshake is retained, including its store-load fences.
+
+A checkpoint parks in Frozen, a state excluded from ordinary wakeup. Confirmation
+is published only after switching stacks. The switch tail captures a specific
+request before remote enqueue becomes possible; a late completion cannot confirm
+a replacement round. An old checkpoint retains only the released old round.
+Release-before-park is checked after Frozen publication and uses an explicit
+state-selected wake, so cancel/drop cannot strand a late arrival. Completed exit
+and registry retirement occur on the incoming stack rather than at early Exited
+publication. A request arriving during exit gets completion notification as well.
+
+The owned deadline timer uses the existing initialized, allocation-free
+completion IRQ callback and is drained before return. Remote notification failure
+or missing safe points prevents success and reaches the bounded timeout. Task
+freezing does not stop scheduler infrastructure, CPUs, interrupts, DMA or device
+access by exempt tasks. The kpm platform-suspend entry retains its UP restriction;
+physical SMP suspend still requires a reversible CPU rendezvous and backend.
 
 ### Publication admission and registration lifetime
 
@@ -900,9 +911,35 @@ reallocate under the lock. Dropping a completed system guard thaws before
 reopening admission. Gate rollback drains deferred owners on all ordinary
 error paths. Forgetting a guard is not a supported PM cancellation mechanism.
 
+Private scheduler fixtures select infrastructure exemptions and invoke the
+shared freeze implementation under one continuously owned publication gate.
+They never reopen admission between exemption and target snapshots. A regression
+fixture activates a non-cooperative task in that interval and checks that it
+stays deferred until the frozen guard is released. Public entry validation is
+still covered separately; this fixture does not exempt production PM tasks.
+
 This is scheduler admission, not a ban on allocating detached task objects or
 updating process-domain visibility. Those objects cannot execute until admitted.
 Explicitly exempt kernel workers can still run, so platform preparation must
 drain/suppress their device accesses before resources disappear. Missing safe
 points refuse suspension by timeout rather than silently claiming global
 quiescence. No new production worker exemptions or real platform PM are enabled.
+
+### Explicit freezable wait wakeup
+
+`PreparedTaskWait::park_freezable` rejects user/non-sleepable contexts before
+setting its scoped flag. A request wakes only an explicit participant; it does
+not convert arbitrary blocking into a freeze acknowledgment. Confirmation still
+requires checkpoint entry after dependency release and an incoming-stack
+scheduler confirmation.
+A sleeping callback using ordinary waits remains unconfirmed and can time out.
+
+The request is published before reading the opt-in flag, and no request lock is
+held while waking the scheduler. The existing blocked-state stop predicate
+rechecks the slot under scheduler exclusion; this closes both publication-before-
+park and wake-before-block races. Its run-queue-to-request lock order has no
+reverse publisher edge. The flag is task-context-only, independent atomic state;
+no IRQ reader or raw pointer is added. It introduces no new unsafe code or
+Send/Sync implementation. The prepared handle retains its task and remains
+neither Send nor Sync. Ordinary waker hints survive confirmed freezing, while
+request cancellation never independently releases a successfully returned guard.

@@ -13,7 +13,7 @@ use kerrno::KResult;
 use ktask::future::PreparedTaskWait;
 use ktime_types::{MonotonicInstant, TimeSpan};
 
-use super::{NormalService, PartitionWorkSource, WorkerState};
+use super::{NormalFreezePolicy, NormalService, PartitionWorkSource, WorkerState};
 
 /// Sole manager-side owner of task references for one prepared normal service.
 /// Exclusive access serializes creation/reaping; no asynchronous slot commands
@@ -28,15 +28,26 @@ pub(crate) struct WorkerManager<S> {
 impl<S: PartitionWorkSource + Send + Sync + 'static> WorkerManager<S> {
     /// Reserves fixed metadata before any task preparation or worker admission.
     /// Caller must satisfy flags' context contract; nested Arc policy is unchanged.
+    #[cfg(unittest)]
     pub(crate) fn new(
         cpu: LogicalCpuId,
         limit: NonZeroUsize,
         idle_for: TimeSpan,
         flags: AllocFlags,
     ) -> KResult<Self> {
+        Self::new_with_policy(cpu, limit, idle_for, flags, NormalFreezePolicy::KeepRunning)
+    }
+
+    pub(super) fn new_with_policy(
+        cpu: LogicalCpuId,
+        limit: NonZeroUsize,
+        idle_for: TimeSpan,
+        flags: AllocFlags,
+        freeze_policy: NormalFreezePolicy,
+    ) -> KResult<Self> {
         assert!(idle_for > TimeSpan::ZERO, "idle interval must be positive");
         Ok(Self {
-            service: NormalService::new(cpu, limit, flags)?,
+            service: NormalService::new_with_policy(cpu, limit, flags, freeze_policy)?,
             tasks: super::empty_slots(limit, flags)?,
             idle_for,
             is_stopping: false,
@@ -73,6 +84,7 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> WorkerManager<S> {
             workers.manager_waker = Some(wait.waker());
         }
         loop {
+            self.service.freeze_policy.checkpoint();
             let stop_requested = self.service.workers.lock().stop_requested;
             if stop_requested && !self.is_stopping {
                 self.stop_if_idle();
@@ -97,7 +109,7 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> WorkerManager<S> {
             }
             // Source/idle/stop changes after the pass deliver a durable task wake.
             // An earlier wake is consumed here rather than lost before sleeping.
-            wait.park();
+            self.service.freeze_policy.park(&mut wait);
         }
         // Exclude further timer delivery before withdrawing the task-bound waker.
         drop(timer);

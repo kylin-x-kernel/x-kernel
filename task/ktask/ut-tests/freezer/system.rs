@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-use crate::{TaskInner, WaitQueue};
+use crate::{TaskInner, TaskState, WaitQueue};
 
 fn prepared(name: &str, entry: impl FnOnce() + Send + 'static) -> KtaskRef {
     crate::prepare_task(TaskInner::new_pidless_kthread(entry, name.into(), 0x4000))
@@ -23,27 +23,31 @@ fn contains(tasks: &[KtaskRef], target: &KtaskRef) -> bool {
 
 // Keep boot/reclamation/worker infrastructure running in scheduler-only tests.
 // This exemption fixture is not used by production PM and never powers devices off.
-fn infrastructure_except(target: Option<&KtaskRef>) -> Vec<KtaskRef> {
+fn freeze_except(
+    target: Option<&KtaskRef>,
+    timeout: TimeSpan,
+    cancellation: &FreezeCancellation,
+) -> Result<SystemFrozenTasks, FreezeError> {
     let gate = PublicationGate::acquire().unwrap();
     let current = crate::current().clone();
-    gate.snapshot()
+    let exemptions: Vec<_> = gate
+        .snapshot()
         .into_iter()
         .filter(|task| {
             !KtaskRef::ptr_eq(task, &current)
                 && !target.is_some_and(|target| KtaskRef::ptr_eq(task, target))
         })
-        .collect()
+        .collect();
+    // Keep admission closed across both snapshots: even asynchronous boot
+    // workers cannot become unlisted non-cooperative targets in between.
+    freeze_with_gate(gate, &exemptions, timeout, cancellation)
 }
 
 #[def_test(serial)]
 fn system_admission_defers_activation_and_wakeup_until_guard_release() {
     let _serial = super::super::tests::SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
-    let exemptions = infrastructure_except(None);
     let cancellation = FreezeCancellation::new();
-    let guard = freeze_system_tasks(&exemptions, TimeSpan::from_secs(5), &cancellation).unwrap();
+    let guard = freeze_except(None, TimeSpan::from_secs(5), &cancellation).unwrap();
     let ran = Arc::new(AtomicBool::new(false));
     let worker_ran = ran.clone();
     let task = prepared("pm-deferred", move || {
@@ -64,6 +68,35 @@ fn system_admission_defers_activation_and_wakeup_until_guard_release() {
 }
 
 #[def_test(serial)]
+fn exemption_snapshot_keeps_new_activation_deferred_through_freeze() {
+    let _serial = super::super::tests::SERIAL.lock();
+    let gate = PublicationGate::acquire().unwrap();
+    let current = crate::current().clone();
+    let exemptions: Vec<_> = gate
+        .snapshot()
+        .into_iter()
+        .filter(|task| !KtaskRef::ptr_eq(task, &current))
+        .collect();
+    let ran = Arc::new(AtomicBool::new(false));
+    let task_ran = ran.clone();
+    // Deliberately activate a non-cooperative task between exemption selection
+    // and freezing. It must remain deferred under the original gate.
+    let task = crate::spawn(move || task_ran.store(true, Ordering::Release));
+    let guard = freeze_with_gate(
+        gate,
+        &exemptions,
+        TimeSpan::from_secs(5),
+        &FreezeCancellation::new(),
+    )
+    .unwrap();
+    assert!(!ran.load(Ordering::Acquire));
+    assert!(matches!(PublicationGate::acquire(), Err(FreezeError::Busy)));
+    drop(guard);
+    assert_eq!(task.try_join().unwrap(), 0);
+    assert!(ran.load(Ordering::Acquire));
+}
+
+#[def_test(serial)]
 fn snapshot_tracks_admitted_tasks_but_not_detached_or_retired_tasks() {
     let _serial = super::super::tests::SERIAL.lock();
     let detached = prepared("pm-detached", || {});
@@ -73,6 +106,9 @@ fn snapshot_tracks_admitted_tasks_but_not_detached_or_retired_tasks() {
     drop(gate);
     crate::activate_task(&detached);
     assert_eq!(detached.try_join().unwrap(), 0);
+    while !detached.is_exit_complete.load(Ordering::Acquire) {
+        crate::yield_now();
+    }
     let gate = PublicationGate::acquire().unwrap();
     assert!(!contains(&gate.snapshot(), &detached));
 }
@@ -94,9 +130,6 @@ fn snapshot_includes_activation_admitted_before_scheduler_enqueue() {
 #[def_test(serial)]
 fn user_task_cannot_be_exempted_even_when_registered() {
     let _serial = super::super::tests::SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     struct Runtime;
     impl crate::UserTaskRuntime for Runtime {
         fn as_any(&self) -> &dyn core::any::Any {
@@ -125,9 +158,6 @@ fn user_task_cannot_be_exempted_even_when_registered() {
 #[def_test(serial)]
 fn task_admitted_before_closure_cannot_escape_system_freezing() {
     let _serial = super::super::tests::SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let entered = Arc::new(AtomicBool::new(false));
     let proceed = Arc::new(AtomicBool::new(false));
     let ran = Arc::new(AtomicBool::new(false));
@@ -162,13 +192,15 @@ fn task_admitted_before_closure_cannot_escape_system_freezing() {
         proceed.store(true, Ordering::Release);
         queue.notify_all(false);
     });
-    let exemptions = infrastructure_except(Some(&task));
-    let guard = freeze_system_tasks(&exemptions, TimeSpan::from_secs(5), &cancellation).unwrap();
+    let guard = freeze_except(Some(&task), TimeSpan::from_secs(5), &cancellation).unwrap();
     assert!(!ran.load(Ordering::Acquire));
     assert!(!newborn_ran.load(Ordering::Acquire));
-    assert!(task.freeze_request.lock().as_ref().is_some_and(|request| {
-        request.is_confirmed.load(Ordering::Acquire)
-    }));
+    assert!(
+        task.freeze_request
+            .lock()
+            .as_ref()
+            .is_some_and(|request| { request.is_confirmed.load(Ordering::Acquire) })
+    );
     drop(guard);
     let child = newborn.lock().take().unwrap();
     assert_eq!(child.try_join().unwrap(), 0);
@@ -180,9 +212,6 @@ fn task_admitted_before_closure_cannot_escape_system_freezing() {
 #[def_test(serial)]
 fn system_freeze_timeout_reopens_publication_and_cleans_requests() {
     let _serial = super::super::tests::SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let entered = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));
     let queue = Arc::new(WaitQueue::new());
@@ -197,9 +226,8 @@ fn system_freeze_timeout_reopens_publication_and_cleans_requests() {
         })
     };
     queue.wait_until(|| entered.load(Ordering::Acquire));
-    let exemptions = infrastructure_except(Some(&task));
     assert!(matches!(
-        freeze_system_tasks(&exemptions, TimeSpan::ZERO, &FreezeCancellation::new()),
+        freeze_except(Some(&task), TimeSpan::ZERO, &FreezeCancellation::new()),
         Err(FreezeError::TimedOut)
     ));
     assert!(task.freeze_request.lock().is_none());
@@ -214,9 +242,6 @@ fn system_freeze_timeout_reopens_publication_and_cleans_requests() {
 #[def_test(serial)]
 fn rejected_exemptions_and_cancellation_release_system_admission() {
     let _serial = super::super::tests::SERIAL.lock();
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let current = crate::current().clone();
     let detached = prepared("pm-invalid-exempt", || {});
     for exempt in [current, detached] {
@@ -226,11 +251,10 @@ fn rejected_exemptions_and_cancellation_release_system_admission() {
         ));
         drop(PublicationGate::acquire().unwrap());
     }
-    let exemptions = infrastructure_except(None);
     let cancellation = FreezeCancellation::new();
     cancellation.cancel();
     assert!(matches!(
-        freeze_system_tasks(&exemptions, TimeSpan::ZERO, &cancellation),
+        freeze_except(None, TimeSpan::ZERO, &cancellation),
         Err(FreezeError::Cancelled)
     ));
     drop(PublicationGate::acquire().unwrap());
@@ -261,7 +285,7 @@ fn gate_rollback_keeps_deferred_task_alive_without_external_owner() {
 }
 
 #[def_test(serial)]
-fn system_freezer_rejects_invalid_context_and_multiple_present_cpus() {
+fn system_freezer_rejects_invalid_context() {
     let _serial = super::super::tests::SERIAL.lock();
     let cancellation = FreezeCancellation::new();
     {
@@ -269,12 +293,6 @@ fn system_freezer_rejects_invalid_context_and_multiple_present_cpus() {
         assert!(matches!(
             freeze_system_tasks(&[], TimeSpan::ZERO, &cancellation),
             Err(FreezeError::InvalidContext)
-        ));
-    }
-    if kcpu_id_map::nr_cpus() != 1 {
-        assert!(matches!(
-            freeze_system_tasks(&[], TimeSpan::ZERO, &cancellation),
-            Err(FreezeError::MultipleCpus)
         ));
     }
 }

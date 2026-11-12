@@ -11,7 +11,7 @@ use kcpu_id_map::LogicalCpuId;
 use ktime_types::TimeSpan;
 
 use super::{
-    NormalService, PartitionWorkSource,
+    NormalFreezePolicy, NormalService, PartitionWorkSource,
     runtime::{NormalRuntime, RuntimeError, validate_idle_interval},
 };
 
@@ -56,13 +56,38 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalServices<S> {
     /// # Panics
     /// Propagates initialized task/timer invariants and fatal kernel allocation.
     pub fn start(limit: NonZeroUsize, idle_for: TimeSpan) -> Result<Self, RuntimeError> {
+        Self::start_with_policy(limit, idle_for, NormalFreezePolicy::KeepRunning)
+    }
+
+    /// Starts a dedicated service set with an immutable PM participation policy.
+    ///
+    /// Cooperative services freeze managers and workers only at unlocked loop
+    /// and idle boundaries, after acquired execution and cleanup have returned.
+    /// All bound sources must permit those boundaries: do not bind PM/RTC or
+    /// recovery work here, and ensure callbacks can finish without frozen tasks.
+    /// This does not pause queues, stop IRQ/BH producers or implement SMP suspend.
+    /// Stop/join requires thaw first. Default kernel services still use `start`.
+    /// Context, initialization and lifetime requirements match [`Self::start`].
+    ///
+    /// # Errors
+    /// Returns the same validation/startup errors as [`Self::start`].
+    ///
+    /// # Panics
+    /// Propagates the task/timer and allocation invariants of [`Self::start`].
+    pub fn start_with_policy(
+        limit: NonZeroUsize,
+        idle_for: TimeSpan,
+        policy: NormalFreezePolicy,
+    ) -> Result<Self, RuntimeError> {
         if !ktask::is_sleepable_context() {
             return Err(RuntimeError::InvalidContext);
         }
         validate_idle_interval(idle_for)?;
         let mut cpus = Vec::new();
         kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
-        Self::start_with(&cpus, |cpu| NormalRuntime::start(cpu, limit, idle_for))
+        Self::start_with(&cpus, |cpu| {
+            NormalRuntime::start_with_policy(cpu, limit, idle_for, policy)
+        })
     }
 
     /// The boot map supplies unique sorted CPUs. The injected starter must retain
@@ -105,6 +130,9 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalServices<S> {
     /// first, and must not execute this operation inside an owned worker/manager.
     /// Repeated calls after complete stop are harmless. References alone do not
     /// authorize publishing new demand during or after this operation.
+    /// With Cooperative services, release every freeze guard covering these
+    /// managers/workers before waiting for stop. Stop does not thaw them; joining
+    /// while retaining their freeze credentials creates a caller-owned wait cycle.
     ///
     /// # Errors
     /// Invalid context returns before stopping any CPU service.

@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use unittest::def_test;
 
 use super::*;
@@ -138,4 +140,50 @@ fn normal_runtime_stop_is_scoped_to_its_owner() {
     assert!(second.service.is_ready());
     assert!(!second.service.workers.lock().stop_requested);
     second.stop().unwrap();
+}
+
+#[def_test(serial)]
+fn cooperative_manager_freezes_idle_and_defers_stop_until_thaw() {
+    let runtime = Arc::new(
+        NormalRuntime::<Empty>::start_with_policy(
+            khal::percpu::this_cpu_id(),
+            NonZeroUsize::new(1).unwrap(),
+            TimeSpan::from_secs(60),
+            NormalFreezePolicy::Cooperative,
+        )
+        .unwrap(),
+    );
+    while runtime.task.state() != ktask::TaskState::Blocked {
+        ktask::yield_now();
+    }
+    let frozen = ktask::freezer::freeze_tasks(
+        core::slice::from_ref(&runtime.task),
+        TimeSpan::from_secs(5),
+        &ktask::freezer::FreezeCancellation::new(),
+    )
+    .unwrap();
+    let completed = Arc::new(AtomicBool::new(false));
+    let completion = completed.clone();
+    let target = runtime.clone();
+    let stopper = ktask::spawn(move || {
+        target.stop().unwrap();
+        completion.store(true, Ordering::Release);
+    });
+    // Observe a real join waiter after the stop request is published. An
+    // implementation that returns early fails rather than satisfying an
+    // assertion implied solely by the manager's already-frozen state.
+    while !runtime.service.workers.lock().stop_requested
+        || stopper.state() != ktask::TaskState::Blocked
+    {
+        assert!(!completed.load(Ordering::Acquire));
+        assert_ne!(stopper.state(), ktask::TaskState::Exited);
+        ktask::yield_now();
+    }
+    assert_eq!(runtime.task.state(), ktask::TaskState::Frozen);
+    assert!(!completed.load(Ordering::Acquire));
+    drop(frozen);
+    assert_eq!(stopper.join(), 0);
+    assert!(completed.load(Ordering::Acquire));
+    assert_eq!(runtime.task.state(), ktask::TaskState::Exited);
+    assert_eq!(runtime.service.workers.lock().pool.reserved_workers(), 0);
 }

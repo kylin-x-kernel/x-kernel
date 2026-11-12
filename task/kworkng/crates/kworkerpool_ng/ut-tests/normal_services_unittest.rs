@@ -158,3 +158,25 @@ fn normal_services_reject_before_startup() {
         Err(RuntimeError::InvalidContext)
     ));
 }
+
+#[def_test(serial)]
+fn public_normal_services_policy_is_explicit_and_default_remains_nonfreezable() {
+    for policy in [
+        super::super::NormalFreezePolicy::KeepRunning,
+        super::super::NormalFreezePolicy::Cooperative,
+    ] {
+        let services = NormalServices::<Empty>::start_with_policy(limit(), idle(), policy).unwrap();
+        for runtime in &services.runtimes {
+            assert_eq!(runtime.service.freeze_policy, policy);
+        }
+        services.stop().unwrap();
+    }
+    let services = NormalServices::<Empty>::start(limit(), idle()).unwrap();
+    for runtime in &services.runtimes {
+        assert_eq!(
+            runtime.service.freeze_policy,
+            super::super::NormalFreezePolicy::KeepRunning
+        );
+    }
+    services.stop().unwrap();
+}

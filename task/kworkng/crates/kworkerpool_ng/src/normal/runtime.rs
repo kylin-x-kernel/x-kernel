@@ -13,7 +13,9 @@ use kerrno::KError;
 use ktask::future::PreparedTaskWait;
 use ktime_types::TimeSpan;
 
-use super::{NormalService, PartitionWorkSource, WorkerState, manager::WorkerManager};
+use super::{
+    NormalFreezePolicy, NormalService, PartitionWorkSource, WorkerState, manager::WorkerManager,
+};
 
 /// Preparation failures before starting or requesting termination of a service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,21 +79,51 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalRuntime<S> {
     ///
     /// # Panics
     /// Propagates task/timer preparation or initialized runtime invariant failures.
+    #[cfg(unittest)]
     pub(super) fn start(
         cpu: LogicalCpuId,
         limit: NonZeroUsize,
         idle_for: TimeSpan,
     ) -> Result<Self, RuntimeError> {
-        Self::start_with_entry(cpu, limit, idle_for, |manager, wake| {
+        Self::start_with_policy(cpu, limit, idle_for, NormalFreezePolicy::KeepRunning)
+    }
+
+    pub(super) fn start_with_policy(
+        cpu: LogicalCpuId,
+        limit: NonZeroUsize,
+        idle_for: TimeSpan,
+        policy: NormalFreezePolicy,
+    ) -> Result<Self, RuntimeError> {
+        Self::start_with_policy_entry(cpu, limit, idle_for, policy, |manager, wake| {
             ktask::PreparedTaskEntry::new(move || manager.run_with_startup(Some(wake)))
                 .map_err(|_| RuntimeError::NoMemory)
         })
     }
 
+    #[cfg(unittest)]
     fn start_with_entry(
         cpu: LogicalCpuId,
         limit: NonZeroUsize,
         idle_for: TimeSpan,
+        prepare_entry: impl FnOnce(
+            WorkerManager<S>,
+            core::task::Waker,
+        ) -> Result<ktask::PreparedTaskEntry, RuntimeError>,
+    ) -> Result<Self, RuntimeError> {
+        Self::start_with_policy_entry(
+            cpu,
+            limit,
+            idle_for,
+            NormalFreezePolicy::KeepRunning,
+            prepare_entry,
+        )
+    }
+
+    fn start_with_policy_entry(
+        cpu: LogicalCpuId,
+        limit: NonZeroUsize,
+        idle_for: TimeSpan,
+        policy: NormalFreezePolicy,
         prepare_entry: impl FnOnce(
             WorkerManager<S>,
             core::task::Waker,
@@ -102,7 +134,8 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalRuntime<S> {
             return Err(RuntimeError::CpuUnavailable);
         }
         validate_idle_interval(idle_for)?;
-        let manager = WorkerManager::new(cpu, limit, idle_for, AllocFlags::KERNEL)?;
+        let manager =
+            WorkerManager::new_with_policy(cpu, limit, idle_for, AllocFlags::KERNEL, policy)?;
         let service = manager.service.clone();
         let wake = startup.waker();
         let entry = prepare_entry(manager, wake)?;
@@ -123,6 +156,9 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalRuntime<S> {
     /// Idempotent after completion. Caller must exclude producers and finish source
     /// teardown first, and must not call from this manager or one of its workers.
     /// This does not close a Queue or cancel caller-owned delayed work.
+    /// With Cooperative services, release every freeze guard covering these
+    /// managers/workers before waiting for stop. Stop does not thaw them; joining
+    /// while retaining their freeze credentials creates a caller-owned wait cycle.
     ///
     /// # Errors
     /// Invalid context rejects before publishing the stop request.
