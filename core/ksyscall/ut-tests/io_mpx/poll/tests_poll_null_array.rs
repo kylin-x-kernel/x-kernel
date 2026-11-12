@@ -48,3 +48,27 @@ fn test_ppoll_accepts_null_descriptor_array_with_zero_count() {
 fn test_poll_accepts_null_descriptor_array_with_zero_count() {
     assert_eq!(sys_poll(UserPtr::default(), 0, 0), Ok(0));
 }
+
+#[def_test(user)]
+fn test_poll_count_limit_precedes_descriptor_array_access() {
+    let timeout = zero_timeout();
+    let limit_fds = kprocess::current_user_process().resources().unwrap()
+        .rlimit(linux_raw_sys::general::RLIMIT_NOFILE).unwrap().current;
+    for nfds in [u32::try_from(limit_fds + 1).unwrap(), u32::MAX] {
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(sys_poll(UserPtr::default(), nfds, 0), Err(kerrno::KError::InvalidInput));
+        assert_eq!(
+            sys_ppoll(
+                UserPtr::default(), nfds,
+                UserConstPtr::from(UserPtr::from(timeout.as_user_ptr::<timespec>())),
+                UserConstPtr::default(), 0,
+            ),
+            Err(kerrno::KError::InvalidInput)
+        );
+    }
+    // ppoll reads the timeout before entering Linux's common poll admission.
+    assert_eq!(
+        sys_ppoll(UserPtr::default(), u32::MAX, UserConstPtr::from(1usize), UserConstPtr::default(), 0),
+        Err(kerrno::KError::BadAddress)
+    );
+}

@@ -610,6 +610,16 @@ entry; timeout, signal-mask and valid-event masking paths otherwise stay intact.
 Five user-task regressions cover ignored negatives, mixed ready/invalid entries,
 unready/invalid entries, duplicate ready entries and a zero-timeout control.
 
+### Poll array admission
+
+`poll` and `ppoll` share `do_sys_poll`, which admits and loads the descriptor
+array, invokes `do_poll`, and copies results back. The unsigned 32-bit count is
+checked against the process's current `RLIMIT_NOFILE` before allocation
+or user-array access; excess returns `EINVAL`. Zero count accepts a NULL array
+without allocating. `ppoll` reads the optional timeout and signal mask before
+entering this common admission, matching Linux's frontend order. No new limit
+or descriptor-accounting state is introduced.
+
 ### Epoll millisecond timeout normalization
 
 `sys_epoll_pwait` maps every negative millisecond timeout to an unlimited wait,

@@ -4,7 +4,7 @@
 
 //! Directory and working-directory syscalls.
 
-use alloc::{ffi::CString, format, string::ToString, vec, vec::Vec};
+use alloc::{ffi::CString, format, string::ToString};
 use core::{
     ffi::c_char,
     mem::{align_of, offset_of},
@@ -167,91 +167,73 @@ pub fn sys_mknod(path: UserConstPtr<c_char>, mode: u32, device: u32) -> KResult<
 }
 
 struct DirBuffer {
-    buf: Vec<u8>,
-    offset: usize,
+    buf: UserPtr<u8>,
+    remaining: usize,
 }
 
 impl DirBuffer {
-    fn new(len: usize) -> Self {
+    fn new(buf: UserPtr<u8>, len: usize) -> Self {
         Self {
-            buf: vec![0; len],
-            offset: 0,
+            buf,
+            remaining: len,
         }
     }
 
-    fn remaining_space(&self) -> usize {
-        self.buf.len().saturating_sub(self.offset)
-    }
-
-    fn write_entry(&mut self, d_ino: u64, d_off: i64, d_type: NodeType, name: &[u8]) -> bool {
+    fn write_entry(&mut self, d_ino: u64, d_off: i64, d_type: NodeType, name: &[u8]) -> KResult {
         const NAME_OFFSET: usize = offset_of!(linux_dirent64, d_name);
 
-        let len = NAME_OFFSET + name.len() + 1;
-        let len = len.next_multiple_of(align_of::<linux_dirent64>());
-        if self.remaining_space() < len {
-            return false;
+        if name.is_empty() || name.len() >= PATH_MAX as usize || name.contains(&b'/') {
+            return Err(KError::Io);
         }
-
-        // SAFETY: Bounds were checked above and the entry layout matches
-        // `linux_dirent64`. The byte buffer may not satisfy `linux_dirent64`
-        // alignment at arbitrary offsets, so the header write must be
-        // unaligned.
-        let entry_ptr = unsafe { self.buf.as_mut_ptr().add(self.offset) };
-        // SAFETY: The checked entry length reserves the header; the byte buffer
-        // is exclusively borrowed and write_unaligned imposes no struct alignment.
-        unsafe {
-            entry_ptr
-                .cast::<linux_dirent64>()
-                .write_unaligned(linux_dirent64 {
-                    d_ino,
-                    d_off,
-                    d_reclen: len as _,
-                    d_type: d_type as _,
-                    d_name: Default::default(),
-                });
+        let len = (NAME_OFFSET + name.len() + 1).next_multiple_of(align_of::<linux_dirent64>());
+        if self.remaining < len {
+            return Err(KError::InvalidInput);
         }
-        // SAFETY: NAME_OFFSET lies within the entry whose full size was checked.
-        let name_ptr = unsafe { entry_ptr.add(NAME_OFFSET) };
-        // SAFETY: The checked entry includes name.len() bytes, and the input
-        // name does not alias the exclusively borrowed output buffer.
-        unsafe { name_ptr.copy_from_nonoverlapping(name.as_ptr(), name.len()) };
-        // SAFETY: The checked entry length also reserves the trailing NUL byte.
-        let terminator = unsafe { name_ptr.add(name.len()) };
-        // SAFETY: terminator is a writable byte within the exclusively held buffer.
-        unsafe { terminator.write(0) };
+        let start = self.buf.as_ptr() as usize;
+        let end = start.checked_add(len).ok_or(KError::BadAddress)?;
+        // Copy only ABI fields and the name. Padding is not output, and the
+        // caller's capacity must never become a kernel allocation request.
+        UserPtr::from(start + offset_of!(linux_dirent64, d_ino)).write_vm(d_ino)?;
+        UserPtr::from(start + offset_of!(linux_dirent64, d_off)).write_vm(d_off)?;
+        UserPtr::from(start + offset_of!(linux_dirent64, d_reclen)).write_vm(len as u16)?;
+        UserPtr::from(start + offset_of!(linux_dirent64, d_type)).write_vm(d_type as u8)?;
+        UserPtr::from(start + NAME_OFFSET + name.len()).write_vm(0u8)?;
+        UserPtr::from(start + NAME_OFFSET).write_vm_slice(name)?;
 
-        self.offset += len;
-        true
+        self.buf = UserPtr::from(end);
+        self.remaining -= len;
+        Ok(())
     }
 }
 
-/// Reads directory entries in `linux_dirent64` format.
-pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
+/// Reads directory entries directly into the caller's `linux_dirent64` buffer.
+///
+/// Capacity is an unsigned 32-bit count, as in Linux. A later short buffer,
+/// user-memory fault or iteration error returns already completed records;
+/// the failed entry does not advance the directory position.
+pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: u32) -> KResult<isize> {
     debug!(
         "sys_getdents64 <= fd: {fd}, buf: {:?}, len: {len}",
         buf.as_ptr()
     );
 
-    let mut buffer = DirBuffer::new(len);
     let dir = kprocess::current_files().get_file(fd)?;
-    let mut has_remaining = false;
-
+    let len = len as usize;
+    let mut buffer = DirBuffer::new(buf, len);
+    let mut error = Ok(());
     let mut sink = |name: &str, ino, node_type, offset| {
-        has_remaining = true;
-        if !buffer.write_entry(ino, offset as _, node_type, name.as_bytes()) {
-            return false;
-        }
-        true
+        error = buffer.write_entry(ino, offset as _, node_type, name.as_bytes());
+        error.is_ok()
     };
     let mut ctx = DirContext::new(dir.position(), &mut sink);
-    dir.iterate_dir(&mut ctx)?;
-
-    if has_remaining && buffer.offset == 0 {
-        return Err(KError::InvalidInput);
+    let iteration = dir.iterate_dir(&mut ctx);
+    let written = len - buffer.remaining;
+    if written != 0 {
+        return Ok(written as isize);
     }
-
-    buf.write_vm_slice(&buffer.buf)?;
-    Ok(buffer.offset as _)
+    iteration?;
+    error?;
+    Ok(0)
 }
 
 /// Gets the current working directory path.
@@ -291,3 +273,5 @@ pub fn sys_getcwd(buf: UserPtr<u8>, size: usize) -> KResult<isize> {
 }
 
 unittest::path_mod_test!(getcwd_tests, "../ut-tests/getcwd.rs");
+
+unittest::path_mod_test!(getdents_tests, "../ut-tests/getdents.rs");

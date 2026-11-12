@@ -460,3 +460,12 @@ The context resolves a live published user owner and exposes its nonblocking
 exit flag; arbitrary user TIDs never become raw task references. Ordinary
 WAKE uses the checked API so it cannot select PI state. PI faults retry outside
 bucket/graph locks; `ERESTARTNOINTR` is returned only after cancellation wins.
+
+### Poll descriptor-array capacity
+
+The caller's `nfds` cannot directly request an unbounded kernel allocation:
+the common `do_sys_poll` path rejects counts above current
+`RLIMIT_NOFILE` with `EINVAL` before reading the array. The existing rlimit
+provider caps the hard limit at Linux's `sysctl_nr_open` default. Zero count
+never accesses a NULL descriptor pointer; invalid `ppoll` timeout or mask
+inputs are checked before array admission.

@@ -63,7 +63,6 @@ This crate does not directly access MMIO, PIO, DMA, firmware tables or architect
 
 | Location | Call path | Purpose | Invariant / safety rationale |
 |------|----------|------|-------------------|
-| `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> iterate_dir sink -> DirBuffer::write_entry` | Write directory entries into a temporary `Vec<u8>` according to the `linux_dirent64` ABI | The record length is computed and `remaining_space >= len` is checked before writing; `entry_ptr` lies within the allocated range of the `Vec`; the record length is rounded up to `align_of::<linux_dirent64>()`, but the byte buffer does not guarantee struct alignment at arbitrary offsets, so the header is written with `write_unaligned`; the name copy length comes from `name.as_bytes().len()`; a trailing NUL is written; after writing, `offset` only advances within the checked range. |
 | `UserRead`/`UserWrite` implementations of `ioctl.rs::FiemapHeader` | `sys_ioctl(FS_IOC_FIEMAP)` | Copy the Linux FIEMAP header | The `repr(C)` structure contains only integers, the trailing explicit `reserved` covers the ABI alignment, and any bit pattern is valid; every byte belongs to an initialized field |
 | `UserWrite` implementation of `ioctl.rs::FiemapExtent` | FIEMAP writer output | Copy a Linux FIEMAP extent | All ABI reserved regions of the `repr(C)` structure are covered by explicit integer arrays and zeroed on every output, so there is no uninitialized padding |
 | `UserRead`/`UserWrite` implementations of `ioctl.rs::Fsxattr` | File-attribute ioctl | Copies the file-attribute ABI | `repr(C)` integers and explicit byte arrays cover all fields; reserved fields are zeroed on output |
@@ -96,8 +95,9 @@ and check that a short buffer is not written, that normal output does not go pas
 1. **User memory is accessed only through wrapper types**:
    Syscall entries read and write user addresses using `UserConstPtr`, `UserPtr`, `VmBytes`, `VmBytesMut`
    and `IoVectorBuf`, and never dereference user pointers directly.
-2. **User output is first built in a temporary kernel buffer**:
-   `getdents64` first writes into a `DirBuffer`, then copies it to user space through `write_vm_slice`.
+2. **Directory output uses bounded checked copies**:
+   `getdents64` copies records through `UserPtr` without using the user capacity
+   as an allocation size. A fault preserves earlier completed records.
 3. **fd objects are held through `Arc<dyn FileLike>`**:
    An object obtained from fd lookup is kept alive by its reference count for the duration of the current operation.
 4. **Type-dependent operations downcast and validate first**:
@@ -111,7 +111,7 @@ and check that a short buffer is not written, that normal output does not go pas
    fd-to-fd copying has the VFS update the kernel-side offset, which is then written back through `UserPtr`.
 6. **Temporary ABI structures must not leak uninitialized memory**:
    `statfs` explicitly initializes all fields with a safe struct literal, and `f_spare` is zero;
-   the temporary `Vec` of `getdents64` starts zeroed, and directory entry records explicitly write the trailing NUL.
+   `getdents64` writes initialized fields, names and NUL bytes, leaving padding untouched.
 7. **FIEMAP variable-length output must use checked arithmetic**:
    `fm_extent_count` is first bounded by the Linux UAPI total byte limit, and the header address, the array byte count and each entry's
    offset all use `checked_add`/`checked_mul`; the reserved fields of every output extent are explicitly zeroed.
@@ -225,7 +225,7 @@ and avoid calling complex VFS/device operations that may access the same resourc
 | ID | Threat Description | Boundary | Impact Level | Trigger Condition | Mitigation |
 |------|----------|------|----------|----------|----------|
 | T-01 | Bad user pointer causes kernel out-of-bounds read/write | User path/buffer/iovec | High | Directly dereferencing a user address or ignoring copy errors | Uniformly use `UserPtr`, `UserConstPtr`, `VmBytes`, `IoVectorBuf` and propagate `KResult` |
-| T-02 | `getdents64` writes a directory entry past the temporary buffer | User output buffer / ABI layout | High | Record length miscomputed or remaining space unchecked | `DirBuffer::write_entry` checks space first, and the record length is aligned per the ABI |
+| T-02 | `getdents64` count causes kernel OOM or record overflow | User output / ABI | High | Treating user capacity as an allocation size, or advancing before copy succeeds | Allocation-free per-entry copies, aligned capacity checks and checked address arithmetic |
 | T-03 | `statfs` leaks uninitialized kernel stack data to user space | User output buffer / ABI layout | High | C ABI struct padding uninitialized | `statfs` initializes all fields including `f_spare` with a struct literal; the four supported 64-bit ABI layouts have no implicit padding, and the layout and copyout must be rechecked when the ABI changes |
 | T-04 | `/proc/<pid>/fd/<fd>` magic-link bypasses normal path resolution to access objects it should not | VFS magic-link | High | procfs follow does not preserve fd lifetime or lacks a permission model | The procfs fd entry holds the target object via an fd snapshot; follow to a non-VFS target returns unsupported; the cross-process permission policy still needs tightening |
 | T-05 | `O_NOFOLLOW` ignored, so a symlink or magic-link is followed | Path flags | High | open/at flags not passed to the resolution layer | The syscall layer uniformly converts flags to `LookupFlags`, and `kvfs::namei` handles final/non-final symlinks and magic-links per `LookupIntent` |

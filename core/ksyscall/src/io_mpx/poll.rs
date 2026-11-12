@@ -16,7 +16,7 @@ use kpoll::IoEvents;
 use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
 use ktime_types::TimeSpan;
-use linux_raw_sys::general::{POLLNVAL, pollfd, timespec};
+use linux_raw_sys::general::{POLLNVAL, RLIMIT_NOFILE, pollfd, timespec};
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_sigset};
 
 use super::FdPollSet;
@@ -98,70 +98,62 @@ fn do_poll(
     })
 }
 
-/// Poll file descriptors with millisecond timeout
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize> {
-    // Linux `do_sys_poll` copies the descriptor array only for `nfds > 0`
-    // (`len = min(nfds, N_STACK_PPS)`), so a NULL array with a zero count is
-    // legal. Loading through the NULL pointer would fail with EFAULT instead.
+fn do_sys_poll(
+    fds: UserPtr<pollfd>,
+    nfds: u32,
+    timeout: Option<TimeSpan>,
+    sigmask: Option<SignalSet>,
+) -> KResult<isize> {
+    let limit_fds = kprocess::current_user_process()
+        .resources()?
+        .rlimit(RLIMIT_NOFILE)?
+        .current;
+    if u64::from(nfds) > limit_fds {
+        return Err(KError::InvalidInput);
+    }
     let mut poll_fds = if nfds == 0 {
         Vec::new()
     } else {
         fds.load_vm_vec(nfds as usize)?
     };
+    let result = do_poll(&mut poll_fds, timeout, sigmask)?;
+    if nfds != 0 {
+        fds.write_vm_slice(&poll_fds)?;
+    }
+    Ok(result)
+}
+
+/// Poll file descriptors with millisecond timeout
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize> {
     let timeout = if timeout < 0 {
         None
     } else {
         Some(TimeSpan::from_millis(timeout as u64))
     };
-    let result = do_poll(&mut poll_fds, timeout, None);
-    if result.is_ok() && nfds > 0 {
-        fds.write_vm_slice(&poll_fds)?;
-    }
-    result
+    do_sys_poll(fds, nfds, timeout, None)
 }
 
 /// Poll file descriptors with high-precision timeout and signal masking
 pub(crate) fn sys_ppoll(
     fds: UserPtr<pollfd>,
-    nfds: i32,
+    nfds: u32,
     timeout: UserConstPtr<timespec>,
     sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    // Linux validates `sigsetsize` only when a sigmask pointer is supplied: the
-    // `ppoll` syscall hands both arguments to `set_user_sigmask`, which returns
-    // early for a NULL mask (fs/select.c). A sigmask-less `ppoll` therefore
-    // never fails on this argument, which the Go runtime relies on: it issues
-    // the wait syscalls with a NULL mask and an uninitialized size register.
-    if !sigmask.is_null() {
-        posix_types::check_sigset_size(sigsetsize)?;
-    }
-    let nfds = nfds.try_into().map_err(|_| KError::InvalidInput)?;
-    // Same rule as `sys_poll`: Linux copies the descriptor array only for
-    // `nfds > 0` (`len = min(nfds, N_STACK_PPS)` in `do_sys_poll`), so
-    // `ppoll(NULL, 0, ...)` is legal and must not fail with EFAULT.
-    let mut poll_fds = if nfds == 0 {
-        Vec::new()
-    } else {
-        fds.load_vm_vec(nfds)?
-    };
     let timeout = if timeout.is_null() {
         None
     } else {
         Some(timeout.read_vm()?.try_into_time_span()?)
     };
-    // TODO: handle signal
     let sigmask = if sigmask.is_null() {
         None
     } else {
+        posix_types::check_sigset_size(sigsetsize)?;
         Some(sigmask.read_vm()?.into())
     };
-    let result = do_poll(&mut poll_fds, timeout, sigmask);
-    if result.is_ok() && nfds > 0 {
-        fds.write_vm_slice(&poll_fds)?;
-    }
-    result
+    do_sys_poll(fds, nfds, timeout, sigmask)
 }
 
 unittest::path_mod_test!(

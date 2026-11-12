@@ -362,12 +362,20 @@ the test cases are executed automatically by the existing kernel unittest flow.
 
 ### `getdents64`
 
-1. Allocate a temporary kernel `DirBuffer` according to the length given by the user.
-2. Obtain the directory fd and lock the directory offset.
-3. Iterate over the directory entries and write each entry in the ABI `linux_dirent64` layout.
-4. Stop iterating when the buffer cannot hold a complete record.
-5. If directory entries exist but the user buffer cannot hold even one, return `InvalidInput`.
-6. Write the temporary buffer back to user space and return the number of bytes actually written.
+The syscall accepts Linux's unsigned 32-bit capacity and resolves the directory
+fd before accessing output. `DirBuffer` holds only the current user pointer and
+remaining capacity; it performs no allocation proportional to the count.
+Directory iteration copies each ABI field, NUL terminator and borrowed name
+through checked user-memory access. Record padding is left untouched, as in
+Linux. Only a fully copied record advances the iterator and output cursor.
+
+A short buffer or copy fault stops at that entry. Earlier completed records
+are returned even if a later entry or the iterator fails; with no completed
+record, the original error propagates. At EOF, even an inaccessible output
+pointer is unused and the result is zero. The user regression checks the
+multi-gigabyte capacity, short-buffer/fault position, record boundaries and
+EOF behavior without adding a test-only implementation path. A failed record
+may leave partially written fields beyond the returned byte count.
 
 ### `fallocate`
 
