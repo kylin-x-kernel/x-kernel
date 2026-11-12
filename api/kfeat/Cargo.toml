@@ -112,7 +112,7 @@ sched_stat = ["ktask/sched_stat", "dep:procfs", "procfs/sched_stat"]
 fs_ext4 = ["dep:kext4", "dep:fs_boot", "kruntime/fs"]
 fs_fat = ["dep:fat", "dep:fs_boot", "kruntime/fs"]
 fs_9p = ["dep:fs_boot", "kruntime/fs9p"]
-fs_cgroup2 = ["dep:fs_boot", "kruntime/fs_cgroup2"]
+fs_cgroup2 = ["dep:fs_boot", "kruntime/fs_cgroup2", "ksyscall/cgroup2"]
 fs_devpts = ["dep:devpts"]
 fs_times = ["fs_ext4", "kext4/times"]
 

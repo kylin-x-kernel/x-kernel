@@ -830,6 +830,7 @@ fn run_case_with_session(
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .unwrap();
     let child_pid = prepared.process().pid();

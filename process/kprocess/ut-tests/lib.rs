@@ -631,6 +631,7 @@ fn test_fork_child_does_not_inherit_tee_session_handles() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("fork should prepare a child runtime");
     let child = prepared.process().clone();
@@ -936,6 +937,7 @@ fn test_clone_parent_inherits_callers_exit_signal_contract() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGUSR2),
+            cgroup_target: None,
         })
         .expect("CLONE_PARENT-style fork should prepare");
     let child = prepared.process().clone();
@@ -995,6 +997,7 @@ fn test_clone_newnpid_allocates_child_in_fresh_pid_namespace() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::NEWPID,
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("CLONE_NEWPID fork should prepare");
 
@@ -1073,6 +1076,7 @@ fn test_child_exit_si_pid_projected_into_parent_namespace() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::NEWPID,
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("CLONE_NEWPID fork should prepare");
     let nested = prepared.process().clone();
@@ -1097,6 +1101,7 @@ fn test_child_exit_si_pid_projected_into_parent_namespace() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("plain fork inside the child namespace should prepare");
     let grand = grand_prepared.process().clone();
@@ -1476,6 +1481,7 @@ fn test_final_thread_preparation_failure_rolls_back_child_relation() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         },
         |runtime, identity| {
             observation = Some((
@@ -1535,6 +1541,7 @@ fn test_exit_cleanup_preserves_clone_vm_address_space_until_last_runtime_user() 
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("CLONE_VM test child should prepare");
     let child_process = child.process().clone();
@@ -1619,6 +1626,7 @@ fn test_clone_fs_shares_the_filesystem_context_umask() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("CLONE_FS test child should prepare");
     let child_process = child.process().clone();
@@ -1722,6 +1730,7 @@ fn test_clone_fs_adoption_is_rejected_during_exec() {
         fd_table: ForkFdTable::Private,
         namespace_flags: kns::NamespaceFlags::empty(),
         exit_signal: Some(ksignal::Signo::SIGCHLD),
+        cgroup_target: None,
     }) {
         Ok(_) => panic!("CLONE_FS must not attach during an exclusive exec"),
         Err(err) => err,
@@ -1748,6 +1757,7 @@ fn test_clone_fs_adoption_is_rejected_during_exec() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("CLONE_FS must succeed after exec admission ends");
     let child_process = child.process().clone();
@@ -1774,6 +1784,7 @@ fn test_exec_admission_marks_cross_process_shared_context() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("CLONE_FS test child should prepare");
     let child_process = child.process().clone();
@@ -1819,6 +1830,7 @@ fn test_failed_shared_vm_fork_rolls_back_tree_relation() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         }) {
         Ok(_) => panic!("shared-VM fork must fail once address-space users are released"),
         Err(err) => err,
@@ -1856,6 +1868,7 @@ fn test_failed_private_vm_fork_after_parent_mm_teardown_rolls_back_tree_relation
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         }) {
         Ok(_) => panic!("private fork must fail once parent mm user is released"),
         Err(err) => err,
@@ -1885,6 +1898,7 @@ fn abandoned_clone_releases_handlers_despite_retained_manager() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .unwrap();
     let child = prepared.process().clone();
@@ -1923,6 +1937,7 @@ fn test_failed_fork_after_parent_files_exit_rolls_back_tree_relation() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         }) {
         Ok(_) => panic!("fork must fail once the parent files owner is released"),
         Err(err) => err,
@@ -2222,6 +2237,7 @@ fn test_clone_inherits_calling_thread_mask_without_copying_private_pending() {
                 fd_table: ForkFdTable::Private,
                 namespace_flags: kns::NamespaceFlags::empty(),
                 exit_signal: Some(Signo::SIGCHLD),
+                cgroup_target: None,
             })
             .unwrap();
         assert!(same_set(child.signal_manager().blocked(), caller_mask));
@@ -2260,6 +2276,7 @@ fn test_oom_score_adjustment_is_process_shared_and_fork_inherited() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("process fork should prepare");
     assert_eq!(child.oom_score_adj(), 321);
@@ -2613,6 +2630,78 @@ fn test_process_migration_reconciles_a_prepared_sibling_at_publication() {
     drop(leader_task);
     root.remove_child("publish-migration-target").unwrap();
     process_publication().cleanup();
+}
+
+#[def_test(serial)]
+fn test_clone_into_cgroup_reserves_the_target() {
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_743);
+    let parent =
+        init.fork_with_task_number(parent_task_number.clone(), Some(ksignal::Signo::SIGCHLD));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[clone-into-cgroup-test]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context::copy_init_fs_struct(),
+        ksignal::api::SignalActions::default(),
+        initial_cred(),
+    )
+    .expect("test thread preparation");
+    let task = TaskInner::new_user(
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
+        String::from("clone-into-cgroup-test"),
+        parent_task_number,
+        thread,
+    );
+
+    let source = task
+        .as_thread()
+        .cgroup()
+        .expect("test thread must have cgroup membership");
+    let root = source.hierarchy_root();
+    root.set_pids_subtree_enabled(true).unwrap();
+    let target = root.create_child("clone-into-cgroup-target").unwrap();
+
+    let prepared = task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: Some(target.clone()),
+        })
+        .expect("CLONE_INTO_CGROUP fork should prepare");
+
+    let (child_thread, _child_number) = prepared.into_parts();
+    let child_cgroup = child_thread
+        .cgroup()
+        .expect("forked child must have cgroup membership");
+    assert!(
+        Arc::ptr_eq(&child_cgroup, &target),
+        "CLONE_INTO_CGROUP child must land in the target cgroup"
+    );
+    assert!(
+        !Arc::ptr_eq(&child_cgroup, &source),
+        "CLONE_INTO_CGROUP child must not inherit the caller's cgroup"
+    );
+    assert_eq!(
+        target.pids_current(),
+        Ok(1),
+        "the child's pids charge must land on the target cgroup"
+    );
+
+    child_thread.detach_cgroup();
+    drop(child_thread);
+    task.as_thread().detach_cgroup();
+    root.remove_child("clone-into-cgroup-target").unwrap();
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
 }
 
 #[def_test(user, serial)]
@@ -3234,6 +3323,7 @@ fn test_capget_target_resolves_pid_in_observer_namespace() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::NEWPID,
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("CLONE_NEWPID fork should prepare");
     let nested = prepared.process().clone();

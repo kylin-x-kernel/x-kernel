@@ -55,7 +55,7 @@ impl Default for ProcessRuntimeConfig {
 }
 
 /// Fork-time options for constructing a child process.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ProcessForkConfig {
     /// Wait-parent selection for the new process.
     pub parent: ForkParent,
@@ -71,6 +71,13 @@ pub struct ProcessForkConfig {
     pub namespace_flags: kns::NamespaceFlags,
     /// Exit signal configured for the new process.
     pub exit_signal: Option<Signo>,
+    /// Target cgroup for `clone3(CLONE_INTO_CGROUP)`.
+    ///
+    /// `Some` charges the child's membership reservation against this node
+    /// instead of the caller's cgroup; the adapter must already have
+    /// resolved and authorized the target. `None` inherits the caller's
+    /// cgroup like a plain fork.
+    pub cgroup_target: Option<Arc<kcgroup::Cgroup>>,
 }
 
 /// Wait-parent selection for a forked process.
@@ -107,6 +114,9 @@ pub enum ForkSignalActions {
     Private,
     /// Share the caller's signal actions.
     Shared,
+    /// Clone the caller's signal actions, then reset every non-ignored
+    /// handler to its default disposition (`clone3(CLONE_CLEAR_SIGHAND)`).
+    Cleared,
 }
 
 /// File-descriptor table clone mode for a forked process.
@@ -643,6 +653,7 @@ pub(crate) fn fork_process_runtime<R>(
     let signal_manager = match config.signal_actions {
         ForkSignalActions::Shared => parent.signal_manager().fork_shared()?,
         ForkSignalActions::Private => parent.signal_manager().fork_private()?,
+        ForkSignalActions::Cleared => parent.signal_manager().fork_cleared()?,
     };
     let process_runtime = finish_fork_runtime(
         parent,

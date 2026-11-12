@@ -3394,11 +3394,13 @@ name = "ksyscall"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
+ "cgroup2fs",
  "entropy",
  "kaddr_layout",
  "kalloc",
  "karch",
  "kbuild_config",
+ "kcgroup",
  "kcpu",
  "kcpu_id_map",
  "kcred",

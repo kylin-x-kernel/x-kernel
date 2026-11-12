@@ -317,6 +317,17 @@ not readiness: consumers still query the file in the current calling context.
 Event filtering and weak registration introduce no additional owner or source
 list. An expired captured source must not fall back to the default path.
 
+## Cross-crate interface
+
+- `Path::dentry_is_mount_root(&self) -> bool` (`src/mount.rs`): reports whether
+  the path's dentry is its mount's root dentry (Linux `path_mounted`,
+  `dentry == mnt_root`), independent of overmount visibility. Provider: kvfs;
+  consumer: `posix/fs` for the statx `STATX_ATTR_MOUNT_ROOT` attribute; call
+  direction `statx(2)` -> `sys_statx` -> `Path::dentry_is_mount_root`. The
+  related `Path::is_mount_root` is `pub(crate)` and additionally requires the
+  mount to be the parent's topmost child mount; it serves mount/umount and
+  mount-stacking validation, not the statx attribute.
+
 ## Scope
 
 - `src/open_flags.rs`: normalization of raw `O_*` arguments and the open intent.

@@ -14,7 +14,8 @@ use kvfs::{
 };
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EACCESS, AT_EMPTY_PATH, AT_STATX_SYNC_TYPE, AT_SYMLINK_NOFOLLOW, R_OK,
-    STATX__RESERVED, STATX_MNT_ID, W_OK, X_OK, stat, statfs, statx,
+    STATX__RESERVED, STATX_ATTR_MOUNT_ROOT, STATX_MNT_ID, STATX_MNT_ID_UNIQUE, W_OK, X_OK, stat,
+    statfs, statx,
 };
 use posix_types::{UserConstPtr, UserPtr};
 
@@ -63,8 +64,10 @@ pub fn sys_fstatat(
 
 /// Gets extended file metadata and the resolved mount identity (statx).
 ///
-/// Reports `STATX_MNT_ID` as valid for the same resolved object as the metadata,
-/// including empty-path descriptors and followed procfs magic links.
+/// Reports `STATX_MNT_ID` and `STATX_MNT_ID_UNIQUE` as valid for the same
+/// resolved object as the metadata, including empty-path descriptors and
+/// followed procfs magic links. Mount IDs are drawn from a monotonic counter
+/// and never reused, so the unique-ID contract holds.
 /// Rejects the reserved request-mask bit and mutually exclusive sync modes
 /// before copying the pathname, resolving the target, or writing output.
 /// Other mask bits are hints.
@@ -89,8 +92,22 @@ pub fn sys_statx(
 
     let location = resolve_at(dirfd, path.as_deref(), flags)?;
     let mut metadata: statx = location.stat()?.into();
-    metadata.stx_mnt_id = location.into_path()?.mount().mount_id();
-    metadata.stx_mask |= STATX_MNT_ID;
+    let resolved = location.into_path()?;
+    metadata.stx_mnt_id = resolved.mount().mount_id();
+    // Mount IDs come from a monotonic counter that never reuses a value, so the
+    // unique-mount-ID contract holds and callers (e.g. systemd's mount-point
+    // detection) can rely on STATX_MNT_ID_UNIQUE without falling back to
+    // name_to_handle_at.
+    metadata.stx_mask |= STATX_MNT_ID | STATX_MNT_ID_UNIQUE;
+    // Advertise STATX_ATTR_MOUNT_ROOT so callers can identify mount roots
+    // directly. systemd's mount-point probe requests this attribute and treats
+    // an absent attribute mask as "cannot determine", failing with EUNATCH.
+    // Linux sets the bit from dentry == mnt_root (path_mounted) alone, so a
+    // mount root captured before an overmount still reports it.
+    metadata.stx_attributes_mask |= STATX_ATTR_MOUNT_ROOT as u64;
+    if resolved.dentry_is_mount_root() {
+        metadata.stx_attributes |= STATX_ATTR_MOUNT_ROOT as u64;
+    }
     statxbuf.write_vm(metadata)?;
 
     Ok(0)

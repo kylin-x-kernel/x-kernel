@@ -94,6 +94,12 @@ bitflags! {
         const NEWTIME = CLONE_NEWTIME as u64;
         /// The new process shares an I/O context with the calling process.
         const IO = CLONE_IO as u64;
+        /// Reset every signal handler not set to ignore to its default
+        /// disposition in the child. Only valid without [`Self::SIGHAND`].
+        const CLEAR_SIGHAND = CLONE_CLEAR_SIGHAND;
+        /// Place the child in the cgroup named by the clone3 `cgroup`
+        /// descriptor instead of the caller's cgroup.
+        const INTO_CGROUP = CLONE_INTO_CGROUP;
     }
 }
 
@@ -110,6 +116,9 @@ pub(crate) struct CloneRequest {
     tls: usize,
     pidfd: usize,
     reject_exit_signal_with_shared_parent: bool,
+    /// Resolved `clone3(CLONE_INTO_CGROUP)` target; `None` inherits the
+    /// caller's cgroup. Only the clone3 adapter sets this.
+    cgroup_target: Option<Arc<kcgroup::Cgroup>>,
 }
 
 impl CloneRequest {
@@ -124,6 +133,7 @@ impl CloneRequest {
             tls: 0,
             pidfd: 0,
             reject_exit_signal_with_shared_parent: false,
+            cgroup_target: None,
         }
     }
 
@@ -170,6 +180,12 @@ impl CloneRequest {
 
     pub(crate) fn set_pidfd(&mut self, ptr: usize) -> &mut Self {
         self.pidfd = ptr;
+        self
+    }
+
+    /// Sets the resolved `CLONE_INTO_CGROUP` target cgroup.
+    pub(crate) fn set_cgroup_target(&mut self, target: Arc<kcgroup::Cgroup>) -> &mut Self {
+        self.cgroup_target = Some(target);
         self
     }
 
@@ -229,11 +245,22 @@ impl CloneRequest {
             self.pidfd,
         );
 
-        self.validate_exit_signal_policy()?;
-        if self.flags.contains(CloneFlags::THREAD)
-            && !self.flags.contains(CloneFlags::VM | CloneFlags::SIGHAND)
+        self.validate_pre_cgroup_flags()?;
+        // Threads share the process's cgroup membership. This kernel has no
+        // threaded cgroup domains, so a thread cannot be placed into another
+        // cgroup. Checked after the THREAD-needs-SIGHAND EINVAL above and after
+        // the clone3 entry resolved the cgroup fd, matching Linux
+        // cgroup_attach_permissions (EOPNOTSUPP after the fd fetch).
+        if self
+            .flags
+            .contains(CloneFlags::INTO_CGROUP | CloneFlags::THREAD)
         {
-            return Err(KError::InvalidInput);
+            return Err(KError::from(LinuxError::EOPNOTSUPP));
+        }
+        // CLONE_INTO_CGROUP needs a resolved target; only the clone3 adapter
+        // supplies one, so a bare flag without a target is a bad request.
+        if self.flags.contains(CloneFlags::INTO_CGROUP) && self.cgroup_target.is_none() {
+            return Err(KError::from(LinuxError::EINVAL));
         }
 
         // Namespace flag validation
@@ -332,6 +359,8 @@ impl CloneRequest {
                 },
                 signal_actions: if self.flags.contains(CloneFlags::SIGHAND) {
                     ForkSignalActions::Shared
+                } else if self.flags.contains(CloneFlags::CLEAR_SIGHAND) {
+                    ForkSignalActions::Cleared
                 } else {
                     ForkSignalActions::Private
                 },
@@ -342,6 +371,7 @@ impl CloneRequest {
                 },
                 namespace_flags,
                 exit_signal,
+                cgroup_target: self.cgroup_target.take(),
             })?
         };
         let tid = prepared.tid();
@@ -431,6 +461,39 @@ impl CloneRequest {
                 .intersects(CloneFlags::THREAD | CloneFlags::PARENT)
         {
             return Err(KError::InvalidInput);
+        }
+        Ok(())
+    }
+
+    /// Validates the flag combinations Linux checks before the
+    /// `CLONE_INTO_CGROUP` descriptor is resolved: `clone3_args_valid`
+    /// (exit-signal policy, `CLONE_CLEAR_SIGHAND | CLONE_SIGHAND`) and the
+    /// `copy_process` thread/signal-sharing check that precedes
+    /// `cgroup_can_fork`. Running them before the fd lookup keeps their
+    /// `EINVAL` precedence over a bad descriptor's `EBADF`.
+    ///
+    /// The `CLONE_INTO_CGROUP | CLONE_THREAD` rejection is deliberately not
+    /// here: Linux raises it in `cgroup_attach_permissions`, after the fd
+    /// fetch, so it stays in [`Self::do_clone_with_preparation`].
+    pub(crate) fn validate_pre_cgroup_flags(&self) -> KResult<()> {
+        self.validate_exit_signal_policy()?;
+        // Linux copy_process: CLONE_THREAD requires CLONE_SIGHAND (and VM).
+        if self.flags.contains(CloneFlags::THREAD)
+            && !self.flags.contains(CloneFlags::VM | CloneFlags::SIGHAND)
+        {
+            return Err(KError::InvalidInput);
+        }
+        self.validate_clear_sighand_flag()
+    }
+
+    /// Rejects `CLONE_CLEAR_SIGHAND` combined with `CLONE_SIGHAND`: a shared
+    /// action table cannot be cleared without affecting the parent.
+    fn validate_clear_sighand_flag(&self) -> KResult<()> {
+        if self
+            .flags
+            .contains(CloneFlags::CLEAR_SIGHAND | CloneFlags::SIGHAND)
+        {
+            return Err(KError::from(LinuxError::EINVAL));
         }
         Ok(())
     }

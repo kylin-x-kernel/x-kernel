@@ -881,8 +881,25 @@ impl Path {
         &self.mnt
     }
 
-    fn is_mount_root(&self) -> bool {
-        if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
+    /// Returns `true` if this path's dentry is its mount's root dentry.
+    ///
+    /// This is the Linux `path_mounted` / `STATX_ATTR_MOUNT_ROOT` condition
+    /// (`dentry == mnt_root`), independent of whether the mount is currently
+    /// the topmost one at its mountpoint: a mount root captured through an
+    /// fd/cwd before an overmount still reports `true`.
+    pub fn dentry_is_mount_root(&self) -> bool {
+        self.dentry.ptr_eq(&self.mnt.mnt.mnt_root)
+    }
+
+    /// Returns `true` if this path is the root of the mount currently
+    /// attached at its mountpoint.
+    ///
+    /// Unlike [`Self::dentry_is_mount_root`], this also requires the mount to
+    /// be the parent's topmost child mount, so a covered (overmounted) mount
+    /// root reports `false`. Mount/umount and mount-stacking validation need
+    /// this "currently attached" semantics, not the statx attribute.
+    pub(crate) fn is_mount_root(&self) -> bool {
+        if !self.dentry_is_mount_root() {
             return false;
         }
 

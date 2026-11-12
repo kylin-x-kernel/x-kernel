@@ -767,8 +767,10 @@ reference. One dequeue takes the thread queue first, then the process queue,
 from the same transaction. `SignalActions` is
 shared by `Arc` so `sigaction` updates are immediately visible to every
 thread. Its shared reference stays inside the signal managers: constructors
-take an owned `SignalActions` value, and `fork_shared` / `fork_private` create
-new process managers with shared configuration or an independent snapshot.
+take an owned `SignalActions` value, and `fork_shared` / `fork_private` /
+`fork_cleared` create new process managers with shared configuration, an
+independent snapshot, or a snapshot whose non-ignored handlers are reset to
+default dispositions (`clone3(CLONE_CLEAR_SIGHAND)`), respectively.
 Both create empty pending queues and separate slot tables. Callers query or
 replace actions through manager methods, not by retaining the underlying lock
 or cloning its reference.

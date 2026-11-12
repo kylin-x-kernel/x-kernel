@@ -203,6 +203,29 @@ impl ProcessSignalManager {
         Ok(Self::new(actions, self.default_restorer))
     }
 
+    /// Creates a new process manager whose actions start cleared for
+    /// `clone3(CLONE_CLEAR_SIGHAND)`.
+    ///
+    /// Like [`Self::fork_private`], but every handler not set to ignore is
+    /// reset to its default disposition and all flags, masks and restorers
+    /// are cleared (Linux `copy_sighand` + `flush_signal_handlers`). Ignored
+    /// dispositions survive, matching the exec reset rule. Call during
+    /// task-context clone preparation, before child publication.
+    /// Returns `NoSuchProcess` after configuration ownership is released.
+    pub fn fork_cleared(&self) -> KResult<Self> {
+        let mut actions = {
+            let handlers = self.handlers.lock();
+            handlers
+                .as_ref()
+                .ok_or(KError::NoSuchProcess)?
+                .actions
+                .lock()
+                .clone()
+        };
+        actions.reset_for_exec();
+        Ok(Self::new(actions, self.default_restorer))
+    }
+
     /// Captures the current arrival source without retaining configuration ownership.
     /// The weak source never rebinds after exec and may expire after capture.
     /// Returns `NoSuchProcess` after configuration ownership is released.

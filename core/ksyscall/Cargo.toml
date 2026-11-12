@@ -9,6 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
+cgroup2 = ["dep:cgroup2fs"]
 ebpf = ["dep:posix-bpf", "posix-bpf/cgroup2"]
 vsock = ["posix-net/vsock"]
 tipc = ["dep:tipc", "posix-process/tipc"]
@@ -65,6 +66,8 @@ kexec.workspace = true
 kuaccess.workspace = true
 ktty.workspace = true
 kvfs.workspace = true
+kcgroup.workspace = true
+cgroup2fs = { workspace = true, optional = true }
 entropy.workspace = true
 posix-fs.workspace = true
 posix-bpf = { workspace = true, optional = true }

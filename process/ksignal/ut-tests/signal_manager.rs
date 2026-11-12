@@ -932,6 +932,54 @@ fn test_process_fork_shares_or_copies_complete_actions_not_pending() {
 }
 
 #[def_test]
+fn test_fork_cleared_resets_handlers_but_keeps_ignored() {
+    extern "C" fn handler(_: i32) {}
+    extern "C" fn restorer() {}
+
+    let parent = ProcessSignalManager::new(SignalActions::default(), 0);
+    let mut mask = SignalSet::default();
+    mask.add(Signo::SIGUSR2);
+    parent
+        .set_signal_action(
+            Signo::SIGUSR1,
+            SignalAction {
+                disposition: SignalDisposition::Handler(handler),
+                flags: SignalActionFlags::RESTART | SignalActionFlags::RESTORER,
+                mask,
+                restorer: Some(restorer),
+            },
+        )
+        .unwrap();
+    parent
+        .set_signal_action(
+            Signo::SIGUSR2,
+            SignalAction {
+                disposition: SignalDisposition::Ignore,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let cleared = parent.fork_cleared().unwrap();
+    let action = cleared.signal_action(Signo::SIGUSR1).unwrap();
+    assert!(matches!(action.disposition, SignalDisposition::Default));
+    assert!(action.flags.is_empty());
+    assert!(action.mask.is_empty());
+    assert!(action.restorer.is_none());
+    assert!(matches!(
+        cleared.signal_action(Signo::SIGUSR2).unwrap().disposition,
+        SignalDisposition::Ignore
+    ));
+    assert!(cleared.pending().is_empty());
+
+    // The parent's action table is untouched by the cleared fork.
+    assert!(matches!(
+        parent.signal_action(Signo::SIGUSR1).unwrap().disposition,
+        SignalDisposition::Handler(_)
+    ));
+}
+
+#[def_test]
 fn test_exec_reset_keeps_ignored_disposition_and_pending() {
     let process = ProcessSignalManager::new(SignalActions::default(), 0);
     process

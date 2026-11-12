@@ -12,7 +12,8 @@
 use kerrno::{KError, KResult};
 use kfd_objects::timerfd::TimerFd;
 use linux_raw_sys::general::{
-    O_RDWR, TFD_CLOEXEC, TFD_NONBLOCK, TFD_TIMER_ABSTIME, itimerspec, timespec,
+    O_RDWR, TFD_CLOEXEC, TFD_NONBLOCK, TFD_TIMER_ABSTIME, TFD_TIMER_CANCEL_ON_SET, itimerspec,
+    timespec,
 };
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr};
 
@@ -26,6 +27,8 @@ pub(crate) fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
         .and_then(timerfd_clock)
         .ok_or(KError::InvalidInput)?;
 
+    // Linux timerfd_create only accepts TFD_CLOEXEC and TFD_NONBLOCK;
+    // TFD_TIMER_CANCEL_ON_SET is a settime-only flag (see sys_timerfd_settime).
     let unknown = flags & !(TFD_CLOEXEC | TFD_NONBLOCK);
     if unknown != 0 {
         return Err(KError::InvalidInput);
@@ -51,7 +54,11 @@ pub(crate) fn sys_timerfd_settime(
 ) -> KResult<isize> {
     debug!("sys_timerfd_settime <= fd: {fd}, flags: {flags:#x}");
 
-    let unknown = flags & !TFD_TIMER_ABSTIME;
+    // TFD_TIMER_CANCEL_ON_SET is accepted so callers (e.g. systemd's
+    // clock-change event source) can arm wall-clock timers. The
+    // cancel-on-clock-set behaviour (reads returning ECANCELED after
+    // clock_settime) is not yet enforced.
+    let unknown = flags & !(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET);
     if unknown != 0 {
         return Err(KError::InvalidInput);
     }

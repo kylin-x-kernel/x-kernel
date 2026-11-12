@@ -190,3 +190,62 @@ fn test_clone3_validation_rejects_exit_signal_with_shared_parent() {
 
     assert!(req.validate_exit_signal_policy().is_err());
 }
+
+#[def_test]
+fn test_validate_rejects_clear_sighand_with_shared_sighand() {
+    let mut req = CloneRequest::new();
+    req.set_flags(CloneFlags::CLEAR_SIGHAND | CloneFlags::SIGHAND | CloneFlags::VM);
+    let err = req.validate_clear_sighand_flag().unwrap_err();
+    assert_eq!(LinuxError::from(err), LinuxError::EINVAL);
+}
+
+#[def_test]
+fn test_validate_accepts_clear_sighand_without_shared_sighand() {
+    let mut req = CloneRequest::new();
+    req.set_flags(CloneFlags::CLEAR_SIGHAND | CloneFlags::VM);
+    assert!(req.validate_clear_sighand_flag().is_ok());
+}
+
+#[def_test]
+fn test_validate_rejects_into_cgroup_with_thread() {
+    // The INTO_CGROUP|THREAD rejection lives in do_clone (after the
+    // THREAD-needs-SIGHAND check and the clone3 fd resolution), not in the
+    // early CLEAR_SIGHAND combination check.
+    let mut req = CloneRequest::new();
+    req.set_flags(CloneFlags::INTO_CGROUP | CloneFlags::THREAD | CloneFlags::VM | CloneFlags::SIGHAND);
+    let uctx = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
+    let err = req.do_clone(&uctx).unwrap_err();
+    assert_eq!(LinuxError::from(err), LinuxError::EOPNOTSUPP);
+}
+
+#[def_test]
+fn test_thread_without_sighand_einval_precedes_into_cgroup() {
+    // Linux copy_process rejects CLONE_THREAD without CLONE_SIGHAND (EINVAL)
+    // before the cgroup fd lookup and before the INTO_CGROUP|THREAD rejection,
+    // so this combination answers EINVAL, not EOPNOTSUPP or a descriptor error.
+    let mut req = CloneRequest::new();
+    req.set_flags(CloneFlags::INTO_CGROUP | CloneFlags::THREAD | CloneFlags::VM);
+    let uctx = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
+    let err = req.do_clone(&uctx).unwrap_err();
+    assert_eq!(LinuxError::from(err), LinuxError::EINVAL);
+}
+
+#[def_test]
+fn test_validate_rejects_into_cgroup_without_target() {
+    // The resolved-target invariant is enforced by do_clone (the clone3
+    // adapter resolves the target before calling it), not by the flag-only
+    // combination check that runs before descriptor resolution.
+    let mut req = CloneRequest::new();
+    req.set_flags(CloneFlags::INTO_CGROUP);
+    let uctx = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
+    let err = req.do_clone(&uctx).unwrap_err();
+    assert_eq!(LinuxError::from(err), LinuxError::EINVAL);
+}
+
+#[def_test]
+fn test_validate_accepts_plain_fork_and_plain_thread() {
+    let mut req = CloneRequest::new();
+    assert!(req.validate_clear_sighand_flag().is_ok());
+    req.set_flags(CloneFlags::THREAD | CloneFlags::VM | CloneFlags::SIGHAND);
+    assert!(req.validate_clear_sighand_flag().is_ok());
+}

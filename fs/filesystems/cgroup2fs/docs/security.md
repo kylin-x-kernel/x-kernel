@@ -54,6 +54,7 @@ The node registry is protected by a sleepable mutex. All hierarchy transactions 
 | T-06 | Deletion/same-name re-creation makes an old fd operate on a new node | High | Lookup rebuilds the inode or rmdir re-looks up by name | Stable registry, locked victim identity; operations on the old node return `ENODEV` |
 | T-07 | A command is concatenated by offset or split into multiple mutations | Medium | Reusing seekable merge or the default write_iter chunking | `CommandFile` fully copies a single request of at most 4096 bytes and ignores the offset |
 | T-08 | `pids.max` conflicts with the unlimited sentinel | Medium | Accepting a `usize` outside the PID domain | Accept only `<= 4*1024*1024` or the text `max` |
+| T-09 | Privilege escalation into a cgroup via clone3 using an inherited fd | High | Authorizing with the fd opener's credentials, or checking only the destination | `cgroup_clone_target` uses the caller's **current** credentials to require `MAY_WRITE` on both the target's and the common ancestor's `cgroup.procs`, with both endpoints under the mount view root; out-of-view returns `ENOENT`, missing write permission `EACCES`, and a removed target `ENODEV` |
 
 ## Failure Mode and Effects Analysis (FMEA)
 

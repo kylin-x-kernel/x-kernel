@@ -311,6 +311,10 @@ impl Thread {
     /// Copies this thread's blocked signal mask before publication; the child's
     /// private and process-wide pending queues start empty even with shared actions.
     ///
+    /// When `config.cgroup_target` is set (`clone3(CLONE_INTO_CGROUP)`), the
+    /// child's membership reservation is charged against that node instead of
+    /// this thread's cgroup; the caller must already have authorized the target.
+    ///
     /// # Errors
     ///
     /// Forwards cgroup reservation/commit, identity allocation, namespace, MM and
@@ -319,9 +323,15 @@ impl Thread {
     /// changed parent/namespace contracts, and Unsupported for an unimplemented
     /// namespace request. Thread and signal-slot allocation use NOWAIT under the cgroup
     /// transaction mutex and may return NoMemory. The prepared child is not activated.
-    pub fn prepare_process_fork(&self, config: ProcessForkConfig) -> KResult<PreparedUserClone> {
+    pub fn prepare_process_fork(
+        &self,
+        mut config: ProcessForkConfig,
+    ) -> KResult<PreparedUserClone> {
         let _transaction = self.process.cgroup_transaction();
-        let charge = self.cgroup.reserve_child()?;
+        let charge = match config.cgroup_target.take() {
+            Some(target) => target.reserve_task()?,
+            None => self.cgroup.reserve_child()?,
+        };
         let files = self
             .files
             .fork(matches!(config.fd_table, crate::ForkFdTable::Shared))?;

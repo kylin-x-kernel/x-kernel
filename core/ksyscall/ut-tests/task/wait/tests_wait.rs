@@ -489,6 +489,7 @@ fn pid_ns_reaper_exit_hands_orphans_past_the_namespace_boundary() {
             fd_table: kprocess::ForkFdTable::Private,
             namespace_flags: NamespaceFlags::NEWPID,
             exit_signal: Some(Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("privileged NEWPID fork must succeed for the test caller");
     let ns_reaper = prepared.process().clone();

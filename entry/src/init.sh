@@ -71,6 +71,16 @@ inittab_sysinit_runnable() {
     [ "$found" -eq 1 ]
 }
 
+# systemd rootfs (e.g. Arch-based ztOS): hand off to systemd as PID 1 only
+# when it is the configured init, i.e. /sbin/init resolves to the systemd
+# binary. Merely having systemd installed must not override a rootfs that
+# configured OpenRC/sysvinit (the /sbin/init branch below handles those).
+# systemd mounts /proc, /sys, /dev and sets up cgroups itself.
+if [ -x /lib/systemd/systemd ] && [ -x /sbin/init ] &&
+    [ "$(readlink -f /sbin/init)" = "$(readlink -f /lib/systemd/systemd)" ]; then
+    exec /lib/systemd/systemd
+fi
+
 if [ -x /sbin/init ] && {
     command -v openrc >/dev/null 2>&1 ||
         { [ -r /etc/inittab ] && inittab_sysinit_runnable; }

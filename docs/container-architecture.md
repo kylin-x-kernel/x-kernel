@@ -42,8 +42,9 @@ X-Kernel 已经具备若干容器基础组件：
 - `/proc/<pid>/cgroup` 已从真实 membership 按当前 cgroup namespace 渲染；
   `CLONE_NEWCGROUP` 要等 Phase 2 的 capability/delegation 授权闭环后再开放。
 
-当前仍缺 CPU、memory 和 I/O controller，`clone3(CLONE_INTO_CGROUP)`、delegation、完整
-PID/user/network namespace 以及 OCI lifecycle/security ABI。`mini-oci` 只提供受限的
+当前仍缺 CPU、memory 和 I/O controller、完整 delegation、完整
+PID/user/network namespace 以及 OCI lifecycle/security ABI。`clone3(CLONE_INTO_CGROUP)`
+已实现（含初始 delegation 授权）。`mini-oci` 只提供受限的
 `run` 路径，不代表 OCI conformance；不支持的安全相关 spec 字段（`process.capabilities`、
 `process.seccomp`、`root.readonly`）会显式报错拒绝启动，而不是静默忽略。
 

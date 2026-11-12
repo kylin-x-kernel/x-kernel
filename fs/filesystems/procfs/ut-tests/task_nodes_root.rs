@@ -326,6 +326,7 @@ fn status_credential_target(
                 fd_table: kprocess::ForkFdTable::Shared,
                 namespace_flags: Default::default(),
                 exit_signal: None,
+                cgroup_target: None,
             })?
         }
     };

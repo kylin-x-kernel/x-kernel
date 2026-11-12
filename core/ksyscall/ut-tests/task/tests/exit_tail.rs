@@ -177,6 +177,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .unwrap();
     let pid = prepared.process().pid();
