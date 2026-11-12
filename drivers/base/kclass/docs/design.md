@@ -106,6 +106,7 @@ drivers/base/kclass/
     │  │  ClassDevice<T>                 │    │
     │  │   Arc<ClassDeviceInner<T>>      │    │
     │  │   ├─ parent: Arc<DeviceObject>  │    │
+    │  │   ├─ binding: BindingRef        │    │
     │  │   ├─ runtime: T (Box<dyn Trait>)│    │
     │  │   ├─ name, device_kind, irq     │    │
     │  │   └─ metadata (input identity)  │    │
@@ -127,8 +128,8 @@ drivers/base/kclass/
 
 | Component | Responsibility |
 |------|------|
-| `ClassDevice<T>` | Typed runtime device handle; wraps `DeviceObject` + trait object and delegates trait method calls |
-| `ClassDeviceInner<T>` | `ClassDevice` internal shared state: parent, runtime, name, kind, irq, metadata |
+| `ClassDevice<T>` | Typed runtime device handle; wraps `DeviceObject`, the captured binding reference and the trait object, and delegates trait method calls |
+| `ClassDeviceInner<T>` | `ClassDevice` internal shared state: parent, captured `BindingRef`, runtime, name, kind, irq, metadata. Driver identity is the binding snapshot; availability reads the captured binding |
 | `ClassRegistry<T>` | Typed registry: publish (unique publication), devices (enumerate available), find (lookup by id), subscribe (availability notification), remove (remove by id) |
 | `ACTIVATION_BRIDGE` | Global event bridge: subscribes to `kdevice` `Activated` / `Removed` events and drives class-level notify/remove |
 | `ClassRuntimeMetadata::device_node_class` | Supplies input capability metadata or the DRM primary class to `kdevice`; other runtime classes return no node request |
@@ -148,12 +149,12 @@ drivers/base/kclass/
                          v
                     ┌──────────┐
                     │Published │  ← ClassDevice created, held by registry;
-                    │(pending) │     parent.state != Active
+                    │(pending) │     captured binding not Active
                     └────┬─────┘
                          │ kdevice Activated event
                          ▼
                     ┌──────────┐
-                    │Available │  ← parent.state == Active;
+                    │Available │  ← captured binding is Active;
                     │(active)  │     DeviceNode assigned, then callbacks fired
                     └────┬─────┘
                          │ kdevice Removed event
@@ -167,7 +168,7 @@ drivers/base/kclass/
 |----|----|----------|
 | — | Published | Driver calls `publish_<class>(parent, runtime)` |
 | Published | Available | `kdevice` dispatches `Activated`; `notify_class_available` registers any class node and then invokes subscriber callbacks |
-| Published | Available (immediate) | `parent.state()` is already `Active` at publish time (desc-adoption path) |
+| Published | Available (immediate) | Captured binding is already `Active` at publish time (desc-adoption path) |
 | Available | Removed | `kdevice` dispatches the `Removed` event; `remove_class_device` removes the entry |
 | Published | — | Publishing the same `DeviceId` again returns `AlreadyExists` |
 
@@ -198,9 +199,13 @@ be undone explicitly on the error path.
    a mismatch returns `InvalidInput`.
 5. `class_metadata()` is extracted from the runtime (only the input class
    returns meaningful metadata).
-6. `ClassDevice::try_new_with_class_metadata` is constructed:
-   - the parent must have `driver_name()` and `driver_id()` (i.e. a bound
-     driver), otherwise `BadState` is returned.
+6. `ClassDevice::try_new_with_class_metadata` captures a `BindingRef`:
+   - the parent must expose complete binding metadata and must not be
+     observed as `Removing`/`Removed`, otherwise `BadState` is returned;
+   - `driver_name()`/`driver_id()` become the immutable identity snapshot,
+     and `is_available()` reads the captured runtime. A successful capture is
+     **not** a publish permission: the normal probe/adoption path relies on
+     the descriptor binding lock to serialize publication with removal.
 7. The registry publishes under the `SpinNoPreempt` lock:
    - if the same id already exists → `AlreadyExists`, and the
      class-specific publish already performed is undone;
@@ -209,10 +214,26 @@ be undone explicitly on the error path.
    synchronously. Input and display classes first register a `DeviceNode` in
    `kdevice`, then notify class subscribers.
 
+### Captured binding reference
+
+`ClassDeviceInner` captures a `kdevice::BindingRef` at construction:
+
+- driver identity is the immutable historical identity of the binding that
+  created this class device; after unbind/removal it stays readable and never
+  falls back to the parent's current metadata;
+- `is_available()` observes only that captured runtime. It is a lock-free,
+  instantaneous availability check, not operation admission;
+- the reference retains the runtime but does not increment `usage`, so a
+  resident class handle or clone cannot make removal return `ResourceBusy`;
+- construction succeeds at the Bound stage used by normal in-probe
+  publication, and at Active; terminal or detached bindings return `BadState`;
+- capture is not a publication permission. Publication serialization with
+  removal still comes from the descriptor binding lock.
+
 ### Device enumeration and lookup
 
 1. `*_devices()`: take the registry lock, iterate all entries, filter by
-   `is_available()` (parent.state == Active), and return clones.
+   `is_available()` (the captured binding is Active), and return clones.
 2. `find_*_device(id)`: take the registry lock and find the entry matching
    the id and `is_available()`.
 3. Both operations return clones of `ClassDevice<T>` (`Arc`-shared), so

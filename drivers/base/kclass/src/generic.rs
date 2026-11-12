@@ -11,7 +11,7 @@
 use alloc::{string::String, sync::Arc, vec::Vec};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use kdevice::{BusId, DeviceCore, DeviceId, DeviceLocation, DeviceObject, DeviceState, DriverId};
+use kdevice::{BindingRef, BusId, DeviceCore, DeviceId, DeviceLocation, DeviceObject, DriverId};
 
 /// A typed runtime capability with a live parent device object.
 pub struct ClassDevice<T> {
@@ -20,6 +20,12 @@ pub struct ClassDevice<T> {
 
 struct ClassDeviceInner<T> {
     parent: Arc<DeviceObject>,
+    /// Binding instance captured when this class device was constructed.
+    ///
+    /// Identity getters read this immutable snapshot and availability reads
+    /// this exact runtime's lifecycle; neither goes back to the parent's
+    /// current driver metadata or binding slot.
+    binding: BindingRef,
     runtime: T,
     name: String,
     device_kind: DeviceKind,
@@ -88,11 +94,14 @@ impl<T> ClassDevice<T> {
         irq: Option<usize>,
         metadata: ClassDeviceMetadata,
     ) -> DriverResult<Self> {
-        parent.driver_name().ok_or(DriverError::BadState)?;
-        parent.driver_id().ok_or(DriverError::BadState)?;
+        // Capture identity and the binding instance together. A Bound device
+        // (the normal in-probe publication stage) has complete metadata and is
+        // accepted; terminal or detached bindings are not.
+        let binding = parent.binding_ref().ok_or(DriverError::BadState)?;
         Ok(Self {
             inner: Arc::new(ClassDeviceInner {
                 parent,
+                binding,
                 runtime: inner,
                 name,
                 device_kind,
@@ -137,44 +146,21 @@ impl<T> ClassDevice<T> {
         self.inner.parent.location()
     }
 
-    /// Name of the driver that activated this device.
-    /// Returns the bound driver's name.
+    /// Name of the driver that created this class device.
     ///
-    /// # Panics
-    ///
-    /// Panics if the parent device has no bound driver; publication
-    /// through [`publish`](crate::prelude) validates this, so tripping
-    /// the check indicates a bypass of the publish path.
+    /// This is an immutable snapshot captured at class construction. It stays
+    /// readable after the parent device is unbound or removed and never reads
+    /// the parent's current, detachable metadata.
     pub fn driver_name(&self) -> &'static str {
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: Class-device publication validates \
-                      the retained parent has a bound driver"
-        )]
-        self.inner
-            .parent
-            .driver_name()
-            .expect("class device must have a bound driver")
+        self.inner.binding.driver_name()
     }
 
-    /// The registered driver that activated this device.
-    /// Returns the bound driver's id.
+    /// ID of the driver that created this class device.
     ///
-    /// # Panics
-    ///
-    /// Panics if the parent device has no bound driver; publication
-    /// validates this, so tripping the check indicates a bypass of the
-    /// publish path.
+    /// Like [`Self::driver_name`], this is the historical identity of the
+    /// binding captured at construction, not a live parent query.
     pub fn driver_id(&self) -> DriverId {
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: Class-device publication validates \
-                      the retained parent has a bound driver"
-        )]
-        self.inner
-            .parent
-            .driver_id()
-            .expect("class device must have a bound driver")
+        self.inner.binding.driver_id()
     }
 
     /// Return the long-lived core handle associated with this runtime object.
@@ -205,9 +191,14 @@ impl<T> ClassDevice<T> {
         map(select(&self.inner.runtime))
     }
 
-    /// Whether the parent device is active and not removed.
+    /// Whether the captured binding is currently `Active`.
+    ///
+    /// This observes only the binding instance captured at construction; it
+    /// does not query the parent's current state or consume an in-use
+    /// admission. Treat it as an instantaneous availability check, not as a
+    /// guarantee that a later hardware operation is safe.
     pub fn is_available(&self) -> bool {
-        self.inner.parent.state() == DeviceState::Active
+        self.inner.binding.is_active()
     }
 
     pub(crate) fn input_physical_location(&self) -> &str {

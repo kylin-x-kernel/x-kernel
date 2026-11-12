@@ -6,16 +6,21 @@
 //!
 //! A [`BindingRuntime`] groups everything that belongs to one driver binding:
 //! the lifecycle state, in-use admission, the current driver metadata and the
-//! cleanup batch registered by that binding. It is a private value field of
-//! `DeviceObject`; it is never replaced, reset or shared, so every `DeviceUse`
-//! guard and every delegated `DeviceObject` accessor observes the same binding
-//! instance for the object's whole lifetime.
+//! cleanup batch registered by that binding. Each `DeviceObject` owns exactly
+//! one binding runtime for its whole lifetime and has no replace/reset path;
+//! the object holds it through `Arc` only so consumers can retain the exact
+//! instance they were created from.
+//!
+//! [`BindingRef`] is the read-only handle exposed to consumers such as the
+//! class layer. It keeps the runtime alive and snapshots the driver identity,
+//! but it neither increments `usage` nor exposes any mutation entry point.
+//! Hardware admission remains a [`DeviceUse`](crate::DeviceUse) responsibility.
 //!
 //! The descriptor binding mutex in the registry is deliberately **not** part
 //! of this type. It serializes probe/adoption/remove/unregister at the
 //! registration layer and stays owned by the registry.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use driver_base::DeviceKind;
@@ -43,6 +48,57 @@ pub(super) struct BindingSnapshot {
     pub(super) driver_id: Option<DriverId>,
     pub(super) driver_name: Option<&'static str>,
     pub(super) device_kind: Option<DeviceKind>,
+}
+
+/// Read-only reference to one binding instance.
+///
+/// A `BindingRef` keeps the [`BindingRuntime`] alive and snapshots the driver
+/// identity captured at creation time. It deliberately provides no way to
+/// mutate lifecycle state, driver metadata or the usage count: it is **not**
+/// an admission guard. Use [`DeviceObject::try_acquire`](crate::DeviceObject)
+/// when hardware-operational admission is required, and note that holding a
+/// `BindingRef` alone never blocks removal.
+///
+/// Instances can only be obtained from
+/// `DeviceObject::binding_ref()`; all fields are private and there is no
+/// public constructor.
+#[derive(Clone)]
+pub struct BindingRef {
+    runtime: Arc<BindingRuntime>,
+    driver_id: DriverId,
+    driver_name: &'static str,
+}
+
+impl BindingRef {
+    /// Whether the captured binding instance is currently `Active`.
+    ///
+    /// This is an instantaneous, lock-free observation, not an operation
+    /// admission. It may become `false` when removal starts and can become
+    /// `true` again if a removal attempt backs off because a `DeviceUse`
+    /// guard is still outstanding.
+    pub fn is_active(&self) -> bool {
+        matches!(self.runtime.state(), DeviceState::Active)
+    }
+
+    /// Driver ID snapshotted when this reference was captured.
+    pub fn driver_id(&self) -> DriverId {
+        self.driver_id
+    }
+
+    /// Driver name snapshotted when this reference was captured.
+    pub fn driver_name(&self) -> &'static str {
+        self.driver_name
+    }
+}
+
+impl core::fmt::Debug for BindingRef {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BindingRef")
+            .field("driver_id", &self.driver_id)
+            .field("driver_name", &self.driver_name)
+            .field("is_active", &self.is_active())
+            .finish()
+    }
 }
 
 /// Runtime state and cleanup responsibility of one driver binding.
@@ -102,6 +158,28 @@ impl BindingRuntime {
     /// Device subsystem kind, if known.
     pub(super) fn device_kind(&self) -> Option<DeviceKind> {
         self.meta.lock().device_kind
+    }
+
+    /// Capture a read-only reference to this binding instance.
+    ///
+    /// The driver id and name are sampled together under one `meta` critical
+    /// section, and the state check happens in that same section. A successful
+    /// capture only means the binding was not observed as `Removing`/`Removed`
+    /// and still had identity metadata at that instant; it is not a publish
+    /// permission and does not prevent a later removal from completing.
+    pub(super) fn capture_ref(self: &Arc<Self>) -> Option<BindingRef> {
+        let meta = self.meta.lock();
+        if matches!(self.state(), DeviceState::Removing | DeviceState::Removed) {
+            return None;
+        }
+        let driver_id = meta.driver_id?;
+        let driver_name = meta.driver_name?;
+        drop(meta);
+        Some(BindingRef {
+            runtime: Arc::clone(self),
+            driver_id,
+            driver_name,
+        })
     }
 
     /// Store a new lifecycle state with release ordering.
@@ -250,3 +328,4 @@ impl BindingRuntime {
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/binding.rs");
+unittest::path_mod_test!(binding_ref_tests, "../../ut-tests/binding_ref.rs");

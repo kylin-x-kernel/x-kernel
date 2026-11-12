@@ -39,15 +39,19 @@ reachable from the documented publish/query/subscribe API.
 ```
 
 - `kclass` trusts `kdriver` to have finished the driver probe before
-  calling `publish_<class>()`, with the parent's `driver_name()` /
-  `driver_id()` set and the driver match validated by `kdevice`.
+  calling `publish_<class>()`, with complete binding metadata available and
+  the driver match validated by `kdevice`. The captured `BindingRef` assumes
+  the normal probe/adoption publication path holds the descriptor binding
+  lock; a capture alone is not a publication permission.
 - `kclass` trusts the runtime trait object to be `Send + Sync` and
   internally concurrency-safe.
 - `kclass` trusts `kdevice` to dispatch `Activated` / `Removed` events in
   the correct order.
 - Upper subsystems trust that a `ClassDevice<T>` returned by `kclass`
-  stays safely accessible after device removal (guaranteed by holding
-  `Arc<DeviceObject>`).
+  stays safely accessible after device removal: it retains both
+  `Arc<DeviceObject>` and the creating binding's `BindingRef`. Driver
+  identity remains readable from the snapshot, while `is_available()` turns
+  false; the handle never grants hardware access by itself.
 
 ## External Boundaries / Attack Surface
 
@@ -93,31 +97,46 @@ by a `PageRef` RAII allocation that lives for the kernel lifetime).
 ## Memory-Safety Invariants
 
 1. **ClassDevice Arc lifetime**: `ClassDevice` holds
-   `Arc<ClassDeviceInner<T>>`, and `ClassDeviceInner` holds
-   `Arc<DeviceObject>`. As long as any `ClassDevice` clone exists, the
-   `DeviceObject` is not freed and its devres resources (MMIO mappings,
-   IRQs, DMA buffers) stay valid.
-2. **ClassDevice remains safe to use after removal**:
+   `Arc<ClassDeviceInner<T>>`; `ClassDeviceInner` holds
+   `Arc<DeviceObject>` and the creating binding's `BindingRef`. As long as
+   any `ClassDevice` clone exists, the `DeviceObject` allocation and the
+   captured binding runtime are not freed, so object memory, runtime storage
+   and lifecycle reads remain valid. This does **not** keep the device's
+   devres resources (MMIO mappings, IRQs, DMA buffers) active: removal and
+   probe failure run the explicit cleanup batch regardless of retained
+   handles.
+2. **ClassDevice remains safe to query after removal**:
    `ClassRegistry::remove` only drops the registry entry; clones held
-   outside stay valid, and their `with()` calls reach device resources
-   through `Arc<DeviceObject>`. Trait methods may return errors once the
-   device state is `Removing`/`Removed`, but no UB can occur.
-3. **No callbacks under the registry lock**: `publish` and `remove`
+   outside stay valid. `driver_name()`/`driver_id()` read the immutable
+   snapshot and cannot panic after detachment; `is_available()` reads the
+   captured runtime and turns false when removal commits. `with()` returns a
+   borrow of the runtime object whose storage is retained by the handle, but
+   it is not an operation admission: hardware access remains safe only under
+   the concrete runtime's resource-ownership, quiesce, and admission
+   contract. Trait methods may return errors once the device state is
+   `Removing`/`Removed`; this layer guarantees memory validity, not hardware
+   availability.
+3. **Binding references do not admit hardware use**: a `ClassDevice` and
+   its clones retain a `BindingRef`, which does not increment usage and
+   cannot mutate the runtime. Retaining class handles therefore cannot make
+   removal return `ResourceBusy`. Availability is an instantaneous
+   observation, not permission for later hardware access.
+4. **No callbacks under the registry lock**: `publish` and `remove`
    complete inside the `SpinNoPreempt` lock without calling external
    callbacks; callbacks run outside the lock.
-4. **No reentrancy in event dispatch**: `notify_class_available` releases
+5. **No reentrancy in event dispatch**: `notify_class_available` releases
    the registry lock before invoking callbacks, so a callback touching
    the same registry cannot deadlock.
-5. **Publish identity uniqueness**: a second publish of the same
+6. **Publish identity uniqueness**: a second publish of the same
    `DeviceId` returns `AlreadyExists`; replacement must be expressed as a
    new publish after `Removed`.
-6. **device_kind validation**: `publish_<class>()` verifies the runtime's
+7. **device_kind validation**: `publish_<class>()` verifies the runtime's
    `device_kind` against the registry type before constructing the
    `ClassDevice`; a mismatch returns `InvalidInput` without publishing.
-7. **Node assignment follows activation**: kclass requests a `DeviceNode` only
+8. **Node assignment follows activation**: kclass requests a `DeviceNode` only
    after observing `DeviceEvent::Activated`. It unregisters that node before
    class-specific cleanup on `DeviceEvent::Removed`.
-8. **Node allocation failure does not hide the runtime**: a failed node
+9. **Node allocation failure does not hide the runtime**: a failed node
    registration is logged, but class availability callbacks still run. The
    typed runtime remains usable even when a Linux-compatible projection cannot
    be allocated.
@@ -127,7 +146,7 @@ by a `PageRef` RAII allocation that lives for the kernel lifetime).
 | Type | Send condition | Sync condition |
 |------|-----------|-----------|
 | `ClassDevice<T>` | `Arc<ClassDeviceInner<T>>` is `Send` when `T: Send + Sync` | `Arc` provides shared access |
-| `ClassDeviceInner<T>` | `Arc<DeviceObject>` + `T: Send` + metadata `Send` | `Arc<DeviceObject>` + `T: Sync` |
+| `ClassDeviceInner<T>` | `Arc<DeviceObject>` + `BindingRef` + `T: Send` + metadata `Send` | `Arc<DeviceObject>` + `BindingRef` + `T: Sync` |
 | `ClassRegistry<T>` | `Vec<ClassDevice<T>>` + `Vec<Callback>` are `Send` | interior mutability via `SpinNoPreempt` |
 | `ClassAvailabilityCallback<T>` | `Arc<dyn Fn(...) + Send + Sync>` is `Send + Sync` | `Arc` provides shared access |
 | `ACTIVATION_BRIDGE` | `LazyInit<()>` is a zero-sized type | `LazyInit` makes initialization thread-safe |
@@ -145,6 +164,7 @@ by a `PageRef` RAII allocation that lives for the kernel lifetime).
 | T-08 | Reentrancy into the same registry from a subscriber callback deadlocks | Medium | Callback calls `publish_*` / `subscribe_*` | `notify_class_available` runs callbacks outside the lock, so reentrancy cannot deadlock (but may build long call chains) |
 | T-09 | A node is visible before the underlying runtime is active | Medium — userspace could open a node whose class runtime cannot serve requests | Node registration happens during publication | Registration is driven only by the `Activated` event, after the class registry releases its lock |
 | T-10 | Node allocation failure suppresses unrelated class consumers | Medium — kernel subsystems could miss an otherwise usable device | The class index pool is exhausted | The failure is logged and ordinary class availability callbacks continue |
+| T-11 | A retained class handle prevents device removal | Medium — device cannot be unbound while any subsystem holds a clone | A subsystem caches `ClassDevice` indefinitely | `BindingRef` retains the runtime but does not increment usage; availability reads the captured lifecycle, so removal can commit and later reports `false` |
 
 Impact levels:
 
@@ -156,7 +176,7 @@ Impact levels:
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity | Handling |
 |------|----------|----------|--------|------|----------|----------|
-| F-01 | Publish with an unbound parent | `DeviceObject` did not complete bind before publish | publish returns `BadState` | Device not published | 3 | `try_new_with_class_metadata` checks `driver_name()` and `driver_id()` |
+| F-01 | Publish with an unbound parent | `DeviceObject` did not complete bind before publish, or its binding is already terminal/detached | publish returns `BadState` | Device not published | 3 | `try_new_with_class_metadata` calls `binding_ref()`, which rejects missing metadata and observed `Removing`/`Removed` |
 | F-02 | Publish with a mismatched device_kind | Driver passes a net device to `publish_block` | publish returns `InvalidInput` | Device not published | 4 | Kind check happens before `ClassDevice` construction |
 | F-03 | Event bridge not registered | `ensure_event_bridge` never called (no class feature enabled) | No Activated/Removed dispatch | Device state changes do not reach class registries | 4 | `ensure_event_bridge` is called by every `*_registry_fn()` |
 | F-04 | Subscriber callback panics | Callback bug causes unwinding | Later subscribers not notified | Some subsystems miss availability notices | 3 | Callbacks run in Vec order; no `catch_unwind` today; subscriber quality relied upon |
@@ -182,9 +202,14 @@ Severity levels:
   the runtime remains available to direct class consumers.
 - A subscriber callback panic currently has no unwind protection;
   subscriber implementation quality is relied upon.
-- `ClassDevice`'s `driver_name()` / `driver_id()` use `expect` — valid
-  because publish validated them; tripping the `expect` indicates a bug
-  in the publish path.
+- `ClassDevice`'s `driver_name()` / `driver_id()` read the captured
+  `BindingRef` snapshot and cannot fail after construction; an unbound or
+  terminal parent is rejected at construction with `BadState` instead.
+- Availability is evaluated against the captured binding instance. A
+  handle built while the device is `Active` can observe the binding go
+  `Removing` and return to `Active` if that removal attempt fails with
+  `ResourceBusy`; only a successful removal commit is terminal for the
+  captured binding.
 - kclass contains no `unsafe` blocks, so class adapter logic cannot cause
   UB; the historical framebuffer raw-pointer path moved to `fbdevice`'s
   fbdev emulation.
@@ -211,6 +236,12 @@ registries and `ClassDevice` objects.
   class-specific metadata requires a trait change.
 - `ClassDevice` has no pre-removal notification (e.g. "device about to be
   removed").
+- `is_available()` is an instantaneous observation of the captured binding,
+  not an admission or reservation: it neither increments usage nor
+  guarantees that a subsequent hardware operation succeeds. Retained class
+  handles never block removal.
+- Class handles are not re-admitted to a later binding of the same device;
+  availability follows the binding captured at construction.
 - Device-node templates currently cover only input event devices and DRM
   primary nodes. Other classes remain discoverable through kclass without a
   Linux-compatible node projection.
@@ -227,8 +258,12 @@ When modifying this module, verify:
 - The new class's trait delegation impls cover all required trait
   methods.
 - The new class is re-exported in the `prelude` module.
-- The publish path still validates `parent.driver_name()` /
-  `parent.driver_id()`.
+- The publish path still captures a `BindingRef` at construction and
+  returns `BadState` when `binding_ref()` is unavailable.
+- `driver_name()` / `driver_id()` read the captured snapshot, never the
+  parent's live binding slot.
+- No path treats `BindingRef` or `is_available()` as usage/admission or
+  mutates binding state through the class handle.
 - Registry-lock critical sections still call no external callbacks (deadlock
   prevention).
 - Device-node registration remains after `Activated` and before availability

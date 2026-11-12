@@ -39,6 +39,11 @@ unittest::path_mod_test!(
     block_requests_unittest,
     "../ut-tests/block_requests_unittest.rs"
 );
+unittest::path_mod_test!(
+    #[cfg(feature = "char")]
+    mod binding_reference_class,
+    "../ut-tests/binding_reference_class.rs"
+);
 mod bus;
 pub mod driver_registry;
 mod enumeration;

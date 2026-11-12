@@ -12,7 +12,7 @@ use driver_os_api::DmaInfo;
 use fwnode::FwNode;
 use kspin::SpinNoPreempt;
 
-use super::binding::BindingRuntime;
+use super::binding::{BindingRef, BindingRuntime};
 use crate::{
     BusId, DeviceId, DeviceIdentity, DeviceLocation, DeviceRecord, DeviceState, DiscoveryOrigin,
     DriverId, IntxRouteStatus, ResourceDesc, ResourceSet, TransportInfo,
@@ -56,10 +56,12 @@ pub struct DeviceObject {
     /// Runtime state, in-use admission, driver metadata and cleanup batch of
     /// this object's single driver binding.
     ///
-    /// This is a plain value field, never an `Option`, `Arc`, or replaceable
-    /// slot: the binding instance lives and dies with the object. See
-    /// [`DeviceUse`] for the transitional ownership invariant.
-    binding: BindingRuntime,
+    /// The object has no replace/reset path for this binding. It is held in
+    /// `Arc` only so read-only [`BindingRef`] handles and [`DeviceUse`] guards
+    /// can retain the exact instance they were created from; lifecycle,
+    /// usage and devres still have this single owner. See [`DeviceUse`] for
+    /// the admission contract.
+    binding: Arc<BindingRuntime>,
 }
 
 impl DeviceObject {
@@ -111,7 +113,7 @@ impl DeviceObject {
                 children: Vec::new(),
                 child_bus: None,
             }),
-            binding: BindingRuntime::new(),
+            binding: Arc::new(BindingRuntime::new()),
         }
     }
 
@@ -353,16 +355,33 @@ impl DeviceObject {
         matches!(self.state(), DeviceState::Removing)
     }
 
+    /// Capture a read-only reference to the current binding instance.
+    ///
+    /// The returned handle snapshots the bound driver identity and keeps the
+    /// binding runtime alive, but does not count as in-use admission and
+    /// never blocks removal. Returns `None` when no driver identity is
+    /// currently recorded, when the binding is already detached, or when the
+    /// capture observes `Removing`/`Removed`.
+    ///
+    /// The capture is not a publish permission: a successful capture does not
+    /// guarantee that a later class publication happens before removal.
+    pub fn binding_ref(&self) -> Option<BindingRef> {
+        self.binding.capture_ref()
+    }
+
     /// Try to acquire an in-use reference to a live device.
     ///
     /// Returns a [`DeviceUse`] guard only while the device is `Active`. While
     /// any guard is alive the remove path (`DeviceObject::begin_removing`)
     /// refuses to tear the device down, so callers can safely operate on it
-    /// for the lifetime of the guard.
+    /// for the lifetime of the guard. The guard retains the exact binding
+    /// instance admitted here and releases that same instance on drop.
     pub fn try_acquire(self: &Arc<Self>) -> Option<DeviceUse> {
-        if self.binding.try_acquire() {
+        let binding = Arc::clone(&self.binding);
+        if binding.try_acquire() {
             Some(DeviceUse {
-                device: self.clone(),
+                device: Arc::clone(self),
+                binding,
             })
         } else {
             None
@@ -463,16 +482,16 @@ impl core::fmt::Debug for DeviceObject {
 /// any `DeviceUse` is alive; dropping the guard releases the reference and lets
 /// a pending removal proceed.
 ///
-/// # Transitional ownership invariant
+/// # Specific-binding ownership
 ///
-/// The guard borrows the whole object, but the reference it releases is the
-/// object's single, non-replaceable binding runtime: the binding is a plain
-/// value field, never reset or swapped, so the count acquired here is always
-/// the count released on drop. Reusing a `DeviceObject` across bindings would
-/// break that assumption; a future stable-object design must move guard
-/// ownership to the specific binding instead of delegating to the current one.
+/// The guard stores the binding instance that admitted it and releases that
+/// same instance on drop; it does not re-read "the object's current binding".
+/// The `Arc<DeviceObject>` is retained only for the public `device()`/`Deref`
+/// queries. A read-only [`BindingRef`] keeps the runtime alive without
+/// incrementing the count, so only `DeviceUse` guards gate removal.
 pub struct DeviceUse {
     device: Arc<DeviceObject>,
+    binding: Arc<BindingRuntime>,
 }
 
 impl DeviceUse {
@@ -492,6 +511,6 @@ impl Deref for DeviceUse {
 
 impl Drop for DeviceUse {
     fn drop(&mut self) {
-        self.device.binding.release_use();
+        self.binding.release_use();
     }
 }

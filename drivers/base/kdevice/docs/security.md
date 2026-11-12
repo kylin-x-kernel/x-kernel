@@ -187,16 +187,27 @@ rest.
     driver in one `devices → drivers` critical section; bus detachment keeps
     the shared driver entry while any remaining device still references it.
 16. **Per-binding runtime is non-replaceable**: a `DeviceObject` owns exactly
-    one private `BindingRuntime` as a value field, with no replace/reset/
-    into-inner API and no `&mut` access. Lifecycle state, usage, driver
-    metadata and devres have a single owner; `DeviceObject` keeps no
-    synchronized copy. In the current model a rebind creates a new
-    `DeviceObject`/`DeviceId`, and the old object stays `Removed`, so a
-    `DeviceUse` acquired from an old binding can never decrement a new one.
-    A future stable-object design that swaps bindings must move guard
-    ownership to the specific binding; generation counters are not a
-    substitute.
-17. **`DeviceRecord` is a grouped snapshot**: binding metadata
+    one private `BindingRuntime` for its lifetime, with no replace/reset/
+    into-inner API and no `&mut` access. The object stores it in `Arc` only so
+    `BindingRef` and `DeviceUse` can retain the exact instance. Lifecycle
+    state, usage, driver metadata and devres still have a single owner;
+    `DeviceObject` keeps no synchronized copy. In the current model a rebind
+    creates a new `DeviceObject`/`DeviceId`, and the old object stays
+    `Removed`, so a `DeviceUse` acquired from an old binding can never
+    decrement a new one. A future stable-object design that swaps bindings
+    must also isolate old class handles and keep guard/reference ownership
+    tied to the specific binding; generation counters are not a substitute.
+17. **Read-only binding references are not admission**: `BindingRef` retains
+    the runtime and snapshots driver id/name under one `meta` critical
+    section, but it does not increment `usage`, cannot mutate lifecycle or
+    metadata, and does not implement `Drop` side effects. Holding any number
+    of class handles or `BindingRef` clones cannot make removal return
+    `ResourceBusy`. `is_active()` is an instantaneous observation; a
+    transient `Removing` that backs off on non-zero usage can return to
+    `Active`. Capture rejects observed `Removing`/`Removed`/missing metadata,
+    but is not a publication permission: publication still relies on the
+    descriptor binding lock for serialization with removal.
+18. **`DeviceRecord` is a grouped snapshot**: binding metadata
     (`driver_id`/`driver_name`/`device_kind`) is sampled under
     `binding.meta`, and relations (`parent`/`child_bus`) are sampled later
     under `relations`; the lifecycle is a separate atomic read. The metadata
@@ -212,8 +223,9 @@ rest.
 |------|-----------|-----------|
 | `DeviceRegistry` | fields are `Send` | `SpinNoPreempt` provides interior mutability |
 | `DeviceNodeRegistry` | maps, index sets, and callbacks are `Send` | a separate `SpinNoPreempt` serializes assignment and snapshots |
-| `DeviceObject` | `Arc<DeviceObject>` is `Send + Sync` | immutable facts; `relations` under `SpinNoPreempt`; contains one `BindingRuntime` |
+| `DeviceObject` | `Arc<DeviceObject>` is `Send + Sync` | immutable facts; `relations` under `SpinNoPreempt`; owns one `Arc<BindingRuntime>` |
 | `BindingRuntime` (private) | fields are `Send` | `AtomicU8` + `AtomicUsize` + separate `SpinNoPreempt` for `meta` and `devres` |
+| `BindingRef` | `Arc<BindingRuntime>` + `DriverId` + `&'static str` is `Send` | immutable snapshot; lifecycle read is atomic |
 | `BusInstance` | `Arc<BusInstance>` is `Send + Sync` | internal `SpinNoPreempt` guards all mutable fields |
 | `BusTypeObject` | `Arc<BusTypeObject>` is `Send + Sync` | internal `SpinNoPreempt` |
 | `DriverObject` | `Arc<DriverObject>` is `Send + Sync` | internal `SpinNoPreempt` + `AtomicU64` |
@@ -245,7 +257,7 @@ rest.
 | T-18 | A stale scan/probe snapshot rebinds a descriptor that was unregistered | High — owner may have released transport/hardware resources; rebinding probes freed hardware | Explicit probe or driver-registration scan holds a pre-unregister snapshot | Unregister takes the same descriptor binding lock, deletes the registration under it, and every probe/scan rechecks after acquiring the lock: missing entry → `Skipped`/`continue`, never a new `DeviceObject` |
 | T-19 | Same-task unregister from a probe/remove hook self-deadlocks or panics | Medium — kernel panic/abort | A callback calls `unregister_device_desc` while its caller holds the descriptor lock | `unregister_device_desc` checks `is_owned_by_current()` before locking and returns `ResourceBusy`; a different task blocks and rechecks |
 | T-20 | Unregister reports success although descriptor deletion failed | Medium — caller believes the old ID is gone and releases transport resources | Lifecycle invariant broken between the state check and the delete | `Pending` delete mismatch returns `BadState`; after a committed `Bound` removal a delete miss still completes teardown but returns `BadState`. No rollback to `Active`, no recovery path |
-| T-21 | An old guard or class handle acts on a new binding after object reuse | High — old holder treats the new binding as usable while holding the previous binding's resources | A future stable-object migration reuses one `DeviceObject` for a new binding | Not reachable today: a rebind creates a new object and the old one stays `Removed`; `BindingRuntime` is a non-replaceable value field and `DeviceUse` releases that same binding (invariant 16). The future migration must move `DeviceUse` ownership to the binding and isolate old class handles; generation counters are not an accepted substitute |
+| T-21 | An old guard or class handle acts on a new binding after object reuse | High — old holder treats the new binding as usable while holding the previous binding's resources | A future stable-object migration reuses one `DeviceObject` for a new binding | Not reachable today: a rebind creates a new object and the old one stays `Removed`; each object has one non-replaceable `BindingRuntime`, `DeviceUse` releases that admitted instance, and class handles retain a `BindingRef` plus historical identity (invariants 16-17). The future migration must keep guard/reference ownership tied to the binding and isolate old class handles; generation counters are not an accepted substitute |
 
 Impact levels:
 
@@ -343,10 +355,13 @@ itself (all logging belongs to upper layers such as `kdriver`).
 - Firmware-node association supports boot-static backends only. There is no
   ownership, refcount or teardown protocol for a dynamically unloaded backend,
   so such a backend must not be published as `FwNode<'static>`.
-- `DeviceUse` ownership is still expressed as `Arc<DeviceObject>`. It is safe
-  only while the object's `BindingRuntime` is non-replaceable; a future
-  stable-object design must change guard ownership before reusing an object
-  across bindings.
+- `DeviceUse` keeps `Arc<DeviceObject>` for its public queries but releases
+  the specific `Arc<BindingRuntime>` admitted at acquisition. `BindingRef` is
+  tied to the same instance, but it is only a read-only identity/lifecycle
+  handle: it carries no operation admission and no publish permission. A
+  future stable-object design still needs explicit old-handle isolation for
+  same-object rebinding; this ticket only makes the reference ownership
+  concrete.
 - `DeviceRecord` is a grouped, non-transactional snapshot. Cross-group
   combinations are observable and must not drive resource release or
   ownership decisions.
@@ -376,9 +391,13 @@ When modifying this module, verify:
   review, including the restore-prior-state path when usage is non-zero.
 - Changes to `record_snapshot` preserve the documented grouping and do not
   silently introduce a second state owner or a cross-group invariant.
-- The `BindingRuntime` stays a non-replaceable value field; any proposal to
-  reset/replace it must migrate `DeviceUse` ownership and class handles in
-  the same change.
+- The `BindingRuntime` stays a single non-replaceable instance per object
+  (currently held via `Arc`); any proposal to reset/replace it must migrate
+  `DeviceUse` ownership and class-handle isolation in the same change.
+- New binding-facing APIs remain non-admission unless they return a
+  `DeviceUse`-equivalent guard. `BindingRef` must not gain state mutation,
+  usage accounting, or publish-permission semantics, and capture must keep
+  taking driver id/name under one `meta` critical section.
 - Cleanup changes preserve batch-taking, LIFO order, exactly-once execution
   per batch item, and lock-free callback execution.
 - New `DeviceDriver` methods keep the `DriverObject` delegation path

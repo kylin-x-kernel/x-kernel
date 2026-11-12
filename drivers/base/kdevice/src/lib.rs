@@ -92,6 +92,7 @@ pub use bus::{
     PlatformBusTypeMatcher,
 };
 pub use device::{
+    BindingRef,
     desc::{
         DeviceDesc, DeviceDescId, DeviceDescSpec, DeviceId, DeviceIdentity, DeviceLocation,
         DeviceNumber, DeviceRecord, DeviceState, DiscoveryOrigin, IntxRouteStatus, PciIdentity,
