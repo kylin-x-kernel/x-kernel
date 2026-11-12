@@ -17,7 +17,10 @@ fn reference_retirement_separates_last_release_from_inventory_reuse() {
     unsafe { meta.claim_reference(UsageKind::Global) }.unwrap();
     // SAFETY: the fixture retains its initial live hold during cloning.
     unsafe { meta.clone_reference() }.unwrap();
-    assert_eq!(meta.reference_state(), ReferenceState::Referenced { references: 2 });
+    assert_eq!(
+        meta.reference_state(),
+        ReferenceState::Referenced { references: 2 }
+    );
     // SAFETY: consumes the extra hold once; the fixture has no hardware use.
     assert!(!unsafe { meta.release_reference() });
     // SAFETY: consumes the remaining initial hold once after all modeled use.
@@ -41,8 +44,14 @@ fn reference_limit_does_not_wrap_or_destroy_the_existing_hold() {
     // holders. Restore its sole real hold before completing retirement.
     meta.references.store(MAX_REFERENCES, Ordering::Relaxed);
     // SAFETY: the modeled limit includes an existing hold retained by this test.
-    assert_eq!(unsafe { meta.clone_reference() }, Err(PageMetaError::ReferenceOverflow));
-    assert_eq!(meta.reference_state(), ReferenceState::Referenced { references: MAX_REFERENCES });
+    let result = unsafe { meta.clone_reference() };
+    assert_eq!(result, Err(PageMetaError::ReferenceOverflow));
+    assert_eq!(
+        meta.reference_state(),
+        ReferenceState::Referenced {
+            references: MAX_REFERENCES
+        }
+    );
     meta.references.store(1, Ordering::Relaxed);
     // SAFETY: consumes the fixture's sole real hold after all modeled use ends.
     assert!(unsafe { meta.release_reference() });
@@ -56,7 +65,8 @@ fn permanent_metadata_cannot_be_claimed_as_an_allocation() {
     meta.mark_permanent();
     // SAFETY: this negative fixture has exclusive modeled storage and no raw
     // users; claim_reference must reject the reservation without changing it.
-    assert_eq!(unsafe { meta.claim_reference(UsageKind::Global) }, Err(PageMetaError::InvalidState));
+    let result = unsafe { meta.claim_reference(UsageKind::Global) };
+    assert_eq!(result, Err(PageMetaError::InvalidState));
     assert!(meta.is_permanent());
     assert_eq!(meta.references.load(Ordering::Relaxed), 0);
     assert_eq!(meta.reference_state(), ReferenceState::Permanent);

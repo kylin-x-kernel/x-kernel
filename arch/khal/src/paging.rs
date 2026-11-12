@@ -4,8 +4,10 @@
 
 //! Page table manipulation.
 
+use core::mem::ManuallyDrop;
+
 use kalloc::{PageRef, UsageKind};
-use memaddr::{PhysAddr, VirtAddr};
+use memaddr::{MemoryAddr, PhysAddr, VirtAddr};
 use page_table::PagingHandler;
 #[doc(no_inline)]
 pub use page_table::{
@@ -38,6 +40,23 @@ impl PagingHandler for PagingHandlerImpl {
         // SAFETY: The handler contract supplies the exact outstanding transfer;
         // its byte length was validated against one aligned leaf before admission.
         unsafe { PageRef::from_raw(paddr, bytes / memaddr::PAGE_SIZE_4K) }
+    }
+
+    unsafe fn mapping_reference_try_clone_from_raw(
+        paddr: PhysAddr,
+        bytes: usize,
+    ) -> page_table::PtResult<PageRef> {
+        debug_assert_ne!(bytes, 0);
+        debug_assert_eq!(bytes % memaddr::PAGE_SIZE_4K, 0);
+        debug_assert!(paddr.is_aligned(memaddr::PAGE_SIZE_4K));
+        // SAFETY: Exclusive table access retains the live leaf's exact transfer
+        // for this allocation incarnation. This borrowed view is never dropped
+        // or transferred; only try_clone_ref acquires a new independent hold.
+        let borrowed =
+            ManuallyDrop::new(unsafe { PageRef::from_raw(paddr, bytes / memaddr::PAGE_SIZE_4K) });
+        borrowed
+            .try_clone_ref()
+            .map_err(|_| page_table::PtError::NoMemory)
     }
 
     fn alloc_frame() -> Option<PhysAddr> {

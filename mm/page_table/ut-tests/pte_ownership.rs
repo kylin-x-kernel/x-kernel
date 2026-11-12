@@ -22,6 +22,32 @@ const PAGE_SIZES: [PageSize; 3] = [PageSize::Size4K, PageSize::Size2M, PageSize:
 const INITIAL_PADDR: usize = 0x4000_0000;
 const UPDATED_PADDR: usize = 0x8000_0000;
 
+#[cfg(target_arch = "riscv64")]
+#[def_test]
+fn write_only_riscv_leaves_use_read_write_encoding() {
+    // Check the hardware R/W bits directly: decoded software permissions alone
+    // do not prove that an Sv39/Sv48 leaf has a legal permission encoding.
+    const READ_WRITE_BITS: usize = (1 << 1) | (1 << 2);
+    for page_size in PAGE_SIZES {
+        let flags = PagingFlags::USER | PagingFlags::WRITE;
+        let mut entry = ArchPageEntry::new_page(
+            PhysAddr::from(INITIAL_PADDR),
+            flags,
+            page_size.is_huge(),
+        );
+        assert_eq!(entry.bits() & READ_WRITE_BITS, READ_WRITE_BITS);
+        entry.set_managed(true);
+        for initial_flags in [PagingFlags::USER, PagingFlags::USER | PagingFlags::READ] {
+            entry.set_flags(initial_flags, page_size.is_huge());
+            entry.set_flags(flags, page_size.is_huge());
+            assert_eq!(entry.bits() & READ_WRITE_BITS, READ_WRITE_BITS);
+            assert!(entry.is_present());
+            assert!(entry.is_managed());
+            assert_eq!(entry.paddr(), PhysAddr::from(INITIAL_PADDR));
+        }
+    }
+}
+
 #[def_test]
 fn raw_entries_start_unmanaged() {
     assert!(!ArchPageEntry::EMPTY.is_managed());

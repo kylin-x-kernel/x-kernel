@@ -502,6 +502,27 @@ pub trait PagingHandler: Sized {
     /// A valid physical address or a metadata lookup alone cannot supply a hold.
     unsafe fn mapping_reference_from_raw(paddr: PhysAddr, bytes: usize) -> Self::MappingReference;
 
+    /// Acquires an independent hold from a live managed leaf's raw transfer.
+    ///
+    /// The original transfer remains owned by its leaf, including on error.
+    /// Raw-only providers reject this operation by default.
+    ///
+    /// # Safety
+    /// The caller must hold exclusive page-table access and retain the live
+    /// managed leaf owning this exact physical range and allocation incarnation
+    /// throughout the call. Address validity or metadata lookup is insufficient.
+    /// The implementation must not consume or release the source transfer.
+    ///
+    /// # Errors
+    /// Returns InvalidAddress when unsupported, or NoMemory when another hold
+    /// cannot be acquired. Failure leaves the original lifetime counts unchanged.
+    unsafe fn mapping_reference_try_clone_from_raw(
+        _paddr: PhysAddr,
+        _bytes: usize,
+    ) -> PtResult<Self::MappingReference> {
+        Err(PtError::InvalidAddress)
+    }
+
     /// Allocates a 4K-aligned physical frame.
     ///
     /// # Returns

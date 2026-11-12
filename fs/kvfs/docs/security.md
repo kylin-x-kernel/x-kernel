@@ -283,11 +283,10 @@ model maintains memory safety through safe Rust locks, `Arc` ownership, and oper
   filemap or a filesystem as an independently clonable cache owner. The entries and the derived dirty marks are maintained under the same mutex, while Folio references
   continue to keep page data alive independently; this adjustment does not change the invalidate lock or the mapping identity check.
   Filesystem-owned `CacheResidency` is installed once during inode construction.
-  Admission runs under folio and mapping index locks; final physical-page
-  release returns capacity outside both locks and must not sleep, including
-  final provider destruction. Callbacks must not reenter a
-  mapping, lock folios, perform I/O, or invert the folio-to-index-to-provider
-  lock order. Detachment alone never releases a live allocation's charge.
+  Admission and release run as cache identities enter/leave the mapping index.
+  Callbacks must not sleep, reenter a mapping, lock folios, perform I/O, or
+  invert the folio-to-index-to-provider lock order. Detached physical references
+  do not retain cache-residency capacity.
 - The operation table of a `SuperBlock` is separate from the filesystem-private state, corresponding to Linux `s_op` and
   `s_fs_info`. The construction API accepts only a static shared operation table; a filesystem callback must recover the private state through a typed borrow bound to
   `&SuperBlock`, and must not obtain an escapable private owner, store the mount owner in the
@@ -657,12 +656,12 @@ Independent opens do not share policy state; dup/fork references to the same ope
 - `with_pinned_file_page` holds the invalidate read lock through EOF validation
   and publication, and rejects page starts at/beyond EOF or overflowing indices
   before materialization or admission. A callback error keeps an initialized
-  in-range cache page charged for reuse. Its callback must not wait for this mapping's exclusive
+  in-range cache page resident and charged for reuse. Its callback must not wait for this mapping's exclusive
   invalidation lock.
-- Read-only publication consumes `PinnedFolio` and returns a must-use
-  `MappedFolio` token. The mapping owner retains that token until its PTE is
-  removed and the corresponding TLB invalidation completes. A deferred
-  invalidation submission and cache detachment do not establish completion.
+- Read-only publication acquires an independent managed PTE hold and returns
+  an optional content token. No access permissions install no PTE/token. Content
+  tokens preserve exact source identity for COW; releasing them does not wait
+  for TLB retirement, which retains the PTE's own physical reference.
 - The stable `Folio` owns its page identity, allocation and content lock.
   Ordinary access uses `FolioGuard`; initialization consumes `FolioRead`, which
   retains the allocation and lock until completion; replacing
@@ -670,25 +669,20 @@ Independent opens do not share policy state; dup/fork references to the same ope
 - Copies deliberately remain available after detachment and are serialized
   with writers of the original object. They initialize all destination bytes,
   but are neither current-EOF validation nor an immutable snapshot.
-- Pins and mapping tokens retain the allocation and its single capacity charge
-  through ordinary shared ownership, without a separate pin statistics system.
+- Pins and mapping tokens retain stable content independently of cache quota.
+  Each managed PTE owns a separate physical reference through retirement.
 
 ## Cache residency lifecycle
 
-The filesystem owns capacity policy and supplies one `CacheResidency` provider
-when constructing an inode mapping. Only a winning new identity calls
-`try_add_folio()` under folio and index locks. Its stable folio retains one
-capacity charge until the physical allocation is freed. Cache detachment and
-mapping destruction leave charges intact while pins, tokens or batches remain.
-The last reference frees the allocation and returns capacity outside both locks;
-its charge also keeps the accounting provider alive until this release.
-Providers must not reenter mappings, acquire folio locks, or perform I/O.
-Release and final provider destruction must not sleep: the last reference can
-be released by I/O completion. Admission still requires task context.
-For memfs, the provider is its filesystem-owned quota, so lock order is cache
-folio -> index -> quota limit; remount and statfs never acquire cache locks.
-Speculative physical storage remains outside the admission policy until insertion.
-
+The mapping owns one filesystem-supplied `CacheResidency` provider. Only a
+winning cache identity is admitted and charged; cache removal and final index
+destruction return each charge once. Surviving Folio, pin, read or PTE references
+retain physical memory without retaining tmpfs `size=` quota. Physical lifetime
+is enforced by PageRef and PTE retirement, not the cache capacity callback.
+Admission/removal run in task context under the cache index lock; providers must
+not sleep or reenter the mapping. Memfs admission takes quota-limit locks after
+folio/index locks, while removal is an atomic decrement. Remount/statfs never
+acquire cache locks.
 
 Sparse-hole zero filling applies only to absent cache identities. A retained
 non-uptodate reservation retries initialization under the invalidate read lock;
@@ -698,8 +692,8 @@ propagated.
 
 Filesystem sparse reads must not consume remaining quota by prefetching absent
 pages. Truncate invalidates retained read-batch entries before removing cache
-identity; references cannot serve stale bytes, and keep their physical page
-charged until its final release.
+identity; references cannot serve stale cache bytes. They keep physical pages
+alive independently of the quota returned at identity removal.
 
 Filesystem-driven resident traversal uses one invalidate read guard per bounded
 31-page snapshot. Page callbacks may only consume data, cannot reenter the

@@ -305,7 +305,10 @@ impl FileSharedRuntime {
                     && !page_flags.contains(MappingFlags::WRITE)
                 {
                     self.check_shared_write_fault_allowed()?;
-                    self.0.source.file().page_mkwrite(pn, |_folio| {
+                    self.0.source.file().page_mkwrite(pn, |folio| {
+                        if folio.paddr() != paddr {
+                            return Err(KError::BadAddress);
+                        }
                         pgtbl
                             .remap_raw(addr, paddr, flags)
                             .map_err(map_paging_err)?;
@@ -316,18 +319,34 @@ impl FileSharedRuntime {
                     populated = 1;
                 }
             }
+            Err(PagingError::NotMapped) if ctx.access_flags().contains(MappingFlags::WRITE) => {
+                self.check_shared_write_fault_allowed()?;
+                self.0.source.file().page_mkwrite(pn, |folio| {
+                    let reference = folio.try_clone_mapping_ref()?;
+                    pgtbl.map(addr, reference, flags).map_err(map_paging_err)?;
+                    populated = 1;
+                    KResult::Ok(())
+                })?;
+            }
             Err(PagingError::NotMapped) => {
                 address_space.with_invalidate_read(|| {
                     address_space.with_folio_or_create(pn, |folio| {
+                        let reference = folio.try_clone_mapping_ref()?;
+                        let read_flags = flags - MappingFlags::WRITE;
+                        let has_access =
+                            read_flags.intersects(MappingFlags::READ | MappingFlags::EXECUTE);
                         pgtbl
-                            .map_raw(
+                            .map(
                                 addr,
-                                folio.paddr(),
-                                PageSize::Size4K,
-                                flags - MappingFlags::WRITE,
+                                reference,
+                                if has_access {
+                                    read_flags
+                                } else {
+                                    MappingFlags::empty()
+                                },
                             )
                             .map_err(map_paging_err)?;
-                        populated = 1;
+                        populated = usize::from(has_access);
                         Ok(())
                     })
                 })?;

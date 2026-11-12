@@ -66,7 +66,8 @@ impl From<PagingFlags> for RvFlags {
             ret |= Self::R;
         }
         if f.contains(PagingFlags::WRITE) {
-            ret |= Self::W;
+            // Sv39/Sv48 reserve W=1,R=0; writable leaves must also be readable.
+            ret |= Self::R | Self::W;
         }
         if f.contains(PagingFlags::EXECUTE) {
             ret |= Self::X;

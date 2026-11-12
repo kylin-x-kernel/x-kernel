@@ -493,7 +493,9 @@ without granting content access or hardware-retirement authority. The HAL uses
 the existing `PageRef` protocol and adds no reference counter. The primary APIs
 `map(reference)`, `map_sized(reference, size)` and
 `replace_if_same(reference)` consume one exact selected hold per leaf, including
-compound views. No split/merge or public reference-cloning API is added.
+compound views. `map_existing` clones an exact hold from a live managed leaf
+through `mapping_reference_try_clone_from_raw`; raw backing remains externally
+owned. No huge-leaf split or merge is added.
 
 `mapping_reference_into_raw(reference) -> (PA, bytes)` transfers that hold into
 the managed leaf with no count change. The private ownership category plus the
@@ -580,3 +582,39 @@ tests retain real `PageRef` inventory/reuse and exact/compound backing checks,
 including `inactive_table_destruction_releases_its_live_data_hold`. Test tables
 are never activated in hardware; these fixtures do not prove real shootdown or
 category-bit hardware correctness.
+
+
+## Live managed-leaf cloning and external raw replacement
+
+`PagingHandler::mapping_reference_try_clone_from_raw` is an unsafe capability:
+exclusive page-table mutation must retain an actual managed source transfer for
+the exact range and allocation incarnation. The provider must acquire a distinct
+hold without consuming the borrowed transfer; raw-only providers reject by
+default. HAL restores only a ManuallyDrop view before cloning. Page address
+validation, a copied snapshot or resident metadata alone never supplies a hold.
+`map_existing` checks aligned leaf bases and destination geometry/mutability;
+failed clone/table preparation preserves the source, and caller prefix rollback
+must remove only successfully prepared destinations. Raw aliases still require
+external lifetime protection for both mappings.
+
+`replace_managed_with_external_if_same` intentionally crosses to raw ownership.
+Its unsafe caller must retain initialized target backing for the full leaf and
+all required retirement, with object-slot commit already prepared. The operation
+validates range, alignment, nonempty access, managed source and exact snapshot
+before publication. A stale compare or validation error consumes neither owner.
+A successful fresh raw PTE must never inherit the source managed bit: only the
+old source transfer is recovered into retirement. No ordinary error follows
+publication, including on unconfirmed automatic drains, so callers cannot mistake
+a committed raw target for an unused candidate and free it. Existing raw replace
+continues to reject a managed physical-address change. No global TLB error-model,
+retry, fail-stop or recovery behavior is added; physical retention and synchronous
+permission revocation remain separate contracts.
+
+## RISC-V writable leaf encoding
+
+RISC-V cannot encode a valid write-only leaf: W=1,R=0 is reserved. The common
+PagingFlags conversion adds R whenever WRITE is requested, for both initial
+publication and set_flags. The VMA still enforces requested software access
+policy. Direct PTE-bit regression checks cover base/huge leaves, USER-only and
+read-only to writable protection updates, and managed-bit preservation. These
+encoding fixtures do not claim to execute accesses through an active user table.

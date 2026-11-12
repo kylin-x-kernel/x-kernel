@@ -30,8 +30,10 @@ impl AddressSpace {
     /// admission. The callback must validate its exact byte range and publish the read-only
     /// PTE together with its file-mapping reference before returning. Truncate
     /// submits mapping invalidation before detaching the cache entry, but that
-    /// submission may be deferred while an MM is busy. The mapping owner must
-    /// retain the pin until PTE removal and TLB invalidation actually complete.
+    /// submission may be deferred while an MM is busy. Managed publication gives
+    /// the PTE an independent physical reference; its retirement belongs to the
+    /// page table. A retained pin provides stable content identity, without a
+    /// TLB-completion prerequisite for releasing its own reference.
     /// Callback failure keeps a successfully initialized in-range page resident
     /// and charged, so another access can reuse it.
     pub fn with_pinned_file_page<R>(

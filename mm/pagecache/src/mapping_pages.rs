@@ -14,26 +14,26 @@ use ksync::{Mutex, SpinConfig};
 
 use crate::{Folio, FolioGuard, PageIndex};
 
-/// Filesystem-owned capacity accounting for cache-owned physical pages.
+/// Filesystem-owned accounting for pages resident in one cache mapping.
 ///
-/// Admission runs in task context under the mapping index and folio locks.
-/// Release runs after physical deallocation, with neither lock held, and can
-/// outlive the mapping. Release and final provider destruction must not sleep:
-/// the last folio reference can be released from I/O completion context.
-/// They must not reenter a mapping, lock folios, perform I/O, or acquire locks
-/// whose holders wait for this mapping. Each folio contains one page. A charge
-/// belongs to the stable folio and survives cache detachment and all clones.
+/// Admission and release run in task context as part of serialized mapping-index
+/// transitions. Admission also holds the candidate folio lock; final index
+/// destruction calls release while the state is exclusively owned. Providers
+/// must not acquire either lock recursively. The charge follows cache membership,
+/// not the lifetime of a `Folio`, PTE, or physical allocation. Providers must not
+/// sleep, reenter this mapping, or take locks whose holders wait for it. Each
+/// folio contains one page.
 pub trait CacheResidency: Send + Sync {
     /// Admits one new page before publication, or fails without changing accounting.
     fn try_add_folio(&self) -> KResult<()>;
 
-    /// Releases one charge after its physical allocation is freed.
+    /// Releases one charge after its cache identity is detached.
     fn remove_folio(&self);
 }
 
 pub(super) struct MappingPagesState {
     pub(super) entries: BTreeMap<PageIndex, Arc<Folio>>,
-    residency: Option<Arc<dyn CacheResidency>>,
+    pub(super) residency: Option<Arc<dyn CacheResidency>>,
     // Rust's `BTreeMap` has no per-entry marks, so this derived index carries
     // the enumeration role of Linux `PAGECACHE_TAG_DIRTY`. `Folio::dirty`
     // remains the authoritative dirty state.
@@ -45,30 +45,27 @@ pub(super) struct MappingPagesState {
 }
 
 impl MappingPagesState {
-    pub(super) fn admit_folio(&self, folio: &mut FolioGuard<'_>) -> KResult<()> {
-        self.residency.as_ref().map_or(Ok(()), |residency| {
-            folio.charge_residency(residency.clone())
-        })
+    pub(super) fn admit_folio(&self) -> KResult<()> {
+        self.residency
+            .as_ref()
+            .map_or(Ok(()), |residency| residency.try_add_folio())
     }
 
-    pub(super) fn insert_folio(
-        &mut self,
-        index: PageIndex,
-        folio: Arc<Folio>,
-        locked: &mut FolioGuard<'_>,
-    ) -> KResult<()> {
+    pub(super) fn insert_folio(&mut self, index: PageIndex, folio: Arc<Folio>) -> KResult<()> {
         debug_assert!(!self.entries.contains_key(&index));
-        self.admit_folio(locked)?;
+        self.admit_folio()?;
         self.entries.insert(index, folio);
         Ok(())
     }
 
     pub(super) fn remove_folio(&mut self, index: PageIndex, retained: &Arc<Folio>) {
         debug_assert!(self.is_current(index, retained));
-        // The caller retains this exact object past the index critical section,
-        // so removing the tree reference cannot deallocate or call the provider.
-        self.entries.remove(&index);
         self.towrite_marks.remove(&index);
+        if self.entries.remove(&index).is_some()
+            && let Some(residency) = &self.residency
+        {
+            residency.remove_folio();
+        }
     }
 
     pub(super) fn is_current(&self, index: PageIndex, candidate: &Arc<Folio>) -> bool {

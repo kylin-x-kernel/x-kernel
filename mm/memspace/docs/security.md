@@ -248,3 +248,17 @@ the existing object-side view range before the VMA extension is published.
 The unlocked `msync` interval includes final runtime/file-reference destruction.
 A concurrent unmap and close can leave that temporary reference as the last
 owner, so reacquiring MM first could block all mappings during file release.
+
+## Managed file mapping relocation
+
+move_pages grows its rollback ledger only for present source leaves and reserves
+each slot before publishing the corresponding destination. Sparse holes require
+no ledger allocation. Allocation failure rolls back the prepared destination
+prefix while preserving every source. map_existing clones a managed source's actual transferred hold under exclusive
+table access, or preserves a raw source's external ownership protocol. Failed
+destination preparation removes only the prepared prefix; source PTEs and their
+runtime owners remain intact. After all destinations exist, source PTE removal
+retires its holds while destination holds independently retain the same pages.
+Folio/content-token release has no TLB-completion dependency. Existing finish
+advances retirement; global synchronous return guarantees remain a separate
+TODO, with no new retry, pending-state or recovery engine introduced here.

@@ -92,6 +92,7 @@ fn pinned_folio_keeps_evicted_page_alive_for_readonly_mappings() {
             MappingFlags::USER | MappingFlags::READ,
         )
     }
+    .unwrap()
     .unwrap();
     let (paddr, ..) = page_table.query(vaddr).unwrap();
     assert!(pin.matches_paddr(paddr));
@@ -110,6 +111,7 @@ fn pinned_folio_keeps_evicted_page_alive_for_readonly_mappings() {
             MappingFlags::USER | MappingFlags::READ,
         )
     }
+    .unwrap()
     .unwrap();
     assert_eq!(page_table.query(restored).unwrap().0, paddr);
     assert!(restored_mapping.matches_paddr(paddr));
@@ -188,6 +190,7 @@ fn pinned_folio_rejects_writable_page_table_publication() {
             MappingFlags::USER | MappingFlags::READ,
         )
     }
+    .unwrap()
     .unwrap();
     let (_, flags, _) = page_table.query(VirtAddr::from(0x1000usize)).unwrap();
     assert!(!flags.contains(MappingFlags::WRITE));
@@ -238,6 +241,7 @@ fn pinned_folio_readonly_mapping_preserves_page_attributes() {
         pin.clone()
             .map_readonly(&mut page_table, vaddr, requested_flags)
     }
+    .unwrap()
     .unwrap();
     let (_, mapped_flags, _) = page_table.query(vaddr).unwrap();
     assert!(mapped_flags.contains(MappingFlags::USER));
@@ -281,11 +285,37 @@ fn pinned_folio_readonly_mapping_reports_existing_mapping() {
 
     // SAFETY: This page table is isolated and never installed on a CPU. The
     // pin remains alive until the page table is dropped.
-    let mapping = unsafe { pin.clone().map_readonly(&mut page_table, vaddr, flags) }.unwrap();
+    let mapping = unsafe { pin.clone().map_readonly(&mut page_table, vaddr, flags) }
+        .unwrap()
+        .unwrap();
     assert!(matches!(
         // SAFETY: An existing PTE is rejected without changing the mapping;
         // the pin remains alive for the page table's entire lifetime.
         unsafe { mapping.map_readonly(&mut page_table, vaddr, flags) },
         Err(kerrno::KError::AlreadyExists)
     ));
+}
+
+#[def_test]
+fn readonly_no_access_publishes_neither_leaf_nor_content_token() {
+    let cache = MappingPages::new();
+    let pin = cache
+        .pin_folio_or_create(0, |read| read.complete(Ok(())))
+        .unwrap();
+    let mut table = PageTable::try_new().unwrap();
+    let mut table = table.modify();
+    let address = VirtAddr::from(0x31_000usize);
+    for flags in [MappingFlags::empty(), MappingFlags::USER] {
+        // SAFETY: the isolated initialized page has no external invalidators;
+        // this permission set requests no content access and publishes no leaf.
+        let token = unsafe { pin.clone().map_readonly(&mut table, address, flags) }.unwrap();
+        assert!(token.is_none());
+        assert!(table.query(address).is_err());
+    }
+    // SAFETY: this isolated page is initialized and its test extent is valid.
+    let token =
+        unsafe { pin.map_readonly(&mut table, address, MappingFlags::USER | MappingFlags::READ) }
+            .unwrap();
+    assert!(token.is_some());
+    assert!(table.query(address).is_ok());
 }

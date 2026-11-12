@@ -84,7 +84,7 @@ impl FolioReadPart {
 
     /// Borrows only this part's bytes; other parts may be in device ownership.
     pub fn data(&mut self) -> &mut [u8] {
-        let address = self.completion.read.folio.addr + self.range.start;
+        let address = self.completion.read.folio.addr() + self.range.start;
         // SAFETY: consuming splits partition the page into disjoint ranges.
         // This token retains the allocation and folio lock; its exclusive
         // borrow prevents splitting or completing while this slice lives.
@@ -135,7 +135,7 @@ impl FolioReadPart {
 // destruction publishes/unlocks without sleeping after device access ends.
 unsafe impl block::BioMemory for FolioReadPart {
     fn bytes(&self) -> &[u8] {
-        let address = self.completion.read.folio.addr + self.range.start;
+        let address = self.completion.read.folio.addr() + self.range.start;
         // SAFETY: the retained page is initialized storage, and this token's
         // exclusive range cannot be mutated through any other safe owner.
         unsafe { core::slice::from_raw_parts(address.as_ptr(), self.range.len()) }

@@ -685,6 +685,122 @@ fn test_move_pages_preserves_contents_and_clears_source_mapping() {
 }
 
 #[def_test]
+fn sparse_move_preserves_holes_and_physical_identities() {
+    let mut aspace = new_test_aspace();
+    let src = VirtAddr::from(0x2000usize);
+    let dst = VirtAddr::from(0x20000usize);
+    let flags = MappingFlags::READ | MappingFlags::WRITE;
+    let last_offset = PAGE_SIZE_4K * 7;
+    for address in [src, src + last_offset] {
+        map_shared(&mut aspace, address.as_usize(), PAGE_SIZE_4K, flags);
+    }
+    let first = aspace.pgtbl.query(src).unwrap();
+    let last = aspace.pgtbl.query(src + last_offset).unwrap();
+    aspace.move_pages(src, dst, PAGE_SIZE_4K * 8, PageSize::Size4K).unwrap();
+    assert_eq!(aspace.pgtbl.query(dst).unwrap(), first);
+    assert_eq!(aspace.pgtbl.query(dst + last_offset).unwrap(), last);
+    for offset in [0, PAGE_SIZE_4K, last_offset] {
+        assert!(matches!(aspace.pgtbl.query(src + offset), Err(PagingError::NotMapped)));
+    }
+    assert!(matches!(aspace.pgtbl.query(dst + PAGE_SIZE_4K), Err(PagingError::NotMapped)));
+}
+
+#[def_test]
+fn sparse_move_conflict_rolls_back_only_prepared_destinations() {
+    let mut aspace = new_test_aspace();
+    let src = VirtAddr::from(0x2000usize);
+    let dst = VirtAddr::from(0x20000usize);
+    let flags = MappingFlags::READ | MappingFlags::WRITE;
+    let last_offset = PAGE_SIZE_4K * 2;
+    for address in [src, src + last_offset, dst + last_offset] {
+        map_shared(&mut aspace, address.as_usize(), PAGE_SIZE_4K, flags);
+    }
+    let first = aspace.pgtbl.query(src).unwrap();
+    let last = aspace.pgtbl.query(src + last_offset).unwrap();
+    let conflict = aspace.pgtbl.query(dst + last_offset).unwrap();
+    assert_eq!(
+        aspace.move_pages(src, dst, PAGE_SIZE_4K * 3, PageSize::Size4K),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(aspace.pgtbl.query(src).unwrap(), first);
+    assert_eq!(aspace.pgtbl.query(src + last_offset).unwrap(), last);
+    assert_eq!(aspace.pgtbl.query(dst + last_offset).unwrap(), conflict);
+    for address in [src + PAGE_SIZE_4K, dst, dst + PAGE_SIZE_4K] {
+        assert!(matches!(aspace.pgtbl.query(address), Err(PagingError::NotMapped)));
+    }
+}
+
+#[def_test(serial)]
+fn move_pages_keeps_managed_storage_after_source_retirement() {
+    use kalloc::{UsageKind, alloc_page_ref, global_allocator};
+
+    let before = global_allocator().usages().get(UsageKind::PageCache);
+    let mut aspace = new_test_aspace();
+    let src = VirtAddr::from(0x2000usize);
+    let dst = VirtAddr::from(0x20000usize);
+    let page = alloc_page_ref(UsageKind::PageCache).unwrap();
+    let paddr = page.phys_addr();
+    let mut edit = aspace.pgtbl.modify();
+    // The source PTE is the sole physical owner, as after cache/token detachment.
+    edit.map(src, page, MappingFlags::READ).unwrap();
+    edit.try_finish().unwrap();
+    drop(edit);
+
+    aspace.move_pages(src, dst, PAGE_SIZE_4K * 3, PageSize::Size4K).unwrap();
+    assert!(matches!(aspace.pgtbl.query(src), Err(PagingError::NotMapped)));
+    assert!(matches!(aspace.pgtbl.query(dst + PAGE_SIZE_4K), Err(PagingError::NotMapped)));
+    assert_eq!(aspace.pgtbl.query(dst).unwrap().0, paddr);
+    assert_eq!(
+        global_allocator().usages().get(UsageKind::PageCache),
+        before + PAGE_SIZE_4K,
+        "the destination must own storage after the source hold retires"
+    );
+    let mut edit = aspace.pgtbl.modify();
+    edit.unmap(dst).unwrap();
+    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before + PAGE_SIZE_4K);
+    edit.try_finish().unwrap();
+    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before);
+}
+
+#[def_test(serial)]
+fn move_pages_conflict_retires_managed_destinations_without_consuming_sources() {
+    use kalloc::{UsageKind, alloc_page_ref, global_allocator};
+
+    let before = global_allocator().usages().get(UsageKind::PageCache);
+    let mut aspace = new_test_aspace();
+    let src = VirtAddr::from(0x2000usize);
+    let dst = VirtAddr::from(0x20000usize);
+    let offset = PAGE_SIZE_4K * 2;
+    let mut edit = aspace.pgtbl.modify();
+    for address in [src, src + offset, dst + offset] {
+        edit.map(address, alloc_page_ref(UsageKind::PageCache).unwrap(), MappingFlags::READ).unwrap();
+    }
+    edit.try_finish().unwrap();
+    drop(edit);
+    let first = aspace.pgtbl.query_entry(src).unwrap();
+    let last = aspace.pgtbl.query_entry(src + offset).unwrap();
+    let conflict = aspace.pgtbl.query_entry(dst + offset).unwrap();
+
+    assert_eq!(
+        aspace.move_pages(src, dst, PAGE_SIZE_4K * 3, PageSize::Size4K),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(aspace.pgtbl.query_entry(src).unwrap(), first);
+    assert_eq!(aspace.pgtbl.query_entry(src + offset).unwrap(), last);
+    assert_eq!(aspace.pgtbl.query_entry(dst + offset).unwrap(), conflict);
+    assert!(matches!(aspace.pgtbl.query(dst), Err(PagingError::NotMapped)));
+    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before + PAGE_SIZE_4K * 3);
+    let mut edit = aspace.pgtbl.modify();
+    // If rollback consumed a source hold or leaked the prepared alias, final
+    // retirement would either underflow or leave an allocated page behind.
+    for address in [src, src + offset, dst + offset] {
+        edit.unmap(address).unwrap();
+    }
+    edit.try_finish().unwrap();
+    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before);
+}
+
+#[def_test]
 fn map_with_max_flags_allows_protection_raise_within_may_permissions() {
     let start = VirtAddr::from_usize(0x4000);
     let current = MappingFlags::USER;

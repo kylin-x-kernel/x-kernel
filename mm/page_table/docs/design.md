@@ -66,7 +66,7 @@ The following responsibilities belong to other layers:
 |----------------------------------|--------------------|
 | Physical frame allocation policy, allocator initialization, and physical-to-virtual mapping setup | `PagingHandler` supplies allocation, release, and address translation. The kernel adapter is [`khal::paging::PagingHandlerImpl`](../../../arch/khal/src/paging.rs), backed by `kalloc` and `khal::mem` / `kaddr_layout`. This crate requests table frames but does not implement an allocator or establish the direct map. |
 | TLB instructions, remote notification delivery, and IPI acknowledgements | `PagingMetaData` supplies architecture-specific invalidation. The architecture implementations delegate instructions to `karch`; software shootdowns use `TlbFlushIf`, implemented in [`kipi::tlb`](../../../arch/kipi/src/tlb.rs). AArch64 uses hardware Inner Shareable broadcast. This crate chooses when and what to invalidate, not how to deliver IPIs. |
-| VMA policy, page faults, COW preparation and object ownership | [`memspace`](../../memspace/src/aspace.rs) and its backends retain policy and object references. Reference-consuming mappings transfer an opaque `H::MappingReference` into the leaf PTE; this crate owns only that exact-range mapping hold and its retirement. Raw leaf data remains caller-owned; production backing migration is deferred. |
+| VMA policy, page faults, COW preparation and object ownership | [`memspace`](../../memspace/src/aspace.rs) and its backends retain policy and object references. Reference-consuming mappings transfer an opaque `H::MappingReference` into the leaf PTE; this crate owns only that exact-range mapping hold and its retirement. File-cache leaves use independent managed holds. Remaining raw leaf data stays caller-owned; other backing migrations remain separate. |
 | ASID assignment, CPU residency, and stopping hardware use before destruction | The address-space owner supplies the ASID or CPU-mask provider and keeps its context alive. On AArch64, [`memspace::aarch64_asid`](../../memspace/src/aarch64_asid.rs) connects the provider to address-space state. This crate neither allocates ASIDs nor schedules CPUs away from an address space. |
 | Synchronizing callers and managing borrowed subtree lifetimes | Callers serialize mutations and ensure that a source used by `copy_from()` outlives its borrowers. Borrowers cannot mutate shared subtrees; source changes must invalidate every borrower. This crate has no internal address-space lock or reference count for borrowed table frames. |
 
@@ -309,14 +309,15 @@ The primary entry points consume references:
 | `map(va, reference, flags)` | Consume one selected 4 KiB hold for a new base-page leaf. |
 | `map_sized(va, reference, size, flags)` | Consume one selected hold exactly matching an aligned supported 4 KiB, 2 MiB or 1 GiB leaf. |
 | `replace_if_same(va, snapshot, reference, flags)` | Conditionally replace one leaf with a new exact hold, preserving its size and returning the old snapshot on success. |
+| `map_existing(source, destination)` | Duplicate a live leaf, acquiring an independent exact hold for a managed source; raw backing stays externally owned. |
+| `unsafe replace_managed_with_external_if_same(va, snapshot, pa, flags)` | Conditionally publish an externally retained raw target and retire the old managed hold without consuming the caller target. |
 | `map_raw`, `map_region_raw`, `remap_raw`, `replace_if_same_raw` | Use caller-owned physical backing; raw installation transfers no mapping hold. |
 
 Exact and compound allocations both work because the provider reports the
 handle's selected physical base and byte length, rather than the larger
 allocation retained by a compound view. One leaf owns one selected hold. No
-huge-page split/merge, public reference-cloning interface, or backing migration
-is added. A caller needing later fault rematerialization keeps an independent
-object hold.
+huge-page split/merge or allocator ownership migration is added. A caller
+needing later fault rematerialization keeps an independent object hold.
 
 `PageTableEntry::is_managed()` / `set_managed()` expose an ownership category
 encoded in an architecture-private software bit. This category is separate from
@@ -334,6 +335,18 @@ transfer without acquiring another reference. It cannot manufacture ownership
 from an arbitrary valid PA, a raw mapping, or a copied descriptor. No permanent
 per-leaf owner index or `BTreeMap` remains, so admission has no owner-index heap
 allocation or associated fatal node-OOM path.
+
+`unsafe mapping_reference_try_clone_from_raw(PA, bytes)` acquires a new hold
+while exclusive table access retains a real managed source transfer. Raw-only
+handlers reject it by default. HAL borrows the existing transfer through a
+`ManuallyDrop<PageRef>` view; cloning never consumes that source. A valid PA or
+metadata lookup alone does not establish this capability. `map_existing` requires
+aligned source/destination leaf bases, validates destination coverage/mutability,
+and preserves size, permissions and managed category through a distinct hold.
+Clone or table-allocation failure leaves the source unchanged; a caller rolling
+back a destination prefix unmaps only leaves it actually prepared. Raw sources
+remain raw and require the caller to retain their external backing for both
+addresses. No TLB retry or source-restore engine is introduced.
 
 Admission validates exact range length, supported leaf geometry, VA/PA alignment
 and coverage, subtree mutability and the available target slot before consuming
@@ -509,8 +522,21 @@ reference-consuming commit primitive for transactional paths such as COW:
 `replace_if_same_raw(vaddr, expected, paddr, flags)` retains the PA-only
 compare-and-replace contract for externally owned backing. It cannot change a
 managed leaf's normalized PA, and same-PA updates preserve the category. A
-successful clear still retires an old managed transfer. Existing raw COW callers
-use this name mechanically; transferring their backing ownership is deferred.
+successful clear still retires an old managed transfer. Callers crossing to an
+externally owned target must use the explicit mixed transaction below rather
+than weakening this raw operation's ownership contract.
+
+`unsafe replace_managed_with_external_if_same` is the explicit bridge from a
+managed file source to an externally owned raw anonymous target. It requires an
+exact unchanged managed snapshot, identical aligned leaf geometry, valid complete
+address ranges and nonempty READ/WRITE/EXECUTE access. Every ordinary failure is
+prepublication. A stale comparison changes neither the source nor the caller's
+target. On success a fresh raw descriptor replaces the managed leaf, then its old
+hold enters normal retirement; the caller commits and retains its raw target's
+object ownership. Automatic drain failure can retain the old hold but cannot
+turn successful publication into an error that would authorize freeing the raw
+target as an unused candidate. Existing `replace_if_same_raw` keeps its original
+restriction. Completion remains the existing `finish`/`try_finish` contract.
 
 The page table layer defines conditional PTE commit and mapping-hold retirement.
 Higher layers retain object-state commit/abort and retry policy for COW,
@@ -669,3 +695,21 @@ Its caller must end hardware use and required translation retirement before
 copying. The current production path populates a fresh user tree from permanent
 kernel mappings. Borrowed descriptors duplicate neither table-storage holds nor
 data-mapping transfers; reference counts do not perform TLB invalidation.
+
+
+### Live-leaf duplication and external replacement coverage
+
+`table64::tests_owned` checks managed alias ownership, clone/occupied/alignment
+rejection, table-allocation failure after a prepared prefix, raw-leaf duplication,
+managed-to-raw match/mismatch validation, and old-hold retention on unconfirmed
+completion. HAL `paging_page_refs` exercises independent aliases and external
+replacement with real PageRef inventory accounting. These roots are never active;
+the tests establish transfer/release contracts, not successful hardware shootdown.
+
+### RISC-V writable leaf permissions
+
+The shared PagingFlags-to-RvFlags conversion normalizes WRITE to hardware R|W.
+Sv39 and Sv48 reserve W=1,R=0, so both new_page and set_flags must use this
+normalization, including first write-only file faults and later mprotect updates.
+This changes the hardware leaf only; VMA permission policy remains with memspace.
+The managed software bit is preserved independently during protection changes.

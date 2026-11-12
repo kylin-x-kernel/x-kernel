@@ -228,16 +228,49 @@ Not supported by the current filemap runtime:
   Range-fsync dispatch alone does not make repeated stores through an already
   writable PTE visible to the folio dirty index.
 
-## Mapping Ownership of Read-Only File Pages
+## File-page object and mapping references
 
-Aligned, full 4 KiB private file pages can install a read-only page-cache PTE directly. After the PTE is installed, the `PinnedFolio` of a page that has not been privatized is converted into a `MappedFolio` and stored in filemap's file page table, keyed by runtime object offset. The anonymous object stores only anonymous frames produced by actual copying; it no longer wraps the file source or compares the physical addresses of borrowed slots. The first read-only mapping and the file-page COW publication both recheck EOF under the AddressSpace invalidate read lock and complete the publication of the PTE and the corresponding ownership. COW uses a `MaybeUninit<u8>` destination, copies the whole page under the page lock, and then atomically publishes the anonymous frame through `commit_after`; the old file pin is removed after PTE/TLB cleanup completes.
+Each cached Folio owns one `PageRef`; every installed file PTE owns an
+independent reference. Shared faults acquire a reference under the invalidation
+read lock and Folio lock, then publish a managed mapping. A first write fault
+without a leaf, including a write-only mapping, calls `page_mkwrite` before
+publishing a writable managed leaf. Permission upgrades verify that the Folio PA
+matches the old PTE and update permissions without another persistent reference.
+`PageRef` does not replace file-extent, mkwrite, content-lock or dirty protocols.
 
-COW directly copies the retained page object that the current PTE refers to and does not reload the same file index, so cache entry replacement, reclaim, or exhaustion of the residency quota does not introduce extra disk reads or quota requests for existing mappings. Fork first installs the file-page PTEs, then commits the anonymous child-object references once through the anonymous-page helper; if any step fails, the child PTEs of this round are revoked to avoid leaving behind anonymous logical references. mremap uses memspace's unified transaction: it first prepares all destination PTEs and then clears the source PTEs; on failure it first revokes the destination PTEs of this round and completes TLB handling, and then revokes the destination VMA and references. The source mapping keeps its PTEs and page ownership intact, does not depend on later READ/WRITE fault compensation, and never produces a dual file/anonymous owner for the same offset. The shared/writable range registration of the shared file runtime is revoked in the metadata-only retirement callback: both a failed destination and an old source that was successfully migrated must have their registrations revoked, so that a leaked registration does not wrongly block `F_SEAL_WRITE`. This callback does not perform an ordinary unmap and does not detach the anonymous backing.
+Aligned full private file pages use read-only managed PTEs. The runtime indexes
+`MappedFolio` tokens by object offset; each token retains the original content
+object and its lock for COW. Folios and tokens release their references without
+checking the TLB. After a PTE is removed, page-table retirement retains its
+reference until invalidation completes. Removing the cache entry returns tmpfs
+cache quota independently of outstanding physical references.
 
-Object invalidation for truncate clears the PTEs of matching VMAs through memspace and completes TLB finalization, then calls `on_invalidate_complete`; filemap releases the pins for that range immediately and does not wait for a later page fault. When MM is busy, the invalidation request is queued, and the pins are retained until the queued request actually completes. munmap and MADV_DONTNEED likewise clear the PTEs and complete the TLB flush first, and then release the pins of the completed pages; on partial failure, pages that were not processed keep their pins. Split VMAs share the original object-offset index, so partial cleanup does not affect the remaining range; fork uses an independent index and shares folio references; mremap keeps the object-offset index and migrates the virtual-address translation base to the new address.
+COW rechecks EOF under the invalidation read lock, copies the complete retained
+page into a `MaybeUninit` destination, and uses `prepare` / `commit_after` to
+publish the existing anonymous object slot. The dedicated managed-to-external-raw
+conditional replacement validates the old snapshot, publishes the target held by
+the anonymous object, and retires the old file PTE reference. A failed compare
+drops only the unpublished candidate. Success removes the old content token;
+the old file page never enters the anonymous raw-release path. Migrating the
+anonymous page's own allocation to `PageRef` remains separate work.
 
-`mprotect(PROT_NONE)` also notifies filemap to release the corresponding pin once TLB finalization
-completes after the existing PTEs are cleared; after read permission is restored, a page fault can reinstall read-only cache pages.
+Fork gives each copied private file PTE an independent reference and content
+token. Shared mappings retain runtime cloning and fault reconstruction. Failed
+preparation removes only the new destination PTEs, preserving the parent object
+and source PTEs. `mremap` uses `map_existing` to preserve the source leaf's actual
+ownership protocol, prepares all destinations before removing any source, and
+rolls back only its prepared destination prefix. Metadata-only retirement drops
+shared/writable registrations without detaching source anonymous slots or
+leaving registrations that block `F_SEAL_WRITE`.
+
+After truncate/invalidate, munmap, `MADV_DONTNEED` or `PROT_NONE` clears a file
+PTE, its content token can be released; the page table retires the physical
+reference independently. VMA splits and moves preserve object offsets, and
+partial cleanup affects only the selected pages. No access permissions means
+no leaf, token or populated count; restoring access acquires a valid mapping
+reference again. The global TLB return contract and inherited synchronous
+permission/EOF completion semantics remain separate work; this change adds no
+retry, recovery state or fail-stop policy.
 
 ### Bounded private-fault prefetch
 
@@ -260,8 +293,8 @@ policy; transient admission contention is retried after releasing the MM.
 File runtime field order drops reverse-mapping registrations before file and
 backing-page references. Thus final file release can trigger filesystem teardown
 under the MM lock without retaining the very view a live cache invalidation is
-waiting to revoke. MM teardown removes PTEs and completes TLB invalidation before
-retiring the runtime's backing references.
+waiting to revoke. MM teardown removes file PTEs; their physical holds retire
+independently of runtime content references. Unconfirmed retirement retains them.
 
 The shared file runtime implements the task-context fault wait hook by waiting
 for its retained file's canonical lifecycle/data admission outside the MM lock.

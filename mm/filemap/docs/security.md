@@ -92,33 +92,40 @@ to `posix/mm`.
 - Advanced Linux behavior such as DAX, THP, readahead, reclaim, swap, memcg,
   and NUMA is out of scope.
 
-## File Cache References and Anonymous Page Isolation
+## File-cache references and anonymous-page isolation
 
-- A file pin never grants user write permission, and an mprotect upgrade must also fault again and perform COW.
-- The page-cache allocation lifetime is guaranteed by the pin held by filemap; the anonymous frame releaser does not accept file pages.
-- The invalidation completion callback runs only after the corresponding PTE removal and TLB completion. A failed or queued request keeps
-  the pins of the not-yet-completed ranges; the completed prefix can be reclaimed immediately without waiting for a future fault.
-- A partial invalidation removes only the corresponding references by runtime object offset; the child mapping of a fork owns an independent index,
-  so the parent mapping's cleanup does not revoke the child mapping's lifetime guarantee.
-- The uninitialized target of COW is exposed only as a MaybeUninit slice; whole-page initialization completes before publication,
-  and a PTE compare/replace failure leaves the original mapping unchanged and publishes no anonymous slot.
-- COW uses only the page object retained by the mapping and rechecks EOF under the invalidation read lock;
-  it does not re-fetch the cached page of the same index to replace the identity of the old mapping.
-- Every token in `file_pages` exists in pairs with a currently mapped read-only PTE. The paths that clear the PTE
-  (invalidation, `mprotect(PROT_NONE)`, `munmap`, `MADV_DONTNEED`) all, after TLB
-  completion, have the runtime itself release the token or call `on_invalidate_complete` to delete it;
-  a prefix failure of a sparse unmap keeps only the PTEs that still exist. Therefore, when a read-only fault finds a token at the same offset, returning
-  `AlreadyExists` is an internal ownership-contract detection, not a user-reachable recovery path.
-- A protection change decides whether to clear the PTE by the PTE flags the runtime actually returns; for example, a bare WRITE
-  request becomes empty after COW removes WRITE, in which case the TLB cleanup must complete first and then the token is released.
-  If a later VMA's protection change fails, the already cleared prefix must also have notified the runtime to release the token.
-- After an mremap preparation failure, the source PTEs and the file/anonymous page ownership stay as they were; the target PTEs are revoked first and
-  TLB handling completes before the target VMA/runtime is released. The target rollback must not perform an
-  ordinary unmap that would remove shared anonymous slots, so a later direct READ, WRITE, mprotect or fork does not depend on fault compensation.
-- When target preparation of a shared file fails or the old source metadata is retired, the shared/writable
-  registration is deregistered separately; a mapping that has already disappeared must not keep blocking shmem `F_SEAL_WRITE`.
-- A file-page installation failure in fork does not commit anonymous child references; when anonymous materialization fails,
-  its helper rolls back the anonymous PTEs and references, and the outer layer revokes the already installed file PTEs and then completes the TLB flush.
+- Folios and installed file PTEs own independent `PageRef` holds. Content tokens
+  retain the original object and its lock; Folio destruction does not wait for
+  the TLB. Page-table retirement prevents reuse after leaf removal/replacement.
+- Shared faults publish managed holds under invalidation, EOF and content
+  protection. Permission upgrades verify the original PA and retain its mapping
+  hold. Private file pages gain write access through COW rather than in place.
+- Private-file read-only publication on the first fault and during fork holds
+  the `AddressSpace` invalidate read lock across current EOF validation and
+  `pin.map_readonly` PTE publication. Each path records the returned content token
+  before releasing that guard.
+- COW copies the retained original object after rechecking EOF and fully
+  initializes the target before conditional publication. The dedicated managed
+  source to external-raw target operation commits only on a matching snapshot.
+  The old hold retires; the existing anonymous object holds the target. Failure
+  before commit drops only the candidate; a committed target cannot be freed as
+  an unpublished candidate.
+- No access permissions means no leaf, token or populated count. Partial
+  invalidation removes only corresponding tokens. Physical references survive
+  independently in page tables/retirement; cache detachment returns quota.
+  Content tokens do not perform TLB retirement.
+- Fork gives child file leaves independent holds. Failure removes only this
+  attempt's child PTEs without committing anonymous child references. Managed
+  mremap destinations own independent holds; failed preparation preserves source
+  PTEs and objects. Rollback retires only destination metadata and must not call
+  ordinary runtime unmap that could detach source anonymous slots.
+- Metadata-only retirement removes shared/writable registrations for failed
+  destinations and successfully replaced sources, preventing leaked counts from
+  blocking `F_SEAL_WRITE`.
+- Unconfirmed retirement retains its `PageRef` and physical backing without
+  retaining tmpfs cache quota. This change adds no TLB retry, recovery or
+  fail-stop policy, changes no global return contract, and does not claim to
+  repair inherited synchronous permission-revocation semantics.
 
 ### Bounded private-fault prefetch
 
@@ -140,8 +147,8 @@ or data-policy transition owns the resource.
 File runtime field order drops reverse-mapping registrations before file and
 backing-page references. Thus final file release can trigger filesystem teardown
 under the MM lock without retaining the very view a live cache invalidation is
-waiting to revoke. MM teardown removes PTEs and completes TLB invalidation before
-retiring the runtime's backing references.
+waiting to revoke. MM teardown removes file PTEs; their physical holds retire
+independently of runtime content references. Unconfirmed retirement retains them.
 
 WouldBlock on a shared write fault requires a backing-resource wait outside MM
 serialization. The runtime uses its existing file reference and VFS admission

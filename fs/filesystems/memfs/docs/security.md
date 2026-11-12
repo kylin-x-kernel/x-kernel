@@ -59,10 +59,11 @@ This crate contains no `unsafe`.
 - The UID/GID of a new inode must come from `inode_init_owner()`; the GID and mode propagation
   of a setgid parent directory must be completed before the inode is published.
 - The filesystem type factory must not write per-mount policy into the shared superblock flags;
-- The mounted tmpfs quota counts admitted physical folios, including pages that are retained by a pin, mapping token,
-  or read batch after being removed from the cache; the logical file length or a sparse
-  hole must not be counted as used pages; a buffered read zero-fills a hole directly, without materializing or charging;
-  an mmap read fault still goes through folio materialization and charges the quota;
+- Mounted tmpfs quota counts resident page-cache identities. After detachment,
+  physical pages retained by pins, mapping tokens, read batches or PTE retirement
+  no longer consume cache quota. Logical file length and sparse holes do not
+  count as used pages; buffered reads zero-fill holes without materializing or
+  charging them. Mmap read faults still materialize Folios and charge quota.
 - The quota does not reserve physical memory; a remount must not lower the limit below current usage, and must not
   retroactively change an unlimited instance to a limited one, nor may it truncate or discard existing file data;
 - `size=0` / `nr_blocks=0` is explicitly unlimited. `statfs()` reporting 0 blocks for unlimited
@@ -73,9 +74,9 @@ This crate contains no `unsafe`.
 - An inode and extra hard links are charged before publication; when references remain after the last name is removed, the inode
   quota is retained; a failed publication undoes the directory entry and returns the quota;
 - The page and inode limits are both validated under the same stats write lock before being updated; on failure, neither is changed;
-- Quota charge/release must be driven by the physical folio lifecycle: charge on successful publication,
-  and return the quota after the last retaining reference releases the physical page; leaving the cache must not release it early,
-  and memfs must not maintain a second page accounting.
+- Quota charge/release must match cache-identity insertion/removal: each resident
+  entry is charged once and refunded on detachment. Independent MM references
+  protect physical lifetime without retaining tmpfs size quota.
 
 ## Thread Safety
 
@@ -88,17 +89,16 @@ This crate contains no `unsafe`.
   `MappingPages` storage.
 - Mount capacity policy lives in memfs `quota.rs`. Its lifecycle provider is
   fixed during inode construction and retained once by each mapping.
-- Admission takes folio -> cache index -> quota limit locks; final physical
-  release returns capacity outside cache locks. Callbacks never enter mappings
-  or lock folios. Remount/statfs never acquire
+- Admission takes folio -> cache index -> quota limit locks; removal returns
+  capacity during the cache-index transition. Callbacks never block, reenter
+  mappings, or lock folios. Remount/statfs never acquire
   cache locks. One stats snapshot supplies both page and inode capacities.
 - Link removal orders locks as metadata → stats. Final inode destruction releases
   the slab lock before returning its allocation charge; admission releases stats
   before taking slab. The number allocator holds no inode reference, so final
   reclamation follows owned references without a reference-count snapshot.
-- Every winning identity is charged once. The stable folio retains its charge
-  and provider reference until physical deallocation; clones neither charge
-  again nor allow cache removal to return capacity early.
+- Every winning cache identity is charged once and removal releases it once.
+  Detached physical references do not retain quota or a per-page provider Arc.
 - Sparse-hole handling belongs to memfs's read operation. Cache access retries
   retained initialization errors and excludes truncate through EOF/data copying.
 
@@ -131,9 +131,10 @@ This crate contains no `unsafe`.
    - Mitigation: a mounted tmpfs by default uses 50% of allocatable physical pages as the
      page quota; when the quota is full, materialization returns `StorageFull`.
 
-8. Quota accounting is decoupled from the actual folio lifecycle.
-   - Mitigation: quota charge/release is driven by the physical folio lifecycle; after truncate and final eviction,
-     a remaining pin/token/batch still holds the charge, and the quota is returned only on the last release; regression tests cover this.
+8. Confusing cache quota with detached physical references.
+   - Mitigation: Charge/refund follows resident cache-identity insertion/removal.
+     Truncate and final eviction refund on detachment; independent pin/PTE holds
+     retain physical storage without retaining cache quota.
 
 9. A memfd is rejected by exec because its mode is too narrow (runc/crun self-reexec).
    - Mitigation: `create_memfd_file()` creates a `0o777` file, so the `MAY_EXEC` check of exec passes.
@@ -172,9 +173,11 @@ This crate contains no `unsafe`.
 - A mounted tmpfs quota does not provide swap-out; without swap, InMemory data that is already resident
   still cannot be dropped by generic clean-page reclaim.
 - An anonymous shmem/memfd instance does not apply the default page/inode limits of a mounted tmpfs.
-- The physical-folio quota does not cover inode/dentry metadata or the symlink target String (including long targets),
-  and does not strictly limit unpublished candidate pages; external physical references that have been detached from the mapping are still charged to the original quota. The inode-space
-  quota limits the number of nodes and extra links, and does not represent actual heap bytes; xattr is currently not supported.
+- Resident-cache quota excludes inode/dentry metadata and symlink target Strings,
+  including long targets. It also does not strictly bound unpublished candidate
+  pages or external physical references detached from the mapping. Inode-space
+  quota limits nodes and additional links rather than heap bytes; xattrs are
+  currently unsupported.
 - The `memfs` regular-file data path depends on the KFS `AddressSpace` and its private page-cache storage;
   `MemoryNode` itself does not directly hold ordinary file data pages.
 
@@ -190,7 +193,8 @@ This crate contains no `unsafe`.
 - Whether the filesystem type factory only creates the superblock and does not decide per-mount flags.
 - Whether the tmpfs default is half of the allocatable physical pages, with no physical memory reserved.
 - Whether `size`/`nr_blocks` parsing rejects unknown or malformed options, and whether `0` expresses unlimited.
-- Whether the quota counts by physical folio, and whether truncate/final eviction wait for the last reference before returning capacity.
+- Does quota count resident cache identities and refund on detachment
+  independently of external physical references?
 - Whether `statfs` reports the quota total and the remaining amount.
 
 Finite inode limits reject excess creation and additional hard links with

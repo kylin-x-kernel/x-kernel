@@ -165,10 +165,9 @@ impl FilePrivateRuntime {
         let Ok(start) = self.local_offset_for(range.start) else {
             return;
         };
-        // Failed sparse unmaps can leave cleared PTEs pending TLB invalidation.
-        // finish() is infallible and completes those translations before any
-        // file-page pin is released. NotMapped offsets below are the pins to
-        // release; present PTEs retain their pins, including the failed leaf.
+        // Cleared file leaves have transferred their independent physical holds
+        // into page-table retirement. Keep content tokens only for present PTEs;
+        // releasing a cleared token does not depend on TLB completion.
         pgtbl.finish();
         let mut unmapped_offsets = alloc::vec::Vec::new();
         let mut addr = range.start;
@@ -230,10 +229,13 @@ impl FilePrivateRuntime {
                     // violated the PTE/token ownership contract.
                     return Err(KError::AlreadyExists);
                 }
-                // SAFETY: The invalidation read guard is held by
-                // `with_pinned_file_page`; `file_pages` retains the pin until
-                // invalidation completion after PTE removal and TLB finish.
-                let mapped = unsafe { pin.map_readonly(pgtbl, va, flags - MappingFlags::WRITE)? };
+                // SAFETY: the invalidate guard covers current EOF and publication.
+                // The PTE owns its physical hold independently of this content token.
+                let Some(mapped) =
+                    (unsafe { pin.map_readonly(pgtbl, va, flags - MappingFlags::WRITE)? })
+                else {
+                    return Ok(false);
+                };
                 if flags.contains(MappingFlags::EXECUTE) {
                     match pgtbl.query(va) {
                         Ok((paddr, ..)) => {
@@ -312,8 +314,10 @@ impl FilePrivateRuntime {
                 return Err(error);
             }
             if let Err(err) = prepared.commit_after(frame, self.size, || {
-                pgtbl
-                    .replace_if_same_raw(addr, expected, frame, flags)
+                // SAFETY: frame is the exclusively allocated candidate, owned
+                // by this caller until commit_after publishes its anonymous slot.
+                // The old file PTE is managed; replacement retires its own hold.
+                unsafe { pgtbl.replace_managed_with_external_if_same(addr, expected, frame, flags) }
                     .map(|_| ())
             }) {
                 dealloc_frame(frame, self.size);
@@ -616,7 +620,7 @@ impl FilePrivateRuntime {
             self.release_unmapped_file_pages(range, pgtbl);
             return result;
         }
-        // `unmap_private_object_range` finishes PTE/TLB removal before return.
+        // File PTE retirement, rather than content tokens, retains physical pages.
         self.release_file_pages(range);
         Ok(())
     }
@@ -696,7 +700,7 @@ impl VmRuntimeOps for FilePrivateRuntime {
             self.release_unmapped_file_pages(range, pgtbl);
             return result.map(|()| true);
         }
-        // `discard_private_object_range` finishes PTE/TLB removal before return.
+        // File PTE retirement, rather than content tokens, retains physical pages.
         self.release_file_pages(range);
         Ok(true)
     }
@@ -759,10 +763,12 @@ impl VmRuntimeOps for FilePrivateRuntime {
                     if old_pgtbl.query(addr).is_err() || file_offset >= file_len {
                         continue;
                     }
-                    // SAFETY: The file invalidation read guard is held for this
-                    // publication, and the child mapping retains a cloned pin until
-                    // its invalidation callback runs after PTE removal and TLB finish.
-                    let mapped = unsafe { pin.map_readonly(new_pgtbl, addr, cow_flags)? };
+                    // SAFETY: invalidation and current EOF are validated above.
+                    // This publication acquires an independent child PTE hold.
+                    let Some(mapped) = (unsafe { pin.map_readonly(new_pgtbl, addr, cow_flags)? })
+                    else {
+                        continue;
+                    };
                     installed.push(addr);
                     // The child runtime keeps the parent's coordinate origin, so
                     // retain the original local key even when cloning a sub-VMA.

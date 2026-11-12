@@ -755,6 +755,60 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         Ok(())
     }
 
+    /// Duplicates a present leaf without consuming its source ownership.
+    ///
+    /// A managed source acquires an independent hold through the provider before
+    /// destination publication. A raw source remains externally owned: its caller
+    /// must keep that backing alive for both mappings and their retirement.
+    /// Source and destination must name aligned leaf bases, not interior bytes.
+    ///
+    /// # Errors
+    /// Returns NotMapped for an absent source, NotAligned for leaf misalignment,
+    /// AlreadyMapped for an occupied destination, InvalidAddress for invalid or
+    /// borrowed ranges or unsupported managed cloning, and NoMemory for clone
+    /// overflow or table allocation failure. The source is unchanged on failure.
+    pub fn map_existing(
+        &mut self,
+        source: M::VirtAddr,
+        destination: M::VirtAddr,
+    ) -> PtResult<PageSize> {
+        let source_address: usize = source.into();
+        let destination_address: usize = destination.into();
+        if !M::vaddr_is_valid(source_address) || !M::vaddr_is_valid(destination_address) {
+            return Err(PtError::InvalidAddress);
+        }
+        let (entry, size) = self.get_entry_mut(source)?;
+        if !entry.is_present() {
+            return Err(PtError::NotMapped);
+        }
+        let entry = *entry;
+        if !size.is_aligned(source_address) || !size.is_aligned(destination_address) {
+            return Err(PtError::NotAligned);
+        }
+        let last = destination_address
+            .checked_add(size as usize - 1)
+            .ok_or(PtError::InvalidAddress)?;
+        if !M::vaddr_is_valid(last) {
+            return Err(PtError::InvalidAddress);
+        }
+        self.ensure_mutable_subtree(destination)?;
+        match self.query(destination) {
+            Ok(_) => return Err(PtError::AlreadyMapped),
+            Err(PtError::NotMapped) => {}
+            Err(error) => return Err(error),
+        }
+        if entry.is_managed() {
+            // SAFETY: Exclusive PageTableMut access keeps this exact live leaf
+            // and its transferred hold unchanged throughout provider cloning.
+            let reference =
+                unsafe { H::mapping_reference_try_clone_from_raw(entry.paddr(), size as usize) }?;
+            self.map_sized(destination, reference, size, entry.flags())?;
+        } else {
+            self.map_raw(destination, entry.paddr(), size, entry.flags())?;
+        }
+        Ok(size)
+    }
+
     fn validate_reference(
         vaddr: M::VirtAddr,
         reference: &H::MappingReference,
@@ -959,6 +1013,80 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         if flags.is_empty() {
             self.retire_mapping_reference(old_entry, size);
         }
+        Ok(current)
+    }
+
+    /// Conditionally replaces a managed leaf with externally owned raw backing.
+    ///
+    /// Unlike replace_if_same_raw, this explicitly ends the old managed mapping
+    /// while transferring no lifetime hold for the new target. The old hold is
+    /// retired through the existing completion/retention protocol. Success is a
+    /// committed replacement even if an automatic retirement drain is unconfirmed;
+    /// no ordinary error is returned after target publication.
+    ///
+    /// # Safety
+    /// The caller must own the aligned target allocation for the entire leaf
+    /// range, prepare its object-slot commit before calling, and keep it alive
+    /// through all subsequent raw mapping use and required TLB retirement. After
+    /// success the caller must not free the target as an unpublished candidate.
+    /// Content initialization, access permissions and COW isolation are caller
+    /// obligations separate from physical ownership.
+    ///
+    /// # Errors
+    /// Returns Changed without mutation if the exact snapshot/size no longer
+    /// matches, or PageTable for invalid addresses, misalignment, a raw source,
+    /// no target access permissions or a borrowed subtree. Neither error consumes
+    /// the external target or the source hold.
+    pub unsafe fn replace_managed_with_external_if_same(
+        &mut self,
+        vaddr: M::VirtAddr,
+        expected: PteSnapshot,
+        paddr: PhysAddr,
+        flags: PagingFlags,
+    ) -> Result<PteSnapshot, PteReplaceError> {
+        let size = expected.page_size();
+        let address: usize = vaddr.into();
+        if !size.is_aligned(address) || !paddr.is_aligned(size) {
+            return Err(PtError::NotAligned.into());
+        }
+        let last_va = address
+            .checked_add(size as usize - 1)
+            .ok_or(PtError::InvalidAddress)?;
+        let last_pa = paddr
+            .as_usize()
+            .checked_add(size as usize - 1)
+            .ok_or(PtError::InvalidAddress)?;
+        if !M::vaddr_is_valid(address)
+            || !M::vaddr_is_valid(last_va)
+            || !M::paddr_is_valid(paddr.as_usize())
+            || !M::paddr_is_valid(last_pa)
+            || !flags.intersects(PagingFlags::READ | PagingFlags::WRITE | PagingFlags::EXECUTE)
+        {
+            return Err(PtError::InvalidAddress.into());
+        }
+        let (entry, actual_size) = match self.get_entry_mut(vaddr) {
+            Ok(value) => value,
+            Err(PtError::NotMapped) => return Err(PteReplaceError::Changed { current: None }),
+            Err(error) => return Err(error.into()),
+        };
+        if !entry.is_present() {
+            return Err(PteReplaceError::Changed { current: None });
+        }
+        let current = PteSnapshot::from_entry(entry, actual_size);
+        if actual_size != size || !expected.matches_entry(entry) {
+            return Err(PteReplaceError::Changed {
+                current: Some(current),
+            });
+        }
+        if !entry.is_managed() {
+            return Err(PtError::InvalidAddress.into());
+        }
+        let old_entry = *entry;
+        // new_page starts raw; retaining the old managed bit would falsely
+        // claim that the external target supplied a recoverable lifetime hold.
+        *entry = PTE::new_page(paddr, flags, size.is_huge());
+        self.flush_leaf(vaddr, size);
+        self.retire_mapping_reference(old_entry, size);
         Ok(current)
     }
 

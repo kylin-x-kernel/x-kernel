@@ -7,30 +7,37 @@ use unittest::{assert_eq, def_test};
 use super::*;
 
 #[def_test]
-fn retained_detached_pages_remain_charged_in_statfs_and_remount() {
+fn detached_physical_pages_do_not_consume_tmpfs_cache_quota() {
     use alloc::sync::Arc;
+
     use pagecache::MappingPages;
 
     let quota = Arc::new(TmpfsAccounting::new(2, 0));
     let mapping = MappingPages::with_residency(Some(quota.clone()));
-    let original = mapping.pin_folio_or_create(0, |folio| folio.complete(Ok(()))).unwrap();
+    let original = mapping
+        .pin_folio_or_create(0, |folio| folio.complete(Ok(())))
+        .unwrap();
     mapping.truncate_final().unwrap();
-    let replacement = mapping.pin_folio_or_create(0, |folio| folio.complete(Ok(()))).unwrap();
+    let replacement = mapping
+        .pin_folio_or_create(0, |folio| folio.complete(Ok(())))
+        .unwrap();
     let mut stat = kvfs::libfs::simple_statfs(crate::TMPFS_MAGIC);
     quota.statfs(&mut stat);
-    assert_eq!(stat.blocks_free, 0);
-    assert_eq!(quota.reconfigure(Some(1), None), Err(KError::InvalidInput));
+    assert_eq!(stat.blocks_free, 1);
+    assert_eq!(quota.reconfigure(Some(1), None), Ok(()));
     assert!(matches!(
         mapping.pin_folio_or_create(1, |folio| folio.complete(Ok(()))),
         Err(KError::StorageFull)
     ));
     drop(original);
     quota.statfs(&mut stat);
-    assert_eq!(stat.blocks_free, 1);
-    assert_eq!(quota.reconfigure(Some(1), None), Ok(()));
+    assert_eq!(
+        stat.blocks_free, 0,
+        "the replacement still consumes the one-page limit"
+    );
     drop(mapping);
     quota.statfs(&mut stat);
-    assert_eq!(stat.blocks_free, 0);
+    assert_eq!(stat.blocks_free, 1);
     drop(replacement);
     quota.statfs(&mut stat);
     assert_eq!(stat.blocks_free, 1);

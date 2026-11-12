@@ -33,14 +33,12 @@ impl MappingPages {
                     return Err(error);
                 }
             };
-            // This private object cannot block. Preserve folio -> index order
-            // when attaching its allocation-lifetime capacity charge.
-            let mut locked = folio.lock()?;
+            let locked = folio.lock()?;
             state = self.state.lock();
             if state.entries.contains_key(&index) {
                 // Another allocator may have published this index while the
                 // index lock was dropped; reuse that identity without another
-                // capacity charge.
+                // cache-residency charge.
                 drop(state);
                 drop(locked);
                 // Dropping a losing allocation can enter the page allocator,
@@ -49,7 +47,7 @@ impl MappingPages {
                 continue;
             }
 
-            if let Err(error) = state.insert_folio(index, folio.clone(), &mut locked) {
+            if let Err(error) = state.insert_folio(index, folio.clone()) {
                 drop(state);
                 drop(locked);
                 drop(folio);
@@ -334,7 +332,7 @@ impl MappingPages {
             drop(locked);
             return Err(folio);
         }
-        if state.admit_folio(&mut locked).is_err() {
+        if state.admit_folio().is_err() {
             drop(locked);
             return Err(folio);
         }

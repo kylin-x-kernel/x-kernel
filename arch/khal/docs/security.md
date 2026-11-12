@@ -282,6 +282,19 @@ transfer. Conversion and recovery do not increment or decrement lifetime counts.
 Restoring the same pair twice, using a larger containing compound allocation, or
 recovering an arbitrary valid PA would violate the provider contract.
 
+`unsafe PagingHandlerImpl::mapping_reference_try_clone_from_raw(PA, bytes)`
+requires exclusive page-table access to an actual live managed leaf of the same
+allocation incarnation and exact range. It reconstructs a borrowed
+`ManuallyDrop<PageRef>` view and calls `try_clone_ref()`. The temporary view must
+never be dropped or transferred: only the returned clone owns a new reference.
+Reference overflow returns `NoMemory` without changing the source. A copied
+snapshot, a raw leaf or valid PageMeta cannot establish this capability; using
+one could clone a freed or reused allocation. The managed-category and exclusive
+source guard in `map_existing` establish the precondition. The HAL regression
+`managed_alias_retains_real_page_after_source_retirement` checks the resulting
+independent physical hold; generic handler tests cover clone failure and source
+preservation.
+
 The safe transaction paths in `mm/page_table/src/table64.rs` enforce admission
 geometry, address coverage, subtree mutability and slot/snapshot checks before
 raw transfer; no fallible step occurs between transfer and managed publication.
@@ -340,13 +353,15 @@ invalidation and alias synchronization remain caller obligations.
 | MP-01 | Invalid or double recovery corrupts lifetime counts. | Wrong byte/page conversion, copied PTE treated as another owner, or recovery of a raw leaf. | Exact-range provider inverse and private category authorize one recovery after old-leaf capture; raw/borrowed entries never supply another transfer. Provider and architecture encoding correctness remain trusted. |
 | MP-02 | Old data is reused under stale translations. | A cleared/replaced mapping loses its last hold before completion. | The recovered hold survives bounded spill/drain failure and unconfirmed completion; unresolved holds stay pinned. This prevents managed reuse but can leak RAM and does not revoke permissions. |
 | MP-03 | Raw backing is released after an unconfirmed shootdown. | An existing PA-only release path uses `finish()`. | Raw names expose the unchanged external lifetime contract. Migration must transfer a mapping hold or retain backing on `try_finish()` failure; that production migration is deferred. |
+| MP-04 | Alias cloning refers to freed storage or consumes the source hold. | A forged/stale raw pair is borrowed, or the temporary reconstructed PageRef is dropped. | `map_existing` retains exclusive access to an actual managed source of the exact allocation incarnation; the HAL uses ManuallyDrop only as a borrowed view and returns a separate checked clone. Clone failure leaves the source transfer unchanged. |
 
 PA-only callers mechanically use `map_raw`, `map_region_raw`, `remap_raw` and
-`replace_if_same_raw`. Allocation/field/destructor migration for production
-anon/pagecache/filemap/memspace backing is explicitly deferred. A nearby
-`PageRef` does not register a guard-owned hold, and these raw paths retain the
-risk described in MP-03. No alias/fork ownership migration, huge split/merge,
-public cloning interface or content-access protocol is added.
+`replace_if_same_raw` for externally owned backing. File Folios and file PTEs now
+hold PageRef independently; mremap and file fork acquire managed aliases. Existing
+anonymous COW targets keep their object-owned raw protocol; anonymous, VMM and
+device migration remain separate work. A nearby PageRef does not register a
+guard-owned hold for a raw leaf, which retains MP-03's external release
+obligation. No huge split/merge or content-access protocol is added.
 
 Real `PageRef` inventory/reuse and exact/compound tests remain in
 `ut-tests/paging_page_refs.rs`, using `map`, `map_sized` and

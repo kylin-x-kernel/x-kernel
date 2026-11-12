@@ -1556,11 +1556,11 @@ impl MmSpace {
             return Err(KError::InvalidInput);
         }
         let pages = crate::backend::pages_in(range, page_size)?;
-        let mut modify = self.pgtbl.modify();
         let mut prepared = Vec::new();
+        let mut modify = self.pgtbl.modify();
         let result = (|| {
             for vaddr in pages {
-                let (paddr, flags, source_page_size) = match modify.query(vaddr) {
+                let (_, _, source_page_size) = match modify.query(vaddr) {
                     Ok(entry) => entry,
                     Err(PagingError::NotMapped) => continue,
                     Err(err) => return Err(map_paging_err(err)),
@@ -1568,8 +1568,12 @@ impl MmSpace {
                 if source_page_size != page_size {
                     return Err(KError::InvalidInput);
                 }
+                // Lazy holes need no rollback slot. Reserve before publishing
+                // this destination so even ledger allocation failure can undo
+                // every earlier destination without touching the source.
+                prepared.try_reserve(1).map_err(|_| KError::NoMemory)?;
                 modify
-                    .map_raw(dst + (vaddr - src), paddr, page_size, flags)
+                    .map_existing(vaddr, dst + (vaddr - src))
                     .map_err(map_paging_err)?;
                 prepared.push(vaddr);
             }

@@ -5,7 +5,10 @@
 //! Exercise the owned PTE mutation paths, with completion observed by each hold.
 
 use alloc::{alloc::Layout, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use core::{
+    mem::ManuallyDrop,
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
+};
 
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use unittest::def_test;
@@ -31,6 +34,7 @@ struct Trace {
     fulls: AtomicUsize,
     fences: AtomicUsize,
     fail_next_allocation: AtomicBool,
+    fail_next_clone: AtomicBool,
     fail_next_flush: AtomicBool,
     prevent_flush_completion: AtomicBool,
     forbidden_table: AtomicUsize,
@@ -93,6 +97,7 @@ impl Fixture {
             fulls: AtomicUsize::new(0),
             fences: AtomicUsize::new(0),
             fail_next_allocation: AtomicBool::new(false),
+            fail_next_clone: AtomicBool::new(false),
             fail_next_flush: AtomicBool::new(false),
             prevent_flush_completion: AtomicBool::new(false),
             forbidden_table: AtomicUsize::new(0),
@@ -188,6 +193,24 @@ impl PagingHandler for GatherHandler {
             trace: Some(trace),
             index,
         }
+    }
+
+    unsafe fn mapping_reference_try_clone_from_raw(
+        paddr: PhysAddr,
+        bytes: usize,
+    ) -> crate::PtResult<Reference> {
+        let mut fail = false;
+        with_active_trace(|trace| fail = trace.fail_next_clone.swap(false, Ordering::Relaxed));
+        if fail {
+            return Err(PtError::NoMemory);
+        }
+        // SAFETY: map_existing retains the exact managed leaf transfer under
+        // exclusive access. This borrowed reconstruction never consumes it.
+        let borrowed = ManuallyDrop::new(unsafe { Self::mapping_reference_from_raw(paddr, bytes) });
+        Ok(Reference {
+            trace: borrowed.trace.as_ref().map(Arc::clone),
+            index: borrowed.index,
+        })
     }
 
     fn alloc_frame() -> Option<PhysAddr> {
@@ -772,6 +795,10 @@ fn borrowed_subtrees_keep_source_holds_and_refuse_borrower_mutation() {
         edit.copy_from(&source, VirtAddr::from(0), PAGE_SIZE_4K);
         assert_eq!(edit.unmap(VirtAddr::from(0)), Err(PtError::InvalidAddress));
         assert_eq!(
+            edit.map_existing(VirtAddr::from(0), VirtAddr::from(PAGE_SIZE_4K)),
+            Err(PtError::InvalidAddress)
+        );
+        assert_eq!(
             edit.map(
                 VirtAddr::from(PAGE_SIZE_4K),
                 fixture.reference(1),
@@ -887,6 +914,13 @@ fn guard_drop_does_not_release_a_hold_after_unconfirmed_invalidation() {
     edit.map(VirtAddr::from(0), Hold, PagingFlags::READ)
         .unwrap();
     edit.try_finish().unwrap();
+    // This provider deliberately keeps the default unsupported clone hook.
+    assert_eq!(
+        edit.map_existing(VirtAddr::from(0), VirtAddr::from(PAGE_SIZE_4K)),
+        Err(PtError::InvalidAddress)
+    );
+    assert!(edit.query(VirtAddr::from(0)).is_ok());
+    assert_eq!(RELEASES.load(Ordering::Relaxed), 0);
     edit.unmap(VirtAddr::from(0)).unwrap();
     fixture
         .0
@@ -1118,4 +1152,248 @@ fn three_level_tree_destruction_recovers_a_root_huge_leaf() {
     // The root itself contains this owned leaf; no child table may be assumed.
     drop(table);
     fixture.0.assert_drops(0, 1);
+}
+
+#[def_test(serial)]
+fn map_existing_alias_owns_an_independent_managed_hold() {
+    let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    let source = VirtAddr::from(0);
+    let alias = VirtAddr::from(PAGE_SIZE_4K);
+    edit.map(source, fixture.reference(0), PagingFlags::READ)
+        .unwrap();
+    edit.finish();
+    assert_eq!(edit.map_existing(source, alias), Ok(PageSize::Size4K));
+    assert_eq!(edit.query(source), edit.query(alias));
+    assert_eq!(Arc::strong_count(&fixture.0), 3);
+    assert_eq!(
+        edit.remap_raw(alias, PhysAddr::from(0x8000_0000), PagingFlags::READ),
+        Err(PtError::InvalidAddress)
+    );
+    edit.unmap(source).unwrap();
+    edit.finish();
+    fixture.0.assert_drops(0, 1);
+    assert!(edit.query(alias).is_ok());
+    edit.unmap(alias).unwrap();
+    fixture.0.assert_drops(0, 1);
+    edit.finish();
+    fixture.0.assert_drops(0, 2);
+}
+
+#[def_test(serial)]
+fn map_existing_rejections_preserve_source_and_destination() {
+    let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    let source = VirtAddr::from(0);
+    let alias = VirtAddr::from(PAGE_SIZE_4K);
+    edit.map(source, fixture.reference(0), PagingFlags::READ)
+        .unwrap();
+    edit.finish();
+    let original = edit.query_entry(source).unwrap();
+    assert_eq!(
+        edit.map_existing(source, source),
+        Err(PtError::AlreadyMapped)
+    );
+    assert_eq!(
+        edit.map_existing(source, VirtAddr::from(1)),
+        Err(PtError::NotAligned)
+    );
+    fixture.0.fail_next_clone.store(true, Ordering::Relaxed);
+    assert_eq!(edit.map_existing(source, alias), Err(PtError::NoMemory));
+    assert_eq!(edit.query_entry(source).unwrap(), original);
+    assert_eq!(edit.query(alias), Err(PtError::NotMapped));
+    fixture.0.assert_drops(0, 0);
+}
+
+#[def_test(serial)]
+fn map_existing_preparation_failure_rolls_back_only_destination_prefix() {
+    let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    let source = VirtAddr::from(0);
+    let first = VirtAddr::from(PAGE_SIZE_4K);
+    let second = VirtAddr::from(1 << 30);
+    edit.map(source, fixture.reference(0), PagingFlags::READ)
+        .unwrap();
+    edit.finish();
+    let original = edit.query_entry(source).unwrap();
+    edit.map_existing(source, first).unwrap();
+    fixture
+        .0
+        .fail_next_allocation
+        .store(true, Ordering::Relaxed);
+    assert_eq!(edit.map_existing(source, second), Err(PtError::NoMemory));
+    fixture.0.assert_drops(0, 1); // Only the unpublished clone ended.
+    assert_eq!(edit.query_entry(source).unwrap(), original);
+    assert_eq!(edit.query(second), Err(PtError::NotMapped));
+    assert!(edit.query(first).is_ok());
+    edit.unmap(first).unwrap();
+    edit.finish();
+    fixture.0.assert_drops(0, 2);
+    assert_eq!(edit.query_entry(source).unwrap(), original);
+}
+
+#[def_test(serial)]
+fn map_existing_raw_leaf_does_not_acquire_a_managed_hold() {
+    let fixture = Fixture::new([]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    let source = VirtAddr::from(0);
+    let target = VirtAddr::from(PAGE_SIZE_4K);
+    edit.map_raw(
+        source,
+        PhysAddr::from(0x4000_0000),
+        PageSize::Size4K,
+        PagingFlags::READ,
+    )
+    .unwrap();
+    fixture.0.fail_next_clone.store(true, Ordering::Relaxed);
+    edit.map_existing(source, target).unwrap();
+    assert!(fixture.0.fail_next_clone.load(Ordering::Relaxed));
+    edit.remap_raw(target, PhysAddr::from(0x8000_0000), PagingFlags::READ)
+        .unwrap();
+    assert_eq!(Arc::strong_count(&fixture.0), 1);
+}
+
+#[def_test(serial)]
+fn external_replacement_commits_raw_target_and_retires_only_source() {
+    let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    let address = VirtAddr::from(0);
+    edit.map(address, fixture.reference(0), PagingFlags::READ)
+        .unwrap();
+    edit.finish();
+    let expected = edit.query_entry(address).unwrap();
+    let target = PhysAddr::from(0x8000_0000);
+    // SAFETY: The synthetic raw target has no reclaiming owner or hardware
+    // users. It stays externally valid for the entire inactive fixture.
+    let result = unsafe {
+        edit.replace_managed_with_external_if_same(
+            address,
+            expected,
+            target,
+            PagingFlags::READ | PagingFlags::WRITE,
+        )
+    };
+    assert_eq!(result, Ok(expected));
+    assert_eq!(edit.query(address).unwrap().0, target);
+    fixture.0.assert_drops(0, 0);
+    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
+    assert!(edit.finish().had_pending());
+    fixture.0.assert_drops(0, 0);
+    assert_eq!(edit.query(address).unwrap().0, target);
+    edit.try_finish().unwrap();
+    fixture.0.assert_drops(0, 1);
+    // An address change is allowed now: the replacement is raw, not managed.
+    edit.remap_raw(address, PhysAddr::from(0xc000_0000), PagingFlags::READ)
+        .unwrap();
+    edit.unmap(address).unwrap();
+    edit.finish();
+    fixture.0.assert_drops(0, 1);
+}
+
+#[def_test(serial)]
+fn external_replacement_rejects_invalid_or_stale_inputs_without_mutation() {
+    use crate::PteReplaceError;
+    let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    let address = VirtAddr::from(0);
+    let target = PhysAddr::from(0x8000_0000);
+    edit.map(address, fixture.reference(0), PagingFlags::READ)
+        .unwrap();
+    edit.finish();
+    let stale = edit.query_entry(address).unwrap();
+    for (va, pa, flags, error) in [
+        (address, target, PagingFlags::USER, PtError::InvalidAddress),
+        (address, target + 1, PagingFlags::READ, PtError::NotAligned),
+        (
+            VirtAddr::from(1),
+            target,
+            PagingFlags::READ,
+            PtError::NotAligned,
+        ),
+    ] {
+        // SAFETY: the retained synthetic target is never accessed; invalid
+        // inputs must fail before publishing or consuming either owner.
+        let result = unsafe { edit.replace_managed_with_external_if_same(va, stale, pa, flags) };
+        assert_eq!(result, Err(PteReplaceError::PageTable(error)));
+        assert_eq!(edit.query_entry(address).unwrap(), stale);
+    }
+    edit.protect(address, PagingFlags::READ | PagingFlags::USER)
+        .unwrap();
+    let current = edit.query_entry(address).unwrap();
+    // SAFETY: the retained synthetic target stays valid; stale comparison
+    // cannot publish it or consume the live source transfer.
+    let result = unsafe {
+        edit.replace_managed_with_external_if_same(address, stale, target, PagingFlags::READ)
+    };
+    assert_eq!(
+        result,
+        Err(PteReplaceError::Changed {
+            current: Some(current)
+        })
+    );
+    assert_eq!(edit.query_entry(address).unwrap(), current);
+    fixture.0.assert_drops(0, 0);
+    edit.unmap(address).unwrap();
+    edit.finish();
+    // SAFETY: the retained synthetic target is not published for an absent leaf.
+    let result = unsafe {
+        edit.replace_managed_with_external_if_same(address, current, target, PagingFlags::READ)
+    };
+    assert_eq!(result, Err(PteReplaceError::Changed { current: None }));
+    edit.map_raw(address, target, PageSize::Size4K, PagingFlags::READ)
+        .unwrap();
+    let raw = edit.query_entry(address).unwrap();
+    // SAFETY: the retained synthetic target is never consumed; the raw source
+    // must be rejected without changing its external ownership.
+    let result = unsafe {
+        edit.replace_managed_with_external_if_same(address, raw, target, PagingFlags::READ)
+    };
+    assert_eq!(
+        result,
+        Err(PteReplaceError::PageTable(PtError::InvalidAddress))
+    );
+}
+
+#[def_test(serial)]
+fn map_existing_huge_leaf_requires_exact_bases_and_preserves_geometry() {
+    let bytes = PageSize::Size2M as usize;
+    let fixture = Fixture::new([(0, bytes)]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    let source = VirtAddr::from(0);
+    let alias = VirtAddr::from(bytes);
+    edit.map_sized(
+        source,
+        fixture.reference(0),
+        PageSize::Size2M,
+        PagingFlags::READ,
+    )
+    .unwrap();
+    edit.finish();
+    assert_eq!(
+        edit.map_existing(VirtAddr::from(PAGE_SIZE_4K), alias),
+        Err(PtError::NotAligned)
+    );
+    assert_eq!(
+        edit.map_existing(source, VirtAddr::from(bytes + PAGE_SIZE_4K)),
+        Err(PtError::NotAligned)
+    );
+    assert_eq!(edit.map_existing(source, alias), Ok(PageSize::Size2M));
+    assert_eq!(
+        edit.query(alias + PAGE_SIZE_4K).unwrap().2,
+        PageSize::Size2M
+    );
+    edit.unmap(source).unwrap();
+    edit.finish();
+    fixture.0.assert_drops(0, 1);
+    assert!(edit.query(alias).is_ok());
+    edit.unmap(alias).unwrap();
+    edit.finish();
+    fixture.0.assert_drops(0, 2);
 }

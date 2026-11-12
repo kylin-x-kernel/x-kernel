@@ -1352,14 +1352,17 @@ writes fail with `InvalidInput`; read-only writes fail with `BadFileDescriptor`.
 
 `AddressSpace::with_pinned_file_page()` initializes a stable page object while
 holding the invalidation read lock. The callback validates EOF and consumes the
-pin through `map_readonly`, storing its must-use `MappedFolio` token alongside
-the PTE. Before materialization, the provider rejects page offsets at/beyond EOF
-and overflowing indices under the same lock, without allocation or quota charge.
-The callback still validates its exact byte range; its failure retains a valid
-initialized page and its charge for ordinary cache reuse. Truncate submits
+pin through `map_readonly`, storing its optional `MappedFolio` content token
+alongside an installed PTE. Before materialization, the provider rejects page
+offsets at/beyond EOF and overflowing indices under the same lock, without
+allocation or quota charge. The callback still validates its exact byte range;
+its failure retains a valid initialized resident page and its cache quota for
+ordinary reuse. Detachment later returns quota regardless of retained physical
+references. Truncate submits
 invalidation before detaching cache entries, but a busy
-MM may queue that submission. Only completed PTE removal and TLB invalidation
-permit releasing mapping tokens; cache removal alone does not.
+MM may queue that submission. Managed file PTEs retain independent physical
+references through page-table retirement. Content tokens retain the stable
+object for COW and can release their own references without waiting for TLB.
 
 `PinnedFolio` and `MappedFolio` retain the same `Arc<Folio>` that owns its page
 and content lock. Ordinary access uses a restricted `FolioGuard`; initialization
@@ -1367,30 +1370,27 @@ uses an owning `FolioRead` that can be transferred to completion;
 cache replacement changes an index reference, not a published object's identity.
 The original page remains copyable under its original lock after detachment,
 without retaining its replacement. Copies do not by themselves prove current EOF
-or freeze bytes against truncate. Pins and tokens share the stable page and its
-physical-allocation quota charge without an additional statistics subsystem.
+or freeze bytes against truncate. Pins and tokens share the stable page object;
+its physical lifetime is independent of cache-residency quota.
 
 ## tmpfs quota integration with resident initialization
 
 The inode address space retains the invalidate lock covering EOF, cache
-reservation and read submission. Transferred folio locks serialize later completion with truncate. The filesystem owns capacity policy and supplies one `CacheResidency` provider
-when constructing an inode mapping. Only a winning new identity calls
-`try_add_folio()` under folio and index locks. Its single capacity charge stays
-with the stable folio after cache detachment, while any pin, mapping token or
-batch retains the allocation. Clones do not charge again. Final release frees
-the physical page before returning capacity, outside both locks; the charge
-keeps its provider alive independently of mapping destruction.
-Providers must not reenter mappings, acquire folio locks, or perform I/O.
-Release and final provider destruction must not sleep: the last reference can
-be released by I/O completion. Admission still requires task context.
-For memfs, the provider is its filesystem-owned quota, so lock order is cache
-folio -> index -> quota limit; remount and statfs never acquire cache locks.
-Speculative physical storage remains outside the admission policy until insertion.
+reservation and read submission. The filesystem supplies one `CacheResidency`
+provider when constructing the mapping. A winning cache identity is charged
+before publication; removing that identity returns capacity once in the same
+index transition. Pins, read batches, managed PTEs and retirement holds retain
+physical pages independently and neither multiply nor extend filesystem quota.
+Callbacks run in task context under the cache index lock and must not block,
+reenter the mapping, or take locks whose holders wait for it. For memfs,
+admission retains folio -> index -> quota limit ordering; removal decrements its
+quota counter atomically. Remount/statfs never acquire cache locks. Speculative
+physical storage is uncharged until cache publication.
 
 The cache publishes non-uptodate reservations before filesystem I/O and keeps
 its index lock out of I/O, preserving the current main concurrency contract.
-Unconsumed readahead reservations detach while locked and return capacity only
-after their final allocation reference is dropped outside the locks.
+Unconsumed readahead reservations detach while locked and return capacity at
+that detachment, while their physical owners remain independently retained.
 
 
 ## Unrecoverable filesystem write failure

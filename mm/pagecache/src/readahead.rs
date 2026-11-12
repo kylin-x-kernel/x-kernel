@@ -70,7 +70,7 @@ impl MappingPages {
             if state.entries.contains_key(&index) {
                 break;
             }
-            if let Err(error) = state.insert_folio(index, folio.clone(), guard) {
+            if let Err(error) = state.insert_folio(index, folio.clone()) {
                 charge_error = Some(error);
                 break;
             }

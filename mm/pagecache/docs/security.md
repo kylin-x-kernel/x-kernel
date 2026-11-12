@@ -16,7 +16,8 @@ visible `i_size`. It performs no access control, and it owns neither the file le
 
 All unsafe page-memory operations are concentrated in the private `src/folio.rs`; its fields are not exposed to other modules.
 
-1. `Folio::new_zeroed(index)`: zeroes the exclusively writable page returned by the page allocator.
+1. `Folio::new_zeroed(index)` delegates exclusive initialization to the PageRef
+   allocator; it never fabricates ownership from a physical address.
 2. `Folio::data()` allows only the exclusive owner of an unpublished page to
    borrow its data. Published pages are accessed through `FolioGuard::data()` or
    `FolioRead::data()` under the stable page object's own lock.
@@ -31,7 +32,7 @@ All unsafe page-memory operations are concentrated in the private `src/folio.rs`
   embedded-index identity, and the owner's projection must remain stable. Release
   the owner only after completion or Drop settles its folios; never extend index
   mutex lifetime independently.
-- Each `Folio` owns exactly one page;
+- Each `Folio` holds one page reference; PTEs and retirement batches can hold independent physical references;
 - `FolioBatch` holds only bounded references in traversal order; a live reference does not mean the mapping identity is still valid;
 - batch clear/drop does not end writeback; any started writeback must be completed explicitly first, including failure suffixes;
 - the traversal candidates and the batch awaiting completion are each at most 31 pages, and contiguous writeback data is at most 31 pages; temporary memory does not
@@ -137,19 +138,20 @@ or resident identity checks. A cache-history query returns a transient hint and 
 
 ## Stable folio lifetime
 
-- `Arc<Folio>` unifies physical ownership, immutable identity and the lock that
-  protects every safe content access. Public callbacks receive only a
+- `Arc<Folio>` retains a PageRef, immutable identity and the lock protecting
+  content access. Managed PTEs hold independent physical references. Public callbacks receive only a
   `FolioGuard`; its fields are private and it cannot yield or replace the owner.
 - Pins refer only to this object. A replaced index cannot redirect their lock
   or accidentally retain the replacement page. The physical address is derived
   from this object's stable allocation.
-- `PinnedFolio::map_readonly` consumes the pin and returns a must-use
-  `MappedFolio` token. The unsafe publication contract requires EOF validation
-  under the invalidate guard and retention of the returned token through PTE
-  removal and completed TLB invalidation. Clone tokens share the same object.
+- `PinnedFolio::map_readonly` consumes the pin and transfers a distinct physical
+  reference into a managed PTE. Its optional `MappedFolio` retains stable content
+  identity for COW; no access permissions produce neither PTE nor token. EOF
+  validation under the invalidate guard remains mandatory. Content-token Drop
+  has no TLB prerequisite; the page table retires its own PTE reference.
 - WRITE, DEVICE, UNCACHED and SHARED attributes are rejected before publication.
-  Existing raw physical-address consumers are migrated in follow-up consumers;
-  this provider change does not authorize writable user aliases.
+  Shared-file admission obtains a guarded mapping reference separately;
+  neither physical lifetime nor this private token authorizes writable aliases.
 - Copying takes a fixed single-page array, so an incorrect length cannot reach a
   kernel panic. A retained detached page remains copyable, serialized with that object's
   writers, and initializes the full output. It neither proves current EOF nor
@@ -159,22 +161,14 @@ or resident identity checks. A cache-history query returns a transient hint and 
 
 ## Cache residency lifecycle
 
-The filesystem owns capacity policy and supplies one `CacheResidency` provider
-when constructing an inode mapping. Only a winning publication calls
-`try_add_folio()` under folio and index locks; its charge is attached to the
-stable folio. Detachment, truncate and mapping destruction cannot release quota
-while pins, tokens or batches retain that physical page. The last reference
-frees the allocation before returning its single charge, with neither lock
-held. Failed admissions and losing allocations own no charge; failed reads keep
-the resident reservation charged. A charge retains its provider past mapping
-destruction, so delayed release cannot use a destroyed accounting object.
-Providers must not reenter mappings, acquire folio locks, or perform I/O.
-Release and final provider destruction must not sleep: the last reference can
-be released by I/O completion. Admission still requires task context.
-For memfs, the provider is its filesystem-owned quota, so lock order is cache
-folio -> index -> quota limit; remount and statfs never acquire cache locks.
-Speculative physical storage remains outside the admission policy until insertion.
-
+The filesystem-owned `CacheResidency` quota counts entries in one cache mapping.
+A winning publication charges once; cache identity removal returns the charge
+once under the index transition. Detached pins, read tokens, managed PTEs and
+retirement holds can keep physical storage alive without consuming cache quota.
+The mapping owns the provider. Callbacks must not sleep, panic, reenter the
+mapping, reacquire the candidate folio/index locks, or acquire locks whose
+holders wait for this mapping. A distinct physical-memory
+budget, if later required, must be modeled separately from this cache policy.
 
 Resident batch traversal reports absent identities only from its bounded index
 snapshot. An existing non-uptodate or invalidated candidate is resolved again
@@ -228,7 +222,8 @@ The waiters hint may remain set after exclusive wake, but cannot be cleared
 while unvisited entries may still wait on this folio.
 Read completion neither takes the mapping index lock nor sleeps. Final index Drop
 atomically invalidates pages and clears dirty without waiting for initialization.
-The read token retains allocation, charge and completion resources; freeing the
+The read token retains allocation and completion resources; cache quota is
+returned at identity detach. Freeing the
 container cannot free a page still in use by I/O. Dirty updates cannot resurrect
 an invalidated page. Owners must explicitly drain before releasing any resource
 not retained by their I/O owner. Context admission errors precede mandatory

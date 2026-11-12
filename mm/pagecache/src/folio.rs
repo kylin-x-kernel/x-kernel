@@ -7,22 +7,21 @@
 use alloc::sync::Arc;
 use core::{
     cell::UnsafeCell,
-    fmt,
     mem::MaybeUninit,
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use kalloc::{UsageKind, global_allocator};
+use kalloc::{PageRef, UsageKind, alloc_zeroed_page_ref};
 use kerrno::{KError, KResult};
 use khal::{
-    mem::{PhysAddr, VirtAddr, v2p},
+    mem::{PhysAddr, VirtAddr, p2v},
     paging::{MappingFlags, PageSize, PageTableMut, PagingError},
 };
 use ktask::completion::CompletionWait;
 use log::warn;
 use memaddr::PAGE_SIZE_4K;
 
-use crate::{CacheResidency, PageIndex};
+use crate::PageIndex;
 
 mod wait;
 use wait::{FolioWaitBit, WaitMode};
@@ -34,20 +33,6 @@ const WRITEBACK: u8 = 2;
 const DIRTY: u8 = 8;
 const INVALIDATED: u8 = 16;
 const UPTODATE: u8 = 32;
-
-struct FolioCharge(Arc<dyn CacheResidency>);
-
-impl fmt::Debug for FolioCharge {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("FolioCharge")
-    }
-}
-
-impl Drop for FolioCharge {
-    fn drop(&mut self) {
-        self.0.remove_folio();
-    }
-}
 
 /// A reference to one stable, initialized cache page object.
 ///
@@ -66,8 +51,9 @@ impl PinnedFolio {
 
     /// Consumes this pin and publishes a read-only PTE with an ownership token.
     ///
-    /// Store the returned token in the mapping's backing object until PTE
-    /// removal and TLB invalidation complete. Invalid flags or alignment publish no PTE.
+    /// The PTE receives its own physical hold; its retirement belongs to the
+    /// page table. The returned token retains this exact content object for COW.
+    /// No access permissions returns None and installs no leaf or token.
     ///
     /// # Errors
     ///
@@ -78,14 +64,14 @@ impl PinnedFolio {
     /// # Safety
     ///
     /// The caller must exclude file invalidation and validate the current file
-    /// extent while publishing. The returned token must be released only after
-    /// its PTE has been removed and the corresponding TLB invalidation completed.
+    /// extent while publishing. Contents require their own access protocol;
+    /// neither this token nor the PTE's lifetime hold grants write permission.
     pub unsafe fn map_readonly(
         self,
         page_table: &mut PageTableMut,
         vaddr: VirtAddr,
         flags: MappingFlags,
-    ) -> KResult<MappedFolio> {
+    ) -> KResult<Option<MappedFolio>> {
         if flags.intersects(
             MappingFlags::WRITE
                 | MappingFlags::DEVICE
@@ -100,8 +86,19 @@ impl PinnedFolio {
         {
             return Err(KError::InvalidInput);
         }
+        let reference = self.folio.lock()?.try_clone_mapping_ref()?;
+        let has_access =
+            flags.intersects(MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE);
         page_table
-            .map_raw(vaddr, paddr, PageSize::Size4K, flags)
+            .map(
+                vaddr,
+                reference,
+                if has_access {
+                    flags
+                } else {
+                    MappingFlags::empty()
+                },
+            )
             .map_err(|error| match error {
                 PagingError::NoMemory => KError::NoMemory,
                 PagingError::NotAligned => KError::InvalidInput,
@@ -109,7 +106,7 @@ impl PinnedFolio {
                 PagingError::AlreadyMapped => KError::AlreadyExists,
                 PagingError::MappedToHugePage => KError::InvalidInput,
             })?;
-        Ok(MappedFolio { pin: self })
+        Ok(has_access.then_some(MappedFolio { pin: self }))
     }
 
     /// Returns whether a page-table address refers to this stable page.
@@ -137,7 +134,7 @@ impl PinnedFolio {
         // The destination is writable for one page; ptr::copy permits overlap.
         unsafe {
             core::ptr::copy(
-                self.folio.addr.as_ptr(),
+                self.folio.addr().as_ptr(),
                 destination.as_mut_ptr().cast::<u8>(),
                 PAGE_SIZE_4K,
             );
@@ -146,12 +143,13 @@ impl PinnedFolio {
     }
 }
 
-/// Ownership of a page published in a PTE.
+/// Stable content identity for a file page published in a managed PTE.
 ///
-/// Keep this token in the mapping's backing object until PTE removal and TLB
-/// invalidation complete. Clones retain the same stable page object.
+/// Clones retain the same content object and its lock for private-file COW.
+/// The PTE independently owns its physical hold. Removing this token never
+/// waits for TLB retirement and cannot release a page still held by a PTE.
 #[derive(Clone, Debug)]
-#[must_use = "store the mapping token until PTE removal and TLB invalidation"]
+#[must_use = "retain the content token while private COW may read this page"]
 pub struct MappedFolio {
     pin: PinnedFolio,
 }
@@ -178,7 +176,7 @@ impl MappedFolio {
         page_table: &mut PageTableMut,
         vaddr: VirtAddr,
         flags: MappingFlags,
-    ) -> KResult<Self> {
+    ) -> KResult<Option<Self>> {
         // SAFETY: the caller supplies the same publication and lifetime proof.
         unsafe { PinnedFolio::clone(&self.pin).map_readonly(page_table, vaddr, flags) }
     }
@@ -188,7 +186,7 @@ impl MappedFolio {
 #[derive(Debug)]
 pub struct Folio {
     index: PageIndex,
-    addr: VirtAddr,
+    page: PageRef,
     flags: AtomicU8,
     state: UnsafeCell<FolioState>,
 }
@@ -201,24 +199,22 @@ unsafe impl Sync for Folio {}
 #[derive(Debug, Default)]
 struct FolioState {
     readahead: bool,
-    charge: Option<FolioCharge>,
 }
 
 impl Folio {
     /// Allocates a zeroed, non-uptodate page not yet associated with a mapping.
     pub fn new_zeroed(index: PageIndex) -> KResult<Self> {
-        let addr = global_allocator()
-            .alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageCache)
-            .map_err(|_| KError::NoMemory)?;
-        let addr = VirtAddr::from(addr);
-        // SAFETY: the allocator returned one exclusively owned writable page.
-        unsafe { core::ptr::write_bytes(addr.as_mut_ptr(), 0, PAGE_SIZE_4K) };
+        let page = alloc_zeroed_page_ref(UsageKind::PageCache).map_err(|_| KError::NoMemory)?;
         Ok(Self {
             index,
-            addr,
+            page,
             flags: AtomicU8::new(0),
             state: UnsafeCell::new(FolioState::default()),
         })
+    }
+
+    fn addr(&self) -> VirtAddr {
+        p2v(self.page.phys_addr())
     }
 
     /// Returns the immutable page index, independently of cache residency.
@@ -228,7 +224,7 @@ impl Folio {
 
     /// Returns the physical allocation identity (existing raw consumers only).
     pub fn paddr(&self) -> PhysAddr {
-        v2p(self.addr)
+        self.page.phys_addr()
     }
 
     pub(crate) fn lock(&self) -> KResult<FolioGuard<'_>> {
@@ -299,7 +295,8 @@ impl Folio {
 
     // Cache residency can end while a read token retains initialization. Flags
     // keep detachment independent of that content lock; the token still owns
-    // the allocation, capacity charge and all resources needed by completion.
+    // the allocation and all resources needed by completion, independently of
+    // cache-residency quota released when its identity is detached.
     pub(super) fn invalidate(&self) {
         let _previous = self
             .flags
@@ -334,7 +331,7 @@ impl Folio {
     pub fn data(&mut self) -> &mut [u8] {
         // SAFETY: exclusive ownership of the whole object excludes all guards
         // and pins; this initialized allocation is owned by the object.
-        unsafe { core::slice::from_raw_parts_mut(self.addr.as_mut_ptr(), PAGE_SIZE_4K) }
+        unsafe { core::slice::from_raw_parts_mut(self.addr().as_mut_ptr(), PAGE_SIZE_4K) }
     }
 
     /// Marks this privately owned page initialized before publication.
@@ -362,7 +359,6 @@ impl Drop for Folio {
     fn drop(&mut self) {
         debug_assert_eq!(*self.flags.get_mut() & LOCKED, 0);
         let writeback = *self.flags.get_mut() & WRITEBACK != 0;
-        let state = self.state.get_mut();
         let dirty = *self.flags.get_mut() & DIRTY != 0;
         if dirty || writeback {
             warn!(
@@ -370,11 +366,8 @@ impl Drop for Folio {
                 self.index, dirty, writeback
             );
         }
-        let charge = state.charge.take();
-        global_allocator().dealloc_pages(self.addr.as_usize(), 1, UsageKind::PageCache);
-        // Capacity becomes available only after the physical allocation is
-        // gone. The provider callback holds neither the folio nor index lock.
-        drop(charge);
+        // Cache quota was returned when the mapping detached this identity.
+        // This PageRef only keeps physical storage alive for remaining owners.
     }
 }
 
@@ -417,11 +410,16 @@ impl FolioGuard<'_> {
         read
     }
 
-    pub(super) fn charge_residency(&mut self, residency: Arc<dyn CacheResidency>) -> KResult<()> {
-        debug_assert!(self.state().charge.is_none());
-        residency.try_add_folio()?;
-        self.state_mut().charge = Some(FolioCharge(residency));
-        Ok(())
+    /// Acquires a physical lifetime hold for one managed file mapping.
+    ///
+    /// Contents remain protected by this guard. The caller separately validates
+    /// file extent and permissions under its invalidation guard before mapping.
+    /// Returns NoMemory on reference overflow. Failure leaves the owner intact.
+    pub fn try_clone_mapping_ref(&self) -> KResult<PageRef> {
+        self.folio
+            .page
+            .try_clone_ref()
+            .map_err(|_| KError::NoMemory)
     }
 
     /// Returns whether backing data has been initialized successfully.
@@ -430,6 +428,7 @@ impl FolioGuard<'_> {
     }
 
     /// Makes a completely initialized folio available to cache readers.
+    #[cfg(unittest)]
     pub(crate) fn mark_uptodate(&mut self) {
         self.folio.flags.fetch_or(UPTODATE, Ordering::Release);
     }
@@ -509,7 +508,7 @@ impl FolioGuard<'_> {
         // SAFETY: the restricted guard holds this stable folio's lock, so no
         // other Folio access can read or mutate this allocation during the
         // returned borrow. The guard borrows the stable object that owns the allocation.
-        unsafe { core::slice::from_raw_parts_mut(self.folio.addr.as_mut_ptr(), PAGE_SIZE_4K) }
+        unsafe { core::slice::from_raw_parts_mut(self.folio.addr().as_mut_ptr(), PAGE_SIZE_4K) }
     }
 }
 
@@ -536,7 +535,7 @@ impl FolioRead {
     pub fn data(&mut self) -> &mut [u8] {
         // SAFETY: the token retains the stable allocation and the unique folio
         // lock. The exclusive borrow prevents completion while this slice lives.
-        unsafe { core::slice::from_raw_parts_mut(self.folio.addr.as_mut_ptr(), PAGE_SIZE_4K) }
+        unsafe { core::slice::from_raw_parts_mut(self.folio.addr().as_mut_ptr(), PAGE_SIZE_4K) }
     }
 
     /// Marks this reserved page as a trigger for the next read window.
@@ -581,7 +580,7 @@ unsafe impl block::BioMemory for FolioRead {
     fn bytes(&self) -> &[u8] {
         // SAFETY: the token owns the stable page and its exclusive lock. This
         // shared borrow excludes data()/completion until the view expires.
-        unsafe { core::slice::from_raw_parts(self.folio.addr.as_ptr(), PAGE_SIZE_4K) }
+        unsafe { core::slice::from_raw_parts(self.folio.addr().as_ptr(), PAGE_SIZE_4K) }
     }
 
     fn bytes_mut(&mut self) -> &mut [u8] {

@@ -2,12 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Physical page-quota accounting across reservation and retained lifecycles.
+//! Cache-residency quota accounting across reservation, publication, and detach.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kerrno::KError;
+use memaddr::PAGE_SIZE_4K;
 use unittest::{assert_eq, def_test};
 
 use crate::{CacheResidency, Folio, MappingPages};
@@ -46,7 +47,7 @@ impl CacheResidency for TestResidency {
 }
 
 #[def_test]
-fn detached_pin_clones_keep_the_single_page_charge_until_final_release() {
+fn detached_pins_keep_physical_pages_but_not_cache_residency_charges() {
     let quota = Arc::new(TestResidency::new(1));
     let cache = MappingPages::with_residency(Some(quota.clone()));
     let pin = cache
@@ -60,23 +61,21 @@ fn detached_pin_clones_keep_the_single_page_charge_until_final_release() {
     ));
     cache.truncate_final().unwrap();
     assert_eq!(cache.nrpages(), 0);
-    assert_eq!(quota.used_pages(), 1);
-    assert!(matches!(
-        cache.pin_folio_or_create(1, |folio| folio.complete(Ok(()))),
-        Err(KError::StorageFull)
-    ));
-    drop(pin);
-    assert_eq!(quota.used_pages(), 1);
-    assert!(matches!(
-        cache.pin_folio_or_create(1, |folio| folio.complete(Ok(()))),
-        Err(KError::StorageFull)
-    ));
-    drop(clone);
     assert_eq!(quota.used_pages(), 0);
     let replacement = cache
         .pin_folio_or_create(1, |folio| folio.complete(Ok(())))
         .unwrap();
     assert_eq!(quota.used_pages(), 1);
+    drop(pin);
+    assert_eq!(quota.used_pages(), 1);
+    drop(clone);
+    assert_eq!(
+        quota.used_pages(),
+        1,
+        "detached owners do not affect cache quota"
+    );
+    cache.truncate_final().unwrap();
+    assert_eq!(quota.used_pages(), 0);
     drop(replacement);
     drop(cache);
     assert_eq!(quota.used_pages(), 0);
@@ -103,7 +102,7 @@ fn page_quota_limits_resident_entries_and_unpublished_pages_are_unaccounted() {
 }
 
 #[def_test]
-fn detached_external_reference_holds_quota_until_its_allocation_is_freed() {
+fn detached_external_reference_does_not_hold_cache_residency_quota() {
     let quota = Arc::new(TestResidency::new(1));
     let cache = MappingPages::with_residency(Some(quota.clone()));
     cache
@@ -111,21 +110,22 @@ fn detached_external_reference_holds_quota_until_its_allocation_is_freed() {
         .unwrap();
     let external = cache.state.lock().entries[&0].clone();
     cache.truncate_final().unwrap();
-    assert_eq!(quota.used_pages(), 1);
-    assert_eq!(
-        cache.with_folio_or_create(0, |folio| folio.complete(Ok(())), |_| Ok(())),
-        Err(KError::StorageFull)
-    );
-    drop(external);
     assert_eq!(quota.used_pages(), 0);
     cache
         .with_folio_or_create(0, |folio| folio.complete(Ok(())), |_| Ok(()))
         .unwrap();
     assert_eq!(quota.used_pages(), 1);
+    assert_eq!(external.index(), 0);
+    drop(external);
+    assert_eq!(
+        quota.used_pages(),
+        1,
+        "external physical owner is not a cache entry"
+    );
 }
 
 #[def_test]
-fn truncate_invalidates_batches_without_returning_their_physical_page_quota() {
+fn truncate_releases_cache_quota_while_batches_keep_physical_pages() {
     let quota = Arc::new(TestResidency::new(1));
     let cache = MappingPages::with_residency(Some(quota.clone()));
     cache
@@ -144,20 +144,16 @@ fn truncate_invalidates_batches_without_returning_their_physical_page_quota() {
         Some(0x55)
     );
     cache.truncate_final().unwrap();
-    assert_eq!(quota.used_pages(), 1);
+    assert_eq!(quota.used_pages(), 0);
     assert_eq!(
         batch.with_read_folio(0, |folio| folio.data()[0]).unwrap(),
         None
     );
-    assert_eq!(
-        cache.with_folio_or_create(0, |folio| folio.complete(Ok(())), |_| Ok(())),
-        Err(KError::StorageFull)
-    );
-    drop(batch);
-    assert_eq!(quota.used_pages(), 0);
     cache
         .with_folio_or_create(0, |folio| folio.complete(Ok(())), |_| Ok(()))
         .unwrap();
+    assert_eq!(quota.used_pages(), 1);
+    drop(batch);
     assert_eq!(quota.used_pages(), 1);
 }
 
@@ -261,7 +257,7 @@ fn same_index_allocators_share_the_last_quota_slot() {
 }
 
 #[def_test]
-fn mapping_drop_keeps_quota_until_its_retained_batch_is_dropped() {
+fn mapping_drop_releases_cache_quota_before_retained_batch_drop() {
     let quota = Arc::new(TestResidency::new(1));
     let cache = MappingPages::with_residency(Some(quota.clone()));
     cache
@@ -270,25 +266,24 @@ fn mapping_drop_keeps_quota_until_its_retained_batch_is_dropped() {
     let batch = cache.get_folios_contig(0, 1);
     drop(cache);
     assert_eq!(batch.with_read_folio(0, |_| ()).unwrap(), None);
-    assert_eq!(quota.used_pages(), 1);
-    let replacement = MappingPages::with_residency(Some(quota.clone()));
-    assert_eq!(
-        replacement.with_folio_or_create(0, |folio| folio.complete(Ok(())), |_| Ok(())),
-        Err(KError::StorageFull)
-    );
-    drop(batch);
     assert_eq!(quota.used_pages(), 0);
+    let replacement = MappingPages::with_residency(Some(quota.clone()));
     replacement
         .with_folio_or_create(0, |folio| folio.complete(Ok(())), |_| Ok(()))
         .unwrap();
     assert_eq!(quota.used_pages(), 1);
+    drop(batch);
+    assert_eq!(quota.used_pages(), 1);
 }
 
-#[def_test]
-fn retained_mapping_tokens_keep_the_charge_after_pin_and_mapping_drop() {
+#[def_test(serial)]
+fn cache_quota_is_released_while_managed_pte_keeps_physical_page() {
     use khal::paging::{MappingFlags, PageTable};
     use memaddr::VirtAddr;
 
+    let initial_bytes = kalloc::global_allocator()
+        .usages()
+        .get(kalloc::UsageKind::PageCache);
     let quota = Arc::new(TestResidency::new(1));
     let cache = MappingPages::with_residency(Some(quota.clone()));
     let pin = cache
@@ -305,24 +300,42 @@ fn retained_mapping_tokens_keep_the_charge_after_pin_and_mapping_drop() {
             MappingFlags::USER | MappingFlags::READ,
         )
     }
+    .unwrap()
     .unwrap();
     let clone = mapping.clone();
     drop(cache);
-    assert_eq!(quota.used_pages(), 1);
-    let replacement = MappingPages::with_residency(Some(quota.clone()));
-    assert!(matches!(
-        replacement.pin_folio_or_create(0, |folio| folio.complete(Ok(()))),
-        Err(KError::StorageFull)
-    ));
-    page_table.unmap(vaddr).unwrap();
-    drop(mapping);
-    assert_eq!(quota.used_pages(), 1);
-    drop(clone);
     assert_eq!(quota.used_pages(), 0);
+    assert_eq!(
+        kalloc::global_allocator()
+            .usages()
+            .get(kalloc::UsageKind::PageCache),
+        initial_bytes + PAGE_SIZE_4K
+    );
+    let replacement = MappingPages::with_residency(Some(quota.clone()));
     replacement
         .pin_folio_or_create(0, |folio| folio.complete(Ok(())))
         .unwrap();
     assert_eq!(quota.used_pages(), 1);
+    page_table.unmap(vaddr).unwrap();
+    drop(mapping);
+    assert_eq!(quota.used_pages(), 1);
+    drop(clone);
+    assert_eq!(quota.used_pages(), 1);
+    page_table.finish();
+    assert_eq!(
+        quota.used_pages(),
+        1,
+        "only the replacement cache entry is charged"
+    );
+    assert_eq!(
+        kalloc::global_allocator()
+            .usages()
+            .get(kalloc::UsageKind::PageCache),
+        initial_bytes + PAGE_SIZE_4K,
+        "retiring the old PTE releases its physical page independently of replacement quota"
+    );
+    replacement.truncate_final().unwrap();
+    assert_eq!(quota.used_pages(), 0);
 }
 
 #[def_test]
@@ -370,7 +383,7 @@ fn rejected_publications_neither_charge_nor_release_the_winner() {
 }
 
 #[def_test]
-fn detached_and_replacement_allocations_hold_independent_single_charges() {
+fn each_resident_cache_identity_holds_one_independent_charge() {
     let quota = Arc::new(TestResidency::new(2));
     let cache = MappingPages::with_residency(Some(quota.clone()));
     let original = cache
@@ -380,17 +393,17 @@ fn detached_and_replacement_allocations_hold_independent_single_charges() {
     let replacement = cache
         .pin_folio_or_create(0, |folio| folio.complete(Ok(())))
         .unwrap();
-    assert_eq!(quota.used_pages(), 2);
+    assert_eq!(quota.used_pages(), 1);
     drop(original);
     assert_eq!(quota.used_pages(), 1);
     drop(cache);
-    assert_eq!(quota.used_pages(), 1);
+    assert_eq!(quota.used_pages(), 0);
     drop(replacement);
     assert_eq!(quota.used_pages(), 0);
 }
 
 #[def_test]
-fn final_quota_release_holds_no_mapping_or_folio_mutex() {
+fn cache_detachment_releases_quota_under_the_mapping_index_lock() {
     use alloc::sync::Weak;
 
     use ksync::Mutex;
@@ -407,9 +420,7 @@ fn final_quota_release_holds_no_mapping_or_folio_mutex() {
 
         fn remove_folio(&self) {
             let mapping = self.mapping.try_lock().unwrap().upgrade().unwrap();
-            // A final pin drop must not invoke the provider under the index
-            // mutex. The folio's own state guard was also released by Drop.
-            assert!(mapping.state.try_lock().is_some());
+            assert!(mapping.state.try_lock().is_none());
             self.released.fetch_add(1, Ordering::AcqRel);
         }
     }
@@ -424,58 +435,19 @@ fn final_quota_release_holds_no_mapping_or_folio_mutex() {
         .pin_folio_or_create(0, |folio| folio.complete(Ok(())))
         .unwrap();
     cache.truncate_final().unwrap();
-    assert_eq!(quota.released.load(Ordering::Acquire), 0);
+    assert_eq!(quota.released.load(Ordering::Acquire), 1);
     drop(pin);
     assert_eq!(quota.released.load(Ordering::Acquire), 1);
 }
 
 #[def_test(serial)]
-fn detached_read_token_releases_last_page_and_provider_in_completion_context() {
-    use core::sync::atomic::AtomicBool;
-
-    struct CompletionResidency {
-        used: Arc<AtomicUsize>,
-        destroyed: Arc<AtomicBool>,
-        initial_bytes: usize,
-    }
-    impl CacheResidency for CompletionResidency {
-        fn try_add_folio(&self) -> kerrno::KResult<()> {
-            self.used.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        fn remove_folio(&self) {
-            core::assert!(!ktask::is_sleepable_context());
-            core::assert_eq!(self.used.fetch_sub(1, Ordering::Relaxed), 1);
-            // The physical page must be returned before its capacity charge.
-            core::assert_eq!(
-                kalloc::global_allocator()
-                    .usages()
-                    .get(kalloc::UsageKind::PageCache),
-                self.initial_bytes
-            );
-        }
-    }
-    impl Drop for CompletionResidency {
-        fn drop(&mut self) {
-            core::assert!(!ktask::is_sleepable_context());
-            core::assert_eq!(self.used.load(Ordering::Relaxed), 0);
-            self.destroyed.store(true, Ordering::Release);
-        }
-    }
-
+fn detached_read_token_keeps_physical_page_after_quota_release() {
     for outcome in 0..3 {
-        let used = Arc::new(AtomicUsize::new(0));
-        let destroyed = Arc::new(AtomicBool::new(false));
-        let provider = Arc::new(CompletionResidency {
-            used: used.clone(),
-            destroyed: destroyed.clone(),
-            initial_bytes: kalloc::global_allocator()
-                .usages()
-                .get(kalloc::UsageKind::PageCache),
-        });
-        let provider_weak = Arc::downgrade(&provider);
-        let cache = MappingPages::with_residency(Some(provider));
+        let quota = Arc::new(TestResidency::new(1));
+        let initial_bytes = kalloc::global_allocator()
+            .usages()
+            .get(kalloc::UsageKind::PageCache);
+        let cache = MappingPages::with_residency(Some(quota.clone()));
         let mut pending = None;
         cache
             .readahead_folios(0..1, |folios| pending = folios.next())
@@ -483,8 +455,13 @@ fn detached_read_token_releases_last_page_and_provider_in_completion_context() {
         let page = Arc::downgrade(&cache.state.lock().entries[&0]);
         drop(cache);
         assert_eq!(page.strong_count(), 1);
-        assert_eq!(provider_weak.strong_count(), 1);
-        assert_eq!(used.load(Ordering::Acquire), 1);
+        assert_eq!(quota.used_pages(), 0);
+        assert_eq!(
+            kalloc::global_allocator()
+                .usages()
+                .get(kalloc::UsageKind::PageCache),
+            initial_bytes + PAGE_SIZE_4K
+        );
         {
             let _irq = kirq::context::test_support::ScopedHardIrqContext::enter();
             let pending = pending.take().unwrap();
@@ -495,7 +472,67 @@ fn detached_read_token_releases_last_page_and_provider_in_completion_context() {
             }
         }
         assert!(page.upgrade().is_none());
-        assert!(provider_weak.upgrade().is_none());
-        assert!(destroyed.load(Ordering::Acquire));
+        assert_eq!(quota.used_pages(), 0);
+        assert_eq!(
+            kalloc::global_allocator()
+                .usages()
+                .get(kalloc::UsageKind::PageCache),
+            initial_bytes
+        );
     }
+}
+
+#[def_test(serial)]
+fn pte_and_retirement_keep_physical_page_after_cache_quota_release() {
+    use khal::paging::{MappingFlags, PageTable};
+    use memaddr::VirtAddr;
+
+    let initial_bytes = kalloc::global_allocator()
+        .usages()
+        .get(kalloc::UsageKind::PageCache);
+    let quota = Arc::new(TestResidency::new(1));
+    let cache = MappingPages::with_residency(Some(quota.clone()));
+    let pin = cache
+        .pin_folio_or_create(0, |read| read.complete(Ok(())))
+        .unwrap();
+    let object = Arc::downgrade(&cache.state.lock().entries[&0]);
+    let mut table = PageTable::try_new().unwrap();
+    let mut table = table.modify();
+    let address = VirtAddr::from(0x30_000usize);
+    // SAFETY: this inactive test table has no users; the initialized page and
+    // file extent are private to this fixture. Publication gives the PTE a hold.
+    let token =
+        unsafe { pin.map_readonly(&mut table, address, MappingFlags::USER | MappingFlags::READ) }
+            .unwrap()
+            .unwrap();
+    let paddr = table.query(address).unwrap().0;
+    drop(cache);
+    drop(token);
+    assert!(
+        object.upgrade().is_none(),
+        "the PTE retains the page, not the Folio"
+    );
+    assert_eq!(quota.used_pages(), 0);
+    assert_eq!(
+        kalloc::global_allocator()
+            .usages()
+            .get(kalloc::UsageKind::PageCache),
+        initial_bytes + PAGE_SIZE_4K
+    );
+    assert_eq!(table.query(address).unwrap().0, paddr);
+    table.unmap(address).unwrap();
+    assert_eq!(
+        kalloc::global_allocator()
+            .usages()
+            .get(kalloc::UsageKind::PageCache),
+        initial_bytes + PAGE_SIZE_4K,
+        "retirement still owns the physical page"
+    );
+    table.finish();
+    assert_eq!(
+        kalloc::global_allocator()
+            .usages()
+            .get(kalloc::UsageKind::PageCache),
+        initial_bytes
+    );
 }

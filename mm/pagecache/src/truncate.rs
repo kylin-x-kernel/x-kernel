@@ -214,11 +214,19 @@ impl Drop for MappingPagesState {
     fn drop(&mut self) {
         // Active operations and writeback completions borrow this index.
         // Read tokens retain their page and backing resources independently.
-        // Final storage destruction only detaches identities; owners needing
-        // an I/O drain call truncate_final() before releasing backing resources.
+        // Final storage destruction detaches all cache identities and releases
+        // their residency charges; owners needing an I/O drain call
+        // truncate_final() before releasing backing resources.
         for folio in self.entries.values() {
             debug_assert!(!folio.is_under_writeback());
             folio.invalidate();
         }
+        let detached = core::mem::take(&mut self.entries);
+        if let Some(residency) = &self.residency {
+            for _ in 0..detached.len() {
+                residency.remove_folio();
+            }
+        }
+        drop(detached);
     }
 }

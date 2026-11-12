@@ -145,8 +145,8 @@ zero selects unlimited, and finite limits are bounded by
 The root and each additional hard link consume one unit; directory `.` and `..`
 links do not. Removing the last name preserves the inode charge until its final
 reference is released. `statfs` reports total and free inode units. `noswap` is accepted as a no-op because this tmpfs implementation
-has no swap backend. The page limit charges physical folios, including detached
-pages retained by pins, mapping tokens or read batches, not a
+has no swap backend. The page limit charges folios resident in page-cache mappings, not detached
+physical pages retained by pins, mapping tokens or PTE retirement, and not a
 reservation and not a file logical-size sum.
 
 For a finite limit, `statfs()` reports the current maximum and available quota
@@ -222,8 +222,9 @@ further seals can be added (aligned with Linux).
   reference to the filesystem quota; lookup never traverses weak inode or
   superblock references on a resident access.
 - The generic cache serializes admission with winning identity publication,
-  taking folio -> index -> quota limit locks. Final physical deallocation returns
-  the charge outside folio/index locks through its non-sleeping atomic release. Remount/statfs never acquire cache locks.
+  taking folio -> index -> quota limit locks. Removing a cache identity returns
+  its charge in that index transition; the callback is a bounded atomic update.
+  Remount/statfs never acquire cache locks.
 - `TmpfsAccounting` protects both limits and remaining inode space with
   `RwLock<TmpfsStats>`. Inode admission/release and remount take the write lock;
   statfs samples both capacities under the read lock. No per-inode charge object
@@ -259,9 +260,9 @@ further seals can be added (aligned with Linux).
 
 6. tmpfs size is enforced at folio materialization rather than file length.
    Reason: sparse holes do not consume pages, while a small file can dirty one
-   full page. Charging physical folios makes truncate/unlink return quota after
-   the last retained reference releases that allocation, without a second
-   accounting pass. A buffered-read hole is served from the
+   full page. Charging resident cache identities makes truncate/unlink return
+   quota when the cache entry is removed, without a second accounting pass. A
+   detached PTE may retain its physical page independently. A buffered-read hole is served from the
    zero page, so it cannot consume the last quota page or turn `read(2)` into
    `ENOSPC`. Mmap read faults deliberately materialize and charge a folio, as
    Linux does for `shmem_fault()`; only the buffered-read path follows
@@ -270,18 +271,18 @@ further seals can be added (aligned with Linux).
 ## Drop / Resource Release
 
 - When an inode is released, the `AddressSpace` is destroyed when its last reference is released, and the `MappingPages` it directly holds are released along with the field.
-- Physical folio destruction returns its page-quota charge. `truncate(0)` and
-  final inode eviction detach entries; retained pins, tokens and batches keep
-  capacity charged until they release the physical pages.
+- Cache identity removal returns its page quota. Pins, tokens, batches and PTE
+  retirement may keep the detached physical allocation alive without charging
+  the tmpfs cache quota.
 - Directory removal logic is maintained by `InodeRef` and nlink.
 - `InodeRef` holds the backing inode; `Inode::drop` returns the inode number and
   allocation quota when the last reference is released, and temporary references and VFS operation objects follow the same lifecycle.
 
 `quota.rs` owns the mount limit, usage and remount/statfs policy. Each mapping
 stores one lifecycle provider reference. Admission runs only for winning
-identities, whose stable folios retain one charge and provider reference each.
-Clones never multiply charges. Removal and mapping destruction cannot return
-capacity before the physical page is freed by its final retained reference.
+identities; each resident cache entry carries one charge. Removing the entry or
+destroying the mapping returns it once, regardless of external Folio/PTE physical
+references. Cloning a content or mapping reference never multiplies charges.
 
 Inode-space exhaustion rejects creation or an additional hard link with
 `ENOSPC` before publication; publication failures undo the directory entry and

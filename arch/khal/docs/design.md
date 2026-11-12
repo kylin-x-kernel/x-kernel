@@ -324,8 +324,9 @@ The provider bridges the existing raw `PageRef` protocol:
 |----------------------------------------|----------|
 | `mapping_reference_into_raw(reference)` | Consume `PageRef::into_raw()` and convert its base-page count into the exact selected byte length, returning `(PA, bytes)`. |
 | `unsafe mapping_reference_from_raw(PA, bytes)` | Convert the validated leaf byte length back to base-page count and restore exactly one outstanding transfer with `PageRef::from_raw(PA, pages)`. |
+| `unsafe mapping_reference_try_clone_from_raw(PA, bytes)` | Borrow a live managed leaf's exact transfer with `ManuallyDrop<PageRef>` and acquire a distinct hold with `try_clone_ref()`; leave the source transfer untouched. |
 
-Neither conversion acquires or releases a reference count. Recovery requires
+The transfer and recovery conversions do not change reference counts. Recovery requires
 exclusive ownership of the same unconsumed exact transfer; an arbitrary PA,
 metadata lookup or raw mapping is insufficient. No new `kalloc` dependency is
 introduced in generic `page_table`.
@@ -357,9 +358,11 @@ leaves in owned subtrees before any destructive overwrite. Sources must outlive
 borrowers, and destination managed leaves must first be unmapped and retired.
 
 PA-only callers mechanically use `map_raw`, `map_region_raw`, `remap_raw` and
-`replace_if_same_raw`; backing allocation/field/destructor migration in
-anon/pagecache/filemap/memspace is deferred. These raw installs transfer no
-mapping hold. Raw replacement cannot change a managed leaf's normalized PA;
+`replace_if_same_raw` for externally owned backing. File Folios now own PageRef,
+file PTEs acquire independent managed holds, and mremap clones managed source
+holds with map_existing. Anonymous COW targets retain their existing external
+raw ownership; anonymous, VMM and device migration remain separate work. A raw
+install still transfers no mapping hold. Raw replacement cannot change a managed leaf's normalized PA;
 same-PA updates preserve category, and permission clearing retires its old hold.
 Existing raw release paths using `finish()` can still release backing after an
 unconfirmed shootdown. The adapter does not make those paths safe: they need a

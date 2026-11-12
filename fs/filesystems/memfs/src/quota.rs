@@ -25,10 +25,10 @@ struct TmpfsStats {
 
 /// Capacity shared by all inodes of one tmpfs superblock.
 ///
-/// Zero means unlimited in either dimension. Pages are released
-/// when the folio's physical allocation is freed, including after retained
-/// mapping tokens are released, and inode space when an inode is destroyed
-/// or an additional hard link is removed.
+/// Zero means unlimited in either dimension. Page capacity follows resident
+/// cache identities and is released when an identity is detached, independently
+/// of outstanding physical-page references. Inode space is released when an
+/// inode is destroyed or an additional hard link is removed.
 #[derive(Debug)]
 pub(crate) struct TmpfsAccounting {
     stats: RwLock<TmpfsStats>,
@@ -158,7 +158,7 @@ impl TmpfsAccounting {
         let previous = self.used_pages.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(
             previous >= 1,
-            "page quota release must match admitted physical pages"
+            "page quota release must match resident cache identities"
         );
     }
 }
