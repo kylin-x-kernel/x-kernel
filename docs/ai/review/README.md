@@ -33,7 +33,8 @@ docs/ai/review/
 ├── bug.md          # 可触发实际错误的缺陷
 ├── performance.md  # 性能与资源使用
 ├── logic.md        # 逻辑、状态、错误路径、unsafe 和测试
-└── guidelines.md   # X-Kernel 编码规范和代码库一致性
+├── guidelines.md   # X-Kernel 编码规范和代码库一致性
+└── module-docs/    # 显式文档审查检查点
 ```
 
 ## 加载顺序

@@ -4,13 +4,9 @@ This reference describes the shared Starry Test Harness repository:
 
 - `git@gitee.com:openkylin/starry-test-harness.git`
 
-In the current development environment, that repository is checked out at:
-
-- `/home/laoyekang/code/starry-test-harness`
-
-The examples below use `<starry-test-harness>` for the repository root. In the
-current workspace, `<starry-test-harness>` resolves to
-`/home/laoyekang/code/starry-test-harness`.
+The examples below use `<starry-test-harness>` for the repository root. When
+running `make ci-test` from the X-Kernel tree, the harness is cloned into
+`CI_TEST_DIR` (default `$(CURDIR)/ci-test`).
 
 ## Suite Entry Points
 
@@ -183,7 +179,7 @@ Typical narrow iteration loop:
 
 ```bash
 cd <starry-test-harness>
-CASES=my-test make ci-test-iter run XKERNEL_REMOTE=/home/laoyekang/code/x-kernel
+CASES=my-test make ci-test-iter run XKERNEL_REMOTE=<x-kernel>
 ```
 
 Inspect results under the latest run directory:

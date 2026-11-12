@@ -100,7 +100,7 @@ Follow the project logging conventions:
 - do not use `println!` or the third-party `log` crate directly
   in normal production code;
 - early boot code may use early output helpers before logging is initialized;
-- keep crate-local log style and `__log_prefix` conventions consistent.
+- keep crate-local log style consistent.
 
 ### Log Level Guidance
 

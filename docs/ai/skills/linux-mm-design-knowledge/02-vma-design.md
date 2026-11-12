@@ -69,7 +69,7 @@ new mapping
 
 ## 7. Linux Compatibility Requirements
 
-- `mprotect()`、`munmap()` 对部分区间操作会导致 split，这个用户可通过 `/proc/maps` 观察到。
+- `mprotect()`、`munmap()` 对部分区间操作会导致 split，这个用户可通过 `/proc/<pid>/maps` 观察到。
 - `MAP_SHARED|MAP_ANONYMOUS` 在 Linux 上依赖 shmem 语义。
 - 栈 guard gap 与 `VM_GROWSDOWN` 语义要保留。
 

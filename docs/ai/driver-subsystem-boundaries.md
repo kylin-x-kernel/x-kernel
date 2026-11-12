@@ -34,7 +34,7 @@ host kernel adapter
 ## Hard Rules
 
 - OS-neutral driver crates must not depend on host-kernel crates such as
-  `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or `kwork`.
+  `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or `kworkng`.
 - Concrete driver code must not call host-kernel APIs directly. It must use
   driver subsystem contracts such as `driver_os_api`, `driver_base`, and
   device-class traits, and the framework core (`kclass`) for runtime
@@ -90,7 +90,7 @@ When reviewing driver changes, check:
 
 - Does any OS-neutral driver crate add a dependency on a host-kernel crate?
 - Does concrete driver code import `khal`, `kirq`, `memspace`, `kdma`,
-  `kruntime`, `ktask`, or `kwork`?
+  `kruntime`, `ktask`, or `kworkng`?
 - Is a new provider trait needed for kernel capabilities such as time, wait,
   workqueue, DMA cache maintenance, or threaded IRQ?
 - Are device capabilities exposed through class traits rather than host code

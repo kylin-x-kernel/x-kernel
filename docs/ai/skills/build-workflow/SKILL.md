@@ -262,7 +262,7 @@ levels being `0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`,
 | 1 | `echo 'warn ksyscall=trace' > /proc/sys/kernel/log_filter` | live, until reboot | nothing — the node already exists |
 | 2 | `loglevel=5`, `loglevel=warn,ksyscall=5`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
 | 3 | `/chosen/x-kernel,log-level = "warn ksyscall=debug";` | boot of that board | editing the DTB |
-| 4 | `LOG_FILTER` (spec) / `LOG_LEVEL_*` (build maximum) Kconfig | build default | a rebuild |
+| 4 | `LOG_FILTER` (spec) / `LOG_LEVEL_*` (build floor) Kconfig | build default | a rebuild |
 
 Layer 1 is the one to reach for while debugging on hardware: it changes
 verbosity mid-session (`cat /proc/sys/kernel/log_filter` reports the whole spec,

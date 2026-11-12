@@ -164,6 +164,6 @@ Sticky pile-up / 缺 LB 解释不了 **整段 p50 抬升**；那是 handoff 模�
 
 ## 关键代码
 
-- `task/ksched/src/eevdf.rs` — place、`peer_preempts_curr`、buddy、sync preempt
-- `task/ktask/src/run_queue.rs` — `select_idle_cpu` / wake SIS、idle-pull、`preempt_resched`、`mark_sync_wake_preempt`
+- `task/ksched/src/classes/fair.rs` — place、`peer_preempts`、`set_next_buddy`、`has_sync_wake`
+- `task/ktask/src/run_queue/`（`placement.rs`、`rq.rs`） — `select_idle_cpu` / wake SIS、idle-pull、`preempt_resched`、`arm_wake_enqueue`（`task/ktask/src/task.rs`）
 - `process/kfutex/src/table.rs` — `with_wake_sync`

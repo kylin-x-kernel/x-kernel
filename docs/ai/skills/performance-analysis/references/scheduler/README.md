@@ -31,7 +31,7 @@ X-Kernel 调度相关性能分析的入口。挂在
 
 ## 相关代码
 
-- `task/ksched/src/eevdf.rs`
+- `task/ksched/src/classes/fair.rs`
 - `task/ktask/src/run_queue/`（`placement.rs` 选核，`rq.rs` leave/pick/switch）
 - `task/ktask/src/future/mod.rs`
 - `arch/khal/src/irq/manager.rs`

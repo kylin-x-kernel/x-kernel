@@ -14,7 +14,7 @@ page fault path 把“地址是否合法、VMA 权限是否允许、页表是否
 ## 3. Core Data Structures
 
 - `struct vm_fault`
-  - 文件: `include/linux/mm_types.h`
+  - 文件: `include/linux/mm.h`
   - 核心字段: `vma`, `address`, `pgoff`, `pud/pmd/pte`, `orig_pte`, `page`, `cow_page`, `flags`
   - 生命周期: 单次 fault 调用栈内有效。
 - `struct vm_area_struct`

@@ -124,7 +124,7 @@ Construction rules (when to use `static_lock!` vs `::new` vs
 - `Mutex::const_new(RawMutex::new(), …)`;
 - `RawMutex::with_config` without `new_with_stats`.
 
-Hot untracked examples: `run_queue.rs` `SpinRaw<Scheduler>`; `kfutex`
+Hot untracked examples: `run_queue/` `SpinRaw<Scheduler>`; `kfutex`
 `WaitQueue` `SpinNoIrq`.
 
 Call out blind spots in the report. For Spin visibility, propose `static_lock!`

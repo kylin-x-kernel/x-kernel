@@ -17,9 +17,7 @@ This skill primarily covers the shared Starry Test Harness repository:
 
 - `git@gitee.com:openkylin/starry-test-harness.git`
 
-In the current development environment, that repository is checked out at:
-
-- `/home/laoyekang/code/starry-test-harness`
+`make ci-test` clones that repository into `CI_TEST_DIR` (default `ci-test/` under the X-Kernel checkout).
 
 Load the detailed harness workflow from:
 

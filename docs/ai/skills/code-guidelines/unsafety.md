@@ -109,8 +109,8 @@ Avoid:
 
 Repository examples:
 
-- [task/kspin/src/lock.rs](/home/laoyekang/code/x-kernel/task/kspin/src/lock.rs:39)
-- [task/ktask/src/task.rs](/home/laoyekang/code/x-kernel/task/ktask/src/task.rs:94)
+- [task/kspin/src/lock.rs](../../../../task/kspin/src/lock.rs)
+- [task/ktask/src/task.rs](../../../../task/ktask/src/task.rs)
 
 Relevant standard references:
 
@@ -129,8 +129,8 @@ Avoid:
 
 Repository examples:
 
-- [util/klazy/src/once.rs](/home/laoyekang/code/x-kernel/util/klazy/src/once.rs:43)
-- [util/klazy/src/lazy.rs](/home/laoyekang/code/x-kernel/util/klazy/src/lazy.rs:23)
+- [util/klazy/src/once.rs](../../../../util/klazy/src/once.rs)
+- [util/klazy/src/lazy.rs](../../../../util/klazy/src/lazy.rs)
 
 ### Raw Ownership Pointers
 
@@ -149,8 +149,8 @@ Avoid:
 
 Repository examples:
 
-- [drivers/contracts/net/src/net_buf.rs](/home/laoyekang/code/x-kernel/drivers/contracts/net/src/net_buf.rs:16)
-- [mm/kalloc/src/lib.rs](/home/laoyekang/code/x-kernel/mm/kalloc/src/lib.rs:256)
+- [drivers/contracts/net/src/net_buf.rs](../../../../drivers/contracts/net/src/net_buf.rs)
+- [mm/kalloc/src/lib.rs](../../../../mm/kalloc/src/lib.rs)
 
 Relevant standard references:
 
@@ -176,8 +176,8 @@ Avoid:
 
 Repository examples:
 
-- [boot/firmware-handoff/src/efi.rs](/home/laoyekang/code/x-kernel/boot/firmware-handoff/src/efi.rs:398)
-- [boot/kernel-elf-loader/src/lib.rs](/home/laoyekang/code/x-kernel/boot/kernel-elf-loader/src/lib.rs:102)
+- [boot/firmware-handoff/src/efi.rs](../../../../boot/firmware-handoff/src/efi.rs)
+- [boot/kernel-elf-loader/src/lib.rs](../../../../boot/kernel-elf-loader/src/lib.rs)
 
 Relevant standard references:
 
@@ -193,8 +193,8 @@ Relevant standard references:
 
 Repository examples:
 
-- [boot/x86_64-uefi-loader/src/multiboot.rs](/home/laoyekang/code/x-kernel/boot/x86_64-uefi-loader/src/multiboot.rs:12)
-- [boot/kernel-elf-loader/src/lib.rs](/home/laoyekang/code/x-kernel/boot/kernel-elf-loader/src/lib.rs:133)
+- [boot/x86_64-uefi-loader/src/multiboot.rs](../../../../boot/x86_64-uefi-loader/src/multiboot.rs)
+- [boot/kernel-elf-loader/src/lib.rs](../../../../boot/kernel-elf-loader/src/lib.rs)
 
 Relevant standard references:
 
@@ -218,8 +218,8 @@ Avoid:
 
 Repository examples:
 
-- [drivers/arm-gic/src/gicv3.rs](/home/laoyekang/code/x-kernel/drivers/arm-gic/src/gicv3.rs:121)
-- [drivers/platform/console/src/ns16550_mmio.rs](/home/laoyekang/code/x-kernel/drivers/platform/console/src/ns16550_mmio.rs:1)
+- [drivers/platform/irq/src/gic/gicv3.rs](../../../../drivers/platform/irq/src/gic/gicv3.rs)
+- [drivers/platform/console/src/ns16550_mmio.rs](../../../../drivers/platform/console/src/ns16550_mmio.rs)
 
 Relevant standard references:
 
@@ -264,9 +264,9 @@ Avoid:
 
 Repository examples:
 
-- [boot/kernel-boot/src/arch/aarch64/entry.rs](/home/laoyekang/code/x-kernel/boot/kernel-boot/src/arch/aarch64/entry.rs:48)
-- [boot/kernel-boot/src/arch/riscv64/entry.rs](/home/laoyekang/code/x-kernel/boot/kernel-boot/src/arch/riscv64/entry.rs:38)
-- [boot/x86_64-boot-stub/src/main.rs](/home/laoyekang/code/x-kernel/boot/x86_64-boot-stub/src/main.rs:75)
+- [boot/kernel-boot/src/arch/aarch64/entry.rs](../../../../boot/kernel-boot/src/arch/aarch64/entry.rs)
+- [boot/kernel-boot/src/arch/riscv64/entry.rs](../../../../boot/kernel-boot/src/arch/riscv64/entry.rs)
+- [boot/x86_64-boot-stub/src/main.rs](../../../../boot/x86_64-boot-stub/src/main.rs)
 
 Relevant standard references:
 

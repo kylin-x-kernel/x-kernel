@@ -42,7 +42,7 @@ targets, so the regenerated lockfile stays complete for every platform.
 `cargo fetch` produces the same lockfile but also downloads crate
 sources, so prefer `generate-lockfile` at rebase time.
 `cargo metadata --locked` must succeed before continuing — it is the
-same check `scripts/check_deps.py` runs, and a failure means the
+same check `make check_deps` runs, and a failure means the
 lockfile is out of sync with `Cargo.toml`.
 
 For a single dependency bump rather than a full conflict,

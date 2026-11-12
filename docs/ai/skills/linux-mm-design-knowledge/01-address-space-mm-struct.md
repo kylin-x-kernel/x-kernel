@@ -30,7 +30,7 @@
     - `mmgrab/mmdrop` 管 `mm_count`
     - `mm_users` 降到 0 后进入 `exit_mmap()`
 - `struct maple_tree`
-  - 文件: `include/linux/mm_types.h`
+  - 文件: `include/linux/maple_tree.h`
   - 设计意图: 高效按地址查找、迭代、split/merge VMA。
 
 ## 4. Key Code Paths
