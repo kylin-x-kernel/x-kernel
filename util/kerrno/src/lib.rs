@@ -182,6 +182,9 @@ pub enum KErrorKind {
     /// Priority inheritance reports this when a task waits for a lock it
     /// already owns, or the owner chain returns to the waiter.
     Deadlock,
+    /// The resolved object has the wrong file type for the request
+    /// (Linux `EFTYPE`, e.g. `openat2` `OPENAT2_REGULAR` on a non-regular file).
+    WrongFileType,
 }
 
 impl KErrorKind {
@@ -237,6 +240,7 @@ impl KErrorKind {
             FileTooLarge => "File too large",
             IoWaitInterrupted => "File wait interrupted",
             Deadlock => "Resource deadlock",
+            WrongFileType => "Inappropriate file type or format",
         }
     }
 
@@ -300,6 +304,7 @@ impl KErrorKind {
             46 => IoWaitInterrupted,
             47 => Stale,
             48 => Deadlock,
+            49 => WrongFileType,
             _ => return None,
         })
     }
@@ -368,6 +373,7 @@ impl From<KErrorKind> for LinuxError {
             Unsupported => LinuxError::ENOSYS,
             WouldBlock => LinuxError::EAGAIN,
             Deadlock => LinuxError::EDEADLK,
+            WrongFileType => LinuxError::EFTYPE,
         }
     }
 }
@@ -421,6 +427,7 @@ impl TryFrom<LinuxError> for KErrorKind {
             LinuxError::ENOSYS => Unsupported,
             LinuxError::EAGAIN => WouldBlock,
             LinuxError::EDEADLK => Deadlock,
+            LinuxError::EFTYPE => WrongFileType,
             _ => {
                 return Err(e);
             }
@@ -661,7 +668,8 @@ kerror_consts!(
     WriteZero,
     ConnectionAborted,
     FileTooLarge,
-    IoWaitInterrupted
+    IoWaitInterrupted,
+    WrongFileType
 );
 
 /// A specialized [`Result`] type with [`KError`] as the error type.

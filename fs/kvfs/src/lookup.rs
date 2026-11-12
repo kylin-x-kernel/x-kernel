@@ -47,6 +47,19 @@ bitflags::bitflags! {
         const NO_XDEV = 1 << 3;
         /// Require the final path component to be a directory.
         const DIRECTORY = 1 << 4;
+        /// Reject any symlink during the walk (`openat2` `RESOLVE_NO_SYMLINKS`).
+        const NO_SYMLINKS = 1 << 5;
+        /// Reject an absolute pathname and keep the walk in the caller's
+        /// subtree (`openat2` `RESOLVE_BENEATH`). A ".." that would leave the
+        /// anchor is `EXDEV`, as is a link that resolves outside it.
+        const BENEATH = 1 << 6;
+        /// Treat the lookup base as a rooted subtree (`openat2`
+        /// `RESOLVE_IN_ROOT`): absolute pathnames are rebased there and ".."
+        /// is clamped instead of escaping.
+        const IN_ROOT = 1 << 7;
+        /// Only cached lookups are allowed (`openat2` `RESOLVE_CACHED`). A
+        /// lookup that would need the slow filesystem path returns `EAGAIN`.
+        const CACHED = 1 << 8;
     }
 }
 
@@ -69,6 +82,17 @@ impl LookupFlags {
     /// Returns whether magic-link following is forbidden.
     pub const fn rejects_magic_links(self) -> bool {
         self.contains(Self::NO_MAGIC_LINKS)
+    }
+
+    /// Returns whether the walk is anchored to a subtree (`BENEATH` or
+    /// `IN_ROOT`), so every resolved location must remain below the root.
+    pub fn is_anchored(self) -> bool {
+        self.intersects(Self::BENEATH | Self::IN_ROOT)
+    }
+
+    /// Returns whether only cached lookups are permitted.
+    pub const fn is_cached_only(self) -> bool {
+        self.contains(Self::CACHED)
     }
 }
 

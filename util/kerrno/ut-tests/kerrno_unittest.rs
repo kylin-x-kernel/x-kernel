@@ -56,6 +56,7 @@ const KIND_LINUX_PAIRS: &[(KErrorKind, LinuxError)] = &[
     (KErrorKind::WouldBlock, LinuxError::EAGAIN),
     (KErrorKind::WriteZero, LinuxError::EIO),
     (KErrorKind::Deadlock, LinuxError::EDEADLK),
+    (KErrorKind::WrongFileType, LinuxError::EFTYPE),
 ];
 
 #[def_test]

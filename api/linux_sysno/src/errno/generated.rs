@@ -137,6 +137,7 @@ errno_enum! {
         ENOTRECOVERABLE(131) = "State not recoverable",
         ERFKILL(132) = "Operation not possible due to RF-kill",
         EHWPOISON(133) = "Memory page has hardware error",
+        EFTYPE(134) = "Inappropriate file type or format",
         ERESTARTSYS(512) = "Restart syscall",
         ERESTARTNOINTR(513) = "Restart if no interrupt",
         ERESTARTNOHAND(514) = "restart if no handler..",

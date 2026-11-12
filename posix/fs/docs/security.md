@@ -176,6 +176,27 @@ kfd resources / kvfs / device and pipe implementations
 而非直接把整个寄存器当作 `usize`。非正值返回 `EINVAL`，不读取 pathname、
 不写输出缓冲区；正值复制仍使用 `UserPtr::write_vm_slice`，不引入裸指针访问。
 
+### openat2 input validation
+
+`sys_openat2` copies and validates the user `struct open_how` before it reads
+the pathname or resolves the directory fd, so malformed requests fail with the
+argument error rather than a later `EFAULT`/`EBADF`:
+
+- `read_open_how`: `size < OPEN_HOW_SIZE_VER0` (24) is `EINVAL`; `size > PATH_MAX`
+  is `E2BIG`; any non-zero byte past the known fields is `E2BIG`
+  (`copy_struct_from_user` semantics).
+- `Openat2How::validate` (kvfs `OpenHow::from_openat2`): unknown `flags` or
+  `resolve` bits are `EINVAL`; `mode` bits outside `0o7777` are `EINVAL`; a
+  non-zero `mode` without `O_CREAT` is `EINVAL`; `RESOLVE_BENEATH |
+  RESOLVE_IN_ROOT` is `EINVAL`; `OPENAT2_REGULAR` with `O_PATH`/`O_DIRECTORY` is
+  `EINVAL`; contradictory `O_DIRECTORY|O_CREAT` / invalid `O_PATH` combinations
+  are `EINVAL` before the `RESOLVE_CACHED` rule; `RESOLVE_CACHED` with
+  `O_CREAT`/`O_TRUNC` is `EAGAIN`.
+- The pathname is bounded to `PATH_MAX - 1` payload bytes; a longer or
+  unterminated name is `ENAMETOOLONG`, invalid UTF-8 is `EILSEQ`.
+- `RESOLVE_BENEATH` with an absolute pathname is `EXDEV` before the dirfd is
+  consulted.
+
 ## 线程安全
 
 `statx` 的 metadata 与 mount ID 来自同一次解析后持有的目标；取得身份时

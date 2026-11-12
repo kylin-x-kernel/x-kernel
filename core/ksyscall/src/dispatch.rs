@@ -270,6 +270,12 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         // fd ops
         #[cfg(target_arch = "x86_64")]
         Sysno::open => sys_open(uctx.arg0().into(), uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::openat2 => sys_openat2(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2().into(),
+            uctx.arg3(),
+        ),
         Sysno::openat => sys_openat(
             uctx.arg0() as _,
             uctx.arg1().into(),

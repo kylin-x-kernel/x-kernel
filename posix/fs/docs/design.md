@@ -35,7 +35,7 @@ posix/fs/
 ├── src/
 │   ├── lib.rs          # crate 入口和 syscall re-export
 │   ├── path.rs         # AT_*、dirfd、VFS magic-link 和 empty-path 解析
-│   ├── open.rs         # open/openat 参数转换和 fd 安装
+│   ├── open.rs         # open/openat/openat2 argument conversion and fd install
 │   ├── io.rs           # read/write/lseek/fallocate/sendfile/splice 等 I/O
 │   ├── fd_ops.rs       # close/dup/close_range/fcntl/flock
 │   ├── dir.rs          # chdir/chroot/mkdir/getdents64/getcwd
@@ -82,7 +82,7 @@ core/ksyscall
 | 子模块 | 职责 |
 |--------|------|
 | `path` | 统一处理绝对路径忽略 `dirfd`、`AT_FDCWD`、`AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW`、`O_NOFOLLOW` 和 VFS magic-link follow |
-| `open` | 将 Linux open 参数交给 `kvfs::Filename`，并把 VFS 返回的打开结果加入当前进程 fd 表；不重新解析 special-file pathname |
+| `open` | Hands Linux open arguments to `kvfs::Filename` and installs the returned file into the current process fd table; does not re-resolve special-file pathnames. `openat2` additionally copies and validates `struct open_how` (`read_open_how`), enforces `RESOLVE_*` constraints via kvfs namei, and selects the dirfd/cwd base (a plain absolute pathname ignores dirfd) |
 | `io` | 处理普通、向量、定点和 fd-to-fd 数据传输 syscall |
 | `fd_ops` | 维护 fd 生命周期、复制、`CLOEXEC`、非阻塞标志和部分 `fcntl` 行为 |
 | `dir` | 维护当前目录、根目录、目录/节点创建和 `linux_dirent64` 输出；`mknodat` 只转换 ABI 参数，创建策略由 KVFS 执行 |
@@ -234,6 +234,28 @@ syscall 层保留参数校验、用户 offset 回写及整个请求的重启决�
 6. 设备节点的特殊 open 语义由对应 VFS/device file operations 处理。
 7. 根据 `O_NONBLOCK`、`O_CLOEXEC` 设置对象和 descriptor 标志。
 8. 把打开的 file 加入当前进程 fd 表并返回 fd。
+
+### `openat2`
+
+1. `read_open_how` copies `struct open_how` with Linux `copy_struct_from_user`
+   semantics: `size < OPEN_HOW_SIZE_VER0` is `EINVAL`, `size > PATH_MAX` is
+   `E2BIG`, and non-zero reserved bytes are `E2BIG`.
+2. `Openat2How::validate` applies the `build_open_flags` rules (unknown flag or
+   resolve bits, mode outside `0o7777`, mode without `O_CREAT`,
+   `BENEATH|IN_ROOT`, `OPENAT2_REGULAR` with `O_PATH`/`O_DIRECTORY`, and
+   `RESOLVE_CACHED` with `O_CREAT`/`O_TRUNC`) before the pathname or dirfd is
+   touched.
+3. The base is the dirfd (or cwd for `AT_FDCWD`) only for a relative pathname or
+   an anchored request; a plain absolute pathname uses the process root and
+   ignores dirfd. For `RESOLVE_IN_ROOT`/`RESOLVE_BENEATH` the directory is passed
+   as both root and base, and kvfs namei owns rebasing/clamping.
+4. `Filename::open_with_openat2_at` runs the constrained namei walk and the
+   opened file is installed into the fd table.
+
+`RESOLVE_CACHED` is a cache-only constraint: a dentry-cache miss, or a request
+with `O_CREAT`/`O_TRUNC`, returns `EAGAIN`. Symlink expansion whose target is not
+cached may still consult the filesystem, so the cached-only guarantee is a
+superset rather than a strict Linux `LOOKUP_CACHED` match.
 
 ### `fchdir` 的 fd 解析
 

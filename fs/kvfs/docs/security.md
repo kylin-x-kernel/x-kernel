@@ -125,6 +125,10 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 
 - `Filename::open_with_flags_at` 和 `dentry_open` 是保留 raw `O_*` 的兼容入口，会把
   原始位规范化为 `OpenParams` 与 `OpenFlags`。
+- `Filename::open_with_openat2_at` receives the raw `struct open_how` triple
+  (flags/mode/resolve) copied from user space by the POSIX layer, which checks
+  the size and reserved bytes; kvfs validates the triple through
+  `OpenHow::from_openat2` before it reaches namei.
 - 设备 open callback 只能通过 `VfsFileBuilder` 的窄接口检查瞬态 `O_NOCTTY`，避免
   暴露或误用完整的创建期 flag 集合。
 - `sys_renameat2` 将 raw rename bits 转换为 `RenameFlags` 后才进入 VFS。
@@ -194,6 +198,17 @@ model 由 safe Rust lock、`Arc` ownership 和 operation trait 约束维护内�
 - pseudo filesystem 的 magic、block size、最大文件大小和 root inode 由通用 helper 一次
   安装；具体实现不得在 private state 复制另一组 geometry/identity。
 - `Nameidata` 不持有 credential；一次操作的调用者必须在整个方法链中传递同一个 `&Cred`。
+- The `openat2(2)` `RESOLVE_*` constraints must be enforced uniformly by namei,
+  not by replacing the root in the syscall layer: every `BENEATH`/`IN_ROOT` path
+  transition must verify the result stays inside the anchored subtree
+  (`Path::render_from`); `NO_XDEV` must pin the starting mount and cover descent
+  into a mount, an upward `..`, an absolute symlink target and a magic-link jump;
+  `NO_SYMLINKS` must cover the final component and magic links.
+- An anchored lookup must refuse to deliver an outside object (`EXDEV`) when a
+  concurrent rename changes an intermediate directory's topology; it must not
+  trust later parent traversal just because `path == root` held earlier.
+- `RESOLVE_CACHED` must return `EAGAIN` before a slow lookup or a side effect such
+  as create or truncate.
 - 路径中间目录在 lookup 下一组件前必须通过 `MAY_EXEC`。
 - 尾随 `/` 必须在最终组件 lookup 前强制 `FOLLOW_FINAL | DIRECTORY`；最终
   `LOOKUP_DIRECTORY` 必须由通用 namei 用 `Dentry::can_lookup()` 消费，不能由 open 层用
