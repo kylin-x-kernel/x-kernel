@@ -8,8 +8,11 @@ use kaddr_layout::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX};
 use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize};
 use kprocess::{current_user_process, current_user_process_address_space};
+use linux_raw_sys::general::RLIMIT_AS;
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange, align_up_4k};
 use memspace::{VmBackingKind, VmRuntimeRef};
+
+use crate::limits::check_address_space_limit;
 
 #[derive(Clone, Copy)]
 struct HeapLayout {
@@ -91,18 +94,20 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
         return Ok(current_top as isize);
     }
 
+    let address_space_limit = process.resources()?.rlimit(RLIMIT_AS)?.current;
     if let Some((expand_start, expand_size)) = request.expand_range() {
-        if process
-            .address_space()?
-            .lock()
-            .map(
-                expand_start,
-                expand_size,
-                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-                false,
-                VmRuntimeRef::new_anon_private(expand_start, PageSize::Size4K),
-            )
-            .is_err()
+        let aspace_ref = process.address_space()?;
+        let mut aspace = aspace_ref.lock();
+        if check_address_space_limit(&aspace, expand_size, None, address_space_limit).is_err()
+            || aspace
+                .map(
+                    expand_start,
+                    expand_size,
+                    MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+                    false,
+                    VmRuntimeRef::new_anon_private(expand_start, PageSize::Size4K),
+                )
+                .is_err()
         {
             return Ok(current_top as isize);
         }
@@ -127,6 +132,11 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
                     let limit = VirtAddrRange::new(aspace.base(), aspace.end());
                     if aspace.find_free_area(map_start, map_size, limit, PAGE_SIZE_4K)
                         != Some(map_start)
+                    {
+                        return Ok(current_top as isize);
+                    }
+                    if check_address_space_limit(&aspace, map_size, None, address_space_limit)
+                        .is_err()
                     {
                         return Ok(current_top as isize);
                     }

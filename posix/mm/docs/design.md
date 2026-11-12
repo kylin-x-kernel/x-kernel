@@ -14,6 +14,7 @@ This state is maintained by `mm/memspace`, `mm/filemap`, `pagecache`, `memfs`,
 ## Scope
 
 - `src/brk.rs`
+- `src/limits.rs`: address-space limit admission for mapping growth.
 - `src/mmap.rs`
 - `src/memfd.rs`
 - `src/mincore.rs`
@@ -281,3 +282,19 @@ callback rather than new-map admission. Fixed replacement removes the target,
 trims a shrinking source, then resolves the remaining source and prepares its
 move. These removals remain effective if a later preparation fails. The syscall
 has no mapping-admission retry around this destructive sequence.
+
+## Address-space resource admission
+
+`mmap`, growing `brk`, and growing or `MREMAP_DONTUNMAP` remaps snapshot the
+current process's `RLIMIT_AS` and check the projected VMA footprint under the
+same MM lock as the mapping mutation. `MAP_FIXED` credits mapped destination
+bytes before replacing them. A growing `mremap` checks its growth before fixed
+destination removal; fixed `MREMAP_DONTUNMAP` removes the destination before
+checking the retained source's additional charge, as in Linux `mremap_to`.
+Shrinking mappings remains available after a limit is lowered.
+Denied `mmap` and `mremap` return `ENOMEM`; denied `brk` returns the unchanged
+break, matching the Linux syscall ABI.
+
+The existing VMA tree supplies accounting for finite limits. Unlimited limits
+bypass the accounting walk. The syscall layer adds no counters or policy fields
+to the MM object and does not enforce an address-space limit at page-fault time.

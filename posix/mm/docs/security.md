@@ -147,3 +147,16 @@ callback rather than new-map admission. Fixed replacement removes the target,
 trims a shrinking source, then resolves the remaining source and prepares its
 move. These removals remain effective if a later preparation fails. The syscall
 has no mapping-admission retry around this destructive sequence.
+
+## RLIMIT_AS
+
+Address-space growth is admitted using a process-resource limit snapshot and the
+VMA footprint while holding the MM lock. Concurrent mapping operations cannot
+spend the same remaining budget. Fixed mmap accounts for holes and existing
+destination mappings before removing them. Growing mremap checks its delta
+before fixed replacement; fixed `MREMAP_DONTUNMAP` removes the destination
+before checking the retained source's charge, so rejection can leave that
+destination unmapped. A denied brk leaves the break unchanged. Unlimited limits
+retain the normal fast path; finite-limit arithmetic is checked.
+This limit governs virtual address-space admission, not physical memory
+availability, and is not checked again when a page fault allocates backing.
