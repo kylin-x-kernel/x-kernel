@@ -583,6 +583,14 @@ impl IrqStateDesc {
         self.runtime.action_count()
     }
 
+    /// Returns whether any installed action refuses user-originated routing.
+    ///
+    /// Line exclusion must be held. The scan is control-plane only; dispatch
+    /// never evaluates owner policy.
+    pub(super) fn has_user_affinity_restriction(&self) -> bool {
+        self.runtime.actions.has_user_affinity_restriction()
+    }
+
     /// Captures membership under Line exclusion for an admitted traversal.
     ///
     /// # Safety

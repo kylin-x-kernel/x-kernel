@@ -8,8 +8,12 @@ With `nmi-pmu`, an available mechanism selects `register_nmi_startup`; mode
 (GIC INTIDs 16..32, exclusive upper bound) use `try_register_percpu_startup`
 and remain disabled until runtime CPU services call `PmuInterruptIf::enable_irq`
 on the BSP and each AP. Ordinary SPIs retain `try_register_startup` with
-`disabled()` for `nmi-pmu` builds and `auto_enable()` for PMU-only builds.
-An ordinary action needs no NMI preparation or local action publication.
+`disabled()` for `nmi-pmu` builds and `auto_enable()` for PMU-only builds, and
+add `restrict_user_affinity()` in both cases. This is a user-only routing
+restriction owned by the regular action; it does not block the trusted kernel
+setter, change automatic selection, or establish an SPI-to-CPU initial route.
+PPI and real-NMI lifecycle paths are unchanged. An ordinary action needs no NMI
+preparation or local action publication.
 Activation skips `configure_nmi` in mode `None`. Periodic NMI shutdown and global
 NMI retirement remain unsupported in that mode; they do not retire the ordinary
 fallback action.
@@ -172,7 +176,7 @@ Guest tests live in crate-root `ut-tests/`, mounted by
 | `peripherals::smccc::tests` | `ut-tests/peripherals_smccc.rs` | 4 |
 | `peripherals::trng::tests` | `ut-tests/peripherals_trng.rs` | 6 |
 | `peripherals::pmu::tests_shutdown` | `ut-tests/peripherals_pmu_shutdown.rs` | Local shutdown ordering, retry, reuse and rejection with another event-counter owner |
-| `peripherals::pmu::tests_ordinary` | `ut-tests/peripherals_pmu_ordinary.rs` | Ordinary PPI activation and restoration on each boot CPU |
+| `peripherals::pmu::tests_ordinary` | `ut-tests/peripherals_pmu_ordinary.rs` | Ordinary PPI activation/restoration on each boot CPU and ordinary SPI user-routing policy declaration |
 | `peripherals::pmu::lifecycle::tests` | `ut-tests/pmu_lifecycle.rs` | Real cross-CPU PMU/GIC shutdown, injected incomplete pass, retry and republication |
 
 An event-counter fixture verifies that periodic arm and shutdown reject another

@@ -16,11 +16,14 @@ Even with `nmi-pmu` compiled, mode `None` installs an ordinary IRQ action and
 skips NMI preparation at enable. Ordinary PPI registration uses the dedicated
 disabled PerCpu startup API in both `nmi-pmu` and PMU-only builds; runtime CPU
 services explicitly activate each local line. KIRQ rejects a mismatched resolved
-flow rather than falling back to generic registration. Ordinary SPI registration
-retains the existing policy: disabled with `nmi-pmu`, auto-enabled without it.
-The single global firmware IRQ selection does not establish per-CPU SPI routing
-or affinity; this change adds no such guarantee. No synthetic preparation
-capability is used to publish an NMI action on an unsupported controller.
+flow rather than falling back to generic registration. Ordinary SPI registration retains the existing activation policy: disabled
+with `nmi-pmu`, auto-enabled without it, with `restrict_user_affinity()` added
+in both cases. This is a user-only policy carried by the regular action; it
+does not block the trusted kernel setter, alter initial routing, or make the
+single global firmware IRQ selection a per-CPU SPI routing contract. The PMU
+adapter still does not establish SPI-to-CPU assignment. No synthetic
+preparation capability is used to publish an NMI action on an unsupported
+controller.
 Periodic NMI shutdown and global retirement reject mode `None` as unsupported, leaving ordinary
 fallback ownership outside that protocol. Mode changes after registration
 are not supported.

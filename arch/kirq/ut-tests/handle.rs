@@ -11,7 +11,8 @@ use unittest::{assert, assert_eq, def_test};
 use super::{IrqLineHandle, lookup_irq_line, next_irq_line};
 use crate::{
     Handler, IrqAffinityApplyError, IrqAffinityChip, IrqAffinityError, IrqAffinityPrepare,
-    IrqDeferredAffinityChip, IrqDesc, IrqDescError, IrqEvent, IrqFlow, LevelChip,
+    IrqDeferredAffinityChip, IrqDesc, IrqDescError, IrqEvent, IrqFlow, IrqRegisterOptions,
+    LevelChip,
     action::IrqAction,
     runtime::{
         manager::{ManagementMode, publish_replaced_on_acquisition, with_retained_line},
@@ -395,4 +396,184 @@ fn enumeration_rejects_nmi_context() {
         result,
         Err(IrqDescError::InvalidContext { .. })
     ));
+}
+
+
+#[def_test(serial)]
+fn protected_regular_remains_readable_but_rejects_user_routing() {
+    APPLY_CALLS.store(0, Ordering::Relaxed);
+    let virq = 0x7e000070;
+    let line = TestLine::new(virq);
+    line.with_chip(&COUNTED);
+    let handle = line.handle();
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert_eq!(
+        crate::try_register_with_options(
+            virq,
+            handler.clone(),
+            IrqRegisterOptions::disabled().restrict_user_affinity(),
+        ),
+        Ok(true)
+    );
+    let before = handle.irq_affinity().unwrap();
+    assert_eq!(
+        handle.check_user_affinity_change(),
+        Err(IrqAffinityError::UserRestricted)
+    );
+    assert_eq!(
+        handle.set_user_affinity(&cpu_mask(0)),
+        Err(IrqAffinityError::UserRestricted)
+    );
+    assert_eq!(APPLY_CALLS.load(Ordering::Relaxed), 0);
+    assert_eq!(handle.irq_affinity().unwrap(), before);
+
+    // The trusted kernel operation is deliberately policy-independent.
+    assert!(handle.set_irq_affinity(&cpu_mask(0)).is_ok());
+    assert_eq!(APPLY_CALLS.load(Ordering::Relaxed), 1);
+    let removed = crate::try_free_irq(virq).unwrap().unwrap();
+    assert!(Arc::ptr_eq(&removed, &handler));
+    drop(removed);
+}
+
+#[def_test(serial)]
+fn unprotected_user_path_and_policy_removal_are_independent() {
+    let virq = 0x7e000071;
+    let line = TestLine::new(virq);
+    line.with_chip(&ACCEPT);
+    let handle = line.handle();
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert_eq!(
+        crate::try_register_with_options(virq, handler, IrqRegisterOptions::disabled()),
+        Ok(true)
+    );
+    assert_eq!(handle.check_user_affinity_change(), Ok(()));
+    assert!(handle.set_user_affinity(&cpu_mask(0)).is_ok());
+    let removed = crate::try_free_irq(virq).unwrap().unwrap();
+    drop(removed);
+    assert!(matches!(
+        handle.check_user_affinity_change(),
+        Err(IrqAffinityError::Management(IrqDescError::NoIrqAction { .. }))
+    ));
+}
+
+#[def_test(serial)]
+fn old_handle_cannot_bypass_new_protected_owner() {
+    let virq = 0x7e000072;
+    let line = TestLine::new(virq);
+    line.with_chip(&ACCEPT);
+    let old = line.handle();
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert_eq!(
+        crate::try_register_with_options(
+            virq,
+            handler,
+            IrqRegisterOptions::disabled().restrict_user_affinity(),
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        old.set_user_affinity(&cpu_mask(0)),
+        Err(IrqAffinityError::UserRestricted)
+    );
+}
+
+#[def_test(serial)]
+fn protected_policy_follows_registration_and_removal() {
+    let virq = 0x7e000073;
+    let line = TestLine::new(virq);
+    line.with_chip(&ACCEPT);
+    assert!(matches!(
+        line.handle().check_user_affinity_change(),
+        Err(IrqAffinityError::Management(IrqDescError::NoIrqAction { .. }))
+    ));
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert_eq!(
+        crate::try_register_with_options(
+            virq,
+            handler,
+            IrqRegisterOptions::disabled().restrict_user_affinity(),
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        line.handle().check_user_affinity_change(),
+        Err(IrqAffinityError::UserRestricted)
+    );
+    let removed = crate::try_free_irq(virq).unwrap().unwrap();
+    drop(removed);
+    assert!(matches!(
+        line.handle().check_user_affinity_change(),
+        Err(IrqAffinityError::Management(IrqDescError::NoIrqAction { .. }))
+    ));
+    let second: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert_eq!(
+        crate::try_register_with_options(virq, second, IrqRegisterOptions::disabled()),
+        Ok(true)
+    );
+    assert_eq!(line.handle().check_user_affinity_change(), Ok(()));
+    assert!(line.handle().set_user_affinity(&cpu_mask(0)).is_ok());
+}
+
+#[def_test(serial)]
+fn user_policy_check_keeps_source_errors_first() {
+    let virq = 0x7e000074;
+    let line = TestLine::new(virq);
+    line.with_chip(&ACCEPT);
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert_eq!(
+        crate::try_register_with_options(
+            virq,
+            handler,
+            IrqRegisterOptions::disabled().restrict_user_affinity(),
+        ),
+        Ok(true)
+    );
+    line.line.lock().desc.affinity = crate::IrqAffinity::Cpu(0);
+    assert_eq!(
+        line.handle().check_user_affinity_change(),
+        Err(IrqAffinityError::OwnerFixed)
+    );
+}
+
+#[def_test(serial)]
+fn protected_regular_rejects_shared_addition_without_relaxing_policy() {
+    let virq = 0x7e000075;
+    let line = TestLine::new(virq);
+    line.with_chip(&ACCEPT);
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert_eq!(
+        crate::try_register_with_options(
+            virq,
+            handler,
+            IrqRegisterOptions::disabled().restrict_user_affinity(),
+        ),
+        Ok(true)
+    );
+    let shared: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert_eq!(crate::try_register_shared(virq, shared), Ok(None));
+    assert_eq!(
+        line.handle().check_user_affinity_change(),
+        Err(IrqAffinityError::UserRestricted)
+    );
+}
+
+#[def_test(serial)]
+fn unprotected_user_deferred_request_remains_pending() {
+    let virq = 0x7e000076;
+    let line = TestLine::new(virq);
+    {
+        let mut entry = line.line.lock();
+        entry.set_flow_for_tests(IrqFlow::Level(&LEVEL));
+        entry.test_deferred_affinity = Some(&DEFERRED);
+    }
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert_eq!(
+        crate::try_register_with_options(virq, handler, IrqRegisterOptions::disabled()),
+        Ok(true)
+    );
+    let handle = line.handle();
+    assert_eq!(handle.check_user_affinity_change(), Ok(()));
+    let snapshot = handle.set_user_affinity(&cpu_mask(0)).unwrap();
+    assert!(snapshot.is_pending);
+    assert_eq!(handle.irq_affinity().unwrap(), snapshot);
 }

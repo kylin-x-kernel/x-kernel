@@ -114,22 +114,45 @@ pub fn prepare_percpu_forwarding(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IrqRegisterOptions {
     auto_enable: bool,
+    user_affinity_restricted: bool,
 }
 
 impl IrqRegisterOptions {
     /// Register and enable the IRQ line after successful handler installation.
     pub const fn auto_enable() -> Self {
-        Self { auto_enable: true }
+        Self {
+            auto_enable: true,
+            user_affinity_restricted: false,
+        }
     }
 
     /// Register the handler but leave delivery disabled until explicit enable.
     pub const fn disabled() -> Self {
-        Self { auto_enable: false }
+        Self {
+            auto_enable: false,
+            user_affinity_restricted: false,
+        }
+    }
+
+    /// Declares that this regular action's source owner does not permit
+    /// user-originated routing changes.
+    ///
+    /// This is a user-only restriction, not Linux `IRQF_NOBALANCING`: the
+    /// trusted kernel setter and automatic initial routing are unchanged. The
+    /// flag is published with the action and disappears with its last owner.
+    pub const fn restrict_user_affinity(mut self) -> Self {
+        self.user_affinity_restricted = true;
+        self
     }
 
     /// Returns whether successful registration should enable the line.
     pub const fn should_auto_enable(self) -> bool {
         self.auto_enable
+    }
+
+    /// Returns whether this action declares a user-affinity restriction.
+    pub const fn is_user_affinity_restricted(self) -> bool {
+        self.user_affinity_restricted
     }
 }
 
@@ -976,6 +999,9 @@ fn register_prepared_locked(
     }
     let needs_restore = configure_registration(entry, &mut apply_plan)?;
     super::affinity::apply_deferred_before_activation(entry)?;
+    if options.is_user_affinity_restricted() {
+        prepared.set_user_affinity_restricted();
+    }
     let installed = entry.publish_regular_action(prepared);
     debug_assert!(installed, "duplicate regular action was checked above");
     let mut plan = if options.should_auto_enable() {

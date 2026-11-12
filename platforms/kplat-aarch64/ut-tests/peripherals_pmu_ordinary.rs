@@ -67,3 +67,13 @@ fn ordinary_pmu_uses_an_enabled_local_action() -> unittest::TestResult {
     unittest::ktest_println!("PMU ordinary action activated on {} GICv2 CPUs", cpus);
     unittest::TestResult::Ok
 }
+
+#[def_test(serial)]
+fn ordinary_spi_registration_declares_user_routing_restriction() {
+    let options = super::ordinary_spi_register_options();
+    assert!(options.is_user_affinity_restricted());
+    #[cfg(feature = "nmi-pmu")]
+    assert!(!options.should_auto_enable());
+    #[cfg(not(feature = "nmi-pmu"))]
+    assert!(options.should_auto_enable());
+}

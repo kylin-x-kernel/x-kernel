@@ -99,6 +99,46 @@ proof. A stale handle returns `UnknownIrq` before hardware and never redirects
 to a replacement Line. This access is trusted kernel control, not user
 authorization or source-owner policy.
 
+## User Routing Protection
+
+`IrqRegisterOptions::restrict_user_affinity` declares a source owner's
+user-routing restriction for a regular action. The flag lives in the existing
+`IrqAction` (`USER_AFFINITY_RESTRICTED`) and is published atomically with that
+action by `publish_regular_action`; there is no Line cache, global table or
+separate policy count. `ActionSet` scans installed action flags under Line
+exclusion on the control path. Removing the action removes the restriction.
+Protected shared registration is not supported in this PR; existing
+regular/shared conflict rules reject the combination.
+
+This is deliberately **user-only**, not Linux `IRQF_NOBALANCING` / `IRQD_NO_BALANCING`.
+The trusted kernel `set_irq_affinity` remains policy-independent (but still
+subject to source, context, fixed, PerCpu, NMI, MSI and failure rules), and
+automatic initial routing is unchanged. A source owner that needs a specific
+initial route must establish it through the trusted path before requiring
+protection. PMU SPI-to-CPU association and real-delivery validation remain
+Ticket07 owner integration.
+
+Observation and write eligibility are distinct:
+
+- `IrqLineHandle::irq_affinity` remains the identity-bound observation and is
+  available for a protected Line; policy does not hide requested/effective/
+  pending/failure state.
+- `IrqLineHandle::check_user_affinity_change` samples change eligibility
+  (`source -> teardown -> action presence -> policy`) without hardware access.
+  It is not an authorization token and does not promise a target mask is
+  programmable.
+- `IrqLineHandle::set_user_affinity` repeats the checks under
+  `with_retained_line` and the Line lock, then runs the existing
+  `apply_user_locked` transaction. Policy denial is before the chip callback.
+  No-action and teardown reject the user change entrance; they do not suppress
+  observation.
+
+The PMU adapter's ordinary SPI path uses
+`IrqRegisterOptions::disabled()` or `auto_enable()` with
+`restrict_user_affinity()`; the PPI and real-NMI paths retain their existing
+lifecycle. `enable_irq` remains non-sleeping and does not call a task affinity
+setter.
+
 ## Shared Descriptor Values
 
 IrqTrigger, IrqController and IrqDomainId are re-exported from irq-types with

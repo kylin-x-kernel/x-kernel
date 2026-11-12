@@ -92,6 +92,37 @@ remains the existing `apply_locked` path with all source, ready-CPU, failure and
 deferred rules unchanged. The handle API provides no credentials and no
 capability bypass; procfs and source-owner policy remain outside this module.
 
+## User Routing Protection Boundary
+
+User routing protection is a change-admission policy, not an information-access
+rule. A protected ordinary Line remains readable through `irq_affinity`; a
+future procfs consumer may expose that snapshot read-only. Only
+`check_user_affinity_change` and `set_user_affinity` apply the action policy.
+
+The restriction belongs to the regular action and cannot outlive it. Before
+action publication, lookup/configuration failure leaves no policy. Once the
+action is published, its existing lifetime is authoritative; a post-publication
+platform failure does not create a second policy state. Last-action removal
+removes the policy with the existing pending cancellation. Re-registration uses
+fresh options. The policy scan runs under Line exclusion and is not a dispatch
+path check.
+
+The trusted kernel setter is intentionally not blocked by this user-only
+policy. It still enforces fixed, PerCpu, NMI, MSI, source and context rules, and
+is not proof of caller ownership. Future generic balancing adapters must use
+the checked user path or the user-only promise is incomplete.
+
+`check_user_affinity_change` is a sampled eligibility observation and never a
+capability token. The setter repeats the checks after management admission.
+Denial changes no affinity snapshot, requested/effective/pending state, disable
+depth, action membership or hardware. No-action and teardown reject the user
+change entrance; read observation remains unchanged.
+
+PMU ordinary SPI and unavailable-NMI fallback declare the restriction through
+their existing registration options. PPI and real-NMI lifecycle paths are
+unchanged. PMU initial SPI-CPU association and real delivery remain owner
+integration obligations; no CPU0 fallback or fake fixed affinity is introduced.
+
 ## NMI Action Lifetime Boundary
 
 `runtime/nmi/action.rs::NmiAction` owns one stable `KBox<Handler>`.

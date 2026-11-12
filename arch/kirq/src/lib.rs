@@ -26,6 +26,10 @@
 //! - [`lookup_irq_line`] / [`next_irq_line`] provide sparse, identity-retained
 //!   Line handles for kernel control consumers. They do not create mappings or
 //!   grant user authority; every operation revalidates the original Line.
+//!   `irq_affinity` remains readable for protected Lines, while
+//!   `check_user_affinity_change` and `set_user_affinity` enforce the
+//!   action-owned user-routing restriction. Trusted `set_irq_affinity` remains
+//!   policy-independent and is not user authorization.
 //! - Architecture adapters enter through [`handle_irq`] / [`handle_nmi`]; irqchip
 //!   providers implement [`IntrManagerIf`] and transfer claims using [`PendingIrq`].
 //!   These entry functions and claim construction are unsafe: the adapter must

@@ -34,6 +34,11 @@ pub enum IrqAffinityError {
     Unsupported,
     /// Descriptor affinity belongs to the source owner, not runtime reassignment.
     OwnerFixed,
+    /// A source owner refuses user-originated routing changes.
+    ///
+    /// This is distinct from `OwnerFixed`: trusted kernel routing may remain
+    /// available, and the current affinity snapshot remains observable.
+    UserRestricted,
     /// The request contains no interrupt-ready CPU.
     NoReadyCpu,
     /// The controller rejected the target before changing hardware.

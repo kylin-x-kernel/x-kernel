@@ -14,7 +14,9 @@ use alloc::sync::Arc;
 use kcpu_id_map::KCpuMask;
 
 use super::{
-    affinity::{apply_locked, snapshot_locked},
+    affinity::{
+        apply_locked, apply_user_locked, check_user_affinity_change_locked, snapshot_locked,
+    },
     index::DIRECTORY,
     manager::{self, ManagementMode},
     state::{IRQ_STATE, IrqLine},
@@ -68,6 +70,56 @@ impl IrqLineHandle {
             return Err(IrqAffinityError::Management(IrqDescError::UnknownIrq));
         }
         snapshot_locked(&entry)
+    }
+
+    /// Samples whether a user-originated routing change is currently allowed.
+    ///
+    /// This checks source/flow eligibility, teardown, action presence and owner
+    /// policy under `IRQ_STATE -> Line`, but performs no hardware operation and
+    /// does not authorize a future request. It must not be used as a
+    /// capabilities token; a later setter repeats every check. NMI is rejected
+    /// before locking. This result does not imply a particular CPU mask is
+    /// ready or programmable.
+    pub fn check_user_affinity_change(&self) -> Result<(), IrqAffinityError> {
+        if crate::context::is_in_nmi() {
+            return Err(IrqAffinityError::Management(IrqDescError::InvalidContext {
+                operation: "check user IRQ affinity change",
+            }));
+        }
+        let state = IRQ_STATE.lock();
+        if !state
+            .descs
+            .get(&self.virq)
+            .is_some_and(|current| Arc::ptr_eq(&current, &self.line))
+        {
+            return Err(IrqAffinityError::Management(IrqDescError::UnknownIrq));
+        }
+        let entry = self.line.lock();
+        if entry.is_retired() {
+            return Err(IrqAffinityError::Management(IrqDescError::UnknownIrq));
+        }
+        check_user_affinity_change_locked(&entry)
+    }
+
+    /// Applies a user-originated affinity request to this exact Line.
+    ///
+    /// Requires sleepable task context. The original Arc is revalidated under
+    /// management admission; source/flow, teardown, action presence and owner
+    /// policy are rechecked under the Line lock before any hardware callback.
+    /// A stale handle returns `UnknownIrq`; a protected action returns
+    /// `UserRestricted`. This is not the trusted-kernel setter and does not
+    /// overwrite owner policy or initial-route obligations.
+    pub fn set_user_affinity(
+        &self,
+        requested: &KCpuMask,
+    ) -> Result<IrqAffinitySnapshot, IrqAffinityError> {
+        manager::with_retained_line(self.virq, &self.line, ManagementMode::Task, |_, line| {
+            let mut entry = line.lock();
+            let ready = kiface_cpu_api::CpuInterruptReadinessIf::ready_cpus();
+            Ok(apply_user_locked(&mut entry, requested, ready))
+        })
+        .map_err(IrqAffinityError::Management)?
+        .ok_or(IrqAffinityError::Management(IrqDescError::UnknownIrq))?
     }
 
     /// Applies affinity through this exact Line's admitted management transaction.

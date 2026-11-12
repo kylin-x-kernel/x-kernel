@@ -42,6 +42,12 @@ impl PreparedAction {
     pub(super) fn is_shared(&self) -> bool {
         self.is_shared
     }
+
+    pub(super) fn set_user_affinity_restricted(&mut self) {
+        if let Some(record) = self.pending.as_mut() {
+            record.set_user_affinity_restricted();
+        }
+    }
 }
 
 /// Public identity for one registered IRQ action on a line.
@@ -94,6 +100,11 @@ bitflags! {
         const ONESHOT = 1 << 1;
         const PER_CPU = 1 << 2;
         const NO_THREAD = 1 << 3;
+        /// User-originated routing changes are refused while this action lives.
+        ///
+        /// This is not Linux `IRQD_NO_BALANCING`: trusted kernel routing and
+        /// automatic initial selection are unchanged.
+        const USER_AFFINITY_RESTRICTED = 1 << 4;
     }
 }
 
@@ -152,6 +163,15 @@ impl IrqAction {
     /// Returns whether this action participates in shared IRQ fanout.
     pub(super) fn is_shared(&self) -> bool {
         self.flags.contains(IrqActionFlags::SHARED)
+    }
+
+    pub(super) fn set_user_affinity_restricted(&mut self) {
+        self.flags.insert(IrqActionFlags::USER_AFFINITY_RESTRICTED);
+    }
+
+    pub(super) fn blocks_user_affinity(&self) -> bool {
+        self.flags
+            .contains(IrqActionFlags::USER_AFFINITY_RESTRICTED)
     }
 
     /// Returns the primary handler.

@@ -29,6 +29,10 @@ pub(super) struct ActionRecord {
 }
 
 impl ActionRecord {
+    pub(super) fn set_user_affinity_restricted(&mut self) {
+        self.action.set_user_affinity_restricted();
+    }
+
     pub(super) fn new(action: IrqAction) -> Self {
         Self {
             action,
@@ -133,6 +137,23 @@ impl ActionSet {
 
     pub(super) const fn len(&self) -> usize {
         self.count
+    }
+
+    /// Scans installed actions under the Line lock for a user-affinity policy.
+    ///
+    /// This is a control-plane query, not a dispatch-path policy cache.
+    pub(super) fn has_user_affinity_restriction(&self) -> bool {
+        let mut raw = self.head;
+        while !raw.is_null() {
+            // SAFETY: the caller holds Line exclusion, which retains linked
+            // records and publishes their immutable flags before linkage.
+            let record = unsafe { &*raw };
+            if record.action.blocks_user_affinity() {
+                return true;
+            }
+            raw = record.next.load(Ordering::Acquire);
+        }
+        false
     }
 
     pub(super) fn can_install_regular(&self) -> bool {

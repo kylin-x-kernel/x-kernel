@@ -300,10 +300,7 @@ macro_rules! pmu_if_impl {
                 } else {
                     // Preserve the existing SPI policy; a shared interrupt is
                     // not a per-CPU registration merely because the PMU is local.
-                    #[cfg(feature = "nmi-pmu")]
-                    let options = kirq::IrqRegisterOptions::disabled();
-                    #[cfg(not(feature = "nmi-pmu"))]
-                    let options = kirq::IrqRegisterOptions::auto_enable();
+                    let options = $crate::peripherals::pmu::ordinary_spi_register_options();
                     kirq::try_register_startup(desc, handler, options)
                 };
                 match registered {
@@ -348,6 +345,15 @@ macro_rules! pmu_if_impl {
             }
         }
     };
+}
+
+/// Selects the ordinary SPI registration policy without changing PPI/NMI paths.
+pub(crate) fn ordinary_spi_register_options() -> kirq::IrqRegisterOptions {
+    #[cfg(feature = "nmi-pmu")]
+    let options = kirq::IrqRegisterOptions::disabled().restrict_user_affinity();
+    #[cfg(not(feature = "nmi-pmu"))]
+    let options = kirq::IrqRegisterOptions::auto_enable().restrict_user_affinity();
+    options
 }
 
 /// Implements the source‑neutral [`kplat::nm_irq::PeriodicNmiSourceIf`] interface

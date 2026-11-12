@@ -1958,6 +1958,32 @@ fn configuration_failure_leaves_regular_and_disabled_registration_unowned() {
 }
 
 #[def_test]
+fn restricted_configuration_failure_publishes_no_policy() {
+    let virq = 0x3173;
+    let line = IrqLine::new(IrqStateDesc::test_new(IrqDesc::from_virq(virq)));
+    let handler: crate::Handler = Arc::new(test_handler);
+    let result = super::register_locked(
+        virq,
+        &mut line.lock(),
+        &handler,
+        super::IrqRegisterOptions::disabled().restrict_user_affinity(),
+        |plan| {
+            Err(IrqDescError::ConfigurationFailed {
+                hwirq: plan.desc.hwirq,
+            })
+        },
+    );
+    assert_eq!(
+        result,
+        Err(IrqDescError::ConfigurationFailed { hwirq: virq })
+    );
+    let entry = line.lock();
+    assert_eq!(entry.action_count(), 0);
+    assert!(!entry.has_user_affinity_restriction());
+    assert_eq!(Arc::strong_count(&handler), 1);
+}
+
+#[def_test]
 fn shared_configuration_failure_preserves_existing_owners_and_tokens() {
     let virq = 0x3171;
     let owner: crate::Handler = Arc::new(test_handler);
