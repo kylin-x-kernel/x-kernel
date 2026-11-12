@@ -400,7 +400,7 @@ pipe/FIFO follows the three-layer ownership of Linux `inode`, `pipe_inode_info`,
 ```text
 VfsInode
 ├── shared stateless FifoFileOperations
-└── fifo_pipe: Option<Arc<PipeObject>>
+└── pipe: Option<Arc<PipeObject>>
 
 PipeObject
 └── buffer, files, readers/writers, r_counter/w_counter, rd_wait/wr_wait
@@ -410,6 +410,12 @@ VfsFile
 ├── pipe_generation
 └── private_data -> PipeObject
 ```
+
+Anonymous pipes and FIFOs share the inode pipe slot. The last close clears the
+slot; a later open creates a new session. Reopening anonymous pipes does not
+wait for a peer, whereas FIFO opens retain their partner-waiting semantics.
+Both use the same data operations. Like Linux `fs/pipe.c`, only the FIFO
+wrappers update access and modification timestamps after successful I/O.
 
 `PipeObject` corresponds to `pipe_inode_info`, not to a file-operation table. The pipe module must live in the
 same fs-core crate as `VfsInode`: the inode needs to hold the concrete pipe session, and the pipe file

@@ -11,7 +11,7 @@ pathname FIFOs, `PipeObject`, and the shared file operations; the syscall layer 
 
 Linux `fs/pipe.c` uses a dedicated `pipefs` for anonymous pipes rather than `anon_inodefs`. The dedicated inode holds
 `pipe_inode_info`, and the dynamic name is `pipe:[ino]`. X-Kernel adopts the same ownership: each anonymous pipe has a
-unique VFS inode, and the inode private data and the private data of both files point to the same `PipeObject`.
+unique VFS inode, and the inode pipe slot and the private data of both files point to the same `PipeObject`.
 
 ## Scope
 
@@ -34,7 +34,7 @@ static pipefs type / s_op / s_d_op
         create_pipe_files(cred, flags)
                  |
                  v
-     unique VfsInode --private--> PipeObject
+     unique VfsInode --pipe slot--> PipeObject
                  |                    ^
                  +-- write VfsFile ---+
                  +-- read  VfsFile ---+
@@ -63,7 +63,7 @@ files.
    `NONBLOCK` and derives the read-only and write-only access modes itself.
 3. A `PipeObject` is created with initial `files=2`, `readers=1`, `writers=1`.
 4. A unique FIFO-mode inode is created with `get_next_ino()`; the owner comes from the fsuid/fsgid of the passed-in credential, and
-   the inode private data holds the same `PipeObject`.
+   the inode pipe slot holds the same `PipeObject`.
 5. The write file is created on the pipefs hidden mount, and then the read file is cloned; the private data of both files
    holds the same pipe object and they use the shared anonymous-pipe file operation table.
 6. The inode uses `kvfs::metadata_only_inode_operations()`: the owner/mode/timestamp of the pipe
@@ -82,16 +82,17 @@ is managed by the state lock in `kvfs::pipe`, and pipefs adds no mount-level loc
 
 - Anonymous pipes no longer borrow the `anon_inodefs` singleton; a dedicated inode identity aligns with Linux pipefs.
 - `PipeFs` holds only the counterpart of Linux `pipe_mnt` and does not duplicate the pipe session or the operation table.
-- The inode private data and the file private data hold the same `Arc<PipeObject>`; this expresses the ownership in which Linux `inode->i_pipe`
+- The inode pipe slot and the file private data hold the same `Arc<PipeObject>`; this expresses the ownership in which Linux `inode->i_pipe`
   and `file->private_data` point to the same object, and is not two copies of pipe state.
 - The pipe/FIFO data path remains shared by KVFS, avoiding duplicating the algorithms for anonymous pipes and pathname FIFOs.
 - The pipe inode uses `kvfs::metadata_only_inode_operations()` (see step 6 above), so `fchown`/`fchmod`/`utimensat` updates to owner/mode/timestamps are kept in the resident inode and are visible through `fstat`. A size update is rejected with `EINVAL`, matching Linux, which refuses truncate on non-regular files.
-- Anonymous pipe file operations maintain I/O timestamps consistently with pathname FIFOs: a successful write updates
-  mtime/ctime, and a successful read updates atime (the corresponding behavior of Linux `fs/pipe.c` `pipe_write`/`pipe_read`),
-  relying on the common fallback layer above to persist them.
+- Linux updates timestamps automatically only in the pathname FIFO I/O wrappers;
+  anonymous pipe reads and writes do not update timestamps. Explicit metadata
+  changes continue through the inode operations above.
 
 ## Drop / Resource Release
 
-The hidden mount is retained for the lifetime of the system. When the read/write files are released, the shared pipe operations update the
-reader/writer/file counts; the last file released drops the last file-private reference, the inode is released along with its dentry/
-file references, and finally the inode-private `PipeObject` is released. There is no additional pipefs inode registry.
+The hidden mount remains for the system lifetime. Closing a file updates the
+reader, writer, and file counts. The last close clears the inode pipe slot and
+releases the session; reopening a retained path creates a new empty session.
+There is no additional pipefs inode registry.

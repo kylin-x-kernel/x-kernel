@@ -22,16 +22,10 @@ fn pipe_files() -> (Arc<VfsFile>, Arc<VfsFile>, Arc<PipeObject>) {
 fn anonymous_pipe_files_share_inode_owned_state() {
     let (read_file, write_file, pipe) = pipe_files();
     let write_pipe = PipeObject::from_file(&write_file).expect("pipe state is installed");
-    let inode_pipe = read_file
-        .path()
-        .inode()
-        .downcast::<PipeObject>()
-        .expect("pipe inode owns pipe state");
 
     assert!(read_file.mode().contains(FMode::READ));
     assert!(write_file.mode().contains(FMode::WRITE));
     assert!(Arc::ptr_eq(&pipe, &write_pipe));
-    assert!(Arc::ptr_eq(&pipe, &inode_pipe));
     assert_eq!(pipe.capacity(), 64 * 1024);
     assert!(
         read_file
@@ -71,6 +65,39 @@ fn anonymous_pipe_derives_endpoint_access_flags() {
         write_file.flags(),
         OpenFlags::WRITE_ONLY | OpenFlags::NONBLOCK
     );
+}
+
+#[def_test]
+fn reopen_anonymous_pipe_shares_session_until_last_close() {
+    let (reader, writer, _) = pipe_files();
+    let path = reader.path().clone();
+    let reopened = kvfs::dentry_open(path.clone(), OpenFlags::NONBLOCK.bits(), kcred::initial_cred())
+        .expect("reopen pipe");
+    drop(reader);
+    assert_eq!(writer.write(b"xy"), Ok(2));
+    let mut byte = [0];
+    assert_eq!(reopened.read(&mut byte), Ok(1));
+    assert_eq!(byte, *b"x");
+    drop(writer);
+    drop(reopened);
+
+    let reopened = kvfs::dentry_open(path.clone(), OpenFlags::NONBLOCK.bits(), kcred::initial_cred())
+        .expect("reopen retained pipe path");
+    assert_eq!(reopened.read(&mut byte), Ok(0));
+    drop(reopened);
+
+    let writer = kvfs::dentry_open(
+        path.clone(),
+        (OpenFlags::WRITE_ONLY | OpenFlags::NONBLOCK).bits(),
+        kcred::initial_cred(),
+    )
+    .expect("reopen anonymous pipe writer without a reader");
+    assert!(writer.poll().contains(IoEvents::ERR));
+    let reader = kvfs::dentry_open(path, OpenFlags::NONBLOCK.bits(), kcred::initial_cred())
+        .expect("reopen pipe reader");
+    assert_eq!(writer.write(b"z"), Ok(1));
+    assert_eq!(reader.read(&mut byte), Ok(1));
+    assert_eq!(byte, *b"z");
 }
 
 #[def_test]
@@ -196,7 +223,7 @@ fn anonymous_pipe_truncate_is_invalid() {
 }
 
 #[def_test]
-fn anonymous_pipe_io_updates_timestamps() {
+fn anonymous_pipe_io_preserves_timestamps() {
     let (read_file, write_file, _) = pipe_files();
     let cred = kcred::initial_cred();
     let past = SetattrTime::Explicit(SystemTime::from_unix_seconds(1));
@@ -204,17 +231,18 @@ fn anonymous_pipe_io_updates_timestamps() {
         .path()
         .set_times(Some(past), Some(past), &cred)
         .expect("pipe fd accepts utimens");
+    let before = read_file.path().getattr().unwrap();
 
     let data = b"hello";
     assert_eq!(write_file.write(data).unwrap(), data.len());
     let after_write = read_file.path().getattr().unwrap();
-    assert!(after_write.mtime.unix_seconds() > 1);
-    assert!(after_write.ctime.unix_seconds() > 1);
+    assert_eq!(after_write.mtime, before.mtime);
+    assert_eq!(after_write.ctime, before.ctime);
 
     let mut buf = [0u8; 5];
     assert_eq!(read_file.read(&mut buf).unwrap(), data.len());
     let after_read = read_file.path().getattr().unwrap();
-    assert!(after_read.atime.unix_seconds() > 1);
+    assert_eq!(after_read.atime, before.atime);
 }
 
 /// `splice(pipe -> file, &off)` must publish the transferred count into

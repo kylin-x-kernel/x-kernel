@@ -447,7 +447,7 @@ KVFS returns the mapped error, does not fabricate a successful byte count, and d
 | T-28 | unlink/rmdir deletes a same-name replacement object after the pathname's initial resolution | High | The syscall resolves the full target first, then performs a second lookup by parent/name | `Filename::unlink_at/rmdir_at` resolves only the parent; the Dentry resolves and operates on the final victim exactly once under the parent exclusive lock |
 | T-29 | A pathname FIFO re-looks-up after authorization and opens a replacement inode | High | The syscall performs a second path resolution based on the first open error | The FIFO file operations complete the open on the same `Path` and `VfsFileBuilder` that namei already authorized, with no fallback lookup |
 | T-30 | A pathname FIFO fd loses the identity of the original inode | Medium | A special open creates an anonymous-inode-backed file | The shared FIFO operations modify only the stream/private state of the original builder, keeping the original path, inode and filesystem |
-| T-31 | The same FIFO inode publishes two pipe sessions at once | High | The last release and a new open modify the slot and the file count separately | get/create/increment and decrement/clear are all completed within the inode pipe-slot lock domain |
+| T-31 | The same pipe or FIFO inode publishes two pipe sessions at once | High | The last release and a new open modify the slot and the file count separately | get/create/increment and decrement/clear are all completed within the inode pipe-slot lock domain |
 | T-32 | A non-blocking reader that never connected a writer immediately gets HUP | Medium | poll checks only `writers == 0` | The file stores a `w_counter` snapshot from open time, and HUP also checks that the generation has changed |
 | T-33 | A poll waiting only for HUP/ERR is never woken by peer close | Medium | The wait queue is chosen by the user event mask | The reader/writer wait queue is registered by `f_mode`, and the event mask only filters readiness |
 | T-20 | Reverse cross-directory rename deadlock | High | Two threads lock the parent directories in opposite orders | One topology mutex serializes topology mutation, and parent directories are locked in topology order |
@@ -570,7 +570,7 @@ completed prefix is returned preferentially, and an error is reported only when 
   `Dentry::can_lookup()` rather than merely checking for a directory-like type.
 - Whether newly created inodes use `inode_init_owner()`, and whether the backend persists UID/GID.
 - Whether fd-based operations use the open file mode/`f_cred`, rather than re-running pathname authorization.
-- Whether a FIFO session is owned only by the inode pipe slot, and whether fops remain shared and stateless.
+- Whether a pipe or FIFO session is owned only by the inode pipe slot, and whether fops remain shared and stateless.
 - Whether pipe private data stores only `PipeObject`, and whether direction and the HUP snapshot come only from
   `f_mode` and `pipe_generation` respectively.
 - Whether FIFO poll registration selects the wait queue by file mode, rather than by the user event mask.
@@ -834,7 +834,7 @@ holding that lock. The VFS cache binds and registers initialized identities
 before publication; inode constructors must not rely on write-dependent
 lifecycle initialization outside mutation or writable-open admission.
 
-FIFO/pipe timestamp mutations share remount write admission even though their
+FIFO timestamp mutations share remount write admission even though FIFO
 file descriptions carry no inode writer count. The guard spans the read-only
 check and timestamp callback; read-only policy prevents metadata mutation while
 allowing the special file's already-completed data operation. Regular writable

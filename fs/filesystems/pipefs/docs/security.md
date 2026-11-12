@@ -23,7 +23,7 @@ This crate does not access MMIO/PIO, DMA, device/interrupt inputs, firmware, FFI
 - `PipeFs::global()` may return only after the hidden mount has been completely published.
 - Each `create_pipe_files()` call must create a unique inode; the same read/write pair must share that
   inode and the same `Arc<PipeObject>`.
-- The inode private data, read-file private data, and write-file private data must not point to different pipe sessions.
+- The inode pipe slot and both files' private data must refer to the same session.
 - The dentry must be bound to the pipefs superblock and inherit the static default dentry operations.
 - If creation of the write file fails, the read file must not be published; if the read clone fails, the local objects are reclaimed by `Arc`.
 

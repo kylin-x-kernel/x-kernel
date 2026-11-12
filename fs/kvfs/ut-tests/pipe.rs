@@ -212,7 +212,7 @@ fn pipe_readiness_and_eof_precede_interrupt_but_empty_wait_is_marked() {
 
 #[def_test]
 fn fifo_partner_counter_records_completed_rendezvous() {
-    let pipe = PipeObject::new_fifo();
+    let pipe = PipeObject::new_empty();
     let partner_counter = pipe.state.lock().w_counter;
     {
         let mut state = pipe.state.lock();

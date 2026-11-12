@@ -1071,6 +1071,19 @@ fn fifo_timestamp_mutation_waits_for_readonly_policy_publication() {
     )
     .unwrap();
     assert!(!file.mode().contains(crate::FMode::WRITER));
+    let past = ktime_types::SystemTime::from_unix_seconds(1);
+    inode.set_accessed_at(past);
+    inode.set_modified_at(past);
+    inode.set_changed_at(past);
+    assert_eq!(file.write(b"a"), Ok(1));
+    let after_write = inode.times();
+    assert!(after_write.modified_at.unix_seconds() > 1);
+    assert!(after_write.changed_at.unix_seconds() > 1);
+    let mut byte = [0];
+    assert_eq!(file.read(&mut byte), Ok(1));
+    assert_eq!(byte, *b"a");
+    assert!(inode.times().accessed_at.unix_seconds() > 1);
+
     let before = inode.times();
     let gate = sb.umount_lock.write();
     let result = Arc::new(crate::Mutex::new(None));

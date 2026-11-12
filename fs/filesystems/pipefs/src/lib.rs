@@ -70,7 +70,8 @@ pub fn create_pipe_files(
     let status_flags = flags & OpenFlags::NONBLOCK;
     let pipe = PipeObject::new_anonymous();
     let operations = pipe_file_operations();
-    let inode = new_pipe_inode(pipe.clone(), &cred, operations.clone());
+    let inode = new_pipe_inode(&cred, operations.clone());
+    inode.init_anonymous_pipe(pipe.clone());
     let write_file = PipeFs::global().mount.alloc_file_pseudo(
         inode,
         "",
@@ -89,11 +90,7 @@ pub fn create_pipe_files(
     Ok((read_file, write_file))
 }
 
-fn new_pipe_inode(
-    pipe: Arc<PipeObject>,
-    cred: &Cred,
-    file_operations: Arc<dyn FileOperations>,
-) -> Arc<VfsInode> {
+fn new_pipe_inode(cred: &Cred, file_operations: Arc<dyn FileOperations>) -> Arc<VfsInode> {
     let timestamp = ktime::realtime();
     let init = VfsInodeInit::new(
         get_next_ino(),
@@ -106,7 +103,7 @@ fn new_pipe_inode(
     .with_owner_links_and_rdev(cred.fsuid(), cred.fsgid(), 1, Default::default())
     .with_stat_data(PAGE_SIZE_4K as u64, 0, timestamp, timestamp, timestamp);
     VfsInode::new_file_with_operations(
-        pipe,
+        Arc::new(()),
         metadata_only_inode_operations(),
         file_operations,
         NodeFlags::PRIVATE,

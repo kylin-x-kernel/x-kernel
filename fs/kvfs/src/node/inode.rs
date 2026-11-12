@@ -1224,7 +1224,7 @@ impl InodeAttributes {
 
 struct InodeSpecialState {
     character_device: Mutex<Weak<ChrdevEntry>>,
-    fifo_pipe: Mutex<Option<Arc<PipeObject>>>,
+    pipe: Mutex<Option<Arc<PipeObject>>>,
     cached_link: Once<String>,
 }
 
@@ -1232,7 +1232,7 @@ impl InodeSpecialState {
     fn new() -> Self {
         Self {
             character_device: Mutex::new(Weak::new()),
-            fifo_pipe: Mutex::new(None),
+            pipe: Mutex::new(None),
             cached_link: Once::new(),
         }
     }
@@ -1810,23 +1810,36 @@ impl VfsInode {
         debug_assert_ne!(previous, 0);
     }
 
-    pub(crate) fn acquire_fifo_pipe(&self) -> VfsResult<Arc<PipeObject>> {
-        let mut fifo_pipe = self.special_state.fifo_pipe.lock();
-        let pipe = fifo_pipe.get_or_insert_with(PipeObject::new_fifo);
+    /// Installs the initial session for a newly created anonymous pipe inode.
+    ///
+    /// Call before publishing the inode or either file, using the session
+    /// whose initial reader and writer correspond to those files.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the inode already has a pipe session.
+    pub fn init_anonymous_pipe(&self, pipe: Arc<PipeObject>) {
+        let mut slot = self.special_state.pipe.lock();
+        assert!(slot.is_none(), "pipe inode already initialized");
+        *slot = Some(pipe);
+    }
+
+    pub(crate) fn acquire_pipe(&self) -> VfsResult<Arc<PipeObject>> {
+        let mut slot = self.special_state.pipe.lock();
+        let pipe = slot.get_or_insert_with(PipeObject::new_empty);
         pipe.acquire_file()?;
         Ok(pipe.clone())
     }
 
-    pub(crate) fn release_fifo_pipe(&self, pipe: &Arc<PipeObject>) {
-        let mut fifo_pipe = self.special_state.fifo_pipe.lock();
+    pub(crate) fn release_pipe(&self, pipe: &Arc<PipeObject>) {
+        let mut slot = self.special_state.pipe.lock();
         assert!(
-            fifo_pipe
-                .as_ref()
+            slot.as_ref()
                 .is_some_and(|active| Arc::ptr_eq(active, pipe)),
-            "released FIFO pipe is not attached to its inode"
+            "released pipe is not attached to its inode"
         );
         if pipe.release_file() {
-            *fifo_pipe = None;
+            *slot = None;
         }
     }
 
