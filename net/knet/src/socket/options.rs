@@ -138,6 +138,9 @@ define_options! {
     SendBuffer(usize),
     ReceiveBuffer(usize),
     KeepAlive(bool),
+    /// TCP close policy: disabled, or a zero duration for an abortive close.
+    /// Positive linger durations are not supported.
+    Linger(Option<TimeSpan>),
     SendTimeout(TimeSpan),
     ReceiveTimeout(TimeSpan),
     SendBufferForce(usize),

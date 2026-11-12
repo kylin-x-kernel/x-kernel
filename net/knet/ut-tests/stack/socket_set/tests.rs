@@ -12,6 +12,11 @@ use smoltcp::{
 use unittest::{assert, assert_eq, def_test};
 
 use super::{ORPHAN_FIN_WAIT2_TIMEOUT, orphan_fin_wait2_deadline};
+use crate::{
+    buf::{PacketBuf, PacketOwner},
+    runtime::tx_queue::DataTxQueue,
+    stack::device::StackDevice,
+};
 
 fn poll_until_idle(
     iface: &mut Interface,
@@ -20,6 +25,80 @@ fn poll_until_idle(
     current: Instant,
 ) {
     while iface.poll(current, device, sockets) != PollResult::None {}
+}
+
+#[def_test]
+fn only_a_protocol_accepted_reset_publishes_a_consumable_error() {
+    let current = Instant::from_millis(1);
+    let mut device = Loopback::new(Medium::Ip);
+    let mut rx = alloc::collections::VecDeque::new();
+    let mut tx = DataTxQueue::with_capacity(4);
+    // Use production checksum capabilities; Loopback alone disables checks.
+    let mut iface = Interface::new(
+        Config::new(HardwareAddress::Ip),
+        &mut StackDevice::new(&mut rx, &mut tx, 1500),
+        current,
+    );
+    let address = Ipv4Address::new(127, 0, 0, 1);
+    iface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(address.into(), 8)).unwrap());
+    let mut sockets = super::SocketSetState::new();
+    let server = sockets.add(crate::tcp::new_tcp_socket());
+    sockets
+        .get_mut::<tcp::Socket>(server)
+        .listen(40000)
+        .unwrap();
+    let client = sockets.add(crate::tcp::new_tcp_socket());
+    sockets
+        .get_mut::<tcp::Socket>(client)
+        .connect(iface.context(), (address, 40000), (address, 40001))
+        .unwrap();
+    poll_until_idle(&mut iface, &mut device, &mut sockets, current);
+    sockets
+        .get_mut::<tcp::Socket>(server)
+        .send_slice(b"x")
+        .unwrap();
+    poll_until_idle(&mut iface, &mut device, &mut sockets, current);
+    sockets.get_mut::<tcp::Socket>(server).abort();
+
+    iface.poll_egress(
+        current,
+        &mut StackDevice::new(&mut rx, &mut tx, 1500),
+        &mut sockets,
+    );
+    let reset = tx.pop_front().unwrap();
+    let bytes = reset.network_packet().unwrap();
+    let mut invalid = bytes.to_vec();
+    let tcp_offset = (invalid[0] & 0xf) as usize * 4;
+    invalid[tcp_offset + 16] ^= 1;
+    rx.push_back(PacketBuf::from_ip_packet_vec(
+        0,
+        invalid,
+        PacketOwner::DeviceRx,
+    ));
+    sockets.poll_ingress_single(
+        &mut iface,
+        current,
+        &mut StackDevice::new(&mut rx, &mut tx, 1500),
+    );
+    let (state, error) = sockets.with_tcp_socket_mut(client, |socket, error| (socket.state(), *error));
+    assert_eq!(state, tcp::State::Established);
+    assert!(error.is_none());
+
+    rx.push_back(reset);
+    sockets.poll_ingress_single(
+        &mut iface,
+        current,
+        &mut StackDevice::new(&mut rx, &mut tx, 1500),
+    );
+    let mut byte = [0];
+    let (state, error, received) = sockets.with_tcp_socket_mut(client, |socket, error| {
+        (socket.state(), error.take(), socket.recv_slice(&mut byte))
+    });
+    assert_eq!(state, tcp::State::Closed);
+    assert_eq!(error, Some(kerrno::KError::ConnectionReset));
+    assert_eq!(received, Ok(1));
+    assert_eq!(byte, *b"x");
+    assert!(sockets.with_tcp_socket_mut(client, |_, error| error.is_none()));
 }
 
 #[def_test]

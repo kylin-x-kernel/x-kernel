@@ -766,6 +766,12 @@ If the receive queue contains unread data, the aborted connection's handle must 
 A handle may be removed only after the protocol enters `Closed`.
 The 60-second reclamation deadline applies only to `FIN_WAIT_2` handles detached from user file objects.
 
+TCP reset errors are published under the socket-set lock only after processing
+the candidate packet closes the matching protocol socket. A matching tuple and
+RST flag alone cannot publish an error: checksum and sequence validation remain
+with the protocol processor. The pending error is consumed once and cleared
+when the handle is removed or reused.
+
 ### 23. Network Timer Conditions
 
 Protocol timers and deferred-close processing share an atomic deadline source. IPv4 reassembly uses a separate atomic source for its deadline and pending state.

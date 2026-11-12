@@ -6,7 +6,7 @@ use alloc::{sync::Weak, task::Wake, vec, vec::Vec};
 use core::{sync::atomic::AtomicBool, task::Context};
 
 use kpoll::PollRegistrations;
-use smoltcp::iface::SocketSet;
+use crate::stack::socket_set::SocketSetState;
 use unittest::{assert, def_test};
 
 use super::*;
@@ -128,7 +128,7 @@ fn smoltcp_ingress_keeps_packets_after_reaching_budget() {
         PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
     ]);
     router.enqueue_ingress_packets(&mut packets);
-    let mut sockets = SocketSet::new(vec![]);
+    let mut sockets = SocketSetState::new();
 
     let progress = poll_smoltcp_ingress_budgeted(
         &mut iface,

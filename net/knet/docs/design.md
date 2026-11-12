@@ -605,6 +605,21 @@ does not undo the update or change its success return.
 
 `TcpSocket` stores `socket::state::State` in `StateLock`. `Idle` permits initial setup, `Busy` serializes a transition, `Connecting` waits for the handshake, `Connected` represents an established endpoint, `Listening` owns a listener entry, and `Closed` records local full shutdown or connection failure. smoltcp maintains the separate TCP wire-protocol state; peer closure alone does not update this local enum.
 
+TCP's `IP_TTL` configures the protocol socket's output hop limit. A listen entry
+retains the listener handle and copies its current hop limit into each child
+before processing the SYN, so handshake replies and accepted sockets use the
+inherited value. Closing the listener marks its entry closed before releasing
+the protocol handle.
+
+TCP supports disabled `SO_LINGER` and zero-duration abortive close; positive
+linger durations are rejected. Abortive close retains the protocol handle until
+its RST has been dispatched. Incoming RST candidates are matched to a socket
+before one ingress operation, and become pending errors only if protocol
+validation closes that socket. The socket-set lock protects this observation and
+the error record. Reads deliver queued bytes first; read, write and `SO_ERROR`
+share one consumable error. Pending errors publish `ERR` readiness, while normal
+FIN closure remains EOF. Handle removal clears its pending error.
+
 ```mermaid
 %%{init: {
   "theme": "base",

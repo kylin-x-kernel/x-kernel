@@ -10,7 +10,7 @@ use kerrno::{KError, KResult};
 use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
 use smoltcp::{
-    iface::{SocketHandle, SocketSet},
+    iface::SocketHandle,
     socket::tcp::{self, SocketBuffer, State},
     wire::{IpEndpoint, IpListenEndpoint},
 };
@@ -18,6 +18,7 @@ use smoltcp::{
 use crate::{
     SOCKET_SET,
     consts::{LISTEN_QUEUE_SIZE, TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
+    stack::socket_set::SocketSetState,
 };
 
 /// Mutable listen backlog state. The accept wakeup source lives on
@@ -33,6 +34,8 @@ struct ListenTableEntry {
 
 /// One listening endpoint: lock-free accept poll source plus guarded queues.
 struct ListenEntry {
+    /// The listener's protocol socket owns configuration inherited by children.
+    listener: SocketHandle,
     /// Shared with waiters via [`PollSet::clone`]; not behind `state`.
     accept_poll: PollSet,
     state: Mutex<ListenTableEntry>,
@@ -72,8 +75,9 @@ impl ListenTableEntry {
 }
 
 impl ListenEntry {
-    fn new(backlog: usize) -> Self {
+    fn new(backlog: usize, listener: SocketHandle) -> Self {
         Self {
+            listener,
             accept_poll: PollSet::new(),
             state: Mutex::new(ListenTableEntry::new(backlog)),
         }
@@ -97,7 +101,12 @@ impl ListenTable {
         !Self::listen_conflicts(&entries, endpoint)
     }
 
-    pub(crate) fn listen(&self, listen_endpoint: IpListenEndpoint, backlog: usize) -> KResult {
+    pub(crate) fn listen(
+        &self,
+        listen_endpoint: IpListenEndpoint,
+        backlog: usize,
+        listener: SocketHandle,
+    ) -> KResult {
         let port = listen_endpoint.port;
         assert_ne!(port, 0);
 
@@ -107,7 +116,10 @@ impl ListenTable {
             return Err(KError::AddrInUse);
         }
 
-        entries.insert(listen_endpoint, Arc::new(ListenEntry::new(backlog)));
+        entries.insert(
+            listen_endpoint,
+            Arc::new(ListenEntry::new(backlog, listener)),
+        );
         Ok(())
     }
 
@@ -135,7 +147,7 @@ impl ListenTable {
     pub(crate) fn can_accept(
         &self,
         endpoint: IpListenEndpoint,
-        sockets: &SocketSet<'_>,
+        sockets: &SocketSetState<'_>,
     ) -> KResult<bool> {
         let Some(entry) = self.get_entry(&endpoint) else {
             warn!("accept before listen");
@@ -169,7 +181,7 @@ impl ListenTable {
     pub(crate) fn accept(
         &self,
         endpoint: IpListenEndpoint,
-        sockets: &mut SocketSet<'_>,
+        sockets: &mut SocketSetState<'_>,
     ) -> KResult<AcceptedTcp> {
         let Some(entry) = self.get_entry(&endpoint) else {
             warn!("accept before listen");
@@ -203,7 +215,7 @@ impl ListenTable {
         entry.state.lock().touched = true;
     }
 
-    pub(crate) fn refresh_acceptors(&self, sockets: &mut SocketSet<'_>) {
+    pub(crate) fn refresh_acceptors(&self, sockets: &mut SocketSetState<'_>) {
         let entries = {
             let entries = self.entries.lock();
             entries.values().cloned().collect::<Vec<_>>()
@@ -232,7 +244,7 @@ impl ListenTable {
         &self,
         src: IpEndpoint,
         dst: IpEndpoint,
-        sockets: &mut SocketSet<'_>,
+        sockets: &mut SocketSetState<'_>,
     ) {
         let Some((endpoint, entry)) = self.lookup_entry(dst) else {
             return;
@@ -263,6 +275,7 @@ impl ListenTable {
             SocketBuffer::new(vec![0; TCP_RX_BUF_LEN]),
             SocketBuffer::new(vec![0; TCP_TX_BUF_LEN]),
         );
+        socket.set_hop_limit(sockets.get::<tcp::Socket>(entry.listener).hop_limit());
         if let Err(err) = socket.listen(IpListenEndpoint {
             addr: Some(dst.addr),
             port: dst.port,
@@ -340,13 +353,19 @@ impl ListenTableEntry {
     }
 }
 
-fn refresh_entry_in_socket_set(entry: &mut ListenTableEntry, sockets: &mut SocketSet<'_>) -> bool {
+fn refresh_entry_in_socket_set(
+    entry: &mut ListenTableEntry,
+    sockets: &mut SocketSetState<'_>,
+) -> bool {
     prune_closed_in_socket_set(&mut entry.syn_queue, sockets);
     prune_closed_in_socket_set(&mut entry.accept_queue, sockets);
     promote_ready_in_socket_set(&mut entry.syn_queue, &mut entry.accept_queue, sockets)
 }
 
-fn refresh_entry_for_accept(entry: &mut ListenTableEntry, sockets: &mut SocketSet<'_>) -> bool {
+fn refresh_entry_for_accept(
+    entry: &mut ListenTableEntry,
+    sockets: &mut SocketSetState<'_>,
+) -> bool {
     prune_closed_in_socket_set(&mut entry.syn_queue, sockets);
     let pruned_accept_queue = prune_closed_in_socket_set(&mut entry.accept_queue, sockets);
     promote_ready_in_socket_set(&mut entry.syn_queue, &mut entry.accept_queue, sockets);
@@ -355,7 +374,7 @@ fn refresh_entry_for_accept(entry: &mut ListenTableEntry, sockets: &mut SocketSe
 
 fn prune_closed_in_socket_set(
     syn_queue: &mut VecDeque<PendingConn>,
-    sockets: &mut SocketSet<'_>,
+    sockets: &mut SocketSetState<'_>,
 ) -> bool {
     let mut closed = Vec::with_capacity(syn_queue.len() / 4);
     syn_queue.retain(|conn| {
@@ -372,7 +391,7 @@ fn prune_closed_in_socket_set(
     pruned
 }
 
-fn is_discardable_in_socket_set(handle: SocketHandle, sockets: &SocketSet<'_>) -> bool {
+fn is_discardable_in_socket_set(handle: SocketHandle, sockets: &SocketSetState<'_>) -> bool {
     let socket = sockets.get::<tcp::Socket>(handle);
     match socket.state() {
         State::LastAck | State::TimeWait => true,
@@ -387,7 +406,7 @@ fn is_discardable_in_socket_set(handle: SocketHandle, sockets: &SocketSet<'_>) -
     }
 }
 
-fn is_acceptable_in_socket_set(handle: SocketHandle, sockets: &SocketSet<'_>) -> bool {
+fn is_acceptable_in_socket_set(handle: SocketHandle, sockets: &SocketSetState<'_>) -> bool {
     is_acceptable_socket(sockets.get::<tcp::Socket>(handle))
 }
 
@@ -406,7 +425,7 @@ fn is_acceptable_socket(socket: &tcp::Socket<'_>) -> bool {
 fn promote_ready_in_socket_set(
     syn_queue: &mut VecDeque<PendingConn>,
     accept_queue: &mut VecDeque<PendingConn>,
-    sockets: &SocketSet<'_>,
+    sockets: &SocketSetState<'_>,
 ) -> bool {
     let mut moved = false;
     let len = syn_queue.len();

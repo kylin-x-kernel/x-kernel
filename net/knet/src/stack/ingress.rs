@@ -7,11 +7,9 @@
 use alloc::vec::Vec;
 
 use ktime_types::MonotonicInstant;
-use smoltcp::{
-    iface::SocketSet,
-    wire::{IpAddress as SmoltcpIpAddress, IpProtocol, Ipv6Packet, TcpPacket},
-};
+use smoltcp::wire::{IpAddress as SmoltcpIpAddress, IpProtocol, Ipv6Packet, TcpPacket};
 
+use super::socket_set::SocketSetState;
 use crate::{
     LISTEN_TABLE,
     buf::PacketBuf,
@@ -189,7 +187,7 @@ impl IngressProcessor {
 /// smoltcp socket-set lock. This keeps custom UDP ingress independent from
 /// unrelated TCP socket operations while preserving listener setup before a
 /// TCP SYN reaches smoltcp.
-pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut SocketSet<'_>) {
+pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut SocketSetState<'_>) {
     for packet in packets {
         let Some(ip_packet) = packet.network_packet() else {
             continue;
@@ -237,7 +235,7 @@ fn should_emit_protocol_unreachable(header: Ipv4Header<'_>) -> bool {
         )
 }
 
-fn snoop_ipv6_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
+fn snoop_ipv6_tcp_packet(buf: &[u8], sockets: &mut SocketSetState<'_>) {
     let Ok(ip_packet) = Ipv6Packet::new_checked(buf) else {
         return;
     };
@@ -261,7 +259,7 @@ fn snoop_tcp_segment(
     src_addr: SmoltcpIpAddress,
     dst_addr: SmoltcpIpAddress,
     payload: &[u8],
-    sockets: &mut SocketSet<'_>,
+    sockets: &mut SocketSetState<'_>,
 ) {
     if protocol != ipv4::PROTOCOL_TCP {
         return;

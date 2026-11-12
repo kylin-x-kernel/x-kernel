@@ -54,6 +54,27 @@ fn pending_handshake_remains_refreshable_after_packet_mark_is_consumed() {
 }
 
 #[def_test]
+fn incoming_children_inherit_the_current_listener_hop_limit() {
+    let address = Ipv4Address::new(127, 0, 0, 1);
+    let endpoint = IpListenEndpoint::from((address, 40000));
+    let mut sockets = SocketSetState::new();
+    let listener = sockets.add(crate::tcp::new_tcp_socket());
+    let table = ListenTable::new();
+    table.listen(endpoint, 2, listener).unwrap();
+
+    let mut children = Vec::new();
+    for (port, ttl) in [(40001, 37), (40002, 45)] {
+        sockets.get_mut::<tcp::Socket>(listener).set_hop_limit(Some(ttl));
+        table.incoming_tcp_packet((address, port).into(), (address, 40000).into(), &mut sockets);
+        let entry = table.get_entry(&endpoint).unwrap();
+        let child = entry.state.lock().syn_queue.back().unwrap().accepted.handle;
+        assert_eq!(sockets.get::<tcp::Socket>(child).hop_limit(), Some(ttl));
+        children.push(child);
+    }
+    assert_eq!(sockets.get::<tcp::Socket>(children[0]).hop_limit(), Some(37));
+}
+
+#[def_test]
 fn accept_waiter_registered_with_ready_backlog_observes_later_arrival() {
     struct AcceptWakeProbe(AtomicUsize);
     impl Wake for AcceptWakeProbe {
@@ -67,7 +88,7 @@ fn accept_waiter_registered_with_ready_backlog_observes_later_arrival() {
     let mut device = Loopback::new(Medium::Ip);
     let mut iface = Interface::new(Config::new(HardwareAddress::Ip), &mut device, current);
     iface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(address.into(), 8)).unwrap());
-    let mut sockets = SocketSet::new(vec![]);
+    let mut sockets = SocketSetState::new();
     let [first, second] = [40001, 40002].map(|client_port| {
         let server = sockets.add(crate::tcp::new_tcp_socket());
         sockets.get_mut::<tcp::Socket>(server).listen(40000).unwrap();
@@ -95,7 +116,7 @@ fn accept_waiter_registered_with_ready_backlog_observes_later_arrival() {
     let first_handle = first.accepted.handle;
     let endpoint = IpListenEndpoint::from(first.accepted.local_endpoint);
     let table = ListenTable::new();
-    table.listen(endpoint, 2).unwrap();
+    table.listen(endpoint, 2, first_handle).unwrap();
     let entry = table.get_entry(&endpoint).unwrap();
     entry.state.lock().accept_queue.push_back(first);
 

@@ -144,6 +144,22 @@ mod conv {
 
     pub(super) struct SocketTimeout;
 
+    pub(super) struct SocketLinger;
+
+    impl SocketLinger {
+        pub(super) fn sys_to_rust(val: [i32; 2]) -> KResult<Option<TimeSpan>> {
+            match val {
+                [0, _] => Ok(None),
+                [_, 0] => Ok(Some(TimeSpan::ZERO)),
+                _ => Err(KError::OperationNotSupported),
+            }
+        }
+
+        pub(super) fn rust_to_sys(val: Option<TimeSpan>) -> KResult<[i32; 2]> {
+            Ok([i32::from(val.is_some()), 0])
+        }
+    }
+
     impl SocketTimeout {
         pub(super) fn sys_to_rust(val: timeval) -> KResult<TimeSpan> {
             let timeout = val.try_into_time_span()?;
@@ -243,6 +259,7 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_SNDBUF) => SendBuffer as Int<usize>,
             (SOL_SOCKET, SO_RCVBUF) => ReceiveBuffer as Int<usize>,
             (SOL_SOCKET, SO_KEEPALIVE) => KeepAlive as IntBool,
+            (SOL_SOCKET, SO_LINGER) => Linger as SocketLinger,
             (SOL_SOCKET, SO_RCVTIMEO) => ReceiveTimeout as SocketTimeout,
             (SOL_SOCKET, SO_SNDTIMEO) => SendTimeout as SocketTimeout,
             (SOL_SOCKET, SO_PASSCRED) => PassCredentials as IntBool,

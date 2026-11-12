@@ -29,6 +29,13 @@ pub(crate) struct StackDevice<'a> {
 }
 
 impl<'a> StackDevice<'a> {
+    pub(crate) fn pending_ip_packet(&self) -> Option<&[u8]> {
+        if self.tx.is_full() {
+            return None;
+        }
+        self.rx.front()?.network_packet()
+    }
+
     pub(super) fn new(
         rx: &'a mut VecDeque<PacketBuf>,
         tx: &'a mut DataTxQueue,

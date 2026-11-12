@@ -106,6 +106,7 @@ pub struct TcpSocket {
     /// smoltcp does not clear an armed deadline when keep-alive is disabled, so
     /// this stays set for the lifetime of the socket after the first enable.
     keep_alive_deadline_armed: AtomicBool,
+    is_abortive_close: AtomicBool,
 }
 
 impl TcpSocket {
@@ -126,6 +127,7 @@ impl TcpSocket {
             poll_tx: Arc::new(PollSet::new()),
             keep_alive: KeepAliveConfig::default(),
             keep_alive_deadline_armed: AtomicBool::new(false),
+            is_abortive_close: AtomicBool::new(false),
         }
     }
 
@@ -150,6 +152,7 @@ impl TcpSocket {
             poll_tx: Arc::new(PollSet::new()),
             keep_alive: KeepAliveConfig::default(),
             keep_alive_deadline_armed: AtomicBool::new(false),
+            is_abortive_close: AtomicBool::new(false),
         };
         let bound_endpoint = endpoint_from_ip_endpoint(local_endpoint);
         *result.bound_endpoint.lock() = bound_endpoint;
@@ -228,6 +231,13 @@ impl TcpSocket {
 
     fn with_smol_socket<R>(&self, f: impl FnOnce(&mut smol::Socket) -> R) -> R {
         SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.handle, f)
+    }
+
+    fn with_smol_socket_error<R>(
+        &self,
+        f: impl FnOnce(&mut smol::Socket, &mut Option<KError>) -> R,
+    ) -> R {
+        SOCKET_SET.inner.lock().with_tcp_socket_mut(self.handle, f)
     }
 
     // File close must inspect the receive queue before any protocol packet is
@@ -396,7 +406,7 @@ impl TcpSocket {
 
     fn poll_stream(&self) -> IoEvents {
         let mut events = IoEvents::empty();
-        self.with_smol_socket(|socket| {
+        self.with_smol_socket_error(|socket, error| {
             events.set(
                 IoEvents::IN,
                 !self.rx_closed.load(Ordering::Acquire)
@@ -406,6 +416,22 @@ impl TcpSocket {
                 IoEvents::OUT,
                 !self.tx_closed.load(Ordering::Acquire)
                     && (!socket.may_send() || socket.can_send()),
+            );
+            events.set(IoEvents::ERR, error.is_some());
+            events.set(
+                IoEvents::HUP,
+                self.state() == State::Connected && socket.state() == smol::State::Closed,
+            );
+            events.set(
+                IoEvents::RDHUP,
+                matches!(
+                    socket.state(),
+                    smol::State::CloseWait
+                        | smol::State::LastAck
+                        | smol::State::Closing
+                        | smol::State::TimeWait
+                        | smol::State::Closed
+                ) && self.state() == State::Connected,
             );
         });
         events
@@ -430,11 +456,28 @@ impl Configurable for TcpSocket {
     fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<OptionHandled> {
         use GetSocketOption as O;
 
+        if let O::Error(error) = option {
+            **error = self.with_smol_socket_error(|_, pending| {
+                pending
+                    .take()
+                    .map_or(0, |error| kerrno::LinuxError::from(error).into_raw())
+            });
+            return Ok(OptionHandled::Yes);
+        }
         if self.general.get_option_inner(option)?.is_yes() {
             return Ok(OptionHandled::Yes);
         }
 
         match option {
+            O::Linger(linger) => {
+                **linger = self
+                    .is_abortive_close
+                    .load(Ordering::Relaxed)
+                    .then_some(ktime_types::TimeSpan::ZERO);
+            }
+            O::Ttl(ttl) => {
+                **ttl = self.with_smol_socket(|socket| socket.hop_limit().unwrap_or(64));
+            }
             O::NoDelay(no_delay) => {
                 **no_delay = self.with_smol_socket(|socket| !socket.nagle_enabled());
             }
@@ -476,6 +519,20 @@ impl Configurable for TcpSocket {
         }
 
         match option {
+            O::Linger(linger) => {
+                if linger.is_some_and(|duration| !duration.is_zero()) {
+                    return Err(KError::OperationNotSupported);
+                }
+                // This independent close policy does not publish other state.
+                self.is_abortive_close
+                    .store(linger.is_some(), Ordering::Relaxed);
+            }
+            O::Ttl(ttl) => {
+                if *ttl == 0 {
+                    return Err(KError::InvalidInput);
+                }
+                self.with_smol_socket(|socket| socket.set_hop_limit(Some(*ttl)));
+            }
             O::NoDelay(no_delay) => {
                 self.with_smol_socket(|socket| {
                     socket.set_nagle_enabled(!no_delay);
@@ -672,7 +729,7 @@ impl SocketOps for TcpSocket {
                 if should_register {
                     register_tcp_bound(bound_endpoint)?;
                 }
-                if let Err(err) = LISTEN_TABLE.listen(bound_endpoint, backlog) {
+                if let Err(err) = LISTEN_TABLE.listen(bound_endpoint, backlog, self.handle) {
                     if should_register {
                         unregister_tcp_bound(bound_endpoint);
                     }
@@ -711,14 +768,16 @@ impl SocketOps for TcpSocket {
                     };
                     Ok(accepted)
                 })?;
-        Ok(Socket::Tcp(KBox::write(
-            storage,
-            TcpSocket::new_connected(
-                accepted.handle,
-                accepted.local_endpoint,
-                accepted.remote_endpoint,
-            ),
-        )))
+        let connected = TcpSocket::new_connected(
+            accepted.handle,
+            accepted.local_endpoint,
+            accepted.remote_endpoint,
+        );
+        connected.is_abortive_close.store(
+            self.is_abortive_close.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        Ok(Socket::Tcp(KBox::write(storage, connected)))
     }
 
     fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
@@ -729,7 +788,12 @@ impl SocketOps for TcpSocket {
             let result = self
                 .general
                 .send_poller_with_nonblocking(self, nonblocking, || {
-                    self.with_smol_socket(|socket| self.send_to_socket(socket, &mut src))
+                    self.with_smol_socket_error(|socket, error| {
+                        if let Some(error) = error.take() {
+                            return Err(error);
+                        }
+                        self.send_to_socket(socket, &mut src)
+                    })
                 });
 
             match result {
@@ -755,7 +819,15 @@ impl SocketOps for TcpSocket {
             self.general
                 .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
                     network_poller().assist_once();
-                    self.with_smol_socket(|socket| {
+                    self.with_smol_socket_error(|socket, error| {
+                        // Deliver queued bytes before the pending reset; a
+                        // read, write or SO_ERROR consumes that error once.
+                        if !socket.can_recv()
+                            && !matches!(socket.peek(0), Err(smol::RecvError::Finished))
+                            && let Some(error) = error.take()
+                        {
+                            return Err(error);
+                        }
                         Self::recv_from_socket(
                             socket,
                             &mut dst,
@@ -825,7 +897,9 @@ impl Pollable for TcpSocket {
             State::Listening => self.poll_listener(),
             State::Busy => IoEvents::empty(),
         };
-        events.set(IoEvents::RDHUP, self.rx_closed.load(Ordering::Acquire));
+        if self.rx_closed.load(Ordering::Acquire) {
+            events.insert(IoEvents::RDHUP);
+        }
         events
     }
 
@@ -834,7 +908,8 @@ impl Pollable for TcpSocket {
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
-        if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+        let read_events = IoEvents::IN | IoEvents::RDHUP | IoEvents::ERR | IoEvents::HUP;
+        if events.intersects(read_events) {
             context.register(&self.poll_rx)?;
         }
         if events.contains(IoEvents::OUT) {
@@ -850,7 +925,7 @@ impl Pollable for TcpSocket {
             // smoltcp has one waker slot per direction. Aggregate all waiters
             // for this socket without subscribing them to unrelated traffic.
             self.with_smol_socket(|socket| {
-                if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+                if events.intersects(read_events) {
                     socket.register_recv_waker(&Waker::from(self.poll_rx.clone()));
                 }
                 if events.contains(IoEvents::OUT) {
@@ -875,7 +950,7 @@ impl Drop for TcpSocket {
         let is_protocol_closed = {
             // Linux aborts a TCP close with unread receive data. Keep the
             // handle until smoltcp dispatches the resulting reset packet.
-            if has_unread_data {
+            if has_unread_data || self.is_abortive_close.load(Ordering::Relaxed) {
                 socket.abort();
             } else {
                 socket.close();

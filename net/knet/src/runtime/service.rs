@@ -18,7 +18,7 @@ use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
 use ktime_types::{MonotonicInstant, TimeSpan};
 use smoltcp::{
-    iface::{Interface, PollIngressSingleResult, PollResult, SocketSet},
+    iface::{Interface, PollIngressSingleResult, PollResult},
     time::Instant as SmoltcpInstant,
     wire::{HardwareAddress, IpAddress as SmoltcpIpAddress, IpCidr as SmoltcpIpCidr},
 };
@@ -41,6 +41,7 @@ use crate::{
     stack::{
         device::StackDevice,
         ingress::{IngressProcessor, prepare_smoltcp_ingress},
+        socket_set::SocketSetState,
         time::{earliest_poll_deadline, has_immediate_timer_work, now, to_smoltcp_instant},
     },
 };
@@ -1335,7 +1336,7 @@ fn poll_smoltcp_ingress_budgeted(
     iface: &mut Interface,
     current: SmoltcpInstant,
     device: &mut StackDevice<'_>,
-    sockets: &mut SocketSet<'_>,
+    sockets: &mut SocketSetState<'_>,
     budget_packets: usize,
     round_started_at: MonotonicInstant,
 ) -> SmoltcpIngressProgress {
@@ -1351,7 +1352,7 @@ fn poll_smoltcp_ingress_budgeted(
             break;
         }
 
-        match iface.poll_ingress_single(current, device, sockets) {
+        match sockets.poll_ingress_single(iface, current, device) {
             PollIngressSingleResult::None => break,
             PollIngressSingleResult::PacketProcessed => {}
             PollIngressSingleResult::SocketStateChanged => {
