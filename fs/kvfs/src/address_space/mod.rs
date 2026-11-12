@@ -23,9 +23,9 @@ mod writeback_errors;
 
 pub use operations::{AddressSpaceOperations, WriteBeginRequest, WriteEndRequest};
 pub(crate) use operations::{default_address_space_operations, empty_address_space_operations};
+pub use pagecache::{WritebackControl, WritebackSyncMode};
 pub use readahead::ReadaheadControl;
 pub use views::AddressSpaceViewGuard;
-pub use writeback::{WritebackControl, WritebackSyncMode};
 pub use writeback_errors::WritebackErrors;
 
 static NEXT_ADDRESS_SPACE_ID: AtomicU64 = AtomicU64::new(1);

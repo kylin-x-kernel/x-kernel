@@ -116,17 +116,20 @@ struct WritebackPass {
     inode: Arc<VfsInode>,
     private: Arc<Ext4Inode>,
     super_block: Arc<SuperBlock>,
-    sync_mode: WritebackSyncMode,
-    is_throttled: bool,
     pending_mapped: Vec<PendingMappedBatch>,
 }
 
 impl WritebackPass {
-    fn submit(&mut self, mapping: &AddressSpace, batch: WritebackBatch<'_>) -> VfsResult<()> {
+    fn submit(
+        &mut self,
+        mapping: &AddressSpace,
+        control: &mut WritebackControl,
+        batch: WritebackBatch<'_>,
+    ) -> VfsResult<()> {
         let queue = self.private.writeback_io().clone();
         if !queue.has_capacity() {
-            if self.sync_mode == WritebackSyncMode::None {
-                self.is_throttled = true;
+            if control.sync_mode() == WritebackSyncMode::None {
+                control.account_skipped(batch.page_count());
                 return Err(VfsError::WouldBlock);
             }
             queue.wait_capacity();
@@ -186,7 +189,7 @@ impl WritebackPass {
             kind,
         };
         let plan = match plan {
-            Some(plan) if self.sync_mode == WritebackSyncMode::All => {
+            Some(plan) if control.sync_mode() == WritebackSyncMode::All => {
                 // Earlier allocating batches may still own metadata publication.
                 // The submission guard excludes mapping removal until this local
                 // pipeline drains, so no worker is needed for these overwrites.
@@ -253,23 +256,20 @@ pub(super) fn writepages(mapping: &AddressSpace, control: &mut WritebackControl)
     let error_generation = errors.current_generation();
     let guard = private.lock_writeback_submission();
     let queue = private.writeback_io();
-    if control.sync_mode() == WritebackSyncMode::All {
-        // Busy redirtied folios must become eligible before enumeration.
-        queue.drain();
-    }
     let mut pass = WritebackPass {
         super_block: inode.super_block()?,
         inode: inode.clone(),
         private: private.clone(),
-        sync_mode: control.sync_mode(),
-        is_throttled: false,
         pending_mapped: Vec::new(),
     };
-    let submitted = mapping.submit_cached_ranges(control, MAX_WRITEBACK_BYTES, |batch| {
-        pass.submit(mapping, batch)
+    let submitted = mapping.submit_cached_ranges(control, MAX_WRITEBACK_BYTES, |control, batch| {
+        pass.submit(mapping, control, batch)
     });
     // Always settle already submitted BIOs, including after a later admission error.
     let mapped_completed = pass.drain_mapped();
+    // Generic ALL preparation waits/revalidates selected busy folios. This
+    // finite prefix also settles old clean or detached owners, so no entry-wide
+    // drain is needed before selecting and submitting new work.
     let target = queue.snapshot();
     drop(guard);
     if control.sync_mode() == WritebackSyncMode::All {
@@ -278,5 +278,5 @@ pub(super) fn writepages(mapping: &AddressSpace, control: &mut WritebackControl)
         let completed = errors.check(error_generation);
         return submitted.and(mapped_completed).and(released).and(completed);
     }
-    if pass.is_throttled { Ok(()) } else { submitted }
+    submitted.and(mapped_completed)
 }

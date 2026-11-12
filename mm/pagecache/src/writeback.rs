@@ -13,7 +13,8 @@ use ktask::completion::CompletionWait;
 use memaddr::PAGE_SIZE_4K;
 
 use crate::{
-    Folio, FolioBatch, FolioGuard, MappingPages, PageIndex, mapping_pages::MappingPagesState,
+    Folio, FolioBatch, FolioGuard, MappingPages, PageIndex, WritebackControl, WritebackSyncMode,
+    mapping_pages::MappingPagesState,
 };
 
 /// Result of one contiguous filesystem writeback submission.
@@ -88,14 +89,33 @@ impl<'a> WritebackBatch<'a> {
 
     fn submit(
         &mut self,
-        submit: &mut impl FnMut(WritebackBatch<'a>, &mut usize) -> KResult<()>,
-        budget: &mut usize,
+        control: &mut WritebackControl,
+        submit: &mut impl FnMut(&mut WritebackControl, WritebackBatch<'a>) -> KResult<()>,
     ) -> KResult<()> {
         if self.data.is_empty() {
             return Ok(());
         }
+        let pages = self.page_count();
+        let skipped = control.pages_skipped();
+        control.charge(pages);
         let empty = Self::new(self.completion.state);
-        submit(core::mem::replace(self, empty), budget)
+        let result = submit(control, core::mem::replace(self, empty));
+        let max_skipped = skipped.saturating_add(pages);
+        if control.pages_skipped() < skipped || control.pages_skipped() > max_skipped {
+            return Err(KError::InvalidInput);
+        }
+        if result == Err(KError::WouldBlock)
+            && (control.sync_mode() != WritebackSyncMode::None
+                || control.pages_skipped() != max_skipped)
+        {
+            return Err(KError::InvalidInput);
+        }
+        result
+    }
+
+    /// Returns the number of prepared folios in this batch.
+    pub fn page_count(&self) -> usize {
+        self.completion.folios.len()
     }
 
     /// Returns the first byte offset in the file.
@@ -222,7 +242,9 @@ fn complete_folios(
     Ok(completed_pages)
 }
 
+#[derive(Clone, Copy)]
 enum FolioMark {
+    ToWrite,
     Dirty,
     Writeback,
 }
@@ -310,6 +332,7 @@ impl MappingPages {
         batch.clear();
         let state = self.state.lock();
         let marks = match mark {
+            FolioMark::ToWrite => &state.towrite_marks,
             FolioMark::Dirty => &state.dirty_marks,
             FolioMark::Writeback => &state.writeback_marks,
         };
@@ -327,260 +350,306 @@ impl MappingPages {
         *next_index = end_index;
     }
 
-    // A dirty tag only selects a candidate. Mapping identity and folio state
-    // must be checked in one folio -> state critical section before I/O owns
-    // the folio, otherwise truncate or replacement can detach a collected Arc.
-    fn start_writeback_for_candidate<'a>(
-        &self,
-        index: PageIndex,
-        candidate: &'a Arc<Folio>,
-        pages_skipped: &mut usize,
-        wait: &CompletionWait,
-    ) -> Option<FolioGuard<'a>> {
-        let mut folio = candidate.lock_with(wait);
-        let mut state = self.state.lock();
-        if !state.is_current(index, candidate) {
-            // Replacement and detach update their own marks under the index
-            // lock. This stale candidate has no authority over those marks.
-            return None;
+    // A pass selects a finite target before preparing data. TOWRITE belongs to
+    // the mapping, not this invocation; never clear another pass's selection.
+    fn select_writeback(&self, control: &WritebackControl) -> KResult<(PageIndex, PageIndex)> {
+        let target = self.capture_writeback_range(control.range_start()..control.range_end())?;
+        let (start, end) = byte_range_to_page_range(target);
+        if control.sync_mode() == WritebackSyncMode::All {
+            let mut cursor = start;
+            while cursor < end {
+                let mut indexes = [0; FolioBatch::CAPACITY];
+                let mut count = 0;
+                let mut state = self.state.lock();
+                for index in state.dirty_marks.range(cursor..end).take(indexes.len()) {
+                    indexes[count] = *index;
+                    count += 1;
+                }
+                if count == 0 {
+                    break;
+                }
+                for index in &indexes[..count] {
+                    state.towrite_marks.insert(*index);
+                }
+                cursor = indexes[count - 1] + 1;
+            }
         }
-        if !folio.is_dirty() {
-            state.dirty_marks.remove(&index);
-            return None;
-        }
-        if folio.is_under_writeback() {
-            *pages_skipped = pages_skipped.saturating_add(1);
-            return None;
-        }
-
-        folio.clear_dirty();
-        folio.start_writeback();
-        state.dirty_marks.remove(&index);
-        state.writeback_marks.insert(index);
-        drop(state);
-        Some(folio)
+        Ok((start, end))
     }
 
-    /// Writes back dirty cached folios intersecting the half-open `range`.
+    // The filesystem supplies live EOF; the cache never owns another size.
+    // Flush unsent WRITEBACK owners before a lock or I/O wait can depend on them.
+    fn prepare_writeback_candidate<'a>(
+        &self,
+        candidate: &'a Arc<Folio>,
+        mode: WritebackSyncMode,
+        live_eof: &mut impl FnMut() -> KResult<u64>,
+        wait: &CompletionWait,
+        mut flush_before_wait: impl FnMut() -> KResult<()>,
+    ) -> KResult<Option<(FolioGuard<'a>, usize)>> {
+        loop {
+            let mut folio = match candidate.try_lock() {
+                Some(folio) => folio,
+                None => {
+                    flush_before_wait()?;
+                    candidate.lock_with(wait)
+                }
+            };
+            let index = candidate.index();
+            // Buffered acceptance and size publication finished under this same
+            // folio lock. Sample only metadata here, with no index lock held.
+            let page_start = index
+                .checked_mul(PAGE_SIZE_4K as u64)
+                .ok_or(KError::InvalidInput)?;
+            let valid_len = live_eof()?
+                .saturating_sub(page_start)
+                .min(PAGE_SIZE_4K as u64) as usize;
+            let mut state = self.state.lock();
+            if !state.is_current(index, candidate) {
+                return Ok(None);
+            }
+            if !folio.is_dirty() {
+                state.dirty_marks.remove(&index);
+                return Ok(None);
+            }
+            if folio.is_under_writeback() {
+                drop(state);
+                drop(folio);
+                if mode == WritebackSyncMode::None {
+                    return Ok(None);
+                }
+                flush_before_wait()?;
+                candidate.wait_writeback(wait);
+                continue;
+            }
+            if valid_len == 0 {
+                return Ok(None);
+            }
+            folio.clear_dirty();
+            folio.start_writeback();
+            state.dirty_marks.remove(&index);
+            state.towrite_marks.remove(&index);
+            state.writeback_marks.insert(index);
+            return Ok(Some((folio, valid_len)));
+        }
+    }
+
+    /// Writes selected folios through a synchronous, folio-locked callback.
     ///
-    /// `nr_to_write` and `pages_skipped` exclusively borrow the owner's control
-    /// fields. Completed pages consume budget immediately, and busy dirty pages
-    /// increment skips, including when a later callback fails. There is no
-    /// separate pass state to merge after return.
-    ///
-    /// Candidates are scanned in bounded ascending windows. Concurrent dirtying
-    /// behind the cursor is left for a later pass; dirtying ahead may be observed.
-    /// The callback runs with the candidate folio locked and must not re-enter
-    /// this [`MappingPages`].
+    /// The live EOF supplier reads owner metadata without acquiring a folio or
+    /// index lock. All adapters charge attempted pages, including failures.
+    /// NONE stops on budget exhaustion or error; ALL completes the finite
+    /// selected set and returns its first error. Existing writeback is skipped
+    /// by NONE and waited/revalidated by ALL. Requires sleepable task context.
     pub fn writeback_until(
         &self,
-        visible_len: u64,
-        range: Range<u64>,
-        nr_to_write: &mut usize,
-        pages_skipped: &mut usize,
-        write_folio_fn: &mut impl FnMut(PageIndex, &[u8], usize) -> KResult<()>,
+        control: &mut WritebackControl,
+        live_eof: &mut impl FnMut() -> KResult<u64>,
+        write_folio: &mut impl FnMut(PageIndex, &[u8], usize) -> KResult<()>,
     ) -> KResult<()> {
-        let wait = CompletionWait::prepare()?;
-        if *nr_to_write == 0 || range.is_empty() {
+        if control.nr_to_write() == 0 {
             return Ok(());
         }
-        let (mut scan_index, end_index) = byte_range_to_page_range(range);
+        let wait = CompletionWait::prepare()?;
+        let (mut cursor, end) = self.select_writeback(control)?;
+        let mode = control.sync_mode();
+        let mark = if mode == WritebackSyncMode::All {
+            FolioMark::ToWrite
+        } else {
+            FolioMark::Dirty
+        };
         let mut candidates = FolioBatch::new();
-
-        'scan: while scan_index < end_index {
-            self.collect_marked_folios(
-                FolioMark::Dirty,
-                &mut scan_index,
-                end_index,
-                &mut candidates,
-            );
-            for folio in candidates.iter() {
-                if *nr_to_write == 0 {
+        let mut first_error = None;
+        'scan: while cursor < end {
+            self.collect_marked_folios(mark, &mut cursor, end, &mut candidates);
+            for candidate in candidates.iter() {
+                if mode == WritebackSyncMode::None && control.nr_to_write() == 0 {
                     break 'scan;
                 }
-                let index = folio.index();
-                let page_start = index
-                    .checked_mul(PAGE_SIZE_4K as u64)
-                    .ok_or(KError::InvalidInput)?;
-                let valid_len = visible_len
-                    .saturating_sub(page_start)
-                    .min(PAGE_SIZE_4K as u64) as usize;
-                if valid_len == 0 {
-                    continue;
-                }
-                let Some(mut locked) =
-                    self.start_writeback_for_candidate(index, folio, pages_skipped, &wait)
-                else {
-                    continue;
+                let result =
+                    self.prepare_writeback_candidate(candidate, mode, live_eof, &wait, || Ok(()));
+                let (mut folio, valid_len) = match result {
+                    Ok(Some(prepared)) => prepared,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        if mode == WritebackSyncMode::None {
+                            break 'scan;
+                        }
+                        continue;
+                    }
                 };
-                let result = write_folio_fn(index, &locked.data()[..valid_len], valid_len);
-                drop(locked);
+                control.charge(1);
+                let result = write_folio(candidate.index(), &folio.data()[..valid_len], valid_len);
+                drop(folio);
+                finish_writeback(&self.state, candidate, result.is_ok());
                 if let Err(error) = result {
-                    finish_writeback(&self.state, folio, false);
-                    return Err(error);
+                    first_error.get_or_insert(error);
+                    if mode == WritebackSyncMode::None {
+                        break 'scan;
+                    }
                 }
-                finish_writeback(&self.state, folio, true);
-                *nr_to_write -= 1;
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
-    /// Writes back dirty cached folios in contiguous batches of at most 31 folios.
+    /// Writes contiguous snapshots with synchronous prefix completion.
     ///
-    /// The callback returns a completed byte prefix on success, or
-    /// `(completed_prefix_bytes, error)` on failure. Only fully completed folios
-    /// consume the borrowed budget. A short success leaves the suffix dirty;
-    /// an oversized prefix returns `InvalidInput` and credits no pages. All started folios finish before an
-    /// error is returned, and progress remains in the borrowed control fields.
-    ///
-    /// The byte and page limits may further shorten each batch. Enumeration is
-    /// incremental as in [`Self::writeback_until`]. The callback runs without
-    /// mapping or folio locks; completion revalidates each resident identity.
-    /// The callback must not wait for or truncate folios in its submitted batch:
-    /// their writeback completes only after the callback returns.
+    /// Completion acknowledges data only; it never changes the invocation's
+    /// attempted-work budget. The incomplete suffix is redirtied for retry.
     pub fn write_cache_pages(
         &self,
-        visible_len: u64,
-        range: Range<u64>,
-        nr_to_write: &mut usize,
-        pages_skipped: &mut usize,
+        control: &mut WritebackControl,
+        live_eof: &mut impl FnMut() -> KResult<u64>,
         max_bytes: usize,
-        write_range_fn: &mut impl FnMut(u64, &[u8]) -> WritebackRangeResult,
+        write_range: &mut impl FnMut(u64, &[u8]) -> WritebackRangeResult,
     ) -> KResult<()> {
-        self.scan_writeback(
-            visible_len,
-            range,
-            nr_to_write,
-            pages_skipped,
-            max_bytes,
-            &mut |batch, budget| {
-                let result = write_range_fn(batch.offset(), batch.data());
-                let (_, completion) = batch.into_parts();
-                let (prefix, error) = match result {
-                    Ok(prefix) => (prefix, None),
-                    Err((prefix, error)) => (prefix, Some(error)),
-                };
-                *budget -= completion.complete(prefix)?;
-                error.map_or(Ok(()), Err)
-            },
-        )
+        self.submit_cache_pages(control, live_eof, max_bytes, &mut |_, batch| {
+            let result = write_range(batch.offset(), batch.data());
+            let (_, completion) = batch.into_parts();
+            let (prefix, error) = match result {
+                Ok(prefix) => (prefix, None),
+                Err((prefix, error)) => (prefix, Some(error)),
+            };
+            let completed = completion.complete(prefix).map(|_| ());
+            error.map_or(completed, Err)
+        })
     }
 
-    /// Transfers bounded dirty batches to the filesystem's submission owner.
+    /// Hands snapshots and exactly-once completion to the filesystem.
     ///
-    /// The budget counts folios handed to `submit`, including rejected batches;
-    /// completion may occur after this scan returns. Unlike write_cache_pages,
-    /// return does not establish I/O completion or report deferred errors. The
-    /// owner bounds outstanding requests, drains on every exit, and provides
-    /// error reporting and serialization against truncate. No cache locks are
-    /// held during submission. Task context only.
+    /// The callback borrows this invocation's control only until it returns.
+    /// A whole unsent NONE decline accounts the batch as skipped, restores all
+    /// its folios before returning, and returns WouldBlock. Other failures are
+    /// errors. ALL must wait filesystem admission rather than decline.
     ///
-    /// # Errors
-    /// Returns the first submission/scan error; already transferred batches
-    /// remain the caller's responsibility, and rejected batches must be dropped.
+    /// Existing asynchronous consumers serialize the entire selection through
+    /// callback return and rollback with their inode submission mutex. Workers
+    /// must not acquire it. The owner retains mappings through deferred I/O,
+    /// drains before freeing blocks, and publishes deferred errors separately.
     pub fn submit_cache_pages<'a>(
         &'a self,
-        visible_len: u64,
-        range: Range<u64>,
-        nr_to_write: &mut usize,
-        pages_skipped: &mut usize,
+        control: &mut WritebackControl,
+        live_eof: &mut impl FnMut() -> KResult<u64>,
         max_bytes: usize,
-        submit: &mut impl FnMut(WritebackBatch<'a>) -> KResult<()>,
+        submit: &mut impl FnMut(&mut WritebackControl, WritebackBatch<'a>) -> KResult<()>,
     ) -> KResult<()> {
-        self.scan_writeback(
-            visible_len,
-            range,
-            nr_to_write,
-            pages_skipped,
-            max_bytes,
-            &mut |batch, budget| {
-                *budget -= batch.completion.folios.len();
-                submit(batch)
-            },
-        )
-    }
-
-    fn scan_writeback<'a>(
-        &'a self,
-        visible_len: u64,
-        range: Range<u64>,
-        nr_to_write: &mut usize,
-        pages_skipped: &mut usize,
-        max_bytes: usize,
-        submit: &mut impl FnMut(WritebackBatch<'a>, &mut usize) -> KResult<()>,
-    ) -> KResult<()> {
-        let wait = CompletionWait::prepare()?;
-        if *nr_to_write == 0 || range.is_empty() {
+        if control.nr_to_write() == 0 {
             return Ok(());
         }
-        let (mut scan_index, end_index) = byte_range_to_page_range(range);
+        let wait = CompletionWait::prepare()?;
+        let (mut cursor, end) = self.select_writeback(control)?;
+        let mode = control.sync_mode();
+        let mark = if mode == WritebackSyncMode::All {
+            FolioMark::ToWrite
+        } else {
+            FolioMark::Dirty
+        };
         let mut candidates = FolioBatch::new();
-
-        let max_bytes = max_bytes.max(PAGE_SIZE_4K);
-        let mut next_index = None;
         let mut batch = WritebackBatch::new(&self.state);
-
-        'scan: while scan_index < end_index {
-            self.collect_marked_folios(
-                FolioMark::Dirty,
-                &mut scan_index,
-                end_index,
-                &mut candidates,
-            );
-            for folio in candidates.iter() {
-                if *nr_to_write == 0 {
+        let mut next_index = None;
+        let mut first_error = None;
+        let max_bytes = max_bytes.max(PAGE_SIZE_4K);
+        'scan: while cursor < end {
+            self.collect_marked_folios(mark, &mut cursor, end, &mut candidates);
+            for (slot, candidate) in candidates.iter().enumerate() {
+                let index = candidate.index();
+                let is_full = batch.completion.folios.is_full()
+                    || batch.data.len().saturating_add(PAGE_SIZE_4K) > max_bytes
+                    || (mode == WritebackSyncMode::None
+                        && batch.page_count() >= control.nr_to_write());
+                if !batch.data.is_empty()
+                    && (next_index != Some(index) || is_full)
+                    && !can_continue_writeback(
+                        mode,
+                        batch.submit(control, submit),
+                        &mut first_error,
+                    )
+                {
                     break 'scan;
                 }
-                let index = folio.index();
-                let page_start = index
-                    .checked_mul(PAGE_SIZE_4K as u64)
-                    .ok_or(KError::InvalidInput)?;
-                let valid_len = visible_len
-                    .saturating_sub(page_start)
-                    .min(PAGE_SIZE_4K as u64) as usize;
-                if valid_len == 0 {
-                    continue;
+                if mode == WritebackSyncMode::None && control.nr_to_write() == 0 {
+                    break 'scan;
                 }
-
-                let contiguous = next_index == Some(index);
-                let would_overflow = batch.data.len().saturating_add(valid_len) > max_bytes;
-                let would_exceed_pages = batch.completion.folios.len() >= *nr_to_write;
-                if !batch.data.is_empty()
-                    && (!contiguous
-                        || would_overflow
-                        || would_exceed_pages
-                        || batch.completion.folios.is_full())
-                {
-                    batch.submit(submit, nr_to_write)?;
-                    if *nr_to_write == 0 {
-                        break 'scan;
+                let prepared =
+                    self.prepare_writeback_candidate(candidate, mode, live_eof, &wait, || {
+                        if !can_continue_writeback(
+                            mode,
+                            batch.submit(control, submit),
+                            &mut first_error,
+                        ) || (mode == WritebackSyncMode::None && control.nr_to_write() == 0)
+                        {
+                            return Err(KError::WouldBlock);
+                        }
+                        Ok(())
+                    });
+                let (mut folio, valid_len) = match prepared {
+                    Ok(Some(prepared)) => prepared,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        if mode == WritebackSyncMode::None && error == KError::WouldBlock {
+                            break 'scan;
+                        }
+                        first_error.get_or_insert(error);
+                        if mode == WritebackSyncMode::None {
+                            break 'scan;
+                        }
+                        continue;
                     }
-                }
-
-                let Some(mut locked) =
-                    self.start_writeback_for_candidate(index, folio, pages_skipped, &wait)
-                else {
-                    batch.submit(submit, nr_to_write)?;
-                    if *nr_to_write == 0 {
-                        break 'scan;
-                    }
-                    next_index = None;
-                    continue;
                 };
-
                 if batch.data.is_empty() {
-                    batch.offset = page_start;
+                    batch.offset = index * PAGE_SIZE_4K as u64;
+                    let mut max_pages = max_bytes / PAGE_SIZE_4K;
+                    if mode == WritebackSyncMode::None {
+                        max_pages = max_pages.min(control.nr_to_write());
+                    }
+                    let pages = candidates.contiguous_pages_from(slot, max_pages);
+                    // Size from the already collected run. Geometric rounding
+                    // preserves the old Vec capacity bound across scan windows,
+                    // without repeatedly reallocating/copying contiguous pages.
+                    let capacity = if valid_len < PAGE_SIZE_4K {
+                        valid_len
+                    } else {
+                        (pages * PAGE_SIZE_4K).next_power_of_two()
+                    };
+                    batch.data.reserve(capacity);
                 }
-                batch.data.extend_from_slice(&locked.data()[..valid_len]);
+                batch.data.extend_from_slice(&folio.data()[..valid_len]);
                 batch.completion.bytes = batch.data.len();
-                drop(locked);
-                batch.completion.folios.push(folio.clone());
+                drop(folio);
+                batch.completion.folios.push(candidate.clone());
                 next_index = Some(index + 1);
+                // A later growing EOF must start its own payload at its real
+                // page offset, never immediately after this partial page.
+                if valid_len < PAGE_SIZE_4K
+                    && !can_continue_writeback(
+                        mode,
+                        batch.submit(control, submit),
+                        &mut first_error,
+                    )
+                {
+                    break 'scan;
+                }
             }
         }
-
-        batch.submit(submit, nr_to_write)?;
-        Ok(())
+        can_continue_writeback(mode, batch.submit(control, submit), &mut first_error);
+        first_error.map_or(Ok(()), Err)
     }
+}
+
+// Like writeback_iter's saved error: integrity passes keep preparing selected
+// work after an error; opportunistic passes stop, with capacity decline benign.
+fn can_continue_writeback(
+    mode: WritebackSyncMode,
+    result: KResult<()>,
+    first_error: &mut Option<KError>,
+) -> bool {
+    let Err(error) = result else {
+        return true;
+    };
+    if !(mode == WritebackSyncMode::None && error == KError::WouldBlock) {
+        first_error.get_or_insert(error);
+    }
+    mode == WritebackSyncMode::All
 }

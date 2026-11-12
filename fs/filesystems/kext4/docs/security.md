@@ -901,3 +901,13 @@ before removing records. Reservations remain with their inodes for a later
 activation. Disable drains the final quota metadata
 transaction through checkpoint before restoring ordinary file access. No parallel
 mapping registry, quota file table or compensating policy flags are added.
+
+## Selection/admission boundary
+
+The existing producer mutex excludes another scan until every declined unsent
+batch is redirtied and its WRITEBACK ended. NONE admission refusal is capacity
+feedback with skipped-page accounting, not an I/O failure. ALL waits capacity;
+workers require no producer mutex. No new rejection field or coordination lock
+is added. Buffered write_end cannot reacquire the copied folio or wait for
+writeback while it publishes accepted size. Completion remains independent of
+the inode data lock retained by writer rollback.

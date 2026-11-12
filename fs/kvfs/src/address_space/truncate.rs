@@ -42,7 +42,8 @@ impl AddressSpace {
     /// Publishes the size accepted by `AddressSpaceOperations::write_end`.
     ///
     /// The caller must be the generic write path, which holds the inode data
-    /// lock and has already prepared any cache bytes between the old EOF and
+    /// lock and, for accepted bytes, the copied folio lock. It has prepared
+    /// any cache bytes between the old EOF and
     /// the completed write. This is the Rust equivalent of an aops
     /// `write_end` implementation doing `i_size_write(mapping->host, len)`.
     pub fn write_end_set_size(&self, len: u64) -> VfsResult<()> {

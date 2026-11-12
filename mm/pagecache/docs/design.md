@@ -49,6 +49,7 @@ VfsInode
                  -> optional Arc<dyn CacheResidency> (one per mapping)
                  -> BTreeSet<PageIndex> dirty_marks (派生索引)
                  -> BTreeSet<PageIndex> writeback_marks (派生索引)
+                 -> BTreeSet<PageIndex> towrite_marks (本轮待写选择)
 ```
 
 `kvfs::AddressSpace` 在 materialize 时提供闭包，由自己的
@@ -122,14 +123,27 @@ truncate belongs to the owning `kvfs::AddressSpace`, not to this container.
 
 ### Writeback
 
-写回进度只由 KVFS `WritebackControl` 拥有。MappingPages 独占借用其预算和 skip
-字段原地更新，返回 `KResult<()>`，后续错误不会丢失先前进度；不另建 stats/pass
-对象。byte callback 使用 `Result<usize, (usize, KError)>` 返回完成前缀，或完成前缀
-与错误。同步适配器完成所有已开始的 folio 后再传播错误，只有完整成功页消耗预算。
+`pagecache::WritebackControl` owns one invocation's range, mode, attempted-page
+budget and filesystem-skipped count; KVFS reexports the same definition. All
+three adapters borrow it directly. Pages consume budget when handed to the
+filesystem, including failed or declined attempts; completion never refunds it.
+NONE stops on exhaustion or the first error. After starting with a nonzero
+budget, ALL processes its selected set despite later exhaustion/errors and
+returns the first error. A busy cache candidate is not a filesystem decline.
 
-`writeback_until` 和 `write_cache_pages` 接收 owner 传入的
-`visible_len`，据此裁剪最后一个 folio 的有效字节。成功后清 dirty；失败时恢复
-仍属于当前 mapping 的 folio 为 dirty，并结束 under-writeback 状态。
+Each pass captures a finite resident endpoint. ALL adds DIRTY indexes to the
+shared TOWRITE derived index in windows of at most 31 and then scans that index;
+NONE scans DIRTY. These are selection marks, not private snapshots. Handoff
+consumes TOWRITE; detach/replacement removes the old mark. Returning from a pass
+never clears other callers' selection. `util/kxarray` has no tag API, so the
+existing BTree indexes remain the storage representation.
+
+The common preparation helper locks the folio, samples the owner's live EOF,
+and rechecks identity/dirty/WRITEBACK before preparing valid bytes. NONE skips
+existing WRITEBACK; ALL waits and revalidates. Batch adapters submit pending
+snapshots before a contended folio lock or writeback wait. A partial EOF folio
+ends its batch, so later growth starts another payload at its real page offset.
+The cache stores no EOF, generation or new per-folio state.
 
 `with_folio_or_create` 和 `pin_folio_or_create` 共享同一查找、锁外分配、
 插入竞争、resident identity 复核、初始化及 dirty 对账流程；两者只在
@@ -146,8 +160,9 @@ folio lock → MappingPages state lock 的同一临界区内重新确认：
 缺失或已替换的候选不会写回，也无权修改新 resident 的 marks；同身份 clean 候选清除 dirty tag。
 通过校验后，writeback 在同一临界区内清 dirty、设置 under-writeback 并删除 dirty
 tag。I/O 期间发生 redirty 时，folio access 会重新插入 tag；I/O 失败时，当前 resident
-folio 会恢复 dirty 并重新插入 tag。完成阶段在 folio lock → MappingPages state lock 的同一临界区再次核对
-mapping identity；只有仍是当前 resident folio 的失败写回才能重新标脏并修改 dirty tag，
+folio 会恢复 dirty 并重新插入 tag。Completion holds only the index lock and checks resident identity plus atomic
+dirty/WRITEBACK state; it never acquires the content lock or inode data lock.
+只有仍是当前 resident folio 的失败写回才能重新标脏并修改 dirty tag，
 已移除或替换的 folio 只结束 under-writeback。batch writeback 同时核对最终 dirty 状态；
 单页同步 writeback 在持有 folio lock 的 callback 成功后保持 clean，后续 writer 会在
 clean → dirty 状态变化时重新插入 tag。
@@ -161,8 +176,12 @@ reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只�
 `submit_cache_pages` 与同步 `write_cache_pages` 共用枚举和状态转换逻辑，
 但把数据快照与完成责任交给 `WritebackBatch`。`into_parts` 将数据交给 BIO、
 将 folio 引用和索引引用留给 `WritebackCompletion`；提交回调返回不结束写回。
-该入口按交给 callback 的页数扣预算，包括 callback 拒绝的批次；同步入口仍按
-完成页数扣预算。每批至多 31 页，文件系统必须另行限制在途批次数。
+All adapters count pages handed to filesystem work, including declined batches.
+The callback borrows the same mutable control until it returns and may account
+filesystem skips; deferred completion retains no control. Whole unsent NONE
+declines account their page count, restore all folios synchronously and return
+WouldBlock; ALL waits admission. Each batch holds at most 31 pages; filesystems
+bound total in-flight work and serialize selection through admission/rollback.
 
 The index mutex is embedded in `MappingPages`; synchronous completion borrows
 it. Cross-task `into_owned` creates an `OwnedWritebackCompletion` retaining the
@@ -394,5 +413,15 @@ The target bounds work rather than freezing contents or identity; normal folio
 revalidation and the filesystem's backing-map lifetime protection still apply.
 Capture and wait require sleepable task context, with no current-process
 requirement. Pagecache reports no journal/device durability and owns no fsync
-intent or per-open error cursor. Existing scan selection/accounting remains
-unchanged in F1; TOWRITE and buffered EOF handoff belong to F2.
+intent or per-open error cursor. TOWRITE selection and attempted-work accounting
+share the finite pass boundary; buffered EOF publication belongs to the owner.
+
+### Bounded snapshot allocation
+
+Snapshot builders derive a contiguous run from the already collected FolioBatch,
+limited before traversal by the callback byte limit and NONE's remaining budget.
+They reserve capacity for that run before copying, avoiding repeated Vec growth
+and copying of the existing prefix. Partial EOF reserves only its valid bytes.
+Geometric rounding preserves the previous Vec capacity bound across windows
+(at most 128 KiB for 31 data pages). Capacity is not prepared work and consumes
+no extra budget. There is no retained buffer pool, cached size or new field.

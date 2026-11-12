@@ -54,9 +54,10 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
   已从 resident tree 移除的 index 不得残留在 dirty index；
 - dirty tag 命中不构成写回许可；开始 I/O 前必须在 folio lock → MappingPages state lock
   的同一临界区重新校验 mapping identity、dirty 和 writeback 状态；
-- writeback 完成时必须按相同锁序重新校验 mapping identity；失败只重新标脏当前
-  resident folio，已脱离 mapping 的 folio 只结束 writeback；
-- 清 writeback 位及 mark 后释放两层锁再唤醒；等待者重查位；
+- completion only takes the index lock, rechecks identity and updates atomic
+  dirty/WRITEBACK state; it never acquires the folio content lock. Failure only
+  redirties the current resident; detached completion only ends its WRITEBACK;
+- clear WRITEBACK and its mark before releasing the index lock, then wake;
 - `MappingPages` 中不存在可与 inode `i_size` 分歧的 length 字段；
 - VM object-id、views 和 notifier 不进入本 crate。
 
@@ -246,3 +247,16 @@ preserves the full u64::MAX sentinel without overflow. The target is local to
 one operation, never an EOF authority or promise that every new write is covered.
 No index/content lock is held across completion waits; no fsync intent or new
 persistent coordination state is introduced.
+
+## Shared selection and attempted-work accounting
+
+TOWRITE is a derived selection index. Handoff clears the selected old identity's
+mark together with dirty-to-WRITEBACK; removal discards it. A pass never clears
+the shared selection on return. NONE skips busy WRITEBACK without counting a
+filesystem decline; ALL flushes unsent batches before sleeping and revalidates
+after waking. The same mutable control is borrowed only during submission.
+Completion cannot retain or refund its budget. A declined unsent NONE batch
+must restore dirty/WRITEBACK synchronously under existing producer exclusion.
+Live EOF is borrowed owner metadata sampled under the folio lock; no second
+size or per-folio generation is stored. Partial EOF ends a payload so growth
+cannot concatenate bytes across a file-offset gap.

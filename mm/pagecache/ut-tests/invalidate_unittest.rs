@@ -69,7 +69,9 @@ fn invalidate_rounds_partial_page_bounds_outward() {
         add_clean(&cache, index);
     }
 
-    cache.invalidate_pages_range(1, PAGE_SIZE_4K as u64 + 1).unwrap();
+    cache
+        .invalidate_pages_range(1, PAGE_SIZE_4K as u64 + 1)
+        .unwrap();
 
     assert_eq!(resident_indices(&cache), vec![2]);
 }
@@ -138,15 +140,14 @@ fn invalidate_waits_for_inflight_writeback_then_discards() {
     let finished = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(WaitQueue::new());
     let mut waiter = None;
-    let mut nr_to_write = 1;
-    let mut pages_skipped = 0;
+    let mut control = crate::WritebackControl::all()
+        .with_sync_mode(crate::WritebackSyncMode::None)
+        .with_nr_to_write(1);
 
     cache
         .writeback_until(
-            PAGE_SIZE_4K as u64,
-            0..u64::MAX,
-            &mut nr_to_write,
-            &mut pages_skipped,
+            &mut control,
+            &mut || Ok(PAGE_SIZE_4K as u64),
             &mut |_, _, _| {
                 let waiting_cache = cache.clone();
                 let waiting_entered = entered.clone();
@@ -185,15 +186,14 @@ fn invalidate_leaves_a_replacement_installed_during_the_scan() {
 
     let mut waiter = None;
     let mut replacement = None;
-    let mut nr_to_write = 1;
-    let mut pages_skipped = 0;
+    let mut control = crate::WritebackControl::all()
+        .with_sync_mode(crate::WritebackSyncMode::None)
+        .with_nr_to_write(1);
 
     cache
         .writeback_until(
-            PAGE_SIZE_4K as u64,
-            0..u64::MAX,
-            &mut nr_to_write,
-            &mut pages_skipped,
+            &mut control,
+            &mut || Ok(PAGE_SIZE_4K as u64),
             &mut |_, _, _| {
                 let waiting_cache = cache.clone();
                 waiter = Some(ktask::spawn(move || {

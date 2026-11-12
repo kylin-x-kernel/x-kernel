@@ -40,6 +40,8 @@ pub(super) struct MappingPagesState {
     pub(super) dirty_marks: BTreeSet<PageIndex>,
     // Derived PAGECACHE_TAG_WRITEBACK index for waits.
     pub(super) writeback_marks: BTreeSet<PageIndex>,
+    // Derived PAGECACHE_TAG_TOWRITE selection, never an inode or folio state copy.
+    pub(super) towrite_marks: BTreeSet<PageIndex>,
 }
 
 impl MappingPagesState {
@@ -66,6 +68,7 @@ impl MappingPagesState {
         // The caller retains this exact object past the index critical section,
         // so removing the tree reference cannot deallocate or call the provider.
         self.entries.remove(&index);
+        self.towrite_marks.remove(&index);
     }
 
     pub(super) fn is_current(&self, index: PageIndex, candidate: &Arc<Folio>) -> bool {
@@ -109,6 +112,7 @@ impl MappingPages {
                     residency,
                     dirty_marks: BTreeSet::new(),
                     writeback_marks: BTreeSet::new(),
+                    towrite_marks: BTreeSet::new(),
                 },
                 SpinConfig {
                     max_spins: 10,

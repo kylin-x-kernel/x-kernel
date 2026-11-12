@@ -918,3 +918,13 @@ and waiting, without reacquiring the shared entry guard. Submission success alon
 cannot authorize cache destruction: completion errors are observed before any
 dirty retry data is discarded. Submission failure keeps precedence while earlier
 owned I/O is still drained and cache ownership remains intact.
+
+## Buffered acceptance/writeback handoff
+
+The copied folio remains locked through write_end acceptance and i_size
+publication, with invalidate shared held. Write-end implementations cannot
+reacquire that folio or wait for its I/O. Cancellation and rollback release
+those guards before lifecycle waits, while retaining writer data serialization.
+Writeback samples live EOF only after taking the same folio lock. Attempted
+work and filesystem declines share one pagecache-owned control; completion
+never retains it. This does not replace shared-PTE dirty rearming/invalidation.

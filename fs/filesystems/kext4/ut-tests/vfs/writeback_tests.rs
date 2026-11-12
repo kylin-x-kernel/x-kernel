@@ -437,13 +437,13 @@ fn mapped_writeback_drains_later_batches_after_a_second_window_failure() {
     }
     *device.fail_data_write_at.lock() = Some(5);
     assert_eq!(file.mapping().writepages(), Err(VfsError::Io));
-    assert_eq!(*device.writes.lock(), 8);
+    assert_eq!(*device.writes.lock(), 10);
     for page in (0..19).step_by(2) {
         file.mapping()
             .with_folio(page as u64, |folio| {
                 let folio = folio.unwrap();
                 assert!(!folio.is_under_writeback());
-                assert_eq!(folio.is_dirty(), page == 8 || page >= 16);
+                assert_eq!(folio.is_dirty(), page == 8);
             })
             .unwrap();
     }
@@ -912,6 +912,7 @@ fn async_overwrite_returns_with_bios_pending_and_bounds_admission() {
     file.mapping().writepages_control(&mut control).unwrap();
     assert_eq!(device.delayed.lock().len(), 4);
     assert_eq!(*device.writes.lock(), 4);
+    assert_eq!(control.pages_skipped(), 1);
     for page in [0, 2, 4, 6, 8] {
         file.mapping()
             .with_folio(page, |folio| {
@@ -924,6 +925,8 @@ fn async_overwrite_returns_with_bios_pending_and_bounds_admission() {
     // A second opportunistic pass must not wait for a full queue.
     file.mapping().writepages_control(&mut control).unwrap();
     assert_eq!(*device.writes.lock(), 4);
+    assert_eq!(control.pages_skipped(), 2);
+    assert_eq!(control.nr_to_write(), usize::MAX - 6);
     device.finish_held(false);
     file.inode()
         .private::<Ext4Inode>()

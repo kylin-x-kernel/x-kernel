@@ -40,6 +40,26 @@ impl FolioBatch {
         self.len == 0
     }
 
+    /// Counts at most `max_pages` consecutive indexes from a collected slot.
+    /// The caller obtains `slot` from this batch's iterator.
+    pub(crate) fn contiguous_pages_from(&self, slot: usize, max_pages: usize) -> usize {
+        let end = self.len.min(slot.saturating_add(max_pages));
+        let mut folios = self.entries[slot..end].iter().flatten();
+        let Some(first) = folios.next() else {
+            return 0;
+        };
+        let mut previous = first.index();
+        let mut pages = 1;
+        for folio in folios {
+            if previous.checked_add(1) != Some(folio.index()) {
+                break;
+            }
+            previous = folio.index();
+            pages += 1;
+        }
+        pages
+    }
+
     /// Accesses an initialized folio at a batch position for buffered reading.
     ///
     /// `slot` is a traversal position. Calls `read` under the folio lock without

@@ -211,3 +211,8 @@ without new-map seal admission. A positive existing count excludes WRITE sealing
 FUTURE_WRITE does not revoke the permissions of inherited mappings. The same
 counter remains the sole owner of WRITE-seal exclusion, with checked addition
 and no separate inherited-permission flag.
+
+Buffered acceptance and visible size publication share the copied folio lock.
+The memfs write-end hook only updates size/metadata and cannot reacquire folios
+or wait for I/O. KVFS performs cancellation and cache rollback outside that
+lock, preserving the existing resident-page accounting and lifecycle owner.

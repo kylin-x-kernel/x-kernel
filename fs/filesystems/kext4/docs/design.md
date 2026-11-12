@@ -1748,3 +1748,21 @@ After the final record/tree/free-list/header updates it commits, checkpoints and
 flushes the metadata domain before unloading the backing file. Under file-data
 exclusion it then invalidates live mapped/cache state, restores external inode
 policy and drains that policy update before admitting ordinary writes again.
+
+### Generic selection and buffered acceptance
+
+The existing inode submission mutex spans TOWRITE selection, scanning, queue
+admission and complete rollback of unsent batches. Workers do not acquire it.
+The callback borrows the same WritebackControl as the scanner; no mode copy or
+throttled flag is retained in WritebackPass. A full queue under NONE accounts
+the declined batch as skipped and drops its owner before returning WouldBlock.
+ALL waits admission. Generic preparation waits/revalidates selected busy folios,
+so the entry-wide queue drain before selection is removed. The exit still waits
+the finite queue prefix and flushes completion captures, covering old clean and
+detached owners. Mapped submission retains its earlier-allocation metadata drain.
+
+write_end settles delalloc reservations and publishes accepted i_size under the
+copied folio lock; its fast path takes no cache/lifecycle wait. Short-accept and
+copy-failure rollback waits happen after that lock is released. Generic scans
+sample live EOF per folio and charge attempted work independently of completion
+prefixes. Existing inode, extent and queued-I/O lifetime owners remain unchanged.

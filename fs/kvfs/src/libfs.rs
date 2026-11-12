@@ -208,6 +208,8 @@ pub fn simple_getattr(
 /// This is the `fs/libfs.c` helper used by ramfs-like address-space
 /// operations. Block-backed filesystems must complete their own write-end
 /// work and publish the accepted size with [`AddressSpace::write_end_set_size`].
+/// Successful-copy callers retain the copied folio lock through this helper;
+/// it updates inode size without reacquiring cache locks or waiting for I/O.
 pub fn simple_write_end(mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
     let copied = request.copied();
     let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;

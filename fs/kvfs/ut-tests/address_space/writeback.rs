@@ -93,7 +93,7 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
         address_space.writepages_control(&mut control),
         Err(VfsError::InvalidInput)
     );
-    assert_eq!(control.nr_to_write(), 1);
+    assert_eq!(control.nr_to_write(), 0);
     for (index, expected_dirty) in [(0, false), (1, true)] {
         let state = address_space
             .i_pages
@@ -111,6 +111,7 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
         assert!(state.durable[PAGE_SIZE_4K..].iter().all(|byte| *byte == 0));
     }
 
+    let mut control = WritebackControl::all().with_nr_to_write(1);
     address_space
         .writepages_control(&mut control)
         .expect("redirtied batch converges on retry");
@@ -145,7 +146,7 @@ fn single_folio_failure_preserves_control_progress_for_retry() {
     );
     let mapping = inode.address_space();
     mapping.write_cached_bytes(0, &input).unwrap();
-    let mut control = WritebackControl::all().with_nr_to_write(3);
+    let mut control = WritebackControl::all().with_nr_to_write(1);
     let _invalidate_guard = mapping.invalidate_lock.read();
     let result = mapping.writeback_cached_folios(&mut control, |index, _, _| {
         if index == 1 {
@@ -155,8 +156,9 @@ fn single_folio_failure_preserves_control_progress_for_retry() {
         }
     });
     assert_eq!(result, Err(VfsError::InvalidInput));
-    assert_eq!(control.nr_to_write(), 2);
+    assert_eq!(control.nr_to_write(), 0);
     assert_eq!(control.pages_skipped(), 0);
+    let mut control = WritebackControl::all().with_nr_to_write(1);
     let mut retried = Vec::new();
     mapping
         .writeback_cached_folios(&mut control, |index, _, _| {
@@ -164,7 +166,7 @@ fn single_folio_failure_preserves_control_progress_for_retry() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(retried, vec![1, 2]);
+    assert_eq!(retried, vec![1]);
     assert_eq!(control.nr_to_write(), 0);
     for index in 0..3 {
         mapping
@@ -195,7 +197,7 @@ struct DeferredWritebackOps {
 
 impl DeferredWritebackOps {
     fn submit(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
-        mapping.submit_cached_ranges(control, PAGE_SIZE_4K, |batch| {
+        mapping.submit_cached_ranges(control, PAGE_SIZE_4K, |_, batch| {
             let offset = batch.offset();
             let (data, completion) = batch.into_parts();
             let completion = mapping.retain_writeback_completion(completion)?;
@@ -474,4 +476,127 @@ fn data_range_sync_rounds_to_intersecting_folios() {
         operations.state.lock().durable,
         vec![0x61; PAGE_SIZE_4K * 2]
     );
+}
+
+struct AcceptedWriteOps {
+    accepted: usize,
+    entered: AtomicBool,
+    released: AtomicBool,
+    events: ktask::WaitQueue,
+    synced: AtomicUsize,
+}
+
+impl AddressSpaceOperations for AcceptedWriteOps {
+    fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
+        folio.data().fill(0);
+        folio.complete(Ok(()))
+    }
+
+    fn write_begin(
+        &self,
+        _mapping: &AddressSpace,
+        _request: crate::WriteBeginRequest,
+    ) -> VfsResult<()> {
+        Ok(())
+    }
+
+    fn write_end(
+        &self,
+        mapping: &AddressSpace,
+        request: crate::WriteEndRequest,
+    ) -> VfsResult<usize> {
+        assert!(self.accepted <= request.copied());
+        self.entered.store(true, Ordering::Release);
+        self.events.notify_all(false);
+        self.events
+            .wait_until(|| self.released.load(Ordering::Acquire));
+        mapping.write_end_set_size(request.pos() + self.accepted as u64)?;
+        Ok(self.accepted)
+    }
+
+    fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
+        mapping.writeback_cached_folios(control, |_, data, valid_len| {
+            assert_eq!(valid_len, self.accepted + 1);
+            assert_eq!(data, &b"accepted"[..self.accepted + 1]);
+            self.synced.fetch_add(valid_len, Ordering::Relaxed);
+            Ok(())
+        })
+    }
+}
+
+#[def_test]
+fn writeback_waits_for_buffered_acceptance_and_samples_the_published_eof() {
+    for accepted in [7, 2] {
+        let operations: &'static AcceptedWriteOps = Box::leak(Box::new(AcceptedWriteOps {
+            accepted,
+            entered: AtomicBool::new(false),
+            released: AtomicBool::new(false),
+            events: ktask::WaitQueue::new(),
+            synced: AtomicUsize::new(0),
+        }));
+        let inode = VfsInode::new_file_with_address_space_and_flags(
+            Arc::new(TruncateOps),
+            NodeFlags::ALWAYS_CACHE,
+            operations,
+            VfsInodeInit::new(
+                91,
+                1,
+                Umode::new(NodeType::RegularFile, NodePermission::default()),
+            ),
+        );
+        let mapping = inode.address_space();
+        mapping.write_cached_bytes(0, b"a").unwrap();
+        let super_block = crate::nullfs::new_superblock();
+        let dentry = crate::Dentry::new_file_from_inode(inode.clone(), None, "accept".into());
+        dentry.bind_super_block(&super_block);
+        // A process keeps its mount active after closing this temporary file.
+        // Otherwise final unmount legitimately synchronizes short-write rollback.
+        let mount = crate::Mount::new_root(&super_block);
+        let file = crate::VfsFileBuilder::from_path_state(
+            crate::Path::new(mount.clone(), dentry),
+            crate::FMode::WRITE,
+            crate::OpenFlags::empty(),
+            Arc::new(TruncateOps),
+            kcred::initial_cred(),
+        )
+        .finish()
+        .unwrap();
+        let writing = mapping.clone();
+        let writer = ktask::spawn(move || {
+            let mut source = iov_iter::iov_iter_kvec_source(b"ccepted");
+            let mut iocb = crate::Kiocb::new(&file, 1);
+            assert_eq!(
+                writing.write_iter_with_prepare(&mut iocb, &mut source, |_, _| Ok(())),
+                Ok(accepted)
+            );
+        });
+        operations
+            .events
+            .wait_until(|| operations.entered.load(Ordering::Acquire));
+        assert_eq!(inode.size(), 1);
+        let started = Arc::new(AtomicBool::new(false));
+        let signal = started.clone();
+        let syncing = mapping.clone();
+        let syncer = ktask::spawn(move || {
+            signal.store(true, Ordering::Release);
+            operations.events.notify_all(false);
+            syncing
+                .writepages_control(&mut WritebackControl::all())
+                .unwrap();
+        });
+        operations
+            .events
+            .wait_until(|| started.load(Ordering::Acquire));
+        while syncer.state() != ktask::TaskState::Blocked {
+            assert_ne!(syncer.state(), ktask::TaskState::Exited);
+            ktask::yield_now();
+        }
+        assert_eq!(operations.synced.load(Ordering::Relaxed), 0);
+        operations.released.store(true, Ordering::Release);
+        operations.events.notify_all(false);
+        assert_eq!(writer.join(), 0);
+        assert_eq!(syncer.join(), 0);
+        assert_eq!(inode.size(), (accepted + 1) as u64);
+        assert_eq!(operations.synced.load(Ordering::Relaxed), accepted + 1);
+    }
 }

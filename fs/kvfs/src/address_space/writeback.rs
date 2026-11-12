@@ -7,112 +7,12 @@
 use core::ops::Range;
 
 use pagecache::{
-    OwnedWritebackCompletion, PageIndex, WritebackBatch, WritebackCompletion, WritebackRangeResult,
+    OwnedWritebackCompletion, PageIndex, WritebackBatch, WritebackCompletion, WritebackControl,
+    WritebackRangeResult,
 };
 
 use super::AddressSpace;
 use crate::{VfsError, VfsResult};
-
-/// Writeback request and authoritative progress for one `writepages` operation.
-///
-/// Cache algorithms borrow the budget and skip fields in place. Synchronous
-/// adapters count completed pages; submission adapters count handed-off pages.
-/// Earlier progress remains accounted even if a later write fails.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WritebackControl {
-    range_start: u64,
-    range_end: u64,
-    sync_mode: WritebackSyncMode,
-    nr_to_write: usize,
-    pages_skipped: usize,
-}
-
-/// Whether a writeback pass is opportunistic or data-integrity oriented.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WritebackSyncMode {
-    /// Start writeback without requiring all matching folios to be written.
-    None,
-    /// Submit matching dirty folios for a data-integrity operation.
-    All,
-}
-
-impl WritebackControl {
-    /// Selects all cached pages for data-integrity submission.
-    pub const fn all() -> Self {
-        Self {
-            range_start: 0,
-            range_end: u64::MAX,
-            sync_mode: WritebackSyncMode::All,
-            nr_to_write: usize::MAX,
-            pages_skipped: 0,
-        }
-    }
-
-    /// Selects cached pages at or after the supplied byte offset.
-    pub const fn from(range_start: u64) -> Self {
-        Self {
-            range_start,
-            range_end: u64::MAX,
-            sync_mode: WritebackSyncMode::All,
-            nr_to_write: usize::MAX,
-            pages_skipped: 0,
-        }
-    }
-
-    /// Selects pages intersecting the half-open byte range.
-    ///
-    /// # Errors
-    /// Returns `InvalidInput` if `range_start + len` overflows.
-    pub fn range(range_start: u64, len: usize) -> VfsResult<Self> {
-        let range_end = range_start
-            .checked_add(len as u64)
-            .ok_or(VfsError::InvalidInput)?;
-        Ok(Self {
-            range_start,
-            range_end,
-            sync_mode: WritebackSyncMode::All,
-            nr_to_write: usize::MAX,
-            pages_skipped: 0,
-        })
-    }
-
-    /// Sets the requested writeback synchronization mode.
-    pub const fn with_sync_mode(mut self, sync_mode: WritebackSyncMode) -> Self {
-        self.sync_mode = sync_mode;
-        self
-    }
-
-    /// Sets the maximum number of pages to write.
-    pub const fn with_nr_to_write(mut self, nr_to_write: usize) -> Self {
-        self.nr_to_write = nr_to_write;
-        self
-    }
-
-    /// Returns the inclusive byte offset at which the range starts.
-    pub const fn range_start(self) -> u64 {
-        self.range_start
-    }
-
-    /// Returns the exclusive byte offset at which the range ends.
-    pub const fn range_end(self) -> u64 {
-        self.range_end
-    }
-
-    /// Returns the requested synchronization mode.
-    pub const fn sync_mode(self) -> WritebackSyncMode {
-        self.sync_mode
-    }
-
-    /// Returns the remaining page budget.
-    pub const fn nr_to_write(self) -> usize {
-        self.nr_to_write
-    }
-
-    /// Returns the number of pages skipped so far.
-    pub const fn pages_skipped(self) -> usize {
-        self.pages_skipped
-    }
-}
 
 impl AddressSpace {
     /// Retains this address space until asynchronous folio completion finishes.
@@ -206,11 +106,8 @@ impl AddressSpace {
         let submitted = if target.is_empty() {
             Ok(())
         } else {
-            let mut control = WritebackControl {
-                range_start: target.start,
-                range_end: target.end,
-                ..WritebackControl::all()
-            };
+            let mut control =
+                WritebackControl::range(target.start, (target.end - target.start) as usize)?;
             submit(&mut control)
         };
         let waited = self.i_pages.wait_on_writeback_range(target);
@@ -223,13 +120,8 @@ impl AddressSpace {
         control: &mut WritebackControl,
         mut write_folio_fn: impl FnMut(PageIndex, &[u8], usize) -> VfsResult<()>,
     ) -> VfsResult<()> {
-        self.i_pages.writeback_until(
-            self.visible_len()?,
-            control.range_start()..control.range_end(),
-            &mut control.nr_to_write,
-            &mut control.pages_skipped,
-            &mut write_folio_fn,
-        )
+        self.i_pages
+            .writeback_until(control, &mut || self.visible_len(), &mut write_folio_fn)
     }
 
     /// Transfers dirty snapshots to a filesystem submission owner.
@@ -238,6 +130,11 @@ impl AddressSpace {
     /// bound outstanding batches, retain inode/mapping protection through
     /// completion, and drain before releasing backing mappings. This
     /// helper does not record deferred errors or make a nonblocking pass safe.
+    /// The callback borrows the same control synchronously and may account
+    /// filesystem-declined pages. Unsent NONE declines must restore the batch
+    /// before returning WouldBlock; ALL waits backend admission. Asynchronous
+    /// producers serialize selection through admission and rollback with their
+    /// existing inode submission exclusion; completion never retains control.
     /// Completion and batch destruction require sleepable task context.
     ///
     /// # Errors
@@ -246,16 +143,10 @@ impl AddressSpace {
         &'a self,
         control: &mut WritebackControl,
         max_bytes: usize,
-        mut submit: impl FnMut(WritebackBatch<'a>) -> VfsResult<()>,
+        mut submit: impl FnMut(&mut WritebackControl, WritebackBatch<'a>) -> VfsResult<()>,
     ) -> VfsResult<()> {
-        self.i_pages.submit_cache_pages(
-            self.visible_len()?,
-            control.range_start()..control.range_end(),
-            &mut control.nr_to_write,
-            &mut control.pages_skipped,
-            max_bytes,
-            &mut submit,
-        )
+        self.i_pages
+            .submit_cache_pages(control, &mut || self.visible_len(), max_bytes, &mut submit)
     }
 
     /// Writes cached dirty ranges through the supplied backing-store writer.
@@ -274,10 +165,8 @@ impl AddressSpace {
         mut write_range_fn: impl FnMut(u64, &[u8]) -> WritebackRangeResult,
     ) -> VfsResult<()> {
         self.i_pages.write_cache_pages(
-            self.visible_len()?,
-            control.range_start()..control.range_end(),
-            &mut control.nr_to_write,
-            &mut control.pages_skipped,
+            control,
+            &mut || self.visible_len(),
             max_bytes,
             &mut write_range_fn,
         )

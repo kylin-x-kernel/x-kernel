@@ -159,6 +159,12 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
 
     /// Completes or cancels a buffered write.
     ///
+    /// Successful copying, dirty publication and this hook run under the same
+    /// folio lock and invalidate read guard. The hook may update reservations
+    /// and inode metadata, but must not reacquire a folio, invalidate/truncate
+    /// the mapping, or wait for writeback. Copy-failure cancellation runs after
+    /// releasing those locks; cache rollback and its waits also run unlocked.
+    ///
     /// A `copied == 0` request can be a cancellation for a previously
     /// successful [`Self::write_begin`] call. When accepting bytes that extend
     /// the file, the implementation must publish the new visible size with

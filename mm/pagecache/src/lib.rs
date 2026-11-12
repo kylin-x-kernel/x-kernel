@@ -19,6 +19,7 @@ mod mapping_pages;
 mod readahead;
 mod truncate;
 mod writeback;
+mod writeback_control;
 
 pub use folio::{Folio, FolioGuard, FolioRead, FolioReadPart, MappedFolio, PinnedFolio};
 pub use folio_batch::FolioBatch;
@@ -26,6 +27,7 @@ pub use mapping_pages::{CacheResidency, MappingPages};
 pub use writeback::{
     OwnedWritebackCompletion, WritebackBatch, WritebackCompletion, WritebackRangeResult,
 };
+pub use writeback_control::{WritebackControl, WritebackSyncMode};
 
 /// Page index within a mapping.
 pub type PageIndex = u64;

@@ -974,7 +974,7 @@ zeroing the range, which frees no blocks.
 
 `simple_write_end` 保留在 `kvfs::libfs`，只服务 ramfs/memfs 风格的 aops。
 块设备文件系统完成自己的 write-end 后，经 `AddressSpace::write_end_set_size()`
-在同一 generic-write data-lock 临界区发布接受后的 `i_size`，而不把 ext4 语义伪装成
+在同一 generic-write data-lock 和已复制 folio 锁临界区发布接受后的 `i_size`，而不把 ext4 语义伪装成
 libfs helper。
 
 `AddressSpace` 自己持有 object-id、mapped views、静态共享的 `AddressSpaceOperations` 和
@@ -983,7 +983,7 @@ libfs helper。
 `read_folio` 从 Folio 自身获取稳定 index；AddressSpace 构造不再传入仅控制诊断的 mapping kind。
 `MappingPages` 不保存 length、object-id 或 views。`AddressSpace` 持有 cache-invalidate
 lock，用于把 readahead 插入、writeback、page_mkwrite 与 truncate 串行到同一个
-mapping。writeback 的 EOF 仍由 `AddressSpace` 从 inode 读取后传入。
+mapping。writeback 通过 owner 闭包在每个 folio 锁定后从 inode 读取实时 EOF。
 构造 API 只接受 `&'static dyn AddressSpaceOperations`，因此 aops 不是 inode private object。
 Backing-store callbacks 只从当前 `AddressSpace` 的 `mapping->host` 借用唯一 filesystem-private
 inode，再经 host 的 `i_sb` 恢复 superblock；filesystem-private inode 因而不需要保存平行
@@ -1016,8 +1016,8 @@ inode `write_count`，成功后用 `FMode::WRITER` 记录当前 file 持有该�
 `get_write_access()`/`FMODE_WRITER` 和 `ext4_release_file()` 的调用时序。当前 KVFS
 尚未实现 executable deny-write 导致的 negative count 状态。
 
-`WritebackControl` 独占拥有页预算与 skip 计数，MappingPages 通过字段借用原地更新，
-错误返回也保留已完成进度。byte-range callback 的 `WritebackRangeResult` 是
+`WritebackControl` 由 pagecache 定义，KVFS reexport 同一类型。扫描和提交同步借用
+同一个控制对象；预算按交给后端处理的页数扣减，错误或拒绝不退还，完成前缀不改变预算。byte-range callback 的 `WritebackRangeResult` 是
 `Result<usize, (usize, VfsError)>` 的别名，
 表达完成前缀或完成前缀与错误，不再导出独立 writeback outcome 类型。
 
@@ -1383,7 +1383,7 @@ after their final allocation reference is dropped outside the locks.
 `AddressSpace::submit_cached_ranges` transfers bounded PageCache snapshots and
 completion responsibility to the filesystem, sharing enumeration with synchronous
 `writeback_cached_ranges`. Its budget counts pages handed to the callback; the
-synchronous API counts completed pages. Callback return does not mean completion.
+synchronous API uses the same attempted-page rule. Callback return does not mean completion.
 The filesystem bounds in-flight work, drains I/O, completes folios in task context,
 and protects inode/extent lifetime. Invalidate shared protection covers the call
 and is not transferred to deferred completion. Filesystems therefore need their
@@ -1620,6 +1620,20 @@ precedence are shared; failed data remains cached for retry.
 `VfsFile::writeback_mapping`/`writeback_mapping_range`, inode/dentry sync, FIEMAP_SYNC
 and superblock data sync use this data-completion boundary. They do not themselves
 commit a journal or flush a device. Filesystem durability belongs to the file
-fsync or superblock sync hook. Scan accounting, TOWRITE selection and buffered EOF
-handoff remain the following F2 work; repeated dirtying through writable PTEs
-remains dependent on G.
+fsync or superblock sync hook. Scan accounting and TOWRITE selection are owned by
+pagecache; repeated dirtying through writable PTEs remains dependent on G.
+
+### Buffered acceptance and live writeback EOF
+
+Copying, dirty publication, write_end acceptance and visible i_size publication
+finish under the same folio lock and invalidate read guard. A successful-copy
+write_end hook may update reservations and inode metadata, but cannot reacquire
+the folio, invalidate the cache or wait for writeback. Copy-failure cancellation
+and short-accept/error cache rollback run after releasing these guards. The
+writer retains its inode data lock; completion never needs that lock.
+
+All cache writeback adapters pass one control object and a live inode-size
+supplier. Pagecache selects a finite target independently of EOF and samples
+valid bytes after locking each candidate. No pending-size field, copied EOF,
+pass owner or extra lifecycle lock is introduced. These buffered guarantees do
+not capture stores through an already writable PTE.

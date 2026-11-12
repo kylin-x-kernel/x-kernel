@@ -151,13 +151,14 @@ fn truncate_waits_for_writeback_after_removing_ready_folios() {
         let writing_started = io_started.clone();
         let writing_release = release_io.clone();
         let writer = ktask::spawn(move || {
-            let mut budget = 1;
-            let mut skipped = 0;
+            let mut control = crate::WritebackControl::range(0, (PAGE_SIZE_4K as u64) as usize)
+                .unwrap()
+                .with_sync_mode(crate::WritebackSyncMode::None)
+                .with_nr_to_write(1);
+
             let result = writing_cache.write_cache_pages(
-                (PAGE_SIZE_4K * 2) as u64,
-                0..PAGE_SIZE_4K as u64,
-                &mut budget,
-                &mut skipped,
+                &mut control,
+                &mut || Ok((PAGE_SIZE_4K * 2) as u64),
                 PAGE_SIZE_4K,
                 &mut |_, _| {
                     writing_started.store(true, Ordering::Release);
@@ -279,14 +280,15 @@ fn growth_during_batch_writeback_keeps_new_bytes_dirty() {
     write_cached(&cache, 0, &vec![0x5a; PAGE_SIZE_4K]).unwrap();
     let old_len = (PAGE_SIZE_4K / 4) as u64;
     let new_len = (PAGE_SIZE_4K / 2) as u64;
-    let mut budget = 1;
-    let mut skipped = 0;
+    let mut control = crate::WritebackControl::range(0, (PAGE_SIZE_4K as u64) as usize)
+        .unwrap()
+        .with_sync_mode(crate::WritebackSyncMode::None)
+        .with_nr_to_write(1);
+
     cache
         .write_cache_pages(
-            old_len,
-            0..PAGE_SIZE_4K as u64,
-            &mut budget,
-            &mut skipped,
+            &mut control,
+            &mut || Ok(old_len),
             PAGE_SIZE_4K,
             &mut |_, data| {
                 // Growth must finish while this batch still owns writeback. Its
