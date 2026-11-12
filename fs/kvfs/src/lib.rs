@@ -13,6 +13,7 @@
 extern crate alloc;
 
 mod address_space;
+mod direct_io;
 mod fiemap;
 mod file;
 mod file_ra;
@@ -47,6 +48,9 @@ mod xattr;
 pub use address_space::{
     AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, ReadaheadControl,
     WriteBeginRequest, WriteEndRequest, WritebackControl, WritebackErrors, WritebackSyncMode,
+};
+pub use direct_io::{
+    DioDirection, DioMapping, DioMappingFlags, DioMappingKind, DirectIoOperations,
 };
 pub use fiemap::{FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags};
 pub use file::{

@@ -1649,3 +1649,47 @@ supplier. Pagecache selects a finite target independently of EOF and samples
 valid bytes after locking each candidate. No pending-size field, copied EOF,
 pass owner or extra lifecycle lock is introduced. These buffered guarantees do
 not capture stores through an already writable PTE.
+
+## Direct I/O engine skeleton
+
+`fs/kvfs/src/direct_io.rs` defines the backend contract for the generic direct
+I/O engine. It mirrors Linux `iomap_begin`/`iomap_end`; the engine itself lives
+in `kvfs` and will be wired into `read_iter`/`write_iter` in a later change.
+
+- `DioMapping` returns one contiguous run with its full file bounds
+  (`offset`, `length_bytes`) and device bounds (`device_offset`), not clamped
+  to the request. `offset` is a file-space byte offset; `device_offset` is the
+  backing device byte offset of the same first byte, so file byte `offset + k`
+  maps to device byte `device_offset + k`. `DioMappingFlags` mirrors the flags
+  a filesystem reports from `iomap_begin` (same bit values); the engine
+  currently consumes `NEW`, which marks a run allocated by this write whose
+  uncovered bytes must stay zero instead of exposing stale data.
+- `DioDirection::{Read, Write}` states the request direction explicitly; Linux
+  carries the same intent as the `IOMAP_WRITE` flag (no flag implies a read).
+  On a write the filesystem chooses the concrete allocation form (initialized,
+  unwritten, or fallback to buffered I/O) from its own format and inode state.
+- `dio_end_io` is called exactly once per mapping returned by a write map
+  call, including when `written_bytes` is zero. It settles
+  `length_bytes - written_bytes` bytes (unreserve, keep unwritten), converts
+  `[pos, pos + written_bytes)`, and extends the visible size to
+  `pos + written_bytes`. Device errors are reported to the request issuer by
+  the engine and do not need to be re-derived by the filesystem.
+- The engine holds the inode data lock for the whole request (shared for reads
+  and overwrites, exclusive when allocating or extending). `dio_map_blocks`
+  runs under that lock; `dio_end_io` runs under the exclusive lock and
+  publishes size with the `*_locked` helpers; the locking variants acquire the
+  same lock and would deadlock there.
+- Journal handles started by either callback must be stopped before the
+  callback returns. `dio_map_blocks` must leave allocation metadata committed
+  by then because the engine submits data bios only after it returns;
+  `dio_end_io` must likewise finish its conversion and size publication before
+  returning.
+- No fixed per-bio byte limit exists. The engine submits one bio per mapping
+  run and the block layer splits it by device limits, as buffered I/O and
+  writeback do. The engine's owned bounce buffer may use an internal
+  allocation stride, which does not affect splitting semantics.
+- `dio_alignment` is the offset/length alignment in bytes; memory alignment is
+  guaranteed by the engine's owned bounce buffer.
+
+No call site uses the engine yet. `O_DIRECT` still falls back to buffered I/O,
+and `FMode::CAN_ODIRECT` remains an informational open-time flag.

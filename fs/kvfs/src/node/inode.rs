@@ -2040,6 +2040,12 @@ impl VfsInode {
     /// Records a file length already changed by the backing filesystem.
     pub fn update_size_after_backing_change(&self, len: u64) -> VfsResult<()> {
         let _data_guard = self.data_lock.write();
+        self.update_size_after_backing_change_locked(len)
+    }
+
+    /// Records a backing-store size change; caller must hold the inode data
+    /// lock exclusively.
+    pub fn update_size_after_backing_change_locked(&self, len: u64) -> VfsResult<()> {
         self.mapping.truncate_setsize_after_backing_change(len)
     }
 
@@ -2050,6 +2056,16 @@ impl VfsInode {
             return Ok(());
         }
         let _data_guard = self.data_lock.write();
+        self.grow_size_after_backing_write_locked(end)
+    }
+
+    /// Publishes growth after a backing write; caller must hold the inode data
+    /// lock exclusively. Other inode types do not acquire a data size from
+    /// scalar writes.
+    pub fn grow_size_after_backing_write_locked(&self, end: u64) -> VfsResult<()> {
+        if self.node_type() != NodeType::RegularFile {
+            return Ok(());
+        }
         if end > self.size() {
             self.mapping.truncate_setsize_after_backing_change(end)?;
         }
