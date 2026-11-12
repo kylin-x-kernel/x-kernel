@@ -3,7 +3,7 @@
 ## Purpose and scope
 
 `kerrno` supplies the shared kernel error vocabulary and translates it to Linux
-errno. All implementation, macros and in-source unit tests are in `src/lib.rs`.
+errno. All implementation and macros are in `src/lib.rs`; unit tests live in `ut-tests/kerrno_unittest.rs` (included from `src/lib.rs`).
 `KErrorKind` models semantic failures, `KError` stores either that domain or a
 Linux error, and `KResult<T>` is their common result alias. The crate does not
 perform recovery, validation of syscall arguments, permission checks or I/O.

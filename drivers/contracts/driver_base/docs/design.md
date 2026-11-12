@@ -52,7 +52,7 @@ drivers/contracts/driver_base/
 
 | Component | Responsibility |
 |------|------|
-| `DeviceKind` | Enumerates all supported device categories (8), provides the stable short names of `as_str()` |
+| `DeviceKind` | Enumerates all supported device categories, provides the stable short names of `as_str()` |
 | `DriverError` | Unified driver error codes, with retry classification and log messages |
 | `DriverResult<T>` | The dedicated `Result` alias for driver operations |
 | `Device` | The trait every device implements: device identity metadata |

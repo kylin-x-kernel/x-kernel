@@ -3,7 +3,7 @@
 ## Scope
 
 This analysis covers the block-core contract in `src/lib.rs`,
-`src/completion.rs`, `src/backing_dev.rs`, and `src/ioctl.rs`. The concrete backends (`src/ahci.rs`,
+`src/completion.rs`, `src/backing_dev.rs`, `src/bio.rs`, `src/queue.rs`, `src/word_io.rs`, and `src/ioctl.rs`. The concrete backends (`src/ahci.rs`,
 `src/bcm2835sdhci.rs`, `src/sdmmc.rs`, `src/ramdisk*.rs`) are hardware
 adapters excluded from this document and audited separately; the
 registry, validation, and completion invariants below are the core's

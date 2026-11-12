@@ -126,15 +126,15 @@ Configuration option.
 
 **Fields:**
 - `name`: Symbol name (e.g., "CONFIG_X86")
-- `symbol_type`: Type of the option (Bool, Tristate, String, Int, Hex)
-- `properties`: Option properties (prompt, default, dependencies, etc.)
+- `symbol_type`: Type of the option (Bool, Tristate, String, the sized integer types `U8`..`Isize`, Hex, Range)
+- `properties`: Option properties (prompt, defaults, dependencies, etc.)
 
 #### `Property`
 
 ```rust
 pub struct Property {
     pub prompt: Option<String>,
-    pub default: Option<Expr>,
+    pub defaults: Vec<DefaultValue>,
     pub depends: Option<Expr>,
     pub select: Vec<(String, Option<Expr>)>,
     pub imply: Vec<(String, Option<Expr>)>,
@@ -152,8 +152,20 @@ pub enum SymbolType {
     Bool,
     Tristate,
     String,
-    Int,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    Usize,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    Isize,
     Hex,
+    Range(RangeType),
 }
 ```
 
@@ -165,6 +177,7 @@ Type of a configuration symbol.
 pub enum Expr {
     Symbol(String),
     Const(String),
+    ShellExpr(String),
     Not(Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
@@ -260,14 +273,14 @@ Reads .config files.
 pub fn read(path: impl AsRef<Path>) -> Result<HashMap<String, String>>
 ```
 
-Reads a .config file and returns a map of symbol names to values.
+Reads a .config file and returns a map of symbol names (with any `CONFIG_` prefix stripped) to values.
 
 **Example:**
 ```rust
 use xconfig::config::ConfigReader;
 
 let config = ConfigReader::read(".config")?;
-println!("CONFIG_X86 = {:?}", config.get("CONFIG_X86"));
+println!("X86 = {:?}", config.get("X86"));
 ```
 
 ### `ConfigWriter`
@@ -312,9 +325,11 @@ Generates an auto.conf file for makefiles.
 
 **Output Format:**
 ```
-CONFIG_X86=y
-CONFIG_VERSION="1.0.0"
+X86=y
+VERSION="1.0.0"
 ```
+
+The `CONFIG_` prefix is stripped from symbol names.
 
 ##### `generate_autoconf_h`
 
@@ -326,9 +341,11 @@ Generates an autoconf.h header file for C code.
 
 **Output Format:**
 ```c
-#define CONFIG_X86 1
-#define CONFIG_VERSION "1.0.0"
+#define X86 1
+#define VERSION "1.0.0"
 ```
+
+The `CONFIG_` prefix is stripped from symbol names.
 
 **Example:**
 ```rust
@@ -385,8 +402,8 @@ xconf <command> [options]
 
 Available commands:
 - `parse`: Parse and display Kconfig AST
-- `defconfig`: Apply defconfig (not yet implemented)
-- `menuconfig`: Interactive TUI (not yet implemented)
+- `defconfig`: Apply defconfig
+- `menuconfig`: Interactive TUI
 - `generate`: Generate configuration files
 
 See [USAGE.md](USAGE.md) for detailed CLI documentation.
@@ -418,7 +435,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 
                 // Set default value if present
-                if let Some(default) = &config.properties.default {
+                for default in &config.properties.defaults {
                     // Evaluate default expression
                     // symbols.set_value(&config.name, evaluated_value);
                 }

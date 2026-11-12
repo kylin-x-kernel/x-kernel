@@ -15,7 +15,6 @@ export/import path. They are described in *Synchronization* below.
 ## Layering
 
 ```text
-<<<<<<< HEAD
 model/            the card object: no VFS, no display driver
 ├── device/       DrmDevice: struct + card-core methods
 │   ├── device.rs struct, construction, device-wide accessors
@@ -42,40 +41,6 @@ kms/              the committed KMS state and every KMS ioctl
 └── vblank.rs       WAIT_VBLANK
 blob.rs           property blobs: registry, legacy-mode slot, blob ioctls
 auth.rs           master ownership, magic tokens and the auth ioctls
-=======
-model/            the object model: no VFS, no display driver
-├── device.rs     DrmDevice + DrmMinor (the only DeviceFileOps adapter)
-├── file.rs       DrmFile: per-open caps, handles, fb list, syncobjs, auth
-├── ioctl.rs      IOCTLS table + permission check + argument marshalling
-├── backend.rs    trait Backend — the only hardware boundary
-├── ids.rs        Id<T> / IdRegistry<T, Tag>
-├── event.rs      bounded vblank queue + poll
-├── error.rs      DrmError -> errno
-├── protocol.rs   VERSION / SET_VERSION / GET_UNIQUE / GET_CAP / SET_CLIENT_CAP
-├── flip.rs       OutFence/Flip: the completion point of one commit
-├── syncobj.rs    syncobj values, the per-file handle table and its waits
-├── dma_buf.rs    dma-buf export/import, attachments, DMA_BUF_IOCTL_*
-├── dma_buf_file.rs  the descriptor a dma-buf is shared through
-└── sync_ioctl.rs SYNC_IOC_* / DMA_BUF_IOCTL_* descriptor commands
-
-sync/             the fence layer; each module mirrors a Linux source file
-├── dma_fence.rs  fences, callbacks, waiters (dma_fence.c)
-├── fence_list.rs immutable published fence sets
-├── fence_array.rs a set merged into one fence (dma-fence-array.c)
-├── dma_resv.rs   implicit ordering of one buffer (dma-resv.c)
-├── sync_file.rs  a fence exported as a file (sync_file.c)
-├── fence_access.rs  fd -> fence, merge, install (the sync_file user surface)
-├── wakeable.rs   a poll source a fence can wake
-└── wait.rs       task-context waits and signals
-
-syncobj/          SYNCOBJ_* ioctls (drm_syncobj.c)
-gem.rs            GemObject: backing pages, reservation, scanout resource
-framebuffer.rs    Framebuffer objects and the fb ioctls
-scanout.rs        ScanoutSlot: binding and scanned resource
-kms.rs            KmsState, the property table and every KMS ioctl
-blob.rs           property blobs
-auth.rs           master ownership and magic tokens
->>>>>>> feat/drm-g2-dma-fence
 abi/              the Linux UAPI: structures, numbers, constants
 ```
 

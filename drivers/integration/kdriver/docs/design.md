@@ -43,17 +43,22 @@ drivers/integration/kdriver/
 ├── docs/
 │   ├── design.md
 │   └── security.md
+├── ut-tests/                    # unit-test fixtures included through path_mod_test
 └── src/
     ├── lib.rs                   # crate entry, init_drivers, ownership summary API
     ├── manager.rs               # DeviceManager and the unified discovery pipeline
     ├── enumeration.rs           # EnumerationContext, descriptor buffer bus backends write
     ├── resource.rs              # provider holder and DriverResult wrappers
+    ├── firmware_dma.rs          # firmware DMA facts composed into one device DMA view
     ├── block_completion.rs      # block wait/signals host provider
     ├── block_completion_dispatch.rs  # block completion reclaimer (softirq batches)
     ├── block_irq.rs             # shared block IRQ request adapter
+    ├── rng_completion.rs        # hwrng completion wait provider
     ├── bus/
     │   ├── mod.rs               # bus module root
+    │   ├── acpi_owner.rs        # ACPI INTx ownership for the PCI backend (x86)
     │   ├── backend.rs           # BusBackend trait
+    │   ├── intx.rs              # PCI legacy INTx route resolution (x86)
     │   ├── manager.rs           # BusManager multi-backend management
     │   ├── pci_backend.rs       # PCI bus discovery
     │   ├── pci_support.rs       # PCI BAR allocation and device configuration
@@ -65,7 +70,9 @@ drivers/integration/kdriver/
     │   ├── virtio/
     │   │   ├── mod.rs           # VirtIO driver descriptors and activation
     │   │   ├── ids.rs           # VirtIO device type codes and PCI id mapping
-    │   │   └── glue.rs          # VirtIoHal implementation, kdma/iomap binding
+    │   │   ├── glue.rs          # VirtIoHal implementation over the resource provider
+    │   │   ├── block.rs         # VirtIO block activation and close
+    │   │   └── input.rs         # VirtIO input activation and IRQ lifecycle
     │   ├── block/               # block driver registration
     │   │   ├── mod.rs           #   ahci, bcm2835_sdhci, ramdisk, sdmmc registry
     │   │   ├── ahci.rs          #   AHCI platform driver glue
@@ -80,12 +87,6 @@ drivers/integration/kdriver/
     │       ├── fxmac.rs         # FXMAC platform driver glue
     │       ├── ixgbe.rs         # ixgbe PCI driver glue
     │       └── ixgbe_hal.rs     # ixgbe HAL adapter
-    └── tests/                   # block host tests (physically grouped)
-        ├── block_completion.rs
-        ├── block_completion_dispatch.rs
-        ├── block_irq.rs
-        ├── block_requests.rs
-        └── virtio_block_activation.rs
 ```
 
 ## Architecture
@@ -266,7 +267,7 @@ failure. The mock has synchronous dispatch only; it does not prove concurrent
 kernel release. That synchronization is covered by kirq's own regression tests.
 driver_registry/virtio/block.rs owns DeviceId activation, rollback, publish-last
 and hardware removal on top of the virtio request lifetime.
-tests/block_requests.rs injects the real wait provider into that fake, blocks 24
+ut-tests/block_requests_unittest.rs injects the real wait provider into that fake, blocks 24
 callers across two CPUs, then acknowledges simulated IRQs and drives this
 reclaimer through Block softirq. It does not publish a production IRQ disk.
 Production PCI/MMIO block activation uses try_new_irq and the real host provider.
@@ -285,10 +286,10 @@ marks the device Closing, removes owned block lookup, waits for admitted calls,
 suppresses device interrupts, drops native DevIrq, stops the reclaimer, then
 destroys the transport. No registry/class spinlock spans a wait. Retained disks
 can query cached geometry but new I/O returns Io. Physical tests are grouped in
-src/tests/virtio_block_activation.rs and included beneath their owning module.
+ut-tests/virtio_block_activation_unittest.rs and included beneath their owning module.
 
-Block host tests are physically grouped in src/tests/. Each unit test file is
-included under its owning module with #[path], preserving private access and
+Host tests are physically grouped in ut-tests/. Each unit test file is
+included under its owning module with `unittest::path_mod_test!`, preserving private access and
 the existing test namespace without a test-only directory per runtime module.
 
 ## Initialization Paths
@@ -662,7 +663,7 @@ transports:
 3. **Dispatch**: `dispatch_virtio_try_new` dispatches on `DeviceKind`:
    - `DeviceKind::Net` → `VirtIoNet::try_new` → `kclass::publish_net`
    - `DeviceKind::Block` → `block::activate` → IRQ setup → `kclass::publish_block`
-   - `DeviceKind::Display` → `VirtIoGpu::try_new` → `kclass::publish_display`
+   - `DeviceKind::Display` → `VirtIoGpu::try_new` → `kclass::publish_display` → `glue::install_irq` when an IRQ is present
    - `DeviceKind::Input` → local `virtio/input.rs` activation → devres IRQ registration → PCI INTx enable when applicable → `kclass::publish_input`
    - `DeviceKind::Vsock` → `VirtIoSocket::try_new` → `kclass::publish_vsock`
    - `DeviceKind::Fs9p` → `VirtIo9p::try_new` → `kclass::publish_virtio_9p`

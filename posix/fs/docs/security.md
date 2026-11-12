@@ -1,18 +1,18 @@
-# posix-fs - 安全与可靠性分析
+# posix-fs - Security and Reliability Analysis
 
-## 概述
+## Overview
 
-`posix-fs` 是用户态文件系统 syscall 进入内核 VFS、fd 表和设备对象的边界层。
-主要风险来自用户指针和路径字符串、文件描述符复用、VFS magic-link follow、
-目录项 ABI 布局、元数据权限语义、mount flags 兼容和 fd-to-fd 数据复制。
+`posix-fs` is the boundary layer where user-space filesystem syscalls enter the kernel VFS, the fd table and device objects.
+The main risks come from user pointers and path strings, file descriptor reuse, VFS magic-link follow,
+the directory entry ABI layout, metadata permission semantics, mount flags compatibility and fd-to-fd data copying.
 
-`timerfd`、`eventfd` 等不以文件系统状态为核心的 fd-backed kernel object
-已迁移到独立 owner crate `kfd_objects`，不再由本 crate 承担其状态机和安全审计责任。
+fd-backed kernel objects whose core is not filesystem state, such as `timerfd` and `eventfd`,
+have been migrated to the standalone owner crate `kfd_objects`; this crate no longer bears responsibility for their state machines or security audit.
 
-本 crate 含少量 Rust `unsafe` 代码，
-都用于构造 Linux ABI 结构，而不是绕过 VFS 或 fd 表权限。
+This crate contains a small amount of Rust `unsafe` code,
+all of it used to construct Linux ABI structures, not to bypass VFS or fd table permissions.
 
-## 信任模型
+## Trust Model
 
 ```text
 user process
@@ -35,38 +35,38 @@ user process
 kfd resources / kvfs / device and pipe implementations
 ```
 
-- 用户态参数不可信，包括空指针、无效地址、过长路径、恶意 flags、负 offset 和 fd 复用。
-- `posix-fs` 信任 `posix_types` / `osvm` 对用户地址执行边界检查和错误传播。
-- `posix-fs` 信任 `kfd` 在 fd 查找、复制、关闭和 descriptor flags 上保持并发安全。
-- `posix-fs` 信任 `kvfs` / `kfd_objects` / 设备对象执行真实读写、权限、目录和挂载语义。
-- 进程当前上下文、fd 表、`FsStruct` 和用户地址空间必须来自当前 syscall 执行线程。
+- User-space arguments are untrusted, including null pointers, invalid addresses, over-long paths, malicious flags, negative offsets and fd reuse.
+- `posix-fs` trusts `posix_types` / `osvm` to perform bounds checks and error propagation on user addresses.
+- `posix-fs` trusts `kfd` to remain concurrency-safe in fd lookup, duplication, closing and descriptor flags.
+- `posix-fs` trusts `kvfs` / `kfd_objects` / device objects to perform the actual reads and writes and to implement the permission, directory and mount semantics.
+- The current process context, the fd table, `FsStruct` and the user address space must come from the thread currently executing the syscall.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-| 边界 | 入口示例 | 风险来源 |
+| Boundary | Entry examples | Risk source |
 |------|----------|----------|
-| 用户路径字符串 | `openat`、`linkat`、`statx`、`mount` | 空指针、非 NUL 结尾、过长字符串、路径穿越、符号链接循环 |
-| mount data 字节页 | `mount(..., data)` | 坏指针、跨不可读页、二进制内容，以及由具体 filesystem 解释的恶意或未知 option |
-| 用户读写缓冲区 | `read`、`write`、`readlinkat`、`getdents64`、`statfs` | 坏地址、短缓冲区、跨页访问失败、内核信息写回格式错误 |
-| xattr 名称和值 | `set/get/list/remove*xattr` | 非 NUL 结尾、超长 name/value/list、非 UTF-8 suffix、短输出缓冲区、namespace 越权 |
-| 用户 iovec | `readv`、`writev`、`preadv2`、`pwritev2` | iovec 数量过大、范围溢出、读写方向错误 |
-| fd 编号 | 几乎所有 fd syscall | 已关闭 fd、类型不匹配、fd 复用、`CLOEXEC`/非阻塞标志混淆 |
-| 当前进程状态 | `chdir`、`openat`、`close_range` | 进程资源锁、fs_struct 更新、umask 和当前目录语义 |
-| VFS magic link | `/proc/self/fd/<fd>`、`/proc/<pid>/fd/<fd>` | 跨进程 fd 访问、目标进程退出、fd 表并发变化、no-follow 策略 |
-| VFS/设备对象 | `open`、`ioctl`、`mount`、`syncfs` | 设备特定 ioctl、终端对象、mount flags、文件系统实现差异 |
-| FIEMAP 可变长输出 | `ioctl(FS_IOC_FIEMAP)` | 用户声明的 extent 数量、header 后数组地址、后端返回的块映射 |
-| fd-to-fd 复制 | `sendfile`、`copy_file_range`、`splice` | 源目标类型错误、offset 指针 TOCTOU、同文件重叠、阻塞语义 |
+| User path strings | `openat`, `linkat`, `statx`, `mount` | Null pointers, strings not NUL-terminated, over-long strings, path traversal, symbolic link loops |
+| mount data byte page | `mount(..., data)` | Bad pointers, crossing into unreadable pages, binary content, and malicious or unknown options interpreted by the specific filesystem |
+| User read/write buffers | `read`, `write`, `readlinkat`, `getdents64`, `statfs` | Bad addresses, short buffers, cross-page access failures, malformed kernel information written back |
+| xattr names and values | `set/get/list/remove*xattr` | Missing NUL terminator, over-long name/value/list, non-UTF-8 suffix, short output buffers, namespace privilege violations |
+| User iovec | `readv`, `writev`, `preadv2`, `pwritev2` | Too many iovecs, range overflow, wrong read/write direction |
+| fd numbers | Almost all fd syscalls | Closed fds, type mismatch, fd reuse, confusion of `CLOEXEC`/non-blocking flags |
+| Current process state | `chdir`, `openat`, `close_range` | Process resource lock, fs_struct updates, umask and current directory semantics |
+| VFS magic link | `/proc/self/fd/<fd>`, `/proc/<pid>/fd/<fd>` | Cross-process fd access, target process exit, concurrent fd table changes, no-follow policy |
+| VFS/device objects | `open`, `ioctl`, `mount`, `syncfs` | Device-specific ioctls, terminal objects, mount flags, differences between filesystem implementations |
+| FIEMAP variable-length output | `ioctl(FS_IOC_FIEMAP)` | User-declared extent count, address of the array after the header, block mappings returned by the backend |
+| fd-to-fd copying | `sendfile`, `copy_file_range`, `splice` | Wrong source/destination types, offset pointer TOCTOU, overlap within the same file, blocking semantics |
 
-本 crate 不直接访问 MMIO、PIO、DMA、固件表或架构内联汇编。
+This crate does not directly access MMIO, PIO, DMA, firmware tables or architecture inline assembly.
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-| 位置 | 调用路径 | 用途 | 不变量 / 安全理由 |
+| Location | Call path | Purpose | Invariant / safety rationale |
 |------|----------|------|-------------------|
-| `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> Directory::read_dir -> DirBuffer::write_entry` | 在临时 `Vec<u8>` 中按 `linux_dirent64` ABI 写目录项 | 写入前计算记录长度并检查 `remaining_space >= len`；`entry_ptr` 位于 `Vec` 已分配范围内；记录按 `align_of::<linux_dirent64>()` 对齐；文件名复制长度来自 `name.as_bytes().len()`；尾部写入 NUL；写完后只增加 `offset` 到已检查范围 |
-| `ioctl.rs::FiemapHeader` 的 `UserRead`/`UserWrite` 实现 | `sys_ioctl(FS_IOC_FIEMAP)` | 复制 Linux FIEMAP header | `repr(C)` 结构仅含整数，末尾显式 `reserved` 覆盖 ABI 对齐且任意 bit pattern 有效；每个字节都属于已初始化字段 |
-| `ioctl.rs::FiemapExtent` 的 `UserWrite` 实现 | FIEMAP writer 输出 | 复制 Linux FIEMAP extent | `repr(C)` 结构所有 ABI reserved 区域都由显式整数数组覆盖并在每次输出时清零，不存在未初始化 padding |
-| `ioctl.rs::Fsxattr` 的 `UserRead`/`UserWrite` 实现 | 文件属性 ioctl | 复制文件属性 ABI | `repr(C)` 的整数和显式字节数组覆盖全部字段；输出时保留字段清零 |
+| `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> iterate_dir sink -> DirBuffer::write_entry` | Write directory entries into a temporary `Vec<u8>` according to the `linux_dirent64` ABI | The record length is computed and `remaining_space >= len` is checked before writing; `entry_ptr` lies within the allocated range of the `Vec`; the record length is rounded up to `align_of::<linux_dirent64>()`, but the byte buffer does not guarantee struct alignment at arbitrary offsets, so the header is written with `write_unaligned`; the name copy length comes from `name.as_bytes().len()`; a trailing NUL is written; after writing, `offset` only advances within the checked range. |
+| `UserRead`/`UserWrite` implementations of `ioctl.rs::FiemapHeader` | `sys_ioctl(FS_IOC_FIEMAP)` | Copy the Linux FIEMAP header | The `repr(C)` structure contains only integers, the trailing explicit `reserved` covers the ABI alignment, and any bit pattern is valid; every byte belongs to an initialized field |
+| `UserWrite` implementation of `ioctl.rs::FiemapExtent` | FIEMAP writer output | Copy a Linux FIEMAP extent | All ABI reserved regions of the `repr(C)` structure are covered by explicit integer arrays and zeroed on every output, so there is no uninitialized padding |
+| `UserRead`/`UserWrite` implementations of `ioctl.rs::Fsxattr` | File-attribute ioctl | Copies the file-attribute ABI | `repr(C)` integers and explicit byte arrays cover all fields; reserved fields are zeroed on output |
 | `notify.rs::entry_notify_wanted` (`transmute::<usize, WatchProbe>`) | `open`/`mkdir`/`mknod`/`symlink`/`link`/`unlink`/`rmdir`/`rename` entry, the "no watch anywhere" probe | Restores the installed `fn` pointer from its integer form | Only `set_watch_probe` writes the static, storing `probe as usize` -- the address of a `fn` item whose signature matches exactly -- so every non-zero value is such a code address; `0` is the "not installed" sentinel and is excluded before the cast; the `Release` store pairs with the `Acquire` load. Several syscall entries may install concurrently, but each stores the same typed value, so the invariant rests on the typed setter parameter, the sentinel and the ordering, not on a single writer. Failure consequence: if that invariant is broken the call jumps to a non-function address (UB), so no other path may write the static |
 | `notify.rs::notify_entry` (`transmute::<usize, EntryNotifier>`) | `notify_entry_of_path` / `notify_entry`, directory-entry events | Restores the entry notifier the same way | Same argument: the only writer is `set_entry_notifier`, the signature matches the cast type, the `0` sentinel is excluded first, and the store/load pair is `Release`/`Acquire` |
 | `notify.rs::notify_modified` (`transmute::<usize, ContentNotifier>`) | successful `write`/`writev`/positioned writes, `sendfile`/`copy_file_range`/`splice` with positive progress, `open(O_TRUNC)`, `truncate`/`ftruncate`, and `fallocate` -> `notify_modified` | Restores the installed content-event router | Only `set_content_notifier` writes `CONTENT`, storing a `ContentNotifier` function pointer as `usize`; the signature matches the cast type, `0` is the "not installed" sentinel and is excluded before the cast; the `Release` store pairs with the `Acquire` load. Concurrent installers store the same typed value. Failure consequence: if that invariant is broken the call jumps to a non-function address (UB), so no other path may write the static |
@@ -75,106 +75,106 @@ kfd resources / kvfs / device and pipe implementations
 
 
 
-新增 `unsafe` 块必须同时满足：
+A newly added `unsafe` block must satisfy all of the following:
 
-- 代码前有 `SAFETY:` 注释；
-- 本清单记录调用路径、被保护的不变量和失败后果；
-- 不把用户指针裸传给底层对象；
-- 不在绕过 VFS/fd 表权限检查的情况下构造对象引用。
+- It is preceded by a `SAFETY:` comment;
+- This inventory records the call path, the invariant being protected and the failure consequence;
+- It does not pass user pointers raw to the underlying objects;
+- It does not construct object references in a way that bypasses VFS/fd table permission checks.
 
-### getcwd 用户输出边界
+### getcwd User Output Boundary
 
-`getcwd` 的 NULL 输出地址不是查询模式；完成路径和容量检查后，
-所有实际输出均经过 `UserPtr::write_vm_slice`，坏地址返回 `EFAULT`。
-容量以 `usize` 接收，但只复制实际路径长度，巨大容量不会触发对应大小的分配。
-短容量在写入前返回 `ERANGE`，包括 NULL 地址与短容量同时出现的情况。
-回归测试使用独立进程的 `FsStruct` 和 `TestUserArray` 管理的映射，
-检查短缓冲区不写入、正常输出不越过路径末尾，以及未映射地址的错误返回。
+A NULL output address in `getcwd` is not a query mode; after the path and capacity checks are complete,
+all actual output goes through `UserPtr::write_vm_slice`, and a bad address returns `EFAULT`.
+The capacity is received as a `usize`, but only the actual path length is copied, so a huge capacity does not trigger an allocation of that size.
+A short capacity returns `ERANGE` before any write, including when a NULL address and a short capacity occur together.
+The regression tests use a separate process's `FsStruct` and mappings managed by `TestUserArray`,
+and check that a short buffer is not written, that normal output does not go past the end of the path, and the error return for an unmapped address.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-1. **用户内存只通过封装类型访问**：
-   syscall 入口使用 `UserConstPtr`、`UserPtr`、`VmBytes`、`VmBytesMut`
-   和 `IoVectorBuf` 读写用户地址，不直接解引用用户指针。
-2. **用户输出先构造到内核临时缓冲区**：
-   `getdents64` 先写入 `DirBuffer`，再通过 `write_vm_slice` 拷贝给用户态。
-3. **fd 对象通过 `Arc<dyn FileLike>` 持有**：
-   fd 查找得到的对象在当前操作期间由引用计数保持存活。
-4. **类型相关操作先 downcast 校验**：
-   `ftruncate`、`fstatfs`、定点 I/O 和目录 seek 等路径先确认对象是 `File`、
-   `Directory`；pipe 专用操作确认 `VfsFile::private_data` 中存在 `PipeObject`，
-   类型不匹配返回错误。
-5. **范围和溢出必须显式处理**：
-   `fallocate` 对负 offset/len 和 `offset + len` 溢出返回 `InvalidInput`；
-   `lseek` 目录 offset 使用 `checked_add_signed`；
-   定点 I/O 拒绝负 offset；
-   fd-to-fd 复制由 VFS 更新内核态 offset，再经 `UserPtr` 回写。
-6. **临时 ABI 结构不能泄露未初始化内存**：
-   `statfs` 使用安全的结构体字面量显式初始化所有字段，`f_spare` 为零；
-   `getdents64` 的临时 `Vec` 初始为零，目录项记录显式写入尾部 NUL。
-7. **FIEMAP 可变长输出必须使用 checked arithmetic**：
-   `fm_extent_count` 先受 Linux UAPI 总字节上限约束，header 地址、数组字节数和每项
-   offset 均用 `checked_add`/`checked_mul`；每个输出 extent 的 reserved 字段显式清零。
-8. **mount data 只能以有界内核字节页向下传递**：
-   syscall 入口复制一个 4 KiB base-page 大小的 opaque buffer 并强制清零末字节，不施加 UTF-8
-   或提前 NUL 约束；`FsContext` 不保存用户指针，filesystem 若要在 `get_tree()` 返回后保留
-   选项，必须只复制已解析状态。
+1. **User memory is accessed only through wrapper types**:
+   Syscall entries read and write user addresses using `UserConstPtr`, `UserPtr`, `VmBytes`, `VmBytesMut`
+   and `IoVectorBuf`, and never dereference user pointers directly.
+2. **User output is first built in a temporary kernel buffer**:
+   `getdents64` first writes into a `DirBuffer`, then copies it to user space through `write_vm_slice`.
+3. **fd objects are held through `Arc<dyn FileLike>`**:
+   An object obtained from fd lookup is kept alive by its reference count for the duration of the current operation.
+4. **Type-dependent operations downcast and validate first**:
+   Paths such as `ftruncate`, `fstatfs`, positional I/O and directory seek first confirm that the object is a `File` or
+   `Directory`; pipe-specific operations confirm that a `PipeObject` exists in `VfsFile::private_data`,
+   and a type mismatch returns an error.
+5. **Ranges and overflow must be handled explicitly**:
+   `fallocate` returns `InvalidInput` for negative offset/len and for `offset + len` overflow;
+   the `lseek` directory offset uses `checked_add_signed`;
+   positional I/O rejects negative offsets;
+   fd-to-fd copying has the VFS update the kernel-side offset, which is then written back through `UserPtr`.
+6. **Temporary ABI structures must not leak uninitialized memory**:
+   `statfs` explicitly initializes all fields with a safe struct literal, and `f_spare` is zero;
+   the temporary `Vec` of `getdents64` starts zeroed, and directory entry records explicitly write the trailing NUL.
+7. **FIEMAP variable-length output must use checked arithmetic**:
+   `fm_extent_count` is first bounded by the Linux UAPI total byte limit, and the header address, the array byte count and each entry's
+   offset all use `checked_add`/`checked_mul`; the reserved fields of every output extent are explicitly zeroed.
+8. **mount data may be passed down only as a bounded kernel byte page**:
+   The syscall entry copies one opaque buffer of 4 KiB base-page size and forcibly zeroes the last byte, imposing no UTF-8
+   or early-NUL constraint; `FsContext` does not store user pointers, and if a filesystem wants to retain
+   options after `get_tree()` returns, it must copy only the parsed state.
 
-### fchdir 描述符边界
+### fchdir descriptor boundary
 
-`fchdir` 对所有输入都执行 fd 表查找，负值（包括 `AT_FDCWD`）和已关闭 fd
-返回 `EBADF`。非目录返回 `ENOTDIR`；目录继续执行当前凭据的搜索权限检查。
-只有完整验证成功才写入 cwd，不把路径 syscall 的特殊基目录标记当成有效 fd。
+`fchdir` performs an fd table lookup for every input; negative values (including `AT_FDCWD`) and closed fds
+return `EBADF`. A non-directory returns `ENOTDIR`; for a directory, execution continues with the search permission check of the current credentials.
+The cwd is written only after full validation succeeds; the special base-directory markers of path syscalls are not treated as valid fds.
 
-## 权限与语义不变量
+## Permission and semantic invariants
 
-读写 syscall 只对已识别的文件等待中断请求信号重启，且必须在完成量汇总后转换。
-不能将所有 EINTR 升级，或在复制类 syscall 共用的底层 helper 中无条件转换；
-否则已经提交的输出可能被整个请求重放。正数完成量和普通错误不得被覆盖。
+Read and write syscalls restart on an interrupt-request signal only when waiting on recognized files, and the conversion must happen after the completed amount is aggregated.
+Not every EINTR may be upgraded, and the conversion must not be applied unconditionally in the low-level helpers shared by copy-type syscalls;
+otherwise output that has already been committed could cause the entire request to be replayed. A positive completed amount and ordinary errors must not be overwritten.
 
-复制请求先提交实际完成量，再进行用户 offset 回写；回写 EFAULT 可以与已输出
-数据同时存在，不能据此重放请求。源文件的预读位置不直接发布，管道源保留未接受
-的后缀。位置锁顺序和管道消费由 KVFS 统一管理，syscall 不持这些锁回写用户内存。
-零完成量并不一律免除回写：sendfile 的传输错误以及 sendfile/splice 的 EOF
-仍可能因偏移不可写返回 EFAULT；copy_file_range 则仅在正数完成后回写。
+A copy request first commits the actual completed amount, and only then writes back the user offset; an EFAULT on write-back may coexist with the already output
+data, and the request must not be replayed on that basis. The read-ahead position of the source file is not published directly, and a pipe source keeps the unaccepted
+suffix. Position lock ordering and pipe consumption are managed uniformly by KVFS, and syscalls do not hold these locks while writing back to user memory.
+A zero completed amount does not always exempt the write-back: a sendfile transfer error, as well as EOF in sendfile/splice,
+may still return EFAULT because the offset is not writable; copy_file_range writes back only after a positive completion.
 
-1. `O_CLOEXEC`、`FD_CLOEXEC` 和 `close_range(CLOEXEC)` 必须只影响 descriptor flags，
-   不应改变底层 `FileLike` 对象。`close_range` 在 syscall 边界验证无符号范围后
-   才转换到有符号 fd 编号；接受 `UINT_MAX` 不能使空范围跳过请求的文件表隔离。
-2. `O_NONBLOCK` 和 `F_SETFL(O_NONBLOCK)` 必须修改 open file description 的
-   `VfsFile::f_flags`，`nonblocking()` 只能从该字段派生。
-3. `AT_EMPTY_PATH` 是空路径解析的必要条件；只有实际的空字符串与
-   `AT_FDCWD` 组合才能选择持有引用的 cwd，其余情况查 fd 表。
-   内部 `None` 形式保持仅按 fd 解析，避免 `fstat/fchmod/fchown/f*xattr`
-   复用解析器时意外获得访问或修改 cwd 的能力。
-4. 非空绝对 `*at` pathname 必须忽略 `dirfd`；只有相对 pathname 才允许
-   `dirfd` 查找失败影响结果。
-5. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 VFS magic-link follow。
-6. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
-7. 普通新挂载只能精确查找已注册的 filesystem type；syscall 层不得维护与
-   `/proc/filesystems` 分离的构造分支。
-8. 创建文件和目录时应应用 `FsStruct` 中的当前 umask；写入 umask 必须截断为
-   `0777`，`CLONE_FS` 必须与 root/pwd 一起共享它。
+1. `O_CLOEXEC`, `FD_CLOEXEC` and `close_range(CLOEXEC)` must affect only descriptor flags
+   and must not change the underlying `FileLike` object. `close_range` validates the unsigned range at the syscall boundary
+   before converting to signed fd numbers; accepting `UINT_MAX` must not let an empty range skip the requested file-table isolation.
+2. `O_NONBLOCK` and `F_SETFL(O_NONBLOCK)` must modify the open file description's
+   `VfsFile::f_flags`, and `nonblocking()` must be derived only from that field.
+3. `AT_EMPTY_PATH` is a necessary condition for empty-path resolution; only an actual empty string combined with
+   `AT_FDCWD` may select the cwd holding a reference, and all other cases look up the fd table.
+   The internal `None` form keeps resolving by fd only, so that `fstat/fchmod/fchown/f*xattr`
+   reusing the resolver do not accidentally gain the ability to access or modify the cwd.
+4. A non-empty absolute `*at` pathname must ignore `dirfd`; only a relative pathname allows
+   a `dirfd` lookup failure to affect the result.
+5. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` must affect symlinks and VFS magic-link follow.
+6. `mount` must not silently ignore unsupported operation flags that change semantics.
+7. An ordinary new mount may only look up registered filesystem types exactly; the syscall layer must not maintain a construction branch separate from
+   `/proc/filesystems`.
+8. Creating files and directories must apply the current umask in `FsStruct`; the written umask must be truncated to
+   `0777`, and `CLONE_FS` must share it together with root/pwd.
 9. A `chroot` target must be a directory, and the caller must hold effective
    `CAP_SYS_CHROOT`.
-10. `chown/chmod/utimensat` 必须把同一个 credential snapshot 传给 VFS metadata
-   授权，不能直接调用后端 `setattr`。
-11. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
-12. Xattr 输入 name/value 必须先复制到有上限的内核缓冲区；list name sink 的累计长度不得
-    超过 `XATTR_LIST_MAX`。`size == 0` 查询不得访问输出指针或物化名称序列，非零短缓冲区
-    必须返回 `ERANGE`，raw set flags 不得进入 KVFS。
-13. `mount`/`umount2` 必须在改变 mount namespace 状态之前用 syscall 入口捕获的那一份
-    credential snapshot 校验 mount privilege；未授权调用在 mount point 状态校验之前返回
-    `EPERM`，与 Linux `may_mount()` 的 `CAP_SYS_ADMIN` 门禁对应。
-14. 挂载授权只发生在 syscall 边界：`kvfs::MntNamespace` 的 `mount_new`、`attach_bind`、
-    `remount`、`reconfigure_mount` 和 `detach` 保持显式调用契约，不引入隐式
-    current-process 查询；内核内部调用方自行保证已获得授权。
+10. `chown/chmod/utimensat` must pass the same credential snapshot to VFS metadata
+   authorization and must not call the backend `setattr` directly.
+11. `F_ADD_SEALS` may only add memfd seals monotonically and must honor `F_SEAL_SEAL`.
+12. Xattr input name/value must first be copied into a bounded kernel buffer; the cumulative length of the list name sink must not
+    exceed `XATTR_LIST_MAX`. A `size == 0` query must not access the output pointer or materialize the name sequence, and a non-zero short buffer
+    must return `ERANGE`; raw set flags must not enter KVFS.
+13. `mount`/`umount2` must validate mount privilege with the one credential snapshot captured at the syscall entry before changing mount namespace state;
+    an unauthorized call returns `EPERM` before mount point state validation,
+    corresponding to Linux's `CAP_SYS_ADMIN` gate in `may_mount()`.
+14. Mount authorization happens only at the syscall boundary: `mount_new`, `attach_bind`,
+    `remount`, `reconfigure_mount` and `detach` of `kvfs::MntNamespace` keep explicit calling contracts and introduce no implicit
+    current-process query; in-kernel callers are responsible for ensuring they are authorized.
 
-### readlink 长度输入边界
+### readlink length input boundary
 
-用户传入的 `readlink` / `readlinkat` 长度按 Linux syscall 的 `int` ABI 解释，
-而非直接把整个寄存器当作 `usize`。非正值返回 `EINVAL`，不读取 pathname、
-不写输出缓冲区；正值复制仍使用 `UserPtr::write_vm_slice`，不引入裸指针访问。
+The user-supplied `readlink` / `readlinkat` length is interpreted according to the Linux syscall `int` ABI,
+rather than treating the whole register directly as a `usize`. A non-positive value returns `EINVAL`, without reading the pathname
+or writing the output buffer; a positive-value copy still uses `UserPtr::write_vm_slice` and does not introduce raw pointer access.
 
 ### openat2 input validation
 
@@ -197,170 +197,170 @@ argument error rather than a later `EFAULT`/`EBADF`:
 - `RESOLVE_BENEATH` with an absolute pathname is `EXDEV` before the dirfd is
   consulted.
 
-## 线程安全
+## Thread safety
 
-`statx` 的 metadata 与 mount ID 来自同一次解析后持有的目标；取得身份时
-不再次读取用户路径。新增字段返回现有整数挂载 ID，不暴露内核指针，也不改变
-路径授权。解析、getattr 和用户写回错误沿原有 `KResult` 路径传播，最终通过
-既有 `UserPtr::write_vm` 写回完整 metadata。
+The metadata and mount ID of `statx` come from the same target held after a single resolution; when obtaining the identity,
+the user path is not read again. The newly added field returns the existing integer mount ID, does not expose kernel pointers, and does not change
+path authorization. Errors from resolution, getattr and user write-back propagate along the original `KResult` path, and the complete metadata is finally
+written back through the existing `UserPtr::write_vm`.
 
-`statx` 的保留请求位和互斥同步标志在访问用户 pathname 和查找目标之前拒绝，不能因参数被
-静默忽略而把非法请求报告为成功；这些失败不写输出 buffer。其他未知 mask
-位不直接拒绝，以保留 Linux 查询请求的可扩展性。
+The reserved request bits and mutually exclusive sync flags of `statx` are rejected before the user pathname is accessed and the target is looked up; an illegal request must not be reported as successful because a parameter was
+silently ignored; these failures do not write the output buffer. Other unknown mask
+bits are not rejected outright, in order to preserve the extensibility of Linux query requests.
 
-| 资源 | 并发条件 | 风险 |
+| Resource | Concurrency condition | Risk |
 |------|----------|------|
-| fd 表 | 由当前进程 resources 内部锁保护 | close/dup/lookup 竞态会导致 fd 复用或对象泄漏 |
-| `FsStruct` | 通过进程 fs_struct 锁访问 | `chdir`、`chroot`、umask 与相对路径解析并发；`CLONE_FS` 共享同一对象 |
-| 目录 offset | `Directory::offset` 锁保护 | `getdents64` 和目录 `lseek` 并发更新 |
-| `FileLike` 对象 | 由具体文件、pipe、设备实现负责 | 阻塞、非阻塞状态和 offset 更新语义 |
-| procfs magic-link target | procfs/kfd snapshot 持有目标 `FileLike` 引用 | 目标进程退出或 fd 关闭时的生命周期 |
+| fd table | Protected by the internal lock of the current process resources | A close/dup/lookup race can cause fd reuse or object leaks |
+| `FsStruct` | Accessed through the process fs_struct lock | `chdir`, `chroot`, umask and relative path resolution run concurrently; `CLONE_FS` shares the same object |
+| Directory offset | Protected by the `Directory::offset` lock | `getdents64` and directory `lseek` update it concurrently |
+| `FileLike` object | Handled by the specific file, pipe or device implementation | Blocking and non-blocking state and offset update semantics |
+| procfs magic-link target | The procfs/kfd snapshot holds a reference to the target `FileLike` | Lifetime when the target process exits or the fd is closed |
 
-`posix-fs` 不定义跨资源全局锁顺序。
-新增代码应缩短持锁区间，
-避免在持有目录 offset 或 fd 表锁时调用可能再次访问同一资源的复杂 VFS/设备操作。
+`posix-fs` does not define a global lock order across resources.
+New code should shorten lock-holding intervals,
+and avoid calling complex VFS/device operations that may access the same resource again while holding the directory offset or fd table lock.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 边界 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Boundary | Impact Level | Trigger Condition | Mitigation |
 |------|----------|------|----------|----------|----------|
-| T-01 | 用户坏指针导致内核越界读写 | 用户路径/缓冲区/iovec | 高 | 直接解引用用户地址或忽略 copy 错误 | 统一使用 `UserPtr`、`UserConstPtr`、`VmBytes`、`IoVectorBuf` 并传播 `KResult` |
-| T-02 | `getdents64` 写出目录项时越过临时缓冲区 | 用户输出缓冲区 / ABI 布局 | 高 | 记录长度计算错误或未检查剩余空间 | `DirBuffer::write_entry` 先检查空间，记录长度按 ABI 对齐 |
-| T-03 | `statfs` 向用户泄露未初始化内核栈数据 | 用户输出缓冲区 / ABI 布局 | 高 | C ABI 结构 padding 未初始化 | `statfs` 用结构体字面量初始化所有字段及 `f_spare`；四个受支持的 64 位 ABI 布局没有隐式 padding，ABI 变更时须重新核对布局和 copyout |
-| T-04 | `/proc/<pid>/fd/<fd>` magic-link 绕过普通路径解析访问不该访问的对象 | VFS magic-link | 高 | procfs follow 未保持 fd 生命周期或缺少权限模型 | procfs fd entry 通过 fd snapshot 持有目标对象；非 VFS 目标 follow 返回不支持；跨进程权限策略仍需收紧 |
-| T-05 | `O_NOFOLLOW` 被忽略导致符号链接或 magic-link 被跟随 | 路径 flags | 高 | open/at flags 没有传入解析层 | syscall 层统一把 flags 转成 `LookupFlags`，`kvfs::namei` 按 `LookupIntent` 处理 final/non-final symlink 与 magic-link |
-| T-06 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |
-| T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；当前不宣称等价 Linux |
-| T-08 | mount flags 被错误分层、类型分派漂移或 unsupported 语义被静默忽略 | mount flags / filesystem type | 高 | 用户态把 move、shared/slave/unbindable propagation 或 recursive-bind bit 与 bind/remount/new mount 组合，或 syscall/procfs 各自维护支持集合 | `path_mount` 在任何 operation dispatch 前统一拒绝未实现位，再独立生成 superblock/per-mount flags；`MS_PRIVATE[|MS_REC]` 仅对 mount root 成功，因为 KVFS mount tree 天生不传播；初次 bind 按 Linux 继承源 flags 并忽略普通请求位，bind remount 才替换 flags；普通 remount 仅默认保留 atime mask；新挂载和 `/proc/filesystems` 共用 KVFS registry |
-| T-09 | 文件锁冲突或关闭竞态破坏应用互斥 | fd_ops / KVFS | 中 | owner、区间或关闭释放错误 | inode 锁上下文串行化区间更新；阻塞等待支持信号取消和 POSIX 死锁检测；关闭按 files owner 清理，加锁后复查 fd |
-| T-10 | 创建文件使用错误所有者导致 DAC 语义错误 | open/create | 高 | 固定 root owner，或忽略 setgid 父目录 | syscall 传递当前 `Cred`，后端用 `inode_init_owner()` 初始化 fsuid/fsgid 与继承组 |
-| T-11 | `faccessat2` 权限检查使用错误身份 | access | 高 | 默认错误使用 filesystem IDs，或 `AT_EACCESS` 强行覆盖显式 fs ID | 默认构造 real-ID credential；`AT_EACCESS` 直接使用当前 credential 的 `fsuid/fsgid`，并用于完整遍历与最终检查 |
-| T-12 | 设备 ioctl 参数被错误解释 | ioctl / 设备对象 | 中 | syscall 层错误处理设备私有命令 | `FIONBIO` 在本层处理，其它命令转交 `FileLike::ioctl`；常见 isatty 探测错误不刷 warning |
-| T-13 | memfd seals 被非 shmem fd 或普通文件伪造 | fcntl / shmem | 中 | `F_ADD_SEALS` / `F_GET_SEALS` 没有校验 fd object 类型和 inode state | fcntl 先取得 `kvfs::VfsFile`，再由 shmem inode state 判断是否存在 |
-| T-14 | fcntl 复制忽略最低编号或越过软限额 | fd_ops / kfd | 中 | `F_DUPFD*` 的 minimum 为负、超限或范围已满 | 先校验源 FD，再按 Linux signed-int minimum 校验并在软限额和物理容量内分配；失败不改变已有槽位和 CLOEXEC。 |
-| T-14 | 同一 pathname 操作混用多个凭据快照 | syscall/VFS | 高 | 路径组件逐次查询 current task，期间 credential 被提交 | syscall 入口只取得一次 `Arc<Cred>` 并沿完整操作传递 |
-| T-15 | `ftruncate` 在 UID 改变后错误重做 pathname DAC | fd/VFS | 中 | fd 操作调用 `Path::truncate(cred)` | `VfsFile::truncate()` 只验证 open write mode，再使用 opened-file authority |
-| T-16 | 非 owner 绕过 VFS 直接修改 mode、owner 或时间 | metadata | 高 | syscall 直接调用后端 `setattr` | syscall 只做 ABI 转换，`Path::chown/chmod/set_times` 统一执行 owner、group 和 write authorization |
+| T-01 | Bad user pointer causes kernel out-of-bounds read/write | User path/buffer/iovec | High | Directly dereferencing a user address or ignoring copy errors | Uniformly use `UserPtr`, `UserConstPtr`, `VmBytes`, `IoVectorBuf` and propagate `KResult` |
+| T-02 | `getdents64` writes a directory entry past the temporary buffer | User output buffer / ABI layout | High | Record length miscomputed or remaining space unchecked | `DirBuffer::write_entry` checks space first, and the record length is aligned per the ABI |
+| T-03 | `statfs` leaks uninitialized kernel stack data to user space | User output buffer / ABI layout | High | C ABI struct padding uninitialized | `statfs` initializes all fields including `f_spare` with a struct literal; the four supported 64-bit ABI layouts have no implicit padding, and the layout and copyout must be rechecked when the ABI changes |
+| T-04 | `/proc/<pid>/fd/<fd>` magic-link bypasses normal path resolution to access objects it should not | VFS magic-link | High | procfs follow does not preserve fd lifetime or lacks a permission model | The procfs fd entry holds the target object via an fd snapshot; follow to a non-VFS target returns unsupported; the cross-process permission policy still needs tightening |
+| T-05 | `O_NOFOLLOW` ignored, so a symlink or magic-link is followed | Path flags | High | open/at flags not passed to the resolution layer | The syscall layer uniformly converts flags to `LookupFlags`, and `kvfs::namei` handles final/non-final symlinks and magic-links per `LookupIntent` |
+| T-06 | `fallocate` offset/len overflow corrupts file size or range operations | scalar arguments / VFS | High | Negative values or `offset + len` overflow | Validate non-negative and use `checked_add` |
+| T-07 | `copy_file_range` overlapping copy within the same file corrupts data | fd-to-fd copy | Medium | Same-file overlap check not implemented | Listed as a limitation in the design document; non-zero flags are rejected at the boundary; equivalence to Linux is currently not claimed |
+| T-08 | mount flags layered incorrectly, filesystem type dispatch drifts, or unsupported semantics silently ignored | mount flags / filesystem type | High | User space combines move, shared/slave/unbindable propagation or the recursive-bind bit with bind/remount/new mount, or syscall/procfs each maintain their own support set | `path_mount` uniformly rejects unimplemented bits before any operation dispatch, then generates superblock/per-mount flags independently; `MS_PRIVATE[|MS_REC]` succeeds only on a mount root, since the KVFS mount tree inherently does not propagate; an initial bind inherits the source flags as Linux does and ignores ordinary request bits, while bind remount replaces the flags; an ordinary remount keeps only the default atime mask; new mounts and `/proc/filesystems` share the KVFS registry |
+| T-09 | File-lock conflict or close race breaks application mutual exclusion | fd_ops / KVFS | Medium | Wrong owner, range, or close release | The inode lock context serializes range updates; blocking waits support signal cancellation and POSIX deadlock detection; close cleans up per files owner, and the fd is rechecked after locking |
+| T-10 | Creating a file with the wrong owner causes wrong DAC semantics | open/create | High | Fixed root owner, or ignoring a setgid parent directory | The syscall passes the current `Cred`, and the backend initializes fsuid/fsgid and the inherited group with `inode_init_owner()` |
+| T-11 | `faccessat2` permission check uses the wrong identity | access | High | Defaulting wrongly to filesystem IDs, or `AT_EACCESS` forcibly overriding an explicit fs ID | By default a real-ID credential is constructed; `AT_EACCESS` uses the current credential's `fsuid/fsgid` directly, for both the full traversal and the final check |
+| T-12 | Device ioctl arguments misinterpreted | ioctl / device object | Medium | The syscall layer wrongly handles device-private commands | `FIONBIO` is handled in this layer and other commands are forwarded to `FileLike::ioctl`; common isatty probe errors do not flood warnings |
+| T-13 | memfd seals forged through a non-shmem fd or a regular file | fcntl / shmem | Medium | `F_ADD_SEALS` / `F_GET_SEALS` do not validate the fd object type and inode state | fcntl first obtains the `kvfs::VfsFile`, and the shmem inode state then decides whether it exists |
+| T-14 | fcntl duplication ignores the minimum number or exceeds the soft limit | fd_ops / kfd | Medium | The `F_DUPFD*` minimum is negative, over the limit, or the range is full | Validate the source FD first, then validate the Linux signed-int minimum and allocate within the soft limit and physical capacity; failure changes neither existing slots nor CLOEXEC. |
+| T-14 | One pathname operation mixes multiple credential snapshots | syscall/VFS | High | Path components query the current task one by one while a credential is committed in between | The syscall entry obtains an `Arc<Cred>` only once and passes it along the whole operation |
+| T-15 | `ftruncate` redoes pathname DAC wrongly after a UID change | fd/VFS | Medium | An fd operation calls `Path::truncate(cred)` | `VfsFile::truncate()` only verifies the open write mode, then uses the opened-file authority |
+| T-16 | A non-owner bypasses the VFS to modify mode, owner or times directly | metadata | High | The syscall calls the backend `setattr` directly | The syscall only does ABI conversion, and `Path::chown/chmod/set_times` uniformly enforce owner, group and write authorization |
 | T-17 | Unprivileged user changes the process root | chroot | High | Only target-directory searchability is checked | After directory DAC, additionally require effective `CAP_SYS_CHROOT` |
 | T-18 | Unprivileged user creates a device node through `mknodat` | namespace / device | High | The special inode is created from the mode alone | Character/block devices require effective `CAP_MKNOD`; other node types still apply umask and VFS directory authorization |
-| T-19 | 绝对 `*at` 路径错误访问无效 `dirfd` | pathname / fd | 中 | 在判断 pathname 是否绝对之前解析 `dirfd` | 所有非空 pathname 入口复用 `with_fs_at`；绝对路径强制选择进程 cwd snapshot 并由 KVFS 从 root 开始 |
-| T-20 | `mknodat` 锁外授权与最终名称状态竞争 | namespace / device | 高 | syscall 先做特权/DAC，再由 VFS 查找或创建 | syscall 只转换 ABI；KVFS 在父目录 exclusive lock 内按 positive-first 顺序执行最终 lookup、授权、mode 准备和 callback |
-| T-21 | 非法 mknod 类型被无效 dirfd 错误遮蔽 | syscall / fd | 中 | 进入 `with_fs_at` 后才执行 `may_mknod` | 复制 pathname 后立即调用 namei 层 `may_mknod()`，验证成功后才允许解析相对路径的 `dirfd` |
-| T-22 | umask 出现两份 owner 或被高位污染 | process / fs context | 高 | process runtime 与 FsStruct 各保存一份，或 `sys_umask` 未截断 | `FsStruct` 是唯一 owner，`replace_umask` 统一执行 `mask & 0777`；fork/clone 与 pathname snapshot 都复制或共享该对象 |
-| T-23 | namespace syscall 对 final name 做两次 lookup 并操作同名替代对象 | pathname / namespace | 高 | syscall 先解析完整目标或锁外确认目标不存在，再由 Path 按名称重新查找 | link/symlink/unlink/rmdir 调用专用 `Filename::*_at`；Dentry 在父目录 exclusive lock 下执行唯一 final lookup |
-| T-24 | `linkat` 默认错误跟随 source symlink 或静默接受未知 flags | pathname flags | 中 | 通用 resolve helper 默认 follow，或 syscall 只记录 warning | syscall 只接受 `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`；默认显式使用 no-follow，未知位返回 `EINVAL` |
-| T-25 | FIFO open 根据第一次错误重新解析 pathname | pathname/open | 高 | 两次 lookup 之间目标被 rename 或 symlink replacement | syscall open 只调用一次 `Filename::open_with_flags_at`；FIFO dispatch 在 KVFS 已授权的 resolved inode 上完成 |
-| T-26 | FIEMAP 数量或地址计算溢出导致越界写或内核数据泄漏 | ioctl / 用户输出 | 高 | 信任 `fm_extent_count`、用未检查指针运算或复制未初始化 reserved 字段 | 限制最大数量，所有地址运算使用 checked arithmetic，输出结构显式初始化全部字段；用户地址只通过 `UserPtr` 写入 |
-| T-27 | `listxattr` 的名称聚合溢出或 size query 产生无界中间分配 | xattr / 用户输出 | 中 | 先收集属性和值，再构造多个完整名称副本，或累计长度未检查 | KVFS borrowed-name sink 直接写入单个 `XattrListWriter`；逐项 checked_add 并限制 `XATTR_LIST_MAX`，`size == 0` 只计数 |
-| T-28 | mount data 导致无界用户内存读取、错误拒绝 binary data 或把瞬时用户指针带入文件系统 | mount data / filesystem type | 高 | 通用层把 `void *` 当路径字符串解析，或直接向后端保留用户指针 | syscall 边界复制一个零填充的 4 KiB opaque byte page，并强制清零末字节；`FsContext` 只借用内核 slice，后端只保存解析后的 mount state |
+| T-19 | Absolute `*at` path wrongly accesses an invalid `dirfd` | pathname / fd | Medium | `dirfd` is resolved before determining whether the pathname is absolute | All non-empty pathname entry points reuse `with_fs_at`; an absolute path forcibly selects the process cwd snapshot and KVFS starts from the root |
+| T-20 | `mknodat` authorization outside the lock races with the final name state | namespace / device | High | The syscall does privilege/DAC first, and then the VFS looks up or creates | The syscall only converts the ABI; KVFS performs the final lookup, authorization, mode preparation and callback in positive-first order under the parent directory's exclusive lock |
+| T-21 | Illegal mknod type masked by an invalid dirfd | syscall / fd | Medium | `may_mknod` runs only after entering `with_fs_at` | After copying the pathname, call the namei-layer `may_mknod()` immediately; resolving the relative-path `dirfd` is allowed only after validation succeeds |
+| T-22 | umask has two owners or is polluted by high bits | process / fs context | High | process runtime and FsStruct each keep a copy, or `sys_umask` does not truncate | `FsStruct` is the sole owner, `replace_umask` uniformly applies `mask & 0777`; fork/clone and the pathname snapshot both copy or share that object |
+| T-23 | A namespace syscall looks up the final name twice and operates on a different object of the same name | pathname / namespace | High | The syscall resolves the complete target first or confirms the target is absent outside the lock, then Path looks it up again by name | link/symlink/unlink/rmdir call the dedicated `Filename::*_at`; Dentry performs the single final lookup under the parent directory's exclusive lock |
+| T-24 | `linkat` wrongly follows the source symlink by default or silently accepts unknown flags | pathname flags | Medium | The generic resolve helper follows by default, or the syscall only logs a warning | The syscall accepts only `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`; no-follow is used explicitly by default, and unknown bits return `EINVAL` |
+| T-25 | FIFO open re-resolves the pathname after the first error | pathname/open | High | The target is renamed or replaced by a symlink between two lookups | The syscall open calls `Filename::open_with_flags_at` only once; FIFO dispatch completes on the resolved inode already authorized by KVFS |
+| T-26 | FIEMAP count or address computation overflow causes out-of-bounds write or kernel data leak | ioctl / user output | High | Trusting `fm_extent_count`, using unchecked pointer arithmetic, or copying uninitialized reserved fields | Limit the maximum count, use checked arithmetic for all address operations, and explicitly initialize all fields of the output structure; user addresses are written only through `UserPtr` |
+| T-27 | `listxattr` name aggregation overflows or a size query causes unbounded intermediate allocation | xattr / user output | Medium | Collecting attributes and values first, then building multiple complete name copies, or leaving the cumulative length unchecked | The KVFS borrowed-name sink writes directly into a single `XattrListWriter`; checked_add per item and `XATTR_LIST_MAX` limit, and `size == 0` only counts |
+| T-28 | mount data causes unbounded user-memory reads, wrongly rejects binary data, or carries a transient user pointer into the filesystem | mount data / filesystem type | High | The generic layer parses a `void *` as a path string, or retains the user pointer in the backend | The syscall boundary copies one zero-filled 4 KiB opaque byte page and forcibly zeroes the last byte; `FsContext` only borrows a kernel slice, and the backend stores only the parsed mount state |
 
-影响等级定义：
+Impact level definitions:
 
-- 高：可能导致内存破坏、内核信息泄露、权限提升或越权访问。
-- 中：可能导致数据损坏、错误兼容语义、服务不可用或应用同步失效。
-- 低：主要导致错误码不精确、性能退化或日志噪声。
+- High: may lead to memory corruption, kernel information leaks, privilege escalation, or unauthorized access.
+- Medium: may lead to data corruption, incorrect compatibility semantics, service unavailability, or broken application synchronization.
+- Low: mainly leads to imprecise error codes, performance degradation, or log noise.
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Cause | Local Effect | System Effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | 路径读取失败 | 用户指针无效或字符串不可访问 | syscall 返回地址错误相关 `KError` | 当前操作失败 | 3 | `load_string` 失败直接传播 |
-| F-02 | fd 类型不匹配 | 对目录执行文件写、对非 pipe 执行 pipe 操作 | 返回 `BadFileDescriptor`、`InvalidInput` 或底层错误 | 应用收到 Linux errno 等价错误 | 3 | 使用 `get_file_like_as` / downcast 校验 |
-| F-03 | 用户输出缓冲区太小 | `getdents64` 一条记录也放不下，`getcwd` size 不足 | 返回 `InvalidInput` 或 `OutOfRange` | 调用方可扩大缓冲区重试 | 4 | 写入前计算长度 |
-| F-04 | 设备 open 失败 | 设备 file operations 拒绝 open 或初始化失败 | open 返回错误 | 终端相关程序无法打开目标设备 | 3 | 错误传播；设备语义由对应设备实现维护 |
-| F-05 | `fallocate` 后端写零返回 0 | 底层文件系统无法前进写入 | 返回 `WriteZero` | 操作失败但文件不应继续无限循环 | 2 | `write_zeros_range` 检测 0 字节写 |
-| F-06 | `sendfile`/`splice` 遇到 `WouldBlock` | 非阻塞源暂时无数据 | 已写入部分则返回部分进度，否则返回错误 | 调用方可轮询后重试 | 4 | `kvfs::transfer_files` 保留部分写入语义 |
-| F-07 | `mount` 请求未知文件系统类型或无效 backing source | 名称未注册，或 source 不是可用 block-special path | 返回 `NoSuchDevice`、`ENOTBLK`、`ENXIO` 等对应错误 | 用户态 mount 失败 | 3 | 按 KVFS registry 精确查找；nodev/device-backed 类型统一经 `FsContext`，设备 source 由 `get_tree_bdev` 校验 |
-| F-08 | `syncfs` 目标不是文件或目录 | fd 指向 pipe/socket/设备 | 返回 `InvalidInput` | 当前同步请求失败 | 4 | downcast 后只 flush 文件系统对象 |
-| F-09 | `copy_file_range` 语义不完整 | 重叠和普通文件检查 TODO | 可能出现与 Linux 不一致的数据结果 | 相关应用复制行为异常 | 2 | 非零 flags 显式拒绝；其余限制实现前需要补充测试 |
-| F-10 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；有安全影响的命令应显式实现或拒绝 |
-| F-11 | `close_range(UNSHARE)` 无法取得 files owner | 进程退出已脱离 fd table owner | `unshare_fd_table` 返回 `NoSuchProcess` | 当前 syscall 失败，已脱离的 fd table 不会被重新安装 | 3 | `sys_close_range` 通过 `?` 将资源层错误传播为用户态 syscall 错误 |
-| F-12 | FIEMAP 输出容量不足或中途遇到坏用户页 | 调用者提供较小数组或不可写地址 | 返回已统计数量或 `BadAddress` | 当前查询失败，文件系统状态不变 | 3 | `FiemapExtentInfo` 达到容量后正常停止；writer 每项通过 `UserPtr` 写入并传播 copy fault |
-| F-13 | mount data 复制失败 | 首字节不可读，或整页读取失败后逐字节恢复也无法读取首字节 | `mount(2)` 在创建 superblock 前返回 `BadAddress` | 当前挂载不发生，不留下部分 topology | 3 | 先尝试整页复制，失败后恢复可读前缀并零填充尾部；只有零字节可读时传播错误 |
+| F-01 | Path read failure | The user pointer is invalid or the string is inaccessible | The syscall returns an address-related `KError` | The current operation fails | 3 | A `load_string` failure is propagated directly |
+| F-02 | fd type mismatch | A file write on a directory, or a pipe operation on a non-pipe | Returns `BadFileDescriptor`, `InvalidInput`, or an underlying error | The application receives an error equivalent to the Linux errno | 3 | Use `get_file` followed by object type checks (for example `is_dir`) and downcast validation |
+| F-03 | User output buffer too small | `getdents64` cannot fit even one record, or the `getcwd` size is insufficient | Returns `InvalidInput` or `OutOfRange` | The caller can retry with a larger buffer | 4 | Compute the length before writing |
+| F-04 | Device open failure | The device file operations reject the open or fail to initialize | open returns an error | Terminal-related programs cannot open the target device | 3 | The error is propagated; device semantics are maintained by the corresponding device implementation |
+| F-05 | The backend zero-fill write of `fallocate` returns 0 | The underlying filesystem cannot advance the write | Returns `WriteZero` | The operation fails, but the file must not loop forever | 2 | `write_zeros_range` detects a 0-byte write |
+| F-06 | `sendfile`/`splice` encounters `WouldBlock` | A non-blocking source temporarily has no data | If part has been written, partial progress is returned; otherwise an error is returned | The caller can poll and retry | 4 | `kvfs::transfer_files` preserves partial-write semantics |
+| F-07 | `mount` requests an unknown filesystem type or an invalid backing source | The name is not registered, or the source is not a usable block-special path | Returns the corresponding error such as `NoSuchDevice`, `ENOTBLK`, or `ENXIO` | User-space mount fails | 3 | Exact lookup in the KVFS registry; nodev/device-backed types all go through `FsContext`, and the device source is validated by `get_tree_bdev` |
+| F-08 | The `syncfs` target is not a file or directory | The fd refers to a pipe/socket/device | Returns `InvalidInput` | The current sync request fails | 4 | Only flush filesystem objects after the downcast |
+| F-09 | `copy_file_range` semantics are incomplete | The overlap and regular-file checks are TODO | Data results inconsistent with Linux are possible | Copy behavior of related applications is abnormal | 2 | Non-zero flags are explicitly rejected; the other restrictions need additional tests before implementation |
+| F-10 | `fcntl` unsupported cmd returns success | Compatibility placeholder | The application wrongly concludes that some control operations have taken effect | Behavioral differences may result | 2 | A warning is logged; commands with security impact should be explicitly implemented or rejected |
+| F-11 | `close_range(UNSHARE)` cannot obtain the files owner | The process has exited and has detached from the fd table owner | `unshare_fd_table` returns `NoSuchProcess` | The current syscall fails, and the detached fd table is not reinstalled | 3 | `sys_close_range` propagates the resource-layer error as a user-space syscall error through `?` |
+| F-12 | FIEMAP output capacity is insufficient or a bad user page is encountered midway | The caller provides a small array or an unwritable address | Returns the count already collected or `BadAddress` | The current query fails, and the filesystem state is unchanged | 3 | `FiemapExtentInfo` stops normally once capacity is reached; the writer writes each entry through `UserPtr` and propagates copy faults |
+| F-13 | Mount data copy failure | The first byte is unreadable, or the whole-page read fails and the byte-by-byte recovery also cannot read the first byte | `mount(2)` returns `BadAddress` before the superblock is created | The current mount does not happen and no partial topology is left behind | 3 | Try a whole-page copy first; on failure, recover the readable prefix and zero-fill the tail; the error is propagated only when zero bytes are readable |
 
-严重度定义：
+Severity definitions:
 
-- 1：致命，可能导致内核崩溃、内存破坏或不可恢复的数据损坏。
-- 2：严重，功能不可用、语义错误或需要重启/人工恢复。
-- 3：一般，单次 syscall 失败或应用可降级。
-- 4：轻微，调用方可重试或影响有限。
+- 1: Fatal; may cause a kernel crash, memory corruption, or unrecoverable data corruption.
+- 2: Serious; functionality is unavailable, semantics are wrong, or a reboot/manual recovery is required.
+- 3: Moderate; a single syscall fails or the application can degrade gracefully.
+- 4: Minor; the caller can retry or the impact is limited.
 
-## 故障管理
+## Fault Management
 
-- 所有 syscall 入口返回 `KResult<isize>`，
-  错误由 `core/ksyscall` 上层映射为 Linux errno。
-- 坏 fd、坏路径、非法 flags 和不支持的模式优先返回显式 `KError`。
-- `WouldBlock`、`WriteZero`、`BrokenPipe` 等 I/O 错误由底层对象传播。
-- 对常见探测型 ioctl 失败，例如非终端 fd 上的 `TCGETS` / `TIOCGWINSZ`，
-  不记录 warning，避免日志噪声。
-- 对不支持的 `fcntl` 参数当前记录 warning 但返回成功，
-  这是兼容占位，不应扩展到有安全影响的新命令。`F_ADD_SEALS` 和
-  `F_GET_SEALS` 已显式接入 shmem object state。
-- 本 crate 没有统一重试机制；
-  用户态或上层 syscall 调度负责根据 errno 决定重试。
+- All syscall entry points return `KResult<isize>`,
+  and errors are mapped to Linux errno by the upper layer of `core/ksyscall`.
+- Bad fds, bad paths, illegal flags, and unsupported modes preferentially return an explicit `KError`.
+- I/O errors such as `WouldBlock`, `WriteZero`, and `BrokenPipe` are propagated by the underlying object.
+- For common probing ioctl failures, for example `TCGETS` / `TIOCGWINSZ` on a non-terminal fd,
+  no warning is logged, to avoid log noise.
+- Unsupported `fcntl` arguments currently log a warning but return success;
+  this is a compatibility placeholder and must not be extended to new commands with security impact. `F_ADD_SEALS` and
+  `F_GET_SEALS` are already explicitly wired to the shmem object state.
+- This crate has no unified retry mechanism;
+  user space or the upper-level syscall scheduler is responsible for deciding whether to retry based on errno.
 
-## 隐私分析
+## Privacy Analysis
 
-`posix-fs` 处理路径名、目录项名称、文件内容缓冲区、fd 编号、挂载点和设备控制参数。
-模块自身不持久化这些数据，
-但 debug 日志会记录部分路径、fd、flags、mode 和 ioctl cmd。
-新增日志应避免输出文件内容、用户缓冲区数据或跨进程敏感路径关系。
+`posix-fs` handles pathnames, directory entry names, file content buffers, fd numbers, mount points, and device control parameters.
+The module itself does not persist this data,
+but debug logs record some paths, fds, flags, modes, and ioctl cmds.
+New logging should avoid emitting file contents, user buffer data, or sensitive cross-process path relationships.
 
-`read`、`write`、`sendfile`、`copy_file_range` 和 `splice`
-会在内核中搬运用户文件内容，
-但内容不会被本 crate 解析或保存在全局状态中。
+`read`, `write`, `sendfile`, `copy_file_range`, and `splice`
+move user file contents within the kernel,
+but the contents are not parsed by this crate or stored in global state.
 
-## 已知限制
+## Known Limitations
 
 1. Credential DAC uses effective capabilities and Linux mode semantics, but
    LSM, ACL, user-namespace ID mapping, and idmapped mounts are not implemented.
-2. FAT 等不能表达 Unix owner 的后端无法完整保存创建者 UID/GID。
-3. 文件锁是 advisory 锁；不阻止未参与加锁的读写，不实现 lease 或网络锁协议。
-4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
-5. `mount` 支持已注册 nodev filesystem、已接入 `get_tree_bdev()` 的 block-backed type、
-   非递归 bind、普通只读 remount、bind remount，以及普通新挂载的一页 opaque mount data
-   转交；支持对 mount root 幂等执行 `MS_PRIVATE[|MS_REC]` 和 `MS_SLAVE[|MS_REC]`（无共享
-   传播组时两者行为等价），支持 `pivot_root` 与 `umount2(MNT_DETACH)`；不支持 move、
-   带挂载子树的 recursive bind（`MS_BIND|MS_REC` 仅在源子树无挂载时接受，否则返回
-   `EINVAL`）、shared/unbindable propagation、文件系统专用 reconfigure 和 force
-   unmount。通用层支持 binary data 转交不等于具体 filesystem 已实现相应格式或选项。
-6. `preadv2` / `pwritev2` 当前只支持 `flags == 0`，
-   非零 flags 返回 `Unsupported`。
-7. memfd `F_ADD_SEALS` / `F_GET_SEALS` 已接入；shared writable mmap 和
-   `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap` 执行。
+2. Backends such as FAT that cannot express a Unix owner cannot fully store the creator UID/GID.
+3. File locks are advisory locks; they do not block reads and writes that do not take part in locking, and do not implement leases or network lock protocols.
+4. `copy_file_range` regular-file type, same-inode overlap and cross-superblock admission checks are performed by the KVFS transfer layer; there is no zero-copy path.
+5. `mount` supports registered nodev filesystems, block-backed types wired to `get_tree_bdev()`,
+   non-recursive bind, ordinary read-only remount, bind remount, and handoff of one opaque mount data page for ordinary new mounts;
+   it supports idempotent `MS_PRIVATE[|MS_REC]` and `MS_SLAVE[|MS_REC]` on a mount root (the two behave equivalently when there is no shared
+   propagation group), and supports `pivot_root` and `umount2(MNT_DETACH)`; it does not support move,
+   recursive bind with mounted subtrees (`MS_BIND|MS_REC` is accepted only when the source subtree has no mounts, otherwise it returns
+   `EINVAL`), shared/unbindable propagation, filesystem-specific reconfigure, or force
+   unmount. The generic layer's support for passing binary data does not mean a concrete filesystem implements the corresponding format or options.
+6. `preadv2` / `pwritev2` currently support only `flags == 0`;
+   non-zero flags return `Unsupported`.
+7. memfd `F_ADD_SEALS` / `F_GET_SEALS` are wired in; shared writable mmap and
+   `mprotect(PROT_WRITE)` seal enforcement are performed by `mm/filemap`.
 8. POSIX ACLs and LSMs are not implemented; the final security policy for
    `security.*`/`system.*` is constrained by this gap. KExt4 currently exposes
    only ordinary `user.*`, `trusted.*`, and `security.*` xattrs, and KVFS
    requires effective `CAP_SYS_ADMIN` to set/remove `security.*` until complete
    concrete LSM hooks are connected.
 
-## 审计清单
+## Audit Checklist
 
-修改 `posix-fs` 时需验证：
+When modifying `posix-fs`, verify:
 
-- [ ] 新增用户指针访问只通过 `UserPtr`、`UserConstPtr`、`VmBytes` 或 `IoVectorBuf`。
-- [ ] 新增 `unsafe` 块有 `SAFETY:` 注释，并补充到本文 unsafe 清单。
-- [ ] 新增路径解析入口正确处理绝对路径忽略 `dirfd`、`AT_EMPTY_PATH`、
-  `AT_SYMLINK_NOFOLLOW` 和 `AT_FDCWD`。
-- [ ] 新增 open/stat/namei 入口明确普通路径与 procfd 路径的差异。
-- [ ] fd 表修改失败时不会留下半创建对象或错误 descriptor flags。
-- [ ] 涉及 offset/len 的路径检查负数、溢出和 0 长度语义。
-- [ ] FIEMAP flag 在 ABI 边界显式支持或按 `EBADR` 规则拒绝，输出 reserved 字段全部初始化。
-- [ ] 跨 fd 复制路径检查源目标类型、阻塞语义和用户 offset 写回。
-- [ ] 元数据和 access 改动与 `kcred` 凭据模型保持同步。
-- [ ] 每个多步 pathname 操作只取得一次 credential snapshot，并传递给完整解析过程。
-- [ ] pathname 与 descriptor 操作没有混淆调用时 DAC 和 open-file authority。
-- [ ] mount/umount 新 flags 要么完整实现，要么显式拒绝。
-- [ ] `MS_PRIVATE`/`MS_SLAVE` 传播请求按各自 flags 集合校验（可带 `MS_REC`/`MS_SILENT`，
-  其余组合 `EINVAL`）；`MS_REC` 不伴随 `MS_BIND`/传播位时仍被拒绝。
-- [ ] `pivot_root` 在调用前完成全部 URL 校验，并按 `chroot_fs_refs()` 语义把所有 root/pwd 恰为旧根的
-  进程 `FsStruct` 重定向到 `new_root`（不仅调用方）；`umount2(MNT_DETACH)` 经 `detach_tree` 摘除而非静默同步卸载。
-- [ ] mount data 是否在 syscall 边界按一页 opaque bytes 有界复制，且 filesystem 只保存解析后的状态？
-- [ ] 新 filesystem type 通过 KVFS registry 接入，不在 syscall 层增加具体 crate 依赖或
-  与 `/proc/filesystems` 分离的名称表。
-- [ ] 新增日志不输出文件内容或敏感用户缓冲区。
-- [ ] xattr list 是否逐项检查累计长度、只使用一个输出缓冲区，并在 `size == 0` 时只计数？
-- [ ] 若修复当前已知限制，同步更新本文和 `design.md`。
+- [ ] New user pointer accesses go only through `UserPtr`, `UserConstPtr`, `VmBytes`, or `IoVectorBuf`.
+- [ ] New `unsafe` blocks have a `SAFETY:` comment and are added to the unsafe inventory in this document.
+- [ ] New path resolution entry points correctly handle absolute paths ignoring `dirfd`, `AT_EMPTY_PATH`,
+  `AT_SYMLINK_NOFOLLOW`, and `AT_FDCWD`.
+- [ ] New open/stat/namei entry points make explicit the difference between ordinary paths and procfd paths.
+- [ ] A failed fd table modification does not leave a half-created object or wrong descriptor flags.
+- [ ] Paths involving offset/len check negative values, overflow, and 0-length semantics.
+- [ ] FIEMAP flags are explicitly supported at the ABI boundary or rejected according to the `EBADR` rule, and all reserved output fields are initialized.
+- [ ] Cross-fd copy paths check source and destination types, blocking semantics, and the write-back of the user offset.
+- [ ] Metadata and access changes stay in sync with the `kcred` credential model.
+- [ ] Each multi-step pathname operation takes the credential snapshot only once and passes it through the entire resolution process.
+- [ ] Pathname and descriptor operations do not confuse the caller's DAC at call time with the open-file authority.
+- [ ] New mount/umount flags are either fully implemented or explicitly rejected.
+- [ ] `MS_PRIVATE`/`MS_SLAVE` propagation requests are validated against their respective flag sets (`MS_REC`/`MS_SILENT` allowed,
+  any other combination gives `EINVAL`); `MS_REC` is still rejected when not accompanied by `MS_BIND` or propagation bits.
+- [ ] `pivot_root` completes all URL validation before the call, and, following `chroot_fs_refs()` semantics, redirects the `FsStruct` of every
+  process whose root/pwd is exactly the old root to `new_root` (not only the caller); `umount2(MNT_DETACH)` detaches via `detach_tree` rather than silently unmounting synchronously.
+- [ ] Is mount data copied with bounds at the syscall boundary as one page of opaque bytes, with the filesystem storing only the parsed state?
+- [ ] New filesystem types are wired in through the KVFS registry, without adding concrete crate dependencies at the syscall layer or
+  a name table separate from `/proc/filesystems`.
+- [ ] New logging does not emit file contents or sensitive user buffers.
+- [ ] Does the xattr list check the cumulative length item by item, use only one output buffer, and only count when `size == 0`?
+- [ ] If a current known limitation is fixed, update this document and `design.md` accordingly.
 
 The ioctl entry passes the current caller's credential snapshot through KVFS.
 The block dispatcher authorizes `BLKROSET` using effective `CAP_SYS_ADMIN`

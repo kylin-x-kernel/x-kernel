@@ -91,7 +91,7 @@ excluded as described in KVFS's registration contract.
 ## Memory-Safety Invariants
 
 ioctl user pointers are dereferenced only at the ABI boundary in
-`src/tty/mod.rs`, through `read_vm`/`write_vm` with user-address
+`src/tty/mod.rs` and `src/tty/vt.rs`, through `read_vm`/`write_vm` with user-address
 validation. The job-control layer stores no user pointers — only weak
 references to `Session` and `ProcessGroup` objects.
 

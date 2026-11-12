@@ -296,7 +296,8 @@ Severity levels:
 - `DeviceObject::state()` returns `DeviceState::Removed` (rather than
   panicking) when `from_u8` decoding fails, so memory corruption cannot
   take down hot paths.
-- All lifecycle APIs return `Result<_, DriverError>` (`InvalidInput` /
+- Fallible lifecycle APIs (descriptor add and unregister, probe, adoption,
+  parent attach/detach and managed removal) return `Result<_, DriverError>` (`InvalidInput` /
   `BadState` / `ResourceBusy` / `Unsupported`, ...).
 - `ResourceBusy` means the call did not commit a new binding or teardown:
   another remover may already have won, or references are still outstanding,
@@ -330,8 +331,9 @@ vendor/device ID/class, platform alias/firmware_id), bus topology
 Linux-facing device-node identity and input capability metadata, visible
 through `Debug` output and snapshot functions.
 
-The module processes no user data, persists nothing, and logs nothing
-itself (all logging belongs to upper layers such as `kdriver`).
+The module processes no user data and persists nothing; it logs only
+driver/device identifiers and errors on driver registration, probe,
+parent-attach, unregister and remove paths.
 
 ## Known Limitations
 
@@ -339,7 +341,7 @@ itself (all logging belongs to upper layers such as `kdriver`).
   `driver.remove()` would leave inconsistent state (moot under the
   current panic=abort configuration).
 - The id allocator uses 64-bit counters that can theoretically overflow
-  (practically impossible; no compile-time or runtime check).
+  (practically impossible; `fetch_add_u64` panics on overflow).
 - `DeviceRegistry` uses `BTreeMap` instead of `HashMap`: O(log n)
   insert/lookup instead of O(1), in exchange for no hashing dependency.
 - Subscribers cannot unsubscribe: once registered, a callback lives as

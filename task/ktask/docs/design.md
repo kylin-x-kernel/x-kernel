@@ -271,8 +271,7 @@ task/ktask/
 │   │   ├── ownership.rs       # cpu_id and nr_running / nr_home
 │   │   ├── idle_pull.rs       # steal a Ready !on_cpu waiter onto an idle CPU
 │   │   ├── migrate.rs         # affinity: migrate_current / migrate_entry
-│   │   ├── stats.rs           # sched_stat counters and /proc text
-│   │   └── tests.rs           # run-queue unittests
+│   │   └── stats.rs           # sched_stat counters and /proc text
 │   ├── future/
 │   │   ├── mod.rs             # block_on and waker-to-unblock bridge
 │   │   ├── poll.rs            # poll helpers
@@ -280,8 +279,8 @@ task/ktask/
 │   ├── wait_queue.rs          # event-driven blocking wait
 │   ├── timers.rs              # owned timer adapter and IRQ heartbeat hook
 │   ├── tracing_hooks.rs       # sched trace hook registration
-│   ├── tests_timer_routing.rs # unittest: ktimer_core owner routing
 │   └── snapshot/              # optional task/CPU snapshot and backtrace
+├── ut-tests/                  # unittests (task_lifecycle.rs, tests_timer_routing.rs, run_queue/, ...)
 ├── Cargo.toml
 ├── Kconfig
 └── docs/
@@ -395,10 +394,12 @@ defers intermediate writes and re-reads all sources after callbacks and wakes.
 Core overload backoff changes only the prepared service deadline, not scheduler
 deadlines. An empty prepared queue cannot disarm another source.
 
-`TaskInner` 在创建时记录单调时钟（`start_time_ns`，构造后不可变）。该时间戳由
-procfs 读取并换算成 `/proc/[pid]/stat` 的 `starttime` 字段（USER_HZ=100 刻度），
-供 runc 等运行时把它与持久化的 `InitProcessStartTime` 比较来判断进程是否仍是
-自己创建的那个。任务生命周期全程不修改它。
+`TaskInner` records the monotonic clock at creation (`start_time_ns`, immutable
+after construction). procfs reads this timestamp and converts it into the
+`starttime` field of `/proc/[pid]/stat` (USER_HZ=100 scale), so that runtimes
+such as runc can compare it with the persisted `InitProcessStartTime` to decide
+whether the process is still the one they created. It is never modified during
+the task's lifetime.
 
 `kfeat/ipi` enables both `ktask/ipi` and `kipi/timer-reprogram`;
 `ktask/ipi` supplies `kiface_time_api::LocalTimerReprogramIf`.
@@ -434,8 +435,9 @@ entries:
 - `mod.rs` `init` / `init_secondary` run once per CPU at scheduler bring-up.
   Only then may this CPU's `RUN_QUEUE` and the matching `RUN_QUEUES` slot be
   read.
-- `&mut RunQueue` from `current_run_queue` / `get_run_queue` must be used
-  under a `BaseGuard` (usually `NoPreemptIrqSave`). A successful `try_get`
+- The `CurrentRunQueueRef` from `current_run_queue` (and the shared
+  `&'static RunQueue` from `get_run_queue`) must be used under a `BaseGuard`
+  (usually `NoPreemptIrqSave`). A successful `try_get`
   only means that CPU has registered; it does not mean the caller holds that
   CPU's IRQ/preempt exclusion.
 - `placement.rs` may run on spawn, affinity migrate-in, and wake (including
@@ -609,7 +611,7 @@ Voluntary switch paths:
 - `exit()` → `exit_current()` → `resched()`
 - `blocked_resched()` → `resched()`
 
-`resched()` calls `pick_next_task()` on this CPU's scheduler. If there is no
+`resched()` calls `pick_next()` on this CPU's scheduler. If there is no
 ready task it first idle-pulls a Ready `!on_cpu` waiter from a CPU with
 `nr_running >= 2`, then falls back to this CPU's `IDLE_TASK`.
 
@@ -653,7 +655,7 @@ deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
 2. Due owned timers run outside timer/runqueue locks, with IRQs disabled.
    Hardware rearm is deferred across callback delivery and its wakeups.
 3. `next_preemption_ns(current)` recomputes the optional
-   `NEXT_SCHED_DEADLINE`, then `rearm_local_timer` to
+   `NEXT_SCHED_DEADLINE_NS`, then `rearm_local_timer` to
 
 ```text
 min(next_sched_deadline?, prepared_service_deadline?)
@@ -1146,8 +1148,8 @@ ordinary IRQ before worker submission, without inline Task destruction.
     must succeed)
   - `preempt_resched` → `Preempt` (keep remaining slice and requeue; same)
   - `blocked_resched` → `Block` (record vlag, do not enqueue; the into_raw
-    current slot counts as 1, so the caller must hold another strong ref to
-    keep `strong_count > 1`; otherwise panic — see `# Panics` and the
+    current slot and Scheduler.curr count as 2, so the caller must hold another strong ref to
+    keep `strong_count > 2`; otherwise panic — see `# Panics` and the
     unittest)
   - `migrate_current` → `Migrate` (source RQ records vlag for dest
     PLACE_LAG, does not enqueue)
@@ -1358,10 +1360,11 @@ active-exception mark is temporarily suspended.
 ### Why wake prefers the current CPU when allowed
 
 Wait/future wakes usually run in the thread that released a resource or
-signaled an event. If the target's affinity allows this CPU, enqueueing
-locally cuts cross-CPU wake latency and lets `need_resched` take effect at
-this CPU's preempt safe point. If affinity forbids this CPU, ordinary
-placement is used.
+signaled an event. A `with_wake_sync` waker that is the only runner on its CPU
+(`nr_running == 1`) nominates this CPU, which cuts cross-CPU wake latency and
+lets `need_resched` take effect at this CPU's preempt safe point. If affinity
+forbids this CPU, or the wake is not sync-marked, ordinary select-idle-sibling
+placement is used: go home if prev is idle, otherwise seek an idle CPU.
 
 ### Why the nice path reads-modifies-writes the attributes
 

@@ -35,10 +35,10 @@ This crate provides a uniform API across all supported architectures (AArch64, x
 - **FP/SIMD enable** (AArch64, LoongArch64): `enable_fp()`
 - **LSX extension** (LoongArch64): `enable_lsx()`
 - **MMU / Page table root**:
-  - `read_kernel_page_table() -> PhysAddr`
-  - `read_user_page_table() -> PhysAddr`
-  - `unsafe fn write_kernel_page_table(root_paddr: PhysAddr)`
-  - `unsafe fn write_user_page_table(root_paddr: PhysAddr)`
+  - `read_kernel_page_table() -> HwPageTableRoot`
+  - `read_user_page_table() -> HwPageTableRoot`
+  - `unsafe fn write_kernel_page_table(root: HwPageTableRoot)`
+  - `unsafe fn write_user_page_table(root: HwPageTableRoot)`
 - **Trap / exception vector** (AArch64, RISC-V, LoongArch64):
   - `unsafe fn write_trap_vector_base(addr: usize)`
 - **Hypercall** (x86_64): `fn hypercall(nr: u64, a0: u64, a1: u64) -> i64`
@@ -56,13 +56,14 @@ The following names are deprecated and will be removed in a future release. Use 
 
 ## Design
 
-`karch` is intentionally kept lightweight: it only depends on `memaddr`, `cfg-if`, and
-architecture-specific register libraries (`aarch64-cpu`, `x86`/`x86_64`, `riscv`,
-`loongArch64`). It has **no** OS-level dependencies, making it suitable as a low-level
-building block for other crates.
+`karch` is intentionally kept lightweight: it depends on `memaddr`, `cfg-if`, `kbuild_config`, `kcpu_id_map`, `kcpu_slot`,
+`kiface`, `kiface-cpu-api`, and architecture-specific register libraries
+(`aarch64-cpu`, `x86`/`x86_64`, `riscv`, `loongArch64`).
 
 ## Features
 
 - `arm-el2`: Enable AArch64 EL2 (hypervisor) variants of TLB flush, page table root, and trap vector operations.
+- `nmi-pseudo`: Use GICv3 PMR priority masking for AArch64 local IRQ control (pseudo-NMI).
+- `nmi-hardware`: Manage AArch64 ALLINT for hardware-NMI mode in local IRQ helpers.
 - `smp`: Delegate remote instruction-cache flushes to the `kipi` provider. Without
   this feature, `karch` installs a uniprocessor no-op provider for remote flushes.

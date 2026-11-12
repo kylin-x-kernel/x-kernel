@@ -1,36 +1,36 @@
-# posix-mm — 设计文档
+# posix-mm — Design Document
 
-## 定位
+## Positioning
 
-`posix-mm` 实现 POSIX/Linux 风格内存管理 syscall 入口，包括
-`mmap`、`mremap`、`brk`、`madvise`、`msync`、`mincore` 和
-`memfd_create`。它位于用户态 ABI 与内核 `mm`/`fs` 子系统之间，只负责
-参数校验、typed request 构造、对象装配和错误码转换。
+`posix-mm` implements the POSIX/Linux-style memory-management syscall entry points, including
+`mmap`, `mremap`, `brk`, `madvise`, `msync`, `mincore`, and
+`memfd_create`. It sits between the userspace ABI and the kernel `mm`/`fs` subsystems, and is responsible only for
+argument validation, typed request construction, object assembly, and error-code translation.
 
-`posix-mm` 不拥有 VMA tree、页表、page cache、文件对象或 anonymous object。
-这些状态分别由 `mm/memspace`、`mm/filemap`、`pagecache`、`memfs`、
-`kvfs` 和 `mm/anon` 维护。
+`posix-mm` does not own the VMA tree, page tables, the page cache, file objects, or anonymous objects.
+This state is maintained by `mm/memspace`, `mm/filemap`, `pagecache`, `memfs`,
+`kvfs`, and `mm/anon` respectively.
 
-## 范围
+## Scope
 
 - `src/brk.rs`
 - `src/mmap.rs`
 - `src/memfd.rs`
 - `src/mincore.rs`
 
-## 架构
+## Architecture
 
 ### syscall-to-MM request boundary
 
-所有 raw syscall 参数先在 `posix-mm` 内冻结为 typed request，再进入
-`mm/memspace` 或 `mm/filemap`：
+All raw syscall arguments are first frozen into a typed request inside `posix-mm`, and only then enter
+`mm/memspace` or `mm/filemap`:
 
 ```text
 sys_mmap(raw args)
   -> MmapRequest::from_raw()
   -> MmapRequest { flags, map_type, page_size, permissions, offset }
   -> MmSpace::mmap_resolve_addr()
-  -> filemap::mmap_*_file() or MmSpace::map()
+  -> filemap::mmap_*_file() + MmSpace::map_runtime_vma() or MmSpace::map_with_max_flags()
 
 sys_mprotect(raw args)
   -> MprotectRequest::from_raw()
@@ -65,27 +65,27 @@ The syscall layer must not retire the old source range with ordinary
 `MmSpace::unmap()` after a successful move. Ordinary unmap semantics may detach
 private backing ownership, while relocation only retires the old virtual role.
 
-这个边界承担 Linux-visible ABI policy：
+This boundary carries the Linux-visible ABI policy:
 
-- `MmapProt` / `MappingPermissions` 从 `PROT_*` 推导 current permission
-  和 maximum permission；
-- `MmapFlags` / `MapType` 从 `MAP_*` 推导 shared/private、fixed policy、
-  anonymous/file-backed、populate 和 page-size policy；
-- unknown `MAP_*` bits 在 syscall 边界返回 `InvalidInput`；
-- 普通 `MAP_PRIVATE` / `MAP_SHARED` 路径允许部分 Linux-known deferred
-  flags 作为兼容 no-op policy 通过 typed request；
-- `MAP_SHARED_VALIDATE` 对这些 deferred flags 返回
-  `OperationNotSupported`；
-- `MAP_FIXED` / `MAP_FIXED_NOREPLACE` 要求传入地址满足目标页大小对齐；
-- `munmap(addr, 0)` 返回 `InvalidInput`；
-- `MprotectRequest` 拒绝 `PROT_GROWSDOWN` / `PROT_GROWSUP`；
-- `MsyncRequest` 拒绝 unknown flags 和 `MS_ASYNC | MS_SYNC` 冲突组合，并把
-  raw `MS_*` bitmask 转成 `memspace::MsyncPolicy`。
+- `MmapProt` / `MappingPermissions` derive the current permission
+  and maximum permission from `PROT_*`;
+- `MmapFlags` / `MapType` derive shared/private, fixed policy,
+  anonymous/file-backed, populate, and page-size policy from `MAP_*`;
+- unknown `MAP_*` bits return `InvalidInput` at the syscall boundary;
+- the ordinary `MAP_PRIVATE` / `MAP_SHARED` paths allow some Linux-known deferred
+  flags to pass through the typed request as a compatible no-op policy;
+- `MAP_SHARED_VALIDATE` returns
+  `OperationNotSupported` for these deferred flags;
+- `MAP_FIXED` / `MAP_FIXED_NOREPLACE` require the supplied address to be aligned to the target page size;
+- `munmap(addr, 0)` returns `InvalidInput`;
+- `MprotectRequest` rejects `PROT_GROWSDOWN` / `PROT_GROWSUP`;
+- `MsyncRequest` rejects unknown flags and the conflicting `MS_ASYNC | MS_SYNC` combination, and converts the
+  raw `MS_*` bitmask into `memspace::MsyncPolicy`.
 
 ### file-backed mapping handoff
 
-`posix-mm` 不直接构造 file-backed `VmArea` internals。file-backed VMA
-和 runtime 装配通过 `filemap::FileMmapRequest` 进入 `mm/filemap`：
+`posix-mm` does not construct file-backed `VmArea` internals directly. The file-backed VMA
+and runtime assembly enter `mm/filemap` through `filemap::FileMmapRequest`:
 
 ```text
 sys_mmap(file-backed)
@@ -93,24 +93,24 @@ sys_mmap(file-backed)
   -> FileMmapRequest
   -> filemap::{mmap_shared_file, mmap_private_file}
   -> VmArea + VmRuntimeRef
-  -> MmSpace::map()
+  -> MmSpace::map_runtime_vma()
 ```
 
-这样 syscall adapter 只表达 Linux ABI，file-backed first-fault policy、
-EOF 处理、private file COW source 和 shared mapping 约束留在
-`mm/filemap`。
+This way the syscall adapter expresses only the Linux ABI, while the file-backed first-fault policy,
+EOF handling, the private file COW source, and shared-mapping constraints stay in
+`mm/filemap`.
 
 ### memfd_create
 
-回归程序 `uapps/memfd-test` 直接调用 `memfd_create`，以带 `/` 的标签创建
-对象，检查 `ftruncate`、共享映射读写及格式化后同名对象的内容隔离。
-修复前 syscall 对 slash 返回 `EINVAL`，该程序会退出非零。内核 formatter
-断言只验证单个 backing 名称分量，不单独证明 syscall 放行或 mount 拓扑。
+The regression program `uapps/memfd-test` calls `memfd_create` directly, creating an
+object with a label containing `/`, and checks `ftruncate`, shared-mapping reads and writes, and content isolation between objects with the same name after formatting.
+Before the fix, the syscall returned `EINVAL` for a slash, and the program exited non-zero. The in-kernel formatter
+assertion only verifies a single backing-name component; it does not by itself prove that the syscall lets the name through or establish the mount topology.
 
-用户名称是调试标签，可以包含 `/`。创建 private tmpfs 的内部文件名时将 `/`
-替换为 `:`，保留单一路径分量，避免将标签解释为目录遍历。每个 memfd 使用独立
-private mount，因此转换后相同的标签仍创建独立对象。249 字节上限和 flags 校验
-保持不变；`/proc/self/fd` 名称显示仍可能与 Linux 有差异。
+The user-supplied name is a debugging label and may contain `/`. When creating the internal file name on the private tmpfs, `/` is
+replaced with `:`, which keeps a single path component and avoids interpreting the label as a directory traversal. Each memfd uses its own
+private mount, so labels that become identical after the conversion still create independent objects. The 249-byte limit and the flags validation
+are unchanged; the `/proc/self/fd` name display may still differ from Linux.
 
 ```text
 sys_memfd_create
@@ -127,73 +127,72 @@ sys_memfd_create
   -> current process fd table install
 ```
 
-`memfd_create` 创建 fd-only 的 tmpfs/shmem 风格匿名文件对象。对象内容由
-regular-file inode 的 inode-owned `kvfs::AddressSpace` 提供。`posix-mm`
-只处理 syscall ABI、名字校验和 fd 安装；private tmpfs file 创建与 shmem
-policy state 由 `memfs::shmem` factory 拥有，并由 shmem 对象自己转换成
-opened `VfsFile`。名字只作为调试标签，不进入全局路径命名空间。
+`memfd_create` creates an fd-only, tmpfs/shmem-style anonymous file object. The object content is provided by the
+inode-owned `kvfs::AddressSpace` of the regular-file inode. `posix-mm`
+handles only the syscall ABI, name validation, and fd installation; creation of the private tmpfs file and the shmem
+policy state are owned by the `memfs::shmem` factory, and the shmem object itself converts into an
+opened `VfsFile`. The name is only a debugging label and does not enter the global path namespace.
 
-`MFD_ALLOW_SEALING` 控制初始 seal state：未设置时对象带
-`F_SEAL_SEAL`，设置时对象从空 seal set 开始。
+`MFD_ALLOW_SEALING` controls the initial seal state: when it is not set, the object carries
+`F_SEAL_SEAL`; when it is set, the object starts from an empty seal set.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-- 所有 syscall 运行在进程上下文。
-- 允许睡眠和分配内存。
-- 依赖当前进程的 fd table 与地址空间状态。
-- 不适用于中断上下文。
+- All syscalls run in process context.
+- Sleeping and memory allocation are allowed.
+- They depend on the current process's fd table and address-space state.
+- They are not applicable in interrupt context.
 
-## 关键语义
+## Key Semantics
 
 ### mmap flag validation
 
-`mmap` request parsing 不使用 `from_bits_truncate()`，避免未知 ABI bits
-静默进入 MM internals。解析结果分三类：
+`mmap` request parsing does not use `from_bits_truncate()`, to prevent unknown ABI bits
+from silently entering the MM internals. The parse result falls into three categories:
 
-1. unknown `MAP_*` bits：拒绝。
-2. Linux-known deferred flags：普通 mapping 路径按兼容 no-op policy 接受。
-3. deferred flags + `MAP_SHARED_VALIDATE`：返回不支持。
+1. unknown `MAP_*` bits: rejected.
+2. Linux-known deferred flags: accepted on the ordinary mapping path as a compatible no-op policy.
+3. deferred flags + `MAP_SHARED_VALIDATE`: return not supported.
 
-固定地址 mapping 不做隐式向下取整。`MAP_FIXED` 和
-`MAP_FIXED_NOREPLACE` 必须传入已按目标页大小对齐的地址。
+Fixed-address mappings do not implicitly round down. `MAP_FIXED` and
+`MAP_FIXED_NOREPLACE` must be given an address already aligned to the target page size.
 
 ### madvise(MADV_DONTNEED)
 
-`madvise` 要求起始地址页对齐，并拒绝 `addr + len` 溢出（含按页向上取整后的
-溢出）。`MADV_DONTNEED` 的结束地址向上扩到整页后交给
-`MmSpace::madvise_dontneed()`；四个性能提示
-（`MADV_NORMAL`/`MADV_RANDOM`/`MADV_SEQUENTIAL`/`MADV_WILLNEED`）不产生
-per-VMA 动作，但与 `MADV_DONTNEED` 一样要求范围完全映射（Linux
-`madvise_walk_vmas` 的判定：有洞整次调用返回 `ENOMEM`）。
+`madvise` requires the start address to be page-aligned and rejects overflow of `addr + len` (including overflow after
+rounding up to a page boundary). For `MADV_DONTNEED`, the end address is extended up to a whole page and then handed to
+`MmSpace::madvise_dontneed()`; the four performance hints
+(`MADV_NORMAL`/`MADV_RANDOM`/`MADV_SEQUENTIAL`/`MADV_WILLNEED`) produce no
+per-VMA action, but like `MADV_DONTNEED` they require the range to be fully mapped (the Linux
+`madvise_walk_vmas` rule: if there is a hole, the whole call returns `ENOMEM`).
 
-当前支持的主线是 private anonymous world：
+The currently supported mainline is the private anonymous world:
 
 - pure `AnonymousPrivate`
-- `FilePrivate` 的 anonymous result object
+- the anonymous result object of `FilePrivate`
 
-VMA-side runtime 把该 advice 转成 private-anon object 的
-`invalidate_range(object_start, len)`，再经 `mm/vmobj` 和 `MmSpace`
-完成 object-driven PTE zap。
+The VMA-side runtime turns this advice into `invalidate_range(object_start, len)` on the private-anon object, and then
+completes the object-driven PTE zap through `mm/vmobj` and `MmSpace`.
 
 ### msync
 
-`msync` 执行 ABI request validation 后，把非空范围交给
-既有 `LiveAddressSpace::msync_range()` capability，保留 active MM user：
+After ABI request validation, `msync` hands the non-empty range to the
+existing `LiveAddressSpace::msync_range()` capability, keeping an active MM user:
 
-- `addr` 必须 4K 对齐；
-- `len == 0` 成功且不进入 MM；
-- unknown flags 和 `MS_ASYNC | MS_SYNC` 冲突组合返回错误；
-- `MS_ASYNC` 保持现代 Linux no-op 语义；
-- `MS_SYNC` 通过 `memspace` 的 VMA walk 只同步 shared file mapping；
-- `MS_INVALIDATE` 返回不支持，因为 locked-page / invalidate 语义尚未接入。
+- `addr` must be 4K-aligned;
+- `len == 0` succeeds and does not enter MM;
+- unknown flags and the conflicting `MS_ASYNC | MS_SYNC` combination return an error;
+- `MS_ASYNC` keeps the modern Linux no-op semantics;
+- `MS_SYNC` synchronizes only shared file mappings, through the VMA walk in `memspace`;
+- `MS_INVALIDATE` returns not supported, because locked-page / invalidate semantics are not yet wired in.
 
-MM 在锁内把当前 VMA overlap 转换为经过溢出校验的半开文件字节范围，保留当前
-runtime 引用后释放 MM mutex，再调用既有文件的
-`VfsFile::fsync_range(range, true)`。文件系统完成数据写入、等待和 datasync
-所需的元数据/journal/设备持久化。`MsyncPolicy` 只保存 MS_* 的写回模式与
-invalidate 标志，不另存恒为 true 的 datasync 字段。`posix-mm` 不直接访问
-page cache、filemap runtime 或 VMA 内部状态。同步后 MM 重新加锁、重新查找下一段 VMA，
-不会持有整段请求的旧映射快照；并发 unmap/mmap 不受文件持久化阻塞。
+Under the lock, MM converts the current VMA overlap into an overflow-checked half-open file byte range, keeps the current
+runtime reference and releases the MM mutex, then calls the existing file's
+`VfsFile::fsync_range(range, true)`. The filesystem completes the data writes, the waiting and the datasync
+metadata/journal/device persistence it requires. `MsyncPolicy` stores only the MS_* writeback mode and
+invalidate flags, and keeps no separate always-true datasync field. `posix-mm` does not directly access
+the page cache, the filemap runtime or VMA internal state. After synchronization MM re-takes the lock and looks up the next VMA again,
+and never holds an old mapping snapshot of the whole requested range; concurrent unmap/mmap is not blocked by file persistence.
 
 ### mremap relocation
 
@@ -214,52 +213,52 @@ This preserves the ownership split between:
 - present PTE residency;
 - private/file-private backing object lineage.
 
-## 设计决策
+## Design Decisions
 
-1. `posix-mm` 只拥有 Linux ABI 翻译，不拥有 MM 内部对象。
-   原因：raw flags、用户指针和 errno policy 属于 syscall 边界；VMA、
-   page table、file runtime 和 object lifetime 属于下游 MM/FS owner。
+1. `posix-mm` owns only the Linux ABI translation, not the MM internal objects.
+   Reason: raw flags, user pointers and the errno policy belong to the syscall boundary; VMA,
+   page table, file runtime and object lifetime belong to the downstream MM/FS owners.
 
-2. file-backed mmap 通过 `mm/filemap` 装配。
-   原因：file-backed first fault、EOF、private file COW source 和 shared
-   writable 约束是 filemap runtime policy，不应散落在 syscall adapter。
+2. file-backed mmap is assembled through `mm/filemap`.
+   Reason: the file-backed first fault, EOF, the private file COW source and the shared
+   writable constraints are filemap runtime policy and should not be scattered across the syscall adapter.
 
-3. `memfd_create` 使用 `memfs::shmem` factory 创建 private tmpfs mount +
-   regular-file inode。
-   原因：该模型提供 fd-only 对象语义和 inode-owned page cache identity，
-   同时复用现有 VFS file/open 生命周期，并让 inode-scoped sealing 语义有
-   统一挂载点。
+3. `memfd_create` uses the `memfs::shmem` factory to create a private tmpfs mount +
+   regular-file inode.
+   Reason: this model provides fd-only object semantics and an inode-owned page cache identity,
+   while reusing the existing VFS file/open lifecycle and giving the inode-scoped sealing semantics
+   a single attachment point.
 
-4. `memfd` 名字只作为调试标签。
-   原因：Linux `memfd` 不是路径创建接口，用户名字不能污染全局 VFS
-   namespace。Linux 调试标签允许包含 `/`；formatter 将 `/` 替换为 `:`，
-   再添加 `memfd:` 前缀，转换为单个私有 backing component。
+4. The `memfd` name is used only as a debugging label.
+   Reason: Linux `memfd` is not a path-creation interface, and a user-supplied name must not pollute the global VFS
+   namespace. Linux debugging labels may contain `/`; the formatter replaces `/` with `:`,
+   then adds the `memfd:` prefix, converting it into a single private backing component.
 
-5. `MmapRequest` 保存 typed policy。
-   原因：下游 `MmSpace` / `filemap` 不应再读取 raw syscall flags。
+5. `MmapRequest` stores the typed policy.
+   Reason: the downstream `MmSpace` / `filemap` should no longer read raw syscall flags.
 
 6. `mremap` move-style source retirement must use metadata-only removal.
-   原因：relocation changes virtual placement and present PTE residency, but it
+   Reason: relocation changes virtual placement and present PTE residency, but it
    must not re-run ordinary private backing teardown on the old source role.
 
-## 已知限制
+## Known Limitations
 
-- `memfd_create` 支持 `MFD_CLOEXEC` 和 `MFD_ALLOW_SEALING` 初始 seal
-  policy；`F_ADD_SEALS` / `F_GET_SEALS` 由 `posix-fs` 处理，hugetlb 扩展未接入。
-- `memfd` 名字展示不保证完全等同 Linux `/proc/self/fd`。
-- `madvise` 支持 `MADV_DONTNEED` 与四个性能提示
-  （`MADV_NORMAL`/`MADV_RANDOM`/`MADV_SEQUENTIAL`/`MADV_WILLNEED`，作为
-  no-op 但仍要求范围完全映射，未映射返回 `ENOMEM`）；未知 advice 才返回
-  `InvalidInput`。
-- `msync` 支持 shared file dirty folio writeback，但 `MS_INVALIDATE` 完整语义未实现。
-- file-backed writable `MAP_SHARED` 由 `filemap` runtime 通过 write-fault
-  dirty tracking 支持；memfd/shmem seals 在 `filemap` 边界执行。
-- `MappingPermissions.maximum` 已与 current permission 分离；匿名映射和
-  private file 映射保留可被 `mprotect()` 提升的 may-permission，shared file
-  映射按文件打开权限收窄。
+- `memfd_create` supports `MFD_CLOEXEC` and the `MFD_ALLOW_SEALING` initial seal
+  policy; `F_ADD_SEALS` / `F_GET_SEALS` are handled by `posix-fs`, and the hugetlb extension is not wired in.
+- The `memfd` name display is not guaranteed to be exactly identical to Linux `/proc/self/fd`.
+- `madvise` supports `MADV_DONTNEED` and four performance hints
+  (`MADV_NORMAL`/`MADV_RANDOM`/`MADV_SEQUENTIAL`/`MADV_WILLNEED`, treated as
+  no-ops but still requiring the range to be fully mapped, with an unmapped range returning `ENOMEM`); only an unknown advice returns
+  `InvalidInput`.
+- `msync` supports shared file dirty folio writeback, but the full semantics of `MS_INVALIDATE` are not implemented.
+- file-backed writable `MAP_SHARED` is supported by the `filemap` runtime through write-fault
+  dirty tracking; memfd/shmem seals are enforced at the `filemap` boundary.
+- `MappingPermissions.maximum` is now separated from the current permission; anonymous mappings and
+  private file mappings keep a may-permission that `mprotect()` can raise, while shared file
+  mappings are narrowed according to the file's open permissions.
 
-`brk` 在补建预映射范围或收缩范围失败时返回原 break，只有映射操作成功
-后才发布新 heap top，与超出初始范围扩展失败的既有 ABI 一致。
+When `brk` fails to fill in a pre-mapped range or to shrink a range, it returns the original break, and publishes the new heap top only after the mapping operation
+succeeds, consistent with the existing ABI for a failed extension beyond the initial range.
 
 ## Kernel unit-test layout
 

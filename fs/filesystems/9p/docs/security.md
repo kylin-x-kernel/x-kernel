@@ -1,4 +1,4 @@
-# v9fs — 安全与可靠性分析
+# v9fs — Security and Reliability Analysis
 
 ## Transport handoff boundary
 
@@ -15,27 +15,27 @@ and root fid through their existing cleanup paths. No root is published locally;
 remote negotiation has already happened and is not a transactional remote rollback.
 Client, Arc and protocol buffer allocations retain their prior failure behavior.
 
-## 信任模型
+## Trust Model
 
 The analysis covers `src/` and the guest tests in `ut-tests/`. The extracted
 metadata transport fixtures remain inside their original test modules under
 `cfg(unittest)` and do not add a production transport or trust boundary.
 
-服务端 metadata、qid、目录项、目录 offset、symlink target 和文件内容均为外部输入。v9fs
-信任 KVFS 已完成 pathname、permission、mount namespace 和 user-memory boundary 检查；
-PDU length、tag、type 和字段边界由 `p9` client 验证。
+Server metadata, qid, directory entries, directory offsets, symlink targets and file contents are all external input. v9fs
+trusts KVFS to have already completed the pathname, permission, mount namespace and user-memory boundary checks;
+PDU length, tag, type and field boundaries are validated by the `p9` client.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-- mount 时的 negotiation、root qid 和 attributes；
-- lookup/readdir 返回的 object identity、type、name 和 offset；
-- read/write、setattr、statfs 和 namespace operation 的 server result；
+- negotiation, root qid and attributes at mount time;
+- the object identity, type, name and offset returned by lookup/readdir;
+- the server results of read/write, setattr, statfs and namespace operations;
 - the content and length a TREAD returns for a folio fault;
 - the size confirmed by a `TSETATTR` truncate and its local cache publication;
-- endpoint failure 与 synchronous fid Drop。
+- endpoint failure and synchronous fid Drop.
 
-本 crate 不直接访问 user pointer、DMA/MMIO、firmware、interrupt、FFI 或 architecture raw
-interface。transport 和 device safety 位于具体 provider/driver。
+This crate does not directly access user pointers, DMA/MMIO, firmware, interrupts, FFI or architecture raw
+interfaces. Transport and device safety reside in the specific provider/driver.
 
 ## Folio read validation
 
@@ -61,80 +61,80 @@ folios, and invalidates mappings past the new EOF. A failed or short remote
 operation publishes nothing, so cached data cannot outlive the size the server
 accepted.
 
-## unsafe 代码清单
+## Unsafe Code Inventory
 
-本 crate 没有 `unsafe` block、unsafe API 或自定义 `Send`/`Sync` 实现。
+This crate has no `unsafe` blocks, unsafe APIs or custom `Send`/`Sync` implementations.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-- 每个 `V9fsInode` 持有 live、unopened fid，不保存 rename 后失效的 absolute path；
-- 每个 opened `VfsFile` 的 typed private data 持有独立 opened fid；
-- fid qid、attribute qid 与 VFS node type 一致后才发布 inode；
-- inode identity 来自 server qid，不来自固定编号或 directory array index；
-- namespace operation 只发送 KVFS 已解析的单个 child name；
-- directory resume position 使用 server `d_off`；
-- 自动时间更新只修改本地 inode，不额外发起远端 metadata 写入；
-- 显式 setattr 失败时不发布修改，成功也不将服务端决定的 ctime 冒充客户端已确认值。
+- Each `V9fsInode` holds a live, unopened fid and does not store an absolute path that becomes stale after rename;
+- The typed private data of each opened `VfsFile` holds an independent opened fid;
+- An inode is published only after the fid qid, attribute qid and VFS node type are consistent;
+- Inode identity comes from the server qid, not from a fixed number or a directory array index;
+- Namespace operations send only a single child name already resolved by KVFS;
+- The directory resume position uses the server `d_off`;
+- Automatic time updates modify only the local inode and do not issue additional remote metadata writes;
+- When an explicit setattr fails, no modification is published; on success, the server-determined ctime is not passed off as a value confirmed by the client.
 
-## 线程安全
+## Thread Safety
 
-v9fs 只共享 `Arc<P9Client>`/`Arc<P9Fid>`，不增加与协议状态分离的 session mutex。client
-内部负责 request synchronization；inode、file 和 superblock 各自持有资源生命周期引用。
-最后一个 fid reference 的 Drop 可阻塞，不得在 IRQ context 或持有 spinlock 时执行。
+v9fs only shares `Arc<P9Client>`/`Arc<P9Fid>` and does not add a session mutex separate from the protocol state. The client
+is internally responsible for request synchronization; inode, file and superblock each hold references that manage resource lifetime.
+The Drop of the last fid reference may block, and must not be executed in IRQ context or while holding a spinlock.
 
-## 威胁分析
+## Threat Analysis
 
-| 威胁 | 触发条件 | 影响 | 缓解 |
+| Threat | Trigger Condition | Impact | Mitigation |
 | --- | --- | --- | --- |
-| stale path identity | rename 后按缓存 path 重新 walk | opened file 指向错误对象 | 只持 fid，不缓存 absolute path |
-| type/qid spoofing | attributes 与 lookup fid 不一致 | 发布错误 inode 类型或身份 | qid path/type 与 mode type 交叉验证 |
-| directory offset manipulation | server 返回异常 `d_off` | 重复或遗漏 entry | 原样使用 server offset，不伪造 local index |
-| fid lifetime error | remove 后重复使用或 clunk | server handle misuse | `P9Fid` live state 与 `Arc` Drop |
+| stale path identity | Re-walk by the cached path after rename | The opened file points to the wrong object | Hold only the fid, and do not cache the absolute path |
+| type/qid spoofing | attributes are inconsistent with the lookup fid | A wrong inode type or identity is published | Cross-validate qid path/type against the mode type |
+| directory offset manipulation | The server returns an abnormal `d_off` | Duplicated or missed entries | Use the server offset as is, and do not forge a local index |
+| fid lifetime error | Reuse or clunk after remove | server handle misuse | `P9Fid` live state and `Arc` Drop |
 | stale cached folio after truncate | `TSETATTR` shrinks the file but only updates the size | read/mmap keeps returning pre-truncate data | invalidate cached folios and mappings through `update_size_after_backing_change()` after a confirmed size change |
-| broad fallback | server 返回真实 I/O/permission error | 错误被掩盖 | 只对 Linux 指定的 `ENOSYS`/`EOPNOTSUPP` fallback |
+| broad fallback | The server returns a real I/O/permission error | The error is masked | Fall back only for the `ENOSYS`/`EOPNOTSUPP` that Linux specifies |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 故障模式 | 局部影响 | 系统影响 | 处理 |
+| Failure Mode | Local Effect | System Effect | Handling |
 | --- | --- | --- | --- |
-| negotiation/attach/root getattr 失败 | mount 失败 | superblock 不发布 | error propagation 和 RAII cleanup |
-| lookup 不存在 | negative lookup | 单个 pathname 不存在 | 只把 `ENOENT` 转成 negative result |
-| create 成功、child walk 失败 | local inode 不发布 | remote object 可能已存在 | 返回 error，不伪造 local state |
-| statfs 不实现 | 无 remote statistics | mount 仍可用 | 仅 `ENOSYS` 回退 `simple_statfs` |
+| negotiation/attach/root getattr fails | mount fails | The superblock is not published | error propagation and RAII cleanup |
+| lookup of a nonexistent name | negative lookup | A single pathname does not exist | Convert only `ENOENT` into a negative result |
+| create succeeds, child walk fails | The local inode is not published | The remote object may already exist | Return the error, and do not forge local state |
+| statfs not implemented | No remote statistics | mount is still usable | Fall back to `simple_statfs` only on `ENOSYS` |
 | truncate succeeds but cache publication fails | local size stays stale | later reads diverge from the server | propagate the `update_size_after_backing_change()` error without publishing partial state |
-| final clunk 失败 | remote fid 暂时滞留 | 到 connection teardown 才回收 | `p9` warning |
-| endpoint 永久不响应 | caller task 阻塞 | 同 client operations 排队 | 当前无 timeout/cancel |
+| final clunk fails | The remote fid lingers for a while | Reclaimed only at connection teardown | `p9` warning |
+| endpoint never responds | The caller task blocks | Operations of the same client queue up | Currently no timeout/cancel |
 
-## 故障管理
+## Fault Management
 
 The range-fsync callback always contacts the existing open fid, including empty
 ranges; it never substitutes local cache completion for server persistence.
 The server receives the exact datasync intent and may synchronize more bytes
 than requested because the protocol has no range field. Server errors propagate.
 
-`p9` 的 typed `KError` 直接传播为 VFS error。namespace/I/O failure 不使用 path-based retry；
-unlink/rename 只按 Linux dotl semantics 对 `EOPNOTSUPP` 使用 protocol fallback，statfs 只对
-`ENOSYS` 回退。
+The typed `KError` of `p9` is propagated directly as a VFS error. Namespace/I/O failures do not use path-based retry;
+unlink/rename use the protocol fallback only for `EOPNOTSUPP`, following Linux dotl semantics, and statfs falls back only on
+`ENOSYS`.
 
-## 隐私分析
+## Privacy Analysis
 
-文件名、metadata、symlink target 和文件内容会暴露给选定的 9P endpoint。v9fs 不提供额外
-加密，信任关系由启动配置、transport 和 VMM/host isolation 决定。
+File names, metadata, symlink targets and file contents are exposed to the selected 9P endpoint. v9fs provides no additional
+encryption; the trust relationship is determined by the boot configuration, the transport and VMM/host isolation.
 
-## 已知限制
+## Known Limitations
 
-- 只实现 9P2000.L cacheless semantics；
-- KVFS 没有 dentry-private fid slot，lookup fid 因而放在 `V9fsInode`；
+- Implements only 9P2000.L cacheless semantics;
+- KVFS has no dentry-private fid slot, so the lookup fid lives in `V9fsInode`;
 - the page cache serves read faults only; no atomic-open contract, xattr or remote lock support;
-- synchronous operations 没有 timeout/cancel。
+- synchronous operations have no timeout/cancel.
 
-## 审计清单
+## Audit Checklist
 
-- VFS operation 是否使用 existing inode/file fid，而不是 absolute path；
-- opened file 是否获得 independent fid 并放入 typed private data；
-- namespace operation 是否保持 Linux fid role、fallback condition 和 wire order；
-- new inode 是否在 qid/attribute validation 后才发布；
-- 新字段是否对应 Linux semantics 或 KVFS/Rust ownership 的必要边界。
+- Whether VFS operations use the existing inode/file fid rather than an absolute path;
+- Whether an opened file obtains an independent fid and places it in typed private data;
+- Whether namespace operations preserve the Linux fid role, fallback condition and wire order;
+- Whether a new inode is published only after qid/attribute validation;
+- Whether new fields correspond to Linux semantics or to a necessary boundary of KVFS/Rust ownership.
 
 TFSYNC is a server persistence barrier and cannot certify local dirty mmap data.
 The local `write_and_wait_range` must succeed first. Missing local writeback

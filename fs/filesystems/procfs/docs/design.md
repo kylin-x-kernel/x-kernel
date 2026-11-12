@@ -320,7 +320,7 @@ X-Kernel's order (`0=off … 5=trace`) and a privileged write of a level name or
 number changes that level, leaving the module filter untouched — a target with a
 surviving override therefore keeps printing, and full silence comes from writing
 `off`/`0` to `sys/kernel/log_filter`, which drops every rule. The filter spec
-lives in `sys/kernel/log_filter` (see the logging nodes above); the value domain
+lives in `sys/kernel/log_filter` (format described in security.md); the value domain
 is X-Kernel-private and *not* Linux's inverted `console_loglevel`.
 
 `/proc/<pid>/ns/<type>` inode numbers come from per-subsystem ID allocators

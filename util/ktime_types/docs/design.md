@@ -1,22 +1,23 @@
-# ktime - 设计文档
+# ktime_types - Design Document
 
-## 定位
+## Positioning
 
-`ktime_types` 提供内核内部统一的语义时间和频率类型。它不读取时钟，也不编程硬件。
-`khal::time` 提供单调硬件时钟，`ktime`（timekeeping 层）负责 monotonic 与
-realtime 的关联。
+`ktime_types` provides the kernel-internal unified semantic time and frequency types. It does not read clocks and does not program hardware.
+`khal::time` provides the monotonic hardware clock, and `ktime` (the timekeeping layer) is responsible for correlating monotonic and
+realtime.
 
-## 范围
+## Scope
 
-- `src/clock_id.rs`：跨模块传递的 `ClockId` 语义枚举；不绑定 Linux ABI 数值。
-- `src/span.rs`：`TimeSpan` 非负时间长度。
-- `src/instant.rs`：由 marker 类型区分的 `Instant<C>` 时钟域时刻。
-- `src/system_time.rs`：带符号的 Unix 墙钟时间。
-- `src/frequency.rs`：以 Hz 为规范存储单位的 `Frequency` 频率类型。
-- `src/units.rs`：秒、毫秒、微秒和纳秒之间的固定单位换算常量。
-- `src/lib.rs`：稳定的 crate 根公开重导出，不承载具体类型实现。
+- `src/clock_id.rs`: the `ClockId` semantic enum passed across modules; it is not bound to Linux ABI values.
+- `src/span.rs`: `TimeSpan`, a non-negative time length.
+- `src/instant.rs`: `Instant<C>`, a clock-domain instant distinguished by marker types.
+- `src/system_time.rs`: signed Unix wall-clock time.
+- `src/frequency.rs`: the `Frequency` type, with Hz as the canonical storage unit.
+- `src/units.rs`: fixed unit conversion constants among seconds, milliseconds, microseconds and nanoseconds.
+- `src/timestamp.rs`: `TimestampLimits`, the timestamp granularity and inclusive seconds range a storage or protocol format can represent.
+- `src/lib.rs`: the stable public re-exports at the crate root; it does not host concrete type implementations.
 
-## 架构
+## Architecture
 
 ```text
 hardware frequency -> Frequency
@@ -26,30 +27,30 @@ RTC sample ------------------------+-> SystemTime
                                       +-> TimeSpan arithmetic
 ```
 
-`MonotonicInstant`、`BoottimeInstant`、`ProcessCpuInstant` 和
-`ThreadCpuInstant` 使用不同 marker，禁止跨时钟域比较或相减。`core::time::Duration`
-只通过 `TimeSpan::from_core` 和 `TimeSpan::into_core` 显式转换。
+`MonotonicInstant`, `BoottimeInstant`, `ProcessCpuInstant` and
+`ThreadCpuInstant` use distinct markers, and comparing or subtracting across clock domains is forbidden. `core::time::Duration`
+is converted explicitly only through `TimeSpan::from_core` and `TimeSpan::into_core`.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-所有类型都是纯值类型，不分配、不阻塞，可用于中断、早期启动和普通任务上下文。
-`Frequency` 在内部始终保存 Hz；转换为 kHz/MHz 只应发生在硬件、固件、日志或第三方
-API 边界，并通过名称明确为向下取整。
-从整数、ABI 或硬件表示构造时间值应只发生在相应边界。
-反向转换同样只允许发生在硬件寄存器、ABI、序列化或第三方接口边界；
-`as_nanos_u64_saturating` 明确表达无法表示时钳位到 `u64::MAX` 的策略。
+All types are pure value types; they do not allocate or block, and can be used in interrupt, early boot and ordinary task contexts.
+`Frequency` always stores Hz internally; conversion to kHz/MHz should happen only at hardware, firmware, logging or third-party
+API boundaries, and the name must make explicit that the result is rounded down.
+Constructing time values from integer, ABI or hardware representations should happen only at the corresponding boundaries.
+Likewise, the reverse conversion is allowed only at hardware register, ABI, serialization or third-party interface boundaries;
+`as_nanos_u64_saturating` explicitly expresses the policy of clamping to `u64::MAX` when the value cannot be represented.
 
-## 设计决策
+## Design Decisions
 
-- `TimeSpan` 不作为 `Duration` 的别名，避免依赖代码无意混用两套 duration。
-- `Frequency` 使用 Hz 作为唯一内部表示，避免将 Hz、kHz 和 MHz 裸整数相互传递；
-  缩放构造执行溢出检查，降精度读取显式标注 `floor`。
-- `Instant<C>` 的泛型时钟域在编译期阻止 realtime、monotonic 和 CPU time 混用。
-- `SystemTime` 保存规范化的秒和纳秒，允许表达 Unix epoch 之前的时间。
-- `SystemTime::{MIN, MAX}` 统一定义墙钟类型的可表示边界。
-- `SystemTime` 的 checked 加减直接处理秒和纳秒分量，避免高频墙钟路径经过
-  `i128` 总纳秒的乘除规范化。
-- checked 和 saturating 运算供外部输入及非严格排序路径使用；运算符只用于已建立顺序和范围不变量的内部路径。
+- `TimeSpan` is not an alias of `Duration`, to prevent dependent code from inadvertently mixing two duration types.
+- `Frequency` uses Hz as the only internal representation, to avoid passing bare integers in Hz, kHz and MHz to one another;
+  scaling constructors perform overflow checks, and reads with reduced precision are explicitly labeled `floor`.
+- The generic clock domain of `Instant<C>` prevents mixing realtime, monotonic and CPU time at compile time.
+- `SystemTime` stores normalized seconds and nanoseconds, and can represent times before the Unix epoch.
+- `SystemTime::{MIN, MAX}` uniformly define the representable bounds of the wall-clock type.
+- The checked addition and subtraction of `SystemTime` operate directly on the seconds and nanoseconds components, so that high-frequency wall-clock paths avoid the
+  multiplication and division normalization over `i128` total nanoseconds.
+- Checked and saturating operations are for external input and paths without strict ordering; operators are used only on internal paths where the ordering and range invariants have been established.
 
-`ClockId` 仅标识时钟种类，不保证每个操作都支持所有种类，也不保证每种标识均有独立时钟源。
-Linux 编号解析及 timerfd 支持集转换由 `ksyscall` 边界完成；本 crate 不依赖 Linux ABI 或文件对象。
+`ClockId` only identifies the kind of clock; it does not guarantee that every operation supports all kinds, nor that every identifier has an independent clock source.
+Parsing of Linux numbers and conversion of the timerfd supported set are done at the `ksyscall` boundary; this crate depends on neither the Linux ABI nor file objects.

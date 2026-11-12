@@ -54,7 +54,7 @@ independent atomic cache and must never be updated outside this protocol.
 
 | Failure mode | Cause and effect | Handling |
 | --- | --- | --- |
-| Registration rejected | Misalignment, invalid range or overlap prevents adding capacity | `add_region` returns `InvalidInput` or `MemoryOverlap` before initializing metadata |
+| Registration rejected | Misalignment, invalid range or overlap prevents adding capacity | `add_region` returns `InvalidInput` or `MemoryOverlap` (or `NoMemory` when all `MAX_REGIONS` slots are used) before initializing metadata |
 | Allocation exhausted | No suitable block remains; a higher-layer request cannot proceed | Allocation returns `NoMemory`; the caller selects retry or OOM policy |
 | Ownership or bookkeeping corrupted | Double free or an external overwrite can corrupt lists and allow overlapping allocations | Debug assertions and permutation/forged-header tests detect regressions; there is no recovery from arbitrary kernel memory corruption |
 

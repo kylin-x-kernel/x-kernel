@@ -127,7 +127,7 @@ access through that page table object. The frame layout is the same as for
 borrowed subtrees shared by `copy_from()`.
 
 **Callers**: `walk_page_table!` in `mut` mode, `walk_page_table_create!`,
-`next_table_mut_or_create()`, and `copy_from()`, all through mutable access.
+`next_table_mut()`, `next_table_mut_or_create()`, `unmap_sparse_region()`, and `copy_from()`, all through mutable access.
 
 ### 4. AArch64 User Page Table Destruction (`table64.rs`)
 

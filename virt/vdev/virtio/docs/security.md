@@ -1,117 +1,117 @@
-# vdev-virtio — 安全与可靠性分析
+# vdev-virtio — Security and Reliability Analysis
 
-## 信任模型
+## Trust Model
 
-- 调用方（设备实现 / VMM）是受信任的：它们选择队列参数、传入 `GuestDma`
-  能力，并决定何时处理队列。
-- 访客是**不受信任**的：访客可自由写 MMIO 寄存器、构造 virtqueue 描述符与
-  available/used ring、指定任意访客物理地址与长度。
-- 本 crate 必须在访客可控输入上做边界与一致性校验，任何越界、错宽、非法
-  状态都返回错误或安全降级，而不是 UB。
+- The caller (device implementation / VMM) is trusted: it chooses the queue parameters, passes in the `GuestDma`
+  capability, and decides when to process the queues.
+- The guest is **untrusted**: the guest may freely write MMIO registers, construct virtqueue descriptors and
+  available/used rings, and specify arbitrary guest physical addresses and lengths.
+- This crate must perform bounds and consistency checks on guest-controlled input; any out-of-bounds access, wrong access width, or illegal
+  state returns an error or degrades safely, rather than causing UB.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-| 边界 | 说明 |
+| Boundary | Description |
 |------|------|
-| MMIO 寄存器写 | 访客写入的 offset/width/value；offset 可能落在标准寄存器或设备配置区 |
-| MMIO 寄存器读 | 访客读宽度；无效宽度必须被拒绝 |
-| 队列地址 | `QUEUE_DESC/AVAIL/USED` 高低位写入的访客物理地址 |
-| 队列大小 | `QUEUE_NUM` 与设备 `max_size` 的关系 |
-| 描述符链 | 链长度、`NEXT`/`INDIRECT` 标志、地址与长度，来自访客内存 |
-| 环索引 | available/used idx 为访客写入的自由整数，存在回绕 |
-| 设备配置区 | 设备实现解释的配置偏移，来自访客读 |
+| MMIO register write | The offset/width/value written by the guest; the offset may fall in a standard register or in the device configuration space |
+| MMIO register read | The read width chosen by the guest; invalid widths must be rejected |
+| Queue address | Guest physical addresses written through the high and low halves of `QUEUE_DESC/AVAIL/USED` |
+| Queue size | The relationship between `QUEUE_NUM` and the device `max_size` |
+| Descriptor chain | Chain length, `NEXT`/`INDIRECT` flags, addresses and lengths, all coming from guest memory |
+| Ring index | The available/used idx is a free-form integer written by the guest and may wrap around |
+| Device configuration space | Configuration offsets interpreted by the device implementation, coming from guest reads |
 
-本 crate 不接触 **user memory / 文件系统 / 网络数据**；它只接触上述
-**MMIO/虚拟队列/DMA** 边界。
+This crate does not touch **user memory / file systems / network data**; it only touches the above
+**MMIO/virtqueue/DMA** boundaries.
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-全部 `unsafe` 集中在 `src/memory.rs`，服务于 `GuestMemoryAccessor` 的默认实现；
-生产路径使用 `dma::DmaGuestMemory`（无 `unsafe`）。
+All `unsafe` code is concentrated in `src/memory.rs` and serves the default implementation of `GuestMemoryAccessor`;
+the production path uses `dma::DmaGuestMemory` (no `unsafe`).
 
-| 位置 | 不变量 | 为什么安全 | 约束入口 |
+| Location | Invariant | Why it is safe | Constraint entry point |
 |------|--------|-----------|----------|
-| `memory.rs:66` `read_buffer` | `translate_and_get_limit` 返回的主机地址对至少 `limit` 字节可解引用，且 `limit >= data.len()` | 长度在拷贝前已校验；`copy_nonoverlapping` 的源区间与目标 `data` 不重叠 | 仅 `GuestMemoryAccessor` 实现者调用 |
-| `memory.rs:89` `write_buffer` | 同上（目标侧） | 长度已校验；目标为访客内存映射 | 同上 |
-| `memory.rs:110` `read_obj`（`unsafe fn`） | `T` 为可按字节寻址、无非法位模式/填充不变量/自有指针的 POD；`MaybeUninit<T>` 的字节视图有效 | `read_buffer` 填满全部字节后才 `assume_init` | `unsafe fn` 的 `# Safety` 契约，调用方保证 `T` 布局 |
-| `memory.rs:132` `write_obj`（`unsafe fn`） | `T` 为 POD | 读取活动值字节对 POD 安全 | 同上 |
+| `memory.rs:66` `read_buffer` | The host address returned by `translate_and_get_limit` is dereferenceable for at least `limit` bytes, and `limit >= data.len()` | The length is validated before the copy; the source range of `copy_nonoverlapping` does not overlap the destination `data` | Called only by `GuestMemoryAccessor` implementors |
+| `memory.rs:89` `write_buffer` | Same as above (destination side) | The length is validated; the destination is a guest memory mapping | Same as above |
+| `memory.rs:110` `read_obj` (`unsafe fn`) | `T` is a POD that is byte-addressable and has no invalid bit patterns, padding invariants, or owned pointers; the byte view of `MaybeUninit<T>` is valid | `assume_init` is called only after `read_buffer` has filled all the bytes | The `# Safety` contract of the `unsafe fn`; the caller guarantees the layout of `T` |
+| `memory.rs:132` `write_obj` (`unsafe fn`) | `T` is a POD | Reading the bytes of a live value is safe for a POD | Same as above |
 
-`read_obj`/`write_obj` 已声明为 `unsafe fn`：`T: Sized` 不保证是 POD，若传入含
-指针、无效位模式或 `bool` 的类型会触发 UB，因此把 POD 约束作为调用方必须满足的
-`# Safety` 契约，而不是默认安全方法。
+`read_obj`/`write_obj` are declared as `unsafe fn`: `T: Sized` does not guarantee that `T` is a POD, and passing a type that contains
+pointers, invalid bit patterns, or `bool` would trigger UB. The POD constraint is therefore made a
+`# Safety` contract that the caller must satisfy, rather than a default safe method.
 
-调用方需满足：`translate_and_get_limit` 返回的宿主地址必须可直接解引用，且
-返回的 `limit` 必须真实反映连续可访问范围。
+The caller must ensure that the host address returned by `translate_and_get_limit` can be dereferenced directly, and that
+the returned `limit` truly reflects the contiguous accessible range.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-1. 任何来自访客的长度/地址在用于读写前都必须经过翻译与上限校验。
-2. 描述符链遍历必须有界（`MAX_DESCRIPTOR_CHAIN_LENGTH`），并防止环回/自引用
-   导致的无限循环。
-3. 环索引回绕必须使用 `wrapping` 语义，且取模到队列 size。
-4. `VirtioQueue` 在 `ready` 之前不得被数据路径访问；`ready` 写入前必须完成环
-   布局（区间不重叠、不越界）校验。
+1. Any length/address coming from the guest must go through translation and upper-bound validation before it is used for reads or writes.
+2. Descriptor chain traversal must be bounded (`MAX_DESCRIPTOR_CHAIN_LENGTH`), and must guard against infinite loops
+   caused by cycles/self-references.
+3. Ring index wraparound must use `wrapping` semantics, and the result must be taken modulo the queue size.
+4. `VirtioQueue` must not be accessed by the data path before `ready`; before `ready` is written, the ring
+   layout must be validated (ranges do not overlap and are not out of bounds).
 
-## 线程安全
+## Thread Safety
 
-- `vdev_core::GuestDma: Send + Sync`；`DmaGuestMemory` 仅持共享引用，天然
-  `Send`。
-- `VirtioMmioState` 的所有可变状态由 `SpinNoIrq` 保护，可在访客退出路径上
-  并发访问；`T: GuestMemoryAccessor + Clone` 以 `Arc<T>` 共享。
-- 本 crate 不注册中断、不创建任务，线程安全责任在调用方对设备实例的共享方式。
+- `vdev_core::GuestDma: Send + Sync`; `DmaGuestMemory` holds only a shared reference and is naturally
+  `Send`.
+- All mutable state of `VirtioMmioState` is protected by `SpinNoIrq` and may be accessed
+  concurrently on the guest exit path; `T: GuestMemoryAccessor + Clone` is shared as `Arc<T>`.
+- This crate neither registers interrupts nor creates tasks; thread-safety responsibility lies with the caller in how it shares the device instance.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat description | Impact level | Trigger condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | 越界访客地址导致宿主内存越界读写 | 高 | 描述符/环地址指向未映射区 | 所有读写经 `GuestDma` 翻译，失败返回 `DmaError`→`VirtioError::InvalidAddress`；`GuestMemoryAccessor` 实现必须校验 `limit` |
-| T-02 | `QUEUE_READY` 环区间重叠/越界 | 高 | 访客提交非法 desc/avail/used 布局 | ready 前做布局校验，非法则拒绝置 ready |
-| T-03 | 恶意描述符链导致无限循环/耗尽 | 中 | 描述符自引用/环回 | 链长度上限 `MAX_DESCRIPTOR_CHAIN_LENGTH`，超过报错 |
-| T-04 | 非法 feature 请求 | 中 | 驱动写 `FEATURES_OK` 但包含未广告位 | 校验子集关系，不满足则清 `FEATURES_OK` |
-| T-05 | 错宽 MMIO 访问 | 低 | 访客用非 1/2/4/8 字节宽度 | `transport` 拒绝并返回错误/0 |
-| T-06 | 中断漏报 | 低 | 驱动读 `INTERRUPT_STATUS` 后新事件到达 | `raised_after_read` 标记并返回 `InterruptPending`，由设备再次注入 |
+| T-01 | An out-of-bounds guest address causes out-of-bounds host memory reads/writes | High | A descriptor/ring address points to an unmapped region | All reads and writes are translated through `GuestDma`; failure returns `DmaError`→`VirtioError::InvalidAddress`; `GuestMemoryAccessor` implementations must validate `limit` |
+| T-02 | `QUEUE_READY` ring ranges overlap or are out of bounds | High | The guest submits an illegal desc/avail/used layout | The layout is validated before ready; if illegal, setting ready is rejected |
+| T-03 | A malicious descriptor chain causes an infinite loop/exhaustion | Medium | Descriptor self-reference/cycle | Chain length is capped at `MAX_DESCRIPTOR_CHAIN_LENGTH`; exceeding it returns an error |
+| T-04 | Illegal feature request | Medium | The driver writes `FEATURES_OK` but includes bits that were not advertised | The subset relationship is validated; if it is not satisfied, `FEATURES_OK` is cleared |
+| T-05 | Wrong-width MMIO access | Low | The guest uses a width other than 1/2/4/8 bytes | `transport` rejects it and returns an error/0 |
+| T-06 | Missed interrupt | Low | A new event arrives after the driver reads `INTERRUPT_STATUS` | `raised_after_read` is set and `InterruptPending` is returned, so the device injects again |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure mode | Cause | Local effect | System effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | 队列处理失败 | 访客地址非法/描述符非法 | 单次请求报错 | 访客 I/O 失败，可重试 | 3 | 返回 `VirtioError`，设备实现回写错误状态 |
-| F-02 | 布局校验拒绝 ready | 访客参数非法 | 队列不可用 | 访客驱动初始化失败 | 3 | 保持未就绪，访客可重新编程 |
-| F-03 | 后端可能需要延迟处理 | 设备后端会阻塞 | `QueuePending` | 若 VMM 无轮询路径则队列停滞 | 3 | 设备实现声明 `requires_deferred_processing`，由 VMM 提供轮询 |
-| F-04 | 中断状态不一致 | 并发读写中断寄存器 | 中断漏报/重复 | 访客可能等待超时 | 4 | 单锁保护 + `raised_after_read` |
+| F-01 | Queue processing fails | Illegal guest address / illegal descriptor | A single request reports an error | Guest I/O fails and can be retried | 3 | Return `VirtioError`; the device implementation writes back an error status |
+| F-02 | Layout validation rejects ready | Illegal guest parameters | The queue is unusable | Guest driver initialization fails | 3 | Remain not ready; the guest can reprogram |
+| F-03 | The backend may need deferred processing | The device backend may block | `QueuePending` | If the VMM has no polling path, the queue stalls | 3 | The device implementation declares `requires_deferred_processing`, and the VMM provides polling |
+| F-04 | Inconsistent interrupt state | Concurrent reads and writes of interrupt registers | Interrupt missed/duplicated | The guest may wait until timeout | 4 | Single-lock protection + `raised_after_read` |
 
-## 故障管理
+## Fault Management
 
-- 所有访客可控失败路径返回 `VirtioError`（`InvalidAddress`、`InvalidQueue`、
-  `InvalidDescriptor`、`InvalidBufferSize` 等），不 panic。
-- `VirtioMmioState::new` 假定调用方已校验队列 size；越界索引在运行期返回
-  `None`/错误而非 panic。
-- 无锁 poisoning 问题：使用 `SpinNoIrq`，不涉及 OS 线程 poison。
+- All guest-controllable failure paths return `VirtioError` (`InvalidAddress`, `InvalidQueue`,
+  `InvalidDescriptor`, `InvalidBufferSize`, etc.) and do not panic.
+- `VirtioMmioState::new` assumes the caller has validated the queue size; out-of-bounds indices return
+  `None`/an error at runtime rather than panicking.
+- There is no lock poisoning issue: `SpinNoIrq` is used, and OS thread poisoning is not involved.
 
-## 隐私分析
+## Privacy Analysis
 
-本 crate 不处理用户隐私数据；它只搬运访客内存字节，字节内容由设备实现解释。
-无日志打印访客数据（除设备实现自身按需 trace）。
+This crate does not handle user private data; it only moves guest memory bytes, and the byte contents are interpreted by the device implementation.
+It does not log guest data (except for the device implementation's own trace output as needed).
 
-## 已知限制
+## Known Limitations
 
-- `ut-tests/` 的 4 个回归用例在内核 harness 中执行，覆盖固定 mock 输入与布局，
-  不覆盖真实 VM/DMA 隔离。descriptor fixture 的原始指针仅指向本例存活且不扩容的
-  Vec；其 translator 返回 `usize::MAX`，只能用于现有固定范围输入，不能用来证明
-  任意地址的边界安全。该测试约束在迁移中保持不变。
-- 仅实现 VirtIO MMIO 传输（version 2），不支持 PCI 传输。
-- event-index 尚未实现：传输不广告 `VIRTIO_F_RING_EVENT_IDX`，队列的
-  `event_idx_enabled` 恒为 `false`。布局计算仍按包含 event-index footer 处理，
-  以保证协商无关的环区间校验。
-- indirect 描述符的完整数据路径能力取决于上层设备实现。
-- 不负责中断注入与硬件交互，由设备实现/VMM 完成。
+- The 4 regression cases in `ut-tests/` run in the kernel harness and cover fixed mock inputs and layouts;
+  they do not cover real VM/DMA isolation. The raw pointer of the descriptor fixture points only to a
+  Vec that is alive in this test and is not grown; its translator returns `usize::MAX`, so it can only be used for the existing fixed-range inputs and cannot be used to prove
+  bounds safety for arbitrary addresses. This test constraint remains unchanged during the migration.
+- Only the VirtIO MMIO transport (version 2) is implemented; the PCI transport is not supported.
+- event-index is not yet implemented: the transport does not advertise `VIRTIO_F_RING_EVENT_IDX`, and the queue's
+  `event_idx_enabled` is always `false`. The layout computation still treats the layout as including the event-index footer,
+  to ensure ring range validation that is independent of negotiation.
+- The full data-path capability for indirect descriptors depends on the upper-layer device implementation.
+- It is not responsible for interrupt injection or hardware interaction; these are done by the device implementation/VMM.
 
-## 审计清单
+## Audit Checklist
 
-- [ ] 任何新的访客内存读写是否都经过翻译与长度校验？
-- [ ] 新描述符处理是否保持链长度上限与回绕安全？
-- [ ] `QUEUE_READY` 前是否仍执行完整的环布局校验？
-- [ ] `unsafe` 块 / `unsafe fn` 是否有 `SAFETY:`/`# Safety` 说明并保持
-      `memory.rs` 的翻译与 POD 契约？
-- [ ] MMIO 访问宽度校验是否覆盖新增寄存器？
-- [ ] 新增状态是否有对应锁保护，避免数据竞争？
+- [ ] Does any new guest memory read/write go through translation and length validation?
+- [ ] Does new descriptor handling preserve the chain length cap and wraparound safety?
+- [ ] Is the complete ring layout validation still performed before `QUEUE_READY`?
+- [ ] Does each `unsafe` block / `unsafe fn` have a `SAFETY:`/`# Safety` explanation and preserve
+      the translation and POD contracts of `memory.rs`?
+- [ ] Does the MMIO access width validation cover newly added registers?
+- [ ] Is new state protected by a corresponding lock to avoid data races?

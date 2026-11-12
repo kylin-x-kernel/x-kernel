@@ -719,12 +719,14 @@ network namespace 不能只拥有一个 ID。最终每个实例应拥有：
 
 ### 12.1 cgroup2fs
 
-`cgroup2fs` 是独立 VFS adapter。mount 实例持有：
+`cgroup2fs` 是独立 VFS adapter。
 
 `KFEAT_FS_CGROUP2=y` 时，`fs_boot` 在 initial mount namespace 中自动创建并挂载
 `/sys/fs/cgroup`，其 superblock 使用 `kcgroup::CgroupNamespace::initial()` 的 root。
 PID 1 的 initial `NsProxy` 复用同一个 namespace。OCI runtime 只在该 hierarchy 下创建、
 迁移和清理容器 cgroup，不负责挂载或初始化宿主机全局 hierarchy。
+
+mount 实例持有：
 
 ```rust,ignore
 pub struct Cgroup2SuperBlock {
@@ -897,7 +899,7 @@ domain、committed charge 无 owner 等属于内核不变量破坏：测试构�
 
 ### 15.1 `process/kcgroup`
 
-从 namespace ID 占位扩展为 hierarchy、membership、namespace view 和 controller
+已从 namespace ID 占位扩展为 hierarchy、membership、namespace view 和 controller
 控制面 owner。保持 crate 聚焦，不吸收 VFS、scheduler 或 MM 实现。
 
 ### 15.2 `process/kns`

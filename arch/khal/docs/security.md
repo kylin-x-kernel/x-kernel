@@ -14,34 +14,34 @@ errors unchanged. Their provider validates sleepable context and retains failed
 shutdown state. Callers must authorize service loss and exclude system stop and
 CPU hotplug; success is not permission to restart old watchdog consumer state.
 
-## 信任模型
+## Trust model
 
-`khal::irq` 是 trap-entry adapter，不拥有 generic IRQ state，也不 re-export
-generic `kirq` API。
-它信任：
+`khal::irq` is a trap-entry adapter. It does not own generic IRQ state and does not re-export the
+generic `kirq` API.
+It trusts that:
 
-- `kcpu` trap dispatch 只在正确异常上下文调用 `irq_handler()` / `nmi_handler()`；
-- `kspin::NoPreempt` 能覆盖进入 `kirq` 的 adapter 调用区间；
+- `kcpu` trap dispatch calls `irq_handler()` / `nmi_handler()` only in the correct exception context;
+- `kspin::NoPreempt` covers the adapter call interval that enters `kirq`;
 - `kirq` owns IRQ state, Line-owned NMI actions, dispatch and completion invariants.
-- `kplat::nm_irq` 的平台实现（`NmiMechanismIf` / `PeriodicNmiSourceIf`）与 `karch` 的 NMI 寄存器
-  访问（PMR / ALLINT / SCTLR_EL1.NMI）正确反映机制与降级状态。
+- The platform implementation of `kplat::nm_irq` (`NmiMechanismIf` / `PeriodicNmiSourceIf`) and `karch`'s NMI register
+  accesses (PMR / ALLINT / SCTLR_EL1.NMI) correctly reflect the mechanism and degradation state.
 
-## 外部边界 / 攻击面
+## External boundaries / attack surface
 
-1. **trap dispatch 边界**
-   `kcpu` 通过 registered trap handler 进入本模块。错误 trap 分类会把 normal IRQ
-   与 pseudo-NMI 语义混淆。
+1. **Trap dispatch boundary**
+   `kcpu` enters this module through the registered trap handler. A wrong trap classification would confuse normal IRQ
+   and pseudo-NMI semantics.
 
-2. **NMI 机制 facade 边界**
-   `khal::nmi` 把 `mode()` / `enable_periodic_nmi()` 等接口 re-export 给消费者。
-   机制不可用（`mode() == NmiMode::None`）时，消费者必须禁用依赖 NMI 的功能；
+2. **NMI mechanism facade boundary**
+   `khal::nmi` re-exports interfaces such as `mode()` / `enable_periodic_nmi()` to consumers.
+   When the mechanism is unavailable (`mode() == NmiMode::None`), consumers must disable NMI-dependent features;
    `configure_nmi` can also reject Closing, unsupported source types or failed
    local preparation. A false result must not be treated as prepared delivery;
    partial controller failure retains cleanup obligations in KIRQ. Periodic
    source activation remains separate from this preparation contract.
-   最终停机路径经 `quiesce_nmi()` 停掉当前 CPU 的周期源；该路径持有
-   `NoPreempt`，并依赖 PMU backend 的共享计数器访问与原子 enabled 状态来安全
-   覆盖可能已经到达的 NMI 分发。
+   The final shutdown path stops the current CPU's periodic source via `quiesce_nmi()`; this path holds
+   `NoPreempt` and relies on the PMU backend's shared counter access and atomic enabled state to safely
+   cover any NMI dispatch that may already have arrived.
 
 3. **Firmware / device-tree handoff boundary** (`khal::firmware`)
 
@@ -104,61 +104,61 @@ generic `kirq` API。
    handle grants no memory or hardware access. This layer adds no cell decode,
    unsafe code, mapping or hardware access.
 
-本模块不直接处理用户指针、DMA buffer、设备 MMIO 或文件/网络数据。
+This module does not directly handle user pointers, DMA buffers, device MMIO or file/network data.
 
-`arch/khal/src/irq` 当前没有本地 `unsafe` 代码块。相关 unsafe 边界位于：
+`arch/khal/src/irq` currently has no local `unsafe` blocks. The related unsafe boundaries are located in:
 
-- `kcpu` trap/汇编入口；
-- 平台中断控制器 backend 的 MMIO/PIO/汇编屏障；
-- `kiface` generated linkage。
+- the `kcpu` trap/assembly entry;
+- the MMIO/PIO/assembly barriers of the platform interrupt controller backend;
+- the `kiface` generated linkage.
 
-## 内存安全不变量
+## Memory-safety invariants
 
 - `khal::irq` owns no IRQ registry or NMI handler storage, avoiding duplicate
   active state beside `kirq`.
-- `NoPreempt` guard 必须覆盖整个 `kirq::handle_irq()` / `kirq::handle_nmi()` 调用。
+- The `NoPreempt` guard must cover the entire `kirq::handle_irq()` / `kirq::handle_nmi()` call.
 - `kiface_task_api::TaskIrqExitCheckpointIf` (defined by kiface-task-api, provided by ktask)
   is reserved for the completed normal IRQ tail, after controller
   completion and dispatch cleanup. It may exempt only the entry IRQ mask from
   ordinary preemption checks, never outer preemption guards or NMI context.
   The adapter restores the suspended exception marker after the checkpoint.
 
-## 线程安全
+## Thread safety
 
-`khal::irq` adapter 不引入新的共享 mutable state。并发控制主要由：
+The `khal::irq` adapter introduces no new shared mutable state. Concurrency control is mainly provided by:
 
-- `NoPreempt` 保护 trap adapter 执行区间；
-- `kirq` 内部 lock 模型保护 IRQ core state；
-- `kiface` 单实现接口连接 platform/backend provider。
+- `NoPreempt`, which protects the execution interval of the trap adapter;
+- the internal lock model of `kirq`, which protects the IRQ core state;
+- the `kiface` single-implementation interface, which connects the platform/backend provider.
 
-## 威胁分析
+## Threat analysis
 
-| 编号 | 威胁 | 触发条件 | 影响 | 缓解 |
+| ID | Threat | Trigger condition | Impact | Mitigation |
 |------|------|----------|------|------|
-| T-01 | trap adapter 未禁用抢占 | handler 直接调用 `kirq` 而无 `NoPreempt` | hardirq exit 后调度边界错误 | `irq_handler()` / `nmi_handler()` 创建 `NoPreempt` |
-| T-02 | generic IRQ API 重新经由 `khal::irq` 导出 | 调用方把 HAL adapter 当公共 IRQ core | crate 边界退化，后续扩展回到 HAL | `khal::irq` 不 re-export `kirq::*`，调用方直接依赖 `kirq` |
-| T-03 | `IPI_IRQ` 移入 `kirq` | generic core 依赖 `kbuild_config` | crate 边界污染、特性耦合 | IPI 调用方直接使用 `kbuild_config::IPI_IRQ` |
-| T-04 | x86 helper 回流到 `khal::irq` | HAL adapter 再次暴露 APIC vector policy | crate 边界退化，驱动绕过 `kirq` MSI resource | `khal::irq` 不提供 MSI-X/APIC helper；x86 APIC 只实现 `kirq::MsiBackendIf` |
-| T-05 | 降级构建仍调用 NMI 接口 | 平台无 FEAT_NMI / GICv2 时消费者未检查 `mode()` | 无效寄存器访问或误报 NMI 已启用 | `mode() == None` 时平台返回 `false` / watchdog 启动期禁用 hardlockup；调用者契约要求先查询 `mode()` |
+| T-01 | The trap adapter does not disable preemption | A handler calls `kirq` directly without `NoPreempt` | Wrong scheduling boundary after hardirq exit | `irq_handler()` / `nmi_handler()` create a `NoPreempt` |
+| T-02 | The generic IRQ API is exported again through `khal::irq` | Callers treat the HAL adapter as the public IRQ core | Crate boundary degrades, and later extensions fall back into the HAL | `khal::irq` does not re-export `kirq::*`, and callers depend on `kirq` directly |
+| T-03 | `IPI_IRQ` is moved into `kirq` | The generic core depends on `kbuild_config` | Crate boundary pollution, feature coupling | IPI callers use `kbuild_config::IPI_IRQ` directly |
+| T-04 | x86 helpers flow back into `khal::irq` | The HAL adapter exposes the APIC vector policy again | Crate boundary degrades, and drivers bypass the `kirq` MSI resource | `khal::irq` provides no MSI-X/APIC helpers; the x86 APIC only implements `kirq::MsiBackendIf` |
+| T-05 | A degraded build still calls the NMI interface | The consumer does not check `mode()` on a platform without FEAT_NMI / with GICv2 | Invalid register access or falsely reporting that NMI is enabled | When `mode() == None`, the platform returns `false` / the watchdog disables hardlockup at startup; the caller contract requires querying `mode()` first |
 
-## 故障模式与影响分析（FMEA）
+## Failure modes and effects analysis (FMEA)
 
-| 编号 | 故障模式 | 局部影响 | 系统影响 | 检测/缓解 |
+| ID | Failure mode | Local effect | System effect | Detection/mitigation |
 |------|----------|----------|----------|-----------|
-| F-01 | `kirq::handle_irq()` 返回前 `NoPreempt` 过早释放 | lifecycle/dispatch 上下文错误 | 调度状态异常 | adapter guard 生命周期覆盖整个调用 |
-| F-02 | 调用方仍使用 `khal::irq` generic API | 编译失败 | 暴露未迁移调用点 | `rg "khal::irq"` audit + Make/Kconfig build |
-| F-03 | trap handler 未链接 | CPU IRQ/NMI 无法进入 `kirq` | 平台无法处理中断 | platform build 覆盖和 trap registration 检查 |
+| F-01 | `NoPreempt` is released too early, before `kirq::handle_irq()` returns | Wrong lifecycle/dispatch context | Abnormal scheduling state | The adapter guard lifetime covers the entire call |
+| F-02 | A caller still uses the generic `khal::irq` API | Compilation failure | Exposes call sites that have not been migrated | `rg "khal::irq"` audit + Make/Kconfig build |
+| F-03 | The trap handler is not linked | CPU IRQ/NMI cannot enter `kirq` | The platform cannot handle interrupts | Platform build coverage and trap registration checks |
 
-## 故障管理
+## Fault management
 
-`khal::irq` adapter 本身不处理 recoverable IRQ 错误；`kirq` 负责注册失败、
-unknown IRQ/NMI warning 和 completion 管理。adapter 返回 `kirq` handler 的布尔结果。
+The `khal::irq` adapter itself does not handle recoverable IRQ errors; `kirq` is responsible for registration failures,
+unknown IRQ/NMI warnings and completion management. The adapter returns the boolean result of the `kirq` handler.
 
-## 隐私分析
+## Privacy analysis
 
-`khal::irq` 不处理用户数据。它只处理 trap vector。
+`khal::irq` does not handle user data. It only handles trap vectors.
 
-## 已知限制
+## Known limitations
 
 - The IRQ analysis covers `src/irq/`; the generic IRQ core threat model belongs
   to `arch/kirq/docs/security.md`. This document also covers the page-table
@@ -185,12 +185,12 @@ adjacent SAFETY comment documents ownership and the absence of hardware use.
 These tests do not establish IRQ/NMI concurrency or real platform suspend
 safety. Test mounts remain gated by cfg(unittest).
 
-## 审计清单
+## Audit checklist
 
-- `khal::irq` 是否仍只作为 adapter/facade，不新增 IRQ state。
-- trap handler 是否在调用 `kirq` 前创建 `NoPreempt`。
-- `khal::irq` 是否没有重新导出 generic `kirq` API。
-- x86 APIC helper 是否仍未回流到 `khal::irq`。
+- Is `khal::irq` still only an adapter/facade, with no new IRQ state added?
+- Does the trap handler create a `NoPreempt` before calling `kirq`?
+- Does `khal::irq` avoid re-exporting the generic `kirq` API?
+- Have the x86 APIC helpers still not flowed back into `khal::irq`?
 
 ## Monotonic suspend/resume boundaries
 

@@ -1,26 +1,26 @@
-# klockstat — 设计文档
+# klockstat — Design Document
 
-## 定位
+## Purpose
 
-`klockstat` 为 X-Kernel 提供按 lock class 聚合的锁竞争统计，供内核诊断
-热点锁与阻塞路径。统计结果通过 `/proc/lock_stat`（Kconfig `KFEAT_LOCK_STAT`）
-或 `klockstat::dump_lock_stat()` 读取。
+`klockstat` provides X-Kernel with lock contention statistics aggregated per lock class, which the kernel uses to diagnose
+hot locks and blocking paths. The statistics are read through `/proc/lock_stat` (Kconfig `KFEAT_LOCK_STAT`)
+or `klockstat::dump_lock_stat()`.
 
-## 范围
+## Scope
 
 ```
 util/klockstat/
 ├── src/
-│   ├── lib.rs       # 计数器、聚合、格式化输出
-│   └── runtime.rs   # 堆锁按初始化调用点注册（stats feature）
+│   ├── lib.rs       # counters, aggregation, formatted output
+│   └── runtime.rs   # heap locks registered by initialization call site (stats feature)
 util/klockstat-macros/
-└── src/static_lock.rs  # static_lock! 过程宏
+└── src/static_lock.rs  # static_lock! procedural macro
 ```
 
-集成点：
+Integration points:
 
 - `ksync::Mutex` / `ksync::RwLock`
-- `kspin::SpinLock` 家族（`SpinNoIrq` 等）
+- the `kspin::SpinLock` family (`SpinNoIrq`, etc.)
 
 ## Host Test Layout
 
@@ -36,93 +36,93 @@ Validate on a host target with `cargo test -p klockstat --lib` and
 `cargo test -p klockstat --features stats --lib` (four and nine cases).
 Use host-target Cargo settings without kernel `--cfg unittest`.
 
-## Lock Class 模型
+## Lock Class Model
 
-每个 lock class 由 `(location, kind)` 标识：
+Each lock class is identified by `(location, kind)`:
 
-| 字段 | 含义 |
+| Field | Meaning |
 |------|------|
-| `location` | 通常为 `file:line` |
-| `kind` | `Mutex`、`RwLock`、`SpinNoIrq` 等 |
+| `location` | Usually `file:line` |
+| `kind` | `Mutex`, `RwLock`, `SpinNoIrq`, etc. |
 
-同一 class 下的多个锁实例共享一组计数器。
+Multiple lock instances under the same class share one set of counters.
 
-### 注册路径
+### Registration Paths
 
-**静态锁** — 使用 `static_lock!`：
+**Static locks** — use `static_lock!`:
 
 ```rust
-use ksync::{Mutex, static_lock};
+use ksync::{RwLock, static_lock};
 
 static_lock! {
     static TASK_TABLE: RwLock<TaskTable> = RwLock::new(TaskTable::new());
 }
 ```
 
-宏展开为：
+The macro expands to:
 
-1. 独立的 `LockClassStats` 静态项；
-2. `linkme::distributed_slice(LOCK_CLASSES)` 条目；
-3. 绑定 `new_with_stats` 的锁静态变量。
+1. a standalone `LockClassStats` static item;
+2. a `linkme::distributed_slice(LOCK_CLASSES)` entry;
+3. a lock static variable bound with `new_with_stats`.
 
-**堆锁 / 非常量静态上下文** — `Mutex::new` / `RwLock::new`（`stats` 开启时）：
+**Heap locks / non-const static contexts** — `Mutex::new` / `RwLock::new` (when `stats` is enabled):
 
-- 构造函数带 `#[track_caller]`；
-- 首次调用时通过 `class_for_init_site` 在运行时注册表按调用点去重；
-- 与静态路径一样按 `file:line` 聚合。
+- the constructor carries `#[track_caller]`;
+- on the first call, `class_for_init_site` deduplicates by call site in the runtime registry;
+- Runtime classes are deduplicated by call site (`file`, `line`, `column`, and lock kind); the displayed label is `file:line`, so distinct classes may share a label.
 
-**未追踪锁** — 指向 `NOOP_CLASS`：
+**Untracked locks** — point to `NOOP_CLASS`:
 
-- `RawMutex::with_config` 等未绑定 stats 的 raw 锁；
-- `Mutex::const_new(RawMutex::new(), ...)` 用于必须 `const` 初始化的场景。
+- raw locks not bound to stats, such as `RawMutex::with_config`;
+- `Mutex::const_new(RawMutex::new(), ...)`, used in scenarios that require `const` initialization.
 
-**`klazy::lazy_static!` 中的锁** — 保持 `lazy_static` 不变时：
+**Locks inside `klazy::lazy_static!`** — when `lazy_static` is left unchanged:
 
-- `stats` 开启后仍可通过运行时 `Mutex::new` 追踪；
-- `location` 落在初始化函数/闭包内部，而非 `static ref` 声明行；
-- 需要精确标签时应改用 `static_lock!`。
+- they can still be tracked through the runtime `Mutex::new` once `stats` is enabled;
+- `location` falls inside the initialization function/closure, not on the `static ref` declaration line;
+- use `static_lock!` instead when an exact label is needed.
 
-## 指标语义
+## Metric Semantics
 
-| 指标 | 含义 |
+| Metric | Meaning |
 |------|------|
-| `acquisitions` | 成功获取锁的次数（`lock()` 成功路径与 `try_lock` 成功） |
-| `contentions` | 获取前发生等待的次数 |
+| `acquisitions` | Number of successful lock acquisitions (the success path of `lock()` and a successful `try_lock`) |
+| `contentions` | Number of times a wait occurred before acquisition |
 
-补充约定（对齐 Linux `lock_contended` / `lock_acquired` 模型）：
+Additional conventions (aligned with the Linux `lock_contended` / `lock_acquired` model):
 
-- **Mutex**：仅在确认需要睡眠、进入 `block_on` 之前记 1 次 `contentions`（每轮 `lock()`
-  至多一次）；纯自旋后 CAS 成功不算 contention；成功时记 `acquisitions`。
-- **SpinLock（SMP）**：自旋等待后成功获取记 1 次 `contentions` + `acquisitions`；
-  无竞争直接成功只记 `acquisitions`。
-- **SpinLock（UP）**：仅记 `acquisitions`。
-- **RwLock**：仅在确认需要睡眠、进入 `block_on` 之前记 1 次 `contentions`（每轮
-  `lock_shared` / `lock_exclusive` 至多一次）；每个成功读锁/写锁各记 1 次 `acquisitions`。
+- **Mutex**: records 1 `contentions` only once it is confirmed that the task needs to sleep, before entering `block_on` (at most once per
+  `lock()` round); a CAS that succeeds after pure spinning does not count as contention; on success it records `acquisitions`.
+- **SpinLock (SMP)**: a successful acquisition after spin-waiting records 1 `contentions` + `acquisitions`;
+  an uncontended immediate success records only `acquisitions`.
+- **SpinLock (UP)**: records only `acquisitions`.
+- **RwLock**: records 1 `contentions` only once it is confirmed that the task needs to sleep, before entering `block_on` (at most once per round of
+  `lock_shared` / `lock_exclusive`); each successful read lock/write lock records 1 `acquisitions`.
 
-## 输出格式
+## Output Format
 
-`dump_lock_stat()` 按 `contentions` 降序取前 `DUMP_TOP_N`（默认 5）条，过滤全零
-条目，输出固定列宽表格。
+`dump_lock_stat()` takes the top `DUMP_TOP_N` (default 5) entries in descending order of `contentions`, filters out all-zero
+entries, and outputs a fixed-column-width table.
 
-数据源合并：
+Data sources are merged:
 
-1. `linkme` 注册的静态 class（`LOCK_CLASSES`）；
-2. `runtime.rs` 运行时注册表中的堆锁 class。
+1. static classes registered through `linkme` (`LOCK_CLASSES`);
+2. heap lock classes in the `runtime.rs` runtime registry.
 
-## Feature 门控
+## Feature Gating
 
-| Kconfig / Cargo | 效果 |
+| Kconfig / Cargo | Effect |
 |-----------------|------|
-| 默认（关闭） | `static_lock!` 为恒等宏；`Mutex::new` 保持 `const fn`；无 hook 开销 |
-| `KFEAT_LOCK_STAT` | 启用 `ksync/stats`、`kspin/stats`、`procfs/lock_stat` |
+| Default (off) | `static_lock!` is an identity macro; `Mutex::new` stays a `const fn`; no hook overhead |
+| `KFEAT_LOCK_STAT` | Enables `ksync/stats`, `kspin/stats`, `procfs/lock_stat` |
 
-`stats` 关闭时 `klockstat` 仍可被 `procfs` 链接，但无运行时注册与宏展开。
+When `stats` is off, `klockstat` can still be linked by `procfs`, but there is no runtime registration or macro expansion.
 
-## 设计取舍
+## Design Trade-offs
 
-- **按调用点而非类型聚合**：与 Linux `lock_stat` 类似，便于定位源码位置；同一行多个
-  `Mutex::new` 因 `column` 不同可能分为多个 class。
-- **Relaxed 原子**：统计为诊断用途，不要求与锁状态严格 happens-before。
+- **Aggregate by call site, not by type**: like Linux `lock_stat`, this makes it easy to locate the source position; multiple
+  `Mutex::new` on the same line may be split into several classes because their `column` differs.
+- **Relaxed atomics**: the statistics are for diagnostic use and do not require a strict happens-before relation with the lock state.
 - Runtime registration uses a fixed 1024-slot open-addressed table. Each slot
   is published once through `klazy::Once`; no heap allocation, container growth,
   or label formatting occurs during registration. The key includes file, line,
@@ -146,7 +146,7 @@ static_lock! {
   explicitly reports pool exhaustion rather than presenting frozen counters
   as live statistics. `statistics_enabled()` exposes the same state.
 
-## 调用约束
+## Calling Constraints
 
 - Registration requires no sleep or reclaim permission. Kernel registration
   saves and disables local IRQs until publication finishes, then restores the
@@ -160,5 +160,5 @@ static_lock! {
   small tables for exhaustion and concurrent publication checks.
   A subprocess isolates the permanent disable transition while checking that
   previously registered static and runtime counters stop and the dump reports it.
-- 静态锁应优先使用 `static_lock!`，避免 `stats` 下 `static X = Mutex::new(...)` 因
-  非 `const fn` 导致编译失败。
+- Static locks should preferably use `static_lock!`, to avoid a compilation failure under `stats` when `static X = Mutex::new(...)` is used
+  because `Mutex::new` is not a `const fn`.

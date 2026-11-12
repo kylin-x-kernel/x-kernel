@@ -1,24 +1,24 @@
-# kernel-image-metadata — 设计文档
+# kernel-image-metadata — Design Document
 
-## 定位
+## Positioning
 
-`kernel-image-metadata` 拥有 X-Kernel 镜像元数据 ABI。XKMake 使用它编码
-ELF note，运行中的内核使用它定位、校验并读取同一份元数据。
+`kernel-image-metadata` owns the X-Kernel image metadata ABI. XKMake uses it to encode
+ELF notes, and the running kernel uses it to locate, validate, and read the same metadata.
 
-## 背景
+## Background
 
-构建来源信息在 Cargo 链接完成后写入 bundle ELF，以免机器名和构建时间等
-诊断字段触发 kernel crate 重编译。该数据同时属于 host 打包器和 kernel
-镜像，因此放在 `boot/` 下的共享 ABI crate，而不是通用 `util` crate。
+Build provenance information is written into the bundle ELF after Cargo linking completes, so that diagnostic
+fields such as the machine name and build time do not trigger a recompilation of the kernel crate. This data belongs to both the host packager and the kernel
+image, so it lives in a shared ABI crate under `boot/` rather than in the general-purpose `util` crate.
 
-## 范围
+## Scope
 
-- `src/lib.rs`：section 名称、ELF note 常量、编码、校验及 kernel linker
-  symbol 访问。
-- `docs/design.md`：镜像 ABI、调用约束和设计决策。
-- `docs/security.md`：ELF 字节与 linker range 的信任边界。
+- `src/lib.rs`: section names, ELF note constants, encoding, validation, and kernel linker
+  symbol access.
+- `docs/design.md`: the image ABI, calling constraints, and design decisions.
+- `docs/security.md`: the trust boundary between ELF bytes and linker ranges.
 
-## 架构
+## Architecture
 
 ```text
 ResolvedKernelConfig
@@ -33,40 +33,41 @@ ResolvedKernelConfig
                                      early boot log
 ```
 
-`.note.xkernel.build-info` 使用标准 ELF note 外壳，其固定大小 descriptor
-包含版本化头部和 UTF-8 payload。`.note.gnu.build-id` 使用 SHA-256 descriptor。
-两个 descriptor 都由 linker 预留并进入 load segment，XKMake 只原地写入。
-finalize 后 section header 只暴露实际编码长度，但 linker symbol 所界定的固定
-reserve 仍完整保留在同一 `PT_LOAD` 中，供早期内核执行有界解析。
+`.note.xkernel.build-info` uses the standard ELF note wrapper, and its fixed-size descriptor
+contains a versioned header and a UTF-8 payload. `.note.gnu.build-id` uses a SHA-256 descriptor.
+Both descriptors are reserved by the linker and placed in a load segment, and XKMake only writes to them in place.
+After finalization, the section header exposes only the actual encoded length, but the fixed
+reserve delimited by the linker symbols is still fully retained in the same `PT_LOAD`,
+so that the early kernel can perform bounded parsing.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-host 侧编码 API 只操作调用者提供的 slice。启用 `kernel` feature 后，读取 API
-可在 allocator、调度器和中断系统初始化前调用，不分配、不阻塞，也不依赖
-当前进程。它依赖最终 linker script 提供的四个边界 symbol，且对应内存必须
-已经随内核只读段完成映射。
+The host-side encoding API operates only on slices provided by the caller. With the `kernel` feature enabled, the read API
+can be called before the allocator, scheduler, and interrupt system are initialized; it does not allocate, does not block, and does not depend on
+the current process. It relies on the four boundary symbols provided by the final linker script, and the corresponding memory must
+already be mapped together with the kernel's read-only segments.
 
-## 算法流程
+## Algorithm Flow
 
-1. linker 在最终地址布局中预留两个 allocatable ELF note descriptor。
-2. XKMake 在 bundle 临时 ELF 中校验 section、note header 和 load segment。
-3. build-info descriptor 被清零并写入小端头部、CRC32 和 UTF-8 payload。
-4. Build ID descriptor 清零后，对最终 `PT_LOAD` 字节计算 SHA-256 并写回。
-5. kernel 通过 linker symbol 取得 descriptor slice，校验后读取。
+1. The linker reserves two allocatable ELF note descriptors in the final address layout.
+2. XKMake validates the section, the note header, and the load segment in the temporary bundle ELF.
+3. The build-info descriptor is zeroed, and the little-endian header, CRC32, and UTF-8 payload are written.
+4. After the Build ID descriptor is zeroed, SHA-256 is computed over the final `PT_LOAD` bytes and written back.
+5. The kernel obtains the descriptor slices through the linker symbols, validates them, and then reads them.
 
-## 并发模型
+## Concurrency Model
 
-crate 不持有可变全局状态。host 编码需要独占 slice；kernel 读取只借用最终
-只读镜像，API 可重入且无需同步。
+The crate holds no mutable global state. Host-side encoding requires an exclusive slice; kernel-side reading only borrows the final
+read-only image, and the API is reentrant and needs no synchronization.
 
-## 设计决策
+## Design Decisions
 
-- 使用 ELF note 表达镜像元数据，section 名和 owner 区分 X-Kernel 与 GNU。
-- 固定 descriptor 大小保持程序段布局稳定，避免链接后增加 section 导致
-  `PT_LOAD` 与 raw image 不一致。
-- payload 采用文本，kernel 只需验证后输出；语义字段模型仍由 XKMake 持有。
-- Build ID 覆盖最终 loadable image，而不是非运行时 section header 噪声。
+- ELF notes are used to express image metadata, and the section name and owner distinguish X-Kernel from GNU.
+- A fixed descriptor size keeps the program segment layout stable, avoiding a mismatch between
+  `PT_LOAD` and the raw image caused by adding sections after linking.
+- The payload is text; the kernel only needs to validate and print it, while the semantic field model remains owned by XKMake.
+- The Build ID covers the final loadable image, rather than non-runtime section header noise.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-crate 不拥有资源。返回值均借用调用者 slice 或静态 kernel image。
+The crate owns no resources. All return values borrow the caller's slice or the static kernel image.

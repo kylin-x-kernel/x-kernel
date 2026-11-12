@@ -24,9 +24,10 @@ to `pts/ptmx` selects this instance through the mounted path.
   fsuid/fsgid), `mode=` (slaves, default 0600), `ptmxmode=` (the ptmx node,
   default 0000), and `newinstance` (inherent — every mount is a fresh
   instance).
-- Maintain per-mount instance state: record the pty pairs created through
-  the instance's `ptmx` (weak references); the root directory enumerates and
-  resolves only pairs that are alive and published.
+- Scope the per-mount view: pty pairs created through the instance's `ptmx`
+  are recorded in `io/ktty` with this mount's filesystem as owner; the root
+  directory enumerates and resolves only pairs owned by this mount that are
+  alive and published.
 - Provide the `ptmx` node: its `open` allocates through the shared ktty PTY
   driver and publishes the slave inode inside this filesystem.
 

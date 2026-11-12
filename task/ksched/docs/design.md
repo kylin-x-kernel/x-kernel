@@ -275,7 +275,7 @@ snapshot.
 
 ## Calling constraints / execution context
 
-- Every `BaseScheduler` method is called by `ktask` while holding the
+- Every `Scheduler` method is called by `ktask` while holding the
   **target** run queue's scheduler lock, with IRQ and preemption disabled as
   that path requires. Idle-pull's `steal_ready_task` holds the **source** RQ
   lock and must not also hold the destination scheduler lock.
@@ -416,7 +416,7 @@ snapshot.
   The two sides convert only through `vruntime_delta` /
   `vruntime_to_wall_ns`. `Σ w·v` multiplies and divides in `i128`. `isize`
   is not used (vruntime would overflow on 32-bit). Nice still goes through
-  `BaseScheduler::set_priority`'s `isize`.
+  `SchedAttr::nice` (`Nice`, applied by `Scheduler::set_attr`).
 
 ## Drop / resource release
 

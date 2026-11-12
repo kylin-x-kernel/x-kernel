@@ -1,35 +1,35 @@
-# kernel-elf-parser — 设计文档
+# kernel-elf-parser — Design Document
 
-## 定位与范围
+## Positioning and Scope
 
-该 crate 提供 ELF 头部解析、辅助向量表示和初始用户栈字节布局。
-它不拥有进程地址空间，也不负责映射或装载 ELF 段。
-`src/info.rs` 管理解析结果，`src/auxv.rs` 表示辅助向量，
-`src/user_stack.rs` 生成栈内容；公开 API 的参数和错误契约见 rustdoc。
+This crate provides ELF header parsing, the auxiliary vector representation, and the byte layout of the initial user stack.
+It does not own the process address space, and it is not responsible for mapping or loading ELF segments.
+`src/info.rs` manages the parse results, `src/auxv.rs` represents the auxiliary vector,
+and `src/user_stack.rs` generates the stack contents; see the rustdoc for the parameters and error contracts of the public API.
 
-## 架构与算法流程
+## Architecture and Algorithm Flow
 
-`ElfHeadersBuilder` 借用 ELF 文件头部，检查程序头表项大小和表范围，
-再将传入的完整程序头表复制成统一的 `ProgramHeader64` 数组。
-`ElfParser` 借用这些头部，并根据 ELF 类型选择装载偏移。
-构造时查找覆盖程序头表文件偏移的段，使用受检加法和整数转换计算
-程序头表虚拟地址。缺少覆盖段或地址溢出通过现有 `Result` 返回。
+`ElfHeadersBuilder` borrows the ELF file header, checks the program header entry size and the table range,
+and then copies the full program header table passed in into a uniform `ProgramHeader64` array.
+`ElfParser` borrows these headers and chooses the load offset according to the ELF type.
+During construction, it looks for the segment that covers the file offset of the program header table, and computes
+the virtual address of the program header table using checked addition and integer conversion. A missing covering segment or an address overflow is returned through the existing `Result`.
 
-构造成功后，`phdr` 字段保留这个地址；`phdr()` 和 `aux_vector()`
-不再重复搜索头部或因缺少覆盖段而 panic。头部通过共享引用借用，
-调用者不能在 parser 生命周期内修改用于校验的数组。
-`app_stack_region` 独立接收辅助向量和字符串，生成可由装载方复制到
-用户内存的字节数组；它不直接访问用户地址空间。
+After successful construction, the `phdr` field retains this address; `phdr()` and `aux_vector()`
+no longer search the headers again and no longer panic because of a missing covering segment. The headers are borrowed through a shared reference,
+so the caller cannot modify the array used for validation during the lifetime of the parser.
+`app_stack_region` independently receives the auxiliary vector and strings, and generates a byte array that the loader can copy into
+user memory; it does not access the user address space directly.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-解析程序头表和生成用户栈需要 `alloc`，调用者应选择允许分配的上下文。
-这些 API 不依赖当前进程、CPU 本地状态、调度器或设备初始化，
-也不主动睡眠、执行 I/O 或修改硬件页表。它们没有全局锁或可变全局状态。
+Parsing the program header table and generating the user stack require `alloc`, so the caller should choose a context in which allocation is allowed.
+These APIs do not depend on the current process, CPU-local state, the scheduler, or device initialization,
+and they do not sleep, perform I/O, or modify hardware page tables on their own. They have no global locks or mutable global state.
 
-## 设计决策与资源释放
+## Design Decisions and Resource Release
 
-程序头地址在可失败的构造阶段校验并保存，使后续辅助向量查询保持
-原来的无错误返回接口。校验只承担该查询所需的地址契约，不能替代
-装载方对段类型、可映射范围、权限或整个程序头表映射的检查。
-解析数组和栈字节由普通容器释放；parser 本身只借用头部，不拥有映射。
+The program header address is validated and saved during the fallible construction phase, so that subsequent auxiliary vector queries keep
+their original error-free return interface. The validation only fulfills the address contract required by that query; it cannot replace
+the loader's checks of segment types, mappable ranges, permissions, or the mapping of the entire program header table.
+The parsed array and the stack bytes are released by ordinary containers; the parser itself only borrows the headers and does not own any mappings.

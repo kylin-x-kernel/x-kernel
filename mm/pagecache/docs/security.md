@@ -1,140 +1,139 @@
-# pagecache — 安全与可靠性分析
+# pagecache — Security and Reliability Analysis
 
-## 信任模型
+## Trust Model
 
-`pagecache` 信任 owning `kvfs::AddressSpace` 提供已经校验并串行化的 index、范围和
-visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生命周期。
+`pagecache` trusts the owning `kvfs::AddressSpace` to provide an already validated and serialized index, range, and
+visible `i_size`. It performs no access control, and it owns neither the file length nor the VM lifecycle.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-- folio index 和页内 offset；
-- owner 提供的 old/new length；
-- writeback range 和 visible length；
-- materialize/writeback closure 的失败结果。
+- folio index and in-page offset;
+- old/new length provided by the owner;
+- writeback range and visible length;
+- failure results of the materialize/writeback closures.
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-所有页内存 unsafe 操作集中在私有 `src/folio.rs`，字段不向其他模块开放。
+All unsafe page-memory operations are concentrated in the private `src/folio.rs`; its fields are not exposed to other modules.
 
-1. `Folio::new_zeroed(index)`：对页分配器返回的独占可写页清零。
+1. `Folio::new_zeroed(index)`: zeroes the exclusively writable page returned by the page allocator.
 2. `Folio::data()` allows only the exclusive owner of an unpublished page to
    borrow its data. Published pages are accessed through `FolioGuard::data()` or
    `FolioRead::data()` under the stable page object's own lock.
-3. `PinnedFolio::copy_to_uninit()`：锁住 pin 持有的同一稳定页对象后复制完整初始化页。
-   缓存摘除或替换不改变其分配或锁，允许继续复制原页；目标范围由独占切片限定。
+3. `PinnedFolio::copy_to_uninit()`: locks the same stable page object held by the pin and copies the full initialized page. Cache detachment or replacement does not change its allocation or lock, so the original page can still be copied; the destination is bounded by an exclusive reference to a fixed single-page array, `&mut [MaybeUninit<u8>; PAGE_SIZE_4K]`.
 
-## 内存安全不变量
+## Memory-Safety Invariants
 
-- 同步写回错误返回前保留已完成页的预算更新，并结束所有已开始的 folio writeback；
-- 提交式写回转移完成责任，callback 返回不清 writeback；owner 必须限制在途批次，
-  在所有 I/O 结束后于任务上下文完成或丢弃 completion，不得在 IRQ/BH 中获取 cache mutex；
+- On a synchronous writeback error, budget updates of completed pages are retained before returning, and all started folio writebacks are ended;
+- Submitted writeback transfers completion responsibility, and the callback returning does not clear writeback; the owner must bound in-flight batches,
+  and complete or discard the completion in task context after all I/O ends, and must not acquire the cache mutex in IRQ/BH;
 - Cross-task completion retains the complete mapping owner. Conversion validates
   embedded-index identity, and the owner's projection must remain stable. Release
   the owner only after completion or Drop settles its folios; never extend index
   mutex lifetime independently.
-- 每个 `Folio` 独占一页；
-- `FolioBatch` 只持有有界、按遍历顺序排列的引用；引用存活不等于 mapping identity 仍有效；
-- batch clear/drop 不结束 writeback；任何已开始的写回必须先显式完成，包括失败后缀；
-- 遍历候选和待完成批次各最多 31 页，连续写回数据最多 31 页；临时内存不随
-  整个 dirty range 或被截断的页数增长；提交式回写的总在途内存由调用方另行限额；
-- 一个 page index 最多关联一个 cached folio；发布前校验 tree key 与 folio immutable index 一致；
+- Each `Folio` owns exactly one page;
+- `FolioBatch` holds only bounded references in traversal order; a live reference does not mean the mapping identity is still valid;
+- batch clear/drop does not end writeback; any started writeback must be completed explicitly first, including failure suffixes;
+- the traversal candidates and the batch awaiting completion are each at most 31 pages, and contiguous writeback data is at most 31 pages; temporary memory does not
+  grow with the whole dirty range or the truncated page count; the total in-flight memory of submitted writeback is limited separately by the caller;
+- a page index is associated with at most one cached folio; before publication, the tree key is checked to match the folio's immutable index;
 - Folio bytes and ordinary state are accessed only under the folio lock; waiters may inspect the atomic writeback bit without that lock;
-- pinned-folio copy-to-uninit 在稳定页对象自身的锁内读取完整初始化页；
-  成功时完整写入 MaybeUninit 目标后才返回；
+- pinned-folio copy-to-uninit reads the fully initialized page under the lock of the stable page object itself;
+  on success it returns only after the MaybeUninit target is fully written;
 - Explicit removal holds the folio lock before invalidating and unlinking.
   Exclusive final-container destruction invalidates atomically without waiting;
   retained tokens keep storage alive. Normal and batch lookup reject detached
   identities, and a successful access callback is never replayed;
-- 批次读取 callback 只读取数据及更新预读标记，不修改 dirty 或驻留状态；
-  允许索引查询，但不得等待其他 folio，预读 I/O 必须在释放当前 folio 锁后执行；
-- owner 必须使 backing read 与发布排除 truncate，并在复制时限制当前 EOF；
-- `Folio::dirty` 是状态源，dirty index 只承担 `PAGECACHE_TAG_DIRTY` 风格的候选枚举；
-- `Folio::writeback` 是状态源，writeback index 只承担等待枚举；
-- 对外 folio 操作返回时，dirty 状态变化已反映到当前 resident folio 的 dirty tag；
-  已从 resident tree 移除的 index 不得残留在 dirty index；
-- dirty tag 命中不构成写回许可；开始 I/O 前必须在 folio lock → MappingPages state lock
-  的同一临界区重新校验 mapping identity、dirty 和 writeback 状态；
+- the batched-read callback only reads data and updates readahead marks, and does not modify dirty or residency state;
+  index queries are allowed, but it must not wait for other folios, and readahead I/O must run after the current folio lock is released;
+- the owner must make the backing read and publication exclude truncate, and bound the copy by the current EOF;
+- `Folio::dirty` is the source of truth, and the dirty index only provides `PAGECACHE_TAG_DIRTY`-style candidate enumeration;
+- `Folio::writeback` is the source of truth, and the writeback index only provides wait enumeration;
+- when an external folio operation returns, the dirty-state change is already reflected in the dirty tag of the current resident folio;
+  an index removed from the resident tree must not remain in the dirty index;
+- a dirty tag hit is not permission to write back; before starting I/O, the mapping identity, dirty and writeback
+  state must be rechecked in the same critical section of folio lock → MappingPages state lock;
 - completion only takes the index lock, rechecks identity and updates atomic
   dirty/WRITEBACK state; it never acquires the folio content lock. Failure only
   redirties the current resident; detached completion only ends its WRITEBACK;
 - clear WRITEBACK and its mark before releasing the index lock, then wake;
-- `MappingPages` 中不存在可与 inode `i_size` 分歧的 length 字段；
-- VM object-id、views 和 notifier 不进入本 crate。
+- `MappingPages` has no length field that can diverge from the inode `i_size`;
+- VM object-id, views and notifiers do not enter this crate.
 
-## 线程安全
+## Thread Safety
 
-folio tree/dirty index 与 folio data 分层加锁。需要同时核对两层状态时，锁顺序固定为
-folio lock → MappingPages state lock；索引锁下只允许非阻塞 try_lock，失败必须释放
-索引锁再等待。folio access closure 持页锁完成 dirty index reconciliation。writeback 和缓冲缺页读取的文件系统 I/O 在 tree lock 外执行。
+The folio tree/dirty index and the folio data are locked in layers. When both layers of state must be checked together, the lock order is fixed as
+folio lock → MappingPages state lock; under the index lock only a non-blocking try_lock is allowed, and on failure the index lock must be released
+before waiting again. The folio access closure completes dirty index reconciliation while holding the page lock. Filesystem I/O for writeback and buffered page-fault reads runs outside the tree lock.
 
-索引 mutex 竞争时的 pause-only 自旋有固定预算，预算耗尽后仍通过原有等待队列
-阻塞和唤醒；不禁用抢占，也不把索引临界区改成不可睡眠区域。较长的索引更新、
-residency admission 和 owner 被调度走仍受 mutex 原有的执行上下文与进展约束。
+The pause-only spin on index mutex contention has a fixed budget; after the budget is exhausted, blocking and wakeup still go through the existing wait queue;
+preemption is not disabled, and the index critical section is not turned into a non-sleepable region. Longer index updates,
+residency admission and the owner being scheduled away remain subject to the mutex's existing execution-context and progress constraints.
 The buffered-read owner holds the shared invalidate lock to coordinate EOF,
 page reservation and submission. The transferred folio lock makes truncate wait
 for completion before clearing the tail or detaching the page; completion itself
 does not reinsert the page into the cache. The folio enters the resident tree
 before reading, and I/O retains the folio lock without holding the tree lock.
-只有完整初始化的页可标记 uptodate，失败页不暴露部分数据。等待页锁后重新查找 resident，
-不使用等待期间已脱离缓存的引用。读入 callback 不得重入映射或获取截断所需锁。
-`writeback_until` 会在 folio lock 下调用 backend
-callback，该 callback 不得重入同一个 `MappingPages`；batch writeback 则在调用 backend
-前释放 folio lock，但回调不得等待或截断自身提交批次的 folio，否则完成路径无法执行。
+Only fully initialized pages may be marked uptodate, and a failed page exposes no partial data. After waiting for the page lock the resident folio is looked up again,
+and references that left the cache during the wait are not used. The read-in callback must not re-enter the mapping or acquire locks needed by truncate.
+`writeback_until` calls the backend callback under the folio lock;
+that callback must not re-enter the same `MappingPages`; batch writeback releases the folio lock before calling the backend,
+but the callback must not wait for or truncate folios of its own submitted batch, or the completion path cannot run.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁 | 控制 |
+| ID | Threat | Control |
 |------|------|------|
-| T-01 | 页内 offset/length 越界 | checked arithmetic 和 page-size boundary 检查 |
-| T-02 | truncate 后尾页泄露旧数据 | shrink 清零 surviving tail |
-| T-03 | writeback 失败却清除当前 folio 的 dirty | 失败路径在 identity 校验后恢复 dirty 并结束 writeback |
-| T-04 | readahead 覆盖前台 dirty folio | insert-if-absent，已缓存 folio 获胜 |
-| T-05 | 缓存层形成第二个 EOF/object owner | 不保存 length、object-id、views 或 notifier |
-| T-06 | dirty index 漏项导致 fsync 漏写 | folio dirty 状态转换时 reconciliation，resize/writeback 显式同步索引 |
-| T-07 | writeback 完成覆盖并发 redirty | batch 完成阶段重新读取最终状态；单页写回后的 clean → dirty writer 重新设置 tag |
-| T-08 | truncate/replace 后写回已脱离 mapping 的旧 folio | 开始与完成写回时均在固定锁序下校验当前 `Arc` identity；失败不重新标脏旧 folio |
-| T-10 | 大映射写回或 truncate 整段收集引用耗尽临时内存 | 固定容量 FolioBatch；dirty 游标前进；删除后复用 batch |
-| T-09 | 文件增长后 cached tail 的清零结果未进入 writeback | growth 在 folio lock → state lock 下同时设置 dirty bit 和 dirty tag |
+| T-01 | In-page offset/length out of bounds | checked arithmetic and page-size boundary checks |
+| T-02 | Tail page leaks old data after truncate | shrink zeroes the surviving tail |
+| T-03 | writeback fails but the current folio's dirty is cleared | the failure path restores dirty and ends writeback after identity validation |
+| T-04 | readahead overwrites a foreground dirty folio | insert-if-absent; the already cached folio wins |
+| T-05 | the cache layer forms a second EOF/object owner | does not store length, object-id, views, or notifier |
+| T-06 | a missing dirty index entry causes fsync to miss a write | reconciliation on folio dirty state transitions; resize/writeback explicitly synchronize the index |
+| T-07 | writeback completion overwrites a concurrent redirty | the batch completion phase rereads the final state; after single-page writeback, a clean → dirty writer sets the tag again |
+| T-08 | writeback of an old folio already detached from the mapping after truncate/replace | at both writeback start and completion, the current `Arc` identity is validated under the fixed lock order; on failure the old folio is not re-marked dirty |
+| T-10 | collecting references for a whole large mapping during writeback or truncate exhausts temporary memory | fixed-capacity FolioBatch; the dirty cursor advances; the batch is reused after deletion |
+| T-09 | the zeroed result of the cached tail after file growth does not enter writeback | growth sets the dirty bit and dirty tag together under folio lock → state lock |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 故障模式 | 当前处理 | 影响 |
+| Failure Mode | Current Handling | Impact |
 |----------|----------|------|
-| folio 分配失败 | 返回 `NoMemory` | 当前 I/O/fault 失败 |
-| range arithmetic 溢出 | 返回 `InvalidInput` | 拒绝本次操作 |
-| backing write 失败 | 保留 dirty | 后续可重试 |
-| dirty tag 指向旧实例或 clean folio | 固定锁序重新核对当前 resident folio 并修正 tag | 不调用 backend，不污染替换后的 folio |
-| 文件增长后 cached tail 清零但未持久化 | growth 同步设置 dirty bit 和 dirty tag | 后续 writeback 会覆盖新可见范围 |
-| final teardown 有 dirty folio | 明确清 dirty 后释放 | inode 已退出生命周期 |
+| folio allocation failure | returns `NoMemory` | the current I/O/fault fails |
+| range arithmetic overflow | returns `InvalidInput` | the current operation is rejected |
+| backing write failure | keeps dirty | can be retried later |
+| dirty tag points to a stale instance or a clean folio | rechecks the current resident folio under the fixed lock order and corrects the tag | does not call the backend and does not pollute the replacement folio |
+| cached tail zeroed after file growth but not persisted | growth sets the dirty bit and dirty tag together | later writeback will cover the newly visible range |
+| final teardown has a dirty folio | explicitly clears dirty and then releases | the inode has already left its lifecycle |
 
-## 已知限制
+## Known Limitations
 
-- resident folio tree 和 dirty index 分别使用 `BTreeMap`/`BTreeSet`；已消除 writeback
-  对全部 resident folio 的扫描，但尚未实现 Linux XArray tag/reclaim；
-- truncate 等待写回时释放 mapping/folio 锁，重新加锁后复核 identity 与 writeback；
-  owner 仍须串行化尺寸变化并禁止在截断范围内重新填页；
-- `writeback_until` 持 folio lock 调用 backend，callback 重入同一个 `MappingPages` 会造成
-  死锁；
-- 没有自适应 readahead、swap、memcg、NUMA 或 THP；
-- inode/MM 一致性由 `kvfs::AddressSpace` 的事务保证，不在本 crate 重复实现。
+- The resident folio tree and the dirty index use `BTreeMap`/`BTreeSet` respectively; the scan of all resident folios
+  by writeback has been eliminated, but the Linux XArray tag/reclaim is not yet implemented;
+- While truncate waits for writeback it releases the mapping/folio locks, and after reacquiring them it rechecks identity and writeback;
+  the owner must still serialize size changes and forbid refilling pages within the truncated range;
+- `writeback_until` calls the backend while holding the folio lock, and a callback that reenters the same `MappingPages` causes a
+  deadlock;
+- There is no adaptive readahead, swap, memcg, NUMA, or THP;
+- inode/MM consistency is guaranteed by the transactions of `kvfs::AddressSpace` and is not reimplemented in this crate.
 
-## 审计清单
+## Audit Checklist
 
-- 是否重新加入了 length、object-id、view 或 invalidation state；
-- owner 是否传入当前 inode `i_size` 执行 writeback；
-- growth 是否在清零 cached tail 后设置 dirty bit 和 dirty tag；
-- shrink 是否清零 partial tail 并删除 EOF 后整页及其 dirty tag；
-- writeback 失败是否保留 dirty；
-- dirty 状态变化返回前是否更新 dirty index，并发 redirty 后索引是否继续保留；
-- dirty tag 候选是否在开始写回前重新校验当前 mapping identity 和 folio 状态；
-- shrink 和 final teardown 是否同步删除对应 dirty index；
-- MappingPages/folio 双锁路径是否保持 folio → MappingPages state 顺序，索引锁下是否只允许非阻塞 try_lock；
-- `writeback_until` backend callback 是否避免重入同一个 `MappingPages`；
-- writeback 是否在 tree lock 外调用 backend，materialize closure 是否避免重入；
-- `MappingPagesState` 是否保持 crate 内部可见，容器是否始终由 AddressSpace 直接持有。
+- Whether length, object-id, view, or invalidation state has been reintroduced;
+- Whether the owner passes the current inode `i_size` when performing writeback;
+- Whether growth sets the dirty bit and dirty tag after zeroing the cached tail;
+- Whether shrink zeroes the partial tail and deletes the whole pages after EOF together with their dirty tags;
+- Whether writeback failure keeps dirty;
+- Whether the dirty index is updated before a dirty state change returns, and whether the index is still retained after a concurrent redirty;
+- Whether dirty tag candidates revalidate the current mapping identity and folio state before writeback starts;
+- Whether shrink and final teardown synchronously delete the corresponding dirty index;
+- Whether the MappingPages/folio two-lock paths keep the folio → MappingPages state order, and whether only a non-blocking try_lock is allowed under the index lock;
+- Whether the `writeback_until` backend callback avoids reentering the same `MappingPages`;
+- Whether writeback calls the backend outside the tree lock, and whether the materialize closure avoids reentrancy;
+- Whether `MappingPagesState` stays visible only within the crate, and whether the container is always held directly by AddressSpace.
 
-预读标记的设置与消费要求独占 folio 访问；标记只影响性能策略，不能替代 uptodate
-或 resident 身份检查。缓存历史查询返回瞬时提示，不延长驻留期或授权发布。
+Setting and consuming the readahead mark requires exclusive folio access; the mark affects only performance policy and cannot replace the uptodate
+or resident identity checks. A cache-history query returns a transient hint and neither extends the residency period nor authorizes publication.
 
 ## Stable folio lifetime
 

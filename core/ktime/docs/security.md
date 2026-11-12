@@ -1,104 +1,104 @@
-# ktime - 安全与可靠性分析
+# ktime - Security and Reliability Analysis
 
-## 信任模型
+## Trust Model
 
-`ktime` 信任 `khal` 提供单调、稳定的硬件时钟读数，信任调用者在 syscall 边界
-完成特权校验。睡眠补偿的调用方还必须确认睡眠边界、处理底层
-MONOTONIC 基准并保证单次结算。`set_realtime_checked` 内置墙钟范围校验（见外部边界），
-syscall 层不再负责 CLOCK_MONOTONIC 约束。RTC 驱动只提供 sample，不直接修改
-timekeeper 状态。
+`ktime` trusts `khal` to provide monotonic, stable hardware clock readings, and trusts callers to
+complete privilege checks at the syscall boundary. Callers of sleep compensation must also confirm the sleep boundary, handle the underlying
+MONOTONIC baseline, and guarantee single settlement. `set_realtime_checked` has a built-in wall-clock range check (see External Boundary),
+so the syscall layer is no longer responsible for the CLOCK_MONOTONIC constraint. The RTC driver only provides samples and does not modify
+timekeeper state directly.
 
-## 外部边界 / 攻击面
+## External Boundary / Attack Surface
 
 The crate does not access user memory, networks or filesystems. Its RTC
 adapter invokes the trusted `PersistentClock` provider, which may access device
 registers or perform sleepable I/O. The PM caller must restore device access
 and obey the provider's execution-context requirements; sampling runs outside
 timekeeper and observer locks. Other external inputs enter through
-`initialize_realtime`/`set_realtime_checked` 传入的 `SystemTime` sample，
-以及 `inject_sleeptime` 传入的 `TimeSpan` 进入；
-`SystemTime` 构造本身规范化并校验分量范围。`set_realtime_checked` 对
-sample 执行内置范围校验：墙钟不得早于 `CLOCK_MONOTONIC` 当前值，也不得
-超过上界 `MAX_SETTABLE_UNIX_SECONDS`（Linux `KTIME_SEC_MAX`）；校验失败
-返回 `RealtimeOutOfRange` 错误，不应用任何部分修改。
+the `SystemTime` sample passed to `initialize_realtime`/`set_realtime_checked`,
+and the `TimeSpan` passed to `inject_sleeptime`;
+`SystemTime` construction itself normalizes and validates component ranges. `set_realtime_checked` performs a
+built-in range check on the sample: the wall clock must not be earlier than the current `CLOCK_MONOTONIC` value, nor
+exceed the upper bound `MAX_SETTABLE_UNIX_SECONDS` (Linux `KTIME_SEC_MAX`); on validation failure it
+returns a `RealtimeOutOfRange` error and applies no partial modification.
 
-`TimeSpan` 从类型上排除负增量；注入前校验累计睡眠值和 BOOTTIME 的
-表示范围，以及 REALTIME 加法和既有墙钟上界，失败返回
-`SleepTimeError::OutOfRange` 且无部分修改。单调读数早于关联基准时返回
-`SleepTimeError::InvalidMonotonicBaseline`，调用方可区分范围错误和底层基准异常。该接口不直接暴露给用户态，
-不负责鉴别 RTC 样本、检测真实休眠或去重。
+`TimeSpan` excludes negative increments by type; before injection, the representable range of the accumulated sleep value and BOOTTIME is validated,
+as are the REALTIME addition and the existing wall-clock upper bound. On failure it returns
+`SleepTimeError::OutOfRange` with no partial modification. When the monotonic reading is earlier than the associated baseline, it returns
+`SleepTimeError::InvalidMonotonicBaseline`, so callers can distinguish range errors from underlying baseline anomalies. This interface is not exposed directly to user space,
+and is not responsible for authenticating RTC samples, detecting real suspend, or deduplication.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-无 `unsafe` 代码（`#![deny(unsafe_code)]`）。状态为普通 Rust 值，由
-`SpinRwNoIrq` 保证访问互斥。
+There is no `unsafe` code (`#![deny(unsafe_code)]`). The state consists of ordinary Rust values, and
+`SpinRwNoIrq` guarantees mutually exclusive access.
 
-## 线程安全
+## Thread Safety
 
-`TIMEKEEPER` 的关联及累计睡眠时间由同一读写锁保护，可在多 CPU 与 IRQ 上下文安全访问；
-`REALTIME_INITIALIZED` 原子标记保证初始化只生效一次。
+The association of `TIMEKEEPER` and the accumulated sleep time are protected by the same read-write lock, and can be accessed safely from multiple CPUs and IRQ context;
+the atomic flag `REALTIME_INITIALIZED` guarantees that initialization takes effect only once.
 
-`realtime_and_monotonic` 返回自有值而非锁守卫。采样与关联换算都在同一
-读临界区，后续墙钟更新不能改变已经缓存的值对。该只读接口不添加授权
-或用户内存边界，也不写全局时间。
+`realtime_and_monotonic` returns owned values rather than a lock guard. Sampling and the association conversion both occur in the same
+read critical section, so a later wall-clock update cannot change the value pair already cached. This read-only interface adds no authorization
+or user-memory boundary, and does not write global time.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
 | T-01 | Unprivileged process modifies wall-clock time | High | Direct call to `set_realtime_checked` | The syscall layer requires effective `CAP_SYS_TIME`; `set_realtime_checked` performs range validation (the wall clock must not precede `CLOCK_MONOTONIC` or exceed `MAX_SETTABLE_UNIX_SECONDS`) and returns `RealtimeOutOfRange`, which the syscall layer maps to `EINVAL` |
-| T-02 | 初始化输入超范围 | 中 | 越界 SystemTime sample | `SystemTime` 构造规范化分量；读取路径 checked/saturating 兜底 |
-| T-03 | IRQ 上下文死锁 | 高 | 中断读取 realtime 时写者持锁 | 读写均使用 `SpinRwNoIrq`（关中断），写临界区极短 |
-| T-04 | 墙钟回拨导致负 duration | 中 | realtime 被设置到过去 | `duration_since` 返回错误而非下溢，deadline 换算按已过期处理 |
-| T-05 | 重复注入或注入已计入 MONOTONIC 的时间 | 高 | PM 调用方违反结算契约 | 调用方维护休眠事务和来源选择；此阶段未接入生产路径 |
-| T-06 | 补偿溢出导致部分状态更新 | 高 | 过大 delta 或累计值 | 所有计算成功后才提交两个状态；失败保持原值 |
-| T-07 | 时间更新后仍使用旧 deadline | 高 | 未来调用方未处理 timer 恢复 | 状态提交时发布 generation，解锁后唤醒；消费者保留原域截止时间并重新判断 |
+| T-02 | Initialization input out of range | Medium | Out-of-bounds SystemTime sample | `SystemTime` construction normalizes components; read path falls back to checked/saturating arithmetic |
+| T-03 | IRQ-context deadlock | High | Writer holds the lock while an interrupt reads realtime | Both reads and writes use `SpinRwNoIrq` (interrupts disabled); the write critical section is very short |
+| T-04 | Wall-clock step back causes negative duration | Medium | realtime is set to the past | `duration_since` returns an error instead of underflowing; deadline conversion treats the deadline as already expired |
+| T-05 | Duplicate injection, or injection of time already counted in MONOTONIC | High | PM caller violates the settlement contract | The caller maintains the sleep transaction and source selection; this phase is not wired into the production path |
+| T-06 | Compensation overflow causes a partial state update | High | Oversized delta or accumulated value | Both states are committed only after all computations succeed; on failure the original values are kept |
+| T-07 | Stale deadline still used after a time update | High | A future caller does not handle timer recovery | A generation is published when the state is committed and waiters are woken after unlock; consumers keep the original-domain deadline and re-evaluate |
 
-## 审计清单
+## Audit Checklist
 
-- 新增写路径是否经过特权与范围校验。
-- 锁守卫是否保持 IRQ 安全（不允许在持锁时睡眠）。
-- realtime 与 monotonic 换算是否始终使用同一快照。
-- 睡眠补偿来源是否可信、是否已从 MONOTONIC 排除，是否只结算一次。
-- timer 通知与恢复执行的顺序是否满足调用契约。
+- Whether new write paths go through privilege and range checks.
+- Whether lock guards remain IRQ-safe (sleeping while holding a lock is not allowed).
+- Whether realtime and monotonic conversions always use the same snapshot.
+- Whether the sleep compensation source is trusted, has been excluded from MONOTONIC, and is settled only once.
+- Whether the order of timer notification and recovery execution satisfies the calling contract.
 
-## 时钟通知的并发与资源契约
+## Concurrency and Resource Contract for Clock Notification
 
-- 通知源只在任务订阅路径初始化；时间写路径不得触发首次分配。
-- TIMEKEEPER 锁内仅发布 generation 和克隆唤醒源，锁外调用 waker。
-- 等待注册通过 PollRegistrations 管理，取消时清理；分配失败返回错误。
-- 注册前后的 generation 检查阻止遗漏已经发布的变化；唤醒后仍检查时间谓词。
-- 注入来源和恰好一次结算仍由未来 PM 调用方保证，通知不能证明真实休眠。
+- The notification source is initialized only on the task subscription path; the time write path must not trigger the first allocation.
+- Under the TIMEKEEPER lock, only the generation is published and wake sources are cloned; wakers are invoked outside the lock.
+- Wait registrations are managed through PollRegistrations and cleaned up on cancellation; allocation failure returns an error.
+- Generation checks before and after registration prevent missing an already published change; the time predicate is still checked after wakeup.
+- The injection source and exactly-once settlement are still guaranteed by the future PM caller; notification cannot prove real suspend.
 
-## 持久观察者约束
+## Persistent Observer Constraints
 
-观察者回调可以重叠，也可以与提交顺序不同。消费者必须使用提交快照，
-拒绝早于当前武装的更新。`ClockChangeId` 使用半范围序号比较，
-单次存活武装不得跨越 2^63 次更新。
-回调期间不持有时间锁或注册表锁。观察者回调及最终析构不得睡眠或分配；
-timerfd 通过预先准备的工作捕获保留运行时，捕获资源延迟至任务上下文回收。
+Observer callbacks may overlap, and may run in an order different from the commit order. Consumers must use the committed snapshot
+and reject updates older than the currently armed one. `ClockChangeId` uses half-range sequence number comparison,
+and a single live arming must not span 2^63 updates.
+No time lock or registry lock is held during callbacks. Observer callbacks and final destruction must not sleep or allocate;
+timerfd retains the runtime through pre-prepared work captures, and captured resources are reclaimed later in task context.
 
-IRQ 锁内插入要求 Arc 唯一且 Vec 有剩余容量；该路径不扩容、不清理槽位。
-复制、几何扩容、清理和释放旧表均在该锁外执行。
-已取得的通知快照会迫使注册使用写时复制，快照在注册期间保持不变。
-独立回归检查新注册不会改变已取得的表，但不替代真实并发 IRQ 验证。
+Insertion under the IRQ lock requires the Arc to be unique and the Vec to have spare capacity; this path neither grows nor cleans up slots.
+Copying, geometric growth, cleanup, and freeing the old table are all performed outside that lock.
+A notification snapshot that has already been taken forces registration to use copy-on-write, and the snapshot remains unchanged during registration.
+A separate regression check verifies that a new registration does not change a table already obtained, but it does not replace real concurrent IRQ verification.
 
-## 暂停结算凭证与恢复边界
+## Suspend Settlement Credential and Resume Boundary
 
-事务标识、当前轮次及时间偏移由同一时间锁串行保护。凭证字段私有且不提供
-构造或整数转换。重复、已取消或旧轮凭证不得提交；标识不回绕复用。恢复在副本
-上验证所有算术后才提交，失败不能消耗有效凭证或修改任一时钟。零提交不通知。
-非零旧式注入在事务活动期间被拒绝，避免绕过该轮结算；墙钟设置仍允许且不被恢复覆盖。
-所有通知在时间锁释放后运行，沿用现有 IRQ 回调契约。无锁跨越暂停，无首次分配。
+The transaction identifier, the current epoch, and the time offsets are serialized under the same time lock. The credential fields are private, and no
+constructor or integer conversion is provided. Duplicate, cancelled, or old-epoch credentials must not be committed; identifiers do not wrap around and get reused. Resume validates all arithmetic
+on a copy before committing; failure must not consume a valid credential or modify any clock. A zero commit sends no notification.
+A nonzero legacy-style injection is rejected while a transaction is active, to avoid bypassing that epoch's settlement; wall-clock setting is still allowed and is not overwritten by resume.
+All notifications run after the time lock is released, following the existing IRQ callback contract. No lock spans the suspend, and there is no first allocation.
 
-凭证只提供内核内结算所有权，不验证实际休眠、RTC 稳定性或宿主事件真实性。
-调用方负责互斥 PM 流程、恢复 MONOTONIC 基准及排除睡眠时间；本层仅拒绝早于
-开始快照或当前墙钟关联基准的恢复样本，无法识别看似正常的向前计数跳变。
-凭证 Drop 只在签发 Timekeeper 的活动标识仍匹配时自动取消，不触发时间补偿或通知，
-不会影响后续事务。析构取得时间写锁，不得在持有该锁或 NMI 中执行；不分配或调用回调。
-正常错误返回可恢复结算所有权；显式 mem::forget 绕过析构不受支持，PM owner 必须
-另行撤销自己的硬件准备。
-独立 Timekeeper 的单测不修改全局时间，也不替代真实 PM 端到端验证。
+The credential only provides in-kernel settlement ownership; it does not verify actual suspend, RTC stability, or the authenticity of host events.
+The caller is responsible for mutually excluding PM flows, restoring the MONOTONIC baseline, and excluding sleep time; this layer only rejects resume samples earlier than
+the start snapshot or the current wall-clock association baseline, and cannot identify seemingly normal forward counter jumps.
+Dropping the credential automatically cancels only if the active identifier of the issuing Timekeeper still matches; it triggers no time compensation or notification,
+and does not affect subsequent transactions. Destruction takes the time write lock, and must not be executed while holding that lock or in an NMI; it neither allocates nor invokes callbacks.
+A normal error return can restore settlement ownership; explicitly bypassing destruction with mem::forget is unsupported, and the PM owner must
+separately revoke its own hardware preparation.
+Unit tests with an independent Timekeeper do not modify global time, and do not replace real PM end-to-end verification.
 
 ## RTC fallback boundary and failure handling
 

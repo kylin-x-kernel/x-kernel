@@ -1,57 +1,61 @@
-# posix-fs - 设计文档
+# posix-fs - Design Document
 
-## 定位
+## Positioning
 
-`posix-fs` 是 x-kernel 的 POSIX/Linux 文件系统 syscall 兼容 crate。
-它把 `openat(2)`、`read(2)`、`write(2)`、`stat(2)`、`mkdir(2)`、
-`link(2)`、`mount(2)`、`fcntl(2)`、`ioctl(2)` 等用户态入口
-转换为内核内部的 fd 表、进程文件系统上下文、VFS 节点和设备对象操作。
+`posix-fs` is the POSIX/Linux filesystem syscall compatibility crate of x-kernel.
+It converts user-space entry points such as `openat(2)`, `read(2)`, `write(2)`, `stat(2)`, `mkdir(2)`,
+`link(2)`, `mount(2)`, `fcntl(2)`, and `ioctl(2)`
+into operations on the kernel-internal fd table, per-process filesystem context, VFS nodes, and device objects.
 
-目标读者是维护 `core/ksyscall` 文件系统分发路径、`kfd` 进程 fd 表、
-`kvfs` VFS 层，以及终端和设备文件兼容路径的开发者。
+The target audience is developers who maintain the `core/ksyscall` filesystem dispatch path, the `kfd` per-process fd table,
+the `kvfs` VFS layer, and the terminal and device-file compatibility paths.
 
-## 背景
+## Background
 
-POSIX 文件系统 syscall 同时接触用户指针、路径字符串、进程当前工作目录、
-文件描述符、VFS 节点、设备节点以及与 fd-backed object 的互操作路径。
-`posix-fs` 把这些 Linux ABI 细节收敛到一个 crate 中，
-使 syscall 分发表只负责导出入口，
-而底层 VFS 和 fd 表继续保持面向内核对象的抽象。
+POSIX filesystem syscalls touch user pointers, path strings, the process current working directory,
+file descriptors, VFS nodes, device nodes, and the interoperation paths with fd-backed objects all at once.
+`posix-fs` gathers these Linux ABI details into a single crate,
+so that the syscall dispatch table is only responsible for exporting entry points,
+while the underlying VFS and fd table remain abstractions oriented toward kernel objects.
 
-`timerfd`、`eventfd` 这类不以 VFS 或文件系统状态为核心的 fd-backed kernel object
-不再由 `posix-fs` 拥有，而是迁移到独立的 owner crate `kfd_objects`。
+Fd-backed kernel objects such as `timerfd` and `eventfd`, whose core is not VFS or filesystem state,
+are no longer owned by `posix-fs`, and have been migrated to the standalone owner crate `kfd_objects`.
 
-当前实现以兼容常用 Linux 用户态程序为目标，
-优先覆盖常用路径和明确拒绝尚不支持的模式。
-文件锁通过 KVFS 的 inode 锁上下文实现；尚未覆盖的能力记录在已知限制中。
+The current implementation aims to be compatible with commonly used Linux user-space programs,
+giving priority to covering the common paths and explicitly rejecting modes that are not yet supported.
+File locks are implemented through the inode lock context of KVFS; capabilities not yet covered are recorded in the known limitations.
 
-## 范围
+## Scope
 
-涉及的源文件：
+Source files involved:
 
 ```text
 posix/fs/
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs          # crate 入口和 syscall re-export
-│   ├── path.rs         # AT_*、dirfd、VFS magic-link 和 empty-path 解析
+│   ├── lib.rs          # crate entry point and syscall re-export
+│   ├── path.rs         # AT_*, dirfd, VFS magic-link and empty-path resolution
 │   ├── open.rs         # open/openat/openat2 argument conversion and fd install
-│   ├── io.rs           # read/write/lseek/fallocate/sendfile/splice 等 I/O
+│   ├── io.rs           # read/write/lseek/fallocate/sendfile/splice and other I/O
 │   ├── fd_ops.rs       # close/dup/close_range/fcntl/flock
 │   ├── dir.rs          # chdir/chroot/mkdir/getdents64/getcwd
 │   ├── namei.rs        # link/unlink/symlink/readlink/rename
+│   ├── notify.rs       # directory-entry notification hook for inotify
 │   ├── metadata.rs     # chown/chmod/utime/utimensat
 │   ├── xattr.rs        # set/get/list/remove xattr syscall families
 │   ├── mount.rs        # mount/umount2
 │   ├── stat.rs         # stat/fstatat/statx/access/statfs
-│   ├── ioctl.rs        # ioctl dispatch、file attributes 与 FIEMAP ABI handling
-│   └── sync.rs         # sync/syncfs
+│   ├── ioctl.rs        # ioctl dispatch, file attributes and FIEMAP ABI handling
+│   ├── quota.rs        # quotactl/quotactl_fd (with quota/xfs.rs)
+│   ├── sync.rs         # sync/syncfs
+│   ├── file.rs         # stdio fd installation (add_stdio)
+│   └── watch.rs        # watch target resolution (resolve_watch_target)
 └── docs/
     ├── design.md
     └── security.md
 ```
 
-## 架构
+## Architecture
 
 ```text
 core/ksyscall
@@ -67,7 +71,7 @@ core/ksyscall
 │                                                          │
 │  Process context                                         │
 │   ├─ kprocess::current_user_process()                     │
-│   ├─ kprocess::current_resources()                        │
+│   ├─ kprocess::current_files()                            │
 │   └─ fs_context::FsStruct { root, pwd, umask, in_exec }    │
 │                                                          │
 │  Internal object dispatch                                │
@@ -79,20 +83,20 @@ core/ksyscall
 └──────────────────────────────────────────────────────────┘
 ```
 
-| 子模块 | 职责 |
+| Submodule | Responsibility |
 |--------|------|
-| `path` | 统一处理绝对路径忽略 `dirfd`、`AT_FDCWD`、`AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW`、`O_NOFOLLOW` 和 VFS magic-link follow |
+| `path` | Uniformly handles absolute paths ignoring `dirfd`, `AT_FDCWD`, `AT_EMPTY_PATH`, `AT_SYMLINK_NOFOLLOW`, `O_NOFOLLOW` and VFS magic-link follow |
 | `open` | Hands Linux open arguments to `kvfs::Filename` and installs the returned file into the current process fd table; does not re-resolve special-file pathnames. `openat2` additionally copies and validates `struct open_how` (`read_open_how`), enforces `RESOLVE_*` constraints via kvfs namei, and selects the dirfd/cwd base (a plain absolute pathname ignores dirfd) |
-| `io` | 处理普通、向量、定点和 fd-to-fd 数据传输 syscall |
-| `fd_ops` | 维护 fd 生命周期、复制、`CLOEXEC`、非阻塞标志和部分 `fcntl` 行为 |
-| `dir` | 维护当前目录、根目录、目录/节点创建和 `linux_dirent64` 输出；`mknodat` 只转换 ABI 参数，创建策略由 KVFS 执行 |
-| `namei` | 处理链接、删除、符号链接和重命名等命名空间变更 |
-| `metadata` | 修改所有者、权限和时间戳 |
-| `xattr` | 实现 pathname、no-follow 和 fd 三种目标形式的 set/get/list/remove xattr，复制有界输入名称和值，并用单个有界 writer 处理 list size query/`ERANGE` |
-| `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，按注册的 `FileSystemType` 查找实现，并处理非递归 bind 与 remount |
-| `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
-| `ioctl` | 处理 `FIONBIO`、inode FIEMAP 和文件属性，并把其它命令转交 `FileLike::ioctl`；未识别命令返回 `ENOTTY`，仅 `debug!` 记录 |
-| `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
+| `io` | Handles ordinary, vectored, positioned and fd-to-fd data-transfer syscalls |
+| `fd_ops` | Maintains fd lifecycle, duplication, `CLOEXEC`, non-blocking flags and some `fcntl` behavior |
+| `dir` | Maintains the current directory, root directory, directory/node creation and `linux_dirent64` output; `mknodat` only converts ABI arguments, and the creation policy is enforced by KVFS |
+| `namei` | Handles namespace mutations such as links, deletion, symlinks and renames |
+| `metadata` | Modifies owner, permissions and timestamps |
+| `xattr` | Implements set/get/list/remove xattr for three target forms (pathname, no-follow and fd), copies bounded input names and values, and handles list size queries/`ERANGE` with a single bounded writer |
+| `mount` | Maps Linux mount flags to `kvfs::MountFlags`, looks up the implementation by registered `FileSystemType`, and handles non-recursive bind and remount |
+| `stat` | Converts VFS metadata, access checks and statfs information |
+| `ioctl` | Handles `FIONBIO`, inode FIEMAP and file attributes, and forwards other commands to `FileLike::ioctl`; unrecognized commands return `ENOTTY` and are only logged with `debug!` |
+| `sync` | Forwards sync requests to the filesystem, or to the filesystem of the open object |
 
 ## Content modification notifications
 
@@ -116,37 +120,37 @@ across bind aliases; namespace event records use the same object identity.
 Concurrent registrations may or may not receive an event; registrations
 completed before the mutation are included.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-`posix-fs` 是 syscall 层 crate，入口默认运行在当前用户进程线程上下文中。
-多数函数依赖以下上下文：
+`posix-fs` is a syscall-layer crate, and its entry points run by default in the context of the current user process thread.
+Most functions depend on the following context:
 
-- 当前线程可通过 `kprocess` 的当前线程接口获取；
-- 当前进程有可访问的进程运行态、fd resources 和 `FsStruct`；
-- 用户指针可通过 `posix_types` / `osvm` 访问当前地址空间；
-- 调用路径允许阻塞、分配和进入 VFS、fd-backed object 或设备对象；
-- 调度器、进程资源锁、VFS 和内存映射已经初始化。
+- the current thread can be obtained through the current-thread interface of `kprocess`;
+- the current process has an accessible process runtime state, fd resources, and `FsStruct`;
+- user pointers can access the current address space through `posix_types` / `osvm`;
+- the calling path is allowed to block, allocate, and enter the VFS, fd-backed objects, or device objects;
+- the scheduler, process resource locks, VFS, and memory mappings have already been initialized.
 
-该 crate 不适合作为中断上下文或早期启动阶段 API 使用。
-路径解析、fd 表访问、VFS I/O、目录遍历和 fd-to-fd 复制都可能分配、
-加锁、等待底层对象或返回 `WouldBlock`。
+This crate is not suitable for use as an API in interrupt context or in the early boot stage.
+Path resolution, fd table access, VFS I/O, directory traversal, and fd-to-fd copying may all allocate,
+take locks, wait on underlying objects, or return `WouldBlock`.
 
-## 状态机
+## State Machine
 
-### statx 挂载身份
+### statx Mount Identity
 
-`sys_statx` 复用一次 `resolve_at` 取得的目标，同时读取 metadata 和
-`VfsMount::mount_id()`，填入 `stx_mnt_id` 并声明 `STATX_MNT_ID` 有效。
-空路径 fd 和跟随 procfs magic link 时返回目标挂载身份，不重新解析路径。
-该字段使用现有挂载 ID，不增加或改变挂载生命周期。
+`sys_statx` reuses the target obtained by a single `resolve_at`, reads the metadata and
+`VfsMount::mount_id()` at the same time, fills in `stx_mnt_id`, and declares `STATX_MNT_ID` valid.
+For an empty-path fd and when following a procfs magic link, the mount identity of the target is returned, and the path is not re-resolved.
+This field uses the existing mount ID and does not add to or change the mount lifecycle.
 
-`statx` 请求中的 `STATX__RESERVED` 保留位，以及同时指定
-`AT_STATX_FORCE_SYNC` / `AT_STATX_DONT_SYNC` 的组合，在 pathname 复制和目标解析之前返回
-`EINVAL`，适用于普通 pathname、空字符串及无效 pathname 地址。
-该错误优先于空路径的 `ENOENT` 和用户地址的 `EFAULT`。零 mask 与其他未知请求位
-仍作为查询提示接受，维持接口的向前兼容性；该校验不改变同步策略或结果 mask。
+The `STATX__RESERVED` reserved bits in a `statx` request, and the combination that specifies both
+`AT_STATX_FORCE_SYNC` / `AT_STATX_DONT_SYNC`, return
+`EINVAL` before pathname copying and target resolution, which applies to ordinary pathnames, empty strings, and invalid pathname addresses.
+This error takes precedence over `ENOENT` for an empty path and `EFAULT` for a user address. A zero mask and other unknown request bits
+are still accepted as query hints, preserving forward compatibility of the interface; this validation does not change the sync policy or the result mask.
 
-### fd 生命周期
+### fd Lifecycle
 
 ```text
 open/pipe/dup
@@ -161,9 +165,9 @@ Open fd with descriptor flags
 Closed fd
 ```
 
-`posix-fs` 不直接保存 fd 表，
-而是通过 `kprocess::current_resources()` 操作当前进程资源。
-### 路径解析
+`posix-fs` does not store the fd table directly,
+but operates on the current process resources through `kprocess::current_files()`.
+### Path Resolution
 
 ```text
 user path pointer
@@ -176,27 +180,26 @@ raw path string or AT_EMPTY_PATH
     └─ magic-link component ───────> kvfs::namei typed follow
 ```
 
-`path.rs` 不拥有 procfd 字符串解析。
-`/proc/<pid>/fd/<fd>` 由 procfs 暴露为 VFS magic-link 节点，`path.rs`
-只负责把 syscall flags 转成 `LookupFlags` 与 `LookupIntent`。final 与
-non-final component 的普通 symlink、magic-link、`NO_MAGIC_LINKS` 和
-`O_NOFOLLOW` 规则都由 `kvfs::namei` 统一执行。
+`path.rs` does not own procfd string parsing.
+`/proc/<pid>/fd/<fd>` is exposed by procfs as a VFS magic-link node, and `path.rs`
+is only responsible for converting syscall flags into `LookupFlags` and `LookupIntent`. The rules for ordinary symlinks, magic-links, `NO_MAGIC_LINKS`, and
+`O_NOFOLLOW` on final and non-final components are all enforced uniformly by `kvfs::namei`.
 
-空字符串配合 `AT_EMPTY_PATH`、`dirfd == AT_FDCWD` 时，通过 `with_fs` 快照克隆当前
-目录的 `Path`，然后释放锁再读取或修改 metadata；不重新解析 `.`，也不要求
-当前目录的搜索权限。`None` 保持现有的仅按 fd 解析约定：`fstat/fchmod/fchown`
-和 fd 形式的 xattr 接口通过它复用解析器，不能把 `AT_FDCWD` 错当成真实
-描述符。本次不扩展各个 syscall 对 NULL 用户 pathname 的接受范围。
+For an empty string combined with `AT_EMPTY_PATH` and `dirfd == AT_FDCWD`, the `Path` of the current
+directory is cloned through a `with_fs` snapshot, and then the lock is released before reading or modifying metadata; `.` is not re-resolved, and search permission on the
+current directory is not required. `None` keeps the existing convention of resolving by fd only: `fstat/fchmod/fchown`
+and the fd forms of the xattr interfaces reuse the resolver through it, and `AT_FDCWD` must not be mistaken for a real
+descriptor. This change does not extend the range in which each syscall accepts a NULL user pathname.
 
-### 文件数据流
+### File Data Flow
 
-非定位读写请求在对象及 iterator 汇总完成量后，仅把显式文件等待中断标记转换为
-`ERESTARTSYS`，由信号交付根据 handler 标志决定重启或 EINTR。转换位于完整请求
-helper，而不是各 syscall 入口：`read/write/readv/writev` 与
-`preadv2/pwritev2(offset=-1, flags=0)` 共用该出口。正数、零和普通错误保持不变。
-复制类 syscall 直接使用底层 VFS 操作，在整个复制请求汇总完成量后才应用同一转换；
-已有输出优先返回正数，不能把单次底层等待升级为整个请求重放。定位 I/O 和未接入标记
-的对象保持原有中断契约。
+For non-positional read and write requests, after the object and the iterator have aggregated the completed amount, only the explicit file-wait interruption marker is converted to
+`ERESTARTSYS`, and signal delivery decides, based on the handler flags, whether to restart or return EINTR. The conversion is located in the whole-request
+helper rather than in each syscall entry point: `read/write/readv/writev` and
+`preadv2/pwritev2(offset=-1, flags=0)` share this exit. Positive values, zero, and ordinary errors are left unchanged.
+Copy-type syscalls use the underlying VFS operations directly, and apply the same conversion only after the completed amount of the entire copy request has been aggregated;
+if there is already output, a positive value is returned first, and a single underlying wait must not be escalated into a replay of the whole request. Positional I/O and objects that have not been wired to the marker
+keep the original interruption contract.
 
 ```text
 user buffer / iovec
@@ -210,30 +213,30 @@ FileLike::read/write
     └─ device-specific FileLike implementation
 ```
 
-`sendfile`、`copy_file_range` 和 `splice` 将内核态偏移交给
-`kvfs::transfer_files`，由 VFS 管理缓冲传输、文件位置和管道消费。
-syscall 层保留参数校验、用户 offset 回写及整个请求的重启决策。
-`sendfile` 在传输返回后回写显式 offset，包括 EOF 和错误；
-`splice` 仅在非负结果后回写，先目标再源，首次回写错误即返回；
-`copy_file_range` 仅在正数结果后回写，两端回写都会尝试。
-回写失败可返回 EFAULT，但不回滚已发生的输出。
+`sendfile`, `copy_file_range`, and `splice` hand kernel-space offsets to
+`kvfs::transfer_files`, and the VFS manages buffered transfer, file positions, and pipe consumption.
+The syscall layer retains argument validation, writing back the user offset, and the restart decision for the whole request.
+`sendfile` writes back the explicit offset after the transfer returns, including on EOF and errors;
+`splice` writes back only after a non-negative result, destination first and then source, and returns on the first write-back error;
+`copy_file_range` writes back only after a positive result, and attempts both write-backs.
+A write-back failure may return EFAULT, but does not roll back output that has already occurred.
 
-## 算法流程
+## Algorithm Flow
 
 ### `openat`
 
-1. 从用户指针读取路径字符串。
-2. 通过 `with_fs_at` 取得包含 root、pwd 和 umask 的完整 `FsStruct` snapshot。
-3. 将 Linux open flags、原始 mode 和 snapshot umask 交给 `kvfs::Filename` 的
-   open 入口；umask 不在 syscall 层提前应用。
-4. `kvfs` 内部构造 namei open 参数，使用 `LookupIntent::Open` 与
-   `LookupFlags` 处理 `O_NOFOLLOW`、`O_PATH`、普通 symlink 和 VFS
-   magic-link。
-5. 对普通路径调用 `with_fs_at(dirfd, filename, ...)`：绝对路径从 root 开始且不访问
-   `dirfd`，相对路径才校验并使用 `dirfd`。
-6. 设备节点的特殊 open 语义由对应 VFS/device file operations 处理。
-7. 根据 `O_NONBLOCK`、`O_CLOEXEC` 设置对象和 descriptor 标志。
-8. 把打开的 file 加入当前进程 fd 表并返回 fd。
+1. Read the path string from the user pointer.
+2. Obtain a complete `FsStruct` snapshot containing root, pwd, and umask through `with_fs_at`.
+3. Pass the Linux open flags, the raw mode, and the snapshot umask to the open entry point of `kvfs::Filename`;
+   the umask is not applied early at the syscall layer.
+4. `kvfs` internally constructs the namei open arguments and uses `LookupIntent::Open` and
+   `LookupFlags` to handle `O_NOFOLLOW`, `O_PATH`, ordinary symlinks, and VFS
+   magic-links.
+5. For ordinary paths, call `with_fs_at(dirfd, filename, ...)`: an absolute path starts from root and does not access
+   `dirfd`; only a relative path validates and uses `dirfd`.
+6. The special open semantics of device nodes are handled by the corresponding VFS/device file operations.
+7. Set the object and descriptor flags according to `O_NONBLOCK` and `O_CLOEXEC`.
+8. Add the opened file to the current process's fd table and return the fd.
 
 ### `openat2`
 
@@ -257,116 +260,114 @@ with `O_CREAT`/`O_TRUNC`, returns `EAGAIN`. Symlink expansion whose target is no
 cached may still consult the filesystem, so the cached-only guarantee is a
 superset rather than a strict Linux `LOOKUP_CACHED` match.
 
-### `fchdir` 的 fd 解析
+### fd resolution in `fchdir`
 
-`fchdir` 直接从当前资源表取得目录对象，不复用为路径查找提供 `AT_FDCWD`
-语义的 `with_fs`。取得的 `Arc<VfsFile>` 保持对象存活；确认目录类型、检查
-搜索权限后，才更新当前进程的 cwd。`O_PATH` 目录描述符仍可用，非法 fd、
-非目录或权限失败均不改变 cwd。
+`fchdir` obtains the directory object directly from the current resource table; it does not reuse `with_fs`, which provides the `AT_FDCWD`
+semantics for path lookup. The obtained `Arc<VfsFile>` keeps the object alive; only after confirming the directory type and checking
+search permission is the current process's cwd updated. An `O_PATH` directory descriptor is still usable; an invalid fd,
+a non-directory, or a permission failure leaves cwd unchanged.
 
 ### `resolve_at`
 
-1. `None` 或空路径必须配合 `AT_EMPTY_PATH`，否则返回 `NotFound`。
-2. 非空路径进入 `kvfs::namei`，携带 syscall 对应的 `LookupIntent` 和
-   `LookupFlags`。
-3. 绝对非空路径不读取 `dirfd`；相对非空路径使用 `dirfd` 选择 base。
-4. namei 在同一条路径中处理 final/non-final symlink、magic-link、
-   `AT_SYMLINK_NOFOLLOW` 和 `NO_MAGIC_LINKS`。
-5. `Some("")`、`AT_EMPTY_PATH` 和 `AT_FDCWD` 同时出现时，通过 `with_fs`
-   的上下文快照克隆 cwd `Path`；不解析 `.`，也不增加 cwd 搜索权限检查。
-   其余空路径及内部 `None` 形式按真实 fd 取得 `Path`。
+1. `None` or an empty path must be accompanied by `AT_EMPTY_PATH`; otherwise `NotFound` is returned.
+2. A non-empty path enters `kvfs::namei`, carrying the `LookupIntent` and
+   `LookupFlags` that correspond to the syscall.
+3. An absolute non-empty path does not read `dirfd`; a relative non-empty path uses `dirfd` to select the base.
+4. namei handles final/non-final symlinks, magic-links,
+   `AT_SYMLINK_NOFOLLOW`, and `NO_MAGIC_LINKS` within a single path walk.
+5. When `Some("")`, `AT_EMPTY_PATH`, and `AT_FDCWD` all appear together, the cwd `Path` is cloned through the context snapshot of `with_fs`;
+   `.` is not resolved, and no additional cwd search-permission check is performed.
+   All other empty paths and the internal `None` form obtain the `Path` from the real fd.
 
 ### xattr syscall family
 
-1. `setxattr/lsetxattr/fsetxattr`、`get*`、`list*` 和 `remove*` 共用四个语义 helper；
-   pathname 版本跟随 final symlink，`l*` 不跟随，`f*` 直接使用 fd 的 `Path`。
-2. Xattr name 按 Linux 255-byte 上限复制为原始 bytes，不要求 UTF-8；set value 和 list
-   分别执行 64 KiB 上限。
-3. `XATTR_CREATE`/`XATTR_REPLACE` 在 syscall 边界转换为 `XattrSetFlags`，未知位返回
-   `EINVAL`；两个已知位可同时设置，实际四种存在性策略由 filesystem 在同一 mutation
-   lock/transaction 内完成。
-4. `get/list` 的 `size == 0` 只返回所需长度；非零缓冲区不足返回 `ERANGE`，list 输出是
-   NUL 分隔的完整名称序列。List 直接把 KVFS name sink 写入唯一的有界内核缓冲区；
-   `size == 0` 时只累计长度，不物化名称序列。
-5. 用户指针只在 `posix-fs` 复制；KVFS 和文件系统后端不接收用户地址。
+1. `setxattr/lsetxattr/fsetxattr`, `get*`, `list*`, and `remove*` share four semantic helpers;
+   the pathname versions follow the final symlink, `l*` does not follow it, and `f*` uses the fd's `Path` directly.
+2. An xattr name is copied as raw bytes subject to the Linux 255-byte limit, without requiring UTF-8; the set value and the list
+   are each subject to a 64 KiB limit.
+3. `XATTR_CREATE`/`XATTR_REPLACE` are converted to `XattrSetFlags` at the syscall boundary, and unknown bits return
+   `EINVAL`; the two known bits may be set together, and the resulting four existence policies are enforced by the filesystem within the same mutation
+   lock/transaction.
+4. For `get/list`, `size == 0` returns only the required length; a non-zero buffer that is too small returns `ERANGE`, and the list output is
+   a complete sequence of NUL-separated names. List writes the KVFS name sink directly into the single bounded kernel buffer;
+   when `size == 0` it only accumulates the length and does not materialize the name sequence.
+5. User pointers are copied only in `posix-fs`; KVFS and filesystem backends do not receive user addresses.
 
 ### `mkdirat`
 
-`mkdirat` 把原始 permission bits 和 `FsStruct` umask 交给
-`Filename::mkdir_at()`。该入口在父目录 namespace lock 下完成 final lookup，再由
-`Path::vfs_mkdir()` 执行 mount、父目录 DAC、mode preparation 和 filesystem callback。
-如果路径已经可解析为现有对象，包括 `/`、`.`、`..` 这类没有普通 final component
-的目录路径，则返回 `AlreadyExists`，对应 Linux `EEXIST`。
+`mkdirat` passes the raw permission bits and the `FsStruct` umask to
+`Filename::mkdir_at()`. This entry point completes the final lookup under the parent directory's namespace lock, and then `Path::vfs_mkdir()` performs the mount check, parent directory DAC, mode preparation, and the filesystem callback.
+If the path already resolves to an existing object, including directory paths such as `/`, `.`, and `..` that have no ordinary final component,
+`AlreadyExists` is returned, corresponding to Linux `EEXIST`.
 
 ### `mknodat`
 
-syscall 入口只复制 pathname，并把 32 位 ABI mode/device 截断或转换为
-`Umode` 和 `DeviceId`，随后在任何 `dirfd` 访问前调用
-namei 层的 `may_mknod()` 执行 Linux 类型校验，并把验证后的 `NodeType` 写回
-现有 `Umode` 的类型位。`Umode::mknod_node_type()` 仅负责纯类型解码，不依赖
-VFS errno。规范化后的 mode、`FsStruct` umask 和 credential snapshot 传给
-`Filename::mknod_at()`：
+The syscall entry point only copies the pathname, and truncates or converts the 32-bit ABI mode/device into
+`Umode` and `DeviceId`; before any `dirfd` access it then calls
+`may_mknod()` in the namei layer to perform Linux type validation, and writes the validated `NodeType` back into the type bits of the
+existing `Umode`. `Umode::mknod_node_type()` only performs pure type decoding and does not depend on
+VFS errno. The normalized mode, the `FsStruct` umask, and the credential snapshot are passed to
+`Filename::mknod_at()`:
 
-1. syscall 边界在路径解析前按原始 `S_IFMT` 位拒绝目录、符号链接和非法类型；
-2. 在父目录 exclusive namespace lock 下完成最终 lookup；
-3. positive dentry 先返回 `AlreadyExists`，negative dentry 才检查 mount write、
-   `MAY_WRITE | MAY_EXEC` 和 character/block device 特权；
-4. 与 open-create 共用 `Path::vfs_create()` / `Path::vfs_mknod()`，按 setgid 后
-   umask 的顺序准备 mode；
-5. regular file 使用 exclusive create callback，FIFO/socket 清零 device，
-   character/block device 保留 ABI device。
+1. The syscall boundary rejects directories, symbolic links, and invalid types according to the raw `S_IFMT` bits before path resolution;
+2. The final lookup is completed under the parent directory's exclusive namespace lock;
+3. A positive dentry returns `AlreadyExists` first, and only a negative dentry proceeds to check mount write,
+   `MAY_WRITE | MAY_EXEC`, and the character/block device privilege;
+4. It shares `Path::vfs_create()` / `Path::vfs_mknod()` with open-create, and prepares the mode in the order of setgid and then
+   umask;
+5. A regular file uses the exclusive create callback, FIFO/socket clear the device, and
+   character/block devices retain the ABI device.
 
 Creating a character or block device requires effective `CAP_MKNOD`.
 
-### `linkat`、`symlinkat`、`unlinkat`
+### `linkat`, `symlinkat`, `unlinkat`
 
-这些 namespace syscall 不再通过通用 `create_at()` 或完整目标 lookup 做一次锁外
-final lookup。syscall 复制并校验 ABI 参数后调用对应的
-`Filename::link_at()`、`Filename::symlink_at()`、`Filename::unlink_at()` 或
-`Filename::rmdir_at()`：
+These namespace syscalls no longer perform a one-off final lookup outside the lock through the generic `create_at()` or a full target lookup.
+The syscall copies and validates the ABI arguments, and then calls the corresponding
+`Filename::link_at()`, `Filename::symlink_at()`, `Filename::unlink_at()`, or
+`Filename::rmdir_at()`:
 
-1. Filename 解析 parent 和 final-component 类型；
-2. Dentry 在 parent exclusive namespace lock 下执行唯一 final lookup；
-3. positive/negative、trailing slash 和特殊 final component 的 errno 在该最终对象上决定；
-4. Path 执行 mount、DAC、cross-mount、sticky 和 mountpoint 策略；
-5. VfsInode 只进入 filesystem callback。
+1. Filename resolves the parent and the type of the final component;
+2. Dentry performs the single final lookup under the parent's exclusive namespace lock;
+3. The errno for positive/negative, trailing slash, and special final components is decided on that final object;
+4. Path enforces the mount, DAC, cross-mount, sticky, and mountpoint policies;
+5. VfsInode only enters the filesystem callback.
 
-`linkat` 只接受 `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`；默认不跟随 source final symlink，
-`AT_SYMLINK_FOLLOW` 才启用 follow。
+`linkat` accepts only `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`; by default it does not follow a final symlink on the source,
+and only `AT_SYMLINK_FOLLOW` enables following.
 
 ### exec path source
 
-`execve` 不再单独解析 procfd 字符串或提供专用 magic-link helper：
+`execve` no longer parses the procfd string separately or provides a dedicated magic-link helper:
 
-1. syscall 层读取用户 path 后构造 `LookupContext`。
-2. 非空 path 以 `LookupIntent::Exec` 和 follow-final flags 进入
-   `kvfs::namei`。
-3. 普通路径、procfd magic-link、APK magic source 风格显示路径，以及后续
-   `AT_EMPTY_PATH`/`fexecve` 入口都应收敛为同一套 namei/open-executable
-   语义。
-4. syscall 层把解析得到的 `Location` 与用户显示路径一起传给
-   `process/kexec::ExecRequest::from_resolved_with_display()`，loader 不再重新按
-   procfs 字符串查找目标对象。
+1. The syscall layer reads the user path and then constructs a `LookupContext`.
+2. A non-empty path enters `kvfs::namei` with `LookupIntent::Exec` and the follow-final flags.
+3. Ordinary paths, procfd magic-links, APK magic source style display paths, and the later
+   `AT_EMPTY_PATH`/`fexecve` entry points should all converge on the same set of namei/open-executable
+   semantics.
+4. The syscall layer passes the resolved `Location` together with the user display path to
+   `process/kexec::ExecRequest::from_resolved_with_display()`; the loader no longer looks up the target object again from the
+   procfs string.
 
-### `getcwd` 输出契约
+### `getcwd` output contract
 
-`getcwd` 按 Linux 原始 syscall 接收无符号机器字大小的容量，先生成包含 NUL
-的路径，再比较容量，最后通过用户内存接口复制。容量不足返回 `ERANGE`；
-容量足够但输出地址无效返回 `EFAULT`。libc 的 `getcwd(NULL, 0)` 自动分配
-扩展由用户态实现，内核不会为 NULL 缓冲区返回成功。
+`getcwd` follows the raw Linux syscall and takes the capacity as an unsigned machine word; it first produces the path including the NUL,
+then compares the capacity, and finally copies through the user memory interface. Insufficient capacity returns `ERANGE`;
+sufficient capacity but an invalid output address returns `EFAULT`. The libc `getcwd(NULL, 0)` automatic allocation
+extension is implemented in user space, and the kernel never returns success for a NULL buffer.
 
-`dir.rs` 的 `getcwd_tests` 通过 `#[def_test(user)]` 创建独立进程和用户映射，
-直接调用 syscall 入口验证容量、返回字节数、写入范围和错误优先级；
-用例由现有内核 unittest 流程自动执行。
+`getcwd_tests` in `dir.rs` creates an independent process and user mappings through `#[def_test(user)]`,
+and calls the syscall entry point directly to verify the capacity, the returned byte count, the write range, and the error priority;
+the test cases are executed automatically by the existing kernel unittest flow.
 
 ### `getdents64`
 
-1. 根据用户给定长度分配内核临时 `DirBuffer`。
-2. 获取目录 fd，并锁住目录 offset。
-3. 遍历目录项，把每项写成 ABI `linux_dirent64` 布局。
-4. 缓冲区放不下一条完整记录时停止遍历。
-5. 若存在目录项但用户缓冲区连一条也放不下，返回 `InvalidInput`。
-6. 将临时缓冲区写回用户空间，返回实际写入字节数。
+1. Allocate a temporary kernel `DirBuffer` according to the length given by the user.
+2. Obtain the directory fd and lock the directory offset.
+3. Iterate over the directory entries and write each entry in the ABI `linux_dirent64` layout.
+4. Stop iterating when the buffer cannot hold a complete record.
+5. If directory entries exist but the user buffer cannot hold even one, return `InvalidInput`.
+6. Write the temporary buffer back to user space and return the number of bytes actually written.
 
 ### `fallocate`
 
@@ -391,142 +392,140 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 
 ### `FS_IOC_FIEMAP`
 
-1. 先检查 inode 是否暴露 FIEMAP capability；不支持时在访问用户 header 前返回
-   `EOPNOTSUPP`，保持 Linux 错误优先级。
-2. 通过 `UserPtr` 复制 32 字节 Linux `fiemap` header，校验 `fm_extent_count` 不超过
-   UAPI 可表达的数组上限，并用 checked arithmetic 验证 header 后的 extent 数组地址范围。
-3. 把 raw flags、容量和安全用户输出 writer 封装为 `FiemapExtentInfo`，由 inode operation
-   决定支持的 flags；不兼容位通过 `fm_flags` 写回并返回 `EBADR`。
-4. writer 逐项构造 56 字节 `fiemap_extent`，显式清零全部 reserved 字段并通过 `UserPtr`
-   写回；容量为零时由 `FiemapExtentInfo` 只统计数量。
-5. 无论后端成功还是失败，都先写回当前 `fm_flags` 和 `fm_mapped_extents`，再传播结果。
+1. First check whether the inode exposes the FIEMAP capability; if unsupported, return
+   `EOPNOTSUPP` before accessing the user header, preserving Linux error priority.
+2. Copy the 32-byte Linux `fiemap` header through `UserPtr`, validate that `fm_extent_count` does not exceed
+   the array limit expressible in the UAPI, and use checked arithmetic to validate the address range of the extent array following the header.
+3. Wrap the raw flags, the capacity, and the safe user output writer into `FiemapExtentInfo`; the inode operation
+   decides which flags are supported, and incompatible bits are written back through `fm_flags` with `EBADR` returned.
+4. The writer constructs each 56-byte `fiemap_extent` one at a time, explicitly zeroes all reserved fields, and writes it back through `UserPtr`;
+   when the capacity is zero, `FiemapExtentInfo` only counts the extents.
+5. Whether the backend succeeds or fails, the current `fm_flags` and `fm_mapped_extents` are written back first, and only then is the result propagated.
 
 ### `mount`
 
-1. `sys_mount()` 复制 nullable source/fs type、target，并把 nullable filesystem-specific
-   mount data 作为一个 4 KiB base-page 大小的 opaque byte buffer 复制到内核；它不要求输入
-   NUL 终止或满足 UTF-8，只保留末字节作为文本 parser 的强制 NUL。整页复制失败时按 Linux
-   legacy mount 语义逐字节恢复可读前缀，首字节不可读才返回 `EFAULT`，其余尾部保持零填充。
-   用户指针只在 syscall 边界访问，随后捕获一次 process/credential 上下文并进入 `do_mount()`。
-2. `do_mount()` 按当前 `FsStruct` 解析 target，再把 resolved `Path` 交给
-   `path_mount()`；对应 Linux 的 syscall、`do_mount()` 和 `path_mount()` 分层。
-3. `path_mount()` 丢弃旧 mount magic，拒绝 `MS_NOUSER`，随后在操作分派前按本次 syscall
-   捕获的 credential snapshot 校验 mount privilege（非特权调用返回 `EPERM`，对应 Linux
-   `path_mount()` 中的 `may_mount()`），并统一拒绝当前未实现的 move、shared/unbindable
-   propagation 和带挂载子树的 recursive-bind bits；`MS_PRIVATE`/`MS_SLAVE`（无共享传播
-   组，二者行为等价）与非递归 bind 受支持；随后从同一份
-   `MS_*` 参数分别生成 superblock
-   flags 和 per-mount `MountFlags`。remount 未显式指定
-   atime 选项时保留目标 mount 当前的 atime flags；其它 user-settable per-mount flags
-   按本次请求整体替换，对应 Linux `set_mount_attributes()`。
-4. 已验证的请求按 `MS_REMOUNT|MS_BIND`、普通 `MS_REMOUNT`、`MS_BIND`、普通新挂载分派；
-   对应操作分别调用 namespace 的
-   `reconfigure_mount()`、`remount()`、`attach_bind()` 或
-   `mount_new()` 对象方法。
-5. 非递归 bind 要求非空 source，解析 source 后克隆源 mount；副本继承源 mount
-   flags，初次 `MS_BIND` 的普通 mount flags 不应用到副本。`MS_BIND | MS_REC` 仅在源
-   子树没有挂载时接受（此时与克隆单 mount 结果一致），否则返回 `EINVAL` 而不是静默
-   压平挂载树。
-6. 普通挂载像 Linux `do_new_mount()` 一样按 canonical type name 查询 KVFS
-   `FileSystemType` 注册表，再构造包含 source、mount data、superblock flags 和 credential
-   的 `FsContext`，再调用 `MntNamespace::mount_new()`。registry 和 `/proc/filesystems`
-   使用同一静态 descriptor identity。
-7. `mount_new()` 经类型对象的同步 `get_tree()` 进入 nodev 或
-   `get_tree_bdev -> fill_super`；filesystem 解析 mount data，并把挂载后仍需保留的状态
-   复制到自身 mount state，随后 VFS 把 detached mount graft 到 target。
-8. `MS_PRIVATE`/`MS_SLAVE` 与可选的 `MS_REC` 要求 target 是 mount root；KVFS 当前不建模
-   shared propagation group，因此 slave 与 private 行为等价，两者都作为幂等操作成功（各自
-   校验非法 flags 组合）；shared 和 unbindable 请求仍被显式拒绝。
-9. `sys_pivot_root()` 解析两个路径后在 `MntNamespace::pivot_root()` 上执行 Linux
-   `do_pivot_root()` 语义（`put_old` 可与 `new_root` 重合，失败前置校验后单次更新
-   fs root 与 pwd），再按 Linux `chroot_fs_refs()` 语义遍历所有存活进程，把 root/pwd 恰为旧根
-   的 `FsStruct` 重定向到 `new_root`。
-10. `sys_umount2()` 支持 `MNT_DETACH`：经 `detach_tree()` 摘下整棵挂载子树而不做
-    busy 检查（OCI runtime 在 `pivot_root` 后用其卸载旧 root）；`MNT_FORCE`、
-    `MNT_EXPIRE`、`UMOUNT_NOFOLLOW` 仍被拒绝。
+1. `sys_mount()` copies the nullable source/fs type and target, and copies the nullable filesystem-specific
+   mount data into the kernel as an opaque byte buffer the size of one 4 KiB base page; it does not require the input
+   to be NUL-terminated or valid UTF-8, and only reserves the last byte as the forced NUL for text parsers. When the whole-page copy fails, following Linux
+   legacy mount semantics, the readable prefix is recovered byte by byte, and `EFAULT` is returned only if the first byte is unreadable; the remaining tail stays zero-filled.
+   User pointers are accessed only at the syscall boundary; the process/credential context is then captured once and `do_mount()` is entered.
+2. `do_mount()` resolves the target against the current `FsStruct`, then hands the resolved `Path` to
+   `path_mount()`; this corresponds to the Linux layering of syscall, `do_mount()` and `path_mount()`.
+3. `path_mount()` discards the old mount magic, rejects `MS_NOUSER`, then, before operation dispatch, checks the mount privilege against the credential snapshot
+   captured for this syscall (an unprivileged call returns `EPERM`, corresponding to `may_mount()` in Linux
+   `path_mount()`), and uniformly rejects the currently unimplemented move, shared/unbindable
+   propagation and recursive-bind bits with a mounted subtree; `MS_PRIVATE`/`MS_SLAVE` (there is no shared propagation
+   group, so the two behave equivalently) and non-recursive bind are supported; then, from the same
+   `MS_*` argument, the superblock
+   flags and the per-mount `MountFlags` are generated separately. When remount does not explicitly specify
+   an atime option, it preserves the target mount's current atime flags; the other user-settable per-mount flags
+   are replaced wholesale by this request, corresponding to Linux `set_mount_attributes()`.
+4. A validated request is dispatched as `MS_REMOUNT|MS_BIND`, plain `MS_REMOUNT`, `MS_BIND`, or an ordinary new mount, in that order;
+   the corresponding operations call the namespace object methods
+   `reconfigure_mount()`, `remount()`, `attach_bind()` or
+   `mount_new()`, respectively.
+5. A non-recursive bind requires a non-empty source; after resolving the source it clones the source mount; the copy inherits the source mount's
+   flags, and the ordinary mount flags of the initial `MS_BIND` are not applied to the copy. `MS_BIND | MS_REC` is accepted only when the source
+   subtree has no mounts (in which case the result is the same as cloning a single mount); otherwise it returns `EINVAL` instead of silently
+   flattening the mount tree.
+6. Like Linux `do_new_mount()`, an ordinary mount looks up the KVFS
+   `FileSystemType` registry by canonical type name, then constructs an `FsContext` containing the source, mount data, superblock flags and credential,
+   and then calls `MntNamespace::mount_new()`. The registry and `/proc/filesystems`
+   use the same static descriptor identity.
+7. `mount_new()` enters either nodev or
+   `get_tree_bdev -> fill_super` through the type object's synchronous `get_tree()`; the filesystem parses the mount data and copies the state that must be retained after mounting
+   into its own mount state, after which the VFS grafts the detached mount onto the target.
+8. `MS_PRIVATE`/`MS_SLAVE` with an optional `MS_REC` require the target to be a mount root; KVFS currently does not model
+   shared propagation groups, so slave and private behave equivalently, and both succeed as idempotent operations (each
+   validating illegal flag combinations); shared and unbindable requests are still explicitly rejected.
+9. After resolving the two paths, `sys_pivot_root()` executes Linux
+   `do_pivot_root()` semantics on `MntNamespace::pivot_root()` (`put_old` may coincide with `new_root`; after the pre-failure checks, the fs root
+   and pwd are updated in a single step), and then, following Linux `chroot_fs_refs()` semantics, walks all live processes and redirects every `FsStruct` whose root/pwd is exactly the old root
+   to `new_root`.
+10. `sys_umount2()` supports `MNT_DETACH`: it detaches the whole mount subtree via `detach_tree()` without a
+    busy check (an OCI runtime uses it to unmount the old root after `pivot_root`); `MNT_FORCE`,
+    `MNT_EXPIRE` and `UMOUNT_NOFOLLOW` are still rejected.
 
-### readlink 长度 ABI
+### readlink length ABI
 
-`readlink` / `readlinkat` 在 syscall 入口以有符号 32 位整数接收长度；
-分发层截取寄存器低 32 位，入口先拒绝非正值，再访问路径和输出缓冲区。
-只有验证后的正值转换成 `usize` 交给复制逻辑，返回值不计 NUL 终止符，
-保持短缓冲区截断语义。
+`readlink` / `readlinkat` receive the length as a signed 32-bit integer at the syscall entry;
+the dispatch layer takes the low 32 bits of the register, and the entry first rejects non-positive values before accessing the path and the output buffer.
+Only a validated positive value is converted to `usize` and handed to the copy logic; the return value does not count the NUL terminator,
+preserving the truncation semantics for short buffers.
 
-`namei.rs` 的内核单测直接向 readlink 入口传入非正长度和 NULL 地址，
-确保长度拒绝先于用户内存访问；独立客体探针补充寄存器截断和成功复制检查。
+The in-kernel unit tests in `namei.rs` pass non-positive lengths and a NULL address directly to the readlink entry,
+ensuring that length rejection precedes user memory access; a separate guest probe adds checks for register truncation and successful copying.
 
-## 并发模型
+## Concurrency model
 
-`posix-fs` 本身不持有全局状态。
-并发控制由下层资源对象负责：
+`posix-fs` itself holds no global state.
+Concurrency control is the responsibility of the underlying resource objects:
 
-- fd 表和 descriptor flags 由 `kfd`/进程 resources 内部锁保护；
-- `FsStruct` 通过进程状态中的锁串行化当前目录、根目录、umask 和解析基准更新；
-  它是 umask 的唯一 owner，`CLONE_FS` 通过共享同一个 `Arc<Mutex<FsStruct>>`
-  同时共享 root、pwd 和 umask。非共享 fork 使用 `clone_for_process()` 复制状态；
-  单次 `*at` 操作使用完整 `snapshot()`，不会把 umask 重置成默认值；
-- 目录流 offset 由 `Directory::offset` 锁保护；
-- 文件、pipe、设备、mountpoint 和 VFS 节点的内部并发由各自实现负责；
-- 用户内存访问由 `posix_types` / `osvm` 在当前进程地址空间下执行。
+- the fd table and descriptor flags are protected by internal locks in `kfd`/process resources;
+- `FsStruct` serializes updates to the current directory, root directory, umask and resolution base through a lock in the process state;
+  it is the sole owner of the umask, and `CLONE_FS` shares root, pwd and umask together by sharing the same `Arc<Mutex<FsStruct>>`.
+  A non-shared fork copies the state with `clone_for_process()`;
+  a single `*at` operation uses a full `snapshot()`, which does not reset the umask to its default value;
+- the directory stream offset is protected by the `Directory::offset` lock;
+- the internal concurrency of files, pipes, devices, mountpoints and VFS nodes is the responsibility of their respective implementations;
+- user memory access is performed by `posix_types` / `osvm` under the current process address space.
 
-文档使用者需要特别注意跨对象操作：
-`renameat2` 会解析旧目录和新目录后交给 VFS rename；
-文件到文件复制按对象地址顺序锁定位置，同一打开文件只取一次锁；管道路径先等
-数据或空间，再在管道锁内获取非管道文件位置锁，不跨管道等待持有位置锁；
-设备节点的 open 语义由 VFS/device file operations 自身处理。
-新增代码应避免在持有 fd 表或目录 offset 锁时进入可能回调同一资源的复杂路径。
+Readers of this document need to pay special attention to cross-object operations:
+`renameat2` resolves the old directory and the new directory and then hands them to the VFS rename;
+file-to-file copy locks positions in object-address order, and takes the lock only once for the same open file; the pipe path first waits for
+data or space, then acquires the non-pipe file position lock inside the pipe lock, and does not hold a position lock while waiting across a pipe;
+the open semantics of device nodes are handled by the VFS/device file operations themselves.
+New code should avoid entering complex paths that may call back into the same resource while holding the fd table or directory offset lock.
 
-## 设计决策
+## Design decisions
 
-### syscall 兼容层与 VFS 分离
+### Separating the syscall compatibility layer from the VFS
 
-`posix-fs` 只处理 Linux ABI、当前进程上下文和错误传播，
-把实际文件语义交给 `kvfs`、`kfd`、`kfd_objects` 和设备对象。
-这样可以避免在 syscall 层复制文件系统实现，
-代价是 syscall 兼容行为必须清楚记录哪些由本 crate 保证、哪些由底层对象保证。
+`posix-fs` handles only the Linux ABI, the current process context and error propagation,
+and leaves the actual file semantics to `kvfs`, `kfd`, `kfd_objects` and device objects.
+This avoids duplicating filesystem implementations in the syscall layer,
+at the cost that syscall compatibility behavior must clearly record which parts are guaranteed by this crate and which by the underlying objects.
 
-### fd-backed object 与文件系统状态分离
+### Separating fd-backed objects from filesystem state
 
-通过 fd 向用户态暴露对象，并不自动意味着该对象属于文件系统 owner。
-`timerfd` 和 `eventfd` 位于 `kfd_objects`，其核心状态分别属于 timer runtime 与 event
-counter。pipe 则位于 `kvfs::pipe`：匿名 pipe 与 pathname FIFO 共享
-`pipe_inode_info` 等价状态，而 pathname FIFO session 由 inode 持有，因此属于 fs-core，
-不能由 process fd-object 层拥有。`posix-fs` 对这些对象保留的职责仅限于
-`splice`、`fcntl(F_*PIPE_SZ)` 等 syscall 与底层对象之间的互操作接线。
+Exposing an object to user space through an fd does not automatically mean that the object belongs to the filesystem owner.
+`timerfd` and `eventfd` live in `kfd_objects`, and their core state belongs to the timer runtime and the event
+counter, respectively. The pipe lives in `kvfs::pipe`: an anonymous pipe and a pathname FIFO share state equivalent to
+`pipe_inode_info`, while the pathname FIFO session is held by the inode and therefore belongs to fs-core,
+and cannot be owned by the process fd-object layer. The responsibility `posix-fs` retains for these objects is limited to
+the interoperation wiring between syscalls such as `splice` and `fcntl(F_*PIPE_SZ)` and the underlying objects.
 
-### procfd 作为 VFS magic-link
+### procfd as a VFS magic-link
 
-`/proc/<pid>/fd/<fd>` 由 procfs 暴露为 magic-link 节点，而不是
-`posix-fs` 内部的字符串解析特例。
-`posix-fs` 根据 syscall flags 决定是否 follow final component，
-实际目标 fd snapshot、readlink display 和 follow 行为由 procfs/kfd/kvfs 协作完成。
-这样能保留 live procfd 对象语义，同时避免 syscall 层复制 procfs 路径规则。
+`/proc/<pid>/fd/<fd>` is exposed by procfs as a magic-link node, rather than as a
+string-parsing special case inside `posix-fs`.
+`posix-fs` decides whether to follow the final component according to the syscall flags,
+while the actual target fd snapshot, the readlink display and the follow behavior are accomplished jointly by procfs/kfd/kvfs.
+This preserves live procfd object semantics while avoiding duplicating procfs path rules in the syscall layer.
 
-### mount 操作的兼容边界
+### Compatibility boundary of mount operations
 
-`sys_mount` 的 ABI 入口、`do_mount` 的 target lookup 和 `path_mount` 的 flags
-归一化/操作分派对应 Linux 同名层次；不为请求参数增加额外持久状态对象。它实现非递归
-bind mount、普通 remount 和 bind remount。remount target 必须是当前 mount namespace
-中已注册 mount 的根路径；普通目录返回 `InvalidInput`。普通 remount 分别传递
-superblock flags 和 per-mount flags，bind remount 只更新目标 mount flags；未显式给出
-atime 选项的 remount 只保留目标当前 atime mask，其它 user-settable flags 按请求重建；
-普通 remount 未给出 `MS_RDONLY` 时请求把 superblock 切换为读写。这是 raw Linux
-`mount(2)` 语义，用户态 `mount(8)` 是否补齐旧选项属于其自身策略。
-初次 bind 继承源 mount flags，不应用同次调用的普通 mount flags；修改 bind mount flags
-需要第二次 `MS_REMOUNT|MS_BIND` 调用。
-普通新挂载不再依赖 devfs、procfs、bpffs 等具体 crate；`path_mount` 只解析 canonical
-type 并使用 KVFS registry，对应 Linux `get_fs_type()` 后进入 filesystem type 的创建入口。
-这使 mount 支持集合与 `/proc/filesystems` 保持同一事实源。
-普通新挂载把一页有界、内核拥有的 opaque mount data 通过 `FsContext` 转交 filesystem
-type；通用 syscall/VFS 不解释 UTF-8、逗号或 filesystem option。具体文件系统决定该页是文本
-还是 binary representation，解析未知或未实现的选项时必须按自身兼容策略明确失败或记录为
-真正的 compatibility no-op。filesystem-specific remount reconfigure 仍未建模。
-move、recursive bind 和 shared/slave/unbindable propagation flags 在任何 operation
-dispatch 前返回 `InvalidInput`；
-因此 `MS_BIND|MS_MOVE`、`MS_REMOUNT|MS_SHARED` 和普通新挂载携带 `MS_REC` 都不会执行部分请求，
-`sys_umount2` 对 force、detach、expire、nofollow 返回 `InvalidInput`。
-显式拒绝比静默忽略更安全，
-因为静默忽略会让用户态误以为已经获得异步卸载或 bind mount 等语义。
+The ABI entry of `sys_mount`, the target lookup of `do_mount` and the flags
+normalization/operation dispatch of `path_mount` correspond to the same-named layers in Linux; no extra persistent state object is added for request parameters. It implements non-recursive
+bind mount, ordinary remount and bind remount. The remount target must be the root path of a mount registered in the current mount namespace;
+an ordinary directory returns `InvalidInput`. An ordinary remount passes the
+superblock flags and the per-mount flags separately, and a bind remount updates only the target mount flags; a remount that does not explicitly give an
+atime option preserves only the target's current atime mask, and the other user-settable flags are rebuilt from the request;
+when an ordinary remount does not give `MS_RDONLY`, it requests switching the superblock to read-write. This is raw Linux
+`mount(2)` semantics; whether user-space `mount(8)` fills in the old options is its own policy.
+The initial bind inherits the source mount flags and does not apply the ordinary mount flags of the same call; modifying the bind mount flags
+requires a second `MS_REMOUNT|MS_BIND` call.
+An ordinary new mount no longer depends on specific crates such as devfs, procfs or bpffs; `path_mount` only resolves the canonical
+type and uses the KVFS registry, corresponding to Linux entering the filesystem type's creation entry after `get_fs_type()`.
+This keeps the set of supported mounts and `/proc/filesystems` on the same source of truth.
+An ordinary new mount passes one page of bounded, kernel-owned opaque mount data to the filesystem
+type through `FsContext`; the generic syscall/VFS does not interpret UTF-8, commas or filesystem options. The concrete filesystem decides whether that page is a text
+or a binary representation, and when parsing an unknown or unimplemented option it must, according to its own compatibility policy, either fail explicitly or record it as a
+genuine compatibility no-op. Filesystem-specific remount reconfigure is still not modeled.
+`MS_MOVE`, `MS_SHARED` and `MS_UNBINDABLE` return `InvalidInput` before any operation dispatch, and an ordinary new mount carrying `MS_REC` also returns `InvalidInput`; `MS_PRIVATE`/`MS_SLAVE` are accepted, and `MS_BIND|MS_REC` is accepted only when the source subtree has no mounts. Therefore `MS_BIND|MS_MOVE` and `MS_REMOUNT|MS_SHARED` never execute a partial request.
+`sys_umount2` returns `InvalidInput` for `MNT_FORCE`, `MNT_EXPIRE` and `UMOUNT_NOFOLLOW`; `MNT_DETACH` is supported.
+Explicit rejection is safer than silent ignoring,
+because silent ignoring would lead user space to believe it has obtained semantics such as asynchronous unmount or bind mount.
 `mount` privilege is decided at the syscall boundary from the credential
 snapshot captured for that call: `path_mount()` checks after `MS_NOUSER` and
 before operation dispatch, while `sys_umount2()` checks after target lookup and
@@ -539,18 +538,18 @@ not implemented. `MntNamespace::{mount_new, attach_bind, remount,
 reconfigure_mount, detach}` retain explicit caller contracts, with authorization
 owned by the caller.
 
-### 文件锁
+### File locks
 
-`fcntl` 将用户区间转换为绝对偏移，校验 fd、打开模式和 OFD 的零 `l_pid`，
-再调用 KVFS 的记录锁操作。POSIX owner 是共享 fd 表身份，OFD owner 是
-`VfsFile` 身份；`F_GETLK` 返回实际冲突。
-传统 `F_GETLK` 在区间转换前拒绝 `F_UNLCK`；`F_OFD_GETLK` 允许用它查询自身锁。
-`F_SETLKW` 可中断等待，信号按 `ERESTARTSYS` 处理；POSIX 加锁成功后复查 fd，
-处理并发关闭/替换。当前 main 的 fd 表绑定仍属于进程；等待期间绑定被替换时，
-清除旧 owner 的迟到加锁，并以原绝对区间在当前表上重试。此 PR 不改变线程文件表、
-exec 或任务身份模型。
-`flock` 使用独立的整文件锁集合。关闭任何指向同一 inode 的 fd 都释放该
-files owner 的 POSIX 锁；OFD/flock 在打开文件最终释放时清理。
+`fcntl` converts the user range into absolute offsets, validates the fd, the open mode and the zero `l_pid` of OFD locks,
+and then calls KVFS's record lock operations. The POSIX owner is the identity of the shared fd table, and the OFD owner is the
+`VfsFile` identity; `F_GETLK` returns the actual conflict.
+The traditional `F_GETLK` rejects `F_UNLCK` before range conversion; `F_OFD_GETLK` allows using it to query one's own lock.
+`F_SETLKW` is an interruptible wait, and signals are handled as `ERESTARTSYS`; after a POSIX lock succeeds, the fd is rechecked
+to handle concurrent close/replace. In the current main, the fd table binding still belongs to the process; when the binding is replaced during the wait,
+the late lock of the old owner is cleared, and the lock is retried on the current table with the original absolute range. This PR does not change the thread file table,
+exec or task identity model.
+`flock` uses a separate whole-file lock set. Closing any fd that refers to the same inode releases the
+POSIX locks of that files owner; OFD/flock locks are cleaned up when the open file is finally released.
 
 ### fcntl minimum-based duplication
 
@@ -564,28 +563,29 @@ existing paths.
 
 ### memfd sealing fcntl
 
-`fd_ops` 处理 `F_GET_SEALS` 和 `F_ADD_SEALS`：
+`fd_ops` handles `F_GET_SEALS` and `F_ADD_SEALS`:
 
 ```text
 sys_fcntl(F_GET_SEALS/F_ADD_SEALS)
-  -> current_resources().get_file()
+  -> current_files().get_file()
   -> kvfs::VfsFile::shmem_seal_bits() / add_shmem_seals()
   -> inode-scoped ShmemObjectState
 ```
 
-这些命令只对 shmem-backed VFS files 有效。非 VFS file 或没有
-`ShmemObjectState` 的普通文件返回错误。`F_ADD_SEALS` 只允许单调添加 seal；
-已有 `F_SEAL_SEAL` 时拒绝继续添加。
+These commands are valid only for shmem-backed VFS files. A non-VFS file, or a
+regular file without `ShmemObjectState`, returns an error. `F_ADD_SEALS` allows
+seals to be added only monotonically; once `F_SEAL_SEAL` is set, further additions
+are rejected.
 
-### 当前凭据与 VFS 授权
+### Current credentials and VFS authorization
 
-每个 pathname syscall 在入口调用 `kprocess::current_cred()` 取得一个 committed
-`Arc<Cred>`，并把同一快照传给 `Filename`、`Nameidata` 和 `Path`。普通 open、路径
-遍历、创建、删除、链接、rename、pathname truncate 和 exec 检查使用该对象的
-`fsuid/fsgid` 与补充组；VFS 不反向查询当前 task。
+On entry, each pathname syscall calls `kprocess::current_cred()` to obtain a committed
+`Arc<Cred>`, and passes the same snapshot to `Filename`, `Nameidata` and `Path`. Ordinary open, path
+traversal, creation, deletion, link, rename, pathname truncate and exec checks use that object's
+`fsuid/fsgid` and supplementary groups; the VFS does not query the current task in the reverse direction.
 
-新 inode 由文件系统创建回调使用 `kvfs::inode_init_owner()` 初始化：UID 为 `fsuid`，
-GID 通常为 `fsgid`，setgid 父目录下继承父 GID，且新子目录传播 setgid 位。
+A new inode is initialized by the filesystem creation callback using `kvfs::inode_init_owner()`: the UID is `fsuid`,
+the GID is normally `fsgid`, it inherits the parent GID under a setgid parent directory, and a new subdirectory propagates the setgid bit.
 
 `faccessat2` selects the checking identity before path resolution. By default,
 `Cred::for_access()` uses the real IDs and adjusts the effective capability set
@@ -601,52 +601,52 @@ then `Path` performs Linux-style owner, group, write-permission, and
 explicit-time authorization. `chroot` additionally requires effective
 `CAP_SYS_CHROOT` after the target-directory search check.
 
-`truncate(path)` 使用调用时凭据进行 pathname write DAC；`ftruncate(fd)` 验证打开文件
-具有 write mode 后直接使用 open file authority，不因调用者随后改变 UID 而重复执行
-pathname DAC。这对应 Linux `vfs_truncate()` 与 `do_ftruncate()` 的语义分工。
+`truncate(path)` uses the credentials at the time of the call for pathname write DAC; `ftruncate(fd)` verifies that the open file
+has write mode and then uses the open file authority directly, without re-running
+pathname DAC if the caller later changes its UID. This corresponds to the division of semantics between Linux `vfs_truncate()` and `do_ftruncate()`.
 
-### 复制类 syscall 使用中间缓冲区
+### Copy-style syscalls use an intermediate buffer
 
-KVFS 的传输入口负责文件缓冲和管道消费，syscall 不自行循环调用对象读写。
-短写计入累计量后返回；后续传输错误不能覆盖已完成量。零完成量的文件等待中断
-才可请求信号重启。显式 offset 回写失败是传输后的独立错误，不属于该累计规则。
-尚无零拷贝；`copy_file_range` 的普通文件类型、同 inode 重叠与跨超级块准入已由
-KVFS 传输层的检查阶段完成（见 `fs/kvfs/docs/design.md`）。
-`copy_file_range` 当前只接受 `flags == 0`，
-非零 flags 会在 syscall 边界返回 `InvalidInput`。
+The KVFS transfer entry point is responsible for file buffering and pipe consumption; the syscall does not loop over object reads and writes by itself.
+A short write is added to the accumulated count and then returned; a later transfer error must not overwrite the amount already completed. Only a file wait with zero completed amount that is interrupted
+may request a signal restart. A failure of the explicit-offset write-back is an independent error after the transfer and is not subject to this accumulation rule.
+There is no zero-copy yet; the regular-file type, same-inode overlap and cross-superblock admission checks of `copy_file_range` are already done
+in the check phase of the KVFS transfer layer (see `fs/kvfs/docs/design.md`).
+`copy_file_range` currently accepts only `flags == 0`;
+nonzero flags return `InvalidInput` at the syscall boundary.
 
-## Drop / 资源释放
+## Drop / Resource release
 
-`posix-fs` 没有自定义 `Drop` 类型。
-资源释放依赖下层对象：
+`posix-fs` has no custom `Drop` types.
+Resource release depends on the lower-level objects:
 
-- `close`/`close_range` 从当前进程 fd 表移除 `Arc<dyn FileLike>`；
-- `close_range` 的两个范围参数遵守 Linux `unsigned int` ABI，接受 `UINT_MAX`
-  作为开放上界；向有符号 fd 表转换时裁剪上界。超出 fd 表编号域的空范围仍保留
-  `CLOSE_RANGE_UNSHARE` 的文件表隔离效果，不将无效顺序或未知 flags 当作成功。
-- fd 复制和打开路径通过 `Arc` 共享文件、目录、pipe 或设备对象；
-- 临时 `Vec`、路径 `String`、`CString` 和中间 I/O 缓冲区在函数返回时释放；
-- mount/unmount 的 topology 由 `kvfs::Path` 和 `Mount` 管理；`VfsMount` 最后释放时归还
-  superblock active 引用，并在最后一个引用消失时执行 shutdown。
+- `close`/`close_range` remove the `Arc<dyn FileLike>` from the current process fd table;
+- the two range arguments of `close_range` follow the Linux `unsigned int` ABI and accept `UINT_MAX`
+  as an open upper bound; the upper bound is clamped when converted to the signed fd table. An empty range beyond the fd table's numbering domain still retains
+  the file-table isolation effect of `CLOSE_RANGE_UNSHARE`, and an invalid order or unknown flags are not treated as success.
+- fd duplication and the open path share file, directory, pipe or device objects through `Arc`;
+- temporary `Vec`, path `String`, `CString` and intermediate I/O buffers are released when the function returns;
+- the mount/unmount topology is managed by `kvfs::Path` and `Mount`; when the last `VfsMount` is released, it returns the
+  superblock active reference, and shutdown runs when the last reference goes away.
 
-## 已知限制
+## Known limitations
 
 1. Credential DAC uses effective capabilities and Linux mode semantics, but
    LSM, ACL, user-namespace ID mapping, and idmapped mounts are not implemented.
-2. FAT 等不能表达 Unix UID/GID 的后端无法完整持久化创建者身份。
-3. 文件锁提供本地 advisory 语义，不实现 lease 或网络文件系统锁协议。
-4. `copy_file_range` 没有零拷贝路径；跨超级块配对只能由目标端的原生拷贝原语
-   服务，否则要求同一超级块。
-5. `mount` 尚不支持 move、recursive bind、shared/slave/unbindable propagation，以及
-   只读策略之外的文件系统专用
-   reconfigure。普通新挂载已转交一页 opaque mount data，但具体文本或二进制格式及选项仍由
-   各 filesystem type 选择性实现；nodev 与 device-backed 类型均经 registry/FsContext 创建。
-6. `sendfile` 对非空 offset 保留 32 位范围限制，反映旧接口兼容约束。
-7. `F_ADD_SEALS` / `F_GET_SEALS` 已接入 shmem object state；shared
-   writable mmap 和 `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap`
-   执行。
-8. POSIX ACL 仍未实现权限计算、mode 同步和继承；KExt4 不把 core 中的 opaque ACL bytes
-   作为普通 `system.posix_acl_*` xattr 暴露。
+2. Backends such as FAT that cannot express Unix UID/GID cannot fully persist the creator identity.
+3. File locks provide local advisory semantics and do not implement leases or network filesystem lock protocols.
+4. `copy_file_range` has no zero-copy path; a cross-superblock pairing can only be
+   served by the target's native copy primitive, otherwise the same superblock is required.
+5. `mount` does not yet support move, recursive bind with mounted subtrees, shared/unbindable propagation, or filesystem-specific
+   reconfigure beyond the read-only policy.
+   An ordinary new mount already passes one page of opaque mount data, but the concrete text or binary format and options are still selectively implemented by
+   each filesystem type; both nodev and device-backed types are created through registry/FsContext.
+6. `sendfile` retains the 32-bit range limit for a non-null offset, reflecting legacy interface compatibility constraints.
+7. `F_ADD_SEALS` / `F_GET_SEALS` are wired into shmem object state; shared
+   writable mmap and `mprotect(PROT_WRITE)` seal enforcement are
+   performed by `mm/filemap`.
+8. POSIX ACL still lacks permission computation, mode synchronization and inheritance; KExt4 does not expose the opaque ACL bytes in core
+   as ordinary `system.posix_acl_*` xattrs.
 
 ## Kernel unit-test layout
 

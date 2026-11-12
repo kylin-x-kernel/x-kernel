@@ -129,7 +129,7 @@ legacy queries, not new DT interpretation.
 - Build an allocation-backed `NodeIndex` for repeated offset/phandle lookups
   after allocator setup; the allocation-free accessors remain equivalent.
 - Decode `reg` entries into `MemoryRegion`s through `RegIter`, honoring the
-  node's cell sizes.
+  parent node's cell sizes.
 - Enumerate memory layout sources: `memory_regions` (`/memory`),
   `mem_reservations` (memreserve block, `0,0`-terminated),
   `reserved_memory_regions` / `reserved_memory_nodes` (`/reserved-memory`).
@@ -169,6 +169,8 @@ drivers/firmware/rs-fdtree/
 │   ├── header.rs         # FdtHeader layout, magic and block ranges
 │   ├── parsing.rs        # FdtData cursor, big-endian ints, CStr
 │   ├── node.rs           # FdtNode, NodeProperty, RegIter, region iterators
+│   ├── address.rs        # Numeric DT address translation
+│   ├── dma.rs            # Local DT DMA declarations (dma-ranges, coherency)
 │   ├── cpu.rs            # Private CPU-node view and identity decoding
 │   ├── property.rs       # Strict property encoding reads, borrowed Cells
 │   ├── reference.rs      # Phandle lookup, references, interrupt specifiers
@@ -176,7 +178,7 @@ drivers/firmware/rs-fdtree/
 │   ├── fwnode_backend/   # fwnode contract adapters
 │   │   ├── mod.rs        # Backend module boundary and re-exports
 │   │   └── dtb.rs        # DtBackend: device-tree translation
-│   ├── error.rs          # FdtError, Result alias
+│   ├── error.rs          # FdtError and its Display impl
 │   └── kernel_nodes/     # Chosen, Dice, InterruptController wrappers
 └── Cargo.toml
 ```
@@ -197,8 +199,8 @@ drivers/firmware/rs-fdtree/
 
 All types carry the borrow of the blob: `LinuxFdt<'a>`,
 `FdtNode<'b, 'a>` (node lifetime vs blob lifetime), and property values as
-`&'a [u8]` / `&'a str`. Nodes and values remain valid without keeping the
-`LinuxFdt` value itself.
+`&'a [u8]` / `&'a str`. Property values remain valid without keeping the `LinuxFdt` value
+itself; nodes borrow the `LinuxFdt` for `'b`.
 
 ## Parsing Model
 
@@ -301,5 +303,3 @@ checked.
 - Well-known node wrappers (`Chosen`, `Dice`, `InterruptController`) live
   in `kernel_nodes/` to keep node policy discoverable without pushing
   kernel conventions into the generic parser.
-- `#![allow(rustdoc::bare_urls)]` is set crate-wide for spec-reference URLs
-  in documentation.

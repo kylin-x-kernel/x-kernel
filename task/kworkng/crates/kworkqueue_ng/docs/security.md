@@ -116,7 +116,7 @@ notification for each allowed CPU, keep execution available through drain and
 detach sources before stopping services. Queue owns those source registrations;
 the provider owns execution lifetime. No safe production submission API is added.
 
-Covers src/queue.rs, src/queue/**, src/work.rs, src/work/** and src/diagnostics/**.
+Covers src/service.rs, src/queue.rs, src/queue/**, src/work.rs, src/work/** and src/diagnostics/**.
 Kernel unit tests exercise private state and real execution providers, not a
 production submission API. No raw user, device, network, file or FFI inputs are
 accepted. Trusted kernel inputs include configuration, callbacks, resource payloads,

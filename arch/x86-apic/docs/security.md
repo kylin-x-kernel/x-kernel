@@ -57,7 +57,7 @@ into this crate.
 
 ## Unsafe Code
 
-All unsafe blocks carry `SAFETY:` comments and fall into three groups:
+All unsafe blocks carry `SAFETY:` comments and fall into four groups:
 
 - Legacy PIC masking (`Port::<u8>::write(0xff)` on 0x21/0xA1) — part of
   APIC bring-up before interrupt routing changes.

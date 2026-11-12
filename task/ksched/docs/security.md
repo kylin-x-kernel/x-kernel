@@ -197,11 +197,9 @@ is not the list lock. `Relaxed` is enough, because operations on the same
 list are already exclusive, and another list can write only its own address
 or zero.
 
-Steal builds a `ManuallyDrop<Arc<_>>` from the cursor's `get_ptr`. It does
-not walk forward from `&T` to recover an `Arc` header. The list still holds
-the original strong reference. The predicate receives only `&Arc`. On a hit,
-`cursor.remove` transfers that `Arc`, and the temporary view is not used
-again.
+Steal borrows the task through the cursor `get`. The predicate receives only
+`&T`. On a hit the owner word is cleared first, and `cursor.remove` then
+transfers the list's existing owning reference.
 
 ## Memory-safety invariants
 
@@ -234,7 +232,7 @@ again.
 
 ## Thread safety
 
-`BaseScheduler` is not a concurrently shareable type. Concurrency safety
+`Scheduler` is not a concurrently shareable type. Concurrency safety
 comes from `ktask`'s per-CPU RQ lock and the IRQ/preemption constraints.
 
 ## Threat analysis
@@ -242,13 +240,13 @@ comes from `ktask`'s per-CPU RQ lock and the IRQ/preemption constraints.
 | ID | Threat | Impact | Trigger | Mitigation |
 |------|----------|----------|----------|----------|
 | T-01 | A missing `leave_current` leaves a stale `curr` or skewed statistics | High | A new leave path is not wired to the shared API | One `leave_current`; EEVDF `pick_next` asserts |
-| T-02 | The scheduler holds a running task's `Arc` and pins its lifetime | High | The `curr` strong reference is not released | `curr` is a non-owning snapshot |
+| T-02 | The scheduler holds a running task's `Arc` and pins its lifetime | High | The `curr` strong reference is not released | `Scheduler::curr` owns the runner and `leave` takes and returns that reference |
 | T-03 | Exit sets PLACE_LAG by mistake | Medium | Exit and Block share sleep accounting | A separate `LeaveReason::Exit` branch |
 | T-04 | The source RQ still counts a task's weight after migration | Medium | Migrate does not clear current accounting | Migrate goes through `leave_current` and clears the snapshot |
 | T-05 | A stale `curr` snapshot causes the wrong preemption or placement | Medium | A running entity's fields change without a refresh | `update_current` / `set_priority` refresh; test helpers sync explicitly |
 | T-06 | Idle-pull steals an entity that is still `on_cpu` | High | A remote `steal_ready_task` after yield/preempt enqueued the task | The scheduler removes only a ready waiter; the `ktask` predicate rejects `on_cpu` and does not `pick_next` |
 | T-07 | A stale Fair link, summary or cache selects or holds the wrong task | High | Removal, key changes, balancing or Drop violate tree invariants | Library balancing; RQ-serialized final-path repair; RETIRED reuse barrier; prepared invariant, oracle, ownership and reuse probes |
-| T-08 | `Scheduler` writes an `RqCell` without the RQ lock | High | The caller breaks the lock contract | Documented; the token is built only at a `Scheduler` entry and at unpublished init |
+| T-08 | `Scheduler` writes an `RqCell` without the RQ lock | High | The caller breaks the lock contract | Documented; the token is built at a `Scheduler` entry, at unpublished init, and inside tree `get_key` adapters that only run from class methods under a `Scheduler` entry |
 | T-09 | The arbiter `curr` `Arc` is the only reference after Block | High | The caller does not hold the task separately | `leave` releases the arbiter reference; the caller must hold the task |
 | T-10 | A second Stop task appears on the same RQ | High | A repeated activate, a mistaken enqueue, or `install_current` while a waiter exists | `enqueue` and `set_curr` assert when the slot is already occupied |
 

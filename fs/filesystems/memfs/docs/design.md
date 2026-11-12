@@ -1,4 +1,4 @@
-# memfs — 设计文档
+# memfs — Design Document
 
 ## Fallible superblock state
 
@@ -17,48 +17,49 @@ synchronous reclaim. Memfd does not take that lock and retains KERNEL. The
 caller chooses the policy explicitly; it is not inferred from current allocator
 behavior. Both paths still require task context for the surrounding VFS work.
 
-## 测试布局
+## Test Layout
 
-guest 单元测试位于 crate 根目录 `ut-tests/`，通过 `unittest::path_mod_test!`
-挂载在原父模块下，保留私有 `tests` 模块名、父模块访问及 `cfg(unittest)`。
-测试文件为 `lib.rs`、`shmem.rs`、`quota.rs` 和 `inode_quota.rs`。
-没有额外架构或 feature 门控，也没有 serial/user 标记或 host 测试。
-四种内核目标在链接 memfs 后均选择这些用例；`fs/boot` 无条件依赖 memfs，
-不需要新增文件系统 feature 开关。验证使用配置好的内核 `UNITTEST=y` 流程。
+The guest unit tests live in the crate-root directory `ut-tests/` and are
+mounted under their original parent module via `unittest::path_mod_test!`,
+preserving the private `tests` module name, parent-module access, and `cfg(unittest)`.
+The test files are `lib.rs`, `shmem.rs`, `quota.rs` and `inode_quota.rs`.
+There is no additional architecture or feature gating, and no serial/user markers or host tests.
+All four kernel targets select these test cases once memfs is linked; `fs/boot` depends on memfs unconditionally,
+so no new filesystem feature switch is needed. Verification uses the configured kernel `UNITTEST=y` flow.
 
-## 定位
+## Positioning
 
-`memfs` 提供纯内存文件系统的 inode 和目录树实现。普通文件内容通过
-`VfsInode::i_mapping -> kvfs::AddressSpace` 提供
-cached content 与 MM shared object identity。
+`memfs` provides the inode and directory-tree implementation of a pure in-memory filesystem. Regular file content is provided through
+`VfsInode::i_mapping -> kvfs::AddressSpace`, which supplies
+cached content and MM shared object identity.
 
-Linux 对应关系：
+Linux counterparts:
 
-- tmpfs/shmem inode 持有 `address_space`
-- `mm/shmem.c` 通过 inode-backed page cache 管理文件内容
-- `shmem_file_setup()` 创建不挂入全局路径空间的匿名 tmpfs 文件对象
+- A tmpfs/shmem inode holds an `address_space`
+- `mm/shmem.c` manages file content through the inode-backed page cache
+- `shmem_file_setup()` creates an anonymous tmpfs file object that is not attached to the global path namespace
 
-## 背景
+## Background
 
-`memfs` 只拥有 inode、目录树、符号链接和元数据。普通文件的页缓存、evict
-listener 和 MM object identity 归 VFS inode address-space 管理。
-因此同一 inode 的 open-file、hard-link、mmap 和 truncate 路径共享同一个内容
-owner，而不是由每个 dentry 或 open file 单独拥有内容对象。
+`memfs` owns only inodes, the directory tree, symbolic links and metadata. The page cache, evict
+listener and MM object identity of regular files are managed by the VFS inode address-space.
+Therefore the open-file, hard-link, mmap and truncate paths of the same inode share the same content
+owner, rather than each dentry or open file owning its own content object.
 
-## 范围
+## Scope
 
 - `src/lib.rs`
 - `src/shmem.rs`
-- `src/quota.rs`、`src/ramfs.rs`
-- `ut-tests/lib.rs`、`ut-tests/shmem.rs`、`ut-tests/quota.rs`
-- regular-file inode 与 VFS address-space/page-cache 的连接
-- 目录、链接、符号链接和元数据维护
-- 基于 VFS `Cred` callback 的 inode owner 初始化
+- `src/quota.rs`, `src/ramfs.rs`
+- `ut-tests/lib.rs`, `ut-tests/shmem.rs`, `ut-tests/quota.rs`
+- Connection between regular-file inodes and the VFS address-space/page-cache
+- Maintenance of directories, links, symbolic links and metadata
+- Inode owner initialization based on the VFS `Cred` callback
 - fd-only tmpfs/shmem anonymous regular-file factory and opened-file conversion
 - mounted tmpfs page quota, `size`/`nr_blocks` options, and `statfs` reporting
 - Static KVFS `FileSystemType` descriptor for `tmpfs`.
 
-## 架构
+## Architecture
 
 ```text
 MemoryFs
@@ -76,15 +77,15 @@ VfsFile::mapping()
   -> VfsInode::i_mapping / kvfs::AddressSpace
 ```
 
-`memfs` 自身不定义第二套 file-backed content owner。KFS 高层通过
-`VfsFile::mapping()` 进入文件缓存路径后，只取得 inode address-space；private
-page-cache storage、mapped views 与 MM shared object identity 的统一宿主是
-`VfsInode::i_mapping` 下的 `AddressSpace`。
+`memfs` itself does not define a second file-backed content owner. After the upper KFS layers enter the file cache path through
+`VfsFile::mapping()`, they obtain only the inode address-space; the unified host of private
+page-cache storage, mapped views and MM shared object identity is the `AddressSpace` under
+`VfsInode::i_mapping`.
 
-`MemoryFs` 也不保存 inode-number 到 `VfsInode` 的第二张表。构造时先分配
-`SuperBlock`，再由 root initializer 通过 `SuperBlock::get_or_init_inode()` 进入 VFS-wide table
-建立 root；普通 lookup/create/link 由当前目录 inode 的 superblock 进入同一个 table。`MemoryFs`
-自己的 slab 只分配 inode 编号；目录项和 VFS 操作对象直接持有 backing inode。
+`MemoryFs` also does not keep a second table mapping inode numbers to `VfsInode`. During construction it first allocates the
+`SuperBlock`, and then the root initializer enters the VFS-wide table through `SuperBlock::get_or_init_inode()`
+to establish the root; ordinary lookup/create/link enters the same table through the superblock of the current directory inode. The slab of `MemoryFs`
+itself only allocates inode numbers; directory entries and VFS operation objects directly hold the backing inode.
 
 `TMPFS_TYPE` describes only the canonical name and nodev superblock factory.
 Boot and KVFS own filesystem-type registration and per-mount policy, so that
@@ -92,37 +93,37 @@ policy is not stored in `MemoryFs` inode state. Each tmpfs mount creates an
 independent instance. Device discovery uses the separate `sysfs` crate rather
 than a memfs-backed pseudo sysfs.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-- regular-file read/write/truncate 允许睡眠，因为可能分配 folio。
-- 目录和元数据操作使用 `memfs` 自身锁保护。
-- 不适用于中断上下文。
+- Regular-file read/write/truncate may sleep, because they may allocate folios.
+- Directory and metadata operations are protected by `memfs`'s own locks.
+- Not applicable to interrupt context.
 
-## 算法流程
+## Algorithm Flow
 
-### 创建普通文件
+### Creating a Regular File
 
-1. VFS 完成路径与父目录 DAC 后，把同一 `&Cred` 传给 create/mkdir/mknod/symlink callback。
-2. `memfs` 调用 `inode_init_owner()`，用 `fsuid/fsgid` 初始化 owner，并处理 setgid
-   父目录的组继承与子目录 setgid 传播。
-3. `memfs` 创建对应 inode；`VfsInode` 构造时持有稳定的 `kvfs::AddressSpace`。
-4. 首次通过 KFS page-cache file path 进入文件缓存路径。
-5. `AddressSpace` 建立唯一的私有 `MappingPages` 实现组件。
-6. open-file、mmap、truncate 和 evict 路径复用同一个 address-space mapping。
+1. After the VFS completes path resolution and the parent-directory DAC check, it passes the same `&Cred` to the create/mkdir/mknod/symlink callback.
+2. `memfs` calls `inode_init_owner()`, initializes the owner with `fsuid/fsgid`, and handles group inheritance from a setgid
+   parent directory and setgid propagation to child directories.
+3. `memfs` creates the corresponding inode; the `VfsInode` holds a stable `kvfs::AddressSpace` when constructed.
+4. The file cache path is entered for the first time through the KFS page-cache file path.
+5. `AddressSpace` establishes the unique private `MappingPages` implementation component.
+6. The open-file, mmap, truncate and evict paths reuse the same address-space mapping.
 
-### 创建匿名文件
+### Creating an Anonymous File
 
-1. `memfs::shmem` factory 创建私有 `MemoryFs`，名称为 `tmpfs`。
-2. factory 在该私有 filesystem 的 root mount 下创建 regular file。
-3. file inode 仍通过同一个 `VfsInode::i_mapping` 获取 page cache 与 MM object
-   identity。
-4. 返回的 `Location` 由调用方通过 KFS `OpenOptions` 打开成 fd，不挂入进程可见
-   路径空间。
+1. The `memfs::shmem` factory creates a private `MemoryFs` named `tmpfs`.
+2. The factory creates a regular file under the root mount of that private filesystem.
+3. The file inode still obtains its page cache and MM object
+   identity through the same `VfsInode::i_mapping`.
+4. The returned `Location` is opened into an fd by the caller through KFS `OpenOptions`, and is not attached to the process-visible
+   path namespace.
 
 ### tmpfs mount entry
 
 The public VFS mount path enters `tmpfs_get_tree` in `src/lib.rs`. That entry
-parses the tmpfs context options, resolves the page limit and root metadata,
+reads the tmpfs context options parsed by `init_tmpfs_context`, resolves the page limit and root metadata,
 and passes the selected `FileSystemType`, VFS-wide `SuperBlockFlags`, and
 mount options to `shmem::new_tmpfs_with_type_and_mount_options`, which
 constructs the private `MemoryFs` superblock. After the factory returns, VFS
@@ -161,9 +162,9 @@ Anonymous shmem/memfd instances remain unlimited in both dimensions.
 Both limits use zero for unlimited throughout parsing and accounting;
 `Option` in a remount request only distinguishes an omitted limit from an explicit value.
 
-### 读取普通文件
+### Reading a regular file
 
-1. KFS file path 找到 inode address-space mapping。
+1. The KFS file path locates the inode's address-space mapping.
 2. memfs `MemoryNode::read_iter` owns sparse-hole handling and never invokes
    generic readahead. It uses `AddressSpace::visit_resident_folios` to access the
    common cache with invalidation excluded and EOF sampled under that guard.
@@ -173,9 +174,9 @@ Both limits use zero for unlimited throughout parsing and accounting;
 4. File-mapping faults materialize cache identities normally. Capacity failures
    become BusError/SIGBUS; buffered write capacity failures remain ENOSPC.
 
-### 写入普通文件
+### Writing a regular file
 
-1. KFS file path 找到 inode address-space mapping。
+1. The KFS file path locates the inode's address-space mapping.
 2. `kvfs::AddressSpace` materializes a missing folio through the tmpfs page
    quota and writes into it.
 3. Candidate physical storage is prepared outside the cache index lock. The
@@ -183,40 +184,40 @@ Both limits use zero for unlimited throughout parsing and accounting;
    returns `StorageFull` and the unpublished candidate is released. Candidate
    allocation can fail before quota admission, so the quota is not a physical
    memory reservation.
-4. inode-owned `AddressSpace` 继续提供共享 object identity 与 mmap contract。
+4. The inode-owned `AddressSpace` continues to provide the shared object identity and the mmap contract.
 
-### 文件同步
+### File synchronization
 
 The single `FileOperations::fsync` callback accepts a half-open byte range and
 `data_only`. MemoryNode explicitly accepts full, partial and empty ranges for
 both intents; no persistent device or required data I/O exists.
 
-`MemoryNode` 为内存文件和目录显式提供 `fsync/fdatasync` 成功的空操作，
-包括 tmpfs、ramfs 和基于 shmem 的 memfd；这些对象没有持久化设备，
-同步不能通过清除或驱逐 dirty folio 丢弃唯一的数据副本。
-FIFO 和设备 inode 在 VFS open 时安装专用 operation table，不继承该空操作。
+`MemoryNode` explicitly provides a successful no-op `fsync/fdatasync` for in-memory files and directories,
+including tmpfs, ramfs and shmem-based memfd; these objects have no persistent device,
+and synchronization must not discard the only copy of the data by clearing or evicting dirty folios.
+FIFO and device inodes install a dedicated operation table at VFS open time and do not inherit this no-op.
 
-### memfd 与 exec
+### memfd and exec
 
-`create_memfd_file()` 用模式 `0o777` 创建匿名 memfd 文件（对齐 Linux
-`shmem_file_setup` 配合 umask）。可执行位对 `fexecve(memfd)` /
-`execveat(dirfd, "", AT_EMPTY_PATH)` 是必需的：runc/crun 把自身镜像拷入 memfd 并
-重新 exec（CVE-2019-5736 自克隆加固），exec 的 `MAY_EXEC` 检查需要通过。memfd
-exec 的显示路径为调用方提供的 `/proc/self/fd/<n>`，`/proc/self/exe` 跟随同一
-已打开 backing file。
+`create_memfd_file()` creates the anonymous memfd file with the fixed mode `0o777`, which is not subject to umask (matching Linux memfd creation through `shmem_file_setup`).
+The executable bit is required for `fexecve(memfd)` /
+`execveat(dirfd, "", AT_EMPTY_PATH)`: runc/crun copy their own image into a memfd and
+re-exec it (CVE-2019-5736 self-clone hardening), and the exec `MAY_EXEC` check must pass. The display path
+of a memfd exec is the caller-supplied `/proc/self/fd/<n>`, and `/proc/self/exe` follows the same
+opened backing file.
 
-memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_memfd_file`
-接收初始 seal：没有 `MFD_ALLOW_SEALING` 时立即置 `F_SEAL_SEAL`，此后不能再加
-任何 seal（对齐 Linux）。
+The memfd seal set is managed atomically by `ShmemSealSet` and only allows additions. `create_memfd_file`
+takes the initial seals: without `MFD_ALLOW_SEALING`, `F_SEAL_SEAL` is set immediately, after which no
+further seals can be added (aligned with Linux).
 
-## 并发模型
+## Concurrency model
 
-- inode metadata 由 `Mutex<Metadata>` 保护。
-- 目录项表由 `Mutex<HashMap<...>>` 保护。
-- 同一 filesystem instance 的 VFS inode identity 由 VFS-wide table 按 `(SuperBlock, ino)` 串行
-  初始化；`MemoryFs` 不增加 cache lock 或 cache 字段。
-- inode address-space 的 private page-cache storage、mapped views 与 MM object identity
-  由 `kvfs::AddressSpace` 内部同步保护；
+- Inode metadata is protected by `Mutex<Metadata>`.
+- The directory entry table is protected by `Mutex<HashMap<...>>`.
+- VFS inode identity within the same filesystem instance is initialized serially by the VFS-wide table, keyed by `(SuperBlock, ino)`;
+  `MemoryFs` adds no cache lock or cache field.
+- The inode address-space's private page-cache storage, mapped views and MM object identity
+  are protected by synchronization internal to `kvfs::AddressSpace`;
 - `MemoryNode::cache_residency()` gives each newly constructed mapping one
   reference to the filesystem quota; lookup never traverses weak inode or
   superblock references on a resident access.
@@ -231,33 +232,33 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
   releases its number under the slab lock, then returns its allocation charge.
   Admission releases stats before acquiring slab; stats never acquires inode locks.
 
-## 设计决策
+## Design Decisions
 
-1. `memfs` 不自行实现 file-backed content owner，而是复用 VFS inode
-   address-space mapping。
-   原因：同一 inode 的 file I/O、mmap、truncate 和 hard-link alias 必须共享同一
-   内容对象。
+1. `memfs` does not implement its own file-backed content owner, but reuses the VFS inode
+   address-space mapping.
+   Reason: file I/O, mmap, truncate and hard-link aliases of the same inode must share the same
+   content object.
 
-2. 符号链接仍由 `FileContent.symlink` 保存。
-   原因：当前 symlink 数据路径独立于 regular-file page cache。包括长 target 在内的
-   String 分配不计入 resident-folio quota；该额度不是文件系统全部内存的总预算。
+2. Symbolic links are still stored in `FileContent.symlink`.
+   Reason: the current symlink data path is independent of the regular-file page cache. String allocations, including those for long targets,
+   are not counted against the resident-folio quota; this quota is not a total budget for all filesystem memory.
 
-3. 匿名文件用私有 tmpfs mount 中的 regular file 表达。
-   原因：这保持了 Linux `shmem_file_setup()` 的私有文件对象 + inode-owned page
-   cache 语义，同时不把对象挂入进程可见路径空间。调用方通过 shmem 对象转换成
-   opened `VfsFile`，不重新操作匿名路径的 open 细节。
+3. Anonymous files are represented as regular files in a private tmpfs mount.
+   Reason: this preserves the Linux `shmem_file_setup()` semantics of a private file object + inode-owned page
+   cache, without attaching the object to the process-visible path space. The caller converts the shmem object into
+   an opened `VfsFile`, and does not redo the open details of an anonymous path.
 
-4. `memfs` 不保存“当前凭据”。
-   原因：当前 task 属于上层 `kprocess`；创建者身份由每次 VFS callback 的 `&Cred`
-   显式提供，inode 只持久化派生出的 UID/GID。
+4. `memfs` does not store the "current credentials".
+   Reason: the current task belongs to the upper-layer `kprocess`; the creator identity is provided by the `&Cred` of each VFS callback
+   explicitly, and the inode persists only the derived UID/GID.
 
-5. filesystem type 描述符不保存 mount flags。
-   原因：`nosuid`、`nodev`、`noexec` 和 atime policy 属于每个 KVFS `Mount`，
+5. The filesystem type descriptor does not store mount flags.
+   Reason: `nosuid`, `nodev`, `noexec` and the atime policy belong to each KVFS `Mount`.
    The nodev factory only selects or creates the filesystem and superblock;
    every tmpfs mount creates a new instance.
 
 6. tmpfs size is enforced at folio materialization rather than file length.
-   原因：sparse holes do not consume pages, while a small file can dirty one
+   Reason: sparse holes do not consume pages, while a small file can dirty one
    full page. Charging physical folios makes truncate/unlink return quota after
    the last retained reference releases that allocation, without a second
    accounting pass. A buffered-read hole is served from the
@@ -266,15 +267,15 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
    Linux does for `shmem_fault()`; only the buffered-read path follows
    `SGP_READ` and zero-fills holes.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-- inode 释放时，`AddressSpace` 在最后一个引用释放时销毁，其直接持有的 `MappingPages` 随字段释放。
+- When an inode is released, the `AddressSpace` is destroyed when its last reference is released, and the `MappingPages` it directly holds are released along with the field.
 - Physical folio destruction returns its page-quota charge. `truncate(0)` and
   final inode eviction detach entries; retained pins, tokens and batches keep
   capacity charged until they release the physical pages.
-- 目录删除逻辑由 `InodeRef` 和 nlink 维护。
-- `InodeRef` 持有 backing inode；`Inode::drop` 在最后一个引用释放时归还编号与
-  分配额度，临时引用与 VFS 操作对象遵循同一生命周期。
+- Directory removal logic is maintained by `InodeRef` and nlink.
+- `InodeRef` holds the backing inode; `Inode::drop` returns the inode number and
+  allocation quota when the last reference is released, and temporary references and VFS operation objects follow the same lifecycle.
 
 `quota.rs` owns the mount limit, usage and remount/statfs policy. Each mapping
 stores one lifecycle provider reference. Admission runs only for winning

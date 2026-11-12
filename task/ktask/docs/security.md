@@ -177,7 +177,7 @@ consumer admission or a progress guarantee without a later safe boundary.
 
 This document covers the security boundaries of the entire `task/ktask` crate:
 the `lib.rs` integration and `api.rs` entry points; task lifetime and context
-in `task.rs`; scheduling in `run_queue.rs`; blocking in `future/` and
+in `task.rs`; scheduling in `run_queue/`; blocking in `future/` and
 `wait_queue.rs`; timers in `timers.rs` and the scoped provider in `timer_api.rs`;
 completion wait and daemon integration in
 `task_api.rs` and `softirqd.rs`; and diagnostics in `tracing_hooks.rs`,
@@ -194,7 +194,7 @@ revalidates CPU routing after migration. Its Drop drains delivery before freeing
 storage; the caller must leave callback-needed locks free and the target CPU
 able to progress, including when returning from the scoped body.
 
-Test-only integration in `tests.rs` and `tests_timer_routing.rs` is covered
+Test-only integration in `ut-tests/task_lifecycle.rs` and `ut-tests/tests_timer_routing.rs` is covered
 as validation infrastructure, not as a production service. The prepared-timer
 routing driver must run both workers concurrently on the requested CPUs and
 join them before returning. `ktimer_core` owns timer scenario storage and
@@ -402,8 +402,8 @@ reentry flag or shared lock was added.
 
 | Entry | Role |
 |---|---|
-| `RunQueueRegistry::try_get` | Restores a `Once<usize>` address to `&'static mut RunQueue` |
-| `current_run_queue_ptr` / `current_run_queue_mut` | Current-CPU `RUN_QUEUE` `NonNull` / `&'static mut` |
+| `RunQueueRegistry::try_get` | Restores a `Once<usize>` address to `&'static RunQueue` |
+| `current_run_queue_ptr` / `current_run_queue_ref` | Current-CPU `RUN_QUEUE` `NonNull<RunQueue>` / shared `&'static RunQueue` |
 | `with_idle_task` / `PREV_TASK` access | Same-CPU idle / outgoing switch-owner slots |
 | `init` / `init_secondary` | `CurrentTask::init_current` at bring-up |
 
@@ -415,7 +415,7 @@ that have not finished bring-up.
 Invariants:
 
 1. A CPU's `RUN_QUEUE` is reachable only after `init` / `init_secondary`.
-2. `&'static mut RunQueue` from `try_get` does not mean the caller already
+2. `&'static RunQueue` from `try_get` does not mean the caller already
    holds that CPU's IRQ/preempt exclusion. Local paths rely on IRQ/preempt
    off; cross-CPU paths rely on the dest RQ `SpinRaw` (`nr_running` /
    `nr_home` are atomics). Do not hold two `&mut RunQueue` aliases for the
@@ -665,7 +665,7 @@ while holding a spinlock or after changing execution context.
 | F-07 | Soft-timer deadline truncates to an already-due hardware time | Deadline exceeds the hardware nanosecond range | Timer fires immediately and repeatedly | IRQ storm; task and network paths stall | 1 | Typed deadline through the HAL; backend uses checked conversion and clamps out-of-range values to the farthest representable deadline. |
 | F-08 | Near-future rearm becomes due again during callback delivery | Delivery outlasts the new deadline | Repeated catch-up rounds | CPU pressure and delayed timer delivery | 1 | Limit catch-up rounds and back off prepared service; independent scheduler deadlines remain eligible. Network/watchdog use completion-relative periods. A callback that loops or continually rearms at/before the fixed round cutoff remains invalid usage and can prevent IRQ exit. |
 | F-09 | Idle-pull and remote wake invert lock order | Dest holds its lock then locks src | Deadlock | Scheduler stops | 1 | Lock only src, then dest enqueue. `resched` has already dropped the dest scheduler lock. |
-| F-10 | Affinity missed in the idle-pull window | `setaffinity` after steal and before dest enqueue | Task runs outside the new mask | Isolation violation | 2 | Recheck cpumask after dest enqueue. Enforce is mask-only when the task does not occupy a CPU. |
+| F-10 | Affinity missed in the idle-pull window | `setaffinity` after steal and before dest enqueue | Task runs outside the new mask | Isolation violation | 2 | Recheck cpumask under the dest scheduler and entity locks before enqueue. Enforce is mask-only when the task does not occupy a CPU. |
 | F-11 | A running user task never sees a pending signal | `interrupt()` only wakes waiters and does not kick the CPU; NOHZ has stopped the clock | Target stays in a user busy loop | Timed signals (for example SIGALRM) are delayed forever; the workload hangs | 2 | `interrupt()` sets local `need_resched` or sends a reschedule IPI for an `on_cpu` task. The user-return path rechecks `is_interrupted` after preempt. |
 | F-12 | Mutex-wait watchdog false-reports a long wait | Unsigned wrap subtraction of an old tick taken before the scan against a concurrently updated start tick | A normal short wait is treated as timeout | Watchdog wrongly takes the stop path | 1 | Sample the current tick after reading each task's wait snapshot. Discard the round if the start time is later than that sample. |
 

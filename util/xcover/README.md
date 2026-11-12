@@ -93,4 +93,4 @@ This project is a pure Rust reimplementation of [minicov](https://github.com/Ama
 
 ## License
 
-Licensed under the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0).
+Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).

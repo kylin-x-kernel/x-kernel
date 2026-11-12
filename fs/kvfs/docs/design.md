@@ -1,4 +1,4 @@
-# kvfs - 设计文档
+# kvfs - Design Document
 
 ## Superblock private owners
 
@@ -160,7 +160,7 @@ cloned and the read lock released before the policy callback runs, so
 callbacks always execute outside the lock.
 
 
-## 定位
+## Role
 
 `Dentry::notification_context` captures linkage and an interested parent inode
 under one location read lock. It copies the name only when the parent subscribes
@@ -175,24 +175,24 @@ The cache filters work; the notifier still validates each watch at delivery.
 Namespace event records retain inode references captured under the operation's
 namespace locks, keeping routing independent of mount IDs and name reuse.
 
-`kvfs` 提供 Linux 风格的 VFS 对象模型，包括 superblock、mount、dentry、inode、
-open file、路径解析和通用文件系统 helper。具体文件系统通过 inode/file operation
-traits 接入，POSIX 层负责把 syscall ABI 参数转换成 VFS 语义对象。`kvfs` 同时拥有
-namespace validation、lock ordering、dcache identity、类型化 operation flags，以及
-`VfsInode` 上的 page-cache attachment。
+`kvfs` provides a Linux-style VFS object model, including superblock, mount, dentry, inode,
+open file, path resolution, and generic filesystem helpers. Concrete filesystems plug in through inode/file operation
+traits, and the POSIX layer converts syscall ABI arguments into VFS semantic objects. `kvfs` also owns
+namespace validation, lock ordering, dcache identity, typed operation flags, and
+the page-cache attachment on `VfsInode`.
 
-权限模型与 Linux 保持同一层次：`kcred` 定义 `Cred`，syscall 层从当前 task 取得一次
-credential snapshot，`kvfs` 接收显式 `&Cred` 并完成路径遍历和通用 DAC。`kvfs` 不
-依赖 `kprocess`，因此可被 boot、内核伪文件系统和测试以明确身份复用。
+The permission model stays at the same layer as Linux: `kcred` defines `Cred`, the syscall layer takes a single
+credential snapshot from the current task, and `kvfs` receives an explicit `&Cred` and performs path traversal and generic DAC. `kvfs` does not
+depend on `kprocess`, so it can be reused with an explicit identity by boot code, in-kernel pseudo filesystems, and tests.
 
-## 字符设备分派
+## Character-device dispatch
 
-字符设备注册表和 PTMX 等 open 时选择后端的 multiplexer 共用
-`open_character_device`。私有 `ChrdevFileOperations` 统一转发能力、I/O、
-poll 和 open/release；文件系统节点不再复制这层适配。
-安装替换表不会自动再次调用 open，统一入口负责调用选定后端一次。
-VFS 在 open 成功后按最终操作表计算能力，末引用释放时调用最终后端 release。
-注册表查找锁不跨后端回调；设备号的注册与注销仍由调用方拥有。
+The character-device registry and multiplexers that select a backend at open time, such as PTMX, share
+`open_character_device`. The private `ChrdevFileOperations` uniformly forwards capabilities, I/O,
+poll, and open/release; filesystem nodes no longer duplicate this adaptation layer.
+Installing a replacement operation table does not automatically call open again; the unified entry point is responsible for calling the selected backend once.
+After open succeeds, the VFS computes capabilities from the final operation table, and calls the final backend's release when the last reference is dropped.
+The registry lookup lock is not held across backend callbacks; registration and unregistration of device numbers remain owned by the caller.
 
 ### Device-access policy (reverse injection)
 
@@ -207,88 +207,88 @@ inverted: kvfs does not depend on bpf/cgroup, and policy callbacks run after
 the registry read lock is released. With no policy registered, device access
 is unrestricted; a denial answers `VfsError::OperationNotPermitted` (`EPERM`).
 
-## 块设备文件尺寸与范围操作
+## Block-device file size and range operations
 
-块设备有两类刻意分离的尺寸视图，与 Linux 一致：设备节点的
-`getattr`/`fstat` 元数据保持零尺寸（Linux 设备节点同样如此），而
-`VfsFile::size()`——`lseek(SEEK_END)` 的基准——实时读取
-`BlockDevice::size()`，对应 Linux 的 `bd_inode`。容量随 loop
-attach/detach 等操作即时变化，不缓存快照；记录锁的 `SEEK_END` 基准是节点
-尺寸，append 写保持在调用者位置（`blkdev_write_iter` 不做重定位）。
+Block devices have two deliberately separate size views, consistent with Linux: the device node's
+`getattr`/`fstat` metadata stays at zero size (as with Linux device nodes), while
+`VfsFile::size()` - the basis for `lseek(SEEK_END)` - reads
+`BlockDevice::size()` live, corresponding to Linux's `bd_inode`. Capacity changes immediately with operations such as loop
+attach/detach and is not cached as a snapshot; the `SEEK_END` basis for record locks is the node
+size, and an append write stays at the caller's position (`blkdev_write_iter` does no repositioning).
 
-`fallocate` 的模式合法性（未知 flag、`PUNCH_HOLE` 与 `ZERO_RANGE` 互斥、
-`PUNCH_HOLE` 必须带 `KEEP_SIZE`、COLLAPSE/INSERT/UNSHARE 的排他性）由
-公共入口按 `vfs_fallocate` 统一校验；块设备随后由
-`DefaultBlkdevFileOperations` 按设备语义执行，不走普通文件的逐字节模拟：
-容量（越界且无 KEEP_SIZE 则 `EINVAL`）与逻辑块对齐（`EINVAL`）先于任何
-介质写入校验，通过后仅 `ZERO_RANGE`（± `KEEP_SIZE`）对齐地整段写零。
-`PUNCH_HOLE` 携带释放语义：Linux 以 `BLKDEV_ZERO_NOFALLBACK` 调用，设备
-具备 write-zeroes/discard 卸载时成功、否则 `EOPNOTSUPP`。块设备契约
-`BlockDeviceOperations` 目前尚未定义这两类能力位，本内核有意收窄为对所有
-后端返回 `EOPNOTSUPP`（按能力缺失上报，而非软件写零冒充释放）。没有这一步，依赖文件尺寸的上层语义（如
-`ext2fs_zero_blocks2` 的清零请求）会把整个设备视为空而静默跳过实际工作。
+The validity of `fallocate` modes (unknown flags, mutual exclusion of `PUNCH_HOLE` and `ZERO_RANGE`,
+`PUNCH_HOLE` requiring `KEEP_SIZE`, exclusivity of COLLAPSE/INSERT/UNSHARE) is validated uniformly by
+the public entry point following `vfs_fallocate`; the block device is then handled by
+`DefaultBlkdevFileOperations` with device semantics, not the byte-by-byte emulation used for regular files:
+capacity (out of range without KEEP_SIZE gives `EINVAL`) and logical-block alignment (`EINVAL`) are validated before any
+media write, and once they pass, only `ZERO_RANGE` (with or without `KEEP_SIZE`) writes zeros over the whole aligned range.
+`PUNCH_HOLE` carries deallocation semantics: Linux calls it with `BLKDEV_ZERO_NOFALLBACK`, which succeeds when the device
+has write-zeroes/discard offload and otherwise returns `EOPNOTSUPP`. The block-device contract
+`BlockDeviceOperations` does not yet define these two capability bits, so this kernel deliberately narrows the behavior to returning `EOPNOTSUPP` for all
+backends (reporting the missing capability instead of passing off software zero-writes as deallocation). Without this step, upper-layer semantics that depend on the file size (such as
+the zeroing request in `ext2fs_zero_blocks2`) would treat the whole device as empty and silently skip the actual work.
 
-字符设备统一按同一 major 内的非空 minor 范围注册，单设备使用长度 1。
-注册表用按 `(major, first_minor)` 排序的 BTreeMap 查找覆盖范围；重复、包含
-或部分重叠均返回错误，不隐式替换已有驱动。注销必须匹配完整起点和长度。
+Character devices are uniformly registered as a non-empty minor range within a single major, and a single device uses length 1.
+The registry looks up the covering range in a BTreeMap ordered by `(major, first_minor)`; duplicate, containing,
+or partially overlapping ranges all return an error, and an existing driver is never implicitly replaced. Unregistration must match both the full start and the length.
 
-inode 只弱引用一次注册对象；该对象拥有操作表与单向退役标记。注销在释放
-注册表锁之前标记退役，新注册产生新对象，即使复用同一操作表也不会复活旧
-缓存。下一次打开忽略退役缓存并重新查表，不需要保留或遍历 inode 反向列表。
-已选定的操作表和已打开文件仍持有后端引用；设备下线后的准入由后端负责。
-注册、注销、打开使用可睡眠上下文；后端回调及最终析构均在注册表锁外执行。
-VFS 不判断路径是否来自 devpts，也不负责 PTY 实例生命周期。
+An inode holds only a weak reference to one registration object; that object owns the operation table and a one-way retirement flag. Unregistration marks it retired before releasing the
+registry lock, and a new registration produces a new object, so even if the same operation table is reused, the old
+cache is not revived. The next open ignores the retired cache and looks up the table again, with no need to keep or walk a reverse inode list.
+An already selected operation table and already open files still hold backend references; admission after the device goes offline is the backend's responsibility.
+Registration, unregistration, and open use a sleepable context; backend callbacks and final destruction all run outside the registry lock.
+The VFS does not determine whether a path comes from devpts, and is not responsible for PTY instance lifetime.
 
-普通 open 的最终 magic link 与路径查询使用相同的对象跳转，不将 readlink
-展示字符串重新解析为路径。因此 procfd 可保留已取消链接 inode 的身份，且
-不会因同名路径重新创建而打开另一个对象。跳转仍受跟随策略、链接次数与
-目标打开权限检查约束；普通文本符号链接继续按其目标字符串解析。
+The final magic link of an ordinary open and path lookup use the same object jump, and the readlink
+display string is not re-parsed as a path. Therefore procfd can retain the identity of an unlinked inode, and
+will not open a different object because a path of the same name was recreated. The jump is still subject to the follow policy, the link count, and
+the target's open-permission checks; ordinary textual symbolic links continue to be resolved by their target string.
 
-## 文件同步契约
+## File synchronization contract
 
-显式接入 `poll_file_io` 的文件操作先尝试 I/O；非阻塞无就绪直接返回。
-阻塞等待被任务信号打断时只再尝试一次，仍无法完成才返回文件等待中断标记。
-对象锁不得跨等待；future 拥有并清理订阅。对象和 iterator 仍负责保存已完成量，
-该标记不能单独证明整个请求可以重放。普通操作错误和注册失败不升级为此标记；
-是否转换成 syscall 重启码由已审计的 syscall 出口决定。
+File operations explicitly wired into `poll_file_io` try the I/O first; a non-blocking call with nothing ready returns immediately.
+A blocking wait interrupted by a task signal tries only once more, and returns the file-wait interruption marker only if it still cannot complete.
+Object locks must not be held across a wait; the future owns and cleans up its subscriptions. The object and its iterator remain responsible for saving the amount already completed;
+the marker alone cannot prove that the whole request can be replayed. Ordinary operation errors and registration failures are not escalated to this marker;
+whether it is converted into a syscall restart code is decided by the audited syscall exit.
 
-管道读写接入该等待流程，FIFO 打开时的伙伴等待仍使用原接口。管道单次写入的
-完成量及向量写入跨块累计量优先于中断；小于等于 PIPE_BUF 的请求仍保留整体
-原子写约束。重查同时观察数据、空间及端点关闭，不能将 EOF/EPIPE 改成重启。
+Pipe reads and writes are wired into this wait flow, while the peer wait at FIFO open still uses the original interface. The completed amount of a single pipe write
+and the cumulative amount of a vectored write across blocks take priority over interruption; requests of at most PIPE_BUF still keep the
+all-or-nothing atomic-write constraint. The recheck observes data, space, and endpoint closure together, and must not turn EOF/EPIPE into a restart.
 
-`transfer_files` 接收文件及可选的内核态偏移，管理整个请求的完成量和位置提交；
-它不接收用户指针，也不生成 syscall 重启码。传输栈分两层：边界层把
-`TransferPosition` 协议解析成显式起点（地址序位置锁、同 open description
-共锁、非定位文件的惰性槽位都在 `resolve_pair_positions` 结算一次），引擎层
-只看到显式偏移，不再接触 `f_pos`。所有形状共享同一个结算泵：每步经
-staged→确认→只消费确认前缀的管道语义或定位读写搬运至多一块，错误后有进度
-返回已完成字节数，仅零进度失败向外传播。文件间传输使用 4 KiB 中间缓冲；
-管道腿按步重取位置锁，锁不跨管道就绪等待；两个管道按对象地址序直接对转，
-不经缓冲。
+`transfer_files` takes files and an optional kernel-side offset, and manages the completed amount and position commit for the whole request;
+it takes no user pointers and does not generate syscall restart codes. The transfer stack has two layers: the boundary layer resolves the
+`TransferPosition` protocol into an explicit start (the address-ordered position lock, the shared lock for the same open description, and the lazy slot for non-seekable files
+are all settled once in `resolve_pair_positions`), and the engine layer
+sees only explicit offsets and no longer touches `f_pos`. All shapes share the same settlement pump: each step moves at most one block, through
+pipe semantics of staged, then confirm, then consume only the confirmed prefix, or through positioned reads and writes; after an error with progress made, the
+completed byte count is returned, and only a zero-progress failure propagates outward. File-to-file transfer uses a 4 KiB intermediate buffer;
+a pipe leg re-acquires the position lock at each step, and the lock is not held across pipe readiness waits; two pipes are transferred directly to each other in object-address order,
+without buffering.
 
-`copy_file_range` 引擎在同一临界区内完成范围校验与拷贝，顺序对应 Linux
-`generic_copy_file_checks`：目录报 `EISDIR`，非普通文件报 `EINVAL`，目标以
-`O_APPEND` 打开报 `EBADF`；配对准入紧随其后、早于回绕检查与 EOF 截短；范围按
-无符号加法回绕报 `EOVERFLOW`，请求先按源 EOF 截短，再受目标最大文件尺寸约束
-（起点达到上限即报 `EFBIG`，即使请求已被截短为零），同 inode 重叠区间报
-`EINVAL`。拷贝允许部分成功：错误后有进度返回已完成字节数并提交对应位置，
-已发布的位置始终描述目标实际接受的字节。
-配对准入按 Linux `f_op->copy_file_range` 的分支结构落在目标端操作表的
-原生拷贝原语 `copy_chunk_from` 上：目标表携带原语时由其自行判定输入兼容性
-（不兼容的存储由实现返回 `EXDEV`，VFS 不做身份比较），块级原语由泵驱动，
-结算仍只在泵里定义一次；目标表无原语时退回同超级块通用泵，跨超级块返回
-`EXDEV`。准入用一次 `len == 0` 的原语查询完成，位置与 Linux 一致地排在 EOF
-截短之前，因此不可服务的跨超级块空请求同样报 `EXDEV`，而不是被截短为零后
-静默成功（`copy_file_range01` 的跨设备能力探测正是这一形态）。memfs 落真实
-原语（memfs 存储到 memfs 存储的页缓存搬运），memfs 实例间的跨超级块拷贝因此
-是真实能力。
+The `copy_file_range` engine completes range validation and the copy within the same critical section, in an order matching Linux
+`generic_copy_file_checks`: a directory reports `EISDIR`, a non-regular file reports `EINVAL`, and a destination opened with
+`O_APPEND` reports `EBADF`; pairing admission follows immediately, before the wraparound check and EOF truncation; a range that
+wraps under unsigned addition reports `EOVERFLOW`, the request is first truncated at the source EOF and then limited by the destination's maximum file size
+(a start at or beyond the limit reports `EFBIG`, even if the request has already been truncated to zero), and overlapping ranges in the same inode report
+`EINVAL`. The copy may partially succeed: after an error with progress made, the completed byte count is returned and the corresponding position is committed,
+so the published position always describes the bytes the destination actually accepted.
+Pairing admission follows the branch structure of Linux `f_op->copy_file_range` and rests on the destination operation table's
+native copy primitive `copy_chunk_from`: when the destination table carries the primitive, it decides input compatibility itself
+(for incompatible storage the implementation returns `EXDEV`, and the VFS does no identity comparison), block-level primitives are driven by the pump,
+and settlement is still defined only once, in the pump; when the destination table has no primitive, it falls back to the generic same-superblock pump, and a cross-superblock request returns
+`EXDEV`. Admission is done with a single primitive query with `len == 0`, and, as in Linux, its position is before the EOF
+truncation, so an unserviceable cross-superblock empty request likewise reports `EXDEV`, instead of being truncated to zero and
+silently succeeding (the cross-device capability probe in `copy_file_range01` has exactly this shape). memfs provides a real
+primitive (a page-cache move from memfs storage to memfs storage), so cross-superblock copying between memfs instances
+is a real capability.
 
-管道复制由 `PipeObject` 管理消费边界：输入管道仅移除目标已接受的前缀，输出管道
-先在 mutex 内确认空间再调用源读取。两个管道按对象地址顺序持有 mutex，直接转移
-已接受的字节；释放锁后通知读写者。非管道回调可以睡眠，但不得重入管道。
-回调接口仅供 VFS 内部使用，可在管道锁内获取非管道文件的位置锁；
-调用者不得持位置锁进入管道操作，
-等待管道自身就绪时不持管道锁或文件位置锁。
+Pipe-to-pipe copying has its consumption boundary managed by `PipeObject`: the input pipe removes only the prefix the destination accepted, and the output pipe
+first confirms space inside the mutex before calling the source read. Two pipes hold their mutexes in object-address order and directly transfer
+the accepted bytes; readers and writers are notified after the locks are released. Non-pipe callbacks may sleep, but must not re-enter a pipe.
+The callback interface is for VFS-internal use only and may acquire the position lock of a non-pipe file while holding a pipe lock;
+callers must not enter pipe operations while holding a position lock,
+and while waiting for the pipe's own readiness, neither the pipe lock nor the file position lock is held.
 
 `VfsFile::fsync(data_only)` delegates to `fsync_range(0..u64::MAX, data_only)`.
 Both use the one `FileOperations::fsync(file, range, data_only)` capability.
@@ -317,33 +317,33 @@ not readiness: consumers still query the file in the current calling context.
 Event filtering and weak registration introduce no additional owner or source
 list. An expired captured source must not fall back to the default path.
 
-## 范围
+## Scope
 
-- `src/open_flags.rs`：原始 `O_*` 参数的规范化与 open intent。
-- `src/namei.rs`：路径遍历和 open 流程。
-- `src/permission.rs`：owner/group/other DAC 与 open access 映射。
+- `src/open_flags.rs`: normalization of raw `O_*` arguments and the open intent.
+- `src/namei.rs`: path traversal and the open flow.
+- `src/permission.rs`: owner/group/other DAC and the open access mapping.
 - `src/node/`: dentry, inode, inode-identity state machine and filesystem
   operation traits; also the character/block device file operations and the
   device-access policy registration (see "Device-access policy (reverse
   injection)").
-- `src/address_space/`：inode-owned `AddressSpace`、其直接持有的 `MappingPages` 容器，以及
-  writeback 与 truncate/invalidation 边界。`mod.rs` 定义对象和构造；`operations.rs`
-  定义 callback 与默认实现；`filemap.rs`、`readahead.rs`、`writeback.rs`、`truncate.rs`
-  分别承载算法编排；`views.rs` 管理注册与失效通知；crate 根目录的
-  `ut-tests/address_space/` 按算法组织回归。
-- `src/fiemap.rs`：与用户 ABI 解耦的 inode FIEMAP 请求状态、标志和安全输出接口。
-- `src/file.rs`：打开文件及其可变状态。
-- `src/file_ra.rs`：每次打开文件的预读历史、窗口选择与错误退让。
-- `src/xattr.rs`：xattr 名称/标志、namespace 权限和 `Path` 语义入口。
-- `src/pipe.rs`：匿名 pipe 与 pathname FIFO 共享的数据通路、会话状态及无状态
-  file-operation 对象。
-- `src/file_system_type.rs`：已注册文件系统类型及其创建入口。
-- `src/mount.rs`、`src/super_block.rs`：挂载树和文件系统实例。
+- `src/address_space/`: the inode-owned `AddressSpace`, the `MappingPages` container it holds directly, and
+  the writeback and truncate/invalidation boundaries. `mod.rs` defines the object and its construction; `operations.rs`
+  defines the callbacks and default implementations; `filemap.rs`, `readahead.rs`, `writeback.rs`, and `truncate.rs`
+  each carry the orchestration of one algorithm; `views.rs` manages registration and invalidation notifications; the crate-root
+  `ut-tests/address_space/` organizes regression tests by algorithm.
+- `src/fiemap.rs`: the inode FIEMAP request state, flags, and safe output interface, decoupled from the user ABI.
+- `src/file.rs`: an open file and its mutable state.
+- `src/file_ra.rs`: the per-open-file readahead history, window selection, and error backoff.
+- `src/xattr.rs`: xattr names/flags, namespace permissions, and the `Path` semantic entry points.
+- `src/pipe.rs`: the data path, session state, and stateless
+  file-operation objects shared by anonymous pipes and pathname FIFOs.
+- `src/file_system_type.rs`: registered filesystem types and their creation entry points.
+- `src/mount.rs`, `src/super_block.rs`: the mount tree and filesystem instances.
 
-具体 `anon_inodefs` 和 `pipefs` 位于 `fs/filesystems/`；KVFS 不保存它们的 filesystem
-type、hidden mount 或 singleton inode。
+The concrete `anon_inodefs` and `pipefs` live in `fs/filesystems/`; KVFS does not store their filesystem
+type, hidden mount, or singleton inode.
 
-## 架构
+## Architecture
 
 ```text
 current task                          kcred::Cred
@@ -384,7 +384,7 @@ uses the latter to emit Linux's `(unreachable)` prefix instead of converting the
 condition to `ENOENT`. `absolute_path()` uses the same component traversal with
 the mount-tree root as its boundary.
 
-pipe/FIFO 遵循 Linux `inode`、`pipe_inode_info` 与 `file` 的三层所有权：
+pipe/FIFO follows the three-layer ownership of Linux `inode`, `pipe_inode_info`, and `file`:
 
 ```text
 VfsInode
@@ -400,60 +400,60 @@ VfsFile
 └── private_data -> PipeObject
 ```
 
-`PipeObject` 对应 `pipe_inode_info`，而不是 file-operation table。pipe 模块必须和
-`VfsInode` 位于同一个 fs-core crate：inode 需要持有具体的 pipe session，pipe file
-operations 又需要 VFS file/inode 接口；拆成相互依赖的 crate 只会迫使实现增加 factory
-或类型擦除。
+`PipeObject` corresponds to `pipe_inode_info`, not to a file-operation table. The pipe module must live in the
+same fs-core crate as `VfsInode`: the inode needs to hold the concrete pipe session, and the pipe file
+operations in turn need the VFS file/inode interfaces; splitting them into mutually dependent crates would only force the implementation to add a factory
+or type erasure.
 
-原始整数只存在于 ABI 或兼容入口。进入 VFS 后，不同 flags 家族由不同 bitflags
-类型表达，调用者通过 `contains`、`intersects` 或组合语义方法读取，避免重新解释
-裸整数和误传其他 flags 家族。
+Raw integers exist only at the ABI or compatibility entry points. Once inside the VFS, the different flags families are expressed by distinct bitflags
+types, and callers read them through `contains`, `intersects`, or combined-semantics methods, which avoids reinterpreting
+bare integers and passing the wrong flags family by mistake.
 
-FIEMAP 的原始 C 布局和用户指针留在 POSIX 层。KVFS 以可选
-`InodeOperations::fiemap_operations()` 表达 inode capability，并把类型化 flags、容量、
-计数器和借用的安全 writer 收敛到 `FiemapExtentInfo`。文件系统后端只调用
-`fill_next_extent()`，不接触或保存用户地址。
+The raw C layout of FIEMAP and the user pointers stay in the POSIX layer. KVFS expresses the inode capability through the optional
+`InodeOperations::fiemap_operations()`, and gathers the typed flags, capacity,
+counters, and the borrowed safe writer into `FiemapExtentInfo`. Filesystem backends only call
+`fill_next_extent()`; they never touch or store user addresses.
 
-`OpenParams` 对应 Linux namei 中规范化后的完整 open 参数。其字段保持私有，创建
-意图、exclusive-create、lookup 行为和 mount 写入需求只能通过窄接口读取。
-`OpenFlags` 是其中的 `O_*` 位集合，同时表示 `VfsFile::f_flags`；原子存储仍使用
-`AtomicU32`，加载后立即恢复为类型。
+`OpenParams` corresponds to the complete normalized open arguments in Linux namei. Its fields are kept private, and the create
+intent, exclusive-create, lookup behavior, and mount write requirement can only be read through narrow interfaces.
+`OpenFlags` is the `O_*` bit set among them and also represents `VfsFile::f_flags`; atomic storage still uses
+`AtomicU32`, and the value is restored to the type immediately after loading.
 
-`SuperBlock` 先分配对象，再由 root initializer 构造并交回 root dentry，最后才绑定 root。
-nodev 实例完成初始化后进入全局 registry；block-backed 实例则像 Linux `sget_dev()` 一样，
-在 fill 前以 nascent 状态和独占 block-device claim 进入 registry，使并发调用者等待同一个
-identity。initializer 可通过 nascent `SuperBlock` 的 inode 方法进入 VFS inode
-identity table 并构造 root inode；失败会把实例标记为 dead、释放 claim、从 registry 删除并
-唤醒等待者，不发布半初始化 superblock。这对应 Linux 先分配
-`struct super_block`、再执行 `fill_super()`、最后令 `s_root` 可见的层次。文件系统 operation
-table 是由同一文件系统类型的所有挂载共享的静态对象；挂载私有状态只能放在 superblock
-private object 中，不重复保存 root。这对应 Linux 中 `s_op`、`s_fs_info` 与 `s_root` 的
-所有权边界，也避免私有状态和 root inode 之间形成引用环。`SuperBlockFlags` 对应
-`super_block.s_flags`，当前承载 `SB_RDONLY`、`SB_NOATIME` 和 `SB_NODIRATIME`；
-`SuperBlock` 同时拥有 Linux `s_magic`、`s_blocksize` 和 `s_maxbytes` 对应的通用值，文件系统
-在构造时提供它们，inode-private state 不再复制 magic、block size 或通用文件大小上限。
-`MountFlags` 对应 `vfsmount.mnt_flags`，承载 `MNT_RELATIME` 等 per-mount 策略。
-`SuperBlockOperations::statfs()` 只返回文件系统统计数据，POSIX 导出时才由 VFS 将
-superblock/mount 状态转换为 `StatFsFlags`。该转换遵循 Linux `fs/statfs.c`：当前建模的
-superblock 位只有 `RDONLY` 导出为 `ST_RDONLY`；`ST_NOATIME`/`ST_NODIRATIME` 只由
-per-mount 位导出，即使同名 superblock 位仍参与 inode atime 决策。重挂载在发布新
-`SuperBlockFlags` 前调用静态 `FsContextOperations::reconfigure`，不把 transaction callback
-放入 `SuperBlockOperations`；该 hook 从 `FsContext` 接收拟议 flags、changed mask、purpose、
-credential、解析态 `fs_private` 和拟议 superblock-private `s_fs_info`。reconfigure context
-在创建时绑定目标 `SuperBlock`，对应 Linux `fs_context::root->d_sb`；callback 只接收 context，
-不再额外传递一份可能失配的 superblock。VFS 只接受 purpose 为 reconfigure 且目标 identity
-匹配的 context；hook 和
-`sb_flags`/`sb_flags_mask` 的发布、最终 shutdown 由 superblock 内的 umount lock
-串行化，对应 `s_umount` 的职责。和 Linux 未提供 callback 时的行为一样，默认 hook 接受纯 VFS
-flags 变更；block-backed superblock 在 callback 前由 VFS 统一拒绝与 canonical read-only
-device 冲突的读写目标。
+`SuperBlock` first allocates the object, then the root initializer constructs the root dentry and hands it back, and only at the end is the root bound.
+A nodev instance enters the global registry after initialization completes; a block-backed instance, like Linux `sget_dev()`,
+enters the registry before fill in the nascent state with an exclusive block-device claim, so that concurrent callers wait on the same
+identity. The initializer can enter the VFS inode
+identity table and construct the root inode through the inode methods of the nascent `SuperBlock`; on failure the instance is marked dead, the claim is released, it is removed from the registry, and
+waiters are woken, so a half-initialized superblock is never published. This corresponds to the Linux layering of first allocating
+`struct super_block`, then running `fill_super()`, and finally making `s_root` visible. The filesystem operation
+table is a static object shared by all mounts of the same filesystem type; mount-private state can only live in the superblock
+private object, and the root is not stored again. This corresponds to the ownership boundary of `s_op`, `s_fs_info`, and `s_root` in
+Linux, and also avoids a reference cycle between the private state and the root inode. `SuperBlockFlags` corresponds to
+`super_block.s_flags` and currently carries `SB_RDONLY`, `SB_NOATIME`, and `SB_NODIRATIME`;
+`SuperBlock` also owns the generic values corresponding to Linux `s_magic`, `s_blocksize`, and `s_maxbytes`, which the filesystem
+provides at construction time, and inode-private state no longer duplicates the magic, block size, or generic file size limit.
+`MountFlags` corresponds to `vfsmount.mnt_flags` and carries per-mount policies such as `MNT_RELATIME`.
+`SuperBlockOperations::statfs()` returns only filesystem statistics, and only at POSIX export time does the VFS convert the
+superblock/mount state into `StatFsFlags`. The conversion follows Linux `fs/statfs.c`: among the currently modeled
+superblock bits, only `RDONLY` is exported as `ST_RDONLY`; `ST_NOATIME`/`ST_NODIRATIME` are exported only from the
+per-mount bits, even though the superblock bits of the same names still take part in inode atime decisions. Before publishing the new
+`SuperBlockFlags`, remount calls the static `FsContextOperations::reconfigure`, and does not put a transaction callback
+into `SuperBlockOperations`; this hook receives the proposed flags, changed mask, purpose,
+credential, parsed `fs_private`, and proposed superblock-private `s_fs_info` from `FsContext`. The reconfigure context
+is bound to the target `SuperBlock` at creation, corresponding to Linux `fs_context::root->d_sb`; the callback receives only the context
+and is not passed a separate superblock that might mismatch. The VFS accepts only a context whose purpose is reconfigure and whose target identity
+matches; the hook and the publication of
+`sb_flags`/`sb_flags_mask`, as well as the final shutdown, are serialized by the umount lock inside the superblock,
+corresponding to the role of `s_umount`. As with Linux behavior when no callback is provided, the default hook accepts pure VFS
+flags changes; before the callback, the VFS uniformly rejects, for a block-backed superblock, a read-write target that conflicts with a canonical read-only
+device.
 
-`ktime_types::TimestampLimits` 对应 Linux `super_block` 的 `s_time_gran`、`s_time_min` 和
-`s_time_max`。`SuperBlockOperations::timestamp_limits()` 采用 Linux `alloc_super()` 的整秒、
-完整 `i64` 范围作为保守默认；filesystem fill operation 安装 operation table 和 private state
-后查询一次该 capability，再由唯一的 `SuperBlock` 持久保存。文件系统可以像 Linux
-`fill_super()` 设置 `s_time_*` 一样，根据磁盘格式或协议状态显式覆盖；KVFS 不另建并行的
-format object，也不在 bridge 中复制该状态。
+`ktime_types::TimestampLimits` corresponds to Linux `super_block`'s `s_time_gran`, `s_time_min` and
+`s_time_max`. `SuperBlockOperations::timestamp_limits()` adopts Linux `alloc_super()`'s whole-second,
+full `i64` range as a conservative default; after the filesystem fill operation installs the operation table and private state
+it queries this capability once, and it is then persisted by the sole `SuperBlock`. A filesystem may explicitly override it based on the on-disk format or protocol state, just as Linux
+`fill_super()` sets `s_time_*`; KVFS does not create a parallel
+format object and does not duplicate this state in the bridge.
 `VfsInode::current_time()` rounds and clamps the current time;
 `truncate_timestamp()` applies the same conversion to explicit values. Explicit
 setattr, automatic I/O updates, and namespace helpers apply superblock policy
@@ -467,134 +467,136 @@ This follows Linux's separation between `current_time()`/`timestamp_truncate()`
 and `inode_set_*_to_ts()`, while allowing FAT-style distinct atime and mtime/ctime
 invariants.
 
-`FileSystemType` 对应 Linux `struct file_system_type`，描述文件系统实现的名称、
-是否需要 backing device、`init_fs_context` 及类型 flags。`init_fs_context` 为每个
-transaction 安装静态共享的 `FsContextOperations` 并初始化 context-private state，对应
-Linux `file_system_type::init_fs_context` 设置 `fs_context::ops`/`fs_private` 的层次；operation
-table 本身不保存 transaction state。全局注册表对应 Linux
-`file_systems` list，是按类型名挂载和 `/proc/filesystems` 的共同事实源。
-每个类型通过 context operation table 的 `get_tree` 回调构造 superblock，对应 Linux 的 `->get_tree`：nodev
-类型调用 `get_tree_nodev`；device-backed 类型调用 KVFS `get_tree_bdev`，由 VFS super
-层完成 source pathname、block-special inode、`nodev` 和 `rdev` 校验，再从 block core
-取得 canonical `BlockDevice`。`get_tree_bdev` 随后按
-`(FileSystemType, BlockDevice object)` 在同一个 superblock registry 中执行 Linux
-`sget_dev()` 等价查找：已有 live 实例直接复用；初始化中
-或正在 shutdown 的实例等待其 lifecycle transition；只有取得 reservation 的调用者才执行
-filesystem fill-super。新的 block-backed superblock 在 block core 取得 exclusive claim，
-所以同一 canonical device 不能由不同 filesystem type 或 instance 并行拥有；同一 `dev_t`
-撤销后重新发布的 `BlockDevice` 对象则是新的介质代际，不会命中旧 root 和 cache。这与
-Linux `setup_bdev_super()` 以新 superblock 作为 exclusive `bdev_open()` holder 一致：不同
-filesystem type 创建不同 holder，因此不能同时取得同一设备。VFS
-先分配并注册已经带有 `s_type/s_bdev/s_flags` 的 nascent `SuperBlock`，fill callback 只接收
-该对象并安装 filesystem operations 与 root，不再接收或复制 type、device、flags；一次性
-fill closure 可以捕获同一 `FsContext` 中已经解析的 mount state，而不把 option parser 放进
+`FileSystemType` corresponds to Linux `struct file_system_type` and describes the name of a filesystem implementation,
+whether it needs a backing device, `init_fs_context`, and type flags. `init_fs_context` installs the statically shared `FsContextOperations` for each
+transaction and initializes the context-private state, corresponding to
+the layering in which Linux `file_system_type::init_fs_context` sets `fs_context::ops`/`fs_private`; the operation
+table itself holds no transaction state. The global registry corresponds to the Linux
+`file_systems` list and is the common source of truth for mounting by type name and for `/proc/filesystems`.
+Each type constructs a superblock through the `get_tree` callback of the context operation table, corresponding to Linux's `->get_tree`: nodev
+types call `get_tree_nodev`; device-backed types call KVFS `get_tree_bdev`, and the VFS super
+layer completes validation of the source pathname, block-special inode, `nodev` and `rdev`, and then obtains the canonical `BlockDevice` from the block core.
+`get_tree_bdev` then performs, by
+`(FileSystemType, BlockDevice object)` in the same superblock registry, the lookup equivalent to Linux
+`sget_dev()`: an existing live instance is reused directly; an instance being initialized
+or shutting down waits for its lifecycle transition; only the caller that obtains the reservation executes
+filesystem fill-super. A new block-backed superblock obtains an exclusive claim in the block core,
+so the same canonical device cannot be owned in parallel by different filesystem types or instances; a `BlockDevice` object republished for the same `dev_t`
+after revocation is a new medium generation and will not hit the old root and cache. This is consistent with
+Linux `setup_bdev_super()` using the new superblock as the exclusive `bdev_open()` holder: different
+filesystem types create different holders and therefore cannot obtain the same device simultaneously. The VFS
+first allocates and registers the nascent `SuperBlock` that already carries `s_type/s_bdev/s_flags`; the fill callback receives only
+that object and installs the filesystem operations and root, and no longer receives or copies type, device or flags; the one-shot
+fill closure may capture the mount state already parsed in the same `FsContext`, without putting the option parser into
 generic VFS. Driver open runs after reservation, outside the registry mutex. The once-installed
 claim corresponds to Linux `s_bdev_file`, separate from reserved `s_bdev` identity.
 Failure/final shutdown closes it before unregistering and waking mount waiters.
 VFS publishes the available lifecycle only after fill succeeds.
-已有 block-backed superblock 与新请求的 `SB_RDONLY` 不一致时返回 `EBUSY`，对应 Linux
-`get_tree_bdev_flags()` 的已有 `s_root` 分支，而不是将 block mount 降格为 per-mount 策略。
-与 Linux `bdev_file_open_by_path` 一样，可写 mount 会拒绝
-canonical read-only device；只读 mount 仍可继续交给 filesystem fill-super。`fs_flags` 字段是类型化
-的 `FileSystemTypeFlags`（bitflags），对应 Linux `struct file_system_type::fs_flags`，
-其中 `REQUIRES_DEV` 声明是否需要 backing device，位编号与 Linux `include/linux/fs.h`
-对齐，供 `/proc/filesystems` 的 nodev 列和 mount 错误路径判断；未来按 Linux 语义
-新增标志（如 binary mountdata、subtype）时保持同一编号体系即可扩展。
+When an existing block-backed superblock disagrees with the new request's `SB_RDONLY`, `EBUSY` is returned, corresponding to Linux's
+existing-`s_root` branch of `get_tree_bdev_flags()`, rather than downgrading the block mount to a per-mount policy.
+As with Linux `bdev_file_open_by_path`, a writable mount rejects a
+canonical read-only device; a read-only mount may still proceed to filesystem fill-super. The `fs_flags` field is the typed
+`FileSystemTypeFlags` (bitflags), corresponding to Linux `struct file_system_type::fs_flags`,
+in which `REQUIRES_DEV` declares whether a backing device is needed, and the bit numbering is aligned with Linux `include/linux/fs.h`,
+for the nodev column of `/proc/filesystems` and the mount error path; when flags are added in the future
+following Linux semantics (such as binary mountdata, subtype), keeping the same numbering scheme is enough to extend it.
 
-block-special inode 统一安装 KVFS 的 `DefaultBlkdevFileOperations`，对应 Linux
+block-special inodes uniformly install KVFS's `DefaultBlkdevFileOperations`, corresponding to Linux
 `def_blk_fops`. Only open looks up `rdev`; existing file-private storage retains
 `BlockDeviceClaim`. Capacity, I/O, ioctl and close use that original device even
 after withdrawal or device-number reuse. The claim preserves `O_EXCL`; ioctl uses
 the current nonblocking flag. Last-file release closes once.
-块设备特殊 inode 尚无 canonical block address space，mmap 返回 ENODEV；启用前必须同时实现介质变更失效协议。
+A block-device special inode has no canonical block address space yet, so mmap returns ENODEV; the medium-change invalidation protocol must be implemented before enabling it.
 KVFS supplies checked argument access and `has_sys_admin` from the current caller.
 The ioctl path receives the syscall caller's `&Cred`, without retaining extra credentials.
-通用 block 命令及未知命令的 driver fallback 统一由 `BlockDevice::ioctl` 分派。普通 close 和 write 不隐式 flush，显式 fsync 才把
-durability 请求传给 backend。KVFS 不维护第二张 `dev_t -> DeviceFileOps` 表；
-devfs 只投影名称与 `rdev`，loop 设备也按普通 `Gendisk` 发布。
+Generic block commands and the driver fallback for unknown commands are dispatched uniformly by `BlockDevice::ioctl`. An ordinary close and write do not implicitly flush; only an explicit fsync passes the
+durability request to the backend. KVFS maintains no second `dev_t -> DeviceFileOps` table;
+devfs projects only names and `rdev`, and loop devices are also published as ordinary `Gendisk`s.
 
-块设备文件的 byte I/O 先按当前容量裁剪。若 offset 和裁剪后的长度均按 backend
-block size 对齐，整个借用 buffer 经一次 general block 调用提交，利用既有的连续多块
-契约，避免每个 sector 都重复提交和等待；不跨文件调用合并，也不增加数据复制。
-未对齐请求保留逐块读取或 read-modify-write。一次多块调用只有整体成功或错误结果，
-KVFS 不猜测失败请求内部完成了多少 sector，不在错误后自动拆小重试写入。
+Byte I/O on a block-device file is first clamped to the current capacity. If both the offset and the clamped length are aligned to the backend
+block size, the entire borrowed buffer is submitted through a single general block call, using the existing contiguous multi-block
+contract and avoiding resubmitting and waiting for every sector; calls are not merged across files, and no extra data copy is added.
+Unaligned requests keep the block-by-block read or read-modify-write path. A single multi-block call has only an overall success or error result,
+so KVFS does not guess how many sectors a failed request completed internally, and does not automatically split and retry the write after an error.
 
-`FsContext` 对应 Linux `struct fs_context`，保存 `fs_type`、mount/reconfigure purpose、source、
-一页有界的 kernel-owned opaque mount data、`sb_flags`/`sb_flags_mask`、mounter credential、
-静态 operations、可选 parsed `fs_private` 和拟议 `s_fs_info`。opaque data 只借用于同步
-transaction；KVFS 不施加文本编码或 option grammar，具体文件系统在 `init_fs_context` 中解析
-自身 representation，并把挂载后仍需存活的选项复制为 typed private state。两种 private state
-由 context 独占；callback 通过 typed borrow 验证拟议 `s_fs_info`，失败 reconfigure 不修改既有
-superblock private。
-reconfigure context 还借用其唯一目标 superblock，使 callback 只需 context 即可恢复 owner。
-它不保存进程 `FsStruct` 的 root/pwd。Linux 在
-`get_tree_bdev -> lookup_bdev -> kern_path` 中从 ambient `current->fs` 取得路径环境；
-KVFS 为避免反向依赖 `kprocess`，由 mount 执行入口取得 `FsStruct` 的 root/pwd 快照，
-在调用 `FsContext::get_tree` 时显式传入。该快照只沿调用栈存在，不成为 mount transaction
-字段。`FileSystemType` registry 与 `SuperBlockRegistry` 分别对应 Linux 的 filesystem type list
-和 superblock instance set，不互相复制状态。对于 block-backed 类型，后者以 canonical
-`FileSystemType` 指针和 canonical `BlockDevice` 对象地址作为唯一 identity；已有 available
-实例直接复用，nascent/dying 实例等待状态转换，dead 实例删除后重试。不同类型争用同一
-device 时由 block core 的独占 claim 拒绝，不能建立第二份 mutable mount state。
+`FsContext` corresponds to Linux `struct fs_context` and holds `fs_type`, the mount/reconfigure purpose, the source,
+one page of bounded kernel-owned opaque mount data, `sb_flags`/`sb_flags_mask`, the mounter credential,
+static operations, an optional parsed `fs_private`, and the proposed `s_fs_info`. The opaque data is only borrowed for the synchronous
+transaction; KVFS imposes no text encoding or option grammar, and a concrete filesystem parses its own
+representation in `init_fs_context` and copies the options that must survive after mounting into typed private state. Both kinds of private state
+are exclusively owned by the context; callbacks validate the proposed `s_fs_info` through a typed borrow, and a failed reconfigure does not modify the existing
+superblock private state.
+A reconfigure context also borrows its sole target superblock, so that a callback needs only the context to recover the owner.
+It does not hold the root/pwd of the process `FsStruct`. In Linux, the path environment is obtained from the ambient `current->fs` in
+`get_tree_bdev -> lookup_bdev -> kern_path`;
+to avoid a reverse dependency on `kprocess`, KVFS has the mount execution entry point take a snapshot of the root/pwd of `FsStruct`
+and pass it explicitly when calling `FsContext::get_tree`. The snapshot exists only along the call stack and does not become a field of the mount transaction.
+The `FileSystemType` registry and the `SuperBlockRegistry` correspond respectively to the Linux filesystem type list
+and the superblock instance set, and do not duplicate each other's state. For block-backed types, the latter uses the
+canonical `FileSystemType` pointer and the canonical `BlockDevice` object address as the unique identity; an existing available
+instance is reused directly, nascent/dying instances wait for the state transition, and dead instances are removed and the lookup retried. When different types contend for the same
+device, the exclusive claim of the block core rejects the later one, so a second copy of mutable mount state cannot be established.
 
-`SuperBlock` 强制分离静态 filesystem operation table 与 mount-private object，对应 Linux
-`s_op`/`s_fs_info`。构造 API 只接受 `&'static dyn SuperBlockOperations`，不能把每次挂载分配的
-有状态 object 当作 operation table；需要挂载状态的文件系统通过
-`try_new_with_flags_and_private()` 把唯一 private object 交给 superblock 独占。callback 通过
-绑定到 `&SuperBlock` 生命周期的 `private::<T>()` 借用恢复它，不复制 `Arc`、不允许 typed owner
-逃逸 superblock 生命周期。block size 与 max file size 作为通用 superblock 字段由 fill
-operation 一次设置，不要求 private inode 或 operation table 复制。
+`SuperBlock` enforces a separation between the static filesystem operation table and the mount-private object, corresponding to Linux
+`s_op`/`s_fs_info`. The construction API accepts only `&'static dyn SuperBlockOperations`; a stateful
+object allocated for each mount cannot be used as an operation table. A filesystem that needs mount state
+hands the one private object to the superblock for exclusive ownership through
+`try_new_with_flags_and_private()`. Callbacks recover it by borrowing through `private::<T>()`, which is
+bound to the lifetime of `&SuperBlock`; this does not clone the `Arc`, and it does not allow a typed owner
+to escape the superblock lifetime. The block size and max file size are generic superblock fields set once by the fill
+operation, and the private inode or operation table is not required to duplicate them.
 
-`Dentry` 是可移动的 namespace 对象。rename 保留 source dentry 和 inode identity，只
-改变 dentry 的位置和 cache membership。inode 持有文件状态和 address space，因此
-rename 不会 flush 文件数据，也不会替换 inode `AddressSpace` identity。与 Linux `d_sb`/`i_sb`
-一致，dentry 和 inode 首次附着 superblock 后都不可重绑；二者保存 `Weak<SuperBlock>` 以避免
-root/dcache 强引用环，但旧 superblock 销毁也不会把同一 VFS identity 转交给新 superblock。
+`Dentry` is a movable namespace object. rename preserves the source dentry and the inode identity, and only
+changes the dentry's position and cache membership. The inode holds the file state and the address space, so
+rename neither flushes file data nor replaces the inode `AddressSpace` identity. Consistent with Linux `d_sb`/`i_sb`,
+once a dentry and an inode are first attached to a superblock, neither can be rebound; both hold a `Weak<SuperBlock>` to avoid
+a strong reference cycle through root/dcache, but destroying the old superblock does not hand the same VFS identity over to a new superblock either.
 
-每个由文件系统通过 VFS-wide identity table 发布的 hashed
-`(SuperBlock, backing inode number)` 复用同一个 `VfsInode`；hard link、rename 和重复 lookup
-因此共享同一个 `AddressSpace`。Linux 风格的 pseudo/unhashed inode 不进入该表，也不能对同一
-identity 混用直接构造与 `get_or_try_init_inode()`。非目录 inode 可以有多个
-dentry alias；目录 inode 至多有一个 live alias，重复 lookup 复用该 dentry，对应 Linux
-`d_splice_alias()` 所依赖的目录单 alias 不变量。文件系统可以让 operation object 实现
-`InodeAttributeOperations`，使 KVFS generic attribute API 与文件系统组件共用一份状态；这对应
-Linux filesystem-private inode 结构内嵌 `struct inode`。未使用共享后端的文件系统完成 mutation
-后，operation callback 已持有 `VfsInode` 时仍可用 `update_metadata_after_backing_change()` 或
-不改变 size 的 `update_attributes_after_backing_change()` 刷新 VFS 缓存；只持有目标
-`Dentry` 时使用同名的 dentry metadata refresh。`Dentry` 不向外部 crate 暴露内部
-`Arc<VfsInode>`。更新入口校验 positive state、inode number、node type、block size 和
-`rdev`，防止把一个 core inode 的结果写入另一 identity。
+Every hashed
+`(SuperBlock, backing inode number)` published by a filesystem through the VFS-wide identity table reuses the same `VfsInode`;
+hard links, rename and repeated lookups
+therefore share the same `AddressSpace`. Linux-style pseudo/unhashed inodes do not enter this table, and direct construction and `get_or_try_init_inode()` must not be mixed for the same
+identity. A non-directory inode can have multiple
+dentry aliases; a directory inode has at most one live alias, and repeated lookups reuse that dentry, corresponding to the single-alias directory invariant that Linux
+`d_splice_alias()` relies on. A filesystem can have its operation object implement
+`InodeAttributeOperations`, so that the KVFS generic attribute API and the filesystem component share one copy of the state; this corresponds to the
+Linux filesystem-private inode structure embedding `struct inode`. For a filesystem that does not use a shared backend, after a mutation completes,
+if the operation callback already holds a `VfsInode`, it can still use `update_metadata_after_backing_change()` or
+`update_attributes_after_backing_change()`, which does not change the size, to refresh the VFS cache; if it holds only the target
+`Dentry`, it uses the dentry metadata refresh of the same name. `Dentry` does not expose its internal
+`Arc<VfsInode>` to external crates. The update entry points validate the positive state, inode number, node type, block size and
+`rdev`, preventing the result of one core inode from being written into another identity.
 
-identity table 对应 Linux `fs/inode.c` 的全局 `inode_hashtable`，按 superblock identity 与 inode
-number 联合索引；它不成为 `SuperBlock` 或 filesystem/bridge 的字段。
-`SuperBlock::lookup_inode()` 是该全局算法的面向对象入口，对应 Linux `ilookup()`；
-`get_or_try_init_inode()` 对应
-`iget_locked()` 加 filesystem fill，再由 VFS 发布。cache 同时承担 Linux inode cache 的
-初始化与释放门禁：缺失 slot 先转为 `New`，只有
-owner 运行 fallible filesystem initializer，其他 lookup 睡眠；成功后发布 `Live`，失败或
-initializer panic unwind 都由局部 reservation guard 删除 `New` slot 并唤醒重试。该 guard 只表达
-Linux `unlock_new_inode()`/`iget_failed()` 的成对约束，不进入 resident inode，也不增加 cache
-状态。每个 slot 的等待队列对应 Linux 对该 inode `I_NEW/I_FREEING` state bit 的等待；等待者
-保存 slot generation 并在 cache mutex 外睡眠，只有该 inode 的 publish/remove 才唤醒它，避免
-全 cache 广播和跨 inode 惊群。Cache-only lookup 等待过渡对象后若 slot 已 unhashed，返回
-`None`；必须从磁盘加载的 hashed 路径使用 `get_or_try_init_inode()`。新 hashed identity 在发布 `Live` 前
-先绑定所属 superblock，因此 filesystem callback 观察不到缺失 `i_sb` 的 resident inode。最后一个
-`VfsInode` 引用进入 drop 时，cache 在 filesystem eviction hook 前
-把精确匹配的 `Live` entry 转为 `Freeing`；同号 lookup 等待 hook 完成、旧 entry 删除后重新
-查找。`New`/`Freeing` 不会作为普通 inode 返回，也不会转换为 pathname 的 `EINVAL`/`ESTALE`。
-Filesystem private state 由 `VfsInode` 组合持有，不得在后端另建 resident inode-number cache。
-普通 pathname callback 的 `Path -> Mount` 强引用在调用期间保活 superblock；如果一个未绑定或
-teardown 后的 raw inode 被绕过 Path 直接用于 filesystem callback，`VfsInode::super_block()` 返回
-Linux `ESTALE`，不把对象生命周期错误误报为介质 `EIO`。
-共享 attribute operations 的构造入口会在发布前校验 inode number 与 node type；构造后 KVFS
-不再分配另一份 owner/link/time/size/block state。高频 generic field 读取直接调用共享组件的
-单字段 getter；只有完整 `stat/getattr` snapshot 才调用 `fill_metadata()`。完整 snapshot 的 inode
-number 和 superblock block size 由唯一 `InodeIdentity`/`SuperBlock` 传入，attribute component
-不再复制 `i_ino` 或通用 block-size 字段。
+The identity table corresponds to the global `inode_hashtable` in Linux `fs/inode.c`, and is indexed jointly by superblock identity and inode
+number; it does not become a field of `SuperBlock` or of the filesystem/bridge.
+`SuperBlock::lookup_inode()` is the object-oriented entry point to this global algorithm, corresponding to Linux `ilookup()`;
+`get_or_try_init_inode()` corresponds to
+`iget_locked()` plus the filesystem fill, followed by publication by the VFS. The cache also takes on the gate that Linux's inode cache provides for
+initialization and release: a missing slot is first turned into `New`, and only the
+owner runs the fallible filesystem initializer while other lookups sleep; on success it publishes `Live`, and on failure or
+initializer panic unwind, the local reservation guard removes the `New` slot and wakes the waiters to retry. This guard only expresses
+the paired constraint of Linux `unlock_new_inode()`/`iget_failed()`; it does not enter the resident inode, and it does not add a cache
+state. The wait queue of each slot corresponds to Linux's wait on the `I_NEW/I_FREEING` state bits of that inode; a waiter
+saves the slot generation and sleeps outside the cache mutex, and only the publish/remove of that inode wakes it, avoiding
+a whole-cache broadcast and a cross-inode thundering herd. If, after a cache-only lookup waits for a transitional object, the slot has been unhashed, it returns
+`None`; a hashed path that must load from disk uses `get_or_try_init_inode()`. A new hashed identity is
+bound to its owning superblock before `Live` is published, so a filesystem callback never observes a resident inode lacking `i_sb`. When the last
+`VfsInode` reference enters drop, before the filesystem eviction hook the cache
+turns the exactly matching `Live` entry into `Freeing`; a lookup of the same number waits for the hook to complete and the old entry to be removed, and then looks up
+again. `New`/`Freeing` are never returned as ordinary inodes, and are not converted into the pathname `EINVAL`/`ESTALE`.
+Filesystem private state is held by composition in `VfsInode`, and a backend must not build another resident inode-number cache.
+The `Path -> Mount` strong reference of an ordinary pathname callback keeps the superblock alive for the duration of the call; if an unbound or
+post-teardown raw inode is used directly in a filesystem callback, bypassing Path, `VfsInode::super_block()` returns
+Linux `ESTALE`, and does not misreport an object lifetime error as a media `EIO`.
+The constructor entry of the shared attribute operations validates the inode number and node type before publication; after construction KVFS
+does not allocate another copy of the owner/link/time/size/block state. High-frequency generic field reads call the
+single-field getters of the shared component directly; only a full `stat/getattr` snapshot calls `fill_metadata()`. The inode
+number and the superblock block size of a full snapshot are supplied by the unique `InodeIdentity`/`SuperBlock`, and the attribute component
+no longer duplicates `i_ino` or the generic block-size field.
 
-`Nameidata` 只保存 Linux namei 所需的路径、root、组件与 lookup 状态，不保存
-credential。所有会解析或修改 namespace 的入口都把 `&Cred` 作为方法参数逐层传递。
-credential 的生命周期由 syscall 持有的 `Arc` 保证；对象字段不需要重复保存调用上下文。
+`Nameidata` stores only the path, root, components and lookup state that Linux namei needs, and does not store
+credentials. Every entry point that resolves or modifies the namespace passes `&Cred` down level by level as a method parameter.
+The lifetime of the credential is guaranteed by the `Arc` held by the syscall; object fields need not store the calling context again.
 
 The `openat2(2)` constraints `BENEATH`/`IN_ROOT`/`NO_XDEV`/`NO_SYMLINKS`/`CACHED`
 are invariants of the namei state machine, not a syscall-layer wrapper: every
@@ -605,135 +607,135 @@ truncate. `sys_openat2` therefore only validates the arguments, selects the
 dirfd/cwd base and decides whether the lookup is anchored; it does not duplicate
 the lookup policy.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-路径和 namespace 操作会获取 sleepable lock、分配对象并调用具体文件系统，可能阻塞，
-不适用于中断上下文，也不能在持有 spinlock 时调用。这些 API 依赖调度器、分配器和
-正常内核运行环境。POSIX 路径通常需要当前进程的 mount、root 和 cwd；纯 VFS 对象
-方法只依赖显式传入的对象。
+Path and namespace operations acquire sleepable locks, allocate objects and call the concrete filesystem, so they may block;
+they are not usable in interrupt context, and must not be called while holding a spinlock. These APIs depend on the scheduler, the allocator and the
+normal kernel runtime environment. POSIX paths usually need the current process's mount, root and cwd; methods on pure VFS objects
+depend only on the objects passed in explicitly.
 
-最后一个 `VfsInode` 引用的释放可能同步执行 filesystem eviction；最后一个
-`VfsMount` 的释放可能同步执行 superblock shutdown。两者同样只能发生在可睡眠的 task
-context，且调用者不能持有 non-sleepable lock 或 teardown 所需的锁。这对应 Linux
-`iput()` 本身可以睡眠的调用约束，不额外引入 inode 专用 deferred worker。
+Releasing the last `VfsInode` reference may synchronously perform filesystem eviction; releasing the last
+`VfsMount` may synchronously perform superblock shutdown. Both can likewise happen only in a sleepable task
+context, and the caller must not hold a non-sleepable lock or a lock needed by teardown. This corresponds to the calling constraint that Linux
+`iput()` itself may sleep, and does not introduce an extra inode-specific deferred worker.
 
-一次完整 pathname 操作必须复用同一个 credential snapshot。调用者不能在每个路径
-组件重新查询 current task，否则并发 credential commit 可能让同一次解析混用身份。
+One complete pathname operation must reuse the same credential snapshot. The caller must not re-query the current task for each path
+component, otherwise a concurrent credential commit could make one resolution mix identities.
 
-文件系统 callback 可在 I/O 上阻塞，但不能在持有同一组 VFS inode namespace lock 时
-重新进入这些 VFS namespace 操作，否则会形成自锁。
+A filesystem callback may block on I/O, but while holding the same set of VFS inode namespace locks it must not
+re-enter these VFS namespace operations, otherwise it would deadlock on itself.
 
-内建文件系统类型也必须在用户进程启动前注册完成。运行期查找只读取注册表，不负责
-加载实现或补做启动初始化。
+Built-in filesystem types must also finish registering before user processes start. Runtime lookup only reads the registry, and is not responsible for
+loading implementations or making up for startup initialization.
 
-## 算法流程
+## Algorithm Flow
 
-open 在入口清理 legacy flags，校验已知位，生成 access mode、open intent 和 lookup
-flags。namei 使用这些语义执行查找、创建和最终 open，不再直接组合 `O_CREAT` 与
-`O_EXCL`。`O_PATH` 路径同样执行最终对象类型约束；例如 `O_PATH | O_DIRECTORY`
-只接受可执行子项查找的目录，普通文件和 autodir 按 Linux 语义返回 `ENOTDIR`。最终组件
-后的 `/` 在通用 `path_lookupat()` 中转换为 `FOLLOW_FINAL | DIRECTORY`，因此即使同时指定
-`O_NOFOLLOW`，尾随斜杠仍会跟随最终符号链接，并用 `Dentry::can_lookup()` 校验解析结果。
+At its entry, open clears legacy flags, validates the known bits, and generates the access mode, open intent and lookup
+flags. namei uses these semantics to perform lookup, creation and the final open, and no longer combines `O_CREAT` and
+`O_EXCL` directly. The `O_PATH` path likewise applies the final object type constraint; for example, `O_PATH | O_DIRECTORY`
+accepts only a directory in which child lookup is permitted by execute permission, and regular files and autodirs return `ENOTDIR` according to Linux semantics. A `/` after the final component
+is converted in the generic `path_lookupat()` into `FOLLOW_FINAL | DIRECTORY`, so even if `O_NOFOLLOW` is also specified,
+the trailing slash still follows the final symbolic link, and the resolved result is validated with `Dentry::can_lookup()`.
 
-pathname FIFO 不通过 syscall fallback 或第二次 lookup 打开。所有 FIFO inode 共享一张
-无运行时字段的 file-operation table；每个 inode 在 special state 中持有当前活动
-`PipeObject`，对应 Linux `inode->i_pipe`。namei 在同一个 resolved `Path` 上完成
-`may_open` 后进入该 table 的 `open()`。operation table 可以修改现有
-`VfsFileBuilder` 的 stream mode、private data 和最终 file operations，但不得替换
-builder 已绑定的 path。由此 pathname DAC、实际使用的 inode 和 opened-file identity
-属于同一次 open transaction。
+A pathname FIFO is not opened through a syscall fallback or a second lookup. All FIFO inodes share one
+file-operation table with no runtime fields; each inode holds the currently active
+`PipeObject` in its special state, corresponding to Linux `inode->i_pipe`. namei completes
+`may_open` on the same resolved `Path` and then enters `open()` of that table. The operation table may modify the stream mode, private data and final file operations of the existing
+`VfsFileBuilder`, but must not replace the path
+already bound by the builder. As a result, the pathname DAC, the inode actually used and the opened-file identity
+belong to the same open transaction.
 
-设备 open callback 可通过 `VfsFileBuilder::requests_no_controlling_tty()` 检查瞬态
-`O_NOCTTY` 请求。该检查发生在 callback 内；open 完成后，`O_NOCTTY` 与其他创建期
-flags 会从最终 `f_flags` 中移除。
+A device open callback can check the transient
+`O_NOCTTY` request through `VfsFileBuilder::requests_no_controlling_tty()`. This check happens inside the callback; after open completes, `O_NOCTTY` and the other creation-time
+flags are removed from the final `f_flags`.
 
-FIFO open 在 inode pipe-slot 锁内创建或复用 session 并增加 `files`，随后
-`PipeObject::open_fifo()` 根据 builder 的 `f_mode` 完成 reader/writer rendezvous。
-最后一个 file release 在同一 slot 锁域内减少 `files` 并清空 inode slot，防止旧
-release 与新 open 交错后把仍在使用的 session 清除。
+FIFO open creates or reuses a session and increments `files` under the inode pipe-slot lock, and then
+`PipeObject::open_fifo()` completes the reader/writer rendezvous according to the builder's `f_mode`.
+The last file release decrements `files` and clears the inode slot within the same slot-lock domain, preventing an old
+release from interleaving with a new open and clearing a session that is still in use.
 
-### 文件 extent 查询
+### File extent query
 
-调用方先从 `VfsInode::fiemap_capability()` 取得可选 inode capability，再用
-`FiemapExtentInfo` 发起查询。普通文件在 inode data shared lock 下执行，目录在 namespace
-shared lock 下执行；因此同一机制既覆盖 regular inode，也覆盖 directory inode，而不把
-FIEMAP 错挂到 open-file operation。文件系统把 inode 创建时确定的格式上限传给
-`FiemapExtentInfo::prepare()`；该 helper 先校验长度、最大文件大小和文件系统支持的 flags，
-最后才按需执行 data-only writeback。
+The caller first obtains an optional inode capability from `VfsInode::fiemap_capability()`, and then issues the query with
+`FiemapExtentInfo`. For a regular file the query runs under the inode data shared lock; for a directory it runs under the namespace
+shared lock. The same mechanism therefore covers both regular inodes and directory inodes, without
+wrongly attaching FIEMAP to an open-file operation. The filesystem passes the format limit determined at inode creation to
+`FiemapExtentInfo::prepare()`; this helper first validates the length, the maximum file size and the flags supported by the filesystem,
+and only then performs data-only writeback if needed.
 
-后端只输出与查询范围相交的 mapped、unwritten 或 delayed extent，跳过 hole。
-`extent_count == 0` 时 `FiemapExtentInfo` 只计数；数组满后正常停止，只有已确认遍历结束的
-最后一个 extent 才添加 `LAST`。
+The backend emits only the mapped, unwritten or delayed extents that intersect the queried range, and skips holes.
+When `extent_count == 0`, `FiemapExtentInfo` only counts; when the array is full it stops normally, and only the
+last extent whose traversal is confirmed to have finished gets `LAST`.
 
-VFS 采用 Linux directory-locking ownership model：
+The VFS follows the Linux directory-locking ownership model:
 
-- slow lookup 对父目录 inode 加 shared namespace lock；
-- create 对父目录 inode 加 exclusive namespace lock；
-- unlink 和 rmdir 先锁父目录，再锁 victim inode；
-- link 先锁新父目录，再锁非目录 source inode；
-- same-directory rename 按 parent dentry identity 判定并只锁一次父目录；
-- cross-directory rename 先获取 superblock topology mutex，再按拓扑顺序锁父目录。无祖先关系
-  时改用 `Dentry::namespace_lock_key()`（祖先 inode 指针链，再按指针）定序；`pivot_root`
-  的多个 inode 取锁使用同一规则。rename 的 participant inode 是其后的独立阶段，不属该全序。
+- slow lookup takes the shared namespace lock on the parent directory inode;
+- create takes the exclusive namespace lock on the parent directory inode;
+- unlink and rmdir lock the parent directory first, then the victim inode;
+- link locks the new parent directory first, then the non-directory source inode;
+- same-directory rename decides by parent dentry identity and locks the parent directory only once;
+- cross-directory rename first acquires the superblock topology mutex, then locks the parent directories in topological order. When there is no ancestor relationship,
+  ordering uses `Dentry::namespace_lock_key()` (the chain of ancestor inode pointers, then the pointer itself); `pivot_root`
+  takes the locks of its multiple inodes with the same rule. The participant inodes of rename are a separate later stage and do not belong to this total order.
 
-Slow lookup 对应 Linux `d_alloc_parallel()`：cache miss 的任务建立唯一 hashed negative
-dentry，设置 parallel-lookup 状态并持有该 dentry 的 lookup mutex 后调用 filesystem
-`lookup`；同名并发 lookup 复用该对象并等待 owner 完成。filesystem 以 `Ok(None)` 表达
-negative miss，找到 inode 时通常原位实例化 candidate；只有 `d_splice_alias()` 语义需要
-复用目录 alias 时才返回另一个 dentry。普通 lookup 和 namespace mutation 使用同一个
-locked lookup 对象方法，差别只在父目录分别持有 shared 或 exclusive namespace lock，
-不存在 mutation 专属的 negative-cache 路径。
+Slow lookup corresponds to Linux `d_alloc_parallel()`: the task that suffers a cache miss creates a unique hashed negative
+dentry, sets the parallel-lookup state, and calls the filesystem
+`lookup` while holding that dentry's lookup mutex; concurrent lookups of the same name reuse this object and wait for the owner to finish. The filesystem expresses a
+negative miss with `Ok(None)`; when it finds an inode it usually instantiates the candidate in place; it returns another dentry only when `d_splice_alias()` semantics require
+reusing a directory alias. Ordinary lookup and namespace mutation use the same
+locked-lookup object method, differing only in whether the parent directory holds the shared or the exclusive namespace lock;
+there is no negative-cache path specific to mutation.
 
-rename 在两个父目录稳定后解析 source 和 target，然后先锁参与的子目录，再锁非目录
-inode。目录单 alias 不变量保证不同 parent dentry 不会引用同一个目录 inode。participant
-最多是 source 和 target 两个 inode，直接按
-目录/非目录组合获取，不构造临时 `Vec`；两个非目录 inode 按指针值排序。父目录拓扑遍历
-同时给出锁顺序和 Linux `lock_two_directories()` 语义中的 `trap`，最终 source/target 直接与
-`trap` 比较，不再次遍历父链。类型、flag、祖先关系以及针对最终 source/target 的 Path
-policy 都在同一个 namespace transaction 内完成；filesystem callback 前已保存旧/新 cache
-key，成功后 VFS 只交换 dentry location 并原位替换已有 cache slot，不再分配 name 或插入
-新的 hash slot。目录是否为空由 filesystem rename/rmdir callback 判定，
-通用层不把 dentry child cache 当作后端目录内容。
+After the two parent directories are stable, rename resolves source and target, then locks the participating child directories first, and then the non-directory
+inodes. The single-alias invariant for directories guarantees that different parent dentries never reference the same directory inode. The participants
+are at most two inodes, source and target, acquired directly by
+directory/non-directory combination without building a temporary `Vec`; two non-directory inodes are ordered by pointer value. The parent-directory topology walk
+yields both the lock order and the `trap` of Linux `lock_two_directories()` semantics; the final source/target are compared directly against
+`trap`, without walking the parent chain again. The type, flag and ancestor-relationship checks, as well as the Path
+policy for the final source/target, are all completed within the same namespace transaction; the old/new cache
+keys are saved before the filesystem callback, and after success the VFS only swaps the dentry locations and replaces the existing cache slot in place, without allocating a name or inserting a
+new hash slot. Whether a directory is empty is decided by the filesystem rename/rmdir callback;
+the generic layer does not treat the dentry child cache as the backend's directory contents.
 
-open-create 和独占 namespace create 复用同一个父目录锁内最终 lookup 骨架，避免
-`O_EXCL`、`mknodat`、`linkat`、`symlinkat` 与 lookup/create 竞争。
-`O_CREAT | O_EXCL` 跳过 speculative lookup，直接执行锁内最终 lookup；独占创建在
-positive dentry 上先返回 `AlreadyExists`，只有 negative dentry 才执行创建 callback。
-`Filename` 只做 parent resolution 和 pathname-specific errno，Dentry 只把锁内最终
-negative dentry 交给 callback，不额外暴露 parent inode。`Path::vfs_create()`、
-`Path::vfs_mkdir()`、`Path::vfs_mknod()`、`Path::vfs_symlink()` 与
-`Path::vfs_link()` 从 parent Path 自身取得 inode，负责 mount write、父目录 DAC、
-设备节点授权、mode preparation 以及 inode callback。
-lookup 得到的同一个 negative dentry 会传给 callback，不再按名称构造第二个对象；
-regular `mknodat` 传递
-`exclusive=true`。create、mkdir、mknod、symlink 和 link callback 都必须实例化该 negative
-dentry；lookup 只有在复用既有目录 alias 时才返回另一个 dentry。create-only 错误只在
-锁内最终 lookup 仍为 negative 时检查。
+Open-create and exclusive namespace create reuse the same final-lookup skeleton under the parent directory lock, which avoids races of
+`O_EXCL`, `mknodat`, `linkat` and `symlinkat` against lookup/create.
+`O_CREAT | O_EXCL` skips the speculative lookup and performs the final lookup under the lock directly; exclusive creation
+returns `AlreadyExists` on a positive dentry first, and runs the create callback only for a negative dentry.
+`Filename` only does parent resolution and pathname-specific errno handling; Dentry only hands the final negative
+dentry under the lock to the callback, and does not additionally expose the parent inode. `Path::vfs_create()`,
+`Path::vfs_mkdir()`, `Path::vfs_mknod()`, `Path::vfs_symlink()` and
+`Path::vfs_link()` obtain the inode from the parent Path itself, and are responsible for mount write, parent-directory DAC,
+device-node authorization, mode preparation and the inode callback.
+The same negative dentry obtained by lookup is passed to the callback, and no second object is constructed by name;
+regular `mknodat` passes
+`exclusive=true`. The create, mkdir, mknod, symlink and link callbacks must all instantiate this negative
+dentry; lookup returns another dentry only when it reuses an existing directory alias. Create-only errors are checked only when the
+final lookup under the lock is still negative.
 
-unlink 和 rmdir 同样由 `Filename::unlink_at()` / `Filename::rmdir_at()` 先解析 parent，
-再由 Dentry 在父目录 exclusive namespace lock 下唯一一次解析 victim。syscall 不先取得
-完整目标 Path 后再按名称查找，因此不会在 replacement 竞争中删除另一个同名 inode。
+unlink and rmdir likewise first resolve the parent via `Filename::unlink_at()` / `Filename::rmdir_at()`,
+and then Dentry resolves the victim exactly once under the parent directory's exclusive namespace lock. The syscall does not first obtain a
+complete target Path and then look it up by name, so it cannot delete another inode with the same name in a replacement race.
 
-### 路径遍历与 DAC
+### Path traversal and DAC
 
-namei 在进入每个目录并查找下一组件前检查目录 search permission (`MAY_EXEC`)；最终
-open 再按访问模式检查目标 inode。默认 `InodeOperations::permission` 进入
-`generic_permission()`，依次选择 owner、group（包括补充组）或 other 权限位。
+Before entering each directory and looking up the next component, namei checks the directory search permission (`MAY_EXEC`); on the final
+open, the target inode is then checked by access mode. The default `InodeOperations::permission` enters
+`generic_permission()`, which selects the owner, group (including supplementary groups) or other permission bits in turn.
 effective `CAP_DAC_OVERRIDE` overrides ordinary mode bits; effective
 `CAP_DAC_READ_SEARCH` additionally grants exact read (and search for
 directories). Neither grants execute permission on a regular file with no
 execute bit set, matching Linux `generic_permission()`.
 
-namespace 修改由 `Path` 或 `Filename` 在调用文件系统回调前统一检查：
-create、mkdir、mknod、symlink、link、unlink、rmdir 和 rename 要求父目录
-`MAY_WRITE | MAY_EXEC`。所有 create-like 操作由锁内 callback 调用共同的 `Path::vfs_*`
-能力；unlink、rmdir 和 rename 把 Path policy 作为 validator 传入 Dentry 操作。
-这些 policy 在父目录锁、所需 participant lock 和最终 lookup 结果仍然有效时执行。
+Namespace modifications are checked uniformly by `Path` or `Filename` before the filesystem callback is invoked:
+create, mkdir, mknod, symlink, link, unlink, rmdir and rename require the parent directory
+`MAY_WRITE | MAY_EXEC`. All create-like operations call the common `Path::vfs_*`
+capabilities from the in-lock callback; unlink, rmdir and rename pass the Path policy to the Dentry operation as a validator.
+These policies execute while the parent directory lock, the required participant locks and the final lookup result are still valid.
 Deletion and replacement in a sticky directory require effective
 `CAP_FOWNER`, directory ownership, or ownership of the final victim; the
 mountpoint check applies to that same dentry.
 
-inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `setattr` callback：
+Inode metadata modifications are likewise authorized uniformly by `Path` and then enter the same backend `setattr` callback:
 
 - `chown` requires effective `CAP_CHOWN` to change the UID; the owner may
   preserve the current UID and change the GID to a current or supplementary
@@ -755,8 +757,8 @@ inode metadata 修改也由 `Path` 统一授权，再进入同一个后端 `seta
   with write permission on the inode; explicit values and mixed
   `UTIME_NOW`/`UTIME_OMIT` permit only the owner or effective `CAP_FOWNER`.
 
-`SetattrTime` 只承载单次调用中“当前值/显式值”的授权信息，落盘的 `MetadataUpdate`
-只包含解析后的 atime/mtime/ctime 值，不在 inode 或 namei 状态中保存调用上下文。
+`SetattrTime` carries only the authorization information of "current value/explicit value" within a single call, and the persisted `MetadataUpdate`
+contains only the resolved atime/mtime/ctime values; the call context is not saved in the inode or namei state.
 Automatic I/O updates use `InodeUpdateTime`, corresponding to Linux
 `FS_UPD_ATIME` / `FS_UPD_CMTIME`, and invoke filesystem `update_time`. Authorized
 explicit values pass through `VfsInode::truncate_timestamp()`; automatic values
@@ -770,18 +772,19 @@ in one critical section, deferring persistence under filesystem sync rules. They
 may reduce precision, couple fields, or ignore unsupported fields; raw setters do
 not repeat capability policy.
 
-`InodeOperations::setattr` 的默认实现是公共回退层，对应 Linux `notify_change()` 把
-没有 `->setattr` 的 inode 路由到 `simple_setattr()` 的形态：owner/mode/时间更新被接受并
-发布到 resident 属性，因此使用 `empty_inode_operations()` 的无后端 inode（匿名管道、
-伪文件系统根等）无需专属表即可支持 `fchownat`/`fchmod`/`utimensat` 与自动
-I/O 时间更新。回退层的前提是 inode identity 独立、metadata 仅驻留于自身；刻意共享
-identity 的 inode 不满足该前提，必须显式覆写 `setattr` 保留拒绝语义——anon_inodefs
-singleton 即此策略，它被所有进程的 eventfd/epoll/timerfd/signalfd/pidfd/socket/BPF
-匿名 fd 共同引用，接受一次 fallback 更新就会改写所有进程 `fstat` 自己匿名 fd 时看到的
-共享属性。回退层拒绝 size 更新并以 `EINVAL` 报错：这类 inode 没有可截断的存储，
-发布伪造的 `i_size` 会破坏语义；这与 Linux 在 syscall 边界对非普通文件 truncate 返回
-`EINVAL` 的可达行为一致，而自带存储的文件系统（memfs、kext4、fat、9p 等）各自实现的
-`setattr` 不受影响。授权仍然只发生在 `Path` 层，回退表不重复执行 policy。
+The default implementation of `InodeOperations::setattr` is a common fallback layer, corresponding to the Linux form in which `notify_change()` routes an
+inode without `->setattr` to `simple_setattr()`: owner/mode/time updates are accepted and
+published to the resident attributes, so backend-less inodes that use `empty_inode_operations()` (anonymous pipes,
+roots of pseudo filesystems, etc.) can support `fchownat`/`fchmod`/`utimensat` and automatic
+I/O time updates without a dedicated table. The precondition of the fallback layer is that the inode identity is independent and the metadata resides only in the inode itself; an inode that deliberately shares
+identity does not satisfy this precondition and must explicitly override `setattr` to keep the rejection semantics. The anon_inodefs
+singleton follows exactly this policy: it is referenced jointly by the eventfd/epoll/timerfd/signalfd/pidfd/socket/BPF
+anonymous fds of all processes, and accepting a single fallback update would rewrite the
+shared attributes that every process sees when it calls `fstat` on its own anonymous fd. The fallback layer rejects size updates and reports
+`EINVAL`: such inodes have no truncatable storage, and
+publishing a fabricated `i_size` would break the semantics; this matches the reachable behavior in which Linux returns
+`EINVAL` at the syscall boundary for truncate on non-regular files, while filesystems that bring their own storage (memfs, kext4, fat, 9p, etc.) each implement
+their own `setattr` and are unaffected. Authorization still happens only at the `Path` layer, and the fallback table does not re-execute the policy.
 
 Xattr policy also flows through `Path`, which applies mount, namespace, and DAC
 policy before entering `InodeOperations::{get,list,set,remove}_xattr`.
@@ -805,132 +808,129 @@ unaffected. Set/remove call the backend under the inode data lock, and each
 filesystem must atomically resolve all four `CREATE`/`REPLACE` combinations
 inside its own transaction or lock.
 
-### 新 inode 所有者
+### New inode owner
 
-创建回调接收同一个 `&Cred`。后端通过 `inode_init_owner()` 得到初始 mode、UID 和 GID：
+The create callback receives the same `&Cred`. The backend obtains the initial mode, UID, and GID through `inode_init_owner()`:
 
-- open-create、`mkdirat`、regular `mknodat` 和 special-node `mknodat` 都进入对应的
-  `Path::vfs_*` 能力；parent inode 的 mode-preparation 方法依次处理 setgid、调用者
-  umask、VFS allowed-permission mask 和 callback node type，当前没有 POSIX ACL 延迟
-  umask 的分支；
-- `vfs_mkdir` 通过 allowed-permission mask 排除调用者提供的 set-user-ID/set-group-ID
-  位，而不是在 Path 层再次手工修改结果；
-- UID 使用 `fsuid`；
-- 普通父目录下 GID 使用 `fsgid`；
-- setgid 父目录下继承父 GID；
-- setgid 父目录下创建子目录时由 `inode_init_owner()` 重新传播 setgid 位。
+- open-create, `mkdirat`, regular `mknodat`, and special-node `mknodat` all enter the corresponding
+  `Path::vfs_*` capability; the mode-preparation method of the parent inode handles, in order, setgid, the caller's
+  umask, the VFS allowed-permission mask, and the callback node type; currently there is no POSIX ACL branch that defers
+  the umask;
+- `vfs_mkdir` uses the allowed-permission mask to exclude the caller-supplied set-user-ID/set-group-ID
+  bits, rather than modifying the result by hand again in the Path layer;
+- the UID uses `fsuid`;
+- under an ordinary parent directory the GID uses `fsgid`;
+- under a setgid parent directory the parent's GID is inherited;
+- when a subdirectory is created under a setgid parent directory, `inode_init_owner()` propagates the setgid bit again.
 
-支持 Unix owner 元数据的后端在分配 inode 时持久化这些值。不能表达 Unix owner 的
-文件系统仍受其磁盘格式限制。
+Backends that support Unix owner metadata persist these values when allocating the inode. File systems
+that cannot express a Unix owner remain limited by their on-disk format.
 
-`SimpleDir` 的 `DirMapping` 可持久插入由 `mknod` 分配的 special inode，也可插入
-不可变目标的 symbolic link，供 devfs 等简单文件系统创建 FIFO、pathname Unix socket
-以及 `/dev/fd` 一类启动期链接。快速链接目标只存入 `VfsInode` cached-link 状态，
-对应 Linux `inode::i_link`；`SimpleFsNode` 只保存 inode number、mode、owner 和
-`i_size` 等元数据，不再用 `SimpleFile` closure 保存第二份目标。未显式支持动态插入的
-simple directory 保持返回 `EPERM`。
+The `DirMapping` of `SimpleDir` can persistently insert special inodes allocated by `mknod`, and can also insert
+symbolic links with immutable targets, so that simple file systems such as devfs can create FIFOs, pathname Unix sockets,
+and boot-time links such as `/dev/fd`. A fast-link target is stored only in the `VfsInode` cached-link state,
+corresponding to Linux `inode::i_link`; `SimpleFsNode` stores only metadata such as the inode number, mode, owner, and
+`i_size`, and no longer keeps a second copy of the target in a `SimpleFile` closure. A simple directory
+that does not explicitly support dynamic insertion keeps returning `EPERM`.
 
-非递归 bind mount 创建新的 `Mount`，共享源 path 的 superblock 与 root dentry，但拥有
-独立 mount ID、父挂载位置和覆盖关系，并继承源 mount 的 per-mount flags。对应 Linux
-`clone_mnt(old, root, clone_flags)`，namespace 复制与 bind mount 复用
-`Mount::clone_mnt`：它只构造 detached `Mount`，不同时写入 parent topology；
-`Path::graft_tree()` 再执行 root/target 类型检查并把对象发布到 mountpoint。新文件系统
-挂载也先构造 detached `Mount`，再走同一个 graft 阶段，避免出现“已有父路径但未进入
-parent child map”的半挂载状态。和当前 Linux `graft_tree()` 一样，root/target 的目录性
-不一致时两个方向都返回 `ENOTDIR`，不在 bind 路径另建 errno 分支。非递归 bind 不复制
-源 path 下的 child mount，初次 `MS_BIND` 也不把同次调用的普通 mount flags 应用到副本。
+A non-recursive bind mount creates a new `Mount` that shares the source path's superblock and root dentry, but has its own
+mount ID, parent mount location, and overmount relationship, and inherits the per-mount flags of the source mount. This corresponds to Linux
+`clone_mnt(old, root, clone_flags)`; namespace copying and bind mounts share
+`Mount::clone_mnt`: it only constructs a detached `Mount` and does not write the parent topology at the same time;
+`Path::graft_tree()` then performs the root/target type checks and publishes the object at the mountpoint. A new file system
+mount likewise first constructs a detached `Mount` and then goes through the same graft stage, which avoids a half-mounted state in which "a parent path exists but the mount is not in the
+parent child map". As in current Linux `graft_tree()`, when the directory-ness of root and target
+does not match, both directions return `ENOTDIR`, and the bind path does not introduce a separate errno branch. A non-recursive bind does not copy
+the child mounts under the source path, and the initial `MS_BIND` does not apply the ordinary mount flags of the same call to the copy.
 
-`Mount` 作为被 `Path`、打开文件和 namespace topology 共同引用的稳定身份，不在 remount
-时替换。父 mount 和 mountpoint 由一个 `Mutex<Option<Path>>` 表示，attach 时一次设置，
-detach 时清空；不再分别保存可能失配的 parent/mountpoint 字段。namespace 操作通过已有
-mount ID registry 校验 source、target 和 detach 对象属于当前 `MntNamespace`；同一把
-registry mutex 覆盖校验、topology 修改和 registry 提交，作为 namespace 级事务边界。
-递归 detach 先从目标 mount 收集每个 child mountpoint 的完整 overmount stack，再校验所有
-对象仍在 registry 中；校验成功后才执行不再返回错误的 topology commit，最后删除 registry
-引用。目标 mount 自身覆盖的旧层不属于待删除子树，commit 时恢复到 parent mountpoint。
-`VfsMount::flags()` 与 `set_flags()` 在 `mnt_flags` 字段上封装原子读写，对其余 mount
-代码保持强类型 `MountFlags` 接口。
+`Mount` is a stable identity referenced jointly by `Path`, open files, and the namespace topology, and it is not replaced on remount.
+The parent mount and the mountpoint are represented by a single `Mutex<Option<Path>>`, set once on attach and
+cleared on detach; they are no longer stored in separate parent/mountpoint fields that could become mismatched. Namespace operations verify through the existing
+mount ID registry that the source, target, and detach objects belong to the current `MntNamespace`; the same registry
+mutex covers verification, topology modification, and registry commit, serving as the namespace-level transaction boundary.
+A recursive detach first collects, starting from the target mount, the complete overmount stack of every child mountpoint, and then verifies that all
+objects are still in the registry; only after verification succeeds does it perform a topology commit that can no longer return errors, and finally it removes the registry
+references. The old layers covered by the target mount itself are not part of the subtree to be removed, and are restored to the parent mountpoint at commit time.
+`VfsMount::flags()` and `set_flags()` wrap atomic reads and writes on the `mnt_flags` field, and keep the strongly typed `MountFlags` interface
+for the rest of the mount code.
 
-普通 remount 只允许作用于已注册 mount 的根路径，由 `MntNamespace::remount()` 接收一个
-reconfigure-purpose `FsContext` 和 per-mount flags，更新 `SuperBlock` 上所有共享 mount 都能观察到的
-只读策略并原子替换目标 mount flags；`MS_REMOUNT|MS_BIND` 通过
-`MntNamespace::reconfigure_mount()` 只替换目标的 per-mount flags，不要求目标本身由
-bind 创建。superblock flags 由 `AtomicSuperBlockFlags` 保存；普通 remount 在发布新 flags
-前调用 `FsContextOperations::reconfigure`，并由 per-superblock umount lock 串行化 hook
-和发布。文件系统后端固定报告只读时，切换到读写会返回 `ReadOnlyFilesystem`。
-`MntNamespace::make_mount_private()` 复用同一 registered-mount-root 校验。KVFS 当前没有
-shared propagation group，所有 mount tree 在构造和 namespace clone 后都不会向其它
-namespace 传播，因此 make-private 是幂等操作；递归请求不需要遍历或修改 descendants。
-mount 不保存“是否由 bind 创建”的来源状态；所有 mount 卸载都只移除 topology 节点，
-`VfsMount` 创建和复制时取得一个 superblock active 引用，最后释放时归还，对应 Linux
-`cleanup_mnt()` 中的 `dput(mnt_root)` 和 `deactivate_super(mnt_sb)`。非最后一个 mount
-释放不重复 teardown；active 计数归零时，在 umount lock 下先写回 inode/page cache 和
-filesystem 状态，再驱逐 dcache 所有权，最后再次同步 eviction 产生的 metadata、journal
-checkpoint 和设备状态，对应 `generic_shutdown_super()` 与 block-device final flush 的职责。
-`MntNamespace::mount_new()` 把 `get_tree` 与 active-reference acquisition 组成一个重试循环：
-若最后一个旧 mount 在两者之间令复用实例进入 dying/dead，VFS 不把该对象 graft 进 namespace，
-而是重新执行 `get_tree`。同一 shared superblock 的新 mount 若请求不同的只读状态则返回
-`EBUSY`，不会让 per-mount 创建悄然改变既有实例的 filesystem-wide policy。
-`Path::unmount()` 不在 topology 层调用 `sync_fs()`，所以打开文件或其它 `Path` 持有 detached
-mount 时会像 Linux 一样推迟 final shutdown。shutdown 的 sync 错误被记录但不回滚已提交的
-topology；清理和最终 flush 仍继续执行。
-卸载在 parent mountpoint 的 inode namespace lock 下移除 parent child 索引、恢复被覆盖的
-mount，并清空 detached mount 的 parent location，使仍持有该 mount 的打开路径不能沿旧
-parent 返回已经离开的 namespace。
+An ordinary remount is only allowed on the root path of a registered mount; `MntNamespace::remount()` receives a
+reconfigure-purpose `FsContext` and per-mount flags, updates the read-only policy on the `SuperBlock` that is observable by all shared mounts,
+and atomically replaces the target mount flags; `MS_REMOUNT|MS_BIND` goes through
+`MntNamespace::reconfigure_mount()` and replaces only the target's per-mount flags, without requiring the target itself to have been
+created by bind. The superblock flags are stored in `AtomicSuperBlockFlags`; before publishing the new flags, an ordinary remount
+calls `FsContextOperations::reconfigure`, and a per-superblock umount lock serializes the hook
+and the publication. When a file system backend always reports read-only, switching to read-write returns `ReadOnlyFilesystem`.
+`MntNamespace::make_mount_private()` reuses the same registered-mount-root validation. KVFS currently has no
+shared propagation group, and after construction and namespace clone no mount tree propagates to any other
+namespace, so make-private is idempotent; a recursive request does not need to traverse or modify descendants.
+A mount does not store origin state recording "whether it was created by bind"; unmounting any mount only removes the topology node,
+and `VfsMount` takes one superblock active reference on creation and copy and returns it on final release, corresponding to `dput(mnt_root)` and `deactivate_super(mnt_sb)` in Linux
+`cleanup_mnt()`. The release of a mount that is not the last one does not repeat teardown; when the active count drops to zero, under the umount lock it first writes back the inode/page cache and
+file system state, then evicts dcache ownership, and finally synchronizes again the metadata, journal
+checkpoint, and device state produced by eviction, corresponding to the responsibilities of `generic_shutdown_super()` and the block-device final flush.
+`MntNamespace::mount_new()` combines `get_tree` and active-reference acquisition into a retry loop:
+if the last old mount puts the reused instance into dying/dead between the two, the VFS does not graft that object into the namespace,
+but runs `get_tree` again. A new mount of the same shared superblock that requests a different read-only state returns
+`EBUSY`, so that per-mount creation does not silently change the filesystem-wide policy of an existing instance.
+`Path::unmount()` does not call `sync_fs()` at the topology layer, so when an open file or another `Path` holds the detached
+mount, final shutdown is deferred just as in Linux. A sync error during shutdown is logged but does not roll back the already committed
+topology; cleanup and the final flush still continue.
+Unmounting removes the parent child index and restores the covered
+mount under the inode namespace lock of the parent mountpoint, and clears the parent location of the detached mount, so that an open path still holding that mount cannot walk back along the old
+parent into a namespace it has already left.
 
-`MntNamespace::pivot_root()`（`pivot_root(2)` 语义）把 namespace 的可见 root 换成
-`new_root` 指向的已注册 mount，并把原可见 root 挂载到 `put_old`（OCI runtime 随后以
-`umount2(MNT_DETACH)` 摘除）。要求：`new_root` 是已注册 mount 根、`put_old` 是目录且
-位于 `new_root` 子树内——允许 `put_old == new_root`（runc 的 `pivot_root(".", ".")`
-路径），`put_old` 被其他挂载覆盖时保留被覆盖层。手术在 registry mutex + 受影响 inode 的 namespace 写锁
-（按 `Dentry::namespace_lock_key()` 的全序、按 Arc 去重）下执行，并在持锁后就绪地复查旧可见
-root 仍挂在其自身 parent mountpoint（读栈可能早于取锁），不满足则返回错误而不是断言：先把 `new_root` 从原位置摘除并恢复其覆盖
-层，使其压栈到 namespace 的 structural root 之上，再把原可见 root 从其被 `new_root` 覆盖的
-位置取出（其自身覆盖链仍随后续 root 保留，对应 Linux 的 stack-preserving move），最后把
-原 root 挂到 `put_old`。所有可失败校验在首次修改前完成，保证失败的 pivot 不留下半编辑的
-树。`mount_edge_detach` 是共享的单边摘除原语（恢复 covers/删除 child 索引 + 清空
-location），供 pivot 与后续 MS_MOVE 复用。
+`MntNamespace::pivot_root()` (`pivot_root(2)` semantics) replaces the visible root of the namespace with the registered mount that
+`new_root` points to, and mounts the original visible root at `put_old` (the OCI runtime then detaches it with
+`umount2(MNT_DETACH)`). Requirements: `new_root` is a registered mount root, and `put_old` is a directory and
+lies within the `new_root` subtree; `put_old == new_root` is allowed (the runc `pivot_root(".", ".")`
+path), and when `put_old` is covered by other mounts the covered layers are preserved. The surgery runs under the registry mutex plus the namespace write locks of the affected inodes
+(in the total order of `Dentry::namespace_lock_key()`, deduplicated by Arc), and after taking the locks it rechecks that the old visible
+root is still mounted on its own parent mountpoint (the stack read may predate lock acquisition), returning an error rather than asserting if not. It first detaches `new_root` from its original location and restores its covered
+layers, so that it is stacked on top of the namespace's structural root, then takes the original visible root out of the
+position where it was covered by `new_root` (its own overmount chain is still preserved with the subsequent root, corresponding to Linux's stack-preserving move), and finally mounts the
+original root at `put_old`. All fallible checks are completed before the first modification, which guarantees that a failed pivot does not leave a half-edited
+tree behind. `mount_edge_detach` is the shared single-edge detach primitive (restore covers / delete the child index + clear the
+location), reused by pivot and by the later MS_MOVE.
 
-`MntNamespace::make_mount_private()`/`make_mount_slave()` 记录一次性传播属性。KVFS 尚无
-共享传播组，因此 slave 与 private 行为等价：没有共享 master 时 slave 不接收任何传播事件。
-两者各自校验调用（`MS_PRIVATE`/`MS_SLAVE` 可带 `MS_REC`/`MS_SILENT`，其余组合返回
-`EINVAL`），防止把非法 flags 静默吃掉。递归 bind（`MS_BIND | MS_REC`）仅在源子树挂载数为
-零时接受——此时与克隆单 mount 的结果一致；否则返回 `EINVAL` 而不是静默压平挂载树。
+`MntNamespace::make_mount_private()` and `make_mount_slave()` only validate that the target is a registered mount root and record no propagation state. KVFS does not yet have
+shared propagation groups, so slave and private behave equivalently: without a shared master, a slave receives no propagation events.
+Each of the two validates its call separately (`MS_PRIVATE`/`MS_SLAVE` may carry `MS_REC`/`MS_SILENT`, and any other combination returns
+`EINVAL`), to prevent illegal flags from being silently swallowed. A recursive bind (`MS_BIND | MS_REC`) is accepted only when the source subtree's mount count is
+zero, in which case the result is identical to cloning a single mount; otherwise it returns `EINVAL` instead of silently flattening the mount tree.
 
-### pathname 与打开文件
+### Pathname and Open Files
 
-`VfsFile` 捕获 open 时使用的 `Arc<Cred>`，对应 Linux `file::f_cred`。path-based
-`Path::truncate()` 使用调用时 `&Cred` 检查写权限；descriptor-based
-`VfsFile::truncate()` 验证文件以写模式打开后，复用 open 已建立的 authority，不重复
-pathname DAC。`O_TRUNC` 已在 open 权限检查后执行同一 opened truncate 路径。
+`VfsFile` captures the `Arc<Cred>` used at open time, corresponding to Linux `file::f_cred`. The path-based
+`Path::truncate()` checks write permission using the `&Cred` passed at call time; the descriptor-based
+`VfsFile::truncate()` verifies that the file was opened in write mode and then reuses the authority already established by open, without repeating
+pathname DAC. `O_TRUNC` runs the same opened truncate path after the open permission check.
 
-pipe/FIFO 的访问方向只读取 `VfsFile::mode`，private data 只保存 `PipeObject`。
-`VfsFile::pipe_generation` 对应 Linux `file->f_pipe`：无 writer 的非阻塞只读 FIFO
-open 记录当前 `w_counter`，poll 仅在此 file 存活期间见过新的 writer generation 且
-当前 writer 数为零时报告 HUP。poll waiter 依据 `f_mode` 注册 `rd_wait`/`wr_wait`，
-用户请求的 event mask 只过滤最终 readiness，不能取消 HUP/ERR 所需的唤醒来源。
-`r_counter` 与 `w_counter` 都从一开始就是非零，保留默认 `f_pipe` snapshot 为零的
-匿名 pipe HUP 语义。
+The access direction of a pipe/FIFO is read only from `VfsFile::mode`, and private data holds only the `PipeObject`.
+`VfsFile::pipe_generation` corresponds to Linux `file->f_pipe`: opening a non-blocking read-only FIFO with no writer
+records the current `w_counter`, and poll reports HUP only if a new writer generation was seen while this file was alive and
+the current writer count is zero. The poll waiter registers `rd_wait`/`wr_wait` according to `f_mode`,
+and the event mask requested by the user filters only the final readiness; it cannot cancel the wakeup sources required for HUP/ERR.
+Both `r_counter` and `w_counter` are non-zero from the start, preserving the HUP semantics of anonymous pipes whose default `f_pipe` snapshot is zero.
 
-匿名 pipe 与 pathname FIFO 复用 `PipeObject` 的 read/write 核心。只有 pathname FIFO
-的 file-operation wrapper 在一次成功的对外 `read`/`read_iter` 后执行统一 atime
-策略，在一次成功的 `write`/`write_iter` 后执行 mtime/ctime 更新；迭代 I/O 内部的
-4 KiB chunk 不各自更新时间。`PIPE_BUF` 原子性按调用开始时的完整写请求判定，内部
-暂存 chunk 不会把大写入错误地提升为原子写；发生部分写入时，未提交的 source iterator
-进度会回退。atime 热路径只读取 `MountFlags` 和 `SuperBlockFlags`，不调用 `statfs`，
-也不构造完整 `Metadata` 快照；RELATIME 与“等于当前时间”早退谓词通过
-`InodeAttributeOperations::times()` 在单次存储锁内读取驻留 atime/mtime/ctime，对应 Linux
-直接读取 `inode->{i_atime,i_mtime,i_ctime}` 而非填充 `struct kstat`；
-RELATIME 使用 Linux 的 `mtime/ctime >= atime` 与“至少 24 小时”边界。
+Anonymous pipes and pathname FIFOs share the read/write core of `PipeObject`. Only the file-operation wrapper of a pathname FIFO
+applies the unified atime policy after a successful external `read`/`read_iter`, and updates mtime/ctime after a successful `write`/`write_iter`; the internal
+4 KiB chunks of iterated I/O do not each update the timestamps. `PIPE_BUF` atomicity is decided on the complete write request at the start of the call, and internal
+staging chunks do not wrongly promote a large write to an atomic write; when a partial write occurs, the progress of the uncommitted source iterator
+is rolled back. The atime hot path reads only `MountFlags` and `SuperBlockFlags`, does not call `statfs`,
+and does not construct a full `Metadata` snapshot; the RELATIME and "equal to current time" early-exit predicates read the resident atime/mtime/ctime through
+`InodeAttributeOperations::times()` under a single storage lock, corresponding to Linux
+reading `inode->{i_atime,i_mtime,i_ctime}` directly rather than filling a `struct kstat`;
+RELATIME uses Linux's `mtime/ctime >= atime` and "at least 24 hours" boundaries.
 
-rename 在 syscall 边界用 `RenameFlags::from_bits` 拒绝未知位，并拒绝互斥模式。
-VFS rename 入口再次检查组合不变量，文件系统 helper 再检查自身支持的子集。
+At the syscall boundary, rename rejects unknown bits with `RenameFlags::from_bits` and rejects mutually exclusive modes.
+The VFS rename entry point checks the combination invariants again, and the filesystem helper then checks the subset it supports.
 
-默认 `FileOperations::read_iter` 使用页大小的内核缓冲区适配标量 read 回调。
-一次迭代已经读取部分数据后，后续回调错误转换为已完成字节数，使 stream I/O
-保持 POSIX partial-read 语义；首个回调失败时保留原错误。
-默认 `write_iter` 只推进已被标量 write 接受的迭代器与 `ki_pos`，短写回退剩余输入；
-`i_size` 由 `write_end` 或实际写入 backing store 的文件系统回调发布。
+The default `FileOperations::read_iter` uses a page-sized kernel buffer to adapt the scalar read callback.
+Once an iteration has already read some data, a later callback error is converted into the number of bytes completed, so that stream I/O
+keeps POSIX partial-read semantics; if the first callback fails, the original error is preserved.
+The default `write_iter` advances only the iterator and `ki_pos` by what the scalar write accepted, and a short write rolls back the remaining input;
+`i_size` is published by `write_end` or by the filesystem callback that actually writes to the backing store.
 
 `Kiocb::flags()` records the open file description's `O_DIRECT`, `O_DSYNC`, and
 `O_SYNC` state in `KiocbFlags` when the control block is created, mirroring Linux
@@ -939,12 +939,12 @@ sets both `SYNC` and `DSYNC`. A control block is built per operation, so an `F_S
 change applies from the next operation. The flags are recorded only: no read or write
 path dispatches on them or changes completion behavior yet.
 
-`libfs::new_pseudo_super_block()` 对应 Linux `init_pseudo()` 与
-`pseudo_fs_fill_super()`：统一安装共享 simple `s_op`、`s_magic`、page-size geometry、
-标准 private root inode 和具体文件系统的静态 `s_d_op`。root dentry 在
-superblock publish 时继承该静态 table；已有 parent/superblock 的新 dentry 在构造或绑定时
-继承同一个引用。dentry operation identity 因而不需要 per-dentry `Arc`、mutex 或由具体
-文件系统在 `alloc_file_pseudo()` 后补装。
+`libfs::new_pseudo_super_block()` corresponds to Linux `init_pseudo()` and
+`pseudo_fs_fill_super()`: it uniformly installs the shared simple `s_op`, `s_magic`, page-size geometry,
+the standard private root inode, and the concrete filesystem's static `s_d_op`. The root dentry inherits this static table
+when the superblock is published; a new dentry with an existing parent/superblock inherits the same reference when it is constructed or bound.
+Dentry operation identity therefore needs no per-dentry `Arc`, no mutex, and no patching by the concrete
+filesystem after `alloc_file_pseudo()`.
 
 The `VfsInode` data lock serializes buffered writes and truncate. Shared-file
 write faults do not take this exclusive lock: `VfsFile::page_mkwrite()` holds
@@ -978,29 +978,29 @@ supporting only plain allocation need no override. The syscall layer consults th
 same mask before dispatching: a backend that declares PUNCH_HOLE/ZERO_RANGE owns
 those modes, and a mode it does not declare (kext4 today) is emulated locally by
 zeroing the range, which frees no blocks.
-无独立 backing 的文件使用 inode operation 的默认截断实现；有 backing 状态的文件系统
-覆盖它，并在调用 `truncate_setsize()` 前完成自身准备。
+A file without independent backing uses the inode operation's default truncate implementation; a filesystem with backing state
+overrides it and completes its own preparation before calling `truncate_setsize()`.
 
-`AddressSpaceOperations` 只提供 folio 读取、写回及缓存状态回调；不再通过字节级
-`read_at`/`write_at` 默认转接。文件系统需要的字节读取可留在其私有 backing helper 中，
-由 `read_folio` 和 `readahead` 显式复用。
+`AddressSpaceOperations` provides only folio read, writeback, and cache-state callbacks; it no longer goes through the byte-level
+`read_at`/`write_at` default forwarding. Byte reads that a filesystem needs can stay in its private backing helper,
+and are reused explicitly by `read_folio` and `readahead`.
 
-`simple_write_end` 保留在 `kvfs::libfs`，只服务 ramfs/memfs 风格的 aops。
-块设备文件系统完成自己的 write-end 后，经 `AddressSpace::write_end_set_size()`
-在同一 generic-write data-lock 和已复制 folio 锁临界区发布接受后的 `i_size`，而不把 ext4 语义伪装成
-libfs helper。
+`simple_write_end` stays in `kvfs::libfs` and serves only ramfs/memfs-style aops.
+After a block-device filesystem completes its own write-end, it publishes the accepted `i_size` via `AddressSpace::write_end_set_size()`
+within the same generic-write data-lock and copied-folio-lock critical section, instead of disguising ext4 semantics as a
+libfs helper.
 
-`AddressSpace` 自己持有 object-id、mapped views、静态共享的 `AddressSpaceOperations` 和
-`i_pages: MappingPages`。该字段直接组合缓存容器，不单独分配 `Arc`，对应 Linux
-`address_space::i_pages`；Folio 使用 `Arc<Folio>` 同时保持物理页、稳定 identity 和内部页锁生命周期。
-`read_folio` 从 Folio 自身获取稳定 index；AddressSpace 构造不再传入仅控制诊断的 mapping kind。
-`MappingPages` 不保存 length、object-id 或 views。`AddressSpace` 持有 cache-invalidate
-lock，用于把 readahead 插入、writeback、page_mkwrite 与 truncate 串行到同一个
-mapping。writeback 通过 owner 闭包在每个 folio 锁定后从 inode 读取实时 EOF。
-构造 API 只接受 `&'static dyn AddressSpaceOperations`，因此 aops 不是 inode private object。
-Backing-store callbacks 只从当前 `AddressSpace` 的 `mapping->host` 借用唯一 filesystem-private
-inode，再经 host 的 `i_sb` 恢复 superblock；filesystem-private inode 因而不需要保存平行
-inode identity 或 superblock 回指。
+`AddressSpace` itself holds the object-id, the mapped views, the statically shared `AddressSpaceOperations` and
+`i_pages: MappingPages`. This field embeds the cache container directly without a separate `Arc` allocation, corresponding to Linux
+`address_space::i_pages`; Folio uses `Arc<Folio>` to keep the physical page, the stable identity and the internal page-lock lifetime together.
+`read_folio` obtains the stable index from the Folio itself; the AddressSpace constructor no longer takes a mapping kind that only controls diagnostics.
+`MappingPages` does not store length, object-id or views. `AddressSpace` holds the cache-invalidate
+lock, used to serialize readahead insertion, writeback, page_mkwrite and truncate onto the same
+mapping. Writeback reads the live EOF from the inode via an owner closure after each folio is locked.
+The construction API accepts only `&'static dyn AddressSpaceOperations`, so aops are not an inode private object.
+Backing-store callbacks borrow the sole filesystem-private inode only from the current `AddressSpace`'s `mapping->host`,
+and then recover the superblock through the host's `i_sb`; the filesystem-private inode therefore does not need to store a parallel
+inode identity or superblock back-pointer.
 `InodeOperations::cache_residency()` supplies optional filesystem-owned admission
 and removal callbacks once, before inode publication. Resident hits perform no
 quota lookup or superblock recovery. The common cache contains no capacity policy.
@@ -1012,68 +1012,67 @@ resident hits then need only their folio lock. Retained initialization failures
 are retried, not reported as holes. The callback samples EOF and selects data or
 zeroes; no sparse policy or readahead is added to generic cache traversal.
 
-`VfsFile::mapping()` 借用 Linux `f_mapping` 对应物；MM 不接触底层 storage，只有确实需要
-超出 file borrow 的生命周期时才显式 clone 该 `Arc`。
+`VfsFile::mapping()` borrows the counterpart of Linux `f_mapping`; MM does not touch the underlying storage, and explicitly clones the `Arc` only when it really needs a lifetime
+that outlives the file borrow.
 
-Generic buffered-write limit check 只读取 `SuperBlock` 创建时缓存的最大文件大小。
-需要按 inode 格式进一步收紧范围的文件系统由 `FileOperations::write_iter()` 调用
-`generic_file_write_iter_with_prepare()`；该回调在同一个 inode data critical section
-内组合文件系统策略、通用大小限制和自动时间戳发布，进入 page-cache write 前执行，
-不把 open-file 写策略下沉到 address-space operation。
-空请求也执行策略检查；被拒绝或裁剪后为空的请求不更新时间戳。
+The generic buffered-write limit check reads only the maximum file size cached at `SuperBlock` creation.
+A filesystem that needs to tighten the range further by inode format has `FileOperations::write_iter()` call
+`generic_file_write_iter_with_prepare()`; this callback composes the filesystem policy, the generic size limit and automatic timestamp publication
+within the same inode data critical section, executing before entering the page-cache write,
+and does not push the open-file write policy down into the address-space operation.
+An empty request also undergoes the policy check; a request that is rejected or trimmed to empty does not update timestamps.
 
-KVFS 在非 special file 的 writable open 进入文件系统 `open` callback 前增加
-inode `write_count`，成功后用 `FMode::WRITER` 记录当前 file 持有该计数，打开
-失败或 `FileOperations::release()` 返回后减少。因此 release callback 中读到 1
-表示当前 file 是最后一个 writer，对应 Linux `do_dentry_open()` 中的
-`get_write_access()`/`FMODE_WRITER` 和 `ext4_release_file()` 的调用时序。当前 KVFS
-尚未实现 executable deny-write 导致的 negative count 状态。
+Before a writable open of a non-special file enters the filesystem `open` callback, KVFS increments the
+inode `write_count`; on success it records with `FMode::WRITER` that the current file holds that count, and
+it decrements the count when the open fails or after `FileOperations::release()` returns. Therefore reading 1 in the release callback
+means the current file is the last writer, matching the call order of `get_write_access()`/`FMODE_WRITER` in Linux `do_dentry_open()` and of `ext4_release_file()`. Currently KVFS
+does not yet implement the negative count state caused by executable deny-write.
 
-`WritebackControl` 由 pagecache 定义，KVFS reexport 同一类型。扫描和提交同步借用
-同一个控制对象；预算按交给后端处理的页数扣减，错误或拒绝不退还，完成前缀不改变预算。byte-range callback 的 `WritebackRangeResult` 是
-`Result<usize, (usize, VfsError)>` 的别名，
-表达完成前缀或完成前缀与错误，不再导出独立 writeback outcome 类型。
+`WritebackControl` is defined by pagecache, and KVFS re-exports the same type. Scanning and submission borrow
+the same control object synchronously; the budget is deducted by the number of pages handed to the backend, an error or rejection does not refund it, and a completed prefix does not change the budget. The `WritebackRangeResult` of the byte-range callback is an alias of
+`Result<usize, (usize, VfsError)>`,
+expressing a completed prefix or a completed prefix with an error, and no separate writeback outcome type is exported any more.
 
-## 并发模型
+## Concurrency Model
 
-dentry 的 inode 和 children 由各自 mutex 保护；静态 operation table 在首次绑定
-superblock 时发布后不再改变。一个 live dentry
-对 parent 持有强引用，parent 的 children map 只保存弱索引；superblock dentry cache
-强持有仍处于 hashed 状态的 child，直到 unlink、rename、forget 等路径显式驱逐。
-这对应 Linux dcache 中 child 引用 parent、零外部引用的 hashed dentry 仍可驻留缓存的
-生命周期，同时避免父子强引用环。`DentryKey` 通过持有 parent 的弱引用稳定对象身份，
-不需要为每个 dentry 分配额外 ID。`VfsFile` 的 position 和 private data 使用 mutex，
-流式文件的普通读写入口不获取 position mutex，也不推进文件偏移，避免阻塞读
-把同一 open-file 上的写操作串行化；非流式文件仍锁定并更新共享偏移。
-`f_flags` 与 `f_mode` 使用原子整数存储，inode `write_count` 由打开与释放
-路径原子更新。bitflags 类型是按值复制的语义快照，不额外引入锁或分配。`VfsFile::f_cred` 是创建后不变的 `Arc<Cred>`，无需额外锁。
-FIEMAP writer 只在一次同步调用中借用，不由 VFS 或文件系统保存。inode capability 持有
-对应 inode 的 shared lock 覆盖整个回调，避免 `SYNC` 写回后、extent 遍历前插入 mapping
-修改；buffered write、shared write fault 和 truncate 都从 exclusive 侧更新 mapping 状态，
-同时不扩大成文件系统挂载级写阻塞。
+A dentry's inode and children are protected by their own mutexes; the static operation table is published when it is first bound to a
+superblock and never changes afterwards. A live dentry
+holds a strong reference to its parent, while the parent's children map holds only weak indexes; the superblock dentry cache
+strongly holds children that are still hashed, until unlink, rename, forget, and similar paths explicitly evict them.
+This corresponds to the Linux dcache lifecycle, in which a child references its parent and a hashed dentry with zero external references can still stay resident in the cache,
+while avoiding strong parent-child reference cycles. `DentryKey` stabilizes object identity by holding a weak reference to the parent,
+so no extra ID needs to be allocated for each dentry. The position and private data of `VfsFile` use mutexes;
+the plain read/write entry points of a stream file do not acquire the position mutex and do not advance the file offset, which prevents a blocking read
+from serializing write operations on the same open file; non-stream files still lock and update the shared offset.
+`f_flags` and `f_mode` are stored as atomic integers, and the inode `write_count` is updated atomically by the open and release
+paths. bitflags types are semantic snapshots copied by value and introduce no extra locks or allocations. `VfsFile::f_cred` is an `Arc<Cred>` that does not change after creation, so it needs no extra lock.
+The FIEMAP writer is borrowed only for the duration of a single synchronous call and is not stored by the VFS or the filesystem. The inode capability holds
+the shared lock of the corresponding inode across the whole callback, which prevents mapping modifications from being inserted after the `SYNC` writeback and before the extent walk;
+buffered write, shared write fault and truncate all update mapping state from the exclusive side,
+without widening into a filesystem-mount-level write block.
 
-由外部注册表驱动命名空间的动态文件系统通过
-`Dentry::invalidate_cached_child()` 报告带外增删。该接口在父目录 namespace
-exclusive lock 下同时驱逐 positive/negative child；目录 child 还递归 forget 已缓存后代。
-文件系统只应失效实际变化的最高层路径，以保持未变化目录及其 mountpoint 的 dentry
-身份。
+A dynamic filesystem whose namespace is driven by an external registry reports out-of-band additions and removals through
+`Dentry::invalidate_cached_child()`. This interface evicts both positive and negative children under the parent directory's namespace
+exclusive lock; a directory child additionally has its cached descendants forgotten recursively.
+A filesystem should invalidate only the highest-level path that actually changed, so as to preserve the dentry
+identity of unchanged directories and their mountpoints.
 
-superblock 默认 dentry operations 使用静态引用，对应 Linux `s_d_op`；dentry 只保存继承的
-table identity，不把 operation object 变成 dentry-private runtime state。
+The superblock default dentry operations use a static reference, corresponding to Linux `s_d_op`; a dentry stores only the inherited
+table identity and does not turn the operation object into dentry-private runtime state.
 
-文件系统类型注册表使用独立 mutex 保护。内建类型在 boot CPU 串行阶段写入；按名称查找
-在锁内复制一个静态描述符，枚举则取得列表快照后再格式化输出，不在持锁期间创建
-superblock 或执行文件系统代码。
+The filesystem type registry is protected by a dedicated mutex. Built-in types are written during the serial boot-CPU phase; lookup by name
+copies a static descriptor while holding the lock, and enumeration takes a snapshot of the list and then formats the output, without creating a
+superblock or executing filesystem code while the lock is held.
 
-Namespace callback 在 inode namespace lock 下运行。文件系统应在回调返回前把 core
-mutation result 同步到受影响的 live inode，并通过 `LockedDentry::instantiate()` 完成创建
-对象的 inode attachment；dentry cache 的删除/rebind 仍由 KVFS 在成功返回后完成。
+Namespace callbacks run under the inode namespace lock. A filesystem should synchronize the core
+mutation result into the affected live inodes before the callback returns, and should complete the inode attachment of the created
+object through `LockedDentry::instantiate()`; removal/rebind in the dentry cache is still done by KVFS after the callback returns successfully.
 
-全局 namespace lock 顺序为：
+The global namespace lock order is:
 
 ```text
-mount-namespace registry mutex（仅 mount tree 操作）
-    -> superblock rename mutex（仅 rename）
+mount-namespace registry mutex (mount tree operations only)
+    -> superblock rename mutex (rename only)
     -> parent-directory namespace locks
     -> child-directory namespace locks
     -> non-directory namespace locks (pointer order)
@@ -1082,131 +1081,131 @@ mount-namespace registry mutex（仅 mount tree 操作）
     -> dentry cache and location locks
 ```
 
-detach transaction 在丢弃其收集的 `Arc<Mount>` 前先释放 namespace registry mutex。
-superblock lifecycle 对应 Linux `SB_BORN`、`s_active`、`SB_DYING` 和 `SB_DEAD`：nascent
-block-backed instance 可被 `sget_dev` 查到但不可激活；并发调用者等待 fill 成功或失败。非最后引用直接
-递减；最后引用候选保留计数为一并释放 lifecycle lock，取得 umount lock 后重新校验，再
-切换到 dying。shutdown callback 运行期间不持有 lifecycle lock，避免 inode eviction
-反向进入 mount release；dying/dead superblock 不能取得新的 active 引用。最终 shutdown 在
-同一个 registry 临界区内发布 dead、释放 block claim 并删除 identity，再唤醒等待者。显式 filesystem
-sync 和 Weak registry 的全局 sync snapshot 也获取 umount lock，不能与 final dcache
-eviction 交错，并在取得锁后跳过已经 dying/dead 的 superblock。shutdown 不反向获取
-mount-namespace registry mutex。
+A detach transaction releases the namespace registry mutex before dropping the `Arc<Mount>` values it collected.
+The superblock lifecycle corresponds to Linux `SB_BORN`, `s_active`, `SB_DYING` and `SB_DEAD`: a nascent
+block-backed instance can be found by `sget_dev` but cannot be activated; concurrent callers wait for the fill to succeed or fail. A non-last reference is simply
+decremented; a last-reference candidate keeps its count, releases the lifecycle lock together with it, revalidates after acquiring the umount lock, and then
+switches to dying. The shutdown callback runs without holding the lifecycle lock, which prevents inode eviction
+from re-entering mount release in the reverse direction; a dying/dead superblock cannot obtain a new active reference. Final shutdown publishes dead, releases the block claim and removes the identity
+within the same registry critical section, and only then wakes the waiters. Explicit filesystem
+sync and the global sync snapshot of the Weak registry also acquire the umount lock, so they cannot interleave with final dcache
+eviction, and after acquiring the lock they skip superblocks that are already dying/dead. Shutdown does not acquire the
+mount-namespace registry mutex in the reverse direction.
 
-挂载操作与 namespace validator 都按 inode namespace lock 在外、mount topology lock 在内
-的顺序执行，挂载点检查不会引入反向嵌套。parallel-lookup mutex 只序列化同一个 hashed
-candidate 的 filesystem lookup callback，不会把不同名称的 slow lookup 串行化。
-`SuperBlock::rename_mutex` 对应 Linux `s_vfs_rename_mutex`，不是 dcache rename
-seqlock；它只在 cross-directory rename 中获取。`VfsInode::namespace_lock` 表达
-Linux `inode->i_rwsem` 中和 namespace 相关的子集。`DentryLocation` 用一个 `RwLock`
-同时保护 `parent` 和 `name`，读者不会观察到混合位置。
+Both mount operations and the namespace validator run in the order with the inode namespace lock outside and the mount topology lock inside,
+so mountpoint checks do not introduce reverse nesting. The parallel-lookup mutex serializes only the filesystem lookup callback of the same hashed
+candidate, and does not serialize slow lookups of different names.
+`SuperBlock::rename_mutex` corresponds to Linux `s_vfs_rename_mutex` and is not the dcache rename
+seqlock; it is acquired only in cross-directory rename. `VfsInode::namespace_lock` expresses the
+namespace-related subset of Linux `inode->i_rwsem`. `DentryLocation` uses a single `RwLock`
+to protect both `parent` and `name`, so readers never observe a mixed location.
 
-pathname FIFO 的锁顺序是 inode `fifo_pipe` slot lock 在外、`PipeObject` state lock
-在内。release 先在 pipe state 下减少 reader/writer，释放该锁后再进入 slot lock 完成
-`files`/slot 生命周期更新，禁止形成反向嵌套。buffer、reader/writer 数、
-`r_counter/w_counter` 以及 poll 状态只由 `PipeObject` state lock 保护；waiter wake
-在释放 state lock 后执行。
+The lock order of a pathname FIFO is the inode `fifo_pipe` slot lock outside and the `PipeObject` state lock
+inside. release first decrements the reader/writer count under the pipe state lock, and after releasing that lock enters the slot lock to complete the
+`files`/slot lifecycle update; forming reverse nesting is forbidden. The buffer, the reader/writer counts,
+`r_counter/w_counter` and the poll state are protected only by the `PipeObject` state lock; waiter wake-ups
+are performed after the state lock is released.
 
-child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache traversal 在当前
-锁模型和回归覆盖稳定前保持在范围外。
+The child cache still uses a mutex. RCU, seqcount lookup and lock-free dcache traversal remain out of scope until the current
+lock model and regression coverage are stable.
 
-## 设计决策
+## Design Decisions
 
-- ABI carrier 与内核语义类型分离，转换尽量靠近边界。
-- FIEMAP 使用 `FiemapExtentInfo` 和安全 writer 连接 ABI 与 inode operation，避免把用户
-  指针下传，也避免按用户声明容量在 VFS 中分配临时 extent 数组。
-- 不提供通用 raw-flags getter；只有写入 ABI 或底层存储时调用 `bits()`。
-- 不同 flags 家族不共享整数别名，使错误组合在编译期失败。
-- current task 定位只存在于 `kprocess`；`kvfs` 对所有安全相关操作显式接收 `&Cred`。
-- `Nameidata` 不保存 credential，避免把一次调用上下文变成冗余对象状态。
-- 通用 DAC、父目录修改检查、sticky policy 和初始 owner 由 VFS 统一实现，后端只负责
-  自身元数据与 operation callback。
-- 打开文件保存 `f_cred`；descriptor 权限与 pathname 权限使用不同入口表达。
-- pathname special file 的 `FileOperations::open()` 必须保留 namei 已解析的 `Path`；
-  FIFO 使用共享无状态 operation table，runtime session 由 inode 的 typed pipe slot
-  持有；禁止使用 per-inode stateful fops、全局 factory、裸指针 key 或 anonymous inode
-  替换原 opened-file identity。
-- 具体 pseudo filesystem 的显式预初始化由各自 `fs/filesystems` crate 拥有；KVFS 只提供
-  hidden mount 所需的通用对象机制，不提供具体 filesystem facade。
-- `FileSystemType` 保留 Linux 的“类型描述符 + 全局注册表”层次；POSIX mount 不依赖
-  具体文件系统 crate，`/proc/filesystems` 也不维护平行的名称表。
-- 不为 immutable simple symlink 增加文件系统私有 target 字段；cached-link 是唯一目标
-  owner，operation table 只标识并读取该 inode 状态。
-- `InodeOperations::set_len()` 必须进入 `VfsInode::truncate_setsize()`；文件系统不能自行组合
-  i_size、cache resize 和 mmap invalidation，也不能建立第二套 EOF/cache owner。
+- The ABI carrier is separate from the kernel semantic types, and conversion stays as close to the boundary as possible.
+- FIEMAP connects the ABI and the inode operation through `FiemapExtentInfo` and a safe writer, avoiding passing the user
+  pointer down, and avoiding allocating a temporary extent array in the VFS according to the user-declared capacity.
+- No generic raw-flags getter is provided; `bits()` is called only when writing to the ABI or the underlying storage.
+- Different flag families do not share integer aliases, so wrong combinations fail at compile time.
+- Current task lookup exists only in `kprocess`; `kvfs` explicitly takes `&Cred` for all security-related operations.
+- `Nameidata` does not store credentials, to avoid turning one call's context into redundant object state.
+- Generic DAC, parent-directory modification checks, the sticky policy and the initial owner are implemented uniformly by the VFS, and the backend is responsible only for its
+  own metadata and operation callbacks.
+- An open file stores `f_cred`; descriptor permission and pathname permission are expressed through different entry points.
+- The `FileOperations::open()` of a pathname special file must preserve the `Path` already resolved by namei;
+  FIFO uses a shared stateless operation table, and the runtime session is held by the inode's typed pipe slot;
+  per-inode stateful fops, global factories, raw-pointer keys, or anonymous inodes replacing the
+  original opened-file identity are forbidden.
+- Explicit pre-initialization of concrete pseudo filesystems is owned by their respective `fs/filesystems` crates; KVFS provides only
+  the generic object mechanisms needed by hidden mounts and provides no concrete filesystem facade.
+- `FileSystemType` keeps Linux's "type descriptor + global registry" layering; POSIX mount does not depend on
+  concrete filesystem crates, and `/proc/filesystems` maintains no parallel name table either.
+- No filesystem-private target field is added for an immutable simple symlink; the cached-link is the sole target
+  owner, and the operation table only identifies and reads that inode state.
+- `InodeOperations::set_len()` must go through `VfsInode::truncate_setsize()`; a filesystem must not compose
+  i_size, cache resize and mmap invalidation by itself, nor establish a second EOF/cache owner.
 - `FileOperations::fallocate()` must publish visible-size growth through
   `VfsInode::truncate_setsize()`; dispatch already holds the data and invalidate
   locks, so the self-locking publish helpers deadlock in that context.
-- `VfsInode` 直接保存唯一的 `Arc<AddressSpace>`，不增加单字段 address-space wrapper；
-  `VfsFile` 保存 Linux 风格的 `f_mapping` 引用，MM runtime 只保存 `VfsFile`。
-- 锁由语义 VFS 对象持有，而不是由 filesystem bridge 持有。
-- `RenameData` 对应 Linux `struct renamedata`，其一次性 `execute` 会消费操作对象并驱动
-  VFS orchestration；辅助方法只借用该对象，不为它提供 `Clone`/`Copy`。
-- callback closure 是 Path policy 与锁内 Dentry final lookup 之间的窄接口，不新增持久
-  状态，也不在锁外保留 lookup 结果；parent inode 由 Path 自身解析，调用者不能传入
-  不一致的 Path/inode/dentry 组合。
-- `mknodat` 直接由 `Filename` 驱动上述 transaction，不新增 syscall 专用类型或
-  transaction 状态结构；`Umode::mknod_node_type()` 只解码 type bits，
-  namei 层的 `may_mknod()` 统一分配 Linux 错误并返回通过校验的 `NodeType`。
-  syscall 边界将该类型写回现有 `Umode` 后再开始 `dirfd`/pathname 解析。
-- namespace lock 使用 blocking lock，因为文件系统 callback 可以执行 I/O。
+- `VfsInode` directly stores the sole `Arc<AddressSpace>`, with no single-field address-space wrapper added;
+  `VfsFile` stores a Linux-style `f_mapping` reference, and the MM runtime stores only `VfsFile`.
+- Locks are held by semantic VFS objects, not by the filesystem bridge.
+- `RenameData` corresponds to Linux `struct renamedata`; its one-shot `execute` consumes the operation object and drives
+  the VFS orchestration; helper methods only borrow that object and provide no `Clone`/`Copy` for it.
+- The callback closure is a narrow interface between the Path policy and the in-lock Dentry final lookup; it adds no persistent
+  state and keeps no lookup result outside the lock; the parent inode is resolved by Path itself, and the caller cannot pass an
+  inconsistent Path/inode/dentry combination.
+- `mknodat` drives the above transaction directly from `Filename`, adding no syscall-specific type or
+  transaction state structure; `Umode::mknod_node_type()` only decodes the type bits,
+  and the namei-layer `may_mknod()` assigns the Linux errors uniformly and returns the validated `NodeType`.
+  The syscall boundary writes that type back into the existing `Umode` before starting `dirfd`/pathname resolution.
+- The namespace lock uses a blocking lock, because filesystem callbacks may perform I/O.
 
-### SimpleFile 写入模式
+### SimpleFile Write Modes
 
-`SimpleFileOps` 默认拒绝写入；需要可写文件时，由具体操作对象实现写入语义。
-`CommandFile` 的 read callback 必须返回 `Some(content)`；`Ok(None)` 转为
-`VfsError::InvalidData`，callback 自身错误原样传播，空内容使用 `Some(Vec::new())`。
-`CommandFile` 表达 procfs/cgroupfs 一类 command-style pseudo file。一次 write/writev
-请求先完整复制到最多 4096 字节的内核缓冲区，再作为一个命令交给 callback；文件 offset
-和此前写入均不参与命令拼接。callback 同时收到保存 opener credential 的 `VfsFile`，因此
-descriptor-based 授权不需要反向查询 current task。`SimpleFile` 根据具体操作对象的
-`write_iter` 分派写入算法，不通过额外的模式字段选择。
+`SimpleFileOps` rejects writes by default; when a writable file is needed, the concrete operation object implements the write semantics.
+The read callback of `CommandFile` must return `Some(content)`; `Ok(None)` is converted to
+`VfsError::InvalidData`, errors from the callback itself are propagated unchanged, and empty content uses `Some(Vec::new())`.
+`CommandFile` expresses command-style pseudo files such as those in procfs/cgroupfs. A single write/writev
+request is first copied in full into a kernel buffer of at most 4096 bytes, and then handed to the callback as one command; the file offset
+and earlier writes take no part in assembling the command. The callback also receives the `VfsFile` that stores the opener credential, so
+descriptor-based authorization does not need to query the current task in the reverse direction. `SimpleFile` dispatches the write algorithm according to the concrete operation object's
+`write_iter`, and does not select it through an extra mode field.
 
-`SimpleDirOps::mkdir()` 接收 VFS 已解析并加锁的 parent inode、准备后的 mode 和同一次
-pathname 操作的 credential；`rmdir()` 接收 parent inode 与加锁的 victim dentry。动态
-文件系统必须基于这些对象提交后端 mutation，不能按裸名称重新 lookup 或查询 ambient
-credential。`child_names()` 可传播生命周期或后端错误，使旧目录 fd 的 readdir 不会被
-静默转换为空目录。需要持久 identity 的 pseudo filesystem 可用 `SimpleFile::new_inode()`、
-`SimpleDir::new_inode_with_owner()` 和 `SimpleDirLookup::{file,dir}_from_inode()` 重用 inode。
+`SimpleDirOps::mkdir()` receives the parent inode already resolved and locked by the VFS, the prepared mode, and the credential of the same
+pathname operation; `rmdir()` receives the parent inode and the locked victim dentry. A dynamic
+filesystem must commit the backend mutation based on these objects, and must not look up again by bare name or query the ambient
+credential. `child_names()` may propagate lifecycle or backend errors, so that readdir on an old directory fd is not
+silently converted into an empty directory. A pseudo filesystem that needs persistent identity can reuse inodes with `SimpleFile::new_inode()`,
+`SimpleDir::new_inode_with_owner()` and `SimpleDirLookup::{file,dir}_from_inode()`.
 
-### SimpleDir 动态目录链接数
+### SimpleDir Dynamic Directory Link Count
 
-`SimpleDirOps::link_count()` 为整个目录提供可选的动态 nlink。`getattr()` 先取得
-`SimpleFsNode` 的 metadata 副本，释放其 metadata lock 后才调用该回调；`Some(nlink)`
-仅覆盖本次返回的链接数，`None` 保留副本中的原值，回调错误向上传播。
-`ChainedDirOps` 不合并各组成目录的链接数，沿用 `None` 默认值。procfs 的 task 目录
-通过该接口在每次查询时读取目标进程的线程成员；已经打开的目录 fd 也得到新查询值。
-其他 metadata 字段与目录 lookup/iteration 路径沿用现有行为。
-动态值只属于 getattr 返回副本，不回写 `SimpleFsNode` 或 `VfsInode` cache。
-需要当前 nlink 的调用方应走 getattr；`metadata()` 保留缓存语义。目录枚举仅从
-缓存取 inode/type，不使用 nlink。新增 guest 定义覆盖 Some 动态变化、默认 None、
-错误传播、其他字段和缓存保持；这些定义尚未编译或执行。
+`SimpleDirOps::link_count()` provides an optional dynamic nlink for the whole directory. `getattr()` first obtains a copy of the
+`SimpleFsNode` metadata, and calls the callback only after releasing its metadata lock; `Some(nlink)`
+overrides the link count only for this return, `None` keeps the original value in the copy, and callback errors are propagated upward.
+`ChainedDirOps` does not merge the link counts of its component directories and keeps the `None` default. The procfs task directory
+uses this interface to read the thread members of the target process on every query; an already-open directory fd also gets the newly queried value.
+Other metadata fields and the directory lookup/iteration paths keep their existing behavior.
+The dynamic value belongs only to the copy returned by getattr and is not written back to the `SimpleFsNode` or `VfsInode` cache.
+Callers that need the current nlink should go through getattr; `metadata()` keeps its cached semantics. Directory enumeration takes only
+inode/type from the cache and does not use nlink. The newly added guest definitions cover Some dynamic changes, the default None,
+error propagation, other fields, and cache preservation; these definitions have not yet been compiled or executed.
 
-### Buffered read 与同步预读
+### Buffered read and synchronous readahead
 
-缓存读复用 `FolioBatch` 批量收集连续 resident 引用，每批最多 31 页；
-缓存引用批次与每次打开文件的预读窗口独立，缺页时使用同步预读协议，
-再重新收集。批次引用只保活分配；逐页复制时拒绝失效或非 uptodate 页，
-回退到 resident 查询和按需初始化。后续批次只收集当前读取请求的剩余范围。
+Cached reads reuse `FolioBatch` to collect consecutive resident references in batches, with at most 31 pages per batch;
+the cached reference batch is independent of the per-open readahead window, and on a missing page the synchronous readahead protocol is used,
+after which collection is redone. Batch references only keep the allocation alive; when copying page by page, invalidated or non-uptodate pages are rejected,
+falling back to resident lookup and on-demand initialization. Subsequent batches collect only the remaining range of the current read request.
 
-`VfsFile` 持有 `Mutex<FileRaState>`，独立 open / alloc_clone 初始化独立历史，
-共享同一个打开文件描述的 dup/fork 引用共享历史。状态只保存页窗口起点、页数、
-提前触发区长度、可缩减的页预算和已完成读取的字节位置，不保存 EOF 或 folio 引用。
-打开文件时，从所属 superblock 的 canonical block device 取得 `Gendisk::bdi` 预读预算；
-块设备特殊文件直接解析该设备，无设备文件使用 128 KiB 默认值。预算只在打开时快照，
-既有 fd 不受后续 BLKRASET 影响。顺序读按请求规模建立窗口，消费 folio 预读标记后按上限增长。
-小随机缺页只准备请求范围，不覆盖顺序窗口；必要时从缓存的有界连续历史重建窗口。
-仅允许预读的打开实例可以消费共享标记；预算为零的实例保留标记供其他读者使用。
-其他允许预读的打开实例也可以消费共享标记，并根据当前缓存恢复自己的窗口。按需读取最终
-返回 EIO 时该打开实例的预算缩为四分之一，降为零后仅准备一个需求页。
-仅标记命中时在 folio 锁内获取策略锁，把预算检查、标记消费与窗口计算作为一次决策；
-普通命中不逐页获取策略锁。策略锁不覆盖 folio 等待、用户复制或文件系统 I/O。
+`VfsFile` holds a `Mutex<FileRaState>`; independent open / alloc_clone initialize independent history,
+and dup/fork references sharing the same open file description share the history. The state stores only the window start page, the page count,
+the length of the early-trigger zone, the shrinkable page budget and the byte position of completed reads, and stores no EOF or folio reference.
+When a file is opened, the readahead budget is obtained from `Gendisk::bdi` of the canonical block device of the owning superblock;
+a block-device special file resolves that device directly, and a file without a device uses the 128 KiB default. The budget is snapshotted only at open time,
+and existing fds are not affected by a later BLKRASET. Sequential reads build the window by request size, and grow it up to the limit after consuming the folio readahead mark.
+A small random fault prepares only the requested range and does not overwrite the sequential window; when necessary the window is rebuilt from the cached bounded contiguous history.
+An open instance that only allows readahead may consume the shared mark; an instance with a zero budget leaves the mark for other readers.
+Other open instances that allow readahead may also consume the shared mark and restore their own window from the current cache. When an on-demand read finally
+returns EIO, that open instance's budget shrinks to a quarter, and once it drops to zero only one demanded page is prepared.
+When only the mark hits, the policy lock is taken inside the folio lock, making the budget check, mark consumption and window computation a single decision;
+an ordinary hit does not take the policy lock per page. The policy lock does not cover folio waits, user copies or filesystem I/O.
 Early triggering describes when the window advances. Current backends still read
 synchronously, but the interface allows initialization ownership to be transferred
 without introducing a background task.
 
-窗口预算与批次容量独立；单页缺失段及分批后的单页尾段也在本轮初始化。
-分发时只有一个预留页则直接调用 `read_folio`，避免为单页 I/O 分配预读中转缓冲。
+The window budget is independent of the batch capacity; a single-page missing segment and the single-page tail segment after batching are also initialized in this round.
+When dispatching, if there is only one reserved page, `read_folio` is called directly, avoiding allocating a readahead bounce buffer for single-page I/O.
 The window is submitted as contiguous missing ranges of at most 31 pages per
 batch. Private folios are allocated and locked outside the index lock, then a
 contiguous prefix is rechecked and published under that lock. I/O runs after the
@@ -1216,11 +1215,11 @@ responsibility for its held lock, without a separate request index.
 Default readahead consumes existing reservations through per-page `read_folio`
 calls and continues after submission failures. The completer publishes uptodate
 and unlocks the folio.
-首个候选被并发插入时，窗口游标只越过该位置，继续查询后面的缺页。
-游标在尝试初始化时消费当前页；文件系统提供含空洞及 EOF 尾部零填充的完整页，再标记 uptodate。
-已消费的失败页可保留供按需重试；回调未消费的后缀在退出时清理，避免空预读或提前返回
-留下无用驻留页。清理保持未消费页的锁，取得索引锁复核身份并摘除后再解锁；
-等待读取者醒来后重新查找 resident，不在已摘除的预留页上继续初始化。读取失败不暴露部分数据，已复制前缀优先返回。
+When the first candidate is inserted concurrently, the window cursor only skips past that position and continues querying the following missing pages.
+The cursor consumes the current page when it attempts initialization; the filesystem provides a complete page with holes and zero-filled EOF tail, and then it is marked uptodate.
+Consumed failed pages may be kept for on-demand retry; the suffix not consumed by the callback is cleaned up on exit, so that empty readahead or an early return
+does not leave useless resident pages. Cleanup keeps the lock of the unconsumed page, takes the index lock to recheck identity and unlink it, and then unlocks;
+after waiting readers wake, they look up the resident page again and do not continue initializing on an already unlinked reserved page. A read failure exposes no partial data, and the already copied prefix is returned first.
 
 Demand reads also reserve an uninitialized folio before reading under its lock.
 Competing readers wait for the folio lock and repeat the resident lookup;
@@ -1234,56 +1233,56 @@ token describes one initialization attempt; a detached replacement may require
 another call for the same index. Buffered writes validate context before
 `write_begin`, and size changes do so before publishing EOF, keeping mandatory
 rollback/truncation waits inside an admitted operation.
-文件系统负责本次读取边界与尾部清零，通用层不以完成后的 EOF 重验返回字节数。
-缓冲缺页路径从 EOF 检查到初始化完成持 invalidate shared lock，缓存索引锁不覆盖 I/O。通用 buffered 复制期间不持 invalidate lock，锁定每页后重新读取
-inode EOF。单次读取的已准备末端只用于避免对失败预留重复发起预读，不保证缓存驻留。
-只有新发布的预留页携带窗口标记；在 folio 锁内完成标记消费与窗口决策，释放 folio 和策略锁后执行后续窗口。
+The filesystem is responsible for the read boundary and tail zeroing of this read, and the generic layer does not revalidate the returned byte count against the post-completion EOF.
+The buffered fault path holds the invalidate shared lock from the EOF check to initialization completion, and the cache index lock does not cover I/O. The generic buffered copy holds no invalidate lock, and re-reads after locking each page
+the inode EOF. The prepared end of a single read is used only to avoid issuing readahead repeatedly for a failed reservation, and does not guarantee cache residency.
+Only newly published reserved pages carry the window mark; mark consumption and window decision complete inside the folio lock, and the subsequent window runs after the folio and the policy lock are released.
 
-### Advisory 文件锁
+### Advisory file locks
 
-`locks.rs` 在 `VfsInode` 上按需建立 `FileLockContext`，对应 Linux `i_flctx`。
-一个 mutex 保护 POSIX/OFD 区间集合和独立的 flock 集合；公开的 `FileLock`
-仅表达不可变请求和查询结果，内部 `LockNode` 保存共享节点。`LockList` 与不可克隆的
-`OwnedLock` 交接安装区间的唯一所有权，只有后者的独占借用能改区间；`Waiter`
-区间终生不可变，`Blocker` 仅提供等待关系身份。通知链表由 `WakeQueue` 私有持有；链表统一使用
-`intrusive-collections::LinkedList` 与同一个节点内嵌链域。
-这些薄类型复用原有 Arc/链表，不增加节点字段、锁或堆分配，并阻止共享句柄绕过所有权
-直接入链。相同 owner 的区间合并、切分、替换；冲突请求
-沿具体 blocker 按冲突形成等待树，授锁时转移后继，取消时直接解链并唤醒下一层。
-已安装区间由 inode 锁保护，首个同类型合并对象原位扩展并保留身份。
-通知复用请求链表节点和已注册 waker，关闭清理不分配；通知出队前请求不得
-重用节点。全局 owner 索引按
-实际 blocker 的 POSIX 类型登记（包括 OFD 请求），仅 POSIX 请求执行沿树根的
-有界 owner 死锁检测，不复制 inode 锁集合。传统 owner 是 fd 表身份，OFD/flock owner
-是打开文件身份；锁记录不强持有这两类 owner。`FileOperations` 分派查询和
-加锁；描述符关闭即使 flush 失败也清理 POSIX 锁，最终文件释放清理 OFD/flock。
+`locks.rs` creates a `FileLockContext` on demand on `VfsInode`, corresponding to Linux `i_flctx`.
+One mutex protects the POSIX/OFD range set and the separate flock set; the public `FileLock`
+expresses only an immutable request and query results, while the internal `LockNode` holds the shared node. `LockList` and the non-cloneable
+`OwnedLock` hand over the sole ownership of an installed range, and only the exclusive borrow of the latter can change the range; the `Waiter`
+range is immutable for its whole lifetime, and `Blocker` only provides the identity of a wait relation. The notification list is held privately by `WakeQueue`; the lists uniformly use
+`intrusive-collections::LinkedList` and the same node-embedded link field.
+These thin types reuse the existing Arc/list, add no node fields, locks or heap allocations, and prevent shared handles from bypassing ownership
+and linking into a list directly. Ranges of the same owner are merged, split and replaced; conflicting requests
+form a wait tree by conflict along the specific blocker; on lock grant the successors are transferred, and on cancellation the node is unlinked directly and the next level is woken.
+Installed ranges are protected by the inode lock, and the first merge object of the same type is extended in place and keeps its identity.
+Notification reuses the request list node and the already registered waker, and close cleanup does not allocate; a request must not
+reuse its node before the notification is dequeued. The global owner index is
+registered by the POSIX type of the actual blocker (including OFD requests), and only POSIX requests perform a
+bounded owner deadlock detection along the tree root, without copying the inode lock set. The traditional owner is the fd table identity, and the OFD/flock owner
+is the open file identity; lock records do not strongly hold these two kinds of owners. `FileOperations` dispatches queries and
+locking; closing a descriptor cleans up POSIX locks even if flush fails, and the final file release cleans up OFD/flock.
 
-## Drop / 资源释放
+## Drop / Resource release
 
-VFS 对象通过 `Arc`/`Weak` 管理生命周期。unlink、rename replacement 和 forget 会从
-parent children 弱索引与 superblock dentry cache 中移除 dentry；仍有 Path/File 引用
-时对象继续存活，否则释放时沿 strong parent 链逐级归还引用。每个 `VfsMount` 持有一个
-superblock active 引用；最后一个 active mount 释放时执行 writeback、dcache eviction 和
-最终 filesystem/device sync。superblock 对象的 `Arc` 最终释放只负责丢弃已经 shutdown 的
-root 和私有状态。dentry cache 与 open file 都持有 `VfsInode` 引用；最后一个引用消失后，
-hashed VFS inode identity table 先发布 `Freeing`，再让 `SuperBlockOperations::evict_inode()` 获得 final teardown
-机会。默认实现只丢弃 inode `AddressSpace` 中的 cached folios，磁盘文件系统可在 nlink=0
-时追加 journaled inode 回收。hook 返回后 cache 删除精确匹配的旧 entry 并唤醒同号 lookup；
-失败只能记录，但仍不能把正在释放的 identity 重新交给普通操作。唤醒使用被删除 slot 自己的
-等待队列，不广播到其它 inode。identity table 的一把 mutex 对应 Linux `inode_hash_lock`；
-锁内只做 `(SuperBlock, inode number)` 哈希查找和状态转换，initializer、等待和 eviction hook
-都在锁外。key 保存 `Weak<SuperBlock>` 并按其分配地址比较：它不延长 superblock 值的生命，
-但会保留 `Arc` 分配直到 slot 删除，因此地址不能在旧 identity 仍 hashed 时复用，也不需要新增
-superblock serial。`VfsInode` 同样只弱持有 superblock，避免与 root/dcache 形成强引用环；
-filesystem callback 按需执行可失败的 upgrade，不在 bridge 中缓存第二份 superblock owner。
-unhashed pseudo inode 不发布 `Freeing` slot，最后一个引用直接执行同一 eviction hook。
+VFS objects manage their lifetimes through `Arc`/`Weak`. unlink, rename replacement and forget remove the dentry from the
+parent children weak index and the superblock dentry cache; if Path/File references still exist,
+the object stays alive, otherwise on release the references are returned level by level along the strong parent chain. Each `VfsMount` holds one
+superblock active reference; when the last active mount is released, writeback, dcache eviction and
+the final filesystem/device sync are performed. The final release of the superblock object's `Arc` is only responsible for dropping the already shut down
+root and private state. The dentry cache and open files both hold `VfsInode` references; after the last reference disappears,
+the hashed VFS inode identity table first publishes `Freeing`, and then gives `SuperBlockOperations::evict_inode()` the final teardown
+opportunity. The default implementation only drops the cached folios in the inode `AddressSpace`, and a disk filesystem may append journaled inode reclamation
+when nlink=0. After the hook returns, the cache removes the exactly matching old entry and wakes lookups of the same number;
+a failure can only be logged, but it still must not hand the identity being released back to ordinary operations. The wakeup uses the wait queue of the removed slot itself,
+and does not broadcast to other inodes. The single mutex of the identity table corresponds to Linux `inode_hash_lock`;
+under the lock only the `(SuperBlock, inode number)` hash lookup and state transitions are done, while the initializer, waiting and the eviction hook
+all run outside the lock. The key stores `Weak<SuperBlock>` and compares by its allocation address: it does not extend the lifetime of the superblock value,
+but it keeps the `Arc` allocation until the slot is removed, so the address cannot be reused while the old identity is still hashed, and no new
+superblock serial is needed. `VfsInode` likewise holds the superblock only weakly, to avoid a strong reference cycle with root/dcache;
+filesystem callbacks perform a fallible upgrade on demand, and the bridge does not cache a second superblock owner.
+An unhashed pseudo inode does not publish a `Freeing` slot, and its last reference runs the same eviction hook directly.
 per-open
-`FileOperations::release()` 先于 final inode eviction，不能代替后者。flags
-类型不拥有资源；inode 与文件系统私有资源仍由现有对象生命周期及文件系统回调负责。
-FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 随最后一个引用
-释放；hard link 因共享同一 `VfsInode` 而共享同一活动 session。
+`FileOperations::release()` runs before final inode eviction and cannot replace the latter. The flags
+type does not own resources; inode and filesystem-private resources are still the responsibility of the existing object lifetimes and filesystem callbacks.
+When the last open file of a FIFO is closed, the inode pipe slot is cleared and the `Arc<PipeObject>` is
+released with its last reference; hard links share the same active session because they share the same `VfsInode`.
 
-## 已知限制
+## Known limitations
 
 - The effective process capability set now covers DAC, sticky directories,
   xattr, chown/chmod, and related checks; LSM, ACL, user-namespace ID mapping,
@@ -1292,17 +1291,17 @@ FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 
   after becoming effective. `trusted.*` access and `security.*` mutation require
   effective `CAP_SYS_ADMIN`; user xattr modification in a sticky directory also
   requires directory ownership or effective `CAP_FOWNER`.
-- FAT 等不能原生表达 Unix UID/GID 的后端不能完整持久化创建者身份。
-- 当前 POSIX rename 路径不支持 `RENAME_WHITEOUT`。
-- superblock dentry cache 尚无 Linux 风格 LRU/shrinker。
-- fast lookup 仍是 mutex-based，没有 RCU 或 rename sequence validation；slow lookup 已按
-  hashed candidate owner/waiter 模型合并同名并发 lookup。
-- layered filesystem 的跨文件系统 lock rank 尚未建模。
-- mount topology 同步与 superblock rename mutex 仍是不同机制。
-- 文件系统类型当前都是静态内建实现，尚无 Linux module autoload、引用计数和
-  `unregister_filesystem()` 生命周期。
-- `FsContext` 只传递一页 opaque mount data；具体 binary/text format 和支持的 option 集合属于
-  各 filesystem type。
+- Backends such as FAT that cannot natively express Unix UID/GID cannot fully persist the creator identity.
+- The current POSIX rename path does not support `RENAME_WHITEOUT`.
+- The superblock dentry cache has no Linux-style LRU/shrinker yet.
+- Fast lookup is still mutex-based, without RCU or rename sequence validation; slow lookup already merges same-name concurrent lookups under the
+  hashed candidate owner/waiter model.
+- The cross-filesystem lock rank of layered filesystems has not been modeled.
+- Mount topology synchronization and the superblock rename mutex are still different mechanisms.
+- Filesystem types are currently all statically built-in implementations, with no Linux module autoload, reference counting or
+  `unregister_filesystem()` lifecycle.
+- `FsContext` passes only one page of opaque mount data; the concrete binary/text format and the supported option set belong to
+  each filesystem type.
 
 ## Sequential record rendering errors
 
@@ -1385,11 +1384,11 @@ after their final allocation reference is dropped outside the locks.
 
 ## Unrecoverable filesystem write failure
 
-`SuperBlock::mark_read_only()` 在不可恢复的文件系统错误后原子设置现有 `RDONLY` 位，
-保留其他标志。它不执行 flush 或 transaction 处理；文件系统负责停止内部写入，并在
-释放 mutation 保护前发布只读状态，使现有 VFS 写入口和 statfs 导出立即观察该状态。
-文件系统的 reconfigure 回调必须依据已有的失败状态拒绝恢复可写，且在返回错误前不应用
-其他挂载选项。`RDONLY` 本身仍是挂载标志，不能替代文件系统内部的写入准入校验。
+After an unrecoverable filesystem error, `SuperBlock::mark_read_only()` atomically sets the existing `RDONLY` bit,
+preserving the other flags. It does not perform flush or transaction handling; the filesystem is responsible for stopping internal writes and for publishing the read-only state
+before releasing mutation protection, so that the existing VFS write entry points and statfs export observe that state immediately.
+The filesystem's reconfigure callback must reject restoring writability based on the existing failure state, and must not apply
+other mount options before returning the error. `RDONLY` itself remains a mount flag and cannot replace the filesystem's internal write admission checks.
 
 ### Submission-based writeback batches
 

@@ -1,4 +1,4 @@
-# kalloc — 设计文档
+# kalloc — Design Document
 
 ## Test Allocation Probe
 
@@ -8,55 +8,55 @@ IRQ/preemption guard across the before/after samples and measured operation.
 Frees cannot hide intervening allocations. This probe adds no production
 instrumentation and does not measure remote CPUs, failed attempts or live usage.
 
-## 定位
+## Scope and Role
 
-`kalloc` 是 x-kernel 的内核全局内存分配层。它接收启动阶段交付的空闲内存区域，
-向上提供 Rust 全局堆、连续页、DMA32 页和 RAII 页对象，并负责把这些请求路由到
-byte allocator、全局 page buddy 以及相应的 per-CPU cache。
+`kalloc` is the kernel-wide global memory allocation layer of x-kernel. It receives the free memory regions handed over during boot,
+provides the Rust global heap, contiguous pages, DMA32 pages and RAII page objects to upper layers, and is responsible for routing these requests to
+the byte allocator, the global page buddy and the corresponding per-CPU caches.
 
-主要使用者包括：
+The main users include:
 
-- Rust `alloc` 生态以及内核中使用 `Box`、`Vec`、`Arc` 等类型的代码；
-- 页表、用户虚拟内存、page cache 和通用连续页使用者；
-- `kdma` 等需要 DMA32 物理地址的子系统；
+- the Rust `alloc` ecosystem, and kernel code that uses types such as `Box`, `Vec`, and `Arc`;
+- page tables, user virtual memory, the page cache, and general contiguous-page users;
+- subsystems such as `kdma` that need DMA32 physical addresses;
 - Kernel components retaining single or contiguous allocations through `PageRef`;
-- 可选的 allocation tracking。
+- optional allocation tracking.
 
-## 背景
+## Background
 
-x-kernel 运行在 `no_std` 环境中，既需要满足 Rust `GlobalAlloc` 接口，也需要直接
-管理启动内存和不同用途的连续页。单一分配策略无法同时兼顾小对象、页粒度、特殊
-对齐、DMA 地址限制和多 CPU 热路径，因此 `kalloc` 采用两级中央 allocator，并在
-页和 slab object 两个层次设置 per-CPU cache：
+x-kernel runs in a `no_std` environment, and needs both to satisfy the Rust `GlobalAlloc` interface and to directly
+manage boot memory and contiguous pages for different purposes. A single allocation strategy cannot simultaneously serve small objects, page granularity, special
+alignment, DMA address restrictions and multi-CPU hot paths, so `kalloc` uses a two-level central allocator and places per-CPU caches at
+two levels, pages and slab objects:
 
-- `BuddyPageAllocator<4096>` 是所有普通内存区域的最终 owner；
-- Kconfig 选择的 byte allocator 管理从 page allocator 取得的 heap region；
-- 页级 PCP 缓存常用的 1–4 页连续 block；
-- slab 配置下的 per-CPU object cache 缓存 8–2048 字节对象。
+- `BuddyPageAllocator<4096>` is the final owner of all ordinary memory regions;
+- the byte allocator selected by Kconfig manages heap regions obtained from the page allocator;
+- the page-level PCP caches commonly used contiguous blocks of 1–4 pages;
+- under the slab configuration, the per-CPU object cache caches objects of 8–2048 bytes.
 
-per-CPU slab cache 是当前 object-cache 设计的初版。它减少稳定小对象工作集对中央
-byte allocator 锁的竞争，但不取代中央 allocator，也不提供完整 reclaim、CPU
-hotplug 或 NMI 支持。
+The per-CPU slab cache is the first version of the current object-cache design. It reduces contention of a stable small-object working set on the central
+byte allocator lock, but it does not replace the central allocator, and it provides no full reclaim, CPU
+hotplug or NMI support.
 
-PCP 和 slab cache 的可变访问统一经 crate-private `AllocLocalOwner`。owner 持有
-`IrqSave`，把“固定在当前 CPU 且禁止本地 IRQ 重入”的条件贯穿一次同步 cache 操作；
-PCP/slab 模块不再自行读取 raw per-CPU base，也不向调用者返回 cache 引用。owner
-只建立执行上下文排他性，具体 object/page provenance 仍由相应 allocation API 负责。
+All mutable access to the PCP and slab caches goes through the crate-private `AllocLocalOwner`. The owner holds
+`NoPreemptIrqSave`, carrying the condition "pinned to the current CPU and local IRQ re-entry disabled" through one synchronous cache operation;
+the PCP/slab modules no longer read the raw per-CPU base themselves, nor return cache references to callers. The owner
+only establishes execution-context exclusivity; the specific object/page provenance remains the responsibility of the corresponding allocation API.
 
-## 范围
+## Scope
 
-本设计覆盖：
+This design covers:
 
 ```text
 mm/kalloc/
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs          # 全局 allocator、初始化、路由、统计和 GlobalAlloc
+│   ├── lib.rs          # Global allocator, initialization, routing, statistics and GlobalAlloc
 │   ├── page.rs         # Unified PageRef, allocation, zeroing and final release
 │   ├── page/split.rs   # Cleanup iterator transferring independent split pages
-│   ├── pcp.rs          # 1–4 页 per-CPU page cache
-│   ├── slab_cache.rs   # slab 配置下的 per-CPU object cache
-│   └── tracking.rs     # 可选 allocation tracking
+│   ├── pcp.rs          # 1–4 page per-CPU page cache
+│   ├── slab_cache.rs   # Per-CPU object cache under the slab configuration
+│   └── tracking.rs     # Optional allocation tracking
 ├── ut-tests/
 │   ├── lib.rs
 │   ├── pcp.rs
@@ -67,34 +67,34 @@ mm/kalloc/
     └── security.md
 ```
 
-底层 buddy、slab、TLSF 等具体算法属于 `mm/alloc-engine`，本文只描述 `kalloc` 对
-它们的组合、同步和调用约束。
+The concrete underlying algorithms such as buddy, slab and TLSF belong to `mm/alloc-engine`; this document only describes how `kalloc` composes
+them, and its synchronization and calling constraints.
 
-内核单元测试通过 `unittest::path_mod_test!` 在对应的 `src/` 模块中挂载，
-仅在 `cfg(unittest)` 下编译。公开模块 `tests_kalloc`、`tests_tracking` 的名称和
-可见性保持不变；PCP 和 slab 测试保留各自私有的 `tests` 模块。
-`slab_cache` 测试需要启用 `slab` feature，`tracking` 测试需要启用 `tracking` feature。
+Kernel unit tests are mounted in the corresponding `src/` modules through `unittest::path_mod_test!`,
+and are compiled only under `cfg(unittest)`. The names and
+visibility of the public modules `tests_kalloc` and `tests_tracking` are unchanged; the PCP and slab tests keep their own private `tests` modules.
+The `slab_cache` tests require the `slab` feature to be enabled, and the `tracking` tests require the `tracking` feature to be enabled.
 
-## 配置
+## Configuration
 
-构建必须通过 Kconfig 选择一种 byte allocator：
+A build must select exactly one byte allocator through Kconfig:
 
 | feature | `DefaultByteAllocator` | per-CPU slab object cache |
 |---------|------------------------|---------------------------|
-| `slab` | `SlabByteAllocator` | 启用 |
-| `buddy` | `BuddyByteAllocator` | 不启用 |
-| `tlsf` | `TlsfByteAllocator` | 不启用 |
+| `slab` | `SlabByteAllocator` | Enabled |
+| `buddy` | `BuddyByteAllocator` | Not enabled |
+| `tlsf` | `TlsfByteAllocator` | Not enabled |
 
-未选择任何一种会触发 `compile_error!`。工程配置约定只选择一种；当前源码没有对
-“同时选择多种”单独报错，而是由 `cfg_if!` 的分支顺序选中一种。
+Selecting none of them triggers `compile_error!`. The build configuration convention is to select only one; the current source does not
+report a separate error for "multiple selected at once", and instead the branch order of `cfg_if!` picks one.
 
-其他可选能力：
+Other optional capabilities:
 
-- `tracking`：记录 Rust 全局堆 allocation 的 layout、backtrace 和 generation；
-- `tee` / `dice`：本 crate 内已无代码受其门控。两个 feature 仍保留声明，因为
-  `api/kfeat`（`dice`）与 `tee_kernel`（`tee`）的 feature 图会启用它们。
+- `tracking`: records the layout, backtrace and generation of Rust global heap allocations;
+- `tee` / `dice`: no code in this crate is gated by them any more. The two features are still declared, because
+  the feature graphs of `api/kfeat` (`dice`) and `tee_kernel` (`tee`) enable them.
 
-## 架构
+## Architecture
 
 ```text
                        Rust alloc / kernel callers
@@ -123,132 +123,132 @@ Other paths:
   tracking ----------------------------------------> wraps Rust GlobalAlloc path
 ```
 
-启用 `tracking` 时，递归标记是 per-CPU `AtomicBool`。一个 RAII guard 在读取标记前
-禁用抢占和 IRQ，并在析构时清除同一 CPU 的标记。该 guard 会跨 backtrace、tracking
-锁以及被包装的 allocation callback；这是诊断 feature 为保证递归和迁移语义付出的
-延迟成本，不属于正常关闭 tracking 时的热路径。
+When `tracking` is enabled, the recursion flag is a per-CPU `AtomicBool`. An RAII guard disables preemption and IRQs before reading the flag,
+and clears the flag of the same CPU on drop. The guard spans the backtrace, the tracking
+lock and the wrapped allocation callback; this is the latency cost the diagnostic feature pays to guarantee recursion and migration semantics, and
+it is not part of the hot path when tracking is normally off.
 
-`GlobalAllocator` 的主要状态为：
+The main state of `GlobalAllocator` is:
 
-| 状态 | 保护方式 | 含义 |
+| State | Protection | Meaning |
 |------|----------|------|
-| `balloc` | `SpinNoIrq` | 当前配置的中央 byte allocator |
+| `balloc` | `SpinNoIrq` | The central byte allocator of the current configuration |
 | `palloc` | `SpinNoIrq` | 4 KiB page buddy |
-| `heap_ready` | `AtomicBool` | byte allocator 是否已获得首个 heap region |
-| `page_ready` | `AtomicBool` | page allocator 是否已获得至少一个 region |
-| per-CPU usage counters | 每 CPU、每 `UsageKind` 两个累计 atomic | caller-live 诊断计数 |
+| `heap_ready` | `AtomicBool` | Whether the byte allocator has obtained its first heap region |
+| `page_ready` | `AtomicBool` | Whether the page allocator has obtained at least one region |
+| per-CPU usage counters | Two cumulative atomics per CPU, per `UsageKind` | caller-live diagnostic counters |
 
-## 初始化状态
+## Initialization State
 
-allocator 只有单向状态转换，不支持 runtime teardown：
+The allocator has only one-way state transitions and does not support runtime teardown:
 
 ```text
 Empty
   |
-  | init_page_allocator()，或 global_init() 的第一阶段
+  | init_page_allocator(), or the first phase of global_init()
   v
 PageReady
   |
-  | bootstrap_heap_if_needed()、首次 byte allocation，
-  | 或 global_init() 的第二阶段
+  | bootstrap_heap_if_needed(), first byte allocation,
+  | or the second phase of global_init()
   v
 HeapReady
 
-PageReady / HeapReady -- add_memory() --> 保持当前状态并扩展 palloc
+PageReady / HeapReady -- add_memory() --> extends palloc; from PageReady it also bootstraps the byte heap (-> HeapReady)
 ```
 
-实际启动路径由 `kruntime` 按以下顺序执行：
+The actual boot path is executed by `kruntime` in the following order:
 
-1. 初始化主 CPU 的 per-CPU storage；
-2. 初始化内存映射并枚举带 `FREE` 标记的 region；
-3. 第一段 region 通过 `global_init()` 初始化 page allocator，并从中取得至少
-   `MIN_HEAP_SIZE`（32 KiB）作为首个 byte heap；
-4. 后续 region 通过 `global_add_memory()` 加入 page allocator；
-5. AP 在进入普通内核代码前安装各自的 per-CPU register。
+1. Initialize the per-CPU storage of the primary CPU;
+2. Initialize the memory map and enumerate the regions marked `FREE`;
+3. The first region initializes the page allocator through `global_init()`, and at least
+   `MIN_HEAP_SIZE` (32 KiB) is taken from it as the first byte heap;
+4. Subsequent regions are added to the page allocator through `global_add_memory()`;
+5. Each AP installs its own per-CPU register before entering ordinary kernel code.
 
-`init_page_allocator()` 支持只发布 page allocator、稍后再惰性建立 byte heap 的路径。
-`page_ready` 和 `heap_ready` 使用 Release/Acquire 发布状态；内存区域的加入和 allocator
-metadata mutation 仍由对应锁串行化。初始化调用本身依赖启动流程串行执行。
+`init_page_allocator()` supports a path that publishes only the page allocator and establishes the byte heap lazily later.
+`page_ready` and `heap_ready` publish state with Release/Acquire; the addition of memory regions and allocator
+metadata mutation are still serialized by the corresponding locks. The initialization calls themselves rely on the boot flow executing serially.
 
-## 核心算法流程
+## Core Algorithm Flow
 
 ### Rust heap / byte allocation
 
-`GlobalAllocator::alloc(layout)` 按以下顺序路由：
+`GlobalAllocator::alloc(layout)` routes in the following order:
 
-1. `layout.size() > LARGE_ALLOC_THRESHOLD_BYTES`（当前为 1 MiB）时直接进行 page
-   allocation，避免超大对象使 byte heap 碎片化；usage 按实际页数统计。更小的中型
-   buffer 留在 byte heap，以复用已经从 page allocator 转移的 backing memory，并降低
-   对全局 buddy 高阶连续块的压力。
-2. slab 配置下，如果 `SizeClass::from_layout()` 接受该 layout，则先访问当前 CPU
-   的 slab object cache。
-3. 其他小请求进入受 `balloc` 保护的 `DefaultByteAllocator`。
-4. 中央 byte allocator 无法满足请求时，从 `palloc` 取得新 region，加入 byte heap
-   后重试。
+1. When `layout.size() > LARGE_ALLOC_THRESHOLD_BYTES` (currently 1 MiB), page
+   allocation is performed directly, to avoid very large objects fragmenting the byte heap; usage is counted by the actual number of pages. Smaller mid-sized
+   buffers stay in the byte heap, to reuse backing memory that has already been transferred from the page allocator and to reduce
+   pressure on high-order contiguous blocks of the global buddy.
+2. Under the slab configuration, if `SizeClass::from_layout()` accepts the layout, the slab object cache of the current CPU
+   is accessed first.
+3. Other small requests go to the `DefaultByteAllocator` protected by `balloc`.
+4. When the central byte allocator cannot satisfy the request, a new region is obtained from `palloc`, added to the byte heap,
+   and the request is retried.
 
-byte heap 首次建立至少使用 32 KiB。后续增长请求参考当前 heap 总量和本次 layout，
-取 power-of-two 大小；page allocation 失败时逐步减半，直到一页或能够容纳 layout 的
-最小 region。byte heap 已取得的 backing region 不主动归还 page allocator。
+The first establishment of the byte heap uses at least 32 KiB. Subsequent growth requests take the current total heap size and this layout into account,
+and choose a power-of-two size; when page allocation fails, the size is halved step by step until one page or the
+smallest region that can hold the layout. Backing regions already obtained by the byte heap are not proactively returned to the page allocator.
 
-deallocation 必须携带原 allocation 的 pointer 和 layout。超过 1 MiB 的大对象返回 page
-allocator；slab-cache-eligible 对象优先进入当前 CPU cache；其他对象返回中央 byte
-allocator。
+Deallocation must carry the pointer and layout of the original allocation. Large objects over 1 MiB are returned to the page
+allocator; slab-cache-eligible objects first go into the current CPU cache; other objects are returned to the central byte
+allocator.
 
-### 连续页 allocation
+### Contiguous-page allocation
 
-`alloc_pages(num_pages, align_pow2, kind)` 的路径为：
+The path of `alloc_pages(num_pages, align_pow2, kind)` is:
 
-- `num_pages` 为 1–4 且 `align_pow2 <= 4096`：先访问当前 CPU 的 PCP；
-- PCP miss：获取 `palloc` 锁并批量 refill；
-- 页数更大或要求特殊对齐：直接访问全局 page buddy；
-- 成功后按 `UsageKind` 更新诊断统计，`RustHeap` 由上层 heap 路径单独处理。
+- `num_pages` is 1–4 and `align_pow2 <= 4096`: access the current CPU's PCP first;
+- PCP miss: acquire the `palloc` lock and refill in batches;
+- Larger page counts or special alignment requirements: access the global page buddy directly;
+- On success, update the diagnostic statistics according to `UsageKind`; `RustHeap` is handled separately by the upper-level heap path.
 
-`dealloc_pages()` 对 1–4 页 block 优先执行 PCP push；cache 满时批量 drain；更大的
-block 直接归还 buddy。特殊对齐取得的小 block 在 free 后也可以作为普通同页数 block
-进入 PCP，因为其地址至少满足普通页对齐。
+`dealloc_pages()` prefers a PCP push for blocks of 1–4 pages; when the cache is full it drains in batches; larger
+blocks are returned directly to the buddy. A small block obtained with special alignment can also enter the PCP as an ordinary block of the same page count after it is freed,
+because its address satisfies at least ordinary page alignment.
 
-`alloc_pages_at()` 需要指定起始虚拟地址，因此绕过 PCP，直接调用 buddy 的定址接口。
+`alloc_pages_at()` requires a specified starting virtual address, so it bypasses the PCP and calls the buddy's address-specified interface directly.
 
-### 页级 PCP
+### Page-level PCP
 
-`pcp.rs` 为每个 CPU 保存四个固定容量数组：
+`pcp.rs` keeps four fixed-capacity arrays for each CPU:
 
-| block 大小 | 每 CPU 容量 |
+| block size | Per-CPU capacity |
 |------------|-------------|
-| 1 页 | 12 个 |
-| 2 页 | 6 个 |
-| 3 页 | 6 个 |
-| 4 页 | 6 个 |
+| 1 page | 12 entries |
+| 2 pages | 6 |
+| 3 pages | 6 |
+| 4 pages | 6 |
 
-cache hit 只更新当前 CPU 数组和计数。refill 目标为容量的 `2/3`：
+A cache hit only updates the current CPU's array and count. The refill target is `2/3` of the capacity:
 
-1. 优先向 buddy 申请覆盖整个 batch 的连续区间，减少持锁次数；
-2. 若大块申请因碎片化失败，退化为逐 block 申请，允许 partial refill；
-3. buddy 对非 power-of-two 页数产生的 rounding slack 会立即按合法 buddy chunk 归还；
-4. cache full 时收集当前 free block 和一批 cache block，按地址排序、合并相邻区间，
-   再通过 `split_to_chunks()` 归还 buddy。
+1. First request from the buddy a contiguous range covering the whole batch, to reduce the number of lock acquisitions;
+2. If the large request fails due to fragmentation, fall back to per-block requests, allowing a partial refill;
+3. Rounding slack that the buddy produces for non-power-of-two page counts is returned immediately as valid buddy chunks;
+4. When the cache is full, collect the block currently being freed and a batch of cache blocks, sort them by address, merge adjacent ranges,
+   and then return them to the buddy through `split_to_chunks()`.
 
-PCP 中的页对 caller 已经 free，但在全局 buddy 看来仍是 allocated。
+Pages in the PCP have already been freed from the caller's point of view, but the global buddy still sees them as allocated.
 
-### per-CPU slab object cache（slab 配置）
+### Per-CPU slab object cache (slab configuration)
 
-`slab_cache.rs` 为每个 CPU、每个 `SizeClass` 保存一个侵入式 LIFO list。支持的 class
-为 8、16、32、64、128、256、512、1024 和 2048 字节。
+`slab_cache.rs` keeps an intrusive LIFO list for each CPU and each `SizeClass`. The supported classes
+are 8, 16, 32, 64, 128, 256, 512, 1024 and 2048 bytes.
 
-每个空闲对象的第一个 machine word 保存 next link；cache metadata 只有 head 和对象数。
-所有 cache-eligible 对象都从中央 allocator 使用 `(class_size, class_size)` canonical
-layout 取得，由此保证：
+The first machine word of each free object stores the next link; the cache metadata is only the head and the object count.
+All cache-eligible objects are obtained from the central allocator using the `(class_size, class_size)` canonical
+layout, which guarantees that:
 
-- 原请求的 size 和 alignment 得到满足；
-- 同一 class 的 refill 和 drain 使用一致 layout；
-- CPU A allocation 的对象可以在 CPU B free，并进入 CPU B 的同 class cache；
-- 不需要逐对象 owner CPU 或原始 layout metadata。
+- the size and alignment of the original request are satisfied;
+- refill and drain of the same class use a consistent layout;
+- an object allocated on CPU A can be freed on CPU B and enter CPU B's cache of the same class;
+- no per-object owner CPU or original layout metadata is needed.
 
-allocation hit 直接 pop；空 cache 在一次中央锁临界区内批量 refill。每批对象数取
-`min(2 页 object payload, 32 个对象)`，其中一个对象直接返回 caller，其余进入 cache。
-高水位设为 `2 * batch - 1`；cache 已满时，下一次 free 把当前对象和 cache 中的
-`batch - 1` 个对象归还中央 allocator，随后保留一个 batch。由此 refill 和 drain
-每次最多分别调用中央 allocator 32 次。
+An allocation hit pops directly; an empty cache refills in a batch within a single central-lock critical section. The number of objects per batch is
+`min(2 pages of object payload, 32 objects)`, where one object is returned directly to the caller and the rest go into the cache.
+The high watermark is set to `2 * batch - 1`; when the cache is full, the next free returns the current object and `batch - 1` objects from the cache
+to the central allocator, and then keeps one batch. As a result, refill and drain
+each call the central allocator at most 32 times.
 
 | class bytes | batch objects | high watermark |
 |-------------|---------------|----------------|
@@ -257,18 +257,18 @@ allocation hit 直接 pop；空 cache 在一次中央锁临界区内批量 refil
 | 1024 | 8 | 15 |
 | 2048 | 4 | 7 |
 
-cache 中对象仍被中央 `SlabByteAllocator` 视为 allocated。该 ownership 选择避免了
-每次 fast-path free 都修改中央 freelist，但意味着中央 `used_bytes()` 包含 caller 已经
-free 到 per-CPU cache 的对象。
+Objects in the cache are still regarded as allocated by the central `SlabByteAllocator`. This ownership choice avoids
+modifying the central freelist on every fast-path free, but it means that the central `used_bytes()` includes objects that the caller has already
+freed into the per-CPU cache.
 
-### DMA32 与定址页
+### DMA32 and address-specified pages
 
-`alloc_dma_pages()` 绕过 PCP，先从全局 buddy 取得连续页，再通过 `v2p` 检查整个物理
-区间是否低于 4 GiB。区间不满足限制时立即归还并返回 `NoMemory`。该接口只负责内存
-位置；页属性切换、平台 share/unshare 和设备生命周期由 `kdma` 等上层完成。
+`alloc_dma_pages()` bypasses the PCP, first obtains contiguous pages from the global buddy, and then uses `v2p` to check whether the whole physical
+range is below 4 GiB. If the range does not satisfy the limit, it is returned immediately and `NoMemory` is returned. This interface is responsible only for memory
+placement; page attribute switching, platform share/unshare and device lifetime are handled by upper layers such as `kdma`.
 
-当前 page allocator 没有独立 DMA32 zone，因此它采用“先分配、后检查”，不能保证在
-存在低端空闲页时一定找到它们。
+The current page allocator has no separate DMA32 zone, so it uses "allocate first, check afterwards" and cannot guarantee that it will find low free pages
+when they exist.
 
 ### Page allocation consumers
 
@@ -291,117 +291,113 @@ they do not acquire compound semantics merely by requesting contiguous memory.
 `UsageKind` distinguishes Rust heap, virtual memory, page cache, page tables,
 DMA and general kernel page allocation accounting.
 
-- 每个 CPU、每个种类分别累计 `allocated_bytes` 和 `freed_bytes`，热路径只修改当前
-  CPU 的 atomic cache line；
-- allocation 和 free 可以发生在不同 CPU，快照按所有 CPU 的累计分配量减累计释放量；
-- 小型 Rust heap allocation 按 caller requested bytes 计数；
-- 直接页支持的 Rust heap allocation 和其他页用途按页对齐后的 bytes 计数；
-- `usages()` 先 acquire 读取所有 CPU 的释放累计量，再读取分配累计量，并以 checked
-  arithmetic 求差。合法跨 CPU free 不会导致本地计数下溢；总释放量超过总分配量则在
-  汇总时 fail-fast；
-- 快照不保证跨 CPU 或跨种类线性化，并发 allocation/free 可能使结果相对任一时刻的
-  精确值暂时偏大或偏小；统计不参与 allocator ownership 或回收决策。
+- `allocated_bytes` and `freed_bytes` are accumulated separately for each CPU and each kind, and the hot path only modifies the current
+  CPU's atomic cache line;
+- allocation and free can happen on different CPUs, and a snapshot takes the cumulative allocated amount over all CPUs minus the cumulative freed amount;
+- small Rust heap allocations are counted by caller requested bytes;
+- direct page-backed Rust heap allocations and other page uses are counted by page-aligned bytes;
+- `usages()` first reads the cumulative freed amounts of all CPUs with acquire, then reads the cumulative allocated amounts, and computes the difference with checked
+  arithmetic. A legitimate cross-CPU free does not cause local counter underflow; if the total freed amount exceeds the total allocated amount, it fails fast
+  during aggregation;
+- a snapshot is not guaranteed to be linearizable across CPUs or across kinds, and concurrent allocation/free may make the result temporarily too large or too small relative to
+  the exact value at any single moment; the statistics do not participate in allocator ownership or reclaim decisions.
 
-`used_bytes()` / `available_bytes()` 展示中央 byte allocator 的视图；`total_pages()` /
-`used_pages()` / `available_pages()` 展示全局 buddy 的视图。`total_pages()` 返回管理的
-总可分配页数（已用加空闲、排除 allocator 元数据），供 tmpfs 等上层选择默认容量；
-它不是当前空闲量，读取该值不预留内存，也不改变增长、分配或回收策略。byte heap backing、PCP block 和 per-CPU
-slab object 会使这些中央视图与 caller-live usage 存在预期差异。
+`used_bytes()` / `available_bytes()` present the view of the central byte allocator; `total_pages()` /
+`used_pages()` / `available_pages()` present the view of the global buddy. `total_pages()` returns the total
+number of allocatable pages under management (used plus free, excluding allocator metadata), for upper layers such as tmpfs to choose a default capacity;
+it is not the current free amount, and reading it neither reserves memory nor changes growth, allocation or reclaim policy. Byte heap backing, PCP blocks and per-CPU
+slab objects cause the expected differences between these central views and caller-live usage.
 
 ### Allocation tracking
 
-`tracking` feature 在 Rust `GlobalAlloc` 路径外层维护：
+The `tracking` feature is maintained outside the Rust `GlobalAlloc` path:
 
-- 以 allocation 地址为 key 的 `BTreeMap`；
-- 原始 `Layout`、allocation backtrace 和递增 generation；
-- per-CPU `IN_GLOBAL_ALLOCATOR` 递归保护，避免 tracker 自身 allocation 再次进入
-  tracking；
-- `enable_tracking()` / `disable_tracking()` 和 generation-range visitor API。
+- a `BTreeMap` keyed by allocation address;
+- the original `Layout`, the allocation backtrace and an increasing generation;
+- a per-CPU `IN_GLOBAL_ALLOCATOR` recursion guard, which prevents the tracker's own allocations from entering
+  tracking again;
+- `enable_tracking()` / `disable_tracking()` and the generation-range visitor API.
 
-tracking 只用于诊断，不改变 allocator ownership。它引入全局 tracking lock、backtrace
-采集和 map 操作，因此启用后的性能不能代表普通 allocation 路径。直接调用
-`GlobalAllocator` page/byte API 的路径不经过这个 wrapper，不会自动加入 tracking map。
+Tracking is for diagnostics only and does not change allocator ownership. It introduces a global tracking lock, backtrace
+collection and map operations, so the performance once it is enabled is not representative of the ordinary allocation path. Paths that call the
+`GlobalAllocator` page/byte API directly do not go through this wrapper and are not automatically added to the tracking map.
 
 ### C ABI symbols
 
-本 crate 不再导出任何 C ABI symbol。原先 `ffi.rs` 在 `tee` / `dice` 下导出 `malloc`、
-`free`、`calloc`、`memcpy`、`memmove`、`memset`、`memcmp` 和 `__memcpy_chk`，供当时的
-C 组件（mbedtls 等）链接；TEE 加密栈已改为纯 Rust 实现，树内也没有其他 C 代码进入内核
-镜像，因此整个模块被移除。
+This crate no longer exports any C ABI symbols. Previously `ffi.rs` exported `malloc`,
+`free`, `calloc`, `memcpy`, `memmove`, `memset`, `memcmp` and `__memcpy_chk` under `tee` / `dice`, for linking by the C
+components of the time (mbedtls and others); the TEE crypto stack has been changed to a pure Rust implementation, and no other C code in the tree enters the kernel
+image, so the whole module was removed.
 
-移除后 `memcpy` / `memmove` / `memset` / `memcmp` 由 rustc 为目标附带的
-`compiler_builtins` 提供——它以弱符号导出这四个名字，链接时自然生效。这一点很关键：
-`core::ptr::write_bytes` 与 `copy_nonoverlapping` / `copy` 会被 LLVM 降成对同名 C 符号的
-调用，因此**谁提供这个强符号，谁就决定了全内核页清零与页拷贝的实现**。之前手写 shim 以
-`#[no_mangle]` 强符号顶掉弱定义，把逐字节循环变成了整个内核的 mem 原语；现在交回上游实现，
-不再需要本 crate 维护其正确性与性能。
+After the removal, `memcpy` / `memmove` / `memset` / `memcmp` are provided by the `compiler_builtins` that rustc ships for the target; it exports these four names as weak symbols, which take effect naturally at link time. This point is crucial:
+`core::ptr::write_bytes` and `copy_nonoverlapping` / `copy` are lowered by LLVM into calls to C symbols of the same names, so **whoever provides this strong symbol decides the implementation of page zeroing and page copying across the whole kernel**. The previous hand-written shim overrode the weak definition with a `#[no_mangle]` strong symbol, turning a byte-by-byte loop into the mem primitive of the whole kernel; now this is handed back to the upstream implementation,
+and this crate no longer needs to maintain its correctness and performance.
 
-## 调用约束 / 执行上下文
+## Calling constraints / execution context
 
-- **初始化前提**：page API 必须在 `page_ready` 后使用；byte/Rust heap allocation
-  还要求已有 page region，使其能够建立或扩展 byte heap。
-- **per-CPU 前提**：PCP、slab cache 和 tracking recursion guard 都要求当前 CPU 的
-  per-CPU storage 已安装。主 CPU 和 AP 的正式运行路径满足这一顺序。
-- **不要求当前进程**：核心 allocator 只依赖 CPU 执行上下文，不依赖当前用户进程。
-- **不睡眠**：同步使用自旋锁、IRQ guard 和原子，不调用阻塞等待；锁竞争和 batch
-  refill/drain 仍可能延长不可抢占或 IRQ-off 时间。
-- **中断上下文**：per-CPU hit 可以在普通 IRQ 约束下完成；miss/full 可能获取中央锁
-  并扩展 heap。接口没有 task/softirq/hardirq allocation policy，也不保证短延迟。
-- **NMI**：不支持在 NMI 中 allocation/free。关闭普通 local IRQ 不能排除 NMI 重入。
-- **早期启动**：`global_init()` 可在调度器建立前使用，但传入 region 必须已经位于可用
-  kernel virtual mapping 中，且主 CPU per-CPU storage 已初始化。
+- **Initialization prerequisite**: the page API must be used after `page_ready`; byte/Rust heap allocation
+  additionally requires an existing page region so that the byte heap can be established or extended.
+- **Per-CPU prerequisite**: the PCP, the slab cache and the tracking recursion guard all require that the current CPU's
+  per-CPU storage has been installed. The formal run paths of the primary CPU and the APs satisfy this ordering.
+- **No current process required**: the core allocator depends only on the CPU execution context, not on the current user process.
+- **Does not sleep**: synchronization uses spinlocks, IRQ guards and atomics, and never calls a blocking wait; lock contention and batch
+  refill/drain can still lengthen non-preemptible or IRQ-off time.
+- **Interrupt context**: a per-CPU hit can complete under ordinary IRQ constraints; a miss or a full cache may acquire the central lock
+  and extend the heap. The interface has no task/softirq/hardirq allocation policy and does not guarantee short latency.
+- **NMI**: allocation/free in an NMI is not supported. Disabling ordinary local IRQs cannot rule out NMI reentry.
+- **Early boot**: `global_init()` can be used before the scheduler is set up, but the region passed in must already be in a usable
+  kernel virtual mapping, and the primary CPU's per-CPU storage must already be initialized.
 
-## 并发模型
+## Concurrency model
 
-| 数据或路径 | 同步 | 备注 |
+| Data or path | Synchronization | Notes |
 |------------|------|------|
-| 中央 byte allocator | `SpinNoIrq` | 所有 allocator metadata mutation 串行化 |
-| 全局 page buddy | `SpinNoIrq` | page slow path、DMA 和定址请求串行化 |
-| 当前 CPU PCP | local IRQ off + current-CPU access | 不允许 remote mutation |
-| 当前 CPU slab cache | local IRQ off + current-CPU access | cache hit 不取 `balloc` 锁 |
-| `page_ready` / `heap_ready` | Acquire/Release atomics | 发布初始化状态；初始化流程仍要求串行 |
-| 各类 usage | current-CPU cumulative atomics；free Release / snapshot Acquire | 支持跨 CPU free，只提供诊断值 |
-| tracking state | `SpinNoIrq` + per-CPU recursion guard | 仅 `tracking` feature |
+| Central byte allocator | `SpinNoIrq` | All allocator metadata mutation is serialized |
+| Global page buddy | `SpinNoIrq` | Page slow path, DMA and address-specified requests are serialized |
+| Current CPU PCP | local IRQ off + current-CPU access | Remote mutation is not allowed |
+| Current CPU slab cache | local IRQ off + current-CPU access | A cache hit does not take the `balloc` lock |
+| `page_ready` / `heap_ready` | Acquire/Release atomics | Publish the initialization state; the initialization flow still requires serialization |
+| Each usage | current-CPU cumulative atomics; free Release / snapshot Acquire | Supports cross-CPU free, provides diagnostic values only |
+| tracking state | `SpinNoIrq` + per-CPU recursion guard | `tracking` feature only |
 
-byte heap 扩容时允许在持有 `balloc` 后进入 page allocation，形成 `balloc -> palloc` 的
-锁顺序。其他路径不得在持有 `palloc` 时再获取 `balloc`；bootstrap 会先释放 page lock，
-再初始化 byte allocator。usage accounting 不引入额外的 allocator 锁顺序。
+When the byte heap grows, it is allowed to enter page allocation while holding `balloc`, forming the lock order `balloc -> palloc`. No other path may acquire `balloc` while holding `palloc`; bootstrap releases the page lock first,
+and then initializes the byte allocator. Usage accounting introduces no additional allocator lock order.
 
-## 设计决策
+## Design decisions
 
-### 中央 ownership 与 per-CPU fast path
+### Central ownership and the per-CPU fast path
 
-中央 allocator 保持唯一的 region ownership 和复杂合并逻辑，per-CPU cache 只保存已经
-从中央取出的 block/object。这样 fast path 简单，代价是 cache residency 对中央 allocator
-不可见为 free，需要另行设计全 CPU reclaim。
+The central allocator keeps sole region ownership and the complex merging logic, and the per-CPU caches only hold blocks/objects that have already been
+taken from the central allocator. This keeps the fast path simple, at the cost that cache residency is not visible to the central allocator
+as free, so a reclaim across all CPUs needs to be designed separately.
 
-### page cache 与 object cache 分层
+### Layering of the page cache and the object cache
 
-PCP 缓存页 block，降低 `palloc` 锁竞争；slab object cache 缓存固定 class 对象，降低
-`balloc` 锁竞争。二者服务不同粒度，不互相替代。byte heap 扩容仍可能经过 PCP 或全局
-page buddy。
+The PCP caches page blocks to reduce `palloc` lock contention; the slab object cache caches objects of fixed classes to reduce
+`balloc` lock contention. The two serve different granularities and do not replace each other. Byte heap growth may still go through the PCP or the global
+page buddy.
 
 ### slab canonical layout
 
-用 class canonical layout 代替 caller 原始 layout，会增加 class 内部碎片和对齐要求，
-但换来跨 CPU free、无逐对象 metadata，以及确定的中央 deallocation layout。这是 slab
-object cache 初版的核心 ownership 约束。
+Using the class canonical layout instead of the caller's original layout increases internal fragmentation within a class and the alignment requirements,
+but in exchange it provides cross-CPU free, no per-object metadata, and a deterministic central deallocation layout. This is the core ownership constraint of the first version of the slab
+object cache.
 
-### 诊断统计不参与正确性
+### Diagnostic statistics do not participate in correctness
 
-usage、`used_bytes()` 和 `used_pages()` 分别反映不同层次，且读取时系统仍可并发变化。
-它们用于观测而非 allocation admission、reclaim 或安全校验，避免为线性化快照扩大锁
-范围。分开累计 allocation/free 也意味着 usage underflow 从 deallocation 热路径的
-即时检查，变为 `usages()` 汇总时的检查。
+Usage, `used_bytes()` and `used_pages()` each reflect a different layer, and the system can still change concurrently while they are read.
+They are used for observation rather than for allocation admission, reclaim or safety checks, which avoids widening the lock
+scope for linearizable snapshots. Accumulating allocation/free separately also means that the usage underflow check moves from an
+immediate check on the deallocation hot path to a check performed when `usages()` aggregates.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-- `GLOBAL_ALLOCATOR`、中央 allocator、per-CPU cache 和 tracking state 为静态生命周期，
-  关机前不 drop。
-- 加入 page allocator 的启动内存 region 永久转移给 `kalloc`；不支持移除 region。
-- byte allocator 从 page allocator 取得的 heap region 不会在 runtime 整体归还。
-- PCP 和 slab cache 在达到各自水位时批量归还，但没有 shutdown、CPU-offline 或全局
-  pressure flush。
+- `GLOBAL_ALLOCATOR`, the central allocator, per-CPU caches, and tracking state have static lifetime
+  and are not dropped before shutdown.
+- Boot memory regions added to the page allocator are transferred to `kalloc` permanently; removing a region is not supported.
+- Heap regions the byte allocator obtains from the page allocator are not returned as a whole at runtime.
+- PCP and slab caches return memory in batches when they reach their respective watermarks, but there is no shutdown, CPU-offline, or global
+  pressure flush.
 - Raw page API callers explicitly pair deallocation; PageRef performs final
   allocation release through Drop after the last hold ends.
 

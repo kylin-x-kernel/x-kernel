@@ -150,12 +150,14 @@ network/file data path in this crate.
 
 ## External Boundaries
 
-- **Device-tree controller description** (`gic.rs`): the node the backend
+- **Device-tree controller description** (`gic/firmware.rs`): the node the backend
   reports as an interrupt controller contributes its compatible strings and
   `reg` regions, which determine version and MMIO windows. Checked properties: compatible
   must match a known GIC list, and each detected version must supply
   its required regions (v2: GICD+GICC; v3: GICD+GICR). Failure:
-  `None` — platform init applies its own fallback or abort policy.
+  `init_from_fwnode` returns `Err` ("invalid GIC firmware configuration" or
+  "no available supported GIC controller in firmware description"), and the
+  aarch64 platform init stops with `primary GIC initialization failed`.
 - **PLIC region and contexts**: `PlicConfig::from_fwnode` selects the first
   available `sifive,plic-1.0.0` / `riscv,plic0` node that the backend reports
   as an interrupt controller, and supplies its translated `reg` resource,
@@ -247,10 +249,11 @@ by the caller (`kirq` dispatch or platform init):
   length before the volatile operation. The driver never forms a whole-block
   `PLICRegs` reference. Invalid internal offsets are explicit invariant failures,
   not zero reads, false state or discarded writes.
-- `riscv/mod.rs` — `asm!("fence rw, rw")`: orders MMIO setup before the
-  hart may take external interrupts.
-- `riscv/mod.rs` — SBI timer programming (`sbiret` handling): forwards the
-  supervisor timer deadline to M-mode.
+- `riscv/mod.rs` `send_ipi_to_raw_hart` — `asm!("fence rw, rw")`: publishes
+  prior memory writes before the SBI IPI request.
+- `riscv/mod.rs` `activate_local_interrupts` and `IntrManagerIf::enable` —
+  `sie::set_ssoft`/`set_stimer`/`set_sext`/`clear_stimer`/`clear_ssoft`: toggle
+  only the current hart's supervisor interrupt-enable CSR bits.
 - `riscv/mod.rs` — `sip::clear_ssoft()`: clears this hart's software
   interrupt pending bit.
 

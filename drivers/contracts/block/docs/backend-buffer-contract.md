@@ -41,16 +41,16 @@ The remaining implementations were also reviewed for address assumptions:
 | Same file: `GeometryDisk` | Intentionally rejects I/O as unsupported; no address-based branch. |
 | Same file: `InherentlyReadOnlyDisk` | Forwards to `MemoryDisk`, with read-only metadata for canonical tests. |
 | `block/ut-tests/word_io.rs`: `RestrictedDevice` | Real CPU adapter around its deliberately word-restricted transfer callback. |
-| `kext4/src/io.rs`: `MemoryBlockDevice` | Byte copies and recorded write lengths. |
-| `kext4/src/file/read_tests.rs`: `ReadDevice` | Public CPU adapter precedes the restricted raw read callback and injected failure. |
+| `kext4/ut-tests/io/tests.rs`: `MemoryBlockDevice` | Byte copies and recorded write lengths. |
+| `kext4/ut-tests/file/read_tests.rs`: `ReadDevice` | Public CPU adapter precedes the restricted raw read callback and injected failure. |
 | Same file: `ReadStorage` | Byte copies with checked ranges. |
-| `kext4/src/buffer/tests.rs`: `TestDevice` | Byte copies with length/range checks and intentional faults/delays. |
-| `kext4/src/extent/legacy_tests.rs`: `ReadOnlyDevice` | Byte-copy reads; deliberately unsupported writes. |
-| `kext4/src/superblock/test_fixtures.rs`: `TestDevice` | Byte copies and injected write/flush errors. |
-| `kext4/src/superblock/fault_device.rs`: `WriteThroughFaultDevice` | Byte copies with injected I/O errors. |
+| `kext4/ut-tests/buffer/tests.rs`: `TestDevice` | Byte copies with length/range checks and intentional faults/delays. |
+| `kext4/ut-tests/extent/legacy_tests.rs`: `ReadOnlyDevice` | Byte-copy reads; deliberately unsupported writes. |
+| `kext4/ut-tests/superblock/test_fixtures.rs`: `TestDevice` | Byte copies and injected write/flush errors. |
+| `kext4/ut-tests/superblock/fault_device.rs`: `WriteThroughFaultDevice` | Byte copies with injected I/O errors. |
 | Same file: `BufferedFaultDevice` | Byte-copy committed/pending ranges with fault injection. |
-| `kvfs/src/node/device.rs`: `MemoryBlockDevice` | Byte copies, counters and deliberate partial failures. |
-| `kvfs/src/super_block.rs`: `TestBlockDevice` | No-op I/O fixture for superblock publication/lifetime; not data-correctness evidence. |
+| `kvfs/ut-tests/node_device.rs`: `MemoryBlockDevice` | Byte copies, counters and deliberate partial failures. |
+| `kvfs/ut-tests/super_block.rs`: `TestBlockDevice` | No-op I/O fixture for superblock publication/lifetime; not data-correctness evidence. |
 
 No additional caller-address rejection was found among these implementations.
 That source conclusion is not a claim that every backend/platform/length/error

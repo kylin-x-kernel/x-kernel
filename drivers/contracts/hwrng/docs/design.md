@@ -16,11 +16,11 @@ Drivers must keep in-flight DMA storage independent of the caller's buffer.
 
 ## Wait flow and concurrency
 
-`wait_until` registers for notification before checking its predicate. A true
+`wait_until` registers for notification before checking its predicate, or checks, registers and rechecks. A true
 predicate commits the result. Spurious notification only causes another
 predicate check. Task interruption does not cancel this internal read. The
 driver publishes completion or a terminal fault under its own lock and calls
-IRQ-safe `notify` after releasing it. No device or IRQ-disabling lock may span
+IRQ-safe `notify` after releasing it. No device, IRQ or preemption-disabling lock may span
 a wait. There is no polling timeout.
 
 ## Failures and resource lifecycle

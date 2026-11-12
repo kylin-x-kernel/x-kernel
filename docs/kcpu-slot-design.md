@@ -57,7 +57,7 @@ Asterinas 的 CPU-local 实现提供了值得吸收的架构边界：
 | 调度器核心状态 | `task/ktask/src/run_queue.rs`、`task/ktask/src/timers.rs`、`task/ktask/src/future/time.rs` | run queue、idle task、退出队列、timer runtime | `current_ref_*_raw()`、手动 `NoPreempt`/IRQ guard |
 | IRQ、softirq 和 bottom-half | `arch/kirq/src/bottom_half/*.rs`、`io/watchdog/src/*.rs` | softirq context、worker/lockup 状态、IRQ 统计 | raw 指针或 `with_current()` |
 | IPI/TLB 与架构硬件状态 | `arch/kipi/src/*.rs`、`mm/kalloc/src/pcp.rs`、`virt/kvmm/src/arch/x86_64/vmx.rs` | TLB shootdown、per-CPU page cache、VMXON 状态 | 当前 CPU raw 访问，部分路径依赖 IRQ 关闭 |
-| 驱动和计时器缓存 | `drivers/platform/timer/src/arm_generic.rs`、`drivers/platform/x86-apic/src/lib.rs` | tick、APIC/定时器本地状态 | `read_current()`、`write_current_raw()` |
+| 驱动和计时器缓存 | `drivers/platform/timer/src/arm_generic.rs`、`arch/x86-apic/src/lib.rs` | tick、APIC/定时器本地状态 | `read_current()`、`write_current_raw()` |
 
 这些调用点共同依赖同一个底层模型：链接器把变量放入 `.percpu`，启动时复制 CPU area，架构寄存器保存当前 CPU base，访问器通过“base + symbol offset”定位实例。
 
@@ -177,9 +177,8 @@ arch/kcpu_slot/
 ├── src/
 │   ├── lib.rs              # 公共 API 和 feature 选择
 │   ├── layout.rs           # section/layout/area 计算
-│   ├── static_local.rs     # 静态 CPU-local storage
-│   ├── dynamic_local.rs    # 动态 chunk 和对象分配
-│   ├── cell.rs             # 当前 CPU cell
+│   ├── static_slot.rs      # 静态 CpuSlot / CpuSlotCell
+│   ├── dynamic.rs          # 动态 chunk 和对象分配
 │   ├── guard.rs            # CpuPin / access guard
 │   ├── arch/
 │   │   ├── mod.rs
@@ -200,7 +199,7 @@ arch/kcpu_slot/
 - IRQ 控制器操作；
 - 通用内存分配器策略。
 
-这些能力通过 `KcpuSlotPlatform` 和 `CpuPin` 接口注入。
+这些能力通过 `CurrentCpuIf`（由 `kplat` 提供）和 `CpuPin` 接口注入。
 
 ## 架构
 
@@ -288,32 +287,25 @@ pub unsafe trait CpuPin {
 `CpuPin` 只表达“不会迁移”，不自动表达“不会被 IRQ 重入”。需要引用非
 `Sync` 对象或可被 IRQ 访问的对象时，调用方必须使用上层已有的 IRQ guard。
 
-建议提供两个入口：
-
-```rust
-pub unsafe fn get_with<'a>(&'a self, pin: &'a CpuPin)
-    -> &'a T;
-```
-
-其中 `get_with_irq` 的 guard 同时实现 `CpuPin`，从而把 IRQ 重入约束编码进类型。
+安全访问入口为 `get(guard: &impl CpuLocalGuard)`，其 guard 同时实现 `CpuPin` 并排除本地 IRQ 重入，从而把 IRQ 重入约束编码进类型；更宽的 `CpuPin` 约束只保留在 `unsafe` 的 `get_unchecked`。
 
 ## 调用约束 / 执行上下文
 
 ### 初始化
 
-- BSP 必须在首次使用 CPU-local 数据前完成 `init_bsp()`。
-- AP 必须在进入 Rust 代码、启用本地 IRQ 前完成 `init_ap(cpu_id, base)`。
-- 平台在 BSP/AP 启动上下文为当前 CPU 准备 area，并调用 `initialize_cpu()`；
+- BSP 必须在首次使用 CPU-local 数据前，通过 `unsafe kcpu_slot::begin_cpu_init(id)` 获得 token、写入各 cell 并调用 `token.publish()`。
+- AP 必须在进入 Rust 代码、启用本地 IRQ 前以同样方式完成 `begin_cpu_init(id)` 与 `token.publish()`。
+- 平台在 BSP/AP 启动上下文为当前 CPU 准备 area 并调用 `begin_cpu_init`；
   `kcpu_slot` 不复制平台的 BSP/AP 状态机。
 - 静态模板复制前禁止访问会被复制的 BSP CPU-local 对象。
 - 动态分配要求页分配器和 CPU 数量已经初始化；不允许在最早期 boot allocator 不可用阶段调用。
 
 ### 当前 CPU 访问
 
-- `get_with` 不阻塞、不睡眠；可在调度器、IRQ-disabled 区间和普通内核线程中使用。
+- `get` 不阻塞、不睡眠；可在调度器、IRQ-disabled 区间和普通内核线程中使用。
 - 传出的引用生命周期不能超过 pin guard。
 - `CpuSlotCell` 的连续操作若要求读写同一 CPU 实例，必须持有 `CpuPin`；若可能被 IRQ 访问，必须关本地 IRQ。
-- `get_on_cpu` 只能返回 `T: Sync` 的共享引用；远端写入不提供无条件安全 API，必须由调用方提供同步协议。
+- 远端读取（如 `DynamicCpuSlot::get_remote`）只能返回 `T: Sync` 的共享引用；远端写入不提供无条件安全 API，必须由调用方提供同步协议。
 
 ### 禁止场景
 
@@ -326,19 +318,20 @@ pub unsafe fn get_with<'a>(&'a self, pin: &'a CpuPin)
 ## 初始化状态机
 
 ```text
-Uninitialized
-    │ init_bsp(num_cpus)
+Unpublished
+    │ begin_cpu_init(id) → token，经 token 写入 cell
+    │ token.publish()
     ▼
-TemplateReady
-    │ init_ap(cpu_id, base)
+Published
+    │ CpuSlotChunk::alloc()
     ▼
-CpuOnline  ── CpuSlotChunk::alloc() ──► DynamicReady
+DynamicReady
 ```
 
 规则：
 
-1. `init_bsp` 校验 CPU 数量并复制 BSP 模板、安装 BSP base；
-2. `init_ap` 只初始化当前 CPU 的 area，不复制或修改其他 CPU 的状态；
+1. BSP 与 AP 都通过 `begin_cpu_init(id)` 初始化当前 CPU 的 area 并安装 base；
+2. 初始化只涉及当前 CPU 的 area，不复制或修改其他 CPU 的状态；
 3. CPU online 后只允许重新初始化明确标记为 resettable 的对象；
 4. 不支持运行时 CPU hotplug，首版将 CPU 数量视为固定值。
 
@@ -362,7 +355,7 @@ X86_64、AArch64、RISC-V、LoongArch 优先使用架构特定指令生成 offse
    `CPU_SLOT_AREA_ALIGN`（`kaddr_layout` 提供，覆盖受支持平台最大数据 cache
    line）设置 area stride，同时按同一值对齐 area 起始地址，保证相邻 CPU area
    不共享 cache line；
-2. BSP/AP 启动上下文调用 `initialize_cpu`，复制隐藏模板并安装当前 CPU base；
+2. BSP/AP 启动上下文调用 `begin_cpu_init`，复制隐藏模板并安装当前 CPU base，随后 `token.publish()`；
 3. `kcpu_slot` 不维护 CPU count、online bitmap 或 BSP/AP 状态机；
 4. AP 完成平台自己的 CPU ID 初始化后，再开放 IRQ。
 
@@ -442,9 +435,9 @@ APIC、VMX、scheduler 与 CPU 身份递归链等路径仍保留命名明确的 
 2. **本地访问能力（已实现）**：`kcpu_slot::CpuLocalGuard` 要求实现者同时保证任务
    不会迁移、访问期间不会发生会触碰同一 slot 的本地 IRQ 重入。当前唯一实现是
    `kspin::NoPreemptIrqSave`，不把 `NoPreempt` 或 `IrqSave` 自动视为同等级 guard。
-3. **安全访问器（已实现）**：安全面只有 `CpuSlot::get`、`DynamicCpuSlot::get`
-   和按值的 `CpuSlotCell::read`/`write`，它们接收 `CpuLocalGuard`，返回引用的
-   生命周期受 guard 约束。通用可变引用访问只保留 `unsafe` 的
+3. **安全访问器（已实现）**：安全面包括 `CpuSlot::get`、`DynamicCpuSlot::get`
+   和按值的 `CpuSlotCell::read`/`write`，它们接收 guard（`write` 也接受 `begin_cpu_init` 返回的 token），返回引用的
+   生命周期受 guard 约束；另有无需 guard 的当前 CPU 访问器（如 `CpuSlotCell::load_current`）。通用可变引用访问只保留 `unsafe` 的
    `get_mut_unchecked`（`CpuPin` 约束）：原设计的 `CpuSlot::get_mut`、
    `CpuSlotCell::get_mut` 和 `DynamicCpuSlot::get_mut` 因 `NoPreemptIrqSave`
    可嵌套、不同 guard 之间仍能对同一 slot 制造重叠 `&mut T` 而被删除。
@@ -474,7 +467,7 @@ APIC、VMX、scheduler 与 CPU 身份递归链等路径仍保留命名明确的 
    feature，使 `.cpu_slot.template` 独占 VMA 0；该共存方案已随迁移结束删除。
 3. 寄存器翻转与平台标识迁移：`boot_cpu_init`/`ap_cpu_init` 改调 `kcpu_slot`
    初始化（base = `_cpu_slot_area_start + cpu * stride`，链接脚本预留区，无需堆），
-   `KPCB_ID`/`KPCB_BSP`/`current_task_ptr` 迁为 `cpu_slot_cell!`，
+   `KCPU_ID`/`KCPU_BSP`/`current_task_ptr` 迁为 `cpu_slot_cell!`，
    `CurrentCpuIf` 改读新 cell。
 4. 逐 crate 迁移其余 per-CPU 调用点（ktask run queue/timers、kirq softirq/BH
    状态、kcpu GDT/TSS、kalloc、kvmm、drivers 等）；`Arc`/`Weak` 等 `!Copy` 载荷

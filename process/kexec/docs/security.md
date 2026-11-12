@@ -23,7 +23,9 @@ exclusive access to the target `MmSpace`, and stopping or replacing peer threads
 `ExecRequest::prepare` consumes owned path/argument/environment values and a
 credential snapshot. String sources use current root/pwd and Exec lookup;
 resolved sources retain their `Path`. Both check `Permission::MAY_EXEC` and open
-the file. An absent display path is reconstructed via VFS. File reads supply ELF
+the file. An `ExecSource::File` source from `ExecRequest::from_file` executes the
+caller-supplied open `VfsFile` directly; an `O_PATH` file is instead reopened
+through its recorded path. An absent display path is reconstructed via VFS. File reads supply ELF
 headers, PT_LOAD addresses/sizes/flags, PT_INTERP bytes, and script text.
 `SCRIPT_RECURSION_MAX` limits redirect count. PT_INTERP is limited to one entry
 and 4096 bytes and must be a complete NUL-terminated UTF-8 string. ELF identity,

@@ -137,9 +137,9 @@ interrupt counts, a 5-cell GIC parent and the 16/17-cell parent boundary.
 
 ## Concurrency Model
 
-- One-shot `LazyInit` global: first initializer wins; accessors before init
+- One-shot `LazyInit` global: `init_once` panics if the DTB is initialized twice; accessors before init
   return `None` rather than blocking or panicking.
-- `PMU_IRQ_CACHE` is a relaxed-use single-word cache: `0` means unresolved,
+- `PMU_IRQ_CACHE` is a single-word cache: `0` means unresolved,
   a resolved non-zero IRQ is stored with `Release` and read with `Acquire`;
   resolution is idempotent, so a redundant re-resolve is harmless.
 - All accessors take `&'static` snapshots of an immutable tree; no locking.

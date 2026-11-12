@@ -24,9 +24,9 @@ Asterinas 的做法（`ostd/src/cpu/local/`）是三层：
 
 声明侧仍用宏（`cpu_local!`/`cpu_local_cell!`），宏只负责把 static 放进特殊段。
 
-## X-Kernel 的三层模型
+## X-Kernel 的四层模型
 
-1. **自举原语**（`kcpu_slot` 内部 + 汇编）：`current_base_raw()`、模板符号。
+1. **自举原语**（`kcpu_slot` 内部 + 汇编）：`arch::current_base()`（crate 私有）、模板符号。
    对应 Asterinas 的 `arch::cpu::get_base()`，用于打破
    `guard -> current_cpu() -> KCPU_ID -> guard` 递归与 x86 TSS 汇编。
 2. **无 guard 的共享/按值访问**（Sync 或 Copy 载荷）：
@@ -47,7 +47,7 @@ Asterinas 的 `SingleInstruction*` 兜底实现调用 `crate::irq::disable_local
 `karch`，而正确的关中断逻辑（尤其 AArch64 的 PMR / ALLINT / pseudo-NMI
 不变量）由 `karch` 拥有。
 
-因此采用 **B2**：`kcpu_slot` 定义 `kiface` 接口，`karch` 提供实现：
+因此采用 **B2**：`kiface-cpu-api` 定义 `kiface` 接口（`kcpu_slot` 调用），`karch` 提供实现：
 
 ```rust
 #[kiface::interface]
@@ -70,7 +70,7 @@ impl kiface_cpu_api::CpuLocalIrqIf {
   普通读改写，再 `restore`（等价 Asterinas 的兜底语义，但复用 `karch` 的正确
   mask 逻辑）；
 - 不使用 `min_specialization`：每个 arch 模块对固定标量集
-  （`u8..u64`/`usize`/`i8..i64`/`isize`/`bool`，以及指针类型）分别实现
+  （`u8..u64`/`usize`/`i8..i64`/`isize`，load/store 另含 `bool`）分别实现
   `SingleInstruction*`。
 
 ## kcpu_slot API 变更
@@ -121,7 +121,7 @@ impl kiface_cpu_api::CpuLocalIrqIf {
   `get_on_cpu`）。
 - Copy 标量单指令：单条读/写不可分割；兜底架构在 `CpuLocalIrqIf` 关中断下
   完成，仍是本级 CPU 访问。
-- 非 Sync：必须 `CpuLocalGuard`；`&mut guard` 在编译期禁止重入借用。
+- 非 Sync：必须 `CpuLocalGuard`；guard 只给出共享借用，可变借用只经 `unsafe get_mut_unchecked`。
 - `current_area()` 不依赖 guard / CPU id，消除自举递归。
 - 汇编：仅 x86 TSS 一处。
 

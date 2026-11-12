@@ -1,141 +1,141 @@
-# posix-mm — 安全与可靠性分析
+# posix-mm — Security and Reliability Analysis
 
-## 信任模型
+## Trust Model
 
-`posix-mm` 信任：
+`posix-mm` trusts that:
 
-- 体系结构 fault/syscall 入口已把控制流切换到内核；
-- `kprocess` 当前进程/线程状态可用；
-- `kfs`、`memspace`、`filemap` 子系统各自维护内部不变量。
+- the architecture fault/syscall entry has already switched control flow into the kernel;
+- the current `kprocess` process/thread state is available;
+- the `kfs`, `memspace`, and `filemap` subsystems each maintain their own internal invariants.
 
-它自身负责：
+It is itself responsible for:
 
-- 校验用户传入参数；
-- 将 raw syscall 参数翻译成 typed request；
-- 正确装配 anonymous file 对象与 fd；
-- 把底层错误转换成 syscall 结果。
+- validating user-supplied arguments;
+- translating raw syscall arguments into typed requests;
+- correctly assembling anonymous file objects and fds;
+- converting lower-level errors into syscall results.
 
-## 外部边界 / 攻击面
+## External Boundary / Attack Surface
 
-- 用户提供的 `mmap` / `mremap` / `mprotect` / `munmap` /
-  `madvise` / `msync` / `memfd_create` 参数
-- 用户指针读取的 memfd 名字与其它 syscall 结构体
-- 当前进程 fd table 与地址空间状态
+- User-supplied arguments of `mmap` / `mremap` / `mprotect` / `munmap` /
+  `madvise` / `msync` / `memfd_create`
+- The memfd name and other syscall structures read through user pointers
+- The current process fd table and address-space state
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-本 crate 没有直接 `unsafe` 代码块。
+This crate contains no direct `unsafe` code blocks.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-- raw syscall flags 必须先转换成 typed request，不能直接传入 `MmSpace`
-  或 `filemap`。
-- unknown flags 必须显式返回错误，不能通过 `from_bits_truncate()` 静默丢弃。
-- Linux-known deferred `mmap` flags 必须留在 `posix-mm` 边界内处理：
-  普通 mapping 可按兼容 no-op policy 通过，`MAP_SHARED_VALIDATE` 必须返回
-  不支持。
-- `MAP_FIXED` / `MAP_FIXED_NOREPLACE` 地址必须按目标页大小对齐。
+- Raw syscall flags must first be converted into a typed request and must not be passed directly into `MmSpace`
+  or `filemap`.
+- Unknown flags must explicitly return an error and must not be silently dropped through `from_bits_truncate()`.
+- Linux-known deferred `mmap` flags must be handled within the `posix-mm` boundary:
+  an ordinary mapping may pass under a compatible no-op policy, while `MAP_SHARED_VALIDATE` must return
+  not-supported.
+- `MAP_FIXED` / `MAP_FIXED_NOREPLACE` addresses must be aligned to the target page size.
 - successful `mremap` move must not retire the source with ordinary
   `MmSpace::unmap()`.
-- `munmap(addr, 0)` 必须失败，不能作为成功 no-op 穿透到 `MmSpace`。
-- `PROT_GROWSDOWN` / `PROT_GROWSUP` 必须在 syscall 边界拒绝。
-- `MS_ASYNC | MS_SYNC` 冲突组合必须拒绝；unknown `msync` flags 也必须拒绝。
-- `MS_INVALIDATE` 必须返回不支持，直到 locked VMA 与 invalidate 语义存在。
-- `posix-mm` 不得直接访问 pagecache 或 filemap runtime internals；`msync`
-  必须通过捕获的 `LiveAddressSpace::msync_range()` 进入 MM，保留 active user；
-  syscall 不持有 MM mutex 执行文件持久化。
+- `munmap(addr, 0)` must fail and must not pass through to `MmSpace` as a successful no-op.
+- `PROT_GROWSDOWN` / `PROT_GROWSUP` must be rejected at the syscall boundary.
+- The conflicting combination `MS_ASYNC | MS_SYNC` must be rejected; unknown `msync` flags must also be rejected.
+- `MS_INVALIDATE` must return unsupported until locked VMA and invalidate semantics exist.
+- `posix-mm` must not directly access pagecache or filemap runtime internals; `msync`
+  must enter MM through the captured `LiveAddressSpace::msync_range()`, keeping an active user;
+  the syscall does not hold the MM mutex while performing file persistence.
 - `mremap` move must preserve the ownership split between VMA metadata,
   present PTE residency, and backing object pages.
-- `memfd_create` 返回的文件对象必须持有有效 `Location`。
-- anonymous file `Location` 必须绑定到 regular-file inode。
-- anonymous file inode 的内容必须由 inode-owned `kvfs::AddressSpace` 提供。
-- `memfd_create` 必须通过 `memfs::shmem` factory 创建匿名文件，不能在 syscall 层
-  复制 private tmpfs 文件创建、重新打开 anonymous location，或绕过 inode-scoped
-  shmem policy state。
-- `MFD_ALLOW_SEALING` 必须只影响初始 seal set：未设置时初始
-  `F_SEAL_SEAL`，设置时初始空 seal set。
-- `memfd` 名字读取必须有 Linux-compatible 上限，不能无界扫描用户内存。
-- anonymous file 对象不应依赖全局路径唯一性。
+- The file object returned by `memfd_create` must hold a valid `Location`.
+- The anonymous file `Location` must be bound to a regular-file inode.
+- The contents of an anonymous file inode must be provided by an inode-owned `kvfs::AddressSpace`.
+- `memfd_create` must create the anonymous file through the `memfs::shmem` factory; the syscall layer must not
+  duplicate private tmpfs file creation, reopen an anonymous location, or bypass the inode-scoped
+  shmem policy state.
+- `MFD_ALLOW_SEALING` must only affect the initial seal set: when unset, the initial set is
+  `F_SEAL_SEAL`; when set, the initial seal set is empty.
+- Reading the `memfd` name must have a Linux-compatible upper bound and must not scan user memory without bound.
+- Anonymous file objects should not depend on global path uniqueness.
 
-## 线程安全
+## Thread Safety
 
-- fd 安装通过进程资源表同步。
-- `memfs::shmem` state、VFS inode 与 `AddressSpace` 分别由各自锁保护。
-- `posix-mm` 不额外缓存跨 syscall 的裸指针或未同步共享状态。
+- fd installation is synchronized through the process resource table.
+- The `memfs::shmem` state, the VFS inode, and the `AddressSpace` are each protected by their own locks.
+- `posix-mm` does not additionally cache raw pointers or unsynchronized shared state across syscalls.
 
-## 威胁分析
+## Threat Analysis
 
-| 威胁 | 应对 |
+| Threat | Mitigation |
 |------|------|
-| 用户通过 `memfd` 名字污染全局路径空间 | `memfs::shmem` factory 创建 private mount 上的 anonymous file |
-| 用户构造包含 `/` 的名字影响 VFS 路径语义 | 接受 Linux 调试标签中的 `/`，仅在 private mount 的内部文件名中替换为 `:`；不解析用户标签为路径 |
-| 用户提供未终止或超长 memfd 名字 | `load_string_with_max_len()` 限制为 249 bytes excluding NUL |
-| 用户通过未知 `memfd_create` flags 进入未定义路径 | `MemfdFlags::from_bits()` 拒绝未知 bits |
-| raw `mmap` flags 静默穿透到 MM internals | `MmapRequest` 显式校验 unknown/deferred flags |
-| unaligned fixed mmap 覆盖错误地址 | fixed policy 在 request 解析阶段拒绝未对齐地址 |
-| `munmap(addr, 0)` 被当作成功 no-op | `MunmapRequest` 在 syscall 边界拒绝零长度 |
-| `MADV_DONTNEED` 误伤 file source object | 当前只接 pure private anon 和 file-private anon result object |
-| `msync` 把 private COW 页写回原文件 | `MmSpace::msync_range()` 只让 shared file runtime 执行 writeback |
-| `MS_INVALIDATE` 被假实现成成功 | 当前返回 `OperationNotSupported` |
-| `mremap` move 失败留下半完成源映射，或旧源 teardown 销毁目标仍需的 private backing | 各 move 分支统一使用 `relocate_mapping` 事务；准备失败保留源状态并撤销目标，成功仅退休源 metadata |
+| A user pollutes the global path space through the `memfd` name | The `memfs::shmem` factory creates the anonymous file on a private mount |
+| A user constructs a name containing `/` to affect VFS path semantics | A `/` in the Linux debug label is accepted and replaced with `:` only in the internal file name on the private mount; the user label is never parsed as a path |
+| A user provides an unterminated or overlong memfd name | `load_string_with_max_len()` limits it to 249 bytes excluding NUL |
+| A user enters an undefined path through unknown `memfd_create` flags | `MemfdFlags::from_bits()` rejects unknown bits |
+| Raw `mmap` flags silently leak into MM internals | `MmapRequest` explicitly validates unknown/deferred flags |
+| An unaligned fixed mmap overwrites the wrong address | The fixed policy rejects unaligned addresses at the request parsing stage |
+| `munmap(addr, 0)` is treated as a successful no-op | `MunmapRequest` rejects zero length at the syscall boundary |
+| `MADV_DONTNEED` damages a file source object | Currently only pure private anon and file-private anon result objects are handled |
+| `msync` writes private COW pages back to the original file | `MmSpace::msync_range()` lets only the shared file runtime perform writeback |
+| `MS_INVALIDATE` is faked as success | Currently returns `OperationNotSupported` |
+| An `mremap` move failure leaves a half-completed source mapping, or the old source teardown destroys private backing that the destination still needs | All move branches uniformly use the `relocate_mapping` transaction; on preparation failure the source state is preserved and the destination is revoked, and on success only the source metadata is retired |
 
-## 故障模式与影响分析（FMEA）
+## Failure Modes and Effects Analysis (FMEA)
 
-| 故障 | 条件 | 处理 | 影响 |
+| Failure | Condition | Handling | Impact |
 |---|---|---|---|
-| 用户名字读取失败 | 无效用户指针、非法 UTF-8、缺少 NUL、超长 | 返回错误 | syscall 失败 |
-| anonymous file 创建失败 | 内存不足或 VFS 分配失败 | 返回错误 | syscall 失败 |
-| fd 安装失败 | fd table 满 | 返回错误 | 文件对象立即释放 |
-| `mmap` flag 不支持 | unknown `MAP_*`、`MAP_SHARED_VALIDATE` 携带 deferred flag、或 file-backed hugetlb | 返回错误 | mmap 失败，不修改地址空间 |
-| fixed mmap 地址未对齐 | `MAP_FIXED*` 地址不满足目标页大小 | 返回错误 | mmap 失败，不修改地址空间 |
-| `munmap` 范围非法 | 长度为 0 或下游地址空间拒绝 | 返回错误 | 不修改地址空间 |
-| `mprotect` grow flag 不支持 | `PROT_GROWSDOWN` 或 `PROT_GROWSUP` | 返回错误 | protect 失败，不修改 PTE/VMA |
-| `MADV_DONTNEED` 范围非法 | 地址未映射、未页对齐、或 `addr + len` 溢出 | 返回错误 | advice 失败，不修改对象 |
-| `msync` flag 不支持 | unknown flags 或 `MS_ASYNC | MS_SYNC` 组合 | 返回错误 | sync 失败，不修改对象 |
-| shared file sync 失败 | 文件范围 datasync 的数据、元数据、journal 或设备持久化失败 | 传播文件系统/文件错误游标结果，未完成数据保留重试状态 | syscall 失败，调用者可重试 |
+| User name read fails | Invalid user pointer, illegal UTF-8, missing NUL, too long | Return an error | The syscall fails |
+| anonymous file creation fails | Out of memory or VFS allocation failure | Return an error | The syscall fails |
+| fd installation fails | The fd table is full | Return an error | The file object is released immediately |
+| `mmap` flag unsupported | unknown `MAP_*`, `MAP_SHARED_VALIDATE` carrying a deferred flag, or file-backed hugetlb | Return an error | mmap fails and the address space is not modified |
+| fixed mmap address not aligned | The `MAP_FIXED*` address does not satisfy the target page size | Return an error | mmap fails and the address space is not modified |
+| `munmap` range illegal | Length is 0 or the downstream address space rejects it | Return an error | The address space is not modified |
+| `mprotect` grow flag unsupported | `PROT_GROWSDOWN` or `PROT_GROWSUP` | Return an error | protect fails and the PTE/VMA are not modified |
+| `MADV_DONTNEED` range illegal | The address is unmapped, not page-aligned, or `addr + len` overflows | Return an error | advice fails and the object is not modified |
+| `msync` flag unsupported | unknown flags or the `MS_ASYNC | MS_SYNC` combination | Return an error | sync fails and the object is not modified |
+| shared file sync fails | Data, metadata, journal or device persistence of the file-range datasync fails | Propagate the filesystem/file error cursor result, and unfinished data keeps its retry state | The syscall fails and the caller may retry |
 
-## 故障管理
+## Fault Management
 
-- 参数和用户内存错误通过 `KResult` 返回。
-- 不通过 panic 处理普通 syscall 失败。
-- anonymous file 创建后若 fd 安装失败，由 `Arc` 生命周期自然回收对象。
+- Argument and user-memory errors are returned through `KResult`.
+- Ordinary syscall failures are not handled through panic.
+- If fd installation fails after the anonymous file is created, the object is reclaimed naturally by the `Arc` lifetime.
 
-## 已知限制
+## Known Limitations
 
-- `memfd_create` 支持 `MFD_ALLOW_SEALING` 初始 seal policy；
-  `F_ADD_SEALS` / `F_GET_SEALS` 由 `posix-fs` 处理，shared writable mmap
-  seal enforcement 由 `mm/filemap` 处理，hugetlb 扩展未接入。
-- `memfd` 名字仅用于调试，不保证与 Linux `/proc/self/fd` 展示完全一致。
-- `madvise` 支持 `MADV_DONTNEED` 与四个性能提示（no-op，但仍要求范围完全
-  映射并页对齐，未映射返回 `ENOMEM`）；`InvalidInput` 只在 advice 值未知、
-  地址未对齐或范围溢出时返回。
-- `mmap` 的 maximum permission 与 current permission 分离；shared file
-  映射的 may-permission 受文件打开权限约束。
-- `MS_SYNC` 已进入 shared file 范围 datasync；文件系统可保守同步更多范围。
-  `MS_INVALIDATE` 和 locked-page `EBUSY` 语义未实现。
-- dirty-PTE 收集与写回后重新写保护属于 Issue G；不能据此声称已经覆盖
-  同一可写 PTE 上不再触发缺页的连续 mmap 写入。
-- file-backed writable `MAP_SHARED` 由 `filemap` runtime 通过 write-fault
-  dirty tracking 支持。
+- `memfd_create` supports the `MFD_ALLOW_SEALING` initial seal policy;
+  `F_ADD_SEALS` / `F_GET_SEALS` are handled by `posix-fs`, and shared writable mmap
+  seal enforcement is handled by `mm/filemap`; the hugetlb extension is not wired in.
+- The `memfd` name is for debugging only and is not guaranteed to match the Linux `/proc/self/fd` display exactly.
+- `madvise` supports `MADV_DONTNEED` and four performance hints (no-ops, but they still require the range to be fully
+  mapped and page-aligned, and an unmapped range returns `ENOMEM`); `InvalidInput` is returned only when the advice value is unknown,
+  the address is unaligned, or the range overflows.
+- The maximum permission and current permission of `mmap` are separate; the may-permission of a shared file
+  mapping is bounded by the file open permissions.
+- `MS_SYNC` now enters the shared file range datasync; the filesystem may conservatively sync more ranges.
+  The `MS_INVALIDATE` and locked-page `EBUSY` semantics are not implemented.
+- Dirty-PTE collection and write re-protection after writeback belong to Issue G; it cannot be claimed that this already covers
+  consecutive mmap writes on the same writable PTE that no longer trigger a fault.
+- File-backed writable `MAP_SHARED` is supported by the `filemap` runtime through write-fault
+  dirty tracking.
 
-## 审计清单
+## Audit Checklist
 
-- `uapps/memfd-test` 是否通过真实 syscall 检查 slash 标签创建、映射读写
-  和格式化同名对象内容隔离；formatter 字符串断言不能替代这项检查，也不能
-  单独证明 private mount 拓扑。
+- Does `uapps/memfd-test` check, through real syscalls, slash-label creation, mapped read/write,
+  and content isolation between objects with the same formatted name; formatter string assertions cannot replace this check, nor can they
+  alone prove the private mount topology.
 
-- 新增 syscall flag 时是否同步更新 typed request 校验与文档。
-- syscall 是否先构造 typed request，再调用 `MmSpace` / `filemap`。
-- 是否仍存在 `from_bits_truncate()` 静默吞掉未知 ABI flags。
-- fixed-address mapping 是否仍拒绝未对齐地址。
-- `memfd_create` 是否仍不依赖 `/tmp` 或其它全局路径。
-- shmem factory 是否总是返回 private mount 上的 regular-file inode。
-- `memfd` regular-file inode 是否始终复用 inode-owned `AddressSpace`。
-- `MADV_DONTNEED` 是否只命中 private-anon object，并通过 object-driven
-  invalidate 主线完成 PTE zap。
+- When a new syscall flag is added, are the typed request validation and the documentation updated together?
+- Does the syscall first construct a typed request and only then call `MmSpace` / `filemap`?
+- Does any `from_bits_truncate()` still silently swallow unknown ABI flags?
+- Does fixed-address mapping still reject unaligned addresses?
+- Does `memfd_create` still not depend on `/tmp` or any other global path?
+- Does the shmem factory always return a regular-file inode on the private mount?
+- Does the `memfd` regular-file inode always reuse the inode-owned `AddressSpace`?
+- Does `MADV_DONTNEED` hit only private-anon objects and complete the PTE zap through the object-driven
+  invalidate main path?
 
-`brk` 不忽略补建/收缩映射的错误；失败时不发布请求的新 heap top，
-避免用户观察到未完成的地址空间变更。
+`brk` does not ignore errors from re-establishing/shrinking the mapping; on failure it does not publish the requested new heap top,
+so that the user never observes an incomplete address-space change.
 
 Shared file mapping creation and permission changes run under MM serialization.
 Write faults may return a retry outcome to leave that critical section before a

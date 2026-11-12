@@ -1,4 +1,4 @@
-# kruntime — 安全与可靠性分析
+# kruntime — Security and Reliability Analysis
 
 Network device-owner reservation failure is fatal only at the configured boot
 network boundary. It occurs before global stack publication and NIC scheduler
@@ -182,28 +182,28 @@ freed there. Payload Drop and its storage always run on the normal executor.
 The BH callback only submits already prepared owners; it never performs the
 payload's sleepable destructor or waits for its completion.
 
-## 信任模型
+## Trust Model
 
-AP 剩余启动流程借用 idle task 的执行上下文，提前切换到持续 runnable 的任务
-可能无限推迟其初始化。NoPreempt 从 run queue 就绪通知发布前一直覆盖到本核
-必要服务准备完毕；内部 SpinNoIrq 退出只能恢复到外层禁抢占计数，不能提前切走。
-总 IRQ 的启用时机不变，guard 不阻止 IPI 的记录/处理，最终释放按既有路径消费
-need_resched。没有增加运行期 ready 状态判断、全局调度锁或清空通知的路径。
+The remainder of AP startup borrows the idle task's execution context, so switching early to a continuously runnable task
+could postpone its initialization indefinitely. NoPreempt covers the span from before the run queue ready notification is published until this CPU's
+required services are ready; exiting the inner SpinNoIrq can only restore the outer preemption-disable count and must not switch away early.
+The timing of enabling the global IRQ is unchanged, the guard does not prevent IPIs from being recorded/handled, and the final release consumes
+need_resched through the existing path. No runtime ready-state check, global scheduler lock, or notification-clearing path is added.
 
-主核仅保护早期服务准备与 late-init 激活，不能把可阻塞的 late-init 工作也包入
-禁抢占区域。初始化扩展不得在 guard 内主动调度或依赖未运行任务完成；NoPreempt
-防止抢占，不会把非法的主动等待自动变安全。未添加 unsafe 或更改 EEVDF 排序。
+The primary CPU protects only early service preparation and late-init activation; blockable late-init work must not also be wrapped in
+the preemption-disabled region. Initialization extensions must not actively schedule inside the guard or depend on tasks that are not running to complete; NoPreempt
+prevents preemption, but does not automatically make an illegal active wait safe. No unsafe is added and the EEVDF ordering is not changed.
 
-固定 IPI 启用之前，当前 scheduler、普通 IPI 队列、控制器与共享 handler 必须就绪。
-主 CPU 通过 IRQ-save 临界区启用，AP 保持其原本关闭总 IRQ 的启动状态；启用 drain
-只设置重调度标志，不主动执行抢占检查或 timer 业务回调。不能在初始化时清除静态
-原因位，也不能在正常 handler 中提前消费尚未启用 CPU 的请求。CPU hotplug 不支持。
+Before the fixed IPI is enabled, the current scheduler, the normal IPI queue, the controller and the shared handler must be ready.
+The primary CPU enables it through an IRQ-save critical section, while APs keep their original boot state with the global IRQ disabled; the enabling drain
+only sets the reschedule flag and does not actively perform a preemption check or timer business callbacks. The static
+reason bits must not be cleared during initialization, and the normal handler must not consume in advance requests for a CPU that is not yet enabled. CPU hotplug is not supported.
 
-`kruntime` 是平台引导层和内核运行时之间的可信编排层。它不直接解析 syscall 参数或用户指针，但它接收 boot 层传入的 `BootInfo`，安装早期内存、调度、中断和驱动运行环境，并在所有已发现 CPU 完成 runtime 初始化后调用 `SystemInitEntry::enter()`。
+`kruntime` is the trusted orchestration layer between the platform boot layer and the kernel runtime. It does not directly parse syscall arguments or user pointers, but it receives the `BootInfo` passed in by the boot layer, installs the early memory, scheduling, interrupt and driver runtime environment, and calls `SystemInitEntry::enter()` after all discovered CPUs have completed runtime initialization.
 
 ```
-kernel-boot / 平台固件
-   │ BootInfo*、主核入口、从核入口
+kernel-boot / platform firmware
+   │ BootInfo*, primary entry, secondary entry
    ▼
 ┌──────────────────────────────────────────────────┐
 │ kruntime                                          │
@@ -219,195 +219,188 @@ kernel-boot / 平台固件
 └──────────────────────────────────────────────────┘
 ```
 
-- **boot 层 / 固件**必须提供可读且语义正确的 `BootInfo`、CPU 拓扑、内存区域和可选 boot console MMIO 描述。
-- **链接脚本和注册宏**必须提供有效的 `_stext` / `_etext`、`__init_array_start` / `__init_array_end`，并保证 `.init_array` 只包含 `extern "C" fn()` 条目。
+- **The boot layer / firmware** must provide a readable and semantically correct `BootInfo`, CPU topology, memory regions and an optional boot console MMIO description.
+- **The linker script and registration macros** must provide valid `_stext` / `_etext` and `__init_array_start` / `__init_array_end`, and guarantee that `.init_array` contains only `extern "C" fn()` entries.
 - The `kiface` exactly-one provider contract enforces unique implementations
   of `PrimaryKernelEntry`, `SecondaryKernelEntry`, `LogSinkIf`, `LogContextIf`
   and `SystemInitEntry` at link time.
-- **`entry` provider**负责策略层启动：`SystemInitEntry::enter()` 必须发布并激活 PID 1 init 任务后返回。
+- **The `entry` provider** is responsible for policy-layer startup: `SystemInitEntry::enter()` must publish and activate the PID 1 init task before returning.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-`kruntime` 的外部输入都来自内核可信边界内，但错误会在启动早期放大为全局失效：
+All external inputs to `kruntime` come from inside the kernel trust boundary, but errors are amplified into global failure early in startup:
 
-| 边界 | 输入 | 风险 | 当前约束 |
+| Boundary | Input | Risk | Current constraint |
 |------|------|------|----------|
-| `BootInfo` | CPU ID、内存表、boot console PA/VA/size | 错误内存映射、错误 CPU 初始化、MMIO 区域越界 | `khal::firmware::init`、`khal::mem::init` 和 `memspace` 负责校验；boot console VA/PA 页内偏移由 `assert_eq!` 检查 |
+| `BootInfo` | CPU ID, memory table, boot console PA/VA/size | Wrong memory mapping, wrong CPU initialization, MMIO region out of bounds | `khal::firmware::init`, `khal::mem::init` and `memspace` are responsible for validation; the in-page offset of the boot console VA/PA is checked by `assert_eq!` |
 | Boot RAM handoff | `FREE` PA/VA/size tuples | Misclassified or aliased RAM could overwrite live owners | Bounded heapless collection; `kalloc` checks arithmetic, overlap and linear mapping, while boot/HAL must establish ownership and mapping lifetime |
-| 链接符号 | `_stext`、`_etext`、`.init_array` 边界 | backtrace 范围错误、构造函数表越界、任意跳转 | 只取 ZST 符号地址；`.init_array` 通过链接脚本和 `#[register_init]` 约束 |
-| SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`SCHED_READY_CPUS` 串行握手（等 AP 注册 run queue）；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
+| Linker symbols | `_stext`, `_etext`, `.init_array` boundaries | Wrong backtrace range, constructor table out of bounds, arbitrary jump | Only the addresses of ZST symbols are taken; `.init_array` is constrained by the linker script and `#[register_init]` |
+| SMP bring-up | present CPUs discovered via DT/ACPI, AP stacks, `boot_ap` | A secondary CPU using the wrong stack, an AP that fails to start causing the primary CPU to spin | Each AP uses its own boot stack; `SCHED_READY_CPUS` serial handshake (waits for the AP to register its run queue); global completion is determined by `INITED_CPUS == nr_cpus()` |
 | IRQ and timer | Softirq runner and timer/IPI/PMU handlers | Interrupt delivery before handler readiness | The primary installs handlers before IRQ enable; APs enable local IRQs after ksoftirqd setup and before publishing service completion. Workqueue service publication follows the all-CPU barrier. PMU IRQ enable follows watchdog setup. |
-| NMI 机制 | GIC 版本 / FEAT_NMI 探测与每 CPU 使能（`khal::nmi::early_init` / `late_init`） | 机制误判导致无效寄存器访问，或 watchdog 误报 hardlockup | 平台 `detect_mode()` 门控；`NmiMode::None` 时 watchdog 启动期禁用硬锁检测；所有 NMI 寄存器访问均有 readiness 门控 |
+| NMI mechanism | GIC version / FEAT_NMI probing and per-CPU enabling (`khal::nmi::early_init` / `late_init`) | Mechanism misdetection causes invalid register accesses, or the watchdog falsely reports a hardlockup | Gated by the platform `detect_mode()`; with `NmiMode::None` the watchdog disables hard-lockup detection at startup; all NMI register accesses are gated by readiness |
 | Boot log filter (DT) | `/chosen/x-kernel,log-level` string, read by `khal::firmware::dt_log_level()` inside `resolve_boot_log_filter` | A malformed or hostile property could mute the boot log or install an unintended per-target filter | `klogger::set_filter_spec` validates the whole spec before applying it; a rejected value is reported on the console through `kprintln!` (the unfiltered path, because the level being installed is what would filter a `warn!`) and the resolver falls through to the command line and the Kconfig default, so logging is never left off by a typo |
 
-本 crate 不直接处理用户内存、用户提供指针、DMA buffer 内容或设备寄存器读写；相关 trust boundary 位于 `memspace`、`kdma`、`kdriver` 和具体 HAL/driver 中。它会注册 boot console 的固定 MMIO 映射元数据，但不直接访问该 MMIO。
+This crate does not directly handle user memory, user-supplied pointers, DMA buffer contents or device register reads and writes; the related trust boundaries are located in `memspace`, `kdma`, `kdriver` and the specific HAL/drivers. It registers the fixed MMIO mapping metadata of the boot console, but does not access that MMIO directly.
 
-## unsafe 代码清单
+## Unsafe Code Inventory
 
 ### Boot RAM transfer (`src/lib.rs::init_allocator`)
 
-unsafe `page_meta::init(&mut ranges, map_storage)` 在 allocator 使用者和从核
-启动前调用。Boot/HAL 保证物理列表中的 RAM 独占，回调的 p2v 映射覆盖完整后备区，
-并且后备 RAM 与映射永久有效。FREE 过滤本身不能证明这些事实。
+unsafe `page_meta::init(&mut ranges, map_storage)` is called before allocator users and before the secondary cores
+start. Boot/HAL guarantees that the RAM in the physical list is exclusively owned, that the callback's p2v mapping covers the entire backing region,
+and that the backing RAM and mapping remain valid permanently. The FREE filter itself cannot prove these facts.
 
-page-meta 原地扣除自身后备区，保留完整物理覆盖。runtime 只把更新后列表中的非空
-区间交给 kalloc；物理页内容映射不作为每个覆盖区间的固定字段。主核串行调用 unsafe
-publish，承诺 static 元数据借用的生命周期。
+page-meta deducts its own backing region in place and preserves the complete physical coverage. The runtime hands only the non-empty
+ranges of the updated list to kalloc; the physical-page content mapping is not a fixed field of every covered range. The primary core calls the unsafe
+publish serially, and commits to the lifetime of the borrowed static metadata.
 
-元数据服务维护索引、描述符初始化和发布；kalloc 维护自身库存与 heap；runtime
-维护映射能力和启动顺序。初始化错误不发布，with_reserved_storage 的单次失败预留不扣除，较早成功的预留
-和规范化结果不承诺回滚。元数据表发布后 allocator 失败即停止启动，不部分重试。
+The metadata service maintains the index, descriptor initialization and publication; kalloc maintains its own inventory and heap; the runtime
+maintains the mapping capability and boot ordering. An initialization error is not published; the single failed reservation of with_reserved_storage is not deducted, and earlier successful reservations
+and normalization results are not promised to be rolled back. Once the metadata table is published, an allocator failure stops boot, with no partial retry.
 
-### 链接文本边界（`src/lib.rs`）
+### Linker text boundary (`src/lib.rs`)
 
-`rust_main` 声明 `_stext` / `_etext` 为零长静态符号，并只用 `.as_ptr()` 构造 backtrace 的指令地址范围。
+`rust_main` declares `_stext` / `_etext` as zero-length static symbols and uses only `.as_ptr()` to build the instruction address range for the backtrace.
 
-不变量：
+Invariants:
 
-- 链接脚本必须定义两个符号，且 `_stext <= _etext`。
-- 代码只读取符号地址，不解引用零长对象。
-- backtrace 的 frame-pointer 范围从 `PAGE_OFFSET` 到 `usize::MAX`，覆盖主核 task stack 和从核线性映射 boot stack。
+- The linker script must define both symbols, and `_stext <= _etext`.
+- The code reads only the symbol addresses and never dereferences the zero-length objects.
+- The backtrace frame-pointer range runs from `PAGE_OFFSET` to `usize::MAX`, covering the primary core's task stack and the secondary cores' linearly mapped boot stacks.
 
-### `.init_array` 遍历（`src/init_setup.rs`）
+### `.init_array` traversal (`src/init_setup.rs`)
 
-`init_cb()` 将 `[__init_array_start, __init_array_end)` 解释为 `extern "C" fn()` 切片并逐个调用。
+`init_cb()` interprets `[__init_array_start, __init_array_end)` as a slice of `extern "C" fn()` and calls each entry in turn.
 
-不变量：
+Invariants:
 
-- 链接脚本导出的起止地址形成同一连续 `.init_array` 区间。
-- 区间按函数指针对齐，长度是函数指针大小的整数倍。
-- 每个槽位由 `#[register_init]` 等受信代码生成，指向有效 `extern "C" fn()`。
-- 调用发生在 late-init bootstrap 线程中：调度器和本地 IRQ 已启用，但 PID 1 尚未 spawn；回调必须不依赖用户态 init 已存在。
+- The start and end addresses exported by the linker script form a single contiguous `.init_array` range.
+- The range is aligned to the function pointer size, and its length is an integer multiple of the function pointer size.
+- Each slot is generated by trusted code such as `#[register_init]` and points to a valid `extern "C" fn()`.
+- The calls happen in the late-init bootstrap thread: the scheduler and local IRQs are already enabled, but PID 1 has not yet been spawned; callbacks must not depend on the user-space init already existing.
 
-风险：该表一旦被错误链接或内存破坏，`init_cb` 可能跳转到任意地址，属于高危启动期边界。
+Risk: if this table is incorrectly linked or corrupted in memory, `init_cb` may jump to an arbitrary address, which makes it a high-risk boot-time boundary.
 
-### 从核 boot stack（`src/mp.rs`）
+### Secondary core boot stacks (`src/mp.rs`)
 
-`SecondaryBootStacks` 使用 `UnsafeCell<[[u8; TASK_STACK_SIZE]; NR_CPUS - 1]>` 保存从核启动栈，`stack_top()` 通过 raw pointer 计算每个 AP 的栈顶地址，并为包装类型手写 `Sync`。
+`SecondaryBootStacks` uses `UnsafeCell<[[u8; TASK_STACK_SIZE]; NR_CPUS - 1]>` to hold the secondary cores' boot stacks, `stack_top()` computes each AP's stack top address through a raw pointer, and `Sync` is implemented by hand for the wrapper type.
 
-不变量：
+Invariants:
 
-- `start_secondary_cpus()` 串行分配 `secondary_cpu_index`，并在 `secondary_cpu_index < NR_CPUS - 1` 时才取栈。
-- backing array 位于 `.bss.stack`，生命周期覆盖整个内核运行期。
-- 每个从核只获得一个独立槽位的 one-past-end 栈顶地址，模块不暴露内部数组引用。
-- `SCHED_READY_CPUS` 握手确保主核在启动下一个 AP 前，当前 AP 已进入 runtime 并注册其 run queue，因而主核进入 `init_drivers` 时跨核 spawn 不会命中未注册 RQ。
+- `start_secondary_cpus()` allocates `secondary_cpu_index` serially, and takes a stack only when `secondary_cpu_index < NR_CPUS - 1`.
+- The backing array lives in `.bss.stack`, and its lifetime covers the entire kernel run.
+- Each secondary core receives only the one-past-end stack top address of its own separate slot, and the module does not expose references to the inner array.
+- The `SCHED_READY_CPUS` handshake ensures that before the primary core starts the next AP, the current AP has entered the runtime and registered its run queue, so cross-core spawns do not hit an unregistered RQ when the primary core enters `init_drivers`.
 
-### per-CPU timer deadline（`src/lib.rs`）
+### Timer handler (`src/lib.rs`)
 
-`init_interrupt()` 内的 `NEXT_DEADLINE.read_current_raw()` / `write_current_raw()` 访问当前 CPU 的 per-CPU slot。
+The timer IRQ handler registered in `init_interrupt()` contains no raw per-CPU access. It only calls `ktask::on_timer_fire()`, which owns timer re-arming.
 
-不变量：
+### Raw memory access in kernel-mode unit tests (`src/mp.rs`, `#[cfg(all(feature = "smp", unittest))]`)
 
-- timer IRQ handler 在当前 CPU 上运行，且 IRQ/preemption 语义保证访问期间不会迁移到其他 CPU。
-- 每个 CPU 只读写自己的 `NEXT_DEADLINE` slot；跨 CPU 不共享该变量。
-- `khal::time::arm_timer(deadline)` 使用根据当前单调时间计算的 deadline，避免因 handler 延迟导致立即重复触发。
+The SMP TLB shootdown unit test uses volatile reads and writes to verify whether remote CPUs see the page-table update.
 
-### kernel-mode unit test raw memory access（`src/mp.rs`，`#[cfg(all(feature = "smp", unittest))]`）
+Invariants:
 
-SMP TLB shootdown 单测使用 volatile 读写验证远端 CPU 是否看到页表更新。
+- The test page is allocated exclusively by the test and freed in the cleanup phase.
+- The test virtual address is mapped to the corresponding physical page before any read or write.
+- The related unsafe code is built only under the `unittest` configuration and is not part of the production boot path.
 
-不变量：
+### panic handler (`src/lang_items.rs`)
 
-- 测试页由测试独占分配并在清理阶段释放。
-- 测试虚拟地址在读写前已映射到对应物理页。
-- 相关 unsafe 仅在 `unittest` 配置下参与构建，不属于生产启动路径。
+The panic handler itself is safe Rust, but capturing a backtrace on a corrupted stack or corrupted page tables may fail again. The current policy is to print the panic message and backtrace, and then call `khal::power::platform_power_off()` to terminate the system. The panic path deliberately bypasses the SMP stop hook of `khal::power::power_off()`: the hook halts CPUs through IPI, while the panicking CPU may be holding a lock that other CPUs spin-wait on, so going through the hook would deadlock.
 
-### panic handler（`src/lang_items.rs`）
+## Memory safety invariants
 
-panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕获 backtrace 可能再次失败。当前策略是打印 panic 信息和 backtrace，然后调用 `khal::power::platform_power_off()` 终止系统。panic 路径刻意绕过 `khal::power::power_off()` 的 SMP stop 钩子：钩子通过 IPI 停机，而 panic CPU 可能正持有其他 CPU 自旋等待的锁，走钩子会死锁。
+- `BootInfo` must be readable during `rust_main(arg)`, and the FREE/RSVD/device regions described by its memory table must not contradict one another.
+- The in-page offsets of the PA and VA of the boot console fixed mapping must be consistent; otherwise `register_boot_console_runtime_region()` panics immediately, to avoid registering a wrong mapping.
+- The `.init_array` boundaries must lie within the mapped kernel image and must not be overwritten by writable data.
+- The secondary core boot stack array must cover at least the number of APs actually started; present CPUs beyond `NR_CPUS - 1` are not started by `kruntime`.
+- PID-less late-init threads and ordinary kernel workers do not enter the root PID allocator; PID 1 can only be consumed and asserted by the init spawn in `SystemInitEntry::enter()`.
 
-## 内存安全不变量
-
-- `BootInfo` 在 `rust_main(arg)` 期间必须可读，且其内存表描述的 FREE/RSVD/设备区域不能互相矛盾。
-- boot console 固定映射的 PA/VA 页内偏移必须一致；否则 `register_boot_console_runtime_region()` 立即 panic，避免注册错误映射。
-- `.init_array` 边界必须位于已映射内核镜像中，并且不会被可写数据覆盖。
-- 从核 boot stack 数组必须至少覆盖被实际启动的 AP 数量；超过 `NR_CPUS - 1` 的 present CPU 不会被 `kruntime` 启动。
-- PID-less late-init 线程和普通内核 worker 不进入 root PID allocator；PID 1 只能由 `SystemInitEntry::enter()` 中的 init spawn 消耗并断言。
-
-## 线程安全
+## Thread safety
 
 - `INITED_CPUS: AtomicUsize` is private boot-lifetime state. Only the primary
   publishes the first Release increment, releasing AP setup. Each AP publishes
   once after its local service initialization. The primary's final Acquire load
   observes the Release RMW sequence before entering device discovery or drivers.
   The counter describes CPU services, not completed filesystem/network startup.
-- `SCHED_READY_CPUS` 只表达 AP 已注册 run queue（进入 runtime 后进一步完成内存管理与调度器初始化），不代表 AP 初始化完成；它与 `INITED_CPUS` 分离，避免把“可跨核调度”/“可启动下一个 AP”和“全局 runtime ready”混在一起。
-- `LogContextIf::cpu_id()` 和 `task_id()` 在 `is_init_ok()` 前避免读取可能未就绪的 current task / CPU-local 运行时状态；非 SMP 构建下 CPU ID 固定为 0。
+- `SCHED_READY_CPUS` only expresses that an AP has registered its run queue (after entering the runtime, it goes on to finish memory management and scheduler initialization); it does not mean AP initialization is complete. It is kept separate from `INITED_CPUS` to avoid conflating "schedulable across cores" / "the next AP may be started" with "global runtime ready".
+- `LogContextIf::cpu_id()` and `task_id()` avoid reading the possibly not-yet-ready current task / CPU-local runtime state before `is_init_ok()`; in non-SMP builds the CPU ID is fixed to 0.
 - APs retain the startup preemption guard through fixed-notification enable,
   softirq/worker setup, IRQ enable, watchdog/PMU setup, and completion publication.
   They must not wait for primary driver initialization or local runnable tasks
   during this phase. The primary would otherwise wait for an AP that cannot finish.
 
-## 威胁分析
+## Threat analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat description | Impact level | Trigger condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | `.init_array` 槽位不是有效函数指针，`init_cb` 跳转到非法地址 | 高 | 链接脚本错误、恶意/损坏对象文件、内存破坏 | 仅信任注册宏生成条目；链接脚本保留并界定 `.init_array`；启动期集中调用 |
-| T-02 | `BootInfo` 内存表或 CPU 拓扑错误 | 高 | boot 层 bug、固件表异常、虚拟化环境错误 | 由 `khal::firmware` / `khal::mem` / `kcpu_id_map` 建立运行时视图；后续初始化只消费该视图 |
+| T-01 | An `.init_array` slot is not a valid function pointer, and `init_cb` jumps to an illegal address | High | Linker script error, malicious/corrupted object file, memory corruption | Trust only entries generated by the registration macro; the linker script retains and delimits `.init_array`; calls are centralized in the boot phase |
+| T-02 | The `BootInfo` memory table or CPU topology is wrong | High | Boot-layer bug, abnormal firmware table, virtualization environment error | The runtime view is established by `khal::firmware` / `khal::mem` / `kcpu_id_map`; later initialization consumes only that view |
 | T-03 | Shared services or drivers use AP services before preparation completes | Medium | Publishing `INITED_CPUS` before local service setup, or starting RCU/drivers before the barrier | Mitigated by separate run-queue registration and service-completion barriers and Release/Acquire publication. Unittest holds AP publication until the primary enters its wait and observes completion at the pre-RCU initialization boundary. |
-| T-04 | 从核使用错误或重叠 boot stack | 高 | AP 启动循环越界、并发启动复用槽位 | `secondary_cpu_index < NR_CPUS - 1`；串行 `boot_ap` + `SCHED_READY_CPUS` 握手；每 AP 独立槽 |
-| T-05 | PID 1 被提前消耗 | 中 | late-init 线程或后台 worker 获得 Linux-visible identity；`SystemInitEntry` 未先创建 init | boot、idle、late-init 和普通内核 worker 使用 PID-less identity；init 创建路径断言 root PID 为 1 |
-| T-06 | IRQ 在 handler 注册前启用 | 高 | `init_interrupt` 顺序被改坏、平台提前开 IRQ | 主核先安装 softirq hardirq-exit runner，再注册 timer/IPI/PMU handler，最后开本地 IRQ；从核初始化完成后再开 IRQ |
-| T-07 | per-CPU timer deadline raw access 在可迁移上下文运行 | 中 | handler 被改为普通线程调用或抢占语义变化 | unsafe 注释要求 IRQ/preemption 禁止迁移；审计 raw percpu 调用点 |
-| T-09 | panic handler 在损坏栈上再次失败 | 中 | 栈溢出、页表损坏、backtrace 范围错误 | panic 后只做诊断并关机，不尝试恢复 |
-| T-10 | 启动日志泄露物理地址和设备映射 | 低 | 开启启动日志 | 限于内核日志；不处理用户数据，但部署时需按日志策略限制可见性 |
+| T-04 | A secondary core uses a wrong or overlapping boot stack | High | AP boot loop goes out of bounds, concurrent boot reuses a slot | `secondary_cpu_index < NR_CPUS - 1`; serial `boot_ap` + `SCHED_READY_CPUS` handshake; a separate slot per AP |
+| T-05 | PID 1 is consumed early | Medium | A late-init thread or background worker obtains a Linux-visible identity; `SystemInitEntry` has not created init first | boot, idle, late-init and ordinary kernel workers use a PID-less identity; the init creation path asserts that the root PID is 1 |
+| T-06 | IRQs are enabled before handlers are registered | High | The order in `init_interrupt` is broken, the platform enables IRQs early | The primary core first installs the softirq hardirq-exit runner, then registers the timer/IPI/PMU handlers, and finally enables local IRQs; secondary cores enable IRQs only after initialization completes |
+| T-09 | The panic handler fails again on a corrupted stack | Medium | Stack overflow, page-table corruption, wrong backtrace range | After a panic, only diagnostics are done and then the system is powered off, with no attempt at recovery |
+| T-10 | Boot logs leak physical addresses and device mappings | Low | Boot logging is enabled | Limited to the kernel log; no user data is handled, but at deployment time its visibility must be restricted according to the log policy |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Failure Cause | Local Effect | System Effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | 全局 allocator 没有可用 FREE 区域 | 固件内存表错误或 boot 层漏报 | allocator 初始化不完整 | 早期分配失败或 panic，系统无法启动 | 1 | 启动期快速失败；依赖 boot/mem 子系统校验 |
-| F-02 | boot console MMIO VA/PA 页内偏移不一致 | `BootInfo` 填写错误 | `assert_eq!` 失败 | 启动中止 | 2 | 显式偏移检查后才注册 fixed device region |
-| F-03 | 某从核未递增 `SCHED_READY_CPUS` | `boot_ap` 失败、固件未唤醒 AP、AP 在 memspace/scheduler 初始化期 trap | 主核卡在 AP bring-up | late init 无法继续 | 2 | `start_secondary_cpus()` 返回 `boot_ap` 错误；启动期 hang 依赖平台日志/调试 |
+| F-01 | The global allocator has no usable FREE region | Firmware memory map is wrong or the boot layer fails to report it | Allocator initialization is incomplete | Early allocation fails or panics; the system cannot boot | 1 | Fail fast during startup; rely on boot/mem subsystem validation |
+| F-02 | The page offsets of the boot console MMIO VA/PA are inconsistent | `BootInfo` is filled in incorrectly | `assert_eq!` fails | Boot is aborted | 2 | Register the fixed device region only after an explicit offset check |
+| F-03 | A secondary CPU does not increment `SCHED_READY_CPUS` | `boot_ap` fails, firmware does not wake the AP, or the AP traps during memspace/scheduler initialization | The primary CPU is stuck in AP bring-up | late init cannot continue | 2 | `start_secondary_cpus()` returns the `boot_ap` error; a startup hang relies on platform logs/debugging |
 | F-04 | A CPU never publishes service completion | AP setup hangs or waits for primary driver startup | The CPU-service barrier does not complete | Driver initialization and system init cannot start | 2 | No waits on drivers or local runnable tasks during AP setup; boot logs and optional watchdog/external reset. There is no local timeout. |
-| F-05 | `register_init` 回调 panic | 子系统 init bug | `.init_array` 遍历中断 | 后续 init 不执行，panic 后关机 | 2 | 回调保持短小、无阻塞；新增回调需审计 panic 路径 |
-| F-06 | `SystemInitEntry` provider 缺失或重复 | `entry` 未提供实现或多个实现冲突 | 链接失败 | 无法生成镜像 | 2 | `kiface` exactly-one provider 构建期发现 |
-| F-07 | PID 1 断言失败 | Linux-visible task 在 init 前抢先消耗 root PID | `assert_eq!` panic | 启动中止 | 2 | boot、idle、late-init 和普通内核 worker 使用 PID-less identity |
-| F-08 | region 日志摘要数组溢出 | distinct region name/flags 超过 64 | `expect("too many region log summaries")` panic | 启动日志阶段失败 | 3 | `MAX_REGION_LOG_SUMMARIES = 64`；异常平台需扩大上限或调整汇总策略 |
-| F-09 | timer handler 重复立刻触发或 deadline 倒退 | 时间源异常或 deadline 更新逻辑被改坏 | tick 过密、调度异常 | 性能下降或 hang | 2 | deadline 取当前记录与 `now + interval` 的较大值，再写入下一 tick |
-| F-10 | NMI 机制探测或每 CPU 使能失败 | 平台缺 FEAT_NMI / GIC 版本过低 / 初始化顺序错误 | 本 CPU 无 NMI 或 hardlockup 被禁用 | 系统失去硬锁检测（软锁仍在） | 3 | 启动日志 + `mode()` / `enable_periodic_nmi` 返回值显式降级 |
+| F-05 | A `register_init` callback panics | Bug in a subsystem init | The `.init_array` traversal is interrupted | Subsequent inits do not run; the system powers off after the panic | 2 | Keep callbacks short and non-blocking; audit the panic path of any new callback |
+| F-06 | The `SystemInitEntry` provider is missing or duplicated | `entry` provides no implementation or multiple implementations conflict | Link failure | The image cannot be generated | 2 | `kiface` exactly-one provider is detected at build time |
+| F-07 | PID 1 assertion fails | A Linux-visible task consumes the root PID before init | `assert_eq!` panic | Boot is aborted | 2 | boot, idle, late-init and ordinary kernel workers use a PID-less identity |
+| F-08 | The region log summary array overflows | More than 64 distinct region name/flags | `expect("too many region log summaries")` panic | Failure in the boot logging phase | 3 | `MAX_REGION_LOG_SUMMARIES = 64`; unusual platforms need a larger limit or an adjusted summarization strategy |
+| F-09 | The timer handler fires again immediately or the deadline goes backward | Abnormal time source or broken deadline update logic | Ticks are too dense and scheduling is abnormal | Performance degradation or hang | 2 | The deadline takes the larger of the current record and `now + interval`, then writes the next tick |
+| F-10 | NMI mechanism probing or per-CPU enabling fails | Platform lacks FEAT_NMI / GIC version too old / wrong initialization order | This CPU has no NMI or hardlockup is disabled | The system loses hard lockup detection (soft lockup detection remains) | 3 | Boot log + explicit degradation via the return values of `mode()` / `enable_periodic_nmi` |
 
-## 故障管理
+## Fault Management
 
-- **启动期错误快速失败**：关键路径使用 `assert!`、`expect` 或 `panic!`，避免在未完整初始化的内核中降级运行。
-- **panic 后关机**：panic handler 打印 panic 信息和 backtrace 后调用裸平台终点 `khal::power::platform_power_off()`（不走 SMP stop 钩子，避免 panic 持锁导致 IPI 停机死锁）；本 crate 不尝试恢复。
-- **SMP hang 无本地超时**：`SCHED_READY_CPUS` / `INITED_CPUS` 等待使用自旋，若 AP 或主核 late init 卡死，需要 watchdog feature、平台日志或外部复位介入。
-- **feature 关闭是配置选择**：如 `fs`、`net`、`watchdog`、`pmu` 未启用时跳过对应初始化，不作为运行时故障处理。
+- **Fail fast on startup errors**: critical paths use `assert!`, `expect` or `panic!` to avoid running degraded in a kernel that is not fully initialized.
+- **Power off after panic**: the panic handler prints the panic message and backtrace, then calls the bare platform endpoint `khal::power::platform_power_off()` (it does not go through the SMP stop hook, to avoid an IPI stop deadlock caused by a panic while holding a lock); this crate does not attempt recovery.
+- **No local timeout on an SMP hang**: the waits on `SCHED_READY_CPUS` / `INITED_CPUS` use spinning; if an AP or the primary CPU's late init hangs, a watchdog feature, platform logs or an external reset must intervene.
+- **Disabling a feature is a configuration choice**: when `fs`, `net`, `watchdog`, `pmu` and the like are not enabled, the corresponding initialization is skipped and is not treated as a runtime fault.
 
-## 隐私分析
+## Privacy Analysis
 
-`kruntime` 不处理用户数据、文件内容或网络 payload。它可能在启动日志中打印：
+`kruntime` does not handle user data, file contents or network payloads. It may print the following in boot logs:
 
-- `BootInfo` 地址；
-- CPU ID；
-- 物理内存区域和保留区来源；
-- runtime device/iomap 的 PA/VA 范围；
-- init 完成后的 task owner key。
+- `BootInfo` addresses;
+- CPU IDs;
+- Physical memory regions and the sources of reserved regions;
+- PA/VA ranges of runtime device/iomap;
+- The task owner key after init completes.
 
-这些信息对内核调试有价值，但在面向非可信操作者的产品配置中应按系统日志策略限制可见性。
+This information is valuable for kernel debugging, but in product configurations facing untrusted operators its visibility should be restricted according to the system log policy.
 
-## 已知限制
+## Known Limitations
 
-1. **`.init_array` 无单条隔离**：一个回调 panic 会中断后续回调；没有 per-callback recovery。
-2. **SMP 等待无超时**：AP 启动或 init 屏障失败会导致自旋等待。
-3. **系统 init 仅由主核 late-init 线程触发**：从核初始化完成后只进入 idle，不执行 `SystemInitEntry`。
-4. **PID 1 语义依赖 `SystemInitEntry` 合约**：`enter()` 必须创建、发布并激活 root PID 1 init。
-5. **启动日志摘要是启发式**：只有名称以 `uefi ` 开头且数量达到阈值的区域会汇总，可能隐藏单个区域的细节。
+1. **`.init_array` has no per-entry isolation**: a panic in one callback interrupts the subsequent callbacks; there is no per-callback recovery.
+2. **SMP waits have no timeout**: a failure in AP startup or the init barrier causes a spin wait.
+3. **System init is triggered only by the primary CPU's late-init thread**: after secondary CPU initialization completes, they only enter idle and do not execute `SystemInitEntry`.
+4. **PID 1 semantics depend on the `SystemInitEntry` contract**: `enter()` must create, publish and activate the root PID 1 init.
+5. **The boot log summary is heuristic**: only regions whose names begin with `uefi ` and whose count reaches the threshold are summarized, which may hide the details of an individual region.
 
-## 审计清单
+## Audit Checklist
 
-修改 `kruntime` 时需验证：
+When modifying `kruntime`, verify the following:
 
-- [ ] 新增或移动 `unsafe` 块时，同步说明真实不变量、调用上下文和失败影响。
-- [ ] 调整 `rust_main` 顺序时，重新检查 allocator、memspace、driver resource provider、logger、scheduler、IRQ 的依赖。
-- [ ] 调整 `late_init_main` 顺序时，重新检查 `.init_array`、SMP ready 屏障、vsock/TIPC bridge 和 `SystemInitEntry` 的顺序。
-- [ ] 修改 `INITED_CPUS` / `SCHED_READY_CPUS` 时，区分“AP 已可跨核调度（run queue 注册）”和“所有 CPU runtime ready”，并检查 Release/Acquire 配对。
-- [ ] 新增 early/late kernel thread 时，确认它是否应为 PID-less `Internal`，不能抢先消耗 PID 1。
-- [ ] 修改 `SystemInitEntry` provider 时，确认它 spawn 并激活 PID 1 后返回。
-- [ ] 新增 `register_init` 回调时，确认它不依赖用户态 init、避免长时间阻塞，并接受 panic 会中止启动。
-- [ ] 修改 timer/IPI/PMU handler 时，确认 handler 注册先于 IRQ enable，raw per-CPU 访问仍只发生在不可迁移上下文。
-- [ ] 不在 runtime 重新引入 DMA 页表适配层；相关校验和锁由 `memspace` 的 MM API provider 负责。
-- [ ] 修改启动日志时，评估是否新增物理地址、设备映射或任务身份泄露。
+- [ ] When adding or moving an `unsafe` block, also document the real invariants, the calling context and the effect of failure.
+- [ ] When changing the order in `rust_main`, re-check the dependencies among allocator, memspace, driver resource provider, logger, scheduler and IRQ.
+- [ ] When changing the order in `late_init_main`, re-check the ordering of `.init_array`, the SMP ready barrier, the vsock/TIPC bridge and `SystemInitEntry`.
+- [ ] When modifying `INITED_CPUS` / `SCHED_READY_CPUS`, distinguish "the AP can be scheduled across cores (run queue registered)" from "all CPU runtimes are ready", and check the Release/Acquire pairing.
+- [ ] When adding an early/late kernel thread, confirm whether it should be a PID-less `Internal` thread so that it cannot consume PID 1 first.
+- [ ] When modifying the `SystemInitEntry` provider, confirm that it returns after spawning and activating PID 1.
+- [ ] When adding a `register_init` callback, confirm that it does not depend on user-space init, avoids long blocking, and accepts that a panic aborts startup.
+- [ ] When modifying the timer/IPI/PMU handlers, confirm that handler registration precedes IRQ enable.
+- [ ] Do not reintroduce a DMA page table adaptation layer in the runtime; the related checks and locks are the responsibility of the MM API provider of `memspace`.
+- [ ] When modifying boot logs, assess whether they newly leak physical addresses, device mappings or task identities.
 
 ## ARM64 counter recovery dispatch
 

@@ -1,4 +1,4 @@
-# kipi — 设计文档
+# kipi — Design Document
 
 ## Fallible generic callback ownership
 
@@ -37,7 +37,7 @@ CPU-stop storage/protocols, and does not make the generic queue NMI-safe.
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
-## 定位
+## Positioning
 
 The `reschedule` feature selects fixed scheduler notifications; `kfeat/ipi`
 selects it together with the ktask receiver. Depending on generic kipi alone, such as
@@ -50,13 +50,13 @@ providers. Only `kfeat/smp` assembles it with `karch/smp`, `khal/smp` and
 generic notification queues remain available, while karch and khal retain
 their local no-op providers. Linking generic kipi must not select SMP implicitly.
 
-固定调度通知由 `notification.rs` 提供：`notify_reschedule` 在静态 CPU 槽中发布原因，
-不经过通用闭包队列。原因与单向 ENABLED 位共用一个原子字，以 AcqRel RMW
-连接发送、启用和 drain。启用前只记请求；启用后每次发送 IPI，即使原因已经置位。
-公共处理顺序是 stop、TLB、固定通知、通用回调。`ktask` 通过静态
-`kiface_task_api::TaskRescheduleRequestIf` 实现处理端，不引入反向 crate 依赖或动态订阅。
-主/AP 在 runtime 指定阶段调用 `enable_fixed_notifications`，此入口以 IRQ guard
-保护线路开启、ENABLED 发布及 drain，不在退出时主动执行抢占检查。
+Fixed scheduler notifications are provided by `notification.rs`: `notify_reschedule` publishes the reason in a static per-CPU slot,
+without going through the generic closure queue. The reasons and the one-way ENABLED bit share a single atomic word, and an AcqRel RMW
+connects sending, enabling and draining. Before enabling, requests are only recorded; after enabling, an IPI is sent on every send, even if the reason is already set.
+The common handling order is stop, TLB, fixed notifications, generic callbacks. `ktask` implements the handler side through the static
+`kiface_task_api::TaskRescheduleRequestIf`, introducing no reverse crate dependency or dynamic subscription.
+The primary CPU and the APs call `enable_fixed_notifications` at the stage specified by the runtime; this entry point uses an IRQ guard
+to protect line enabling, ENABLED publication and the drain, and does not actively perform a preemption check on exit.
 The kiface-task-api contract is implemented by ktask and consumed by this transport.
 For outward reschedule delivery, kipi implements
 `kiface_cpu_api::CpuRescheduleNotifyIf`; it does not own a second task interface.
@@ -81,7 +81,7 @@ without these features require no fixed endpoint. The scheduler and timer
 features each require their own provider, including non-SMP configurations that
 explicitly enable them. The BH feature calls kirq directly and needs no new provider.
 
-`PendingWord` stores ENABLED, RESCHEDULE, TIMER_REPROGRAM, BOTTOM_HALF and
+`PendingWord` stores ENABLED, RESCHEDULE, TIMER_REPROGRAM, BOTTOM_HALF, RCU and
 HIGHPRI_BOTTOM_HALF bits in one
 `AtomicUsize`. Its private `NotificationFlags` bitflags type represents snapshots
 and request masks; integer conversion stays at the atomic access boundary.
@@ -127,34 +127,34 @@ This unit provides the transport only. The kworkng runtime owns action
 registration and service publication. A non-IPI configuration
 uses local kirq raising; linking kipi alone does not enable an IPI line.
 
-`kipi` 是 X-Kernel 的跨 CPU 协调模块，向上提供：
+`kipi` is the cross-CPU coordination module of X-Kernel. It provides the following upward:
 
-- 通用 IPI 回调投递与广播；
-- I-cache 跨核失效的实现绑定；
-- TLB shootdown 的跨核通知与确认协议；
-- 进入平台电源终点前的系统级 CPU 停机协议（`khal::power::SmpStopIf`
-  的 provider，`stop_other_cpus`）。
+- generic IPI callback delivery and broadcast;
+- the implementation binding for cross-CPU I-cache invalidation;
+- the cross-CPU notification and acknowledgment protocol for TLB shootdown;
+- the system-level CPU stop protocol before reaching the platform power endpoint (the provider of `khal::power::SmpStopIf`,
+  `stop_other_cpus`).
 
-它位于 `kirq::notify_cpu()` 之上、调度器和页表实现之旁，为内核中
-“需要让别的 CPU 立刻执行一小段本地操作”的场景提供统一入口。
+It sits on top of `kirq::notify_cpu()` and alongside the scheduler and page-table implementations, providing a unified entry point for
+scenarios in the kernel where "another CPU must immediately execute a small piece of local work".
 
-## 背景
+## Background
 
-内核中有两类典型的跨核需求：
+The kernel has two typical cross-CPU needs:
 
-1. 让指定 CPU 或一组 CPU 在中断上下文中执行一个短回调，例如 I-cache flush。
-2. 在页表修改后通知其它 CPU 丢弃本地 TLB 项，并等待确认，避免旧映射继续生效。
+1. Have a specified CPU or a set of CPUs execute a short callback in interrupt context, for example an I-cache flush.
+2. After a page-table modification, notify the other CPUs to discard their local TLB entries and wait for acknowledgment, so that stale mappings do not stay in effect.
 
-这两类需求都依赖 IPI，但约束不同：
+Both needs rely on IPIs, but their constraints differ:
 
-- 通用回调更关注投递、排队和广播语义；
-- TLB shootdown 更关注发布顺序、确认协议、并发安全和等待行为。
+- Generic callbacks care more about delivery, queueing and broadcast semantics;
+- TLB shootdown cares more about publication ordering, the acknowledgment protocol, concurrency safety and waiting behavior.
 
-`kipi` 将它们放在同一 crate 中，复用同一 IPI 向量，但把协议状态分层管理。
+`kipi` puts them in the same crate and reuses the same IPI vector, but manages the protocol state in separate layers.
 
-## 范围
+## Scope
 
-涉及的源文件：
+Source files involved:
 
 ```text
 arch/kipi/
@@ -170,320 +170,317 @@ arch/kipi/
 └── Cargo.toml
 ```
 
-其中：
+Where:
 
-- `lib.rs`：对外 API、每 CPU 事件队列、IPI handler；
-- `event.rs`：单播/广播回调模型；
-- `queue.rs`：每 CPU FIFO 队列；
+- `lib.rs`: public API, per-CPU event queues, IPI handler;
+- `event.rs`: unicast/broadcast callback model;
+- `queue.rs`: per-CPU FIFO queue;
 - `sync_call.rs`: task-bound completed execution on an explicitly selected boot-static CPU;
 - `notification.rs`: allocation-free fixed reasons and their boot handshake;
-- `icache.rs`：I-cache 跨核 flush 的 crate interface 实现；
-- `stop.rs`：系统级 CPU 停机协议（电源终点前停靠其它 CPU）；
-- `tlb.rs`：TLB shootdown 发布、IPI 发送、确认和等待协议。
+- `icache.rs`: the crate interface implementation of cross-CPU I-cache flush;
+- `stop.rs`: system-level CPU stop protocol (parking the other CPUs before the power endpoint);
+- `tlb.rs`: TLB shootdown publication, IPI sending, acknowledgment and wait protocol.
 
-## 架构
+## Architecture
 
-`kipi` 把“通用事件投递”和“TLB shootdown 协议”叠加在同一个 IPI handler 中：
+`kipi` layers "generic event delivery" and the "TLB shootdown protocol" in the same IPI handler:
 
 ```text
-发起 CPU
+Initiating CPU
    │
    ├─ run_on_cpu / run_on_each_cpu
    │      │
-   │      ├─ 向目标 CPU 的 IPI_EVENT_QUEUE 入队回调
+   │      ├─ enqueue the callback into the target CPU's IPI_EVENT_QUEUE
    │      └─ kirq::notify_cpu(kbuild_config::IPI_IRQ, ...)
    │
    └─ tlb::flush_remote
           │
-          ├─ 发布每发起 CPU request slot
-          ├─ bump 每目标 CPU pending epoch
+          ├─ publish the per-initiating-CPU request slot
+          ├─ bump the per-target-CPU pending epoch
           └─ kirq::notify_cpu(kbuild_config::IPI_IRQ, ...)
                      │
                      v
-目标 CPU IPI handler
+Target CPU IPI handler
    │
    ├─ tlb::handle_shootdown()
-   │      ├─ fast path: 检查 pending epoch
-   │      └─ slow path: 扫描 request slots，flush 并 ack
+   │      ├─ fast path: check the pending epoch
+   │      └─ slow path: scan request slots, flush and ack
    │
-   └─ 处理 IPI_EVENT_QUEUE 中的普通回调
+   └─ process ordinary callbacks in IPI_EVENT_QUEUE
 ```
 
-这里有两个核心状态面：
+There are two core state planes here:
 
-- **每 CPU 事件队列**：存放通用回调，FIFO 执行；
-- **每发起 CPU request slot**：存放 TLB shootdown 请求；
-- **每目标 CPU pending epoch**：为 TLB handler 提供 O(1) fast path gate。
+- **Per-CPU event queue**: holds generic callbacks, executed in FIFO order;
+- **Per-initiating-CPU request slot**: holds the TLB shootdown request;
+- **Per-target-CPU pending epoch**: provides the TLB handler with an O(1) fast-path gate.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-### 通用 API
+### Generic API
 
-- `init()` 必须在对应 CPU 上初始化本地 IPI 队列后才能接收远程投递。
-- `run_on_cpu()` / `run_on_each_cpu()` / `run_on_each_cpu_via_ipi()` 只能在
-  `kirq::notify_cpu()` 可用后使用。
-- 回调必须足够短，不应依赖长时间阻塞语义；它们最终在 IPI handler 上执行。
+- `init()` must initialize the local IPI queue on the corresponding CPU before that CPU can receive remote deliveries.
+- `run_on_cpu()` / `run_on_each_cpu()` / `run_on_each_cpu_via_ipi()` may only be used after
+  `kirq::notify_cpu()` is available.
+- Callbacks must be short and must not rely on long-blocking semantics; they ultimately execute in the IPI handler.
 
-### 执行上下文
+### Execution Context
 
-- `ipi_handler()` 运行在中断上下文，不可睡眠。
-- `run_on_each_cpu()` 在当前 CPU 上同步执行一次广播回调，在其它 CPU 上通过
-  IPI 上下文执行。
-- `run_on_each_cpu_via_ipi()` 则连当前 CPU 也走队列和 IPI handler 路径。
+- `ipi_handler()` runs in interrupt context and must not sleep.
+- `run_on_each_cpu()` executes the broadcast callback synchronously once on the current CPU, and on the other CPUs
+  in IPI context.
+- `run_on_each_cpu_via_ipi()` sends even the current CPU through the queue and IPI handler path.
 
-### TLB shootdown 约束
+### TLB Shootdown Constraints
 
-- TLB shootdown 依赖所有 AP 已经启动，`mark_all_cpus_started()` 之后才会真正发 IPI。
-- `flush_remote()` 在发布 request slot 的生命周期内禁用抢占，防止同一 CPU 上的
-  另一个任务复用相同 slot。
-- 用户页表 shootdown 的目标集合由调度路径维护的 mm-owned residency 提供；
-  `flush_remote()` 只消费快照，不在 flush 结束后重建或 reset residency。
+- TLB shootdown depends on all APs having started; IPIs are only actually sent after `mark_all_cpus_started()`.
+- `flush_remote()` disables preemption for the lifetime of the published request slot, preventing
+  another task on the same CPU from reusing the same slot.
+- The target set for user page-table shootdown is provided by the mm-owned residency maintained by the scheduling path;
+  `flush_remote()` only consumes a snapshot and does not rebuild or reset the residency after the flush finishes.
 
-## 状态机
+## State Machine
 
-### IPI 事件队列
+### IPI Event Queue
 
-通用回调没有复杂状态机，单个事件生命周期为：
+Generic callbacks have no complex state machine; the lifecycle of a single event is:
 
 ```text
-创建 Callback / MulticastCallback
-    -> 入目标 CPU 队列
-    -> 发送 IPI
-    -> 目标 CPU pop_one()
-    -> 执行回调
-    -> 销毁
+create Callback / MulticastCallback
+    -> enqueue into the target CPU queue
+    -> send IPI
+    -> target CPU pop_one()
+    -> run the callback
+    -> destroy
 ```
 
 ### TLB shootdown request slot
 
-每个发起 CPU 持有一个 request slot，生命周期为：
+Each initiating CPU owns one request slot, with the following lifecycle:
 
 ```text
 inactive
    -> try_activate()
    -> clear_targets / mark_target
    -> publish(request_seq, vaddr/flush_all)
-   -> bump 目标 CPU pending epoch
+   -> bump the target CPU pending epoch
    -> send IPI
-   -> wait for per-target ack（等待中轮询 `handle_shootdown`，IRQ 关闭时也能 ack 对方）
+   -> wait for per-target ack (poll `handle_shootdown` while waiting, so it can ack the peer even with IRQs disabled)
    -> deactivate()
 ```
 
-如果同一 CPU 在 slot active 期间再次进入 `flush_remote()`，不会立刻重入复用，
-而是设置 `needs_retry_full_flush`，由外层在本次请求结束后补发一次全局 retry。
+If the same CPU enters `flush_remote()` again while the slot is active, the slot is not immediately reentered or reused;
+instead `needs_retry_full_flush` is set, and the outer caller issues one global retry after the current request finishes.
 
-## 算法流程
+## Algorithm Flow
 
 ### `run_on_cpu`
 
-1. 校验目标 `LogicalCpuId` 是否在配置范围内且存在于逻辑 CPU 映射中。
-2. 若目标是当前 CPU，直接本地执行回调。
-3. 若目标是远程 CPU，检查其 IPI 队列是否已初始化。
-4. 将回调压入目标 CPU 的 `IPI_EVENT_QUEUE`。
-5. 调用 `kirq::notify_cpu(kbuild_config::IPI_IRQ, Specific(...))` 发 IPI。
+1. Validate that the target `LogicalCpuId` is within the configured range and present in the logical CPU map.
+2. If the target is the current CPU, execute the callback locally and directly.
+3. If the target is a remote CPU, check whether its IPI queue has been initialized.
+4. Push the callback into the target CPU's `IPI_EVENT_QUEUE`.
+5. Call `kirq::notify_cpu(kbuild_config::IPI_IRQ, Specific(...))` to send the IPI.
 
 ### `run_on_each_cpu`
 
-1. 校验所有远程 CPU 队列已准备好。
-2. 当前 CPU 同步执行一次回调。
-3. 其余 CPU 入队单播化后的回调。
-4. 通过 `AllButSelf` 发广播 IPI。
+1. Validate that the queues of all remote CPUs are ready.
+2. The current CPU executes the callback synchronously once.
+3. Enqueue the unicast-ized callbacks for the remaining CPUs.
+4. Send the broadcast IPI via `AllButSelf`.
 
 ### `ipi_handler`
 
-1. 先调用 `tlb::handle_shootdown()`。
-2. 再循环消费本 CPU 队列中的普通 IPI 回调。
+1. With the `smp` feature, call `stop::handle_stop_request()` and then `tlb::handle_shootdown()`; then call `notification::handle_pending()` for fixed notifications.
+2. Then loop to consume the ordinary IPI callbacks in this CPU's queue.
 
-这个顺序是刻意设计的：TLB shootdown 属于页表一致性协议，优先级高于普通跨核回调。
+This order is deliberate: TLB shootdown is a page-table consistency protocol and has higher priority than ordinary cross-CPU callbacks.
 
 ### `tlb::flush_remote`
 
-1. 获取当前 CPU 的 active request slot，并禁用抢占。
-2. 根据目标 `KCpuMask` 生成不含自己的目标数组。
-3. 分配新的 `request_seq`。
-4. 标记目标 CPU，发布 `(request_seq, vaddr | flush_all)`。
-5. 为每个目标 CPU bump `pending epoch`。
-6. 发送 IPI。
-7. 等待每个目标 CPU 将 `acked_seq_by_cpu[target]` 推进到该 `request_seq`。
-   等待循环里轮询 `handle_shootdown()`：页表路径常在 IRQ 关闭下走到
-   `flush_remote`，若只等 IPI handler，两核互等会谁也 ack 不了。
-8. 释放 active slot；若期间检测到同 CPU 嵌套请求，则补发 full retry flush。
+1. Obtain the current CPU's active request slot and disable preemption.
+2. Generate, from the target `KCpuMask`, a target array that excludes the current CPU.
+3. Allocate a new `request_seq`.
+4. Mark the target CPUs and publish `(request_seq, vaddr | flush_all)`.
+5. Bump the `pending epoch` for each target CPU.
+6. Send the IPI.
+7. Wait for each target CPU to advance `acked_seq_by_cpu[target]` to that `request_seq`.
+   The wait loop polls `handle_shootdown()`: the page-table path often reaches
+   `flush_remote` with IRQs disabled, and if it only waited for the IPI handler, two CPUs waiting on each other could never ack.
+8. Release the active slot; if a nested request from the same CPU was detected in the meantime, issue a full retry flush.
 
 ### `tlb::handle_shootdown`
 
-1. 读取当前 CPU 的 `pending_epoch`，与本 CPU `LAST_HANDLED_PENDING_EPOCH` 比较。
-2. 若未变化，直接返回，不扫描所有 slots。
-3. 若有变化，遍历所有发起 CPU 的 request slots。
-4. 对每个 slot：
-   - `Acquire` 读取 `published_seq`；
-   - 若该 request 目标包含当前 CPU 且尚未 ack，则执行本地 `flush_tlb(...)`；
-   - 更新对该发起 CPU 的 ack。
-5. 把本次入口时看到的 `pending_epoch` 记为已处理值。
+1. Read the current CPU's `pending_epoch` and compare it with this CPU's `LAST_HANDLED_PENDING_EPOCH`.
+2. If unchanged, return directly without scanning all slots.
+3. If changed, iterate over the request slots of all initiating CPUs.
+4. For each slot:
+   - read `published_seq` with `Acquire`;
+   - if the request's targets include the current CPU and it has not yet acked, perform the local `flush_tlb(...)`;
+   - update the ack for that initiating CPU.
+5. Record the `pending_epoch` seen at entry as the handled value.
 
 ### `stop_other_cpus`
 
-本模块以 `#[kiface::provide]` 实现 `khal::power::SmpStopIf`（UP 构建不
-链接本模块，由 `khal` 内的 no-op 兜底）；本地 IPI 事件队列就绪之前
-（即 `kipi::init()` 之前）调用退化为 no-op，终点直接落到裸平台终点。
+This module implements `khal::power::SmpStopIf` with `#[kiface::provide]` (UP builds do not
+link this module; `khal` provides a no-op fallback); before the local IPI event queue is ready
+(that is, before `kipi::init()`), the call degrades to a no-op and the endpoint falls straight through to the bare platform endpoint.
 
-系统级 CPU 停机采用**标志位协议**而非回调队列，保证不分配内存，且即使
-目标 CPU 的 IPI 事件队列已满也能送达：
+System-level CPU stop uses a **flag protocol** rather than a callback queue, which guarantees no memory allocation and delivery even
+when the target CPU's IPI event queue is full:
 
-1. orchestrator 用一次 `compare_exchange(NO_STOP_REQUESTED, 自身逻辑
-   CPU id)` 在 `STOP_STATE` 上**同时完成选主与发布**：该原子值既是停机
-   请求标志又是 orchestrator id，不存在"请求已可见但 id 未知"的中间状
-   态；并发调用方 CAS 失败，置 ack 并自行 park。发布后向其它所有 CPU
-   发一个裸 IPI。
-2. 任何 CPU 进入 `ipi_handler` 时，若看到停机请求且自己不是 orchestrator，
-   先完成所有仍会触碰共享状态的收尾（日志、屏蔽本地中断、停靠本地
-   NMI/pseudo-NMI 源，`khal::quiesce_nmi`），**然后才**置位本 CPU 的
-   `STOP_ACKED`——ack 是停靠 CPU 对共享状态的最后一次写，之后立即进入
-   屏蔽本地异常的 `wfi/hlt` 永久停靠。orchestrator 观察到 ack 即可确定
-   该 CPU 不会再执行任何共享状态路径。
-3. orchestrator 以 1s 有界超时轮询等待集中各 CPU 的 ack。等待集在发布时
-   一次性快照：只包含 IPI 队列已初始化的 present CPU（见设计决策）。
-   超时仍未 ack 的 CPU 不阻塞终点，逐个告警后继续，语义对齐 Linux
-   `smp_send_stop()`。
+1. The orchestrator uses a single `compare_exchange(NO_STOP_REQUESTED, its own logical
+   CPU id)` on `STOP_STATE` to **elect the leader and publish at the same time**: this atomic value is both the stop
+   request flag and the orchestrator id, so there is no intermediate state where "the request is visible but the id is unknown"; a concurrent
+   caller fails the CAS, sets its ack and parks itself. After publishing, it sends a bare IPI to all other CPUs.
+2. When any CPU enters `ipi_handler` and sees a stop request while not being the orchestrator,
+   it first completes all cleanup that would still touch shared state (logging, masking local interrupts, quiescing the local
+   NMI/pseudo-NMI sources via `khal::quiesce_nmi`), **and only then** sets its own `STOP_ACKED`
+   -- the ack is the parking CPU's last write to shared state, after which it immediately enters a permanent
+   `wfi/hlt` park with local exceptions masked. Once the orchestrator observes the ack, it can be sure
+   that the CPU will never execute any shared-state path again.
+3. The orchestrator polls for the acks of the CPUs in the wait set with a bounded 1s timeout. The wait set is snapshotted
+   once at publish time: it contains only present CPUs whose IPI queue is initialized (see Design Decisions).
+   CPUs that still have not acked after the timeout do not block the endpoint; a warning is logged for each and the procedure continues, matching the semantics of Linux
+   `smp_send_stop()`.
 
-orchestrator 全程持有 `NoPreempt` 守卫钉在本 CPU 上（见设计决策），否则
-认领、广播与等待所依据的 CPU id 会在迁移后失效。
+The orchestrator holds a `NoPreempt` guard throughout, pinning it to the current CPU (see Design Decisions); otherwise the CPU id
+on which claiming, broadcasting and waiting rely would become invalid after a migration.
 
-停靠前必须停靠本地 NMI 源：CPU 级异常屏蔽挡不住真正的 NMI（如 x86 NMI
-看门狗）；若不停靠，停靠中的 CPU 会被看门狗 NMI 反复唤醒，并把“故意停机”
-误判为 hard lockup，panic 后走平台断电，从而破坏 `khal::power::halt()`
-的语义。
+Local NMI sources must be quiesced before parking: CPU-level exception masking cannot block a real NMI (such as the x86 NMI
+watchdog); if they are not quiesced, a parked CPU would be repeatedly woken by the watchdog NMI, and the "intentional stop"
+would be misjudged as a hard lockup, causing a panic followed by platform power-off, which breaks the semantics of `khal::power::halt()`.
 
-## 并发模型
+## Concurrency Model
 
-### 通用 IPI 队列
+### Generic IPI queue
 
-- 队列是 **每 CPU 独占消费、远程生产** 模型。
-- 远程 CPU 在 `IPI_QUEUE_READY` 的 Acquire 读取后取得共享的
-  `LazyInit<SpinNoIrq<IpiEventQueue>>` 引用，再通过内层锁入队；不会为了加锁
-  先构造指向远端槽位的 `&mut`。
-- 当前 CPU 只在本地 IPI handler 中 `pop_one()`。
-- 队列锁使用 `SpinNoIrq`，因为会被 IPI handler 触达。
-- 目标 CPU 完成本地队列初始化后以 Release 写入 `IPI_QUEUE_READY`；发送端的
-  Acquire 既拒绝未就绪目标，也发布 `LazyInit` 中的队列对象。
+- The queue follows a **per-CPU exclusive consumer, remote producer** model.
+- After an Acquire read of `IPI_QUEUE_READY`, a remote CPU obtains a shared reference to
+  `LazyInit<SpinNoIrq<IpiEventQueue>>` and enqueues through the inner lock; it does not construct a `&mut` pointing at the remote slot
+  just to take the lock.
+- The current CPU calls `pop_one()` only in the local IPI handler.
+- The queue lock is `SpinNoIrq`, because it is reached from the IPI handler.
+- After the target CPU finishes initializing its local queue, it writes `IPI_QUEUE_READY` with Release; the sender's
+  Acquire both rejects targets that are not ready and publishes the queue object inside the `LazyInit`.
 
 ### TLB request slot
 
-- 每个发起 CPU 一个 slot，避免多个 initiator 共享同一个全局 pending 位。
-- slot 发布通过 `published_seq: Release` 完成，消费端通过
-  `PublishedShootdownRequest` 在 `Acquire` 后读取其余字段。
-- `ActiveShootdownSlot` 把“抢占关闭 + slot active”绑定成一个守卫类型，
-  防止调用者忘记成对维护这两个约束。
+- There is one slot per initiating CPU, which avoids multiple initiators sharing a single global pending bit.
+- Slot publication is completed through `published_seq: Release`, and the consumer reads the remaining fields through
+  `PublishedShootdownRequest` after an `Acquire`.
+- `ActiveShootdownSlot` binds "preemption disabled + slot active" into a single guard type,
+  preventing callers from forgetting to maintain these two constraints as a pair.
 
 ### Fast path gate
 
-- `PENDING_EPOCH_BY_CPU[target]` 是 **每目标 CPU 的单调计数**。
-- 每次对某个目标 CPU 发布 shootdown 请求，先 publish request，再 bump epoch，
-  再发 IPI。
-- 目标 CPU 的 `handle_shootdown()` 先比较 epoch，避免普通 IPI 也 O(CPU_NUM)
-  扫描全部 request slots。
+- `PENDING_EPOCH_BY_CPU[target]` is a **per-target-CPU monotonic counter**.
+- Each time a shootdown request is published to a target CPU, the request is published first, then the epoch is bumped,
+  and then the IPI is sent.
+- The target CPU's `handle_shootdown()` compares the epoch first, so that an ordinary IPI does not also have to do an O(CPU_NUM)
+  scan of all request slots.
 
-这里用单调计数而不是布尔 `pending`，是为了避免多个 initiator 并发发布时的
-丢事件窗口。
+A monotonic counter is used here instead of a boolean `pending` in order to avoid the lost-event window
+when multiple initiators publish concurrently.
 
-## 设计决策
+## Design Decisions
 
-### 为什么 IPI 队列和 TLB 协议共用一个 IPI 向量
+### Why the IPI queue and the TLB protocol share one IPI vector
 
-优点：
+Advantages:
 
-- 避免为每类跨核控制流单独申请中断向量；
-- 统一 `kirq::notify_cpu(kbuild_config::IPI_IRQ, ...)` 用法；
-- 让 IPI handler 成为单一跨核控制入口。
+- Avoids allocating a separate interrupt vector for each kind of cross-core control flow;
+- Unifies the usage of `kirq::notify_cpu(kbuild_config::IPI_IRQ, ...)`;
+- Makes the IPI handler the single cross-core control entry point.
 
-代价：
+Costs:
 
-- handler 必须区分 TLB 协议和普通回调；
-- TLB 路径需要 fast path gate，避免普通 IPI 也走完整 slot 扫描。
+- The handler must distinguish the TLB protocol from ordinary callbacks;
+- The TLB path needs a fast path gate, so that an ordinary IPI does not also go through a full slot scan.
 
-### 为什么 TLB shootdown 采用“每发起 CPU 一个 slot”
+### Why TLB shootdown uses "one slot per initiating CPU"
 
-旧的单全局 slot 设计会让不同 initiator 的并发请求互相覆盖或互锁。  
-按 initiator 分 slot 后：
+The old single global slot design let concurrent requests from different initiators overwrite each other or deadlock on each other.
+After splitting slots per initiator:
 
-- 请求身份变成 `(initiator_cpu, request_seq)`；
-- 远程 CPU 对每个 initiator 分别 ack；
-- 不同 initiator 可以并发发布，而不会共享同一个 completion 状态。
+- Request identity becomes `(initiator_cpu, request_seq)`;
+- Each remote CPU acks each initiator separately;
+- Different initiators can publish concurrently without sharing the same completion state.
 
-### 为什么把发布协议封成 `PublishedShootdownRequest`
+### Why the publication protocol is wrapped in `PublishedShootdownRequest`
 
-`is_flush_all` 和 `published_vaddr` 的读取依赖 `published_seq` 的
-Release/Acquire 链。直接在调用点散落 `Relaxed` load 容易让维护者误改顺序。
+Reading `is_flush_all` and `published_vaddr` depends on the Release/Acquire chain of `published_seq`. Scattering
+`Relaxed` loads across call sites makes it easy for maintainers to change the ordering by mistake.
 
-把它收进一个“已发布请求视图”类型后，协议边界变成显式的：
+After folding them into a "published request view" type, the protocol boundary becomes explicit:
 
-- 先通过 `load_published_request()` 建立 Acquire；
-- 再通过视图读取其余字段。
+- First establish Acquire through `load_published_request()`;
+- Then read the remaining fields through the view.
 
-### 为什么 `notify_cpu()` 的发布顺序契约下沉到中断控制器实现
+### Why the publish-ordering contract of `notify_cpu()` is pushed down into the interrupt controller implementation
 
-“先发布普通内存中的请求状态，再发送 IPI”是 IPI 原语的契约，不只是
-TLB shootdown 的私有需求。  
-因此 `IntrManagerIf::notify_cpu` 明确要求各架构后端保证
-publish-before-notify 语义，而不是在单个调用点散落 fence。
+"Publish the request state in ordinary memory first, then send the IPI" is a contract of the IPI primitive, not merely a private requirement of
+TLB shootdown.
+Therefore `IntrManagerIf::notify_cpu` explicitly requires each architecture backend to guarantee
+publish-before-notify semantics, rather than scattering fences at individual call sites.
 
-### 为什么停机协议用标志位而不是 IPI 回调
+### Why the stop protocol uses flags instead of IPI callbacks
 
-- 停机必须在“目标 CPU 的 IPI 队列可能已满”的极端场景下仍然可达；
-- 停机路径不允许分配内存；
-- 停机语义是全局单发的（一次只有一个 orchestrator），用一个状态字加
-  per-CPU ack 数组即可，
-  无需复用回调队列的排队/确认机制。
+- Stop must remain reachable even in the extreme case where "the target CPU's IPI queue may be full";
+- The stop path is not allowed to allocate memory;
+- Stop semantics are global and single-shot (only one orchestrator at a time), so one state word plus a
+  per-CPU ack array is enough,
+  with no need to reuse the queueing/acknowledgment mechanism of the callback queue.
 
-### 为什么停机状态用单个原子值表达
+### Why the stop state is expressed as a single atomic value
 
-请求标志和 orchestrator 身份本质上是同一个状态（"是否有人发起停机、
-是谁"）。拆成 `STOP_REQUESTED` + `STOP_ORCHESTRATOR` 两个变量时，无论
-先发布哪个都留有窗口：先发布请求再写 id，窗口内一个无关 IPI（如 TLB
-shootdown）到达 orchestrator 自身，`handle_stop_request` 会看到"已请求
-停机但 id 仍是 `NO_ORCHESTRATOR`"，orchestrator 无法识别自己，随即 ack
-并 park——唯一应走到平台终点的 CPU 自停，系统既不 halt 也不断电；而仅
-交换两条语句的顺序时，并发后到者的 store 又会覆盖先到者的 id。因此合并
-为单个 `AtomicUsize`（`usize::MAX` 表示无请求，CPU id 表示请求已由该
-CPU 发布），一次 `compare_exchange` 同时完成选主与发布，观察者 Acquire
-读到请求时必然同步看到正确的 orchestrator id，协议中不再存在需要额外
-排序保证的中间状态。
+The request flag and the orchestrator identity are essentially the same state ("whether anyone has initiated a stop, and
+who it is"). When split into two variables, `STOP_REQUESTED` + `STOP_ORCHESTRATOR`, a window remains whichever is
+published first: if the request is published before the id is written, an unrelated IPI (such as a TLB
+shootdown) arriving at the orchestrator itself within the window makes `handle_stop_request` see "stop already requested
+but the id is still `NO_ORCHESTRATOR`"; the orchestrator cannot recognize itself, then acks
+and parks -- the one CPU that should reach the platform endpoint stops itself, and the system neither halts nor powers off; and if
+the order of the two statements is merely swapped, the store of a concurrent later arrival overwrites the id of the earlier one. Therefore they are merged
+into a single `AtomicUsize` (`usize::MAX` means no request, and a CPU id means the request has been published by that
+CPU), and a single `compare_exchange` completes both leader election and publication; when an observer reads the request with Acquire, it necessarily
+sees the correct orchestrator id as well, and the protocol no longer has any intermediate state that needs extra
+ordering guarantees.
 
-### 为什么停靠前要停靠本地 NMI 源
+### Why local NMI sources must be quiesced before parking
 
-`karch::stop_cpu()` 现在是 `-> !` 的终结停靠：AArch64 侧以 `msr daifset,
-#0xf` 全掩 DAIF 四类异常（debug、SError、IRQ 含 pseudo-NMI、FIQ），其它
-架构屏蔽本地可屏蔽中断并循环进入等待指令。但 CPU 级屏蔽挡不住真正的
-NMI（x86 的 NMI 不受 IF 控制）。若不先把 NMI 源停掉：
+`karch::stop_cpu()` is now a terminal park with signature `-> !`: on AArch64 it uses `msr daifset,
+#0xf` to mask all four DAIF classes of exceptions (debug, SError, IRQ including pseudo-NMI, FIQ), while other
+architectures mask local maskable interrupts and loop on the wait instruction. But CPU-level masking cannot block a real
+NMI (the x86 NMI is not controlled by IF). If the NMI sources are not stopped first:
 
-- 带 NMI 看门狗的平台（如 x86 NMI watchdog）上，停靠中的 CPU 会被周期性
-  NMI 反复唤醒，无法真正停下；
-- NMI 驱动的 hard-lockup 看门狗会把“故意停机”误判为 lockup，panic 后走
-  平台断电，使 `halt` 与 `power_off` 的区分失效。
+- On platforms with an NMI watchdog (such as the x86 NMI watchdog), a parked CPU would be periodically
+  woken by NMIs and could never truly stop;
+- An NMI-driven hard-lockup watchdog would misjudge the "intentional stop" as a lockup, panic and go through
+  platform power-off, making the distinction between `halt` and `power_off` ineffective.
 
-因此在 park 前调用 `khal::quiesce_nmi()`；它在无 NMI 设施的平台是 no-op，
-不引入新的架构耦合。在 pseudo-NMI 已被 DAIF 全掩挡住的 AArch64 上，停靠
-PMU 源还顺带让看门狗计数器彻底安静，属于纵深防御。orchestrator（终端
-CPU）自身的本地 NMI 则由 `khal::power::halt()` / `power_off()` 在调用裸
-平台终点前停靠，因此无论是否注册了 SMP stop 钩子（如 UP 构建），终端 CPU
-都不会被看门狗 NMI 唤醒。
+Therefore `khal::quiesce_nmi()` is called before park; on platforms without NMI facilities it is a no-op,
+introducing no new architectural coupling. On AArch64, where pseudo-NMI is already blocked by the full DAIF mask, quiescing the
+PMU source additionally keeps the watchdog counter completely quiet, as defense in depth. The local NMI of the orchestrator (the terminal
+CPU) itself is quiesced by `khal::power::halt()` / `power_off()` before calling the bare
+platform endpoint, so whether or not an SMP stop hook is registered (such as in UP builds), the terminal CPU
+will not be woken by the watchdog NMI.
 
-### 为什么 orchestrator 全程关闭抢占
+### Why the orchestrator disables preemption throughout
 
-认领的 orchestrator id、`AllButSelf` 广播和等待循环都以发起时的
-`current_cpu_index` 为锚。调用来自普通系统调用上下文（如 `sys_reboot`）时
-中断开启、任务可抢占：若协议中途被迁移，被离开的 CPU 会被所有 CPU 当作
-orchestrator 而永不 park，而真正的 orchestrator 却在等它 ack，直到超时。
-`NoPreempt` 守卫把发起 CPU 钉住，代价只是一次每 CPU 计数。
+The claimed orchestrator id, the `AllButSelf` broadcast and the wait loop are all anchored to the `current_cpu_index`
+at the time of initiation. When the call comes from an ordinary syscall context (such as `sys_reboot`),
+interrupts are enabled and the task is preemptible: if the protocol is migrated midway, the CPU that was left would be treated by all CPUs as the
+orchestrator and would never park, while the real orchestrator waits for its ack until the timeout.
+The `NoPreempt` guard pins the initiating CPU, at the cost of only a per-CPU counter.
 
-### 为什么等待集只含 IPI 队列已就绪的 CPU
+### Why the wait set contains only CPUs whose IPI queue is ready
 
-等待集在发布停机请求时一次性快照，只包含 IPI 队列已初始化的 present CPU。
-尚未跑到 `kipi::init()` 的 present CPU（AP 带起较慢或启动失败）收不了
-共享 IPI，也永远无法 ack；把它留在等待集里意味着每次停机都白等满 1 秒
-超时并打出误导性告警。广播仍然发往除自身外的全部 CPU，晚就绪的 CPU 在
-后续任意 IPI 进入 `handle_stop_request` 时照样 park，因此缩小等待集只影响
-等待，不影响停机覆盖面，与 Linux `smp_send_stop()` 的 best-effort 语义
-一致。
+The wait set is snapshotted once when the stop request is published, and contains only present CPUs whose IPI queue is initialized.
+A present CPU that has not yet reached `kipi::init()` (an AP that is slow to come up or failed to boot) cannot receive the
+shared IPI and can never ack; leaving it in the wait set would mean every stop waits out the full 1 second
+timeout and prints a misleading warning. The broadcast is still sent to all CPUs except self, and a late-ready CPU parks just the same when any
+later IPI enters `handle_stop_request`, so shrinking the wait set only affects
+waiting, not stop coverage, consistent with the best-effort semantics of Linux `smp_send_stop()`.
 
 ## Completed CPU Calls
 
@@ -510,14 +507,14 @@ is not an online lease. Hotplug requires a separate CPU-lifecycle capability
 before this API can be used for dynamic participant sets. Permanent timer/IPI
 services must not be dismantled using their own callback transport.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-- 通用回调的生命周期由 `Callback` / `MulticastCallback` 自然管理；
+- The lifetime of generic callbacks is managed naturally by `Callback` / `MulticastCallback`;
 - Broadcast senders clone the Arc and wrap it in a single-use Callback without allocation;
-- `IpiEventQueue` 中的事件在 `pop_one()` 后被消费；
-- `ActiveShootdownSlot` 通过 `Drop` 自动清除 active 状态，防止异常路径遗留 slot 占用；
-- `kipi` 本身不拥有跨 CPU 长生命周期的内存池或设备资源，主要资源都是
-  per-CPU 队列和原子状态。
+- Events in `IpiEventQueue` are consumed after `pop_one()`;
+- `ActiveShootdownSlot` automatically clears the active state through `Drop`, preventing exceptional paths from leaving a slot occupied;
+- `kipi` itself owns no cross-CPU long-lived memory pools or device resources; its main resources are
+  per-CPU queues and atomic state.
 
 
 ## Shootdown completion status for managed data retirement

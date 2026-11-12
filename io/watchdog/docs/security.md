@@ -67,7 +67,7 @@ Enabling the feature requires exactly one `kiface` implementation at link time.
 
 ### `watchdog_task.rs`
 
-- `current_task_list` constructs a shared reference from the current CPU's slot.
+- `register_watchdog_task` (mutating push) and `check_watchdog_tasks` (shared slice) dereference the current CPU's `WATCHDOG_TASK_LIST` `UnsafeCell` obtained via `shared_current()`.
   The caller must be pinned to an initialized CPU; the inner
   `UnsafeCell<Vec<_>>` is reachable only through the registration/publication
   protocol.
@@ -81,7 +81,7 @@ Enabling the feature requires exactly one `kiface` implementation at link time.
 - Per-CPU state may be accessed only by its owning CPU.
 - The `&'static` per-CPU pointers referenced by NMI callbacks live as long as the kernel.
 - Atomic ordering: `Release` stores and `Acquire` loads make soft-lockup timestamp
-  initialization visible; rendezvous state transitions use `AcqRel`.
+  initialization visible; `mark_dump_done` and `reset` publish rendezvous phase changes with `Release` stores, and `arrived_bitmap` reads with `Acquire`.
 
 ## Thread Safety
 
@@ -102,7 +102,7 @@ Enabling the feature requires exactly one `kiface` implementation at link time.
 | ID | Threat | Impact Level | Trigger | Mitigation |
 |----|--------|--------------|---------|------------|
 | T-01 | NMI callback acquires an ordinary IRQ lock | High (same-CPU self-deadlock) | A pseudo-NMI preempts an ordinary IRQ path holding the lock | NMI paths use only atomics and spinning; enforced through code review. |
-| T-02 | NMI does not arrive at the expected interval | Medium (false hard-lockup report) | Delayed or lost NMI under TCG emulation | The hard-lockup counter must first be initialized (`current != 0`); detection is disabled at boot if NMI is unavailable. |
+| T-02 | NMI does not arrive at the expected interval | Medium (false hard-lockup report) | Delayed or lost NMI under TCG emulation | The hard-lockup heartbeat must first be initialized (`hard_timestamp_initialized`); detection is disabled at boot if NMI is unavailable. |
 | T-03 | A CPU can never enter NMI context | High (initiating CPU spins forever) | The CPU's interrupt/NMI handling has stopped | The strong rendezvous intentionally has no timeout because the system is already unusable; documented in the design. |
 | T-04 | Snapshot reentry | Medium (snapshot corruption/deadlock) | NMI interrupts an existing snapshot operation | Skip the dump if `nmi_begin()` fails; `kprint_atomic!` bypasses normal serial locks for best-effort output. |
 | T-05 | False soft-lockup reports flood the console | Low (log storm) | The Stop thread does not run while the timer IRQ still does | Limit reports to one per threshold interval. The touch runs on Stop, so a lower-priority task being starved is not itself a softlockup. |
@@ -116,7 +116,7 @@ Enabling the feature requires exactly one `kiface` implementation at link time.
 | F-01 | NMI mechanism unavailable | GICv2 or no FEAT_NMI | Hard-lockup detection disabled | Loss of hard-lockup detection; soft-lockup detection cannot cover a hard hang | 3 | Log at boot, check `mode()`, and return. |
 | F-02 | Periodic NMI arming fails | PMU unavailable or arming returns `false` | Hard-lockup detection disabled on this CPU | One CPU loses hard-lockup detection | 3 | Log an error when `enable_periodic_nmi` fails. |
 | F-03 | False soft-lockup report | Stop thread does not run while the timer IRQ still does | Soft-lockup log and snapshot | Log and dump, once per threshold interval | 3 | The touch runs on the Stop thread, so a starved lower-priority watchdog task is not a softlockup. Reports are limited to one per threshold interval. |
-| F-04 | Timer interrupts stop | Interrupt masking or hardware failure | `hrtimer_interrupts` stops advancing | NMI detects a hard lockup, then rendezvous and panic follow | 2 | This is the intended behavior of hard-lockup detection. |
+| F-04 | Timer interrupts stop | Interrupt masking or hardware failure | The `hard_timestamp` heartbeat goes stale | NMI detects a hard lockup, then rendezvous and panic follow | 2 | This is the intended behavior of hard-lockup detection. |
 | F-05 | Initiating CPU panics during rendezvous | A task check failed | System stops | Shutdown with diagnostic dump output retained | 1 | Intentional: stop the system while preserving diagnostics. |
 
 ## Failure Management

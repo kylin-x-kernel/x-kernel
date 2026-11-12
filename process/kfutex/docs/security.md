@@ -88,7 +88,7 @@ create.
 
 Errors surface as `KError` (`EFAULT` for words that stay inaccessible after write fault-in, `EAGAIN`
 (`WouldBlock`) for compare mismatches, `EINTR`/`ETIMEDOUT` via the
-interruptible wait). No panics are reachable from user input: the two
+interruptible wait). No panics are reachable from user input: the three
 `expect`s in requeue/drain loop invariants are backed by the lock-held
 length snapshot and are not user-triggerable. Timed waits interrupted by
 signals return `EINTR`. The syscall layer maps an untimed interrupted wait

@@ -1,29 +1,30 @@
-# kspin - 设计文档
+# kspin - Design Document
 
-## 定位
+## Positioning
 
-`kspin` 是 x-kernel 的内核自旋锁 crate。
-它提供带 RAII guard 的 `SpinLock<G, T>`，
-并通过 guard 类型在编译期选择进入临界区时是否关闭本地 IRQ、
-是否关闭内核抢占。
+`kspin` is the kernel spinlock crate of x-kernel.
+It provides `SpinLock<G, T>` with an RAII guard,
+and uses the guard type to select at compile time whether entering the critical section
+disables local IRQs
+and whether it disables kernel preemption.
 
-目标读者是维护调度、IRQ、驱动和底层同步路径的开发者。
+The target audience is developers who maintain the scheduling, IRQ, driver, and low-level synchronization paths.
 
-## 背景
+## Background
 
-内核运行在 `no_std` 环境，
-很多路径不能睡眠或不能依赖阻塞式 mutex。
-自旋锁适合短临界区，
-但在内核中单纯的 atomic lock 不够：
-同一 CPU 上的抢占或中断处理程序可能重入并访问同一数据，
-导致死锁或数据竞争。
+The kernel runs in a `no_std` environment,
+and many paths cannot sleep or cannot rely on a blocking mutex.
+A spinlock suits short critical sections,
+but in the kernel a plain atomic lock is not enough:
+preemption or an interrupt handler on the same CPU may re-enter and access the same data,
+causing a deadlock or a data race.
 
-`kspin` 把“锁状态”和“进入临界区前的 CPU 本地保护”拆开：
+`kspin` separates the "lock state" from the "CPU-local protection before entering the critical section":
 
-- `SpinLock` 负责跨 CPU 互斥。
-- guard 类型负责本地 IRQ / preemption 状态。
+- `SpinLock` is responsible for cross-CPU mutual exclusion.
+- The guard type is responsible for the local IRQ / preemption state.
 
-## 范围
+## Scope
 
 `NoPreempt::release_without_check` consumes one guard and restores only its
 preemption credit through `TaskPreemptionIf::enable_preempt_without_check`.
@@ -32,29 +33,32 @@ adapter uses this before its explicit scheduler checkpoint, avoiding an earlier
 ordinary guard-drop check. Normal Drop behavior is unchanged; with preemption
 support disabled, or in host builds, release remains a no-op.
 
-`static_lock!` 在开启 stats 时导出 klockstat 的注册宏；关闭 stats 时原样输出
-static item，与 ksync 的入口一致。因此调用方不需要为统计配置复制锁定义。
+When stats is enabled, `static_lock!` emits klockstat's registration macro; when stats is disabled, it emits the
+static item unchanged, consistent with the entry point in ksync. Callers therefore do not need to duplicate lock definitions for the stats configuration.
 
-涉及的源文件：
+Source files involved:
 
 ```text
 task/kspin/
 ├── src/
-│   ├── lib.rs                  # crate 文档、公开 re-export 和类型别名
-│   ├── lock.rs                 # SpinLock 与 SpinLockGuard
+│   ├── lib.rs                  # crate docs, public re-exports and type aliases
+│   ├── lock.rs                 # SpinLock and SpinLockGuard
 │   ├── guard/
 │   │   ├── mod.rs              # BaseGuard
 │   │   ├── types.rs            # NoOp/IrqSave/NoPreempt/NoPreemptIrqSave
-│   │   └── arch/mod.rs         # karch IRQ save/restore 适配
-│   └── tests.rs                # unittest 测试
-├── README.md                   # crate-level rustdoc 内容
+│   │   ├── arch/mod.rs         # karch IRQ save/restore adaptation
+│   │   └── percpu.rs           # kcpu_slot CpuPin/CpuLocalGuard impls
+│   └── rwlock.rs               # SpinRwLock and read/write guards
+├── ut-tests/
+│   └── kspin_unittest.rs       # unittest tests
+├── README.md                   # crate-level rustdoc content
 ├── Cargo.toml
 └── docs/
     ├── design.md
     └── security.md
 ```
 
-## 架构
+## Architecture
 
 ```text
 caller
@@ -84,51 +88,51 @@ caller
 └─────────────────────────────────────────────┘
 ```
 
-| 组件 | 职责 |
+| Component | Responsibility |
 |------|------|
-| `SpinLock<G, T>` | 保存被保护数据和可选 SMP atomic 状态 |
-| `SpinLockGuard` | 持锁期间提供 `Deref` / `DerefMut`，drop 时释放锁并恢复 guard 状态 |
-| `SpinRwLock<G, T>` | 保存被保护数据和 reader/writer atomic 状态 |
-| `SpinRwLockReadGuard` | 持读锁期间提供 `Deref`，drop 时释放 reader slot 并恢复 guard 状态 |
-| `SpinRwLockWriteGuard` | 持写锁期间提供 `Deref` / `DerefMut`，drop 时释放 writer slot 并恢复 guard 状态 |
-| `BaseGuard` | 抽象进入/退出本地临界区的 acquire/release 协议 |
-| `TaskPreemptionIf` | `preempt` feature 下由调度器提供 enable/disable preempt 接口 |
-| `NoOp` | 不执行本地保护，适合调用方已关闭 IRQ/抢占的上下文 |
-| `IrqSave` | 保存并关闭本地 IRQ，drop 时恢复 |
-| `NoPreempt` | 关闭内核抢占，drop 时恢复 |
-| `NoPreemptIrqSave` | 先关闭抢占再保存关闭 IRQ，释放时先恢复 IRQ 再恢复抢占 |
+| `SpinLock<G, T>` | Holds the protected data and the optional SMP atomic state |
+| `SpinLockGuard` | Provides `Deref` / `DerefMut` while the lock is held; on drop, releases the lock and restores the guard state |
+| `SpinRwLock<G, T>` | Holds the protected data and the reader/writer atomic state |
+| `SpinRwLockReadGuard` | Provides `Deref` while the read lock is held; on drop, releases the reader slot and restores the guard state |
+| `SpinRwLockWriteGuard` | Provides `Deref` / `DerefMut` while the write lock is held; on drop, releases the writer slot and restores the guard state |
+| `BaseGuard` | Abstracts the acquire/release protocol for entering/leaving the local critical section |
+| `TaskPreemptionIf` | Enable/disable preempt interface provided by the scheduler under the `preempt` feature |
+| `NoOp` | Performs no local protection; suited to contexts where the caller has already disabled IRQs/preemption |
+| `IrqSave` | Saves and disables local IRQs; restores them on drop |
+| `NoPreempt` | Disables kernel preemption; restores it on drop |
+| `NoPreemptIrqSave` | Disables preemption first, then saves and disables IRQs; on release, restores IRQs first and then preemption |
 
-## 模块边界自审
+## Module Boundary Self-Review
 
-`kspin` 的职责保持在“底层自旋锁与本地临界区 guard”：
+The responsibility of `kspin` stays at "low-level spinlock and local critical-section guard":
 
 - Preemption control uses `kiface_task_api::TaskPreemptionIf`, provided by `ktask`.
   kspin consumes this contract; it does not define it or implement scheduling.
-- 不直接操作架构寄存器，
-  IRQ save/restore 经 `karch` 统一封装。
-- 不封装睡眠等待、条件变量或 semaphore，
-  这些由 `ksync` 等更高层同步 crate 承担。
-- 仅提供不会睡眠的 spin-based reader-writer lock，
-  适用于 Linux `*_lock_irq()` 风格的短临界区。
-- 不依赖 `ktask`、`kservices`、`ktracing` 或驱动子系统，
-  依赖方向是这些上层 crate 使用 `kspin`。
+- It does not operate on architecture registers directly;
+  IRQ save/restore is uniformly wrapped by `karch`.
+- It does not wrap sleeping waits, condition variables, or semaphores;
+  these are handled by higher-level synchronization crates such as `ksync`.
+- It only provides a spin-based reader-writer lock that never sleeps,
+  suited to short critical sections in the style of Linux `*_lock_irq()`.
+- It does not depend on `ktask`, `kservices`, `ktracing`, or driver subsystems;
+  the dependency direction is that these upper-layer crates use `kspin`.
 
-公开 API 自审结果：
+Public API self-review results:
 
 - Public exports include `SpinLock`, `SpinLockGuard`, `SpinRwLock`,
   `SpinRwLockReadGuard`, `SpinRwLockWriteGuard`, `BaseGuard`, `IrqSave`, `NoOp`,
   `NoPreempt`, `NoPreemptIrqSave` and the lock aliases. `TaskPreemptionIf`
   belongs to kiface-task-api and is not reexported by kspin.
-- `guard::arch` 是私有模块，
-  IRQ save/restore helper 没有跨 crate 暴露。
-- 未接入模块树的旧重复实现 `src/base.rs` 已删除，
-  避免出现第二套 unsafe spinlock API 和重复审计面。
-- `force_unlock` 保持 `unsafe fn`，
-  只服务 `lock_api::RawMutex` 这类无法持有 RAII guard 的适配场景。
+- `guard::arch` is a private module;
+  the IRQ save/restore helpers are not exposed across crates.
+- The old duplicate implementation `src/base.rs`, which was not wired into the module tree, has been removed,
+  avoiding a second unsafe spinlock API and a duplicated audit surface.
+- `force_unlock` remains an `unsafe fn`,
+  serving only adaptation scenarios such as `lock_api::RawMutex` where an RAII guard cannot be held.
 
-## 状态机
+## State Machines
 
-### SMP lock 状态
+### SMP lock state
 
 ```text
 Unlocked(flag = false)
@@ -141,14 +145,14 @@ Locked(flag = true)
 Unlocked
 ```
 
-| 从 | 到 | 触发条件 |
+| From | To | Trigger |
 |----|----|----------|
-| Unlocked | Locked | `lock` 或 `try_lock` CAS 成功 |
-| Locked | Locked | `lock` CAS 失败后自旋等待 |
-| Locked | Unlocked | `SpinLockGuard::drop` 执行 Release store |
-| Locked | Unlocked | `unsafe force_unlock` 在调用者证明持锁时强制释放 |
+| Unlocked | Locked | `lock` or `try_lock` CAS succeeds |
+| Locked | Locked | `lock` spins and waits after a failed CAS |
+| Locked | Unlocked | `SpinLockGuard::drop` performs a Release store |
+| Locked | Unlocked | `unsafe force_unlock` forcibly releases the lock when the caller proves it holds the lock |
 
-### Spin rwlock 状态
+### Spin rwlock state
 
 ```text
 Unlocked(state = 0)
@@ -163,14 +167,14 @@ Writer
    └─ write guard drop store(0, Release) ────> Unlocked
 ```
 
-| 从 | 到 | 触发条件 |
+| From | To | Trigger |
 |----|----|----------|
-| Unlocked | Readers | `read` 或 `try_read` 在无 writer 时 CAS 成功 |
-| Readers | Readers | 新 reader 在无 writer 时 CAS 成功，或 reader drop 后仍有其他 reader |
-| Unlocked | Writer | `write` 或 `try_write` 在 state 为 0 时 CAS 成功 |
-| Writer | Unlocked | `SpinRwLockWriteGuard::drop` 执行 Release store |
+| Unlocked | Readers | `read` or `try_read` CAS succeeds when there is no writer |
+| Readers | Readers | A new reader's CAS succeeds when there is no writer, or other readers remain after a reader drops |
+| Unlocked | Writer | `write` or `try_write` CAS succeeds when state is 0 |
+| Writer | Unlocked | `SpinRwLockWriteGuard::drop` performs a Release store |
 
-### 非 SMP lock 状态
+### Non-SMP lock state
 
 ```text
 SingleCpu
@@ -182,12 +186,12 @@ GuardedByLocalGuard
 SingleCpu
 ```
 
-未启用 `smp` feature 时，
-atomic flag 被编译移除。
-互斥依赖 guard 类型提供的本地不可重入保证，
-例如关闭抢占或 IRQ。
+When the `smp` feature is not enabled,
+the atomic flag is compiled out.
+Mutual exclusion relies on the local non-reentrancy guarantee provided by the guard type,
+for example disabling preemption or IRQs.
 
-### `NoPreemptIrqSave` 状态顺序
+### `NoPreemptIrqSave` state order
 
 ```text
 Normal
@@ -205,123 +209,123 @@ PreemptDisabled
 Normal
 ```
 
-该顺序避免在 IRQ 已恢复但抢占状态尚未一致时被调度出去。
+This order avoids being scheduled out when IRQs have been restored but the preemption state is not yet consistent.
 
-## 算法流程
+## Algorithm Flow
 
 ### `lock`
 
-1. 调用 `G::acquire()`，进入本地临界区并保存 guard 状态。
-2. 启用 `smp` 时，通过 `compare_exchange_weak(false, true, Acquire, Relaxed)` 尝试抢锁。
-3. CAS 失败时，在 `is_locked()` 为真期间执行 `spin_loop()`。
-4. 成功后从 `UnsafeCell<T>` 取出指针，
-   构造 `SpinLockGuard`。
-5. 调用者通过 guard 的 `Deref` / `DerefMut` 访问数据。
+1. Call `G::acquire()` to enter the local critical section and save the guard state.
+2. When `smp` is enabled, try to take the lock with `compare_exchange_weak(false, true, Acquire, Relaxed)`.
+3. When the CAS fails, execute `spin_loop()` for as long as `is_locked()` is true.
+4. On success, take the pointer out of the `UnsafeCell<T>`
+   and construct the `SpinLockGuard`.
+5. The caller accesses the data through the guard's `Deref` / `DerefMut`.
 
 ### `try_lock`
 
-1. 先执行 `G::acquire()`。
-2. 启用 `smp` 时用强 CAS 尝试把 flag 从 false 改为 true。
-3. 成功则返回 guard。
-4. 失败则立即执行 `G::release(guard_state)`，
-   恢复本地 IRQ / preemption 状态并返回 `None`。
+1. First execute `G::acquire()`.
+2. When `smp` is enabled, use a strong CAS to try to change the flag from false to true.
+3. On success, return the guard.
+4. On failure, immediately execute `G::release(guard_state)`,
+   restore the local IRQ / preemption state, and return `None`.
 
 ### `SpinLockGuard::drop`
 
-1. 启用 `smp` 时以 `Release` store 把 flag 写回 false。
-2. 调用 `G::release(guard_state)` 恢复本地状态。
+1. When `smp` is enabled, write the flag back to false with a `Release` store.
+2. Call `G::release(guard_state)` to restore the local state.
 
-释放顺序保证其他 CPU 在 Acquire CAS 成功后能看到临界区内的写入。
+The release order guarantees that another CPU, after its Acquire CAS succeeds, can see the writes made inside the critical section.
 
 ### `get_mut`
 
-`get_mut(&mut self)` 依赖 Rust 独占借用，
-不需要设置 atomic flag。
-因为调用者持有 `&mut SpinLock`，
-不可能同时存在任何 guard 或其他引用。
+`get_mut(&mut self)` relies on Rust's exclusive borrow
+and does not need to set the atomic flag.
+Because the caller holds `&mut SpinLock`,
+no guard or other reference can exist at the same time.
 
 ### `force_unlock`
 
-`force_unlock` 只清除 SMP flag，
-不会恢复 guard 状态，
-也不会 drop 被泄漏的 guard。
-它仅用于 FFI 或测试等 RAII 无法表达的边界，
-调用者必须证明当前执行路径确实持有该锁。
+`force_unlock` only clears the SMP flag;
+it does not restore the guard state,
+nor does it drop a leaked guard.
+It is used only at boundaries that RAII cannot express, such as FFI or tests,
+and the caller must prove that the current execution path really holds the lock.
 
-## 并发模型
+## Concurrency Model
 
-锁策略：
+Locking strategy:
 
-- `smp` feature 开启时，跨 CPU 互斥由 `AtomicBool` 提供。
-- `SpinRwLock` 使用 `AtomicUsize` 的高位表示 writer、低位表示 reader count。
-- `smp` feature 关闭时，不存在跨 CPU 竞争，
-  互斥依赖 guard 阻止同 CPU 抢占或 IRQ 重入。
-- `SpinRaw` 不提供本地保护，
-  只能在调用方已经保证不可重入的上下文使用。
-- `SpinNoIrq` 是默认最保守选择，
-  可覆盖普通任务上下文和 IRQ 上下文访问同一数据的场景。
-- `SpinRwNoIrq` 在读写双方都关闭 IRQ/抢占，
-  适合短小、不可睡眠、读多写少的关系快照和事务边界。
-  不支持 read-to-write upgrade，调用方不得在持有 read guard 时等待 writer。
+- When the `smp` feature is enabled, cross-CPU mutual exclusion is provided by an `AtomicBool`.
+- `SpinRwLock` uses the high bit of an `AtomicUsize` to represent the writer and the low bits to represent the reader count.
+- When the `smp` feature is disabled, there is no cross-CPU contention,
+  and mutual exclusion relies on the guard preventing same-CPU preemption or IRQ reentrancy.
+- `SpinRaw` provides no local protection,
+  and may only be used in contexts where the caller has already guaranteed non-reentrancy.
+- `SpinNoIrq` is the most conservative default choice,
+  and covers the case where task context and IRQ context access the same data.
+- `SpinRwNoIrq` disables IRQs/preemption on both the reader and writer sides,
+  and is suited to short, non-sleeping, read-mostly relation snapshots and transaction boundaries.
+  It does not support read-to-write upgrade, and the caller must not wait for a writer while holding a read guard.
 
-内存序：
+Memory ordering:
 
-- 成功 acquire 使用 `Ordering::Acquire`。
-- unlock 使用 `Ordering::Release`。
-- 自旋观察 `is_locked` 使用 `Ordering::Relaxed`，
-  只作为等待提示，不承载同步。
+- A successful acquire uses `Ordering::Acquire`.
+- Unlock uses `Ordering::Release`.
+- Spin-observing `is_locked` uses `Ordering::Relaxed`,
+  serving only as a wait hint and carrying no synchronization.
 
 ## Cargo Features
 
-| Feature | 作用 |
+| Feature | Purpose |
 |---------|------|
-| `smp` | 启用 `AtomicBool` lock flag，实现跨 CPU 互斥 |
-| `preempt` | 通过 `TaskPreemptionIf` 调用调度器的抢占开关 |
+| `smp` | Enables the `AtomicBool` lock flag to implement cross-CPU mutual exclusion |
+| `preempt` | Invokes the scheduler's preemption toggle through `TaskPreemptionIf` |
 
-未启用 `preempt` 时，
-`NoPreempt` 和 `NoPreemptIrqSave` 的抢占开关部分会被编译为空操作。
+When `preempt` is not enabled,
+the preemption-toggle part of `NoPreempt` and `NoPreemptIrqSave` is compiled to a no-op.
 
-## 设计决策
+## Design Decisions
 
-### 为何 guard 是类型参数
+### Why the guard is a type parameter
 
-guard 类型参数把临界区策略编码进类型：
-同一个 `SpinLock` 实例的本地保护方式不能在运行时被误改。
-调用点从类型别名即可看出锁适合的上下文。
+The guard type parameter encodes the critical-section policy into the type:
+the local protection mode of a given `SpinLock` instance cannot be changed by mistake at runtime.
+From the type alias alone, a call site shows which contexts the lock is suited to.
 
-### 为何单核移除 atomic flag
+### Why the atomic flag is removed on a single core
 
-在无 `smp` 配置下没有其他 CPU 竞争。
-保留 atomic flag 只会增加指令和存储开销。
-互斥问题退化为本 CPU 是否会被抢占或中断重入，
-由 guard 负责。
+Without the `smp` configuration there is no contention from other CPUs.
+Keeping the atomic flag would only add instruction and storage overhead.
+The mutual exclusion problem reduces to whether this CPU can be preempted or reentered by an interrupt,
+which is the guard's responsibility.
 
 With `stats` enabled, UP builds record acquisitions only. The contention
 recording helper is compiled only with `smp`, matching its spin-wait caller;
 `stats` without `smp` remains a supported configuration.
 
-### 为何 `try_lock` 失败也要先 acquire guard
+### Why `try_lock` acquires the guard first even when it fails
 
-如果不先关闭本地抢占或 IRQ，
-在检查 lock flag 和返回之间可能被本地中断/抢占路径重入。
-先 acquire guard 可以让成功和失败路径都处于一致的本地临界区模型。
-失败时立即 release，避免泄露 IRQ/preemption 状态。
+If local preemption or IRQs are not disabled first,
+the path may be reentered by a local interrupt/preemption path between checking the lock flag and returning.
+Acquiring the guard first lets both the success and failure paths operate under a consistent local critical-section model.
+On failure it is released immediately, to avoid leaking IRQ/preemption state.
 
-### 为何存在 `force_unlock`
+### Why `force_unlock` exists
 
-少数 FFI 或测试场景无法让 RAII guard 正常 drop。
-`force_unlock` 保留逃生口，
-但以 `unsafe fn` 暴露，
-并在安全文档中要求调用者证明当前路径持锁。
+In a few FFI or test scenarios the RAII guard cannot be dropped normally.
+`force_unlock` keeps an escape hatch,
+but exposes it as an `unsafe fn`,
+and the safety documentation requires the caller to prove that the current path holds the lock.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-`SpinLock` 没有自定义 `Drop`。
-当 lock 被销毁时，
-被保护的 `T` 按普通 Rust 所有权规则 drop。
+`SpinLock` has no custom `Drop`.
+When the lock is destroyed,
+the protected `T` is dropped according to ordinary Rust ownership rules.
 
-`SpinLockGuard::drop` 是核心释放路径：
-它释放 SMP flag 并恢复 guard 状态。
-若 guard 被 `mem::forget`，
-锁保持 locked 状态，
-除非调用者使用 `unsafe force_unlock`。
+`SpinLockGuard::drop` is the core release path:
+it releases the SMP flag and restores the guard state.
+If the guard is `mem::forget`-ed,
+the lock stays in the locked state,
+unless the caller uses `unsafe force_unlock`.

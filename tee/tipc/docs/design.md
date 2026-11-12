@@ -1,32 +1,32 @@
-# tipc — 设计文档
+# tipc — Design Document
 
-## 定位
+## Positioning
 
-`tipc` 是 X-Kernel 中 Trusty IPC 的传输无关核心 crate。
-它负责维护 port、channel、message、memref 和全局 service registry。
+`tipc` is the transport-independent core crate of Trusty IPC in X-Kernel.
+It maintains ports, channels, messages, memrefs, and the global service registry.
 
-`tipc-handle` 负责 `Handle` trait、`HandleSet` 和 process-local `HandleTable`，
-供 `tipc` 与 `process/kprocess` 共同依赖。
-`tipc` 同时承载 Trusty syscall ABI adapter；
-`core/ksyscall` 只在总 syscall dispatch 中把 TIPC syscall number 转接到该 adapter。
+`tipc-handle` provides the `Handle` trait, `HandleSet`, and the process-local `HandleTable`,
+which `tipc` and `process/kprocess` both depend on.
+`tipc` also hosts the Trusty syscall ABI adapter;
+`core/ksyscall` only forwards TIPC syscall numbers to this adapter in the overall syscall dispatch.
 
-## 背景
+## Background
 
-Trusty TIPC 以具名 port 建立双向 channel，并以 handle 作为对象能力传递。
-X-Kernel 需要先提供一层不依赖具体 TEE runtime 和 syscall ABI 的 IPC 核心，使后续系统调用适配、TA 服务和 kernel-side helper 可以共享同一套状态机。
+Trusty TIPC establishes bidirectional channels over named ports, and passes handles as object capabilities.
+X-Kernel first needs an IPC core that does not depend on a specific TEE runtime or syscall ABI, so that later syscall adaptation, TA services, and kernel-side helpers can share the same state machine.
 
-当前实现优先覆盖以下语义：
+The current implementation prioritizes the following semantics:
 
-- service port 创建、发布、连接和 accept；
-- client 可早于 port 发布而进入等待状态；
-- channel 双端点、固定槽消息队列和消息边界；
-- handle event、cookie、handle set 和 process-local handle table 由 `tipc-handle` 统一维护；
-- handle 传递的基础所有权模型；
-- memref handle 的 Trusty-visible 元数据和创建时用户映射校验。
+- service port creation, publication, connection, and accept;
+- a client may enter the waiting state before the port is published;
+- channel with two endpoints, a fixed-slot message queue, and message boundaries;
+- handle events, cookies, handle sets, and the process-local handle table are maintained uniformly by `tipc-handle`;
+- the basic ownership model for handle passing;
+- Trusty-visible metadata of memref handles and validation of user mappings at creation time.
 
-## 范围
+## Scope
 
-涉及的源文件：
+Source files involved:
 
 ```text
 tee/tipc/
@@ -47,7 +47,7 @@ tee/tipc/
     └── tests.rs
 ```
 
-相关共享 handle crate：
+Related shared handle crate:
 
 ```text
 tee/tipc-handle/
@@ -59,7 +59,7 @@ tee/tipc-handle/
     └── handle_table.rs
 ```
 
-## 架构
+## Architecture
 
 ```text
 core/ksyscall dispatch
@@ -98,35 +98,35 @@ tee/tipc-handle::{Handle, HandleSet, HandleTable}
 process/kprocess ProcessRuntime owns per-process HandleTable
 ```
 
-| 组件 | 职责 |
+| Component | Responsibility |
 |------|------|
-| `IpcPort` | 表示服务端具名 port，保存发布状态、访问策略、接收队列配置和未 accept 的 server endpoint 队列 |
-| `IpcChan` | 表示双向连接的一端，保存生命周期状态、对端 weak 引用、接收队列、事件状态和 cookie |
-| `IpcMsgQueue` | 固定槽消息队列，保持 Trusty 消息边界和 `get/read/put` 三阶段读取模型 |
-| `PortRegistry` | 全局服务命名空间，按 path 查找已发布 port，并保存等待 port 发布的 client endpoint |
-| `tipc_handle::Handle` | port、channel、handle set、memref 的统一事件、关闭、cookie 和 downcast 接口 |
-| `tipc_handle::HandleSet` | 多 handle 事件聚合器，按 process-local handle id 返回就绪事件 |
-| `tipc_handle::HandleTable` | process-local integer id 到 `Arc<dyn Handle>` 的映射，负责 close 时从 handle set 脱离 |
-| `MemRef` | 可通过消息传递的内存引用元数据；syscall 创建时验证当前进程映射，当前不绑定可 mmap 的 VMM 对象 |
-| `syscall` | Trusty syscall ABI adapter，负责用户指针、syscall 参数和当前进程 handle table 挂接 |
+| `IpcPort` | Represents a named server-side port; holds the publication state, access policy, receive queue configuration, and the queue of server endpoints not yet accepted |
+| `IpcChan` | Represents one end of a bidirectional connection; holds the lifecycle state, a weak reference to the peer, the receive queue, the event state, and the cookie |
+| `IpcMsgQueue` | Fixed-slot message queue; preserves Trusty message boundaries and the three-phase `get/read/put` read model |
+| `PortRegistry` | Global service namespace; looks up published ports by path and holds client endpoints waiting for a port to be published |
+| `tipc_handle::Handle` | Unified interface for events, close, cookie, and downcast for ports, channels, handle sets, and memrefs |
+| `tipc_handle::HandleSet` | Aggregator of events from multiple handles; returns ready events by process-local handle id |
+| `tipc_handle::HandleTable` | Mapping from process-local integer id to `Arc<dyn Handle>`; responsible for detaching from handle sets on close |
+| `MemRef` | Metadata of a memory reference that can be passed through messages; the current process mapping is validated at syscall creation time, and it is currently not bound to an mmap-able VMM object |
+| `syscall` | Trusty syscall ABI adapter; handles user pointers, syscall arguments, and attachment to the current process handle table |
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-- 本 crate 是 `no_std` 内核 crate，依赖 `alloc`、`kspin`、`kpoll` 和 `ktask`。
-- API 面向 task/syscall 生命周期路径，不应在中断上下文调用。
-- `IpcChan::wait_connected` 会通过 `ktask::future::block_on` 等待连接完成，内部
-  `PollRegistrations` 跨越 `Pending`；调用方必须处在允许阻塞的上下文。
-  该等待可被 fatal signal 中断，此时返回 `KError::Interrupted`。
-- `tipc_handle::Handle::register` 使用 `PollContext` 并可返回注册错误；poll/wait
-  调用方需要位于调度器可用之后，并在每轮 poll 刷新 registration context。
-- `tipc_handle::HandleTable` 本身不持锁，调用方负责把它放入 process-local 锁保护中。
-- `syscall` 模块依赖 `kprocess`、`khal`、`linux_sysno` 和 `posix-types`，只能在用户线程 syscall 上下文使用。
-- `PortRegistry` 是全局命名空间，路径、端口发布和 waiting client 操作由内部 `SpinNoIrq` 串行化。
-- early boot 阶段不应创建 TIPC port 或 channel；该模块假设 allocator、scheduler 和基础同步设施已经可用。
+- This crate is a `no_std` kernel crate and depends on `alloc`, `kspin`, `kpoll`, and `ktask`.
+- The API targets task/syscall lifecycle paths and must not be called in interrupt context.
+- `IpcChan::wait_connected` waits for the connection to complete via `ktask::future::block_on`, and the internal
+  `PollRegistrations` is held across `Pending`; the caller must be in a context that allows blocking.
+  This wait can be interrupted by a fatal signal, in which case it returns `KError::Interrupted`.
+- `tipc_handle::Handle::register` uses `PollContext` and may return a registration error; poll/wait
+  callers must run after the scheduler is available, and must refresh the registration context on every poll round.
+- `tipc_handle::HandleTable` itself does not hold a lock; the caller is responsible for placing it under a process-local lock.
+- The `syscall` module depends on `kprocess`, `khal`, `linux_sysno`, and `posix-types`, and may only be used in the user-thread syscall context.
+- `PortRegistry` is a global namespace; path, port publication, and waiting-client operations are serialized by an internal `SpinNoIrq`.
+- TIPC ports or channels must not be created during early boot; this module assumes that the allocator, scheduler, and basic synchronization facilities are already available.
 
-## 状态机
+## State Machines
 
-### Port 生命周期
+### Port Lifecycle
 
 ```text
 Invalid
@@ -140,10 +140,10 @@ Listening
 Invalid
 ```
 
-`IpcPort` 创建后先处于 `Invalid`，发布成功后进入 `Listening`。
-关闭 port 会从全局 registry 中移除自身，并关闭所有 pending server endpoint。
+After creation, an `IpcPort` is first in `Invalid`, and enters `Listening` once published successfully.
+Closing a port removes it from the global registry and closes all pending server endpoints.
 
-### Channel 生命周期
+### Channel Lifecycle
 
 ```text
 client new_client()
@@ -161,10 +161,10 @@ Connected
 Disconnecting
 ```
 
-client endpoint 可以先于目标 port 创建。
-当 port 已发布或稍后发布时，`attach_client` 才分配双方接收队列并创建 server endpoint。
+A client endpoint can be created before the target port.
+Only when the port has been published, or is published later, does `port_attach_client` allocate the receive queues on both sides and create the server endpoint.
 
-### Message slot 状态
+### Message Slot State
 
 ```text
 Free
@@ -181,9 +181,9 @@ Read
 Free
 ```
 
-`read` 不释放 slot，只有 `put` 会清空数据和 attached handles，并把 slot 放回 free list。
+`read` does not release the slot; only `put` clears the data and the attached handles and returns the slot to the free list.
 
-### Handle table 生命周期
+### Handle Table Lifecycle
 
 ```text
 Arc<dyn Handle>
@@ -200,20 +200,20 @@ process-local integer id
        └─ close every handle
 ```
 
-handle id 是进程本地能力，不是全局 id。
-关闭一个 handle 时，`HandleTable` 会从同一 table 中所有 `HandleSet` 移除该 id，避免 stale registration 持有已关闭对象。
-exec 边界和进程最后一个线程退出时（发布 process exit 之前）都会经
-`Process::close_all_tipc_handles` 调用 `uctx_handle_close_all`，
-因此父进程 `wait` 返回或设备 shutdown 时不会观察到已退出进程仍持有存活的
-port/channel owner。
-`sys_tipc_wait_any` 使用 `HandleTable` 缓存的 wait-any snapshot；
-缓存只在 handle table 增删后重建，避免每轮 poll 都分配 `Vec` 并 clone
-所有 `Arc<dyn Handle>`。等待路径同时注册 handle 事件和 handle-table
-membership 变化，防止安装或关闭 handle 时漏唤醒。
+A handle id is a process-local capability, not a global id.
+When a handle is closed, `HandleTable` removes that id from all `HandleSet`s in the same table, so that a stale registration does not keep a closed object alive.
+Both at the exec boundary and when the last thread of a process exits (before process exit is published), `uctx_handle_close_all` is invoked via
+`Process::close_all_tipc_handles`,
+so that when the parent's `wait` returns or on device shutdown, an exited process is never observed still holding a live
+port/channel owner.
+`sys_tipc_wait_any` uses the wait-any snapshot cached by `HandleTable`;
+the cache is rebuilt only after handles are added to or removed from the handle table, avoiding allocating a `Vec` and cloning
+all `Arc<dyn Handle>` on every poll round. The wait path registers for both handle events and handle-table
+membership changes, to prevent a missed wakeup when a handle is installed or closed.
 
-## 算法流程
+## Algorithm Flow
 
-### 创建并发布 port
+### Creating and Publishing a Port
 
 ```text
 ipc_port_create(uuid, path, queue sizes, flags)
@@ -232,10 +232,10 @@ ipc_port_publish(port)
   → attach each live waiting client
 ```
 
-waiting client 在 registry 解锁后逐个 attach，避免在全局 registry 锁内执行较复杂的 channel 创建和 port pending-list 操作。
-`IpcPort` 内部的 port-local 临界区会重新检查 `Listening` 状态，并把 client/server 绑定与 pending 队列更新串行化，因此并发 close 不能插入到状态检查和 pending 入队之间。
+Waiting clients are attached one by one after the registry is unlocked, to avoid performing the more complex channel creation and port pending-list operations while holding the global registry lock.
+The port-local critical section inside `IpcPort` rechecks the `Listening` state and serializes the client/server binding with the pending queue update, so a concurrent close cannot slip in between the state check and the pending enqueue.
 
-### 连接 port
+### Connecting to a Port
 
 ```text
 ipc_port_connect_async(uuid, path, flags)
@@ -248,7 +248,7 @@ ipc_port_connect_async(uuid, path, flags)
   → return client endpoint
 ```
 
-同步连接由 syscall adapter 或调用方在返回 client endpoint 后调用 `wait_connected` 完成。
+A synchronous connect is completed by the syscall adapter or the caller invoking `wait_connected` after the client endpoint is returned.
 
 ### Accept
 
@@ -262,7 +262,7 @@ IpcPort::ipc_port_accept()
   → return (server endpoint, peer uuid)
 ```
 
-### 发送和接收消息
+### Sending and receiving messages
 
 ```text
 sender.ipc_send_msg_with_handles(data, handles)
@@ -305,52 +305,52 @@ poll_one()
   → return first ready UEvent
 ```
 
-当前实现禁止把 `HandleSet` 添加到另一个 `HandleSet`。
-这比 Trusty 的“允许非循环嵌套”更保守，避免第一阶段引入循环检测。
+The current implementation forbids adding a `HandleSet` to another `HandleSet`.
+This is more conservative than Trusty, which allows acyclic nesting, and avoids introducing cycle detection in the first phase.
 
-## 并发模型
+## Concurrency Model
 
-- `PortRegistry` 使用全局 `SpinNoIrq<PortRegistryState>` 保护 path registry 和 waiting client 列表。
-- `IpcPort::inner` 使用 `SpinNoIrq` 同时保护 port lifecycle state 和 pending server endpoint 队列，避免 attach/accept/close 之间拆开状态检查与队列更新。
-- `IpcChan::peer` 和 `msg_queue` 使用 `SpinNoIrq`，生命周期状态和辅助事件使用 atomic。
-- `IpcMsgQueue` 不自带锁，只在 `IpcChan::msg_queue` 锁内访问。
-- `HandleSet::entries` 使用 `SpinNoIrq<BTreeMap<...>>`，注册、删除和 poll 串行化。
-- `HandleWaitState` 使用 `kpoll::PollSet` 保存等待者，并用 `AtomicUsize` 保存 cookie。
-- `HandleTable` 不内置锁，进程状态通常以 `RwLock<HandleTable>` 包装。
+- `PortRegistry` uses a global `SpinNoIrq<PortRegistryState>` to protect the path registry and the waiting client list.
+- `IpcPort::inner` uses `SpinNoIrq` to protect both the port lifecycle state and the pending server endpoint queue, so that the state check and the queue update are not separated between attach/accept/close.
+- `IpcChan::peer` and `msg_queue` use `SpinNoIrq`; the lifecycle state and auxiliary events use atomics.
+- `IpcMsgQueue` has no lock of its own and is accessed only while holding the `IpcChan::msg_queue` lock.
+- `HandleSet::entries` uses `SpinNoIrq<BTreeMap<...>>`, which serializes registration, removal, and poll.
+- `HandleWaitState` uses `kpoll::PollSet` to hold waiters and an `AtomicUsize` to hold the cookie.
+- `HandleTable` has no built-in lock; process state typically wraps it in an `RwLock<HandleTable>`.
 
-锁粒度偏向简单和局部化。
-全局 registry 锁只保护命名空间，channel 和 message 操作不持有 registry 锁。
+The lock granularity favors simplicity and locality.
+The global registry lock protects only the namespace; channel and message operations do not hold the registry lock.
 
-## 设计决策
+## Design Decisions
 
-- **syscall adapter 跟随 TIPC owner**：Trusty IPC syscall ABI 放在 `tipc` crate 中，便于把 TIPC 专属 ABI、UUID 转换和核心状态机一起维护；`core/ksyscall` 只保留总分发表。
-- **handle ownership 独立为 `tipc-handle`**：`process/kprocess` 只需要 process-local handle table，不应依赖完整 TIPC core；`tipc` 与 `kprocess` 共同依赖 `tipc-handle` 来避免循环依赖。
-- **registry 保存 weak port**：port 生命周期由创建者的 handle table 强引用拥有，全局命名空间不阻止对象释放。
-- **client 可等待未发布 port**：`WAIT_FOR_PORT` 通过保存 weak client endpoint 实现，若 client 在 port 发布前关闭，发布时会跳过 stale weak。
-- **固定槽消息队列**：保留 Trusty message boundary 和 back-pressure 语义，队列满时返回 `WouldBlock` 并在释放 slot 后通知发送方。
-- **handle set 禁止嵌套**：第一阶段避免循环检测复杂度；后续如需对齐 Trusty，可扩展为非循环嵌套。
-- **memref 暂为元数据 handle**：`sys_memref_create` 验证页对齐的地址范围被当前进程 VMA 覆盖，并具有请求的 READ/WRITE 用户权限；handle 当前保存通过校验的地址、长度和权限位，不建立跨地址空间映射。
-- **memref mmap 语义先校验后接入**：`MemRef::validate_mmap` 按 Trusty 规则校验 offset、size 和请求权限是否落在 memref 能力内；实际 VMM 对象绑定和目标地址空间映射仍待接入。
+- **The syscall adapter follows the TIPC owner**: The Trusty IPC syscall ABI lives in the `tipc` crate, which makes it easier to maintain the TIPC-specific ABI, UUID conversion, and the core state machine together; `core/ksyscall` keeps only the top-level dispatch table.
+- **Handle ownership is split out into `tipc-handle`**: `process/kprocess` only needs a process-local handle table and should not depend on the full TIPC core; `tipc` and `kprocess` both depend on `tipc-handle` to avoid a circular dependency.
+- **The registry holds weak ports**: The port lifetime is owned by strong references from the creator's handle table, and the global namespace does not prevent the object from being released.
+- **A client can wait for an unpublished port**: `WAIT_FOR_PORT` is implemented by storing a weak client endpoint; if the client is closed before the port is published, the stale weak reference is skipped at publish time.
+- **Fixed-slot message queue**: It preserves Trusty message boundary and back-pressure semantics; when the queue is full it returns `WouldBlock`, and the sender is notified once a slot is released.
+- **Handle sets cannot be nested**: This avoids the complexity of cycle detection in the first phase; if alignment with Trusty is needed later, it can be extended to acyclic nesting.
+- **memref is currently a metadata handle**: `sys_tipc_memref_create` verifies that the page-aligned address range is covered by the current process's VMAs and has the requested READ/WRITE user permissions; the handle currently stores the validated address, length, and permission bits, and does not establish a cross-address-space mapping.
+- **memref mmap semantics are validated first and wired up later**: `MemRef::validate_mmap` checks, following Trusty rules, whether the offset, size, and requested permissions fall within the memref's capabilities; the actual VMM object binding and the mapping into the target address space are still to be wired up.
 
-## 内核调用方
+## In-Kernel Callers
 
-TIPC core 的 port、channel、handle set 对象同时服务 syscall adapter 和内核内部调用方。
-`knet` 的 vsock-TIPC bridge 不经过进程 handle table，而是直接复用下列对象 API：
+The port, channel, and handle set objects of the TIPC core serve both the syscall adapter and in-kernel callers.
+The vsock-TIPC bridge in `knet` does not go through the process handle table, and instead directly reuses the following object APIs:
 
-- `ipc_port_connect_async(..., WAIT_FOR_PORT | ASYNC)` 创建 host-originated client channel。
-- `ipc_port_create` + `ipc_port_publish` 创建 bridge 暴露给 TA 的 forwarder service。
-- `IpcPort::ipc_port_accept` 非阻塞接收 TA-originated channel。
-- `IpcChan::ipc_send_msg`、`ipc_get_msg`、`ipc_read_msg`、`ipc_put_msg` 转发 message bytes 并保持 Trusty message boundary。
-- `HandleSet::handle_set_create`、`handle_set_ctrl`、`poll_one` 让 bridge worker 等待 READY、MSG、SEND_UNBLOCKED、HUP 和 ERROR。
+- `ipc_port_connect_async(..., WAIT_FOR_PORT | ASYNC)` creates a host-originated client channel.
+- `ipc_port_create` + `ipc_port_publish` create the forwarder service that the bridge exposes to the TA.
+- `IpcPort::ipc_port_accept` accepts a TA-originated channel without blocking.
+- `IpcChan::ipc_send_msg`, `ipc_get_msg`, `ipc_read_msg`, and `ipc_put_msg` forward message bytes while preserving Trusty message boundaries.
+- `HandleSet::handle_set_create`, `handle_set_ctrl`, and `poll_one` let the bridge worker wait for READY, MSG, SEND_UNBLOCKED, HUP, and ERROR.
 
-bridge v1 只转发消息字节。
-如果 TIPC message 附带 handle 或 memref，bridge 会把该消息视为不支持并关闭连接；
-跨 vsock 转发 object capability 需要单独的能力模型和生命周期设计。
+The bridge v1 forwards message bytes only.
+If a TIPC message carries a handle or memref, the bridge treats the message as unsupported and closes the connection;
+forwarding object capabilities across vsock requires a separate capability model and lifecycle design.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-- `IpcPort::drop` 调用 `close`，从 registry 移除自身并关闭 pending channel。
-- `IpcChan::drop` 调用 `close`，进入 `Disconnecting`，关闭本端接收队列，通知对端 HUP/ERROR。
-- `HandleTable::uctx_handle_remove` 会先从所有 handle set 移除目标 id，再调用目标 handle 的 `close`。
-- `IpcMsgQueue::put` 清空 slot 数据和 attached handles，释放对 transferred handles 的强引用。
-- `MemRef::close` 当前只唤醒等待者；实际 VMM 资源解绑尚未实现。
+- `IpcPort::drop` calls `close`, removes itself from the registry, and closes pending channels.
+- `IpcChan::drop` calls `close`, which moves the channel to `Disconnecting`, also marks the peer `Disconnecting`, and notifies both endpoints; `poll` then reports HUP. `close` does not clear the receive queue.
+- `HandleTable::uctx_handle_remove` first removes the target id from all handle sets, and then calls `close` on the target handle.
+- `IpcMsgQueue::put` clears the slot data and attached handles, releasing the strong references to the transferred handles.
+- `MemRef::close` currently only wakes waiters; the actual unbinding of VMM resources is not yet implemented.

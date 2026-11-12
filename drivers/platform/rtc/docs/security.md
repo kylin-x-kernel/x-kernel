@@ -71,8 +71,8 @@ zero virtual address is rejected before any pointer dereference.
 
 ## Known Limitations
 
-The driver takes a boot-time snapshot only. It does not verify RTC authenticity,
-detect later drift, or support runtime resampling and clock adjustment.
+Boot helpers take a single snapshot; repeated sampling is limited to prepared `RtcClock` bindings. The driver does not verify RTC authenticity,
+detect later drift, or support clock adjustment.
 
 ## Audit Checklist
 

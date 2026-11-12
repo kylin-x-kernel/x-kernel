@@ -1,81 +1,80 @@
-# pipefs — 安全与可靠性分析
+# pipefs — Security and Reliability Analysis
 
-## 信任模型
+## Trust Model
 
-pipefs type、operation tables 和 boot wiring 是受信任内核代码。status flags 是 syscall
-层完成组合检查后构造的 `OpenFlags`，credential 是调用时稳定 `Arc<Cred>`；本 crate
-只保留 `NONBLOCK`，并自行派生只读端和只写端 access mode。
+The pipefs type, operation tables, and boot wiring are trusted kernel code. The status flags are an `OpenFlags` constructed by the syscall
+layer after it has completed its combination checks, and the credential is an `Arc<Cred>` that is stable for the duration of the call. This crate
+keeps only `NONBLOCK`, and derives the read-only end and write-only end access modes on its own.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-- pipe2 用户 flags 经 syscall 层收窄后影响两个 file 的 nonblocking 状态。
-- credential 的 fsuid/fsgid 决定 pipe inode metadata owner。
-- 后续用户 I/O、poll、ioctl 和 resize 进入 `kvfs::pipe`，本 crate 不接触用户指针。
+- The user flags of pipe2, after being narrowed by the syscall layer, affect the nonblocking state of the two files.
+- The fsuid/fsgid of the credential determine the owner of the pipe inode metadata.
+- Subsequent user I/O, poll, ioctl, and resize go into `kvfs::pipe`; this crate does not touch user pointers.
 
-本 crate 不访问 MMIO/PIO、DMA、设备/中断输入、固件、FFI 或架构汇编。
+This crate does not access MMIO/PIO, DMA, device/interrupt inputs, firmware, FFI, or architecture assembly.
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-`src/lib.rs` 没有 `unsafe` block。
+`src/lib.rs` contains no `unsafe` block.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-- `PipeFs::global()` 只能在 hidden mount 完整发布后返回。
-- 每次 `create_pipe_files()` 必须创建一个唯一 inode；同一 read/write pair 必须共享该
-  inode 和同一个 `Arc<PipeObject>`。
-- inode private、read-file private 和 write-file private 不得指向不同 pipe session。
-- dentry 必须绑定 pipefs superblock 并继承静态默认 dentry operations。
-- write file 创建失败时不得发布 read file；read clone 失败时局部对象由 `Arc` 回收。
+- `PipeFs::global()` may return only after the hidden mount has been completely published.
+- Each `create_pipe_files()` call must create a unique inode; the same read/write pair must share that
+  inode and the same `Arc<PipeObject>`.
+- The inode private data, read-file private data, and write-file private data must not point to different pipe sessions.
+- The dentry must be bound to the pipefs superblock and inherit the static default dentry operations.
+- If creation of the write file fails, the read file must not be published; if the read clone fails, the local objects are reclaimed by `Arc`.
 
-## 线程安全
+## Thread Safety
 
-全局 mount 只读并由 `Once` 发布。并发创建只竞争 KVFS allocator/registry 内部同步；
-不同 pipe session 没有共享可变状态。同一 pipe 的同步契约由 `PipeObject` 实现。
+The global mount is read-only and is published through `Once`. Concurrent creation contends only on the internal synchronization of the KVFS allocator/registry;
+different pipe sessions share no mutable state. The synchronization contract of a single pipe is implemented by `PipeObject`.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | pipe 错误复用 anon-inode singleton | 高 | 用 anon_inodefs 创建两个端点 | 独立 pipefs 每次创建唯一 FIFO inode |
-| T-02 | 两个 file 指向不同 pipe state | 高 | clone 时重新分配 private object | inode/read/write 明确 clone 同一 `Arc<PipeObject>`，测试检查指针一致性 |
-| T-03 | inode owner 固定 root | 中 | 忽略调用 credential | inode init 使用传入 `Cred::fsuid/fsgid()` |
-| T-04 | 未初始化 pipefs 被 syscall 使用 | 高 | boot wiring 缺失 | `global()` panic，使错误在启动/测试期显式失败 |
-| T-05 | dentry 名称泄漏错误 identity | 低 | 使用固定 `[pipe]` 或 anon dname | 静态 pipefs dentry table 从唯一 inode number 生成 `pipe:[ino]` |
-| T-06 | pipe inode metadata 越过 DAC 授权被修改 | 中 | 绕过 `Path` 层直接进入 inode 表 | inode 保持 `empty_inode_operations()`，metadata 更新只经 `Path::chown/chmod/set_times` 授权后由 KVFS 公共回退层发布；size 更新一律 `EINVAL` |
+| T-01 | A pipe wrongly reuses the anon-inode singleton | High | Creating the two endpoints with anon_inodefs | The standalone pipefs creates a unique FIFO inode on every creation |
+| T-02 | The two files point to different pipe state | High | The private object is reallocated during clone | The inode/read/write explicitly clone the same `Arc<PipeObject>`, and tests check pointer consistency |
+| T-03 | The inode owner is fixed to root | Medium | The calling credential is ignored | Inode init uses the passed-in `Cred::fsuid/fsgid()` |
+| T-04 | An uninitialized pipefs is used by a syscall | High | Boot wiring is missing | `global()` panics, so the error fails explicitly at boot/test time |
+| T-05 | The dentry name leaks a wrong identity | Low | A fixed `[pipe]` or an anon dname is used | The static pipefs dentry table generates `pipe:[ino]` from the unique inode number |
+| T-06 | Pipe inode metadata is modified without DAC authorization | Medium | Bypassing the `Path` layer and going directly into the inode table | The inode uses `metadata_only_inode_operations()`, and metadata updates are published only after authorization through `Path::chown/chmod/set_times`. Size updates always return `EINVAL`. |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Failure Cause | Local Effect | System Effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | pipefs 未初始化 | boot 顺序错误 | pipe 创建 panic | 用户态启动前停止或测试失败 | 2 | `fs_boot` 显式初始化 |
-| F-02 | 调用者传入无关 status flags | 内核调用点没有收窄参数 | 无关位若传播会污染 file 状态 | fd 行为偏离 pipe2 | 3 | 类型化入口只保留 `NONBLOCK`，access mode 由 pipefs 固定派生 |
-| F-03 | inode/file 分配失败 | 内存不足 | 当前创建失败 | 已分配局部状态自动释放 | 3 | `KResult` 传播，顺序发布两个 file |
-| F-04 | read clone 失败 | file 分配失败 | write file 未返回 caller | pipe state 局部回收 | 3 | clone 成功后才返回 pair |
+| F-01 | pipefs is uninitialized | Wrong boot order | Pipe creation panics | Halt before userspace starts, or a test failure | 2 | `fs_boot` initializes it explicitly |
+| F-02 | The caller passes unrelated status flags | The kernel call site does not narrow the arguments | Unrelated bits, if propagated, would pollute the file state | fd behavior deviates from pipe2 | 3 | The typed entry point keeps only `NONBLOCK`, and the access mode is derived fixedly by pipefs |
+| F-03 | inode/file allocation fails | Out of memory | The current creation fails | Already allocated local state is released automatically | 3 | Propagated through `KResult`, and the two files are published in order |
+| F-04 | The read clone fails | File allocation fails | The write file is not returned to the caller | The pipe state is reclaimed locally | 3 | The pair is returned only after the clone succeeds |
 
-## 故障管理
+## Failure Management
 
-输入和分配错误通过 `KResult` 返回；未初始化属于 boot 契约破坏并 panic。没有半初始化
-global state 的重试路径，也不把失败 pipe 放入额外 registry。
+Input and allocation errors are returned through `KResult`; being uninitialized is a violation of the boot contract and causes a panic. There is no retry path for half-initialized
+global state, and failed pipes are not placed in any additional registry.
 
-## 隐私分析
+## Privacy Analysis
 
-pipefs 只保存 pipe bytes 的 owner object，不读取或记录其内容。动态名称只包含 inode
-number，不包含 pipe payload、credential 或用户地址。
+pipefs stores only the owner object of the pipe bytes, and neither reads nor records their contents. The dynamic name contains only the inode
+number, and contains no pipe payload, credential, or user address.
 
-## 已知限制
+## Known Limitations
 
-- 尚未支持 Linux notification pipe 与 `O_DIRECT` packet mode。
-- hidden pipefs 不支持运行期卸载。
-- pipe resource accounting/limits 仍由当前 `kvfs::pipe` 能力决定。
-- pipe inode 的 owner/mode/时间更新只保留在 resident `VfsInode` 中（pipefs 无后端存储，
-  对应 Linux pipefs 同样不持久化）。
+- Linux notification pipes and `O_DIRECT` packet mode are not yet supported.
+- The hidden pipefs does not support runtime unmounting.
+- Pipe resource accounting/limits are still determined by the current `kvfs::pipe` capabilities.
+- Updates to the owner/mode/times of a pipe inode are kept only in the resident `VfsInode` (pipefs has no backing storage,
+  and likewise Linux pipefs does not persist them).
 
-## 审计清单
+## Audit Checklist
 
-- 匿名 pipe 是否只通过 `pipefs::create_pipe_files()` 创建？
-- 每次创建是否分配唯一 inode，而 read/write 是否共享 inode 和 `PipeObject`？
-- owner 是否来自调用 credential，而不是固定 root 或重新读取 current task？
-- dentry 是否显示 `pipe:[ino]`，且 operation table 来自 superblock 默认 `s_d_op`？
-- 新错误路径是否在返回 fd 前完整释放局部 file/inode/pipe state？
-- pipe inode 是否仍使用 `empty_inode_operations()`，metadata 变更是否全部经过 `Path`
-  授权层而不是专属表？
+- Are anonymous pipes created only through `pipefs::create_pipe_files()`?
+- Does each creation allocate a unique inode, and do the read/write files share the inode and the `PipeObject`?
+- Does the owner come from the calling credential, rather than a fixed root or a fresh read of the current task?
+- Does the dentry display `pipe:[ino]`, and does the operation table come from the superblock default `s_d_op`?
+- Does every new error path fully release the local file/inode/pipe state before returning an fd?
+- Does the pipe inode still use `kvfs::metadata_only_inode_operations()`, with all metadata changes authorized by the `Path` layer?

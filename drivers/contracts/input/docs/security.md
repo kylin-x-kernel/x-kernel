@@ -11,7 +11,7 @@ implementations.
 
 ## Trust Model
 
-Pure contract layer: evdev-compatible value types plus one trait. The
+Pure contract layer: evdev-compatible value types plus the `InputDevice` and `InputEventNotifier` traits. The
 crate processes no untrusted data and holds no state; its security
 relevance is the data-layout contract (`repr(C)` structs crossing to user
 space) and the obligations placed on driver implementations.
@@ -45,7 +45,7 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly.
 - `EventType` discriminants match the Linux input subsystem constants
   (`Synchronization = 0x00` ... `ForceFeedback = 0x15`); `MAX = 0x1f`.
 - `bits_count` returns the exact bitmap length per category; a consumer
-  allocating `bits_count/8` bytes must receive no more event codes than
+  allocating `bits_count.div_ceil(8)` bytes must receive no more event codes than
   that bitmap can describe.
 - `get_event_bits` writes only within the caller-provided `out` buffer
   and reports `Ok(false)` for unsupported types rather than touching the

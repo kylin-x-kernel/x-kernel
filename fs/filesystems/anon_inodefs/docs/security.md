@@ -1,76 +1,76 @@
-# anon_inodefs — 安全与可靠性分析
+# anon_inodefs — Security and Reliability Analysis
 
-## 信任模型
+## Trust Model
 
-filesystem type、operation tables 和 boot 初始化代码是受信任内核代码。调用者提供的
-file operation object、typed private object、名称、flags 和 credential 都已位于内核
-地址空间，但名称和 flags 仍不能被当作文件系统结构或权限来源。
+The filesystem type, operation tables, and boot initialization code are trusted kernel code. The caller-provided
+file operation object, typed private object, name, flags, and credential all already reside in the kernel
+address space, but the name and flags still must not be treated as a source of filesystem structure or permissions.
 
-## 外部边界 / 攻击面
+## External Boundary / Attack Surface
 
-- `name` 会进入 proc-style 动态路径显示，但只作为内核拥有的 Rust `str` 格式化。
-- raw syscall flags 不直接进入本 crate；调用者传入类型化 `OpenFlags`，本 crate 只保留
-  access mode 与 nonblocking bits。
-- `Cred` 只作为 open-time credential 保存，不在这里执行 pathname DAC。
-- caller-provided `FileOperations` 可能在 file open/release/I/O 路径失败或阻塞。
+- `name` enters the proc-style dynamic path display, but is only formatted as a kernel-owned Rust `str`.
+- Raw syscall flags do not enter this crate directly; the caller passes in typed `OpenFlags`, and this crate only retains
+  the access mode and nonblocking bits.
+- `Cred` is only stored as the open-time credential; no pathname DAC is performed here.
+- The caller-provided `FileOperations` may fail or block in the file open/release/I/O paths.
 
-本 crate 不访问用户指针、MMIO/PIO、DMA、设备输入、固件、FFI 或汇编。
+This crate does not access user pointers, MMIO/PIO, DMA, device input, firmware, FFI, or assembly.
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-`src/lib.rs` 没有 `unsafe` block。
+`src/lib.rs` contains no `unsafe` block.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-- `AnonInodeFs::global()` 只能在 `Once` 完整发布 mount 与 singleton inode 后返回。
-- 所有普通匿名 file 必须引用同一个 singleton inode，不建立平行 inode identity。
-- file private data 由 `Arc` 持有，必须满足 `Any + Send + Sync + 'static`。
-- dentry operations 从 superblock 的静态默认 table 继承，dentry 绑定后不得替换。
-- 动态名称只读取 dentry 自己的稳定 name snapshot。
+- `AnonInodeFs::global()` may return only after `Once` has completely published the mount and the singleton inode.
+- All ordinary anonymous files must reference the same singleton inode; no parallel inode identity is created.
+- File private data is held by an `Arc` and must satisfy `Any + Send + Sync + 'static`.
+- Dentry operations are inherited from the superblock's static default table and must not be replaced once the dentry is bound.
+- The dynamic name reads only the dentry's own stable name snapshot.
 
-## 线程安全
+## Thread Safety
 
-初始化预期由 boot CPU 串行调用，`Once` 仍保证重复调用幂等。发布后对象字段只读；
-并发 file 创建由 KVFS 内部锁和 `Arc` 管理，不存在本 crate 自有可变全局状态。
+Initialization is expected to be called serially by the boot CPU, and `Once` still guarantees idempotence on repeated calls. After publication, object fields are read-only;
+concurrent file creation is managed by KVFS internal locks and `Arc`, and this crate has no mutable global state of its own.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | 未初始化访问隐藏 mount | 高 | boot 漏掉 `init_anon_inodefs()` | `global()` 立即 panic，在启动/测试阶段暴露顺序错误 |
-| T-02 | 每个 file 分配独立 inode 或 operation state | 中 | caller 绕过 singleton 或 filesystem 保存 per-file table | 唯一公开创建入口复用 singleton inode；operation tables 为静态/共享对象 |
-| T-03 | 不受支持的 open flags 泄漏到 file 状态 | 中 | caller 混入 create/path/exec flags | `get_file()` 只保留 access mode 与 `NONBLOCK` |
-| T-04 | dentry operation 与 superblock 不一致 | 中 | per-file 手动安装 `d_op` | dentry 从 superblock `s_d_op` 对应物自动继承，绑定后不可替换 |
-| T-05 | 共享 singleton 的 metadata 被单个调用者跨进程改写 | 中 | 持有任意匿名 fd 的特权 credential 调用 `fchown(at)`/`fchmod`/`futimens` | `AnonInodeOperations` 显式覆写 `setattr`：owner/mode/时间保持拒绝语义（`EOPNOTSUPP`），不继承 KVFS 公共回退层；`ftruncate` 保持非普通文件的 `EINVAL`；测试覆盖各字段拒绝与 resident 属性不变 |
+| T-01 | Uninitialized access hides the mount | High | boot omits `init_anon_inodefs()` | `global()` panics immediately, exposing the ordering error during boot/testing |
+| T-02 | Each file allocates its own inode or operation state | Medium | The caller bypasses the singleton or the filesystem stores a per-file table | The only public creation entry point reuses the singleton inode; operation tables are static/shared objects |
+| T-03 | Unsupported open flags leak into file state | Medium | The caller mixes in create/path/exec flags | `get_file()` retains only the access mode and `NONBLOCK` |
+| T-04 | Dentry operations are inconsistent with the superblock | Medium | `d_op` is manually installed per file | The dentry automatically inherits from the counterpart of the superblock `s_d_op` and cannot be replaced once bound |
+| T-05 | The shared singleton's metadata is rewritten by a single caller across processes | Medium | A privileged credential holding any anonymous fd calls `fchown(at)`/`fchmod`/`futimens` | `AnonInodeOperations` explicitly overrides `setattr`: owner/mode/times keep the rejection semantics (`EOPNOTSUPP`) and do not inherit the KVFS common fallback layer; `ftruncate` keeps `EINVAL` for non-regular files; tests cover rejection of each field and that resident attributes remain unchanged |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Failure Cause | Local Effect | System Effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | 全局对象未初始化 | boot wiring 缺失 | 当前创建 panic | 用户态启动前停止 | 2 | boot 显式初始化，单元测试覆盖初始化后创建 |
-| F-02 | file 分配失败 | 内存不足或 VFS 校验失败 | 当前创建返回错误 | 无全局状态变化 | 3 | 通过 `VfsResult` 原样传播，private data 只在成功后安装 |
-| F-03 | file release 失败 | caller fops cleanup 错误 | 当前 close 返回错误 | filesystem singleton 保持可用 | 3 | cleanup 归 caller operation table；共享 mount/inode 不随单 file teardown |
+| F-01 | Global object uninitialized | boot wiring is missing | The current creation panics | Stops before userspace starts | 2 | boot initializes explicitly; unit tests cover creation after initialization |
+| F-02 | File allocation fails | Out of memory or VFS validation failure | The current creation returns an error | No global state change | 3 | Propagated unchanged through `VfsResult`; private data is installed only after success |
+| F-03 | File release fails | Caller fops cleanup error | The current close returns an error | The filesystem singleton remains usable | 3 | Cleanup belongs to the caller's operation table; the shared mount/inode is not torn down with a single file |
 
-## 故障管理
+## Fault Management
 
-可恢复的 file 分配和 open 错误通过 `VfsResult` 返回。只有违反 boot 初始化契约时 panic；
-不在 runtime 首次访问时尝试隐式恢复或重新构造全局 VFS 对象。
+Recoverable file allocation and open errors are returned through `VfsResult`. A panic occurs only when the boot initialization contract is violated;
+no implicit recovery or reconstruction of global VFS objects is attempted on first runtime access.
 
-## 隐私分析
+## Privacy Analysis
 
-本 crate 不读取 file private object 内容，也不复制用户数据。动态名称可能出现在 proc/debug
-路径输出中，因此调用者应使用固定 kernel-object class 名称，不应嵌入敏感数据。
+This crate does not read the contents of the file private object and does not copy user data. The dynamic name may appear in proc/debug
+path output, so callers should use a fixed kernel-object class name and must not embed sensitive data.
 
-## 已知限制
+## Known Limitations
 
-- 尚未实现 Linux secure/unique anonymous inode 与 LSM security-init 路径。
-- hidden filesystem 不支持运行期卸载。
-- operation-table 存储仍遵循 KVFS inode/file operation API；本 crate 不建立额外缓存。
+- The Linux secure/unique anonymous inode and LSM security-init paths are not yet implemented.
+- The hidden filesystem does not support runtime unmounting.
+- Operation-table storage still follows the KVFS inode/file operation API; this crate establishes no additional cache.
 
-## 审计清单
+## Audit Checklist
 
-- 新匿名 kernel object 是否使用 `AnonInodeFs::global().get_file()`？
-- boot 是否在任何并发 caller 之前调用 `init_anon_inodefs()`？
-- name 是否为固定 class label，未包含用户秘密？
-- 新 flags 是否在 syscall 边界类型化，且未绕过 `get_file()` 的 mask？
-- 是否错误增加 per-file inode、mount 或 dentry-operation owner？
+- Does the new anonymous kernel object use `AnonInodeFs::global().get_file()`?
+- Does boot call `init_anon_inodefs()` before any concurrent caller?
+- Is the name a fixed class label that contains no user secrets?
+- Are new flags typed at the syscall boundary, without bypassing the mask in `get_file()`?
+- Is a per-file inode, mount, or dentry-operation owner added by mistake?

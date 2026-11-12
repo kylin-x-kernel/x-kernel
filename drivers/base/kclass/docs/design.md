@@ -98,6 +98,7 @@ drivers/base/kclass/
     │  │  CHAR_DEVICES   (SpinNoPreempt) │    │
     │  │  DISPLAY_DEVICES(SpinNoPreempt) │    │
     │  │  INPUT_DEVICES  (SpinNoPreempt) │    │
+    │  │  HWRNG_DEVICES  (SpinNoPreempt) │    │
     │  │  VSOCK_DEVICES  (SpinNoPreempt) │    │
     │  │  VIRTIO_9P_DEVICES(SpinNoPreempt)│   │
     │  └─────────────┬───────────────────┘    │
@@ -115,6 +116,7 @@ drivers/base/kclass/
     │  Delegation impls:                      │
     │   ClassDevice<NI> : NetDevice           │
     │   ClassDevice<CI> : CharDevice          │
+    │   ClassDevice<HI> : HwrngDevice         │
     │   ClassDevice<DI> : DisplayDevice       │
     │   ClassDevice<II> : InputDevice         │
     │   ClassDevice<VI> : VsockDevice         │
@@ -296,10 +298,10 @@ runtime is the driver's own responsibility (usually interior mutability).
 
 ### Display device framebuffer path
 
-The `DisplayDevice` trait exposes only the resolution
-(`DisplayInfo { width, height }`) and the scanout resource interface
+The `DisplayDevice` trait exposes the flush hooks (`need_flush` / `flush`), the resolution
+(`DisplayInfo { width, height }`), display IRQ acknowledgement (`ack_irq`) and the scanout resource interface
 (`create_scanout_resource` / `destroy_scanout_resource` /
-`present_scanout_resource`). The kclass class adapter is a pure
+`present_scanout_resource` / `flush_scanout_resource`). The kclass class adapter is a pure
 delegation for those methods and holds no framebuffer raw pointers or
 direct memory mappings.
 

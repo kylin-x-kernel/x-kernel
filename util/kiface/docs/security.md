@@ -33,7 +33,7 @@ signature and compares the generated per-method safety marker. This rejects
 qualifier mismatches even where safe-to-unsafe pointer coercion would otherwise
 succeed. A provider that does not match fails to compile; and
 (2) both symbol names derive from the same `src/naming.rs` rule
-(`__kiface_{namespace}_{Interface}_{method}`), so the definition and
+(`__kiface_{namespace}_{Interface}_{method}`, or `__kiface_{Interface}_{method}` when no namespace is given), so the definition and
 provider sides can only meet when namespace, interface name, and method
 name agree. The remaining risk is linking more or fewer than one provider,
 covered by the invariants below.
@@ -64,8 +64,8 @@ best-effort dependency into a hard link dependency.
 
 ## Current Restrictions
 
-The `interface` implementation rejects generics, receivers, async methods,
-explicit extern methods, variadic methods, and default bodies.
+The `interface` implementation rejects generics, receivers, `const` methods,
+async methods, explicit extern methods, variadic methods, and default bodies.
 These restrictions keep the generated ABI surface small while the crate is used
 to replace existing single-provider `crate_interface` and accidental `linkme`
 entry wiring.

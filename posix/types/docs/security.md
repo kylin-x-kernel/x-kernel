@@ -21,7 +21,7 @@ after copying.
 | `load_string_with_max_len`/`load_bytes_with_max_len` | NUL-terminated user buffer | Bound enforced (`max_len + 1` probed bytes); `OutOfRange`/`InvalidInput` on overrun, UTF-8 checked only by the string variants. |
 | `IoVectorBuf::from_iovecs` | copied descriptors | ≤ 1024 segments, non-negative lengths, checked total sum; rejects before any user I/O. |
 | `FdSet::read_from_user` | bitmap + `nfds` | Bits ≥ `nfds` cleared after copy; `nfds ≥ FD_SETSIZE` accepted unchanged (Linux behavior); null pointer means absent. |
-| `check_sigset_size` | `pselect6` size word | Must equal 8; otherwise error. |
+| `check_sigset_size` | `pselect6` size word | Must be 0 or 8; otherwise `InvalidInput`. Zero is accepted here; syscall-specific requirements belong to the adapter. |
 | `TimeSpanLike`/`SystemTimeLike` conversions | ABI time fields | Subsecond range validated; unrepresentable results are `InvalidInput`; pre-epoch realtime deadlines rejected. |
 | IPC/fs/process/task POD carriers | ABI structs by value | Copy traits only; field semantics (e.g. permissions in `IpcPerm`, `rusage` counters) are validated by their owners. |
 
@@ -44,7 +44,7 @@ All unsafe sites carry inline `SAFETY:` justifications.
 | `ptr.rs` `UserRead`/`UserWrite` trait defs and impls | unsafe traits | implementers must guarantee any user bit pattern is a valid initialized `T` (read) / fully initialized byte representation including padding (write); audited for scalars, arrays, raw pointers, `UserPtr`, and the listed POD `linux_raw_sys` structs |
 | `ptr.rs` `as_uninit_bytes`/`spare_as_uninit_bytes` | byte-view of `MaybeUninit` | `MaybeUninit<T>` may always be viewed as an equally sized uninit byte slice |
 | `ptr.rs` `write_vm_slice` | byte-view of a live slice | same allocation and length; layout-preserving reinterpretation |
-| `ptr.rs` `read_vm`/`load_vm_vec`/`load_bytes_with_max_len` | `assume_init` | exactly the copied bytes were initialized by the preceding `osvm` call; `T: UserRead`/element-by-element init makes them valid |
+| `ptr.rs` `read_vm`/`load_bytes_with_max_len` (`assume_init`), `load_vm_vec` (`Vec::set_len`) | `assume_init` / `set_len` | exactly the copied bytes were initialized by the preceding `osvm` call; `T: UserRead`/element-by-element init makes them valid |
 | `ptr.rs` `bytemuck::Zeroable`/`AnyBitPattern` for `UserPtr` | auto-trait override | `repr(transparent)` over a raw pointer; all bit patterns are plain addresses |
 | domain modules `unsafe impl User{Read,Write}` | trait attachment | each listed carrier is plain-old-data with explicit ABI fields and no implicit padding on the write side; this includes `linux_raw_sys` structs and the locally defined `CapUserData` |
 

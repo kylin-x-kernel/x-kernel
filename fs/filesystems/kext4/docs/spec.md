@@ -119,7 +119,7 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 | journal 提交仍受同步 block API 限制 | N2.1 已把连续 journal blocks 聚合为不超过 128 KiB 的请求，并复用 journal-superblock image、去除 commit 后的重复 flush | 请求数量已降低，但每个 batch 仍在调用栈中同步完成；没有多请求 in-flight、后台 commit/checkpoint 或驱动 completion |
 | durability 等待仍为同步基线 | runtime inode 尚无 sync/datasync tid，`fsync/fdatasync` 保守提交整个 running transaction 并 flush；`syncfs` 仍推进全文件系统 | 尚无目标 transaction 等待、异步 ordered-data dependency、后台 commit/checkpoint 和 errseq，等待者仍在当前调用栈执行设备 I/O |
 | PageCache writeback 基础有限 | PageCache 仍固定上限聚合 folio；core 已由 live cursor 按实际 mapping/allocation run 续订 credits，并在 journal transaction 容量不足时提交前缀后续写；失败会把已完成字节前缀反馈给 PageCache，仅保留边界 folio 与后缀为 dirty，但仍无后台 dirty control 和异步 transaction dependency | 静态全范围 credit/space plan 与“错误等于零进展”的歧义已消除；fio 吞吐、内存压力和异步完成仍不可控 |
-| KExt4 仍使用同步 I/O 适配 | 公共块层已有独立提交和完成的 Bio/Request；KExt4 当前通过 BlockDevice 同步方法等待 | 后续批量 I/O 可使用公共 Bio 接口先提交再等待，不应依赖 VirtIO 私有接口 |
+| KExt4 仍使用同步 I/O 适配 | 公共块层已有独立提交和完成的 Bio/Request；KExt4 的 mapped-overwrite writeback 已先提交 owned BIO 再等待，journal 与其余元数据路径仍通过 BlockDevice 同步方法等待 | 后续批量 I/O 可使用公共 Bio 接口先提交再等待，不应依赖 VirtIO 私有接口 |
 | extent/allocator 仍未完整分层 | `ExtentPath` 已承载单路径更新和均衡 split，但跨叶 truncate 回退、重复 lookup 和 scan-backed free-run cache 仍存在 | 长文件常规写不再全树重建，复杂范围操作和多 job 仍受限 |
 
 完整 errseq、unmount 和 fault matrix 很重要，但它们不消除上述结构性瓶颈，也不应继续阻塞

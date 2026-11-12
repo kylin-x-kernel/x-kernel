@@ -1,10 +1,10 @@
-# page-meta — 设计文档
+# page-meta — Design Document
 
-## 定位与范围
+## Scope and Positioning
 
-为物理基页建立稳定的元数据身份。启动调用方持有物理区间列表，`init()` 原地规范化
-并扣除元数据后备区，返回 PageMetaTable。调用方发布统一查询后，把列表中剩余的
-非空区间交给 allocator。物理区间复用 memaddr::PhysAddrRange，不包装另一套库存类型。
+Establishes a stable metadata identity for physical base pages. The boot caller holds a list of physical ranges; `init()` normalizes it in place
+and deducts the metadata backing region, then returns a PageMetaTable. After the caller publishes the unified lookup, the remaining
+non-empty ranges in the list are handed to the allocator. Physical ranges reuse memaddr::PhysAddrRange; no separate inventory type is wrapped around it.
 
 PageMeta records the permanent reservation of this service's backing storage,
 an optional allocation-head reference count, head/tail geometry, and the
@@ -14,84 +14,84 @@ users, content permissions or reclaimability. Metadata does not track allocator
 inventory. Lookup grants no ownership, content access or release authority.
 Current input covers only RAM marked FREE by HAL.
 
-## 架构与职责
+## Architecture and Responsibilities
 
 - `src/lib.rs`: errors, public initialization and identity queries, and global publication.
 - `src/page.rs`: PageMeta, head counter, tail offset, allocation order and reference-state
   transitions. It defines no RAII holder and does not return inventory.
 - `src/page/group.rs`: independent-range admission/clone/validation and compound
   group admission/resolution, retirement and exclusive split.
-- `src/free_ranges.rs`：整理调用方的空闲物理区间，并从中划出后备内存。
-- `src/backend/mod.rs`：选择私有存储与 PFN 索引实现，导出 init 和 Table。
-- `src/backend/segments.rs`：当前紧凑分段索引、数组存储、查找和初始化写入。
+- `src/free_ranges.rs`: organizes the caller's free physical ranges and carves the backing memory out of them.
+- `src/backend/mod.rs`: selects the private storage and PFN index implementation, and exports init and Table.
+- `src/backend/segments.rs`: the current compact segment index, array storage, lookup and initialization writes.
 - `ut-tests/{free_ranges,segments,page,group}.rs`: handoff, bidirectional page identity,
   reference-state transitions and boundary cases.
-- `core/kruntime/ut-tests/page_metadata.rs`：既有 allocator 交接和全局查询。
+- `core/kruntime/ut-tests/page_metadata.rs`: the existing allocator handoff and global lookup.
 
 ```text
-kruntime 持有物理区间列表
+kruntime holds the physical range list
   → page_meta::init(&mut ranges, map_storage)
-       → 共用函数规范化范围
-       → backend 建立覆盖索引、申请后备区、初始化
-       → 共用函数扣除后备区，保留剩余物理区间
+       → shared function normalizes the ranges
+       → backend builds the coverage index, requests the backing region, initializes
+       → shared function deducts the backing region, keeps the remaining physical ranges
   → publish(table)
-  → 遍历非空剩余区间，p2v 后交给原有 allocator
+  → iterate the non-empty remaining ranges, p2v, then hand to the existing allocator
 ```
 
-PageMeta 的初始状态和永久标记由共用方法定义。backend 负责计算存储需求、组织
-索引并返回稳定借用；不决定全局发布策略，不了解 allocator 的 bitmap 或空闲链表。
-调用方映射回调只接收 backend 实际申请的完整后备区，不要求全部描述页内容已有
-内核映射。元数据页的描述符与它所描述的物理页内容是不同对象。
+The initial state and permanent flag of PageMeta are defined by shared methods. The backend computes the storage requirement, organizes the
+index and returns stable borrows; it does not decide the global publication policy and has no knowledge of the allocator's bitmap or free lists.
+The caller's mapping callback receives only the complete backing region actually requested by the backend, and does not require all descriptor page contents to have an existing
+kernel mapping. The descriptor of a metadata page and the physical page content it describes are different objects.
 
-## 初始化和库存规则
+## Initialization and Inventory Rules
 
-1. 共用 normalize 校验起止顺序和地址运算，向内对齐到完整 4 KiB 页，忽略空区间，
-   按 PA 排序并拒绝物理重叠，合并相邻物理区间。未使用条目置空，切片长度不变。
-2. backend 直接遍历共用层已规范化的范围，在任何库存扣除前构造段表及描述符计数；
-   不重复排序、合并或输入范围校验。预留页自身也必须有 PageMeta，不能把余额误作覆盖。
-3. 共用 with_reserved_storage 按整页从最大可用区间尾部选取存储，backend 映射并初始化它。
-   只有该次初始化成功才扣除库存；映射或初始化失败不扣除该次请求。
+1. The shared normalize step validates start/end order and address arithmetic, aligns inward to whole 4 KiB pages, ignores empty ranges,
+   sorts by PA, rejects physical overlaps, and merges adjacent physical ranges. Unused entries are set to empty, and the slice length is unchanged.
+2. The backend directly iterates the ranges already normalized by the shared layer and builds the segment table and descriptor count before any inventory deduction;
+   it does not re-sort, re-merge or re-validate the input ranges. The reserved pages themselves must also have a PageMeta; the remaining balance must not be mistaken for coverage.
+3. The shared with_reserved_storage selects storage in whole pages from the tail of the largest available range, and the backend maps and initializes it.
+   Inventory is deducted only if that initialization succeeds; if mapping or initialization fails, that request is not deducted.
 4. covered_pages() derives coverage from the final segment. lookup(PFN) and
    pfn_of(metadata) provide bidirectional identity conversion. Reverse lookup
    checks descriptor membership and uses a binary segment search; it needs no
    page-content mapping. Table stores no coverage count, and PageMetaTable stores
    no metadata-storage count.
-5. kruntime 串行 publish，再按 PA 升序以首个非空区间初始化 allocator，依次交接后续非空区间，
-   保持 buddy 的低地址优先分配顺序，避免 DMA32 请求先命中高地址 RAM。
-   空条目必须跳过；allocator 自行扣除其内部 metadata。启动日志的元数据开销由
-   覆盖页数减去交接前剩余页数临时计算，不作为表的持久状态。
+5. kruntime publishes serially, then initializes the allocator with the first non-empty range in ascending PA order and hands over the subsequent non-empty ranges in turn,
+   preserving buddy's low-address-first allocation order and preventing DMA32 requests from first hitting high-address RAM.
+   Empty entries must be skipped; the allocator deducts its own internal metadata itself. The metadata overhead in the boot log is computed transiently as
+   the number of covered pages minus the number of pages remaining before handoff, and is not persistent state of the table.
 
-错误不会发布元数据表。输入切片在错误时可能已经被规范化；若未来后端多次预留，先前
-成功的扣除仍然生效，不承诺跨请求回滚。元数据表发布后 allocator 初始化失败，启动按
-fatal-boot 策略停止，不重试整个事务。
+On error, no metadata table is published. The input slice may already have been normalized when an error occurs; if a future backend reserves multiple times, earlier
+successful deductions remain in effect, and no rollback across requests is promised. If allocator initialization fails after the metadata table is published, boot stops under the
+fatal-boot policy, and the whole transaction is not retried.
 
-## 后端边界和限制
+## Backend Boundaries and Limits
 
-公开 API 不暴露 segment 数量、数组下标、后备连续性或索引容量。当前私有后端先
-在局部变量中计算段表、计数和存储大小，再预留并初始化连续后备数组，最后一次性
-构造有效 Table。Table 只保存段表、有效段数和描述符指针。构造时所需 entry_count 仅用于
-计算数组字节数和初始化槽位，不在构造后继续保存。
-容量暂为 64 个合并后的物理段，属于该
-实现的限制，与调用方列表长度或 allocator 的上限无关。后端通过编译期模块选择。
+The public API does not expose the segment count, array indices, backing contiguity or index capacity. The current private backend first
+computes the segment table, counts and storage size in local variables, then reserves and initializes the contiguous backing array, and finally
+constructs a valid Table in one step. Table stores only the segment table, the number of valid segments and the descriptor pointer. The entry_count needed during construction is used only to
+compute the array byte size and initialize the slots, and is not kept after construction.
+The capacity is currently 64 merged physical segments; this is a limit of that
+implementation and is unrelated to the length of the caller's list or the allocator's limits. The backend is selected through compile-time modules.
 
-未来后端可以改变索引、存储分块和申请次数。需要额外虚拟地址/页表能力的方案，
-仍须由启动集成提供对应资源；当前接口不承诺自行建立映射。
+A future backend may change the index, the storage chunking and the number of requests. Schemes that need extra virtual-address/page-table capabilities
+still require the boot integration to provide the corresponding resources; the current interface does not promise to establish mappings itself.
 
-## 并发、上下文和生命周期
+## Concurrency, Context and Lifetime
 
-主核在 heap、其他 allocator 使用者和从核启动前串行初始化；内部不使用 heap。
-映射回调也必须适用于该上下文。初始化和永久标记完成后，klazy::Once 负责发布
-可见性；共享 lookup 不分配、不等待、不取锁、不写描述符。
+The primary core initializes serially before the heap, other allocator users and secondary-core startup; the heap is not used internally.
+The mapping callback must also be valid in that context. After initialization and permanent marking complete, klazy::Once is responsible for publishing
+visibility; shared lookup does not allocate, wait, take locks or write descriptors.
 
-元数据表可移动，描述符地址不变。元数据表不在 Drop 时归还原始 RAM。调用方在元数据表及全部
-借用销毁前保留后备区与映射；全局发布后须永久有效。局部测试先销毁元数据表、allocator
-和借用，再回收夹具。发布后的查询与当前任务或某个 allocator 实例无关。
+The metadata table is movable, and descriptor addresses do not change. The metadata table does not return the original RAM on Drop. The caller keeps the backing region and mappings until the metadata table and all
+borrows are destroyed; after global publication they must remain valid permanently. Local tests first destroy the metadata table, allocator
+and borrows, then reclaim the fixture. Lookups after publication are independent of the current task or any particular allocator instance.
 
 kalloc raw release relies on the original allocation ownership contract rather
 than checking every page's references or permanent flag. Callers must not return
 reference-owned or permanent pages as raw allocations. This service neither
 synchronizes buddy bitmap reservations nor detects raw-protocol double frees.
-永久标记为 false 不代表该页可分配或可释放。
+A permanent flag of false does not mean the page can be allocated or released.
 
 
 ## Allocation references and head/tail geometry

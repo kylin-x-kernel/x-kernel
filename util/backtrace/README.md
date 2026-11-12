@@ -57,7 +57,7 @@ println!("{}", bt);
 
 | Architecture | Status | Frame Offset | Alignment | Notes |
 |--------------|--------|--------------|-----------|-------|
-| x86_64       | ✅     | 0            | 16 bytes  | Fully tested |
+| x86_64       | ✅     | 0            | 8 bytes   | Fully tested |
 | aarch64      | ✅     | 0            | 16 bytes  | Fully tested |
 | riscv32      | ✅     | 1            | 8 bytes   | Tested |
 | riscv64      | ✅     | 1            | 8 bytes   | Fully tested |
@@ -84,8 +84,8 @@ Backtrace:
 With `dwarf` (KFEAT_DWARF): full function names, files and line numbers,
 resolved in kernel (legacy mode).
 
-The raw address is always the first token of each frame line, so the host
-parser works with every format.
+In the default and `symtab` formats the raw address is the first address on
+each frame line, so the host parser works with both.
 
 ## Examples
 
@@ -118,9 +118,9 @@ set_max_depth(20);
 ⚠️ **Important**: Always call `init()` before capturing backtraces!
 
 - Ensure IP and FP ranges cover valid memory
-- Stack unwinding allocates a `Vec` bounded by the configured max depth
+- `Backtrace::capture`/`capture_trap` unwind into a fixed 64-frame buffer without heap allocation (only `unwind_stack` returns a `Vec`)
 - Raw unwinding is designed for panic/NMI/lockup paths: no DWARF parsing,
-  no demangling, no allocation beyond the frame vector
+  no demangling, no heap allocation (fixed frame buffer)
 
 ## Testing
 

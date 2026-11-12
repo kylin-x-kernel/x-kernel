@@ -1,15 +1,15 @@
-# klazy — 安全与可靠性分析
+# klazy — Security and Reliability Analysis
 
-## 概述
+## Overview
 
-`klazy` 是 x-kernel 中广泛使用的底层同步原语，负责内核服务的一次性初始化。
-其中包含 `unsafe` 代码，涉及内部可变性和原子状态转换。不正确的使用或不变量
-破损将导致未定义行为。
+`klazy` is a low-level synchronization primitive widely used in x-kernel, responsible for the one-time initialization of kernel services.
+It contains `unsafe` code involving interior mutability and atomic state transitions. Incorrect use or a broken
+invariant will lead to undefined behavior.
 
-## 信任模型
+## Trust Model
 
 ```
-调用者（内核子系统）
+Caller (kernel subsystem)
    │
    │ safe API: call_once, get, wait, poll, is_completed
    │
@@ -17,8 +17,8 @@
 ┌──────────────────────────────────┐
 │  Once<T> / Lazy<T, F>           │
 │                                  │
-│  ┌── unsafe 边界 ──────────────┐ │
-│  │ AtomicStatus::new_unchecked │ │
+│  ┌── unsafe boundary ──────────┐ │
+│  │ extract_value_unchecked     │ │
 │  │ get_value_unchecked         │ │
 │  │ as_mut_ptr                  │ │
 │  │ MaybeUninit write/read      │ │
@@ -26,34 +26,34 @@
 └──────────────────────────────────┘
 ```
 
-- **safe API 调用者**信任 `klazy` 正确维护其不变量。
-- **unsafe API 调用者**（`get_unchecked`、`get_mut_unchecked`、
-  `into_inner_unchecked`、`as_mut_ptr`）需自行证明初始化已完成。
+- **Callers of the safe API** trust `klazy` to maintain its invariants correctly.
+- **Callers of the unsafe API** (`get_unchecked`, `get_mut_unchecked`,
+  `into_inner_unchecked`, `as_mut_ptr`) must themselves prove that initialization has completed.
 
-## 外部边界 / 攻击面
+## External Boundary / Attack Surface
 
-`klazy` 本身不是 I/O、设备或用户态边界模块，
-其主要攻击面来自调用者传入的初始化闭包和 unsafe API 的误用。
+`klazy` itself is not an I/O, device, or user-space boundary module;
+its main attack surface comes from the initialization closures passed in by callers and from misuse of the unsafe API.
 
-经检查，本模块：
+Upon inspection, this module:
 
-- **不直接访问用户内存**；
-- **不直接操作 MMIO / PIO 寄存器**；
-- **不直接管理 DMA 缓冲区或设备所有权内存**；
-- **不依赖 FFI、内联汇编或架构专有裸接口**；
-- **不直接解析 bootloader、firmware、device tree 或 ACPI 输入**；
-- **不直接处理文件系统、网络或 IPC 外部输入**。
+- **does not directly access user memory**;
+- **does not directly operate on MMIO / PIO registers**;
+- **does not directly manage DMA buffers or device-owned memory**;
+- **does not depend on FFI, inline assembly, or architecture-specific raw interfaces**;
+- **does not directly parse bootloader, firmware, device tree, or ACPI input**;
+- **does not directly handle external input from filesystems, networks, or IPC**.
 
-因此本模块的威胁分析重点在于：
+Therefore the threat analysis of this module focuses on:
 
-- 调用者是否满足初始化时序和 unsafe 前提；
-- 初始化闭包 panic 或长时间执行带来的可用性问题；
-- 并发调用者在自旋等待期间的 CPU 消耗；
-- 调用者是否通过 unsafe API 绕过状态检查。
+- whether callers satisfy the initialization ordering and the unsafe preconditions;
+- availability problems caused by an initialization closure that panics or runs for a long time;
+- CPU consumption of concurrent callers while spin-waiting;
+- whether callers bypass state checks through the unsafe API.
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-### 1. `Status::from_raw`（`util/klazy/src/once.rs:101`）
+### 1. `Status::from_raw` (`util/klazy/src/once.rs:101`)
 
 ```rust
 fn from_raw(raw: u8) -> Self {
@@ -67,12 +67,12 @@ fn from_raw(raw: u8) -> Self {
 }
 ```
 
-**不变量**：`u8` 值必须是有效的 `Status` 判别值（0x00–0x03）。
+**Invariant**: the `u8` value must be a valid `Status` discriminant (0x00–0x03).
 
-**为何安全**：状态解码现在走显式匹配，不再依赖 `transmute`。非法值会
-立刻触发 `unreachable!`，而不是把未验证的判别值重解释成枚举。
+**Why it is safe**: state decoding now goes through an explicit match and no longer relies on `transmute`. An invalid value
+immediately triggers `unreachable!`, instead of reinterpreting an unvalidated discriminant as an enum.
 
-### 2. `Once::get_value_unchecked`（`util/klazy/src/once.rs:419`）
+### 2. `Once::get_value_unchecked` (`util/klazy/src/once.rs:419`)
 
 ```rust
 unsafe fn get_value_unchecked(&self) -> &T {
@@ -80,197 +80,197 @@ unsafe fn get_value_unchecked(&self) -> &T {
 }
 ```
 
-**不变量**：状态必须为 `Ready`（值已初始化）。
+**Invariant**: the state must be `Ready` (the value is initialized).
 
-**调用者**：
-- `get()` — 由 `Acquire` load 检查 `Status::Ready` 保护。
-- `poll()` — 由状态匹配 `Status::Ready` 保护。
-- `try_call_once_slow` — 在 `Release` store `Ready` 之后调用。
-- `get_unchecked()` — 调用者负责（debug 构建中有 `debug_assert`）。
+**Callers**:
+- `get()` — protected by an `Acquire` load that checks for `Status::Ready`.
+- `poll()` — protected by matching on `Status::Ready`.
+- `try_call_once_slow` — called after the `Release` store of `Ready`.
+- `get_unchecked()` — the caller is responsible (there is a `debug_assert` in debug builds).
 
-### 3. `Once::try_call_once_slow` value write（`util/klazy/src/once.rs:306`）
+### 3. `Once::try_call_once_slow` value write (`util/klazy/src/once.rs:306`)
 
 ```rust
 let storage_ptr = (*self.storage.get()).as_mut_ptr();
 storage_ptr.write(initialized_value);
 ```
 
-**不变量**：调用者持有独占 write 权限（CAS 成功转为 `Initializing`），
-此时无并发 reader 能观察到 `Ready` 状态。
+**Invariant**: the caller holds exclusive write permission (the CAS to `Initializing` succeeded),
+and at this point no concurrent reader can observe the `Ready` state.
 
-### 4. `Once::as_mut_ptr`（`util/klazy/src/once.rs:413`）
+### 4. `Once::as_mut_ptr` (`util/klazy/src/once.rs:413`)
 
 ```rust
 pub fn as_mut_ptr(&self) -> *mut T
 ```
 
-**不变量**：初始化前 read 此指针是 UB。write 可用于 FFI 互操作，
-调用者承担全部责任。
+**Invariant**: reading through this pointer before initialization is UB. Writing through it may be used for FFI interoperation,
+and the caller bears all responsibility.
 
-### 5. `Once::get_mut_unchecked`（`util/klazy/src/once.rs:496`）
+### 5. `Once::get_mut_unchecked` (`util/klazy/src/once.rs:496`)
 
 ```rust
 pub unsafe fn get_mut_unchecked(&mut self) -> &mut T
 ```
 
-**不变量**：调用前值必须已经初始化完成。
+**Invariant**: the value must already be fully initialized before the call.
 
-**为何安全**：该 API 要求独占 `&mut self`，
-因此不会与其他 reader / writer 并发访问同一 storage。
-但独占借用本身不代表值已经初始化，
-这一点仍由调用者负责证明。
+**Why it is safe**: this API requires exclusive `&mut self`,
+so it cannot access the same storage concurrently with other readers / writers.
+However, an exclusive borrow by itself does not mean the value has been initialized;
+proving this remains the caller's responsibility.
 
-### 6. `Once::into_inner_unchecked`（`util/klazy/src/once.rs:527`）
+### 6. `Once::into_inner_unchecked` (`util/klazy/src/once.rs:527`)
 
 ```rust
 pub unsafe fn into_inner_unchecked(self) -> T
 ```
 
-**不变量**：消费 `self` 时，内部值必须已经初始化完成。
+**Invariant**: when `self` is consumed, the inner value must already be fully initialized.
 
-**为何安全**：`self` 被按值消费后，不会再有其他并发访问路径；
-`MaybeUninit<T>` 中必须已写入有效 `T`。提取函数先以 `ManuallyDrop`
-包裹单元格，再 `read` 移出值，抑制仍为 `Ready` 的单元格再次析构该值。
+**Why it is safe**: once `self` has been consumed by value, there is no other concurrent access path;
+a valid `T` must already have been written into the `MaybeUninit<T>`. The extraction function first wraps the cell in `ManuallyDrop`,
+then moves the value out with `read`, which prevents the cell, still in the `Ready` state, from dropping the value again.
 
-### 7. `unsafe impl Sync/Send for Once<T>`（`util/klazy/src/once.rs:76`）
+### 7. `unsafe impl Sync/Send for Once<T>` (`util/klazy/src/once.rs:76`)
 
 ```rust
 unsafe impl<T: Send + Sync> Sync for Once<T> {}
 unsafe impl<T: Send> Send for Once<T> {}
 ```
 
-**不变量**：
+**Invariants**:
 
-- `Once<T>` 共享访问时，未初始化 storage 的写入必须与已初始化值的读取正确同步。
-- 只有赢得 CAS 的执行路径能写入内部 `MaybeUninit<T>`。
-- 所有从 `&Once<T>` 派生的共享读取都必须在 `Status::Ready` 的 `Acquire`/`Release`
-  配对之后发生。
+- With shared access to `Once<T>`, the write to uninitialized storage must be correctly synchronized with the read of the initialized value.
+- Only the execution path that wins the CAS may write to the inner `MaybeUninit<T>`.
+- All shared reads derived from `&Once<T>` must happen after the `Acquire`/`Release`
+  pairing on `Status::Ready`.
 
-**为何安全**：`Once<T>` 的并发语义由内部原子状态机和内存序约束保护。
-`T: Send + Sync` 保证已初始化值可被跨线程共享；
-`T: Send` 保证 `Once<T>` 可在线程之间移动而不破坏内部值的所有权语义。
+**Why it is safe**: the concurrency semantics of `Once<T>` are protected by the internal atomic state machine and memory-ordering constraints.
+`T: Send + Sync` guarantees that the initialized value can be shared across threads;
+`T: Send` guarantees that `Once<T>` can be moved between threads without breaking the ownership semantics of the inner value.
 
-### 8. `unsafe impl Sync for Lazy<T, F>`（`util/klazy/src/lazy.rs:91`）
+### 8. `unsafe impl Sync for Lazy<T, F>` (`util/klazy/src/lazy.rs:91`)
 
 ```rust
 unsafe impl<T, F: Send> Sync for Lazy<T, F> where Once<T>: Sync {}
 ```
 
-**不变量**：
+**Invariants**:
 
-- `factory: Cell<Option<F>>` 虽然不是 `Sync`，但只能在 `force()` 的一次性初始化路径中被消费一次。
-- 不得从 `&Lazy<T, F>` 派生出可并发访问的 `&F`。
-- `Lazy` 的共享访问安全性完全依赖底层 `Once<T>` 的同步和 `Cell::take()` 只发生一次。
+- Although `factory: Cell<Option<F>>` is not `Sync`, it may be consumed only once, on the one-time initialization path of `force()`.
+- A concurrently accessible `&F` must not be derived from `&Lazy<T, F>`.
+- The shared-access safety of `Lazy` depends entirely on the synchronization of the underlying `Once<T>` and on `Cell::take()` happening only once.
 
-**为何安全**：`force()` 通过 `Once::call_once()` 保证只有一个执行路径能拿到并消费
-`factory`；其余路径只会在初始化完成后读取 `&T`。因此 `F` 只需 `Send`，
-不需要 `Sync`。
+**Why it is safe**: `force()` uses `Once::call_once()` to guarantee that only one execution path can obtain and consume
+`factory`; all other paths only read `&T` after initialization has completed. Therefore `F` only needs to be `Send`
+and does not need to be `Sync`.
 
-### 9. `Once::Drop`（`util/klazy/src/once.rs:559`）
+### 9. `Once::Drop` (`util/klazy/src/once.rs:559`)
 
 ```rust
-core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
+self.storage.get_mut().assume_init_drop();
 ```
 
-**不变量**：仅在状态为 `Ready` 时调用。独占 `&mut self` 保证无并发访问。
+**Invariant**: called only when the state is `Ready`. Exclusive `&mut self` guarantees there is no concurrent access.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-以下不变量必须在任何时候都成立：
+The following invariants must hold at all times:
 
-1. **Single writer**：只有成功 CAS（从 `Uninitialized` 到 `Initializing`）的
-   线程才能 write `storage`。
+1. **Single writer**: only the thread that succeeds in the CAS (from `Uninitialized` to `Initializing`)
+   may write `storage`.
 
-2. **Ready 前不可 read**：在状态以 `Release` 内存序 store 为 `Ready` 之前，
-   `storage` 不得被当作 `T` read。
+2. **No read before Ready**: before the state is stored as `Ready` with `Release` memory ordering,
+   `storage` must not be read as a `T`.
 
-3. **AtomicStatus 有效性**：底层 `AtomicU8` 必须始终包含有效的 `Status`
-   判别值。通过将 `AtomicStatus` 作为唯一接口并仅接受 `Status` 值（而非
-   原始 `u8`）来保证。
+3. **AtomicStatus validity**: the underlying `AtomicU8` must always hold a valid `Status`
+   discriminant. This is guaranteed by making `AtomicStatus` the only interface and accepting only `Status` values (rather than
+   raw `u8`).
 
-4. **无 double-drop**：`Drop` 仅在状态为 `Ready` 时调用 `drop_in_place`。
-   `try_call_once` 错误路径不会 drop 从未 write 的值；消费提取路径通过
-   `ManuallyDrop` 抑制旧单元格的析构，将唯一析构责任交给返回值的所有者。
+4. **No double-drop**: `Drop` calls `drop_in_place` only when the state is `Ready`.
+   The `try_call_once` error path does not drop a value that was never written; the consuming extraction path uses
+   `ManuallyDrop` to suppress the destruction of the old cell, handing the sole destruction responsibility to the owner of the returned value.
 
-## 线程安全
+## Thread Safety
 
-| 类型           | `Send` 条件            | `Sync` 条件          |
+| Type           | `Send` condition            | `Sync` condition          |
 |---------------|------------------------|----------------------|
 | `Once<T>`     | `T: Send`              | `T: Send + Sync`    |
-| `Lazy<T, F>`  | 自动（字段均为 `Send`） | `Once<T>: Sync`     |
+| `Lazy<T, F>`  | Automatic (all fields are `Send`) | `Once<T>: Sync`     |
 
-`Lazy` 不要求 `F: Sync`，因为工厂函数在 `Once` 同步机制保护下通过
-`Cell::take()` 消费 — 只有一个线程会 read `F`。
+`Lazy` does not require `F: Sync`, because the factory function is consumed via
+`Cell::take()` under the protection of the `Once` synchronization mechanism — only one thread will read `F`.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | 对未初始化 `Once` 调用 `get_unchecked()` 返回未初始化内存引用 | 高 | 调用者在未确认 `is_completed()` 前直接调用 `get_unchecked()` | debug 构建中 `debug_assert` 检测；release 构建依赖调用者正确使用 |
-| T-02 | 通过 `as_mut_ptr()` 获取指针后，在初始化前 read | 高 | 调用者未遵守 `as_mut_ptr()` 文档约束 | 文档标注 `# Safety`，调用者承担证明责任；无运行时检查 |
-| T-03 | 初始化闭包中 panic 导致 `PanicGuard` 将状态标记为 `Failed`，后续所有调用永久 panic | 中 | 闭包包含可能 panic 的代码（如越界访问、除零） | `try_call_once` 提供不 panic 的替代路径，错误时 reset 为 `Uninitialized` 可重试 |
-| T-04 | 自旋等待无超时，初始化线程被抢占时自旋线程浪费 CPU | 低 | 初始化闭包执行时间过长，或调度器延迟高 | 仅用于快速初始化场景；文档约束不建议在热路径使用 |
-| T-05 | `AtomicU8` 在目标架构上非 lock-free，内部可能使用全局锁 | 低 | 在不支持 native `AtomicU8` 的架构上运行 | 当前所有支持目标（x86_64/aarch64/riscv64/loongarch64）均为 lock-free |
-| T-06 | `Lazy` 工厂函数被 `Cell::take()` 消费后，二次 `force()` panic | 中 | `force()` 首次因 panic 失败后再次调用 | 由 `Once` 中毒机制保护，二次调用直接 panic（符合 `std::sync` 语义） |
+| T-01 | Calling `get_unchecked()` on an uninitialized `Once` returns a reference to uninitialized memory | High | The caller calls `get_unchecked()` directly without first confirming `is_completed()` | Detected by `debug_assert` in debug builds; release builds rely on correct use by the caller |
+| T-02 | Reading through a pointer obtained from `as_mut_ptr()` before initialization | High | The caller does not follow the documented constraint of `as_mut_ptr()` | The method docs state that accessing the pointer before initialization is UB; callers bear the burden of proof; no runtime check |
+| T-03 | A panic in the initialization closure causes `PanicGuard` to mark the state as `Failed`, and all subsequent calls panic permanently | Medium | The closure contains code that may panic (such as out-of-bounds access or division by zero) | `try_call_once` provides a non-panicking alternative path; on error it resets to `Uninitialized` so a retry is possible |
+| T-04 | Spin-waiting has no timeout, so spinning threads waste CPU when the initializing thread is preempted | Low | The initialization closure runs for too long, or scheduler latency is high | Intended only for fast-initialization scenarios; documentation constraints discourage use on hot paths |
+| T-05 | `AtomicU8` is not lock-free on the target architecture, and a global lock may be used internally | Low | Running on an architecture that does not support native `AtomicU8` | All currently supported targets (x86_64/aarch64/riscv64/loongarch64) are lock-free |
+| T-06 | After the `Lazy` factory function has been consumed by `Cell::take()`, a second `force()` panics | Medium | `force()` is called again after its first call failed due to a panic | Protected by the `Once` poisoning mechanism; the second call panics directly (consistent with `std::sync` semantics) |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Cause | Local Effect | System Effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | `get()` 对未初始化单元格返回 `None`，调用者未处理 | 调用时序错误，初始化尚未完成 | 依赖该值的功能跳过 | 使用该值的子系统功能缺失 | 3 | 返回 `Option` 强制调用者处理；建议使用 `wait()` 或 `call_once()` |
-| F-02 | 初始化闭包 panic，单元格永久中毒 | 闭包内存在 bug（越界、断言失败等） | 该 `Once` 永不可用 | 依赖该 `Once` 的内核服务无法启动 | 2 | `PanicGuard` 标记 `Failed` 防止 UB；`try_call_once` 提供可重试路径 |
-| F-03 | 多线程竞争 `call_once`，CAS 失败的线程自旋等待 | 正常并发场景 | 自旋线程 CPU 占用 | 短暂 CPU 浪费，无功能影响 | 4 | `spin_loop` 提示 CPU pause；初始化完成后立即返回 |
-| F-04 | `Once` 被 `mem::forget` 泄漏，内部 `T` 不被 drop | 外部代码误用 | `T` 占用的资源不释放 | 内存或资源泄漏 | 3 | Rust 生态已知问题，不构成内存安全问题 |
-| F-05 | `try_call_once` 错误路径重置为 `Uninitialized` 后，另一线程立即 CAS 成功 | 错误恢复后立即重试 | 初始化可能被重复尝试 | 无功能影响（CAS 保证单次执行） | 4 | 正常行为，设计如此 |
-| F-06 | `AtomicStatus` 存入非法 `u8` 值导致 `transmute` 产生无效 `Status` | unsafe 代码被外部修改破坏 | 状态机逻辑异常 | 可能导致 UB 或 panic | 1 | `AtomicStatus` 封装阻止直接写入；`Status` 为 `#[repr(u8)]`，编译器验证判别值范围 |
+| F-01 | `get()` returns `None` for an uninitialized cell and the caller does not handle it | Incorrect call ordering; initialization has not completed yet | Functionality that depends on the value is skipped | The subsystem that uses the value loses functionality | 3 | Returning `Option` forces the caller to handle it; using `wait()` or `call_once()` is recommended |
+| F-02 | The initialization closure panics and the cell is permanently poisoned | A bug in the closure (out-of-bounds access, assertion failure, etc.) | That `Once` is never usable | Kernel services that depend on that `Once` cannot start | 2 | `PanicGuard` marks the state `Failed` to prevent UB; `try_call_once` provides a retryable path |
+| F-03 | Multiple threads race on `call_once`, and threads that lose the CAS spin-wait | Normal concurrent scenario | CPU usage by the spinning threads | Brief CPU waste, no functional impact | 4 | `spin_loop` hints the CPU to pause; returns immediately once initialization completes |
+| F-04 | `Once` is leaked via `mem::forget` and the inner `T` is not dropped | Misuse by external code | Resources held by `T` are not released | Memory or resource leak | 3 | Known issue in the Rust ecosystem; not a memory-safety problem |
+| F-05 | After the `try_call_once` error path resets the state to `Uninitialized`, another thread immediately succeeds with CAS | Immediate retry after error recovery | Initialization may be attempted repeatedly | No functional impact (CAS guarantees single execution) | 4 | Normal behavior, by design |
+| F-06 | An invalid `u8` stored in `AtomicStatus` makes `Status::from_raw` hit `unreachable!` (panic) | Unsafe code corrupted by external modification | State machine logic fails | Panic instead of an invalid `Status` (no `transmute` is used) | 1 | The `AtomicStatus` wrapper prevents direct writes; `Status::from_raw` decodes via an explicit match |
 
-## Panic 安全性
+## Panic Safety
 
-- `PanicGuard` 保证在 unwind 时将状态转为 `Failed`。
-- `Failed` 状态是终态 — 所有后续访问均 panic。
-- `try_call_once` 错误路径：在重置状态为 `Uninitialized` 之前显式
-  `mem::forget`（`PanicGuard`），防止正常错误处理中的二次 panic。
-- 即使 `mem::forget` 失败（不可能 — 它是安全的），守卫也会在 drop 时
-  将单元格标记为 `Failed`，这是保守（安全）的结果。
+- `PanicGuard` guarantees that the state is changed to `Failed` on unwind.
+- The `Failed` state is terminal: all subsequent accesses panic.
+- On the `try_call_once` error path: `mem::forget` is explicitly called on the `PanicGuard`
+  before the state is reset to `Uninitialized`, preventing a second panic during normal error handling.
+- Even if `mem::forget` were to fail (impossible, as it is safe), the guard would mark
+  the cell as `Failed` on drop, which is a conservative (safe) outcome.
 
-## 故障管理
+## Fault Management
 
-`klazy` 通过以下机制处理故障：
+`klazy` handles faults through the following mechanisms:
 
-- **错误传播**：`try_call_once` 返回 `Result<&T, E>`，调用者可处理错误。
-- **中毒检测**：所有 `Failed` 状态的访问立即 panic，防止使用不一致状态。
-- **无错误码**：模块不返回 POSIX 错误码，通过 Rust 的 `Result` / `panic`
-  机制处理异常。
+- **Error propagation**: `try_call_once` returns `Result<&T, E>`, so the caller can handle errors.
+- **Poison detection**: Every access to a `Failed` state panics immediately, preventing use of inconsistent state.
+- **No error codes**: The module does not return POSIX error codes; exceptions are handled through Rust's `Result` / `panic`
+  mechanisms.
 
-## 隐私分析
+## Privacy Analysis
 
-本模块为纯同步原语，不处理用户数据、不执行 I/O、不涉及网络通信。
-不直接涉及用户隐私问题。需确保使用本模块的内核子系统正确管理各自的数据生命周期。
+This module is a pure synchronization primitive. It does not process user data, perform I/O, or involve network communication.
+It does not directly involve user privacy issues. Kernel subsystems that use this module must ensure that they manage the lifetimes of their own data correctly.
 
-## 已知限制
+## Known Limitations
 
-1. **自旋等待无上限**：`wait()` 和 `poll()` 自旋无超时。如果初始化线程
-   被无限期抢占，自旋线程浪费 CPU。在内核早期启动场景可接受，但不应在
-   启动后的热路径中用于长时间初始化闭包。
+1. **Unbounded spin-wait**: `wait()` and `poll()` spin without a timeout. If the initializing thread
+   is preempted indefinitely, the spinning threads waste CPU. This is acceptable in early kernel boot scenarios, but it should not be used
+   with long-running initialization closures in post-boot hot paths.
 
-2. **无优先级反转保护**：自旋线程无法提升初始化线程的优先级。
+2. **No priority inversion protection**: A spinning thread cannot boost the priority of the initializing thread.
 
-3. **中毒不可逆**：`Once` 一旦中毒（`Failed`），永远不可再用。
-   `try_call_once` 出错时单元格会重置为 `Uninitialized`，可重试。
-   但 panic 是不可逆的。
+3. **Poisoning is irreversible**: Once a `Once` is poisoned (`Failed`), it can never be used again.
+   When `try_call_once` fails, the cell is reset to `Uninitialized` and can be retried.
+   A panic, however, is irreversible.
 
-4. **`AtomicU8` lock-free 假设**：在 `AtomicU8` 非 lock-free 的目标上，
-   正确性不受影响但性能下降。当前所有 x-kernel 支持的目标均具有
-   lock-free `AtomicU8`。
+4. **`AtomicU8` lock-free assumption**: On targets where `AtomicU8` is not lock-free,
+   correctness is unaffected but performance degrades. All targets currently supported by x-kernel have
+   lock-free `AtomicU8`.
 
-## 审计清单
+## Audit Checklist
 
-修改 `klazy` 时需验证：
+When modifying `klazy`, verify that:
 
-- [ ] 每个 `unsafe` 块均有 `SAFETY:` 注释说明不变量。
-- [ ] 每条重要 unsafe 路径都能回溯到具体函数和文件位置。
-- [ ] 新增的 `u8 → Status` 转换不绕过 `AtomicStatus`。
-- [ ] `try_call_once_slow` 中的状态转换符合 `design.md` 中的状态机图。
-- [ ] 新增原子操作的内存序不低于 `design.md` 中表格的要求。
-- [ ] `Drop` 实现正确处理所有新增状态。
-- [ ] `PanicGuard` 覆盖新代码中的所有 panic 路径。
+- [ ] Every `unsafe` block has a `SAFETY:` comment stating the invariants.
+- [ ] Every significant unsafe path can be traced back to a specific function and file location.
+- [ ] Any new `u8 → Status` conversion does not bypass `AtomicStatus`.
+- [ ] State transitions in `try_call_once_slow` conform to the state machine diagram in `design.md`.
+- [ ] The memory ordering of any new atomic operation is no weaker than required by the table in `design.md`.
+- [ ] The `Drop` implementation correctly handles all newly added states.
+- [ ] `PanicGuard` covers all panic paths in new code.

@@ -197,7 +197,7 @@ Make variables:
 
 ```make
 UAPPS ?= all
-UAPP_DIR ?= $(PWD)/uapps
+UAPP_DIR ?= $(CURDIR)/uapps
 UAPP_AUTOSTART_TARGET ?= /etc/profile.d/99-autostart.sh
 ```
 
@@ -211,7 +211,7 @@ uapps:
 		exit 1; \
 	fi
 	cargo run --target-dir $(TARGET_DIR)/tools/uapp \
-	  --manifest-path xtask/uapp/Cargo.toml -- \
+	  --manifest-path xtask/Cargo.toml -p uapp -- \
 	  install \
 	  --uapps-dir $(UAPP_DIR) \
 	  --disk-img $(DISK_IMG) \

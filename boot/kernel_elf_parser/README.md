@@ -6,7 +6,7 @@
 
 A lightweight ELF parser written in Rust, providing assistance for loading applications into the kernel.
 
-It reads the data of the ELF file, and generates Sections, Relocations, Segments and so on.
+It reads the ELF header and program headers, and derives the entry point, program-header address and auxiliary-vector entries.
 
 It also generate a layout of the user stack according to the given user parameters and environment variables,which will be
 used for loading a given application into the physical memory of the kernel.

@@ -2,7 +2,7 @@
 
 ## Scope, assets and trust
 
-The complete scope is `src/lib.rs`, including the two exported macros, hidden
+The complete scope is `src/lib.rs`, including the four exported macros (`k_err_type!`, `k_err!`, `k_bail!`, `ensure!`), hidden
 macro support module and `cfg(unittest)` tests. The asset is correct error-domain
 classification at the kernel/Linux boundary. An error value contains neither
 credentials nor a resource handle and grants no permission. Subsystem callers

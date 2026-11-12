@@ -479,10 +479,10 @@ For the static variant, supply the image path through `XKERNEL_RAMDISK_IMG`
 as consumed by `build.rs`. When collecting QEMU unit-test coverage from
 `disk.img`, set `KFEAT_ROOT_BLOCK="vda"` so the profile is written to the
 persistent virtio disk rather than the embedded RAM disk.
-The AHCI, BCM2835 SDHCI and SDMMC modules and their dependency declarations
-remain commented out in the current crate. Their relocated tests are preserved
-source, not registered or executed coverage; this layout migration does not
-reactivate those backends.
+The AHCI and BCM2835 SDHCI modules compile only under `cfg(unittest)` against
+CPU controller fixtures; their production features and dependency declarations
+remain commented out. The SDMMC module remains undeclared, so its relocated tests
+are preserved source, not registered or executed coverage.
 
 Guest test sources live in `ut-tests/` and are mounted at their original
 module boundaries with `unittest::path_mod_test!`. They use `#[def_test]`

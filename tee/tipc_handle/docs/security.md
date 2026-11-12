@@ -153,7 +153,7 @@ object lifetime after table removal.
 - [ ] Register table changes and object events before rechecking readiness; retain the owner while pending (T-07).
 - [ ] Update the unsafe inventory if a hand-written unsafe, FFI, or assembly boundary is introduced.
 
-Existing checks in [tipc tests](../../tipc/src/tests.rs) include
+Existing checks in [tipc tests](../../tipc/ut-tests/tipc_unittest.rs) include
 `handle_set_matches_trusty_empty_and_nested_rules` (T-04/F-03),
 `handle_table_close_detaches_handle_set_entries` and
 `handle_table_forgets_removed_handle_sets` (T-02), and

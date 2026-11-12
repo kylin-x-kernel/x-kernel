@@ -57,13 +57,13 @@ the fault-checked byte copy.
 
 Stateless except for the per-call provider instance; all functions are
 reentrant. `VmBytes`/`VmBytesMut` are single-owner cursors (no interior
-mutability), safe to move across threads like any `Send` value containing
-only integers.
+mutability); they hold a raw user pointer plus a length and are therefore
+`!Send`/`!Sync` by default.
 
 ## Failure handling
 
 Every fallible API returns `MemResult`/`kio::Result`; there are no panics
-in this crate. Error mapping into `KError` (`EFAULT`, `ENAMETOOLONG`) is
+in this crate. Error mapping into `KError` (`EFAULT`, `ENOMEM`, `ENAMETOOLONG`) is
 centralized in `From<MemError>`.
 
 ## Privacy analysis

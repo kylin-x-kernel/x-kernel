@@ -110,7 +110,7 @@ Read aggregated statistics from `/proc/lock_stat` or through
 
 ### `watchdog`
 
-Enable watchdog support for deadlock detection (requires `axhal`).
+Enable watchdog support for deadlock detection (forwards to `kmutex/watchdog`).
 
 ## Architecture
 
@@ -118,4 +118,4 @@ Enable watchdog support for deadlock detection (requires `axhal`).
 - **RwLock**: Atomic state management with separate events for readers/writers
 - **Semaphore**: Atomic counter with blocking on `event_listener::Event`
 
-All primitives use the `lock_api` trait for consistent API surface.
+`Mutex` and `RwLock` use `lock_api` for a consistent API surface; `Semaphore` provides its own `SemaphoreGuard`.

@@ -68,7 +68,7 @@ rolled back on error. `IoVectorBufIo` is the kernel-side cursor with
 carrier and then clears bits at or above `nfds` (`nfds >= FD_SETSIZE` leaves it
 unchanged), and a null pointer yields `Ok(None)`. `SignalSetWithSize` carries
 the `pselect6` mask pointer plus its `sigsetsize`, checked by
-`check_sigset_size` (exactly 8 bytes).
+`check_sigset_size` (zero or exactly 8 bytes; any other size returns `InvalidInput`).
 
 Time conversion is trait-based: `TimeSpanLike` (relative) and `SystemTimeLike`
 (absolute) convert ABI `timespec`/`timeval` variants after `tv_nsec`/`tv_usec`

@@ -835,8 +835,8 @@ observationally, and the task re-checks the head deadline.
 - Deadlines across different clocks are an enum, not shared nanosecond
   scalars, so cross-domain comparisons surface as explicit mismatches
   (panics are confined to internal invariants, never user input).
-- The alarm queue holds only monotonic instants; realtime conversion
-  happens once at enqueue.
+- Each alarm queue holds instants of its own clock domain; conversion to
+  monotonic happens when the task compares heap heads.
 - `snapshot` receives the clock-domain "now" and returns interval and
   remaining `TimeSpan` only.
 - `SIGEV_NONE` timers track expirations with no notification at all

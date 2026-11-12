@@ -233,7 +233,7 @@ limitation must not be presented as a complete suspend-aware clock.
 - Never allocate or reinterpret node names and numbers inside devfs.
 - Preserve detached-fd behavior before enabling index reuse.
 - Add a class adapter before accepting a new `DeviceNodeKind` in devfs.
-- Register removal wakeups before IRQ wakeups and keep event draining in task
+- Register waiters only on the client `PollSet` and keep event draining in task
   context.
 
 Firmware DTB capture precedes the first static root construction, preventing

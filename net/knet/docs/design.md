@@ -152,7 +152,6 @@ net/knet/
     │   ├── port.rs
     │   ├── rtnetlink.rs
     │   ├── socket.rs
-    │   ├── tests.rs
     │   └── wire.rs
     ├── netns.rs
     ├── network/
@@ -174,9 +173,7 @@ net/knet/
     │   ├── general.rs
     │   ├── mod.rs
     │   ├── options.rs
-    │   ├── state.rs
-    │   ├── test_options.rs
-    │   └── test_state.rs
+    │   └── state.rs
     ├── stack/
     │   ├── ingress.rs
     │   ├── mod.rs
@@ -1434,7 +1431,7 @@ stop point as Linux, which ends its read after the first fd-bearing skb.
 | 2 | **send** publishes the bytes through `advance_write_index`; the cursor `sent_total` advances with the registration. |
 | 3 | A send registers its record only when it is about to publish at least one byte, immediately before `advance_write_index`. A failed read, a rejected liveness check, an exhausted record quota (`ENOBUFS`), or a closed consumer (`EPIPE`) publishes no byte and leaves no record. |
 | 4 | **recv** caps its copy at `min(occupied, record.end - recv_total)` for the oldest pending record: the read may span plain data and stop at the record's committed segment end. |
-| 5 | **recv** copies up to that cap, then retires the record its window reached (`pop_reached`) and delivers its entries to the caller. |
+| 5 | **recv** copies up to that cap, then retires the record its window reached (`take_reached`) and delivers its entries to the caller. |
 | 6 | On `MSG_PEEK`, the read stops at the same cap but the record is **duplicated** (the shared entry-handle `Arc`) and kept for the later consuming recv; the ring and cursor are not advanced. |
 | 7 | On a consuming recv with a control buffer, the record is retired into `RecvOptions.ancillary`. |
 | 8 | On a consuming recv **without** a control buffer, the reached record is dropped instead of being inherited by a later `recvmsg`, and `RecvOptions.ancillary_discarded` reports the loss so the POSIX layer sets `MSG_CTRUNC`. |
@@ -1659,7 +1656,7 @@ callers outside a user-task context specify credentials explicitly through
 
 ### Credentials for Unix Messages and Peer Queries
 
-Unix datagram, stream and seqpacket sockets can be inherited or passed between processes. POSIX send and socket-file write ask the transport once per send through `UnixDomainSocket::should_attach_sender_credentials`, which applies the Linux `unix_passcred_enabled` gate: datagram sends always capture, while a stream send captures when either endpoint of a connected pair enabled `SO_PASSCRED`. The gate calls `unix::current_sender_credentials` only when capture is needed, recording the sender as `SenderCredentials { pid: Option<Arc<kidentity::PidHandle>>, uid, gid }` — the task-number identity (`struct pid`, the process leader for automatic credentials) plus real UID/GID — in `SendOptions::unix_sender_credentials`. The pid is deliberately kept as an identity rather than a number: Linux stores a `struct pid` per message and resolves it with `pid_vnr` in the reading task's active PID namespace, so a receiver in another PID namespace sees its own view of the sender (0 when the sender has no projection there). The helper requires a current user thread; kernel callers without one may leave the snapshot unset or supply an explicit snapshot through `listen_with_credentials`/`connect_with_credentials`.
+Unix datagram, stream and seqpacket sockets can be inherited or passed between processes. POSIX send and socket-file write ask the transport once per send through `UnixDomainSocket::should_attach_sender_credentials`, which applies the Linux `unix_passcred_enabled` gate: datagram sends always capture, while a stream send captures when either endpoint of a connected pair enabled `SO_PASSCRED`. The gate calls `unix::current_sender_credentials` only when capture is needed, recording the sender as `SenderCredentials { pid: Option<Arc<kidentity::PidHandle>>, uid, gid }` — the task-number identity (`struct pid`, the process leader for automatic credentials) plus real UID/GID — in `SendOptions::sender_credentials`. The pid is deliberately kept as an identity rather than a number: Linux stores a `struct pid` per message and resolves it with `pid_vnr` in the reading task's active PID namespace, so a receiver in another PID namespace sees its own view of the sender (0 when the sender has no projection there). The helper requires a current user thread; kernel callers without one may leave the snapshot unset or supply an explicit snapshot through `listen_with_credentials`/`connect_with_credentials`.
 
 `DgramTransport` stores the snapshot with the queued message instead of using the PID recorded when the socket was created. On receive, `GeneralOptions::pass_credentials` controls whether the transport appends `KernelAncillaryData::Credentials` to the returned ancillary data; the identity is a `PidHandle` and the POSIX receive path resolves it in the receiver's namespace before serializing the result as `SCM_CREDENTIALS`, reporting `MSG_CTRUNC` when the control buffer is absent or too small. Kernel peers with a fixed numeric identity (netlink kobject uevents) send the same variant with no identity, which serializes as `pid=0`.
 

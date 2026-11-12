@@ -1,4 +1,4 @@
-# fs_boot — 设计文档
+# fs_boot — Design Document
 
 ## 9P transport preparation
 
@@ -19,13 +19,13 @@ KERNEL allocation policy is permitted. These are not early-boot allocations.
 The existing boot boundary still stops startup if a required filesystem cannot
 be constructed; ordinary filesystem constructors do not impose that policy.
 
-## 定位
+## Positioning
 
-`fs_boot` 拥有初始 mount namespace 的布局与 root device 选择策略，不拥有具体 block
-filesystem 的 mount 算法。内建 filesystem type 在用户态启动前注册，普通 mount、boot
-root 和 `/proc/filesystems` 读取同一组 descriptor。
+`fs_boot` owns the layout of the initial mount namespace and the root device selection policy; it does not own the mount algorithm of any specific block
+filesystem. Built-in filesystem types are registered before userspace starts, and ordinary mounts, the boot
+root, and reads of `/proc/filesystems` all use the same set of descriptors.
 
-## 架构
+## Architecture
 
 ```text
 block::block_devices -> select root policy -> /dev/<disk_name>
@@ -43,74 +43,75 @@ bootstrap rootfs -> bootstrap devtmpfs         v
                                    overmount bootstrap rootfs
 ```
 
-Kconfig 的 ext4/FAT 开关只决定把哪些 block filesystem 链入运行态，不预选 root 格式。
-每个已链接后端通过统一 `register_init` 段注册自己的 canonical `FileSystemType` 静态对象；
-`kruntime` 只执行该段，不引用或调用具体后端。`fs_boot` 不接收 root descriptor，也不定义 root
-provider trait 或第二套名称/能力来源。root 候选从同一 registry 的 `REQUIRES_DEV` 类型中
-取得，`get_tree` 与用户 `mount(2)` 完全相同。这对应 Linux 各文件系统 init 函数调用
-`register_filesystem()`，随后 `mount_root_generic()` 读取 `list_bdev_fs_names()` 的层次。
+The Kconfig ext4/FAT switches only decide which block filesystems are linked into the runtime; they do not preselect the root format.
+Each linked backend registers its own canonical `FileSystemType` static object through the unified `register_init` section;
+`kruntime` only executes that section and does not reference or call any specific backend. `fs_boot` does not accept a root descriptor, and it defines neither a root
+provider trait nor a second source of names/capabilities. Root candidates are
+taken from the `REQUIRES_DEV` types in the same registry,
+and `get_tree` is exactly the same as for a user `mount(2)`. This corresponds to the Linux layering in which each filesystem's init function calls
+`register_filesystem()`, and `mount_root_generic()` then reads `list_bdev_fs_names()`.
 
-初始 namespace 先在 KVFS structural nullfs 上挂一个名为 `rootfs` 的 ramfs，并把 init
-`FsStruct` 临时指向它。随后在 `/dev` 挂共享 devtmpfs，使 root source 能按 pathname
-解析。选定 root disk 后构造普通 `FsContext`，经 `get_tree_bdev` 查找或创建真实 superblock，
-再把它 overmount 到 bootstrap root。最后把 init `FsStruct` 的 root/pwd 成对更新到新的
-visible root。bootstrap rootfs 保留在覆盖层下，对应 Linux 初始 rootfs 的生命周期。
+The initial namespace first mounts a ramfs named `rootfs` on the KVFS structural nullfs, and temporarily points the init
+`FsStruct` at it. A shared devtmpfs is then mounted at `/dev`, so that the root source can be resolved by pathname.
+After the root disk is selected, an ordinary `FsContext` is constructed, the real superblock is looked up or created through `get_tree_bdev`,
+and it is then overmounted onto the bootstrap root. Finally, the root/pwd of the init `FsStruct` are updated as a pair to the new
+visible root. The bootstrap rootfs remains under the overlay, which corresponds to the lifecycle of the Linux initial rootfs.
 
-真实 root 发布后，boot 显式初始化 `anon_inodefs` 与 `pipefs` 的 hidden mount。两者是
-不可由用户 mount 的内核伪文件系统，不进入用户可见 filesystem registry；初始化发生在
-普通 task/eventfd/socket/pipe 路径运行前，runtime caller 只读取已发布对象。
+After the real root is published, boot explicitly initializes the hidden mounts of `anon_inodefs` and `pipefs`. Both are
+kernel pseudo filesystems that users cannot mount, and they do not enter the user-visible filesystem registry; initialization happens before
+the ordinary task/eventfd/socket/pipe paths run, and runtime callers only read the already published objects.
 
-用户态启动前，真实 root 上再挂同一个共享 devtmpfs 以及 tmpfs、procfs、sysfs 和可选
-bpffs。`KFEAT_FS_CGROUP2=y` 时还会创建并挂载 `/sys/fs/cgroup`。通常每个固定路径直接
-使用已经由 init 段注册的 canonical descriptor 构造 `FsContext`，再调用
-`MntNamespace::mount_new()`。cgroup2 是启动期例外：PID 1 尚未创建，不能使用普通 mount
-路径的 current cgroup namespace，因此 `fs_boot` 请求 `cgroup2fs` 构造绑定
-`CgroupNamespace::initial()` 的 superblock，再通过 namespace attach 挂载；该 superblock
-仍引用 canonical `FILE_SYSTEM_TYPE`。boot 不按名称二次查表。devtmpfs/sysfs 的 internal
-mount 保证可见 mount 卸载后内核维护的树仍然存活。
-通用 mount helper 要求目标
-目录已经存在；需要由 boot 创建的路径先通过 `ensure_directory_path()` 逐级建立，9P 的动态
-`/mnt/hostshare` 与固定虚拟文件系统路径使用同一显式 policy，不把递归创建隐藏在 mount 机制中。
-可写 root 缺少这些目录时 boot 会按 policy 创建；只读 root 必须像 Linux 的真实 root 一样
-预先包含 `/dev`、`/tmp`、`/proc` 和 `/sys` 等必要 mountpoint，否则镜像不满足启动契约。
+Before userspace starts, the same shared devtmpfs, together with tmpfs, procfs, sysfs, and the optional
+bpffs, is mounted on the real root. When `KFEAT_FS_CGROUP2=y`, `/sys/fs/cgroup` is also created and mounted. Usually, each fixed path directly
+uses the canonical descriptor already registered by the init section to construct an `FsContext`, and then calls
+`MntNamespace::mount_new()`. cgroup2 is a boot-time exception: PID 1 has not been created yet, so the current cgroup namespace used by the ordinary mount
+path cannot be used. Therefore `fs_boot` asks `cgroup2fs` to construct a superblock bound to
+`CgroupNamespace::initial()`, and then mounts it through namespace attach; that superblock
+still references the canonical `FILE_SYSTEM_TYPE`. Boot does not look up the table a second time by name. The internal
+mounts of devtmpfs/sysfs guarantee that the kernel-maintained tree stays alive after the visible mount is unmounted.
+The generic mount helper requires the target
+directory to already exist; paths that boot needs to create are first established level by level through `ensure_directory_path()`. The dynamic 9P
+`/mnt/hostshare` and the fixed virtual filesystem paths use the same explicit policy, and recursive creation is not hidden inside the mount mechanism.
+When the root is writable and lacks these directories, boot creates them according to policy; a read-only root, like a real Linux root, must
+already contain the necessary mountpoints such as `/dev`, `/tmp`, `/proc`, and `/sys`, otherwise the image does not satisfy the boot contract.
 
-## 算法流程
+## Algorithm Flow
 
-1. 统一 init 段执行各文件系统自己拥有的注册回调，发布 canonical type。
-2. 建立 bootstrap rootfs、initial namespace 和 init `FsStruct`。
-3. 在 bootstrap `/dev` 挂载 devtmpfs。
-4. 从非零容量的 canonical `BlockDevice` 中按 `KFEAT_ROOT_BLOCK` 选择 root；未配置时兼容
-   路径按 `dev_t` 顺序选择。
-5. 从 registry 遍历 `REQUIRES_DEV` 候选；先以 RW flags 完整尝试一轮，再加入
-   `SB_RDONLY`/`MNT_READONLY` 完整重试一轮。每次都以 `/dev/<disk_name>` 为 source 构造
-   `FsContext` 并调用 `MntNamespace::mount_new()`；与 Linux `mount_root_generic()` 一样，
-   只有 `EACCES`/`EINVAL` 会继续尝试下一种格式，其它错误立即停止启动。
-6. 成对更新 init root/pwd 到 overmount 后的真实 root。
-7. 初始化 `anon_inodefs` 与 `pipefs` 的 hidden mount。
-8. 在真实 root 上安装启动期虚拟文件系统；普通类型使用 `mount_new()`，启用的 cgroup2
-   使用 initial hierarchy superblock attach。
+1. The unified init section executes the registration callbacks owned by each filesystem and publishes the canonical types.
+2. Establish the bootstrap rootfs, the initial namespace, and the init `FsStruct`.
+3. Mount devtmpfs on the bootstrap `/dev`.
+4. Select the root from the non-zero-capacity canonical `BlockDevice`s according to `KFEAT_ROOT_BLOCK`; when it is not configured, the compatibility
+   path selects in `dev_t` order.
+5. Iterate over the `REQUIRES_DEV` candidates from the registry; first try one complete round with RW flags, then add
+   `SB_RDONLY`/`MNT_READONLY` and retry one complete round. Each time, construct an
+   `FsContext` with `/dev/<disk_name>` as the source and call `MntNamespace::mount_new()`; as with Linux `mount_root_generic()`,
+   only `EACCES`/`EINVAL` continue on to try the next format, and any other error stops startup immediately.
+6. Update the init root/pwd as a pair to the real root after the overmount.
+7. Initialize the hidden mounts of `anon_inodefs` and `pipefs`.
+8. Install the boot-time virtual filesystems on the real root; ordinary types use `mount_new()`, and the enabled cgroup2
+   uses an attach of the initial hierarchy superblock.
 
-## 所有权与并发
+## Ownership and Concurrency
 
-initial namespace 由 boot CPU 串行建立。`block::BlockDevice` 的发布与 `dev_t` lookup 由
-block core 拥有；boot 只持有选择和 mount 期间的 `Arc`。Kconfig 只控制 block filesystem
-implementation 是否链接；每个已链接实现恰好把一个静态 descriptor 注册进 KVFS
-registry，root 格式由 registry 探测结果决定。
+The initial namespace is established serially by the boot CPU. The publication of `block::BlockDevice` and the `dev_t` lookup are owned by
+the block core; boot only holds an `Arc` during selection and mount. Kconfig only controls whether a block filesystem
+implementation is linked; each linked implementation registers exactly one static descriptor into the KVFS
+registry, and the root format is determined by the registry probing result.
 
-`nosuid`、`nodev`、`noexec` 和 `relatime` 写入各自 `Mount`；只有 filesystem-wide 只读
-状态进入 `SuperBlockFlags`。bootstrap devfs 与真实 root 上的 devfs 都不能设置 `nodev`。
+`nosuid`, `nodev`, `noexec`, and `relatime` are written to the respective `Mount`; only the filesystem-wide read-only
+state goes into `SuperBlockFlags`. Neither the bootstrap devfs nor the devfs on the real root may set `nodev`.
 
-## 设计决策
+## Design Decisions
 
-- root device selection 是 boot policy；source resolution 和 fill-super 是通用 VFS 机制。
-- 非空 `KFEAT_ROOT_BLOCK` 是权威配置，找不到同名 disk 时停止启动，不猜测其他介质。
-- `fs_boot` 不引用 ext4/FAT crate，也不维护 filesystem name switch；`kruntime` 只初始化
-  统一 init 段，descriptor 注册由实现自己拥有。
-- 空容量 loop disk 不参加 root fallback，但仍是正常 block-core 对象。
-- 固定虚拟文件系统路径属于 initial namespace policy，保持显式。
-- cgroup2 hierarchy 的启动挂载属于 feature-controlled boot policy；`mini-oci` 等用户态
-  消费者不负责初始化宿主机全局 hierarchy。
-- boot 负责递归创建其声明拥有的 mountpoint；KVFS mount helper 只挂载已解析目录。
+- Root device selection is boot policy; source resolution and fill-super are generic VFS mechanisms.
+- A non-empty `KFEAT_ROOT_BLOCK` is authoritative configuration; if no disk with that name is found, startup stops, and no other media are guessed.
+- `fs_boot` does not reference the ext4/FAT crates and does not maintain a filesystem name switch; `kruntime` only initializes the
+  unified init section, and descriptor registration is owned by the implementations themselves.
+- An empty-capacity loop disk does not take part in the root fallback, but it is still a normal block-core object.
+- Fixed virtual filesystem paths belong to the initial namespace policy and are kept explicit.
+- The boot-time mount of the cgroup2 hierarchy is a feature-controlled boot policy; userspace
+  consumers such as `mini-oci` are not responsible for initializing the host-global hierarchy.
+- Boot is responsible for recursively creating the mountpoints it declares ownership of; the KVFS mount helper only mounts already resolved directories.
 
-设备树快照捕获与静态节点发布由 devtmpfs 首次根目录构造统一完成。
-`mount_virtual_filesystems()` 只负责挂载，不再执行晚期设备树捕获。
+Device tree snapshot capture and static node publication are done uniformly by the first root directory construction of devtmpfs.
+`mount_virtual_filesystems()` is only responsible for mounting and no longer performs late device tree capture.

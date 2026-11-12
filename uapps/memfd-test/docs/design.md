@@ -1,38 +1,38 @@
-# memfd-test — 设计文档
+# memfd-test — Design Document
 
-## 定位与范围
+## Positioning and Scope
 
-该用户态回归直接通过 `SYS_memfd_create` 进入 syscall，不模拟内核名称校验。
-它覆盖 `ict/shared-buffer` 和 `/../buffer`，修复前内核对首个带 `/` 的名称
-返回 `EINVAL`，程序退出非零；修复后还必须通过后续对象可用性检查。
+This user-space regression enters the syscall directly through `SYS_memfd_create` and does not simulate the kernel's name validation.
+It covers `ict/shared-buffer` and `/../buffer`. Before the fix, the kernel returned `EINVAL` for the first name containing `/`,
+and the program exited non-zero; after the fix, it must also pass the subsequent object-usability checks.
 
-## 流程与执行上下文
+## Flow and Execution Context
 
-程序为单线程 Linux ABI 用户进程，无需 root、procfs 或全局临时路径。
-每个标签创建两个 fd，第二个标签用 `:` 替换 `/`，在 X-Kernel 内部格式化后
-与第一个同名。分别 `ftruncate` 到 4096 字节，将第一个以 `MAP_SHARED` 映射，
-写入已知内容、解除映射后通过 `pread` 核对；第二个必须仍返回零数据。
-它验证 syscall 接受标签、匿名对象可用、同名 backing 不共享内容。
+The program is a single-threaded Linux ABI user process and requires no root, procfs, or global temporary paths.
+For each label it creates two fds. The second label replaces `/` with `:`, so that after formatting inside X-Kernel
+it has the same name as the first. Each is `ftruncate`d to 4096 bytes. The first is mapped with `MAP_SHARED`,
+written with known content, unmapped, and then verified through `pread`; the second must still return zero data.
+It verifies that the syscall accepts the label, that the anonymous object is usable, and that backings with the same name do not share content.
 
-这不是内核私有 mount 拓扑检查，也不要求 `/proc/self/fd` 与 Linux 的显示名
-逐字一致。内核 formatter 单元断言只验证单分量格式，不替代本回归。
+This is not a check of the kernel's private mount topology, nor does it require `/proc/self/fd` to match
+Linux's display name character for character. The kernel formatter unit assertions only verify the single-component format and do not replace this regression.
 
-## 构建与运行
+## Build and Run
 
-在已配置平台与独立测试镜像上运行：
+Run on a configured platform with a separate test image:
 
 ```sh
 make uapps UAPPS=memfd-test
-# 在测试 guest 中手动运行：
+# Run manually in the test guest:
 /usr/local/bin/memfd-test
 ```
 
-manifest 使用平台提供的 `CROSS_COMPILE`，静态链接，无新增 Cargo 依赖。
-没有 autostart，不能把安装成功当作执行成功。只有退出 0 并输出
-`memfd slash syscall regression: PASS` 才算本程序通过。Linux 参考与
-X-Kernel 修复前后必须分别记录源码、二进制与实际退出码。
+The manifest uses the platform-provided `CROSS_COMPILE`, links statically, and adds no new Cargo dependencies.
+There is no autostart, so a successful installation must not be taken as a successful execution. The program passes only if it exits with 0 and prints
+`memfd slash syscall regression: PASS`. The Linux reference and
+X-Kernel before and after the fix must each have their source, binary, and actual exit code recorded.
 
-## 资源释放
+## Resource Release
 
-所有失败路径汇合到清理逻辑，释放已创建的映射和两个 fd；不使用全局 hook、
-线程、fork 或固定文件名。清理失败同样使程序退出非零。
+All failure paths converge on cleanup logic that releases the created mappings and the two fds; no global hooks,
+threads, fork, or fixed file names are used. A cleanup failure likewise makes the program exit non-zero.

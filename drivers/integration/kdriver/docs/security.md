@@ -6,7 +6,7 @@ This analysis covers the entire crate: `src/lib.rs`, `src/manager.rs`,
 `src/enumeration.rs`, `src/resource.rs`, `src/firmware_dma.rs`,
 `src/block_completion*.rs`,
 `src/block_irq.rs`, `src/bus/`, and `src/driver_registry/` (including
-the VirtIO, block, char, and net driver glue), plus `src/tests/`, which
+the VirtIO, block, char, and net driver glue), plus `ut-tests/`, which
 is test-only. Reusable concrete drivers behind the registry are audited
 in their own crates; this document covers the host integration glue.
 
@@ -284,7 +284,7 @@ Callers:
 
 ### 3. VirtIoHalImpl — Unsafe Trait Implementation
 
-Location: `src/driver_registry/virtio/glue.rs:139`
+Location: `src/driver_registry/virtio/glue.rs:267`
 
 ```rust
 unsafe impl VirtIoHal for VirtIoHalImpl { ... }
@@ -302,69 +302,73 @@ Individual operations:
 
 #### 3a. `dma_alloc`
 
-Location: `src/driver_registry/virtio/glue.rs:148,150`
+Location: `src/driver_registry/virtio/glue.rs:274,281`
 
-- Constructs `Layout::from_size_align(pages * PAGE_SIZE_4K, PAGE_SIZE_4K)` before
-  calling `allocate_dma_memory`.
+- Constructs `DmaSpec::new(pages * PAGE_SIZE_4K, PAGE_SIZE_4K)` before
+  calling `resource_provider().alloc_coherent`.
 - Zeroes the allocation through `write_bytes(0)`:
-  `unsafe { core::ptr::write_bytes(dma_info.cpu_addr.as_ptr(), 0, size) }`.
+  `unsafe { core::ptr::write_bytes(cpu_ptr, 0, size) }`.
 - Returns `(0, NonNull::dangling())` on failure; the VirtIO transport detects and
   reports the error.
 
 #### 3b. `dma_dealloc`
 
-Location: `src/driver_registry/virtio/glue.rs:165,178`
+Location: `src/driver_registry/virtio/glue.rs:308,309`
 
-- Uses the same `Layout` as allocation: `pages * PAGE_SIZE_4K` bytes aligned to `PAGE_SIZE_4K`.
-- Reconstructs `DmaInfo` from `paddr` and `vaddr` before calling `deallocate_dma_memory`.
+- Uses the same `DmaSpec` as allocation: `pages * PAGE_SIZE_4K` bytes aligned to `PAGE_SIZE_4K`.
+- Reconstructs `DmaAllocation` from `paddr` and `vaddr` before calling `resource_provider().free_coherent`.
 
 #### 3c. `mmio_phys_to_virt`
 
-Location: `src/driver_registry/virtio/glue.rs:183`
+Location: `src/driver_registry/virtio/glue.rs:318`
 
 ```rust
 unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
-    iomap_mmio(paddr as usize, size, "virtio-mmio-hal")
-        .expect("failed to iomap virtio MMIO region")
+    let region = MmioRegion { base: paddr as usize, size };
+    match resource_provider().map_mmio(region, "virtio-hal") { ... }
 }
 ```
 
-- `iomap_mmio` calls `memspace::iomap_device` through the standard MMIO validation path.
-- Mapping failure panics. This path runs only after the VirtIO transport has confirmed
+- The mapping goes through `resource_provider().map_mmio`.
+- Mapping failure logs an error and calls `panic!`. This path runs only after the VirtIO transport has confirmed
   that the device exists, so failure indicates a platform configuration error.
 
 #### 3d. `share`
 
-Location: `src/driver_registry/virtio/glue.rs:190,195`
+Location: `src/driver_registry/virtio/glue.rs:356,361`
 
 ```rust
 unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection, ...) -> PhysAddr {
-    unsafe { kdma::map_dma_buffer(buffer, dma_direction(direction)) }
-        .expect(...)
-        .bus_addr.as_u64() as PhysAddr
+    match resource_provider().map_streaming(buffer, hal_direction(direction)) {
+        Ok(m) => m.bus_addr as PhysAddr,
+        Err(err) => { /* log */ 0 }
+    }
 }
 ```
 
 - `buffer` is a valid buffer supplied to the VirtIO transport by `dma_alloc` or an upper layer.
-- `direction` is correctly translated into `kdma::DmaDirection`.
+- `direction` is translated into `DmaDirection` by `hal_direction`.
+- On failure, `share` logs an error and returns paddr 0 instead of panicking.
 
 #### 3e. `unshare`
 
-Location: `src/driver_registry/virtio/glue.rs:203,209`
+Location: `src/driver_registry/virtio/glue.rs:371,387`
 
 ```rust
 unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection, ...) {
-    unsafe { kdma::unmap_dma_buffer(DmaBusAddress::new(paddr), buffer, dma_direction(direction)) };
+    if paddr == 0 { return; }
+    resource_provider().unmap_streaming(DmaMapping { .. });
 }
 ```
 
 - `paddr` and `buffer` come from the same `share` operation.
+- A `paddr` of 0 returns early; otherwise a `DmaMapping` is reconstructed and passed to `unmap_streaming`.
 - The `virtio` transport guarantees paired calls.
 
 Callers:
 
 - The `virtio` transport layer: `VirtIoNetDev`, `VirtIoBlkDev`, `VirtIoGpuDev`,
-  `VirtIoInputDev`, `VirtIoSocketDev`, and `VirtIo9pDev`.
+  `VirtIoInputDev`, `VirtIoVsockDev`, `VirtIoRngDev`, and `VirtIo9pDev`.
 
 ### 4. VirtIO MMIO Discovery During Platform Enumeration
 
@@ -536,7 +540,7 @@ Callers:
 
 ### 8. IxgbeHal — Unsafe Trait Implementation
 
-Location: `src/driver_registry/net/ixgbe_hal.rs:14`
+Location: `src/driver_registry/net/ixgbe_hal.rs:33`
 
 ```rust
 unsafe impl IxgbeHal for IxgbeHalImpl { ... }
@@ -544,11 +548,11 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 
 Individual operations:
 
-- `dma_alloc` (line 17): `Layout::from_size_align(size, 8)` followed by `allocate_dma_memory`.
-- `dma_dealloc` (lines 23 and 29): Reconstructs `Layout`, then calls `deallocate_dma_memory`.
-- `mmio_p2v` (line 33): Directly converts a physical address to a virtual address through
+- `dma_alloc` (line 34): `DmaSpec::new(size, 8)` followed by `resource_provider().alloc_coherent`.
+- `dma_dealloc` (line 49): Reconstructs `DmaSpec`/`DmaAllocation`, then calls `resource_provider().free_coherent`.
+- `mmio_p2v` (line 63): Directly converts a physical address to a virtual address through
   `khal::mem::p2v`, assuming that the caller supplies a valid physical address.
-- `mmio_v2p` (line 37): Performs the reverse conversion through `khal::mem::v2p`.
+- `mmio_v2p` (line 74): Performs the reverse conversion through `khal::mem::v2p`.
 
 Invariants:
 
@@ -645,7 +649,7 @@ Callers:
 | `PCI_BAR_ALLOCATOR` | `SpinNoPreempt<Option<PciRangeAllocator>>` satisfies `Send` and `Sync` | `SpinNoPreempt` provides interior mutability. |
 | `PlatformBackend` | The `LocalIdAlloc` field is `Copy` and satisfies `Send` | Does not implement `Sync`; access is serialized by the `BusManager` lock. |
 | `PciBackend` | `Cam` satisfies `Send` | Does not implement `Sync`. |
-| `VirtIoHalImpl` | Zero-sized type | Calls `kdma` and `iomap_mmio`, each responsible for its own thread safety. |
+| `VirtIoHalImpl` | Zero-sized type | Calls the `resource_provider()` DMA and MMIO methods, which are responsible for their own thread safety. |
 
 ## Threat Analysis
 
@@ -733,8 +737,7 @@ Severity levels:
   the VirtIO transport has confirmed device presence, unsafe failure paths return
   `Result` or log errors.
 - Panic paths primarily come from `expect` after `LazyInit::call_once`, where static
-  initialization failure indicates a platform configuration error, and overflow in
-  `LocalIdAlloc::alloc`, where `u16` overflow indicates an abnormal device count.
+  initialization failure indicates a platform configuration error; `LocalIdAlloc::alloc` exhaustion returns `DriverError::NoMemory` instead of panicking.
 
 ## Privacy Analysis
 

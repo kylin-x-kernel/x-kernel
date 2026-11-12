@@ -136,8 +136,7 @@ A future deadline becomes a relative count clamped to `1..=u32::MAX`; an expired
 deadline uses count 1. Writing count 0 disarms the timer. TSC calibration does
 not calibrate the LAPIC event rate.
 
-ARM samples logical counter time in nanoseconds, subtracts it from the software
-deadline with saturation, then converts the remaining duration to ticks rounded
+ARM receives a relative interval from HAL, which owns deadline subtraction, then converts the remaining duration to ticks rounded
 up and clamped to `i32::MAX`. Multiplication saturates before division: since
 `i32::MAX * 1_000_000_000` fits in `u64`, an overflowing product already requires
 the maximum countdown. This avoids absolute-deadline conversion wrap without

@@ -1,4 +1,4 @@
-# memspace — 设计文档
+# memspace — Design Document
 
 ## Post-populate action ownership
 
@@ -24,41 +24,41 @@ no allocation into existing fault paths. Future producers must propagate
 preparation errors through the backend result; NoMemory remains classified as
 `PageFaultOutcome::OutOfMemory`. No NOFAIL guarantee is implemented.
 
-## 定位
+## Positioning
 
-`memspace` 是 X-Kernel 的地址空间 owner。它维护 `MmSpace`、`VmAreaSet`、
-`VmArea`、页表根和 VMA-side runtime dispatch。
+`memspace` is the address-space owner of X-Kernel. It maintains `MmSpace`, `VmAreaSet`,
+`VmArea`, the page-table root, and VMA-side runtime dispatch.
 
-它不拥有 file-backed cached content，也不拥有 anonymous page content。
-内容对象分别由 `kvfs::AddressSpace` 和 `mm/anon` 管理；`memspace` 只保存
-VMA metadata、运行时执行引用和页表状态。
+It owns neither file-backed cached content nor anonymous page content.
+Content objects are managed by `kvfs::AddressSpace` and `mm/anon` respectively; `memspace` only holds
+VMA metadata, runtime execution references, and page-table state.
 
-## 背景
+## Background
 
-当前模型显式区分三类职责：
+The current model explicitly distinguishes three kinds of responsibilities:
 
-- `VmAreaSet`：地址空间里的 VMA metadata 容器。
-- `VmArea`：单个映射实例的 range、permission、backing、file metadata 和
-  inheritance metadata。
-- `VmRuntimeRef` / `VmRuntimeOps`：VMA-side map/unmap/protect/fault/fork/mremap
-  执行入口，角色接近 Linux `vm_operations_struct`。
-- `MmUserHandle` / `MmPin`：地址空间生命周期 capability。`MmUserHandle`
-  对应 Linux `mm_users`，表示仍有 runtime 或临时路径 active 使用用户映射；
-  `MmPin` 预留 Linux `mm_count` 风格对象 pin，只保证 `MmSpace` 对象和稳定
-  identity 可观察，不延长用户映射生命周期。
+- `VmAreaSet`: the container of VMA metadata in an address space.
+- `VmArea`: the range, permission, backing, file metadata, and
+  inheritance metadata of a single mapping instance.
+- `VmRuntimeRef` / `VmRuntimeOps`: the VMA-side map/unmap/protect/fault/fork/mremap
+  execution entry points, with a role close to Linux `vm_operations_struct`.
+- `MmUserHandle` / `MmPin`: address-space lifetime capabilities. `MmUserHandle`
+  corresponds to Linux `mm_users` and indicates that a runtime or temporary path is still actively using the user mappings;
+  `MmPin` reserves a Linux `mm_count`-style object pin, which only guarantees that the `MmSpace` object and its stable
+  identity remain observable, and does not extend the lifetime of user mappings.
   `MmPin::clone` only increments reference counts; it neither allocates nor
   takes the MM lock or acquires an active user. Before unpublishing an exiting
   thread, kprocess retains a pin with matching residency and ASID metadata.
   The final pin must survive while scheduling can still use that root.
 
-Linux 对应关系：
+Linux correspondence:
 
-- `MmSpace` 对应 `mm_struct`。
-- `VmArea` 对应 `vm_area_struct`。
-- `VmRuntimeOps` 对应 VMA 侧 `vm_operations_struct`。
-- `VmBackingInfo` 描述 VMA 指向的 file/anon/linear backing object。
+- `MmSpace` corresponds to `mm_struct`.
+- `VmArea` corresponds to `vm_area_struct`.
+- `VmRuntimeOps` corresponds to the VMA-side `vm_operations_struct`.
+- `VmBackingInfo` describes the file/anon/linear backing object a VMA points to.
 
-## 范围
+## Scope
 
 - `src/aspace.rs`
 - `src/vma.rs`
@@ -66,13 +66,13 @@ Linux 对应关系：
 - `src/backend/*`
 - `src/iomap.rs`
 
-### 内核单元测试布局
+### Kernel unit test layout
 
-测试源码位于 crate 根目录的 `ut-tests/`，通过 `unittest::path_mod_test!`
-挂载到原源模块中，仅在 `cfg(unittest)` 下编译。模块名称、私有可见性和
-测试执行方式保持不变，`super` 仍指向原生产模块。
+Test sources live in `ut-tests/` at the crate root and are mounted into the original source modules through `unittest::path_mod_test!`,
+compiled only under `cfg(unittest)`. Module names, private visibility, and
+the way tests are executed remain unchanged, and `super` still refers to the original production module.
 
-| 测试文件 | 原模块路径 | 用例数 |
+| Test file | Original module path | Test cases |
 | --- | --- | --- |
 | `ut-tests/lib.rs` | `tests_memspace` | 3 |
 | `ut-tests/aspace.rs` | `aspace::tests` | 16 |
@@ -83,11 +83,11 @@ Linux 对应关系：
 | `ut-tests/backend_shared.rs` | `backend::shared::tests` | 1 |
 | `ut-tests/aarch64_asid.rs` | `aarch64_asid::tests` | 6 |
 
-共 8 个测试模块、54 个用例；`aarch64_asid` 保留父模块的 AArch64 架构门控，
-其他架构选择其余 48 个用例。测试没有额外的 feature 门控或 serial/user 标记。
-使用已配置内核的 guest unittest 流程验证，不通过 host Cargo 测试替代。
+There are 8 test modules and 54 test cases in total; `aarch64_asid` keeps the AArch64 architecture gate of its parent module,
+and other architectures select the remaining 48 test cases. The tests have no extra feature gates or serial/user markers.
+They are verified using the guest unittest flow with a configured kernel, not replaced by host Cargo tests.
 
-## 架构
+## Architecture
 
 ```text
 MmSpace
@@ -111,58 +111,58 @@ object owner
   -> VMA lookup and runtime unmap
 ```
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-- `MmSpace` 由外层 `Mutex` 或等价独占访问保护。
-- map/unmap/protect/fault/fork/mremap 路径可能分配内存，运行于可睡眠上下文。
-- 不适用于中断上下文。
-- 调用者必须在 syscall、loader 或内核 VM 边界完成用户输入校验。
+- `MmSpace` is protected by an outer `Mutex` or equivalent exclusive access.
+- The map/unmap/protect/fault/fork/mremap paths may allocate memory and run in a sleepable context.
+- Not applicable to interrupt context.
+- Callers must complete validation of user input at the syscall, loader, or kernel VM boundary.
 
-## 算法流程
+## Algorithm Flow
 
-### VMA 查询
+### VMA lookup
 
-1. `MmSpace::find_vma()` 在 `VmAreaSet` 中定位 VMA。
-2. `VmArea::backing()` 返回 `VmBackingInfo`。
-3. `VmArea::page_offset()` 表示 Linux `vm_pgoff` 风格的 backing page offset。
-4. `VmArea::file_mapping()` 返回 file-backed introspection metadata。
-5. `VmArea::runtime()` 只在 `memspace` 内部用于执行 map/unmap/fault 操作。
+1. `MmSpace::find_vma()` locates the VMA in `VmAreaSet`.
+2. `VmArea::backing()` returns `VmBackingInfo`.
+3. `VmArea::page_offset()` denotes the Linux `vm_pgoff`-style backing page offset.
+4. `VmArea::file_mapping()` returns the file-backed introspection metadata.
+5. `VmArea::runtime()` is used only inside `memspace` to execute map/unmap/fault operations.
 
-### Futex backing 解析
+### Futex backing resolution
 
-`MmSpace::resolve_futex_backing()` 是 non-private futex key 的 MM 边界：
+`MmSpace::resolve_futex_backing()` is the MM boundary for non-private futex keys:
 
-- private VMA 返回 `(mm_id, virtual_address)`；
-- shared anon/file VMA 返回
-  `(VmObjectId, backing_page_index, byte_offset_in_page)`；
-- shared offset 通过 `VmArea::backing_offset_for()` 计算，因此 VMA split、trim、
-  不同 virtual mapping 和非零 file offset 都保持同一 object-relative identity。
+- A private VMA returns `(mm_id, virtual_address)`;
+- A shared anon/file VMA returns
+  `(VmObjectId, backing_page_index, byte_offset_in_page)`;
+- The shared offset is computed through `VmArea::backing_offset_for()`, so VMA split, trim,
+  different virtual mappings, and nonzero file offsets all preserve the same object-relative identity.
 
-该 API 只读取 VMA metadata，不触发缺页。调用者仍需使用 kuaccess 完成实际
-用户字访问与 fault-in。
+This API only reads VMA metadata and does not trigger a page fault. Callers must still use kuaccess to perform the actual
+user word access and fault-in.
 
-### VMA 插入
+### VMA insertion
 
-1. 调用方构造 `VmArea` 和对应 `VmRuntimeRef`，`MmSpace::map_runtime_vma()` 校验范围。
-2. `install_runtime_mapping()` 在修改页表或注册 incoming object view 前检查 VMA overlap，
-   重叠时返回 `AlreadyExists`，保留已安装映射的内容、权限和范围。
-3. runtime 执行 eager map 或准备 lazy fault 路径。
-4. 使用当前 `mm_id` 和 `InvalidateHandle` 注册 file/anon object view，再发布 VMA。
-5. `VmAreaSet::insert()` 的内部断言保护已通过预检的独占修改不变量。
+1. The caller constructs a `VmArea` and the corresponding `VmRuntimeRef`, and `MmSpace::map_runtime_vma()` validates the range.
+2. `install_runtime_mapping()` checks for VMA overlap before modifying the page table or registering the incoming object view,
+   returns `AlreadyExists` on overlap, and preserves the content, permissions, and range of the already installed mapping.
+3. The runtime performs an eager map or prepares the lazy fault path.
+4. The file/anon object view is registered using the current `mm_id` and `InvalidateHandle`, and then the VMA is published.
+5. The internal assertion in `VmAreaSet::insert()` protects the exclusive-modification invariant that has already passed the pre-check.
 
-lazy private runtime 的 `map()` 本身不修改页表，不能依赖 page-table collision 拒绝重叠。
-回归同时检查这种请求返回错误、原物理页/内容/写权限保持、扩展后缀没有 VMA 或 PTE。
-该保护不解释上层为何选择了重叠地址，也不将任意上层 mmap/brk 错误视为已经解决。
+The `map()` of a lazy private runtime does not itself modify the page table, so it cannot rely on page-table collision to reject overlap.
+The regression test also checks that such a request returns an error, that the original physical page/content/write permission are preserved, and that the extended suffix has no VMA or PTE.
+This protection does not explain why the upper layer chose the overlapping address, nor does it treat arbitrary upper-layer mmap/brk errors as already resolved.
 
-### VMA 变形
+### VMA transformation
 
-- `VmAreaSet::unmap()` 支持 exact removal、front/back trim 和 middle split。
-- `VmAreaSet::protect()` 支持 partial range split，只更新 current permission。
+- `VmAreaSet::unmap()` supports exact removal, front/back trim, and middle split.
+- `VmAreaSet::protect()` supports partial range split and updates only the current permission.
 - Protection changes use each runtime's actual PTE flags. Empty PTE flags
   follow the zap/TLB/runtime-notification contract even when the VMA request
   itself is nonempty; a later error cannot retain tokens for cleared prefixes.
-- `VmAreaSet::merge_adjacent_where()` 只合并语义等价且 runtime kind 一致的相邻 VMA。
-- file-backed `FileMappingInfo.offset` 和 `page_offset` 在 split/trim 时同步更新。
+- `VmAreaSet::merge_adjacent_where()` merges only adjacent VMAs that are semantically equivalent and have the same runtime kind.
+- The file-backed `FileMappingInfo.offset` and `page_offset` are updated in sync during split/trim.
 
 ### mremap relocation
 
@@ -211,15 +211,15 @@ FaultInput
   -> PageFaultOutcome
 ```
 
-`FaultOutcome` 保留 Linux 用户可见 fault class：
+`FaultOutcome` preserves the Linux user-visible fault classes:
 
-- resolved；
-- retry / COW retry；
-- unmapped；
-- access denied；
-- file-range `BusError`；
-- out of memory；
-- no progress / failed。
+- resolved;
+- retry / COW retry;
+- unmapped;
+- access denied;
+- file-range `BusError`;
+- out of memory;
+- no progress / failed.
 
 ### Object-driven invalidate
 
@@ -233,16 +233,16 @@ kvfs::AddressSpace / anon object
   -> runtime.unmap()
 ```
 
-`MmSpace` 收到 object-side invalidate 后，重新按当前 VMA metadata 检查：
+After receiving an object-side invalidate, `MmSpace` re-checks it against the current VMA metadata:
 
-- object id 是否匹配；
-- shared/private view kind 是否匹配；
-- object offset 与 VMA offset 是否仍一致；
-- request range 是否仍覆盖当前 VMA overlap。
+- whether the object id matches;
+- whether the shared/private view kind matches;
+- whether the object offset is still consistent with the VMA offset;
+- whether the request range still covers the current VMA overlap.
 
-匹配后只 zap present PTE，保留 VMA metadata。下一次 fault 重新按当前 object 状态裁决。
+After a match, only present PTEs are zapped and the VMA metadata is kept. The next fault re-decides based on the current object state.
 
-若单个 request 应用失败，`MmSpace` 将其放回队列尾部并结束本轮 drain，避免同一边界无限重试。
+If applying a single request fails, `MmSpace` puts it back at the tail of the queue and ends the current drain round, to avoid retrying the same boundary indefinitely.
 
 ### Private anonymous discard / COW
 
@@ -254,13 +254,13 @@ TLB finish, and final object/frame release. The shared helper also serves
 private discard and address-space cleanup; VMA deletion, object-page indexing,
 shared backends, and intermediate page-table reclamation are unchanged.
 
-- `AnonymousPrivate` 和 `FilePrivate` 的 post-write private pages 由
-  `AnonPrivateObject` 持有。
-- `MADV_DONTNEED` 通过 runtime 将 VMA range 转成 object range，再由
-  private-anon helper detach object page slots、unmap present PTE、完成 TLB
-  finalization 后释放 frame。
-- COW write fault 使用 object slot 比较和 `PageTableMut::replace_if_same()` 的
-  PTE snapshot 比较。任一侧发生变化都返回 retry-class outcome。
+- Post-write private pages of `AnonymousPrivate` and `FilePrivate` are held by
+  `AnonPrivateObject`.
+- `MADV_DONTNEED` converts the VMA range into an object range through the runtime; the
+  private-anon helper then detaches the object page slots, unmaps present PTEs, and releases the frames after TLB
+  finalization completes.
+- A COW write fault uses an object slot comparison and the PTE snapshot comparison of `PageTableMut::replace_if_same()`.
+  A change on either side returns a retry-class outcome.
 
 ### `msync`
 
@@ -295,20 +295,20 @@ dirty tracking.
 
 ### Fork
 
-1. 新建 child `MmSpace`。
-2. 复制每个 `VmArea` metadata。
-3. shared runtime 共享 object identity。
-4. private runtime 通过 `AnonPrivateObject` lineage 和页表写保护形成 COW。
-5. 父/子页表修改完成 TLB finalization 后，才提交 child object page state。
+1. Create a new child `MmSpace`.
+2. Copy the metadata of each `VmArea`.
+3. Shared runtimes share the object identity.
+4. Private runtimes form COW through the `AnonPrivateObject` lineage and page-table write protection.
+5. The child object page state is committed only after TLB finalization completes for the parent/child page-table modifications.
 
-## 并发模型
+## Concurrency model
 
-- `MmSpace` 由外层锁串行化。
-- `MmUserHandle` 的 user-count 状态转换不依赖 `MmSpace` 主锁；从裸
-  `Arc<Mutex<MmSpace>>` mint handle 时会短暂读取 mm-owned lifetime，最后一个
-  user 释放时会获取 `MmSpace` 主锁并执行 `clear()`。
-- `MmUserHandle::clone_user_unless_zero()` 与最后一个 user release 通过同一个原子
-  状态转换互斥；一旦进入 torn-down 状态，后续 `MmPin` 不能再升级为 active user。
+- `MmSpace` is serialized by an outer lock.
+- The user-count state transitions of `MmUserHandle` do not depend on the `MmSpace` main lock; minting a handle from a bare
+  `Arc<Mutex<MmSpace>>` briefly reads the mm-owned lifetime, and when the last
+  user is released, it acquires the `MmSpace` main lock and performs `clear()`.
+- `MmUserHandle::clone_user_unless_zero()` and the last user release are mutually exclusive through the same atomic
+  state transition; once the torn-down state is entered, a later `MmPin` can no longer be upgraded to an active user.
   Cloning only increments reference counts and can run under a short spinlock
   without allocation or MM locking. Release the returned handle outside that
   critical section, in sleepable task context without holding the MM lock.
@@ -316,61 +316,60 @@ dirty tracking.
   state. Scheduling adds the CPU to the new MM before switching and does not
   immediately clear it from the old MM. Conservative retention can target extra
   CPUs for shootdown but must not omit CPUs that still need invalidation.
-- `InvalidateSink` 使用 `SpinNoIrq` 保护短队列操作，不在该锁内执行 runtime
-  unmap 或获取 `MmSpace` 主锁。
-- `PageTable::modify()` 提供页表独占修改 guard。
-- `VmAreaSet` 不暴露独立可变共享访问。
-- file/anon object 的内部并发由对应 object crate 自己维护。
+- `InvalidateSink` uses `SpinNoIrq` to protect short queue operations, and does not run runtime
+  unmap or acquire the `MmSpace` main lock while holding that lock.
+- `PageTable::modify()` provides an exclusive page-table modification guard.
+- `VmAreaSet` does not expose independent mutable shared access.
+- The internal concurrency of file/anon objects is maintained by the corresponding object crates themselves.
 
-## 设计决策
+## Design decisions
 
-1. `VmArea` 保存 Linux 风格 VMA metadata。
-   原因：split/protect/unmap/fork/mremap 都需要稳定 metadata，而不是从 runtime
-   私有状态反推。
+1. `VmArea` stores Linux-style VMA metadata.
+   Reason: split/protect/unmap/fork/mremap all need stable metadata, rather than inferring it from runtime
+   private state.
 
-2. `VmRuntimeRef` 只表示 VMA-side execution reference。
-   原因：runtime 可以执行 fault 和 PTE 操作，但不能成为 file cache 或 anon page
-   owner。
+2. `VmRuntimeRef` only represents a VMA-side execution reference.
+   Reason: a runtime can perform faults and PTE operations, but must not become the owner of the file cache or anon pages.
 
-3. `VmBackingInfo` 显式区分 `Linear`、`AnonymousShared`、`AnonymousPrivate`、
-   `FileShared`、`FilePrivate`。
-   原因：file-private mapping 必须同时保留 file source object、anon result
-   object 和 anon lineage。
+3. `VmBackingInfo` explicitly distinguishes `Linear`, `AnonymousShared`, `AnonymousPrivate`,
+   `FileShared`, and `FilePrivate`.
+   Reason: a file-private mapping must retain the file source object, the anon result
+   object, and the anon lineage at the same time.
 
-4. `FaultInput` 与 `FaultContext` 分离。
-   原因：trap/user runtime 输入只包含 CPU 报告的 fault facts；VMA-derived
-   object offsets 必须在 VMA lookup 后附加。
+4. `FaultInput` is separate from `FaultContext`.
+   Reason: the trap/user runtime input contains only the fault facts reported by the CPU; VMA-derived
+   object offsets must be attached after the VMA lookup.
 
-5. Object-driven invalidate 使用 `vmobj` request。
-   原因：file-backed 和 anonymous object 都需要同一套 object -> VMA view 语言。
+5. Object-driven invalidate uses a `vmobj` request.
+   Reason: both file-backed and anonymous objects need the same object -> VMA view language.
 
-6. `msync` 使用 runtime hook 而不是 syscall 反查 pagecache。
-   原因：`MmSpace` owns VMA traversal, while `filemap` owns file-backed runtime
+6. `msync` uses a runtime hook rather than having the syscall look up the pagecache in reverse.
+   Reason: `MmSpace` owns VMA traversal, while `filemap` owns file-backed runtime
    source state. This keeps syscall ABI, VMA dispatch, and content-object
    writeback in separate owner crates.
 
 7. relocation source retirement is separate from ordinary runtime unmap.
-   原因：ordinary private/file-private unmap may detach backing object pages;
+   Reason: ordinary private/file-private unmap may detach backing object pages;
    successful relocation only retires the old virtual role.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-- `MmSpace::clear()` 通过 runtime unmap 清理全部 VMA 的 present PTE。
-- `PageTableMut::finish()` 是释放 detached frames 前的 TLB finalization boundary。
-- `VmAreaSet` 清空后，VMA metadata 和 runtime references 一起释放。
-- File/anon object view guards 随 runtime/object 引用释放并注销 view。
+- `MmSpace::clear()` cleans up the present PTEs of all VMAs through runtime unmap.
+- `PageTableMut::finish()` is the TLB finalization boundary before detached frames are released.
+- After `VmAreaSet` is cleared, the VMA metadata and the runtime references are released together.
+- File/anon object view guards are released together with the runtime/object references, and the views are unregistered.
 
 File-backed page faults classify backend capacity exhaustion (`StorageFull`)
 as `BusError`, alongside backend data and I/O failures. User runtime therefore
 delivers `SIGBUS`; this conversion does not change write syscall errno mapping.
 
-## 映射引用的失效完成通知
+## Invalidation Completion Notification for Mapping References
 
-`VmRuntimeOps::on_invalidate_complete(range)` 是通用运行时寿命边界：对象
-失效请求经过 backing identity/offset 匹配，或调用 invalidate_present 后，
-memspace 在一个页表 guard 中批量 zap PTE 并完成一次 TLB finalization，再按
-已成功处理的页逐页通知运行时；失败时未处理部分保留引用和请求供重试。通知不删除
-VMA，不承担文件 pin 或匿名帧的具体所有权。
+`VmRuntimeOps::on_invalidate_complete(range)` is the generic runtime lifetime boundary: after an object
+invalidation request has been matched by backing identity/offset, or after invalidate_present has been called,
+memspace zaps the PTEs in batch under a single page-table guard and completes one TLB finalization, then
+notifies the runtime page by page for the pages that were processed successfully; on failure, the unprocessed part keeps its references and request for retry. The notification does not delete
+the VMA, and does not take on the concrete ownership of file pins or anonymous frames.
 
 `PROT_NONE` protection also removes present PTEs. After the page-table guard
 finishes TLB invalidation, `MmSpace` invokes the same completion hook so backing

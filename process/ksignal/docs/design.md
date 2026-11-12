@@ -879,8 +879,10 @@ and `SA_NOCLDWAIT` request autoreap.
 
 ## Execution context
 
-- All managers are lock-based (`SpinNoIrq`) and involve no sleeping within
-  this crate; they are safe on syscall and trap return paths.
+- All managers are lock-based (`SpinNoIrq`). Apart from slot allocation in
+  `ThreadSignalManager::new`/`new_with_flags` and the replacement allocation in
+  `reset_actions_for_exec` (task context, see below), they involve no sleeping
+  within this crate and are safe on syscall and trap return paths.
 - `handle_signal`, `check_signals`, and `restore` run on the
   user-return path of the owning thread; `handle_signal` writes to
   user memory through `osvm` checked access (`write_vm`), so it may fail on

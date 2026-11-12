@@ -14,25 +14,25 @@ that source owner through `PmuInterruptIf`. These task-context operations own
 global PMU retirement/republication in the platform provider, not HAL. The local
 NMI operation and terminal stop remain separate APIs with different lifetimes.
 
-## 定位
+## Positioning
 
-`khal::irq` 是 IRQ trap-entry adapter。通用 IRQ core
-位于 `kirq`；外部调用方不应再通过 `khal::irq::*` 使用 generic IRQ API。
+`khal::irq` is the IRQ trap-entry adapter. The generic IRQ core
+lives in `kirq`; external callers should no longer use the generic IRQ API through `khal::irq::*`.
 
-本模块现在只拥有 trap-entry 相关职责：
+This module now owns only trap-entry responsibilities:
 
-- 注册 `IRQ` / `NMI` trap handler；
-- 在进入 `kirq` 前建立 `NoPreempt` 执行约束。
+- registering the `IRQ` / `NMI` trap handlers;
+- establishing the `NoPreempt` execution constraint before entering `kirq`.
 
-## 范围
+## Scope
 
 ```text
 arch/khal/src/
 ├── irq/
 │   ├── mod.rs       # adapter helper exports only
 │   ├── manager.rs   # trap handlers
-│   └── nmi.rs       # khal::irq::configure_nmi（每 CPU 中断线提升，委托平台 NmiMechanismIf）
-└── lib.rs           # khal::nmi / khal::pmu 机制中立 facade（re-export kplat）
+│   └── nmi.rs       # khal::irq::configure_nmi (per-CPU interrupt line promotion, delegated to the platform NmiMechanismIf)
+└── lib.rs           # khal::nmi / khal::pmu mechanism-neutral facade (re-export kplat)
 ```
 
 Generic IRQ state, descriptors, dispatch, Line-owned NMI actions, lifecycle
@@ -40,7 +40,7 @@ hooks and `IntrManagerIf` belong to `arch/kirq`. `khal::nmi` is a
 mechanism-neutral facade; mechanism details belong to `kplat::nm_irq` and its
 platform implementations.
 
-## 架构
+## Architecture
 
 ```text
 kcpu trap dispatch
@@ -52,19 +52,19 @@ kcpu trap dispatch
             `-- kirq::{handle_irq, handle_nmi}
 ```
 
-普通 IRQ API 调用路径应直接进入 `kirq`，不经过 `khal::irq` facade。
+Ordinary IRQ API call paths should go directly into `kirq`, not through the `khal::irq` facade.
 
-NMI 机制 facade：
+NMI mechanism facade:
 
 ```text
-watchdog / perf 消费者
+watchdog / perf consumers
     |
-    `-- khal::nmi（re-export kplat::nm_irq）
-            |-- early_init / late_init   # 机制探测 + 每 CPU 使能
-            |-- mode / info              # 运行时机制查询（Pseudo / Hardware / None）
-            |-- enable_periodic_nmi      # 周期 NMI 源（当前为 PMU）
-            |-- quiesce_nmi               # 终止路径停靠本地周期源
-            `-- khal::irq::configure_nmi # 每 CPU 提升中断线
+    `-- khal::nmi (re-export kplat::nm_irq)
+            |-- early_init / late_init   # mechanism probing + per-CPU enablement
+            |-- mode / info              # runtime mechanism query (Pseudo / Hardware / None)
+            |-- enable_periodic_nmi      # periodic NMI source (currently PMU)
+            |-- quiesce_nmi               # park the local periodic source on the terminating path
+            `-- khal::irq::configure_nmi # per-CPU interrupt line promotion
 ```
 
 ## Firmware and device-tree transport (`khal::firmware`)
@@ -118,36 +118,36 @@ The lazy index means device enumeration must not run before the allocator
 exists. Early console and PMU discovery use allocation-free
 `FdtNode::irq_spec(0)` directly instead of `for_each_compatible`.
 
-## 调用约束 / 执行上下文
+## Calling constraints / execution context
 
-- `irq_handler()` 与 `nmi_handler()` 只能由架构 trap dispatch 调用。
-- 两个 handler 都先创建 `kspin::NoPreempt`，再调用 `kirq`。
-- `irq_handler()` 调用 `kirq::handle_irq()`；hardirq lifecycle enter/exit 和
-  IRQ completion 顺序由 `kirq` 负责。
-- `nmi_handler()` 调用 `kirq::handle_nmi()`；NMI raw-hwirq dispatch 语义由
-  `kirq` 负责。
+- `irq_handler()` and `nmi_handler()` may only be called by the architecture trap dispatch.
+- Both handlers first create a `kspin::NoPreempt` and then call `kirq`.
+- `irq_handler()` calls `kirq::handle_irq()`; the hardirq lifecycle enter/exit and the
+  IRQ completion order are the responsibility of `kirq`.
+- `nmi_handler()` calls `kirq::handle_nmi()`; the NMI raw-hwirq dispatch semantics are the responsibility of
+  `kirq`.
 - `khal::irq` stores neither IRQ registry state nor NMI handler ownership;
   both remain in the single `kirq` core.
-- `khal::nmi::early_init()`：GIC 初始化后、任何 NMI 使能前调用一次（平台
-  early_driver_init），探测机制并写入运行时 `NmiMode`。
-- `khal::nmi::late_init()`：主核 `prepare_interrupts` 与每个从核 `prepare_local_interrupts` 各调用
-  一次（每 CPU）；hardware 模式在此开启 `SCTLR_EL1.NMI` / ALLINT 使能。
-- `khal::nmi::enable_periodic_nmi(period_ns, cb)`：每 CPU 调用；返回 `false`
-  表示本 CPU 无法武装（机制不可用或资源冲突），消费者应显式降级。
-- `khal::quiesce_nmi()`：仅供终止停机路径调用；以 `NoPreempt` 钉住当前 CPU，
-  停掉已武装的本地周期源但保留回调和 IRQ 配置。没有 `nmi_pmu` source 或本地
-  source 未初始化时为 no-op，调用后不得重新武装。
+- `khal::nmi::early_init()`: called once after GIC initialization and before any NMI is enabled (platform
+  early_driver_init); it probes the mechanism and writes the runtime `NmiMode`.
+- `khal::nmi::late_init()`: called once each by the primary core's `prepare_interrupts` and by every secondary core's `prepare_local_interrupts`
+  (per CPU); in hardware mode it enables `SCTLR_EL1.NMI` / ALLINT here.
+- `khal::nmi::enable_periodic_nmi(period_ns, cb)`: called per CPU; returning `false`
+  means this CPU cannot be armed (mechanism unavailable or resource conflict), and the consumer should degrade explicitly.
+- `khal::quiesce_nmi()`: to be called only from the terminal halt path; it pins the current CPU with `NoPreempt`,
+  and stops the armed local periodic source while keeping the callback and the IRQ configuration. It is a no-op when there is no `nmi_pmu` source or the local
+  source is uninitialized, and must not re-arm after the call.
 - `khal::irq::configure_nmi(hwirq)` delegates CPU-local preparation through the
   platform to KIRQ. Initial preparation requires a registered disabled source;
   repeated preparation rechecks admission without rewriting live attributes.
   Shared sources are unsupported. False means rejected/failed preparation,
   including an unavailable mechanism or a closing Line; it does not enable IRQs.
-- `khal::nmi::mode()`：返回 `NmiMode::{Pseudo, Hardware, None}`，供消费者
-  （如 watchdog）判断是否启用依赖 NMI 的功能。
+- `khal::nmi::mode()`: returns `NmiMode::{Pseudo, Hardware, None}`, for consumers
+  (such as the watchdog) to decide whether to enable NMI-dependent features.
 
-## 并发模型
+## Concurrency model
 
-`khal::irq` adapter 只有短生命周期的 `NoPreempt` guard，不持有全局 IRQ state。
+The `khal::irq` adapter has only a short-lived `NoPreempt` guard and holds no global IRQ state.
 IRQ shared-state locking, NMI RCU ownership and lifecycle hooks are maintained
 inside `kirq`.
 
@@ -160,24 +160,24 @@ scheduler checkpoint under the entry IRQ mask, not an ordinary preempt-enable
 operation. Outer guards still exclude scheduling. The marker resumes on the
 interrupted task's stack; dedicated NMI dispatch never invokes this checkpoint.
 
-## 设计决策
+## Design decisions
 
-### 为什么保留 `khal::irq`
+### Why `khal::irq` is kept
 
-trap handler registration 依赖 `kcpu::excp::register_trap_handler`，并且进入
-`kirq` 前需要由 HAL adapter 建立 `NoPreempt` 执行约束。因此 `khal::irq`
-继续存在，但不再承载 generic IRQ API 或 x86 MSI-X vector helper。
+Trap handler registration depends on `kcpu::excp::register_trap_handler`, and the HAL adapter must establish the `NoPreempt`
+execution constraint before entering `kirq`. Therefore `khal::irq`
+remains, but no longer carries the generic IRQ API or the x86 MSI-X vector helper.
 
-### 为什么 x86 MSI-X helper 不在 `khal::irq`
+### Why the x86 MSI-X helper is not in `khal::irq`
 
-MSI-X vector allocation、APIC destination selection 和 MSI message composition
-属于 IRQ core/backend 边界。当前由 `kirq::MsiBackendIf` 定义 backend contract，
-由 `drivers/platform/x86-apic` 实现；`khal::irq` 不再暴露 APIC id 或裸 CPU vector。
+MSI-X vector allocation, APIC destination selection and MSI message composition
+belong to the IRQ core/backend boundary. Currently `kirq::MsiBackendIf` defines the backend contract,
+implemented by `arch/x86-apic`; `khal::irq` no longer exposes APIC ids or raw CPU vectors.
 
-### 为什么 `IPI_IRQ` 不进入 `kirq`
+### Why `IPI_IRQ` does not enter `kirq`
 
-`IPI_IRQ` 来自 Kconfig 生成常量。`kirq` 必须保持不依赖 `kbuild_config`，所以
-IPI 调用方直接使用 `kbuild_config::IPI_IRQ` 并调用 `kirq::notify_cpu()`。
+`IPI_IRQ` is a constant generated from Kconfig. `kirq` must stay independent of `kbuild_config`, so
+IPI callers use `kbuild_config::IPI_IRQ` directly and call `kirq::notify_cpu()`.
 
 ## Crate-level guest test layout
 
@@ -192,8 +192,9 @@ their original source modules using `unittest::path_mod_test!`:
 | `src/mem/mod.rs` | `ut-tests/mem.rs` | `tests_mem` | 3 |
 | `src/time/mod.rs` | `ut-tests/time.rs` | `tests_time` | 4 |
 | `src/time/epoch.rs` | `ut-tests/time_epoch.rs` | `tests` | 7 |
+| `src/firmware/devices.rs` | `ut-tests/firmware_devices.rs` | `firmware_devices_unittest` | 4 |
 
-These 24 cases require `cfg(unittest)` without additional feature, architecture
+These 28 cases require `cfg(unittest)` without additional feature, architecture
 or user gates. The huge-leaf lifetime case runs serially and compares allocation
 usage before unmap and after synchronous retirement, with no independent owner
 masking early release. `inactive_table_destruction_releases_its_live_data_hold`

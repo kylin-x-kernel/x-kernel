@@ -1,21 +1,21 @@
-# memfd-test — 安全与可靠性分析
+# memfd-test — Security and Reliability Analysis
 
-## 信任边界
+## Trust Boundary
 
-程序只发送固定、以 NUL 结尾的标签到 Linux ABI `memfd_create`，随后操作自己
-取得的 fd。`/../buffer` 是调试标签，不作为路径传入 `open`、`unlink` 等接口。
-不读取用户文件、凭据或网络，不修改共享文件系统节点或内核全局设置。
+The program only sends a fixed, NUL-terminated label to the Linux ABI `memfd_create`, and then operates on the fd
+it obtained. `/../buffer` is a debugging label and is not passed as a path to interfaces such as `open` or `unlink`.
+It does not read user files, credentials, or the network, and does not modify shared filesystem nodes or global kernel settings.
 
-## 内存与生命周期
+## Memory and Lifetime
 
-只有 `mmap` 成功后才访问映射，写入长度小于 4096 字节；`pread` 的目标为
-栈上完整定长数组，只有精确读取预期字节后才比较内容。短读、错误和内容
-不符均失败。读操作仅对 `EINTR` 重试，不忽略其它错误。
-成功或失败都尝试解除本进程的映射并关闭 fd，`close` 不盲重试。
+The mapping is accessed only after `mmap` succeeds, and the write length is less than 4096 bytes; the target of `pread` is
+a fully sized fixed-length array on the stack, and the contents are compared only after exactly the expected bytes have been read. Short reads, errors, and content
+mismatches all fail. Read operations are retried only on `EINTR`, and other errors are not ignored.
+On both success and failure, the program attempts to unmap this process's mapping and close the fd; `close` is not blindly retried.
 
-## 限制与审计
+## Limitations and Audit
 
-程序无 Rust unsafe、共享状态或并发假设；C 的映射访问由成功返回值和长度
-边界保护。它检查外部可见的创建、映射读写和内容隔离，不能证明私有 mount
-拓扑、内存生命周期峰值、性能收益或 sealing 的完整语义。安装不会自动执行，
-Linux 通过也不能代替 X-Kernel guest 的实际运行证据。
+The program has no Rust unsafe code, shared state, or concurrency assumptions; the C mapping accesses are protected by the successful return value and the length
+bound. It checks externally visible creation, mapped reads and writes, and content isolation, but cannot prove the private mount
+topology, peak memory lifetime, performance benefits, or the complete semantics of sealing. Installation is not performed automatically,
+and a pass on Linux cannot substitute for evidence from actually running on an X-Kernel guest.

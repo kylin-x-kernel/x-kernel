@@ -71,9 +71,9 @@ are implemented.
   VFS. Loading is bounded by the control-plane loader's own validation
   (`kvmm-api::loader::load_image_to_guest`).
 * After boot, `write` bytes are copied verbatim into the guest UART RX FIFO.
-  The guest console runs in polled mode, so the guest's own poll timer drains
-  the FIFO; no host-side interrupt is injected on the input path. The bytes are
-  guest-visible input only and cannot perturb host interrupt state. A writer can
+  The console push path injects the guest UART RX interrupt (registered via
+  `set_console_irq`) so the guest driver drains the FIFO. The bytes and the
+  injected interrupt are guest-visible only and cannot perturb host interrupt state. A writer can
   at most flood the guest with input, which the guest already controls by
   reading (or not reading) the UART.
 * `read` returns guest UART output drained from the console TX channel. The

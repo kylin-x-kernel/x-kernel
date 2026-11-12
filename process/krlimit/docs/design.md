@@ -9,7 +9,7 @@ lookup, authorization, allocation accounting, or current-task dependency.
 
 ## Scope and architecture
 
-`src/lib.rs` contains `Rlimit`, `Rlimits`, `FILE_LIMIT`, conversions, indexing,
+`src/lib.rs` contains `Rlimit`, `Rlimits`, `FILE_LIMIT`, `SYSCTL_NR_OPEN_DEFAULT`, conversions, indexing,
 and kernel unit tests. `linux_raw_sys::general` supplies resource indices.
 `Rlimit` holds public `current` (soft) and `max` (hard) `u64` values; `Rlimits` owns
 a fixed `[Rlimit; RLIM_NLIMITS]`. Consumers index it with Linux `u32` resource IDs.

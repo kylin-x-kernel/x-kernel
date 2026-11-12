@@ -1,4 +1,4 @@
-# fs_boot — 安全与可靠性分析
+# fs_boot — Security and Reliability Analysis
 
 ## 9P owner failure
 
@@ -17,97 +17,96 @@ an absent superblock. Other mount callers receive NoMemory through VfsResult.
 This does not provide boot-time OOM recovery or make nested filesystem allocations
 fallible; it separates explicit boot policy from the reusable constructor.
 
-## 信任模型
+## Trust Model
 
-root block device 名称来自内核构建配置；设备枚举和磁盘内容来自驱动及外部介质。
-具体磁盘格式验证由 registry 中候选 `FileSystemType` 的 `get_tree/fill_super` 负责。
-内建 filesystem type 描述符和 boot mount policy 是受信任的内核构建产物。
+The root block device name comes from the kernel build configuration; device enumeration and disk contents come from drivers and external media.
+Validation of the concrete disk format is the responsibility of the `get_tree/fill_super` of the candidate `FileSystemType` in the registry.
+Built-in filesystem type descriptors and the boot mount policy are trusted kernel build artifacts.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-- `KFEAT_ROOT_BLOCK` 可能不匹配已注册设备。
-- block device 可能缺失、被移除、返回 I/O 错误或包含损坏的文件系统。
-- 9P mount tag 和响应来自外部 transport。
+- `KFEAT_ROOT_BLOCK` may not match any registered device.
+- A block device may be missing, removed, return I/O errors, or contain a corrupted filesystem.
+- The 9P mount tag and responses come from an external transport.
 
-本 crate 不处理用户指针；调用发生在用户进程启动前。
+This crate does not handle user pointers; its calls occur before user processes start.
 
-## unsafe 代码清单
+## Unsafe Code Inventory
 
-`fs/boot/src` 没有 `unsafe` block。
+`fs/boot/src` contains no `unsafe` blocks.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-- bootstrap mount namespace 初始化成功后才能取得 initial root path。
-- root device handle 在 `FsContext::get_tree` 和真实 root graft 完成前保持有效。
-- init `FsStruct` 的 root/pwd 在 bootstrap 和真实 root 两次切换中都成对更新。
-- 所有内建 filesystem type 必须在安装用户态可见的 procfs 和开放 mount syscall 前
-  通过统一 init 段完成唯一注册。
-- registry 必须保存各实现的唯一静态 descriptor 引用；boot 直接使用这些 canonical 对象，
-  POSIX 和 procfs 通过 registry 查找/遍历同一对象，不复制类型或另建 provider。
-- `nosuid`、`nodev`、`noexec`、`relatime` 属于具体 `Mount`；不得写入共享
-  superblock 状态。`/dev` 不得设置 `nodev`。
-- root 候选必须先按 RW 完整探测，再以 `SB_RDONLY` 和只读 mount flag 完整重试；不得因
-  read-only block device 的首轮 `EACCES` 直接停止启动。
-- 只读真实 root 必须预先包含 boot policy 所需的 mountpoint 目录；Linux 同样不会在
-  只读介质上合成缺失的目录。目录缺失属于无效 root 镜像并停止启动。
-- mount helper 只接受已存在目录；boot policy 声明创建的嵌套路径必须先逐级建立，不能只
-  创建最终分量或删除同名非目录对象。
-- boot 挂载的 devtmpfs/sysfs 必须与对应 type factory 使用同一共享 superblock，
-  否则后续 mount 会暴露缺失 boot 节点的分离目录树。
-- devtmpfs/sysfs 构造器必须保留 internal root mount 的 active 引用；可见 mount 卸载不得
-  teardown 内核仍在更新的共享树。
-- `anon_inodefs` 与 `pipefs` 必须在普通 task 可创建匿名 fd/pipe 前完成 hidden mount 发布；
-  runtime 路径不得隐式执行首次初始化。
-- 启用 cgroup2 时，启动挂载必须与 initial `NsProxy` 复用
-  `CgroupNamespace::initial()`；不得在 PID 1 创建前调用依赖 current user process 的普通
-  cgroup2 mount 路径，也不得创建第二棵 hierarchy。
+- The initial root path may be obtained only after the bootstrap mount namespace has been successfully initialized.
+- The root device handle remains valid until `FsContext::get_tree` and the real root graft complete.
+- The root/pwd of the init `FsStruct` are updated in pairs in both switches, the bootstrap one and the real-root one.
+- All built-in filesystem types must be registered exactly once through the unified init section
+  before the user-visible procfs is installed and the mount syscalls are opened.
+- The registry must hold the unique static descriptor reference of each implementation; boot uses these canonical objects directly,
+  and POSIX and procfs look up/iterate the same objects through the registry, without copying types or creating separate providers.
+- `nosuid`, `nodev`, `noexec`, and `relatime` belong to the concrete `Mount`; they must not be written into shared
+  superblock state. `/dev` must not be set `nodev`.
+- A root candidate must first be fully probed as RW, then fully retried with `SB_RDONLY` and the read-only mount flag; boot must not
+  stop directly because of the first-round `EACCES` on a read-only block device.
+- A read-only real root must already contain the mountpoint directories required by the boot policy; Linux likewise does not synthesize missing directories on
+  read-only media. A missing directory makes the root image invalid and stops boot.
+- The mount helper accepts only existing directories; nested paths that the boot policy declares to create must be established level by level first, and it must not merely
+  create the final component or delete a non-directory object of the same name.
+- The devtmpfs/sysfs mounted by boot must use the same shared superblock as the corresponding type factory,
+  otherwise later mounts would expose a detached directory tree missing the boot nodes.
+- The devtmpfs/sysfs constructors must retain the active reference of the internal root mount; unmounting a visible mount must not
+  tear down a shared tree that the kernel is still updating.
+- `anon_inodefs` and `pipefs` must complete hidden-mount publication before ordinary tasks can create anonymous fds/pipes;
+  runtime paths must not perform first-time initialization implicitly.
+- When cgroup2 is enabled, the boot mount must reuse `CgroupNamespace::initial()` with the initial `NsProxy`; the ordinary
+  cgroup2 mount path that depends on the current user process must not be called before PID 1 is created, and a second hierarchy must not be created.
 
-## 线程安全
+## Thread Safety
 
-初始 mount 建立由 boot CPU 串行执行。已挂载文件系统直接持有 backing device handle；
-boot 不另建移除订阅或设备生命周期状态。
+Initial mount setup is executed serially by the boot CPU. Mounted filesystems hold the backing device handle directly;
+boot does not create a separate removal subscription or device lifecycle state.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | root 类型选择与可挂载类型表漂移 | 高 | Kconfig、runtime 或 boot 维护第二套 provider/name/能力来源 | Kconfig 只链接实现；每个实现通过统一 init 段注册自己的 canonical descriptor；boot 只遍历同一 registry 的 `REQUIRES_DEV` 类型 |
-| T-02 | 损坏磁盘触发不安全解析 | 高 | filesystem 未校验外部介质 | mount 错误必须传播；磁盘校验由具体 `fill_super` 实现 |
-| T-03 | 已挂载 backing device 被移除 | 中 | 热移除 root 或 9P 设备 | mount/session 持有 resident object；后续 I/O 传播设备错误；boot 不复制设备生命周期状态 |
-| T-04 | filesystem type 列表与用户 mount 分派漂移 | 中 | boot、procfs 和 syscall 各自维护类型名或构造入口 | boot 直接使用已注册 canonical descriptor，procfs/POSIX 从同一 registry 取得它，并统一经 `MntNamespace::mount_new` 创建和 attach |
-| T-05 | 启动 mount flags 错误作用到共享 superblock 或禁用 `/dev` | 高 | 把 per-mount flags 填入 statfs 后端状态，或给 `/dev` 设置 `nodev` | boot 通过 namespace attach 设置 `MountFlags`；superblock 构造器只接收 filesystem-wide flags |
-| T-06 | 只读 root device 无法启动 | 高 | root 探测只使用 RW flags，首轮 `EACCES` 后直接 panic | 按 Linux `mount_root_generic()` 对完整 filesystem 候选集执行 RW、RO 两轮探测；RO 轮同时设置 superblock 与 mount 只读位；root 镜像须预置必要 mountpoint |
-| T-07 | 9P 嵌套挂载点缺少父目录 | 中 | mount helper 只对最终 `/mnt/hostshare` 执行 `mkdir` | `mount_host_share()` 在挂载前通过 `ensure_directory_path()` 逐级创建 policy-owned 路径；通用 helper 要求目标已存在 |
-| T-08 | 匿名 fd/pipe 在 hidden pseudo fs 初始化前运行 | 高 | boot 漏掉初始化或把初始化推迟到 runtime first-use | `prepare_namespace()` 在发布真实 root 后显式初始化两个 filesystem，未初始化访问立即暴露契约错误 |
-| T-09 | 启动 cgroup2 挂载与 PID 1 使用不同 hierarchy | 高 | boot 和 `NsProxy` 分别创建 root，或 boot 隐式读取不存在的 current process | 两条路径共同使用 `CgroupNamespace::initial()`；boot 通过显式 initial superblock constructor 挂载 |
+| T-01 | Drift between root type selection and the mountable type table | High | Kconfig, runtime, or boot maintains a second source of provider/name/capability | Kconfig only links implementations; each implementation registers its own canonical descriptor through the unified init section; boot only iterates the `REQUIRES_DEV` types of the same registry |
+| T-02 | A corrupted disk triggers unsafe parsing | High | A filesystem does not validate external media | Mount errors must be propagated; disk validation is implemented by the concrete `fill_super` |
+| T-03 | A mounted backing device is removed | Medium | Hot removal of the root or 9P device | The mount/session holds the resident object; later I/O propagates device errors; boot does not duplicate device lifecycle state |
+| T-04 | Drift between the filesystem type list and user mount dispatch | Medium | Boot, procfs, and the syscall each maintain their own type names or construction entry points | Boot uses the registered canonical descriptor directly, procfs/POSIX obtain it from the same registry, and creation and attach all go through `MntNamespace::mount_new` |
+| T-05 | Boot mount flags are wrongly applied to the shared superblock or disable `/dev` | High | Per-mount flags are filled into statfs backend state, or `nodev` is set on `/dev` | Boot sets `MountFlags` through namespace attach; the superblock constructor accepts only filesystem-wide flags |
+| T-06 | A read-only root device fails to boot | High | Root probing uses only RW flags and panics directly after the first-round `EACCES` | Following Linux `mount_root_generic()`, perform two probing rounds, RW and RO, over the full filesystem candidate set; the RO round sets both the superblock and mount read-only bits; the root image must pre-provide the necessary mountpoints |
+| T-07 | The nested 9P mountpoint lacks a parent directory | Medium | The mount helper runs `mkdir` only on the final `/mnt/hostshare` | Before mounting, `mount_host_share()` creates the policy-owned path level by level through `ensure_directory_path()`; the generic helper requires the target to exist already |
+| T-08 | Anonymous fds/pipes run before the hidden pseudo fs is initialized | High | Boot misses the initialization or defers it to first use at runtime | After publishing the real root, `prepare_namespace()` explicitly initializes the two filesystems, and uninitialized access exposes the contract error immediately |
+| T-09 | The boot cgroup2 mount and PID 1 use different hierarchies | High | Boot and `NsProxy` each create a root, or boot implicitly reads a nonexistent current process | Both paths share `CgroupNamespace::initial()`; boot mounts through an explicit initial superblock constructor |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Failure Cause | Local Effect | System Effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | 无 block device | 驱动未探测或配置错误 | 无法选择 root backing | boot panic | 1 | 明确 `No block device found` |
-| F-02 | root mount 失败 | source lookup、I/O、格式或 feature 错误 | 无真实 root superblock | boot panic | 1 | 记录 `FsContext/get_tree` 错误后停止启动 |
-| F-03 | 首选设备名不存在 | 配置与硬件不一致 | 无法选择 root | boot panic | 2 | 输出配置名和候选设备，不回退到其他介质 |
-| F-04 | filesystem type 重名或重复注册 | 启动接线错误 | 注册返回 `ResourceBusy` | boot 在 namespace 对用户态开放前停止 | 2 | 每个配置启用的 canonical type 恰好注册一次 |
+| F-01 | No block device | Driver did not probe or misconfiguration | Cannot select the root backing | boot panic | 1 | Explicit `No block device found` |
+| F-02 | Root mount fails | Source lookup, I/O, format, or feature error | No real root superblock | boot panic | 1 | Log the `FsContext/get_tree` error and stop boot |
+| F-03 | Preferred device name does not exist | Configuration inconsistent with hardware | Cannot select the root | boot panic | 2 | Output the configured name and candidate devices; do not fall back to other media |
+| F-04 | Filesystem type name collision or duplicate registration | Boot wiring error | Registration returns `ResourceBusy` | boot stops before the namespace is opened to user space | 2 | Each config-enabled canonical type is registered exactly once |
 
-## 故障管理
+## Fault Management
 
-root/关键虚拟文件系统失败会停止启动，避免在不完整 namespace 上运行用户态。
-可选 9P mount 错误保留 transport 上下文并停止启动。
+Failure of the root or critical virtual filesystems stops boot, to avoid running user space on an incomplete namespace.
+Optional 9P mount errors preserve the transport context and stop boot.
 
-## 已知限制
+## Known Limitations
 
-设备移除尚不能强制 mounted block filesystem 进入只读或完成自动卸载；已持有对象的
-后续 I/O 会返回底层错误。未配置 root name 时仍保留按 `dev_t` 排序的兼容选择。filesystem type
-当前是静态内建集合，不支持运行时注册/卸载模块。
+Device removal cannot yet force a mounted block filesystem into read-only mode or complete an automatic unmount; later I/O
+on already-held objects returns the underlying error. When no root name is configured, the compatible selection ordered by `dev_t` is still retained. Filesystem types
+are currently a static built-in set; runtime module registration/unregistration is not supported.
 
-## 审计清单
+## Audit Checklist
 
-- `fs_boot` 是否仍然不引用具体 block filesystem crate 或 `KFEAT_FS_*` 分支？
-- feature-controlled pseudo filesystem 是否只承载明确的 initial namespace policy，且启动
-  路径不依赖 current process？
-- 新 mount path 是 namespace policy，还是应进入通用 mount/type 层？
-- 新 filesystem 是否注册 canonical type，且没有在 procfs 或 POSIX 层增加名称表？
-- 新启动 mount 的 flags 是否写入 `Mount`；`/dev` 是否保持可访问设备节点？
-- 真实 root mount 失败是否在启动用户态前终止，并保留明确错误？
-- backing device 生命周期是否由 mount/session handle 持有，而不是在 boot 复制状态？
+- Does `fs_boot` still avoid referencing concrete block filesystem crates or `KFEAT_FS_*` branches?
+- Does a feature-controlled pseudo filesystem carry only explicit initial namespace policy, and does the boot
+  path not depend on the current process?
+- Is a new mount path namespace policy, or should it go into the generic mount/type layer?
+- Does a new filesystem register a canonical type, without adding a name table in the procfs or POSIX layer?
+- Are the flags of a new boot mount written into `Mount`; does `/dev` remain an accessible device node?
+- Does a real root mount failure terminate before user space starts, and retain an explicit error?
+- Is the backing device lifecycle held by the mount/session handle, rather than duplicating state in boot?

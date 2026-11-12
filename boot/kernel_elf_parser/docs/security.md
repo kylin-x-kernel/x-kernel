@@ -1,39 +1,39 @@
-# kernel-elf-parser — 安全与可靠性分析
+# kernel-elf-parser — Security and Reliability Analysis
 
-## 信任模型与外部边界
+## Trust Model and External Boundaries
 
-ELF 文件头部、程序头表、装载偏移、参数和环境字符串来自调用者。
-文件字段应视为不可信输入；parser 返回的信息仍须由装载方按进程
-地址空间及 ABI 约束校验，不能直接当作已验证的用户映射。
+The ELF file header, the program header table, the load offset, and the argument and environment strings come from the caller.
+File fields must be treated as untrusted input; the information returned by the parser must still be validated by the loader against the process
+address space and ABI constraints, and must not be used directly as an already-validated user mapping.
 
-## 内存安全不变量与 unsafe 代码
+## Memory-Safety Invariants and unsafe Code
 
-本 crate 的生产源文件没有显式 `unsafe` 块。程序头读取使用
-`xmas_elf` 和 `zero::read`；构造器先检查 ELF 类对应的表项大小和
-完整表长度，但底层读取还要求输入符合其对齐约束。
-输入切片和解析头部的 Rust 生命周期保证借用存续；程序头数组通过
-共享引用提供给 `ElfParser`，构造后不会被调用者并发修改。
+The production source files of this crate contain no explicit `unsafe` blocks. Program header reads use
+`xmas_elf` and `zero::read`; the constructor first checks the entry size and
+the full table length that correspond to the ELF class, but the underlying read still requires the input to satisfy its alignment constraints.
+The Rust lifetimes of the input slice and the parsed header guarantee that the borrow remains valid; the program header array is provided
+to `ElfParser` through a shared reference and cannot be modified concurrently by the caller after construction.
 
-`ElfParser::new` 用减法比较段覆盖范围，避免比较范围末端时加法溢出；
-随后检查虚拟地址、表内偏移和装载偏移的加法，以及到 `usize` 的转换。
-成功保存的 `phdr` 因此不会在查询时因缺少覆盖段或地址溢出而 panic。
+`ElfParser::new` compares segment coverage ranges using subtraction, avoiding addition overflow when comparing the end of a range;
+it then checks the additions of the virtual address, the in-table offset, and the load offset, as well as the conversions to `usize`.
+A successfully stored `phdr` therefore cannot cause a panic at query time because of a missing covering segment or an address overflow.
 
-## 故障管理 / FMEA
+## Fault Management / FMEA
 
-| 条件 | 处理与影响 |
+| Condition | Handling and Impact |
 | --- | --- |
-| 不支持的 ELF 类、错误的表项大小或不完整的程序头表 | builder 返回错误，解析结果不发布 |
-| 无段覆盖程序头表文件偏移 | parser 构造返回错误，不再在辅助向量查询时 panic |
-| 程序头虚拟地址或装载偏移相加溢出 | parser 构造返回错误 |
-| 分配失败或底层读取对齐前提不满足 | 仍遵循容器和依赖库原有失败方式；本次没有新增恢复策略 |
+| Unsupported ELF class, wrong entry size, or incomplete program header table | The builder returns an error, and the parse result is not published |
+| No segment covers the file offset of the program header table | Parser construction returns an error, instead of panicking later during auxiliary vector queries |
+| Overflow when adding the program header virtual address and the load offset | Parser construction returns an error |
+| Allocation failure, or the alignment precondition of the underlying read is not met | The original failure behavior of the container and dependency libraries still applies; this change adds no new recovery policy |
 
-## 并发、隐私与已知限制
+## Concurrency, Privacy, and Known Limitations
 
-crate 没有全局注册表或锁；调用者负责输入的所有权和同步。
-初始栈数组包含参数、环境变量及随机字节，调用者负责最终用户映射的
-权限与生命周期。普通容器释放不承诺擦除这些数据。
+The crate has no global registry or lock; the caller is responsible for ownership of the input and for synchronization.
+The initial stack array contains the arguments, environment variables, and random bytes, and the caller is responsible for the permissions and
+lifetime of the final user mapping. Ordinary container deallocation does not promise to erase this data.
 
-程序头地址检查只验证表起始偏移有覆盖段，并未证明整个程序头表都
-位于可装载段内，也未校验段权限。`entry()` 等其他原有查询的地址
-运算并未在此次 lint 迁移中重新设计。回归测试覆盖缺少覆盖段和
-程序头虚拟地址溢出，以及有效 ELF 的构造成功路径。
+The program header address check only verifies that a segment covers the starting offset of the table; it does not prove that the entire program header table
+lies within a loadable segment, nor does it validate segment permissions. The address
+arithmetic of other pre-existing queries such as `entry()` was not redesigned in this lint migration. The regression tests cover a missing covering segment
+and program header virtual address overflow, as well as the successful construction path for a valid ELF.

@@ -13,7 +13,7 @@ and exec enforcement remain external responsibilities.
 
 The command is `mini-oci run ID BUNDLE`. It reads `BUNDLE/config.json`, requires
 `/sys/fs/cgroup/cgroup.controllers`, and creates `/sys/fs/cgroup/oci-ID`.
-`Spec` contains a root path, process, optional hostname, and mounts. Process
+`Spec` contains a root path (a true `root.readonly` is rejected as unsupported), process, optional hostname, and mounts. Process
 configuration supplies arguments, environment strings, cwd, user IDs/groups,
 and optional fields that trigger rejection for capabilities or seccomp.
 `no_new_privileges` uses that literal field name in the current deserializer;

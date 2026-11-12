@@ -1,4 +1,4 @@
-# kalloc-types 安全与可靠性
+# kalloc-types Safety and Reliability
 
 ## Shared Owner Boundary
 
@@ -118,51 +118,51 @@ requirements. Allocation flags neither constrain next/nth nor the iterator's
 destructor. Failed allocation of a chained iterator drops both input owners;
 private allocator-injection tests cover this cleanup without exhausting memory.
 
-## 边界与不变量
+## Boundaries and Invariants
 
-输入是有效 Rust 值和可信内核调用方声明的分配策略，没有用户裸指针。
-类型不能证明调用方真的处于可睡眠上下文，调用方必须审计锁和中断状态。
-底层 `kalloc` 必须返回满足布局且独占的存储，并支持跨 CPU 释放。
-`new` 默认允许睡眠，即使当前后端没有回收也不能在禁止睡眠的路径使用。
-`new_with_flags` 拒绝未知位；所有已知位都是回收许可，不要求后端执行它们。
-无 `DIRECT_RECLAIM` 时不得睡眠，IO/FS 位不能绕过这个限制。
-NOIO/NOFS 只约束这次申请，不建立隐式的跨调用链回收作用域。
-两个策略都允许睡眠，不能用于替代 NOWAIT。即使持有的是可睡眠锁，也
-必须检查回收依赖，避免回收等待调用方已持有的锁。接口不会自动检测
-当前上下文或降级策略。NOWAIT 不承诺 NMI 安全或任意锁下的可重入性。
-失败会立即析构输入值；最终 Drop 在释放方上下文执行且不继承分配 flags。
-调用方必须分别保证这些析构路径允许在各自上下文运行。
+The inputs are valid Rust values and an allocation policy declared by a trusted kernel caller; there are no raw user pointers.
+The type cannot prove that the caller is actually in a sleepable context, so the caller must audit lock and interrupt state.
+The underlying `kalloc` must return exclusive storage that satisfies the layout and must support freeing across CPUs.
+`new` allows sleeping by default; even if the current backend does no reclaim, it must not be used on paths where sleeping is forbidden.
+`new_with_flags` rejects unknown bits; all known bits are reclaim permissions and do not require the backend to perform them.
+Without `DIRECT_RECLAIM`, sleeping is not allowed, and the IO/FS bits cannot bypass this restriction.
+NOIO/NOFS constrain only this one allocation and do not establish an implicit reclaim scope across the call chain.
+Both policies allow sleeping and cannot be used as a substitute for NOWAIT. Even when the lock held is a sleepable lock, the caller
+must check reclaim dependencies to avoid reclaim waiting on a lock the caller already holds. The interface does not automatically detect
+the current context or downgrade the policy. NOWAIT does not promise NMI safety or reentrancy under arbitrary locks.
+On failure the input value is destroyed immediately; the final Drop runs in the context of the releasing party and does not inherit the allocation flags.
+The caller must separately guarantee that these destruction paths are allowed to run in their respective contexts.
 
 `src/kbox.rs::new_with_allocator` is a private audit boundary: production passes
 only `allocate`; test substitutes only return failure. Any successful substitute
 must satisfy the same layout, exclusivity and allocation-origin requirements. Allocator
 injection remains private; raw ownership recovery has its separate unsafe contract.
 
-## Unsafe 清单
+## Unsafe Inventory
 
-| 位置 | 不变量及约束 |
+| Location | Invariants and constraints |
 | --- | --- |
-| `KBox::new_with_allocator` | 后端提供有效对齐的布局存储，ZST 使用对齐 dangling；写入前不创建引用 |
-| `Deref` / `DerefMut` | 完整初始化后才能构造 KBox；引用生命周期受所有者借用限制，写访问要求独占借用 |
+| `KBox::new_with_allocator` | The backend provides storage with a validly aligned layout; ZSTs use an aligned dangling pointer; no reference is created before the write |
+| `Deref` / `DerefMut` | A KBox can be constructed only after full initialization; the reference lifetime is bounded by the borrow of the owner, and write access requires an exclusive borrow |
 | `KBox::drop` | Compute the dynamic layout while the value is valid; the stack-local Storage guard frees storage after destruction or unwinding, without accessing the destroyed value |
 | `KBox::into_inner` | A consumed sized owner supplies initialized aligned storage; ManuallyDrop prevents duplicate destruction, and Storage frees only the original allocation after the move |
-| `Send` / `Sync` | 仅允许符合对应 trait 的值跨线程移动或共享；内部指针不暴露 |
+| `Send` / `Sync` | Only values that satisfy the corresponding trait may be moved or shared across threads; the internal pointer is not exposed |
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat description | Impact level | Trigger condition | Mitigation |
 | --- | --- | --- | --- | --- |
-| T-01 | 内存压力导致 fatal OOM | 中 | 可满足布局但后端资源不足 | 直接调用可失败 kalloc 接口，返回 KError::NoMemory，不经过 GlobalAlloc fatal 路径 |
+| T-01 | Memory pressure causes a fatal OOM | Medium | The layout can be satisfied but the backend has insufficient resources | Call the fallible kalloc interface directly and return KError::NoMemory, bypassing the GlobalAlloc fatal path |
 | T-02 | Memory corruption from an incorrect layout or double free | High | Corruption of private storage provenance or DST metadata | Private fields and no Clone/raw API; compiler-generated unsizing preserves provenance, and the dynamic layout matches the original allocation |
-| T-03 | 后续回收在不可睡眠上下文阻塞 | 高 | 错用默认 new 或忽略 NOWAIT | 非睡眠调用点使用 new_nowait；未来分派必须遵守 flags；当前后端不执行睡眠回收 |
+| T-03 | Later reclaim blocks in a non-sleepable context | High | Misuse of the default new or ignoring NOWAIT | Non-sleeping call sites use new_nowait; future dispatch must honor flags; the current backend performs no sleeping reclaim |
 
 ## FMEA
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| F-01 | 分配失败 | 内存不足 | 输入值释放，无 owner 返回 | 调用方决定传播或重试 | 3 | 错误返回；局部失败注入验证析构 |
-| F-02 | VFS 上下文初始化失败 | 内存不足 | 无上下文发布、无锁安装 | 当前 lock/flock 返回 ENOMEM | 3 | Once 重置，可重试；成功后复用 |
-| F-03 | 值构造或析构自身失败 | T 的外部逻辑 | 不由 KBox 转换成 KError | 仍可能内核 panic | 2 | 明确失败保证仅覆盖对象存储申请，不承诺完整 OOM 安全 |
+| ID | Failure mode | Failure cause | Local effect | System effect | Severity | Mitigation |
+| --- | --- | --- | --- | --- | --- | --- |
+| F-01 | Allocation failure | Out of memory | The input value is released and no owner is returned | The caller decides whether to propagate or retry | 3 | Error return; local failure injection verifies destruction |
+| F-02 | VFS context initialization failure | Out of memory | No context is published and no lock is installed | The current lock/flock returns ENOMEM | 3 | Once is reset and can be retried; reused after success |
+| F-03 | Value construction or destruction itself fails | External logic of T | Not converted into a KError by KBox | A kernel panic is still possible | 2 | The failure guarantee explicitly covers only object storage allocation and does not promise complete OOM safety |
 
 ## Reserved storage initialization
 

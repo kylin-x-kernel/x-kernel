@@ -104,7 +104,7 @@ Manages configuration symbols and their values.
 
 **Features:**
 - Symbol registration
-- Value storage (bool, tristate, string, int, hex)
+- Value storage (bool, tristate, string, sized integers, hex)
 - Canonical value normalization on write (`canonical_symbol_value`)
 - Enabled state checking
 - Value retrieval
@@ -245,12 +245,11 @@ workspace-wide rebuild.
 ## Future Enhancements
 
 ### Planned Features
-1. **Full menuconfig TUI**: Interactive terminal UI for configuration
-2. **Constraint validation**: Deepen Linux-compatible diagnostics around
+1. **Constraint validation**: Deepen Linux-compatible diagnostics around
    `select` / `imply` / `range`
-3. **Dependency resolution**: Auto-enable dependencies
-4. **Config merging**: Merge multiple configuration fragments
-5. **Export formats**: JSON, YAML export of configuration
+2. **Dependency resolution**: Auto-enable dependencies
+3. **Config merging**: Merge multiple configuration fragments
+4. **Export formats**: JSON, YAML export of configuration
 
 ### Performance Optimizations
 1. **Lazy parsing**: Only parse files when needed
@@ -260,8 +259,7 @@ workspace-wide rebuild.
 ### Language Features
 1. **Full expression support**: All expression operators
 2. **Advanced select/imply**: Complex select conditions
-3. **Range validation**: Validate int/hex ranges
-4. **Option attributes**: allnoconfig_y, etc.
+3. **Option attributes**: allnoconfig_y, etc.
 
 ## Testing Strategy
 

@@ -1,4 +1,4 @@
-# kipi — 安全与可靠性分析
+# kipi — Security and Reliability Analysis
 
 ## Completed-call Boundary
 
@@ -51,7 +51,7 @@ single destruction of a consuming-only capture. Injection replaces only the
 private preparation operation; it does
 not force global allocator OOM or queue-growth failure.
 
-## 信任模型
+## Trust Model
 
 ### Fixed RCU Notification Boundary
 
@@ -115,25 +115,25 @@ unittest-only per-CPU counters observe delivery after the receiver marks the
 vector pending. They verify deferred delivery with IRQs masked, not one-to-one
 request acknowledgment: concurrent service requests may coalesce normally.
 
-固定通知 `notify_reschedule` 不要求普通回调队列 ready，但调用方必须已向合法
-目标的运行队列发布任务状态。CPU 范围/存在性由入口验证；静态槽不分配、不释放，
-也不保存任务指针。正常 handler 在 ENABLED 前不得取走原因；启用与发送共用
-一个原子字，避免独立 ready/pending 变量间的丢请求窗口。取走原因后不再清零，
-保证处理中到达的新原因保留。硬件仍依赖 publish-before-notify 契约。
+The fixed notification `notify_reschedule` does not require the ordinary callback queue to be ready, but the caller must already have published task state to the valid
+target's run queue. CPU range/presence is validated at the entry; the static slot is neither allocated nor freed,
+and does not hold task pointers. The normal handler must not take reasons before ENABLED; enablement and sending share
+a single atomic word, avoiding the lost-request window between separate ready/pending variables. Reasons are not cleared after being taken,
+so new reasons arriving during processing are retained. Hardware still relies on the publish-before-notify contract.
 The scheduler endpoint only sets the local preemption flag; the independent
 timer endpoint refreshes hardware. Neither takes a mutable RunQueue reference,
 allocates or sleeps.
-`enable_fixed_notifications` 只能在当前 scheduler、IPI 队列和 handler 已初始化后调用；
-它保存 IRQ 状态，不使用会在析构时主动调度的禁抢占 guard。没有新增 unsafe。
-调用者还须为 CPU-bound 启动路径，因为线路启用的内部锁可能触发已有抢占检查；
-主核 late-init 线程固定亲和性，AP 在 IRQ 关闭且尚未设置本次 pending 前开启线路。
-线路启用失败会 panic，不发布 ENABLED，避免软件 ready 与硬件线路状态失配。
+`enable_fixed_notifications` may only be called after the current scheduler, IPI queue and handler have been initialized;
+it saves the IRQ state and does not use a preemption-disabling guard that would actively reschedule on drop. No new unsafe code is added.
+The caller must also be on a CPU-bound startup path, because the internal lock used to enable the line may trigger existing preemption checks;
+the primary CPU's late-init thread pins its affinity, and an AP enables the line while IRQs are off and before this round's pending is set.
+If enabling the line fails, it panics and does not publish ENABLED, avoiding a mismatch between the software ready state and the hardware line state.
 
-`kipi` 不是用户态边界模块，它的主要调用者是内核中的页表、I-cache 和
-跨 CPU 协调逻辑。信任关系如下：
+`kipi` is not a userspace-facing boundary module; its main callers are the kernel's page-table, I-cache and
+cross-CPU coordination logic. The trust relationships are as follows:
 
 ```text
-内核调用者
+Kernel callers
    │
    │ safe API: run_on_cpu / run_on_each_cpu / run_on_each_cpu_via_ipi
    │           page_table::TlbFlushIf / karch::IcacheFlushIf
@@ -142,195 +142,194 @@ allocates or sleeps.
 ┌───────────────────────────────────────────┐
 │                   kipi                    │
 │  ┌──────────────┐   ┌──────────────────┐  │
-│  │ IPI 队列路径 │   │ TLB 协议状态路径 │  │
+│  │  IPI queue   │   │  TLB state path  │  │
 │  └──────────────┘   └──────────────────┘  │
 └───────────────────────────────────────────┘
    │
    │ kiface / checked publication / IRQ backend
    v
-平台中断控制器与 CPU 本地执行上下文
+Platform interrupt controller and CPU-local execution context
 ```
 
-默认信任前提：
+Default trust assumptions:
 
-- 调用者在正确的执行阶段使用 `kipi`，即目标 CPU 的本地队列已初始化；
-- 平台 `notify_cpu()` 实现满足 publish-before-notify 契约；
-- `ipi_handler()` 能在目标 CPU 上被正常投递和执行。
+- The caller uses `kipi` in the correct execution phase, i.e. the target CPU's local queue has been initialized;
+- The platform `notify_cpu()` implementation satisfies the publish-before-notify contract;
+- `ipi_handler()` can be delivered and executed normally on the target CPU.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-`kipi` 不直接接收用户态输入，但它确实跨越了若干高风险边界：
+`kipi` does not directly receive userspace input, but it does cross several high-risk boundaries:
 
-1. **中断控制器边界**  
-   通过 `kirq::notify_cpu()` 与 GIC/APIC/SBI 等后端交互，依赖其
-   IPI 投递和发布顺序正确。
+1. **Interrupt controller boundary**
+   It interacts with backends such as GIC/APIC/SBI through `kirq::notify_cpu()`, and relies on their
+   IPI delivery and publication ordering being correct.
 
-2. **per-CPU slot 引用边界**
-   私有 `ipi_queue()` 从显式 CPU area 构造共享 `LazyInit<SpinNoIrq<_>>`
-   引用，依赖“目标 CPU 的本地队列已经初始化”这一前提；队列修改只经锁完成。
+2. **Per-CPU slot reference boundary**
+   The private `ipi_queue()` builds a shared `LazyInit<SpinNoIrq<_>>`
+   reference from an explicit CPU area, relying on the precondition that "the target CPU's local queue has been initialized"; queue modification is done only under the lock.
 
-3. **页表一致性边界**  
-   `tlb.rs` 与 `page_table`、`memspace` 的一致性协议耦合，
-   一旦请求发布、ack 或重试逻辑出错，可能导致旧 TLB 项继续生效。
+3. **Page-table consistency boundary**
+   `tlb.rs` is coupled to the consistency protocol of `page_table` and `memspace`;
+   if request publication, ack or retry logic goes wrong, stale TLB entries may remain in effect.
 
-4. **中断上下文边界**  
-   `ipi_handler()` 和 TLB shootdown handler 运行在不可睡眠上下文中，
-   不能持有会阻塞的锁，也不能执行长路径。
+4. **Interrupt context boundary**
+   `ipi_handler()` and the TLB shootdown handler run in a non-sleepable context,
+   so they must not hold locks that may block, nor execute long paths.
 
-5. **回调边界**  
-   广播/单播回调由其他 CPU 提供并在目标 CPU 上执行。`kipi` 只保证投递，
-   不验证回调逻辑本身是否适合在 IPI 上下文运行。
+5. **Callback boundary**
+   Broadcast/unicast callbacks are supplied by other CPUs and executed on the target CPU. `kipi` only guarantees delivery,
+   and does not verify whether the callback logic itself is suitable to run in IPI context.
 
-本模块不直接涉及：
+This module does not directly involve:
 
-- 用户内存或用户指针；
-- DMA 缓冲区；
-- 网络/文件系统外部输入；
-- FFI。
+- User memory or user pointers;
+- DMA buffers;
+- Network/filesystem external input;
+- FFI.
 
-## unsafe 代码清单
+## Unsafe Code Inventory
 
-### 1. `ipi_queue()` 的显式 CPU-area 访问
+### 1. Explicit CPU-area access in `ipi_queue()`
 
-不变量：
+Invariants:
 
-- 目标 CPU 必须存在于逻辑 CPU 映射中；
-- 目标 CPU 的本地 IPI 队列必须已经初始化；
-- 返回值只允许作为共享引用使用；任何生产或消费都必须取得内层 `SpinNoIrq`。
+- The target CPU must exist in the logical CPU mapping;
+- The target CPU's local IPI queue must already be initialized;
+- The return value may only be used as a shared reference; any production or consumption must acquire the inner `SpinNoIrq`.
 
-防护：
+Safeguards:
 
-- 对外 API 在远程入队前显式检查 `IPI_QUEUE_READY`；
-- `IPI_QUEUE_READY` 由目标 CPU 在初始化后 Release 发布，发送端 Acquire 检查；
-- accessor 不构造远端 `&mut`，多生产者和本地消费者都由同一把锁串行化。
+- The public API explicitly checks `IPI_QUEUE_READY` before remote enqueue;
+- `IPI_QUEUE_READY` is published with Release by the target CPU after initialization, and checked with Acquire by the sender;
+- The accessor does not construct a remote `&mut`; multiple producers and the local consumer are serialized by the same lock.
 
-### 2. `LAST_HANDLED_PENDING_EPOCH` 的 guard-backed per-CPU 访问
+### 2. Guard-backed per-CPU access to `LAST_HANDLED_PENDING_EPOCH`
 
-不变量：
+Invariants:
 
-- 只能访问当前 CPU 的本地 slot；
-- 不能把别的 CPU 的 epoch 缓存错误地写入当前 CPU 本地状态。
+- Only the current CPU's local slot may be accessed;
+- Another CPU's cached epoch must not be mistakenly written into the current CPU's local state.
 
-防护：
+Safeguards:
 
-- helper 获取 `NoPreemptIrqSave`，通过按值 `read`/`write` 完成一次访问，不生成引用；
-- helper 只暴露“当前 CPU 读/写”接口，不提供跨 CPU 写路径。
+- The helpers use `load_current()` / `store_current()` as single by-value scalar accesses on the current CPU, without a guard and without creating references;
+- The helpers only expose "current CPU read/write" interfaces and provide no cross-CPU write path.
 
-### 3. 平台 `notify_cpu()` 中的内联汇编屏障
+### 3. Inline-assembly barriers in platform `notify_cpu()`
 
-位置：
+Locations:
 
 - `drivers/platform/irq/src/gic/gicv2.rs:167`
 - `drivers/platform/irq/src/gic/gicv3.rs:86`
 - `drivers/platform/irq/src/riscv/mod.rs:83`
 
-不变量：
+Invariants:
 
-- 屏障必须覆盖“请求状态已写入普通内存”到“IPI 被目标 CPU 观测”之间的顺序；
-- 否则目标 CPU 可能先响应 IPI，再看见旧 request 状态。
+- The barrier must cover the ordering between "the request state being written to ordinary memory" and "the IPI being observed by the target CPU";
+- Otherwise the target CPU may respond to the IPI first and then see the stale request state.
 
-防护：
+Safeguards:
 
-- `IntrManagerIf::notify_cpu` 现在把该契约写成接口要求；
-- AArch64 / RISC-V 后端已在发送路径显式补 barrier。
+- `IntrManagerIf::notify_cpu` now states this contract as an interface requirement;
+- The AArch64 / RISC-V backends have explicitly added a barrier on the send path.
 
-## 内存安全不变量
+## Memory-Safety Invariants
 
-以下不变量对 `kipi` 的健壮性和内存安全都关键：
+The following invariants are critical to both the robustness and the memory safety of `kipi`:
 
-1. **每 CPU 队列必须先初始化再被远程访问**  
-   私有 area accessor 没有运行时恢复能力，前置条件错了就是逻辑错误；
-   `IPI_QUEUE_READY` 的 Release/Acquire 是该初始化发布协议。
+1. **A per-CPU queue must be initialized before being accessed remotely**
+   The private area accessor has no runtime recovery capability, so a violated precondition is a logic error;
+   the Release/Acquire on `IPI_QUEUE_READY` is the publication protocol for this initialization.
 
-2. **TLB 请求必须先 publish，再允许目标 CPU 看到 IPI**  
-   否则目标 CPU 可能跳过 request，发起 CPU 永久等不到 ack。
+2. **A TLB request must be published before the target CPU is allowed to see the IPI**
+   Otherwise the target CPU may skip the request, and the initiating CPU will wait forever for the ack.
 
-3. **同一发起 CPU 的 request slot 在 active 生命周期内不可被另一个任务复用**  
-   这由 `ActiveShootdownSlot` 的 no-preempt guard 维持。
+3. **The request slot of the same initiating CPU must not be reused by another task during the active lifetime**
+   This is maintained by the no-preempt guard of `ActiveShootdownSlot`.
 
-4. **TLB shootdown 不能在 flush 路径内重建 residency 状态**  
-   residency 由调度切换路径维护；flush 路径只允许消费一个保守快照。
+4. **TLB shootdown must not rebuild residency state inside the flush path**
+   Residency is maintained by the scheduler switch path; the flush path may only consume a conservative snapshot.
 
-5. **pending epoch 只能作为 fast path gate，不能替代真实 ack 协议**  
-   epoch 只决定“要不要扫描”，真正的完成条件仍是 `acked_seq_by_cpu`。
+5. **The pending epoch may only serve as a fast-path gate and cannot replace the real ack protocol**
+   The epoch only decides "whether to scan"; the real completion condition is still `acked_seq_by_cpu`.
 
-## 线程安全
+## Thread Safety
 
-### 通用 IPI 队列
+### Generic IPI queue
 
-- 每个目标 CPU 的队列是多生产者、单消费者模型；
-- 生产者通过 `SpinNoIrq` 串行化入队；
-- 消费者只在目标 CPU 的 IPI handler 上 pop。
+- Each target CPU's queue follows a multi-producer, single-consumer model;
+- Producers serialize enqueue through `SpinNoIrq`;
+- The consumer only pops in the target CPU's IPI handler.
 
 ### TLB shootdown
 
-- `REQUEST_SLOTS` 按发起 CPU 分片，避免 initiator 间共享单个全局 pending 状态；
-- `acked_seq_by_cpu` 按目标 CPU 维度记录确认进度；
-- `PENDING_EPOCH_BY_CPU` 只是降低无关 IPI 的扫描成本，不改变协议正确性；
-- `needs_retry_full_flush` 用于同 CPU 嵌套请求的兜底补发，避免直接重入复用 slot。
+- `REQUEST_SLOTS` is sharded by initiating CPU, avoiding a single global pending state shared among initiators;
+- `acked_seq_by_cpu` records acknowledgment progress per target CPU;
+- `PENDING_EPOCH_BY_CPU` only reduces the scan cost of unrelated IPIs and does not change protocol correctness;
+- `needs_retry_full_flush` is used as a fallback re-issue for nested requests on the same CPU, avoiding direct reentrant reuse of the slot.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁 | 触发条件 | 影响 | 缓解 |
+| ID | Threat | Trigger Condition | Impact | Mitigation |
 |------|------|----------|------|------|
-| T-01 | 目标 CPU 在观察到 request 状态前先处理 IPI | 平台 `notify_cpu()` 缺少发布屏障 | TLB shootdown 丢失，发起 CPU 自旋等待 | 在 IRQ backend 中定义并实现 publish-before-notify 契约 |
-| T-02 | 同一 CPU 上两个任务重入复用同一个 request slot | `flush_remote()` 生命周期内允许抢占 | request 状态被覆盖，可能死锁或漏 flush | `ActiveShootdownSlot` 绑定 no-preempt 与 active slot |
-| T-02a | 两核 `flush_remote` 互等 ack | 等待时 IRQ 关闭，不处理对方 shootdown | libc-test 等并行 unmap 整机卡住 | 等待循环轮询 `handle_shootdown()`，不依赖本核已进 IPI handler |
-| T-03 | 普通 IPI 共用同一向量导致无意义全表扫描 | 每次 IPI 都无条件扫描 TLB slots | 高频无关 IPI 造成 O(CPU_NUM) 热路径开销 | per-target `pending_epoch` fast path |
-| T-04 | 调用者把不适合中断上下文的逻辑作为回调广播到其它 CPU | 回调内部睡眠、拿大锁或跑长路径 | IPI handler 延迟、锁顺序问题、可用性下降 | `kipi` 文档约束回调必须适合该执行上下文；模块不兜底 |
-| T-05 | 队列未初始化前被远程入队 | AP 尚未执行 `init()`，但已经成为 IPI 目标 | 通过原始 per-CPU 引用访问未就绪槽位 | API 显式检查 `IPI_QUEUE_READY`，失败返回 `TargetCpuNotReady` |
-| T-06 | 停机 IPI 无法到达关中断自旋的 CPU | 目标 CPU 长期屏蔽本地中断，永远不进入 `ipi_handler` | 该 CPU 未停靠，终点前仍在变更共享状态 | 1s 有界超时后告警并继续（对齐 Linux `smp_send_stop`），不阻塞终点 |
-| T-07 | NMI 看门狗唤醒停靠 CPU 或误判故意停机为 lockup | 平台带 NMI/pseudo-NMI hard-lockup 看门狗，park 后 NMI 源仍开启 | 停靠 CPU 被反复唤醒；看门狗 panic 后走平台断电，`halt` 变成 `power_off` | park 前调用 `khal::quiesce_nmi()` 停靠本地 NMI 源（无 NMI 平台为 no-op） |
-| T-08 | 停机编排者任务在协议中途被迁移 | 从可抢占的 syscall 上下文进入终点，认领 id 与广播/等待基于过期的 CPU id | 被离开的 CPU 被当作 orchestrator 永不 park，协议必然吃满超时并留下运行中的 CPU | `stop_other_cpus` 全程持有 `NoPreempt` 守卫，把编排者钉在认领的 CPU 上 |
-| T-09 | 等待集包含 IPI 队列未初始化的 present CPU | AP 尚未执行 `kipi::init()` 即触发停机 | 该 CPU 永远无法 ack，每次停机固定白等 1s 超时并误报告警 | 发布时一次性快照等待集，只含队列已就绪的 CPU；广播仍覆盖全部其它 CPU |
+| T-01 | The target CPU handles the IPI before it observes the request state | The platform `notify_cpu()` lacks a publish barrier | TLB shootdown is lost and the initiating CPU spins forever | Define and implement the publish-before-notify contract in the IRQ backend |
+| T-02 | Two tasks on the same CPU re-enter and reuse the same request slot | Preemption is allowed during the lifetime of `flush_remote()` | Request state is overwritten, which may deadlock or miss a flush | `ActiveShootdownSlot` binds no-preempt to the active slot |
+| T-02a | Two cores' `flush_remote` calls wait on each other's ack | IRQs are off while waiting, so the peer's shootdown is not handled | The whole machine hangs during parallel unmaps such as libc-test | The wait loop polls `handle_shootdown()` and does not depend on this core having entered the IPI handler |
+| T-03 | Ordinary IPIs share the same vector and cause pointless full-table scans | Every IPI unconditionally scans the TLB slots | Frequent unrelated IPIs add O(CPU_NUM) hot-path overhead | Per-target `pending_epoch` fast path |
+| T-04 | A caller broadcasts logic unsuitable for interrupt context to other CPUs as a callback | The callback sleeps, takes a big lock, or runs a long path | IPI handler latency, lock-ordering problems, reduced availability | The `kipi` documentation requires callbacks to be suitable for that execution context; the module provides no safety net |
+| T-05 | The queue is enqueued to remotely before it is initialized | An AP has not yet run `init()` but is already an IPI target | The slot is accessed through a raw per-CPU reference before it is ready | The API explicitly checks `IPI_QUEUE_READY` and returns `TargetCpuNotReady` on failure |
+| T-06 | The stop IPI cannot reach a CPU spinning with interrupts disabled | The target CPU masks local interrupts for a long time and never enters `ipi_handler` | That CPU is not parked and still mutates shared state before the final step | After a bounded 1s timeout, warn and continue (matching Linux `smp_send_stop`) without blocking the final step |
+| T-07 | An NMI watchdog wakes a parked CPU or misjudges the deliberate stop as a lockup | The platform has an NMI/pseudo-NMI hard-lockup watchdog and the NMI source is still enabled after park | The parked CPU is repeatedly woken; after the watchdog panics the platform powers off, turning `halt` into `power_off` | Call `khal::quiesce_nmi()` before park to quiesce the local NMI source (a no-op on platforms without NMI) |
+| T-08 | The stop orchestrator task is migrated midway through the protocol | The final step is entered from a preemptible syscall context, and the claim id and broadcast/wait are based on a stale CPU id | The CPU that was left is treated as the orchestrator and never parks, so the protocol necessarily runs out the timeout and leaves a CPU running | `stop_other_cpus` holds a `NoPreempt` guard throughout, pinning the orchestrator to the CPU it claimed |
+| T-09 | The wait set includes a present CPU whose IPI queue is not initialized | A stop is triggered before an AP has run `kipi::init()` | That CPU can never ack, so every stop needlessly waits the full 1s timeout and emits a false warning | Snapshot the wait set once at publish time, containing only CPUs whose queues are ready; the broadcast still covers all other CPUs |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 局部影响 | 系统影响 | 检测/缓解 |
+| ID | Failure Mode | Local Effect | System Effect | Detection/Mitigation |
 |------|----------|----------|----------|-----------|
-| F-01 | 目标 CPU IPI 队列未初始化 | `run_on_cpu` / 广播失败 | 相关跨核操作无法执行 | 返回 `KipiError::TargetCpuNotReady` |
+| F-01 | The target CPU's IPI queue is not initialized | `run_on_cpu` / broadcast fails | The related cross-core operation cannot be performed | Returns `KipiError::TargetCpuNotReady` |
 | F-02 | Queue growth allocation fails | Event cannot be stored | Existing allocator OOM policy is fatal | VecDeque growth remains infallible; QueueFull is not currently emitted |
-| F-03 | 目标 CPU 长时间不 ack TLB request | 发起 CPU 自旋等待 | 页表修改路径停顿，可能表现为系统卡住 | 超时后记录 warning；等待中轮询 `handle_shootdown` 避免 IRQ-off 互等 |
-| F-04 | pending epoch 未同步更新 | 目标 CPU fast path 直接返回，不扫描 slots | 单测或协议调用错误时出现假阴性 / 卡住 | 正式路径由 `flush_remote()` 封装；单测通过 helper 同步更新 |
+| F-03 | The target CPU does not ack the TLB request for a long time | The initiating CPU spin-waits | The page-table modification path stalls, which may look like a system hang | Warns at 1 s, re-sends the IPI every 1 s and escalates at 10 s; after 30 s it logs an error, flushes only the local TLB and returns `TimedOut` without the target's ack (a stale remote TLB entry may remain). The wait loop polls `handle_shootdown` to avoid IRQ-off mutual waits. |
+| F-04 | The pending epoch is not updated synchronously | The target CPU fast path returns directly without scanning the slots | False negatives / hangs on unit tests or protocol misuse | The production path is encapsulated by `flush_remote()`; unit tests update it synchronously through a helper |
 | F-05 | Callback panics | Dispatch does not complete normally | Kernel panic policy applies | No per-callback panic isolation or continuation guarantee |
 | F-06 | Single-use owner allocation fails | No event is published or notified | Caller decides whether to retry or fail | Return NoMemory and drop captures in sender context |
 
-## 故障管理
+## Failure Management
 
-- 通用 IPI 投递路径以 `Result` 返回错误，而不是静默失败；
-- TLB shootdown 的主要失败模式不是 `Result`，而是“目标 CPU 不 ack”，因此采用
-  自旋等待 + 超时 warning 的诊断模型；
-- 同 CPU 嵌套 TLB 请求不直接 panic，而是设置 `needs_retry_full_flush` 并在当前请求结束后补发；
-- 对平台 IPI 顺序语义的要求被写入接口契约，避免隐式依赖散落在调用点。
+- The generic IPI delivery path returns errors as a `Result` instead of failing silently;
+- The main TLB shootdown failure mode is a target CPU that does not ack. The initiator spins with a bounded wait: it warns at 1 s, re-sends the IPI every 1 s, escalates at 10 s, and after 30 s logs an error, flushes only the local TLB and returns `TimedOut` without the target's ack;
+- A nested TLB request on the same CPU does not panic directly; instead it sets `needs_retry_full_flush` and is re-issued after the current request finishes;
+- The requirements on the platform's IPI ordering semantics are written into the interface contract, so implicit dependencies are not scattered across call sites.
 
-## 隐私分析
+## Privacy Analysis
 
-`kipi` 不处理用户隐私数据，也不直接接触用户缓冲区、文件内容或网络载荷。  
-它处理的内容主要是：
+`kipi` does not handle user private data, and does not directly touch user buffers, file contents, or network payloads.
+What it handles is mainly:
 
-- CPU ID；
-- 回调对象；
-- TLB shootdown 协议状态；
-- 诊断日志中的地址和 request 序号。
+- CPU IDs;
+- Callback objects;
+- TLB shootdown protocol state;
+- Addresses and request sequence numbers in diagnostic logs.
 
-需要注意的是，诊断日志可能包含虚拟地址或 CPU 拓扑信息，因此仍应视为内核内部调试信息。
+Note that diagnostic logs may contain virtual addresses or CPU topology information, so they should still be treated as kernel-internal debugging information.
 
-## 已知限制
+## Known Limitations
 
-- 通用 IPI 回调和 TLB shootdown 共用一个 IPI 向量，设计上要求 handler 顺序稳定；
-- TLB shootdown 在等待 ack 时采用自旋，不适合极长延迟目标；
-- `kipi` 只保证跨 CPU 投递，不保证回调本身适合在 IPI 中断上下文运行；
-- `pending_epoch` 只是性能优化门槛，不是完整协议状态，因此测试若直接操作内部 slot，
-  必须同步更新该 gate。
+- Generic IPI callbacks and TLB shootdown share a single IPI vector, so the design requires a stable handler order;
+- TLB shootdown spins while waiting for acks, which is unsuitable for targets with extremely long latency;
+- `kipi` only guarantees cross-CPU delivery; it does not guarantee that the callback itself is suitable to run in IPI interrupt context;
+- `pending_epoch` is only a performance-optimization gate and not complete protocol state, so a test that manipulates internal slots directly
+  must update this gate in sync.
 
-## 审计清单
+## Audit Checklist
 
-- 检查所有新增 `notify_cpu()` 调用点是否依赖 publish-before-notify 语义。
-- 检查是否有任何路径在 `ActiveShootdownSlot` 生命周期内进入可能睡眠的代码。
-- 检查 `flush_remote` 等待 ack 时是否轮询 `handle_shootdown`（IRQ 关闭下两核互等）。
-- 检查任何新测试若手工构造 request slot 状态，是否同步更新 `pending_epoch`。
-- 检查新的广播回调是否真的能在 IPI handler 上下文执行，而不会睡眠或长时间占用 CPU。
-- 检查新平台 IRQ backend 是否兑现 `IntrManagerIf::notify_cpu` 的顺序契约。
+- Check whether every newly added `notify_cpu()` call site depends on publish-before-notify semantics.
+- Check whether any path enters code that may sleep within the lifetime of an `ActiveShootdownSlot`.
+- Check whether `flush_remote` polls `handle_shootdown` while waiting for acks (two cores waiting on each other with IRQs off).
+- Check whether any new test that hand-builds request slot state updates `pending_epoch` in sync.
+- Check whether a new broadcast callback can really run in the IPI handler context without sleeping or occupying the CPU for a long time.
+- Check whether a new platform IRQ backend honors the ordering contract of `IntrManagerIf::notify_cpu`.
 
 
 ## Shootdown completion status for managed data retirement

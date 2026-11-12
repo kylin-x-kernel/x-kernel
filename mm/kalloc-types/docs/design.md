@@ -1,4 +1,4 @@
-# kalloc-types 设计
+# kalloc-types Design
 
 ## Minimal Shared Ownership
 
@@ -153,7 +153,7 @@ KBox<T: Iterator + ?Sized> delegates next, size_hint and nth to T. This supports
 owned chain/enumerate/skip adapters even after erasure to a borrowed-lifetime
 trait object. Forwarding adds no allocation and does not introduce unsafe code.
 
-## 范围和接口
+## Scope and Interface
 
 The initial API provides `KBox` for exclusive ownership of a single object,
 fallible construction, `Deref`, `DerefMut`, and automatic destruction.
@@ -168,49 +168,50 @@ String construction, cloning, growable containers, and
 pinning are not provided.
 Callers do not use the standard `Box` through this API.
 
-构造接口统一返回 `KResult<KBox<T>>`，不使用 `try_` 前缀：
+The construction interfaces uniformly return `KResult<KBox<T>>` and do not use a `try_` prefix:
 
-| 接口 | 策略 |
+| Interface | Policy |
 | --- | --- |
-| `KBox::new(value)` | 默认 `AllocFlags::KERNEL`，调用方允许睡眠、回收 IO 和文件系统回调 |
-| `KBox::new_nowait(value)` | `AllocFlags::NOWAIT`，不允许分配路径睡眠 |
-| `KBox::new_with_flags(value, flags)` | 调用方选择常用组合或组合许可位 |
+| `KBox::new(value)` | Defaults to `AllocFlags::KERNEL`; the caller allows sleeping, reclaim IO and filesystem callbacks |
+| `KBox::new_nowait(value)` | `AllocFlags::NOWAIT`; the allocation path is not allowed to sleep |
+| `KBox::new_with_flags(value, flags)` | The caller chooses a common combination or composes permission bits |
 
-分配不足返回 `KError::NoMemory`；未知 flag 位返回 `KError::InvalidInput`，
-包括零大小值。失败均析构输入值。值构造过程中的嵌套分配和输入值自身
-析构的阻塞行为不属于这个 API 的分配策略保证。
+Insufficient memory returns `KError::NoMemory`; unknown flag bits return `KError::InvalidInput`,
+including for zero-sized values. On any failure the input value is destroyed. Nested allocations during
+value construction and the blocking behavior of the input value's own
+destructor are not covered by the allocation-policy guarantees of this API.
 
-## 分配上下文
+## Allocation Context
 
-`AllocFlags` 借鉴 Linux GFP 的“许可位 + 常用组合”，不是 Linux 位值 ABI。
-`DIRECT_RECLAIM` 允许可睡眠的同步回收，`IO` 允许回收发起 IO，`FS` 允许
-回收进入文件系统。没有 `DIRECT_RECLAIM` 时，即使 IO/FS 位存在也不得
-通过它们执行睡眠回收；有此位时调用方必须允许睡眠。
+`AllocFlags` borrows Linux GFP's "permission bits + common combinations" model; it is not a Linux bit-value ABI.
+`DIRECT_RECLAIM` allows sleepable synchronous reclaim, `IO` allows reclaim to initiate IO, and `FS` allows
+reclaim to enter the filesystem. Without `DIRECT_RECLAIM`, sleeping reclaim must not be performed
+through the IO/FS bits even if they are present; when this bit is set, the caller must be allowed to sleep.
 
-`KERNEL` 包含全部三项许可，也是 `Default`；`NOWAIT` 不授予任何许可；
-`NOIO` 只允许同步回收，`NOFS` 允许同步回收和 IO。可通过位运算构造策略，
-例如 `AllocFlags::KERNEL & !AllocFlags::FS`。这些是许可而不是必须执行的
-行为，因此当前无回收后端仍能满足限制。未加入储备池、必成功、DMA 或
-任意 allocator 注入；这些功能不能靠设置许可位假装实现。
+`KERNEL` contains all three permissions and is also the `Default`; `NOWAIT` grants no permissions;
+`NOIO` allows only synchronous reclaim, and `NOFS` allows synchronous reclaim and IO. Policies can be built with bit operations,
+for example `AllocFlags::KERNEL & !AllocFlags::FS`. These are permissions rather than behavior that must be performed,
+so the current backend without reclaim can still satisfy the restrictions. Reserve pools, must-succeed allocation, DMA or
+arbitrary allocator injection are not added; these features cannot be faked by setting permission bits.
 
-默认构造只能在允许睡眠的任务上下文调用，不能持非睡眠锁或在中断里用。
-这一约束现在就成立，不能依赖当前后端恰好不睡眠。`new_nowait` 不承诺
-储备访问或有界延迟。策略仅作用于单次分配，不会改变 task-wide 上下文。
-Linux 推荐通过作用域 API 处理跨调用链的 NOFS/NOIO 约束；本次不实现这类
-作用域继承，因此调用方不能假设嵌套分配自动继承限制。
+The default constructor may only be called from a sleepable task context; it must not be called while holding a non-sleeping lock or in an interrupt.
+This constraint holds now and must not rely on the current backend happening not to sleep. `new_nowait` does not promise
+reserve access or bounded latency. The policy applies only to a single allocation and does not change the task-wide context.
+Linux recommends handling NOFS/NOIO constraints across call chains through scoped APIs; this change does not implement such
+scope inheritance, so callers cannot assume that nested allocations automatically inherit the restrictions.
 
-当前所有已知许可组合都调用 `kalloc::global_allocator().alloc`，现有后端
-不执行睡眠回收、回收 IO 或文件系统回调。未来必须在内部 `allocate` 将
-许可传递给回收后端，保留 NOWAIT、NOIO 和 NOFS 的限制。
-不能改走当前 `GlobalAlloc` 入口，该入口会在 OOM 时调用 fatal handler。
-后端本身的内部不变量 panic 不转换成普通分配失败。
-直接分配仍参与 `kalloc` 的 RustHeap 用量统计，但不经过 `GlobalAlloc`
-包装层的可选 backtrace tracking；未来统一跟踪入口时需要保留失败语义。
+All currently known permission combinations call `kalloc::global_allocator().alloc`, and the existing backend
+performs no sleeping reclaim, reclaim IO or filesystem callbacks. In the future, the internal `allocate` must pass
+the permissions to the reclaim backend, preserving the NOWAIT, NOIO and NOFS restrictions.
+It must not be rerouted to the current `GlobalAlloc` entry point, which calls the fatal handler on OOM.
+Panics caused by the backend's own internal invariants are not converted into ordinary allocation failures.
+Direct allocation still participates in `kalloc`'s RustHeap usage accounting, but does not go through the optional backtrace tracking of the `GlobalAlloc`
+wrapper layer; when the tracking entry point is unified in the future, the failure semantics must be preserved.
 
-## 生命周期
+## Lifecycle
 
-非零大小值使用 `Layout::new::<T>()` 申请，成功后一次写入完成初始化。
-ZST 使用对齐的 dangling 指针，不调用分配和释放接口，但正常运行析构。
+Non-zero-sized values are allocated with `Layout::new::<T>()`, and initialization is completed with a single write after success.
+A ZST uses an aligned dangling pointer and does not call the allocation or deallocation interfaces, but its destructor still runs normally.
 `KBox` stores only `NonNull<T>` and an ownership marker, with a transparent
 representation and a derived `CoercePointee` implementation. Following Linux
 KBox's DST ownership model, it does not store a layout in every owner.
@@ -220,48 +221,48 @@ with the saved layout and never creates a reference after value destruction.
 The guard also frees storage if destruction unwinds. The kernel normally uses
 panic abort, so this is not a kernel recovery guarantee. Unsizing neither
 allocates nor changes the allocation-policy contract.
-所有权移动不改变堆地址，但 `DerefMut` 允许替换值，因此不提供 pinning。
+Moving ownership does not change the heap address, but `DerefMut` allows replacing the value, so pinning is not provided.
 `Send` and `Sync` require `T: Send` and `T: Sync`, respectively, including for DSTs.
 
-## 调用点迁移约束
+## Call-Site Migration Constraints
 
-不能批量把 `Box::new` 改成默认 `KBox::new`。每个迁移点都必须沿调用链
-核对以下条件，并在所属接口的 rustdoc 中说明执行上下文和错误行为：
+`Box::new` must not be bulk-replaced with the default `KBox::new`. Every migration point must
+check the following conditions along the call chain, and state the execution context and error behavior in the rustdoc of the interface it belongs to:
 
-1. 确认是可睡眠任务上下文，还是中断、关 IRQ/抢占、非睡眠 RCU 读侧或
-   持自旋锁的路径。默认 `new` 只用于前者，ZST 和当前不回收都不是例外。
-2. 检查当前持有的全部锁与潜在回收路径的依赖。可睡眠 mutex 并不自动
-   意味着能调用默认分配；回收可能回到相同子系统并等待该锁。按实际
-   依赖选择 NOFS/NOIO、调整分配位置或使用 NOWAIT。
-3. NOFS/NOIO 仍允许睡眠；不允许睡眠时必须去掉 DIRECT_RECLAIM。
-   NOWAIT 只约束存储分配，不承诺 NMI 安全、任意锁上下文的可重入性、
-   储备或必成功。仍须核对底层 allocator 的锁顺序和重入条件。
-4. 核对输入值构造、失败时的析构，以及成功后最终释放所在上下文。
-   flags 不会约束这些代码，也不会被保留下来影响未来 Drop；Deref 本身
-   不分配或睡眠，但通过引用调用的 T 的方法有自己的约束。
-5. 确认错误能返回或有明确回退，失败前未发布半成品，资源与已有状态能
-   正确清理。不能通过新增 unwrap/expect 把可失败申请改回致命失败。
+1. Determine whether the path runs in sleepable task context, or in interrupt context, with IRQs/preemption disabled, in a non-sleepable RCU read-side section, or
+   while holding a spinlock. The default `new` is only for the former; neither a ZST nor the fact that nothing is currently reclaimed is an exception.
+2. Check the dependencies between all locks currently held and potential reclaim paths. A sleepable mutex does not automatically
+   mean the default allocation can be called; reclaim may re-enter the same subsystem and wait on that lock. Depending on the actual
+   dependencies, choose NOFS/NOIO, move the allocation, or use NOWAIT.
+3. NOFS/NOIO still allow sleeping; if sleeping is not allowed, DIRECT_RECLAIM must be removed.
+   NOWAIT only constrains storage allocation; it does not promise NMI safety, reentrancy in arbitrary lock contexts,
+   reserves, or guaranteed success. The lock ordering and reentrancy conditions of the underlying allocator must still be checked.
+4. Check the construction of the input value, its destruction on failure, and the context in which it is finally freed after success.
+   flags do not constrain this code, and are not retained to affect a future Drop; Deref itself does not
+   allocate or sleep, but methods of T called through the reference have their own constraints.
+5. Confirm that the error can be returned or there is a clear fallback, that no half-built object is published before failure, and that resources and existing state are
+   cleaned up correctly. A fallible allocation must not be turned back into a fatal failure by adding unwrap/expect.
 
-不根据当前是否持锁隐式切换默认策略：策略是调用接口的稳定契约。
-同一辅助函数若需要服务多种上下文，应让上层传入 flags，或明确拆分
-普通/非睡眠入口，不能在下层无条件使用默认 `new`。
+The default policy is not switched implicitly based on whether a lock is currently held: the policy is a stable contract of the calling interface.
+If the same helper function must serve multiple contexts, the upper layer should pass in flags, or the helper should be explicitly split into
+normal/non-sleeping entry points; the lower layer must not unconditionally use the default `new`.
 
-## 首个调用方和验证
+## First Caller and Verification
 
-VFS inode 的文件锁上下文采用 `Once<KBox<FileLockContext>>`。
-`try_call_once` 在失败后保持未初始化状态，下一次调用可重试；成功后
-所有请求复用同一上下文。由于 Once 的竞争者自旋，初始化使用 `new_nowait`。
-`lock`/`flock` 将失败作为 `NoMemory` 返回，查询和无上下文的解锁无需分配。
-上下文里的锁记录节点仍使用现有实现，不属于本次迁移。
+The file-lock context of a VFS inode uses `Once<KBox<FileLockContext>>`.
+`try_call_once` remains uninitialized after a failure, so the next call can retry; after success,
+all requests reuse the same context. Because contenders of Once spin, initialization uses `new_nowait`.
+`lock`/`flock` return the failure as `NoMemory`; queries and unlocks without a context need no allocation.
+The lock-record nodes inside the context still use the existing implementation and are not part of this migration.
 
-guest 测试覆盖实际分配、对齐、移动、可变访问、析构、ZST 和局部失败注入。
-失败注入仅向私有分配回调返回错误，不引入全局故障开关；VFS 测试验证
-失败不发布上下文、重试成功和已初始化时不再次执行分配。
-策略测试覆盖默认构造、常用及自定义 flags 到私有分配回调的传递，以及
-未知位拒绝时不执行分配且正确析构输入。
+The guest tests cover actual allocation, alignment, moves, mutable access, destruction, ZSTs, and local failure injection.
+Failure injection only returns an error from the private allocation callback and introduces no global fault switch; the VFS tests verify that
+a failure does not publish the context, that a retry succeeds, and that no allocation is performed again once initialized.
+The policy tests cover default construction, the passing of common and custom flags to the private allocation callback, and
+that when unknown bits are rejected, no allocation is performed and the input is destroyed correctly.
 
-定向执行命令为 `make unittest UNITTEST_CRATE=kalloc_types,kvfs`；
-过滤器使用 Rust crate 名称 `kalloc_types`，而不是 Cargo 包名中的连字符。
+The targeted command is `make unittest UNITTEST_CRATE=kalloc_types,kvfs`;
+the filter uses the Rust crate name `kalloc_types`, not the hyphenated Cargo package name.
 
 ## Second batch: mount-transaction private state
 
@@ -281,10 +282,10 @@ VFS tests cover private-state replacement and cleanup after initializer failure.
 Existing local allocation-failure injection still verifies that the input value
 is destroyed exactly once.
 
-## 参考
+## References
 
-- [Linux 内存分配指南](https://docs.kernel.org/core-api/memory-allocation.html)：GFP 许可、常用组合及 NOFS/NOIO 作用域建议。
-- [Linux Rust Box](https://rust.docs.kernel.org/kernel/alloc/kbox/struct.Box.html)：`new(value, flags)` 是可失败构造；本模块另外提供无 flags 的默认入口和 NOWAIT 快捷入口。
+- [Linux memory allocation guide](https://docs.kernel.org/core-api/memory-allocation.html): GFP permissions, common combinations, and recommendations for NOFS/NOIO scopes.
+- [Linux Rust Box](https://rust.docs.kernel.org/kernel/alloc/kbox/struct.Box.html): `new(value, flags)` is a fallible constructor; this module additionally provides a default entry point without flags and a NOWAIT shortcut entry point.
 
 ## Reserved owner storage
 

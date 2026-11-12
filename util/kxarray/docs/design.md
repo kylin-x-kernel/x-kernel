@@ -47,7 +47,7 @@ period; root growth preserves the previous root as
 a descendant. Overlapping reads may miss a newly inserted key, but growth never
 removes an existing association.
 
-Writers serialize with one preemption-disabling spinlock. Task-context writers
+Writers serialize with one preemption-disabling spinlock. Task-context or early-boot writers
 and locked ownership queries take this lock; IRQ/NMI readers use the atomic topology and
 RCU, so writer serialization need not mask ordinary interrupts.
 Inspection counts missing nodes;

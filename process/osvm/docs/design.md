@@ -72,6 +72,7 @@ limit for an all-zero terminator.
 |---|---|
 | Misaligned typed pointer | `MemError::InvalidAddr` (`EFAULT` via `From` into `KError`) |
 | Provider fault/rejection | `MemError::NoAccess` (`EFAULT`) |
+| Provider out of memory | `MemError::OutOfMemory` (`ENOMEM`) |
 | Terminator beyond 128 KiB (`alloc`) | `MemError::NameTooLong` (`ENAMETOOLONG`) |
 | `rewind_bytes` overflow | `kio` `EINVAL` (cursor unchanged) |
 

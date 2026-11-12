@@ -271,7 +271,7 @@ context switch (switch-in starts a fresh interval, switch-out settles it) and on
 demand when sampling. A settlement charges the unsettled interval to the mode
 that is current when it runs, giving the user/kernel split tick-level
 resolution; long kernel work still settles as kernel time because the trap path
-publishes `Kernel` for it. Settlement is a compare-exchange on `last_wall`
+publishes `Kernel` for it. Settlement is a compare-exchange on `last_wall_ns`
 followed by an accumulator update, so concurrent local and remote settlements
 cannot charge the same interval twice. The existing exit flag prevents
 restarting finalized accounting during cleanup. Separate IRQ/steal/guest
@@ -585,10 +585,9 @@ Preallocated intrusive child slots keep commit-time relations within the
 non-sleeping domain boundary; stable publication slots separate visibility from
 allocating/deleting BTreeMap entries. Dedicated semantic query modules prevent
 callers from reconstructing lifecycle policy from weak runtime references.
-`ProcessRuntime` holds the process namespace bundle in an `RwLock<Option<NsProxy>>`.
+`ProcessRuntime` holds the process namespace bundle in an `RwLock<Option<Arc<NsProxy>>>`.
 `apply_prepared_unshare` installs a validated bundle (optionally swapping the
-filesystem context for `NEWNS`/`CLONE_FS`) and unshares the fd table for
-`CLONE_FILES`; `apply_setns` swaps one namespace slot and retargets the fs
+filesystem context for `NEWNS`/`CLONE_FS`); `apply_setns` swaps one namespace slot and retargets the fs
 root/pwd into a mount namespace for `CLONE_NEWNS`. Both paths only install
 state validated by `kns`, so the commit surface is small. `Process::nsproxy` and
 the per-namespace accessors expose the bundle to `setns` and `/proc/<pid>/ns`.

@@ -1,4 +1,4 @@
-# v9fs — 设计文档
+# v9fs — Design Document
 
 ## Prepared transport handoff
 
@@ -16,36 +16,36 @@ no transport guard is retained at this allocation. Callers must use sleepable,
 reclaim-safe task context with IRQs/preemption enabled and no non-sleepable RCU
 section. A failed owner allocation is returned before a local superblock is published.
 
-## 定位
+## Positioning
 
-`fs/filesystems/9p` 是具体的 9P 网络文件系统，对应 Linux `fs/9p`。它拥有 mount、superblock、
-inode、namespace、open-file 和 directory-iteration 的 KVFS 适配；`net/9p` 拥有 9P client、fid、
-协议编解码和 connection 接口。
+`fs/filesystems/9p` is the concrete 9P network filesystem, corresponding to Linux `fs/9p`. It owns the KVFS adaptation for mount, superblock,
+inode, namespace, open-file and directory-iteration; `net/9p` owns the 9P client, fid,
+protocol encoding/decoding and the connection interface.
 
-## 背景
+## Background
 
-远端对象在 rename/unlink 后仍由 fid 标识。按绝对路径重新 walk 会改变 open-file identity，
-因此 v9fs 必须像 Linux 一样让 inode/dentry 和 opened file 持有不同角色的 fid。
+After a rename/unlink, a remote object is still identified by its fid. Re-walking by absolute path would change the open-file identity,
+so, like Linux, v9fs must have the inode/dentry and the opened file hold fids in different roles.
 
-## 范围
+## Scope
 
-代码按 Linux 的职责拆分：
+The code is split by responsibility following Linux:
 
-| X-Kernel | Linux | 职责 |
+| X-Kernel | Linux | Responsibility |
 | --- | --- | --- |
-| `fs.rs` | `vfs_super.c`、`v9fs.c` | mount session 和 superblock operations |
-| `inode.rs` | `vfs_inode.c`、`vfs_inode_dotl.c` | inode、metadata 和 namespace operations |
+| `fs.rs` | `vfs_super.c`, `v9fs.c` | mount session and superblock operations |
+| `inode.rs` | `vfs_inode.c`, `vfs_inode_dotl.c` | inode, metadata and namespace operations |
 | `file.rs` | `vfs_file.c` | open, read/write, fsync and folio reads |
 | `dir.rs` | `vfs_dir.c` | opened directory iteration |
-| `util.rs` | dotl/VFS conversion helpers | device number 和 `d_type` 转换 |
+| `util.rs` | dotl/VFS conversion helpers | device number and `d_type` conversion |
 
-## 架构
+## Architecture
 
-内核单元测试位于 `ut-tests/file.rs`、`ut-tests/inode.rs` 和 `ut-tests/util.rs`。
-各文件通过 `unittest::path_mod_test!` 挂载到原源文件的私有 `tests` 模块中，
-仅在 `cfg(unittest)` 下编译。当前 AArch64 验证配置需同时启用 `KFEAT_FS_9P=y`
-和 `KFEAT_DRIVER_VIRTIO_9P=y`，以纳入 `v9fs` 及其所需的 VirtIO 9P 设备支持。
-这些测试与 `net/9p` 中协议客户端的测试相互独立。
+The kernel unit tests are located in `ut-tests/file.rs`, `ut-tests/inode.rs` and `ut-tests/util.rs`.
+Each file is mounted into the private `tests` module of the corresponding source file via `unittest::path_mod_test!`,
+and is compiled only under `cfg(unittest)`. The current AArch64 verification configuration must enable both `KFEAT_FS_9P=y`
+and `KFEAT_DRIVER_VIRTIO_9P=y`, so as to include `v9fs` and the VirtIO 9P device support it requires.
+These tests are independent of the protocol client tests in `net/9p`.
 
 ```text
 SuperBlock private_data
@@ -60,52 +60,51 @@ V9fsInode ───────► unopened Arc<P9Fid>
 VfsFile private_data ─► opened Arc<P9Fid>
 ```
 
-`V9fsSession` 对应 Linux `v9fs_session_info`，只保留 mount 级 client。`V9fsInode` 不保存绝对
-路径、重复的 node type 或 filesystem 外层锁；节点类型和身份来自 qid/attributes。
+`V9fsSession` corresponds to Linux `v9fs_session_info` and keeps only the mount-level client. `V9fsInode` stores no absolute
+path, no redundant node type and no outer filesystem lock; the node type and identity come from the qid/attributes.
 
-Linux 将 lookup fid 放在 dentry private data。KVFS 当前没有 dentry-private slot，因此 v9fs
-把同一 unopened fid 放在 `V9fsInode`。这是维持对象身份所需的最小结构差异，没有为此增加
-path cache 或第二层 fid wrapper。
+Linux keeps the lookup fid in dentry private data. KVFS currently has no dentry-private slot, so v9fs
+keeps the same unopened fid in `V9fsInode`. This is the minimal structural difference needed to preserve object identity; no
+path cache or second-layer fid wrapper is added for it.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-mount、lookup、namespace、I/O 和最后一个 fid 引用的释放都会同步等待 transport，只能在
-scheduler 与 allocator 可用后的可睡眠 task context 执行。不要求 current userspace process，
-但不得在 IRQ context 或持有 spinlock 时执行。并发入口可重入，协议请求由共享 client 串行化。
+Mount, lookup, namespace operations, I/O and the release of the last fid reference all wait synchronously on the transport, and may only run in
+sleepable task context after the scheduler and allocator are available. A current userspace process is not required,
+but they must not run in IRQ context or while holding a spinlock. Concurrent entry is allowed (the code is reentrant), and protocol requests are serialized by the shared client.
 
-## 算法流程
+## Algorithm Flow
 
-### mount 和 inode
+### mount and inode
 
-boot/driver glue 先选择具体 device 并建立 transport connection，随后调用 `v9fs::mount()`。
-v9fs 创建 `P9Client`，协商 9P2000.L、attach root fid、取得并验证 root attributes，再发布
-superblock。块大小按 Linux `fls(maxdata - 1)` 等价规则计算，最大文件大小使用 KVFS
-`MAX_LFS_FILESIZE`。
+The boot/driver glue first selects the concrete device and establishes the transport connection, then calls `v9fs::mount()`.
+v9fs creates the `P9Client`, negotiates 9P2000.L, attaches the root fid, obtains and validates the root attributes, and then publishes the
+superblock. The block size is computed by a rule equivalent to Linux `fls(maxdata - 1)`, and the maximum file size uses KVFS
+`MAX_LFS_FILESIZE`.
 
-inode number 使用 Linux 64-bit `QID2INO(qid.path) = qid.path + 2`。当前实现对应 Linux 默认
-cacheless 模式：每次成功 lookup 由 returned fid 建立 inode，不以 inode number 合并不同 lookup；
-hard link 则复用 source dentry 已有的 VFS inode。
+The inode number uses the Linux 64-bit `QID2INO(qid.path) = qid.path + 2`. The current implementation corresponds to Linux's default
+cacheless mode: each successful lookup builds an inode from the returned fid, and different lookups are not merged by inode number;
+a hard link instead reuses the VFS inode already held by the source dentry.
 
-attributes 通过 `TGETATTR` 获取，并验证 fid qid、attribute qid 和 VFS node type 一致。
-显式 mode、owner、size、atime、mtime 修改转换为一次 `TSETATTR`；atime/mtime
-使用明确指定的时间。ctime 只能请求服务端更新，`RSETATTR` 不返回其实际值，因此不会把
-客户端 ctime 当作确认结果发布；对外 getattr 仍从服务端读取时间。
+Attributes are fetched via `TGETATTR`, and the fid qid, the attribute qid and the VFS node type are verified to be consistent.
+Explicit changes to mode, owner, size, atime and mtime are converted into a single `TSETATTR`; atime/mtime
+use explicitly specified times. ctime can only be requested to be updated by the server, and `RSETATTR` does not return its actual value, so the
+client's ctime is never published as a confirmed result; the externally visible getattr still reads the times from the server.
 
 Automatic access/modification updates follow Linux `generic_update_time`: the
 `update_time` callback publishes local inode atime or mtime/ctime directly, and
 KVFS does not publish them again. It sends no remote `TSETATTR` and does not
 translate automatic updates into server-side current-time requests.
 
-### open、I/O 和生命周期
+### open, I/O and lifecycle
 
-每次 VFS open 都从 inode 的 unopened fid 执行 zero-name walk，得到独立 fid，按 Linux
-`v9fs_open_to_dotl_flags()` 规则选择 access mode/status flags 后执行 `TLOPEN`。opened fid 作为
-typed private data 放入 `VfsFile`；read、write、readdir 和 fsync 始终从该对象取 fid。
-write 根据服务端确认的写入字节数更新 inode size，使用 KVFS 的
-`grow_size_after_backing_write()` 保持 backing write 与本地大小发布的职责一致。
+Every VFS open performs a zero-name walk from the inode's unopened fid to obtain an independent fid, selects the access mode/status flags following Linux's
+`v9fs_open_to_dotl_flags()` rules, and then issues `TLOPEN`. The opened fid is stored in `VfsFile` as typed private data; read, write, readdir and fsync on regular files always take the fid from that object; symlink reads go through `read_link()` and use the inode's unopened fid.
+write updates the inode size from the number of bytes the server confirmed written, and uses KVFS's
+`grow_size_after_backing_write()` to keep the backing write and the local size publication under consistent responsibility.
 
-因此 rename/unlink 后，已打开文件不依赖旧路径，仍引用同一服务端对象。文件释放时 typed
-private data 释放最后一个 `Arc<P9Fid>`，由 `P9Fid::drop` clunk；v9fs 不实现重复的 release 状态机。
+Therefore, after a rename/unlink, an already opened file does not depend on the old path and still refers to the same server object. When the file is released, the typed
+private data drops the last `Arc<P9Fid>`, which is clunked by `P9Fid::drop`; v9fs does not implement a duplicate release state machine.
 
 ### Page cache and mmap
 
@@ -141,41 +140,41 @@ invalidates mappings past the new EOF before the operation returns. Without
 that publication a folio cached by `read_folio` could keep serving
 pre-truncate bytes.
 
-directory iteration 把服务端 qid 转换为 inode number，并把服务端 `d_off` 作为下一次
-`DirContext` 位置，不使用本地数组下标模拟远端 offset。
+Directory iteration converts the server qid into an inode number, and uses the server `d_off` as the next
+`DirContext` position, rather than simulating the remote offset with a local array index.
 
-### namespace 操作
+### namespace operations
 
-- lookup 在 parent fid 上 walk 单个 child name；
-- create/mkdir/mknod/symlink 在 parent fid 上执行 dotl 操作，再 walk child 获得 unopened fid；
-- link 发送 `dfid, oldfid, name`，并复用 source VFS inode；
-- unlink/rmdir 优先执行 `TUNLINKAT`，仅对 `EOPNOTSUPP` 回退到 cloned child fid 的 `TREMOVE`；
-- rename 优先执行 `TRENAMEAT`，仅对 `EOPNOTSUPP` 回退到 source fid 的 `TRENAME`；
-- 全部操作使用对象 fid，不构造或更新绝对路径字符串。
+- lookup walks a single child name on the parent fid;
+- create/mkdir/mknod/symlink perform the dotl operation on the parent fid, then walk the child to obtain an unopened fid;
+- link sends `dfid, oldfid, name` and reuses the source VFS inode;
+- unlink/rmdir prefer `TUNLINKAT`, and fall back to `TREMOVE` on a cloned child fid only for `EOPNOTSUPP`;
+- rename prefers `TRENAMEAT`, and falls back to `TRENAME` on the source fid only for `EOPNOTSUPP`;
+- all operations use object fids and do not construct or update absolute path strings.
 
-`statfs` 使用 root inode fid 的 `TSTATFS`；仅在服务端明确表示 unsupported 时回退到
-`simple_statfs`。`sync_fs` 没有 superblock-owned dirty state，opened object 的 durability 由
-per-fid `TFSYNC` 表达。The range-aware VFS callback forwards `data_only` unchanged.
+`statfs` uses `TSTATFS` on the root inode fid; it falls back to
+`simple_statfs` only when the server explicitly reports unsupported. `sync_fs` has no superblock-owned dirty state; the durability of opened objects is expressed by
+per-fid `TFSYNC`. The range-aware VFS callback forwards `data_only` unchanged.
 9P fsync has no byte-range operand, so partial and empty VFS ranges conservatively
 synchronize the whole opened fid; no local writeback or second sync hook is added.
 
-## 并发模型
+## Concurrency Model
 
-v9fs 自身不增加全局或 session 级锁。一个 mount 的 inode/file fids 共享 `P9Client`，client
-内部 mutex 串行 transport request 和协议分配状态；VFS 对象和 fid 生命周期由 `Arc` 表达。
+v9fs itself adds no global or session-level lock. The inode/file fids of one mount share the `P9Client`, and the client's
+internal mutex serializes transport requests and protocol allocation state; the lifetimes of VFS objects and fids are expressed by `Arc`.
 
-## 设计决策
+## Design Decisions
 
-- 只实现 9P2000.L cacheless filesystem 语义；
+- Only 9P2000.L cacheless filesystem semantics are implemented;
 - No KVFS dentry-private fid slot, atomic-open contract, xattr, or remote-lock support yet;
 - the page cache only serves read faults; no writable shared mappings or writeback;
-- transport discovery 和 VirtIO/kclass glue 保持在现有 boot/driver 层，本次不重构它们。
+- transport discovery and VirtIO/kclass glue stay in the existing boot/driver layer; this change does not refactor them.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-superblock private data 持有 mount client；inode 持有 lookup fid；opened file 的 typed private
-data 持有独立 opened fid。各宿主对象释放其最后一个 `Arc<P9Fid>` 时由协议层 clunk，v9fs
-不复制 clunk 状态或实现额外 release wrapper。
+The superblock private data holds the mount client; the inode holds the lookup fid; the typed private
+data of an opened file holds an independent opened fid. When each host object releases its last `Arc<P9Fid>`, the protocol layer clunks it, and v9fs
+does not duplicate clunk state or implement an extra release wrapper.
 
 File fsync first writes and waits for the requested local mapping range, then
 issues the protocol's whole-fid TFSYNC. This follows Linux

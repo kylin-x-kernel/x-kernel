@@ -1,99 +1,98 @@
-# vdev-virtio-blk — 安全与可靠性分析
+# vdev-virtio-blk — Security and Reliability Analysis
 
-## 信任模型
+## Trust Model
 
-- 调用方（VMM 组装代码）受信任：提供 `GuestDma`、`IrqSender` 与容量。
-- 访客不受信任：控制 MMIO 寄存器与 virtqueue 内容，包括请求头中的
-  `request_type`、`sector`，以及描述符地址与长度。
-- 本 crate 必须保证：恶意请求最多导致该请求以 IOERR 完成，不得越界访问宿主
-  内存、不得 panic、不得破坏设备/VM 状态。
+- The caller (the VMM assembly code) is trusted: it provides `GuestDma`, `IrqSender`, and the capacity.
+- The guest is untrusted: it controls the MMIO registers and the virtqueue contents, including the
+  `request_type` and `sector` in the request header, as well as descriptor addresses and lengths.
+- This crate must guarantee that a malicious request results at most in that request completing with IOERR, and must not access host memory out of bounds,
+  must not panic, and must not corrupt device/VM state.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-| 边界 | 说明 |
+| Boundary | Description |
 |------|------|
-| MMIO 标准寄存器 | 来自 `vdev-virtio` 的传输状态机（含 `QUEUE_READY` 布局校验） |
-| 配置空间读 | 段大小、几何等常量，只读 |
-| 请求头描述符 | 访客提供的 `VIRTIO_BLK_T_*`、`sector`、描述符方向与长度 |
-| 数据描述符链 | 访客提供的地址/长度，经 `GuestDma` 读写 |
-| status 描述符 | 设备写入 1 字节状态 |
-| `QUEUE_NOTIFY` | 触发队列处理 |
-| 后端 | `BlockBackend` 实现（默认 RAM 盘） |
+| Standard MMIO registers | The transport state machine from `vdev-virtio` (including the `QUEUE_READY` layout validation) |
+| Config space reads | Constants such as segment size and geometry, read-only |
+| Request header descriptor | Guest-provided `VIRTIO_BLK_T_*`, `sector`, descriptor direction and length |
+| Data descriptor chain | Guest-provided addresses/lengths, read and written via `GuestDma` |
+| status descriptor | The device writes a 1-byte status |
+| `QUEUE_NOTIFY` | Triggers queue processing |
+| Backend | `BlockBackend` implementation (RAM disk by default) |
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-本 crate 无 `unsafe` 代码。所有访客内存访问经 `vdev-virtio::DmaGuestMemory`
-→ `vdev_core::GuestDma`，`unsafe` 仅在 `kvmm` 的 `GuestDma` 实现与
-`vdev-virtio::memory` 中（见各自文档）。
+This crate contains no `unsafe` code. All guest memory accesses go through `vdev-virtio::DmaGuestMemory`
+→ `vdev_core::GuestDma`; `unsafe` appears only in the `GuestDma` implementation in `kvmm` and in
+`vdev-virtio::memory` (see their respective documents).
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-1. 数据请求必须通过 `validate_data_request`：段数 ≤ `seg_max`、单段 ≤
-   `size_max`、总长按 `SECTOR_SIZE` 对齐、`[sector, sector+len)` 落在容量内。
-2. 描述符方向必须匹配请求类型：`IN` 要求数据描述符可写，`OUT` 要求可读。
-3. 请求头描述符必须可读且长度 ≥ `VirtioBlockHeader::SIZE`；status 描述符必须
-   可写且长度 ≥ 1。
-4. 缓冲区分配使用 `try_reserve_exact`，分配失败返回
-   `VirtioError::InvalidBufferSize`，不对访客声明长度直接 `resize` 造成 OOM panic。
-5. 所有 `GuestDma` 访问失败都映射为 I/O 错误，不传播为 UB。
+1. Data requests must pass `validate_data_request`: segment count ≤ `seg_max`, each segment ≤
+   `size_max`, total length aligned to `SECTOR_SIZE`, and `[sector, sector+len)` within the capacity.
+2. The descriptor direction must match the request type: `IN` requires the data descriptors to be writable, and `OUT` requires them to be readable.
+3. The request header descriptor must be readable with length ≥ `VirtioBlockHeader::SIZE`; the status descriptor must be
+   writable with length ≥ 1.
+4. Buffer allocation uses `try_reserve_exact`; on allocation failure it returns
+   `VirtioError::InvalidBufferSize`, and never calls `resize` directly on a guest-declared length, which could cause an OOM panic.
+5. All `GuestDma` access failures are mapped to I/O errors and are not propagated as UB.
 
-## 线程安全
+## Thread Safety
 
-- 设备实例作为 `Box<dyn MmioDevice>` 由 VMM MMIO 总线以 `&mut self` 串行访问；
-  内部共享状态由 `SpinNoIrq` 保护。
-- `IrqSender` 为 `Send + Sync`；注入在设备锁外调用。
-- `RamDiskBackend` 的内存盘由 `kspin::SpinNoIrq` 保护，可在多 vCPU 触发下安全访问。
-  后端 I/O 运行在队列 `SpinNoIrq` 锁内（本地中断屏蔽），故后端锁必须不可睡眠，
-  避免在中断屏蔽状态下阻塞导致死锁。
+- The device instance is accessed serially as a `Box<dyn MmioDevice>` by the VMM MMIO bus via `&mut self`;
+  internal shared state is protected by `SpinNoIrq`.
+- `IrqSender` is `Send + Sync`; injection is invoked outside the device lock.
+- The memory disk of `RamDiskBackend` is protected by `kspin::SpinNoIrq` and can be accessed safely when triggered from multiple vCPUs.
+  Backend I/O runs inside the queue `SpinNoIrq` lock (with local interrupts masked), so the backend lock must be non-sleeping,
+  to avoid a deadlock caused by blocking while interrupts are masked.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | 超容量/越界读写请求 | 高 | 访客给出越界 `sector`/长度 | `validate_data_request` + `RamDiskBackend::checked_range` 双重校验，失败 IOERR |
-| T-02 | 描述符方向伪造 | 中 | `IN` 请求的数据描述符不可写等 | `process_read`/`process_write` 校验方向，失败 `InvalidDescriptor` |
-| T-03 | 超大长度导致内存耗尽 | 中 | 访客声明巨大数据长度 | 请求长度必须通过描述符与 `seg_max`/`size_max` 约束；缓冲区用 `try_reserve_exact` |
-| T-04 | 请求头/status 描述符非法 | 中 | 链长不足、头可写、status 不可写 | 处理前校验链长与方向 |
-| T-05 | 复位后处理失效的挂起请求 | 中 | 后端延迟期间访客复位 | 复位清除 `pending_head` |
-| T-06 | 延迟后端无轮询导致队列停滞 | 低 | `requires_deferred_processing` 为真但 VMM 无轮询 | `deferred_pending` 记录并告警，需 VMM 提供轮询 |
+| T-01 | Over-capacity/out-of-bounds read/write request | High | Guest supplies an out-of-bounds `sector`/length | Double validation by `validate_data_request` + `RamDiskBackend::checked_range`; failure yields IOERR |
+| T-02 | Forged descriptor direction | Medium | The data descriptor of an `IN` request is not writable, etc. | `process_read`/`process_write` validate the direction; failure yields `InvalidDescriptor` |
+| T-03 | Oversized length causing memory exhaustion | Medium | Guest declares a huge data length | The request length must satisfy the descriptor and `seg_max`/`size_max` constraints; buffers use `try_reserve_exact` |
+| T-04 | Illegal request header/status descriptor | Medium | Chain too short, header writable, status not writable | Validate chain length and direction before processing |
+| T-05 | Processing a stale pending request after reset | Medium | Guest resets during a backend delay | Reset clears `pending_head` |
+| T-06 | Deferred backend without polling stalls the queue | Low | `requires_deferred_processing` is true but the VMM does not poll | `deferred_pending` records it and logs a warning; the VMM must provide polling |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Failure Cause | Local Effect | System Effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | 请求以 IOERR 完成 | 非法 range/方向/后端错误 | 单请求失败 | 访客 I/O 报错，可重试 | 3 | 回写 `VIRTIO_BLK_S_IOERR`，继续处理后续请求 |
-| F-02 | 请求挂起 | 后端 `WouldBlock` | 该 head 存入 `pending_head` | 队列暂缓，待继续处理 | 3 | 返回 `QueuePending`，由 `process_pending_queue` 继续 |
-| F-03 | 缓冲区分配失败 | 内存不足 | 请求 IOERR | 访客 I/O 失败 | 3 | `try_reserve_exact` 失败返回错误，不 panic |
-| F-04 | 未支持请求 | 未知 `request_type` | 请求以 UNSUPP 完成 | 访客可见不支持 | 4 | 回写 `VIRTIO_BLK_S_UNSUPP` |
-| F-05 | 构造 panic | 容量非 512 倍数 | 启动期 panic | 设备无法创建 | 2 | `RamDiskBackend::new` 断言配置错误（调用方受信任的配置失误） |
+| F-01 | Request completes with IOERR | Illegal range/direction/backend error | Single request fails | Guest I/O reports an error, can be retried | 3 | Write back `VIRTIO_BLK_S_IOERR` and continue processing subsequent requests |
+| F-02 | Request pending | Backend `WouldBlock` | The head is stored in `pending_head` | Queue is deferred until processing resumes | 3 | Return `QueuePending`; `process_pending_queue` continues it |
+| F-03 | Buffer allocation failure | Out of memory | Request gets IOERR | Guest I/O fails | 3 | `try_reserve_exact` failure returns an error, no panic |
+| F-04 | Unsupported request | Unknown `request_type` | Request completes with UNSUPP | Guest sees it as unsupported | 4 | Write back `VIRTIO_BLK_S_UNSUPP` |
+| F-05 | Construction panic | Capacity is not a multiple of 512 | Panic at startup | Device cannot be created | 2 | `RamDiskBackend::new` asserts on the configuration error (a configuration mistake by the trusted caller) |
 
-## 故障管理
+## Failure Management
 
-- 访客可控失败一律通过 `VirtioResult` 与状态码返回，不 panic。
-- 唯一的 panic 点在 `RamDiskBackend::new`：容量必须是 512 的整数倍，属调用方
-  配置错误（受信任输入），非访客可控。
-- 后端 `read`/`write` 长度不匹配返回 `BackendError`，请求以 IOERR 完成。
+- Guest-controllable failures are always returned via `VirtioResult` and status codes, without panicking.
+- The only panic point is `RamDiskBackend::new`: the capacity must be a positive multiple of 512 bytes. A violation is a caller configuration error (trusted input), not guest-controllable.
+- A length mismatch in backend `read`/`write` returns `BackendError`, and the request completes with IOERR.
 
-## 隐私分析
+## Privacy Analysis
 
-本 crate 不处理用户隐私数据；它只在访客 RAM 盘与访客描述符缓冲间搬运字节。
-`selftest` 仅使用固定测试数据，无真实用户数据。
+This crate does not process private user data; it only moves bytes between the guest RAM disk and guest descriptor buffers.
+`selftest` uses only fixed test data and no real user data.
 
-## 已知限制
+## Known Limitations
 
-- `ut-tests/device.rs` 的 3 个用例在内核 harness 中运行，仅使用本例拥有的 mock
-  内存和同步后端。固定 MMIO 地址是模型输入，不映射真实设备，也不注册 IRQ；
-  内核锁 guard 仍会执行正常的 IRQ/preempt 保护。这些用例不覆盖真实 VM 或 DMA。
-- 默认后端为内存 RAM 盘，非持久化。
-- 未实现 `VIRTIO_BLK_F_*` 之外的高级特性（discard/write-zeroes 等）。
-- 仅 MMIO 传输，不支持 PCI。
-- 默认 base/IRQ 固定为 QEMU `virt` slot 1，多设备/自定义布局需扩展构造参数。
+- The 3 test cases in `ut-tests/device.rs` run in the kernel harness and use only mock
+  memory owned by the test itself and a synchronous backend. The fixed MMIO addresses are model inputs; they do not map a real device and do not register an IRQ;
+  kernel lock guards still perform the normal IRQ/preempt protection. These test cases do not cover a real VM or DMA.
+- The default backend is an in-memory RAM disk and is not persistent.
+- Advanced features beyond `VIRTIO_BLK_F_*` (discard/write-zeroes, etc.) are not implemented.
+- MMIO transport only; PCI is not supported.
+- The default base/IRQ is fixed to QEMU `virt` slot 1; multiple devices or a custom layout require extending the constructor parameters.
 
-## 审计清单
+## Audit Checklist
 
-- [ ] 新增请求类型是否都经过方向与容量校验？
-- [ ] 所有访客长度是否在分配前受 `seg_max`/`size_max`/容量约束？
-- [ ] 缓冲区分配是否保持 `try_reserve_exact` 失败即返回错误？
-- [ ] 复位路径是否清除所有挂起的中间状态？
-- [ ] 新增后端是否声明正确的 `requires_deferred_processing` 并提供轮询路径？
-- [ ] 中断注入是否在设备锁之外调用？
+- [ ] Do all newly added request types go through direction and capacity validation?
+- [ ] Are all guest lengths constrained by `seg_max`/`size_max`/capacity before allocation?
+- [ ] Does buffer allocation keep returning an error on `try_reserve_exact` failure?
+- [ ] Does the reset path clear all pending intermediate state?
+- [ ] Does a newly added backend declare the correct `requires_deferred_processing` and provide a polling path?
+- [ ] Is interrupt injection invoked outside the device lock?

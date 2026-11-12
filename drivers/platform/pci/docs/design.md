@@ -44,7 +44,7 @@ and MSI-X capability setup (`msix` module).
 - MSI-X support in `msix`: capability discovery (`find_msix_capability`),
   layout validation against BAR bounds (`validate_msix_layout`),
   table mapping and entry programming on x86_64 (`MsixTable`,
-  `configure_msix_entry`), enable/disable (`activate_msix`,
+  `configure_msix_entry`), enable/unmask/disable (`prepare_msix`, `activate_msix`,
   `disable_msix`, `disable_msix_with_config`), and the `MsixCapability`
   / `MsixTableEntry` wire types.
 - Re-export the `virtio-drivers` bus vocabulary (`PciRoot`, `Cam`,
@@ -140,10 +140,8 @@ messages, and remove IRQ actions before releasing the host vector allocation.
 - Absence is `Option`: no config space (`(0, 0, Static)` sentinel meaning
   "PCI skipped"), no firmware BAR range, no programmed INTx pin, no
   MSI-X capability.
-- Panics: `configure_device` expects a BAR allocator to be present
-  (`"No memory ranges available for PCI BARs!"`) — assigning BARs without
-  an allocator range is a platform configuration error, not a runtime
-  condition.
+- `configure_device` returns `PciInitError::NoMemory` when an unassigned
+  memory BAR needs allocation but no BAR allocator is present.
 
 ## External Boundary And Inputs
 

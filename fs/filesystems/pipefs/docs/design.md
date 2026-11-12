@@ -1,29 +1,29 @@
-# pipefs — 设计文档
+# pipefs — Design Document
 
-## 定位
+## Positioning
 
-`pipefs` 拥有匿名 pipe 的具体伪文件系统：`pipefs` 类型、隐藏 mount、superblock、默认
-dentry operations，以及每次创建时的 pipe inode。KVFS 的 `pipe` 模块保留匿名 pipe 与
-pathname FIFO 共用的数据通路、`PipeObject` 和共享 file operations；syscall 层只调用
-`pipefs::create_pipe_files()`。
+`pipefs` is the concrete pseudo filesystem that owns anonymous pipes: the `pipefs` type, the hidden mount, the superblock, the default
+dentry operations, and the pipe inode created for each pipe. The KVFS `pipe` module retains the data path shared by anonymous pipes and
+pathname FIFOs, `PipeObject`, and the shared file operations; the syscall layer only calls
+`pipefs::create_pipe_files()`.
 
-## 背景
+## Background
 
-Linux `fs/pipe.c` 为匿名 pipe 使用独立 `pipefs`，而不是 `anon_inodefs`。独立 inode 保存
-`pipe_inode_info`，动态名称为 `pipe:[ino]`。X-Kernel 采用相同所有权：每条匿名 pipe 有
-唯一 VFS inode，inode private data 与两个 file 的 private data 指向同一个 `PipeObject`。
+Linux `fs/pipe.c` uses a dedicated `pipefs` for anonymous pipes rather than `anon_inodefs`. The dedicated inode holds
+`pipe_inode_info`, and the dynamic name is `pipe:[ino]`. X-Kernel adopts the same ownership: each anonymous pipe has a
+unique VFS inode, and the inode private data and the private data of both files point to the same `PipeObject`.
 
-## 范围
+## Scope
 
-内核单元测试位于 `ut-tests/lib.rs`，由 `src/lib.rs` 中的
-`unittest::path_mod_test!` 挂载为 `tests` 模块，在 `cfg(unittest)` 下编译。
+The kernel unit tests are in `ut-tests/lib.rs`; they are mounted as the `tests` module by
+`unittest::path_mod_test!` in `src/lib.rs` and compiled under `cfg(unittest)`.
 
-- `src/lib.rs`：pipefs 初始化、pipe inode/file 创建和动态 dentry 名称。
-- `kvfs::pipe`：共享 pipe/FIFO 数据结构与 file operation 算法，不属于本 crate 的
-  filesystem instance state。
-- `docs/design.md`、`docs/security.md`：生命周期和可靠性契约。
+- `src/lib.rs`: pipefs initialization, pipe inode/file creation, and dynamic dentry names.
+- `kvfs::pipe`: the shared pipe/FIFO data structures and file operation algorithms; they are not part of this crate's
+  filesystem instance state.
+- `docs/design.md`, `docs/security.md`: lifecycle and reliability contracts.
 
-## 架构
+## Architecture
 
 ```text
 static pipefs type / s_op / s_d_op
@@ -40,62 +40,58 @@ static pipefs type / s_op / s_d_op
                  +-- read  VfsFile ---+
 ```
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-`init_pipefs()` 在 boot 的可睡眠执行路径运行，早于 pipe syscall 与并行测试。初始化会
-分配 VFS 对象，不能在中断上下文或持有 spinlock 时调用。
+`init_pipefs()` runs on the sleepable execution path of boot, before the pipe syscalls and parallel tests. Initialization
+allocates VFS objects, so it must not be called in interrupt context or while holding a spinlock.
 
-`create_pipe_files()` 分配 pipe state、inode、dentry 和两个 file，并可能取得 sleepable
-lock，只能从普通 task context 调用。接口显式接收 credential，不依赖反向 current-task
-lookup；它可重入，不依赖 CPU-local state 或设备映射。
+`create_pipe_files()` allocates the pipe state, the inode, the dentry, and two files, and may acquire sleepable
+locks, so it may only be called from normal task context. The interface takes the credential explicitly and does not rely on a reverse current-task
+lookup; it is reentrant and does not depend on CPU-local state or device mappings.
 
-## 状态机
+## State Machine
 
-全局 filesystem 只有 `Uninitialized -> Published`。每次创建的 `PipeObject` reader、writer、
-file count 和 wait queues 状态机由 `kvfs::pipe` 定义；`pipefs` 只负责一次性建立它与 inode/
-file 的所有权关系。
+The global filesystem only has `Uninitialized -> Published`. The state machine of each created `PipeObject` (reader, writer,
+file count, and wait queues) is defined by `kvfs::pipe`; `pipefs` is only responsible for establishing, once, its ownership relationship with the inode and
+files.
 
-## 算法流程
+## Algorithm Flow
 
-1. boot 通过 KVFS `new_pseudo_super_block()` 用静态 type、共享 simple `s_op`、pipefs
-   `s_magic` 和静态 `s_d_op` 创建并发布 hidden mount。
-2. syscall 调用 `create_pipe_files()` 并传入类型化 status flags；pipefs 只保留
-   `NONBLOCK`，自行派生只读端与只写端 access mode。
-3. 创建 `PipeObject`，初始 `files=2`、`readers=1`、`writers=1`。
-4. 用 `get_next_ino()` 创建唯一 FIFO-mode inode；owner 来自传入 credential 的 fsuid/fsgid，
-   inode private data 保存同一个 `PipeObject`。
-5. 在 pipefs hidden mount 上创建 write file，再 clone read file；两个 file private data
-   保存同一个 pipe object，并使用共享匿名-pipe file operation table。
-6. inode 使用 `kvfs::metadata_only_inode_operations()`：pipe 的 owner/mode/timestamp
-   全部存续于 KVFS 驻留 inode，`setattr` 原样接受更新，因此 `fchown`/`fchmod` 作用于
-   匿名 pipe（runc 对容器 stdio pipe 做 `fchown`）会正确发布元数据，而不是被 inode-op
-   默认的 `EOPNOTSUPP` 拒绝。
-7. dentry 自动继承 pipefs 默认 table，路径显示为 `pipe:[inode-number]`。
+1. At boot, a hidden mount is created and published through KVFS `new_pseudo_super_block()` using the static type, the shared simple `s_op`, the pipefs
+   `s_magic`, and the static `s_d_op`.
+2. The syscall calls `create_pipe_files()` and passes typed status flags; pipefs retains only
+   `NONBLOCK` and derives the read-only and write-only access modes itself.
+3. A `PipeObject` is created with initial `files=2`, `readers=1`, `writers=1`.
+4. A unique FIFO-mode inode is created with `get_next_ino()`; the owner comes from the fsuid/fsgid of the passed-in credential, and
+   the inode private data holds the same `PipeObject`.
+5. The write file is created on the pipefs hidden mount, and then the read file is cloned; the private data of both files
+   holds the same pipe object and they use the shared anonymous-pipe file operation table.
+6. The inode uses `kvfs::metadata_only_inode_operations()`: the owner/mode/timestamp of the pipe
+   all persist in the KVFS-resident inode, and `setattr` accepts updates as-is, so `fchown`/`fchmod` applied to an
+   anonymous pipe (runc calls `fchown` on container stdio pipes) publish the metadata correctly instead of being rejected with the inode-op
+   default `EOPNOTSUPP`.
+7. The dentry automatically inherits the pipefs default table, and the path is displayed as `pipe:[inode-number]`.
 
-## 并发模型
+## Concurrency Model
 
-`Once<PipeFs>` 只在初始化时写入。发布后的 hidden mount 不变；不同 pipe 创建互不共享
-inode 或 `PipeObject`。同一 pipe 的 buffer、reader/writer 和 wait queue 并发由
-`kvfs::pipe` 的 state lock 管理，pipefs 不再增加挂载级锁。
+`Once<PipeFs>` is written only during initialization. After publication the hidden mount is immutable; creations of different pipes share no
+inode or `PipeObject`. Concurrency over the buffer, readers/writers, and wait queues of the same pipe
+is managed by the state lock in `kvfs::pipe`, and pipefs adds no mount-level lock.
 
-## 设计决策
+## Design Decisions
 
-- 匿名 pipe 不再借用 `anon_inodefs` singleton；独立 inode identity 对齐 Linux pipefs。
-- `PipeFs` 只保存 Linux `pipe_mnt` 对应物，不复制 pipe session 或 operation table。
-- inode private 与 file private 保存同一个 `Arc<PipeObject>`；这是 Linux `inode->i_pipe`
-  与 `file->private_data` 指向同一对象的所有权表达，不是两份 pipe state。
-- pipe/FIFO 数据通路仍由 KVFS 共用，避免为匿名 pipe 和 pathname FIFO 复制算法。
-- pipe inode 保持 `empty_inode_operations()`，不安装任何专属 metadata 表：KVFS
-  `InodeOperations::setattr` 的默认公共回退层（Linux `notify_change` → `simple_setattr`
-  的对应物）使匿名 pipe 的 `fchownat`/`fchmod`/`utimensat` 与 `fstat` 可见的
-  owner/mode/时间更新天然可用；size 更新被回退层以 `EINVAL` 拒绝，与 Linux 对非普通文件
-  truncate 的拒绝一致。
-- 匿名 pipe file operations 与 pathname FIFO 一致地维护 I/O 时间戳：成功 write 后更新
-  mtime/ctime，成功 read 后更新 atime（Linux `fs/pipe.c` `pipe_write`/`pipe_read` 的
-  对应行为），依赖上述公共回退层落盘。
+- Anonymous pipes no longer borrow the `anon_inodefs` singleton; a dedicated inode identity aligns with Linux pipefs.
+- `PipeFs` holds only the counterpart of Linux `pipe_mnt` and does not duplicate the pipe session or the operation table.
+- The inode private data and the file private data hold the same `Arc<PipeObject>`; this expresses the ownership in which Linux `inode->i_pipe`
+  and `file->private_data` point to the same object, and is not two copies of pipe state.
+- The pipe/FIFO data path remains shared by KVFS, avoiding duplicating the algorithms for anonymous pipes and pathname FIFOs.
+- The pipe inode uses `kvfs::metadata_only_inode_operations()` (see step 6 above), so `fchown`/`fchmod`/`utimensat` updates to owner/mode/timestamps are kept in the resident inode and are visible through `fstat`. A size update is rejected with `EINVAL`, matching Linux, which refuses truncate on non-regular files.
+- Anonymous pipe file operations maintain I/O timestamps consistently with pathname FIFOs: a successful write updates
+  mtime/ctime, and a successful read updates atime (the corresponding behavior of Linux `fs/pipe.c` `pipe_write`/`pipe_read`),
+  relying on the common fallback layer above to persist them.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-hidden mount 在系统生命周期内保留。read/write file 释放时共享 pipe operations 更新
-reader/writer/file counts；最后一个 file 释放最后的 file-private 引用，inode 随其 dentry/
-file 引用释放，最终释放 inode-private `PipeObject`。没有额外 pipefs inode registry。
+The hidden mount is retained for the lifetime of the system. When the read/write files are released, the shared pipe operations update the
+reader/writer/file counts; the last file released drops the last file-private reference, the inode is released along with its dentry/
+file references, and finally the inode-private `PipeObject` is released. There is no additional pipefs inode registry.

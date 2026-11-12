@@ -87,8 +87,6 @@ COW replacement contract:
 - the runtime-provided commit closure performs the page-table compare/replace
   step; object publication happens only after that closure succeeds.
 
-## 原子发布首次匿名 COW 页
+## Atomically Publishing the First Anonymous COW Page
 
-`PreparedAnonPrivatePage::commit_after()` 在对象页表锁内复核槽位为空，再执行
-调用方的原子 PTE 更新；仅成功后发布自持匿名页。回调失败时槽保持为空，
-帧仍归调用方。未发生 COW 的文件缓存页由 filemap 保有，不进入匿名对象。
+`PreparedAnonPrivatePage::commit_after()` rechecks that the slot is empty while holding the object's page-slot map lock, then runs the caller's atomic PTE update; the owned anonymous page is published only after that update succeeds. If the callback fails, the slot stays empty and the frame remains owned by the caller. File cache pages that have not undergone COW remain owned by filemap and do not enter the anonymous object.

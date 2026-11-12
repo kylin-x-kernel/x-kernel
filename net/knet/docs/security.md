@@ -385,7 +385,7 @@ runtime replacement of the global service is not supported.
 
 ### 1. Writing to Vacant Regions of the Unix Stream Ring Buffer
 
-Locations: `StreamTransport::send` in [src/unix/stream.rs](../src/unix/stream.rs), lines 256 and 260.
+Locations: `StreamTransport::send` in [src/unix/stream.rs](../src/unix/stream.rs), lines 315 and 319.
 
 ```rust
 let mut count = src.read(unsafe { left.assume_init_mut() })?;
@@ -413,7 +413,7 @@ Caller:
 
 ### 2. Advancing the Unix Stream Write Index
 
-Location: `StreamTransport::send` in [src/unix/stream.rs](../src/unix/stream.rs), line 275.
+Location: `StreamTransport::send` in [src/unix/stream.rs](../src/unix/stream.rs), line 375.
 
 ```rust
 unsafe { chan.tx.advance_write_index(count) };
@@ -437,7 +437,7 @@ Caller:
 
 ### 3. Advancing the Unix Stream Read Index
 
-Location: `StreamTransport::recv` in [src/unix/stream.rs](../src/unix/stream.rs), line 312.
+Location: `StreamTransport::recv` in [src/unix/stream.rs](../src/unix/stream.rs), line 453.
 
 ```rust
 unsafe { chan.rx.advance_read_index(count) };
@@ -462,7 +462,7 @@ Caller:
 
 ### 4. Advancing the vsock Receive-Buffer Read Index
 
-Location: `Connection::advance_rx_read` in [src/vsock/connection_manager.rs](../src/vsock/connection_manager.rs), lines 187–189.
+Location: `Connection::advance_rx_read` in [src/vsock/connection_manager.rs](../src/vsock/connection_manager.rs), lines 196–198.
 
 ```rust
 unsafe {
@@ -490,10 +490,10 @@ Callers:
 
 ### 5. Test-Only UDP `RawWaker`
 
-Locations: the `tests` module in [src/transport/udp/wait.rs](../src/transport/udp/wait.rs):
-`waker_clone` at line 109, `waker_wake` at lines 113–118,
-`waker_wake_by_ref` at lines 121–124, `waker_drop` at line 132,
-and `make_waker` at lines 135–141.
+Locations: [ut-tests/transport/udp/wait/tests.rs](../ut-tests/transport/udp/wait/tests.rs):
+`waker_clone` at line 27, `waker_wake` at line 36,
+`waker_wake_by_ref` at line 49, `waker_drop` at line 60,
+and `make_waker` at line 65.
 
 This `cfg(unittest)` implementation counts `PollSet` wakeups. `new_counter`
 uses `Box::leak` to create a static `AtomicUsize`, and `make_waker` installs
@@ -511,10 +511,10 @@ certify that rustdoc coverage.
 
 ### 6. Test-Only Ethernet `RawWaker`
 
-Locations: the `tests` module in [src/device/ethernet.rs](../src/device/ethernet.rs):
-`waker_clone` at line 857, `waker_wake` at lines 861–864,
-`waker_wake_by_ref` at lines 867–870, `waker_drop` at line 873,
-and `make_waker` at lines 882–886.
+Locations: [ut-tests/device/ethernet/tests.rs](../ut-tests/device/ethernet/tests.rs):
+`waker_clone` at line 20, `waker_wake` at line 29,
+`waker_wake_by_ref` at line 40, `waker_drop` at line 51,
+and `make_waker` at line 60.
 
 This `cfg(unittest)` implementation tests RX-source wakeups. `new_counter`
 leaks a properly aligned `AtomicUsize`; `make_waker` installs its static pointer
@@ -655,7 +655,7 @@ port forwards a userspace-originated uevent it preserves that sender instead.
 No netlink header field is converted into credentials, and no claimed
 credential participates in bind, connect, send, or mutation authorization.
 
-For Unix datagram and seqpacket sockets, which both deliver one record per send, the user-facing send boundary records the sending process identity plus its real UID/GID as `SenderCredentials { pid, uid, gid }`. The queued message retains that immutable snapshot, and the task is held as a `struct pid`-style identity rather than a number; the pid is resolved in the receiving task's PID namespace at delivery, matching Linux `pid_vnr`. Kernel peers with a fixed numeric identity send the same record with no identity, which serializes as `pid=0`. `DgramTransport::recv` and `SeqpacketTransport::recv` expose both only when the receiver enabled `SO_PASSCRED`; user-provided ancillary data cannot replace this kernel-produced identity. Credential-free kernel sends do not synthesize a user identity. Both user-facing datagram send paths use `unix::current_sender_credentials` to populate `SendOptions::unix_sender_credentials`.
+For Unix datagram and seqpacket sockets, which both deliver one record per send, the user-facing send boundary records the sending process identity plus its real UID/GID as `SenderCredentials { pid, uid, gid }`. The queued message retains that immutable snapshot, and the task is held as a `struct pid`-style identity rather than a number; the pid is resolved in the receiving task's PID namespace at delivery, matching Linux `pid_vnr`. Kernel peers with a fixed numeric identity send the same record with no identity, which serializes as `pid=0`. `DgramTransport::recv` and `SeqpacketTransport::recv` expose both only when the receiver enabled `SO_PASSCRED`; user-provided ancillary data cannot replace this kernel-produced identity. Credential-free kernel sends do not synthesize a user identity. Both user-facing datagram send paths use `unix::current_sender_credentials` to populate `SendOptions::sender_credentials`.
 
 Stream sends capture the sender snapshot when either endpoint of the connected pair enabled `SO_PASSCRED`, matching Linux `unix_passcred_enabled`, and always while the receiving endpoint has not been accepted; an accepted stream whose sender and receiver both disabled the option adds neither credentials nor a stream barrier. The snapshot is attached to every send round, as `maybe_add_creds` does per skb, while file descriptors remain limited to the first record. The published credential record is subject to the receiver's separate `SO_PASSCRED` gate, and an unrequested record is filtered without setting `MSG_CTRUNC`. A read that starts before a credential-bearing record stops at its first byte; preceding plain data is delivered without credentials. POSIX accepts explicit user-supplied `SCM_CREDENTIALS` only after validating the claim against the caller's process identity and adoptable ids (Linux `scm_check_creds`, `ESRCH` for a privileged claim naming no process) and consumes it as the sender identity rather than relaying it; it reports `MSG_CTRUNC` if receive control space is absent or insufficient. An explicit claim replaces the automatic snapshot. The queued server endpoint snapshots the listener's `SO_PASSCRED` selection at `connect()`, matching Linux's connect-time SCM receive-flag copy. `accept()` attaches that endpoint without re-reading the listener and clears the pre-accept capture gate, so later listener changes do not affect the accepted socket.
 
@@ -937,7 +937,7 @@ Impact levels:
 | F-25 | Short-timeout loopback UDP loses packets while the poller is busy | `sendto` only notifies the poller, and the 1-jiffy `recvfrom` timeout expires first | Concurrent libc-test `socket.exe` runs intermittently report `ETIMEDOUT` | A user-visible functional regression | 3 | `NetRx` delivers loopback UDP to the PCB within the send path's BH window; the poller no longer performs this delivery; stress tests cover four concurrent short-timeout operations with SMP=1 and SMP=4 |
 | F-26 | A TCP child connection remains in the SYN queue indefinitely | The packet marker is consumed before the child becomes acceptable, and later ingress processing or timer polling does not refresh the listener | The accept queue stays empty | The server remains blocked in `accept` after connection establishment | 2 | Refresh listeners with nonempty SYN queues after each actual network poll; wake waiters only after a child enters the accept queue; SYN queues do not request continuous polling |
 | F-27 | Connect or accept waits indefinitely after Unix listener shutdown | A listener state change does not notify capacity and request events | Blocking `connect` or `accept` cannot return | Application threads remain asleep indefinitely | 2 | Both `shutdown(SHUT_RD)` and Drop notify `capacity_available` and `request_available`; queued requests are delivered first, and blocking `accept` on an empty queue returns `EINVAL`; blocking `connect` with `SO_SNDTIMEO` returns `EAGAIN` when its capacity wait times out |
-| F-28 | A receipt's control record is lost or duplicated at the stream boundary | The segment-end read cap or record retirement miscomputes the byte positions; a peek and a consuming recv race at the boundary; a failed or rejected send registers a record for no byte | The receiver misses `SCM_RIGHTS` or installs duplicate file descriptions | Application-level fd-passing protocols (e.g. ttrpc) fail or leak descriptors | 2 | The read cap stops at the reached record's committed segment end; `pop_reached` retires at most the reached record (peek only duplicates); the producer registers its record immediately before publishing its first byte, so failures cannot leave a record behind; unit tests cover byte-marking, the segment barrier, peek duplication, quota rejection, and control-buffer-less discard |
+| F-28 | A receipt's control record is lost or duplicated at the stream boundary | The segment-end read cap or record retirement miscomputes the byte positions; a peek and a consuming recv race at the boundary; a failed or rejected send registers a record for no byte | The receiver misses `SCM_RIGHTS` or installs duplicate file descriptions | Application-level fd-passing protocols (e.g. ttrpc) fail or leak descriptors | 2 | The read cap stops at the reached record's committed segment end; `take_reached` retires at most the reached record (peek only duplicates); the producer registers its record immediately before publishing its first byte, so failures cannot leave a record behind; unit tests cover byte-marking, the segment barrier, peek duplication, quota rejection, and control-buffer-less discard |
 
 Severity levels:
 

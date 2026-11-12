@@ -510,9 +510,9 @@ kirq (policy) ──IntrManagerIf──> irq-driver
              +---------------------+----------------------+
              | aarch64           | riscv64              | x86_64
              v                   v                      v
-        gic.rs               riscv.rs               x86/{config,runtime}.rs
-   config_from_device_tree  PLIC @ 0x0c00_0000    x86-apic crate
-   (DT: interrupt-controller     (DT confirm)      (multi-instance GSI
+        gic/                 riscv/                 x86/{config,runtime}.rs
+   GicConfig::from_fwnode   PlicConfig::from_fwnode x86-apic crate
+   (DT: interrupt-controller  (legacy.rs fallback) (multi-instance GSI
     + reg regions; v2: GICD+GICC,                    ranges; domain+pin)
      v3: GICD+GICR)
    iomap: gicd/gicc/gicr      iomap: "plic"
@@ -893,9 +893,10 @@ models are not physical delivery, MMIO fault or hardware-quiescence proofs.
 
 ## Error And Panic Model
 
-- Absence is `Option`: no controller node in the device tree, or too few
-  `reg` regions for the detected version, yields `None` so the platform
-  can fall back or abort with its own policy.
+- Absence is `Option`: no available supported controller node makes
+  `GicConfig::from_fwnode` yield `None`, and too few `reg` regions for the
+  detected version are a `GicConfigError::MissingRegion`; `init_from_fwnode`
+  returns both as an `Err` so the platform can fall back or abort with its own policy.
 - MMIO mapping failures panic with the region name
   (`map_mmio_region`), and `remember_config` panics on a changed config —
   both are bring-up ordering/configuration bugs, not runtime conditions.

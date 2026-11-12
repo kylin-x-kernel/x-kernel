@@ -1,4 +1,4 @@
-# p9 — 设计文档
+# p9 — Design Document
 
 ## Prepared transport ownership
 
@@ -13,32 +13,32 @@ Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 Enable `KFEAT_FS_9P=y` in the kernel configuration to include the `p9` tests.
 
-## 定位
+## Scope and Role
 
-`net/9p` 对应 Linux `net/9p`，拥有 transport-independent 的 9P2000.L client、fid 和
-PDU 编解码。它不实现 VFS 文件系统，也不负责设备发现；具体 transport 连接由调用者建立后
-交给 `P9Client`。
+`net/9p` corresponds to Linux `net/9p`. It owns the transport-independent 9P2000.L client, fids, and
+PDU encoding/decoding. It does not implement a VFS filesystem and is not responsible for device discovery; the concrete transport connection is established by the caller and then
+handed to `P9Client`.
 
-| X-Kernel | Linux | 职责 |
+| X-Kernel | Linux | Responsibility |
 | --- | --- | --- |
-| `client.rs` | `net/9p/client.c`、`client.h` | `P9Client`、`P9Fid` 和协议操作 |
-| `message.rs`、`protocol.rs` | `net/9p/protocol.c`、`9p.h` | PDU 编解码、qid 和协议常量 |
-| `transport.rs` | `net/9p/transport.h` 的 connection 操作 | 一条已连接 endpoint 的 request 接口 |
+| `client.rs` | `net/9p/client.c`, `client.h` | `P9Client`, `P9Fid`, and protocol operations |
+| `message.rs`, `protocol.rs` | `net/9p/protocol.c`, `9p.h` | PDU encoding/decoding, qid, and protocol constants |
+| `transport.rs` | connection operations of `net/9p/transport.h` | Request interface of a single connected endpoint |
 
-`fs/filesystems/9p` 对应 Linux `fs/9p`，只把这些协议对象适配到 KVFS。
+`fs/filesystems/9p` corresponds to Linux `fs/9p` and only adapts these protocol objects to KVFS.
 
-## 背景
+## Background
 
-数值 fid 只是 server handle，不足以表达 client ownership、qid、open 状态和最终 clunk。
-本模块把 Linux 的 client/fid 引用关系直接编码为 Rust 对象，使 filesystem 层不再维护路径
-字符串或裸 fid 生命周期。
+A numeric fid is only a server handle; it cannot express client ownership, qid, open state, and the final clunk.
+This module encodes Linux's client/fid reference relationship directly as Rust objects, so that the filesystem layer no longer maintains path
+strings or raw fid lifetimes.
 
-## 范围
+## Boundaries
 
-上表列出的 client、wire protocol 和 connection trait 属于本模块；transport discovery、具体
-VirtIO driver 和 KVFS adapter 不属于本模块。
+The client, wire protocol, and connection trait listed in the table above belong to this module; transport discovery, the concrete
+VirtIO driver, and the KVFS adapter do not belong to this module.
 
-## 架构
+## Architecture
 
 ```text
 Arc<P9Fid> ──owns──► Arc<P9Client>
@@ -50,14 +50,14 @@ Arc<P9Fid> ──owns──► Arc<P9Client>
     └── fid / qid / open mode / iounit / live state
 ```
 
-`P9Fid` 是 Linux `struct p9_fid` 的 Rust 对象表达。`Arc` 直接承担 fid 引用计数，fid
-保存 client 引用、服务端编号、qid、open mode、iounit 和是否仍有效。Linux 当前语义未使用
-且不能影响对象行为的字段不复制到 Rust 结构。
+`P9Fid` is the Rust object representation of Linux `struct p9_fid`. `Arc` directly serves as the fid reference count, and the fid
+holds the client reference, the server-side number, the qid, the open mode, the iounit, and whether it is still valid. Fields that current Linux semantics do not use
+and that cannot affect object behavior are not copied into the Rust structure.
 
-`P9Client` 对应 Linux `struct p9_client` 的协议所有权。内部 sleepable mutex 串行化一条同步
-transport connection 的请求以及 tag/fid 分配，上层无需再创建 session 级外锁。
+`P9Client` corresponds to the protocol ownership of Linux `struct p9_client`. An internal sleepable mutex serializes requests on a synchronous
+transport connection as well as tag/fid allocation, so upper layers do not need to create a session-level outer lock.
 
-## 状态机
+## State Machine
 
 ```text
 attach / complete walk
@@ -65,60 +65,60 @@ attach / complete walk
           v
       unopened ──TLOPEN──► opened
           │                   │
-          ├──TREMOVE──► consumed
+          ├──TREMOVE (from unopened or opened)──► consumed
           └──── final Arc drop ┴──► TCLUNK ──► released
 ```
 
-- zero-name `walk()` 为同一远端对象建立独立 fid；非空 walk 只接受单个协议 name component；
-- partial walk 不发布新对象，已经由服务端建立的 fid 会被 clunk；
-- open 在 client mutex 内检查 unopened、发送请求并提交结果；失败保持 unopened，不增加 opening 状态；
-- `TREMOVE` 提交后 fid 按 Linux 语义失效，即使请求返回错误也不再发送第二次 clunk；
-- 最后一个 `Arc<P9Fid>` 释放时同步发送 `TCLUNK`，并在完成前保持 client/transport 存活。
+- A zero-name `walk()` creates an independent fid for the same remote object; a non-empty walk accepts only a single protocol name component;
+- A partial walk does not publish a new object, and a fid already established by the server is clunked;
+- open checks unopened, sends the request, and commits the result inside the client mutex; on failure the fid stays unopened, and no opening state is added;
+- After `TREMOVE` is committed, the fid becomes invalid per Linux semantics, and no second clunk is sent even if the request returns an error;
+- When the last `Arc<P9Fid>` is released, `TCLUNK` is sent synchronously, and the client/transport is kept alive until it completes.
 
-## 算法流程
+## Algorithm Flow
 
-`P9Client::new()` 接管一条已连接 transport。`negotiate()` 只协商当前 filesystem adapter
-实际实现的 9P2000.L，记录双方较小的 msize，分配 root fid 并执行 attach。
+`P9Client::new()` takes over a connected transport. `negotiate()` negotiates only the 9P2000.L that the current filesystem adapter
+actually implements, records the smaller of the two msize values, allocates the root fid, and performs attach.
 
-fid 对象直接提供 walk、open、getattr/setattr、read/write/readdir、fsync、statfs 和 namespace
-操作。文件系统层不传绝对路径，也不能直接操作数值 fid。read、write 和 readdir 的单次数据量
-同时受 negotiated maxdata 与服务端 iounit 限制。
+The fid object directly provides walk, open, getattr/setattr, read/write/readdir, fsync, statfs, and namespace
+operations. The filesystem layer does not pass absolute paths and cannot operate on numeric fids directly. The amount of data in a single read, write, or readdir
+is limited by both the negotiated maxdata and the server iounit.
 
-每次同步 request 都验证：
+Every synchronous request verifies that:
 
-- transport 返回长度不超过 response buffer；
-- PDU 声明长度与实际长度一致，且至少包含 7-byte header；
-- response tag 和类型与当前请求一致；
-- 所有整数、qid、字符串和内嵌 data length 均在包边界内；
-- 9P2000.L `RLERROR` 的数值 errno 直接转换为 `KError`。
+- the length returned by the transport does not exceed the response buffer;
+- the length declared in the PDU matches the actual length and includes at least the 7-byte header;
+- the response tag and type match the current request;
+- all integers, qids, strings, and embedded data lengths are within the packet boundary;
+- the numeric errno of a 9P2000.L `RLERROR` is converted directly to `KError`.
 
-fid allocator 跟踪仍存活的编号，回卷时不会复用尚未 clunk/remove 的 server handle；这对应
-Linux client 的 fid IDR，而不是额外的 filesystem 状态。
+The fid allocator tracks the numbers that are still live, and on wraparound it does not reuse a server handle that has not yet been clunked/removed; this corresponds to the
+Linux client's fid IDR, rather than additional filesystem state.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-协议调用和 live fid 的 Drop 都可能阻塞，只能在 scheduler 和 allocator 可用后的可睡眠 task
-context 执行；不要求 current userspace process，但不得从 IRQ context 或持有 spinlock 的路径
-释放最后一个 fid 引用。同步 client connection 不可重入，重入和并发请求由 client mutex
-串行化。
+Protocol calls and the Drop of a live fid may both block, so they may only run in a sleepable task
+context after the scheduler and allocator are available; a current userspace process is not required, but the last fid reference must not be
+released from IRQ context or from a path that holds a spinlock. The synchronous client connection is not reentrant; reentrant and concurrent requests are
+serialized by the client mutex.
 
-## 并发模型
+## Concurrency Model
 
-client mutex 同时保护 negotiated state、tag/fid allocator 和 mutable transport request。
-qid 使用 mutex，open mode、iounit 和 live lifecycle 使用原子状态，使共享 fid 的检查与最后
-释放保持一致。open 的状态检查、响应提交及 I/O 的 iounit 上限计算位于同一个 client
-临界区，避免在等待 open 时使用旧的 I/O 上限。
+The client mutex protects the negotiated state, the tag/fid allocator, and the mutable transport request all together.
+The qid uses a mutex, while the open mode, iounit, and live lifecycle use atomic state, so that checks on a shared fid stay consistent with its final
+release. The open state check, the response commit, and the iounit limit calculation for I/O are all in the same client
+critical section, which avoids using a stale I/O limit while waiting for open.
 
-## 设计决策
+## Design Decisions
 
-- 9P 是可承载于 VirtIO、TCP、fd 等 transport 的协议，因此 client/fid 位于 `net/9p`；
-- `P9Transport` 只表示一条 connection，不在本次改动中建立 transport registry 或搬迁驱动；
-- transport 选择和 VirtIO device claim 仍属于现有 boot/driver glue；
-- API 按 client/fid 对象表达，不保留 path-based convenience API；
-- 当前只支持同步 9P2000.L，不声明尚未实现的 legacy/dotu、cache、xattr 或锁语义。
+- 9P is a protocol that can be carried over transports such as VirtIO, TCP, and fd, so the client/fid live in `net/9p`;
+- `P9Transport` represents only a single connection; this change does not introduce a transport registry or move drivers;
+- Transport selection and VirtIO device claim remain in the existing boot/driver glue;
+- The API is expressed in terms of client/fid objects, and no path-based convenience API is kept;
+- Only synchronous 9P2000.L is currently supported, and legacy/dotu, cache, xattr, or lock semantics that are not yet implemented are not declared.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-最后一个 `P9Fid` 引用同步发送 `TCLUNK` 并从 client 的 live-fid set 释放编号；已经提交
-`TREMOVE` 的 consumed fid 不再 clunk。fid 在清理完成前持有 client，最后一个 client/fid
-引用释放后才释放 transport connection。
+The last `P9Fid` reference synchronously sends `TCLUNK` and releases the number from the client's live-fid set; a consumed fid for which
+`TREMOVE` has already been committed is not clunked again. A fid holds the client until cleanup completes, and the transport connection is released only after the last client/fid
+reference is released.

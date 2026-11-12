@@ -4,7 +4,7 @@
 用例通过真实文件描述符和真实 DRM ioctl 检查 legacy（非原子）mode-setting 的
 可观察 ABI，适用于 64 位 X-Kernel Linux 用户环境。
 
-`mode_setting_abi_regressions` 顺序覆盖：
+`mode.rs` 中的各个独立 `#[test]` 用例分别覆盖：
 
 - `CREATE_DUMB` 同时接受 32bpp 与 24bpp，且 24bpp 以同样的 32bpp 布局承载；
   宽度/高度为 0 与 bpp=16 被拒绝。

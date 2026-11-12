@@ -387,7 +387,7 @@ The following are deliberately outside the current implementation:
 
 - richer unit-test result aggregation beyond the kernel-emitted status and
   generated LLVM coverage reports;
-- QEMU acceleration and non-user networking policies;
+- non-user networking policies;
 - a declarative `XKMake.toml` runtime scheme.
 
 `XKMake.toml` should be considered only after the typed command model has

@@ -1,4 +1,4 @@
-# KExt4 — 安全与可靠性分析
+# KExt4 — Security and Reliability Analysis
 
 ## VFS owner allocation failure
 
@@ -34,7 +34,7 @@ It introduces no `KERNEL` reclaim permission and does not relax the existing
 lock or execution-context requirements. BIO buffers and writeback callback
 owners are outside this conversion cleanup.
 
-## 信任模型
+## Trust Model
 
 Allocation requests borrow their actual ext4 inode. A physical goal selects the
 starting group; without a goal, data allocation uses the inode's group. Metadata
@@ -66,35 +66,35 @@ Recovery reconstruction does not trust or copy the previous derived index. Chang
 loaded journal's backing identity are rejected before its mapping can be assigned
 to a different inode.
 
-KExt4 只把块设备视为 I/O 传输层，不信任其中的元数据天然有效。来自磁盘的
-superblock、group descriptor、directory block、extent tree、xattr block、bitmap 和
-journal record 都属于外部输入，必须在解释或修改前完成范围、格式和 checksum 校验。
+KExt4 treats the block device only as an I/O transport layer and does not assume that the metadata on it is valid. The
+superblock, group descriptors, directory blocks, extent trees, xattr blocks, bitmaps and
+journal records read from disk are all external input, and must pass range, format and checksum validation before they are interpreted or modified.
 
-superblock feature bitmap 在进入文件系统逻辑时被包装为按 compat 类别区分的强类型
-flags。未知位不会在解码时丢弃，incompat 未支持位仍会导致挂载失败，从而避免因类型
-封装而放宽对不可信磁盘 feature 的校验。
+When the superblock feature bitmap enters the filesystem logic, it is wrapped into strongly typed
+flags distinguished by compat category. Unknown bits are not discarded during decoding, and unsupported incompat bits still cause the mount to fail, so that type
+encapsulation does not relax the validation of features from an untrusted disk.
 
-KExt4 当前只对 extent-backed block map 提供完整 mutation 合同，因此缺少
-`EXT4_FEATURE_INCOMPAT_EXTENTS` 的镜像会在挂载状态发布前失败。这个检查防止合法但超出
-实现能力的 legacy indirect 格式先进入可写运行态，再由延迟 writeback 把用户态已经成功的
-写入转化为异步 `EOPNOTSUPP`、journal shutdown 错误或部分持久化。即使 superblock 启用了
-extents feature，个别 legacy inode 的 `write_begin`/`page_mkwrite` 也会在 delayed-allocation
-reservation 和用户数据标脏前同步拒绝。
+KExt4 currently provides a complete mutation contract only for extent-backed block maps, so images lacking
+`EXT4_FEATURE_INCOMPAT_EXTENTS` fail before the mount state is published. This check prevents a valid but unsupported
+legacy indirect format from first entering a writable runtime state and then having deferred writeback turn writes that already succeeded in user space
+into asynchronous `EOPNOTSUPP`, a journal shutdown error or partial persistence. Even if the superblock enables the
+extents feature, `write_begin`/`page_mkwrite` on an individual legacy inode is rejected synchronously, before the delayed-allocation
+reservation is made and before user data is marked dirty.
 
-KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name、dentry、inode `AddressSpace`
-（含直接持有的 `MappingPages` storage）和文件生命周期回调。KExt4 核心不直接解引用用户态指针。
-它也信任 `fill_super` 只接收 KVFS 已按 canonical `(s_type, BlockDevice)` reservation 并持有
-独占 claim 的 nascent superblock；KExt4 不建立平行的 device-to-mount cache。
+KExt4's KVFS operation implementations trust that KVFS has already provided kernel-owned path names, dentries, inode `AddressSpace`
+(including directly held `MappingPages` storage) and file lifecycle callbacks. The KExt4 core does not directly dereference user-space pointers.
+It also trusts that `fill_super` receives only a nascent superblock that KVFS has already reserved by canonical `(s_type, BlockDevice)` and holds an
+exclusive claim on; KExt4 does not build a parallel device-to-mount cache.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-相关边界包括：
+The relevant boundaries include:
 
-- ext4 块设备镜像，包括恶意或损坏的元数据；
-- JBD2 journal replay record 和 checksum 字段；
-- 从磁盘读取的 directory name 和 dirent file type；
-- extent tree entry 和 block mapping；
-- KVFS FIEMAP 请求范围，以及 core 从磁盘 mapping 与 inode extent-status 区间统一报告的 extent；
+- ext4 block-device images, including malicious or corrupted metadata;
+- JBD2 journal replay records and checksum fields;
+- directory names and dirent file types read from disk;
+- extent tree entries and block mappings;
+- the KVFS FIEMAP request range, and the extents that the core reports uniformly from the on-disk mapping and the inode extent-status ranges;
 - KVFS fallocate's mode, offset and len: mode bits are admitted against the
   backend's `supported_fallocate_modes()` declaration. The kvfs layer filters
   requests routed through `VfsFile::fallocate` (mode 0, UNSHARE_RANGE,
@@ -115,26 +115,26 @@ KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name
   to the successfully allocated prefix (capped at the request end, never shrinking)
   and ctime/mtime are refreshed, matching Linux `ext4_alloc_file_blocks`; this
   failure state is defined, not undefined;
-- xattr name、value、external xattr block header、refcount 和 checksum；
-- KVFS 运行态操作，例如 create、unlink、rename、truncate、writeback、fsync 和 syncfs；
-- KVFS 传入的 atime、mtime 和 ctime，以及磁盘 inode size/extra timestamp 字段决定的可表示范围；
-- transaction commit、journal replay 或 checkpoint 期间的设备写入/flush 失败。
+- xattr names, values, external xattr block headers, refcounts and checksums;
+- KVFS runtime operations such as create, unlink, rename, truncate, writeback, fsync and syncfs;
+- the atime, mtime and ctime passed in by KVFS, and the representable range determined by the on-disk inode size/extra timestamp fields;
+- device write/flush failures during transaction commit, journal replay or checkpoint.
 
-经检查，本 crate 使用 `#![forbid(unsafe_code)]`，不直接访问 MMIO/PIO，不管理 DMA
-所有权，不使用 FFI、inline assembly 或架构专有裸接口。
+As checked, this crate uses `#![forbid(unsafe_code)]`, does not access MMIO/PIO directly, does not manage DMA
+ownership, and does not use FFI, inline assembly or architecture-specific raw interfaces.
 
-## 读取缓冲与失败发布边界
+## Read Buffering and Failure Publication Boundary
 
-整块 initialized 文件读取复用调用者的 `&mut [u8]`，不引入 unsafe、用户指针解引用或
-新的 DMA 所有权。块 trait 对直读与部分块暂存缓冲都接受任意字节起点；后端及其 DMA 能力层
-负责设备地址对齐、连续性、映射与缓存维护。文件系统不以常量或 `Vec<u8>` 的偶然分配对齐
-代替设备契约，也不把缓冲要求转嫁给 `read_at` 调用者。
-这个约定不取消块长度/范围校验，也不承诺设备 I/O 失败原子性。
-hole/unwritten 分支不能读取物理旧数据，部分块和 EOF 不能把
-请求外字节复制给调用者。
+Whole-block initialized file reads reuse the caller's `&mut [u8]`, without introducing unsafe, user-pointer dereferences or
+new DMA ownership. The block trait accepts an arbitrary byte start for both direct reads and partial-block staging buffers; the backend and its DMA capability layer
+are responsible for device address alignment, contiguity, mapping and cache maintenance. The filesystem does not substitute constants or the incidental allocation alignment of a `Vec<u8>`
+for the device contract, nor does it push buffer requirements onto the `read_at` caller.
+This convention does not remove block length/range validation, and it does not promise failure atomicity for device I/O.
+The hole/unwritten branches must not read old physical data, and partial blocks and EOF must not copy
+bytes outside the request to the caller.
 
-块后端可能先修改目标前缀再返回错误，因此 `read_at` 不保证失败缓冲保持旧值，也不返回
-可发布的成功前缀。调用者必须传播错误，不能置 uptodate 或把失败内容复制到读迭代器。
+The block backend may modify the target prefix before returning an error, so `read_at` does not guarantee that a failed buffer keeps its old value, nor does it return
+a publishable successful prefix. The caller must propagate the error and must not set uptodate or copy the failed content into the read iterator.
 Cached pages move into bios through `FolioRead` and complete only after device
 access ends. Contiguous pages belong to one bio. Fragmented subpage reads use
 disjoint part owners: zeroed holes, unwritten extents and device-read runs
@@ -155,23 +155,23 @@ Writable ext4 integration tests retain both tail-page bios after demand returns,
 start a VFS shrink, and verify that mappings and free-block accounting survive
 until the last owner retires, including when another part has already failed.
 The same tests verify that shrink/regrow cannot expose the discarded suffix.
-`vfs/read_tests.rs` 以真实 ext4 + KVFS + PageCache 链路验证上述隔离，并检查重试后的页未被
-标脏、17 字节 EOF 尾部补零。失败读后部分写入的测试还验证完整重新读页先于写入复制，
-只把成功写入后的完整数据标脏，不发布此前失败读污染的前缀。该验证不声称设备 I/O 具备失败原子性。
+`vfs/read_tests.rs` verifies the above isolation over the real ext4 + KVFS + PageCache path, and checks that the retried page is not
+marked dirty and that the 17-byte EOF tail is zero-filled. The test of a partial write after a failed read also verifies that the page is fully re-read before the write copy,
+and only the complete data after a successful write is marked dirty, without publishing a prefix polluted by the earlier failed read. This verification does not claim that device I/O is failure-atomic.
 
-## unsafe 代码清单
+## Unsafe Code Inventory
 
-无。`fs/filesystems/kext4/src/lib.rs` 对整个 crate 禁止 unsafe code。Unsafe 或设备专有
-操作位于本 crate 边界之外。
+None. `fs/filesystems/kext4/src/lib.rs` forbids unsafe code for the entire crate. Unsafe or device-specific
+operations are located outside the boundary of this crate.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-- 对 metadata bytes 切片前必须校验磁盘 offset 和 size。
-- 信任 checksum-protected block 前必须完成 metadata checksum validation。
-- Primary superblock 的 metadata checksum failure 必须先于 mount feature negotiation 返回；
-  capability 拒绝只能发生在 checksum 通过后，并在首次 open 及 recovery reload 发布运行态前执行。
-- block number 和 inode number 必须通过 layout、group、bitmap 和 system-zone 规则校验。
-- JBD2 handle 在 dirty 或 revoke metadata buffer 前必须拥有足够 credits。
+- The on-disk offset and size must be validated before slicing metadata bytes.
+- Metadata checksum validation must complete before a checksum-protected block is trusted.
+- A metadata checksum failure of the primary superblock must be returned before mount feature negotiation;
+  capability rejection may happen only after the checksum passes, and must run before the first open and before a recovery reload publishes the runtime state.
+- Block numbers and inode numbers must be validated against the layout, group, bitmap and system-zone rules.
+- A JBD2 handle must hold enough credits before it dirties or revokes a metadata buffer.
 - A speculative prealloc space exists only in memory: it is not marked in the block bitmap, the group
   descriptor or the inode, so discarding it at any moment leaves no disk residue; it reaches the bitmap only
   when consumed, through the normal allocation path, and inside that same critical section both indexes are
@@ -180,39 +180,39 @@ The same tests verify that shrink/regrow cannot expose the discarded suffix.
   the inode-side logical range and the group-side twin entry must be added and removed together inside one
   allocator critical section, and `preallocated_blocks` must always equal the sum of the group-side span
   lengths (verified after every change in debug builds).
-- group 侧孪生条目持有 owner inode 的强引用，所以 eviction 必须无条件丢弃该文件的 space；漏丢
-  会让条目与其强引用一起活过 inode 对象。
-- mount 生命周期内的 `MountedJournal` 是生产路径唯一 journal identity，同时拥有磁盘 mapping、
-  活跃 superblock 状态、transaction engine 和 FIFO checkpoint queue。同一个 runtime
-  transaction 必须按 Running → Committing → Checkpoint → Finished 迁移；队列只保存该对象，
-  持久化证据属于其 Checkpoint phase，不复制 payload 或携带可替换的 coordinator 引用。
-- 提交请求在事务锁下先关闭目标 running transaction 的新 handle 准入，再释放状态锁等待
-  活跃 handle 退出；stop 和 abort 必须唤醒等待者。不能持有自身 handle 或退出方需要的锁
-  等待提交，也不能嵌套 begin 等待自己所在事务解封。重复持久化请求必须识别 pending/finished
-  目标，不能重复 append 或退休；无效未来目标必须失败，不能等待不相关事务。
-- 可变事务的 ordered-data flush 只能确认 barrier 开始前快照的依赖代次；较旧 barrier
-  完成不能倒退确认水位，失败不能清除依赖。冻结后不再接受新依赖，commit 在日志写入前
-  满足其完整 ordered-data 依赖。
-- journal 持久化 execution mutex 串行 append、checkpoint、ring/tail 与 recovery flag I/O；
-  短 transaction/state/buffer guard 不得跨设备 I/O。home 和 tail 两次持久化成功前不退休，
-  失败须在交出执行权前 abort。首次 feature 更新和 PreserveDuringRecovery 同样参加该协议；
-  replay/reset 仍限于 mount 身份发布前的独占恢复。
-- replay 完成后必须先把 transaction engine 的 next sequence、运行态 ring 和 checkpoint
-  水位重置到 replay report，再开始 orphan cleanup；否则旧 sequence 不得用于创建新 transaction。
-- internal-journal extent 必须连续且至少覆盖 JBD2 `s_maxlen` 声明的 logical block 数；
-  inode-backed journal 的预分配容量可以大于 `s_maxlen`。每个 physical extent 都必须位于
-  filesystem block count 内；磁盘映射校验完成前不得创建 `MountedJournal`。
-- 多个 handle 可以独立退出并共享 running transaction；handle stop 必须归还未使用 credits。
-  预期错误必须在该 handle 首次 metadata access 前完成校验并原样返回，不能改变其他 handle
-  已发布的 bytes、dirty buffer ownership 或 transaction membership。单个 handle 不得在
-  失败路径上删除已发布的 metadata/revoke membership，因为同一 block 可能已被其他 handle
-  共享。任何普通错误若发生在 metadata 已发布之后，都按遗漏 preflight/unwind 的内部不变量
-  失败处理并永久 abort journal；不得回滚同一 running transaction 中其他已经成功返回的
-  operation，也不得把失败报告成可继续运行的局部回滚。尚未发布的私有状态由 ext4 算法显式
-  unwind。
-  普通 transaction 上界按 journal descriptor/commit/revoke 开销保守限制，不能用固定
-  operation 数代替容量约束。显式 filesystem sync 必须先提交 running transaction，再推进
-  committed checkpoint queue。
+- The group-side twin entry holds a strong reference to the owner inode, so eviction must unconditionally discard that file's space; missing the discard
+  would let the entry and its strong reference outlive the inode object.
+- The `MountedJournal` for the mount lifetime is the sole journal identity on the production path, and owns the on-disk mapping,
+  the active superblock state, the transaction engine and the FIFO checkpoint queue. The same runtime
+  transaction must migrate Running → Committing → Checkpoint → Finished; the queue holds only that object,
+  the persistence evidence belongs to its Checkpoint phase, and it does not copy the payload or carry a replaceable coordinator reference.
+- A commit request first closes admission of new handles to the target running transaction under the transaction lock, then releases the state lock and waits for
+  active handles to exit; stop and abort must wake waiters. It must not wait for commit while holding its own handle or a lock the exiting side needs,
+  nor nest a begin that waits for its own transaction to be unsealed. A duplicate persistence request must recognize a pending/finished
+  target and must not append or retire twice; an invalid future target must fail and must not wait on an unrelated transaction.
+- The ordered-data flush of a mutable transaction may only acknowledge the dependency generation snapshotted before the barrier began; an older barrier
+  completing must not move the acknowledged watermark backwards, and a failure must not clear dependencies. After freezing no new dependencies are accepted, and commit satisfies
+  its complete ordered-data dependencies before the journal write.
+- The journal persistence execution mutex serializes append, checkpoint, ring/tail and recovery flag I/O;
+  short transaction/state/buffer guards must not span device I/O. No retirement before both the home and the tail persistence succeed,
+  and a failure must abort before handing off execution. The first feature update and PreserveDuringRecovery take part in the same protocol;
+  replay/reset remains limited to exclusive recovery before the mount identity is published.
+- After replay completes, the transaction engine's next sequence, the runtime ring and the checkpoint
+  watermark must first be reset to the replay report before orphan cleanup begins; otherwise an old sequence must not be used to create a new transaction.
+- The internal-journal extent must be contiguous and cover at least the number of logical blocks declared by JBD2 `s_maxlen`;
+  the preallocated capacity of an inode-backed journal may exceed `s_maxlen`. Every physical extent must lie within the
+  filesystem block count; no `MountedJournal` may be created before the on-disk mapping validation completes.
+- Multiple handles may exit independently and share the running transaction; handle stop must return unused credits.
+  Expected errors must be validated and returned as-is before that handle's first metadata access, and must not change the bytes,
+  dirty buffer ownership or transaction membership already published by other handles. A single handle must not, on
+  a failure path, delete metadata/revoke membership already published, because the same block may already be
+  shared by other handles. Any ordinary error occurring after metadata has been published is handled as a failure of the internal invariant of a missed preflight/unwind,
+  and the journal is aborted permanently; it must not roll back other operations in the same running transaction that have already returned successfully,
+  nor report the failure as a partial rollback from which operation can continue. Private state not yet published is explicitly
+  unwound by the ext4 algorithm.
+  The upper bound of an ordinary transaction is limited conservatively by journal descriptor/commit/revoke overhead, and a fixed
+  operation count must not replace the capacity constraint. An explicit filesystem sync must first commit the running transaction, then advance the
+  committed checkpoint queue.
 - Resident `Ext4InodeState` owns each regular inode's metadata target and records
   the handle's transaction identity at publication. Retain the transaction Arc
   and inspect its phase; long-lived tids must not alias across sequence wrap.
@@ -228,138 +228,138 @@ The same tests verify that shrink/regrow cannot expose the discarded suffix.
   It may retain the predecessor's old target: an uncommitted removal leaves the
   old chain and its allocated inode recoverable together. No temporary inode
   object or second resident-inode registry substitutes for the canonical owner.
-- 释放 bitmap 位之前，分配器必须按块组和 freeing transaction ID 登记待复用区间；
-  区间、统计与 bitmap/cache 发布归同一 allocator owner、受同一锁保护。JBD2 不保存物理
-  空间记录；文件系统胶水仅在提交持久化成功后、释放 journal 锁后通知分配器解除该事务的
-  保护。handle stop、freeze、缓存重建或失败都不能解除；无需等待 home checkpoint。
-  连续区间按组有界处理，跨段失败必须走 mutation-error abort。分配同时排除 prealloc 与
-  待复用区间；surplus 登记不得通过 bitmap-free 采样承诺不可复用块。提交失败保留记录并
-  abort，不能向后续分配开放这些块。
-- 回收阶段可共享事务，但每个因同步/额度压力提交的前缀必须保持 orphan 与剩余映射一致；
-  每个回收阶段在 handle 创建成功后独立禁止 dying inode 的 extra-isize 自动扩展，不能
-  依赖上一阶段标志，也不能在清理 xattr 后重新建立 EA block；准入失败不改变该标志。
-  运行态回收仅裁剪最右侧叶并沿路径回收空节点，不分配或重建子树；操作前失效映射缓存。
-  批次超过单事务容量时必须先有界缩批，容量判断共用 journal 契约；其他 NoSpace 或
-  提交错误不能被吞掉并当成缩批重试。
-- 有界物理空间准入只能在 mount mutation 排他下、打开 handle 前进行，不把 metadata
-  credits 当成物理块需求。空间不足可先丢弃可选预分配，再提交可解禁的 freeing transaction；
-  不得持有 active handle 等待自身提交，也不得重试已经部分发布 metadata 的 namespace 操作。
-  writeback 转换以实际叶项变化与分裂布局计树块需求，零增长操作不能为固定预算推动提交。
-  有待复用块时逐映射关闭 handle 再准入，停止 handle 本身不建立持久化边界。
-  准入或 handle completion 隐式提交成功后，必须与显式 Restart 一样确认完成前缀、
-  释放该范围预留。后续错误/abort 不得把已提交前缀重新算作未完成；失败的提交不得
-  推进前缀。完成依据来自 journal 原有事务生命周期，并遵循事务 ID 回绕规则。
-  现有 admission 失败不 abort、mutation 后失败 abort 并发布只读状态的边界不变。
-- truncate 必须在释放旧 block mapping 前强制提交 orphan + `i_disksize` transaction；恢复期
-  orphan cleanup 不得与普通 transaction 混合，并须在保持 recovery evidence 的策略下同步
-  完成 commit/checkpoint。
-- 多个 committed transaction 驻留磁盘日志时，sequence/start 必须保持指向最老 live
-  transaction，追加只能从 mount 运行态 append head 开始并至少保留一个空 journal block；
-  clean journal 首次提交必须先持久化非零 start 再发出 descriptor/data/commit，使激活与
-  commit block 之间的掉电被恢复路径识别为未完成 active transaction；
-  活跃期不得把运行态 head 持久化为 `s_head`，只有 clean journal 才写该字段；home-block flush 完成后
-  才能把 tail 推进到下一个 transaction，队列非空时不得清除 ext4 recovery evidence。包含
-  primary superblock 的 frozen checkpoint image 必须保留 recovery feature，不能让较老
-  checkpoint 覆盖后续 live journal 的恢复标志。
-- 缓存的 journal-superblock image 必须覆盖一个完整 journal block，且只能来自成功解码和
-  checksum 校验的输入；每次内存更新必须重新解码生成下一份可信状态。journal write batch
-  不得超过 128 KiB，不得跨越 ring wrap 或 internal-journal 不连续 physical extent。批量写入
-  只改变请求粒度，不能合并 clean-journal activation flush 与 transaction 最终 durability
-  flush，也不能省略没有 metadata commit 代为提供的同步 flush。
-- extent 局部更新必须同时刷新被修改叶子、祖先索引、inode root 和 metadata checksum；
-  ordered writeback 不得在同一 handle 内从路径更新切换到全树重写，credits 上界按本次写入
-  规模与最大路径深度覆盖逐层分裂，且不得截断计算结果。
-- ordered writeback 不得把全范围静态 mapping/space plan 当作执行真相。dirty range 的必需块
-  已纳入 delayed-allocation reservation accounting；执行 cursor 在每个实际 mapping/allocation
-  run 前重新查询 extent，并由 journal handle 自己约束 mounted credit limit。handle 扩展失败
-  只能在完整 run 边界 flush 并提交 durable prefix。只有该 transaction 成功后才能释放对应
-  delalloc range；因 metadata/fragmentation 发生的后续 ENOSPC 也必须按部分进度返回。未完成
-  后缀及其 reservation 必须保留，optional preallocation budget 不能因 transaction restart 被
-  重新授予，也不能占用 ext4 reserved blocks 或其他 inode 的 delalloc reservation。
-  整体 writeback 在后续 transaction 失败时必须返回已完成字节前缀；PageCache 只结束其中完整
-  folio 的 writeback，边界 folio 和后缀保持 dirty。普通可重试错误可以再次提交该 suffix；
-  device/JBD2 错误会 abort 当前 mount journal，必须先 recovery/remount。
-- range mutation 只有在完整操作可由单条 `ExtentPath` 表达时才能开始局部 metadata 写入；
-  跨叶回退必须发生在首个 metadata write/create/revoke 之前。
-- 不带 revoke feature 的 journal 只能在“旧 transaction 已全部 checkpoint”时无 revoke
-  释放 metadata block；forget 同时必须从当前 handle 的 metadata 集合中移除该 block。Clean v2
-  journal 必须先 flush revoke feature 才能允许 transaction/checkpoint 重叠；v1 journal 保持
-  同步 checkpoint 退化路径。
-- 内存中的 counter 和 descriptor 只应在同一事务内完成对应 metadata bytes staging 后更新。
-- block allocation/release 必须在同一 metadata mutation 中同步 primary superblock 与 group
-  descriptor 的 free-block counter；delayed-allocation admission 依赖 primary counter，并另行
-  扣除 ext4 reserved blocks 和 core 持有的 delayed-allocation mount aggregate。
-- `Ext4StatFsMode` 只能改变对外总块数的口径；free、available、reserved-block 和
-  delayed-allocation aggregate 必须保持同一唯一事实源，不能按 `minixdf` 重算或放宽空间准入。
-- 从磁盘解码的 external xattr name 必须拒绝内嵌 NUL，保持与 Linux/e2fsck 的 corruption
-  handling 一致。
-- 目录记录长度必须由 `RawDirectoryEntry` 的唯一编解码入口按 Linux 磁盘语义解释。HTree root
-  的固定字段、磁盘 hash version 和树深必须经共享 root decoder 校验；磁盘版本 `3/4/5` 是
-  非法元数据，版本 `6` 是合法 SIPHASH 格式，但缺少 fscrypt name key 的 mutation 必须在依据
-  该 hash 选择或写入 HTree leaf 前返回 `Unsupported`。
-- HTree signedness 必须由 mount state 统一拥有：默认 hash 在 mount 时校验，`DIR_INDEX` 未启用
-  时不得解释 signedness，显式 unsigned 优先于 signed，两者都未指定时遵循当前 Linux 的
-  unsigned-char 选择；策略解析不得写盘，可写 mount 只能在 root inode 初始化成功后、superblock
-  发布前持久化该默认，read-only mount 不得写盘。Orlov placement 必须固定使用 signed HALF_MD4
-  和 superblock seed，不能复用 HTree default/signedness policy。
-- 新写 external xattr block 必须按 Linux ext4 算法生成每项 `e_hash` 和聚合 `h_hash`，并在其后
-  计算 metadata checksum；不能用只保证 KExt4 自身可读、但会被 e2fsck 判坏的零 hash 编码。
-- Xattr name-only 遍历仍必须验证 entry 末端、value range、external block header 和 checksum；
-  sink 只能在单次回调期间借用 name bytes，不能保存该引用。
-- External xattr block 的 `h_reserved` 按 Linux 语义作为 opaque 字段处理，不能仅因其非零拒绝
-  e2fsck 修复后的合法块；启用 metadata checksum 时仍由完整 block checksum 检测意外修改。
-- 相同 xattr value 的允许替换必须在 journal credit 准备和 metadata access 前短路，不能更新
-  inode ctime，也不能产生无意义的 journal 写入。
-- 普通 xattr set/remove 必须固定使用当前 `i_extra_isize`，只改变目标 entry 的存储区域；可选的
-  extra-isize 扩展只由统一 ordinary inode-dirty 入口触发，xattr apply 和 zero-link cleanup 必须
-  绕过该入口以防递归。
-- 扩大 `i_extra_isize` 前必须先证明全部 xattr 可在缩小后的 inode body 与一个 external block
-  中完整分区；迁移、`i_file_acl`/`i_blocks` 和 inode checksum 更新必须属于同一 transaction。
-  运行时 effective `want_extra_isize` 必须按 Linux 规则包含默认 32 字节，并仅在
-  `RO_COMPAT_EXTRA_ISIZE` 存在时合并磁盘 min/want；新 inode 必须在分配事务中直接写入该值。
-  effective want 无法满足时只能退到磁盘 `min_extra_isize` 或保留当前值，不能丢弃属性或阻断
-  本来合法的普通 inode metadata 更新。迁移选择必须是有界的 entry-by-entry 扫描，并禁止把
-  `system.data` 移到 external block。内容未变的已有 external block 必须直接复用；需要新
-  external block 的候选必须在规划阶段检查 allocator 可用性，并在 apply 前完成分配。规划与分配
-  之间的空闲空间竞争返回 `NoSpace` 时记录 resident `no_expand` 并继续普通更新，不能扩大为假
-  `ENOSPC`；删除 xattr 清除该状态，journal 的暂时性 credit/忙碌失败不应永久禁止重试。设备 I/O、
-  checksum 和 corruption 错误仍必须传播并触发既有 journal 失败策略，不能以 best-effort 为由吞掉。
-- 运行态 inode allocation 必须使用 kext4 callback 已通过 `inode_init_owner()` 导出的显式
-  UID/GID；KExt4 core 不得把新 inode owner 默认为 root。
-- Filesystem 级 timestamp range 必须按 inode size 判断完整 `i_[acm]time_extra` 容量；128-byte
-  inode 只能声明秒级精度和有符号 32-bit 秒范围。Core encode/decode 仍须按 inode 实际 extra
-  field 存在性截断纳秒、限制 epoch，并把解码后的值作为唯一 resident metadata 结果发布。
-- FIEMAP 的 logical/physical/length 乘法和加法必须 checked；遍历必须同时受请求末端与
-  inode 创建时缓存的格式上限约束，损坏 mapping 不得越界输出。
-- Resident identity 只属于 KVFS `VfsInode` 和 VFS-wide `(SuperBlock, ino)` table；KExt4
-  不得建立 inode-number cache、
-  `Live/Evicting/Evicted` 状态或基于 core handle 引用数的 last-reference 规则。`RawInode` 只能
-  作为磁盘解码值，不能承载 runtime identity 或 ext4-private transient state。
-- `VfsInode` 必须直接组合一份 `Ext4Inode` private component，不能只保存 inode number 并按操作重新
-  解码。unlink/rmdir/rename 必须把已锁定 VFS victim/moved/replaced 的 private component 传入 ext4 算法，
-  防止 open handle 与 namespace mutation 各自更新不同对象。
-- Legacy orphan chain 的 `i_dtime` 必须从 journaled inode-table bytes 读取并原位更新；不得为
-  resident 前驱按编号构造第二份 private state，也不得从可能过期的 private snapshot 恢复 next。
-- delayed-allocation 的区间、per-inode reserved count 和 mount aggregate 全归 KExt4；一次
-  reserve/release/truncate/writeback/eviction API 必须在 core mutation guard 内联合更新它们，
-  kext4 KVFS 层不得维护 set、逐块节点或另一个 aggregate。
-- KVFS 在 final hook 前发布 `Freeing`，因此普通 VFS 能力不能与 eviction Phase A/B/C 并存。
-  Core 三个 phase 都借用 VFS inode 组合持有的同一 private component，不返回可逃逸的 eviction
-  handle；inode slot 释放后由 KVFS 删除旧 cache entry，number reuse 构造全新的 private state。
+- Before freeing bitmap bits, the allocator must register the pending-reuse ranges per block group and freeing transaction ID;
+  the ranges, statistics and bitmap/cache publication belong to the same allocator owner and are protected by the same lock. JBD2 does not store physical
+  space records; the filesystem glue notifies the allocator to release that transaction's protection only after commit persistence succeeds and after the journal lock is released.
+  Handle stop, freeze, cache rebuild or failure must not release it; there is no need to wait for the home checkpoint.
+  Contiguous ranges are processed per group in bounded fashion, and a cross-segment failure must take the mutation-error abort. Allocation excludes both prealloc and
+  pending-reuse ranges; surplus registration must not promise non-reusable blocks via a bitmap-free sample. A commit failure keeps the records and
+  aborts, and must not open these blocks to later allocations.
+- The reclaim phases may share a transaction, but each prefix committed under sync/quota pressure must keep the orphan list and the remaining mapping consistent;
+  each reclaim phase independently forbids automatic extra-isize expansion of the dying inode after its handle is created successfully, and must not
+  depend on the previous phase's flag, nor re-establish the EA block after xattrs are cleaned; an admission failure does not change that flag.
+  Runtime reclaim only trims the rightmost leaf and reclaims empty nodes along the path, without allocating or rebuilding subtrees; the mapping cache is invalidated before the operation.
+  When a batch exceeds the capacity of a single transaction it must first shrink in a bounded way, with the capacity decision sharing the journal contract; any other NoSpace or
+  commit error must not be swallowed and treated as a batch-shrink retry.
+- Bounded physical-space admission may only occur under mount mutation exclusion and before opening a handle, and does not treat metadata
+  credits as physical block demand. When space is insufficient, optional preallocation may be dropped first, and then a freeing transaction that can be released is committed;
+  it must not hold an active handle to wait for its own commit, nor retry a namespace operation that has already partially published metadata.
+  The writeback conversion counts tree-block demand from the actual leaf-entry changes and the split layout; a zero-growth operation must not drive a commit for a fixed budget.
+  When there are pending-reuse blocks, the handle is closed per mapping before admission; stopping a handle does not by itself establish a persistence boundary.
+  After admission or handle completion commits implicitly and successfully, it must, like an explicit Restart, acknowledge the completed prefix and
+  release the reservation of that range. A later error/abort must not recount the committed prefix as incomplete; a failed commit must not
+  advance the prefix. The basis for completion comes from the journal's existing transaction lifecycle and follows the transaction ID wraparound rules.
+  The existing boundaries are unchanged: an admission failure does not abort, and a post-mutation failure aborts and publishes the read-only state.
+- truncate must force-commit the orphan + `i_disksize` transaction before releasing the old block mapping; during recovery
+  orphan cleanup must not be mixed with ordinary transactions, and must complete commit/checkpoint synchronously under a policy that keeps the
+  recovery evidence.
+- When multiple committed transactions reside in the on-disk journal, sequence/start must keep pointing at the oldest live
+  transaction; appending may only start from the mount runtime append head and must keep at least one empty journal block;
+  the first commit of a clean journal must first persist a non-zero start before issuing descriptor/data/commit, so that a power loss between activation and the
+  commit block is recognized by the recovery path as an unfinished active transaction;
+  while active, the runtime head must not be persisted as `s_head`, and that field is written only for a clean journal; only after the home-block flush completes
+  may the tail advance to the next transaction, and while the queue is non-empty the ext4 recovery evidence must not be cleared. A frozen checkpoint image containing the
+  primary superblock must retain the recovery feature, and an older
+  checkpoint must not overwrite the recovery flag of a later live journal.
+- The cached journal-superblock image must cover one complete journal block and may only come from input that was successfully decoded and
+  checksum-verified; every in-memory update must be re-decoded to produce the next trusted state. A journal write batch
+  must not exceed 128 KiB and must not cross a ring wrap or a discontiguous internal-journal physical extent. Batched writes
+  change only the request granularity; they must not merge the clean-journal activation flush with the final transaction durability
+  flush, nor omit a sync flush that is otherwise provided in place of a metadata commit.
+- A partial extent update must refresh the modified leaf, the ancestor indexes, the inode root and the metadata checksum together;
+  ordered writeback must not switch from a path update to a whole-tree rewrite within the same handle, and the credits upper bound covers level-by-level splits according to the size of this write
+  and the maximum path depth, and the computed result must not be truncated.
+- Ordered writeback must not treat a full-range static mapping/space plan as execution truth. The blocks required by the dirty range
+  are already included in delayed-allocation reservation accounting; the execution cursor re-queries the extent before every actual mapping/allocation
+  run, and the journal handle itself constrains the mounted credit limit. A handle extension failure
+  may only flush at a complete run boundary and commit the durable prefix. The corresponding delalloc range may be released only after that transaction succeeds;
+  a later ENOSPC caused by metadata/fragmentation must also be returned as partial progress. The unfinished
+  suffix and its reservation must be retained, and the optional preallocation budget must not be
+  granted again because of a transaction restart, nor may it consume ext4 reserved blocks or the delalloc reservations of other inodes.
+  If a later transaction fails, the overall writeback must return the prefix of bytes already completed; PageCache ends writeback only for the complete
+  folios among them, while the boundary folio and the suffix stay dirty. An ordinary retryable error may resubmit that suffix;
+  a device/JBD2 error aborts the current mount journal, and recovery/remount must happen first.
+- A range mutation may begin partial metadata writes only if the complete operation can be expressed by a single `ExtentPath`;
+  a cross-leaf fallback must happen before the first metadata write/create/revoke.
+- A journal without the revoke feature may release a metadata block without revoke only when "all old transactions have been checkpointed";
+  forget must also remove that block from the current handle's metadata set. A clean v2
+  journal must first flush the revoke feature before transaction/checkpoint overlap is allowed; a v1 journal keeps the
+  synchronous checkpoint fallback path.
+- In-memory counters and descriptors should be updated only after the corresponding metadata bytes have been staged within the same transaction.
+- Block allocation/release must synchronize the free-block counters of the primary superblock and the group
+  descriptor within the same metadata mutation; delayed-allocation admission depends on the primary counter and additionally
+  subtracts the ext4 reserved blocks and the delayed-allocation mount aggregate held by the core.
+- `Ext4StatFsMode` may only change the reporting basis of the externally visible total block count; the free, available, reserved-block and
+  delayed-allocation aggregate must keep the same single source of truth, and must not be recomputed per `minixdf` or loosen space admission.
+- An external xattr name decoded from disk must reject an embedded NUL, consistent with Linux/e2fsck corruption
+  handling.
+- Directory record lengths must be interpreted by the sole encode/decode entry of `RawDirectoryEntry` according to Linux on-disk semantics. The fixed fields, on-disk hash version and tree depth of the HTree root
+  must be validated by the shared root decoder; on-disk versions `3/4/5` are
+  illegal metadata, and version `6` is a legal SIPHASH format, but a mutation lacking the fscrypt name key must return `Unsupported` before selecting or writing an HTree leaf based on
+  that hash.
+- HTree signedness must be owned uniformly by the mount state: the default hash is validated at mount time, and signedness must not be interpreted when `DIR_INDEX` is not enabled;
+  explicit unsigned takes precedence over signed, and when neither is specified the current Linux
+  unsigned-char choice is followed; policy resolution must not write to disk, a writable mount may persist that default only after the root inode is initialized successfully and before the superblock is
+  published, and a read-only mount must not write to disk. Orlov placement must always use signed HALF_MD4
+  and the superblock seed, and must not reuse the HTree default/signedness policy.
+- A newly written external xattr block must generate each entry's `e_hash` and the aggregate `h_hash` according to the Linux ext4 algorithm, and then
+  compute the metadata checksum; it must not use a zero-hash encoding that is only readable by KExt4 itself but would be judged corrupt by e2fsck.
+- Xattr name-only traversal must still validate the entry end, the value range, the external block header and the checksum;
+  the sink may only borrow the name bytes during a single callback and must not keep that reference.
+- The `h_reserved` of an external xattr block is treated as an opaque field following Linux semantics, and must not reject a legal block repaired by
+  e2fsck merely because it is non-zero; when metadata checksum is enabled, the full-block checksum still detects unexpected modification.
+- A permitted replacement with the same xattr value must short-circuit before journal credit preparation and metadata access, must not update the
+  inode ctime, and must not produce a meaningless journal write.
+- An ordinary xattr set/remove must always use the current `i_extra_isize` and change only the storage region of the target entry; the optional
+  extra-isize expansion is triggered only by the unified ordinary inode-dirty entry, and the xattr apply and zero-link cleanup must
+  bypass that entry to prevent recursion.
+- Before enlarging `i_extra_isize`, it must first be proven that all xattrs can be partitioned within the shrunk inode body and one external block
+  in full; the migration, the `i_file_acl`/`i_blocks` update and the inode checksum update must belong to the same transaction.
+  The runtime effective `want_extra_isize` must include the default 32 bytes per Linux rules, and merge the on-disk min/want only when
+  `RO_COMPAT_EXTRA_ISIZE` is present; a new inode must have that value written directly in the allocation transaction.
+  When the effective want cannot be satisfied, it may only fall back to the on-disk `min_extra_isize` or keep the current value, and must not drop attributes or block
+  an otherwise legal ordinary inode metadata update. Migration selection must be a bounded entry-by-entry scan, and moving
+  `system.data` to an external block is forbidden. An existing external block with unchanged content must be reused directly; a candidate that needs a new
+  external block must check allocator availability in the planning phase and complete the allocation before apply. When a free-space race between planning and allocation
+  returns `NoSpace`, record a resident `no_expand` and continue the ordinary update, and it must not be escalated to a false
+  `ENOSPC`; deleting an xattr clears that state, and a transient journal credit/busy failure should not permanently forbid retry. Device I/O,
+  checksum and corruption errors must still propagate and trigger the existing journal failure policy, and must not be swallowed on the grounds of best-effort.
+- Runtime inode allocation must use the explicit UID/GID that the kext4 callback has already derived via `inode_init_owner()`;
+  the KExt4 core must not default a new inode's owner to root.
+- The filesystem-level timestamp range must judge the full `i_[acm]time_extra` capacity by inode size; a 128-byte
+  inode may only declare second-level precision and a signed 32-bit seconds range. Core encode/decode must still truncate nanoseconds and bound the epoch by whether the inode's actual extra
+  field exists, and publish the decoded value as the sole resident metadata result.
+- The logical/physical/length multiplications and additions in FIEMAP must be checked; traversal must be bounded both by the request end and
+  by the format upper bound cached at inode creation, and a corrupt mapping must not produce out-of-bounds output.
+- Resident identity belongs only to the KVFS `VfsInode` and the VFS-wide `(SuperBlock, ino)` table; KExt4
+  must not establish an inode-number cache,
+  a `Live/Evicting/Evicted` state, or a last-reference rule based on core handle reference counts. `RawInode` may only serve
+  as an on-disk decoded value and must not carry runtime identity or ext4-private transient state.
+- `VfsInode` must directly embed one `Ext4Inode` private component, and must not store only the inode number and re-decode it per operation.
+  unlink/rmdir/rename must pass the private component of the already locked VFS victim/moved/replaced inode into the ext4 algorithm,
+  preventing an open handle and a namespace mutation from each updating a different object.
+- The `i_dtime` of the legacy orphan chain must be read from the journaled inode-table bytes and updated in place; a second copy of private state must not be constructed by number for
+  a resident predecessor, nor may next be recovered from a possibly stale private snapshot.
+- The delayed-allocation ranges, the per-inode reserved count and the mount aggregate are all owned by KExt4; one
+  reserve/release/truncate/writeback/eviction API must update them jointly within the core mutation guard,
+  and the kext4 KVFS layer must not maintain a set, per-block nodes or another aggregate.
+- KVFS publishes `Freeing` before the final hook, so ordinary VFS capabilities cannot coexist with eviction Phase A/B/C.
+  All three core phases borrow the same private component held by the VFS inode embedding and return no escapable eviction
+  handle; after the inode slot is released, KVFS deletes the old cache entry, and number reuse constructs entirely fresh private state.
 
-## 线程安全
+## Thread Safety
 
-运行态 KVFS `SuperBlock` 把无状态 `Ext4SuperOperations` 与唯一 `Ext4Mount`（内部 `RwLock<Ext4SbInfo>`）
-分别作为 `s_op`/`s_fs_info` 保存；`s_op` 是所有挂载共享的真正静态表，private object 由
-superblock 独占且只能借用恢复，不存在承载 mount identity 的 operation wrapper 或可逃逸的
-typed owner。所有 inode mapping 也共享静态 `Ext4AddressSpaceOperations`，callback 只从
-`mapping->host` 借用唯一 `Ext4Inode`；共享写 fault 的准备由 `Ext4Inode` 的
-`FileMappingOperations` 完成。仍需联合修改
-superblock/group metadata 的 mutation 由挂载级 write guard 串行化；只读 core 操作共享进入，
-delalloc range 与 mount aggregate 则在 shared guard 下由独立 reservation mutex 联合更新。KVFS
-cache 合并并发 `iget` 并封闭 `New/Freeing`；ext4 private metadata 与 transient state 在 inode
-state mutex 下更新，KExt4 不再取得另一把 inode-cache lock。内部 JBD2 和 metadata-buffer 状态仍会记录
-transaction ownership。
+The runtime KVFS `SuperBlock` stores the stateless `Ext4SuperOperations` and the sole `Ext4Mount` (internally `RwLock<Ext4SbInfo>`)
+as `s_op`/`s_fs_info` respectively; `s_op` is a truly static table shared by all mounts, and the private object is
+exclusively owned by the superblock and can only be recovered by borrowing; there is no operation wrapper carrying mount identity and no escapable
+typed owner. All inode mappings also share the static `Ext4AddressSpaceOperations`, and callbacks only
+borrow the sole `Ext4Inode` from `mapping->host`; the preparation of a shared write fault is done by the
+`FileMappingOperations` of `Ext4Inode`. Mutations that still need to jointly modify
+superblock/group metadata are serialized by the mount-level write guard; read-only core operations enter shared,
+and the delalloc ranges and the mount aggregate are updated jointly by a separate reservation mutex under the shared guard. The KVFS
+cache coalesces concurrent `iget` and seals `New/Freeing`; ext4 private metadata and transient state are updated under the inode
+state mutex, and KExt4 no longer takes another inode-cache lock. Internal JBD2 and metadata-buffer state still record
+transaction ownership.
 Shared-buffer atomic mutations hold the slot mutex and preserve old bytes on
 failure. Writers in the same transaction must not independently read old snapshots
 and then replace whole blocks.
@@ -372,174 +372,174 @@ Acquire it before mount protection, never while holding mount or inode-state
 guards. PageCache enumeration holds no core mutex, and batch writers enter the
 core only after mapping/folio locks are released. Journal execution protection
 follows mount protection; stopping a handle does not acquire it.
-容量 preflight 与 begin 仍由同一次 mount mutation 排他保证，尚不是独立 credit reservation，
-不得据此放开全部 metadata mutation。后续引入细粒度锁时，必须保持该跨层边界，以及 buffer
-ownership、journal handle、allocator bitmap 和 inode metadata 之间的顺序约束。
-FIEMAP 由 VFS inode shared lock 稳定单 inode mapping；core read lock 和 delayed-block
-mutex 只分别短暂取得，并在安全 writer 访问用户页前释放。不得把用户内存访问放进挂载级
-core lock 或 delayed-block mutex。Buffered write 和 shared write fault 都必须在 inode
-exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，不能以 dirty-folio
-扫描替代 filesystem mapping prepare。
-speculative prealloc space 的 per-inode map 锁是 allocator 锁之下的模块私有叶锁，刻意不使用
-inode state 锁：消费与 discard 都在持 allocator 锁的临界区内取放它，`update` 闭包内不再取得
-任何锁，group 侧 discard 锁 foreign owner 的 map 也按同一顺序取，因此 prealloc 操作不会与
-inode-state 使用者构成 ABBA。ENOSPC 重试阀自带 allocator 锁，只能在扫描的锁段之外调用。
+The capacity preflight and begin are still guaranteed by the same mount-mutation exclusion, and are not yet an independent credit reservation,
+so this must not be used to release all metadata mutations. When finer-grained locks are introduced later, this cross-layer boundary must be kept, along with the ordering constraints among buffer
+ownership, journal handles, allocator bitmaps and inode metadata.
+FIEMAP relies on the VFS inode shared lock to stabilize the single-inode mapping; the core read lock and the delayed-block
+mutex are each taken only briefly, and released before the safe writer accesses user pages. User memory access must not be placed under the mount-level
+core lock or the delayed-block mutex. Both buffered write and shared write fault must publish the hole reservation into the same delayed set under the inode
+exclusive data lock first, and a dirty-folio
+scan must not replace the filesystem mapping prepare.
+The per-inode map lock of speculative prealloc space is a module-private leaf lock below the allocator lock, and deliberately does not use the
+inode state lock: both consumption and discard take and put it inside the critical section holding the allocator lock, no further lock is taken inside the `update` closure,
+and the group-side discard also takes the map of a foreign owner in the same order, so prealloc operations cannot form an ABBA with
+inode-state users. The ENOSPC retry valve carries its own allocator lock and may only be called outside the locked section of the scan.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Countermeasure |
 |------|----------|----------|----------|----------|
-| T-01 | 损坏镜像中的 xattr entry name 或 value range 被 name-only list 路径当成合法属性 | 中 | 恶意或损坏镜像编码 NUL、越界/重叠 value 或无效 external block | `decode_xattr_entries()` 拒绝 NUL 和畸形 entry；name-only 遍历仍校验 value range、block header 与 checksum，并有回归测试 |
-| T-02 | external xattr block 在 unlink 或 rename overwrite 后泄漏，或 inode 继续引用已释放 block | 中 | zero-link victim 的 `i_file_acl != 0` | zero-link eviction 先释放或递减 EA block refcount，清 `i_file_acl`，更新 `i_blocks`，再释放 inode |
-| T-03 | 运行态 unlink 过早释放仍被打开 fd 引用的 inode | 中 | KExt4 运行态后端上 unlink 一个仍打开的 inode | namespace transaction 只持久化 nlink/orphan；open-file 持有唯一 VFS inode 及其 ext4 private state，最后 VFS 引用销毁才进入 superblock final eviction |
-| T-04 | journal credits 估算不足或按 data blocks 过度估算，导致 metadata update 在事务中途失败或被错误拒绝 | 中 | namespace remove、HTree 转换/split、writeback、truncate、preallocation discard 或 final eviction 修改 orphan、xattr、extent 和 inode metadata | namespace 插入预检显式记录 HTree 路径，转换后立即 split 按两个独立单块 extent 预估并在 inode flag 发布前加入 HTree credits；namespace removal 只覆盖 dirent、nlink 和 orphan metadata，不包含后续 final eviction；ordered writeback 固定为 path-local 算法，由 live cursor 按实际 unwritten conversion 和 hole allocation run 续订 handle，达到 transaction 上限时提交完整前缀并重启；legacy final eviction 和 extent truncate 按实际 tree blocks、需要 revoke 的旧 tree blocks 与 affected groups 计算，目录/block-mapped symlink 数据块释放按释放块数逐一计入 revoke credits；victim 带 external xattr 时 final eviction 预算包含 EA 清理 |
-| T-05 | 恶意 extent 或 bitmap metadata 导致释放不属于该 inode 的 block | 高 | 损坏镜像把 extent/xattr block 指向 system zone 或非法 group | release 或 mutation 前执行 block ownership、system-zone、bitmap 和 checksum 校验 |
-| T-06 | 设备写入/flush 失败让部分 metadata 可见 | 中 | commit、replay、checkpoint、显式 sync 或 xattr update 期间设备失败 | journal abort 保留 recovery state 或 pending checkpoint；后续 sync/mutation 返回 aborted，不跨 syscall 回滚内存修改；测试覆盖 explicit-sync commit、checkpoint、xattr 和 replay failure |
-| T-07 | clean journal 上残留 orphan，mount 永久返回 `NeedsRecovery` | 中 | namespace transaction 已 checkpoint，但 final inode eviction 尚未发生 | 显式 recovery 无论 journal 是否需要 replay 都遍历 legacy list 与 orphan file；clean 分支以 `PreserveDuringRecovery` 建立 recovery evidence，逐个同步 commit/checkpoint，确认 journal start 清零且 orphan file 为空后才清除 recovery features；zero-link entry 复用 journaled final-eviction 路径 |
-| T-08 | free-block aggregate、delalloc 区间与 reservation aggregate 漂移导致过量预留 | 中 | VFS/ext4 两侧分别更新，或逐块 set 与 mount counter 只更新一侧 | block mutation 同时发布 superblock 与 group descriptor；ext4 range API 在独立 reservation mutex 下联合更新 inode interval、`i_reserved_data_blocks` 等价计数和 mount aggregate，admission/statfs 直接使用该 aggregate |
-| T-09 | 新建 inode 固定为 root，绕过调用者 owner 语义 | 高 | callback 丢弃 credential 或 ext4 constructor 隐式填入 UID/GID 0 | create/mkdir/mknod/symlink callback 使用 `inode_init_owner()`，显式 `uid`、`gid` 随同 namei transaction 持久化 |
-| T-10 | journal head 追上 tail 并覆盖尚未 checkpoint 的 commit | 高 | 多个 committed transaction 占满环形日志，追加仍继续写入 | 依据 oldest tail/current head 计算 live 空间，始终保留一个空 block；空间不足时先 checkpoint 足够释放空间的连续前缀再重试，不发出覆盖写；真实 ext4 镜像测试覆盖双 transaction tail 推进 |
-| T-11 | 损坏 extent 或超大 FIEMAP 范围造成算术溢出、错误物理地址或无界遍历 | 高 | disk mapping 长度越过格式容量，或字节/块换算未检查 | ext4 算法暴露 Linux 对等的 inode 格式相关最大字节数；KVFS operation 对每次加法、乘法和输出字段做 checked 校验，并把 mapping 截断到请求与格式边界 |
-| T-12 | 磁盘 inode 的 immutable/append-only 状态在 VFS 接入中丢失，导致 xattr 被修改 | 中 | iget 构造 KVFS inode 时总是使用空 `NodeFlags` | ext4 以语义方法暴露 `EXT4_IMMUTABLE_FL/EXT4_APPEND_FL`；kext4 KVFS 层在发布 VFS inode identity 时映射为 KVFS flags，由通用 xattr 权限层在 mutation 前返回 `EPERM` |
-| T-13 | 同一 inode 出现 snapshot 分叉，或 inode number reuse 继承旧 transient state | 中 | KVFS 初始化/释放期间并发 `iget`，namei 按编号重载 live child，或 orphan removal 为 resident 前驱解码临时对象 | KVFS-wide `(SuperBlock, ino)` table 的 `New/Live/Freeing` 是唯一 identity 状态；`New/Freeing` 等待并重试；kext4 向 unlink/rmdir/rename 传入既有 private component；legacy orphan next 只读写 journaled inode-table bytes；KExt4 无 resident cache；reuse 只能在 `Freeing` 完成并删除旧 slot 后发生 |
-| T-14 | shrink 后重新增长暴露旧 PageCache 数据或沿用失效的 extent proof | 高 | ext4 backing prepare 提前发布 `i_size` 使 `truncate_setsize()` 跳过清理，或把 atomic 单值发布误当成尺寸事务并移除映射失效互斥 | regular-file metadata publish 只更新 `i_disksize`；VFS 与 ext4 共享唯一 `i_size`，由 VFS 在 PageCache 顺序点以 release store 发布，EOF 读取使用 acquire load；尺寸写入持 inode-state 写锁，shrink 清除 proof 后才发布新 EOF，快照及 extent proof 在同一锁内采样；inode data/invalidation 锁继续约束 PageCache/PTE 顺序，atomic 不提供失效互斥；通用属性共享、并发 shrink/proof、core prepare 及 KVFS shrink/regrow、partial-grow 回归测试共同约束该职责边界 |
-| T-15 | 扩大 `i_extra_isize` 时覆盖、丢失 xattr，生成 e2fsck 不接受的 external EA block，或在磁盘满时拒绝本可完成的更新 | 高 | xattr syscall 错误地同时改变 extra-isize、普通 inode dirty 路径漏掉扩展，新 extra fields 与旧 inline 区间重叠，external entry/block hash 留零，错误地 COW 内容未变的共享 block，或布局阶段的空闲块在 apply 前被占用 | 普通 set/remove 固定使用当前 extra-isize，统一 ordinary inode-dirty 入口再按 want/min/current 扩展；迁移采用 Linux 风格 entry-by-entry 选择且固定 `system.data`；内容未变的 external block 直接复用，需要新 block 的布局在 apply 前预分配并把 `NoSpace` 降级为 `no_expand`；同一 journal transaction 重写 external block、生成 Linux-compatible `e_hash`/`h_hash`、清理旧 inline 区并更新 inode checksum；单元测试覆盖 deferred expansion、目录 inode dirty、磁盘满共享 external 复用、迁移选择与独立固定 hash 向量 |
-| T-16 | 损坏 orphan entry 让挂载恢复失败、循环，或访问未分配/special inode | 中 | `s_last_orphan` 或 orphan-file slot 越界、指向 allocation bit 为零或内部 backing inode，已加载 inode 带不可截断的链接类型，或 legacy `i_dtime` 指向非法 next | 统一 `orphan_iget` 在 inode-table decode 前验证编号、special-inode 边界和带 checksum 的 bitmap，加载后验证格式与可清理性；legacy bad chain 以 `PreserveDuringRecovery` transaction 持久化清零，非法 orphan-file entry 跳过并继续处理后续有效槽位，最终保留恢复证据并失败；bitmap I/O/checksum、inode decode 和合法但未支持的 cleanup 不被降级 |
-| T-17 | `minixdf`/`bsddf` 改变 free-space 事实源或错误扣除 metadata overhead | 中 | 两种模式分别实现整套 statfs 公式，或 VFS integration 直接修改 free counters | typed mode 只选择 `blocks_count - overhead` 或原始 `blocks_count`；free/available/inode 统计走共享代码，Linux-image 回归测试验证两者除总块数外一致 |
-| T-18 | 128-byte inode 对外暴露不存在的纳秒精度，或新建 inode 丢失纳秒/扩展 epoch 并在 2038 年后回绕 | 中 | 只在 inode-table encode 时截断、VFS 比较原始高精度时间，或初始化结构只保存 base `u32` 秒 | KExt4 按 inode size 返回共享的 `TimestampLimits`，由唯一 KVFS `SuperBlock` 持有；`VfsInode::current_time()` 在比较、callback 和 publication 前只截断一次；新建 inode 保存完整 `Ext4Timestamp` 并通过 base/extra encoder 写盘，128-byte 格式在边界钳制，256-byte 格式保留纳秒和 epoch；回归测试覆盖两种 inode size 的能力选择、初始化编码和 resident publication |
-| T-19 | 合法 SIPHASH HTree 被误报损坏 | 中 | root `hash_version=6` 进入目录写路径 | 共享 HTree root decoder 只接受磁盘版本 `0/1/2/6`，HTree signedness 来自 mount state；SIPHASH 在需要密钥的 hash 边界返回 `Unsupported`，相关事务不能提交 metadata mutation |
-| T-20 | 未标 signedness 的旧 HTree 镜像跨 Linux 挂载后名称不可见，或 Orlov 目录放置漂移 | 高 | 磁盘两种 signedness flag 都为空时按 signed 计算，或 Orlov 复用 HTree default/unsigned policy | mount state 按 Linux unsigned-char 语义生成 `hash_unsigned`，RW 持久化 unsigned flag、RO 保持磁盘不变；HTree 只经 mount policy hash，Orlov 独立固定 signed HALF_MD4 + seed；高位字节名称回归测试区分 signed/unsigned |
+| T-01 | An xattr entry name or value range in a corrupted image is treated as a valid attribute by the name-only list path | Medium | A malicious or corrupted image encodes NUL, an out-of-bounds/overlapping value, or an invalid external block | `decode_xattr_entries()` rejects NUL and malformed entries; name-only traversal still validates the value range, block header and checksum, and is covered by regression tests |
+| T-02 | The external xattr block leaks after unlink or rename overwrite, or the inode keeps referencing an already-freed block | Medium | `i_file_acl != 0` on a zero-link victim | Zero-link eviction first frees or decrements the EA block refcount, clears `i_file_acl`, updates `i_blocks`, and only then frees the inode |
+| T-03 | A runtime unlink releases too early an inode that is still referenced by an open fd | Medium | Unlinking a still-open inode on the KExt4 runtime backend | The namespace transaction persists only nlink/orphan; the open file holds the single VFS inode and its ext4 private state, and only the destruction of the last VFS reference enters superblock final eviction |
+| T-04 | Journal credits are underestimated, or overestimated based on data blocks, so that a metadata update fails midway through a transaction or is wrongly rejected | Medium | Namespace remove, HTree conversion/split, writeback, truncate, preallocation discard or final eviction modifies orphan, xattr, extent and inode metadata | The namespace insertion precheck explicitly records the HTree path; the split immediately after conversion is estimated as two independent single-block extents, and HTree credits are added before the inode flag is published; namespace removal covers only dirent, nlink and orphan metadata and excludes the subsequent final eviction; ordered writeback is fixed to a path-local algorithm in which a live cursor renews the handle per actual unwritten conversion and hole allocation run, and when the transaction limit is reached it commits the complete prefix and restarts; legacy final eviction and extent truncate are computed from the actual tree blocks, the old tree blocks that need revoke, and the affected groups, and the release of directory/block-mapped symlink data blocks counts revoke credits one by one per freed block; when the victim carries an external xattr, the final eviction budget includes EA cleanup |
+| T-05 | A malicious extent or bitmap metadata causes a block that does not belong to the inode to be freed | High | A corrupted image points an extent/xattr block at the system zone or an illegal group | Block ownership, system-zone, bitmap and checksum validation is performed before release or mutation |
+| T-06 | A device write/flush failure makes partial metadata visible | Medium | Device failure during commit, replay, checkpoint, explicit sync or xattr update | Journal abort preserves the recovery state or pending checkpoint; subsequent sync/mutation returns aborted, and in-memory modifications are not rolled back across syscalls; tests cover explicit-sync commit, checkpoint, xattr and replay failure |
+| T-07 | An orphan remains on a clean journal, so mount permanently returns `NeedsRecovery` | Medium | The namespace transaction has been checkpointed, but final inode eviction has not yet happened | Explicit recovery traverses the legacy list and the orphan file regardless of whether the journal needs replay; the clean branch establishes recovery evidence with `PreserveDuringRecovery`, synchronously commits/checkpoints one by one, and clears the recovery features only after confirming that the journal start is zeroed and the orphan file is empty; a zero-link entry reuses the journaled final-eviction path |
+| T-08 | The free-block aggregate, delalloc ranges and reservation aggregate drift apart, causing over-reservation | Medium | The VFS and ext4 sides are updated separately, or the per-block set and the mount counter are updated on only one side | A block mutation publishes the superblock and the group descriptor together; the ext4 range API jointly updates the inode interval, the equivalent of the `i_reserved_data_blocks` counter and the mount aggregate under a separate reservation mutex, and admission/statfs use this aggregate directly |
+| T-09 | A newly created inode is fixed to root, bypassing the caller's owner semantics | High | A callback drops the credential, or the ext4 constructor implicitly fills in UID/GID 0 | The create/mkdir/mknod/symlink callbacks use `inode_init_owner()`, and the explicit `uid` and `gid` are persisted together with the namei transaction |
+| T-10 | The journal head catches up with the tail and overwrites a commit that has not yet been checkpointed | High | Multiple committed transactions fill the circular log, and appending still continues to write | Live space is computed from the oldest tail/current head, and one empty block is always kept; when space is insufficient, a contiguous prefix large enough to free space is checkpointed first and then the write is retried, and no overwriting write is issued; a real ext4 image test covers tail advancement across two transactions |
+| T-11 | A corrupted extent or an oversized FIEMAP range causes arithmetic overflow, a wrong physical address or unbounded traversal | High | The disk mapping length exceeds the format capacity, or the byte/block conversion is unchecked | The ext4 algorithm exposes the Linux-equivalent inode-format-dependent maximum byte count; the KVFS operation performs checked validation on every addition, multiplication and output field, and truncates the mapping to the request and format boundaries |
+| T-12 | The immutable/append-only state of an on-disk inode is lost in the VFS integration, so xattrs get modified | Medium | iget always uses empty `NodeFlags` when constructing the KVFS inode | ext4 exposes `EXT4_IMMUTABLE_FL/EXT4_APPEND_FL` through semantic methods; the kext4 KVFS layer maps them to KVFS flags when publishing the VFS inode identity, and the generic xattr permission layer returns `EPERM` before the mutation |
+| T-13 | A snapshot fork appears for the same inode, or an inode number reuse inherits the old transient state | Medium | Concurrent `iget` during KVFS initialization/release, namei reloading a live child by number, or orphan removal decoding a temporary object for a resident predecessor | The `New/Live/Freeing` states of the KVFS-wide `(SuperBlock, ino)` table are the only identity state; `New/Freeing` wait and retry; kext4 passes the existing private component to unlink/rmdir/rename; the legacy orphan next pointer reads and writes only journaled inode-table bytes; KExt4 has no resident cache; reuse can happen only after `Freeing` completes and the old slot is deleted |
+| T-14 | Re-growing after a shrink exposes stale PageCache data or reuses an invalidated extent proof | High | ext4 backing prepare publishes `i_size` early so that `truncate_setsize()` skips cleanup, or a single atomic publication is mistaken for a size transaction and the mapping-invalidation mutex is removed | Regular-file metadata publish updates only `i_disksize`; the VFS and ext4 share the single `i_size`, which the VFS publishes with a release store at the PageCache ordering point, and EOF reads use an acquire load; size writes hold the inode-state write lock, a shrink clears the proof before publishing the new EOF, and the snapshot and the extent proof are sampled under the same lock; the inode data/invalidation lock continues to constrain the PageCache/PTE ordering, and the atomic provides no invalidation mutual exclusion; the generic attribute sharing, concurrent shrink/proof, core prepare, and KVFS shrink/regrow and partial-grow regression tests together enforce this responsibility boundary |
+| T-15 | Enlarging `i_extra_isize` overwrites or loses xattrs, generates an external EA block that e2fsck does not accept, or rejects an update that could have completed when the disk is full | High | An xattr syscall wrongly changes extra-isize at the same time, the ordinary inode dirty path misses the expansion, new extra fields overlap the old inline range, the external entry/block hash is left zero, a shared block whose content is unchanged is wrongly COWed, or free blocks from the layout phase are taken before apply | Ordinary set/remove always uses the current extra-isize, and the unified ordinary inode-dirty entry then expands according to want/min/current; migration uses Linux-style entry-by-entry selection with `system.data` fixed; an external block whose content is unchanged is reused directly, a layout that needs a new block is preallocated before apply and downgrades `NoSpace` to `no_expand`; the same journal transaction rewrites the external block, generates a Linux-compatible `e_hash`/`h_hash`, clears the old inline area and updates the inode checksum; unit tests cover deferred expansion, directory inode dirty, shared external reuse when the disk is full, migration selection, and independent fixed hash vectors |
+| T-16 | A corrupted orphan entry makes mount recovery fail, loop, or access an unallocated/special inode | Medium | `s_last_orphan` or an orphan-file slot is out of bounds, points to an inode whose allocation bit is zero or to an internal backing inode, the loaded inode has a link type that cannot be truncated, or the legacy `i_dtime` points to an illegal next | The unified `orphan_iget` validates the number, the special-inode boundary and the checksummed bitmap before inode-table decode, and validates the format and cleanability after loading; a legacy bad chain is zeroed persistently in a `PreserveDuringRecovery` transaction, an illegal orphan-file entry is skipped and processing continues with the subsequent valid slots, and in the end the recovery evidence is preserved and the operation fails; bitmap I/O/checksum errors, inode decode errors, and legal but unsupported cleanup are not downgraded |
+| T-17 | `minixdf`/`bsddf` changes the source of truth for free space or wrongly deducts metadata overhead | Medium | The two modes each implement the whole statfs formula, or the VFS integration modifies the free counters directly | The typed mode only selects `blocks_count - overhead` or the raw `blocks_count`; the free/available/inode statistics go through shared code, and a Linux-image regression test verifies that the two agree except for the total block count |
+| T-18 | A 128-byte inode exposes nonexistent nanosecond precision, or a newly created inode loses its nanosecond/extended epoch and wraps around after 2038 | Medium | Truncation only at inode-table encode time, the VFS comparing raw high-precision times, or the initialization structure storing only the base `u32` seconds | KExt4 returns the shared `TimestampLimits` according to the inode size, held by the single KVFS `SuperBlock`; `VfsInode::current_time()` truncates only once, before comparison, callback and publication; a new inode stores the full `Ext4Timestamp` and writes it to disk through the base/extra encoder, the 128-byte format clamps at the boundary, and the 256-byte format preserves nanoseconds and the epoch; regression tests cover capability selection, initialization encoding and resident publication for both inode sizes |
+| T-19 | A valid SIPHASH HTree is misreported as corrupted | Medium | A root `hash_version=6` enters the directory write path | The shared HTree root decoder accepts only the on-disk versions `0/1/2/6`, and HTree signedness comes from the mount state; SIPHASH returns `Unsupported` at the hash boundary that needs a key, and the related transaction cannot commit a metadata mutation |
+| T-20 | An old HTree image with no signedness mark has invisible names after being mounted across Linux, or Orlov directory placement drifts | High | The computation treats the image as signed when both on-disk signedness flags are empty, or Orlov reuses the HTree default/unsigned policy | The mount state generates `hash_unsigned` according to Linux unsigned-char semantics, RW persists the unsigned flag, and RO leaves the disk unchanged; HTree hashes only through the mount policy, and Orlov independently uses a fixed signed HALF_MD4 + seed; a high-byte name regression test distinguishes signed/unsigned |
 | T-21 | The two indexes of a speculative prealloc space drift apart: a leftover entry on one side protects no block yet is treated as an available span, or a group twin outlives its owner inode | Medium | The inode side and the group side change in different critical sections, or close / writeback settlement / eviction drops only one side | Both sides change only together inside one allocator critical section; `preallocated_blocks` is conserved against the sum of the group-side span lengths and checked by a debug assertion; each twin holds a strong owner reference; close (when no delalloc reservation remains), writeback settlement (when reservations reach zero and no writable open remains, with an empty reclaim skipped via the inode-side emptiness hint) and eviction (unconditional, never short-circuited on the inode-side hint so a drifted pair cannot leave a twin behind) all discard; regression tests cover the close, evict and shrink reclaim paths and dual-index consistency |
-| T-22 | ENOSPC 重试阀在"聚合非零但选不出块"状态下无界重扫，或用重试掩盖位图损坏 | 中 | free 聚合把未消费 space 计为空闲；损坏组被每轮重扫再次命中 | 搜索次数上界固定为 `PREALLOC_DISCARD_SEARCH_LIMIT`（3 次，discard 只可能出现在第一次之后）；discard 返回 0 立即结束；重试只由健康组的无空间结论触发，几何/描述符预检跳过不置位；扫描中首个 `InvalidBlockBitmap` 被记住并优先于 `NoSpace` 返回，但不封闭健康组的回收重试 |
+| T-22 | The ENOSPC retry valve rescans without bound in the state "aggregate is nonzero but no block can be selected", or uses retries to mask bitmap corruption | Medium | The free aggregate counts unconsumed space as free; a corrupted group is hit again by every rescan round | The search count is bounded by the fixed `PREALLOC_DISCARD_SEARCH_LIMIT` (3 attempts, since a discard can only occur after the first); a discard that returns 0 ends the search immediately; a retry is triggered only by the no-space conclusion of a healthy group, and geometry/descriptor precheck skips do not set it; the first `InvalidBlockBitmap` encountered during the scan is remembered and returned in preference to `NoSpace`, but does not close off the reclaim retry for healthy groups |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-Namespace removal 的共享 eviction preflight 在首个 metadata mutation 前校验 inode 数据
-格式。Orphan file 在挂载/replay 后完成校验和初始化；运行时由 `OrphanInfo` 在挂载级独占访问下
-维护槽位和 free-entry 计数，metadata publication 成功后才更新计数，失败由 journal abort 路径
-保留磁盘恢复证据。多硬链接且不会归零的普通 inode 不分配 orphan entry。内核组件测试使用合成
-metadata 覆盖 unlink、rmdir、覆盖 rename 和乱序 final eviction；镜像互操作与 e2fsck 属于外部 harness。
+The shared eviction preflight for namespace removal validates the inode data
+format before the first metadata mutation. The orphan file is validated and initialized after mount/replay; at runtime, `OrphanInfo`, under mount-level exclusive access,
+maintains the slots and the free-entry count; the count is updated only after metadata publication succeeds, and on failure the journal abort path
+preserves the on-disk recovery evidence. An ordinary inode with multiple hard links whose link count does not drop to zero is not given an orphan entry. Kernel component tests use synthetic
+metadata to cover unlink, rmdir, overwriting rename, and out-of-order final eviction; image interoperability and e2fsck belong to the external harness.
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure mode | Cause | Local effect | System effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | 对 Linux ext4 有效 feature 返回 unsupported | EA inode、bigalloc、inline-data write 等 feature 尚未实现 | 当前操作失败 | filesystem 仍保持可审计状态，但该能力不可用 | 3 | feature negotiation 和显式 `UnsupportedKind` |
-| F-02 | journal commit 或 checkpoint 失败 | 设备写入/flush 错误 | committing 或 pending checkpoint 状态保留并 abort journal | 当前 mount 后续 sync/mutation 拒绝继续，重新挂载时依赖 recovery | 2 | 失败返回前永久 abort；保留 recovery evidence 和 pending state，禁止后续 sync 假成功 |
-| F-03 | recovery-time orphan cleanup 失败 | crash 发生在 namespace commit 之后、final cleanup 之前，bad legacy chain 需要切断，或 orphan-file/bitmap/inode metadata、设备失败、inode 使用尚未支持的格式 | 明确的 legacy bad-orphan 在 durable clear 后终止；不能安全降级的错误保留 orphan entry 或 recovery evidence 并返回 | filesystem 不会在未持久化 cleanup 时被当作可写 root 暴露，也不会把 checksum/I/O 错误当成 stale orphan 丢弃 | 2 | orphan cleanup 使用独立 journal transaction；bad legacy clear 与普通 inode cleanup 都采用 `PreserveDuringRecovery`，checkpoint 后只重载 mutable superblock/group state 并增量维护 orphan-file free count，成功后再继续；N3 在最终执行图上补齐 fault/powercut 矩阵 |
-| F-04 | 粗粒度 write lock 串行化慢 mutation I/O | live kext4 KVFS 层在 blocking filesystem mutation 周围持有 mount-level core write guard | 吞吐下降 | 其他 KExt4 mutation 等待；只读路径仍可共享 read guard | 4 | inode private state 已有独立 state lock；N2 根据实际 worker 和共享状态继续建立 per-group/journal/metadata-buffer 锁域；锁拆分前不宣称 mutation 并发性能 |
-| F-05 | journal reservation 空间不足 | operation 的实际 metadata targets 超过空 journal 容量，或 reservation 混入另一个 lifecycle 阶段的工作 | 单次 mutation 无法容纳时在修改 metadata 前失败；writeback transaction 扩展失败时只提交完整前缀 | admission 失败保持磁盘不变；分段 writeback 的后续 transaction 若再失败，调用方可收到错误而 durable prefix 保留 | 3 | namespace 与 final eviction 分开预算；目录插入在事务前检查磁盘容量，额度按当前 extent 深度的结构上界预留，仅可能转换的单块目录计入第二次 append；ordered writeback 在每个 live mapping run 前保证该操作及 inode publish 余量，先尝试 `reserve_more()`，容量不足则提交已 flush 的前缀、精确结算其 delalloc 后重开 transaction，只有连单次 mutation 都无法容纳时才在 admission 阶段拒绝；跨叶 truncate 在首个 metadata 写入前选择按 tree blocks/groups 估算的全树路径；由 small-journal actual-run restart、fragmented unwritten、failure/retry、rename-overwrite、balanced-split 和 preallocation-tail credit 回归测试约束 |
-| F-06 | PageCache 与 filesystem core 锁序反转 | writeback 持有 core mutex 等待 mapping mutex，同时 cache miss 持有 mapping mutex 进入 backing read | 并发 buffered I/O 和 `sync()` 停止推进 | watchdog 报告 mutex deadlock，filesystem workload 无法继续 | 2 | kext4 KVFS 层不在 PageCache traversal 外层持有 core mutex；同 inode writeback 独立串行化，batch callback 在 mapping/folio mutex 释放后才进入核心；VFS/MM 后续仍需消除 tree lock 下的 backing I/O |
-| F-07 | committed journal 占满可追加空间 | checkpoint 落后于 commit，head 接近 oldest tail | 新 transaction 暂时不能持久化 | mutation 等待 checkpoint progress | 3 | append 前按环形 live range 校验空间并保留一个空 block；提交路径捕获 `JournalBusy`，同步处理足够释放空间的 pending checkpoint 前缀后重试 |
-| F-08 | FIEMAP 查询遇到损坏 mapping | extent tree/legacy pointer 返回非法长度或物理范围 | 当前 ioctl 返回数据错误 | 文件内容不被修改，调用方不能取得布局 | 3 | 复用 ext4 mapping 校验；KVFS operation 拒绝零进度和算术溢出，不输出未经检查的 extent |
-| F-09 | eviction 与并发 `iget` 交错 | final teardown 已开始时另一路按相同 inode number 加载 | 调用方可能观察正在释放的 metadata，或建立并行 identity | stale I/O、重复释放或 transient state 串线 | 2 | KVFS cache mutex 下完成 `Live -> Freeing`；lookup/insert 在内部等待，finish 精确移除旧 Weak entry 并唤醒后重试，不向路径操作返回 `EINVAL`/`ESTALE` |
-| F-10 | 存量 inode 的 extra-isize 扩展在每次脏写重复失败 | xattr 布局或 external block 资源持续不满足，但失败结论没有驻留状态 | 每次 ordinary inode dirty 重复 metadata I/O、checksum、解码、排序和布局规划 | 元数据更新吞吐下降，磁盘满场景可能被放大 | 4 | 确定布局不可行时在唯一 resident `Ext4Inode` 状态中设置 `no_expand`；成功删除 xattr 后清除，journal busy/credits 不足保持可重试 |
-| F-11 | statfs 总容量模式选择错误 | context 丢失显式选项、无选项 reconfigure 重置现值，或默认模式成为 minixdf | `f_blocks` 与 Linux ext4 ABI 口径不一致 | 容量监控与应用空间判断错误 | 3 | 新挂载默认 `Bsd`，显式模式保存在唯一 `Ext4SbInfo`；无选项 reconfigure 保留现值；分别验证 minixdf 精确总块数和 bsddf overhead 结果 |
+| F-01 | Unsupported is returned for a feature that is valid in Linux ext4 | Features such as EA inode, bigalloc, and inline-data write are not yet implemented | The current operation fails | The filesystem remains in an auditable state, but the capability is unavailable | 3 | Feature negotiation and an explicit `UnsupportedKind` |
+| F-02 | Journal commit or checkpoint fails | Device write/flush error | The committing or pending checkpoint state is preserved and the journal is aborted | Subsequent sync/mutation on the current mount is refused, and recovery is relied on at remount | 2 | Abort the journal permanently before the failure is returned; preserve recovery evidence and pending state; forbid subsequent syncs from falsely succeeding |
+| F-03 | Recovery-time orphan cleanup fails | The crash happened after the namespace commit but before final cleanup, a bad legacy chain must be cut, or orphan-file/bitmap/inode metadata is bad, the device fails, or an inode uses a format that is not yet supported | An explicit legacy bad orphan terminates after a durable clear; errors that cannot be safely downgraded preserve the orphan entry or recovery evidence and return | The filesystem is not exposed as a writable root without durable cleanup, and checksum/I/O errors are not discarded as stale orphans | 2 | Orphan cleanup uses an independent journal transaction; both bad legacy clear and ordinary inode cleanup use `PreserveDuringRecovery`; after a checkpoint, only the mutable superblock/group state is reloaded and the orphan-file free count is maintained incrementally, and only after success does processing continue; N3 completes the fault/powercut matrix on the final execution graph |
+| F-04 | The coarse-grained write lock serializes slow mutation I/O | The live kext4 KVFS layer holds the mount-level core write guard around blocking filesystem mutations | Throughput drops | Other KExt4 mutations wait; read-only paths can still share the read guard | 4 | Inode private state already has an independent state lock; N2 continues to build per-group/journal/metadata-buffer lock domains based on the actual workers and shared state; mutation concurrency performance is not claimed before the locks are split |
+| F-05 | Journal reservation has insufficient space | An operation's actual metadata targets exceed the capacity of an empty journal, or a reservation mixes in work from another lifecycle phase | A single mutation that cannot fit fails before modifying metadata; when a writeback transaction fails to extend, only the complete prefix is committed | Admission failure leaves the disk unchanged; if a later transaction of a segmented writeback fails again, the caller may receive an error while the durable prefix is preserved | 3 | Namespace and final eviction are budgeted separately; directory insertion checks disk capacity before the transaction, the credit is reserved at the structural upper bound for the current extent depth, and a single-block directory that may be converted is counted for a second append; before each live mapping run, ordered writeback guarantees headroom for that operation and the inode publish, first tries `reserve_more()`, and if capacity is insufficient it commits the already flushed prefix, settles its delalloc exactly, and reopens the transaction, rejecting at the admission stage only when even a single mutation cannot fit; a cross-leaf truncate chooses, before the first metadata write, the whole-tree path estimated from tree blocks/groups; constrained by regression tests for small-journal actual-run restart, fragmented unwritten, failure/retry, rename-overwrite, balanced-split, and preallocation-tail credit |
+| F-06 | Lock order inversion between PageCache and the filesystem core | Writeback holds the core mutex while waiting for the mapping mutex, while a cache miss holds the mapping mutex and enters a backing read | Concurrent buffered I/O and `sync()` stop making progress | The watchdog reports a mutex deadlock, and the filesystem workload cannot continue | 2 | The kext4 KVFS layer does not hold the core mutex outside the PageCache traversal; writeback of the same inode is serialized independently, and the batch callback enters the core only after the mapping/folio mutex is released; VFS/MM must still eliminate backing I/O under the tree lock |
+| F-07 | Committed journal fills the appendable space | Checkpoint lags behind commit, and the head approaches the oldest tail | New transactions temporarily cannot be made durable | Mutations wait for checkpoint progress | 3 | Before appending, validate the space against the circular live range and keep one empty block in reserve; the commit path catches `JournalBusy`, synchronously processes a prefix of pending checkpoints sufficient to free space, and retries |
+| F-08 | A FIEMAP query encounters a corrupted mapping | The extent tree/legacy pointer returns an invalid length or physical range | The current ioctl returns a data error | File contents are not modified, and the caller cannot obtain the layout | 3 | Reuse ext4 mapping validation; the KVFS operation rejects zero progress and arithmetic overflow and does not output unchecked extents |
+| F-09 | Eviction interleaves with a concurrent `iget` | Another path loads the same inode number while final teardown has already begun | A caller may observe metadata that is being released, or establish a parallel identity | Stale I/O, double free, or crosstalk of transient state | 2 | `Live -> Freeing` is completed under the KVFS cache mutex; lookup/insert wait internally, and finish removes exactly the old Weak entry, wakes waiters, and they retry, without returning `EINVAL`/`ESTALE` to path operations |
+| F-10 | The extra-isize expansion of an existing inode fails repeatedly on every dirty write | The xattr layout or external block resources continue to be unsatisfiable, but the failure conclusion has no resident state | Every ordinary inode dirtying repeats metadata I/O, checksum, decoding, sorting, and layout planning | Metadata update throughput drops, and the disk-full scenario may be amplified | 4 | When the layout is determined to be infeasible, set `no_expand` in the unique resident `Ext4Inode` state; clear it after an xattr is successfully removed; journal busy/insufficient credits remain retryable |
+| F-11 | Wrong selection of the statfs total-capacity mode | The context loses the explicit option, a reconfigure without options resets the current value, or the default mode becomes minixdf | `f_blocks` is inconsistent with the Linux ext4 ABI semantics | Capacity monitoring and application space decisions are wrong | 3 | A new mount defaults to `Bsd`, and the explicit mode is stored in the unique `Ext4SbInfo`; a reconfigure without options keeps the current value; the exact total block count of minixdf and the overhead result of bsddf are verified separately |
 | F-12 | A speculative prealloc space is not reclaimed with its owner's lifecycle | Close was gated by a delalloc reservation and eviction did not cover the gap, or only one of the two indexes was changed | Blocks are counted in `preallocated_blocks` without an owner, and the group scan keeps excluding those bits | Shows up as "the free aggregate is nonzero but allocation fails"; the ENOSPC retry valve's discard bounds it, and a group twin holds a strong reference so a missed drop would keep a dead inode alive | 2 | Both sides change inside one allocator critical section; the conservation debug assertion; eviction discards unconditionally; close drops only when no reservation remains, and otherwise writeback settlement (reservations zero and no writable open) or eviction reclaims; a settlement racing the writer-count decrement keeps the spaces for the next settlement or eviction; retries are bounded and stop when discard returns 0; close/evict/shrink/settlement regression tests assert both indexes and the counter return to zero |
 
-## 故障管理
+## Fault Management
 
-KExt4 使用 `Ext4Result` 和 typed `Ext4Error` 表达 corruption、unsupported format、
-out-of-bounds metadata、checksum mismatch、journal credit exhaustion 和 device error。
-日志化修改路径把普通失败前移到首次 metadata access 前；多个 handle 的空失败不会影响同一
-running transaction 中其他修改。metadata/revoke 已发布后出现普通错误、设备/checksum/状态机错误或
-handle accounting 错误时会 permanent abort journal，不执行跨 operation 的内存回滚。
-数据 I/O 成功只记录持久化依赖，不标记 handle 已发布 metadata；metadata access 前的普通失败
-保留依赖并允许重试，例如 unwritten extent 转换因树块分配不足返回 `NoSpace`。
-发布 metadata 的 ordered writeback 在设备 I/O 完成后必须设置事务依赖；依赖在 freeze 后保留，commit 在
-任何日志/恢复证据写入前执行一次设备 flush。flush 失败不能清除依赖，也不能进入
-checkpoint phase，必须 abort journal 并向同步调用方报错。此路径仍受 mount 写锁串行保护；
-容量 restart 的显式 flush 成功后才能确认当前全部数据依赖已满足。running/committing 两种
-`flush_ordered_data` 入口内部先 barrier 后清除，不暴露独立清除方法，也不持有事务内部锁执行 I/O。
-data-only 的已映射覆盖写不依赖新 metadata，持久化由 inode sync 的同设备 journal flush 或直接
-flush、filesystem sync 的最终 flush 提供，不承诺先于无关事务的 commit record 持久化。
+KExt4 uses `Ext4Result` and typed `Ext4Error` to express corruption, unsupported format,
+out-of-bounds metadata, checksum mismatch, journal credit exhaustion, and device error.
+The journaled modification path moves ordinary failures ahead of the first metadata access; an empty failure of multiple handles does not affect other modifications in the same
+running transaction. After metadata/revoke has been published, an ordinary error, a device/checksum/state-machine error, or a
+handle accounting error permanently aborts the journal, and no cross-operation in-memory rollback is performed.
+A successful data I/O only records a persistence dependency and does not mark the handle as having published metadata; an ordinary failure before metadata access
+keeps the dependency and allows a retry, for example an unwritten extent conversion that returns `NoSpace` because too few tree blocks could be allocated.
+Ordered writeback that publishes metadata must set the transaction dependency after the device I/O completes; the dependency is kept after freeze, and commit performs one device flush before
+writing any journal/recovery evidence. A flush failure must not clear the dependency and must not enter the
+checkpoint phase; it must abort the journal and report an error to the synchronous caller. This path is still serialized by the mount write lock;
+only after the explicit flush of a capacity restart succeeds can all current data dependencies be considered satisfied. Both the running and committing
+`flush_ordered_data` entry points internally issue a barrier first and clear afterwards, expose no standalone clear method, and do not hold the transaction's internal lock while performing I/O.
+A data-only overwrite of already-mapped blocks does not depend on new metadata; its persistence is provided by the same-device journal flush or direct
+flush of inode sync, or by the final flush of filesystem sync, and it is not promised to be persisted before the commit record of an unrelated transaction.
 
-Checkpoint 批处理必须保持 FIFO frozen image 写回顺序：选中连续前缀的全部 home-block
-写入成功并 flush 之后，才允许一次持久化日志尾部更新；在尾部 flush 及 recovery 状态处理成功前，不移除
-任何批内事务或回收日志空间。写回中途失败或任一道 flush 失败都保留整批 pending work
-并 abort，禁止在当前 mount 重试已消费的缓存快照；重新挂载依赖保留的日志恢复。
-空间不足时，按待提交事务的实际日志块数加下一笔 transaction credit 上限的最坏编码开销
-选择前缀，目标封顶为 ring 容量减一，始终保留一个空块。`usable_log_capacity()` 是
-预留规则的单一来源，append 准入、过大事务拒绝与目标封顶共用，避免全排空后仍无法
-满足目标的语义漂移。可选预算不能阻塞可容纳的当前
-append；计算使用与日志写入相同的 descriptor/revoke 格式和 checked 算术。完整的下一笔
-预算覆盖共用 credit 池的任意 metadata/revoke 混合，证明见设计文档；ring 容量封顶可能
-削减可选预算，不能据此承诺下一笔免于再次回收。剩余事务及其 policy 不移除。tail 指向 `next_oldest`，journal 必须保持 active，ext4 recovery feature
-不得清除，也不能失效仍有 frozen checkpoint image 的缓存。前缀退休先按涉及的 block key 定向回收
-clean、无 pin 且无后续 ownership 的 entry；后缀或 committing transaction 的缓存不能释放。
-一般缓存清理不以 checkpoint 批次计数触发。`MetadataBlockCache` 从驻留 block payload
-是否超过 4 MiB 软保留额度计算需求；`Ext4Mount` 的读写 guard 在访问结束、仍持有 mount
-保护时最多推进 64 个条目的增量扫描。只读访问无需日志压力即可推进回收。
-每轮固定结束 key，新增高地址不能推迟回绕；dirty/pin/ownership 和 frozen image 不可淘汰，
-预算限制检查数而非成功淘汰数。命中在已有索引锁内设置一位复用标记，首次插入不置位；
-扫描清位并给近期复用条目一次保留机会，仍消耗检查预算，不因未淘汰而额外扫描。
-该位不授予淘汰权限，也不替代 pin/ownership/frozen image 校验；checkpoint 定向回收
-及显式全回收忽略访问位，避免热度阻止明确清理。持续复用可能使软额度长期超出。
-无需求时仅 Relaxed 读取缓存自己的 `AtomicBool` 提示，
-不获取 cache mutex；提示在每次索引增删/失效的同一 cache 临界区内从实际长度更新，
-避免旧扫描覆盖新插入的需求。它不发布 buffer 数据或授予淘汰权限，并发旧值只允许
-推迟维护或触发一次多余复核。真正的需求复核、游标和资格检查在同一 cache mutex 下进行；
-不持有该锁执行设备 I/O。普通缓存 read/insert 不淘汰；不可变 buffer 同时 pin 字节和
-槽位，allocator 持有预取 pins 至临界区结束，即使 bytes 被新发布替换，也不能回收并
-重建该槽位。forget/revoke 后的移除同样在 index mutex 下检查是否另有槽位引用。
-mount guard 的维护入口暂时保留，但上述普通回收正确性不依赖 mount 排他。
-整体 invalidate 仍要求独占恢复/生命周期边界，不得与活跃 pins 并行。
-显式全回收和整个缓存失效重置游标，syncfs 仍排空并全局回收。
-没有周期全扫或 checkpoint 次数状态。软保留额度不包括索引/frozen image 开销，不能保证
-硬内存上界：pin/事务持有、单次访问的大量插入或新增速度超过扫描速度都可能造成超额；
-没有后续访问也没有自动进度。尚无通用 shrinker、容量准入或内存压力反馈。
-空间目标限制回收完成条件，但 mount 写锁内的 I/O 仍可能较长，
-该策略不保证设备故障下的延迟上界。
-生产 checkpoint entry 必须先取得 persisted evidence 再在事务锁内入队；缺少证据属于
-内部不变量破坏，不能按仍在提交的 `JournalBusy` 状态跳过。写回前须确认每笔事务的
-policy 记录存在。`PreserveDuringRecovery` 追加后在 mount 写锁下同步排空，若批内存在
-该策略，它必为最后一笔，整批保留 recovery evidence；不得允许后续普通事务在排空前
-覆盖批末策略。恢复工作全部完成后才可执行最终 recovery feature 清除。
+Checkpoint batching must preserve the FIFO write-back order of frozen images: only after all home-block
+writes of the selected contiguous prefix have succeeded and been flushed may a single persistent update of the journal tail be allowed; before the tail flush and recovery-state handling succeed, no
+transaction in the batch is removed and no journal space is reclaimed. A failure midway through write-back or in either flush keeps the whole batch of pending work
+and aborts; retrying an already consumed cache snapshot in the current mount is forbidden, and a remount relies on the retained journal for recovery.
+When space is insufficient, the prefix is selected according to the worst-case encoding overhead of the actual journal block count of the transactions awaiting commit plus the upper bound of the next transaction credit,
+and the target is capped at the ring capacity minus one, so that one empty block is always kept. `usable_log_capacity()` is the single source of
+the reservation rule, shared by append admission, rejection of oversized transactions, and target capping, which avoids semantic drift where the target still cannot be
+met after a full drain. The optional budget must not block a current
+append that fits; the computation uses the same descriptor/revoke format and checked arithmetic as journal writes. The complete next-transaction
+budget covers any metadata/revoke mix sharing the credit pool; the proof is in the design document. Capping at the ring capacity may
+reduce the optional budget, so it cannot be taken as a promise that the next transaction will be exempt from another reclaim. The remaining transactions and their policy are not removed. The tail points to `next_oldest`, the journal must remain active, the ext4 recovery feature
+must not be cleared, and caches that still have frozen checkpoint images must not be invalidated. Prefix retirement first reclaims, by targeted block key,
+entries that are clean, unpinned, and without subsequent ownership; caches of the suffix or of the committing transaction must not be released.
+General cache cleanup is not triggered by the checkpoint batch count. `MetadataBlockCache` computes demand from whether the resident block payload
+exceeds the 4 MiB soft retention quota; the read/write guard of `Ext4Mount`, at the end of an access and while still holding the mount
+protection, advances an incremental scan of at most 64 entries. Read-only accesses can advance reclaim without journal pressure.
+Each round fixes its end key, so newly added high addresses cannot postpone wrap-around; dirty, pinned, owned, and frozen-image entries cannot be evicted,
+and the budget limits the number of checks rather than the number of successful evictions. A hit sets a one-bit reuse mark under the existing index lock, and a first insertion does not set it;
+the scan clears the bit and gives recently reused entries one chance to be retained, which still consumes check budget, and no extra scanning is done because an entry was not evicted.
+This bit does not grant eviction permission and does not replace the pin/ownership/frozen-image checks; targeted checkpoint reclaim
+and explicit full reclaim ignore the access bit, so that hotness does not block an explicit cleanup. Sustained reuse may leave the soft quota exceeded for a long time.
+When there is no demand, only a Relaxed read of the cache's own `AtomicBool` hint is made,
+without acquiring the cache mutex; the hint is updated from the actual length inside the same cache critical section as each index insertion/removal/invalidation,
+so that a stale scan does not overwrite the demand created by a new insertion. It neither publishes buffer data nor grants eviction permission, and a concurrent stale value is only allowed to
+postpone maintenance or trigger one redundant recheck. The actual demand recheck, cursor, and eligibility checks are performed under the same cache mutex;
+device I/O is not performed while holding that lock. Ordinary cache read/insert does not evict; an immutable buffer pins both its bytes and its
+slot, and the allocator holds prefetch pins until the end of the critical section, so even if the bytes are replaced by a new publication, the slot cannot be reclaimed and
+rebuilt. Removal after forget/revoke likewise checks under the index mutex whether another slot reference exists.
+The maintenance entry of the mount guard is retained for now, but the correctness of the ordinary reclaim above does not depend on mount exclusivity.
+Whole-cache invalidate still requires an exclusive recovery/lifecycle boundary and must not run in parallel with active pins.
+Explicit full reclaim and invalidation of the whole cache reset the cursor, and syncfs still drains and reclaims globally.
+There is no periodic full scan and no checkpoint-count state. The soft retention quota does not include index/frozen-image overhead and cannot guarantee a
+hard memory upper bound: pin/transaction holds, a large number of insertions in a single access, or additions faster than the scan speed can all cause overshoot;
+without subsequent accesses there is no automatic progress. There is as yet no general shrinker, capacity admission, or memory-pressure feedback.
+The space target limits the reclaim completion condition, but I/O inside the mount write lock can still take long,
+and this policy does not guarantee a latency upper bound under device failure.
+A production checkpoint entry must first obtain persisted evidence and then be enqueued under the transaction lock; missing evidence is
+a broken internal invariant and must not be skipped as a still-committing `JournalBusy` state. Before write-back, it must be confirmed that each transaction's
+policy record exists. After `PreserveDuringRecovery` is appended, it is drained synchronously under the mount write lock; if the batch contains
+that policy, it must be the last transaction and the whole batch retains recovery evidence; a later ordinary transaction must not be allowed to
+overwrite the end-of-batch policy before the drain. The final recovery feature clearing may be performed only after all recovery work has completed.
 
-Commit/checkpoint failure 会保留 committing 或 pending work 并永久 abort journal，避免静默
-丢失尚未落盘的 metadata；后续 sync 和 mutation 都观察 `JournalAborted`，不能把内存中的
-transaction 当作 durable。journal tail 只能越过已经完成 home-block 持久化的连续事务
-前缀；只有覆盖全部 pending commit 的批次完成后才清除 journal start 和 ext4 recovery
-evidence。当前 inode sync
-采用提交整个 running transaction 的保守语义。显式 recovery 同样只有在 legacy list 与
-orphan-file cleanup 全部完成 commit/checkpoint、确认 journal start 为零且 orphan file 为空，
-并 flush 最终 superblock 状态之后才能返回成功；在 cleanup durable 之前失败会保留 orphan entry 或 recovery feature
-作为下一次恢复入口，最终状态 flush 失败也必须向调用方返回错误。
+A commit/checkpoint failure keeps the committing or pending work and permanently aborts the journal, to avoid silently
+losing metadata that has not yet reached disk; subsequent sync and mutation both observe `JournalAborted`, and an in-memory
+transaction must not be treated as durable. The journal tail may only advance past a contiguous prefix of transactions whose home-block persistence has completed;
+the journal start and the ext4 recovery
+evidence are cleared only after a batch covering all pending commits has completed. Currently inode sync
+uses the conservative semantics of committing the whole running transaction. Explicit recovery likewise may return success only after the legacy list and
+orphan-file cleanup have all completed commit/checkpoint, the journal start is confirmed to be zero and the orphan file empty,
+and the final superblock state has been flushed; a failure before the cleanup is durable keeps the orphan entry or the recovery feature
+as the entry point for the next recovery, and a failure of the final state flush must also return an error to the caller.
 
-N1 已完成的 `MountedJournal` 边界必须继续保留 recovery evidence、revoke 和
-checkpoint-failure-retain 不变量。后续 N2 后台化不能以暂时缺少 N3 完整 fault matrix 为理由
-吞掉错误或清除 pending state。用户态 sticky error/errseq 和 forced-readonly 的完整联动在
-后台执行图稳定后的 N3 收口。
+The completed N1 `MountedJournal` boundary must continue to preserve the recovery-evidence, revoke, and
+checkpoint-failure-retain invariants. The later N2 backgrounding must not swallow errors or clear pending state on the grounds that the complete N3 fault matrix is temporarily missing.
+The full linkage of the user-space sticky error/errseq and forced-readonly is to be completed in N3,
+after the background execution graph is stable.
 
-## 隐私分析
+## Privacy Analysis
 
-KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可能包含 security label
-或应用数据。核心不记录 xattr value 或文件内容日志。
+KExt4 stores and returns filesystem data and metadata, where an xattr value may contain a security label
+or application data. The core does not log xattr values or file contents.
 
-## 已知限制
+## Known Limitations
 
-- 整盘 legacy direct/indirect block-map 格式当前不能挂载；只读 legacy mount 需要先把
-  core mount state 拆成不可取得 mutation API 的能力类型。带 extents feature 的镜像中，
-  个别 legacy inode 仍只支持受检读取；buffered write/page fault 在 reservation 前同步拒绝，
-  其他 mutation 最迟在首次 metadata access 前拒绝。
-- 运行态已通过 KVFS 暴露 `user.*`、`trusted.*` 和 `security.*` xattr；namespace/DAC 在
-  KVFS 检查，缺少完整 LSM/capability 时 `security.*` set/remove 要求 privileged
-  credential，create/replace 的四种标志组合由 KExt4 core 在同一写锁的 mutation plan
-  中检查。磁盘 immutable/append-only flags 在 iget 时映射到 KVFS 并阻止 xattr mutation；
-  当前尚未实现 `FS_IOC_SETFLAGS`，因此不存在需要运行时刷新这些 flags 的修改入口。
-- POSIX ACL 当前只是 core 内的 opaque xattr bytes，不实现 ACL permission enforcement、
-  mode 同步或 inheritance，因此 kext4 KVFS 层不把 `system.posix_acl_*` 作为普通 xattr 暴露；
-  mount parser 接受 `acl` 只用于兼容 Linux 默认开启选项的正向拼写，不得改变上述权限边界。
-- EA inode、oversized xattr、bigalloc、inline-data write、huge-file write
-  block-unit accounting、encryption/casefold、direct I/O 和 mmap coherence 仍是后续工作。
-- HTree SIPHASH root 可以完成格式分类，但 encryption/casefold name-key 语义尚未实现；需要名称
-  哈希的 create/unlink/rename 等操作返回 `EOPNOTSUPP`。
-- KVFS unmount 已在 topology detach 前后同步 VFS 与 journal 状态，但阻止新引用/写入、
-  lazy unmount、freeze 和后台 worker drain 仍需最终 lifecycle gate。
+- The whole-disk legacy direct/indirect block-map format currently cannot be mounted; a read-only legacy mount first needs the
+  core mount state split into a capability type that cannot obtain the mutation API. In images with the extents feature,
+  individual legacy inodes still support only checked reads; buffered write/page fault is rejected synchronously before reservation,
+  and other mutations are rejected no later than the first metadata access.
+- Runtime already exposes `user.*`, `trusted.*` and `security.*` xattrs through KVFS; namespace/DAC is
+  checked in KVFS, and without a complete LSM/capability, `security.*` set/remove requires a privileged
+  credential, and the four flag combinations of create/replace are checked by the KExt4 core in the mutation plan
+  under the same write lock. The on-disk immutable/append-only flags are mapped to KVFS at iget and block xattr mutation;
+  `FS_IOC_SETFLAGS` is not yet implemented, so there is no modification entry that needs to refresh these flags at runtime.
+- POSIX ACL is currently only opaque xattr bytes inside the core; ACL permission enforcement,
+  mode synchronization or inheritance is not implemented, so the kext4 KVFS layer does not expose `system.posix_acl_*` as an ordinary xattr;
+  the mount parser accepts `acl` only for the positive spelling compatible with Linux's default-on option, and it must not change the permission boundary above.
+- EA inodes, oversized xattrs, bigalloc, inline-data write, huge-file write
+  block-unit accounting, encryption/casefold, direct I/O and mmap coherence remain future work.
+- An HTree SIPHASH root can complete format classification, but encryption/casefold name-key semantics are not yet implemented; operations that need a name
+  hash, such as create/unlink/rename, return `EOPNOTSUPP`.
+- KVFS unmount already synchronizes VFS and journal state before and after topology detach, but blocking new references/writes,
+  lazy unmount, freeze and background worker drain still need a final lifecycle gate.
 - Regular inodes have metadata transaction targets, but fsync and fdatasync do
   not yet distinguish timestamp-only and data-required metadata. Directories,
   missing targets, and unattributed mutations may still commit unrelated metadata.
-- 新增或扩展 mutation 时必须继续证明所有预期失败可在首次 metadata access 前发现；若无法
-  做到，需要实现 path-local 显式 unwind，不能恢复 operation savepoint。遗漏路径会保守地
-  abort 整个 running transaction，保证正确性但降低该次 mount 的可用性。
+- When adding or extending a mutation, one must continue to prove that all expected failures can be detected before the first metadata access; if that cannot be
+  done, path-local explicit unwind must be implemented, and an operation savepoint must not be restored. A missed path conservatively
+  aborts the entire running transaction, preserving correctness but reducing the availability of that mount.
 - Owned data BIOs and task-context completion cover allocation, unwritten extents,
   and append. Partial initialized-block reads and metadata I/O remain synchronous;
   background triggering, wider inode-target coverage, and mount-lock separation
@@ -550,40 +550,40 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
   ENOSPC retry valve are all live. The `preallocated_blocks` conservation assertion is checked after every
   change in debug builds, so the two sides desynchronizing is exposed immediately.
 
-## 审计清单
+## Audit Checklist
 
-- metadata parser 是否拒绝 truncated、out-of-bounds、unsorted 或 checksum-invalid input？
-- 目录 parser 是否由 `RawDirectoryEntry` 统一执行 Linux `rec_len` 解码？HTree 读写是否复用
-  同一个 root decoder，且把非法磁盘 hash version、mount-time unsigned 算法和合法但未实现的
-  SIPHASH 分开分类？未指定 signedness 的 RW/RO mount 是否分别持久化/保留磁盘 flags？Orlov 是否
-  始终绕过 HTree default/signedness policy 而使用 signed HALF_MD4？
-- xattr list 是否只借用名称，同时继续校验 value range 和 external block checksum？相同值
-  set 是否在 journal/ctime 更新前返回？磁盘 immutable/append-only flags 是否在 iget 时
-  映射到 KVFS，并在任何 xattr mutation 前返回 `EPERM`？inline/external 混合布局是否保存
-  全部属性，普通 set/remove 是否保持当前 extra-isize，统一 ordinary inode-dirty 入口是否覆盖
-  目录和非写入元数据更新，extra-isize 扩展失败是否安全回退且只缓存已经完成布局/资源判定的
-  失败，而不把 journal 暂时繁忙记成永久状态？
-- 每个 mutation 是否为所有可能 dirty 或 revoke 的 metadata block 预留了足够 journal credits？
-- 线性目录转 HTree 后立即 split 时，extent 预检是否把两次独立 block allocation 视为两个
-  最坏情况下不合并的 mapping，并在 `EXT4_INDEX_FL` 发布前预留 HTree credits？
-- zero-link cleanup 是否在一个可审计事务中释放 data、external xattr block、orphan entry 和
-  inode bitmap state？
-- zero-link inode 是否只能由既有 VFS identity 访问，并在最后引用消失前保持 inode number、
-  extent 和 xattr 有效？
-- FIEMAP 是否受查询末端和 inode 格式最大文件大小双重限制，并正确区分 mapped、
-  unwritten、delayed、hole 与截断结果的 `LAST`？
-- MAP_SHARED 写缺页是否先通过 `page_mkwrite()` 建立 delayed reservation，再发布 writable
-  PTE；该过程是否持有 address-space invalidate shared lock 与 folio lock，而不取得 inode
-  exclusive data lock，使非 `SYNC` FIEMAP 不漏报脏 hole？
-- 运行态 `iget` 是否只由 KVFS cache initializer 解码 private state，且 `New/Freeing` 等待重试？
-- namespace mutation 是否传入既有 VFS victim/moved/replaced private state，而不是 core 按编号重载？
-- 新增 ext4-private transient 字段是否放在 VFS inode 组合持有的 `Ext4Inode`，而不是另建 wrapper
-  snapshot、mount-wide inode-number map 或通用状态容器？
-- 目录插入需要分配新块时，link/rename 是否在发布 metadata 前预留 bitmap/group/superblock
-  增长额度，而不是依赖只存在于 create 路径的 child inode allocation 预算？普通文件
-  创建是否避免重复申请父目录增长额度，同时保留 mkdir/长 symlink 的独立 child 块预留？
-- 文档是否区分了 core support、live KVFS syscall exposure 和路线图能力？
-- statfs 模式是否只改变 `blocks`，并保持 free/available/reserved/delalloc accounting 共享？
+- Does the metadata parser reject truncated, out-of-bounds, unsorted, or checksum-invalid input?
+- Is the directory parser's Linux `rec_len` decoding performed uniformly by `RawDirectoryEntry`? Do HTree reads and writes
+  reuse the same root decoder, and are an invalid on-disk hash version, a mount-time unsigned algorithm, and a valid but unimplemented
+  SIPHASH classified separately? Do RW/RO mounts with unspecified signedness persist/preserve the on-disk flags respectively? Does Orlov
+  always bypass the HTree default/signedness policy and use signed HALF_MD4?
+- Does the xattr list only borrow names, while still validating value ranges and the external block checksum? Does a set with an identical
+  value return before the journal/ctime update? Are the on-disk immutable/append-only flags
+  mapped to KVFS at iget time, and does every xattr mutation return `EPERM` before doing anything? Does a mixed inline/external layout preserve
+  all attributes, do ordinary set/remove keep the current extra-isize, does the unified ordinary inode-dirty entry point cover
+  directories and non-write metadata updates, does a failed extra-isize expansion fall back safely and cache only
+  failures whose layout/resource determination has completed, without recording a transient journal busy condition as a permanent state?
+- Does every mutation reserve enough journal credits for all metadata blocks that may be dirtied or revoked?
+- When a linear directory is converted to an HTree and then immediately split, does the extent precheck treat the two independent block allocations as two
+  worst-case non-merging mappings, and reserve the HTree credits before `EXT4_INDEX_FL` is published?
+- Does zero-link cleanup release data, the external xattr block, the orphan entry, and the
+  inode bitmap state in a single auditable transaction?
+- Can a zero-link inode be accessed only through an existing VFS identity, with its inode number,
+  extents, and xattrs remaining valid until the last reference goes away?
+- Is FIEMAP bounded both by the end of the query and by the maximum file size of the inode format, and does it correctly distinguish mapped,
+  unwritten, delayed, and hole results, as well as `LAST` for truncated results?
+- Does a MAP_SHARED write fault first establish a delayed reservation through `page_mkwrite()` before publishing a writable
+  PTE; does that path hold the address-space invalidate shared lock and the folio lock without taking the inode
+  exclusive data lock, so that non-`SYNC` FIEMAP does not miss dirty holes?
+- Is the runtime `iget` private state decoded only by the KVFS cache initializer, with `New/Freeing` waiting and retrying?
+- Do namespace mutations pass in the existing VFS victim/moved/replaced private state, rather than having the core reload it by inode number?
+- Are new ext4-private transient fields placed in the `Ext4Inode` held by the VFS inode composition, rather than in a separate wrapper
+  snapshot, a mount-wide inode-number map, or a generic state container?
+- When a directory insertion needs to allocate a new block, does link/rename reserve the bitmap/group/superblock
+  growth quota before publishing metadata, rather than relying on the child inode allocation budget that exists only on the create path? Does ordinary file
+  creation avoid requesting the parent directory growth quota twice, while preserving the independent child block reservation for mkdir/long symlink?
+- Does the documentation distinguish core support, live KVFS syscall exposure, and roadmap capabilities?
+- Does the statfs mode change only `blocks`, while keeping free/available/reserved/delalloc accounting shared?
 
 
 ### Directory growth extent-credit boundary

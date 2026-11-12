@@ -32,7 +32,7 @@ contains no `unsafe` block.
 
 ## Unsafe inventory
 
-None. All state manipulation is safe Rust: fixed arrays, modular indexing and
+None. All state manipulation is safe Rust: bounded fixed arrays and
 `SpinNoIrq` guards.
 
 ## Memory-safety invariants

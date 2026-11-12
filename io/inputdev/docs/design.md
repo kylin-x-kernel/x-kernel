@@ -23,7 +23,7 @@ framework and devfs respectively.
 ## Architecture
 
 ```text
-VirtIO input IRQ -> InputEventNotifier -> InputEndpoint::WorkHandle
+VirtIO input IRQ -> InputEventNotifier -> InputEndpoint.poller (WorkHandle)
                                             |
                                             v
                                 InputDevice::read_event()

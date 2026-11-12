@@ -335,8 +335,9 @@ mapped. Timer delivery deliberately tolerates missing recipients. Current-helper
 initialization and publication assertions are invariant checks, not recoverable
 user-input validation. No crash-recovery mechanism is provided.
 
-`apply_prepared_unshare` installs an already-validated namespace bundle, then
-unshares the fd table. The `CLONE_FILES` step is the only fallible commit step;
+`apply_prepared_unshare` installs an already-validated namespace bundle and
+optionally replaces the fs context; the syscall adapter then detaches the calling
+thread's fd table for `CLONE_FILES`. That detach is the only fallible commit step;
 a failure after the bundle install leaves the process with the new namespaces
 and the old fd sharing, so callers must treat it as a process-fatal condition.
 `apply_setns` swaps the bundle and, for `CLONE_NEWNS`, retargets the fs

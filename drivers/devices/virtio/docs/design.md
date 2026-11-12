@@ -29,6 +29,11 @@ drivers/devices/virtio/
 ├── src/
 │   ├── lib.rs          # device probing, error conversion, public re-exports
 │   ├── blk.rs          # VirtIO Block adapter
+│   ├── blk/requests.rs # Block request queue and token ownership
+│   ├── device_dma.rs   # held device DMA capability adapted to the vendor allocation ABI
+│   ├── rng.rs          # VirtIO RNG adapter
+│   ├── pci.rs          # PCI transport and probing
+│   ├── pci/x86_64.rs   # x86_64 MSI-X setup
 │   ├── gpu.rs          # VirtIO GPU adapter
 │   ├── input.rs        # VirtIO Input adapter
 │   ├── net.rs          # VirtIO Net adapter with IRQ management
@@ -46,6 +51,7 @@ Feature flags select the device adapters compiled into the crate:
 | `gpu` | gpu | `alloc`, `display` crate |
 | `input` | input | `alloc`, `input` crate |
 | `net` | net | `alloc`, `net` crate |
+| `rng` | rng | `alloc`, `hwrng` crate |
 | `socket` | socket | `alloc`, `vsock` crate |
 | `virtio-9p` | virtio_9p | `alloc` |
 
@@ -138,8 +144,8 @@ satisfy the following constraints:
   input events, allocate memory, or enter the VFS. Queue consumption remains in
   task context.
 - **Shared safety depends on trait bounds and internal encapsulation.** blk
-  uses internal locks for queues and request state. Other non-network devices
-  are primarily accessed through exclusive `&mut self`. Network devices rely
+  uses internal locks for queues and request state. input, gpu, vsock and 9p
+  serialize device access with an internal `SpinNoIrq`. Network devices rely
   on internal locking and token-buffer correspondence.
 - **Upper layers must respect handle lifetimes.** For example, TX/RX handles
   returned by the network device must be reclaimed exactly as specified and
@@ -221,9 +227,7 @@ Empty ──device event──> HasEvent ──read_event──> Empty
 | Empty | WouldBlock | `read_event()` finds no queued event and returns `DriverError::WouldBlock` |
 | WouldBlock | HasEvent | The device produces a new event |
 
-> Input devices use a polling model. `read_event()` non-blockingly pops an
-> event from the VirtIO queue, returns `WouldBlock` when none is available, and
-> leaves the polling policy to the upper layer.
+> Input events are notification-driven: the IRQ handler acks the ISR and calls `InputEventNotifier`, after which `inputdev` calls `read_event()` in task context. `read_event()` pops events from the VirtIO queue without blocking and returns `WouldBlock` when none are pending.
 
 ### Network Buffer State
 
@@ -243,30 +247,9 @@ Free ──alloc_tx_buf──> Allocated ──send──> InFlight ──recycl
 
 ### Vsock Connection State
 
-```text
-Closed ──listen──> Listening ──connect──> Connecting ──Connected event──> Established
-  │                    │                                          │
-  │                    │              ConnectionRequest           │  recv / send
-  │                    └──> Accept ──accept──> Established         │
-  │                                                               │
-  │    disconnect / abort                                         │  Disconnected event
-  └───────────────────────────────────────────────────────────────> Closed
-```
+This adapter keeps no vsock connection state; `listen()` and `unlisten()` are no-ops. The connection state machine (listen, connect, accept, close) is owned by `VSOCK_CONN_MANAGER` in `net/knet`, which drives this adapter's packet-level methods (`connect`, `accept`, `send`, `shutdown`, `force_close`, `credit_update`).
 
-| From | To | Trigger |
-| --- | --- | --- |
-| Closed | Listening | `listen(src_port)` starts listening on a port |
-| Listening | Established | A `ConnectionRequest` arrives and the upper layer calls `connect()` to accept it |
-| Closed | Connecting | `connect(cid)` initiates an outbound connection |
-| Connecting | Established | A `Connected` event arrives |
-| Established | Established | `send()` / `recv()` transfer data; `recv()` automatically updates credit |
-| Established | Closed | A `Disconnected` event arrives, or `disconnect()` / `abort()` is called |
-| Any | Closed | `abort()` force-closes the connection with `force_close` without waiting for peer acknowledgement |
-
-> `VsockConnectionManager` owns vsock connection state. This crate obtains
-> events through `poll_event()` and translates them into upper-layer
-> `VsockDriverEventType` values. After `recv()`, `update_credit()` advertises
-> updated receive-buffer capacity to the peer.
+> Vsock connection state is owned by `VSOCK_CONN_MANAGER` in `net/knet`, not by this module. This module only fetches raw events through `poll_event()` and translates them into `VsockTransportEvent`.
 
 ### 9p Request State
 
@@ -396,8 +379,10 @@ pixel output uses the scanout-resource path shared by `fbdevice` emulation and
 
 When the host changes the console size, for example by resizing the QEMU
 window, it sets `VIRTIO_GPU_EVENT_DISPLAY` in the configuration-space
-`events_read` word. The driver registers no interrupt for the display device
-because `pci.rs` deliberately masks Display INTx, so the query path polls:
+`events_read` word. `pci.rs` keeps Display INTx enabled; the IRQ handler that
+`kdriver` installs acknowledges the interrupt through `ack_irq()` and, on a
+configuration change, queues task-context work that calls `refresh_info()`.
+The query path also refreshes the size:
 
 1. `DisplayDevice::refresh_info()` reads `events_read`, acknowledges consumed
    bits by writing `events_clear`, and issues `GET_DISPLAY_INFO` again.
@@ -486,7 +471,7 @@ never enter the per-axis query path.
 
 **IRQ handling:**
 
-1. `register_virtio_net_irq(irq, irq_provider, inner)` stores a
+1. `register_virtio_net_irq(irq_provider, irq, inner, rx_scheduler)` stores a
    `VirtIoNetIrqHandle` in global `NET_IRQ_HANDLES`.
 2. On the first registration for an IRQ, `REGISTERED_NET_IRQS` deduplicates it
    and `DevIrq::request_with(irq_provider, resource,
@@ -608,8 +593,8 @@ maximum payload of 8148 bytes.
   state. Caller waits and terminal callbacks occur outside it. IRQ
   acknowledgement uses the same lock, and the host serializes per-device
   completion passes.
-- **gpu / socket / virtio_9p:** All operations require exclusive `&mut self`
-  access. The caller serializes operations; the module has no internal lock.
+- **gpu / socket / virtio_9p:** Each adapter serializes access to its underlying
+  device with an internal `SpinNoIrq`; trait methods take `&self`.
 - **input:** `VirtIoInputState` wraps the lower device in `Arc<SpinNoIrq<_>>`.
   IRQ acknowledgement in hard-IRQ context is mutually exclusive with capability
   queries and event access in task context. Tasks never hold the lock while

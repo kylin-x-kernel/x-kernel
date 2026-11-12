@@ -1,4 +1,4 @@
-# kcpu — 安全与可靠性分析
+# kcpu — Security and Reliability Analysis
 
 ## Cross-architecture CPU identification boundary
 
@@ -55,112 +55,111 @@ userspace from querying CPUID directly or executing unsupported instructions.
 The snapshot is per CPU, not a system-wide intersection or scheduling guarantee.
 
 
-## 概述
+## Overview
 
-`kcpu` 是 x-kernel 中直接操作 CPU 特权级硬件的底层 crate，涉及大量
-`unsafe` 代码：naked 函数、内联汇编、裸指针操作和 `transmute`。不正确的
-使用或不变量破损可能导致未定义行为、内存损坏或特权级泄露。
+`kcpu` is a low-level crate in x-kernel that directly operates CPU privileged hardware, and it involves a large amount of
+`unsafe` code: naked functions, inline assembly, raw pointer operations, and `transmute`. Incorrect
+use or a broken invariant can lead to undefined behavior, memory corruption, or privilege leaks.
 
-## 测试审计范围
+## Test Audit Scope
 
-审计范围包含 `ut-tests/` 中的 guest 测试及 `tests/host/` 中保留的 host 测试。
-guest 文件仍是原父模块的子模块，原有 public、crate-private 或 private 可见性
-不变。测试中的 unsafe、寄存器访问、per-CPU 状态恢复和 serial 属性均随原测试体
-迁移；不扩大生产 API 或改变生产 unsafe 契约。AArch64 的两例 host 测试仍由
-原 `cfg(test)` 挂载，不依赖 guest 注册。
+The audit scope covers the guest tests in `ut-tests/` and the host tests retained in `tests/host/`.
+The guest files remain submodules of their original parent modules, and the original public, crate-private, or private visibility
+is unchanged. The unsafe code, register accesses, per-CPU state restoration, and serial attributes in the tests all moved along with the original test bodies;
+the production API is not widened and the production unsafe contracts are not changed. The two AArch64 host tests are still mounted by the
+original `cfg(test)` and do not depend on guest registration.
 
-## 信任模型
+## Trust Model
 
-LoongArch idle 返回修正仅在普通 IRQ 分支、保存的 PRMD.PPLV 为内核级时
-执行，并由 `karch` 精确匹配专用 `idle` 指令地址。修正不接受用户地址作为
-跳转目标，也不改变保存的 IRQ 掩码。其可用性约束是：中断消费唤醒后必须
-跳过该等待指令，回到调度器重新检查工作，而不是依赖下一次周期中断解围。
+The LoongArch idle return fixup is performed only in the normal IRQ branch, when the saved PRMD.PPLV is kernel level,
+and `karch` matches the address of the dedicated `idle` instruction exactly. The fixup does not accept a user address as a
+jump target and does not change the saved IRQ mask. Its availability constraint is: after an interrupt is consumed to wake the CPU, it must
+skip that wait instruction and return to the scheduler to re-check for work, rather than relying on the next periodic interrupt to break out.
 
 ```text
-内核上层（调度器/信号/syscall/驱动）
+Kernel upper layers (scheduler/signals/syscalls/drivers)
    │
    │ safe API: init_trap(), UserContext::run(),
-   │           TaskContext::switch_to(), user_copy()
+   │           unsafe API: TaskContext::switch_to(), user_copy()
    │
    v
 ┌──────────────────────────────────────────────────┐
 │  kcpu                                            │
 │                                                  │
-│  ┌── unsafe 边界 ──────────────────────────────┐ │
-│  │ 汇编入口 (excp.S / copy_user.S)             │ │
-│  │ naked 函数 (context_switch, fpstate_*)      │ │
-│  │ 内联汇编 (movgr2fr.d / movfr2gr.d)         │ │
-│  │ 裸指针操作 (异常表、栈帧构造)               │ │
-│  │ transmute (IDT 填充、寄存器数组转换)        │ │
-│  │ MSR/CSR 写入 (syscall 配置、页表切换)       │ │
+│  ┌── unsafe boundary ──────────────────────────┐ │
+│  │ asm entry (excp.S / copy_user.S)            │ │
+│  │ naked function (context_switch, fpstate_*)  │ │
+│  │ inline assembly (movgr2fr.d / movfr2gr.d)  │ │
+│  │ Raw pointer operations (exception table, stack frame construction)  │ │
+│  │ transmute (IDT fill, register array cast)   │ │
+│  │ MSR/CSR writes (syscall config, page table switch)       │ │
 │  └─────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────┘
 ```
 
-- **safe API 调用者**信任 `kcpu` 正确维护寄存器布局和硬件操作不变量。
-- **汇编代码**被视为可信边界内的实现细节，其正确性通过人工审计和架构约定保证。
-- **`user_copy` 调用者**信任异常表机制能正确拦截无效用户指针。
+- **Callers of the safe API** trust `kcpu` to correctly maintain the register layout and the hardware operation invariants.
+- **Assembly code** is regarded as an implementation detail within the trusted boundary, and its correctness is guaranteed by manual audit and architectural conventions.
+- **Callers of `user_copy`** trust that the exception table mechanism can correctly intercept invalid user pointers.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-本模块直接接触以下外部边界：
+This module directly touches the following external boundaries:
 
-- **用户内存**：`copy_user.S` 中的 `user_copy` 函数从用户空间地址读写数据。
-  用户可提供任意地址（包括未映射、只读或内核地址），异常表机制用于安全恢复。
+- **User memory**: the `user_copy` function in `copy_user.S` reads and writes data at user-space addresses.
+  The user may supply arbitrary addresses (including unmapped, read-only, or kernel addresses), and the exception table mechanism is used to recover safely.
 
-- **MMIO / CSR / MSR 寄存器**：trap handler 读取 CR2（x86_64）、
-  FAR_EL1（aarch64）、stval（riscv）、badv（loongarch64）获取故障地址。
-  MSR 写入配置 syscall 入口（x86_64 LStar/Star/SFMask/Efer）。
+- **MMIO / CSR / MSR registers**: the trap handler reads CR2 (x86_64),
+  FAR_EL1 (aarch64), stval (riscv), and badv (loongarch64) to obtain the fault address.
+  MSR writes configure the syscall entry (x86_64 LStar/Star/SFMask/Efer).
 
-- **用户态寄存器状态**：`UserContext::run()` 切换到用户态后，用户可控制
-  所有通用寄存器内容。trap handler 需正确处理任意寄存器值。
-- **riscv64 `gp`（percpu 基址）**：`gp` 是每 CPU 不变量，绝不从每任务
-  trapframe 恢复。trap 途中任务可能因 handler 阻塞而迁移到其他 hart；若从
-  可迁移的 trapframe 恢复 `gp`，会把另一 hart 的 percpu 基址装入本 hart，
-  使 `current()`/`this_cpu_id()` 指向错误的 CPU 与任务，构成跨任务指针泄漏。
-  当前实现：S-mode trap 返回不触碰 `gp`；仅 U-mode 返回从 slot-3 恢复用户
-  `gp`。
+- **User-mode register state**: after `UserContext::run()` switches to user mode, the user can control
+  the contents of all general-purpose registers. The trap handler must correctly handle arbitrary register values.
+- **riscv64 `gp` (percpu base)**: `gp` is a per-CPU invariant and is never restored from the per-task
+  trapframe. During a trap, the task may migrate to another hart because the handler blocks; if `gp` were restored from
+  a migratable trapframe, the percpu base of another hart would be loaded into this hart,
+  making `current()`/`this_cpu_id()` point to the wrong CPU and task, which constitutes a cross-task pointer leak.
+  Current implementation: an S-mode trap return does not touch `gp`; only a U-mode return restores the user
+  `gp` from slot-3.
 
-- **中断/异常输入**：硬件中断和异常向量触发 trap 入口。IRQ 编号来自硬件，
-  不完全可信。
+- **Interrupt/exception input**: hardware interrupts and exceptions trigger the trap entry. IRQ numbers come from hardware
+  and are not fully trusted.
 
-- **指令流**：LoongArch64 的 `emulate_unaligned()` 读取故障地址处的指令
-  字进行解码。该指令字来自用户或内核代码段。
+- **Instruction stream**: LoongArch64's `emulate_unaligned()` reads the instruction
+  word at the fault address and decodes it. That instruction word comes from the user or kernel code segment.
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-### 当前任务指针发布
+### Current Task Pointer Publication
 
-current 的存储和访问由架构模块拥有，任务存活由调度器保证。底层只传递不透明
-指针，不解引用任务对象，也不获取或释放引用。发布者必须保留新任务，并让旧任务
-跨过发布窗口和旧栈使用期；NMI 的借用必须在被中断流程恢复前结束。
+The storage and access of current are owned by the architecture module, and task liveness is guaranteed by the scheduler. The lower layer only passes an opaque
+pointer; it does not dereference the task object and does not acquire or release references. The publisher must retain the new task and keep the old task alive
+across the publication window and the period during which the old stack is in use; a borrow taken by an NMI must end before the interrupted flow resumes.
 
-`TaskContext::switch_to` 是 unsafe 边界：调用者保证下一任务指针与目标上下文
-匹配、上下文独占及 IRQ/迁移排除。架构层在硬件上下文准备后、底层切栈前发布
-指针，不执行任务析构。current 发布与栈切换不是单个原子动作；NMI 只能依赖
-指针指向存活任务，不能据此假设所有硬件上下文已同时完成切换。
+`TaskContext::switch_to` is an unsafe boundary: the caller guarantees that the next task pointer matches the target context,
+that the context is held exclusively, and that IRQs and migration are excluded. The architecture layer publishes the
+pointer after the hardware context is prepared and before the lower layer switches stacks, and it does not perform task destruction. Publishing current and switching the stack are not a single atomic action; an NMI may only rely on the
+pointer pointing to a live task, and must not assume from it that all hardware contexts have been switched at the same time.
 
-x86_64 使用对齐的 GS 指令和编译器内存屏障，CPU 选择与指针访问不能被迁移拆开；
-ARM64 直接读取 SP_EL0，CPU 选择与读取也不能被迁移拆开。启动在 EL1/VHE 路径
-均先清零该寄存器。EL0 异常入口在调用 Rust 前用本 CPU 的 `ENTRY_TASK` 恢复
-current；入口的硬件屏蔽状态覆盖这段交接。返回 EL0 时，先在 current 仍有效时
-完成最后一次 Rust 调用并屏蔽普通 IRQ、伪 NMI 及已启用的硬件 NMI，再写入
-用户 SP。最终 `eret` 从 SPSR 恢复用户中断状态。用户 SP 不作为任务指针使用。
-RISC-V 直接读取 `tp`，主从核启动在进入 Rust 前清零。用户态与 guest 的 `tp`
-只在 IRQ 关闭的汇编交接窗口使用，返回内核 Rust 前恢复 host current。内核
-trapframe 保存的 `tp` 属于任务，即使该任务迁移也可恢复；`gp` 属于 CPU，不能
-从可迁移的内核 trapframe 恢复。本机制不提供 RISC-V NMI/RNMI 入口支持。
-LoongArch 直接读取 `$tp`，主从核在第一次 Rust 调用前清零。用户态交接使用
-独立的 callee frame 保存内核 current，并在 IRQ 仍关闭时恢复，再返回 Rust；
-TLB refill 汇编不修改 `$tp`，也不调用 Rust。本机制不增加 LoongArch NMI 支持。
-指针返回后不携带持续的 CPU 固定或所有权。接口不能被当作远端任务引用获取机制。
+x86_64 uses aligned GS instructions and a compiler memory barrier, so CPU selection and the pointer access cannot be split by migration;
+ARM64 reads SP_EL0 directly, and CPU selection and the read likewise cannot be split by migration. Boot clears this register
+on both the EL1 and VHE paths. The EL0 exception entry restores current from this CPU's `ENTRY_TASK` before calling into Rust;
+the hardware mask state at entry covers this handoff. On return to EL0, the last Rust call is completed first while current is still valid, and normal IRQs, pseudo-NMIs, and any enabled hardware NMIs are masked; only then is the
+user SP written. The final `eret` restores the user interrupt state from SPSR. The user SP is not used as a task pointer.
+RISC-V reads `tp` directly, and both the primary and secondary cores clear it at boot before entering Rust. The `tp` of user mode and guests
+is used only in the assembly handoff window with IRQs disabled, and the host current is restored before returning to kernel Rust. The `tp` saved in the kernel
+trapframe belongs to the task and can be restored even if the task migrates; `gp` belongs to the CPU and must not be
+restored from a migratable kernel trapframe. This mechanism does not provide RISC-V NMI/RNMI entry support.
+LoongArch reads `$tp` directly, and the primary and secondary cores clear it before the first Rust call. The user-mode handoff uses
+a separate callee frame to save the kernel current and restores it while IRQs are still disabled, before returning to Rust;
+the TLB refill assembly neither modifies `$tp` nor calls Rust. This mechanism does not add LoongArch NMI support.
+The returned pointer does not carry any lasting CPU pinning or ownership. The interface must not be treated as a mechanism for acquiring a reference to a remote task.
 
-### AArch64 异常返回窗口
+### AArch64 Exception Return Window
 
-AArch64 硬件 NMI 可打断普通 IRQ handler，但不得打断最终 ELR/SPSR 恢复。
-`HardwareNmiExitGuard` 先声明、最后析构，在其余异常清理完成后设置 ALLINT，
-并保持到 `eret`；保存的 SPSR 不变。该操作受当前 CPU 的 FEAT_NMI readiness
-门控，降级运行不访问 ALLINT。用户态返回同样在替换 SP_EL0 之前屏蔽硬件 NMI。
+An AArch64 hardware NMI may interrupt a normal IRQ handler, but must not interrupt the final ELR/SPSR restoration.
+`HardwareNmiExitGuard` is declared first and dropped last; after the remaining exception cleanup is complete it sets ALLINT,
+and keeps it set until `eret`; the saved SPSR is unchanged. This operation is gated by the current CPU's FEAT_NMI readiness,
+and degraded operation does not access ALLINT. The return to user mode likewise masks hardware NMIs before replacing SP_EL0.
 
 The boolean `in_exception_context()` query pins CPU-slot selection and load
 with architecture IRQ save/restore. Permanent atomic storage alone does not
@@ -168,7 +167,7 @@ prevent a migrating caller from observing the previous CPU. This query does
 not dereference the stored pointer; its guarantee does not extend to subsequent
 caller operations or replace the trapframe snapshot's lifetime requirements.
 
-### 1. `ExceptionContextGuard::new` / `Drop`（`active_exception_context.rs`）
+### 1. `ExceptionContextGuard::new` / `Drop` (`active_exception_context.rs`)
 
 ```rust
 ACTIVE_EXCEPTION_CONTEXT_PTR
@@ -176,44 +175,44 @@ ACTIVE_EXCEPTION_CONTEXT_PTR
     .swap(ptr, Ordering::Relaxed)
 ```
 
-**不变量**：`tf` 必须是有效的 `&ExceptionContext` 引用；guard 的生命周期
-必须覆盖 trap handler 整个执行期。
+**Invariant**: `tf` must be a valid `&ExceptionContext` reference; the lifetime of the guard
+must cover the entire execution of the trap handler.
 
-**为何安全**：安装时记录原始 per-CPU slot 地址；per-CPU 数据区在整个内核生命
-周期内有效，因此该裸指针在迟到 Drop 时仍可解引用。`swap` 在 trap 入口的 IRQ
-关闭上下文中执行。Drop 时用 CAS 恢复原始 slot 和迁移后的当前 CPU slot，避免
-trap 后端阻塞/迁移后误写或遗漏 CPU slot。CAS 失败表示 slot 已被调度器清空或被
-新的 trap 覆盖，保留当前值是正确行为。迁移后的内层 guard 释放时，当前 CPU slot
-恢复为 `self.prev` 而不是 0；`self.prev` 来自同一任务中仍存活的外层 guard，必须
-保持可见，直到外层 guard 自己释放。
+**Why it is safe**: the raw per-CPU slot address is recorded at installation; the per-CPU data area is valid for the entire kernel
+lifetime, so this raw pointer can still be dereferenced at a late Drop. The `swap` is performed in the IRQ-disabled
+context at trap entry. On Drop, CAS is used to restore the original slot and the current CPU slot after migration, avoiding
+writing to or missing a CPU slot after the trap backend blocks or migrates. A CAS failure means the slot has been cleared by the scheduler or overwritten by a
+new trap, and keeping the current value is the correct behavior. When the inner guard after migration is released, the current CPU slot
+is restored to `self.prev` rather than 0; `self.prev` comes from the outer guard still alive in the same task, and must
+remain visible until the outer guard itself is released.
 
-### 2. `active_exception_context()` 裸指针转换（`active_exception_context.rs:39-52`）
+### 2. `active_exception_context()` raw pointer conversion (`active_exception_context.rs:39-52`)
 
 ```rust
 Some(unsafe { *(ptr as *const ExceptionContext) })
 ```
 
-**不变量**：`ptr` 必须指向有效的 `ExceptionContext` 实例。
+**Invariant**: `ptr` must point to a valid `ExceptionContext` instance.
 
-**为何安全**：指针仅由 `ExceptionContextGuard::new` 安装，guard 的 `Drop`
-在原始 slot 和当前 CPU slot 上尝试恢复；调度器切离安装者任务前会挂起并清空本
-CPU slot，切回后恢复到当前 CPU。该 API 立即按值复制 trapframe 并返回快照，
-避免向调用者暴露可能在 trap 返回后失效的借用引用。
+**Why it is safe**: the pointer is installed only by `ExceptionContextGuard::new`, and the guard's `Drop`
+attempts restoration on the original slot and the current CPU slot; before switching away from the installer task, the scheduler suspends and clears this
+CPU's slot, and restores it to the current CPU after switching back. This API immediately copies the trapframe by value and returns a snapshot,
+avoiding exposing to the caller a borrowed reference that could become invalid after the trap returns.
 
-### 3. `prepare_initial_frame`（`x86_64/ctx.rs:367-379`）
+### 3. `prepare_initial_frame` (`x86_64/ctx.rs:367-379`)
 
 ```rust
 let frame_ptr = unsafe { top_u64.sub(1).cast::<ContextSwitchFrame>().sub(1) };
 unsafe { frame_ptr.write(ContextSwitchFrame { rip: entry as _, ..Default::default() }) };
 ```
 
-**不变量**：`kstack_top` 指向有效的内核栈顶，栈有足够空间容纳
-`ContextSwitchFrame`（56 字节）。
+**Invariant**: `kstack_top` points to a valid kernel stack top, and the stack has enough space to hold
+`ContextSwitchFrame` (56 bytes).
 
-**为何安全**：由 `TaskContext::init()` 调用，调用者保证 `kstack_top` 有效。
-x86_64 栈要求 16 字节对齐，`sub(1)` 保证 `ret` 后对齐。
+**Why it is safe**: it is called by `TaskContext::init()`, and the caller guarantees that `kstack_top` is valid.
+The x86_64 stack requires 16-byte alignment, and `sub(1)` guarantees alignment after `ret`.
 
-### 4. `context_switch` naked 函数（`x86_64/ctx.rs:376-398`）
+### 4. `context_switch` naked function (`x86_64/ctx.rs:376-398`)
 
 ```rust
 #[unsafe(naked)]
@@ -222,59 +221,43 @@ unsafe extern "C" fn context_switch(_current_stack: &mut u64, _next_stack: &u64)
 }
 ```
 
-**不变量**：`rdi` 指向当前任务的 `rsp` 字段，`rsi` 指向下一任务的 `rsp`
-字段。callee-saved 寄存器布局与 `ContextSwitchFrame` 一致。
+**Invariant**: `rdi` points to the `rsp` field of the current task, and `rsi` points to the `rsp`
+field of the next task. The callee-saved register layout is consistent with `ContextSwitchFrame`.
 
-**为何安全**：调用前中断已关闭；保存/恢复序列对称；
-`ret` 跳转到 `ContextSwitchFrame.rip` 处的入口函数。
+**Why it is safe**: interrupts are disabled before the call; the save/restore sequence is symmetric;
+`ret` jumps to the entry function at `ContextSwitchFrame.rip`.
 
-### 5. FP 状态保存/恢复（各架构 ctx.rs）
+### 5. FP state save/restore (ctx.rs of each architecture)
 
-- x86_64：标准 `_xsave64` / `_xrstor64`；无 XSAVE 时回退 `_fxsave64` / `_fxrstor64`。
-- aarch64：`fpstate_save` / `fpstate_restore` naked 函数。
-- riscv：`save_fp_registers` / `restore_fp_registers` naked 函数。
-- loongarch64：`save_fp_registers` / `restore_fp_registers` naked 函数。
+- x86_64: standard `_xsave64` / `_xrstor64`; falls back to `_fxsave64` / `_fxrstor64` when XSAVE is absent.
+- aarch64: `fpstate_save` / `fpstate_restore` naked functions.
+- riscv: `save_fp_registers` / `restore_fp_registers` naked functions.
+- loongarch64: `save_fp_registers` / `restore_fp_registers` naked functions.
 
-**不变量**：目标内存区域大小和对齐满足架构要求。
+**Invariant**: the size and alignment of the target memory region satisfy the architectural requirements.
 
-**为何安全**：`FpState`/`FpuState`/`FxStateBlock` 的布局通过
-`static_assertions` 或 `repr(C, align(...))` 保证与指令期望一致。
+**Why it is safe**: the layouts of `FpState`/`FpuState`/`FxStateBlock` are guaranteed by
+`static_assertions` or `repr(C, align(...))` to match what the instructions expect.
 
-### 5a. x86_64 信号帧 FP/SIMD 恢复（`x86_64/xstate.rs`）
+### 5a. x86_64 signal-frame FP/SIMD restore (`x86_64/xstate.rs`)
 
-`rt_sigreturn` 在 syscall 边界用 checked copy 读取 `ucontext` 和 FP 字节。
-先验证长度（最大 836 字节）、两处 magic、支持的 xfeatures、XSTATE_BV、
-零 XCOMP_BV 和保留字段，再恢复到 64 字节对齐的内核自有 `ExtendedState`。
-任何用户指针都不直接传给 XRSTOR。短帧、未映射帧和非法 header 触发进程
-SIGSEGV；RIP/RSP 和代码段也在更改寄存器前校验，RFLAGS 仅允许用户状态位。
+`rt_sigreturn` reads `ucontext` and the FP bytes with a checked copy at the syscall boundary.
+It first validates the length (at most 836 bytes), both magics, the supported xfeatures, XSTATE_BV,
+zero XCOMP_BV and the reserved fields, and then restores into the 64-byte-aligned kernel-owned `ExtendedState`.
+No user pointer is ever passed directly to XRSTOR. A short frame, an unmapped frame, and an invalid header trigger process
+SIGSEGV; RIP/RSP and the code segment are also validated before any register is changed, and RFLAGS permits only user-state bits.
 
-MXCSR 仍按本项目原有兼容策略与启动时可信 mask 相与（硬件返回 0 时使用
-0xffbf），不同于 Linux 对非法 MXCSR 的拒绝策略。BSP 发布保存格式和 mask；
-每个 AP 验证兼容性并安装相同 XCR0 后才能调度。新建、exec 和信号处理器
-使用确定的初始状态；信号捕获使用全初始化存储，避免泄露未写入的扩展区域。
-用户可编辑自己的 x87/SSE/YMM 数据，无法通过 header 启用 AVX-512/AMX。
+MXCSR is still ANDed with the trusted boot-time mask under this project's existing compatibility policy (0xffbf is used
+when the hardware returns 0), unlike Linux's policy of rejecting an invalid MXCSR. The BSP publishes the save format and mask;
+each AP must verify compatibility and install the same XCR0 before it can be scheduled. New tasks, exec and signal handlers
+use a deterministic initial state; signal capture uses fully initialized storage to avoid leaking unwritten extended regions.
+The user can edit their own x87/SSE/YMM data but cannot enable AVX-512/AMX through the header.
 
-### 6. `ExtendedState::default`（`x86_64/xstate.rs`）
+### 6. `ExtendedState::default` (`x86_64/xstate.rs`)
 
-```rust
-FxStateBlock {
-    fpu_ctrl: 0x037f,
-    sse_mxcsr: 0x1f80,
-    st_space: [0; 16],
-    xmm_space: [0; 32],
-    _padding: [0; 12],
-    // ...
-}
-```
+`ExtendedState::default` is a safe `const fn` that builds the state from `FxStateBlock::initial()` and zeroed XSAVE header and YMM fields; it contains no `unsafe` operation. Every field is explicitly initialized, so no all-zero validity assumption is needed. The layout is guaranteed by `repr(C, align(64))` with compile-time size and offset assertions on `ExtendedState`, and by `repr(C, align(16))` with a 512-byte size assertion on `FxStateBlock`, matching what XSAVE/FXSAVE expect.
 
-**不变量**：`FxStateBlock` 的所有字段均为 `u16`/`u32`/`u64` 数组，
-全零是有效表示。
-
-**为何安全**：`FxStateBlock` 现在通过显式字段初始化构造，避免了对
-“整块零初始化后再补写关键字段”的 `unsafe` 假设。其布局仍由
-`repr(C, align(16))` 和 `static_assertions` 保证满足 FXSAVE/FXRSTOR 要求。
-
-### 7. `switch_to` 页表切换（各架构 ctx.rs）
+### 7. `switch_to` page table switch (`ctx.rs` of each architecture)
 
 ```rust
 if next_ctx.cr3 != self.cr3 {
@@ -282,16 +265,16 @@ if next_ctx.cr3 != self.cr3 {
 }
 ```
 
-**不变量**：共享根架构的 `cr3`/`satp` 必须指向任务运行期间有效的页表；
-独立根架构的内核页表由启动流程保持有效，用户任务的 `ttbr0_el1`/`pgdl`
-必须由运行时持有对应页表。内核任务沿用零用户根默认值，不访问用户地址区。
+**Invariant**: On architectures with a shared root, `cr3`/`satp` must point to a page table that is valid for the whole time the task runs;
+on architectures with separate roots, the kernel page table is kept valid by the boot flow, and the `ttbr0_el1`/`pgdl` of a user task
+must be backed by a corresponding page table held by the runtime. Kernel tasks keep the zero user root default and do not access the user address region.
 
-**为何安全**：`TaskContext::new_kernel(kernel_root)` 显式接收永久内核根，
-不读取创建者当前用户根。x86_64/RISC-V 将其保存为任务根；AArch64/LoongArch
-保持零用户根默认值。构造函数不取得 MM 所有权，调用方必须保证永久内核映射
-持续有效，并在用户任务发布前通过 `set_page_table_root()` 安装其持有的用户根。
+**Why it is safe**: `TaskContext::new_kernel(kernel_root)` explicitly takes the permanent kernel root
+and does not read the creator's current user root. x86_64/RISC-V save it as the task root; AArch64/LoongArch
+keep the zero user root default. The constructor does not take ownership of the MM, so the caller must guarantee that the permanent kernel mapping
+remains valid, and must install the user root it holds via `set_page_table_root()` before a user task is published.
 
-### 8. IDT 初始化中的 `transmute`（`x86_64/idt.rs:25-29`）
+### 8. `transmute` in IDT initialization (`x86_64/idt.rs:25-29`)
 
 ```rust
 let entries = unsafe {
@@ -299,39 +282,39 @@ let entries = unsafe {
 };
 ```
 
-**不变量**：`InterruptDescriptorTable` 的内存布局与 `[Entry<()>; 256]` 一致。
+**Invariant**: The memory layout of `InterruptDescriptorTable` is identical to that of `[Entry<()>; 256]`.
 
-**为何安全**：`InterruptDescriptorTable` 文档声明其为 256 个 `Entry` 的
-透明包装。`const NUM_INT: usize = 256` 保证尺寸匹配。
+**Why it is safe**: The `InterruptDescriptorTable` documentation declares it to be a
+transparent wrapper around 256 `Entry` values. `const NUM_INT: usize = 256` guarantees that the sizes match.
 
-### 9. `init_syscall` MSR 写入（`x86_64/userspace.rs:169-191`）
+### 9. `init_syscall` MSR writes (`x86_64/userspace.rs:169-191`)
 
 ```rust
 LStar::write(...); Star::write(...); SFMask::write(...);
 Efer::update(|efer| *efer |= EferFlags::SYSTEM_CALL_EXTENSIONS);
 ```
 
-**不变量**：`syscall_entry` 地址必须在内核代码段内；段选择子指向正确的
-GDT 描述符。
+**Invariant**: The `syscall_entry` address must lie within the kernel code segment; the segment selectors must point to the correct
+GDT descriptors.
 
-**为何安全**：`syscall_entry` 由 `excp.S` 定义，链接到内核地址空间。
-段选择子使用 `gdt.rs` 中的编译时常量。
+**Why it is safe**: `syscall_entry` is defined in `excp.S` and linked into the kernel address space.
+The segment selectors use compile-time constants from `gdt.rs`.
 
-### 10. 异常表操作（`userspace_common.rs:52-90`）
+### 10. Exception table operations (`userspace_common.rs:52-90`)
 
 ```rust
 let entries = unsafe {
-    core::slice::from_raw_parts(_ex_table_start.as_ptr(), count)
+    core::slice::from_raw_parts(start, len)
 };
 ```
 
-**不变量**：`_ex_table_start` 和 `_ex_table_end` 由链接脚本定义，
-标记 `__ex_table` 段的起止；条目数量为非负值。
+**Invariant**: `_ex_table_start` and `_ex_table_end` are defined by the linker script
+and mark the start and end of the `__ex_table` section; the number of entries is non-negative.
 
-**为何安全**：符号由链接器生成，在 `init_exception_table()` 中排序后
-仅做只读访问。`fixup_exception` 中的二分查找不修改条目。
+**Why it is safe**: The symbols are generated by the linker and, after being sorted in `init_exception_table()`,
+are only accessed read-only. The binary search in `fixup_exception` does not modify the entries.
 
-### 11. LoongArch64 `emulate_unaligned`（`loongarch64/unaligned.rs:574-636`）
+### 11. LoongArch64 `emulate_unaligned` (`loongarch64/unaligned.rs:574-636`)
 
 ```rust
 let badi = unsafe { core::ptr::read(self.era as *const u32) };
@@ -343,187 +326,186 @@ let regs = unsafe {
 };
 ```
 
-**不变量**：
+**Invariants**:
 
-- `self.era` 必须指向可读的内存地址（故障指令所在位置）。
-- `GeneralRegisters` 的内存布局必须与 `[usize; 32]` 一致。
-- `rd`（目标寄存器编号）在 0–31 范围内。
-- 非对齐读写的目标地址 `badv` 可安全访问。
+- `self.era` must point to a readable memory address (the location of the faulting instruction).
+- The memory layout of `GeneralRegisters` must be identical to that of `[usize; 32]`.
+- `rd` (the destination register number) is in the range 0–31.
+- The target address `badv` of the unaligned access can be safely accessed.
 
-**为何安全**：在 trap handler 上下文中调用，`era` 指向故障指令所在的
-代码段。`GeneralRegisters` 为 `repr(C)` 结构体，32 个 `usize` 字段连续排列。
-寄存器编号从指令字的低 5 位提取，天然在 0–31 范围内。
+**Why it is safe**: It is called in the trap handler context, where `era` points into the code segment containing
+the faulting instruction. `GeneralRegisters` is a `repr(C)` struct whose 32 `usize` fields are laid out contiguously.
+The register number is extracted from the low 5 bits of the instruction word, so it is inherently in the range 0–31.
 
-### 12. LoongArch64 FP 寄存器读写（`loongarch64/unaligned.rs:67-533`）
+### 12. LoongArch64 FP register reads and writes (`loongarch64/unaligned.rs:67-533`)
 
 ```rust
 unsafe { asm!("movgr2fr.d $f0, {val}", val = in(reg) val) }
 unsafe { asm!("movfr2gr.d {val}, $f0", val = out(reg) value) }
 ```
 
-**不变量**：每条汇编指令操作固定的 FP 寄存器编号，与 `write_fpr`/`read_fpr`
-的 match 分支一一对应。
+**Invariant**: Each assembly instruction operates on a fixed FP register number, in one-to-one correspondence with the match arms of `write_fpr`/`read_fpr`.
 
-**为何安全**：LoongArch64 ISA 中 `movgr2fr.d` / `movfr2gr.d` 是通用寄存器
-与 FP 寄存器之间的数据搬移指令，不涉及内存访问。64 个函数各自硬编码了
-$f0–$f31 的寄存器编号。
+**Why it is safe**: In the LoongArch64 ISA, `movgr2fr.d` / `movfr2gr.d` are data-move instructions between general-purpose registers
+and FP registers and involve no memory access. Each of the 64 functions hard-codes
+its own register number from $f0 to $f31.
 
-### 13. `NmiExceptionGuard::drop`（`aarch64/excp.rs`）
+### 13. `NmiExceptionGuard::drop` (`aarch64/excp.rs`)
 
 ```rust
 unsafe { core::arch::asm!("msr daifset, #2", options(nomem, nostack)) };
 ```
 
-**不变量**：guard 仅在 `pmr_active`（入口 PMR 已保存并打开 mask）时执行恢复；
-`msr daifset` 只屏蔽 IRQ，随后写回的是同一 CPU 在入口保存的 `ICC_PMR_EL1`。
+**Invariant**: The guard performs restoration only when `pmr_active` is set (the entry PMR has been saved and the mask enabled);
+`msr daifset` masks only IRQ, and what is written back afterwards is the `ICC_PMR_EL1` saved by the same CPU at entry.
 
-**为何安全**：执行上下文为异常入口/出口（本 CPU、IRQ 关闭）；PMR 值属于当前
-CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
+**Why it is safe**: The execution context is exception entry/exit (this CPU, IRQs disabled); the PMR value belongs to the current
+CPU; `eret` then restores the pre-interrupt DAIF state from SPSR.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-以下不变量必须在任何时候都成立：
+The following invariants must hold at all times:
 
-1. **栈帧布局一致性**：汇编入口保存的寄存器布局必须与 Rust 侧
-   `ExceptionContext` 的 `repr(C)` 布局完全匹配。`trapframe_size` 编译期
-   常量注入汇编确保尺寸一致。
+1. **Stack frame layout consistency**: The register layout saved by the assembly entry must exactly match the `repr(C)` layout of the Rust-side
+   `ExceptionContext`. The `trapframe_size` compile-time
+   constant is injected into the assembly to ensure the sizes agree.
 
-2. **页表有效性**：`new_kernel(kernel_root)` 的永久内核根必须持续有效。
-   共享根架构直接保存它；独立根架构的内核任务保持零用户根且不访问用户地址区。
-   用户任务必须在发布前安装其运行时持有的有效用户根。`switch_to` 写入硬件前
-   不验证页表或持有 MM 引用，由调用者保证生命周期与根的用途一致。
+2. **Page table validity**: The permanent kernel root passed to `new_kernel(kernel_root)` must remain valid.
+   Architectures with a shared root save it directly; kernel tasks on architectures with separate roots keep the zero user root and do not access the user address region.
+   A user task must install the valid user root held by the runtime before it is published. Before writing to the hardware, `switch_to` does not
+   verify the page table or hold an MM reference; the caller guarantees that the lifetime and the use of the root are consistent.
 
-3. **异常表已排序**：`fixup_exception` 使用二分查找，要求异常表在调用前
-   已通过 `init_exception_table()` 排序。
+3. **Exception table is sorted**: `fixup_exception` uses binary search and requires that the exception table
+   has been sorted by `init_exception_table()` before the call.
 
-4. **guard 生命周期与迁移**：`ExceptionContextGuard` 必须覆盖 trap handler
-   整个执行期。guard 记录安装时的 per-CPU slot；调度器切离安装者任务前必须挂起并
-   清空当前 CPU slot，切回后恢复到当前 CPU。Drop 必须同时处理原始 slot 和迁移后
-   的当前 CPU slot，避免 trap handler 阻塞/迁移后留下 stale active-exception 标记
-   或在恢复执行后丢失异常上下文标记。嵌套 guard 的 `prev` 指向外层 live guard
-   的 `ExceptionContext`；只要外层 guard 未释放，该指针必须被视为当前任务仍处于
-   外层异常上下文的标记。
+4. **Guard lifetime and migration**: `ExceptionContextGuard` must cover the entire execution of the trap handler.
+   The guard records the per-CPU slot at install time; before the scheduler switches away from the installer task, it must suspend and
+   clear the current CPU slot, and restore it on the current CPU after switching back. Drop must handle both the original slot and the current CPU slot after migration,
+   to avoid leaving a stale active-exception marker after the trap handler blocks/migrates,
+   or losing the exception context marker after execution resumes. The `prev` of a nested guard points to the `ExceptionContext` of the outer live guard;
+   as long as the outer guard has not been released, this pointer must be treated as a marker that the current task is still in
+   the outer exception context.
 
-5. **中断关闭**：`context_switch` 和 `UserContext::run` 的核心操作必须在
-   中断关闭状态下执行。中断关闭保护了 per-CPU 状态和寄存器保存/恢复的原子性。
+5. **Interrupts disabled**: The core operations of `context_switch` and `UserContext::run` must be performed with
+   interrupts disabled. Disabling interrupts protects per-CPU state and the atomicity of register save/restore.
 
-6. **naked 函数调用约定**：所有 naked 函数的参数传递必须与汇编中的寄存器
-   使用一致（如 x86_64 的 `rdi`/`rsi` 用于 `context_switch`）。
+6. **Naked function calling convention**: The argument passing of all naked functions must be consistent with the register
+   usage in the assembly (for example, `rdi`/`rsi` on x86_64 for `context_switch`).
 
-## 线程安全
+## Thread Safety
 
-| 类型 | `Send` 条件 | `Sync` 条件 |
+| Type | `Send` condition | `Sync` condition |
 | ---- | ----------- | ----------- |
-| `ExceptionContext` | `Copy` 类型，自动 `Send` | 自动 `Sync` |
-| `UserContext` | `Copy`/字段均为 `Send` | 自动 `Sync` |
-| `TaskContext` | 字段均为 `Send` | 字段均为 `Sync`，但不应跨 CPU 共享 |
-| `ExceptionContextGuard` | 不应跨线程转移（绑定安装时 slot） | 不可共享使用 |
+| `ExceptionContext` | A `Copy` type, automatically `Send` | Automatically `Sync` |
+| `UserContext` | `Copy` / all fields are `Send` | Automatically `Sync` |
+| `TaskContext` | All fields are `Send` | All fields are `Sync`, but it should not be shared across CPUs |
+| `ExceptionContextGuard` | Should not be transferred across threads (bound to the install-time slot) | Must not be shared |
 
-- `TaskContext::switch_to` 是 unsafe 方法；调用者保证运行中与目标上下文独占，
-  并排除普通 IRQ、迁移和其他 CPU 上的并发执行。仅 `&mut self` 不能证明这些条件。
-- `ACTIVE_EXCEPTION_CONTEXT_PTR` 为 per-CPU 变量。安装路径写当前 CPU 副本；
-  迟到的 Drop 可能在迁移后访问原 CPU slot，也可能需要清理迁移后当前 CPU 的恢复
-  标记，因此恢复路径必须使用 CAS，不能无条件覆盖任一 CPU slot。
-- `IRQ` 和 `PAGE_FAULT` 分布式切片为编译期静态数据，运行时只读。
+- `TaskContext::switch_to` is an unsafe method; the caller guarantees exclusive access to the running and target contexts,
+  and rules out ordinary IRQs, migration, and concurrent execution on other CPUs. `&mut self` alone cannot prove these conditions.
+- `ACTIVE_EXCEPTION_CONTEXT_PTR` is a per-CPU variable. The install path writes the current CPU's copy;
+  a late Drop may access the original CPU's slot after migration, and may also need to clear the restore
+  marker of the post-migration current CPU, so the restore path must use CAS and must not unconditionally overwrite either CPU's slot.
+- The `IRQ` and `PAGE_FAULT` distributed slices are compile-time static data and read-only at runtime.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 | ---- | -------- | -------- | -------- | -------- |
-| T-01 | 用户通过 `user_copy` 传入恶意地址导致内核 panic | 高 | `user_copy` 访问无效用户指针且异常表条目缺失 | 异常表机制覆盖所有 `copy_user.S` 中的访存指令；`fixup_exception` 拦截内核态 Page Fault 并恢复到安全路径 |
-| T-02 | trap frame 布局与汇编不一致导致寄存器错位 | 高 | 修改 `ExceptionContext` 字段顺序但未同步汇编 | `trapframe_size` 编译期常量注入汇编；`repr(C)` 保证内存布局可预测 |
-| T-03 | LoongArch64 `emulate_unaligned` 解码未知指令导致寄存器损坏 | 高 | 故障指令为非预期的操作码 | 未匹配的操作码返回 `Err(UnalignedError)`，不修改寄存器；trap handler panic 而非继续执行 |
-| T-04 | `active_exception_context()` 返回过期或 stale trapframe | 高 | trap handler 阻塞/迁移后原 CPU slot 未清理，或调用者持久保存快照来源 | API 只返回按值快照；context switch 挂起并清空当前 CPU slot、切回后恢复当前 CPU slot；guard Drop 用 CAS 恢复原始/当前 slot |
-| T-05 | `switch_to` 使用无效页表根导致 TLB 填充错误地址 | 高 | `TaskContext` 的页表根被错误设置 | `new_kernel` 显式接收永久根；用户根由 `set_page_table_root` 安装，调用方保证页表有效期 |
-| T-06 | IDT/向量表条目指向错误地址 | 高 | 汇编符号名拼写错误或链接脚本问题 | `trap_handler_table` 为汇编定义的固定大小数组；IDT 初始化通过 `set_handler_addr` 填充 |
-| T-07 | 中断未关闭时调用 `switch_to` 或 `run` | 中 | 调用者违反调用约束 | `run()` 内部调用 `disable_local_irq()`；`switch_to` 要求调用者保证关中断 |
-| T-08 | `ExceptionContextGuard` 嵌套导致 per-CPU 指针被覆盖 | 低 | trap handler 执行期间再次触发异常 | `swap` 语义保存前一个值，guard drop 时用 CAS 恢复；深层嵌套通过 guard 链正确恢复，且不会覆盖后续新 trap |
-| T-09 | LoongArch64 用户态构造恶意非对齐指令字 | 高 | 用户态程序执行非对齐访问，故障指令字被 `emulate_unaligned` 解码为意外操作 | `emulate_unaligned` 仅修改指令编码中指定的目标寄存器；未匹配操作码返回错误不修改任何状态；操作码掩码仅匹配已知指令类型 |
-| T-10 | `init_trap()` 被重复调用导致硬件状态不一致 | 中 | 二次调用覆盖 GDT/IDT/向量表等已激活的硬件结构 | 由调用者保证仅调用一次（boot 阶段单线程执行）；无运行时防护 |
-| T-11 | x86_64 `orig_rax` 被恶意篡改导致 syscall 重启异常 | 中 | 用户态通过信号处理器修改 trap frame 中的 `orig_rax` | `orig_rax` 仅在 `syscall_entry` 汇编中写入；x86_64 信号帧只导出 Linux ABI 状态，恢复时重置 `orig_rax`；x86_64 `EnterUserFrame.kernel_rsp` 也不进入用户信号帧；signal delivery 代码通过 `syscall_restart_error()` 判断重启条件 |
-| T-12 | `rollback_syscall` 在非 syscall 上下文调用 | 低 | 信号处理代码误判上下文类型 | `is_from_syscall()` 检查 `orig_rax != u64::MAX`，非 syscall 上下文时 `rollback_syscall()` 和 `restart_with_syscall()` 为 no-op |
-| T-13 | IRQ 被误分类为 NMI（或反之） | 高 | `use_nmi_path` 的 SPSR.I / 入口 PMR 判断错误，或机制 readiness 标志（`pmr::is_ready` / `allint_active`）错误 | NMI handler 在错误上下文约束下执行（如普通 IRQ 按 NMI 规则），或 Superpriority NMI 被当普通 IRQ 丢失优先级 | 分类依赖硬件状态快照 + readiness 双重门控；降级构建永不触碰 NMI 寄存器；NMI path 保持 ALLINT/PMR 防嵌套 |
-| T-14 | x86_64 恶意 FP 信号帧使 XRSTOR 触发内核异常 | 高 | 用户修改 MXCSR/header/长度/指针 | 内核异常或数据泄露 | checked copy、最大长度限制、feature/header/magic 校验、可信 MXCSR mask、64 字节对齐的私有存储；无效帧投递 SIGSEGV |
+| T-01 | User passes a malicious address through `user_copy`, causing a kernel panic | High | `user_copy` accesses an invalid user pointer and the exception-table entry is missing | The exception-table mechanism covers all memory-access instructions in `copy_user.S`; `fixup_exception` intercepts kernel-mode Page Faults and resumes on a safe path |
+| T-02 | trap frame layout inconsistent with assembly causes register misalignment | High | `ExceptionContext` field order changed without updating the assembly | The `trapframe_size` compile-time constant is injected into the assembly; `repr(C)` keeps the memory layout predictable |
+| T-03 | LoongArch64 `emulate_unaligned` decodes an unknown instruction and corrupts registers | High | The faulting instruction has an unexpected opcode | An unmatched opcode returns `Err(UnalignedError)` without modifying registers; the trap handler panics instead of continuing |
+| T-04 | `active_exception_context()` returns an expired or stale trapframe | High | The original CPU slot is not cleaned after the trap handler blocks/migrates, or the caller persists the snapshot source | The API returns only a by-value snapshot; context switch suspends and clears the current CPU slot and restores it after switching back; the guard's Drop uses CAS to restore the original/current slot |
+| T-05 | `switch_to` uses an invalid page-table root, causing TLB fills of wrong addresses | High | `TaskContext`'s page-table root is set incorrectly | `new_kernel` explicitly takes a permanent root; user roots are installed by `set_page_table_root`, and the caller guarantees page-table validity |
+| T-06 | IDT/vector table entry points to a wrong address | High | Misspelled assembly symbol name or a linker-script problem | `trap_handler_table` is a fixed-size array defined by assembly; IDT initialization fills it via `set_handler_addr` |
+| T-07 | `switch_to` or `run` called with interrupts not disabled | Medium | Caller violates the calling constraints | `run()` calls `disable_local_irq()` internally; `switch_to` requires the caller to guarantee interrupts are disabled |
+| T-08 | `ExceptionContextGuard` nesting overwrites the per-CPU pointer | Low | Another exception is triggered while a trap handler is running | `swap` semantics save the previous value and the guard restores it with CAS on drop; deep nesting is restored correctly through the guard chain and does not overwrite a later new trap |
+| T-09 | LoongArch64 user mode crafts a malicious unaligned instruction word | High | A user program performs an unaligned access and the faulting instruction word is decoded by `emulate_unaligned` into an unexpected operation | `emulate_unaligned` modifies only the destination register specified in the instruction encoding; an unmatched opcode returns an error without modifying any state; the opcode masks match only known instruction types |
+| T-10 | `init_trap()` called repeatedly leaves hardware state inconsistent | Medium | A second call overwrites already-active hardware structures such as GDT/IDT/vector tables | The caller guarantees a single call (single-threaded execution in the boot phase); no runtime protection |
+| T-11 | x86_64 `orig_rax` maliciously tampered with, causing abnormal syscall restart | Medium | User mode modifies `orig_rax` in the trap frame through a signal handler | `orig_rax` is written only in the `syscall_entry` assembly; the x86_64 signal frame exports only Linux ABI state and resets `orig_rax` on restore; x86_64 `UserContext::kernel_rsp` also does not enter the user signal frame; signal delivery code decides the restart condition via `syscall_restart_error()` |
+| T-12 | `rollback_syscall` called in a non-syscall context | Low | Signal handling code misjudges the context type | `is_from_syscall()` checks `orig_rax != u64::MAX`; in a non-syscall context `rollback_syscall()` and `restart_with_syscall()` are no-ops |
+| T-13 | IRQ misclassified as NMI (or vice versa) | High | `use_nmi_path` misjudges SPSR.I / entry PMR, or the readiness flags (`pmr::is_ready` / `allint_active`) are wrong; impact: an NMI handler runs under wrong context constraints (e.g. a normal IRQ treated under NMI rules), or a Superpriority NMI is treated as a normal IRQ and loses its priority | Classification is double-gated by a hardware-state snapshot plus readiness; degraded builds never touch NMI registers; the NMI path keeps ALLINT/PMR nesting protection |
+| T-14 | Malicious x86_64 FP signal frame makes XRSTOR raise a kernel exception | High | The user tampers with `MXCSR`, the XSAVE header, the frame length or pointers; impact: a kernel exception or a data leak | checked copy, maximum-length limit, feature/header/magic validation, trusted MXCSR mask, 64-byte-aligned private storage; an invalid frame delivers SIGSEGV |
 
-## 故障模式与影响分析（FMEA）
+## Failure Modes and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Failure Cause | Local Effect | System Effect | Severity | Mitigation |
 | ---- | -------- | -------- | -------- | -------- | ------ | -------- |
-| F-01 | Page Fault 无法处理导致 panic | 页面未映射 + 异常表无匹配条目 + 无注册 handler | 当前 CPU 停止 | 系统崩溃 | 1 | 三级处理：注册 handler → 异常表修正 → panic 附带诊断信息 |
-| F-02 | `user_copy` 返回非零值（部分拷贝） | 用户缓冲区部分无效 | 系统调用返回 -EFAULT | 用户进程收到错误，可重试 | 3 | 调用者检查返回值；异常表机制保证不 panic |
-| F-03 | `emulate_unaligned` 返回错误 | 故障指令为不支持的 FP 或向量操作 | 非对齐访问失败 | 当前进程可能收到 SIGBUS | 3 | trap handler panic（内核态）/ 返回错误（用户态） |
-| F-04 | 上下文切换期间中断导致寄存器损坏 | 调用者未关中断 | 当前任务状态不一致 | 调度器数据损坏 | 1 | API 约束要求关中断调用；`run()` 自行管理中断状态 |
-| F-05 | GDT/IDT 初始化顺序错误 | `init_trap()` 调用前 per-CPU 未初始化 | 段寄存器加载失败 | CPU 异常 | 1 | 文档标注前置条件；boot 代码按固定顺序调用 |
-| F-06 | FP 状态跨任务泄漏 | `fp-simd` 未启用但任务使用 FP 指令 | FP 寄存器包含前一个任务数据 | 信息泄漏 | 2 | 未启用 `fp-simd` 时不保存/恢复；依赖内核配置禁用用户态 FP |
-| F-07 | `ExceptionContextGuard` 提前 drop | trap handler 中 guard 被 shadow 或手动 drop | `active_exception_context()` 返回错误指针 | NMI 看门狗获取过期快照 | 2 | guard 声明为 handler 第一个局部变量，生命周期覆盖整个函数 |
-| F-13 | `ExceptionContextGuard` 迟到 drop 写错 CPU slot | trap handler 中阻塞并迁移，Drop 时重新计算当前 CPU | 原 CPU长期保持 stale active-exception 标记，或迁移后当前 CPU 标记未恢复 | `check_preempt_pending()` 一直跳过抢占，或 trap handler 后半段错误允许抢占 | 1 | guard 保存原始 slot 并 CAS 恢复；context switch 挂起/恢复当前 CPU slot |
-| F-08 | `emulate_unaligned` 内部 `.unwrap()` panic | 非对齐指令解码成功但实际访问故障（页不存在） | 当前 CPU trap handler panic | 系统崩溃 | 1 | `_unaligned_read`/`_unaligned_write` 汇编辅助函数含异常表条目，通常能安全恢复；若异常表未覆盖则 panic |
-| F-09 | trap handler 内 panic 触发 double fault | panic 过程中再次触发异常 | panic unwind 路径访问无效内存 | 系统不可恢复 | 1 | panic handler 应最小化操作；x86_64 #DF 有独立栈（TSS IST） |
-| F-10 | `init_trap` 重复调用导致 IDT/向量表重置 | boot 代码逻辑错误 | 中断配置被覆盖 | 后续中断处理异常 | 1 | 前置条件约束（仅调用一次）；无运行时防护 |
-| F-11 | `syscall_restart_error` 误判导致 syscall 不必要重启 | 返回值恰好等于 ERESTART 常量但非 syscall 上下文 | 用户态 syscall 被意外重启 | 用户进程行为异常 | 3 | `is_from_syscall()` 前置检查过滤非 syscall 上下文；重启常量为负值，正常返回值不会匹配 |
-| F-12 | `rollback_syscall` rip 回退到非法地址 | `rip` 值小于 2（syscall 指令长度） | `saturating_sub` 保证不溢出，但回退后 rip 可能指向非法指令 | 用户进程收到 SIGILL | 3 | `saturating_sub` 防止下溢；用户态 rip 由内核设置，正常情况下不会小于 2 |
+| F-01 | A Page Fault cannot be handled, causing a panic | The page is unmapped + no matching exception table entry + no registered handler | The current CPU halts | System crash | 1 | Three-level handling: registered handler → exception table fixup → panic with diagnostic information |
+| F-02 | `user_copy` returns a non-zero value (partial copy) | Part of the user buffer is invalid | The system call returns -EFAULT | The user process receives an error and may retry | 3 | The caller checks the return value; the exception table mechanism guarantees no panic |
+| F-03 | `emulate_unaligned` returns an error | The faulting instruction is an unsupported FP or vector operation | The unaligned access fails | The current process may receive SIGBUS | 3 | The trap handler panics (kernel mode) / returns an error (user mode) |
+| F-04 | An interrupt during a context switch corrupts registers | The caller did not disable interrupts | The current task state is inconsistent | Scheduler data is corrupted | 1 | The API contract requires calling with interrupts disabled; `run()` manages the interrupt state itself |
+| F-05 | Wrong GDT/IDT initialization order | per-CPU is uninitialized before `init_trap()` is called | Segment register loading fails | CPU exception | 1 | The documentation states the precondition; the boot code calls in a fixed order |
+| F-06 | FP state leaks across tasks | `fp-simd` is not enabled but a task uses FP instructions | FP registers contain the previous task's data | Information leak | 2 | Without `fp-simd`, nothing is saved/restored; relies on the kernel configuration to disable user-mode FP |
+| F-07 | `ExceptionContextGuard` is dropped early | The guard is shadowed or manually dropped in the trap handler | `active_exception_context()` returns a wrong pointer | The NMI watchdog obtains an expired snapshot | 2 | The guard is declared as the first local variable of the handler, and its lifetime covers the entire function |
+| F-13 | A late drop of `ExceptionContextGuard` writes the wrong CPU slot | The trap handler blocks and migrates, and Drop recomputes the current CPU | The original CPU keeps a stale active-exception marker for a long time, or the current CPU marker is not restored after migration | `check_preempt_pending()` skips preemption indefinitely, or the second half of the trap handler wrongly allows preemption | 1 | The guard saves the original slot and restores it with CAS; a context switch suspends/restores the current CPU slot |
+| F-08 | `emulate_unaligned` access failure | The unaligned instruction decodes successfully but the actual access faults (page not present) | `unaligned_read`/`unaligned_write` see -1 from the assembly helper and `emulate_unaligned` returns `Err(UnalignedError)` via `?` | The caller (e.g. the trap handler) decides how to handle the error; in kernel mode it may panic | 1 | The `_unaligned_read`/`_unaligned_write` assembly helpers have exception table entries and return an error on failure instead of panicking inside the function |
+| F-09 | A panic inside the trap handler triggers a double fault | Another exception is triggered during the panic | The panic unwind path accesses invalid memory | The system is unrecoverable | 1 | The panic handler should minimize its operations; x86_64 #DF has a separate stack (TSS IST) |
+| F-10 | Repeated calls to `init_trap` reset the IDT/vector table | Boot code logic error | Interrupt configuration is overwritten | Subsequent interrupt handling is abnormal | 1 | Precondition constraint (call only once); no runtime protection |
+| F-11 | `syscall_restart_error` misjudges, causing an unnecessary syscall restart | The return value happens to equal an ERESTART constant but the context is not a syscall | The user-mode syscall is restarted unexpectedly | The user process behaves abnormally | 3 | The `is_from_syscall()` precheck filters out non-syscall contexts; the restart constants are negative values, which normal return values do not match |
+| F-12 | `rollback_syscall` rolls rip back to an illegal address | The `rip` value is less than 2 (the length of the syscall instruction) | `saturating_sub` guarantees no overflow, but after the rollback rip may point to an illegal instruction | The user process receives SIGILL | 3 | `saturating_sub` prevents underflow; the user-mode rip is set by the kernel and is normally never less than 2 |
 
-## 故障管理
+## Fault Management
 
-`kcpu` 通过以下机制处理故障：
+`kcpu` handles faults through the following mechanisms:
 
-- **异常表修正**：`user_copy` 的 Page Fault 通过异常表安全恢复，返回
-  未拷贝字节数（0 表示成功）。
-- **分布式 handler 链**：Page Fault 和 IRQ handler 通过 `linkme` 分布式
-  切片注册，按注册顺序尝试处理。
-- **panic**：无法恢复的异常（未知向量、未处理的 Page Fault、#GP 等）
-  直接 panic，附带完整 trap frame 和 backtrace 信息。
-- **`Result` 传播**：LoongArch64 的 `emulate_unaligned` 返回
-  `Result<(), UnalignedError>`，允许调用者决定处理方式。
+- **Exception table fixup**: Page Faults in `user_copy` are safely recovered through the exception table, returning
+  the number of uncopied bytes (0 means success).
+- **Distributed handler chain**: Page Fault and IRQ handlers are registered through `linkme` distributed
+  slices and are tried in registration order.
+- **panic**: Unrecoverable exceptions (unknown vectors, unhandled Page Faults, #GP, etc.)
+  panic directly, with the complete trap frame and backtrace information.
+- **`Result` propagation**: The LoongArch64 `emulate_unaligned` returns
+  `Result<(), UnalignedError>`, allowing the caller to decide how to handle it.
 
-## 隐私分析
+## Privacy Analysis
 
-本模块不处理用户数据内容。`user_copy` 在内核与用户空间之间搬运数据，
-但不解析或记录数据内容。FP 寄存器中可能包含用户态敏感数据，
-`fp-simd` feature 启用后通过保存/恢复防止跨任务泄漏。
+This module does not process the content of user data. `user_copy` moves data between the kernel and user space,
+but does not parse or record the data content. FP registers may contain sensitive user-mode data;
+once the `fp-simd` feature is enabled, save/restore prevents leakage across tasks.
 
-## 已知限制
+## Known Limitations
 
-1. **trap handler 不支持嵌套**：`ExceptionContextGuard` 使用单个 per-CPU
-   指针，深层嵌套异常仅通过 guard 链恢复前一个值，不维护完整栈。
+1. **The trap handler does not support nesting**: `ExceptionContextGuard` uses a single per-CPU
+   pointer; deeply nested exceptions only restore the previous value through the guard chain and do not maintain a complete stack.
 
-2. **IRQ handler 最多一个**：`handle_trap!` 宏仅调用第一个注册的
-   handler，多个 handler 时打印警告并忽略后续。
+2. **At most one IRQ handler**: The `handle_trap!` macro calls only the first registered
+   handler; when there are multiple handlers it prints a warning and ignores the rest.
 
-3. **LoongArch64 非对齐模拟范围有限**：仅覆盖基本加载/存储和标量浮点指令，
-   不覆盖 SIMD（LSX/LASX）指令的非对齐情况。
+3. **LoongArch64 unaligned emulation has limited coverage**: It covers only basic load/store and scalar floating-point instructions,
+   and does not cover unaligned accesses by SIMD (LSX/LASX) instructions.
 
-4. **`context_switch` 无栈溢出检测**：新任务的内核栈必须有足够空间容纳
-   `ContextSwitchFrame`，否则 `prepare_initial_frame` 写越界。
+4. **`context_switch` has no stack overflow detection**: The kernel stack of a new task must have enough space to hold
+   `ContextSwitchFrame`, otherwise `prepare_initial_frame` writes out of bounds.
 
-5. **x86_64 扩展状态范围**：仅支持 x87/SSE/YMM；AVX-512、AMX 和 supervisor
-   状态不启用、不报告。AP 必须兼容 BSP 的保存格式；不提供异构 CPU 降级或热插拔协商。
+5. **x86_64 extended-state scope**: only x87/SSE/YMM are supported; AVX-512, AMX and supervisor
+   state are neither enabled nor reported. APs must be compatible with the BSP's save format; no heterogeneous-CPU degradation or hotplug negotiation is provided.
 
-6. **riscv64 hwprobe snapshot 依赖固件描述**：RISC-V capability snapshot
-   只报告 device tree 或内核地址布局中可确定的信息。未描述的 vendor id
-   和扩展按 Linux hwprobe ABI 返回 `0` / unknown，避免在 S-mode syscall
-   路径读取可能 fault 的 M-mode CSR。
+6. **The riscv64 hwprobe snapshot depends on firmware descriptions**: The RISC-V capability snapshot
+   reports only information that can be determined from the device tree or the kernel address layout. Undescribed vendor ids
+   and extensions are returned as `0` / unknown according to the Linux hwprobe ABI, to avoid reading M-mode CSRs that may fault
+   on the S-mode syscall path.
 
-## 审计清单
+## Audit Checklist
 
-修改 `kcpu` 时需验证：
+When modifying `kcpu`, verify the following:
 
-- [ ] 修改 `ExceptionContext` 字段后同步更新汇编中的 `trapframe_size` 和
-      寄存器保存/恢复序列。
-- [ ] 新增 `unsafe` 块均有 `SAFETY:` 注释说明不变量。
-- [ ] 修改 `ContextSwitchFrame` 布局后同步更新 `context_switch` naked 函数
-      中的 `push`/`pop` 序列。
-- [ ] 修改 GDT 段选择子常量后验证 `UserContext::new` 中的 `cs`/`ss` 值。
-- [ ] 新增异常向量处理时检查是否需要更新异常表或注册新 handler。
-- [ ] LoongArch64 新增指令模拟时验证操作码掩码和寄存器编号范围。
-- [ ] 修改 `copy_user.S` / `atomic_user.S` 后确认每条访存指令均有对应的 `_asm_extable` 条目。
-- [ ] 新增 per-CPU 变量时验证初始化顺序（percpu init → `init_trap`）。
-- [ ] 新增 RISC-V hwprobe key 时确认数据来源是否来自启动期 snapshot，
-      并同步 `ksyscall` 聚合/过滤语义。
-- [ ] 修改页表切换逻辑后验证 TLB 刷新语义是否正确。
-- [ ] 修改 `fp-simd` feature 门控代码后验证所有架构的一致性。
-- [ ] 修改 x86_64 `orig_rax` 或 syscall 重启逻辑后验证 `excp.S` 中的 push/pop 序列与 `ExceptionContext` 布局一致。
-- [ ] 新增可重启 syscall 错误码时同步更新 `syscall_restart_error()` 中的常量列表。
+- [ ] After modifying `ExceptionContext` fields, update `trapframe_size` and the
+      register save/restore sequences in the assembly accordingly.
+- [ ] Every newly added `unsafe` block has a `SAFETY:` comment stating its invariants.
+- [ ] After modifying the `ContextSwitchFrame` layout, update the `push`/`pop` sequences
+      in the `context_switch` naked function accordingly.
+- [ ] After modifying the GDT segment selector constants, verify the `cs`/`ss` values in `UserContext::new`.
+- [ ] When adding handling for a new exception vector, check whether the exception table needs updating or a new handler needs to be registered.
+- [ ] When adding new instruction emulation on LoongArch64, verify the opcode masks and the register number ranges.
+- [ ] After modifying `copy_user.S` / `atomic_user.S`, confirm that every memory-access instruction has a corresponding `_asm_extable` entry.
+- [ ] When adding a new per-CPU variable, verify the initialization order (percpu init → `init_trap`).
+- [ ] When adding a new RISC-V hwprobe key, confirm whether its data comes from the boot-time snapshot,
+      and update the `ksyscall` aggregation/filtering semantics accordingly.
+- [ ] After modifying the page table switching logic, verify that the TLB flush semantics are correct.
+- [ ] After modifying code gated by the `fp-simd` feature, verify consistency across all architectures.
+- [ ] After modifying x86_64 `orig_rax` or the syscall restart logic, verify that the push/pop sequences in `excp.S` are consistent with the `ExceptionContext` layout.
+- [ ] When adding a new restartable syscall error code, update the constant list in `syscall_restart_error()` accordingly.
 
 ## Interrupt Callback Safety
 

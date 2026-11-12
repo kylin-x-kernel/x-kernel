@@ -145,7 +145,7 @@ the service, not manager ownership, avoiding a strong reference cycle.
 - An unactivated Creating/Prepared attempt can return to Empty after disposal.
 
 The fixed positive slot limit includes all nonempty states. The manager grows
-capacity only when demand has no usable worker and a slot is available.
+capacity when no slot is reserved yet (the startup baseline) or when demand has no usable worker and a slot is available.
 Saturation retains source demand. Excess idle workers retire while one idle
 baseline remains; occupied workers never retire. Checked idle deadlines outside
 the timer range are omitted, leaving the worker usable.

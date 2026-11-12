@@ -38,7 +38,7 @@ locks; the final table destructor has exclusive ownership of its entries.
 
 | ID | Threat and asset | Severity | Trigger | Response and residual risk |
 |---|---|---|---|---|
-| T-01 | Access through invalid descriptor | Medium | Negative, closed, or out-of-capacity FD | `FlattenObjects` lookup rejects absent indices and returns `BadFileDescriptor`; ABI-specific checks remain external. |
+| T-01 | Access through invalid descriptor | Medium | Negative, closed, or out-of-capacity FD | `FileSlots` lookup rejects absent indices and returns `BadFileDescriptor`; ABI-specific checks remain external. |
 | T-02 | Quota bypass | Medium | Caller uses `insert_file`/fixed-slot duplication for an untrusted request | `add_file` and `duplicate_from` share an allocator that bounds the new descriptor number by the supplied soft limit and physical capacity. Other paths need explicit caller policy. |
 | T-03 | File reference leaks across exec | High | Caller omits close-on-exec cleanup | `remove_cloexec_files` returns flagged entries; exec owner must invoke cleanup and close them outside the lock. |
 | T-04 | Reentrant close deadlock | Medium | Flush callback needs a held table lock | Removal returns owned entries and `kresources` closes after unlocking; direct callers must do likewise. |

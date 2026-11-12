@@ -51,10 +51,10 @@ device callbacks, user pointers, or network/file inputs in this crate):
 | `unmap_dma_buffer(dma_addr, buffer, direction)` | `dma_addr: DmaBusAddress`, `buffer: NonNull<[u8]>` | must match a prior `map_dma_buffer` result | mapping must be active and length must match — panics otherwise |
 
 A production call site exercising `allocate_dma_memory` /
-`deallocate_dma_memory` is the device-res provider adapter
-`drivers/adapters/xkernel/device-res/src/dma.rs`
+`deallocate_dma_memory` is the driver OS API provider adapter
+`drivers/adapters/xkernel/provider/src/dma.rs`
 (`alloc_coherent` / `free_coherent`), which drivers reach through the
-`DmaCoherent` contract.
+`driver_os_api` `DmaOp` contract (for example `CoherentMem`).
 
 Devices never pass pointers into this crate; they only read/write the
 ranges the drivers granted (see Threat T-02).
@@ -116,10 +116,10 @@ each with `# Safety` sections and `SAFETY:` comments:
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
 | T-01 | Driver exposes a coherent bus address to a device that must not read it | Medium — kernel data disclosure to a device | Caller violates the `# Safety` contract | Contract documentation; allocation is the only path to device-reachable memory and is explicit. Residual risk accepted at the driver trust level. |
-| T-02 | Device DMA targeting memory outside its grant | High — kernel memory corruption | Mis-programmed device or descriptor | Grant sizes are page-exact and devices only learn the bounce/coherent addresses the driver programmed; cannot defend against arbitrary device DMA (no IOMMU here) — recorded as the core residual risk of the crate. |
+| T-02 | Device DMA targeting memory outside its grant | High — kernel memory corruption | Mis-programmed device or descriptor | Coherent grants are page-exact (bounce grants are byte-granular TLSF sub-allocations sharing the pool) and devices only learn the bounce/coherent addresses the driver programmed; cannot defend against arbitrary device DMA (no IOMMU here) — recorded as the core residual risk of the crate. |
 | T-03 | Double map / mismatched unmap by a driver | Medium — aliasing or allocator corruption | Driver bookkeeping bugs | Public `map_dma_buffer` (`io/kdma/src/lib.rs`) rejects a duplicate bus address via the `active_mappings` lookup in `DmaAllocator::map_dma_buffer` (`io/kdma/src/dma.rs`, `contains_key` check → `AllocError::InvalidInput`); public `unmap_dma_buffer` panics on a `remove()` miss in `DmaAllocator::unmap_dma_buffer` and `assert_eq!`s the recorded length; `bounce_pool::BouncePool::deallocate` (`io/kdma/src/bounce_pool.rs`) asserts pool containment. |
 | T-04 | Bounce buffer retention after unmap failure | Low — stale kernel data readable by device | Caller forgets to unmap before dropping | RAII does not span map/unmap; the `active_mappings` table (`DmaAllocator.active_mappings`, keyed by bus address) keeps every leaked mapping enumerable, and the `dma-trace` feature (`trace_coherent_alloc`/`trace_coherent_free` in `src/dma.rs`) logs allocation sites and flags duplicate or mismatched coherent frees so leaks can be located in trace builds. |
-| T-05 | Uncached mapping left cached on free | Medium — cache-coherency corruption on reuse | Attribute-restore failure ignored | Restore failures are currently ignored (`let _ =`) after logging in the release path; accepted because the pages are returned to the DMA-only pool, not the general allocator. |
+| T-05 | Uncached mapping left cached on free | Medium — cache-coherency corruption on reuse | Attribute-restore failure ignored | Restore failures are currently ignored (`let _ =`) after logging in the release path; accepted as a residual risk: the pages are still returned to the global allocator via `dealloc_dma_pages` (tagged `UsageKind::Dma`) even if the restore failed. |
 
 ## Failure Modes
 

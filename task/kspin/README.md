@@ -97,7 +97,7 @@ RAII guards that manage critical sections:
 - `NoPreemptIrqSave`: Disables both preemption and IRQs
 
 Guards also implement the `kcpu_slot` execution-context contracts:
-`IrqSave`, `NoPreemptIrqSave` (and `NoPreempt` with the `preempt` feature)
+`IrqSave`, `NoPreemptIrqSave` and `NoPreempt` (without the `preempt` feature this relies on a cooperative scheduler)
 implement `CpuPin`, and `NoPreemptIrqSave` additionally implements
 `CpuLocalGuard`, which is what makes `kcpu_slot`'s safe slot accessors
 available. Guards learn the current logical CPU through the

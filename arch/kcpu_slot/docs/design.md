@@ -1,14 +1,14 @@
-# kcpu_slot 设计
+# kcpu_slot Design
 
-unsafe 边界的现状、目标能力模型和分阶段收敛方案见
-[`unsafe-convergence.md`](unsafe-convergence.md)。
+For the current state of the unsafe boundary, the target capability model, and the phased convergence plan, see
+[`unsafe-convergence.md`](unsafe-convergence.md).
 
-`kcpu_slot` 是独立于旧 `percpu` 的架构层 crate。它把 per-CPU 数据表示为
-`.cpu_slot.template` 中的隐藏模板，并由链接脚本为每个 possible CPU 预留等距副本。CPU
-启动时复制模板、安装架构 base register；热路径通过 `base + offset` 直接访问，
-不需要哈希表或锁。
+`kcpu_slot` is an architecture-layer crate independent of the old `percpu`. It represents per-CPU data as hidden templates in
+`.cpu_slot.template`, and the linker script reserves equally spaced copies for every possible CPU. At CPU
+startup it copies the template and installs the architecture base register; the hot path accesses data directly through `base + offset`,
+with no hash table or lock.
 
-## API 约束
+## API Constraints
 
 - `CpuSlot::with_current_irq_disabled` provides scoped shared access for
   `T: Sync`. The masking contract belongs to kiface-cpu-api, not kcpu_slot.
@@ -21,76 +21,74 @@ unsafe 边界的现状、目标能力模型和分阶段收敛方案见
   pin when exclusion spans queue selection and submission, multiple mutable
   slots, initialization, or a later context switch. Do not use it inside the
   IRQ-mask provider itself: that would recurse through `kiface_cpu_api::CpuLocalIrqIf`.
-- `cpu_slot!` 用于按位可复制的静态模板；复杂初始化应由上层为每个 CPU 单独构造。
-- `cpu_slot_cell!` 提供 `UnsafeCell<T>`，只允许在调用者已建立排他性或本地 CPU
-  访问协议时使用；`CpuSlotCell::read`/`write` 提供单字读写的便捷入口，读改写
-  与原子语义仍由具体架构实现补齐，不能把普通读改写误当成原子操作。
-- `CpuPin` 是执行上下文契约，由上层 guard 实现：`kspin::IrqSave`、
-  `kspin::NoPreemptIrqSave`、`kspin::NoPreempt` 均已实现（关闭 `preempt`、仅
-  协作式调度时 `NoPreempt` 同样固定当前 CPU）。它只表达“CPU 固定”，不会自行
-  关闭抢占；调度器/中断层负责创建 guard。`kspin` guard 经 `kspin::CurrentCpuIf`
-  （由 `kplat` 提供）取得当前逻辑 CPU——这些是 `kspin`/`kplat` 之间的上层契约，
-  `kcpu_slot` 只定义 `CpuPin`/`CpuLocalGuard` trait，自身不依赖 `kspin`/`kplat`。
-- `CpuLocalGuard` capability trait：要求不迁移且本地 IRQ 不重入，当前唯一实现是
-  `kspin::NoPreemptIrqSave`。安全访问器 `CpuSlot::get`、`CpuSlotCell::get`、
-  `read`/`write`、`current_shared`/`shared_current` 等只对它或 `T: Sync` 开放；
-  通用可变引用只保留显式 unsafe 的 `get_mut_unchecked`。`CpuLocalGuard` 只证明
-  执行上下文互斥，不能证明不同嵌套 guard 之间的对象唯一借用。
-- 底层 `*_unchecked` 入口保留 `unsafe` 与更宽的 `CpuPin` 约束，只留给
-  初始化和特殊架构路径。
-- `CpuSlot::at`、`CpuSlotCell::shared_at`、`CpuSlot::current_shared` 与
-  `DynamicCpuSlot::get_remote` 在 `T: Sync` 下开放共享读取；远端写入不提供
-  无条件 API。
-- `begin_cpu_init` 复制模板并设置寄存器，`BootCpuToken::publish` 在 CPU-local
-  初始化结束后发布可供远端访问的 checked `CpuArea`。
-- `CpuSlotChunk` 使用平台提供的 backing memory；`DynamicCpuSlot` 在每个 CPU 上分别
-  初始化，初始化失败会回滚已构造对象，handle drop 时逐 CPU 析构。chunk 使用共享
-  bump 元数据，允许多个 dynamic handle 同时存活。backing 或 stride 对齐不满足时返回
-  `SlotInitError::Misaligned`，与空间耗尽 `NoSpace` 区分。除类型对齐外，backing 基址
-  与 stride 还必须是 `CPU_SLOT_AREA_ALIGN` 的倍数，否则不同 CPU 的对象会共享 cache
-  line。
-- `DynamicCpuSlot` handle 在 `T: Send` 下可跨线程共享（`Sync`）：handle 构造后字段
-  不可变，各线程经 guard 只观察各自 CPU 的实例；唯一跨线程共享单值的
-  `get_remote` 另行要求 `T: Sync`。chunk 本身因 bump cursor 保持非 `Sync`，
-  分配结束后通过泄漏的 `&'static CpuSlotChunk` 固定 handle 生命周期。
+- `cpu_slot!` is for statically bit-copyable templates; complex initialization should be constructed separately for each CPU by the upper layer.
+- `cpu_slot_cell!` provides `UnsafeCell<T>` and may only be used when the caller has established an exclusive or local-CPU
+  access protocol; `CpuSlotCell::read`/`write` offer a convenient entry point for single-word reads and writes, while read-modify-write
+  and atomic semantics are still supplied by the concrete architecture implementation; a plain read-modify-write must not be mistaken for an atomic operation.
+- `CpuPin` is an execution-context contract, implemented by upper-layer guards: `kspin::IrqSave`,
+  `kspin::NoPreemptIrqSave`, and `kspin::NoPreempt` all implement it (with `preempt` disabled and only
+  cooperative scheduling, `NoPreempt` likewise pins the current CPU). It only expresses "the CPU is pinned" and does not disable
+  preemption by itself; the scheduler/interrupt layer is responsible for creating the guard. `kspin` guards obtain the current logical CPU through `kspin::CurrentCpuIf`
+  (provided by `kplat`); these are upper-layer contracts between `kspin` and `kplat`,
+  and `kcpu_slot` only defines the `CpuPin`/`CpuLocalGuard` traits and does not itself depend on `kspin`/`kplat`.
+- `CpuLocalGuard` capability trait: requires no migration and no local IRQ reentrancy; it is implemented by `kspin::NoPreemptIrqSave` and by `BootCpuToken` during exclusive CPU bring-up. The safe accessors `CpuSlot::get`, `CpuSlotCell::get`,
+  `read`/`write`, `current_shared`/`shared_current`, etc. are open only to it or to `T: Sync`;
+  general mutable references are kept only as the explicitly unsafe `get_mut_unchecked`. `CpuLocalGuard` only proves
+  mutual exclusion of the execution context; it cannot prove unique borrowing of an object across different nested guards.
+- The low-level `*_unchecked` entry points keep `unsafe` and the wider `CpuPin` bound, and are reserved only for
+  initialization and special architecture paths.
+- `CpuSlot::at`, `CpuSlotCell::shared_at`, `CpuSlot::current_shared`, and
+  `DynamicCpuSlot::get_remote` open up shared reads for `T: Sync`; no unconditional API is provided for
+  remote writes.
+- `begin_cpu_init` copies the template and sets the register; `BootCpuToken::publish` publishes a checked `CpuArea` that can be accessed remotely after CPU-local
+  initialization finishes.
+- `CpuSlotChunk` uses backing memory provided by the platform; `DynamicCpuSlot` is initialized separately on each CPU, and
+  on initialization failure the already constructed objects are rolled back, and when the handle is dropped they are destructed CPU by CPU. A chunk uses shared
+  bump metadata, allowing multiple dynamic handles to be alive at the same time. When the backing or stride alignment is not satisfied, `SlotInitError::Misaligned` is returned, distinguishing it from space exhaustion, `NoSpace`. In addition to type alignment, the backing base address
+  and the stride must also be multiples of `CPU_SLOT_AREA_ALIGN`; otherwise objects of different CPUs would share a cache
+  line.
+- A `DynamicCpuSlot` handle can be shared across threads (`Sync`) under `T: Send`: after construction the handle's fields
+  are immutable, and each thread observes only the instance of its own CPU through a guard; `get_remote`, the only way to share a single value across threads,
+  separately requires `T: Sync`. The chunk itself stays non-`Sync` because of its bump cursor,
+  and after allocation finishes the handle lifetime is fixed through a leaked `&'static CpuSlotChunk`.
 
-## 链接布局
+## Link Layout
 
-根链接脚本定义模板 LMA、模板 size 和 `.cpu_slot.template`。模板位于镜像加载地址，
-模板 VMA 为零；公开 descriptor 位于正常数据区。模板镜像与 CPU area 不重叠。
+The root linker script defines the template LMA, the template size, and `.cpu_slot.template`. The template resides at the image load address,
+and the template VMA is zero; the public descriptor resides in the normal data region. The template image and the CPU areas do not overlap.
 
-area stride 为模板实际大小向上对齐到 `CPU_SLOT_AREA_ALIGN`，area 起始地址也按同一
-值对齐；该常量由 `kaddr_layout` 提供、链接脚本经 `%CPU_SLOT_AREA_ALIGN%` 替换，Rust
-侧 `stride()` 与链接器不会漂移。它取受支持平台最大数据 cache line 的上界（当前
-128B），因此**相邻 CPU area 永不共享一条 cache line**——某个 CPU area 里的锁字不会
-与另一 CPU 的数据产生伪共享。改大模板时这条不变量仍成立，因为对齐基于编译期常量
-而非模板布局。
+The area stride is the actual template size rounded up to `CPU_SLOT_AREA_ALIGN`, and the area start address is also aligned to the same
+value; this constant is provided by `kaddr_layout` and substituted into the linker script via `%CPU_SLOT_AREA_ALIGN%`, so the Rust-side
+`stride()` and the linker cannot drift apart. It takes the upper bound of the largest data cache line among supported platforms (currently
+128B), so **adjacent CPU areas never share a cache line**: a lock word in one CPU area will not
+falsely share a line with data of another CPU. This invariant still holds when the template grows, because the alignment is based on a compile-time constant
+rather than on the template layout.
 
-该命名空间与旧 `.percpu` 完全分离；迁移已完成，目标镜像只保留
-`.cpu_slot.template`，不再包含旧 `.percpu` 区域，也不再依赖 crates.io 的
-`percpu` crate 及其 `non-zero-vma` feature。
+This namespace is completely separate from the old `.percpu`; the migration is complete, and the target image keeps only
+`.cpu_slot.template`, no longer contains the old `.percpu` region, and no longer depends on the crates.io
+`percpu` crate and its `non-zero-vma` feature.
 
-不支持架构（非 x86_64/aarch64/riscv/loongarch64）在非测试构建下通过
-`compile_error!` 拒绝，避免 base register 访问静默失效。
+Unsupported architectures (anything other than x86_64/aarch64/riscv/loongarch64) are rejected through
+`compile_error!` in non-test builds, to prevent base register accesses from silently failing.
 
-RISC-V 使用 `gp` 作为 per-CPU base register；`tp` 已被内核 TLS 使用，不能同时承担
-per-CPU base。
+RISC-V uses `gp` as the per-CPU base register; `tp` is already used by kernel TLS and cannot also serve as the
+per-CPU base.
 
-## 后续扩展
+## Future Extensions
 
-动态 slot 通过 `CpuSlotChunk::alloc` 实现按 CPU 初始化和失败回滚；远端读取使用
-`DynamicCpuSlot::get_remote`，只对 `T: Sync` 开放，不提供远端写入 API。
+Dynamic slots implement per-CPU initialization and failure rollback through `CpuSlotChunk::alloc`; remote reads use
+`DynamicCpuSlot::get_remote`, which is open only for `T: Sync` and provides no remote write API.
 
-安全访问 API 第一阶段已完成：`kspin` 的真实 guard 实现 `CpuPin`，
-`NoPreemptIrqSave` 实现 `CpuLocalGuard`，普通共享与按值 slot 访问已提供 guard 约束的
-安全方法；通用可变引用只保留 `*_unchecked` unsafe 边界。
+The first phase of the safe access API is complete: the real `kspin` guards implement `CpuPin`,
+`NoPreemptIrqSave` implements `CpuLocalGuard`, and ordinary shared and by-value slot accesses now have safe
+methods constrained by guards; general mutable references are kept only behind the `*_unchecked` unsafe boundary.
 
-平台标识与调度器状态迁移已完成：`current_task_ptr`、BSP 标记、`KPCB_ID`
-（当前 CPU 身份，是一切 guard `current_cpu()` 的来源）以及 ktask/kirq/kalloc 等
-调用点都已落在寄存器寻址的静态 slot 或 `kplat` 托管的动态槽上，旧 `percpu`
-依赖、`.percpu` 区域与 `non-zero-vma` feature 均已删除。
+The migration of platform identity and scheduler state is complete: `current_task_ptr`, the BSP flag, `KCPU_ID`
+(the current CPU identity, and the source of every guard's `current_cpu()`), and call sites such as ktask/kirq/kalloc
+now all sit on register-addressed static slots or on dynamic slots managed by `kplat`; the old `percpu`
+dependency, the `.percpu` region, and the `non-zero-vma` feature have all been removed.
 
-剩余扩展：
+Remaining extensions:
 
-- IRQ/trap 上下文与调度器 pinned context 按 `CpuLocalGuard` 契约补齐实现。
-- `CpuSlotCell` 的原子 `load/store/add/bit*` 快路径由具体架构模块补齐。
+- Fill in the IRQ/trap context and scheduler pinned context implementations according to the `CpuLocalGuard` contract.
+- The atomic `load/store/add/bit*` fast paths of `CpuSlotCell` are to be supplied by the concrete architecture modules.

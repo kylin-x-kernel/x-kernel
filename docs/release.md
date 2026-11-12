@@ -448,9 +448,9 @@ X-Kernel 采用季度发布节奏。
 建议文件命名：
 
 ```text
-docs/releases/x-kernel-2606.md
-docs/releases/x-kernel-2609.md
-docs/releases/x-kernel-2612.md
+docs/releases/v0.1.0-2606.md
+docs/releases/v0.2.0-2609.md
+docs/releases/v0.3.0-2612.md
 ```
 
 Release Note 推荐包含以下内容：

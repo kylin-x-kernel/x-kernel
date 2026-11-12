@@ -100,7 +100,7 @@ config MY_OPTION
 - `bool`: Boolean (y/n)
 - `tristate`: Tristate (y/m/n)
 - `string`: String value
-- `int`: Integer value
+- `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `i8`, `i16`, `i32`, `i64`, `i128`, `isize`: Integer values
 - `hex`: Hexadecimal value
 
 ### Dependencies

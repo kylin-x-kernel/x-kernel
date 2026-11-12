@@ -1,71 +1,71 @@
-# kernel-image-metadata — 安全与可靠性分析
+# kernel-image-metadata — Security and Reliability Analysis
 
-## 信任模型
+## Trust Model
 
-XKMake 构造的字段值属于受信构建输入，但待修改 ELF 的 section、note header、
-program header 和文件范围均需验证。kernel 侧把镜像 descriptor 视为可能损坏
-的数据，不在完成边界、CRC32 和 UTF-8 校验前打印。
+Field values constructed by XKMake are trusted build inputs, but the sections, note headers,
+program headers, and file ranges of the ELF being modified must all be validated. The kernel side treats the image descriptor as potentially corrupted
+data and does not print it before the completeness boundary, CRC32, and UTF-8 checks have passed.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-host 边界是 Cargo 产出的 ELF 文件；kernel 边界是 linker symbol 描述的启动
-镜像内存。crate 不接触用户内存、MMIO、DMA、设备、文件系统或网络输入。
+The host boundary is the ELF file produced by Cargo; the kernel boundary is the boot
+image memory described by linker symbols. The crate does not touch user memory, MMIO, DMA, devices, the file system, or network input.
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-`linker_slice` 将 linker symbol 地址转换为静态 slice。其安全性依赖最终
-linker script 将 start/end symbol 包围的固定 reserve 放在同一已初始化、
-只读且已加载的 `PT_LOAD` 范围内；函数先验证地址顺序和非零长度，再调用
-`from_raw_parts`。XKMake 在 finalize 与 bundle 复用时验证完整 reserve，不能
-只验证缩短后的可见 note section。
+`linker_slice` converts linker symbol addresses into a static slice. Its safety depends on the final
+linker script placing the fixed reserve bounded by the start/end symbols within the same initialized,
+read-only, loaded `PT_LOAD` range; the function first validates the address order and non-zero length, and then calls
+`from_raw_parts`. XKMake validates the complete reserve during finalize and bundle reuse, rather than
+validating only the shortened visible note section.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-- linker descriptor 的 start 不大于 end，范围在已映射 kernel image 内。
-- 所有编码字段使用显式小端字节序，不依赖 Rust ABI 或结构体布局。
-- payload 结束位置使用 checked arithmetic 和 slice `get` 验证。
-- UTF-8 校验成功后才返回 `&str`。
+- The start of the linker descriptor is not greater than its end, and the range lies within the mapped kernel image.
+- All encoded fields use explicit little-endian byte order and do not depend on the Rust ABI or struct layout.
+- The payload end position is validated using checked arithmetic and slice `get`.
+- A `&str` is returned only after UTF-8 validation succeeds.
 
-## 线程安全
+## Thread Safety
 
-kernel image 在启动前完成写入，运行时只读。crate 无内部同步和全局可变状态。
+The kernel image is fully written before boot and is read-only at runtime. The crate has no internal synchronization and no global mutable state.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | ELF 字段伪造导致 host 越界写 | 高 | 输入 ELF section/header 损坏 | XKMake 验证 section 文件范围、大小和 load segment 包含关系 |
-| T-02 | linker range 错误导致 kernel 越界读 | 高 | linker script 与 crate ABI 不一致 | 固定 symbol 名、检查地址顺序，并在 build 阶段验证 section |
-| T-03 | 损坏 payload 被作为字符串打印 | 中 | 镜像字节被破坏 | CRC32 和 UTF-8 均通过后才返回字符串 |
-| T-04 | CRC32 被误作真实性保证 | 低 | 镜像存在恶意篡改 | CRC32 仅检测意外损坏；真实性由安全启动或镜像签名承担 |
+| T-01 | Forged ELF fields cause an out-of-bounds write on the host | High | Input ELF section/header is corrupted | XKMake validates section file ranges, sizes, and load segment containment |
+| T-02 | A wrong linker range causes an out-of-bounds read in the kernel | High | The linker script is inconsistent with the crate ABI | Fixed symbol names, address order checks, and section validation at build time |
+| T-03 | A corrupted payload is printed as a string | Medium | Image bytes are corrupted | The string is returned only after both CRC32 and UTF-8 checks pass |
+| T-04 | CRC32 is mistaken for an authenticity guarantee | Low | The image has been maliciously tampered with | CRC32 only detects accidental corruption; authenticity is the responsibility of secure boot or image signing |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Failure Cause | Local Effect | System Effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | payload 超出预留空间 | 字段增长 | bundle 构建失败 | 不发布新 bundle | 3 | 编码返回 `PayloadTooLarge` |
-| F-02 | note 不在 load segment | linker 规则回归 | ELF 后处理失败 | 不生成启动镜像 | 2 | XKMake 显式验证 program header 包含关系 |
-| F-03 | 启动校验失败 | ELF 损坏或协议不匹配 | 元数据不可用 | 内核继续启动并打印错误 | 4 | entry 将元数据视为诊断信息 |
+| F-01 | Payload exceeds the reserved space | Field growth | Bundle build fails | No new bundle is published | 3 | Encoding returns `PayloadTooLarge` |
+| F-02 | Note is not in a load segment | Linker rule regression | ELF post-processing fails | No boot image is generated | 2 | XKMake explicitly validates program header containment |
+| F-03 | Boot-time validation fails | ELF corruption or protocol mismatch | Metadata is unavailable | The kernel continues booting and prints an error | 4 | The entry treats metadata as diagnostic information |
 
-## 故障管理
+## Fault Management
 
-格式 API 全部通过 `Result` 返回。host 失败会中止临时 bundle 的提升；kernel
-读取失败只影响诊断输出，不阻止后续初始化。
+All format APIs return through `Result`. A host failure aborts promotion of the temporary bundle; a kernel
+read failure only affects diagnostic output and does not prevent subsequent initialization.
 
-## 隐私分析
+## Privacy Analysis
 
-payload 可包含构建用户名和主机名。正式发布可以通过构建环境覆盖或清除该字段；
-该信息不应被视为运行时安全决策输入。
+The payload may contain the build username and hostname. Official releases can override or clear this field through the build environment;
+this information must not be treated as input to runtime security decisions.
 
-## 已知限制
+## Known Limitations
 
-- CRC32 不提供抗篡改能力。
-- format version 1 只支持 UTF-8 文本 payload。
-- build-info descriptor 固定为 1024 字节。
+- CRC32 provides no tamper resistance.
+- Format version 1 supports only UTF-8 text payloads.
+- The build-info descriptor is fixed at 1024 bytes.
 
-## 审计清单
+## Audit Checklist
 
-- 修改 note、header 或 symbol 名时是否同步 producer、consumer 与 linker？
-- 新 ELF 写路径是否验证 section 在 `PT_LOAD` 内？
-- Build ID 是否在所有 loadable 内容完成后最后写入？
-- kernel 是否始终把读取失败作为可恢复诊断错误？
+- When changing a note, header, or symbol name, are the producer, consumer, and linker updated together?
+- Does every new ELF write path validate that the section lies within `PT_LOAD`?
+- Is the Build ID written last, after all loadable content is complete?
+- Does the kernel always treat read failures as recoverable diagnostic errors?

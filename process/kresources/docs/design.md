@@ -70,7 +70,7 @@ Repeated exit is harmless. Fork and unsharing reject `None` with
   `may_raise_hard_limit = true`; the syscall layer sets that flag from its
   `CAP_SYS_RESOURCE` decision and the comparison runs inside
   the same write guard against the current limit, so `OperationNotPermitted`
-  is returned there and not in this crate.
+  is returned by this crate from inside that write guard.
 - Insertion passes `RLIMIT_NOFILE.current` to `FdTable::add_file`. Fixed-slot
   duplication uses the table's capacity check, not that soft-limit policy.
   Minimum-based duplication passes a limit snapshot to `FdTable::duplicate_from`.

@@ -12,7 +12,7 @@ LoongArch machines (QEMU virt-class platforms).
 
 - Boot handoff: the `PlatformBootIf` provider runs
   `early_driver_init` (clock, interrupts, console from the device tree,
-  RTC sample seeding `ktime::initialize_realtime`) and per-CPU
+  RTC sample seeding `ktime::initialize_realtime` with feature `rtc`) and per-CPU
   `activate_local_interrupts` (timer enablement after handler installation).
 - Clock: the architectural stable counter (`Time::read`, `TCFG`
   registers) exposed as the `CounterSourceIf` / `ClockEventIf` providers,

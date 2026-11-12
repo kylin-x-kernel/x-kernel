@@ -49,7 +49,7 @@ endmenu
 
 ### Key Features
 
-- ✅ **Linux-Compatible Syntax**: Full Kconfig language support (bool, tristate, string, int, hex)
+- ✅ **Linux-Compatible Syntax**: Full Kconfig language support (bool, tristate, string, sized integers (u8..isize), hex)
 - ✅ **Dependency Management**: `depends on`, `select`, `imply` directives
 - ✅ **Fast & Safe**: Written in Rust for performance and memory safety
 
@@ -81,7 +81,7 @@ config LOG_LEVEL
       Set the default log level (debug, info, warn, error).
 
 config MAX_CONNECTIONS
-    int "Maximum concurrent connections"
+    u32 "Maximum concurrent connections"
     range 1 1000
     default 100
 EOF
@@ -114,7 +114,7 @@ xconf oldconfig
 # 🆕 New configuration options detected:
 #   + NEW_FEATURE
 # 
-# 💡 Use 'menuconfig' to configure new options (coming soon)
+# 💡 Use 'menuconfig' to configure new options
 ```
 
 With auto-defaults:
@@ -312,7 +312,7 @@ Options:
 
 See [MENUCONFIG_GUIDE.md](MENUCONFIG_GUIDE.md) for detailed usage.
 
-### `xconf defconfig` *(Coming Soon)*
+### `xconf defconfig`
 
 Apply a defconfig file.
 
@@ -364,7 +364,7 @@ C-style header for compatibility:
 ```c
 #define ENABLE_LOGGING 1
 #define LOG_LEVEL "info"
-#define MAX_CONNECTIONS 100
+#define MAX_CONNECTIONS "100"
 ```
 
 ## 🧪 Example Project
@@ -395,7 +395,7 @@ cat .config
 - `bool` - Boolean (y/n)
 - `tristate` - Three-state (y/m/n)
 - `string` - String values
-- `int` - Integer values
+- `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `i8`, `i16`, `i32`, `i64`, `i128`, `isize` - Sized integer values
 - `hex` - Hexadecimal values
 
 ### Directives
@@ -413,7 +413,7 @@ cat .config
 - `depends on` - Conditional visibility
 - `select` - Force enable another option
 - `imply` - Weak dependency
-- `range` - Value constraints (for int/hex)
+- `range` - Value constraints (for integer/hex)
 - `default` - Default value
 
 ### Expressions
@@ -440,7 +440,7 @@ config NET_IPV4
     bool "IPv4 support"
 
 config NET_PORT
-    int "Default port"
+    u32 "Default port"
     range 1 65535
     default 8080
 
@@ -467,13 +467,13 @@ XCONFIG_DEBUG=1 xconf menuconfig
 **Example debug output:**
 
 ```
-🔹 process_entries: parent_id='menu_Platform Selection', depth=1, entries_count=5
-🔹 Inserting into menu_tree: key='menu_Platform Selection', items_count=12
-    [0] id='choice_PLATFORM_KPLAT_AARCH64', label='AArch64 Platform', kind="Choice"
-    [1] id='PLATFORM_KPLAT_AARCH64', label='QEMU ARM64 Virtual Machine', kind="Config"
+[MenuTree] Building: parent_id="menu_Platform Selection", depth=1, entries_count=5
+[MenuTree] Inserting into menu_tree: key="menu_Platform Selection", items_count=12
+    [0] id="choice_PLATFORM_KPLAT_AARCH64", label="AArch64 Platform", kind="Choice"
+    [1] id="PLATFORM_KPLAT_AARCH64", label="QEMU ARM64 Virtual Machine", kind="Config"
     ...
-🔍 get_items_for_path: key='menu_Platform Selection', path=["menu_Platform Selection"]
-📋 Returning 12 items for key 'menu_Platform Selection'
+[GET_ITEMS] Called with path=["menu_Platform Selection"], key='menu_Platform Selection'
+    ✅ Returning 12 items for key 'menu_Platform Selection'
 ```
 
 **Use cases:**
@@ -514,7 +514,7 @@ cargo doc --open
 ### ✅ Implemented
 
 - Complete Kconfig lexer and parser
-- Full syntax support (bool, tristate, string, int, hex)
+- Full syntax support (bool, tristate, string, sized integers (u8..isize), hex)
 - Source directive recursion with cycle detection
 - Expression evaluation
 - Configuration file I/O (without CONFIG_ prefix)

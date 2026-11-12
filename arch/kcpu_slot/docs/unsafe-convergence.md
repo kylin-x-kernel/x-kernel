@@ -13,7 +13,7 @@
 
 当前访问分为四层：
 
-- **自举原语**：`current_base_raw()`、模板符号，仅 `kcpu_slot` 内部使用；
+- **自举原语**：`arch::current_base()`、模板符号，仅 `kcpu_slot` 内部使用；
 - **无 guard 的 Sync/Copy 访问**：`current_shared`、`shared_current`、
   `load_current`/`store_current`（架构单指令；无单指令的架构经 `karch` 提供的
   `CpuLocalIrqIf` 关中断兜底）；
@@ -58,8 +58,8 @@ AArch64、RISC-V 和 LoongArch64 使用各自约定的寄存器。这类 unsafe 
 
 ### `base + offset` 裸指针寻址
 
-`CpuSlot` 和 `CpuSlotCell` 的 `*_unchecked`、`*_at` 系列把 area base 与链接器
-offset 相加并转换为引用或执行按值读写。
+`CpuSlot` 和 `CpuSlotCell` 的 `*_unchecked` 系列以及已发布 area 访问（`at`/`shared_at`）
+把 area base 与链接器 offset 相加并转换为引用或执行按值读写。
 
 必须同时证明：
 
@@ -71,8 +71,7 @@ offset 相加并转换为引用或执行按值读写。
 - 普通访问不与 IRQ、NMI 或其他 CPU 形成数据竞争；
 - 当前上下文在引用存活期间不迁移。
 
-`ref_at` 和 `ref_mut_at` 的风险高于 `read_at` 和 `write_at`，因为前者生成可能逃逸
-出调用表达式的 Rust 引用。
+返回引用的访问器风险高于按值读写，因为前者生成可能逃逸出调用表达式的 Rust 引用。
 
 ### CPU-local 并发能力
 
@@ -153,9 +152,8 @@ closure API 可以限制引用逃逸，但 callback 内仍可创建第二个嵌�
 对 bool、整数、CPU ID、deadline 和 epoch 等值只提供短暂的 `read`、`write`、
 `replace` 操作，不返回引用。当前 safe `CpuSlotCell::read/write` 要求
 `CpuLocalGuard`；只有 unchecked 面接受较弱的 `CpuPin`。未来若提供只要求 `CpuPin` 的
-Copy view，必须先证明该 slot 不与 IRQ/NMI 形成非原子数据竞争。`khal::current_task_ptr`
-是 guard/CPU 身份解析链上的
-递归源头，不能先取得 pin，应作为命名明确的底层 raw 边界保留。
+Copy view，必须先证明该 slot 不与 IRQ/NMI 形成非原子数据竞争。`CURRENT_TASK_PTR`
+和 KCPU_ID/BSP 已改用 `load_current`/`store_current`，不再需要 raw 边界。
 
 ### 原子状态
 
@@ -178,7 +176,7 @@ run queue、allocator cache、IPI queue 和 watchdog registry 等状态应绑定
 ### CPU 初始化
 
 `begin_cpu_init`、`BootCpuToken` 和 `publish` 已集中完成模板复制、base register 安装、
-CPU ID/BSP 写入和 area 发布。CPU 身份读取是 guard 自举根，仍保留为命名 raw 边界。
+CPU ID/BSP 写入和 area 发布。CPU 身份读取使用 `load_current`/`store_current`。
 
 ### IRQ 与 NMI
 
@@ -240,9 +238,9 @@ helper。
 - IRQ context 与 periodic callback 容器已使用 per-CPU `SpinNoIrq`，嵌套 guard 不再能
   制造重叠 `&mut`，且 callback 在锁外执行。APIC 热路径复用 `IrqSave` pin，ARM timer
   在同一 guard 内读写，VMX 初始化全程固定 CPU。
-- 阶段 4 已完成首轮审计，但 raw API 尚不能全部降为 `pub(crate)`：架构 IRQ、PMU、timer、
-  APIC、VMX、scheduler 和 CPU 身份递归链仍有跨 crate 用户。保留的 public raw API
-  是显式迁移清单，不代表普通调用点可以继续新增使用。
+- 阶段 4 已完成首轮审计；唯一保留的 public raw 边界是 `CpuSlotCell::current_shared_mut`。
+  `cpu_area_base` 和 `DynamicCpuSlot` 的 unsafe `get_unchecked`/`get_mut_unchecked`
+  仍为 public，不代表普通调用点可以继续新增使用。
 
 `StaticSlotValue` 已改为语言级 `unsafe trait`。所有权容器的 blanket impl 已删除，固定
 空模板通过 `cpu_slot_cell_with_template!` 做值级认证。`impl_static_slot_value!` 仍可由

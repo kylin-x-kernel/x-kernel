@@ -1,24 +1,24 @@
-# evdev 回归用例
+# evdev regression cases
 
-独立的用户态 Cargo 包，检查 evdev 的 ioctl 分发层：libinput 打开一个输入
-设备时会做的探测（`EVIOCGVERSION`、`EVIOCGID`、`EVIOCGNAME`、`EVIOCGPHYS`、
-`EVIOCGPROP`、`EVIOCGKEY`、`EVIOCGBIT`、`EVIOCGABS`）都必须按请求编码的
-长度回答，而不是按任意长度。
+A standalone userspace Cargo package that checks the ioctl dispatch layer of evdev: the probes libinput makes when it opens an input
+device (`EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGPHYS`,
+`EVIOCGPROP`, `EVIOCGKEY`, `EVIOCGBIT`, `EVIOCGABS`) must all be answered with the
+length encoded in the request, not with an arbitrary length.
 
-- 命令字全部写死为 Linux 的值，布局漂移会让调用落到 `EINVAL` 而不是悄悄通过；
-- 名字必须非空（libinput 以名字标识设备）；
-- 属性/按键位图回答的长度等于请求长度（零填充）；
-- 未知轴号返回 `EINVAL`；
-- 没有 `EV_ABS` 的设备对 `EVIOCGABS` 返回 `EINVAL`，绝对轴设备则返回真实范围。
+- The command words are all hard-coded to the Linux values, so layout drift makes the call fall to `EINVAL` instead of quietly passing;
+- The name must be non-empty (libinput identifies a device by its name);
+- The length of the property/key bitmap answers equals the request length (zero-padded);
+- An unknown axis number returns `EINVAL`;
+- A device without `EV_ABS` returns `EINVAL` for `EVIOCGABS`, while an absolute-axis device returns the real range.
 
-构建与运行：
+Build and run:
 
 ```sh
 cd io/drmdevice/abi-tests/evdev
 cargo test --target aarch64-unknown-linux-musl --no-run
 ```
 
-把生成的可执行文件复制到 X-Kernel 用户环境执行：
+Copy the generated executable into the X-Kernel user environment and run it:
 
 ```sh
 EVENT_DEVICE=/dev/input/event0 /usr/tests/evdev_regression --nocapture

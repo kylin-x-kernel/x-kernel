@@ -25,7 +25,7 @@ Hardware, firmware and VMM-produced bytes enter through source adapters. This
 crate does not access user pointers, MMIO or DMA directly. VirtIO bytes depend
 on host trust expressed by enabling `entropy_virtio_rng`; the Hwrng class itself
 provides no entropy-quality proof.
-The bootstrap seed is not sufficient to mark the pool ready. Secure consumers
+The tick-only bootstrap seed is not sufficient to mark the pool ready; with `entropy_jitter` enabled, a successful jitter read mixed into the bootstrap seed marks the pool ready. Secure consumers
 must use the readiness contract before treating pool output as securely seeded.
 
 ## Memory and thread safety

@@ -1,63 +1,64 @@
-# klazy — 设计文档
+# klazy — Design Document
 
-## 定位
+## Purpose
 
-`klazy` 提供兼容 `no_std` 的一次性初始化和延迟求值同步原语。这些原语是
-x-kernel 中内核服务静态延迟初始化的基础构件（如 tracing、内存管理、TEE
-服务、密码学模块）。
+`klazy` provides `no_std`-compatible one-time initialization and lazy evaluation synchronization primitives. These primitives are
+the building blocks for static lazy initialization of kernel services in x-kernel (such as tracing, memory management, TEE
+services, and cryptography modules).
 
-## 背景
+## Background
 
-`std::sync::Once` 和 `std::sync::LazyLock` 依赖标准库。x-kernel 运行在
-裸机 `no_std` 环境中，无法使用这些类型。本模块提供等价功能，不依赖 `std`、
-OS 线程或条件变量。
+`std::sync::Once` and `std::sync::LazyLock` depend on the standard library. x-kernel runs in a
+bare-metal `no_std` environment and cannot use these types. This module provides equivalent functionality without depending on `std`,
+OS threads, or condition variables.
 
-参考实现改编自 `spin::once` 和 `std::sync::SyncLazy`。
+The reference implementation is adapted from `spin::once` and `std::sync::SyncLazy`.
 
-## 范围
+## Scope
 
-涉及的源文件：
+Source files involved:
 
 ```
 util/klazy/
 ├── src/
 │   ├── lib.rs
 │   ├── once.rs
-│   └── lazy.rs
+│   ├── lazy.rs
+│   └── lazy_static.rs
 └── Cargo.toml
 ```
 
-## 架构
+## Architecture
 
-两个类型，分层构建：
+Two types, built in layers:
 
 ```
-Lazy<T, F>  ──使用──>  Once<T>
+Lazy<T, F>  ──uses──>  Once<T>
 ```
 
-| 组件 | 职责 |
+| Component | Responsibility |
 |------|------|
-| `Once<T>` | 线程安全的单元格，保证闭包仅执行一次。四状态原子状态机，持有初始化后的值 |
-| `Lazy<T, F>` | 在 `Once<T>` 之上包装工厂函数 `F`，首次访问时通过 `Deref` 触发初始化。支持 `const` 构造，适合用作静态变量 |
+| `Once<T>` | A thread-safe cell that guarantees a closure runs only once. A four-state atomic state machine that holds the initialized value |
+| `Lazy<T, F>` | Wraps a factory function `F` on top of `Once<T>` and triggers initialization on first access through `Deref`. Supports `const` construction, which makes it suitable for use as a static variable |
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-`klazy` 设计用于内核早期启动和常规运行阶段的只初始化一次场景，
-但调用者需要满足以下约束：
+`klazy` is designed for initialize-once scenarios during early kernel boot and normal runtime,
+but callers must satisfy the following constraints:
 
-- **可在早期启动阶段调用**：模块不依赖调度器、条件变量或进程线程上下文。
-- **可在中断关闭或不可睡眠路径中调用**：内部仅使用原子和自旋等待，
-  不会主动阻塞或睡眠。
-- **不适合长时间初始化闭包**：若初始化闭包执行较慢，
-  并发调用者会在 `Initializing` 状态下持续自旋，浪费 CPU。
-- **不要求当前进程线程**：API 只依赖当前执行路径，
-  不依赖“当前任务”之类的调度器状态。
-- **可重入性有限**：同一 `Once` / `Lazy` 实例的初始化流程不应递归进入自身，
-  否则可能导致当前执行路径自旋等待自己完成初始化。
-- **依赖基本原子可用性**：正确性依赖目标架构提供可用的 `AtomicU8`
-  以及内存序语义；当前支持架构满足这一前提。
+- **Callable during early boot**: the module does not depend on the scheduler, condition variables, or a process/thread context.
+- **Callable with interrupts disabled or on non-sleepable paths**: internally it only uses atomics and spin waiting,
+  and never blocks or sleeps on its own.
+- **Not suitable for long-running initialization closures**: if the initialization closure runs slowly,
+  concurrent callers keep spinning in the `Initializing` state, wasting CPU.
+- **No current process/thread required**: the API only depends on the current execution path,
+  not on scheduler state such as the "current task".
+- **Limited reentrancy**: the initialization flow of a given `Once` / `Lazy` instance must not recursively enter itself,
+  otherwise the current execution path may spin waiting for its own initialization to complete.
+- **Depends on basic atomic availability**: correctness depends on the target architecture providing a usable `AtomicU8`
+  and memory ordering semantics; the currently supported architectures satisfy this prerequisite.
 
-## 状态机（Once）
+## State Machine (Once)
 
 ```
                   call_once()
@@ -69,128 +70,127 @@ Lazy<T, F>  ──使用──>  Once<T>
        └─────────────────────  Failed
                                   │
      try_call_once()              │
-     返回 Err，重置为              │
+     returns Err, reset to        │
      Uninitialized                │
                                   v
-                             poison: 所有
-                             后续调用 panic
+                             poison: all
+                             later calls panic
 ```
 
-状态以 `u8` 判别值存储在 `AtomicU8` 中：
+The state is stored as a `u8` discriminant in an `AtomicU8`:
 
-| 状态           | 值   | 含义                     |
+| State           | Value   | Meaning                     |
 |---------------|------|--------------------------|
-| Uninitialized | 0x00 | 尚未开始初始化            |
-| Initializing  | 0x01 | 某线程正在执行初始化闭包   |
-| Ready         | 0x02 | 值已初始化，可读取         |
-| Failed        | 0x03 | 初始化闭包 panic（已中毒） |
+| Uninitialized | 0x00 | Initialization has not started            |
+| Initializing  | 0x01 | A thread is running the initialization closure   |
+| Ready         | 0x02 | The value is initialized and can be read         |
+| Failed        | 0x03 | The initialization closure panicked (poisoned) |
 
-### 状态转换
+### State Transitions
 
-| 从            | 到            | 触发条件                        |
+| From            | To            | Trigger                        |
 |---------------|---------------|--------------------------------|
-| Uninitialized | Initializing  | 首个线程赢得 CAS               |
-| Initializing  | Ready         | 初始化闭包返回 Ok              |
-| Initializing  | Failed        | 初始化闭包 panic（PanicGuard） |
-| Initializing  | Uninitialized | `try_call_once` 返回 Err       |
-| Failed        | —             | 所有后续调用 panic（中毒）      |
+| Uninitialized | Initializing  | The first thread wins the CAS               |
+| Initializing  | Ready         | The initialization closure returns Ok              |
+| Initializing  | Failed        | The initialization closure panics (PanicGuard) |
+| Initializing  | Uninitialized | `try_call_once` returns Err       |
+| Failed        | —             | All later calls panic (poisoned)      |
 
-## 内存序
+## Memory Ordering
 
-| 操作                          | 内存序     | 原因                                  |
+| Operation                          | Ordering     | Reason                                  |
 |-------------------------------|-----------|---------------------------------------|
-| 快速路径 `get()`              | `Acquire` | 与 writer 侧的 `Release` 配对          |
-| CAS 竞争                      | `Acquire` | 成功和失败路径都需要建立 happens-before |
-| store `Ready`                 | `Release` | 将初始化值发布给所有 reader             |
-| store `Uninitialized`（出错时） | `Release` | 发布重置状态，重试线程能看到干净状态     |
-| PanicGuard drop               | `SeqCst`  | 保守选择 — panic unwind 是边界场景      |
+| Fast-path `get()`              | `Acquire` | Pairs with the writer-side `Release`          |
+| CAS contention                      | `Acquire` | Both the success and failure paths need to establish happens-before |
+| store `Ready`                 | `Release` | Publishes the initialized value to all readers             |
+| store `Uninitialized` (on error) | `Release` | Publishes the reset state so retrying threads see a clean state     |
+| PanicGuard drop               | `SeqCst`  | Conservative choice — panic unwind is a boundary case      |
 
-`is_completed()` 使用 `Acquire`，足以与 `Release` store 配对，保证后续
-`get_unchecked()` 调用安全。
+`is_completed()` uses `Acquire`, which is sufficient to pair with the `Release` store and ensures that subsequent
+`get_unchecked()` calls are safe.
 
-## 并发模型
+## Concurrency Model
 
-- **自旋等待**：`wait()` 和 `poll()` 在状态为 `Initializing` 时自旋
-  （`core::hint::spin_loop`），不使用阻塞原语。
+- **Spin waiting**: `wait()` and `poll()` spin while the state is `Initializing`
+  (`core::hint::spin_loop`) and do not use blocking primitives.
 
-- **快速路径**：`get()` 仅一次 `Acquire` load 加分支判断 — 初始化完成后
-  零开销。
+- **Fast path**: `get()` is only one `Acquire` load plus a branch — zero
+  overhead once initialization has completed.
 
-- **慢速路径**（`try_call_once_slow`）：CAS 循环竞争初始化权，正确协调
-  并发调用者。
+- **Slow path** (`try_call_once_slow`): a CAS loop competes for the right to initialize and correctly coordinates
+  concurrent callers.
 
-### 权衡：自旋 vs 阻塞
+### Trade-off: Spinning vs Blocking
 
-自旋等待适用于内核早期启动阶段和阻塞原语不可用的场景。对于执行时间较长的
-初始化闭包，自旋线程会浪费 CPU。这是可接受的，因为：
+Spin waiting suits early kernel boot and scenarios where blocking primitives are unavailable. For initialization
+closures with long execution times, spinning threads waste CPU. This is acceptable because:
 
-1. x-kernel 中的初始化闭包通常很快（寄存器配置、静态分配）。
-2. 这些原语首次使用时，调度器和条件变量尚不可用。
+1. Initialization closures in x-kernel are usually fast (register configuration, static allocation).
+2. When these primitives are first used, the scheduler and condition variables are not yet available.
 
-## Panic 与中毒
+## Panic and Poisoning
 
-`PanicGuard` 在 unwind 时将单元格标记为 `Failed`。中毒后：
+`PanicGuard` marks the cell as `Failed` on unwind. After poisoning:
 
-- `call_once()` / `try_call_once()` / `wait()` / `poll()` 均会 panic。
-- `get()` 返回 `None`（不 panic — 允许读取中毒前状态，尽管新单元格无此状态）。
+- `call_once()` / `try_call_once()` / `wait()` / `poll()` all panic.
+- `get()` returns `None` (it does not panic — this allows reading the pre-poisoning state, although a fresh cell has no such state).
 
-这与 `std::sync` 的中毒语义一致：panic 意味着状态可能已损坏，所有后续访问
-被拒绝。
+This is consistent with the poisoning semantics of `std::sync`: a panic means the state may be corrupted, and all later accesses
+are rejected.
 
-对于 `Lazy<T, F>`，工厂函数在首次 `force()` 时通过 `Cell::take()` 消费。
-如果初始化闭包 panic，工厂函数丢失，`Lazy` 永久不可用（与
-`std::sync::SyncLazy` 行为一致）。
+For `Lazy<T, F>`, the factory function is consumed through `Cell::take()` on the first `force()`.
+If the initialization closure panics, the factory function is lost and the `Lazy` becomes permanently unusable (consistent with
+the behavior of `std::sync::SyncLazy`).
 
-## 设计决策
+## Design Decisions
 
-### 为什么不用 `spin::Once`
+### Why Not `spin::Once`
 
-上游 `spin` crate 提供类似功能。我们将设计引入 `klazy` 是为了：
+The upstream `spin` crate provides similar functionality. We bring the design into `klazy` in order to:
 
-- 控制 API 范围（添加 `try_call_once`、`initialized()` 等）。
-- 不受 `spin` 发布节奏影响，确保稳定性。
-- 保持内核 crate 的依赖树最小。
+- Control the API scope (adding `try_call_once`, `initialized()`, etc.).
+- Be unaffected by the `spin` release cadence, ensuring stability.
+- Keep the dependency tree of kernel crates minimal.
 
-### 为什么不用 `atomic_polyfill` / portable-atomics
+### Why Not `atomic_polyfill` / portable-atomics
 
-直接使用 `core::sync::atomic`。在 `AtomicU8` 非 lock-free 的架构上需要
-polyfill。当前支持的目标（x86_64、aarch64、riscv64、loongarch64）上
-`AtomicU8` 均为 lock-free，无需额外依赖。
+We use `core::sync::atomic` directly. A polyfill is needed on architectures where `AtomicU8` is not lock-free. On the currently supported targets (x86_64, aarch64, riscv64, loongarch64),
+`AtomicU8` is lock-free on all of them, so no extra dependency is needed.
 
-### `lazy_static!` 宏的 Deref 语义
+### Deref Semantics of the `lazy_static!` Macro
 
-`lazy_static!` 为每个 `static ref NAME: T` 生成一个**独立的、零大小的
-包装类型**（通过 `paste` crate 做 ident 拼接，名为 `NAME__LazyRef` 等
-内部符号），它 `Deref<Target = T>`。这与上游 `lazy_static` crate 的分发
-语义和隔离模型一致：
+For each `static ref NAME: T`, `lazy_static!` generates an **independent, zero-sized
+wrapper type** (using the `paste` crate for ident concatenation, with internal symbols named like `NAME__LazyRef`)
+that implements `Deref<Target = T>`. This matches the dispatch
+semantics and isolation model of the upstream `lazy_static` crate:
 
-- **分发语义**：对静态变量调用 trait 方法（如 `NAME.clone()`、
-  `NAME.lock()`）会经 autoderef 穿透到内部值 `T`，而不是克隆/操作外层
-  包装。
-- **类型隔离**：每个静态拥有自己的包装类型，两个静态即使内部值类型
-  相同也不可互换——编译器会拒绝把 `STATIC_A` 当作 `STATIC_B` 传递。
+- **Dispatch semantics**: calling a trait method on the static (such as `NAME.clone()` or
+  `NAME.lock()`) goes through autoderef to the inner value `T`, rather than cloning or operating on the outer
+  wrapper.
+- **Type isolation**: each static has its own wrapper type, so two statics are not interchangeable even if their inner value types
+  are the same — the compiler rejects passing `STATIC_A` as `STATIC_B`.
 
-包装类型刻意**不**实现 `Clone`/`Copy`。否则 `NAME.clone()` 会优先匹配
-包装自身的 `Clone`，无法到达 `T::clone`。保留这两个 trait 未实现正是
-`NAME.clone()` 能解析为 `T::clone`（例如克隆内部 `Arc`）的关键。
+The wrapper type deliberately does **not** implement `Clone`/`Copy`. Otherwise `NAME.clone()` would match
+the wrapper's own `Clone` first and never reach `T::clone`. Leaving these two traits unimplemented is exactly the key to
+`NAME.clone()` resolving to `T::clone` (for example, cloning an inner `Arc`).
 
-包装类型可见性跟随用户声明的 `$vis`（`pub`/`pub(crate)`/私有），并加
-`#[doc(hidden)]`，这样 `pub static` 可跨 crate 引用，但包装类型本身不
-出现在渲染的 API 文档里。`paste` 仅作编译期 ident 拼接，是 proc-macro，
-不进入运行时二进制。
+The wrapper type's visibility follows the user-declared `$vis` (`pub`/`pub(crate)`/private) and is marked
+`#[doc(hidden)]`, so that a `pub static` can be referenced across crates, while the wrapper type itself does not
+appear in the rendered API documentation. `paste` is used only for compile-time ident concatenation; it is a proc-macro and
+does not enter the runtime binary.
 
-历史上 `lazy_static!` 曾把 `NAME` 直接生成成 `&'static Lazy<T>` 引用。
-在那种形态下 `NAME.clone()` 走的是 `&T` 的 `Clone`（克隆引用本身），
-autoderef 不发生，因此调用方必须手写 `(**NAME).clone()` 才能拿到内部
-`Arc` 的克隆。当前的独立包装消除了这一 workaround——迁移自旧形态的
-代码应把 `(**NAME).clone()` 改回 `NAME.clone()`。
+Historically, `lazy_static!` generated `NAME` directly as a `&'static Lazy<T>` reference.
+In that form, `NAME.clone()` went to the `Clone` of `&T` (cloning the reference itself),
+autoderef did not occur, and so callers had to write `(**NAME).clone()` by hand to get a clone of the inner
+`Arc`. The current independent wrapper eliminates this workaround — code
+migrating from the old form should change `(**NAME).clone()` back to `NAME.clone()`.
 
-## Drop 行为
+## Drop Behavior
 
-`Once<T>` 实现了 `Drop`：状态为 `Ready` 时，通过 `ptr::drop_in_place`
-drop 内部 `T`。未初始化的单元格 drop 时不会触碰 `MaybeUninit` storage
-（无 UB）。
+`Once<T>` implements `Drop`: when the state is `Ready`, the inner `T` is dropped
+through `ptr::drop_in_place`. Dropping an uninitialized cell does not touch the `MaybeUninit` storage
+(no UB).
 
-`try_into_inner` / `into_inner_unchecked` 将值的所有权移交给调用者；
-提取前用 `ManuallyDrop` 抑制被消费单元格的析构，防止仍为 `Ready` 的
-单元格再次析构已经移出的值。
+`try_into_inner` / `into_inner_unchecked` transfer ownership of the value to the caller; before
+extraction, `ManuallyDrop` is used to suppress the destructor of the consumed cell, preventing a cell that is still `Ready`
+from dropping the already moved-out value a second time.

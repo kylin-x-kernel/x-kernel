@@ -97,8 +97,9 @@ the kernel never reclaims or rewrites.
   forming cells; `interrupt-map` walking bounds-checks each step against
   the map length and returns `None` on truncation.
 - Phandle resolution only reads nodes found in the validated tree.
-- `ranges` parsing clamps to the declared `total_cells` and rejects
-  chunks shorter than the cell count.
+- `ranges` parsing returns `None` when `total_cells` is 0, exceeds the
+  7-cell buffer, or the property is shorter than one entry; a trailing
+  partial entry is ignored.
 - No accessor panics on malformed content: undecodable values surface as
   `None`, `InterruptTrigger::Unknown`, or
   `InterruptControllerKind::Unknown`.

@@ -55,7 +55,7 @@ char_driver (this crate: byte-stream trait only)
       ^
       |  consumes &self read/write
       |
-char-device consumers (device layer wrappers, e.g. hwrng, UART cards)
+char-device consumers (higher-layer callers of CharDevice implementations)
 ```
 
 The crate is a single trait plus re-exports; there is no state, no

@@ -1,21 +1,21 @@
-# page-meta — 安全与可靠性分析
+# page-meta — Security and Reliability Analysis
 
-## 信任边界
+## Trust Boundary
 
-输入是调用方持有的 PhysAddrRange 切片。PA 只表示物理页身份，不被解引用；
-真实写入只通过映射回调提供的 NonNull<u8> 完成。init 的 unsafe 契约要求输入 RAM
-独占、回调提供完整后备范围的独占可写存储，并维持充分生命周期。运算和覆盖校验
-不能证明硬件映射有效，也不要求未被用作元数据的物理页内容已有内核映射。
+The input is a slice of PhysAddrRange held by the caller. A PA only represents the identity of a physical page and is never dereferenced;
+real writes are performed only through the NonNull<u8> provided by the mapping callback. The unsafe contract of init requires that the input RAM be
+exclusively owned, that the callback provide exclusive writable storage for the complete backing range, and that sufficient lifetimes be maintained. Arithmetic and coverage validation
+cannot prove that the hardware mapping is valid, nor do they require that physical pages not used as metadata already have a kernel mapping.
 
 Public lookup only borrows descriptors; it grants no ownership, content access
 or release authority. Reverse lookup checks descriptor identity and cannot create
 a hold. Coverage includes complete input pages, not every boot-reserved RAM page
 on the machine.
 
-## unsafe 清单与不变量
+## unsafe Inventory and Invariants
 
-- 公共 init → backend::init：输入已规范化且无物理重叠；调用方保证 RAM 独占，
-  映射回调只为选中的后备区提供指针。with_reserved_storage 只在该次初始化成功后扣除库存。
+- Public init → backend::init: the input has been normalized and has no physical overlap; the caller guarantees exclusive ownership of RAM,
+  and the mapping callback provides pointers only for the selected backing region. with_reserved_storage deducts inventory only after that initialization succeeds.
 - Segment Table::initialize: indexes and counts come from build_segments over
   normalized ranges. Array size, isize limits and capacity are checked before
   writing slots. The unsafe contract carries the map callback's PageMeta alignment
@@ -24,18 +24,18 @@ on the machine.
   actual type alignment rather than the earlier byte-aligned representation.
   Table is constructed only after every descriptor is initialized; no pointer or
   reference exposes uninitialized slots.
-- segment lookup：Table 内嵌段表的段边界和紧凑下标证明槽位已初始化且在数组内，
-  返回共享借用；输入规范化只在共用 free_ranges 路径执行。covered_pages 从末段
-  推导，不依赖另存的计数；构造时已校验全部描述符下标及数组大小。
-- segment mark_permanent_range：先校验完整物理范围，再排他调用 PageMeta::mark_permanent；
-  不与任何共享描述符借用并发。
+- segment lookup: the segment boundaries and compact indexes of the segment table embedded in Table prove that the slot is initialized and within the array,
+  and a shared borrow is returned; input normalization is performed only on the shared free_ranges path. covered_pages is
+  derived from the last segment and does not depend on a separately stored count; all descriptor indexes and the array size were validated at construction.
+- segment mark_permanent_range: first validate the complete physical range, then call PageMeta::mark_permanent exclusively;
+  it does not run concurrently with any shared descriptor borrow.
 - Table's unsafe Send/Sync: moving the table does not move its backing storage.
   Shared reference state uses atomic updates; permanent marking requires exclusive
   access before publication.
-- publish：通过 Once 安装元数据表，并允许 static 借用；调用方串行化发布，保证后备
-  RAM 和映射永久有效，不能发布生命周期有限的局部测试夹具。
+- publish: installs the metadata table through Once and allows a static borrow; the caller serializes publication and guarantees that the backing
+  RAM and mapping remain valid permanently; a local test fixture with a limited lifetime must not be published.
 
-## 生命周期与错误
+## Lifetime and Errors
 
 Initial descriptor values and permanent flags are written before publication.
 Global Once provides visibility. Lookup takes no extra lock; reference-state
@@ -43,22 +43,22 @@ observations and transitions use per-page atomics. Dropping a local table does
 not reclaim its backing; the caller may reclaim it only after all borrows end.
 Global metadata lifetime is independent of allocator instances.
 
-| 失败 | 处理 | 保证范围 |
+| Failure | Handling | Scope of guarantee |
 | --- | --- | --- |
-| 起止颠倒、地址运算溢出、没有完整页 | InvalidRange / EmptyCoverage | 不探测硬件可访问性 |
-| 物理重叠、后端索引容量不足 | 初始化返回错误 | 输入可能已被规范化，不发布元数据表 |
-| 后备 RAM 不足 | NoMemory | 不扣除失败的请求 |
-| 映射回调或后备初始化失败 | 返回对应错误 | 不扣除该次请求；回调负责其外部映射资源 |
-| 未来多次预留中后一次失败 | 返回错误 | 先前成功的扣除保留，不承诺整体回滚 |
-| 查询空洞或未发布元数据表 | None | 不表示该物理页不存在 |
-| 重复发布 | AlreadyPublished | 调用方仍须串行化发布 |
-| 后备区被过早回收、重新交给 allocator | 违反 unsafe 契约 | 可能 UAF 或损坏，类型不拥有原始 RAM |
+| Reversed start/end, address arithmetic overflow, no complete page | InvalidRange / EmptyCoverage | Hardware accessibility is not probed |
+| Physical overlap, insufficient backend index capacity | Initialization returns an error | The input may already have been normalized; no metadata table is published |
+| Insufficient backing RAM | NoMemory | The failed request is not deducted |
+| Mapping callback or backing initialization fails | Returns the corresponding error | The request is not deducted; the callback is responsible for its external mapping resources |
+| A later reservation fails among multiple future reservations | Returns an error | Earlier successful deductions are retained; no overall rollback is promised |
+| Lookup hits a hole or the metadata table is unpublished | None | Does not mean that the physical page does not exist |
+| Duplicate publication | AlreadyPublished | The caller must still serialize publication |
+| Backing region is reclaimed too early or handed back to the allocator | Violates the unsafe contract | May cause UAF or corruption; the type does not own the raw RAM |
 
-规范化保持切片长度，合并后多余条目及完全耗尽的区间可能为空。启动集成必须跳过
-空条目；只将原地更新后的剩余区间交给 allocator。元数据表发布后 allocator 初始化
-失败即停止启动，不进行部分重试。
+Normalization preserves the slice length; after merging, redundant entries and fully consumed ranges may be empty. Boot integration must skip
+empty entries; only the remaining ranges after in-place updates are handed to the allocator. If allocator initialization fails after the metadata table is published,
+boot stops, with no partial retry.
 
-## 保障范围与审计
+## Scope of Guarantees and Audit
 
 Metadata backing never enters ordinary free inventory. kalloc raw release does
 not scan each page's references or permanent flag; callers must own the original
@@ -67,9 +67,9 @@ raw-protocol double frees, or record allocator bitmap/heap/PCP ownership in
 metadata. It parses no user input, retains no user-page contents and writes no
 persistent data.
 
-审计关注：原地列表扣除与元数据覆盖是否区分；映射是否只针对实际后备区且足够大；
-backend 是否隐藏索引几何；发布是否晚于全部初始化写入；调用方是否保留后备映射、
-跳过空条目并只交接剩余 RAM；局部测试是否按正确顺序销毁夹具。
+Audit focus: whether in-place list deduction and metadata coverage are distinguished; whether the mapping targets only the actual backing region and is large enough;
+whether the backend hides the index geometry; whether publication happens after all initialization writes; whether the caller retains the backing mapping,
+skips empty entries and hands over only the remaining RAM; whether local tests destroy fixtures in the correct order.
 
 
 ## Allocation references, grouping and unsafe callers

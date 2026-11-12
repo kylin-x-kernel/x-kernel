@@ -8,12 +8,12 @@ selftest_guest_mem_impl (以 guest-mem selftest 为例)
 │   └─ riscv64: hext_init (设 hstatus.VTW)
 │
 ├─ Vm::new(cfg)                     // 创建 VM 容器
-│   ├─ cfg.mem_size > 0 → A::GuestMem::new(base, size)
+│   ├─ cfg.mem_size > 0 → A::GuestMem::new(mem_base, mem_size, hpa_base, vmid)
 │   │   ├─ x86: Ept::new()   — 分配 PML4/PDPT/PD，填 2MiB 大页
 │   │   ├─ arm: Stage2::new() — 分配 L1/L2，填 2MiB block entries
 │   │   └─ rv:  GStage::new() — 分配 root(16K)/L1×4，填 2MiB superpages
 │   │
-│   └─ Arc::new(VmShared { cfg, guest_mem, mmio_bus, vcpu_pcpu })
+│   └─ Arc::new(VmShared { cfg, guest_mem, devices, vcpu_pcpu, vcpu_run_state, vcpu_tasks, stats, .. })
 │
 ├─ vm.create_vcpu(0)                // 创建 Vcpu<A>
 │   └─ Vcpu { arch: Default, vcpu_id, launched: false, vm: Arc::clone, hw_pages: [] }
@@ -59,7 +59,7 @@ vmm_run_vcpu<A>(vcpu)
     ├─ A::enter_guest(vcpu)         // 进入 guest
     │   ├─ x86:
     │   │   ├─ vmptrld(vmcs_pa)
-    │   │   ├─ vmcs_write(HostBaseGs, rdmsr(GS_BASE))  ← 修复: 刷新 GS
+    │   │   ├─ vmx::refresh_host_state()  ← 刷新所有 per-CPU host 字段
     │   │   └─ vmx_enter_guest (asm: 加载 GPR → vmlaunch/vmresume)
     │   ├─ arm: eret 到 EL1
     │   └─ rv:  sret 到 VS-mode

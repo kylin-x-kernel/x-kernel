@@ -320,7 +320,7 @@ context, whereas successful exec only releases session ownership.
 
 ## Regression Coverage
 
-The unittest-only `ExecSessionFixture` in `src/tee/tee_session.rs` supports
+The unittest-only `ExecSessionFixture` in `ut-tests/tee/tee_session/exec_fixture.rs` supports
 `core/ksyscall/ut-tests/task/tests/exec_lifecycle.rs`. It checks session retention
 until fatal cleanup, success-only slot removal and eventual resource release.
 These tests use transient resources and do not cover persistent storage,

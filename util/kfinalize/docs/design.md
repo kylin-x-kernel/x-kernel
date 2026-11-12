@@ -1,4 +1,4 @@
-# kfinalize — 设计文档
+# kfinalize — Design Document
 
 ## Fallible Payload Reservation
 
@@ -30,9 +30,9 @@ error precedence. Existing raw-owner and host/Miri probes cover successful
 publication, alignment, ZSTs, Weak expiry and modeled NMI retirement. This is
 not global OOM injection or proof of all kernel NMI/reclaim interleavings.
 
-## 定位与范围
+## Positioning and Scope
 
-公共 `DeferredArc<T>` / `DeferredWeak<T>` 将末公开强引用与 payload 析构分开。只提供普通可睡眠 worker 析构，不提供 BH 析构类型。普通使用者仅依赖 kfinalize；本 crate 不依赖 ktask、kirq 或 kworkng。安全构造器仍要求 provider 已安装、当前可睡眠；受审计的启动/任务准备通过 unsafe service::new_integration 提前准备。此入口复用现有共享链表保活未绑定责任，不扩展到 Task/RCU 迁移或公共排空 API。
+The public `DeferredArc<T>` / `DeferredWeak<T>` separate the release of the last public strong reference from the destruction of the payload. Only ordinary sleepable worker destruction is provided; no BH destruction type is provided. Ordinary users depend only on kfinalize; this crate does not depend on ktask, kirq or kworkng. The safe constructors still require that the provider is installed and the current context can sleep; audited boot/task preparation prepares ahead of time through the unsafe service::new_integration. This entry point reuses the existing shared list to keep the unbound responsibility alive, and does not extend to Task/RCU migration or a public drain API.
 
 The hidden unsafe service::new_integration entry obtains a fresh carrier and
 shares the same identity/KBox construction. After primary-CPU installation,
@@ -41,61 +41,63 @@ NoMemory return the unchanged input. Early retirement expires Weak immediately;
 the permanent inbox retains destruction until workers bind. Failed boot does
 not guarantee reclamation, and startup must not wait on its own executor.
 
-## 使用原则：非必要不使用
+## Usage Principle: Do Not Use Unless Necessary
 
-默认保留普通 Arc 和直接析构。只有明确存在“最后引用可能在不允许该对象析构的上下文释放”的需求，才考虑 DeferredArc；不能仅为了统一类型或省写回调而全量替换。
+By default, keep the ordinary Arc and direct destruction. Consider DeferredArc only when there is an explicit requirement that "the last reference may be released in a context where this object is not allowed to be destroyed"; do not replace everything merely to unify types or to avoid writing callbacks.
 
-- 接入时说明最后引用可能出现的上下文、完整析构链为何不能在那里执行，以及普通 worker 上下文如何满足要求。
-- 已有安全、正确的直接释放路径无需改造；RCU 宽限期后的 BH 回调已经可以直接析构时，不额外套延后析构类型。
-- 评估对象数量、创建/销毁频率、积压驻留内存和共享 worker 依赖；大量小对象尤其不能忽略每对象固定元数据。
-- 异步只提供执行上下文转换，不保证更快，也不保证更低尾延迟；同样不承担引用之外的 RCU/设备生命周期协议。
+- When adopting it, state the contexts in which the last reference may occur, why the complete destruction chain cannot run there, and how the ordinary worker context satisfies the requirements.
+- Paths that already have a safe and correct direct release need no rework; when a BH callback after an RCU grace period can already destroy directly, do not wrap it in an additional deferred destruction type.
+- Evaluate the number of objects, the creation/destruction frequency, the resident memory of the backlog, and the dependency on the shared worker; for large numbers of small objects in particular, the fixed per-object metadata must not be ignored.
+- Asynchrony only provides execution-context conversion; it does not guarantee speed, nor lower tail latency; likewise it does not take on any RCU/device lifetime protocol beyond the reference.
 
-当前仍是每对象三块分配：带 NMI 退休前缀的 identity、带 raw-owner
-头部的 payload、带 NMI 节点的 carrier；ZST 也有 payload 头部分配。
-64 位 DeferredArc/DeferredWeak 句柄各为 24 B，普通全局 allocator 的
-Arc/Weak 为 8 B。Clone 不新建 carrier，但解引用多一层指针间接访问，
-末引用释放增加队列同步、通知和 worker 调度，NMI 再增加普通 IRQ 转交。
-当前完整 allocator 请求量、slab 占用及 Task 总体增量尚未重新计量，
-不能引用历史版本的测量作为当前采用依据。大规模接入须针对目标配置补测。
+It is still three allocations per object: an identity with an NMI retirement prefix, a payload with a raw-owner
+header, and a carrier with an NMI node; a ZST also has a payload header allocation.
+On 64-bit, the DeferredArc/DeferredWeak handles are 24 B each, while an
+Arc/Weak from an ordinary global allocator is 8 B. Clone does not create a new carrier, but dereferencing involves an extra pointer indirection,
+the last-reference release adds queue synchronization, notification and worker scheduling, and NMI additionally adds an ordinary IRQ handoff.
+The current total allocator request volume, slab usage and overall Task increment have not been re-measured,
+so measurements from historical versions must not be cited as the basis for current adoption. Large-scale adoption requires supplementary measurements for the target configuration.
 
-接入评审必须记录：析构上下文冲突、对象峰值数量与创建/销毁频率、
-每对象及积压内存预算、共享执行器等待依赖，以及模块自己的完成/关闭协议。
-类型约束和构造器检查不能自动证明这些业务条件；不满足时保留普通 Arc，
-或先调整模块生命周期，而不是先替换再假设后台能够及时释放。
+The adoption review must record: the destruction-context conflict, the peak object count and creation/destruction frequency,
+the per-object and backlog memory budgets, the wait dependencies of the shared executor,
+and the module's own completion/shutdown protocol.
+Type constraints and constructor checks cannot automatically prove these business conditions; if they are not satisfied, keep the ordinary Arc,
+or first adjust the module lifecycle, rather than replacing first and then assuming the background can release in time.
 
-## 架构
+## Architecture
 
 ```text
 DeferredArc ── Arc<Identity<T>, IdentityAllocator> ── KBox<Payload<T>> (raw header + T)
                      │
-                     └── Arc<dyn Prepared> ── 轻量链表节点 ── 共享 Normal Work
+                     └── Arc<dyn Prepared> ── lightweight list node ── shared Normal Work
 DeferredWeak ── Weak<Identity<T>, IdentityAllocator>
 ```
 
-`src/lib.rs` 拥有公开身份与 payload；`src/service.rs` 是给内核集成层的隐藏 provider 契约。kworkng 启动早期安装集成准备入口，执行服务初始化成功后安装普通 Normal 准备入口；二者共用同一 executor，每次返回独立载体。普通构造在普通入口未安装时直接返回 NotReady，不因集成入口已安装而绕过上下文检查。
+`src/lib.rs` owns the public identity and the payload; `src/service.rs` is the hidden provider contract for the kernel integration layer. Early in startup, kworkng installs the integration preparation entry point; after the execution service initializes successfully, it installs the ordinary Normal preparation entry point; the two share the same executor, and each returns an independent carrier. Ordinary construction returns NotReady directly when the ordinary entry point is not installed, and does not bypass the context check just because the integration entry point is installed.
 
-没有发现需要“末引用自动触发 BH 析构”的业务消费者，因此首版移除 BH 入口。RCU 已有的非睡眠析构回调保持原样；将来只有具体消费者证明独立需求时才重新评估。不睡眠不等于任意上下文安全，但这个区别本身不是新增通用类型的理由。
+No business consumer was found that needs "automatic BH destruction on the last reference", so the first version removes the BH entry point. The existing non-sleeping destruction callbacks of RCU remain unchanged; they will be re-evaluated in the future only if a concrete consumer demonstrates an independent need. Not sleeping does not mean being safe in any context, but this distinction by itself is not a reason to add a new general-purpose type.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-| 操作 | 允许的上下文与前提 | 不提供的保证 |
+| Operation | Allowed context and preconditions | Guarantees not provided |
 | --- | --- | --- |
-| 普通 new | provider 已安装的可睡眠任务上下文 | 不允许 IRQ/NMI 中临时构造 |
-| unsafe service::new_integration | provider 已安装，各 CPU 本地 allocator/per-CPU/IRQ 锁就绪；已审计启动/任务准备，可禁止抢占 | 不允许 hardirq/softirq/NMI 构造；不是通用检查旁路 |
-| 最后强引用释放 | task、softirq、hardirq、已审计启动路径；NMI 要求本 CPU irq_work 已准备好 | 普通路径锁序约束不变；不保证 wait-free |
-| 最后 Weak 释放 | 普通上下文直接释放 identity；NMI 经独立 irq_work 节点转交普通 IRQ | 不支持未准备 irq_work 的 NMI；不保证延迟 |
+| Plain new | Sleepable task context with a provider installed | Ad hoc construction in IRQ/NMI is not allowed |
+| unsafe service::new_integration | Provider installed, each CPU's local allocator/per-CPU/IRQ locks ready; audited boot/task preparation, preemption may be disabled | hardirq/softirq/NMI construction not allowed; not a general bypass of the checks |
+| Last strong reference release | task, softirq, hardirq, audited boot paths; NMI requires this CPU's irq_work to be prepared | Lock-ordering constraints on ordinary paths are unchanged; wait-free is not guaranteed |
+| Last Weak release | Ordinary context frees the identity directly; NMI hands off to ordinary IRQ via a separate irq_work node | NMI without a prepared irq_work is not supported; no latency guarantee |
 | Payload Drop / KBox free | Sleepable normal worker, outside queue locks | Never inline in submit; no latency bound |
 
-NMI 分支在任何普通 guard、pending/queue 锁或 allocator free 前判断。
-payload carrier 的原始 Arc owner 转交到普通 IRQ，之后沿原链表进入 worker。
-控制块使用标准 Arc 的 allocator_api：provider 在请求区域之外准备独立
-退休头，末 Weak 的 allocator deallocate 仅交出原始分配 token。普通路径
-不增加 IRQ 跳数。不支持或未就绪的 NMI 交接按致命契约违规处理，不能
-退回到 NMI 内直接释放。Weak upgrade 得到的临时 owner 遵守同样条件。
+The NMI branch is decided before any ordinary guard, pending/queue lock or allocator free.
+The original Arc owner of the payload carrier is handed off to ordinary IRQ, and afterwards enters the worker along the original list.
+The control block uses the standard Arc's allocator_api: the provider prepares a separate
+retirement header outside the requested region, and the allocator deallocate of the last Weak merely hands out the original allocation token.
+The ordinary path
+adds no IRQ hops. An unsupported or unready NMI handoff is treated as a fatal contract violation, and must not
+fall back to releasing directly inside the NMI. The temporary owner obtained by Weak upgrade obeys the same conditions.
 
-这不等于禁止 NMI 读取某对象：若模块另有协议，保证 NMI 外的 owner
-覆盖整个借用期间，且读取操作本身适合 NMI，可以单独审计该借用。
-DeferredArc 不自动提供此借用协议，也不保证任意 T 的方法适合 NMI。
+This does not amount to forbidding NMI from reading an object: if a module has a separate protocol that guarantees an owner outside the NMI
+covers the entire borrow period, and the read operation itself is suitable for NMI, that borrow may be audited individually.
+DeferredArc does not provide this borrowing protocol automatically, nor does it guarantee that the methods of an arbitrary T are suitable for NMI.
 
 The provider checks context and readiness before payload reservation. Recoverable
 failure returns the original input; only payload reservation gains NoMemory
@@ -104,71 +106,71 @@ initialized local irq_work. Submission allocates no carrier, never waits for
 workers and never destroys the payload inline; it is not wait-free or safe
 under arbitrary locks.
 
-IdentityAllocator 是每 identity 一次分配的 allocator，不是通用多分配池。
-成功分配后才能 Clone，复制永久 policy 和原始 token；所有副本拒绝第二次
-allocate。Arc 构造成功后才产生这些副本，析构 allocator 本身不释放任何
-资源。token 独立保存原始 provenance，不能从 Arc 缩窄后的区域指针反推
-整块分配再 free。公共 handles 因而包含 16 B allocator 状态（64 位）。
-默认 Global policy 只供安装前的内部测试；生产 provider 必须先安装内存
-policy，早期对象保留创建时的 policy，不会随后切换 deallocator。
+IdentityAllocator is an allocator that performs one allocation per identity, not a general multi-allocation pool.
+Only after a successful allocation can it be cloned, copying the permanent policy and the original token; all copies refuse a second
+allocate. These copies are produced only after the Arc has been constructed successfully, and destroying the allocator itself releases no
+resources. The token separately preserves the original provenance, and the whole allocation cannot be inferred from the region pointer narrowed by Arc and then freed.
+The public handles therefore contain 16 B of allocator state (64-bit).
+The default Global policy is only for internal tests before installation; the production provider must install the memory
+policy first, and early objects retain the policy at the time of creation, so the deallocator is not switched afterwards.
 
-Normal 最终 Drop 可以睡眠，但仍须避免共享池等待依赖环。即使最后引用在 softirq 中释放，也只提交到普通 worker，不在 softirq 内析构。关机前的落盘、设备停止仍由所属模块同步保证；本机制不是关机屏障。
+The final Normal Drop may sleep, but it must still avoid wait-dependency cycles in the shared pool. Even if the last reference is released in softirq, it is only submitted to an ordinary worker and not destroyed inside the softirq. Flushing to disk and stopping devices before shutdown are still guaranteed synchronously by the owning module; this mechanism is not a shutdown barrier.
 
-共享 Work 使当前普通回收串行：某个 Normal 析构睡眠会阻挡后续 Normal 节点。因此析构不得直接或间接等待同一执行器中其他对象完成回收；允许入队新的对象但不等待它。这是共享方案新增的接入限制，不是额外线程能自动解决的问题。
+The shared Work serializes current ordinary reclamation: if one Normal destruction sleeps, it blocks subsequent Normal nodes. Therefore a destruction must not directly or indirectly wait for the reclamation of other objects in the same executor to complete; enqueuing new objects is allowed, but waiting for them is not. This is a new adoption restriction introduced by the shared scheme, not a problem that additional threads can solve automatically.
 
-## 状态机与算法
+## State Machine and Algorithm
 
-1. 检查 provider，准备 carrier；任何可恢复失败都尚未接管输入。
+1. Check the provider and prepare the carrier; any recoverable failure has not yet taken over the input.
 2. Reserve and initialize stable KBox<Payload<T>> storage, construct the standard Arc identity, then initialize the raw header before publication. Identity, payload and carrier remain separate allocations, including the header for ZST values.
-3. 标准 Arc 将最后强引用变为零后调用 Identity::drop。此时所有 Weak 升级失败。
-4. Identity 交出唯一 Finalization；载体保活不引用公开身份，不延长 Weak 升级窗口。
+3. After the standard Arc drops the last strong reference to zero, Identity::drop is called. From this point all Weak upgrades fail.
+4. Identity hands out the unique Finalization; the carrier keep-alive does not reference the public identity and does not extend the Weak upgrade window.
 5. The prepared executor consumes Finalization; KBox::from_raw runs T::drop and releases payload storage. Submission context does not change the executor.
 
-## 并发模型与设计决策
+## Concurrency Model and Design Decisions
 
-### 调度所有权接口
+### Scheduling Ownership Interface
 
-`as_ptr` 只借用 T 地址；`ptr_eq` 比较 identity；`strong_count` 只是瞬时
-观察，不能代替同步。`into_raw/from_raw` 转交/恢复一个强引用，不增减
-计数、不分配。每个 raw owner 必须恢复一次；遗漏则保留强引用而泄漏，
-重复恢复属于调用者的 unsafe 违约。raw owner 存在时 Weak 仍可升级。
-`borrow_raw` 专供 current 一类非拥有型视图：返回 ManuallyDrop 包装，
-不消耗原始 count、不增加引用。调用者保证真实 raw owner 覆盖视图及其
-借用，不能显式 Drop/取出包装中的 handle；clone 才产生独立拥有型引用。
+`as_ptr` only borrows the address of T; `ptr_eq` compares identity; `strong_count` is merely an instantaneous
+observation and cannot replace synchronization. `into_raw/from_raw` hand off/restore one strong reference, without increasing or decreasing
+the count and without allocating. Each raw owner must be restored exactly once; if omitted, the strong reference remains and is leaked;
+a duplicate restoration is an unsafe contract violation by the caller. While a raw owner exists, a Weak can still be upgraded.
+`borrow_raw` is dedicated to non-owning views such as current: it returns a ManuallyDrop wrapper,
+which neither consumes the original count nor adds a reference. The caller guarantees that the real raw owner covers the view and its
+borrows, and must not explicitly Drop/take out the handle inside the wrapper; only clone produces an independent owning reference.
 
-payload 在 T 前保存不可变 RawIdentity：原 Arc identity 指针与兼容的
-IdentityAllocator 副本。初始化发生在首次发布前，不添加保活引用，
-不是引用环。into_raw 从完整 payload 原始指针投影 T；from_raw 仅接受
-保留该分配 provenance 的拥有型指针，按 repr(C) 字段偏移回到头部。
-不能从 Deref 产生的 &T 逆推头部；as_ptr 本身也不授予一份强引用。
-这与禁止从 Arc 缩窄区域指针恢复 allocator backing allocation 不冲突：
+The payload stores an immutable RawIdentity before T: the original Arc identity pointer and a compatible
+IdentityAllocator copy. It is initialized before first publication and adds no keep-alive reference,
+so it is not a reference cycle. into_raw projects T from the full payload raw pointer; from_raw accepts only an owning pointer
+that retains the allocation provenance, and returns to the header by the repr(C) field offset.
+The header cannot be derived backwards from a &T produced by Deref; as_ptr itself also does not grant a strong reference.
+This does not conflict with the prohibition on recovering the allocator backing allocation from a narrowed Arc region pointer:
 The retained pointer has the full KBox allocation provenance, not authority widened from a shared T reference.
 
-末强引用结束后头部中的 identity 指针可能悬垂，worker 绝不读取它；
-MaybeUninit 头部无需析构，其 allocator 副本本身不释放资源。worker 仅
+After the last strong reference ends, the identity pointer in the header may dangle, and the worker never reads it;
+the MaybeUninit header needs no destructor, and its allocator copy itself releases no resources. The worker only
 The worker drops T and frees the whole payload KBox. Last Weak release retains the identity-memory protocol.
 
-64 位 RawIdentity 为 24 B；usize payload 请求从 8 B 变为 32 B，ZST
-从无 payload 分配变为 24 B，其他类型还受对齐影响。非 ZST 的分配次数
-不增加，DeferredArc/Weak 句柄大小仍为 24 B。实际 Task 成本待接入测量；
-不把宿主正确性测试当成正式性能数据。
+On 64-bit, RawIdentity is 24 B; a usize payload request goes from 8 B to 32 B, a ZST
+goes from no payload allocation to 24 B, and other types are additionally affected by alignment. For non-ZST types the number of allocations
+does not increase, and the DeferredArc/Weak handle size remains 24 B. The actual Task cost awaits adoption measurements;
+host correctness tests must not be treated as formal performance data.
 
-公开强/弱引用竞争完全复用标准 Arc/Weak。公开引用存在时 payload 只有共享访问；只有公开强引用消失后的唯一 token 可取得析构权。没有自制引用计数，没有扫描或重试。
+Races between public strong/weak references fully reuse the standard Arc/Weak. While public references exist, the payload only has shared access; only the unique token after the public strong references disappear can obtain the right to destroy. There is no home-grown reference count, and no scanning or retry.
 
-Prepared 的消费式 Arc receiver 与待处理链表持有的 Arc 分别保护提交者和执行者；worker 可先完成 payload 析构，提交者仍能安全返回。公共身份、carrier 与 payload 分开，因此该竞争不要求 payload 留到发布返回。链表锁仅保护发布/移除；锁外通知共享 Work、析构和释放节点，每轮最多处理 64 项，剩余由后续执行轮次承接。
+The consuming Arc receiver of Prepared and the Arc held by the pending list protect the submitter and the executor respectively; the worker may finish the payload destruction first, and the submitter can still return safely. The public identity, the carrier and the payload are separate, so this race does not require the payload to remain until publication returns. The list lock only protects publication/removal; notifying the shared Work, destruction and freeing nodes all happen outside the lock, and at most 64 items are processed per round, with the remainder taken over by subsequent execution rounds.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-| 对象 | 释放位置 |
+| Object | Release location |
 | --- | --- |
 | T destruction and KBox<Payload<T>> storage | Finalization::finish on a normal worker |
-| Arc 公开控制块 | 最后强/弱引用的调用者；可能在 IRQ 路径 |
-| 空 carrier 分配与元数据 | 最后发布者或 worker；可能在 IRQ 路径 |
+| Arc public control block | Caller of the last strong/weak reference; possibly on an IRQ path |
+| Empty carrier allocation and metadata | Last publisher or worker; possibly on an IRQ path |
 
-后两行不能包含需要睡眠的业务析构，不声称全部 allocator free 被异步化。这是源码所有权边界，不是 allocator 逐次跟踪测量结果。
+The last two rows must not contain business destruction that needs to sleep, and it is not claimed that all allocator frees are made asynchronous. This is a source-level ownership boundary, not the result of per-call allocator tracing measurements.
 
-## 使用
+## Usage
 
-依赖 `kfinalize.workspace = true`，在合法任务上下文调用 `DeferredArc::new(value)`。初始化由 runtime/kworkng 完成，使用者无需创建或管理 WorkHandle。没有 get_mut、try_unwrap、任意队列选择或取消最终析构接口。
+Depend on `kfinalize.workspace = true`, and call `DeferredArc::new(value)` in a valid task context. Initialization is done by runtime/kworkng, and users need not create or manage a WorkHandle. There is no get_mut, try_unwrap, arbitrary queue selection, or interface to cancel the final destruction.
 
-RCU 宽限期仍由 RCU 负责，本 crate 不改变 RCU 调度底座。已经在 GP 后 BH 回调中可安全释放的对象无需为了使用本类型再排一次 BH；需要睡眠的析构可在 GP 后交接 Normal。
+The RCU grace period remains the responsibility of RCU, and this crate does not change the RCU scheduling foundation. Objects that can already be safely released in a BH callback after the GP need not queue another BH just to use this type; destruction that needs to sleep can be handed off to Normal after the GP.

@@ -1,4 +1,4 @@
-# kruntime — 设计文档
+# kruntime — Design Document
 
 ## Network Startup Owners
 
@@ -70,7 +70,7 @@ require moving platform discovery or hardware implementation into the generic
 IRQ core. X-Kernel retains its own current-installation and AP rendezvous needs.
 
 Early console/controller discovery remains distinct from local source activation.
-After GP and worker startup, the boot task invokes `khal::console::prepare_input`
+After GP and worker startup, the late-init thread invokes `khal::console::prepare_input`
 before device discovery can construct N_TTY. The console provider owns optional
 input setup and polled fallback; runtime only orders this phase. Validation and
 coverage limits for controller startup are recorded in
@@ -263,7 +263,7 @@ stop on fixture allocation failure; this is not a production OOM policy.
 `KFEAT_RCU_BENCH` selects the independent callback/synchronous-wait runner through the
 same handoff. Kconfig excludes both stress runners while it is selected.
 
-## 定位
+## Positioning
 
 RCU integration tests in `ut-tests/rcu_service_startup.rs` and
 `ut-tests/rcu_synchronize.rs` verify task/timer carrier preparation and public
@@ -311,14 +311,9 @@ ksoftirqd creation, IRQ enable and optional watchdog/PMU initialization. It rele
 the guard before run_idle. Requests remain pending rather than being discarded.
 IRQ masking alone is insufficient because internal lock release can check preemption.
 
-主核在 scheduler 初始化返回后，同样保护 IRQ 服务与 late-init 任务的创建和激活，
-完成后释放 guard，再进入普通调度。late_init_main 的驱动/文件系统/网络阶段可能
-等待 I/O，不处于该保护范围。受保护启动区域不得显式 yield、阻塞或等待本 CPU
-尚未执行的任务；后续新增初始化步骤必须维护这个约束。
+After scheduler initialization returns, the primary likewise protects IRQ service setup and the creation and activation of the late-init task, then releases the guard before entering normal scheduling. The driver/filesystem/network phases of late_init_main may wait for I/O and are not covered by this protection. The protected startup region must not explicitly yield, block, or wait for a task that this CPU has not yet run; initialization steps added later must maintain this constraint.
 
-单测启动钩子在所有 AP 的 run queue 就绪、主核尚未发布 INITED_CPUS 时逐核
-投递任务及重调度请求，任务检查 AP 服务准备完成标记。结果保留至测试执行，
-不依赖忙等时长；测试任务退出，无运行期 hook 或栈借用遗留。
+The unit-test startup hook, once all AP run queues are ready and before the primary has published INITED_CPUS, delivers a task and a reschedule request to each CPU in turn; the task checks the AP service-ready marker. The result is retained until the test executes and does not depend on busy-wait duration; after the test task exits, no runtime hook or stack borrow remains.
 
 Runtime enables fixed notifications after `kipi::init` on the primary, then
 releases AP service initialization. Each AP enables notifications before creating
@@ -326,31 +321,31 @@ its local services and publishing completion. The notification entry enables the
 line, publishes ENABLED, and drains early requests. `SCHED_READY_CPUS` still means
 run-queue registration, not IRQ readiness; static reason bits retain early requests.
 
-`kruntime` 是 x-kernel 的**运行时编排层**：在平台引导代码将控制权交给内核后，负责主核/从核的初始化顺序、子系统装配，以及跳转到系统初始化入口（`entry` crate 提供的 `SystemInitEntry`）。它不实现具体设备驱动或 syscall，而是把 `khal`、`memspace`、`ktask`、`kdriver` 等按固定阶段串联起来。
+`kruntime` is the **runtime orchestration layer** of x-kernel: after platform boot code hands control to the kernel, it is responsible for primary/secondary CPU initialization order, subsystem assembly, and the jump to the system initialization entry (`SystemInitEntry`, provided by the `entry` crate). It implements no concrete device drivers or syscalls; instead it chains `khal`, `memspace`, `ktask`, `kdriver` and others together in fixed phases.
 
-目标读者：需要理解启动链、SMP 屏障、或在此 crate 增加初始化钩子的内核开发者。
+Target audience: kernel developers who need to understand the boot chain, SMP barriers, or add initialization hooks in this crate.
 
-## 背景
+## Background
 
-x-kernel 将**引导**（`kernel-boot`、平台 `platconfig`）与**运行时**（内存、调度、驱动、用户态 init）分离。引导层通过 `BootInfo` 和 `kiface` 单实现入口把主核/从核控制权交给运行时；`kruntime` 提供这些入口的实现（`rust_main` / `rust_main_secondary`）。
+x-kernel separates **boot** (`kernel-boot`, platform `platconfig`) from the **runtime** (memory, scheduling, drivers, userspace init). The boot layer hands primary/secondary CPU control to the runtime through `BootInfo` and single-implementation `kiface` entries; `kruntime` provides the implementations of these entries (`rust_main` / `rust_main_secondary`).
 
-启动拓扑遵循 FreeBSD `proc0` 模型：boot/current task 是调度器内部任务（`Internal` 身份，不进入普通 PID allocator）。`rust_main` 激活一个 PID-less 的 late-init 内核线程跑完所有 late init（drivers/fs/net/SMP 等），等待全部 CPU 就绪后调用 `SystemInitEntry::enter()`。`entry` **spawn 出一个全新的 PID 1 用户任务**（init），随后 late-init 线程退出。init 不是"原地变身"——它是被 spawn 的新任务，走与 fork 相同的 `new_user` + `publish_user_task().commit()` 标准路径。
+The boot topology follows the FreeBSD `proc0` model: the boot/current task is a scheduler-internal task (`Internal` identity, not in the ordinary PID allocator). `rust_main` activates a PID-less late-init kernel thread that runs all late init (drivers/fs/net/SMP, etc.) and calls `SystemInitEntry::enter()` once all CPUs are ready. `entry` **spawns a brand-new PID 1 user task** (init), after which the late-init thread exits. Init does not "transform in place"; it is a newly spawned task that follows the same standard `new_user` + `publish_user_task().commit()` path as fork.
 
-关键设计：late-init 线程以及 late init 期间 spawn 的所有后台 worker（网络 poller、TTY、watchdog 等）都是 PID-less 的 `Internal` 内核线程（对应 FreeBSD `kthread_add`），不进入普通 PID 空间。因此 init 的分配是 root namespace 的第一笔普通分配，PID 1 是唯一的启动期固定 PID。
+Key design: the late-init thread and all background workers spawned during late init (network poller, TTY, watchdog, etc.) are PID-less `Internal` kernel threads (corresponding to FreeBSD `kthread_add`) and do not enter the ordinary PID space. Init's allocation is therefore the first ordinary allocation in the root namespace, and PID 1 is the only fixed PID at boot.
 
-应用逻辑（例如 `entry::runtime::init_runtime`）放在 `entry` crate；初始用户进程组装则由 `posix-process::spawn_init_process` 承接，避免 `kruntime` 反向依赖高层服务。
+Application logic (e.g. `entry::runtime::init_runtime`) lives in the `entry` crate; assembly of the initial user process is handled by `posix-process::spawn_init_process`, so that `kruntime` does not depend back on high-level services.
 
-## 范围
+## Scope
 
-涉及的源文件：
+Source files involved:
 
 ```
 core/kruntime/
 ├── src/
-│   ├── lib.rs              # 主核 rust_main、日志适配、中断/分配器、内存区日志
-│   ├── mp.rs               # SMP 从核启动、TLB 单测
+│   ├── lib.rs              # primary-core rust_main, log adapter, interrupt/allocator, memory-region log
+│   ├── mp.rs               # SMP secondary-core boot, TLB unit test
 │   ├── cpu_readiness.rs    # Per-CPU interrupt-readiness publication and query
-│   ├── init_setup.rs       # .init_array 构造函数表遍历
+│   ├── init_setup.rs       # .init_array constructor table traversal
 │   └── lang_items.rs       # #[panic_handler]
 ├── Cargo.toml
 └── docs/
@@ -358,15 +353,15 @@ core/kruntime/
     └── security.md
 ```
 
-## 架构
+## Architecture
 
 ```
-kernel-boot (汇编 / MMU / BootInfo)
+kernel-boot (assembly / MMU / BootInfo)
         │
         │  PrimaryKernelEntry::enter(boot_info_ptr)
         ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  kruntime::rust_main (主核, boot task)                         │
+│  kruntime::rust_main (primary CPU, boot task)                 │
 │    khal / memspace / kalloc / klogger / backtrace             │
 │    init_scheduler / init_interrupt                            │
 │    create PID-less late-init bootstrap thread                 │
@@ -387,38 +382,38 @@ kernel-boot (汇编 / MMU / BootInfo)
         │  boot_ap → SecondaryKernelEntry::enter(logical_cpu_id)
         ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  kruntime::rust_main_secondary (从核)                          │
-│    percpu / trap / memspace 从核 / 调度器从核 / IPI            │
+│  kruntime::rust_main_secondary (secondary CPU)                │
+│    percpu / trap / memspace secondary / scheduler secondary / IPI │
 │    wait for primary -> local services -> publish -> idle      │
 └───────────────────────────────────────────────────────────────┘
 
-侧向接线（链接期，非启动顺序）：
+Lateral wiring (link time, not boot order):
   lib.rs            ──provide──►  kiface_logging_api::LogSinkIf / LogContextIf
   lib.rs            ──provide──►  kernel_boot::PrimaryKernelEntry
   mp.rs             ──provide──►  kernel_boot::SecondaryKernelEntry
 ```
 
-| 组件 | 职责 |
+| Component | Responsibility |
 |------|------|
-| `rust_main` | 主核唯一完整初始化路径；由 `PrimaryKernelEntry` provider 进入 |
-| `rust_main_secondary` | 从核初始化；由 `SecondaryKernelEntry` provider 进入；最终 `run_idle` |
-| `mp::start_secondary_cpus` | 为 AP 准备栈、调用 `boot_ap`、等待 AP 注册其 run queue（跨核 spawn 安全前提） |
-| `init_setup` | 执行链接段 `.init_array` 中的 `register_init` 回调 |
-| `lang_items` | Panic 时打印 backtrace 并调用裸平台终点 `khal::power::platform_power_off`（绕过 SMP stop 钩子，避免 panic 持锁时 IPI 停机死锁） |
+| `rust_main` | The sole full initialization path of the primary CPU; entered via the `PrimaryKernelEntry` provider |
+| `rust_main_secondary` | Secondary CPU initialization; entered via the `SecondaryKernelEntry` provider; finally `run_idle` |
+| `mp::start_secondary_cpus` | Prepares the stack for each AP, calls `boot_ap`, and waits for the AP to register its run queue (precondition for safe cross-CPU spawn) |
+| `init_setup` | Runs the `register_init` callbacks in the `.init_array` link section |
+| `lang_items` | On panic, prints a backtrace and calls the bare platform endpoint `khal::power::platform_power_off` (bypassing the SMP stop hook to avoid an IPI-stop deadlock when panicking while holding a lock) |
 
-## 启动流程（主核）
+## Boot Flow (Primary CPU)
 
-`rust_main` 阶段划分如下（与代码顺序一致）：
+`rust_main` is divided into the following phases (matching code order):
 
 ```
 BootInfo*
     → firmware::init / percpu::init_primary / init_trap
     → mem::init
     → init_allocator (resident physical-page metadata, page inventory, then byte heap)
-    → register_boot_console_runtime_region (可选 MMIO UART)
+    → register_boot_console_runtime_region (optional MMIO UART)
     → memspace::init_memory_management
     → early_driver_init
-    → klogger + backtrace (链接符号 _stext/_etext)
+    → klogger + backtrace (linker symbols _stext/_etext)
         (Log filtering: `init_klogger(configured_log_level())` fixes the build
          level — the console default and the floor of the log filter, which a
          runtime request may raise but never lower. `resolve_boot_log_filter()`
@@ -457,52 +452,41 @@ late-init thread (Internal, PID-less):
     → [fs9p] fs_boot host-share mount
     → [net/vsock] knet
     → finish_allocator_init, log_memory_regions
-    → [vsock_tipc_bridge] start_vsock_bridge (依赖跨 CPU 调度，必须在屏障后)
+    → [vsock_tipc_bridge] start_vsock_bridge (depends on cross-CPU scheduling, so it must come after the barrier)
     → SystemInitEntry::enter()
-        (entry; spawn 出全新 PID 1 用户任务 init，返回)
-    → late-init thread exits (task_entry 自动调 ktask::exit)
+        (entry; spawns a brand-new PID 1 user task init, then returns)
+    → late-init thread exits (task_entry automatically calls ktask::exit)
 
-init (PID 1, 全新 spawn 的用户任务):
-    → 调度器 switch-in 时自动激活用户页表 (switch_page_table_root)
-    → run_user_thread_loop → 进入用户态
+init (PID 1, a newly spawned user task):
+    → the scheduler automatically activates the user page table on switch-in (switch_page_table_root)
+    → run_user_thread_loop → enter user mode
 ```
 
 ### Boot RAM handoff
 
-`init_allocator()` 将 HAL 的 `MemFlags::FREE` 区间收集到调用方的有界
-`heapless::Vec<PhysAddrRange, 256>`。`page_meta::init(&mut ranges, map_storage)`
-原地规范化并扣除后备区，只返回 PageMetaTable；映射回调仅将实际后备区 PA
-转换为稳定可写 VA，不在每个物理范围上保存映射信息。
+`init_allocator()` collects the HAL's `MemFlags::FREE` ranges into the caller's bounded `heapless::Vec<PhysAddrRange, 256>`. `page_meta::init(&mut ranges, map_storage)` normalizes in place and deducts the backing region, returning only the PageMetaTable; the mapping callback only converts the PA of the actual backing region into a stable writable VA and does not keep mapping information on each physical range.
 
-runtime 串行发布统一 PFN 查询服务，再按 PA 升序以首个非空剩余区间调用既有 global_init，
-用 global_add_memory 依次交接后续非空区间。buddy 按注册顺序选区间，低地址优先可避免
-DMA32 分配先命中高于 4 GiB 的区间后直接失败。VA 转换在这两个实际使用位置完成。
-输入容器容量属于 runtime/HAL 接线，不作为 page-meta 的公共 region 抽象。
-256 是规范化前输入条目数；当前后端接受最多 64 个合并后的不连续段，现有 buddy
-同样最多注册 64 个 region。这两个上限统计的对象不同。
+The runtime serially publishes the unified PFN lookup service, then calls the existing global_init with the first non-empty remaining range in ascending PA order and hands off subsequent non-empty ranges one by one with global_add_memory. The buddy allocator selects ranges in registration order; preferring low addresses avoids a DMA32 allocation first hitting a range above 4 GiB and failing outright. VA conversion is done at these two actual use sites.
+The input container capacity is part of runtime/HAL wiring and is not a public region abstraction of page-meta. 256 is the number of input entries before normalization; the current backend accepts at most 64 merged discontiguous segments, and the existing buddy allocator likewise registers at most 64 regions. These two limits count different things.
 
-page-meta 拥有存储规划、索引和自身预留，allocator 拥有 bitmap、空闲库存与 heap，
-runtime 只负责物理列表、映射能力和交接顺序。覆盖范围包括扣除的后备页，当前只
-描述输入 FREE RAM 的完整页。覆盖页数通过 covered_pages() 从段表推导，启动日志的
-metadata_pages 由覆盖页数减去交接前剩余页数局部计算，均不保存为表字段。
-错误不发布元数据表；输入可能已规范化。元数据表发布后 allocator 失败按 fatal-boot 停止，
-不重试整个事务。
+page-meta owns storage planning, indexing and its own reservation; the allocator owns the bitmap, free inventory and heap; the runtime is responsible only for the physical list, mapping capability and handoff order. Coverage includes the deducted backing pages and currently describes only whole pages of the input FREE RAM. The covered page count is derived from the segment table via covered_pages(), and the boot log's metadata_pages is computed locally as the covered page count minus the pages remaining before handoff; neither is stored as a table field.
+On error the metadata table is not published; the input may already have been normalized. If the allocator fails after the metadata table is published, boot stops as fatal and the whole transaction is not retried.
 
-### PID 1 启动约定
+### PID 1 Boot Convention
 
-`ktask::init_scheduler()` 创建的 boot/current task 与 idle task 都是 scheduler 内部身份（`Internal`/`Idle`），不调用 `kidentity::allocate_root_pid_handle()`。late-init 线程也是 `Internal`，且 late init 期间 spawn 的所有后台 worker（`ktask::spawn` 走 `new_pidless_kthread`）同样是 PID-less 的 `Internal`。因此 `SystemInitEntry::enter()` 创建 init 时，root namespace 的第一笔普通 PID 分配必须得到 PID 1。
+The boot/current task and idle task created by `ktask::init_scheduler()` both have scheduler-internal identities (`Internal`/`Idle`) and do not call `kidentity::allocate_root_pid_handle()`. The late-init thread is also `Internal`, and all background workers spawned during late init (`ktask::spawn` goes through `new_pidless_kthread`) are likewise PID-less `Internal`. Therefore, when `SystemInitEntry::enter()` creates init, the first ordinary PID allocation in the root namespace must yield PID 1.
 
-这个顺序把 root namespace 的早期 PID 语义固定为：
+This ordering fixes the early PID semantics of the root namespace as:
 
 ```text
-PID 0   = boot/idle/swapper 类内部任务（不经普通 allocator）
-PID 1   = init 用户进程（late-init 线程 spawn 的全新用户任务）
-PID >=2 = 后续 fork 出的用户进程或显式 Linux-visible task；普通内核 worker 不占号
+PID 0   = internal tasks of the boot/idle/swapper kind (do not go through the ordinary allocator)
+PID 1   = the init user process (a brand-new user task spawned by the late-init thread)
+PID >=2 = user processes forked later or explicit Linux-visible tasks; ordinary kernel workers do not consume a PID
 ```
 
-init 不再经历"原地变身"：late-init 线程通过 `SystemInitEntry::enter()` → `posix-process::spawn_init_process` 构造一个全新的 `User` 身份任务，runtime 在 `new_user` 构造时一次性就绪（`UserRuntimeSlot::ready`），经 `publish_user_task().commit()` 发布并激活，页表由调度器在首次 switch-in 时通过 `switch_page_table_root` 自动写入。没有 `install_user_runtime`、空槽状态机或 `activate_current_user_page_table` 这类"事后补装"机制。
+Init no longer "transforms in place": the late-init thread constructs a brand-new `User`-identity task through `SystemInitEntry::enter()` → `posix-process::spawn_init_process`; its runtime is made ready once at `new_user` construction (`UserRuntimeSlot::ready`), published and activated via `publish_user_task().commit()`, and the page table is written automatically by the scheduler at first switch-in through `switch_page_table_root`. There is no "after-the-fact installation" mechanism such as `install_user_runtime`, an empty-slot state machine, or `activate_current_user_page_table`.
 
-### 全局就绪屏障 `is_init_ok`
+### Global Readiness Barrier `is_init_ok`
 
 ```rust
 INITED_CPUS.load(Acquire) == kcpu_id_map::nr_cpus()
@@ -530,32 +514,23 @@ has entered its service wait. It observes completion immediately before RCU
 initialization, exercising the rendezvous without a timer or runnable-task
 dependency. Normal builds do not install this handshake.
 
-### NMI 初始化时序
+### NMI Initialization Sequence
 
-NMI 机制由平台探测并在每 CPU 使能，`kruntime` 负责在正确的初始化阶段调用
-`khal::nmi` 接口：
+The NMI mechanism is probed by the platform and enabled per CPU; `kruntime` is responsible for calling the `khal::nmi` interfaces at the correct initialization phases:
 
-- `early_driver_init`（GIC 初始化完成后）→ `khal::nmi::early_init()`：探测 GIC
-  版本与 FEAT_NMI，写入运行时机制（`Pseudo` / `Hardware` / `None`），并打印
-  `NMI mode: ...` 启动日志。
-- 主核 `prepare_interrupts` 与每个从核 `prepare_local_interrupts` → `khal::nmi::late_init()`：每 CPU
-  使能。hardware 模式在此开启 `SCTLR_EL1.NMI` / ALLINT；pseudo 与降级（`None`）
-  无需 per-CPU 寄存器操作。
-- late-init 线程中的 `[watchdog] init_primary`（以及从核 idle 前的
-  `init_secondary`）调用 `init_nmi_watchdog`：`mode() == None` 时打印
-  "hard lockup detection disabled" 并跳过武装；否则经
-  `khal::nmi::enable_periodic_nmi` 用 PMU 周期源武装硬锁检测。
-- PMU 溢出分发由 `pmu` feature init 独立注册（normal IRQ 或 NMI fallback），与
-  watchdog 解耦，因此降级平台上 perf 事件仍可用。
+- `early_driver_init` (after GIC initialization completes) → `khal::nmi::early_init()`: probes the GIC version and FEAT_NMI, records the runtime mechanism (`Pseudo` / `Hardware` / `None`), and prints the `NMI mode: ...` boot log.
+- Primary `prepare_interrupts` and each secondary's `prepare_local_interrupts` → `khal::nmi::late_init()`: per-CPU enablement. Hardware mode turns on `SCTLR_EL1.NMI` / ALLINT here; pseudo and the degraded mode (`None`) need no per-CPU register operations.
+- `[watchdog] init_primary` in the late-init thread (and `init_secondary` before a secondary's idle) calls `init_nmi_watchdog`: when `mode() == None` it prints "hard lockup detection disabled" and skips arming; otherwise it arms hard-lockup detection with the PMU periodic source via `khal::nmi::enable_periodic_nmi`.
+- PMU overflow dispatch is registered independently by the `pmu` feature init (normal IRQ or NMI fallback) and is decoupled from the watchdog, so perf events remain available on degraded platforms.
 
-## 启动流程（从核）
+## Boot Flow (Secondary CPUs)
 
 ```
 SecondaryKernelEntry::enter(logical_cpu_id)
     → percpu::init_secondary, init_trap
     → memspace::init_memory_management_secondary
     → prepare_local_interrupts, init_scheduler_secondary
-    → SCHED_READY_CPUS += 1  (供 start_secondary_cpus 等待; RQ 已注册, 跨核 spawn 安全)
+    → SCHED_READY_CPUS += 1  (for start_secondary_cpus to wait on; RQ is registered, cross-CPU spawn is safe)
     → [ipi] kipi::init
     -> wait until INITED_CPUS != 0 (primary services prepared)
     -> activate_local_interrupts (before notifications can reprogram the timer)
@@ -566,7 +541,7 @@ SecondaryKernelEntry::enter(logical_cpu_id)
     -> [pmu] enable_irq
     -> INITED_CPUS += 1 (publish local service completion)
     -> release startup preemption guard
-    → run_idle()  (永不返回)
+    → run_idle()  (never returns)
 ```
 
 `start_secondary_cpus` waits for each AP's `SCHED_READY_CPUS` publication after
@@ -574,76 +549,66 @@ scheduler initialization before starting the next AP. This permits cross-CPU
 task placement but does not permit assuming that local services are ready.
 The primary subsequently completes `init_cpu_services` before entering drivers.
 
-## `.init_array` 与 `register_init`
+## `.init_array` and `register_init`
 
-`init_setup.rs` 维护链接器段 `.init_array`：
+`init_setup.rs` maintains the linker section `.init_array`:
 
-- `_SECTION_PLACE_HOLDER`：保证空镜像也有 `__init_array_start` / `__init_array_end`。
-- `init_cb()`：late-init 在 driver probe 和 entropy 初始化后、filesystem namespace 构造前，
-  按指针步进调用段内每个 `extern "C" fn()`。
+- `_SECTION_PLACE_HOLDER`: ensures that even an empty image has `__init_array_start` / `__init_array_end`.
+- `init_cb()`: late-init, after driver probe and entropy initialization and before filesystem namespace construction, steps through the section by pointer and calls each `extern "C" fn()`.
 
-各子系统可通过 `util/macros` 的 `#[register_init]` 向该段注册早期 init，无需修改 `kruntime` 源码列表。
+Subsystems can register early init in this section through `#[register_init]` from `util/macros`, without modifying the `kruntime` source list.
 
-## 已知限制：loongarch64 QEMU 直启没有 ACPI 表
+## Known Limitation: loongarch64 QEMU Direct Boot Has No ACPI Tables
 
-`make justrun`（loongarch64）用 `-kernel` 直启，QEMU 的
-`loongarch_direct_kernel_boot` 伪造的 EFI system table 只含
-memmap/initrd/DTB 三个 configuration table 条目；ACPI 表
-（`virt_acpi_setup`）只通过 fw_cfg 文件（`etc/acpi/tables`、
-`etc/acpi/rsdp`）暴露，**从不写入 guest RAM**——它们只有在 UEFI 固件
-启动（固件读 fw_cfg 并把表拷进 RAM、在 EFI config table 挂 RSDP 条目）
-时才可达。因此直启下 `rsdp=0`、表解析休眠属预期行为而非缺陷（Linux
-在同样启动方式下也拿不到 ACPI）。断电由 DTB 的 `syscon-poweroff`
-声明兜底（直启虽无 ACPI 表，但 QEMU 的 DTB 声明了 GED
-sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响。
+`make justrun` (loongarch64) boots directly with `-kernel`. The EFI system table forged by QEMU's `loongarch_direct_kernel_boot` contains only three configuration table entries: memmap/initrd/DTB. The ACPI tables (`virt_acpi_setup`) are exposed only through fw_cfg files (`etc/acpi/tables`, `etc/acpi/rsdp`) and are **never written into guest RAM**; they are reachable only when booting through UEFI firmware (the firmware reads fw_cfg, copies the tables into RAM, and installs an RSDP entry in the EFI config table). Therefore, under direct boot, `rsdp=0` and dormant table parsing are expected behavior rather than a defect (Linux cannot obtain ACPI under the same boot method either). Power-off falls back on the DTB's `syscon-poweroff` declaration (although direct boot has no ACPI tables, QEMU's DTB declares the GED sleep-control register address and the S5 write value). x86-64 (SeaBIOS) is unaffected.
 
-## `kiface` 接线
+## `kiface` Wiring
 
-| 接口 | 实现位置 | 目的 |
+| Interface | Implemented in | Purpose |
 |------|----------|------|
-| `kiface_logging_api::LogSinkIf / LogContextIf` | `lib.rs` | 日志输出到 `khal::console`，附带 CPU/任务 ID |
-| `kernel_boot::PrimaryKernelEntry` | `lib.rs` | 主核从 boot 层进入 `rust_main` |
-| `kernel_boot::SecondaryKernelEntry` | `mp.rs` | 从核从 boot 层进入 `rust_main_secondary` |
-| `kruntime::SystemInitEntry` | `entry/src/main.rs` | runtime 就绪后进入系统级 init 策略层 |
-均为链接期 exactly-one 单实现，非运行时注册。
+| `kiface_logging_api::LogSinkIf / LogContextIf` | `lib.rs` | Log output to `khal::console`, annotated with CPU/task ID |
+| `kernel_boot::PrimaryKernelEntry` | `lib.rs` | Primary CPU enters `rust_main` from the boot layer |
+| `kernel_boot::SecondaryKernelEntry` | `mp.rs` | Secondary CPUs enter `rust_main_secondary` from the boot layer |
+| `kruntime::SystemInitEntry` | `entry/src/main.rs` | Enters the system-level init policy layer once the runtime is ready |
+All are link-time exactly-one single implementations, not runtime registrations.
 
 ## Cargo Features
 
-| Feature | 作用 |
+| Feature | Effect |
 |---------|------|
-| `smp` | 从核启动、`rust_main_secondary`；跨模块 SMP 配置由 `kfeat/smp` 统一启用 |
-| `ipi` | 依赖 `kipi`；IPI 中断处理 |
-| `fs` / `fs9p` / `net` / `vsock` / `display` / `input` | 驱动与子系统初始化（经 `kdriver`）；具体 filesystem feature 只负责链接其自注册实现 |
-| `rtc` | 启动时打印墙钟时间 |
-| `watchdog` / `watchdog_hardlockup` | 看门狗主/从核初始化；`watchdog_hardlockup` 额外启用 NMI 驱动的硬锁检测（`watchdog/nmi`） |
-| `pmu` | PMU 溢出中断；`kruntime` 在 `pmu` feature 下独立注册溢出分发（`khal::pmu::register_overflow_dispatch`），perf 与 watchdog 解耦；配合 `watchdog_hardlockup` 时 PMU 线可被提升为周期 NMI 源 |
-| `arm-timer-resume-fixup` | 在每次读时检查 AArch64 计数器回退，并在定时器中断中发送延后的恢复通知 |
-| `rootfs-secondary-block` | 将第二个块设备作为根文件系统后端 |
+| `smp` | Secondary CPU startup, `rust_main_secondary`; cross-module SMP configuration is enabled uniformly by `kfeat/smp` |
+| `ipi` | Depends on `kipi`; IPI interrupt handling |
+| `fs` / `fs9p` / `net` / `vsock` / `display` / `input` | Driver and subsystem initialization (via `kdriver`); concrete filesystem features only link their self-registering implementations |
+| `rtc` | Prints wall-clock time at boot |
+| `watchdog` / `watchdog_hardlockup` | Watchdog initialization on primary/secondary CPUs; `watchdog_hardlockup` additionally enables NMI-driven hard-lockup detection (`watchdog/nmi`) |
+| `pmu` | PMU overflow interrupt; under the `pmu` feature `kruntime` independently registers overflow dispatch (`khal::pmu::register_overflow_dispatch`), decoupling perf from the watchdog; together with `watchdog_hardlockup`, the PMU line can be promoted to a periodic NMI source |
+| `arm-timer-resume-fixup` | Checks for AArch64 counter regression on every read and sends the deferred recovery notification from the timer interrupt |
+| `rootfs-secondary-block` | Uses the second block device as the root filesystem backend |
 
-默认全部关闭；由 `entry` / `kfeat` 的 defconfig 打开。
+All are off by default; they are enabled by the defconfig of `entry` / `kfeat`.
 
-## 设计决策
+## Design Decisions
 
-### 为何用 `SystemInitEntry` 而非直接依赖 `entry`
+### Why `SystemInitEntry` Instead of Depending on `entry` Directly
 
-`kruntime` 被 `entry` 依赖。若 `kruntime` 再依赖 `entry` 会形成环。`SystemInitEntry` 把 handoff 变成一个 `kiface` 单实现接口：`kruntime` 拥有调用契约，`entry` 提供策略实现，同时避免依赖裸符号名和 `extern "C"` 调用。
+`kruntime` is depended on by `entry`; if `kruntime` also depended on `entry`, a cycle would form. `SystemInitEntry` turns the handoff into a single-implementation `kiface` interface: `kruntime` owns the call contract and `entry` provides the policy implementation, while avoiding reliance on bare symbol names and `extern "C"` calls.
 
-### 为何主核才跑 `init_cb`
+### Why Only the Primary Runs `init_cb`
 
-`.init_array` 回调假定中断子系统已注册、且尚未进入多任务应用阶段；放在 `init_interrupt` 之后、调用 `SystemInitEntry::enter()` 之前，与 C 运行时 constructor 时机相近，但由内核显式控制调用点。
+`.init_array` callbacks assume that the interrupt subsystem is registered and that the multitasking application phase has not yet begun; placing them after `init_interrupt` and before `SystemInitEntry::enter()` is close to the timing of C runtime constructors, but with the call point explicitly controlled by the kernel.
 
-### 日志适配放在 `lib.rs`
+### Log Adapters Live in `lib.rs`
 
-`LogSinkIf` and `LogContextIf` 需在 `klogger::init_klogger` 之前通过 `kiface` provider 链接生效；与 `rust_main` 同文件可避免初始化顺序问题。
+`LogSinkIf` and `LogContextIf` must take effect through `kiface` provider linkage before `klogger::init_klogger`; keeping them in the same file as `rust_main` avoids initialization-order problems.
 
-## 与 QEMU / 真机的边界
+## Boundary with QEMU / Real Hardware
 
-`kruntime` 本身**平台无关**：`BootInfo` 内容由 `kernel-boot` + 平台 crate 填充。QEMU virt 与板级（如 raspi）差异在引导层和平台准备/激活 hook，进入 `rust_main` 后的阶段表相同。
+`kruntime` itself is **platform-independent**: the `BootInfo` contents are filled in by `kernel-boot` plus the platform crate. Differences between QEMU virt and boards (e.g. raspi) lie in the boot layer and platform prepare/activate hooks; the phase table after entering `rust_main` is the same.
 
-## 冗余与过载
+## Redundancy and Overload
 
-- **冗余设计**：无（单路径主核 init）。
-- **过载控制**：不在此 crate；调度与内存压力由 `ktask` / `kalloc` 负责。
+- **Redundancy**: none (single-path primary init).
+- **Overload control**: not in this crate; scheduling and memory pressure are handled by `ktask` / `kalloc`.
 
 ## ARM64 counter recovery dispatch
 

@@ -141,7 +141,7 @@ sys_mmap
 ### Shared file fault
 
 1. `MmSpace` finds the `VmArea` and dispatches to its runtime.
-2. `FileSharedRuntime` checks file permissions.
+2. File permissions were already checked by `FileSharedRuntime` at map/protect time; write faults recheck the shmem write seal.
 3. The runtime resolves the faulting page's file offset.
 4. If the faulting page starts at or beyond current file length, the runtime
    returns object-level bad-address so `MmSpace` can report a bus-error class
@@ -228,38 +228,16 @@ Not supported by the current filemap runtime:
   Range-fsync dispatch alone does not make repeated stores through an already
   writable PTE visible to the folio dirty index.
 
-## 只读文件页的映射所有权
+## Mapping Ownership of Read-Only File Pages
 
-对齐的完整 4 KiB 私有文件页可直接安装只读缓存页 PTE。未私有化页面的
-`PinnedFolio` 在安装 PTE 后转为 `MappedFolio`，按运行时对象偏移保存在
-filemap 的文件页表中；匿名对象
-仅保存实际复制产生的匿名帧，不再包装文件源或比较借用槽的物理地址。
-首次只读映射和文件页 COW 发布均在 AddressSpace 失效读锁下复核 EOF，
-并完成 PTE 与相应所有权的发布。COW 使用 `MaybeUninit<u8>` 目标，页锁内
-完成整页复制，再通过 `commit_after` 原子发布匿名帧；旧文件 pin 在 PTE/TLB
-清理完成后移除。
+Aligned, full 4 KiB private file pages can install a read-only page-cache PTE directly. After the PTE is installed, the `PinnedFolio` of a page that has not been privatized is converted into a `MappedFolio` and stored in filemap's file page table, keyed by runtime object offset. The anonymous object stores only anonymous frames produced by actual copying; it no longer wraps the file source or compares the physical addresses of borrowed slots. The first read-only mapping and the file-page COW publication both recheck EOF under the AddressSpace invalidate read lock and complete the publication of the PTE and the corresponding ownership. COW uses a `MaybeUninit<u8>` destination, copies the whole page under the page lock, and then atomically publishes the anonymous frame through `commit_after`; the old file pin is removed after PTE/TLB cleanup completes.
 
-COW 直接复制当前 PTE 对应的保留页对象，不重新加载相同文件索引，因此缓存
-条目替换、回收或驻留配额耗尽不会给已有映射引入额外的读盘或配额申请。
-fork 先安装文件页 PTE，再由匿名页 helper 一次提交匿名子对象引用；任一步
-失败均撤销本轮子 PTE，避免遗留匿名逻辑引用。mremap 经 memspace 的统一
-事务先准备全部目标 PTE，再清除源 PTE；失败时先撤销本轮目标 PTE 并完成
-TLB 处理，再撤销目标 VMA 与引用。源映射仍保持完整的 PTE 与页所有权，
-不依赖后续 READ/WRITE 缺页补偿，也不产生同一偏移的文件/匿名双重所有者。
-共享文件 runtime 的 shared/writable 区间登记在 metadata-only retirement
-回调中撤销：失败目标与成功迁移的旧源均须撤销登记，防止泄漏后错误阻塞
-`F_SEAL_WRITE`。此回调不执行普通 unmap，也不摘除匿名 backing。
+COW directly copies the retained page object that the current PTE refers to and does not reload the same file index, so cache entry replacement, reclaim, or exhaustion of the residency quota does not introduce extra disk reads or quota requests for existing mappings. Fork first installs the file-page PTEs, then commits the anonymous child-object references once through the anonymous-page helper; if any step fails, the child PTEs of this round are revoked to avoid leaving behind anonymous logical references. mremap uses memspace's unified transaction: it first prepares all destination PTEs and then clears the source PTEs; on failure it first revokes the destination PTEs of this round and completes TLB handling, and then revokes the destination VMA and references. The source mapping keeps its PTEs and page ownership intact, does not depend on later READ/WRITE fault compensation, and never produces a dual file/anonymous owner for the same offset. The shared/writable range registration of the shared file runtime is revoked in the metadata-only retirement callback: both a failed destination and an old source that was successfully migrated must have their registrations revoked, so that a leaked registration does not wrongly block `F_SEAL_WRITE`. This callback does not perform an ordinary unmap and does not detach the anonymous backing.
 
-truncate 的对象失效经 memspace 清除匹配 VMA 的 PTE、完成 TLB finalization，
-随后调用 `on_invalidate_complete`；filemap 立即释放该区间 pin，不等待后续
-缺页。MM 忙时失效请求排队，pin 持续保留到排队请求实际完成。munmap 和
-MADV_DONTNEED 同样先清 PTE 并完成 TLB 刷新，再释放已完成页的 pin；部分失败
-时未处理页仍保留 pin。分裂 VMA 共用原对象偏移
-索引，局部清理不影响剩余区间；fork 使用独立索引并共享 folio 引用；mremap
-保留对象偏移索引，将虚拟地址转换基址迁到新地址。
+Object invalidation for truncate clears the PTEs of matching VMAs through memspace and completes TLB finalization, then calls `on_invalidate_complete`; filemap releases the pins for that range immediately and does not wait for a later page fault. When MM is busy, the invalidation request is queued, and the pins are retained until the queued request actually completes. munmap and MADV_DONTNEED likewise clear the PTEs and complete the TLB flush first, and then release the pins of the completed pages; on partial failure, pages that were not processed keep their pins. Split VMAs share the original object-offset index, so partial cleanup does not affect the remaining range; fork uses an independent index and shares folio references; mremap keeps the object-offset index and migrates the virtual-address translation base to the new address.
 
-`mprotect(PROT_NONE)` 清除现有 PTE 后也会在 TLB finalization 完成时通知
-filemap 释放对应 pin；恢复读权限后，缺页可重新安装只读缓存页。
+`mprotect(PROT_NONE)` also notifies filemap to release the corresponding pin once TLB finalization
+completes after the existing PTEs are cleared; after read permission is restored, a page fault can reinstall read-only cache pages.
 
 ### Bounded private-fault prefetch
 

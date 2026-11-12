@@ -1,4 +1,4 @@
-# fat — 安全与可靠性分析
+# fat — Security and Reliability Analysis
 
 ## VFS owner allocation failure
 
@@ -8,87 +8,87 @@ wakes waiters and releases the device claim through its existing cleanup path.
 NOWAIT is limited to owner storage and does not change the third-party FAT
 allocator or guarantee rollback of earlier device effects.
 
-## 信任模型
+## Trust Model
 
-FAT 介质内容和 block I/O 结果不可信。KVFS 可信地提供已解析的 canonical
-`BlockDevice`、mount flags、VFS inode/dentry 生命周期；`axfatfs` 负责格式解析，本 crate
-负责错误转换和锁域。
+FAT media contents and block I/O results are untrusted. KVFS provides, as trusted inputs, the resolved canonical
+`BlockDevice`, the mount flags, and the VFS inode/dentry lifecycle; `axfatfs` is responsible for format parsing, and this crate
+is responsible for error conversion and lock domains.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-- FAT boot sector、allocation table、directory entry 和文件数据；
-- block read/write/flush failure；
-- KVFS lookup/create/read/write/metadata callbacks。
+- FAT boot sector, allocation table, directory entries and file data;
+- block read/write/flush failure;
+- KVFS lookup/create/read/write/metadata callbacks.
 
-本 crate 不接触 user pointer、MMIO、PIO、DMA、FFI 或 interrupt handler。
+This crate does not touch user pointers, MMIO, PIO, DMA, FFI or interrupt handlers.
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-`src/lib.rs` 的 `FsRef` 把受 owner mutex 保护的 `axfatfs` file/dir handle lifetime 延长到
-wrapper 生命周期，并通过 `UnsafeCell` 提供 guard-bound borrow。`from_file_handle()`、
-`from_dir_handle()`、`borrow()`、`borrow_mut()` 及 `Send/Sync` 实现共同依赖以下不变量：
+`FsRef` in `src/lib.rs` extends the lifetime of the `axfatfs` file/dir handles, which are protected by the owner mutex, to
+the lifetime of the wrapper, and provides guard-bound borrows through `UnsafeCell`. `from_file_handle()`,
+`from_dir_handle()`, `borrow()`, `borrow_mut()` and the `Send/Sync` implementations all depend on the following invariants:
 
-- `FatFilesystem` 由 `Arc` 固定存活，`FatFilesystemInner` 由 `PhantomPinned` 标记地址敏感；
-- 每个 `FsRef` 保存创建它的 owner 地址，借用前由 `assert_owner()` 校验；
-- matching filesystem mutex guard 覆盖每次访问，共享/独占借用由 guard 类型区分。
+- `FatFilesystem` is kept alive at a fixed address by `Arc`, and `FatFilesystemInner` is marked address-sensitive by `PhantomPinned`;
+- each `FsRef` stores the address of the owner that created it, which `assert_owner()` checks before borrowing;
+- the matching filesystem mutex guard covers every access, and shared/exclusive borrows are distinguished by the guard type.
 
-各 unsafe block、unsafe function 和 unsafe impl 均在代码旁记录对应 `SAFETY`/`# Safety`
-合同。
+Each unsafe block, unsafe function and unsafe impl records its corresponding `SAFETY`/`# Safety`
+contract next to the code.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-- FAT handle 不得在 owner mount state 销毁后访问，也不得在另一个 mount 的 guard 下借用；
-- mutable handle borrow 必须由唯一的 mutable guard 承载；
-- root superblock 只能在格式解析成功后发布；
-- `register_init` 回调只能注册一个静态 `FileSystemType`，root 与普通 mount 必须使用该对象；
-- `fill_super` 只能给 KVFS 已分配的新生 `(s_type, dev_t)` superblock 安装私有 operations 与
-  root；同设备已有 live instance 必须由 VFS 复用。
+- A FAT handle must not be accessed after the owner mount state has been destroyed, nor borrowed under the guard of another mount;
+- a mutable handle borrow must be backed by the unique mutable guard;
+- the root superblock may be published only after format parsing succeeds;
+- the `register_init` callback may register only one static `FileSystemType`, and both the root mount and ordinary mounts must use that object;
+- `fill_super` may only install private operations and the root
+  into the newly created `(s_type, dev_t)` superblock already allocated by KVFS; an existing live instance on the same device must be reused by the VFS.
 
-## 线程安全
+## Thread Safety
 
-所有 FAT handle operation 由 mount-wide mutex 串行化。`FsRef` 不直接向无 guard 调用者暴露
-内部引用；KVFS 自身负责 dentry/inode/mount topology 的并发。
+All FAT handle operations are serialized by the mount-wide mutex. `FsRef` does not expose
+internal references directly to callers without a guard; KVFS itself is responsible for the concurrency of dentry/inode/mount topology.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | 损坏 FAT 元数据导致越界或 panic | 高 | 外部介质字段畸形 | `axfatfs` 解析错误经 `into_vfs_err` 返回；`fill_super` 不使用 `expect` |
-| T-02 | handle 在错误 owner/lock 下访问 | 高 | wrapper 与 mount state 混用 | `FsRef` 保存 owner pointer，每次 borrow 校验 matching mutex guard |
-| T-03 | root 与普通 mount 行为漂移 | 中 | 另建 root provider 或 callback | 自有 `register_init` 回调注册唯一静态 `FILE_SYSTEM_TYPE`，随后经 KVFS registry、`get_tree_bdev` 和 `fill_super` 分派 |
-| T-04 | 同一 FAT 设备建立两套 mutable mount state | 高 | 每次 mount 都直接调用 `fill_super` | KVFS 在调用 FAT 前按 `(s_type, dev_t)` reservation；已有 live superblock 直接复用，RO/RW 不一致返回 `EBUSY` |
-| T-05 | resident inode 时间与 FAT 目录项不一致 | 中 | VFS 发布原请求，绕过日期级 atime、2 秒 mtime/ctime 联动或 1980～2107 范围 | superblock 只声明公共范围和 1ns 粒度；FAT callback 规范化各字段、写盘并返回实际 `MetadataUpdate`；ctime 单独请求不作为已应用字段返回 |
+| T-01 | Corrupted FAT metadata causes out-of-bounds access or panic | High | Malformed fields on external media | `axfatfs` parse errors are returned through `into_vfs_err`; `fill_super` does not `expect` format or I/O results, and its `expect` on `s_bdev` relies on `get_tree_bdev` installing the block device before calling it |
+| T-02 | Handle accessed under the wrong owner/lock | High | Wrapper and mount state mixed up | `FsRef` stores the owner pointer, and every borrow checks for the matching mutex guard |
+| T-03 | Behavior drift between the root mount and ordinary mounts | Medium | A separate root provider or callback is created | The crate's own `register_init` callback registers the only static `FILE_SYSTEM_TYPE`, which is then dispatched through the KVFS registry, `get_tree_bdev` and `fill_super` |
+| T-04 | Two sets of mutable mount state are created for the same FAT device | High | Every mount calls `fill_super` directly | KVFS makes a `(s_type, dev_t)` reservation before calling FAT; an existing live superblock is reused directly, and an RO/RW mismatch returns `EBUSY` |
+| T-05 | Resident inode times are inconsistent with the FAT directory entry | Medium | The VFS publishes the original request, bypassing date-granularity atime, the 2-second mtime/ctime coupling, or the 1980–2107 range | The superblock declares only the public range and 1ns granularity; the FAT callback normalizes each field, writes it to disk and returns the actual `MetadataUpdate`; a ctime-only request is not returned as an applied field |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Failure Cause | Local Effect | System Effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | FAT 初始化失败 | 损坏格式或 I/O 错误 | `fill_super` 返回错误 | 当前 mount 失败；root 无候选时停止 boot | 2 | 传播 typed VFS error，不发布半初始化 superblock |
-| F-02 | block flush 失败 | 后端设备错误 | 同步请求失败 | 持久化不保证 | 2 | 显式 sync/flush 路径传播错误 |
-| F-03 | owner 校验失败 | 内部 handle 跨 mount 混用 | 内核 assertion 终止当前执行 | kernel panic | 1 | wrapper 构造绑定 owner；review 禁止绕过 `FsRef` borrow API |
-| F-04 | timestamp 超出 FAT 范围或精度 | 用户请求无法编码的时间 | 请求在 FAT callback 中被钳制或舍入 | syscall 成功且 resident 值与介质表示一致 | 3 | 统一使用 `FAT_TIMESTAMP_LIMITS`、日期级 atime 和 2 秒 mtime helper，并把实际值返回 KVFS |
+| F-01 | FAT initialization failure | Corrupted format or I/O error | `fill_super` returns an error | The current mount fails; boot stops if the root has no candidates | 2 | Propagate a typed VFS error and do not publish a half-initialized superblock |
+| F-02 | block flush failure | Backend device error | The sync request fails | Persistence is not guaranteed | 2 | The explicit sync/flush path propagates the error |
+| F-03 | owner check failure | Internal handle mixed up across mounts | A kernel assertion terminates the current execution | kernel panic | 1 | Wrapper construction binds the owner; review forbids bypassing the `FsRef` borrow API |
+| F-04 | Timestamp exceeds the FAT range or precision | The user requests a time that cannot be encoded | The request is clamped or rounded in the FAT callback | The syscall succeeds and the resident value matches the on-media representation | 3 | Consistently use `FAT_TIMESTAMP_LIMITS`, the date-granularity atime helper and the 2-second mtime helper, and return the actual values to KVFS |
 
-## 故障管理
+## Failure Management
 
-挂载解析和正常 I/O 错误通过 `VfsResult` 返回。内部 owner mismatch 表示类型合同破坏，使用
-assertion 阻止产生错误引用。
+Mount parsing errors and normal I/O errors are returned through `VfsResult`. An internal owner mismatch indicates a broken type contract, and an
+assertion is used to prevent an erroneous reference from being produced.
 
-## 隐私分析
+## Privacy Analysis
 
-本 crate 处理文件名、metadata 和文件内容，但不主动记录这些数据。
+This crate handles file names, metadata and file contents, but does not actively log this data.
 
-## 已知限制
+## Known Limitations
 
-mount-wide mutex 串行化 FAT 操作；FAT 无法完整表达 Unix owner/permission 语义。当前内核没有
-FAT `time_offset` mount option 或全局 kernel timezone，FAT local time 暂按 UTC（offset 0）解释。
+The mount-wide mutex serializes FAT operations; FAT cannot fully express Unix owner/permission semantics. The current kernel has no
+FAT `time_offset` mount option or global kernel timezone, so FAT local time is currently interpreted as UTC (offset 0).
 
-## 审计清单
+## Audit Checklist
 
-- 新 mount 能力是否仍经唯一 canonical `FileSystemType`？
-- 新 FAT handle 是否只通过 matching owner guard 借用？
-- 新 unsafe lifetime extension 是否列出 owner、pinning、锁和 aliasing 不变量？
-- 格式或 I/O 错误是否返回而非 panic？
-- metadata callback 是否只返回真正写入 FAT 的时间字段和值？
+- Does the new mount capability still go through the single canonical `FileSystemType`?
+- Is the new FAT handle borrowed only through the matching owner guard?
+- Does the new unsafe lifetime extension list the owner, pinning, lock and aliasing invariants?
+- Are format or I/O errors returned rather than causing a panic?
+- Does the metadata callback return only the time fields and values actually written to FAT?
 
 ## Mount buffer reservation
 

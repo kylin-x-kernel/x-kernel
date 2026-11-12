@@ -71,7 +71,7 @@ it is not a zero-allocation or fallible-allocation change.
 
 Single-file algorithms stay as files under `src/algorithms/` to keep the tree
 compact. Directories are reserved for modules with real internal structure,
-currently root-level `src/bignum`.
+currently root-level `src/bignum`, `src/streaming_cipher`, `src/tee_ops`, `src/kdf`, `src/pkix`, and `src/pkix_path`.
 
 The module root files expose object-style or one-shot Rust APIs. The
 `tee_ops` files expose raw stateless operations that are easier for
@@ -153,7 +153,7 @@ mode dispatch.
 
 ## Error Model
 
-All public APIs return `Result<T, CryptoError>` unless they are pure metadata
+Fallible public APIs outside `pkix` return `Result<T, CryptoError>`; the `pkix` facade returns `tee_crypto::pkix::Result` with its own `pkix::Error`. Exceptions are infallible constructors, accessors, and pure metadata
 queries. `CryptoError` uses stable variants such as `InvalidKey`,
 `InvalidLength`, `BufferTooSmall`, `InvalidModulus`, and `VerificationFailed`.
 Backend failures are represented by `CryptoError::Backend(BackendError)`

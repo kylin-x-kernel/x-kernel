@@ -293,7 +293,8 @@ CPU performing the request. There is no other creation or cleanup path.
   target (logged).
 - Panics mark bring-up ordering violations: `with_local_apic` without a
   per-CPU handle, `boot_ap` with a logical CPU that has no raw id
-  mapping, or duplicate local initialization.
+  mapping, duplicate local initialization, or a missing xAPIC base when
+  building the local APIC in xAPIC mode.
 
 ## Unsafe Code
 

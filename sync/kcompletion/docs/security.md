@@ -17,7 +17,7 @@ All production unsafe code lives in `src/completion.rs`:
 | `notify_borrowed` | The erased pointer is paired with its monomorphized W trampoline in `with_waiter`; the guard retains the shared W borrow. W implements Sync. |
 | `CompletionState: Send` | Access to links, list and callbacks is serialized by the owning SpinNoIrq; no node or borrowed W moves through the list. |
 | `wake_one` | A popped node remains pinned and alive until source-locked cleanup completes, including the callback after removal. |
-| `UnsafeRef::from_raw` insertion | A private pinned node belongs only to this list. Its storage remains live and no mutable node reference exists until all non-owning entries are gone. A locked `is_linked` check skips duplicate insertion without modifying FIFO order. |
+| `UnsafeRef::from_raw` insertion | A private pinned node belongs only to this list. Its storage remains live and no mutable node reference exists until all non-owning entries are gone. In `Completion::wait_with`, a locked `is_linked` check skips duplicate insertion without modifying FIFO order; `WaitQueue::wait_until` first unlinks any old enrollment under the same lock and then reenrolls at the tail. |
 | `cursor_mut_from_ptr` removal | Called only when the node is linked; private registration permits membership in this source only. The same source lock covers the membership check and cursor removal. |
 | `Registration::drop` | Removes only its own scoped node and always acquires the source lock, including after another CPU popped the node. |
 

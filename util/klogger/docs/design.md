@@ -100,7 +100,7 @@ KernelLogger::log
   a kernel buffer, calls `logbuf_read_newest`, and only then writes to user space.
 - `set_filter_spec` is callable at runtime, from the
   `/proc/sys/kernel/log_filter` write path, and at boot from the command line
-  (`kruntime::resolve_log_level`). It replaces the console rule set, and
+  (`kruntime`). It replaces the console rule set, and
   the default level when the spec carries one, in a single critical section; it
   never touches the build floor. `set_console_default` is the level-only knob
   behind `/proc/sys/kernel/printk` and leaves the rule set alone.

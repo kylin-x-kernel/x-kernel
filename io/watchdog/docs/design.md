@@ -20,7 +20,7 @@ system-workqueue check is no longer registered. Soft/hard lockup checks are unch
   timestamp has expired. A touch that never runs while IRQs still fire is
   the softlockup signal.
 - Hard lockup: NMI support (the `nmi` feature) periodically checks whether the local
-  CPU's timer interrupt count is still advancing.
+  CPU's timer-IRQ heartbeat timestamp is older than the hard-lockup threshold.
   A failed check triggers a global rendezvous, collects snapshots, and panics.
 
 Dependencies: `khal` (NMI, per-CPU state, and time), `ktask` (tasks, timer callbacks,
@@ -81,9 +81,9 @@ this crate is the NMI consumer.
 
 ### Per-CPU Hard-Lockup Detection
 
-`hrtimer_interrupts`, incremented by timer interrupts, is compared with
-`hrtimer_interrupts_saved`, the value observed by the previous NMI check.
-If the count has been initialized but has not advanced, the hard-lockup condition
+Every local timer IRQ stores the current monotonic time in `hard_timestamp`
+and sets `hard_timestamp_initialized`. On each NMI check, if the heartbeat has been
+initialized and is older than the hard-lockup threshold, the hard-lockup condition
 holds: `check_hardlockup` returns `true`.
 `WatchdogTask::check` negates this result, so a healthy task returns `true`.
 

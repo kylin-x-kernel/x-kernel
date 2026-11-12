@@ -617,8 +617,8 @@ are not disabled by that fixture; it is not proof of a completely tick-free run.
 ## Callback Drain
 
 The public drain interface requires a sleepable watched task. A sleepable
-mutex supplied by the runtime serializes drain callers from marker installation
-through completion. The runtime owns only this gate and prepared task parking;
+mutex owned by krcu (`src/drain.rs::DRAIN_LOCK`) serializes drain callers from marker installation
+through completion. The runtime supplies only prepared completion waiting;
 krcu owns the completion predicate and marker protocol. Permanent service
 storage contains one reusable marker per CPU, separate from the mutex payload.
 Each queue inserts its marker

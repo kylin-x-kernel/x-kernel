@@ -4,8 +4,8 @@
 
 This analysis covers the entire crate: `src/lib.rs` (IRQ handler
 registration and console state), `src/runtime.rs` (console adoption and
-the adopted stdout runtime identity), and `src/serial.rs` (PL011/NS16550 UART
-drivers). No modules are excluded; the emergency-output path is
+the adopted stdout runtime identity), `src/serial.rs` (PL011/NS16550 UART
+drivers), and `src/ns16550_mmio.rs` (NS16550 MMIO register access). No modules are excluded; the emergency-output path is
 reachable from the audited entry points.
 
 

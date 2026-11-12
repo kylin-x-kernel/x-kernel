@@ -116,7 +116,7 @@ drivers/base/kdevice/
     │                 │                             │
     │  ┌──────────────┴───────────────────────┐    │
     │  │   lifecycle::dispatch                 │    │
-    │  │   mark_matched → bind_to_driver →     │    │
+    │  │   mark_matched → bind_driver →        │    │
     │  │   activate → dispatch_event           │    │
     │  └──────────────┬───────────────────────┘    │
     │                 │                             │
@@ -295,9 +295,9 @@ rejected instead of backfilling synthetic add events.
                                │ probe_device_desc finds a matching driver
                                ▼
                          ┌────────────┐
-                         │  Matched   │  ← mark_device_matched()
+                         │  Matched   │  ← DeviceObject::mark_matched()
                          └─────┬──────┘
-                               │ bind_device_to_driver()
+                               │ DeviceObject::bind_driver()
                                ▼
                          ┌────────────┐
                          │   Bound    │  ← driver_id/name/kind recorded

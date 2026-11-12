@@ -50,7 +50,7 @@ Per-mount isolation is a data-structure property of this crate: each mount
 gets its own superblock and instance record, and only pairs created through
 that instance's `ptmx` are listed. Pty **allocation** itself is global
 (`io/ktty`'s allocator with capacity `pty_limit()`), so containers share the
-host pty budget; `max=` is rejected rather than pretending per-instance
+host pty budget; `max=` is accepted and range-checked but not enforced rather than pretending per-instance
 bounds exist. Device access is not special-cased by devpts: character-device
 opens and device-node creation consult the generic KVFS device policy, which the
 cgroup-v2 BPF device controller installs, so an attached program can deny pty

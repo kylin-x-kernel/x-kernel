@@ -155,7 +155,7 @@ by a `PageRef` RAII allocation that lives for the kernel lifetime).
 
 | ID | Threat | Impact | Trigger | Existing control |
 |------|----------|----------|----------|----------|
-| T-02 | Event bridge fires before `kdevice` is initialized | High | `ensure_event_bridge` called before `kdevice::init_device_registry` | kdriver runs `init_device_registry` before any `publish_*`; the `ACTIVATION_BRIDGE` lazy init fires at first publish |
+| T-02 | Event bridge fires before `kdevice` is initialized | High | `ensure_event_bridge` called before `kdevice::init_device_registry` | kdriver runs `init_device_registry` before any `publish_*`; the `ACTIVATION_BRIDGE` lazy init fires at first class-registry access (publish, query, or subscribe) |
 | T-03 | Publish race loses or duplicates a device | Medium | Concurrent publish of the same device | `SpinNoPreempt` serializes; a second publish of the same id returns `AlreadyExists` |
 | T-04 | A subscriber callback panics, skipping later subscribers | Medium | One callback panics inside the notification `for` loop | Callbacks run outside `catch_unwind`; currently no unwind protection — subscriber quality is relied upon |
 | T-05 | `with()` on a removed `ClassDevice` reaches freed runtime | Medium | Runtime trait object dropped before `ClassDeviceInner` | All `ClassDeviceInner` fields (including runtime) drop together; `Arc` counting delays drop until all references are gone |
@@ -180,7 +180,7 @@ Impact levels:
 | F-02 | Publish with a mismatched device_kind | Driver passes a net device to `publish_block` | publish returns `InvalidInput` | Device not published | 4 | Kind check happens before `ClassDevice` construction |
 | F-03 | Event bridge not registered | `ensure_event_bridge` never called (no class feature enabled) | No Activated/Removed dispatch | Device state changes do not reach class registries | 4 | `ensure_event_bridge` is called by every `*_registry_fn()` |
 | F-04 | Subscriber callback panics | Callback bug causes unwinding | Later subscribers not notified | Some subsystems miss availability notices | 3 | Callbacks run in Vec order; no `catch_unwind` today; subscriber quality relied upon |
-| F-06 | `devices()` returns a very large `Vec` | Many devices active at once | Allocation may fail | Caller gets an empty `Vec` (no OOM handling) | 4 | `Vec::collect` may fail; callers should handle empty results |
+| F-06 | `devices()` returns a very large `Vec` | Many devices active at once | Allocation may fail | Allocation failure reaches the global allocation error handler instead of returning (no OOM handling) | 4 | `collect()` is infallible; kclass has no recovery path |
 | F-07 | Duplicate publish | Driver bypasses the normal remove/add lifecycle | publish returns `AlreadyExists` | New runtime not visible | 4 | Class-specific publish is rolled back; the resident object is kept |
 | F-08 | Missing input metadata | Non-input class does not override `class_metadata` | `physical_location()` / `unique_id()` return empty strings | Input device identity incomplete | 4 | `ClassRuntimeMetadata` default returns `empty()`; the input class overrides explicitly |
 | F-09 | Device-node allocation fails | The fixed class index range is exhausted | No `/dev` or `/sys` projection is created for the runtime | Linux-compatible discovery is unavailable for that device | 3 | kdevice returns an error; kclass logs it and still notifies typed class consumers |
@@ -232,8 +232,10 @@ registries and `ClassDevice` objects.
   adds allocation pressure.
 - The registry supports no predicate filtering (e.g. "list devices with
   feature X"); callers filter themselves.
-- Non-input classes have no `ClassDeviceMetadata` extension point; adding
-  class-specific metadata requires a trait change.
+- `ClassDeviceMetadata` currently only carries input identity
+  (`input_identity`); adding class-specific metadata for other classes
+  requires extending the `ClassDeviceMetadata` struct in addition to
+  overriding `class_metadata()`.
 - `ClassDevice` has no pre-removal notification (e.g. "device about to be
   removed").
 - `is_available()` is an instantaneous observation of the captured binding,

@@ -65,7 +65,7 @@ IRQ 27 产生点
 pCPU 发布的 owner task；真正注入由 vCPU thread 根据该 vCPU 保存的 CNTV state
 调用 check_vtimer() 完成。当前在 guest entry 前会无条件按当前 vCPU 的 deadline
 重算：
-virt/kvmm/src/vdev/vtimer.rs
+virt/kvmm/src/vdev/aarch64/vtimer.rs
 fn on_entry(&mut self, vcpu: &mut Vcpu<Aarch64Vhe>) {
     publish_owner_for_current_cpu();
     check_vtimer(vcpu);
@@ -97,7 +97,7 @@ CNTV_CTL.IMASK == 0
 CNTPCT_EL0 >= CNTV_CVAL_EL02 + CNTVOFF_EL2
 满足后调用：
 vcpu.vm.inject_irq(vcpu.vcpu_id, 27);
-这个位置非常关键：只有 guest 已经 exit 到 host，Rust 的 exit_handler() 被执行了，才会检查 27 是否该 pending。
+这个位置非常关键：check_vtimer() 由 HostVtimerHook::on_entry() 在每次 guest entry 前调用，exit_handler() 不再检查 vtimer。
 如果 guest 一直不 exit，host 只能靠物理 IRQ 让 guest exit。当前 el2_enter_guest 设置了：
 virt/kvmm/src/arch/aarch64/el2_vmcs.S:74-83
 bic  x2, x2, #(1 << 27)    // clear TGE
@@ -113,9 +113,7 @@ pub fn inject_irq(&self, vcpu_id: u32, irq: u32) {
     if vcpu_id as usize >= self.nr_vcpus {
         return;
     }
-    if let Some(vgic) = self.vgic.lock().clone() {
-        vgic.set_pending(vcpu_id, irq);
-    }
+    self.devices.inject_irq(vcpu_id, irq);
 
     if self.vcpu_run_state(vcpu_id) == VcpuRunState::WfiSleeping
         && let Some(task) = self.vcpu_tasks[vcpu_id as usize].lock().clone()
@@ -149,7 +147,7 @@ struct Core {
     pending: AtomicU64,
     hw: UnsafeCell<Hw>,
 }
-这里 pending 只是一个 bitmap，不区分 edge/level，不保存 active/pending 状态机，不看 GICD enable，不看 priority mask，也不处理 redistributor，因为当前是 GICv2 最小模型。
+这里 pending 只是一个 bitmap，不区分 edge/level，不保存 active/pending 状态机，不看 priority mask，也不处理 redistributor，因为当前是 GICv2 最小模型。
 Entry 前写 GICH LR
 真正把 IRQ 27 交给硬件 GIC virtual interface 的地方是 VgicHook::on_entry()：
 virt/kvmm/src/vdev/vgic.rs:134-176
@@ -285,7 +283,7 @@ check_vtimer() 只在 VM exit 后跑。如果 guest 长时间不 exit，就不�
 代码里已经写了 TODO。当前如果外部设备调用 inject_irq()，而目标 vCPU 正在别的 pCPU 上跑 guest，不会发 IPI 让它退出并重载 LR。这个 pending 只能等下一次自然 exit 才会进入 GICH LR。
 3. vIRQ 27 不是由 host timer deadline 驱动。
 当前没有把 guest CNTV_CVAL 转换成 host hrtimer/clockevent，也没有在 guest timer 到期时由 host timer callback 设置 pending + kick vCPU。它只是 exit 后检查。
-4. guest virtual timer 被 exit stub 禁用了。
+4. guest virtual timer 在 exit stub 中只保存、不禁用。
 这避免 host 阶段漏出 IRQ 27，但也说明 host 阶段不会靠 guest CNTV 自己继续产生 interrupt。host 必须自己维护“这个 guest timer deadline 到了”的事件。
 5. vGIC 是 LR-drain 模型，不是完整 GIC state machine。
 当前 pending bitmap 到 LR 的路径能跑 FreeRTOS，但没有完整处理 enable/disable、level/edge、active/pending、priority、targeting、多 vCPU、maintenance interrupt 等语义。

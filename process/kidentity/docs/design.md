@@ -11,7 +11,7 @@ without introducing a catch-all process crate dependency.
 
 ## Scope and architecture
 
-`src/lib.rs` contains all types, allocation functions, and kernel unit tests.
+`src/lib.rs` contains all types and allocation functions; kernel unit tests live in `ut-tests/lib.rs` and are included via `unittest::path_mod_test!`.
 
 ```text
 PidNamespace { id: u64, parent: Option<Arc<_>>, level: u32, next_nr: AtomicU32 }
@@ -28,7 +28,7 @@ a [`PidLifecycleState`] that gates observer visibility.
 
 `PidNamespace::id()` is a kernel-wide monotonic identity stable for the
 namespace's lifetime; procfs uses it as the `/proc/<pid>/ns/pid` inode so
-`stat()` can distinguish PID namespaces.
+`stat()` can distinguish PID namespaces. The id comes from a global `AtomicU32` counter that starts at one and whose exhaustion is not checked, so it wraps after 2^32 namespace creations.
 
 ## Execution context
 
@@ -91,7 +91,7 @@ tests the state machine so upper layers cannot invent invalid transitions.
 
 ## Concurrency and design decisions
 
-`next_nr` and the lifecycle byte are the only mutable atomics. Immutable handles
+`next_nr`, the lifecycle byte, and the global `NEXT_PID_NS_ID` and `TaskIdentityToken` counters (relaxed `fetch_add`) are the only mutable atomics. Immutable handles
 and ancestor references can be shared without locks. A vector and linear lookup
 keep the representation simple for shallow namespace trees; no depth cap or
 number reclamation is implemented. Stable allocation is distinct from

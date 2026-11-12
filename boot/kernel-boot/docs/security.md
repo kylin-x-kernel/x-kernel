@@ -61,7 +61,7 @@ newly audited configuration.
 
 | Failure | Cause and effect | Control or limitation |
 |---|---|---|
-| Valid user cache operations fault | Reset permissions disable CTR/cache access, causing SIGILL | Set named UCT/UCI fields explicitly and execute the instructions from EL0. |
+| Valid user cache operations fault | Reset permissions disable CTR/cache access, causing SIGILL | Set named UCT/UCI/DZE fields explicitly and execute the instructions from EL0. |
 | Behavior depends on CPU placement | Only the primary CPU is configured | Keep the update in the shared primary/secondary boot path. |
 | Boot control ordering regresses | Unrelated SCTLR bits or the ISB are changed | Preserve read-modify-write and the original enable sequence. |
 | Fault handling is accidentally masked | A workaround suppresses illegal-instruction delivery | Retain a genuine undefined-instruction negative control. |

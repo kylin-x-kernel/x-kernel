@@ -245,7 +245,7 @@ driver only attaches that backing to a 2D resource and later submits
 
 - DRM dumb-buffer lifetime management.
 
-`VirtIoGpu2d::active_scanout` caches only the confirmed resource ID and
+The `scanout` field (`ScanoutBinding`) of `VirtIoGpuDev` caches only the confirmed resource ID and
 rectangle for scanout 0 and shares the same GPU-state lock as control-queue
 operations. Each presentation still submits `TRANSFER_TO_HOST_2D` first and
 `RESOURCE_FLUSH` last; `SET_SCANOUT` is sent only when the resource or rectangle
@@ -368,7 +368,7 @@ is correct.
 ```rust
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
-// Similarly for VirtIoGpuDev, VirtIoInputDev, VirtIoNetDev,
+// Similarly for VirtIoGpuDev, VirtIoInputState, VirtIoNetDev,
 // VirtIoVsockDev, and VirtIo9pDev.
 ```
 
@@ -378,9 +378,9 @@ contracts.
 
 **Why it is safe:**
 
-- blk, gpu, socket, and virtio_9p: Operations require exclusive `&mut self`.
-  `Sync` permits only shared immutable references and therefore introduces no
-  data race.
+- blk, gpu, socket, and virtio_9p: every access to the underlying device goes
+  through the adapter's internal `SpinNoIrq`, so shared `&self` access cannot
+  race.
 - input: `VirtIoInputState` manually implements `Send` and `Sync`; every access
   to the underlying input device is serialized by its `SpinNoIrq`. The
   notification callback is protected by a separate `SpinNoIrq`, is invoked
@@ -451,16 +451,15 @@ allocation, and `fill` only leaks a `Box` after `add` succeeded.
 | `VirtIoBlkDev<H, T>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
 | `VirtIoGpuDev<H, T>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
 | `VirtIoInputDev<H, T>` | `Arc<VirtIoInputState<H, T>>`; state manually implements `Send` | `Arc<VirtIoInputState<H, T>>`; state manually implements `Sync` |
-| `VirtIoNetDev<H, T, QS>` | `H: Hal + 'static, T: Transport + 'static` (manual impl) | `H: Hal + 'static, T: Transport + 'static` (manual impl) |
-| `VirtIoVsockDev<H, T>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
+| `VirtIoNetDev<H, T, QS>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
+| `VirtIoVsockDev<H, T, RX_BUF_SIZE>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
 | `VirtIo9pDev<H, T>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
 
 All manual `Send` and `Sync` implementations rely on these guarantees:
 
-- blk and input use internal `SpinNoIrq` state to protect queues and the
-  transport. Input capability bitmaps and axis metadata are immutable after
-  probing. Other non-network devices are accessed through exclusive
-  `&mut self` and do not use interior mutability.
+- blk, input, gpu, vsock and 9p serialize device access with an internal
+  `SpinNoIrq`. Input capability bitmaps and axis metadata are immutable after
+  probing.
 - Network devices protect the shared `InnerDev` with `SpinNoIrq`, making the
   IRQ callback mutually exclusive with normal paths.
 
@@ -510,8 +509,11 @@ All manual `Send` and `Sync` implementations rely on these guarantees:
     regions and headers are returned as `MmioError`.
   - `try_new()` panics when `receive_begin` returns an unexpected token,
     indicating an internal consistency failure.
-  - Other paths do not panic proactively and propagate errors through
-    `DriverResult`.
+  - The IRQ block path panics on unknown or out-of-range tokens, unproven
+    descriptor reclamation, and `NotReady` completion outcomes (see IRQ Block
+    Request Safety). Other paths propagate errors through `DriverResult`.
+  - Some other paths, for example in socket `poll_event`, also contain `expect`
+    calls.
 - **Recovery:**
   - Network devices can continue after `recycle_tx` or `recycle_rx` reclaims
     buffers.

@@ -69,7 +69,7 @@ All unsafe code lives in `src/net_buf.rs` (the dormant `fxmac.rs` /
 
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
-| T-01 | Forged or double-consumed `NetBufHandle` | High — UB via `Box::from_raw` | A driver fabricates a handle or recycles one twice | Documented single-consumption `# Safety` contract on `from_handle`; drivers are in-crate trusted code. Residual risk accepted by the driver trust model. |
+| T-01 | Forged or double-consumed `NetBufHandle` | High — UB via `Box::from_raw` | A driver fabricates a handle or recycles one twice | Documented single-consumption `# Safety` contract on `from_handle`; drivers are trusted kernel components. Residual risk accepted by the driver trust model. |
 | T-02 | Out-of-bounds header/payload sizing | Medium — out-of-bounds slice access | Caller sets `hdr_len + payload_len` beyond the slot | Checked arithmetic and `DriverError::InvalidInput` in `set_hdr_len`/`set_payload_len` before any slice is formed. |
 | T-03 | Device writes past its buffer into the pool | High — corruption of neighboring slots | Mis-programmed DMA on the device side | Out of scope here: drivers size DMA descriptors from slot geometry; the pool keeps one slot per buffer to bound the blast radius. Residual risk sits with the driver/device boundary. |
 | T-04 | Unbounded pool exhaustion | Low — allocation failure, no progress | All slots checked out and dropped buffers leaked | RAII drop returns slots deterministically; `alloc_buf` returns `None` instead of blocking or panicking. |

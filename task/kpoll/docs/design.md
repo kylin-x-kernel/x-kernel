@@ -1,4 +1,4 @@
-# kpoll — 设计文档
+# kpoll — Design Document
 
 ## Weak Source Capture
 
@@ -10,39 +10,39 @@ Expiry never selects a replacement source. The temporary strong reference may
 be the last owner, so registration can trigger source-destruction wakeups.
 Callers must release outer locks that waker callbacks could reenter first.
 
-## 定位
+## Positioning
 
-`kpoll` 是 x-kernel 中 I/O readiness 查询与 one-shot waiter 注册的核心原语。
-`poll`/`select`/`epoll`、阻塞 read/write、信号等待和 TIPC 等子系统
-都通过它把“条件未就绪”转换为可被唤醒的异步等待。
+`kpoll` is the core primitive in x-kernel for I/O readiness queries and one-shot waiter registration.
+Subsystems such as `poll`/`select`/`epoll`, blocking read/write, signal waits, and TIPC
+all use it to convert "condition not ready" into an asynchronous wait that can be woken.
 
 Synchronous completion tokens and blocking waits belong to the independent
 `kcompletion` primitive and its task provider. `kpoll` exposes readiness sources
 only, with no completion compatibility API. Process exit uses `PollSet` plus
 `Process::is_exited()` as its persistent readiness predicate.
 
-## 背景
+## Background
 
-旧实现使用固定 64 槽数组保存 `Waker`，溢出时静默覆盖，导致大量共享 fd 上的
-waiter（例如 hackbench）丢失唤醒并永久阻塞。随后的无界 `Vec<Waker>` 修复了
-丢唤醒，但缺少：
+The old implementation stored `Waker`s in a fixed 64-slot array and silently overwrote on overflow, so
+waiters on heavily shared fds (for example hackbench) lost wakeups and blocked forever. The subsequent unbounded `Vec<Waker>` fixed
+the lost wakeups, but it lacked:
 
-- 随等待生命周期注销的 registration；
-- 可失败的注册扩容；
-- wake 路径零分配保证。
+- registrations that are unregistered along with the wait lifetime;
+- fallible registration growth;
+- a zero-allocation guarantee on the wake path.
 
-本重构引入 per-registration token + RAII owner，对齐 Linux `poll_wqueues`
-“可扩容、可失败、随调用结束回收”的语义边界，同时保留 Rust async/`Waker`
-模型。
+This refactor introduces a per-registration token plus an RAII owner, aligning with the Linux `poll_wqueues`
+semantic boundary of "growable, fallible, reclaimed when the call ends", while retaining the Rust async/`Waker`
+model.
 
-## 范围
+## Scope
 
 ```
 task/kpoll/
 ├── src/
-│   ├── lib.rs           # Pollable trait 与公共导出
+│   ├── lib.rs           # Pollable trait and public exports
 │   ├── events.rs        # IoEvents
-│   ├── source.rs        # PollSet / 槽表 / wake
+│   ├── source.rs        # PollSet / slot table / wake
 │   ├── event.rs         # PollEvent generation-based broadcast source
 │   └── registration.rs  # PollRegistration / PollRegistrations / PollContext
 ├── ut-tests/
@@ -52,15 +52,15 @@ task/kpoll/
     └── security.md
 ```
 
-主要消费方：
+Main consumers:
 
-- `task/ktask`：`poll_io`、`interruptible`、task interrupt、GC wait；
-- `fs/kvfs`：`FileOperations::register_poll`；
-- `core/ksyscall`：poll/select、wait、signal；
-- `process/kfd_objects`：eventfd/epoll 等；`fs/kvfs`：pipe/FIFO；
-- `net/knet`、`io/ktty`、`arch/kirq`、`tee/tipc*`。
+- `task/ktask`: `poll_io`, `interruptible`, task interrupt, GC wait;
+- `fs/kvfs`: `FileOperations::register_poll`;
+- `core/ksyscall`: poll/select, wait, signal;
+- `process/kfd_objects`: eventfd/epoll, etc.; `fs/kvfs`: pipe/FIFO;
+- `net/knet`, `io/ktty`, `arch/kirq`, `tee/tipc*`.
 
-## 架构
+## Architecture
 
 ```
 Pollable::register(context, events)
@@ -73,38 +73,38 @@ Pollable::register(context, events)
         v
  PollRegistrations (owner across Poll::Pending)
         │
-        └─ Drop / clear() ──unregister──> 对应 slot
+        └─ Drop / clear() ──unregister──> corresponding slot
 ```
 
-| 组件 | 职责 |
+| Component | Responsibility |
 |------|------|
-| `IoEvents` | Linux poll 事件位 |
-| `PollSet` | IRQ-safe 广播源；持有 active waiter 槽表 |
-| `PollRegistration` | 单个 registration 的 RAII guard（Weak 回指 source） |
-| `PollRegistrations` | 一次逻辑等待拥有的全部 guards |
-| `PollContext` | 当前 poll 轮次的短生命周期注册能力 |
-| `Pollable` | 就绪快照 + 通过 `PollContext` 注册 |
+| `IoEvents` | Linux poll event bits |
+| `PollSet` | IRQ-safe broadcast source; holds the slot table of active waiters |
+| `PollRegistration` | RAII guard for a single registration (Weak back-reference to the source) |
+| `PollRegistrations` | All guards owned by one logical wait |
+| `PollContext` | Short-lived registration capability for the current poll round |
+| `Pollable` | Readiness snapshot + registration through `PollContext` |
 | `PollEvent` | generation-based broadcast wake source |
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-- **`PollSet::wake` 可在 IRQ 中调用**：内部使用 `SpinNoIrq`；锁内移出旧槽表并
-  重置 active/free_head，锁外调用 `Waker::wake`。整次 wake 只获取一次 spin lock，
-  不分配新的槽表；旧 heap capacity 随移出的表释放，不回收到 source。
-- **`register` / `unregister` 可在任务上下文调用**；也可能与 IRQ wake 并发。
-  `Waker::clone` 在加锁前完成；cancel 摘取的 `Waker` 在解锁后 drop，避免自定义
-  waker 回调在 `SpinNoIrq` 内重入。
-- **不得在持有可能与 scheduler/Waker 回调反向的外层锁时调用 `wake`**。
-- **注册可失败**：扩容失败返回 `PollRegisterError::NoMemory`；ID 耗尽返回
-  `IdExhausted`；目标未就绪返回 `InvalidState`。上层映射为 `KError::NoMemory` /
-  `ENOMEM` 或 `InvalidInput` / `EINVAL`。
-- **调用方必须持有注册 guard 跨等待**：普通 poll 使用 `PollRegistrations`，
-  单源 bridge 可使用 `PollRegistration`；timeout、Ready 或 future drop 时自动注销。
-- **wake 是提示而非状态转移**：允许迟到 wake；正确性依赖 register 后 recheck。
-- **`PollSet::new` 内部 `Arc::new` 目前仍可能在 OOM 时走全局分配器 panic**；
-  该限制不扩展到每次 register。
+- **`PollSet::wake` may be called from IRQ context**: it uses `SpinNoIrq` internally; under the lock it moves out the old slot table and
+  resets active/free_head, and calls `Waker::wake` outside the lock. A whole wake acquires the spin lock only once and
+  allocates no new slot table; the old heap capacity is released along with the moved-out table and is not recycled into the source.
+- **`register` / `unregister` may be called from task context**; they may also run concurrently with an IRQ wake.
+  `Waker::clone` completes before taking the lock; a `Waker` removed by cancel is dropped after unlocking, to prevent a custom
+  waker callback from reentering inside `SpinNoIrq`.
+- **Do not call `wake` while holding an outer lock that may be inverted with scheduler/Waker callbacks**.
+- **Registration can fail**: a growth failure returns `PollRegisterError::NoMemory`; ID exhaustion returns
+  `IdExhausted`; a target that is not ready returns `InvalidState`. Upper layers map these to `KError::NoMemory` /
+  `ENOMEM` or `InvalidInput` / `EINVAL`.
+- **The caller must hold the registration guard across the wait**: ordinary poll uses `PollRegistrations`,
+  and a single-source bridge may use `PollRegistration`; it is unregistered automatically on timeout, Ready, or future drop.
+- **A wake is a hint, not a state transition**: late wakes are allowed; correctness relies on rechecking after register.
+- **The internal `Arc::new` in `PollSet::new` may still panic in the global allocator on OOM**;
+  this limitation does not extend to every register.
 
-## 状态机
+## State Machine
 
 ```
 register()
@@ -112,39 +112,39 @@ register()
    v
  Queued ──guard drop/cancel──> Cancelled (slot freed)
    │
-   ├── wake()/source Drop ──> Detached ──锁外──> Waker::wake
+   ├── wake()/source Drop ──> Detached ──outside lock──> Waker::wake
    │
-   └── 迟到 guard drop ──> No-op（token 已失效）
+   └── late guard drop ──> No-op (token already invalid)
 ```
 
-注销与 wake 由同一把 `SpinNoIrq` 线性化：
+Unregistration and wake are linearized by the same `SpinNoIrq` lock:
 
-- cancel 先赢：不 wake；
-- wake 先赢：允许一次迟到 wake。
+- cancel wins first: no wake;
+- wake wins first: one late wake is allowed.
 
-## 算法流程
+## Algorithm Flow
 
-### 一次阻塞等待（`poll_io`）
+### A Blocking Wait (`poll_io`)
 
-1. 执行非阻塞操作 / readiness 检查。
-2. `WouldBlock` 时用 `PollRegistrations::context(cx)` 清理上一轮 registration。
-3. `pollable.register(&mut context, events)?`；失败立即返回 `NoMemory`。
-4. 再次执行检查，封闭 check/register 竞态。
-5. 仍阻塞则 `Pending`，owner 保留 registration。
-6. 被唤醒、超时、中断或 drop 时，RAII 注销全部 source。
+1. Perform the non-blocking operation / readiness check.
+2. On `WouldBlock`, clean up the previous round's registrations with `PollRegistrations::context(cx)`.
+3. `pollable.register(&mut context, events)?`; on failure return `NoMemory` immediately.
+4. Perform the check again, closing the check/register race.
+5. If still blocked, return `Pending`; the owner keeps the registrations.
+6. On wakeup, timeout, interrupt, or drop, RAII unregisters all sources.
 
 ### `PollSet::wake`
 
-1. 持锁检查 `active`；为 0 则返回。
-2. 用 `mem::replace` 把整个 slot table 移出 `State`，并重置 `active/free_head`。
-3. 释放锁。
-4. 锁外遍历旧 slot table，逐个调用 occupied `waker.wake()`。
+1. Check `active` under the lock; return if it is 0.
+2. Use `mem::replace` to move the whole slot table out of `State` and reset `active/free_head`.
+3. Release the lock.
+4. Outside the lock, iterate the old slot table and call `waker.wake()` on each occupied slot.
 
 ### `PollSet::register` / cancel
 
-1. 锁外 `Waker::clone`。
-2. 持锁安装 owned waker；`next_id` 仅在 slot 安装成功后递增。
-3. cancel 持锁摘取 waker，解锁后再 drop。
+1. `Waker::clone` outside the lock.
+2. Install the owned waker under the lock; `next_id` is incremented only after the slot is installed successfully.
+3. cancel removes the waker under the lock and drops it after unlocking.
 
 ### `PollEvent`
 
@@ -155,33 +155,33 @@ the new generation and returns a `PollSet` clone for waking after outer locks
 are released; `notify` publishes and wakes immediately. Notifications prompt
 predicate rechecks and never supply consumable tokens or synchronous waits.
 
-## 并发模型
+## Concurrency Model
 
-- 共享状态：`SpinNoIrq<State>`。
-- 注册不去重：同一 task 的多个逻辑等待拥有独立 token，避免一个 guard 误删另一个。
-- 复杂度：注册/注销 O(1)（除扩容）；唤醒 O(n)；不再做锁内 `will_wake` 扫描。
-- epoll 在 `EpollInterest` 上长期持有 `PollRegistrations`（`Mutex`），并用 generation
-  过滤已被 drain、正在锁外执行的旧 `InterestWaker`；file `register_poll` 在锁外执行。
-  替换/清空 owner 时用 `mem::replace` / `mem::take` 把旧值移出后再 drop，避免在
-  `Mutex` 内嵌套 source `SpinNoIrq` 注销。
+- Shared state: `SpinNoIrq<State>`.
+- Registrations are not deduplicated: multiple logical waits of the same task own independent tokens, so one guard cannot remove another by mistake.
+- Complexity: register/unregister O(1) (except growth); wake O(n); no more `will_wake` scan under the lock.
+- epoll holds `PollRegistrations` (a `Mutex`) long-term on `EpollInterest`, and uses a generation
+  to filter old `InterestWaker`s that have already been drained and are running outside the lock; file `register_poll` runs outside the lock.
+  When replacing/clearing the owner, `mem::replace` / `mem::take` moves the old value out before dropping it, to avoid nesting the source
+  `SpinNoIrq` unregistration inside the `Mutex`.
 
-## 设计决策
+## Design Decisions
 
-| 决策 | 理由 | 放弃方案 |
+| Decision | Rationale | Rejected Alternative |
 |------|------|----------|
-| RAII registration + token | 用所有权表达生命周期，自动回收 | 共享 `Vec<Waker>` / 按 Waker 注销 |
-| `SmallVec` inline + `try_reserve` | 常见路径零堆，溢出可失败 | 固定上限数组；裸 `Vec::push` |
-| wake 路径移出 slot table 后锁外唤醒 | IRQ 热路径单次加锁、锁内不分配、不调用 waker | 锁内构造临时 waker buffer；二次加锁 recycle capacity |
-| 普通 `Pollable` 使用 `PollContext` | 禁止把裸 Waker 无 owner 地永久塞进 fd | 无 RAII owner 的注册 API |
-| registration 持 `Weak` | 防引用环，允许 source 先销毁 | registration 持强引用 |
+| RAII registration + token | Express the lifetime through ownership, with automatic reclamation | Shared `Vec<Waker>` / unregistering by Waker |
+| `SmallVec` inline + `try_reserve` | Zero heap on the common path, fallible on overflow | Fixed-limit array; bare `Vec::push` |
+| Wake path moves out the slot table, then wakes outside the lock | Single lock acquisition on the IRQ hot path, no allocation and no waker calls under the lock | Building a temporary waker buffer under the lock; taking the lock a second time to recycle capacity |
+| Ordinary `Pollable` uses `PollContext` | Forbid stuffing a bare Waker permanently into an fd without an owner | A registration API without an RAII owner |
+| registration holds a `Weak` | Prevents reference cycles, allows the source to be destroyed first | registration holds a strong reference |
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-- `PollRegistration::Drop`：若 token 仍匹配 occupied slot，则摘链回收。
-- `PollRegistrations::Drop` / `clear`：逐个 drop guard。
-- `PollSetInner::Drop`：摘取全部 waiter 并锁外唤醒，避免析构后永久阻塞。
-- epoll interest Drop / DEL / ONESHOT：通过清空其 `PollRegistrations` 注销；MOD
-  原地更新同一个 interest 的配置并重新安装 registration。
+- `PollRegistration::Drop`: if the token still matches an occupied slot, unlink and reclaim it.
+- `PollRegistrations::Drop` / `clear`: drop the guards one by one.
+- `PollSetInner::Drop`: remove all waiters and wake them outside the lock, so nothing blocks forever after destruction.
+- epoll interest Drop / DEL / ONESHOT: unregister by clearing its `PollRegistrations`; MOD
+  updates the configuration of the same interest in place and reinstalls the registration.
 
 ## Advisory waiter snapshot
 

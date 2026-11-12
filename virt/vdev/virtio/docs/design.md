@@ -1,121 +1,121 @@
-# vdev-virtio — 设计文档
+# vdev-virtio — Design Document
 
-## 定位
+## Positioning
 
-`vdev-virtio` 是 X-Kernel 的 VirtIO MMIO 设备模型基础设施 crate：提供标准 MMIO
-传输寄存器状态机、split virtqueue（描述符表 / available ring / used ring）以及
-设备配置空间的通用抽象。具体设备（如 `vdev-virtio-blk`）在其之上只实现
-设备特定的配置空间与数据路径。
+`vdev-virtio` is the VirtIO MMIO device-model infrastructure crate of X-Kernel: it provides the standard MMIO
+transport register state machine, the split virtqueue (descriptor table / available ring / used ring), and
+a generic abstraction of the device configuration space. Concrete devices (such as `vdev-virtio-blk`) build on top of it and implement only
+the device-specific configuration space and data path.
 
-本 crate 属于可复用的虚拟设备层，由 `vdev-core` 提供的接口（`GuestDma`）与
-`kspin` 提供的中断屏蔽锁支撑。它不依赖任何 host VMM crate（`kvmm`）、体系结构
-HAL 或内核内存管理，因此可被不同 VMM 复用，也可在宿主机测试中单独驱动。
+This crate belongs to the reusable virtual-device layer and is backed by the interface provided by `vdev-core` (`GuestDma`) and
+the interrupt-masking lock provided by `kspin`. It does not depend on any host VMM crate (`kvmm`), architecture-specific
+HAL, or kernel memory management, so it can be reused by different VMMs and can also be driven standalone in host-side tests.
 
-## 背景
+## Background
 
-原有实现位于 `kvmm` 的 `src/vdev/virtio/` 中。代码本身只引用自身模块与
-`alloc`/`core`/`kspin`/`log`，既非体系结构相关也非 KVMM 相关；真正与 KVMM
-耦合的只有“访客物理地址 → 主机可解引用地址”的翻译能力。把该设备模型提取为
-独立 crate 后，`kvmm` 只保留 `GuestDma` 实现与体系结构相关设备，边界更清晰。
+The original implementation lived in `src/vdev/virtio/` of `kvmm`. The code itself references only its own modules and
+`alloc`/`core`/`kspin`/`log`, and is neither architecture-specific nor KVMM-specific; the only thing truly
+coupled to KVMM is the translation capability "guest physical address → host-dereferenceable address". After extracting this device model into an
+independent crate, `kvmm` retains only the `GuestDma` implementation and architecture-specific devices, giving a clearer boundary.
 
-## 范围
+## Scope
 
 ```
 virt/vdev/virtio/
 ├── src/
-│   ├── lib.rs            # crate 入口与公共类型 re-export
+│   ├── lib.rs            # crate entry and public type re-exports
 │   ├── addr.rs           # GuestPhysAddr / PhysAddr / AccessWidth
-│   ├── config.rs         # 设备配置空间视图
+│   ├── config.rs         # device configuration space view
 │   ├── device_type.rs    # VirtioDeviceId
-│   ├── dma.rs            # vdev_core::GuestDma → GuestMemory 适配器
+│   ├── dma.rs            # vdev_core::GuestDma → GuestMemory adapter
 │   ├── error.rs          # VirtioError / VirtioResult
 │   ├── memory.rs         # GuestMemory / GuestMemoryAccessor
-│   ├── constants/        # MMIO 寄存器、队列、通用常量
-│   ├── mmio/             # transport 寄存器解码 + VirtioMmioState 状态机
-│   └── queue/            # 描述符链、available/used ring、VirtioQueue
-├── ut-tests/            # kernel harness: descriptor 2 例，available/used 各 1 例
+│   ├── constants/        # MMIO registers, queue, and common constants
+│   ├── mmio/             # transport register decoding + VirtioMmioState state machine
+│   └── queue/            # descriptor chain, available/used ring, VirtioQueue
+├── ut-tests/            # kernel harness: 2 descriptor cases, 1 each for available/used
 └── Cargo.toml
 ```
 
-### 内核单元测试
+### Kernel Unit Tests
 
-原 4 个 host `#[test]` 用例迁入 `ut-tests/{descriptor,available,used}.rs`，
-由原 queue 子模块通过 `unittest::path_mod_test!` 挂载私有 `tests` 模块，
-使用 `#[unittest::def_test]` 注册。原断言、fixture 和私有访问保留，
-测试入口从 Cargo host harness 改为 `cfg(unittest)` 下的内核 harness。
-`unittest` 使用 workspace 普通依赖；生产 API 与设备行为不变。
+The original 4 host `#[test]` cases were migrated to `ut-tests/{descriptor,available,used}.rs`;
+the original queue submodules mount a private `tests` module via `unittest::path_mod_test!`,
+and the cases are registered with `#[unittest::def_test]`. The original assertions, fixtures, and private access are preserved;
+the test entry point changes from the Cargo host harness to the kernel harness under `cfg(unittest)`.
+`unittest` is used as a regular workspace dependency; production APIs and device behavior are unchanged.
 
-这些用例使用局部内存或纯布局计算，不创建 VM、不访问真实设备。
-descriptor fixture 用内核 allocator 分配 Vec，执行需正常初始化的内核测试环境；
-测试之间不共享设备或缓冲区。配置需将本 crate 链入测试内核，
-可沿现有 VMM 依赖路径启用 `KFEAT_VMM=y`，再使用
-`make unittest UNITTEST_CRATE=vdev_virtio` 过滤运行。
-无需在测试内部执行 VM 初始化或 guest world switch，也不再由 bare Cargo host 测试运行。
+These cases use local memory or pure layout computation, do not create a VM, and do not access real devices.
+The descriptor fixture allocates a Vec with the kernel allocator, so execution requires a properly initialized kernel test environment;
+tests do not share devices or buffers. The configuration needs this crate to be linked into the test kernel,
+which can be done by enabling `KFEAT_VMM=y` along the existing VMM dependency path, and then running with the filter
+`make unittest UNITTEST_CRATE=vdev_virtio`.
+There is no need to perform VM initialization or a guest world switch inside the tests, and they are no longer run by bare Cargo host tests.
 
-## 架构
+## Architecture
 
 ```
 ┌──────────────────────────────────────────────┐
-│  vdev-virtio-blk / vdev-virtio-net（设备实现）  │
-│  设备配置空间 + 请求数据路径                    │
+│  vdev-virtio-blk / vdev-virtio-net (device implementations)  │
+│  device config space + request data path                    │
 └───────────────┬──────────────────────────────┘
                 │ VirtioMmioState<T> / VirtioQueue<T>
 ┌───────────────┴──────────────────────────────┐
-│              vdev-virtio（本 crate）           │
-│  mmio::state   标准 MMIO 寄存器状态机          │
-│  mmio::transport  寄存器解码与校验             │
-│  queue        描述符表 / avail / used ring     │
+│              vdev-virtio (this crate)           │
+│  mmio::state   standard MMIO register state machine          │
+│  mmio::transport  register decoding and validation             │
+│  queue        descriptor table / avail / used ring     │
 │  memory       GuestMemory / GuestMemoryAccessor│
-│  dma          DmaGuestMemory（GuestDma 适配）   │
+│  dma          DmaGuestMemory (GuestDma adapter)   │
 └───────────────┬──────────────────────────────┘
                 │ vdev_core::GuestDma
 ┌───────────────┴──────────────────────────────┐
-│  VM 的访客内存翻译（提交方实现 GuestDma）        │
+│  VM guest memory translation (the submitter implements GuestDma)        │
 └──────────────────────────────────────────────┘
 ```
 
-| 组件 | 职责 |
+| Component | Responsibility |
 |------|------|
-| `mmio::state::VirtioMmioState<T>` | 维护 status、feature 选择器、queue 选择器、中断状态、config generation 等标准寄存器，并持有队列向量 |
-| `mmio::transport` | 校验访问宽度、判断寄存器是否落在设备配置区、解码寄存器偏移 |
-| `queue::VirtioQueue<T>` | 队列配置（desc/avail/used 地址与 size）、ready 校验、描述符链遍历、used 完成回写 |
-| `queue::{AvailableRing, UsedRing, DescriptorTable}` | 三类环结构的布局计算与读写 |
-| `memory::GuestMemory` | 队列/数据路径所需的最小访客内存读写能力 |
-| `memory::GuestMemoryAccessor` | 可做“地址翻译并返回连续上限”的访问者，供 `AddressSpaceMemory` 适配 |
-| `dma::DmaGuestMemory` | 把 `vdev_core::GuestDma` 适配成 `GuestMemory`，是生产路径的默认实现 |
-| `constants` | MMIO 寄存器偏移、队列常量、feature/status/descriptor 位 |
+| `mmio::state::VirtioMmioState<T>` | Maintains the standard registers such as status, feature selector, queue selector, interrupt status, and config generation, and holds the queue vector |
+| `mmio::transport` | Validates access width, determines whether a register falls within the device configuration region, and decodes register offsets |
+| `queue::VirtioQueue<T>` | Queue configuration (desc/avail/used addresses and size), ready validation, descriptor chain traversal, and used-completion write-back |
+| `queue::{AvailableRing, UsedRing, DescriptorTable}` | Layout computation and read/write for the three kinds of ring structures |
+| `memory::GuestMemory` | The minimal guest memory read/write capability required by the queue/data path |
+| `memory::GuestMemoryAccessor` | An accessor that can "translate an address and return a contiguous upper bound", adapted by `AddressSpaceMemory` |
+| `dma::DmaGuestMemory` | Adapts `vdev_core::GuestDma` into `GuestMemory`; it is the default implementation on the production path |
+| `constants` | MMIO register offsets, queue constants, and feature/status/descriptor bits |
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-- **非中断上下文**：MMIO 读写与队列处理由 VMM 在访客退出路径上调用，属于任务
-  上下文，不要求中断屏蔽；内部锁使用 `kspin::SpinNoIrq`，临界区只覆盖寄存器与
-  队列元数据，不包含访客内存大块拷贝之外的等待。
-- **不可睡眠**：本 crate 不做任何阻塞等待；后端若可能阻塞，必须由设备实现把
-  `QUEUE_NOTIFY` 转为延迟处理（见 `vdev-virtio-blk` 的 `QueuePending`）。
-- **访客内存能力由调用方注入**：生产路径传入 `GuestDma` 支持的
-  `DmaGuestMemory`；仅做布局计算、不处理队列的场景可传
-  `NoGuestMemoryAccessor` 并使用 `_with_memory` 形式的分步操作。
-- **无周期/调度依赖**：不访问 CPU-local 状态、不依赖调度器或平台初始化，可在
-  早期启动或宿主机测试环境运行（只要 `alloc` 可用）。
-- **可重入**：对同一 `VirtioQueue`/`VirtioMmioState` 的并发访问由内部锁串行化；
-  不同设备实例之间相互独立。
+- **Non-interrupt context**: MMIO reads/writes and queue processing are invoked by the VMM on the guest-exit path and run in task
+  context, so interrupt masking is not required; the internal lock uses `kspin::SpinNoIrq`, and the critical section covers only registers and
+  queue metadata, containing no waiting other than bulk copies of guest memory.
+- **No sleeping**: this crate performs no blocking waits; if a backend may block, the device implementation must turn
+  `QUEUE_NOTIFY` into deferred processing (see `QueuePending` in `vdev-virtio-blk`).
+- **Guest memory capability is injected by the caller**: the production path passes a `GuestDma`-backed
+  `DmaGuestMemory`; scenarios that only compute layouts and do not process queues may pass
+  `NoGuestMemoryAccessor` and use the step-by-step operations in `_with_memory` form.
+- **No periodic/scheduling dependencies**: it does not access CPU-local state and does not depend on the scheduler or platform initialization, so it can run in
+  early boot or a host-side test environment (as long as `alloc` is available).
+- **Reentrant**: concurrent access to the same `VirtioQueue`/`VirtioMmioState` is serialized by the internal lock;
+  different device instances are independent of each other.
 
-## 状态机
+## State Machine
 
-### 设备 status 寄存器
+### Device status register
 
 ```
 0 ──ACKNOWLEDGE──> ACK ──DRIVER──> ACK|DRIVER ──FEATURES_OK──> ... ──DRIVER_OK──> Ready
 │                                                                           │
-└────────────────────────── status 写 0（reset）─────────────────────────────┘
+└────────────────────────── status write 0 (reset)─────────────────────────────┘
 ```
 
-- 驱动写 `FEATURES_OK` 时校验 `driver_features` 是 `device_features` 的子集；
-  不满足则清掉 `FEATURES_OK`。
-- 写 status `0` 触发 `MmioWriteAction::Reset`。
-- `is_driver_ok()` 供设备实现判断是否可处理队列。
+- When the driver writes `FEATURES_OK`, it is checked that `driver_features` is a subset of `device_features`;
+  if not, `FEATURES_OK` is cleared.
+- Writing status `0` triggers `MmioWriteAction::Reset`.
+- `is_driver_ok()` lets the device implementation determine whether queues can be processed.
 
-### 队列配置
+### Queue configuration
 
 ```
 Unset ──QUEUE_SEL/QUEUE_NUM/QUEUE_DESC|AVAIL|USED──> Programmed ──QUEUE_READY=1──> Ready
@@ -123,61 +123,61 @@ Unset ──QUEUE_SEL/QUEUE_NUM/QUEUE_DESC|AVAIL|USED──> Programmed ──QU
    └────────────────────────── reset / QUEUE_READY=0 ─────────────────────────────────┘
 ```
 
-`QUEUE_READY` 写入时根据 desc/avail/used 地址与 size 计算各环布局区间，任何
-越界或地址重叠都拒绝置 ready。
+When `QUEUE_READY` is written, the layout range of each ring is computed from the desc/avail/used addresses and size, and any
+out-of-bounds range or address overlap causes the ready bit to be refused.
 
-### 中断状态
+### Interrupt status
 
-- `set_interrupt(bits)`：`pending |= bits` 且 `raised_after_read |= bits`。
-- 驱动读 `INTERRUPT_STATUS` 后，`INTERRUPT_ACK` 清除 `pending` 对应位。
-- 若在读之后又有位被置位，`mmio_write` 返回 `MmioWriteAction::InterruptPending`，
-  设备实现据此再次注入中断，避免漏报。
+- `set_interrupt(bits)`: `pending |= bits` and `raised_after_read |= bits`.
+- After the driver reads `INTERRUPT_STATUS`, `INTERRUPT_ACK` clears the corresponding bits of `pending`.
+- If any bit is set after the read, `mmio_write` returns `MmioWriteAction::InterruptPending`,
+  and the device implementation injects the interrupt again accordingly, avoiding a missed notification.
 
-## 算法流程
+## Algorithm Flow
 
-### MMIO 读
+### MMIO read
 
-1. `transport` 校验访问宽度。
-2. 命中标准寄存器 → 返回 `MmioReadOutcome::Standard`。
-3. 命中设备配置区 → 返回 `MmioReadOutcome::DeviceConfig { offset, width }`，
-   由设备实现解释其配置空间。
+1. `transport` validates the access width.
+2. If a standard register is hit → return `MmioReadOutcome::Standard`.
+3. If the device configuration region is hit → return `MmioReadOutcome::DeviceConfig { offset, width }`,
+   and the device implementation interprets its own configuration space.
 
-### MMIO 写
+### MMIO write
 
-1. `transport` 校验宽度并解析寄存器。
-2. 写 feature/queue 寄存器更新 `VirtioMmioState`；`QUEUE_READY` 做环布局校验。
-3. `QUEUE_NOTIFY` → `MmioWriteAction::QueueNotified(index)`。
-4. status 写 0 → `MmioWriteAction::Reset`。
+1. `transport` validates the width and parses the register.
+2. Writes to feature/queue registers update `VirtioMmioState`; `QUEUE_READY` performs ring layout validation.
+3. `QUEUE_NOTIFY` → `MmioWriteAction::QueueNotified(index)`.
+4. status write 0 → `MmioWriteAction::Reset`.
 
-### 队列数据路径
+### Queue data path
 
-1. 设备实现从 available ring 弹出 head 描述符索引。
-2. 遍历描述符链（`VIRQ_DESC_F_NEXT` / `VIRQ_DESC_F_INDIRECT`），构造
-   `DescriptorChain`。
-3. 按设备语义读写描述符缓冲。
-4. 通过 `complete_with_memory` 把 head 与写入长度写入 used ring 并推进 used idx。
+1. The device implementation pops the head descriptor index from the available ring.
+2. It traverses the descriptor chain (`VIRTQ_DESC_F_NEXT` / `VIRTQ_DESC_F_INDIRECT`) and constructs a
+   `DescriptorChain`.
+3. It reads and writes the descriptor buffers according to device semantics.
+4. Via `complete_with_memory`, it writes the head and the written length into the used ring and advances the used idx.
 
-## 并发模型
+## Concurrency Model
 
-- `VirtioMmioState` 中每个可变寄存器与队列向量各由一把 `SpinNoIrq` 锁保护；
-  锁粒度小、仅在寄存器更新/队列元数据访问时持有。
-- `VirtioQueue` 内的 accessor 以 `Arc<T>` 共享，`T: Clone`；队列自身通过
-  `queues_lock()` 暴露给设备数据路径，保证同一时刻只有一个数据路径在遍历。
-- 中断注入/后端回调不在本 crate 内，由设备实现决定；本 crate 不直接触碰硬件。
+- Each mutable register and the queue vector in `VirtioMmioState` is protected by its own `SpinNoIrq` lock;
+  the lock granularity is small, and the locks are held only during register updates/queue metadata access.
+- The accessor inside `VirtioQueue` is shared as `Arc<T>`, with `T: Clone`; the queues themselves are exposed to the device data path via
+  `queues_lock()`, ensuring that only one data path traverses them at any given time.
+- Interrupt injection/backend callbacks are not in this crate and are decided by the device implementation; this crate does not touch hardware directly.
 
-## 设计决策
+## Design Decisions
 
-- **保留 `GuestMemoryAccessor` 与 `GuestMemory` 两个层次**：前者用于需要“翻译 +
-  连续上限”的宿主测试/独立设备模型，后者是队列操作真正需要的最小能力。
-- **以 `DmaGuestMemory` 收敛到 `vdev-core`**：生产路径不再各设备自定义访客内存
-  适配器，统一走 `GuestDma`，使本 crate 只依赖 `vdev-core` 接口。
-- **不把 crate 放进 `vdev-core`**：`vdev-core` 只放跨 VMM 的 trait 契约；
-  VirtIO 是“实现族”，作为 `vdev-core` 的兄弟 crate 更符合边界划分。
-- **从 `kvmm` 迁出**：设备模型与 VMM 无关，迁出后 `kvmm` 只剩 `GuestDma`
-  实现、world-switch hook 与体系结构设备。
+- **Keep both layers, `GuestMemoryAccessor` and `GuestMemory`**: the former is for host-side tests/standalone device models that need "translation +
+  contiguous upper bound", and the latter is the minimal capability that queue operations actually need.
+- **Converge on `vdev-core` through `DmaGuestMemory`**: the production path no longer has each device define its own guest memory
+  adapter, but uniformly goes through `GuestDma`, so this crate depends only on the `vdev-core` interface.
+- **Do not put this crate into `vdev-core`**: `vdev-core` holds only cross-VMM trait contracts;
+  VirtIO is an "implementation family", and being a sibling crate of `vdev-core` fits the boundary division better.
+- **Move out of `kvmm`**: the device model is VMM-independent, and after the move `kvmm` retains only the `GuestDma`
+  implementation, the world-switch hook, and architecture-specific devices.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-本 crate 无自定义 `Drop`。队列与访问者随所属设备结构体析构；`Arc<T>` 访问者在
-最后一个引用释放后回收。访客内存由 `GuestDma` 的拥有者（VMM）管理，本 crate
-只做作用域内的读写，不持有宿主内存所有权。
+This crate has no custom `Drop`. Queues and accessors are destroyed along with the device struct that owns them; an `Arc<T>` accessor is reclaimed after the
+last reference is released. Guest memory is managed by the owner of `GuestDma` (the VMM); this crate
+only performs scoped reads and writes and does not hold ownership of host memory.

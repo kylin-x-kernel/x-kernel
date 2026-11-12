@@ -1,43 +1,43 @@
-# ktime - 安全与可靠性分析
+# ktime_types - Security and Reliability Analysis
 
-## 信任模型
+## Trust Model
 
-`ktime_types` 信任调用者只在真实的 ABI、硬件、协议或序列化边界使用整数转换 API。
-类型本身负责规范化表示，并阻止不同时钟域直接运算。
+`ktime_types` trusts callers to use the integer conversion APIs only at real ABI, hardware, protocol, or serialization boundaries.
+The types themselves are responsible for canonicalizing the representation and for preventing direct arithmetic across different clock domains.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-该 crate 不访问用户内存、设备、网络或文件系统。外部输入只会通过构造函数进入；
-调用边界应先验证秒、纳秒范围及有符号性。
+This crate does not access user memory, devices, the network, or the filesystem. External input enters only through constructors;
+the calling boundary must first validate the range of seconds and nanoseconds, as well as signedness.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-无 `unsafe` 代码。所有类型由普通 Rust 值组成。
+There is no `unsafe` code. All types are composed of plain Rust values.
 
-## 线程安全
+## Thread Safety
 
-类型不含内部可变状态，可在线程和 CPU 之间复制。时钟源的同步由提供这些值的子系统负责。
+The types contain no interior mutable state and can be copied across threads and CPUs. Synchronization of clock sources is the responsibility of the subsystem that supplies these values.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | 不同时钟域被当作同一时间轴 | 中 | 使用裸整数绕过类型 | 内部 API 使用 `Instant<C>`；整数转换限制在边界 |
-| T-02 | 外部时间值溢出 | 中 | 未验证的超大 duration 或 timestamp | 提供 checked/saturating API，边界拒绝或钳位输入 |
-| T-03 | 墙钟回拨被当作正 duration | 中 | realtime 时间排序反转 | `SystemTime::duration_since` 返回错误而非下溢 |
-| T-04 | Hz、kHz 和 MHz 裸整数被混用 | 中 | 固件或硬件边界使用错误单位 | `Frequency` 规范存储 Hz；缩放构造检查溢出，降精度转换在名称中标明向下取整 |
+| T-01 | Different clock domains are treated as the same timeline | Medium | Bare integers are used to bypass the types | Internal APIs use `Instant<C>`; integer conversion is confined to boundaries |
+| T-02 | External time values overflow | Medium | Unvalidated, excessively large duration or timestamp | Provide checked/saturating APIs; boundaries reject or clamp the input |
+| T-03 | A wall-clock step backward is treated as a positive duration | Medium | realtime time ordering is reversed | `SystemTime::duration_since` returns an error instead of underflowing |
+| T-04 | Bare integers in Hz, kHz, and MHz are mixed up | Medium | Firmware or hardware boundary uses the wrong unit | `Frequency` canonically stores Hz; scaled constructors check for overflow, and precision-reducing conversions state round-down in their names |
 
-## 已知限制
+## Known Limitations
 
-`TimeSpan` 只能表达非负时长；需要带符号差值的协议必须在协议边界单独建模。
+`TimeSpan` can only express non-negative durations; protocols that need signed differences must model them separately at the protocol boundary.
 
-## 审计清单
+## Audit Checklist
 
-- 新 API 是否返回语义类型而不是带单位的整数。
-- `Instant` 运算双方是否属于同一时钟域。
-- 原始整数转换是否紧邻 ABI、硬件、序列化或第三方接口边界。
-- 频率是否以 `Frequency` 在内部传递，单位换算是否使用命名转换方法。
-- 使用饱和转换的边界是否明确接受 `u64::MAX` 作为不可表示值的钳位结果。
+- Whether a new API returns a semantic type rather than an integer carrying a unit.
+- Whether both operands of an `Instant` operation belong to the same clock domain.
+- Whether raw integer conversions sit right next to an ABI, hardware, serialization, or third-party interface boundary.
+- Whether frequencies are passed internally as `Frequency`, and whether unit conversions use named conversion methods.
+- Whether boundaries that use saturating conversions explicitly accept `u64::MAX` as the clamped result for an unrepresentable value.
 
-`ClockId` 不提供原始整数转换或指定 ABI 布局。外部编号验证与操作支持集检查由
-系统调用适配层负责；枚举有效不代表某项操作支持该时钟。
+`ClockId` provides no raw integer conversion and specifies no ABI layout. Validation of external numbering and the check of the set of supported operations are the responsibility of the
+system call adaptation layer; an enum value being valid does not mean that a given operation supports that clock.

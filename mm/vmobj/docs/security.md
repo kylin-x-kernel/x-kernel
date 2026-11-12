@@ -1,41 +1,41 @@
-# vmobj — 安全文档
-## 信任边界
+# vmobj — Security Document
+## Trust Boundary
 
-`vmobj` 只承载 object-neutral 语言层，不直接执行页表修改，也不直接拥有对象内容。
+`vmobj` only carries the object-neutral language layer. It neither modifies page tables directly nor owns object contents directly.
 
-它的主要安全责任是：
+Its main security responsibilities are:
 
-- object identity 不被复用或混淆；
-- mapped view 坐标稳定且自洽；
-- object-side invalidation work 不能把 object 坐标和 VMA 坐标混在一起。
+- object identity is never reused or confused;
+- mapped view coordinates are stable and self-consistent;
+- object-side invalidation work never mixes object coordinates with VMA coordinates.
 
-## 关键约束
+## Key Constraints
 
-1. `VmObjectId` 只用于稳定身份比较，不用于解引用。
-   它必须保留 object family 信息，避免 file-backed 与 anonymous object
-   复用同一裸整数命名空间。
-2. `MappingViewRange` 同时保存：
-   - VMA 坐标
-   - object 坐标
-   调用方不得自行从一组字段“猜”另一组坐标。
-3. `ObjectViewHit` 必须落在其 `MappingView` 覆盖范围内。
-4. `ObjectInvalidateWork` 只是 object-side work item；是否 zap PTE，仍由 `MmSpace` 按当前 VMA/object 关系复核。
-5. `MappingViewRange` 不允许为空或发生 end offset 溢出。
-6. `ObjectInvalidateWork` 的 object range 必须覆盖其中每个 `ObjectViewHit`。
-7. file-backed 与 anonymous object 都必须复用 `ObjectViewHit` /
-   `ObjectInvalidateWork`，不能各自定义第二套 invalidate 坐标语言。
-8. `ObjectInvalidateWork.object()` 是 request 派生的唯一 object identity 来源；
-   notifier 不得保存另一份 object id 后与 hit 重新组合。
+1. `VmObjectId` is used only for stable identity comparison, never for dereferencing.
+   It must retain object family information, so that file-backed and anonymous objects
+   do not share the same raw integer namespace.
+2. `MappingViewRange` stores both:
+   - VMA coordinates
+   - object coordinates
+   Callers must not "guess" one set of coordinates from the other set of fields on their own.
+3. An `ObjectViewHit` must fall within the range covered by its `MappingView`.
+4. `ObjectInvalidateWork` is only an object-side work item; whether to zap PTEs is still re-checked by `MmSpace` against the current VMA/object relationship.
+5. `MappingViewRange` must not be empty or overflow its end offset.
+6. The object range of an `ObjectInvalidateWork` must cover every `ObjectViewHit` it contains.
+7. Both file-backed and anonymous objects must reuse `ObjectViewHit` /
+   `ObjectInvalidateWork`, and must not each define a second invalidation coordinate language.
+8. `ObjectInvalidateWork.object()` is the sole source of the object identity derived from a request;
+   a notifier must not save another copy of the object id and then recombine it with a hit.
 
-## 审计清单
+## Audit Checklist
 
-- 新 object owner 注册 view 时是否使用 `MappingViewSpec` / `MappingView`。
-- object event 转换成 VMA hit 时是否使用 `MappingView::page_hit()` 或
-  `ObjectViewHit::try_new()`。
-- notifier 是否只投递 `ObjectInvalidateRequest`，而不是携带自定义 range。
-- 手工构造 `ObjectViewHit::new()` 的调用点是否已经证明 hit 完全落在 view 内。
-- object-driven invalidate 是否只通过 `ObjectInvalidateRequest` 进入
-  `MmSpace`，而不是保留 file/page-index 风格的旁路入口。
+- Whether a new object owner uses `MappingViewSpec` / `MappingView` when registering a view.
+- Whether `MappingView::page_hit()` or
+  `ObjectViewHit::try_new()` is used when converting an object event into a VMA hit.
+- Whether the notifier only delivers `ObjectInvalidateRequest`, rather than carrying a custom range.
+- Whether call sites that construct `ObjectViewHit::new()` by hand have proven that the hit lies entirely within the view.
+- Whether object-driven invalidation enters `MmSpace` only through `ObjectInvalidateRequest`,
+  rather than leaving behind a file/page-index style side-channel entry point.
 
 Live backing-page release requires synchronous notifier success for every
 carried view hit. A queued notification is insufficient. Providers that cannot

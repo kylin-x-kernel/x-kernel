@@ -1,180 +1,179 @@
-# vdev-virtio-blk — 设计文档
+# vdev-virtio-blk — Design Document
 
-## 定位
+## Positioning
 
-`vdev-virtio-blk` 是 X-Kernel 的 VirtIO MMIO 块设备模型 crate。它把
-`vdev-virtio` 提供的传输/队列基础设施组装成一个可用的块设备：设备配置空间
-（容量、几何、I/O 限制）、请求数据路径（OUT/IN/FLUSH）以及可插拔的
-`BlockBackend`。`bus::VirtioBlkDevice` 再把该模型适配为
-`vdev_core::MmioDevice`，注册到 VMM 的 MMIO 总线。
+`vdev-virtio-blk` is the VirtIO MMIO block device model crate of X-Kernel. It assembles the
+transport/queue infrastructure provided by `vdev-virtio` into a usable block device: the device configuration space
+(capacity, geometry, I/O limits), the request data path (OUT/IN/FLUSH), and a pluggable
+`BlockBackend`. `bus::VirtioBlkDevice` then adapts the model to
+`vdev_core::MmioDevice` and registers it on the VMM's MMIO bus.
 
-本 crate 属于可复用虚拟设备层：只依赖 `vdev-core`、`vdev-virtio` 与同步原语，
-不依赖 `kvmm`、体系结构 HAL 或内核内存管理。VM 只需提供 `GuestDma` 翻译能力与
-`IrqSender` 注入能力。
+This crate belongs to the reusable virtual device layer: it depends only on `vdev-core`, `vdev-virtio` and synchronization primitives,
+and does not depend on `kvmm`, the architecture HAL, or kernel memory management. The VM only needs to provide the `GuestDma` translation capability and
+the `IrqSender` injection capability.
 
-## 背景
+## Background
 
-原实现位于 `kvmm` 的 `src/vdev/virtio_blk/` 与 `virtio_blk_bus.rs`。设备模型
-本身只依赖 `vdev-core` 接口，`bus.rs` 也只用
-`vdev_core::{GuestDma, IrqSender, MmioDevice}`，因此整体迁出后 `kvmm` 不再持有
-VirtIO 设备代码，仅 `kvmm-api` 在装配 VM 时构造并注册该设备。
+The original implementation lived in `src/vdev/virtio_blk/` and `virtio_blk_bus.rs` of `kvmm`. The device model
+itself depends only on `vdev-core` interfaces, and `bus.rs` uses only
+`vdev_core::{GuestDma, IrqSender, MmioDevice}`. After the whole thing was moved out, `kvmm` no longer holds
+any VirtIO device code; only `kvmm-api` constructs and registers this device when assembling a VM.
 
-## 范围
+## Scope
 
 ```
 virt/vdev/virtio-blk/
 ├── src/
-│   ├── lib.rs          # crate 入口与 re-export
+│   ├── lib.rs          # crate entry and re-exports
 │   ├── backend.rs      # BlockBackend trait
-│   ├── bus.rs          # VirtioBlkDevice + RamDiskBackend（MmioDevice 绑定）
-│   ├── selftest.rs     # 宿主机驱动序列自测
-│   ├── block/config.rs # VirtioBlockConfig 配置空间
-│   ├── constants/      # 块设备常量（复导出 vdev-virtio 通用常量）
-│   └── mmio/           # VirtioMmioBlockDevice + BlockDeviceEvent + 请求头
-├── ut-tests/device.rs  # 内核 harness 中的 3 个 mock 设备回归用例
+│   ├── bus.rs          # VirtioBlkDevice + RamDiskBackend (MmioDevice binding)
+│   ├── selftest.rs     # host-side driver sequence self-test
+│   ├── block/config.rs # VirtioBlockConfig configuration space
+│   ├── constants/      # block device constants (re-exports the common vdev-virtio constants)
+│   └── mmio/           # VirtioMmioBlockDevice + BlockDeviceEvent + request header
+├── ut-tests/device.rs  # 3 mock device regression cases in the kernel harness
 └── Cargo.toml
 ```
 
-| 组件 | 职责 |
+| Component | Responsibility |
 |------|------|
-| `mmio::VirtioMmioBlockDevice<B, T>` | 组合 `VirtioMmioState<T>` 与块配置，处理配置空间读与请求队列 |
-| `backend::BlockBackend` | 存储后端契约：`read`/`write`/`flush` 与是否延迟处理 |
-| `bus::RamDiskBackend` | 同步内存 RAM 盘后端（默认 16 MiB） |
-| `bus::VirtioBlkDevice` | 以 `GuestDma`/`IrqSender` 实现 `MmioDevice`，转发 MMIO 与 used-ring 中断 |
-| `mmio::BlockDeviceEvent` | MMIO 写之后 VMM 需要执行的动作 |
-| `selftest::vmm_selftest_virtio_blk` | 不开 VM 的完整驱动序列自测 |
+| `mmio::VirtioMmioBlockDevice<B, T>` | Combines `VirtioMmioState<T>` with the block configuration, handles configuration space reads and the request queue |
+| `backend::BlockBackend` | Storage backend contract: `read`/`write`/`flush` and whether processing is deferred |
+| `bus::RamDiskBackend` | Synchronous in-memory RAM disk backend (16 MiB by default) |
+| `bus::VirtioBlkDevice` | Implements `MmioDevice` with `GuestDma`/`IrqSender`, forwards MMIO and used-ring interrupts |
+| `mmio::BlockDeviceEvent` | Action the VMM needs to perform after an MMIO write |
+| `selftest::vmm_selftest_virtio_blk` | Complete driver sequence self-test without starting a VM |
 
-### 内核单元测试
+### Kernel Unit Tests
 
-原 3 个 host `#[test]` 用例完整迁入 `ut-tests/device.rs`，通过
-`unittest::path_mod_test!` 保留私有 `mmio::device::tests` 模块，
-以 `#[unittest::def_test]` 注册超限请求、容量越界和 reset 清除延迟请求头用例。
-原断言及对 `process_request`、`pending_head` 的私有访问不变；
-`unittest` 使用 workspace 普通依赖，不增加业务公开接口。
+The original 3 host `#[test]` cases were moved in full into `ut-tests/device.rs`. Through
+`unittest::path_mod_test!` the private `mmio::device::tests` module is preserved,
+and `#[unittest::def_test]` registers the over-limit request, capacity out-of-bounds, and reset-clears-deferred-request-head cases.
+The original assertions and the private accesses to `process_request` and `pending_head` are unchanged;
+`unittest` uses a regular workspace dependency and adds no public business interface.
 
-测试使用局部 Vec、mock 内存和同步 mock 后端，无需创建 VM、真实块设备或真实 IRQ。
-它们在 `cfg(unittest)` 下的内核 harness 执行，需要已初始化的 allocator 与
-IRQ/preempt guard 运行环境；每例独立构造设备和缓冲区，正常返回时释放资源。
-配置需将本 crate 链入内核，可沿现有 VMM 依赖路径启用 `KFEAT_VMM=y`，再使用
-`make unittest UNITTEST_CRATE=vdev_virtio_blk` 过滤运行。
-这些用例不再由 bare Cargo host harness 执行；`src/selftest.rs` 的可调用自测保持不变。
+The tests use local Vecs, mock memory and a synchronous mock backend, so no VM, real block device or real IRQ needs to be created.
+They run in the kernel harness under `cfg(unittest)`, which requires an initialized allocator and an
+IRQ/preempt guard runtime environment; each case constructs its own device and buffers, and releases the resources on normal return.
+The configuration requires this crate to be linked into the kernel; `KFEAT_VMM=y` can be enabled along the existing VMM dependency path, and then
+`make unittest UNITTEST_CRATE=vdev_virtio_blk` is used to run with filtering.
+These cases are no longer executed by the bare Cargo host harness; the callable self-test in `src/selftest.rs` remains unchanged.
 
-## 架构
+## Architecture
 
 ```
 ┌───────────────────────────────────────────┐
-│            VMM MMIO bus（vdev-core）        │
+│            VMM MMIO bus(vdev-core)          │
 │        MmioDevice::read/write_for_vcpu     │
 └───────────────┬───────────────────────────┘
                 │
 ┌───────────────┴───────────────────────────┐
 │           bus::VirtioBlkDevice             │
-│  地址换算 → mmio_read/mmio_write_with_memory│
-│  事件翻译 → IrqSender / deferred latch      │
+│  address translation → mmio_read/mmio_write_with_memory│
+│  event translation → IrqSender / deferred latch      │
 └───────────────┬───────────────────────────┘
                 │ DmaGuestMemory(vdev-virtio)
 ┌───────────────┴───────────────────────────┐
 │      mmio::VirtioMmioBlockDevice<B, T>     │
-│  VirtioMmioState(标准寄存器) + 块配置空间    │
-│  请求解析：header / data / status 描述符链   │
+│  VirtioMmioState (standard registers) + block config space    │
+│  request parsing: header / data / status descriptor chain   │
 └───────────────┬───────────────────────────┘
                 │ BlockBackend
 ┌───────────────┴───────────────────────────┐
-│   RamDiskBackend / 其他后端实现             │
+│   RamDiskBackend / other backend implementations             │
 └───────────────────────────────────────────┘
 ```
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-- **MMIO 读写来自 vCPU 退出路径**：任务上下文，非中断上下文；`write_for_vcpu`
-  会以内联方式处理同步后端的队列。
-- **同步后端内联处理**：`RamDiskBackend` 的 `requires_deferred_processing()`
-  为 `false`，`QUEUE_NOTIFY` 在 MMIO 写路径内完成读写并立即注入 used-ring 中断。
-  若后端改为可能阻塞，`VirtioMmioBlockDevice` 返回 `QueuePending`，需要 VMM 提供
-  轮询路径；当前 `VirtioBlkDevice` 会用 `deferred_pending` 位防御性记录。
-- **访客内存通过 `GuestDma` 注入**：`GuestPhysAddr` 先换算为设备内偏移，再交给
-  `DmaGuestMemory` 读写；不依赖宿主直接映射假设。
-- **中断注入由 `IrqSender` 完成**：目标 vCPU 与 IRQ 号由调用方在构造时决定
-  （默认 slot 1：base `0x0a00_1000`、IRQ 49）。
-- **不睡眠、不依赖调度器**：可在启动期构造并注册。
+- **MMIO reads and writes come from the vCPU exit path**: task context, not interrupt context; `write_for_vcpu`
+  processes the queue of a synchronous backend inline.
+- **Synchronous backends are processed inline**: `RamDiskBackend`'s `requires_deferred_processing()`
+  is `false`, and `QUEUE_NOTIFY` completes the reads and writes within the MMIO write path and immediately injects the used-ring interrupt.
+  If a backend is changed to one that may block, `VirtioMmioBlockDevice` returns `QueuePending`, and the VMM needs to provide a
+  polling path; currently `VirtioBlkDevice` defensively records this with the `deferred_pending` bit.
+- **Guest memory is injected through `GuestDma`**: a `GuestPhysAddr` is first translated into an offset within the device, and then handed to
+  `DmaGuestMemory` for reads and writes; it does not rely on the assumption of a direct host mapping.
+- Interrupt injection is done by `IrqSender`: the IRQ number is fixed in `bus.rs` (slot 1: base `0x0a00_1000`, IRQ 49), and the target vCPU is the `vcpu_id` of the vCPU that performed the MMIO write (plain `write` uses vCPU 0).
+- **No sleeping, no dependence on the scheduler**: it can be constructed and registered during boot.
 
-## 状态机
+## State Machine
 
-### 请求处理
+### Request Processing
 
 ```
-Idle ──QUEUE_NOTIFY──> Process ──同步后端──> Complete ──used ring + IRQ──> Idle
+Idle ──QUEUE_NOTIFY──> Process ──synchronous backend──> Complete ──used ring + IRQ──> Idle
                           │
-                          │ 后端 WouldBlock
-                          └──> QueuePending（交由轮询/延迟路径）
+                          │ backend WouldBlock
+                          └──> QueuePending (handed to the polling/deferred path)
 ```
 
-### 传输复位
+### Transport Reset
 
 ```
-Active ──status 写 0──> Reset（丢弃 pending_head）──> Idle
+Active ──status write 0──> Reset (discard pending_head) ──> Idle
 ```
 
-`pending_head` 记录后端延迟处理时被取出但未完成的描述符；复位必须清除它，避免
-复位后处理失效请求。
+`pending_head` records a descriptor that was taken out but not completed when the backend defers processing; reset must clear it, to avoid
+processing a stale request after reset.
 
-### 后端延迟策略
+### Backend Deferral Policy
 
-- `requires_deferred_processing() == false`：内联处理，MMIO 写返回
-  `BlockDeviceEvent::InterruptPending` 或 `None`。
-- `== true`：MMIO 写返回 `QueuePending(index)`，由运行时调用
-  `process_pending_queue`。
+- `requires_deferred_processing() == false`: processed inline, and the MMIO write returns
+  `BlockDeviceEvent::InterruptPending` or `None`.
+- `== true`: the MMIO write returns `QueuePending(index)`, and the runtime calls
+  `process_pending_queue`.
 
-## 算法流程
+## Algorithm Flow
 
-### 配置空间读
+### Configuration Space Read
 
-1. `VirtioMmioState::mmio_read` 处理标准寄存器。
-2. 配置区读交由 `read_config_space`：容量、`size_max`、`seg_max`、几何、
-   block size 等。
+1. `VirtioMmioState::mmio_read` handles the standard registers.
+2. Configuration region reads are handed to `read_config_space`: capacity, `size_max`, `seg_max`, geometry,
+   block size, etc.
 
-### 请求处理（`handle_queue_notify`）
+### Request Processing (`handle_queue_notify`)
 
-1. 校验 `DRIVER_OK` 与队列有效性。
-2. 循环取 head（优先 `pending_head`，否则从 available ring 弹出）。
-3. `process_request`：
-   - 校验描述符链长度 ≥ 2；首个描述符为设备可读的请求头；末个为可写的 status。
-   - 解析 `request_type` 与 `sector`。
-   - `IN` → 后端读入 buffer 并写回各数据描述符；`OUT` → 从数据描述符读入 buffer
-     并写后端；`FLUSH` → `backend.flush()`。
-   - 回写 status（OK/IOERR/UNSUPP）；`WouldBlock` 返回 `None` 挂起。
-4. `complete_with_memory` 写 used ring；必要时 `trigger_interrupt` 置中断位。
+1. Validate `DRIVER_OK` and queue validity.
+2. Loop to fetch the head (`pending_head` first, otherwise pop from the available ring).
+3. `process_request`:
+   - Validate that the descriptor chain length is ≥ 2; the first descriptor is the device-readable request header; the last is the writable status.
+   - Parse `request_type` and `sector`.
+   - `IN` → the backend reads into the buffer and writes it back to each data descriptor; `OUT` → read into the buffer from the data descriptors
+     and write to the backend; `FLUSH` → `backend.flush()`.
+   - Write back the status (OK/IOERR/UNSUPP); `WouldBlock` returns `None` and suspends.
+4. `complete_with_memory` writes the used ring; if necessary `trigger_interrupt` sets the interrupt bit.
 
-### 地址与容量校验
+### Address and Capacity Validation
 
-- `validate_data_request` 检查描述符数量/单段长度、总长度按 512 字节对齐、
-  请求区间落在容量内；失败返回 `InvalidBufferSize`/`InvalidSector`，并以 IOERR
-  完成请求而非 panic。
+- `validate_data_request` checks the descriptor count/single-segment length, that the total length is aligned to 512 bytes, and
+  that the request range falls within the capacity; on failure it returns `InvalidBufferSize`/`InvalidSector`, and completes
+  the request with IOERR instead of panicking.
 
-## 并发模型
+## Concurrency Model
 
-- `VirtioMmioBlockDevice` 内部状态由 `VirtioMmioState` 的 `SpinNoIrq` 锁保护；
-  `pending_head` 另由 `SpinNoIrq<Option<u16>>` 保护。
-- `Arc<T>` accessor 共享；`RamDiskBackend` 用 `kspin::SpinNoIrq<Vec<u8>>` 串行化
-  内存盘访问。后端 I/O 在队列 `SpinNoIrq` 锁内执行，因此后端锁也必须是不可睡眠
-  的自旋锁：`ksync::Mutex` 在竞争时会阻塞当前任务，而此刻本地中断已被屏蔽，
-  可能死锁。
-- `VirtioBlkDevice` 的 `deferred_pending` 是 `AtomicBool`，仅作防御性记录。
-- 中断注入在锁外调用 `IrqSender::inject`。
+- The internal state of `VirtioMmioBlockDevice` is protected by the `SpinNoIrq` lock of `VirtioMmioState`;
+  `pending_head` is additionally protected by `SpinNoIrq<Option<u16>>`.
+- Shared through the `Arc<T>` accessor; `RamDiskBackend` uses `kspin::SpinNoIrq<Vec<u8>>` to serialize
+  RAM disk accesses. Backend I/O runs inside the queue `SpinNoIrq` lock, so the backend lock must also be a non-sleeping
+  spin lock: `ksync::Mutex` blocks the current task under contention, and at that point local interrupts are already masked,
+  which could deadlock.
+- `deferred_pending` of `VirtioBlkDevice` is an `AtomicBool`, used only as a defensive record.
+- Interrupt injection calls `IrqSender::inject` outside the lock.
 
-## 设计决策
+## Design Decisions
 
-- **设备模型与总线绑定都放在本 crate**：`bus::VirtioBlkDevice` 只依赖
-  `vdev-core` trait，放在 `kvmm` 会无谓地把通用代码绑到 host crate。
-- **默认 base/IRQ 固化在 `bus.rs`**：沿用 QEMU `virt` 平台 `virtio_mmio` slot 1
-  （`0x0a00_1000`、IRQ 49），slot 0 留给 `vdev-virtio-net`。设备可被多 VM 复用，
-  VM 侧通过各自 `GuestDma`/`IrqSender` 隔离。
-- **同步 RAM 盘为默认后端**：便于启动期即完成数据路径，不需要延迟处理机制。
-- **自测放在 crate 内**：`selftest` 以假 `GuestDma` + 记录型 `IrqSender` 驱动完整
-  序列，可由内核 unittest 直接调用（`vdev_virtio_blk::selftest::vmm_selftest_virtio_blk`）。
+- **Both the device model and the bus binding live in this crate**: `bus::VirtioBlkDevice` depends only on
+  `vdev-core` traits, and placing it in `kvmm` would needlessly tie generic code to the host crate.
+- **Default base/IRQ are fixed in `bus.rs`**: it follows slot 1 of `virtio_mmio` on the QEMU `virt` platform
+  (`0x0a00_1000`, IRQ 49), with slot 0 left for `vdev-virtio-net`. The device can be reused by multiple VMs,
+  and the VM side isolates them through their own `GuestDma`/`IrqSender`.
+- **The synchronous RAM disk is the default backend**: it lets the data path work as early as boot and needs no deferred-processing mechanism.
+- **The self-test lives inside the crate**: `selftest` drives the complete sequence with a fake `GuestDma` + a recording `IrqSender`,
+  and it can be called directly by the kernel unittest (`vdev_virtio_blk::selftest::vmm_selftest_virtio_blk`).
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-无自定义 `Drop`。`Arc<VirtioMmioBlockDevice>`、`RamDiskBackend` 的内存盘与队列
-随结构体析构释放。设备从 MMIO 总线移除（VMM 释放 `Box<dyn MmioDevice>`）后不再
-接收访问；在途请求依赖同步后端已内联完成，复位会丢弃 `pending_head`。
+There is no custom `Drop`. The `Arc<VirtioMmioBlockDevice>`, the RAM disk of `RamDiskBackend` and the queues
+are released when the structs are destroyed. After the device is removed from the MMIO bus (the VMM releases the `Box<dyn MmioDevice>`), it no longer
+receives accesses; in-flight requests rely on the synchronous backend having completed them inline, and reset discards `pending_head`.

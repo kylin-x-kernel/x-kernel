@@ -1,4 +1,4 @@
-# kpoll — 安全与可靠性分析
+# kpoll — Security and Reliability Analysis
 
 ## Weak Source Lifetime
 
@@ -9,126 +9,126 @@ not a registration error or a readiness event. Temporary-owner release occurs
 after source locking ends, but callers must also exclude outer callback locks.
 No new unsafe production code or allocator-failure policy is introduced.
 
-## 信任模型
+## Trust Model
 
 ```
-用户态 syscall / 内核子系统
+User-space syscall / kernel subsystem
         │
         │ Pollable / PollContext / PollSet API
         v
 ┌──────────────────────────────────────────┐
 │ kpoll                                    │
-│  - PollRegistrations 生命周期由调用方持有 │
-│  - PollSet 槽表由 SpinNoIrq 保护         │
-│  - registration 仅持 Weak<source>        │
+│  - PollRegistrations lifetime is held by the caller │
+│  - The PollSet slot table is protected by SpinNoIrq │
+│  - registration holds only Weak<source>  │
 └──────────────────────────────────────────┘
         │
-        │ Waker::wake（锁外）
+        │ Waker::wake (outside the lock)
         v
-   调度器 / 任务恢复
+   Scheduler / task resume
 ```
 
-- 调用方负责：持有 registration owner、register 后 recheck、把
-  `PollRegisterError` 映射为用户可见错误。
-- `kpoll` 负责：token 正确性、cancel/wake 线性化、wake 不持锁调用 Waker、
-  `Waker::clone`/cancel-path drop 不在 `SpinNoIrq` 内执行、注册扩容失败可返回。
+- The caller is responsible for: holding the registration owner, rechecking after register, and mapping
+  `PollRegisterError` to a user-visible error.
+- `kpoll` is responsible for: token correctness, cancel/wake linearization, calling the Waker without holding a lock in wake,
+  not executing `Waker::clone`/cancel-path drop inside `SpinNoIrq`, and returning on registration growth failure.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-经检查，`kpoll`：
+Upon review, `kpoll`:
 
-- **不直接访问用户内存**；
-- **不直接操作 MMIO / PIO / DMA**；
-- **不解析 firmware / DT / ACPI**；
-- **间接受用户控制的量**：并发 waiter 数量、poll fd 数量、epoll interest 数。
+- **does not directly access user memory**;
+- **does not directly operate MMIO / PIO / DMA**;
+- **does not parse firmware / DT / ACPI**;
+- **has quantities indirectly controlled by the user**: number of concurrent waiters, number of poll fds, number of epoll interests.
 
-因此主要攻击/滥用面是：
+Therefore the main attack/abuse surfaces are:
 
-- 大量并发 registration 造成内存压力；
-- 忘记持有 `PollRegistrations` 导致挂死或 stale waiter；
-- 在错误锁层级调用 `wake` 引发死锁；
-- 把 wake 当成可靠状态通知而忽略 recheck。
+- Memory pressure caused by a large number of concurrent registrations;
+- Forgetting to hold `PollRegistrations`, causing hangs or stale waiters;
+- Calling `wake` at the wrong lock level, causing deadlock;
+- Treating wake as a reliable state notification and omitting the recheck.
 
-## unsafe 代码清单
+## unsafe Code Inventory
 
-当前 `kpoll` 实现本身不包含 `unsafe` 代码块。单元测试中的自定义
-`RawWaker` 使用 `unsafe`，每个站点都有 `SAFETY:` 说明，且仅用于 unittest。
+The current `kpoll` implementation itself contains no `unsafe` code blocks. The custom
+`RawWaker` in the unit tests uses `unsafe`; every site has a `SAFETY:` comment, and it is used only in unittests.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-1. 每个 active slot 的 `(slot, id)` 唯一；注销必须同时匹配两者。
-2. `next_id` 单调递增且不回绕复用；耗尽返回 `IdExhausted`。
-3. `PollRegistration` 只持 `Weak<PollSetInner>`，不能延长 source 生命周期。
-4. wake 摘取 slot 后，对应 token 永久失效；迟到 Drop 为 no-op。
-5. 复合注册中途失败时，已成功项仍由 owner 持有，clear/drop 会完整回滚。
+1. The `(slot, id)` of each active slot is unique; deregistration must match both.
+2. `next_id` increases monotonically and is never wrapped around or reused; exhaustion returns `IdExhausted`.
+3. `PollRegistration` holds only `Weak<PollSetInner>` and cannot prolong the source lifetime.
+4. After wake takes the slot, the corresponding token is permanently invalidated; a late Drop is a no-op.
+5. If a composite registration fails midway, the items already registered successfully are still held by the owner, and clear/drop rolls them all back completely.
 6. `PollEvent` generations signal state changes; callers recheck their own
    predicates and never interpret notifications as consumable completion tokens.
 
-## 线程安全
+## Thread Safety
 
 `PollSet::register` returns a weak RAII guard. Keep it across the logical wait
 and recheck readiness after registration. Dropping it cancels a queued waiter
 but cannot retract a detached late wake. Synchronous completion state and wait
 node lifetimes are outside this crate's boundary.
 
-- `PollSet: Send + Sync`：内部 `SpinNoIrq` 保护槽表。
-- `PollRegistration` / `PollRegistrations`：按所有权在单逻辑等待路径上移动；
-  不要求跨线程共享同一个 owner。
-- `Waker::wake` 可重入 `PollSet::wake`；因锁外 drain，不会在同一把锁上死锁。
+- `PollSet: Send + Sync`: the internal `SpinNoIrq` protects the slot table.
+- `PollRegistration` / `PollRegistrations`: moved by ownership along a single logical wait path;
+  sharing the same owner across threads is not required.
+- `Waker::wake` may re-enter `PollSet::wake`; because the drain happens outside the lock, it will not deadlock on the same lock.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | 大量 waiter 耗尽内存 | 中 | 用户并发 poll/epoll 放大 | `try_reserve` 返回 `NoMemory`；syscall 映射 `ENOMEM` |
-| T-02 | 等待结束后残留 waiter | 中 | 缺少 owner / 忘记 clear | 普通 poll 经 `PollContext`，单源 bridge 持有单个 guard；RAII Drop 注销 |
-| T-03 | ABA 误删新 waiter | 高 | slot 复用后旧 guard drop | token 含单调 `id` |
-| T-04 | IRQ wake 持锁重入死锁 | 高 | 外层锁内调用 `wake` 且回调反取锁 | wake 在外层锁释放后执行；register clone / cancel drop 均在锁外 |
-| T-05 | OOM panic 代替错误返回 | 中 | 注册路径裸 `push`/`with_capacity` | 注册路径统一 `try_reserve`；已知限制仅限 `PollSet::new` 的 `Arc::new` |
-| T-06 | 迟到 wake 被当成最终状态 | 低 | cancel 与 wake 竞态 | 文档约定 wake 可迟到；调用方必须 recheck |
+| T-01 | A large number of waiters exhaust memory | Medium | Amplification by concurrent user poll/epoll | `try_reserve` returns `NoMemory`; syscall maps it to `ENOMEM` |
+| T-02 | Waiters remain after the wait ends | Medium | Missing owner / forgetting to clear | Ordinary poll goes through `PollContext`, and the single-source bridge holds a single guard; RAII Drop deregisters |
+| T-03 | ABA wrongly removes a new waiter | High | Old guard dropped after slot reuse | The token contains a monotonic `id` |
+| T-04 | IRQ wake re-entrancy deadlock while holding a lock | High | `wake` called inside an outer lock and the callback takes the lock in reverse | wake runs after the outer lock is released; register clone / cancel drop are both outside the lock |
+| T-05 | OOM panic instead of an error return | Medium | Bare `push`/`with_capacity` in the registration path | The registration path uniformly uses `try_reserve`; the known limitation is only the `Arc::new` in `PollSet::new` |
+| T-06 | A late wake is treated as the final state | Low | Race between cancel and wake | Documented convention that wake may be late; callers must recheck |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure Mode | Failure Cause | Local Effect | System Effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | 注册失败 | 堆扩容失败 / ID 耗尽 | 本次等待立即失败 | 用户收到 `ENOMEM` | 3 | 错误传播到 syscall/async |
-| F-02 | 丢失唤醒 | check/register 竞态 | 任务继续睡眠 | 阻塞 hang | 2 | register 后强制 recheck；block_on woke flag |
-| F-03 | 误删并发等待 | 按 Waker 去重注销 | 另一等待永不醒 | hang | 1（已消除） | 每逻辑等待独立 token |
-| F-04 | wake 路径分配失败 | 热路径新建 buffer | IRQ 分配/panic | 系统不稳 | 1（已消除） | 锁内只移出 slot table 并重置元数据；遍历和 `wake()` 都在锁外执行 |
-| F-05 | source 先销毁 | fd/设备释放早于 waiter | 等待者无唤醒 | hang | 2 | source Drop 唤醒全部 waiter |
+| F-01 | Registration failure | Heap growth failure / ID exhaustion | This wait fails immediately | User receives `ENOMEM` | 3 | Error propagated to syscall/async |
+| F-02 | Lost wakeup | check/register race | Task keeps sleeping | Blocking hang | 2 | Mandatory recheck after register; block_on woke flag |
+| F-03 | Wrongly removing a concurrent wait | Deduplicated deregistration by Waker | Another wait never wakes | hang | 1 (eliminated) | Independent token per logical wait |
+| F-04 | Allocation failure on the wake path | New buffer on the hot path | IRQ allocation/panic | System unstable | 1 (eliminated) | Under the lock, only move out the slot table and reset metadata; traversal and `wake()` both run outside the lock |
+| F-05 | Source destroyed first | fd/device released before waiters | Waiters never woken | hang | 2 | source Drop wakes all waiters |
 
-## 故障管理
+## Fault Management
 
-- 注册失败：返回 `PollRegisterError`，由 `ktask`/`ksyscall` 映射为
-  `KError::NoMemory` 或 `InvalidInput`（`InvalidState`）。
-- 正常取消：`PollRegistrations` Drop/clear。
-- 迟到 wake：允许，不视为错误。
-- 不在正常控制流使用 panic；unittest 中的断言除外。
+- Registration failure: returns `PollRegisterError`, which `ktask`/`ksyscall` map to
+  `KError::NoMemory` or `InvalidInput` (`InvalidState`).
+- Normal cancellation: `PollRegistrations` Drop/clear.
+- Late wake: allowed, not treated as an error.
+- panic is not used in normal control flow; assertions in unittests are the exception.
 
-## 隐私分析
+## Privacy Analysis
 
-模块不处理用户数据内容，只保存任务 `Waker` 与 registration 元数据。
+The module does not process user data content; it only stores the task `Waker` and registration metadata.
 
-## 已知限制
+## Known Limitations
 
-1. `PollSet::new` 仍依赖 infallible `Arc::new`；仓库尚无通用 `Arc::try_new`。
-2. `Waker::clone` 在极端自定义 waker 实现中仍可能分配；内核默认 `KWaker`
-   为 Arc 引用计数。
-3. 单次 `wake` 广播成本仍是 O(n)；lifecycle guard 防止无限累积。锁内成本只包括
-   detach slot table 和重置元数据，实际遍历/唤醒在锁外执行。
-4. IRQ 等多等待者事件源通过调用方提供的 `PollContext` 直接注册，
-   registration 生命周期由跨越 `Pending` 的 `PollRegistrations` 管理。
-## 审计清单
+1. `PollSet::new` still depends on the infallible `Arc::new`; the repository has no general `Arc::try_new` yet.
+2. `Waker::clone` may still allocate in extreme custom waker implementations; the kernel default `KWaker`
+   uses Arc reference counting.
+3. The cost of a single `wake` broadcast is still O(n); the lifecycle guard prevents unbounded accumulation. The cost under the lock only includes
+   detaching the slot table and resetting metadata; the actual traversal/wakeup runs outside the lock.
+4. Multi-waiter event sources such as IRQ register directly through the caller-provided `PollContext`,
+   and the registration lifetime is managed by `PollRegistrations` that spans `Pending`.
+## Audit Checklist
 
-- [ ] 所有 `Pollable::register` / `register_poll` 都通过 `PollContext`。
-- [x] 每个 `Poll::Pending` 路径都有活着的 `PollRegistrations`（含 signal /
-  wait / interruptible / knet-rx；注册失败不得在无 waiter 时入睡）。
-- [x] register 之后一定有 readiness recheck（含 `poll_interrupt` Ready 竞态）。
-- [ ] 注册增长使用 `try_reserve`，wake 路径锁内不分配。
-- [x] `wake` 不在持锁状态下调用 `Waker`（含 IRQ descriptor 状态锁）。
-- [ ] 外层锁顺序不会与 wake 回调反向。
-- [ ] epoll interest 在 DEL/ONESHOT/Drop 时清空 registration，MOD 原地更新配置并重装 registration。
-- [ ] 测试覆盖 >64 waiter、取消注销、token ABA、wake 重入。
+- [ ] All `Pollable::register` / `register_poll` go through `PollContext`.
+- [x] Every `Poll::Pending` path has a live `PollRegistrations` (including signal /
+  wait / interruptible / knet-rx; on registration failure, must not sleep without a waiter).
+- [x] A readiness recheck always follows register (including the `poll_interrupt` Ready race).
+- [ ] Registration growth uses `try_reserve`, and the wake path does not allocate under the lock.
+- [x] `wake` does not call `Waker` while holding a lock (including the IRQ descriptor state lock).
+- [ ] The outer lock order does not conflict with the wake callback in reverse.
+- [ ] An epoll interest clears its registration on DEL/ONESHOT/Drop, and MOD updates the configuration in place and reinstalls the registration.
+- [ ] Tests cover >64 waiters, cancel deregistration, token ABA, and wake re-entrancy.
 
 ## Advisory waiter snapshot
 

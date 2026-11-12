@@ -429,7 +429,7 @@ process identity.
   zero leaves both outputs untouched. The raw waitid usage output remains
   unimplemented.
 - `task/execve.rs` implements `execve`/`execveat` through a single
-  `run_exec`. `execveat` accepts `AT_EMPTY_PATH` (exec the file already
+  `exec_resolved`. `execveat` accepts `AT_EMPTY_PATH` (exec the file already
   open on `dirfd`, e.g. a memfd) and `AT_SYMLINK_NOFOLLOW` (currently
   treated as follow). A multi-threaded `exec`, or one whose thread is not the
   group leader, runs `de_thread` (see `posix-process`) to replace the whole

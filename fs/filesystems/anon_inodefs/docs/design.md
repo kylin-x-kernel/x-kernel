@@ -1,30 +1,28 @@
-# anon_inodefs — 设计文档
+# anon_inodefs — Design Document
 
-## 定位
+## Positioning
 
-`anon_inodefs` 是内核匿名文件的具体伪文件系统。它拥有 `anon_inodefs` 的
-`FileSystemType`、隐藏 mount、superblock、默认 dentry operations 和 singleton inode；
-eventfd、epoll、timerfd、signalfd、pidfd、socket 与 BPF object 等调用者只请求创建
-open file。KVFS 只提供通用 superblock、dentry、inode 和 `alloc_file_pseudo()` 机制，
-不拥有该具体文件系统。
+`anon_inodefs` is the concrete pseudo filesystem for kernel anonymous files. It owns the `FileSystemType`, the hidden mount, the superblock, the default dentry operations and the singleton inode of `anon_inodefs`;
+callers such as eventfd, epoll, timerfd, signalfd, pidfd, sockets and BPF objects only request the creation of an
+open file. KVFS provides only the generic superblock, dentry, inode and `alloc_file_pseudo()` mechanisms,
+and does not own this concrete filesystem.
 
-## 背景
+## Background
 
-Linux `fs/anon_inodes.c` 通过一个内核 mount 和一个共享 inode 为无需独立 inode 状态的
-kernel object 创建 file。X-Kernel 保持相同语义层次，并用 `AnonInodeFs` 对象组合 Linux
-中的全局 mount 与 singleton inode；静态 filesystem、superblock 和 dentry operation
-table 不进入该对象，也不按 mount 或 file 重复分配。
+Linux `fs/anon_inodes.c` creates files for kernel objects that need no independent inode state, using one kernel mount and one shared inode. X-Kernel keeps the same semantic layering, and uses an `AnonInodeFs` object to combine the global mount and the singleton inode found in Linux;
+the static filesystem, superblock and dentry operation
+tables are not part of this object, and are not allocated repeatedly per mount or per file.
 
-## 范围
+## Scope
 
-内核单元测试位于 `ut-tests/lib.rs`，由 `src/lib.rs` 中的
-`unittest::path_mod_test!` 挂载为 `tests` 模块，在 `cfg(unittest)` 下编译。
+The kernel unit tests are located in `ut-tests/lib.rs`, are mounted as the `tests` module by
+`unittest::path_mod_test!` in `src/lib.rs`, and are compiled under `cfg(unittest)`.
 
-- `src/lib.rs`：隐藏文件系统初始化、共享 inode、动态 dentry 名称和 file 创建。
-- `docs/design.md`：对象层次、启动顺序和生命周期。
-- `docs/security.md`：输入边界、并发初始化与失效模式。
+- `src/lib.rs`: hidden filesystem initialization, the shared inode, dynamic dentry names and file creation.
+- `docs/design.md`: object hierarchy, boot order and lifetimes.
+- `docs/security.md`: input boundaries, concurrent initialization and failure modes.
 
-## 架构
+## Architecture
 
 ```text
 static FileSystemType / s_op / s_d_op
@@ -32,7 +30,7 @@ static FileSystemType / s_op / s_d_op
                  v
 Once<AnonInodeFs> { hidden Mount, singleton VfsInode }
                  |
-                 +-- get_file(name, fops, private, flags, cred)
+                 +-- get_file(name, fops, private, mode, flags, cred)
                            |
                            v
                  per-call Dentry + VfsFile
@@ -41,21 +39,21 @@ Once<AnonInodeFs> { hidden Mount, singleton VfsInode }
                            +-- caller-owned file private data
 ```
 
-superblock 的默认 `s_d_op` 对应物使 root 和 `alloc_file_pseudo()` 创建的 dentry 自动继承
-同一静态 table。`AnonInodeFs` 因而不保存 dentry-operation `Arc`，每个 file 也不保存
-平行 operation owner。
+The counterpart of the superblock's default `s_d_op` makes the root and the dentries created by `alloc_file_pseudo()` automatically inherit
+the same static table. `AnonInodeFs` therefore does not hold a dentry-operation `Arc`, and each file does not hold a
+parallel operation owner.
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
-`init_anon_inodefs()` 必须在 boot 的可睡眠执行路径调用，早于普通任务或并行测试创建
-匿名文件。初始化会分配 VFS 对象并取得 sleepable lock，不能在中断上下文或持有
-spinlock 时调用。
+`init_anon_inodefs()` must be called on the sleepable boot execution path, before any ordinary task or parallel test creates
+anonymous files. Initialization allocates VFS objects and acquires sleepable locks, so it must not be called in interrupt context or while holding a
+spinlock.
 
-`get_file()` 可以从普通 task context 调用。它需要分配 dentry/file，因此不能在中断
-上下文调用。接口不反向读取 current task；调用者
-显式传入 open credential snapshot，所以内核线程和测试可使用受控 credential。
+`get_file()` may be called from ordinary task context. It needs to allocate a dentry/file, so it must not be called in interrupt
+context. The interface does not read the current task in reverse; the caller
+explicitly passes in an open credential snapshot, so kernel threads and tests can use a controlled credential.
 
-## 状态机
+## State Machine
 
 ```text
 Uninitialized -- init_anon_inodefs() --> Published
@@ -63,47 +61,46 @@ Published     -- get_file() ----------> Published
 Uninitialized -- global()/get_file() -> panic
 ```
 
-没有运行期卸载状态。`Once` 发布后 mount 和 singleton inode 在系统生命周期内保持有效。
+There is no runtime unload state. After `Once` is published, the mount and the singleton inode remain valid for the lifetime of the system.
 
-## 算法流程
+## Algorithm Flow
 
-初始化阶段：
+Initialization phase:
 
-1. 通过 KVFS `new_pseudo_super_block()` 以静态 `FileSystemType`、共享 simple `s_op`、
-   `s_magic` 和默认 `s_d_op` 创建 superblock。
-2. 通用 helper 创建 pseudo-fs root inode/dentry，并由 superblock 绑定默认 dentry operations。
-3. 创建带 `NODEV | NOEXEC` 的隐藏 root mount。
-4. 通过 KVFS `get_next_ino()` 创建一个无文件类型、权限为 `0600` 的共享匿名 inode。
-5. 将 mount 与 inode 一次性发布到 `Once<AnonInodeFs>`。
+1. Create the superblock through KVFS `new_pseudo_super_block()` with the static `FileSystemType`, the shared simple `s_op`,
+   `s_magic` and the default `s_d_op`.
+2. The generic helper creates the pseudo-fs root inode/dentry, and the superblock binds the default dentry operations.
+3. Create the hidden root mount with `NODEV | NOEXEC`.
+4. Create one shared anonymous inode with no file type and permissions `0600` through KVFS `get_next_ino()`.
+5. Publish the mount and the inode to `Once<AnonInodeFs>` in one step.
 
-创建 file 时只分配 per-file dentry/file，保留 `O_ACCMODE | O_NONBLOCK`，把调用者的
-private object 安装到 `file->private_data` 对应物。`getattr` 从 path 的唯一 VFS inode
-取得 metadata，再清除 file-type bits，保持 Linux 用户 ABI 对匿名 inode 的历史语义。
+When creating a file, only the per-file dentry/file is allocated, `O_ACCMODE | O_NONBLOCK` is preserved, and the caller's
+private object is installed into the counterpart of `file->private_data`. `getattr` obtains metadata from the path's unique VFS inode,
+then clears the file-type bits, preserving the historical semantics of the Linux user ABI for anonymous inodes.
 
-## 并发模型
+## Concurrency Model
 
-初始化由 boot 串行执行；`Once` 负责发布可见性。发布后 `AnonInodeFs` 字段不可变，
-并发 `get_file()` 只共享 mount 和 singleton inode，各自创建独立 dentry/file/private
-state，不需要文件系统级 mutex。VFS 对象内部同步由 KVFS 负责。
+Initialization is executed serially by boot; `Once` is responsible for publication visibility. After publication, the `AnonInodeFs` fields are immutable,
+and concurrent `get_file()` calls share only the mount and the singleton inode, each creating independent dentry/file/private
+state, so no filesystem-level mutex is needed. Internal synchronization of VFS objects is the responsibility of KVFS.
 
-## 设计决策
+## Design Decisions
 
-- 具体 `anon_inodefs` 位于 `fs/filesystems`，不作为 KVFS 模块或 facade re-export。
-- `AnonInodeFs` 只组合 Linux 中确实存在的 hidden mount 与 singleton inode；operation
-  tables 使用静态对象，不放入 runtime state。
-- 所有普通匿名 file 共享 inode；需要独立 inode/security context 的 Linux
-  `anon_inode_create_getfile()` 语义尚未实现，不能用复制 singleton state 伪装。
-- `AnonInodeOperations` 显式覆写 `setattr`：owner/mode/时间更新保持拒绝语义
-  （`EOPNOTSUPP`），不继承 KVFS 公共回退层——公共回退层的前提是 inode identity 与
-  metadata 均为自身持有，而 singleton 被所有进程的
-  eventfd/epoll/timerfd/signalfd/pidfd/socket/BPF 匿名 fd 共同引用，接受一次
-  fallback 更新就会改写所有进程 `fstat` 自己匿名 fd 时看到的共享 uid/gid/mode/时间戳。
-  size 更新沿用公共回退层的 `EINVAL`，使 `ftruncate` 对非普通文件保持在文档化 errno
-  上，与匿名管道一致。
-- 初始化显式发生在 boot，而不是在任意 runtime caller 的首次访问中执行复杂 VFS 构造。
+- The concrete `anon_inodefs` resides in `fs/filesystems`, and is not a KVFS module or a facade re-export.
+- `AnonInodeFs` combines only the hidden mount and singleton inode that actually exist in Linux; the operation
+  tables use static objects and are not placed in runtime state.
+- All ordinary anonymous files share one inode; the semantics of Linux
+  `anon_inode_create_getfile()`, which needs an independent inode/security context, are not yet implemented, and must not be faked by copying singleton state.
+- `AnonInodeOperations` explicitly overrides `setattr`: owner/mode/time updates keep the rejection semantics
+  (`EOPNOTSUPP`) and do not inherit the KVFS common fallback layer. The premise of the common fallback layer is that inode identity and
+  metadata are both held by the inode itself, whereas the singleton is referenced jointly by the anonymous fds of eventfd/epoll/timerfd/signalfd/pidfd/socket/BPF of all processes; accepting a single
+  fallback update would rewrite the shared uid/gid/mode/timestamps that every process sees when it calls `fstat` on its own anonymous fd.
+  Size updates keep the common fallback layer's `EINVAL`, so that `ftruncate` on a non-regular file stays on the documented errno,
+  consistent with anonymous pipes.
+- Initialization explicitly happens at boot, rather than performing complex VFS construction on the first access of an arbitrary runtime caller.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
-全局 filesystem 对象不在运行期释放。每个 `VfsFile` 释放时由自身 operation table 完成
-kernel object cleanup，随后释放 per-file private `Arc`、dentry 和 file 引用；共享 inode
-与 hidden mount 仍由 `AnonInodeFs` 持有。
+The global filesystem object is not released at runtime. When each `VfsFile` is released, its own operation table performs
+the kernel object cleanup, after which the per-file private `Arc`, the dentry and the file reference are released; the shared inode
+and the hidden mount remain held by `AnonInodeFs`.

@@ -62,7 +62,7 @@ way to distinguish synchronous vs asynchronous exceptions.
 **Fix**: Each vector entry writes an exit type (0=sync, 1=IRQ, 2=FIQ,
 3=SError) to `vcpu->exit_type` (offset 520) via `tpidr_el2` before
 jumping to the common save path. `exit_handler` checks `exit_type` first;
-non-zero → yield + resume without reading ESR.
+non-zero → resume without reading ESR (host fairness comes from the run loop's bounded periodic yield).
 
 ### 3. tpidr\_el2 preemption race (EC=0x25, FAR=low address)
 

@@ -80,7 +80,7 @@ file release.
 - Preserve index and soft/hard validation on checked limit access.
 - Keep current-hard validation, old snapshot and replacement in one transaction.
 - Keep user copying and task coordination outside the limits guard.
-- Keep table -> limits ordering consistent with insertion.
+- Snapshot the limit before insertion; never nest the limits lock with table locks.
 - Detach slots before executing close callbacks.
 - Reject attempts to replace a detached owner.
 - Distinguish retained snapshots from current descriptor membership.

@@ -168,7 +168,7 @@ are simplified; robust-futex cleanup remains best effort on memory faults.
   that publishes `EINTR`, including when the later scan is the one that installs
   the handler.
 
-- `exec_de_thread` joins siblings before the address-space swap and undoes group-exit
+- `exec_de_thread` joins siblings before the address-space swap and exempts sweep targets from group-exit
   bookkeeping; changing the exec path must keep the group-kill flush ordering.
   Once the group is un-resumable it commits `SIGCHLD` as the parent contract
   before returning, so later fatal failures cannot restore the old signal.

@@ -126,11 +126,11 @@ also rejects IRQ-enabled direct calls before any VMCS selection or VMX access.
 ### vCPU Run Loop (`vmm_run_vcpu`)
 
 ```
-restore_guest_ctx()
 loop {
+    restore_guest_ctx()
     enter_guest()       → vmlaunch / sret / eret
     save_guest_ctx()
-    exit_handler()      → Resume / VmExit / Exit
+    exit_handler()      → Resume / VmSkip / VmExit / VmAbort / Exit
 }
 ```
 
@@ -417,9 +417,8 @@ wall time. When the vCPU is the only runnable task that yield is a cheap
 self-repick (~µs, measured); when a host task is ready on the pCPU it hands the
 CPU over. Result on the Rhealstone task-switch test: jitter 10.3 ms → 263 µs,
 vCPU utilisation 49 % → 98 %, host shell responsive, vtimer inject latency
-~130 µs. The remaining knob (a later step) is letting the vCPU actually sleep
-during guest WFI instead of busy-yielding, and ultimately enabling kernel
-preemption so no explicit yield is needed.
+~130 µs. The remaining knob (a later step) is enabling kernel preemption so no
+explicit yield is needed; the vCPU already sleeps interruptibly during guest WFI.
 
 ---
 
@@ -611,7 +610,7 @@ current logical processor before being loaded (vmptrld) on a different one. With
 vmclear, the destination CPU may read stale processor-internal VMCS cache — producing
 undefined behavior (typically an infinite hang on vmlaunch/vmresume).
 
-The `handle_hlt` exit calls `ktask::yield_now()`, which allows the scheduler to
+The `handle_hlt` exit calls `ktask::sleep` (1 ms), which allows the scheduler to
 migrate the vCPU thread to a different physical CPU. On resume, `enter_guest` does
 `vmptrld` on the new CPU without the required vmclear on the old CPU.
 
@@ -628,7 +627,7 @@ fn handle_hlt(vcpu: &mut Vcpu<X86Vmx>) -> ExitAction {
     vmcs_write(VmcsField::GuestRip, rip + inst_len);
     vmx::vmclear(vcpu.arch.vmcs_pa);  // flush VMCS to memory
     vcpu.launched = false;             // next entry must use vmlaunch
-    ktask::yield_now();                // thread may migrate
+    ktask::sleep(ktime_types::TimeSpan::from_millis(1)); // thread may migrate
     ExitAction::Resume
 }
 ```
@@ -668,11 +667,11 @@ and vCPUs can be distributed across all available CPUs via affinity pinning.
 Each vCPU runs as a `ktask` kernel thread via `spawn_vcpu_thread()`. From the scheduler's
 perspective, a vCPU thread is identical to any other kernel thread:
 
-- **Preemption**: Host timer interrupts force VM-exits; the scheduler can then preempt the
-  vCPU thread at any timer tick, regardless of guest behavior.
+- **Preemption**: Host timer interrupts force VM-exits. Kernel preemption is disabled, so the
+  run loop yields cooperatively at most once per ~1 ms (see *IRQ exit scheduling*).
 - **Cooperative wait**: AArch64 WFI uses an interruptible task wait, with an
-  owned deadline only when CNTV is enabled and unmasked. Other backends retain
-  their existing WFI/HLT yield behavior so idle guests release
+  owned deadline only when CNTV is enabled and unmasked. RISC-V WFI also uses
+  `ktask::interruptible_sleep_until` and x86 HLT uses a 1 ms `ktask::sleep`, so idle guests release
   their time slice early (optimization, not required for correctness).
 - **API**: `spawn_vcpu_thread<A>(vcpu) -> KtaskRef` — moves the Vcpu into the thread,
   caller uses `.join()` to wait (returns 0 on success, 1 on error).

@@ -124,8 +124,8 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 - Panics mark contract violations: unmapping a non-active address,
   length mismatch between map and unmap, bounce recycling outside the
   initialized pool, and initializing an already registered pool.
-- `deallocate_dma_memory` ignores (logs under `dma-trace`) mismatched
-  frees instead of corrupting the allocator — the trace layer detects and
+- With `dma-trace` enabled, `deallocate_dma_memory` logs and skips mismatched
+  frees instead of corrupting the allocator (without the feature no check is made) — the trace layer detects and
   skips duplicate or inconsistent records.
 
 ## External Boundary And Inputs

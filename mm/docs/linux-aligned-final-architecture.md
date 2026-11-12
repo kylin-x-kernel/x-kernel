@@ -196,7 +196,6 @@ sys_mmap / sys_munmap / sys_mprotect / sys_brk
 核心类型：
 
 - `MappingPages`
-- `PageCacheKind`
 - `Folio`
 
 职责：
@@ -368,8 +367,6 @@ write/fork COW
 当前明确不支持或不完整：
 
 - writable regular-file `MAP_SHARED`；
-- `msync` dirty shared file writeback；
-- Linux `page_mkwrite` / write-notify equivalent；
 - readahead/fault-around；
 - hole-punch/collapse-range；
 - reclaim/swap/memcg/NUMA/THP；

@@ -201,10 +201,10 @@ global as a documented follow-up rather than a rejected case.
 in the API. Credential and active-PID roles are not folded into `NsProxy`.
 
 `NsProxy` itself has no custom drop: final `Arc` release drops the references
-it holds. The one namespace type with a paired teardown is net:
+it holds. Net has a paired teardown (IPC additionally runs an optional drop observer):
 `NetNamespace::drop` notifies the protocol-stack owner through the registered
 hook so the private stack is released with the namespace. IPC and time are
-ID-only types with no local resource manager teardown, and IPC managers remain
+ID-only types with no local resource manager teardown, except that `IpcNamespace::drop` runs the at-most-one observer registered through `register_ipc_ns_drop_hook` (a `ksync::Mutex`-protected map, callback invoked outside the lock), and IPC managers remain
 global. `NsFd` pins the namespace for the fd lifetime, so a namespace survives
 while any fd or bundle references it.
 
