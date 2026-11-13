@@ -6,7 +6,12 @@ use alloc::{task::Wake, vec};
 use core::{net::Ipv4Addr, sync::atomic::AtomicUsize, task::Context};
 
 use kpoll::PollRegistrations;
-use smoltcp::{time::Instant, wire::Ipv4Address};
+use smoltcp::{
+    iface::{Config, Interface, PollResult},
+    phy::{Loopback, Medium},
+    time::Instant,
+    wire::{HardwareAddress, IpCidr, Ipv4Address},
+};
 use unittest::def_test;
 
 use super::*;
@@ -99,29 +104,112 @@ fn listen_endpoint(addr: Option<Ipv4Addr>, port: u16) -> IpListenEndpoint {
     }
 }
 
-#[def_test]
-fn recv_window_poll_requires_consumed_data() {
-    assert!(!should_poll_receive_window(64 * 1024, 0, 0));
-    assert!(!should_poll_receive_window(64 * 1024, 1, 0));
+fn poll_tcp_until_idle(
+    iface: &mut Interface,
+    device: &mut Loopback,
+    sockets: &mut crate::stack::socket_set::SocketSetState<'_>,
+    current: Instant,
+) {
+    while iface.poll(current, device, sockets) != PollResult::None {}
 }
 
 #[def_test]
-fn recv_window_poll_covers_the_scaled_zero_window_range() {
-    assert!(should_poll_receive_window(64 * 1024, 0, 1));
-    assert!(should_poll_receive_window(64 * 1024, 1, 1));
-    assert!(should_poll_receive_window(64 * 1024, 1, 4096));
-}
+fn reads_publish_window_updates_without_new_ingress_or_timer_expiry() {
+    for (capacity_bytes, available_bytes) in [
+        (TCP_RX_BUF_LEN, 312),
+        (TCP_RX_BUF_LEN, 1296),
+        (TCP_RX_BUF_LEN - 1, 0),
+        (TCP_RX_BUF_LEN, 1),
+    ] {
+        let current = Instant::from_millis(1);
+        let address = Ipv4Address::new(127, 0, 0, 1);
+        let mut device = Loopback::new(Medium::Ip);
+        let mut iface = Interface::new(Config::new(HardwareAddress::Ip), &mut device, current);
+        iface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(address.into(), 8)).unwrap());
+        let mut sockets = crate::stack::socket_set::SocketSetState::new();
+        let receiver = sockets.add(smol::Socket::new(
+            smol::SocketBuffer::new(vec![0; capacity_bytes]),
+            smol::SocketBuffer::new(vec![0; TCP_TX_BUF_LEN]),
+        ));
+        sockets
+            .get_mut::<smol::Socket>(receiver)
+            .listen(40000)
+            .unwrap();
+        sockets
+            .get_mut::<smol::Socket>(receiver)
+            .set_ack_delay(None);
+        let sender = sockets.add(new_tcp_socket());
+        sockets
+            .get_mut::<smol::Socket>(sender)
+            .connect(iface.context(), (address, 40000), (address, 40001))
+            .unwrap();
+        poll_tcp_until_idle(&mut iface, &mut device, &mut sockets, current);
+        let queued_bytes = capacity_bytes - available_bytes;
+        assert_eq!(
+            sockets
+                .get_mut::<smol::Socket>(sender)
+                .send_slice(&vec![0x5a; queued_bytes])
+                .unwrap(),
+            queued_bytes
+        );
+        poll_tcp_until_idle(&mut iface, &mut device, &mut sockets, current);
+        assert_eq!(
+            sockets.get::<smol::Socket>(receiver).recv_queue(),
+            queued_bytes
+        );
 
-#[def_test]
-fn recv_window_poll_stops_after_the_scale_quantum() {
-    assert!(!should_poll_receive_window(64 * 1024, 2, 4096));
-    assert!(!should_poll_receive_window(64 * 1024, 4096, 4096));
-}
+        let mut bytes = [0; 4096];
+        let mut should_poll_rx_window = false;
+        for peek in [true, false] {
+            let mut dst = if peek {
+                &mut bytes[..]
+            } else {
+                &mut bytes[..0]
+            };
+            let received = TcpSocket::recv_from_socket(
+                sockets.get_mut::<smol::Socket>(receiver),
+                &mut dst,
+                peek,
+                &mut should_poll_rx_window,
+            )
+            .unwrap();
+            assert_eq!(received, if peek { bytes.len() } else { 0 });
+            assert!(!should_poll_rx_window);
+            assert_eq!(
+                sockets.get::<smol::Socket>(receiver).recv_queue(),
+                queued_bytes
+            );
+        }
+        assert_eq!(
+            TcpSocket::recv_from_socket(
+                sockets.get_mut::<smol::Socket>(receiver),
+                &mut &mut bytes[..],
+                false,
+                &mut should_poll_rx_window,
+            )
+            .unwrap(),
+            bytes.len()
+        );
+        assert!(
+            should_poll_rx_window,
+            "read must publish receive-window work"
+        );
+        assert_eq!(
+            iface.poll_delay(current, &sockets),
+            Some(Duration::from_millis(0))
+        );
+        poll_tcp_until_idle(&mut iface, &mut device, &mut sockets, current);
 
-#[def_test]
-fn recv_window_poll_covers_unscaled_receive_buffers() {
-    assert!(should_poll_receive_window(64 * 1024 - 1, 0, 1));
-    assert!(!should_poll_receive_window(64 * 1024 - 1, 1, 1));
+        sockets
+            .get_mut::<smol::Socket>(sender)
+            .send_slice(&bytes)
+            .unwrap();
+        poll_tcp_until_idle(&mut iface, &mut device, &mut sockets, current);
+        assert_eq!(
+            sockets.get::<smol::Socket>(receiver).recv_queue(),
+            queued_bytes
+        );
+    }
 }
 
 #[def_test]

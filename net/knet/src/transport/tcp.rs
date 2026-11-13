@@ -327,9 +327,9 @@ impl TcpSocket {
 
     /// Copies queued data from the socket into `dst`, or peeks it when `peek`.
     ///
-    /// Sets `should_poll_rx_window` when a dequeue reopens enough receive
-    /// window to be worth advertising. Returns `Ok(0)` at end of stream and
-    /// `WouldBlock` while no data is queued.
+    /// Sets `should_poll_rx_window` after consuming data so protocol processing
+    /// can decide whether to advertise the enlarged window. Returns `Ok(0)` at
+    /// end of stream and `WouldBlock` while no data is queued.
     fn recv_from_socket(
         socket: &mut smol::Socket<'_>,
         dst: &mut (impl Write + IoBufMut),
@@ -350,8 +350,6 @@ impl TcpSocket {
                     .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
             );
         }
-        let receive_capacity_bytes = socket.recv_capacity();
-        let available_before_bytes = receive_capacity_bytes.saturating_sub(socket.recv_queue());
         let result = socket
             .recv(|buf| {
                 let result = dst.write(buf);
@@ -360,11 +358,9 @@ impl TcpSocket {
             })
             .map_err(|_| k_err_type!(NotConnected, "not connected?"))?;
         if let Ok(received) = result {
-            *should_poll_rx_window = should_poll_receive_window(
-                receive_capacity_bytes,
-                available_before_bytes,
-                received,
-            );
+            // A positive advertised window can still be too small for the peer
+            // to send. Reevaluate it after every read that frees buffer space.
+            *should_poll_rx_window = received > 0;
         }
         result
     }
@@ -869,23 +865,6 @@ impl SocketOps for TcpSocket {
     fn shutdown(&self, how: Shutdown) -> KResult {
         self.shutdown_inner(how, true, true)
     }
-}
-
-fn should_poll_receive_window(
-    receive_capacity_bytes: usize,
-    available_before_bytes: usize,
-    received_bytes: usize,
-) -> bool {
-    // Keep this calculation aligned with smoltcp Socket::new so dependency
-    // upgrades cannot silently narrow the zero-window range covered here.
-    let capacity_bit_len = usize::BITS as usize - receive_capacity_bytes.leading_zeros() as usize;
-    let max_window_scale_shift = capacity_bit_len.saturating_sub(16);
-    let max_window_scale_quantum_bytes = 1usize << max_window_scale_shift;
-
-    // A peer without window scaling needs the first notification after a full
-    // buffer is consumed. A scaled peer can still see a zero window until one
-    // complete scale quantum is free, so each read in that range must poll.
-    received_bytes > 0 && available_before_bytes < max_window_scale_quantum_bytes
 }
 
 impl Pollable for TcpSocket {
