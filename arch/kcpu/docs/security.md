@@ -114,6 +114,8 @@ This module directly touches the following external boundaries:
 
 - **User-mode register state**: after `UserContext::run()` switches to user mode, the user can control
   the contents of all general-purpose registers. The trap handler must correctly handle arbitrary register values.
+- **RISC-V kernel stack slot**: `ExceptionContext.kernel_sp` is outside `GeneralRegisters`, so signal
+  frames neither expose it nor restore it from user-controlled register state.
 - **riscv64 `gp` (percpu base)**: `gp` is a per-CPU invariant and is never restored from the per-task
   trapframe. During a trap, the task may migrate to another hart because the handler blocks; if `gp` were restored from
   a migratable trapframe, the percpu base of another hart would be loaded into this hart,

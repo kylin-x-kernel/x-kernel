@@ -296,6 +296,9 @@ on its first switch-out.
   Each architecture completes exception-table sorting, hardware descriptor table loading and trap vector base setup in this function.
 - **trap handler** (such as `x86_trap_handler`): runs in an interrupts-disabled context
   and must not sleep or block. It is called directly by the assembly entry, with the full trap frame already saved on the stack at call time.
+- **RISC-V trapframe layout**: slot 0 stores the kernel stack pointer used by user-mode
+  entry and return; `GeneralRegisters` contains x1–x31 in architectural order in slots
+  1–31, followed by `sepc` and `sstatus`. Signal frames reuse the register layout after PC.
 - **riscv64 `gp` invariant**: `gp` (x3) is the per-CPU percpu base, set once at boot by the
   `set_current_base` of the `kcpu_slot` architecture layer and constant during an S-mode trap, so it is **not** saved/restored by
   `PUSH_POP_GENERAL_REGS` - it must never be placed in the migratable per-task trapframe.

@@ -44,6 +44,7 @@ impl UserContext {
         sstatus.set_fs(FS::Initial); // set the FPU to initial state
 
         Self(ExceptionContext {
+            kernel_sp: 0,
             regs: GeneralRegisters {
                 a0: arg0,
                 sp: ustack_top.as_usize(),

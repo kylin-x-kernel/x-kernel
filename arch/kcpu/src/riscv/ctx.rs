@@ -14,12 +14,10 @@ use core::arch::naked_asm;
 use memaddr::VirtAddr;
 use riscv::register::sstatus::{self, FS};
 
-/// General registers of RISC-V.
+/// RISC-V general registers x1 through x31 in architectural order.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GeneralRegisters {
-    /// Constant zero register x0.
-    pub zero: usize,
     /// Return address register x1.
     pub ra: usize,
     /// Stack pointer register x2.
@@ -158,6 +156,8 @@ impl FpState {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ExceptionContext {
+    /// Kernel stack pointer saved by `enter_user` for the return from user mode.
+    pub(super) kernel_sp: usize,
     /// All general registers.
     pub regs: GeneralRegisters,
     /// Supervisor Exception Program Counter.
@@ -176,6 +176,7 @@ pub struct ExceptionContext {
 impl Default for ExceptionContext {
     fn default() -> Self {
         Self {
+            kernel_sp: 0,
             regs: GeneralRegisters::default(),
             sepc: 0,
             sstatus: sstatus::Sstatus::from_bits(0),
