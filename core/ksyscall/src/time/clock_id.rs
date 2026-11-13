@@ -34,6 +34,41 @@ pub(super) fn parse_clock_id(raw: __kernel_clockid_t) -> Option<ClockId> {
     }
 }
 
+/// Decodes the target PID of a Linux process scheduler clock.
+fn process_sched_clock_target(raw: i32) -> Option<u32> {
+    const CPUCLOCK_SCHED: i32 = 2;
+    const CPUCLOCK_KIND_MASK: i32 = 0b111;
+    if raw >= 0 || raw & CPUCLOCK_KIND_MASK != CPUCLOCK_SCHED {
+        return None;
+    }
+    u32::try_from(!(raw >> 3)).ok()
+}
+
+/// Resolves the supported process scheduler clock only when it names this
+/// process: zero means current, while a nonzero PID is namespace-relative.
+pub(super) fn is_current_process_sched_clock(raw: i32, process_pid: u32) -> bool {
+    process_sched_clock_target(raw).is_some_and(|pid| pid == 0 || pid == process_pid)
+}
+
+/// Resolves the clocks supported by clock_gettime/getres for the caller.
+pub(super) fn parse_query_clock_id(raw: __kernel_clockid_t, is_gettime: bool) -> Option<ClockId> {
+    if let Some(clock) = parse_clock_id(raw) {
+        return Some(clock);
+    }
+    let target_pid = process_sched_clock_target(raw)?;
+    if target_pid == 0 {
+        return Some(ClockId::ProcessCpu);
+    }
+    let thread = kprocess::current_user_thread();
+    (target_pid == thread.process().visible_pid()
+        || (is_gettime
+            && thread
+                .task_number()
+                .nr_in(&thread.process().active_pid_namespace())
+                == Some(target_pid)))
+    .then_some(ClockId::ProcessCpu)
+}
+
 /// Restrict a semantic clock to the set supported by timerfd.
 pub(super) fn timerfd_clock(clock: ClockId) -> Option<TimerFdClock> {
     match clock {

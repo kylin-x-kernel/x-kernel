@@ -11,7 +11,7 @@ use kprocess::{AsThread, Pid};
 use ksignal::Signo;
 use ktimer::{PosixTimerCreateNotify, PosixTimerSigValue, TimerSigValue};
 use linux_raw_sys::general::{
-    SIGEV_NONE, SIGEV_SIGNAL, SIGEV_THREAD_ID, TIMER_ABSTIME, itimerspec,
+    CLOCK_PROCESS_CPUTIME_ID, SIGEV_NONE, SIGEV_SIGNAL, SIGEV_THREAD_ID, TIMER_ABSTIME, itimerspec,
 };
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_sigevent};
 
@@ -86,6 +86,12 @@ pub(crate) fn sys_timer_create(
 ) -> KResult<isize> {
     let notify = parse_sigevent(sevp)?;
     let process = kprocess::current_user_process();
+    let clockid = if super::clock_id::is_current_process_sched_clock(clockid, process.visible_pid())
+    {
+        CLOCK_PROCESS_CPUTIME_ID as i32
+    } else {
+        clockid
+    };
     let timer_id = process.create_posix_timer(clockid, notify)?;
     if let Err(error) = timerid.write_vm(timer_id) {
         // A peer may already have deleted this timer, or runtime teardown may

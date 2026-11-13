@@ -10,14 +10,14 @@ use ktime_types::{ClockId, SystemTime, TimeSpan};
 use linux_raw_sys::general::{__kernel_clockid_t, timespec, timeval, timezone};
 use posix_types::{SystemTimeLike, TimeSpanLike, UserConstPtr, UserPtr};
 
-use super::clock_id::parse_clock_id;
+use super::clock_id::{parse_clock_id, parse_query_clock_id};
 
 /// Returns the current time from the specified clock.
 pub(crate) fn sys_clock_gettime(
     clock_id: __kernel_clockid_t,
     ts: UserPtr<timespec>,
 ) -> KResult<isize> {
-    let clock = parse_clock_id(clock_id).ok_or_else(|| {
+    let clock = parse_query_clock_id(clock_id, true).ok_or_else(|| {
         warn!("Called sys_clock_gettime for unsupported clock {clock_id}");
         KError::InvalidInput
     })?;
@@ -105,7 +105,7 @@ pub(crate) fn sys_clock_getres(
     clock_id: __kernel_clockid_t,
     res: UserPtr<timespec>,
 ) -> KResult<isize> {
-    let _clock = parse_clock_id(clock_id).ok_or_else(|| {
+    let _clock = parse_query_clock_id(clock_id, false).ok_or_else(|| {
         warn!("Called sys_clock_getres for unsupported clock {clock_id}");
         KError::InvalidInput
     })?;
