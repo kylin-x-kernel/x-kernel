@@ -19,10 +19,10 @@ use alloc::sync::{Arc, Weak};
 use core::cell::UnsafeCell;
 
 use block::completion::{BlockCompletionOperations, BlockSignals, BlockWaiter};
+use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use kirq::softirq::{self, SoftirqVec};
 use kspin::{NoPreempt, SpinNoIrq, static_lock};
 use ksync::Mutex;
-use linked_list_r4l::{GetLinks, Links, List};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProcessingPhase {
@@ -47,7 +47,7 @@ struct ProcessingState {
 /// stop processing: activation must explicitly stop before destroying the device.
 pub(crate) struct BlockIoReclaimer {
     // Intrusive membership avoids allocating a node in the IRQ path.
-    pending_link: Links<Self>,
+    pending_link: LinkedListAtomicLink,
     // Activation owns the device; an escaped IRQ handle must not keep it alive.
     device: Weak<dyn BlockCompletionOperations>,
     // The pending-list lock also protects this phase and the closing-task signal.
@@ -62,22 +62,20 @@ pub(crate) struct BlockIoReclaimer {
 // Send + Sync and no driver callback executes under this lock.
 unsafe impl Sync for BlockIoReclaimer {}
 
-impl GetLinks for BlockIoReclaimer {
-    type EntryType = Self;
+intrusive_adapter!(PendingAdapter = Arc<BlockIoReclaimer>: BlockIoReclaimer {
+    pending_link => LinkedListAtomicLink
+});
 
-    fn get_links(data: &Self) -> &Links<Self> {
-        &data.pending_link
-    }
-}
+type PendingList = LinkedList<PendingAdapter>;
 
 static_lock! {
-    static PENDING_DEVICES: SpinNoIrq<[List<Arc<BlockIoReclaimer>>; kbuild_config::NR_CPUS]> =
-        SpinNoIrq::new([const { List::new() }; kbuild_config::NR_CPUS]);
+    static PENDING_DEVICES: SpinNoIrq<[PendingList; kbuild_config::NR_CPUS]> =
+        SpinNoIrq::new([const { LinkedList::new(PendingAdapter::NEW) }; kbuild_config::NR_CPUS]);
 }
 
 fn update_state<R>(
     reclaimer: &BlockIoReclaimer,
-    update: impl FnOnce(&mut ProcessingState, &mut [List<Arc<BlockIoReclaimer>>]) -> R,
+    update: impl FnOnce(&mut ProcessingState, &mut [PendingList]) -> R,
 ) -> R {
     let mut pending = PENDING_DEVICES.lock();
     // SAFETY: this is the actual global lock shared with batch consumption.
@@ -99,7 +97,7 @@ impl BlockIoReclaimer {
     /// Creates stable per-device state in task context before IRQ publication.
     pub(crate) fn new(device: Weak<dyn BlockCompletionOperations>) -> Arc<Self> {
         Arc::new(Self {
-            pending_link: Links::new(),
+            pending_link: LinkedListAtomicLink::new(),
             device,
             state: UnsafeCell::new(ProcessingState {
                 phase: ProcessingPhase::Idle,
@@ -128,6 +126,7 @@ impl BlockIoReclaimer {
             }
             match state.phase {
                 ProcessingPhase::Idle => {
+                    // Idle and RunningAgain entries are unlinked; relinking panics.
                     state.phase = ProcessingPhase::Queued(cpu);
                     pending[cpu].push_back(self.clone());
                     true
@@ -180,7 +179,7 @@ fn process_pending_devices() {
     let cpu = khal::percpu::this_cpu_id().as_usize();
     let mut batch = {
         let mut pending = PENDING_DEVICES.lock();
-        core::mem::take(&mut pending[cpu])
+        pending[cpu].take()
     };
     loop {
         let (reclaimer, should_run) = {

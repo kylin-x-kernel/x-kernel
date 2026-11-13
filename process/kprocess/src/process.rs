@@ -22,16 +22,16 @@ pub use exit::{
     ProcessExitPublication, WaitChildKind, WaitChildScan, WaitChildSelector, WaitReapMode,
     WaitedChild,
 };
+use intrusive_collections::LinkedList;
 use kidentity::{PidHandle, PidNamespace};
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ksync::{Mutex, MutexGuard};
 use lazyinit::LazyInit;
-use linked_list_r4l::List;
 pub use runtime_access::{LiveAddressSpace, ProcessExecUpdate};
 pub(crate) use thread_membership::ThreadMemberSlot;
 use thread_membership::{ThreadGroupExitState, ThreadMembership};
-use tree::{ChildRelationSlot, GroupMembership, ParentRelation};
+use tree::{ChildSlotAdapter, GroupMembership, ParentRelation};
 
 use crate::{
     AsThread, Pid, ProcessGroup, ProcessRuntime, Session, lifecycle::ProcessLifecycleState,
@@ -80,7 +80,7 @@ pub struct Process {
     child_subreaper: AtomicBool,
     /// Current children linked under this process. Mutate only under
     /// `process_domain` write lock.
-    children: SpinNoIrq<List<Arc<ChildRelationSlot>>>,
+    children: SpinNoIrq<LinkedList<ChildSlotAdapter>>,
     /// Wait parent contract and preallocated child-list relation slots. Mutate
     /// only under `process_domain` write lock.
     parent_relation: ParentRelation,
@@ -424,7 +424,7 @@ impl Process {
             cpu_timers_armed: AtomicBool::new(false),
             lifecycle: ProcessLifecycleState::new(),
             child_subreaper: AtomicBool::new(false),
-            children: SpinNoIrq::new(List::new()),
+            children: SpinNoIrq::new(LinkedList::new(ChildSlotAdapter::NEW)),
             parent_relation,
             visible_parent: AtomicU32::new(visible_parent),
             group_membership,

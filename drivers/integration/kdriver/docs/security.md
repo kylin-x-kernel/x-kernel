@@ -205,8 +205,9 @@ contain inert device state, not a transport whose final Drop could occur in IRQ.
 the single PENDING_DEVICES lock, rather than adding independently ordered slot locks.
 Every state access, list push and list pop holds that lock. Only the owning,
 pinned CPU consumes its finite detached batch. Queued also means detached, so
-remote requests cannot link the same device completion twice. List<Arc<BlockIoReclaimer>> retains
-the allocation; the module never manufactures raw ownership pointers.
+remote requests cannot link the same device completion twice. LinkedList<PendingAdapter>
+(an Arc adapter) retains the allocation; the module never manufactures raw ownership pointers.
+Double-linking a reclaimer panics; the phase state machine makes that unreachable.
 
 The unsafe Sync implementation relies on this lock discipline, stable Arc
 ownership, and Send+Sync devices. The fields remain private to block_completion_dispatch.

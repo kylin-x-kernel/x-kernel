@@ -41,7 +41,7 @@ ktask.workspace = true
 ktimer.workspace = true
 linux_sysno.workspace = true
 lazyinit.workspace = true
-linked_list_r4l.workspace = true
+intrusive-collections.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
 tee_task_iface = { workspace = true, optional = true }

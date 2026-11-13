@@ -1633,8 +1633,9 @@ On successful cleanup it first removes freeze requests and thaws old tasks,
 then detaches the deferred activation list and reopens admission. Deferred tasks
 re-enter normal admission before enqueue, so a subsequent freeze can retain them
 again. No allocation or callback occurs while modifying list links; registration
-and list ownership use the project intrusive list. The pending strong owner is
-released on activation, including when callers dropped every external reference.
+and list ownership use an `Arc` adapter over `intrusive_collections::LinkedList`.
+The pending strong owner is released on activation, including when callers
+dropped every external reference.
 
 This corresponds to the task preparation responsibilities of Linux v6.12
 `kernel/power/process.c` (`freeze_processes`, `freeze_kernel_threads`, thaw),

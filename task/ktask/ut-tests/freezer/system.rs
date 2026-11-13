@@ -296,3 +296,39 @@ fn system_freezer_rejects_invalid_context() {
         ));
     }
 }
+
+#[def_test(serial)]
+fn registry_links_once_and_retires_only_its_members() {
+    let _serial = super::super::tests::SERIAL.lock();
+    let task = prepared("pm-registry-contract", || {});
+    let mut registry = Registry::new();
+    let active = Arc::new(Registration::new(&task));
+    let never_admitted = Arc::new(Registration::new(&task));
+
+    // A non-member is never passed to the list's member-only removal.
+    assert!(registry.retire(&never_admitted).is_none());
+    assert!(!never_admitted.links.is_linked());
+
+    // Repeated admission must not relink, which the list rejects by panicking.
+    assert!(registry.admit(&active, &task));
+    assert!(!registry.admit(&active, &task));
+    assert_eq!(registry.active.iter().count(), 1);
+
+    assert!(registry.retire(&active).is_some());
+    assert!(!active.links.is_linked());
+    assert!(registry.active.is_empty());
+    assert!(registry.retire(&active).is_none());
+    assert!(!registry.admit(&active, &task));
+
+    registry.is_closed = true;
+    let deferred = Arc::new(Registration::new(&task));
+    assert!(!registry.admit(&deferred, &task));
+    // A deferred registration is on the other list; retire must leave it there.
+    assert!(registry.retire(&deferred).is_none());
+    assert!(deferred.links.is_linked());
+    assert!(registry.deferred.pop_front().is_some());
+    assert!(registry.deferred.is_empty());
+
+    crate::activate_task(&task);
+    assert_eq!(task.try_join().unwrap(), 0);
+}

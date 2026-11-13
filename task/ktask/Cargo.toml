@@ -56,7 +56,7 @@ memaddr = { workspace = true }
 kbuild_config = { workspace = true }
 karch = { workspace = true }
 klazy = { workspace = true }
-linked_list_r4l.workspace = true
+intrusive-collections.workspace = true
 unittest = { workspace = true }
 
 [lints]

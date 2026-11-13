@@ -894,7 +894,10 @@ drop registrations at capacity. System preparation instead owns an unbounded
 intrusive list with a preallocated node per non-idle task. Registration carries
 a weak owner while admitted; permanent exit and destructor fallback unlink it
 under the same registry lock. Its sole unsafe list removal checks the Active
-phase under that lock, establishing that the node belongs to this exact list.
+phase under that lock, establishing that the node belongs to this exact list;
+`cursor_mut_from_ptr` is undefined for a node outside it. Admission links only
+Prepared registrations, which are unlinked, so the list's duplicate-insertion
+panic is unreachable.
 Only this module mutates its links, and removal releases the list reference
 outside the registry guard. There are no new unsafe Send/Sync implementations.
 

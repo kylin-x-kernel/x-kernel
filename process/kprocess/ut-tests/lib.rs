@@ -908,6 +908,74 @@ fn test_reap_after_reparent_removes_child_from_current_parent() {
     parent.free();
 }
 
+fn listed_child_count(parent: &Process, child: &Process) -> usize {
+    parent
+        .children()
+        .iter()
+        .filter(|listed| listed.pid() == child.pid())
+        .count()
+}
+
+#[def_test(serial)]
+fn test_child_removal_ignores_slot_linked_in_another_parent() {
+    let init = ensure_init();
+    let parent = init.fork(320);
+    let other = init.fork(321);
+    let child = parent.fork(322);
+
+    // Removal from the wrong list must be rejected before the member-only
+    // cursor removal, leaving the slot linked under its real parent.
+    assert!(!Process::remove_child_from_parent_for_tests(&other, &child));
+    assert_eq!(listed_child_count(&parent, &child), 1);
+    assert_eq!(child.parent().map(|parent| parent.pid()), Some(parent.pid()));
+
+    child.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert!(wait_reap::try_reap_zombie_process(&child));
+    assert_eq!(listed_child_count(&parent, &child), 0);
+    // A second removal of the now-unlinked slot is a no-op, not a list operation.
+    assert!(!wait_reap::try_reap_zombie_process(&child));
+    assert!(!Process::remove_child_from_parent_for_tests(&parent, &child));
+
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+    other.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    other.free();
+}
+
+#[def_test(serial)]
+fn test_repeated_reparenting_links_each_slot_once() {
+    let init = ensure_init();
+    let outer = init.fork(323);
+    outer.set_child_subreaper(true);
+    let inner = outer.fork(324);
+    inner.set_child_subreaper(true);
+    let parent = inner.fork(325);
+    let child = parent.fork(326);
+
+    // Subreaper adoption reuses the slot just popped from the exiting parent;
+    // init adoption uses the reserved init slot. Neither may be relinked.
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert_eq!(child.parent().map(|parent| parent.pid()), Some(inner.pid()));
+    assert_eq!(listed_child_count(&inner, &child), 1);
+    assert_eq!(listed_child_count(&parent, &child), 0);
+
+    inner.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert_eq!(child.parent().map(|parent| parent.pid()), Some(outer.pid()));
+    assert_eq!(listed_child_count(&outer, &child), 1);
+    assert_eq!(listed_child_count(&inner, &child), 0);
+
+    outer.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert_eq!(child.parent().map(|parent| parent.pid()), Some(init.pid()));
+    assert_eq!(listed_child_count(&init, &child), 1);
+    assert_eq!(listed_child_count(&outer, &child), 0);
+
+    parent.free();
+    inner.free();
+    outer.free();
+    child.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    child.free();
+}
+
 #[def_test(serial)]
 fn test_clone_parent_inherits_callers_exit_signal_contract() {
     let init = ensure_init();

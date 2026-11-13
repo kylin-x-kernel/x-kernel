@@ -198,6 +198,8 @@ The reclaimer holds an intrusive pending_link, Weak device, ProcessingState
 PENDING_DEVICES SpinNoIrq protects the per-CPU lists and all processing state.
 Idle/Queued(cpu)/Running(cpu)/RunningAgain(cpu) are the processing phases. Detachment gives
 the pinned CPU a finite batch; detached nodes remain Queued and cannot relink.
+Only the Idle and RunningAgain transitions to Queued link a reclaimer, and it is
+unlinked then, so the intrusive-collections relink panic is unreachable.
 Callbacks and notifications run outside the global lock. RunningAgain requeues
 only into the next batch. Enqueue and raise stay pinned across daemon wake.
 

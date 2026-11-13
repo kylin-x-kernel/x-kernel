@@ -5,11 +5,11 @@
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
 
+use intrusive_collections::{LinkedListAtomicLink, intrusive_adapter};
 use kerrno::{KError, KResult};
 use kidentity::PidHandle;
 use ksignal::Signo;
 use kspin::SpinNoIrq;
-use linked_list_r4l::{GetLinks, Links};
 
 use super::{INIT_PROC, NO_VISIBLE_PARENT, Process, ProcessExitState};
 use crate::{
@@ -126,7 +126,7 @@ impl ParentRelation {
 pub(super) struct ChildRelationSlot {
     pub(super) pid: Pid,
     child: SpinNoIrq<Option<Arc<Process>>>,
-    links: Links<Self>,
+    links: LinkedListAtomicLink,
 }
 
 impl ChildRelationSlot {
@@ -134,7 +134,7 @@ impl ChildRelationSlot {
         Self {
             pid,
             child: SpinNoIrq::new(None),
-            links: Links::new(),
+            links: LinkedListAtomicLink::new(),
         }
     }
 
@@ -151,13 +151,9 @@ impl ChildRelationSlot {
     }
 }
 
-impl GetLinks for ChildRelationSlot {
-    type EntryType = Self;
-
-    fn get_links(data: &Self::EntryType) -> &Links<Self::EntryType> {
-        &data.links
-    }
-}
+intrusive_adapter!(pub(super) ChildSlotAdapter = Arc<ChildRelationSlot>: ChildRelationSlot {
+    links => LinkedListAtomicLink
+});
 
 pub(super) struct GroupMembership {
     group: SpinNoIrq<Arc<ProcessGroup>>,
@@ -368,12 +364,21 @@ impl Process {
         true
     }
 
+    /// Runs the guarded child removal against an arbitrary parent.
+    #[cfg(unittest)]
+    pub(crate) fn remove_child_from_parent_for_tests(parent: &Process, child: &Process) -> bool {
+        let domain = process_domain::write_lock();
+        Self::remove_child_from_parent_locked(&domain, parent, child)
+    }
+
     fn remove_child_slot_from_parent_locked(
         _domain: &process_domain::ProcessDomainWriteGuard<'_>,
         parent: &Process,
         slot: &Arc<ChildRelationSlot>,
     ) -> bool {
         let mut children = parent.children.lock();
+        // A linked slot may belong to another parent's list; only this scan
+        // establishes the exact-list membership that cursor removal requires.
         if !children
             .iter()
             .any(|listed| core::ptr::eq(listed, slot.as_ref()))
@@ -383,7 +388,9 @@ impl Process {
         // SAFETY: `process_domain` serializes all child-list mutations. The
         // membership check above found `slot` linked in this exact parent's list,
         // and no concurrent mutation can unlink it before this removal.
-        unsafe { children.remove(slot) }.is_some()
+        unsafe { children.cursor_mut_from_ptr(Arc::as_ptr(slot)) }
+            .remove()
+            .is_some()
     }
 
     pub(crate) fn discard_unpublished_locked(
@@ -431,6 +438,9 @@ impl Process {
             .number_in(self.leader_task_number.active_ns())
             .unwrap_or(NO_VISIBLE_PARENT);
         self.visible_parent.store(visible_parent, Ordering::Release);
+        // The selected slot is unlinked: fork uses a fresh slot; reparent pops
+        // the current slot first, or selects the init slot, which is linked only
+        // while init is the parent and init never reparents. Relinking would panic.
         parent.children.lock().push_back(slot);
     }
 }

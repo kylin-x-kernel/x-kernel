@@ -9,7 +9,7 @@ use core::ptr::NonNull;
 
 use block::{BioOperation, completion::BlockCompletionOperations};
 use driver_os_api::{IrqEvent, IrqHandler};
-use linked_list_r4l::{GetLinks, Links, List};
+use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use virtio_drivers::{
     Error,
     device::blk::{BlkReq, BlkResp, MAX_DATA_SEGMENTS},
@@ -18,7 +18,7 @@ use virtio_drivers::{
 use super::*;
 
 struct VirtioRequest {
-    links: Links<Self>,
+    links: LinkedListAtomicLink,
     header: BlkReq,
     response: BlkResp,
     request: block::Request,
@@ -27,13 +27,11 @@ struct VirtioRequest {
     result: DriverResult,
 }
 
-impl GetLinks for VirtioRequest {
-    type EntryType = Self;
+intrusive_adapter!(RequestAdapter = Box<VirtioRequest>: VirtioRequest {
+    links => LinkedListAtomicLink
+});
 
-    fn get_links(data: &Self) -> &Links<Self> {
-        &data.links
-    }
-}
+type RequestList = LinkedList<RequestAdapter>;
 
 impl VirtioRequest {
     fn new(mut request: block::Request, max_segments: usize) -> Box<Self> {
@@ -43,7 +41,7 @@ impl VirtioRequest {
                 .vectors_mut()
                 .any(|vector| !vector.bytes().len().is_multiple_of(SECTOR_SIZE));
         Box::new(Self {
-            links: Links::new(),
+            links: LinkedListAtomicLink::new(),
             header: BlkReq::default(),
             response: BlkResp::default(),
             request,
@@ -248,7 +246,7 @@ impl VirtioRequest {
 
 /// Owns queued and submitted requests, including their protocol allocations.
 pub(super) struct BlockRequests {
-    pending: List<Box<VirtioRequest>>,
+    pending: RequestList,
     // Each non-null token owns one Box transferred before DMA publication.
     in_flight: Box<[Option<NonNull<VirtioRequest>>]>,
 }
@@ -256,7 +254,7 @@ pub(super) struct BlockRequests {
 impl BlockRequests {
     pub(super) fn new(descriptors: u16) -> Self {
         Self {
-            pending: List::new(),
+            pending: RequestList::new(RequestAdapter::NEW),
             in_flight: (0..descriptors).map(|_| None).collect(),
         }
     }
@@ -268,7 +266,7 @@ impl BlockRequests {
     fn dispatch<H: Hal, T: Transport>(
         &mut self,
         device: &mut InnerDev<H, T>,
-        completed: &mut List<Box<VirtioRequest>>,
+        completed: &mut RequestList,
     ) {
         while let Some(node) = self.pending.pop_front() {
             // End Box's exclusive ownership before exposing protocol addresses;
@@ -306,7 +304,7 @@ impl BlockRequests {
     fn reclaim<H: Hal, T: Transport>(
         &mut self,
         device: &mut InnerDev<H, T>,
-        completed: &mut List<Box<VirtioRequest>>,
+        completed: &mut RequestList,
     ) {
         // No replenishment until this finite used-ring batch has been reclaimed.
         while let Some(token) = device.peek_used() {
@@ -348,7 +346,7 @@ impl BlockRequests {
 }
 
 impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
-    fn finish_requests(&self, mut completed: List<Box<VirtioRequest>>) {
+    fn finish_requests(&self, mut completed: RequestList) {
         while let Some(node) = completed.pop_front() {
             node.finish();
             let notification = {
@@ -379,7 +377,7 @@ impl<H: Hal, T: Transport> block::BlkMqOperations for VirtIoBlkDev<H, T> {
             device.max_segments()
         };
         let node = VirtioRequest::new(request, max_segments);
-        let mut completed = List::new();
+        let mut completed = RequestList::new(RequestAdapter::NEW);
         {
             let mut state = self.state.lock();
             if !state.is_accepting {
@@ -429,7 +427,7 @@ impl<H: Hal, T: Transport> IrqHandler for VirtIoBlkDev<H, T> {
 
 impl<H: Hal, T: Transport> BlockCompletionOperations for VirtIoBlkDev<H, T> {
     fn process_completed_requests(&self) {
-        let mut completed = List::new();
+        let mut completed = RequestList::new(RequestAdapter::NEW);
         {
             let mut state = self.state.lock();
             let BlockState {

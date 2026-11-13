@@ -123,7 +123,7 @@ Before considering a code change aligned with this skill, verify:
 - container choices match their access pattern; queues needing middle
   removal, stable element addresses, or IRQ-safe enqueue are not built
   on growable `Vec` bookkeeping, and linked-list needs use the
-  project-standard intrusive `linked_list_r4l`;
+  project-standard intrusive `intrusive-collections`;
 - the patch does not introduce obvious hot-path regressions.
 
 ## Canonical Human References

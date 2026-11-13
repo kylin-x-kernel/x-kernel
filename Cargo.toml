@@ -176,7 +176,6 @@ ktask = { path = "task/ktask" }
 ktask-types = { path = "task/ktask-types" }
 ktimer_core = { path = "task/ktimer-core", package = "ktimer-core" }
 ksched = { path = "task/ksched" }
-linked_list_r4l = "0.3"
 intrusive-collections = { version = "=0.10.2", default-features = false, features = ["alloc", "nightly"] }
 
 # Internal: process management

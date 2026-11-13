@@ -7,9 +7,9 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::marker::PhantomData;
 
+use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use kspin::{SpinNoIrq, static_lock};
 use ktime_types::TimeSpan;
-use linked_list_r4l::{GetLinks, Links, List};
 
 use super::{FreezeCancellation, FreezeError, FrozenTasks, freeze_tasks};
 use crate::{KtaskRef, TaskInner, WeakKtaskRef};
@@ -23,7 +23,7 @@ enum Publication {
 
 /// Preallocated before scheduler publication; links belong only to REGISTRY.
 pub(crate) struct Registration {
-    links: Links<Self>,
+    links: LinkedListAtomicLink,
     task: WeakKtaskRef,
     publication: SpinNoIrq<Publication>,
 }
@@ -31,38 +31,35 @@ pub(crate) struct Registration {
 impl Registration {
     pub(crate) fn new(task: &KtaskRef) -> Self {
         Self {
-            links: Links::new(),
+            links: LinkedListAtomicLink::new(),
             task: KtaskRef::downgrade(task),
             publication: SpinNoIrq::new(Publication::Prepared),
         }
     }
 }
 
-impl GetLinks for Registration {
-    type EntryType = Self;
-
-    fn get_links(data: &Self) -> &Links<Self> {
-        &data.links
-    }
-}
+intrusive_adapter!(RegistrationAdapter = Arc<Registration>: Registration {
+    links => LinkedListAtomicLink
+});
 
 struct Registry {
-    active: List<Arc<Registration>>,
-    deferred: List<Arc<Registration>>,
+    active: LinkedList<RegistrationAdapter>,
+    deferred: LinkedList<RegistrationAdapter>,
     is_closed: bool,
 }
 
 impl Registry {
     const fn new() -> Self {
         Self {
-            active: List::new(),
-            deferred: List::new(),
+            active: LinkedList::new(RegistrationAdapter::NEW),
+            deferred: LinkedList::new(RegistrationAdapter::NEW),
             is_closed: false,
         }
     }
 
     fn admit(&mut self, registration: &Arc<Registration>, task: &KtaskRef) -> bool {
         let mut publication = registration.publication.lock();
+        // Only Prepared registrations are unlinked; relinking would panic.
         if !matches!(*publication, Publication::Prepared) {
             return false;
         }
@@ -80,9 +77,11 @@ impl Registry {
     fn retire(&mut self, registration: &Arc<Registration>) -> Option<Arc<Registration>> {
         let mut publication = registration.publication.lock();
         let removed = if matches!(*publication, Publication::Active) {
+            debug_assert!(registration.links.is_linked());
             // SAFETY: this node is linked only by admit, to this registry's
-            // active list while Active. The registry lock covers state and links.
-            unsafe { self.active.remove(registration) }
+            // active list while Active; Active is left only here, after removal.
+            // The registry lock covers state and links, so it is a member now.
+            unsafe { self.active.cursor_mut_from_ptr(Arc::as_ptr(registration)) }.remove()
         } else {
             None
         };
@@ -149,7 +148,7 @@ impl Drop for PublicationGate {
         let mut deferred = {
             let mut registry = REGISTRY.lock();
             registry.is_closed = false;
-            core::mem::take(&mut registry.deferred)
+            registry.deferred.take()
         };
         while let Some(registration) = deferred.pop_front() {
             let publication = {

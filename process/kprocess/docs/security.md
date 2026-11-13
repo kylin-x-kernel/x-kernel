@@ -140,12 +140,17 @@ the vtables preserve that lifetime and never reclaim the pointed-to storage.
 These test-only callbacks remain outside production builds.
 
 The intrusive-list unsafe operation is in `src/process/tree.rs`,
-`Process::remove_child_slot_from_parent_locked`: `children.remove(slot)` operates
-on an intrusive list. Its SAFETY comment requires the process-domain lock to
-serialize every child-list mutation, a membership check proving this exact slot
-is in this exact parent's list, and absence of concurrent unlink between check
-and removal. The write-guard parameter plus pointer-identity search provide the
-local guarded path; `parent.children` is also locked during removal.
+`Process::remove_child_slot_from_parent_locked`: `cursor_mut_from_ptr(slot)`
+on the parent's `intrusive_collections::LinkedList` is undefined unless the slot
+is linked in that exact list. Its SAFETY comment requires the process-domain
+lock to serialize every child-list mutation, a membership check proving this
+exact slot is in this exact parent's list, and absence of concurrent unlink
+between check and removal. The write-guard parameter plus pointer-identity
+search provide the local guarded path; `parent.children` is also locked during
+removal. `is_linked` alone is not sufficient: it cannot tell which parent's list
+holds the slot. Linking an already linked slot panics; attachment only links a
+fresh slot, the current slot just popped by reparenting, or the init slot,
+which is linked only while init is the parent.
 
 `src/process_runtime/runtime_state.rs::replace_current_address_space` is an
 unsafe CPU-state handoff. Its caller guarantees a fresh user-empty MM preserving
@@ -297,7 +302,7 @@ the runtime stays pinned through this unlocked cleanup as well.
 |---|---|---|---|---|
 | T-01 | PID/TID reuse causes wrong-task removal or signal targeting | High | Old exit/rollback races a new numeric ID binding | Stable slots and Arc identity checks gate retirement/deletion; Reserved slots are not deleted as retired. Syscall target authorization remains external. |
 | T-02 | Double reap or inconsistent parent relation | Medium | Multiple waiters, reparent and exit race | Domain write transaction scans, claims Zombie, detaches and retires identity once; callers rescan after failed claim. |
-| T-03 | Intrusive-list removal corrupts memory | High | A foreign or concurrently unlinked slot is removed | Guard token, parent list lock and exact membership check enforce the documented unsafe preconditions. |
+| T-03 | Intrusive-list removal corrupts memory | High | A foreign or concurrently unlinked slot is removed; duplicate linking panics | Guard token, parent list lock and exact membership check enforce the documented unsafe preconditions; attachment links only unlinked slots. |
 | T-04 | Runtime references retain resources through zombie lifetime | Medium | Parent observes completion before task files and runtime fs/ns/mm detach | Lifecycle caller must detach owners first; weak runtime identity avoids owning the runtime. Existing live capabilities can deliberately prolong active-mm lifetime. |
 | T-05 | Credential confusion permits cross-task inspection | High | Caller/target credentials differ or subjective override exists | Ptrace checks real credentials and commit rejects override, with effective `CAP_SYS_PTRACE` as the privilege override; the absent full dumpability model remains a residual limitation. |
 | T-06 | Half-published fork becomes runnable | Medium | Parent writeback or cgroup migration fails | Staged publication and commit-before-activation; Drop rolls back. Already-exited/unusual rollback paths retain conservative state rather than deleting another identity. |
