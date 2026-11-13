@@ -50,7 +50,11 @@ pub use active_exception_context::{
 
 mod cpuinfo;
 mod userspace_common;
-pub use cpuinfo::cpu_info;
+#[cfg(target_arch = "aarch64")]
+pub(crate) use cpuinfo::intersect_hwcap;
+#[cfg(target_arch = "aarch64")]
+pub use cpuinfo::system_hwcap;
+pub use cpuinfo::{cpu_info, current_cpu_info, for_each_cpu_info};
 
 unittest::path_mod_test!(tests_current_task, "../ut-tests/lib.rs");
 

@@ -136,6 +136,63 @@ fn symlink_targets_are_relative_to_the_link_parent() {
 }
 
 #[def_test]
+fn platform_devices_expose_a_modalias_uevent() {
+    // An input node, not a DRM one: class indices are allocated per kind, and a
+    // DRM node here would take `card0`, making the DRM test's node `card1` and
+    // failing its `card0-Virtual-1` assertion depending on run order. The
+    // platform-uevent projection is the same for every kind.
+    let node = kdevice::register_device_node(
+        kdevice::DeviceId::new(9003),
+        kdevice::DeviceNodeClass::Input(kdevice::InputDeviceNodeMetadata::new(
+            String::from("test-input"),
+            String::from("test"),
+            String::from("test"),
+            kdevice::InputDeviceNodeId {
+                bus_type: 0x19,
+                vendor: 1,
+                product: 2,
+                version: 3,
+            },
+            alloc::vec![],
+            BTreeMap::new(),
+        )),
+        String::from("virtio-input-mmio"),
+        String::from("test"),
+        kdevice::DeviceLocation::Mmio {
+            base: 0xa003e00,
+            size: 0x1000,
+        },
+        None,
+    )
+    .expect("an MMIO device node must register");
+    let projected = Arc::new(ProjectedDevice::new(node.clone()));
+    let mut nodes = BTreeMap::new();
+    nodes.insert(node.core_id(), projected);
+    let tree = build_tree(&nodes, &[]);
+
+    // libdrm's `drmParseOFBusInfo` and `drmParseOFDeviceInfo` read
+    // `OF_FULLNAME`/`OF_COMPATIBLE_N` first and fall back to `MODALIAS` on the
+    // device directory's `uevent`. Without either attribute `drmGetDevices2`
+    // drops the platform node and clients report "no drm device found".
+    let path = "devices/platform/a003e00.mmio/uevent";
+    let Some(TreeEntry::RawUevent { contents, .. }) = tree.get(path) else {
+        panic!("a platform device must expose a device-directory uevent");
+    };
+    let text = core::str::from_utf8(contents).expect("uevent is text");
+    assert!(
+        text.contains("MODALIAS=platform:a003e00.mmio\n"),
+        "the uevent must carry a platform MODALIAS, got {text:?}"
+    );
+    assert!(
+        text.contains("DRIVER=test\n"),
+        "the uevent must name the bound driver, got {text:?}"
+    );
+
+    // Release the node so a later test's `build_tree` does not see it.
+    kdevice::unregister_device_node(node.core_id()).expect("test node unregisters");
+}
+
+#[def_test]
 fn drm_nodes_project_a_render_minor() {
     let node = kdevice::register_device_node(
         kdevice::DeviceId::new(9002),

@@ -112,11 +112,18 @@ struct DmaBufFileOps;
 impl FileOperations for DmaBufFileOps {
     fn llseek(&self, file: &VfsFile, offset: i64, whence: i32) -> VfsResult<u64> {
         let state = state_of(file).map_err(crate::model::error::DrmError::to_vfs)?;
-        // `dma_buf_llseek`: only `SEEK_END` at offset zero names the size.
-        if whence == SEEK_END && offset == 0 {
-            return Ok(state.buf.size);
+        // `dma_buf_llseek` supports discovering the end of the buffer and also
+        // accepts `SEEK_SET` so the idiomatic SEEK_END(0), SEEK_CUR(0) pattern
+        // works; any other whence, or a non-zero offset, is `EINVAL`.
+        let base = match whence {
+            SEEK_END => state.buf.size,
+            SEEK_SET => 0,
+            _ => return Err(VfsError::InvalidInput),
+        };
+        if offset != 0 {
+            return Err(VfsError::InvalidInput);
         }
-        Err(VfsError::InvalidInput)
+        Ok(base)
     }
 
     fn ioctl(&self, file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
@@ -183,7 +190,11 @@ pub(crate) fn new_dma_buf_file(buf: &Arc<DmaBuf>, cred: &Arc<Cred>) -> VfsResult
         buf.name(),
         Arc::new(DmaBufFileOps),
         state,
-        FMode::READ | FMode::WRITE,
+        // `dma_buf_getfile` hands out a regular file, so `lseek` works: Mesa
+        // sizes an imported buffer with `lseek(SEEK_END)` before mapping it,
+        // and `VfsFile::llseek` refuses the syscall with ESPIPE when the open
+        // mode lacks the flag, before this file's `llseek` op is ever reached.
+        FMode::READ | FMode::WRITE | FMode::LSEEK,
         OpenFlags::READ_WRITE,
         cred.clone(),
     )?;
@@ -210,5 +221,6 @@ pub(crate) fn exported_object(file: &VfsFile) -> Option<Arc<dyn display::DmaBufO
     display::find(file)
 }
 
-/// `SEEK_END`, the only `whence` a dma-buf answers.
+/// `SEEK_SET` / `SEEK_END`, the two `whence` values a dma-buf answers.
+const SEEK_SET: i32 = 0;
 const SEEK_END: i32 = 2;

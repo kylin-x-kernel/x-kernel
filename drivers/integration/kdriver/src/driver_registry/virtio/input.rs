@@ -11,7 +11,7 @@ use driver_os_api::IrqResource;
 use kdevice::DeviceObject;
 use virtio::Transport;
 
-use super::glue::VirtIoHalImpl;
+use super::{glue::VirtIoHalImpl, set_pci_intx_disabled};
 use crate::resource::DeviceResourceExt;
 
 pub(super) fn activate_pci<T: Transport + 'static>(
@@ -60,25 +60,6 @@ fn activate<T: Transport + 'static>(
     }
 
     kclass::publish_input(parent, Box::new(input)).map(drop)
-}
-
-fn set_pci_intx_disabled(
-    config: &mut pci::PciConfigAccess,
-    bdf: pci::DeviceFunction,
-    is_disabled: bool,
-) {
-    const INTERRUPT_DISABLE: u16 = 1 << 10;
-    const STATUS_COMMAND_OFFSET: u16 = 0x04;
-
-    let status_command = config.read_word(bdf, STATUS_COMMAND_OFFSET);
-    let command = if is_disabled {
-        status_command as u16 | INTERRUPT_DISABLE
-    } else {
-        status_command as u16 & !INTERRUPT_DISABLE
-    };
-    // Status has write-one-to-clear bits in the same 32-bit word. Only write
-    // the Command halfword so a pending Status bit is not cleared here.
-    config.write_halfword(bdf, STATUS_COMMAND_OFFSET, command);
 }
 
 unittest::path_mod_test!(

@@ -264,6 +264,11 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
         return input::activate_pci(device, transport, irq, config, bdf);
     }
 
+    #[cfg(feature = "virtio-gpu")]
+    if device_kind == DeviceKind::Display {
+        return glue::activate_display_pci(device, transport, irq, config, bdf);
+    }
+
     dispatch_virtio_try_new(device, device_kind, transport, Some(irq))
 }
 
@@ -602,6 +607,10 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
         DeviceKind::Block => block::activate(parent, transport, irq),
         #[cfg(feature = "virtio-gpu")]
         DeviceKind::Display => {
+            // PCI displays take `glue::activate_display_pci`, which also
+            // sequences INTx unmasking after the handler is installed. MMIO
+            // transports have a dedicated interrupt line, so no masking is
+            // needed here.
             use glue::VirtIoGpu;
             let display = kclass::publish_display(parent.clone(), VirtIoGpu::try_new(transport)?)?;
             if let Some(irq) = irq {
@@ -755,6 +764,54 @@ const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[
 #[cfg(feature = "virtio")]
 pub(crate) fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {
     crate::driver_registry::register_factories(registrar, DRIVER_FACTORIES);
+}
+
+/// Masks or unmasks legacy INTx delivery for one PCI function.
+///
+/// A transport that has reached `DRIVER_OK` may assert its level-triggered
+/// line at any time. Activation that installs the interrupt owner later masks
+/// INTx first and unmasks it only once the action is registered, so a shared
+/// line never sees an unrouted assertion.
+///
+/// Every caller belongs to a device kind that installs its interrupt owner
+/// late, so a configuration that enables `virtio` but none of those kinds —
+/// virtcca enables virtio without display or input — has no user of this.
+///
+/// Only the device kinds that mask INTx at probe and unmask it after
+/// registering their handler call this. A configuration with `virtio` but
+/// neither kind (virtcca enables virtio without display or input) has no
+/// caller, so the definition is expected to be dead there. `unittest` alone is
+/// not a caller either: the input test module that names it is gated on
+/// `virtio-input` as well.
+#[cfg(feature = "virtio")]
+#[cfg_attr(
+    not(any(feature = "virtio-gpu", feature = "virtio-input")),
+    expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: probe-time INTx masking is shared by every \
+                  device kind that installs its interrupt owner late; a virtio configuration may \
+                  enable neither virtio-gpu nor virtio-input (virtcca does), leaving the helper \
+                  unused. It is used as soon as either kind is enabled, which is every \
+                  configuration that has a display or input device"
+    )
+)]
+pub(super) fn set_pci_intx_disabled(
+    config: &mut pci::PciConfigAccess,
+    bdf: pci::DeviceFunction,
+    is_disabled: bool,
+) {
+    const INTERRUPT_DISABLE: u16 = 1 << 10;
+    const STATUS_COMMAND_OFFSET: u16 = 0x04;
+
+    let status_command = config.read_word(bdf, STATUS_COMMAND_OFFSET);
+    let command = if is_disabled {
+        status_command as u16 | INTERRUPT_DISABLE
+    } else {
+        status_command as u16 & !INTERRUPT_DISABLE
+    };
+    // Status has write-one-to-clear bits in the same 32-bit word. Only write
+    // the Command halfword so a pending Status bit is not cleared here.
+    config.write_halfword(bdf, STATUS_COMMAND_OFFSET, command);
 }
 
 #[cfg(all(feature = "virtio", unittest))]

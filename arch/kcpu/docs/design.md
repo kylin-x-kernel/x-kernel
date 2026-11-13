@@ -69,9 +69,16 @@ ID before publication. Add synthetic register/firmware tests and extend procfs's
 per-architecture formatter and spelling table. Keep hardware filtering in kcpu
 and Linux field names in procfs. Update both crates' design/security documents.
 
-These are per-CPU diagnostic snapshots, not Linux's system-wide capability
-intersection. AT_HWCAP/AT_HWCAP2 generation and scheduler placement policy remain
-separate; this change does not synchronize those interfaces with cpuinfo.
+`cpu_info()` returns per-CPU diagnostic snapshots. `CpuInfo::hwcap()` converts
+one CPU's *usable* set into the Linux `AT_HWCAP` encoding, `for_each_cpu_info()`
+iterates the published snapshots as the public building block for system-wide
+queries, and `system_hwcap()` folds that iteration into the intersection exec
+publishes as `AT_HWCAP`. The intersection is required because the scheduler may
+migrate a process to any online core after exec, and a frozen auxiliary-vector
+word cannot be revised; Linux reaches the same answer from its sanitised
+system-wide feature registers. `current_cpu_info()` still reports the calling
+core for callers that need per-core detail. Scheduler placement policy remains
+separate and is not synchronized with cpuinfo.
 
 ## x86_64 extended state
 

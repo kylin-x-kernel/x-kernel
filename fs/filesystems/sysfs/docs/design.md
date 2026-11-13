@@ -111,6 +111,15 @@ and `uevent`. Class and character-number entries are relative links to these
 canonical objects. `relative_symlink` computes links from source and target
 components, so link depth follows the actual paths.
 
+Every device directory also carries its own `uevent`. PCI devices report the
+`PCI_*` identity Linux publishes; platform devices (MMIO, firmware node, static)
+report `DRIVER` and a `MODALIAS=platform:<leaf>` line. The platform attribute is
+not decoration: libdrm's `drmParseOFBusInfo`/`drmParseOFDeviceInfo` read
+`OF_FULLNAME`/`OF_COMPATIBLE_N` first and fall back to `MODALIAS`, returning
+`ENOENT` when neither is present. A missing `uevent` makes `drmGetDevices2` drop
+the node silently, so DRM clients fail with "no drm device found" even though
+`/dev/dri/cardN` exists.
+
 The root also supplies `/sys/fs/cgroup` and `/sys/fs/bpf` mountpoints required
 by boot filesystem setup.
 

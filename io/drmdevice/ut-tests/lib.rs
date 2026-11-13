@@ -376,7 +376,7 @@ fn setcrtc_with_mode_and_no_framebuffer_is_enoent() {
 // ===========================================================================
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::{
     gem::GemObject,
@@ -397,6 +397,13 @@ struct FakeBackend {
     created: AtomicUsize,
     destroyed: AtomicUsize,
     presented: AtomicUsize,
+    /// Last transfer rectangle reported by `present`, packed as
+    /// `((width as u64) << 32) | height as u64`.
+    last_rect: AtomicU64,
+    /// Resource id the last `flush` targeted, or 0 when none ran.
+    last_flush_resource: AtomicU32,
+    /// Resource id the last `present` put on screen, or 0 when none ran.
+    last_present_resource: AtomicU32,
     flushed: AtomicUsize,
     fail_next_present: AtomicBool,
     fail_next_create: AtomicBool,
@@ -473,18 +480,24 @@ impl Backend for FakeBackend {
         Ok(())
     }
 
-    fn present(&self, _id: ResourceId, _rect: Rect, _host_rendered: bool) -> DrmResult<()> {
+    fn present(&self, id: ResourceId, rect: Rect, _host_rendered: bool) -> DrmResult<()> {
+        self.last_present_resource.store(id.raw(), Ordering::Relaxed);
         if self
             .fail_next_present
             .swap(false, core::sync::atomic::Ordering::Relaxed)
         {
             return Err(DrmError::Io);
         }
+        self.last_rect.store(
+            (u64::from(rect.width) << 32) | u64::from(rect.height),
+            Ordering::Relaxed,
+        );
         self.presented.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
-    fn flush(&self, _id: ResourceId, _rect: Rect, _host_rendered: bool) -> DrmResult<()> {
+    fn flush(&self, id: ResourceId, _rect: Rect, _host_rendered: bool) -> DrmResult<()> {
+        self.last_flush_resource.store(id.raw(), Ordering::Relaxed);
         self.flushed.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -2521,4 +2534,118 @@ fn edid_mode_names_its_geometry_and_refresh() {
     assert!(mode.vrefresh == 60, "refresh is {}", mode.vrefresh);
     assert!(mode.kind == DRM_MODE_TYPE_PREFERRED as u32);
     assert!(mode.clock == 65_000);
+}
+
+#[def_test]
+fn a_dma_buf_descriptor_answers_seek_end_with_its_size() {
+    use crate::model::dma_buf::{DmaBuf, DmaBufBacking};
+
+    // Mesa sizes an imported buffer with `lseek(SEEK_END)` before mapping it.
+    // `VfsFile::llseek` rejects the syscall with ESPIPE unless the open mode
+    // carries `FMode::LSEEK`, so the flag has to be part of the descriptor's
+    // open mode and not only of its `FileOperations::llseek` op.
+    let buf = DmaBuf::new(
+        DmaBufBacking {
+            start: 0,
+            length: 3 * crate::prelude::PAGE_SIZE_4K,
+            owner: None,
+        },
+        crate::sync::dma_resv::DmaResv::new(),
+        alloc::string::String::from("test-buffer"),
+        1,
+        1,
+        None,
+    );
+    let file = crate::model::dma_buf_file::new_dma_buf_file(&buf, &kcred::initial_cred())
+        .expect("a dma-buf descriptor must be created");
+    assert!(
+        file.mode().contains(kvfs::FMode::LSEEK),
+        "a dma-buf descriptor must allow seeking"
+    );
+    assert_eq!(
+        file.llseek(0, 2).expect("SEEK_END must answer the size"),
+        (3 * crate::prelude::PAGE_SIZE_4K) as u64
+    );
+    // `dma_buf_llseek` also accepts SEEK_SET(0), which is how a client that
+    // wants the size without moving the offset asks for it.
+    assert_eq!(
+        file.llseek(0, 0).expect("SEEK_SET(0) must answer the base"),
+        0
+    );
+    // Any other whence, or a non-zero offset, is EINVAL as in Linux.
+    assert!(file.llseek(0, 1).is_err(), "SEEK_CUR is not supported");
+    assert!(
+        file.llseek(1, 2).is_err(),
+        "a non-zero offset is rejected"
+    );
+}
+
+/// A present must transfer the framebuffer's geometry, not its object's size.
+///
+/// A framebuffer smaller than its object is displayed through a view resource
+/// created from the framebuffer geometry. Naming the object's rows in the
+/// transfer rectangle would ask the host for rows that view does not contain,
+/// and the display rejects the command (`EIO`) — exactly what glmark2 hit with
+/// a 1280x800 framebuffer inside a 1280x832 dumb object.
+#[def_test]
+fn a_windowed_present_transfers_the_framebuffer_geometry() {
+    let (dev, backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+
+    let object = GemObject::create(&dev, 64, 64).expect("dumb");
+    let geometry = window_spec(&object);
+    let fb = dev
+        .add_framebuffer(&file, object.clone(), geometry, 0)
+        .expect("fb");
+    bind(&dev, fb).expect("present");
+
+    let recorded = backend.last_rect.load(Ordering::Relaxed);
+    assert_eq!(
+        (recorded >> 32) as u32,
+        geometry.width,
+        "the transfer width must be the framebuffer's, not the object's"
+    );
+    assert_eq!(
+        recorded as u32,
+        geometry.height,
+        "the transfer height must be the framebuffer's, not the object's"
+    );
+    assert!(
+        geometry.height < object.height(),
+        "the fixture must exercise a framebuffer smaller than its object"
+    );
+}
+
+/// `DRM_IOCTL_MODE_DIRTYFB` must update the resource the host scans.
+///
+/// A framebuffer smaller than its object is displayed through a view resource
+/// created from the framebuffer geometry. Flushing the object's own resource
+/// would push pixels into memory the display is not reading, so the visible
+/// contents stay stale even though the call succeeded.
+#[def_test]
+fn a_windowed_dirtyfb_flushes_the_view_resource() {
+    let (dev, backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+
+    let object = GemObject::create(&dev, 64, 64).expect("dumb");
+    let fb = dev
+        .add_framebuffer(&file, object.clone(), window_spec(&object), 0)
+        .expect("fb");
+    bind(&dev, fb).expect("present");
+
+    let object_resource = object.resource().expect("object resource");
+
+    dev.flush(fb).expect("dirtyfb");
+    // `present` records the resource it put on screen; a flush of the same
+    // framebuffer must name that same resource.
+    assert_eq!(
+        backend.last_flush_resource.load(Ordering::Relaxed),
+        backend.last_present_resource.load(Ordering::Relaxed),
+        "flush must target the resource present put on screen"
+    );
+    assert_ne!(
+        backend.last_flush_resource.load(Ordering::Relaxed),
+        object_resource.raw(),
+        "a windowed present scans a view resource, not the object's own"
+    );
 }

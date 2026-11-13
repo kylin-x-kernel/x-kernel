@@ -94,6 +94,51 @@ pub mod context {
 }
 
 pub use kcpu::{instrs as asm, userspace as uspace};
+
+/// Userspace-visible CPU capability bits for `AT_HWCAP`, in the architecture's
+/// own encoding.
+///
+/// This is the cross-crate entry point for exec's auxiliary vector: `kexec`
+/// calls it while building the initial stack and publishes the result as
+/// `AT_HWCAP`. User runtimes read that word instead of probing control
+/// registers — glibc's IFUNC resolvers, and LLVM's `getHostCPUFeatures` behind
+/// llvmpipe's JIT, select instruction paths from it — so publishing zero makes
+/// them believe the CPU has no optional features and a JIT that then emits a
+/// feature-gated path faults.
+///
+/// # Contract
+///
+/// - **Task context, no locks and no allocation.** Reads published per-CPU
+///   snapshots only; safe before the caller's address space is fully set up,
+///   which is where exec calls it.
+/// - **Platform-wide, not per-CPU.** The value is the *intersection* of the
+///   usable-feature sets of the online CPUs (`kcpu::system_hwcap()`), because
+///   the scheduler may migrate the process to any of them after exec returns.
+///   A single core's word could advertise a bit that a weaker core lacks, and
+///   a frozen `AT_HWCAP` cannot be revised once the task migrates.
+/// - **Snapshot timing.** Per-CPU identification is published during trap
+///   initialization, and boot starts every present secondary CPU before the
+///   first user process, so the intersection covers the full online set at
+///   exec time.
+/// - **Only aarch64 publishes bits today.** Linux also sets `AT_HWCAP` on
+///   x86 (e.g. FSGSBASE), RISC-V (ISA extensions) and LoongArch; those
+///   encodings are not implemented here and report zero, which is a
+///   conservative claim rather than a grant. Adding one is a per-architecture
+///   change to this function.
+pub fn cpu_hwcap() -> usize {
+    cpu_hwcap_impl()
+}
+
+#[cfg(target_arch = "aarch64")]
+fn cpu_hwcap_impl() -> usize {
+    kcpu::system_hwcap()
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn cpu_hwcap_impl() -> usize {
+    0
+}
+
 #[cfg(feature = "smp")]
 pub use kplat::boot::prepare_local_interrupts;
 pub use kplat::boot::{activate_local_interrupts, prepare_interrupts};

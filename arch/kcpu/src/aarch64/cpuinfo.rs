@@ -81,6 +81,41 @@ impl CpuInfo {
         self.capabilities & (1 << feature as u8) != 0
     }
 
+    /// Userspace-visible capability word in the Linux `AT_HWCAP` encoding.
+    ///
+    /// User runtimes read this instead of probing control registers: glibc's
+    /// IFUNC resolvers and LLVM's `getHostCPUFeatures` (behind llvmpipe's JIT)
+    /// select instruction paths from it. The bit positions are Linux's
+    /// (`arch/arm64/include/uapi/asm/hwcap.h`), not this crate's
+    /// `CpuFeature` discriminant order: AES is bit 3 because bit 2 is ASIMDHP,
+    /// which this kernel does not publish. Only features the kernel deems
+    /// usable are set, so a CPU whose FP/SIMD state is not preserved never
+    /// advertises it.
+    pub fn hwcap(&self) -> usize {
+        const HWCAP_FP: usize = 1 << 0;
+        const HWCAP_ASIMD: usize = 1 << 1;
+        const HWCAP_AES: usize = 1 << 3;
+        const HWCAP_PMULL: usize = 1 << 4;
+        const HWCAP_SHA1: usize = 1 << 5;
+        const HWCAP_SHA2: usize = 1 << 6;
+        const HWCAP_CRC32: usize = 1 << 7;
+        const HWCAP_ATOMICS: usize = 1 << 8;
+
+        [
+            (CpuFeature::Fp, HWCAP_FP),
+            (CpuFeature::Asimd, HWCAP_ASIMD),
+            (CpuFeature::Aes, HWCAP_AES),
+            (CpuFeature::Pmull, HWCAP_PMULL),
+            (CpuFeature::Sha1, HWCAP_SHA1),
+            (CpuFeature::Sha2, HWCAP_SHA2),
+            (CpuFeature::Crc32, HWCAP_CRC32),
+            (CpuFeature::Atomics, HWCAP_ATOMICS),
+        ]
+        .into_iter()
+        .filter(|(feature, _)| self.has_feature(*feature))
+        .fold(0, |hwcap, (_, bit)| hwcap | bit)
+    }
+
     /// MIDR implementer, variant, part number and revision, respectively.
     pub fn identity(&self) -> (u8, u8, u16, u8) {
         (

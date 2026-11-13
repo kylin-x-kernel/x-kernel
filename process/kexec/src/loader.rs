@@ -692,6 +692,12 @@ fn initial_aux_vector(
         AuxEntry::new(AuxType::PHNUM, image.program_header_count()),
         AuxEntry::new(AuxType::PAGESZ, PAGE_SIZE_4K),
         AuxEntry::new(AuxType::ENTRY, image.entry(executable_bias)?),
+        // Linux publishes the CPU capability word here, and user runtimes read
+        // it instead of probing control registers: glibc's IFUNC resolvers and
+        // LLVM's `getHostCPUFeatures` (behind llvmpipe's JIT) pick instruction
+        // paths from it. Omitting it makes every reader see "no optional
+        // features", and a JIT that still emits a feature-gated path faults.
+        AuxEntry::new(AuxType::HWCAP, khal::cpu_hwcap()),
     ];
     if let Some(interpreter_bias) = layout.interpreter_bias() {
         auxv.push(AuxEntry::new(AuxType::BASE, interpreter_bias));

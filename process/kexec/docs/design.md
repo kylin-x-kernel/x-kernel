@@ -168,9 +168,10 @@ credential snapshot's `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, and explicit
 pool and `AT_EXECFN` backed by the resolved request's display path, including
 when `argv` is empty. Script redirects preserve the original script display
 path for `AT_EXECFN` while using the interpreter path for loading. `AT_HWCAP`
-and `AT_PLATFORM` are not yet supplied, so dynamic runtimes that require either
-entry remain outside the supported ABI. The interpreter entry is selected when
-present.
+carries the boot CPU's userspace-visible capability word (`khal::cpu_hwcap()`),
+encoded in the architecture's own Linux bit layout; `AT_PLATFORM` is not yet
+supplied, so dynamic runtimes that require that entry remain outside the
+supported ABI. The interpreter entry is selected when present.
 
 Preparation builds argc/argv/env/aux data with `app_stack_region` and checks
 its configured stack capacity. The ready value owns these encoded bytes rather
@@ -244,7 +245,7 @@ are prepared without a target MM; fallible installation remains separate. The
 exec syscall replaces only its own process binding, preserving independent
 CLONE_VM peers' old image, and distinguishes errors at the exchange boundary.
 Known constraints include stale cache contents, fixed
-rather than randomized load hints, missing `AT_HWCAP`/`AT_PLATFORM`, and no
+rather than randomized load hints, missing `AT_PLATFORM`, and no
 complete exec credential/namespace transaction within this crate. The init
 process bootstrap discards the backing executable because the low-level
 `build_process_thread` path does not install `ExecMetadata`; `/proc/1/exe` is

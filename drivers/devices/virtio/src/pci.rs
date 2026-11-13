@@ -317,10 +317,17 @@ pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
         log::warn!("PCI virtio device at {bdf:?}: transport creation failed: {error:?}");
         PciProbeError::Transport
     })?;
-    // Vsock and input disable INTx here because their activation installs an
-    // interrupt owner later. Display keeps INTx enabled: its activation now
-    // registers a config-change IRQ handler after publishing the class device.
-    if matches!(dev_kind, DeviceKind::Vsock | DeviceKind::Input) {
+    // Transport creation drives the device to `DRIVER_OK`, after which it may
+    // raise INTx at any moment. Every kind whose activation installs the
+    // interrupt owner later must mask INTx here, or a level-triggered line
+    // fires with no action to claim it: on a shared line the storm starves the
+    // CPU before the owner is ever registered. Display is included for the
+    // same reason: it publishes the class device and only then registers its
+    // config-change handler.
+    if matches!(
+        dev_kind,
+        DeviceKind::Vsock | DeviceKind::Input | DeviceKind::Display
+    ) {
         let (_, command) = root.get_status_command(bdf);
         root.set_command(bdf, command | Command::INTERRUPT_DISABLE);
     }

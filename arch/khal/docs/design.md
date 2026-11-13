@@ -40,6 +40,13 @@ hooks and `IntrManagerIf` belong to `arch/kirq`. `khal::nmi` is a
 mechanism-neutral facade; mechanism details belong to `kplat::nm_irq` and its
 platform implementations.
 
+`khal::cpu_hwcap()` is the CPU-capability interface this crate provides to the
+rest of the kernel: `kexec` calls it while building a new process's auxiliary
+vector and publishes the result as `AT_HWCAP`. The calling direction is
+kexec → khal → kcpu; khal does not detect capabilities itself, it asks `kcpu`
+for the intersection the online CPUs advertise and restates it in the
+architecture's own encoding.
+
 ## Architecture
 
 ```text

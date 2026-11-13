@@ -62,6 +62,17 @@ impl ScanoutSlot {
         self.bound == fb
     }
 
+    /// The resource the host is scanning for the bound framebuffer.
+    ///
+    /// `None` when nothing is installed, or when the presented framebuffer
+    /// covers its whole object: that case scans the object's own resource,
+    /// which the caller looks up itself. `Some` is the view resource created
+    /// for a framebuffer smaller than its object — the one a flush must
+    /// target, because the object's resource is not what the host displays.
+    pub(crate) fn scanning_resource(&self) -> Option<ResourceId> {
+        self.scanning.as_ref().and_then(|pending| pending.resource)
+    }
+
     /// Installs a new scanout target, returning what was there before.
     ///
     /// The caller drops the snapshot only after the backend accepted the new
