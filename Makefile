@@ -64,7 +64,8 @@
 # * Root filesystem download (`make rootfs`):
 #     - ROOTFS_URL          Base URL for prebuilt rootfs images
 #     - ROOTFS_VARIANT      Rootfs variant (default debian-openrc;
-#                           also supports alpine-busybox, debian-busybox)
+#                           also supports alpine-busybox, debian-busybox,
+#                           and debian-systemd)
 
 .DEFAULT_GOAL := build
 
