@@ -41,12 +41,12 @@ fn run_two_workers(workers: [impl FnOnce() + Send + 'static; 2]) -> bool {
     let tasks = workers.map(|worker| {
         let selected = cpu;
         cpu += 1;
-        let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-            move || {
+        let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+            crate::PreparedTaskEntry::new(move || {
                 let is_expected_cpu = khal::percpu::this_cpu_id().as_usize() == selected;
                 worker();
                 crate::exit(if is_expected_cpu { 0 } else { 1 });
-            },
+            }).unwrap(),
             "timer_race_probe".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));

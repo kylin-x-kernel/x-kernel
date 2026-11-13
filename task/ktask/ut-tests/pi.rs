@@ -25,8 +25,8 @@ fn fifo(priority: u8) -> SchedAttr {
 }
 
 fn prepare_worker(body: impl FnOnce() + Send + 'static, attr: SchedAttr) -> KtaskRef {
-    let task = crate::prepare_task(TaskInner::new_pidless_kthread(
-        body,
+    let task = crate::prepare_task(TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new_nowait(body).unwrap(),
         "pi-test".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

@@ -118,8 +118,8 @@ fn wait_for(counters: &Counters, expected: usize) {
 
 fn on_each_cpu(action: fn()) {
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| {
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            action,
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(action).unwrap(),
             "irq_work_probe".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));

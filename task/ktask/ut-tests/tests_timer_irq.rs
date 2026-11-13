@@ -136,12 +136,12 @@ fn delivery_on_each_cpu(repeats: usize) -> bool {
             "timer IRQ probe starting: cpu={}, expirations={repeats}",
             cpu.as_usize()
         );
-        let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-            move || {
+        let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+            crate::PreparedTaskEntry::new(move || {
                 let is_expected_cpu = khal::percpu::this_cpu_id() == cpu;
                 let is_valid = is_expected_cpu && local_delivery(repeats);
                 crate::exit(if is_valid { 0 } else { 1 });
-            },
+            }).unwrap(),
             "timer_irq_probe".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));

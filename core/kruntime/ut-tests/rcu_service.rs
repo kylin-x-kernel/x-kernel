@@ -182,8 +182,8 @@ fn submit_probes(
     let callback_violations = violations.clone();
     let accepted = Arc::new(AtomicUsize::new(0));
     let submitted = accepted.clone();
-    let producer = ktask::prepare_task(TaskInner::new_pidless_kthread(
-        move || {
+    let producer = ktask::prepare_task(TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new_nowait(move || {
             let prepared: Vec<_> = (0..count)
                 .map(|_| {
                     prepare_probe(
@@ -207,7 +207,7 @@ fn submit_probes(
                     Err((_, prepared)) => drop(prepared),
                 }
             }
-        },
+        }).unwrap(),
         "rcu-callback-producer".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -277,18 +277,20 @@ fn gp_task_delivers_scoped_callbacks_through_each_cpus_softirq() {
     // It does not simulate observations or claim idle/no-tick progress coverage.
     for cpu in 0..kcpu_id_map::nr_cpus() {
         let finished = is_finished.clone();
-        let worker = ktask::prepare_task(TaskInner::new_pidless_kthread(
-            move || {
+        let worker = ktask::prepare_task(TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 while !finished.load(Ordering::Acquire) {
                     ktask::yield_now();
                 }
-            },
+            }).unwrap(),
             "rcu-observer-test".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
         worker.set_cpumask(ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(cpu)));
-        ktask::activate_task(&worker);
         workers.push(worker);
+    }
+    for worker in &workers {
+        ktask::activate_task(worker);
     }
     let per_cpu = CALLBACKS_PER_CPU;
     let mut accepted = 0;
@@ -345,8 +347,8 @@ fn migrated_deferred_reader_cleans_original_node_from_destination() {
 fn verify_deferred_reader_completion(destination: LogicalCpuId) -> unittest::TestResult {
     let probe = Arc::new(DeferredReaderProbe::default());
     let reader_probe = probe.clone();
-    let reader = ktask::prepare_task(TaskInner::new_pidless_kthread(
-        move || {
+    let reader = ktask::prepare_task(TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             let task = ktask::current();
             let irq = krcu::with_read(|_| {
                 reader_probe.has_entered.store(true, Ordering::Release);
@@ -383,7 +385,7 @@ fn verify_deferred_reader_completion(destination: LogicalCpuId) -> unittest::Tes
             // Independent fallback before returning the task: a failed delivery
             // assertion must not strand membership in the live service.
             ktask::check_preempt_pending();
-        },
+        }).unwrap(),
         "rcu-deferred-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -396,8 +398,8 @@ fn verify_deferred_reader_completion(destination: LogicalCpuId) -> unittest::Tes
     // The reader never blocks or yields in its scope. Joining a same-CPU
     // competitor proves an actual switch enrolled it, independent of whether
     // a reschedule request alone would have selected another task.
-    let competitor = ktask::prepare_task(TaskInner::new_pidless_kthread(
-        || {},
+    let competitor = ktask::prepare_task(TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new_nowait(|| {}).unwrap(),
         "rcu-deferred-competitor".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

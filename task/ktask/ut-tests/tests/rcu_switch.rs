@@ -127,8 +127,8 @@ fn abandoned_reader_is_unlinked_and_reclaimed_after_switch() {
     let passed = Arc::new(AtomicBool::new(false));
     let result = passed.clone();
     let cpu = LogicalCpuId::new(0);
-    let supervisor = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-        move || {
+    let supervisor = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new(move || {
             let mut all_reclaimed = true;
             for _ in 0..4 {
                 let runtime_dropped = Arc::new(AtomicBool::new(false));
@@ -149,8 +149,8 @@ fn abandoned_reader_is_unlinked_and_reclaimed_after_switch() {
 
                 // Running a later task on this CPU crosses abandoned's switch
                 // cleanup without assuming join waits for that cleanup.
-                let sentinel = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-                    || {},
+                let sentinel = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+                    crate::PreparedTaskEntry::new_nowait(|| {}).unwrap(),
                     "rcu-switch-sentinel".into(),
                     kbuild_config::TASK_STACK_SIZE,
                 ));
@@ -180,7 +180,7 @@ fn abandoned_reader_is_unlinked_and_reclaimed_after_switch() {
                 all_reclaimed &= exit_code == 17 && sentinel_status == 0 && is_clean;
             }
             result.store(all_reclaimed, Ordering::Release);
-        },
+        }).unwrap(),
         "rcu-retirement".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -228,8 +228,8 @@ fn first_task_entry_cleans_the_exited_readers_handoff() {
     let cpu = LogicalCpuId::new(0);
     let stop_work = Arc::new(kspin::SpinNoIrq::new(crate::CpuStopWork::empty()));
     let outgoing_stop_work = stop_work.clone();
-    let abandoned = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-        move || {
+    let abandoned = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new(move || {
             let task = crate::current();
             let outgoing = crate::KtaskRef::downgrade(&task);
             let outgoing_probe = outgoing.clone();
@@ -267,7 +267,7 @@ fn first_task_entry_cleans_the_exited_readers_handoff() {
             task.rcu_reader.with_read::<()>(|_| {
                 task.rcu_reader.with_read::<()>(|_| exit_to_first_entry(receiver));
             });
-        },
+        }).unwrap(),
         "rcu-first-entry-outgoing".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

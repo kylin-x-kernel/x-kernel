@@ -71,12 +71,12 @@ impl Drop for SameCpuSpinner {
 fn spawn_same_cpu_spinner() -> SameCpuSpinner {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = stop.clone();
-    let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-        move || {
+    let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new(move || {
             while !stop_flag.load(Ordering::Acquire) {
                 core::hint::spin_loop();
             }
-        },
+        }).unwrap(),
         String::from("subtick-spinner"),
         kbuild_config::TASK_STACK_SIZE,
     ));

@@ -71,8 +71,8 @@ fn rcu_preempted_reader_remains_enrolled_until_outer_exit() {
         let observer_task = task.clone();
         let observer_result = observed.clone();
         let observer_finished = finished.clone();
-        let observer = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-            move || {
+        let observer = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+            crate::PreparedTaskEntry::new(move || {
                 observer_result.store(
                     observer_task.rcu_reader.is_reading()
                         && observer_task.rcu_reader.is_enrolled_on(
@@ -81,7 +81,7 @@ fn rcu_preempted_reader_remains_enrolled_until_outer_exit() {
                     Ordering::Release,
                 );
                 observer_finished.store(true, Ordering::Release);
-            },
+            }).unwrap(),
             "rcu-observer".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
@@ -133,8 +133,8 @@ fn rcu_migration_preserves_original_reader_node() {
     let worker_finish = finish.clone();
     let observed_cpu = Arc::new(AtomicUsize::new(usize::MAX));
     let worker_cpu = observed_cpu.clone();
-    let worker = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-        move || {
+    let worker = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new(move || {
             let task = crate::current();
             task.rcu_reader.with_read(|_| {
                 worker_started.store(true, Ordering::Release);
@@ -148,7 +148,7 @@ fn rcu_migration_preserves_original_reader_node() {
             drop(worker_finish);
             drop(worker_cpu);
             crate::exit(i32::from(task.rcu_reader.is_enrolled()));
-        },
+        }).unwrap(),
         "rcu-migration".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

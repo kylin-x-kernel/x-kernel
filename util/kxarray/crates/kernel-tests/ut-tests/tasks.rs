@@ -28,8 +28,8 @@ fn competing_insertions_keep_one_owner_and_return_every_loser() {
         let can_start = can_start.clone();
         let winners = winners.clone();
         let has_invalid_return = has_invalid_return.clone();
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 let original = Arc::as_ptr(&offered);
                 ready.fetch_add(1, Ordering::Release);
                 while !can_start.load(Ordering::Acquire) {
@@ -49,12 +49,14 @@ fn competing_insertions_keep_one_owner_and_return_every_loser() {
                         }
                     }
                 }
-            },
+            }).unwrap(),
             "xarray-insert".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
-        ktask::activate_task(&task);
         tasks.push(task);
+    }
+    for task in &tasks {
+        ktask::activate_task(task);
     }
     while ready.load(Ordering::Acquire) != WRITERS {
         ktask::yield_now();
@@ -108,8 +110,8 @@ fn competing_sets_release_every_displaced_owner_once() {
             let ready = ready.clone();
             let can_start = can_start.clone();
             let accepted = accepted.clone();
-            let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-                move || {
+            let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+                ktask::PreparedTaskEntry::new(move || {
                     ready.fetch_add(1, Ordering::Release);
                     while !can_start.load(Ordering::Acquire) {
                         ktask::yield_now();
@@ -120,12 +122,14 @@ fn competing_sets_release_every_displaced_owner_once() {
                     if unsafe { array.set_with_flags(key, value, AllocFlags::NOWAIT) }.is_ok() {
                         accepted.fetch_add(1, Ordering::Release);
                     }
-                },
+                }).unwrap(),
                 "xarray-set".into(),
                 kbuild_config::TASK_STACK_SIZE,
             ));
-            ktask::activate_task(&task);
             tasks.push(task);
+        }
+        for task in &tasks {
+            ktask::activate_task(task);
         }
         while ready.load(Ordering::Acquire) != WRITERS {
             ktask::yield_now();
@@ -168,8 +172,8 @@ fn published_entries_remain_readable_during_root_growth() {
     let writer_published = published.clone();
     let writer_observed = observed.clone();
     let writer_failure = has_failed_insert.clone();
-    let writer = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let writer = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             for (position, key) in writer_keys.iter().copied().enumerate() {
                 // SAFETY: task context, no held guard, primitive KBox release.
                 if unsafe {
@@ -188,7 +192,7 @@ fn published_entries_remain_readable_during_root_growth() {
                     ktask::yield_now();
                 }
             }
-        },
+        }).unwrap(),
         "xarray-grow".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -232,8 +236,8 @@ fn competing_removals_withdraw_one_owner() {
         let can_start = can_start.clone();
         let removed = removed.clone();
         let absent = absent.clone();
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 ready.fetch_add(1, Ordering::Release);
                 while !can_start.load(Ordering::Acquire) {
                     ktask::yield_now();
@@ -249,12 +253,14 @@ fn competing_removals_withdraw_one_owner() {
                     }
                     Err(_) => {}
                 }
-            },
+            }).unwrap(),
             "xarray-remove".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
-        ktask::activate_task(&task);
         tasks.push(task);
+    }
+    for task in &tasks {
+        ktask::activate_task(task);
     }
     while ready.load(Ordering::Acquire) != REMOVERS {
         ktask::yield_now();
@@ -314,8 +320,8 @@ fn removal_and_reinsertion_preserve_a_held_old_borrow() {
     assert!(ktask::set_current_affinity(
         ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(0))
     ));
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             krcu::with_read(|scope| {
                 let borrowed = reader_array.read(scope, usize::MAX);
                 reader_entered.store(true, Ordering::Release);
@@ -329,7 +335,7 @@ fn removal_and_reinsertion_preserve_a_held_old_borrow() {
                     Ordering::Release,
                 );
             });
-        },
+        }).unwrap(),
         "xarray-held-removal".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -423,8 +429,8 @@ fn successive_replacements_preserve_two_held_versions() {
         }
         let reader_array = array.clone();
         let reader_history = history.clone();
-        let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new_nowait(move || {
                 krcu::with_read(|scope| {
                     let borrowed = reader_array.read(scope, 64);
                     reader_history.has_entered[number].store(true, Ordering::Release);
@@ -437,7 +443,7 @@ fn successive_replacements_preserve_two_held_versions() {
                         Ordering::Release,
                     );
                 });
-            },
+            }).unwrap(),
             "xarray-held-version".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));

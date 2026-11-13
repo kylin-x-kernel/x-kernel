@@ -7,6 +7,8 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use kerrno::KResult;
+
 const REPLACEMENTS: usize = 64;
 
 struct RetirementProbe {
@@ -43,7 +45,7 @@ fn check_negative_control() {
 }
 
 /// Checks simulated premature retirement and then the real GP protocol.
-pub(super) fn run() {
+pub(super) fn run() -> KResult<()> {
     check_negative_control();
     let probe = Arc::new(RetirementProbe::new());
     let should_stop = Arc::new(AtomicBool::new(false));
@@ -60,8 +62,8 @@ pub(super) fn run() {
         let should_stop = should_stop.clone();
         let errors = errors.clone();
         let reads = reads.clone();
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 while !should_stop.load(Ordering::Relaxed) {
                     krcu::with_read(|_| {
                         let slot = probe.published.load(Ordering::Acquire);
@@ -77,12 +79,14 @@ pub(super) fn run() {
                     reads[index].fetch_add(1, Ordering::Relaxed);
                     ktask::yield_now();
                 }
-            },
+            })?,
             "rcu-retirement-reader".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
-        ktask::activate_task(&task);
         readers.push(task);
+    }
+    for task in &readers {
+        ktask::activate_task(task);
     }
     while reads.iter().any(|count| count.load(Ordering::Relaxed) == 0) {
         ktask::yield_now();
@@ -118,4 +122,5 @@ pub(super) fn run() {
     assert!(counts.iter().all(|count| *count > 0));
     assert_eq!(completed, REPLACEMENTS);
     assert_eq!(errors, 0);
+    Ok(())
 }

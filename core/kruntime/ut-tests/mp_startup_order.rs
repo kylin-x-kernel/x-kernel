@@ -47,13 +47,13 @@ pub(crate) fn queue_early_tasks(primary: LogicalCpuId) {
         if cpu_id == primary {
             return;
         }
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new_nowait(move || {
                 if !COMPLETE[cpu_id.as_usize()].load(Ordering::Acquire) {
                     RAN_EARLY.store(true, Ordering::Release);
                 }
                 REMAINING.fetch_sub(1, Ordering::AcqRel);
-            },
+            }).unwrap(),
             "startup_order_probe".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));

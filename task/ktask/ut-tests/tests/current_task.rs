@@ -21,15 +21,22 @@ fn prepared_kernel_entry_transfers_without_reboxing() {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    for should_run in [false, true] {
+    for (should_run, has_pid) in [(false, false), (true, false), (false, true), (true, true)] {
         let drops = Arc::new(AtomicUsize::new(0));
         let probe = EntryDropProbe(drops.clone());
         let entry = super::PreparedTaskEntry::new(move || drop(probe)).unwrap();
         let address = (&*entry.0) as *const dyn super::OwnedTaskEntry as *const ();
-        let task = super::TaskInner::new_pidless_kthread_with_entry(
-            entry, "prepared-kernel-entry".into(), 16384,
-        );
-        assert!(matches!(task.identity, super::TaskIdentity::Internal));
+        let task = if has_pid {
+            super::TaskInner::new_kthread_with_entry(
+                entry, "prepared-kernel-entry".into(), 16384,
+            ).unwrap()
+        } else {
+            super::TaskInner::new_pidless_kthread_with_entry(
+                entry, "prepared-kernel-entry".into(), 16384,
+            )
+        };
+        assert_eq!(task.task_number().is_some(), has_pid);
+        assert_eq!(matches!(task.identity, super::TaskIdentity::Internal), !has_pid);
         let stored = task.entry.take().unwrap();
         let super::TaskEntry::Prepared(entry) = stored else {
             panic!("expected prepared kernel entry");

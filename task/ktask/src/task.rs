@@ -590,6 +590,28 @@ impl TaskInner {
         ))
     }
 
+    /// Creates an unpublished Linux-visible kernel thread from a prepared entry.
+    ///
+    /// Allocates a root PID handle, preserving [`Self::new_kthread`] identity
+    /// semantics without allocating another callback owner. PID allocation
+    /// failure drops the entry and its captures in the caller's context.
+    /// Requires sleepable task context suitable for PID allocation; entry
+    /// allocation flags do not change PID, stack or bookkeeping allocation
+    /// contracts. No task is published or activated by this constructor.
+    pub fn new_kthread_with_entry(
+        entry: PreparedTaskEntry,
+        name: String,
+        stack_size: usize,
+    ) -> KResult<Self> {
+        let task_number = kidentity::allocate_root_pid_handle()?;
+        Ok(Self::new_with_entry(
+            TaskEntry::Prepared(entry),
+            name,
+            stack_size,
+            TaskIdentity::KernelThread { task_number },
+        ))
+    }
+
     /// Creates a user thread with a preallocated thread identity and runtime.
     ///
     /// Callers must allocate the thread identity in the correct PID namespace

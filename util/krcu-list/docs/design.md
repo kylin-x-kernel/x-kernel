@@ -1,5 +1,11 @@
 # RCU List
 
+The kernel integration test crate prepares task entries with PreparedTaskEntry
+in sleepable, reclaim-safe coordinator context before starting readers. Stress
+writers are all prepared before activation, so no worker waits behind a start
+gate while another entry is still being allocated. Container code and the
+integration dependency split are unchanged.
+
 ## Fallible entry preparation
 
 Entry owns a KBox node. `new` returns KResult with KERNEL permissions and

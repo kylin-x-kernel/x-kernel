@@ -45,8 +45,8 @@ fn old_reader_retains_entire_removed_chain_then_backlog_drains() {
     let has_entered = Arc::new(AtomicBool::new(false));
     let can_exit = Arc::new(AtomicBool::new(false));
     let is_old_valid = Arc::new(AtomicBool::new(false));
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new({
             let list = list.clone();
             let has_entered = has_entered.clone();
             let can_exit = can_exit.clone();
@@ -69,7 +69,7 @@ fn old_reader_retains_entire_removed_chain_then_backlog_drains() {
                     );
                 });
             }
-        },
+        }).unwrap(),
         "rcu-list-old-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

@@ -69,11 +69,11 @@ fn callback_drain_does_not_wait_for_downstream_task_work() {
     let worker_gate = gate.clone();
     let finished = Arc::new(AtomicBool::new(false));
     let worker_finished = finished.clone();
-    let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             let _guard = worker_gate.lock();
             worker_finished.store(true, Ordering::Release);
-        },
+        }).unwrap(),
         "rcu-downstream".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -165,8 +165,8 @@ fn drain_waits_for_every_cpu_and_reuses_markers_across_batches() {
             let destroyed = destroyed.clone();
             let accepted = accepted.clone();
             let has_wrong_cpu = has_wrong_cpu.clone();
-            let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-                move || {
+            let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+                ktask::PreparedTaskEntry::new(move || {
                     let prepared: alloc::vec::Vec<_> = (0..PER_CPU)
                         .map(|_| prepare_drain_probe(&destroyed))
                         .collect();
@@ -186,7 +186,7 @@ fn drain_waits_for_every_cpu_and_reuses_markers_across_batches() {
                             Err((_, callback)) => drop(callback),
                         }
                     }
-                },
+                }).unwrap(),
                 "rcu-drain-producer".into(),
                 kbuild_config::TASK_STACK_SIZE,
             ));

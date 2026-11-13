@@ -103,7 +103,7 @@ fn prepare_with_storage(
     Ok(unsafe { PreparedCallback::new(node, cancel) })
 }
 
-pub(super) fn run() {
+pub(super) fn run() -> KResult<()> {
     let mut cpus = Vec::new();
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
     assert!(!cpus.is_empty());
@@ -125,8 +125,8 @@ pub(super) fn run() {
     let mut producers = Vec::new();
     for (producer, cpu) in cpus.into_iter().enumerate() {
         let ledger = ledger.clone();
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 if khal::percpu::this_cpu_id() != cpu {
                     ledger.errors.fetch_add(1, Ordering::Relaxed);
                 }
@@ -150,13 +150,15 @@ pub(super) fn run() {
                         }
                     }
                 }
-            },
+            })?,
             "rcu-callback-producer".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
         task.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu));
-        ktask::activate_task(&task);
         producers.push(task);
+    }
+    for task in &producers {
+        ktask::activate_task(task);
     }
     // Invocation can precede submit's return, so acceptance and call counters
     // are compared only after producer joins and the following drain.
@@ -193,4 +195,5 @@ pub(super) fn run() {
         assert_eq!(ledger.calls[id].load(Ordering::Relaxed), 1);
         assert_eq!(ledger.drops[id].load(Ordering::Relaxed), 1);
     }
+    Ok(())
 }

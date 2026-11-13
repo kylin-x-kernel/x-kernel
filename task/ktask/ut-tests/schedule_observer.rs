@@ -76,8 +76,9 @@ unsafe impl TaskScheduleObserver for Probe {
 #[def_test]
 fn unpublished_observer_does_not_acquire_cpu_state() {
     let probe = Arc::new(Probe::new());
-    let task = crate::TaskInner::new_pidless_kthread(|| {}, "observer-unused".into(), 0x4000)
-        .with_schedule_observer(probe.clone());
+    let task = crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new(|| {}).unwrap(), "observer-unused".into(), 0x4000,
+    ).with_schedule_observer(probe.clone());
     drop(task);
     assert_eq!(probe.loads.load(Ordering::Relaxed), 0);
     assert_eq!(probe.puts.load(Ordering::Relaxed), 0);
@@ -91,8 +92,8 @@ fn first_entry_block_resume_and_terminal_exit_are_paired() {
     let worker_probe = probe.clone();
     let worker_release = release.clone();
     let task = crate::spawn_task(
-        crate::TaskInner::new_pidless_kthread(
-            move || {
+        crate::TaskInner::new_pidless_kthread_with_entry(
+            crate::PreparedTaskEntry::new(move || {
                 {
                     let _irq = kspin::IrqSave::new();
                     core::assert_eq!(
@@ -108,7 +109,7 @@ fn first_entry_block_resume_and_terminal_exit_are_paired() {
                 drop(worker_probe);
                 drop(worker_release);
                 crate::exit(7);
-            },
+            }).unwrap(),
             "observer-lifecycle".into(),
             0x4000,
         )
@@ -144,8 +145,8 @@ fn migration_puts_source_before_loading_destination() {
     let probe = Arc::new(Probe::new());
     let worker_probe = probe.clone();
     let task = crate::spawn_task(
-        crate::TaskInner::new_pidless_kthread(
-            move || {
+        crate::TaskInner::new_pidless_kthread_with_entry(
+            crate::PreparedTaskEntry::new(move || {
                 for cpu in [0, 1, 0, 1] {
                     core::assert!(crate::set_current_affinity(
                         crate::KCpuMask::one_shot_logical(LogicalCpuId::new(cpu))
@@ -154,7 +155,7 @@ fn migration_puts_source_before_loading_destination() {
                     core::assert_eq!(khal::percpu::this_cpu_id(), LogicalCpuId::new(cpu));
                     core::assert_eq!(worker_probe.cpu.load(Ordering::Relaxed), cpu);
                 }
-            },
+            }).unwrap(),
             "observer-migration".into(),
             0x4000,
         )
@@ -179,8 +180,8 @@ fn same_task_reselection_does_not_put_or_reload() {
     let probe = Arc::new(Probe::new());
     let worker_probe = probe.clone();
     let task = crate::spawn_task(
-        crate::TaskInner::new_pidless_kthread(
-            move || {
+        crate::TaskInner::new_pidless_kthread_with_entry(
+            crate::PreparedTaskEntry::new(move || {
                 let _guard = kspin::NoPreemptIrqSave::new();
                 let before = (
                     worker_probe.loads.load(Ordering::Relaxed),
@@ -202,7 +203,7 @@ fn same_task_reselection_does_not_put_or_reload() {
                         worker_probe.puts.load(Ordering::Relaxed),
                     )
                 );
-            },
+            }).unwrap(),
             "observer-same-task".into(),
             0x4000,
         )
@@ -260,8 +261,8 @@ fn prepared_alarm_can_wake_a_task_put_by_the_scheduler() {
         alarm: crate::Timer::new(Alarm(done.clone())),
     });
     let task = crate::spawn_task(
-        crate::TaskInner::new_pidless_kthread(
-            move || crate::wait_for_completion(&done).unwrap(),
+        crate::TaskInner::new_pidless_kthread_with_entry(
+            crate::PreparedTaskEntry::new(move || crate::wait_for_completion(&done).unwrap()).unwrap(),
             "observer-alarm".into(),
             0x4000,
         )
@@ -328,21 +329,21 @@ fn cpu_reuse_releases_the_previous_observers_ownership() {
     });
     let worker_entered = entered.clone();
     let worker_release = release.clone();
-    let first_task = crate::TaskInner::new_pidless_kthread(
-        move || {
+    let first_task = crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new(move || {
             worker_entered.complete_all();
             crate::wait_for_completion(&worker_release).unwrap();
-        },
+        }).unwrap(),
         "observer-owner-a".into(),
         0x4000,
     )
     .with_schedule_observer(first.clone());
     first_task.set_cpumask(crate::KCpuMask::one_shot_logical(LogicalCpuId::new(0)));
-    let second_task = crate::TaskInner::new_pidless_kthread(
-        move || {
+    let second_task = crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new(move || {
             crate::wait_for_completion(&entered).unwrap();
             release.complete_all();
-        },
+        }).unwrap(),
         "observer-owner-b".into(),
         0x4000,
     )

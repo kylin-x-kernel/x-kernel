@@ -231,14 +231,15 @@ fn test_prepare_task_requires_activation() {
     let executed = Arc::new(AtomicBool::new(false));
     let worker_executed = executed.clone();
     let task = ktask::prepare_task(
-        crate::TaskInner::new_kthread(
-            move || worker_executed.store(true, Ordering::Release),
+        crate::TaskInner::new_kthread_with_entry(
+            crate::PreparedTaskEntry::new(move || worker_executed.store(true, Ordering::Release)).unwrap(),
             "prepared-task".into(),
             0x1000,
         ).expect("fixture kernel thread identity allocation succeeds"),
     );
     ktask::yield_now();
     assert!(!executed.load(Ordering::Acquire));
+    assert!(task.task_number().is_some());
     ktask::activate_task(&task);
     assert_eq!(task.join(), 0);
     assert!(executed.load(Ordering::Acquire));

@@ -1,5 +1,12 @@
 # Integration Boundary
 
+Task fixtures prepare their entry owners with PreparedTaskEntry before
+activation. Ordinary setup uses KERNEL outside read scopes and exclusion guards;
+competing writer groups are fully prepared before any worker is activated.
+Additional held-version readers use NOWAIT while earlier readers are retained.
+The migration writer uses NOWAIT after installing its preparation pause hook,
+so entry allocation cannot enter reclaim dependent on the gated fixture.
+
 The unittest entry selects `kfeat/kernel-tests`, which optionally links this
 crate and the container. Weak SMP forwarding does not enable the test crate in
 ordinary system configurations. This crate depends on the XArray

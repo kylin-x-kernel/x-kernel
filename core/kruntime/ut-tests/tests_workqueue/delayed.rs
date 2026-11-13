@@ -46,8 +46,8 @@ fn delayed_retime_cancel_race_drains_before_reuse() {
             let work = work.clone();
             let ready = ready.clone();
             let start = start.clone();
-            let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-                move || {
+            let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+                ktask::PreparedTaskEntry::new(move || {
                     assert_eq!(khal::percpu::this_cpu_id(), cpu);
                     ready.fetch_add(1, Ordering::Release);
                     while !start.load(Ordering::Acquire) {
@@ -76,7 +76,7 @@ fn delayed_retime_cancel_race_drains_before_reuse() {
                         }
                         ktask::yield_now();
                     }
-                },
+                }).unwrap(),
                 "delayed-race-producer".into(),
                 kbuild_config::TASK_STACK_SIZE,
             ));

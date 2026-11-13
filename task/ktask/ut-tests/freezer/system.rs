@@ -14,7 +14,11 @@ use super::*;
 use crate::{TaskInner, TaskState, WaitQueue};
 
 fn prepared(name: &str, entry: impl FnOnce() + Send + 'static) -> KtaskRef {
-    crate::prepare_task(TaskInner::new_pidless_kthread(entry, name.into(), 0x4000))
+    crate::prepare_task(TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new_nowait(entry).unwrap(),
+        name.into(),
+        0x4000,
+    ))
 }
 
 fn contains(tasks: &[KtaskRef], target: &KtaskRef) -> bool {

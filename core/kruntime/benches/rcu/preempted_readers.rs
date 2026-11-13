@@ -8,6 +8,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
+use kerrno::KResult;
 
 const BODIES: usize = 16;
 const BODY_NS: u64 = 10_000_000;
@@ -20,7 +21,7 @@ struct Progress {
     witnessed_bodies: AtomicUsize,
 }
 
-fn run_round(cpus: &[LogicalCpuId], round: usize, use_rcu: bool) {
+fn run_round(cpus: &[LogicalCpuId], round: usize, use_rcu: bool) -> KResult<()> {
     let gate = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::new();
     let mut competitors = Vec::new();
@@ -28,8 +29,8 @@ fn run_round(cpus: &[LogicalCpuId], round: usize, use_rcu: bool) {
         let progress = Arc::new(Progress::default());
         let output = Arc::new(kmutex::Mutex::new((0u64, 0u64)));
         let observed = progress.clone();
-        let competitor = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let competitor = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 let mut last_body = 0;
                 while !observed.is_done.load(Ordering::Acquire) {
                     assert_eq!(khal::percpu::this_cpu_id(), cpu);
@@ -40,19 +41,18 @@ fn run_round(cpus: &[LogicalCpuId], round: usize, use_rcu: bool) {
                     }
                     ktask::yield_now();
                 }
-            },
+            })?,
             "rcu-reader-competitor".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
         competitor.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu));
-        ktask::activate_task(&competitor);
         competitors.push(competitor);
 
         let state = progress.clone();
         let result = output.clone();
         let start_gate = gate.clone();
-        let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 state.is_ready.store(true, Ordering::Release);
                 while !start_gate.load(Ordering::Acquire) {
                     ktask::yield_now();
@@ -85,13 +85,18 @@ fn run_round(cpus: &[LogicalCpuId], round: usize, use_rcu: bool) {
                 let elapsed_ns = khal::time::monotonic_time_nanos() - begin;
                 state.is_done.store(true, Ordering::Release);
                 *result.lock() = (operations, elapsed_ns);
-            },
+            })?,
             "rcu-preempted-reader".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
         reader.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu));
-        ktask::activate_task(&reader);
         readers.push((reader, progress, output));
+    }
+    for competitor in &competitors {
+        ktask::activate_task(competitor);
+    }
+    for (reader, ..) in &readers {
+        ktask::activate_task(reader);
     }
     while readers
         .iter()
@@ -132,6 +137,7 @@ fn run_round(cpus: &[LogicalCpuId], round: usize, use_rcu: bool) {
         cpus.len(),
         usize::from(use_rcu)
     );
+    Ok(())
 }
 
 pub(super) fn run(cpus: &[LogicalCpuId]) {
@@ -146,7 +152,11 @@ pub(super) fn run(cpus: &[LogicalCpuId]) {
             } else {
                 [true, false]
             } {
-                run_round(&cpus[..workers], round, use_rcu);
+                let result = run_round(&cpus[..workers], round, use_rcu);
+                assert!(
+                    result.is_ok(),
+                    "RCU preempt task preparation failed: {result:?}"
+                );
             }
         }
     }

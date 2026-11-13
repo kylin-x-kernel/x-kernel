@@ -26,8 +26,8 @@ fn entry_acknowledges_and_ordinary_wakeup_cannot_thaw() {
     let _serial = SERIAL.lock();
     let ran = Arc::new(AtomicBool::new(false));
     let worker_ran = ran.clone();
-    let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-        move || worker_ran.store(true, Ordering::Release),
+    let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new_nowait(move || worker_ran.store(true, Ordering::Release)).unwrap(),
         "freeze-entry".into(),
         0x4000,
     ));
@@ -105,8 +105,8 @@ fn cancellation_wakes_owner_and_releases_partial_freeze() {
     queue.wait_until(|| started.load(Ordering::Acquire));
     let ran = Arc::new(AtomicBool::new(false));
     let worker_ran = ran.clone();
-    let cooperative = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-        move || worker_ran.store(true, Ordering::Release),
+    let cooperative = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new_nowait(move || worker_ran.store(true, Ordering::Release)).unwrap(),
         "freeze-cancel".into(),
         0x4000,
     ));
@@ -143,8 +143,8 @@ fn cancellation_wakes_owner_and_releases_partial_freeze() {
 #[def_test(serial)]
 fn validation_rejects_self_duplicates_and_pre_cancelled_attempt() {
     let _serial = SERIAL.lock();
-    let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-        || {},
+    let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new_nowait(|| {}).unwrap(),
         "freeze-invalid".into(),
         0x4000,
     ));
@@ -293,7 +293,9 @@ fn confirmation_follows_outgoing_observer_and_completed_stack_switch() {
     let _serial = SERIAL.lock();
     let probe = Arc::new(FreezeSwitchProbe(AtomicBool::new(false)));
     let task = crate::prepare_task(
-        crate::TaskInner::new_pidless_kthread(|| {}, "freeze-switch".into(), 0x4000)
+        crate::TaskInner::new_pidless_kthread_with_entry(
+            crate::PreparedTaskEntry::new_nowait(|| {}).unwrap(), "freeze-switch".into(), 0x4000,
+        )
             .with_schedule_observer(probe.clone()),
     );
     let cancellation = FreezeCancellation::new();
@@ -333,8 +335,8 @@ fn late_switch_completion_cannot_confirm_a_replacement_request() {
         })
     };
     // An unpublished task models the old handoff without racing a real CPU.
-    let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-        || {},
+    let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread_with_entry(
+        crate::PreparedTaskEntry::new_nowait(|| {}).unwrap(),
         "freeze-round-identity".into(),
         0x4000,
     ));

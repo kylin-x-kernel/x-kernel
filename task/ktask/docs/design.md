@@ -1,5 +1,20 @@
 # ktask — Design
 
+## Prepared unit-test entries
+
+Direct unit-test task constructors transfer PreparedTaskEntry owners rather
+than allocating legacy boxed closures. new_kthread_with_entry preserves the
+root PID identity of new_kthread; PID-less fixtures use the existing prepared
+constructor. Entry preparation precedes PID allocation and task publication.
+The legacy closure constructors and spawn wrappers remain unchanged.
+
+Ordinary fixtures prepare with KERNEL in sleepable, reclaim-safe task context.
+Freezer helpers use NOWAIT under their serialization/admission gates; PI workers
+use NOWAIT because their callers can hold an RtMutex. Scheduler helpers used
+under exclusion guards, the BH-disabled preparation fixture and the abandoned
+RCU reader's sentinel also use NOWAIT. Entry flags do not grant those callers
+permission to sleep or change the existing stack/bookkeeping allocations.
+
 ## Priority inheritance
 
 `pi::TaskPiHost` binds `krtmutex` to `KtaskRef` and the `PiTaskNode` embedded

@@ -35,8 +35,8 @@ fn run_round(cpus: &[LogicalCpuId], batch: usize, round: usize) -> KResult<()> {
         let output = Arc::new(kmutex::Mutex::new(Vec::new()));
         outputs.push(output.clone());
         let can_start = can_start.clone();
-        let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 while !can_start.load(Ordering::Acquire) {
                     ktask::yield_now();
                 }
@@ -56,7 +56,7 @@ fn run_round(cpus: &[LogicalCpuId], batch: usize, round: usize) -> KResult<()> {
                     });
                 }
                 *output.lock() = samples;
-            },
+            })?,
             "rcu-async-batch".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));

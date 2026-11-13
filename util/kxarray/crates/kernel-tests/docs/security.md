@@ -1,5 +1,11 @@
 # Test Safety
 
+Task-entry allocation failures fail the fixture, never activate a missing entry,
+and drop its captures in the preparing context. Group setup prepares all owners
+before activation. Multi-stage retained-reader tests are not global OOM recovery
+tests; NOWAIT prevents entry reclaim from depending on their held readers or
+preparation hooks. Task stacks, names and nested allocations remain infallible.
+
 Fixtures execute only in kernel unittest images, with trusted constructed values
 and no external input. They use the permanent boot RCU and task services, never
 replace global providers, and restore changed task affinity before assertions.

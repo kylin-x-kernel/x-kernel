@@ -2,6 +2,12 @@
 
 ## Benchmark Fixture Ownership
 
+Soak producers transfer fallibly prepared task entries to the existing prepared
+task constructor. The boot coordinator prepares the complete group before
+activation; entry failure rejects the run with no partially started group.
+KERNEL permissions require sleepable, reclaim-safe task context without locks
+needed by reclaim. The production worker creation protocol is unchanged.
+
 The opt-in release benchmark stack-pins its two ordinary Work fixtures. The
 producer retains each Work and its captures through every submission and final
 flush/cancel; lexical scope then ends their lifetime. Preparation and final

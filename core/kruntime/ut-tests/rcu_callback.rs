@@ -247,8 +247,8 @@ fn preflight_survives_involuntary_migration_before_submission() {
     let checked = has_checked.clone();
     let submitted = has_submitted.clone();
     let destination = LogicalCpuId::new(1);
-    let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             if krcu::preflight_callback_submission().is_err() {
                 return;
             }
@@ -270,7 +270,7 @@ fn preflight_survives_involuntary_migration_before_submission() {
                 Ok(()) => submitted.store(true, Ordering::Release),
                 Err((_, prepared)) => drop(prepared),
             }
-        },
+        }).unwrap(),
         "rcu-preflight-migration".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

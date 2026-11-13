@@ -1,5 +1,10 @@
 # Safety and Ownership
 
+Integration task entry preparation uses KERNEL outside read scopes and writer
+locks. Allocation failure fails the fixture before its new task is activated;
+prepared tasks release captures through the existing task lifecycle. This does
+not make stacks, Arc owners or nested fixture allocations recoverable under OOM.
+
 ## Entry allocation boundary
 
 Entry preparation precedes publication and writer locking. A rejected allocation

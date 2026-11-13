@@ -48,13 +48,13 @@ fn test_context_switch_updates_on_cpu_mask() {
         let mut affinity = KCpuMask::new();
         affinity.set(remote_cpu, true);
 
-        let task = ktask::TaskInner::new_kthread(
-            move || {
+        let task = ktask::TaskInner::new_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 TASK_CPU.store(khal::percpu::this_cpu_id().as_usize(), Ordering::Release);
                 if let Some(t) = ktask::current_may_uninit() {
                     TASK_MASK_BIT.store(t.on_cpu_mask().get(remote_cpu), Ordering::Release);
                 }
-            },
+            }).unwrap(),
             "test_ctx_mask".into(),
             0x2000,
         )

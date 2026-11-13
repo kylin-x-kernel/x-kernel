@@ -1,6 +1,24 @@
 # kruntime — Design Document
 
+## Unit-test task entries
+
+Direct task constructors in the runtime fixtures transfer PreparedTaskEntry
+owners. Ordinary preparation uses KERNEL before activation and outside reader
+scopes and IRQ guards. Early SMP startup probes use NOWAIT before AP publication.
+RCU service producers, owned-record replacement helpers and competitors created
+while a fixture reader is retained use NOWAIT: reclaim must not wait for that
+fixture's coordinator. Concurrent observer groups are fully prepared before
+activation. The TLB fixture uses new_kthread_with_entry to retain its root PID.
+Indirect spawn wrappers and production worker creation are outside this batch.
+
 ## RCU Benchmark Owners
+
+All RCU benchmark tasks use PreparedTaskEntry rather than the legacy boxed
+closure constructor. The coordinator prepares complete concurrent groups before
+activation, including auxiliary readers and competitors. Fallible preparation
+returns to the runner's failure boundary while every task in that group is still
+unactivated. Already completed sequential rounds remain joined. Task stacks and
+scheduler bookkeeping are not made fallible by this change.
 
 Release-only callback, backlog and latency records use KBox owners prepared
 with KERNEL permissions in unlocked, reclaim-safe sleepable task context.

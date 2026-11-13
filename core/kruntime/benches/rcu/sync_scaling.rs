@@ -8,6 +8,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
+use kerrno::KResult;
 
 const SAMPLES: usize = 128;
 
@@ -24,17 +25,17 @@ struct ReaderProgress {
     max_body_ns: AtomicU64,
 }
 
-fn start_reader(
+fn prepare_reader(
     cpu: LogicalCpuId,
     gate: Arc<StartGate>,
     should_stop: Arc<AtomicBool>,
     hold_ns: u64,
     is_rcu_reader: bool,
-) -> (ktask::KtaskRef, Arc<ReaderProgress>) {
+) -> KResult<(ktask::KtaskRef, Arc<ReaderProgress>)> {
     let progress = Arc::new(ReaderProgress::default());
     let output = progress.clone();
-    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             gate.ready.fetch_add(1, Ordering::Release);
             while !gate.is_open.load(Ordering::Acquire) {
                 ktask::yield_now();
@@ -68,16 +69,15 @@ fn start_reader(
             }
             output.min_body_ns.store(minimum, Ordering::Relaxed);
             output.max_body_ns.store(maximum, Ordering::Relaxed);
-        },
+        })?,
         "rcu-sync-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
     task.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu));
-    ktask::activate_task(&task);
-    (task, progress)
+    Ok((task, progress))
 }
 
-fn run_load(cpus: &[LogicalCpuId], hold_ns: u64, is_rcu_reader: bool) {
+fn run_load(cpus: &[LogicalCpuId], hold_ns: u64, is_rcu_reader: bool) -> KResult<()> {
     let read_scopes = usize::from(is_rcu_reader);
     for workers in [1, 2, 4] {
         if workers > cpus.len() {
@@ -91,7 +91,7 @@ fn run_load(cpus: &[LogicalCpuId], hold_ns: u64, is_rcu_reader: bool) {
             } else {
                 cpus.iter()
                     .map(|&cpu| {
-                        start_reader(
+                        prepare_reader(
                             cpu,
                             gate.clone(),
                             should_stop.clone(),
@@ -99,7 +99,7 @@ fn run_load(cpus: &[LogicalCpuId], hold_ns: u64, is_rcu_reader: bool) {
                             is_rcu_reader,
                         )
                     })
-                    .collect()
+                    .collect::<KResult<Vec<_>>>()?
             };
             let mut tasks = Vec::with_capacity(workers);
             let mut results = Vec::with_capacity(workers);
@@ -107,8 +107,8 @@ fn run_load(cpus: &[LogicalCpuId], hold_ns: u64, is_rcu_reader: bool) {
                 let output = Arc::new(kmutex::Mutex::new(Vec::new()));
                 results.push(output.clone());
                 let gate = gate.clone();
-                let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-                    move || {
+                let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+                    ktask::PreparedTaskEntry::new(move || {
                         let mut samples = Vec::with_capacity(SAMPLES);
                         gate.ready.fetch_add(1, Ordering::Release);
                         // Yield outside read scopes so the gate works on UP too.
@@ -127,13 +127,18 @@ fn run_load(cpus: &[LogicalCpuId], hold_ns: u64, is_rcu_reader: bool) {
                             samples.push(end - start);
                         }
                         *output.lock() = samples;
-                    },
+                    })?,
                     "rcu-sync-scaling".into(),
                     kbuild_config::TASK_STACK_SIZE,
                 ));
                 task.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu));
-                ktask::activate_task(&task);
                 tasks.push(task);
+            }
+            for (reader, _) in &readers {
+                ktask::activate_task(reader);
+            }
+            for task in &tasks {
+                ktask::activate_task(task);
             }
             while gate.ready.load(Ordering::Acquire) != workers + readers.len() {
                 ktask::yield_now();
@@ -173,6 +178,7 @@ fn run_load(cpus: &[LogicalCpuId], hold_ns: u64, is_rcu_reader: bool) {
             report(cpus, &results, round, hold_ns, elapsed_ns, read_scopes);
         }
     }
+    Ok(())
 }
 
 fn report(
@@ -214,10 +220,19 @@ fn report(
 
 /// Measures full public calls, including allocation, GP and scheduling costs.
 pub(super) fn run(cpus: &[LogicalCpuId]) {
-    run_load(cpus, 0, false);
+    let result = run_load(cpus, 0, false);
+    assert!(
+        result.is_ok(),
+        "RCU sync task preparation failed: {result:?}"
+    );
     for hold_ns in [10_000, 1_000_000] {
-        run_load(cpus, hold_ns, false);
-        run_load(cpus, hold_ns, true);
+        for is_rcu_reader in [false, true] {
+            let result = run_load(cpus, hold_ns, is_rcu_reader);
+            assert!(
+                result.is_ok(),
+                "RCU sync task preparation failed: {result:?}"
+            );
+        }
     }
     klogger::kprintln!("RCU_SYNC_SCALING_PASS");
 }

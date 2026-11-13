@@ -154,7 +154,9 @@ mod tests_wake_affinity {
     use crate::{KCpuMask, KtaskRef, TaskInner, TaskState};
 
     fn test_task_on(home: usize) -> KtaskRef {
-        let task = TaskInner::new_internal(|| {}, "wake-aff".into(), 4096).into_arc();
+        let task = TaskInner::new_pidless_kthread_with_entry(
+            crate::PreparedTaskEntry::new_nowait(|| {}).unwrap(), "wake-aff".into(), 4096,
+        ).into_arc();
         task.set_cpu_id(LogicalCpuId::new(home));
         task
     }
@@ -164,7 +166,9 @@ mod tests_wake_affinity {
     #[def_test]
     fn set_task_affinity_on_unpublished_task_is_mask_only() {
         if kcpu_id_map::nr_cpus() >= 2 {
-            let task = TaskInner::new_internal(|| {}, "aff-prep".into(), 4096).into_arc();
+            let task = TaskInner::new_pidless_kthread_with_entry(
+                crate::PreparedTaskEntry::new(|| {}).unwrap(), "aff-prep".into(), 4096,
+            ).into_arc();
             assert_eq!(task.cpu_id().as_usize(), 0);
             assert!(task.is_ready());
 
@@ -876,7 +880,9 @@ mod tests_rt_wire {
 
     #[def_test]
     fn set_task_prio_keeps_realtime_policy() {
-        let task = TaskInner::new_internal(|| {}, "nice-rt".into(), 4096).into_arc();
+        let task = TaskInner::new_pidless_kthread_with_entry(
+            crate::PreparedTaskEntry::new(|| {}).unwrap(), "nice-rt".into(), 4096,
+        ).into_arc();
         #[cfg(feature = "smp")]
         task.set_cpu_id(this_cpu_id());
         let now_ns = khal::time::monotonic_time_nanos();

@@ -137,10 +137,19 @@ fn stress(target: LogicalCpuId, deadline_ns: u64, progress: Arc<AtomicUsize>) {
 ///
 /// # Panics
 /// Panics on admission/drain errors, incorrect callback counts or placement,
-/// failed task joins, a duration above one day, or fatal allocation failure.
+/// failed task joins, a duration above one day, task-entry preparation failure,
+/// or fatal nested allocation failure.
 /// An external timeout must diagnose hangs; elapsed times are measurements,
 /// not pass thresholds.
 pub fn run(seconds: usize) {
+    let result = run_prepared(seconds);
+    assert!(
+        result.is_ok(),
+        "workqueue task preparation failed: {result:?}"
+    );
+}
+
+fn run_prepared(seconds: usize) -> kerrno::KResult<()> {
     deferred::run();
     assert!(seconds <= 86400);
     let mut cpus = Vec::new();
@@ -162,14 +171,16 @@ pub fn run(seconds: usize) {
     for (index, &cpu) in cpus.iter().enumerate() {
         let target = cpus[(index + 1) % cpus.len()];
         let progress = progress.clone();
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || stress(target, deadline, progress),
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || stress(target, deadline, progress))?,
             "ng-soak".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
         task.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu));
-        ktask::activate_task(&task);
         tasks.push(task);
+    }
+    for task in &tasks {
+        ktask::activate_task(task);
     }
     let mut last_report = begin;
     while now_ns() < deadline {
@@ -197,4 +208,5 @@ pub fn run(seconds: usize) {
         }
     }
     klogger::kprintln!("NG_RUN_PASS");
+    Ok(())
 }

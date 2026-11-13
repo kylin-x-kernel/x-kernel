@@ -199,12 +199,12 @@ fn replace_in_task(
 ) -> ktask::KtaskRef {
     let value = value.clone();
     let probe = probe.clone();
-    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new_nowait(move || {
             let old = value.replace_sync(payload(next, &probe)).unwrap();
             probe.returned[next - 2].store(old.version, Ordering::Release);
             drop(old);
-        },
+        }).unwrap(),
         "rcu-replace".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -221,8 +221,8 @@ fn overlapping_replacements_keep_old_readers_and_return_distinct_owners() {
     let value = Arc::new(Rcu::new(payload(1, &probe)));
     let reader_value = value.clone();
     let reader_probe = probe.clone();
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             krcu::with_read(|token| {
                 // Keep the first version across preemption without blocking.
                 let old = reader_value.read(token);
@@ -237,7 +237,7 @@ fn overlapping_replacements_keep_old_readers_and_return_distinct_owners() {
                     Ordering::Release,
                 );
             });
-        },
+        }).unwrap(),
         "rcu-old-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -258,8 +258,8 @@ fn overlapping_replacements_keep_old_readers_and_return_distinct_owners() {
     // Joining a real same-CPU competitor establishes a scheduler boundary
     // before the enrollment check. The reader cannot exit its scope until we
     // release it below, so registration cannot disappear before that check.
-    let competitor = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        || {},
+    let competitor = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new_nowait(|| {}).unwrap(),
         "rcu-reader-competitor".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -461,8 +461,8 @@ fn submit_softirq_reader(value: &Arc<Rcu<Payload>>, reads: &Arc<SoftirqReads>, c
     let task_accepted = accepted.clone();
     // Public submission selects current CPU. A pinned producer preserves the
     // original per-CPU executor coverage without exposing callback queues.
-    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new_nowait(move || {
             let reader = KBox::into_raw(
                 KBox::new_nowait(SoftirqReader {
                     node: krcu_core::CallbackNode::new(read_from_softirq),
@@ -485,7 +485,7 @@ fn submit_softirq_reader(value: &Arc<Rcu<Payload>>, reads: &Arc<SoftirqReads>, c
                 Ok(()) => task_accepted.store(true, Ordering::Release),
                 Err((_, prepared)) => drop(prepared),
             }
-        },
+        }).unwrap(),
         "rcu-softirq-producer".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -657,8 +657,8 @@ fn migrated_reader_keeps_old_owner_until_scope_exit() {
     let reader_probe = probe.clone();
     let source = LogicalCpuId::new(0);
     let destination = LogicalCpuId::new(1);
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             krcu::with_read(|token| {
                 // Keep the borrowed version through involuntary migration.
                 let old = reader_value.read(token);
@@ -676,7 +676,7 @@ fn migrated_reader_keeps_old_owner_until_scope_exit() {
                     Ordering::Release,
                 );
             });
-        },
+        }).unwrap(),
         "rcu-migrating-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

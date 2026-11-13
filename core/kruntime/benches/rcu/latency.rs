@@ -180,8 +180,17 @@ fn report(cpu: LogicalCpuId, round: usize, metric: &str, mut values: Vec<u64>) {
 ///
 /// # Panics
 /// Panics on rejected operations, failed joins, wrong callback context/CPU or
-/// inconsistent clock observations. There is no latency pass threshold.
+/// inconsistent clock observations or task-entry preparation failure.
+/// There is no latency pass threshold.
 pub(crate) fn run() {
+    let result = run_prepared();
+    assert!(
+        result.is_ok(),
+        "RCU latency task preparation failed: {result:?}"
+    );
+}
+
+fn run_prepared() -> KResult<()> {
     let mut cpus = Vec::new();
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
     assert!(!cpus.is_empty());
@@ -193,8 +202,8 @@ pub(crate) fn run() {
         for round in 0..=ROUNDS {
             let result = Arc::new(kmutex::Mutex::new(RoundSamples::default()));
             let output = result.clone();
-            let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-                move || {
+            let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+                ktask::PreparedTaskEntry::new(move || {
                     let callbacks = measure(cpu);
                     let sync_wait_ns = measure_sync_wait();
                     let reads = read_cost::measure();
@@ -203,7 +212,7 @@ pub(crate) fn run() {
                         sync_wait_ns,
                         reads,
                     };
-                },
+                })?,
                 "rcu-latency".into(),
                 kbuild_config::TASK_STACK_SIZE,
             ));
@@ -260,4 +269,5 @@ pub(crate) fn run() {
     sync_scaling::run(&cpus);
     preempted_readers::run(&cpus);
     klogger::kprintln!("RCU_LATENCY_PASS");
+    Ok(())
 }

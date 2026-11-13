@@ -90,8 +90,8 @@ fn detached_successor_survives_reader_and_returns_task_owned_payload() {
     let has_entered = Arc::new(AtomicBool::new(false));
     let can_exit = Arc::new(AtomicBool::new(false));
     let is_old_valid = Arc::new(AtomicBool::new(false));
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new({
             let list = list.clone();
             let probe = probe.clone();
             let has_entered = has_entered.clone();
@@ -115,7 +115,7 @@ fn detached_successor_survives_reader_and_returns_task_owned_payload() {
                     );
                 });
             }
-        },
+        }).unwrap(),
         "rcu-list-task-retirement-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

@@ -2,6 +2,12 @@
 
 ## Benchmark Stack Lifetimes
 
+Soak entry allocation happens before any producer is activated, in the
+sleepable, reclaim-safe boot coordinator. Preparation errors release the
+unactivated task references using the existing deferred finalizer and fail the
+run, rather than publish partial success. Nested allocations remain outside
+this fallible-owner boundary.
+
 Stack-pinned benchmark Work never escapes its producer's lexical scope. Its
 capture storage is declared first and remains live through final cancellation
 and drain. The normal and BH callbacks borrow only those retained captures;

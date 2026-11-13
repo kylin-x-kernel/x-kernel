@@ -80,8 +80,8 @@ fn run_round(reader_cpu: LogicalCpuId, count: usize, round: usize) -> KResult<()
         .collect::<KResult<Vec<_>>>()?;
     let gate = Arc::new(ReaderGate::default());
     let reader_gate = gate.clone();
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             krcu::with_read(|_| {
                 let start_ns = khal::time::monotonic_time_nanos();
                 // Acquire on the producer side orders every submission after
@@ -95,7 +95,7 @@ fn run_round(reader_cpu: LogicalCpuId, count: usize, round: usize) -> KResult<()
                     core::hint::spin_loop();
                 }
             });
-        },
+        })?,
         "rcu-backlog-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

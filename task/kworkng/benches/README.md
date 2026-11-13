@@ -1,5 +1,15 @@
 # Kernel Benchmarks And Soak
 
+Soak producer entries use PreparedTaskEntry with KERNEL permissions in the
+sleepable, reclaim-safe boot coordinator. All entries and CPU masks are prepared
+before any producer is activated. Failure returns to the runner's assertion
+boundary without starting that group or emitting its PASS markers; prepared
+task references retain their existing deferred cleanup. The duration clock
+still starts before producer preparation, so startup cost remains part of the
+soak window. Earlier warmup work is already drained. Task stacks, task owners
+and dynamic worker services retain their existing allocation contracts.
+Guest validation exercises the successful group; it does not inject entry OOM.
+
 The ordinary Work fixtures are stack-pinned for their full lexical lifetime.
 Their captures outlive the Work, and final flush/cancel completes before either
 leaves scope. This removes two fixture-owner allocations without changing the

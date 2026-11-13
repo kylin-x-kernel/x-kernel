@@ -1,5 +1,28 @@
 # Explicit Kernel RCU Validation
 
+## Task Entry Preparation
+
+All eleven task-entry construction sites use PreparedTaskEntry with KERNEL
+permissions in the coordinator's sleepable, reclaim-safe task context, outside
+read scopes and locks needed by reclaim. Creating an RCU reader does not mean
+that its entry is allocated inside that reader's eventual read scope.
+
+Each concurrent group prepares every entry before activating any member. This
+includes both reader and writer sets in torture, reader and competitor sets in
+preemption measurements, and pressure readers plus synchronous waiters. Torture
+still waits for every reader to run before activating the already-prepared
+writers. Sequential latency rounds finish their previous task before preparing
+the next. Allocation errors unwind the unactivated group and are rejected at the
+runner boundary; no final PASS is printed. Prepared task references use the
+existing deferred finalizer, so captured-owner cleanup need not finish before
+the error returns. No new cancellation protocol for running tasks is needed.
+
+Task stacks, task references, names, Vec/Arc and other nested allocations retain
+their existing contracts. This migration does not change production dynamic
+worker creation. Group preparation changes startup overlap, so cross-revision
+performance equivalence is not claimed. Guest runs check successful activation,
+joins and accounting; they do not inject task-entry allocation failure.
+
 ## Callback Owner Preparation
 
 Callback records use KBox with KERNEL permissions, prepared in sleepable,

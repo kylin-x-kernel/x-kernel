@@ -117,8 +117,8 @@ fn check_index_reuse(is_interrupt_reader: bool) -> unittest::TestResult {
         let entered = entered.clone();
         let can_exit = can_exit.clone();
         let valid = valid.clone();
-        ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 let wait_for_writer = || {
                     entered.store(true, Ordering::Release);
                     while !can_exit.load(Ordering::Acquire) {
@@ -131,7 +131,7 @@ fn check_index_reuse(is_interrupt_reader: bool) -> unittest::TestResult {
                     old.read_across(wait_for_writer)
                 };
                 valid.store(matches, Ordering::Release);
-            },
+            }).unwrap(),
             "irq-index-old-reader".into(),
             kbuild_config::TASK_STACK_SIZE,
         ))
@@ -400,8 +400,8 @@ fn local_flow_handlers_overlap_on_distinct_cpus() {
     let mut tasks = alloc::vec::Vec::new();
     for cpu in 0..2 {
         let probe = probe.clone();
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 let pin = kspin::NoPreemptIrqSave::new();
                 probe.set_enabled(true);
                 let completed = probe.dispatch();
@@ -415,7 +415,7 @@ fn local_flow_handlers_overlap_on_distinct_cpus() {
                 } else {
                     1
                 });
-            },
+            }).unwrap(),
             "local_irq_overlap".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));

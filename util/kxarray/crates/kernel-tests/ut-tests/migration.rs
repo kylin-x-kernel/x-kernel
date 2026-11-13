@@ -41,8 +41,8 @@ fn wait_for_flag(flag: &AtomicBool) {
 }
 
 fn prepare_reader(array: Arc<XArray<KBox<Version>>>, history: Arc<History>) -> ktask::KtaskRef {
-    ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             krcu::with_read(|scope| {
                 let old = array.read(scope, usize::MAX);
                 history.has_entered.store(true, Ordering::Release);
@@ -60,7 +60,7 @@ fn prepare_reader(array: Arc<XArray<KBox<Version>>>, history: Arc<History>) -> k
                     Ordering::Release,
                 );
             });
-        },
+        }).unwrap(),
         "xarray-migrating-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ))
@@ -178,8 +178,8 @@ fn prepared_writer_migrates_before_replacement_and_retires_once() {
         ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(0))
     ));
     let has_published = Arc::new(AtomicBool::new(false));
-    let writer = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        {
+    let writer = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new_nowait({
             let array = array.clone();
             let history = history.clone();
             let has_published = has_published.clone();
@@ -192,7 +192,7 @@ fn prepared_writer_migrates_before_replacement_and_retires_once() {
                     Ordering::Release,
                 );
             }
-        },
+        }).unwrap(),
         "xarray-migrating-writer".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

@@ -80,8 +80,8 @@ fn verify_implicit_region<G>(
     let updater_published = published.clone();
     let updater_handshake = handshake.clone();
     let updater_result = result.clone();
-    let updater = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let updater = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             let nodes = [const { ReaderNode::new() }; kbuild_config::NR_CPUS];
             // SAFETY: sole controller of these isolated nodes. Only READER_CPU reads
             // this fixture's publication; no production reader uses the nodes.
@@ -145,7 +145,7 @@ fn verify_implicit_region<G>(
                 observed,
                 invoked,
             ));
-        },
+        }).unwrap(),
         "rcu-implicit-updater".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -155,8 +155,8 @@ fn verify_implicit_region<G>(
 
     let reader_handshake = handshake.clone();
     let reader_published = published.clone();
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             // Single-CPU affinity keeps this permanent observation tied to the
             // reader CPU even after the tested guard ends. Publish before entry
             // so no fixture lock changes the implicit region being exercised.
@@ -202,7 +202,7 @@ fn verify_implicit_region<G>(
             // SAFETY: matching same-CPU exit before any task work or guard release.
             unsafe { krcu::exit_user_quiescent() };
             drop(boundary);
-        },
+        }).unwrap(),
         "rcu-implicit-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

@@ -8,6 +8,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kalloc_types::KBox;
+use kerrno::KResult;
 use krcu::Rcu;
 
 #[path = "retirement.rs"]
@@ -112,7 +113,7 @@ fn run_writer(value: &Rcu<Payload>, ledger: &Arc<Ledger>, writer_index: usize) {
     }
 }
 
-fn run_batch() {
+fn run_batch() -> KResult<()> {
     // Readers only delay for finite work and yield outside their scope. The
     // same workload can therefore run on UP without relying on preemption.
     let reader_count = kcpu_id_map::nr_cpus().max(2);
@@ -129,13 +130,26 @@ fn run_batch() {
     for index in 0..reader_count {
         let value = value.clone();
         let ledger = ledger.clone();
-        let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || run_reader(&value, &ledger, index),
+        let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || run_reader(&value, &ledger, index))?,
             "rcu-torture-reader".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
-        ktask::activate_task(&reader);
         readers.push(reader);
+    }
+    let mut writers = Vec::new();
+    for writer_index in 0..WRITERS {
+        let value = value.clone();
+        let ledger = ledger.clone();
+        let writer = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || run_writer(&value, &ledger, writer_index))?,
+            "rcu-torture-writer".into(),
+            kbuild_config::TASK_STACK_SIZE,
+        ));
+        writers.push(writer);
+    }
+    for reader in &readers {
+        ktask::activate_task(reader);
     }
     // Require every reader to run, rather than accepting a zero-read pass.
     // The external bounded QEMU runner diagnoses a scheduling/service stall;
@@ -147,17 +161,8 @@ fn run_batch() {
     {
         ktask::yield_now();
     }
-    let mut writers = Vec::new();
-    for writer_index in 0..WRITERS {
-        let value = value.clone();
-        let ledger = ledger.clone();
-        let writer = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || run_writer(&value, &ledger, writer_index),
-            "rcu-torture-writer".into(),
-            kbuild_config::TASK_STACK_SIZE,
-        ));
-        ktask::activate_task(&writer);
-        writers.push(writer);
+    for writer in &writers {
+        ktask::activate_task(writer);
     }
     let writer_statuses: Vec<_> = writers.iter().map(|task| task.join()).collect();
     ledger.should_stop.store(true, Ordering::Relaxed);
@@ -210,6 +215,7 @@ fn run_batch() {
             usize::from(id != final_id)
         );
     }
+    Ok(())
 }
 
 /// Runs finite concurrent batches for at least the requested duration.
@@ -218,10 +224,15 @@ fn run_batch() {
 ///
 /// # Panics
 /// Panics on invalid duration, failed joins, content/ownership errors or lack
-/// of observed reads. An external timeout must diagnose a stalled batch.
+/// of observed reads or task-entry preparation failure. An external timeout
+/// must diagnose a stalled batch.
 pub(crate) fn run(seconds: usize) {
     assert!((1..=86400).contains(&seconds));
-    retirement::run();
+    let result = retirement::run();
+    assert!(
+        result.is_ok(),
+        "RCU retirement task preparation failed: {result:?}"
+    );
     let begin = khal::time::monotonic_time_nanos();
     let deadline = begin + seconds as u64 * 1_000_000_000;
     let mut batches = 0;
@@ -230,8 +241,16 @@ pub(crate) fn run(seconds: usize) {
         kcpu_id_map::nr_cpus()
     );
     loop {
-        run_batch();
-        callbacks::run();
+        let result = run_batch();
+        assert!(
+            result.is_ok(),
+            "RCU torture task preparation failed: {result:?}"
+        );
+        let result = callbacks::run();
+        assert!(
+            result.is_ok(),
+            "RCU callback task preparation failed: {result:?}"
+        );
         batches += 1;
         if khal::time::monotonic_time_nanos() >= deadline {
             break;

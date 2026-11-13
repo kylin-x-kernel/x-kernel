@@ -53,8 +53,8 @@ fn paired_retirement_preserves_one_shared_owner_until_reader_exit() {
     assert!(ktask::set_current_affinity(
         ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(0))
     ));
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             krcu::with_read(|scope| {
                 let left = reader_arrays[0].read(scope, usize::MAX);
                 let right = reader_arrays[1].read(scope, usize::MAX);
@@ -69,7 +69,7 @@ fn paired_retirement_preserves_one_shared_owner_until_reader_exit() {
                     Ordering::Release,
                 );
             });
-        },
+        }).unwrap(),
         "xarray-paired-retirement".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

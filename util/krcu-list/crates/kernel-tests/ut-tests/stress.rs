@@ -41,8 +41,8 @@ fn opt_in_concurrent_publish_unlink_and_reclaim() {
         let completed = completed.clone();
         let is_invalid = is_invalid.clone();
         let can_start = can_start.clone();
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 while !can_start.load(Ordering::Acquire) {
                     ktask::yield_now();
                 }
@@ -65,12 +65,14 @@ fn opt_in_concurrent_publish_unlink_and_reclaim() {
                     }
                 }
                 completed.fetch_add(1, Ordering::Release);
-            },
+            }).unwrap(),
             "rcu-list-stress".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
-        ktask::activate_task(&task);
         tasks.push(task);
+    }
+    for task in &tasks {
+        ktask::activate_task(task);
     }
     let started = khal::time::monotonic_time().as_nanos_u64_saturating();
     can_start.store(true, Ordering::Release);
