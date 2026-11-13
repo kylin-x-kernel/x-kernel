@@ -1,9 +1,13 @@
 # kexec design
 
-The unittest-only `PartialInstallProbe::observe` retains its existing standard
-`Box` callback contract with syscall exec lifecycle fixtures. Its field has a
-narrow `std_box_in_kernel_tests` exception; the caller's construction is exempted
-at its own fixture boundary.
+The unittest-only `PartialInstallProbe::new` prepares a KBox callback owner in
+sleepable, reclaim-safe task context before destructive exec operations. The
+syscall fixture prepares it before `de_thread()`; allocation failure returns
+`NoMemory` without invoking the observer or starting thread-group surgery.
+Installation invokes the already prepared owner under the target MM lock,
+without allocating another callback owner. Dropping an unused probe releases
+its captures without invoking them, covered by a loader unit test. This is not
+global OOM injection or a guarantee about nested allocations.
 
 ## Purpose and background
 

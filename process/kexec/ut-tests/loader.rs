@@ -26,6 +26,26 @@ use crate::elf_image::tests::{
 
 static TEST_FS: FileSystemType = FileSystemType::internal("kexec-test");
 
+#[def_test]
+fn partial_install_probe_releases_unused_capture_without_invocation() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = calls.clone();
+    let probe = super::PartialInstallProbe::new(
+        Arc::new(AtomicUsize::new(0)),
+        move |_| {
+            captured.fetch_add(1, Ordering::Relaxed);
+        },
+    )
+    .unwrap();
+    assert_eq!(Arc::strong_count(&calls), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    drop(probe);
+    assert_eq!(Arc::strong_count(&calls), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
 fn image_request(data: Vec<u8>, args: Vec<String>) -> ExecRequest {
     let cached_data = data.clone();
     let size = data.len() as u64;

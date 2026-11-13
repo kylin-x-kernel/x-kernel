@@ -1,5 +1,13 @@
 # Prepared Workqueue API Security
 
+## Benchmark Stack Lifetimes
+
+Stack-pinned benchmark Work never escapes its producer's lexical scope. Its
+capture storage is declared first and remains live through final cancellation
+and drain. The normal and BH callbacks borrow only those retained captures;
+nonblocking cancellation alone is not used as permission to destroy the Work.
+This removes fixture boxing, not the benchmark's other allocation risks.
+
 ## Partition Reservation Failure
 
 All three default partition tables are reserved before BH preparation and normal

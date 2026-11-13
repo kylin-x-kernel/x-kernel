@@ -2463,6 +2463,7 @@ dependencies = [
  "entropy",
  "filemap",
  "kaddr_layout",
+ "kalloc-types",
  "kcred",
  "kernel-elf-parser",
  "kerrno",

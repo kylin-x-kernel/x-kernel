@@ -1,5 +1,14 @@
 # ksyscall security and reliability
 
+## Exec fixture allocation boundary
+
+Unittest partial-install callback ownership is allocated before `de_thread()`.
+Owner allocation failure cannot introduce a recoverable return after that
+irreversible step. The prepared observer still runs under the target MM lock;
+moving preparation earlier does not relax its lock-order or capture-lifetime
+requirements. This change is absent from non-unittest exec paths and does not
+make nested exec allocations fallible.
+
 ## x86_64 signal-return input
 
 Signal-frame pointers, lengths, register values and xstate bytes are untrusted.

@@ -1,5 +1,16 @@
 # kruntime — Design Document
 
+## RCU Benchmark Owners
+
+Release-only callback, backlog and latency records use KBox owners prepared
+with KERNEL permissions in unlocked, reclaim-safe sleepable task context.
+The batch fixture reserves storage before constructing its live-counted record;
+an injected reservation failure verifies that accounting and references remain
+unchanged. Raw transfer and recovery stay paired with KBox. Failed preparation
+cannot produce a successful batch or complete latency distribution. Backlog
+owners are all prepared before activating the blocking reader. See
+`benches/rcu/README.md` for the release-only validation and measurement limits.
+
 ## Network Startup Owners
 
 Late-init task context calls the fallible `knet::init_network`. Device owners

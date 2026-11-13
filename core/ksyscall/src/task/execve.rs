@@ -336,6 +336,11 @@ fn exec_request(
 
     let args = request.args().to_vec();
     let prepared = prepare_user_app_request(request)?;
+    #[cfg(unittest)]
+    let prepared = match probe.as_deref() {
+        Some(probe) => probe.prepare_image_probe(prepared)?,
+        None => prepared,
+    };
     // Everything that can still fail with a plain errno must run before the
     // first irreversible step. `de_thread()` is that step: once the siblings
     // are gone the old program cannot be resumed, so allocate the new address
@@ -377,10 +382,10 @@ fn exec_request(
         .with_exe_file(exe_file)
         .with_auxv(prepared.auxv_bytes().to_vec());
     #[cfg(unittest)]
-    let (prepared, exec_update) = if let Some(probe) = probe.as_deref_mut() {
-        probe.attach_failure_probes(prepared, exec_update)
+    let exec_update = if let Some(probe) = probe.as_deref() {
+        probe.attach_update_probe(exec_update)
     } else {
-        (prepared, exec_update)
+        exec_update
     };
 
     #[cfg(feature = "tee")]

@@ -1,5 +1,13 @@
 # Prepared Workqueue API
 
+## Benchmark Fixture Ownership
+
+The opt-in release benchmark stack-pins its two ordinary Work fixtures. The
+producer retains each Work and its captures through every submission and final
+flush/cancel; lexical scope then ends their lifetime. Preparation and final
+drain remain outside the measured interval. Owned delayed work and dynamic
+worker construction are unchanged.
+
 ## Unit-Test Callback Ownership
 
 Static-publication fixtures intentionally leak KBox-owned Work for the guest's

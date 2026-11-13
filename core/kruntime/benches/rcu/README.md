@@ -1,5 +1,27 @@
 # Explicit Kernel RCU Validation
 
+## Callback Owner Preparation
+
+Callback records use KBox with KERNEL permissions, prepared in sleepable,
+reclaim-safe task context outside read scopes and reclaim-required locks.
+Invocation and cancellation recover the same raw KBox owner; neither allocates
+another record. Callback destruction remains nonblocking in softirq context.
+The batch runner reserves uninitialized storage before constructing its counted
+record, so allocation failure cannot decrement an unregistered live count.
+A preflight injects reservation failure and checks unchanged live/drop counts
+and ledger references. This is not global allocator OOM injection.
+
+Preparation failure invalidates the run: batch producers report an error and
+the coordinator checks the full expected count after joining and draining;
+latency preparation stops the incomplete round before timing, and the
+coordinator rejects its sample count. Backlog preparation collects all owners
+before starting its reader; failure drops earlier unsubmitted owners and fails
+the round. Async bursts also finish owner preparation before activating any
+worker; reservation failure drops the unsubmitted records and prepared tasks.
+No failed run prints a final pass marker. Nested Vec/Arc and task
+allocations retain their existing policies. These changes do not preserve
+cross-version performance comparability; record the source revision.
+
 ## Ownership Stress
 
 These runtime-owned runners follow kworkng's opt-in boot validation mechanism.

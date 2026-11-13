@@ -5,8 +5,11 @@
 //! Explicit kernel-only release benchmarks and continuous reuse stress.
 //! See `README.md` in this directory for configuration and measurement scope.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use alloc::{sync::Arc, vec::Vec};
+use core::{
+    pin::pin,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use ktime_types::TimeSpan;
@@ -31,7 +34,7 @@ fn now_ns() -> u64 {
 fn measure(target: LogicalCpuId, round: usize) {
     for (kind, queue) in QUEUES.into_iter().enumerate() {
         let calls = AtomicUsize::new(0);
-        let work = Box::pin(Work::with_callback(|| {
+        let work = pin!(Work::with_callback(|| {
             assert_eq!(khal::percpu::this_cpu_id(), target);
             calls.fetch_add(1, Ordering::Relaxed);
         }));
@@ -57,7 +60,7 @@ fn measure(target: LogicalCpuId, round: usize) {
 
 fn stress(target: LogicalCpuId, deadline_ns: u64, progress: Arc<AtomicUsize>) {
     let calls = AtomicUsize::new(0);
-    let work = Box::pin(Work::with_callback(|| {
+    let work = pin!(Work::with_callback(|| {
         assert_eq!(khal::percpu::this_cpu_id(), target);
         calls.fetch_add(1, Ordering::Relaxed);
     }));

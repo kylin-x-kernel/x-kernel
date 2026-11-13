@@ -8,7 +8,7 @@
 //! SimpleFile has no folio reader and its bytes are not a runnable program.
 //! These tests do not enter userspace; exit_tail covers last-user MM retirement.
 
-use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
+use alloc::{format, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult, LinuxError};
@@ -272,35 +272,30 @@ impl ExecProbe {
         matches!(self.case, Case::Fatal | Case::Retirement)
     }
 
-    #[expect(
-        clippy::allow_attributes,
-        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
-    )]
-    #[allow(
-        unknown_lints,
-        std_box_in_kernel_tests,
-        reason = "CG-049-no-std-box-in-kernel-tests: PartialInstallProbe::observe requires Box<dyn Fn(&MmSpace) + Send + Sync>; preserve the existing exec-loader probe API"
-    )]
-    pub(super) fn attach_failure_probes(
-        &mut self,
+    pub(super) fn prepare_image_probe(
+        &self,
         image: kexec::PreparedExecImage,
-        update: kprocess::ProcessExecUpdate,
-    ) -> (kexec::PreparedExecImage, kprocess::ProcessExecUpdate) {
-        let image = if self.case == Case::Partial {
+    ) -> KResult<kexec::PreparedExecImage> {
+        Ok(if self.case == Case::Partial {
             let switch = self.switch.clone();
-            image.with_partial_install_probe(kexec::PartialInstallProbe {
-                hits: self.partial_hits.clone(),
-                observe: Box::new(move |mm| observe_partial(mm, &switch)),
-            })
+            image.with_partial_install_probe(kexec::PartialInstallProbe::new(
+                self.partial_hits.clone(),
+                move |mm| observe_partial(mm, &switch),
+            )?)
         } else {
             image
-        };
-        let update = if self.case == Case::Update {
+        })
+    }
+
+    pub(super) fn attach_update_probe(
+        &self,
+        update: kprocess::ProcessExecUpdate,
+    ) -> kprocess::ProcessExecUpdate {
+        if self.case == Case::Update {
             update.with_failure_probe(self.update_hits.clone())
         } else {
             update
-        };
-        (image, update)
+        }
     }
 
     pub(super) fn observe_update(&self, process: &kprocess::Process, entry: usize, sp: usize) {

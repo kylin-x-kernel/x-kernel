@@ -1,5 +1,13 @@
 # kruntime — Security and Reliability Analysis
 
+RCU benchmark record allocation occurs before publication in sleepable,
+reclaim-safe task context. The batch fixture reserves storage before creating
+a record whose destructor decrements its live count; failed reservation cannot
+underflow that count. Invocation and cancellation reconstruct only the original
+KBox allocation through its zero-offset node projection, exactly once. The
+softirq destructor remains nonblocking. Local failure injection checks owner
+reservation only, not nested allocation, global OOM, or production recovery.
+
 Network device-owner reservation failure is fatal only at the configured boot
 network boundary. It occurs before global stack publication and NIC scheduler
 attachment; ordinary namespace callers receive NoMemory. Late init provides

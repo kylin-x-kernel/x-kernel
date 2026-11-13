@@ -1,5 +1,12 @@
 # Kernel Benchmarks And Soak
 
+The ordinary Work fixtures are stack-pinned for their full lexical lifetime.
+Their captures outlive the Work, and final flush/cancel completes before either
+leaves scope. This removes two fixture-owner allocations without changing the
+timed enqueue/flush interval. It does not remove allocations in owned delayed
+work, task creation, or the benchmark's Vec/Arc state; measurements across this
+layout change must retain their source revision rather than claim equivalence.
+
 This opt-in runner uses real boot-installed NG normal/BH/high-BH providers,
 workers, timers and IPIs. It is not a host simulation or an ordinary unit test.
 Cargo bench auto-discovery is disabled: the kernel compiles this runner through

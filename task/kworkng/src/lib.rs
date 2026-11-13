@@ -144,19 +144,22 @@
 //! initialization deliberately retains a prepared allocation for kernel life;
 //! it must not be repeated for each interrupt. Prefer [`WorkHandle`] when the
 //! object must eventually be released.
+//! KBox preparation requires reclaim-safe, sleepable task context without
+//! reclaim-required locks; allocation failure occurs before static publication.
 //!
 //! ```no_run
 //! extern crate alloc;
-//! use alloc::boxed::Box;
-//!
+//! use kalloc_types::KBox;
 //! use kworkng::{Work, queue_static_work};
 //!
 //! fn service_device() {}
 //! // One-time task-context preparation; retain this reference in the producer.
 //! let work: &'static Work<fn()> =
-//!     Box::leak(Box::new(Work::with_callback(service_device as fn())));
+//!     KBox::leak(KBox::new(Work::with_callback(service_device as fn()))?);
 //! queue_static_work(work, None).unwrap(); // Safe, allocation-free publication.
 //! work.flush().unwrap(); // Optional task-context wait, not closure.
+//! //
+//! # Ok::<(), kerrno::KError>(())
 //! ```
 //!
 //! # Borrowed work and BH callbacks

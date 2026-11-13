@@ -5,13 +5,15 @@
 //! A finite old reader creates a known backlog; per-record release timestamps
 //! reconstruct its decay without polling the production queue.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use kalloc_types::KBox;
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
+use kerrno::KResult;
 use krcu::{CallbackNode, PreparedCallback};
 
 const TIMEOUT_NS: u64 = 5_000_000_000;
@@ -32,11 +34,11 @@ struct Record {
 const _: () = assert!(core::mem::offset_of!(Record, node) == 0);
 
 /// # Safety
-/// Consume exactly once the zero-offset node projection of the Box transferred
+/// Consume exactly once the zero-offset node projection of the KBox transferred
 /// by prepare, after detachment. No other owner may access that allocation.
 unsafe fn invoke(node: *mut CallbackNode) {
-    // SAFETY: repr(C) and the offset assertion recover the submitted Box base.
-    let record = unsafe { Box::from_raw(node.cast::<Record>()) };
+    // SAFETY: repr(C) and the offset assertion recover the submitted KBox base.
+    let record = unsafe { KBox::from_raw(node.cast::<Record>()) };
     let observation = record.released_ns.clone();
     assert_eq!(
         kirq::context::interrupt_context_level(),
@@ -49,30 +51,33 @@ unsafe fn invoke(node: *mut CallbackNode) {
 }
 
 /// # Safety
-/// Consume the same Box projection as invoke, solely while unsubmitted.
+/// Consume the same KBox projection as invoke, solely while unsubmitted.
 unsafe fn cancel(node: *mut CallbackNode) {
     // SAFETY: cancellation owns this unqueued allocation exclusively.
-    drop(unsafe { Box::from_raw(node.cast::<Record>()) });
+    drop(unsafe { KBox::from_raw(node.cast::<Record>()) });
 }
 
-fn prepare(observation: &Arc<AtomicU64>) -> PreparedCallback {
-    let record = Box::into_raw(Box::new(Record {
+fn prepare(observation: &Arc<AtomicU64>) -> KResult<PreparedCallback> {
+    let record = KBox::into_raw(KBox::new(Record {
         node: CallbackNode::new(invoke),
         released_ns: observation.clone(),
-    }));
-    // SAFETY: projection preserves provenance of this initialized live Box.
+    })?);
+    // SAFETY: projection preserves provenance of this initialized live KBox.
     let node = unsafe { &raw mut (*record).node };
     // SAFETY: the initialized field of a live allocation cannot be null.
     let node = unsafe { NonNull::new_unchecked(node) };
     // SAFETY: unique stable storage never published to readers; cancellation
     // and callback release it once without blocking. Permanent code and the
     // independently retained observation outlive either transfer path.
-    unsafe { PreparedCallback::new(node, cancel) }
+    Ok(unsafe { PreparedCallback::new(node, cancel) })
 }
 
-fn run_round(reader_cpu: LogicalCpuId, count: usize, round: usize) {
+fn run_round(reader_cpu: LogicalCpuId, count: usize, round: usize) -> KResult<()> {
     let observations: Vec<_> = (0..count).map(|_| Arc::new(AtomicU64::new(0))).collect();
-    let records: Vec<_> = observations.iter().map(prepare).collect();
+    let records = observations
+        .iter()
+        .map(prepare)
+        .collect::<KResult<Vec<_>>>()?;
     let gate = Arc::new(ReaderGate::default());
     let reader_gate = gate.clone();
     let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
@@ -147,6 +152,7 @@ fn run_round(reader_cpu: LogicalCpuId, count: usize, round: usize) {
         releases.len(),
         drained_ns - release_ns
     );
+    Ok(())
 }
 
 pub(super) fn run(cpus: &[LogicalCpuId]) {
@@ -156,7 +162,11 @@ pub(super) fn run(cpus: &[LogicalCpuId]) {
     }
     for count in [256, 1024] {
         for round in 0..=3 {
-            run_round(cpus[cpus.len() - 1], count, round);
+            let result = run_round(cpus[cpus.len() - 1], count, round);
+            assert!(
+                result.is_ok(),
+                "backlog owner preparation failed: {result:?}"
+            );
         }
     }
     klogger::kprintln!("RCU_BACKLOG_PASS");

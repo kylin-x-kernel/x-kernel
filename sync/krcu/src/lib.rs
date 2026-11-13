@@ -122,12 +122,14 @@
 //! retain protection on rejection: do not copy this cancellation policy for
 //! data still accessible to readers. This is a low-level callback example,
 //! not an asynchronous replacement operation on [`Rcu`].
+//! Owner preparation uses KERNEL permissions in sleepable, reclaim-safe task
+//! context without reclaim-required locks, before any publication or read scope.
 //!
 //! ```no_run
 //! extern crate alloc;
-//! use alloc::boxed::Box;
 //! use core::ptr::NonNull;
 //!
+//! use kalloc_types::KBox;
 //! use krcu::{CallbackNode, PreparedCallback, drain_callbacks};
 //!
 //! #[repr(C)]
@@ -138,22 +140,22 @@
 //! const _: () = assert!(core::mem::offset_of!(Record, node) == 0);
 //!
 //! /// # Safety
-//! /// Consume exactly the raw Box owner created below, through its zero-offset
+//! /// Consume exactly the raw KBox owner created below, through its zero-offset
 //! /// node projection. There must be no remaining readers or queue accesses.
 //! unsafe fn release_record(node: *mut CallbackNode) {
 //!     // SAFETY: repr(C), the offset assertion and the original field projection
 //!     // preserve this allocation's base and provenance. Drop cannot block.
-//!     drop(unsafe { Box::from_raw(node.cast::<Record>()) });
+//!     drop(unsafe { KBox::from_raw(node.cast::<Record>()) });
 //! }
 //!
 //! fn submit_and_drain() -> kerrno::KResult<()> {
-//!     let record = Box::into_raw(Box::new(Record {
+//!     let record = KBox::into_raw(KBox::new(Record {
 //!         node: CallbackNode::new(release_record),
 //!         value: 42,
-//!     }));
-//!     // SAFETY: raw projection retains the whole Box allocation's provenance.
+//!     })?);
+//!     // SAFETY: raw projection retains the whole KBox allocation's provenance.
 //!     let node = unsafe { &raw mut (*record).node };
-//!     // SAFETY: a live Box field cannot be null.
+//!     // SAFETY: a live KBox field cannot be null.
 //!     let node = unsafe { NonNull::new_unchecked(node) };
 //!     // SAFETY: unique stable storage, transferable nonblocking cleanup, never
 //!     // published to readers. Cancellation and invocation each consume one owner.

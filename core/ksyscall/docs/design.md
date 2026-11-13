@@ -1,5 +1,14 @@
 # ksyscall design
 
+## Exec fixture owner preparation
+
+The partial-install observer is prepared through `PartialInstallProbe::new`
+after image validation and before `de_thread()`, in unlocked, reclaim-safe
+sleepable task context. Its KBox allocation error returns before thread-group
+surgery. Attaching the process-update counter later only clones an existing
+Arc; it does not allocate another callback owner. The existing partial-install
+failure, scheduling and migration tests retain their observation point.
+
 ## x86_64 signal return
 
 `sys_rt_sigreturn` owns checked user copies of the 304-byte Linux kernel

@@ -74,6 +74,12 @@ They must not reacquire its mutex or wait for a peer that needs that mutex.
 Blocking and migration require IRQs/preemption enabled; scheduler callbacks
 must use cached binding metadata rather than enter the borrowed MM.
 These request-local probes are absent from production builds.
+Their KBox owner is prepared with KERNEL permissions before `de_thread()` in
+sleepable, reclaim-safe task context without reclaim-required locks. Preparation
+failure drops captures without calling them. Invocation under the target MM
+lock does not allocate an owner; capture execution and destruction must still
+respect the caller's context. The cancellation test checks capture release, not
+global allocator failure or nested allocation recovery.
 
 ## Threat analysis
 

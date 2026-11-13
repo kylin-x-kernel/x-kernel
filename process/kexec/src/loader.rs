@@ -315,17 +315,27 @@ pub struct PartialInstallProbe {
     /// Observes borrowed mappings and schedules without reacquiring this MM.
     /// The peer must never require this MM mutex or an inverse lock.
     /// Captured request-local state owns the peer handshake and migration target.
-    #[expect(
-        clippy::allow_attributes,
-        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
-    )]
-    #[allow(
-        unknown_lints,
-        std_box_in_kernel_tests,
-        reason = "CG-049-no-std-box-in-kernel-tests: the existing exec-loader probe API receives \
-                  a standard Box callback from the syscall exec lifecycle fixture"
-    )]
-    pub observe: alloc::boxed::Box<dyn Fn(&MmSpace) + Send + Sync>,
+    observe: kalloc_types::KBox<dyn Fn(&MmSpace) + Send + Sync>,
+}
+
+#[cfg(unittest)]
+impl PartialInstallProbe {
+    /// Prepares a request-local observer before irreversible exec operations.
+    ///
+    /// Requires sleepable, reclaim-safe task context without locks needed by
+    /// reclaim. Returns `NoMemory` if owner allocation fails, dropping the
+    /// captures without invoking the observer. Invocation and destruction must
+    /// satisfy the captures' context requirements; invocation holds the target
+    /// MM lock and must not reacquire it or introduce an inverse lock order.
+    pub fn new(
+        hits: Arc<core::sync::atomic::AtomicUsize>,
+        observe: impl Fn(&MmSpace) + Send + Sync + 'static,
+    ) -> KResult<Self> {
+        Ok(Self {
+            hits,
+            observe: kalloc_types::KBox::new(observe)?,
+        })
+    }
 }
 
 #[cfg(unittest)]
