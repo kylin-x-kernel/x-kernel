@@ -29,6 +29,15 @@ fn create_aligned_buffer(size: usize) -> &'static mut [u8] {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn test_ramdisk_static_basic_operations() {
     let buffer = create_aligned_buffer(2048); // 4 blocks
     let disk = RamDisk::new(buffer);
@@ -82,6 +91,15 @@ fn test_ramdisk_static_basic_operations() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn test_ramdisk_static_boundary_and_errors() {
     let buffer = create_aligned_buffer(1024); // 2 blocks
     let disk = crate::Gendisk::alloc(

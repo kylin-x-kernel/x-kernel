@@ -11,10 +11,9 @@
 //! setup a listener needs: `bind` creates the rendezvous, `listen` enables it,
 //! `connect` queues a connection, and `accept` takes one out.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 
 use async_channel::TryRecvError;
-use async_trait::async_trait;
 use kerrno::{KError, KResult};
 use kio::{IoBufMut, Read, Write};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
@@ -151,6 +150,51 @@ impl Default for SeqpacketTransport {
 }
 
 impl SeqpacketTransport {
+    /// Accepts a connection using an inline, lazily polled future.
+    pub async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
+        let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
+        if *listener.state.lock() == ListenerState::Unlistened {
+            return Err(KError::InvalidInput);
+        }
+
+        let pending = if nonblocking || self.options.nonblocking() {
+            match listener.pending.try_recv() {
+                Ok(pending) => pending,
+                Err(TryRecvError::Empty) => {
+                    let state = *listener.state.lock();
+                    return if state.is_listening() {
+                        Err(KError::WouldBlock)
+                    } else {
+                        Err(KError::InvalidInput)
+                    };
+                }
+                Err(TryRecvError::Closed) => return Err(KError::InvalidInput),
+            }
+        } else {
+            listener
+                .pending
+                .recv()
+                .await
+                .map_err(|_| KError::InvalidInput)?
+        };
+
+        let accepted = Self::new();
+        if self.options.pass_credentials() {
+            accepted.set_option(SetSocketOption::PassCredentials(&true))?;
+        }
+        *accepted.rx.lock() = Some((pending.to_server, pending.server_poll));
+        *accepted.peer.write() = Some(PeerChannel {
+            tx: Some(pending.from_server),
+            read_poll: pending.client_poll,
+            peer_credentials: pending.client_credentials,
+        });
+        accepted
+            .local_addr
+            .write()
+            .clone_from(&self.local_addr.read().clone());
+        Ok((UnixTransport::Seqpacket(accepted), pending.client_addr))
+    }
+
     pub fn new() -> Self {
         Self {
             rx: Mutex::new(None),
@@ -254,7 +298,6 @@ impl Configurable for SeqpacketTransport {
     }
 }
 
-#[async_trait]
 impl UnixTransportOps for SeqpacketTransport {
     fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult {
         let bind_slot_handle = slot.seqpacket.clone();
@@ -360,50 +403,6 @@ impl UnixTransportOps for SeqpacketTransport {
         drop(shutdown);
         self.poll_state.wake();
         Ok(())
-    }
-
-    async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
-        let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
-        if *listener.state.lock() == ListenerState::Unlistened {
-            return Err(KError::InvalidInput);
-        }
-
-        let pending = if nonblocking || self.options.nonblocking() {
-            match listener.pending.try_recv() {
-                Ok(pending) => pending,
-                Err(TryRecvError::Empty) => {
-                    let state = *listener.state.lock();
-                    return if state.is_listening() {
-                        Err(KError::WouldBlock)
-                    } else {
-                        Err(KError::InvalidInput)
-                    };
-                }
-                Err(TryRecvError::Closed) => return Err(KError::InvalidInput),
-            }
-        } else {
-            listener
-                .pending
-                .recv()
-                .await
-                .map_err(|_| KError::InvalidInput)?
-        };
-
-        let accepted = Self::new();
-        if self.options.pass_credentials() {
-            accepted.set_option(SetSocketOption::PassCredentials(&true))?;
-        }
-        *accepted.rx.lock() = Some((pending.to_server, pending.server_poll));
-        *accepted.peer.write() = Some(PeerChannel {
-            tx: Some(pending.from_server),
-            read_poll: pending.client_poll,
-            peer_credentials: pending.client_credentials,
-        });
-        accepted
-            .local_addr
-            .write()
-            .clone_from(&self.local_addr.read().clone());
-        Ok((UnixTransport::Seqpacket(accepted), pending.client_addr))
     }
 
     fn send(&self, mut src: impl Read, options: SendOptions) -> KResult<usize> {

@@ -28,6 +28,16 @@ use kdevice::{
 use kspin::SpinNoPreempt;
 use unittest::{assert, assert_eq, def_test};
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: kclass publication requires the production \
+              CharDeviceImpl boxed trait object"
+)]
 type ClassCell = Arc<SpinNoPreempt<Option<ClassDevice<CharDeviceImpl>>>>;
 
 fn class_cell() -> ClassCell {
@@ -58,6 +68,16 @@ impl CharDevice for TestCharDevice {
     }
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: kclass::CharDeviceImpl is the production Box<dyn \
+              CharDevice + Send + Sync> publication contract"
+)]
 fn test_runtime(name: &str) -> CharDeviceImpl {
     Box::new(TestCharDevice {
         name: String::from(name),
@@ -170,6 +190,16 @@ impl Drop for Cleanup {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: kclass publication requires the production \
+              CharDeviceImpl boxed trait object"
+)]
 fn class_handle_keeps_historical_identity_after_unbind() -> unittest::TestResult {
     const ALIAS: &str = "binding-ref-class-identity";
 
@@ -211,6 +241,16 @@ fn class_handle_keeps_historical_identity_after_unbind() -> unittest::TestResult
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: kclass publication requires the production \
+              CharDeviceImpl boxed trait object"
+)]
 fn class_handle_does_not_block_device_removal() -> unittest::TestResult {
     const ALIAS: &str = "binding-ref-active-class";
 
@@ -243,13 +283,13 @@ fn class_handle_does_not_block_device_removal() -> unittest::TestResult {
 
     // The real DeviceUse, not the class handle, is what rejects teardown.
     let in_use = device.try_acquire().expect("active device admits a use");
-    assert_eq!(
-        remove_device_managed(id),
-        Err(DriverError::ResourceBusy)
-    );
+    assert_eq!(remove_device_managed(id), Err(DriverError::ResourceBusy));
     assert_eq!(cleanups.load(Ordering::SeqCst), 0);
     assert_eq!(device.state(), DeviceState::Active);
-    assert_eq!(kdevice::find_device(id).unwrap().state(), DeviceState::Active);
+    assert_eq!(
+        kdevice::find_device(id).unwrap().state(),
+        DeviceState::Active
+    );
     assert!(class.is_available());
 
     drop(in_use);
@@ -270,6 +310,16 @@ fn class_handle_does_not_block_device_removal() -> unittest::TestResult {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: kclass publication requires the production \
+              CharDeviceImpl boxed trait object"
+)]
 fn class_built_at_bound_becomes_available_on_activation() -> unittest::TestResult {
     const ALIAS: &str = "binding-ref-bound-class";
 
@@ -305,6 +355,16 @@ fn class_built_at_bound_becomes_available_on_activation() -> unittest::TestResul
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: kclass publication requires the production \
+              CharDeviceImpl boxed trait object"
+)]
 fn failed_probe_leaves_its_class_handle_unavailable() -> unittest::TestResult {
     const ALIAS: &str = "binding-ref-failed-class";
 
@@ -345,6 +405,16 @@ fn failed_probe_leaves_its_class_handle_unavailable() -> unittest::TestResult {
 
 #[cfg(feature = "char")]
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: kclass publication requires the production \
+              CharDeviceImpl boxed trait object"
+)]
 fn char_registry_publish_filters_unavailable_class() {
     let id = DeviceId::new(0xB1_0005);
     let parent = Arc::new(DeviceObject::new_bound_for_test(id, DeviceKind::Char));
@@ -355,5 +425,9 @@ fn char_registry_publish_filters_unavailable_class() {
     cleanup.track_class(id);
     assert!(!class.is_available());
     assert!(kclass::find_char_device(id).is_none());
-    assert!(kclass::char_devices().iter().all(|device| device.id() != id));
+    assert!(
+        kclass::char_devices()
+            .iter()
+            .all(|device| device.id() != id)
+    );
 }

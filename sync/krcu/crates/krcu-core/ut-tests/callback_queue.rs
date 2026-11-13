@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::AtomicUsize;
+use kalloc_types::KBox;
 
 use intrusive_collections::container_of;
 use unittest::{assert, assert_eq};
@@ -19,14 +20,17 @@ struct Fixture<F> {
 
 impl<F: FnOnce() + Send + 'static> Fixture<F> {
     fn prepare(callback_fn: F) -> UnsafeRef<CallbackNode> {
-        let object = Box::into_raw(Box::new(Self {
-            node: CallbackNode::new(Self::invoke),
-            callback_fn,
-        }));
-        // SAFETY: initialized Box; raw projection retains enclosing provenance.
+        let object = KBox::into_raw(
+            KBox::new_nowait(Self {
+                node: CallbackNode::new(Self::invoke),
+                callback_fn,
+            })
+            .unwrap(),
+        );
+        // SAFETY: initialized KBox; raw projection retains enclosing provenance.
         let node = unsafe { &raw mut (*object).node };
         // SAFETY: ownership transfers to the fixture queue, with a Send payload
-        // and exactly one terminal invocation that reconstructs this Box.
+        // and exactly one terminal invocation that reconstructs this KBox.
         unsafe { CallbackNode::from_raw(node) }
     }
 
@@ -36,8 +40,8 @@ impl<F: FnOnce() + Send + 'static> Fixture<F> {
         // SAFETY: prepare used raw projection from this concrete allocation.
         let object = unsafe { container_of!(node, Self, node) }.cast_mut();
         // SAFETY: unique terminal invocation; no other owner or borrow remains.
-        let object = unsafe { Box::from_raw(object) };
-        let Self { callback_fn, .. } = *object;
+        let object = unsafe { KBox::from_raw(object) };
+        let Self { callback_fn, .. } = KBox::into_inner(object);
         callback_fn();
     }
 }

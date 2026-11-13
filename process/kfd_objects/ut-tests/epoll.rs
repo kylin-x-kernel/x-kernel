@@ -2,10 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anon_inodefs::AnonInodeFs;
+use kalloc_types::KBox;
 use kerrno::KError;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
@@ -42,8 +43,8 @@ struct TestFile {
     ready_events: AtomicUsize,
     events_on_register: AtomicUsize,
     wake_on_register: AtomicBool,
-    on_register: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    on_poll: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    on_register: Mutex<Option<KBox<dyn Fn() + Send>>>,
+    on_poll: Mutex<Option<KBox<dyn Fn() + Send>>>,
     poll_set: PollSet,
 }
 
@@ -727,18 +728,24 @@ fn test_epoll_edge_rearm_preserves_repeated_same_direction_notifications() {
 
         // Two source notifications race consecutive registrations. Neither
         // changes the sampled mask, as with eventfd writes before a read.
-        *state.on_register.lock() = Some(Box::new({
-            let state = state.clone();
-            move || {
-                state.poll_set.wake();
-                *state.on_register.lock() = Some(Box::new({
-                    let state = state.clone();
-                    move || {
-                        state.poll_set.wake();
-                    }
-                }));
-            }
-        }));
+        *state.on_register.lock() = Some(
+            KBox::new({
+                let state = state.clone();
+                move || {
+                    state.poll_set.wake();
+                    *state.on_register.lock() = Some(
+                        KBox::new_nowait({
+                            let state = state.clone();
+                            move || {
+                                state.poll_set.wake();
+                            }
+                        })
+                        .unwrap(),
+                    );
+                }
+            })
+            .unwrap(),
+        );
 
         let mut out = [k_epoll_event::default(); 1];
         assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
@@ -783,18 +790,24 @@ fn test_epoll_empty_registration_notifications_preserve_future_monitoring() {
             )
             .unwrap();
         state.ready_events.store(0, Ordering::Release);
-        *state.on_register.lock() = Some(Box::new({
-            let state = state.clone();
-            move || {
-                state.poll_set.wake();
-                *state.on_register.lock() = Some(Box::new({
-                    let state = state.clone();
-                    move || {
-                        state.poll_set.wake();
-                    }
-                }));
-            }
-        }));
+        *state.on_register.lock() = Some(
+            KBox::new({
+                let state = state.clone();
+                move || {
+                    state.poll_set.wake();
+                    *state.on_register.lock() = Some(
+                        KBox::new_nowait({
+                            let state = state.clone();
+                            move || {
+                                state.poll_set.wake();
+                            }
+                        })
+                        .unwrap(),
+                    );
+                }
+            })
+            .unwrap(),
+        );
 
         // Both notifications are stale by the final sample. Drive their
         // rechecks explicitly; none may fabricate a ready user event.
@@ -869,22 +882,28 @@ fn test_epoll_edge_rearm_preserves_wake_after_final_readiness_sample() {
             EpollFlags::EDGE_TRIGGER,
         )
         .unwrap();
-    *state.on_register.lock() = Some(Box::new({
-        let state = state.clone();
-        move || {
-            *state.on_poll.lock() = Some(Box::new({
-                let state = state.clone();
-                move || {
-                    // The final sample saw OUT, but data arrives before that
-                    // sample is returned. The callback must already be live.
-                    state
-                        .ready_events
-                        .fetch_or(IoEvents::IN.bits() as usize, Ordering::AcqRel);
-                    state.poll_set.wake();
-                }
-            }));
-        }
-    }));
+    *state.on_register.lock() = Some(
+        KBox::new({
+            let state = state.clone();
+            move || {
+                *state.on_poll.lock() = Some(
+                    KBox::new_nowait({
+                        let state = state.clone();
+                        move || {
+                            // The final sample saw OUT, but data arrives before that
+                            // sample is returned. The callback must already be live.
+                            state
+                                .ready_events
+                                .fetch_or(IoEvents::IN.bits() as usize, Ordering::AcqRel);
+                            state.poll_set.wake();
+                        }
+                    })
+                    .unwrap(),
+                );
+            }
+        })
+        .unwrap(),
+    );
 
     let mut out = [k_epoll_event::default(); 1];
     assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
@@ -924,17 +943,20 @@ fn test_epoll_concurrent_consumer_preserves_requeued_interest() {
             )
             .unwrap();
     }
-    *state.on_register.lock() = Some(Box::new({
-        let epoll = epoll.clone();
-        move || {
-            // A second waiter drains the remaining original entries before the
-            // first waiter's rearm publishes a new read event.
-            let mut out = [k_epoll_event::default(); 2];
-            assert_eq!(epoll.poll_events(&mut out).unwrap(), 2);
-            assert_epoll_event(&out[0], IoEvents::OUT.bits(), 8);
-            assert_epoll_event(&out[1], IoEvents::OUT.bits(), 9);
-        }
-    }));
+    *state.on_register.lock() = Some(
+        KBox::new({
+            let epoll = epoll.clone();
+            move || {
+                // A second waiter drains the remaining original entries before the
+                // first waiter's rearm publishes a new read event.
+                let mut out = [k_epoll_event::default(); 2];
+                assert_eq!(epoll.poll_events(&mut out).unwrap(), 2);
+                assert_epoll_event(&out[0], IoEvents::OUT.bits(), 8);
+                assert_epoll_event(&out[1], IoEvents::OUT.bits(), 9);
+            }
+        })
+        .unwrap(),
+    );
 
     let mut out = [k_epoll_event::default(); 3];
     assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
@@ -974,15 +996,18 @@ fn test_epoll_modify_cannot_be_overwritten_by_inflight_rearm() {
         is_released: AtomicBool::new(false),
         waiters: ktask::WaitQueue::new(),
     });
-    *state.on_register.lock() = Some(Box::new({
-        let gate = gate.clone();
-        move || {
-            gate.has_entered.store(true, Ordering::Release);
-            gate.waiters.notify_all(false);
-            gate.waiters
-                .wait_until(|| gate.is_released.load(Ordering::Acquire));
-        }
-    }));
+    *state.on_register.lock() = Some(
+        KBox::new({
+            let gate = gate.clone();
+            move || {
+                gate.has_entered.store(true, Ordering::Release);
+                gate.waiters.notify_all(false);
+                gate.waiters
+                    .wait_until(|| gate.is_released.load(Ordering::Acquire));
+            }
+        })
+        .unwrap(),
+    );
     let consumer = ktask::spawn({
         let epoll = epoll.clone();
         move || {

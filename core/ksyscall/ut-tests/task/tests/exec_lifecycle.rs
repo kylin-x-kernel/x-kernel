@@ -272,6 +272,15 @@ impl ExecProbe {
         matches!(self.case, Case::Fatal | Case::Retirement)
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: PartialInstallProbe::observe requires Box<dyn Fn(&MmSpace) + Send + Sync>; preserve the existing exec-loader probe API"
+    )]
     pub(super) fn attach_failure_probes(
         &mut self,
         image: kexec::PreparedExecImage,

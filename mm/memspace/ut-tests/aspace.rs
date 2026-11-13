@@ -5,7 +5,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::AtomicUsize;
 
-use kalloc_types::AllocFlags;
+use kalloc_types::{AllocFlags, KBox};
 use khal::{
     paging::{MappingFlags, PageSize, PagingError},
     trap::PageFaultFlags,
@@ -994,7 +994,7 @@ fn synchronous_invalidation_is_complete_after_mm_destruction() {
 // No PTEs are needed: these fixtures exercise VMA ownership and sync dispatch.
 struct MsyncTestRuntime {
     backing: crate::VmBackingInfo,
-    sync: alloc::boxed::Box<dyn Fn(core::ops::Range<u64>) -> KResult + Send + Sync>,
+    sync: KBox<dyn Fn(core::ops::Range<u64>) -> KResult + Send + Sync>,
 }
 
 impl crate::VmRuntimeOps for MsyncTestRuntime {
@@ -1084,7 +1084,7 @@ fn map_msync_file(
     );
     let runtime = Arc::new(MsyncTestRuntime {
         backing,
-        sync: alloc::boxed::Box::new(sync),
+        sync: KBox::new_nowait(sync).unwrap(),
     });
     let runtime = if shared {
         VmRuntimeRef::new_file_shared(runtime)

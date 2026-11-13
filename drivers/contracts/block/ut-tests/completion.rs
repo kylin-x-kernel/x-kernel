@@ -23,7 +23,7 @@ impl BlockSignals for Signals {
 
 struct Waiter {
     signals: Arc<Signals>,
-    on_wait: Option<Box<dyn FnOnce()>>,
+    on_wait: Option<Arc<SpinNoIrq<BioWaitState>>>,
 }
 
 impl BlockWaiter for Waiter {
@@ -32,7 +32,8 @@ impl BlockWaiter for Waiter {
     }
 
     fn wait_completion(&mut self) {
-        self.on_wait.take().expect("completed bio must not wait")();
+        let state = self.on_wait.take().expect("completed bio must not wait");
+        BioWaitState::complete(&state, result(Ok(())));
         core::assert_eq!(self.signals.count.load(Ordering::Relaxed), 1);
     }
 }
@@ -49,6 +50,16 @@ fn pending() -> (Arc<SpinNoIrq<BioWaitState>>, BioWait) {
     (state, wait)
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioVec uses the production Box<[u8]> constructor \
+              and BioMemory implementation"
+)]
 fn result(status: DriverResult) -> BioResult {
     (
         status,
@@ -72,6 +83,15 @@ fn inline_completion_never_prepares_host_wait_resources() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioWait::wait_with requires Box<dyn BlockWaiter>"
+)]
 fn completion_during_wait_preparation_needs_no_notification() {
     let (state, wait) = pending();
     let signals = Arc::new(Signals {
@@ -91,6 +111,15 @@ fn completion_during_wait_preparation_needs_no_notification() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioWait::wait_with requires Box<dyn BlockWaiter>"
+)]
 fn completion_after_enrollment_publishes_result_before_notification() {
     let (state, wait) = pending();
     let signals = Arc::new(Signals {
@@ -100,9 +129,7 @@ fn completion_after_enrollment_publishes_result_before_notification() {
     let (status, vectors) = wait.wait_with(|| {
         Box::new(Waiter {
             signals: signals.clone(),
-            on_wait: Some(Box::new(move || {
-                BioWaitState::complete(&state, result(Ok(())))
-            })),
+            on_wait: Some(state),
         })
     });
     assert_eq!(status, Ok(()));

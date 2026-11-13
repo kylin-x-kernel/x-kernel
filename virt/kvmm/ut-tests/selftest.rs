@@ -35,6 +35,15 @@ impl VcpuHook<CurrentArch> for HostCurrentObserver {
 }
 
 #[unittest::def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: VCPU hook installation still consumes standard Box owners; its lifecycle migration is deferred"
+)]
 fn guest_roundtrip_preserves_host_current() {
     assert!(CurrentArch::percpu_hw_init());
     let vm = Vm::<CurrentArch>::new(VmConfig::new(0, 0, 1)).expect("test VM");

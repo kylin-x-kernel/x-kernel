@@ -46,6 +46,17 @@ impl IrqOp for ReleaseProvider {
     }
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: portable MSI-X fixture requires static provider \
+              and aligned MMIO backing retained through copied accessors; kernel allocator \
+              dependencies are forbidden"
+)]
 fn fixture() -> (
     PciIrqState,
     &'static ReleaseProvider,

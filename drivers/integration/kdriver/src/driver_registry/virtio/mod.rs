@@ -504,6 +504,16 @@ fn activate_mmio_with<A: MmioAccess>(
 /// attribute DMA calls to this scenario; every other device keeps the
 /// production dispatch unchanged.
 #[cfg(all(feature = "virtio", unittest))]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the fixture dispatch transfers the production \
+              boxed VsockDeviceImpl from the counting-HAL constructor to kclass publication"
+)]
 fn dispatch_fixture_try_new<T: virtio::Transport + Send + 'static>(
     parent: Arc<DeviceObject>,
     kind: DeviceKind,

@@ -4,7 +4,7 @@
 
 //! Register storage model; no claim of GIC hardware virtualization coverage.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 
 use super::*;
 use crate::vm::{Vm, VmConfig};
@@ -44,7 +44,7 @@ fn shared_hooks_serialize_saved_image_queries_and_stop() {
 
 #[unittest::def_test(serial)]
 fn entry_failure_detaches_hardware_without_consuming_saved_pending() {
-    let mut registers = Box::new([0u32; 1024]);
+    let mut registers = alloc::vec![0u32; 1024];
     let waker: Arc<dyn VcpuWaker> = Arc::new(NoWake);
     let vgic = Vgic::new(1, registers.as_mut_ptr() as usize, Arc::downgrade(&waker));
     let vm = Vm::<Aarch64Vhe>::new(VmConfig::new(0, 0, 1)).expect("test VM");

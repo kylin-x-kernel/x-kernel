@@ -452,6 +452,15 @@ fn spawn_successful_waiting_mount(block_device: Arc<block::BlockDevice>) -> ktas
     })
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn add_test_disk(name: &str, major: u32) -> (block::GendiskRef, Arc<block::BlockDevice>) {
     let disk = block::Gendisk::alloc(String::from(name), major, 0, 1, Box::new(TestBlockDevice))
         .expect("valid superblock test disk");
@@ -826,6 +835,15 @@ impl block::BioOperations for OpenLifecycleDevice {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn mount_opens_once_and_closes_at_failure_or_logical_shutdown() {
     let backend = Arc::new(OpenLifecycleDevice {
         modes: crate::Mutex::new(alloc::vec::Vec::new()),
@@ -933,6 +951,15 @@ fn mount_opens_once_and_closes_at_failure_or_logical_shutdown() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn registry_lookup_defers_final_superblock_drop_until_after_unlock() {
     let backend = Arc::new(OpenLifecycleDevice {
         modes: crate::Mutex::new(alloc::vec::Vec::new()),

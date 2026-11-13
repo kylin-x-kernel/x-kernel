@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     assert, assert_eq,
     sync::atomic::{AtomicBool, Ordering},
@@ -153,11 +153,11 @@ fn queue_drain_covers_every_configured_partition() {
     assert!(returned.load(Ordering::Acquire));
 }
 
-struct Resource(Option<Box<dyn FnOnce() + Send>>);
+struct Resource(Option<crate::test_callback::Callback>);
 impl Drop for Resource {
     fn drop(&mut self) {
         if let Some(cleanup) = self.0.take() {
-            cleanup();
+            cleanup.call();
         }
     }
 }
@@ -170,7 +170,7 @@ fn queue_drain_covers_detached_cleanup_in_all_colors() {
         let work = Arc::new(Work::new());
         let cleanup_started = Arc::new(AtomicBool::new(false));
         let release_cleanup = Arc::new(AtomicBool::new(false));
-        let resource = Resource(Some(Box::new({
+        let resource = Resource(Some(crate::test_callback::new({
             let (started, release) = (cleanup_started.clone(), release_cleanup.clone());
             move || {
                 started.store(true, Ordering::Release);

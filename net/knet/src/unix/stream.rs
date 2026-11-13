@@ -7,10 +7,9 @@
 mod channel;
 mod listener;
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{any::TypeId, sync::atomic::Ordering};
 
-use async_trait::async_trait;
 use kerrno::{KError, KResult, LinuxError};
 use kio::{IoBuf, IoBufMut, Read, Write};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
@@ -46,6 +45,25 @@ impl Default for StreamTransport {
 }
 
 impl StreamTransport {
+    /// Accepts a connection using an inline, lazily polled future.
+    pub async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
+        let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
+        let request = listener.accept(nonblocking).await?;
+        let ConnRequest {
+            channel,
+            addr: peer_addr,
+        } = request;
+        let accepted = StreamTransport::new_channel(Some(channel));
+        // Linux `unix_accept` does not re-read the listener's SCM flags: the
+        // queued peer sock already captured them in `unix_stream_connect`.
+        // Clear only the pre-accept capture gate.
+        accepted
+            .endpoint
+            .awaiting_accept
+            .store(false, Ordering::Release);
+        Ok((UnixTransport::Stream(accepted), peer_addr))
+    }
+
     pub fn new() -> Self {
         StreamTransport::new_channel(None)
     }
@@ -154,7 +172,6 @@ impl Configurable for StreamTransport {
         Ok(OptionHandled::No)
     }
 }
-#[async_trait]
 impl UnixTransportOps for StreamTransport {
     fn bind(&self, entry: &super::BindEntry, _local_addr: &UnixAddr) -> KResult<()> {
         let channel = self.channel.lock();
@@ -260,24 +277,6 @@ impl UnixTransportOps for StreamTransport {
         bind.listener.notify_request_available();
         self.endpoint.polls.wake_state_change();
         Ok(())
-    }
-
-    async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
-        let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
-        let request = listener.accept(nonblocking).await?;
-        let ConnRequest {
-            channel,
-            addr: peer_addr,
-        } = request;
-        let accepted = StreamTransport::new_channel(Some(channel));
-        // Linux `unix_accept` does not re-read the listener's SCM flags: the
-        // queued peer sock already captured them in `unix_stream_connect`.
-        // Clear only the pre-accept capture gate.
-        accepted
-            .endpoint
-            .awaiting_accept
-            .store(false, Ordering::Release);
-        Ok((UnixTransport::Stream(accepted), peer_addr))
     }
 
     fn send(&self, mut src: impl Read + IoBuf, mut options: SendOptions) -> KResult<usize> {

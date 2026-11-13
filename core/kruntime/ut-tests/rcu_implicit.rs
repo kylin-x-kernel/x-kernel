@@ -4,8 +4,9 @@
 
 //! Real guards and watching with an isolated GP, not the boot callback carrier.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use kalloc_types::KBox;
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use krcu_core::{CallbackNode, CallbackState, CpuWatching, RcuContextIf, ReaderNode};
@@ -34,11 +35,11 @@ impl Drop for Value {
 
 /// # Safety
 /// `node` is the zero-offset field projection of a uniquely submitted Value
-/// Box. The sole executor invokes it once, after the reader has ended its borrow.
+/// KBox. The sole executor invokes it once, after the reader has ended its borrow.
 unsafe fn reclaim_value(node: *mut CallbackNode) {
-    // SAFETY: checked zero offset preserves the original Box pointer and its
+    // SAFETY: checked zero offset preserves the original KBox pointer and its
     // provenance; invocation consumes the transferred owner after all accesses.
-    drop(unsafe { Box::from_raw(node.cast::<Value>()) });
+    drop(unsafe { KBox::from_raw(node.cast::<Value>()) });
 }
 
 #[derive(Default)]
@@ -66,11 +67,14 @@ fn verify_implicit_region<G>(
         return unittest::TestResult::Ignored;
     }
     let drops = Arc::new(AtomicUsize::new(0));
-    let published = Arc::new(AtomicPtr::new(Box::into_raw(Box::new(Value {
-        node: CallbackNode::new(reclaim_value),
-        number: 17,
-        drops: drops.clone(),
-    }))));
+    let published = Arc::new(AtomicPtr::new(KBox::into_raw(
+        KBox::new_nowait(Value {
+            node: CallbackNode::new(reclaim_value),
+            number: 17,
+            drops: drops.clone(),
+        })
+        .unwrap(),
+    )));
     let handshake = Arc::new(Handshake::default());
     let result = Arc::new(kspin::SpinNoPreempt::new(None));
     let updater_published = published.clone();
@@ -131,7 +135,7 @@ fn verify_implicit_region<G>(
             let invoked = unsafe { state.invoke_ready(READER_CPU, 1) };
             if !accepted {
                 // SAFETY: rejection retained ownership; reader exit is confirmed.
-                drop(unsafe { Box::from_raw(retired) });
+                drop(unsafe { KBox::from_raw(retired) });
             }
             updater_handshake.can_resume.store(true, Ordering::Release);
             *updater_result.lock() = Some((

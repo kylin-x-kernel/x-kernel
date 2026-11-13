@@ -2,8 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use alloc::{sync::Arc, vec::Vec};
+use core::{
+    pin::pin,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use kcpu_id_map::KCpuMaskExt;
 use unittest::def_test;
@@ -83,9 +86,9 @@ fn independent_flushes_do_not_follow_new_acceptance() {
 fn full_ring_waits_for_completion_without_stopping_admission() {
     for first_completed in [0, 2] {
         let queue = queue();
-        let works: Vec<_> = (0..5)
-            .map(|_| Box::pin(Work::with_callback(|| {})))
-            .collect();
+        let works = pin!(core::array::from_fn::<_, 5, _>(|_| Work::with_callback(
+            || {}
+        )));
         let mut flushes = Vec::new();
         for work in &works[..3] {
             // SAFETY: every pinned allocation survives cancellation and all joins.
@@ -130,11 +133,11 @@ fn full_ring_waits_for_completion_without_stopping_admission() {
 #[def_test]
 fn shutdown_needs_neither_color_space_nor_flush_serializer() {
     let queue = queue();
-    let works: Vec<_> = (0..3)
-        .map(|_| Box::pin(Work::with_callback(|| {})))
-        .collect();
+    let works = pin!(core::array::from_fn::<_, 3, _>(|_| Work::with_callback(
+        || {}
+    )));
     let mut flushes = Vec::new();
-    for work in &works {
+    for work in works.iter() {
         // SAFETY: all accepted Work is canceled before storage and queue release.
         unsafe { queue.submit(work, None, || 0.into()) }.unwrap();
         flushes.push(start_flush(&queue));
@@ -147,7 +150,7 @@ fn shutdown_needs_neither_color_space_nor_flush_serializer() {
     while queue.admission_color().is_some() {
         ktask::yield_now();
     }
-    for work in &works {
+    for work in works.iter() {
         assert!(work.cancel_pending());
     }
     assert_eq!(drain.join(), 0);
@@ -382,12 +385,12 @@ fn callback_flush_rejection_preserves_cutoff() {
     queue.flush().unwrap();
 }
 
-struct Resource(Option<Box<dyn FnOnce() + Send>>);
+struct Resource(Option<crate::test_callback::Callback>);
 
 impl Drop for Resource {
     fn drop(&mut self) {
         if let Some(cleanup) = self.0.take() {
-            cleanup();
+            cleanup.call();
         }
     }
 }
@@ -402,7 +405,7 @@ fn flush_includes_cleanup_detached_before_capture() {
     let work = Arc::new(Work::new());
     let started = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));
-    let resource = Resource(Some(Box::new({
+    let resource = Resource(Some(crate::test_callback::new({
         let (started, release) = (started.clone(), release.clone());
         move || {
             started.store(true, Ordering::Release);

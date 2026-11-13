@@ -2,12 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
     task::{RawWaker, RawWakerVTable, Waker},
 };
 
+use kalloc_types::KBox;
 use unittest::{assert_eq, def_test};
 
 use super::*;
@@ -54,7 +55,7 @@ static WAKER_VTABLE: RawWakerVTable =
     RawWakerVTable::new(waker_clone, waker_wake, waker_wake_by_ref, waker_drop);
 
 fn new_counter() -> &'static AtomicUsize {
-    Box::leak(Box::new(AtomicUsize::new(0)))
+    KBox::leak(KBox::new(AtomicUsize::new(0)).unwrap())
 }
 
 fn make_waker(counter: &'static AtomicUsize) -> Waker {

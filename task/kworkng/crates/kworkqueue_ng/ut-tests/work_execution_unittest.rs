@@ -3,7 +3,6 @@
 // See LICENSES for license details.
 
 use alloc::{
-    boxed::Box,
     sync::{Arc, Weak},
     task::Wake,
     vec,
@@ -15,6 +14,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use kalloc_types::KBox;
 use kspin::SpinNoIrq;
 use unittest::{assert, assert_eq, def_test};
 
@@ -26,15 +26,15 @@ fn release_in_terminal_gap<H: Fn() + Send + Sync>(callback: H, is_partitioned: b
         kcpu_id_map::LogicalCpuId::new(0),
         NonZeroUsize::new(1).unwrap(),
     ));
-    let work = Box::into_raw(Box::new(Work::with_callback(callback)));
+    let work = KBox::into_raw(KBox::new_nowait(Work::with_callback(callback)).unwrap());
     let (receipt, token) = CompletionObserver::prepare();
     let (queue_receipt, queue_token) = CompletionObserver::prepare();
     {
-        // SAFETY: the raw Box uniquely retains this stable allocation until the
+        // SAFETY: the raw KBox uniquely retains this stable allocation until the
         // explicit destruction below, after terminal publication and all borrows.
         let borrowed = unsafe { &*work };
         if is_partitioned {
-            // SAFETY: the Box remains live through admission and the unique
+            // SAFETY: the KBox remains live through admission and the unique
             // execution's shared cleanup; no other producer can submit it.
             core::assert!(unsafe { partition.accept(borrowed, (), 0) }.is_ok());
             core::assert!(partition.observe_batch(0, queue_token).is_ok());
@@ -47,7 +47,7 @@ fn release_in_terminal_gap<H: Fn() + Send + Sync>(callback: H, is_partitioned: b
         let super::Execution { work, .. } = partition.claim_next().unwrap();
         work
     } else {
-        // SAFETY: the unpartitioned fixture's sole Box owner keeps this state
+        // SAFETY: the unpartitioned fixture's sole KBox owner keeps this state
         // initialized; claim establishes the same unique running responsibility.
         core::assert!(unsafe { &*work }.state.lock().claim());
         NonNull::new(work).unwrap().cast()
@@ -65,7 +65,7 @@ fn release_in_terminal_gap<H: Fn() + Send + Sync>(callback: H, is_partitioned: b
     let finished = unsafe { Work::<(), H>::finish_execution(claimed, running_partition) };
     core::assert!(!receipt.is_completed());
     {
-        // SAFETY: the raw Box is still retained. This new caller arrives after
+        // SAFETY: the raw KBox is still retained. This new caller arrives after
         // idle publication, with no earlier shared Work call on the stack.
         let borrowed = unsafe { &*work };
         let (_, late_token) = CompletionObserver::prepare();
@@ -73,8 +73,8 @@ fn release_in_terminal_gap<H: Fn() + Send + Sync>(callback: H, is_partitioned: b
         core::assert!(!borrowed.cancel_sync().unwrap());
     }
     // SAFETY: cancellation observed no pending/running work, every shared call
-    // returned, and there is no producer or retirement hook retaining this Box.
-    drop(unsafe { Box::from_raw(work) });
+    // returned, and there is no producer or retirement hook retaining this KBox.
+    drop(unsafe { KBox::from_raw(work) });
     Work::<(), H>::complete_execution(finished);
     core::assert!(receipt.is_completed());
     if is_partitioned {
@@ -104,14 +104,14 @@ fn late_cancel_releases_work_before_old_notifications() {
 }
 
 struct Resource {
-    on_drop: Option<Box<dyn FnOnce() + Send>>,
+    on_drop: Option<crate::test_callback::Callback>,
     drops: Arc<AtomicUsize>,
 }
 
 impl Drop for Resource {
     fn drop(&mut self) {
         if let Some(on_drop) = self.on_drop.take() {
-            on_drop();
+            on_drop.call();
         }
         self.drops.fetch_add(1, Ordering::Relaxed);
     }
@@ -155,7 +155,7 @@ fn successor_waits_through_callback_and_destructor() {
     assert!(
         work.accept(Resource {
             drops: drops.clone(),
-            on_drop: Some(Box::new(move || {
+            on_drop: Some(crate::test_callback::new(move || {
                 let work = weak.upgrade().unwrap();
                 core::assert!(work.claim().is_none());
                 core::assert!(!destructor_old.is_completed());
@@ -369,7 +369,7 @@ fn bound_callback_reenters_partition_unlocked() {
 }
 
 struct ReleaseOnCompletion {
-    work: SpinNoIrq<Option<Pin<Box<Work<()>>>>>,
+    work: SpinNoIrq<Option<Pin<KBox<Work<()>>>>>,
     releases: AtomicUsize,
 }
 
@@ -392,8 +392,11 @@ fn terminal_notification_can_release_work_storage() {
             kcpu_id_map::LogicalCpuId::new(0),
             NonZeroUsize::new(1).unwrap(),
         ));
+        let work = KBox::new_nowait(Work::with_callback((|| {}) as fn())).unwrap();
+        // SAFETY: the sole owner is immediately pinned and only borrowed or dropped.
+        let work = unsafe { Pin::new_unchecked(work) };
         let owner = Arc::new(ReleaseOnCompletion {
-            work: SpinNoIrq::new(Some(Box::pin(Work::with_callback((|| {}) as fn())))),
+            work: SpinNoIrq::new(Some(work)),
             releases: AtomicUsize::new(0),
         });
         let (work_receipt, work_token) = CompletionObserver::prepare();

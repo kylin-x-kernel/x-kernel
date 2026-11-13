@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
@@ -19,7 +19,7 @@ use crate::{
 pub(super) const TEST_BLOCK_SIZE: usize = 512;
 
 pub(super) struct TestDevice {
-    bytes: crate::sync::Mutex<Box<[u8]>>,
+    bytes: crate::sync::Mutex<Vec<u8>>,
     pub(super) read_count: AtomicUsize,
     write_count: AtomicUsize,
     flush_count: AtomicUsize,
@@ -34,7 +34,7 @@ impl TestDevice {
             *byte = index as u8;
         }
         Self {
-            bytes: crate::sync::Mutex::new(bytes.into_boxed_slice()),
+            bytes: crate::sync::Mutex::new(bytes),
             read_count: AtomicUsize::new(0),
             write_count: AtomicUsize::new(0),
             flush_count: AtomicUsize::new(0),

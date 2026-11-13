@@ -116,6 +116,15 @@ cfg_if! {
             /// [`Self::try_new`]. Only the synthetic MMIO fixture dispatches
             /// here, so the caller attributes these counts to that scenario.
             #[cfg(unittest)]
+            #[expect(
+                clippy::allow_attributes,
+                reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+            )]
+            #[allow(
+                unknown_lints,
+                std_box_in_kernel_tests,
+                reason = "CG-049-no-std-box-in-kernel-tests: the counting-HAL fixture returns the production boxed VsockDeviceImpl required by kclass publication"
+            )]
             pub(super) fn try_new_counting<T: virtio::Transport + 'static>(
                 transport: T,
                 _irq: Option<driver_os_api::IrqResource>,

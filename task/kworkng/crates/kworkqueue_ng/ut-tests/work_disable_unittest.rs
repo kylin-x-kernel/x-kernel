@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     assert, assert_eq,
     num::NonZeroUsize,
@@ -108,12 +108,12 @@ fn ordinary_disable_covers_every_phase_without_waiting_for_running() {
     }
 }
 
-struct Resource(Option<Box<dyn FnOnce() + Send>>);
+struct Resource(Option<crate::test_callback::Callback>);
 
 impl Drop for Resource {
     fn drop(&mut self) {
         if let Some(cleanup) = self.0.take() {
-            cleanup();
+            cleanup.call();
         }
     }
 }
@@ -128,7 +128,7 @@ fn disable_remains_held_during_reentrant_cancellation_cleanup() {
     let work = Arc::new(Work::new());
     let weak = Arc::downgrade(&work);
     let cleanup_partition = partition.clone();
-    let resource = Resource(Some(Box::new(move || {
+    let resource = Resource(Some(crate::test_callback::new(move || {
         let work = weak.upgrade().unwrap();
         let (nested, revoked) = work.disable();
         assert!(!revoked);

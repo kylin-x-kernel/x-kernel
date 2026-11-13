@@ -22,6 +22,17 @@ fn device(action: impl Fn() + Send + Sync + 'static) -> Arc<dyn BlockCompletionO
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: prepare_block_wait returns the production \
+              Box<dyn BlockWaiter> contract; this test retains that owner through terminal \
+              signaling or reclaimer shutdown"
+)]
 fn block_completion_dispatch_coalesces_and_requeues_only_into_next_batch() {
     let _wake_gate = ScopedDaemonWakeGate::disabled();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -116,6 +127,17 @@ impl Drop for Affinity {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: prepare_block_wait returns the production \
+              Box<dyn BlockWaiter> contract; this test retains that owner through terminal \
+              signaling or reclaimer shutdown"
+)]
 fn block_completion_dispatch_remote_schedule_and_stop_wait_for_callback_retirement() {
     if kcpu_id_map::nr_cpus() < 2 {
         return unittest::TestResult::Ignored;

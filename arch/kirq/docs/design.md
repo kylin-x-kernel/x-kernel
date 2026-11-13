@@ -2731,3 +2731,11 @@ locks for request/free serialization, releasing the short locks before
 `__synchronize_irq` while retaining `request_mutex`. The RAII guard expresses
 that ownership directly in Rust. XArray capacity is also prepared before short
 locks; commits revalidate identity and publish without allocating nodes.
+
+The IRQ-work kernel unit tests use NOWAIT `KBox` allocation, including fixtures
+prepared while local IRQs and preemption are disabled. Nodes retain their heap
+addresses through publication and drain. Self-freeing callbacks reconstruct
+only pointers transferred by `KBox::into_raw`; chained callbacks cast the
+first-field IRQ-work pointer back to its original `repr(C)` owner before
+reconstruction. The local queue fixture outlives both parent and child callbacks.
+The separate host IRQ-work test keeps its standard allocator ownership model.

@@ -39,6 +39,15 @@ protocol without changing the kernel allocator; it does not replace the host
 allocation-rejection check. Both use `tests/support/reposting.rs` for the owned
 callback fixture, so its unsafe allocation and repost lifecycle has one source.
 
+Owned callback fixtures use `KBox::new_nowait`, including the shared host
+reposting fixture. The `kalloc-types` dependency serves these path-mounted tests;
+production bookkeeping does not allocate fixture storage. Raw pointers retain
+the original enclosing allocation provenance and are recovered only with
+`KBox::from_raw`, after reader access ends. Reposting transfers that same owner
+without allocation. A terminal `FnOnce` fixture uses `KBox::into_inner` before
+invocation to move its payload out exactly once. Host allocation rejection still
+observes the global allocator used by the host KBox backend.
+
 Scope entry increments nesting, an internally owned guard covers the callback,
 and guard destruction decrements nesting. A higher-ranked callback receives only
 a borrowed token. Nested scopes remain active until the outer scope exits.

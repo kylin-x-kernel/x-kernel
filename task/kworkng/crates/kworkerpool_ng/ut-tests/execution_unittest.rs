@@ -4,15 +4,13 @@
 
 //! Contract fixtures, not concrete WorkQueue claims or real BH/worker contexts.
 
-use alloc::{
-    boxed::Box,
-    sync::{Arc, Weak},
-};
+use alloc::sync::{Arc, Weak};
 use core::{
     num::NonZeroUsize,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use kalloc_types::KBox;
 use kspin::SpinNoIrq;
 use unittest::{assert, assert_eq, def_test};
 
@@ -22,9 +20,9 @@ use crate::{
     execution::{AcquiredExecution, PartitionWorkSource},
 };
 
-struct TestSource(Box<dyn Fn() -> (Option<TestExecution>, SourceRemainder) + Send + Sync>);
+struct TestSource(KBox<dyn Fn() -> (Option<TestExecution>, SourceRemainder) + Send + Sync>);
 
-struct TestExecution(Box<dyn FnOnce() + Send>);
+struct TestExecution(KBox<dyn FnMut() + Send>);
 
 impl PartitionWorkSource for TestSource {
     type Execution = TestExecution;
@@ -35,7 +33,7 @@ impl PartitionWorkSource for TestSource {
 }
 
 impl AcquiredExecution for TestExecution {
-    fn run(self) {
+    fn run(mut self) {
         self.0();
     }
 }
@@ -45,17 +43,25 @@ fn empty_source_counts_as_a_turn_and_does_not_hide_other_sources() {
     let dispatch = PartitionDispatch::new();
     assert!(!dispatch.run_one_turn());
     let runs = Arc::new(AtomicUsize::new(0));
-    let empty = dispatch.create_source(TestSource(Box::new(|| (None, SourceRemainder::Empty))));
+    let empty = dispatch.create_source(TestSource(
+        KBox::new_nowait(|| (None, SourceRemainder::Empty)).unwrap(),
+    ));
     let counter = runs.clone();
-    let ready = dispatch.create_source(TestSource(Box::new(move || {
-        let counter = counter.clone();
-        (
-            Some(TestExecution(Box::new(move || {
-                counter.fetch_add(1, Ordering::Relaxed);
-            }))),
-            SourceRemainder::Empty,
-        )
-    })));
+    let ready = dispatch.create_source(TestSource(
+        KBox::new_nowait(move || {
+            let counter = counter.clone();
+            (
+                Some(TestExecution(
+                    KBox::new_nowait(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .unwrap(),
+                )),
+                SourceRemainder::Empty,
+            )
+        })
+        .unwrap(),
+    ));
     dispatch.notify(&empty);
     dispatch.notify(&ready);
     assert!(dispatch.run_one_turn());
@@ -71,24 +77,30 @@ fn source_turn_is_finished_before_execution_enters_callback() {
     let weak = Arc::downgrade(&dispatch);
     let runs = Arc::new(AtomicUsize::new(0));
     let counter = runs.clone();
-    let source = dispatch.create_source(TestSource(Box::new(move || {
-        // Reentry also proves acquire does not hold the service lock.
-        core::assert!(weak.upgrade().unwrap().begin_inspection().is_none());
-        let weak = weak.clone();
-        let counter = counter.clone();
-        (
-            Some(TestExecution(Box::new(move || {
-                // This source must already be available for the next inspection.
-                let dispatch = weak.upgrade().unwrap();
-                dispatch
-                    .begin_inspection()
-                    .unwrap()
-                    .finish(SourceRemainder::Empty);
-                counter.fetch_add(1, Ordering::Relaxed);
-            }))),
-            SourceRemainder::More,
-        )
-    })));
+    let source = dispatch.create_source(TestSource(
+        KBox::new_nowait(move || {
+            // Reentry also proves acquire does not hold the service lock.
+            core::assert!(weak.upgrade().unwrap().begin_inspection().is_none());
+            let weak = weak.clone();
+            let counter = counter.clone();
+            (
+                Some(TestExecution(
+                    KBox::new_nowait(move || {
+                        // This source must already be available for the next inspection.
+                        let dispatch = weak.upgrade().unwrap();
+                        dispatch
+                            .begin_inspection()
+                            .unwrap()
+                            .finish(SourceRemainder::Empty);
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .unwrap(),
+                )),
+                SourceRemainder::More,
+            )
+        })
+        .unwrap(),
+    ));
     dispatch.notify(&source);
     assert!(dispatch.run_one_turn());
     assert_eq!(runs.load(Ordering::Relaxed), 1);
@@ -103,13 +115,16 @@ fn notification_inside_empty_acquire_survives_turn_completion() {
     let saved = locator.clone();
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
-    let source = dispatch.create_source(TestSource(Box::new(move || {
-        if counter.fetch_add(1, Ordering::Relaxed) == 0 {
-            let source = saved.lock().upgrade().unwrap();
-            weak.upgrade().unwrap().notify(&source);
-        }
-        (None, SourceRemainder::Empty)
-    })));
+    let source = dispatch.create_source(TestSource(
+        KBox::new_nowait(move || {
+            if counter.fetch_add(1, Ordering::Relaxed) == 0 {
+                let source = saved.lock().upgrade().unwrap();
+                weak.upgrade().unwrap().notify(&source);
+            }
+            (None, SourceRemainder::Empty)
+        })
+        .unwrap(),
+    ));
     *locator.lock() = Arc::downgrade(&source);
     dispatch.notify(&source);
     assert!(dispatch.run_one_turn());
@@ -123,10 +138,13 @@ fn retained_empty_demand_does_not_make_a_single_turn_loop() {
     let dispatch = PartitionDispatch::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
-    let source = dispatch.create_source(TestSource(Box::new(move || {
-        counter.fetch_add(1, Ordering::Relaxed);
-        (None, SourceRemainder::More)
-    })));
+    let source = dispatch.create_source(TestSource(
+        KBox::new_nowait(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+            (None, SourceRemainder::More)
+        })
+        .unwrap(),
+    ));
     dispatch.notify(&source);
     for expected in 1..=4 {
         assert!(dispatch.run_one_turn());
@@ -146,10 +164,13 @@ fn bounded_pass_stops_on_empty_list_and_counts_empty_demand() {
     assert!(!dispatch.run_bounded_pass(budget));
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
-    let source = dispatch.create_source(TestSource(Box::new(move || {
-        counter.fetch_add(1, Ordering::Relaxed);
-        (None, SourceRemainder::More)
-    })));
+    let source = dispatch.create_source(TestSource(
+        KBox::new_nowait(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+            (None, SourceRemainder::More)
+        })
+        .unwrap(),
+    ));
     dispatch.notify(&source);
     assert!(dispatch.run_bounded_pass(budget));
     assert_eq!(calls.load(Ordering::Relaxed), 3);
@@ -164,16 +185,22 @@ fn bounded_pass_preserves_rotation_across_budget_exits() {
     let trace = Arc::new(AtomicUsize::new(0));
     for id in 1..=2 {
         let trace = trace.clone();
-        let source = dispatch.create_source(TestSource(Box::new(move || {
-            let trace = trace.clone();
-            (
-                Some(TestExecution(Box::new(move || {
-                    let previous = trace.load(Ordering::Relaxed);
-                    trace.store(previous * 10 + id, Ordering::Relaxed);
-                }))),
-                SourceRemainder::More,
-            )
-        })));
+        let source = dispatch.create_source(TestSource(
+            KBox::new_nowait(move || {
+                let trace = trace.clone();
+                (
+                    Some(TestExecution(
+                        KBox::new_nowait(move || {
+                            let previous = trace.load(Ordering::Relaxed);
+                            trace.store(previous * 10 + id, Ordering::Relaxed);
+                        })
+                        .unwrap(),
+                    )),
+                    SourceRemainder::More,
+                )
+            })
+            .unwrap(),
+        ));
         dispatch.notify(&source);
     }
     assert!(dispatch.run_bounded_pass(NonZeroUsize::new(3).unwrap()));
@@ -186,17 +213,25 @@ fn bounded_pass_preserves_rotation_across_budget_exits() {
 fn empty_turn_exhausts_budget_without_consuming_next_callback() {
     let dispatch = PartitionDispatch::new();
     let calls = Arc::new(AtomicUsize::new(0));
-    let empty = dispatch.create_source(TestSource(Box::new(|| (None, SourceRemainder::Empty))));
+    let empty = dispatch.create_source(TestSource(
+        KBox::new_nowait(|| (None, SourceRemainder::Empty)).unwrap(),
+    ));
     let counter = calls.clone();
-    let ready = dispatch.create_source(TestSource(Box::new(move || {
-        let counter = counter.clone();
-        (
-            Some(TestExecution(Box::new(move || {
-                counter.fetch_add(1, Ordering::Relaxed);
-            }))),
-            SourceRemainder::Empty,
-        )
-    })));
+    let ready = dispatch.create_source(TestSource(
+        KBox::new_nowait(move || {
+            let counter = counter.clone();
+            (
+                Some(TestExecution(
+                    KBox::new_nowait(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .unwrap(),
+                )),
+                SourceRemainder::Empty,
+            )
+        })
+        .unwrap(),
+    ));
     dispatch.notify(&empty);
     dispatch.notify(&ready);
     let budget = NonZeroUsize::new(1).unwrap();
@@ -210,18 +245,26 @@ fn empty_turn_exhausts_budget_without_consuming_next_callback() {
 fn final_callback_notification_is_retained_for_next_pass() {
     let dispatch = PartitionDispatch::new();
     let weak = Arc::downgrade(&dispatch);
-    let next = dispatch.create_source(TestSource(Box::new(|| (None, SourceRemainder::Empty))));
+    let next = dispatch.create_source(TestSource(
+        KBox::new_nowait(|| (None, SourceRemainder::Empty)).unwrap(),
+    ));
     let next_source = next.clone();
-    let source = dispatch.create_source(TestSource(Box::new(move || {
-        let weak = weak.clone();
-        let next = next_source.clone();
-        (
-            Some(TestExecution(Box::new(move || {
-                weak.upgrade().unwrap().notify(&next);
-            }))),
-            SourceRemainder::Empty,
-        )
-    })));
+    let source = dispatch.create_source(TestSource(
+        KBox::new_nowait(move || {
+            let weak = weak.clone();
+            let next = next_source.clone();
+            (
+                Some(TestExecution(
+                    KBox::new_nowait(move || {
+                        weak.upgrade().unwrap().notify(&next);
+                    })
+                    .unwrap(),
+                )),
+                SourceRemainder::Empty,
+            )
+        })
+        .unwrap(),
+    ));
     dispatch.notify(&source);
     let budget = NonZeroUsize::new(1).unwrap();
     assert!(dispatch.run_bounded_pass(budget));
@@ -249,19 +292,25 @@ fn owned_execution_outlives_last_source_reference_and_cleans_up_once() {
     let source_lifetime = DropCount(source_drops.clone());
     let cleanup = execution_drops.clone();
     let counter = runs.clone();
-    let source = dispatch.create_source(TestSource(Box::new(move || {
-        let source_drops = source_lifetime.0.clone();
-        let execution_lifetime = DropCount(cleanup.clone());
-        let counter = counter.clone();
-        (
-            Some(TestExecution(Box::new(move || {
-                core::assert_eq!(source_drops.load(Ordering::Relaxed), 1);
-                counter.fetch_add(1, Ordering::Relaxed);
-                drop(execution_lifetime);
-            }))),
-            SourceRemainder::Empty,
-        )
-    })));
+    let source = dispatch.create_source(TestSource(
+        KBox::new_nowait(move || {
+            let source_drops = source_lifetime.0.clone();
+            let mut execution_lifetime = Some(DropCount(cleanup.clone()));
+            let counter = counter.clone();
+            (
+                Some(TestExecution(
+                    KBox::new_nowait(move || {
+                        core::assert_eq!(source_drops.load(Ordering::Relaxed), 1);
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        drop(execution_lifetime.take());
+                    })
+                    .unwrap(),
+                )),
+                SourceRemainder::Empty,
+            )
+        })
+        .unwrap(),
+    ));
     dispatch.notify(&source);
     drop(source);
     assert!(dispatch.run_one_turn());

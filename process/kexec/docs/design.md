@@ -1,5 +1,10 @@
 # kexec design
 
+The unittest-only `PartialInstallProbe::observe` retains its existing standard
+`Box` callback contract with syscall exec lifecycle fixtures. Its field has a
+narrow `std_box_in_kernel_tests` exception; the caller's construction is exempted
+at its own fixture boundary.
+
 ## Purpose and background
 
 `kexec` loads user executables and prepares their address-space layout. It is an

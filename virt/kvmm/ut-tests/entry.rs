@@ -90,6 +90,15 @@ impl VcpuHook<RejectEntry> for DeviceProbe {
 }
 
 #[unittest::def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: VCPU hook installation still consumes standard Box owners; its lifecycle migration is deferred"
+)]
 fn rejected_entry_unwinds_devices_without_guest_readback() {
     let vm = Vm::<RejectEntry>::new(VmConfig::new(0, 0, 1)).expect("test VM");
     let mut vcpu = vm.create_vcpu(0);

@@ -5,7 +5,6 @@
 //! Payload publication through real boot-installed workqueue synchronization.
 //! Providers intentionally remain installed for the full guest lifetime.
 
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use ktime_types::TimeSpan;
@@ -32,8 +31,8 @@ fn fresh_submission_and_flush_publish_relaxed_payloads() {
                 assert_eq!(khal::percpu::this_cpu_id(), target);
                 output.store(input.load(Ordering::Relaxed) * 3, Ordering::Relaxed);
             };
-            let ordinary = Box::pin(Work::with_callback(callback));
-            let delayed = Box::pin(DelayedWork::new(callback));
+            let ordinary = core::pin::pin!(Work::with_callback(callback));
+            let delayed = core::pin::pin!(DelayedWork::new(callback));
             for round in 1..=128 {
                 input.store(round, Ordering::Relaxed);
                 output.store(0, Ordering::Relaxed);

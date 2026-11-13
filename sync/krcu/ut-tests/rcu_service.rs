@@ -4,8 +4,9 @@
 
 //! Private startup ownership and progress policy fixtures.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::AtomicUsize;
+use kalloc_types::KBox;
 
 use krcu_core::CallbackNode;
 use unittest::{assert, assert_eq, def_test};
@@ -22,10 +23,10 @@ const _: () = core::assert!(core::mem::offset_of!(BudgetProbe, node) == 0);
 
 /// # Safety
 /// `node` is the first-field projection of a uniquely submitted BudgetProbe
-/// Box. Invocation consumes that allocation exactly once after its GP.
+/// KBox. Invocation consumes that allocation exactly once after its GP.
 unsafe fn finish_budget_probe(node: *mut CallbackNode) {
-    // SAFETY: repr(C) and the offset assertion preserve the submitted Box base.
-    let probe = unsafe { Box::from_raw(node.cast::<BudgetProbe>()) };
+    // SAFETY: repr(C) and the offset assertion preserve the submitted KBox base.
+    let probe = unsafe { KBox::from_raw(node.cast::<BudgetProbe>()) };
     probe.completed.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -36,10 +37,11 @@ fn callback_batches_rearm_only_for_ready_budget_remainder() {
     let completed = Arc::new(AtomicUsize::new(0));
     let probes: alloc::vec::Vec<_> = (0..2 * CALLBACK_BUDGET + 1)
         .map(|_| {
-            Box::new(BudgetProbe {
+            KBox::new_nowait(BudgetProbe {
                 node: CallbackNode::new(finish_budget_probe),
                 completed: completed.clone(),
             })
+            .unwrap()
         })
         .collect();
     let _guard = kspin::NoPreemptIrqSave::new();
@@ -57,15 +59,15 @@ fn callback_batches_rearm_only_for_ready_budget_remainder() {
     };
     let mut driver = service.callbacks.claim_driver().unwrap();
     for probe in probes {
-        let raw = Box::into_raw(probe);
-        // SAFETY: field projection preserves the original Box provenance.
+        let raw = KBox::into_raw(probe);
+        // SAFETY: field projection preserves the original KBox provenance.
         let node = unsafe { &raw mut (*raw).node };
         // SAFETY: uniquely owned unpublished probe; nonblocking callback
         // destroys it once, and this fixture supplies all execution/progress.
         let accepted = unsafe { service.callbacks.submit(cpu, node) };
         if !accepted {
-            // SAFETY: rejected admission leaves the original Box caller-owned.
-            drop(unsafe { Box::from_raw(raw) });
+            // SAFETY: rejected admission leaves the original KBox caller-owned.
+            drop(unsafe { KBox::from_raw(raw) });
         }
         assert!(accepted);
     }
@@ -318,11 +320,11 @@ struct ProgressCallbackProbe {
 const _: () = core::assert!(core::mem::offset_of!(ProgressCallbackProbe, node) == 0);
 
 /// # Safety
-/// The node is the first-field projection of a uniquely submitted probe Box.
+/// The node is the first-field projection of a uniquely submitted probe KBox.
 /// The executor has detached it after its GP and transfers ownership once.
 unsafe fn finish_progress_probe(node: *mut CallbackNode) {
-    // SAFETY: repr(C) and the offset assertion preserve the submitted Box base.
-    let probe = unsafe { Box::from_raw(node.cast::<ProgressCallbackProbe>()) };
+    // SAFETY: repr(C) and the offset assertion preserve the submitted KBox base.
+    let probe = unsafe { KBox::from_raw(node.cast::<ProgressCallbackProbe>()) };
     // Runtime's callback tests verify the specific softirq carrier. This
     // internal fixture checks its host-visible execution and reader contracts.
     let is_valid_context = kiface_irq_context_api::InterruptContextIf::is_in_interrupt_handler()
@@ -365,7 +367,7 @@ unsafe fn finish_progress_probe(node: *mut CallbackNode) {
     probe.completed.fetch_add(1, Ordering::Release);
     probe.completion_waker.wake_by_ref();
     // Completion does not transfer storage back to the waiter. This callback
-    // retains its Box and Arc resources until return, including through wakeup.
+    // retains its KBox and Arc resources until return, including through wakeup.
 }
 
 fn submit_progress_probe(
@@ -375,14 +377,17 @@ fn submit_progress_probe(
     violations: &Arc<AtomicUsize>,
     completion_waker: Waker,
 ) -> bool {
-    let object = Box::into_raw(Box::new(ProgressCallbackProbe {
-        node: CallbackNode::new(finish_progress_probe),
-        completed: completed.clone(),
-        violations: violations.clone(),
-        cpu,
-        completion_waker,
-    }));
-    // SAFETY: raw projection preserves the original enclosing Box provenance.
+    let object = KBox::into_raw(
+        KBox::new_nowait(ProgressCallbackProbe {
+            node: CallbackNode::new(finish_progress_probe),
+            completed: completed.clone(),
+            violations: violations.clone(),
+            cpu,
+            completion_waker,
+        })
+        .unwrap(),
+    );
+    // SAFETY: raw projection preserves the original enclosing KBox provenance.
     let node = unsafe { &raw mut (*object).node };
     // SAFETY: boot retains this participating CPU's queue and carrier. The
     // unpublished probe has no protected readers; invocation consumes its
@@ -391,7 +396,7 @@ fn submit_progress_probe(
         true
     } else {
         // SAFETY: rejection leaves the original allocation uniquely caller-owned.
-        drop(unsafe { Box::from_raw(object) });
+        drop(unsafe { KBox::from_raw(object) });
         false
     }
 }
@@ -433,16 +438,16 @@ fn callback_progress_does_not_require_yielding_test_workers() {
 #[cfg(feature = "ipi")]
 #[def_test(serial)]
 fn cleanup_demand_kicks_an_already_observed_cpu() {
-    use alloc::boxed::Box;
+    use kalloc_types::KBox;
 
     use krcu_core::CallbackNode;
 
     /// # Safety
-    /// `node` is a uniquely owned Box<CallbackNode>, submitted once and detached
+    /// `node` is a uniquely owned KBox<CallbackNode>, submitted once and detached
     /// after its period. Invocation consumes that original allocation once.
     unsafe fn release_marker(node: *mut CallbackNode) {
-        // SAFETY: submission transferred this Box allocation unchanged.
-        drop(unsafe { Box::from_raw(node) });
+        // SAFETY: submission transferred this KBox allocation unchanged.
+        drop(unsafe { KBox::from_raw(node) });
     }
 
     let (
@@ -473,13 +478,13 @@ fn cleanup_demand_kicks_an_already_observed_cpu() {
         };
         let mut driver = service.callbacks.claim_driver().unwrap();
         let pin = kspin::NoPreempt::new();
-        let marker = Box::into_raw(Box::new(CallbackNode::new(release_marker)));
+        let marker = KBox::into_raw(KBox::new_nowait(CallbackNode::new(release_marker)).unwrap());
         // SAFETY: this isolated marker protects no data. The driver owns it until
         // invoking its nonblocking release callback; rejection retains ownership.
         let accepted = unsafe { service.callbacks.submit(cpu, marker) };
         if !accepted {
             // SAFETY: rejected submission neither accesses nor retains the marker.
-            drop(unsafe { Box::from_raw(marker) });
+            drop(unsafe { KBox::from_raw(marker) });
         }
         let started = driver.advance();
         crate::read::with_task_read(|_| {

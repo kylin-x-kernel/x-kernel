@@ -26,6 +26,14 @@ queue, CPU-list and worker allocations retain their existing failure policies.
 
 ## Socket owner allocation boundary
 
+Unix accept futures are stored inline instead of behind an infallibly allocated
+Box. They add no allocator permissions or unsafe pin projection. Polling and
+nested operations retain their existing task-context requirements. Cancellation
+uses the existing event/channel future destruction protocol; the new tests
+exercise pending and unpolled cancellation without consuming a connection.
+The size regression checks bound the future object, not the full stack or
+nested allocations, and do not inject global OOM.
+
 TCP, Unix and vsock reserve KBox storage before consuming a pending connection.
 Owner allocation failure cannot silently close a dequeued connection. Transport
 errors free the uninitialized reservation without calling a socket destructor.

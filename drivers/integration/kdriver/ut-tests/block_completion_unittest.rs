@@ -10,6 +10,17 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: prepare_block_wait returns the production \
+              Box<dyn BlockWaiter> contract; this test retains that owner through terminal \
+              signaling or reclaimer shutdown"
+)]
 fn block_wait_preserves_early_terminal_signals() {
     let mut waiter = prepare_block_wait().unwrap();
     let signals = waiter.signals();

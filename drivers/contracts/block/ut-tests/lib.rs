@@ -184,6 +184,16 @@ impl crate::BioOperations for InherentlyReadOnlyDisk {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>; \
+              BioVec uses the production Box<[u8]> constructor and BioMemory implementation"
+)]
 fn bio_validates_whole_transfer_and_remaps_once() {
     let backend = Arc::new(MemoryDisk::with_block_size(4, 4096));
     let disk = Gendisk::alloc(
@@ -255,21 +265,25 @@ fn bio_validates_whole_transfer_and_remaps_once() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>; \
+              BioVec uses the production Box<[u8]> constructor and BioMemory implementation"
+)]
 fn invalid_flush_returns_memory_without_reaching_backend() {
     let backend = Arc::new(ProbeDisk {
         pending: Mutex::new(None),
         observed: Mutex::new(Vec::new()),
         is_deferred: false,
     });
-    let device = Gendisk::alloc(
-        "invalid-flush".into(),
-        250,
-        0,
-        1,
-        Box::new(backend.clone()),
-    )
-    .unwrap()
-    .part0();
+    let device = Gendisk::alloc("invalid-flush".into(), 250, 0, 1, Box::new(backend.clone()))
+        .unwrap()
+        .part0();
     for (sector, vectors) in [
         (0, vec![BioVec::new(vec![0x5a; 512].into_boxed_slice())]),
         (1, Vec::new()),
@@ -282,12 +296,25 @@ fn invalid_flush_returns_memory_without_reaching_backend() {
         let (status, returned) = waiter.wait();
         assert_eq!(status, Err(DriverError::InvalidInput));
         assert_eq!(returned.first().map(|v| v.bytes().as_ptr()), address);
-        assert!(returned.iter().all(|v| v.bytes().iter().all(|b| *b == 0x5a)));
+        assert!(
+            returned
+                .iter()
+                .all(|v| v.bytes().iter().all(|b| *b == 0x5a))
+        );
         assert!(backend.observed.lock().is_empty());
         assert!(backend.pending.lock().is_none());
     }
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn disk(name: &str, major: u32, first_minor: u32, minors: u32) -> GendiskRef {
     Gendisk::alloc(
         String::from(name),
@@ -318,6 +345,15 @@ fn ioctl_bytes(device: &BlockDevice, cmd: u32) -> Vec<u8> {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn generic_ioctls_report_queue_geometry_and_sector_capacity() {
     use linux_raw_sys::ioctl::{
         BLKALIGNOFF, BLKGETDISKSEQ, BLKGETSIZE, BLKGETSIZE64, BLKIOMIN, BLKIOOPT, BLKPBSZGET,
@@ -428,6 +464,15 @@ fn disk_sequence_tracks_media_not_publication_or_capacity() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn unpublished_part0_keeps_its_complete_disk_alive() {
     let backend = Arc::new(MemoryDisk::new(8));
     let backend_weak = Arc::downgrade(&backend);
@@ -541,6 +586,15 @@ fn set_capacity_updates_the_resident_block_device() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn gendisk_rejects_invalid_capacity_geometry() {
     let zero_block_size = Gendisk::alloc(
         String::from("zero-block-size"),
@@ -580,6 +634,15 @@ fn gendisk_rejects_invalid_capacity_geometry() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn four_kib_logical_io_uses_sector_capacity() {
     let disk = Gendisk::alloc(
         String::from("four-k-logical-blocks"),
@@ -723,6 +786,15 @@ fn read_only_state_is_owned_by_the_block_core() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn inherently_read_only_disk_cannot_be_made_writable() {
     let disk = Gendisk::alloc(
         String::from("test-inherently-read-only"),
@@ -817,6 +889,15 @@ impl BioOperations for ProbeDisk {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn synchronous_bio_preserves_borrowed_addresses_and_write_access() {
     let backend = Arc::new(ProbeDisk {
         pending: Mutex::new(None),
@@ -842,13 +923,13 @@ fn synchronous_bio_preserves_borrowed_addresses_and_write_access() {
 }
 
 struct TrackedMemory {
-    buffer: Box<[u8]>,
+    buffer: Vec<u8>,
     drops: Arc<core::sync::atomic::AtomicUsize>,
 }
 
-// SAFETY: the boxed bytes have stable address and exclusive ownership. Neither
+// SAFETY: the vector never resizes and owns its stable bytes exclusively. Neither
 // the drop counter nor other observers expose the allocation; Drop only counts
-// destruction and releases the box, both valid in completion context.
+// destruction and releases the vector, both valid in completion context.
 unsafe impl BioMemory for TrackedMemory {
     fn bytes(&self) -> &[u8] {
         &self.buffer
@@ -865,6 +946,16 @@ impl Drop for TrackedMemory {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>; \
+              BioVec uses the production Box<[u8]> constructor and BioMemory implementation"
+)]
 fn bio_range_retains_storage_after_wait_handle_is_dropped() {
     let backend = Arc::new(ProbeDisk {
         pending: Mutex::new(None),
@@ -883,7 +974,7 @@ fn bio_range_retains_storage_after_wait_handle_is_dropped() {
     for status in [Ok(()), Err(DriverError::Io)] {
         let drops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
         let memory = TrackedMemory {
-            buffer: vec![0; 1024].into_boxed_slice(),
+            buffer: vec![0; 1024],
             drops: drops.clone(),
         };
         let address = memory.bytes()[17..].as_ptr() as usize;
@@ -905,6 +996,16 @@ fn bio_range_retains_storage_after_wait_handle_is_dropped() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>; \
+              BioVec uses the production Box<[u8]> constructor and BioMemory implementation"
+)]
 fn bio_wait_returns_memory_on_device_validation_and_preparation_errors() {
     let backend = Arc::new(ProbeDisk {
         pending: Mutex::new(None),
@@ -923,7 +1024,7 @@ fn bio_wait_returns_memory_on_device_validation_and_preparation_errors() {
     for failure in 0..3 {
         let drops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
         let memory = TrackedMemory {
-            buffer: vec![0x37; 512].into_boxed_slice(),
+            buffer: vec![0x37; 512],
             drops: drops.clone(),
         };
         let address = memory.bytes().as_ptr() as usize;
@@ -1041,6 +1142,15 @@ impl BioOperations for OpenDisk {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn open_claim_pairs_each_success_with_one_close_without_publication() {
     let backend = Arc::new(OpenDisk::new());
     let disk = Gendisk::alloc(
@@ -1080,11 +1190,23 @@ fn open_claim_pairs_each_success_with_one_close_without_publication() {
     drop(concurrent);
     assert_eq!(backend.releases.load(Ordering::Relaxed), 3);
     drop(disk);
-    device.open(BlockOpenMode::EXCLUSIVE, None).unwrap().release();
+    device
+        .open(BlockOpenMode::EXCLUSIVE, None)
+        .unwrap()
+        .release();
     assert_eq!(backend.releases.load(Ordering::Relaxed), 4);
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn same_holder_reopens_until_its_last_exclusive_close() {
     let backend = Arc::new(OpenDisk::new());
     let device = Gendisk::alloc(
@@ -1134,6 +1256,15 @@ fn same_holder_reopens_until_its_last_exclusive_close() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn failed_driver_open_rolls_back_exclusive_ownership_without_release() {
     let backend = Arc::new(OpenDisk::new());
     let device = Gendisk::alloc(
@@ -1159,14 +1290,8 @@ fn failed_driver_open_rolls_back_exclusive_ownership_without_release() {
         .expect("failed open must not retain a holder");
     assert_eq!(backend.modes.lock().len(), 2);
     backend.fail_open.store(true, Ordering::Relaxed);
-    assert!(matches!(
-        device.open(mode, Some(holder)),
-        Err(KError::Io)
-    ));
-    assert!(matches!(
-        device.open(mode, None),
-        Err(KError::ResourceBusy)
-    ));
+    assert!(matches!(device.open(mode, Some(holder)), Err(KError::Io)));
+    assert!(matches!(device.open(mode, None), Err(KError::ResourceBusy)));
     assert_eq!(backend.modes.lock().len(), 3);
     assert_eq!(backend.releases.load(Ordering::Relaxed), 0);
     drop(claim);

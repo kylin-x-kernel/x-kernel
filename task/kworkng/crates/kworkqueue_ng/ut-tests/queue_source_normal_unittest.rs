@@ -4,9 +4,11 @@
 
 //! Concrete Work integration without test-driven claim or manager passes.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::sync::atomic::AtomicBool;
 
+#[cfg(feature = "self-wait-check")]
+use kalloc_types::KBox;
 use kcpu_id_map::KCpuMaskExt;
 use ktask::future::PreparedTaskWait;
 use kworkerpool_ng::NormalServices;
@@ -157,25 +159,28 @@ fn remote_callback_finishes_before_submission_returns() {
 #[cfg(feature = "self-wait-check")]
 #[def_test]
 fn normal_callback_rejects_own_synchronous_stop() {
-    type CallbackWork = Work<Arc<Queue>, Box<dyn Fn() + Send + Sync>>;
+    type CallbackWork = Work<Arc<Queue>, KBox<dyn Fn() + Send + Sync>>;
     let cpu = khal::percpu::this_cpu_id();
     with_normal_service(cpu, NonZeroUsize::new(1).unwrap(), |dispatch, kick| {
         let queue = queue(cpu, 1, &dispatch, &kick);
         let work: Arc<CallbackWork> = Arc::new_cyclic(|weak: &alloc::sync::Weak<CallbackWork>| {
             let weak = weak.clone();
-            Work::with_callback(Box::new(move || {
-                let work = weak.upgrade().unwrap();
-                assert_eq!(
-                    work.cancel_sync(),
-                    Err(crate::work::wait::WaitError::SelfWait)
-                );
-                assert_eq!(work.flush(), Err(crate::work::wait::WaitError::SelfWait));
-                assert!(matches!(
-                    work.disable_sync(),
-                    Err(crate::work::wait::WaitError::SelfWait)
-                ));
-                assert!(!work.state.lock().is_disabled());
-            }))
+            Work::with_callback(
+                KBox::new_nowait(move || {
+                    let work = weak.upgrade().unwrap();
+                    assert_eq!(
+                        work.cancel_sync(),
+                        Err(crate::work::wait::WaitError::SelfWait)
+                    );
+                    assert_eq!(work.flush(), Err(crate::work::wait::WaitError::SelfWait));
+                    assert!(matches!(
+                        work.disable_sync(),
+                        Err(crate::work::wait::WaitError::SelfWait)
+                    ));
+                    assert!(!work.state.lock().is_disabled());
+                })
+                .unwrap(),
+            )
         });
         // SAFETY: the Arc allocation is never moved out or mutated exclusively;
         // its owner remains alive through queue drain and all callback accesses.
@@ -257,26 +262,24 @@ fn normal_workers_drain_irq_masked_work_without_manual_dispatch() {
     with_normal_service(cpu, NonZeroUsize::new(1).unwrap(), |dispatch, kick| {
         let queue = queue(cpu, 1, &dispatch, &kick);
         let calls = AtomicUsize::new(0);
-        let works: Vec<_> = (0..13)
-            .map(|_| {
-                Box::pin(Work::with_callback(|| {
-                    assert!(ktask::is_sleepable_context());
-                    assert_eq!(khal::percpu::this_cpu_id(), cpu);
-                    assert_ne!(ktask::current().owner_key(), producer);
-                    calls.fetch_add(1, Ordering::Relaxed);
-                }))
+        let works = pin!(core::array::from_fn::<_, 13, _>(|_| {
+            Work::with_callback(|| {
+                assert!(ktask::is_sleepable_context());
+                assert_eq!(khal::percpu::this_cpu_id(), cpu);
+                assert_ne!(ktask::current().owner_key(), producer);
+                calls.fetch_add(1, Ordering::Relaxed);
             })
-            .collect();
+        }));
         {
             let _irq = kspin::NoPreemptIrqSave::new();
-            for work in &works {
+            for work in works.iter() {
                 // SAFETY: each pinned Work and its captures remain alive until
                 // close_and_drain below finishes every execution and cleanup.
                 unsafe { queue.submit(work, Some(cpu), || unreachable!()) }.unwrap();
             }
         }
         queue.flush().unwrap();
-        for work in &works {
+        for work in works.iter() {
             work.flush().unwrap();
         }
         assert_eq!(calls.load(Ordering::Relaxed), works.len());

@@ -13,6 +13,16 @@ MONOTONIC needs no refresh callback. Nested Arc/timer/work allocations are uncha
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
+Epoll test hooks own `KBox<dyn Fn() + Send>` callbacks. Taking the optional
+slot before invocation preserves one-shot execution. Initial fixture setup
+uses KERNEL allocation; callbacks installed during poll/rearm use NOWAIT so
+allocation cannot enter reclaim under the caller's locks.
+
+The eventfd and timerfd pending-I/O tests pin their locally polled futures on
+the stack. Each future has its own lexical scope ending at the former owner
+drop boundary, so poll registrations and buffer borrows are released before
+the following assertions or operation. No future escapes that scope.
+
 ## Purpose and scope
 
 This crate owns epoll, eventfd, inotify, signalfd and timerfd object state and

@@ -2,8 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::AtomicUsize;
+
+use kalloc_types::KBox;
 
 use super::*;
 use crate::ReaderNode;
@@ -40,16 +42,17 @@ fn repost_completes_without_allocations() {
     let mut driver = unsafe { CallbackDriver::new(&gp, &queues) };
     let calls = Arc::new(AtomicUsize::new(0));
     let drops = Arc::new(AtomicUsize::new(0));
-    let prepared = Box::new(SelfReposting {
+    let prepared = KBox::new_nowait(SelfReposting {
         node: CallbackNode::new(SelfReposting::invoke),
         queues: queues.clone(),
         calls: calls.clone(),
         drops: drops.clone(),
         remaining: 2,
-    });
+    })
+    .unwrap();
 
     let run_fn = || {
-        prepared.enqueue();
+        SelfReposting::enqueue(prepared);
         for period in 1..=3 {
             assert_eq!(execute(&queues[0], 8), 0);
             assert_eq!(driver.drive(), Some(period));

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -48,11 +48,7 @@ unsafe impl Hal for TrackedHal {
         unsafe { MockHal::mmio_phys_to_virt(paddr, size) }
     }
 
-    unsafe fn share(
-        buffer: NonNull<[u8]>,
-        direction: BufferDirection,
-        platform: bool,
-    ) -> PhysAddr {
+    unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection, platform: bool) -> PhysAddr {
         core::assert_eq!(buffer.len(), MAX_REQUEST_BYTES);
         BUFFER_ADDRESS.store(buffer.as_ptr() as *mut u8 as usize, Ordering::Relaxed);
         MAPPINGS.fetch_add(1, Ordering::Relaxed);
@@ -84,7 +80,10 @@ fn request(features: u64) -> (Request, Arc<SpinNoIrq<MockQueue>>) {
     let mut transport = MockTransport::new_with_type(DeviceType::EntropySource);
     transport.features = features;
     transport.queue = Some(queue.clone());
-    (Request::new(transport, StaticHal::default()).unwrap(), queue)
+    (
+        Request::new(transport, StaticHal::default()).unwrap(),
+        queue,
+    )
 }
 
 /// Emulate one device completion, optionally reporting a malformed used element.
@@ -141,6 +140,17 @@ unsafe fn finish(queue: &MockQueue, len: u32, is_wrong_token: bool) {
 }
 
 type Device = VirtIoRngDev<TrackedHal, MockTransport>;
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: portable RNG fixture owns an erased one-shot \
+              closure across wait calls; unique Box ownership preserves FnOnce capture \
+              destruction without a kernel allocator dependency"
+)]
 type Action = Box<dyn FnOnce() + Send>;
 
 #[derive(Default)]
@@ -148,10 +158,32 @@ struct Completion {
     before: Option<DriverError>,
     after: Option<DriverError>,
     has_returned_error: AtomicBool,
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: portable RNG fixture owns an erased one-shot \
+                  closure across wait calls; unique Box ownership preserves FnOnce capture \
+                  destruction without a kernel allocator dependency"
+    )]
     action: SpinNoIrq<Option<Action>>,
     notifications: AtomicUsize,
 }
 impl RngCompletion for Completion {
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: portable RNG fixture owns an erased one-shot \
+                  closure across wait calls; unique Box ownership preserves FnOnce capture \
+                  destruction without a kernel allocator dependency"
+    )]
     fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> DriverResult {
         if let Some(error) = self.before {
             return Err(error);
@@ -190,6 +222,17 @@ fn device(
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: portable RNG fixture owns an erased one-shot \
+              closure across wait calls; unique Box ownership preserves FnOnce capture \
+              destruction without a kernel allocator dependency"
+)]
 fn hwrng_irq_reclaims_before_waking_waiter() {
     let completion = Arc::new(Completion::default());
     let (device, queue, irq) = device(completion.clone());
@@ -219,6 +262,17 @@ fn hwrng_irq_reclaims_before_waking_waiter() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: portable RNG fixture owns an erased one-shot \
+              closure across wait calls; unique Box ownership preserves FnOnce capture \
+              destruction without a kernel allocator dependency"
+)]
 fn hwrng_not_ready_preserves_request_until_later_completion() {
     let completion = Arc::new(Completion::default());
     let (device, queue, irq) = device(completion.clone());
@@ -295,6 +349,17 @@ fn hwrng_wait_failure_preserves_dma_and_validates_before_consuming() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: portable RNG fixture owns an erased one-shot \
+              closure across wait calls; unique Box ownership preserves FnOnce capture \
+              destruction without a kernel allocator dependency"
+)]
 fn hwrng_wait_retry_joins_pending_request() {
     let completion = Arc::new(Completion {
         after: Some(DriverError::NoMemory),
@@ -326,6 +391,17 @@ fn hwrng_wait_retry_joins_pending_request() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: portable RNG fixture owns an erased one-shot \
+              closure across wait calls; unique Box ownership preserves FnOnce capture \
+              destruction without a kernel allocator dependency"
+)]
 fn hwrng_wrong_token_reports_terminal_failure() {
     let completion = Arc::new(Completion::default());
     let (device, queue, irq) = device(completion.clone());

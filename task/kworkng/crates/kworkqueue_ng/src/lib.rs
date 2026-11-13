@@ -49,6 +49,10 @@
 
 extern crate alloc;
 
+#[cfg(unittest)]
+#[path = "../ut-tests/callback.rs"]
+mod test_callback;
+
 #[cfg(feature = "stall-check")]
 mod diagnostics;
 

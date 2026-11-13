@@ -309,8 +309,7 @@ pub fn block_test_disk(features: u64, is_immediate: bool) -> (Arc<Disk>, Arc<Spi
     base.features = features;
     base.config_space.lock()[..8].copy_from_slice(&1024u64.to_le_bytes());
     base.config_space.lock()[8..12].copy_from_slice(&1024u32.to_le_bytes());
-    base.config_space.lock()[12..16]
-        .copy_from_slice(&(MAX_DATA_SEGMENTS as u32).to_le_bytes());
+    base.config_space.lock()[12..16].copy_from_slice(&(MAX_DATA_SEGMENTS as u32).to_le_bytes());
     let hardware = Arc::new(SpinNoIrq::new(Hardware {
         is_immediate,
         ..Default::default()
@@ -330,6 +329,16 @@ struct Signals {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioVec uses the production Box<[u8]> constructor \
+              and BioMemory implementation"
+)]
 fn polling_requests_reclaim_split_transfers_without_interrupts() {
     let mut base = MockTransport::new();
     base.features = (1 << 1) | (1 << 2); // SIZE_MAX and SEG_MAX.
@@ -368,7 +377,11 @@ fn polling_requests_reclaim_split_transfers_without_interrupts() {
         // used descriptors and submit the suffix. No IRQ executor runs here.
         let (status, vectors) = result.lock().take().expect("polling completes inline");
         assert_eq!(status, Ok(()));
-        let expected = if operation == BioOperation::Read { 0xa5 } else { 0x3c };
+        let expected = if operation == BioOperation::Read {
+            0xa5
+        } else {
+            0x3c
+        };
         assert!(vectors[0].bytes().iter().all(|byte| *byte == expected));
         assert_eq!(hardware.lock().completed - before, 2);
         assert!(disk.state.lock().requests.is_drained());
@@ -400,6 +413,16 @@ fn view(disk: &Arc<Disk>) -> Arc<block::BlockDevice> {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioVec uses the production Box<[u8]> constructor \
+              and BioMemory implementation"
+)]
 fn request_read_write_flush_complete_without_driver_copy() {
     for features in [1 << 9, (1 << 9) | (1 << 28)] {
         for operation in [BioOperation::Read, BioOperation::Write, BioOperation::Flush] {
@@ -459,6 +482,16 @@ fn request_read_write_flush_complete_without_driver_copy() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioVec uses the production Box<[u8]> constructor \
+              and BioMemory implementation"
+)]
 fn submit_batch_then_wait_preserves_fifo_and_owned_scatter_memory() {
     let (disk, hardware) = disk(0, false);
     let device = view(&disk);
@@ -508,6 +541,16 @@ fn submit_batch_then_wait_preserves_fifo_and_owned_scatter_memory() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioVec uses the production Box<[u8]> constructor \
+              and BioMemory implementation"
+)]
 fn request_immediate_completion_and_noop_flush() {
     let (disk, hardware) = disk(0, true);
     let device = view(&disk);
@@ -544,6 +587,16 @@ fn request_validation_precedes_submission() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioVec uses the production Box<[u8]> constructor \
+              and BioMemory implementation"
+)]
 fn scatter_transfers_preserve_addresses_and_split_only_at_device_limits() {
     for features in [(1 << 1) | (1 << 2), (1 << 1) | (1 << 2) | (1 << 28)] {
         for operation in [BioOperation::Read, BioOperation::Write] {

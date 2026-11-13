@@ -7,6 +7,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use kalloc_types::KBox;
 use ktime_types::TimeSpan;
 use unittest::def_test;
 
@@ -96,7 +97,7 @@ fn owned_work_drains_and_destroys_captures_in_task_context() {
 /// Panics on failed submission, wrong destruction context or missing reclamation.
 #[def_test(serial)]
 fn owned_callback_can_release_last_handle() {
-    type Handle = crate::WorkHandle<alloc::boxed::Box<dyn Fn() + Send + Sync>>;
+    type Handle = crate::WorkHandle<KBox<dyn Fn() + Send + Sync>>;
     let slot: Arc<kspin::SpinNoIrq<Option<Handle>>> = Arc::new(kspin::SpinNoIrq::new(None));
     let drops = Arc::new(AtomicUsize::new(0));
     let running = Arc::new(AtomicBool::new(false));
@@ -105,13 +106,14 @@ fn owned_callback_can_release_last_handle() {
         running: running.clone(),
     };
     let callback_slot = slot.clone();
-    let callback: alloc::boxed::Box<dyn Fn() + Send + Sync> = alloc::boxed::Box::new(move || {
+    let callback: KBox<dyn Fn() + Send + Sync> = KBox::new_nowait(move || {
         capture.run();
         running.store(true, Ordering::Release);
         let handle = callback_slot.lock().take().unwrap();
         drop(handle);
         running.store(false, Ordering::Release);
-    });
+    })
+    .unwrap();
     *slot.lock() = Some(crate::WorkHandle::new(callback).unwrap());
     slot.lock().as_ref().unwrap().queue_default(None).unwrap();
     wait_until(|| drops.load(Ordering::Acquire) == 1);

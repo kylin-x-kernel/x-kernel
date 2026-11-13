@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::{sync::Arc, vec};
 use core::{assert, assert_eq, num::NonZeroUsize, pin::pin};
 
 use unittest::def_test;
@@ -40,12 +40,12 @@ fn colors_complete_independently() {
     assert!(first.is_completed());
 }
 
-struct Resource(Option<Box<dyn FnOnce() + Send>>);
+struct Resource(Option<crate::test_callback::Callback>);
 
 impl Drop for Resource {
     fn drop(&mut self) {
         if let Some(callback) = self.0.take() {
-            callback();
+            callback.call();
         }
     }
 }
@@ -70,7 +70,7 @@ fn canceled_cleanup_remains_in_original_queue() {
     let old_control = old_queue.clone();
     let (receipt, token) = CompletionObserver::prepare();
     let during_cleanup = receipt.clone();
-    let resource = Resource(Some(Box::new(move || {
+    let resource = Resource(Some(crate::test_callback::new(move || {
         let work = weak.upgrade().unwrap();
         core::assert_eq!(work.capture(&mut vec![]), Ok(0));
         core::assert!(old_control.observe_batch(0, token).is_ok());
@@ -168,7 +168,7 @@ fn accepted_work_retains_control_through_cleanup() {
     let weak = Arc::downgrade(&control);
     let cleanup_control = weak.clone();
     let work = pin!(Work::new());
-    let resource = Resource(Some(Box::new(move || {
+    let resource = Resource(Some(crate::test_callback::new(move || {
         core::assert!(cleanup_control.upgrade().is_some());
     })));
     // SAFETY: pinned Work is retained until synchronous cancellation completes.
@@ -210,7 +210,7 @@ fn execution_retires_before_queue_notification() {
     ));
     let (receipt, token) = CompletionObserver::prepare();
     let during_cleanup = receipt.clone();
-    let resource = Resource(Some(Box::new(move || {
+    let resource = Resource(Some(crate::test_callback::new(move || {
         core::assert!(!during_cleanup.is_completed());
     })));
     // SAFETY: outer Arc keeps Work stable through both executions and wake reentry.

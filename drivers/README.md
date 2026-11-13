@@ -104,3 +104,25 @@ first, implement it in an adapter crate, then pass the provider through
 
 ResourceDesc/Set and explicit-provider managed cleanup helpers belong to kdevice.
 The old device-res contract and adapter are removed, not retained as aliases.
+
+## Kernel Unit-Test Storage
+
+Portable driver tests prefer inline values and retain existing vector buffers
+without adding kernel allocator dependencies. The synthetic MMIO header lives
+inline under its existing shared mutex; register borrows end before unlocking.
+Network mock handles point into retained payload vectors; moving the vector
+owners does not move those payloads. Singleton vectors and unshared reference
+counted owners are not substitutes for uniquely owned heap storage.
+
+CG-049 exemptions stay on individual functions or types that require existing
+production Box contracts: block device operations, bio memory, waiters, character
+class publication, and deferred binding cleanup. The MMIO and coherent-memory
+test providers additionally preserve paired GlobalAlloc Box allocation and raw
+reconstruction through their opaque address tokens. Portable fixture exceptions
+also preserve Box where scoped storage cannot satisfy static firmware/MMIO
+lifetimes, a large test backend must keep the UART enum compact, or an erased
+FnOnce callback must retain unique ownership across wait calls. Serial fixture
+allocation precedes port-locked I/O. RNG actions are taken once from their slot,
+called outside its lock, and release their captures on completion. These narrow
+exceptions do not authorize portable production drivers to depend on kernel
+allocation types or change production ownership contracts.

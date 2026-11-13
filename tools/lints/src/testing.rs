@@ -149,6 +149,17 @@ pub(crate) struct MockCrate {
 ///
 /// Panics if a mock crate cannot be built or the output differs.
 pub(crate) fn run_ui(lint: &str, source: &str, expected_stderr: &str, mocks: &[MockCrate]) {
+    run_ui_with_files(lint, source, expected_stderr, mocks, &[]);
+}
+
+/// Runs a UI fixture with additional module files relative to its source directory.
+pub(crate) fn run_ui_with_files(
+    lint: &str,
+    source: &str,
+    expected_stderr: &str,
+    mocks: &[MockCrate],
+    files: &[(&str, &str)],
+) {
     let base = target_dir().join("ui").join(lint);
     if base.exists() {
         fs::remove_dir_all(&base)
@@ -174,6 +185,12 @@ pub(crate) fn run_ui(lint: &str, source: &str, expected_stderr: &str, mocks: &[M
     }
     write(&src.join(format!("{lint}.rs")), source);
     write(&src.join(format!("{lint}.stderr")), expected_stderr);
+    for (name, contents) in files {
+        let path = src.join(name);
+        fs::create_dir_all(path.parent().expect("fixture file has a parent"))
+            .unwrap_or_else(|error| panic!("cannot create fixture directory: {error}"));
+        write(&path, contents);
+    }
 
     // compiletest saves a mismatching output as `<temp dir>/<lint>.stage-id.stderr`.
     let saved = env::temp_dir().join(format!("{lint}.stage-id.stderr"));

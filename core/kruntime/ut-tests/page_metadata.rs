@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::ptr::NonNull;
+use kalloc_types::KBox;
 
 use kalloc::{GlobalAllocator, UsageKind, alloc_page_ref, alloc_pages_exact_ref};
 use memaddr::{PAGE_SIZE_4K as PAGE, PhysAddr, PhysAddrRange};
@@ -27,7 +28,7 @@ fn prepared_inventory_works_with_existing_allocator_interfaces() {
         })
     }
     .unwrap();
-    let allocator = Box::new(GlobalAllocator::new());
+    let allocator = KBox::new_nowait(GlobalAllocator::new()).unwrap();
     let first = free.as_slice()[0];
     allocator.init_page_allocator(khal::mem::p2v(first.start).as_usize(), first.size());
     for r in &free.as_slice()[1..] {

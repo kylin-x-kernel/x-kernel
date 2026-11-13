@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use kalloc_types::KBox;
 
 use intrusive_collections::{LinkedList, container_of};
 use unittest::{assert, assert_eq};
@@ -21,21 +22,22 @@ struct OwnedObject {
 }
 
 impl OwnedObject {
-    fn new(invoked: Arc<AtomicUsize>, dropped: Arc<AtomicUsize>) -> Box<Self> {
-        Box::new(Self {
+    fn new(invoked: Arc<AtomicUsize>, dropped: Arc<AtomicUsize>) -> KBox<Self> {
+        KBox::new_nowait(Self {
             value: 7,
             callback: CallbackNode::new(Self::release),
             invoked,
             dropped,
         })
+        .unwrap()
     }
 
-    fn into_node(self: Box<Self>) -> UnsafeRef<CallbackNode> {
-        let object = Box::into_raw(self);
-        // SAFETY: object is an initialized Box transferred to this fixture's
+    fn into_node(owned: KBox<Self>) -> UnsafeRef<CallbackNode> {
+        let object = KBox::into_raw(owned);
+        // SAFETY: object is an initialized KBox transferred to this fixture's
         // retirement path. Raw field projection preserves allocation provenance.
         let node = unsafe { &raw mut (*object).callback };
-        // SAFETY: only this handle owns invocation; the Box remains allocated
+        // SAFETY: only this handle owns invocation; the KBox remains allocated
         // and fixed until release reconstructs it. Its captures are Send.
         unsafe { CallbackNode::from_raw(node) }
     }
@@ -44,12 +46,12 @@ impl OwnedObject {
     /// `node` must be this object's unique detached callback from into_node;
     /// no object references may survive this terminal invocation.
     unsafe fn release(node: *mut CallbackNode) {
-        // SAFETY: into_node preserved the enclosing Box provenance; the actual
+        // SAFETY: into_node preserved the enclosing KBox provenance; the actual
         // field offset restores its address and original over-aligned layout.
         let object = unsafe { container_of!(node, Self, callback) }.cast_mut();
-        // SAFETY: this is the original Box pointer, uniquely transferred by
+        // SAFETY: this is the original KBox pointer, uniquely transferred by
         // into_node; no references survive the detached callback invocation.
-        let object = unsafe { Box::from_raw(object) };
+        let object = unsafe { KBox::from_raw(object) };
         object.invoked.fetch_add(object.value, Ordering::Relaxed);
         drop(object);
     }
@@ -77,7 +79,7 @@ fn embedded_callback_releases_its_original_object() {
     let object = OwnedObject::new(invoked.clone(), dropped.clone());
     let address = core::ptr::from_ref(&object.callback);
     let mut queue = LinkedList::new(CallbackAdapter::NEW);
-    queue.push_back(object.into_node());
+    queue.push_back(OwnedObject::into_node(object));
     let retained = invoked.load(Ordering::Relaxed) == 0 && dropped.load(Ordering::Relaxed) == 0;
     let node = queue.pop_front();
     let same_address = node
@@ -136,7 +138,7 @@ fn one_list_supports_owned_and_stack_backed_nodes() {
     // is drained and notify returns. There is exactly one invocation handle.
     let borrowed = unsafe { CallbackNode::from_raw(node_ptr) };
     let mut queue = LinkedList::new(CallbackAdapter::NEW);
-    queue.push_back(object.into_node());
+    queue.push_back(OwnedObject::into_node(object));
     queue.push_back(borrowed);
     let mut count = 0;
     while let Some(node) = queue.pop_front() {

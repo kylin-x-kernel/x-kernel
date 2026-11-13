@@ -55,27 +55,28 @@ fn interrupted_timerfd_read_preserves_nonblocking_and_count_consumption() {
 
 #[def_test]
 fn timerfd_expirations_after_pending_precede_signal_and_are_consumed_once() {
-    use alloc::boxed::Box;
     use core::{
         future::Future,
+        pin::pin,
         task::{Context, Poll, Waker},
     };
     let timerfd = TimerFd::new(TimerFdClock::Monotonic).unwrap();
     let task = ktask::current();
     task.clear_interrupt();
-    let mut read = Box::pin(poll_file_io(timerfd.as_ref(), IoEvents::IN, false, || {
-        timerfd.read_expirations()
-    }));
-    let mut cx = Context::from_waker(Waker::noop());
-    assert_eq!(read.as_mut().poll(&mut cx), Poll::Pending);
-    // Establish completed expirations without relying on timer IRQ timing.
-    timerfd.runtime.timer.handler().inner.lock().expirations = 5;
-    timerfd.runtime.timer.handler().poll_rx.wake();
-    task.interrupt();
-    let result = read.as_mut().poll(&mut cx);
-    task.clear_interrupt();
-    assert_eq!(result, Poll::Ready(Ok(5)));
-    drop(read);
+    {
+        let mut read = pin!(poll_file_io(timerfd.as_ref(), IoEvents::IN, false, || {
+            timerfd.read_expirations()
+        }));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(read.as_mut().poll(&mut cx), Poll::Pending);
+        // Establish completed expirations without relying on timer IRQ timing.
+        timerfd.runtime.timer.handler().inner.lock().expirations = 5;
+        timerfd.runtime.timer.handler().poll_rx.wake();
+        task.interrupt();
+        let result = read.as_mut().poll(&mut cx);
+        task.clear_interrupt();
+        assert_eq!(result, Poll::Ready(Ok(5)));
+    }
     assert_eq!(timerfd.read_expirations(), Err(KError::WouldBlock));
 }
 

@@ -5,19 +5,17 @@
 //! Boot-owned RCU service integration through public owning callbacks.
 //! The permanent service is neither replaced nor reinitialized by these tests.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::Waker,
 };
+use kalloc_types::KBox;
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use kerrno::KError;
-use krcu::{
-    CallbackNode, PreparedCallback,
-    host::RcuSoftirqIf,
-};
+use krcu::{CallbackNode, PreparedCallback, host::RcuSoftirqIf};
 use ktask::{TaskInner, future::PreparedTaskWait};
 use unittest::{assert, assert_eq, def_test};
 
@@ -95,12 +93,12 @@ struct CallbackProbe {
 const _: () = core::assert!(core::mem::offset_of!(CallbackProbe, node) == 0);
 
 /// # Safety
-/// `node` is the first field of a uniquely owned CallbackProbe Box, submitted
+/// `node` is the first field of a uniquely owned CallbackProbe KBox, submitted
 /// once and detached after its GP. Invocation takes ownership of that allocation.
 unsafe fn finish_probe(node: *mut CallbackNode) {
     // SAFETY: repr(C) puts node at offset zero; admission passed a raw projection
-    // of this original Box allocation, and execution grants unique ownership.
-    let probe = unsafe { Box::from_raw(node.cast::<CallbackProbe>()) };
+    // of this original KBox allocation, and execution grants unique ownership.
+    let probe = unsafe { KBox::from_raw(node.cast::<CallbackProbe>()) };
     if !kirq::context::is_softirq_context()
         || ktask::is_sleepable_context()
         || khal::percpu::this_cpu_id().as_usize() != probe.cpu
@@ -147,7 +145,7 @@ unsafe fn finish_probe(node: *mut CallbackNode) {
 /// The node is an unsubmitted CallbackProbe allocation owned by its handle.
 unsafe fn cancel_probe(node: *mut CallbackNode) {
     // SAFETY: the prepared handle retains the original first-field projection.
-    drop(unsafe { Box::from_raw(node.cast::<CallbackProbe>()) });
+    drop(unsafe { KBox::from_raw(node.cast::<CallbackProbe>()) });
 }
 
 fn prepare_probe(
@@ -156,16 +154,19 @@ fn prepare_probe(
     violations: &Arc<AtomicUsize>,
     completion_waker: Option<Waker>,
 ) -> PreparedCallback {
-    let object = Box::into_raw(Box::new(CallbackProbe {
-        node: CallbackNode::new(finish_probe),
-        completed: completed.clone(),
-        violations: violations.clone(),
-        cpu,
-        completion_waker,
-    }));
-    // SAFETY: raw field projection preserves the containing Box provenance.
+    let object = KBox::into_raw(
+        KBox::new_nowait(CallbackProbe {
+            node: CallbackNode::new(finish_probe),
+            completed: completed.clone(),
+            violations: violations.clone(),
+            cpu,
+            completion_waker,
+        })
+        .unwrap(),
+    );
+    // SAFETY: raw field projection preserves the containing KBox provenance.
     let node = NonNull::new(unsafe { &raw mut (*object).node }).unwrap();
-    // SAFETY: uniquely owned stable unpublished Box, with transferable Arc
+    // SAFETY: uniquely owned stable unpublished KBox, with transferable Arc
     // resources. Invocation and cancellation each consume the allocation once.
     unsafe { PreparedCallback::new(node, cancel_probe) }
 }
@@ -458,11 +459,11 @@ fn verify_deferred_reader_completion(destination: LogicalCpuId) -> unittest::Tes
 #[def_test(serial)]
 fn reschedule_ipi_cleans_deferred_reader_after_cpu_observation() {
     /// # Safety
-    /// `node` is a uniquely owned Box<CallbackNode>, submitted once and detached
+    /// `node` is a uniquely owned KBox<CallbackNode>, submitted once and detached
     /// after its period. Invocation consumes that original allocation once.
     unsafe fn release_marker(node: *mut CallbackNode) {
-        // SAFETY: submission transferred this Box allocation unchanged.
-        drop(unsafe { Box::from_raw(node) });
+        // SAFETY: submission transferred this KBox allocation unchanged.
+        drop(unsafe { KBox::from_raw(node) });
     }
 
     static NODES: [krcu_core::ReaderNode; kbuild_config::NR_CPUS] =
@@ -478,13 +479,13 @@ fn reschedule_ipi_cleans_deferred_reader_after_cpu_observation() {
             .unwrap();
     let mut driver = callbacks.claim_driver().unwrap();
     let pin = kspin::NoPreempt::new();
-    let marker = Box::into_raw(Box::new(CallbackNode::new(release_marker)));
+    let marker = KBox::into_raw(KBox::new_nowait(CallbackNode::new(release_marker)).unwrap());
     // SAFETY: this isolated marker protects no data. The driver owns it until
     // invoking its nonblocking release callback; rejection retains ownership.
     let accepted = unsafe { callbacks.submit(cpu, marker) };
     if !accepted {
         // SAFETY: rejected submission neither accesses nor retains the marker.
-        drop(unsafe { Box::from_raw(marker) });
+        drop(unsafe { KBox::from_raw(marker) });
     }
     let started = driver.advance();
     krcu::with_read(|_| {

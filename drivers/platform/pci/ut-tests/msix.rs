@@ -30,6 +30,17 @@ impl ConfigurationAccess for FakeConfig {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: portable PCI config accessors require \
+              program-lifetime aligned backing shared by copied accessors; a kernel allocator \
+              dependency is forbidden"
+)]
 fn shutdown_never_restores_discovery_time_msix_enable() {
     let bdf = DeviceFunction {
         bus: 0,

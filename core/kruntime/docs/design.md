@@ -670,6 +670,19 @@ same-key publication; callback drain happens only after reader exit. This
 checks retained identity, successor lookup and eventual reclamation without
 requiring the writer to wait for IRQ delivery on the reader CPU.
 
+## Unit-test allocation ownership
+
+Unit-test callback owners use `KBox` with `NOWAIT` allocation so preparation
+also remains valid in IRQ/preemption-excluded fixtures and does not introduce
+reclaim into lock-held scenarios. Raw ownership transfers and cancellation or
+post-grace-period recovery use the same KBox allocation, including nonzero
+callback offsets and reposting. Allocation accounting retains a real 64-byte
+KBox control allocation under the IRQ guard; it still reaches the counted
+kernel heap path. Locally retained Work and DelayedWork fixtures use stack
+pinning and finish their existing synchronous drains before scope exit. The
+private page-metadata allocator remains heap-owned to avoid increasing kernel
+test stack requirements.
+
 ## System power management
 
 System suspend/resume coordination belongs to `core/kpm`, independently of

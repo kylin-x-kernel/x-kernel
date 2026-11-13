@@ -1,5 +1,9 @@
 # kdma — Design
 
+The bounce-pool guest fixture retains its original Vec backing without resizing
+or relocating it after registration. The pool and its allocations are retired
+before that buffer is released; no boxed-slice conversion is needed.
+
 ## Purpose
 
 `kdma` is the kernel's DMA memory layer: it allocates coherent memory that

@@ -142,15 +142,16 @@ fn backoff_only_changes_service_deadline() {
 
 #[def_test]
 fn external_storage_is_released_after_running_clear() {
-    let node = alloc::boxed::Box::new(TimerNode::new(setting(10)));
     let mut timers = CpuTimers::new();
-    // SAFETY: allocation remains live through running retirement.
-    unsafe { timers.arm(&node, setting(10)) };
-    let (running, _) = timers.take_expired(10).unwrap();
-    assert!(timers.take_expired(20).is_none());
-    // SAFETY: no callback resources remain and owner storage is still live.
-    unsafe { complete(&mut timers, running) };
-    drop(node);
+    {
+        let node = core::pin::pin!(TimerNode::new(setting(10)));
+        // SAFETY: pinned storage remains live through running retirement.
+        unsafe { timers.arm(&node, setting(10)) };
+        let (running, _) = timers.take_expired(10).unwrap();
+        assert!(timers.take_expired(20).is_none());
+        // SAFETY: no callback resources remain and owner storage is still live.
+        unsafe { complete(&mut timers, running) };
+    }
     assert!(timers.running.is_none());
     assert!(timers.take_expired(20).is_none());
 }

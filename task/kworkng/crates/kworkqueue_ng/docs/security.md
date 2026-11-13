@@ -1,5 +1,22 @@
 # Workqueue Security
 
+## Unit-Test Storage Ownership
+
+Fixed Work batches are stack-pinned arrays retained through cancellation and
+joined execution. Tests that destroy Work during terminal notification retain
+a pinned KBox owner; the late-cancel fixture transfers ownership with
+KBox::into_raw and recovers it exactly once with KBox::from_raw after all Work
+borrows end. Production queue pointers only borrow this storage and do not
+reconstruct a Box owner.
+
+The test-only consuming cleanup adapter stores an Option of the concrete
+FnOnce capture in a KBox-backed FnMut closure. Consuming the adapter takes and
+invokes that capture once; abandoning it drops the capture without invocation.
+This preserves callbacks that move resources or observer tokens during cleanup.
+Erased callback and retained Work allocations use NOWAIT because some fixtures
+run with preemption disabled or inside dispatch. Failure panics before admission;
+NOWAIT does not relax the callbacks' own execution-context requirements.
+
 ## Partition Initialization Ownership
 
 PreparedQueue keeps CPU configuration and reserved partition storage inseparable.

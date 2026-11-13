@@ -9,6 +9,15 @@ extern crate alloc;
 use alloc::vec;
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn test_ramdisk_basic_operations() {
     // Test creation with different sizes
     let disk = RamDisk::new(1024);
@@ -124,6 +133,15 @@ fn test_ramdisk_boundary_conditions() {
     assert_eq!(verify_buf, vec![0x12; 512]);
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn test_device(disk: RamDisk) -> alloc::sync::Arc<crate::BlockDevice> {
     crate::Gendisk::alloc("ram-test".into(), 250, 0, 1, Box::new(disk))
         .unwrap()

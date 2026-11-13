@@ -1,5 +1,15 @@
 # Prepared Work Execution Services
 
+## Unit-Test Callback Storage
+
+Contract fixtures retain erased source and execution callbacks in KBox owners
+allocated with NOWAIT, including execution preparation inside source acquisition.
+The execution wrapper consumes itself when calling its FnMut callback. Its
+drop probe is taken from an Option inside the callback, preserving destruction
+before return and exactly-once cleanup after the source's final release.
+These fixture allocations remain fatal on failure and do not change production
+source ownership or worker admission.
+
 ## Fallible Startup Storage And Manager Entry
 
 Each CPU reserves three fixed KBox slices: worker states, optional task wakers,

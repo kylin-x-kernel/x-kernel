@@ -5,17 +5,18 @@
 //! Public drain contracts against boot's permanent RCU service. Fixtures join
 //! their downstream tasks without replacing service state or callback carriers.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::Waker,
 };
+use kalloc_types::KBox;
 
 use kcpu_id_map::KCpuMaskExt;
 use kerrno::KError;
-use krcu::{CallbackNode, PreparedCallback, drain_callbacks};
 use kmutex::Mutex;
+use krcu::{CallbackNode, PreparedCallback, drain_callbacks};
 use ktask::future::PreparedTaskWait;
 use unittest::{assert, assert_eq, def_test};
 
@@ -45,21 +46,21 @@ struct DownstreamProbe {
 const _: () = core::assert!(core::mem::offset_of!(DownstreamProbe, node) == 0);
 
 /// # Safety
-/// `node` projects the first field of a uniquely accepted DownstreamProbe Box.
+/// `node` projects the first field of a uniquely accepted DownstreamProbe KBox.
 /// Its prepared task has not been activated; invocation runs outside RCU locks.
 unsafe fn activate_downstream(node: *mut CallbackNode) {
-    // SAFETY: the first-field projection preserves the original Box allocation.
-    let probe = unsafe { Box::from_raw(node.cast::<DownstreamProbe>()) };
+    // SAFETY: the first-field projection preserves the original KBox allocation.
+    let probe = unsafe { KBox::from_raw(node.cast::<DownstreamProbe>()) };
     ktask::activate_task(&probe.task);
 }
 
 /// # Safety
-/// `node` is the first-field projection of the unsubmitted Box owned by the
+/// `node` is the first-field projection of the unsubmitted KBox owned by the
 /// prepared handle. No reader can access it; cancellation consumes it once.
 unsafe fn cancel_downstream(node: *mut CallbackNode) {
     // SAFETY: repr(C), the offset assertion and unique cancellation ownership
-    // preserve the Box base. Cancellation must not activate the prepared task.
-    drop(unsafe { Box::from_raw(node.cast::<DownstreamProbe>()) });
+    // preserve the KBox base. Cancellation must not activate the prepared task.
+    drop(unsafe { KBox::from_raw(node.cast::<DownstreamProbe>()) });
 }
 
 #[def_test(serial)]
@@ -77,13 +78,16 @@ fn callback_drain_does_not_wait_for_downstream_task_work() {
         kbuild_config::TASK_STACK_SIZE,
     ));
     let blocked = gate.lock();
-    let record = Box::into_raw(Box::new(DownstreamProbe {
-        node: CallbackNode::new(activate_downstream),
-        task: worker.clone(),
-    }));
-    // SAFETY: project from the whole uniquely retained Box.
+    let record = KBox::into_raw(
+        KBox::new_nowait(DownstreamProbe {
+            node: CallbackNode::new(activate_downstream),
+            task: worker.clone(),
+        })
+        .unwrap(),
+    );
+    // SAFETY: project from the whole uniquely retained KBox.
     let node = NonNull::new(unsafe { &raw mut (*record).node }).unwrap();
-    // SAFETY: unpublished stable Box transfers its sole submission right. Both
+    // SAFETY: unpublished stable KBox transfers its sole submission right. Both
     // paths consume it once; cancellation only drops the retained task owner.
     let prepared = unsafe { PreparedCallback::new(node, cancel_downstream) };
     // SAFETY: unpublished fixture with a preallocated task; callback only
@@ -125,23 +129,26 @@ impl Drop for DrainProbe {
 }
 
 /// # Safety
-/// `node` projects the first field of a uniquely transferred DrainProbe Box.
+/// `node` projects the first field of a uniquely transferred DrainProbe KBox.
 /// The probe has no published readers; invocation or cancellation consumes
-/// that Box once outside queue locks, without requiring a GP for cancellation.
+/// that KBox once outside queue locks, without requiring a GP for cancellation.
 unsafe fn destroy_probe(node: *mut CallbackNode) {
-    // SAFETY: repr(C) and the offset assertion preserve the original Box base.
-    drop(unsafe { Box::from_raw(node.cast::<DrainProbe>()) });
+    // SAFETY: repr(C) and the offset assertion preserve the original KBox base.
+    drop(unsafe { KBox::from_raw(node.cast::<DrainProbe>()) });
 }
 
 fn prepare_drain_probe(destroyed: &Arc<AtomicUsize>) -> PreparedCallback {
-    let record = Box::into_raw(Box::new(DrainProbe {
-        node: CallbackNode::new(destroy_probe),
-        destroyed: destroyed.clone(),
-    }));
-    // SAFETY: project from the whole uniquely owned Box allocation.
+    let record = KBox::into_raw(
+        KBox::new_nowait(DrainProbe {
+            node: CallbackNode::new(destroy_probe),
+            destroyed: destroyed.clone(),
+        })
+        .unwrap(),
+    );
+    // SAFETY: project from the whole uniquely owned KBox allocation.
     let node = NonNull::new(unsafe { &raw mut (*record).node }).unwrap();
     // SAFETY: unpublished stable storage transfers its only submission right.
-    // Invocation and cancellation both release this reader-free Box exactly once.
+    // Invocation and cancellation both release this reader-free KBox exactly once.
     unsafe { PreparedCallback::new(node, destroy_probe) }
 }
 
@@ -311,27 +318,27 @@ impl Drop for RepostingProbe {
 }
 
 /// # Safety
-/// The node is the first field of the uniquely owned, unqueued probe Box.
+/// The node is the first field of the uniquely owned, unqueued probe KBox.
 unsafe fn cancel_reposting_probe(node: *mut CallbackNode) {
-    // SAFETY: repr(C), the offset assertion and unique ownership recover the Box.
-    drop(unsafe { Box::from_raw(node.cast::<RepostingProbe>()) });
+    // SAFETY: repr(C), the offset assertion and unique ownership recover the KBox.
+    drop(unsafe { KBox::from_raw(node.cast::<RepostingProbe>()) });
 }
 
-fn prepare_reposting_probe(probe: Box<RepostingProbe>) -> PreparedCallback {
-    let record = Box::into_raw(probe);
-    // SAFETY: project from the whole uniquely retained, unqueued Box.
+fn prepare_reposting_probe(probe: KBox<RepostingProbe>) -> PreparedCallback {
+    let record = KBox::into_raw(probe);
+    // SAFETY: project from the whole uniquely retained, unqueued KBox.
     let node = NonNull::new(unsafe { &raw mut (*record).node }).unwrap();
-    // SAFETY: stable unpublished Box transfers its unique submission right;
+    // SAFETY: stable unpublished KBox transfers its unique submission right;
     // cancellation drops it without reposting and both paths are nonblocking.
     unsafe { PreparedCallback::new(node, cancel_reposting_probe) }
 }
 
 /// # Safety
-/// The node projects the first field of a uniquely accepted probe Box.
+/// The node projects the first field of a uniquely accepted probe KBox.
 /// The executor detached it and will not access it after this invocation.
 unsafe fn repost_until_stopped(node: *mut CallbackNode) {
-    // SAFETY: repr(C) and the offset assertion preserve the original Box base.
-    let probe = unsafe { Box::from_raw(node.cast::<RepostingProbe>()) };
+    // SAFETY: repr(C) and the offset assertion preserve the original KBox base.
+    let probe = unsafe { KBox::from_raw(node.cast::<RepostingProbe>()) };
     let control = probe.control.clone();
     // SAFETY: no lock or retired data is held by this rejection probe.
     // Softirq must reject before installing a self-dependent drain.
@@ -352,7 +359,7 @@ unsafe fn repost_until_stopped(node: *mut CallbackNode) {
         // A counted permit covers decision through publication. No gate lock
         // spans submit: no-IPI notification may wake the local daemon inline.
         // SAFETY: uniquely detached node, watched softirq CPU, no held locks;
-        // its resources remain owned by the transferred Box and control Arc.
+        // its resources remain owned by the transferred KBox and control Arc.
         match unsafe { prepared.submit() } {
             Ok(()) => {
                 control.reposted.fetch_add(1, Ordering::Release);
@@ -382,10 +389,13 @@ fn stopped_reposts_drain_before_owner_teardown_and_reject_callback_waits() {
         has_failed: AtomicBool::new(false),
         waker: wait.waker(),
     });
-    let prepared = prepare_reposting_probe(Box::new(RepostingProbe {
-        node: CallbackNode::new(repost_until_stopped),
-        control: control.clone(),
-    }));
+    let prepared = prepare_reposting_probe(
+        KBox::new_nowait(RepostingProbe {
+            node: CallbackNode::new(repost_until_stopped),
+            control: control.clone(),
+        })
+        .unwrap(),
+    );
     // SAFETY: unpublished fixture with nonblocking callback/cancellation.
     // No fixture or scheduler lock spans public submission.
     let accepted = match unsafe { prepared.submit() } {

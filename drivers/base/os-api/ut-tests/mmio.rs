@@ -17,6 +17,17 @@ struct Provider {
 // SAFETY: each successful map owns a separate aligned Box allocation. Only the
 // matching unmap frees it; release accounting is atomic across callers.
 unsafe impl MmioOp for Provider {
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: the MMIO test provider transfers a \
+                  GlobalAlloc Box array through vaddr and reconstructs that exact allocation once \
+                  at unmap"
+    )]
     fn map_mmio(&self, region: MmioRegion, _name: &'static str) -> ResResult<MmioMapping> {
         if region.size == 0 || region.size > 64 {
             return Err(ResError::InvalidResource);
@@ -27,6 +38,17 @@ unsafe impl MmioOp for Provider {
         })
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: the MMIO test provider transfers a \
+                  GlobalAlloc Box array through vaddr and reconstructs that exact allocation once \
+                  at unmap"
+    )]
     unsafe fn unmap_mmio(&self, mapping: MmioMapping) {
         // SAFETY: the caller returns this provider's original allocation once,
         // after all accesses have ended, with its exact array type preserved.

@@ -100,10 +100,13 @@ concurrent device writes.
 
 The four dormant adapter cases are preserved historical mock tests, not
 validated coverage. Their raw-pointer fixtures and SDK-dependent parent code
-must be audited before any future enablement. In particular, the old fixtures
-use a boxed Vec object's address as both owner and packet-data pointer; that
-does not identify the Vec's backing byte allocation. Relocation preserves this
-unreachable code and does not claim it is safe to execute.
+must be audited before any future enablement. The fixtures now retain Vec
+owners and use `Vec::as_mut_ptr()` to identify the backing byte allocations;
+the owners outlive handle access and release the storage when dropped. Both
+handle pointers refer to the byte allocation, not to a boxed `NetBuf` owner.
+These mock handles must not be passed to `NetBuf::from_handle`, whose
+`Box::from_raw` recovery requires an owner produced by `NetBuf::into_handle`.
+The dormant cases remain unvalidated and are not claimed safe to enable.
 
 ## Audit Checklist
 

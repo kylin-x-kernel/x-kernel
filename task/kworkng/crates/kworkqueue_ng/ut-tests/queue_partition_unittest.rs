@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     assert, assert_eq,
     num::NonZeroUsize,
@@ -18,7 +18,7 @@ use unittest::def_test;
 use super::{QueuePartition, inflight::QueueInFlight};
 use crate::work::{Work, observers::CompletionObserver};
 
-struct Resource(Option<Box<dyn FnOnce() + Send>>);
+struct Resource(Option<crate::test_callback::Callback>);
 
 /// Checks closure after the final admission sample does not lose an old obligation.
 ///
@@ -140,7 +140,7 @@ fn queue_count_exhaustion_preserves_routing() {
 impl Drop for Resource {
     fn drop(&mut self) {
         if let Some(callback) = self.0.take() {
-            callback();
+            callback.call();
         }
     }
 }
@@ -203,7 +203,7 @@ fn ready_cancel_refills_before_cleanup_retires_batch() {
     let (receipt, token) = CompletionObserver::prepare();
     let cleanup_receipt = receipt.clone();
     let cleanup_partition = partition.clone();
-    let resource = Resource(Some(Box::new(move || {
+    let resource = Resource(Some(crate::test_callback::new(move || {
         assert!(!cleanup_receipt.is_completed());
         assert_eq!(cleanup_partition.state.lock().active, 1);
         cleanup_partition
@@ -274,7 +274,7 @@ fn cleanup_keeps_original_partition_and_allowance() {
     let cleanup_partition = first.clone();
     let cleanup_other = other.clone();
     let cleanup_second = second.clone();
-    let resource = Resource(Some(Box::new(move || {
+    let resource = Resource(Some(crate::test_callback::new(move || {
         let work = weak_work.upgrade().unwrap();
         // SAFETY: outer owner retains Work through successor cleanup.
         core::assert!(unsafe { cleanup_other.accept(&work, Resource(None), 0) }.is_err());
@@ -565,7 +565,7 @@ fn selection_waits_for_resource_cleanup() {
     let (receipt, token) = CompletionObserver::prepare();
     let cleanup_receipt = receipt.clone();
     let cleanup_partition = partition.clone();
-    let resource = Resource(Some(Box::new(move || {
+    let resource = Resource(Some(crate::test_callback::new(move || {
         assert!(!cleanup_receipt.is_completed());
         assert!(cleanup_partition.claim_next().is_none());
         assert_eq!(cleanup_partition.state.lock().active, 1);

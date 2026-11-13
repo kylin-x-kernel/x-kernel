@@ -1,5 +1,27 @@
 # kvfs - Design Document
 
+## Unit-test ownership boundaries
+
+Local polling futures use stack pinning with lexical destruction boundaries;
+cancellation assertions run after the future and its registrations are dropped.
+Block-device fixtures retain narrowly exempted standard Box owners because
+`Gendisk::alloc` still requires them. The UT lint does not change that driver
+ownership contract.
+
+## Writeback test fixture ownership
+
+The guest writeback fixtures in `ut-tests/address_space/writeback.rs` prepare
+their operations with `KBox::new` before publishing an inode or starting worker
+tasks. These setup sites run in sleepable task context without holding mapping,
+inode or fixture locks, so they use the default KERNEL allocation policy.
+`deferred_mapping` returns allocation errors to its test caller before inode
+construction. Tests require successful fixture preparation before proceeding.
+
+`KBox::leak` preserves the existing static operations-reference contract. These
+per-test operations intentionally survive for the guest lifetime, as their Box
+predecessors did; this change does not introduce fixture reclamation or alter
+the production writeback protocol.
+
 ## Superblock private owners
 
 `SuperBlock::{new_with_flags_and_private,try_new_with_flags_and_private,

@@ -2,10 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, task::Wake};
+use alloc::{sync::Arc, task::Wake};
 use core::{
     cell::Cell,
     future::Future,
+    pin::pin,
     sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
 };
@@ -86,7 +87,7 @@ fn file_wait_rechecks_readiness_published_while_registering() {
     ktask::current().clear_interrupt();
     let input = Input::new();
     input.publish_on_register.set(true);
-    let mut wait = Box::pin(poll_file_io(&input, IoEvents::IN, false, || input.read()));
+    let mut wait = pin!(poll_file_io(&input, IoEvents::IN, false, || input.read()));
     let mut cx = Context::from_waker(Waker::noop());
     // No wake is sent: only the post-registration recheck can see the data.
     assert_eq!(wait.as_mut().poll(&mut cx), Poll::Ready(Ok(11)));
@@ -101,14 +102,15 @@ fn file_wait_rechecks_after_signal_and_releases_registrations() {
     let wakes = Arc::new(WakeCount::default());
     let waker = Waker::from(wakes.clone());
     let mut cx = Context::from_waker(&waker);
-    let mut wait = Box::pin(poll_file_io(&input, IoEvents::IN, false, || input.read()));
-    assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending);
-    input.value.set(7);
-    input.events.wake();
-    assert!(wakes.0.load(Ordering::Relaxed) > 0);
-    ktask::current().interrupt();
-    assert_eq!(wait.as_mut().poll(&mut cx), Poll::Ready(Ok(7)));
-    drop(wait);
+    {
+        let mut wait = pin!(poll_file_io(&input, IoEvents::IN, false, || input.read()));
+        assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending);
+        input.value.set(7);
+        input.events.wake();
+        assert!(wakes.0.load(Ordering::Relaxed) > 0);
+        ktask::current().interrupt();
+        assert_eq!(wait.as_mut().poll(&mut cx), Poll::Ready(Ok(7)));
+    }
     assert_eq!(input.value.get(), 0);
     wakes.0.store(0, Ordering::Relaxed);
     input.events.wake();
@@ -116,9 +118,10 @@ fn file_wait_rechecks_after_signal_and_releases_registrations() {
     assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
 
     ktask::current().clear_interrupt();
-    let mut wait = Box::pin(poll_file_io(&input, IoEvents::IN, false, || input.read()));
-    assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending);
-    drop(wait);
+    {
+        let mut wait = pin!(poll_file_io(&input, IoEvents::IN, false, || input.read()));
+        assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending);
+    }
     wakes.0.store(0, Ordering::Relaxed);
     input.events.wake();
     ktask::current().interrupt();
@@ -131,14 +134,15 @@ fn file_wait_marks_only_signal_interruption_and_prefers_ready_io() {
     let input = Input::new();
     let mut cx = Context::from_waker(Waker::noop());
     ktask::current().clear_interrupt();
-    let mut wait = Box::pin(poll_file_io(&input, IoEvents::IN, false, || input.read()));
-    assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending);
-    ktask::current().interrupt();
-    assert_eq!(
-        wait.as_mut().poll(&mut cx),
-        Poll::Ready(Err(KError::IoWaitInterrupted))
-    );
-    drop(wait);
+    {
+        let mut wait = pin!(poll_file_io(&input, IoEvents::IN, false, || input.read()));
+        assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending);
+        ktask::current().interrupt();
+        assert_eq!(
+            wait.as_mut().poll(&mut cx),
+            Poll::Ready(Err(KError::IoWaitInterrupted))
+        );
+    }
 
     ktask::current().interrupt();
     assert_eq!(

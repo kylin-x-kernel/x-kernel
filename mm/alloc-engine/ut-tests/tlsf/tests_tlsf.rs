@@ -11,8 +11,8 @@ use crate::{BaseAllocator, ByteAllocator};
 
 #[def_test]
 fn test_tlsf_allocate_deallocate() {
+    let mut heap = alloc::vec![0u8; 4096];
     let mut alloc = TlsfByteAllocator::new();
-    let mut heap = alloc::vec![0u8; 4096].into_boxed_slice();
     let base = heap.as_mut_ptr() as usize;
     let size = heap.len();
     alloc.init_region(base, size);
@@ -25,8 +25,8 @@ fn test_tlsf_allocate_deallocate() {
 
 #[def_test]
 fn test_tlsf_available_bytes() {
+    let mut heap = alloc::vec![0u8; 4096];
     let mut alloc = TlsfByteAllocator::new();
-    let mut heap = alloc::vec![0u8; 4096].into_boxed_slice();
     let base = heap.as_mut_ptr() as usize;
     let size = heap.len();
     alloc.init_region(base, size);

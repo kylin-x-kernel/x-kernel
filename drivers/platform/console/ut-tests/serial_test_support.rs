@@ -48,6 +48,17 @@ impl SerialPortFixture {
     /// Creates a port with the supplied input, without publishing it anywhere.
     ///
     /// Task context; allocates the port. Panics if input exceeds 256 bytes.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: portable serial fixture needs heap-owned \
+                  backend storage to keep the production UART enum compact; adding a kernel \
+                  allocator dependency would violate its boundary"
+    )]
     pub fn new(input: &[u8]) -> Self {
         assert!(
             input.len() <= CAPACITY,

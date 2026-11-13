@@ -1,5 +1,12 @@
 # KExt4 — Design Document
 
+## Unit-test storage owners
+
+Buffer-test devices retain their original Vec inside the mutex without an
+intermediate boxed-slice conversion; accesses and failure injection are unchanged.
+The test block-device factory still transfers a standard Box to `Gendisk::alloc`
+and carries a narrow UT lint exception for that unmigrated driver contract.
+
 ## Prepared VFS mount owner
 
 `fill_super` prepares `KBox<Ext4Mount>` with NOWAIT before transferring it to

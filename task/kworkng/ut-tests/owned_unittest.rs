@@ -7,6 +7,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use kalloc_types::KBox;
 use ktime_types::TimeSpan;
 use unittest::def_test;
 
@@ -44,7 +45,7 @@ fn wait_until(mut done: impl FnMut() -> bool) {
 /// Panics on wrong context/CPU, lost callbacks or post-close acceptance.
 #[def_test(serial)]
 fn static_work_uses_normal_execution_and_shared_closure() {
-    use alloc::{boxed::Box, vec::Vec};
+    use alloc::vec::Vec;
     let _services = crate::services::services_unittest::install_for_test();
     let mut cpus = Vec::new();
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
@@ -55,14 +56,17 @@ fn static_work_uses_normal_execution_and_shared_closure() {
     let expected_cpu = Arc::new(AtomicUsize::new(0));
     let callback_calls = calls.clone();
     let callback_cpu = expected_cpu.clone();
-    let work: &'static _ = Box::leak(Box::new(crate::Work::with_callback(move || {
-        assert!(ktask::is_sleepable_context());
-        assert_eq!(
-            khal::percpu::this_cpu_id().as_usize(),
-            callback_cpu.load(Ordering::Acquire)
-        );
-        callback_calls.fetch_add(1, Ordering::Release);
-    })));
+    let work: &'static _ = KBox::leak(
+        KBox::new_nowait(crate::Work::with_callback(move || {
+            assert!(ktask::is_sleepable_context());
+            assert_eq!(
+                khal::percpu::this_cpu_id().as_usize(),
+                callback_cpu.load(Ordering::Acquire)
+            );
+            callback_calls.fetch_add(1, Ordering::Release);
+        }))
+        .unwrap(),
+    );
     let mut expected = 0;
     for cpu in cpus {
         expected_cpu.store(cpu.as_usize(), Ordering::Release);
@@ -191,7 +195,7 @@ fn owned_handles_use_private_normal_queue() {
 #[def_test(serial)]
 fn owned_callback_can_release_last_handle() {
     let _services = crate::services::services_unittest::install_for_test();
-    type Handle = crate::WorkHandle<alloc::boxed::Box<dyn Fn() + Send + Sync>>;
+    type Handle = crate::WorkHandle<KBox<dyn Fn() + Send + Sync>>;
     let slot: Arc<kspin::SpinNoIrq<Option<Handle>>> = Arc::new(kspin::SpinNoIrq::new(None));
     let drops = Arc::new(AtomicUsize::new(0));
     let running = Arc::new(AtomicBool::new(false));
@@ -200,13 +204,14 @@ fn owned_callback_can_release_last_handle() {
         running: running.clone(),
     };
     let callback_slot = slot.clone();
-    let callback: alloc::boxed::Box<dyn Fn() + Send + Sync> = alloc::boxed::Box::new(move || {
+    let callback: KBox<dyn Fn() + Send + Sync> = KBox::new_nowait(move || {
         capture.run();
         running.store(true, Ordering::Release);
         let handle = callback_slot.lock().take().unwrap();
         drop(handle);
         running.store(false, Ordering::Release);
-    });
+    })
+    .unwrap();
     *slot.lock() = Some(crate::WorkHandle::new(callback).unwrap());
     slot.lock().as_ref().unwrap().queue_default(None).unwrap();
     wait_until(|| drops.load(Ordering::Acquire) == 1);

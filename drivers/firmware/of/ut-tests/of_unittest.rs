@@ -258,9 +258,20 @@ fn build_test_dtb() -> Vec<u8> {
 }
 
 fn test_dtb_bytes() -> &'static [u8] {
-    Box::leak(build_test_dtb().into_boxed_slice())
+    build_test_dtb().leak()
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: portable firmware fixture returns static FDT \
+              node borrows and needs a leaked stable FDT owner; it cannot depend on the kernel \
+              allocator"
+)]
 fn test_fdt() -> &'static LinuxFdt<'static> {
     // SAFETY: The leaked DTB bytes live for the rest of the test process
     // and form a valid flattened device tree blob.
@@ -440,6 +451,17 @@ fn pci_host_helpers_cover_ecam_ranges_and_legacy_irq_map() {
     );
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: portable firmware fixture returns static FDT \
+              node borrows and needs a leaked stable FDT owner; it cannot depend on the kernel \
+              allocator"
+)]
 fn pci_interrupt_test_fdt(
     parent_address_cells: u32,
     child_interrupt_cells: u32,
@@ -468,7 +490,7 @@ fn pci_interrupt_test_fdt(
     builder.prop_u32s("interrupt-map", map);
     builder.end_node();
     builder.end_node();
-    let bytes = Box::leak(builder.finish().into_boxed_slice());
+    let bytes = builder.finish().leak();
     // SAFETY: The builder emits a complete DTB and its leaked allocation
     // remains readable throughout the test run.
     let fdt = unsafe { LinuxFdt::from_ptr(bytes.as_ptr()) }.unwrap();

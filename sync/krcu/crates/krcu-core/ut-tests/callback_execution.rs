@@ -176,16 +176,17 @@ fn same_node_repost_cannot_reuse_completed_period() {
     let mut driver = unsafe { CallbackDriver::new(&gp, &queues) };
     let calls = Arc::new(AtomicUsize::new(0));
     let drops = Arc::new(AtomicUsize::new(0));
-    let prepared = Box::new(SelfReposting {
+    let prepared = KBox::new_nowait(SelfReposting {
         node: CallbackNode::new(SelfReposting::invoke),
         queues: queues.clone(),
         calls: calls.clone(),
         drops: drops.clone(),
         remaining: 2,
-    });
+    })
+    .unwrap();
 
     let run_fn = || {
-        prepared.enqueue();
+        SelfReposting::enqueue(prepared);
         for period in 1..=3 {
             assert_eq!(execute(&queues[0], 8), 0);
             assert_eq!(driver.drive(), Some(period));

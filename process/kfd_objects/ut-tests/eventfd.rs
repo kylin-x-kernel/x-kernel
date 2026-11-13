@@ -60,9 +60,9 @@ fn eventfd_wait_interruption_does_not_override_ready_or_nonblocking_io() {
 
 #[def_test]
 fn eventfd_pending_read_and_write_recheck_ready_state_after_signal() {
-    use alloc::boxed::Box;
     use core::{
         future::Future,
+        pin::pin,
         task::{Context, Poll, Waker},
     };
 
@@ -79,12 +79,13 @@ fn eventfd_pending_read_and_write_recheck_ready_state_after_signal() {
     let state = EventFd::from_file(&file).unwrap();
     let mut cx = Context::from_waker(Waker::noop());
     let mut bytes = [0; 8];
-    let mut read = Box::pin(EventfdFops::read_wait(&file, &mut bytes));
-    assert_eq!(read.as_mut().poll(&mut cx), Poll::Pending);
-    assert_eq!(EventfdFops.write(&file, &7u64.to_ne_bytes(), 0), Ok(8));
-    task.interrupt();
-    assert_eq!(read.as_mut().poll(&mut cx), Poll::Ready(Ok(8)));
-    drop(read);
+    {
+        let mut read = pin!(EventfdFops::read_wait(&file, &mut bytes));
+        assert_eq!(read.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(EventfdFops.write(&file, &7u64.to_ne_bytes(), 0), Ok(8));
+        task.interrupt();
+        assert_eq!(read.as_mut().poll(&mut cx), Poll::Ready(Ok(8)));
+    }
     assert_eq!(u64::from_ne_bytes(bytes), 7);
     assert_eq!(state.count.load(Ordering::Acquire), 0);
     task.clear_interrupt();
@@ -94,40 +95,43 @@ fn eventfd_pending_read_and_write_recheck_ready_state_after_signal() {
         Ok(8)
     );
     let increment = 3u64.to_ne_bytes();
-    let mut write = Box::pin(EventfdFops::write_wait(&file, &increment));
-    assert_eq!(write.as_mut().poll(&mut cx), Poll::Pending);
-    assert_eq!(EventfdFops.read(&file, &mut bytes, 0), Ok(8));
-    assert_eq!(u64::from_ne_bytes(bytes), u64::MAX - 1);
-    task.interrupt();
-    assert_eq!(write.as_mut().poll(&mut cx), Poll::Ready(Ok(8)));
-    drop(write);
+    {
+        let mut write = pin!(EventfdFops::write_wait(&file, &increment));
+        assert_eq!(write.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(EventfdFops.read(&file, &mut bytes, 0), Ok(8));
+        assert_eq!(u64::from_ne_bytes(bytes), u64::MAX - 1);
+        task.interrupt();
+        assert_eq!(write.as_mut().poll(&mut cx), Poll::Ready(Ok(8)));
+    }
     assert_eq!(state.count.load(Ordering::Acquire), 3);
     assert_eq!(EventfdFops.read(&file, &mut bytes, 0), Ok(8));
     assert_eq!(u64::from_ne_bytes(bytes), 3);
     assert_eq!(state.count.load(Ordering::Acquire), 0);
     task.clear_interrupt();
-    let mut read = Box::pin(EventfdFops::read_wait(&file, &mut bytes));
-    assert_eq!(read.as_mut().poll(&mut cx), Poll::Pending);
-    task.interrupt();
-    assert_eq!(
-        read.as_mut().poll(&mut cx),
-        Poll::Ready(Err(KError::IoWaitInterrupted))
-    );
-    drop(read);
+    {
+        let mut read = pin!(EventfdFops::read_wait(&file, &mut bytes));
+        assert_eq!(read.as_mut().poll(&mut cx), Poll::Pending);
+        task.interrupt();
+        assert_eq!(
+            read.as_mut().poll(&mut cx),
+            Poll::Ready(Err(KError::IoWaitInterrupted))
+        );
+    }
     assert_eq!(state.count.load(Ordering::Acquire), 0);
     task.clear_interrupt();
     assert_eq!(
         EventfdFops.write(&file, &(u64::MAX - 1).to_ne_bytes(), 0),
         Ok(8)
     );
-    let mut write = Box::pin(EventfdFops::write_wait(&file, &increment));
-    assert_eq!(write.as_mut().poll(&mut cx), Poll::Pending);
-    task.interrupt();
-    assert_eq!(
-        write.as_mut().poll(&mut cx),
-        Poll::Ready(Err(KError::IoWaitInterrupted))
-    );
-    drop(write);
+    {
+        let mut write = pin!(EventfdFops::write_wait(&file, &increment));
+        assert_eq!(write.as_mut().poll(&mut cx), Poll::Pending);
+        task.interrupt();
+        assert_eq!(
+            write.as_mut().poll(&mut cx),
+            Poll::Ready(Err(KError::IoWaitInterrupted))
+        );
+    }
     assert_eq!(state.count.load(Ordering::Acquire), u64::MAX - 1);
 }
 

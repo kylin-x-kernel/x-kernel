@@ -4,8 +4,9 @@
 
 //! Caller-CPU heap accounting for the boot-installed NG submission paths.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use kalloc_types::KBox;
 
 use kalloc::current_cpu_allocated_bytes_for_test as allocated_bytes;
 use ktime_types::TimeSpan;
@@ -141,7 +142,7 @@ fn static_safe_submission_does_not_allocate() {
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
     let config = kworkng::QueueConfig::new(&cpus, kworkng::CpuPolicy::CurrentCpu, 1).unwrap();
     let queue = kworkng::NormalQueue::new("static-noalloc", config).unwrap();
-    let work: &'static _ = Box::leak(Box::new(Work::with_callback(|| {})));
+    let work: &'static _ = KBox::leak(KBox::new_nowait(Work::with_callback(|| {})).unwrap());
     for _ in 0..16 {
         {
             let irq = kspin::NoPreemptIrqSave::new();
@@ -168,7 +169,7 @@ fn prepared_ng_operations_do_not_allocate_on_caller_cpu() {
     {
         let irq = kspin::NoPreemptIrqSave::new();
         let before = allocated_bytes(&irq);
-        let allocation = core::hint::black_box(Box::new([0u8; 64]));
+        let allocation = core::hint::black_box(KBox::new_nowait([0u8; 64]).unwrap());
         drop(allocation);
         assert!(allocated_bytes(&irq) >= before + 64);
     }
@@ -178,8 +179,8 @@ fn prepared_ng_operations_do_not_allocate_on_caller_cpu() {
         DefaultQueue::HighBottomHalf,
     ] {
         kcpu_id_map::for_each_present_logical_cpu(|_, target, _| {
-            let work = Box::pin(Work::with_callback(|| {}));
-            let delayed = Box::pin(DelayedWork::new(|| {}));
+            let work = core::pin::pin!(Work::with_callback(|| {}));
+            let delayed = core::pin::pin!(DelayedWork::new(|| {}));
             {
                 let irq = kspin::NoPreemptIrqSave::new();
                 let before = allocated_bytes(&irq);

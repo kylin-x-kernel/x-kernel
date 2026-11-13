@@ -56,6 +56,15 @@ impl CharDevice for TestUart {
 ///
 /// The handle reuses a live parent identity and is never published, so no boot
 /// device or other test is affected.
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: CharDeviceImpl is still a standard Box in the driver runtime API"
+)]
 fn test_serial_dev() -> Option<SerialDev> {
     let devices = char_devices();
     let parent = devices.first()?.parent();

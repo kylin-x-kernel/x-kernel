@@ -1,5 +1,9 @@
 # kvmm-api design
 
+The guest timer probe's `make_vcpu_hook` retains a narrow standard Box lint
+exception for the existing `VcpuHookFactory` return contract. Hook ownership
+remains deferred with the production VCPU lifecycle migration.
+
 ## Purpose
 
 AArch64 `setup_gic` obtains the active backend's guest-interface capability

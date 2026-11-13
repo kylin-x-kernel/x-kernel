@@ -80,6 +80,15 @@ fn ioctl_permissions_follow_command_and_open_mode() {
 }
 
 #[unittest::def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioVec still transfers standard boxed slices through the driver completion API"
+)]
 fn loop_passes_one_scatter_iterator_and_returns_short_io_memory() {
     use core::sync::atomic::{AtomicUsize, Ordering};
 

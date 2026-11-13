@@ -1,5 +1,9 @@
 # ktty — Design
 
+The native-TTY runtime fixture retains a narrow standard Box lint exception in
+its connection constructor because `CharDeviceImpl` still requires that owner.
+This does not change the production driver ownership or fallible poller policy.
+
 ## Fallible Input Callback Ownership
 
 `TtyPort::new` returns `KResult` and prepares a `KBox<dyn Fn() + Send + Sync>`

@@ -14,10 +14,10 @@ pub(super) struct SelfReposting {
 }
 
 impl SelfReposting {
-    pub(super) fn enqueue(self: Box<Self>) {
-        let queues = self.queues.clone();
-        let object = Box::into_raw(self);
-        // SAFETY: raw field projection preserves the original Box provenance.
+    pub(super) fn enqueue(owned: KBox<Self>) {
+        let queues = owned.queues.clone();
+        let object = KBox::into_raw(owned);
+        // SAFETY: raw field projection preserves the original KBox provenance.
         let node = unsafe { &raw mut (*object).node };
         // SAFETY: this fixture owns the unqueued/detached node exclusively;
         // its original allocation survives until the next invocation.
@@ -29,17 +29,17 @@ impl SelfReposting {
 
     /// # Safety
     /// `node` is the unique detached projection transferred by enqueue. Recover
-    /// its original Box once; requeue or destroy it without subsequent access.
+    /// its original KBox once; requeue or destroy it without subsequent access.
     pub(super) unsafe fn invoke(node: *mut CallbackNode) {
         // SAFETY: enqueue preserves allocation provenance; the actual field
-        // offset restores the original Box base without a layout assumption.
+        // offset restores the original KBox base without a layout assumption.
         let object = unsafe { node.byte_sub(core::mem::offset_of!(Self, node)) }.cast::<Self>();
         // SAFETY: the detached callback exclusively owns the original allocation.
-        let mut object = unsafe { Box::from_raw(object) };
+        let mut object = unsafe { KBox::from_raw(object) };
         object.calls.fetch_add(1, Ordering::Relaxed);
         if object.remaining != 0 {
             object.remaining -= 1;
-            object.enqueue();
+            Self::enqueue(object);
         }
     }
 }

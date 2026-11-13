@@ -539,6 +539,15 @@ impl block::BioOperations for MemoryBlockDevice {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn block_special_file_io_crosses_blocks_and_obeys_capacity() {
     const BLOCK_SIZE: usize = 512;
     const BLOCKS: usize = 4;
@@ -652,6 +661,15 @@ struct BlockIoFixture {
 }
 
 impl BlockIoFixture {
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+    )]
     fn new(block_size: usize) -> Self {
         use core::sync::atomic::{AtomicBool, AtomicUsize};
         let backend = Arc::new(MemoryBlockDevice {
@@ -894,6 +912,15 @@ fn open_block_device_file_with(
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn block_device_file_reports_live_capacity() {
     const BLOCK_SIZE: usize = 512;
     const BLOCKS: usize = 4;
@@ -988,6 +1015,15 @@ fn block_device_file_reports_live_capacity() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn block_device_fallocate_validates_mode_capacity_and_alignment() {
     const BLOCK_SIZE: usize = 512;
     const BLOCKS: usize = 8;
@@ -1320,6 +1356,15 @@ impl block::BioOperations for OpenBlockDevice {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn block_file_retains_open_identity_across_device_number_reuse() {
     use core::sync::atomic::Ordering::Relaxed;
     let old = OpenBlockDevice::new(8);
@@ -1390,6 +1435,15 @@ fn block_file_retains_open_identity_across_device_number_reuse() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn failed_block_file_open_leaves_no_holder_or_release_callback() {
     use core::sync::atomic::Ordering::Relaxed;
     let backend = OpenBlockDevice::new(8);
@@ -1417,6 +1471,15 @@ fn failed_block_file_open_leaves_no_holder_or_release_callback() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn block_file_preserves_ioctl_only_mode_and_allows_raw_readonly_open() {
     let backend = OpenBlockDevice::new(8);
     let disk = block::Gendisk::alloc(

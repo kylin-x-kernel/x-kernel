@@ -74,6 +74,16 @@ fn binding_runtime_busy_preserves_state_and_admission() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BindingRuntime::add_cleanup consumes Box<dyn \
+              FnOnce() + Send>; these tests exercise its deferred one-shot cleanup contract"
+)]
 fn cleanup_batch_is_lifo_and_second_drain_is_empty() {
     let binding = BindingRuntime::new();
     let order = Arc::new(SpinNoPreempt::new(Vec::<usize>::new()));
@@ -97,6 +107,16 @@ fn cleanup_batch_is_lifo_and_second_drain_is_empty() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BindingRuntime::add_cleanup consumes Box<dyn \
+              FnOnce() + Send>; these tests exercise its deferred one-shot cleanup contract"
+)]
 fn cleanup_registered_from_callback_waits_for_next_batch() {
     let binding = Arc::new(BindingRuntime::new());
     let order = Arc::new(SpinNoPreempt::new(Vec::<usize>::new()));

@@ -9,6 +9,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use kalloc_types::KBox;
 use ktime_types::TimeSpan;
 use unittest::def_test;
 
@@ -163,7 +164,7 @@ fn boot_services_retire_owned_storage_in_matching_context() {
 /// or acceptance after queue closure.
 #[def_test(serial)]
 fn static_work_uses_normal_execution_and_shared_closure() {
-    use alloc::{boxed::Box, sync::Arc, vec::Vec};
+    use alloc::{sync::Arc, vec::Vec};
 
     let mut cpus = Vec::new();
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
@@ -174,14 +175,17 @@ fn static_work_uses_normal_execution_and_shared_closure() {
     let expected_cpu = Arc::new(AtomicUsize::new(0));
     let callback_calls = calls.clone();
     let callback_cpu = expected_cpu.clone();
-    let work: &'static _ = Box::leak(Box::new(Work::with_callback(move || {
-        assert!(ktask::is_sleepable_context());
-        assert_eq!(
-            khal::percpu::this_cpu_id().as_usize(),
-            callback_cpu.load(Ordering::Acquire)
-        );
-        callback_calls.fetch_add(1, Ordering::Release);
-    })));
+    let work: &'static _ = KBox::leak(
+        KBox::new_nowait(Work::with_callback(move || {
+            assert!(ktask::is_sleepable_context());
+            assert_eq!(
+                khal::percpu::this_cpu_id().as_usize(),
+                callback_cpu.load(Ordering::Acquire)
+            );
+            callback_calls.fetch_add(1, Ordering::Release);
+        }))
+        .unwrap(),
+    );
     let mut expected = 0;
     for cpu in cpus {
         expected_cpu.store(cpu.as_usize(), Ordering::Release);

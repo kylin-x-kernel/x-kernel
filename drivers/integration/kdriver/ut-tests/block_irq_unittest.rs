@@ -122,6 +122,17 @@ fn dispatch(irq: usize) -> IrqEvent {
     event
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: prepare_block_wait returns the production \
+              Box<dyn BlockWaiter> contract; this test retains that owner through terminal \
+              signaling or reclaimer shutdown"
+)]
 fn stop_reclaimer(reclaimer: Arc<BlockIoReclaimer>) {
     let mut waiter = prepare_block_wait().expect("test block wait preparation must succeed");
     reclaimer.stop_and_wait(waiter.as_mut());

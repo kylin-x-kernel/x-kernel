@@ -8,7 +8,7 @@ use super::*;
 
 #[def_test]
 fn register_pool_and_recycle_mixed_size_buffers() {
-    let mut backing = alloc::vec![0u8; 65536].into_boxed_slice();
+    let mut backing = alloc::vec![0u8; 65536];
     let cpu_base = NonNull::new(backing.as_mut_ptr()).unwrap();
     let bus_base = DmaBusAddress::new(0x1000_0000);
     let mut pool = BouncePool::new();

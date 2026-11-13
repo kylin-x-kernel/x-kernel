@@ -8,6 +8,13 @@ use kcpu_id_map::LogicalCpuId;
 use kerrno::KResult;
 use ktime_types::MonotonicInstant;
 
+/// Runs two concrete worker closures concurrently and joins both before returning.
+#[cfg(feature = "smp")]
+pub trait WorkerRunner {
+    /// Returns whether both workers completed successfully.
+    fn run(self, workers: [impl FnOnce() + Send + 'static; 2]) -> bool;
+}
+
 #[cfg(feature = "smp")]
 pub use crate::set::tests::{concurrent_cancel_waits_for_cleanup, concurrent_owner_routes};
 use crate::{

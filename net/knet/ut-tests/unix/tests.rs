@@ -15,6 +15,85 @@ fn test_peer_credentials() -> crate::options::PeerCredentials {
 }
 
 #[def_test]
+fn accept_futures_are_send_and_fit_inline_budget() {
+    use core::future::Future;
+
+    use super::{DgramTransport, SeqpacketTransport, StreamTransport, UnixTransport};
+
+    fn future_size(future: impl Future + Send) -> usize {
+        let bytes = core::mem::size_of_val(&future);
+        info!("Unix accept future: {} bytes", bytes);
+        bytes
+    }
+
+    assert!(future_size(StreamTransport::new().accept(false)) <= 2048);
+    assert!(future_size(SeqpacketTransport::new().accept(false)) <= 2048);
+    assert!(future_size(DgramTransport::new().accept(false)) <= 2048);
+    for transport in [
+        UnixTransport::Stream(StreamTransport::new()),
+        UnixTransport::Seqpacket(SeqpacketTransport::new()),
+        UnixTransport::Dgram(DgramTransport::new()),
+    ] {
+        assert!(future_size(transport.accept(false)) <= 2048);
+    }
+    let datagram = UnixTransport::Dgram(DgramTransport::new());
+    assert!(matches!(
+        ktask::future::block_on(datagram.accept(true)),
+        Err(KError::InvalidInput)
+    ));
+}
+
+#[def_test]
+fn cancelled_inline_accept_preserves_listener_and_pending_connection() {
+    use core::{future::Future, pin::pin, task::Context};
+
+    use kpoll::{IoEvents, Pollable};
+    use ktask::future::block_on;
+
+    use super::{SeqpacketTransport, StreamTransport, UnixTransport, UnixTransportOps};
+    use crate::{ConnectOptions, RecvOptions, SendOptions};
+
+    for (listener, client) in [
+        (
+            UnixTransport::Stream(StreamTransport::new()),
+            UnixTransport::Stream(StreamTransport::new()),
+        ),
+        (
+            UnixTransport::Seqpacket(SeqpacketTransport::new()),
+            UnixTransport::Seqpacket(SeqpacketTransport::new()),
+        ),
+    ] {
+        let entry = BindEntry::default();
+        listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+        listener.listen(1, &test_peer_credentials()).unwrap();
+        {
+            let mut waiting = pin!(listener.accept(false));
+            let mut context = Context::from_waker(core::task::Waker::noop());
+            assert!(waiting.as_mut().poll(&mut context).is_pending());
+        }
+        client
+            .connect(
+                &entry,
+                &UnixAddr::Unbound,
+                ConnectOptions::default(),
+                &test_peer_credentials(),
+            )
+            .unwrap();
+        drop(listener.accept(false));
+        assert!(listener.poll().contains(IoEvents::IN));
+        let (accepted, _) = block_on(listener.accept(true)).unwrap();
+        assert_eq!(client.send(&b"ok"[..], SendOptions::default()), Ok(2));
+        let mut bytes = [0; 2];
+        assert_eq!(accepted.recv(&mut bytes[..], RecvOptions::default()), Ok(2));
+        assert_eq!(&bytes, b"ok");
+        assert!(matches!(
+            block_on(listener.accept(true)),
+            Err(KError::WouldBlock)
+        ));
+    }
+}
+
+#[def_test]
 fn unix_missing_abstract_address_returns_connection_refused() {
     let addr = UnixAddr::Abstract(Arc::from(&b"xkernel-missing-abstract-socket"[..]));
 

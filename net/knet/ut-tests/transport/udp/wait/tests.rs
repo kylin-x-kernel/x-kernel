@@ -2,19 +2,19 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::boxed::Box;
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
     task::{Context, RawWaker, RawWakerVTable, Waker},
 };
 
+use kalloc_types::KBox;
 use kpoll::PollRegistrations;
 use unittest::{assert_eq, def_test};
 
 use super::*;
 
 fn new_counter() -> &'static AtomicUsize {
-    Box::leak(Box::new(AtomicUsize::new(0)))
+    KBox::leak(KBox::new(AtomicUsize::new(0)).unwrap())
 }
 
 /// Clones a test waker whose data points to a leaked counter.

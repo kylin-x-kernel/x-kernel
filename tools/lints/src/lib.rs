@@ -10,6 +10,7 @@
 #![feature(rustc_private)]
 
 extern crate rustc_abi;
+extern crate rustc_ast;
 extern crate rustc_hir;
 extern crate rustc_interface;
 extern crate rustc_lint;
@@ -20,6 +21,7 @@ extern crate rustc_span;
 dylint_linting::dylint_library!();
 
 mod facts_export;
+mod std_box_in_kernel_tests;
 mod unregistered_static_spinlock;
 
 #[cfg(test)]
@@ -34,8 +36,10 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
     lint_store.register_lints(&[
         unregistered_static_spinlock::UNREGISTERED_STATIC_SPINLOCK,
         facts_export::FACTS_EXPORT,
+        std_box_in_kernel_tests::STD_BOX_IN_KERNEL_TESTS,
     ]);
     lint_store.register_late_pass(|_| Box::new(facts_export::FactsExport));
+    std_box_in_kernel_tests::register(lint_store);
     lint_store
         .register_late_pass(|_| Box::new(unregistered_static_spinlock::UnregisteredStaticSpinlock));
 }

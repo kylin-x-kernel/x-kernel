@@ -99,6 +99,13 @@ Dylint 的待迁入表在 stack 落地后的 pending.md。
 | lint | 目标等级 | 待定政策 / 阻塞项 |
 |---|---|---|
 
+## Kernel UT Dylint
+
+`std_box_in_kernel_tests` is a deny-by-default Dylint rule implementing
+[CG-049](CG-049-no-std-box-in-kernel-tests.md). It applies to compiled kernel
+UT code, not every production item in a `--cfg unittest` build. Both CI Dylint
+legs select the UNITTEST graph; standalone host tests are outside this rollout.
+
 ## 开放问题
 
 - `TODO(cg)` 逐点原因仍登记失败接口、生命周期或拆分债务；启用 lint 不代表债务已解决。

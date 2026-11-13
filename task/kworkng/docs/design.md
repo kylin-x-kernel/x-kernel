@@ -1,5 +1,14 @@
 # Prepared Workqueue API
 
+## Unit-Test Callback Ownership
+
+Static-publication fixtures intentionally leak KBox-owned Work for the guest's
+lifetime to satisfy the static submission contract. Owned-handle release tests
+use KBox-erased reusable callbacks while retaining their existing capture-drop
+and execution-context checks. These test allocations use NOWAIT and fail before
+publication. The kalloc-types dependency is used by kernel unit-test modules;
+it adds no production callback-storage change.
+
 ## Partition Table Preparation
 
 Default initialization reserves three `PreparedQueue` tables after validating

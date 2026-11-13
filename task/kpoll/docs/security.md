@@ -1,5 +1,14 @@
 # kpoll — Security and Reliability Analysis
 
+## Unit-Test Waker Ownership
+
+Counter and reentrant fixtures use Arc-backed Wake implementations, so every
+cloned waker retains its state without leaked Box storage. The reentrant state
+owns a PollSet clone and is released after registration and waker teardown.
+The last-strong-owner scenario retains its custom clone hook: its raw wakers
+borrow stack-pinned state declared before every waker and registration. Their
+drop hook is a no-op and never reconstructs an allocation owner.
+
 ## Weak Source Lifetime
 
 Weak capture cannot prolong source ownership or revive a destroyed source.

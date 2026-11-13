@@ -17,12 +17,7 @@
 //! any access, and it moves that claim into the opened transport, so a probe
 //! that skips the shared claim contract cannot observe the fixture at all.
 
-use alloc::{
-    boxed::Box,
-    collections::BTreeMap,
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     ptr::NonNull,
     sync::atomic::{AtomicUsize, Ordering},
@@ -32,8 +27,7 @@ use driver_base::{DriverError, DriverResult};
 use driver_os_api::MmioClaim;
 use ksync::{Mutex, static_lock};
 use virtio::{
-    BufferDirection, DeviceStatus, OwnedMmioTransport, PhysAddr,
-    mock_virtio::MockTransport,
+    BufferDirection, DeviceStatus, OwnedMmioTransport, PhysAddr, mock_virtio::MockTransport,
 };
 
 use super::MmioAccess;
@@ -136,9 +130,7 @@ unsafe impl virtio::VirtIoHal for CountingVirtIoHal {
 
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
         // SAFETY: Forwarded unchanged; the caller supplies a valid MMIO range.
-        unsafe {
-            <super::glue::VirtIoHalImpl as virtio::VirtIoHal>::mmio_phys_to_virt(paddr, size)
-        }
+        unsafe { <super::glue::VirtIoHalImpl as virtio::VirtIoHal>::mmio_phys_to_virt(paddr, size) }
     }
 
     unsafe fn share(
@@ -203,7 +195,7 @@ pub(super) enum Event {
 }
 
 struct Header {
-    words: Box<[u32; HEADER_WORDS]>,
+    words: [u32; HEADER_WORDS],
 }
 
 struct Spec {
@@ -226,7 +218,7 @@ pub(super) fn install(
     device_id: u32,
     device_type: virtio::DeviceType,
 ) -> FixtureHandle {
-    let mut words = Box::new([0u32; HEADER_WORDS]);
+    let mut words = [0u32; HEADER_WORDS];
     words[0] = MAGIC_VALUE;
     words[1] = MODERN_VERSION;
     words[2] = device_id;
@@ -350,8 +342,7 @@ impl DmaSnapshot {
     /// comparison.
     pub(super) fn bounce_backing_growth(self, before: Self) -> (usize, usize) {
         assert!(
-            before.bounce_total_bytes == 0
-                || before.bounce_total_bytes == self.bounce_total_bytes,
+            before.bounce_total_bytes == 0 || before.bounce_total_bytes == self.bounce_total_bytes,
             "bounce pool changed size: {before:?} -> {self:?}"
         );
         if before.bounce_total_bytes == 0 && self.bounce_total_bytes != 0 {
@@ -367,7 +358,10 @@ impl DmaSnapshot {
     /// the scenario did not own) fails the test instead of wrapping.
     pub(super) fn since(self, before: Self) -> DmaDelta {
         DmaDelta {
-            active_mappings: self.active_mappings.checked_sub(before.active_mappings).unwrap(),
+            active_mappings: self
+                .active_mappings
+                .checked_sub(before.active_mappings)
+                .unwrap(),
             active_mapping_bytes: self
                 .active_mapping_bytes
                 .checked_sub(before.active_mapping_bytes)
@@ -403,15 +397,7 @@ pub(super) struct DmaDelta {
 /// All handles for one base share the same header, so mutations would remain
 /// visible across candidates.
 pub(super) fn fixture_for(base: usize) -> Option<Fixture> {
-    let (
-        device_type,
-        header,
-        opens,
-        events,
-        status_after_identify,
-        status_at_open,
-        status_history,
-    ) = {
+    let (device_type, header, opens, events, status_after_identify, status_at_open, status_history) = {
         let fixtures = FIXTURES.lock();
         let spec = fixtures.get(&base)?;
         (
@@ -481,7 +467,7 @@ impl MmioAccess for Fixture {
             let Some(ptr) = NonNull::new(header.words.as_mut_ptr().cast::<u8>()) else {
                 return Err(DriverError::BadState);
             };
-            // SAFETY: the boxed header is 4-byte aligned, `size <= HEADER_SIZE`,
+            // SAFETY: the inline header is 4-byte aligned, `size <= HEADER_SIZE`,
             // and the header mutex excludes every other fixture access for the
             // duration of the call.
             let result = unsafe { virtio::identify_mmio_device(ptr, size) };

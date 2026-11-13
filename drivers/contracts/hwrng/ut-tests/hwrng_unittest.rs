@@ -4,7 +4,7 @@
 
 //! Unit tests for the hardware RNG device contract.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 
 use kspin::SpinNoIrq;
 use unittest::{assert_eq, def_test};
@@ -13,7 +13,7 @@ use super::{completion::*, *};
 
 struct ScriptedCompletion {
     error: Option<DriverError>,
-    produce: Box<dyn Fn() + Send + Sync>,
+    bytes: Arc<SpinNoIrq<Vec<u8>>>,
 }
 
 impl RngCompletion for ScriptedCompletion {
@@ -22,7 +22,7 @@ impl RngCompletion for ScriptedCompletion {
             return Err(error);
         }
         if !ready() {
-            (self.produce)();
+            self.bytes.lock().extend_from_slice(&[7, 9]);
             if !ready() {
                 return Err(DriverError::InvalidInput);
             }
@@ -35,7 +35,7 @@ impl RngCompletion for ScriptedCompletion {
 
 struct TestDevice {
     bytes: Arc<SpinNoIrq<Vec<u8>>>,
-    completion: Box<dyn RngCompletion>,
+    completion: ScriptedCompletion,
 }
 
 impl Device for TestDevice {
@@ -79,10 +79,10 @@ fn device(error: Option<DriverError>) -> TestDevice {
     let completion_bytes = bytes.clone();
     TestDevice {
         bytes,
-        completion: Box::new(ScriptedCompletion {
+        completion: ScriptedCompletion {
             error,
-            produce: Box::new(move || completion_bytes.lock().extend_from_slice(&[7, 9])),
-        }),
+            bytes: completion_bytes,
+        },
     }
 }
 

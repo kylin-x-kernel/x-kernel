@@ -27,6 +27,17 @@ static PROVIDER: Provider = Provider {
 };
 
 impl DmaOp for Provider {
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: the DMA test provider transfers a \
+                  GlobalAlloc Box array through cpu_addr and reconstructs that exact allocation \
+                  once at free_coherent"
+    )]
     fn alloc_coherent(&self, spec: DmaSpec) -> ResResult<DmaAllocation> {
         if spec.len > 64 || spec.align > 8 {
             return Err(ResError::NoMemory);
@@ -38,6 +49,17 @@ impl DmaOp for Provider {
         })
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: the DMA test provider transfers a \
+                  GlobalAlloc Box array through cpu_addr and reconstructs that exact allocation \
+                  once at free_coherent"
+    )]
     fn free_coherent(&self, allocation: DmaAllocation) {
         core::assert_eq!(allocation.bus_addr, 0);
         self.released_len

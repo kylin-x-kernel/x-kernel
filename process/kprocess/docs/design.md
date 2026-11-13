@@ -1,5 +1,9 @@
 # kprocess — Design
 
+Unit-test wake counters and exit observers use fallible `KBox` allocation in
+sleepable fixture setup. `KBox::leak` retains their existing static lifetime:
+raw wakers borrow the observers and never reclaim them.
+
 ## Fallible Ordinary Signal Admission
 
 Process/thread signal helpers propagate ksignal WouldBlock before interrupting

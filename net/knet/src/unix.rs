@@ -7,9 +7,8 @@ pub(crate) mod dgram;
 pub(crate) mod seqpacket;
 pub(crate) mod stream;
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 
-use async_trait::async_trait;
 use enum_dispatch::enum_dispatch;
 use hashbrown::HashMap;
 use kalloc_types::KBox;
@@ -98,8 +97,8 @@ pub enum UnixAddr {
     Path(Arc<str>),
 }
 
-/// Transport interface for Unix-domain sockets.
-#[async_trait]
+/// Synchronous transport operations for Unix-domain sockets.
+/// Accept uses the inherent [`UnixTransport::accept`] method.
 #[enum_dispatch]
 pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
     fn bind(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> KResult;
@@ -124,8 +123,6 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
         _credentials: &PeerCredentials,
     ) -> KResult;
 
-    async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)>;
-
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize>;
     fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize>;
 
@@ -140,6 +137,20 @@ pub enum UnixTransport {
     Dgram(DgramTransport),
     Seqpacket(SeqpacketTransport),
 }
+impl UnixTransport {
+    /// Accepts through static dispatch without boxing the future.
+    ///
+    /// Polling requires sleepable task context. Dropping a pending future
+    /// cancels its wait; socket owner reservation remains the caller's job.
+    pub async fn accept(&self, nonblocking: bool) -> KResult<(Self, UnixAddr)> {
+        match self {
+            Self::Stream(transport) => transport.accept(nonblocking).await,
+            Self::Dgram(transport) => transport.accept(nonblocking).await,
+            Self::Seqpacket(transport) => transport.accept(nonblocking).await,
+        }
+    }
+}
+
 impl Pollable for UnixTransport {
     fn poll(&self) -> IoEvents {
         match self {

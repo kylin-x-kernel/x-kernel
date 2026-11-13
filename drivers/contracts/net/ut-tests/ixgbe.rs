@@ -68,6 +68,7 @@ fn test_ixgbe_queue_size_validation() {
     );
 
     // Simulate queue operations
+    let mut owners = Vec::new();
     let mut rx_queue: VecDeque<NetBufHandle> = VecDeque::with_capacity(RX_BUFFER_SIZE);
 
     // Test queue boundary conditions
@@ -75,11 +76,10 @@ fn test_ixgbe_queue_size_validation() {
     assert!(rx_queue.is_empty());
 
     // Fill queue with test data
-    let mut test_handles = Vec::new();
     for i in 0..core::cmp::min(RX_BUFFER_SIZE, 100) {
         let data = vec![(i % 256) as u8; 1514];
-        let box_data = Box::new(data.clone());
-        let ptr = Box::into_raw(box_data);
+        owners.push(data.clone());
+        let ptr = owners.last_mut().unwrap().as_mut_ptr();
         let handle = NetBufHandle::new(
             NonNull::new(ptr as *mut u8).unwrap(),
             NonNull::new(ptr as *mut u8).unwrap(),
@@ -99,11 +99,6 @@ fn test_ixgbe_queue_size_validation() {
             assert_eq!(handle.data().len(), 1514);
             assert_eq!(handle.data()[0], (processed % 256) as u8);
             processed += 1;
-
-            // Clean up
-            unsafe {
-                let _ = Box::from_raw(handle.owner_ptr::<Vec<u8>>());
-            }
         }
     }
 
@@ -111,11 +106,7 @@ fn test_ixgbe_queue_size_validation() {
     assert!(processed <= RECV_BATCH_SIZE);
 
     // Clean up remaining handles
-    while let Some(handle) = rx_queue.pop_front() {
-        unsafe {
-            let _ = Box::from_raw(handle.owner_ptr::<Vec<u8>>());
-        }
-    }
+    rx_queue.clear();
 }
 
 #[def_test]

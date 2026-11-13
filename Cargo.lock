@@ -233,17 +233,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-trait"
-version = "0.1.92"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2655,6 +2644,7 @@ dependencies = [
  "heapless",
  "kaddr_layout",
  "kalloc",
+ "kalloc-types",
  "kcpu",
  "kernel-boot",
  "kerrno",
@@ -2892,7 +2882,6 @@ dependencies = [
  "anon_inodefs",
  "arrayvec",
  "async-channel",
- "async-trait",
  "bitflags 2.13.2",
  "entropy",
  "enum_dispatch",
@@ -3195,6 +3184,7 @@ name = "krcu-core"
 version = "0.3.0-dev"
 dependencies = [
  "intrusive-collections",
+ "kalloc-types",
  "kiface",
  "kspin",
  "unittest",
@@ -3765,6 +3755,7 @@ name = "kworkng"
 version = "0.3.0-dev"
 dependencies = [
  "intrusive-collections",
+ "kalloc-types",
  "kbuild_config",
  "kcpu_id_map",
  "kerrno",

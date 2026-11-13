@@ -6,7 +6,7 @@
 
 use unittest::def_test;
 extern crate alloc;
-use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
+use alloc::{collections::VecDeque, vec, vec::Vec};
 use core::ptr::NonNull;
 
 use super::*;
@@ -18,6 +18,7 @@ struct MockFXmac;
 #[def_test]
 fn test_fxmac_queue_management() {
     // Test RX buffer queue operations with boundary conditions
+    let mut owners = Vec::new();
     let mut rx_queue: VecDeque<NetBufHandle> = VecDeque::with_capacity(QS);
 
     // Test queue capacity and boundary operations
@@ -36,8 +37,8 @@ fn test_fxmac_queue_management() {
     let handles: Vec<NetBufHandle> = test_data_sets
         .iter()
         .map(|data| {
-            let box_data = Box::new(data.clone());
-            let ptr = Box::into_raw(box_data);
+            owners.push(data.clone());
+            let ptr = owners.last_mut().unwrap().as_mut_ptr();
             NetBufHandle::new(
                 NonNull::new(ptr as *mut u8).unwrap(),
                 NonNull::new(ptr as *mut u8).unwrap(),
@@ -70,8 +71,8 @@ fn test_fxmac_queue_management() {
     // Test edge case: try to add more packets when queue has space
     for i in 0..5 {
         let data = vec![(200 + i) as u8; 60]; // Minimum Ethernet frame
-        let box_data = Box::new(data.clone());
-        let ptr = Box::into_raw(box_data);
+        owners.push(data.clone());
+        let ptr = owners.last_mut().unwrap().as_mut_ptr();
         let handle = NetBufHandle::new(
             NonNull::new(ptr as *mut u8).unwrap(),
             NonNull::new(ptr as *mut u8).unwrap(),
@@ -84,17 +85,9 @@ fn test_fxmac_queue_management() {
     assert!(rx_queue.len() <= QS);
 
     // Clean up remaining handles
-    while let Some(handle) = rx_queue.pop_front() {
-        unsafe {
-            let _ = Box::from_raw(handle.owner_ptr::<Vec<u8>>());
-        }
-    }
+    rx_queue.clear();
 
-    for handle in removed_handles {
-        unsafe {
-            let _ = Box::from_raw(handle.owner_ptr::<Vec<u8>>());
-        }
-    }
+    removed_handles.clear();
 }
 
 #[def_test]
@@ -129,8 +122,7 @@ fn test_fxmac_network_frame_validation() {
         }
 
         // Create NetBufHandle for frame
-        let box_data = Box::new(frame_data.clone());
-        let ptr = Box::into_raw(box_data);
+        let ptr = frame_data.as_mut_ptr();
         let handle = NetBufHandle::new(
             NonNull::new(ptr as *mut u8).unwrap(),
             NonNull::new(ptr as *mut u8).unwrap(),
@@ -164,19 +156,13 @@ fn test_fxmac_network_frame_validation() {
             let mac_addr = MacAddress(src_mac);
             assert_eq!(mac_addr.0, [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
         }
-
-        // Clean up
-        unsafe {
-            let _ = Box::from_raw(handle.owner_ptr::<Vec<u8>>());
-        }
     }
 
     // Test invalid frame sizes (too small)
     let invalid_sizes = [0, 1, 30, 59]; // Below minimum Ethernet frame size
     for invalid_size in invalid_sizes {
-        let frame_data = vec![0u8; invalid_size];
-        let box_data = Box::new(frame_data.clone());
-        let ptr = Box::into_raw(box_data);
+        let mut frame_data = vec![0u8; invalid_size];
+        let ptr = frame_data.as_mut_ptr();
         let handle = NetBufHandle::new(
             NonNull::new(ptr as *mut u8).unwrap(),
             NonNull::new(ptr as *mut u8).unwrap(),
@@ -186,10 +172,5 @@ fn test_fxmac_network_frame_validation() {
         // These should still create valid handles, but represent invalid Ethernet frames
         assert_eq!(handle.len(), invalid_size);
         assert_eq!(handle.is_empty(), invalid_size == 0);
-
-        // Clean up
-        unsafe {
-            let _ = Box::from_raw(handle.owner_ptr::<Vec<u8>>());
-        }
     }
 }

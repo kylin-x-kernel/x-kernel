@@ -1,5 +1,10 @@
 # kvmm — Kernel Virtual Machine Monitor
 
+The GIC-entry register fixture retains a fixed-length Vec until its hooks and
+VCPU are retired; it never resizes after publishing the register address.
+Hook-factory and hook-installation tests retain narrow standard Box lint
+exceptions until those production ownership interfaces are migrated.
+
 ## Overview
 
 MMIO devices are transferred as prepared `KBox<dyn MmioDevice>` owners.

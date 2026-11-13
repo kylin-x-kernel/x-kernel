@@ -1,5 +1,9 @@
 # devfs — Design
 
+Serial and loop guest fixtures retain narrow standard Box lint exceptions at
+the `CharDeviceImpl` and `BioVec` ownership boundaries. These production driver
+interfaces remain unchanged; the exceptions do not permit unrelated test owners.
+
 Native console preparation now precedes the infallible static root builder.
 Its fallible `native_tty()` uses NOWAIT callback ownership inside the singleton
 initializer. Failure propagates from devtmpfs creation before dynamic-root or

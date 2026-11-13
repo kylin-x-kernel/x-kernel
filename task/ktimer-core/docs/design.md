@@ -1,5 +1,14 @@
 # ktimer-core Design
 
+## Unit-Test Storage And Worker Driver
+
+The SMP test-support WorkerRunner accepts an array of two concrete closures
+and must run both concurrently and join them before returning. ktask supplies
+CPU placement and task activation; the timer fixture needs neither erased Box
+callbacks nor an allocator dependency for worker storage. The external-node
+retirement fixture uses an inner stack-pin scope so node destruction still
+precedes checks on the surviving timer collection.
+
 ## Purpose and Scope
 
 `ktimer-core` provides prepared timers independently of task scheduling.

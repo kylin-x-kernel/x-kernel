@@ -2,12 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::boxed::Box;
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
     task::{RawWaker, RawWakerVTable, Waker},
 };
 
+use kalloc_types::KBox;
 use unittest::{assert_eq, def_test};
 
 use super::*;
@@ -146,7 +146,7 @@ fn test_softirq_resched_handoff_remains_drainable() {
 #[def_test(serial)]
 fn test_softirq_daemon_provider_wakes_current_cpu_source() {
     let source = ensure_test_wake_source();
-    let counter = Box::leak(Box::new(AtomicUsize::new(0)));
+    let counter = KBox::leak(KBox::new_nowait(AtomicUsize::new(0)).unwrap());
     let registration = source.register(&make_waker(counter)).unwrap();
 
     kirq::softirq::SoftirqDaemonIf::wake_current_cpu();
@@ -159,10 +159,8 @@ fn test_softirq_daemon_provider_wakes_current_cpu_source() {
 fn test_softirq_daemon_drain_runs_pending_current_cpu_work() {
     let vec = kirq::softirq::SoftirqVec::Block;
     let _wake_gate = kirq::softirq::test_support::ScopedDaemonWakeGate::disabled();
-    let _action = kirq::softirq::test_support::ScopedSoftirqAction::install(
-        vec,
-        test_softirq_drain_action,
-    );
+    let _action =
+        kirq::softirq::test_support::ScopedSoftirqAction::install(vec, test_softirq_drain_action);
 
     TEST_DRAIN_RUNS.store(0, Ordering::SeqCst);
     kirq::softirq::raise_softirq(vec);

@@ -9,7 +9,13 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[package.metadata.cargo-shear]
+# kalloc-types supplies KBox owners in path-mounted cfg(unittest) callback and
+# service fixtures, plus the reposting fixture shared with cfg(test) host tests.
+ignored = ["kalloc-types"]
+
 [dependencies]
+kalloc-types.workspace = true
 kiface.workspace = true
 intrusive-collections.workspace = true
 kspin.workspace = true

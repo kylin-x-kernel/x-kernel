@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, task::Wake, vec, vec::Vec};
+use alloc::{sync::Arc, task::Wake, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use unittest::{assert, assert_eq, def_test};
@@ -10,14 +10,14 @@ use unittest::{assert, assert_eq, def_test};
 use super::super::{Work, observers::CompletionObserver};
 
 struct Resource {
-    on_drop: Option<Box<dyn FnOnce() + Send>>,
+    on_drop: Option<crate::test_callback::Callback>,
     drops: Arc<AtomicUsize>,
 }
 
 impl Drop for Resource {
     fn drop(&mut self) {
         if let Some(on_drop) = self.on_drop.take() {
-            on_drop();
+            on_drop.call();
         }
         self.drops.fetch_add(1, Ordering::Relaxed);
     }
@@ -40,7 +40,7 @@ fn detached_cleanup_preserves_old_observers_only() {
     assert!(
         work.accept(Resource {
             drops: drops.clone(),
-            on_drop: Some(Box::new(move || {
+            on_drop: Some(crate::test_callback::new(move || {
                 let work = weak.upgrade().unwrap();
                 core::assert_eq!(work.observer_count(), 0);
                 core::assert_eq!(work.capture(&mut Vec::new()), Ok(0));
@@ -80,7 +80,7 @@ fn nested_cancellation_keeps_cleanup_local() {
     let drops = Arc::new(AtomicUsize::new(0));
     let inner = Resource {
         drops: drops.clone(),
-        on_drop: Some(Box::new(move || {
+        on_drop: Some(crate::test_callback::new(move || {
             let work = inner_weak.upgrade().unwrap();
             core::assert_eq!(work.capture(&mut Vec::new()), Ok(0));
             core::assert!(!work.cancel_pending());
@@ -89,7 +89,7 @@ fn nested_cancellation_keeps_cleanup_local() {
     assert!(
         work.accept(Resource {
             drops: drops.clone(),
-            on_drop: Some(Box::new(move || {
+            on_drop: Some(crate::test_callback::new(move || {
                 let work = weak.upgrade().unwrap();
                 core::assert!(work.accept(inner).is_ok());
                 core::assert!(work.cancel_pending());

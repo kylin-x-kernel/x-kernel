@@ -75,7 +75,7 @@ until callback completion plus Work flush. It quiesces the test-owned source;
 that source cannot be rearmed in the same boot. A host timeout must bound failed
 hardware delivery or a genuine lockup; no test timeout proves latency bounds.
 
-Deferred reference probes retain their containing Box outside NMI until the
+Deferred reference probes retain their containing KBox outside NMI until the
 source's release/acquire completion handoff. NMI takes only the prepared fields;
 it never frees the containing fixture allocation. Payload and metadata retirement
 are separate, including late Weak after payload completion. This validates only

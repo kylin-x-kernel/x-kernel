@@ -7,6 +7,15 @@ SimpleDir skips that child's `NotFound` while enumerating subsequent live
 entries. It does not suppress permission, allocation or I/O errors, and direct
 lookup of the missing child retains its normal failure behavior.
 
+## Writeback test fixture allocation
+
+Writeback test operations are allocated fallibly before inode publication or
+worker startup. Allocation failure is a fixture setup failure, not an injected
+writeback failure. The deferred setup helper propagates the error to its test
+caller. Successful operations retain their existing guest-lifetime leak because
+the inode stores a static operations reference. Nested Arc/Vec allocations and
+production writeback behavior are unchanged; this is not an end-to-end OOM test.
+
 ## Parallel lookup result publication
 
 The parent children mutex protects both candidate membership and the decision

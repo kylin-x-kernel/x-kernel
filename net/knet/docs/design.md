@@ -52,8 +52,27 @@ locks needed by reclaim: nonblocking controls connection waiting, not allocator
 permissions. NoMemory can precede empty-queue WouldBlock; Unix/vsock reservation
 can also fail before transport validation. Each blocked accept retains one
 reserved slot, avoiding connection loss without a queue rollback protocol.
-Portable driver-class owners, boxed packet buffers, async-trait futures,
+Portable driver-class owners, boxed packet buffers,
 nested Arc/Vec allocations and dynamic workers remain outside this migration.
+
+## Inline Unix accept futures
+
+Unix transport accept uses inherent async methods and an explicit enum match,
+not async-trait boxed futures. Synchronous operations retain enum_dispatch.
+The concrete and enum futures are Send and borrow their transport; construction
+does not execute the accept body. This changes the internal Rust interface:
+generic callers cannot request accept through UnixTransportOps alone.
+
+The connection queues, lock scopes, validation and dequeue order are unchanged.
+Dropping a pending future drops its existing wait registration; dropping an
+unpolled future does not consume a queued connection. The socket KBox is still
+reserved before transport accept. Event/channel internals and accepted endpoint
+construction may still allocate, so this is not allocation-free accept.
+
+Tests check Send and a 2048-byte future-size ceiling on the supported targets,
+plus cancellation, unpolled drop, retry and data transfer for stream and
+seqpacket enum dispatch. The ceiling bounds the future object only, not total
+call-stack usage. Datagram accept retains its InvalidInput result.
 
 ## Bridge receive buffers
 
@@ -78,6 +97,18 @@ use `unittest::path_mod_test!` at the original scope. Netlink and socket test
 helpers move with their cases. Runtime timer probes retain their original
 hang bounds and observe the boot-created service; migration does not install
 another service or change its registration.
+
+Ethernet and UDP test wake counters use fallible `KBox` allocation during
+sleepable setup and retain their leaked static lifetime for raw wakers.
+The RX-budget fixture keeps a narrow `std_box_in_kernel_tests` exception:
+the production `NetDeviceImpl` driver contract requires a standard `Box<TestNic>`
+coerced to its driver trait object.
+Four additional method-local exceptions preserve the driver buffer protocol:
+`recv` and `alloc_tx_buf` allocate standard boxed `NetBuf` owners from the pool
+and transfer them through `into_handle`. Their paired consumers, `recycle_rx`
+and `send`, reconstruct those owners through `NetBuf::from_handle` and drop
+them exactly once. These allocation/reconstruction pairs retain the driver's
+standard Box ownership contract rather than substituting a kernel allocator.
 
 ## Role
 

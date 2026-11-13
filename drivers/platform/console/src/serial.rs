@@ -64,6 +64,17 @@ pub enum SerialRole {
 /// may be compiled in so a single image can carry several UART families.
 enum Backend {
     #[cfg(unittest)]
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: portable serial fixture needs heap-owned \
+                  backend storage to keep the production UART enum compact; adding a kernel \
+                  allocator dependency would violate its boundary"
+    )]
     Test(alloc::boxed::Box<test_support::TestBackend>),
     #[cfg(feature = "pl011")]
     Pl011(Pl011Uart),

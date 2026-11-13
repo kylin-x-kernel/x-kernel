@@ -74,6 +74,15 @@ mod math_tests {
 
     // Test Box allocation
     #[def_test]
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: this test intentionally exercises the standard Box GlobalAlloc path, not the fallible KBox allocator"
+    )]
     fn test_box_alloc() {
         let boxed = alloc::boxed::Box::new(42u64);
         assert_eq!(*boxed, 42);

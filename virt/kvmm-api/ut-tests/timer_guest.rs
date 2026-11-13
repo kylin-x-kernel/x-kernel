@@ -27,6 +27,15 @@ struct MigrationCheckpoint {
 struct StopProbe(Arc<AtomicUsize>);
 
 impl kvmm::vdev::VcpuHookFactory<super::CurrentArch> for StopProbe {
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: VcpuHookFactory requires this standard Box return type and ownership transfer"
+    )]
     fn make_vcpu_hook(&self, _: u32) -> Option<Box<dyn kvmm::vdev::VcpuHook<super::CurrentArch>>> {
         Some(Box::new(Self(self.0.clone())))
     }

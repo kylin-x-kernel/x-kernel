@@ -7,8 +7,9 @@
 //! Valid, absent and unreadable declarations must stay distinguishable, and
 //! `u64 -> usize` conversion must be exact rather than truncating.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 
+use kalloc_types::KBox;
 use rs_fdtree::{DtBackend, LinuxFdt};
 use unittest::{assert_eq, def_test};
 
@@ -119,10 +120,11 @@ fn virtio_tree() -> Vec<u8> {
 /// The blob and backend are leaked to simulate boot-static firmware storage;
 /// the returned handle is only valid because of that leak.
 fn dt_node() -> FwNode<'static> {
-    let bytes: &'static [u8] = Box::leak(Box::from(virtio_tree()));
+    let bytes: &'static [u8] = virtio_tree().leak();
     let tree = LinuxFdt::new(bytes).expect("fixture is a valid device tree");
-    let backend: &'static DtBackend<'static> =
-        Box::leak(Box::new(DtBackend::new(tree)));
+    let backend: &'static DtBackend<'static> = KBox::leak(
+        KBox::new_nowait(DtBackend::new(tree)).expect("firmware backend allocation failed"),
+    );
     backend
         .root()
         .expect("fixture has a root")
@@ -216,10 +218,9 @@ impl FwNodeOps<'static> for FakeOps {
     }
 }
 
-fn fake_device(
-    mmio: Result<Option<FwMmioResource<'static>>, FwError>,
-) -> FirmwareDevice {
-    let ops: &'static FakeOps = Box::leak(Box::new(FakeOps { mmio }));
+fn fake_device(mmio: Result<Option<FwMmioResource<'static>>, FwError>) -> FirmwareDevice {
+    let ops: &'static FakeOps =
+        KBox::leak(KBox::new_nowait(FakeOps { mmio }).expect("firmware ops allocation failed"));
     firmware_device_from_node(FwNode::new(ops, FwNodeId::new(NODE_RAW)), "test,platform")
 }
 

@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicPtr, AtomicUsize};
+use kalloc_types::KBox;
 
 use intrusive_collections::container_of;
 use unittest::{assert, assert_eq};
@@ -39,8 +40,8 @@ struct Retirement {
 unsafe fn invoke_retirement(node: *mut CallbackNode) {
     // SAFETY: the fixture submits a raw field projection of this concrete type.
     let allocation = unsafe { container_of!(node, Retirement, node) }.cast_mut();
-    // SAFETY: callback execution uniquely owns the original Box allocation.
-    let retirement = unsafe { Box::from_raw(allocation) };
+    // SAFETY: callback execution uniquely owns the original KBox allocation.
+    let retirement = unsafe { KBox::from_raw(allocation) };
     retirement.calls.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -59,12 +60,12 @@ impl Drop for PublishedValue {
 
 /// # Safety
 /// `node` is the detached field projection of a uniquely submitted PublishedValue
-/// Box. All fixture borrows have ended; invocation consumes that allocation once.
+/// KBox. All fixture borrows have ended; invocation consumes that allocation once.
 unsafe fn reclaim_published_value(node: *mut CallbackNode) {
     // SAFETY: the submitted projection belongs to this concrete container.
     let allocation = unsafe { container_of!(node, PublishedValue, node) }.cast_mut();
-    // SAFETY: retirement transferred the original Box owner; no borrow remains.
-    drop(unsafe { Box::from_raw(allocation) });
+    // SAFETY: retirement transferred the original KBox owner; no borrow remains.
+    drop(unsafe { KBox::from_raw(allocation) });
 }
 
 #[unittest::def_test]
@@ -76,11 +77,14 @@ fn interrupt_borrow_delays_retirement_until_quiescent_return() {
     let state = unsafe { CallbackState::new(&nodes, [true]) }.unwrap();
     let mut driver = state.claim_driver().unwrap();
     let drops = Arc::new(AtomicUsize::new(0));
-    let allocation = Box::into_raw(Box::new(PublishedValue {
-        node: CallbackNode::new(reclaim_published_value),
-        value: 17,
-        drops: drops.clone(),
-    }));
+    let allocation = KBox::into_raw(
+        KBox::new_nowait(PublishedValue {
+            node: CallbackNode::new(reclaim_published_value),
+            value: 17,
+            drops: drops.clone(),
+        })
+        .unwrap(),
+    );
     let published = AtomicPtr::new(allocation);
     // This serial model interleaves a reader CPU and an updater/GP CPU. It does
     // not change real CPU context, run allocations in NMI or inject hardware.
@@ -94,7 +98,7 @@ fn interrupt_borrow_delays_retirement_until_quiescent_return() {
         // invokes reclamation while the borrow lives, even on GP regression.
         let old = unsafe { &(*current).value };
         let retired = published.swap(core::ptr::null_mut(), Ordering::AcqRel);
-        // SAFETY: projection retains the original Box provenance.
+        // SAFETY: projection retains the original KBox provenance.
         let node = unsafe { &raw mut (*retired).node };
         // SAFETY: removal precedes submission; the fixture retains storage
         // until callback invocation after the borrow and interrupt end.
@@ -129,12 +133,12 @@ fn interrupt_borrow_delays_retirement_until_quiescent_return() {
     let reported_after_return = unsafe { state.observe_watching(0, &watching) };
     let remains_active = driver.advance();
     // SAFETY: no borrow remains, even if eligibility regressed above. This sole
-    // executor consumes the original Box via its nonblocking owning callback.
+    // executor consumes the original KBox via its nonblocking owning callback.
     let invoked = unsafe { state.invoke_ready(0, 1) };
     if !observed.0 {
         // SAFETY: rejection leaves the allocation caller-owned and unqueued;
         // the read scope and modeled interrupt have both finished.
-        drop(unsafe { Box::from_raw(allocation) });
+        drop(unsafe { KBox::from_raw(allocation) });
     }
     // SAFETY: finish the same modeled quiescent window before assertions.
     unsafe { watching.exit_quiescent() };
@@ -156,11 +160,14 @@ fn watching_report_does_not_make_an_old_readers_callback_eligible() {
     let state = unsafe { CallbackState::new(&nodes, [true]) }.unwrap();
     let mut driver = state.claim_driver().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    let object = Box::into_raw(Box::new(Retirement {
-        node: CallbackNode::new(invoke_retirement),
-        calls: calls.clone(),
-    }));
-    // SAFETY: raw projection preserves the containing Box provenance.
+    let object = KBox::into_raw(
+        KBox::new_nowait(Retirement {
+            node: CallbackNode::new(invoke_retirement),
+            calls: calls.clone(),
+        })
+        .unwrap(),
+    );
+    // SAFETY: raw projection preserves the containing KBox provenance.
     let node = unsafe { &raw mut (*object).node };
     // SAFETY: unique unpublished fixture, retained until its owning nonblocking
     // callback. This fixture drives the service through completion below.
@@ -191,7 +198,7 @@ fn watching_report_does_not_make_an_old_readers_callback_eligible() {
     // outer exit. This supplies no additional CPU observation.
     let reported_after_exit = unsafe { state.report_ready(0) };
     let remains_active = driver.advance();
-    // SAFETY: isolated unpublished Box, reader removed and modeled GP complete;
+    // SAFETY: isolated unpublished KBox, reader removed and modeled GP complete;
     // its callback owns the allocation and no bookkeeping lock is held.
     let invoked = unsafe { state.invoke_ready(0, 1) };
     assert_eq!(blocked, (true, false, false, true, false));
@@ -207,16 +214,19 @@ fn driver_claim_is_not_released_by_drop_or_move() {
     // SAFETY: isolated nodes have no other controller or active period.
     let state = unsafe { CallbackState::new(&nodes, [true]) }.unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    let object = Box::into_raw(Box::new(Retirement {
-        node: CallbackNode::new(invoke_retirement),
-        calls: calls.clone(),
-    }));
+    let object = KBox::into_raw(
+        KBox::new_nowait(Retirement {
+            node: CallbackNode::new(invoke_retirement),
+            calls: calls.clone(),
+        })
+        .unwrap(),
+    );
     let executed = {
         let mut driver = state.claim_driver().unwrap();
-        // SAFETY: raw projection retains the concrete Box provenance.
+        // SAFETY: raw projection retains the concrete KBox provenance.
         let node = unsafe { &raw mut (*object).node };
         // SAFETY: unpublished fixture with no external readers; state and storage
-        // remain live through invocation. The callback owns the original Box and
+        // remain live through invocation. The callback owns the original KBox and
         // the test drives this isolated service to completion below.
         assert!(unsafe { state.submit(0, node) });
         assert!(driver.advance());
@@ -246,11 +256,14 @@ fn rejected_submission_preserves_node_for_participating_cpu() {
     // SAFETY: fresh isolated nodes have no other controller.
     let state = unsafe { CallbackState::new(&nodes, [true, false]) }.unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    let object = Box::into_raw(Box::new(Retirement {
-        node: CallbackNode::new(invoke_retirement),
-        calls: calls.clone(),
-    }));
-    // SAFETY: raw projection retains the original Box provenance.
+    let object = KBox::into_raw(
+        KBox::new_nowait(Retirement {
+            node: CallbackNode::new(invoke_retirement),
+            calls: calls.clone(),
+        })
+        .unwrap(),
+    );
+    // SAFETY: raw projection retains the original KBox provenance.
     let node = unsafe { &raw mut (*object).node };
     // SAFETY: rejection leaves the valid unpublished fixture owned by this test.
     assert!(!unsafe { state.submit(0, node) });
@@ -261,7 +274,7 @@ fn rejected_submission_preserves_node_for_participating_cpu() {
     assert!(!unsafe { state.submit(2, node) });
     assert!(!state.has_ready(1));
     assert!(!state.has_ready(2));
-    // SAFETY: unpublished retained fixture, sole control owner, nonblocking Box
+    // SAFETY: unpublished retained fixture, sole control owner, nonblocking KBox
     // cleanup and explicit test service driving through execution below.
     assert!(unsafe { state.submit(0, node) });
     assert!(driver.advance());
@@ -283,10 +296,13 @@ fn execution_waits_for_promotion_and_preserves_budget_remainder() {
     let mut driver = state.claim_driver().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     for _ in 0..2 {
-        let object = Box::into_raw(Box::new(Retirement {
-            node: CallbackNode::new(invoke_retirement),
-            calls: calls.clone(),
-        }));
+        let object = KBox::into_raw(
+            KBox::new_nowait(Retirement {
+                node: CallbackNode::new(invoke_retirement),
+                calls: calls.clone(),
+            })
+            .unwrap(),
+        );
         // SAFETY: field projection preserves the original allocation provenance.
         let node = unsafe { &raw mut (*object).node };
         // SAFETY: unpublished retained fixture; nonblocking callback owns this
@@ -393,10 +409,13 @@ fn scheduler_observation_keeps_a_migrating_reader_blocking() {
     let state = unsafe { CallbackState::new(&nodes, [true, true]) }.unwrap();
     let mut driver = state.claim_driver().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    let object = Box::into_raw(Box::new(Retirement {
-        node: CallbackNode::new(invoke_retirement),
-        calls: calls.clone(),
-    }));
+    let object = KBox::into_raw(
+        KBox::new_nowait(Retirement {
+            node: CallbackNode::new(invoke_retirement),
+            calls: calls.clone(),
+        })
+        .unwrap(),
+    );
     // SAFETY: preserve the enclosing allocation's raw provenance.
     let node = unsafe { &raw mut (*object).node };
     // SAFETY: unique unpublished object retained until nonblocking callback;
@@ -446,10 +465,13 @@ fn repeated_retained_runner_observations_preserve_retirement_blockers() {
     let state = unsafe { CallbackState::new(&nodes, [true]) }.unwrap();
     let mut driver = state.claim_driver().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    let object = Box::into_raw(Box::new(Retirement {
-        node: CallbackNode::new(invoke_retirement),
-        calls: calls.clone(),
-    }));
+    let object = KBox::into_raw(
+        KBox::new_nowait(Retirement {
+            node: CallbackNode::new(invoke_retirement),
+            calls: calls.clone(),
+        })
+        .unwrap(),
+    );
     // SAFETY: field projection preserves the uniquely owned allocation.
     let node = unsafe { &raw mut (*object).node };
     // SAFETY: this unpublished fixture allocation is retired exactly once and

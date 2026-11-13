@@ -37,6 +37,16 @@ impl CharDevice for DummyConsole {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: kclass::CharDeviceImpl is the production Box<dyn \
+              CharDevice + Send + Sync> publication contract"
+)]
 fn stdout_identity_requires_local_handle_and_clears_on_removal() {
     let parent = Arc::new(DeviceObject::new_bound_for_test(
         DeviceId::new(1),

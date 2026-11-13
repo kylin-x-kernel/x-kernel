@@ -714,6 +714,13 @@ reads in 1024-operation batches. Batch totals include normal IRQ/preemption
 interference; they are not single-read tail latencies or multicore scaling
 measurements. No updater pressure or baseline subtraction is applied.
 
+## Unit-test allocation ownership
+
+Service unit-test callback probes use `KBox::new_nowait`, including marker
+preparation inside IRQ/preemption-disabled regions. Rejection and invocation
+recover the same original owner with `KBox::from_raw`; raw field projections,
+grace-period obligations and exactly-once destruction are unchanged.
+
 ## Read-state admission query
 
 `is_reading()` samples current's task and nested interrupt read depth without

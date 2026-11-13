@@ -4,12 +4,13 @@
 
 //! Live IRQ/NMI handoff probes, separate from deterministic kirq unit tests.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     pin::Pin,
     ptr::{self, NonNull},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use kalloc_types::KBox;
 
 use kcpu_id_map::KCpuMaskExt;
 use kirq::irq_work::IrqWork;
@@ -43,8 +44,8 @@ fn worker_callback() {
 /// work is the first field of a uniquely transferred Probe allocation. The
 /// optional worker pointer remains pinned through completion and explicit flush.
 unsafe fn consume(work: NonNull<IrqWork>) {
-    // SAFETY: repr(C) places work first; the callback owns its detached Box.
-    let probe = unsafe { Box::from_raw(work.cast::<Probe>().as_ptr()) };
+    // SAFETY: repr(C) places work first; the callback owns its detached KBox.
+    let probe = unsafe { KBox::from_raw(work.cast::<Probe>().as_ptr()) };
     let counters = probe.counters.clone();
     if kirq::context::is_in_nmi()
         || !kirq::context::is_in_hardirq()
@@ -74,13 +75,16 @@ fn counters() -> Arc<Counters> {
 fn prepare_chain(count: usize, counters: &Arc<Counters>, worker: *const Work<fn()>) -> *mut Probe {
     let mut head = ptr::null_mut();
     for index in 0..count {
-        head = Box::into_raw(Box::new(Probe {
-            work: IrqWork::new(consume),
-            next_for_nmi: head,
-            counters: counters.clone(),
-            cpu: khal::percpu::this_cpu_id().as_usize(),
-            worker: if index == 0 { worker } else { ptr::null() },
-        }));
+        head = KBox::into_raw(
+            KBox::new_nowait(Probe {
+                work: IrqWork::new(consume),
+                next_for_nmi: head,
+                counters: counters.clone(),
+                cpu: khal::percpu::this_cpu_id().as_usize(),
+                worker: if index == 0 { worker } else { ptr::null() },
+            })
+            .unwrap(),
+        );
     }
     head
 }
@@ -92,7 +96,7 @@ unsafe fn submit_chain(mut head: *mut Probe) -> bool {
     while let Some(pointer) = NonNull::new(head) {
         // SAFETY: this node is still privately owned; save next before publishing.
         head = unsafe { (*pointer.as_ptr()).next_for_nmi };
-        // SAFETY: the prepared Box transfers to consume, which owns cleanup.
+        // SAFETY: the prepared KBox transfers to consume, which owns cleanup.
         if unsafe { kirq::irq_work::queue(pointer.cast()) }.is_err() {
             return false;
         }
@@ -136,7 +140,7 @@ fn ordinary_probe() {
         return;
     }
     let counters = counters();
-    let worker = Box::pin(Work::with_callback(worker_callback as fn()));
+    let worker = core::pin::pin!(Work::with_callback(worker_callback as fn()));
     let before = WORKER_RUNS.load(Ordering::Acquire);
     let count = kirq::irq_work::CALLBACK_BUDGET * 3 + 1;
     let head = prepare_chain(count, &counters, worker.as_ref().get_ref());
@@ -223,7 +227,7 @@ mod hardware_nmi {
             FAILED.store(true, Ordering::Release);
         }
         let retirement = RETIREMENT[cpu].load(Ordering::Acquire);
-        // SAFETY: the task retains this Box until SUBMITTED's release/acquire
+        // SAFETY: the task retains this KBox until SUBMITTED's release/acquire
         // handoff. This one NMI is its exclusive accessor during that interval.
         let retirement = unsafe { &mut *retirement };
         drop(retirement.no_weak.take());
@@ -259,15 +263,18 @@ mod hardware_nmi {
         wait_for_reclamation(cpu, 1);
         let with_weak = DeferredArc::new(SleepablePayload(cpu)).unwrap();
         let weak = DeferredArc::downgrade(&with_weak);
-        let retirement = Box::into_raw(Box::new(RetirementCase {
-            no_weak: Some(DeferredArc::new(SleepablePayload(cpu)).unwrap()),
-            with_weak: Some(with_weak),
-            weak: Some(weak),
-            late_weak: Some(late_weak),
-        }));
+        let retirement = KBox::into_raw(
+            KBox::new_nowait(RetirementCase {
+                no_weak: Some(DeferredArc::new(SleepablePayload(cpu)).unwrap()),
+                with_weak: Some(with_weak),
+                weak: Some(weak),
+                late_weak: Some(late_weak),
+            })
+            .unwrap(),
+        );
         RETIREMENT[cpu].store(retirement, Ordering::Release);
         let counters = counters();
-        let worker = Box::pin(Work::with_callback(worker_callback as fn()));
+        let worker = core::pin::pin!(Work::with_callback(worker_callback as fn()));
         let before = WORKER_RUNS.load(Ordering::Acquire);
         let count = kirq::irq_work::CALLBACK_BUDGET * 2 + 1;
         let head = prepare_chain(count, &counters, worker.as_ref().get_ref());
@@ -297,8 +304,8 @@ mod hardware_nmi {
         khal::quiesce_nmi();
         RETIREMENT[cpu].store(ptr::null_mut(), Ordering::Release);
         // SAFETY: SUBMITTED was acquired and the source is quiesced; the NMI
-        // finished taking every owner, so only the empty fixture Box is freed.
-        drop(unsafe { Box::from_raw(retirement) });
+        // finished taking every owner, so only the empty fixture KBox is freed.
+        drop(unsafe { KBox::from_raw(retirement) });
         wait_for(&counters, count);
         wait_for_reclamation(cpu, 3);
         worker.flush().unwrap();

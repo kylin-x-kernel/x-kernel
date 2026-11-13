@@ -2,12 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     task::{Context, RawWaker, RawWakerVTable, Waker},
 };
 
+use kalloc_types::KBox;
 use kcred::{CAP_CHOWN, CapSets, Cred, initial_cred};
 use khal::{
     mem::{PAGE_SIZE_4K, VirtAddr},
@@ -30,7 +31,7 @@ use crate::{
 };
 
 fn new_wake_counter() -> &'static AtomicUsize {
-    Box::leak(Box::new(AtomicUsize::new(0)))
+    KBox::leak(KBox::new(AtomicUsize::new(0)).unwrap())
 }
 
 #[def_test]
@@ -180,12 +181,15 @@ fn new_exit_accounting_observer(
     expected_utime: TimeSpan,
     expected_stime: TimeSpan,
 ) -> &'static ExitAccountingObserver {
-    Box::leak(Box::new(ExitAccountingObserver {
-        process,
-        expected_utime,
-        expected_stime,
-        failures: AtomicUsize::new(0),
-    }))
+    KBox::leak(
+        KBox::new(ExitAccountingObserver {
+            process,
+            expected_utime,
+            expected_stime,
+            failures: AtomicUsize::new(0),
+        })
+        .unwrap(),
+    )
 }
 
 /// # Safety
@@ -250,11 +254,14 @@ fn new_child_exit_wake_observer(
     parent: Arc<Process>,
     child: Arc<Process>,
 ) -> &'static ChildExitWakeObserver {
-    Box::leak(Box::new(ChildExitWakeObserver {
-        parent,
-        child,
-        failures: AtomicUsize::new(0),
-    }))
+    KBox::leak(
+        KBox::new(ChildExitWakeObserver {
+            parent,
+            child,
+            failures: AtomicUsize::new(0),
+        })
+        .unwrap(),
+    )
 }
 
 /// # Safety

@@ -11,8 +11,9 @@ description = "Hardware abstraction layer, provides unified APIs for platform-sp
 
 [package.metadata.cargo-shear]
 # linkme is kept for feature-gated registration wiring that cargo-shear does
-# not see as a direct code reference in every configuration.
-ignored = ["linkme"]
+# not see as a direct code reference in every configuration. kalloc-types is
+# consumed by cfg(unittest) firmware fixtures outside src/.
+ignored = ["linkme", "kalloc-types"]
 ignored-paths = ["src/dummy.rs"]
 
 [features]
@@ -30,6 +31,7 @@ pmu = ["kplat/pmu"]
 irq = []
 
 [dependencies]
+kalloc-types.workspace = true
 kiface-console-api.workspace = true
 kiface-task-api.workspace = true
 kiface-time-api.workspace = true

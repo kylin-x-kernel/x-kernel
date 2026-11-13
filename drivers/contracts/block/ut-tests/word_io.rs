@@ -270,6 +270,15 @@ impl RestrictedDevice {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc consumes Box<dyn BioOperations>"
+)]
 fn word_io_backend_and_canonical_forwarding_accept_arbitrary_addresses() {
     let backend = Arc::new(RestrictedDevice(Mutex::new(vec![0; 4096])));
     let disk = Gendisk::alloc(

@@ -1,5 +1,9 @@
 # memspace — Design Document
 
+Msync test runtimes own their sync callbacks through fallible `KBox` allocation.
+Fixture mapping may run with MM serialization held, including inside a sync
+callback replacing a mapping, so callback allocation uses NOWAIT.
+
 ## Post-populate action ownership
 
 `PopulateHook` owns a fallibly allocated `KBox` callback. A concrete `Option<F>`

@@ -2,12 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     assert, assert_eq,
     sync::atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(feature = "self-wait-check")]
+use kalloc_types::KBox;
 use unittest::def_test;
 
 use super::*;
@@ -117,20 +119,23 @@ fn synchronous_stop_rejects_before_effects() {
 #[cfg(feature = "self-wait-check")]
 #[def_test]
 fn callback_self_stop_preserves_successor_and_allows_reuse() {
-    type CallbackWork = Work<(), Box<dyn Fn() + Send + Sync>>;
+    type CallbackWork = Work<(), KBox<dyn Fn() + Send + Sync>>;
     let work: Arc<CallbackWork> = Arc::new_cyclic(|weak: &alloc::sync::Weak<CallbackWork>| {
         let weak = weak.clone();
-        Work::with_callback(Box::new(move || {
-            let work = weak.upgrade().unwrap();
-            assert!(work.accept(()).is_ok());
-            assert_eq!(work.cancel_sync(), Err(WaitError::SelfWait));
-            assert_eq!(work.flush(), Err(WaitError::SelfWait));
-            assert!(matches!(work.disable_sync(), Err(WaitError::SelfWait)));
-            ktask::yield_now();
-            assert_eq!(work.cancel_sync(), Err(WaitError::SelfWait));
-            assert_eq!(work.observer_count(), 2);
-            assert!(!work.state.lock().is_disabled());
-        }))
+        Work::with_callback(
+            KBox::new_nowait(move || {
+                let work = weak.upgrade().unwrap();
+                assert!(work.accept(()).is_ok());
+                assert_eq!(work.cancel_sync(), Err(WaitError::SelfWait));
+                assert_eq!(work.flush(), Err(WaitError::SelfWait));
+                assert!(matches!(work.disable_sync(), Err(WaitError::SelfWait)));
+                ktask::yield_now();
+                assert_eq!(work.cancel_sync(), Err(WaitError::SelfWait));
+                assert_eq!(work.observer_count(), 2);
+                assert!(!work.state.lock().is_disabled());
+            })
+            .unwrap(),
+        )
     });
     assert!(work.accept(()).is_ok());
     work.claim().unwrap().run();
@@ -148,33 +153,36 @@ fn callback_self_stop_preserves_successor_and_allows_reuse() {
 #[cfg(feature = "self-wait-check")]
 #[def_test]
 fn nested_callbacks_preserve_outer_self_wait_identity() {
-    type CallbackWork = Work<(), Box<dyn Fn() + Send + Sync>>;
+    type CallbackWork = Work<(), KBox<dyn Fn() + Send + Sync>>;
     let outer: Arc<CallbackWork> = Arc::new_cyclic(|weak: &alloc::sync::Weak<CallbackWork>| {
         let weak = weak.clone();
-        Work::with_callback(Box::new(move || {
-            let outer = weak.upgrade().unwrap();
-            let inner = Work::with_callback(|| {
+        Work::with_callback(
+            KBox::new_nowait(move || {
+                let outer = weak.upgrade().unwrap();
+                let inner = Work::with_callback(|| {
+                    assert_eq!(outer.cancel_sync(), Err(WaitError::SelfWait));
+                    let unrelated = Work::<()>::new();
+                    assert_eq!(unrelated.cancel_sync(), Ok(false));
+                });
+                assert!(inner.accept(()).is_ok());
+                inner.claim().unwrap().run();
+                assert_eq!(inner.cancel_sync(), Ok(false));
                 assert_eq!(outer.cancel_sync(), Err(WaitError::SelfWait));
-                let unrelated = Work::<()>::new();
-                assert_eq!(unrelated.cancel_sync(), Ok(false));
-            });
-            assert!(inner.accept(()).is_ok());
-            inner.claim().unwrap().run();
-            assert_eq!(inner.cancel_sync(), Ok(false));
-            assert_eq!(outer.cancel_sync(), Err(WaitError::SelfWait));
-        }))
+            })
+            .unwrap(),
+        )
     });
     assert!(outer.accept(()).is_ok());
     outer.claim().unwrap().run();
     assert_eq!(outer.cancel_sync(), Ok(false));
 }
 
-struct Resource(Option<Box<dyn FnOnce() + Send>>);
+struct Resource(Option<crate::test_callback::Callback>);
 
 impl Drop for Resource {
     fn drop(&mut self) {
         if let Some(cleanup) = self.0.take() {
-            cleanup();
+            cleanup.call();
         }
     }
 }
@@ -200,7 +208,7 @@ fn synchronous_cancel_waits_through_running_cleanup() {
             until(&release);
         }
     }));
-    let resource = Resource(Some(Box::new({
+    let resource = Resource(Some(crate::test_callback::new({
         let (started, release) = (cleanup_started.clone(), release_cleanup.clone());
         move || {
             started.store(true, Ordering::Release);
@@ -325,7 +333,7 @@ fn flush_tracks_canceled_cleanup_only_if_already_captured() {
     let release = Arc::new(AtomicBool::new(false));
     let returned = Arc::new(AtomicBool::new(false));
     assert!(
-        work.accept(Resource(Some(Box::new({
+        work.accept(Resource(Some(crate::test_callback::new({
             let (started, release) = (started.clone(), release.clone());
             move || {
                 started.store(true, Ordering::Release);

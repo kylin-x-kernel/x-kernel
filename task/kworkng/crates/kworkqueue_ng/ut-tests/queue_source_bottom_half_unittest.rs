@@ -4,7 +4,7 @@
 
 //! Local provider fixtures use kirq's actual softirq runner, not a task-mode drain.
 
-use alloc::{boxed::Box, sync::Arc, task::Wake, vec::Vec};
+use alloc::{sync::Arc, task::Wake};
 use core::{
     assert, assert_eq,
     num::NonZeroUsize,
@@ -179,20 +179,18 @@ fn real_softirq_budget_preserves_backlog_across_runner_exit() {
     let (queue, service) = prepare(16, kick);
     let _installed = InstalledService::new(service);
     let calls = AtomicUsize::new(0);
-    let works: Vec<_> = (0..13)
-        .map(|_| {
-            Box::pin(Work::with_callback(|| {
-                assert!(kirq::context::is_softirq_context());
-                calls.fetch_add(1, Ordering::Relaxed);
-            }))
+    let works = pin!(core::array::from_fn::<_, 13, _>(|_| {
+        Work::with_callback(|| {
+            assert!(kirq::context::is_softirq_context());
+            calls.fetch_add(1, Ordering::Relaxed);
         })
-        .collect();
+    }));
     // Keep IRQs masked across the bounded observation, so timer IRQ-tail drains
     // cannot consume the residual bit before we assert that it was retained.
     let irq = kspin::NoPreemptIrqSave::new();
     let bh = local_bh_disable();
-    for work in &works {
-        // SAFETY: all Box-pinned Work/captures remain live until all 13 complete.
+    for work in works.iter() {
+        // SAFETY: all stack-pinned Work/captures remain live until all 13 complete.
         unsafe {
             queue.submit(work, Some(cpu), || unreachable!()).unwrap();
         }

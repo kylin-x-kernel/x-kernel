@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use driver_base::{DeviceKind, DriverError, DriverResult};
@@ -501,15 +501,15 @@ fn test_failed_probe_retry_preserves_descriptor_and_node() {
 
 type ProbeFn = dyn Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync;
 
-struct TestDriver {
+struct TestDriver<Matcher> {
     name: &'static str,
     bus_types: &'static [BusTypeId],
-    matcher: Box<dyn crate::DeviceMatcher>,
+    matcher: Matcher,
     probe: Arc<ProbeFn>,
     remove: Option<Arc<ProbeFn>>,
 }
 
-impl DeviceDriver for TestDriver {
+impl<Matcher: crate::DeviceMatcher> DeviceDriver for TestDriver<Matcher> {
     fn name(&self) -> &'static str {
         self.name
     }
@@ -523,7 +523,7 @@ impl DeviceDriver for TestDriver {
     }
 
     fn matcher(&self) -> &dyn crate::DeviceMatcher {
-        self.matcher.as_ref()
+        &self.matcher
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
@@ -555,7 +555,7 @@ fn platform_driver_with_remove(
     Arc::new(TestDriver {
         name,
         bus_types: &[BusTypeId::PLATFORM],
-        matcher: Box::new(matcher),
+        matcher,
         probe: Arc::new(probe),
         remove: Some(Arc::new(remove)),
     })

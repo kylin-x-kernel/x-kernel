@@ -5,8 +5,13 @@
 //! Boot service state persists for the test run; all accepted probes finish
 //! before their observers are released. No global action or service is replaced.
 
-use alloc::{boxed::Box, sync::Arc};
-use core::{ptr::NonNull, sync::atomic::{AtomicBool, AtomicUsize, Ordering}, task::Waker};
+use alloc::sync::Arc;
+use core::{
+    ptr::NonNull,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    task::Waker,
+};
+use kalloc_types::KBox;
 
 use kerrno::KError;
 use krcu::{CallbackNode, PreparedCallback};
@@ -61,14 +66,14 @@ impl Drop for Probe {
 
 /// # Safety
 /// `node` is the unique raw projection produced by prepare_probe, still owned by
-/// either cancellation or detached invocation. Recover the Box exactly once.
-unsafe fn recover_probe(node: *mut CallbackNode) -> Box<Probe> {
+/// either cancellation or detached invocation. Recover the KBox exactly once.
+unsafe fn recover_probe(node: *mut CallbackNode) -> KBox<Probe> {
     // SAFETY: prepare_probe projected from the full allocation pointer, retaining
     // provenance. Subtracting the actual field offset restores its aligned base.
     let object = unsafe { node.byte_sub(core::mem::offset_of!(Probe, node)) }.cast::<Probe>();
-    // SAFETY: the unique raw Box owner was transferred into this handle; no
+    // SAFETY: the unique raw KBox owner was transferred into this handle; no
     // references or competing invocation survive at this recovery point.
-    unsafe { Box::from_raw(object) }
+    unsafe { KBox::from_raw(object) }
 }
 
 /// # Safety
@@ -84,7 +89,7 @@ unsafe fn cancel_probe(node: *mut CallbackNode) {
 /// Receives prepare_probe's unique detached owner after its required GP. Queue
 /// bookkeeping holds no lock and will not access the node after this invocation.
 unsafe fn complete_probe(node: *mut CallbackNode) {
-    // SAFETY: accepted submission transferred this original Box to invocation.
+    // SAFETY: accepted submission transferred this original KBox to invocation.
     let mut object = unsafe { recover_probe(node) };
     let counts = object.counts.clone();
     counts.invoked_node_address.store(node as usize, Ordering::Relaxed);
@@ -129,28 +134,28 @@ unsafe fn complete_probe(node: *mut CallbackNode) {
 }
 
 fn prepare_probe(counts: &Arc<Counts>, waker: Waker, reposts: usize) -> PreparedCallback {
-    let object = Box::new(Probe {
+    let object = KBox::new_nowait(Probe {
         value: 7,
         reposts_left: reposts,
         node: CallbackNode::new(complete_probe),
         counts: counts.clone(),
         waker,
-    });
+    })
+    .unwrap();
     // Address-only observation: never reconstruct or dereference this integer.
-    counts.prepared_node_address.store(
-        core::ptr::addr_of!(object.node) as usize,
-        Ordering::Relaxed,
-    );
+    counts
+        .prepared_node_address
+        .store(core::ptr::addr_of!(object.node) as usize, Ordering::Relaxed);
     adopt_probe(object)
 }
 
-fn adopt_probe(object: Box<Probe>) -> PreparedCallback {
-    let object = Box::into_raw(object);
-    // SAFETY: raw field projection retains the full original Box provenance.
+fn adopt_probe(object: KBox<Probe>) -> PreparedCallback {
+    let object = KBox::into_raw(object);
+    // SAFETY: raw field projection retains the full original KBox provenance.
     let node = unsafe { &raw mut (*object).node };
-    // SAFETY: a field of a live Box cannot have a null address.
+    // SAFETY: a field of a live KBox cannot have a null address.
     let node = unsafe { NonNull::new_unchecked(node) };
-    // SAFETY: unpublished Box storage is fixed and exclusively transferred.
+    // SAFETY: unpublished KBox storage is fixed and exclusively transferred.
     // Both cleanup paths recover its actual field offset and release it once.
     // Its Arc counters/waker are transferable and permit nonblocking cleanup.
     unsafe { PreparedCallback::new(node, cancel_probe) }
@@ -201,7 +206,13 @@ fn rejected_preflight_preserves_publication_and_prepared_owner() {
     drop(irq);
     assert!(was_sleepable_in_exception);
     assert!(was_exception_active);
-    for result in [irq_result, bh_result, read_result, nmi_result, exception_result] {
+    for result in [
+        irq_result,
+        bh_result,
+        read_result,
+        nmi_result,
+        exception_result,
+    ] {
         assert_eq!(result, Err(KError::InvalidInput));
     }
     if let Some(result) = preempt_result {
@@ -268,10 +279,8 @@ fn preflight_survives_involuntary_migration_before_submission() {
     while !has_checked.load(Ordering::Acquire) && worker.state() != ktask::TaskState::Exited {
         ktask::yield_now();
     }
-    let affinity_applied = ktask::set_task_affinity(
-        &worker,
-        ktask::KCpuMask::one_shot_logical(destination),
-    );
+    let affinity_applied =
+        ktask::set_task_affinity(&worker, ktask::KCpuMask::one_shot_logical(destination));
     let status = worker.join();
     // SAFETY: the only producer has joined; no callback-needed resource is
     // held and the fixed boot service/participants remain available.

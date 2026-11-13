@@ -4,10 +4,11 @@
 
 //! Isolated real Work/softirq integration, not global workng activation.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use core::{
     assert, assert_eq,
     num::NonZeroUsize,
+    pin::pin,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -92,32 +93,31 @@ fn exercise(priority: BottomHalfPriority, select_cpu: fn(LogicalCpuId) -> Logica
     let fixture = Fixture::new(cpu, priority);
     let queue = fixture.queue(cpu);
     let calls = AtomicUsize::new(0);
-    let works: Vec<_> = (0..13)
-        .map(|_| {
-            Box::pin(Work::with_callback(|| {
+    {
+        let works = pin!(core::array::from_fn::<_, 13, _>(|_| {
+            Work::with_callback(|| {
                 assert!(kirq::context::is_softirq_context());
                 assert_eq!(khal::percpu::this_cpu_id(), cpu);
                 calls.fetch_add(1, Ordering::Relaxed);
-            }))
-        })
-        .collect();
-    {
-        let _irq = kspin::NoPreemptIrqSave::new();
-        for work in &works {
-            // SAFETY: Box pins each externally owned Work; callbacks borrow calls
-            // and cpu until close_and_drain completes all callbacks and cleanup.
-            unsafe {
-                queue.submit(work, Some(cpu), || unreachable!()).unwrap();
+            })
+        }));
+        {
+            let _irq = kspin::NoPreemptIrqSave::new();
+            for work in works.iter() {
+                // SAFETY: The stack array pins each externally owned Work; callbacks borrow calls
+                // and cpu until close_and_drain completes all callbacks and cleanup.
+                unsafe {
+                    queue.submit(work, Some(cpu), || unreachable!()).unwrap();
+                }
             }
         }
+        drop(sender);
+        // Do not manually drive softirq or claim. IRQ exit/ksoftirqd must make progress,
+        // including completion refill and continuation beyond kirq's restart budget.
+        queue.close_and_drain().unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 13);
+        assert!(PASSES.load(Ordering::Relaxed) >= 13);
     }
-    drop(sender);
-    // Do not manually drive softirq or claim. IRQ exit/ksoftirqd must make progress,
-    // including completion refill and continuation beyond kirq's restart budget.
-    queue.close_and_drain().unwrap();
-    assert_eq!(calls.load(Ordering::Relaxed), 13);
-    assert!(PASSES.load(Ordering::Relaxed) >= 13);
-    drop(works);
     drop(queue);
     drop(fixture);
 }
