@@ -112,7 +112,11 @@ impl Default for EnumerationContext {
 }
 
 unittest::path_mod_test!(enumeration_unittest, "../ut-tests/enumeration_unittest.rs");
+// These regressions spawn real kernel tasks and use `ksync` semaphores, so they
+// need the task-layer feature rather than whichever driver feature happens to
+// pull it in.
 unittest::path_mod_test!(
-    descriptor_binding_unittest,
+    #[cfg(feature = "unittest-threads")]
+    mod descriptor_binding_unittest,
     "../ut-tests/descriptor_binding_unittest.rs"
 );

@@ -16,7 +16,7 @@ fn reset_model() -> alloc::sync::Arc<kdevice::BusInstance> {
 }
 
 #[def_test(serial)]
-fn test_register_device_creates_descriptor_without_runtime_record() {
+fn test_register_device_publishes_a_discovered_stable_object() {
     let bus = reset_model();
 
     let mut context = EnumerationContext::new();
@@ -41,7 +41,13 @@ fn test_register_device_creates_descriptor_without_runtime_record() {
     let desc = kdevice::find_device_desc(id).unwrap();
     assert_eq!(desc.id(), id);
     assert_eq!(context.registered_count(), 1);
-    assert_eq!(kdevice::device_records_snapshot().len(), 0);
+    // Registration publishes the stable object before any driver binds it:
+    // the record exists, projects `Discovered`, and carries no driver.
+    let records = kdevice::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, desc.device_id());
+    assert_eq!(records[0].state, kdevice::DeviceState::Discovered);
+    assert_eq!(records[0].driver_id, None);
 }
 
 #[def_test(serial)]

@@ -19,24 +19,33 @@
 //! spinlock-protected objects: the registry (`DeviceRegistry`), bus instances
 //! (`BusInstance`), bus types (`BusTypeObject`), driver objects
 //! (`DriverObject`), and per-object leaf locks inside `DeviceObject`
-//! (`relations`, plus the binding's `meta` and `devres`). To prevent
-//! deadlocks, all code paths that need to touch more than one of these must
-//! observe the following order:
+//! (`slot`, `relations`, plus the current binding's `meta` and `devres`). To
+//! prevent deadlocks, all code paths that need to touch more than one of these
+//! must observe the following order:
 //!
-//! 1. **Descriptor binding lock first**. Each descriptor owns a sleepable
-//!    `kmutex` that serializes binding and removal. It is taken outside every
-//!    spinlock (blocking acquisition would otherwise disable preemption for
-//!    an unbounded time); holding it may then take the registry and
-//!    per-object locks. No path may acquire it while holding a spinlock, and
-//!    only its holder may set or clear the descriptor's `Probing` state.
+//! 1. **Descriptor binding lock first**. Each descriptor and its stable device
+//!    object share one sleepable `kmutex` that serializes binding install/
+//!    clear, cleanup registration, removal and topology entry points. It is
+//!    taken outside every spinlock (blocking acquisition would otherwise
+//!    disable preemption for an unbounded time); holding it may then take the
+//!    registry and per-object locks. No path may acquire it while holding a
+//!    spinlock, and only its holder may set or clear the descriptor's
+//!    `Probing` state or the object's current binding. Registration uses
+//!    `try_lock` on the still-unpublished descriptor lock so enumeration never
+//!    sleeps.
 //! 2. **Registry next**: take the registry guard, snapshot the `Arc` handles
 //!    you need, then drop the registry guard before reaching into a
-//!    bus-instance lock that can block or nest further.
+//!    bus-instance lock that can block or nest further. Snapshot helpers that
+//!    build device records do this in two phases: collect objects under the
+//!    registry lock, read their leaves after releasing it.
 //! 3. **Per-object order** is `bus.devices` -> `bus.drivers` and
-//!    `bus.devices` -> one `DeviceObject` leaf lock. The three leaves
-//!    (`relations`, `binding.meta`, `binding.devres`) are never held
-//!    together. There is deliberately no path from a `DeviceObject` lock
-//!    back into the registry or a bus instance.
+//!    `bus.devices` -> one `DeviceObject` leaf lock. The leaves (`slot`,
+//!    `relations`, `binding.meta`, `binding.devres`) are never held together.
+//!    A topology write may hold several `relations` locks at once, but only by
+//!    acquiring them in strictly ascending `DeviceId` order, independent of
+//!    parent/child role. There is deliberately no path from a `DeviceObject`
+//!    lock back into the registry or a bus instance, except the documented
+//!    snapshot order `registry -> relations` used while unregistering.
 //! 4. **Never re-enter the registry from inside a per-object lock**. Per-
 //!    object methods (`BusInstance::attach_bound_device`,
 //!    `BusTypeObject::*`, `DriverObject::*`, `DeviceObject::*`) must not call
@@ -105,11 +114,12 @@ pub use device::{
     },
 };
 pub use device_node::{
-    DRM_RENDER_MINOR_BASE, DeviceNode, DeviceNodeCallback, DeviceNodeClass, DeviceNodeEvent,
-    DeviceNodeKind, DeviceNodeLifecycleCallback, DeviceNodeLifecycleEvent, DrmDeviceNodeMetadata,
-    InputDeviceNodeId, InputDeviceNodeMetadata, device_nodes_snapshot,
-    install_device_node_lifecycle_publisher, register_device_node, subscribe_device_nodes,
-    unregister_device_node,
+    DRM_RENDER_MINOR_BASE, DeferredNodeRetirement, DeviceNode, DeviceNodeCallback, DeviceNodeClass,
+    DeviceNodeEvent, DeviceNodeKind, DeviceNodeLifecycleCallback, DeviceNodeLifecycleEvent,
+    DrmDeviceNodeMetadata, InputDeviceNodeId, InputDeviceNodeMetadata, NodeRemoval,
+    device_nodes_snapshot, install_device_node_lifecycle_publisher, register_device_node,
+    register_device_node_for_binding, subscribe_device_nodes, unregister_device_node,
+    unregister_device_node_for_binding,
 };
 pub use driver::{
     CompatibleAliasMatcher, DeviceDriver, DeviceMatcher, DriverId, DriverInfo, DriverObject,
@@ -117,6 +127,8 @@ pub use driver::{
     VirtioTypeMatcher,
 };
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+#[cfg(unittest)]
+pub use lifecycle::dispatch::dispatch_device_event_for_tests;
 #[cfg(unittest)]
 pub use lifecycle::test_hooks;
 pub use lifecycle::{

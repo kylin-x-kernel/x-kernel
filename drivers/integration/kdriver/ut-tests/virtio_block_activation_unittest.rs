@@ -9,7 +9,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use driver_os_api::{IrqEvent, IrqHandlerToken, IrqTrigger, ResError, ResResult};
 use kdevice::{
-    BusId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity, ResourceSet,
+    BusId, DeviceIdentity, DeviceKind, DeviceLocation, DiscoveryOrigin, DriverId,
+    PlatformIdentity, ResourceSet,
 };
 use kirq::context::test_support::ScopedHardIrqContext;
 use unittest::{assert, assert_eq, def_test};
@@ -71,6 +72,17 @@ fn parent() -> Arc<DeviceObject> {
     ))
 }
 
+/// Detached fixture with a live binding, so activation reaches IRQ registration.
+fn bound_parent() -> Arc<DeviceObject> {
+    let parent = parent();
+    parent.install_bound_for_test(
+        DriverId::new(u64::MAX - 101),
+        "blk-activation-test",
+        DeviceKind::Block,
+    );
+    parent
+}
+
 fn dispatch() {
     let handlers: Vec<_> = ACTIONS.lock().values().cloned().collect();
     let _irq = ScopedHardIrqContext::enter();
@@ -80,27 +92,25 @@ fn dispatch() {
 }
 
 #[def_test(serial)]
-fn failed_irq_and_failed_publication_close_transport_without_disk() {
+fn failed_irq_and_unbound_parent_close_transport_without_disk() {
     assert_eq!(
         activate(parent(), MockTransport::new(), None),
         Err(DriverError::InvalidInput)
     );
-    for (number, error) in [
-        (FAILED_IRQ, DriverError::ResourceBusy),
-        (IRQ, DriverError::BadState),
-    ] {
-        let parent = parent();
+    // A live binding lets activation reach IRQ registration; a failed request
+    // must drop the activation bundle, which closes the transport without
+    // publishing anything.
+    {
+        let parent = bound_parent();
         let id = parent.id();
         let (device, hardware) = block_test_disk(0, false);
         let disk_number = kdevice::DeviceNumber::new(
             virtio::VIRTIO_BLK_MAJOR,
             device.index() << virtio::VIRTIO_BLK_PART_BITS,
         );
-        // An unbound parent deliberately fails real kclass publication after IRQ
-        // registration, exercising the installed registry owner's rollback.
         assert_eq!(
-            activate_device(parent, device.clone(), resource(number), &PROVIDER),
-            Err(error)
+            activate_device(parent, device.clone(), resource(FAILED_IRQ), &PROVIDER),
+            Err(DriverError::ResourceBusy)
         );
         assert!(!hardware.lock().is_queue_live());
         assert!(ACTIONS.lock().is_empty());
@@ -112,6 +122,27 @@ fn failed_irq_and_failed_publication_close_transport_without_disk() {
             closed_disk.part0().read_block(0, &mut [0; 512]),
             Err(DriverError::Io)
         );
+        close_device(id);
+    }
+
+    // An unbound parent is rejected while capturing the binding, before the
+    // IRQ request or any activation state exists. The transport still belongs
+    // to the caller, so this path makes no claim about closing it.
+    {
+        let parent = parent();
+        let id = parent.id();
+        let (device, _hardware) = block_test_disk(0, false);
+        let disk_number = kdevice::DeviceNumber::new(
+            virtio::VIRTIO_BLK_MAJOR,
+            device.index() << virtio::VIRTIO_BLK_PART_BITS,
+        );
+        assert_eq!(
+            activate_device(parent, device, resource(IRQ), &PROVIDER),
+            Err(DriverError::BadState)
+        );
+        assert!(ACTIONS.lock().is_empty());
+        assert!(!ACTIVATIONS.lock().contains_key(&id));
+        assert!(block::lookup_block_device(disk_number).is_none());
         close_device(id);
     }
 }

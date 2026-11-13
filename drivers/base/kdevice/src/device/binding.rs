@@ -6,14 +6,16 @@
 //!
 //! A [`BindingRuntime`] groups everything that belongs to one driver binding:
 //! the lifecycle state, in-use admission, the current driver metadata and the
-//! cleanup batch registered by that binding. Each `DeviceObject` owns exactly
-//! one binding runtime for its whole lifetime and has no replace/reset path;
-//! the object holds it through `Arc` only so consumers can retain the exact
-//! instance they were created from.
+//! cleanup batch registered by that binding. A stable `DeviceObject` replaces
+//! the runtime in its slot when a new candidate is probed, but it never resets
+//! or reuses a retired runtime. The object holds each instance through `Arc`
+//! so consumers can retain the exact instance they were created from.
 //!
 //! [`BindingRef`] is the read-only handle exposed to consumers such as the
-//! class layer. It keeps the runtime alive and snapshots the driver identity,
-//! but it neither increments `usage` nor exposes any mutation entry point.
+//! class layer. It keeps the runtime alive and snapshots the driver identity.
+//! New exact-instance operations (`try_acquire`/`add_cleanup`) check that the
+//! captured runtime is still the object's current slot before acting, so an
+//! old binding handle can never admit or register cleanup on a replacement.
 //! Hardware admission remains a [`DeviceUse`](crate::DeviceUse) responsibility.
 //!
 //! The descriptor binding mutex in the registry is deliberately **not** part
@@ -23,10 +25,10 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-use driver_base::DeviceKind;
+use driver_base::{DeviceKind, DriverResult};
 use kspin::SpinNoPreempt;
 
-use crate::{DeviceState, DriverId};
+use crate::{DeviceObject, DeviceState, DeviceUse, DriverId};
 
 /// Current driver metadata of one binding.
 struct BindingMeta {
@@ -53,15 +55,18 @@ pub(super) struct BindingSnapshot {
 /// Read-only reference to one binding instance.
 ///
 /// A `BindingRef` keeps the [`BindingRuntime`] alive and snapshots the driver
-/// identity captured at creation time. It deliberately provides no way to
-/// mutate lifecycle state, driver metadata or the usage count: it is **not**
-/// an admission guard. Use [`DeviceObject::try_acquire`](crate::DeviceObject)
-/// when hardware-operational admission is required, and note that holding a
-/// `BindingRef` alone never blocks removal.
+/// identity captured at creation time. Its operations are exact-instance
+/// operations: they first verify that this runtime is still the object's
+/// current binding, so a reference captured from binding A can never admit
+/// hardware use or register cleanup on a later binding B.
+///
+/// Holding a `BindingRef` alone never blocks removal. Use
+/// [`BindingRef::try_acquire`] when hardware-operational admission is required,
+/// and [`BindingRef::add_cleanup`] to attach devres to the captured instance.
 ///
 /// Instances can only be obtained from
-/// `DeviceObject::binding_ref()`; all fields are private and there is no
-/// public constructor.
+/// `DeviceObject::binding_ref()`/`binding_ref_for_lifecycle_write()`; all
+/// fields are private and there is no public constructor.
 #[derive(Clone)]
 pub struct BindingRef {
     runtime: Arc<BindingRuntime>,
@@ -70,6 +75,23 @@ pub struct BindingRef {
 }
 
 impl BindingRef {
+    /// Lifecycle state of the captured binding instance.
+    ///
+    /// A lock-free observation of this exact runtime. It does not read the
+    /// parent object's current slot, so it keeps reporting A after a
+    /// replacement binding B is installed.
+    pub fn state(&self) -> DeviceState {
+        self.runtime.state()
+    }
+
+    /// Whether the captured binding instance has reached its terminal state.
+    ///
+    /// Only `Removed` is terminal. `Removing` may return to the previous state
+    /// when removal backs off because a [`DeviceUse`] guard is outstanding.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.state(), DeviceState::Removed)
+    }
+
     /// Whether the captured binding instance is currently `Active`.
     ///
     /// This is an instantaneous, lock-free observation, not an operation
@@ -77,7 +99,7 @@ impl BindingRef {
     /// `true` again if a removal attempt backs off because a `DeviceUse`
     /// guard is still outstanding.
     pub fn is_active(&self) -> bool {
-        matches!(self.runtime.state(), DeviceState::Active)
+        matches!(self.state(), DeviceState::Active)
     }
 
     /// Driver ID snapshotted when this reference was captured.
@@ -88,6 +110,41 @@ impl BindingRef {
     /// Driver name snapshotted when this reference was captured.
     pub fn driver_name(&self) -> &'static str {
         self.driver_name
+    }
+
+    /// Whether this handle captures the same runtime instance as `other`.
+    ///
+    /// This is an identity comparison only. It grants no admission and no
+    /// cleanup permission; those operations still check that the captured
+    /// runtime is the object's current binding.
+    pub fn same_binding(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.runtime, &other.runtime)
+    }
+
+    /// Admit one in-use reference to the captured binding instance.
+    ///
+    /// Fails if the parent object's current binding has been replaced (this
+    /// is the A→B isolation rule) or if this exact instance is not `Active`.
+    pub fn try_acquire(&self, device: &Arc<DeviceObject>) -> Option<DeviceUse> {
+        device.try_acquire_exact(&self.runtime)
+    }
+
+    /// Register a cleanup callback on the captured binding instance.
+    ///
+    /// The object must still have this exact runtime in its binding slot. For
+    /// a registered object the caller must hold the descriptor binding lock
+    /// (probe/remove/adoption write context); detached fixtures do not.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError::BadState`](crate::DriverError::BadState) if the
+    /// slot no longer points at this instance, the caller is not in a
+    /// lifecycle write context, or the instance has already started removal.
+    pub fn add_cleanup<F>(&self, device: &DeviceObject, cleanup: F) -> DriverResult<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        device.add_cleanup_exact(&self.runtime, Box::new(cleanup))
     }
 }
 
@@ -104,10 +161,12 @@ impl core::fmt::Debug for BindingRef {
 /// Runtime state and cleanup responsibility of one driver binding.
 ///
 /// Only the device core mutates this type; it is not exported from the crate
-/// and has no replace/reset/into-inner API.
-pub(super) struct BindingRuntime {
+/// and has no replace/reset/into-inner API. The type is crate-visible only so
+/// `DeviceObject::clear_binding` can return the retired instance to the
+/// lifecycle code that calls it.
+pub(crate) struct BindingRuntime {
     lifecycle: AtomicU8,
-    /// Outstanding in-use references handed out by `DeviceObject::try_acquire`.
+    /// Outstanding in-use references handed out by `BindingRef::try_acquire`.
     ///
     /// Removal is gated on this dropping back to zero so a consumer holding a
     /// live reference (an opened handle, an in-flight operation) cannot have
@@ -252,6 +311,11 @@ impl BindingRuntime {
                 Err(observed) => current = observed,
             }
         }
+
+        #[cfg(unittest)]
+        crate::lifecycle::test_hooks::pause(
+            crate::lifecycle::test_hooks::BindingPause::BindingRemovingBeforeUseCheck,
+        );
 
         // The state is now `Removing`, which makes `try_acquire` reject new
         // references. If any are still outstanding we must NOT proceed: no

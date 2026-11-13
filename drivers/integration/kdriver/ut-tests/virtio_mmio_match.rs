@@ -329,7 +329,16 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
     cleanup.remove();
     assert_eq!(kclass::vsock_devices().len(), vsock_before);
     assert_eq!(kclass::hwrng_devices().len(), hwrng_before);
-    assert!(kdevice::device_records_snapshot().is_empty());
+    // Unbind keeps the stable device object and requeues its descriptor.
+    let records_after_unbind = kdevice::device_records_snapshot();
+    assert_eq!(records_after_unbind.len(), 1);
+    assert_eq!(records_after_unbind[0].id, device_id);
+    assert_eq!(
+        records_after_unbind[0].state,
+        kdevice::DeviceState::Discovered
+    );
+    assert!(records_after_unbind[0].driver_name.is_none());
+    assert!(kdevice::find_device(device_id).is_some());
     assert!(right.bound_devices_snapshot().is_empty());
 
     // The device-owner teardown released every mapping through the real HAL:

@@ -51,8 +51,12 @@ pub(crate) enum DeviceDescState {
     Pending,
     /// A probe is currently evaluating this descriptor.
     Probing,
-    /// A live device object was published from this descriptor.
-    Bound(DeviceId),
+    /// The stable device object created at registration is bound to a driver.
+    ///
+    /// This state owns no object id: the descriptor carries its own stable
+    /// `device_id` for the whole registration, so the state does not change
+    /// when the current binding is replaced.
+    Bound,
 }
 
 struct DeviceDescEntry {
@@ -60,11 +64,11 @@ struct DeviceDescEntry {
     state: DeviceDescState,
     /// Serializes binding attempts for this descriptor.
     ///
-    /// The object is stable across candidate rebuilds, probe failures and
-    /// requeue/remove, so every path that can bind or unbind this descriptor
-    /// contends on the same lock. It is deliberately not stored on
-    /// `DeviceObject`: a failed candidate's object is discarded, while the
-    /// descriptor outlives it. The registry only clones the `Arc`; blocking
+    /// The stable object shares this lock handle, so install/clear of its
+    /// current binding, cleanup registration and topology entry points all
+    /// check the same ownership. It is stored here as well because the
+    /// descriptor outlives any individual probe attempt even though the
+    /// object does not. The registry only clones the `Arc`; blocking
     /// acquisition happens outside the registry spinlock.
     binding: Arc<Mutex<()>>,
 }
@@ -184,13 +188,28 @@ impl DeviceRegistry {
         self.descriptors.get(&id).map(|entry| entry.state)
     }
 
-    /// Find the live device currently created from a descriptor.
+    /// Find the stable device object registered with this descriptor.
+    ///
+    /// The object exists from descriptor registration until the descriptor is
+    /// unregistered, independent of whether a binding is currently installed
+    /// (`Pending`, `Probing` or `Bound`). Only a descriptor that is no longer
+    /// registered has no object.
     pub(crate) fn find_device_for_desc(&self, id: DeviceDescId) -> Option<Arc<DeviceObject>> {
-        let device_id = match self.descriptors.get(&id)?.state {
-            DeviceDescState::Bound(device_id) => device_id,
-            _ => return None,
-        };
-        self.find_device(device_id)
+        let entry = self.descriptors.get(&id)?;
+        self.find_device(entry.desc.device_id())
+    }
+
+    /// Find the descriptor owning a stable device id in any registration state.
+    ///
+    /// Used by topology entry points that only know a child `DeviceId` and
+    /// must take the owning descriptor's binding lock before changing
+    /// parent/child relations. Registration creates the object in `Pending`
+    /// state, so this deliberately does not require `Bound`.
+    pub(crate) fn descriptor_for_device(&self, device_id: DeviceId) -> Option<DeviceDesc> {
+        self.descriptors
+            .values()
+            .find(|entry| entry.desc.device_id() == device_id)
+            .map(|entry| entry.desc.clone())
     }
 
     /// Find a device object.
@@ -202,22 +221,22 @@ impl DeviceRegistry {
     /// every attempt to bind it.
     ///
     /// The caller constructs `binding` before taking the registry lock; the
-    /// lock is never created or acquired here. Re-registering an existing ID
-    /// refreshes the descriptor copy but keeps the existing lock object and
-    /// lifecycle state.
+    /// lock is never created or acquired here. Descriptor ids are unique:
+    /// re-adding an existing id is rejected instead of silently replacing the
+    /// immutable descriptor facts (and a different `device_id`). Returns
+    /// `false` on duplication.
     pub(crate) fn add_device_desc_with_binding(
         &mut self,
         desc: DeviceDesc,
         binding: Arc<Mutex<()>>,
-    ) {
-        match self.descriptors.get_mut(&desc.id()) {
-            Some(existing) => existing.desc = desc,
-            None => {
-                let id = desc.id();
-                self.descriptors
-                    .insert(id, DeviceDescEntry::pending(desc, binding));
-            }
+    ) -> bool {
+        let id = desc.id();
+        if self.descriptors.contains_key(&id) {
+            return false;
         }
+        self.descriptors
+            .insert(id, DeviceDescEntry::pending(desc, binding));
+        true
     }
 
     /// Claim a `Pending` descriptor for a binding attempt.
@@ -254,7 +273,9 @@ impl DeviceRegistry {
         device_id: DeviceId,
     ) -> bool {
         match self.descriptors.get_mut(&id) {
-            Some(entry) if entry.state == DeviceDescState::Bound(device_id) => {
+            Some(entry)
+                if entry.state == DeviceDescState::Bound && entry.desc.device_id() == device_id =>
+            {
                 entry.state = DeviceDescState::Pending;
                 true
             }
@@ -281,12 +302,15 @@ impl DeviceRegistry {
         }
     }
 
-    /// Whether `id` is still bound to exactly `device_id`.
+    /// Whether `id` is still `Bound` to the stable `device_id`.
+    ///
+    /// Because `device_id` is now stable for the whole registration, this
+    /// distinguishes registrations, not binding instances. Callers that need
+    /// instance identity must also compare the current `BindingRef`.
     pub(crate) fn device_desc_is_bound_to(&self, id: DeviceDescId, device_id: DeviceId) -> bool {
-        matches!(
-            self.descriptors.get(&id).map(|entry| entry.state),
-            Some(DeviceDescState::Bound(bound)) if bound == device_id
-        )
+        self.descriptors.get(&id).is_some_and(|entry| {
+            entry.state == DeviceDescState::Bound && entry.desc.device_id() == device_id
+        })
     }
 
     /// Return the unique descriptor currently bound to `device_id`.
@@ -297,7 +321,7 @@ impl DeviceRegistry {
     pub(crate) fn descriptor_bound_to_device(&self, device_id: DeviceId) -> Option<DescBindingRef> {
         let mut found = None;
         for (id, entry) in &self.descriptors {
-            if entry.state == DeviceDescState::Bound(device_id) {
+            if entry.state == DeviceDescState::Bound && entry.desc.device_id() == device_id {
                 if found.is_some() {
                     return None;
                 }
@@ -310,20 +334,9 @@ impl DeviceRegistry {
         found
     }
 
-    pub(crate) fn bind_device_desc(&mut self, desc_id: DeviceDescId, device_id: DeviceId) {
+    pub(crate) fn bind_device_desc(&mut self, desc_id: DeviceDescId) {
         if let Some(entry) = self.descriptors.get_mut(&desc_id) {
-            entry.state = DeviceDescState::Bound(device_id);
-        }
-    }
-
-    /// Clear any descriptor parent linkage that still points at a device that
-    /// has been removed, so a later reprobe does not attach under a stale
-    /// parent id.
-    pub(crate) fn clear_descriptor_parents_for(&mut self, removed: DeviceId) {
-        for entry in self.descriptors.values_mut() {
-            if entry.desc.parent() == Some(removed) {
-                entry.desc.clear_parent();
-            }
+            entry.state = DeviceDescState::Bound;
         }
     }
 
@@ -436,12 +449,14 @@ impl DeviceRegistry {
             .collect()
     }
 
-    /// Snapshot all live device records from device objects.
-    pub(crate) fn records_snapshot(&self) -> Vec<DeviceRecord> {
-        self.devices
-            .values()
-            .map(|device| device.record_snapshot())
-            .collect()
+    /// Snapshot the live device objects.
+    ///
+    /// Records are taken after the caller releases the registry lock: building
+    /// a record reads each object's slot and relations spinlocks, and holding
+    /// the registry spinlock across those reads would invert the documented
+    /// lock order.
+    pub(crate) fn device_objects_snapshot(&self) -> Vec<Arc<DeviceObject>> {
+        self.devices.values().cloned().collect()
     }
 
     /// Register a subscriber for one lifecycle event kind.
@@ -510,8 +525,15 @@ pub fn device_descs_snapshot() -> Vec<DeviceDesc> {
 }
 
 /// Snapshot all live device records.
+///
+/// The object set is collected under the registry lock, then each record is
+/// built outside it. The result is a grouped, non-atomic view.
 pub fn device_records_snapshot() -> Vec<DeviceRecord> {
-    device_registry().records_snapshot()
+    let devices = device_registry().device_objects_snapshot();
+    devices
+        .iter()
+        .map(|device| device.record_snapshot())
+        .collect()
 }
 
 /// Snapshot all registered bus metadata.

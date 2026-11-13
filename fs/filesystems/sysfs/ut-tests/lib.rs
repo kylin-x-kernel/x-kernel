@@ -201,5 +201,5 @@ fn drm_nodes_project_a_render_minor() {
         "the edid attribute is the raw descriptor"
     );
 
-    kdevice::unregister_device_node(node.core_id());
+    kdevice::unregister_device_node(node.core_id()).expect("legacy node unregisters");
 }

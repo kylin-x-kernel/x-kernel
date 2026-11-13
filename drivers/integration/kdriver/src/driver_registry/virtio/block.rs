@@ -76,6 +76,12 @@ fn activate_device<H: VirtIoHal + 'static, T: Transport + 'static>(
     irq: IrqResource,
     provider: &'static dyn IrqOp,
 ) -> DriverResult<()> {
+    // Capture the binding before any side effect: the probe must still own the
+    // descriptor binding lock, and every resource registered below belongs to
+    // this exact binding.
+    let binding = parent
+        .binding_ref_for_lifecycle_write()
+        .ok_or(DriverError::BadState)?;
     let completion: Arc<dyn BlockCompletionOperations> = device.clone();
     let reclaimer = BlockIoReclaimer::new(Arc::downgrade(&completion));
     let mut activation = BlockActivation {
@@ -111,7 +117,10 @@ fn activate_device<H: VirtIoHal + 'static, T: Transport + 'static>(
         }
         registry.insert(id, Box::new(move || drop(activation)));
     }
-    parent.add_cleanup(move || close_device(id));
+    if let Err(error) = binding.add_cleanup(&parent, move || close_device(id)) {
+        close_device(id);
+        return Err(error);
+    }
     if let Err(error) = kclass::publish_block(parent, disk) {
         close_device(id);
         return Err(error);

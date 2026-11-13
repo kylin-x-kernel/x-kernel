@@ -422,11 +422,15 @@ fn real_dt_virtio_mmio_is_registered_as_a_description_only() {
     assert_eq!(desc.transport(), None);
     assert_eq!(desc.resources().len(), 1);
 
-    // No driver in this test claims the descriptor, so probing it publishes
-    // nothing — the description alone is the discovery result.
+    // No driver in this test claims the descriptor, so probing it binds
+    // nothing — the description alone is the discovery result. The stable
+    // object registered with the descriptor remains, unbound (`Discovered`).
     assert_eq!(context.probe_pending(), 0);
     assert_eq!(context.unclaimed_count(), 1);
-    assert!(kdevice::device_records_snapshot().is_empty());
+    let records = kdevice::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].state, kdevice::DeviceState::Discovered);
+    assert_eq!(records[0].driver_id, None);
 }
 
 // -- A2: source-neutral fake backend, same consumer --------------------------
@@ -659,10 +663,14 @@ fn failed_probe_retry_and_removal_keep_the_original_node() {
     assert_eq!(context.probe_pending(), 0);
     assert_eq!(context.unclaimed_count(), 1);
 
-    // The failed attempt already received the correct association, and it
-    // left no published runtime object behind.
+    // The failed attempt already received the correct association; its
+    // binding was retired, and the stable object remains unbound so the
+    // retry below reuses the same device id.
     assert_eq!(taken_consumed().node, node);
-    assert_eq!(kdevice::device_records_snapshot().len(), 0);
+    let records = kdevice::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].state, kdevice::DeviceState::Discovered);
+    assert_eq!(records[0].driver_id, None);
 
     let desc_id: DeviceDescId = context.unclaimed()[0].id();
     *CONSUMED.lock() = None;
@@ -684,14 +692,16 @@ fn failed_probe_retry_and_removal_keep_the_original_node() {
         desc_id
     );
 
-    // Removal drops the runtime object but not the shared, boot-static
-    // backend: the original discovery handle is still readable. Drop the test's
-    // own strong reference too, so the read below cannot be satisfied by an
-    // object kept alive by the test.
+    // Unbinding ends the driver binding but not the stable object or the
+    // shared, boot-static backend: the original discovery handle is still
+    // readable after the binding is gone.
     let device_id = bound.id();
     kdevice::remove_device_managed(device_id).unwrap();
     drop(bound);
-    assert!(kdevice::find_device(device_id).is_none());
+    let retained = kdevice::find_device(device_id).expect("unbind keeps the stable object");
+    assert_eq!(retained.state(), kdevice::DeviceState::Discovered);
+    assert_eq!(retained.driver_id(), None);
+    drop(retained);
     assert_eq!(read_string(node, "test-value"), Ok(Some("dt-device")));
     assert_eq!(read_reference_target(node), Ok(Some("dt-target")));
 }

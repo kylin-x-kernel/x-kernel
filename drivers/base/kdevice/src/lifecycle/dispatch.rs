@@ -67,6 +67,16 @@ pub(crate) fn dispatch_device_event(event: DeviceEvent) {
     dispatch_event(&callbacks, event);
 }
 
+/// Dispatch an event through the real subscriber bridge from a test.
+///
+/// Test-only entry point used to deliver a stale terminal event through the
+/// same bridge production uses; tests must not fake class/node teardown by
+/// calling internal helpers directly.
+#[cfg(unittest)]
+pub fn dispatch_device_event_for_tests(event: DeviceEvent) {
+    dispatch_device_event(event);
+}
+
 /// Silently prepare the `Matched`/`Bound` metadata of an unpublished device.
 ///
 /// No event is dispatched and the object is not yet queryable through the

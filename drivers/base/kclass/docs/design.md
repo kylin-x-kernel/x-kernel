@@ -20,6 +20,14 @@ as `knet`, `fs_boot`, or the input subsystem) discover and use runtime
 devices through `*_devices()` / `find_*_device()` /
 `subscribe_*_available()`, without depending on probe order.
 
+Publication is binding-scoped. The parent `DeviceObject` is stable across
+rebinds, but each class entry captures the exact `BindingRef` that published
+it. Removal of a class entry is therefore a two-step protocol: a terminal
+entry is reserved under the registry lock, then its device node is revoked
+and its class-specific runtime is unpublished outside the lock. A deferred
+node removal completes the same protocol later, still keyed by the exact
+binding instance.
+
 The intended audience is developers implementing device class adapters,
 modifying class registry semantics, or adding new device categories.
 
@@ -65,9 +73,11 @@ drivers/base/kclass/
 ├── docs/
 │   ├── design.md
 │   └── security.md
+├── ut-tests/        # registry/retirement tests mounted as cfg(unittest)
 └── src/
-    ├── lib.rs       # macro-driven class registries + device trait delegation + prelude
-    └── generic.rs   # ClassDevice<T>, ClassRegistry<T> generic primitives
+    ├── lib.rs       # macro-driven class registries + event bridge + delegation + prelude
+    ├── generic.rs   # ClassDevice<T>, ClassRegistry<T>, retirement claim protocol
+    └── retirement_hooks.rs # cfg(unittest) retirement-claim pause seam
 ```
 
 ## Architecture
@@ -85,8 +95,9 @@ drivers/base/kclass/
     │  │  (kdevice event subscriber)     │    │
     │  │  Activated → notify_class_avail │    │
     │  │              + register node     │    │
-    │  │  Removed   → remove_class_device│    │
-    │  │              + unregister node   │    │
+    │  │  Removed / BindingRetired       │    │
+    │  │            → remove_class_device│    │
+    │  │              + retire by binding │    │
     │  └─────────────┬───────────────────┘    │
     │                │                        │
     │  ┌─────────────┴───────────────────┐    │
@@ -132,8 +143,10 @@ drivers/base/kclass/
 |------|------|
 | `ClassDevice<T>` | Typed runtime device handle; wraps `DeviceObject`, the captured binding reference and the trait object, and delegates trait method calls |
 | `ClassDeviceInner<T>` | `ClassDevice` internal shared state: parent, captured `BindingRef`, runtime, name, kind, irq, metadata. Driver identity is the binding snapshot; availability reads the captured binding |
-| `ClassRegistry<T>` | Typed registry: publish (unique publication), devices (enumerate available), find (lookup by id), subscribe (availability notification), remove (remove by id) |
-| `ACTIVATION_BRIDGE` | Global event bridge: subscribes to `kdevice` `Activated` / `Removed` events and drives class-level notify/remove |
+| `ClassRegistry<T>` | Typed registry: publish (unique publication), devices (enumerate available), find (lookup by id), subscribe (availability notification), terminal-entry discovery, two-phase retirement claim/finish |
+| `ClaimOutcome` | Result of reserving terminal entries: `Claimed { id, token, removed }`, `Retiring` (a reservation for the id is already in flight), or `Nothing` |
+| `ACTIVATION_BRIDGE` | Global event bridge: subscribes to `kdevice` `Activated` / `Removed` / `BindingRetired` events and drives class-level notify/remove; removable for tests via `reinstall_event_bridge_for_tests` |
+| Retirement token | Monotonic `u64` private cleanup credential. It authorizes `finish_retirement` for the exact claim; it is not binding identity and is never reused. Exhaustion (`u64::MAX`) returns `BadState` before touching registry state |
 | `ClassRuntimeMetadata::device_node_class` | Supplies input capability metadata or the DRM primary class to `kdevice`; other runtime classes return no node request |
 | `class_registries!` macro | Declaratively generates all 8 class registries and their companion functions |
 | `ClassDeviceMetadata` | Optional class-specific metadata (currently only the input class carries physical_location / unique_id) |
@@ -159,20 +172,29 @@ drivers/base/kclass/
                     │Available │  ← captured binding is Active;
                     │(active)  │     DeviceNode assigned, then callbacks fired
                     └────┬─────┘
-                         │ kdevice Removed event
+                         │ Removed / BindingRetired event
                          ▼
                     ┌──────────┐
-                    │ Removed  │  ← swap_remove from the registry
+                    │ Terminal │  ← captured binding is no longer Active
+                    │ (reserved)│    registry id is claimed under the lock
+                    └────┬─────┘
+                         │ node revoked (or deferred) → unpublish outside
+                         │ the lock → finish_retirement(token)
+                         ▼
+                    ┌──────────┐
+                    │ Removed  │  ← entry removed; reservation released
                     └──────────┘
 ```
 
 | From | To | Trigger |
 |----|----|----------|
-| — | Published | Driver calls `publish_<class>(parent, runtime)` |
+| — | Published | Driver calls `publish_<class>(parent, runtime)` from a probe/adoption/remove write context |
 | Published | Available | `kdevice` dispatches `Activated`; `notify_class_available` registers any class node and then invokes subscriber callbacks |
 | Published | Available (immediate) | Captured binding is already `Active` at publish time (desc-adoption path) |
-| Available | Removed | `kdevice` dispatches the `Removed` event; `remove_class_device` removes the entry |
-| Published | — | Publishing the same `DeviceId` again returns `AlreadyExists` |
+| Available/Published | Terminal | `kdevice` dispatches `Removed` (unbind/unregister) or `BindingRetired` (failed candidate); the captured binding is terminal |
+| Terminal | Removed | `evict_*_terminal`/`retire_*_binding` claims the id, revokes the node, unpublishes the class runtime, then finishes the claim |
+| Terminal | Terminal (deferred) | The node is mid-removal; the claim is not taken, a deferred callback is registered, and the finishing node path retries the same retirement |
+| Published/Available | — | Publishing the same `DeviceId` while a retiring reservation exists returns `ResourceBusy`; a live non-terminal entry returns `AlreadyExists` |
 
 ### Registry publish semantics
 
@@ -180,6 +202,14 @@ drivers/base/kclass/
 registration does. Hotplug re-registration must first remove the old
 object through the `Removed` lifecycle and then publish a new object; a
 resident runtime is never silently replaced.
+
+Publication also respects an in-flight same-ID retirement. A retiring
+reservation is installed in the same critical section that removes the
+terminal entries, and it is released only after the class runtime has been
+unpublished outside the registry lock. Until then a same-ID publish returns
+`ResourceBusy`, so a replacement device created by a fast rebind cannot become
+visible before the previous instance's unpublish has finished. A live
+non-terminal entry is reported as `AlreadyExists` instead.
 
 Publishing is all-or-nothing from the driver's point of view: a driver that
 returns an error from `probe_device` after calling `publish_<class>` must
@@ -201,20 +231,27 @@ be undone explicitly on the error path.
    a mismatch returns `InvalidInput`.
 5. `class_metadata()` is extracted from the runtime (only the input class
    returns meaningful metadata).
-6. `ClassDevice::try_new_with_class_metadata` captures a `BindingRef`:
-   - the parent must expose complete binding metadata and must not be
-     observed as `Removing`/`Removed`, otherwise `BadState` is returned;
-   - `driver_name()`/`driver_id()` become the immutable identity snapshot,
-     and `is_available()` reads the captured runtime. A successful capture is
-     **not** a publish permission: the normal probe/adoption path relies on
-     the descriptor binding lock to serialize publication with removal.
-7. The registry publishes under the `SpinNoPreempt` lock:
-   - if the same id already exists → `AlreadyExists`, and the
-     class-specific publish already performed is undone;
-   - otherwise → push.
-8. If the device is already `Active`, `notify_class_available` runs
-   synchronously. Input and display classes first register a `DeviceNode` in
-   `kdevice`, then notify class subscribers.
+6. The macro calls `parent.binding_ref_for_lifecycle_write()` to capture
+   the exact binding being published. `ClassDevice::try_new_with_binding`
+   rejects a binding observed as `Removing`/`Removed` with `BadState`;
+   `driver_name()`/`driver_id()` become the immutable identity snapshot, and
+   `is_available()` reads the captured runtime. Only the fixture/test
+   constructor `try_new_with_class_metadata` reads the parent's current slot.
+   A successful capture is **not** a publish permission: the caller must
+   already hold the descriptor binding lock because it is in a probe, adoption
+   or remove write context.
+7. The registry is inspected before any class resource is touched:
+   an in-flight retirement → `ResourceBusy`; a live same-ID entry →
+   `AlreadyExists`; terminal same-ID entries are evicted in the fixed order
+   node revocation → unpublish → reservation release.
+8. `publish_class` runs the class-specific registration. If the subsequent
+   registry `publish` fails (for example a racing `AlreadyExists`), the
+   class-specific publish is undone and the error is returned.
+9. Successful publication pushes the entry under the `SpinNoPreempt` lock.
+   If the captured binding is already `Active`, `notify_class_available`
+   runs synchronously: input and display classes first register a
+   `DeviceNode` for the exact binding in `kdevice`, then notify class
+   subscribers.
 
 ### Captured binding reference
 
@@ -224,13 +261,16 @@ be undone explicitly on the error path.
   created this class device; after unbind/removal it stays readable and never
   falls back to the parent's current metadata;
 - `is_available()` observes only that captured runtime. It is a lock-free,
-  instantaneous availability check, not operation admission;
+  instantaneous availability check, not operation admission. If the binding is
+  replaced by a rebind, an old class handle keeps reporting unavailable and can
+  never start following the replacement;
 - the reference retains the runtime but does not increment `usage`, so a
   resident class handle or clone cannot make removal return `ResourceBusy`;
-- construction succeeds at the Bound stage used by normal in-probe
-  publication, and at Active; terminal or detached bindings return `BadState`;
+- construction succeeds for a live binding (Bound stage used by in-probe
+  publication, or Active); terminal or detached bindings return `BadState`;
 - capture is not a publication permission. Publication serialization with
-  removal still comes from the descriptor binding lock.
+  removal still comes from the descriptor binding lock, and removal is matched
+  back to the entry with `BindingRef::same_binding`, never by device ID alone.
 
 ### Device enumeration and lookup
 
@@ -262,13 +302,51 @@ be undone explicitly on the error path.
    it calls `notify_class_available(kind, id)`, dispatching on
    `DeviceKind` to the matching class notify function. Input and display
    notify functions capture their class metadata and call
-   `kdevice::register_device_node` before availability callbacks.
-2. A `DeviceEventKind::Removed` subscriber is registered: on each event it
-   calls `remove_class_device(id)`, which walks every class registry, removes
-   the id, unregisters its optional `DeviceNode`, and then runs class-specific
-   unpublish cleanup.
+   `kdevice::register_device_node_for_binding` for the entry's captured
+   binding before availability callbacks.
+2. `DeviceEventKind::Removed` and `DeviceEventKind::BindingRetired`
+   subscribers are registered: on each event they call
+   `remove_class_device(id)`, which walks every class registry and retires
+   terminal entries whose captured binding is the instance being removed.
+   Unbinding (which keeps the stable device object) and retirement of a failed
+   candidate that already published a runtime both use this path; the event
+   name does not select an entry, the exact binding reference does.
 3. The bridge completes inside `LazyInit::call_once`, guaranteeing a
-   single registration.
+   single registration. `reinstall_event_bridge_for_tests` restores the
+   subscriptions after a test reset clears the subscriber buckets.
+
+### Terminal retirement protocol
+
+Retirement never removes an entry with a live binding and never lets a
+replacement binding inherit the entry.
+
+1. `terminal_entries_for_retirement(id)` snapshots entries whose captured
+   binding is `Removed`. An in-flight reservation for the id yields
+   `ResourceBusy`; a live non-terminal entry yields `AlreadyExists`; a
+   `Removing` (transient) entry is not terminal and is left alone.
+2. For each terminal entry, the optional `DeviceNode` is revoked with
+   `unregister_device_node_for_binding(id, &binding, on_deferred)`. The node
+   implementation compares the owning binding instance:
+   - `Removed`/`NotFound`: continue;
+   - `Deferred`: the node is mid-removal; the callback is registered and the
+     caller returns `ResourceBusy` without unpublishing. The finishing node
+     path re-enters the same retirement with the same binding;
+   - `NotOwner`: the node belongs to another binding instance; this is a
+     `BadState`, never a reason to remove someone else's node.
+3. `claim_retirement(id, [binding])` removes exactly the matching terminal
+   entries from the registry and installs a same-ID reservation in one
+   critical section. Only a `Claimed` outcome may unpublish; `Retiring` means
+   another executor already owns the sequence.
+4. The class runtime is unpublished outside the registry lock (input and
+   display release class resources; block releases its owning disk
+   reference).
+5. `finish_retirement(&claim)` releases only the reservation whose id and
+   token match the claim. A delayed finisher cannot clear a later executor's
+   reservation, and a `Retiring`/`Nothing` claim is a no-op.
+6. Test-only pause hooks (`test_hooks::ClassPause::RetirementClaimed` and
+   `RetirementUnpublished`) can hold a claim between steps 3 and 5, and after
+   step 4 respectively, to exercise same-ID publication and deferred-retirement
+   interleavings. Both run outside the registry lock.
 
 ### Device trait delegation
 
@@ -327,8 +405,20 @@ before publication; kclass does not implement waiting or entropy trust policy.
 
 ## Concurrency Model
 
-- Each class registry is protected by `SpinNoPreempt<ClassRegistry<T>>`:
-  publish / devices / find / subscribe / remove complete inside the lock.
+- Each class registry is protected by `SpinNoPreempt<ClassRegistry<T>>`.
+  Registry membership, the retirement reservation list and the token
+  allocator change inside the lock; class-specific `publish_class` /
+  `unpublish_class` and subscriber callbacks always run outside it.
+- The retirement sequence has two lock regions (claim, then finish) with the
+  unpublish in between. The same-ID reservation is what makes that gap safe:
+  it is installed in the claim's critical section and cleared only by the
+  matching token, so publication cannot slip into the gap.
+- Spin-lock sections never sleep. Deferred node callbacks may run later in a
+  different context; they re-validate the exact binding before claiming.
+- Driver probes and removals call the registry while holding the descriptor
+  binding lock, which is a sleeping `kmutex::Mutex`. The two are never held in
+  the opposite order, and no class-registry `SpinNoPreempt` is held while
+  taking the descriptor lock.
 - `notify_class_available` uses the "find device inside the lock, call
   callbacks outside" pattern:
   - find the device and clone the subscriber list under the lock;
@@ -399,6 +489,34 @@ exchange for:
 init-order dependency — kdevice would have to be initialized whenever
 kclass constructs.
 
+### Binding-scoped entries with a two-phase retirement claim
+
+**Choice**: every class entry captures the exact `BindingRef` that published
+it, and retirement is a claim/finish protocol with an opaque monotonic token
+and a same-ID reservation, rather than an immediate `swap_remove` on the
+`Removed` event.
+
+**Trade-off**: one extra reservation entry and one token allocation per
+retirement, in exchange for:
+
+- the stable `DeviceObject` can be rebound without an old class entry being
+  mistaken for the new binding's entry;
+- `unpublish_class` (which may take class-specific locks or release a disk
+  reference) can run outside the registry spin lock without allowing a
+  same-ID publish to resurrect the device in the gap;
+- a deferred `DeviceNode` removal can complete later and still retire exactly
+  the instance that requested it, instead of guessing by device ID;
+- removing an entry without owning its claim is impossible, because
+  `finish_retirement` matches the private token.
+
+**Rejected alternative**: key removal by `DeviceId` only. Under stable device
+objects a rebind reuses the ID, so an old `Removed` event or a stale deferred
+callback could evict the new binding's entry.
+
+**Rejected alternative**: hold the registry spin lock across `unpublish_class`.
+That violates the spin-lock no-sleeping rule for class unpublish paths and
+would run subscriber-adjacent teardown inside an atomic context.
+
 ### Input class carries runtime identity metadata
 
 **Choice**: only the input class carries `physical_location` and
@@ -419,16 +537,22 @@ input-specific concepts.
 
 ### Arc<DeviceObject> prevents use-after-remove
 
-**Choice**: `ClassDevice` holds a strong `Arc<DeviceObject>`.
+**Choice**: `ClassDevice` holds a strong `Arc<DeviceObject>` plus the
+`BindingRef` captured at construction.
 
 **Trade-off**: clones of a `ClassDevice` held outside the registry still
-reach the trait methods after the device is removed from the registry.
-This is necessary for:
+reach the trait methods after the device is removed from the registry. This is
+necessary for:
 
 - pollers / async tasks holding a device reference that must finish a last
   I/O after hot removal;
 - references obtained inside subscriber callbacks that may outlive the
   removal.
+
+The strong parent keeps descriptor facts (id, name, location) readable. It
+does **not** make the handle current: `is_available()` reads the captured
+binding, so after unbind or rebind an old handle stays unavailable and cannot
+follow the new instance.
 
 **Rejected alternative**: `ClassDevice` holding `Weak<DeviceObject>`. That
 would free the `DeviceObject` immediately on removal but requires
@@ -438,13 +562,20 @@ path (device already freed).
 ## Drop / Resource Release
 
 - Dropping a `ClassDevice` only decrements the `Arc` count; it performs no
-  device operations.
-- Registry removal is a `Vec::swap_remove` of the `ClassDevice` entry.
+  device operations and releases no binding.
+- Registry removal is a `Vec::swap_remove` inside `claim_retirement`, before
+  the class runtime is unpublished outside the lock.
+- A binding-owned `DeviceNode` is revoked through
+  `unregister_device_node_for_binding` before the claim, so a replacement
+  binding can register its own node only after the old owner is gone. A node
+  that is still in use defers, and the node completion callback finishes the
+  same claim.
 - When the last `ClassDevice` and `DeviceObject` references are released,
   the `DeviceObject` devres (MMIO mappings, IRQs, DMA buffers) is cleaned
   up in LIFO order.
 - The runtime trait object is dropped by its `Box<T>` when
-  `ClassDeviceInner` drops.
+  `ClassDeviceInner` drops; the class-specific `unpublish_class` hook runs
+  first, in the retirement path.
 
 ## Input readiness forwarding
 

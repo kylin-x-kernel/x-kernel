@@ -32,33 +32,60 @@ use lazyinit::LazyInit;
 
 mod generic;
 
+#[cfg(unittest)]
+#[path = "retirement_hooks.rs"]
+pub mod test_hooks;
+
 /// Re-export generic class-device primitives that are part of the public API.
 pub use self::generic::{ClassAvailabilityCallback, ClassDevice};
 use self::generic::{ClassDeviceMetadata, ClassRegistry};
 
 static ACTIVATION_BRIDGE: LazyInit<()> = LazyInit::new();
 
+fn subscribe_bridge() {
+    kdevice::subscribe_device_event_kind(
+        DeviceEventKind::Activated,
+        Arc::new(|event| {
+            let DeviceEvent::Activated { id, kind } = event else {
+                return;
+            };
+            notify_class_available(kind, id);
+        }),
+    );
+    kdevice::subscribe_device_event_kind(
+        DeviceEventKind::Removed,
+        Arc::new(|event| {
+            let DeviceEvent::Removed { id } = event else {
+                return;
+            };
+            remove_class_device(id);
+        }),
+    );
+    // A candidate binding that failed before activation may already have
+    // published a class runtime. Its terminal entry is revoked through the same
+    // exact-binding path as a published removal.
+    kdevice::subscribe_device_event_kind(
+        DeviceEventKind::BindingRetired,
+        Arc::new(|event| {
+            let DeviceEvent::BindingRetired { id } = event else {
+                return;
+            };
+            remove_class_device(id);
+        }),
+    );
+}
+
 fn ensure_event_bridge() {
-    ACTIVATION_BRIDGE.call_once(|| {
-        kdevice::subscribe_device_event_kind(
-            DeviceEventKind::Activated,
-            Arc::new(|event| {
-                let DeviceEvent::Activated { id, kind } = event else {
-                    return;
-                };
-                notify_class_available(kind, id);
-            }),
-        );
-        kdevice::subscribe_device_event_kind(
-            DeviceEventKind::Removed,
-            Arc::new(|event| {
-                let DeviceEvent::Removed { id } = event else {
-                    return;
-                };
-                remove_class_device(id);
-            }),
-        );
-    });
+    ACTIVATION_BRIDGE.call_once(subscribe_bridge);
+}
+
+/// Reinstall the production subscriptions after a test reset cleared them.
+///
+/// The one-shot `ACTIVATION_BRIDGE` initializer cannot be reset, so tests that
+/// clear subscriber buckets call this instead of hand-removing class entries.
+#[cfg(unittest)]
+pub fn reinstall_event_bridge_for_tests() {
+    subscribe_bridge();
 }
 
 macro_rules! class_registry {
@@ -73,7 +100,10 @@ macro_rules! class_registry {
         $find_fn:ident,
         $subscribe_fn:ident,
         $notify_fn:ident,
-        $remove_fn:ident
+        $remove_fn:ident,
+        $evict_fn:ident,
+        $retire_fn:ident,
+        $remove_any_fn:ident
     ) => {
         #[cfg(feature = $feature)]
         static $registry: LazyInit<SpinNoPreempt<ClassRegistry<$ty>>> = LazyInit::new();
@@ -86,11 +116,19 @@ macro_rules! class_registry {
         }
 
         /// Publish a runtime capability into its typed class registry.
+        ///
+        /// Must run in a lifecycle write context (probe, adoption or remove)
+        /// that holds the descriptor binding lock. The class handle captures
+        /// that exact binding instance, so a later replacement binding never
+        /// inherits this handle's identity.
         #[cfg(feature = $feature)]
         pub fn $publish_fn(
             parent: Arc<DeviceObject>,
             runtime: $ty,
         ) -> DriverResult<ClassDevice<$ty>> {
+            let binding = parent
+                .binding_ref_for_lifecycle_write()
+                .ok_or(DriverError::BadState)?;
             let name = runtime.name().into();
             let device_kind = runtime.device_kind();
             let irq = runtime.irq();
@@ -104,11 +142,18 @@ macro_rules! class_registry {
                 return Err(DriverError::InvalidInput);
             }
             let metadata = runtime.class_metadata();
-            let device = ClassDevice::try_new_with_class_metadata(
-                parent, runtime, name, $kind, irq, metadata,
+            let device = ClassDevice::try_new_with_binding(
+                parent, binding, runtime, name, $kind, irq, metadata,
             )?;
-            device.with(ClassRuntimeMetadata::publish_class)?;
             let id = device.id();
+
+            // Reject an in-flight retirement or a live same-ID entry before
+            // touching class resources. Terminal entries are then evicted in
+            // the fixed order node -> unpublish -> registry removal.
+            let _ = $registry_fn().lock().terminal_entries_for_retirement(id)?;
+            $evict_fn(id)?;
+
+            device.with(ClassRuntimeMetadata::publish_class)?;
             let is_active = device.is_available();
             if let Err(error) = $registry_fn().lock().publish(device.clone()) {
                 device.with(ClassRuntimeMetadata::unpublish_class);
@@ -144,6 +189,81 @@ macro_rules! class_registry {
             $registry_fn().lock().subscribe_available(callback);
         }
 
+        /// Claim the terminal class entry for `binding` and unpublish it
+        /// outside the registry lock.
+        ///
+        /// This is the single retirement path used by synchronous eviction and
+        /// by deferred node completion. Only the executor that receives
+        /// `Claimed` unpublishes; the reservation blocks same-ID publication
+        /// until `finish_retirement` clears it.
+        #[cfg(feature = $feature)]
+        fn $retire_fn(id: DeviceId, binding: kdevice::BindingRef) -> DriverResult<()> {
+            let claim = $registry_fn()
+                .lock()
+                .claim_retirement(id, core::slice::from_ref(&binding))?;
+            if matches!(&claim, crate::generic::ClaimOutcome::Claimed { .. }) {
+                #[cfg(unittest)]
+                crate::test_hooks::pause(crate::test_hooks::ClassPause::RetirementClaimed { id });
+                for device in claim.removed() {
+                    device.with(ClassRuntimeMetadata::unpublish_class);
+                }
+                #[cfg(unittest)]
+                crate::test_hooks::pause(crate::test_hooks::ClassPause::RetirementUnpublished {
+                    id,
+                });
+                $registry_fn().lock().finish_retirement(&claim);
+                Ok(())
+            } else if matches!(&claim, crate::generic::ClaimOutcome::Retiring) {
+                Err(DriverError::ResourceBusy)
+            } else {
+                Ok(())
+            }
+        }
+
+        /// Retire every terminal entry for `id`, preserving the visible order
+        /// node revocation -> unpublish -> reservation release.
+        #[cfg(feature = $feature)]
+        fn $evict_fn(id: DeviceId) -> DriverResult<()> {
+            let terminals = $registry_fn().lock().terminal_entries_for_retirement(id)?;
+            if terminals.is_empty() {
+                return Ok(());
+            }
+            for device in terminals {
+                let binding = device.binding_ref().clone();
+                let on_deferred = {
+                    let binding = binding.clone();
+                    Box::new(move || {
+                        if let Err(error) = $retire_fn(id, binding) {
+                            log::error!(
+                                "device class '{}': deferred retirement of {:?} failed: {}",
+                                $kind.as_str(),
+                                id,
+                                error,
+                            );
+                        }
+                    })
+                };
+                match kdevice::unregister_device_node_for_binding(id, &binding, on_deferred) {
+                    kdevice::NodeRemoval::Removed | kdevice::NodeRemoval::NotFound => {}
+                    kdevice::NodeRemoval::Deferred | kdevice::NodeRemoval::DeferredExisting => {
+                        return Err(DriverError::ResourceBusy);
+                    }
+                    kdevice::NodeRemoval::NotOwner => {
+                        log::error!(
+                            "device class '{}': device node for {:?} belongs to another binding",
+                            $kind.as_str(),
+                            id,
+                        );
+                        return Err(DriverError::BadState);
+                    }
+                }
+                // Retire each entry as soon as its node is gone, so a later
+                // deferred entry cannot strand the earlier terminal entries.
+                $retire_fn(id, binding)?;
+            }
+            Ok(())
+        }
+
         #[cfg(feature = $feature)]
         fn $notify_fn(id: DeviceId) {
             let (device, callbacks) = {
@@ -155,8 +275,9 @@ macro_rules! class_registry {
             };
 
             if let Some(node_class) = device.with(ClassRuntimeMetadata::device_node_class)
-                && let Err(error) = kdevice::register_device_node(
+                && let Err(error) = kdevice::register_device_node_for_binding(
                     id,
+                    device.binding_ref(),
                     node_class,
                     String::from(device.name()),
                     String::from(device.driver_name()),
@@ -182,9 +303,68 @@ macro_rules! class_registry {
 
         #[cfg(feature = $feature)]
         fn $remove_fn(id: DeviceId) {
-            let removed = { $registry_fn().lock().remove(id) };
-            if let Some(device) = removed {
-                kdevice::unregister_device_node(id);
+            if let Err(error) = $evict_fn(id) {
+                // `ResourceBusy` with a registered deferred completion is the
+                // normal node-in-flight outcome; the node finishing path owns
+                // the eventual unpublish. Only unexpected eviction failures
+                // deserve operator-visible warning.
+                if matches!(&error, DriverError::ResourceBusy) {
+                    log::debug!(
+                        "device class '{}': retirement of {:?} deferred: {}",
+                        $kind.as_str(),
+                        id,
+                        error,
+                    );
+                } else {
+                    log::warn!(
+                        "device class '{}': retired device {:?} not fully cleaned: {}",
+                        $kind.as_str(),
+                        id,
+                        error,
+                    );
+                }
+            }
+        }
+
+        /// Test cleanup: run the production retirement path, then drop any
+        /// leftover entries for `id`.
+        ///
+        /// The caller must have joined every task that could still hold a
+        /// retirement claim. Deferred node completions keep their entries (and
+        /// their registered callback); this helper does not force-clear them.
+        #[cfg(all(feature = $feature, unittest))]
+        fn $remove_any_fn(id: DeviceId) {
+            $remove_fn(id);
+            let entries = $registry_fn().lock().entries_for_tests(id);
+            let mut deferred: Vec<kdevice::BindingRef> = Vec::new();
+            for device in &entries {
+                let binding = device.binding_ref().clone();
+                let on_deferred = {
+                    let binding = binding.clone();
+                    Box::new(move || {
+                        if let Err(error) = $retire_fn(id, binding) {
+                            log::error!(
+                                "device class '{}': deferred test retirement of {:?} failed: {}",
+                                $kind.as_str(),
+                                id,
+                                error,
+                            );
+                        }
+                    })
+                };
+                match kdevice::unregister_device_node_for_binding(id, &binding, on_deferred) {
+                    kdevice::NodeRemoval::Removed | kdevice::NodeRemoval::NotFound => {}
+                    kdevice::NodeRemoval::Deferred | kdevice::NodeRemoval::DeferredExisting => {
+                        deferred.push(binding);
+                    }
+                    kdevice::NodeRemoval::NotOwner => log::error!(
+                        "device class '{}': test cleanup found a foreign node owner for {:?}",
+                        $kind.as_str(),
+                        id,
+                    ),
+                }
+            }
+            for device in $registry_fn().lock().remove_any_for_tests(id, &deferred) {
                 device.with(ClassRuntimeMetadata::unpublish_class);
             }
         }
@@ -204,7 +384,10 @@ macro_rules! class_registries {
             $find_fn:ident,
             $subscribe_fn:ident,
             $notify_fn:ident,
-            $remove_fn:ident
+            $remove_fn:ident,
+            $evict_fn:ident,
+            $retire_fn:ident,
+            $remove_any_fn:ident
         );+ $(;)?
     ) => {
         fn notify_class_available(kind: DeviceKind, id: DeviceId) {
@@ -228,12 +411,15 @@ macro_rules! class_registries {
         /// bridge.
         ///
         /// Tests that reset the device registry clear the bridge's one-shot
-        /// `Removed` subscription but cannot reset the one-shot initializer.
-        /// Those tests may call this after `remove_device_managed` to release
-        /// the class runtime explicitly.
+        /// subscriptions but cannot reset the one-shot initializer. They may
+        /// call this after `remove_device_managed`, once every task that could
+        /// still hold a retirement claim has been joined.
         #[cfg(unittest)]
         pub fn remove_class_device_for_tests(id: DeviceId) {
-            remove_class_device(id);
+            $(
+                #[cfg(feature = $feature)]
+                $remove_any_fn(id);
+            )+
         }
 
         $(
@@ -248,7 +434,10 @@ macro_rules! class_registries {
                 $find_fn,
                 $subscribe_fn,
                 $notify_fn,
-                $remove_fn
+                $remove_fn,
+                $evict_fn,
+                $retire_fn,
+                $remove_any_fn
             );
         )+
     };
@@ -679,7 +868,10 @@ class_registries! {
     find_net_device,
     subscribe_net_available,
     notify_net_available,
-    remove_net_device;
+    remove_net_device,
+    evict_net_terminal,
+    retire_net_binding,
+    remove_net_class_any;
     "block",
     BlockDeviceImpl,
     DeviceKind::Block,
@@ -690,7 +882,10 @@ class_registries! {
     find_block_device,
     subscribe_block_available,
     notify_block_available,
-    remove_block_device;
+    remove_block_device,
+    evict_block_terminal,
+    retire_block_binding,
+    remove_block_class_any;
     "char",
     CharDeviceImpl,
     DeviceKind::Char,
@@ -701,7 +896,10 @@ class_registries! {
     find_char_device,
     subscribe_char_available,
     notify_char_available,
-    remove_char_device;
+    remove_char_device,
+    evict_char_terminal,
+    retire_char_binding,
+    remove_char_class_any;
     "hwrng",
     HwrngDeviceImpl,
     DeviceKind::Hwrng,
@@ -712,7 +910,10 @@ class_registries! {
     find_hwrng_device,
     subscribe_hwrng_available,
     notify_hwrng_available,
-    remove_hwrng_device;
+    remove_hwrng_device,
+    evict_hwrng_terminal,
+    retire_hwrng_binding,
+    remove_hwrng_class_any;
     "display",
     DisplayDeviceImpl,
     DeviceKind::Display,
@@ -723,7 +924,10 @@ class_registries! {
     find_display_device,
     subscribe_display_available,
     notify_display_available,
-    remove_display_device;
+    remove_display_device,
+    evict_display_terminal,
+    retire_display_binding,
+    remove_display_class_any;
     "input",
     InputDeviceImpl,
     DeviceKind::Input,
@@ -734,7 +938,10 @@ class_registries! {
     find_input_device,
     subscribe_input_available,
     notify_input_available,
-    remove_input_device;
+    remove_input_device,
+    evict_input_terminal,
+    retire_input_binding,
+    remove_input_class_any;
     "vsock",
     VsockDeviceImpl,
     DeviceKind::Vsock,
@@ -745,7 +952,10 @@ class_registries! {
     find_vsock_device,
     subscribe_vsock_available,
     notify_vsock_available,
-    remove_vsock_device;
+    remove_vsock_device,
+    evict_vsock_terminal,
+    retire_vsock_binding,
+    remove_vsock_class_any;
     "virtio-9p",
     Virtio9pDeviceImpl,
     DeviceKind::Fs9p,
@@ -756,7 +966,10 @@ class_registries! {
     find_virtio_9p_device,
     subscribe_virtio_9p_available,
     notify_virtio_9p_available,
-    remove_virtio_9p_device;
+    remove_virtio_9p_device,
+    evict_virtio_9p_terminal,
+    retire_virtio_9p_binding,
+    remove_virtio_9p_class_any;
 }
 
 /// Shared class prelude for runtime publishers and consumers.

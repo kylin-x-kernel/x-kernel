@@ -182,8 +182,7 @@ fn static_record_maps_binding_and_relations_groups() {
     );
     device.set_parent(Some(DeviceId::new(21)));
     device.set_child_bus(Some(BusId::new(22)));
-    device.mark_matched();
-    device.bind_driver(DriverId::new(31), "grouped-driver", DeviceKind::Char);
+    device.install_bound_for_test(DriverId::new(31), "grouped-driver", DeviceKind::Char);
     device.mark_active(DeviceKind::Char);
 
     let record = device.record_snapshot();

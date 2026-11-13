@@ -41,6 +41,7 @@ fn render_node_derives_from_the_primary_index() {
     let (_first, ..) = registry
         .register(
             DeviceId::new(6),
+            None,
             DeviceNodeClass::Drm(drm_metadata()),
             String::from("first"),
             String::from("test"),
@@ -51,6 +52,7 @@ fn render_node_derives_from_the_primary_index() {
     let (node, ..) = registry
         .register(
             DeviceId::new(7),
+            None,
             DeviceNodeClass::Drm(drm_metadata()),
             String::from("display"),
             String::from("test"),
@@ -75,6 +77,7 @@ fn render_node_derives_from_the_primary_index() {
     let (input, ..) = registry
         .register(
             DeviceId::new(8),
+            None,
             DeviceNodeClass::Input(InputDeviceNodeMetadata::new(
                 String::from("keyboard"),
                 String::new(),
@@ -108,6 +111,7 @@ fn removal_keeps_the_old_index_reserved_until_callbacks_finish() {
     let (original, ..) = registry
         .register(
             DeviceId::new(0),
+            None,
             DeviceNodeClass::Drm(drm_metadata()),
             String::from("original"),
             String::from("test"),
@@ -118,22 +122,27 @@ fn removal_keeps_the_old_index_reserved_until_callbacks_finish() {
     assert!(registry.finish_publish(&original).is_none());
     assert_eq!(original.index(), 0);
 
-    let (removed, ..) = registry
-        .begin_remove(original.core_id())
+    let removal = registry
+        .begin_remove_ownerless(original.core_id())
         .expect("the original node must be removable");
+    let Some((removed, ..)) = removal else {
+        panic!("a published node must dispatch its removal synchronously");
+    };
     assert!(!removed.is_available());
     let duplicate = registry.register(
         original.core_id(),
+        None,
         DeviceNodeClass::Drm(drm_metadata()),
         String::from("duplicate"),
         String::from("test"),
         DeviceLocation::PlatformStatic { id: 0 },
-            None,
+        None,
     );
     assert_eq!(duplicate.err(), Some(DriverError::ResourceBusy));
     let (replacement, ..) = registry
         .register(
             DeviceId::new(1),
+            None,
             DeviceNodeClass::Drm(drm_metadata()),
             String::from("replacement"),
             String::from("test"),
@@ -143,10 +152,11 @@ fn removal_keeps_the_old_index_reserved_until_callbacks_finish() {
         .expect("replacement node must fit while the old index is reserved");
     assert_eq!(replacement.index(), 1);
 
-    registry.finish_remove(&removed);
+    registry.finish_remove(&removed, None);
     let (later, ..) = registry
         .register(
             DeviceId::new(2),
+            None,
             DeviceNodeClass::Drm(drm_metadata()),
             String::from("later"),
             String::from("test"),
@@ -155,6 +165,109 @@ fn removal_keeps_the_old_index_reserved_until_callbacks_finish() {
         )
         .expect("the released index must be reusable");
     assert_eq!(later.index(), 0);
+}
+
+/// A node that raced a removal while publishing sits in
+/// `RemovePending`/`Removing`; it must keep its device id and class index
+/// reserved until the add path has dispatched the removal and called
+/// `finish_remove`.
+#[def_test]
+fn pending_removal_reserves_id_and_index_until_finish_remove() {
+    let mut registry = DeviceNodeRegistry::new();
+    let (node, subscribers, publisher, is_new) = registry
+        .register(
+            DeviceId::new(0),
+            None,
+            DeviceNodeClass::Drm(drm_metadata()),
+            String::from("pending"),
+            String::from("test"),
+            DeviceLocation::PlatformStatic { id: 0 },
+            None,
+        )
+        .expect("the pending node must fit");
+    assert!(is_new);
+    assert_eq!(node.index(), 0);
+
+    // Removal arrives while the add callbacks are still running: the add path
+    // must finish the removal sequence.
+    assert!(matches!(
+        registry.begin_remove_ownerless(node.core_id()),
+        Ok(None)
+    ));
+    assert!(!node.is_available());
+
+    // `RemovePending` still owns the device id and the DRM index.
+    assert_eq!(
+        registry
+            .register(
+                DeviceId::new(0),
+                None,
+                DeviceNodeClass::Drm(drm_metadata()),
+                String::from("same-id"),
+                String::from("test"),
+                DeviceLocation::PlatformStatic { id: 0 },
+                None,
+            )
+            .err(),
+        Some(DriverError::ResourceBusy),
+        "a pending removal still reserves its device id"
+    );
+    let (other, ..) = registry
+        .register(
+            DeviceId::new(1),
+            None,
+            DeviceNodeClass::Drm(drm_metadata()),
+            String::from("other-id"),
+            String::from("test"),
+            DeviceLocation::PlatformStatic { id: 1 },
+            None,
+        )
+        .expect("an unrelated device may register while the index is reserved");
+    assert_eq!(
+        other.index(),
+        1,
+        "an unrelated device must not take the pending node's class index"
+    );
+
+    // Finish the add path: publication moves the node to `Removing`.
+    dispatch_node_added(&node, subscribers, publisher);
+    let (node, subscribers, publisher) = registry
+        .finish_publish(&node)
+        .expect("a pending removal follows add publication");
+    assert_eq!(node.index(), 0);
+
+    // Removal callbacks run before `finish_remove`; the index is still held.
+    dispatch_node_removal(&node, subscribers, publisher);
+    let (during, ..) = registry
+        .register(
+            DeviceId::new(2),
+            None,
+            DeviceNodeClass::Drm(drm_metadata()),
+            String::from("during-removal"),
+            String::from("test"),
+            DeviceLocation::PlatformStatic { id: 2 },
+            None,
+        )
+        .expect("a new device may register while removal callbacks run");
+    assert_eq!(
+        during.index(),
+        2,
+        "the old index stays reserved until finish_remove"
+    );
+
+    assert!(registry.finish_remove(&node, None).is_none());
+    let (later, ..) = registry
+        .register(
+            DeviceId::new(3),
+            None,
+            DeviceNodeClass::Drm(drm_metadata()),
+            String::from("later"),
+            String::from("test"),
+            DeviceLocation::PlatformStatic { id: 3 },
+            None,
+        )
+        .expect("the retired index must be reusable");
+    assert_eq!(later.index(), 0, "finish_remove releases the old index");
 }
 
 #[def_test]
@@ -182,6 +295,7 @@ fn removal_requested_during_add_preserves_lifecycle_order() {
     let (node, subscribers, publisher, is_new) = registry
         .register(
             DeviceId::new(0),
+            None,
             DeviceNodeClass::Drm(drm_metadata()),
             String::from("device"),
             String::from("test"),
@@ -190,14 +304,20 @@ fn removal_requested_during_add_preserves_lifecycle_order() {
         )
         .unwrap();
     assert!(is_new);
-    assert!(registry.begin_remove(node.core_id()).is_none());
+    assert!(matches!(
+        registry.begin_remove_ownerless(node.core_id()),
+        Ok(None)
+    ));
     assert!(!node.is_available());
     dispatch_node_added(&node, subscribers, publisher);
     let (node, subscribers, publisher) = registry
         .finish_publish(&node)
         .expect("pending removal must follow add publication");
     dispatch_node_removal(&node, subscribers, publisher);
-    registry.finish_remove(&node);
+    assert!(
+        registry.finish_remove(&node, None).is_none(),
+        "the ownerless pending-removal path registers no deferred retirement"
+    );
 
     let observed = observed.lock();
     assert_eq!(
@@ -209,5 +329,69 @@ fn removal_requested_during_add_preserves_lifecycle_order() {
             "publisher-remove",
             "projection-removed",
         ]
+    );
+}
+
+/// A callback that is not registered must be dropped after the node registry
+/// guard is released. Its captured probe queries the registry on drop; doing
+/// that under the guard would self-deadlock.
+#[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: DeferredNodeRetirement is the production Box<dyn FnOnce()> callback contract"
+)]
+fn unused_deferred_callback_drops_after_registry_unlock() {
+    use alloc::{boxed::Box, sync::Arc};
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropProbe {
+        dropped: Arc<AtomicBool>,
+    }
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            // Re-entering the registry would deadlock if the callback were
+            // dropped while the registry spinlock is held.
+            let _ = crate::device_nodes_snapshot();
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let device = crate::DeviceObject::new_bound_for_test(
+        DeviceId::new(0x9001),
+        driver_base::DeviceKind::Char,
+    );
+    let binding = device.binding_ref().expect("fixture has a binding");
+    let node = register_device_node_for_binding(
+        device.id(),
+        &binding,
+        DeviceNodeClass::Drm(drm_metadata()),
+        String::from("unused-callback"),
+        String::from("test"),
+        DeviceLocation::PlatformStatic { id: 0x9001 },
+        None,
+    )
+    .expect("fixture node registers");
+    let dropped = Arc::new(AtomicBool::new(false));
+    let probe = DropProbe {
+        dropped: dropped.clone(),
+    };
+    let callback: DeferredNodeRetirement = Box::new(move || {
+        drop(probe);
+    });
+
+    // Synchronous removal does not register the callback, so the captured
+    // probe must be dropped by the outer wrapper after the registry guard.
+    assert_eq!(
+        unregister_device_node_for_binding(node.core_id(), &binding, callback),
+        NodeRemoval::Removed
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the unused callback was not dropped"
     );
 }

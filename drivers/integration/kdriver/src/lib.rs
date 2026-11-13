@@ -39,10 +39,19 @@ unittest::path_mod_test!(
     block_requests_unittest,
     "../ut-tests/block_requests_unittest.rs"
 );
+// These regressions spawn real kernel tasks. They must not ride on a concrete
+// driver feature such as `block` (which happens to enable `ktask`/`ksync`) or
+// on `char` alone: the dedicated `unittest-threads` feature is the explicit
+// contract that the task-layer dependencies are present.
 unittest::path_mod_test!(
-    #[cfg(feature = "char")]
+    #[cfg(all(feature = "char", feature = "unittest-threads"))]
     mod binding_reference_class,
     "../ut-tests/binding_reference_class.rs"
+);
+unittest::path_mod_test!(
+    #[cfg(feature = "unittest-threads")]
+    mod topology_unittest,
+    "../ut-tests/topology_unittest.rs"
 );
 mod bus;
 pub mod driver_registry;
@@ -109,13 +118,14 @@ fn first_mmio_resource(
 
 #[cfg(any(feature = "ahci", feature = "sdmmc", feature = "ixgbe"))]
 fn iomap_first_mmio(
+    binding: &kdevice::BindingRef,
     device: &kdevice::DeviceObject,
     name: &'static str,
 ) -> driver_base::DriverResult<(core::ptr::NonNull<u8>, usize)> {
     use resource::DeviceResourceExt as _;
 
     let mmio = first_mmio_resource(device)?;
-    let ptr = device.devm_iomap(mmio, name)?;
+    let ptr = binding.devm_iomap(device, mmio, name)?;
     Ok((ptr, mmio.size))
 }
 

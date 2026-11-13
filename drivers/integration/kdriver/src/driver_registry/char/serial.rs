@@ -74,7 +74,11 @@ enum SerialKind {
 /// builds a fresh per-instance port tied to the device. The returned port's
 /// [`SerialRole`] encodes which case applied, so callers can dispatch on it.
 #[cfg(any(feature = "serial-pl011", feature = "serial-ns16550-mmio"))]
-fn resolve_port(device: &DeviceObject, kind: SerialKind) -> DriverResult<Arc<SerialPort>> {
+fn resolve_port(
+    binding: &kdevice::BindingRef,
+    device: &DeviceObject,
+    kind: SerialKind,
+) -> DriverResult<Arc<SerialPort>> {
     let mmio = device.first_mmio().ok_or(DriverError::InvalidInput)?;
     let paddr = PhysAddr::from_usize(mmio.base);
     let ident = SerialIdent::Mmio {
@@ -88,7 +92,7 @@ fn resolve_port(device: &DeviceObject, kind: SerialKind) -> DriverResult<Arc<Ser
         return Ok(early);
     }
 
-    let ptr = device.devm_iomap(mmio, "serial")?;
+    let ptr = binding.devm_iomap(device, mmio, "serial")?;
     let vaddr = VirtAddr::from_usize(ptr.as_ptr() as usize);
     let port = match kind {
         #[cfg(feature = "serial-pl011")]
@@ -165,7 +169,10 @@ impl DeviceDriver for Pl011SerialDriver {
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
-        let port = resolve_port(device.as_ref(), SerialKind::Pl011)?;
+        let binding = device
+            .binding_ref_for_lifecycle_write()
+            .ok_or(DriverError::BadState)?;
+        let port = resolve_port(&binding, device.as_ref(), SerialKind::Pl011)?;
         publish(device, port)
     }
 }
@@ -206,7 +213,10 @@ impl DeviceDriver for Ns16550MmioSerialDriver {
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
-        let port = resolve_port(device.as_ref(), SerialKind::Ns16550Mmio)?;
+        let binding = device
+            .binding_ref_for_lifecycle_write()
+            .ok_or(DriverError::BadState)?;
+        let port = resolve_port(&binding, device.as_ref(), SerialKind::Ns16550Mmio)?;
         publish(device, port)
     }
 }

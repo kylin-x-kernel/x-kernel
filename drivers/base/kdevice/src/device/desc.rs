@@ -265,13 +265,17 @@ pub struct DeviceDescSpec {
 
 /// Discovery-stage device description.
 ///
-/// A descriptor represents a device candidate and its resources. It is not a
-/// runtime device instance and must not carry bound-driver or lifecycle state.
-/// It is constructed only by registering a [`DeviceDescSpec`].
+/// A descriptor represents one registration and its immutable discovery facts.
+/// It is not a runtime device instance and must not carry bound-driver or
+/// lifecycle state. It is constructed only by registering a
+/// [`DeviceDescSpec`], which also creates the stable [`DeviceId`] documented by
+/// [`Self::device_id`].
 #[derive(Debug, Clone)]
 pub struct DeviceDesc {
     /// Descriptor id assigned by the backend's enumeration context.
     id: DeviceDescId,
+    /// Stable runtime object id assigned when the descriptor is registered.
+    device_id: DeviceId,
     /// Bus instance the device was discovered on.
     bus_id: BusId,
     /// Parent device (controller / bridge), if discovery named one.
@@ -305,10 +309,12 @@ impl DeviceDesc {
     /// Build a descriptor from a finalized registration specification.
     ///
     /// Device-core-internal: the only public registration path is
-    /// [`crate::device_desc_add`], which assigns the descriptor id first.
-    pub(crate) fn from_spec(id: DeviceDescId, spec: DeviceDescSpec) -> Self {
+    /// [`crate::device_desc_add`], which assigns the descriptor and stable
+    /// device id first.
+    pub(crate) fn from_spec(id: DeviceDescId, device_id: DeviceId, spec: DeviceDescSpec) -> Self {
         Self {
             id,
+            device_id,
             bus_id: spec.bus_id,
             parent: spec.parent,
             location: spec.location,
@@ -346,6 +352,15 @@ impl DeviceDesc {
         self.id
     }
 
+    /// Stable runtime object id assigned by registration.
+    ///
+    /// The descriptor is immutable after registration: every probe retry,
+    /// unbind and rebind observes this same id and the same `DeviceObject`
+    /// identity. Only unregistering the descriptor ends the registration.
+    pub const fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
+
     /// Bus instance this candidate was discovered under.
     pub const fn bus_id(&self) -> BusId {
         self.bus_id
@@ -354,14 +369,6 @@ impl DeviceDesc {
     /// Parent device the descriptor should be attached under, if any.
     pub const fn parent(&self) -> Option<DeviceId> {
         self.parent
-    }
-
-    /// Clear the recorded parent linkage.
-    ///
-    /// Driver-core-internal: used when the parent device is removed so a
-    /// later reprobe does not try to attach under a stale parent id.
-    pub(crate) fn clear_parent(&mut self) {
-        self.parent = None;
     }
 
     /// Where this candidate lives.
@@ -395,7 +402,12 @@ impl DeviceDesc {
     }
 }
 
-/// Device lifecycle state tracked by the live device object's binding runtime.
+/// Lifecycle state of one binding instance, projected by the stable object.
+///
+/// A registered object without a current binding projects as `Discovered`; an
+/// unregistered object projects as `Removed`. The two forms of `Removed` are
+/// distinguishable through [`crate::DeviceObject::is_registered`], but both
+/// mean the binding instance is terminal and must never become current again.
 ///
 /// The `#[repr(u8)]` annotation lets `BindingRuntime` store the lifecycle as
 /// an `AtomicU8` so hot read paths (`state()`, `is_removing()`) can avoid
@@ -416,8 +428,13 @@ pub enum DeviceState {
     /// Activated and available for subsystem consumption.
     Active     = 3,
     /// Removal is in progress (driver.remove and bus-type cleanup running).
+    ///
+    /// This is not terminal: a removal attempt blocked by outstanding
+    /// [`crate::DeviceUse`] admission returns to the previous state.
     Removing   = 4,
-    /// Removed (hot-unplug or driver unbind).
+    /// Current binding ended, or the whole registration was unregistered.
+    ///
+    /// For a binding instance this is terminal and irreversible.
     Removed    = 5,
 }
 

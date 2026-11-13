@@ -89,7 +89,10 @@ cfg_if! {
                 }
                 IrqEvent::HANDLED
             });
-            parent.devm_request_irq(irq, handler)
+            let binding = parent
+                .binding_ref_for_lifecycle_write()
+                .ok_or(driver_base::DriverError::BadState)?;
+            binding.devm_request_irq(parent, irq, handler)
         }
     }
 }

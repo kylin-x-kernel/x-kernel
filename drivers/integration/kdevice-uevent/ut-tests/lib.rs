@@ -70,5 +70,5 @@ fn drm_render_node_has_its_own_uevent_projection() {
         .into_bytes()
     );
 
-    kdevice::unregister_device_node(node.core_id());
+    kdevice::unregister_device_node(node.core_id()).expect("legacy node unregisters");
 }

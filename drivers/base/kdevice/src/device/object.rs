@@ -7,10 +7,11 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::ops::Deref;
 
-use driver_base::DeviceKind;
+use driver_base::{DeviceKind, DriverError, DriverResult};
 use driver_os_api::DmaInfo;
 use fwnode::FwNode;
-use kspin::SpinNoPreempt;
+use kmutex::Mutex;
+use kspin::{SpinNoPreempt, SpinNoPreemptGuard};
 
 use super::binding::{BindingRef, BindingRuntime};
 use crate::{
@@ -21,21 +22,40 @@ use crate::{
 /// Topology relations of a device object protected by a per-object lock.
 ///
 /// These are device facts managed by the lifecycle layer, not by the binding
-/// runtime: `BindingRuntime` does not own or clear them. The existing shared
-/// removal path still detaches the device from its parent and clears the
-/// parent pointer of its surviving children.
-struct DeviceRelations {
-    parent: Option<DeviceId>,
-    children: Vec<DeviceId>,
+/// runtime: `BindingRuntime` does not own or clear them. Registration creates
+/// them, unbind preserves them, and unregister conditionally removes them.
+pub(crate) struct DeviceRelations {
+    pub(crate) parent: Option<DeviceId>,
+    pub(crate) children: Vec<DeviceId>,
     /// Bus instance this device produces, if it is a bus controller / bridge.
     ///
     /// For a PCI host bridge this points at the PCI bus instance whose
     /// endpoints sit beneath the bridge in the device tree. Endpoint and
     /// leaf devices leave this `None`.
-    child_bus: Option<BusId>,
+    pub(crate) child_bus: Option<BusId>,
+}
+
+/// Whether the stable object still belongs to a registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Registration {
+    /// Test/fixture object that never had a descriptor registration.
+    Detached,
+    /// Registered by `device_desc_add`/`adopt_active_device`.
+    Registered,
+    /// Unregistered; terminal and cannot install a new binding.
+    Ended,
+}
+
+/// Replaceable current-binding slot of a stable device object.
+struct BindingSlot {
+    registration: Registration,
+    current: Option<Arc<BindingRuntime>>,
 }
 
 /// Long-lived device object owned by the driver core.
+///
+/// The object and its [`DeviceId`] survive probe failures, unbind and rebind.
+/// Discovery facts are immutable; only the current binding slot is replaced.
 pub struct DeviceObject {
     id: DeviceId,
     bus_id: BusId,
@@ -53,15 +73,16 @@ pub struct DeviceObject {
     /// Device-tree relations; owned by the lifecycle layer, not by the binding
     /// runtime.
     relations: SpinNoPreempt<DeviceRelations>,
-    /// Runtime state, in-use admission, driver metadata and cleanup batch of
-    /// this object's single driver binding.
+    /// Descriptor binding lock shared with the registry entry.
     ///
-    /// The object has no replace/reset path for this binding. It is held in
-    /// `Arc` only so read-only [`BindingRef`] handles and [`DeviceUse`] guards
-    /// can retain the exact instance they were created from; lifecycle,
-    /// usage and devres still have this single owner. See [`DeviceUse`] for
-    /// the admission contract.
-    binding: Arc<BindingRuntime>,
+    /// Lifecycle writes (install/clear binding, add cleanup, topology entry
+    /// points) verify that the caller owns this lock for a registered object.
+    binding_lock: Arc<Mutex<()>>,
+    /// Registration membership plus the current binding instance, if any.
+    ///
+    /// The slot spinlock is a leaf: it is taken after the descriptor binding
+    /// lock and never held while re-entering the registry.
+    slot: SpinNoPreempt<BindingSlot>,
 }
 
 impl DeviceObject {
@@ -83,11 +104,49 @@ impl DeviceObject {
             None,
             ResourceSet::new(),
         );
-        device.bind_driver(DriverId::new(0), "test-driver", kind);
+        device.install_bound_for_test(DriverId::new(0), "test-driver", kind);
         device
     }
 
-    /// Create a newly discovered device object.
+    /// Drive a detached fixture's current binding to `Removed`.
+    ///
+    /// Test-only: class-registry tests need a terminal binding instance without
+    /// running the whole probe/remove path. Does nothing when removal is
+    /// already in progress or a `DeviceUse` is outstanding.
+    #[cfg(unittest)]
+    pub fn force_removed_for_test(&self) {
+        if self.begin_removing() {
+            self.mark_removed();
+        }
+    }
+
+    /// Install one bound runtime on a detached fixture.
+    ///
+    /// Test-only: lets fixtures keep their custom bus/location facts and still
+    /// exercise binding lifecycle. No registration, event or hardware resource
+    /// is created. The fixture stays `Detached`, so lifecycle writes skip the
+    /// descriptor-lock ownership check.
+    #[cfg(unittest)]
+    pub fn install_bound_for_test(
+        &self,
+        driver_id: DriverId,
+        driver_name: &'static str,
+        kind: DeviceKind,
+    ) {
+        let runtime = Arc::new(BindingRuntime::new());
+        runtime.bind(driver_id, driver_name, kind);
+        *self.slot.lock() = BindingSlot {
+            registration: Registration::Detached,
+            current: Some(runtime),
+        };
+    }
+
+    /// Create a detached device fixture object.
+    ///
+    /// Test-only: this constructor has no descriptor registration and no
+    /// lifecycle write-context check. Production registration uses
+    /// [`DeviceObject::new_registered`].
+    #[cfg(unittest)]
     pub fn new(
         id: DeviceId,
         bus_id: BusId,
@@ -96,6 +155,69 @@ impl DeviceObject {
         identity: DeviceIdentity,
         transport: Option<TransportInfo>,
         resources: ResourceSet,
+    ) -> Self {
+        Self::with_binding_lock(
+            id,
+            bus_id,
+            location,
+            origin,
+            identity,
+            transport,
+            resources,
+            Arc::new(Mutex::new(())),
+            Registration::Detached,
+        )
+    }
+
+    /// Create the stable object for a new descriptor registration.
+    ///
+    /// The object starts registered (`Discovered`) with no current binding and
+    /// shares `binding_lock` with its descriptor entry.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: internal constructor mirrors the immutable discovery \
+                  facts and registration metadata; a builder would duplicate the same fields \
+                  without adding invariants, and only the descriptor registration and adoption \
+                  paths call it"
+    )]
+    pub(crate) fn new_registered(
+        id: DeviceId,
+        bus_id: BusId,
+        location: DeviceLocation,
+        origin: DiscoveryOrigin,
+        identity: DeviceIdentity,
+        transport: Option<TransportInfo>,
+        resources: ResourceSet,
+        binding_lock: Arc<Mutex<()>>,
+    ) -> Self {
+        Self::with_binding_lock(
+            id,
+            bus_id,
+            location,
+            origin,
+            identity,
+            transport,
+            resources,
+            binding_lock,
+            Registration::Registered,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Internal constructor mirrors the immutable discovery facts and registration \
+                  metadata; it is called only by the two public constructors above"
+    )]
+    fn with_binding_lock(
+        id: DeviceId,
+        bus_id: BusId,
+        location: DeviceLocation,
+        origin: DiscoveryOrigin,
+        identity: DeviceIdentity,
+        transport: Option<TransportInfo>,
+        resources: ResourceSet,
+        binding_lock: Arc<Mutex<()>>,
+        registration: Registration,
     ) -> Self {
         Self {
             id,
@@ -113,7 +235,11 @@ impl DeviceObject {
                 children: Vec::new(),
                 child_bus: None,
             }),
-            binding: Arc::new(BindingRuntime::new()),
+            binding_lock,
+            slot: SpinNoPreempt::new(BindingSlot {
+                registration,
+                current: None,
+            }),
         }
     }
 
@@ -170,7 +296,7 @@ impl DeviceObject {
     /// Attach the firmware node recorded for this device at discovery.
     ///
     /// This is a construction-time builder used by the device core when it
-    /// rebuilds a runtime object from its descriptor. There is no
+    /// builds the stable object from its descriptor. There is no
     /// post-publication replacement path. The handle is borrowed, not owned.
     pub(crate) fn with_firmware_node(mut self, node: Option<FwNode<'static>>) -> Self {
         self.firmware_node = node;
@@ -223,15 +349,28 @@ impl DeviceObject {
         })
     }
 
-    /// Current lifecycle state of the object's binding — lock-free atomic
-    /// read.
+    /// Projected lifecycle state of the registration and current binding.
     ///
-    /// The atomic is only ever written via [`DeviceState::as_u8`], so an
-    /// undecodable value is impossible barring memory corruption; such a value
-    /// is treated as [`DeviceState::Removed`] so callers stop operating on the
-    /// object instead of panicking on a hot read path.
+    /// - unregistered object -> [`DeviceState::Removed`];
+    /// - registered object with no current binding -> [`DeviceState::Discovered`];
+    /// - otherwise the current binding runtime's state.
+    ///
+    /// The projection takes the slot spinlock. It is a point-in-time view; a
+    /// concurrent install/clear may change the answer immediately afterwards.
     pub fn state(&self) -> DeviceState {
-        self.binding.state()
+        let slot = self.slot.lock();
+        match slot.registration {
+            Registration::Ended => DeviceState::Removed,
+            _ => match &slot.current {
+                Some(runtime) => runtime.state(),
+                None => DeviceState::Discovered,
+            },
+        }
+    }
+
+    /// Whether the object still belongs to a descriptor registration.
+    pub fn is_registered(&self) -> bool {
+        matches!(self.slot.lock().registration, Registration::Registered)
     }
 
     /// Current parent device ID.
@@ -241,10 +380,26 @@ impl DeviceObject {
 
     /// Set or clear this object's parent relation.
     ///
-    /// Driver-core-internal: parenting is managed by the lifecycle layer
-    /// (`attach_device_parent` / removal), never by drivers directly.
+    /// Test-only topology helper. It acquires this object's relations lock
+    /// internally; the caller must not already hold it. Production topology
+    /// code uses [`DeviceObject::with_relations_locks`] and writes the guard.
+    #[cfg(unittest)]
     pub(crate) fn set_parent(&self, parent: Option<DeviceId>) {
         self.relations.lock().parent = parent;
+    }
+
+    /// Clear the parent only if it still equals `expected`.
+    ///
+    /// This is the only safe form for delayed cleanup: it cannot erase a newer
+    /// parent relation installed after the cleanup snapshot.
+    pub(crate) fn clear_parent_if(&self, expected: DeviceId) -> bool {
+        let mut relations = self.relations.lock();
+        if relations.parent == Some(expected) {
+            relations.parent = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// Bus instance produced by this device, if any.
@@ -271,7 +426,17 @@ impl DeviceObject {
         self.relations.lock().children.clone()
     }
 
+    /// Snapshot the parent and direct children together.
+    pub(crate) fn topology_snapshot(&self) -> (Option<DeviceId>, Vec<DeviceId>) {
+        let relations = self.relations.lock();
+        (relations.parent, relations.children.clone())
+    }
+
     /// Attach a direct child to this device.
+    ///
+    /// Test-only topology helper. It acquires this object's relations lock
+    /// internally; the caller must not already hold it.
+    #[cfg(unittest)]
     pub(crate) fn attach_child(&self, child: DeviceId) {
         let mut relations = self.relations.lock();
         if !relations.children.contains(&child) {
@@ -280,6 +445,10 @@ impl DeviceObject {
     }
 
     /// Detach a direct child from this device.
+    ///
+    /// This helper acquires this object's relations lock internally; the
+    /// caller must not already hold it. Ordered multi-node writers must update
+    /// the guard directly inside [`DeviceObject::with_relations_locks`].
     pub(crate) fn detach_child(&self, child: DeviceId) {
         let mut relations = self.relations.lock();
         if let Some(pos) = relations
@@ -291,66 +460,101 @@ impl DeviceObject {
         }
     }
 
-    /// Bound driver ID, if any.
+    /// Acquire the relations locks of `nodes` once, in the given ID order.
+    ///
+    /// `nodes` must be sorted by ascending, unique [`DeviceId`]. The callback
+    /// receives one guard per node in the same order. This is the only helper
+    /// that takes more than one relations lock; taking all of them in a single
+    /// total order is what prevents parent/child role-order ABBA deadlocks.
+    pub(crate) fn with_relations_locks<R>(
+        nodes: &[Arc<DeviceObject>],
+        f: impl FnOnce(&mut [SpinNoPreemptGuard<'_, DeviceRelations>]) -> R,
+    ) -> R {
+        debug_assert!(nodes.windows(2).all(|pair| pair[0].id() < pair[1].id()));
+        let mut guards = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            guards.push(node.relations.lock());
+        }
+        #[cfg(unittest)]
+        {
+            let ids: Vec<DeviceId> = nodes.iter().map(|node| node.id()).collect();
+            crate::lifecycle::test_hooks::relations_locked(&ids);
+        }
+        f(&mut guards)
+    }
+
+    /// Bound driver ID of the current binding, if any.
     pub fn driver_id(&self) -> Option<DriverId> {
-        self.binding.driver_id()
+        self.current_runtime()
+            .and_then(|runtime| runtime.driver_id())
     }
 
-    /// Bound driver name, if any.
+    /// Bound driver name of the current binding, if any.
     pub fn driver_name(&self) -> Option<&'static str> {
-        self.binding.driver_name()
+        self.current_runtime()
+            .and_then(|runtime| runtime.driver_name())
     }
 
-    /// Device subsystem kind, if known.
+    /// Device subsystem kind of the current binding, if known.
     pub fn device_kind(&self) -> Option<DeviceKind> {
-        self.binding.device_kind()
+        self.current_runtime()
+            .and_then(|runtime| runtime.device_kind())
     }
 
-    /// Mark the device as matched.
+    /// Borrow the current runtime, if the slot has one.
+    fn current_runtime(&self) -> Option<Arc<BindingRuntime>> {
+        self.slot.lock().current.clone()
+    }
+
+    /// Mark the current binding as matched.
     ///
-    /// Driver-core-internal: call via
-    /// `lifecycle::dispatch::prepare_device_binding` while the object is still
-    /// unpublished.
+    /// Driver-core-internal: called via
+    /// `lifecycle::dispatch::prepare_device_binding` inside the lifecycle
+    /// write context.
     pub(crate) fn mark_matched(&self) {
-        self.binding.mark_matched();
+        if let Some(runtime) = self.current_runtime() {
+            runtime.mark_matched();
+        }
     }
 
-    /// Bind this device to a driver object.
+    /// Bind the current runtime to a driver object.
     ///
-    /// Driver-core-internal: call via
-    /// `lifecycle::dispatch::prepare_device_binding` while the object is still
-    /// unpublished.
+    /// Driver-core-internal: called via
+    /// `lifecycle::dispatch::prepare_device_binding` inside the lifecycle
+    /// write context.
     pub(crate) fn bind_driver(
         &self,
         driver_id: DriverId,
         driver_name: &'static str,
         kind: DeviceKind,
     ) {
-        self.binding.bind(driver_id, driver_name, kind);
+        if let Some(runtime) = self.current_runtime() {
+            runtime.bind(driver_id, driver_name, kind);
+        }
     }
 
-    /// Detach any bound driver metadata.
+    /// Detach any bound driver metadata from the current binding.
     ///
-    /// Driver-core-internal: invoked by the remove path so a device leaving
-    /// the registry never observes a `Bound`/`Active` state with no driver.
+    /// Driver-core-internal: invoked by the remove path so a retired binding
+    /// never observes `Bound`/`Active` state with stale identity metadata.
     pub(crate) fn detach_driver(&self) {
-        self.binding.detach();
+        if let Some(runtime) = self.current_runtime() {
+            runtime.detach();
+        }
     }
 
-    /// Atomically transition into `Removing`. Returns `false` if removal was
-    /// already in progress (the lifecycle state is already `Removing` or
-    /// `Removed`) or if the device still has outstanding in-use references
-    /// handed out by [`DeviceObject::try_acquire`].
+    /// Atomically transition the current binding into `Removing`.
     ///
-    /// Entering `Removing` only closes admission for new references. If
-    /// references are still outstanding, the previous state is restored and no
-    /// teardown is committed; the caller may retry later. A `true` return is
-    /// the lifecycle layer's gate for irreversible teardown.
+    /// Returns `false` when there is no current binding, removal is already in
+    /// progress, or [`crate::DeviceUse`] guards are outstanding. In every
+    /// failure case the current binding and its resources are unchanged; the
+    /// caller may retry.
     pub(crate) fn begin_removing(&self) -> bool {
-        self.binding.begin_removing()
+        self.current_runtime()
+            .is_some_and(|runtime| runtime.begin_removing())
     }
 
-    /// Whether this object is currently in the `Removing` state — lock-free.
+    /// Whether the current binding is in `Removing` — projected state read.
     pub fn is_removing(&self) -> bool {
         matches!(self.state(), DeviceState::Removing)
     }
@@ -359,86 +563,183 @@ impl DeviceObject {
     ///
     /// The returned handle snapshots the bound driver identity and keeps the
     /// binding runtime alive, but does not count as in-use admission and
-    /// never blocks removal. Returns `None` when no driver identity is
-    /// currently recorded, when the binding is already detached, or when the
-    /// capture observes `Removing`/`Removed`.
+    /// never blocks removal. Returns `None` when there is no current binding
+    /// or when capture observes `Removing`/`Removed`.
     ///
     /// The capture is not a publish permission: a successful capture does not
     /// guarantee that a later class publication happens before removal.
     pub fn binding_ref(&self) -> Option<BindingRef> {
-        self.binding.capture_ref()
+        let runtime = self.slot.lock().current.clone()?;
+        runtime.capture_ref()
     }
 
-    /// Try to acquire an in-use reference to a live device.
+    /// Capture the current binding for a lifecycle write operation.
     ///
-    /// Returns a [`DeviceUse`] guard only while the device is `Active`. While
-    /// any guard is alive the remove path (`DeviceObject::begin_removing`)
-    /// refuses to tear the device down, so callers can safely operate on it
-    /// for the lifetime of the guard. The guard retains the exact binding
-    /// instance admitted here and releases that same instance on drop.
-    pub fn try_acquire(self: &Arc<Self>) -> Option<DeviceUse> {
-        let binding = Arc::clone(&self.binding);
-        if binding.try_acquire() {
-            Some(DeviceUse {
-                device: Arc::clone(self),
-                binding,
-            })
-        } else {
-            None
+    /// Unlike [`Self::binding_ref`], a registered object only returns a handle
+    /// when the calling task holds the descriptor binding lock (probe,
+    /// adoption or remove write context). Detached fixtures skip that check.
+    /// An unregistered object always returns `None`.
+    pub fn binding_ref_for_lifecycle_write(&self) -> Option<BindingRef> {
+        let runtime = {
+            let slot = self.slot.lock();
+            match slot.registration {
+                Registration::Ended => return None,
+                Registration::Registered if !self.binding_lock.is_owned_by_current() => {
+                    return None;
+                }
+                Registration::Detached | Registration::Registered => slot.current.clone()?,
+            }
+        };
+        runtime.capture_ref()
+    }
+
+    /// Install a brand-new binding runtime in the empty slot.
+    ///
+    /// The runtime is always freshly allocated; this API cannot reuse or
+    /// reset a retired instance. The caller must hold the descriptor binding
+    /// lock, and the object must be registered with no current binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError::BadState`] when the object is not registered,
+    /// the slot is not empty, or the caller is not the descriptor-lock owner.
+    pub(crate) fn install_fresh_binding(&self) -> DriverResult<()> {
+        let runtime = Arc::new(BindingRuntime::new());
+        let mut slot = self.slot.lock();
+        if slot.registration != Registration::Registered {
+            return Err(DriverError::BadState);
+        }
+        if slot.current.is_some() || !self.binding_lock.is_owned_by_current() {
+            return Err(DriverError::BadState);
+        }
+        slot.current = Some(runtime);
+        Ok(())
+    }
+
+    /// Remove the current binding from the slot without resetting it.
+    ///
+    /// Driver-core-internal: called only after the old binding has reached its
+    /// terminal state and its cleanup/event path completed.
+    pub(crate) fn clear_binding(&self) -> Option<Arc<BindingRuntime>> {
+        self.slot.lock().current.take()
+    }
+
+    /// Terminate the registration and remove any current binding.
+    ///
+    /// Driver-core-internal: called by unregister after teardown. The object
+    /// can never install a binding again.
+    pub(crate) fn mark_unregistered(&self) {
+        let mut slot = self.slot.lock();
+        slot.registration = Registration::Ended;
+        slot.current = None;
+    }
+
+    /// Exact-instance admission used by [`BindingRef::try_acquire`].
+    pub(super) fn try_acquire_exact(
+        self: &Arc<Self>,
+        runtime: &Arc<BindingRuntime>,
+    ) -> Option<DeviceUse> {
+        let slot = self.slot.lock();
+        if !slot
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, runtime))
+        {
+            return None;
+        }
+        if !runtime.try_acquire() {
+            return None;
+        }
+        Some(DeviceUse {
+            device: Arc::clone(self),
+            binding: Arc::clone(runtime),
+        })
+    }
+
+    /// Exact-instance cleanup registration used by [`BindingRef::add_cleanup`].
+    pub(super) fn add_cleanup_exact(
+        &self,
+        runtime: &Arc<BindingRuntime>,
+        cleanup: Box<dyn FnOnce() + Send>,
+    ) -> DriverResult<()> {
+        let slot = self.slot.lock();
+        if !slot
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, runtime))
+        {
+            return Err(DriverError::BadState);
+        }
+        if slot.registration == Registration::Registered && !self.binding_lock.is_owned_by_current()
+        {
+            return Err(DriverError::BadState);
+        }
+        drop(slot);
+        if matches!(
+            runtime.state(),
+            DeviceState::Removing | DeviceState::Removed
+        ) {
+            return Err(DriverError::BadState);
+        }
+        runtime.add_cleanup(cleanup);
+        Ok(())
+    }
+
+    /// Run and drain the current binding's cleanup batch in LIFO order.
+    ///
+    /// Driver-core-internal: invoked on probe failure and by the remove path
+    /// while holding the descriptor binding lock. The callbacks are taken out
+    /// of the lock before running.
+    pub(crate) fn run_cleanups(&self) {
+        if let Some(runtime) = self.current_runtime() {
+            runtime.run_cleanups();
         }
     }
 
-    /// Register a cleanup callback bound to this device's lifetime ("devres").
+    /// Mark the current binding as active.
     ///
-    /// Callbacks run in LIFO order when the device's probe fails or when the
-    /// device is removed (see `DeviceObject::run_cleanups`). Drivers use this
-    /// to attach resource teardown to the device so neither a failed probe nor
-    /// a later removal leaks the resource. Registration order matches
-    /// acquisition order, so the most-recently acquired resource is released
-    /// first.
-    pub fn add_cleanup<F>(&self, cleanup: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.binding.add_cleanup(Box::new(cleanup));
-    }
-
-    /// Run and drain the current cleanup batch in LIFO order.
-    ///
-    /// Driver-core-internal: invoked on probe failure and by the remove path.
-    /// The callbacks are taken out of the lock before running so a callback is
-    /// free to touch the device without re-entering the devres lock. A cleanup
-    /// registered by a running callback belongs to the next batch; only a call
-    /// with no new registrations is a no-op.
-    pub(crate) fn run_cleanups(&self) {
-        self.binding.run_cleanups();
-    }
-
-    /// Mark this device as active.
-    ///
-    /// Driver-core-internal: call via `lifecycle::dispatch::activate_device`.
+    /// Driver-core-internal: called via `lifecycle::dispatch::activate_device`.
     pub(crate) fn mark_active(&self, kind: DeviceKind) {
-        self.binding.activate(kind);
+        if let Some(runtime) = self.current_runtime() {
+            runtime.activate(kind);
+        }
     }
 
-    /// Mark this device as removed.
+    /// Mark the current binding as removed (terminal).
     ///
-    /// Driver-core-internal: called by the remove path.
+    /// Driver-core-internal: called by the probe-failure and remove paths.
     pub(crate) fn mark_removed(&self) {
-        self.binding.mark_removed();
+        if let Some(runtime) = self.current_runtime() {
+            runtime.mark_removed();
+        }
     }
 
     /// Snapshot this object into metadata form.
     ///
     /// This is a **grouped snapshot**, not a single atomic snapshot of the
-    /// whole record: driver metadata is sampled as one group under
-    /// `binding.meta`, `parent`/`child_bus` as one relations group, and the
-    /// lifecycle state as a separate atomic read taken before the metadata
-    /// lock. Each group is internally consistent, but the three samples may
-    /// come from different instants. `location/origin/identity/...` are
-    /// immutable for the object's lifetime.
+    /// whole record: the slot is sampled once to project registration state
+    /// and capture the current runtime, then the runtime's driver metadata and
+    /// parent/child_bus relations are sampled separately. Each group is
+    /// internally consistent, but the groups may come from different
+    /// instants. `location/origin/identity/...` are immutable.
     pub fn record_snapshot(&self) -> DeviceRecord {
-        let binding = self.binding.snapshot();
+        let (state, binding) = {
+            let slot = self.slot.lock();
+            let state = match slot.registration {
+                Registration::Ended => DeviceState::Removed,
+                _ => DeviceState::Discovered,
+            };
+            (state, slot.current.clone())
+        };
+        let binding = match binding {
+            Some(runtime) => runtime.snapshot(),
+            None => super::binding::BindingSnapshot {
+                state,
+                driver_id: None,
+                driver_name: None,
+                device_kind: None,
+            },
+        };
         let (parent, child_bus) = {
             let relations = self.relations.lock();
             (relations.parent, relations.child_bus)
@@ -478,7 +779,7 @@ impl core::fmt::Debug for DeviceObject {
 
 /// RAII guard representing an outstanding in-use reference to a [`DeviceObject`].
 ///
-/// Created by [`DeviceObject::try_acquire`]. The device cannot be removed while
+/// Created by [`BindingRef::try_acquire`]. The device cannot be removed while
 /// any `DeviceUse` is alive; dropping the guard releases the reference and lets
 /// a pending removal proceed.
 ///

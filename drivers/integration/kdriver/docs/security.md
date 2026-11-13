@@ -284,7 +284,7 @@ Callers:
 
 ### 3. VirtIoHalImpl — Unsafe Trait Implementation
 
-Location: `src/driver_registry/virtio/glue.rs:267`
+Location: `src/driver_registry/virtio/glue.rs:279`
 
 ```rust
 unsafe impl VirtIoHal for VirtIoHalImpl { ... }

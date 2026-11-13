@@ -23,7 +23,8 @@ use crate::{
 const DRIVER_ID: DriverId = DriverId::new(43);
 const DRIVER_NAME: &str = "binding-ref-driver";
 
-fn device() -> Arc<DeviceObject> {
+/// Detached fixture with no current binding.
+fn unbound_device() -> Arc<DeviceObject> {
     Arc::new(DeviceObject::new(
         DeviceId::new(41),
         BusId::new(0),
@@ -38,8 +39,12 @@ fn device() -> Arc<DeviceObject> {
     ))
 }
 
+/// Detached fixture whose slot holds one bound, active runtime.
 fn bound_active() -> Arc<DeviceObject> {
-    let device = device();
+    let device = Arc::new(DeviceObject::new_bound_for_test(
+        DeviceId::new(41),
+        DeviceKind::Char,
+    ));
     device.bind_driver(DRIVER_ID, DRIVER_NAME, DeviceKind::Char);
     device.mark_active(DeviceKind::Char);
     device
@@ -85,7 +90,7 @@ fn binding_ref_tracks_lifecycle_without_admission() {
 
 #[def_test]
 fn binding_ref_rejects_terminal_binding() {
-    let fresh = device();
+    let fresh = unbound_device();
     assert!(fresh.binding_ref().is_none());
 
     let device = bound_active();
@@ -118,7 +123,9 @@ fn binding_ref_clones_share_runtime_state() {
 fn binding_ref_survives_busy_removal_attempt() {
     let device = bound_active();
     let binding = device.binding_ref().expect("bound device captures a ref");
-    let in_use = device.try_acquire().expect("active device admits a use");
+    let in_use = binding
+        .try_acquire(&device)
+        .expect("active device admits a use");
 
     // The outstanding DeviceUse, not the BindingRef, is what rejects removal.
     assert!(!device.begin_removing());
@@ -134,8 +141,13 @@ fn binding_ref_survives_busy_removal_attempt() {
 #[def_test]
 fn device_use_admission_is_released_once_per_guard() {
     let device = bound_active();
-    let first = device.try_acquire().expect("active device admits a use");
-    let second = device.try_acquire().expect("active device admits a use");
+    let binding = device.binding_ref().expect("bound device captures a ref");
+    let first = binding
+        .try_acquire(&device)
+        .expect("active device admits a use");
+    let second = binding
+        .try_acquire(&device)
+        .expect("active device admits a use");
 
     drop(first);
     // One guard is still alive: removal must back off and restore Active.

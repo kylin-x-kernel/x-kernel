@@ -11,7 +11,7 @@ use unittest::def_test;
 
 use super::*;
 use crate::{
-    BusTypeId, DeviceDesc, DeviceDescId, DeviceDescSpec, DeviceDriver, DeviceIdentity,
+    BusTypeId, DeviceDesc, DeviceDescId, DeviceDescSpec, DeviceDriver, DeviceId, DeviceIdentity,
     DeviceLocation, DeviceMatcher, DeviceObject, DiscoveryOrigin, MatchResult, PciIdentity,
     PlatformIdentity, ResourceSet,
 };
@@ -61,6 +61,7 @@ fn driver(bus_types: &'static [BusTypeId], matcher: MatchResult) -> FixtureDrive
 fn desc(location: DeviceLocation, identity: DeviceIdentity) -> DeviceDesc {
     DeviceDesc::from_spec(
         DeviceDescId::new(0),
+        DeviceId::new(0),
         DeviceDescSpec {
             bus_id: crate::BusId::new(0),
             parent: None,

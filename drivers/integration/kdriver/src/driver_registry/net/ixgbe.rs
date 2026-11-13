@@ -34,7 +34,10 @@ impl DeviceDriver for IxgbeDriver {
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> driver_base::DriverResult<()> {
-        let (vaddr, mmio_size) = crate::iomap_first_mmio(device.as_ref(), "ixgbe-bar")?;
+        let binding = device
+            .binding_ref_for_lifecycle_write()
+            .ok_or(DriverError::BadState)?;
+        let (vaddr, mmio_size) = crate::iomap_first_mmio(&binding, device.as_ref(), "ixgbe-bar")?;
         let vaddr = vaddr.as_ptr() as usize;
 
         match net::ixgbe::IxgbeNic::<super::ixgbe_hal::IxgbeHalImpl, 1024, 1>::init(

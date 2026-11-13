@@ -54,7 +54,10 @@ impl DeviceDriver for AhciDriver {
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> driver_base::DriverResult<()> {
-        let (vaddr, _) = crate::iomap_first_mmio(device.as_ref(), "ahci")?;
+        let binding = device
+            .binding_ref_for_lifecycle_write()
+            .ok_or(driver_base::DriverError::BadState)?;
+        let (vaddr, _) = crate::iomap_first_mmio(&binding, device.as_ref(), "ahci")?;
         let vaddr = vaddr.as_ptr() as usize;
 
         // SAFETY: `iomap_first_mmio` returned a kernel virtual address that

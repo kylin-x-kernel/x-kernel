@@ -146,6 +146,7 @@ fn event_id(event: DeviceEvent) -> DeviceId {
     match event {
         DeviceEvent::Published { id }
         | DeviceEvent::Matched { id }
+        | DeviceEvent::BindingRetired { id }
         | DeviceEvent::Removed { id } => id,
         DeviceEvent::Bound { id, .. } | DeviceEvent::Activated { id, .. } => id,
     }
@@ -176,6 +177,13 @@ fn event_position(trace: &EventTrace, kind: DeviceEventKind, id: DeviceId) -> Op
         .lock()
         .iter()
         .position(|(event_kind, event_id)| *event_kind == kind && *event_id == id)
+}
+
+fn last_event_position(trace: &EventTrace, kind: DeviceEventKind, id: DeviceId) -> Option<usize> {
+    trace
+        .lock()
+        .iter()
+        .rposition(|(event_kind, event_id)| *event_kind == kind && *event_id == id)
 }
 
 fn event_kinds(trace: &EventTrace, id: DeviceId) -> Vec<DeviceEventKind> {
@@ -461,8 +469,8 @@ fn test_waiter_binds_after_core_preparation_failure() {
     let holder_outcome = cell();
     let holder_slot = holder_outcome.clone();
 
-    // A constructs normally; C's construction is the injected core failure.
-    test_hooks::fail_device_construction_after(1);
+    // A's candidate setup succeeds; C's is the injected core failure.
+    test_hooks::fail_candidate_setup_after(1);
     let holder = ktask::spawn(move || {
         set_cell(&holder_slot, kdevice::probe_device_desc(id));
     });
@@ -616,9 +624,12 @@ fn test_remove_holds_binding_lock_through_unbind() {
         assert!(remove_paused, "remove never reached RemoveAfterRequeue");
     }
 
-    // Descriptor is back to Pending, but the old bus association is still
-    // listed and the binding lock is still held by the remover.
-    let device_missing = kdevice::find_device(old_id).is_none();
+    // The descriptor is back to Pending, but the stable object is still
+    // registered and still listed on its bus; only the binding slot is going
+    // to be cleared after this pause. The binding lock is still held by the
+    // remover.
+    let device_present = kdevice::find_device(old_id).is_some();
+    let state_during_remove = kdevice::find_device(old_id).map(|device| device.state());
     let bus_len_during_remove = bus.devices_snapshot().len();
 
     let binder_outcome = cell();
@@ -627,7 +638,7 @@ fn test_remove_holds_binding_lock_through_unbind() {
         set_cell(&binder_slot, kdevice::probe_device_desc(target).unwrap());
     });
     let binder_blocked = wait_until_blocked(&binder);
-    let record_absent = bound_record(&bus, &desc).is_none();
+    let record_still_stable = bound_record(&bus, &desc).map(|record| record.id);
 
     release.release();
     let remover_code = reap(&remover);
@@ -639,24 +650,28 @@ fn test_remove_holds_binding_lock_through_unbind() {
         Ok(()),
         "binder was not parked on the remove-held binding lock: {binder_blocked:?}"
     );
-    assert!(device_missing);
+    assert!(device_present);
+    // Removal is committed (`begin_removing`), so the current binding still in
+    // the slot projects `Removing` until the requeue completes.
+    assert_eq!(state_during_remove, Some(DeviceState::Removing));
     assert_eq!(bus_len_during_remove, 1);
-    assert!(record_absent);
+    assert_eq!(record_still_stable, Some(old_id));
     assert_eq!(remover_code, Ok(0));
     assert_eq!(binder_code, Ok(0));
     assert_eq!(get_cell(&remove_result), Some(Ok(())));
     assert_eq!(get_cell(&binder_outcome), Some(ProbeOutcome::Activated));
     let new_id = bound_record(&bus, &desc).unwrap().id;
-    assert_ne!(new_id, old_id);
+    // Rebind reuses the same stable object and identity.
+    assert_eq!(new_id, old_id);
     assert_eq!(bus.devices_snapshot().len(), 1);
     assert_eq!(bus.devices_snapshot()[0].id(), new_id);
-    let removed_at = event_position(&trace, DeviceEventKind::Removed, old_id)
-        .expect("old device must report Removed");
-    let activated_at = event_position(&trace, DeviceEventKind::Activated, new_id)
-        .expect("new device must report Activated");
+    let removed_at = last_event_position(&trace, DeviceEventKind::Removed, old_id)
+        .expect("unbind must report Removed");
+    let activated_at = last_event_position(&trace, DeviceEventKind::Activated, old_id)
+        .expect("rebind must report Activated");
     assert!(
         removed_at < activated_at,
-        "old device must be removed before the new identity is activated"
+        "the replacement binding must activate only after the old binding retired"
     );
 }
 
@@ -719,7 +734,9 @@ fn test_remove_waits_for_inflight_probe() {
     assert_eq!(remover_code, Ok(0));
     assert_eq!(get_cell(&probe_outcome), Some(ProbeOutcome::Skipped));
     assert_eq!(get_cell(&remove_result), Some(Ok(())));
-    assert!(kdevice::find_device(device_id).is_none());
+    let retained = kdevice::find_device(device_id).expect("unbind keeps the stable object");
+    assert_eq!(retained.state(), DeviceState::Discovered);
+    assert!(retained.binding_ref().is_none());
     assert!(bus.devices_snapshot().is_empty());
 }
 
@@ -802,7 +819,9 @@ fn test_remove_waits_for_adoption_publish_window() {
     assert_eq!(remover_code, Ok(0));
     assert_eq!(get_cell(&adopted_id), Some(device_id));
     assert_eq!(get_cell(&remove_result), Some(Ok(())));
-    assert!(kdevice::find_device(device_id).is_none());
+    let retained = kdevice::find_device(device_id).expect("unbind keeps the adopted object");
+    assert_eq!(retained.state(), DeviceState::Discovered);
+    assert!(retained.binding_ref().is_none());
     let activated_at = event_position(&trace, DeviceEventKind::Activated, device_id)
         .expect("adopted device must report Activated");
     let removed_at = event_position(&trace, DeviceEventKind::Removed, device_id)
@@ -1149,9 +1168,14 @@ fn test_unbind_then_unregister_tears_down_once() {
     let cleanup_count = cleanups.clone();
     kdevice::register_driver_object(driver("unbind-first", "unbind-first", move |device| {
         let cleanup_count = cleanup_count.clone();
-        device.add_cleanup(move || {
-            cleanup_count.fetch_add(1, Ordering::SeqCst);
-        });
+        let binding = device
+            .binding_ref_for_lifecycle_write()
+            .expect("probe holds the binding write context");
+        binding
+            .add_cleanup(&device, move || {
+                cleanup_count.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("probe may register cleanup");
         Ok(())
     }));
 
@@ -1226,9 +1250,14 @@ fn test_unregister_then_unbind_returns_busy_without_second_teardown() {
     let cleanup_count = cleanups.clone();
     kdevice::register_driver_object(driver("unreg-first", "unreg-first", move |device| {
         let cleanup_count = cleanup_count.clone();
-        device.add_cleanup(move || {
-            cleanup_count.fetch_add(1, Ordering::SeqCst);
-        });
+        let binding = device
+            .binding_ref_for_lifecycle_write()
+            .expect("probe holds the binding write context");
+        binding
+            .add_cleanup(&device, move || {
+                cleanup_count.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("probe may register cleanup");
         Ok(())
     }));
 
@@ -1307,9 +1336,14 @@ fn test_double_unregister_tears_down_once() {
     let cleanup_count = cleanups.clone();
     kdevice::register_driver_object(driver("double-unreg", "double-unreg", move |device| {
         let cleanup_count = cleanup_count.clone();
-        device.add_cleanup(move || {
-            cleanup_count.fetch_add(1, Ordering::SeqCst);
-        });
+        let binding = device
+            .binding_ref_for_lifecycle_write()
+            .expect("probe holds the binding write context");
+        binding
+            .add_cleanup(&device, move || {
+                cleanup_count.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("probe may register cleanup");
         Ok(())
     }));
 

@@ -42,6 +42,17 @@ pub enum DeviceEvent {
         /// Device that was removed.
         id: DeviceId,
     },
+    /// One binding instance is terminal and has been (or is being) retired.
+    ///
+    /// This is instance-scoped, not registration-scoped: the same `DeviceId`
+    /// may emit it once per failed candidate. An unbind or unregister emits
+    /// `Removed` instead. Consumers holding handles captured from the old
+    /// binding must revoke them; the stable object itself may still be
+    /// registered and may later bind again.
+    BindingRetired {
+        /// Device whose binding instance retired.
+        id: DeviceId,
+    },
 }
 
 /// Stable discriminator for lifecycle event subscriptions.
@@ -57,11 +68,13 @@ pub enum DeviceEventKind {
     Activated,
     /// Subscription bucket for [`DeviceEvent::Removed`].
     Removed,
+    /// Subscription bucket for [`DeviceEvent::BindingRetired`].
+    BindingRetired,
 }
 
 impl DeviceEventKind {
     /// Number of distinct lifecycle event kinds.
-    pub(crate) const COUNT: usize = 5;
+    pub(crate) const COUNT: usize = 6;
 
     /// Dense bucket index for this kind, in `0..COUNT`.
     pub(crate) const fn index(self) -> usize {
@@ -71,6 +84,7 @@ impl DeviceEventKind {
             Self::Bound => 2,
             Self::Activated => 3,
             Self::Removed => 4,
+            Self::BindingRetired => 5,
         }
     }
 }
@@ -84,6 +98,7 @@ impl DeviceEvent {
             Self::Bound { .. } => DeviceEventKind::Bound,
             Self::Activated { .. } => DeviceEventKind::Activated,
             Self::Removed { .. } => DeviceEventKind::Removed,
+            Self::BindingRetired { .. } => DeviceEventKind::BindingRetired,
         }
     }
 }

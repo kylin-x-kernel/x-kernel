@@ -2,7 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Driver-core lifecycle orchestration over discovery descriptors and live objects.
+//! Driver-core lifecycle orchestration over discovery descriptors and stable
+//! device objects.
 
 pub(crate) mod dispatch;
 pub(crate) mod event;
@@ -21,9 +22,13 @@ use self::{
     event::DeviceEvent,
 };
 use crate::{
-    BusId, BusInstance, BusTypeId, BusTypeObject, DeviceDesc, DeviceDescId, DeviceDescSpec,
-    DeviceId, DeviceIdentity, DeviceLocation, DeviceObject, DiscoveryOrigin, DriverObject,
-    MatchResult, ResourceSet, device_registry, init_device_registry, registry::DeviceDescState,
+    BindingRef, BusId, BusInstance, BusTypeId, BusTypeObject, DeviceDesc, DeviceDescId,
+    DeviceDescSpec, DeviceId, DeviceIdentity, DeviceLocation, DeviceObject, DeviceState,
+    DiscoveryOrigin, DriverObject, MatchResult, ResourceSet, device_registry, init_device_registry,
+    registry::DeviceDescState,
+    topology::relations::{
+        attach_device_parent_locked, clear_registration_topology, detach_device_parent_locked,
+    },
 };
 
 /// Description of a boot/runtime handoff object that is already active before
@@ -105,10 +110,11 @@ enum ProbeCandidates {
 ///
 /// The caller must hold the binding lock. `Some` carries the `Pending`
 /// descriptor the caller may claim and probe; `None` means the descriptor was
-/// unregistered while the caller waited or is bound to a device that is
+/// unregistered while the caller waited or is bound to a stable object that is
 /// already terminal. `Probing` here means the state invariant was broken
-/// (only the lock holder may set it), and a `Bound` device that is not
-/// terminal means publication did not finish before the lock was released.
+/// (only the lock holder may set it), and a `Bound` descriptor whose object is
+/// neither terminal nor registered means publication did not finish before the
+/// lock was released.
 fn inspect_locked_desc(id: DeviceDescId) -> Result<Option<DeviceDesc>, DriverError> {
     let (state, desc, device) = {
         let index = device_registry();
@@ -123,7 +129,7 @@ fn inspect_locked_desc(id: DeviceDescId) -> Result<Option<DeviceDesc>, DriverErr
             _ => None,
         };
         let device = match state {
-            DeviceDescState::Bound(device_id) => index.find_device(device_id),
+            DeviceDescState::Bound => index.find_device_for_desc(id),
             _ => None,
         };
         (state, desc, device)
@@ -132,13 +138,11 @@ fn inspect_locked_desc(id: DeviceDescId) -> Result<Option<DeviceDesc>, DriverErr
     match state {
         DeviceDescState::Pending => desc.map(Some).ok_or(DriverError::InvalidInput),
         DeviceDescState::Probing => Err(DriverError::BadState),
-        DeviceDescState::Bound(_) => match device {
+        DeviceDescState::Bound => match device {
             Some(device)
                 if matches!(
                     device.state(),
-                    crate::DeviceState::Active
-                        | crate::DeviceState::Removing
-                        | crate::DeviceState::Removed
+                    DeviceState::Active | DeviceState::Removing | DeviceState::Removed
                 ) =>
             {
                 Ok(None)
@@ -284,65 +288,89 @@ pub fn register_driver_object(ops: Arc<dyn crate::DeviceDriver>) -> Arc<DriverOb
     driver
 }
 
-/// Register a discovery-stage device descriptor without creating a runtime object.
+/// Register a discovery-stage device and create its stable object.
 ///
-/// The specification is consumed as one finalized discovery result: the device
-/// core assigns the descriptor id and stores its own copy in `Pending` state.
-/// That copy is the only source for rebuilding runtime objects, so a retried
-/// probe keeps the same association. `firmware_node: None` records that
-/// discovery established no association; it does not make the device invalid.
+/// The specification is consumed as one finalized discovery result. The device
+/// core assigns the descriptor id and a stable [`DeviceId`], stores its own
+/// immutable descriptor copy in `Pending` state, and publishes the stable
+/// `DeviceObject` in `Discovered` state in the same registry critical section.
+/// From registration onward that object identity survives probe failures,
+/// unbind and rebind; only unregistering the descriptor ends it.
+///
+/// The new descriptor's binding lock is acquired with `try_lock` before the
+/// object is published. This function may run under the enumeration
+/// `SpinNoPreempt` lock, so it never blocks and never sleeps. The guard covers
+/// the initial parent attach/recheck, so no probe can observe a half-linked
+/// topology.
 pub fn device_desc_add(spec: DeviceDescSpec) -> Result<DeviceDesc, DriverError> {
     init_device_registry();
 
-    // The binding lock belongs to the descriptor entry, but it must be
-    // constructed before entering the registry lock and must not be acquired
-    // there.
-    let binding = Arc::new(Mutex::new(()));
-    let desc = {
+    // Validate the bus and allocate both ids under the registry lock; construct
+    // the (heap-allocating) descriptor, object and lock outside it.
+    let (desc_id, device_id) = {
         let mut index = device_registry();
         if index.find_bus(spec.bus_id).is_none() {
             return Err(DriverError::InvalidInput);
         }
-        let id = index.alloc_device_desc_id();
-        let desc = DeviceDesc::from_spec(id, spec);
-        index.add_device_desc_with_binding(desc.clone(), binding);
-        desc
+        (index.alloc_device_desc_id(), index.alloc_device_id())
     };
 
-    Ok(desc)
-}
-
-fn new_unpublished_device_from_desc(desc: &DeviceDesc) -> Result<Arc<DeviceObject>, DriverError> {
-    #[cfg(unittest)]
-    if test_hooks::take_device_construction_failure() {
-        return Err(DriverError::NoMemory);
-    }
-    // Clone the descriptor's resources before taking the registry lock so the
-    // (potentially heap-allocating) snapshot does not run under the lock.
+    let binding = Arc::new(Mutex::new(()));
+    let desc = DeviceDesc::from_spec(desc_id, device_id, spec);
     let resources = desc.resources_snapshot();
-    let id = {
-        let mut index = device_registry();
-        if index.find_bus(desc.bus_id()).is_none() {
-            return Err(DriverError::InvalidInput);
-        }
-        index.alloc_device_id()
-    };
-    // Allocate the device object outside the registry lock.
     let device = Arc::new(
-        DeviceObject::new(
-            id,
+        DeviceObject::new_registered(
+            device_id,
             desc.bus_id(),
             desc.location(),
             desc.origin(),
             desc.identity(),
             desc.transport(),
             resources,
+            binding.clone(),
         )
         .with_dma(desc.dma())
         .with_intx_route(desc.intx_route())
         .with_firmware_node(desc.firmware_node()),
     );
-    Ok(device)
+
+    // No published handle exists for this lock yet, so `try_lock` cannot
+    // contend with a probe/remove. The guard is deliberately held through
+    // publication and the initial topology link/recheck.
+    let _binding_guard = binding.try_lock().ok_or(DriverError::BadState)?;
+
+    #[cfg(unittest)]
+    test_hooks::pause(test_hooks::BindingPause::RegistrationHoldingLock { desc_id });
+
+    {
+        let mut index = device_registry();
+        if index.find_bus(desc.bus_id()).is_none() {
+            return Err(DriverError::InvalidInput);
+        }
+        if !index.add_device_desc_with_binding(desc.clone(), binding.clone()) {
+            return Err(DriverError::BadState);
+        }
+        index.add_device(device.clone());
+    }
+
+    // "Link first, recheck membership" (§7.1): a concurrent unregister either
+    // sees this link while snapshotting its children, or is detected by the
+    // membership recheck and the link is conditionally undone.
+    if let Some(parent_id) = desc.parent() {
+        // The registry guard must be released before the topology helper takes
+        // the registry again for its own snapshot.
+        let parent_registered = device_registry().find_device(parent_id).is_some();
+        if parent_registered && let Err(error) = attach_device_parent_locked(parent_id, device_id) {
+            log::warn!(
+                "failed to attach device {:?} under parent {:?} at registration: {:?}",
+                device_id,
+                parent_id,
+                error,
+            );
+        }
+    }
+
+    Ok(desc)
 }
 
 fn publish_desc_device(
@@ -354,8 +382,7 @@ fn publish_desc_device(
     // guard, drop the guard, then mutate the bus instance object outside.
     let bus_instance = {
         let mut index = device_registry();
-        index.add_device(device.clone());
-        index.bind_device_desc(desc_id, device.id());
+        index.bind_device_desc(desc_id);
         index.find_bus(device.bus_id())
     };
     if let Some(bus) = bus_instance {
@@ -369,12 +396,13 @@ fn requeue_desc(desc_id: DeviceDescId) {
 
 /// Run one binding round with the descriptor's binding lock already held.
 ///
-/// Candidates are evaluated in snapshot order. Each matching driver gets one
-/// fresh unpublished `DeviceObject`; a failed probe is fully rolled back before
-/// the next candidate starts, and the first success stops the round. Ordinary
-/// probe failures are reported as `Unclaimed` (logged and counted), never as a
-/// core error; core preparation failures requeue the descriptor and return
-/// `Err`.
+/// The stable object already exists. Each matching driver gets a brand-new
+/// binding runtime installed into the object's empty slot; a failed candidate
+/// terminates that runtime, runs its cleanup batch and emits
+/// `BindingRetired`, then clears the slot without discarding the object. The
+/// first success stops the round. Ordinary probe failures are reported as
+/// `Unclaimed` (logged and counted), never as a core error; core setup
+/// failures requeue the descriptor and return `Err`.
 fn probe_desc_round(
     desc: DeviceDesc,
     candidates: ProbeCandidates,
@@ -382,6 +410,11 @@ fn probe_desc_round(
     let Some(bus_type) = bus_type_for_desc(&desc) else {
         requeue_desc(desc.id());
         return Err(DriverError::InvalidInput);
+    };
+
+    let Some(device) = device_registry().find_device(desc.device_id()) else {
+        requeue_desc(desc.id());
+        return Err(DriverError::BadState);
     };
 
     let drivers = match candidates {
@@ -399,13 +432,18 @@ fn probe_desc_round(
             continue;
         }
 
-        let device = match new_unpublished_device_from_desc(&desc) {
-            Ok(device) => device,
-            Err(error) => {
-                requeue_desc(desc.id());
-                return Err(error);
-            }
-        };
+        #[cfg(unittest)]
+        if test_hooks::take_candidate_setup_failure() {
+            requeue_desc(desc.id());
+            return Err(DriverError::NoMemory);
+        }
+
+        // A brand-new runtime for every candidate; the object is never reused
+        // with a reset runtime.
+        if let Err(error) = device.install_fresh_binding() {
+            requeue_desc(desc.id());
+            return Err(error);
+        }
 
         // The driver's probe may construct class-layer state that reads the
         // binding metadata, but subscribers must not see it before the
@@ -429,15 +467,25 @@ fn probe_desc_round(
         match ops.probe_device(device.clone()) {
             Ok(()) => {
                 publish_desc_device(desc.id(), device.clone(), driver.clone());
-                if let Some(parent_id) = desc.parent()
-                    && let Err(err) = attach_device_parent(parent_id, device.id())
+                // Compatible late-parent attach: registration may have run
+                // before the parent was registered. Existing topology is never
+                // rebuilt or cleared here.
+                if device.parent().is_none()
+                    && let Some(parent_id) = desc.parent()
                 {
-                    log::warn!(
-                        "failed to attach device {:?} under parent {:?}: {:?}",
-                        device.id(),
-                        parent_id,
-                        err,
-                    );
+                    // Release the registry guard before the topology helper
+                    // takes it again for its own snapshot.
+                    let parent_registered = device_registry().find_device(parent_id).is_some();
+                    if parent_registered
+                        && let Err(err) = attach_device_parent_locked(parent_id, device.id())
+                    {
+                        log::warn!(
+                            "failed to attach device {:?} under parent {:?}: {:?}",
+                            device.id(),
+                            parent_id,
+                            err,
+                        );
+                    }
                 }
                 driver.attach_device(device.id());
                 announce_device_matched(device.as_ref());
@@ -457,12 +505,14 @@ fn probe_desc_round(
                 if let Some(bus) = &bus_instance {
                     bus.record_probe_failure();
                 }
-                // Roll this candidate back completely before trying the next
-                // one. No event is emitted: the object was never published, so
-                // subscribers must never observe this DeviceId.
-                device.run_cleanups();
+                // Retire this binding instance completely before the next
+                // candidate: terminal state, cleanup batch, instance-scoped
+                // event, then clear the slot. The stable object stays.
                 device.detach_driver();
                 device.mark_removed();
+                device.run_cleanups();
+                dispatch_device_event(DeviceEvent::BindingRetired { id: device.id() });
+                device.clear_binding();
             }
         }
     }
@@ -506,14 +556,14 @@ pub fn probe_device_desc(id: DeviceDescId) -> Result<ProbeOutcome, DriverError> 
 /// Adopt a device that boot code already initialized, skipping descriptor match/probe.
 ///
 /// This path is for explicit boot/runtime handoff contracts. It creates a
-/// device object, registers it in the driver-core registry, and records the
-/// driver binding metadata. It drives the same canonical lifecycle event
-/// sequence as the probe path (`Matched` -> `Bound` -> `Published` ->
-/// `Activated`) so that subscribers see adopted devices (e.g. PCI host
-/// bridges, PCI-PCI bridges) the same way they see probed ones; when adoption
-/// runs before any subscriber is registered the dispatches are simply no-ops.
-/// The caller is responsible for completing subsystem-level registration
-/// (e.g. `publish_char`).
+/// stable device object, registers it in the driver-core registry, installs one
+/// fresh binding runtime and records the driver binding metadata. It drives the
+/// same canonical lifecycle event sequence as the probe path (`Matched` ->
+/// `Bound` -> `Published` -> `Activated`) so that subscribers see adopted
+/// devices (e.g. PCI host bridges, PCI-PCI bridges) the same way they see
+/// probed ones; when adoption runs before any subscriber is registered the
+/// dispatches are simply no-ops. The caller is responsible for completing
+/// subsystem-level registration (e.g. `publish_char`).
 ///
 /// Publication holds the new descriptor's binding lock from before the device
 /// is visible until `Activated`. Because adoption also runs under the bus
@@ -527,22 +577,26 @@ pub fn adopt_active_device(
 
     let driver = adoption.driver;
     // Validate the target bus and mint the IDs under the registry lock, then
-    // drop it before constructing the (heap-allocating) descriptor and device
-    // objects so allocation does not run under the lock.
-    let (bus_instance, desc_id, id) = {
+    // drop it before constructing the (heap-allocating) descriptor, lock and
+    // object so allocation does not run under the lock.
+    let (bus_instance, desc_id, device_id) = {
         let mut index = device_registry();
         let bus_instance = index.find_bus(adoption.bus_id);
         let bus = bus_instance.as_ref().ok_or(DriverError::InvalidInput)?;
         if !driver.bus_types().contains(&bus.bus_type()) {
             return Err(DriverError::InvalidInput);
         }
-        let desc_id = index.alloc_device_desc_id();
-        let id = index.alloc_device_id();
-        (bus_instance, desc_id, id)
+        (
+            bus_instance,
+            index.alloc_device_desc_id(),
+            index.alloc_device_id(),
+        )
     };
 
+    let binding = Arc::new(Mutex::new(()));
     let desc = DeviceDesc::from_spec(
         desc_id,
+        device_id,
         DeviceDescSpec {
             bus_id: adoption.bus_id,
             parent: adoption.parent,
@@ -557,22 +611,29 @@ pub fn adopt_active_device(
         },
     );
     let device = Arc::new(
-        DeviceObject::new(
-            id,
+        DeviceObject::new_registered(
+            device_id,
             adoption.bus_id,
             adoption.location,
             adoption.origin,
             adoption.identity,
             adoption.transport,
             adoption.resources,
+            binding.clone(),
         )
         .with_dma(adoption.dma)
         .with_firmware_node(None),
     );
 
+    // The entry is not published yet, so nobody else can hold or contend for
+    // this lock. `try_lock` keeps adoption non-blocking while it runs inside
+    // the bus-manager spinlock; failure is a broken invariant, not a race.
+    let _binding_guard = binding.try_lock().ok_or(DriverError::BadState)?;
+
     // Prepare the binding metadata before the object becomes visible. From
     // this point on a concurrent remove can safely inspect `driver_id()` once
     // it finds the device on the bus.
+    device.install_fresh_binding()?;
     prepare_device_binding(
         device.as_ref(),
         driver.id(),
@@ -580,22 +641,13 @@ pub fn adopt_active_device(
         driver.device_kind(),
     );
 
-    // The entry is not published yet, so nobody else can hold or contend for
-    // this lock. `try_lock` keeps adoption non-blocking while it runs inside
-    // the bus-manager spinlock; failure is a broken invariant, not a race.
-    let binding = Arc::new(Mutex::new(()));
-    let Some(_guard) = binding.try_lock() else {
-        return Err(DriverError::BadState);
-    };
-
     {
         let mut index = device_registry();
-        // The registry gets its own handle to the same mutex; the local `Arc`
-        // must stay alive because `_guard` borrows it through the end of the
-        // publication window.
-        index.add_device_desc_with_binding(desc, binding.clone());
+        if !index.add_device_desc_with_binding(desc, binding.clone()) {
+            return Err(DriverError::BadState);
+        }
         index.add_device(device.clone());
-        index.bind_device_desc(desc_id, device.id());
+        index.bind_device_desc(desc_id);
     }
 
     // Bus instance must be mutated outside the registry guard per the
@@ -604,15 +656,17 @@ pub fn adopt_active_device(
         bus.attach_bound_device(device.clone(), driver.clone());
     }
 
-    if let Some(parent_id) = adoption.parent
-        && let Err(err) = attach_device_parent(parent_id, device.id())
-    {
-        log::warn!(
-            "failed to attach adopted device {:?} under parent {:?}: {:?}",
-            device.id(),
-            parent_id,
-            err,
-        );
+    if let Some(parent_id) = adoption.parent {
+        // Release the registry guard before the topology helper takes it again.
+        let parent_registered = device_registry().find_device(parent_id).is_some();
+        if parent_registered && let Err(err) = attach_device_parent_locked(parent_id, device.id()) {
+            log::warn!(
+                "failed to attach adopted device {:?} under parent {:?}: {:?}",
+                device.id(),
+                parent_id,
+                err,
+            );
+        }
     }
     driver.attach_device(device.id());
 
@@ -632,42 +686,49 @@ pub fn adopt_active_device(
     Ok(device)
 }
 
-/// Attach a child device under a parent device object.
-pub fn attach_device_parent(parent_id: DeviceId, child_id: DeviceId) -> Result<(), DriverError> {
-    let (parent, child) = {
-        let index = device_registry();
-        let parent = index
-            .find_device(parent_id)
-            .ok_or(DriverError::InvalidInput)?;
-        let child = index
-            .find_device(child_id)
-            .ok_or(DriverError::InvalidInput)?;
-        (parent, child)
-    };
+/// Look up the descriptor binding lock that serializes writes for `device_id`.
+fn binding_for_device(device_id: DeviceId) -> Result<Arc<Mutex<()>>, DriverError> {
+    let index = device_registry();
+    if index.find_device(device_id).is_none() {
+        return Err(DriverError::InvalidInput);
+    }
+    let desc = index
+        .descriptor_for_device(device_id)
+        .ok_or(DriverError::BadState)?;
+    index
+        .binding_for_desc(desc.id())
+        .ok_or(DriverError::BadState)
+}
 
-    parent.attach_child(child_id);
-    child.set_parent(Some(parent_id));
-    Ok(())
+/// Attach a child device under a parent device object.
+///
+/// Serialized by the child descriptor binding lock (or the enclosing write
+/// context when already held). All touched relations are locked in ascending
+/// `DeviceId` order; self-parent and cycles are rejected with
+/// `InvalidInput`. An existing parent is atomically replaced.
+pub fn attach_device_parent(parent_id: DeviceId, child_id: DeviceId) -> Result<(), DriverError> {
+    if parent_id == child_id {
+        return Err(DriverError::InvalidInput);
+    }
+    let binding = binding_for_device(child_id)?;
+    if binding.is_owned_by_current() {
+        return attach_device_parent_locked(parent_id, child_id);
+    }
+    let _guard = binding.lock();
+    attach_device_parent_locked(parent_id, child_id)
 }
 
 /// Detach a child device from its current parent.
+///
+/// Serialized by the child descriptor binding lock. Only the relation that is
+/// still equal to the observed parent is cleared.
 pub fn detach_device_parent(child_id: DeviceId) -> Result<(), DriverError> {
-    let (parent, child) = {
-        let index = device_registry();
-        let child = index
-            .find_device(child_id)
-            .ok_or(DriverError::InvalidInput)?;
-        let parent = child
-            .parent()
-            .and_then(|parent_id| index.find_device(parent_id));
-        (parent, child)
-    };
-
-    if let Some(parent) = parent {
-        parent.detach_child(child_id);
+    let binding = binding_for_device(child_id)?;
+    if binding.is_owned_by_current() {
+        return detach_device_parent_locked(child_id);
     }
-    child.set_parent(None);
-    Ok(())
+    let _guard = binding.lock();
+    detach_device_parent_locked(child_id)
 }
 
 /// What happens to the discovery descriptor when its bound device is removed.
@@ -679,29 +740,30 @@ enum DescDisposition {
     Delete,
 }
 
-/// Remove a device from the object index and finish unbinding its relations.
+/// Remove or requeue a device after the binding has been committed for removal.
 ///
 /// The caller holds the descriptor's binding lock and must have committed the
-/// removal with `DeviceObject::begin_removing`. The descriptor is requeued or
-/// deleted here according to `disposition`, but the binding lock is still held
-/// while the old device's bus/driver/parent relations are torn down and
-/// `Removed` is dispatched, so a waiter cannot start a new binding against a
-/// half-cleaned old identity.
+/// removal with `DeviceObject::begin_removing`.
 ///
-/// `Delete` reports `BadState` if the descriptor was not in the expected
-/// `Bound(id)` state when the index was updated; the teardown itself is still
-/// completed because `begin_removing` is irreversible. `Requeue` keeps the
-/// historical log-and-continue behavior.
+/// `Requeue` keeps the stable object and its topology in the registry, restores
+/// the descriptor to `Pending`, dispatches `Removed` while the slot still holds
+/// the terminal binding, and only then clears the slot (`Discovered`).
+///
+/// `Delete` removes the descriptor and the device index entry together,
+/// terminates the registration, conditionally clears the object's topology
+/// relations, and dispatches exactly one `Removed`.
 fn remove_device_from_index(
     desc_id: DeviceDescId,
     id: DeviceId,
     disposition: DescDisposition,
 ) -> Result<(), DriverError> {
     // Lock-order discipline: take Arc snapshots under the registry guard,
-    // drop the guard, then mutate per-object state.
+    // drop the guard, then mutate per-object state. The topology snapshot is
+    // taken in the same critical section as the index deletion so the
+    // registration path's "link then recheck" is mutually visible with it.
     let (device, bus, driver, parent, children, disposition_applied) = {
         let mut index = device_registry();
-        let Some(device) = index.remove_device(id) else {
+        let Some(device) = index.find_device(id) else {
             // Unreachable for both callers: they rechecked under the binding
             // lock immediately before committing the removal.
             return match disposition {
@@ -710,13 +772,18 @@ fn remove_device_from_index(
             };
         };
         let bus = index.find_bus(device.bus_id());
-        // Recheck under the lock: never touch a descriptor that was rebound
-        // to a newer device while this removal waited for the lock.
+        let driver = device
+            .driver_id()
+            .and_then(|driver_id| index.find_driver(driver_id));
+        let (parent, children) = device.topology_snapshot();
         let disposition_applied = match disposition {
             DescDisposition::Requeue => index.requeue_device_desc_if_bound(desc_id, id),
-            DescDisposition::Delete => index
-                .remove_device_desc_if_state(desc_id, DeviceDescState::Bound(id))
-                .is_some(),
+            DescDisposition::Delete => {
+                index.remove_device(id);
+                index
+                    .remove_device_desc_if_state(desc_id, DeviceDescState::Bound)
+                    .is_some()
+            }
         };
         if !disposition_applied {
             log::error!(
@@ -725,23 +792,6 @@ fn remove_device_from_index(
                 id,
             );
         }
-        // Any descriptor still pointing at this device as its parent is now
-        // stale; clear the linkage so a later reprobe does not try to attach
-        // under a removed parent.
-        index.clear_descriptor_parents_for(id);
-        let driver = device
-            .driver_id()
-            .and_then(|driver_id| index.find_driver(driver_id));
-        let parent = device
-            .parent()
-            .and_then(|parent_id| index.find_device(parent_id));
-        // Live children still reference this device as their parent; snapshot
-        // them so we can drop the now-dangling parent pointer below.
-        let children = device
-            .children_snapshot()
-            .into_iter()
-            .filter_map(|child_id| index.find_device(child_id))
-            .collect::<alloc::vec::Vec<_>>();
         (device, bus, driver, parent, children, disposition_applied)
     };
 
@@ -761,24 +811,34 @@ fn remove_device_from_index(
         driver.detach_device(id);
     }
     // Clear bound-driver metadata only after the bus no longer lists the
-    // device, then announce removal.
+    // device. Topology is preserved on unbind and removed on unregister.
     device.detach_driver();
     device.mark_removed();
-    if let Some(parent) = parent {
-        parent.detach_child(id);
+
+    match disposition {
+        DescDisposition::Requeue => {
+            dispatch_device_event(DeviceEvent::Removed { id });
+            // The slot still held the terminal A while subscribers revoked
+            // their captured handles; only now may the stable object report
+            // Discovered and accept a fresh runtime.
+            device.clear_binding();
+        }
+        DescDisposition::Delete => {
+            device.mark_unregistered();
+            #[cfg(unittest)]
+            test_hooks::pause(test_hooks::BindingPause::UnregisterBeforeTopologyCleanup {
+                device_id: id,
+            });
+            clear_registration_topology(&device, parent, children);
+            dispatch_device_event(DeviceEvent::Removed { id });
+        }
     }
-    // Drop the dangling parent pointer on any live children so the topology
-    // never exposes a child referencing a removed parent.
-    for child in children {
-        child.set_parent(None);
-    }
-    dispatch_device_event(DeviceEvent::Removed { id });
 
     if disposition_applied || disposition == DescDisposition::Requeue {
         Ok(())
     } else {
         // Unregistration could not delete the registration it just tore down.
-        // The device is already irreversible removed, so report the broken
+        // The device is already irreversibly removed, so report the broken
         // invariant instead of pretending the descriptor no longer exists.
         Err(DriverError::BadState)
     }
@@ -788,11 +848,12 @@ fn remove_device_from_index(
 ///
 /// Unlike [`remove_device_managed`], this function removes the descriptor's
 /// registration instead of restoring it to `Pending`: after it succeeds the
-/// old [`DeviceDescId`] cannot be probed, matched, or rebound, even through a
-/// scan snapshot taken before the call. Re-discovery must allocate a new
-/// descriptor. A `Pending` descriptor is deleted without creating an object
-/// or emitting any event; a `Bound` one runs the normal remove sequence and
-/// emits exactly one `Removed`.
+/// old [`DeviceDescId`] and stable [`DeviceId`] cannot be probed, matched, or
+/// rebound, even through a scan snapshot taken before the call. Re-discovery
+/// must allocate a new descriptor and device id. A `Pending` descriptor is
+/// deleted together with its (unbound) stable object without emitting any
+/// event; a `Bound` one runs the normal remove sequence and emits exactly one
+/// `Removed`.
 ///
 /// The caller must be in a sleepable task context and must not already hold
 /// this descriptor's binding lock (for example from a probe or `Removed`
@@ -836,8 +897,10 @@ pub fn unregister_device_desc(id: DeviceDescId) -> Result<(), DriverError> {
             None => Target::Absent,
             Some(DeviceDescState::Pending) => Target::Pending,
             Some(DeviceDescState::Probing) => Target::Probing,
-            Some(DeviceDescState::Bound(device_id)) => {
-                // 1:1 invariant: exactly this descriptor owns a live device.
+            Some(DeviceDescState::Bound) => {
+                let desc = index.find_device_desc(id).ok_or(DriverError::BadState)?;
+                let device_id = desc.device_id();
+                // 1:1 invariant: exactly this descriptor owns the stable object.
                 if index.find_device(device_id).is_none()
                     || index
                         .descriptor_bound_to_device(device_id)
@@ -859,17 +922,33 @@ pub fn unregister_device_desc(id: DeviceDescId) -> Result<(), DriverError> {
         // seeing it here means the lifecycle invariant is broken.
         Target::Probing => Err(DriverError::BadState),
         Target::Pending => {
-            if device_registry()
-                .remove_device_desc_if_state(id, DeviceDescState::Pending)
-                .is_none()
-            {
+            // Delete the descriptor and the never-bound stable object together;
+            // no event is emitted because no binding was ever published.
+            let (desc, device) = {
+                let mut index = device_registry();
+                let desc = index.remove_device_desc_if_state(id, DeviceDescState::Pending);
+                let device = desc
+                    .as_ref()
+                    .and_then(|desc| index.remove_device(desc.device_id()));
+                (desc, device)
+            };
+            let Some(_) = desc else {
                 log::error!("descriptor {:?} was not Pending under its binding lock", id);
                 return Err(DriverError::BadState);
+            };
+            if let Some(device) = device {
+                let (parent, children) = device.topology_snapshot();
+                #[cfg(unittest)]
+                test_hooks::pause(test_hooks::BindingPause::UnregisterBeforeTopologyCleanup {
+                    device_id: device.id(),
+                });
+                device.mark_unregistered();
+                clear_registration_topology(&device, parent, children);
             }
             Ok(())
         }
         Target::Bound(device_id) => {
-            remove_bound_device_locked(id, device_id, DescDisposition::Delete)
+            remove_bound_device_locked(id, device_id, DescDisposition::Delete, None)
         }
     }
 }
@@ -884,6 +963,7 @@ fn remove_bound_device_locked(
     desc_id: DeviceDescId,
     device_id: DeviceId,
     disposition: DescDisposition,
+    expected_binding: Option<&BindingRef>,
 ) -> Result<(), DriverError> {
     // Re-read everything after the wait; the snapshots taken before it may be
     // stale. A device that disappeared here was removed by another task.
@@ -896,7 +976,10 @@ fn remove_bound_device_locked(
             };
         };
         if !index.device_desc_is_bound_to(desc_id, device_id) {
-            return Err(DriverError::BadState);
+            return match disposition {
+                DescDisposition::Requeue => Err(DriverError::ResourceBusy),
+                DescDisposition::Delete => Err(DriverError::BadState),
+            };
         }
         let driver = device
             .driver_id()
@@ -907,11 +990,30 @@ fn remove_bound_device_locked(
         (device, driver, bus_type)
     };
 
+    // The pre-wait snapshot named one binding instance, but another task may
+    // have requeued the descriptor and installed a replacement while this task
+    // waited. Recheck the instance, not just the stable device id: a stale
+    // remove must not tear down a binding it never observed.
+    if matches!(disposition, DescDisposition::Requeue) && expected_binding.is_none() {
+        // The pre-lock observation could not capture a stable instance: a
+        // removal or Busy backoff was in flight. The caller may retry; do not
+        // report this legal race as the non-retryable BadState.
+        return Err(DriverError::ResourceBusy);
+    }
+    if let Some(expected) = expected_binding {
+        let Some(current) = device.binding_ref() else {
+            return Err(DriverError::BadState);
+        };
+        if !current.same_binding(expected) {
+            return Err(DriverError::ResourceBusy);
+        }
+    }
+
     // `begin_removing` is the single commit point: it atomically claims the
-    // device for removal (or fails with `ResourceBusy` if another remove is
+    // binding for removal (or fails with `ResourceBusy` if another remove is
     // already in flight or references are outstanding). It must run after the
     // descriptor lock is acquired, so an in-flight publish cannot mark the
-    // device active after we commit.
+    // binding active after we commit.
     if !device.begin_removing() {
         return Err(DriverError::ResourceBusy);
     }
@@ -920,7 +1022,7 @@ fn remove_bound_device_locked(
     // `bus_type.remove` are best-effort cleanup hooks; once `driver.remove`
     // has run the device's private state (MMIO mappings, IRQ handlers, queues)
     // may already be gone, so we must NOT roll the lifecycle back to a usable
-    // state on failure — doing so would expose a torn-down device as `Active`
+    // state on failure — doing so would expose a torn-down binding as `Active`
     // and invite use-after-free. Failures are logged and removal proceeds to
     // `Removed`. This mirrors the "remove never fails" contract of Linux's
     // driver core.
@@ -958,26 +1060,38 @@ fn remove_bound_device_locked(
 /// The caller must be in a sleepable task context. Removal serializes with
 /// binding through the unique descriptor's binding lock: while this function
 /// waits, an in-flight probe or adoption finishes first, and only after this
-/// removal releases the lock (after `Removed`) may a new binding start.
+/// removal releases the lock (after `Removed`) may a new binding start. The
+/// stable object, its facts and its topology survive; only the current binding
+/// is retired.
 ///
 /// [`DriverError::ResourceBusy`] means this call did not commit a teardown:
-/// another remover may already have won, or references to the device are
-/// still outstanding. The caller may retry later; no eventual completion is
-/// guaranteed.
+/// another remover may already have won, the binding may have been replaced
+/// while this call waited for the descriptor lock, or references to the
+/// device are still outstanding. The caller may retry later; no eventual
+/// completion is guaranteed.
 pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
     // Locate the unique descriptor backing this device before waiting. Zero or
     // multiple descriptors mean the 1:1 invariant is broken; do not touch the
     // device in that case.
-    let desc_ref = {
+    let (desc_ref, device) = {
         let index = device_registry();
-        index.find_device(id).ok_or(DriverError::InvalidInput)?;
-        index
+        let device = index.find_device(id).ok_or(DriverError::InvalidInput)?;
+        let desc_ref = index
             .descriptor_bound_to_device(id)
-            .ok_or(DriverError::BadState)?
+            .ok_or(DriverError::BadState)?;
+        (desc_ref, device)
     };
+    // A transient Removing state makes this capture fail; keep the wait and
+    // classify the race as retryable ResourceBusy after the lock instead.
+    let observed_binding = device.binding_ref();
 
     let _guard = desc_ref.binding.lock();
-    remove_bound_device_locked(desc_ref.id, id, DescDisposition::Requeue)
+    remove_bound_device_locked(
+        desc_ref.id,
+        id,
+        DescDisposition::Requeue,
+        observed_binding.as_ref(),
+    )
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/lifecycle.rs");

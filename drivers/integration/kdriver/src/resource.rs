@@ -17,7 +17,7 @@ use driver_os_api::{
     MmioClaim, MmioRegion, ResError,
 };
 use driver_os_api_xkernel::XKernelResourceProvider;
-use kdevice::DeviceObject;
+use kdevice::{BindingRef, DeviceObject};
 
 static XKERNEL_RESOURCE_PROVIDER: XKernelResourceProvider = XKernelResourceProvider::new();
 
@@ -50,31 +50,42 @@ pub(crate) fn claim_mmio_region(region: MmioRegion, name: &'static str) -> Drive
     MmioClaim::claim_with(resource_provider(), region, name).map_err(map_res_err)
 }
 
-/// Map an MMIO region and tie its lifetime to `device`.
+/// Map an MMIO region and tie its lifetime to the captured `binding` of
+/// `device`.
 ///
-/// The mapping is released when the device's probe fails or the device is
-/// removed. Returns the virtual base address for the region.
+/// The mapping is released when that binding's probe fails or the binding is
+/// removed. It is never attached to a later binding that reuses the same
+/// stable object. Returns the virtual base address for the region.
 pub(crate) fn devm_iomap(
+    binding: &BindingRef,
     device: &DeviceObject,
     region: MmioRegion,
     name: &'static str,
 ) -> DriverResult<NonNull<u8>> {
-    kdevice::device::managed::devm_iomap_with_provider(resource_provider(), device, region, name)
-        .map_err(map_res_err)
+    kdevice::device::managed::devm_iomap_with_provider(
+        resource_provider(),
+        binding,
+        device,
+        region,
+        name,
+    )
+    .map_err(map_res_err)
 }
 
-/// Register a context-carrying interrupt handler and tie its lifetime to
-/// `device`.
+/// Register a context-carrying interrupt handler and tie its lifetime to the
+/// captured `binding` of `device`.
 ///
-/// The handler is released when the device's probe fails or the device is
+/// The handler is released when that binding's probe fails or the binding is
 /// removed.
 pub(crate) fn devm_request_irq(
+    binding: &BindingRef,
     device: &DeviceObject,
     irq: IrqResource,
     handler: Arc<dyn DevIrqHandler>,
 ) -> DriverResult<()> {
     kdevice::device::managed::devm_request_irq_with_provider(
         resource_provider(),
+        binding,
         device,
         irq,
         handler,
@@ -83,10 +94,11 @@ pub(crate) fn devm_request_irq(
 }
 
 /// Register primary and threaded interrupt handlers and tie their lifetime to
-/// `device`.
+/// the captured `binding` of `device`.
 ///
 /// The request is routed through the framework-owned `driver_os_api` IRQ provider.
 pub(crate) fn devm_request_threaded_irq(
+    binding: &BindingRef,
     device: &DeviceObject,
     irq: IrqResource,
     primary: Arc<dyn DevIrqHandler>,
@@ -95,6 +107,7 @@ pub(crate) fn devm_request_threaded_irq(
 ) -> DriverResult<()> {
     kdevice::device::managed::devm_request_threaded_irq_with_provider(
         resource_provider(),
+        binding,
         device,
         irq,
         primary,
@@ -105,10 +118,11 @@ pub(crate) fn devm_request_threaded_irq(
 }
 
 /// Register a default-primary threaded interrupt handler and tie its lifetime
-/// to `device`.
+/// to the captured `binding` of `device`.
 ///
 /// The request is routed through the framework-owned `driver_os_api` IRQ provider.
 pub(crate) fn devm_request_threaded_irq_default(
+    binding: &BindingRef,
     device: &DeviceObject,
     irq: IrqResource,
     thread: Arc<dyn DevIrqThreadHandler>,
@@ -116,6 +130,7 @@ pub(crate) fn devm_request_threaded_irq_default(
 ) -> DriverResult<()> {
     kdevice::device::managed::devm_request_threaded_irq_default_with_provider(
         resource_provider(),
+        binding,
         device,
         irq,
         thread,
@@ -124,39 +139,57 @@ pub(crate) fn devm_request_threaded_irq_default(
     .map_err(map_res_err)
 }
 
-/// Allocate a coherent DMA buffer and tie its lifetime to `device`.
+/// Allocate a coherent DMA buffer and tie its lifetime to the captured
+/// `binding` of `device`.
 ///
-/// The buffer is freed when the device's probe fails or the device is removed.
-/// Returns the CPU virtual address and device bus address of the buffer.
+/// The buffer is freed when that binding's probe fails or the binding is
+/// removed. Returns the CPU virtual address and device bus address of the
+/// buffer.
 pub(crate) fn devm_alloc_coherent(
+    binding: &BindingRef,
     device: &DeviceObject,
     spec: DmaSpec,
 ) -> DriverResult<(NonNull<u8>, u64)> {
-    kdevice::device::managed::devm_alloc_coherent_with_provider(resource_provider(), device, spec)
-        .map_err(map_res_err)
+    kdevice::device::managed::devm_alloc_coherent_with_provider(
+        resource_provider(),
+        binding,
+        device,
+        spec,
+    )
+    .map_err(map_res_err)
 }
 
 /// Driver-facing device-managed resource methods.
 ///
-/// Drivers use this extension trait to acquire resources from their
-/// [`DeviceObject`] without naming the concrete host provider. The provider is
+/// Drivers use this extension trait from the [`BindingRef`] they captured in
+/// their probe context, passing the stable device object alongside it. The
+/// helper verifies that the captured runtime is still the object's current
+/// binding before registering cleanup, so a stale handle from a previous
+/// binding can never attach resources to its replacement. The provider is
 /// owned by the driver framework and passed explicitly into `driver_os_api`.
 pub trait DeviceResourceExt {
-    /// Map an MMIO region and tie its lifetime to this device.
-    fn devm_iomap(&self, region: MmioRegion, name: &'static str) -> DriverResult<NonNull<u8>>;
+    /// Map an MMIO region and tie its lifetime to this binding.
+    fn devm_iomap(
+        &self,
+        device: &DeviceObject,
+        region: MmioRegion,
+        name: &'static str,
+    ) -> DriverResult<NonNull<u8>>;
 
     /// Register a context-carrying interrupt handler and tie its lifetime to
-    /// this device.
+    /// this binding.
     fn devm_request_irq(
         &self,
+        device: &DeviceObject,
         irq: IrqResource,
         handler: Arc<dyn DevIrqHandler>,
     ) -> DriverResult<()>;
 
     /// Register primary and threaded interrupt handlers and tie their lifetime
-    /// to this device.
+    /// to this binding.
     fn devm_request_threaded_irq(
         &self,
+        device: &DeviceObject,
         irq: IrqResource,
         primary: Arc<dyn DevIrqHandler>,
         thread: Arc<dyn DevIrqThreadHandler>,
@@ -164,51 +197,68 @@ pub trait DeviceResourceExt {
     ) -> DriverResult<()>;
 
     /// Register a default-primary threaded interrupt handler and tie its
-    /// lifetime to this device.
+    /// lifetime to this binding.
     fn devm_request_threaded_irq_default(
         &self,
+        device: &DeviceObject,
         irq: IrqResource,
         thread: Arc<dyn DevIrqThreadHandler>,
         name: Option<&'static str>,
     ) -> DriverResult<()>;
 
-    /// Allocate a coherent DMA buffer and tie its lifetime to this device.
-    fn devm_alloc_coherent(&self, spec: DmaSpec) -> DriverResult<(NonNull<u8>, u64)>;
+    /// Allocate a coherent DMA buffer and tie its lifetime to this binding.
+    fn devm_alloc_coherent(
+        &self,
+        device: &DeviceObject,
+        spec: DmaSpec,
+    ) -> DriverResult<(NonNull<u8>, u64)>;
 }
 
-impl DeviceResourceExt for DeviceObject {
-    fn devm_iomap(&self, region: MmioRegion, name: &'static str) -> DriverResult<NonNull<u8>> {
-        devm_iomap(self, region, name)
+impl DeviceResourceExt for BindingRef {
+    fn devm_iomap(
+        &self,
+        device: &DeviceObject,
+        region: MmioRegion,
+        name: &'static str,
+    ) -> DriverResult<NonNull<u8>> {
+        devm_iomap(self, device, region, name)
     }
 
     fn devm_request_irq(
         &self,
+        device: &DeviceObject,
         irq: IrqResource,
         handler: Arc<dyn DevIrqHandler>,
     ) -> DriverResult<()> {
-        devm_request_irq(self, irq, handler)
+        devm_request_irq(self, device, irq, handler)
     }
 
     fn devm_request_threaded_irq(
         &self,
+        device: &DeviceObject,
         irq: IrqResource,
         primary: Arc<dyn DevIrqHandler>,
         thread: Arc<dyn DevIrqThreadHandler>,
         name: Option<&'static str>,
     ) -> DriverResult<()> {
-        devm_request_threaded_irq(self, irq, primary, thread, name)
+        devm_request_threaded_irq(self, device, irq, primary, thread, name)
     }
 
     fn devm_request_threaded_irq_default(
         &self,
+        device: &DeviceObject,
         irq: IrqResource,
         thread: Arc<dyn DevIrqThreadHandler>,
         name: Option<&'static str>,
     ) -> DriverResult<()> {
-        devm_request_threaded_irq_default(self, irq, thread, name)
+        devm_request_threaded_irq_default(self, device, irq, thread, name)
     }
 
-    fn devm_alloc_coherent(&self, spec: DmaSpec) -> DriverResult<(NonNull<u8>, u64)> {
-        devm_alloc_coherent(self, spec)
+    fn devm_alloc_coherent(
+        &self,
+        device: &DeviceObject,
+        spec: DmaSpec,
+    ) -> DriverResult<(NonNull<u8>, u64)> {
+        devm_alloc_coherent(self, device, spec)
     }
 }

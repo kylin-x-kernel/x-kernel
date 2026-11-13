@@ -126,12 +126,15 @@ pub(super) fn run_live_transport_claim_scenario() -> unittest::TestResult {
 
     let outcome = probe_device_desc(first.id()).unwrap();
     // The records snapshot feeds the guard before any assertion can fail.
+    // Both descriptors own a stable device object from `device_desc_add`
+    // onwards, so select the probed one by its descriptor's device id.
     let records = kdevice::device_records_snapshot();
-    let device_id = records
-        .first()
-        .map(|record| record.id)
-        .expect("the first descriptor must publish a device");
+    let device_id = first.device_id();
     cleanup.track(device_id);
+    assert!(
+        records.iter().any(|record| record.id == device_id),
+        "the first descriptor must publish a device"
+    );
 
     assert_eq!(outcome, ProbeOutcome::Activated);
 
@@ -180,8 +183,26 @@ pub(super) fn run_live_transport_claim_scenario() -> unittest::TestResult {
     assert_eq!(status_at_open.as_slice(), &[INITIAL_STATUS]);
     assert_eq!(handle.status(), INITIAL_STATUS);
     assert_eq!(kclass::vsock_devices().len(), vsock_before + 1);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].id, device_id);
+    assert_eq!(
+        records.len(),
+        2,
+        "each descriptor owns one stable device object"
+    );
+    let first_record = records
+        .iter()
+        .find(|record| record.id == device_id)
+        .expect("the probed descriptor's record exists");
+    assert_eq!(first_record.driver_name, Some("virtio-vsock-mmio-claim"));
+    let second_record = records
+        .iter()
+        .find(|record| record.id == second.device_id())
+        .expect("the refused descriptor keeps its stable object");
+    assert_eq!(
+        second_record.state,
+        kdevice::DeviceState::Discovered,
+        "the refused probe leaves the stable object unbound"
+    );
+    assert!(second_record.driver_name.is_none());
 
     // The owner is alive: a second descriptor for the same firmware node must
     // be refused before the fixture is consulted, so the device sees no second
@@ -210,7 +231,20 @@ pub(super) fn run_live_transport_claim_scenario() -> unittest::TestResult {
     assert_eq!(status_at_second_open.as_slice(), &[INITIAL_STATUS]);
     assert_eq!(handle.status(), INITIAL_STATUS);
     assert_eq!(kclass::vsock_devices().len(), vsock_before + 1);
-    assert_eq!(kdevice::device_records_snapshot().len(), 1);
+    let records_after_second = kdevice::device_records_snapshot();
+    assert_eq!(
+        records_after_second.len(),
+        2,
+        "both descriptors keep their stable device objects"
+    );
+    assert_eq!(
+        records_after_second
+            .iter()
+            .filter(|record| record.driver_name == Some("virtio-vsock-mmio-claim"))
+            .count(),
+        1,
+        "the refused descriptor never gains a binding"
+    );
     assert_eq!(driver.bound_devices_snapshot().len(), 1);
 
     // The refused second descriptor did no DMA or queue work either.
@@ -237,7 +271,23 @@ pub(super) fn run_live_transport_claim_scenario() -> unittest::TestResult {
     drop(records);
     cleanup.remove();
     assert_eq!(kclass::vsock_devices().len(), vsock_before);
-    assert!(kdevice::device_records_snapshot().is_empty());
+    // Unbind keeps both stable objects and requeues their descriptors; only
+    // unregister (or a registry reset) removes them.
+    let records_after_unbind = kdevice::device_records_snapshot();
+    assert_eq!(records_after_unbind.len(), 2);
+    for record in &records_after_unbind {
+        assert_eq!(
+            record.state,
+            kdevice::DeviceState::Discovered,
+            "unbind returns the stable object to the unbound state"
+        );
+        assert!(
+            record.driver_name.is_none(),
+            "unbind clears the binding metadata"
+        );
+    }
+    assert!(kdevice::find_device(device_id).is_some());
+    assert!(kdevice::find_device(second.device_id()).is_some());
     assert!(driver.bound_devices_snapshot().is_empty());
 
     // Removing the owner released every mapping through the real provider.

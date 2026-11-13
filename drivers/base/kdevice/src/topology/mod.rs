@@ -2,7 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Read-only topology snapshot over the live device index.
+//! Topology snapshots and serialized relation updates.
+
+pub(crate) mod relations;
 
 use alloc::vec::Vec;
 

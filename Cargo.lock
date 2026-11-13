@@ -2229,6 +2229,7 @@ dependencies = [
  "lazyinit",
  "log",
  "net",
+ "unittest",
  "virtio",
  "vsock",
 ]

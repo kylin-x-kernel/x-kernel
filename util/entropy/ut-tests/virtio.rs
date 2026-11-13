@@ -145,7 +145,11 @@ fn collector_retries_without_new_demand_and_stops_only_on_device_failure() {
             ready: WaitQueue::new(),
             entered: WaitQueue::new(),
         });
-        let class = kclass::publish_hwrng(parent.clone(), hardware.clone()).unwrap();
+        let class = kdevice::test_hooks::with_binding_lock(parent.id(), || {
+            kclass::publish_hwrng(parent.clone(), hardware.clone())
+        })
+        .expect("the adopted device still has a binding")
+        .unwrap();
         let source = VirtioEntropySource::new(class).unwrap();
         assert_eq!(hardware.reads.load(Ordering::Acquire), 0);
         source.request();

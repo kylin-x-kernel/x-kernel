@@ -26,6 +26,8 @@ below.
 │  ├─ SpinNoPreempt locks on all mutable      │
 │  │  shared state                            │
 │  ├─ per-binding AtomicU8 + CAS lifecycle    │
+│  ├─ a stable slot that only ever holds a    │
+│  │  fresh, never-reset BindingRuntime       │
 │  ├─ Arc reference counts keeping objects    │
 │  │  alive across lock boundaries            │
 │  ├─ BTreeMap preventing ID collisions       │
@@ -78,9 +80,11 @@ hardware, firmware, or network input. Its safety boundaries are:
   would create inconsistent user-visible device identity.
 - **ID allocator overflow**: the `AtomicU64` id counters can theoretically
   overflow (~1.8×10^19 allocations), after which they panic.
-- **Arc reference cycles**: DeviceObject parent→child and child→parent
-  `Arc`s are broken explicitly by detach in the remove path; missing that
-  leaks memory.
+- **Topology edge lifetime**: parent/child relations store only `DeviceId`
+  values; the registry owns the `Arc<DeviceObject>` and topology code takes
+  short-lived registry lookups. Unregister clears the edges conditionally so a
+  concurrent re-parent is never erased, and the object is dropped when the
+  registry entry and all external handles are gone.
 
 The threat analysis should focus on:
 
@@ -106,12 +110,16 @@ rest.
 ## Memory-Safety Invariants
 
 1. **Lock-ordering rule**: descriptor binding lock → Registry → (drop guard)
-   → per-object (`bus.devices` → `bus.drivers`; a single `DeviceObject` leaf
-   lock: `relations`, `binding.meta`, or `binding.devres`). No path holds two
-   of those three leaf locks at once. The binding lock is a sleepable `kmutex`
-   and must be acquired outside every spinlock. Every caller must follow this
-   order. `DeviceRegistry::find_bus_type` documents its panic-on-missing
-   behavior and requires bus types to be registered at init time.
+   → per-object (`bus.devices` → `bus.drivers`; one `DeviceObject` leaf lock:
+   `slot`, `relations`, `binding.meta`, or `binding.devres`). The slot and the
+   binding leaves are never nested. Topology writes may hold several
+   `relations` locks, but only acquired in ascending `DeviceId` order. The
+   binding lock is a sleepable `kmutex` and must be acquired outside every
+   spinlock; registration/adoption use `try_lock` because they run under a
+   spinlock. The only registry-after-object path is the documented unregister
+   snapshot (`registry → relations`), never `relations → registry`.
+   `DeviceRegistry::find_bus_type` documents its panic-on-missing behavior and
+   requires bus types to be registered at init time.
 2. **BindingRuntime::begin_removing atomicity**: the CAS into `Removing` only
    closes admission for new `DeviceUse` references. It is not by itself the
    teardown commit point: a non-zero usage count restores the prior state,
@@ -122,9 +130,9 @@ rest.
    check; `begin_removing` checks the usage count after closing admission.
    Together they guarantee: either `begin_removing` is rejected while a
    `DeviceUse` exists, or after admission closes, `try_acquire` sees a
-   non-Active state and rolls the count back. The guard keeps
-   `Arc<DeviceObject>` and therefore releases the object's single,
-   non-replaceable binding; see invariant 16.
+   non-Active state and rolls the count back. The guard keeps the exact
+   `Arc<BindingRuntime>` admitted, so dropping it can never decrement a later
+   binding; see invariant 16.
 4. **DeviceDesc Probing mutual exclusion**: only the holder of the
    descriptor's binding lock may call `mark_device_desc_probing` (which
    accepts `Pending → Probing` only), requeue it, or delete its registration.
@@ -155,9 +163,14 @@ rest.
    Active. A partially cleaned device must never look "available". A `false`
    return (already removing/removed, or non-zero usage) commits nothing and
    restores the prior state for the usage case.
-10. **Parent/child detach**: the remove path removes the child from the
-    parent's children list and clears the child's parent pointer,
-    preventing stale parent references.
+10. **Topology lifetime**: unbind keeps the stable object and its relations.
+    Unregister conditionally clears the object's parent edge and removes it
+    from each parent's child set; a stale child entry is removed even if the
+    child was re-parented, while the child's new parent edge is preserved.
+    Relation locks are taken in ascending id order, and the ancestor walk is
+    bounded (`MAX_PARENT_DEPTH`, repeated-node detection,
+    `MAX_TOPOLOGY_RETRIES`), so a cyclic or continuously changing topology
+    cannot spin forever under a relation spinlock.
 11. **Device-node assignment consistency**: class index, `DeviceNumber`, and
     `devname` are created together under the node-registry lock and stored in
     one immutable `DeviceNode` publication with shared atomic lifecycle state.
@@ -186,17 +199,14 @@ rest.
     rebinds a half-removed one. Bus publication attaches the device and its
     driver in one `devices → drivers` critical section; bus detachment keeps
     the shared driver entry while any remaining device still references it.
-16. **Per-binding runtime is non-replaceable**: a `DeviceObject` owns exactly
-    one private `BindingRuntime` for its lifetime, with no replace/reset/
-    into-inner API and no `&mut` access. The object stores it in `Arc` only so
-    `BindingRef` and `DeviceUse` can retain the exact instance. Lifecycle
-    state, usage, driver metadata and devres still have a single owner;
-    `DeviceObject` keeps no synchronized copy. In the current model a rebind
-    creates a new `DeviceObject`/`DeviceId`, and the old object stays
-    `Removed`, so a `DeviceUse` acquired from an old binding can never
-    decrement a new one. A future stable-object design that swaps bindings
-    must also isolate old class handles and keep guard/reference ownership
-    tied to the specific binding; generation counters are not a substitute.
+16. **Binding runtimes are per-instance and never reused**: a stable
+    `DeviceObject` has one slot holding at most one current runtime. Every
+    candidate/rebind installs a brand-new runtime; a terminal runtime is never
+    reset, re-installed, or mutated back to a usable state. `BindingRef` and
+    `DeviceUse` retain their exact `Arc<BindingRuntime>`, so a handle or guard
+    from a retired binding can never observe or affect a replacement binding,
+    even though both belong to the same `DeviceObject`/`DeviceId`. Generation
+    counters are not used and are not needed.
 17. **Read-only binding references are not admission**: `BindingRef` retains
     the runtime and snapshots driver id/name under one `meta` critical
     section, but it does not increment `usage`, cannot mutate lifecycle or
@@ -206,16 +216,31 @@ rest.
     transient `Removing` that backs off on non-zero usage can return to
     `Active`. Capture rejects observed `Removing`/`Removed`/missing metadata,
     but is not a publication permission: publication still relies on the
-    descriptor binding lock for serialization with removal.
-18. **`DeviceRecord` is a grouped snapshot**: binding metadata
-    (`driver_id`/`driver_name`/`device_kind`) is sampled under
-    `binding.meta`, and relations (`parent`/`child_bus`) are sampled later
-    under `relations`; the lifecycle is a separate atomic read. The metadata
-    group and the relations group are each internally consistent, but the
-    three samples are not jointly consistent, and record consumers must not
-    treat cross-group combinations as a transaction. Audited consumers are
-    diagnostics, enumeration and filtering; no in-tree consumer uses topology
-    plus driver metadata as an ownership/resource-release decision.
+    descriptor binding lock for serialization with removal. Exact-instance
+    admission and cleanup registration revalidate against the object's
+    current binding, so a stale reference cannot acquire use or attach devres
+    to its successor.
+18. **Instance-scoped retirement event**: a failed candidate dispatches
+    `BindingRetired` after the runtime is terminal and before the slot is
+    cleared. Subscribers revoke handles captured from that exact binding; the
+    stable object may still be registered and may later bind again. An unbind
+    or unregister dispatches `Removed` instead; a never-bound registration
+    unregisters silently.
+19. **Registration owns existence**: `DeviceObject::state()` is projected from
+    registration membership and the slot; only unregister marks the
+    registration `Ended`. A stale `Arc<DeviceObject>` therefore cannot make a
+    retired binding current, and a `Pending` unregister deletes the never-bound
+    object without reviving it.
+20. **`DeviceRecord` is a grouped snapshot**: the current binding and its
+    metadata (`driver_id`/`driver_name`/`device_kind`) are sampled together,
+    and relations (`parent`/`child_bus`) are sampled later under `relations`;
+    the projected lifecycle is a separate read. The snapshot helpers collect
+    object `Arc`s under the registry lock and read the leaves after releasing
+    it. Each group is internally consistent, but the samples are not jointly
+    consistent, and record consumers must not treat cross-group combinations
+    as a transaction. Audited consumers are diagnostics, enumeration and
+    filtering; no in-tree consumer uses topology plus driver metadata as an
+    ownership/resource-release decision.
 
 ## Thread Safety
 
@@ -223,7 +248,7 @@ rest.
 |------|-----------|-----------|
 | `DeviceRegistry` | fields are `Send` | `SpinNoPreempt` provides interior mutability |
 | `DeviceNodeRegistry` | maps, index sets, and callbacks are `Send` | a separate `SpinNoPreempt` serializes assignment and snapshots |
-| `DeviceObject` | `Arc<DeviceObject>` is `Send + Sync` | immutable facts; `relations` under `SpinNoPreempt`; owns one `Arc<BindingRuntime>` |
+| `DeviceObject` | `Arc<DeviceObject>` is `Send + Sync` | immutable facts; `relations` under `SpinNoPreempt`; registration/binding `slot` under a separate `SpinNoPreempt`; shared binding lock is `Arc<kmutex::Mutex<()>>` |
 | `BindingRuntime` (private) | fields are `Send` | `AtomicU8` + `AtomicUsize` + separate `SpinNoPreempt` for `meta` and `devres` |
 | `BindingRef` | `Arc<BindingRuntime>` + `DriverId` + `&'static str` is `Send` | immutable snapshot; lifecycle read is atomic |
 | `BusInstance` | `Arc<BusInstance>` is `Send + Sync` | internal `SpinNoPreempt` guards all mutable fields |
@@ -245,9 +270,9 @@ rest.
 | T-06 | ID counter overflow | High — a kernel panic prevents identity reuse after exhaustion | `AtomicU64` reaches `u64::MAX` | `fetch_add_u64` panics instead of returning a duplicate id; exhaustion is practically unreachable at a 64-bit width. |
 | T-07 | `find_bus_type` panics on a missing bus type | Medium | A bus instance is created before `register_bus_type` | `default_bus_manager` fixes the order: register_bus_type before register_bus_instance |
 | T-08 | Driver probe failure leaves devres uncleaned | Medium | Driver registers devres then panics during probe (unwinding skips cleanup) | x-kernel is `#![no_std]` with no unwinding today; probe failure cleans up explicitly via `run_cleanups` |
-| T-09 | Parent/child relations survive device removal | Medium | The remove path forgets to detach | `remove_device_from_index` removes the child from the parent's list and clears children's parent pointers |
+| T-09 | Parent/child relations survive a registration | Medium | Unregister forgets to detach, or a stale cleanup overwrites a concurrent re-parent | Unbind keeps the stable object and topology by design; unregister runs `clear_registration_topology`, which clears the parent edge and this device's children edges conditionally and removes only this device's stale entry from a live parent |
 | T-10 | `DeviceRecord` groups disagree with each other or the live object | Low | Binding metadata and relations are sampled at different instants; lifecycle is another atomic read | `record_snapshot()` samples binding metadata as one group and relations as another; immutable facts are copied verbatim. The contract is a grouped, non-transactional snapshot, and audited consumers use individual fields only for diagnostics/filtering |
-| T-11 | Arc reference cycles leak device/bus objects | Medium | parent↔child `Arc`s never broken | Remove path runs explicit `detach_child` + `set_parent(None)`; controller↔bus `set_child_bus`/`set_controller` are managed by backends |
+| T-11 | Device/bus objects leak after unregister | Medium | A registry entry, topology edge, or handle keeps the object reachable | Relations store ids only, so there are no parent↔child `Arc` cycles. Unregister removes the registry entry and conditionally clears topology; external `Arc` handles delay object drop but never make it current. Controller↔bus `set_child_bus`/`set_controller` remain backend-managed |
 | T-12 | A class index or core ID is reused before projections remove the old node | Medium — stale files or operations could collide with a replacement node | Hot-unplug races a new device in the same class | Removing nodes remain in the registry and unavailable; same-ID registration returns `ResourceBusy`, and the index is released only after `Removed` callbacks return |
 | T-13 | Filesystem projections disagree about device identity | Medium — `/dev` and `/sys` could describe different devices | A consumer independently derives names or numbers | `DeviceNode` is the single immutable source consumed by both devfs and sysfs; allocation templates are private to kdevice |
 | T-14 | Concurrent registration and removal invert add/remove events | Medium — listeners retain a ghost node after observing remove followed by add | Removal begins after registry insertion but before add callbacks finish | Publishing transitions to `RemovePending`; the add-publishing thread emits add first, then performs the complete ordered removal sequence |
@@ -257,7 +282,11 @@ rest.
 | T-18 | A stale scan/probe snapshot rebinds a descriptor that was unregistered | High — owner may have released transport/hardware resources; rebinding probes freed hardware | Explicit probe or driver-registration scan holds a pre-unregister snapshot | Unregister takes the same descriptor binding lock, deletes the registration under it, and every probe/scan rechecks after acquiring the lock: missing entry → `Skipped`/`continue`, never a new `DeviceObject` |
 | T-19 | Same-task unregister from a probe/remove hook self-deadlocks or panics | Medium — kernel panic/abort | A callback calls `unregister_device_desc` while its caller holds the descriptor lock | `unregister_device_desc` checks `is_owned_by_current()` before locking and returns `ResourceBusy`; a different task blocks and rechecks |
 | T-20 | Unregister reports success although descriptor deletion failed | Medium — caller believes the old ID is gone and releases transport resources | Lifecycle invariant broken between the state check and the delete | `Pending` delete mismatch returns `BadState`; after a committed `Bound` removal a delete miss still completes teardown but returns `BadState`. No rollback to `Active`, no recovery path |
-| T-21 | An old guard or class handle acts on a new binding after object reuse | High — old holder treats the new binding as usable while holding the previous binding's resources | A future stable-object migration reuses one `DeviceObject` for a new binding | Not reachable today: a rebind creates a new object and the old one stays `Removed`; each object has one non-replaceable `BindingRuntime`, `DeviceUse` releases that admitted instance, and class handles retain a `BindingRef` plus historical identity (invariants 16-17). The future migration must keep guard/reference ownership tied to the binding and isolate old class handles; generation counters are not an accepted substitute |
+| T-21 | An old guard or class handle acts on a new binding after rebind | High — old holder treats the new binding as usable while holding the previous binding's resources | A stable object is rebound after a failed probe or unbind | `DeviceUse` releases the exact admitted runtime; `BindingRef::try_acquire(&object)` and `add_cleanup(&object, ...)` revalidate instance identity against the current slot; class handles keep their captured runtime and never observe the replacement (invariants 16-17). A failed attempt is also revoked through `BindingRetired` before the slot is cleared |
+| T-22 | Concurrent attach/detach deadlocks on parent and child relations | High — kernel hang | Two topology writes lock the same devices in opposite parent/child roles | Every write locks the child, both parents and all ancestors in ascending `DeviceId` order; the ancestor walk is bounded and detects cycles/repeated nodes, returning `InvalidInput`/`ResourceBusy` instead of looping |
+| T-23 | A stale terminal binding's cleanup runs against a replacement binding | High — release of new resources or double release | A retried probe installs a new runtime before an old cleanup queue drains | Cleanups belong to the runtime that registered them; the old runtime is never re-installed, and every devres/class retry uses the exact instance. A stale callback can only run its own batch |
+| T-24 | Unbounded topology traversal under a relation spinlock | Medium — long preemption-off stall | A corrupted or rapidly changing parent chain | `MAX_PARENT_DEPTH=64`, repeated-node detection and `MAX_TOPOLOGY_RETRIES=8`; abnormal topology returns a typed error |
+| T-25 | Descriptor and object disagree about the binding | High — probe/remove acts on a binding that is not current | Publication or removal interrupted halfway | Descriptor `Bound` is written only under the shared binding lock after the slot holds the fresh runtime; `state()` projects registration + slot, and `inspect_locked_desc` rejects a `Bound` descriptor whose object is missing or non-terminal-but-unregistered as `BadState` |
 
 Impact levels:
 
@@ -277,7 +306,8 @@ Impact levels:
 | F-06 | `device_records_snapshot` memory pressure with many devices | Thousands of active devices require a large `Vec` | Slower snapshot; possible OOM | Affects snapshot consumers (e.g. /proc reads) | 4 | The BTreeMap iterator yields records in id order; callers can paginate |
 | F-07 | Same DeviceId added twice | Two adoptions reusing an id | The second `add_device` replaces the first entry | The old DeviceObject may drop while external `Arc` holders persist | 4 | The id allocator is monotonic; adoption allocates a fresh id every time |
 | F-08 | `desc.parent` points at a removed parent | Parent device removed before the child is published | `attach_device_parent` runs after publish; parent may be gone | Child has no parent; device tree incomplete | 4 | `attach_device_parent` failure logs a warning and does not block child activation |
-| F-09 | BusInstance.devices inconsistent with DeviceRegistry.devices | One path updated only one side | Snapshots may miss or include stale devices | Inconsistent query results | 3 | Publish adds to the registry and then to the bus under the binding lock; remove deletes from the registry and atomically detaches from the bus under the same lock, then fires `Removed` |
+| F-09 | BusInstance.devices inconsistent with DeviceRegistry.devices | One path updated only one side | Snapshots may miss or include stale devices | Inconsistent query results | 3 | Publish adds to the registry and then to the bus under the binding lock; unbind keeps the registry object but atomically detaches it from the bus under the same lock, then fires `Removed`; unregister deletes the registry entry and detaches from the bus in the same sequence |
+| F-13 | Topology write cannot get a stable snapshot | Parent chain changes or an ancestor disappears during the bounded retry loop | `attach_device_parent`/`detach_device_parent` return `ResourceBusy` | That topology update is deferred; the device remains on its previous parent | 3 | `MAX_TOPOLOGY_RETRIES` then a typed error; callers may retry, and no partial relation is left behind |
 | F-10 | Same-task recursive probe/unregister self-deadlocks the binding lock | A probe or hook calls `probe_device_desc`/`unregister_device_desc` for the descriptor it is binding | `kmutex` would panic on recursive locking | Probe/unregister path aborts | 3 | Both check `is_owned_by_current()` before locking and return `Busy`/`ResourceBusy`; the registration scan skips local re-entry with a warning |
 | F-11 | Device-node class index range is exhausted | More than 32 input or 64 DRM primary devices are active | New node registration returns `ResourceBusy` | The runtime device remains active but has no Linux node projection | 3 | Existing assignments remain unchanged; kclass logs the failure |
 | F-12 | Device-node subscriber panics | Projection callback has a kernel bug | Later callbacks do not run | One or more filesystem projections may miss the transition before panic aborts | 2 | Callbacks run without registry locks; panic isolation is unavailable in the current panic=abort kernel |
@@ -312,13 +342,25 @@ Severity levels:
   deletion: a `Pending` mismatch returns `BadState`; after a committed
   `Bound` removal, a delete miss completes teardown and still returns
   `BadState` (the device is terminal, not rolled back to `Active`).
-- A candidate probe failure runs the full rollback (`run_cleanups` +
-  `detach_driver` + `mark_removed`) and continues with the next candidate;
+- A candidate probe failure runs the full rollback (`detach_driver` +
+  `mark_removed` + `run_cleanups`), dispatches instance-scoped
+  `BindingRetired`, clears the slot, and continues with the next candidate;
   when the round ends the descriptor is requeued. A partially initialized
-  device is never leaked and never receives lifecycle events.
+  binding is never leaked, and the stable object is never discarded or
+  re-identified.
+- An unbind keeps the stable object and its topology, requeues the
+  descriptor, dispatches `Removed` while the slot still holds the terminal
+  binding, and clears the slot afterwards. Unregister deletes the object and
+  the descriptor, clearing topology and emitting one `Removed`.
 - The descriptor binding lock is released only after the terminal lifecycle
-  step (`Activated`, or `Removed` plus relation teardown), so a waiting
-  binder never observes an intermediate publication/removal state.
+  step (`Activated`, or `Removed` plus relation teardown and slot clearing),
+  so a waiting binder never observes an intermediate publication/removal
+  state.
+- A deferred device-node retirement callback re-checks the exact binding
+  before retiring a class entry; a `NotOwner`/`NotFound` result touches
+  nothing. Duplicate requests are first-wins: the second call reports
+  `DeferredExisting` and its callback is dropped after the node registry
+  spinlock is released, so captured destructors never run under that lock.
 - Subscriber callback panics are unprotected, but x-kernel runs
   `#![no_std]` without unwinding (panic = abort), so later subscribers
   cannot be silently skipped.
@@ -350,8 +392,10 @@ parent-attach, unregister and remove paths.
   primary nodes, with Linux ABI-sized pools of 32 and 64 entries.
 - `DeviceTopology::snapshot()` allocates a fresh `Vec` on every call; no
   caching.
-- Parent/child relations are single-level (no cross-bus hierarchy); a
-  multi-level device tree would need a recursive children structure.
+- The topology model stores one parent edge and a direct-children set per
+  device. Ancestor checks walk the parent chain (bounded), so deep or
+  cross-bus hierarchies are representable, but a continuously changing tree
+  can make one update return `ResourceBusy` instead of waiting indefinitely.
 - No IOMMU or device-isolation type abstractions; those belong to kernel
   adaptation layers.
 - Firmware-node association supports boot-static backends only. There is no
@@ -359,11 +403,11 @@ parent-attach, unregister and remove paths.
   so such a backend must not be published as `FwNode<'static>`.
 - `DeviceUse` keeps `Arc<DeviceObject>` for its public queries but releases
   the specific `Arc<BindingRuntime>` admitted at acquisition. `BindingRef` is
-  tied to the same instance, but it is only a read-only identity/lifecycle
-  handle: it carries no operation admission and no publish permission. A
-  future stable-object design still needs explicit old-handle isolation for
-  same-object rebinding; this ticket only makes the reference ownership
-  concrete.
+  tied to the same instance and is only a read-only identity/lifecycle handle:
+  it carries no operation admission and no publish permission. Same-object
+  rebinding is isolated by instance identity, not by generations: old
+  references can read the retired runtime forever, but cannot acquire use or
+  attach cleanups to the replacement.
 - `DeviceRecord` is a grouped, non-transactional snapshot. Cross-group
   combinations are observable and must not drive resource release or
   ownership decisions.
@@ -375,10 +419,13 @@ When modifying this module, verify:
 - No new `unsafe` blocks are added (currently zero unsafe; keep it that
   way).
 - New per-object locks do not violate the lock-ordering rule
-  (Registry → at most one of `relations` / `binding.meta` /
-  `binding.devres`), and no path takes two of those leaves at once.
+  (Registry → at most one of `slot` / `relations` / `binding.meta` /
+  `binding.devres`), and no path takes two of those leaves at once. A new
+  topology write must acquire every touched relation lock in ascending
+  `DeviceId` order and stay within the bounded walk/retry limits.
 - New lifecycle transitions update the `DeviceState` `as_u8`/`from_u8`
-  and `repr(u8)` mapping.
+  and `repr(u8)` mapping; new registration-side states update the
+  `Registration` projection in `DeviceObject::state()`.
 - New subscriber event kinds update `DeviceEventKind::COUNT` and
   `index()`.
 - New registry queries never hold a per-object lock.
@@ -393,13 +440,23 @@ When modifying this module, verify:
   review, including the restore-prior-state path when usage is non-zero.
 - Changes to `record_snapshot` preserve the documented grouping and do not
   silently introduce a second state owner or a cross-group invariant.
-- The `BindingRuntime` stays a single non-replaceable instance per object
-  (currently held via `Arc`); any proposal to reset/replace it must migrate
-  `DeviceUse` ownership and class-handle isolation in the same change.
+- A binding runtime is installed only into an empty slot, under the
+  descriptor binding lock, and is never reset or reinstalled. A proposal to
+  reuse a runtime must migrate `DeviceUse` ownership, `BindingRef`
+  exact-instance checks, class-handle isolation and cleanup ownership in the
+  same change.
+- Unbind/rebind keeps the stable object, topology and event ordering:
+  `Removed`/`BindingRetired` fire while the terminal runtime is still in the
+  slot, and the slot is cleared only afterwards.
 - New binding-facing APIs remain non-admission unless they return a
   `DeviceUse`-equivalent guard. `BindingRef` must not gain state mutation,
   usage accounting, or publish-permission semantics, and capture must keep
-  taking driver id/name under one `meta` critical section.
+  taking driver id/name under one `meta` critical section. `try_acquire` and
+  cleanup registration must keep revalidating the captured instance against
+  the object's current binding.
+- Binding-owned device nodes keep the owner check: unregister by binding
+  returns `NotOwner` for a foreign node, and deferred retirement re-checks
+  the exact binding rather than clearing by core id.
 - Cleanup changes preserve batch-taking, LIFO order, exactly-once execution
   per batch item, and lock-free callback execution.
 - New `DeviceDriver` methods keep the `DriverObject` delegation path
@@ -411,7 +468,8 @@ When modifying this module, verify:
 
 ResourceDesc/ResourceSet belong to device::resource. device::managed acquires
 driver-os-api guards through explicit providers and registers them directly with
-DeviceObject::add_cleanup. DeviceResource and the unused ResourceProvider
+`BindingRef::add_cleanup(&DeviceObject, ...)` on the captured binding instance.
+DeviceResource and the unused ResourceProvider
 aggregate are removed without a replacement facade.
 Cleanup remains framework-triggered, LIFO and outside the binding's devres
 lock; it is owned by that binding's runtime. Failed acquisition registers

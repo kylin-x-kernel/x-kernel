@@ -43,14 +43,19 @@ fn activate<T: Transport + 'static>(
     irq: IrqResource,
     pci_intx: Option<(&mut pci::PciConfigAccess, pci::DeviceFunction)>,
 ) -> DriverResult<()> {
+    let binding = parent
+        .binding_ref_for_lifecycle_write()
+        .ok_or(DriverError::BadState)?;
     let input = virtio::VirtIoInputDev::<VirtIoHalImpl, T>::try_new(transport, irq.virq().raw())?;
-    parent.devm_request_irq(irq, input.irq_handler())?;
+    binding.devm_request_irq(&parent, irq, input.irq_handler())?;
 
     if let Some((config, bdf)) = pci_intx {
         // The transport stays masked until the shared handler is registered.
         // LIFO cleanup masks INTx before the IRQ action is released.
         let mut cleanup_config = *config;
-        parent.add_cleanup(move || set_pci_intx_disabled(&mut cleanup_config, bdf, true));
+        binding.add_cleanup(&parent, move || {
+            set_pci_intx_disabled(&mut cleanup_config, bdf, true)
+        })?;
         set_pci_intx_disabled(config, bdf, false);
     }
 

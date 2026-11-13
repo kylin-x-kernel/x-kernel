@@ -11,6 +11,7 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use driver_base::DeviceKind;
 use driver_os_api::{
     DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource,
     IrqThreadHandler, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
@@ -202,6 +203,12 @@ impl IrqOp for TestProvider {
     }
 }
 
+/// Detached fixture whose slot holds a bound runtime, so devm helpers can
+/// capture the exact binding instance they attach cleanup to.
+fn test_bound_device() -> DeviceObject {
+    DeviceObject::new_bound_for_test(crate::DeviceId::new(0), DeviceKind::Char)
+}
+
 fn test_device(resources: Vec<ResourceDesc>) -> DeviceObject {
     DeviceObject::new(
         crate::DeviceId::new(0),
@@ -340,12 +347,17 @@ fn device_cleanups_run_lifo_order() {
     ORDER.lock().clear();
     NEXT.store(0, Ordering::Relaxed);
 
-    let device = test_device(Vec::new());
+    let device = test_bound_device();
+    let binding = device
+        .binding_ref()
+        .expect("bound fixture captures a binding ref");
     for id in 0..3 {
-        device.add_cleanup(move || {
-            let seq = NEXT.fetch_add(1, Ordering::Relaxed);
-            ORDER.lock().push((seq << 8) | id);
-        });
+        binding
+            .add_cleanup(&device, move || {
+                let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+                ORDER.lock().push((seq << 8) | id);
+            })
+            .expect("detached fixture admits cleanup registration");
     }
 
     device.run_cleanups();
@@ -364,20 +376,27 @@ fn devm_helpers_use_explicit_provider_for_cleanup() {
     };
     let irq = IrqResource::plain(driver_os_api::Virq::new(11), IrqTrigger::LevelHigh);
     let spec = DmaSpec::new(16, 8);
-    let device = test_device(vec![
-        ResourceDesc::Mmio(region),
-        ResourceDesc::Irq(irq),
-        ResourceDesc::Dma(spec),
-    ]);
+    let device = test_bound_device();
+    let binding = device
+        .binding_ref()
+        .expect("bound fixture captures a binding ref");
 
-    let ptr = devm_iomap_with_provider(&PROVIDER, &device, region, "explicit").unwrap();
+    let ptr =
+        devm_iomap_with_provider(&PROVIDER, &binding, &device, region, "explicit").unwrap();
     assert_eq!(
         ptr.as_ptr() as usize,
         PROVIDER.state.lock().mmio_words.as_ptr() as usize
     );
-    devm_request_irq_with_provider(&PROVIDER, &device, irq, Arc::new(|_| IrqEvent::HANDLED))
-        .unwrap();
-    let (cpu_addr, bus_addr) = devm_alloc_coherent_with_provider(&PROVIDER, &device, spec).unwrap();
+    devm_request_irq_with_provider(
+        &PROVIDER,
+        &binding,
+        &device,
+        irq,
+        Arc::new(|_| IrqEvent::HANDLED),
+    )
+    .unwrap();
+    let (cpu_addr, bus_addr) =
+        devm_alloc_coherent_with_provider(&PROVIDER, &binding, &device, spec).unwrap();
     assert_eq!(
         cpu_addr.as_ptr() as usize,
         PROVIDER.state.lock().dma.as_ptr() as usize
@@ -404,7 +423,10 @@ fn devm_helpers_use_explicit_provider_for_cleanup() {
 fn failed_managed_acquisitions_register_no_cleanup() {
     static PROVIDER: TestProvider = TestProvider::new();
     PROVIDER.reset();
-    let device = test_device(Vec::new());
+    let device = test_bound_device();
+    let binding = device
+        .binding_ref()
+        .expect("bound fixture captures a binding ref");
     let region = MmioRegion {
         base: 0x5000,
         size: 8,
@@ -413,17 +435,23 @@ fn failed_managed_acquisitions_register_no_cleanup() {
     let spec = DmaSpec::new(8, 8);
     PROVIDER.set_map_error(ResError::MappingFailed);
     assert_eq!(
-        devm_iomap_with_provider(&PROVIDER, &device, region, "failure"),
+        devm_iomap_with_provider(&PROVIDER, &binding, &device, region, "failure"),
         Err(ResError::MappingFailed)
     );
     PROVIDER.set_irq_error(ResError::Busy);
     assert_eq!(
-        devm_request_irq_with_provider(&PROVIDER, &device, irq, Arc::new(|_| IrqEvent::HANDLED)),
+        devm_request_irq_with_provider(
+            &PROVIDER,
+            &binding,
+            &device,
+            irq,
+            Arc::new(|_| IrqEvent::HANDLED),
+        ),
         Err(ResError::Busy)
     );
     PROVIDER.set_dma_error(ResError::NoMemory);
     assert_eq!(
-        devm_alloc_coherent_with_provider(&PROVIDER, &device, spec),
+        devm_alloc_coherent_with_provider(&PROVIDER, &binding, &device, spec),
         Err(ResError::NoMemory)
     );
     device.run_cleanups();
@@ -441,10 +469,14 @@ fn failed_managed_acquisitions_register_no_cleanup() {
 fn managed_threaded_guards_release_once_after_success_only() {
     static PROVIDER: TestProvider = TestProvider::new();
     PROVIDER.reset();
-    let device = test_device(Vec::new());
+    let device = test_bound_device();
+    let binding = device
+        .binding_ref()
+        .expect("bound fixture captures a binding ref");
     let irq = IrqResource::plain(driver_os_api::Virq::new(13), IrqTrigger::LevelHigh);
     super::devm_request_threaded_irq_with_provider(
         &PROVIDER,
+        &binding,
         &device,
         irq,
         Arc::new(|_| IrqEvent::WAKE_THREAD),
@@ -454,6 +486,7 @@ fn managed_threaded_guards_release_once_after_success_only() {
     .unwrap();
     super::devm_request_threaded_irq_default_with_provider(
         &PROVIDER,
+        &binding,
         &device,
         irq,
         Arc::new(|_| IrqEvent::HANDLED),
@@ -464,6 +497,7 @@ fn managed_threaded_guards_release_once_after_success_only() {
     assert_eq!(
         super::devm_request_threaded_irq_default_with_provider(
             &PROVIDER,
+            &binding,
             &device,
             irq,
             Arc::new(|_| IrqEvent::HANDLED),
