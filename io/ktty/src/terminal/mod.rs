@@ -10,13 +10,16 @@ use core::sync::atomic::AtomicU32;
 use bytemuck::AnyBitPattern;
 use kspin::SpinNoPreempt;
 use ksync::Mutex;
+use posix_types::{UserRead, UserWrite};
 
 pub mod job;
 pub mod ldisc;
 pub mod termios;
 
+/// `struct winsize`: `#[repr(C)]` four-`u16` aggregate, so every byte pattern
+/// is a valid value and the layout has no implicit padding for either direction.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, AnyBitPattern)]
+#[derive(Debug, Copy, Clone, AnyBitPattern, UserRead, UserWrite)]
 pub struct WindowSize {
     pub ws_row: u16,
     pub ws_col: u16,

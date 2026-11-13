@@ -77,8 +77,11 @@ hardware blanking or complete VT keyboard translation. Registry-owned named
 identities are projected by devfs/procfs/sysfs, with failed/retired registrations
 excluded as described in KVFS's registration contract.
 
-- `TC*`/`TIOC*` ioctls carry user addresses and must be copied through
-  the `osvm` user-memory access interface.
+- `TC*`/`TIOC*` ioctls carry user addresses and must be copied through the
+  typed `posix_types::UserPtr`/`UserConstPtr` interface (`UserPtr::<T>::from`
+  plus `read_vm`/`write_vm`), which wraps the `osvm` user-memory access
+  interface. Raw `arg as *mut T`/`arg as *const T` casts are not used; the
+  payload type is stated at the ABI boundary.
 - The PGID passed to `TIOCSPGRP` may be invalid, exited, or belong to
   another session.
 - `O_NOCTTY` controls whether opening a TTY may implicitly acquire the
@@ -91,9 +94,23 @@ excluded as described in KVFS's registration contract.
 ## Memory-Safety Invariants
 
 ioctl user pointers are dereferenced only at the ABI boundary in
-`src/tty/mod.rs` and `src/tty/vt.rs`, through `read_vm`/`write_vm` with user-address
-validation. The job-control layer stores no user pointers — only weak
-references to `Session` and `ProcessGroup` objects.
+`src/tty/mod.rs` and `src/tty/vt.rs`, through `UserPtr`/`UserConstPtr`
+`read_vm`/`write_vm` with user-address validation. The job-control layer stores
+no user pointers — only weak references to `Session` and `ProcessGroup`
+objects.
+
+Copying a payload by value additionally requires `T: UserRead`/`UserWrite`, so
+each type stored to or read from user memory opts in explicitly. The console and
+VT payload types (`WindowSize` in `src/terminal/mod.rs`; `Termios`/`Termios2` in
+`src/terminal/termios.rs`; `VtMode`/`VtState` in `src/tty/vt.rs`) take
+`#[derive(UserRead, UserWrite)]`, the same marker derives `posix_types` applies
+to its own ABI types. Each is a `repr(C)` aggregate whose size is a multiple of
+its alignment and which has no interior padding (8, 36, 44, 8 and 6 bytes
+respectively), so every byte pattern read from user memory is a valid value and
+every value written back is fully initialized. Array payloads that have no named
+local type (`[i32; 20]`, `[u16; 3]`, `[u8; 8]`) use the blanket array impls.
+The markers assert the layout only; they do not validate a caller's buffer size,
+alignment or contents, which remain the ioctl handler's responsibility.
 
 ## Thread Safety
 

@@ -37,7 +37,7 @@ ktime_types.workspace = true
 ktask.workspace = true
 kvfs.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl"] }
-osvm.workspace = true
+posix-types.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
 unittest.workspace = true

@@ -18,7 +18,7 @@ use klazy::Once;
 use kprocess::{AsThread, ControllingTerminal, Process};
 use ksync::Mutex;
 use kvfs::{CharacterDeviceRegistration, DeviceId, cdev_add_named, cdev_del};
-use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::{UserConstPtr, UserPtr, UserRead, UserWrite};
 
 use super::{Tty, TtyKind};
 use crate::port::{InputIngress, ProcessMode, TtyConfig, TtyRead, TtyWrite};
@@ -40,8 +40,10 @@ const KDSKBMODE: u32 = 0x4b45;
 /// `<linux/kd.h>` `KB_101`: a 101-key keyboard, reported as one char.
 const KB_101: u8 = 0x02;
 
+/// `struct vt_mode`: two bytes followed by three `i16` fields. The 8-byte
+/// layout has no implicit padding, so either copy direction is bit-valid.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, AnyBitPattern)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, AnyBitPattern, UserRead, UserWrite)]
 struct VtMode {
     mode: u8,
     waitv: u8,
@@ -171,8 +173,10 @@ impl ConsoleState {
     }
 }
 
+/// `struct vt_stat`: three `u16` fields, so the 6-byte layout has no implicit
+/// padding and every copied byte pattern is a valid value.
 #[repr(C)]
-#[derive(Clone, Copy, AnyBitPattern)]
+#[derive(Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
 struct VtState {
     active: u16,
     signal: u16,
@@ -266,8 +270,8 @@ pub(super) fn ioctl<R: TtyRead, W: TtyWrite>(
             .map_err(|_| KError::NotATty)?;
         console.writer.state.lock().refresh_controller();
         match cmd {
-            VT_GETSTATE => (arg as *mut VtState).write_vm(fixed_vt_state())?,
-            VT_OPENQRY => (arg as *mut i32).write_vm(-1)?,
+            VT_GETSTATE => UserPtr::<VtState>::from(arg).write_vm(fixed_vt_state())?,
+            VT_OPENQRY => UserPtr::<i32>::from(arg).write_vm(-1)?,
             VT_ACTIVATE | VT_WAITACTIVE => {
                 require_active_console(arg)?;
                 console.writer.state.lock().refresh_controller();
@@ -278,10 +282,10 @@ pub(super) fn ioctl<R: TtyRead, W: TtyWrite>(
                     state.refresh_controller();
                     state.mode
                 };
-                (arg as *mut VtMode).write_vm(mode)?;
+                UserPtr::<VtMode>::from(arg).write_vm(mode)?;
             }
             VT_SETMODE => {
-                let mode = (arg as *const VtMode).read_vm()?.validate()?;
+                let mode = UserConstPtr::<VtMode>::from(arg).read_vm()?.validate()?;
                 let current = ktask::current();
                 let caller = current
                     .try_as_thread()
@@ -312,12 +316,12 @@ pub(super) fn ioctl<R: TtyRead, W: TtyWrite>(
                         state.keyboard as i32
                     }
                 };
-                (arg as *mut i32).write_vm(value)?;
+                UserPtr::<i32>::from(arg).write_vm(value)?;
             }
             // Linux reports these as a single char; this VT keeps no LED state
             // of its own, so the flags read as zero.
-            KDGKBTYPE => (arg as *mut u8).write_vm(KB_101)?,
-            KDGKBLED => (arg as *mut u8).write_vm(0)?,
+            KDGKBTYPE => UserPtr::<u8>::from(arg).write_vm(KB_101)?,
+            KDGKBLED => UserPtr::<u8>::from(arg).write_vm(0)?,
             _ => return Err(KError::NotATty),
         }
         Ok(0)

@@ -11,7 +11,7 @@ use kprocess::{AsThread, ControllingTerminal, Pid, Process, ProcessGroup, SetTer
 use ksync::Mutex;
 use ktask::future::block_on;
 use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode, poll_file_io};
-use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::{UserConstPtr, UserPtr};
 
 use crate::{
     port::{InputIngress, TtyConfig, TtyPort, TtyRead, TtyWrite},
@@ -252,25 +252,27 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         }
         Some((|| {
             match cmd {
-                KDGETMODE => (arg as *mut i32).write_vm(KD_TEXT)?,
-                KDGKBMODE => (arg as *mut i32).write_vm(K_XLATE)?,
+                KDGETMODE => UserPtr::<i32>::from(arg).write_vm(KD_TEXT)?,
+                KDGKBMODE => UserPtr::<i32>::from(arg).write_vm(K_XLATE)?,
                 // Linux stores these as a single char/unsigned char: writing an
                 // `int` would corrupt the three bytes after the caller's buffer
                 // (and fault when the char ends a writable mapping).
-                KDGKBTYPE => (arg as *mut u8).write_vm(KB_101 as u8)?,
-                KDGKBLED => (arg as *mut u8).write_vm(0)?,
-                TIOCGSOFTCAR => (arg as *mut i32).write_vm(1)?,
-                TIOCSERGETLSR => (arg as *mut i32).write_vm(TIOCSER_TEMT)?,
-                KDGKBMETA | TIOCGPKT | TIOCGEXCL | TIOCMGET => (arg as *mut i32).write_vm(0)?,
-                TIOCGLCKTRMIOS => (arg as *mut Termios)
+                KDGKBTYPE => UserPtr::<u8>::from(arg).write_vm(KB_101 as u8)?,
+                KDGKBLED => UserPtr::<u8>::from(arg).write_vm(0)?,
+                TIOCGSOFTCAR => UserPtr::<i32>::from(arg).write_vm(1)?,
+                TIOCSERGETLSR => UserPtr::<i32>::from(arg).write_vm(TIOCSER_TEMT)?,
+                KDGKBMETA | TIOCGPKT | TIOCGEXCL | TIOCMGET => {
+                    UserPtr::<i32>::from(arg).write_vm(0)?
+                }
+                TIOCGLCKTRMIOS => UserPtr::<Termios>::from(arg)
                     .write_vm(*self.terminal.termios.lock().as_ref().deref())?,
                 // struct serial_icounter_struct is 20 ints; all counters zero.
-                TIOCGICOUNT => (arg as *mut [i32; 20]).write_vm([0; 20])?,
-                VT_OPENQRY => (arg as *mut i32).write_vm(1)?,
+                TIOCGICOUNT => UserPtr::<[i32; 20]>::from(arg).write_vm([0; 20])?,
+                VT_OPENQRY => UserPtr::<i32>::from(arg).write_vm(1)?,
                 // struct vt_stat { active, signal, state }; report VT 1 active.
-                VT_GETSTATE => (arg as *mut [u16; 3]).write_vm([1, 0, 0])?,
+                VT_GETSTATE => UserPtr::<[u16; 3]>::from(arg).write_vm([1, 0, 0])?,
                 // struct vt_mode zeroed == VT_AUTO with no switch signals.
-                VT_GETMODE => (arg as *mut [u8; 8]).write_vm([0; 8])?,
+                VT_GETMODE => UserPtr::<[u8; 8]>::from(arg).write_vm([0; 8])?,
                 // VT keyboard-table getters have no serial-console backing.
                 // Linux returns ENOTTY for them on a non-VT console rather than
                 // reporting success with an untouched output buffer, so do the
@@ -387,24 +389,25 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
             // Generic N_TTY requests serve every tty kind (Linux
             // n_tty_ioctl_helper): every endpoint owns an ingress, has no
             // pending output buffer of its own and runs the only discipline.
-            FIONREAD => (arg as *mut i32).write_vm(self.ingress.readable_bytes() as i32)?,
-            TIOCOUTQ => (arg as *mut i32).write_vm(0)?,
-            TIOCGETD => (arg as *mut i32).write_vm(N_TTY)?,
+            FIONREAD => UserPtr::<i32>::from(arg).write_vm(self.ingress.readable_bytes() as i32)?,
+            TIOCOUTQ => UserPtr::<i32>::from(arg).write_vm(0)?,
+            TIOCGETD => UserPtr::<i32>::from(arg).write_vm(N_TTY)?,
             // Linux's `tty_set_ldisc` succeeds when the requested discipline is
             // already N_TTY and rejects anything this kernel does not
             // implement, so console setup that explicitly restores N_TTY works.
             TIOCSETD => {
-                if (arg as *const i32).read_vm()? != N_TTY {
+                if UserConstPtr::<i32>::from(arg).read_vm()? != N_TTY {
                     return Err(KError::InvalidInput);
                 }
             }
-            TCGETS => {
-                (arg as *mut Termios).write_vm(*self.terminal.termios.lock().as_ref().deref())?
+            TCGETS => UserPtr::<Termios>::from(arg)
+                .write_vm(*self.terminal.termios.lock().as_ref().deref())?,
+            TCGETS2 => {
+                UserPtr::<Termios2>::from(arg).write_vm(*self.terminal.termios.lock().as_ref())?
             }
-            TCGETS2 => (arg as *mut Termios2).write_vm(*self.terminal.termios.lock().as_ref())?,
             TCSETS | TCSETSF | TCSETSW => {
                 *self.terminal.termios.lock() =
-                    Arc::new(Termios2::new((arg as *const Termios).read_vm()?));
+                    Arc::new(Termios2::new(UserConstPtr::<Termios>::from(arg).read_vm()?));
                 if cmd == TCSETSF {
                     self.input.lock().drain_input();
                 }
@@ -413,7 +416,8 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
                 self.ingress.notify_space();
             }
             TCSETS2 | TCSETSF2 | TCSETSW2 => {
-                *self.terminal.termios.lock() = Arc::new((arg as *const Termios2).read_vm()?);
+                *self.terminal.termios.lock() =
+                    Arc::new(UserConstPtr::<Termios2>::from(arg).read_vm()?);
                 if cmd == TCSETSF2 {
                     self.input.lock().drain_input();
                 }
@@ -435,7 +439,7 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
                     let caller_session = kprocess::current_user_process().group().session();
                     self.terminal.job_control.foreground_for(&caller_session)?
                 };
-                (arg as *mut i32).write_vm(foreground.pgid() as i32)?;
+                UserPtr::<i32>::from(arg).write_vm(foreground.pgid() as i32)?;
             }
             TIOCGSID => {
                 let session = if self.kind == TtyKind::PtyMaster {
@@ -444,10 +448,10 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
                     let caller_session = kprocess::current_user_process().group().session();
                     self.terminal.job_control.session_for(&caller_session)?
                 };
-                (arg as *mut u32).write_vm(session.sid())?;
+                UserPtr::<u32>::from(arg).write_vm(session.sid())?;
             }
             TIOCSPGRP => {
-                let pgid = (arg as *const i32).read_vm()?;
+                let pgid = UserConstPtr::<i32>::from(arg).read_vm()?;
                 if pgid <= 0 {
                     return Err(KError::InvalidInput);
                 }
@@ -458,12 +462,15 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
                     .job_control
                     .set_foreground_for(&current_session, &target_group)?;
             }
-            TIOCGWINSZ => (arg as *mut WindowSize).write_vm(*self.terminal.window_size.lock())?,
+            TIOCGWINSZ => {
+                UserPtr::<WindowSize>::from(arg).write_vm(*self.terminal.window_size.lock())?
+            }
             TIOCSWINSZ => {
-                *self.terminal.window_size.lock() = (arg as *const WindowSize).read_vm()?;
+                *self.terminal.window_size.lock() =
+                    UserConstPtr::<WindowSize>::from(arg).read_vm()?;
             }
             TIOCSPTLCK => {}
-            TIOCGPTN => (arg as *mut u32).write_vm(self.pty_number())?,
+            TIOCGPTN => UserPtr::<u32>::from(arg).write_vm(self.pty_number())?,
             TIOCSCTTY => {
                 if arg != 0 {
                     // Linux supports arg == 1 for privileged terminal stealing.

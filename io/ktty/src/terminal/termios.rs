@@ -11,9 +11,13 @@ use linux_raw_sys::general::{
     ONLCR, OPOST, VDISCARD, VEOF, VEOL, VEOL2, VERASE, VINTR, VKILL, VLNEXT, VQUIT, VREPRINT,
     VWERASE, speed_t, tcflag_t,
 };
+use posix_types::{UserRead, UserWrite};
 
+/// Linux `struct termios`: four `tcflag_t` words, a `u8` and a 19-byte array.
+/// The 36-byte layout is a multiple of its 4-byte alignment, so there is no
+/// implicit padding and every copied byte pattern is a valid value.
 #[repr(C)]
-#[derive(Clone, Copy, AnyBitPattern)]
+#[derive(Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
 pub struct Termios {
     c_iflag: tcflag_t,
     c_oflag: tcflag_t,
@@ -116,8 +120,11 @@ impl Termios {
     }
 }
 
+/// Linux `struct termios2`: the base `Termios` followed by two `speed_t`
+/// words. The embedded 36-byte prefix is already 4-byte aligned, so the
+/// 44-byte layout carries no implicit padding.
 #[repr(C)]
-#[derive(Clone, Copy, AnyBitPattern)]
+#[derive(Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
 pub struct Termios2 {
     termios: Termios,
     c_ispeed: speed_t,

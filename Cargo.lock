@@ -3600,7 +3600,7 @@ dependencies = [
  "kvfs",
  "kworkng",
  "linux-raw-sys",
- "osvm",
+ "posix-types",
  "ringbuf",
  "unittest",
 ]
