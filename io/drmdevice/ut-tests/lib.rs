@@ -14,15 +14,20 @@ use crate::{
         ObjectType, PROPS, PropKind, apply, atomic_flags_valid, mode_blob_bytes, mode_from_bytes,
         wait_vblank_crtc_valid, wait_vblank_flags_valid,
     },
-    model::vblank::{SequenceTracker, TickHandler, VblankClockState, VblankRequest, resolve_absolute, resolve_relative},
-    model::syncobj::{Syncobj, SyncobjHandle, SyncobjTable},
+    model::{
+        syncobj::{Syncobj, SyncobjHandle, SyncobjTable},
+        vblank::{
+            SequenceTracker, TickHandler, VblankClockState, VblankRequest, resolve_absolute,
+            resolve_relative,
+        },
+    },
     prelude::*,
     sync::{
         dma_fence::{DmaFence, SyncContext, Wait, new_anonymous_fence},
         dma_resv::{DmaResv, ResvUsage},
         fence_access::fence_array,
-        fence_chain,
         fence_array::FenceArray,
+        fence_chain,
         fence_list::{FenceList, first_error, is_signaled as list_is_signaled},
     },
 };
@@ -115,12 +120,10 @@ fn command_numbers_match_the_uapi_header() {
             .find(|desc| desc.name == *name)
             .unwrap_or_else(|| panic!("{name} must be in the table"));
         let encoded_size = ((desc.cmd >> 16) & 0x3fff) as u16;
+        assert_eq!(encoded_size, *size, "{name} has the wrong request size");
         assert_eq!(
-            encoded_size, *size,
-            "{name} has the wrong request size"
-        );
-        assert_eq!(
-            (desc.cmd & 0xff) as u8, *number,
+            (desc.cmd & 0xff) as u8,
+            *number,
             "{name} has the wrong command number"
         );
     }
@@ -411,8 +414,10 @@ struct FakeBackend {
 
 impl FakeBackend {
     fn set_resolution(&self, width: u32, height: u32) {
-        self.resolution
-            .store((u64::from(width) << 32) | u64::from(height), Ordering::Relaxed);
+        self.resolution.store(
+            (u64::from(width) << 32) | u64::from(height),
+            Ordering::Relaxed,
+        );
         self.pending_change.store(true, Ordering::Relaxed);
     }
 
@@ -524,7 +529,9 @@ fn removed_framebuffer_stays_alive_while_it_is_scanned() {
     let (dev, backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&file, object.clone(), object_spec(&object), 0).expect("fb");
+    let fb = dev
+        .add_framebuffer(&file, object.clone(), object_spec(&object), 0)
+        .expect("fb");
     bind(&dev, fb).expect("present");
     assert_eq!(backend.presented(), 1);
 
@@ -541,7 +548,9 @@ fn removed_framebuffer_stays_alive_while_it_is_scanned() {
 
     // The next successful present is the moment the host stops scanning it.
     let next = GemObject::create(&dev, 64, 64).expect("dumb");
-    let next_fb = dev.add_framebuffer(&file, next.clone(), object_spec(&next), 0).expect("fb");
+    let next_fb = dev
+        .add_framebuffer(&file, next.clone(), object_spec(&next), 0)
+        .expect("fb");
     bind(&dev, next_fb).expect("present");
     assert_eq!(
         backend.destroyed(),
@@ -579,7 +588,9 @@ fn dirty_flush_never_rebinds_the_scanout() {
     let (dev, backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&file, object.clone(), object_spec(&object), 0).expect("fb");
+    let fb = dev
+        .add_framebuffer(&file, object.clone(), object_spec(&object), 0)
+        .expect("fb");
     bind(&dev, fb).expect("present");
     let presented = backend.presented();
 
@@ -640,7 +651,9 @@ fn failed_present_keeps_both_resources_alive_until_the_next_present() {
     // First target presented, then removed from the registry: only the scanout
     // slot keeps its resource alive.
     let first = GemObject::create(&dev, 64, 64).expect("dumb");
-    let first_fb = dev.add_framebuffer(&file, first.clone(), object_spec(&first), 0).expect("fb");
+    let first_fb = dev
+        .add_framebuffer(&file, first.clone(), object_spec(&first), 0)
+        .expect("fb");
     bind(&dev, first_fb).expect("present");
     dev.remove_framebuffer(&file, first_fb).expect("rmfb");
     assert_eq!(backend.destroyed(), 0);
@@ -648,7 +661,9 @@ fn failed_present_keeps_both_resources_alive_until_the_next_present() {
     // A failed present means the host may have switched anyway: the attempted
     // resource must stay alive as well.
     let second = GemObject::create(&dev, 64, 64).expect("dumb");
-    let second_fb = dev.add_framebuffer(&file, second.clone(), window_spec(&second), 0).expect("fb");
+    let second_fb = dev
+        .add_framebuffer(&file, second.clone(), window_spec(&second), 0)
+        .expect("fb");
     backend
         .fail_next_present
         .store(true, core::sync::atomic::Ordering::Relaxed);
@@ -662,7 +677,9 @@ fn failed_present_keeps_both_resources_alive_until_the_next_present() {
 
     // The next successful present settles both.
     let third = GemObject::create(&dev, 64, 64).expect("dumb");
-    let third_fb = dev.add_framebuffer(&file, third.clone(), object_spec(&third), 0).expect("fb");
+    let third_fb = dev
+        .add_framebuffer(&file, third.clone(), object_spec(&third), 0)
+        .expect("fb");
     // The third present retired the first target's object resource; the
     // failed window resource is still uncertain until a present succeeds for
     // the framebuffer that owns it.
@@ -737,7 +754,10 @@ impl display::ExportedDmaBuf for ForeignExport {
             .fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
     }
 
-    fn map(&self, _attachment: &display::DmaBufAttachment) -> Result<display::MappedMemory, display::DriverError> {
+    fn map(
+        &self,
+        _attachment: &display::DmaBufAttachment,
+    ) -> Result<display::MappedMemory, display::DriverError> {
         Ok(display::MappedMemory {
             start: self.start as u64,
             len: self.len as u64,
@@ -768,8 +788,7 @@ fn a_foreign_dmabuf_is_imported_through_the_kernel_contract() {
     let (dev, _backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     // Memory this card never allocated: a window the host exporter reports.
-    let pages =
-        alloc_zeroed_pages_exact_ref(1, PAGE_SIZE_4K, UsageKind::Global).expect("pages");
+    let pages = alloc_zeroed_pages_exact_ref(1, PAGE_SIZE_4K, UsageKind::Global).expect("pages");
     let export = Arc::new(ForeignExport {
         start: pages.phys_addr().as_usize(),
         len: PAGE_SIZE_4K,
@@ -809,13 +828,17 @@ fn a_foreign_dmabuf_is_imported_through_the_kernel_contract() {
 
     // Dropping the object detaches from the exporter exactly once.
     assert_eq!(
-        export.attachments.load(core::sync::atomic::Ordering::Relaxed),
+        export
+            .attachments
+            .load(core::sync::atomic::Ordering::Relaxed),
         1
     );
     file.handles.lock().clear();
     drop(object);
     assert_eq!(
-        export.attachments.load(core::sync::atomic::Ordering::Relaxed),
+        export
+            .attachments
+            .load(core::sync::atomic::Ordering::Relaxed),
         0,
         "the object's lifetime is the attachment's lifetime"
     );
@@ -1180,7 +1203,9 @@ fn closefb_refuses_a_framebuffer_that_is_still_bound() {
     let (dev, _backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&file, object.clone(), object_spec(&object), 0).expect("fb");
+    let fb = dev
+        .add_framebuffer(&file, object.clone(), object_spec(&object), 0)
+        .expect("fb");
     bind(&dev, fb).expect("present");
 
     assert_eq!(
@@ -1198,18 +1223,14 @@ fn another_file_cannot_remove_a_framebuffer() {
     let owner = dev.open_file(MinorKind::Primary).expect("open");
     let other = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&owner, object.clone(), object_spec(&object), 0).expect("fb");
+    let fb = dev
+        .add_framebuffer(&owner, object.clone(), object_spec(&object), 0)
+        .expect("fb");
 
     // Linux looks the id up in `file_priv->fbs`, so a foreign id is
     // indistinguishable from an unknown one.
-    assert_eq!(
-        dev.remove_framebuffer(&other, fb),
-        Err(DrmError::NotFound)
-    );
-    assert_eq!(
-        dev.close_framebuffer(&other, fb),
-        Err(DrmError::NotFound)
-    );
+    assert_eq!(dev.remove_framebuffer(&other, fb), Err(DrmError::NotFound));
+    assert_eq!(dev.close_framebuffer(&other, fb), Err(DrmError::NotFound));
     assert!(dev.has_framebuffer(fb), "a foreign file must not remove it");
 
     dev.remove_framebuffer(&owner, fb).expect("owner rmfb");
@@ -1225,7 +1246,8 @@ fn destroying_the_legacy_blob_succeeds_and_clears_the_slot() {
     assert!(dev.blob_bytes(id).is_some());
     // The ioctl path destroys it exactly once and reports success, and the
     // legacy slot no longer names it (a later modeset must not free it twice).
-    dev.destroy_client_blob(None, id).expect("destroy legacy blob");
+    dev.destroy_client_blob(None, id)
+        .expect("destroy legacy blob");
     assert!(dev.blob_bytes(id).is_none());
     assert_eq!(
         dev.legacy_mode_blob(),
@@ -1233,10 +1255,7 @@ fn destroying_the_legacy_blob_succeeds_and_clears_the_slot() {
         "destroying the blob must clear the device's legacy slot"
     );
     // A second destroy is ENOENT, and the slot no longer names it.
-    assert_eq!(
-        dev.destroy_client_blob(None, id),
-        Err(DrmError::NotFound)
-    );
+    assert_eq!(dev.destroy_client_blob(None, id), Err(DrmError::NotFound));
 }
 
 #[def_test]
@@ -1329,7 +1348,9 @@ fn page_flip_on_a_disabled_crtc_is_rejected_without_binding() {
     let (dev, backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&file, object.clone(), object_spec(&object), 0).expect("fb");
+    let fb = dev
+        .add_framebuffer(&file, object.clone(), object_spec(&object), 0)
+        .expect("fb");
     let mut request = DrmModeCrtcPageFlip {
         crtc_id: CRTC_ID,
         fb_id: fb.raw(),
@@ -1355,10 +1376,7 @@ fn page_flip_on_a_disabled_crtc_is_rejected_without_binding() {
 #[def_test]
 fn plane_coordinate_metadata_matches_the_signed_writer() {
     let (dev, _backend) = fake_device();
-    for (id, name) in [
-        (PROP_PLANE_CRTC_X, "CRTC_X"),
-        (PROP_PLANE_CRTC_Y, "CRTC_Y"),
-    ] {
+    for (id, name) in [(PROP_PLANE_CRTC_X, "CRTC_X"), (PROP_PLANE_CRTC_Y, "CRTC_Y")] {
         let desc = PROPS
             .iter()
             .find(|desc| desc.id == PropertyId::from_raw(id))
@@ -1379,8 +1397,14 @@ fn plane_coordinate_metadata_matches_the_signed_writer() {
         let mut state = KmsState::default();
         write(&mut state, *min, &dev).expect("advertised minimum must be accepted");
         write(&mut state, *max, &dev).expect("advertised maximum must be accepted");
-        assert_eq!(write(&mut state, 0x8000_0000, &dev), Err(DrmError::InvalidInput));
-        assert_eq!(write(&mut state, u32::MAX as u64, &dev), Err(DrmError::InvalidInput));
+        assert_eq!(
+            write(&mut state, 0x8000_0000, &dev),
+            Err(DrmError::InvalidInput)
+        );
+        assert_eq!(
+            write(&mut state, u32::MAX as u64, &dev),
+            Err(DrmError::InvalidInput)
+        );
     }
 }
 
@@ -1559,16 +1583,19 @@ fn connector_mode_tracks_a_host_resize() {
     let backend = Arc::new(FakeBackend::default());
     let dev = DrmDevice::new_with_backend(backend.clone());
 
-    let mode = current_mode(&dev);
+    let mode = current_mode(&dev).expect("mode for initial geometry");
     assert_eq!((mode.hdisplay, mode.vdisplay), (1280, 800));
     assert_eq!(mode_name(&mode), "1280x800");
 
     // A resized host window must change both the pixels and the mode name, so
     // a client that re-reads the mode list can tell the new mode apart.
     backend.set_resolution(1024, 768);
-    let mode = current_mode(&dev);
+    let mode = current_mode(&dev).expect("mode for resized geometry");
     assert_eq!((mode.hdisplay, mode.vdisplay), (1024, 768));
     assert_eq!(mode_name(&mode), "1024x768");
+    let total_pixels = u64::from(mode.htotal) * u64::from(mode.vtotal);
+    let refresh_hz = (u64::from(mode.clock) * 1000 + total_pixels / 2) / total_pixels;
+    assert_eq!(refresh_hz, u64::from(mode.vrefresh));
 
     // The query envelope must not shrink to the new mode, otherwise a client
     // that grew the window could never ask for the larger size again.
@@ -1576,6 +1603,21 @@ fn connector_mode_tracks_a_host_resize() {
     let mut resources = DrmModeCardRes::default();
     DrmModeCardRes::handle(&dev, &file, 0, &mut resources).expect("resources");
     assert_eq!((resources.max_width, resources.max_height), (8192, 8192));
+}
+
+#[def_test]
+fn virtual_mode_checks_timing_fields_and_uses_wide_clock_arithmetic() {
+    let (dev, backend) = fake_device();
+    backend.set_resolution(16_384, 16_384);
+    let mode = current_mode(&dev).expect("geometry fits the timing fields");
+    assert_eq!((mode.htotal, mode.vtotal), (16_544, 16_414));
+    assert_eq!(mode.clock, 16_293_192);
+
+    backend.set_resolution(u32::from(u16::MAX), 1024);
+    assert!(
+        current_mode(&dev).is_none(),
+        "horizontal blanking must fit u16"
+    );
 }
 
 #[def_test]
@@ -1646,9 +1688,15 @@ fn getresources_framebuffer_count_is_per_open_file() {
     let owner = dev.open_file(MinorKind::Primary).expect("owner");
     let other = dev.open_file(MinorKind::Primary).expect("other");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let first = dev.add_framebuffer(&owner, object.clone(), object_spec(&object), 0).expect("fb");
-    let second = dev.add_framebuffer(&owner, object.clone(), object_spec(&object), 0).expect("fb");
-    let foreign = dev.add_framebuffer(&other, object.clone(), object_spec(&object), 0).expect("foreign");
+    let first = dev
+        .add_framebuffer(&owner, object.clone(), object_spec(&object), 0)
+        .expect("fb");
+    let second = dev
+        .add_framebuffer(&owner, object.clone(), object_spec(&object), 0)
+        .expect("fb");
+    let foreign = dev
+        .add_framebuffer(&other, object.clone(), object_spec(&object), 0)
+        .expect("foreign");
 
     let mut request = DrmModeCardRes::default();
     DrmModeCardRes::handle(&dev, &owner, 0, &mut request).expect("owner query");
@@ -1670,7 +1718,9 @@ fn getresources_count_query_does_not_access_the_id_buffer() {
     let (dev, _backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
     let object = GemObject::create(&dev, 64, 64).expect("dumb");
-    let fb = dev.add_framebuffer(&file, object.clone(), object_spec(&object), 0).expect("fb");
+    let fb = dev
+        .add_framebuffer(&file, object.clone(), object_spec(&object), 0)
+        .expect("fb");
     let mut request = DrmModeCardRes {
         fb_id_ptr: UserPtr::from(1_usize),
         ..Default::default()
@@ -1877,7 +1927,6 @@ fn oversized_drm_mmap_does_not_retain_gem_backing() {
     ));
     assert!(mapper.range.is_none());
 
-
     drop(state.take_handle(handle).unwrap());
     drop(object);
     assert!(
@@ -2035,21 +2084,35 @@ fn relative_wait_counts_from_the_files_cursor() {
     let mut tracker = SequenceTracker::default();
     assert_eq!(resolve_relative(&mut tracker, 10, 0), VblankRequest::AtNext);
     assert_eq!(resolve_relative(&mut tracker, 10, 1), VblankRequest::AtNext);
-    assert_eq!(resolve_relative(&mut tracker, 12, 4), VblankRequest::Ahead(3));
+    assert_eq!(
+        resolve_relative(&mut tracker, 12, 4),
+        VblankRequest::Ahead(3)
+    );
 }
 
 #[def_test]
 fn absolute_targets_resolve_in_the_clients_wrap_domain() {
     let mut tracker = SequenceTracker::default();
-    assert_eq!(resolve_absolute(&mut tracker, 100, 100), VblankRequest::Past);
+    assert_eq!(
+        resolve_absolute(&mut tracker, 100, 100),
+        VblankRequest::Past
+    );
     assert_eq!(resolve_absolute(&mut tracker, 100, 99), VblankRequest::Past);
-    assert_eq!(resolve_absolute(&mut tracker, 100, 101), VblankRequest::AtNext);
-    assert_eq!(resolve_absolute(&mut tracker, 100, 104), VblankRequest::Ahead(4));
+    assert_eq!(
+        resolve_absolute(&mut tracker, 100, 101),
+        VblankRequest::AtNext
+    );
+    assert_eq!(
+        resolve_absolute(&mut tracker, 100, 104),
+        VblankRequest::Ahead(4)
+    );
 }
 
 #[def_test]
 fn the_flag_word_is_checked_before_anything_else() {
-    assert!(wait_vblank_flags_valid(DRM_VBLANK_RELATIVE | DRM_VBLANK_NONBLOCK));
+    assert!(wait_vblank_flags_valid(
+        DRM_VBLANK_RELATIVE | DRM_VBLANK_NONBLOCK
+    ));
     assert!(!wait_vblank_flags_valid(0x8000));
     assert!(!wait_vblank_flags_valid(DRM_VBLANK_RELATIVE | 0x20));
     assert!(wait_vblank_crtc_valid(DRM_VBLANK_HIGH_CRTC, 0));
@@ -2068,7 +2131,10 @@ fn a_clock_without_ticks_reports_its_state() {
     assert_eq!(clock.tick().sequence, 41);
     assert_eq!(VblankRequest::AtNext.target(41), 42);
     assert!(!clock.reached(42));
-    assert!(!clock.reached(43), "a target two blanks ahead is still ahead");
+    assert!(
+        !clock.reached(43),
+        "a target two blanks ahead is still ahead"
+    );
     assert!(clock.reached(40));
 }
 
@@ -2119,7 +2185,11 @@ fn a_fence_signals_once_and_keeps_its_first_outcome() {
     assert_eq!(signal.signal(), 0, "no callbacks is still the first signal");
     assert!(fence.is_signaled());
     assert_eq!(signal.signal(), 0, "a second signal runs nothing");
-    assert_eq!(signal.signal_error(22), 0, "an error cannot override success");
+    assert_eq!(
+        signal.signal_error(22),
+        0,
+        "an error cannot override success"
+    );
     assert_eq!(fence.error(), 0, "the fence reports its first outcome");
     assert!(fence.timestamp().is_some(), "completion is timestamped");
 }
@@ -2159,7 +2229,11 @@ fn a_callback_runs_once_at_the_terminal_state() {
     first_signal.signal();
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     first_signal.signal();
-    assert_eq!(counter.0.load(Ordering::Relaxed), 1, "one wake per completion");
+    assert_eq!(
+        counter.0.load(Ordering::Relaxed),
+        1,
+        "one wake per completion"
+    );
     assert_eq!(
         waiter.outcome(&fence_list(&[first]), &waker),
         Some(0),
@@ -2244,10 +2318,8 @@ fn a_chain_walks_past_completed_premises_to_the_pending_work() {
 
 #[def_test(serial)]
 fn a_fence_array_completes_when_every_member_does() {
-    let ((first, first_signal), (second, second_signal)) = (
-        new_anonymous_fence(),
-        new_anonymous_fence(),
-    );
+    let ((first, first_signal), (second, second_signal)) =
+        (new_anonymous_fence(), new_anonymous_fence());
     let list = fence_list(&[first.clone(), second.clone()]);
     assert!(
         !list_is_signaled(&list),
@@ -2302,7 +2374,10 @@ fn a_fence_array_member_set_is_the_completion_condition() {
     assert!(merged.is_signaled());
     assert_eq!(merged.error(), 11, "the merge reports the member failure");
     assert!(
-        Arc::ptr_eq(merged.array().as_ref().expect("the head knows its array"), &array),
+        Arc::ptr_eq(
+            merged.array().as_ref().expect("the head knows its array"),
+            &array
+        ),
         "the head names the array it completes"
     );
 }
@@ -2410,7 +2485,10 @@ fn resetting_a_syncobj_clears_its_value() {
     let (fence, _signal) = new_anonymous_fence();
     object.set_timeline(4, fence);
     object.reset();
-    assert!(object.timeline_fence(4).is_none(), "a reset timeline has no points");
+    assert!(
+        object.timeline_fence(4).is_none(),
+        "a reset timeline has no points"
+    );
     assert_eq!(object.available_point(), 0);
 
     let (fence, _signal) = new_anonymous_fence();
@@ -2435,7 +2513,10 @@ fn a_syncobj_replacement_pokes_a_waiting_task() {
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     replacement_signal.signal();
     let value = object.binary_fence().unwrap();
-    assert!(Arc::ptr_eq(&value, &replacement), "the replacement is the value");
+    assert!(
+        Arc::ptr_eq(&value, &replacement),
+        "the replacement is the value"
+    );
     assert!(value.is_signaled());
 }
 

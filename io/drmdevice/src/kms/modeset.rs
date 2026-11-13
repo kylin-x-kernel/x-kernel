@@ -48,40 +48,49 @@ fn display_resolution(dev: &DrmDevice) -> (u32, u32) {
 /// changes both the dimensions and the name, so a client that re-reads the
 /// mode list can tell the new mode from the one it had cached, the same way an
 /// EDID-derived mode is named after its timing.
-pub(crate) fn current_mode(dev: &DrmDevice) -> DrmModeModeInfo {
+pub(crate) fn current_mode(dev: &DrmDevice) -> Option<DrmModeModeInfo> {
     let (width, height) = display_resolution(dev);
     mode_for_size(width, height)
 }
 
 /// Builds the connector's single mode for one visible size.
-fn mode_for_size(w: u32, h: u32) -> DrmModeModeInfo {
+fn mode_for_size(width: u32, height: u32) -> Option<DrmModeModeInfo> {
+    let hdisplay = u16::try_from(width).ok()?;
+    let vdisplay = u16::try_from(height).ok()?;
+    if hdisplay == 0 || vdisplay == 0 {
+        return None;
+    }
+    let htotal = hdisplay.checked_add(160)?;
+    let vtotal = vdisplay.checked_add(30)?;
+    let vrefresh = 60;
+    // The UAPI clock is in kHz. Multiplying in Hz needs a wider intermediate.
+    let clock = (u64::from(htotal) * u64::from(vtotal) * u64::from(vrefresh) / 1000)
+        .try_into()
+        .ok()?;
     let mut name = [0u8; DRM_MODE_NAME_LEN];
-    let mut cursor = write_decimal(&mut name, 0, w);
+    let mut cursor = write_decimal(&mut name, 0, width);
     if cursor < name.len() {
         name[cursor] = b'x';
         cursor += 1;
     }
-    let _ = write_decimal(&mut name, cursor, h);
-    let htotal = w.saturating_add(160);
-    let vtotal = h.saturating_add(30);
-    let clock = htotal.saturating_mul(vtotal).saturating_mul(60) / 1000;
-    DrmModeModeInfo {
+    let _ = write_decimal(&mut name, cursor, height);
+    Some(DrmModeModeInfo {
         clock,
-        hdisplay: w as u16,
-        hsync_start: (w + 8) as u16,
-        hsync_end: (w + 40) as u16,
-        htotal: htotal as u16,
+        hdisplay,
+        hsync_start: hdisplay + 8,
+        hsync_end: hdisplay + 40,
+        htotal,
         hskew: 0,
-        vdisplay: h as u16,
-        vsync_start: (h + 3) as u16,
-        vsync_end: (h + 6) as u16,
-        vtotal: vtotal as u16,
+        vdisplay,
+        vsync_start: vdisplay + 3,
+        vsync_end: vdisplay + 6,
+        vtotal,
         vscan: 0,
-        vrefresh: 60,
+        vrefresh,
         flags: 0,
         kind: 0,
         name,
-    }
+    })
 }
 
 /// `DRM_IOCTL_MODE_GETRESOURCES`.
@@ -140,12 +149,13 @@ impl Ioctl for DrmModeCrtc {
         crtc.x = state.plane_crtc_x.clamp(0, u32::MAX as i64) as u32;
         crtc.y = state.plane_crtc_y.clamp(0, u32::MAX as i64) as u32;
         crtc.fb_id = state.plane_fb_id.raw();
-        crtc.mode_valid = 1;
-        crtc.mode = state
+        let mode = state
             .crtc_mode
             .as_ref()
             .and_then(|(_, blob)| mode_from_bytes(blob.bytes().as_slice()))
-            .unwrap_or_else(|| current_mode(dev));
+            .or_else(|| current_mode(dev));
+        crtc.mode_valid = u32::from(mode.is_some());
+        crtc.mode = mode.unwrap_or_default();
         let connectors: &[u32] = if bound && state.crtc_active != 0 {
             &[CONNECTOR_ID]
         } else {
@@ -203,7 +213,7 @@ impl Ioctl for DrmModeSetCrtc {
         let mode = if c.mode_valid != 0 {
             c.mode
         } else {
-            current_mode(dev)
+            current_mode(dev).ok_or(DrmError::InvalidInput)?
         };
         let (mode_id, mode_blob) =
             dev.create_blob(None, Arc::new(mode_blob_bytes(&mode)), false)?;
@@ -342,7 +352,7 @@ fn connector_modes(
             return modes;
         }
     }
-    alloc::vec![mode_for_size(width, height)]
+    mode_for_size(width, height).into_iter().collect()
 }
 
 /// Snapshots the connector's property ids and their current values.

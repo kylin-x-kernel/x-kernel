@@ -300,3 +300,9 @@ three-page range. It also checks that destroying the remaining file/device
 owners releases that backing. The mapper records the physical range without
 installing hardware translations, so the test does not establish TLB retirement
 or real userspace unmap behavior.
+
+Display backend geometry is checked before building a synthetic KMS mode.
+Zero dimensions and totals outside the UAPI timing fields cannot produce
+wrapped timings. An unrepresentable fallback cannot create a legacy mode
+blob. EDID modes and explicitly committed mode blobs follow their existing
+validation paths.

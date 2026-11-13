@@ -514,3 +514,14 @@ The other half of the Linux design — unmapping a `vma` and revoking its
 offset when a client unmaps — has no hook in this kernel's VFS, so mappings
 keep the object alive until the card goes away. That boundary is unchanged
 and is recorded here rather than papered over.
+
+## Virtual display timing
+
+When the connector has no usable EDID modes, KMS builds a 60 Hz mode from
+the visible geometry and the fixed horizontal and vertical blanking. The
+geometry and totals must fit the UAPI's 16-bit timing fields. The pixel
+clock is calculated with a 64-bit product and converted from Hz to kHz
+after multiplication. A connector with an unrepresentable fallback
+geometry exposes no synthetic mode. The CRTC query can still report an
+explicitly committed mode. An implicit legacy modeset requires a valid
+fallback mode before it creates a blob.
