@@ -43,7 +43,8 @@ posix/fs/
 │   ├── notify.rs       # directory-entry notification hook for inotify
 │   ├── metadata.rs     # chown/chmod/utime/utimensat
 │   ├── xattr.rs        # set/get/list/remove xattr syscall families
-│   ├── mount.rs        # mount/umount2
+│   ├── mount.rs        # mount/umount2/pivot_root (legacy mount API)
+│   ├── mount_api.rs    # fsopen/fsconfig/fsmount/move_mount (new mount API subset)
 │   ├── stat.rs         # stat/fstatat/statx/access/statfs
 │   ├── ioctl.rs        # ioctl dispatch, file attributes and FIEMAP ABI handling
 │   ├── quota.rs        # quotactl/quotactl_fd (with quota/xfs.rs)
@@ -78,6 +79,8 @@ core/ksyscall
 │   ├─ kfd::FileLike                                       │
 │   ├─ kvfs::{Filename, VfsFile, MetadataUpdate, MountFlags}  │
 │   ├─ kvfs::FileSystemType registry                         │
+│   ├─ kvfs::{FsContext, MntNamespace} for the new mount API │
+│   ├─ anon_inodefs::AnonInodeFs (fsopen fs-context fd)      │
 │   ├─ fs_context::FsStruct                                │
 │   └─ kvfs::pipe::PipeObject interop for splice/fcntl     │
 └──────────────────────────────────────────────────────────┘
@@ -93,7 +96,8 @@ core/ksyscall
 | `namei` | Handles namespace mutations such as links, deletion, symlinks and renames |
 | `metadata` | Modifies owner, permissions and timestamps |
 | `xattr` | Implements set/get/list/remove xattr for three target forms (pathname, no-follow and fd), copies bounded input names and values, and handles list size queries/`ERANGE` with a single bounded writer |
-| `mount` | Maps Linux mount flags to `kvfs::MountFlags`, looks up the implementation by registered `FileSystemType`, and handles non-recursive bind and remount |
+| `mount` | Maps Linux mount flags to `kvfs::MountFlags`, looks up the implementation by registered `FileSystemType`, and handles non-recursive and recursive bind (`MS_BIND|MS_REC`), `MS_MOVE`, remount, `pivot_root`, and `umount2` (accepts `UMOUNT_NOFOLLOW`/`MNT_DETACH`). All mutations require `CAP_SYS_ADMIN` via `require_mount_privilege` |
+| `mount_api` | New mount API subset (`fsopen`/`fsconfig`/`fsmount`/`move_mount`) consumed by `core/ksyscall` dispatch. `fsopen` creates an `anon_inodefs` fs-context fd; `fsconfig` accumulates options/`source` and builds the superblock via `kvfs::FsContext::get_tree`; `fsmount` wraps it in a detached mount (`MntNamespace::create_detached_mount`); `move_mount` attaches it (`MntNamespace::attach_detached_mount`). Only the systemd subset is implemented; unsupported commands/flags return `EINVAL`/`EOPNOTSUPP`. All four entries enforce `CAP_SYS_ADMIN` |
 | `stat` | Converts VFS metadata, access checks and statfs information |
 | `ioctl` | Handles `FIONBIO`, inode FIEMAP and file attributes, and forwards other commands to `FileLike::ioctl`; unrecognized commands return `ENOTTY` and are only logged with `debug!` |
 | `sync` | Forwards sync requests to the filesystem, or to the filesystem of the open object |
@@ -484,6 +488,18 @@ file-to-file copy locks positions in object-address order, and takes the lock on
 data or space, then acquires the non-pipe file position lock inside the pipe lock, and does not hold a position lock while waiting across a pipe;
 the open semantics of device nodes are handled by the VFS/device file operations themselves.
 New code should avoid entering complex paths that may call back into the same resource while holding the fd table or directory offset lock.
+
+The new mount API adds two per-fd shared states. An fs-context fd wraps
+`FsContextState` in a `Mutex`: `fsconfig` mutates it one option at a time and
+`fsmount` clones the accumulated context before `get_tree`, so two operations
+on the same context fd serialize on that lock instead of observing a partially
+accumulated option set. A mount fd wraps the detached mount in a
+`Mutex<Option<Arc<Mount>>>`; `move_mount` takes, attaches and, on failure,
+restores that slot inside one critical section, so a concurrent `move_mount` on
+the same fd cannot see the transient empty slot or interleave with a rollback.
+Both locks are per-fd and are never held across a call that could re-enter the
+same fd's operations.
+
 
 ## Design decisions
 

@@ -23,7 +23,7 @@ use lazyinit::LazyInit;
 
 #[cfg(feature = "input")]
 use crate::nodes::event::EventDev;
-use crate::{DeviceFile, device_dentry};
+use crate::{DeviceFile, content, device_dentry};
 
 type DeviceRemovalCallback = Arc<dyn Fn() + Send + Sync>;
 
@@ -291,6 +291,31 @@ impl SimpleDirOps for WritableDir {
         SimpleDirOps::create_inode_child(&*self.mapping.lock(), lookup, name, inode)
     }
 
+    fn create_file(
+        &self,
+        _dir: &VfsInode,
+        _name: &str,
+        mode: Umode,
+        uid: u32,
+        gid: u32,
+    ) -> VfsResult<Arc<VfsInode>> {
+        Ok(content::ContentFile::new_inode(
+            self.fs.clone(),
+            mode,
+            uid,
+            gid,
+        ))
+    }
+
+    fn install_link(
+        &self,
+        lookup: SimpleDirLookup<'_>,
+        target: &Dentry,
+        name: &str,
+    ) -> VfsResult<()> {
+        SimpleDirOps::install_link(&*self.mapping.lock(), lookup, target, name)
+    }
+
     fn mkdir(
         &self,
         _dir: &VfsInode,
@@ -312,12 +337,8 @@ impl SimpleDirOps for WritableDir {
         Ok(inode)
     }
 
-    fn unlink(&self, _dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
-        if self.mapping.lock().remove_child(dentry.name()) {
-            Ok(())
-        } else {
-            Err(VfsError::NotFound)
-        }
+    fn unlink(&self, dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
+        SimpleDirOps::unlink(&*self.mapping.lock(), dir, dentry)
     }
 
     fn rmdir(&self, _dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
@@ -447,12 +468,8 @@ impl SimpleDirOps for DynamicDeviceDir {
         self.writable.create_inode_child(lookup, name, inode)
     }
 
-    fn unlink(&self, _dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
-        if self.writable.remove_child(dentry.name()) {
-            Ok(())
-        } else {
-            Err(VfsError::NotFound)
-        }
+    fn unlink(&self, dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
+        SimpleDirOps::unlink(&*self.writable, dir, dentry)
     }
 
     fn rmdir(&self, _dir: &VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {

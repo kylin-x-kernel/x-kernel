@@ -748,6 +748,33 @@ impl InodeIdentity {
         true
     }
 
+    /// Adds `dentry` as an alias, or returns the live directory alias that
+    /// blocks the add, under a single lock.
+    ///
+    /// Splitting this into `add_alias` followed by `directory_alias` leaves a
+    /// window where a concurrent drop of the alias's last strong reference can
+    /// retire it between the two calls, so the follow-up lookup finds nothing.
+    /// Performing the retain, the conflict check, and the upgrade atomically
+    /// closes that window; the loop only retries if an alias is retired while
+    /// the lock is held.
+    fn add_alias_or_existing(&self, dentry: &Dentry, is_directory: bool) -> Result<(), Dentry> {
+        let mut aliases = self.aliases.lock();
+        loop {
+            aliases.retain(DentryAlias::is_live);
+            if aliases.iter().any(|alias| alias.points_to(dentry)) {
+                return Ok(());
+            }
+            if is_directory && !aliases.is_empty() {
+                match aliases.first().and_then(DentryAlias::upgrade) {
+                    Some(existing) => return Err(existing),
+                    None => continue,
+                }
+            }
+            aliases.push(DentryAlias::new(dentry));
+            return Ok(());
+        }
+    }
+
     fn directory_alias(&self) -> Option<Dentry> {
         let mut aliases = self.aliases.lock();
         aliases.retain(DentryAlias::is_live);
@@ -2545,6 +2572,10 @@ impl VfsInode {
 
     pub(crate) fn add_dentry_alias(&self, dentry: &Dentry) -> bool {
         self.identity.add_alias(dentry, self.is_dir())
+    }
+
+    pub(crate) fn add_dentry_alias_or_existing(&self, dentry: &Dentry) -> Result<(), Dentry> {
+        self.identity.add_alias_or_existing(dentry, self.is_dir())
     }
 
     pub(crate) fn directory_alias(&self) -> Option<Dentry> {

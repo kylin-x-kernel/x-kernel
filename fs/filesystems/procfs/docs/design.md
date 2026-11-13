@@ -151,6 +151,28 @@ read-time `files_lookup_fd_locked()`. It then runs
 inotify file appends one `inotify wd:... ino:... sdev:... mask:...
 ignored_mask:...` line per live watch, using the instance's watch snapshot.
 
+A pidfd appends Linux's `Pid:` line for glibc/systemd pidfd-to-pid resolution.
+The value is the `pid_nr_ns` view: the process's number in the reading task's
+active PID namespace, and `0` when it has no projection there. This procfs does
+not model a per-mount PID namespace, so the reader's namespace stands in for
+the procfs instance's; a kernel-task reader has none and falls back to the
+internal number instead of panicking. A pidfd reports `-1` only once its process has been
+reaped: Linux computes the number while the pid still has a task attached
+(`pid_has_task`), which includes an exited child that has not been waited for,
+so a waitable zombie keeps naming its pid and only the reaped state reads as
+unidentifiable.
+
+`/proc/sys/kernel/{hostname,domainname}` are `0644` nodes backed by the
+caller's UTS namespace, so `uname(2)` and the sysctl always agree. Reads report
+the namespace bytes verbatim plus one newline — the UTS owner accepts non-UTF-8
+names and `uname(2)` returns them unchanged, so no decoding happens here.
+Writes follow Linux `proc_dostring` under the default strict mode: they start
+at the file position, stop at the first NUL or newline, truncate the stored
+value there, and accept a write that begins past the current value as a
+successful no-op. Both directions require a caller with a UTS namespace, so a
+kernel task gets `ENOENT`, and writing requires `CAP_SYS_ADMIN` like
+sethostname(2).
+
 `/proc/sys/fs/inotify/{max_queued_events,max_user_instances,max_user_watches}`
 are `0644` nodes with a per-inode permission hook that authorizes an open for
 write on the opener's euid, matching Linux's `proc_sys_permission` rather than

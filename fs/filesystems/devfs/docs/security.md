@@ -210,6 +210,20 @@ limitation must not be presented as a complete suspend-aware clock.
 | F-06 | Driver fails an abs or property query | Both ioctls return `EIO` | Userspace cannot mistake a backend failure for an absent axis or property | 4 | Log the driver error; do not mask it as a zero-filled success. |
 | F-07 | Userspace supplies a shorter abs/property buffer | Copy is clipped; `EVIOCGPROP` reports the clipped length, `EVIOCGABS` returns 0 | Caller can detect truncation for the bitmap but not the fixed-size abs record | 4 | Bound the copy by the requested length; match Linux's per-ioctl return convention. |
 
+## Content files in writable directories
+
+Writable devtmpfs directories accept plain file creation and hard links from
+userspace, mirroring Linux ramfs-backed devtmpfs. Creation is gated by the
+generic VFS namespace policy: the parent directory needs `MAY_WRITE |
+MAY_EXEC` (`/dev` and `/dev/shm` are mode 0755/01777 root-owned), so only
+root or a `CAP_DAC_OVERRIDE` holder can create content — the same population
+that can already create device nodes there. Content files allocate memory
+only through the caller-driven page cache and the per-inode metadata lock;
+they expose no cross-task state, no hardware identity and no kernel-memory
+backed reads (holes read as zeroes). `link` aliases an existing inode within
+one directory and cannot cross superblocks (the VFS rejects cross-mount
+links before the callback runs).
+
 ## Known limitations
 
 - Only input and DRM primary `DeviceNodeKind` values have devfs adapters.

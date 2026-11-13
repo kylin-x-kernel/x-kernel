@@ -18,7 +18,7 @@ use kcpu_id_map::nr_cpus;
 use kcred::Cred;
 use kfd_objects::inotify::Inotify;
 use khal::paging::MappingFlags;
-use kprocess::{AsThread, LiveAddressSpace, Process, TaskStat, procfs};
+use kprocess::{AsThread, LiveAddressSpace, PidFd, Process, TaskStat, procfs};
 use ktask::{KCpuMask, KtaskRef, WeakKtaskRef, current};
 use ktime_types::SystemTime;
 #[cfg(feature = "tee")]
@@ -1131,7 +1131,7 @@ const O_CLOEXEC: u32 = 0o2000000;
 /// The generic lines are the ones this kernel can answer: the file offset,
 /// the open file description's flags, and the mount id of its location, in
 /// Linux's order. Type-specific lines are rendered for objects that have them;
-/// only inotify does so far, in man 5 proc_pid_fdinfo's field order and hex
+/// inotify and pidfd do, in man 5 proc_pid_fdinfo's field order and hex
 /// formatting (`wd`, `ino`, `sdev`, `mask`, `ignored_mask`). The trailing
 /// `fhandle-*` fields that page documents are absent because those exist only
 /// for file handles exported through an NFS file handle, which this kernel
@@ -1162,6 +1162,34 @@ fn render_fdinfo(file: &VfsFile, cloexec: bool) -> String {
                 watch.watch_descriptor, watch.inode, watch.device, watch.mask
             );
         }
+    }
+    // Linux's pidfd_show_fdinfo() emits the referenced thread-group id *as seen
+    // from the PID namespace of the procfs instance being read*, and 0 when the
+    // process has no projection there. glibc and systemd resolve a
+    // clone3(CLONE_PIDFD) pidfd to a pid by reading this line from
+    // /proc/self/fdinfo/<pidfd>; without it posix_spawn/pidfd_spawn cannot
+    // report the child pid and service spawn fails. This procfs does not model
+    // a per-mount PID namespace, so the reading task's active namespace is the
+    // observer — the same number that task's getpid(2)/wait(2) use.
+    if let Ok(pidfd) = PidFd::from_file(file) {
+        // Linux defaults to -1 and computes the number only while the pid still
+        // has a task attached — that includes an exited child that has not been
+        // reaped yet, so a waitable zombie keeps naming its pid.
+        let process = pidfd.process();
+        let pid: i64 = if process.has_attached_task() {
+            // A kernel-task reader has no PID namespace; report the internal
+            // number there instead of panicking in `current_user_process()`.
+            let observer = ktask::current()
+                .try_as_thread()
+                .map(|thread| thread.process().active_pid_namespace());
+            match observer {
+                Some(ns) => process.number_in_namespace(&ns).unwrap_or(0).into(),
+                None => process.pid().into(),
+            }
+        } else {
+            -1
+        };
+        let _ = writeln!(out, "Pid:\t{}", pid);
     }
     out
 }

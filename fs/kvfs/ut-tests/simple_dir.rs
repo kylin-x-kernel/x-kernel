@@ -99,6 +99,100 @@ impl SimpleDirOps for NamesOps {
     }
 }
 
+/// Writable simple-directory ops exercising the opt-in create/link hooks.
+struct WritableMapping {
+    fs: Arc<SimpleFs>,
+    mapping: crate::Mutex<DirMapping>,
+}
+
+impl SimpleDirOps for WritableMapping {
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        let names: Vec<Cow<'a, str>> = SimpleDirOps::child_names(&*self.mapping.lock())?
+            .map(|name| Cow::Owned(name.into_owned()))
+            .collect();
+        Ok(KBox::new(names.into_iter())?)
+    }
+
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
+        SimpleDirOps::lookup_child(&*self.mapping.lock(), lookup, name)
+    }
+
+    fn create_inode_child(
+        &self,
+        lookup: SimpleDirLookup<'_>,
+        name: &str,
+        inode: Arc<VfsInode>,
+    ) -> VfsResult<Dentry> {
+        SimpleDirOps::create_inode_child(&*self.mapping.lock(), lookup, name, inode)
+    }
+
+    fn create_file(
+        &self,
+        _dir: &VfsInode,
+        _name: &str,
+        mode: Umode,
+        _uid: u32,
+        _gid: u32,
+    ) -> VfsResult<Arc<VfsInode>> {
+        let file = crate::SimpleFile::new_regular_with_permission(
+            self.fs.clone(),
+            mode.permission(),
+            || Ok("content"),
+        );
+        Ok(file.new_inode(crate::NodeFlags::empty()))
+    }
+
+    fn install_link(
+        &self,
+        lookup: SimpleDirLookup<'_>,
+        target: &Dentry,
+        name: &str,
+    ) -> VfsResult<()> {
+        SimpleDirOps::install_link(&*self.mapping.lock(), lookup, target, name)
+    }
+
+    fn unlink(&self, dir: &VfsInode, victim: &LockedDentry<'_>) -> VfsResult<()> {
+        SimpleDirOps::unlink(&*self.mapping.lock(), dir, victim)
+    }
+}
+
+#[def_test]
+fn writable_simple_dir_create_link_unlink_tracks_nlink() {
+    let cred = kcred::initial_cred();
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+        SimpleDir::new_maker(
+            fs.clone(),
+            Arc::new(WritableMapping {
+                fs,
+                mapping: crate::Mutex::new(DirMapping::new()),
+            }),
+        )
+    })
+    .unwrap();
+    let root = Mount::new_root(&super_block).root_path();
+    let lookup = |name: &str| root.with_dentry(root.dentry().lookup(name).unwrap());
+
+    root.create(
+        "a",
+        crate::NodePermission::from_bits_truncate(0o644),
+        &cred,
+    )
+    .unwrap();
+    assert_eq!(lookup("a").inode().metadata().nlink, 1);
+
+    let source = lookup("a");
+    root.link("b", &source, &cred).unwrap();
+    let alias = lookup("b");
+    assert_eq!(alias.inode().metadata().nlink, 2);
+    assert!(Arc::ptr_eq(
+        &source.dentry().inode_ref(),
+        &alias.dentry().inode_ref()
+    ));
+
+    root.unlink("b", &cred).unwrap();
+    assert_eq!(lookup("a").inode().metadata().nlink, 1);
+}
+
 #[def_test]
 fn chained_names_propagate_failure_and_drop_first_iterator() {
     let drops = Arc::new(AtomicU64::new(0));

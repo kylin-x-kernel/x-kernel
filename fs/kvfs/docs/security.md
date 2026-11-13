@@ -545,9 +545,15 @@ Locks constrain only cooperating callers; file reads and writes without an advis
 
 ### Mount propagation limits
 
-- Mount propagation covers only `MS_PRIVATE`/`MS_SLAVE` (there are no shared propagation groups, so the two behave equivalently) and non-recursive
-  bind; `MS_SHARED`/`MS_UNBINDABLE` and copying of recursively bind-mounted subtrees still return `EINVAL`,
-  and the mount tree is not silently flattened. A recursive bind is accepted only when the source subtree has no mounts, in which case the result is the same as for a non-recursive one.
+- Mount propagation covers only `MS_PRIVATE`/`MS_SLAVE` (there are no shared propagation groups, so the two behave equivalently);
+  `MS_SHARED`/`MS_UNBINDABLE` still return `EINVAL`, and the mount tree is not silently flattened.
+- Recursive bind (`MS_BIND|MS_REC`) is supported: `attach_bind_recursive` clones the source mount subtree and re-grafts each cloned
+  child under its cloned parent. Only submounts at or below the bind source are cloned (sibling submounts elsewhere in the host mount
+  are excluded), so every cloned child stays reachable under the new root and can be unmounted; the tree is not silently flattened.
+- `MS_MOVE` (`move_mount_to`) is supported with Linux `do_move_mount` safeguards: a target at or below the moved subtree is rejected
+  with `ELOOP` (no self-referential mount), the directory/non-directory match is validated before any detach so a failing move leaves
+  the source attached, and the whole detach + re-graft runs under the namespace registry lock plus the touched inodes'
+  namespace-exclusive locks (no split critical section).
 
 ### Validity of buffered read window hints
 

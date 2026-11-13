@@ -129,9 +129,8 @@ fn path_mount(
     // Reject unsupported mount operations before selecting an implemented
     // operation. Otherwise a supported bit could make an unsupported
     // combination execute with part of the request silently ignored.
-    let unsupported_operations = linux_raw_sys::general::MS_MOVE
-        | linux_raw_sys::general::MS_SHARED
-        | linux_raw_sys::general::MS_UNBINDABLE;
+    let unsupported_operations =
+        linux_raw_sys::general::MS_SHARED | linux_raw_sys::general::MS_UNBINDABLE;
     if flags & unsupported_operations != 0 {
         return Err(KError::InvalidInput);
     }
@@ -139,6 +138,13 @@ fn path_mount(
     let mount_flags = per_mount_flags(flags, target.mount().flags());
     let superblock_flags = superblock_flags(flags);
     let namespace = process.mnt_ns()?;
+
+    if flags & linux_raw_sys::general::MS_MOVE != 0 {
+        let old_name = dev_name.ok_or(KError::InvalidInput)?;
+        let old_path = lookup_mount_path(process, old_name, cred)?;
+        namespace.move_mount_to(&old_path, target)?;
+        return Ok(());
+    }
 
     if flags & (linux_raw_sys::general::MS_REMOUNT | linux_raw_sys::general::MS_BIND)
         == (linux_raw_sys::general::MS_REMOUNT | linux_raw_sys::general::MS_BIND)
@@ -201,8 +207,19 @@ fn path_mount(
 }
 
 fn lookup_mount_path(process: &Process, name: &str, cred: &kcred::Cred) -> KResult<Path> {
+    lookup_mount_path_with_flags(process, name, cred, LookupFlags::follow())
+}
+
+/// Resolves `name` with explicit lookup flags (e.g. no-follow for
+/// `umount2(UMOUNT_NOFOLLOW)`).
+fn lookup_mount_path_with_flags(
+    process: &Process,
+    name: &str,
+    cred: &kcred::Cred,
+    flags: LookupFlags,
+) -> KResult<Path> {
     let fs = process.fs_context()?.lock().snapshot();
-    lookup_mount_path_in(&fs, name, cred)
+    Filename::new(name).lookup_at(fs.root(), fs.pwd(), LookupIntent::Open, flags, cred)
 }
 
 /// Resolves `name` against an already-snapshotted filesystem context.
@@ -222,8 +239,10 @@ fn lookup_mount_path_in(fs: &FsStruct, name: &str, cred: &kcred::Cred) -> KResul
 /// Rejects mount namespace mutations from callers without mount privilege.
 ///
 /// This is Linux `CAP_SYS_ADMIN` authority in the mount namespace's user
-/// namespace; failure reports `EPERM` like `may_mount()`.
-fn require_mount_privilege(cred: &kcred::Cred) -> KResult<()> {
+/// namespace; failure reports `EPERM` like `may_mount()`. Shared with the new
+/// mount API (`mount_api`) so `fsopen`/`fsconfig`/`fsmount`/`move_mount` enforce
+/// the same authority as legacy `mount(2)`.
+pub(crate) fn require_mount_privilege(cred: &kcred::Cred) -> KResult<()> {
     if cred.has_sys_admin() {
         Ok(())
     } else {
@@ -244,15 +263,12 @@ fn do_loopback(
         .ok_or(KError::InvalidInput)?;
     let old_path = lookup_mount_path(process, old_name, cred)?;
     // Linux `do_loopback()` clones the whole source subtree for a recursive
-    // bind. KVFS clones a single mount, which only matches Linux's result while
-    // the source subtree has no mounts attached below it; reject the request
-    // otherwise instead of silently flattening the cloned tree. The namespace
-    // query looks at mounts at or below the bind source, not at every child of
-    // the containing mount.
-    if recursive && namespace.has_mount_under(&old_path) {
-        return Err(KError::InvalidInput);
+    // bind; a non-recursive bind clones only the top mount.
+    if recursive {
+        namespace.attach_bind_recursive(&old_path, mountpoint)?;
+    } else {
+        namespace.attach_bind(&old_path, mountpoint)?;
     }
-    namespace.attach_bind(&old_path, mountpoint)?;
     Ok(())
 }
 
@@ -333,26 +349,32 @@ fn per_mount_flags(flags: u32, current_flags: MountFlags) -> MountFlags {
 
 /// Unmount a filesystem at the specified target path.
 pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
-    // Reject flags we don't implement yet: MNT_FORCE(1), MNT_EXPIRE(4),
-    // UMOUNT_NOFOLLOW(8). MNT_DETACH is supported: it detaches the mount tree
-    // without busy checks (lazy unmount), as required by OCI runtime rootfs
-    // setups after `pivot_root`.
+    // Reject flags we don't implement yet: MNT_FORCE(1), MNT_EXPIRE(4).
+    // MNT_DETACH is supported: it detaches the mount tree without busy checks
+    // (lazy unmount), as required by OCI runtime rootfs setups after
+    // `pivot_root`. UMOUNT_NOFOLLOW disables final-component symlink following
+    // (systemd's credential-store replacement uses MNT_DETACH|UMOUNT_NOFOLLOW):
+    // a symlink target then resolves to the link itself, which is not a mount
+    // root, so the unmount fails with EINVAL like Linux instead of silently
+    // unmounting the link's target.
     let f = flags as u32;
-    if f & (linux_raw_sys::general::MNT_FORCE
-        | linux_raw_sys::general::MNT_EXPIRE
-        | linux_raw_sys::general::UMOUNT_NOFOLLOW)
-        != 0
-    {
+    if f & (linux_raw_sys::general::MNT_FORCE | linux_raw_sys::general::MNT_EXPIRE) != 0 {
         return Err(KError::InvalidInput);
     }
     let detach = f & linux_raw_sys::general::MNT_DETACH != 0;
+    let nofollow = f & linux_raw_sys::general::UMOUNT_NOFOLLOW != 0;
 
     let target = target.load_string()?;
     debug!("sys_umount2 <= target: {target:?}, flags: {flags} (detach: {detach})");
 
     let process = current_user_process();
     let cred = kprocess::current_cred();
-    let target = lookup_mount_path(&process, &target, &cred)?;
+    let lookup_flags = if nofollow {
+        LookupFlags::no_follow()
+    } else {
+        LookupFlags::follow()
+    };
+    let target = lookup_mount_path_with_flags(&process, &target, &cred, lookup_flags)?;
     // `umount` acts on the mounted path, so resolve to the topmost covering
     // mount: after `pivot_root(".", ".")`, `umount(".", MNT_DETACH)` must
     // detach the relocated old root, not the new root underneath it.

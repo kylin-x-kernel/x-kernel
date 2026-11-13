@@ -64,10 +64,12 @@ fs/filesystems/devfs/src/
 ├── lib.rs             # filesystem registration and singleton superblock
 ├── dynamic.rs         # DeviceNode -> DeviceFile projection
 ├── device_file.rs     # special-device inode projection
+├── content.rs         # memory-backed regular files for writable directories
 ├── root.rs            # root directory assembly
 └── nodes/
     ├── dri.rs         # dynamic /dev/dri directory
-    └── event.rs       # dynamic /dev/input directory and evdev operations
+    ├── event.rs       # dynamic /dev/input directory and evdev operations
+    └── shm.rs         # /dev/shm directory entry
 ```
 
 ## Guest unit-test layout
@@ -324,6 +326,16 @@ waiters. Clients never read the VirtIO queue or register IRQ-line waiters.
 - Primary and render registration form one transaction at projection level:
   a render failure rolls the primary cdev back instead of publishing a record
   that removal could never reach.
+- Writable devtmpfs directories accept plain file creation and hard links.
+  Linux devtmpfs is ramfs-backed, so userspace treats `/dev` entries as
+  creatable files; POSIX shared memory relies on this. When an init grafts a
+  fresh devtmpfs mount over `/dev` (systemd's `fsmount` + `move_mount` setup),
+  the boot-time `/dev/shm` tmpfs is shadowed and `sem_open` creates its
+  semaphore files directly in the devtmpfs `/dev/shm` directory. `content.rs`
+  provides that page-cache-backed regular-file inode, and the writable
+  directories (`/dev` root and `/dev/shm`) opt in through the kvfs
+  `SimpleDirOps::create_file` / `install_link` hooks. Pseudo filesystems
+  without a backing store keep the rejecting defaults.
 
 Loop advances the owning `Gendisk::diskseq` after successful SET_FD/CLR_FD
 under the existing media-change locks; failed changes retain the sequence.

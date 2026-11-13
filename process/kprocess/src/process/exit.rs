@@ -272,6 +272,17 @@ impl Process {
         self.exit_state() == ProcessExitState::Zombie
     }
 
+    /// Returns `true` while a task is still attached to this process, i.e. it
+    /// runs or is a zombie that has not been reaped — Linux
+    /// `pid_has_task(pid, PIDTYPE_PID)`.
+    ///
+    /// Only a reaped (`Dead`) process has been detached from its pid, so
+    /// reported-pid consumers such as pidfd fdinfo keep naming an
+    /// exited-but-unreaped child and report absence afterwards.
+    pub fn has_attached_task(&self) -> bool {
+        self.exit_state() != ProcessExitState::Dead
+    }
+
     pub(super) fn exit_state(&self) -> ProcessExitState {
         self.exit_state.load(Ordering::Acquire)
     }

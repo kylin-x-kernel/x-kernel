@@ -292,6 +292,39 @@ impl MntNamespace {
         }
     }
 
+    /// Creates a detached mount for the new mount API (`fsmount`).
+    ///
+    /// The mount is not attached to any mountpoint yet;
+    /// [`attach_detached_mount`](Self::attach_detached_mount) (`move_mount`)
+    /// installs it later. Mirrors Linux `vfs_create_mount()`. The returned
+    /// `Arc<Mount>` lets callers open the mount root (via `root_path`) before
+    /// attachment, as `fsmount` fds require.
+    pub fn create_detached_mount(
+        &self,
+        fs: &Arc<SuperBlock>,
+        flags: MountFlags,
+        devname: Option<&str>,
+        requested_superblock_flags: Option<SuperBlockFlags>,
+    ) -> VfsResult<Arc<Mount>> {
+        let mount = Mount::try_new_detached(fs, flags, devname, requested_superblock_flags)?
+            .ok_or(VfsError::ResourceBusy)?;
+        Ok(mount.into_arc_at(None))
+    }
+
+    /// Attaches a detached mount at `mountpoint` for the new mount API
+    /// (`move_mount`). The caller must hold mount privilege.
+    pub fn attach_detached_mount(
+        &self,
+        mount: Arc<Mount>,
+        mountpoint: &Path,
+    ) -> VfsResult<Arc<Mount>> {
+        let mut mounts = self.mounts.lock();
+        Self::require_mount(&mounts, mountpoint.mount())?;
+        let mount = mountpoint.graft_tree_arc(mount)?;
+        mounts.insert(mount.mount_id(), mount.clone());
+        Ok(mount)
+    }
+
     /// Creates a non-recursive bind mount of `source` at `mountpoint`.
     ///
     /// The new mount shares the source dentry and superblock and inherits the
@@ -303,6 +336,111 @@ impl MntNamespace {
         let mount = mountpoint.mount_bind(source)?;
         mounts.insert(mount.mount_id(), mount.clone());
         Ok(mount)
+    }
+
+    /// Recursive bind mount (`MS_BIND | MS_REC`): clones the whole source
+    /// mount subtree, not just the top mount.
+    ///
+    /// Each cloned child is re-grafted at the same mountpoint dentry but under
+    /// its cloned parent, so the new tree mirrors the source's submounts.
+    /// `collect_subtree` yields parents before children, which lets the clone
+    /// map resolve a child's parent as it is processed.
+    pub fn attach_bind_recursive(&self, source: &Path, mountpoint: &Path) -> VfsResult<Arc<Mount>> {
+        let mut mounts = self.mounts.lock();
+        Self::require_mount(&mounts, source.mount())?;
+        Self::require_mount(&mounts, mountpoint.mount())?;
+        let new_root = mountpoint.mount_bind(source)?;
+        mounts.insert(new_root.mount_id(), new_root.clone());
+
+        let mut clone_map: HashMap<u64, Arc<Mount>> = HashMap::new();
+        clone_map.insert(source.mount().mount_id(), new_root.clone());
+        for child in source.mount().collect_subtree().iter().skip(1) {
+            let location = child.location().ok_or(VfsError::InvalidInput)?;
+            // Only clone submounts at or below the bind source. `collect_subtree`
+            // walks the whole host mount, so a subdirectory bind would otherwise
+            // clone sibling submounts located elsewhere in that mount; those land
+            // outside the new root, are unreachable, and make unmount permanently
+            // EBUSY. Linux copy_tree clones only the subtree under the source.
+            if !Self::is_reachable_from(&location, source) {
+                continue;
+            }
+            let new_parent = clone_map
+                .get(&location.mount().mount_id())
+                .ok_or(VfsError::InvalidInput)?;
+            let new_location = Path::new(new_parent.clone(), location.dentry.clone());
+            let new_child = new_location.mount_bind(&child.root_path())?;
+            mounts.insert(new_child.mount_id(), new_child.clone());
+            clone_map.insert(child.mount_id(), new_child);
+        }
+        Ok(new_root)
+    }
+
+    /// Moves a mount (and its subtree) from `source` to `target` (`MS_MOVE`).
+    ///
+    /// The source must be the root of a registered mount. The mount is
+    /// detached from its old parent (restoring whatever it covered) and
+    /// re-grafted at the target, keeping its identity and submounts.
+    ///
+    /// The whole detach + re-graft runs under the namespace registry lock and
+    /// the touched inodes' namespace-exclusive locks (CG-015), so a concurrent
+    /// mount/umount can never observe a detached-but-not-reattached mount, and a
+    /// failing move leaves the tree unchanged.
+    pub fn move_mount_to(&self, source: &Path, target: &Path) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        let mnt = Self::registered_mount_at(&mounts, source)?.clone();
+        let parent_path = mnt.location().ok_or(VfsError::InvalidInput)?;
+
+        // Linux `do_move_mount()` checks the directory/non-directory match
+        // (EINVAL) before the ancestry test, so do the same: validate the type
+        // before detaching, so a failing move never leaves the source unmounted.
+        if mnt.mnt.mnt_root.as_dir().is_ok() != target.is_dir() {
+            return Err(VfsError::InvalidInput);
+        }
+        // Linux `do_move_mount()` then rejects a target inside the moved subtree
+        // (`mount_is_ancestor`) with ELOOP: grafting there would make the mount
+        // its own ancestor and loop path rendering forever. Check before any
+        // tree surgery.
+        if Self::is_reachable_from(target, source) {
+            return Err(VfsError::FilesystemLoop);
+        }
+
+        // Serialize the surgery on every touched inode in the same total order
+        // as pivot_root/rename (ancestor before descendant, then a stable
+        // pointer tiebreak), holding the locks across both detach and graft.
+        let mut targets: Vec<(Arc<VfsInode>, Vec<usize>)> = Vec::new();
+        let mut push_target = |path: &Path| {
+            let inode = path.inode();
+            if !targets.iter().any(|(held, _)| Arc::ptr_eq(held, &inode)) {
+                targets.push((inode, path.dentry.namespace_lock_key()));
+            }
+        };
+        push_target(&parent_path);
+        push_target(target);
+        targets.sort_by(|left, right| left.1.cmp(&right.1));
+        let _guards: Vec<_> = targets
+            .iter()
+            .map(|(inode, _)| inode.lock_namespace_exclusive())
+            .collect();
+
+        // Re-validate the source edge under the locks: the mount stack may have
+        // changed between resolving the paths and acquiring these locks.
+        if !parent_path
+            .mnt
+            .child_mount_at(&parent_path.dentry)
+            .is_some_and(|mounted| Arc::ptr_eq(&mounted, &mnt))
+        {
+            return Err(VfsError::InvalidInput);
+        }
+
+        // Detach from the old parent (restoring whatever it covered), then graft
+        // at the target. This mirrors `graft_tree_arc` without re-acquiring the
+        // target inode lock already held above.
+        mount_edge_detach(&parent_path.mnt, &parent_path.dentry, &mnt);
+        *mnt.mnt_location.lock() = Some(target.clone());
+        if let Some(old) = target.mnt.install_child_mount(&target.dentry, &mnt) {
+            *mnt.covers.lock() = Some(old);
+        }
+        Ok(())
     }
 
     /// Remounts `target` with independent superblock and per-mount flags.
@@ -1828,6 +1966,24 @@ impl Path {
             *result.covers.lock() = Some(old);
         }
         Ok(result)
+    }
+
+    /// Attaches an already-shared detached mount (new mount API `move_mount`).
+    ///
+    /// Unlike [`graft_tree`](Self::graft_tree), the mount is already an
+    /// `Arc<Mount>` (it was exposed through an `fsmount` fd), so only its
+    /// location is recorded rather than re-wrapping it.
+    fn graft_tree_arc(&self, mount: Arc<Mount>) -> VfsResult<Arc<Mount>> {
+        let inode = self.inode();
+        let _namespace_guard = inode.lock_namespace_exclusive();
+        if mount.mnt.mnt_root.as_dir().is_ok() != self.is_dir() {
+            return Err(VfsError::NotADirectory);
+        }
+        *mount.mnt_location.lock() = Some(self.clone());
+        if let Some(old) = self.mnt.install_child_mount(&self.dentry, &mount) {
+            *mount.covers.lock() = Some(old);
+        }
+        Ok(mount)
     }
 
     /// Unmount the filesystem rooted at this path.

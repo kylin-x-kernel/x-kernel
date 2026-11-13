@@ -100,6 +100,12 @@ impl InputIngress {
         }
     }
 
+    /// Reports the number of input bytes currently queued for a reader
+    /// (`FIONREAD`/`TIOCINQ`).
+    pub fn readable_bytes(&self) -> usize {
+        self.state.lock().bytes.len()
+    }
+
     pub(crate) fn read(&self, buf: &mut [u8]) -> usize {
         let read = {
             let mut state = self.state.lock();

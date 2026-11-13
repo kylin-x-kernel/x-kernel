@@ -2,16 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, string::String, sync::Arc};
+use alloc::{borrow::Cow, format, string::String, sync::Arc};
 use core::fmt::Write;
 
 use kcpu_id_map::nr_cpus;
 use kfd_objects::inotify_limits::InotifyLimit;
-use kprocess::{TaskStat, procfs};
+use kprocess::{AsThread, TaskStat, procfs};
 use kvfs::{
     CommandFile, Dentry, DirMapping, GetattrQueryFlags, GetattrRequestMask, InodeOperations,
     Metadata, MetadataUpdate, MountIdmap, NodeFlags, NodePermission, Path, Permission, SimpleDir,
-    SimpleFile, SimpleFileOperation, SimpleFs, VfsError, VfsInode, VfsInodeInit, VfsResult,
+    SimpleFile, SimpleFileOperation, SimpleFileOps, SimpleFs, VfsError, VfsFile, VfsInode,
+    VfsInodeInit, VfsResult,
 };
 
 /// One `/proc/sys/fs/inotify/` control.
@@ -74,6 +75,84 @@ impl InodeOperations for InotifySysctlFile {
             return Err(VfsError::PermissionDenied);
         }
         Ok(())
+    }
+}
+
+/// One `/proc/sys/kernel` UTS name node.
+enum UtsNameField {
+    Hostname,
+    DomainName,
+}
+
+/// `/proc/sys/kernel/hostname` and `domainname` (Linux `proc_doutsstring`).
+///
+/// Reads report the caller's UTS namespace and writes replace that namespace's
+/// value, so a `systemd ProtectHostname` bind mount behaves like Linux. The
+/// write path trims one trailing newline and requires `CAP_SYS_ADMIN`, the same
+/// checks `proc_dostring` and sethostname(2) apply. `try_as_thread` keeps a
+/// kernel-task reader failing cleanly instead of panicking in
+/// `current_user_process()`.
+struct UtsNameFile {
+    field: UtsNameField,
+}
+
+/// Size of a UTS name buffer including the terminator: Linux `UTSLEN`
+/// (`__NEW_UTS_LEN` = 64 name bytes plus the NUL).
+const UTS_NAME_MAXLEN: usize = 65;
+
+impl SimpleFileOps for UtsNameFile {
+    fn read_all(&self) -> VfsResult<Cow<'_, [u8]>> {
+        let task = ktask::current();
+        let thread = task.try_as_thread().ok_or(VfsError::NotFound)?;
+        let uts = thread.process().uts_ns()?;
+        // Report the namespace bytes verbatim: the UTS owner accepts non-UTF-8
+        // names and uname(2) returns them unchanged, so decoding here would
+        // make the two interfaces disagree.
+        let mut name = match self.field {
+            UtsNameField::Hostname => uts.nodename(),
+            UtsNameField::DomainName => uts.domainname(),
+        };
+        name.push(b'\n');
+        Ok(Cow::Owned(name))
+    }
+
+    /// Applies Linux's `proc_dostring` write under the default strict mode:
+    /// the write starts at the file position, stops at the first NUL or
+    /// newline, truncates the value there, and a write that starts past the
+    /// current value is a successful no-op.
+    fn write(&self, _file: &VfsFile, data: &[u8], offset: u64) -> VfsResult<usize> {
+        if !kprocess::current_cred().has_sys_admin() {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        let task = ktask::current();
+        let thread = task.try_as_thread().ok_or(VfsError::NotFound)?;
+        let uts = thread.process().uts_ns()?;
+        let current = match self.field {
+            UtsNameField::Hostname => uts.nodename(),
+            UtsNameField::DomainName => uts.domainname(),
+        };
+        let current_len = current
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(current.len())
+            .min(UTS_NAME_MAXLEN - 1);
+        let start = usize::try_from(offset).unwrap_or(usize::MAX);
+        if start > current_len {
+            return Ok(data.len());
+        }
+        let mut name = current[..start].to_vec();
+        for &byte in data {
+            if byte == 0 || byte == b'\n' || name.len() >= UTS_NAME_MAXLEN - 1 {
+                break;
+            }
+            name.push(byte);
+        }
+        match self.field {
+            UtsNameField::Hostname => uts.set_nodename(&name),
+            UtsNameField::DomainName => uts.set_domainname(&name),
+        }
+        .map_err(|_| VfsError::InvalidInput)?;
+        Ok(data.len())
     }
 }
 
@@ -182,6 +261,30 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             kernel.add(
                 "pid_max",
                 SimpleFile::new_regular(fs.clone(), || Ok("32768\n")),
+            );
+            // systemd ProtectHostname bind-mounts these over the service's
+            // namespace; they must exist. Report and update the caller's UTS
+            // namespace state (same source as uname(2)) so reads stay
+            // consistent with sethostname/setdomainname.
+            kernel.add(
+                "hostname",
+                SimpleFile::new_regular_with_permission(
+                    fs.clone(),
+                    NodePermission::from_bits_truncate(0o644),
+                    UtsNameFile {
+                        field: UtsNameField::Hostname,
+                    },
+                ),
+            );
+            kernel.add(
+                "domainname",
+                SimpleFile::new_regular_with_permission(
+                    fs.clone(),
+                    NodePermission::from_bits_truncate(0o644),
+                    UtsNameFile {
+                        field: UtsNameField::DomainName,
+                    },
+                ),
             );
             kernel.add("pty", {
                 let mut pty = DirMapping::new();

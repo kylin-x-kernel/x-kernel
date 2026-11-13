@@ -79,6 +79,17 @@ Symlink entries are cached by the same mapping. kvfs provides
 `/dev/ptmx -> pts/ptmx`, so the call direction is devfs -> kvfs. The target is
 stored in the inode and returned by `read_link` without being re-resolved.
 
+File creation and hard links in simple directories are opt-in. The default
+`SimpleDirOps::create_file` and `SimpleDirOps::install_link` reject both
+operations, matching pseudo filesystems such as procfs and sysfs whose
+directories must stay immutable from userspace. Filesystems that mirror a
+writable backing store — ramfs-backed devtmpfs directories — override the two
+hooks; `SimpleDirInodeOperations` then routes `vfs_create` and `vfs_link`
+through them and instantiates the negative dentry like every other
+create-like callback. Link accounting is symmetric: `install_link` increments
+the target inode's link count and `DirMapping::unlink` decrements it, so
+`stat` nlink tracks the alias count for hook-backed filesystems.
+
 ## Same-superblock mount reuse
 
 Mounting a filesystem over the root of its own superblock with no requested

@@ -177,6 +177,35 @@ pub trait SimpleDirOps: Send + Sync + 'static {
         Err(VfsError::OperationNotPermitted)
     }
 
+    /// Creates a persistent regular-file child from VFS-validated context.
+    ///
+    /// Only filesystems that accept userspace file creation opt in: Linux
+    /// devtmpfs is ramfs-backed and its directories accept plain files, while
+    /// pseudo filesystems such as procfs and sysfs keep rejecting creation.
+    fn create_file(
+        &self,
+        _dir: &VfsInode,
+        _name: &str,
+        _mode: Umode,
+        _uid: u32,
+        _gid: u32,
+    ) -> VfsResult<Arc<VfsInode>> {
+        Err(VfsError::PermissionDenied)
+    }
+
+    /// Creates an additional name for an existing non-directory child.
+    ///
+    /// Default matches simple pseudo filesystems, which do not accept `link`;
+    /// ramfs-backed devtmpfs directories do.
+    fn install_link(
+        &self,
+        _lookup: SimpleDirLookup<'_>,
+        _target: &Dentry,
+        _name: &str,
+    ) -> VfsResult<()> {
+        Err(VfsError::OperationNotPermitted)
+    }
+
     /// Creates a dynamic directory child from VFS-validated context.
     fn mkdir(
         &self,
@@ -263,10 +292,37 @@ impl SimpleDirOps for DirMapping {
 
     fn unlink(&self, _dir: &VfsInode, victim: &LockedDentry<'_>) -> VfsResult<()> {
         if self.remove_child(victim.name()) {
+            victim.decrement_link_count();
             Ok(())
         } else {
             Err(VfsError::NotFound)
         }
+    }
+
+    fn install_link(
+        &self,
+        _lookup: SimpleDirLookup<'_>,
+        target: &Dentry,
+        name: &str,
+    ) -> VfsResult<()> {
+        let mut entries = self.entries.lock();
+        if entries.contains_key(name) {
+            return Err(VfsError::AlreadyExists);
+        }
+        let inode = target.vfs_inode();
+        let stored_inode = inode.clone();
+        entries.insert(
+            name.to_owned(),
+            Arc::new(move |parent, name| {
+                Ok(Dentry::new_file_from_inode(
+                    stored_inode.clone(),
+                    parent,
+                    name.to_owned(),
+                ))
+            }),
+        );
+        target.increment_link_count();
+        Ok(())
     }
 
     fn rename(
@@ -598,6 +654,33 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         dentry.instantiate(inode)
     }
 
+    fn create(
+        &self,
+        _idmap: &crate::MountIdmap,
+        dir: &VfsInode,
+        dentry: &LockedDentry<'_>,
+        mode: Umode,
+        _exclusive: bool,
+        cred: &kcred::Cred,
+    ) -> VfsResult<()> {
+        if mode.node_type() != NodeType::RegularFile {
+            return Err(VfsError::InvalidInput);
+        }
+        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
+        let inode = self
+            .dir
+            .ops
+            .create_file(dir, dentry.name(), mode, uid, gid)?;
+        let entry =
+            self.dir
+                .ops
+                .create_inode_child(SimpleDirLookup::new(&parent), dentry.name(), inode)?;
+        let inode = entry.vfs_inode();
+        drop(entry);
+        dentry.instantiate(inode)
+    }
+
     fn mkdir(
         &self,
         _idmap: &crate::MountIdmap,
@@ -649,11 +732,15 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
 
     fn link(
         &self,
-        _old_dentry: &Dentry,
+        old_dentry: &Dentry,
         _dir: &crate::VfsInode,
-        _new_dentry: &LockedDentry<'_>,
+        new_dentry: &LockedDentry<'_>,
     ) -> VfsResult<()> {
-        Err(VfsError::OperationNotPermitted)
+        let parent = new_dentry.parent().ok_or(VfsError::InvalidInput)?;
+        self.dir
+            .ops
+            .install_link(SimpleDirLookup::new(&parent), old_dentry, new_dentry.name())?;
+        new_dentry.instantiate(old_dentry.vfs_inode())
     }
 
     fn unlink(&self, dir: &crate::VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {

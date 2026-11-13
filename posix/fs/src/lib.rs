@@ -18,6 +18,7 @@ mod io;
 mod ioctl;
 mod metadata;
 mod mount;
+mod mount_api;
 mod namei;
 pub mod notify;
 mod open;
@@ -29,6 +30,6 @@ pub mod watch;
 mod xattr;
 
 pub use self::{
-    dir::*, fd_ops::*, io::*, ioctl::*, metadata::*, mount::*, namei::*, open::*, quota::*,
-    stat::*, sync::*, xattr::*,
+    dir::*, fd_ops::*, io::*, ioctl::*, metadata::*, mount::*, mount_api::*, namei::*, open::*,
+    quota::*, stat::*, sync::*, xattr::*,
 };

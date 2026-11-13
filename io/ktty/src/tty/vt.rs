@@ -33,8 +33,12 @@ const VT_ACTIVATE: u32 = 0x5606;
 const VT_WAITACTIVE: u32 = 0x5607;
 const KDSETMODE: u32 = 0x4b3a;
 const KDGETMODE: u32 = 0x4b3b;
+const KDGKBTYPE: u32 = 0x4b33;
+const KDGKBLED: u32 = 0x4b64;
 const KDGKBMODE: u32 = 0x4b44;
 const KDSKBMODE: u32 = 0x4b45;
+/// `<linux/kd.h>` `KB_101`: a 101-key keyboard, reported as one char.
+const KB_101: u8 = 0x02;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, AnyBitPattern)]
@@ -238,6 +242,8 @@ pub(super) fn ioctl<R: TtyRead, W: TtyWrite>(
             | VT_WAITACTIVE
             | KDSETMODE
             | KDGETMODE
+            | KDGKBTYPE
+            | KDGKBLED
             | KDGKBMODE
             | KDSKBMODE
     ) {
@@ -308,6 +314,10 @@ pub(super) fn ioctl<R: TtyRead, W: TtyWrite>(
                 };
                 (arg as *mut i32).write_vm(value)?;
             }
+            // Linux reports these as a single char; this VT keeps no LED state
+            // of its own, so the flags read as zero.
+            KDGKBTYPE => (arg as *mut u8).write_vm(KB_101)?,
+            KDGKBLED => (arg as *mut u8).write_vm(0)?,
             _ => return Err(KError::NotATty),
         }
         Ok(0)

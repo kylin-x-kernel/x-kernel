@@ -90,7 +90,16 @@ count can change immediately after observation and grants no admission guarantee
   truncates to 15 bytes and validates C-string/UTF-8 conversion; OOM adjustment
   accepts only parsed values in `[-1000, 1000]`. Tracing delegates validation
   to `ktracing`; SysRq accepts the first non-whitespace byte only when it is
-  `t`.
+  `t`. `sys/kernel/hostname` and `sys/kernel/domainname` are also writable:
+  both are `0644` and their write path requires `kprocess::current_cred()
+  .has_sys_admin()` (the `CAP_SYS_ADMIN` check `sethostname(2)` makes) and
+  fails with `OperationNotPermitted` otherwise. An accepted write replaces the
+  caller's UTS namespace value following Linux `proc_dostring` strict
+  semantics — it starts at the file position, stops at the first NUL or
+  newline, truncates the stored value there, and silently accepts a write that
+  starts past the current value. Reads report the namespace bytes verbatim plus
+  one trailing newline; both the read and write paths return `NotFound` for a
+  kernel-task caller because it has no UTS namespace of its own.
 - FD magic links expose resource-backed paths. `ProcFdLink::follow` rejects
   magic-link-disallowing flags or lack of final-component following before
   obtaining a descriptor snapshot. Descriptor reuse can change a later result.

@@ -16,6 +16,7 @@ categories.workspace = true
 ignored = ["klazy", "ksync", "unittest_support"]
 
 [dependencies]
+anon_inodefs.workspace = true
 bitflags.workspace = true
 kfd.workspace = true
 memfs.workspace = true

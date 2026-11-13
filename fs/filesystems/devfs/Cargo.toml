@@ -19,6 +19,8 @@ vmm = ["dep:kvmm-api"]
 
 [dependencies]
 kalloc-types.workspace = true
+memaddr.workspace = true
+pagecache.workspace = true
 block.workspace = true
 iov_iter.workspace = true
 kalloc.workspace = true

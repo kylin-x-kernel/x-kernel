@@ -45,8 +45,9 @@ kfd resources / kvfs / device and pipe implementations
 
 | Boundary | Entry examples | Risk source |
 |------|----------|----------|
-| User path strings | `openat`, `linkat`, `statx`, `mount` | Null pointers, strings not NUL-terminated, over-long strings, path traversal, symbolic link loops |
+| User path strings | `openat`, `linkat`, `statx`, `mount`, `move_mount` | Null pointers, strings not NUL-terminated, over-long strings, path traversal, symbolic link loops |
 | mount data byte page | `mount(..., data)` | Bad pointers, crossing into unreadable pages, binary content, and malicious or unknown options interpreted by the specific filesystem |
+| New mount API inputs | `fsopen`, `fsconfig`, `fsmount`, `move_mount` | Unregistered fs type, unknown commands/flags, missing superblock, non-empty `from_path`, unprivileged caller (all require `CAP_SYS_ADMIN`) |
 | User read/write buffers | `read`, `write`, `readlinkat`, `getdents64`, `statfs` | Bad addresses, short buffers, cross-page access failures, malformed kernel information written back |
 | xattr names and values | `set/get/list/remove*xattr` | Missing NUL terminator, over-long name/value/list, non-UTF-8 suffix, short output buffers, namespace privilege violations |
 | User iovec | `readv`, `writev`, `preadv2`, `pwritev2` | Too many iovecs, range overflow, wrong read/write direction |
@@ -89,6 +90,20 @@ The capacity is received as a `usize`, but only the actual path length is copied
 A short capacity returns `ERANGE` before any write, including when a NULL address and a short capacity occur together.
 The regression tests use a separate process's `FsStruct` and mappings managed by `TestUserArray`,
 and check that a short buffer is not written, that normal output does not go past the end of the path, and the error return for an unmapped address.
+
+### New mount API input validation
+
+The new mount API (`mount_api.rs`) validates every user-controlled branch before touching namespace state,
+and all four entries enforce `CAP_SYS_ADMIN` via `require_mount_privilege` (same authority as legacy `mount(2)`):
+
+- `fsopen`: `flags & !FSOPEN_CLOEXEC != 0` → `InvalidInput`; the fs type name is bounded by `PATH_MAX` and must be
+  registered (`kvfs::get_filesystem_type`), otherwise `NoSuchDevice`. The fs-context fd is an `anon_inodefs` anonymous inode.
+- `fsconfig`: unknown `cmd` → `InvalidInput`; `FSCONFIG_CMD_CREATE` is rejected with `InvalidInput` once a superblock already
+  exists; the `source` key is stored as the mount source (not folded into the option string). Key/value strings are bounded by `PATH_MAX`.
+- `fsmount`: `flags & !FSMOUNT_CLOEXEC != 0` → `InvalidInput`; the context must already hold a superblock, otherwise `InvalidInput`.
+- `move_mount`: `flags & !MOVE_MOUNT_F_EMPTY_PATH != 0` → `InvalidInput`; a non-empty `from_path` → `InvalidInput`
+  (only detached `fsmount` mounts are supported). The target path is resolved before the `fsmount` mount is consumed, so a
+  failed lookup leaves the descriptor reusable; a failed attach restores the mount instead of spending the fd.
 
 ## Memory Safety Invariants
 

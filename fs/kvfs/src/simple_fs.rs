@@ -235,6 +235,14 @@ impl SimpleFsNode {
     pub fn sync(&self, _data_only: bool) -> VfsResult<()> {
         Ok(())
     }
+
+    /// Sets this node's `inode::i_size`.
+    ///
+    /// Buffered-write completion paths that grow the file outside `setattr`
+    /// use this to keep the served metadata in step with the page cache.
+    pub fn set_size(&self, size: u64) {
+        self.metadata.lock().size = size;
+    }
 }
 
 impl Drop for SimpleFsNode {

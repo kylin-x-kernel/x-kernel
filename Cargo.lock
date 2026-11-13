@@ -1171,7 +1171,9 @@ dependencies = [
  "lazyinit",
  "linux-raw-sys",
  "macros",
+ "memaddr",
  "osvm",
+ "pagecache",
  "posix-types",
  "tee_crypto 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "unittest",
@@ -4504,6 +4506,7 @@ dependencies = [
 name = "posix-fs"
 version = "0.3.0-dev"
 dependencies = [
+ "anon_inodefs",
  "bitflags 2.13.2",
  "fs_context",
  "iov_iter",

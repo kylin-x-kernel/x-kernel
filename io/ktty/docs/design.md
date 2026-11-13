@@ -313,6 +313,46 @@ An in-flight snapshot may complete while another caller falls back, but both
 access paths share the same port and receive queue. The no-port case retains HAL
 fallback and manual processing. No dynamic rebinding or hot-unplug is added.
 
+## Native Console ioctl Compatibility
+
+The native serial console accepts the console/keyboard/VT ioctl class that
+userspace console setup (systemd-executor) probes: `KD*` keyboard mode/LEDs/type
+tables, `VT_*` mode/state/resize requests, `TIOCPKT`/`TIOCGEXCL`/`TIOCEXCL`,
+locked termios and modem lines. A dedicated `console_ioctl` helper serves them
+with fixed serial-console defaults (text mode, XLATE keyboard, no
+LEDs/packet/exclusive mode) instead of failing `ENOTTY`; commands outside that
+class fall through to the generic termios/PTY dispatch in `Tty::ioctl`.
+Struct-writing getters follow the Linux buffer layouts (`vt_stat` 3×u16,
+`vt_mode` 8 bytes, `serial_icounter_struct` 20 ints, one `char` for
+`KDGKBTYPE`/`KDGKBLED`), and the keyboard-table getters keep returning `ENOTTY`
+because there is no serial keyboard table to report.
+
+Requests that Linux serves for every tty running `N_TTY` stay in
+`terminal_ioctl`, independent of the console gate: `FIONREAD`/`TIOCINQ`
+(queued input bytes from the port ingress), `TIOCOUTQ` (no kernel output buffer
+to drain) and `TIOCGETD` (`N_TTY`). PTY endpoints and the virtual console
+therefore keep those answers, and the virtual console adds `KDGKBTYPE` and
+`KDGKBLED` beside its own `KDGETMODE`/`KDGKBMODE` handling in `vt::ioctl`.
+
+The helper is gated on the native console identity, not on `TtyKind`: a PTY
+slave shares `TtyKind::Terminal` with the serial console, so the gate also
+requires the absence of a PTY pair. PTY masters and slaves therefore keep
+returning `ENOTTY` for the console class — Linux keeps packet mode and VT
+requests off PTYs, and `TIOCPKT` on a master would otherwise report success
+while never enabling framing. The virtual console keeps its own `vt::ioctl`
+path and does not use this table.
+
+Acquiring compatibility rather than capability, the following requests are
+accepted as successful no-ops because their operation has no serial-console
+effect: `VT_SETMODE`, `KDSETMODE`, `KDSKBMODE`, `KDSKBMETA`, `KDSKBLED`,
+`TIOCPKT`, `TIOCEXCL`, `TIOCNXCL`, `TIOCVHANGUP`, `TIOCMIWAIT`, `KDENABIO`,
+`KDDISABIO`, `KDADDIO`, `KDDELIO`, `KDSIGACCEPT`, `TIOCCONS`,
+`TIOCSLCKTRMIOS`, `TIOCMSET`, `TIOCMBIS`, `TIOCMBIC`, `TIOCSETD` and
+`TIOCSSOFTCAR`. They report success so console setup and teardown proceed, but
+they do not revoke other openers (`TIOCVHANGUP`), reprogram a keyboard, or
+establish packet/exclusive/console-redirect state; real VT keyboard state and
+full vhangup revoke remain follow-ups.
+
 ## Terminal Layer
 
 `ktty` implements the X-Kernel terminal layer: terminal devices, the line
