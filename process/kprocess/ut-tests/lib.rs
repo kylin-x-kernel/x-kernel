@@ -2659,6 +2659,65 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     process_publication().cleanup();
 }
 
+/// A thread pidfd (`CLONE_THREAD | CLONE_PIDFD`) names the thread's own tid for
+/// every observer until that tid stops resolving to the captured identity.
+#[def_test(user, serial)]
+fn test_thread_pidfd_fdinfo_reports_its_own_tid() {
+    let process = ensure_init().fork(9200);
+    let leader_task = publish_test_thread(&process, process.pid());
+    let leader = leader_task.as_thread();
+    let prepared = leader
+        .prepare_thread_clone()
+        .expect("thread clone should allocate a sibling tid");
+    let tid = prepared.tid();
+    let (cloned, task_number) = prepared.into_parts();
+    let identity = cloned.identity_token();
+    let pidfd_file = crate::PidFd::new_file_for_task(
+        &process,
+        task_number.clone(),
+        identity,
+        kvfs::OpenFlags::READ_WRITE.bits(),
+        initial_cred(),
+    )
+    .unwrap();
+    let pidfd = crate::PidFd::from_file(&pidfd_file).unwrap();
+
+    let thread_ns = process.active_pid_namespace();
+    let child_ns = kidentity::PidNamespace::new_child(&thread_ns);
+
+    // The pidfd is created before its thread is published (Linux attaches the
+    // pid before the pidfd), so a reader that races publication sees no task.
+    assert_eq!(pidfd.fdinfo_pid(None), -1);
+
+    let sibling = prepare_user_task(TaskInner::new_user(
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
+        String::from("pidfd-thread"),
+        task_number,
+        cloned,
+    ))
+    .publish()
+    .unwrap();
+    // Member-thread identities are allocated root-only, so a reader in the
+    // thread's own namespace (here the root one) or an ancestor reports the
+    // root tid that gettid(2) and the clone3 return value give, while a reader
+    // below that branch sees no projection and gets Linux pid_nr_ns's 0.
+    assert_eq!(pidfd.fdinfo_pid(None), i64::from(tid));
+    assert_eq!(pidfd.fdinfo_pid(Some(&thread_ns)), i64::from(tid));
+    assert_eq!(pidfd.fdinfo_pid(Some(&child_ns)), 0);
+
+    // Once the thread leaves, the tid no longer names the captured identity.
+    assert!(!process.exit_thread(sibling.task(), 0));
+    assert_eq!(pidfd.fdinfo_pid(None), -1);
+    drop(sibling);
+
+    assert!(process.exit_thread(&leader_task, 0));
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    let _ = process_publication().unpublish_process_if_matches(&process);
+    drop(leader_task);
+    process_publication().cleanup();
+}
+
 #[def_test(user, serial)]
 fn test_process_migration_reconciles_a_prepared_sibling_at_publication() {
     let process = ensure_init().fork(1742);

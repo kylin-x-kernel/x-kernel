@@ -17,6 +17,20 @@ use crate::{AsThread, Pid, Process, Tid, lookup};
 pub struct PidFd {
     process: Arc<Process>,
     exit_event: Arc<PollSet>,
+    /// The thread this pidfd refers to when it was created by a `clone3` with
+    /// `CLONE_THREAD | CLONE_PIDFD`. `None` means the pidfd names the
+    /// thread-group leader. Member-thread identities are allocated root-only,
+    /// so this handle carries the thread's root tid rather than per-namespace
+    /// projections.
+    task_number: Option<Arc<kidentity::PidHandle>>,
+    /// Stable identity of the task named by `task_number`, used to reject a
+    /// reused tid or an exec leader takeover when resolving the fdinfo line.
+    task_token: Option<kidentity::TaskIdentityToken>,
+    /// PID namespace the thread lives in, captured when the pidfd is created.
+    /// Threads share their process's namespace, and the root-only thread
+    /// identity can only be reported to observers that would name that
+    /// namespace (itself or an ancestor).
+    task_pid_ns: Option<Arc<kidentity::PidNamespace>>,
 }
 
 impl PidFd {
@@ -25,6 +39,29 @@ impl PidFd {
         Self {
             process: process.clone(),
             exit_event: process.exit_event().clone(),
+            task_number: None,
+            task_token: None,
+            task_pid_ns: None,
+        }
+    }
+
+    /// Create a new pidfd that reports a specific thread (its tid) in fdinfo,
+    /// while still anchoring lifecycle and file lookup on the owning process.
+    ///
+    /// `task_number` carries every PID-namespace projection of the tid and
+    /// `task_token` its stable identity, so [`Self::fdinfo_pid`] can resolve the
+    /// number in the reader's namespace and reject a reused tid.
+    fn new_with_task_pid(
+        process: &Arc<Process>,
+        task_number: Arc<kidentity::PidHandle>,
+        task_token: kidentity::TaskIdentityToken,
+    ) -> Self {
+        Self {
+            process: process.clone(),
+            exit_event: process.exit_event().clone(),
+            task_number: Some(task_number),
+            task_token: Some(task_token),
+            task_pid_ns: Some(process.active_pid_namespace()),
         }
     }
 
@@ -41,11 +78,35 @@ impl PidFd {
         open_flags: u32,
         cred: Arc<Cred>,
     ) -> KResult<Arc<VfsFile>> {
+        Self::file_from_pidfd(Self::new(process), open_flags, cred)
+    }
+
+    /// Create the pidfd file for a clone that reports a specific task id (a
+    /// thread's tid for `CLONE_THREAD | CLONE_PIDFD`) in fdinfo.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::new_file`].
+    pub fn new_file_for_task(
+        process: &Arc<Process>,
+        task_number: Arc<kidentity::PidHandle>,
+        task_token: kidentity::TaskIdentityToken,
+        open_flags: u32,
+        cred: Arc<Cred>,
+    ) -> KResult<Arc<VfsFile>> {
+        Self::file_from_pidfd(
+            Self::new_with_task_pid(process, task_number, task_token),
+            open_flags,
+            cred,
+        )
+    }
+
+    fn file_from_pidfd(pidfd: Self, open_flags: u32, cred: Arc<Cred>) -> KResult<Arc<VfsFile>> {
         let open_flags = OpenFlags::from_bits(open_flags).ok_or(KError::InvalidInput)?;
         AnonInodeFs::global().get_file(
             "[pidfd]",
             Arc::new(PidfdFops),
-            Arc::new(Self::new(process)),
+            Arc::new(pidfd),
             FMode::READ | FMode::STREAM,
             open_flags,
             cred,
@@ -65,6 +126,58 @@ impl PidFd {
     /// Returns the published process identity.
     pub fn process(&self) -> &Arc<Process> {
         &self.process
+    }
+
+    /// Returns the `Pid:` value Linux's `pidfd_show_fdinfo()` would print, or
+    /// `-1` when the referenced pid no longer has a task attached.
+    ///
+    /// The value is the `pid_nr_ns` view for `observer` — the number the reader
+    /// names the task with — and `0` when the pid has no projection there.
+    /// Process identities carry per-namespace projections. Member-thread
+    /// identities are allocated root-only, so the kernel's own name for a
+    /// thread is its root tid (`gettid(2)`, the `clone3` return value); it is
+    /// reported to a reader in the thread's namespace or an ancestor, and `0`
+    /// to a reader below or beside that branch, matching `pid_nr_ns`. `None`
+    /// means the caller has no PID namespace (kernel task) and gets the
+    /// internal number.
+    ///
+    /// A process pidfd reports the thread-group leader until it is reaped; a
+    /// waitable zombie still reports its pid. A thread pidfd
+    /// (`CLONE_THREAD | CLONE_PIDFD`) resolves its tid dynamically: once the
+    /// thread exits, an exec leader takeover detaches its identity, or the tid
+    /// is reused by another task, it reports `-1`.
+    pub fn fdinfo_pid(&self, observer: Option<&Arc<kidentity::PidNamespace>>) -> i64 {
+        if let (Some(number), Some(token)) = (&self.task_number, self.task_token) {
+            return match lookup::task(number.root_nr()) {
+                Ok(task) if task.as_thread().identity_token() == token => match observer {
+                    // Member-thread identities are allocated root-only, so the
+                    // kernel's own name for the thread is its root tid. Report
+                    // it only to a reader that names the thread's namespace or
+                    // an ancestor of it; a reader below or beside that branch
+                    // sees no projection, as Linux `pid_nr_ns` returns 0.
+                    Some(ns) => {
+                        let visible = self
+                            .task_pid_ns
+                            .as_ref()
+                            .is_none_or(|thread_ns| ns.is_ancestor_or_self(thread_ns));
+                        if visible {
+                            i64::from(number.root_nr())
+                        } else {
+                            0
+                        }
+                    }
+                    None => i64::from(number.root_nr()),
+                },
+                _ => -1,
+            };
+        }
+        if !self.process.has_attached_task() {
+            return -1;
+        }
+        match observer {
+            Some(ns) => i64::from(self.process.number_in_namespace(ns).unwrap_or(0)),
+            None => i64::from(self.process.pid()),
+        }
     }
 
     /// Gets a descriptor from the referenced thread-group leader's files.

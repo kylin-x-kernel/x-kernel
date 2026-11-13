@@ -88,10 +88,11 @@ also detaches it for failed or abandoned unpublished children. Retaining a
 manager for observation or prepared notification does not retain that ownership;
 configuration operations reject inactive owners rather than recreating defaults.
 
-Protected assets are stable PID/TID bindings, parent/child membership, exit
-visibility, runtime mm/fs/ns and per-thread files ownership, objective/subjective credentials,
-cgroup charge, signal recipients, timer generations and controlling-terminal
-identity. Possession of a `Process` reference is not by itself syscall authority.
+Protected assets are stable PID/TID bindings, each task's immutable identity
+token, parent/child membership, exit visibility, runtime mm/fs/ns and per-thread
+files ownership, objective/subjective credentials, cgroup charge, signal
+recipients, timer generations and controlling-terminal identity. Possession of a
+`Process` reference is not by itself syscall authority.
 
 Pidfd exit notifications use a `PollSet`, not stored completion tokens. Exit
 state is published before waking observers; readiness comes from
@@ -108,6 +109,7 @@ their existing Arc ownership.
 | Thread fork/clone | Typed clone policy, namespace flags and credential snapshot into runtime owners | Checks parent relation stability and Running state, delegates namespace/fs/mm/fd validation and cgroup charge; namespace InvalidFlagCombination/Unimplemented map to InvalidInput/Unsupported. |
 | Signal facade | PID/TID/group and optional `SignalInfo` into ksignal/task interrupt | Unpublished targets return NoSuchProcess, while published zombies accept the send and discard delivery (Linux `kill` semantics); thread runtime mismatch returns OperationNotPermitted; optional TGID must match. Syscall signal permission checks remain external. |
 | `capability::target_capabilities` | Caller-provided PID plus the caller's explicit observer PID namespace; ksyscall `capget` consumer into kprocess credential provider | PID zero selects the caller; a positive PID is resolved through the observer namespace projection into the root-keyed live task index, then to the target's objective `real_cred` capability sets, including an unreaped exited leader's retained credentials. An invisible or unresolvable PID returns NoSuchProcess (`ESRCH`). Any caller may read these objective sets without ptrace authorization, matching Linux `capget`; subjective credentials are never reported. The syscall layer owns ABI/version validation and supplies its active namespace. |
+| `PidFd::fdinfo_pid` | Captured thread identity token and PID namespace into fdinfo `Pid:` reporting | A thread pidfd reports its tid only while `lookup::task` resolves that tid to a task whose immutable identity token equals the captured one; exit, exec leader takeover or tid reuse yields `-1`. The token is never derived from user input and cannot be forged, so a recycled tid is never reported as the original thread. The value is additionally namespace-scoped: only an observer in the thread's captured namespace or an ancestor receives the root tid, and a child/sibling observer receives `0` as `pid_nr_ns` would; process pidfds keep their per-namespace projection lookup. The printed number is a snapshot of the pid handle the pidfd retains; it cannot be recycled to another task while the pidfd lives. |
 | `ptrace::check_read_real_creds_access` | Caller/target threads into access decision | Same-process access succeeds; otherwise caller real IDs must match target real/effective/saved IDs and target permitted capabilities must be contained in the caller's permitted set. Effective `CAP_SYS_PTRACE` overrides both checks. Failure returns OperationNotPermitted. |
 | `ptrace::check_read_fs_creds_access` | Caller/target threads into `/proc/<pid>/fdinfo/<fd>` read authorization | Same-thread-group access succeeds; otherwise caller fsuid/fsgid must match all target real/effective/saved UID/GID values and target permitted capabilities must be contained in the caller's effective set. Effective `CAP_SYS_PTRACE` overrides both checks. Failure returns OperationNotPermitted, which procfs maps to `EACCES`. |
 | Cgroup migration | Target group and authorization callback into membership transaction | Requires published members/source, runs callback under stable process cgroup gate, then delegates atomic group migration. Callback decides filesystem-owned authorization. |
@@ -353,9 +355,20 @@ authorized the switch and rejected pseudo-isolation kinds.
 
 Executable paths, command lines, IDs, user addresses, credentials and CPU stats
 can be exposed through procfs/signal/pidfd consumers. Those consumers own access
-policy; this crate supplies snapshots and does not redact them. Debug/signal
-logs include process IDs and signal names. Credential and payload memory is not
-explicitly scrubbed on drop here.
+policy; this crate supplies snapshots and does not redact them, with one
+namespace-scoped exception: a thread pidfd's fdinfo `Pid:` value is withheld
+from observers that would not name the thread (see the next paragraph). Debug/
+signal logs include process IDs and signal names. Credential and payload memory
+is not explicitly scrubbed on drop here.
+
+Thread-pidfd `Pid:` disclosure is namespace-scoped. `PidFd::fdinfo_pid`
+reports a thread's root tid only when the reading task's active PID namespace is
+that thread's captured namespace or one of its ancestors; a reader in a child or
+sibling namespace receives `0`, the value Linux's `pid_nr_ns` returns when no
+projection exists. The decision is not a capability check — procfs still gates
+the read itself (`ptrace::check_read_fs_creds_access`) — and it discloses no
+number the reader's namespace could name. Process pidfds are unaffected: their
+leader handles carry real per-namespace projections.
 
 Root/global PID lookup projection, fs-sharing detection limited to published
 threads, missing subreaper support, representative-thread credentials, simplified

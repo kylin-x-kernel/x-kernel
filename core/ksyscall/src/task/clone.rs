@@ -398,6 +398,15 @@ impl CloneRequest {
             thr.set_clear_child_tid(self.child_tid);
         }
 
+        // A thread pidfd (CLONE_THREAD | CLONE_PIDFD) reports the thread's own
+        // tid, resolved dynamically in fdinfo; capture the id and stable
+        // identity before task_number/thr move into the new task. A process
+        // pidfd reports the stable leader pid via PidFd::new_file instead.
+        let pidfd_task_identity = if self.flags.contains(CloneFlags::THREAD) {
+            Some((task_number.clone(), thr.identity_token()))
+        } else {
+            None
+        };
         let mut new_task = new_user_task(&curr.name(), entry, task_number, thr);
         // Linux copies the creator's CPU affinity into the child. schbench
         // relies on this: the message thread pins itself to the worker CPU set
@@ -405,23 +414,47 @@ impl CloneRequest {
         new_task.set_cpumask(curr.cpumask());
         new_task.ctx_mut().set_page_table_root(page_table_root);
 
-        let pidfd_install = if self.flags.contains(CloneFlags::PIDFD) {
-            let pidfd_file = PidFd::new_file(&child_process, O_RDWR, kprocess::current_cred())?;
-            let resources = kprocess::current_files();
-            let fd = resources.add_file(pidfd_file, true)?;
-            Some((resources, fd))
+        // Create the pidfd before publishing, but install it into the caller's
+        // (possibly shared) fd table only after the child is published, so a
+        // concurrent /proc/self/fdinfo reader never sees a pidfd whose task is
+        // not yet lookup-visible (Linux attaches the pid before the pidfd).
+        let pidfd_file = if self.flags.contains(CloneFlags::PIDFD) {
+            Some(match pidfd_task_identity {
+                Some((task_number, token)) => PidFd::new_file_for_task(
+                    &child_process,
+                    task_number,
+                    token,
+                    O_RDWR,
+                    kprocess::current_cred(),
+                )?,
+                None => PidFd::new_file(&child_process, O_RDWR, kprocess::current_cred())?,
+            })
         } else {
             None
         };
 
-        publish_user_task_with(new_task, |task| {
+        let published = publish_user_task_with(new_task, |task| {
             ktask::init_task_sched_attr(task, child_attr).map_err(super::sched::sched_errno)?;
             if let Some(thread) = task.try_as_thread() {
                 thread.set_nice(kprocess::NiceValue::new_clamped(child_attr.nice.as_i32()));
             }
             Ok(())
-        })?
-        .commit(|_task| {
+        })?;
+
+        let pidfd_install = if let Some(file) = pidfd_file {
+            let resources = kprocess::current_files();
+            match resources.add_file(file, true) {
+                Ok(fd) => Some((resources, fd)),
+                Err(err) => {
+                    published.abort();
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
+
+        published.commit(|_task| {
             if self.flags.contains(CloneFlags::PARENT_SETTID)
                 && let Err(err) = (self.parent_tid as *mut Pid).write_vm(tid)
             {

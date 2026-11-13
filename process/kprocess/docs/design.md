@@ -118,7 +118,8 @@ The analysis covers the entire crate, including feature-gated code and tests.
 | `src/thread/mod.rs`, `src/thread/core.rs`, `src/thread/current.rs`, `src/thread/cpu_time.rs`, `src/thread/restart.rs`, `src/thread/task_ext.rs` | Task-bound thread state, credentials, restart-block slot, current-context access and task-runtime hooks. |
 | `src/publication.rs`, `src/process_domain.rs`, `src/lookup.rs`, `src/lifecycle.rs` | Directory slots, relation transaction lock, lookup and exit events/CPU totals. |
 | `src/process_group.rs`, `src/session.rs` | Group member slots, session groups and controlling terminal. |
-| `src/capability.rs`, `src/cgroup.rs`, `src/credentials.rs`, `src/job_control.rs`, `src/pidfd.rs`, `src/process_exit.rs`, `src/process_signals.rs`, `src/procfs.rs`, `src/ptrace.rs`, `src/resource_limits.rs`, `src/scheduler.rs`, `src/stat.rs`, `src/system_view.rs`, `src/timer_delivery.rs`, `src/wait_reap.rs` | Domain-specific public queries, updates, callbacks and snapshots. |
+| `src/capability.rs`, `src/cgroup.rs`, `src/credentials.rs`, `src/job_control.rs`, `src/process_exit.rs`, `src/process_signals.rs`, `src/procfs.rs`, `src/ptrace.rs`, `src/resource_limits.rs`, `src/scheduler.rs`, `src/stat.rs`, `src/system_view.rs`, `src/timer_delivery.rs`, `src/wait_reap.rs` | Domain-specific public queries, updates, callbacks and snapshots. |
+| `src/pidfd.rs` | Pidfd file identity and lifetime: process-anchored lifecycle/notification, fdinfo `Pid:` resolution, and thread-pidfd identity-token verification (`new_file_for_task`, `fdinfo_pid`). |
 | `ut-tests/lib.rs`, `ut-tests/process_runtime_runtime_state.rs` | Process-domain and captured-MM regression cases; the remaining regression modules also live in `ut-tests/`. |
 
 ```text
@@ -146,6 +147,24 @@ retains init identity; orphan reparenting reserves an init relation slot.
   caller initializer while the task is still private, then publishes it.
   `PublishedUserTask::commit` runs parent-side writeback before activation;
   abort/drop rolls back publication.
+- `ksyscall`'s clone path calls `PidFd::new_file` (process pidfd, reporting the
+  thread-group leader) or `PidFd::new_file_for_task` (thread pidfd for
+  `CLONE_THREAD | CLONE_PIDFD`, reporting the thread's own tid). Both anchor
+  lifecycle, poll readiness and file lookup on the owning `Process`; only the
+  reported fdinfo number differs.
+- `procfs` calls `PidFd::fdinfo_pid(observer)` with the reading task's active
+  PID namespace to render `/proc/<pid>/fdinfo/<fd>`'s `Pid:` line. Resolution
+  is a snapshot: the process identity is reported while a task is attached
+  (a waitable zombie included) and `-1` after reaping, while a thread pidfd
+  reports its root tid only while `lookup::task` still resolves that tid to the
+  same immutable identity token. A thread that exited, moved its number through
+  an exec leader takeover, or lost its tid to reuse therefore reports `-1`
+  instead of a stale or recycled number. Process identities translate through
+  their per-namespace projections (`0` when the observer has none). Thread
+  identities are allocated root-only, so the kernel names a thread by its root
+  tid (`gettid(2)`, the `clone3` return value); that number is reported to a
+  reader in the thread's namespace or an ancestor of it, while a reader below
+  or beside that branch gets `0`, matching `pid_nr_ns`.
 - `Process` runtime capabilities return filesystem/namespace/mm/resource/signal
   references and expose timer/exec/teardown operations. `LiveAddressSpace` owns
   an active mm-user handle; its mapping closure supplies both the locked space
