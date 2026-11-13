@@ -16,7 +16,10 @@ imports, crate dependencies, macros, lints, or attributes.
   multiple peer crates;
 - avoid catch-all crates that aggregate unrelated resources only because migration or wiring
   is temporarily convenient;
-- use workspace dependencies instead of ad hoc per-crate version drift.
+- use workspace dependencies instead of ad hoc per-crate version drift;
+- when importing or upgrading a third-party package under `vendor/`, add or update its
+  entry in `vendor/sources.toml` in the same change; local patches keep the upstream
+  entry unchanged. `vendor/README.md` describes the record and the vendoring rules.
 
 ## Macros
 
@@ -34,4 +37,5 @@ Check specifically for:
 - shared state/data components left inside one crate even though multiple peer crates depend
   on them;
 - dependency declarations that bypass workspace conventions;
+- vendored package imports or upgrades without a matching `vendor/sources.toml` entry;
 - macros used where a normal function would be clearer.

@@ -1,0 +1,61 @@
+# Upstream provenance of the vendored packages, read by xreview.
+# One [[package]] per directory under vendor/. Files in a package match the
+# archive byte for byte, except the local patches described in README.md.
+# The sha256 is that of the archive; xreview downloads only from
+# static.crates.io (crates-io) and codeload.github.com (github).
+schema = 1
+
+[[package]]
+dir = "acpi"
+source = "crates-io"
+name = "acpi"
+version = "6.1.1"
+sha256 = "b763acdc1d85c36d61acf97a59938f23202d0e8efe45e8759de10c02db242744"
+repository = "https://github.com/rust-osdev/acpi"
+rev = "ae81c54b468decc1cb13f877fa2652ab5115426a"
+
+[[package]]
+dir = "arm-gic-driver"
+source = "crates-io"
+name = "arm-gic-driver"
+version = "0.17.13"
+sha256 = "52210fc25fa222377dfabf2ffd2f07a751debe75d35c173ac14def04525541a5"
+repository = "https://github.com/rcore-os/tgoskits"
+rev = "8fdfcc9e7b57002d4ec3c48ccceb5acc5f24ed83"
+path = "drivers/intc/arm-gic-driver"
+
+[[package]]
+dir = "arm_pl011"
+source = "crates-io"
+name = "arm_pl011"
+version = "0.1.1"
+sha256 = "e32b9dcf7e8b53378fa5eff69bc4a9430d69ffea312170c1ce2b1eaec5ee18b9"
+repository = "https://github.com/arceos-org/arm_pl011"
+rev = "d4e6caedb617ab9774f452f2b7658e77ad4c6c97"
+
+# No published archive: the GitHub tarball of the imported revision.
+[[package]]
+dir = "kvirtiodrivers"
+source = "github"
+version = "0.13.5"
+repository = "https://github.com/727Hsj/kvirtiodrivers"
+rev = "ab99294a6860704142d3b18a9a4884349adceede"
+sha256 = "d26bea83d751d080dc58265a7e1086f9628c2c098afef8cda0703b3f4ae5d250"
+
+[[package]]
+dir = "uart_16550"
+source = "crates-io"
+name = "uart_16550"
+version = "0.4.0"
+sha256 = "94d293f51425981fdb1b766beae254dbb711a17e8c4b549dc69b9b7ee0d478d5"
+repository = "https://github.com/rust-osdev/uart_16550"
+rev = "9a46f42061a1455c3f5fe206e613ca9071e63dfd"
+
+[[package]]
+dir = "x2apic"
+source = "crates-io"
+name = "x2apic"
+version = "0.5.1"
+sha256 = "e64dd21b207e918377ce79266b54517c75262031948f06324b6ef8473d3294cc"
+repository = "https://github.com/kzhao0986/x2apic-rs"
+rev = "b8f989f781f44ba9a2e504c55dba2f2d526590f5"

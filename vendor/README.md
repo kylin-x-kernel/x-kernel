@@ -5,6 +5,12 @@ They are excluded from the kernel workspace, not treated as first-party
 workspace members. Kernel consumers still pass the normal build and lint gates.
 Do not apply kernel copyright headers or repository-wide refactors to them.
 
+[sources.toml](sources.toml) records, per package, the upstream source
+(registry package or repository revision) and the SHA-256 of the upstream
+archive. Update it in the same change whenever a vendored package is imported
+or upgraded. xreview may skip files verified identical to the recorded upstream
+archive; local patches are reviewed for defects only.
+
 ## arm-gic-driver (Locally Maintained Dependency)
 
 - Published version: 0.17.13
