@@ -145,6 +145,13 @@ the bucket until `drain_inactive` removes them and calls their wakers under
 `ktask::with_wake_sync` (Linux WF_SYNC hint: the waker usually sleeps
 next).
 
+`drain_inactive` retains the first woken waiter inline and collects any
+remaining woken waiters in a temporary vector. A drain batch containing zero
+or one woken waiter needs no temporary heap allocation. Larger batches keep
+their bucket traversal order, and all scheduler callbacks still run after
+unlock. The batch can include waiters selected by concurrent wake operations,
+so its size is not necessarily this operation's requested wake count.
+
 ## Bucket lifetime and lock ordering
 
 The 256 buckets are created once on first futex use (lazily seeded from the

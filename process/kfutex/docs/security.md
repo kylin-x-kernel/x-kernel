@@ -51,6 +51,11 @@ are `kuaccess` calls, not unsafe in this crate.
 8. PI owner-death metadata records a kernel handoff awaiting user-word repair;
    each repair rechecks both the state identity and the observed word.
 
+The drain batch owns its first woken waiter's `Arc` inline and any additional
+woken waiters in a temporary vector until their callbacks run outside the
+bucket lock. Zero- and one-wake batches require no temporary heap allocation;
+larger batches retain the existing allocation behavior and wake ordering.
+
 ## Lock ordering
 
 ```text

@@ -474,9 +474,11 @@ impl FutexTable {
     ///
     /// Runs in a single O(n) pass under the bucket lock, then invokes wakers
     /// after the lock is released (scheduler work must not run while holding
-    /// a non-preemptible bucket lock).
+    /// a non-preemptible bucket lock). A batch with at most one wake needs no
+    /// temporary heap allocation.
     fn drain_inactive(&self, bucket_id: BucketId) {
-        let mut to_wake = Vec::new();
+        let mut first_wake = None;
+        let mut remaining_wakes = Vec::new();
         {
             let mut bucket = self.bucket(bucket_id).state.lock();
             let queue = &mut bucket.waiters;
@@ -494,14 +496,20 @@ impl FutexTable {
                 if waiter.is_queued() {
                     queue.push_back(waiter);
                 } else if waiter.is_woken() {
-                    to_wake.push(waiter);
+                    // Most futex handoffs wake one waiter; keep that case off
+                    // the allocator while retaining batch wake order.
+                    if first_wake.is_none() {
+                        first_wake = Some(waiter);
+                    } else {
+                        remaining_wakes.push(waiter);
+                    }
                 }
                 // Cancelled waiters are dropped here.
             }
         }
         // Futex wake implies the waker often sleeps next (Linux WF_SYNC).
         ktask::with_wake_sync(|| {
-            for waiter in to_wake {
+            for waiter in first_wake.into_iter().chain(remaining_wakes) {
                 waiter.wake_task();
             }
         });

@@ -2,8 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::Arc;
-use core::task::Waker;
+use alloc::{sync::Arc, task::Wake};
+use core::{
+    sync::atomic::{AtomicUsize, Ordering},
+    task::Waker,
+};
 
 use unittest::def_test;
 
@@ -88,4 +91,43 @@ fn wake_wins_over_late_cancellation() {
     assert_eq!(table.wake(key, 1, u32::MAX), 1);
     assert!(!table.cancel_waiter_for_test(&waiter));
     assert!(waiter.is_woken());
+}
+
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[def_test]
+fn wake_delivers_each_selected_waiter_once() {
+    for wake_count in [1, 3] {
+        let table = FutexTable::new();
+        let key = FutexKey::private_for_test(13, 0x6000);
+        let counters: [_; 3] =
+            core::array::from_fn(|_| Arc::new(WakeCounter(AtomicUsize::new(0))));
+        for counter in &counters {
+            let waiter = Arc::new(FutexWaiter::new(
+                key,
+                table.bucket_id(key),
+                u32::MAX,
+                Waker::from(counter.clone()),
+            ));
+            table.enqueue_waiter_for_test(key, waiter);
+        }
+
+        assert_eq!(table.wake(key, wake_count, u32::MAX), wake_count);
+        let delivered: usize = counters
+            .iter()
+            .map(|counter| counter.0.load(Ordering::Relaxed))
+            .sum();
+        assert_eq!(delivered, wake_count);
+        assert!(counters.iter().all(|counter| counter.0.load(Ordering::Relaxed) <= 1));
+
+        assert_eq!(table.wake(key, usize::MAX, u32::MAX), 3 - wake_count);
+        assert_eq!(table.wake(key, usize::MAX, u32::MAX), 0);
+        assert!(counters.iter().all(|counter| counter.0.load(Ordering::Relaxed) == 1));
+    }
 }
