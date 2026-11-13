@@ -30,6 +30,9 @@ triggers:
      from publication. Do not turn a missing ritual comment into a finding.
 - **Exceptions**: Independent counters need no ritual ordering comment. Existing
   adequate type/module rationale needs no repetition at each operation.
+  A rationale stated in a field, type or module doc covers every atomic
+  operation on that field; per-operation comments are not required. Replacing
+  per-operation comments with such a field-level rationale is not a violation.
 - **Counter-example**:
 
 ```rust,ignore

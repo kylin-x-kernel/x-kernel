@@ -35,7 +35,9 @@ triggers:
   section still assumes it is pinned.
 - **How to check**:
   1. Identify each live spinlock, IRQ-disable, and preempt-disable guard and
-     where it is dropped.
+     where it is dropped: a guard in a temporary drops at the end of its
+     statement, a guard in a block drops at the block end, and after
+     `let x = m.lock().take();` the lock is no longer held.
   2. Trace calls made before that drop for I/O, blocking lock acquisition,
      `block_on`, `wait`, `sleep`, event listeners, scheduler operations, or
      handling of `WouldBlock` by waiting.

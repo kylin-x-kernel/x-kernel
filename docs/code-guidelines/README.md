@@ -68,6 +68,13 @@ sites. Internal-invariant reasons name the invariant and why it holds. Rustc
 ignores expectations on macro invocation statements such as `panic!();`;
 place them on the smallest containing arm or item instead.
 
+### Vendored code
+
+`vendor/` holds third-party code imported as-is (see
+[vendor/README.md](../../vendor/README.md)). CG rules and the module-docs
+(DD/SD) checks do not apply to it. Hunks that this repository modifies locally
+are reviewed for defects only, not for rule or documentation conformance.
+
 ### Per-crate opt-outs
 
 Keep `#![allow(<lint>, reason = "<rule-id>: case (a)/(b): <specific reason>")]`

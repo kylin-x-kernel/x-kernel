@@ -52,6 +52,11 @@ checks:
   kernel dependencies to portable driver layers, disguise a unique owner as
   a singleton Vec, or add artificial Arc sharing merely to satisfy this rule.
   Whole-crate or whole-module migration exemptions are not permitted.
+  Portable drivers such as virtio must not depend on `kalloc` or
+  `kalloc-types` (see
+  [driver-subsystem-boundaries.md](../ai/driver-subsystem-boundaries.md)), so
+  "replace with `KBox`" does not apply to their tests; use the portable-driver
+  fixture exception above.
 - **Counter-example**:
 
 ```rust,ignore

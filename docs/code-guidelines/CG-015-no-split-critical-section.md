@@ -28,7 +28,9 @@ triggers:
   producing a time-of-check/time-of-use bug or inconsistent state.
 - **How to check**:
   1. Identify the protected invariant and each acquisition and release around
-     the operation.
+     the operation. Confirm where each guard drops (a temporary at the end of
+     its statement, a block-scoped guard at the block end) before claiming a
+     lock is held or released across the gap.
   2. Check whether another accessor can change state in a gap so that a later
      read or update relies on stale information.
   3. Keep dependent checks and updates within one critical section; separate
