@@ -1156,7 +1156,9 @@ impl NetDeviceOps for EthernetDevice {
         trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
         let packet = self.handle_rx_frame(ifindex, rx_buf.data(), timestamp);
         self.inner.recycle_rx(rx_buf).map_err(map_dev_err)?;
-        Ok(RxPoll::Consumed(packet))
+        Ok(RxPoll::Consumed(
+            packet.map(super::net_rx::RxPacket::Network),
+        ))
     }
 
     fn has_rx_work(&self) -> bool {

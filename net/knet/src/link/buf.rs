@@ -172,7 +172,8 @@ impl PacketBuf {
     }
 
     pub(crate) fn set_ifindex(&mut self, ifindex: i32) {
-        Arc::make_mut(&mut self.inner).ifindex = ifindex;
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.ifindex = ifindex;
     }
 
     pub(crate) fn packet_type(&self) -> PacketType {
@@ -273,20 +274,6 @@ impl PacketBuf {
 
     pub(crate) fn udp_metadata(&self) -> Option<UdpPacketMetadata> {
         self.inner.udp_metadata
-    }
-
-    /// Drops stamped UDP metadata from a uniquely owned handle.
-    ///
-    /// Used after `NetRx` fails to match a socket, so the same packet can stay
-    /// on the shared queue for the task poller without being picked up again.
-    /// The handle is unique on that path, so `make_mut` does not allocate.
-    pub(crate) fn clear_udp_metadata(&mut self) {
-        debug_assert_eq!(
-            Arc::strong_count(&self.inner),
-            1,
-            "NetRx unmatched UDP must uniquely own the packet handle"
-        );
-        Arc::make_mut(&mut self.inner).udp_metadata = None;
     }
 
     #[cfg(unittest)]

@@ -158,23 +158,11 @@ impl NetDevice for LoopbackDevice {
         }
         packet.set_ifindex(ifindex);
         packet.set_owner(PacketOwner::Loopback);
-        let Some(packet) = net_rx::prepare_for_enqueue(packet) else {
-            // Malformed IPv4 UDP is dropped in task context. Linux
-            // `loopback_xmit` still returns `NETDEV_TX_OK` after `NET_RX_DROP`.
-            return true;
-        };
-
-        // Linux `netif_rx`: if the caller is not already in BH/IRQ context,
-        // disable BH around enqueue + raise so `local_bh_enable` runs
-        // `NET_RX_SOFTIRQ` before this function returns.
-        let enqueue_result = {
+        let enqueue_result = net_rx::enqueue(packet, &self.name, crate::netfilter::global());
+        if enqueue_result.is_ok() {
             let _bh = kirq::context::local_bh_disable();
-            let result = net_rx::enqueue(packet);
-            if result.is_ok() {
-                kirq::softirq::raise_softirq(kirq::softirq::SoftirqVec::NetRx);
-            }
-            result
-        };
+            kirq::softirq::raise_softirq(kirq::softirq::SoftirqVec::NetRx);
+        }
         if let Err(dropped) = enqueue_result {
             warn!(
                 "Loopback device buffer is full, dropping packet to {}",

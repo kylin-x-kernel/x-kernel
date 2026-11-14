@@ -29,6 +29,7 @@ use crate::{
     device::{
         LINK_FLAG_UP, LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborEvent,
         NeighborSnapshot, NeighborState, NeighborUpdate, NetDeviceId, RxDeviceSelection,
+        net_rx::RxPacket,
     },
     ip::{self, IpAddress, Ipv4Address},
     network::{
@@ -122,7 +123,7 @@ pub(crate) struct Service {
     pub(crate) iface: Mutex<Interface>,
     router: Mutex<Router>,
     ingress: Mutex<IngressProcessor>,
-    rx_batch: Mutex<Vec<PacketBuf>>,
+    rx_batch: Mutex<Vec<RxPacket>>,
     accepted_batch: Mutex<Vec<PacketBuf>>,
     control_batch: Mutex<Vec<Vec<u8>>>,
     timeout_deadline_micros: AtomicU64,
@@ -416,7 +417,7 @@ impl Service {
         device_timestamp: MonotonicInstant,
         round_started_at: MonotonicInstant,
         budget: usize,
-        rx_batch: &mut Vec<PacketBuf>,
+        rx_batch: &mut Vec<RxPacket>,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
     ) -> DeviceRxProgress {
@@ -535,7 +536,7 @@ impl Service {
     fn try_process_rx_batch(
         &self,
         device_timestamp: MonotonicInstant,
-        rx_batch: &mut Vec<PacketBuf>,
+        rx_batch: &mut Vec<RxPacket>,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
     ) -> bool {
@@ -548,6 +549,7 @@ impl Service {
         };
         ingress.handle_rx_packets(
             device_timestamp,
+            crate::netfilter::global(),
             rx_batch,
             accepted_packets,
             control_packets,
@@ -861,8 +863,20 @@ impl Service {
     }
 
     fn sync_local_ipv4_views(&self) {
-        let local_ipv4_addrs = self.router.lock().local_ipv4_addrs();
+        let router = self.router.lock();
+        self.sync_ingress_device_names(&router);
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        drop(router);
         self.replace_local_ipv4_views(&local_ipv4_addrs);
+    }
+
+    fn sync_ingress_device_names(&self, router: &Router) {
+        self.ingress.lock().update_device_names(
+            router
+                .devices
+                .iter_with_ids()
+                .map(|(id, device)| (id.ifindex(), device.name())),
+        );
     }
 
     fn replace_local_ipv4_views(&self, addrs: &[crate::ip::Ipv4Cidr]) {
@@ -1156,6 +1170,7 @@ impl Service {
         let before = router.devices.link_snapshot_for_ifindex(ifindex);
         let routes_before = router.table.snapshot();
         let is_effective_mtu_changed = router.devices.update_device_link(ifindex, update)?;
+        self.sync_ingress_device_names(&router);
         if is_effective_mtu_changed {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
@@ -1244,6 +1259,7 @@ impl Service {
         let mut router = self.router.lock();
         let effective_mtu = router.devices.effective_mtu();
         let removed = router.remove_device_by_model_id(id)?;
+        self.sync_ingress_device_names(&router);
         if router.devices.effective_mtu() != effective_mtu {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);

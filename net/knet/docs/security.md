@@ -132,6 +132,15 @@ fit a NUL-terminated ABI field, and conditions whose meaning would change in the
 legacy format. The output buffer may be partially written on failure and must
 be discarded. The encoder receives kernel values and does not access user memory.
 
+INPUT runs on complete, validated local IPv4 datagrams before transport delivery
+or protocol/port-unreachable replies. Fragment queues do not evaluate partial datagrams.
+Unknown input interfaces and invalid match contexts drop the packet. Interface
+names are copied on configuration changes, so matching needs no Router lock.
+Loopback reserves queue capacity before INPUT, then evaluates UDP outside the
+queue lock and before disabling BH. NetRx never acquires the filter's sleepable lock. Deferred receive work carries the accepted UDP continuation
+through table changes. Ingress resumes that delivery without another INPUT
+check; ordinary network input still evaluates the current table.
+
 Entry decoding bounds every record by `next_offset`, keeps extensions before the
 target, and checks their aligned sizes before slicing. Each decode allocates at
 most 16 extension values and fixed-width names. Unsupported conditions are
@@ -812,7 +821,7 @@ Raw-packet batches already taken from devices, admitted-packet batches awaiting 
 
 ### 27. Loopback UDP Delivery Boundary
 
-Before disabling BH, the loopback send path must write validated metadata for complete IPv4 UDP packets. Under `local_bh_disable`, it then places the same `PacketBuf` into `pending_udp` in the shared `NET_RX_QUEUE` and triggers `NetRx`.
+Before disabling BH, the loopback send path must write validated metadata for complete IPv4 UDP packets. Under `local_bh_disable`, it then places the prepared UDP handle into `pending_udp` in the shared `NET_RX_QUEUE` and triggers `NetRx`.
 `NetRx` dequeues only UDP packets with validated metadata from `pending_udp` and does not look up `LoopbackDevice`.
 Both `NetRx` and supplemental processing in task context must use `SpinNoIrq` for UDP PCB lookup and enqueueing.
 Delivery of complete IPv4 UDP packets is independent of the poller's `RUNNING` execution ownership.
@@ -822,7 +831,9 @@ Delivery of complete IPv4 UDP packets is independent of the poller's `RUNNING` e
 
 `pending_udp` and `deferred` must be preallocated according to `SOCKET_BUFFER_SIZE` when the device is created. `enqueue` checks capacity against the combined number of queued and in-flight packets and rejects excess packets, so `push_back` must never trigger capacity growth within `SpinNoIrq` or the `NetRx` softirq.
 UDP packets with validated metadata taken by `process_pending` must count toward the in-flight reservation. Each batch is limited to `NET_RX_BUDGET` and delivered outside the lock.
-Packets without a matching PCB must retain exclusive handle ownership, have their metadata cleared, and enter `deferred`.
+Packets without a matching PCB retain their prepared UDP view and enter
+`deferred` as local-delivery work. This queue preserves FIFO order with ordinary
+network input and never sends local-delivery work back through INPUT.
 When the queue is full, `enqueue` must return the packet to the caller. The send path then drops it after releasing the `NET_RX_QUEUE` lock and BH guard.
 `discard_ifindex` must first move matching packets to a local container and drop them after unlocking to avoid heap deallocation within `SpinNoIrq`.
 Supplemental processing in the send path's task context handles only the `pending_udp` packets present at entry, split into a fixed number of rounds according to `NET_RX_BUDGET`.

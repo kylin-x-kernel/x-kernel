@@ -18,7 +18,7 @@ use crate::{
     device::{
         DeviceRegistry, IF_OPER_DOWN, Ipv4AddrChange, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING,
         LINK_FLAG_UP, LinkKind, NeighborEvent, NeighborSnapshot, NeighborState, NeighborUpdate,
-        NetDevice, NetDeviceId, RxPoll,
+        NetDevice, NetDeviceId, RxPoll, net_rx::RxPacket,
     },
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     network::{
@@ -1037,7 +1037,7 @@ impl Router {
         &mut self,
         timestamp: MonotonicInstant,
         budget: usize,
-        packets: &mut Vec<PacketBuf>,
+        packets: &mut Vec<RxPacket>,
     ) -> RxDrain {
         packets.clear();
         if budget == 0 || self.devices.is_empty() {

@@ -14,3 +14,5 @@ pub(super) mod rule;
 pub(super) mod table;
 
 unittest::path_mod_test!(tests, "../../../ut-tests/filter_evaluation.rs");
+
+unittest::path_mod_test!(input_tests, "../../../ut-tests/filter_input.rs");

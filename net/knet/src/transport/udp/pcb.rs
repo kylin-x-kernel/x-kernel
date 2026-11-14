@@ -33,7 +33,7 @@ pub(super) struct UdpDatagram {
 }
 
 /// A validated IPv4 UDP view over a reference-counted [`PacketBuf`].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct PreparedUdpPacket {
     packet: PacketBuf,
 }
@@ -80,14 +80,6 @@ impl PreparedUdpPacket {
 
     pub(crate) fn into_packet(self) -> PacketBuf {
         self.packet
-    }
-
-    /// Rebuilds a validated view from a packet stamped by [`super::input::prepare_ipv4_packet`].
-    pub(crate) fn from_stamped(packet: PacketBuf) -> Result<Self, PacketBuf> {
-        if packet.udp_metadata().is_none() {
-            return Err(packet);
-        }
-        Ok(Self { packet })
     }
 
     fn metadata(&self) -> UdpPacketMetadata {

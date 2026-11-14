@@ -13,7 +13,7 @@ use ktime_types::MonotonicInstant;
 mod ethernet;
 mod id;
 mod loopback;
-mod net_rx;
+pub(crate) mod net_rx;
 mod registry;
 
 pub(crate) use ethernet::*;
@@ -170,7 +170,7 @@ pub(crate) enum RxPoll {
     Empty,
     /// One frame or deferred packet was consumed by the budgeted receive step.
     /// Ethernet ARP handling and dropped frames yield `None`.
-    Consumed(Option<PacketBuf>),
+    Consumed(Option<net_rx::RxPacket>),
 }
 
 /// Trait implemented by network device backends.

@@ -464,6 +464,21 @@ Rejected updates preserve the current state. These operations require sleepable
 task context; table construction and counter collection allocate bounded storage.
 The global store starts with empty ACCEPT chains.
 
+Local IPv4 input runs INPUT after reassembly, before transport delivery and
+ICMP error handling. The service keeps interface names indexed by ifindex and
+refreshes them on device removal or rename; a missing input device drops the
+packet. INPUT has no output interface. Loopback reserves a NetRx slot before
+evaluating UDP input in task context. Full queues reject packets without INPUT
+counts; filtering and parsing release the slot on drop. The queue lock is released
+before taking the configuration's sleepable read lock.
+Receive work distinguishes ordinary network input from local UDP delivery after
+INPUT acceptance. Unmatched loopback UDP keeps its `PreparedUdpPacket` in the
+deferred queue and resumes local delivery without evaluating or counting INPUT
+again, including across a table replacement. `PacketBuf` carries no filter progress.
+Interface-name updates take Router before ingress; packet matching takes ingress
+before the filter read lock and never calls back into Router. OUTPUT and FORWARD
+are not connected to packet processing yet.
+
 ### Legacy IPv4 Table Compatibility
 
 `netfilter/compat/iptables_legacy` exports tables in the native
@@ -1541,7 +1556,16 @@ Before a packet enters a PCB queue, the loopback send path validates the datagra
 
 Each PCB reserves 1,024 `VecDeque` slots at creation. This follows the Linux `__udp_enqueue_schedule_skb` pattern, where `__skb_queue_tail` inserts an existing `skb` while holding `sk_receive_queue.lock`. Accordingly, `enqueue` performs only an occupancy check and inserts an existing handle while running in softirq context under `SpinNoIrq`. If the queue is full, it releases the queue lock before reclaiming the packet. `MSG_PEEK` increments the `PacketBuf` reference count under the lock and copies the payload after releasing it.
 
-The shared `NET_RX_QUEUE` is also protected by `SpinNoIrq` and is used by loopback transmit, `NetRx`, and task-context `poll_rx`. Its `pending_udp` and `deferred` queues both contain pointer-sized `PacketBuf` values. `NetRx` removes already-annotated entries from `pending_udp` under its budget for UDP delivery; the task poller removes other packets from `deferred`. Capacity accounting includes both queue lengths and all in-flight packets, so producers cannot consume slots that are temporarily vacant while a packet is being delivered to a PCB. If a UDP packet matches no PCB, this path retains unique ownership, clears the packet metadata, and moves it to `deferred`.
+The shared `NET_RX_QUEUE` is protected by `SpinNoIrq` and used by loopback transmit,
+`NetRx`, and task-context `poll_rx`. `pending_udp` holds pointer-sized
+`PreparedUdpPacket` values. The FIFO `deferred` queue holds `RxPacket` work:
+ordinary network input or prepared UDP that has passed INPUT. Both queues reserve
+their full capacity before use. NetRx moves unmatched UDP to `deferred` with its
+prepared view intact. Router and Service carry this receive stage to ingress,
+which resumes UDP delivery after INPUT. PacketBuf and PCB queue handles remain
+pointer-sized; deferred queue and ingress batch elements include the stage tag.
+Capacity accounting includes both queue lengths and all in-flight packets, so
+producers cannot consume slots temporarily vacant during PCB delivery.
 
 `IngressProcessor::ipv4_reassembler` owns reassembly queues and is protected by `Service::ingress`, a `Mutex<IngressProcessor>`. The global `SERVICE` is a `LazyInit<Service>` with separate component locks.
 

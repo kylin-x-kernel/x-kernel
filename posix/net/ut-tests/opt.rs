@@ -693,6 +693,9 @@ fn legacy_filter_writes_round_trip_counters_and_commit_before_copyout() {
         num_counters: info.num_entries,
         counters: counters.as_user_ptr::<u8>() as u64,
     };
+    // Earlier network tests may have counted packets in the global table.
+    let _ = reader.replace(header.replacement(wire.entries())).unwrap();
+    let wire = reader.export_entries(info.size).unwrap();
     let len = 96 + wire.entries().len();
     let request = TestUserBuffer::new(len + 8).unwrap();
     let mut bytes = header.as_bytes().to_vec();

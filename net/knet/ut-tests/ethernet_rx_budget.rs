@@ -282,7 +282,10 @@ fn dropped_frames_exhaust_budget_and_rotate_to_another_device() {
     assert_eq!(drain.work_done, 1);
     assert_eq!(packets.len(), 1);
     assert!(drain.has_more);
-    assert_eq!(packets[0].ifindex(), 3);
+    assert!(matches!(
+        &packets[0],
+        crate::device::net_rx::RxPacket::Network(packet) if packet.ifindex() == 3
+    ));
     assert_eq!(first_state.received.load(Ordering::Relaxed), 2);
     assert_eq!(second_state.recycled.load(Ordering::Relaxed), 1);
 

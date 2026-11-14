@@ -76,7 +76,7 @@ impl NetDevice for FailingRxDevice {
     fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> KResult<RxPoll> {
         self.packet
             .take()
-            .map(|packet| RxPoll::Consumed(Some(packet)))
+            .map(|packet| RxPoll::Consumed(Some(packet.into())))
             .ok_or(KError::Io)
     }
 

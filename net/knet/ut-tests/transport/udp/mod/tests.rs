@@ -187,13 +187,14 @@ fn unmatched_loopback_udp_stays_queued_for_the_poller() {
         ktime_types::MonotonicInstant::ORIGIN,
     ));
 
-    let crate::device::RxPoll::Consumed(Some(leftover)) = device
-        .poll_rx(1, ktime_types::MonotonicInstant::ORIGIN)
-        .unwrap()
+    let crate::device::RxPoll::Consumed(Some(crate::device::net_rx::RxPacket::LocalUdp(leftover))) =
+        device
+            .poll_rx(1, ktime_types::MonotonicInstant::ORIGIN)
+            .unwrap()
     else {
         panic!("unmatched UDP should remain for the task poller");
     };
-    assert!(leftover.udp_metadata().is_none());
+    assert!(leftover.packet().udp_metadata().is_some());
 
     clear_registry();
 }
