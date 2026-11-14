@@ -163,6 +163,11 @@ The test migration does not change production visibility, unsafe preconditions, 
    - Mitigation: only `MmUserHandle` increments the active user count; `MmPin` only pins the object, and
      upgrade and the last release are mutually exclusive through a single atomic state.
 
+10. Exit cleanup copies a large VMA set under memory pressure.
+    - Mitigation: walk the stable set directly before and after TLB completion;
+      this outer walk needs no VMA-count-sized allocation. Backend teardown may
+      still allocate and has its own failure constraints.
+
 ## Failure Mode and Effects Analysis (FMEA)
 
 | Failure | Condition | Handling | Impact |

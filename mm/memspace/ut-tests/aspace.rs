@@ -960,16 +960,22 @@ fn mm_pin_does_not_keep_user_mappings_alive_after_last_user_release() {
 }
 
 #[def_test]
-fn clear_tolerates_zapped_linear_mapping() {
+fn clear_removes_present_and_zapped_linear_mappings() {
     let start = VirtAddr::from_usize(0x4000);
+    let present = start + 2 * PAGE_SIZE_4K;
     let flags = MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER;
     let frame = crate::backend::alloc_frame(true, PageSize::Size4K).expect("allocate linear frame");
+    let present_frame =
+        crate::backend::alloc_frame(true, PageSize::Size4K).expect("allocate second linear frame");
     let mut aspace =
-        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate test address space");
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 3).expect("allocate test address space");
 
     aspace
         .map_linear(start, frame, PAGE_SIZE_4K, flags)
         .expect("map linear page");
+    aspace
+        .map_linear(present, present_frame, PAGE_SIZE_4K, flags)
+        .expect("map second linear page");
     assert!(aspace.page_table().query(start).is_ok());
     aspace
         .invalidate_present(start, PAGE_SIZE_4K)
@@ -980,7 +986,11 @@ fn clear_tolerates_zapped_linear_mapping() {
     );
 
     aspace.clear();
+    assert!(aspace.find_vma(start).is_none());
+    assert!(aspace.find_vma(present).is_none());
+    assert_eq!(aspace.page_table().query(present), Err(PagingError::NotMapped));
     crate::backend::dealloc_frame(frame, PageSize::Size4K);
+    crate::backend::dealloc_frame(present_frame, PageSize::Size4K);
 }
 
 #[def_test]

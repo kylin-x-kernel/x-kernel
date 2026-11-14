@@ -379,6 +379,11 @@ the VMA, and does not take on the concrete ownership of file pins or anonymous f
 finishes TLB invalidation, `MmSpace` invokes the same completion hook so backing
 runtimes can release references that only kept those translations valid.
 
+Last-user address-space teardown walks the stable VMA set to unmap each range,
+finishes TLB invalidation, then walks it again to complete runtime invalidation
+before clearing the VMA metadata. It does not copy the VMA set into temporary
+arrays, so this outer walk does not require memory proportional to VMA count.
+
 Private anonymous offsets have one source: anonymous VMAs derive bytes from
 `page_offset`, while file-private runtimes derive them from their retained
 anonymous origin and the virtual displacement. Object invalidation asks that

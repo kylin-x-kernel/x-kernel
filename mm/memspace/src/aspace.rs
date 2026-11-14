@@ -580,26 +580,22 @@ impl MmSpace {
     }
 
     fn clear_all_mappings(&mut self) {
-        let vmas = self.vmas.iter().cloned().collect::<Vec<_>>();
-        let operations = vmas
-            .iter()
-            .map(|vma| {
-                let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
-                Ok((vma.range(), runtime))
-            })
-            .collect::<KResult<Vec<_>>>()
-            .expect("runtime entry must exist for every VMA");
+        // The VMA set remains stable until after TLB completion, so teardown
+        // can walk it directly without allocating under memory pressure.
         {
             let mut modify = self.pgtbl.modify();
-            for (range, runtime) in &operations {
-                runtime
-                    .unmap(*range, &mut modify)
+            for vma in self.vmas.iter() {
+                vma.runtime()
+                    .expect("runtime entry must exist for every VMA")
+                    .unmap(vma.range(), &mut modify)
                     .expect("backend clear must succeed");
             }
             modify.finish();
         }
-        for (range, runtime) in &operations {
-            runtime.on_invalidate_complete(*range);
+        for vma in self.vmas.iter() {
+            vma.runtime()
+                .expect("runtime entry must exist for every VMA")
+                .on_invalidate_complete(vma.range());
         }
         self.vmas.clear();
     }
