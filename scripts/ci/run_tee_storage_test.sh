@@ -2,9 +2,9 @@
 set -euo pipefail
 
 arch="${1:?usage: run_tee_storage_test.sh <arch>}"
-musl_target="${arch}-unknown-linux-musl"
-musl_linker="${arch}-linux-musl-gcc"
-target_upper="${musl_target^^}"
+gnu_target="${arch}-unknown-linux-gnu"
+gnu_linker="${arch}-linux-gnu-gcc"
+target_upper="${gnu_target^^}"
 target_upper="${target_upper//-/_}"
 read -r -a tee_test_bins <<< "${TEE_TEST_BINS:-storage_test cryp_test}"
 
@@ -19,7 +19,7 @@ if [ "${#tee_test_bins[@]}" -eq 0 ]; then
     exit 2
 fi
 
-libutee_dir="/xkernel-target/libutee-${arch}"
+libutee_dir="/xkernel-target/libutee-${arch}-gnu"
 mkdir -p "$(dirname "${libutee_dir}")"
 echo "==> Syncing rust-libutee..."
 fallback_clone_dir=""
@@ -64,12 +64,14 @@ for attempt in 1 2 3; do
     sleep "$((attempt * 5))"
 done
 
-echo "==> Building TEE tests for ${musl_target}: ${tee_test_bins[*]}"
+echo "==> Building TEE tests for ${gnu_target}: ${tee_test_bins[*]}"
 (
     cd "${libutee_dir}"
     for bin in "${tee_test_bins[@]}"; do
-        CC="${musl_linker}" cargo +"${AUX_RUST_TOOLCHAIN}" build \
-            --bin "${bin}" --release --target "${musl_target}"
+        env RUSTFLAGS="-C target-feature=-crt-static" \
+            "CARGO_TARGET_${target_upper}_LINKER=${gnu_linker}" \
+            "CC_${gnu_target//-/_}=${gnu_linker}" CC="${gnu_linker}" cargo +"${AUX_RUST_TOOLCHAIN}" build \
+            --bin "${bin}" --release --target "${gnu_target}"
     done
 )
 
@@ -85,24 +87,33 @@ done
 echo "==> Building tee_apps/sh with TEE_INIT_APPS=${tee_init_apps}..."
 env \
   TEE_INIT_APPS="${tee_init_apps}" \
-  RUSTFLAGS= \
-  CC="${musl_linker}" \
-  "CARGO_TARGET_${target_upper}_LINKER=${musl_linker}" \
-  cargo build --release --target "${musl_target}" --manifest-path tee_apps/sh/Cargo.toml \
+  RUSTFLAGS="-C target-feature=-crt-static" \
+  CC="${gnu_linker}" \
+  "CARGO_TARGET_${target_upper}_LINKER=${gnu_linker}" \
+  cargo build --release --target "${gnu_target}" --manifest-path tee_apps/sh/Cargo.toml \
   --target-dir "${TARGET_DIR}/tee-apps"
 
-echo "==> Creating rootfs..."
-staging_dir="${TARGET_DIR}/rootfs-staging"
-rm -rf "${staging_dir}"
-mkdir -p "${staging_dir}/bin" "${staging_dir}/tee"
-cp "${TARGET_DIR}/tee-apps/${musl_target}/release/sh" "${staging_dir}/bin/sh"
-chmod 0755 "${staging_dir}/bin/sh"
-for bin in "${tee_test_bins[@]}"; do
-    cp "${libutee_dir}/target/${musl_target}/release/${bin}" "${staging_dir}/tee/${bin}"
-    chmod 0755 "${staging_dir}/tee/${bin}"
+echo "==> Creating glibc rootfs from the shared release..."
+rootfs_cached="$(scripts/ci/prepare_rootfs_cache.sh "${arch}" | tail -n 1)"
+cp --reflink=auto "${rootfs_cached}" disk.img
+# Do not follow/overwrite Debian's /bin -> /usr/bin symlink. Replace its shell
+# executable explicitly; the rest of the published loader/library tree stays intact.
+commands="${TARGET_DIR}/tee-rootfs-${arch}.debugfs"
+{
+    printf 'cd /usr/bin\nrm sh\n'
+    printf 'write %s sh\n' "${TARGET_DIR}/tee-apps/${gnu_target}/release/sh"
+    printf 'set_inode_field sh mode 0100755\ncd /tee\n'
+    for bin in "${tee_test_bins[@]}"; do
+        printf 'rm %s\n' "${bin}"
+        printf 'write %s %s\n' "${libutee_dir}/target/${gnu_target}/release/${bin}" "${bin}"
+        printf 'set_inode_field %s mode 0100755\n' "${bin}"
+    done
+} > "${commands}"
+debugfs -w -f "${commands}" disk.img
+# debugfs may return zero for failed commands: verify every installed file.
+for guest in /usr/bin/sh "${tee_test_bins[@]/#//tee/}"; do
+    debugfs -R "stat ${guest}" disk.img 2>/dev/null | grep -q 'Type: regular'
 done
-truncate -s 64M disk.img
-mkfs.ext4 -q -F -b 4096 -O ^metadata_csum,^64bit -d "${staging_dir}" disk.img
 
 if [ "${SKIP_KERNEL_BUILD:-0}" != "1" ]; then
     echo "==> Building kernel..."

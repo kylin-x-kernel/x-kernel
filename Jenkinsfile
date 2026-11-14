@@ -24,6 +24,8 @@ pipeline {
         string(name: 'LIBUTEE_REPO', defaultValue: 'https://gitee.com/openkylin/rust-libutee')
         string(name: 'TEST_HARNESS_REPO', defaultValue: 'https://gitee.com/openkylin/starry-test-harness')
         string(name: 'TEST_HARNESS_BRANCH', defaultValue: 'master')
+        string(name: 'CI_BUILDER_IMAGE', defaultValue: 'yeanwang/x-kernel-builder:v3.2', description: 'Builder image; set a candidate tag for pre-release validation')
+        string(name: 'ROOTFS_RELEASE_TAG', defaultValue: 'rootfs-v20261111', description: 'RootFS release; set a candidate tag for pre-release validation')
         booleanParam(name: 'ENABLE_DOC_CHECK', defaultValue: false, description: 'Run Rust documentation generation check')
         booleanParam(
             name: 'ENABLE_COVERAGE',
@@ -50,7 +52,8 @@ pipeline {
         PYTHONUNBUFFERED = '1'
         TARGET_DIR = '/xkernel-target'
         ROOTFS_CACHE_DIR = '/xkernel-cache/rootfs'
-        ROOTFS_VERSION = '20260302'
+        ROOTFS_VARIANT = 'xkernel-glibc'
+        ROOTFS_RELEASE_TAG = "${params.ROOTFS_RELEASE_TAG?.trim() ?: 'rootfs-v20261111'}"
         HARNESS_JOBS = '2'
         STARRY_ACCEL = 'n'
     }
@@ -184,7 +187,7 @@ def guestAgentLabelForArch(String arch) {
 
 def ciBuilderImage() {
     // Agents preload the platform image with docker load (tag preserved, digest may differ).
-    return 'kennard/x-kernel-builder:v3.1'
+    return params.CI_BUILDER_IMAGE?.trim() ?: 'yeanwang/x-kernel-builder:v3.2'
 }
 
 def ciBuilderDockerArgs(String seccompProfile = 'unconfined') {
@@ -196,8 +199,8 @@ def ciBuilderDockerArgs(String seccompProfile = 'unconfined') {
         '--mount type=volume,dst=/xkernel-target ' +
         '--mount type=volume,src=xkernel-cargo-home-v2,dst=/xkernel-cache/cargo ' +
         // Keep Rustup temporary files and toolchains on the same filesystem.
-        '--mount type=volume,src=xkernel-rustup-home-v5,dst=/usr/local/rustup ' +
-        '--mount type=volume,src=xkernel-rootfs-cache-v2,dst=/xkernel-cache/rootfs ' +
+        '--mount type=volume,src=xkernel-rustup-home-v6,dst=/usr/local/rustup ' +
+        '--mount type=volume,src=xkernel-rootfs-cache-v3,dst=/xkernel-cache/rootfs ' +
         '--device=/dev/kvm --device=/dev/vhost-vsock --group-add 36 ' +
         "--security-opt \"${seccompOption}\" --security-opt no-new-privileges=true"
 }
@@ -215,7 +218,9 @@ def ciArchOutputStashName(String arch) {
 }
 
 def withCiRootWs(String rootWs, Closure body) {
-    withEnv(["ROOT_WS=${rootWs}"]) {
+    def harnessRoot = "${rootWs}/.ci/rootfs-harness"
+    withEnv(["ROOT_WS=${rootWs}", "HARNESS_ROOTFS_DIR=${harnessRoot}",
+             "ROOTFS_LATEST_FILE=${harnessRoot}/rootfs/releases/${env.ROOTFS_RELEASE_TAG}.json"]) {
         body.call()
     }
 }
@@ -402,6 +407,9 @@ def restoreStashedArchCiOutputs() {
 }
 
 def prepareRootfsCacheForArch(String arch, String stageName) {
+    dir(env.HARNESS_ROOTFS_DIR) {
+        gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH, true)
+    }
     sh label: "Prepare rootfs cache ${arch}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
@@ -1008,7 +1016,7 @@ facts_early_failure() {
 }
 trap facts_early_failure EXIT
 facts_base=''
-if [ -n "\${_CI_FACTS_BASE_REF}" ]; then
+if [ -n "\${_CI_FACTS_BASE_REF:-}" ]; then
     facts_base=\$(git merge-base HEAD "\${_CI_FACTS_BASE_REF}" 2>/dev/null || true)
 fi
 scripts/ci/check_dylint_environment.sh
@@ -1094,12 +1102,12 @@ def runRuntimeTests(String arch) {
         withEnv(["TARGET_DIR=${runtimeTargetDir}", "STAGE_LOG=${stageLog}"]) {
             restoreKernelArtifact(artifactNameForNormal(arch))
             dir('test-harness') {
-                gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
+                gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH, true)
 
                 withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
                          "STARRY_SKIP_BUILD=1",
                          "ROOTFS_CACHE_DIR=${env.ROOTFS_CACHE_DIR}",
-                         "GUEST_CASES_TARGET_DIR=/xkernel-target/guest-cases-${arch}",
+                         "GUEST_CASES_TARGET_DIR=/xkernel-target/guest-cases-${arch}-gnu-dynamic",
                          "JOBS=${env.HARNESS_JOBS}"]) {
                     sh label: "Run starry-test-harness ${arch}", script: """#!/bin/bash
 set -euo pipefail
@@ -1356,7 +1364,7 @@ def checkoutProject() {
     gitCheckoutPublic(env.PROJECT_REPO, env.DEFAULT_BRANCH)
 }
 
-def gitCheckoutPublic(String repoUrl, String branch) {
+def gitCheckoutPublic(String repoUrl, String branch, boolean shallow = false) {
     if (!repoUrl?.trim()) {
         error('Repository URL is required')
     }
@@ -1367,6 +1375,7 @@ def gitCheckoutPublic(String repoUrl, String branch) {
     withEnv([
         "_CI_CHECKOUT_REPO=${repoUrl.trim()}",
         "_CI_CHECKOUT_BRANCH=${branch.trim()}",
+        "_CI_CHECKOUT_SHALLOW=${shallow}",
     ]) {
         sh(label: 'Checkout source branch', script: '''#!/bin/bash
 set -euo pipefail
@@ -1376,6 +1385,10 @@ git init --quiet .
 git remote add origin "${_CI_CHECKOUT_REPO}"
 
 refspec="+refs/heads/${_CI_CHECKOUT_BRANCH}:refs/remotes/origin/${_CI_CHECKOUT_BRANCH}"
+depth_args=()
+if [[ "${_CI_CHECKOUT_SHALLOW}" == true ]]; then
+    depth_args=(--depth=1)
+fi
 fetch_ok=false
 for attempt in 1 2 3; do
     if git fetch \
@@ -1383,6 +1396,7 @@ for attempt in 1 2 3; do
         --prune \
         --no-tags \
         --no-recurse-submodules \
+        "${depth_args[@]}" \
         origin "${refspec}"; then
         fetch_ok=true
         break

@@ -27,7 +27,7 @@ Do not use a bare `cargo check -p <crate>` as the main kernel validation path.
 
 - the Rust toolchain and targets from `rust-toolchain.toml`;
 - `cargo-binutils` and `rust-objcopy`;
-- the target architecture's musl cross toolchain (`<arch>-linux-musl-gcc`) for
+- the target architecture's GNU cross toolchain (`<arch>-linux-gnu-gcc`) for
   user apps, TEE tests and harness guest cases; the kernel build itself does
   not compile C;
 - the matching QEMU system emulator for `make run`;

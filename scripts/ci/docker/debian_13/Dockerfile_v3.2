@@ -1,0 +1,78 @@
+# GNU guest toolchains and glibc 2.43 sysroots on amd64 and arm64.
+# Reuse only Rust and Dylint tools from v3.1; the final filesystem starts
+# from the upgraded Debian base so the old system libc is not retained.
+ARG BASE_IMAGE=kennard/x-kernel-builder:v3.1@sha256:25b707ce4754dff4b7eb185c9f0c049dee202a394fe4b812153396b49821bca2
+ARG DEBIAN_IMAGE=debian:trixie-20260918@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+ARG DEBIAN_SNAPSHOT=https://snapshot-cloudflare.debian.org/archive/debian/20261003T000000Z
+
+FROM ${BASE_IMAGE} AS tools
+FROM ${DEBIAN_IMAGE} AS bootstrap
+ARG DEBIAN_SNAPSHOT
+ENV DEBIAN_FRONTEND=noninteractive
+COPY --from=tools /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN set -eux; \
+    echo 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";' > /etc/apt/apt.conf.d/99-snapshot-ca; \
+    rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; \
+    echo "deb [check-valid-until=no] ${DEBIAN_SNAPSHOT} sid main contrib non-free non-free-firmware" > /etc/apt/sources.list; \
+    if [ "$(dpkg-query -W -f='${Version}' libc6)" != 2.43-6 ]; then \
+      apt-get -o APT::Update::Error-Mode=any update; \
+      apt-get -y dist-upgrade; \
+    fi; \
+    test "$(dpkg-query -W -f='${Version}' libc6)" = 2.43-6; \
+    test "$(dpkg-query -W -f='${Version}' libc-bin)" = 2.43-6; \
+    rm -rf /var/lib/apt/lists/*
+
+FROM scratch
+COPY --from=bootstrap / /
+ARG TARGETARCH
+ARG CI_UID=1000
+ARG CI_GID=1000
+ENV DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN for arch in amd64 arm64 riscv64; do \
+      if [ "${arch}" != "${TARGETARCH}" ]; then dpkg --add-architecture "${arch}"; fi; \
+    done; \
+    apt-get -o APT::Update::Error-Mode=any update; \
+    apt-get install -y --no-install-recommends opensysusers seedfiles; \
+    apt-get install -y --no-install-recommends \
+      build-essential ca-certificates clang cmake curl dosfstools e2fsprogs file git \
+      lcov mtools musl-tools musl-dev:amd64 musl-dev:arm64 musl-dev:riscv64 \
+      ovmf pkg-config python3 rsync wget xz-utils libssl-dev zlib1g-dev \
+      gdb-multiarch qemu-system-arm qemu-system-misc qemu-system-riscv \
+      qemu-system-x86 qemu-utils \
+      gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross \
+      gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
+      gcc-riscv64-linux-gnu g++-riscv64-linux-gnu libc6-dev-riscv64-cross; \
+    test "$(dpkg-query -W -f='${Version}' libc6)" = 2.43-6; \
+    for pkg in libc6-dev-amd64-cross libc6-dev-arm64-cross libc6-dev-riscv64-cross; do \
+      case "$(dpkg-query -W -f='${Version}' "$pkg")" in 2.43-*) ;; *) echo "unexpected $pkg version" >&2; exit 1;; esac; \
+    done; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=tools /usr/local/cargo/ /usr/local/cargo/
+COPY --from=tools --chown=${CI_UID}:${CI_GID} /usr/local/rustup/ /usr/local/rustup/
+COPY --from=tools /usr/local/lib/dylint/drivers/ /usr/local/lib/dylint/drivers/
+COPY --from=tools /.cargo/config.toml /.cargo/config.toml
+RUN groupadd --gid "${CI_GID}" jenkins; \
+    useradd --uid "${CI_UID}" --gid "${CI_GID}" --create-home --home-dir /home/jenkins --shell /bin/bash jenkins; \
+    install -d -o "${CI_UID}" -g "${CI_GID}" -m 0755 /xkernel-target /xkernel-cache /xkernel-cache/cargo /xkernel-cache/rootfs /usr/local/rustup/toolchains
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/xkernel-cache/cargo \
+    DYLINT_DRIVER_PATH=/usr/local/lib/dylint/drivers \
+    PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/home/jenkins USER=jenkins LOGNAME=jenkins GDB=gdb-multiarch \
+    BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="-nostdlibinc -isystem /usr/include/x86_64-linux-musl" \
+    BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_musl="-nostdlibinc -isystem /usr/include/aarch64-linux-musl" \
+    BINDGEN_EXTRA_CLANG_ARGS_riscv64gc_unknown_linux_musl="-nostdlibinc -isystem /usr/include/riscv64-linux-musl" \
+    BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_gnu="--target=x86_64-linux-gnu -isystem /usr/x86_64-linux-gnu/include" \
+    BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--target=aarch64-linux-gnu -isystem /usr/aarch64-linux-gnu/include" \
+    BINDGEN_EXTRA_CLANG_ARGS_riscv64gc_unknown_linux_gnu="--target=riscv64-linux-gnu -isystem /usr/riscv64-linux-gnu/include"
+ARG IMAGE_VERSION=v3.2
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.title="X-Kernel CI builder" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.source="https://gitee.com/openkylin/x-kernel/tree/main/scripts/ci/docker" \
+      org.opencontainers.image.revision="${VCS_REF}"
+USER jenkins
+CMD ["bash"]

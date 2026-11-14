@@ -5,11 +5,11 @@ ROOTFS_SIZE ?= 64M
 APP_DIRS := $(patsubst %/Cargo.toml,%,$(wildcard */Cargo.toml))
 
 ifeq ($(ARCH), aarch64)
-  TARGET := aarch64-unknown-linux-musl
-  LINKER := aarch64-linux-musl-gcc
+  TARGET := aarch64-unknown-linux-gnu
+  LINKER := aarch64-linux-gnu-gcc
 else ifeq ($(ARCH), x86_64)
-  TARGET := x86_64-unknown-linux-musl
-  LINKER := x86_64-linux-musl-gcc
+  TARGET := x86_64-unknown-linux-gnu
+  LINKER := x86_64-linux-gnu-gcc
 else
   $(error "ARCH" must be "aarch64" or "x86_64")
 endif
@@ -22,7 +22,7 @@ APP_BINS := $(foreach name,$(APP_NAMES),$(TARGET_DIR)/$(TARGET)/release/$(name))
 
 TARGET_UPPER := $(shell echo $(TARGET) | tr a-z- A-Z_)
 LINKER_ENV := CARGO_TARGET_$(TARGET_UPPER)_LINKER
-CARGO_ENV := RUSTFLAGS= CC=$(LINKER) $(LINKER_ENV)=$(LINKER)
+CARGO_ENV := RUSTFLAGS="-C target-feature=-crt-static" CC=$(LINKER) $(LINKER_ENV)=$(LINKER)
 CARGO_BUILD := cargo build --release --target $(TARGET) --target-dir $(TARGET_DIR)
 
 .PHONY: tee_apps
@@ -45,15 +45,14 @@ tee_apps:
 			exit 1; \
 		fi; \
 	done; \
-	echo "==> Creating $(DISK_IMG)"; \
-	staging="$(TARGET_DIR)/rootfs-staging"; \
-	rm -rf "$$staging"; \
-	mkdir -p "$$staging/bin" "$$staging/tee"; \
-	cp "$(TARGET_DIR)/$(TARGET)/release/$(SH_APP)" "$$staging/bin/$(SH_APP)"; \
-	chmod 0755 "$$staging/bin/$(SH_APP)"; \
-	for name in $(TEE_APP_NAMES); do \
-		cp "$(TARGET_DIR)/$(TARGET)/release/$$name" "$$staging/tee/$$name"; \
-		chmod 0755 "$$staging/tee/$$name"; \
-	done; \
-	truncate -s "$(ROOTFS_SIZE)" "$(DISK_IMG)"; \
-	mkfs.ext4 -q -F -b 4096 -O ^metadata_csum,^64bit -d "$$staging" "$(DISK_IMG)"
+	echo "==> Creating glibc $(DISK_IMG)"; \
+	rootfs=$$(../scripts/ci/prepare_rootfs_cache.sh "$(ARCH)" | tail -n 1); \
+	cp --reflink=auto "$$rootfs" "$(DISK_IMG)"; \
+	commands="$(TARGET_DIR)/tee-apps-$(ARCH).debugfs"; \
+	{ \
+		printf 'cd /usr/bin\nrm sh\nwrite %s sh\nset_inode_field sh mode 0100755\ncd /tee\n' "$(TARGET_DIR)/$(TARGET)/release/$(SH_APP)"; \
+		for name in $(TEE_APP_NAMES); do \
+			printf 'rm %s\nwrite %s %s\nset_inode_field %s mode 0100755\n' "$$name" "$(TARGET_DIR)/$(TARGET)/release/$$name" "$$name" "$$name"; \
+		done; \
+	} > "$$commands"; \
+	debugfs -w -f "$$commands" "$(DISK_IMG)"

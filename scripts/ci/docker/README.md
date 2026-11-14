@@ -33,6 +33,12 @@ scripts/ci/docker/
   主版本号加一。
 - 已发布版本的文件不再修改，要改就发一个新版本。
 
+尚未合并的 PR 中，`Dockerfile_v3.2` 使用固定 Debian 快照构建 glibc 2.43
+系统和三个 GNU 交叉 sysroot。它将固定的上一版作为工具来源，只复制 Rust
+与 Dylint 工具，最终文件系统从新的基础层组装，避免携带旧系统 libc。
+这一 PR 已有预先推送的候选镜像：新构建须先使用独立候选标签并在两个原生
+架构节点验证，验证完成前不要覆盖现有的 `v3.2` 镜像标签。
+
 ## 镜像内容与缓存 volume
 
 流水线把几个节点本地 named volume 挂到镜像的 `/xkernel-cache/*` 和
@@ -101,3 +107,35 @@ shellcheck scripts/ci/docker/*.sh
 
    PR 的 CI 读取的是 PR 合并引用里的 `Jenkinsfile`，所以换镜像的 PR 自己的 CI
    就会用新镜像运行。
+
+## v3.2 GNU guest 基线
+
+`debian_13/Dockerfile_v3.2` 基于固定 digest 的 v3.1，增加 amd64、arm64、
+riscv64 的 GNU GCC/G++、glibc 开发 sysroot 与目标 bindgen include 路径。
+目标 Rust std 由 `check_build_environment.sh` 在 Rustup 安装锁内安装。
+Jenkins 使用新的 `xkernel-rustup-home-v6` 和 `xkernel-rootfs-cache-v3`。
+先构建、验证、发布 amd64/arm64 两个平台，再合入引用 v3.2 的 Jenkinsfile：
+
+```sh
+scripts/ci/docker/build.sh scripts/ci/docker/debian_13/Dockerfile_v3.2 \
+  --repo yeanwang/x-kernel-builder --push --platform linux/amd64,linux/arm64
+```
+
+
+候选镜像先执行 GNU 工具链实测（默认 `jenkins` 用户）：
+
+```sh
+docker run --rm \
+  -v "$PWD/scripts/ci/docker/validate-glibc.sh:/validate-glibc.sh:ro" \
+  <candidate-image> bash /validate-glibc.sh
+```
+
+该脚本为三种 guest 架构实际编译 C/C++、CMake 静态库并检查 GNU ELF
+解释器、libc 依赖和目标 bindgen 头文件；在原生架构运行 pthread/TLS。
+随后仍须按显式平台 defconfig 完成原生内核构建，不能仅凭工具版本检查验收。
+
+
+v3.2 已发布为 `yeanwang/x-kernel-builder:v3.2`（linux/amd64、linux/arm64），
+多架构清单摘要为
+`sha256:93c64c3922b82b2510ba7454422bbb8ffecc7da60b01811b6911980c81d1ceeb`。
+两个原生 CI 节点已预加载该标签；配置摘要与平台清单摘要应按类型分别比较。

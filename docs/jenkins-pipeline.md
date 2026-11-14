@@ -162,9 +162,9 @@ volume 时，递增 `Jenkinsfile` 中对应的后缀。Cargo 工具本体位于�
 `scripts/ci/check_build_environment.sh --fmt`，在浮动节点的 Rustup volume 里安装
 `AUX_RUST_TOOLCHAIN` 的 `rustfmt`，供随后的 `cargo fmt --check`。
 各 leg 再运行 `scripts/ci/check_build_environment.sh --leg <arch>`，在该节点安装
-`rust-toolchain.toml` 声明的全部 target 及额外的 musl target，避免后续 Cargo
+`rust-toolchain.toml` 声明的全部 target 及额外的 GNU target，避免后续 Cargo
 调用触发隐式安装，与共享缓存的构建并发修改工具链。`x86_64` / `aarch64`
-另外安装 nightly 与 host musl，供 TEE。不带参数调用同一脚本可用于手工预热。
+另外安装 nightly 与 host GNU，供 TEE。不带参数调用同一脚本可用于手工预热。
 安装通过 volume 内文件锁串行化。rootfs 下载同样按架构加锁，并通过临时文件、完整性检查和原子替换避免并发
 读到半成品。
 
@@ -260,3 +260,15 @@ Build 留在该容器 `/xkernel-target` 里的 boot、链接和 Cargo 中间产�
 跨节点传递的是 stash 的源码、阶段日志、轻量覆盖率文件，以及 leg 上归档的
 覆盖率 HTML 与文档。leg 结束时的 `Collect: <arch> outputs` 把 stash 和归档
 结果写入 `ciResults` 与对应的 Gitee Check Run；收集失败时构建失败，PR 评论会标出该阶段。
+
+
+CI 用户态 glibc 基线使用 `yeanwang/x-kernel-builder:v3.2`。新版本增加三个
+架构的 GNU GCC/G++ 和 glibc 开发 sysroot；裸机 kernel target 不变。
+Setup 检出 `HARNESS_ROOTFS_DIR`，单测、TEE 和 runtime 使用固定的
+`rootfs-v20261111`，并共用 harness 的 release 下载器和校验元数据。
+校验元数据按 release 标签保存，CI 不跟随 `latest` 指针。
+缓存按架构、libc、release 和
+归档校验值识别，不再使用 x-kernel-image 的 `20260302` 镜像。
+`prepare_rootfs_cache.sh` 在返回镜像路径前检查用户态工具与 bridge 的 libc，
+旧的静态 musl bridge 会使准备阶段失败。部署顺序是先发布 v3.2 和包含 GNU
+bridge 的新 RootFS、更新 harness release 指针，再合入两个仓库的 CI 配置。

@@ -15,8 +15,8 @@ if [ -n "${STAGE_LOG:-}" ]; then
 fi
 
 ROOTFS_CACHE_DIR="${ROOTFS_CACHE_DIR:-${PWD}/.cache/rootfs}"
-ROOTFS_CACHED="${ROOTFS_CACHE_DIR}/rootfs-${arch}.img"
-scripts/ci/prepare_rootfs_cache.sh "${arch}"
+ROOTFS_CACHED="$(scripts/ci/prepare_rootfs_cache.sh "${arch}" | tail -n 1)"
+test -s "${ROOTFS_CACHED}"
 cp --reflink=auto "${ROOTFS_CACHED}" disk.img
 
 TIMEOUT=480

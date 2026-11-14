@@ -112,14 +112,14 @@ PY_TOOLCHAIN
 
 DEFAULT_EXTRA_TARGETS=(
     x86_64-unknown-uefi
-    x86_64-unknown-linux-musl
-    aarch64-unknown-linux-musl
-    riscv64gc-unknown-linux-musl
+    x86_64-unknown-linux-gnu
+    aarch64-unknown-linux-gnu
+    riscv64gc-unknown-linux-gnu
 )
 NIGHTLY_TARGETS=(
-    x86_64-unknown-linux-musl
-    aarch64-unknown-linux-musl
-    riscv64gc-unknown-linux-musl
+    x86_64-unknown-linux-gnu
+    aarch64-unknown-linux-gnu
+    riscv64gc-unknown-linux-gnu
 )
 
 dedup_words() {
@@ -136,11 +136,11 @@ validate_leg_arch() {
     esac
 }
 
-leg_host_musl_target() {
+leg_host_gnu_target() {
     case "${1}" in
-        x86_64) printf '%s\n' x86_64-unknown-linux-musl ;;
-        aarch64) printf '%s\n' aarch64-unknown-linux-musl ;;
-        riscv64) printf '%s\n' riscv64gc-unknown-linux-musl ;;
+        x86_64) printf '%s\n' x86_64-unknown-linux-gnu ;;
+        aarch64) printf '%s\n' aarch64-unknown-linux-gnu ;;
+        riscv64) printf '%s\n' riscv64gc-unknown-linux-gnu ;;
     esac
 }
 
@@ -151,9 +151,9 @@ SKIP_NIGHTLY_INSTALL=""
 mapfile -t DEFAULT_TARGETS < <(dedup_words "${XKERNEL_TARGETS[@]}" "${DEFAULT_EXTRA_TARGETS[@]}")
 if [ -n "${LEG_ARCH}" ]; then
     validate_leg_arch "${LEG_ARCH}"
-    mapfile -t _leg_musl < <(leg_host_musl_target "${LEG_ARCH}")
-    LEG_MUSL_TARGET="${_leg_musl[0]}"
-    # riscv64 leg has no TEE stage; x86_64/aarch64 need nightly + host musl for libutee.
+    mapfile -t _leg_gnu < <(leg_host_gnu_target "${LEG_ARCH}")
+    LEG_GNU_TARGET="${_leg_gnu[0]}"
+    # riscv64 leg has no TEE stage; x86_64/aarch64 need nightly + host GNU for libutee.
     if [ "${LEG_ARCH}" = riscv64 ]; then
         SKIP_NIGHTLY_INSTALL=1
     fi
@@ -169,7 +169,7 @@ done
 
 nightly_install_args=("${NIGHTLY_TOOLCHAIN}" --profile minimal --component rustfmt --no-self-update)
 if [ -n "${LEG_ARCH}" ] && [ -z "${SKIP_NIGHTLY_INSTALL:-}" ]; then
-    nightly_install_args+=(--target "${LEG_MUSL_TARGET}")
+    nightly_install_args+=(--target "${LEG_GNU_TARGET}")
 else
     for target in "${NIGHTLY_TARGETS[@]}"; do
         nightly_install_args+=(--target "${target}")
