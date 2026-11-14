@@ -65,8 +65,8 @@ impl MappingPages {
         mut read: impl FnMut(FolioRead) -> KResult<()>,
         f: impl FnOnce(&Arc<Folio>, &mut FolioGuard<'_>) -> KResult<R>,
     ) -> KResult<R> {
-        // This helper's lock order is folio -> mapping state. After waiting for
-        // the folio, recheck the index because truncate may have detached it.
+        // After waiting for the folio, recheck the invalidation marker because
+        // truncate may have detached it before the lock was acquired.
         let mut folio = self.get_or_create_folio(index)?;
         loop {
             let Some(mut locked) = folio.try_lock() else {
@@ -75,18 +75,18 @@ impl MappingPages {
                 continue;
             };
 
-            let state = self.state.lock();
-            if !state.is_current(index, &folio) {
-                drop(state);
+            // Discard marks the detached identity before removing it from the
+            // index, so a set flag is equivalent to an `is_current` mismatch
+            // without taking the index lock a second time.
+            if locked.is_invalidated() {
                 drop(locked);
                 folio = self.get_or_create_folio(index)?;
                 continue;
             }
-            drop(state);
 
             if !locked.is_uptodate() {
                 locked = read_locked_folio(&folio, locked, &mut read)?;
-                if !self.state.lock().is_current(index, &folio) {
+                if locked.is_invalidated() {
                     drop(locked);
                     folio = self.get_or_create_folio(index)?;
                     continue;
@@ -106,7 +106,8 @@ impl MappingPages {
     /// `read` receives initialization ownership without the mapping index lock
     /// only when the folio is not up to date. It may transfer that ownership to
     /// completion; this method waits for completion and checks residency again.
-    /// The owner must exclude invalidation and validate EOF around this operation.
+    /// The owner must exclude invalidation (through the invalidate lock or the
+    /// inode data lock) and validate EOF around this operation.
     /// The returned reference keeps the allocation alive after cache eviction.
     /// Waiting is killable: `Interrupted` leaves any submitted read owned by
     /// its completion token. Invalid waiting context returns `InvalidInput`.
@@ -192,6 +193,47 @@ impl MappingPages {
             }
             return Ok(result);
         }
+    }
+
+    /// Runs `write` on one resident batch slot under its folio lock for buffered writing.
+    ///
+    /// - `batch`: a snapshot from [`Self::get_folios_contig_with_run_len`].
+    /// - `slot`: traversal position within `batch`; an out-of-range slot is a miss.
+    /// - `write`: copies data into the locked folio and may dirty it; it must not
+    ///   wait for another folio or change residency.
+    ///
+    /// Returns: `Ok(Some(result))` when `write` ran, `Ok(None)` when the entry is
+    /// absent, non-uptodate or invalidated. Dirty-state changes made by `write`
+    /// are reflected in the cache's writeback index on both the success and the
+    /// failure path, before this method returns.
+    ///
+    /// Errors: waiting returns [`KError::InvalidInput`] outside sleepable task
+    /// context or [`KError::Interrupted`] for a pending uncatchable kill, before
+    /// `write` runs; `write` errors propagate with the folio lock released.
+    ///
+    /// Locking: takes the folio lock and holds it across `write`; reconciles the
+    /// dirty index under the mapping index lock while the folio stays locked. No
+    /// mapping lock is held during `write`. The caller must exclude invalidation
+    /// (through the inode data lock). May sleep while locking.
+    pub fn with_write_folio<R>(
+        &self,
+        batch: &FolioBatch,
+        slot: usize,
+        write: impl FnOnce(&mut FolioGuard<'_>) -> KResult<R>,
+    ) -> KResult<Option<R>> {
+        let Some(folio) = batch.folio_at(slot) else {
+            return Ok(None);
+        };
+        let mut locked = folio.lock_killable()?;
+        if locked.is_invalidated() || !locked.is_uptodate() {
+            return Ok(None);
+        }
+        let was_dirty = locked.is_dirty();
+        let result = write(&mut locked);
+        if was_dirty != locked.is_dirty() {
+            self.reconcile_dirty_folio(folio, &locked);
+        }
+        result.map(Some)
     }
 
     /// Visits a bounded snapshot of resident folios and holes in page order.
@@ -302,7 +344,8 @@ impl MappingPages {
     /// an uptodate check; failed completion returns [`KError::Io`]. Failed reads
     /// leave a non-uptodate folio that a later reader can retry. After detach,
     /// `read` can be invoked again for the replacement identity.
-    /// The owner must exclude invalidation and recheck EOF around this operation.
+    /// The owner must exclude invalidation (through the invalidate lock or the
+    /// inode data lock) and recheck EOF around this operation.
     /// Neither callback may reenter the mapping; dirty changes made by `f`
     /// are reconciled before releasing the folio lock.
     pub fn with_folio_or_create<R>(

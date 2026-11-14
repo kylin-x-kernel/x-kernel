@@ -396,8 +396,13 @@ impl MappingPages {
                 }
             };
             let index = candidate.index();
-            // Buffered acceptance and size publication finished under this same
-            // folio lock. Sample only metadata here, with no index lock held.
+            // A single-folio buffered write finished acceptance and size
+            // publication under this same folio lock. A buffered batch run
+            // never grows the file, so its data acceptance is the per-folio
+            // copy and dirty step that already ran under this folio's lock, and
+            // its shared settlement hook releases reservation tails only.
+            // Sampling metadata here therefore sees every accepted byte either
+            // way.
             let page_start = index
                 .checked_mul(PAGE_SIZE_4K as u64)
                 .ok_or(KError::InvalidInput)?;

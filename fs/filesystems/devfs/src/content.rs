@@ -17,8 +17,8 @@ use iov_iter::{IovIterDest, IovIterSource};
 use kvfs::{
     AddressSpace, AddressSpaceOperations, FileOperations, InodeOperations, Kiocb, Metadata,
     MetadataUpdate, MountIdmap, NodeFlags, NodeType, SimpleFs, SimpleFsNode, Umode, VfsError,
-    VfsFile, VfsInode, VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl,
-    libfs::simple_write_end,
+    VfsFile, VfsInode, VfsResult, WriteBeginRequest, WriteEndRequest, WriteReservation,
+    WritebackControl, libfs::simple_write_end,
 };
 use pagecache::FolioRead;
 
@@ -173,11 +173,20 @@ impl AddressSpaceOperations for DevfsContentSpaceOperations {
         Ok(())
     }
 
-    fn write_begin(&self, _mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {
-        Ok(())
+    fn write_begin(
+        &self,
+        _mapping: &AddressSpace,
+        _request: WriteBeginRequest,
+    ) -> VfsResult<WriteReservation> {
+        Ok(WriteReservation::new())
     }
 
-    fn write_end(&self, mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
+    fn write_end(
+        &self,
+        mapping: &AddressSpace,
+        request: WriteEndRequest,
+        _reservation: &WriteReservation,
+    ) -> VfsResult<usize> {
         let copied = simple_write_end(mapping, request)?;
         if copied != 0 {
             let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;

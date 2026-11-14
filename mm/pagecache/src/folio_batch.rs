@@ -90,6 +90,11 @@ impl FolioBatch {
         self.len == Self::CAPACITY
     }
 
+    /// Returns the reference collected at a batch slot, if any.
+    pub(crate) fn folio_at(&self, slot: usize) -> Option<&Arc<Folio>> {
+        self.entries.get(slot).and_then(Option::as_ref)
+    }
+
     /// Appends a reference in traversal order, with space available.
     pub(crate) fn push(&mut self, folio: Arc<Folio>) {
         self.entries[self.len] = Some(folio);

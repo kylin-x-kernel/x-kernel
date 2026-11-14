@@ -31,7 +31,7 @@ use kvfs::{
     InodeOperations, InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate,
     NodeFlags, NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
     Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
-    WriteEndRequest, get_tree_nodev, inode_init_owner,
+    WriteEndRequest, WriteReservation, get_tree_nodev, inode_init_owner,
     libfs::{simple_getattr, simple_rename, simple_statfs, simple_write_end},
 };
 use pagecache::{CacheResidency, FolioRead};
@@ -1247,13 +1247,22 @@ impl AddressSpaceOperations for MemoryAddressSpaceOperations {
         Ok(())
     }
 
-    fn write_begin(&self, mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {
+    fn write_begin(
+        &self,
+        mapping: &AddressSpace,
+        _request: WriteBeginRequest,
+    ) -> VfsResult<WriteReservation> {
         let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
         vfs_inode.private::<MemoryNode>()?.inode.as_file()?;
-        Ok(())
+        Ok(WriteReservation::new())
     }
 
-    fn write_end(&self, mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
+    fn write_end(
+        &self,
+        mapping: &AddressSpace,
+        request: WriteEndRequest,
+        _reservation: &WriteReservation,
+    ) -> VfsResult<usize> {
         let copied = simple_write_end(mapping, request)?;
         if copied != 0 {
             let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;

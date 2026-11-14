@@ -501,14 +501,15 @@ impl AddressSpaceOperations for AcceptedWriteOps {
         &self,
         _mapping: &AddressSpace,
         _request: crate::WriteBeginRequest,
-    ) -> VfsResult<()> {
-        Ok(())
+    ) -> VfsResult<crate::WriteReservation> {
+        Ok(crate::WriteReservation::new())
     }
 
     fn write_end(
         &self,
         mapping: &AddressSpace,
         request: crate::WriteEndRequest,
+        _reservation: &crate::WriteReservation,
     ) -> VfsResult<usize> {
         assert!(self.accepted <= request.copied());
         self.entered.store(true, Ordering::Release);

@@ -673,7 +673,7 @@ fn project_change_transfers_inode_and_delalloc_reservation() {
 
     let inode = allocate_accounted_inode(&mut state, 1000);
     let block_size = i64::from(state.layout().block_size());
-    state.reserve_delalloc_range(&inode, LogicalBlock::new(0), 1).unwrap();
+    state.reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 1).unwrap();
     let before = quota_usage(&super_block, &mut state, QuotaType::Project, 0);
     assert_eq!((before.used_inodes, before.reserved_bytes), (1, block_size));
 
@@ -721,7 +721,7 @@ fn internal_quota_claims_delalloc_once_and_chown_transfers_usage_and_reservation
     let mut state = ext4_private(&super_block).unwrap().write(&super_block);
     let block_size = u64::from(state.layout().block_size());
     state
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 2)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 2)
         .unwrap();
     let initial = owner_usage(&super_block, &mut state, 1000);
     assert_eq!(
@@ -1166,7 +1166,7 @@ fn suspension_waits_for_eviction_to_release_quota_reservations() {
     ext4_private(&super_block)
         .unwrap()
         .read()
-        .reserve_delalloc_range(&private, LogicalBlock::new(0), 1)
+        .reserve_delalloc_range_into(&private, LogicalBlock::new(0), 1)
         .unwrap();
     let writeback = private.lock_writeback_submission();
     let eviction = ktask::spawn(move || drop(inode));
@@ -2008,7 +2008,7 @@ fn delalloc_space_refusal_refunds_quota_and_preserves_remount_admission() {
         let mut state = ext4_private(&super_block).unwrap().write(&super_block);
         let inode = allocate_accounted_inode(&mut state, 1000);
         assert_eq!(
-            state.reserve_delalloc_range(
+            state.reserve_delalloc_range_into(
                 &inode,
                 LogicalBlock::new(0),
                 state.free_blocks_count() + 1,

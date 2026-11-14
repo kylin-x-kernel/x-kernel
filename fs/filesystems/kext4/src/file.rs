@@ -681,10 +681,11 @@ impl Ext4SbInfo {
             return Ok(input.len());
         }
 
-        // Required dirty data has already been reserved by write_begin or
-        // page_mkwrite. Optional preallocation is limited to currently
-        // unreserved space; execution re-reads the live mapping before every
-        // mutation and reports any later ENOSPC with its completed prefix.
+        // Required dirty data has already been reserved by write_begin,
+        // batch_write_begin or page_mkwrite. Optional preallocation is limited
+        // to currently unreserved space; execution re-reads the live mapping
+        // before every mutation and reports any later ENOSPC with its completed
+        // prefix.
         let extra_prealloc_blocks = u32::try_from(
             self.unreserved_blocks_count()
                 .min(u64::from(max_extra_prealloc_blocks)),

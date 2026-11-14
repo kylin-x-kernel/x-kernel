@@ -29,7 +29,8 @@ The implementation is split into private modules by responsibility, and the crat
 - `mapping_pages.rs`: the container, the resident tree/dirty marks under the lock, and dirty reconciliation;
 - `folio.rs`: page allocation, data access, uptodate/dirty/writeback state, and release;
 - `folio_batch.rs`: the bounded reference set shared by read, writeback and truncate, and the page-locked read access interface;
-- `filemap.rs`: lookup, batch collection of consecutive references, materialize and insert-if-absent;
+- `filemap.rs`: lookup, batch collection of consecutive references, materialize and insert-if-absent, and the page-locked write access
+  interface that reconciles the dirty index around the callback;
 - `readahead.rs`: bounded missing-range lookup, page reservation and transfer of read initialization ownership;
 - `truncate.rs`: page removal on size change, tail-page zeroing and final teardown;
 - `invalidate.rs`: byte-range invalidation of clean resident folios, reporting
@@ -216,6 +217,11 @@ error recording, background scheduling, and fsync semantics.
 - `visit_resident_folios` collects the resident references and positions of at most 31 pages in one index snapshot; then, while
   visiting page by page, an already initialized hit takes only the folio lock. A non-uptodate/invalidated candidate is looked up again,
   and an initialization error is not turned into a hole; the owner holds invalidate shared over the whole batch;
+- `MappingPages::with_write_folio` is the page-locked write counterpart of the read accessor: kvfs buffered-write batching calls it to copy
+  and dirty one resident folio under its own lock while holding no mapping index lock, and it reconciles the dirty index when the callback
+  changes the dirty bit, on both the success and the failure path; invalidated or non-uptodate slots return `None` and the
+  caller falls back to the single-folio path. The caller must already exclude truncate and invalidation through the inode data lock,
+  and a batched settlement hook (`BatchedWriteOperations::settle_write_run`) runs once for the run after the per-folio locks are released;
 - `with_folio` exposes only uptodate data; a failed initialization keeps the non-uptodate page for retry,
   and truncate does not mark its partial content dirty; `readahead_folios` uses a fixed-capacity FolioBatch to keep and lock the missing page span,
   keeps the page lock after the callback returns, takes the index lock to recheck identity and remove the unconsumed suffix, then releases the page lock;

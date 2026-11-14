@@ -15,6 +15,7 @@ use crate::{FileOperations, InodeOperations, VfsError, VfsResult};
 
 mod read;
 mod truncate;
+mod write;
 mod writeback;
 
 pub(super) use read::observe_readahead_run;

@@ -136,10 +136,10 @@ fn delayed_allocation_range_updates_inode_and_mount_accounting_together() {
     let free_before = filesystem.statfs().unwrap().blocks_free;
 
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 4)
         .unwrap();
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(2), 4)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(2), 4)
         .unwrap();
     assert_eq!(filesystem.delalloc_reserved_block_count(), 6);
     assert_eq!(filesystem.statfs().unwrap().blocks_free, free_before - 6);
@@ -182,16 +182,16 @@ fn delayed_allocation_reuses_existing_reservations_when_space_is_exhausted() {
     let available = filesystem.statfs().unwrap().blocks_available;
     assert!(available > 0);
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), available)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), available)
         .unwrap();
     assert_eq!(filesystem.statfs().unwrap().blocks_available, 0);
 
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), available)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), available)
         .unwrap();
     assert_eq!(filesystem.delalloc_reserved_block_count(), available);
     assert_eq!(
-        filesystem.reserve_delalloc_range(&inode, LogicalBlock::new(available), 1),
+        filesystem.reserve_delalloc_range_into(&inode, LogicalBlock::new(available), 1),
         Err(Ext4Error::NoSpace)
     );
     assert_eq!(filesystem.delalloc_reserved_block_count(), available);
@@ -233,19 +233,19 @@ fn delayed_allocation_only_reserves_holes_between_allocated_blocks() {
         let mapping_before = filesystem.map_blocks(&inode, LogicalBlock::new(1)).unwrap();
 
         filesystem
-            .reserve_delalloc_range(&inode, LogicalBlock::new(1), 2)
+            .reserve_delalloc_range_into(&inode, LogicalBlock::new(1), 2)
             .unwrap();
         assert!(!inode.has_delalloc_reservations());
         assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
         assert_eq!(filesystem.statfs().unwrap().blocks_free, free_before);
 
         filesystem
-            .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+            .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 4)
             .unwrap();
         assert_eq!(filesystem.delalloc_reserved_block_count(), 2);
         assert_eq!(filesystem.statfs().unwrap().blocks_free, free_before - 2);
         filesystem
-            .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+            .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 4)
             .unwrap();
         assert_eq!(filesystem.delalloc_reserved_block_count(), 2);
         assert_eq!(
@@ -260,7 +260,7 @@ fn delayed_allocation_only_reserves_holes_between_allocated_blocks() {
         // Prime the overwrite cache, then turn part of that range into a
         // hole. A stale proof would incorrectly skip this reservation.
         filesystem
-            .reserve_delalloc_range(&inode, LogicalBlock::new(1), 2)
+            .reserve_delalloc_range_into(&inode, LogicalBlock::new(1), 2)
             .unwrap();
         filesystem
             .remove_extent_range(
@@ -271,7 +271,7 @@ fn delayed_allocation_only_reserves_holes_between_allocated_blocks() {
             )
             .unwrap();
         filesystem
-            .reserve_delalloc_range(&inode, LogicalBlock::new(1), 2)
+            .reserve_delalloc_range_into(&inode, LogicalBlock::new(1), 2)
             .unwrap();
         assert_eq!(filesystem.delalloc_reserved_block_count(), 1);
         assert!(matches!(
@@ -313,7 +313,7 @@ fn delayed_allocation_rejects_legacy_inode_before_reserving_space() {
     let legacy = filesystem.internal_iget(inode.number()).unwrap();
     assert!(!legacy.has_extents());
     assert_eq!(
-        filesystem.reserve_delalloc_range(&legacy, LogicalBlock::new(0), 1),
+        filesystem.reserve_delalloc_range_into(&legacy, LogicalBlock::new(0), 1),
         Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode))
     );
     assert!(!legacy.has_delalloc_reservations());
@@ -330,8 +330,8 @@ fn proven_initialized_prefix_skips_reservation_without_accounting() {
     // The whole request lies inside the proven prefix, so the fast path returns
     // without entering the inode-state critical section or touching accounting.
     assert_eq!(
-        filesystem.reserve_delalloc_range(&inode, LogicalBlock::new(0), 1),
-        Ok(())
+        filesystem.reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 1),
+        Ok(vec![])
     );
     assert!(!inode.has_delalloc_reservations());
     assert_eq!(inode.reserved_data_blocks(), 0);
@@ -547,7 +547,7 @@ fn ordered_writeback_restarts_transaction_for_actual_allocation_runs() {
 
     inode.set_size(input.len() as u64);
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 6)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 6)
         .unwrap();
     filesystem
         .writeback_ordered_at_with_prealloc_budget(
@@ -628,7 +628,7 @@ fn ordered_writeback_preserves_prealloc_budget_across_five_restarts() {
     let blocks_before_write = inode.blocks();
     inode.set_size(input.len() as u64);
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 14)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 14)
         .unwrap();
 
     filesystem
@@ -725,7 +725,7 @@ fn ordered_writeback_restarts_across_hole_mapped_and_unwritten_runs() {
     let original_times = (inode.ctime(), inode.mtime());
     inode.set_size(input.len() as u64);
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 4)
         .unwrap();
 
     filesystem
@@ -830,7 +830,7 @@ fn failed_split_writeback_publishes_only_the_durable_prefix() {
 
     inode.set_size(visible_size);
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 11)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 11)
         .unwrap();
     // The first data barrier and three journal barriers must succeed;
     // fail the capacity-restart data barrier of the second transaction.
@@ -1545,10 +1545,10 @@ fn readmission_failure_preserves_prefix(
         .unwrap();
     handle.stop().unwrap();
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 4)
         .unwrap();
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(5), 1)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(5), 1)
         .unwrap();
     let flushes = device.flush_count();
     if fail_commit {

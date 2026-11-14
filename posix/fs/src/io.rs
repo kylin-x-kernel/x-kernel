@@ -523,7 +523,7 @@ pub fn sys_pread64(
     if offset < 0 {
         return Err(KError::InvalidInput);
     }
-    let f = kprocess::current_files().get_file(fd)?;
+    let f = kprocess::with_current_user_thread(|thread| thread.files().get_file(fd))?;
     reject_positioned_stream_io(&f)?;
     let read = read_file_at_to_io(
         &f,
@@ -544,7 +544,7 @@ pub fn sys_pwrite64(
     if offset < 0 {
         return Err(KError::InvalidInput);
     }
-    let f = kprocess::current_files().get_file(fd)?;
+    let f = kprocess::with_current_user_thread(|thread| thread.files().get_file(fd))?;
     reject_positioned_stream_io(&f)?;
     if len == 0 {
         return Ok(0);

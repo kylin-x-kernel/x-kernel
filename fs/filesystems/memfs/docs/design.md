@@ -310,7 +310,9 @@ FUTURE_WRITE does not revoke the permissions of inherited mappings. The same
 counter remains the sole owner of WRITE-seal exclusion, with checked addition
 and no separate inherited-permission flag.
 
-Buffered write_end now runs under the copied folio lock and invalidate shared
-guard. simple_write_end publishes accepted inode size and MemoryNode updates
-its metadata before this handoff ends. Neither operation reenters the cache or
-waits for writeback; short-accept rollback waits are owned by KVFS after unlock.
+Buffered `write_end` runs under the copied folio lock; memfs does not expose
+the batched-write vtable, so every write stays on the per-folio path and the
+generic write path holds no invalidate guard. simple_write_end publishes
+accepted inode size and MemoryNode updates its metadata before this handoff
+ends. Neither operation reenters the cache or waits for writeback; short-accept
+rollback waits are owned by KVFS after unlock.

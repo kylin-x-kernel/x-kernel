@@ -46,8 +46,9 @@ mod types;
 mod xattr;
 
 pub use address_space::{
-    AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, ReadaheadControl,
-    WriteBeginRequest, WriteEndRequest, WritebackControl, WritebackErrors, WritebackSyncMode,
+    AddressSpace, AddressSpaceOperations, AddressSpaceViewGuard, BatchedWriteOperations,
+    ReadaheadControl, WriteBeginRequest, WriteEndRequest, WriteReservation, WriteSettlement,
+    WritebackControl, WritebackErrors, WritebackSyncMode,
 };
 pub use direct_io::{
     DioDirection, DioMapping, DioMappingFlags, DioMappingKind, DirectIoOperations,

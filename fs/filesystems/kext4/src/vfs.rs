@@ -11,14 +11,15 @@ use iov_iter::{IovIterDest, IovIterSource};
 use kerrno::LinuxError;
 use ktime_types::SystemTime;
 use kvfs::{
-    AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FMode, FallocateFlags,
-    FiemapExtentFlags, FiemapExtentInfo, FiemapFlags, FileDirOperations, FileMappingOperations,
-    FileOperations, InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations,
-    InodeOperations, InodeSymlinkOperations, InodeTimes, InodeUpdateTime, Kiocb, LockedDentry,
-    Metadata, MetadataUpdate, NodePermission, NodeType, ReadaheadControl, RenameFlags, StatFs,
-    SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsFile, VfsFileBuilder,
-    VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl,
-    XattrName, XattrNameRef, XattrNameSink, XattrSetFlags, default_evict_inode, inode_init_owner,
+    AddressSpace, AddressSpaceOperations, BatchedWriteOperations, Dentry, DeviceId, DirContext,
+    FMode, FallocateFlags, FiemapExtentFlags, FiemapExtentInfo, FiemapFlags, FileDirOperations,
+    FileMappingOperations, FileOperations, InodeAttributeOperations, InodeDirOperations,
+    InodeFiemapOperations, InodeOperations, InodeSymlinkOperations, InodeTimes, InodeUpdateTime,
+    Kiocb, LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, ReadaheadControl,
+    RenameFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode, VfsError,
+    VfsFile, VfsFileBuilder, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest,
+    WriteReservation, WriteSettlement, WritebackControl, XattrName, XattrNameRef, XattrNameSink,
+    XattrSetFlags, default_evict_inode, inode_init_owner,
 };
 use pagecache::FolioRead;
 
@@ -1055,15 +1056,31 @@ fn check_write_limit(
     Ok(())
 }
 
+/// Reserves delayed-allocation space for one buffered write.
+///
+/// - `ext4`: mount holding the delayed-allocation accounting.
+/// - `inode`: regular file receiving the write.
+/// - `pos`: file byte offset of the write range.
+/// - `len`: byte length of the write range.
+/// - `block_size`: filesystem block size in bytes.
+///
+/// Returns: a reservation listing the half-open byte ranges newly reserved here.
+/// Ranges already covered by an existing reservation, or a write proven to fall
+/// inside the initialized extent prefix, yield an empty reservation.
+///
+/// Errors: `ReadOnly` for a read-only mount, quota/ENOSPC admission failures and
+/// corruption propagate unchanged; `InvalidInput` on byte/block overflow.
+///
+/// Locking: takes the mount read guard and the inode-state lock internally.
 fn reserve_delalloc_range(
     ext4: &Ext4Mount,
     inode: &Ext4Inode,
     pos: u64,
     len: usize,
     block_size: u64,
-) -> VfsResult<()> {
+) -> VfsResult<WriteReservation> {
     let Some((first, block_count)) = logical_block_range(pos, len, block_size)? else {
-        return Ok(());
+        return Ok(WriteReservation::new());
     };
     ext4.ensure_writable().map_err(into_vfs_err)?;
     if inode
@@ -1075,46 +1092,57 @@ fn reserve_delalloc_range(
         )
         .map_err(into_vfs_err)?
     {
-        return Ok(());
+        return Ok(WriteReservation::new());
     }
     // Cache misses still need mapping and accounting validation under mount
     // protection. Scan-to-insert atomicity comes from the inode-state lock held across
     // Ext4Inode::reserve_delalloc_range, so reserves on different inodes never
     // queue behind each other. Holders of the mount write lock (writeback,
     // fsync, set_len) still exclude this shared guard.
-    ext4.read()
-        .reserve_delalloc_range(inode, LogicalBlock::new(first), block_count)
-        .map_err(into_vfs_err)
+    let reserved = ext4
+        .read()
+        .reserve_delalloc_range_into(inode, LogicalBlock::new(first), block_count)
+        .map_err(into_vfs_err)?;
+    let mut ranges = Vec::with_capacity(reserved.len());
+    for (start, end) in reserved {
+        let start_byte = start
+            .checked_mul(block_size)
+            .ok_or(VfsError::InvalidInput)?;
+        let end_byte = end.checked_mul(block_size).ok_or(VfsError::InvalidInput)?;
+        ranges.push((start_byte, end_byte));
+    }
+    Ok(WriteReservation::from_ranges(ranges))
 }
 
-fn release_delalloc_range(
+/// Settles a buffered write: releases the reservation this write still owns
+/// beyond the accepted prefix.
+///
+/// - `ext4`: mount holding the delayed-allocation accounting.
+/// - `inode`: regular file receiving the write.
+/// - `pos`: write or run start byte offset.
+/// - `len`: reserved byte count of the write or run.
+/// - `accepted`: bytes accepted (per-folio) or published (batched), at most
+///   `len`.
+/// - `reservation`: byte ranges the matching admission newly reserved; ranges
+///   it does not list belong to earlier writes and stay reserved.
+/// - `block_size`: filesystem block size in bytes.
+///
+/// Errors: accounting-invariant and overflow errors propagate unchanged.
+///
+/// Locking: takes the mount read guard and the inode-state lock per release.
+fn finish_delalloc_write(
     ext4: &Ext4Mount,
     inode: &Ext4Inode,
     pos: u64,
     len: usize,
-    block_size: u64,
-) -> VfsResult<()> {
-    let Some((first, block_count)) = logical_block_range(pos, len, block_size)? else {
-        return Ok(());
-    };
-    ext4.read()
-        .release_delalloc_range(inode, LogicalBlock::new(first), block_count)
-        .map_err(into_vfs_err)
-}
-
-fn finish_delalloc_write(
-    ext4: &Ext4Mount,
-    inode: &Ext4Inode,
-    request: WriteEndRequest,
     accepted: usize,
+    reservation: &WriteReservation,
     block_size: u64,
 ) -> VfsResult<()> {
-    if accepted >= request.len() {
+    if accepted >= len {
         return Ok(());
     }
-    let Some((first, requested_blocks)) =
-        logical_block_range(request.pos(), request.len(), block_size)?
-    else {
+    let Some((first, requested_blocks)) = logical_block_range(pos, len, block_size)? else {
         return Ok(());
     };
     let requested_end = first
@@ -1123,8 +1151,7 @@ fn finish_delalloc_write(
     let release_start = if accepted == 0 {
         first
     } else {
-        let accepted_end = request
-            .pos()
+        let accepted_end = pos
             .checked_add(accepted as u64)
             .ok_or(VfsError::InvalidInput)?;
         first_logical_block_after_len(accepted_end, block_size)
@@ -1132,13 +1159,29 @@ fn finish_delalloc_write(
     if release_start >= requested_end {
         return Ok(());
     }
-    ext4.read()
-        .release_delalloc_range(
-            inode,
-            LogicalBlock::new(release_start),
-            requested_end - release_start,
-        )
-        .map_err(into_vfs_err)
+    for (range_start, range_end) in reservation.ranges() {
+        let Some((extent_first, extent_count)) =
+            logical_block_range(*range_start, (range_end - range_start) as usize, block_size)?
+        else {
+            continue;
+        };
+        let extent_end = extent_first
+            .checked_add(extent_count)
+            .ok_or(VfsError::InvalidInput)?;
+        let owned_start = extent_first.max(release_start);
+        let owned_end = extent_end.min(requested_end);
+        if owned_start >= owned_end {
+            continue;
+        }
+        ext4.read()
+            .release_delalloc_range(
+                inode,
+                LogicalBlock::new(owned_start),
+                owned_end - owned_start,
+            )
+            .map_err(into_vfs_err)?;
+    }
+    Ok(())
 }
 
 impl InodeOperations for Ext4Inode {
@@ -1698,7 +1741,82 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         read::submit_folios(mapping, core::iter::once(folio))
     }
 
-    fn write_begin(&self, mapping: &AddressSpace, request: WriteBeginRequest) -> VfsResult<()> {
+    fn write_begin(
+        &self,
+        mapping: &AddressSpace,
+        request: WriteBeginRequest,
+    ) -> VfsResult<WriteReservation> {
+        <Self as BatchedWriteOperations>::batch_write_begin(self, mapping, request)
+    }
+
+    fn write_end(
+        &self,
+        mapping: &AddressSpace,
+        request: WriteEndRequest,
+        reservation: &WriteReservation,
+    ) -> VfsResult<usize> {
+        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
+        let inode = vfs_inode.private::<Ext4Inode>()?;
+        let super_block = vfs_inode.super_block()?;
+        let ext4 = ext4_private(&super_block)?;
+        let block_size = super_block.block_size();
+        let accepted = request.copied();
+        let accepted_end = match request.pos().checked_add(accepted as u64) {
+            Some(end) => end,
+            None => {
+                // Nothing is accepted, so the whole reservation this write
+                // created is released; reservations of earlier writes stay owned.
+                finish_delalloc_write(
+                    ext4,
+                    inode,
+                    request.pos(),
+                    request.len(),
+                    0,
+                    reservation,
+                    block_size,
+                )?;
+                return Err(VfsError::InvalidInput);
+            }
+        };
+        finish_delalloc_write(
+            ext4,
+            inode,
+            request.pos(),
+            request.len(),
+            accepted,
+            reservation,
+            block_size,
+        )?;
+        if accepted != 0 {
+            // The accepted prefix may still be dirty if size publication fails.
+            mapping.write_end_set_size(accepted_end)?;
+        }
+        Ok(accepted)
+    }
+
+    fn batched_write_ops(&self) -> Option<&'static dyn BatchedWriteOperations> {
+        Some(&EXT4_ADDRESS_SPACE_OPERATIONS)
+    }
+
+    fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
+        writeback::writepages(mapping, control)
+    }
+
+    fn readahead(&self, control: &mut ReadaheadControl<'_>) -> VfsResult<()> {
+        if control.count() == 0 {
+            return Ok(());
+        }
+        let mapping = control.mapping();
+        read::submit_folios(mapping, core::iter::from_fn(|| control.next_folio()))
+    }
+}
+
+impl BatchedWriteOperations for Ext4AddressSpaceOperations {
+    fn batch_write_begin(
+        &self,
+        mapping: &AddressSpace,
+        request: WriteBeginRequest,
+    ) -> VfsResult<WriteReservation> {
         let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
         let inode = vfs_inode.private::<Ext4Inode>()?;
         // The kind check is lock-free; reservation re-validates the same
@@ -1714,38 +1832,69 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         reserve_delalloc_range(ext4, inode, request.pos(), request.len(), block_size)
     }
 
-    fn write_end(&self, mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
+    fn settle_write_run(
+        &self,
+        mapping: &AddressSpace,
+        settlement: WriteSettlement,
+        reservation: &WriteReservation,
+    ) -> VfsResult<()> {
         let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
         let inode = vfs_inode.private::<Ext4Inode>()?;
         let super_block = vfs_inode.super_block()?;
         let ext4 = ext4_private(&super_block)?;
-        let block_size = super_block.block_size();
-        let accepted = request.copied();
-        let accepted_end = match request.pos().checked_add(accepted as u64) {
-            Some(end) => end,
-            None => {
-                release_delalloc_range(ext4, inode, request.pos(), request.len(), block_size)?;
-                return Err(VfsError::InvalidInput);
-            }
-        };
-        finish_delalloc_write(ext4, inode, request, accepted, block_size)?;
-        if accepted != 0 {
-            // The accepted prefix may still be dirty if size publication fails.
-            mapping.write_end_set_size(accepted_end)?;
-        }
-        Ok(accepted)
+        // Published bytes are final; only the reservation tail inside this
+        // run's token is released, and no size is published (the run never
+        // grows past the visible size).
+        finish_delalloc_write(
+            ext4,
+            inode,
+            settlement.pos(),
+            settlement.len_bytes(),
+            settlement.published(),
+            reservation,
+            super_block.block_size(),
+        )
     }
+}
 
-    fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
-        writeback::writepages(mapping, control)
-    }
-
-    fn readahead(&self, control: &mut ReadaheadControl<'_>) -> VfsResult<()> {
-        if control.count() == 0 {
-            return Ok(());
+impl Ext4Inode {
+    /// Linux `ext4_generic_write_checks`: rejects immutable files and
+    /// out-of-range positions before the journal check.
+    ///
+    /// - `inode`: VFS inode carrying immutable flags and node policy.
+    /// - `pos`: requested write offset in bytes.
+    /// - `count`: requested byte count; zero skips the size check.
+    /// - `extent_max_size`: extent-mapped size limit in bytes.
+    /// - `bitmap_max_size`: bitmap-mapped size limit in bytes.
+    ///
+    /// Returns: `true` when a nonempty in-range request may proceed to
+    /// admission; `false` for an empty request, which the caller finishes
+    /// without journal admission or timestamp publication.
+    ///
+    /// Errors: `OperationNotPermitted` for an immutable inode; `FileTooLarge`
+    /// when `pos` is at or beyond the inode's format-selected size limit.
+    ///
+    /// Locking: lock-free; reads published flags and caller-supplied limits.
+    fn ext4_generic_write_checks(
+        &self,
+        inode: &VfsInode,
+        pos: u64,
+        count: usize,
+        extent_max_size: u64,
+        bitmap_max_size: u64,
+    ) -> VfsResult<bool> {
+        if inode.flags().contains(kvfs::NodeFlags::IMMUTABLE) {
+            return Err(VfsError::OperationNotPermitted);
         }
-        let mapping = control.mapping();
-        read::submit_folios(mapping, core::iter::from_fn(|| control.next_folio()))
+        if count == 0 {
+            return Ok(false);
+        }
+        let max_size =
+            crate::inode::inode_max_file_size(self.flags(), extent_max_size, || bitmap_max_size);
+        if pos >= max_size {
+            return Err(VfsError::FileTooLarge);
+        }
+        Ok(true)
     }
 }
 
@@ -1794,17 +1943,24 @@ impl FileOperations for Ext4Inode {
             let ext4 = ext4_private(&super_block)?;
             iocb.generic_file_write_iter_with_prepare(iter, |iocb, count| {
                 let file = iocb.file();
-                if file.inode().flags().contains(kvfs::NodeFlags::IMMUTABLE) {
-                    return Err(VfsError::OperationNotPermitted);
-                }
-                iocb.generic_write_check_limits(count)?;
-                if *count == 0 {
+                // Linux `ext4_generic_write_checks`: immutable and size limits
+                // precede the journal check; the count clamp and timestamps stay
+                // in `prepare_buffered_write`'s inode-state critical section.
+                if !self.ext4_generic_write_checks(
+                    file.inode(),
+                    iocb.ki_pos(),
+                    *count,
+                    super_block.max_file_size(),
+                    ext4.bitmap_max_file_size(),
+                )? {
                     return Ok(());
                 }
+                // A journal abort must be rejected before timestamp publication,
+                // so this stays ahead of `prepare_buffered_write` even though the
+                // per-page reservation repeats it. Mount writability was
+                // established at VFS write admission (`lock_writable_mount` plus
+                // `verify_write_area`), so it does not repeat here.
                 ext4.ensure_writable().map_err(into_vfs_err)?;
-                file.path().check_writable_mount()?;
-                // Reuse the format/limit lookup's inode-state critical section
-                // for timestamps, rather than acquiring it again per write.
                 *count = self
                     .prepare_buffered_write(
                         iocb.ki_pos(),
@@ -1943,7 +2099,10 @@ impl FileMappingOperations for Ext4Inode {
         let super_block = ext4_super_block(file.inode())?;
         let ext4 = ext4_private(&super_block)?;
         check_write_limit(ext4, &super_block, self, pos, &mut len)?;
-        reserve_delalloc_range(ext4, self, pos, len, super_block.block_size())
+        // The fault has no write_end settlement step, so the reservation token
+        // is not threaded; the blocks remain reserved until writeback consumes
+        // them or a later write cancels them.
+        reserve_delalloc_range(ext4, self, pos, len, super_block.block_size()).map(|_| ())
     }
 }
 

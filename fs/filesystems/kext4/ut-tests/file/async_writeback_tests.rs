@@ -279,7 +279,7 @@ fn async_fragmented_allocation_completes_through_small_journal_without_rewriting
     let input = vec![0x7d; TEST_BLOCK_SIZE * 8];
     inode.set_size(input.len() as u64);
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 8)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 8)
         .unwrap();
     let plan = filesystem
         .prepare_allocating_writeback(

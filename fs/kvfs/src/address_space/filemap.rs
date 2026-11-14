@@ -11,7 +11,10 @@ use kerrno::KResult;
 use memaddr::PAGE_SIZE_4K;
 use pagecache::{FolioGuard, PageIndex, PinnedFolio};
 
-use super::{AddressSpace, WriteBeginRequest, WriteEndRequest};
+use super::{
+    AddressSpace, BatchedWriteOperations, WriteBeginRequest, WriteEndRequest, WriteReservation,
+    WriteSettlement,
+};
 use crate::{Kiocb, Mutex, VfsError, VfsResult, file_ra::FileRaState};
 
 fn write_prefix_or_error(written: usize, error: VfsError) -> VfsResult<usize> {
@@ -20,6 +23,30 @@ fn write_prefix_or_error(written: usize, error: VfsError) -> VfsResult<usize> {
     } else {
         Ok(written)
     }
+}
+
+/// Result of one contiguous-run attempt in the buffered write path.
+enum BatchWriteResult {
+    /// The backend does not batch, the run was not attempted, or nothing was
+    /// published after cancelling its reservation; the caller must take the
+    /// single-folio path from this pos.
+    NoRun,
+    /// Bytes published and settled through one batched admission/settlement
+    /// pair; never zero.
+    Committed(usize),
+    /// The run published `committed` bytes before failing; the caller reports
+    /// those bytes as a written prefix and surfaces `error` only when no bytes
+    /// were committed in total.
+    Failed { committed: usize, error: VfsError },
+}
+
+/// One buffered-write page step and its cache growth plan.
+struct PageWriteState {
+    pos: u64,
+    copied: usize,
+    grew_cache: bool,
+    prepared_end: u64,
+    visible_len: u64,
 }
 
 impl AddressSpace {
@@ -367,14 +394,311 @@ impl AddressSpace {
         Ok(written)
     }
 
+    /// Writes one contiguous run of already-resident whole pages under one
+    /// batched admission and settlement pair.
+    ///
+    /// Each slot copies and publishes its dirty state under its own folio
+    /// lock; `settle_write_run` then releases the reservation tail. The
+    /// published count is final here: the settlement hook cannot renegotiate
+    /// it, and the run never extends the visible size.
+    ///
+    /// - `pos`: byte offset of the run; page aligned.
+    /// - `remaining`: bytes left in this buffered write.
+    /// - `visible_len`: current EOF; the run never grows past it.
+    /// - `iter`: source copied per slot; reverted for bytes not committed.
+    ///
+    /// Returns: [`BatchWriteResult::NoRun`] when the backend does not support
+    /// batched writes, no run can start, or nothing was published;
+    /// [`BatchWriteResult::Committed`] with the published bytes, or
+    /// [`BatchWriteResult::Failed`] with the first error.
+    ///
+    /// Errors: admission, dirty, settlement and copy failures propagate as
+    /// `Failed`.
+    ///
+    /// Locking: caller holds the inode data lock and no folio lock. Each slot
+    /// takes and releases its own folio lock; may sleep while locking.
+    fn write_batch_run(
+        &self,
+        pos: u64,
+        remaining: usize,
+        visible_len: u64,
+        iter: &mut IovIterSource<'_>,
+    ) -> BatchWriteResult {
+        let Some(batched) = self.batched else {
+            return BatchWriteResult::NoRun;
+        };
+        let page = PAGE_SIZE_4K as u64;
+        let want = (remaining / PAGE_SIZE_4K).min(pagecache::FolioBatch::CAPACITY);
+        if want < 2 {
+            return BatchWriteResult::NoRun;
+        }
+        let Some(fit_pages) = visible_len
+            .checked_sub(pos)
+            .map(|inside| (inside / page) as usize)
+        else {
+            return BatchWriteResult::NoRun;
+        };
+        let fit = want.min(fit_pages);
+        if fit < 2 {
+            return BatchWriteResult::NoRun;
+        }
+        let start = pos / page;
+        let (batch, run_len) = self.i_pages.get_folios_contig_with_run_len(start, fit);
+        let run_len = run_len.min(batch.len());
+        if run_len < 2 {
+            return BatchWriteResult::NoRun;
+        }
+        let run_bytes = run_len * PAGE_SIZE_4K;
+        let Ok(reservation) =
+            batched.batch_write_begin(self, WriteBeginRequest::new(pos, run_bytes))
+        else {
+            // Fall back to the single-folio path so a smaller reservation can
+            // retry, matching Linux's per-folio write_begin granularity. A real
+            // failure is reported again by the single-folio write_begin.
+            return BatchWriteResult::NoRun;
+        };
+        let mut copied_total = 0usize;
+        for slot in 0..run_len {
+            let mut page_copied = 0usize;
+            let outcome = self.i_pages.with_write_folio(&batch, slot, |folio| {
+                let data = folio.data();
+                let copied = iter.copy_from_iter(&mut data[..PAGE_SIZE_4K])?;
+                page_copied = copied;
+                if copied != 0 {
+                    self.dirty_folio(folio)?;
+                }
+                Ok(copied)
+            });
+            let page_copied = match outcome {
+                Ok(Some(copied)) => copied,
+                Ok(None) => break,
+                Err(error) => {
+                    let revert_error = iter.revert(page_copied).err();
+                    let (committed, settle_error) =
+                        self.settle_run(batched, pos, run_bytes, copied_total, &reservation);
+                    if let Some(settle_error) = settle_error {
+                        log::warn!(
+                            "failed to settle buffered write batch at {pos}: {settle_error:?}"
+                        );
+                    }
+                    let error = revert_error.unwrap_or(error);
+                    return BatchWriteResult::Failed { committed, error };
+                }
+            };
+            copied_total += page_copied;
+            if page_copied < PAGE_SIZE_4K {
+                break;
+            }
+        }
+        let (committed, settle_error) =
+            self.settle_run(batched, pos, run_bytes, copied_total, &reservation);
+        if let Some(settle_error) = settle_error {
+            log::warn!("failed to settle buffered write batch at {pos}: {settle_error:?}");
+        }
+        if committed == 0 {
+            return match settle_error {
+                Some(error) => BatchWriteResult::Failed {
+                    committed: 0,
+                    error,
+                },
+                None => BatchWriteResult::NoRun,
+            };
+        }
+        // Published bytes are final: a settlement bookkeeping failure keeps the
+        // reported prefix, and `perform_write` returns it as progress.
+        match settle_error {
+            Some(error) => BatchWriteResult::Failed { committed, error },
+            None => BatchWriteResult::Committed(committed),
+        }
+    }
+
+    /// Settles one batch run through the batched vtable.
+    ///
+    /// - `batched`: the backend's batched-write vtable.
+    /// - `pos`: run start offset.
+    /// - `run_bytes`: reserved run length.
+    /// - `published`: bytes already copied and dirtied under slot locks; final.
+    /// - `reservation`: ranges the run's `batch_write_begin` newly reserved; the
+    ///   hook releases the unaccepted tail only inside it.
+    ///
+    /// Returns: the published byte count paired with the settlement hook's
+    /// bookkeeping error, if any. Published bytes are final: a failure only
+    /// releases the unaccepted tail, so the caller must keep reporting this
+    /// prefix as progress.
+    ///
+    /// Errors: reported through the second tuple element; the iterator and the
+    /// published count are left untouched.
+    ///
+    /// Locking: caller holds the inode data lock and no folio lock.
+    fn settle_run(
+        &self,
+        batched: &dyn BatchedWriteOperations,
+        pos: u64,
+        run_bytes: usize,
+        published: usize,
+        reservation: &WriteReservation,
+    ) -> (usize, Option<VfsError>) {
+        match batched.settle_write_run(
+            self,
+            WriteSettlement::new(pos, run_bytes, published),
+            reservation,
+        ) {
+            Ok(()) => (published, None),
+            Err(error) => (published, Some(error)),
+        }
+    }
+
+    /// Commits one page's copied bytes from the backend `write_end` result and
+    /// rolls back any unaccepted tail (iterator bytes and a cache growth window).
+    ///
+    /// - `page`: this step's offset, copied count and growth plan.
+    /// - `write_end_result`: the backend `write_end` outcome, produced under the
+    ///   copied folio's lock by the caller.
+    /// - `iter`: source iterator, reverted for unaccepted bytes.
+    ///
+    /// Returns: the accepted length paired with the EOF published by this step.
+    ///
+    /// Errors: the backend `write_end` error after iterator and cache rollback,
+    /// `InvalidInput` if a backend accepts more than was copied or on offset
+    /// overflow. The caller reports any already-committed prefix.
+    ///
+    /// Locking: caller holds the inode data lock and no folio lock.
+    fn finish_page_write(
+        &self,
+        page: PageWriteState,
+        write_end_result: VfsResult<usize>,
+        iter: &mut IovIterSource<'_>,
+    ) -> VfsResult<(usize, u64)> {
+        let PageWriteState {
+            pos,
+            copied,
+            grew_cache,
+            prepared_end,
+            visible_len,
+        } = page;
+        let accepted = match write_end_result {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                iter.revert(copied)?;
+                if grew_cache {
+                    self.i_pages
+                        .resize_cached_folios(prepared_end, visible_len)?;
+                }
+                return Err(error);
+            }
+        };
+        if accepted > copied {
+            return Err(VfsError::InvalidInput);
+        }
+        if accepted < copied {
+            iter.revert(copied - accepted)?;
+        }
+        // `write_end` publishes EOF as `pos + accepted`; roll the cache back
+        // to that same end so unaccepted bytes are not left cached and dirty
+        // beyond the visible size.
+        let accepted_end = pos
+            .checked_add(accepted as u64)
+            .ok_or(VfsError::InvalidInput)?;
+        if grew_cache && accepted_end < prepared_end {
+            self.i_pages
+                .resize_cached_folios(prepared_end, accepted_end)?;
+        }
+        Ok((accepted, accepted_end))
+    }
+
+    /// Writes, settles and rolls back one buffered-write page.
+    ///
+    /// - `index`: page index holding the target folio.
+    /// - `page_off`: byte offset of the step inside that page.
+    /// - `pos`: file byte offset of the step.
+    /// - `step`: bytes requested for this step, never past the page end.
+    /// - `visible_len`: current EOF, used to plan cache growth.
+    /// - `iter`: source consumed by the copy and rewound for unaccepted bytes.
+    ///
+    /// Returns: the bytes the backend accepted paired with the EOF it published.
+    /// A zero accepted count means the backend took no bytes at this position.
+    ///
+    /// Errors: the setup, copy, completion or cache-rollback error to report for
+    /// this step; a failed copy first rewinds the iterator, cancels the
+    /// reservation this step created and undoes an unfinished growth window, so
+    /// the caller can still report an already written prefix.
+    ///
+    /// Locking: caller holds the inode data lock and no folio lock. The folio
+    /// lock spans instantiation, copying, dirty publication and the backend
+    /// `write_end`; cache discard takes the same folio lock before detaching the
+    /// identity, matching Linux `generic_perform_write`, which holds no
+    /// invalidate lock here. Rollback may wait for concurrent writeback.
+    fn write_single_page(
+        &self,
+        index: PageIndex,
+        page_off: usize,
+        pos: u64,
+        step: usize,
+        visible_len: u64,
+        iter: &mut IovIterSource<'_>,
+    ) -> VfsResult<(usize, u64)> {
+        let prepared_end = pos.checked_add(step as u64).ok_or(VfsError::InvalidInput)?;
+        let reservation = self
+            .ops
+            .write_begin(self, WriteBeginRequest::new(pos, step))?;
+        let grew_cache = prepared_end > visible_len;
+        let mut copied = 0;
+        let copy_result = {
+            if grew_cache {
+                self.i_pages
+                    .resize_cached_folios(visible_len, prepared_end)?;
+            }
+            self.with_folio_or_create(index, |folio| {
+                let data = folio.data();
+                copied = iter.copy_from_iter(&mut data[page_off..page_off + step])?;
+                if copied != 0 {
+                    self.dirty_folio(folio)?;
+                }
+                Ok(self
+                    .ops
+                    .write_end(self, WriteEndRequest::new(pos, step, copied), &reservation))
+            })
+        };
+        let accepted = match copy_result {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                iter.revert(copied)?;
+                if let Err(cancel_error) =
+                    self.ops
+                        .write_end(self, WriteEndRequest::new(pos, step, 0), &reservation)
+                {
+                    log::warn!(
+                        "failed to cancel buffered write at {pos} (len {step}): {cancel_error:?}"
+                    );
+                }
+                if grew_cache {
+                    self.i_pages
+                        .resize_cached_folios(prepared_end, visible_len)?;
+                }
+                return Err(error);
+            }
+        };
+        self.finish_page_write(
+            PageWriteState {
+                pos,
+                copied,
+                grew_cache,
+                prepared_end,
+                visible_len,
+            },
+            accepted,
+            iter,
+        )
+    }
+
     // The caller holds the inode data lock through rollback to keep size and
-    // competing writes stable. The folio instantiation and dirty window also
-    // holds the invalidate read lock, matching `page_mkwrite`, so truncate and
-    // direct-I/O invalidation serialize against buffered writes. Rollback may
-    // wait for concurrent writeback; filesystem callbacks have returned before
-    // cache shrink, so their locks are released. Writeback completion must not
-    // depend on the data lock.
-    fn perform_write(
+    // competing writes stable. Each page step serializes its own copy, dirty
+    // publication and acceptance under that page's folio lock; a batched run
+    // settles once after its per-folio locks are released. Rollback may wait for
+    // concurrent writeback; filesystem callbacks have returned before cache
+    // shrink, so their locks are released. Writeback completion must not depend
+    // on the data lock.
+    pub(crate) fn perform_write(
         &self,
         offset: u64,
         iter: &mut IovIterSource<'_>,
@@ -392,81 +716,27 @@ impl AddressSpace {
             let index = pos / memaddr::PAGE_SIZE_4K as u64;
             let page_off = (pos % memaddr::PAGE_SIZE_4K as u64) as usize;
             let step = (len - written).min(memaddr::PAGE_SIZE_4K - page_off);
-            let prepared_end = pos.checked_add(step as u64).ok_or(VfsError::InvalidInput)?;
-            if let Err(error) = self
-                .ops
-                .write_begin(self, WriteBeginRequest::new(pos, step))
-            {
-                return write_prefix_or_error(written, error);
-            }
-            let grew_cache = prepared_end > visible_len;
-            let mut copied = 0;
-            // Hold the invalidate read lock across folio instantiation and
-            // dirtying so truncate and direct-I/O invalidation cannot discard
-            // the page between its residency check and dirty publication.
-            let copy_result = {
-                let _invalidate_guard = self.invalidate_lock.read();
-                if grew_cache {
-                    self.i_pages
-                        .resize_cached_folios(visible_len, prepared_end)?;
+            if page_off == 0 && len - written >= 2 * PAGE_SIZE_4K {
+                match self.write_batch_run(pos, len - written, visible_len, iter) {
+                    BatchWriteResult::Committed(bytes) => {
+                        written += bytes;
+                        let end = pos
+                            .checked_add(bytes as u64)
+                            .ok_or(VfsError::InvalidInput)?;
+                        visible_len = visible_len.max(end);
+                        continue;
+                    }
+                    BatchWriteResult::Failed { committed, error } => {
+                        return write_prefix_or_error(written + committed, error);
+                    }
+                    BatchWriteResult::NoRun => {}
                 }
-                self.with_folio_or_create(index, |folio| {
-                    let data = folio.data();
-                    copied = iter.copy_from_iter(&mut data[page_off..page_off + step])?;
-                    if copied != 0 {
-                        self.dirty_folio(folio)?;
-                    }
-                    Ok(self
-                        .ops
-                        .write_end(self, WriteEndRequest::new(pos, step, copied)))
-                })
-            };
-            let accepted = match copy_result {
-                Ok(accepted) => accepted,
-                Err(error) => {
-                    iter.revert(copied)?;
-                    if let Err(cancel_error) =
-                        self.ops.write_end(self, WriteEndRequest::new(pos, step, 0))
-                    {
-                        log::warn!(
-                            "failed to cancel buffered write at {pos} (len {step}): \
-                             {cancel_error:?}"
-                        );
-                    }
-                    if grew_cache {
-                        self.i_pages
-                            .resize_cached_folios(prepared_end, visible_len)?;
-                    }
-                    return write_prefix_or_error(written, error);
-                }
-            };
-            let accepted = match accepted {
-                Ok(accepted) => accepted,
-                Err(error) => {
-                    iter.revert(copied)?;
-                    if grew_cache {
-                        self.i_pages
-                            .resize_cached_folios(prepared_end, visible_len)?;
-                    }
-                    return write_prefix_or_error(written, error);
-                }
-            };
-            if accepted > copied {
-                return Err(VfsError::InvalidInput);
             }
-            if accepted < copied {
-                iter.revert(copied - accepted)?;
-            }
-            // `write_end` publishes EOF as `pos + accepted`; roll the cache back
-            // to that same end so unaccepted bytes are not left cached and dirty
-            // beyond the visible size.
-            let accepted_end = pos
-                .checked_add(accepted as u64)
-                .ok_or(VfsError::InvalidInput)?;
-            if grew_cache && accepted_end < prepared_end {
-                self.i_pages
-                    .resize_cached_folios(prepared_end, accepted_end)?;
-            }
+            let (accepted, accepted_end) =
+                match self.write_single_page(index, page_off, pos, step, visible_len, iter) {
+                    Ok(progress) => progress,
+                    Err(error) => return write_prefix_or_error(written, error),
+                };
             visible_len = visible_len.max(accepted_end);
             if accepted == 0 {
                 break;

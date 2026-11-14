@@ -1920,6 +1920,11 @@ impl Ext4Inode {
     /// Extent and counter validation precede quota and mount admission, so
     /// publishing admitted reservations cannot return an insertion error.
     ///
+    /// Returns: the logical block ranges this call newly reserved, in ascending
+    /// order. Subranges already covered by a reservation, or proven inside the
+    /// initialized extent prefix, are not listed: the caller may only cancel
+    /// what it owns.
+    ///
     /// # Locking
     ///
     /// The closure must not call back into `Ext4Inode` state accessors (see
@@ -1937,12 +1942,12 @@ impl Ext4Inode {
         reason = "CG-029-shallow-control-flow: TODO(cg): legacy delayed-allocation reservation; \
                   move the per-extent mapping walk and hole coalescing into a helper"
     )]
-    pub(crate) fn reserve_delalloc_range(
+    pub(crate) fn reserve_delalloc_range_into(
         &self,
         sb: &Ext4SbInfo,
         start: LogicalBlock,
         block_count: u64,
-    ) -> Ext4Result<()> {
+    ) -> Ext4Result<Vec<(u64, u64)>> {
         let end = start
             .get()
             .checked_add(block_count)
@@ -1962,7 +1967,7 @@ impl Ext4Inode {
             && range_end_bytes != 0
             && range_end_bytes <= self.initialized_extent_end.load(Ordering::Acquire)
         {
-            return Ok(());
+            return Ok(Vec::new());
         }
         self.update_state(|state| {
             regular_file_extent_mutation_supported(
@@ -1977,13 +1982,13 @@ impl Ext4Inode {
                 self.size(),
             ) {
                 self.publish_initialized_extent_end(state, sb.layout().block_size());
-                return Ok(());
+                return Ok(Vec::new());
             }
             if state.reserved_data_blocks > sb.delalloc_reserved_blocks() {
                 return Err(Ext4Error::InvalidDelayedAllocationState);
             }
             if block_count == 0 {
-                return Ok(());
+                return Ok(Vec::new());
             }
             let root = InodeMappingRoot {
                 inode_flags: self.flags(),
@@ -2034,7 +2039,7 @@ impl Ext4Inode {
             // mutex pair guards the aggregate against concurrent reserves, not
             // an empty range against itself.
             if reserved == 0 {
-                return Ok(());
+                return Ok(Vec::new());
             }
             // Check-then-act admission stays inside one critical section so the
             // capacity check sees the same snapshot that the accumulation
@@ -2068,7 +2073,7 @@ impl Ext4Inode {
                 return Err(error);
             }
             insert_unreserved_delalloc_extents_in_state(state, &holes, new_reserved_data_blocks);
-            Ok(())
+            Ok(holes)
         })
     }
 
@@ -2512,7 +2517,7 @@ impl Ext4SbInfo {
 
     /// Reserves unallocated blocks in one logical range for delayed allocation.
     ///
-    /// Delegates to [`Ext4Inode::reserve_delalloc_range`], which serializes
+    /// Delegates to [`Ext4Inode::reserve_delalloc_range_into`], which serializes
     /// the reserve sequence on the per-inode state lock instead of a
     /// mount-wide lock; callers are expected to hold only a shared mount
     /// guard.
@@ -2520,18 +2525,23 @@ impl Ext4SbInfo {
     /// in-file overwrites reuse them while no delayed reservations remain.
     /// Extent mutations and size shrink invalidate the cached ranges.
     ///
+    /// Returns: the logical block ranges newly reserved by this call; empty when
+    /// the range was already reserved or proven initialized. A buffered write
+    /// threads this list into its completion so cancellation cannot release
+    /// reservations owned by earlier writes.
+    ///
     /// # Errors
     ///
     /// Returns an aborted-journal, extent-validation, overflow, accounting,
     /// or no-space error without publishing a partial mount reservation.
-    pub(crate) fn reserve_delalloc_range(
+    pub(crate) fn reserve_delalloc_range_into(
         &self,
         inode: &Ext4Inode,
         start: LogicalBlock,
         block_count: u64,
-    ) -> Ext4Result<()> {
+    ) -> Ext4Result<Vec<(u64, u64)>> {
         self.ensure_writable()?;
-        inode.reserve_delalloc_range(self, start, block_count)
+        inode.reserve_delalloc_range_into(self, start, block_count)
     }
 
     /// Releases delayed-allocation reservations overlapping a logical range.

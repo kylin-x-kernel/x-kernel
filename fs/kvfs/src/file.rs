@@ -1099,16 +1099,22 @@ impl VfsFile {
     }
 
     fn verify_read_area(&self, pos: u64, count: usize) -> VfsResult<()> {
-        self.verify_mode(FMode::READ)?;
-        if !self.mode().contains(FMode::CAN_READ) {
+        let mode = self.mode();
+        if !mode.contains(FMode::READ) || mode.contains(FMode::PATH) {
+            return Err(VfsError::BadFileDescriptor);
+        }
+        if !mode.contains(FMode::CAN_READ) {
             return Err(VfsError::InvalidInput);
         }
         self.verify_io_area(pos, count)
     }
 
     fn verify_write_area(&self, pos: u64, count: usize) -> VfsResult<()> {
-        self.verify_mode(FMode::WRITE)?;
-        if !self.mode().contains(FMode::CAN_WRITE) {
+        let mode = self.mode();
+        if !mode.contains(FMode::WRITE) || mode.contains(FMode::PATH) {
+            return Err(VfsError::BadFileDescriptor);
+        }
+        if !mode.contains(FMode::CAN_WRITE) {
             return Err(VfsError::InvalidInput);
         }
         self.verify_io_area(pos, count)?;

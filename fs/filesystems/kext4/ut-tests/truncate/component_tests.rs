@@ -32,7 +32,7 @@ fn truncate_releases_delalloc_beyond_visible_eof_even_without_disk_shrink() {
 
     inode.set_size(visible_size);
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 6)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 6)
         .unwrap();
     filesystem
         .truncate_regular_inode(&inode, truncated_size, crate::Ext4Timestamp::new(10, 0))
@@ -55,7 +55,7 @@ fn truncate_releases_delalloc_beyond_visible_eof_even_without_disk_shrink() {
 
     inode.set_size(visible_size);
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(3), 3)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(3), 3)
         .unwrap();
     filesystem
         .truncate_regular_inode(&inode, truncated_size, crate::Ext4Timestamp::new(11, 0))

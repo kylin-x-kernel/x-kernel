@@ -1158,7 +1158,7 @@ context, which parses it from the opaque mount data and stores it in the single 
 The positive options that Linux enables by default, `user_xattr` and `acl`, are accepted as mount-data compatibility spellings, but no unused per-mount field is created for them; the syntax compatibility of `acl` does not widen the current KVFS POSIX ACL permission semantics.
 
 Buffered write applies the inode-format limit in `FileOperations::write_iter()`, inside the inode data critical
-section of generic write, and then `write_begin()` queries the core mapping. A shared-file write
+section of generic write, and then `write_begin()` (forwarding to the batched `batch_write_begin()`) queries the core mapping. A shared-file write
 fault applies the same limit inside the address-space invalidate shared lock and the folio lock, and then calls
 `page_mkwrite()`. Both entry points add hole blocks to the same delayed set; therefore a non-`SYNC`
 FIEMAP can uniformly report the `DELALLOC | UNKNOWN` produced by both write entry points, without scanning dirty folios to guess the allocation
@@ -1778,7 +1778,11 @@ the finite queue prefix and flushes completion captures, covering old clean and
 detached owners. Mapped submission retains its earlier-allocation metadata drain.
 
 write_end settles delalloc reservations and publishes accepted i_size under the
-copied folio lock; its fast path takes no cache/lifecycle wait. Short-accept and
-copy-failure rollback waits happen after that lock is released. Generic scans
-sample live EOF per folio and charge attempted work independently of completion
-prefixes. Existing inode, extent and queued-I/O lifetime owners remain unchanged.
+copied folio lock for a single-page write; a batched run settles through the
+`BatchedWriteOperations` vtable instead, unlocked, publishing no size and
+releasing only the reservation units that `batch_write_begin` newly created. Its
+fast path takes no cache/lifecycle wait. Short-accept and copy-failure rollback
+waits happen after that lock is released.
+Generic scans sample live EOF per folio and charge attempted work independently
+of completion prefixes. Existing inode, extent and queued-I/O lifetime owners
+remain unchanged.

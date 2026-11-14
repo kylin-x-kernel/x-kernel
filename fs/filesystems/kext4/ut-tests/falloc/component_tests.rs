@@ -186,7 +186,7 @@ fn fallocate_reservation_coexists_with_delayed_allocation() {
     inode.set_size(len);
     fx.ext4()
         .write(fx.super_block.as_ref())
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+        .reserve_delalloc_range_into(&inode, LogicalBlock::new(0), 4)
         .unwrap();
     assert_eq!(fx.ext4().read().delalloc_reserved_block_count(), 4);
 

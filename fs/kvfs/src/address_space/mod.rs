@@ -21,7 +21,10 @@ mod views;
 mod writeback;
 mod writeback_errors;
 
-pub use operations::{AddressSpaceOperations, WriteBeginRequest, WriteEndRequest};
+pub use operations::{
+    AddressSpaceOperations, BatchedWriteOperations, WriteBeginRequest, WriteEndRequest,
+    WriteReservation, WriteSettlement,
+};
 pub(crate) use operations::{default_address_space_operations, empty_address_space_operations};
 pub use pagecache::{WritebackControl, WritebackSyncMode};
 pub use readahead::ReadaheadControl;
@@ -35,6 +38,9 @@ pub struct AddressSpace {
     inode: WeakVfsInode,
     /// Shared operation table corresponding to Linux `address_space::a_ops`.
     ops: &'static dyn AddressSpaceOperations,
+    /// Batched-write settlement vtable, sampled once from `ops`; `None` keeps
+    /// every buffered write on the per-folio path.
+    batched: Option<&'static dyn BatchedWriteOperations>,
     object_id: VmObjectId,
     invalidate_lock: RwLock<()>,
     views: Mutex<BTreeMap<MappingViewId, RegisteredView>>,
@@ -57,6 +63,7 @@ impl AddressSpace {
         Arc::new(Self {
             inode,
             ops,
+            batched: ops.batched_write_ops(),
             object_id: VmObjectId::File(FileObjectId::from_raw(
                 NEXT_ADDRESS_SPACE_ID.fetch_add(1, Ordering::Relaxed),
             )),
