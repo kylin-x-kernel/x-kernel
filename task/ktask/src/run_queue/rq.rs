@@ -237,7 +237,13 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 .resched;
             (elapsed, should_preempt)
         };
-        self.apply_runtime_account_side_effects(elapsed, is_idle, should_preempt);
+        let cgroup_throttled =
+            super::bandwidth::account_current(&self.current_task, elapsed, now_ns, is_idle);
+        self.apply_runtime_account_side_effects(
+            elapsed,
+            is_idle,
+            should_preempt || cgroup_throttled,
+        );
     }
 
     fn apply_runtime_account_side_effects(
@@ -947,6 +953,7 @@ impl RunQueue {
             krcu_core::SchedulerObservation::new(&prev_task.rcu_reader, self.cpu_id.as_usize())
         };
         krcu_core::RcuContextIf::note_context_switch(observation);
+
         if prev_task.ptr_eq(&next_task) {
             #[cfg(feature = "sched_stat")]
             sched_stat_inc(&sched_stat_cpu(this_cpu_id()).switch_same);

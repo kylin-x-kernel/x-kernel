@@ -100,7 +100,9 @@ pub mod wait_reap;
 #[macro_use]
 extern crate klogger;
 
-pub use cgroup::{cgroup_member_process_ids, current_cgroup, migrate_cgroup_process};
+pub use cgroup::{
+    cgroup_member_process_ids, current_cgroup, current_memcg, migrate_cgroup_process,
+};
 pub use credentials::{current_cred, current_real_cred};
 pub use kidentity::PidHandle as PidIdentity;
 pub use pidfd::PidFd;
@@ -279,6 +281,7 @@ pub(crate) fn build_process_thread_with_config(
     credentials: alloc::sync::Arc<kcred::Cred>,
     config: process_runtime::ProcessRuntimeConfig,
 ) -> kerrno::KResult<kalloc_types::KBox<Thread>> {
+    kcgroup::refresh_root_cpuset_universe();
     let runtime = ProcessRuntime::new(
         process.clone(),
         exe_path,

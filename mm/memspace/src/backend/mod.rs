@@ -10,6 +10,7 @@ use khal::{
     mem::{p2v, v2p},
     paging::{MappingFlags, PageSize, PageTableMut, PagingError},
 };
+use memacct;
 use memaddr::{DynPageIter, MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
 pub mod linear;
 pub mod private;
@@ -41,6 +42,10 @@ pub fn alloc_frame(zeroed: bool, size: PageSize) -> KResult<PhysAddr> {
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, pgsize) };
     }
     let paddr = v2p(vaddr);
+    if memacct::charge_frame(paddr, pgsize, UsageKind::VirtMem).is_err() {
+        global_allocator().dealloc_pages(vaddr.as_usize(), num_pages, UsageKind::VirtMem);
+        return Err(KError::NoMemory);
+    }
 
     Ok(paddr)
 }
@@ -50,6 +55,7 @@ pub fn dealloc_frame(frame: PhysAddr, align: PageSize) {
     let vaddr = p2v(frame);
     let page_size: usize = align.into();
     let num_pages = page_size / PAGE_SIZE_4K;
+    memacct::uncharge_frame(frame, page_size);
     global_allocator().dealloc_pages(vaddr.as_usize(), num_pages, UsageKind::VirtMem);
 }
 

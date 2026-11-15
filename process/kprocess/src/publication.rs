@@ -355,6 +355,8 @@ impl PublishedUserTask {
     pub fn activate(mut self) -> KtaskRef {
         self.rollback.take();
         activate_task(&self.task);
+        let weight = self.task.cpu_weight();
+        ktask::set_task_weight(&self.task, weight);
         self.task.clone()
     }
 

@@ -366,8 +366,8 @@ impl Drop for Folio {
                 self.index, dirty, writeback
             );
         }
-        // Cache quota was returned when the mapping detached this identity.
-        // This PageRef only keeps physical storage alive for remaining owners.
+        // Cache quota follows the physical PageRef, not this cache identity:
+        // page tables may keep the page alive after this Folio is dropped.
     }
 }
 

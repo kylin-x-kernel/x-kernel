@@ -1749,3 +1749,52 @@ fn set_attr_rejects_stop() {
     );
     assert_eq!(stop.sched_class(), SchedClass::Stop);
 }
+
+#[def_test]
+fn cgroup_parked_entity_is_skipped_and_resumes() {
+    let mut sched = sched();
+    let low = task(1);
+    let high = task(2);
+
+    // Park the higher-priority (earlier deadline) entity before it queues.
+    high.set_cgroup_parked(true);
+    assert!(high.is_cgroup_parked());
+    let _ = enqueue_new(&mut sched, low.clone());
+    let _ = enqueue_new(&mut sched, high.clone());
+
+    // The parked entity stays linked but is never selected: the runnable peer
+    // runs, and once it is parked too the rq falls through to idle.
+    assert_eq!(pick_id(&mut sched, UNIT_NS), 1);
+    low.set_cgroup_parked(true);
+    sched.yield_current(UNIT_NS);
+    assert_eq!(pick_id(&mut sched, UNIT_NS * 2), 0);
+
+    // Unparking makes them selectable again without re-enqueueing, and the
+    // parked-so-far entity keeps its earlier arbitration position.
+    sched.yield_current(UNIT_NS * 2);
+    low.set_cgroup_parked(false);
+    high.set_cgroup_parked(false);
+    assert_eq!(pick_id(&mut sched, UNIT_NS * 3), 2);
+}
+
+#[def_test]
+fn cgroup_parked_entity_keeps_its_queue_position() {
+    let mut sched = sched();
+    let a = task(1);
+    let b = task(2);
+    let _ = enqueue_new(&mut sched, a.clone());
+    let _ = enqueue_new(&mut sched, b.clone());
+
+    // Park both: the queue must still contain them, so picking yields idle
+    // and unparking restores the original arbitration order.
+    a.set_cgroup_parked(true);
+    b.set_cgroup_parked(true);
+    assert_eq!(pick_id(&mut sched, UNIT_NS), 0);
+    sched.yield_current(UNIT_NS);
+    a.set_cgroup_parked(false);
+    b.set_cgroup_parked(false);
+    let first = pick_id(&mut sched, UNIT_NS * 2);
+    sched.yield_current(UNIT_NS * 2);
+    let second = pick_id(&mut sched, UNIT_NS * 3);
+    assert_eq!((first, second), (1, 2));
+}

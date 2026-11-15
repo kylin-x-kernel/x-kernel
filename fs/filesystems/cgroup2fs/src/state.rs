@@ -12,7 +12,7 @@ use klazy::lazy_static;
 use ksync::Mutex;
 use kvfs::{NodeFlags, NodePermission, SimpleDir, SimpleFs, VfsError, VfsInode, VfsResult};
 
-use crate::{controller, dir::CgroupDir, pids, process};
+use crate::{controller, dir::CgroupDir, process};
 
 #[derive(Clone, Copy)]
 struct NodeOwner {
@@ -38,7 +38,13 @@ pub(crate) struct CgroupFsState {
 pub(crate) struct CgroupFsNode {
     cgroup: Arc<Cgroup>,
     directory: Arc<VfsInode>,
-    files: BTreeMap<&'static str, Arc<VfsInode>>,
+    files: BTreeMap<
+        &'static str,
+        (
+            Arc<VfsInode>,
+            Option<&'static controller::ControllerAdapter>,
+        ),
+    >,
 }
 
 impl CgroupFsState {
@@ -104,7 +110,7 @@ impl CgroupFsState {
             owner.gid,
         );
         let mut files = BTreeMap::new();
-        let declarations = [
+        let base_files = [
             (
                 "cgroup.controllers",
                 controller::controllers_file(fs.clone(), cgroup.clone()),
@@ -117,14 +123,14 @@ impl CgroupFsState {
                 "cgroup.procs",
                 process::membership_file(fs.clone(), cgroup.clone(), Arc::downgrade(self)),
             ),
-            (
-                "pids.current",
-                pids::current_file(fs.clone(), cgroup.clone()),
-            ),
-            ("pids.max", pids::max_file(fs, cgroup.clone())),
         ];
-        for (name, file) in declarations {
-            files.insert(name, file.new_inode(NodeFlags::empty()));
+        for (name, file) in base_files {
+            files.insert(name, (file.new_inode(NodeFlags::empty()), None));
+        }
+        for adapter in controller::adapters() {
+            for (name, file) in (adapter.files)(fs.clone(), cgroup.clone()) {
+                files.insert(name, (file.new_inode(NodeFlags::empty()), Some(adapter)));
+            }
         }
         let node = Arc::new(CgroupFsNode {
             cgroup,
@@ -168,15 +174,19 @@ impl CgroupFsNode {
     }
 
     pub(crate) fn file(&self, name: &str) -> Option<Arc<VfsInode>> {
-        if matches!(name, "pids.current" | "pids.max") && !self.cgroup.has_pids_controller() {
+        let (inode, adapter) = self.files.get(name)?;
+        if let Some(adapter) = adapter
+            && !self.cgroup.has_controller(adapter.kind)
+        {
             return None;
         }
-        self.files.get(name).cloned()
+        Some(inode.clone())
     }
 
     pub(crate) fn file_names(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.files.keys().copied().filter(|name| {
-            !matches!(*name, "pids.current" | "pids.max") || self.cgroup.has_pids_controller()
+        self.files.iter().filter_map(|(name, (_, adapter))| {
+            let is_visible = adapter.is_none_or(|adapter| self.cgroup.has_controller(adapter.kind));
+            is_visible.then_some(*name)
         })
     }
 }

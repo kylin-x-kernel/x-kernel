@@ -9,10 +9,15 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+kcpu_id_map.workspace = true
+kcred.workspace = true
 kerrno.workspace = true
 kidentity.workspace = true
 klazy.workspace = true
+kbandwidth.workspace = true
+kspin.workspace = true
 ksync.workspace = true
+memacct.workspace = true
 unittest.workspace = true
 
 [lints]

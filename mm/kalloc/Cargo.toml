@@ -20,6 +20,7 @@ kaddr_layout.workspace = true
 kspin.workspace = true
 log.workspace = true
 memaddr.workspace = true
+memacct.workspace = true
 page-meta.workspace = true
 kcpu_slot.workspace = true
 kbuild_config.workspace = true

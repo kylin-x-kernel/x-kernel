@@ -11,7 +11,7 @@ use core::fmt::Write;
 use kcgroup::Cgroup;
 use kvfs::{CommandFile, Permission, SimpleFile, SimpleFileOperation, SimpleFs, VfsError};
 
-use crate::{command, control, state::CgroupFsState};
+use crate::{command, control, cpuset, state::CgroupFsState};
 
 pub(crate) fn membership_file(
     fs: Arc<SimpleFs>,
@@ -41,6 +41,7 @@ pub(crate) fn membership_file(
                 let process_id = command::parse_command(data)?
                     .parse::<u32>()
                     .map_err(|_| VfsError::InvalidInput)?;
+                cpuset::validate_cpuset_affinity_for_process(&cgroup, process_id)?;
                 kprocess::migrate_cgroup_process(process_id, &cgroup, |source, destination| {
                     if !source.is_descendant_of(state.view_root())
                         || !destination.is_descendant_of(state.view_root())
@@ -54,6 +55,7 @@ pub(crate) fn membership_file(
                         .ok_or(VfsError::PermissionDenied)?;
                     procs_inode.permission(Permission::MAY_WRITE, file.cred())
                 })?;
+                cpuset::apply_cpuset_affinity_to_process(&cgroup, process_id)?;
                 Ok(None)
             }
         }),

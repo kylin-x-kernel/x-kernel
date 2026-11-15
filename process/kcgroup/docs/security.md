@@ -3,15 +3,18 @@
 ## Scope, trust model, and input boundaries
 
 The whole crate (`src/lib.rs` and `ut-tests/lib.rs`) is covered. Assets are canonical membership,
-stable task identities, pids quotas/counts, topology, and live-node reservations.
-Trusted kernel adapters supply child names, limit values, nodes, and task handles.
+stable task identities, pids quotas/counts, cpuset CPU/NUMA masks, topology,
+and live-node reservations. Trusted kernel adapters supply child names, limit
+values, mask text, nodes, and task handles.
 The cgroup2fs/syscall layer must enforce mount visibility, credentials,
 permissions, and target-task access before mutations. Process-wide migration
 requires the additional `kprocess` cgroup gate and publication protocol.
 
 `create_child` rejects empty, dot, dot-dot, and slash-containing names, but is not
 full pathname/credential validation. Numeric pids limits are bounded by
-`PIDS_MAX_LIMIT`; hierarchy queries compare live object identity. No direct user
+`PIDS_MAX_LIMIT`; cpuset masks reject indexes outside `MAX_CPUS`, indexes
+outside the hierarchy universe, and child requests that escape the parent's
+effective mask. Hierarchy queries compare live object identity. No direct user
 pointer, MMIO, DMA, firmware, file-content read, FFI, or assembly exists here.
 The crate denies unsafe code at its root.
 
@@ -43,6 +46,7 @@ Operation guards keep a node live, but do not freeze quota/delegation policy.
 | T-07 | Limits collide with unlimited sentinel | Medium | Numeric input exceeds the supported PID domain | `set_pids_max` returns `EINVAL` above `PIDS_MAX_LIMIT`; only `None` selects unlimited. |
 | T-08 | Thread group split by migration/publication race | High | Prepared sibling publishes after group target changes | `kprocess` process gate and publication reconciliation are required in addition to the hierarchy transaction. |
 | T-09 | Counter/depth resource exhaustion | Medium | Extreme reservations, namespace IDs, or hierarchy nesting | Controller count additions/subtractions are checked; reservation/ID increments and hierarchy depth remain unbounded locally. Trusted adapters must constrain workloads. |
+| T-10 | Cpuset escapes its delegated CPU set | High | Child request widens beyond the parent effective mask, or affinity is applied from the wrong node | `set_cpuset_cpus`/`set_cpuset_mems` validate universe and parent-subset under the hierarchy transaction; adapters apply each node's own effective mask to its subtree. Empty effective masks are skipped rather than treated as "all CPUs". |
 
 ## Failure modes and effects (FMEA)
 
@@ -51,9 +55,11 @@ Operation guards keep a node live, but do not freeze quota/delegation policy.
 | F-01 | Admission fails | Active pids limit or count overflow | `EAGAIN`, partial charge released | Fork/clone rejected | 3 | RAII rollback of `TaskCharge`. |
 | F-02 | Child mutation fails | Invalid name, missing node, duplicate name, busy node | `EINVAL`/`ENOENT`/`EEXIST`/`EBUSY` | Filesystem operation fails | 3 | Preserve original child and restore ACTIVE on busy removal. |
 | F-03 | Controller inaccessible | Node removed or controller absent/inactive | `ENODEV` or `ENOENT` | Controller operation rejected | 3 | Adapter reports error; no fabricated active state. |
-| F-04 | Charge invariant fails | Incomplete commit, inactive commit, count underflow | Assertion or debug assertion | Kernel service may fail | 2 | Preserve exact reservation/accounting ownership; checked subtraction does not wrap. |
-| F-05 | Hierarchy mismatch | Unrelated source/target or view root | `EXDEV` | No successful migration/path result | 3 | Validate before mutation or rendering. |
-| F-06 | Allocation exhaustion | Map/vector/node creation | Allocation cannot complete | Service unavailable | 2 | Global allocator policy; no local recoverable allocation path. |
+| F-04 | Cpuset request rejected | Empty effective mask, bad list, or mask outside parent/universe | `ENOSPC`, `EINVAL`, or `ENODEV` | Mask remains unchanged | 3 | Validate before storing; refresh only after a successful request. |
+| F-05 | Charge invariant fails | Incomplete commit caused by a concurrent subtree-control lineage change | `EAGAIN` | Commit rejected; reserved charges roll back | 2 | Recheck lineage at commit and return a recoverable error; Drop releases the reservation. |
+| F-05a | Charge invariant fails | Inactive commit or counter underflow | Assertion or debug assertion | Kernel service may fail | 2 | Preserve exact reservation/accounting ownership; checked subtraction does not wrap. |
+| F-06 | Hierarchy mismatch | Unrelated source/target or view root | `EXDEV` | No successful migration/path result | 3 | Validate before mutation or rendering. |
+| F-07 | Allocation exhaustion | Map/vector/node creation | Allocation cannot complete | Service unavailable | 2 | Global allocator policy; no local recoverable allocation path. |
 
 ## Failure handling and privacy
 
@@ -70,6 +76,8 @@ same hierarchy used by boot filesystem setup.
 ## Known limitations and audit checklist
 
 - Existing-task migration intentionally ignores `pids.max`.
+- `cpuset.mems` is validated and propagated, but this crate does not enforce a
+  NUMA allocation policy; memory placement can still differ from the mask.
 - Retain the hierarchy root while using weak-parent ancestry results.
 - Preserve gate -> publication -> hierarchy lock ordering in integration.
 - Keep error paths from dropping/replacing preexisting membership identities.

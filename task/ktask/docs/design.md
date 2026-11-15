@@ -1694,3 +1694,18 @@ Existing callback-boundary, cancellation, idle-wait and manager-stop tests also
 execute on SMP. A switch observer asserts that confirmation has not been
 published on the outgoing stack; a staged completion test checks stale-round
 identity. None of these fixtures powers down CPUs or changes global clocks.
+
+## Cgroup CPU controls
+
+`UserTaskRuntime` exposes the live cgroup `cpu.weight` and `Bandwidth`
+tracker. The task samples weight at activation and reapplies it after a
+process-wide cgroup migration; a task forked or moved into a group therefore
+does not keep the scheduler-default nice value.
+
+`cpu.max` runtime is charged by `run_queue::bandwidth` on scheduler account
+points. Trackers and weak member references are registered lazily; an atomic
+live count skips the registry lock entirely when no task is under a bandwidth
+limit. A tick first polls an expired period, then charges the new period, so a
+window close is not consumed by the period rollover. When a window is open,
+every selectable member is parked before the next pick. Destroyed trackers are
+weak and retired by the next poll rather than held forever.

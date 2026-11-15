@@ -71,3 +71,15 @@ fn permanent_metadata_cannot_be_claimed_as_an_allocation() {
     assert_eq!(meta.references.load(Ordering::Relaxed), 0);
     assert_eq!(meta.reference_state(), ReferenceState::Permanent);
 }
+
+#[def_test]
+fn memory_cgroup_ownership_is_stamped_and_taken_once() {
+    let meta = PageMeta::new();
+    assert_eq!(meta.memcg(), 0);
+
+    meta.set_memcg(7);
+    assert_eq!(meta.memcg(), 7);
+    assert_eq!(meta.take_memcg(), 7);
+    assert_eq!(meta.memcg(), 0);
+    assert_eq!(meta.take_memcg(), 0);
+}

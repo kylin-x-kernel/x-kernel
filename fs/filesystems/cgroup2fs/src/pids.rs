@@ -2,17 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, string::ToString, sync::Arc};
+use alloc::{format, string::ToString, sync::Arc, vec::Vec};
 
 use kcgroup::Cgroup;
-use kvfs::{CommandFile, SimpleFile, SimpleFileOperation, SimpleFs, VfsError, VfsResult};
+use kvfs::{CommandFile, SimpleFile, SimpleFileOperation, SimpleFs, VfsError};
 
 use crate::{command, control};
-
-pub(crate) fn set_subtree_enabled(cgroup: &Cgroup, is_enabled: bool) -> VfsResult<()> {
-    cgroup.set_pids_subtree_enabled(is_enabled)?;
-    Ok(())
-}
 
 pub(crate) fn current_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>) -> Arc<SimpleFile> {
     SimpleFile::new_regular_with_permission(fs, control::readonly_mode(), move || {
@@ -46,4 +41,22 @@ pub(crate) fn max_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>) -> Arc<SimpleFile
             }
         }),
     )
+}
+
+fn events_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>) -> Arc<SimpleFile> {
+    SimpleFile::new_regular_with_permission(fs, control::readonly_mode(), move || {
+        let _operation = cgroup.begin_operation()?;
+        Ok(format!("max {}\n", cgroup.pids_max_hits()?))
+    })
+}
+
+pub(crate) fn files(
+    fs: Arc<SimpleFs>,
+    cgroup: Arc<Cgroup>,
+) -> Vec<(&'static str, Arc<SimpleFile>)> {
+    alloc::vec![
+        ("pids.current", current_file(fs.clone(), cgroup.clone())),
+        ("pids.max", max_file(fs.clone(), cgroup.clone())),
+        ("pids.events", events_file(fs, cgroup)),
+    ]
 }

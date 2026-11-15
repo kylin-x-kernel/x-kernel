@@ -401,6 +401,21 @@ immediate check on the deallocation hot path to a check performed when `usages()
 - Raw page API callers explicitly pair deallocation; PageRef performs final
   allocation release through Drop after the last hold ends.
 
+## PageRef accounting hand-off
+
+`PageRef` admission calls `memacct::charge_frame` for the owned physical range.
+The charge records the memory-cgroup id and allocation class in page metadata.
+`PageRef::release_unit` calls `memacct::uncharge_frame` only when the last
+physical reference retires, before the range is returned to the allocator.
+This keeps memory-cgroup accounting tied to physical lifetime rather than to a
+cache container such as `Folio`; page tables or another `PageRef` holder may
+outlive the container while still owning the page.
+
+If the accounting charge fails, admission returns `NoMemory`, drops the newly
+created `PageRef`, returns spare inventory pages, and never publishes a page
+with a partial charge. A `PageRef` dropped before a successful charge has no
+recorded memcg id, so its release is a no-op for accounting.
+
 ## Range PageRef and reference units
 
 PageRef in src/page.rs stores a first resident descriptor and a selected page

@@ -625,7 +625,16 @@ pub fn clone_private_object_pages_for_fork(
         match old_pgtbl.query(vaddr) {
             Ok((_paddr, parent_flags, mapped_size)) => {
                 assert_eq!(mapped_size, ctx.page_size);
-                if let Err(err) = old_pgtbl.protect(vaddr, ctx.cow_flags) {
+                // Only writable pages need the COW downgrade. File-backed text
+                // and rodata are already read-only, so rewriting their PTEs
+                // would add a page-table walk and a TLB invalidation per page
+                // to the common fork+exec path for no change in permission.
+                let protected = if parent_flags.contains(MappingFlags::WRITE) {
+                    old_pgtbl.protect(vaddr, ctx.cow_flags)
+                } else {
+                    Ok(mapped_size)
+                };
+                if let Err(err) = protected {
                     rollback_private_fork_pages(
                         &mapped,
                         None,

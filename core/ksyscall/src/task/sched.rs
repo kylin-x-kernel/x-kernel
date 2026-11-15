@@ -96,7 +96,7 @@ pub(crate) fn sys_sched_setaffinity(
     // Linux migrates a running/ready target off CPUs outside the new mask
     // before returning success. A failed remote migrate maps to EBUSY rather
     // than a silent Ok(0).
-    if !ktask::set_task_affinity(&task, cpu_mask) {
+    if !ktask::set_task_requested_affinity(&task, cpu_mask) {
         return Err(KError::ResourceBusy);
     }
     Ok(0)

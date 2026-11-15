@@ -517,8 +517,10 @@ dependencies = [
  "klazy",
  "kprocess",
  "ksync",
+ "ktask",
  "kvfs",
  "macros",
+ "memacct",
  "unittest",
 ]
 
@@ -2159,6 +2161,7 @@ dependencies = [
  "kcpu_slot",
  "kspin",
  "log",
+ "memacct",
  "memaddr",
  "page-meta",
  "strum",
@@ -2195,6 +2198,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kbandwidth"
+version = "0.3.0-dev"
+dependencies = [
+ "kspin",
+ "unittest",
+]
+
+[[package]]
 name = "kbpf"
 version = "0.3.0-dev"
 dependencies = [
@@ -2209,10 +2220,15 @@ version = "0.3.0-dev"
 name = "kcgroup"
 version = "0.3.0-dev"
 dependencies = [
+ "kbandwidth",
+ "kcpu_id_map",
+ "kcred",
  "kerrno",
  "kidentity",
  "klazy",
+ "kspin",
  "ksync",
+ "memacct",
  "unittest",
 ]
 
@@ -3117,6 +3133,7 @@ dependencies = [
  "kaddr_layout",
  "kalloc-types",
  "karch",
+ "kbandwidth",
  "kcgroup",
  "kcpu_id_map",
  "kcred",
@@ -3139,6 +3156,7 @@ dependencies = [
  "kvfs",
  "lazyinit",
  "linux_sysno",
+ "memacct",
  "memaddr",
  "memspace",
  "posix-types",
@@ -3451,6 +3469,7 @@ dependencies = [
  "intrusive-collections",
  "kalloc-types",
  "karch",
+ "kbandwidth",
  "kbuild_config",
  "kcompletion",
  "kcpu_id_map",
@@ -3949,6 +3968,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "memacct"
+version = "0.3.0-dev"
+dependencies = [
+ "kerrno",
+ "klazy",
+ "kspin",
+ "memaddr",
+ "page-meta",
+ "unittest",
+]
+
+[[package]]
 name = "memaddr"
 version = "0.3.0-dev"
 dependencies = [
@@ -4014,6 +4045,7 @@ dependencies = [
  "ksync",
  "lazyinit",
  "log",
+ "memacct",
  "memaddr",
  "page_table",
  "unittest",

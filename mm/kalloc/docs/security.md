@@ -120,6 +120,15 @@ canonical layout.
 Relied-on invariants: the central allocator lock is already held by the caller; all cached objects were originally allocated by the same central
 allocator with the same class layout; the current-CPU mutable reference is not re-entered on the same CPU. Violating these conditions may put an object into the wrong freelist or create a mutable alias.
 
+### U-04a: PageRef memory-cgroup charge lifetime
+
+`PageRef` admission records a memory-cgroup charge in page metadata and the
+final `release_unit` path clears it. The charge must not be released from a
+`Folio` or other cache destructor because page tables may hold independent
+`PageRef` references. A charge failure is rejected before the page is
+published; a duplicate or forged release is prevented by the page-owner and
+reference protocols.
+
 ### U-04: Fresh exact zeroing and reference-range transfer
 
 Locations: alloc_zeroed_pages_exact_ref and PageRef::from_raw in src/page.rs.

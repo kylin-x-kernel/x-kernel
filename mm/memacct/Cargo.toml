@@ -1,0 +1,20 @@
+[package]
+name = "memacct"
+description = "Hierarchical memory-cgroup accounting and page ownership"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+kerrno.workspace = true
+klazy.workspace = true
+kspin.workspace = true
+memaddr.workspace = true
+page-meta.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

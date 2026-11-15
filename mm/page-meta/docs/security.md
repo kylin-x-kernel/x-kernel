@@ -82,7 +82,7 @@ explicit compounds publish their first head hold only after membership setup. A 
 prevents admission. Ordinary error paths do not claim a prefix. The immutable
 published directory and caller-owned backing establish descriptor lifetime.
 
-Tail membership uses a checked u32 PFN distance. reference_allocation requires a
+Tail membership uses a checked u16 page distance. reference_allocation requires a
 live hold from the same allocation incarnation, resolves a head with a positive
 count, and checks the member fits its order. A live hold excludes retirement and
 exclusive split, making geometry stable. Safe lookup, global_table and
@@ -133,3 +133,13 @@ changes one head count. Range length belongs to the external holder, not a share
 metadata field; raw consumers must transfer that length without reconstruction
 from the first descriptor. Isolated fixture tests force mid-range overflow without
 exposing a production count-setting API and restore all modeled holds afterward.
+
+## Memory-cgroup attribution invariants
+
+- The cgroup id is 32-bit and is never truncated.
+- The id and usage class are published only after a successful hierarchical
+  charge and complete metadata coverage.
+- `take_memcg` clears the id exactly once; a second release cannot underflow a
+  different group.
+- Tail offsets fit 16 bits; compound admission rejects larger encodings.
+

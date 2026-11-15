@@ -46,6 +46,10 @@ pub fn migrate_process_cgroup_with(
         .ok_or(KError::NoSuchProcess)?;
     authorize(&source, target)?;
     kcgroup::TaskMembership::migrate_group(&memberships, target)?;
+    let weight = target.effective_cpu_weight();
+    for task in &tasks {
+        ktask::set_task_weight(task, weight);
+    }
     *cgroup_target = Some(target.clone());
     Ok(())
 }

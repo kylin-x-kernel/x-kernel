@@ -163,6 +163,29 @@ pub trait UserTaskRuntime: Send + Sync + Any {
         kidentity::TaskIdentityToken::unknown()
     }
 
+    /// Returns the cgroup `cpu.weight` for this task.
+    ///
+    /// Sampled at activation so tasks forked or moved into a cgroup inherit
+    /// its current weight instead of the scheduler default.
+    fn cpu_weight(&self) -> u32 {
+        100
+    }
+
+    /// Returns the cgroup `cpuset` CPU bound for this task, if any.
+    ///
+    /// The bound is applied when the task is constructed so a child does not
+    /// inherit a stale boot-CPU affinity from its parent.
+    fn cgroup_cpus(&self) -> Option<KCpuMask> {
+        None
+    }
+
+    /// Returns the cgroup CPU bandwidth tracker charged for this task's
+    /// runtime ticks, sampled once at task construction. `None` leaves the
+    /// task outside `cpu.max` accounting.
+    fn cpu_bandwidth(&self) -> Option<alloc::sync::Arc<kbandwidth::Bandwidth>> {
+        None
+    }
+
     /// Returns this runtime as [`Any`] for process-domain type recovery.
     fn as_any(&self) -> &dyn Any;
 }
@@ -342,6 +365,48 @@ impl TaskEntry {
     }
 }
 
+/// CPU affinity split between the mask userspace requested and the mask the
+/// task may actually run on after cgroup `cpuset` constraints.
+///
+/// `requested` is only written by `sched_setaffinity`; `bound` is only written
+/// by the cgroup `cpuset` layer. `effective` is their intersection and is the
+/// value consumed by run-queue placement, idle pull, and migration. Keeping the
+/// two inputs separate lets either layer change without losing the other one.
+#[derive(Clone, Copy)]
+pub(crate) struct TaskAffinity {
+    requested: KCpuMask,
+    bound: KCpuMask,
+    effective: KCpuMask,
+}
+
+impl TaskAffinity {
+    fn new(cpus: KCpuMask) -> Self {
+        Self {
+            requested: cpus,
+            bound: cpus,
+            effective: cpus,
+        }
+    }
+
+    fn with_requested(self, requested: KCpuMask) -> Option<Self> {
+        let effective = requested & self.bound;
+        (!effective.is_empty()).then_some(Self {
+            requested,
+            bound: self.bound,
+            effective,
+        })
+    }
+
+    fn with_bound(self, bound: KCpuMask) -> Option<Self> {
+        let effective = self.requested & bound;
+        (!effective.is_empty()).then_some(Self {
+            requested: self.requested,
+            bound,
+            effective,
+        })
+    }
+}
+
 /// The inner task structure.
 pub struct TaskInner {
     identity: TaskIdentity,
@@ -365,8 +430,11 @@ pub struct TaskInner {
     pub(crate) is_exit_complete: AtomicBool,
     pub(crate) suspend_registration: klazy::Once<Arc<crate::freezer::system::Registration>>,
 
-    /// CPU affinity mask.
-    cpumask: SpinNoIrq<KCpuMask>,
+    /// Requested, cgroup-bounded, and effective CPU affinity.
+    affinity: SpinNoIrq<TaskAffinity>,
+
+    /// NUMA memory-node mask inherited from the cgroup `cpuset` controller.
+    mems: SpinNoIrq<KCpuMask>,
 
     /// Used to indicate the CPU ID where the task is running or will run.
     cpu_id: AtomicU32,
@@ -644,14 +712,36 @@ impl TaskInner {
                 "a user task's identity must match its runtime number"
             );
         }
-        Self::new_with_entry(
+        let task = Self::new_with_entry(
             TaskEntry::Prepared(entry),
             name,
             kbuild_config::KERNEL_STACK_SIZE,
             TaskIdentity::User {
                 user_runtime: UserRuntimeSlot::ready(user_runtime),
             },
-        )
+        );
+        if let Some(cpus) = task
+            .user_runtime()
+            .and_then(|runtime| runtime.cgroup_cpus())
+        {
+            let _ = task.set_cgroup_cpus(cpus);
+        }
+        task
+    }
+
+    /// Returns the live cgroup bandwidth tracker from this task's runtime.
+    ///
+    /// Reading through `UserTaskRuntime` observes a controller enabled after
+    /// task construction, so enabling `+cpu` does not require rebinding every
+    /// existing task.
+    pub fn cpu_bandwidth(&self) -> Option<alloc::sync::Arc<kbandwidth::Bandwidth>> {
+        self.user_runtime()?.cpu_bandwidth()
+    }
+
+    /// Returns the cgroup CPU weight sampled from the task runtime.
+    pub fn cpu_weight(&self) -> u32 {
+        self.user_runtime()
+            .map_or(100, |runtime| runtime.cpu_weight())
     }
 
     /// Returns the current task-number handle, if the task has one.
@@ -838,21 +928,96 @@ impl TaskInner {
         LogicalCpuId::new(self.cpu_id.load(Ordering::Acquire) as usize)
     }
 
-    /// Gets the cpu affinity mask of the task.
+    /// Gets the effective CPU affinity mask of the task.
     ///
-    /// Returns the cpu affinity mask of the task in type [`KCpuMask`].
+    /// This is `requested ∩ cgroup bound` and is the only mask that placement
+    /// and migration decisions may consult.
     #[inline]
     pub fn cpumask(&self) -> KCpuMask {
-        *self.cpumask.lock()
+        self.affinity.lock().effective
     }
 
-    /// Sets the cpu affinity mask of the task.
+    /// Gets the CPU affinity mask last requested by userspace.
     ///
-    /// # Arguments
-    /// `cpumask` - The cpu affinity mask to be set in type [`KCpuMask`].
+    /// Unlike [`Self::cpumask`], this is not restricted by `cpuset`.
+    #[inline]
+    pub fn requested_cpus(&self) -> KCpuMask {
+        self.affinity.lock().requested
+    }
+
+    /// Gets the CPU mask imposed by the task's cgroup `cpuset` ancestors.
+    #[inline]
+    pub fn cgroup_cpus(&self) -> KCpuMask {
+        self.affinity.lock().bound
+    }
+
+    /// Gets the NUMA memory-node mask imposed by cgroup `cpuset`.
+    #[inline]
+    pub fn mems(&self) -> KCpuMask {
+        *self.mems.lock()
+    }
+
+    /// Replaces the requested CPU mask and recomputes the effective mask.
+    ///
+    /// Returns `false` without modifying any mask when the request does not
+    /// intersect the cgroup bound.
+    #[inline]
+    pub fn set_requested_cpus(&self, requested: KCpuMask) -> bool {
+        let mut affinity = self.affinity.lock();
+        let Some(next) = affinity.with_requested(requested) else {
+            return false;
+        };
+        *affinity = next;
+        true
+    }
+
+    /// Replaces the cgroup CPU bound and recomputes the effective mask.
+    ///
+    /// Returns `false` without modifying any mask when the bound does not
+    /// intersect the requested mask.
+    #[inline]
+    pub fn set_cgroup_cpus(&self, bound: KCpuMask) -> bool {
+        let mut affinity = self.affinity.lock();
+        let Some(next) = affinity.with_bound(bound) else {
+            return false;
+        };
+        *affinity = next;
+        true
+    }
+
+    /// Sets the NUMA memory-node mask imposed by cgroup `cpuset`.
+    #[inline]
+    pub fn set_mems(&self, mems: KCpuMask) {
+        *self.mems.lock() = mems
+    }
+
+    /// Sets all three affinity masks at once.
+    ///
+    /// Kernel-internal pinning uses this when no cgroup constraint applies.
     #[inline]
     pub fn set_cpumask(&self, cpumask: KCpuMask) {
-        *self.cpumask.lock() = cpumask
+        *self.affinity.lock() = TaskAffinity::new(cpumask)
+    }
+
+    /// Restores only the effective mask after a failed migration.
+    ///
+    /// The requested mask belongs to userspace and the bound to cpuset; a
+    /// transient stop failure must not overwrite either of them.
+    #[inline]
+    pub(crate) fn restore_effective_cpus(&self, cpumask: KCpuMask) {
+        self.affinity.lock().effective = cpumask;
+    }
+
+    /// Copies the placement inherited by a forked or cloned task.
+    ///
+    /// The child starts with the parent's split affinity and memory-node bound;
+    /// a later cgroup move or `sched_setaffinity` updates it independently.
+    #[inline]
+    pub fn inherit_placement(&self, parent: &Self) {
+        let affinity = *parent.affinity.lock();
+        let mems = *parent.mems.lock();
+        *self.affinity.lock() = affinity;
+        *self.mems.lock() = mems;
     }
 
     /// Polls whether the task has been interrupted.
@@ -1016,7 +1181,8 @@ impl TaskInner {
             is_exit_complete: AtomicBool::new(false),
             suspend_registration: klazy::Once::new(),
             // By default, the task is allowed to run on all CPUs.
-            cpumask: SpinNoIrq::new(cpumask),
+            affinity: SpinNoIrq::new(TaskAffinity::new(cpumask)),
+            mems: SpinNoIrq::new(KCpuMask::one_shot(0)),
             cpu_id: AtomicU32::new(0),
             #[cfg(feature = "smp")]
             on_cpu: AtomicBool::new(false),

@@ -53,6 +53,7 @@ kspin = { workspace = true, features = ["preempt"] }
 lazyinit = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }
+kbandwidth = { workspace = true }
 kbuild_config = { workspace = true }
 karch = { workspace = true }
 klazy = { workspace = true }

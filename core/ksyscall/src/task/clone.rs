@@ -407,11 +407,22 @@ impl CloneRequest {
         } else {
             None
         };
+        let child_cgroup = thr.cgroup();
         let mut new_task = new_user_task(&curr.name(), entry, task_number, thr);
-        // Linux copies the creator's CPU affinity into the child. schbench
-        // relies on this: the message thread pins itself to the worker CPU set
-        // before pthread_create, then re-pins itself to the message CPU.
-        new_task.set_cpumask(curr.cpumask());
+        // Linux copies the creator's requested CPU affinity into the child,
+        // but the cgroup cpuset bound is owned by the child's cgroup. Do not
+        // copy `curr.cpumask()` wholesale: that would copy the parent's
+        // effective bound and can pin a child to the boot CPU forever.
+        let _ = new_task.set_requested_cpus(curr.requested_cpus());
+        if let Some(cgroup) = child_cgroup
+            && let Ok(cpus) = cgroup.cpuset_effective_cpus()
+        {
+            let mut bound = ktask::KCpuMask::new();
+            for cpu in cpus.iter() {
+                bound.set(cpu, true);
+            }
+            let _ = new_task.set_cgroup_cpus(bound);
+        }
         new_task.ctx_mut().set_page_table_root(page_table_root);
 
         // Create the pidfd before publishing, but install it into the caller's

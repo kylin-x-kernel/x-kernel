@@ -60,3 +60,14 @@ pub fn current_cgroup() -> Option<Arc<Cgroup>> {
         .try_as_thread()
         .and_then(|thread| thread.cgroup())
 }
+
+/// Returns the memory cgroup of the current task's cgroup membership.
+///
+/// The membership lock is an IRQ-safe spinlock, so this is safe from page
+/// allocation and interrupt context. The lookup is live: enabling `+memory`
+/// after a task joined a child cgroup is observed on the next charge.
+pub fn current_memcg() -> memacct::MemcgId {
+    current_cgroup()
+        .map(|cgroup| cgroup.effective_memcg().id())
+        .unwrap_or(memacct::MemcgId::NONE)
+}

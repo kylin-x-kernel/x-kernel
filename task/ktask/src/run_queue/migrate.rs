@@ -177,7 +177,7 @@ fn stop_and_recheck(task: &KtaskRef, mask: KCpuMask, old_mask: KCpuMask) -> bool
     ) {
         // The stopper never ran, so the new mask would leave this task on a
         // CPU it now forbids.
-        task.set_cpumask(old_mask);
+        task.restore_effective_cpus(old_mask);
         return false;
     }
     if !task.is_running()

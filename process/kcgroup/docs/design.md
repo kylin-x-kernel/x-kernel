@@ -5,9 +5,10 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
 ## Purpose and scope
 
-`kcgroup` owns the canonical cgroup v2 hierarchy, pids controller accounting,
-and task membership. The implementation is in `src/lib.rs`; its kernel tests
-are in `ut-tests/lib.rs`.
+`kcgroup` owns the canonical cgroup v2 hierarchy, cpu, cpuset, memory, and
+pids controller accounting, and task membership. The implementation lives in `src/lib.rs`,
+`src/hierarchy.rs`, `src/membership.rs`, `src/namespace.rs`, and
+`src/controller/`; its kernel tests are in `ut-tests/lib.rs`.
 `kprocess` integrates task publication, process-wide migration, and exit;
 cgroup2fs and syscall adapters provide authorization, ABI parsing, and views.
 They must not maintain parallel membership or controller state. This crate
@@ -23,6 +24,7 @@ new-task limit. `TaskCharge` and `TaskMembership` separate those lifetimes.
 CgroupNamespace -> Arc<Cgroup> view root
 Cgroup -> strong children / weak parent / shared CgroupHierarchy
        -> optional PidsController
+       -> CpusetController (always live on the root)
        -> member_tasks: set of stable TaskIdentityToken
 reserve_task -> TaskCharge -> commit -> TaskMembership -> detach/drop
 ```
@@ -37,11 +39,11 @@ ID allocator, not an authorization token.
 
 Hierarchy mutations, reservations, migration, and detach use a hierarchy-wide
 sleepable `Mutex<()>`. Children and optional controller references use `RwLock`;
-membership maps use `Mutex`; each task's current cgroup uses `RwLock<Option<_>>`.
+membership maps use `Mutex`; each task's current cgroup uses `SpinNoIrq<Option<_>>` so page-charge lookup is safe from IRQ context; controller slots also use IRQ-safe spinlocks because the scheduler reads cpu bandwidth on every tick.
 Atomic controller values permit cheap snapshot reads. Lifecycle, reservations,
 and delegation bits are atomic; multi-node edits occur under the transaction.
-`set_pids_max` updates its atomic limit after controller validation without
-acquiring the hierarchy transaction itself.
+`set_pids_max` takes the hierarchy transaction, rejects removed nodes with
+`ENODEV`, then updates its atomic limit after controller validation.
 
 Use task context with allocation and sleepable locking available, not IRQ or
 atomic/spinlocked context. There is no local current-task or CPU dependency;
@@ -53,7 +55,7 @@ transaction ordering. The core does not acquire that process gate for callers.
 
 ## Controller and task flows
 
-The hierarchy root has no pids controller files. Enabling `pids` in a parent's
+The hierarchy root has no pids controller state. Enabling `pids` in a parent's
 subtree activates controllers on direct children. A non-root node must receive
 the controller from its parent and have no direct members before delegating;
 a parent cannot disable it while a child still delegates. Inactive controllers
@@ -61,7 +63,32 @@ remain accounting anchors; reactivation resets the limit to unlimited.
 The first activation initializes a child's count from its subtree membership.
 Numeric limits must be at most `4 * 1024 * 1024`; `None` represents textual `max`
 using a private `usize::MAX` sentinel. Lowering a limit below current usage is
-allowed and affects later admission.
+allowed and affects later admission. A new-task reservation rejected because
+`current >= max` increments the controller's `max` event count; migration never
+increments it. The count belongs to the live controller instance, so initial
+activation starts it at zero and deactivation followed by reactivation resets
+it.
+
+Cpuset state differs because the root is always live: its effective CPU and
+NUMA-node masks are the machine universe, and descendants always intersect
+against a live ancestor. `cpuset.cpus`/`cpuset.mems` are requests; an empty
+request inherits the parent's effective mask. A non-empty request must be a
+subset of the parent's effective mask and of the machine universe, otherwise
+the setter returns `EINVAL` or `ENODEV` respectively. A request that would make
+the effective mask empty returns `ENOSPC`. Request changes refresh effective
+masks through the whole subtree under the hierarchy transaction. The filesystem
+adapter treats the controller write and task-affinity application as one
+transaction: an `ENOSPC` restores the old requested masks and reapplies the old
+effective masks. Cpuset
+delegation follows the same parent-ownership and no-internal-process rules as
+pids. The no-internal-process rule applies to direct members only, so a node
+may delegate while its descendants hold tasks. Enabling a controller for
+children never changes the current node's own live controller. Disabling it
+deactivates the controller on direct children only; the current node keeps the
+controller it received from its parent (and the root keeps its always-live
+cpuset). The core only owns masks and hierarchy validation; applying CPU
+affinity to tasks is an adapter responsibility because it needs
+scheduler/process access.
 
 `reserve_task` increments a lifecycle reservation and charges each controller
 in root-to-leaf order. A failure drops the partial charge and releases counts.
@@ -109,7 +136,9 @@ counts; repeated detach is harmless. `CgroupOperationGuard::drop` releases its
 reservation. Checked decrement prevents wrap; underflow triggers a debug
 assertion and otherwise leaves the counter unchanged.
 
-There are no memory/CPU controllers, authorization engine, or full namespace
-clone syscall implementation here. Namespace IDs and reservation increments
+The `cpu`, `cpuset`, `memory`, and `pids` controllers are implemented; `io` is
+not. Filesystem authorization and the full namespace clone syscall live outside
+this crate. Cpuset NUMA-node masks are
+validated and propagated but do not constrain the allocator's NUMA policy. Namespace IDs and reservation increments
 have no explicit wrap protection. Recursive subtree counts and linear lineage
 walks are not depth-bounded by this crate.

@@ -456,10 +456,7 @@ impl<A: FairTreeAdapter> FairTree<A> {
             .map(|ptr| node(ptr).min_vruntime)
     }
 
-    pub(crate) fn earliest_eligible(&self, avg: i64) -> Option<DeadlineKey> {
-        self.search(avg, || {})
-    }
-
+    #[cfg(any(test, unittest))]
     fn search(&self, avg: i64, mut visit: impl FnMut()) -> Option<DeadlineKey> {
         let mut next = self.context.mutation.root.get();
         while let Some(ptr) = next {

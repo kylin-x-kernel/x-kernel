@@ -18,6 +18,7 @@
 //! Placement reads remote `nr_running` / `nr_home` / `rt_preempt_rank` without
 //! taking a remote scheduler lock; `ksched` only sees the already-chosen queue.
 
+pub(crate) mod bandwidth;
 #[cfg(feature = "smp")]
 mod idle_pull;
 #[cfg(feature = "smp")]

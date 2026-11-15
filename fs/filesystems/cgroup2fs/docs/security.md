@@ -79,7 +79,7 @@ PID namespace translation is not yet implemented, so namespace isolation must no
 ## Known Limitations
 
 - Non-zero `cgroup.procs` IDs are still resolved in the root PID namespace.
-- Only the `pids` controller exists.
+- Implemented controller surfaces are `pids`, `cpuset`, `cpu`, and `memory`; `io` is not implemented.
 - User namespace ID mapping, capabilities and LSM are not fully wired in; delegation currently relies on the inode
   owner/mode, the mount view and VFS DAC.
 
@@ -90,3 +90,13 @@ PID namespace translation is not yet implemented, so namespace isolation must no
 - Does it avoid directly accessing the scheduler, the procfs registry or credential internals?
 - Does task display continue to verify the stable identity?
 - Do the normal mount and the boot mount each maintain the current/initial view boundary?
+
+
+## Controller files
+
+`memory.*` and `cpu.*` writes are untrusted control input. Values are parsed
+as bounded integers; invalid domains are rejected before touching controller
+state. Memory accounting ids are kernel-owned, never read from userspace.
+`cgroup.procs` migration authorizes the source and common ancestor file
+credentials before membership changes; a post-migration affinity failure is
+reported without claiming the migration was rolled back.

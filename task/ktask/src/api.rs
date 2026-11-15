@@ -449,6 +449,7 @@ pub fn on_timer_fire() {
         }
     }
     let now_ns = khal::time::monotonic_time_nanos();
+    crate::run_queue::bandwidth::poll_trackers(now_ns);
     let cpu_id = khal::percpu::this_cpu_id();
     // Any local timer IRQ means this CPU is still taking interrupts. Watchdog
     // hardlockup must not wait for the 4s sample callback: a busy lone task
@@ -698,12 +699,50 @@ pub fn set_task_prio(task: &KtaskRef, prio: isize) -> bool {
     crate::run_queue::set_task_nice(task, prio)
 }
 
+/// Applies a cgroup v2 `cpu.weight` value (1..=10000) to `task`.
+///
+/// The weight is translated to the Linux nice value whose scheduler load
+/// weight is closest (the same relationship Linux's own weight tables encode),
+/// so the existing fair-scheduler arbitration enforces the relative share
+/// without a second weight domain.
+pub fn set_task_weight(task: &KtaskRef, weight: u32) -> bool {
+    // cgroup cpu.weight is normalized to 100 for the default Linux share;
+    // convert it to the scheduler's 1024-scale weight before the nice lookup.
+    let scheduler_weight = (u64::from(weight) * 1024 / 100).clamp(1, 88_761) as u32;
+    crate::run_queue::set_task_nice(task, weight_to_nice(scheduler_weight) as isize)
+}
+
+/// Linux `prio_to_weight` for nice 0 inverted: returns the nice value whose
+/// load weight is nearest to `weight`. The table matches `kernel/sched/core.c`.
+pub(crate) fn weight_to_nice(weight: u32) -> i8 {
+    /// `prio_to_weight[nice + 20]` from the Linux scheduler.
+    const WEIGHTS: [u32; 40] = [
+        88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916, 9548, 7620, 6100,
+        4904, 3906, 3121, 2501, 1991, 1586, 1277, 1024, 820, 655, 526, 423, 335, 272, 215, 172,
+        137, 110, 87, 70, 56, 45, 36, 29, 23, 18, 15,
+    ];
+    let weight = weight.clamp(1, 10_000);
+    let mut best: (u32, i8) = (u32::MAX, 0);
+    for (index, candidate) in WEIGHTS.iter().enumerate() {
+        let distance = candidate.abs_diff(weight);
+        if distance < best.0 {
+            best = (distance, index as i8 - 20);
+        }
+    }
+    best.1
+}
+
 /// Read `task`'s user-visible scheduling attributes.
 ///
 /// Takes the run-queue lock that owns `task`. Call from task context, not
 /// while that lock is already held.
 pub fn sched_getattr(task: &KtaskRef) -> SchedAttr {
     crate::run_queue::sched_getattr(task)
+}
+
+/// Drops a task's pending `cpu.max` throttle record at exit.
+pub fn forget_bandwidth_member(task: &KtaskRef) {
+    crate::run_queue::bandwidth::forget_member(task);
 }
 
 /// `SCHED_RR` quantum for `sched_rr_get_interval(2)`.
@@ -790,6 +829,62 @@ pub fn set_task_affinity(task: &KtaskRef, cpumask: KCpuMask) -> bool {
     {
         true
     }
+}
+
+/// Applies a userspace `sched_setaffinity` request without overwriting the
+/// cgroup `cpuset` bound.
+///
+/// The requested mask is intersected with the task's existing bound. Returns
+/// `false` for an empty request or an empty intersection; the task's masks are
+/// unchanged on failure. Kernel-internal pinning uses [`set_task_affinity`].
+pub fn set_task_requested_affinity(task: &KtaskRef, cpumask: KCpuMask) -> bool {
+    if cpumask.is_empty() {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    let old_mask = task.cpumask();
+    if !task.set_requested_cpus(cpumask) {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    {
+        crate::run_queue::enforce_affinity_placement(task, old_mask)
+    }
+    #[cfg(not(feature = "smp"))]
+    {
+        true
+    }
+}
+
+/// Applies the cgroup `cpuset` bound to a task and recomputes its effective
+/// affinity.
+///
+/// The requested mask is preserved, so lifting a cgroup restriction restores
+/// the CPUs userspace originally asked for. Returns `false` and leaves every
+/// mask unchanged when the intersection would be empty; cgroup writes turn
+/// that into `ENOSPC` instead of silently starving the task.
+pub fn set_task_cgroup_cpus(task: &KtaskRef, cpumask: KCpuMask) -> bool {
+    if cpumask.is_empty() {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    let old_mask = task.cpumask();
+    if !task.set_cgroup_cpus(cpumask) {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    {
+        crate::run_queue::enforce_affinity_placement(task, old_mask)
+    }
+    #[cfg(not(feature = "smp"))]
+    {
+        true
+    }
+}
+
+/// Applies the cgroup `cpuset` memory-node mask to a task.
+pub fn set_task_mems(task: &KtaskRef, mems: KCpuMask) {
+    task.set_mems(mems);
 }
 
 /// Set the affinity for the current task.
@@ -1092,4 +1187,9 @@ pub fn check_mutex_deadlock() -> bool {
         }
     });
     ok
+}
+
+/// Releases scheduler state for a cpu controller's bandwidth tracker.
+pub fn release_bandwidth_tracker(tracker: &alloc::sync::Arc<kbandwidth::Bandwidth>) {
+    crate::run_queue::bandwidth::release_tracker(tracker);
 }
