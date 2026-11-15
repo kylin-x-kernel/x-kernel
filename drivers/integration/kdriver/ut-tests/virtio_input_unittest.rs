@@ -5,7 +5,7 @@
 use pci::{Cam, DeviceFunction, PciConfigAccess};
 use unittest::{assert_eq, def_test};
 
-use super::set_pci_intx_disabled;
+use super::super::set_pci_intx_disabled;
 
 fn config_for_command(command: u32) -> ([u32; 64], DeviceFunction) {
     let mut config_space = [0u32; 64];

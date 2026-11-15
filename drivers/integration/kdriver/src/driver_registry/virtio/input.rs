@@ -11,7 +11,7 @@ use driver_os_api::IrqResource;
 use kdevice::DeviceObject;
 use virtio::Transport;
 
-use super::{glue::VirtIoHalImpl, set_pci_intx_disabled};
+use super::{arm_pci_intx, glue::VirtIoHalImpl};
 use crate::resource::DeviceResourceExt;
 
 pub(super) fn activate_pci<T: Transport + 'static>(
@@ -50,13 +50,7 @@ fn activate<T: Transport + 'static>(
     binding.devm_request_irq(&parent, irq, input.irq_handler())?;
 
     if let Some((config, bdf)) = pci_intx {
-        // The transport stays masked until the shared handler is registered.
-        // LIFO cleanup masks INTx before the IRQ action is released.
-        let mut cleanup_config = *config;
-        binding.add_cleanup(&parent, move || {
-            set_pci_intx_disabled(&mut cleanup_config, bdf, true)
-        })?;
-        set_pci_intx_disabled(config, bdf, false);
+        arm_pci_intx(&parent, config, bdf)?;
     }
 
     kclass::publish_input(parent, Box::new(input)).map(drop)

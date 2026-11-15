@@ -56,14 +56,15 @@ disable the hardware interrupt, while masking the shared line would also block
 completion notifications for other devices, including blk. Command updates
 preserve all other bits so memory access and DMA capability remain enabled.
 
-The PCI display scanout path also polls only through `transfer_to_host_2d`,
-`set_scanout`, and `resource_flush`, and it registers no IRQ handler. Probing
-must therefore disable INTx for this function as well; otherwise the host holds
-the level-triggered line high with no one to acknowledge it, and graphics load
-repeatedly traps. Display never installs an interrupt owner afterward, so the
-mask is final. This differs from input, which masks first and re-enables the
-line after registering a handler. Command updates likewise set only
-`INTERRUPT_DISABLE`, preserve all other bits, and never mask the shared line.
+The PCI display function enables INTx after registering its shared handler.
+The handler returns `IrqEvent::NOT_HANDLED` when the device ISR is empty.
+Only the submitting task recycles a used chain, after matching its token,
+while its input and output buffers are still borrowed. A mismatched ID retires
+both queues: the driver waits for device reset, detaches the submitted chain
+using the original buffers, and rejects further commands.
+Unbinding drains that task before withdrawing IRQ delivery. An unresponsive
+device can stall an outstanding command or reset acknowledgement; a timeout alone would not make it
+safe to release buffers still owned by the device.
 
 `virtio` is a classic hardware or virtual-hardware boundary module. It directly
 connects VirtIO devices exposed by the VMM, platform transports, and the
@@ -224,12 +225,12 @@ or drop order.
   other mapping entry points and drivers that do not claim are outside this
   guarantee.
 
-### 2. VirtIO GPU Scanout Resource Backing (`gpu.rs:166-188`)
+### 2. VirtIO GPU Scanout Resource Backing (`gpu.rs:309-393`)
 
 The `DisplayDevice` trait no longer exposes `fb()` or a `FrameBuffer` type, and
 the driver no longer constructs slices from a raw framebuffer pointer. GPU pixel
-backing is allocated by a DRM dumb buffer or fbdev shadow buffer and passed as a
-physical address and length to `create_scanout_resource()`. The virtio-gpu
+backing is allocated by a DRM dumb buffer or fbdev shadow buffer and passed in a
+`ScanoutWindow` to `create_scanout_resource()`. The virtio-gpu
 driver only attaches that backing to a 2D resource and later submits
 `TRANSFER_TO_HOST_2D`, `SET_SCANOUT`, and `RESOURCE_FLUSH` on page flip.
 
@@ -245,14 +246,17 @@ driver only attaches that backing to a 2D resource and later submits
 
 - DRM dumb-buffer lifetime management.
 
-The `scanout` field (`ScanoutBinding`) of `VirtIoGpuDev` caches only the confirmed resource ID and
-rectangle for scanout 0 and shares the same GPU-state lock as control-queue
-operations. Each presentation still submits `TRANSFER_TO_HOST_2D` first and
-`RESOURCE_FLUSH` last; `SET_SCANOUT` is sent only when the resource or rectangle
-changes. The driver publishes cached state only after that command succeeds and
-clears it only after resource unref succeeds. A device error therefore cannot
-turn an unconfirmed binding into an active binding or let a destroyed resource
-remain eligible for reuse.
+The `VirtIoGpuInner::scanout` field (`ScanoutBinding`) caches only the confirmed
+resource ID and rectangle for scanout 0. It is protected by `GpuState::inner`,
+the sleepable operation mutex reached through `VirtIoGpuDev.0`, together with
+the control queues. A guest-rendered presentation submits `TRANSFER_TO_HOST_2D`
+first; a host-rendered presentation skips that transfer. Both submit
+`RESOURCE_FLUSH` last, and `SET_SCANOUT` is sent only when the resource or
+rectangle changes. The driver publishes cached state only after `SET_SCANOUT`
+succeeds, clears it on any presentation error, and clears a matching binding
+after successful resource unref. A device error therefore cannot turn an
+unconfirmed binding into an active binding or let a destroyed resource remain
+eligible for reuse.
 
 ### 3. `receive_begin` In `VirtIoNetDev::try_new()` (`net.rs:263-278`)
 
@@ -363,12 +367,12 @@ is correct.
 - `VirtIoNetDev::recv()`, where the token and buffer come from the same array
   index.
 
-### 8. `unsafe impl Send/Sync` In Device Modules (`blk.rs`, `gpu.rs`, `input.rs`, `net.rs`, `socket.rs`, `virtio_9p.rs`)
+### 8. `unsafe impl Send/Sync` In Device Modules (`blk.rs`, `input.rs`, `net.rs`, `socket.rs`, `virtio_9p.rs`)
 
 ```rust
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
-// Similarly for VirtIoGpuDev, VirtIoInputState, VirtIoNetDev,
+// Similarly for VirtIoInputState, VirtIoNetDev,
 // VirtIoVsockDev, and VirtIo9pDev.
 ```
 
@@ -378,9 +382,11 @@ contracts.
 
 **Why it is safe:**
 
-- blk, gpu, socket, and virtio_9p: every access to the underlying device goes
-  through the adapter's internal `SpinNoIrq`, so shared `&self` access cannot
-  race.
+- blk, socket, and virtio_9p: every access to the underlying device goes
+  through the adapter's internal `SpinNoIrq`, so shared `&self` access cannot race.
+- gpu: The compiler derives `Send` and `Sync` from the transport and lock
+  types. Task operations hold the sleepable mutex, and the IRQ handler
+  accesses registers under `SpinNoIrq`.
 - input: `VirtIoInputState` manually implements `Send` and `Sync`; every access
   to the underlying input device is serialized by its `SpinNoIrq`. The
   notification callback is protected by a separate `SpinNoIrq`, is invoked
@@ -449,7 +455,7 @@ allocation, and `fill` only leaks a `Box` after `add` succeeded.
 | Type | `Send` condition | `Sync` condition |
 | --- | --- | --- |
 | `VirtIoBlkDev<H, T>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
-| `VirtIoGpuDev<H, T>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
+| `VirtIoGpuDev<H, T, W>` | Derived from the shared GPU state (`T: Transport + Send`, `W: GpuHost`) | Derived from the operation mutex and IRQ-safe register lock |
 | `VirtIoInputDev<H, T>` | `Arc<VirtIoInputState<H, T>>`; state manually implements `Send` | `Arc<VirtIoInputState<H, T>>`; state manually implements `Sync` |
 | `VirtIoNetDev<H, T, QS>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
 | `VirtIoVsockDev<H, T, RX_BUF_SIZE>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |

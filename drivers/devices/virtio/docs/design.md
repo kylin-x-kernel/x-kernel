@@ -48,7 +48,7 @@ Feature flags select the device adapters compiled into the crate:
 | Feature | Enabled device | Additional dependencies |
 | --- | --- | --- |
 | `block` | blk | `block` crate |
-| `gpu` | gpu | `alloc`, `display` crate |
+| `gpu` | gpu | `alloc`, `display`, `lock_api` |
 | `input` | input | `alloc`, `input` crate |
 | `net` | net | `alloc`, `net` crate |
 | `rng` | rng | `alloc`, `hwrng` crate |
@@ -198,14 +198,14 @@ Ready / ResourceAttached / ScanningOut ──device error──> Failed
 
 | From | To | Trigger |
 | --- | --- | --- |
-| Uninit | Ready | `try_new()` negotiates features, initializes virtqueues, and queries display resolution |
+| Uninit | Ready | `prepare()` initializes the queues and `start()` queries the display resolution after IRQ registration |
 | Ready | ResourceAttached | The DRM dumb-buffer backing is created and attached to a virtio-gpu 2D resource |
 | ResourceAttached | ScanningOut | A DRM modeset/page flip issues transfer-to-host, set-scanout, and flush |
 | ScanningOut | ScanningOut | Repeated presentation of the same resource and geometry reuses the existing scanout binding; another resource or geometry reprograms the binding |
 | ResourceAttached / ScanningOut | Ready | The dumb buffer is destroyed and the resource is detached/unreferenced |
 | Ready / ResourceAttached / ScanningOut | Failed | The device returns an unrecoverable error |
 
-> The GPU driver no longer creates a fixed framebuffer in `try_new()`. Pixel
+> The GPU driver no longer creates a fixed framebuffer during probe. Pixel
 > memory is allocated by DRM dumb buffers and mmaped to userspace; the
 > virtio-gpu resource attaches that backing directly. A page flip only submits
 > transfer-to-host, set-scanout, and resource-flush commands and performs no CPU
@@ -348,9 +348,10 @@ use only the common block adapter.
 
 **Initialization:**
 
-1. `try_new(transport)` negotiates features and allocates the control and cursor
-   virtqueues.
-2. `GET_DISPLAY_INFO` queries display resolution `(width, height)`.
+1. `prepare(transport, host)` negotiates features and allocates the control and
+   cursor virtqueues.
+2. The host registers the shared IRQ handler and enables PCI INTx when applicable.
+   `start()` sets `DRIVER_OK` and issues `GET_DISPLAY_INFO`.
 3. The driver stores `width` and `height` in `DisplayInfo { width, height }`.
    Only `refresh_info()` updates the cached value afterward.
 
@@ -379,18 +380,14 @@ pixel output uses the scanout-resource path shared by `fbdevice` emulation and
 
 When the host changes the console size, for example by resizing the QEMU
 window, it sets `VIRTIO_GPU_EVENT_DISPLAY` in the configuration-space
-`events_read` word. `pci.rs` keeps Display INTx enabled; the IRQ handler that
-`kdriver` installs acknowledges the interrupt through `ack_irq()` and, on a
-configuration change, queues task-context work that calls `refresh_info()`.
-The query path also refreshes the size:
+`events_read` word and raises a configuration interrupt.
 
-1. `DisplayDevice::refresh_info()` reads `events_read`, acknowledges consumed
-   bits by writing `events_clear`, and issues `GET_DISPLAY_INFO` again.
-2. If the size differs from the cached value, it updates `DisplayInfo` and
-   returns `Some(new)`; otherwise it returns `None`.
-3. `drmdevice` calls `refresh_info()` before `GETCONNECTOR`, so the new size
-   appears as a `<width>x<height>` connector mode, and `GETRESOURCES` reports
-   the capability envelope rather than the current size.
+1. The shared IRQ handler acknowledges the interrupt and schedules the
+   display refresh worker.
+2. `DisplayDevice::refresh_info()` reads `events_read`, issues
+   `GET_DISPLAY_INFO`, and acknowledges the event by writing `events_clear`.
+3. If the size differs from the cached value, the driver updates `DisplayInfo`
+   and the worker publishes a DRM hotplug event.
 
 `refresh_info()` issues control-virtqueue requests and therefore may run only in
 process context, never from interrupt handling.
@@ -593,7 +590,12 @@ maximum payload of 8148 bytes.
   state. Caller waits and terminal callbacks occur outside it. IRQ
   acknowledgement uses the same lock, and the host serializes per-device
   completion passes.
-- **gpu / socket / virtio_9p:** Each adapter serializes access to its underlying
+- **gpu:** A sleepable mutex serializes control and cursor commands. A queue
+  IRQ wakes the submitting task, which checks its used token before reclaiming
+  the buffers. An invalid completion retires both queues and resets the device
+  before the submitted buffers are detached. During unbind the mutex is
+  released before reset. The handler takes `SpinNoIrq` only for register access.
+- **socket / virtio_9p:** Each adapter serializes access to its underlying
   device with an internal `SpinNoIrq`; trait methods take `&self`.
 - **input:** `VirtIoInputState` wraps the lower device in `Arc<SpinNoIrq<_>>`.
   IRQ acknowledgement in hard-IRQ context is mutually exclusive with capability
@@ -694,7 +696,7 @@ partially constructed queue and transport are dropped. A failure inside `fill`
 also resets before the already published buffers are released; earlier
 publications are not rolled back inside the queue.
 
-Other device adapters (block, net, GPU, 9p, input, RNG) keep their existing
+Other device adapters (block, net, 9p, input, RNG) keep their existing
 release paths; this change does not convert them.
 
 ### Teardown Consumer Audit
@@ -703,7 +705,7 @@ release paths; this change does not convert them.
 | --- | --- | --- | --- | --- | --- |
 | VSOCK `VirtIOSocket` | Owner `Drop` runs `queue_unset` ×3 then `reset`; a fatal published TX failure resets before detaching; a failed `fill` resets before its locals drop. | `OwningQueue::Drop` detaches every outstanding token, unshares and frees; remaining rings, then transport (last field). | Field order, owner reset, checked TX token, `failed` poison, `fill` rollback. | Reset busy-polls with no timeout and may hold `SpinNoIrq`; it is device-side evidence only. VSOCK is polled and registers no IRQ callback. | Vendor UTs: `drop_stops_device_before_releasing_unconsumed_rx_buffers`, `completed_rx_buffer_is_reused_and_released_once`, `rx_fill_failure_resets_before_releasing_published_buffers`, `indirect_tx_unshares_every_mapping_once`, `wrong_token_stops_device_and_releases_every_outstanding_buffer`, `unpublished_tx_failure_does_not_stop_the_device`, `ring_allocation_failure_releases_partial_queue`, `next_queue_allocation_failure_releases_existing_queues_after_reset`; the kdriver MMIO integration tests assert HAL and provider baselines. |
 | sound `VirtIOSound` | Owner `Drop` runs `queue_unset` ×4 then `reset`; queue creation and config-read failures reset before return; an `OwningQueue::fill` failure resets. | `event_queue` `OwningQueue::Drop` detaches, unshares and frees; other rings, then transport (last field). | Field order, owner reset, `try_or_reset!` around creation and config reads, deferred `fill`. | No behavioral UT covers the sound teardown path; the reset limitations above apply. | Compile-time contract only this round; no sound failure-injection test. |
-| Unchecked `add_notify_wait_pop` callers: vendor `console`, `blk`, `rtc`, `rng`, `gpu`, `virtio_9p`, `net/dev_raw`, sound control queue, and the driver GPU wrapper | Each caller's existing owner/transport `Drop`; only some transports reset in `Drop` (`MmioTransport`, `PciTransport`), and `HypPciTransport` requires an explicit reset. | Success recycles descriptors; a post-publication error returns no token, so the chain stays published until the queue and transport are destroyed. | None: the old helper keeps its signature and semantics. | A wrong token or post-publication error can leave a mapping and buffer unreleased until teardown; these paths were not converted or individually audited. | Existing per-device tests unchanged; no new wrong-token coverage for these consumers. |
+| Unchecked `add_notify_wait_pop` callers: vendor `console`, `blk`, `rtc`, `rng`, `virtio_9p`, `net/dev_raw`, and sound control queue | Each caller's existing owner/transport `Drop`; only some transports reset in `Drop` (`MmioTransport`, `PciTransport`), and `HypPciTransport` requires an explicit reset. | Success recycles descriptors; a post-publication error returns no token, so the chain stays published until the queue and transport are destroyed. | None: the old helper keeps its signature and semantics. | A wrong token or post-publication error can leave a mapping and buffer unreleased until teardown; these paths were not converted or individually audited. | Existing per-device tests unchanged; no new wrong-token coverage for these consumers. |
 | Transport wrappers: `SomeTransport`, `OwnedMmioTransport`, driver `PciTransport`, `HypPciTransport`, mock/test transports | A wrapper must forward rather than reimplement reset. | Each wrapper reaches its inner transport, which performs the status write and readback poll. | Explicit forwarding added to `SomeTransport`, `OwnedMmioTransport` and driver `PciTransport`; explicit reset added to `HypPciTransport`. | A wrapper that failed to forward would lose an inner override; `HypPciTransport` still depends on its owner calling reset before release. | The vsock recording transport observes the wrapper call; the MMIO integration tests observe the reset write through the mock transport. |
 
 ### Reset Semantics And Evidence

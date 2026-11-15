@@ -66,8 +66,7 @@ pub struct DisplayInfo {
 /// Pending interrupt causes acknowledged by a display device.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct DisplayIrqStatus {
-    /// A virtqueue buffer was used. The driver polls the queues, so this only
-    /// needs acknowledging.
+    /// A virtqueue buffer was used. A driver may wake its command waiter.
     pub queue: bool,
     /// The device configuration changed, for example the host resized the
     /// visible output.

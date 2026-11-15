@@ -11,9 +11,6 @@ use driver_base::DriverResult;
 use driver_os_api::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, MmioOp, MmioRegion};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
-#[cfg(feature = "virtio-gpu")]
-use super::set_pci_intx_disabled;
-
 cfg_if! {
     if #[cfg(feature = "virtio-net")] {
         pub(super) struct VirtIoNet;
@@ -29,105 +26,6 @@ cfg_if! {
                     Some(crate::resource::resource_provider()),
                 )?))
             }
-        }
-    }
-}
-
-cfg_if! {
-    if #[cfg(feature = "virtio-gpu")] {
-        use driver_os_api::{IrqEvent, IrqHandler, IrqResource};
-
-        pub(super) struct VirtIoGpu;
-
-        impl VirtIoGpu {
-            pub(super) fn try_new<T: virtio::Transport + 'static>(
-                transport: T,
-            ) -> DriverResult<kclass::prelude::DisplayDeviceImpl> {
-                Ok(Box::new(virtio::VirtIoGpuDev::<VirtIoHalImpl, T>::try_new(
-                    transport,
-                )?))
-            }
-        }
-
-        /// Activates a display device discovered on PCI.
-        ///
-        /// INTx is masked by `probe_pci_device` once the transport reaches
-        /// `DRIVER_OK`, because the device may raise a level-triggered
-        /// interrupt before any action is registered. On a shared PCI line
-        /// that unrouted assertion becomes an interrupt storm that starves the
-        /// CPU before activation can run, so the line is unmasked only after
-        /// the config-change handler is installed.
-        pub(super) fn activate_display_pci<T: virtio::Transport + 'static>(
-            parent: Arc<kdevice::DeviceObject>,
-            transport: T,
-            irq: IrqResource,
-            config: &mut pci::PciConfigAccess,
-            bdf: pci::DeviceFunction,
-        ) -> DriverResult<()> {
-            let display = kclass::publish_display(
-                parent.clone(),
-                VirtIoGpu::try_new(transport)?,
-            )?;
-            install_irq(&parent, &display, irq)?;
-            // LIFO cleanup masks INTx again before the IRQ action is released.
-            let binding = parent
-                .binding_ref_for_lifecycle_write()
-                .ok_or(driver_base::DriverError::BadState)?;
-            let mut cleanup_config = *config;
-            binding.add_cleanup(&parent, move || {
-                set_pci_intx_disabled(&mut cleanup_config, bdf, true)
-            })?;
-            set_pci_intx_disabled(config, bdf, false);
-            Ok(())
-        }
-
-        pub(super) fn install_irq(
-            parent: &Arc<kdevice::DeviceObject>,
-            display: &kclass::ClassDevice<kclass::prelude::DisplayDeviceImpl>,
-            irq: IrqResource,
-        ) -> DriverResult<()> {
-            use crate::resource::DeviceResourceExt;
-            use kclass::prelude::DisplayDevice;
-
-            let device_id = display.id();
-            let work_display = display.clone();
-            let display = display.clone();
-            let work = kworkng::WorkHandle::new(move || {
-                if work_display.refresh_info().is_none() {
-                    return;
-                }
-                let Some(node) = kdevice::device_nodes_snapshot()
-                    .into_iter()
-                    .find(|node| node.core_id() == device_id)
-                else {
-                    return;
-                };
-                kdevice_uevent::publish_drm_hotplug(&node);
-            })
-            .map_err(|_| DriverError::NoMemory)?;
-            let virq = irq.virq().raw();
-            let handler: Arc<dyn IrqHandler> = Arc::new(move |fired: usize| {
-                if fired != virq {
-                    return IrqEvent::NOT_HANDLED;
-                }
-                let status = display.ack_irq();
-                if status.is_empty() {
-                    // Shared level-triggered lines may fire for another owner;
-                    // do not claim an interrupt this device did not report.
-                    return IrqEvent::NOT_HANDLED;
-                }
-                if status.config {
-                    // The work callback refreshes the display and publishes the
-                    // uevent in task context; hard IRQ only acknowledges and
-                    // coalesces the hint.
-                    let _ = work.queue_default(None);
-                }
-                IrqEvent::HANDLED
-            });
-            let binding = parent
-                .binding_ref_for_lifecycle_write()
-                .ok_or(driver_base::DriverError::BadState)?;
-            binding.devm_request_irq(parent, irq, handler)
         }
     }
 }

@@ -13,6 +13,9 @@ pub(crate) mod ids;
 #[cfg(feature = "virtio")]
 mod glue;
 
+#[cfg(feature = "virtio-gpu")]
+mod gpu;
+
 #[cfg(feature = "virtio-blk")]
 mod block;
 
@@ -259,17 +262,35 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
         return Err(DriverError::Unsupported);
     }
 
+    #[cfg(feature = "virtio-gpu")]
+    if device_kind == DeviceKind::Display {
+        return gpu::activate(device, transport, Some(irq), Some((config, bdf)));
+    }
     #[cfg(feature = "virtio-input")]
     if device_kind == DeviceKind::Input {
         return input::activate_pci(device, transport, irq, config, bdf);
     }
 
-    #[cfg(feature = "virtio-gpu")]
-    if device_kind == DeviceKind::Display {
-        return glue::activate_display_pci(device, transport, irq, config, bdf);
-    }
-
     dispatch_virtio_try_new(device, device_kind, transport, Some(irq))
+}
+
+/// Arm this function after its handler is live. LIFO cleanup masks just the
+/// function before its shared IRQ action is removed.
+#[cfg(any(feature = "virtio-gpu", feature = "virtio-input"))]
+fn arm_pci_intx(
+    parent: &DeviceObject,
+    config: &mut pci::PciConfigAccess,
+    bdf: pci::DeviceFunction,
+) -> DriverResult<()> {
+    let binding = parent
+        .binding_ref_for_lifecycle_write()
+        .ok_or(DriverError::BadState)?;
+    let mut cleanup_config = *config;
+    binding.add_cleanup(parent, move || {
+        set_pci_intx_disabled(&mut cleanup_config, bdf, true)
+    })?;
+    set_pci_intx_disabled(config, bdf, false);
+    Ok(())
 }
 
 /// Converts an explicit `NoInterrupt` probe result into an activation error.
@@ -606,18 +627,7 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
         #[cfg(feature = "virtio-blk")]
         DeviceKind::Block => block::activate(parent, transport, irq),
         #[cfg(feature = "virtio-gpu")]
-        DeviceKind::Display => {
-            // PCI displays take `glue::activate_display_pci`, which also
-            // sequences INTx unmasking after the handler is installed. MMIO
-            // transports have a dedicated interrupt line, so no masking is
-            // needed here.
-            use glue::VirtIoGpu;
-            let display = kclass::publish_display(parent.clone(), VirtIoGpu::try_new(transport)?)?;
-            if let Some(irq) = irq {
-                glue::install_irq(&parent, &display, irq)?;
-            }
-            Ok(())
-        }
+        DeviceKind::Display => gpu::activate(parent, transport, irq, None),
         #[cfg(feature = "virtio-input")]
         DeviceKind::Input => input::activate_mmio(parent, transport, irq),
         #[cfg(feature = "virtio-socket")]

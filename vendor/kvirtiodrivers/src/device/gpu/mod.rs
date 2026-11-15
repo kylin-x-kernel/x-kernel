@@ -1,6 +1,8 @@
 //! Driver for VirtIO GPU devices.
 
 mod edid;
+#[cfg(test)]
+mod tests;
 
 pub use self::edid::Edid;
 
@@ -34,6 +36,39 @@ const SUPPORTED_FEATURES: Features = Features::RING_EVENT_IDX
     .union(Features::CONTEXT_INIT)
     .union(Features::RESOURCE_BLOB);
 
+/// Register access and completion waiting for a synchronous GPU command.
+pub trait GpuChannel {
+    /// Device transport used for configuration and queue notifications.
+    type Transport: Transport;
+
+    /// Access registers without retaining the transport across a completion wait.
+    fn with_transport<R>(&mut self, access: impl FnOnce(&mut Self::Transport) -> R) -> R;
+
+    /// Reset the device and wait for acknowledgement before reclaiming DMA buffers.
+    fn shutdown(&mut self) {
+        self.with_transport(Transport::reset);
+    }
+
+    /// Wait until the used ring is ready. Interrupt implementations must register
+    /// their listener before the last predicate check to avoid a lost wakeup.
+    fn wait_until(&self, ready: impl FnMut() -> bool);
+}
+
+// Standalone users without a scheduler retain the original polling API.
+impl<T: Transport> GpuChannel for T {
+    type Transport = T;
+
+    fn with_transport<R>(&mut self, access: impl FnOnce(&mut T) -> R) -> R {
+        access(self)
+    }
+
+    fn wait_until(&self, mut ready: impl FnMut() -> bool) {
+        while !ready() {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 /// A virtio based graphics adapter.
 ///
 /// It can operate in 2D mode and in 3D (virgl) mode.
@@ -41,8 +76,10 @@ const SUPPORTED_FEATURES: Features = Features::RING_EVENT_IDX
 /// a gpu with 3D support on the host machine.
 /// In 2D mode the virtio-gpu device provides support for ARGB Hardware cursors
 /// and multiple scanouts (aka heads).
-pub struct VirtIOGpu<H: Hal, T: Transport> {
+pub struct VirtIOGpu<H: Hal, T: GpuChannel> {
     transport: T,
+    /// A malformed completion retired both queues. Only destruction is allowed.
+    is_failed: bool,
     rect: Option<Rect>,
     /// DMA area of frame buffer.
     frame_buffer_dma: Option<Dma<H>>,
@@ -68,7 +105,19 @@ pub struct VirtIOGpu<H: Hal, T: Transport> {
 
 impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     /// Create a new VirtIO-Gpu driver.
-    pub fn new(mut transport: T) -> Result<Self> {
+    pub fn new(transport: T) -> Result<Self> {
+        let mut gpu = Self::prepare(transport, |t| t)?;
+        gpu.enable();
+        Ok(gpu)
+    }
+}
+
+impl<H: Hal, T: GpuChannel> VirtIOGpu<H, T> {
+    /// Configure queues without setting DRIVER_OK or issuing a command.
+    pub fn prepare(
+        mut transport: T::Transport,
+        wrap: impl FnOnce(T::Transport) -> T,
+    ) -> Result<Self> {
         let negotiated_features = transport.begin_init(SUPPORTED_FEATURES);
 
         // read configuration space
@@ -95,9 +144,12 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
             negotiated_features.contains(Features::RING_INDIRECT_DESC),
             negotiated_features.contains(Features::RING_EVENT_IDX),
             access_platform,
-        )?;
-
-        transport.finish_init();
+        )
+        .inspect_err(|_| {
+            // The device already has the control ring address. Revoke it
+            // before propagating the error and dropping its DMA allocation.
+            transport.reset();
+        })?;
 
         let has_edid = negotiated_features.contains(Features::EDID);
         let has_virgl = negotiated_features.contains(Features::VIRGL);
@@ -110,7 +162,8 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
         );
 
         Ok(VirtIOGpu {
-            transport,
+            transport: wrap(transport),
+            is_failed: false,
             frame_buffer_dma: None,
             cursor_buffer_dma: None,
             rect: None,
@@ -124,6 +177,55 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
         })
     }
 
+    /// Channel used to deliver queue notifications.
+    pub fn channel(&self) -> &T {
+        &self.transport
+    }
+
+    /// Set DRIVER_OK after the interrupt handler has been registered.
+    pub fn enable(&mut self) {
+        if !self.is_failed {
+            self.transport.with_transport(|t| t.finish_init());
+        }
+    }
+
+    fn exchange<'a>(
+        &mut self,
+        index: u16,
+        inputs: &'a [&'a [u8]],
+        outputs: &'a mut [&'a mut [u8]],
+    ) -> Result<u32> {
+        if self.is_failed {
+            return Err(Error::IoError);
+        }
+        let queue = if index == QUEUE_CURSOR {
+            &mut self.cursor_queue
+        } else {
+            &mut self.control_queue
+        };
+        // SAFETY: only one command owns this queue; the caller's buffers stay
+        // borrowed until pop_used succeeds or reset and detach reclaim them.
+        let token = unsafe { queue.add(inputs, outputs) }?;
+        if queue.should_notify() {
+            self.transport.with_transport(|t| t.notify(index));
+        }
+        if !queue.can_pop() {
+            self.transport.wait_until(|| queue.can_pop());
+        }
+        // SAFETY: these are the buffers published with this token. pop_used
+        // checks the device's returned ID before reclaiming any descriptor.
+        let result = unsafe { queue.pop_used(token, inputs, outputs) };
+        if result.is_err() {
+            self.is_failed = true;
+            self.transport.shutdown();
+            // SAFETY: reset stopped DMA on both queues. This is the sole live
+            // command, and its token and original buffers are still ours.
+            let detached = unsafe { queue.detach_unused_buffer(token, inputs, outputs) };
+            assert!(detached, "GPU lost its published descriptor");
+        }
+        result
+    }
+
     /// Whether the host raised the display-changed event since it was last
     /// acknowledged.
     ///
@@ -131,7 +233,11 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     /// `events_read` register. Reading it does not acknowledge anything: the
     /// device clears the bit when the driver writes `events_clear`.
     pub fn display_changed(&mut self) -> bool {
-        read_config!(self.transport, Config, events_read)
+        if self.is_failed {
+            return false;
+        }
+        self.transport
+            .with_transport(|t| read_config!(*t, Config, events_read))
             .map(|events| events & EVENT_DISPLAY != 0)
             .unwrap_or(false)
     }
@@ -141,12 +247,20 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     /// After this the device stops reporting the event until the display
     /// configuration changes again.
     pub fn ack_display_event(&mut self) -> bool {
-        write_config!(self.transport, Config, events_clear, EVENT_DISPLAY).is_ok()
+        if self.is_failed {
+            return false;
+        }
+        self.transport
+            .with_transport(|t| write_config!(*t, Config, events_clear, EVENT_DISPLAY))
+            .is_ok()
     }
 
     /// Acknowledge interrupt.
     pub fn ack_interrupt(&mut self) -> InterruptStatus {
-        self.transport.ack_interrupt()
+        if self.is_failed {
+            return InterruptStatus::empty();
+        }
+        self.transport.with_transport(|t| t.ack_interrupt())
     }
 
     /// Get the resolution (width, height).
@@ -314,10 +428,10 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
         req: Req,
     ) -> Result<Rsp> {
         let mut response = Rsp::new_zeroed();
-        self.control_queue.add_notify_wait_pop(
+        self.exchange(
+            QUEUE_TRANSMIT,
             &[req.as_bytes()],
             &mut [response.as_mut_bytes()],
-            &mut self.transport,
         )?;
         Ok(response)
     }
@@ -332,10 +446,10 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
         extra_response: &mut [u8],
     ) -> Result<(Rsp, usize)> {
         let mut response = Rsp::new_zeroed();
-        let used_len = self.control_queue.add_notify_wait_pop(
+        let used_len = self.exchange(
+            QUEUE_TRANSMIT,
             &[req.as_bytes()],
             &mut [response.as_mut_bytes(), extra_response],
-            &mut self.transport,
         )? as usize;
         Ok((
             response,
@@ -348,8 +462,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
 
     /// Send a mouse cursor operation request to the device and block for a response.
     fn cursor_request<Req: IntoBytes + Immutable>(&mut self, req: Req) -> Result {
-        self.cursor_queue
-            .add_notify_wait_pop(&[req.as_bytes()], &mut [], &mut self.transport)?;
+        self.exchange(QUEUE_CURSOR, &[req.as_bytes()], &mut [])?;
         Ok(())
     }
 
@@ -363,16 +476,16 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     ) -> Result<Rsp> {
         let mut response = Rsp::new_zeroed();
         if data.is_empty() {
-            self.control_queue.add_notify_wait_pop(
+            self.exchange(
+                QUEUE_TRANSMIT,
                 &[req.as_bytes()],
                 &mut [response.as_mut_bytes()],
-                &mut self.transport,
             )?;
         } else {
-            self.control_queue.add_notify_wait_pop(
+            self.exchange(
+                QUEUE_TRANSMIT,
                 &[req.as_bytes(), data],
                 &mut [response.as_mut_bytes()],
-                &mut self.transport,
             )?;
         }
         Ok(response)
@@ -829,12 +942,13 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> Drop for VirtIOGpu<H, T> {
+impl<H: Hal, T: GpuChannel> Drop for VirtIOGpu<H, T> {
     fn drop(&mut self) {
         // Clear any pointers pointing to DMA regions, so the device doesn't try to access them
         // after they have been freed.
-        self.transport.queue_unset(QUEUE_TRANSMIT);
-        self.transport.queue_unset(QUEUE_CURSOR);
+        if !self.is_failed {
+            self.transport.shutdown();
+        }
     }
 }
 

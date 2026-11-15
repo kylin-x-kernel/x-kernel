@@ -6214,6 +6214,7 @@ dependencies = [
  "intrusive-collections",
  "kspin",
  "kvirtiodrivers",
+ "lock_api",
  "log",
  "net",
  "pci",

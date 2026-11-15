@@ -40,7 +40,7 @@ pub use self::blk::{PART_BITS as VIRTIO_BLK_PART_BITS, VIRTIO_BLK_MAJOR, VirtIoB
 #[cfg(feature = "gpu")]
 mod gpu;
 #[cfg(feature = "gpu")]
-pub use self::gpu::VirtIoGpuDev;
+pub use self::gpu::{GpuHost, VirtIoGpuDev};
 
 #[cfg(feature = "input")]
 mod input;

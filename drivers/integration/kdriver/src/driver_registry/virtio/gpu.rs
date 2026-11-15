@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Wire the GPU command waiter and the independent display-change worker.
+
+use alloc::{boxed::Box, sync::Arc};
+
+use driver_base::{DriverError, DriverResult};
+use driver_os_api::{IrqEvent, IrqResource};
+use kclass::prelude::DisplayDevice;
+use kdevice::DeviceObject;
+use virtio::{GpuHost, Transport, VirtIoGpuDev};
+
+use super::glue::VirtIoHalImpl;
+use crate::resource::DeviceResourceExt;
+
+struct Host(ktask::WaitQueue);
+
+impl GpuHost for Host {
+    type Mutex = ksync::RawMutex;
+
+    fn can_sleep(&self) -> bool {
+        ktask::is_sleepable_context()
+    }
+
+    fn wait_until(&self, ready: impl FnMut() -> bool) {
+        self.0.wait_until(ready);
+    }
+
+    fn notify(&self) {
+        self.0.notify_one(false);
+    }
+}
+
+pub(super) fn activate<T: Transport + Send + 'static>(
+    parent: Arc<DeviceObject>,
+    transport: T,
+    irq: Option<IrqResource>,
+    pci: Option<(&mut pci::PciConfigAccess, pci::DeviceFunction)>,
+) -> DriverResult<()> {
+    let binding = parent
+        .binding_ref_for_lifecycle_write()
+        .ok_or(DriverError::BadState)?;
+    let irq = irq.ok_or(DriverError::InvalidInput)?;
+    let gpu =
+        VirtIoGpuDev::<VirtIoHalImpl, _, _>::prepare(transport, Host(ktask::WaitQueue::new()))?;
+    let id = parent.id();
+    let work_gpu = gpu.clone();
+    let work = kworkng::WorkHandle::new(move || {
+        if kclass::find_display_device(id).is_some()
+            && work_gpu.refresh_info().is_some()
+            && let Some(node) = kdevice::device_nodes_snapshot()
+                .into_iter()
+                .find(|n| n.core_id() == id)
+        {
+            kdevice_uevent::publish_drm_hotplug(&node);
+        }
+    })
+    .map_err(|_| DriverError::NoMemory)?;
+    let refresh = work.clone();
+    let handler = gpu.clone();
+    let virq = irq.virq().raw();
+    binding.devm_request_irq(
+        &parent,
+        irq,
+        Arc::new(move |line| {
+            if line != virq {
+                return IrqEvent::NOT_HANDLED;
+            }
+            let status = handler.ack_irq();
+            if status.is_empty() {
+                return IrqEvent::NOT_HANDLED;
+            }
+            if status.config {
+                let _ = refresh.queue_default(None);
+            }
+            IrqEvent::HANDLED
+        }),
+    )?;
+    if let Some((config, bdf)) = pci {
+        super::arm_pci_intx(&parent, config, bdf)?;
+    }
+    let closing = gpu.clone();
+    binding.add_cleanup(&parent, move || closing.close())?;
+    gpu.start()?;
+    log::info!("virtio-gpu: display discovery complete on IRQ {virq}");
+    kclass::publish_display(parent, Box::new(gpu))?;
+    // A config interrupt may have arrived before the class was visible.
+    let _ = work.queue_default(None);
+    Ok(())
+}

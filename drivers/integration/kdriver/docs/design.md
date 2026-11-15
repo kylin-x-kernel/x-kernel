@@ -672,16 +672,17 @@ transports:
    the dispatch result. Removing a published device drops its class runtime
    first, so a VSOCK or sound device owner unsets its queues, resets the
    device, and releases RX mappings and queue rings before the transport (and
-   therefore the claim) is dropped; other device kinds still rely on their
-   transport `Drop` alone. The teardown order and its evidence are described
+   therefore the claim) is dropped. GPU devres cleanup drains the active
+   command, detaches the queues from callers and resets the device before
+   withdrawing its IRQ handler. The teardown order and its evidence are described
    in `drivers/devices/virtio/docs/design.md`.
 3. **Dispatch**: `dispatch_virtio_try_new` dispatches on `DeviceKind`:
    - `DeviceKind::Net` → `VirtIoNet::try_new` → `kclass::publish_net`
    - `DeviceKind::Block` → `block::activate` → IRQ setup → `kclass::publish_block`
-   - `DeviceKind::Display` → PCI takes `glue::activate_display_pci`
-     (`VirtIoGpu::try_new` → `kclass::publish_display` → `glue::install_irq`
-     → PCI INTx enable); MMIO takes the shared dispatcher and installs its
-     IRQ directly, because a dedicated line needs no masking.
+   - `DeviceKind::Display` → `gpu::activate` → devres IRQ registration → PCI INTx enable when applicable → `gpu.start()` → `kclass::publish_display`.
+     Activation captures the current `BindingRef` before acquiring resources;
+     IRQ registration, INTx masking and GPU close callbacks all belong to that
+     binding, including probe-failure rollback.
    - `DeviceKind::Input` → local `virtio/input.rs` activation → devres IRQ registration → PCI INTx enable when applicable → `kclass::publish_input`
    - `DeviceKind::Vsock` → `VirtIoSocket::try_new` → `kclass::publish_vsock`
    - `DeviceKind::Fs9p` → `VirtIo9p::try_new` → `kclass::publish_virtio_9p`

@@ -322,8 +322,8 @@ pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
     // interrupt owner later must mask INTx here, or a level-triggered line
     // fires with no action to claim it: on a shared line the storm starves the
     // CPU before the owner is ever registered. Display is included for the
-    // same reason: it publishes the class device and only then registers its
-    // config-change handler.
+    // same reason: activation installs its queue/config handler before unmasking
+    // this function and enabling the device.
     if matches!(
         dev_kind,
         DeviceKind::Vsock | DeviceKind::Input | DeviceKind::Display

@@ -210,7 +210,8 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
     /// # Safety
     ///
     /// The input and output buffers must remain valid and not be accessed until a call to
-    /// `pop_used` with the returned token succeeds.
+    /// `pop_used` with the returned token succeeds, or the device is reset and
+    /// `detach_unused_buffer` reclaims that token.
     pub unsafe fn add<'a, 'b>(
         &mut self,
         inputs: &'a [&'b [u8]],
@@ -587,8 +588,8 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
     unsafe fn recycle_descriptors<'a>(
         &mut self,
         head: u16,
-        inputs: &'a [&'a [u8]],
-        outputs: &'a mut [&'a mut [u8]],
+        inputs: &[&'a [u8]],
+        outputs: &mut [&'a mut [u8]],
     ) {
         let original_free_head = self.free_head;
         self.free_head = head;
@@ -725,8 +726,8 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
     pub unsafe fn pop_used<'a>(
         &mut self,
         token: u16,
-        inputs: &'a [&'a [u8]],
-        outputs: &'a mut [&'a mut [u8]],
+        inputs: &[&'a [u8]],
+        outputs: &mut [&'a mut [u8]],
     ) -> Result<u32> {
         if !self.can_pop() {
             return Err(Error::NotReady);
@@ -739,18 +740,18 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
         // SAFETY: `self.used` points to a valid, aligned, initialised, dereferenceable, readable
         // instance of `UsedRing`.
         unsafe {
-            index = (*self.used.as_ptr()).ring[last_used_slot as usize].id as u16;
+            index = (*self.used.as_ptr()).ring[last_used_slot as usize].id;
             len = (*self.used.as_ptr()).ring[last_used_slot as usize].len;
         }
 
-        if index != token {
+        if index != u32::from(token) {
             // The device used a different descriptor chain to the one we were expecting.
             return Err(Error::WrongToken);
         }
 
         // SAFETY: The caller ensures the buffers are valid and match the descriptor.
         unsafe {
-            self.recycle_descriptors(index, inputs, outputs);
+            self.recycle_descriptors(token, inputs, outputs);
         }
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
@@ -1090,7 +1091,7 @@ fn take_first_mut<'a, T>(slice: &mut &'a mut [T]) -> Option<&'a mut T> {
 #[cfg(test)]
 pub(crate) fn fake_corrupt_last_used_id<const QUEUE_SIZE: usize>(
     queue_device_area: *mut u8,
-    id: u16,
+    id: impl Into<u32>,
 ) {
     let used_ring = queue_device_area as *mut UsedRing<QUEUE_SIZE>;
     // SAFETY: The caller passes the device area of a configured fake queue and
@@ -1099,7 +1100,7 @@ pub(crate) fn fake_corrupt_last_used_id<const QUEUE_SIZE: usize>(
         let used_idx = (*used_ring).idx.load(Ordering::Acquire);
         assert_ne!(used_idx, 0);
         let slot = used_idx.wrapping_sub(1) & (QUEUE_SIZE as u16 - 1);
-        (*used_ring).ring[slot as usize].id = u32::from(id);
+        (*used_ring).ring[slot as usize].id = id.into();
     }
 }
 

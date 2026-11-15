@@ -4,6 +4,7 @@
 
 //! VirtIO GPU driver adapter.
 
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use display::{
@@ -14,7 +15,7 @@ use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
-    device::gpu::{GpuBox, Rect, VirtIOGpu},
+    device::gpu::{GpuBox, GpuChannel, Rect, VirtIOGpu},
     transport::{InterruptStatus, Transport},
 };
 
@@ -89,58 +90,134 @@ const fn unpack_display_info(packed: u64) -> DisplayInfo {
     }
 }
 
-/// The VirtIO GPU device driver.
-pub struct VirtIoGpuDev<H: Hal, T: Transport> {
-    /// Host-reported visible size, packed as `width << 32 | height`.
-    ///
-    /// Only the query path (`info`/`refresh_info`) touches it and no interrupt
-    /// or softirq context does, so an atomic copy needs no lock. A plain
-    /// relaxed load/store is enough: the value publishes no other state, and a
-    /// reader that observes a stale size is corrected by the next refresh.
+/// Task-context serialization and IRQ-safe notification supplied by the host.
+pub trait GpuHost: Send + Sync {
+    /// A sleepable lock for complete, potentially multi-command GPU operations.
+    type Mutex: lock_api::RawMutex + Send + Sync;
+    /// Whether the caller can take the operation mutex and park for an IRQ.
+    fn can_sleep(&self) -> bool;
+    /// Park the task until the predicate is true, including a wake before parking.
+    fn wait_until(&self, ready: impl FnMut() -> bool);
+    /// Wake waiters after the device reports a used buffer. Called from IRQ.
+    fn notify(&self);
+}
+
+struct Registers<T, W> {
+    transport: SpinNoIrq<Option<T>>,
+    host: W,
+}
+
+struct IrqChannel<T, W>(Arc<Registers<T, W>>);
+
+impl<T: Transport, W: GpuHost> GpuChannel for IrqChannel<T, W> {
+    type Transport = T;
+
+    fn with_transport<R>(&mut self, access: impl FnOnce(&mut T) -> R) -> R {
+        let mut transport = self.0.transport.lock();
+        #[expect(
+            clippy::expect_used,
+            reason = "the queue owner only accesses registers while the channel is live"
+        )]
+        access(transport.as_mut().expect("live GPU channel"))
+    }
+
+    fn shutdown(&mut self) {
+        // No new commands can enter. Detach the IRQ view first; the device
+        // reset may wait for acknowledgement and must run with IRQs enabled.
+        let transport = self.0.transport.lock().take();
+        if let Some(mut transport) = transport {
+            transport.reset();
+        }
+    }
+
+    fn wait_until(&self, ready: impl FnMut() -> bool) {
+        self.0.host.wait_until(ready);
+    }
+}
+
+/// VirtIO GPU command queues owned by the submitting task. The hard IRQ
+/// acknowledges the transport and wakes that task without acquiring its mutex.
+pub struct VirtIoGpuDev<H: Hal, T: Transport, W: GpuHost>(Arc<GpuState<H, T, W>>);
+
+struct GpuState<H: Hal, T: Transport, W: GpuHost> {
+    // Width and height form one snapshot. It publishes no other state, so
+    // readers and writers only need relaxed atomic access.
     info: AtomicU64,
-    inner: SpinNoIrq<VirtIoGpuInner<H, T>>,
+    registers: Arc<Registers<T, W>>,
+    inner: lock_api::Mutex<W::Mutex, Option<VirtIoGpuInner<H, T, W>>>,
+}
+
+impl<H: Hal, T: Transport, W: GpuHost> Clone for VirtIoGpuDev<H, T, W> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
 }
 
 /// The vendor device plus the adapter state that is not part of the device.
-struct VirtIoGpuInner<H: Hal, T: Transport> {
-    gpu: VirtIOGpu<H, T>,
+struct VirtIoGpuInner<H: Hal, T: Transport, W: GpuHost> {
+    gpu: VirtIOGpu<H, IrqChannel<T, W>>,
     /// The resource the host was last asked to scan out.
     scanout: ScanoutBinding,
     /// Whether the 3D feature was negotiated.
     has_virgl: bool,
 }
 
-// SAFETY: VirtIoGpuDev serializes access to the inner device through its own
-// `SpinNoIrq` lock, so the device is only ever touched by one context at a
-// time. `VirtIOGpu` is not `Send`/`Sync` because it owns raw queue memory.
-unsafe impl<H: Hal, T: Transport> Send for VirtIoGpuDev<H, T> {}
-// SAFETY: shared references are synchronized by the same `SpinNoIrq` lock, so
-// immutable aliasing across threads cannot reach the device concurrently.
-unsafe impl<H: Hal, T: Transport> Sync for VirtIoGpuDev<H, T> {}
+type Operation<'a, H, T, W> =
+    lock_api::MappedMutexGuard<'a, <W as GpuHost>::Mutex, VirtIoGpuInner<H, T, W>>;
 
-impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
-    /// Creates a new driver instance and reads the display resolution.
-    pub fn try_new(transport: T) -> DriverResult<Self> {
-        let gpu = VirtIOGpu::new(transport).map_err(crate::as_driver_error)?;
-        let has_virgl = gpu.has_virgl();
-        let mut inner = VirtIoGpuInner {
-            gpu,
-            scanout: ScanoutBinding::default(),
-            has_virgl,
-        };
-        let (width, height) = inner.gpu.resolution().map_err(crate::as_driver_error)?;
-        if inner.has_virgl {
-            log::info!("virtio-gpu: 3D (virgl) feature negotiated");
-        }
-
-        Ok(Self {
-            info: AtomicU64::new(pack_display_info(DisplayInfo { width, height })),
-            inner: SpinNoIrq::new(inner),
+impl<H: Hal, T: Transport + Send, W: GpuHost> VirtIoGpuDev<H, T, W> {
+    /// Prepare both queues without issuing a command or enabling the device.
+    pub fn prepare(transport: T, host: W) -> DriverResult<Self> {
+        let gpu = VirtIOGpu::prepare(transport, |t| {
+            IrqChannel(Arc::new(Registers {
+                transport: SpinNoIrq::new(Some(t)),
+                host,
+            }))
         })
+        .map_err(crate::as_driver_error)?;
+        let registers = gpu.channel().0.clone();
+        let has_virgl = gpu.has_virgl();
+        Ok(Self(Arc::new(GpuState {
+            info: AtomicU64::new(0),
+            registers,
+            inner: lock_api::Mutex::new(Some(VirtIoGpuInner {
+                gpu,
+                scanout: ScanoutBinding::default(),
+                has_virgl,
+            })),
+        })))
+    }
+
+    fn operation(&self) -> DriverResult<Operation<'_, H, T, W>> {
+        if !self.0.registers.host.can_sleep() {
+            return Err(DriverError::WouldBlock);
+        }
+        lock_api::MutexGuard::try_map(self.0.inner.lock(), Option::as_mut)
+            .map_err(|_| DriverError::BadState)
+    }
+
+    /// Set DRIVER_OK and discover the display with IRQ delivery already active.
+    pub fn start(&self) -> DriverResult<()> {
+        let mut inner = self.operation()?;
+        inner.gpu.enable();
+        let (width, height) = inner.gpu.resolution().map_err(crate::as_driver_error)?;
+        self.0.info.store(
+            pack_display_info(DisplayInfo { width, height }),
+            Ordering::Relaxed,
+        );
+        Ok(())
+    }
+
+    /// Drain the active operation while its IRQ is still registered, then
+    /// release the queues and reject new requests through surviving handles.
+    pub fn close(&self) {
+        let inner = self.0.inner.lock().take();
+        // Surviving handles can now observe closure while reset acknowledges.
+        drop(inner);
     }
 }
 
-impl<H: Hal, T: Transport> Device for VirtIoGpuDev<H, T> {
+impl<H: Hal, T: Transport + Send, W: GpuHost> Device for VirtIoGpuDev<H, T, W> {
     fn name(&self) -> &str {
         "virtio-gpu"
     }
@@ -150,9 +227,9 @@ impl<H: Hal, T: Transport> Device for VirtIoGpuDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
+impl<H: Hal, T: Transport + Send, W: GpuHost> DisplayDevice for VirtIoGpuDev<H, T, W> {
     fn info(&self) -> DisplayInfo {
-        unpack_display_info(self.info.load(Ordering::Relaxed))
+        unpack_display_info(self.0.info.load(Ordering::Relaxed))
     }
 
     fn driver_info(&self) -> DriverInfo {
@@ -164,7 +241,7 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
     }
 
     fn refresh_info(&self) -> Option<DisplayInfo> {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation().ok()?;
         // The host reports a display change by setting the event bit in the
         // config space. Reading it does not acknowledge it: the device keeps
         // the bit set until the driver writes `events_clear`, so every query
@@ -186,7 +263,7 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
         // The device lock above serializes refreshes, so the compare and the
         // store cannot race another refresh; the relaxed access only has to
         // carry the value, not order it against other state.
-        let previous = unpack_display_info(self.info.load(Ordering::Relaxed));
+        let previous = unpack_display_info(self.0.info.load(Ordering::Relaxed));
         let refreshed = DisplayInfo { width, height };
         if previous == refreshed {
             return None;
@@ -198,14 +275,23 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
             refreshed.width,
             refreshed.height
         );
-        self.info
+        self.0
+            .info
             .store(pack_display_info(refreshed), Ordering::Relaxed);
         Some(refreshed)
     }
 
     fn ack_irq(&self) -> DisplayIrqStatus {
-        let mut inner = self.inner.lock();
-        let status = inner.gpu.ack_interrupt();
+        let status = self
+            .0
+            .registers
+            .transport
+            .lock()
+            .as_mut()
+            .map_or(InterruptStatus::empty(), Transport::ack_interrupt);
+        if status.contains(InterruptStatus::QUEUE_INTERRUPT) {
+            self.0.registers.host.notify();
+        }
         DisplayIrqStatus {
             queue: status.contains(InterruptStatus::QUEUE_INTERRUPT),
             config: status.contains(InterruptStatus::DEVICE_CONFIGURATION_INTERRUPT),
@@ -231,7 +317,7 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
         if resource.format != display::ScanoutFormat::Bgra8888 {
             return Err(DriverError::InvalidInput);
         }
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         inner
             .gpu
             .resource_create_2d(resource.id, resource.width, resource.height)
@@ -246,7 +332,7 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
     }
 
     fn destroy_scanout_resource(&self, resource_id: u32) -> DriverResult {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         inner
             .gpu
             .resource_detach_backing(resource_id)
@@ -280,7 +366,7 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
             width: rect.width,
             height: rect.height,
         };
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         let result = (|| {
             if !host_rendered {
                 inner
@@ -322,7 +408,7 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
             width: rect.width,
             height: rect.height,
         };
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         if !host_rendered {
             inner
                 .gpu
@@ -340,15 +426,17 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
     }
 
     fn has_resource_blob(&self) -> bool {
-        self.inner.lock().gpu.has_resource_blob()
+        self.operation()
+            .is_ok_and(|inner| inner.gpu.has_resource_blob())
     }
 
     fn has_context_init(&self) -> bool {
-        self.inner.lock().gpu.has_context_init()
+        self.operation()
+            .is_ok_and(|inner| inner.gpu.has_context_init())
     }
 
     fn edid(&self) -> Option<::alloc::vec::Vec<u8>> {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation().ok()?;
         match inner.gpu.get_edid(SCANOUT_ID) {
             Ok(edid) => Some(edid.bytes().to_vec()),
             // A host that did not negotiate EDID, or has no descriptor for
@@ -363,20 +451,20 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
+impl<H: Hal, T: Transport + Send, W: GpuHost> VirtIoGpuDev<H, T, W> {
     /// Whether the VIRGL feature was negotiated.
     fn has_virgl(&self) -> bool {
-        self.inner.lock().has_virgl
+        self.operation().is_ok_and(|inner| inner.has_virgl)
     }
 }
 
-impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
+impl<H: Hal, T: Transport + Send, W: GpuHost> GpuCommand for VirtIoGpuDev<H, T, W> {
     fn is_available(&self) -> bool {
         self.has_virgl()
     }
 
     fn capset_info(&self, index: u32) -> DriverResult<Option<CapsetInfo>> {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         match inner.gpu.get_capset_info(index) {
             Ok(info) => Ok(Some(CapsetInfo {
                 id: info.capset_id,
@@ -390,7 +478,7 @@ impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
     }
 
     fn capset(&self, id: u32, version: u32, size: u32) -> DriverResult<alloc::vec::Vec<u8>> {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         inner
             .gpu
             .get_capset(id, version, size)
@@ -398,7 +486,7 @@ impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
     }
 
     fn create_context(&self, ctx_id: u32, name: &str, context_init: u32) -> DriverResult {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         inner
             .gpu
             .ctx_create(ctx_id, name, context_init)
@@ -406,7 +494,7 @@ impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
     }
 
     fn destroy_context(&self, ctx_id: u32) -> DriverResult {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         inner
             .gpu
             .ctx_destroy(ctx_id)
@@ -414,7 +502,7 @@ impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
     }
 
     fn create_resource_3d(&self, request: ResourceCreate3D) -> DriverResult {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         inner
             .gpu
             .resource_create_3d(
@@ -435,7 +523,7 @@ impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
     }
 
     fn transfer_to_host_3d(&self, request: Transfer3D) -> DriverResult {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         inner
             .gpu
             .transfer_to_host_3d(
@@ -451,7 +539,7 @@ impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
     }
 
     fn transfer_from_host_3d(&self, request: Transfer3D) -> DriverResult {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         inner
             .gpu
             .transfer_from_host_3d(
@@ -467,7 +555,7 @@ impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
     }
 
     fn submit(&self, ctx_id: u32, fence: GpuFenceId, cmds: &[u8]) -> DriverResult {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         let result = inner
             .gpu
             .submit_3d(ctx_id, fence, cmds)
@@ -479,7 +567,7 @@ impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
     }
 
     fn attach_resource(&self, ctx_id: u32, resource_id: u32) -> DriverResult {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         inner
             .gpu
             .ctx_attach_resource(ctx_id, resource_id)
@@ -492,7 +580,7 @@ impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
         paddr: u64,
         length_bytes: u32,
     ) -> DriverResult {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         inner
             .gpu
             .resource_attach_backing(resource_id, paddr, length_bytes)
@@ -510,7 +598,7 @@ impl<H: Hal, T: Transport> GpuCommand for VirtIoGpuDev<H, T> {
         paddr: u64,
         length_bytes: u32,
     ) -> DriverResult {
-        let mut inner = self.inner.lock();
+        let mut inner = self.operation()?;
         // SAFETY: the caller owns the window and hands it to a GEM object that
         // keeps the pages allocated and unshared; the object's destructor
         // unrefs the resource before the pages are freed, which is exactly the
