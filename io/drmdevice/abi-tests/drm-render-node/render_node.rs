@@ -317,12 +317,15 @@ mod tests {
         );
 
         // PRIME is render-allowed, so the node accepts the command and the
-        // request fails on the unknown handle instead of on the node.
+        // request fails on the unknown handle instead of on the node. Linux
+        // reports that failed `drm_gem_object_lookup` as ENOENT
+        // (`drm_gem_prime_handle_to_fd`), which is what distinguishes "node
+        // rejects the command" (EACCES) from "the handle does not exist".
         let mut prime = PrimeHandle {
             handle: 0xdead_beef,
             ..Default::default()
         };
-        assert_eq!(errno_of(fd, PRIME_HANDLE_TO_FD, &mut prime), EINVAL);
+        assert_eq!(errno_of(fd, PRIME_HANDLE_TO_FD, &mut prime), ENOENT);
 
         // SET_MASTER is not part of the render allowlist. `ioctl_no_arg` is the
         // only raw-ioctl wrapper, so the security note's single-unsafe-site

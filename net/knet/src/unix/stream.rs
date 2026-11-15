@@ -22,8 +22,8 @@ use self::{
     listener::{ConnRequest, ListenerQueue},
 };
 use crate::{
-    AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SendOptions,
-    Shutdown,
+    AncillaryData, ConnectOptions, KernelAncillaryData, QueueLengths, RecvFlags, RecvOptions,
+    SendOptions, Shutdown,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
@@ -127,6 +127,22 @@ impl Configurable for StreamTransport {
         }
         if let O::Error(error) = opt {
             **error = self.endpoint.socket_error.swap(0, Ordering::AcqRel);
+            return Ok(OptionHandled::Yes);
+        }
+        if let O::AcceptConn(listening) = opt {
+            // Linux reports SO_ACCEPTCONN from `sk_state == TCP_LISTEN`
+            // (`sk_getsockopt`, net/core/sock.c), and only `unix_listen` moves
+            // a unix stream socket into TCP_LISTEN. `bind()` already installs
+            // the `ListenerQueue` here, so a bound-but-unlistened socket must
+            // still report false: every sd-bus AF_UNIX client binds an abstract
+            // description address before connecting (`bind_description`,
+            // bus-socket.c) and `bus_socket_start_auth` gates fd-passing
+            // negotiation on `sd_is_socket(..., listening=0)`.
+            **listening = self
+                .listener
+                .lock()
+                .as_ref()
+                .is_some_and(|listener| listener.is_listening());
             return Ok(OptionHandled::Yes);
         }
         if self.options.get_option_inner(opt)?.is_yes() {
@@ -577,6 +593,35 @@ impl UnixTransportOps for StreamTransport {
             }
         }
         Ok(())
+    }
+
+    fn is_listening(&self) -> bool {
+        self.listener
+            .lock()
+            .as_ref()
+            .is_some_and(|listener| listener.is_listening())
+    }
+
+    fn queue_lengths(&self) -> Option<QueueLengths> {
+        // Linux `unix_inq_len` counts the bytes queued on the receive side and
+        // `unix_outq_len` the sender's `sk_wmem_alloc`, which for this channel
+        // is the tx bytes the peer has not consumed yet. Each count is read
+        // under its producer's ordering lock, sequentially so the two guards
+        // never nest; an unconnected socket reports zeros like Linux does for
+        // an empty `sk_receive_queue`.
+        let channel = self.channel.lock();
+        let Some(chan) = channel.as_ref() else {
+            return Some(QueueLengths::default());
+        };
+        let inq = {
+            let _tx_order = chan.peer_endpoint.tx_order.lock();
+            chan.rx.occupied_len()
+        };
+        let outq = {
+            let _tx_order = self.endpoint.tx_order.lock();
+            chan.tx.occupied_len()
+        };
+        Some(QueueLengths::from_bytes(outq, inq))
     }
 }
 

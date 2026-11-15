@@ -882,4 +882,26 @@ pub fn sys_mlock2(_addr: usize, _length: usize, _flags: u32) -> KResult<isize> {
     Ok(0)
 }
 
+/// Locks all of the caller's memory. X-Kernel has no swap, so every page is
+/// already resident; accept the request as a no-op (greetd and other daemons
+/// call `mlockall` for hardening and abort if it fails).
+///
+/// The flag word is still validated: Linux's `mlockall` rejects an empty word,
+/// an unknown bit, and `MCL_ONFAULT` on its own with `EINVAL`. Accepting those
+/// would report success for a request Linux refuses.
+pub fn sys_mlockall(flags: u32) -> KResult<isize> {
+    const MCL_CURRENT: u32 = 0x1;
+    const MCL_FUTURE: u32 = 0x2;
+    const MCL_ONFAULT: u32 = 0x4;
+    if flags == 0 || flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 || flags == MCL_ONFAULT
+    {
+        return Err(KError::InvalidInput);
+    }
+    Ok(0)
+}
+
+pub fn sys_munlockall() -> KResult<isize> {
+    Ok(0)
+}
+
 unittest::path_mod_test!(tests, "../ut-tests/mmap.rs");

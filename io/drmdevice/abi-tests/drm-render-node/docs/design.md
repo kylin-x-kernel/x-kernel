@@ -17,7 +17,7 @@ workspace.
 
 | Test | What it proves |
 |---|---|
-| `render_node_permission_matrix` | `renderD*` exists, `GET_CAP` works there (`PREFER_SHADOW == 1`), `CREATE_DUMB` is refused with `EACCES`, `PRIME` is allowed but rejects an unknown handle with `EINVAL`, `SET_MASTER` is refused |
+| `render_node_permission_matrix` | `renderD*` exists, `GET_CAP` works there (`PREFER_SHADOW == 1`), `CREATE_DUMB` is refused with `EACCES`, `PRIME` is allowed but rejects an unknown handle with `ENOENT` (Linux's failed `drm_gem_object_lookup`), `SET_MASTER` is refused |
 | `every_card_has_a_matching_render_node` | every `/dev/dri/cardN` has `/dev/dri/renderD{128+N}` |
 | `dirtyfb_flushes_without_rebinding` | `fb_id == 0` is `ENOENT` like any unknown id, a registered fb flushes, and the clip protocol is validated (`EINVAL` for a count without a pointer or an odd `ANNOTATE_COPY` count) |
 | `dumb_release_outlives_the_scanout` | closing a handle that a framebuffer still names succeeds; the next frame still presents |

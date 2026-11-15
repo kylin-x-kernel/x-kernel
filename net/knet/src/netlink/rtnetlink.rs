@@ -507,7 +507,7 @@ fn handle_rtnetlink_request_inner(
     normalize_reply_ports(packets, requesting_port)
 }
 
-fn normalize_reply_ports(
+pub(super) fn normalize_reply_ports(
     mut packets: Vec<NetlinkPacket>,
     requesting_port: u32,
 ) -> Vec<NetlinkPacket> {

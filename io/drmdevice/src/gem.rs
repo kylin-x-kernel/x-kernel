@@ -769,6 +769,20 @@ impl Ioctl for DrmGemClose {
     }
 }
 
+/// Whether a `PRIME_HANDLE_TO_FD` flag word is one Linux admits.
+///
+/// `drm_prime_handle_to_fd_ioctl` accepts exactly `DRM_CLOEXEC | DRM_RDWR` and
+/// answers `EINVAL` for any other bit. `DRM_RDWR` is `O_RDWR`, and a client
+/// exporting a buffer it also fills passes it together with `DRM_CLOEXEC`
+/// (Mesa's `gbm_bo_get_fd_for_plane` passes `0x80002`).
+///
+/// The predicate is a separate function so the admitted set is testable
+/// without a current task: the rest of the command installs a descriptor,
+/// which needs one.
+pub(crate) fn prime_export_flags_valid(flags: u32) -> bool {
+    flags & !(DRM_CLOEXEC | DRM_RDWR) == 0
+}
+
 /// `DRM_IOCTL_PRIME_HANDLE_TO_FD`.
 impl Ioctl for DrmPrimeHandle {
     const NAME: &'static str = "PRIME_HANDLE_TO_FD";
@@ -779,15 +793,16 @@ impl Ioctl for DrmPrimeHandle {
         _unit: u32,
         prime: &mut Self,
     ) -> DrmResult<usize> {
-        // `drm_gem_prime_handle_to_fd`: the handle must belong to this file,
-        // the flag word must be a known one, and the exported descriptor is a
-        // dma-buf whose reservation is the object's.
-        if prime.flags & !DRM_CLOEXEC != 0 {
+        // Rejecting `DRM_RDWR` failed every export Mesa makes: it exports the
+        // buffers it renders into with both flags set.
+        if !prime_export_flags_valid(prime.flags) {
             return Err(DrmError::InvalidInput);
         }
+        // `drm_gem_prime_handle_to_fd` reports a handle that is not this
+        // file's as `ENOENT` (the failed `drm_gem_object_lookup`).
         let object = file
             .handle(DumbHandle::from_raw(prime.handle))
-            .ok_or(DrmError::InvalidInput)?;
+            .ok_or(DrmError::NotFound)?;
         let Some(buf) = object.export_view() else {
             return Err(DrmError::OpNotSupported);
         };

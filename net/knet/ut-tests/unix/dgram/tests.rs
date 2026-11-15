@@ -8,9 +8,9 @@ use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 use crate::{
-    KernelAncillaryData,
+    KernelAncillaryData, SendOptions,
     options::{PeerCredentials, UnixCredentials},
-    unix::BindEntry,
+    unix::{BindEntry, UnixTransportOps},
 };
 
 fn test_peer_credentials() -> PeerCredentials {
@@ -284,4 +284,20 @@ fn unix_dgram_connect_does_not_create_peer_credentials() {
     let mut data = [0_u8; 1];
     assert_eq!(receiver.recv(&mut data[..], RecvOptions::default()), Ok(1));
     assert_eq!(data, [b'x']);
+}
+
+/// A datagram transport cannot answer `SIOCINQ`, so it says so.
+///
+/// `unix_inq_len` reports the head datagram's length for `SOCK_DGRAM`, but
+/// these messages live in an `async_channel::Receiver`, which has no peek. The
+/// ioctl turns the missing answer into ENOTTY; a zero would instead read as an
+/// empty queue to a caller such as glibc's resolver, which abandons a lookup
+/// when `FIONREAD` reports 0 even though the reply is already queued.
+#[def_test]
+fn queue_lengths_are_unavailable_for_the_datagram_transport() {
+    let (sender, receiver) = DgramTransport::new_pair(test_peer_credentials());
+    assert_eq!(sender.send(&b"hello"[..], SendOptions::default()), Ok(5));
+
+    assert!(sender.queue_lengths().is_none());
+    assert!(receiver.queue_lengths().is_none());
 }

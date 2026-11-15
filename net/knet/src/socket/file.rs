@@ -25,7 +25,7 @@ pub fn sock_alloc_file(socket: Socket, flags: u32, cred: Arc<Cred>) -> KResult<A
     let flags = OpenFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     let socket = Arc::new(socket);
     let name = format!("socket:[{}]", socket.as_ref() as *const _ as usize);
-    AnonInodeFs::global().get_file(
+    AnonInodeFs::global().get_socket_file(
         &name,
         Arc::new(SocketFileOps),
         socket,
@@ -170,6 +170,40 @@ impl FileOperations for SocketFileOps {
             socket.register(context, events)?;
         }
         Ok(())
+    }
+
+    fn ioctl(&self, file: &VfsFile, _cred: &Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
+        // Linux `sock_do_ioctl` forwards these to the protocol's ioctl
+        // (`unix_ioctl`, `tcp_ioctl`, `udp_ioctl`), which copies one int
+        // result to the caller. `SIOCINQ` shares `FIONREAD`'s number
+        // (include/uapi/asm-generic/ioctls.h). Everything else keeps the
+        // generic non-tty rejection, which is what an unimplemented socket
+        // ioctl folds to through `sock_ioctl`.
+        const SIOCOUTQ: u32 = 0x5411;
+        const SIOCINQ: u32 = 0x541B;
+        if cmd != SIOCOUTQ && cmd != SIOCINQ {
+            return Err(KError::NotATty);
+        }
+        let socket = Self::socket(file)?;
+        // `unix_ioctl` answers SIOCOUTQ from `unix_outq_len` unconditionally,
+        // while SIOCINQ goes through `unix_inq_len`, which refuses a listening
+        // socket with EINVAL. `tcp_ioctl` makes the same split.
+        if cmd == SIOCINQ && socket.is_listening() {
+            return Err(KError::InvalidInput);
+        }
+        // A transport that cannot see its own queue answers ENOTTY: a zero
+        // reads as "nothing is queued" to a caller such as glibc's resolver,
+        // which abandons a lookup that has a reply waiting.
+        let Some(lengths) = socket.queue_lengths()? else {
+            return Err(KError::NotATty);
+        };
+        let amount = if cmd == SIOCOUTQ {
+            lengths.outq
+        } else {
+            lengths.inq
+        };
+        osvm::write_vm_bytes(arg as *mut u8, &amount.to_ne_bytes())?;
+        Ok(0)
     }
 }
 

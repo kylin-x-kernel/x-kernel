@@ -943,11 +943,26 @@ original root at `put_old`. All fallible checks are completed before the first m
 tree behind. `mount_edge_detach` is the shared single-edge detach primitive (restore covers / delete the child index + clear the
 location), reused by pivot and by the later MS_MOVE.
 
-`MntNamespace::make_mount_private()` and `make_mount_slave()` only validate that the target is a registered mount root and record no propagation state. KVFS does not yet have
-shared propagation groups, so slave and private behave equivalently: without a shared master, a slave receives no propagation events.
-Each of the two validates its call separately (`MS_PRIVATE`/`MS_SLAVE` may carry `MS_REC`/`MS_SILENT`, and any other combination returns
-`EINVAL`), to prevent illegal flags from being silently swallowed. A recursive bind (`MS_BIND | MS_REC`) is accepted only when the source subtree's mount count is
-zero, in which case the result is identical to cloning a single mount; otherwise it returns `EINVAL` instead of silently flattening the mount tree.
+`MntNamespace::make_mount_private()`, `make_mount_slave()`, `make_mount_shared()` and `make_mount_unbindable()` only validate
+that the target is a registered mount root and record no propagation state. KVFS does not yet have shared propagation groups, so all
+four behave equivalently: without a shared master a slave receives no events, a shared mount propagates nothing, and an unbindable
+mount has no peer to refuse. `MS_SHARED` is accepted rather than rejected because systemd remounts the namespace root `MS_SHARED`
+after `pivot_root`, and an `EINVAL` there aborts the switch-root. Each entry validates its call separately (`MS_PRIVATE`,
+`MS_SLAVE`, `MS_SHARED` and `MS_UNBINDABLE` may carry `MS_REC`/`MS_SILENT`, and any other combination returns `EINVAL`), to prevent
+illegal flags from being silently swallowed. A recursive bind (`MS_BIND | MS_REC`) clones the source subtree:
+`attach_bind_recursive()` re-grafts each cloned child under its cloned parent, so only submounts at or below the bind source are
+included and the tree is never silently flattened. (`clone_mount_tree()` is the separate entry point behind `open_tree(OPEN_TREE_CLONE)`.)
+
+### Detached mounts and the new mount API
+
+`MntNamespace::clone_mount_tree()` produces the detached tree behind `open_tree(OPEN_TREE_CLONE)`: it clones the mount at the
+resolved path, then walks that mount's subtree and installs each clone under the clone of its parent, returning the root together with
+every clone so the caller (the mount fd) keeps the whole tree alive. `create_detached_mount()` and `attach_detached_mount()` are the
+pair behind `fsmount` and `move_mount`; the attach consumes the detached mount and restores it if the graft fails, so a failed move
+does not spend the descriptor. `set_mount_attributes()` and `set_mount_attributes_on()` apply a translated `MOUNT_ATTR_*` set/clear
+pair to the mount at a path or to a mount object directly (`AT_EMPTY_PATH`), optionally recursing into the subtree. The
+`CAP_SYS_ADMIN` check lives in the syscall layer, which is the boundary that owns it; the namespace methods validate only mount
+identity and flag legality.
 
 ### Pathname and Open Files
 

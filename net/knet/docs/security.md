@@ -74,7 +74,12 @@ The syscall layer supplies validated socket arguments and current-call
 credentials. `kcred` defines credential predicates, `kvfs` enforces pathname
 permissions, `kclass` and its device providers own network-buffer validity and
 transport event contracts, and `ringbuf`, `smoltcp`, `zerocopy`, and `etherparse`
-provide their respective buffer and parsing contracts. Driver DMA programming,
+provide their respective buffer and parsing contracts. The unix datagram and
+seqpacket transports additionally queue messages in `async_channel` channels,
+whose FIFO ordering and close semantics are that crate's contract; the byte
+counters that `SIOCINQ`/`SIOCOUTQ` report live here because a channel offers no
+peek, and the datagram transport therefore refuses those ioctls with `ENOTTY`
+instead of reporting a queue depth it cannot observe. Driver DMA programming,
 raw user-pointer access, host-side handshake clients, and TIPC service policy
 are external responsibilities rather than guarantees established by `knet`.
 
@@ -293,7 +298,17 @@ The trust relationships in the diagram define the security responsibilities of e
 | Asset | Protection requirement and local evidence |
 |-------|-------------------------------------------|
 | Per-send `Cred` capability sets | `NetlinkSocket::send_with_cred` inspects the effective capabilities of the sender's credential captured at each send. Rtnetlink mutation and destination checks require `CAP_NET_ADMIN`; the `NETLINK_KOBJECT_UEVENT` receive callback requires `CAP_SYS_ADMIN`. `bind_with_cred` and `connect_with_cred` require `CAP_NET_ADMIN` for group or nonzero-destination authorization. A connected destination is authorized at connect time and is not rechecked by address-less sends. For an address-less or connected send to a kernel protocol, both the current sender and the credential captured at socket-file open (`SendOptions::opener_cred`) must hold the protocol capability, matching `__netlink_ns_capable`'s `NETLINK_SKB_DST` conjunct; an explicit `msg_name` check uses only the current sender. Effective UID 0 alone grants nothing when the capability has been dropped from the effective set. Credential-free bind, send, and connect paths have no administrative authority. |
-| Netlink port IDs and subscription masks | `port::bind` allocates or validates the port ID per protocol, rejects nonzero group subscriptions for unknown protocols (`EPERM` without `CAP_NET_ADMIN`, `ENOENT` with it), and stores only the protocol's implemented group bits. `NETLINK_ROUTE` additionally requires `CAP_NET_ADMIN` for the reverse-path groups 30 and 31, matching `rtnetlink_bind`; authorization finishes before any stored address changes. A bound socket cannot change its port ID, and conflicting explicit IDs fail with `EADDRINUSE`. `port::publish` filters recipients by protocol, live weak reference, bound subscription mask, sender exclusion, and requested unicast port before enqueueing. |
+| Netlink port IDs and subscription masks | `port::bind` allocates or validates the port ID per protocol, rejects nonzero group subscriptions for unknown protocols (`EPERM` without `CAP_NET_ADMIN`, `ENOENT` with it), and stores only the protocol's implemented group bits. `NETLINK_ROUTE` additionally requires `CAP_NET_ADMIN` for the reverse-path groups 30 and 31, matching `rtnetlink_bind`; authorization finishes before any stored address changes. A bound socket cannot change its port ID, and conflicting explicit IDs fail with `EADDRINUSE`. `port::publish` filters recipients by protocol, live weak reference, the socket's own subscription mask, sender exclusion, and
+requested unicast port before enqueueing. The mask lives on the socket rather than on its bound address because
+`NETLINK_ADD_MEMBERSHIP` is valid before `bind()` (`netlink_realloc_groups` needs no port id), so an unbound subscriber is still
+a recipient: the first subscription links the socket into the protocol's broadcast list (`port::subscribe`, Linux's `mc_list`
+through `sk_add_bind_node`), `publish` snapshots that list together with the port map and de-duplicates by socket identity, and
+dropping the last subscription unlinks it again. `bind()` merges its `nl_groups` into the same mask. Membership changes require `CAP_NET_ADMIN` when the protocol's table lacks
+`NL_CFG_F_NONROOT_RECV` and the caller does not hold it. `NETLINK_ROUTE` and
+`NETLINK_KOBJECT_UEVENT` set that flag; `NETLINK_USERSOCK` sets only
+`NL_CFG_F_NONROOT_SEND`, so its groups are privileged while its sends are not.
+The answer comes from the netlink layer's own per-protocol `GroupPolicy`, so
+the bind-time and setsockopt-time policies cannot diverge. |
 | Pathname socket inode and binding identity | `lookup_bind_entry` in [src/unix.rs](../src/unix.rs) checks final-inode `MAY_WRITE` through kvfs, verifies `NodeType::Socket`, and uses `path_bind_matches` to compare the upgraded inode with the resolved inode through `Arc::ptr_eq`. A stale or missing binding returns `ConnectionRefused`. |
 | Filesystem ownership fields | Path lookup and creation pass the same `Cred` to kvfs. kvfs uses `fsuid`, `fsgid`, supplementary groups, inode owner/group, and mode bits for DAC and ownership initialization. User bind supplies `0777 & !umask`; `bind_with_cred` receives an explicit mode from its kernel caller. |
 | Driver RX/TX memory and `PacketBuf` data | `EthernetDevice::poll_rx` finishes `handle_rx_frame` before `recycle_rx`; the provider owns buffer validity. `PacketBuf` owns packet storage and validates offsets and ranges through its accessors. Reference-counted handles keep storage alive across queues. |

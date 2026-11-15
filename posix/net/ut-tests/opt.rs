@@ -11,9 +11,9 @@ use ktime_types::{NANOS_PER_SEC, TimeSpan};
 use linux_raw_sys::{
     general::timeval,
     net::{
-        AF_INET, AF_NETLINK, AF_UNIX, IPPROTO_TCP, SO_DOMAIN, SO_PEERCRED, SO_PROTOCOL, SO_TYPE,
-        SOCK_DGRAM, SOCK_RAW, SOCK_STREAM, SOL_SOCKET, TCP_KEEPCNT, TCP_KEEPIDLE, TCP_KEEPINTVL,
-        socklen_t,
+        AF_INET, AF_NETLINK, AF_UNIX, IPPROTO_IP, IPPROTO_TCP, IP_PKTINFO, IP_RECVFRAGSIZE,
+        SO_BINDTOIFINDEX, SO_DOMAIN, SO_SNDBUF, SO_PEERCRED, SO_PROTOCOL, SO_TYPE, SOCK_DGRAM, SOCK_RAW,
+        SOCK_STREAM, SOL_SOCKET, TCP_KEEPCNT, TCP_KEEPIDLE, TCP_KEEPINTVL, socklen_t,
     },
 };
 use posix_types::UserPtr;
@@ -499,6 +499,9 @@ fn netlink_cap_ack_option_round_trips_through_the_syscall_layer() {
         Ok(0)
     );
     assert_eq!(value.read(), 0);
+    // The negative-length check is shared with every other option and reports
+    // the canonical `KError::InvalidInput`; both carriers encode as `-EINVAL`
+    // at the syscall boundary.
     assert_eq!(
         sys_setsockopt(
             fd,
@@ -507,7 +510,7 @@ fn netlink_cap_ack_option_round_trips_through_the_syscall_layer() {
             UserPtr::from(empty.as_user_ptr()).as_const(),
             u32::MAX,
         ),
-        Err(KError::from(LinuxError::EINVAL))
+        Err(KError::InvalidInput)
     );
 
     close_socket(fd);
@@ -943,5 +946,188 @@ fn legacy_filter_writes_check_access_lengths_and_allocation_bounds() {
     caller.commit_creds((*saved).clone());
     assert_eq!(results, [Err(LinuxError::EPERM.into()); 2]);
     close_socket(unix);
+    close_socket(fd);
+}
+
+/// `do_sock_setsockopt` rejects a negative length before any option handler
+/// runs.
+///
+/// A `socklen_t` of `0xFFFF_FFFF` is the signed `-1` Linux refuses; treating it
+/// as an enormous length would instead select the "at least a byte" branches
+/// and enable an option on a request Linux rejects.
+#[def_test(user)]
+fn negative_set_option_length_is_rejected_before_the_handler() {
+    let fd = sys_socket(AF_INET, SOCK_DGRAM, 0).unwrap() as i32;
+    let value = TestUserValue::from_value(1_i32).unwrap();
+    let value_ptr = UserPtr::from(value.as_user_ptr().cast::<u8>()).as_const();
+
+    assert_eq!(
+        sys_setsockopt(fd, IPPROTO_IP as u32, IP_PKTINFO, value_ptr, u32::MAX),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(
+        sys_setsockopt(fd, SOL_SOCKET, SO_SNDBUF, value_ptr, u32::MAX),
+        Err(KError::InvalidInput)
+    );
+
+    let enabled = TestUserValue::<i32>::new().unwrap();
+    let optlen = TestUserValue::from_value(size_of::<i32>() as socklen_t).unwrap();
+    assert_eq!(
+        sys_getsockopt(
+            fd,
+            IPPROTO_IP as u32,
+            IP_PKTINFO,
+            UserPtr::from(enabled.as_user_ptr().cast::<u8>()),
+            UserPtr::from(optlen.as_user_ptr()),
+        ),
+        Ok(0)
+    );
+    assert_eq!(enabled.read(), 0, "the option was not enabled");
+
+    close_socket(fd);
+}
+
+/// `NETLINK_ADD_MEMBERSHIP` reads four bytes whenever the length reaches an
+/// `int`, and a socket of another family answers `ENOPROTOOPT`.
+#[def_test(user)]
+fn group_membership_accepts_a_long_option_and_reports_the_family_mismatch() {
+    const SOL_NETLINK: u32 = 270;
+    const NETLINK_ADD_MEMBERSHIP: u32 = 1;
+    const NETLINK_LIST_MEMBERSHIPS: u32 = 9;
+
+    let fd = sys_socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE as u32).unwrap() as i32;
+
+    // An `int` inside a larger object still joins the group: Linux copies the
+    // first four bytes and ignores the rest.
+    let mut wide = [0u8; size_of::<u64>()];
+    wide[..size_of::<u32>()].copy_from_slice(&1u32.to_ne_bytes());
+    let wide_buf = TestUserBuffer::new(wide.len()).unwrap();
+    wide_buf.write_bytes(&wide).unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            SOL_NETLINK,
+            NETLINK_ADD_MEMBERSHIP,
+            UserPtr::from(wide_buf.as_user_ptr::<u8>()).as_const(),
+            wide.len() as socklen_t,
+        ),
+        Ok(0)
+    );
+
+    let memberships = TestUserValue::<u32>::new().unwrap();
+    let optlen = TestUserValue::from_value(size_of::<u32>() as socklen_t).unwrap();
+    assert_eq!(
+        sys_getsockopt(
+            fd,
+            SOL_NETLINK,
+            NETLINK_LIST_MEMBERSHIPS,
+            UserPtr::from(memberships.as_user_ptr().cast::<u8>()),
+            UserPtr::from(optlen.as_user_ptr()),
+        ),
+        Ok(0)
+    );
+    assert_eq!(memberships.read(), 1, "group 1 is subscribed");
+
+    // A length below an `int` selects the zero group and fails the group
+    // check without reading the (here absent) value buffer.
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            SOL_NETLINK,
+            NETLINK_ADD_MEMBERSHIP,
+            UserPtr::default().as_const(),
+            3,
+        ),
+        Err(KError::InvalidInput)
+    );
+
+    // Linux dispatches SOL_NETLINK per family, so a UDP socket answers
+    // `inet_setsockopt`'s default: ENOPROTOOPT, before any memory access.
+    let udp = sys_socket(AF_INET, SOCK_DGRAM, 0).unwrap() as i32;
+    assert_eq!(
+        sys_setsockopt(
+            udp,
+            SOL_NETLINK,
+            NETLINK_ADD_MEMBERSHIP,
+            UserPtr::default().as_const(),
+            size_of::<u32>() as socklen_t,
+        ),
+        Err(KError::from(LinuxError::ENOPROTOOPT))
+    );
+
+    close_socket(udp);
+    close_socket(fd);
+}
+
+/// `IP_RECVFRAGSIZE` belongs to the `int`-or-byte group and only raw and
+/// datagram sockets can take it.
+#[def_test(user)]
+fn ip_recvfragsize_takes_a_byte_and_refuses_stream_sockets() {
+    let fd = sys_socket(AF_INET, SOCK_DGRAM, 0).unwrap() as i32;
+    let one = TestUserValue::from_value(1_u8).unwrap();
+    let one_ptr = UserPtr::from(one.as_user_ptr()).as_const();
+    assert_eq!(
+        sys_setsockopt(fd, IPPROTO_IP as u32, IP_RECVFRAGSIZE, one_ptr, 1),
+        Ok(0)
+    );
+
+    let enabled = TestUserValue::<i32>::new().unwrap();
+    let optlen = TestUserValue::from_value(size_of::<i32>() as socklen_t).unwrap();
+    assert_eq!(
+        sys_getsockopt(
+            fd,
+            IPPROTO_IP as u32,
+            IP_RECVFRAGSIZE,
+            UserPtr::from(enabled.as_user_ptr().cast::<u8>()),
+            UserPtr::from(optlen.as_user_ptr()),
+        ),
+        Ok(0)
+    );
+    assert_eq!(enabled.read(), 1);
+    close_socket(fd);
+
+    // `do_ip_setsockopt` refuses the option on a stream socket: only raw and
+    // datagram sockets receive fragments.
+    let stream = sys_socket(AF_INET, SOCK_STREAM, 0).unwrap() as i32;
+    assert_eq!(
+        sys_setsockopt(stream, IPPROTO_IP as u32, IP_RECVFRAGSIZE, one_ptr, 1),
+        Err(KError::InvalidInput)
+    );
+    close_socket(stream);
+}
+
+/// `sock_bindtoindex_locked` answers EINVAL for a negative ifindex instead of
+/// storing it.
+#[def_test(user)]
+fn bind_to_ifindex_rejects_a_negative_index() {
+    let fd = sys_socket(AF_INET, SOCK_DGRAM, 0).unwrap() as i32;
+    let negative = TestUserValue::from_value(-1_i32).unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_BINDTOIFINDEX,
+            UserPtr::from(negative.as_user_ptr().cast::<u8>()).as_const(),
+            size_of::<i32>() as socklen_t,
+        ),
+        Err(KError::InvalidInput)
+    );
+
+    // The invalid request left the socket unbound, and the negative index did
+    // not reach the field a later connect would resolve.
+    let ifindex = TestUserValue::<i32>::new().unwrap();
+    let optlen = TestUserValue::from_value(size_of::<i32>() as socklen_t).unwrap();
+    assert_eq!(
+        sys_getsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_BINDTOIFINDEX,
+            UserPtr::from(ifindex.as_user_ptr().cast::<u8>()),
+            UserPtr::from(optlen.as_user_ptr()),
+        ),
+        Ok(0)
+    );
+    assert_eq!(ifindex.read(), 0);
+
     close_socket(fd);
 }

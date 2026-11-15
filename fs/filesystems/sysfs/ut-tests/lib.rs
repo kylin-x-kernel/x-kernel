@@ -260,3 +260,47 @@ fn drm_nodes_project_a_render_minor() {
 
     kdevice::unregister_device_node(node.core_id()).expect("legacy node unregisters");
 }
+
+/// `kobject_action_type` takes the first space-separated token after dropping
+/// one trailing newline or NUL, and refuses every other whitespace.
+#[def_test]
+fn uevent_action_is_the_first_space_separated_token() {
+    assert_eq!(parse_uevent_action(b"add"), Ok(UeventAction::Add));
+    assert_eq!(parse_uevent_action(b"add\n"), Ok(UeventAction::Add));
+    assert_eq!(parse_uevent_action(b"add\0"), Ok(UeventAction::Add));
+    assert_eq!(parse_uevent_action(b"add uuid-1234"), Ok(UeventAction::Add));
+    assert_eq!(parse_uevent_action(b"add  uuid-1234"), Ok(UeventAction::Add));
+    assert_eq!(parse_uevent_action(b"change\n"), Ok(UeventAction::Change));
+
+    // A tab, an embedded newline and a leading tab are not separators: the
+    // token then carries them and no action matches, so the write is refused.
+    assert_eq!(parse_uevent_action(b"add\tuuid-1234"), Err(VfsError::InvalidInput));
+    assert_eq!(parse_uevent_action(b"add\nuuid-1234"), Err(VfsError::InvalidInput));
+    assert_eq!(parse_uevent_action(b"\tadd"), Err(VfsError::InvalidInput));
+    assert_eq!(parse_uevent_action(b""), Err(VfsError::InvalidInput));
+    assert_eq!(parse_uevent_action(b"\n"), Err(VfsError::InvalidInput));
+}
+
+/// logind's `seat_has_vts()` opens `/sys/class/tty/tty0/active`, so the alias
+/// must exist for the `tty`/`tty0` registration and carry the active console.
+#[def_test]
+fn tty0_projects_the_active_console_alias() {
+    init_device_projection();
+    let devices = kvfs::registered_character_devices();
+    let tty0 = devices
+        .iter()
+        .find(|registration| registration.class() == "tty" && registration.name() == "tty0")
+        .expect("the fixed VT console registers tty0");
+
+    let tree = build_tree(&BTreeMap::new(), core::slice::from_ref(tty0));
+    let path = "devices/virtual/tty/tty0/active";
+    let Some(TreeEntry::CharacterAttribute(identity, contents)) = tree.get(path) else {
+        panic!("tty0 must expose the `active` alias");
+    };
+    assert!(identity.same_registration(tty0));
+    assert_eq!(contents, b"tty1\n", "the fixed VT console is VT 1");
+    assert!(
+        tree.contains_key("class/tty/tty0"),
+        "logind opens the alias through /sys/class"
+    );
+}

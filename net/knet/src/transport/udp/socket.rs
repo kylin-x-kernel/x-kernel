@@ -17,8 +17,8 @@ use super::{
     state::UdpSocketState,
 };
 use crate::{
-    AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SendFlags,
-    SendOptions, Shutdown, SocketAddrEx, SocketOps,
+    AncillaryData, ConnectOptions, KernelAncillaryData, QueueLengths, RecvFlags, RecvOptions,
+    SERVICE, SendFlags, SendOptions, Shutdown, SocketAddrEx, SocketOps,
     consts::{UDP_RX_BUF_LEN, UDP_TX_BUF_LEN},
     ip::{IpAddress, IpEndpoint, Ipv4Address},
     ipv4,
@@ -521,6 +521,17 @@ impl SocketOps for UdpSocket {
         network_poller().assist_once();
         debug!("UDP socket: shutting down");
         Ok(())
+    }
+
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
+        // `udp_ioctl(SIOCINQ)` reports `first_packet_length`, the payload
+        // length of the datagram at the head of the receive queue; an empty
+        // queue reports 0. `SIOCOUTQ` reports `sk_wmem_alloc` less its
+        // baseline reference, and this send path hands each datagram to the
+        // device before `send` returns, so nothing is left charged to the
+        // socket.
+        let inq = self.pcb.head_datagram_len().unwrap_or(0);
+        Ok(Some(QueueLengths::from_bytes(0, inq)))
     }
 }
 

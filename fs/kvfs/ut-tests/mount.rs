@@ -1827,3 +1827,83 @@ fn test_recursive_bind_skips_sibling_submounts_outside_source() {
     // With no unreachable cloned child, a plain unmount succeeds.
     namespace.detach(&bind_root).unwrap();
 }
+
+#[def_test]
+fn test_clone_mount_tree_reproduces_a_stacked_mountpoint() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let lower_fs = mock_filesystem(StatFsFlags::empty());
+    let upper_fs = mock_filesystem(StatFsFlags::empty());
+
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+    let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
+
+    // Two mounts stacked on one mountpoint: Linux keeps the upper one visible
+    // and chains the lower one through its overmount link. Each gets a distinct
+    // devname because every mock reports the same filesystem name, so the
+    // devname is the only thing that tells the layers apart in an assertion.
+    let lower = namespace
+        .attach_with_flags_and_devname(&mountpoint, &lower_fs, MountFlags::empty(), Some("lower"))
+        .unwrap();
+    let upper = namespace
+        .attach_with_flags_and_devname(&mountpoint, &upper_fs, MountFlags::empty(), Some("upper"))
+        .unwrap();
+    let visible = lookup_no_follow(&root, "mnt").unwrap();
+    assert!(Arc::ptr_eq(visible.mount(), &upper));
+    assert!(!Arc::ptr_eq(&lower, &upper));
+    assert_eq!(visible.mount().devname(), Some("upper"));
+    let source_lower = visible.mount().covered_mount().unwrap();
+    assert_eq!(
+        source_lower.devname(),
+        Some("lower"),
+        "the source stack is upper over lower"
+    );
+
+    // `open_tree(OPEN_TREE_CLONE)` must reproduce that stack, top over bottom.
+    // A clone that dropped the displaced mount, or installed the layers in the
+    // wrong order, shows a different visible devname or a different layer
+    // underneath.
+    let (cloned_root, kept) = namespace.clone_mount_tree(&root).unwrap();
+    let cloned_mountpoint = lookup_no_follow(&cloned_root.root_path(), "mnt").unwrap();
+    let cloned_visible = cloned_mountpoint.mount();
+    assert!(
+        !Arc::ptr_eq(cloned_visible, &upper),
+        "the clone must not alias the source's mount"
+    );
+    assert_eq!(
+        cloned_visible.devname(),
+        Some("upper"),
+        "the clone's visible layer is the top of the source stack"
+    );
+    let covered = cloned_visible
+        .covered_mount()
+        .expect("the lower layer survives the clone");
+    assert_eq!(
+        covered.devname(),
+        Some("lower"),
+        "the layer under the clone's top is the source stack's bottom"
+    );
+    assert!(
+        !Arc::ptr_eq(&covered, cloned_visible),
+        "the stack has two distinct layers, not one mount covering itself"
+    );
+    assert!(
+        kept.iter().any(|mount| Arc::ptr_eq(mount, cloned_visible))
+            && kept.iter().any(|mount| Arc::ptr_eq(mount, &covered)),
+        "both cloned layers are handles the caller keeps alive"
+    );
+    assert!(
+        !Arc::ptr_eq(&covered, &lower),
+        "the clone copies the layers instead of sharing the source's"
+    );
+
+    // The source stack is untouched.
+    let source_visible = lookup_no_follow(&root, "mnt").unwrap();
+    assert!(Arc::ptr_eq(source_visible.mount(), &upper));
+    let source_lower = source_visible.mount().covered_mount().unwrap();
+    assert!(
+        Arc::ptr_eq(&source_lower, &lower),
+        "the source still covers its own lower mount"
+    );
+}
+

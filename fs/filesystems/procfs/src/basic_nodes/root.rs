@@ -286,6 +286,35 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                     },
                 ),
             );
+            // systemd reads these while building a service's exec context; a
+            // missing node makes the spawn fail with ENOENT.
+            kernel.add(
+                "cap_last_cap",
+                SimpleFile::new_regular(fs.clone(), || Ok(format!("{}\n", kcred::CAP_LAST_CAP))),
+            );
+            kernel.add(
+                "overflowuid",
+                SimpleFile::new_regular(fs.clone(), || Ok("65534\n")),
+            );
+            kernel.add(
+                "overflowgid",
+                SimpleFile::new_regular(fs.clone(), || Ok("65534\n")),
+            );
+            kernel.add(
+                "threads-max",
+                SimpleFile::new_regular(fs.clone(), || Ok("65536\n")),
+            );
+            kernel.add("random", {
+                let mut random = DirMapping::new();
+                // A per-boot identifier; systemd uses it for invocation IDs.
+                random.add(
+                    "boot_id",
+                    SimpleFile::new_regular(fs.clone(), || {
+                        Ok(format!("{}\n", crate::boot_id::boot_id()))
+                    }),
+                );
+                SimpleDir::new_maker(fs.clone(), Arc::new(random))
+            });
             kernel.add("pty", {
                 let mut pty = DirMapping::new();
                 let permission = NodePermission::from_bits_truncate(0o444);

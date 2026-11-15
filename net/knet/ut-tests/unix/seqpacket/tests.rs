@@ -91,6 +91,78 @@ fn listener_accepts_a_queued_connection() {
     assert_eq!(&buf[..4], b"pong");
 }
 
+/// A send rejected by a released receive direction leaves no charge behind.
+///
+/// The charge is taken before the enqueue, so the rejection path has to give it
+/// back; otherwise a `SIOCOUTQ` nobody can read would stay on the socket.
+#[def_test]
+fn rejected_send_leaves_the_outq_unchanged() {
+    let (sender, receiver) = SeqpacketTransport::new_pair(test_peer_credentials());
+    drop(receiver);
+    assert_eq!(
+        sender.send(&b"lost"[..], SendOptions::default()),
+        Err(KError::BrokenPipe)
+    );
+    assert_eq!(sender.queue_lengths().unwrap().outq, 0);
+}
+
+/// A receive shutdown does not release the sender's `SIOCOUTQ`.
+///
+/// `shutdown(SHUT_RD)` closes the receiving side but leaves the records queued
+/// before it readable, so the bytes the sender queued are still going to be
+/// read and the count must not drop to zero with the channel.
+#[def_test]
+fn peer_read_shutdown_keeps_the_queued_outq() {
+    let (sender, receiver) = SeqpacketTransport::new_pair(test_peer_credentials());
+    assert_eq!(sender.send(&b"hello"[..], SendOptions::default()), Ok(5));
+    assert_eq!(sender.queue_lengths().unwrap().outq, 5);
+
+    receiver.shutdown(Shutdown::Read).unwrap();
+    assert_eq!(
+        sender.queue_lengths().unwrap().outq,
+        5,
+        "the queued message is still readable"
+    );
+
+    let mut buf = [0u8; 8];
+    assert_eq!(receiver.recv(&mut buf[..], RecvOptions::default()), Ok(5));
+    assert_eq!(&buf[..5], b"hello");
+    assert_eq!(sender.queue_lengths().unwrap().outq, 0);
+}
+
+/// A client's `SIOCOUTQ` falls to 0 when the connection it queued data into is
+/// released before it is accepted.
+///
+/// Linux's `unix_release_sock` purges a listening socket's queued children,
+/// which frees the skbs and drops the sender's `sk_wmem_alloc`
+/// (`unix_outq_len`). No transport runs `Drop` for a pending connection the
+/// listener never accepted, so the closed channel is what has to show the
+/// sender that its bytes can never be read.
+#[def_test]
+fn released_pending_connection_clears_the_client_outq() {
+    let listener = SeqpacketTransport::new();
+    let entry = BindEntry::default();
+    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.listen(1, &test_peer_credentials()).unwrap();
+
+    let client = SeqpacketTransport::new();
+    client
+        .connect(
+            &entry,
+            &UnixAddr::Unbound,
+            ConnectOptions::default(),
+            &test_peer_credentials(),
+        )
+        .unwrap();
+    assert_eq!(client.send(&b"queued"[..], SendOptions::default()), Ok(6));
+    assert_eq!(client.queue_lengths().unwrap().outq, 6);
+
+    // Released without `accept`: the queued connection is discarded and those
+    // bytes can never be read.
+    drop(listener);
+    assert_eq!(client.queue_lengths().unwrap().outq, 0);
+}
+
 #[def_test]
 fn accept_would_block_without_a_connection() {
     let listener = SeqpacketTransport::new();
@@ -454,4 +526,85 @@ fn read_shutdown_drains_queued_records_and_rejects_peer_sends() {
         right.send(&b"late"[..], SendOptions::default()),
         Err(KError::BrokenPipe)
     );
+}
+
+/// `SO_ACCEPTCONN` reports whether the socket reached `TCP_LISTEN`.
+///
+/// `unix_listen` accepts `SOCK_SEQPACKET`, so `sk_getsockopt` answers from
+/// `sk_state` here too. The transport delegates to the shared general options,
+/// and that handler answers `AcceptConn` with a constant `false` *and* reports
+/// the option handled, so a seqpacket socket must answer before delegating; the
+/// regression this pins made a listening seqpacket socket report 0.
+#[def_test]
+fn accept_conn_follows_the_listener_state() {
+    use super::{Listener, ListenerState};
+
+    let transport = SeqpacketTransport::new();
+    let mut listening = false;
+    transport
+        .get_option(GetSocketOption::AcceptConn(&mut listening))
+        .expect("AcceptConn is a get-only option");
+    assert!(!listening, "a fresh socket is not listening");
+
+    // Installing a listener in the `Listening` state is what `listen()` leaves
+    // behind; nothing else changes the answer.
+    let (_sender, pending) = async_channel::unbounded();
+    *transport.listener.lock() = Some(Listener {
+        pending,
+        poll: Arc::new(PollSet::new()),
+        state: Arc::new(Mutex::new(ListenerState::Listening)),
+    });
+    let mut listening = false;
+    transport
+        .get_option(GetSocketOption::AcceptConn(&mut listening))
+        .expect("AcceptConn is a get-only option");
+    assert!(listening, "a listening seqpacket socket reports SO_ACCEPTCONN");
+
+    // A listener whose accept side was shut down is no longer listening, which
+    // is what `unix_listen`'s state machine reports too.
+    *transport.listener.lock() = Some(Listener {
+        pending: async_channel::unbounded().1,
+        poll: Arc::new(PollSet::new()),
+        state: Arc::new(Mutex::new(ListenerState::AcceptShutdown)),
+    });
+    let mut listening = true;
+    transport
+        .get_option(GetSocketOption::AcceptConn(&mut listening))
+        .expect("AcceptConn is a get-only option");
+    assert!(!listening, "a shut-down listener is not accepting");
+}
+
+/// `SIOCINQ`/`SIOCOUTQ` report the queued byte totals for a seqpacket pair.
+///
+/// Linux `unix_inq_len` sums every queued skb for `SOCK_STREAM`/`SOCK_SEQPACKET`
+/// and `unix_outq_len` reports the sender's queued bytes, so both sides are
+/// plain running totals. A socket that only inherited the trait default answered
+/// 0/0 for a connected pair with data in flight.
+#[def_test]
+fn queue_lengths_report_queued_bytes_per_direction() {
+    let (sender, receiver) = SeqpacketTransport::new_pair(test_peer_credentials());
+
+    let lengths = sender
+        .queue_lengths()
+        .expect("seqpacket reports queue lengths");
+    assert_eq!((lengths.outq, lengths.inq), (0, 0), "an idle pair queues nothing");
+
+    assert_eq!(sender.send(&b"hello"[..], SendOptions::default()), Ok(5));
+    assert_eq!(sender.send(&b"world!"[..], SendOptions::default()), Ok(6));
+
+    // The sender reports what it handed to the peer and has nothing to read.
+    let lengths = sender.queue_lengths().unwrap();
+    assert_eq!((lengths.outq, lengths.inq), (11, 0));
+
+    // The receiver sees the same 11 bytes as readable.
+    let lengths = receiver.queue_lengths().unwrap();
+    assert_eq!((lengths.outq, lengths.inq), (0, 11));
+
+    // Reading one message drops exactly its bytes from both views.
+    let mut buf = [0u8; 16];
+    assert_eq!(receiver.recv(&mut buf[..], RecvOptions::default()), Ok(5));
+    let lengths = sender.queue_lengths().unwrap();
+    assert_eq!(lengths.outq, 6, "the acknowledged message is no longer queued");
+    let lengths = receiver.queue_lengths().unwrap();
+    assert_eq!(lengths.inq, 6);
 }

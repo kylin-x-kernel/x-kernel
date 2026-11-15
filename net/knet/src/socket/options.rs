@@ -145,10 +145,46 @@ define_options! {
     ReceiveTimeout(TimeSpan),
     SendBufferForce(usize),
     PassCredentials(bool),
+    PassSecurity(bool),
+    PassRights(bool),
+    Timestamp(bool),
+    TimestampNs(bool),
+    Timestamping(u32),
     PeerCredentials(PeerCredentials),
     /// `NETLINK_CAP_ACK`: omit the original request payload from error
     /// acknowledgements and mark them `NLM_F_CAPPED`.
     NetlinkCapAck(bool),
+    /// `NETLINK_EXT_ACK`: request extended ACK error reporting. Tracked only.
+    NetlinkExtAck(bool),
+    /// `NETLINK_GET_STRICT_CHK`: strict dump checking. Tracked only.
+    NetlinkGetStrictChk(bool),
+    /// `NETLINK_PKTINFO`: receive packet info ancillary data. Tracked only.
+    NetlinkPktinfo(bool),
+    /// `NETLINK_ADD_MEMBERSHIP` / `NETLINK_DROP_MEMBERSHIP`: multicast group id.
+    NetlinkAddMembership(u32),
+    NetlinkDropMembership(u32),
+    /// `NETLINK_LIST_MEMBERSHIPS`: the socket's bound multicast group mask,
+    /// zero-based bit per group (`netlink_getsockopt` copies `nlk->groups`).
+    NetlinkMemberships(u32),
+    /// `IP_PKTINFO`: receive packet-info ancillary data on UDP. Tracked only.
+    IpPktinfo(bool),
+    /// `IP_RECVTTL` / `IP_RECVTOS`: receive TTL/TOS ancillary data. Tracked only.
+    IpRecvTtl(bool),
+    IpRecvTos(bool),
+    /// `SO_BINDTOIFINDEX`: bind to a device by ifindex (like SO_BINDTODEVICE).
+    BindToIfindex(i32),
+    /// `TCP_FASTOPEN`: fast-open queue length. Tracked only.
+    TcpFastopen(u32),
+    /// `SO_ACCEPTCONN`: whether the socket is listening (read-only).
+    AcceptConn(bool),
+    /// `SO_RCVBUFFORCE`: privileged receive-buffer override.
+    ReceiveBufferForce(usize),
+    /// `IP_MULTICAST_TTL`: multicast TTL. Tracked only.
+    IpMulticastTtl(u32),
+    /// `IP_RECVFRAGSIZE`: receive fragment-size ancillary data. Tracked only.
+    IpRecvFragsize(bool),
+    /// `SO_PASSPIDFD`: pass peer pidfd ancillary data. Tracked only.
+    PassPidfd(bool),
 
     // ---- TCP options ----
     NoDelay(bool),

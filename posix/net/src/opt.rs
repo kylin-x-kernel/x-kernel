@@ -12,11 +12,11 @@
 //! Linux stores nonzero send and receive timeouts in jiffies. Socket timeout
 //! conversion therefore rounds a userspace `timeval` up to one kernel tick.
 
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
 use knet::{
-    SocketOps,
+    Socket, SocketOps,
     options::{Configurable, GetSocketOption, PeerCredentials, SetSocketOption, UnixCredentials},
     sock_from_file,
 };
@@ -35,6 +35,13 @@ const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
 
 /// `NETLINK_CAP_ACK` is not exposed by `linux_raw_sys` on every target.
 const NETLINK_CAP_ACK: u32 = 10;
+/// Netlink options not exposed by `linux_raw_sys` on every target.
+const NETLINK_ADD_MEMBERSHIP: u32 = 1;
+const NETLINK_DROP_MEMBERSHIP: u32 = 2;
+const NETLINK_PKTINFO: u32 = 3;
+const NETLINK_LIST_MEMBERSHIPS: u32 = 9;
+const NETLINK_EXT_ACK: u32 = 11;
+const NETLINK_GET_STRICT_CHK: u32 = 12;
 
 const PACKET_ADD_MEMBERSHIP: u32 = 1;
 const PACKET_DROP_MEMBERSHIP: u32 = 2;
@@ -258,13 +265,31 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_BROADCAST) => Broadcast as IntBool,
             (SOL_SOCKET, SO_SNDBUF) => SendBuffer as Int<usize>,
             (SOL_SOCKET, SO_RCVBUF) => ReceiveBuffer as Int<usize>,
+            (SOL_SOCKET, SO_SNDBUFFORCE) => SendBufferForce as Int<usize>,
             (SOL_SOCKET, SO_KEEPALIVE) => KeepAlive as IntBool,
             (SOL_SOCKET, SO_LINGER) => Linger as SocketLinger,
             (SOL_SOCKET, SO_RCVTIMEO) => ReceiveTimeout as SocketTimeout,
             (SOL_SOCKET, SO_SNDTIMEO) => SendTimeout as SocketTimeout,
             (SOL_SOCKET, SO_PASSCRED) => PassCredentials as IntBool,
+            (SOL_SOCKET, SO_PASSSEC) => PassSecurity as IntBool,
+            (SOL_SOCKET, SO_PASSRIGHTS) => PassRights as IntBool,
+            (SOL_SOCKET, SO_ACCEPTCONN) => AcceptConn as IntBool,
+            (SOL_SOCKET, SO_RCVBUFFORCE) => ReceiveBufferForce as Int<usize>,
+            (SOL_SOCKET, SO_BINDTOIFINDEX) => BindToIfindex as Int<i32>,
+            (SOL_SOCKET, SO_PASSPIDFD) => PassPidfd as IntBool,
+            (SOL_SOCKET, SO_TIMESTAMP) => Timestamp as IntBool,
+            (SOL_SOCKET, SO_TIMESTAMP_NEW) => Timestamp as IntBool,
+            (SOL_SOCKET, SO_TIMESTAMPNS) => TimestampNs as IntBool,
+            (SOL_SOCKET, SO_TIMESTAMPNS_NEW) => TimestampNs as IntBool,
+            (SOL_SOCKET, SO_TIMESTAMPING) => Timestamping as Int<u32>,
+            (SOL_SOCKET, SO_TIMESTAMPING_NEW) => Timestamping as Int<u32>,
 
             (SOL_NETLINK, NETLINK_CAP_ACK) => NetlinkCapAck as IntBool,
+            (SOL_NETLINK, NETLINK_ADD_MEMBERSHIP) => NetlinkAddMembership as Int<u32>,
+            (SOL_NETLINK, NETLINK_DROP_MEMBERSHIP) => NetlinkDropMembership as Int<u32>,
+            (SOL_NETLINK, NETLINK_EXT_ACK) => NetlinkExtAck as IntBool,
+            (SOL_NETLINK, NETLINK_GET_STRICT_CHK) => NetlinkGetStrictChk as IntBool,
+            (SOL_NETLINK, NETLINK_PKTINFO) => NetlinkPktinfo as IntBool,
 
             (PROTO_TCP, TCP_NODELAY) => NoDelay as IntBool,
             (PROTO_TCP, TCP_MAXSEG) => MaxSegment as Int<usize>,
@@ -272,10 +297,16 @@ macro_rules! call_dispatch {
             (PROTO_TCP, TCP_KEEPIDLE) => KeepIdle as Int<u32>,
             (PROTO_TCP, TCP_KEEPINTVL) => KeepInterval as Int<u32>,
             (PROTO_TCP, TCP_KEEPCNT) => KeepCount as Int<u32>,
+            (PROTO_TCP, TCP_FASTOPEN) => TcpFastopen as Int<u32>,
 
             (PROTO_IP, IP_TTL) => Ttl as Int<u8>,
             (PROTO_IP, IP_RECVERR) => RecvErr as IntBool,
             (PROTO_IP, IP_MTU_DISCOVER) => MtuDiscover as Int<u8>,
+            (PROTO_IP, IP_PKTINFO) => IpPktinfo as IntBool,
+            (PROTO_IP, IP_RECVTTL) => IpRecvTtl as IntBool,
+            (PROTO_IP, IP_RECVTOS) => IpRecvTos as IntBool,
+            (PROTO_IP, IP_MULTICAST_TTL) => IpMulticastTtl as Int<u32>,
+            (PROTO_IP, IP_RECVFRAGSIZE) => IpRecvFragsize as IntBool,
 
             (SOL_PACKET, PACKET_STATISTICS) => PacketStatistics as PacketStats,
             (SOL_PACKET, PACKET_ADD_MEMBERSHIP) => PacketAddMembership as PacketMembershipConv,
@@ -462,12 +493,204 @@ pub fn sys_getsockopt(
             osvm::write_vm_bytes(optval.as_ptr() as *mut u8, &buf)?;
         }
         optlen = buf.len() as socklen_t;
+    } else if level == SOL_NETLINK && optname == NETLINK_LIST_MEMBERSHIPS {
+        optlen = put_list_memberships(&socket, optval, optlen)?;
     } else {
         call_dispatch!(dispatch, (level, optname));
     }
 
     optlen_ptr.write_vm(optlen)?;
     Ok(0)
+}
+
+/// Writes `NETLINK_LIST_MEMBERSHIPS` and returns the new `optlen`.
+///
+/// `netlink_getsockopt(NETLINK_LIST_MEMBERSHIPS)` copies as much of the socket's
+/// group bitmap as fits and reports the bitmap's full byte length, so a caller
+/// can size the buffer from a zero-length query. Reporting a zero length for a
+/// socket that did join groups would tell it there are no memberships at all.
+fn put_list_memberships(
+    socket: &Arc<Socket>,
+    optval: UserPtr<u8>,
+    optlen: socklen_t,
+) -> KResult<socklen_t> {
+    let mut groups = 0u32;
+    socket.get_option(GetSocketOption::NetlinkMemberships(&mut groups))?;
+    let bytes = groups.to_ne_bytes();
+    // `netlink_getsockopt` copies whole `u32` words only (`if (len - pos <
+    // sizeof(u32)) break;`), so a buffer shorter than one word receives nothing
+    // while `optlen` still reports the full length for sizing.
+    if (optlen as usize) >= size_of::<u32>() {
+        osvm::write_vm_bytes(optval.as_ptr() as *mut u8, &bytes)?;
+    }
+    Ok(bytes.len() as socklen_t)
+}
+
+/// Reads an `IP_*` integer option the way `do_ip_setsockopt` does.
+///
+/// Linux's `IP_*` option handlers accept either a full `int` or a single
+/// `unsigned char` (`if (optlen >= sizeof(int)) ... else if (optlen >=
+/// sizeof(char))`), because callers commonly pass a boolean as one byte.
+fn get_int_or_byte(val: UserConstPtr<u8>, len: socklen_t) -> KResult<i32> {
+    if len as usize >= size_of::<i32>() {
+        val.cast::<i32>().read_vm().map_err(KError::from)
+    } else if len as usize >= size_of::<u8>() {
+        let byte = val.read_vm().map_err(KError::from)?;
+        Ok(i32::from(byte))
+    } else {
+        // `do_ip_setsockopt` initialises `val = 0` and only overwrites it for a
+        // length of at least one byte, so a zero-length request means "disable"
+        // rather than EINVAL.
+        Ok(0)
+    }
+}
+
+/// Applies an `IP_*` option whose argument Linux reads as an `int` *or* a byte.
+///
+/// `do_ip_setsockopt` handles `IP_PKTINFO`, `IP_RECVTTL`, `IP_RECVTOS`,
+/// `IP_RECVFRAGSIZE` and `IP_MULTICAST_TTL` (among others) with `if (optlen >=
+/// sizeof(int)) ... else if (optlen >= sizeof(char))`, because callers commonly
+/// pass a boolean as one byte. This mirrors that, and reports whether the
+/// option was one of them.
+fn set_ip_length_tolerant(
+    socket: &Arc<Socket>,
+    optname: u32,
+    optval: UserConstPtr<u8>,
+    optlen: socklen_t,
+) -> KResult<Option<()>> {
+    let value = match optname {
+        linux_raw_sys::net::IP_PKTINFO
+        | linux_raw_sys::net::IP_RECVTTL
+        | linux_raw_sys::net::IP_RECVTOS
+        | linux_raw_sys::net::IP_RECVFRAGSIZE => get_int_or_byte(optval, optlen)?,
+        linux_raw_sys::net::IP_MULTICAST_TTL => get_int_or_byte(optval, optlen)?,
+        _ => return Ok(None),
+    };
+    match optname {
+        linux_raw_sys::net::IP_PKTINFO => {
+            let enabled = value != 0;
+            socket.set_option(SetSocketOption::IpPktinfo(&enabled))?;
+        }
+        linux_raw_sys::net::IP_RECVTTL => {
+            let enabled = value != 0;
+            socket.set_option(SetSocketOption::IpRecvTtl(&enabled))?;
+        }
+        linux_raw_sys::net::IP_RECVTOS => {
+            let enabled = value != 0;
+            socket.set_option(SetSocketOption::IpRecvTos(&enabled))?;
+        }
+        linux_raw_sys::net::IP_RECVFRAGSIZE => {
+            // `do_ip_setsockopt`: only raw and datagram sockets ever carry
+            // fragments, so a stream socket is EINVAL rather than silently
+            // tracking a flag it can never report.
+            let socket_type = socket.socket_type();
+            if socket_type != linux_raw_sys::net::SOCK_RAW as i32
+                && socket_type != linux_raw_sys::net::SOCK_DGRAM as i32
+            {
+                return Err(KError::InvalidInput);
+            }
+            let enabled = value != 0;
+            socket.set_option(SetSocketOption::IpRecvFragsize(&enabled))?;
+        }
+        linux_raw_sys::net::IP_MULTICAST_TTL => {
+            // `do_ip_setsockopt`: a stream socket cannot take it, a zero-length
+            // argument is `EINVAL` (this option has an explicit `optlen < 1`
+            // check, unlike the boolean ones above), `-1` means "use 1", and
+            // anything else outside 0..=255 is `EINVAL`. Treating the value as
+            // an unsigned byte would have accepted 256 and rejected -1, which is
+            // the common "reset" value.
+            if socket.socket_type() == linux_raw_sys::net::SOCK_STREAM as i32 || optlen < 1 {
+                return Err(KError::InvalidInput);
+            }
+            let ttl = if value == -1 { 1 } else { value };
+            if !(0..=255).contains(&ttl) {
+                return Err(KError::InvalidInput);
+            }
+            let ttl = ttl as u32;
+            socket.set_option(SetSocketOption::IpMulticastTtl(&ttl))?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(Some(()))
+}
+
+/// Applies `SO_BINDTOIFINDEX` the way `sock_bindtoindex_locked` does.
+///
+/// The capability check comes first, as in the reference: once a socket is
+/// bound to a device, changing or clearing that binding needs `CAP_NET_RAW`.
+/// A negative index is `EINVAL` rather than a value to store -- storing it
+/// would let an unprivileged caller clear a binding it may not have set and
+/// would turn into `ENODEV` when the socket later connects.
+fn set_bind_to_ifindex(
+    socket: &Arc<Socket>,
+    optval: UserConstPtr<u8>,
+    optlen: socklen_t,
+) -> KResult<()> {
+    let ifindex: i32 = if optlen as usize != size_of::<i32>() {
+        return Err(KError::InvalidInput);
+    } else {
+        optval.cast::<i32>().read_vm().map_err(KError::from)?
+    };
+    let mut bound = 0i32;
+    socket.get_option(GetSocketOption::BindToIfindex(&mut bound))?;
+    if bound != 0 && !kprocess::current_cred().has_cap(kcred::CAP_NET_RAW) {
+        return Err(KError::OperationNotPermitted);
+    }
+    if ifindex < 0 {
+        return Err(KError::InvalidInput);
+    }
+    socket.set_option(SetSocketOption::BindToIfindex(&ifindex))
+}
+
+/// Applies one `NETLINK_ADD_MEMBERSHIP` / `NETLINK_DROP_MEMBERSHIP` request.
+///
+/// `netlink_setsockopt` copies the option value before it switches on the
+/// option, so an unreadable buffer is `EFAULT` even for a caller that would then
+/// be refused for lack of privilege; the capability check runs after the read.
+fn set_group_membership(
+    socket: &Arc<Socket>,
+    optname: u32,
+    optval: UserConstPtr<u8>,
+    optlen: socklen_t,
+) -> KResult<()> {
+    // Linux dispatches SOL_NETLINK per family, so a UDP or TCP socket answers
+    // `inet_setsockopt`'s default before any value is read: ENOPROTOOPT and no
+    // user-memory access. Only a netlink socket reaches the copy below.
+    if !socket.is_netlink() {
+        return Err(LinuxError::ENOPROTOOPT.into());
+    }
+    // `netlink_setsockopt` copies `sizeof(int)` bytes when `optlen >=
+    // sizeof(int)` and leaves `val` at 0 for a shorter length, so a short
+    // request fails the group check with EINVAL rather than the length check.
+    let group: u32 = if optlen as usize >= size_of::<u32>() {
+        optval.cast::<u32>().read_vm().map_err(KError::from)?
+    } else {
+        0
+    };
+    check_group_membership_privilege(socket)?;
+    if optname == NETLINK_ADD_MEMBERSHIP {
+        socket.set_option(SetSocketOption::NetlinkAddMembership(&group))
+    } else {
+        socket.set_option(SetSocketOption::NetlinkDropMembership(&group))
+    }
+}
+
+/// Checks the family and the capability `NETLINK_ADD_MEMBERSHIP` needs.
+///
+/// Linux's `sock_setsockopt` answers EINVAL for an option a family does not
+/// implement, and that precedes any privilege check, so a non-netlink socket is
+/// refused as a wrong option rather than as a credentials failure. A netlink
+/// socket then goes through `netlink_allowed(sock, NL_CFG_F_NONROOT_RECV)`:
+/// the protocol's table decides, or CAP_NET_ADMIN overrides. `NETLINK_USERSOCK`
+/// sets only `NL_CFG_F_NONROOT_SEND`, so its groups need the capability, and
+/// `ns_capable`'s failure is EPERM.
+fn check_group_membership_privilege(socket: &Arc<Socket>) -> KResult<()> {
+    if !socket.allows_unprivileged_group_subscribe()
+        && !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN)
+    {
+        return Err(KError::OperationNotPermitted);
+    }
+    Ok(())
 }
 
 /// Sets a socket option at a specified protocol level.
@@ -500,12 +723,15 @@ pub fn sys_setsockopt(
 
     let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
+    // `do_sock_setsockopt` rejects a negative length before any option handler
+    // runs, so a `(socklen_t)-1` never reaches an option that treats "large
+    // enough" lengths as an `int` read.
+    if (optlen as i32) < 0 {
+        return Err(KError::InvalidInput);
+    }
     if level == PROTO_IP
         && let Some(option) = LegacySetOption::from_raw(optname)
     {
-        if (optlen as i32) < 0 {
-            return Err(KError::InvalidInput);
-        }
         option.set(socket.as_ref(), optval, optlen as usize)?;
         return Ok(0);
     }
@@ -538,17 +764,38 @@ pub fn sys_setsockopt(
     if level == SOL_NETLINK && optname == NETLINK_CAP_ACK {
         // Linux `netlink_setsockopt()` treats a short option length as a zero
         // value for NETLINK_CAP_ACK rather than rejecting it: it only reads
-        // the integer when `optlen >= sizeof(int)`.  A negative length is
-        // still invalid.
-        if (optlen as i32) < 0 {
-            return Err(LinuxError::EINVAL.into());
-        }
+        // the integer when `optlen >= sizeof(int)`.
         let enabled = if optlen >= size_of::<i32>() as socklen_t {
             optval.cast::<i32>().read_vm().map_err(KError::from)? != 0
         } else {
             false
         };
         socket.set_option(SetSocketOption::NetlinkCapAck(&enabled))?;
+        return Ok(0);
+    }
+    if level == PROTO_IP && set_ip_length_tolerant(&socket, optname, optval, optlen)?.is_some() {
+        return Ok(0);
+    }
+    if level == SOL_SOCKET
+        && (optname == linux_raw_sys::net::SO_SNDBUFFORCE
+            || optname == linux_raw_sys::net::SO_RCVBUFFORCE)
+    {
+        // `sock_setsockopt` gates both force forms on `sockopt_capable(
+        // CAP_NET_ADMIN)`: they bypass the `wmem_max`/`rmem_max` clamp, which is
+        // exactly the privilege a non-root caller must not have.
+        if !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN) {
+            // `sockopt_capable` returns `capable(cap)`, whose failure is EPERM.
+            return Err(KError::OperationNotPermitted);
+        }
+    }
+    if level == SOL_NETLINK
+        && (optname == NETLINK_ADD_MEMBERSHIP || optname == NETLINK_DROP_MEMBERSHIP)
+    {
+        set_group_membership(&socket, optname, optval, optlen)?;
+        return Ok(0);
+    }
+    if level == SOL_SOCKET && optname == linux_raw_sys::net::SO_BINDTOIFINDEX {
+        set_bind_to_ifindex(&socket, optval, optlen)?;
         return Ok(0);
     }
     if level == SOL_SOCKET && optname == SO_BINDTODEVICE {

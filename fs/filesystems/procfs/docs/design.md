@@ -104,6 +104,7 @@ Paths in this table are relative to `fs/filesystems/procfs/`.
 | `src/task_nodes/tee.rs` | Feature-gated TA metadata through `tee_task_iface` |
 | `src/basic_nodes/root.rs` | Boot command line, root entry registration, filesystem information, kernel settings and the `/proc/sys/fs/inotify` live limits |
 | `src/basic_nodes/cpuinfo.rs` | Per-CPU text formatting and Linux feature-name table over kcpu snapshots |
+| `src/boot_id.rs` | Per-boot random UUID behind `/proc/sys/kernel/random/boot_id`, drawn once from the entropy pool |
 | `src/mem_nodes/root.rs` | Allocator-derived memory statistics |
 | `src/device_nodes/root.rs` | Device, bus, driver, and topology views through `kdevice` |
 | `src/trace_nodes/root.rs` | Trace records, event metadata and enable controls through `ktracing` |

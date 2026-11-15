@@ -145,6 +145,18 @@ impl UdpPcb {
         !self.rx_queue.lock().is_empty()
     }
 
+    /// Length of the datagram at the head of the receive queue.
+    ///
+    /// `udp_ioctl(SIOCINQ)` copies out `first_packet_length`, the payload
+    /// length of the first queued datagram (0 for an empty queue). The payload
+    /// range excludes the IPv4 and UDP headers, which is what the receive path
+    /// hands to `recv` as well.
+    pub(super) fn head_datagram_len(&self) -> Option<usize> {
+        let queue = self.rx_queue.lock();
+        let range = queue.front()?.metadata().payload_range();
+        Some(range.end - range.start)
+    }
+
     pub(super) fn recv_datagram(&self, mode: RecvMode) -> Option<UdpDatagram> {
         // Take only a packet handle (or pop) under `SpinNoIrq`. Payload copy
         // runs after the guard drops.

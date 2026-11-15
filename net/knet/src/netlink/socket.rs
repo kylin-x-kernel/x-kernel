@@ -11,10 +11,12 @@ use kio::prelude::*;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 
 use super::{
-    NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NLM_F_ACK, NLM_F_REQUEST, NLMSG_HDR_LEN, NLMSG_MIN_TYPE,
-    NetlinkAddr, NetlinkPacket, NetlinkRxQueue, NetlinkSocketInner, UEVENT_SEQNUM, port,
+    NETLINK_AUDIT, NETLINK_GROUP_COUNT, NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NLM_F_ACK,
+    NLM_F_REQUEST, NLMSG_HDR_LEN, NLMSG_MIN_TYPE, NetlinkAddr, NetlinkPacket, NetlinkRxQueue,
+    NetlinkSocketInner, UEVENT_SEQNUM, port,
     rtnetlink::{
         build_ack_response, build_error_response_with_cap, handle_rtnetlink_request_with_cred,
+        normalize_reply_ports,
     },
     wire::{NlMsgHeader, align},
 };
@@ -54,6 +56,7 @@ impl NetlinkSocket {
                 protocol,
                 socket_type,
                 local_addr: ksync::RwLock::new(None),
+                groups: core::sync::atomic::AtomicU32::new(0),
                 remote_addr: ksync::RwLock::new(None),
                 send_lock: ksync::Mutex::new(()),
                 rx_queue: ksync::Mutex::new(NetlinkRxQueue::new(super::NETLINK_RX_QUEUE_LIMIT)),
@@ -74,8 +77,24 @@ impl NetlinkSocket {
         self.inner.protocol == NETLINK_KOBJECT_UEVENT
     }
 
+    /// Whether `NETLINK_ADD_MEMBERSHIP` is admitted without CAP_NET_ADMIN.
+    ///
+    /// `netlink_setsockopt` gates the membership commands on
+    /// `netlink_allowed(sock, NL_CFG_F_NONROOT_RECV)`, which is a per-protocol
+    /// table flag: `NETLINK_ROUTE` and `NETLINK_KOBJECT_UEVENT` set it, and
+    /// `NETLINK_USERSOCK` sets only `NL_CFG_F_NONROOT_SEND`. This reuses the
+    /// table's own `allows_unprivileged_receive` so the two policies cannot
+    /// drift.
+    pub fn allows_unprivileged_group_subscribe(&self) -> bool {
+        super::port::allows_unprivileged_receive(self.inner.protocol)
+    }
+
     fn local_addr_inner(&self) -> KResult<NetlinkAddr> {
-        Ok(self.inner.local_addr.read().unwrap_or_default())
+        let mut addr = self.inner.local_addr.read().unwrap_or_default();
+        // `getsockname` reports `nlk->groups`, which `NETLINK_ADD/DROP_MEMBERSHIP`
+        // updates after `bind()`; the stored address keeps the bind-time value.
+        addr.groups = self.inner.groups.load(Ordering::Relaxed);
+        Ok(addr)
     }
 
     fn handle_request(
@@ -325,6 +344,15 @@ impl NetlinkSocket {
                 options.sender_credentials.as_ref(),
             );
             self.push_responses(responses);
+        } else if self.inner.protocol == NETLINK_AUDIT {
+            // This kernel has no audit subsystem, and Linux's `audit_receive` is
+            // void: the send succeeds and `audit_receive_msg`'s error travels
+            // back as an `NLMSG_ERROR` ack, emitted here through the same
+            // `build_error_response` path rtnetlink uses. Answering success
+            // without the ack is what stalls a caller that set `NLM_F_ACK`, so
+            // the ack is the part that must exist, not the errno.
+            let responses = self.push_audit_unsupported(&request);
+            self.push_responses(responses);
         } else {
             // Linux always ends `netlink_sendmsg` with a unicast to the
             // destination port, including port 0. Protocols without a kernel
@@ -342,6 +370,46 @@ impl NetlinkSocket {
     /// still succeeds and any mutation has already taken effect.  In
     /// particular there is no aggregate reservation that could turn a full
     /// reply queue into `ENOBUFS` before running the request.
+    /// Builds the `NLMSG_ERROR` replies a message to the (absent) audit
+    /// subsystem earns.
+    ///
+    /// Every message type is unimplemented, which is `EINVAL` in
+    /// `audit_receive_msg`, and an error ack is reported whether or not the
+    /// caller asked for one (`audit_receive`: "send an ack if the user asked for
+    /// one ... or if there was an error").
+    fn push_audit_unsupported(&self, request: &[u8]) -> Vec<NetlinkPacket> {
+        let mut responses = Vec::new();
+        let mut remaining = request;
+        while let Some(header) = NlMsgHeader::read(remaining) {
+            let message_len = header.len as usize;
+            if message_len < NLMSG_HDR_LEN || message_len > remaining.len() {
+                break;
+            }
+            responses.push(NetlinkPacket {
+                from: NetlinkAddr { pid: 0, groups: 0 },
+                data: build_error_response_with_cap(
+                    remaining,
+                    LinuxError::EINVAL,
+                    self.inner.cap_ack.load(Ordering::Relaxed),
+                ),
+                credentials: None,
+            });
+            let step = align(message_len).min(remaining.len());
+            if step == 0 {
+                break;
+            }
+            remaining = &remaining[step..];
+        }
+        // `netlink_ack` stamps the reply with the sender's port id
+        // (`NETLINK_CB(skb).portid`), not with the `nlmsg_pid` the sender wrote
+        // into its request, so a sender that left that field zero can still
+        // match the ack to its socket.
+        normalize_reply_ports(
+            responses,
+            self.local_addr_inner().map_or(0, |addr| addr.pid),
+        )
+    }
+
     fn push_responses(&self, responses: Vec<NetlinkPacket>) {
         let mut queue = self.inner.rx_queue.lock();
         let mut pushed_any = false;
@@ -441,6 +509,11 @@ impl NetlinkSocket {
         let _send_guard = self.inner.send_lock.lock();
         let current = *self.inner.local_addr.read();
         let bound = port::bind(&self.inner, requested, current, can_net_admin)?;
+        // `netlink_bind` *replaces* the low 32 bits of `nlk->groups` with the
+        // requested `nl_groups` (`nlk->groups[0] = (old & ~0xffffffffUL) |
+        // groups`), so a rebind drops subscriptions taken earlier rather than
+        // adding to them.
+        self.inner.groups.store(bound.groups, Ordering::Relaxed);
         *self.inner.local_addr.write() = Some(bound);
         self.inner.poll_rx.wake();
         Ok(())
@@ -497,6 +570,12 @@ impl Configurable for NetlinkSocket {
             **enabled = self.inner.cap_ack.load(Ordering::Relaxed);
             return Ok(OptionHandled::Yes);
         }
+        if let GetSocketOption::NetlinkMemberships(groups) = opt {
+            // `netlink_getsockopt(NETLINK_LIST_MEMBERSHIPS)` copies the
+            // socket's `nlk->groups` bitmap, one bit per zero-based group.
+            **groups = self.inner.groups.load(Ordering::Relaxed);
+            return Ok(OptionHandled::Yes);
+        }
         if let GetSocketOption::Error(error) = opt {
             // `SO_ERROR` returns the pending positive errno and clears it.
             // Clearing this field does not clear receive-queue congestion;
@@ -508,25 +587,102 @@ impl Configurable for NetlinkSocket {
     }
 
     fn set_option_inner(&self, opt: SetSocketOption) -> KResult<OptionHandled> {
-        if let SetSocketOption::SendBuffer(size) = opt {
-            // Linux clamps the user hint to `net.core.wmem_max`, doubles it,
-            // and applies `SOCK_MIN_SNDBUF` to the effective buffer.
-            let requested = (*size).min(super::NETLINK_WMEM_MAX);
+        // `SO_SNDBUF`/`SO_RCVBUF` and their `CAP_NET_ADMIN` force forms reach
+        // the same `sock_setsockopt` arms on Linux and write `sk_sndbuf` and
+        // `sk_rcvbuf`, which netlink's send admission and receive queue account
+        // against. The force forms skip only the `*mem_max` clamp, so they must
+        // update these queues too: answering success while leaving the queue at
+        // its default would contradict both the readback and the admission
+        // limit imposed by the same socket layer.
+        let send = match opt {
+            SetSocketOption::SendBuffer(size) => Some((*size, false)),
+            SetSocketOption::SendBufferForce(size) => Some((*size, true)),
+            _ => None,
+        };
+        if let Some((size, is_force)) = send {
+            // Linux clamps the unforced hint to `net.core.wmem_max`, doubles
+            // it, and applies `SOCK_MIN_SNDBUF` to the effective buffer.
+            let requested = if is_force {
+                size
+            } else {
+                size.min(super::NETLINK_WMEM_MAX)
+            };
             let effective = requested.saturating_mul(2).max(super::NETLINK_SNDBUF_MIN);
             self.inner.send_buffer.store(effective, Ordering::Relaxed);
             return Ok(OptionHandled::Yes);
         }
-        if let SetSocketOption::ReceiveBuffer(size) = opt {
-            // `sock_setsockopt(SO_RCVBUF)` clamps the hint to
-            // `net.core.rmem_max`, doubles it, and applies
-            // `SOCK_MIN_RCVBUF` to the stored `sk_rcvbuf`.
-            let requested = (*size).min(super::NETLINK_RMEM_MAX);
+        let receive = match opt {
+            SetSocketOption::ReceiveBuffer(size) => Some((*size, false)),
+            SetSocketOption::ReceiveBufferForce(size) => Some((*size, true)),
+            _ => None,
+        };
+        if let Some((size, is_force)) = receive {
+            // `sock_setsockopt(SO_RCVBUF)` clamps the unforced hint to
+            // `net.core.rmem_max`, doubles it, and applies `SOCK_MIN_RCVBUF`
+            // to the stored `sk_rcvbuf`.
+            let requested = if is_force {
+                size
+            } else {
+                size.min(super::NETLINK_RMEM_MAX)
+            };
             let effective = requested.saturating_mul(2).max(super::NETLINK_RCVBUF_MIN);
             self.inner.rx_queue.lock().set_limit(effective);
             return Ok(OptionHandled::Yes);
         }
         if let SetSocketOption::NetlinkCapAck(enabled) = opt {
             self.inner.cap_ack.store(*enabled, Ordering::Relaxed);
+            return Ok(OptionHandled::Yes);
+        }
+        if let SetSocketOption::NetlinkAddMembership(group) = opt {
+            // `netlink_setsockopt` answers EINVAL for group 0 and for any group
+            // at or past the protocol's `ngroups`; silently succeeding would
+            // tell a subscriber it joined a group that will never deliver.
+            if !(1..=NETLINK_GROUP_COUNT as u32).contains(group) {
+                return Err(KError::InvalidInput);
+            }
+            // `netlink_setsockopt` runs the protocol's `netlink_bind` hook, and
+            // `rtnetlink_bind` requires CAP_NET_ADMIN for the reverse-path
+            // groups. `bind()` enforces the same rule here; subscribing by
+            // `setsockopt` must not be the cheaper way in.
+            if super::port::group_is_privileged(self.inner.protocol, *group)
+                && !kprocess::current_cred().has_cap(CAP_NET_ADMIN)
+            {
+                return Err(KError::OperationNotPermitted);
+            }
+            // `netlink_setsockopt` runs under `netlink_table_grab`, the same
+            // table lock `netlink_bind` takes, because `bind` replaces the whole
+            // mask and the two must not interleave. `send_lock` is this
+            // socket's serialisation point and is the one `bind_inner` holds
+            // across that replacement.
+            let _membership_guard = self.inner.send_lock.lock();
+            // The first subscription links the socket into the broadcast list
+            // (`netlink_update_subscriptions` -> `sk_add_bind_node` on the
+            // protocol's `mc_list`), which is independent of `bind()`: a socket
+            // that never binds still receives its groups' multicast.
+            if self
+                .inner
+                .groups
+                .fetch_or(1u32 << (*group - 1), Ordering::Relaxed)
+                == 0
+            {
+                super::port::subscribe(&self.inner);
+            }
+            return Ok(OptionHandled::Yes);
+        }
+        if let SetSocketOption::NetlinkDropMembership(group) = opt {
+            if !(1..=NETLINK_GROUP_COUNT as u32).contains(group) {
+                return Err(KError::InvalidInput);
+            }
+            // Same table lock as the add path: a concurrent rebind must not
+            // replace the mask between this clear and the list update.
+            let _membership_guard = self.inner.send_lock.lock();
+            // The last subscription leaving unlinks the socket from the
+            // broadcast list, as `netlink_update_subscriptions` does when the
+            // subscription count reaches zero.
+            let bit = 1u32 << (*group - 1);
+            if self.inner.groups.fetch_and(!bit, Ordering::Relaxed) == bit {
+                super::port::unsubscribe(&self.inner);
+            }
             return Ok(OptionHandled::Yes);
         }
         self.inner.general.set_option_inner(opt)

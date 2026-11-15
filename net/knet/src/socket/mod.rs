@@ -199,6 +199,38 @@ pub struct SocketErrorInfo {
     pub offender: Option<SocketAddr>,
 }
 
+/// The byte counts `SIOCOUTQ` and `SIOCINQ` copy out.
+///
+/// Both fields are byte counts, not message counts: `outq` is the data queued
+/// for the peer that it has not consumed yet, `inq` the data the caller can
+/// read next.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct QueueLengths {
+    /// Bytes queued towards the peer (Linux `sk_wmem_alloc` /
+    /// `unix_outq_len`; the unsent transmit buffer for TCP).
+    pub outq: i32,
+    /// Bytes ready to be read: the head datagram's length for datagram
+    /// sockets, the summed queued bytes for stream and seqpacket sockets.
+    pub inq: i32,
+}
+
+impl QueueLengths {
+    /// Builds both counts from byte totals.
+    ///
+    /// A queue can in principle outgrow `int`; the ioctl copy-out has no room
+    /// for that, so each count saturates instead of wrapping into a value a
+    /// caller could mistake for a small or negative queue.
+    pub(crate) fn from_bytes(outq: usize, inq: usize) -> Self {
+        fn saturate(bytes: usize) -> i32 {
+            i32::try_from(bytes).unwrap_or(i32::MAX)
+        }
+        Self {
+            outq: saturate(outq),
+            inq: saturate(inq),
+        }
+    }
+}
+
 /// The task identity behind a kernel-attached credentials record.
 ///
 /// The pid is kept as a task-number identity (`struct pid`), not a number:
@@ -393,6 +425,35 @@ pub trait SocketOps: Configurable {
     /// Shutdown the socket, closing the connection.
     fn shutdown(&self, how: Shutdown) -> KResult;
 
+    /// Whether the socket is in the listening state.
+    ///
+    /// `unix_inq_len` and `tcp_ioctl` refuse `SIOCINQ` for a listening socket
+    /// (it holds no data of its own) while `unix_outq_len` still answers
+    /// `SIOCOUTQ`, so the ioctl needs to tell the two apart before it asks for
+    /// the counts.
+    fn is_listening(&self) -> bool {
+        false
+    }
+
+    /// Reports the byte counts `SIOCOUTQ` and `SIOCINQ` copy out.
+    ///
+    /// `outq` is what the peer has not consumed yet (Linux's
+    /// `sk_wmem_alloc`/`unix_outq_len`, the unsent transmit buffer for TCP),
+    /// and `inq` is what the caller can read next: the head datagram's length
+    /// for datagram sockets (`first_packet_length`, `unix_inq_len` on
+    /// `SOCK_DGRAM`), the summed queued bytes for stream and seqpacket sockets,
+    /// and `tcp_inq()` for TCP.
+    ///
+    /// `None` reports that the transport keeps its receive queue where this
+    /// layer cannot inspect it. The ioctl then answers `ENOTTY`, the answer an
+    /// unsupported socket ioctl has always given. It must not substitute zero:
+    /// glibc 2.43's resolver issues `FIONREAD` on this socket after each query
+    /// and abandons the lookup with `EAI_AGAIN` when it reads 0, even though
+    /// the reply is already queued.
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
+        Ok(None)
+    }
+
     /// Returns the `SO_TYPE` value reported by `getsockopt(SOL_SOCKET,
     /// SO_TYPE)`: the type the socket was created with, which runtime
     /// supervisors (containerd-shim, ttrpc) use to validate inherited
@@ -462,6 +523,14 @@ impl<T: SocketOps + ?Sized> SocketOps for KBox<T> {
     fn shutdown(&self, how: Shutdown) -> KResult {
         (**self).shutdown(how)
     }
+
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
+        (**self).queue_lengths()
+    }
+
+    fn is_listening(&self) -> bool {
+        (**self).is_listening()
+    }
 }
 
 /// Network socket abstraction.
@@ -488,6 +557,37 @@ impl Socket {
         match self {
             Self::Netlink(socket) => socket.bind_with_cred(local_addr, cred),
             _ => <Self as SocketOps>::bind(self, local_addr),
+        }
+    }
+
+    /// Whether this socket is an `AF_NETLINK` socket.
+    ///
+    /// `SOL_NETLINK` options are meaningful only on one; Linux's
+    /// `sock_setsockopt` answers EINVAL for an option a family does not
+    /// implement, and that decision precedes any privilege check.
+    pub fn is_netlink(&self) -> bool {
+        matches!(self, Self::Netlink(_))
+    }
+
+    /// Whether `NETLINK_ADD_MEMBERSHIP` is admitted without CAP_NET_ADMIN.
+    ///
+    /// `netlink_setsockopt` gates both membership commands on
+    /// `netlink_allowed(sock, NL_CFG_F_NONROOT_RECV)`, which passes when the
+    /// protocol's table carries that flag *or* the caller has CAP_NET_ADMIN.
+    /// Every netlink protocol this kernel implements sets it: `NETLINK_ROUTE`
+    /// (`rtnetlink_net_init`) and `NETLINK_KOBJECT_UEVENT`
+    /// (`uevent_net_init`) both do, so unprivileged udev-style subscribers are
+    /// normal. The capability therefore only matters for a protocol that does
+    /// not, and none is implemented here; the check stays so adding one cannot
+    /// silently grant subscription. A non-netlink socket answers `false`; its
+    /// own option dispatcher rejects the command before privilege matters.
+    pub fn allows_unprivileged_group_subscribe(&self) -> bool {
+        match self {
+            // Linux's `NL_CFG_F_NONROOT_RECV` is a per-protocol table flag;
+            // the netlink layer owns that table and answers from it, so the
+            // policy lives in one place.
+            Self::Netlink(socket) => socket.allows_unprivileged_group_subscribe(),
+            _ => false,
         }
     }
 

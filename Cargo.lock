@@ -2933,6 +2933,7 @@ dependencies = [
  "linux-raw-sys",
  "log",
  "net",
+ "osvm",
  "ringbuf",
  "smoltcp",
  "tipc",
@@ -4548,6 +4549,7 @@ dependencies = [
  "kio",
  "klazy",
  "klogger",
+ "kns",
  "kprocess",
  "kquota",
  "ksync",
@@ -4772,6 +4774,7 @@ dependencies = [
 name = "procfs"
 version = "0.3.0-dev"
 dependencies = [
+ "entropy",
  "kaddr_layout",
  "kalloc",
  "kalloc-types",
@@ -4786,6 +4789,7 @@ dependencies = [
  "klogger",
  "kns",
  "kprocess",
+ "ksync",
  "ktask",
  "ktime",
  "ktime_types",

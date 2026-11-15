@@ -278,9 +278,28 @@ open. After peer closure, background reads return EIO without consuming input
 reserved for foreground readers. Linux's full
 `SIGTTIN`/orphaned-process-group semantics are not implemented yet.
 
-`TIOCSCTTY` does not yet support Linux's privileged `arg == 1`
-cross-session forced acquisition; that request returns `EPERM`, and other
-non-zero arguments return `EINVAL`.
+`TIOCSCTTY` with `arg == 1` performs Linux's privileged cross-session forced
+acquisition. `tiocsctty`'s conditions are applied before any state changes:
+
+- a caller that is its session's leader *and* whose session already owns the
+  terminal succeeds without changing anything;
+- otherwise the caller must be its session's leader **and** have no controlling
+  terminal yet (the `signal->tty` test), else `EPERM`;
+- `CAP_SYS_ADMIN` is required only for taking the terminal away from a live
+  session; claiming one that no session owns needs no capability.
+
+A steal replaces the current owner, so the
+previous claim is released before the new one is installed - the two are mutually
+exclusive and `ensure_session` would otherwise answer `EBUSY`, which is the case
+this path exists for. Everything the call changes is rolled back on failure,
+including the previous owner's foreground group (clearing a session drops it too),
+so a rejected steal leaves the terminal exactly as it was rather than stranding
+it without a session; a session that already names a different terminal yields
+`EBUSY`. Other non-zero arguments return `EINVAL`.
+
+This is the only `TIOCSCTTY` path that reassigns a terminal an existing getty
+holds, which is why it is capability-gated rather than merely
+session-leader-gated.
 
 ## Audit Checklist
 

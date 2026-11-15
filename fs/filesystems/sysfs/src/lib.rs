@@ -183,6 +183,29 @@ impl DeviceProjection {
     }
 }
 
+/// Strips the one trailing newline or NUL `kobject_action_type` ignores.
+fn strip_action_terminator(data: &[u8]) -> &[u8] {
+    match data {
+        [rest @ .., b'\n' | 0] => rest,
+        _ => data,
+    }
+}
+
+/// Parses a `uevent` write the way `kobject_action_type` does.
+///
+/// One trailing newline or NUL is dropped, then the action is the first token
+/// up to a single space: `udevadm trigger` writes `add <uuid>` and userspace
+/// may append further `KEY=VALUE` words. Any other whitespace stays inside the
+/// token, so `add\t<uuid>`, an embedded newline or a leading tab does not name
+/// an action and the write is refused, matching the reference parser.
+fn parse_uevent_action(data: &[u8]) -> VfsResult<UeventAction> {
+    let text = strip_action_terminator(data);
+    let text = core::str::from_utf8(text).map_err(|_| VfsError::InvalidInput)?;
+    let action = text.split(' ').next().ok_or(VfsError::InvalidInput)?;
+    UeventAction::try_from(action).map_err(|()| VfsError::InvalidInput)
+}
+
+/// The device projection tree shared by every lookup.
 fn device_projection() -> &'static Mutex<DeviceProjection> {
     #[expect(
         clippy::expect_used,
@@ -831,6 +854,17 @@ fn build_tree(
                 TreeEntry::Symlink(relative_symlink(&source, &target)),
             );
         }
+        // logind opens /sys/class/tty/tty0/active to decide whether seat0 has
+        // VTs (seat_has_vts); without it CreateSession rejects VTNr. The fixed
+        // VT console is always VT 1 (ktty's VT_GETSTATE reports VT 1), so
+        // publish that alias as the active console.
+        if registration.class() == "tty" && registration.name() == "tty0" {
+            add_entry(
+                &mut tree,
+                format!("{leaf}/active"),
+                TreeEntry::CharacterAttribute(registration.clone(), append_line("tty1")),
+            );
+        }
     }
 
     for projected in nodes.values() {
@@ -908,12 +942,18 @@ fn build_tree(
                 ));
             }
             properties.push(("DRIVER".to_string(), node.driver_name().to_string()));
-            let path = format!("devices/{physical}/uevent");
+            // `DEVPATH` names the device directory, never the `uevent`
+            // attribute inside it; Linux's `kobject_uevent_env` reports
+            // `/devices/pci0000:00/0000:00:04.0`, and udev derives its database
+            // entry (`data/+pci:0000:00:04.0`) from that path. Publishing the
+            // attribute path makes udev look for a device called "uevent" and
+            // drop the event.
+            let device_path = format!("devices/{physical}");
             add_entry(
                 &mut tree,
-                path.clone(),
+                format!("{device_path}/uevent"),
                 TreeEntry::RawUevent {
-                    path,
+                    path: device_path,
                     subsystem: "pci".to_string(),
                     contents: render_uevent(&properties),
                     properties,
@@ -1057,18 +1097,18 @@ impl SimpleDirOps for SysfsDirectory {
                                 kdevice_uevent::uevent_file_contents(node, scope)
                             })
                             .map(Some),
-                        SimpleFileOperation::Write { data, .. } => projected
-                            .with_available(|node| -> VfsResult<()> {
-                                let action = core::str::from_utf8(data)
-                                    .map_err(|_| VfsError::InvalidInput)?
-                                    .trim_matches(['\0', '\n', '\r', ' ']);
-                                let action = UeventAction::try_from(action)
-                                    .map_err(|()| VfsError::InvalidInput)?;
-                                kdevice_uevent::publish(action, node, scope);
-                                Ok(())
-                            })
-                            .and_then(|result| result)
-                            .map(|()| None),
+                        SimpleFileOperation::Write { data, .. } => {
+                            projected
+                                .with_available(|node| -> VfsResult<()> {
+                                    // `kobject_uevent_store` parses the whole
+                                    // attribute text before it publishes.
+                                    let action = parse_uevent_action(data)?;
+                                    kdevice_uevent::publish(action, node, scope);
+                                    Ok(())
+                                })
+                                .and_then(|result| result)
+                                .map(|()| None)
+                        }
                     }
                 });
                 lookup.file(
@@ -1090,11 +1130,9 @@ impl SimpleDirOps for SysfsDirectory {
                     match operation {
                         SimpleFileOperation::Read => Ok(Some(contents.clone())),
                         SimpleFileOperation::Write { data, .. } => {
-                            let action = core::str::from_utf8(data)
-                                .map_err(|_| VfsError::InvalidInput)?
-                                .trim_matches(['\0', '\n', '\r', ' ']);
-                            let action = UeventAction::try_from(action)
-                                .map_err(|()| VfsError::InvalidInput)?;
+                            // The device-directory uevent parses its action
+                            // with the same rule as the device one.
+                            let action = parse_uevent_action(data)?;
                             kdevice_uevent::publish_raw(action, &path, &subsystem, &properties);
                             Ok(None)
                         }

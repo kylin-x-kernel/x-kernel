@@ -23,6 +23,7 @@ memfs.workspace = true
 fs_context.workspace = true
 kerrno.workspace = true
 kcred.workspace = true
+kns.workspace = true
 kquota.workspace = true
 ktime_types.workspace = true
 ktime.workspace = true

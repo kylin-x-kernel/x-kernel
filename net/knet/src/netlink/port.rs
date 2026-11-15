@@ -12,7 +12,7 @@
 //! userspace multicast the same addressing and filtering rules.
 
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -36,21 +36,32 @@ static_lock! {
 
 struct PortTable {
     sockets: BTreeMap<(i32, u32), Weak<NetlinkSocketInner>>,
+    /// Sockets holding at least one group subscription, the equivalent of
+    /// Linux's per-protocol `mc_list` (`netlink_update_subscriptions` ->
+    /// `sk_add_bind_node`).
+    ///
+    /// This list is what makes an *unbound* subscriber reachable: the port map
+    /// above is keyed by the id `bind()` allocates, and `NETLINK_ADD_MEMBERSHIP`
+    /// is valid without one.
+    subscribers: Vec<Weak<NetlinkSocketInner>>,
 }
 
 impl PortTable {
     const fn new() -> Self {
         Self {
             sockets: BTreeMap::new(),
+            subscribers: Vec::new(),
         }
     }
 
     fn retain_live(&mut self) {
-        self.sockets.retain(|_, socket| {
+        let is_live = |socket: &Weak<NetlinkSocketInner>| {
             socket
                 .upgrade()
                 .is_some_and(|socket| !socket.closed.load(Ordering::Acquire))
-        });
+        };
+        self.sockets.retain(|_, socket| is_live(socket));
+        self.subscribers.retain(is_live);
     }
 
     /// Allocates an unused port ID for an unbound socket.
@@ -193,6 +204,23 @@ pub(super) fn allows_unprivileged_send(protocol: i32) -> bool {
     group_policy(protocol).is_some_and(|policy| policy.allows_unprivileged_send)
 }
 
+/// Whether `group` is one `rtnetlink_bind` restricts to CAP_NET_ADMIN.
+///
+/// The reverse-path groups expose routing topology, so Linux refuses them to an
+/// unprivileged subscriber through both `bind()` and `NETLINK_ADD_MEMBERSHIP`.
+pub(super) fn group_is_privileged(protocol: i32, group: u32) -> bool {
+    group_policy(protocol).is_some_and(|policy| policy.privileged_groups & group_bit(group) != 0)
+}
+
+/// Returns whether an unprivileged socket may join a multicast group.
+///
+/// Linux gates this on `NL_CFG_F_NONROOT_RECV`. `NETLINK_ROUTE` and
+/// `NETLINK_KOBJECT_UEVENT` set it; `NETLINK_USERSOCK` sets only
+/// `NL_CFG_F_NONROOT_SEND`, so its groups need `CAP_NET_ADMIN`.
+pub(super) fn allows_unprivileged_receive(protocol: i32) -> bool {
+    group_policy(protocol).is_some_and(|policy| policy.allows_unprivileged_receive)
+}
+
 /// Binds `socket` to `requested`, allocating a port ID when an unbound socket
 /// leaves `requested.pid` zero.
 ///
@@ -262,8 +290,40 @@ pub(super) fn bind(
     })
 }
 
-/// Delivers `data` to every live socket bound to `protocol` whose subscription
-/// mask contains `group`.
+/// Links a socket into the protocol's broadcast list.
+///
+/// Called when `NETLINK_ADD_MEMBERSHIP` takes the socket from no subscription
+/// to one, mirroring `netlink_update_subscriptions`' `sk_add_bind_node`. An
+/// unbound socket lives only here, which is why `publish` walks both this list
+/// and the port map.
+pub(super) fn subscribe(socket: &Arc<NetlinkSocketInner>) {
+    let mut ports = PORTS.lock();
+    ports.retain_live();
+    let ptr = Arc::as_ptr(socket);
+    if ports
+        .subscribers
+        .iter()
+        .filter_map(Weak::upgrade)
+        .any(|existing| Arc::as_ptr(&existing) == ptr)
+    {
+        return;
+    }
+    ports.subscribers.push(Arc::downgrade(socket));
+}
+
+/// Unlinks a socket whose last subscription was dropped.
+pub(super) fn unsubscribe(socket: &Arc<NetlinkSocketInner>) {
+    let mut ports = PORTS.lock();
+    let ptr = Arc::as_ptr(socket);
+    ports.subscribers.retain(|weak| match weak.upgrade() {
+        Some(existing) => Arc::as_ptr(&existing) != ptr,
+        None => false,
+    });
+}
+
+/// Delivers `data` to every live socket of `protocol` whose subscription mask
+/// contains `group`: bound sockets from the port map plus unbound subscribers
+/// from the broadcast list.
 ///
 /// Delivery is best effort: a full receive queue drops the packet without
 /// blocking the publisher, matching kernel netlink multicast.  Userspace
@@ -293,28 +353,40 @@ pub(super) fn publish(
     let recipients: Vec<_> = {
         let mut ports = PORTS.lock();
         ports.retain_live();
+        // A subscribed socket is in both tables once it binds, so the union is
+        // de-duplicated by identity; delivering twice would duplicate messages
+        // a bound subscriber expects once.
+        let mut seen = BTreeSet::new();
         ports
             .sockets
             .values()
+            .chain(ports.subscribers.iter())
             .filter_map(Weak::upgrade)
             .filter(|socket| socket.protocol == protocol)
             .filter(|socket| !exclude_socket.is_some_and(|exclude| Arc::ptr_eq(exclude, socket)))
+            .filter(|socket| seen.insert(Arc::as_ptr(socket) as usize))
             .collect()
     };
 
     for socket in recipients {
-        // The filter above is only a snapshot: `bind()` can replace the
-        // subscription mask after it is released.  Hold the address lock from
-        // the mask check through the enqueue; `bind_inner()` takes the write
-        // side before publishing the new mask.  A concurrent unsubscribe
-        // therefore either wins and suppresses this packet, or waits until the
-        // packet is queued, never removing the group between the check and the
-        // push.
+        // `netlink_setsockopt(NETLINK_ADD_MEMBERSHIP)` links the socket into the
+        // protocol's `mc_list` (`netlink_update_subscriptions` ->
+        // `sk_add_bind_node`), and `netlink_broadcast_filtered` walks exactly
+        // that list with `sk_for_each_bound`. An unbound subscriber is therefore
+        // a recipient; only the sender-exclusion check below needs a port id.
+        //
+        // The registry snapshot above is not the subscription decision, so the
+        // live mask is read here, once per recipient. The mask is an atomic the
+        // subscribe/unsubscribe path updates without this record's locks, so a
+        // concurrent unsubscribe is observed either before this read (the packet
+        // is suppressed) or after it (the packet is already claimed and is
+        // queued) - never lost between a check and a push.
         let addr_guard = socket.local_addr.read();
-        let Some(local_addr) = *addr_guard else {
+        let local_addr = *addr_guard;
+        if socket.groups.load(Ordering::Relaxed) & mask == 0 {
             continue;
-        };
-        if exclude_pid == Some(local_addr.pid) || local_addr.groups & mask == 0 {
+        }
+        if local_addr.is_some_and(|addr| exclude_pid == Some(addr.pid)) {
             continue;
         }
         let packet = NetlinkPacket {

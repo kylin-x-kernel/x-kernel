@@ -30,6 +30,7 @@ const ANON_INODE_FS_MAGIC: u32 = 0x0904_1934;
 pub struct AnonInodeFs {
     mount: Arc<Mount>,
     singleton_inode: Arc<VfsInode>,
+    socket_inode: Arc<VfsInode>,
 }
 
 impl AnonInodeFs {
@@ -44,6 +45,7 @@ impl AnonInodeFs {
         Self {
             mount,
             singleton_inode: new_anon_inode(),
+            socket_inode: new_anon_inode_typed(NodeType::Socket),
         }
     }
 
@@ -81,9 +83,7 @@ impl AnonInodeFs {
     where
         T: Any + Send + Sync + 'static,
     {
-        let open_flags =
-            open_flags & (OpenFlags::WRITE_ONLY | OpenFlags::READ_WRITE | OpenFlags::NONBLOCK);
-        let file = self.mount.alloc_file_pseudo(
+        let file = self.open_shared(
             self.singleton_inode.clone(),
             name,
             mode,
@@ -93,6 +93,56 @@ impl AnonInodeFs {
         )?;
         file.set_private_data(private_data);
         Ok(file)
+    }
+
+    /// Creates an open socket file description whose inode stats as `S_IFSOCK`.
+    ///
+    /// Socket consumers (e.g. dbus-broker validating a socket-activated
+    /// listener) require `fstat` to report a socket and `fstatfs` to report
+    /// sockfs, so sockets use a socket-typed inode rather than the shared
+    /// anonymous inode.
+    pub fn get_socket_file<T>(
+        &self,
+        name: &str,
+        file_operations: Arc<dyn FileOperations>,
+        private_data: Arc<T>,
+        mode: FMode,
+        open_flags: OpenFlags,
+        cred: Arc<Cred>,
+    ) -> VfsResult<Arc<VfsFile>>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        let file = self.open_shared(
+            self.socket_inode.clone(),
+            name,
+            mode,
+            open_flags,
+            file_operations,
+            cred,
+        )?;
+        file.set_private_data(private_data);
+        Ok(file)
+    }
+
+    /// Opens `name` on one of the two shared inodes.
+    ///
+    /// Only the inode differs between the two entry points: every anonymous
+    /// file shares its inode with the others of its kind, so the access mode is
+    /// the per-descriptor part and the remaining open flags are dropped.
+    fn open_shared(
+        &self,
+        inode: Arc<VfsInode>,
+        name: &str,
+        mode: FMode,
+        open_flags: OpenFlags,
+        file_operations: Arc<dyn FileOperations>,
+        cred: Arc<Cred>,
+    ) -> VfsResult<Arc<VfsFile>> {
+        let open_flags =
+            open_flags & (OpenFlags::WRITE_ONLY | OpenFlags::READ_WRITE | OpenFlags::NONBLOCK);
+        self.mount
+            .alloc_file_pseudo(inode, name, mode, open_flags, file_operations, cred)
     }
 }
 
@@ -111,8 +161,10 @@ impl InodeOperations for AnonInodeOperations {
         _request_mask: GetattrRequestMask,
         _query_flags: GetattrQueryFlags,
     ) -> VfsResult<Metadata> {
-        let mut metadata = path.ok_or(VfsError::InvalidInput)?.metadata();
-        metadata.mode = metadata.mode.with_node_type(NodeType::Unknown);
+        let metadata = path.ok_or(VfsError::InvalidInput)?.metadata();
+        // Keep the inode's own node type: sockets created through this
+        // filesystem must stat as S_IFSOCK (dbus-broker validates a passed
+        // listener that way); other anonymous inodes stay Unknown.
         Ok(metadata)
     }
 
@@ -140,12 +192,16 @@ impl InodeOperations for AnonInodeOperations {
 }
 
 fn new_anon_inode() -> Arc<VfsInode> {
+    new_anon_inode_typed(NodeType::Unknown)
+}
+
+fn new_anon_inode_typed(node_type: NodeType) -> Arc<VfsInode> {
     let timestamp = ktime::realtime();
     let init = VfsInodeInit::new(
         get_next_ino(),
         0,
         Umode::new(
-            NodeType::Unknown,
+            node_type,
             NodePermission::OWNER_READ | NodePermission::OWNER_WRITE,
         ),
     )

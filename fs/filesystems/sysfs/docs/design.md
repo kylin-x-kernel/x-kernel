@@ -21,7 +21,11 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 Named KVFS cdev registrations use the same device-projection tree as hardware
 nodes, at `devices/virtual/<class>/<name>` with class/dev links and read-only
 identity attributes. Name, class, dev_t and availability come from the cdev
-registration handle; there is no ConsoleAttribute or hardcoded tty0/tty1 path.
+registration handle. The one class-specific attribute is `/sys/class/tty/tty0/active`, which
+is projected for the `tty0` registration and reports the fixed VT console (`tty1`, the value
+ktty's `VT_GETSTATE` reports); logind's `seat_has_vts()` reads it to decide whether seat0 has
+virtual terminals, and without it `CreateSession` rejects a `VTNr`. No other class needs a
+per-name attribute, and the projection for every other cdev registration stays generic.
 Sysfs subscribes atomically with a registry snapshot, and named add/remove
 callbacks rebuild/invalidate the projection after registry locks are released.
 Read closures recheck registration availability. These virtual identity uevent
@@ -40,7 +44,10 @@ device-management clients.
   bus, driver, and character-number paths.
 - Render read-only attributes and relative symlinks from owned snapshots.
 - Validate `uevent` action writes and pass them to the shared kobject event
-  publisher.
+  publisher. The action is parsed as `kobject_action_type` does: one trailing
+  newline or NUL is dropped, the action is the token before the first single
+  space (`udevadm trigger` writes `add <uuid>`), and any other whitespace is
+  part of the token, so a tab or an embedded newline is refused with `EINVAL`.
 - Apply Linux-compatible permissions: ordinary attributes are `0444` and
   writable `uevent` attributes are `0644`.
 

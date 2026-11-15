@@ -920,9 +920,9 @@ socket cannot keep receiving or pin its numeric port ID.
 
 `bind` installs the requested 32-bit `nl_groups` mask. Bits the protocol does
 not implement are masked off instead of rejected, matching `netlink_bind`.
-`NETLINK_ROUTE` advertises 36 route groups, but only the first 32 fit in
-`nl_groups`; groups 33 through 36 require `NETLINK_ADD_MEMBERSHIP`, which this
-stack does not yet implement. `NETLINK_KOBJECT_UEVENT` exposes all 32 group bits,
+`NETLINK_ROUTE` advertises 36 route groups, but only the first 32 fit in the
+modeled 32-bit mask; groups 33 through 36 are unreachable here because
+`NETLINK_ADD_MEMBERSHIP` enforces the same 32-group bound. `NETLINK_KOBJECT_UEVENT` exposes all 32 group bits,
 mirroring Linux's `__netlink_kernel_create` minimum group count; kernel-originated
 uevents use group 1. `getsockname` reports the effective mask. Route notifications use group `g` with the bit
 `1 << (g - 1)`: link, neighbor, IPv4 address, and IPv4 route events map to
@@ -941,10 +941,42 @@ changed, so a rejected bind leaves the previous subscription untouched. POSIX
 `bind` passes the syscall credential through `Socket::bind_with_cred`;
 credential-free `SocketOps::bind` callers have no administrative authority.
 
-Kernel publishers deliver a message only to live, bound sockets whose mask
-contains the event group. Delivery snapshots the registry under its lock, then
-enqueues and wakes receivers after releasing it. Receive queues model Linux's
-default `sk_rcvbuf` of 212992 bytes. `SO_RCVBUF` clamps its hint to
+Kernel publishers deliver a message only to live sockets whose mask contains
+the event group: bound sockets from the port registry plus unbound sockets that
+hold a subscription, which `NETLINK_ADD_MEMBERSHIP` links into a broadcast list
+of its own (Linux's `mc_list`). Delivery snapshots both under the registry lock
+and de-duplicates a socket that appears in both, then enqueues and wakes
+receivers after releasing it. Receive queues model Linux's
+default `sk_rcvbuf` of 212992 bytes. The general socket layer applies the same
+`sock_setsockopt` rule to every family: `SO_SNDBUF`/`SO_RCVBUF` clamp the hint
+to the modeled `wmem_max`/`rmem_max` (4 MiB), double it, and floor it at
+`SOCK_MIN_SNDBUF`/`SOCK_MIN_RCVBUF` (4608/2304), while `SO_SNDBUFFORCE` and
+`SO_RCVBUFFORCE` skip only the clamp. `getsockopt` reports the doubled value,
+which is what a client that sets N and reads back expects.
+
+`SIOCOUTQ` and `SIOCINQ`/`FIONREAD` are served by `SocketOps::queue_lengths`, a
+per-transport queue-depth query rather than a generic counter. Unix stream and
+seqpacket report their channel occupancy on both sides, which is what
+`unix_inq_len` sums for `SOCK_STREAM`/`SOCK_SEQPACKET` and what
+`unix_outq_len` reports for the peer's unread bytes. UDP reports the head
+datagram's payload length for `SIOCINQ`, as `udp_ioctl` does through
+`first_packet_length`; its `SIOCOUTQ` is 0 because `send` hands each datagram to
+the device before it returns. TCP reports its receive queue for `SIOCINQ` and
+its unsent transmit buffer for `SIOCOUTQ`, and a listening TCP or unix socket
+answers `EINVAL` to `SIOCINQ` like `tcp_ioctl` and `unix_inq_len`.
+
+A transport that cannot inspect its own queue returns `None`, and the ioctl
+answers `ENOTTY`, which is what an unsupported socket ioctl has always
+answered. Unix datagram is the only such transport today: `unix_inq_len` would
+report its head message's length, but the messages live in an
+`async_channel::Receiver` with no peek, so the length is not readable without
+consuming a message the caller did not ask for. A fabricated 0 is not an
+acceptable substitute. glibc 2.43's resolver issues `FIONREAD` on its UDP
+socket after each query and abandons the lookup with `EAI_AGAIN` when it reads
+0, even though the reply is already queued, so answering 0 for a queue this
+layer cannot see breaks name resolution. Reporting the real head length for
+unix datagram needs a peekable queue, which is a separate change to how
+messages are enqueued, dequeued and woken. `SO_RCVBUF` clamps its hint to
 `net.core.rmem_max` (4 MiB), doubles it, and applies the
 `SOCK_MIN_RCVBUF` floor of 2304; `getsockopt` reports the effective limit.
 Lowering the limit does not purge packets already queued. Admission adds the

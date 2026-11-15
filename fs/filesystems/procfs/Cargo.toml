@@ -35,10 +35,12 @@ kalloc.workspace = true
 kcpu.workspace = true
 kcpu_id_map.workspace = true
 kdevice.workspace = true
+entropy.workspace = true
 khal.workspace = true
 klockstat = { workspace = true, optional = true }
 klogger.workspace = true
 kprocess.workspace = true
+ksync.workspace = true
 ktask.workspace = true
 ktty.workspace = true
 ktime_types.workspace = true

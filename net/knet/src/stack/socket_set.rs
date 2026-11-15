@@ -249,6 +249,26 @@ impl<'a> SocketSetWrapper<'a> {
         f(socket)
     }
 
+    /// Runs `f` on the socket only if `handle` still refers to a live one.
+    ///
+    /// smoltcp's `get_mut` panics for a removed handle. Most callers run inside
+    /// the socket's own lifetime and cannot see that, but an ioctl may be
+    /// issued on a descriptor whose transport has already been torn down (a
+    /// peer-close race), so those paths need a non-panicking query.
+    pub(crate) fn try_with_socket_mut<R>(
+        &self,
+        handle: SocketHandle,
+        f: impl FnOnce(&mut smoltcp::socket::tcp::Socket<'_>) -> R,
+    ) -> Option<R> {
+        let mut set = self.inner.lock();
+        set.iter_mut()
+            .find(|(candidate, _)| *candidate == handle)
+            .and_then(|(_, socket)| match socket {
+                smoltcp::socket::Socket::Tcp(tcp) => Some(f(tcp)),
+                _ => None,
+            })
+    }
+
     pub(crate) fn remove(&self, handle: SocketHandle) {
         self.inner.lock().remove(handle);
     }

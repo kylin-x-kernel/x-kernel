@@ -87,7 +87,7 @@ the scanout resource when the last reference goes away. Consequences:
   event-slot reservation.
 - On-target ABI tests, run in a QEMU virtio-gpu guest (`GRAPHIC=y ACCEL=n`):
   - `drm-render-node` (5): render node exists, permission matrix (`CREATE_DUMB`
-    → `EACCES`, `PRIME` unknown handle → `EINVAL`), `DIRTYFB` with zero and
+    → `EACCES`, `PRIME` unknown handle → `ENOENT`), `DIRTYFB` with zero and
     unknown ids → `ENOENT`, `DESTROY_DUMB` before `RMFB`, per-file handle
     scoping;
   - existing suites, unmodified: `drm-identity` (1), `drm-mode` (7),

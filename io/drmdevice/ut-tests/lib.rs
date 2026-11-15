@@ -897,6 +897,50 @@ fn flink_names_an_object_once_and_open_reaches_it_from_another_file() {
     );
 }
 
+/// A PRIME export accepts `DRM_CLOEXEC | DRM_RDWR` and nothing else.
+///
+/// `drm_prime_handle_to_fd_ioctl` admits exactly those two flags, and
+/// `DRM_RDWR` is `O_RDWR`. Mesa's `gbm_bo_get_fd_for_plane` exports a buffer it
+/// renders into with both set, so rejecting `DRM_RDWR` failed every swapchain
+/// allocation with `EINVAL` and the compositor fell back to no buffer at all.
+#[def_test]
+fn a_prime_export_accepts_the_read_write_flag() {
+    const DRM_CLOEXEC: u32 = 0o2000000;
+    const DRM_RDWR: u32 = 2;
+
+    // The word Mesa passes: close-on-exec plus read/write.
+    assert!(crate::gem::prime_export_flags_valid(
+        DRM_CLOEXEC | DRM_RDWR
+    ));
+    assert!(crate::gem::prime_export_flags_valid(DRM_CLOEXEC));
+    assert!(crate::gem::prime_export_flags_valid(DRM_RDWR));
+    assert!(crate::gem::prime_export_flags_valid(0));
+    // Any other bit is `EINVAL`, as the ioctl's own check reports it.
+    assert!(!crate::gem::prime_export_flags_valid(0x4));
+    assert!(!crate::gem::prime_export_flags_valid(DRM_CLOEXEC | 0x4));
+
+    // The ABI constants match the header, so the admitted set is the real one:
+    // `DRM_RDWR` is `O_RDWR`, which is 2 on every Linux target.
+    assert_eq!(crate::abi::DRM_RDWR, DRM_RDWR, "DRM_RDWR is O_RDWR");
+    assert_eq!(crate::abi::DRM_CLOEXEC, DRM_CLOEXEC);
+
+    // A handle this file does not hold is `ENOENT`, the failed lookup, not the
+    // flag check's `EINVAL`; the lookup runs before any descriptor is made, so
+    // it is reachable without a current task.
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+    let mut unknown = DrmPrimeHandle {
+        handle: 0xdead_beef,
+        flags: DRM_CLOEXEC | DRM_RDWR,
+        ..Default::default()
+    };
+    assert_eq!(
+        DrmPrimeHandle::handle(&dev, &file, 0, &mut unknown),
+        Err(DrmError::NotFound),
+        "an unknown handle is ENOENT, not EINVAL"
+    );
+}
+
 #[def_test]
 fn the_mmap_offset_names_the_object_inside_the_card_namespace() {
     let (dev, _backend) = fake_device();

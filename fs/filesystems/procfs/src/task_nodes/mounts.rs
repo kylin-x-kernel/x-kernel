@@ -30,6 +30,7 @@ pub(crate) struct ProcMountEntry {
 struct ProcMountCollector {
     root: Option<Path>,
     stack: Vec<Arc<Mount>>,
+    visited: alloc::collections::BTreeSet<u64>,
 }
 
 pub(crate) struct ProcMountIter {
@@ -42,29 +43,39 @@ impl ProcMountCollector {
         Self {
             root,
             stack: Vec::new(),
+            visited: alloc::collections::BTreeSet::new(),
         }
     }
 
     fn rewind(&mut self) {
         self.stack.clear();
+        self.visited.clear();
         if let Some(root) = &self.root {
             self.stack.push(root.mount().clone());
         }
     }
 
     fn next_entry(&mut self) -> Option<ProcMountEntry> {
-        let mount = self.stack.pop()?;
-        let mount_id = mount.mount_id();
-        let parent_id = mount
-            .location()
-            .map_or(0, |location| location.mount().mount_id());
+        loop {
+            let mount = self.stack.pop()?;
+            let mount_id = mount.mount_id();
+            // A mount reachable through more than one path (or a propagation
+            // cycle) must be listed once; without this the walk can revisit
+            // mounts forever and grow mountinfo without bound.
+            if !self.visited.insert(mount_id) {
+                continue;
+            }
+            let parent_id = mount
+                .location()
+                .map_or(0, |location| location.mount().mount_id());
 
-        let children = sorted_mnt_mounts(&mount);
-        for child in children.into_iter().rev() {
-            self.stack.push(child);
+            let children = sorted_mnt_mounts(&mount);
+            for child in children.into_iter().rev() {
+                self.stack.push(child);
+            }
+
+            return Some(make_mount_entry(&mount, parent_id, mount_id));
         }
-
-        Some(make_mount_entry(&mount, parent_id, mount_id))
     }
 }
 

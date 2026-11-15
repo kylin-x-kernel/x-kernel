@@ -126,15 +126,6 @@ fn path_mount(
     // cannot tell which operation it asked for.
     require_mount_privilege(cred)?;
 
-    // Reject unsupported mount operations before selecting an implemented
-    // operation. Otherwise a supported bit could make an unsupported
-    // combination execute with part of the request silently ignored.
-    let unsupported_operations =
-        linux_raw_sys::general::MS_SHARED | linux_raw_sys::general::MS_UNBINDABLE;
-    if flags & unsupported_operations != 0 {
-        return Err(KError::InvalidInput);
-    }
-
     let mount_flags = per_mount_flags(flags, target.mount().flags());
     let superblock_flags = superblock_flags(flags);
     let namespace = process.mnt_ns()?;
@@ -176,12 +167,15 @@ fn path_mount(
         return do_loopback(process, cred, &namespace, target, dev_name, recursive);
     }
 
-    // KVFS has no shared propagation groups, so `MS_PRIVATE` and `MS_SLAVE`
-    // are behaviorally identical; each is validated and recorded per-mount.
-    // Descendants are also covered by construction, so an accompanying
-    // `MS_REC` requires no additional traversal. Linux dispatches these after
-    // REMOUNT/BIND, so combinations like `MS_BIND | MS_PRIVATE` perform the
-    // bind and ignore the propagation bit.
+    // KVFS has no shared propagation groups, so `MS_PRIVATE`, `MS_SLAVE`,
+    // `MS_SHARED` and `MS_UNBINDABLE` are behaviorally identical: no mount
+    // events propagate between mounts. Each is validated and recorded
+    // per-mount. Descendants are also covered by construction, so an
+    // accompanying `MS_REC` requires no additional traversal. Linux dispatches
+    // these after REMOUNT/BIND, so combinations like `MS_BIND | MS_PRIVATE`
+    // perform the bind and ignore the propagation bit. Accepting `MS_SHARED`
+    // matters for systemd, which remounts the namespace root shared after
+    // `pivot_root` and fails the unit with EXIT_NAMESPACE if that is rejected.
     if flags & linux_raw_sys::general::MS_PRIVATE != 0 {
         validate_propagation_flags(flags, linux_raw_sys::general::MS_PRIVATE)?;
         namespace.make_mount_private(target)?;
@@ -191,6 +185,18 @@ fn path_mount(
     if flags & linux_raw_sys::general::MS_SLAVE != 0 {
         validate_propagation_flags(flags, linux_raw_sys::general::MS_SLAVE)?;
         namespace.make_mount_slave(target)?;
+        return Ok(());
+    }
+
+    if flags & linux_raw_sys::general::MS_SHARED != 0 {
+        validate_propagation_flags(flags, linux_raw_sys::general::MS_SHARED)?;
+        namespace.make_mount_shared(target)?;
+        return Ok(());
+    }
+
+    if flags & linux_raw_sys::general::MS_UNBINDABLE != 0 {
+        validate_propagation_flags(flags, linux_raw_sys::general::MS_UNBINDABLE)?;
+        namespace.make_mount_unbindable(target)?;
         return Ok(());
     }
 

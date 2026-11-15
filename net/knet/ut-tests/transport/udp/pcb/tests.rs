@@ -16,10 +16,17 @@ use crate::{
 };
 
 fn queued_packet(remote_addr: SocketAddrV4, payload: u8) -> PreparedUdpPacket {
+    queued_packet_with_payload(remote_addr, &[payload])
+}
+
+fn queued_packet_with_payload(
+    remote_addr: SocketAddrV4,
+    payload: &[u8],
+) -> PreparedUdpPacket {
     let source_addr = Ipv4Address::from_octets(remote_addr.ip().octets());
     let destination_addr = Ipv4Address::new(192, 0, 2, 100);
-    let mut udp_packet = vec![0; UDP_HEADER_LEN + 1];
-    udp_packet[UDP_HEADER_LEN] = payload;
+    let mut udp_packet = vec![0; UDP_HEADER_LEN + payload.len()];
+    udp_packet[UDP_HEADER_LEN..].copy_from_slice(payload);
     write_udp_header(
         &mut udp_packet,
         source_addr,
@@ -55,6 +62,26 @@ fn receive_preserves_fifo_order() {
     let second = pcb.recv_datagram(RecvMode::Consume).unwrap();
     assert_eq!(second.remote_addr, SocketAddr::V4(connected_remote));
     assert_eq!(second.payload.as_slice(), &[2]);
+}
+
+/// `SIOCINQ` copies out the head datagram's payload length.
+///
+/// `udp_ioctl(SIOCINQ)` reports `first_packet_length`, the length of the skb
+/// at the head of the receive queue (UDP header already pulled) and 0 for an
+/// empty queue. A queue total or a constant 0 would both be wrong: glibc's
+/// resolver sizes its read from `FIONREAD`.
+#[def_test]
+fn head_datagram_len_reports_the_first_payload() {
+    let pcb = UdpPcb::new(UdpSocketState::new());
+    let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
+    assert_eq!(pcb.head_datagram_len(), None, "an empty queue has no head");
+
+    assert!(pcb.enqueue(queued_packet_with_payload(remote, &[1, 2, 3])));
+    assert!(pcb.enqueue(queued_packet_with_payload(remote, &[4; 9])));
+    assert_eq!(pcb.head_datagram_len(), Some(3), "the head, not the total");
+
+    let _ = pcb.recv_datagram(RecvMode::Consume);
+    assert_eq!(pcb.head_datagram_len(), Some(9));
 }
 
 #[def_test]

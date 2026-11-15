@@ -8,8 +8,9 @@ The tests check the visible ABI through real file descriptors and DRM ioctls, an
 - `/dev/dri/renderD128` exists and can be opened read-write; the primary node `card0` and the render node share the same device number family (226).
 - `GET_CAP` on the render node succeeds; `CREATE_DUMB` returns `EACCES` (Linux's `DRM_RENDER_ALLOW` allowlist,
   not `ENOTTY`).
-- `PRIME_HANDLE_TO_FD` on the render node returns `EINVAL` for an unknown handle: the command itself is allowed by the node, only the handle
-  does not exist, which distinguishes "node rejects" from "handle invalid".
+- `PRIME_HANDLE_TO_FD` on the render node returns `ENOENT` for an unknown handle: the command itself is allowed by the node, only the handle
+  does not exist, which distinguishes "node rejects the command" (`EACCES`) from "the handle does not exist" (`ENOENT`, Linux's failed
+  `drm_gem_object_lookup` in `drm_gem_prime_handle_to_fd`).
 - `DIRTYFB` looks up the framebuffer by `fb_id`: `fb_id == 0` returns `ENOENT` just like any unknown id,
   while a registered framebuffer is flushed successfully (consistent with Linux; Xorg depends on this distinction).
 - `DESTROY_DUMB` returns success while a framebuffer still references the resource and the resource is being scanned out; the subsequent `RMFB`

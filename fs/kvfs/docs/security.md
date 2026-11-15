@@ -545,8 +545,11 @@ Locks constrain only cooperating callers; file reads and writes without an advis
 
 ### Mount propagation limits
 
-- Mount propagation covers only `MS_PRIVATE`/`MS_SLAVE` (there are no shared propagation groups, so the two behave equivalently);
-  `MS_SHARED`/`MS_UNBINDABLE` still return `EINVAL`, and the mount tree is not silently flattened.
+- There are no shared propagation groups, so every propagation request is behaviourally private. `MS_PRIVATE`/`MS_SLAVE`
+  are accepted after validating the target is a registered mount in this namespace, and `MS_SHARED`/`MS_UNBINDABLE` are accepted
+  as validated no-ops for the same reason: a shared mount here would propagate no events and an unbindable one has no peer to
+  refuse, and systemd remounts the namespace root `MS_SHARED` after `pivot_root`, so rejecting it would abort the switch-root.
+  An invalid target is still `EINVAL` in all four cases, and the mount tree is never silently flattened.
 - Recursive bind (`MS_BIND|MS_REC`) is supported: `attach_bind_recursive` clones the source mount subtree and re-grafts each cloned
   child under its cloned parent. Only submounts at or below the bind source are cloned (sibling submounts elsewhere in the host mount
   are excluded), so every cloned child stays reachable under the new root and can be unmounted; the tree is not silently flattened.

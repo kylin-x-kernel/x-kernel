@@ -313,6 +313,38 @@ impl MntNamespace {
 
     /// Attaches a detached mount at `mountpoint` for the new mount API
     /// (`move_mount`). The caller must hold mount privilege.
+    pub fn move_detached_mount(
+        &self,
+        mount: Arc<Mount>,
+        source: &Path,
+        mountpoint: &Path,
+    ) -> VfsResult<Arc<Mount>> {
+        let mut mounts = self.mounts.lock();
+        Self::require_mount(&mounts, mountpoint.mount())?;
+        Self::registered_mount_at(&mounts, source)?;
+        // `do_move_mount` compares `d_is_dir()` of both ends before it walks the
+        // destination's ancestors, and answers EINVAL (not ENOTDIR) when they
+        // disagree; the ELOOP ancestry walk comes later. Keeping that order means
+        // a mismatched target that also lies in the moved mount's subtree reports
+        // EINVAL, as Linux does, rather than ELOOP.
+        if mount.root_path().dentry().as_dir().is_ok() != mountpoint.dentry().as_dir().is_ok() {
+            return Err(VfsError::InvalidInput);
+        }
+        // Moving a mount under itself would make the parent chain a cycle, and
+        // every walk from the root would then never terminate.
+        if mountpoint.mount().is_in_subtree_of(&mount) {
+            return Err(VfsError::FilesystemLoop);
+        }
+        // Re-validate the source edge under the lock before touching it: the
+        // stack may have changed since the caller resolved the path.
+        source.detach_only()?;
+        let mount = mountpoint.graft_tree_arc(mount)?;
+        for m in mount.collect_subtree() {
+            mounts.insert(m.mount_id(), m.clone());
+        }
+        Ok(mount)
+    }
+
     pub fn attach_detached_mount(
         &self,
         mount: Arc<Mount>,
@@ -321,7 +353,11 @@ impl MntNamespace {
         let mut mounts = self.mounts.lock();
         Self::require_mount(&mounts, mountpoint.mount())?;
         let mount = mountpoint.graft_tree_arc(mount)?;
-        mounts.insert(mount.mount_id(), mount.clone());
+        // Register the whole subtree: a single fsmount mount, or an open_tree
+        // clone whose children must gain strong namespace references here.
+        for m in mount.collect_subtree() {
+            mounts.insert(m.mount_id(), m.clone());
+        }
         Ok(mount)
     }
 
@@ -352,9 +388,10 @@ impl MntNamespace {
         let new_root = mountpoint.mount_bind(source)?;
         mounts.insert(new_root.mount_id(), new_root.clone());
 
+        let subtree = source.mount().collect_subtree_under(&source.dentry)?;
         let mut clone_map: HashMap<u64, Arc<Mount>> = HashMap::new();
         clone_map.insert(source.mount().mount_id(), new_root.clone());
-        for child in source.mount().collect_subtree().iter().skip(1) {
+        for child in subtree.iter().skip(1) {
             let location = child.location().ok_or(VfsError::InvalidInput)?;
             // Only clone submounts at or below the bind source. `collect_subtree`
             // walks the whole host mount, so a subdirectory bind would otherwise
@@ -468,6 +505,131 @@ impl MntNamespace {
         Ok(())
     }
 
+    /// Applies `mount_setattr(2)` attribute changes to the mount at `target`.
+    ///
+    /// `attr_set`/`attr_clr` are already translated to per-mount [`MountFlags`].
+    /// With `recursive`, the change is applied to every mount in the subtree.
+    pub fn set_mount_attributes(
+        &self,
+        target: &Path,
+        attr_set: MountFlags,
+        attr_clr: MountFlags,
+        recursive: bool,
+    ) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        let mount = Self::registered_mount_at(&mounts, target)?.clone();
+        Self::apply_mount_attributes(&mount, attr_set, attr_clr, recursive);
+        Ok(())
+    }
+
+    /// Applies attribute changes to a specific mount (e.g. one referenced by an
+    /// `open_tree` fd via `mount_setattr` `AT_EMPTY_PATH`), not by path. The
+    /// mount may still be detached (an `fsmount` result not yet attached), so no
+    /// namespace-registration check is performed.
+    pub fn set_mount_attributes_on(
+        &self,
+        mount: &Arc<Mount>,
+        attr_set: MountFlags,
+        attr_clr: MountFlags,
+        recursive: bool,
+    ) -> VfsResult<()> {
+        Self::apply_mount_attributes(mount, attr_set, attr_clr, recursive);
+        Ok(())
+    }
+
+    fn apply_mount_attributes(
+        mount: &Arc<Mount>,
+        attr_set: MountFlags,
+        attr_clr: MountFlags,
+        recursive: bool,
+    ) {
+        let apply = |m: &Mount| m.set_flags((m.flags() & !attr_clr) | attr_set);
+        apply(mount);
+        if recursive {
+            for sub in mount.collect_subtree().iter().skip(1) {
+                apply(sub);
+            }
+        }
+    }
+
+    /// Clones the mount subtree at `source` into a detached tree (`open_tree`
+    /// with `OPEN_TREE_CLONE`).
+    ///
+    /// The returned root is not attached to the namespace; the caller keeps the
+    /// whole subtree alive (e.g. in an `open_tree` fd) until `move_mount`
+    /// installs it. Children are re-grafted under their cloned parents.
+    pub fn clone_mount_tree(&self, source: &Path) -> VfsResult<(Arc<Mount>, Vec<Arc<Mount>>)> {
+        self.clone_mount_tree_recursive(source, true)
+    }
+
+    /// Clones the mount at `source`, optionally with its subtree.
+    ///
+    /// `open_tree` without `AT_RECURSIVE` clones only the named mount
+    /// (`__do_loopback` uses `clone_mnt`), and with it the whole tree
+    /// (`copy_tree`). Cloning the subtree unconditionally made a non-recursive
+    /// request bring along mounts the caller did not ask for.
+    pub fn clone_mount_tree_recursive(
+        &self,
+        source: &Path,
+        recursive: bool,
+    ) -> VfsResult<(Arc<Mount>, Vec<Arc<Mount>>)> {
+        let mounts = self.mounts.lock();
+        Self::require_mount(&mounts, source.mount())?;
+        let new_root = Arc::new(Mount::clone_mnt(source));
+        if !recursive {
+            return Ok((new_root, Vec::new()));
+        }
+        let mut kept = vec![new_root.clone()];
+        let mut clone_map: HashMap<u64, Arc<Mount>> = HashMap::new();
+        clone_map.insert(source.mount().mount_id(), new_root.clone());
+        let subtree = source.mount().collect_subtree_under(&source.dentry)?;
+        // Clone every collected mount first, so a child can find the clone of its
+        // parent regardless of the order `collect_subtree_under` produced them.
+        let mut ordered: Vec<(Arc<Mount>, Path)> = Vec::new();
+        for child in subtree.iter().skip(1) {
+            let location = child.location().ok_or(VfsError::InvalidInput)?;
+            let new_parent = clone_map
+                .get(&location.mount().mount_id())
+                .ok_or(VfsError::InvalidInput)?;
+            let new_location = Path::new(new_parent.clone(), location.dentry.clone());
+            let new_child = Arc::new(Mount::clone_mnt(&child.root_path()));
+            *new_child.mnt_location.lock() = Some(new_location.clone());
+            clone_map.insert(child.mount_id(), new_child.clone());
+            ordered.push((new_child.clone(), new_location));
+            kept.push(new_child);
+        }
+        // Install bottom-up. `collect_subtree_under` yields a mountpoint's stack
+        // top first and each covered layer after it, while `install_child_mount`
+        // replaces whatever already sits at the mountpoint and returns it. In
+        // collection order the bottom layer would end up on top, so walk
+        // backwards: the deepest layer installs first and every higher layer
+        // records the clone it now covers, reproducing the stack.
+        for (new_child, new_location) in ordered.into_iter().rev() {
+            if let Some(covered) = new_location
+                .mnt
+                .install_child_mount(&new_location.dentry, &new_child)
+            {
+                *new_child.covers.lock() = Some(covered);
+            }
+        }
+        Ok((new_root, kept))
+    }
+
+    /// Requires `mount` to be registered in this namespace (`check_mnt`).
+    ///
+    /// `mount_setattr` can be handed a mount through a descriptor, so the mount
+    /// is not necessarily one this namespace knows; Linux's `check_mnt` refuses
+    /// to change a mount that belongs to another namespace. A detached mount
+    /// (an `fsmount` result) is not registered yet and is not checked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] when the mount is unknown here.
+    pub fn require_registered_mount(&self, mount: &Arc<Mount>) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        Self::require_mount(&mounts, mount)
+    }
+
     /// Makes the mount rooted at `target` private.
     ///
     /// KVFS does not yet model shared propagation groups, so registered mounts
@@ -495,9 +657,57 @@ impl MntNamespace {
     /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
     /// mount registered in this namespace.
     pub fn make_mount_slave(&self, target: &Path) -> VfsResult<()> {
-        let mounts = self.mounts.lock();
-        Self::registered_mount_at(&mounts, target)?;
+        self.make_mount_private(target)
+    }
+
+    /// Makes the mount rooted at `target` shared.
+    ///
+    /// KVFS does not yet model shared propagation groups, so a shared mount
+    /// would propagate no mount events and is behaviorally identical to a
+    /// private mount. This operation only validates the target and is
+    /// idempotent. It exists so callers such as systemd, which remount the
+    /// namespace root `MS_SHARED` after `pivot_root`, are not rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
+    /// mount registered in this namespace.
+    pub fn make_mount_shared(&self, target: &Path) -> VfsResult<()> {
+        self.make_mount_private(target)
+    }
+
+    /// Applies a propagation request to a mount that need not be registered.
+    ///
+    /// `mount_setattr` accepts `AT_EMPTY_PATH` on a mount fd, which names a
+    /// detached mount (`fsmount`/`open_tree` clone). Linux's `do_mount_setattr`
+    /// changes propagation on such a mount too, and it becomes observable once
+    /// `move_mount` attaches it, so requiring namespace registration here would
+    /// reject a legal request. KVFS models no shared propagation groups, so
+    /// every one of the four policies is a validated idempotent operation; this
+    /// entry point only checks that `target` is a mount root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is a mount root.
+    pub fn set_mount_propagation(&self, target: &Path) -> VfsResult<()> {
+        if !target.is_mount_root() {
+            return Err(VfsError::InvalidInput);
+        }
         Ok(())
+    }
+
+    /// Makes the mount rooted at `target` unbindable.
+    ///
+    /// KVFS does not yet model shared propagation groups, so an unbindable
+    /// mount is behaviorally identical to a private mount. This operation only
+    /// validates the target and is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
+    /// mount registered in this namespace.
+    pub fn make_mount_unbindable(&self, target: &Path) -> VfsResult<()> {
+        self.make_mount_private(target)
     }
 
     fn registered_mount_at<'a>(
@@ -928,6 +1138,22 @@ impl Mount {
         self.covers.lock().clone()
     }
 
+    /// Whether `self` is `root` or lies anywhere in its subtree.
+    ///
+    /// Walks parent links upward, so a mount that covers `root` or sits under
+    /// it answers true; a cycle in the parent chain cannot exist here because
+    /// this check is what prevents one from being created.
+    pub fn is_in_subtree_of(self: &Arc<Self>, root: &Arc<Self>) -> bool {
+        let mut current = Some(self.clone());
+        while let Some(mount) = current {
+            if Arc::ptr_eq(&mount, root) {
+                return true;
+            }
+            current = mount.location().map(|location| location.mount().clone());
+        }
+        false
+    }
+
     fn collect_subtree(self: &Arc<Self>) -> Vec<Arc<Self>> {
         let mut mounts = vec![self.clone()];
         let mut index = 0;
@@ -943,6 +1169,39 @@ impl Mount {
             index += 1;
         }
         mounts
+    }
+
+    /// Collects this mount plus the submounts at or under `dentry`, parents
+    /// before children.
+    ///
+    /// A recursive bind or `open_tree` clone of a subdirectory must clone only
+    /// the mounts beneath that directory, not the whole containing mount: the
+    /// latter re-clones unrelated subtrees and, when the destination lives
+    /// under the source, the clone's own previously-grafted tree, growing the
+    /// namespace without bound. Linux `copy_tree` roots the clone at the source
+    /// path for the same reason. Only the top mount's direct children need the
+    /// ancestry test; deeper descendants lie under `dentry` by construction.
+    fn collect_subtree_under(self: &Arc<Self>, dentry: &Dentry) -> VfsResult<Vec<Arc<Self>>> {
+        let mut mounts = vec![self.clone()];
+        let mut index = 0;
+        while index < mounts.len() {
+            let mount = mounts[index].clone();
+            for child in mount.children() {
+                if index == 0 {
+                    let location = child.location().ok_or(VfsError::InvalidInput)?;
+                    if !dentry.is_ancestor_of(&location.dentry)? {
+                        continue;
+                    }
+                }
+                let mut layer = Some(child);
+                while let Some(mount) = layer {
+                    layer = mount.covered_mount();
+                    mounts.push(mount);
+                }
+            }
+            index += 1;
+        }
+        Ok(mounts)
     }
 
     fn child_mount_at(&self, dentry: &Dentry) -> Option<Arc<Self>> {
@@ -1036,7 +1295,7 @@ impl Path {
     /// be the parent's topmost child mount, so a covered (overmounted) mount
     /// root reports `false`. Mount/umount and mount-stacking validation need
     /// this "currently attached" semantics, not the statx attribute.
-    pub(crate) fn is_mount_root(&self) -> bool {
+    pub fn is_mount_root(&self) -> bool {
         if !self.dentry_is_mount_root() {
             return false;
         }
@@ -2025,6 +2284,42 @@ impl Path {
     fn unmount_tree(&self) -> VfsResult<()> {
         let mounts = self.mnt.collect_subtree();
         self.detach_mount_subtree(&mounts)
+    }
+
+    /// Detaches one mount from its parent, keeping its own subtree attached.
+    ///
+    /// `move_mount` moves the whole subtree with the mount, so the children must
+    /// stay linked to their parent through `mnt_mounts`; only the edge to the
+    /// old parent is removed. `unmount` cannot serve here because it refuses a
+    /// mount that still has children (`ResourceBusy`), and `detach_mount_subtree`
+    /// takes the children down instead of moving them.
+    fn detach_only(&self) -> VfsResult<()> {
+        if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
+            return Err(VfsError::InvalidInput);
+        }
+        let parent_path = self.mnt.location().ok_or(VfsError::InvalidInput)?;
+        let inode = parent_path.inode();
+        let _namespace_guard = inode.lock_namespace_exclusive();
+        if !parent_path
+            .mnt
+            .child_mount_at(&parent_path.dentry)
+            .is_some_and(|mount| Arc::ptr_eq(&mount, &self.mnt))
+        {
+            return Err(VfsError::InvalidInput);
+        }
+        let covered = self.mnt.covers.lock().take();
+        match covered {
+            Some(ref mount) => {
+                parent_path
+                    .mnt
+                    .install_child_mount(&parent_path.dentry, mount);
+            }
+            None => {
+                parent_path.mnt.remove_child_mount(&parent_path.dentry);
+            }
+        }
+        self.mnt.detach();
+        Ok(())
     }
 
     fn detach_mount_subtree(&self, mounts: &[Arc<Mount>]) -> VfsResult<()> {

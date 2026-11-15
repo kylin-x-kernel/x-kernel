@@ -26,8 +26,8 @@ use kvfs::{
 
 pub use self::{dgram::DgramTransport, seqpacket::SeqpacketTransport, stream::StreamTransport};
 use crate::{
-    AcceptOptions, ConnectOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx,
-    SocketOps,
+    AcceptOptions, ConnectOptions, QueueLengths, RecvOptions, SendOptions, Shutdown, Socket,
+    SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
 };
 
@@ -128,6 +128,17 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
 
     fn shutdown(&self, _how: Shutdown) -> KResult {
         Ok(())
+    }
+
+    /// Byte counts for `SIOCOUTQ`/`SIOCINQ`, or `None` when this transport
+    /// keeps its receive queue somewhere the socket layer cannot peek into.
+    fn queue_lengths(&self) -> Option<QueueLengths> {
+        None
+    }
+
+    /// Whether this transport has reached the listening state.
+    fn is_listening(&self) -> bool {
+        false
     }
 }
 
@@ -667,6 +678,14 @@ impl SocketOps for UnixDomainSocket {
 
     fn shutdown(&self, how: Shutdown) -> KResult {
         self.transport.shutdown(how)
+    }
+
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
+        Ok(self.transport.queue_lengths())
+    }
+
+    fn is_listening(&self) -> bool {
+        self.transport.is_listening()
     }
 }
 

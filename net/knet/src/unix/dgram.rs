@@ -155,6 +155,14 @@ impl Configurable for DgramTransport {
     }
 }
 impl UnixTransportOps for DgramTransport {
+    // No `queue_lengths`: `unix_inq_len` reports the head datagram's length for
+    // SOCK_DGRAM, but this transport keeps its messages in an
+    // `async_channel::Receiver`, which has no peek, so the length is not
+    // readable without consuming the message the caller has not asked for. The
+    // ioctl answers ENOTTY instead of a zero that a caller would read as an
+    // empty queue; reaching the head length needs a peekable queue, which is a
+    // separate change (see `docs/design.md`).
+
     fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult {
         let bind_slot_handle = slot.dgram.clone();
         let mut slot = slot.dgram.lock();

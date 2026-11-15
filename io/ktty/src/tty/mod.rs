@@ -182,8 +182,12 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
     /// keyboard, LEDs, graphics mode, or modem lines, so these requests are
     /// accepted with sane defaults (text mode, XLATE keyboard, no packet or
     /// exclusive mode) instead of failing `ENOTTY`. This lets userspace console
-    /// setup (e.g. systemd-executor) proceed. Returns `None` for commands that
-    /// belong to the generic terminal ioctl path.
+    /// setup (e.g. systemd-executor) proceed.
+    ///
+    /// Returns `None` for any command it does not handle; the caller then passes
+    /// those to the generic terminal path. The line-discipline pair is handled
+    /// here rather than there because the console has exactly one discipline
+    /// (`N_TTY`) to report, so it needs no discipline table.
     fn console_ioctl(&self, cmd: u32, arg: usize) -> Option<KResult<usize>> {
         use linux_raw_sys::ioctl::*;
         // Mode/keyboard values from <linux/kd.h> and <linux/vt.h> that
@@ -192,11 +196,14 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         // <linux/kd.h>: K_RAW=0x00, K_XLATE=0x01. The console reports XLATE.
         const K_XLATE: i32 = 0x01;
         const KB_101: i32 = 0x02;
+        const N_TTY: i32 = 0;
         const TIOCSER_TEMT: i32 = 0x01;
         const KDSKBDIACR: u32 = 0x4B4B;
         if !matches!(
             cmd,
-            KDGETMODE
+            FIONREAD
+                | TIOCOUTQ
+                | KDGETMODE
                 | KDSETMODE
                 | KDGKBMODE
                 | KDSKBMODE
@@ -233,6 +240,8 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
                 | TIOCMSET
                 | TIOCMBIS
                 | TIOCMBIC
+                | TIOCGETD
+                | TIOCSETD
                 | TIOCCONS
                 | TIOCSERGETLSR
                 | TIOCGICOUNT
@@ -252,8 +261,13 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         }
         Some((|| {
             match cmd {
+                FIONREAD => {
+                    UserPtr::<i32>::from(arg).write_vm(self.ingress.readable_bytes() as i32)?
+                }
+                TIOCOUTQ => UserPtr::<i32>::from(arg).write_vm(0)?,
                 KDGETMODE => UserPtr::<i32>::from(arg).write_vm(KD_TEXT)?,
                 KDGKBMODE => UserPtr::<i32>::from(arg).write_vm(K_XLATE)?,
+                TIOCGETD => UserPtr::<i32>::from(arg).write_vm(N_TTY)?,
                 // Linux stores these as a single char/unsigned char: writing an
                 // `int` would corrupt the three bytes after the caller's buffer
                 // (and fault when the char ends a writable mapping).
@@ -353,6 +367,105 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         }
         self.terminal.job_control.clear_session_if_matches(&session);
         true
+    }
+
+    /// Steals this TTY as `proc`'s controlling terminal (`TIOCSCTTY` arg 1).
+    ///
+    /// Like [`Self::bind_to`] but forcibly reassigns a terminal that already
+    /// belongs to another session. Linux restricts this to a privileged
+    /// session leader; the previous session simply loses the terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EPERM` when `proc` is not a session leader or lacks
+    /// `CAP_SYS_ADMIN`, and the foreground-group error if the final state
+    /// transition cannot complete.
+    pub fn steal_for(self: &Arc<Self>, proc: &Process) -> KResult<()> {
+        if self.kind == TtyKind::PtyMaster {
+            return Err(KError::NotATty);
+        }
+        let _association = self.terminal.association.lock();
+        let pg = proc.group();
+        let session = pg.session();
+        // `tiocsctty`: a caller that is its session's leader and whose session
+        // already owns this terminal succeeds without changing anything. The
+        // leader test is part of the condition, not an extra one - a mere
+        // member of the owning session must fall through to the `signal->tty`
+        // check below and be refused.
+        let tty_session = self.terminal.job_control.session();
+        if session.sid() == proc.pid()
+            && tty_session
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, &session))
+        {
+            return Ok(());
+        }
+        // "The process must be a session leader and not have a controlling tty
+        // already."
+        if session.sid() != proc.pid() || session.terminal().is_some() {
+            return Err(KError::OperationNotPermitted);
+        }
+        // Stealing from a live session needs the capability; taking a terminal
+        // that no session owns does not, as in Linux where only the
+        // `tty->ctrl.session` branch checks `capable(CAP_SYS_ADMIN)`.
+        if tty_session.is_some() && !kprocess::current_cred().has_sys_admin() {
+            return Err(KError::OperationNotPermitted);
+        }
+        let terminal: Arc<dyn ControllingTerminal> = self.clone();
+        // A steal *replaces* the current owner. `ensure_session` refuses with
+        // EBUSY when a different session already owns the terminal, which is
+        // exactly the case this path exists for, so the previous owner is
+        // released first and restored if the rest of the acquisition fails.
+        //
+        // The alternative -- verifying the new occupant before releasing the
+        // old one -- cannot work: the two claims are mutually exclusive by
+        // construction, so the new one always sees the old one as an
+        // occupant. What must be preserved instead is that a *failed* steal
+        // never leaves the terminal with no session at all.
+        let previous = self.terminal.job_control.session();
+        let restored_previous = previous.clone();
+        // `clear_session_if_matches` drops the foreground group together with
+        // the session, so the previous owner's group is captured first: a
+        // rollback that restored only the session would leave the terminal
+        // owned but with no foreground group, which is the half-state this
+        // whole ordering exists to prevent.
+        let previous_foreground = self.terminal.job_control.foreground();
+        if let Some(previous) = previous.as_ref()
+            && !Arc::ptr_eq(previous, &session)
+        {
+            previous.unset_terminal(&terminal);
+            self.terminal.job_control.clear_session_if_matches(previous);
+        }
+        // Undo everything this call installs and put the previous owner back,
+        // so a rejected steal is a no-op rather than a terminal with neither.
+        let restore = || {
+            session.unset_terminal(&terminal);
+            self.terminal.job_control.clear_session_if_matches(&session);
+            if let Some(previous) = restored_previous.as_ref()
+                && self.terminal.job_control.ensure_session(previous).is_ok()
+            {
+                let _ = previous.set_terminal(&terminal);
+                if let Some(pg) = previous_foreground.as_ref() {
+                    let _ = self.terminal.job_control.set_foreground(pg);
+                }
+            }
+        };
+        if let Err(err) = self.terminal.job_control.ensure_session(&session) {
+            restore();
+            return Err(err);
+        }
+        match session.set_terminal(&terminal) {
+            SetTerminalResult::Installed | SetTerminalResult::AlreadySetToSame => {}
+            SetTerminalResult::Occupied => {
+                restore();
+                return Err(KError::ResourceBusy);
+            }
+        }
+        if let Err(err) = self.terminal.job_control.set_foreground(&pg) {
+            restore();
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Set `pg` as the foreground process group of this terminal.
@@ -472,18 +585,17 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
             TIOCSPTLCK => {}
             TIOCGPTN => UserPtr::<u32>::from(arg).write_vm(self.pty_number())?,
             TIOCSCTTY => {
-                if arg != 0 {
-                    // Linux supports arg == 1 for privileged terminal stealing.
-                    // X-Kernel does not yet implement reassignment across sessions.
-                    return Err(if arg == 1 {
-                        KError::OperationNotPermitted
-                    } else {
-                        KError::InvalidInput
-                    });
-                }
                 let tty = self.this.upgrade().ok_or(KError::NoSuchDevice)?;
                 let current_process = kprocess::current_user_thread().process().clone();
-                tty.bind_to(&current_process)?;
+                if arg == 0 {
+                    tty.bind_to(&current_process)?;
+                } else if arg == 1 {
+                    // Linux privileged terminal stealing: greetd reassigns a VT
+                    // that a getty already holds as its controlling terminal.
+                    tty.steal_for(&current_process)?;
+                } else {
+                    return Err(KError::InvalidInput);
+                }
             }
             TIOCNOTTY => {
                 let tty = self.this.upgrade().ok_or(KError::NoSuchDevice)?;

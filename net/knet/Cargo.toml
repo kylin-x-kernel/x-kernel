@@ -35,6 +35,7 @@ kidentity = { workspace = true }
 kprocess = { workspace = true }
 kcred = { workspace = true }
 kerrno = { workspace = true }
+osvm.workspace = true
 kvfs = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }
 iov_iter.workspace = true

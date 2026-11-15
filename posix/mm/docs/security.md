@@ -160,3 +160,16 @@ destination unmapped. A denied brk leaves the break unchanged. Unlimited limits
 retain the normal fast path; finite-limit arithmetic is checked.
 This limit governs virtual address-space admission, not physical memory
 availability, and is not checked again when a page fault allocates backing.
+
+## Locked-memory requests
+
+`mlockall(2)` is accepted as a no-op because the kernel has no swap, so every
+page is already resident and cannot be evicted. Being a no-op must not make the
+entry point a permissive one: the `flags` word is validated against
+`MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT` before the call reports success. An
+empty word, an unknown bit, and the bare `MCL_ONFAULT` return `InvalidInput`,
+exactly as `SYSCALL_DEFINE1(mlockall)` does. Accepting them would tell a caller
+that it had locked memory it never asked the kernel to lock, and a hardening
+path that treats success as proof of residency would draw the wrong conclusion.
+`munlockall()` likewise reports success after doing nothing, which is the
+correct answer for memory that was never pinned.

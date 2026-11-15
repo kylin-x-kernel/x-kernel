@@ -25,8 +25,8 @@ use smoltcp::{
 };
 
 use crate::{
-    AcceptOptions, ConnectOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET,
-    SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, ConnectOptions, LISTEN_TABLE, QueueLengths, RecvFlags, RecvOptions, SERVICE,
+    SOCKET_SET, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     consts::{
         TCP_KEEPCNT_DEFAULT, TCP_KEEPCNT_MAX, TCP_KEEPIDLE_DEFAULT_SECS, TCP_KEEPIDLE_MAX_SECS,
         TCP_KEEPINTVL_DEFAULT_SECS, TCP_KEEPINTVL_MAX_SECS, TCP_RX_BUF_LEN, TCP_TX_BUF_LEN,
@@ -460,6 +460,10 @@ impl Configurable for TcpSocket {
             });
             return Ok(OptionHandled::Yes);
         }
+        if let O::AcceptConn(listening) = option {
+            **listening = self.is_listening();
+            return Ok(OptionHandled::Yes);
+        }
         if self.general.get_option_inner(option)?.is_yes() {
             return Ok(OptionHandled::Yes);
         }
@@ -583,6 +587,38 @@ impl SocketOps for TcpSocket {
 
     fn socket_protocol(&self) -> i32 {
         linux_raw_sys::net::IPPROTO_TCP as i32
+    }
+
+    fn is_listening(&self) -> bool {
+        TcpSocket::is_listening(self)
+    }
+
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
+        // `tcp_ioctl(SIOCINQ)` reports `tcp_inq()` -- the bytes queued for
+        // reading -- and answers EINVAL to a listening socket, which holds no
+        // data of its own. `SIOCOUTQ` reports `tp->write_seq - tp->snd_una`,
+        // the bytes handed to the peer but not yet acknowledged; smoltcp's
+        // `send_queue()` is the unsent transmit buffer instead, so it is the
+        // closest quantity this stack exposes and is reported as such.
+        if self.is_listening() {
+            return Err(KError::InvalidInput);
+        }
+        // A closed or time-wait socket still answers: `tcp_inq` reports its
+        // (usually empty) receive queue rather than an error, and only the
+        // listening state is refused. `recv_queue()`/`send_queue()` remain
+        // readable in those states, so no state check beyond listening is
+        // needed here.
+        //
+        // An ioctl can arrive after the transport was torn down (the caller
+        // still holds the descriptor while the peer-close path removed the
+        // smoltcp socket), and smoltcp's accessors panic for a dead handle.
+        // A missing socket reports an idle connection instead.
+        let Some((received, queued)) = SOCKET_SET.try_with_socket_mut(self.handle, |socket| {
+            (socket.recv_queue(), socket.send_queue())
+        }) else {
+            return Ok(Some(QueueLengths::default()));
+        };
+        Ok(Some(QueueLengths::from_bytes(queued, received)))
     }
 
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {

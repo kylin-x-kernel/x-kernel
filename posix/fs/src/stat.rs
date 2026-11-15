@@ -274,7 +274,14 @@ pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
 
     let resources = kprocess::current_files();
     let file = resources.get_file(fd)?;
-    buf.write_vm(statfs(file.path())?)?;
+    let mut st = statfs(file.path())?;
+    // Sockets live on the anonymous-inode mount, but Linux reports them on
+    // sockfs; consumers such as dbus-broker validate a passed listener with
+    // `fstatfs().f_type == SOCKFS_MAGIC`.
+    if file.inode().node_type() == NodeType::Socket {
+        st.f_type = linux_raw_sys::general::SOCKFS_MAGIC as _;
+    }
+    buf.write_vm(st)?;
     Ok(0)
 }
 

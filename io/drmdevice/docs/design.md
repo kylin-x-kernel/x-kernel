@@ -217,6 +217,16 @@ display before it overwrites the pixels.
   that the object owns, and returns a new handle. A descriptor that is not one
   of this driver's dma-bufs is `EINVAL`.
 
+  The flag word admits exactly `DRM_CLOEXEC | DRM_RDWR`, which is what
+  `drm_prime_handle_to_fd_ioctl` accepts; any other bit is `EINVAL`. `DRM_RDWR`
+  is `O_RDWR`, and Linux forwards the whole word to `get_unused_fd_flags()`, so
+  the only bit with an effect here is `DRM_CLOEXEC` — but the check must still
+  admit `DRM_RDWR`, because Mesa's `gbm_bo_get_fd_for_plane` exports the buffer
+  it renders into with both flags set (`0x80002`). Rejecting it failed every
+  swapchain allocation and left the compositor with no buffer at all, while the
+  3D path itself was already working. A handle this file does not hold is
+  `ENOENT`, matching Linux's failed `drm_gem_object_lookup`.
+
   One card has one import per dma-buf (`drm_gem_prime_import`'s attachment
   lookup): the second import of the same buffer — through another descriptor
   or through a re-export of it — resolves to the object the file already

@@ -10,7 +10,7 @@
 //! network configuration lock, and dumps live snapshots.
 
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use kerrno::LinuxError;
 use ksync::{Mutex, RwLock};
@@ -33,14 +33,23 @@ pub(crate) use wire::route::{
 
 pub const NETLINK_ROUTE: i32 = 0;
 pub(super) const NETLINK_USERSOCK: i32 = 2;
+pub(super) const NETLINK_AUDIT: i32 = 9;
 pub(super) const NETLINK_KOBJECT_UEVENT: i32 = 15;
 /// Number of netlink protocol slots, matching Linux `MAX_LINKS`.
 pub const NETLINK_MAX_LINKS: i32 = 32;
-/// Protocols with a kernel handler in this implementation.
+/// Multicast groups this netlink implementation reports for every protocol.
+///
+/// `NETLINK_ADD_MEMBERSHIP`/`NETLINK_DROP_MEMBERSHIP` are bounded by the
+/// protocol's `ngroups` in `netlink_setsockopt`; the group mask kept on the
+/// socket address is 32 bits wide, so the accepted range is 1..=32.
+pub(super) const NETLINK_GROUP_COUNT: i32 = 32;
+/// Protocols accepted by `socket(AF_NETLINK, ...)`. `NETLINK_AUDIT` has no
+/// kernel handler here; it is a sink so audit emitters (systemd-resolved) can
+/// open their audit socket and send best-effort messages.
 pub fn netlink_protocol_supported(protocol: i32) -> bool {
     matches!(
         protocol,
-        NETLINK_ROUTE | NETLINK_USERSOCK | NETLINK_KOBJECT_UEVENT
+        NETLINK_ROUTE | NETLINK_USERSOCK | NETLINK_AUDIT | NETLINK_KOBJECT_UEVENT
     )
 }
 pub(super) const NLM_F_REQUEST: u16 = 0x0001;
@@ -236,6 +245,14 @@ pub(super) struct NetlinkSocketInner {
     /// way Linux keeps it in `sk_type`.
     pub(super) socket_type: NetlinkSocketType,
     pub(super) local_addr: RwLock<Option<NetlinkAddr>>,
+    /// Multicast groups this socket subscribed to, one bit per zero-based
+    /// group (`nlk->groups`).
+    ///
+    /// Kept apart from `local_addr` because `NETLINK_ADD_MEMBERSHIP` is valid
+    /// before `bind()`: Linux only allocates the bitmap there
+    /// (`netlink_realloc_groups`), it does not require a port id. Storing the
+    /// subscription on the bound address discarded it for an unbound socket.
+    pub(super) groups: AtomicU32,
     /// The peer stored by `connect()`.
     ///
     /// `Some(NetlinkAddr { pid: 0, groups: 0 })` is a connected socket whose

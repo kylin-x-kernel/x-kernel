@@ -6733,6 +6733,89 @@ fn test_unicast_accepts_one_datagram_larger_than_receive_buffer() {
     );
 }
 
+/// `NETLINK_ADD_MEMBERSHIP` links the socket into the protocol's broadcast
+/// list (`mc_list`) without needing a port id, so a subscriber that never binds
+/// still receives its group's multicast.
+#[def_test(serial)]
+fn test_unbound_group_subscriber_receives_multicast() {
+    let subscriber = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT, NetlinkSocketType::Raw);
+    subscriber
+        .set_option(SetSocketOption::NetlinkAddMembership(&1))
+        .unwrap();
+    assert!(
+        subscriber.inner.local_addr.read().is_none(),
+        "the subscriber never binds"
+    );
+    let sender = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT, NetlinkSocketType::Raw);
+    sender
+        .bind(SocketAddrEx::Netlink(NetlinkAddr {
+            pid: 631,
+            groups: 0,
+        }))
+        .unwrap();
+
+    let payload = b"ACTION=add\0";
+    let send = |sender: &NetlinkSocket| {
+        sender.send_with_cred(
+            Cursor::new(payload.as_slice()),
+            SendOptions {
+                to: Some(SocketAddrEx::Netlink(NetlinkAddr { pid: 0, groups: 1 })),
+                ..SendOptions::default()
+            },
+            &Cred::root(),
+        )
+    };
+    assert_eq!(send(&sender), Ok(payload.len()));
+
+    let packet = pop_event(&subscriber);
+    assert_eq!(packet.data, payload);
+    assert_eq!(packet.from.pid, 631);
+
+    // Dropping the last subscription unlinks it from the broadcast list again.
+    subscriber
+        .set_option(SetSocketOption::NetlinkDropMembership(&1))
+        .unwrap();
+    assert_eq!(send(&sender), Ok(payload.len()));
+    assert!(subscriber.inner.rx_queue.lock().is_empty());
+}
+
+/// The `CAP_NET_ADMIN` buffer forms resize the same netlink queues as the
+/// unforced options: `sock_setsockopt` writes `sk_sndbuf`/`sk_rcvbuf` for both,
+/// and netlink's accessors and admission checks read those fields.
+#[def_test(serial)]
+fn test_netlink_buffer_force_options_resize_the_queues() {
+    let socket = NetlinkSocket::new(NETLINK_USERSOCK, NetlinkSocketType::Raw);
+
+    let mut before = 0usize;
+    socket
+        .get_option(GetSocketOption::ReceiveBuffer(&mut before))
+        .unwrap();
+    let request = 65_536usize;
+    socket
+        .set_option(SetSocketOption::ReceiveBufferForce(&request))
+        .unwrap();
+    let mut after = 0usize;
+    socket
+        .get_option(GetSocketOption::ReceiveBuffer(&mut after))
+        .unwrap();
+    assert_eq!(after, request * 2, "the force form doubles the hint");
+    assert_eq!(
+        socket.inner.rx_queue.lock().limit(),
+        after,
+        "the receive queue follows the readback"
+    );
+
+    let send_request = 32_768usize;
+    socket
+        .set_option(SetSocketOption::SendBufferForce(&send_request))
+        .unwrap();
+    assert_eq!(
+        socket.inner.send_buffer.load(Ordering::Relaxed),
+        send_request * 2,
+        "the send buffer follows the force form"
+    );
+}
+
 #[def_test(serial)]
 fn test_uevent_multicast_is_scoped_to_uevent_sockets() {
     let route_subscriber = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
