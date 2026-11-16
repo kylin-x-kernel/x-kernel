@@ -324,11 +324,22 @@ fn kernel_main() {
         ktask::yield_now();
     }
 
-    info!("Writing LLVM coverage data to /.llvm-cov/default.profraw ...");
     let mut cov = Vec::new();
-    if let Err(e) = xcover::write_profraw(&mut cov) {
-        error!("write_profraw failed: {:?}", e);
-    } else if !cov.is_empty() {
+    let profile_ready = match xcover::write_profraw(&mut cov) {
+        Ok(()) => true,
+        // The unittest image carries no instrumentation, so there is nothing
+        // to persist. Skipping the write also skips the filesystem sync below,
+        // which flushes every mounted filesystem and dominates runtime on
+        // emulated guests.
+        Err(xcover::ProfileError::NotEnabled) => false,
+        Err(e) => {
+            error!("write_profraw failed: {:?}", e);
+            false
+        }
+    };
+
+    if profile_ready && !cov.is_empty() {
+        info!("Writing LLVM coverage data to /.llvm-cov/default.profraw ...");
         let fs_struct = fs_context::init_fs().lock().clone_for_process();
         let cred = kcred::initial_cred();
         let write_result = (|| -> kvfs::VfsResult<()> {

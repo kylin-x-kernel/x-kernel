@@ -21,10 +21,17 @@ impl kiface_mm_api::DmaMappingIf {
         vaddr: memaddr::VirtAddr,
         size_bytes: usize,
         mode: DmaMappingMode,
-    ) -> kerrno::KResult {
-        crate::kernel_layout()
-            .lock()
-            .protect(vaddr, size_bytes, mapping_flags(mode))
+    ) -> kerrno::KResult<Option<kiface_mm_api::DmaMappingCompletion>> {
+        // Detach the remote invalidation from the kernel address-space lock;
+        // the caller completes it after releasing its own locks. A CPU waiting
+        // for either lock with interrupts disabled cannot answer the shootdown.
+        let deferred = {
+            let mut layout = crate::kernel_layout().lock();
+            layout.protect_kernel_deferred(vaddr, size_bytes, mapping_flags(mode))?
+        };
+        Ok(deferred.map(|flush| {
+            kiface_mm_api::DmaMappingCompletion::new(move || flush.complete().is_ok())
+        }))
     }
 }
 

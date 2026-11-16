@@ -158,6 +158,14 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         Self::try_new_inner(true)
     }
 
+    /// Returns whether this table owns the global kernel mappings.
+    ///
+    /// Kernel tables invalidate through the all-CPU scope; user tables use the
+    /// owning address space's residency mask.
+    pub const fn is_kernel(&self) -> bool {
+        self.is_kernel
+    }
+
     fn try_new_inner(is_kernel: bool) -> PtResult<Self> {
         let root_paddr = Self::alloc_table()?;
         Ok(Self {
@@ -436,6 +444,74 @@ enum ToFlush<M: PagingMetaData> {
 impl<M: PagingMetaData> ToFlush<M> {
     const fn has_pending(&self) -> bool {
         !matches!(self, Self::None)
+    }
+}
+
+/// Kernel-mapping invalidation detached from a [`PageTableMut`] guard.
+///
+/// The page-table writes are already published when this value is produced, so
+/// the caller may release the lock that protects the table and then call
+/// [`complete`](Self::complete). That ordering matters when the invalidation
+/// waits for remote CPUs: a CPU that needs the same lock must not be spinning
+/// with interrupts disabled, or it can never acknowledge the shootdown.
+///
+/// Dropping the value without completing still performs the invalidation, but
+/// it then runs at the drop site, which may still hold the lock, and its result
+/// is not reported. Callers that must observe completion use
+/// [`complete`](Self::complete).
+pub struct DeferredKernelTlbFlush {
+    scope: Option<DeferredKernelTlbFlushScope>,
+    flush_all_cpus: fn(Option<usize>) -> TlbFlushResult,
+}
+
+enum DeferredKernelTlbFlushScope {
+    Full,
+    Addresses(alloc::vec::Vec<usize>),
+}
+
+impl DeferredKernelTlbFlush {
+    /// Performs the detached invalidation and reports whether every relevant
+    /// CPU confirmed it.
+    ///
+    /// A failed scoped or partial shootdown is retried once as a full-TLB
+    /// invalidation, mirroring the guard's `ToFlush::Full` retry. The caller
+    /// must not treat the mapping change as complete when this returns an
+    /// error.
+    pub fn complete(mut self) -> TlbFlushResult {
+        self.invalidate()
+    }
+
+    fn invalidate(&mut self) -> TlbFlushResult {
+        let Some(scope) = self.scope.take() else {
+            return Ok(());
+        };
+        let result = match scope {
+            DeferredKernelTlbFlushScope::Full => (self.flush_all_cpus)(None),
+            DeferredKernelTlbFlushScope::Addresses(addresses) => {
+                let mut result = Ok(());
+                for address in addresses {
+                    let current = (self.flush_all_cpus)(Some(address));
+                    if current.is_err() {
+                        result = current;
+                    }
+                }
+                result
+            }
+        };
+        if result.is_ok() {
+            return Ok(());
+        }
+        // A partial or scoped failure cannot authorize reuse; retry the whole
+        // TLB once, as the guard would retain a full-scope retry.
+        (self.flush_all_cpus)(None)
+    }
+}
+
+impl Drop for DeferredKernelTlbFlush {
+    fn drop(&mut self) {
+        // Best effort: a drop site cannot report failure. Callers that need
+        // the result call `complete`.
+        let _ = self.invalidate();
     }
 }
 
@@ -1476,6 +1552,38 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         let receipt = TlbFlushReceipt::new(self.flush.has_pending());
         self.flush_pending()?;
         Ok(receipt)
+    }
+
+    /// Detaches the pending invalidation of a kernel page-table change.
+    ///
+    /// The PTE writes are already visible; the caller must drop this guard and
+    /// release the lock that protects the table before completing the returned
+    /// handle. That lets CPUs competing for the same lock answer the shootdown
+    /// IPI instead of spinning with interrupts disabled.
+    ///
+    /// Returns `None` when nothing is pending, or when the pending work cannot
+    /// be detached safely: user tables use residency-scoped flushes, fresh
+    /// mappings still need their publication fence, and managed retirements
+    /// must stay with the guard until their invalidation completes.
+    #[must_use = "the caller must complete the invalidation after unlocking"]
+    pub fn defer_kernel_invalidation(&mut self) -> Option<DeferredKernelTlbFlush> {
+        if !self.inner.is_kernel || self.fresh_map || !self.retired_mapping_refs.is_empty() {
+            return None;
+        }
+        let scope = match core::mem::replace(&mut self.flush, ToFlush::None) {
+            ToFlush::None => return None,
+            ToFlush::Full => DeferredKernelTlbFlushScope::Full,
+            ToFlush::Addresses(addresses) => DeferredKernelTlbFlushScope::Addresses(
+                addresses.iter().map(|address| (*address).into()).collect(),
+            ),
+        };
+        Some(DeferredKernelTlbFlush {
+            scope: Some(scope),
+            flush_all_cpus: |vaddr| {
+                let vaddr = vaddr.map(M::VirtAddr::from);
+                M::flush_tlb_all_cpus(vaddr)
+            },
+        })
     }
 
     #[cfg(not(docsrs))]

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::collections::btree_map::BTreeMap;
+use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 #[cfg(feature = "dma-trace")]
 use core::panic::Location;
 use core::{alloc::Layout, ptr::NonNull};
@@ -10,7 +10,7 @@ use core::{alloc::Layout, ptr::NonNull};
 use alloc_engine::{AllocError, AllocResult};
 use kalloc::{UsageKind, global_allocator};
 use khal::mem::v2p;
-use kiface_mm_api::{DmaMappingIf, DmaMappingMode};
+use kiface_mm_api::{DmaMappingCompletion, DmaMappingIf, DmaMappingMode};
 use kspin::{SpinNoIrq, static_lock};
 use log::error;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
@@ -26,6 +26,9 @@ static_lock! {
 }
 
 pub(crate) struct DmaAllocator {
+    /// Detached kernel invalidations produced by mode changes while this
+    /// allocator was locked. The public wrappers drain them after unlocking.
+    pending_completions: Vec<DmaMappingCompletion>,
     bounce_pool: BouncePool,
     active_mappings: BTreeMap<u64, BounceMapping>,
     #[cfg(feature = "dma-trace")]
@@ -72,6 +75,7 @@ struct CoherentAllocation {
 impl DmaAllocator {
     pub(crate) const fn new() -> Self {
         Self {
+            pending_completions: Vec::new(),
             bounce_pool: BouncePool::new(),
             active_mappings: BTreeMap::new(),
             #[cfg(feature = "dma-trace")]
@@ -107,7 +111,11 @@ impl DmaAllocator {
             UsageKind::Dma,
         )?;
         let vaddr = va!(vaddr_raw);
-        self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent)?;
+        if let Some(completion) =
+            self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent)?
+        {
+            self.pending_completions.push(completion);
+        }
         self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
         let dma_info = DmaInfo {
             // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
@@ -124,17 +132,24 @@ impl DmaAllocator {
         Ok(dma_info)
     }
 
+    /// Applies one mapping mode and returns the invalidation the provider
+    /// detached from its lock, if it did not complete it in place.
     fn update_mapping_mode(
         &mut self,
         vaddr: VirtAddr,
         num_pages: usize,
         mode: DmaMappingMode,
-    ) -> AllocResult<()> {
+    ) -> AllocResult<Option<DmaMappingCompletion>> {
         let expand_size = num_pages * PAGE_SIZE_4K;
         DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
             error!("change table flag fail");
             AllocError::NoMemory
         })
+    }
+
+    /// Takes the detached invalidations accumulated under this lock.
+    pub(crate) fn take_completions(&mut self) -> Vec<DmaMappingCompletion> {
+        core::mem::take(&mut self.pending_completions)
     }
 
     fn prepare_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {
@@ -172,10 +187,27 @@ impl DmaAllocator {
 
         // Deallocation cannot fail; the helper already logs platform release errors.
         let _ = self.release_platform_dma(v2p(vaddr), size);
-        // Deallocation cannot fail; update_mapping_mode already logs restoration errors.
-        let _ = self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal);
-
-        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+        // The pages may return to the general allocator only after every CPU
+        // has dropped its uncached translation: otherwise a CPU that still
+        // holds the coherent mapping could observe a cached alias of the
+        // reused page. The provider detaches that invalidation from the
+        // allocator lock, so release the pages inside the completion, which
+        // the public wrapper runs after unlocking.
+        match self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal) {
+            Ok(Some(flush)) => {
+                self.pending_completions
+                    .push(DmaMappingCompletion::new(move || {
+                        let is_invalidated = flush.complete();
+                        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+                        is_invalidated
+                    }));
+            }
+            // The provider completed the invalidation in place, or the mode
+            // restore failed after logging; no flush is pending.
+            Ok(None) | Err(_) => {
+                global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+            }
+        }
     }
 
     /// Returns a read-only snapshot of in-use DMA resources for test baselines.

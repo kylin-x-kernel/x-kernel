@@ -27,17 +27,15 @@ mod platform;
 
 // === Public API ===
 
-/// Returns `true` if code coverage instrumentation is enabled
-/// (the current image contains profiling data sections).
+/// Returns `true` when the final binary contains LLVM profile records.
+///
+/// LLVM emits one `__llvm_profile_data` record per instrumented function, so a
+/// non-empty profile-data section is the signal that the image was built with
+/// `-C instrument-coverage` or `-C profile-generate`. The check inspects the
+/// linker section directly instead of the lazily built runtime image: probing
+/// instrumentation state must not allocate or publish profile state.
 pub fn is_enabled() -> bool {
-    #[cfg(feature = "alloc")]
-    {
-        runtime::has_image()
-    }
-    #[cfg(not(feature = "alloc"))]
-    {
-        false
-    }
+    platform::profile_sections().data.len() != 0
 }
 
 /// Trait for writing profile data to an arbitrary destination.
@@ -82,10 +80,18 @@ impl core::fmt::Display for ProfileError {
 /// Captures the current profile data and writes it in LLVM `.profraw`
 /// format to the given writer.
 ///
+/// Returns [`ProfileError::NotEnabled`] when the image was not instrumented:
+/// an empty profile-data section means there are no counters to report, and
+/// emitting a header-only profile would only move that emptiness to the
+/// consumer. Callers can treat this error as "nothing to persist".
+///
 /// This function is not thread-safe: concurrent calls or concurrent execution
 /// of instrumented code may produce inaccurate profile data.
 #[cfg(feature = "alloc")]
 pub fn write_profraw(writer: &mut dyn ProfileWriter) -> Result<(), ProfileError> {
+    if !is_enabled() {
+        return Err(ProfileError::NotEnabled);
+    }
     let snapshot = runtime::snapshot().ok_or(ProfileError::NotEnabled)?;
     serialize::encode(&snapshot, writer)
 }

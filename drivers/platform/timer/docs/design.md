@@ -98,19 +98,27 @@ rate is in range; otherwise it uses the nonzero leaf `0x16` processor base
 frequency as an estimate of TSC frequency. Each source is evaluated only when
 earlier sources fail.
 
-PIT channel 2 runs a mode-0 countdown of about 10 ms. Calibration takes three
-samples and selects the lowest valid frequency to reduce the effect of polling
-delays. Each sample has a one-million-iteration limit and a TSC tick budget of
-one fifth of the nominal platform frequency. This tick budget is a time bound
-only to the extent that the nominal frequency matches the running TSC.
+PIT channel 2 runs a mode-0 countdown of roughly 50 ms. The TSC is read before
+every PIT poll, and another read follows the poll that observes the terminal
+count. A pre-poll read becomes the lower bound only after its poll reported
+"still counting", which proves the terminal count is later; the post-poll read
+is the upper bound. Host preemption can therefore only widen the interval
+instead of moving both ends together, and the spread check rejects it. The
+countdown itself is programmed between two TSC reads; that window bounds how far
+the measured start can sit from the reload, its midpoint is used, and it must
+stay within 1% of the measured interval.
 
-Normal samples require at least 1,000 polls, nonzero adjacent TSC progress, and a
-maximum polling interval no larger than ten times the minimum. QEMU TCG samples
-require at least one poll and a nonzero minimum interval, allowing the wider
-polling jitter caused by device emulation and host scheduling. An immediately
-completed or timed-out sample is discarded. The measurement uses the last TSC
-read before the observed PIT completion, so polling granularity also affects
-its accuracy.
+A sample is accepted when its interval is within 2% of the midpoint. If no
+sample is that tight, the tightest interval is reported as degraded only while
+it stays within 25%; otherwise discovery fails instead of trusting a best guess.
+Each sample has a one-million-iteration limit and a TSC timeout of one nominal
+frequency period. Only a stalled countdown counts toward the two-timeout abort;
+a pause while programming the countdown, a stale first poll, or an interval
+shorter than its programming window only discards that sample, and the
+eight-sample budget bounds those retries.
+
+A sample requires the terminal count to be observed after at least one polling
+iteration; a first-poll terminal count is a stale output level and is discarded.
 
 Runtime candidates must be at least 1 MHz and fit in `u32` after conversion to
 kHz. Bootstrap separately checks the platform minimum and the selected value's

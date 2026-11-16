@@ -34,14 +34,6 @@ pub(crate) fn image_or_init() -> Result<&'static ProfileImage, crate::ProfileErr
     RUNTIME_IMAGE.get_or_try_init(crate::abi::collect::collect_profile_image)
 }
 
-/// Returns `true` iff the profile image has been initialized.
-///
-/// Single atomic load, no allocation, no contention.
-#[cfg(feature = "alloc")]
-pub(crate) fn has_image() -> bool {
-    RUNTIME_IMAGE.get().is_some()
-}
-
 /// Captures a snapshot of the current profile image for serialization.
 ///
 /// Returns `None` if the image has not been initialized or initialization

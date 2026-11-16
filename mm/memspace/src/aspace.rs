@@ -1391,6 +1391,46 @@ impl MmSpace {
         self.protect_mapping_range(start, size, flags)
     }
 
+    /// Changes kernel mapping attributes and detaches the remote invalidation.
+    ///
+    /// The caller holds this address space's lock while calling this method and
+    /// must release it before completing the returned flush. That keeps CPUs
+    /// that are waiting for the same lock able to answer the shootdown IPI.
+    ///
+    /// Only raw kernel mappings such as the linear map or device windows are
+    /// supported. Managed file mappings must use [`protect`](Self::protect),
+    /// whose retirements complete in place; `defer_kernel_invalidation` returns
+    /// `None` for a user page table or when a retirement is still pending, in
+    /// which case the guard's drop completes the flush as before.
+    ///
+    /// This is a kernel-internal fast path for callers that already own a
+    /// validated range: unlike [`protect`](Self::protect), it does not require
+    /// full VMA coverage, alignment, or a per-VMA `allows_protection` check, and
+    /// unmapped pages inside `[start, start + size)` are skipped. The caller
+    /// must pass a page-aligned range fully covered by kernel VMAs whose mapping
+    /// mode it exclusively owns.
+    pub fn protect_kernel_deferred(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+    ) -> KResult<Option<page_table::DeferredKernelTlbFlush>> {
+        if !self.pgtbl.is_kernel() {
+            // User address spaces use residency-scoped flushes and backend
+            // protection hooks, so keep the ordinary protection path.
+            self.protect(start, size, flags)?;
+            return Ok(None);
+        }
+        let mut modify = self.pgtbl.modify();
+        modify
+            .protect_region(start, size, flags)
+            .map_err(crate::backend::map_paging_err)?;
+        let deferred = modify.defer_kernel_invalidation();
+        drop(modify);
+        self.vmas.protect(start, size, flags);
+        Ok(deferred)
+    }
+
     /// Requires every byte of `[start, start + size)` to be backed by a
     /// mapping.
     ///

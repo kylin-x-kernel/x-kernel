@@ -163,8 +163,11 @@ fn force_link_abi_symbols_for_test() {
 }
 
 #[test]
-fn is_enabled_returns_bool() {
-    let _enabled: bool = xcover::is_enabled();
+fn is_enabled_reports_the_profile_data_section() {
+    // This test binary seeds `__llvm_prf_data` with an anchor record so the
+    // ELF boundary symbols exist, so the section is present even though the
+    // test build itself is not instrumented.
+    assert!(xcover::is_enabled());
 }
 
 #[test]

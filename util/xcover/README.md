@@ -56,6 +56,11 @@ fn main() {
 
 If your program is running on a different system than your build system then you will need to transfer this file back to your build system.
 
+An image without LLVM profile records was not built with instrumentation, so
+`write_profraw` returns `ProfileError::NotEnabled` instead of emitting a
+header-only profile; `is_enabled()` exposes the same check so callers can skip
+the write and any filesystem flush that would persist it.
+
 Sinks must implement the `ProfileWriter` trait. If the default `alloc` feature is enabled then an implementation is provided for `Vec<u8>`.
 
 4. Use a tool such as [grcov] or `llvm-cov` to generate a human-readable coverage report:

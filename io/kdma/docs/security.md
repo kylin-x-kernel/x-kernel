@@ -94,9 +94,13 @@ each with `# Safety` sections and `SAFETY:` comments:
   allocation with its call site and rejects duplicate records; mismatched
   frees are detected and skipped rather than corrupting the allocator.
 - Page-table attributes: coherent pages are mapped
-  `READ | WRITE | UNCACHED | SHARED`; on release the flags are restored
-  before the pages return to the general allocator, so cached-vs-coherent
-  aliasing cannot occur.
+  `READ | WRITE | UNCACHED | SHARED`; on release the flags are restored and
+  every CPU's uncached translation is invalidated before the pages return to
+  the general allocator, so cached-vs-coherent aliasing cannot occur. The
+  provider detaches the remote invalidation, the page release is deferred
+  into that completion, and the public wrapper completes both after releasing
+  the allocator `SpinNoIrq`, so contenders that are spinning with interrupts
+  disabled can acknowledge the shootdown.
 
 ## Invariants
 
@@ -119,7 +123,7 @@ each with `# Safety` sections and `SAFETY:` comments:
 | T-02 | Device DMA targeting memory outside its grant | High — kernel memory corruption | Mis-programmed device or descriptor | Coherent grants are page-exact (bounce grants are byte-granular TLSF sub-allocations sharing the pool) and devices only learn the bounce/coherent addresses the driver programmed; cannot defend against arbitrary device DMA (no IOMMU here) — recorded as the core residual risk of the crate. |
 | T-03 | Double map / mismatched unmap by a driver | Medium — aliasing or allocator corruption | Driver bookkeeping bugs | Public `map_dma_buffer` (`io/kdma/src/lib.rs`) rejects a duplicate bus address via the `active_mappings` lookup in `DmaAllocator::map_dma_buffer` (`io/kdma/src/dma.rs`, `contains_key` check → `AllocError::InvalidInput`); public `unmap_dma_buffer` panics on a `remove()` miss in `DmaAllocator::unmap_dma_buffer` and `assert_eq!`s the recorded length; `bounce_pool::BouncePool::deallocate` (`io/kdma/src/bounce_pool.rs`) asserts pool containment. |
 | T-04 | Bounce buffer retention after unmap failure | Low — stale kernel data readable by device | Caller forgets to unmap before dropping | RAII does not span map/unmap; the `active_mappings` table (`DmaAllocator.active_mappings`, keyed by bus address) keeps every leaked mapping enumerable, and the `dma-trace` feature (`trace_coherent_alloc`/`trace_coherent_free` in `src/dma.rs`) logs allocation sites and flags duplicate or mismatched coherent frees so leaks can be located in trace builds. |
-| T-05 | Uncached mapping left cached on free | Medium — cache-coherency corruption on reuse | Attribute-restore failure ignored | Restore failures are currently ignored (`let _ =`) after logging in the release path; accepted as a residual risk: the pages are still returned to the global allocator via `dealloc_dma_pages` (tagged `UsageKind::Dma`) even if the restore failed. |
+| T-05 | Uncached mapping left cached on free | Medium — cache-coherency corruption on reuse | Attribute-restore or shootdown failure ignored | Restore failures are logged and the page release is deferred into the invalidation completion, so pages are freed only after the flush attempt. A flush the provider cannot confirm is logged; accepted residual risk: the pages are still returned to the global allocator via `dealloc_dma_pages` (tagged `UsageKind::Dma`) after that retried attempt. |
 
 ## Failure Modes
 

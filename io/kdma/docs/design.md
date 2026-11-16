@@ -83,7 +83,8 @@ drivers
 SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   |  alloc_coherent_pages                             |
   |    kalloc alloc_dma_pages (UsageKind::Dma)        v
-  |    kiface_mm_api::DmaMappingIf::set_mode (UNCACHED|SHARED)   BouncePool (lazy, 1024 pages)
+  |    kiface_mm_api::DmaMappingIf::set_mode (UNCACHED|SHARED)
+  |      -> detached completion completed after unlock          BouncePool (lazy, 1024 pages)
   |    kplat::dma::prepare / release                 TLSF byte allocator
   |    p2b -> DmaInfo{cpu_addr, bus_addr}            copy-in/out + SeqCst fences
   |                                           active_mappings: BTreeMap<bus, BounceMapping>
@@ -94,6 +95,17 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 - All public functions take a `SpinNoIrq` lock: callers must not sleep
   while holding the API, and the functions are safe from any context
   where spin locks are legal (task context; not from NMI-level code).
+- A coherent mode change detaches its remote TLB invalidation. The public
+  wrappers complete it after releasing the allocator lock, because a CPU
+  waiting for that lock with interrupts disabled cannot acknowledge the
+  shootdown. A completion that cannot confirm the invalidation is logged; the
+  mode change is not silently assumed to have taken effect.
+- Restoring Normal mode on release also detaches its invalidation. The pages
+  rejoining the general allocator are freed inside that completion, after the
+  flush, so a CPU that still holds the page's uncached translation cannot
+  observe a cached alias of the reused page. The public wrapper runs the
+  completion after unlocking, so CPUs spinning on the allocator lock with
+  interrupts disabled can still answer the shootdown.
 - Coherent allocation participates in the global page allocator and page
   table updates, so it must run after `kalloc` and the address-space
   subsystem are initialized; first use of the bounce path lazily
@@ -111,7 +123,8 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 
 - One global `SpinNoIrq<DmaAllocator>` serializes coherent allocation,
   bounce mapping, and the mapping table; critical sections are short
-  (page allocation, memcpy, BTreeMap ops).
+  (page allocation, memcpy, BTreeMap ops). Detached mapping invalidation
+  runs after the lock is released and is not part of the critical section.
 - `active_mappings` makes double-map of one bus address an error
   (`AllocError::InvalidInput`) and keeps `unmap` exact-match; unmapping an
   inactive address panics — that is a driver contract violation, not a

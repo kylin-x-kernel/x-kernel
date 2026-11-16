@@ -33,7 +33,7 @@ identity or permission checks; access is through privileged kernel code.
 | --- | --- |
 | Platform configuration to x86 `early_init` | Requires a nominal frequency of at least 1 MHz. The selected frequency must fit in `u32` kHz. Violations panic. The nominal value also supplies the PIT timeout budget. |
 | CPU or hypervisor CPUID to x86 discovery | Hypervisor leaf `0x40000010` is interpreted only for KVM and ACRN. Architectural timing leaves require Intel identification and a nonzero leaf `0x15` ratio. Invalid or absent candidates return `None`; accepted candidates are at least 1 MHz and fit in `u32` kHz. |
-| PIT ports `0x42`, `0x43`, and `0x61` to x86 calibration | A fixed nonzero reload starts channel 2. Poll count, TSC progress, jitter policy, and timeout bounds determine whether the sample is usable. Invalid samples return `None`; discovery continues with the remaining sources. |
+| PIT ports `0x42`, `0x43`, and `0x61` to x86 calibration | A fixed nonzero reload starts channel 2. A TSC read becomes the lower bound only after a following poll reports "still counting"; the post-poll read is the upper bound. The programming window is itself bounded, must stay within 1% of the measured interval, and its midpoint is used. A terminal count on the first poll is rejected as stale, and the nominal TSC rate supplies the timeout bound. A transient pause or stale level discards only its sample; two stalled countdowns abandon PIT discovery, which continues with the remaining sources. |
 | Device tree through ARM `config_from_device_tree` | Looks for `arm,armv8-timer` or `arm,armv7-timer`. Reads `interrupts`, `interrupt-names`, and `clock-frequency`. Missing node or usable interrupt returns `None`; the current AArch64 platform boot hook requires a result with `expect`. |
 | ARM interrupt properties to `timer_irq_from_device_tree` | Parses complete 12-byte entries, accepts type 0 or 1, and adds the corresponding SPI or PPI base. Names use valid UTF-8 entries, with positional fallback. The parser does not validate the resulting ID against controller capacity. |
 | ARM `clock-frequency` to `timer_frequency_from_device_tree` | Accepts a 4- or 8-byte big-endian value. Missing or malformed properties yield `None`, so `init` reads `CNTFRQ_EL0`. `init` rejects zero IRQs, zero frequency, and frequency above `u32::MAX` Hz. |
@@ -77,7 +77,7 @@ repair requests use independent per-CPU atomic pending flags.
 | ID | Threat and trigger | Impact | Current controls and residual risk |
 | --- | --- | --- | --- |
 | T-01 | CPU or hypervisor reports a plausible but incorrect TSC rate. | Medium: elapsed time and deadlines are distorted. | Vendor and numeric checks reject unsupported encodings; TCG prefers measurement. An in-range enumerated value is trusted without independent cross-checking. |
-| T-02 | PIT is absent, stuck, or delayed by emulation or host scheduling. | Medium: calibration fails or produces inaccurate time. | Poll and TSC budgets bound sampling; progress and jitter checks reject unsuitable samples, and three attempts retain the minimum valid rate. TCG's relaxed checks retain measurement error risk. |
+| T-02 | PIT is absent, stuck, or delayed by emulation or host scheduling. | Medium: calibration fails or produces inaccurate time. | Each observation bounds the interval with a pre-poll read that a "still counting" poll proved early and a post-terminal-count read; preemption widens the interval instead of shifting both ends. The programming window is bounded, checked against the measured interval, and its midpoint used. A sample is trusted only within 2%; otherwise the tightest interval is reported as degraded only within 25%, and wider intervals fail discovery instead of being trusted. Two stalled countdowns abandon discovery, while host-pause rejections are retried within the eight-sample budget. |
 | T-03 | Another CPU or driver reprograms PIT channel 2 during calibration. | Medium: corrupted samples or disrupted device use. | Bootstrap-only ownership and local IRQ masking prevent the expected competitors. Violating boot ownership remains unsupported. |
 | T-04 | Firmware supplies extreme frequency values or unusable ARM interrupt data. | Medium: boot panic, incorrect time, or missing timer delivery. | Checked frequency scaling, x86 range filters, ARM property-length checks, and initialization assertions limit accepted data. ARM interrupt capacity and the RISC-V conversion scale remain platform responsibilities. |
 | T-05 | TSC rate changes or CPU counters are unsynchronized. | Medium: drift or cross-CPU time regression. | The backend relies on a stable, system-consistent TSC. It provides no runtime recalibration or synchronization repair. |
@@ -89,7 +89,7 @@ repair requests use independent per-CPU atomic pending flags.
 | ID | Failure and cause | Local effect | System effect | Severity | Handling |
 | --- | --- | --- | --- | --- | --- |
 | F-01 | All runtime TSC sources are unavailable or rejected. | Platform frequency is selected. | Clock accuracy depends on the configured fallback. | 2 | Initialization checks the selected representation; discovery represents the source as `TscFrequency::PlatformStatic`. |
-| F-02 | PIT completes without usable progress or exceeds a budget. | Sample returns `None`. | Calibration falls back to other samples or sources. | 3 | Fixed sample count and discovery order preserve a bounded fallback path. |
+| F-02 | PIT terminal count is stale or the TSC budget expires. | Sample returns `None`. | Calibration falls back to other samples or sources. | 3 | Fixed sample count and discovery order preserve a bounded fallback path. |
 | F-03 | Required configuration or conversion state is invalid or missing. | Assertions or ratio lookups panic. | Boot or the calling kernel path stops. | 2 | Platform initialization must establish the documented prerequisites. |
 | F-04 | LAPIC rate differs from the fixed event rate. | Counts represent the wrong duration. | Deadline delivery is early or late. | 2 | Software can recheck early deadlines; late delivery remains a platform timing limitation. |
 | F-05 | RISC-V timebase produces a zero or truncated scale. | Conversion divides by zero or loses precision. | Panic or systematic time error. | 2 | Platform configuration must provide a usable timebase; current initialization checks only nonzero frequency. |
@@ -133,8 +133,13 @@ an independent clock.
 - `tsc_frequency_discovery_respects_sources_and_fallback` checks source order,
   supported hypervisor identification, lazy calibration, and fallback selection.
 - `tsc_frequency_calculations_preserve_reference_units` checks rate conversion
-  and rejected frequency inputs; `pit_samples_require_progress_and_reject_hardware_jitter`
-  checks the normal and TCG sample policies. These tests use no real hardware.
+  and rejected frequency inputs. The scripted `pit_*` cases drive the sampling
+  order and check that a pause after a false poll widens the interval, that a
+  start-programming pause, a stale first poll and a timeout reject the sample
+  for the right reason, that calibration accepts only tight intervals, reports
+  a bounded degraded result, or fails, that transient rejections are retried
+  without aborting, and that the early abort stops the stalled-countdown search
+  after the configured number of samples. These tests use no real hardware.
 - Inspect the assertions in each backend's initialization and the ARM property
   parsers when changing accepted firmware inputs.
 - Check every PIT early return against the guard lifetime, the independent

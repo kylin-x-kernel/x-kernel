@@ -52,11 +52,12 @@ mod dma;
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::AllocResult;
+use log::error;
 use memaddr::PhysAddr;
 
-use self::dma::ALLOCATOR;
 #[cfg(unittest)]
 pub use self::dma::DmaTestStats;
+use self::dma::{ALLOCATOR, DmaAllocator};
 
 /// Returns a read-only snapshot of in-use DMA resources.
 ///
@@ -65,6 +66,26 @@ pub use self::dma::DmaTestStats;
 #[cfg(unittest)]
 pub fn dma_test_stats() -> DmaTestStats {
     ALLOCATOR.lock().test_stats()
+}
+
+/// Runs one allocator operation and completes detached mapping invalidations
+/// after the allocator lock is released.
+///
+/// A mode change detaches its remote TLB shootdown so it does not run under
+/// this IRQ-disabled lock: a CPU waiting for the lock could not otherwise
+/// acknowledge the shootdown.
+fn run_allocator<R>(operation: impl FnOnce(&mut DmaAllocator) -> R) -> R {
+    let (result, completions) = {
+        let mut allocator = ALLOCATOR.lock();
+        let result = operation(&mut allocator);
+        (result, allocator.take_completions())
+    };
+    for completion in completions {
+        if !completion.complete() {
+            error!("DMA mapping change did not confirm remote TLB invalidation");
+        }
+    }
+    result
 }
 
 /// Converts a physical address to a bus address.
@@ -111,7 +132,7 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 #[track_caller]
 pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
     // SAFETY: forwards the caller's DMA allocation preconditions to the global DMA allocator.
-    unsafe { ALLOCATOR.lock().allocate_dma_memory(layout) }
+    unsafe { run_allocator(|allocator| allocator.allocate_dma_memory(layout)) }
 }
 
 /// Frees coherent memory previously allocated.
@@ -130,7 +151,7 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
 #[track_caller]
 pub unsafe fn deallocate_dma_memory(dma: DmaInfo, layout: Layout) {
     // SAFETY: forwards the caller's matching deallocation contract to the global DMA allocator.
-    unsafe { ALLOCATOR.lock().deallocate_dma_memory(dma, layout) }
+    unsafe { run_allocator(|allocator| allocator.deallocate_dma_memory(dma, layout)) }
 }
 
 /// Direction for a temporary DMA mapping of an existing buffer.
@@ -168,7 +189,7 @@ pub unsafe fn map_dma_buffer(
     direction: DmaDirection,
 ) -> AllocResult<DmaInfo> {
     // SAFETY: forwards the caller's exclusive-buffer contract to the DMA mapper.
-    unsafe { ALLOCATOR.lock().map_dma_buffer(buffer, direction) }
+    unsafe { run_allocator(|allocator| allocator.map_dma_buffer(buffer, direction)) }
 }
 
 /// Unmaps a previously mapped DMA buffer and synchronizes data back if needed.
@@ -195,11 +216,7 @@ pub unsafe fn unmap_dma_buffer(
     direction: DmaDirection,
 ) {
     // SAFETY: forwards the caller's matching mapping contract to the DMA mapper.
-    unsafe {
-        ALLOCATOR
-            .lock()
-            .unmap_dma_buffer(dma_addr, buffer, direction)
-    }
+    unsafe { run_allocator(|allocator| allocator.unmap_dma_buffer(dma_addr, buffer, direction)) }
 }
 
 /// Releases a mapping that was never handed to a device.
@@ -221,7 +238,7 @@ pub unsafe fn unmap_dma_buffer(
 /// caller contract violations.
 pub unsafe fn cancel_dma_mapping(dma_addr: DmaBusAddress, len: usize) {
     // SAFETY: forwards the caller's never-published mapping contract.
-    unsafe { ALLOCATOR.lock().cancel_dma_mapping(dma_addr, len) }
+    unsafe { run_allocator(|allocator| allocator.cancel_dma_mapping(dma_addr, len)) }
 }
 
 /// A bus memory address.
