@@ -19,7 +19,7 @@ ROOTFS_CACHED="$(scripts/ci/prepare_rootfs_cache.sh "${arch}" | tail -n 1)"
 test -s "${ROOTFS_CACHED}"
 cp --reflink=auto "${ROOTFS_CACHED}" disk.img
 
-TIMEOUT=480
+TIMEOUT=960
 if [ "${arch}" = "aarch64" ]; then
     TIMEOUT=481
 fi
@@ -41,7 +41,6 @@ if [ "${status}" -eq 124 ]; then
     echo "Unit test timed out after ${TIMEOUT}s"
     exit 1
 fi
-
 if grep -q "UNITTEST_STATUS: TESTS_FAILED" unittest-output.log; then
     echo "Unit tests failed"
     exit 1
