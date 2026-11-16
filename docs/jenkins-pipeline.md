@@ -69,6 +69,9 @@ xkernel-agent docker vhost-vsock container-vsock
 `jenkins`（`1000:1000`）；设备组 `36` 由流水线在运行时通过 `--group-add 36`
 加入，镜像内不预置。
 
+运行套件由 Starry Test Harness 自动选择加速：同架构且 KVM 可用时使用 KVM，
+否则使用 TCG；用例可单独指定 TCG。
+
 宿主机必须将 `/dev/kvm` 和 `/dev/vhost-vsock` 持久设置为 group `36`、mode
 `0660`。流水线只显式传入这两个设备并执行 `--group-add 36`，不使用
 `--privileged`、root 用户或 Docker Socket。

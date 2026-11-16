@@ -55,7 +55,6 @@ pipeline {
         ROOTFS_VARIANT = 'xkernel-glibc'
         ROOTFS_RELEASE_TAG = "${params.ROOTFS_RELEASE_TAG?.trim() ?: 'rootfs-v20261111'}"
         HARNESS_JOBS = '2'
-        STARRY_ACCEL = 'n'
     }
 
     stages {
