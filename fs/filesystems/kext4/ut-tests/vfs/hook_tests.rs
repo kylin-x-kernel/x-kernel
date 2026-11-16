@@ -309,9 +309,9 @@ fn cancelled_batch_releases_only_the_reservation_it_newly_created() {
 
     // Cancelling the whole run must keep the earlier owner's block reserved.
     batched
-        .settle_write_run(
+        .release_write_run_tail(
             mapping,
-            kvfs::WriteSettlement::new(0, (2 * block_size) as usize, 0),
+            kvfs::BatchWriteRunTail::new(0, (2 * block_size) as usize, 0),
             &reservation,
         )
         .unwrap();

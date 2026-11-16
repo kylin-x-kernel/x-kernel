@@ -22,8 +22,8 @@ mod writeback;
 mod writeback_errors;
 
 pub use operations::{
-    AddressSpaceOperations, BatchedWriteOperations, WriteBeginRequest, WriteEndRequest,
-    WriteReservation, WriteSettlement,
+    AddressSpaceOperations, BatchWriteRunTail, BatchedWriteOperations, WriteBeginRequest,
+    WriteEndRequest, WriteReservation,
 };
 pub(crate) use operations::{default_address_space_operations, empty_address_space_operations};
 pub use pagecache::{WritebackControl, WritebackSyncMode};
@@ -38,7 +38,7 @@ pub struct AddressSpace {
     inode: WeakVfsInode,
     /// Shared operation table corresponding to Linux `address_space::a_ops`.
     ops: &'static dyn AddressSpaceOperations,
-    /// Batched-write settlement vtable, sampled once from `ops`; `None` keeps
+    /// Batched-write tail-release vtable, sampled once from `ops`; `None` keeps
     /// every buffered write on the per-folio path.
     batched: Option<&'static dyn BatchedWriteOperations>,
     object_id: VmObjectId,

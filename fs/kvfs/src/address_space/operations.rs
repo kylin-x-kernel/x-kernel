@@ -80,7 +80,7 @@ impl WriteEndRequest {
 ///
 /// The generic write path threads this token into the matching
 /// [`AddressSpaceOperations::write_end`] or
-/// [`BatchedWriteOperations::settle_write_run`] so cancellation releases
+/// [`BatchedWriteOperations::release_write_run_tail`] so cancellation releases
 /// exactly the units this write owns and never reservations established by
 /// earlier writes.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -223,9 +223,9 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// dirty data must keep their space and quota guarantees. When accepting
     /// bytes that extend the file, the implementation must publish the new
     /// visible size with [`AddressSpace::write_end_set_size`]. Batched runs do
-    /// not reach this hook; they settle through
-    /// [`BatchedWriteOperations::settle_write_run`], whose return type cannot
-    /// change a published byte count.
+    /// not reach this hook; they release their unaccepted tail through
+    /// [`BatchedWriteOperations::release_write_run_tail`], whose return type
+    /// cannot change a published byte count.
     fn write_end(
         &self,
         _mapping: &AddressSpace,
@@ -236,11 +236,13 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
         Err(VfsError::InvalidInput)
     }
 
-    /// Returns the batched-write settlement vtable, or `None` when buffered
-    /// writes for this mapping must always run one page at a time.
+    /// Returns the batched-write vtable, or `None` when buffered writes for
+    /// this mapping must always run one page at a time.
     ///
     /// [`AddressSpace`] samples this once at construction; the generic write
-    /// path never attempts a batched run for a `None` mapping.
+    /// path never attempts a batched run for a `None` mapping. The vtable only
+    /// amortizes admission and run-tail release: slots complete by copying and
+    /// dirtying, and a run's published prefix is fixed before the tail release.
     fn batched_write_ops(&self) -> Option<&'static dyn BatchedWriteOperations> {
         None
     }
@@ -262,20 +264,20 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     }
 }
 
-/// Settlement request for one batched buffered-write run.
+/// Tail-release request for one batched buffered-write run.
 ///
 /// `published` bytes were copied and dirtied under their own folio locks and
-/// are final: the settlement hook releases resources for the remainder and
+/// are final: the release hook releases resources for the remainder and
 /// cannot renegotiate the published count.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WriteSettlement {
+pub struct BatchWriteRunTail {
     pos: u64,
     len_bytes: usize,
     published: usize,
 }
 
-impl WriteSettlement {
-    /// Creates a settlement request for one published run.
+impl BatchWriteRunTail {
+    /// Creates a tail-release request for one published run.
     ///
     /// - `pos`: starting file byte offset of the run.
     /// - `len_bytes`: reserved byte count of the run.
@@ -298,26 +300,21 @@ impl WriteSettlement {
         self.len_bytes
     }
 
-    /// Returns whether the run covers no bytes.
-    pub const fn is_empty(self) -> bool {
-        self.len_bytes == 0
-    }
-
     /// Returns the byte count already copied and dirtied; final.
     pub const fn published(self) -> usize {
         self.published
     }
 }
 
-/// Batched-write admission and settlement, available only to backends that
+/// Batched-write admission and tail release, available only to backends that
 /// declare it through [`AddressSpaceOperations::batched_write_ops`].
 ///
 /// The generic path runs one contiguous run of already-resident, uptodate,
 /// in-EOF whole pages through `batch_write_begin` once, per-slot copy and dirty
-/// under each folio lock, and `settle_write_run` once after those locks are
-/// released. Data acceptance is the per-slot copy and dirty step; the return
-/// type of `settle_write_run` makes rejecting or shortening published bytes
-/// unrepresentable.
+/// under each folio lock, and `release_write_run_tail` once after those locks
+/// are released. Data acceptance is the per-slot copy and dirty step; the
+/// return type of `release_write_run_tail` makes rejecting or shortening
+/// published bytes unrepresentable.
 pub trait BatchedWriteOperations: Send + Sync + 'static {
     /// Reserves a batched write run and reports what this call newly reserved.
     ///
@@ -337,17 +334,17 @@ pub trait BatchedWriteOperations: Send + Sync + 'static {
         request: WriteBeginRequest,
     ) -> VfsResult<WriteReservation>;
 
-    /// Settles one published batched run.
+    /// Releases the unaccepted tail of one published batched run.
     ///
-    /// - `settlement`: the run range with its final published byte count; the
+    /// - `tail`: the run range with its final published byte count; the
     ///   implementation must not treat any published byte as rejected.
     /// - `reservation`: ranges this run's `batch_write_begin` newly reserved;
     ///   the tail beyond the published prefix is released strictly inside it.
     ///
-    /// Returns: `Ok(())` once settlement completes. The published count is
-    /// decided by the generic path and is not an output here.
+    /// Returns: `Ok(())` once the tail release completes. The published count
+    /// is decided by the generic path and is not an output here.
     ///
-    /// Errors: limited to settlement bookkeeping failures (for example an
+    /// Errors: limited to tail-release bookkeeping failures (for example an
     /// accounting-invariant violation); they abort the run's report and must
     /// never be used to express disagreement with published data — such
     /// objections belong in `batch_write_begin`, before publication.
@@ -355,10 +352,10 @@ pub trait BatchedWriteOperations: Send + Sync + 'static {
     /// Locking: caller holds the inode data lock and no folio lock. The hook
     /// may take mount and inode-state locks, but must not reacquire a folio,
     /// invalidate or truncate the mapping, or wait for writeback.
-    fn settle_write_run(
+    fn release_write_run_tail(
         &self,
         mapping: &AddressSpace,
-        settlement: WriteSettlement,
+        tail: BatchWriteRunTail,
         reservation: &WriteReservation,
     ) -> VfsResult<()>;
 }

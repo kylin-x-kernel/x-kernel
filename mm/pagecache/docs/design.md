@@ -221,7 +221,7 @@ error recording, background scheduling, and fsync semantics.
   and dirty one resident folio under its own lock while holding no mapping index lock, and it reconciles the dirty index when the callback
   changes the dirty bit, on both the success and the failure path; invalidated or non-uptodate slots return `None` and the
   caller falls back to the single-folio path. The caller must already exclude truncate and invalidation through the inode data lock,
-  and a batched settlement hook (`BatchedWriteOperations::settle_write_run`) runs once for the run after the per-folio locks are released;
+  and a batched tail-release hook (`BatchedWriteOperations::release_write_run_tail`) runs once for the run after the per-folio locks are released;
 - `with_folio` exposes only uptodate data; a failed initialization keeps the non-uptodate page for retry,
   and truncate does not mark its partial content dirty; `readahead_folios` uses a fixed-capacity FolioBatch to keep and lock the missing page span,
   keeps the page lock after the callback returns, takes the index lock to recheck identity and remove the unconsumed suffix, then releases the page lock;

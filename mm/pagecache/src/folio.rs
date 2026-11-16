@@ -472,6 +472,14 @@ impl FolioGuard<'_> {
     }
 
     /// Marks the folio dirty unless its cache identity has been invalidated.
+    ///
+    /// `dirty_marks` is a derived index reconciled when the pagecache
+    /// folio-locking wrapper exits. Dirtying outside such a wrapper must
+    /// publish the index entry before returning: writeback selects candidates
+    /// from `dirty_marks`, not from this bit.
+    ///
+    /// Locking: caller holds this folio's lock through the guard; the mapping
+    /// index lock is not taken here.
     pub fn mark_dirty(&mut self) {
         self.folio.set_dirty();
     }

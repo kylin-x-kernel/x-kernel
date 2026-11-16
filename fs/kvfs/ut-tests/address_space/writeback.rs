@@ -107,6 +107,7 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
             .unwrap();
         assert_eq!(state, (expected_dirty, false));
     }
+    address_space.i_pages.verify_index_consistency();
     {
         let state = operations.state.lock();
         assert_eq!(state.calls, 1);
@@ -129,6 +130,7 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
             .unwrap();
         assert_eq!(state, (false, false));
     }
+    address_space.i_pages.verify_index_consistency();
     let state = operations.state.lock();
     assert_eq!(state.calls, 2);
     assert_eq!(state.durable, input);
@@ -161,6 +163,7 @@ fn single_folio_failure_preserves_control_progress_for_retry() {
     assert_eq!(result, Err(VfsError::InvalidInput));
     assert_eq!(control.nr_to_write(), 0);
     assert_eq!(control.pages_skipped(), 0);
+    mapping.i_pages.verify_index_consistency();
     let mut control = WritebackControl::all().with_nr_to_write(1);
     let mut retried = Vec::new();
     mapping
@@ -171,6 +174,7 @@ fn single_folio_failure_preserves_control_progress_for_retry() {
         .unwrap();
     assert_eq!(retried, vec![1]);
     assert_eq!(control.nr_to_write(), 0);
+    mapping.i_pages.verify_index_consistency();
     for index in 0..3 {
         mapping
             .i_pages

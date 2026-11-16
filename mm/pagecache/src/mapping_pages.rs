@@ -124,6 +124,14 @@ impl MappingPages {
         self.state.lock().entries.len() as u64
     }
 
+    /// Republishes one locked folio's dirty bit into the writeback index.
+    ///
+    /// - `candidate`: folio identity whose bit changed; must still be resident.
+    /// - `folio`: its locked guard; the bit is authoritative.
+    ///
+    /// Locking: takes the mapping index lock; the folio must stay locked so the
+    /// bit cannot change before this update. A detached or replaced identity is
+    /// ignored.
     pub(super) fn reconcile_dirty_folio(&self, candidate: &Arc<Folio>, folio: &FolioGuard<'_>) {
         let mut state = self.state.lock();
         let index = folio.index();

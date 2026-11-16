@@ -620,3 +620,53 @@ fn resident_batch_stops_before_initializing_the_next_page() {
         Ok(1)
     );
 }
+
+#[def_test]
+fn index_check_accepts_reconciled_dirtying() {
+    let cache = new_cache();
+    write_cached(&cache, 0, b"hello").unwrap();
+    cache.verify_index_consistency();
+}
+
+#[def_test]
+fn index_check_detects_each_mismatch_kind() {
+    use super::index_check::IndexMismatch;
+
+    let cache = new_cache();
+    write_cached(&cache, 0, b"hello").unwrap();
+    cache.state.lock().dirty_marks.remove(&0);
+    let mismatches = cache.index_mismatches();
+    assert!(
+        mismatches.contains(&IndexMismatch::Dirty {
+            index: 0,
+            bit: true,
+            mark: false,
+        }),
+        "a missing dirty mark must be reported: {mismatches:?}"
+    );
+
+    let cache = new_cache();
+    write_cached(&cache, 0, b"hello").unwrap();
+    cache.state.lock().writeback_marks.insert(0);
+    let mismatches = cache.index_mismatches();
+    assert!(
+        mismatches.contains(&IndexMismatch::Writeback {
+            index: 0,
+            bit: false,
+            mark: true,
+        }),
+        "a stale writeback mark must be reported: {mismatches:?}"
+    );
+
+    let cache = new_cache();
+    cache.state.lock().dirty_marks.insert(9);
+    let mismatches = cache.index_mismatches();
+    assert!(
+        mismatches.contains(&IndexMismatch::Orphan {
+            index: 9,
+            dirty: true,
+            writeback: false,
+        }),
+        "an orphaned dirty mark must be reported: {mismatches:?}"
+    );
+}

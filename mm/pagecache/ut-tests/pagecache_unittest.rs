@@ -14,6 +14,8 @@ use memaddr::PAGE_SIZE_4K;
 
 use crate::{Folio, MappingPages, PageIndex};
 
+#[path = "index_check.rs"]
+mod index_check;
 #[path = "invalidate_unittest.rs"]
 mod invalidate;
 #[path = "mapping_pages_unittest.rs"]

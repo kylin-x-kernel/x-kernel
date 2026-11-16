@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Batched admission/settlement and per-folio buffered-write acceptance tests.
+//! Batched admission/tail-release and per-folio buffered-write acceptance tests.
 
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -82,8 +82,8 @@ impl AddressSpaceOperations for PrefixWriteOps {
     }
 }
 
-/// Published count passed to the last `settle_write_run`, or `usize::MAX`.
-static LAST_SETTLE_PUBLISHED: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Published count passed to the last `release_write_run_tail`, or `usize::MAX`.
+static LAST_RELEASE_PUBLISHED: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 impl BatchedWriteOperations for PrefixWriteOps {
     fn batch_write_begin(
@@ -94,13 +94,13 @@ impl BatchedWriteOperations for PrefixWriteOps {
         Ok(crate::WriteReservation::new())
     }
 
-    fn settle_write_run(
+    fn release_write_run_tail(
         &self,
         _mapping: &AddressSpace,
-        settlement: crate::WriteSettlement,
+        tail: crate::BatchWriteRunTail,
         _reservation: &crate::WriteReservation,
     ) -> VfsResult<()> {
-        LAST_SETTLE_PUBLISHED.store(settlement.published(), Ordering::SeqCst);
+        LAST_RELEASE_PUBLISHED.store(tail.published(), Ordering::SeqCst);
         Ok(())
     }
 }
@@ -130,7 +130,7 @@ fn batched_write_failure_reports_the_committed_prefix() {
     };
     let mut iter = iov_iter_source(&mut source);
 
-    LAST_SETTLE_PUBLISHED.store(usize::MAX, Ordering::SeqCst);
+    LAST_RELEASE_PUBLISHED.store(usize::MAX, Ordering::SeqCst);
     let _data_guard = inode.lock_data();
     let written = mapping
         .perform_write(0, &mut iter, 2 * PAGE_SIZE_4K)
@@ -141,15 +141,16 @@ fn batched_write_failure_reports_the_committed_prefix() {
         "a partially committed batch must report the written prefix, not the fault"
     );
     assert_eq!(
-        LAST_SETTLE_PUBLISHED.load(Ordering::SeqCst),
+        LAST_RELEASE_PUBLISHED.load(Ordering::SeqCst),
         PAGE_SIZE_4K,
-        "settlement must see exactly the published prefix"
+        "tail release must see exactly the published prefix"
     );
     mapping
         .with_folio(1, |folio| {
             assert_eq!(folio.unwrap().data()[0], 0, "the failed page stays untouched");
         })
         .unwrap();
+    mapping.i_pages.verify_index_consistency();
 }
 
 /// Backend that accepts one byte less than the batch copied.
@@ -214,6 +215,131 @@ impl AddressSpaceOperations for OverAcceptOps {
     }
 }
 
+/// Source that serves every request but rejects any rewind.
+struct UnrevertableSource {
+    total: usize,
+    written: usize,
+}
+
+impl IovSource for UnrevertableSource {
+    fn count(&self) -> usize {
+        self.total - self.written
+    }
+
+    fn copy_from_iter(&mut self, dst: &mut [u8]) -> KResult<usize> {
+        let len = dst.len().min(self.count());
+        dst[..len].fill(0x5a);
+        self.written += len;
+        Ok(len)
+    }
+
+    fn revert(&mut self, count: usize) -> KResult<()> {
+        if count != 0 {
+            return Err(KError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+
+/// Recorded `write_end` traffic from the generic buffered-write path.
+static WRITE_END_CALLS: AtomicUsize = AtomicUsize::new(0);
+static LAST_WRITE_END_POS: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LAST_WRITE_END_LEN: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LAST_WRITE_END_COPIED: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LAST_RESERVATION_RANGES: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+fn record_write_end(request: crate::WriteEndRequest, reservation: &crate::WriteReservation) {
+    WRITE_END_CALLS.fetch_add(1, Ordering::SeqCst);
+    LAST_WRITE_END_POS.store(request.pos() as usize, Ordering::SeqCst);
+    LAST_WRITE_END_LEN.store(request.len(), Ordering::SeqCst);
+    LAST_WRITE_END_COPIED.store(request.copied(), Ordering::SeqCst);
+    LAST_RESERVATION_RANGES.store(reservation.ranges().len(), Ordering::SeqCst);
+}
+
+fn reset_write_end_record() {
+    WRITE_END_CALLS.store(0, Ordering::SeqCst);
+    LAST_WRITE_END_POS.store(usize::MAX, Ordering::SeqCst);
+    LAST_WRITE_END_LEN.store(usize::MAX, Ordering::SeqCst);
+    LAST_WRITE_END_COPIED.store(usize::MAX, Ordering::SeqCst);
+    LAST_RESERVATION_RANGES.store(usize::MAX, Ordering::SeqCst);
+}
+
+/// Admits a step by newly reserving exactly its byte range.
+fn reserve_request_range(request: crate::WriteBeginRequest) -> crate::WriteReservation {
+    crate::WriteReservation::from_ranges(vec![(
+        request.pos(),
+        request.pos() + request.len() as u64,
+    )])
+}
+
+/// Single-page backend that records every completion the generic path issues.
+struct RecordingWriteEndOps;
+
+static RECORDING_WRITE_END_OPERATIONS: RecordingWriteEndOps = RecordingWriteEndOps;
+
+impl AddressSpaceOperations for RecordingWriteEndOps {
+    fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
+        folio.data().fill(0);
+        folio.complete(Ok(()))
+    }
+
+    fn write_begin(
+        &self,
+        _mapping: &AddressSpace,
+        request: crate::WriteBeginRequest,
+    ) -> VfsResult<crate::WriteReservation> {
+        Ok(reserve_request_range(request))
+    }
+
+    fn write_end(
+        &self,
+        _mapping: &AddressSpace,
+        request: crate::WriteEndRequest,
+        reservation: &crate::WriteReservation,
+    ) -> VfsResult<usize> {
+        record_write_end(request, reservation);
+        Ok(request.copied())
+    }
+}
+
+/// Backend whose dirty publication fails before the folio bit is set.
+struct DirtyFailOps;
+
+static DIRTY_FAIL_OPERATIONS: DirtyFailOps = DirtyFailOps;
+
+impl AddressSpaceOperations for DirtyFailOps {
+    fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
+        folio.data().fill(0);
+        folio.complete(Ok(()))
+    }
+
+    fn write_begin(
+        &self,
+        _mapping: &AddressSpace,
+        request: crate::WriteBeginRequest,
+    ) -> VfsResult<crate::WriteReservation> {
+        Ok(reserve_request_range(request))
+    }
+
+    fn dirty_folio(
+        &self,
+        _mapping: &AddressSpace,
+        _folio: &mut pagecache::FolioGuard<'_>,
+    ) -> VfsResult<bool> {
+        Err(VfsError::Io)
+    }
+
+    fn write_end(
+        &self,
+        _mapping: &AddressSpace,
+        request: crate::WriteEndRequest,
+        reservation: &crate::WriteReservation,
+    ) -> VfsResult<usize> {
+        record_write_end(request, reservation);
+        Ok(request.copied())
+    }
+}
+
 /// Builds a two-page file whose pages are already resident.
 ///
 /// - `operations`: address-space callbacks installed on the inode.
@@ -247,6 +373,7 @@ fn resident_two_page_file(
                 .expect("populate a clean resident page");
         }
     }
+    mapping.i_pages.verify_index_consistency();
     (inode, mapping)
 }
 
@@ -265,6 +392,7 @@ fn writeback_visited(mapping: &AddressSpace) -> Vec<u64> {
             Ok(())
         })
         .expect("writeback pass completes");
+    mapping.i_pages.verify_index_consistency();
     visited
 }
 
@@ -322,6 +450,7 @@ fn per_folio_short_accept_reverts_the_iterator_to_the_reported_prefix() {
         2 * PAGE_SIZE_4K,
         "the iterator must sit exactly at the unreported tail"
     );
+    mapping.i_pages.verify_index_consistency();
 }
 
 #[def_test]
@@ -341,14 +470,149 @@ fn per_folio_over_accept_is_rejected() {
         result.is_err(),
         "an over-accepting backend must not report phantom progress: {result:?}"
     );
+    mapping.i_pages.verify_index_consistency();
 }
 
-/// Batched backend whose settlement hook reports a bookkeeping failure.
-struct SettleFailureOps;
+#[def_test(serial)]
+fn per_folio_copy_fault_cancels_the_reservation() {
+    let (inode, mapping) = resident_two_page_file(&RECORDING_WRITE_END_OPERATIONS, true);
+    reset_write_end_record();
+    let mut source = FailingSource {
+        total: PAGE_SIZE_4K,
+        limit: 0,
+        written: 0,
+    };
+    let mut iter = iov_iter_source(&mut source);
+    let result = {
+        let _data_guard = inode.lock_data();
+        mapping.perform_write(0, &mut iter, PAGE_SIZE_4K)
+    };
+    assert_eq!(
+        result,
+        Err(VfsError::BadAddress),
+        "a per-folio copy fault must surface the source error with zero progress"
+    );
+    assert_eq!(
+        WRITE_END_CALLS.load(Ordering::SeqCst),
+        1,
+        "the copy fault must cancel the step through write_end"
+    );
+    assert_eq!(
+        LAST_WRITE_END_POS.load(Ordering::SeqCst),
+        0,
+        "the cancel must target the failed step"
+    );
+    assert_eq!(
+        LAST_WRITE_END_LEN.load(Ordering::SeqCst),
+        PAGE_SIZE_4K,
+        "the cancel must cover the requested step length"
+    );
+    assert_eq!(
+        LAST_WRITE_END_COPIED.load(Ordering::SeqCst),
+        0,
+        "the cancel must report zero copied bytes"
+    );
+    assert_eq!(
+        LAST_RESERVATION_RANGES.load(Ordering::SeqCst),
+        1,
+        "the cancel must carry the reservation this step established"
+    );
+    assert_eq!(
+        iter.count(),
+        PAGE_SIZE_4K,
+        "a failed copy must leave the iterator at the step start"
+    );
+    mapping
+        .with_folio(0, |folio| {
+            assert_eq!(
+                folio.unwrap().data()[0],
+                0,
+                "the cancelled page keeps its prior contents"
+            );
+        })
+        .unwrap();
+    mapping.i_pages.verify_index_consistency();
+}
 
-static SETTLE_FAILURE_OPERATIONS: SettleFailureOps = SettleFailureOps;
+#[def_test(serial)]
+fn dirty_publication_failure_with_rejected_rewind_still_cancels_the_reservation() {
+    let (inode, mapping) = resident_two_page_file(&DIRTY_FAIL_OPERATIONS, false);
+    reset_write_end_record();
+    let mut source = UnrevertableSource {
+        total: PAGE_SIZE_4K,
+        written: 0,
+    };
+    let mut iter = iov_iter_source(&mut source);
+    let result = {
+        let _data_guard = inode.lock_data();
+        mapping.perform_write(0, &mut iter, PAGE_SIZE_4K)
+    };
+    assert_eq!(
+        result,
+        Err(VfsError::InvalidInput),
+        "the rewind failure must replace the dirty publication error"
+    );
+    assert_eq!(
+        WRITE_END_CALLS.load(Ordering::SeqCst),
+        1,
+        "the reservation cancel must run even when the iterator rewind fails"
+    );
+    assert_eq!(
+        LAST_WRITE_END_COPIED.load(Ordering::SeqCst),
+        0,
+        "the cancel must report zero copied bytes"
+    );
+    assert_eq!(
+        LAST_RESERVATION_RANGES.load(Ordering::SeqCst),
+        1,
+        "the cancel must carry the reservation this step established"
+    );
+    mapping.i_pages.verify_index_consistency();
+}
 
-impl AddressSpaceOperations for SettleFailureOps {
+#[def_test(serial)]
+fn grow_copy_fault_with_rejected_rewind_shrinks_the_cache_window() {
+    let (inode, mapping) = resident_two_page_file(&DIRTY_FAIL_OPERATIONS, false);
+    reset_write_end_record();
+    let before = mapping.i_pages.nrpages();
+    let mut source = UnrevertableSource {
+        total: PAGE_SIZE_4K,
+        written: 0,
+    };
+    let mut iter = iov_iter_source(&mut source);
+    let result = {
+        let _data_guard = inode.lock_data();
+        mapping.perform_write((2 * PAGE_SIZE_4K) as u64, &mut iter, PAGE_SIZE_4K)
+    };
+    assert_eq!(
+        result,
+        Err(VfsError::InvalidInput),
+        "the rewind failure must replace the dirty publication error"
+    );
+    assert_eq!(
+        WRITE_END_CALLS.load(Ordering::SeqCst),
+        1,
+        "the reservation cancel must run even when the iterator rewind fails"
+    );
+    assert_eq!(
+        mapping.i_pages.nrpages(),
+        before,
+        "the prepared cache window must shrink back even when the iterator rewind fails"
+    );
+    assert_eq!(
+        inode.size(),
+        (2 * PAGE_SIZE_4K) as u64,
+        "a cancelled grow must publish no size"
+    );
+    mapping.i_pages.verify_index_consistency();
+}
+
+/// Batched backend whose tail-release hook reports a bookkeeping failure.
+struct ReleaseFailureOps;
+
+static RELEASE_FAILURE_OPERATIONS: ReleaseFailureOps = ReleaseFailureOps;
+
+impl AddressSpaceOperations for ReleaseFailureOps {
     fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
         folio.data().fill(0);
         folio.complete(Ok(()))
@@ -365,11 +629,11 @@ impl AddressSpaceOperations for SettleFailureOps {
     }
 
     fn batched_write_ops(&self) -> Option<&'static dyn BatchedWriteOperations> {
-        Some(&SETTLE_FAILURE_OPERATIONS)
+        Some(&RELEASE_FAILURE_OPERATIONS)
     }
 }
 
-impl BatchedWriteOperations for SettleFailureOps {
+impl BatchedWriteOperations for ReleaseFailureOps {
     fn batch_write_begin(
         &self,
         _mapping: &AddressSpace,
@@ -378,10 +642,10 @@ impl BatchedWriteOperations for SettleFailureOps {
         Ok(crate::WriteReservation::new())
     }
 
-    fn settle_write_run(
+    fn release_write_run_tail(
         &self,
         _mapping: &AddressSpace,
-        _settlement: crate::WriteSettlement,
+        _tail: crate::BatchWriteRunTail,
         _reservation: &crate::WriteReservation,
     ) -> VfsResult<()> {
         Err(VfsError::Io)
@@ -389,8 +653,8 @@ impl BatchedWriteOperations for SettleFailureOps {
 }
 
 #[def_test]
-fn batched_settle_failure_keeps_the_published_prefix() {
-    let (inode, mapping) = resident_two_page_file(&SETTLE_FAILURE_OPERATIONS, false);
+fn batched_release_failure_keeps_the_published_prefix() {
+    let (inode, mapping) = resident_two_page_file(&RELEASE_FAILURE_OPERATIONS, false);
     let mut source = FailingSource {
         total: 2 * PAGE_SIZE_4K,
         limit: 2 * PAGE_SIZE_4K,
@@ -404,7 +668,7 @@ fn batched_settle_failure_keeps_the_published_prefix() {
     assert_eq!(
         result.unwrap(),
         2 * PAGE_SIZE_4K,
-        "published bytes stay reported progress even when settlement fails"
+        "published bytes stay reported progress even when the tail release fails"
     );
     assert_eq!(
         iter.count(),
@@ -414,7 +678,7 @@ fn batched_settle_failure_keeps_the_published_prefix() {
     assert_eq!(
         writeback_visited(&mapping),
         vec![0, 1],
-        "published data survives a settlement failure and stays writeback-visible"
+        "published data survives a tail-release failure and stays writeback-visible"
     );
 }
 
@@ -474,4 +738,5 @@ fn batched_and_per_folio_writes_agree() {
         vec![0, 1],
         "per-folio dirty must reach the same writeback index as the batched one"
     );
+    batch_mapping.i_pages.verify_index_consistency();
 }

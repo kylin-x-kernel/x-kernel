@@ -11,14 +11,14 @@ use iov_iter::{IovIterDest, IovIterSource};
 use kerrno::LinuxError;
 use ktime_types::SystemTime;
 use kvfs::{
-    AddressSpace, AddressSpaceOperations, BatchedWriteOperations, Dentry, DeviceId, DirContext,
-    FMode, FallocateFlags, FiemapExtentFlags, FiemapExtentInfo, FiemapFlags, FileDirOperations,
-    FileMappingOperations, FileOperations, InodeAttributeOperations, InodeDirOperations,
-    InodeFiemapOperations, InodeOperations, InodeSymlinkOperations, InodeTimes, InodeUpdateTime,
-    Kiocb, LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, ReadaheadControl,
-    RenameFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode, VfsError,
-    VfsFile, VfsFileBuilder, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest,
-    WriteReservation, WriteSettlement, WritebackControl, XattrName, XattrNameRef, XattrNameSink,
+    AddressSpace, AddressSpaceOperations, BatchWriteRunTail, BatchedWriteOperations, Dentry,
+    DeviceId, DirContext, FMode, FallocateFlags, FiemapExtentFlags, FiemapExtentInfo, FiemapFlags,
+    FileDirOperations, FileMappingOperations, FileOperations, InodeAttributeOperations,
+    InodeDirOperations, InodeFiemapOperations, InodeOperations, InodeSymlinkOperations, InodeTimes,
+    InodeUpdateTime, Kiocb, LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType,
+    ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
+    Umode, VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
+    WriteEndRequest, WriteReservation, WritebackControl, XattrName, XattrNameRef, XattrNameSink,
     XattrSetFlags, default_evict_inode, inode_init_owner,
 };
 use pagecache::FolioRead;
@@ -1114,8 +1114,8 @@ fn reserve_delalloc_range(
     Ok(WriteReservation::from_ranges(ranges))
 }
 
-/// Settles a buffered write: releases the reservation this write still owns
-/// beyond the accepted prefix.
+/// Releases a buffered write's unaccepted tail: the reservation this write
+/// still owns beyond the accepted prefix.
 ///
 /// - `ext4`: mount holding the delayed-allocation accounting.
 /// - `inode`: regular file receiving the write.
@@ -1832,10 +1832,10 @@ impl BatchedWriteOperations for Ext4AddressSpaceOperations {
         reserve_delalloc_range(ext4, inode, request.pos(), request.len(), block_size)
     }
 
-    fn settle_write_run(
+    fn release_write_run_tail(
         &self,
         mapping: &AddressSpace,
-        settlement: WriteSettlement,
+        tail: BatchWriteRunTail,
         reservation: &WriteReservation,
     ) -> VfsResult<()> {
         let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
@@ -1848,9 +1848,9 @@ impl BatchedWriteOperations for Ext4AddressSpaceOperations {
         finish_delalloc_write(
             ext4,
             inode,
-            settlement.pos(),
-            settlement.len_bytes(),
-            settlement.published(),
+            tail.pos(),
+            tail.len_bytes(),
+            tail.published(),
             reservation,
             super_block.block_size(),
         )

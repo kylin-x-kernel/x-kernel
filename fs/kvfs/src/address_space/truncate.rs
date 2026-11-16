@@ -42,9 +42,9 @@ impl AddressSpace {
     /// Publishes the size accepted by `AddressSpaceOperations::write_end`.
     ///
     /// The caller must be the generic per-folio write path, which holds the
-    /// inode data lock and the copied folio lock. Batched runs settle through
-    /// `BatchedWriteOperations::settle_write_run` inside the visible size and
-    /// never publish a size here. The path has prepared any cache bytes
+    /// inode data lock and the copied folio lock. Batched runs release their
+    /// unaccepted tail through `BatchedWriteOperations::release_write_run_tail`
+    /// inside the visible size and never publish a size here. The path has prepared any cache bytes
     /// between the old EOF and the completed write. This is the Rust
     /// equivalent of an aops `write_end` implementation doing
     /// `i_size_write(mapping->host, len)`.

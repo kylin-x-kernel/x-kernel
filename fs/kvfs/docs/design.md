@@ -1058,7 +1058,7 @@ and are reused explicitly by `read_folio` and `readahead`.
 `simple_write_end` stays in `kvfs::libfs` and serves only ramfs/memfs-style aops.
 A per-folio write-end of a block-device filesystem publishes the accepted `i_size` via `AddressSpace::write_end_set_size()`
 within the same generic-write data-lock and copied-folio-lock critical section, instead of disguising ext4 semantics as a
-libfs helper. Batched settlement publishes no size because a batched run never extends the visible size.
+libfs helper. Batched tail release publishes no size because a batched run never extends the visible size.
 
 `AddressSpace` itself holds the object-id, the mapped views, the statically shared `AddressSpaceOperations` and
 `i_pages: MappingPages`. This field embeds the cache container directly without a separate `Arc` allocation, corresponding to Linux
@@ -1713,11 +1713,12 @@ pagecache; repeated dirtying through writable PTEs remains dependent on G.
 
 A single-folio buffered write copies, dirties, accepts in `write_end` and
 publishes visible i_size under one folio lock. A batched run of already-resident
-pages copies and dirties each slot under its own folio lock, then settles the
-whole run once through the batched-write settlement hook after those locks are
-released; the published count is decided by the generic path and the settlement
-hook's return type cannot change it. The batch never extends the visible size,
-so settlement publishes no size and the slot is accepted as soon as it is dirty.
+pages copies and dirties each slot under its own folio lock, then releases the
+whole run's unaccepted tail once through the batched-write tail-release hook
+after those locks are released; the published count is decided by the generic
+path and the release hook's return type cannot change it. The batch never
+extends the visible size, so tail release publishes no size and the slot is
+accepted as soon as it is dirty.
 A successful-copy `write_end` hook may update reservations and inode metadata,
 but cannot reacquire the folio, invalidate the cache or wait for writeback.
 Cancellation releases only the units that the matching admission newly reserved,

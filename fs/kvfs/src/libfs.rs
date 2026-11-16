@@ -209,7 +209,8 @@ pub fn simple_getattr(
 /// operations. Block-backed filesystems must complete their own write-end
 /// work and publish the accepted size with [`AddressSpace::write_end_set_size`].
 /// The per-folio write path holds the copied folio lock through this helper;
-/// batched runs settle through `BatchedWriteOperations` and never call it.
+/// batched runs release their tail through `BatchedWriteOperations` and never
+/// call it.
 /// It updates inode size without reacquiring cache locks or waiting for I/O.
 pub fn simple_write_end(mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
     let copied = request.copied();

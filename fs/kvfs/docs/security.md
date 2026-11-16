@@ -956,8 +956,9 @@ owned I/O is still drained and cache ownership remains intact.
 
 A single-folio write keeps the copied folio locked through write_end acceptance
 and i_size publication. A batched run accepts each slot while its own folio is
-locked and settles the run afterwards, unlocked, in one settlement hook whose
-return type cannot change the published count; it publishes no size and releases
+locked and releases the run's unaccepted tail afterwards, unlocked, in one
+tail-release hook whose return type cannot change the published count; it
+publishes no size and releases
 only the reservation units that run newly created, never reservations owned by
 earlier writes. Write-end implementations cannot reacquire a folio or wait for
 its I/O. Cancellation and rollback release those guards before lifecycle waits,
