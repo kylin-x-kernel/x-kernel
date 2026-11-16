@@ -143,6 +143,7 @@ checked through the configured kernel's `make clippy` during this migration.
 | [CG-047-kconfig-feature-ownership](CG-047-kconfig-feature-ownership.md) | MUST | ai | — |
 | [CG-048-direct-owner-conversion](CG-048-direct-owner-conversion.md) | SHOULD | ai | — |
 | [CG-049-no-std-box-in-kernel-tests](CG-049-no-std-box-in-kernel-tests.md) | MUST | dylint | `std_box_in_kernel_tests` |
+| [CG-050-scheduler-lock-order](CG-050-scheduler-lock-order.md) | MUST | ai | — |
 
 ### Candidates not yet ruled
 

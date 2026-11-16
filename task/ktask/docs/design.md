@@ -502,6 +502,38 @@ not reentrant under a held RQ guard.
 - Blocked wake versus `on_cpu` uses the Dekker handshake in the SMP section
   below.
 
+### Lock order
+
+Scheduler code has one allowed nesting direction and no cycles:
+
+```
+run queue lock  ->  bandwidth registry (TRACKED, MEMBERS)  ->  task state atomics
+```
+
+- **The registry is never taken the other way round.** `bandwidth.rs` never
+  acquires a run-queue lock, and it never holds `TRACKED` while touching
+  `MEMBERS` or while calling `resume_group` / `park_group`. Both registry locks
+  are leaf locks over short `Vec` scans.
+- **Accounting points run under the run-queue lock** (`blocked_resched`,
+  `account_sched_tick`). Their locks must therefore be leaves: `poll_trackers`
+  releases `TRACKED` before touching `MEMBERS` and before `resume_group`
+  mutates task state, and registration never nests the two. Waiting for a leaf
+  registry lock is bounded and safe; waiting for a lock that another CPU holds
+  while it waits for a run queue is not.
+- **The rollover path allocates only when a window actually closes**, so the
+  common accounting path stays allocation-free.
+- **Wake latches never force a nested registry lock.** A park latch
+  (`SpinNoIrq<bool>`) is held across `blocked_resched` and its guard contributes
+  one no-preempt count, so the accounting that runs inside `blocked_resched`
+  keeps the registry locks in the blocking-but-leaf order described above: it
+  waits for one registry lock at a time and releases it before taking the other
+  or before touching task state
+  ([CG-050](../../../docs/code-guidelines/CG-050-scheduler-lock-order.md)).
+- A CPU that spins here with IRQs disabled cannot be observed by the soft
+  lockup watchdog (its timer interrupt is masked) and the hard lockup backend is
+  currently aarch64-only, so x86_64 hangs silently. Capture such a hang with an
+  external debugger or the QEMU monitor (`info registers`) instead.
+
 ## Creation and publication
 
 `ktask` splits the user-visible lifetime into two stages:

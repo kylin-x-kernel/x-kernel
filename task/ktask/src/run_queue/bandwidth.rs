@@ -90,25 +90,45 @@ pub(crate) fn account_current(
 
 /// Runs the lazy period rollover for every tracked group and resumes members
 /// whose window closed.
+///
+/// Reached from every accounting point, including `RunQueue::blocked_resched`
+/// with the run-queue lock held and IRQs disabled, so its locks must be leaves:
+/// `TRACKED` is released before `MEMBERS` is touched and before
+/// [`resume_group`] mutates task state. Nothing is allocated unless a rollover
+/// actually fires, so the common path stays allocation-free.
+///
+/// Lock order: run queue -> `TRACKED` -> (released) -> `MEMBERS`. The two
+/// registry locks are never held at the same time.
 pub(crate) fn poll_trackers(now_ns: u64) {
     if ACTIVE_TRACKERS.load(Ordering::Acquire) == 0 {
         return;
     }
     let mut resumed = Vec::new();
-    let mut tracked = TRACKED.lock();
-    tracked.retain(|entry| entry.strong_count() != 0);
-    ACTIVE_TRACKERS.store(tracked.len(), Ordering::Release);
-    for tracker in tracked.iter().filter_map(Weak::upgrade) {
-        if tracker.poll(now_ns) {
-            resumed.push(tracker);
+    {
+        let mut tracked = TRACKED.lock();
+        tracked.retain(|entry| entry.strong_count() != 0);
+        ACTIVE_TRACKERS.store(tracked.len(), Ordering::Release);
+        for tracker in tracked.iter().filter_map(Weak::upgrade) {
+            if tracker.poll(now_ns) {
+                // Only a closed window allocates; the registry lock is held
+                // across this push, so keep the buffer empty in steady state.
+                resumed.push(tracker);
+            }
         }
     }
+
     MEMBERS
         .lock()
         .retain(|member| member.task.upgrade().is_some() && member.tracker.strong_count() != 0);
+
+    // Resume outside both registry locks: `resume_group` re-enters `MEMBERS`
+    // and mutates task state, which must not happen under a registry lock.
     for tracker in &resumed {
         resume_group(tracker);
     }
+    // Re-sweep members whose task exited during the resume pass. This keeps the
+    // original cleanup behaviour; the sweep runs after all registry locks were
+    // released, so it adds no nesting.
     if !resumed.is_empty() {
         MEMBERS
             .lock()
@@ -116,6 +136,11 @@ pub(crate) fn poll_trackers(now_ns: u64) {
     }
 }
 
+/// Registers `tracker` in the global registry on its first charged tick.
+///
+/// Registration must not be skipped: an unregistered group would never be
+/// polled, so its members would escape `cpu.max` throttling. The scan is a
+/// short `Vec` pass and only runs on a group's first charged tick.
 fn register_tracker_once(tracker: &Arc<Bandwidth>) {
     let mut tracked = TRACKED.lock();
     if !tracked
@@ -128,6 +153,10 @@ fn register_tracker_once(tracker: &Arc<Bandwidth>) {
     }
 }
 
+/// Records `task` as a member of `tracker` on its first charged tick.
+///
+/// Same correctness rule as [`register_tracker_once`]: skipping the record
+/// would leave the task unparked when its group is throttled.
 fn register_member(tracker: &Arc<Bandwidth>, task: &KtaskRef) {
     let mut members = MEMBERS.lock();
     let known = members.iter().any(|member| {
