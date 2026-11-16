@@ -16,9 +16,8 @@ description = "Prepared workqueue APIs and safe ownership wrappers"
 # (`src/lib.rs`: `#[cfg(all(feature = "bench", not(unittest)))]` plus
 # `#[path = "../benches/kernel.rs"] pub mod benchmarks;`) and prints through
 # `klogger::kprintln!`. Its sources live outside the lib target's `src/`
-# directory, so the package-level analysis does not see the use. kalloc-types
-# is consumed by cfg(unittest) modules under ut-tests, also outside src/.
-ignored = ["klogger", "kalloc-types"]
+# directory, so the package-level analysis does not see the use.
+ignored = ["klogger"]
 
 [features]
 # Select live-service integration tests instead of replaceable service fixtures.

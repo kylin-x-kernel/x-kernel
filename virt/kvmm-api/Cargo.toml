@@ -9,9 +9,9 @@ repository.workspace = true
 description = "Lifecycle-oriented control-plane devices built on the kvmm mechanism crate"
 
 [package.metadata.cargo-shear]
-# Kernel guest fixtures use cache maintenance, task placement and a read-only
-# irqchip probe. They are outside cargo-shear's production-source scan.
-ignored = ["karch", "ktask", "kcpu_id_map", "khal", "irq_driver"]
+# Kernel guest fixtures use a read-only irqchip probe and the CPU-id map. They
+# are outside cargo-shear's production-source scan.
+ignored = ["karch", "kcpu_id_map", "irq_driver"]
 
 [features]
 default = []

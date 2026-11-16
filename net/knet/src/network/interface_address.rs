@@ -218,6 +218,7 @@ impl Ipv4AddressSet {
         Ok(removed)
     }
 
+    #[cfg(unittest)]
     pub(crate) fn remove(&mut self, addr: Ipv4Cidr) -> Option<Ipv4AddrEntry> {
         let index = self.entry_index(addr)?;
         Some(self.addresses.remove(index))

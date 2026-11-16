@@ -52,6 +52,14 @@ impl PlatformBackend {
     ///
     /// These devices have no firmware description to associate, so the node is
     /// explicitly `None` rather than omitted from the registration path.
+    #[cfg(any(
+        feature = "serial-ns16550-ioport",
+        feature = "ramdisk",
+        feature = "ahci",
+        feature = "bcm2835-sdhci",
+        feature = "sdmmc",
+        unittest,
+    ))]
     fn register_static_device(
         context: &mut EnumerationContext,
         bus_id: BusId,

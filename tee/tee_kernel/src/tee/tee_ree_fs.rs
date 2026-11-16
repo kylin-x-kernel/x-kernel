@@ -137,11 +137,10 @@ pub(super) struct TeeFsFdAux {
     pub fd: FileVariant,
 }
 
+#[cfg(unittest)]
 impl TeeFsFdAux {
     pub(super) fn new() -> Self {
-        Self {
-            fd: FileVariant::default(),
-        }
+        Self::default()
     }
 }
 

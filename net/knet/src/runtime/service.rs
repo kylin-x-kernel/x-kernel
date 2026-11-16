@@ -1269,6 +1269,7 @@ impl Service {
         Some(removed)
     }
 
+    #[cfg(unittest)]
     pub(crate) fn apply_neighbor_update(
         &self,
         update: NeighborUpdate,

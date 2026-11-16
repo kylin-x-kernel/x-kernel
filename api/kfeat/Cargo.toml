@@ -11,8 +11,10 @@ description = "Top-level feature selection for x-kernel"
 
 [package.metadata.cargo-shear]
 # kfeat owns top-level feature forwarding. These optional crates are selected
-# through feature edges rather than direct code references.
-ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "kirq", "knet", "krcu", "kspin", "ksync", "ktask", "ktracing", "memspace", "fs_boot", "timer_driver", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno", "pagecache"]
+# through feature edges rather than direct code references. The `smp` and `vmm`
+# edges are load-bearing: crates such as karch, kplat and page_table gate code
+# on `feature = "smp"`, so removing the edge would silently drop that code.
+ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "karch", "kbpf", "kipi", "kirq", "knet", "kplat", "krcu", "kspin", "ksync", "ktask", "ktimer_core", "ktracing", "memspace", "fs_boot", "page_table", "timer_driver", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kvmm", "kvmm-api", "kprocess", "kruntime", "ksyscall", "linux_sysno", "pagecache"]
 
 [features]
 default = []

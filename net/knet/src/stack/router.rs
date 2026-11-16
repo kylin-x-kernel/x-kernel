@@ -950,6 +950,7 @@ impl Router {
         }
     }
 
+    #[cfg(unittest)]
     pub(crate) fn apply_neighbor_update(
         &mut self,
         update: NeighborUpdate,

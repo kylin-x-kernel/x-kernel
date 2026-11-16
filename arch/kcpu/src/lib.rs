@@ -50,7 +50,7 @@ pub use active_exception_context::{
 
 mod cpuinfo;
 mod userspace_common;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", unittest))]
 pub(crate) use cpuinfo::intersect_hwcap;
 #[cfg(target_arch = "aarch64")]
 pub use cpuinfo::system_hwcap;

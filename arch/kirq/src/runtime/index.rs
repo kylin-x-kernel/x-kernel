@@ -204,6 +204,7 @@ impl LineIndex {
     }
 
     /// Records a withdrawal only for an index that owns its population.
+    #[cfg(any(target_arch = "x86_64", unittest))]
     fn note_withdrawn(&mut self) {
         #[cfg(unittest)]
         if let Some(count) = self.private_count_mut() {

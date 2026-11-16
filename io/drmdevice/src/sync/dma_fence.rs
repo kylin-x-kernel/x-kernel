@@ -67,7 +67,7 @@ impl SyncContext {
     }
 }
 
-/// Context of fences created by [`new_anonymous_fence`].
+/// Context of fences created by `new_anonymous_fence`.
 const ANONYMOUS_CONTEXT: SyncContext = SyncContext(0);
 /// Context of fences created by [`new_signaled_fence`].
 const PRIVATE_CONTEXT: SyncContext = SyncContext(2);
@@ -82,6 +82,7 @@ static PRIVATE_SEQNO: AtomicU64 = AtomicU64::new(0);
 /// card keeps the capability and runs it on the completion point it can
 /// justify, which is also the point at which an `OUT_FENCE_PTR` descriptor
 /// becomes readable.
+#[cfg(unittest)]
 pub(crate) fn new_anonymous_fence() -> (Arc<DmaFence>, Arc<FenceSignal>) {
     new_anonymous_fence_named("unknown")
 }

@@ -75,6 +75,7 @@ pub(super) const NLMSG_ALIGNTO: usize = 4;
 pub(super) const RTM_NEWLINK: u16 = 16;
 pub(super) const RTM_DELLINK: u16 = 17;
 pub(super) const RTM_GETLINK: u16 = 18;
+#[cfg(unittest)]
 pub(super) const RTM_SETLINK: u16 = 19;
 pub(super) const RTM_NEWADDR: u16 = 20;
 pub(super) const RTM_DELADDR: u16 = 21;

@@ -66,6 +66,7 @@ pub(crate) mod route {
     pub(crate) const SCOPE_UNIVERSE: u8 = 0;
     pub(crate) const SCOPE_LINK: u8 = 253;
     pub(crate) const SCOPE_HOST: u8 = 254;
+    #[cfg(unittest)]
     pub(crate) const SCOPE_NOWHERE: u8 = 255;
     pub(crate) const TYPE_UNICAST: u8 = 1;
     pub(crate) const TYPE_LOCAL: u8 = 2;

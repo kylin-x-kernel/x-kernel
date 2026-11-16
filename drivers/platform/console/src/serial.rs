@@ -30,7 +30,9 @@ use input::SerialInput;
 use khal::mem::PhysAddr;
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::VirtAddr;
-use kirq::{IrqDesc, IrqEvent};
+#[cfg(any(all(feature = "ns16550-ioport", target_arch = "x86_64"), unittest))]
+use kirq::IrqDesc;
+use kirq::IrqEvent;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
@@ -488,6 +490,7 @@ pub(crate) enum EarlyIrq {
     #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
     Firmware(fwnode::FwIrqSpec<'static>),
     /// Legacy pre-decoded descriptor.
+    #[cfg(any(all(feature = "ns16550-ioport", target_arch = "x86_64"), unittest))]
     Legacy(IrqDesc),
 }
 

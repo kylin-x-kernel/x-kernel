@@ -278,6 +278,22 @@ impl IrqDescRuntimeState {
         self.is_msi
     }
 
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        expect(
+            clippy::allow_attributes,
+            reason = "CG-024-lint-exceptions: teardown queries are used only by the x86 MSI \
+                      backend"
+        )
+    )]
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        allow(
+            dead_code,
+            reason = "CG-024-lint-exceptions: dead_code: MSI teardown queries are used only by \
+                      the x86 MSI backend"
+        )
+    )]
     const fn is_unused(&self) -> bool {
         !self.has_actions() && self.teardown_depth == 0
     }
@@ -825,6 +841,22 @@ impl IrqStateDesc {
         self.runtime.is_msi()
     }
 
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        expect(
+            clippy::allow_attributes,
+            reason = "CG-024-lint-exceptions: teardown queries are used only by the x86 MSI \
+                      backend"
+        )
+    )]
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        allow(
+            dead_code,
+            reason = "CG-024-lint-exceptions: dead_code: MSI teardown queries are used only by \
+                      the x86 MSI backend"
+        )
+    )]
     pub(super) fn is_unused(&self) -> bool {
         !self.is_managed
             && !self.has_nmi_shutdown
@@ -873,6 +905,7 @@ impl IrqStateDesc {
     }
 
     /// Trigger reconfiguration cannot repair a failed routing transaction.
+    #[cfg(unittest)]
     pub(super) fn require_affinity_ready(&self) -> Result<(), IrqDescError> {
         if self.affinity.has_failed_programming {
             return Err(IrqDescError::ConfigurationFailed {
@@ -882,7 +915,7 @@ impl IrqStateDesc {
         Ok(())
     }
 
-    /// Like [`Self::require_affinity_ready`], but admits a masked deferred
+    /// Like `require_affinity_ready`, but admits a masked deferred
     /// retry so activation can run the controller's recovery transaction.
     pub(super) fn require_affinity_activation_ready(&self) -> Result<(), IrqDescError> {
         if self.affinity.has_failed_programming

@@ -161,6 +161,9 @@ pub(super) struct RouteRequest {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct NeighRequest {
+    /// Only the test entry points reach the family check directly; the wire
+    /// path validates the family before it builds this request.
+    #[cfg(unittest)]
     pub(super) family: u8,
     pub(super) ifindex: u32,
     pub(super) state: u16,
@@ -335,6 +338,7 @@ pub(super) fn build_ack_response(request: &[u8]) -> Vec<u8> {
     build_nlmsg_error_response(&header, 0, request)
 }
 
+#[cfg(unittest)]
 pub(super) fn handle_rtnetlink_request(request: &[u8], requesting_port: u32) -> Vec<NetlinkPacket> {
     handle_rtnetlink_request_with_cred(request, requesting_port, true, 0, false)
 }
@@ -1466,6 +1470,7 @@ fn publish_mutation_events(events: Vec<NetworkEvent>, origin: MutationOrigin) ->
 }
 
 /// Applies a link update without request-derived notification routing.
+#[cfg(unittest)]
 pub(super) fn apply_link_update(
     request: LinkUpdateRequest,
 ) -> Result<Vec<NetworkEvent>, LinuxError> {
@@ -1510,6 +1515,7 @@ fn apply_link_update_with_origin(
     Ok(publish_mutation_events(events, origin))
 }
 
+#[cfg(unittest)]
 pub(super) fn add_addr(request: AddrRequest, flags: u16) -> Result<Vec<NetworkEvent>, LinuxError> {
     add_addr_with_origin(request, flags, MutationOrigin::default())
 }
@@ -1533,6 +1539,7 @@ fn add_addr_with_origin(
     Ok(publish_mutation_events(events, origin))
 }
 
+#[cfg(unittest)]
 pub(super) fn del_addr(request: DelAddrRequest) -> Result<Vec<NetworkEvent>, LinuxError> {
     del_addr_with_origin(request, MutationOrigin::default())
 }
@@ -1582,6 +1589,7 @@ fn del_addr_with_origin(
     Ok(publish_mutation_events(events, origin))
 }
 
+#[cfg(unittest)]
 pub(super) fn add_route(
     request: RouteRequest,
     flags: u16,
@@ -1626,6 +1634,7 @@ fn add_route_with_origin(
     Ok(publish_mutation_events(events, origin))
 }
 
+#[cfg(unittest)]
 pub(super) fn del_route(request: RouteRequest) -> Result<Vec<NetworkEvent>, LinuxError> {
     del_route_with_origin(request, MutationOrigin::default())
 }
@@ -1651,6 +1660,7 @@ fn del_route_with_origin(
     Ok(publish_mutation_events(events, origin))
 }
 
+#[cfg(unittest)]
 pub(super) fn add_neigh(
     request: NeighRequest,
     flags: u16,
@@ -1658,6 +1668,7 @@ pub(super) fn add_neigh(
     add_neigh_with_origin(request, flags, MutationOrigin::default())
 }
 
+#[cfg(unittest)]
 fn add_neigh_with_origin(
     request: NeighRequest,
     flags: u16,
@@ -1709,6 +1720,7 @@ fn add_neigh_wire_with_origin(
     let dst = parse_ip_prefix_by_family(request.family, request.dst)?;
     add_neigh_locked(
         NeighRequest {
+            #[cfg(unittest)]
             family: request.family,
             ifindex: request.ifindex,
             state: request.state,
@@ -1748,10 +1760,12 @@ fn add_neigh_locked(
     Ok(publish_mutation_events(events, origin))
 }
 
+#[cfg(unittest)]
 pub(super) fn del_neigh(request: NeighRequest) -> Result<Vec<NetworkEvent>, LinuxError> {
     del_neigh_with_origin(request, MutationOrigin::default())
 }
 
+#[cfg(unittest)]
 fn del_neigh_with_origin(
     request: NeighRequest,
     origin: MutationOrigin,
@@ -1789,6 +1803,7 @@ fn del_neigh_wire_with_origin(
     let dst = parse_ip_prefix_by_family(request.family, request.dst)?;
     del_neigh_locked(
         NeighRequest {
+            #[cfg(unittest)]
             family: request.family,
             ifindex: request.ifindex,
             state: request.state,

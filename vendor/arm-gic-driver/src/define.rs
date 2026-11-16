@@ -81,6 +81,7 @@ pub const SPECIAL_RANGE: Range<u32> = Range {
 };
 
 /// Register location for a standard INTID's non-maskable attribute.
+#[cfg(any(target_arch = "aarch64", doc, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NmiAttributeSlot {
     /// The bit is in the current PE's `GICR_INMIR0`.
@@ -90,6 +91,7 @@ pub(crate) enum NmiAttributeSlot {
 }
 
 /// Map a standard SGI, PPI, or SPI to its architectural INMIR slot.
+#[cfg(any(target_arch = "aarch64", doc, test))]
 pub(crate) fn nmi_attribute_slot(intid: IntId) -> Option<NmiAttributeSlot> {
     let intid = intid.to_u32();
     if intid < PPI_RANGE.end {

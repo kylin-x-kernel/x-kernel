@@ -956,6 +956,9 @@ fn run_cargo_shear(root: &Path, relative_path: &str, fix: bool) -> Result<()> {
     println!("Checking dependencies in {}", workspace.display());
 
     let mut process = Process::new("cargo-shear", false, 0);
+    // Warnings are dependency-hygiene defects too: make them fail the check so
+    // an unused dependency or a stale ignore cannot regress silently.
+    process.arg("--deny-warnings");
     // `--locked` is only meaningful where a `Cargo.lock` is committed: it
     // forbids the analysis from creating or updating the lockfile. The nested
     // tooling projects (`xtask`, `tee_apps`, `uapps/hello`) keep their

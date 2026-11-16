@@ -16,7 +16,7 @@ description = "Runtime library of X-kernel"
 # integration fixtures; kmutex supplies their independent serialization lock.
 # kcompletion and kiface-task-wait-api supply IRQ lifecycle test handshakes.
 # kalloc-types supplies prepared owners in path-mounted RCU tests and benchmarks.
-ignored = ["kalloc-types", "kfinalize", "irq_driver", "of", "krcu-core", "kiface-cpu-api", "kiface-irq-context-api", "kmutex", "kiface-time-api", "kiface-task-api", "kcompletion", "kiface-task-wait-api"]
+ignored = ["kalloc-types", "kfinalize", "irq_driver", "of", "krcu-core", "kiface-irq-context-api", "kmutex", "kiface-time-api", "kiface-task-api", "kcompletion", "kiface-task-wait-api"]
 
 [features]
 default = []

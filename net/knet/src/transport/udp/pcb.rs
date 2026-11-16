@@ -78,6 +78,7 @@ impl PreparedUdpPacket {
         self.metadata().remote_addr()
     }
 
+    #[cfg(unittest)]
     pub(crate) fn into_packet(self) -> PacketBuf {
         self.packet
     }

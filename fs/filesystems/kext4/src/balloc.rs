@@ -394,6 +394,7 @@ impl Ext4SbInfo {
         Ok(allocation)
     }
 
+    #[cfg(unittest)]
     pub(crate) fn release_allocated_block(
         &self,
         inode: &Ext4Inode,

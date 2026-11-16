@@ -256,6 +256,7 @@ impl<H: Handler + AmlHost> AcpiContext<H> {
     /// `decode` runs while the host/context pair is exclusively borrowed. It
     /// must copy the values it needs; it may not retain the vendor object or
     /// call back into this context.
+    #[cfg(unittest)]
     pub(crate) fn evaluate<T>(
         &mut self,
         path: &AmlName,

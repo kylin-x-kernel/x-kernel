@@ -10,6 +10,7 @@ use crate::XKernelResourceProvider;
 
 /// Returns whether `port` plus a `width` access stays inside the 16-bit port
 /// space.
+#[cfg(any(target_arch = "x86_64", unittest))]
 fn checked_port(port: u16, width: PortWidth) -> ResResult<()> {
     let last = port as u32 + width.bytes() as u32 - 1;
     if last > u16::MAX as u32 {
@@ -18,6 +19,7 @@ fn checked_port(port: u16, width: PortWidth) -> ResResult<()> {
     Ok(())
 }
 
+#[cfg(any(target_arch = "x86_64", unittest))]
 fn checked_write(port: u16, width: PortWidth, value: u32) -> ResResult<()> {
     checked_port(port, width)?;
     if !width.accepts(value) {

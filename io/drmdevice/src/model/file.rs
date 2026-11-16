@@ -142,6 +142,7 @@ impl DrmFile {
     /// file must still hold a handle to it. A null object (a fresh import
     /// that was never bound to a handle) is reported as `None`, so a client
     /// cannot map a buffer it never received.
+    #[cfg(unittest)]
     pub(crate) fn object_by_offset(&self, offset_bytes: u64) -> Option<Arc<GemObject>> {
         self.object_by_offset_range(offset_bytes, 1)
     }

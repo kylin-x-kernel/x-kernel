@@ -38,7 +38,9 @@ use alloc::sync::Arc;
 
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::PhysAddr;
-use kirq::{IrqActionToken, IrqDesc};
+use kirq::IrqActionToken;
+#[cfg(any(all(feature = "ns16550-ioport", target_arch = "x86_64"), unittest))]
+use kirq::IrqDesc;
 use kspin::{SpinNoIrq, static_lock};
 #[cfg(feature = "ns16550-mmio")]
 pub use ns16550_mmio::SerialRegWidth;
@@ -412,6 +414,7 @@ fn map_console_irq(irq: serial::EarlyIrq) -> Option<usize> {
                 None
             }
         },
+        #[cfg(any(all(feature = "ns16550-ioport", target_arch = "x86_64"), unittest))]
         serial::EarlyIrq::Legacy(desc) => match kirq::try_map(desc) {
             Ok(virq) => Some(virq),
             Err(error) => {
