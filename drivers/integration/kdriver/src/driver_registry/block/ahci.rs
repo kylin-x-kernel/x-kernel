@@ -37,6 +37,8 @@ unsafe impl block::ahci::AhciHal for AhciHalImpl {
 struct AhciDriver;
 
 impl DeviceDriver for AhciDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "ahci"
     }
@@ -53,11 +55,8 @@ impl DeviceDriver for AhciDriver {
         &AHCI
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> driver_base::DriverResult<()> {
-        let binding = device
-            .binding_ref_for_lifecycle_write()
-            .ok_or(driver_base::DriverError::BadState)?;
-        let (vaddr, _) = crate::iomap_first_mmio(&binding, device.as_ref(), "ahci")?;
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> driver_base::DriverResult<()> {
+        let (vaddr, _) = crate::iomap_first_mmio(ctx, "ahci")?;
         let vaddr = vaddr.as_ptr() as usize;
 
         // SAFETY: `iomap_first_mmio` returned a kernel virtual address that
@@ -76,10 +75,10 @@ impl DeviceDriver for AhciDriver {
         let (index, first_minor) = super::allocate_scsi_disk()?;
         let name = format!("{}{}", ahci.name(), index);
         let disk = block::Gendisk::alloc_mq(name, 8, first_minor, 16, Arc::new(ahci))?;
-        kclass::publish_block(device, disk).map(drop)
+        kclass::publish_block(ctx, disk).map(drop)
     }
 }
 
 pub(super) fn descriptor() -> BoxedDriver {
-    Arc::new(AhciDriver)
+    BoxedDriver::new(AhciDriver)
 }

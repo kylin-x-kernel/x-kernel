@@ -86,7 +86,7 @@ impl kdevice::BusType for Bus {
         BUS
     }
 
-    fn match_desc(&self, _: &dyn DeviceDriver, _: &DeviceDesc) -> MatchResult {
+    fn match_desc(&self, _: &dyn kdevice::DriverMatchInfo, _: &DeviceDesc) -> MatchResult {
         MatchResult::NoMatch
     }
 }
@@ -97,6 +97,7 @@ impl kdevice::DeviceMatcher for Driver {
     }
 }
 impl DeviceDriver for Driver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "entropy-collector-test"
     }
@@ -113,7 +114,7 @@ impl DeviceDriver for Driver {
         self
     }
 
-    fn probe_device(&self, _: Arc<kdevice::DeviceObject>) -> Result<(), DriverError> {
+    fn probe_device(&self, _: &kdevice::ProbeContext<'_>) -> Result<(), DriverError> {
         Err(DriverError::Unsupported)
     }
 }
@@ -122,7 +123,7 @@ impl DeviceDriver for Driver {
 fn collector_retries_without_new_demand_and_stops_only_on_device_failure() {
     kdevice::register_bus_type(Arc::new(kdevice::BusTypeObject::new(Arc::new(Bus))));
     let bus = kdevice::register_bus_instance(BUS, "entropy-collector-test");
-    let driver = kdevice::register_driver_object(Arc::new(Driver));
+    let driver = kdevice::register_driver_object(kdevice::BoxedDriver::new_adoptable(Driver));
     for index in 0..3 {
         let parent = kdevice::adopt_active_device(kdevice::ActiveDeviceAdoption {
             bus_id: bus.id(),
@@ -146,7 +147,10 @@ fn collector_retries_without_new_demand_and_stops_only_on_device_failure() {
             entered: WaitQueue::new(),
         });
         let class = kdevice::test_hooks::with_binding_lock(parent.id(), || {
-            kclass::publish_hwrng(parent.clone(), hardware.clone())
+            kdevice::ProbeContext::with_test_context(parent.clone(), |ctx| {
+                kclass::publish_hwrng(ctx, hardware.clone())
+            })
+            .expect("the adopted device has a probe context")
         })
         .expect("the adopted device still has a binding")
         .unwrap();

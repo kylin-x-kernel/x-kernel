@@ -4,15 +4,13 @@
 
 //! Bus-type matching regressions.
 
-use alloc::sync::Arc;
-
 use driver_base::{DeviceKind, DriverResult};
 use unittest::def_test;
 
 use super::*;
 use crate::{
     BusTypeId, DeviceDesc, DeviceDescId, DeviceDescSpec, DeviceDriver, DeviceId, DeviceIdentity,
-    DeviceLocation, DeviceMatcher, DeviceObject, DiscoveryOrigin, MatchResult, PciIdentity,
+    DeviceLocation, DeviceMatcher, DiscoveryOrigin, MatchResult, PciIdentity,
     PlatformIdentity, ResourceSet,
 };
 
@@ -30,6 +28,7 @@ struct FixtureDriver {
 }
 
 impl DeviceDriver for FixtureDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "bus-match-fixture"
     }
@@ -46,7 +45,7 @@ impl DeviceDriver for FixtureDriver {
         &self.matcher
     }
 
-    fn probe_device(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, _ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
         Ok(())
     }
 }

@@ -12,6 +12,8 @@ use crate::driver_registry::{BoxedDriver, firmware_specs::SDMMC};
 struct SdmmcDriver;
 
 impl DeviceDriver for SdmmcDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "sdmmc"
     }
@@ -28,11 +30,8 @@ impl DeviceDriver for SdmmcDriver {
         &SDMMC
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> driver_base::DriverResult<()> {
-        let binding = device
-            .binding_ref_for_lifecycle_write()
-            .ok_or(driver_base::DriverError::BadState)?;
-        let (vaddr, _) = crate::iomap_first_mmio(&binding, device.as_ref(), "sdmmc")?;
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> driver_base::DriverResult<()> {
+        let (vaddr, _) = crate::iomap_first_mmio(ctx, "sdmmc")?;
         let vaddr = vaddr.as_ptr() as usize;
 
         // SAFETY: `iomap_first_mmio` returned a kernel virtual address that
@@ -46,10 +45,10 @@ impl DeviceDriver for SdmmcDriver {
         let (index, first_minor) = super::allocate_mmc_disk()?;
         let name = format!("{}{}", dev.name(), index);
         let disk = block::Gendisk::alloc_mq(name, 179, first_minor, 8, Arc::new(dev))?;
-        kclass::publish_block(device, disk).map(drop)
+        kclass::publish_block(ctx, disk).map(drop)
     }
 }
 
 pub(super) fn descriptor() -> BoxedDriver {
-    Arc::new(SdmmcDriver)
+    BoxedDriver::new(SdmmcDriver)
 }

@@ -13,7 +13,7 @@ use driver_base::DeviceKind;
 use kspin::SpinNoPreempt;
 use unittest::{assert_eq, def_test};
 
-use super::BindingRuntime;
+use super::{BindingRuntime, BindingSource};
 use crate::{
     BusId, DeviceId, DeviceIdentity, DeviceLocation, DeviceObject, DeviceState, DiscoveryOrigin,
     DriverId, PlatformIdentity, ResourceSet,
@@ -21,7 +21,7 @@ use crate::{
 
 #[def_test]
 fn binding_runtime_admits_only_active() {
-    let binding = BindingRuntime::new();
+    let binding = BindingRuntime::new(BindingSource::Probe);
     assert_eq!(binding.state(), DeviceState::Discovered);
     assert!(!binding.try_acquire());
 
@@ -54,7 +54,7 @@ fn binding_runtime_admits_only_active() {
 
 #[def_test]
 fn binding_runtime_busy_preserves_state_and_admission() {
-    let binding = BindingRuntime::new();
+    let binding = BindingRuntime::new(BindingSource::Probe);
     binding.bind(DriverId::new(2), "busy-test", DeviceKind::Char);
     binding.activate(DeviceKind::Char);
 
@@ -85,7 +85,7 @@ fn binding_runtime_busy_preserves_state_and_admission() {
               FnOnce() + Send>; these tests exercise its deferred one-shot cleanup contract"
 )]
 fn cleanup_batch_is_lifo_and_second_drain_is_empty() {
-    let binding = BindingRuntime::new();
+    let binding = BindingRuntime::new(BindingSource::Probe);
     let order = Arc::new(SpinNoPreempt::new(Vec::<usize>::new()));
     let next = Arc::new(AtomicUsize::new(0));
 
@@ -118,7 +118,7 @@ fn cleanup_batch_is_lifo_and_second_drain_is_empty() {
               FnOnce() + Send>; these tests exercise its deferred one-shot cleanup contract"
 )]
 fn cleanup_registered_from_callback_waits_for_next_batch() {
-    let binding = Arc::new(BindingRuntime::new());
+    let binding = Arc::new(BindingRuntime::new(BindingSource::Probe));
     let order = Arc::new(SpinNoPreempt::new(Vec::<usize>::new()));
 
     let outer_order = order.clone();
@@ -141,7 +141,7 @@ fn cleanup_registered_from_callback_waits_for_next_batch() {
 
 #[def_test]
 fn binding_snapshot_reads_driver_metadata_as_one_group() {
-    let binding = BindingRuntime::new();
+    let binding = BindingRuntime::new(BindingSource::Probe);
     binding.bind(DriverId::new(7), "snapshot-driver", DeviceKind::Net);
 
     let snapshot = binding.snapshot();
@@ -194,4 +194,106 @@ fn static_record_maps_binding_and_relations_groups() {
     assert_eq!(record.driver_name, Some("grouped-driver"));
     assert_eq!(record.device_kind, Some(DeviceKind::Char));
     assert_eq!(record.state, DeviceState::Active);
+}
+
+#[def_test]
+fn probe_data_slot_transfers_exactly_and_restores() {
+    use crate::driver::DriverData;
+
+    let binding = BindingRuntime::new(BindingSource::Probe);
+    binding
+        .install_data(DriverData::new(0x51u32))
+        .expect("empty probe slot accepts data");
+
+    let mut data = binding
+        .take_data()
+        .expect("installed data can be taken")
+        .expect("probe binding has data");
+    assert_eq!(data.downcast_mut::<u32>().copied(), Some(0x51u32));
+    assert!(
+        binding.take_data().is_err(),
+        "a second take must not silently duplicate ownership"
+    );
+
+    binding
+        .restore_data(data)
+        .expect("PM-style restore returns the exact value");
+    assert_eq!(
+        binding
+            .take_data()
+            .expect("restored data is takeable")
+            .expect("probe binding has data")
+            .downcast_mut::<u32>()
+            .copied(),
+        Some(0x51u32)
+    );
+}
+
+#[def_test]
+fn data_install_failure_returns_original_data() {
+    use crate::driver::DriverData;
+
+    let binding = BindingRuntime::new(BindingSource::Probe);
+    binding
+        .install_data(DriverData::new(1u32))
+        .expect("first install succeeds");
+    let error = binding
+        .install_data(DriverData::new(2u32))
+        .expect_err("occupied slot rejects install");
+    let (kind, _, data) = error.into_parts();
+    assert_eq!(kind, crate::device::DataInstallFailureKind::Occupied);
+
+    let mut data = data;
+    assert_eq!(data.downcast_mut::<u32>().copied(), Some(2u32));
+}
+
+#[def_test]
+fn pm_style_data_borrow_returns_to_the_same_slot() {
+    use crate::driver::DriverData;
+
+    let binding = BindingRuntime::new(BindingSource::Probe);
+    binding
+        .install_data(DriverData::new(7usize))
+        .expect("probe data installs");
+    let mut data = binding
+        .take_data()
+        .expect("PM take succeeds")
+        .expect("probe data exists");
+    *data.downcast_mut::<usize>().expect("typed data") += 1;
+    assert!(
+        binding.take_data().is_err(),
+        "the slot must remain taken during the callback"
+    );
+    binding
+        .restore_data(data)
+        .expect("PM restore returns the borrowed value");
+    assert_eq!(
+        binding
+            .take_data()
+            .expect("restored data is takeable")
+            .expect("probe data exists")
+            .downcast_mut::<usize>()
+            .copied(),
+        Some(8usize)
+    );
+}
+
+#[def_test]
+fn data_lock_probe_detects_a_held_slot_lock() {
+    let first = BindingRuntime::new(BindingSource::Probe);
+    let second = BindingRuntime::new(BindingSource::Probe);
+    assert!(!first.data_lock_is_locked_for_test());
+    assert!(!second.data_lock_is_locked_for_test());
+    let guard = first.hold_data_lock_for_test();
+    assert!(
+        first.data_lock_is_locked_for_test(),
+        "the probe must observe its own held Data lock"
+    );
+    assert!(
+        !second.data_lock_is_locked_for_test(),
+        "another binding must not inherit the held-lock state"
+    );
+    drop(guard);
+    assert!(!first.data_lock_is_locked_for_test());
+    assert!(!second.data_lock_is_locked_for_test());
 }

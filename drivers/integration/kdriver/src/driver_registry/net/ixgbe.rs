@@ -17,6 +17,8 @@ static IXGBE_MATCH: PciIdsMatcher = PciIdsMatcher(&[PciDeviceId {
 struct IxgbeDriver;
 
 impl DeviceDriver for IxgbeDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "ixgbe"
     }
@@ -33,22 +35,19 @@ impl DeviceDriver for IxgbeDriver {
         &IXGBE_MATCH
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> driver_base::DriverResult<()> {
-        let binding = device
-            .binding_ref_for_lifecycle_write()
-            .ok_or(DriverError::BadState)?;
-        let (vaddr, mmio_size) = crate::iomap_first_mmio(&binding, device.as_ref(), "ixgbe-bar")?;
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> driver_base::DriverResult<()> {
+        let (vaddr, mmio_size) = crate::iomap_first_mmio(ctx, "ixgbe-bar")?;
         let vaddr = vaddr.as_ptr() as usize;
 
         match net::ixgbe::IxgbeNic::<super::ixgbe_hal::IxgbeHalImpl, 1024, 1>::init(
             vaddr, mmio_size,
         ) {
-            Ok(nic) => kclass::publish_net(device, Box::new(nic)).map(drop),
+            Ok(nic) => kclass::publish_net(ctx, Box::new(nic)).map(drop),
             Err(_) => Err(DriverError::Io),
         }
     }
 }
 
 pub(super) fn descriptor() -> BoxedDriver {
-    Arc::new(IxgbeDriver)
+    BoxedDriver::new(IxgbeDriver)
 }

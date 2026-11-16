@@ -160,7 +160,7 @@ drivers/base/kclass/
 ```text
                     driver probe_device()
                          │
-                         │ publish_<class>(parent, runtime)
+                         │ publish_<class>(ctx, runtime)
                          v
                     ┌──────────┐
                     │Published │  ← ClassDevice created, held by registry;
@@ -188,9 +188,8 @@ drivers/base/kclass/
 
 | From | To | Trigger |
 |----|----|----------|
-| — | Published | Driver calls `publish_<class>(parent, runtime)` from a probe/adoption/remove write context |
+| — | Published | Driver calls `publish_<class>(ctx, runtime)` from a probe context |
 | Published | Available | `kdevice` dispatches `Activated`; `notify_class_available` registers any class node and then invokes subscriber callbacks |
-| Published | Available (immediate) | Captured binding is already `Active` at publish time (desc-adoption path) |
 | Available/Published | Terminal | `kdevice` dispatches `Removed` (unbind/unregister) or `BindingRetired` (failed candidate); the captured binding is terminal |
 | Terminal | Removed | `evict_*_terminal`/`retire_*_binding` claims the id, revokes the node, unpublishes the class runtime, then finishes the claim |
 | Terminal | Terminal (deferred) | The node is mid-removal; the claim is not taken, a deferred callback is registered, and the finishing node path retries the same retirement |
@@ -225,21 +224,21 @@ be undone explicitly on the error path.
 
 1. The driver creates the runtime device inside `DeviceDriver::probe_device`
    (e.g. `VirtIoNet::try_new`).
-2. It calls `publish_<class>(parent, runtime)` (macro-generated).
+2. It calls `publish_<class>(ctx, runtime)` (macro-generated).
 3. `name()`, `device_kind()`, and `irq()` are extracted from the runtime.
 4. The `device_kind` is checked against the registry type;
    a mismatch returns `InvalidInput`.
 5. `class_metadata()` is extracted from the runtime (only the input class
    returns meaningful metadata).
-6. The macro calls `parent.binding_ref_for_lifecycle_write()` to capture
+6. The macro calls `ctx.binding()` to capture
    the exact binding being published. `ClassDevice::try_new_with_binding`
    rejects a binding observed as `Removing`/`Removed` with `BadState`;
    `driver_name()`/`driver_id()` become the immutable identity snapshot, and
    `is_available()` reads the captured runtime. Only the fixture/test
    constructor `try_new_with_class_metadata` reads the parent's current slot.
    A successful capture is **not** a publish permission: the caller must
-   already hold the descriptor binding lock because it is in a probe, adoption
-   or remove write context.
+   already hold the descriptor binding lock because it is in the probe write
+   context.
 7. The registry is inspected before any class resource is touched:
    an in-flight retirement → `ResourceBusy`; a live same-ID entry →
    `AlreadyExists`; terminal same-ID entries are evicted in the fixed order
@@ -248,10 +247,12 @@ be undone explicitly on the error path.
    registry `publish` fails (for example a racing `AlreadyExists`), the
    class-specific publish is undone and the error is returned.
 9. Successful publication pushes the entry under the `SpinNoPreempt` lock.
-   If the captured binding is already `Active`, `notify_class_available`
-   runs synchronously: input and display classes first register a
-   `DeviceNode` for the exact binding in `kdevice`, then notify class
-   subscribers.
+   A production probe publishes while the binding is still `Bound`, so
+   availability is delivered by the later `Activated` event; publication does
+   not synthesize an immediate availability transition. Only a test/fixture
+   context that captures an already-`Active` binding takes the synchronous
+   path: input and display classes first register a `DeviceNode` for the exact
+   binding in `kdevice`, then notify class subscribers.
 
 ### Captured binding reference
 
@@ -583,3 +584,10 @@ The input class adapter forwards the optional readiness hint without taking a
 class lock or allocating. The devfs consumer separately checks device
 availability before probing, and a retained class handle keeps the underlying
 driver storage alive.
+
+## Probe-context publication
+
+`publish_*` accepts the kdevice `ProbeContext` rather than a raw stable object.
+The class handle captures the context's exact `BindingRef`; publication never
+queries the current binding slot itself. Remove/PM contexts cannot call the
+publish API, so class publication cannot be smuggled into teardown.

@@ -9,7 +9,7 @@ use alloc::{boxed::Box, sync::Arc};
 use driver_base::{DriverError, DriverResult};
 use driver_os_api::{IrqEvent, IrqResource};
 use kclass::prelude::DisplayDevice;
-use kdevice::DeviceObject;
+use kdevice::ProbeContext;
 use virtio::{GpuHost, Transport, VirtIoGpuDev};
 
 use super::glue::VirtIoHalImpl;
@@ -34,18 +34,15 @@ impl GpuHost for Host {
 }
 
 pub(super) fn activate<T: Transport + Send + 'static>(
-    parent: Arc<DeviceObject>,
+    ctx: &ProbeContext<'_>,
     transport: T,
     irq: Option<IrqResource>,
     pci: Option<(&mut pci::PciConfigAccess, pci::DeviceFunction)>,
 ) -> DriverResult<()> {
-    let binding = parent
-        .binding_ref_for_lifecycle_write()
-        .ok_or(DriverError::BadState)?;
     let irq = irq.ok_or(DriverError::InvalidInput)?;
     let gpu =
         VirtIoGpuDev::<VirtIoHalImpl, _, _>::prepare(transport, Host(ktask::WaitQueue::new()))?;
-    let id = parent.id();
+    let id = ctx.device().id();
     let work_gpu = gpu.clone();
     let work = kworkng::WorkHandle::new(move || {
         if kclass::find_display_device(id).is_some()
@@ -61,8 +58,7 @@ pub(super) fn activate<T: Transport + Send + 'static>(
     let refresh = work.clone();
     let handler = gpu.clone();
     let virq = irq.virq().raw();
-    binding.devm_request_irq(
-        &parent,
+    ctx.devm_request_irq(
         irq,
         Arc::new(move |line| {
             if line != virq {
@@ -79,13 +75,13 @@ pub(super) fn activate<T: Transport + Send + 'static>(
         }),
     )?;
     if let Some((config, bdf)) = pci {
-        super::arm_pci_intx(&parent, config, bdf)?;
+        super::arm_pci_intx(ctx, config, bdf)?;
     }
     let closing = gpu.clone();
-    binding.add_cleanup(&parent, move || closing.close())?;
+    ctx.add_cleanup(move || closing.close())?;
     gpu.start()?;
     log::info!("virtio-gpu: display discovery complete on IRQ {virq}");
-    kclass::publish_display(parent, Box::new(gpu))?;
+    kclass::publish_display(ctx, Box::new(gpu))?;
     // A config interrupt may have arrived before the class was visible.
     let _ = work.queue_default(None);
     Ok(())

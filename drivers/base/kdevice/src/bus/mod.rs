@@ -15,7 +15,9 @@ use crate::{
 
 mod bus_type;
 
-pub use bus_type::{BusType, BusTypeId, BusTypeObject, PciBusTypeMatcher, PlatformBusTypeMatcher};
+pub use bus_type::{
+    BusType, BusTypeId, BusTypeObject, DriverMatchInfo, PciBusTypeMatcher, PlatformBusTypeMatcher,
+};
 
 /// Globally unique bus instance identifier assigned at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -24,6 +24,14 @@ use super::{
 };
 use crate::{DeviceObject, ResourceDesc};
 
+fn with_ctx<R>(
+    device: &Arc<DeviceObject>,
+    f: impl FnOnce(&crate::ProbeContext<'_>) -> R,
+) -> R {
+    crate::ProbeContext::with_test_context(device.clone(), f)
+        .expect("fixture has a probe context")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
     MapMmio(MmioRegion),
@@ -205,8 +213,11 @@ impl IrqOp for TestProvider {
 
 /// Detached fixture whose slot holds a bound runtime, so devm helpers can
 /// capture the exact binding instance they attach cleanup to.
-fn test_bound_device() -> DeviceObject {
-    DeviceObject::new_bound_for_test(crate::DeviceId::new(0), DeviceKind::Char)
+fn test_bound_device() -> Arc<DeviceObject> {
+    Arc::new(DeviceObject::new_bound_for_test(
+        crate::DeviceId::new(0),
+        DeviceKind::Char,
+    ))
 }
 
 fn test_device(resources: Vec<ResourceDesc>) -> DeviceObject {
@@ -377,26 +388,25 @@ fn devm_helpers_use_explicit_provider_for_cleanup() {
     let irq = IrqResource::plain(driver_os_api::Virq::new(11), IrqTrigger::LevelHigh);
     let spec = DmaSpec::new(16, 8);
     let device = test_bound_device();
-    let binding = device
-        .binding_ref()
-        .expect("bound fixture captures a binding ref");
-
-    let ptr =
-        devm_iomap_with_provider(&PROVIDER, &binding, &device, region, "explicit").unwrap();
+    let ptr = with_ctx(&device, |ctx| {
+        devm_iomap_with_provider(&PROVIDER, ctx, region, "explicit")
+    })
+    .unwrap();
     assert_eq!(
         ptr.as_ptr() as usize,
         PROVIDER.state.lock().mmio_words.as_ptr() as usize
     );
-    devm_request_irq_with_provider(
-        &PROVIDER,
-        &binding,
-        &device,
-        irq,
-        Arc::new(|_| IrqEvent::HANDLED),
-    )
+    with_ctx(&device, |ctx| {
+        devm_request_irq_with_provider(
+            &PROVIDER,
+            ctx,
+            irq,
+            Arc::new(|_| IrqEvent::HANDLED),
+        )
+    })
     .unwrap();
     let (cpu_addr, bus_addr) =
-        devm_alloc_coherent_with_provider(&PROVIDER, &binding, &device, spec).unwrap();
+        with_ctx(&device, |ctx| devm_alloc_coherent_with_provider(&PROVIDER, ctx, spec)).unwrap();
     assert_eq!(
         cpu_addr.as_ptr() as usize,
         PROVIDER.state.lock().dma.as_ptr() as usize
@@ -424,9 +434,6 @@ fn failed_managed_acquisitions_register_no_cleanup() {
     static PROVIDER: TestProvider = TestProvider::new();
     PROVIDER.reset();
     let device = test_bound_device();
-    let binding = device
-        .binding_ref()
-        .expect("bound fixture captures a binding ref");
     let region = MmioRegion {
         base: 0x5000,
         size: 8,
@@ -435,23 +442,28 @@ fn failed_managed_acquisitions_register_no_cleanup() {
     let spec = DmaSpec::new(8, 8);
     PROVIDER.set_map_error(ResError::MappingFailed);
     assert_eq!(
-        devm_iomap_with_provider(&PROVIDER, &binding, &device, region, "failure"),
+        with_ctx(&device, |ctx| {
+            devm_iomap_with_provider(&PROVIDER, ctx, region, "failure")
+        }),
         Err(ResError::MappingFailed)
     );
     PROVIDER.set_irq_error(ResError::Busy);
     assert_eq!(
-        devm_request_irq_with_provider(
-            &PROVIDER,
-            &binding,
-            &device,
-            irq,
-            Arc::new(|_| IrqEvent::HANDLED),
-        ),
+        with_ctx(&device, |ctx| {
+            devm_request_irq_with_provider(
+                &PROVIDER,
+                ctx,
+                irq,
+                Arc::new(|_| IrqEvent::HANDLED),
+            )
+        }),
         Err(ResError::Busy)
     );
     PROVIDER.set_dma_error(ResError::NoMemory);
     assert_eq!(
-        devm_alloc_coherent_with_provider(&PROVIDER, &binding, &device, spec),
+        with_ctx(&device, |ctx| {
+            devm_alloc_coherent_with_provider(&PROVIDER, ctx, spec)
+        }),
         Err(ResError::NoMemory)
     );
     device.run_cleanups();
@@ -470,39 +482,39 @@ fn managed_threaded_guards_release_once_after_success_only() {
     static PROVIDER: TestProvider = TestProvider::new();
     PROVIDER.reset();
     let device = test_bound_device();
-    let binding = device
-        .binding_ref()
-        .expect("bound fixture captures a binding ref");
     let irq = IrqResource::plain(driver_os_api::Virq::new(13), IrqTrigger::LevelHigh);
-    super::devm_request_threaded_irq_with_provider(
-        &PROVIDER,
-        &binding,
-        &device,
-        irq,
-        Arc::new(|_| IrqEvent::WAKE_THREAD),
-        Arc::new(|_| IrqEvent::HANDLED),
-        Some("primary"),
-    )
+    with_ctx(&device, |ctx| {
+        super::devm_request_threaded_irq_with_provider(
+            &PROVIDER,
+            ctx,
+            irq,
+            Arc::new(|_| IrqEvent::WAKE_THREAD),
+            Arc::new(|_| IrqEvent::HANDLED),
+            Some("primary"),
+        )
+    })
     .unwrap();
-    super::devm_request_threaded_irq_default_with_provider(
-        &PROVIDER,
-        &binding,
-        &device,
-        irq,
-        Arc::new(|_| IrqEvent::HANDLED),
-        Some("default"),
-    )
+    with_ctx(&device, |ctx| {
+        super::devm_request_threaded_irq_default_with_provider(
+            &PROVIDER,
+            ctx,
+            irq,
+            Arc::new(|_| IrqEvent::HANDLED),
+            Some("default"),
+        )
+    })
     .unwrap();
     PROVIDER.set_irq_error(ResError::Unsupported);
     assert_eq!(
-        super::devm_request_threaded_irq_default_with_provider(
-            &PROVIDER,
-            &binding,
-            &device,
-            irq,
-            Arc::new(|_| IrqEvent::HANDLED),
-            None
-        ),
+        with_ctx(&device, |ctx| {
+            super::devm_request_threaded_irq_default_with_provider(
+                &PROVIDER,
+                ctx,
+                irq,
+                Arc::new(|_| IrqEvent::HANDLED),
+                None,
+            )
+        }),
         Err(ResError::Unsupported)
     );
     device.run_cleanups();

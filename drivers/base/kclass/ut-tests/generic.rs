@@ -228,7 +228,7 @@ impl crate::CharDevice for TestCharRuntime {
 /// after every removed entry has been unpublished.
 ///
 /// Both observations are taken from inside the pause hooks. The hooks run
-/// outside the registry lock, so the reentrant `publish_char` call exercises
+/// outside the registry lock, so the reentrant `publish_char_for_test` call exercises
 /// the real publication path rather than the registry primitives directly.
 #[cfg(feature = "char")]
 #[def_test(serial)]
@@ -249,7 +249,7 @@ fn test_production_retirement_orders_unpublish_before_replacement() {
     const ID: u64 = 0xB1_1007;
     let id = DeviceId::new(ID);
     let old = fixture(ID);
-    crate::publish_char(old.parent.clone(), Box::new(TestCharRuntime))
+    crate::publish_char_for_test(old.parent.clone(), Box::new(TestCharRuntime))
         .expect("an active fixture publishes a char class");
     old.parent.force_removed_for_test();
     assert!(old.binding.is_terminal());
@@ -273,7 +273,7 @@ fn test_production_retirement_orders_unpublish_before_replacement() {
                 let replacement = fixture(ID);
                 busy_when_claimed.store(
                     matches!(
-                        crate::publish_char(replacement.parent.clone(), Box::new(TestCharRuntime)),
+                        crate::publish_char_for_test(replacement.parent.clone(), Box::new(TestCharRuntime)),
                         Err(DriverError::ResourceBusy)
                     ),
                     Ordering::SeqCst,
@@ -286,7 +286,7 @@ fn test_production_retirement_orders_unpublish_before_replacement() {
                 let replacement = fixture(ID);
                 busy_when_unpublished.store(
                     matches!(
-                        crate::publish_char(replacement.parent.clone(), Box::new(TestCharRuntime)),
+                        crate::publish_char_for_test(replacement.parent.clone(), Box::new(TestCharRuntime)),
                         Err(DriverError::ResourceBusy)
                     ),
                     Ordering::SeqCst,
@@ -337,7 +337,7 @@ fn test_production_retirement_orders_unpublish_before_replacement() {
 
     let replacement = fixture(ID);
     let replacement_class =
-        crate::publish_char(replacement.parent.clone(), Box::new(TestCharRuntime))
+        crate::publish_char_for_test(replacement.parent.clone(), Box::new(TestCharRuntime))
             .expect("the released reservation admits the replacement");
     assert_eq!(replacement_class.id(), id);
     let entries = crate::char_class_registry().lock().entries_for_tests(id);
@@ -373,7 +373,7 @@ fn test_class_unpublish_waits_for_node_removal() {
     const ID: u64 = 0xB1_1008;
     let id = DeviceId::new(ID);
     let old = fixture(ID);
-    let class = crate::publish_char(old.parent.clone(), Box::new(TestCharRuntime))
+    let class = crate::publish_char_for_test(old.parent.clone(), Box::new(TestCharRuntime))
         .expect("A publishes a class entry");
     kdevice::register_device_node_for_binding(
         id,
@@ -477,7 +477,7 @@ fn test_class_unpublish_waits_for_node_removal() {
     );
 
     let replacement = fixture(ID);
-    let replacement_class = crate::publish_char(replacement.parent.clone(), Box::new(TestCharRuntime))
+    let replacement_class = crate::publish_char_for_test(replacement.parent.clone(), Box::new(TestCharRuntime))
         .expect("B publishes after A's node removal and unpublish");
     assert_eq!(replacement_class.id(), id);
     replacement.parent.force_removed_for_test();

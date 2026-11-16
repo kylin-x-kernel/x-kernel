@@ -6,6 +6,9 @@
 
 mod binding;
 pub use binding::BindingRef;
+#[cfg(unittest)]
+pub(crate) use binding::fail_next_data_install;
+pub(crate) use binding::{BindingSource, DataInstallError, DataInstallFailureKind, DataTakeError};
 pub mod desc;
 pub mod handles;
 /// Device-owned cleanup through explicit capability providers.

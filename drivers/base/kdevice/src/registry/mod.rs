@@ -445,7 +445,7 @@ impl DeviceRegistry {
         self.drivers
             .values()
             .filter(|driver| driver.bus_types().contains(&bus_type))
-            .filter_map(|driver| driver.ops().matcher().firmware_spec().copied())
+            .filter_map(|driver| driver.matcher().firmware_spec().copied())
             .collect()
     }
 

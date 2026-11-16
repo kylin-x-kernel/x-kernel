@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use driver_base::{DeviceKind, DriverError, DriverResult};
 use fwnode::{FwError, FwIrqSpec, FwNode, FwNodeId, FwNodeOps, FwProperty, FwReference};
@@ -13,11 +13,12 @@ use lazyinit::LazyInit;
 use unittest::{assert_eq, def_test};
 
 use super::*;
-use crate::{DeviceDriver, DeviceState, IntxRouteStatus, PlatformIdentity};
+use crate::{DeviceDriver, DeviceState, IntxRouteStatus, PlatformIdentity, find_device};
 
 struct MatchingDriver;
 
 impl DeviceDriver for MatchingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "matching-test"
     }
@@ -35,7 +36,7 @@ impl DeviceDriver for MatchingDriver {
         &M
     }
 
-    fn probe_device(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, _ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
         Ok(())
     }
 }
@@ -176,7 +177,24 @@ fn test_driver_registration_scans_existing_descriptors() {
 #[def_test(serial)]
 fn test_adopt_active_device_registers_bound_object() {
     let bus = reset_model();
-    let driver = register_driver_object(Arc::new(MatchingDriver));
+    let rejected_driver = register_driver_object(Arc::new(MatchingDriver));
+    let rejected = adopt_active_device(ActiveDeviceAdoption {
+        bus_id: bus.id(),
+        parent: None,
+        location: DeviceLocation::PlatformStatic { id: 2 },
+        origin: DiscoveryOrigin::PlatformStatic,
+        identity: DeviceIdentity::Platform(PlatformIdentity {
+            alias: Some("rejected"),
+            firmware_id: None,
+        }),
+        transport: None,
+        resources: ResourceSet::new(),
+        dma: None,
+        driver: rejected_driver,
+    });
+    assert!(matches!(rejected, Err(DriverError::Unsupported)));
+
+    let driver = register_driver_object(crate::BoxedDriver::new_adoptable(MatchingDriver));
     let dma = DmaInfo::new(0xffff_ffff, DmaWindow::IDENTITY, true).unwrap();
 
     let device = adopt_active_device(ActiveDeviceAdoption {
@@ -332,6 +350,7 @@ struct RetryRecordingDriver;
 struct FailingDriver;
 
 impl DeviceDriver for RecordingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "node-recording-test"
     }
@@ -349,13 +368,15 @@ impl DeviceDriver for RecordingDriver {
         &M
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         record_probe_node(&device);
         Ok(())
     }
 }
 
 impl DeviceDriver for RetryRecordingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "node-retry-recording-test"
     }
@@ -373,13 +394,15 @@ impl DeviceDriver for RetryRecordingDriver {
         &M
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         record_probe_node(&device);
         Ok(())
     }
 }
 
 impl DeviceDriver for FailingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "node-failing-test"
     }
@@ -397,7 +420,8 @@ impl DeviceDriver for FailingDriver {
         &M
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         // The first, failing probe must already see the discovery association.
         record_probe_node(&device);
         Err(DriverError::Io)
@@ -527,6 +551,7 @@ struct TestDriver<Matcher> {
 }
 
 impl<Matcher: crate::DeviceMatcher> DeviceDriver for TestDriver<Matcher> {
+    type Data = ();
     fn name(&self) -> &'static str {
         self.name
     }
@@ -543,13 +568,18 @@ impl<Matcher: crate::DeviceMatcher> DeviceDriver for TestDriver<Matcher> {
         &self.matcher
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         (self.probe)(device)
     }
 
-    fn remove(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn remove(
+        &self,
+        ctx: &crate::RemoveContext<'_>,
+        _data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
         match &self.remove {
-            Some(remove) => remove(device),
+            Some(remove) => remove(ctx.device().clone()),
             None => Ok(()),
         }
     }
@@ -559,7 +589,7 @@ fn platform_driver(
     name: &'static str,
     matcher: impl crate::DeviceMatcher,
     probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
-) -> Arc<dyn DeviceDriver> {
+) -> crate::BoxedDriver {
     platform_driver_with_remove(name, matcher, probe, |_| Ok(()))
 }
 
@@ -568,8 +598,8 @@ fn platform_driver_with_remove(
     matcher: impl crate::DeviceMatcher,
     probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
     remove: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
-) -> Arc<dyn DeviceDriver> {
-    Arc::new(TestDriver {
+) -> crate::BoxedDriver {
+    crate::BoxedDriver::new_adoptable(TestDriver {
         name,
         bus_types: &[BusTypeId::PLATFORM],
         matcher,
@@ -1539,13 +1569,15 @@ fn test_stale_remove_observation_does_not_tear_down_rebound_binding() {
         .binding_for_desc(desc.id())
         .expect("the descriptor has a binding lock");
     {
-        let _guard = binding_lock.lock();
+        let guard = binding_lock.lock();
+        let permit = crate::driver::ContextPermit::new(&guard);
         assert_eq!(
             remove_bound_device_locked(
                 desc.id(),
                 id,
                 DescDisposition::Requeue,
                 Some(&old),
+                &permit,
             ),
             Err(DriverError::ResourceBusy),
             "a stale observation must not remove the replacement binding"
@@ -2122,4 +2154,418 @@ fn test_bus_attach_sees_binding_metadata() {
     let listed = bus.devices_snapshot();
     assert_eq!(listed.len(), 2);
     assert!(listed.iter().all(|device| device.driver_id().is_some()));
+}
+
+static TYPED_MATCHER: crate::CompatibleAliasMatcher =
+    crate::CompatibleAliasMatcher("typed-data");
+static NEXT_TYPED_DATA: AtomicUsize = AtomicUsize::new(0);
+static FAIL_NEXT_PM_SUSPEND: AtomicBool = AtomicBool::new(false);
+static FAIL_NEXT_DRIVER_REMOVE: AtomicBool = AtomicBool::new(false);
+static DROP_SAW_DATA_LOCK: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypedEvent {
+    Remove(u64, usize),
+    Cleanup(u64),
+    Drop(usize),
+    Suspend(usize),
+    Resume(usize),
+    Shutdown(usize),
+}
+
+fn typed_events() -> &'static SpinNoPreempt<Vec<TypedEvent>> {
+    static EVENTS: LazyInit<SpinNoPreempt<Vec<TypedEvent>>> = LazyInit::new();
+    EVENTS.call_once(|| SpinNoPreempt::new(Vec::new()));
+    EVENTS.get().unwrap()
+}
+
+fn record_typed(event: TypedEvent) {
+    typed_events().lock().push(event);
+}
+
+struct TypedData {
+    id: usize,
+    pm_visits: usize,
+    binding: crate::BindingRef,
+}
+
+impl Drop for TypedData {
+    fn drop(&mut self) {
+        if self.binding.data_lock_is_locked_for_test() {
+            DROP_SAW_DATA_LOCK.store(true, Ordering::SeqCst);
+        }
+        record_typed(TypedEvent::Drop(self.id));
+    }
+}
+
+struct TypedDataDriver;
+
+impl DeviceDriver for TypedDataDriver {
+    type Data = TypedData;
+
+    fn name(&self) -> &'static str {
+        "typed-data"
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Char
+    }
+
+    fn bus_types(&self) -> &'static [BusTypeId] {
+        &[BusTypeId::PLATFORM]
+    }
+
+    fn matcher(&self) -> &dyn crate::DeviceMatcher {
+        &TYPED_MATCHER
+    }
+
+    fn probe_device(&self, ctx: &crate::ProbeContext<'_>) -> DriverResult<Self::Data> {
+        let id = NEXT_TYPED_DATA.fetch_add(1, Ordering::SeqCst) + 1;
+        let device_id = ctx.device().id().raw();
+        ctx.add_cleanup(move || record_typed(TypedEvent::Cleanup(device_id)))?;
+        Ok(TypedData {
+            id,
+            pm_visits: 0,
+            binding: ctx.binding().clone(),
+        })
+    }
+
+    fn remove(
+        &self,
+        ctx: &crate::RemoveContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        let Some(data) = data else {
+            return Err(DriverError::BadState);
+        };
+        record_typed(TypedEvent::Remove(ctx.device().id().raw(), data.id));
+        if FAIL_NEXT_DRIVER_REMOVE.swap(false, Ordering::SeqCst) {
+            return Err(DriverError::Io);
+        }
+        Ok(())
+    }
+
+    fn suspend(
+        &self,
+        _ctx: &crate::PmContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        let Some(data) = data else {
+            return Err(DriverError::BadState);
+        };
+        data.pm_visits += 1;
+        record_typed(TypedEvent::Suspend(data.id));
+        if FAIL_NEXT_PM_SUSPEND.swap(false, Ordering::SeqCst) {
+            return Err(DriverError::Io);
+        }
+        Ok(())
+    }
+
+    fn resume(
+        &self,
+        _ctx: &crate::PmContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        let Some(data) = data else {
+            return Err(DriverError::BadState);
+        };
+        data.pm_visits += 1;
+        record_typed(TypedEvent::Resume(data.id));
+        Ok(())
+    }
+
+    fn shutdown(&self, _ctx: &crate::PmContext<'_>, data: Option<&mut Self::Data>) {
+        if let Some(data) = data {
+            data.pm_visits += 1;
+            record_typed(TypedEvent::Shutdown(data.id));
+        }
+    }
+}
+
+#[def_test(serial)]
+fn typed_data_is_isolated_across_bindings_and_rebind() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let first = platform_desc(&bus, 40, "typed-data");
+    let second = platform_desc(&bus, 41, "typed-data");
+    register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+
+    let first_device = find_device(first.device_id()).expect("first device is published");
+    let second_device = find_device(second.device_id()).expect("second device is published");
+    assert_eq!(first_device.state(), DeviceState::Active);
+    assert_eq!(second_device.state(), DeviceState::Active);
+
+    remove_device_managed(first_device.id()).unwrap();
+    remove_device_managed(second_device.id()).unwrap();
+    let mut removed: Vec<_> = typed_events()
+        .lock()
+        .iter()
+        .filter_map(|event| match event {
+            TypedEvent::Remove(device, data) => Some((*device, *data)),
+            _ => None,
+        })
+        .collect();
+    removed.sort_unstable();
+    assert_eq!(
+        removed,
+        alloc::vec![
+            (first.device_id().raw(), 1),
+            (second.device_id().raw(), 2)
+        ],
+        "each binding must receive Data belonging to its own DeviceId"
+    );
+    assert!(
+        !DROP_SAW_DATA_LOCK.load(Ordering::SeqCst),
+        "Data Drop must not run while the BindingRuntime data spinlock is held"
+    );
+
+    let outcome = probe_device_desc(first.id()).unwrap();
+    assert_eq!(outcome, ProbeOutcome::Activated);
+    remove_device_managed(first.device_id()).unwrap();
+    let removed: Vec<_> = typed_events()
+        .lock()
+        .iter()
+        .filter_map(|event| match event {
+            TypedEvent::Remove(device, data) => Some((*device, *data)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        removed.contains(&(first.device_id().raw(), 3)),
+        "rebinding creates a fresh Data value"
+    );
+}
+
+#[def_test(serial)]
+fn injected_data_install_failure_stops_and_returns_data() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 42, "typed-data");
+    let expected_id = desc.device_id().raw();
+    crate::device::fail_next_data_install(desc.device_id());
+    register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+
+    let device = find_device(desc.device_id()).expect("stable object survives install failure");
+    assert_eq!(
+        device.state(),
+        DeviceState::Discovered,
+        "install failure must not publish the binding"
+    );
+    assert_eq!(
+        typed_events().lock().clone(),
+        alloc::vec![
+            TypedEvent::Remove(expected_id, 1),
+            TypedEvent::Cleanup(expected_id),
+            TypedEvent::Drop(1),
+        ],
+        "remove must run before cleanup and Drop, each exactly once"
+    );
+    assert!(
+        !DROP_SAW_DATA_LOCK.load(Ordering::SeqCst),
+        "install-failure Data Drop must not hold the data spinlock"
+    );
+
+    let outcome = probe_device_desc(desc.id()).unwrap();
+    assert_eq!(outcome, ProbeOutcome::Activated);
+    remove_device_managed(desc.device_id()).unwrap();
+    assert!(typed_events().lock().contains(&TypedEvent::Drop(2)));
+}
+
+#[def_test(serial)]
+fn driver_remove_error_still_cleans_up_and_retires() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 46, "typed-data");
+    register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+    let device = find_device(desc.device_id()).expect("published by registration scan");
+    let id = device.id();
+
+    FAIL_NEXT_DRIVER_REMOVE.store(true, Ordering::SeqCst);
+    remove_device_managed(id).unwrap();
+    assert_eq!(
+        typed_events().lock().clone(),
+        alloc::vec![
+            TypedEvent::Remove(id.raw(), 1),
+            TypedEvent::Cleanup(id.raw()),
+            TypedEvent::Drop(1),
+        ],
+        "a driver Err must not skip cleanup, Data drop, or retirement"
+    );
+    assert!(!DROP_SAW_DATA_LOCK.load(Ordering::SeqCst));
+    assert_eq!(
+        find_device(id).expect("stable object survives requeue").state(),
+        DeviceState::Discovered
+    );
+    assert_desc_pending!(desc.id());
+}
+
+#[def_test(serial)]
+fn bus_remove_error_still_cleans_up_and_retires() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 47, "typed-data");
+    register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+    let device = find_device(desc.device_id()).expect("published by registration scan");
+    let id = device.id();
+
+    crate::test_hooks::fail_next_bus_remove();
+    remove_device_managed(id).unwrap();
+    assert_eq!(
+        typed_events().lock().clone(),
+        alloc::vec![
+            TypedEvent::Remove(id.raw(), 1),
+            TypedEvent::Cleanup(id.raw()),
+            TypedEvent::Drop(1),
+        ],
+        "a bus Err must not skip cleanup, Data drop, or retirement"
+    );
+    assert!(!DROP_SAW_DATA_LOCK.load(Ordering::SeqCst));
+    assert_eq!(
+        find_device(id).expect("stable object survives requeue").state(),
+        DeviceState::Discovered
+    );
+    assert_desc_pending!(desc.id());
+}
+
+#[def_test(serial)]
+fn pm_callbacks_forward_data_and_restore_it() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    FAIL_NEXT_PM_SUSPEND.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 43, "typed-data");
+    let driver = register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+    let device = find_device(desc.device_id()).expect("adopted by registration scan");
+
+    let observed = crate::test_hooks::with_binding_lock(device.id(), || {
+        crate::PmContext::with_test_context(device.clone(), |ctx| {
+            let mut data = ctx
+                .take_data()
+                .expect("PM take")
+                .expect("probe data exists");
+            let suspend = driver.suspend_erased(ctx, Some(&mut data));
+            let resume = driver.resume_erased(ctx, Some(&mut data));
+            let shutdown = driver.shutdown_erased(ctx, Some(&mut data));
+            let pm_visits = data.downcast_mut::<TypedData>().map(|data| data.pm_visits);
+            let restore = ctx.restore_data(data);
+            (
+                suspend.is_ok(),
+                resume.is_ok(),
+                shutdown.is_ok(),
+                pm_visits,
+                restore.is_ok(),
+            )
+        })
+        .expect("PM context")
+    });
+    let observed = observed.expect("the binding lock was available");
+    assert_eq!(
+        observed,
+        (true, true, true, Some(3), true),
+        "all three PM callbacks received the same Data and restore succeeded"
+    );
+    assert_eq!(
+        typed_events().lock().clone(),
+        alloc::vec![
+            TypedEvent::Suspend(1),
+            TypedEvent::Resume(1),
+            TypedEvent::Shutdown(1),
+        ]
+    );
+
+    remove_device_managed(device.id()).unwrap();
+    assert!(typed_events().lock().contains(&TypedEvent::Drop(1)));
+}
+
+#[def_test(serial)]
+fn pm_callback_error_still_restores_data() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    FAIL_NEXT_PM_SUSPEND.store(true, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 44, "typed-data");
+    let driver = register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+    let device = find_device(desc.device_id()).expect("adopted by registration scan");
+
+    let (suspend_failed, restore_ok, restored) = crate::test_hooks::with_binding_lock(
+        device.id(),
+        || {
+            crate::PmContext::with_test_context(device.clone(), |ctx| {
+                let mut data = ctx
+                    .take_data()
+                    .expect("PM take")
+                    .expect("probe data exists");
+                let suspend = driver.suspend_erased(ctx, Some(&mut data));
+                let restore = ctx.restore_data(data);
+                let restored_data = ctx
+                    .take_data()
+                    .expect("restored data can be taken again");
+                let restored = restored_data.is_some();
+                if let Some(data) = restored_data {
+                    ctx.restore_data(data)
+                        .expect("put the checked data back into the slot");
+                }
+                (suspend.is_err(), restore.is_ok(), restored)
+            })
+            .expect("PM context")
+        },
+    )
+    .expect("the binding lock was available");
+    assert!(suspend_failed);
+    assert!(restore_ok);
+    assert!(restored);
+    assert_eq!(
+        typed_events().lock().clone(),
+        alloc::vec![TypedEvent::Suspend(1)],
+        "the failing callback ran exactly once and Data was not dropped"
+    );
+
+    remove_device_managed(device.id()).unwrap();
+}
+
+#[def_test(serial)]
+fn pm_type_mismatch_does_not_invoke_driver() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 45, "typed-data");
+    let driver = register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+    let device = find_device(desc.device_id()).expect("adopted by registration scan");
+
+    let is_type_mismatch = crate::test_hooks::with_binding_lock(device.id(), || {
+        crate::PmContext::with_test_context(device.clone(), |ctx| {
+            let mut wrong = crate::driver::DriverData::new(0u8);
+            matches!(
+                driver.suspend_erased(ctx, Some(&mut wrong)),
+                Err(crate::driver::ErasedCallError::TypeMismatch)
+            )
+        })
+        .expect("PM context")
+    })
+    .expect("the binding lock was available");
+    assert!(is_type_mismatch);
+    assert!(
+        typed_events().lock().is_empty(),
+        "TypeMismatch must not invoke the driver callback"
+    );
+
+    remove_device_managed(device.id()).unwrap();
 }

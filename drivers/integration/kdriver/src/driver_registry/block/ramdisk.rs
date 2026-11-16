@@ -14,6 +14,8 @@ static RAMDISK_MATCH: CompatibleAliasMatcher = CompatibleAliasMatcher("ramdisk")
 struct RamdiskDriver;
 
 impl DeviceDriver for RamdiskDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "ramdisk"
     }
@@ -30,7 +32,7 @@ impl DeviceDriver for RamdiskDriver {
         &RAMDISK_MATCH
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> driver_base::DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> driver_base::DriverResult<()> {
         // `ramdisk-static` backs the device with a build-time filesystem image
         // (embedded, zero-copy) so it can be mounted as a real root filesystem.
         // Otherwise the device is an empty zero-filled region, useful only for
@@ -43,10 +45,10 @@ impl DeviceDriver for RamdiskDriver {
 
         let name = dev.name().into();
         let disk = block::Gendisk::alloc(name, 1, 0, 1, Box::new(dev))?;
-        kclass::publish_block(device, disk).map(drop)
+        kclass::publish_block(ctx, disk).map(drop)
     }
 }
 
 pub(super) fn descriptor() -> BoxedDriver {
-    Arc::new(RamdiskDriver)
+    BoxedDriver::new(RamdiskDriver)
 }

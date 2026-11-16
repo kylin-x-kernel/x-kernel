@@ -20,8 +20,8 @@ use driver_base::DriverResult;
 use driver_os_api::IrqOp;
 use kdevice::{
     ActiveDeviceAdoption, BusId, BusTypeId, DeviceDriver, DeviceId, DeviceIdentity, DeviceKind,
-    DeviceLocation, DeviceMatcher, DeviceObject, DiscoveryOrigin, DriverObject, IoPortRange,
-    MmioRegion, NeverMatcher, PciIdentity, PlatformIdentity, ResourceDesc, ResourceSet,
+    DeviceLocation, DeviceMatcher, DiscoveryOrigin, DriverObject, IoPortRange, MmioRegion,
+    NeverMatcher, PciIdentity, PlatformIdentity, ResourceDesc, ResourceSet,
 };
 use lazyinit::LazyInit;
 use pci::{Cam, HeaderType, PciBus, PciConfigSource};
@@ -45,6 +45,8 @@ use crate::{
 struct PciHostDriver;
 
 impl DeviceDriver for PciHostDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "pci-host"
     }
@@ -61,7 +63,7 @@ impl DeviceDriver for PciHostDriver {
         &NeverMatcher
     }
 
-    fn probe_device(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, _ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
         Ok(())
     }
 }
@@ -70,7 +72,9 @@ impl DeviceDriver for PciHostDriver {
 static PCI_HOST_DRIVER: LazyInit<Arc<DriverObject>> = LazyInit::new();
 
 fn pci_host_driver() -> Arc<DriverObject> {
-    PCI_HOST_DRIVER.call_once(|| kdevice::register_driver_object(Arc::new(PciHostDriver)));
+    PCI_HOST_DRIVER.call_once(|| {
+        kdevice::register_driver_object(kdevice::BoxedDriver::new_adoptable(PciHostDriver))
+    });
     PCI_HOST_DRIVER.clone()
 }
 
@@ -86,6 +90,8 @@ fn pci_host_driver() -> Arc<DriverObject> {
 struct PciBridgeDriver;
 
 impl DeviceDriver for PciBridgeDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "pci-bridge"
     }
@@ -102,7 +108,7 @@ impl DeviceDriver for PciBridgeDriver {
         &NeverMatcher
     }
 
-    fn probe_device(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, _ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
         Ok(())
     }
 }
@@ -111,7 +117,9 @@ impl DeviceDriver for PciBridgeDriver {
 static PCI_BRIDGE_DRIVER: LazyInit<Arc<DriverObject>> = LazyInit::new();
 
 fn pci_bridge_driver() -> Arc<DriverObject> {
-    PCI_BRIDGE_DRIVER.call_once(|| kdevice::register_driver_object(Arc::new(PciBridgeDriver)));
+    PCI_BRIDGE_DRIVER.call_once(|| {
+        kdevice::register_driver_object(kdevice::BoxedDriver::new_adoptable(PciBridgeDriver))
+    });
     PCI_BRIDGE_DRIVER.clone()
 }
 

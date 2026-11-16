@@ -305,6 +305,7 @@ static DT_SPEC: FirmwareMatchSpec = FirmwareMatchSpec {
 struct DtConsumingDriver;
 
 impl DeviceDriver for DtConsumingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "fwnode-dt-consuming-test"
     }
@@ -321,7 +322,8 @@ impl DeviceDriver for DtConsumingDriver {
         &DT_SPEC
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         record_consumed(&device);
         Ok(())
     }
@@ -332,6 +334,7 @@ impl DeviceDriver for DtConsumingDriver {
 struct DtFailingDriver;
 
 impl DeviceDriver for DtFailingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "fwnode-dt-failing-test"
     }
@@ -348,7 +351,8 @@ impl DeviceDriver for DtFailingDriver {
         &DT_SPEC
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         record_consumed(&device);
         Err(DriverError::Io)
     }
@@ -558,6 +562,7 @@ impl DeviceMatcher for AliasMatcher {
 struct AliasConsumingDriver;
 
 impl DeviceDriver for AliasConsumingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "fwnode-alias-consuming-test"
     }
@@ -574,7 +579,8 @@ impl DeviceDriver for AliasConsumingDriver {
         &ALIAS_FAKE
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         record_consumed(&device);
         Ok(())
     }
@@ -735,6 +741,7 @@ static ALIAS_UNKNOWN: AliasMatcher = AliasMatcher("fwnode-unknown");
 struct ClassifyingDriver;
 
 impl DeviceDriver for ClassifyingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "fwnode-classifying-test"
     }
@@ -751,7 +758,8 @@ impl DeviceDriver for ClassifyingDriver {
         &ALIAS_CLASSIFY
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         let node = device
             .firmware_node()
             .ok_or(DriverError::InvalidInput)?;
@@ -766,6 +774,7 @@ impl DeviceDriver for ClassifyingDriver {
 struct UnknownHandleDriver;
 
 impl DeviceDriver for UnknownHandleDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "fwnode-unknown-handle-test"
     }
@@ -782,7 +791,8 @@ impl DeviceDriver for UnknownHandleDriver {
         &ALIAS_UNKNOWN
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         let node = device
             .firmware_node()
             .ok_or(DriverError::InvalidInput)?;
@@ -857,6 +867,7 @@ static ALIAS_STATIC: AliasMatcher = AliasMatcher("fwnode-static");
 struct StaticRecordingDriver;
 
 impl DeviceDriver for StaticRecordingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "fwnode-static-recording-test"
     }
@@ -873,7 +884,8 @@ impl DeviceDriver for StaticRecordingDriver {
         &ALIAS_STATIC
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         PROBED_RAW.store(
             device
                 .firmware_node()
@@ -910,7 +922,7 @@ fn platform_static_device_registers_without_a_firmware_node() {
 #[def_test(serial)]
 fn adopted_device_has_no_firmware_node() {
     let (_bus_type, bus) = kdevice::reset_and_setup_platform_bus_for_tests("fwnode-adopt-bus");
-    let driver = register_driver_object(Arc::new(StaticRecordingDriver));
+    let driver = register_driver_object(kdevice::BoxedDriver::new_adoptable(StaticRecordingDriver));
 
     let device = adopt_active_device(ActiveDeviceAdoption {
         bus_id: bus.id(),

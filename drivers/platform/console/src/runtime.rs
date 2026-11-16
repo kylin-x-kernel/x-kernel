@@ -17,7 +17,7 @@ use kclass::{
     CharDeviceImpl, ClassDevice, char_devices, find_char_device, publish_char,
     subscribe_char_available,
 };
-use kdevice::{DeviceId, DeviceObject, subscribe_device_removed};
+use kdevice::{DeviceId, subscribe_device_removed};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
@@ -117,12 +117,12 @@ fn ensure_console_bridge() {
 /// The runtime implementation must wrap the same early stdout port, not another
 /// device. Called by serial adoption in task context, before driver activation.
 pub fn register_stdout_console(
-    parent: Arc<DeviceObject>,
+    ctx: &kdevice::ProbeContext<'_>,
     runtime: CharDeviceImpl,
 ) -> DriverResult<()> {
     ensure_console_bridge();
-    let id = parent.id();
-    publish_char(parent, runtime)?;
+    let id = ctx.device().id();
+    publish_char(ctx, runtime)?;
     console_subsystem().lock().stdout = Some(id);
     // This runs inside the driver's `probe_device`, so the device is usually
     // not active yet and `find_char_device()` (which filters on availability)

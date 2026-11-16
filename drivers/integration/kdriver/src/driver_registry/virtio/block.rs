@@ -4,34 +4,54 @@
 
 //! Task-owned virtio block activation, publication and drained removal.
 
-use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
+use alloc::sync::Arc;
+#[cfg(unittest)]
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use block::{Gendisk, GendiskRef, completion::BlockCompletionOperations};
 use driver_base::{Device, DriverError, DriverResult};
 use driver_os_api::{DevIrq, IrqHandler, IrqOp, IrqResource};
-use kdevice::{DeviceId, DeviceObject};
-use ksync::{Mutex, static_lock};
+use kdevice::ProbeContext;
 use virtio::{Transport, VirtIoBlkDev, VirtIoHal};
 
 use super::glue::VirtIoHalImpl;
 use crate::{block_completion, block_completion_dispatch::BlockIoReclaimer, block_irq};
 
-static_lock! {
-    // Heterogeneous transports are erased only at task-context cleanup. IRQ and
-    // I/O paths never look up this map or capture its owning DeviceObject.
-    static ACTIVATIONS: Mutex<BTreeMap<DeviceId, Box<dyn FnOnce() + Send>>> =
-        Mutex::new(BTreeMap::new());
+/// Close operations needed after the transport type is erased.
+pub(super) trait BlockActivationOps: Send + Sync {
+    fn begin_close(&self, notification: Arc<dyn block::completion::BlockSignals>);
+    fn disable_interrupts(&self);
+    fn finish_close(&self);
 }
 
-struct BlockActivation<H: VirtIoHal, T: Transport> {
-    device: Arc<VirtIoBlkDev<H, T>>,
+impl<H: VirtIoHal + 'static, T: Transport + 'static> BlockActivationOps for VirtIoBlkDev<H, T> {
+    fn begin_close(&self, notification: Arc<dyn block::completion::BlockSignals>) {
+        VirtIoBlkDev::begin_close(self, notification)
+    }
+
+    fn disable_interrupts(&self) {
+        VirtIoBlkDev::disable_interrupts(self)
+    }
+
+    fn finish_close(&self) {
+        VirtIoBlkDev::finish_close(self)
+    }
+}
+
+pub(super) struct BlockActivation {
+    device: Arc<dyn BlockActivationOps>,
     irq: Option<DevIrq>,
     reclaimer: Arc<BlockIoReclaimer>,
     disk: Option<GendiskRef>,
+    closed: bool,
 }
 
-impl<H: VirtIoHal, T: Transport> Drop for BlockActivation<H, T> {
-    fn drop(&mut self) {
+impl BlockActivation {
+    pub(super) fn close(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
         // Prepare on the removing task, not the original probe task. No
         // recoverable failure may let device-core continue tearing down live DMA.
         #[expect(
@@ -60,35 +80,50 @@ impl<H: VirtIoHal, T: Transport> Drop for BlockActivation<H, T> {
     }
 }
 
+impl Drop for BlockActivation {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[cfg(unittest)]
+static FAIL_NEXT_DISK_ALLOC: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unittest)]
+pub(super) fn fail_next_disk_alloc() {
+    FAIL_NEXT_DISK_ALLOC.store(true, Ordering::Release);
+}
+
+#[cfg(unittest)]
+fn take_disk_alloc_failure() -> bool {
+    FAIL_NEXT_DISK_ALLOC.swap(false, Ordering::AcqRel)
+}
+
 pub(super) fn activate<T: Transport + 'static>(
-    parent: Arc<DeviceObject>,
+    ctx: &ProbeContext<'_>,
     transport: T,
     irq: Option<IrqResource>,
-) -> DriverResult<()> {
+) -> DriverResult<BlockActivation> {
     let irq = irq.ok_or(DriverError::InvalidInput)?;
     let device = Arc::new(VirtIoBlkDev::<VirtIoHalImpl, T>::try_new_irq(transport)?);
-    activate_device(parent, device, irq, crate::resource::resource_provider())
+    activate_device(ctx, device, irq, crate::resource::resource_provider())
 }
 
 fn activate_device<H: VirtIoHal + 'static, T: Transport + 'static>(
-    parent: Arc<DeviceObject>,
+    ctx: &ProbeContext<'_>,
     device: Arc<VirtIoBlkDev<H, T>>,
     irq: IrqResource,
     provider: &'static dyn IrqOp,
-) -> DriverResult<()> {
-    // Capture the binding before any side effect: the probe must still own the
-    // descriptor binding lock, and every resource registered below belongs to
-    // this exact binding.
-    let binding = parent
-        .binding_ref_for_lifecycle_write()
-        .ok_or(DriverError::BadState)?;
+) -> DriverResult<BlockActivation> {
     let completion: Arc<dyn BlockCompletionOperations> = device.clone();
     let reclaimer = BlockIoReclaimer::new(Arc::downgrade(&completion));
+    let close_device: Arc<dyn BlockActivationOps> = device.clone();
     let mut activation = BlockActivation {
-        device: device.clone(),
+        device: close_device,
         irq: None,
         reclaimer,
         disk: None,
+        closed: false,
     };
     let handler: Arc<dyn IrqHandler> = device.clone();
     activation.irq = Some(
@@ -100,6 +135,10 @@ fn activate_device<H: VirtIoHal + 'static, T: Transport + 'static>(
         )
         .map_err(crate::resource::map_res_err)?,
     );
+    #[cfg(unittest)]
+    if take_disk_alloc_failure() {
+        return Err(DriverError::NoMemory);
+    }
     let disk = Gendisk::alloc_mq(
         device.name().into(),
         virtio::VIRTIO_BLK_MAJOR,
@@ -109,32 +148,8 @@ fn activate_device<H: VirtIoHal + 'static, T: Transport + 'static>(
     )?;
     activation.disk = Some(disk.clone());
     device.enable_interrupts();
-    let id = parent.id();
-    {
-        let mut registry = ACTIVATIONS.lock();
-        if registry.contains_key(&id) {
-            return Err(DriverError::AlreadyExists);
-        }
-        registry.insert(id, Box::new(move || drop(activation)));
-    }
-    if let Err(error) = binding.add_cleanup(&parent, move || close_device(id)) {
-        close_device(id);
-        return Err(error);
-    }
-    if let Err(error) = kclass::publish_block(parent, disk) {
-        close_device(id);
-        return Err(error);
-    }
-    Ok(())
-}
-
-/// Device-core serializes remove via begin_removing; its later devres fallback
-/// calls this again after remove returns. Taking the unique owner is idempotent.
-pub(super) fn close_device(id: DeviceId) {
-    let close = { ACTIVATIONS.lock().remove(&id) };
-    if let Some(close) = close {
-        close();
-    }
+    kclass::publish_block(ctx, disk)?;
+    Ok(activation)
 }
 
 unittest::path_mod_test!(

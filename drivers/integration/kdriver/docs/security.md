@@ -826,3 +826,13 @@ spurious wakes only trigger another check. The driver must call IRQ-safe
 The provider retains neither the predicate nor DMA storage. Invalid context and
 preparation failures do not establish a device fault. Once the predicate is invoked,
 scoped registration and wakeup are allocation-free and cannot return registration errors.
+
+## VirtIO block binding data
+
+VirtIO block activation is owned by the block binding's typed `Data`, not by a
+`DeviceId -> closure` table. `remove` takes the activation and runs
+`begin_close`, disk withdrawal, drain, IRQ release, reclaimer stop, and
+`finish_close` before framework devres/Data release. `Drop` only covers probe
+failure paths; the production remove path closes explicitly. Non-block VirtIO
+kinds retain their legacy class/devres cleanup and are not claimed as audited
+for the stop contract.

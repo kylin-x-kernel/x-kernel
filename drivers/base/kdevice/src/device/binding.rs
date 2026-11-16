@@ -23,12 +23,16 @@
 //! registration layer and stays owned by the registry.
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
+#[cfg(unittest)]
+use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-use driver_base::{DeviceKind, DriverResult};
+use driver_base::{DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoPreempt;
+#[cfg(unittest)]
+use kspin::SpinNoPreemptGuard;
 
-use crate::{DeviceObject, DeviceState, DeviceUse, DriverId};
+use crate::{DeviceObject, DeviceState, DeviceUse, DriverId, driver::DriverData};
 
 /// Current driver metadata of one binding.
 struct BindingMeta {
@@ -61,8 +65,9 @@ pub(super) struct BindingSnapshot {
 /// hardware use or register cleanup on a later binding B.
 ///
 /// Holding a `BindingRef` alone never blocks removal. Use
-/// [`BindingRef::try_acquire`] when hardware-operational admission is required,
-/// and [`BindingRef::add_cleanup`] to attach devres to the captured instance.
+/// [`BindingRef::try_acquire`] when hardware-operational admission is required.
+/// Cleanup registration is intentionally only available through a
+/// `ProbeContext`.
 ///
 /// Instances can only be obtained from
 /// `DeviceObject::binding_ref()`/`binding_ref_for_lifecycle_write()`; all
@@ -129,22 +134,32 @@ impl BindingRef {
         device.try_acquire_exact(&self.runtime)
     }
 
-    /// Register a cleanup callback on the captured binding instance.
-    ///
-    /// The object must still have this exact runtime in its binding slot. For
-    /// a registered object the caller must hold the descriptor binding lock
-    /// (probe/remove/adoption write context); detached fixtures do not.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DriverError::BadState`](crate::DriverError::BadState) if the
-    /// slot no longer points at this instance, the caller is not in a
-    /// lifecycle write context, or the instance has already started removal.
-    pub fn add_cleanup<F>(&self, device: &DeviceObject, cleanup: F) -> DriverResult<()>
+    /// Exact-instance cleanup registration used only by `ProbeContext` and
+    /// kdevice-internal devm helpers.
+    pub(crate) fn runtime(&self) -> &Arc<BindingRuntime> {
+        &self.runtime
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn data_lock_is_locked_for_test(&self) -> bool {
+        self.runtime.data_lock_is_locked_for_test()
+    }
+
+    pub(crate) fn add_cleanup_exact<F>(&self, device: &DeviceObject, cleanup: F) -> DriverResult<()>
     where
         F: FnOnce() + Send + 'static,
     {
         device.add_cleanup_exact(&self.runtime, Box::new(cleanup))
+    }
+
+    /// Test-only compatibility handle for existing fixture tests. Production
+    /// drivers must register cleanup through `ProbeContext`.
+    #[cfg(unittest)]
+    pub fn add_cleanup<F>(&self, device: &DeviceObject, cleanup: F) -> DriverResult<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.add_cleanup_exact(device, cleanup)
     }
 }
 
@@ -156,6 +171,78 @@ impl core::fmt::Debug for BindingRef {
             .field("is_active", &self.is_active())
             .finish()
     }
+}
+
+/// Why this binding's runtime exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindingSource {
+    /// Explicit probe; an installed Data value is expected.
+    Probe,
+    /// Legacy adoption; Data is validly absent.
+    Adoption,
+    /// Detached test fixture; Data is validly absent.
+    #[cfg_attr(
+        all(not(unittest), not(doc)),
+        expect(
+            dead_code,
+            reason = "CG-024-lint-exceptions: constructed only by unit-test fixtures"
+        )
+    )]
+    Test,
+}
+
+/// State of one binding's driver-private data.
+enum DataSlot {
+    /// Probe has not installed Data yet.
+    Empty,
+    /// Probe installed Data; the runtime owns it.
+    Installed(DriverData),
+    /// Adoption/test binding: no Data by design.
+    AdoptionAbsent,
+    /// Remove or PM has temporarily taken the Data.
+    Taken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DataInstallFailureKind {
+    Occupied,
+    WrongSource,
+    RuntimeMismatch,
+    #[cfg(unittest)]
+    Injected,
+}
+
+/// Named install/restore failure carrying the unaccepted Data.
+pub(crate) struct DataInstallError {
+    kind: DataInstallFailureKind,
+    error: DriverError,
+    data: DriverData,
+}
+
+impl core::fmt::Debug for DataInstallError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DataInstallError")
+            .field("kind", &self.kind)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DataInstallError {
+    pub(super) fn new(kind: DataInstallFailureKind, error: DriverError, data: DriverData) -> Self {
+        Self { kind, error, data }
+    }
+
+    pub(crate) fn into_parts(self) -> (DataInstallFailureKind, DriverError, DriverData) {
+        (self.kind, self.error, self.data)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DataTakeError {
+    NotInstalled,
+    AlreadyTaken,
+    RuntimeMismatch,
 }
 
 /// Runtime state and cleanup responsibility of one driver binding.
@@ -177,11 +264,69 @@ pub(crate) struct BindingRuntime {
     /// Driver-registered cleanup callbacks ("devres"), run in LIFO order when
     /// a probe fails or the device is removed.
     devres: SpinNoPreempt<Vec<Box<dyn FnOnce() + Send>>>,
+    /// Why this runtime exists; determines whether absent Data is valid.
+    source: BindingSource,
+    /// One binding's typed driver data, erased at this boundary.
+    data: SpinNoPreempt<DataSlot>,
+    /// Test-only observation depth for this runtime's Data lock.
+    #[cfg(unittest)]
+    data_lock_depth: AtomicUsize,
+}
+
+#[cfg(unittest)]
+static FAIL_NEXT_DATA_INSTALL: AtomicU64 = AtomicU64::new(u64::MAX);
+
+#[cfg(unittest)]
+struct DataLockHeld<'a> {
+    runtime: &'a BindingRuntime,
+}
+
+#[cfg(unittest)]
+impl<'a> DataLockHeld<'a> {
+    fn new(runtime: &'a BindingRuntime) -> Self {
+        runtime.data_lock_depth.fetch_add(1, Ordering::AcqRel);
+        Self { runtime }
+    }
+}
+
+#[cfg(unittest)]
+impl Drop for DataLockHeld<'_> {
+    fn drop(&mut self) {
+        self.runtime.data_lock_depth.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(unittest)]
+pub(super) struct DataLockGuard<'a> {
+    _guard: SpinNoPreemptGuard<'a, DataSlot>,
+    _depth: DataLockHeld<'a>,
+}
+
+/// One-shot, per-device test hook for the recoverable install-failure path.
+#[cfg(unittest)]
+pub(crate) fn fail_next_data_install(device_id: crate::DeviceId) {
+    FAIL_NEXT_DATA_INSTALL.store(device_id.raw(), Ordering::Release);
+}
+
+#[cfg(unittest)]
+pub(crate) fn take_data_install_failure(device_id: crate::DeviceId) -> bool {
+    FAIL_NEXT_DATA_INSTALL
+        .compare_exchange(
+            device_id.raw(),
+            u64::MAX,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
 }
 
 impl BindingRuntime {
-    /// Create the runtime for a newly discovered, unbound device object.
-    pub(super) const fn new() -> Self {
+    /// Create the runtime for one binding source.
+    pub(super) fn new(source: BindingSource) -> Self {
+        let data = match source {
+            BindingSource::Probe => DataSlot::Empty,
+            BindingSource::Adoption | BindingSource::Test => DataSlot::AdoptionAbsent,
+        };
         Self {
             lifecycle: AtomicU8::new(DeviceState::Discovered.as_u8()),
             usage: AtomicUsize::new(0),
@@ -191,6 +336,10 @@ impl BindingRuntime {
                 device_kind: None,
             }),
             devres: SpinNoPreempt::new(Vec::new()),
+            source,
+            data: SpinNoPreempt::new(data),
+            #[cfg(unittest)]
+            data_lock_depth: AtomicUsize::new(0),
         }
     }
 
@@ -231,6 +380,20 @@ impl BindingRuntime {
         if matches!(self.state(), DeviceState::Removing | DeviceState::Removed) {
             return None;
         }
+        let driver_id = meta.driver_id?;
+        let driver_name = meta.driver_name?;
+        drop(meta);
+        Some(BindingRef {
+            runtime: Arc::clone(self),
+            driver_id,
+            driver_name,
+        })
+    }
+
+    /// Capture the exact runtime for the remove path even when state is
+    /// already `Removing`.
+    pub(super) fn capture_ref_for_removal(self: &Arc<Self>) -> Option<BindingRef> {
+        let meta = self.meta.lock();
         let driver_id = meta.driver_id?;
         let driver_name = meta.driver_name?;
         drop(meta);
@@ -370,6 +533,98 @@ impl BindingRuntime {
         let mut cleanups = core::mem::take(&mut *self.devres.lock());
         while let Some(cleanup) = cleanups.pop() {
             cleanup();
+        }
+    }
+
+    #[cfg(unittest)]
+    pub(super) fn data_lock_is_locked_for_test(&self) -> bool {
+        self.data_lock_depth.load(Ordering::Acquire) != 0
+    }
+
+    #[cfg(unittest)]
+    pub(super) fn hold_data_lock_for_test(&self) -> DataLockGuard<'_> {
+        let depth = DataLockHeld::new(self);
+        let guard = self.data.lock();
+        DataLockGuard {
+            _guard: guard,
+            _depth: depth,
+        }
+    }
+
+    /// Install probe-owned Data. Failure returns the original Data.
+    pub(super) fn install_data(&self, data: DriverData) -> Result<(), DataInstallError> {
+        #[cfg(unittest)]
+        let _data_lock_held = DataLockHeld::new(self);
+        let mut slot = self.data.lock();
+        match (&self.source, &*slot) {
+            (BindingSource::Probe, DataSlot::Empty) => {
+                *slot = DataSlot::Installed(data);
+                Ok(())
+            }
+            (_, DataSlot::Installed(_)) | (_, DataSlot::Taken) => Err(DataInstallError {
+                kind: DataInstallFailureKind::Occupied,
+                error: DriverError::BadState,
+                data,
+            }),
+            (BindingSource::Probe, DataSlot::AdoptionAbsent) => Err(DataInstallError {
+                kind: DataInstallFailureKind::RuntimeMismatch,
+                error: DriverError::BadState,
+                data,
+            }),
+            (BindingSource::Adoption | BindingSource::Test, _) => Err(DataInstallError {
+                kind: DataInstallFailureKind::WrongSource,
+                error: DriverError::BadState,
+                data,
+            }),
+        }
+    }
+
+    /// Take Data for remove/PM. Adoption/test absence is a valid `None`.
+    pub(super) fn take_data(&self) -> Result<Option<DriverData>, DataTakeError> {
+        #[cfg(unittest)]
+        let _data_lock_held = DataLockHeld::new(self);
+        let mut slot = self.data.lock();
+        match self.source {
+            BindingSource::Probe => match &*slot {
+                DataSlot::Installed(_) => {
+                    let DataSlot::Installed(data) = core::mem::replace(&mut *slot, DataSlot::Taken)
+                    else {
+                        return Err(DataTakeError::RuntimeMismatch);
+                    };
+                    Ok(Some(data))
+                }
+                DataSlot::Empty => Err(DataTakeError::NotInstalled),
+                DataSlot::Taken => Err(DataTakeError::AlreadyTaken),
+                DataSlot::AdoptionAbsent => Err(DataTakeError::RuntimeMismatch),
+            },
+            BindingSource::Adoption | BindingSource::Test => match &*slot {
+                DataSlot::AdoptionAbsent => Ok(None),
+                DataSlot::Taken => Err(DataTakeError::AlreadyTaken),
+                _ => Err(DataTakeError::RuntimeMismatch),
+            },
+        }
+    }
+
+    /// Return PM-taken Data. Only Probe/Taken is a valid restore point.
+    pub(super) fn restore_data(&self, data: DriverData) -> Result<(), DataInstallError> {
+        #[cfg(unittest)]
+        let _data_lock_held = DataLockHeld::new(self);
+        let mut slot = self.data.lock();
+        match (&self.source, &*slot) {
+            (BindingSource::Probe, DataSlot::Taken) => {
+                *slot = DataSlot::Installed(data);
+                Ok(())
+            }
+            (_, DataSlot::Installed(_)) | (_, DataSlot::Taken) => Err(DataInstallError {
+                kind: DataInstallFailureKind::Occupied,
+                error: DriverError::BadState,
+                data,
+            }),
+            _ => Err(DataInstallError {
+                kind: DataInstallFailureKind::RuntimeMismatch,
+                error: DriverError::BadState,
+                data,
+            }),
         }
     }
 

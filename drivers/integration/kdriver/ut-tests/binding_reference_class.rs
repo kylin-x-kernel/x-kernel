@@ -109,6 +109,7 @@ struct ClassDriver {
 }
 
 impl DeviceDriver for ClassDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         self.name
     }
@@ -125,7 +126,8 @@ impl DeviceDriver for ClassDriver {
         &self.matcher
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         (self.probe)(device)
     }
 }
@@ -134,8 +136,8 @@ fn class_driver(
     name: &'static str,
     alias: &'static str,
     probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
-) -> Arc<dyn DeviceDriver> {
-    Arc::new(ClassDriver {
+) -> kdevice::BoxedDriver {
+    kdevice::BoxedDriver::new(ClassDriver {
         name,
         matcher: CompatibleAliasMatcher(alias),
         probe: Arc::new(probe),
@@ -242,7 +244,7 @@ fn class_handle_keeps_historical_identity_after_unbind() -> unittest::TestResult
     let cell = class_cell();
     let probe_cell = cell.clone();
     let driver = register_driver_object(class_driver(ALIAS, ALIAS, move |device| {
-        let class = kclass::publish_char(device, test_runtime("identity-char"))?;
+        let class = kclass::publish_char_for_test(device, test_runtime("identity-char"))?;
         *probe_cell.lock() = Some(class);
         Ok(())
     }));
@@ -312,7 +314,7 @@ fn class_handle_does_not_block_device_removal() -> unittest::TestResult {
         binding.add_cleanup(&device, move || {
             cleanup_count.fetch_add(1, Ordering::SeqCst);
         })?;
-        let published = kclass::publish_char(device, test_runtime("active-char"))?;
+        let published = kclass::publish_char_for_test(device, test_runtime("active-char"))?;
         *probe_cell.lock() = Some(published);
         Ok(())
     }));
@@ -392,7 +394,7 @@ fn class_built_at_bound_becomes_available_on_activation() -> unittest::TestResul
     let probe_cell = cell.clone();
     let probe_available = available_at_publish.clone();
     let driver = register_driver_object(class_driver(ALIAS, ALIAS, move |device| {
-        let class = kclass::publish_char(device, test_runtime("bound-char"))?;
+        let class = kclass::publish_char_for_test(device, test_runtime("bound-char"))?;
         probe_available.store(class.is_available(), Ordering::SeqCst);
         *probe_cell.lock() = Some(class);
         Ok(())
@@ -439,7 +441,7 @@ fn failed_probe_leaves_its_class_handle_unavailable() -> unittest::TestResult {
     let cell = class_cell();
     let probe_cell = cell.clone();
     let driver = register_driver_object(class_driver(ALIAS, ALIAS, move |device| {
-        let class = kclass::publish_char(device, test_runtime("failed-char"))?;
+        let class = kclass::publish_char_for_test(device, test_runtime("failed-char"))?;
         *probe_cell.lock() = Some(class);
         Err(DriverError::BadState)
     }));
@@ -499,7 +501,7 @@ fn test_failed_binding_class_retired_before_same_id_rebind() -> unittest::TestRe
     let failed_runs = first_runs.clone();
     let first = register_driver_object(class_driver(ALIAS, ALIAS, move |device| {
         failed_runs.fetch_add(1, Ordering::SeqCst);
-        let class = kclass::publish_char(device, test_runtime("failed-rebind-char"))?;
+        let class = kclass::publish_char_for_test(device, test_runtime("failed-rebind-char"))?;
         *failed_probe.lock() = Some(class);
         Err(DriverError::BadState)
     }));
@@ -529,7 +531,7 @@ fn test_failed_binding_class_retired_before_same_id_rebind() -> unittest::TestRe
     let rebound_runs = second_runs.clone();
     let second = register_driver_object(class_driver(ALIAS, ALIAS, move |device| {
         rebound_runs.fetch_add(1, Ordering::SeqCst);
-        let class = kclass::publish_char(device, test_runtime("rebound-char"))?;
+        let class = kclass::publish_char_for_test(device, test_runtime("rebound-char"))?;
         *rebound_probe.lock() = Some(class);
         Ok(())
     }));
@@ -579,13 +581,13 @@ fn test_failed_candidate_retires_before_next_candidate_in_same_round() -> unitte
 
     let failed_probe = failed_cell.clone();
     let first = register_driver_object(class_driver(ALIAS, ALIAS, move |device| {
-        let class = kclass::publish_char(device, test_runtime("failed-same-round-char"))?;
+        let class = kclass::publish_char_for_test(device, test_runtime("failed-same-round-char"))?;
         *failed_probe.lock() = Some(class);
         Err(DriverError::BadState)
     }));
     let rebound_probe = rebound_cell.clone();
     let second = register_driver_object(class_driver(ALIAS, ALIAS, move |device| {
-        let class = kclass::publish_char(device, test_runtime("rebound-same-round-char"))?;
+        let class = kclass::publish_char_for_test(device, test_runtime("rebound-same-round-char"))?;
         *rebound_probe.lock() = Some(class);
         Ok(())
     }));
@@ -635,7 +637,7 @@ fn test_duplicate_and_stale_events_do_not_revoke_rebind() -> unittest::TestResul
         Arc::new(SpinNoPreempt::new(Vec::new()));
     let probe_classes = classes.clone();
     register_driver_object(class_driver(ALIAS, ALIAS, move |device| {
-        let class = kclass::publish_char(device, test_runtime("stale-char"))?;
+        let class = kclass::publish_char_for_test(device, test_runtime("stale-char"))?;
         probe_classes.lock().push(class);
         Ok(())
     }));
@@ -915,7 +917,7 @@ fn test_stale_event_during_busy_removing_keeps_class_and_node() -> unittest::Tes
     let cell = class_cell();
     let probe_cell = cell.clone();
     register_driver_object(class_driver(ALIAS, ALIAS, move |device| {
-        let class = kclass::publish_char(device.clone(), test_runtime("busy-char"))?;
+        let class = kclass::publish_char_for_test(device.clone(), test_runtime("busy-char"))?;
         *probe_cell.lock() = Some(class);
         let binding = device
             .binding_ref_for_lifecycle_write()
@@ -1090,7 +1092,7 @@ fn char_registry_publish_filters_unavailable_class() {
     let parent = Arc::new(DeviceObject::new_bound_for_test(id, DeviceKind::Char));
     let mut cleanup = Cleanup::new();
 
-    let class = kclass::publish_char(parent, test_runtime("bound-only-char"))
+    let class = kclass::publish_char_for_test(parent, test_runtime("bound-only-char"))
         .expect("a Bound parent publishes");
     cleanup.track_class(id);
     assert!(!class.is_available());
@@ -1128,7 +1130,7 @@ fn test_deferred_class_unpublish_waits_for_node_publication() -> unittest::TestR
         }
     }
     let _cleanup = ClassNodeCleanup { id };
-    let class = kclass::publish_char(fixture.clone(), test_runtime("deferred-order-char"))
+    let class = kclass::publish_char_for_test(fixture.clone(), test_runtime("deferred-order-char"))
         .expect("the detached fixture publishes a class entry");
     let binding = class.binding_ref().clone();
 

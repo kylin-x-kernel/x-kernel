@@ -4,56 +4,48 @@
 
 //! VirtIO input activation and host interrupt-resource ownership.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::boxed::Box;
 
 use driver_base::{DriverError, DriverResult};
 use driver_os_api::IrqResource;
-use kdevice::DeviceObject;
+use kdevice::ProbeContext;
 use virtio::Transport;
 
 use super::{arm_pci_intx, glue::VirtIoHalImpl};
 use crate::resource::DeviceResourceExt;
 
 pub(super) fn activate_pci<T: Transport + 'static>(
-    parent: Arc<DeviceObject>,
+    ctx: &ProbeContext<'_>,
     transport: T,
     irq: IrqResource,
     config: &mut pci::PciConfigAccess,
     bdf: pci::DeviceFunction,
 ) -> DriverResult<()> {
-    activate(parent, transport, irq, Some((config, bdf)))
+    activate(ctx, transport, irq, Some((config, bdf)))
 }
 
 pub(super) fn activate_mmio<T: Transport + 'static>(
-    parent: Arc<DeviceObject>,
+    ctx: &ProbeContext<'_>,
     transport: T,
     irq: Option<IrqResource>,
 ) -> DriverResult<()> {
-    activate(
-        parent,
-        transport,
-        irq.ok_or(DriverError::InvalidInput)?,
-        None,
-    )
+    activate(ctx, transport, irq.ok_or(DriverError::InvalidInput)?, None)
 }
 
 fn activate<T: Transport + 'static>(
-    parent: Arc<DeviceObject>,
+    ctx: &ProbeContext<'_>,
     transport: T,
     irq: IrqResource,
     pci_intx: Option<(&mut pci::PciConfigAccess, pci::DeviceFunction)>,
 ) -> DriverResult<()> {
-    let binding = parent
-        .binding_ref_for_lifecycle_write()
-        .ok_or(DriverError::BadState)?;
     let input = virtio::VirtIoInputDev::<VirtIoHalImpl, T>::try_new(transport, irq.virq().raw())?;
-    binding.devm_request_irq(&parent, irq, input.irq_handler())?;
+    ctx.devm_request_irq(irq, input.irq_handler())?;
 
     if let Some((config, bdf)) = pci_intx {
-        arm_pci_intx(&parent, config, bdf)?;
+        arm_pci_intx(ctx, config, bdf)?;
     }
 
-    kclass::publish_input(parent, Box::new(input)).map(drop)
+    kclass::publish_input(ctx, Box::new(input)).map(drop)
 }
 
 unittest::path_mod_test!(

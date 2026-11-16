@@ -13,10 +13,10 @@ use fwnode::FwNode;
 use kmutex::Mutex;
 use kspin::{SpinNoPreempt, SpinNoPreemptGuard};
 
-use super::binding::{BindingRef, BindingRuntime};
+use super::binding::{BindingRef, BindingRuntime, BindingSource, DataInstallError, DataTakeError};
 use crate::{
     BusId, DeviceId, DeviceIdentity, DeviceLocation, DeviceRecord, DeviceState, DiscoveryOrigin,
-    DriverId, IntxRouteStatus, ResourceDesc, ResourceSet, TransportInfo,
+    DriverId, IntxRouteStatus, ResourceDesc, ResourceSet, TransportInfo, driver::DriverData,
 };
 
 /// Topology relations of a device object protected by a per-object lock.
@@ -39,6 +39,13 @@ pub(crate) struct DeviceRelations {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Registration {
     /// Test/fixture object that never had a descriptor registration.
+    #[cfg_attr(
+        all(not(unittest), not(doc)),
+        expect(
+            dead_code,
+            reason = "CG-024-lint-exceptions: constructed only by unit-test fixtures"
+        )
+    )]
     Detached,
     /// Registered by `device_desc_add`/`adopt_active_device`.
     Registered,
@@ -133,7 +140,7 @@ impl DeviceObject {
         driver_name: &'static str,
         kind: DeviceKind,
     ) {
-        let runtime = Arc::new(BindingRuntime::new());
+        let runtime = Arc::new(BindingRuntime::new(BindingSource::Test));
         runtime.bind(driver_id, driver_name, kind);
         *self.slot.lock() = BindingSlot {
             registration: Registration::Detached,
@@ -573,13 +580,7 @@ impl DeviceObject {
         runtime.capture_ref()
     }
 
-    /// Capture the current binding for a lifecycle write operation.
-    ///
-    /// Unlike [`Self::binding_ref`], a registered object only returns a handle
-    /// when the calling task holds the descriptor binding lock (probe,
-    /// adoption or remove write context). Detached fixtures skip that check.
-    /// An unregistered object always returns `None`.
-    pub fn binding_ref_for_lifecycle_write(&self) -> Option<BindingRef> {
+    fn capture_lifecycle_binding(&self) -> Option<BindingRef> {
         let runtime = {
             let slot = self.slot.lock();
             match slot.registration {
@@ -593,6 +594,106 @@ impl DeviceObject {
         runtime.capture_ref()
     }
 
+    /// Capture the current binding for a lifecycle write operation.
+    ///
+    /// Production visibility is crate-private: only the lifecycle framework
+    /// may mint a write context. Test builds expose the helper so existing
+    /// fixtures can construct a `ProbeContext`; PM/remove consumers cannot use
+    /// it to bypass the phase permission.
+    #[cfg(not(unittest))]
+    pub(crate) fn binding_ref_for_lifecycle_write(&self) -> Option<BindingRef> {
+        self.capture_lifecycle_binding()
+    }
+
+    /// Test-build compatibility helper; see the production cfg above.
+    #[cfg(unittest)]
+    pub fn binding_ref_for_lifecycle_write(&self) -> Option<BindingRef> {
+        self.capture_lifecycle_binding()
+    }
+
+    /// Capture the exact current binding for the remove path. Unlike
+    /// [`Self::binding_ref_for_lifecycle_write`], a `Removing` instance is
+    /// valid.
+    pub(crate) fn binding_ref_for_removal(&self) -> Option<BindingRef> {
+        let slot = self.slot.lock();
+        match slot.registration {
+            Registration::Ended => return None,
+            Registration::Registered if !self.binding_lock.is_owned_by_current() => return None,
+            Registration::Detached | Registration::Registered => {}
+        }
+        let runtime = slot.current.clone()?;
+        drop(slot);
+        runtime.capture_ref_for_removal()
+    }
+
+    /// Install probe-owned DriverData into the exact runtime.
+    pub(crate) fn install_data(
+        &self,
+        runtime: &Arc<BindingRuntime>,
+        data: DriverData,
+    ) -> Result<(), DataInstallError> {
+        #[cfg(unittest)]
+        if super::binding::take_data_install_failure(self.id) {
+            return Err(DataInstallError::new(
+                super::binding::DataInstallFailureKind::Injected,
+                DriverError::BadState,
+                data,
+            ));
+        }
+        let Some(current) = self.current_runtime() else {
+            return Err(DataInstallError::new(
+                super::binding::DataInstallFailureKind::RuntimeMismatch,
+                DriverError::BadState,
+                data,
+            ));
+        };
+        if !Arc::ptr_eq(&current, runtime) {
+            return Err(DataInstallError::new(
+                super::binding::DataInstallFailureKind::RuntimeMismatch,
+                DriverError::BadState,
+                data,
+            ));
+        }
+        current.install_data(data)
+    }
+
+    /// Take DriverData from the exact runtime.
+    pub(crate) fn take_data(
+        &self,
+        runtime: &Arc<BindingRuntime>,
+    ) -> Result<Option<DriverData>, DataTakeError> {
+        let Some(current) = self.current_runtime() else {
+            return Err(DataTakeError::RuntimeMismatch);
+        };
+        if !Arc::ptr_eq(&current, runtime) {
+            return Err(DataTakeError::RuntimeMismatch);
+        }
+        current.take_data()
+    }
+
+    /// Return PM-taken DriverData to the exact runtime.
+    pub(crate) fn restore_data(
+        &self,
+        runtime: &Arc<BindingRuntime>,
+        data: DriverData,
+    ) -> Result<(), DataInstallError> {
+        let Some(current) = self.current_runtime() else {
+            return Err(DataInstallError::new(
+                super::binding::DataInstallFailureKind::RuntimeMismatch,
+                DriverError::BadState,
+                data,
+            ));
+        };
+        if !Arc::ptr_eq(&current, runtime) {
+            return Err(DataInstallError::new(
+                super::binding::DataInstallFailureKind::RuntimeMismatch,
+                DriverError::BadState,
+                data,
+            ));
+        }
+        current.restore_data(data)
+    }
+
     /// Install a brand-new binding runtime in the empty slot.
     ///
     /// The runtime is always freshly allocated; this API cannot reuse or
@@ -603,8 +704,8 @@ impl DeviceObject {
     ///
     /// Returns [`DriverError::BadState`] when the object is not registered,
     /// the slot is not empty, or the caller is not the descriptor-lock owner.
-    pub(crate) fn install_fresh_binding(&self) -> DriverResult<()> {
-        let runtime = Arc::new(BindingRuntime::new());
+    pub(crate) fn install_fresh_binding(&self, source: BindingSource) -> DriverResult<()> {
+        let runtime = Arc::new(BindingRuntime::new(source));
         let mut slot = self.slot.lock();
         if slot.registration != Registration::Registered {
             return Err(DriverError::BadState);

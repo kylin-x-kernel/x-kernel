@@ -17,6 +17,12 @@
 //! Input and display classes also translate their runtime metadata into
 //! [`kdevice::DeviceNode`] registrations when the parent device becomes active.
 
+//! ```compile_fail
+//! fn cannot_publish_from_remove(ctx: &kdevice::RemoveContext<'_>) {
+//!     let _ = kclass::publish_char(ctx, unreachable!());
+//! }
+//! ```
+
 #![no_std]
 
 extern crate alloc;
@@ -26,7 +32,7 @@ use alloc::collections::BTreeMap;
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use kdevice::{DeviceEvent, DeviceEventKind, DeviceId, DeviceObject};
+use kdevice::{DeviceEvent, DeviceEventKind, DeviceId, ProbeContext};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
@@ -117,18 +123,13 @@ macro_rules! class_registry {
 
         /// Publish a runtime capability into its typed class registry.
         ///
-        /// Must run in a lifecycle write context (probe, adoption or remove)
-        /// that holds the descriptor binding lock. The class handle captures
-        /// that exact binding instance, so a later replacement binding never
-        /// inherits this handle's identity.
+        /// Publish from the exact probe context. The class handle captures that
+        /// context's binding, so a later replacement binding never inherits
+        /// this handle's identity.
         #[cfg(feature = $feature)]
-        pub fn $publish_fn(
-            parent: Arc<DeviceObject>,
-            runtime: $ty,
-        ) -> DriverResult<ClassDevice<$ty>> {
-            let binding = parent
-                .binding_ref_for_lifecycle_write()
-                .ok_or(DriverError::BadState)?;
+        pub fn $publish_fn(ctx: &ProbeContext<'_>, runtime: $ty) -> DriverResult<ClassDevice<$ty>> {
+            let parent = ctx.device().clone();
+            let binding = ctx.binding().clone();
             let name = runtime.name().into();
             let device_kind = runtime.device_kind();
             let irq = runtime.irq();
@@ -997,4 +998,25 @@ pub mod prelude {
         VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice, VsockDeviceImpl,
         VsockTransportEvent, VsockTransportEventKind,
     };
+}
+
+/// Test-only scoped publication helper. Production drivers use
+/// [`publish_char`] with a `ProbeContext`.
+#[cfg(all(unittest, feature = "char"))]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: test-only helper accepts the production boxed \
+              CharDeviceImpl required by kclass publication"
+)]
+pub fn publish_char_for_test(
+    parent: Arc<kdevice::DeviceObject>,
+    runtime: CharDeviceImpl,
+) -> DriverResult<ClassDevice<CharDeviceImpl>> {
+    ProbeContext::with_test_context(parent, |ctx| publish_char(ctx, runtime))
+        .unwrap_or(Err(DriverError::BadState))
 }

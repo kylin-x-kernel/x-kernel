@@ -14,6 +14,32 @@ use crate::{
     MatchResult,
 };
 
+/// Metadata needed by a bus type without exposing the typed driver object.
+pub trait DriverMatchInfo {
+    fn bus_types(&self) -> &'static [BusTypeId];
+    fn matcher(&self) -> &dyn crate::DeviceMatcher;
+}
+
+impl<D: DeviceDriver> DriverMatchInfo for D {
+    fn bus_types(&self) -> &'static [BusTypeId] {
+        DeviceDriver::bus_types(self)
+    }
+
+    fn matcher(&self) -> &dyn crate::DeviceMatcher {
+        DeviceDriver::matcher(self)
+    }
+}
+
+impl DriverMatchInfo for DriverObject {
+    fn bus_types(&self) -> &'static [BusTypeId] {
+        DriverObject::bus_types(self)
+    }
+
+    fn matcher(&self) -> &dyn crate::DeviceMatcher {
+        DriverObject::matcher(self)
+    }
+}
+
 /// Driver-core bus type identifier.
 ///
 /// A stable string handle that identifies one driver matching domain. Built-in
@@ -50,7 +76,7 @@ pub trait BusType: Send + Sync {
     fn id(&self) -> BusTypeId;
 
     /// Decide whether a driver can bind a device in this domain.
-    fn match_desc(&self, driver: &dyn DeviceDriver, desc: &DeviceDesc) -> MatchResult;
+    fn match_desc(&self, driver: &dyn DriverMatchInfo, desc: &DeviceDesc) -> MatchResult;
 
     /// Bus-type cleanup hook after the bound driver has removed the device.
     fn remove(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
@@ -85,7 +111,7 @@ impl BusType for PciBusTypeMatcher {
         BusTypeId::PCI
     }
 
-    fn match_desc(&self, driver: &dyn DeviceDriver, desc: &DeviceDesc) -> MatchResult {
+    fn match_desc(&self, driver: &dyn DriverMatchInfo, desc: &DeviceDesc) -> MatchResult {
         if !driver.bus_types().contains(&BusTypeId::PCI) || !self.accepts_desc(desc) {
             return MatchResult::NoMatch;
         }
@@ -124,7 +150,7 @@ impl BusType for PlatformBusTypeMatcher {
         BusTypeId::PLATFORM
     }
 
-    fn match_desc(&self, driver: &dyn DeviceDriver, desc: &DeviceDesc) -> MatchResult {
+    fn match_desc(&self, driver: &dyn DriverMatchInfo, desc: &DeviceDesc) -> MatchResult {
         if !driver.bus_types().contains(&BusTypeId::PLATFORM) || !self.accepts_desc(desc) {
             return MatchResult::NoMatch;
         }
@@ -187,12 +213,16 @@ impl BusTypeObject {
     }
 
     /// Decide whether a driver can bind a device in this domain.
-    pub fn match_desc(&self, driver: &dyn DeviceDriver, desc: &DeviceDesc) -> MatchResult {
+    pub fn match_desc(&self, driver: &dyn DriverMatchInfo, desc: &DeviceDesc) -> MatchResult {
         self.matcher.match_desc(driver, desc)
     }
 
     /// Bus-type cleanup hook after the bound driver has removed the device.
     pub fn remove(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+        #[cfg(unittest)]
+        if crate::test_hooks::take_bus_remove_failure() {
+            return Err(crate::DriverError::Io);
+        }
         self.matcher.remove(device)
     }
 

@@ -12,6 +12,8 @@ use crate::driver_registry::{BoxedDriver, firmware_specs::BCM2835_SDHCI};
 struct BcmSdhciDriver;
 
 impl DeviceDriver for BcmSdhciDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "bcm2835-sdhci"
     }
@@ -28,13 +30,13 @@ impl DeviceDriver for BcmSdhciDriver {
         &BCM2835_SDHCI
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> driver_base::DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> driver_base::DriverResult<()> {
         match block::bcm2835sdhci::SDHCIDriver::new(crate::resource::resource_provider()) {
             Ok(dev) => {
                 let (index, first_minor) = super::allocate_mmc_disk()?;
                 let name = format!("{}{}", dev.name(), index);
                 let disk = block::Gendisk::alloc(name, 179, first_minor, 8, Box::new(dev))?;
-                kclass::publish_block(device, disk).map(drop)
+                kclass::publish_block(ctx, disk).map(drop)
             }
             Err(_) => Err(DriverError::Io),
         }
@@ -42,5 +44,5 @@ impl DeviceDriver for BcmSdhciDriver {
 }
 
 pub(super) fn descriptor() -> BoxedDriver {
-    Arc::new(BcmSdhciDriver)
+    BoxedDriver::new(BcmSdhciDriver)
 }

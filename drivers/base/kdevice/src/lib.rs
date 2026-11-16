@@ -97,8 +97,8 @@ mod registry;
 pub mod topology;
 
 pub use bus::{
-    BusId, BusInfo, BusInstance, BusType, BusTypeId, BusTypeObject, PciBusTypeMatcher,
-    PlatformBusTypeMatcher,
+    BusId, BusInfo, BusInstance, BusType, BusTypeId, BusTypeObject, DriverMatchInfo,
+    PciBusTypeMatcher, PlatformBusTypeMatcher,
 };
 pub use device::{
     BindingRef,
@@ -122,9 +122,9 @@ pub use device_node::{
     unregister_device_node_for_binding,
 };
 pub use driver::{
-    CompatibleAliasMatcher, DeviceDriver, DeviceMatcher, DriverId, DriverInfo, DriverObject,
-    FirmwareMatchSpec, MatchResult, NeverMatcher, PciDeviceId, PciIdsMatcher, ProbeStats,
-    VirtioTypeMatcher,
+    BoxedDriver, CompatibleAliasMatcher, DeviceDriver, DeviceMatcher, DriverId, DriverInfo,
+    DriverObject, FirmwareMatchSpec, MatchResult, NeverMatcher, PciDeviceId, PciIdsMatcher,
+    PmContext, ProbeContext, ProbeStats, RemoveContext, VirtioTypeMatcher,
 };
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 #[cfg(unittest)]

@@ -11,7 +11,7 @@
 //! just before that scan takes the lock.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
@@ -150,6 +150,8 @@ static PAUSE: LazyInit<SpinNoPreempt<Option<PauseCallback>>> = LazyInit::new();
 /// Number of successful candidate setups before the injected failure, or
 /// `usize::MAX` when no failure is armed.
 static FAIL_CANDIDATE_SETUP: AtomicUsize = AtomicUsize::new(usize::MAX);
+#[cfg(unittest)]
+static FAIL_NEXT_BUS_REMOVE: AtomicBool = AtomicBool::new(false);
 
 fn pause_slot() -> &'static SpinNoPreempt<Option<PauseCallback>> {
     PAUSE.call_once(|| SpinNoPreempt::new(None));
@@ -201,6 +203,16 @@ pub fn fail_candidate_setup_after(successful: usize) {
 ///
 /// Returns `true` exactly once when the countdown reaches zero, then
 /// disarms so a retry can set up candidates again.
+#[cfg(unittest)]
+pub(crate) fn fail_next_bus_remove() {
+    FAIL_NEXT_BUS_REMOVE.store(true, Ordering::Release);
+}
+
+#[cfg(unittest)]
+pub(crate) fn take_bus_remove_failure() -> bool {
+    FAIL_NEXT_BUS_REMOVE.swap(false, Ordering::AcqRel)
+}
+
 pub(crate) fn take_candidate_setup_failure() -> bool {
     let mut current = FAIL_CANDIDATE_SETUP.load(Ordering::SeqCst);
     loop {

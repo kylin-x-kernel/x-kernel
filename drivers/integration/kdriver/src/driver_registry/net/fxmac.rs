@@ -6,7 +6,7 @@ use alloc::{boxed::Box, sync::Arc};
 
 use axalloc::{UsageKind, global_allocator};
 use driver_base::{DeviceKind, DriverError};
-use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher, DeviceObject};
+use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher};
 use khal::mem::PAGE_SIZE_4K;
 
 use crate::driver_registry::{BoxedDriver, firmware_specs::FXMAC};
@@ -45,6 +45,8 @@ impl net::fxmac::KernelFunc for FXmacKernelFunc {
 struct FxmacDriver;
 
 impl DeviceDriver for FxmacDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "fxmac"
     }
@@ -61,7 +63,8 @@ impl DeviceDriver for FxmacDriver {
         &FXMAC
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> driver_base::DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> driver_base::DriverResult<()> {
+        let device = ctx.device();
         let mmio = crate::first_mmio_resource(device.as_ref()).map_err(|err| {
             log::error!(
                 "fxmac: no MMIO resource for {:?}; refusing to fall back to address 0",
@@ -71,12 +74,12 @@ impl DeviceDriver for FxmacDriver {
         })?;
         let mapped_regs = mmio.base;
         match net::fxmac::FXmacNic::init(mapped_regs) {
-            Ok(dev) => kclass::publish_net(device, Box::new(dev)).map(drop),
+            Ok(dev) => kclass::publish_net(ctx, Box::new(dev)).map(drop),
             Err(_) => Err(DriverError::Io),
         }
     }
 }
 
 pub(super) fn descriptor() -> BoxedDriver {
-    Arc::new(FxmacDriver)
+    BoxedDriver::new(FxmacDriver)
 }

@@ -118,14 +118,13 @@ fn first_mmio_resource(
 
 #[cfg(any(feature = "ahci", feature = "sdmmc", feature = "ixgbe"))]
 fn iomap_first_mmio(
-    binding: &kdevice::BindingRef,
-    device: &kdevice::DeviceObject,
+    ctx: &kdevice::ProbeContext<'_>,
     name: &'static str,
 ) -> driver_base::DriverResult<(core::ptr::NonNull<u8>, usize)> {
     use resource::DeviceResourceExt as _;
 
-    let mmio = first_mmio_resource(device)?;
-    let ptr = binding.devm_iomap(device, mmio, name)?;
+    let mmio = first_mmio_resource(ctx.device().as_ref())?;
+    let ptr = ctx.devm_iomap(mmio, name)?;
     Ok((ptr, mmio.size))
 }
 

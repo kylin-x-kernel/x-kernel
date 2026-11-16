@@ -24,7 +24,11 @@ use self::{
 use crate::{
     BindingRef, BusId, BusInstance, BusTypeId, BusTypeObject, DeviceDesc, DeviceDescId,
     DeviceDescSpec, DeviceId, DeviceIdentity, DeviceLocation, DeviceObject, DeviceState,
-    DiscoveryOrigin, DriverObject, MatchResult, ResourceSet, device_registry, init_device_registry,
+    DiscoveryOrigin, DriverObject, MatchResult, ResourceSet,
+    device::{BindingSource, DataInstallError, DataInstallFailureKind},
+    device_registry,
+    driver::{BoxedDriver, ContextPermit, ErasedCallError, ProbeContext, RemoveContext},
+    init_device_registry,
     registry::DeviceDescState,
     topology::relations::{
         attach_device_parent_locked, clear_registration_topology, detach_device_parent_locked,
@@ -188,8 +192,9 @@ pub fn register_bus_instance(bus_type_id: BusTypeId, name: &'static str) -> Arc<
 ///
 /// A probe must not call this function for drivers that should bind to the
 /// descriptor being probed; that recursion is rejected by the binding lock.
-pub fn register_driver_object(ops: Arc<dyn crate::DeviceDriver>) -> Arc<DriverObject> {
+pub fn register_driver_object<B: Into<BoxedDriver>>(ops: B) -> Arc<DriverObject> {
     init_device_registry();
+    let ops: BoxedDriver = ops.into();
 
     let (driver, bus_types) = {
         let mut index = device_registry();
@@ -234,7 +239,8 @@ pub fn register_driver_object(ops: Arc<dyn crate::DeviceDriver>) -> Arc<DriverOb
             desc_id: desc_ref.id,
         });
 
-        let _guard = desc_ref.binding.lock();
+        let guard = desc_ref.binding.lock();
+        let permit = ContextPermit::new(&guard);
         let desc = match inspect_locked_desc(desc_ref.id) {
             Ok(Some(desc)) => desc,
             Ok(None) => continue,
@@ -266,6 +272,7 @@ pub fn register_driver_object(ops: Arc<dyn crate::DeviceDriver>) -> Arc<DriverOb
             ProbeCandidates::Only {
                 driver: driver.clone(),
             },
+            &permit,
         ) {
             Ok(outcome) if outcome.activated() => activated_from_desc += 1,
             Ok(_) => {}
@@ -406,6 +413,7 @@ fn requeue_desc(desc_id: DeviceDescId) {
 fn probe_desc_round(
     desc: DeviceDesc,
     candidates: ProbeCandidates,
+    permit: &ContextPermit<'_>,
 ) -> Result<ProbeOutcome, DriverError> {
     let Some(bus_type) = bus_type_for_desc(&desc) else {
         requeue_desc(desc.id());
@@ -424,9 +432,8 @@ fn probe_desc_round(
 
     let mut probed = false;
     for driver in drivers {
-        let ops = driver.ops();
         if matches!(
-            bus_type.match_desc(ops.as_ref(), &desc),
+            bus_type.match_desc(driver.as_ref(), &desc),
             MatchResult::NoMatch
         ) {
             continue;
@@ -440,7 +447,7 @@ fn probe_desc_round(
 
         // A brand-new runtime for every candidate; the object is never reused
         // with a reset runtime.
-        if let Err(error) = device.install_fresh_binding() {
+        if let Err(error) = device.install_fresh_binding(BindingSource::Probe) {
             requeue_desc(desc.id());
             return Err(error);
         }
@@ -464,36 +471,16 @@ fn probe_desc_round(
         }
         probed = true;
 
-        match ops.probe_device(device.clone()) {
-            Ok(()) => {
-                publish_desc_device(desc.id(), device.clone(), driver.clone());
-                // Compatible late-parent attach: registration may have run
-                // before the parent was registered. Existing topology is never
-                // rebuilt or cleared here.
-                if device.parent().is_none()
-                    && let Some(parent_id) = desc.parent()
-                {
-                    // Release the registry guard before the topology helper
-                    // takes it again for its own snapshot.
-                    let parent_registered = device_registry().find_device(parent_id).is_some();
-                    if parent_registered
-                        && let Err(err) = attach_device_parent_locked(parent_id, device.id())
-                    {
-                        log::warn!(
-                            "failed to attach device {:?} under parent {:?}: {:?}",
-                            device.id(),
-                            parent_id,
-                            err,
-                        );
-                    }
-                }
-                driver.attach_device(device.id());
-                announce_device_matched(device.as_ref());
-                announce_device_bound(device.as_ref(), driver.device_kind());
-                dispatch_device_event(DeviceEvent::Published { id: device.id() });
-                activate_device(device.as_ref(), driver.device_kind());
-                return Ok(ProbeOutcome::Activated);
+        let binding = match device.binding_ref_for_lifecycle_write() {
+            Some(binding) => binding,
+            None => {
+                requeue_desc(desc.id());
+                return Err(DriverError::BadState);
             }
+        };
+        let probe_ctx = ProbeContext::new(device.clone(), binding, permit);
+        let data = match driver.probe_erased(&probe_ctx) {
+            Ok(data) => data,
             Err(error) => {
                 log::info!(
                     "driver {} probe failed for descriptor {:?}: {:?}",
@@ -505,16 +492,43 @@ fn probe_desc_round(
                 if let Some(bus) = &bus_instance {
                     bus.record_probe_failure();
                 }
-                // Retire this binding instance completely before the next
-                // candidate: terminal state, cleanup batch, instance-scoped
-                // event, then clear the slot. The stable object stays.
-                device.detach_driver();
-                device.mark_removed();
-                device.run_cleanups();
-                dispatch_device_event(DeviceEvent::BindingRetired { id: device.id() });
-                device.clear_binding();
+                retire_failed_binding(device.as_ref());
+                continue;
+            }
+        };
+
+        if let Err(error) = probe_ctx.install_data(data) {
+            recover_failed_data_install(desc.id(), &device, driver.as_ref(), permit, error);
+            continue;
+        }
+
+        publish_desc_device(desc.id(), device.clone(), driver.clone());
+        // Compatible late-parent attach: registration may have run
+        // before the parent was registered. Existing topology is never
+        // rebuilt or cleared here.
+        if device.parent().is_none()
+            && let Some(parent_id) = desc.parent()
+        {
+            // Release the registry guard before the topology helper
+            // takes it again for its own snapshot.
+            let parent_registered = device_registry().find_device(parent_id).is_some();
+            if parent_registered
+                && let Err(err) = attach_device_parent_locked(parent_id, device.id())
+            {
+                log::warn!(
+                    "failed to attach device {:?} under parent {:?}: {:?}",
+                    device.id(),
+                    parent_id,
+                    err,
+                );
             }
         }
+        driver.attach_device(device.id());
+        announce_device_matched(device.as_ref());
+        announce_device_bound(device.as_ref(), driver.device_kind());
+        dispatch_device_event(DeviceEvent::Published { id: device.id() });
+        activate_device(device.as_ref(), driver.device_kind());
+        return Ok(ProbeOutcome::Activated);
     }
 
     requeue_desc(desc.id());
@@ -523,6 +537,85 @@ fn probe_desc_round(
     } else {
         ProbeOutcome::Unmatched
     })
+}
+
+/// Run the post-stop path for a recoverable probe-data install failure.
+///
+/// `Injected` is the only recoverable kind and exists only in unit builds.
+/// Occupied/WrongSource/RuntimeMismatch mean the runtime or slot invariant is
+/// already broken, so the helper never releases resources on those paths.
+fn recover_failed_data_install(
+    desc_id: DeviceDescId,
+    device: &Arc<DeviceObject>,
+    driver: &DriverObject,
+    permit: &ContextPermit<'_>,
+    error: DataInstallError,
+) {
+    let (kind, error, data) = error.into_parts();
+    let recoverable = match kind {
+        DataInstallFailureKind::Occupied
+        | DataInstallFailureKind::WrongSource
+        | DataInstallFailureKind::RuntimeMismatch => false,
+        #[cfg(unittest)]
+        DataInstallFailureKind::Injected => true,
+    };
+    if !recoverable {
+        fatal_data_invariant(desc_id, device.id(), "install", error);
+    }
+    let remove_binding = match device.binding_ref_for_removal() {
+        Some(binding) => binding,
+        None => fatal_data_invariant(desc_id, device.id(), "install-remove", error),
+    };
+    let remove_ctx = RemoveContext::new(device.clone(), remove_binding, permit);
+    let mut data = data;
+    match driver.remove_erased(&remove_ctx, Some(&mut data)) {
+        Ok(()) => {}
+        Err(ErasedCallError::Driver(remove_error)) => log::error!(
+            "driver {} post-install remove failed for {:?}: {:?}; continuing after stop contract",
+            driver.name(),
+            device.id(),
+            remove_error,
+        ),
+        Err(ErasedCallError::TypeMismatch) => {
+            fatal_data_invariant(desc_id, device.id(), "install-data-type", error)
+        }
+    }
+    device.run_cleanups();
+    drop(data);
+    retire_failed_binding(device.as_ref());
+}
+
+/// Retire a binding that never became published.
+fn retire_failed_binding(device: &DeviceObject) {
+    device.detach_driver();
+    device.mark_removed();
+    device.run_cleanups();
+    dispatch_device_event(DeviceEvent::BindingRetired { id: device.id() });
+    device.clear_binding();
+}
+
+/// Internal lifecycle invariant failure: stop before any resource release.
+#[cold]
+#[expect(
+    clippy::panic,
+    reason = "CG-021-no-panic-on-reachable-failure: an internally inconsistent Data slot or \
+              binding state has no safe recovery; releasing hardware resources would risk DMA/IRQ \
+              use-after-free"
+)]
+fn fatal_data_invariant(
+    desc_id: DeviceDescId,
+    device_id: DeviceId,
+    stage: &'static str,
+    error: DriverError,
+) -> ! {
+    log::error!(
+        "kdevice invariant failure at {} for descriptor {:?}, device {:?}: {:?}",
+        stage,
+        desc_id,
+        device_id,
+        error,
+    );
+    panic!("kdevice lifecycle invariant failure");
 }
 
 /// Probe one registered descriptor through the descriptor-first driver path.
@@ -539,7 +632,8 @@ pub fn probe_device_desc(id: DeviceDescId) -> Result<ProbeOutcome, DriverError> 
         return Ok(ProbeOutcome::Busy);
     }
 
-    let _guard = binding.lock();
+    let guard = binding.lock();
+    let permit = ContextPermit::new(&guard);
     #[cfg(unittest)]
     test_hooks::pause(test_hooks::BindingPause::ProbeHoldingLock { desc_id: id });
     match inspect_locked_desc(id)? {
@@ -548,7 +642,7 @@ pub fn probe_device_desc(id: DeviceDescId) -> Result<ProbeOutcome, DriverError> 
             if device_registry().mark_device_desc_probing(id).is_none() {
                 return Err(DriverError::BadState);
             }
-            probe_desc_round(desc, ProbeCandidates::BusType)
+            probe_desc_round(desc, ProbeCandidates::BusType, &permit)
         }
     }
 }
@@ -576,6 +670,9 @@ pub fn adopt_active_device(
     init_device_registry();
 
     let driver = adoption.driver;
+    if !driver.supports_adoption() {
+        return Err(DriverError::Unsupported);
+    }
     // Validate the target bus and mint the IDs under the registry lock, then
     // drop it before constructing the (heap-allocating) descriptor, lock and
     // object so allocation does not run under the lock.
@@ -633,7 +730,7 @@ pub fn adopt_active_device(
     // Prepare the binding metadata before the object becomes visible. From
     // this point on a concurrent remove can safely inspect `driver_id()` once
     // it finds the device on the bus.
-    device.install_fresh_binding()?;
+    device.install_fresh_binding(BindingSource::Adoption)?;
     prepare_device_binding(
         device.as_ref(),
         driver.id(),
@@ -877,7 +974,8 @@ pub fn unregister_device_desc(id: DeviceDescId) -> Result<(), DriverError> {
         return Err(DriverError::ResourceBusy);
     }
 
-    let _guard = binding.lock();
+    let guard = binding.lock();
+    let permit = ContextPermit::new(&guard);
     #[cfg(unittest)]
     test_hooks::pause(test_hooks::BindingPause::UnregisterHoldingLock { desc_id: id });
 
@@ -948,7 +1046,7 @@ pub fn unregister_device_desc(id: DeviceDescId) -> Result<(), DriverError> {
             Ok(())
         }
         Target::Bound(device_id) => {
-            remove_bound_device_locked(id, device_id, DescDisposition::Delete, None)
+            remove_bound_device_locked(id, device_id, DescDisposition::Delete, None, &permit)
         }
     }
 }
@@ -964,6 +1062,7 @@ fn remove_bound_device_locked(
     device_id: DeviceId,
     disposition: DescDisposition,
     expected_binding: Option<&BindingRef>,
+    permit: &ContextPermit<'_>,
 ) -> Result<(), DriverError> {
     // Re-read everything after the wait; the snapshots taken before it may be
     // stale. A device that disappeared here was removed by another task.
@@ -1026,22 +1125,40 @@ fn remove_bound_device_locked(
     // and invite use-after-free. Failures are logged and removal proceeds to
     // `Removed`. This mirrors the "remove never fails" contract of Linux's
     // driver core.
-    if let Some(driver) = driver
-        && let Err(error) = driver.ops().remove(device.clone())
-    {
-        log::error!(
-            "driver {} remove() failed for device {:?}: {:?}; proceeding with removal",
-            driver.name(),
-            device_id,
-            error,
-        );
+    let remove_binding = match device.binding_ref_for_removal() {
+        Some(binding) => binding,
+        None => fatal_data_invariant(desc_id, device_id, "remove-context", DriverError::BadState),
+    };
+    let remove_ctx = RemoveContext::new(device.clone(), remove_binding, permit);
+    let mut data = match remove_ctx.take_data() {
+        Ok(data) => data,
+        Err(_) => fatal_data_invariant(desc_id, device_id, "take", DriverError::BadState),
+    };
+
+    if let Some(driver) = driver {
+        match driver.remove_erased(&remove_ctx, data.as_mut()) {
+            Ok(()) => {}
+            Err(ErasedCallError::Driver(error)) => log::error!(
+                "driver {} remove() reported post-stop cleanup error for device {:?}: {:?}; \
+                 continuing",
+                driver.name(),
+                device_id,
+                error,
+            ),
+            Err(ErasedCallError::TypeMismatch) => fatal_data_invariant(
+                desc_id,
+                device_id,
+                "remove-data-type",
+                DriverError::BadState,
+            ),
+        }
     }
 
     if let Some(bus_type) = bus_type
         && let Err(error) = bus_type.remove(device.clone())
     {
         log::error!(
-            "bus-type remove() failed for device {:?}: {:?}; proceeding with removal",
+            "bus-type remove() reported post-stop cleanup error for device {:?}: {:?}; continuing",
             device_id,
             error,
         );
@@ -1051,6 +1168,7 @@ fn remove_bound_device_locked(
     // remove() hook. Runs after both teardown hooks so the driver gets first
     // chance to release things itself.
     device.run_cleanups();
+    drop(data);
 
     remove_device_from_index(desc_id, device_id, disposition)
 }
@@ -1085,12 +1203,14 @@ pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
     // classify the race as retryable ResourceBusy after the lock instead.
     let observed_binding = device.binding_ref();
 
-    let _guard = desc_ref.binding.lock();
+    let guard = desc_ref.binding.lock();
+    let permit = ContextPermit::new(&guard);
     remove_bound_device_locked(
         desc_ref.id,
         id,
         DescDisposition::Requeue,
         observed_binding.as_ref(),
+        &permit,
     )
 }
 

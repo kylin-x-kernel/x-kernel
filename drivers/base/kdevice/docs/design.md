@@ -225,7 +225,7 @@ one runtime for its lifetime.
   a retired binding can never decrement a newer binding's usage.
 - `BindingRef::try_acquire(&DeviceObject)` revalidates that the captured
   runtime is still the object's current binding; an old handle cannot obtain
-  admission from a replacement binding. `add_cleanup(&DeviceObject, ...)`
+  admission from a replacement binding. `ProbeContext::add_cleanup(...)`
   performs the same exact-instance check, so a stale handle cannot attach
   resources to its successor.
 
@@ -235,12 +235,13 @@ otherwise the current runtime's state. `is_registered()` reports the
 registration membership.
 
 `DeviceObject::binding_ref()` rejects a capture that observes
-`Removing`/`Removed` or lacks identity metadata. `binding_ref_for_lifecycle_write()`
-additionally requires that the caller holds the descriptor binding lock for a
-registered object (fixtures skip that check); probe, adoption and removal use
-it to capture the exact binding they are writing. Neither is a publication
-permission: publication still relies on the descriptor binding lock to
-serialize with removal. An independent capture followed by a publish after
+`Removing`/`Removed` or lacks identity metadata. The probe/remove context
+constructors additionally require the caller to hold the descriptor binding
+lock for a registered object (fixtures skip that check); they capture the exact
+binding being written. The legacy lifecycle-write helper is crate-private in
+production. Neither a `BindingRef` nor a context is a publication permission:
+publication still relies on the descriptor binding lock to serialize with
+removal. An independent capture followed by a publish after
 removal can leave a class entry whose `is_available()` is false (queries
 filter it out); this layer adds no publication protocol or rollback.
 Conversely, `Removing` can be transient: when `begin_removing` finds
@@ -611,9 +612,10 @@ descriptor's binding lock:
    `Removing`, and rejects `Removing`/`Removed` states and non-zero usage with
    `ResourceBusy`. On `ResourceBusy` the prior state is restored and no
    teardown is committed; only a `true` return lets the steps below proceed.
-4. Under the lock: `driver.ops().remove(device)` and
-   `bus_type.remove(device)` (best-effort; errors logged, removal proceeds),
-   then `device.run_cleanups()` (devres LIFO).
+4. Under the lock: `driver.remove_erased(&remove_ctx, data.as_mut())` through
+   `BoxedDriver`'s erased dispatch, then `bus_type.remove(device)` (both
+   best-effort; errors logged, removal proceeds), then
+   `device.run_cleanups()` (devres LIFO).
 5. `remove_device_from_index`: requeue the descriptor only if it is still
    bound to this device and snapshot bus/driver/parent/children while the
    registry owns the entry. Detach the bus association and the shared driver
@@ -974,7 +976,7 @@ lock is simple but slow; nesting deadlocks easily.
 
 ResourceDesc/ResourceSet belong to device::resource. device::managed acquires
 driver-os-api guards through explicit providers and registers them through
-`BindingRef::add_cleanup(&DeviceObject, ...)`, which verifies that the captured
+`ProbeContext::add_cleanup(...)`, whose exact-instance check verifies that the captured
 runtime is still the object's current binding before queuing the callback.
 DeviceResource and the unused ResourceProvider aggregate are removed without a
 replacement facade.
@@ -985,3 +987,50 @@ registered by a running callback waits for the next drain. Raw MMIO/DMA
 views expire at cleanup. Hardware/users must be quiesced first and release must
 run in the provider's permitted context. Allocation policy and legacy
 remove-error handling are unchanged.
+
+## Controlled lifecycle context and typed binding data
+
+S2 adds a phase-scoped context and one typed private-data slot per binding.
+
+- `ProbeContext`, `RemoveContext`, and `PmContext` are constructed only by
+  kdevice while the caller owns the descriptor binding lock. Their private
+  permit ties the lifetime to that write window, and a raw-pointer marker makes
+  them neither `Send` nor `Sync`. The public `BindingRef` cannot register
+  cleanup in production; only `ProbeContext::add_cleanup` can.
+- `DeviceDriver::Data` is the typed state of one binding. `probe_device`
+  returns it; the framework erases it into `BindingRuntime`; `remove`/PM receive
+  the same instance. Drivers never see `Any` or a data getter.
+- `BindingRuntime` distinguishes `Probe`, `Adoption`, and `Test` sources and
+  keeps `Empty`, `Installed`, `AdoptionAbsent`, or `Taken` data slots.
+  Install failure returns the original data in `DataInstallError`; a missing
+  probe data is an internal invariant, not adoption.
+- Probe success installs Data before publication and activation. Remove takes
+  Data after the irreversible `Removing` commit, calls driver remove (both
+  `Ok`/`Err` return only after the stop postcondition), runs bus remove and
+  devres, drops Data without a spinlock but still under the descriptor mutex,
+  then dispatches `Removed`. Adoption has validly absent Data and passes
+  `None`; a driver registered without `BoxedDriver::new_adoptable` is rejected
+  by `adopt_active_device` with `DriverError::Unsupported`.
+- Internal lifecycle states that cannot prove the binding stopped (data-slot
+  corruption, install runtime mismatch, restore failure) enter a fatal
+  invariant before releasing devres/Data or requeueing. A normal driver/bus
+  remove error is not such an invariant: it is logged and teardown continues.
+
+### S2 module responsibility boundary
+
+| Module | Owns | Must not do |
+| --- | --- | --- |
+| `driver::context` | phase permission, exact `BindingRef`, write-window permit | store runtime/Data or outlive the binding lock |
+| `driver::data` | internal Data erasure container | lifecycle ordering or data-type policy |
+| `driver::erased` | the single typed-driver ↔ registry erasure boundary; separates driver errors from Data type mismatch | release resources on type mismatch |
+| `device::binding` | BindingRuntime state, usage, devres, DataSlot and its transition errors | call driver callbacks or perform probe/remove policy |
+| `kdevice::lifecycle` | probe/remove/Data transfer and failure classification/order | hide a type mismatch as a normal driver error |
+| `kclass` | consume a `ProbeContext` to publish a class capability | acquire binding-write permission itself |
+| `kdriver::…::virtio::block` | own a block activation and perform its concrete stop/close sequence | rely on the old global activation map |
+
+Data install/take/restore policy is owned by `BindingRuntime` and exposed to
+lifecycle only through exact-instance context methods. The erased layer reports
+type mismatch as `ErasedCallError::TypeMismatch`; only lifecycle classifies it
+as a fatal internal invariant. Ordinary driver/bus `Err` values are post-stop
+cleanup reports and never authorize releasing resources without the stop
+postcondition.

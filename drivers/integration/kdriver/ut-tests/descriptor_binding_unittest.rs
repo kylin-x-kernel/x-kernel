@@ -34,6 +34,7 @@ struct ThreadDriver {
 }
 
 impl DeviceDriver for ThreadDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         self.name
     }
@@ -50,7 +51,8 @@ impl DeviceDriver for ThreadDriver {
         self.matcher.as_ref()
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         (self.probe)(device)
     }
 }
@@ -59,7 +61,7 @@ fn driver(
     name: &'static str,
     alias: &'static str,
     probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
-) -> Arc<dyn DeviceDriver> {
+) -> kdevice::BoxedDriver {
     driver_with_matcher(name, CompatibleAliasMatcher(alias), probe)
 }
 
@@ -67,10 +69,10 @@ fn driver_with_matcher(
     name: &'static str,
     matcher: impl DeviceMatcher,
     probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
-) -> Arc<dyn DeviceDriver> {
+) -> kdevice::BoxedDriver {
     let matcher: KBox<dyn DeviceMatcher> =
         KBox::new(matcher).expect("test driver matcher allocation failed");
-    Arc::new(ThreadDriver {
+    kdevice::BoxedDriver::new_adoptable(ThreadDriver {
         name,
         matcher,
         probe: Arc::new(probe),

@@ -42,10 +42,9 @@ documented publish/query/subscribe API.
 - `kclass` trusts `kdriver` to have finished the driver probe before
   calling `publish_<class>()`, with a live descriptor binding and the driver
   match validated by `kdevice`. Publication captures that exact
-  `BindingRef` through `binding_ref_for_lifecycle_write()`; the capture alone
+  `BindingRef` through the `ProbeContext`; the capture alone
   is not a publication permission, and the caller must already hold the
-  descriptor binding lock because it is in a probe/adoption/remove write
-  context.
+  descriptor binding lock because it is in the probe write context.
 - `kclass` trusts the runtime trait object to be `Send + Sync` and
   internally concurrency-safe.
 - `kclass` trusts `kdevice` to dispatch `Activated` / `Removed` /
@@ -222,7 +221,7 @@ Impact levels:
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity | Handling |
 |------|----------|----------|--------|------|----------|----------|
-| F-01 | Publish with an unbound parent | `DeviceObject` did not complete bind before publish, or its binding is already terminal/detached | publish returns `BadState` | Device not published | 3 | `publish_<class>` requires `binding_ref_for_lifecycle_write()`; `try_new_with_binding` also rejects an observed `Removing`/`Removed` |
+| F-01 | Publish with an unbound parent | `DeviceObject` did not complete bind before publish, or its binding is already terminal/detached | publish returns `BadState` | Device not published | 3 | `publish_<class>` requires a `ProbeContext`; `try_new_with_binding` also rejects an observed `Removing`/`Removed` |
 | F-02 | Publish with a mismatched device_kind | Driver passes a net device to `publish_block` | publish returns `InvalidInput` | Device not published | 4 | Kind check happens before `ClassDevice` construction |
 | F-03 | Event bridge not registered | `ensure_event_bridge` never called (no class feature enabled) | No Activated/Removed dispatch | Device state changes do not reach class registries | 4 | `ensure_event_bridge` is called by every `*_registry_fn()` |
 | F-04 | Subscriber callback panics | Callback bug causes unwinding | Later subscribers not notified | Some subsystems miss availability notices | 3 | Callbacks run in Vec order; no `catch_unwind` today; subscriber quality relied upon |
@@ -331,7 +330,7 @@ When modifying this module, verify:
   methods.
 - The new class is re-exported in the `prelude` module.
 - Production publish captures the exact binding through
-  `binding_ref_for_lifecycle_write()` and constructs with
+  `ProbeContext` and constructs with
   `try_new_with_binding`; it returns `BadState` when capture fails. The
   slot-reading `try_new_with_class_metadata` remains fixture-only.
 - `driver_name()` / `driver_id()` read the captured snapshot, never the

@@ -118,6 +118,7 @@ static SPEC: FirmwareMatchSpec = FirmwareMatchSpec {
 struct RecordingDriver;
 
 impl DeviceDriver for RecordingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "platform-backend-recording-test"
     }
@@ -134,7 +135,8 @@ impl DeviceDriver for RecordingDriver {
         &SPEC
     }
 
-    fn probe_device(&self, device: Arc<kdevice::DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         PROBED_NODE.store(
             device
                 .firmware_node()

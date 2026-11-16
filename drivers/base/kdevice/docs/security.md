@@ -282,7 +282,7 @@ rest.
 | T-18 | A stale scan/probe snapshot rebinds a descriptor that was unregistered | High — owner may have released transport/hardware resources; rebinding probes freed hardware | Explicit probe or driver-registration scan holds a pre-unregister snapshot | Unregister takes the same descriptor binding lock, deletes the registration under it, and every probe/scan rechecks after acquiring the lock: missing entry → `Skipped`/`continue`, never a new `DeviceObject` |
 | T-19 | Same-task unregister from a probe/remove hook self-deadlocks or panics | Medium — kernel panic/abort | A callback calls `unregister_device_desc` while its caller holds the descriptor lock | `unregister_device_desc` checks `is_owned_by_current()` before locking and returns `ResourceBusy`; a different task blocks and rechecks |
 | T-20 | Unregister reports success although descriptor deletion failed | Medium — caller believes the old ID is gone and releases transport resources | Lifecycle invariant broken between the state check and the delete | `Pending` delete mismatch returns `BadState`; after a committed `Bound` removal a delete miss still completes teardown but returns `BadState`. No rollback to `Active`, no recovery path |
-| T-21 | An old guard or class handle acts on a new binding after rebind | High — old holder treats the new binding as usable while holding the previous binding's resources | A stable object is rebound after a failed probe or unbind | `DeviceUse` releases the exact admitted runtime; `BindingRef::try_acquire(&object)` and `add_cleanup(&object, ...)` revalidate instance identity against the current slot; class handles keep their captured runtime and never observe the replacement (invariants 16-17). A failed attempt is also revoked through `BindingRetired` before the slot is cleared |
+| T-21 | An old guard or class handle acts on a new binding after rebind | High — old holder treats the new binding as usable while holding the previous binding's resources | A stable object is rebound after a failed probe or unbind | `DeviceUse` releases the exact admitted runtime; `BindingRef::try_acquire(&object)` revalidates instance identity against the current slot; cleanup registration is only exposed by `ProbeContext`; class handles keep their captured runtime and never observe the replacement (invariants 16-17). A failed attempt is also revoked through `BindingRetired` before the slot is cleared |
 | T-22 | Concurrent attach/detach deadlocks on parent and child relations | High — kernel hang | Two topology writes lock the same devices in opposite parent/child roles | Every write locks the child, both parents and all ancestors in ascending `DeviceId` order; the ancestor walk is bounded and detects cycles/repeated nodes, returning `InvalidInput`/`ResourceBusy` instead of looping |
 | T-23 | A stale terminal binding's cleanup runs against a replacement binding | High — release of new resources or double release | A retried probe installs a new runtime before an old cleanup queue drains | Cleanups belong to the runtime that registered them; the old runtime is never re-installed, and every devres/class retry uses the exact instance. A stale callback can only run its own batch |
 | T-24 | Unbounded topology traversal under a relation spinlock | Medium — long preemption-off stall | A corrupted or rapidly changing parent chain | `MAX_PARENT_DEPTH=64`, repeated-node detection and `MAX_TOPOLOGY_RETRIES=8`; abnormal topology returns a typed error |
@@ -468,7 +468,7 @@ When modifying this module, verify:
 
 ResourceDesc/ResourceSet belong to device::resource. device::managed acquires
 driver-os-api guards through explicit providers and registers them directly with
-`BindingRef::add_cleanup(&DeviceObject, ...)` on the captured binding instance.
+`ProbeContext::add_cleanup(...)` on the captured binding instance; production `BindingRef` has no cleanup entry.
 DeviceResource and the unused ResourceProvider
 aggregate are removed without a replacement facade.
 Cleanup remains framework-triggered, LIFO and outside the binding's devres
@@ -478,3 +478,16 @@ registered by a running callback waits for the next drain. Raw MMIO/DMA
 views expire at cleanup. Hardware/users must be quiesced first and release must
 run in the provider's permitted context. Allocation policy and legacy
 remove-error handling are unchanged.
+
+## S2 context and binding-data boundary
+
+- `ProbeContext`/`RemoveContext`/`PmContext` are forge-proof framework values:
+  private fields, private permit lifetime, and `!Send + !Sync`. External code
+  cannot construct or move them to another task. Only `ProbeContext` can
+  register cleanup; production `BindingRef` has no cleanup entry.
+- Binding Data is stored once in `BindingRuntime` and is never exposed through
+  `BindingRef`. A stale reference/context cannot retarget Data at a replacement
+  binding. Adoption is the explicit no-Data path (`None` in remove).
+- Internal Data-slot corruption or inability to prove a stopped binding enters
+  a per-site fatal invariant before resources are released. Ordinary
+  driver/bus remove errors are post-stop cleanup reports and are logged.

@@ -22,7 +22,7 @@ use console_driver::{
 };
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kclass::publish_char;
-use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher, DeviceObject, FirmwareMatchSpec};
+use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher, FirmwareMatchSpec};
 #[cfg(any(feature = "serial-pl011", feature = "serial-ns16550-mmio"))]
 use khal::mem::{PhysAddr, VirtAddr};
 
@@ -75,10 +75,10 @@ enum SerialKind {
 /// [`SerialRole`] encodes which case applied, so callers can dispatch on it.
 #[cfg(any(feature = "serial-pl011", feature = "serial-ns16550-mmio"))]
 fn resolve_port(
-    binding: &kdevice::BindingRef,
-    device: &DeviceObject,
+    ctx: &kdevice::ProbeContext<'_>,
     kind: SerialKind,
 ) -> DriverResult<Arc<SerialPort>> {
+    let device = ctx.device();
     let mmio = device.first_mmio().ok_or(DriverError::InvalidInput)?;
     let paddr = PhysAddr::from_usize(mmio.base);
     let ident = SerialIdent::Mmio {
@@ -92,7 +92,7 @@ fn resolve_port(
         return Ok(early);
     }
 
-    let ptr = binding.devm_iomap(device, mmio, "serial")?;
+    let ptr = ctx.devm_iomap(mmio, "serial")?;
     let vaddr = VirtAddr::from_usize(ptr.as_ptr() as usize);
     let port = match kind {
         #[cfg(feature = "serial-pl011")]
@@ -129,12 +129,12 @@ fn resolve_port(
 /// (so the TTY handoff adopts it); any other UART becomes a standalone char
 /// device. `register_stdout_console` adds only that one device to the console
 /// subsystem, so an auxiliary UART can never displace the real stdout UART.
-fn publish(device: Arc<DeviceObject>, port: Arc<SerialPort>) -> DriverResult<()> {
+fn publish(ctx: &kdevice::ProbeContext<'_>, port: Arc<SerialPort>) -> DriverResult<()> {
     let role = port.role();
     let dev = Box::new(SerialCharDev(port));
     match role {
-        SerialRole::Stdout => runtime::register_stdout_console(device, dev),
-        SerialRole::Auxiliary => publish_char(device, dev).map(drop),
+        SerialRole::Stdout => runtime::register_stdout_console(ctx, dev),
+        SerialRole::Auxiliary => publish_char(ctx, dev).map(drop),
     }
 }
 
@@ -152,6 +152,8 @@ struct Pl011SerialDriver;
 
 #[cfg(feature = "serial-pl011")]
 impl DeviceDriver for Pl011SerialDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "serial-pl011"
     }
@@ -168,18 +170,15 @@ impl DeviceDriver for Pl011SerialDriver {
         &PL011
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
-        let binding = device
-            .binding_ref_for_lifecycle_write()
-            .ok_or(DriverError::BadState)?;
-        let port = resolve_port(&binding, device.as_ref(), SerialKind::Pl011)?;
-        publish(device, port)
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let port = resolve_port(ctx, SerialKind::Pl011)?;
+        publish(ctx, port)
     }
 }
 
 #[cfg(feature = "serial-pl011")]
 pub(super) fn pl011_descriptor() -> BoxedDriver {
-    Arc::new(Pl011SerialDriver)
+    BoxedDriver::new(Pl011SerialDriver)
 }
 
 // --- NS16550 MMIO ------------------------------------------------------------
@@ -196,6 +195,8 @@ struct Ns16550MmioSerialDriver;
 
 #[cfg(feature = "serial-ns16550-mmio")]
 impl DeviceDriver for Ns16550MmioSerialDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "serial-ns16550-mmio"
     }
@@ -212,18 +213,15 @@ impl DeviceDriver for Ns16550MmioSerialDriver {
         &NS16550_MMIO
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
-        let binding = device
-            .binding_ref_for_lifecycle_write()
-            .ok_or(DriverError::BadState)?;
-        let port = resolve_port(&binding, device.as_ref(), SerialKind::Ns16550Mmio)?;
-        publish(device, port)
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+        let port = resolve_port(ctx, SerialKind::Ns16550Mmio)?;
+        publish(ctx, port)
     }
 }
 
 #[cfg(feature = "serial-ns16550-mmio")]
 pub(super) fn ns16550_mmio_descriptor() -> BoxedDriver {
-    Arc::new(Ns16550MmioSerialDriver)
+    BoxedDriver::new(Ns16550MmioSerialDriver)
 }
 
 // --- NS16550 I/O-port (x86 ISA COM) ------------------------------------------
@@ -242,6 +240,8 @@ struct Ns16550IoPortSerialDriver;
 
 #[cfg(feature = "serial-ns16550-ioport")]
 impl DeviceDriver for Ns16550IoPortSerialDriver {
+    type Data = ();
+
     fn name(&self) -> &'static str {
         "serial-ns16550-ioport"
     }
@@ -258,7 +258,7 @@ impl DeviceDriver for Ns16550IoPortSerialDriver {
         &NS16550_IOPORT
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
         // The x86 ISA COM port is a single fixed port with no per-device
         // resource and no device-tree node, so always adopt the early stdout
         // instance (no remap, no fresh port).
@@ -266,11 +266,11 @@ impl DeviceDriver for Ns16550IoPortSerialDriver {
             port: console_driver::boot_console_io_port(),
         };
         let port = take_early_port(&ident).ok_or(DriverError::BadState)?;
-        publish(device, port)
+        publish(ctx, port)
     }
 }
 
 #[cfg(feature = "serial-ns16550-ioport")]
 pub(super) fn ns16550_ioport_descriptor() -> BoxedDriver {
-    Arc::new(Ns16550IoPortSerialDriver)
+    BoxedDriver::new(Ns16550IoPortSerialDriver)
 }

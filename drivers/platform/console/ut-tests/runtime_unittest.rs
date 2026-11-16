@@ -5,6 +5,7 @@
 use alloc::boxed::Box;
 
 use driver_base::{Device, DeviceKind};
+use kdevice::DeviceObject;
 use kclass::CharDevice;
 use unittest::def_test;
 
