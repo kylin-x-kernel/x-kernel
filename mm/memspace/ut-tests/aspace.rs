@@ -11,7 +11,7 @@ use khal::{
     trap::PageFaultFlags,
 };
 use ksync::Mutex;
-use memaddr::{PAGE_SIZE_4K, VirtAddr};
+use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use unittest::def_test;
 use vmobj::{
     FileObjectId, MappingView, MappingViewId, MappingViewKind, MappingViewRange,
@@ -112,6 +112,39 @@ fn backend_fault_completion_runs_prepared_hook_and_preserves_oom_outcome() {
 fn new_test_aspace() -> AddrSpace {
     AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K * 64)
         .expect("test address space should be constructible")
+}
+
+#[def_test]
+fn linear_mapping_defers_its_kernel_invalidation() {
+    let mut aspace = new_test_aspace();
+    let start = VirtAddr::from(0x1000usize);
+    let paddr = PhysAddr::from(0x20_0000usize);
+
+    // Architectures whose page-table metadata needs no invalidation for an
+    // invalid-to-valid mapping (aarch64's fresh-map fence) publish the PTE
+    // without a deferred flush; the others must defer it.
+    let map_deferred = aspace
+        .map_linear_deferred(
+            start,
+            paddr,
+            PAGE_SIZE_4K,
+            MappingFlags::READ | MappingFlags::WRITE,
+        )
+        .expect("linear mapping should succeed");
+    // The PTE is published before the remote shootdown completes.
+    assert!(aspace.page_table().query(start).is_ok());
+    if let Some(deferred) = map_deferred {
+        assert_eq!(deferred.complete(), Ok(()));
+    }
+
+    // Removing a valid translation always needs an invalidation, so every
+    // architecture must defer the unmap.
+    let deferred = aspace
+        .unmap_linear_deferred(start, PAGE_SIZE_4K)
+        .expect("linear unmap should succeed")
+        .expect("a kernel unmap should defer its invalidation");
+    assert!(aspace.page_table().query(start).is_err());
+    assert_eq!(deferred.complete(), Ok(()));
 }
 
 fn map_shared(

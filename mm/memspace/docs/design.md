@@ -406,6 +406,17 @@ Coherent is READ|WRITE|UNCACHED|SHARED; Normal is READ|WRITE. The caller owns th
 allocation and quiesces device access before restoration. Allocation, platform
 sharing, rollback and device-cache synchronization are outside this capability.
 
+## IO Mapping
+
+`iomap_device` registers a device region and maps it in the kernel I/O window;
+`iounmap` drops the last reference and removes the mapping. Both use the
+deferred variants (`MmSpace::map_linear_deferred` / `unmap_linear_deferred`):
+the page-table update happens under `kernel_layout()` and `DEVICE_REGISTRY`,
+both locks are released, and only then is the remote TLB invalidation completed.
+A CPU that contends for either IRQ-disabled lock therefore stays able to
+acknowledge the shootdown. Ranges that contain a managed runtime fall back to
+the in-place path, whose invalidation completion must run under the lock.
+
 ## MMIO Error Conversion
 
 IoMapError converts into KError at callers' kernel error boundaries: InvalidRange

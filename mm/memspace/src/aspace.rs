@@ -1075,6 +1075,100 @@ impl MmSpace {
         self.map_runtime_vma(vma, false, runtime)
     }
 
+    /// Maps a linear range and detaches its kernel TLB invalidation.
+    ///
+    /// The caller holds this address space's lock and must release it before
+    /// completing the returned flush, so CPUs contending for that lock can
+    /// answer the shootdown IPI. Only the raw linear mapping used by device
+    /// windows is supported; other backends use [`map_linear`](Self::map_linear).
+    #[must_use = "the caller must complete the invalidation after unlocking"]
+    pub fn map_linear_deferred(
+        &mut self,
+        start_vaddr: VirtAddr,
+        start_paddr: PhysAddr,
+        size: usize,
+        flags: MappingFlags,
+    ) -> KResult<Option<page_table::DeferredKernelTlbFlush>> {
+        self.drain_pending_invalidations();
+        self.validate_region(start_vaddr, size)?;
+        if !start_paddr.is_aligned_4k() {
+            k_bail!(InvalidInput, "address is not aligned");
+        }
+
+        let offset = start_vaddr.as_usize() as isize - start_paddr.as_usize() as isize;
+        let runtime = VmRuntimeRef::new_linear(offset);
+        let mut vma = VmArea::new(
+            start_vaddr,
+            size,
+            flags,
+            Self::kernel_linear_max_flags(flags),
+            runtime.backing_info(),
+            0,
+            None,
+        );
+        if self.vmas.overlaps(vma.range()) {
+            return Err(KError::AlreadyExists);
+        }
+        let deferred = {
+            let mut modify = self.pgtbl.modify();
+            runtime.map(vma.range(), vma.flags(), &mut modify)?;
+            let deferred = modify.defer_kernel_invalidation();
+            drop(modify);
+            deferred
+        };
+        vma.set_runtime(runtime.register_object_views(
+            self.mm_id,
+            self.deferred_invalidate_handle(),
+            &vma,
+        ));
+        self.vmas.insert(vma);
+        Ok(deferred)
+    }
+
+    /// Unmaps a raw linear range and detaches its kernel TLB invalidation.
+    ///
+    /// The caller holds this address space's lock and must release it before
+    /// completing the returned flush. Falls back to [`unmap`](Self::unmap)
+    /// when the range contains a managed runtime, whose invalidation
+    /// completion must run in place.
+    #[must_use = "the caller must complete the invalidation after unlocking"]
+    pub fn unmap_linear_deferred(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+    ) -> KResult<Option<page_table::DeferredKernelTlbFlush>> {
+        self.drain_pending_invalidations();
+        self.validate_region(start, size)?;
+        let range = VirtAddrRange::from_start_size(start, size);
+        let operations = self
+            .vmas
+            .collect_overlapping(range)
+            .iter()
+            .map(|vma| {
+                let overlap = VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
+                let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
+                let is_linear = matches!(&runtime, VmRuntimeRef::Linear(_));
+                Ok((overlap, runtime, is_linear))
+            })
+            .collect::<KResult<Vec<_>>>()?;
+        if operations.iter().any(|(_, _, is_linear)| !is_linear) {
+            self.unmap(start, size)?;
+            return Ok(None);
+        }
+        let deferred = {
+            let mut modify = self.pgtbl.modify();
+            for (overlap, runtime, _) in &operations {
+                runtime.unmap(*overlap, &mut modify)?;
+            }
+            let deferred = modify.defer_kernel_invalidation();
+            drop(modify);
+            deferred
+        };
+        // Raw linear backing has no object-side invalidation completion.
+        self.vmas.unmap(start, size);
+        Ok(deferred)
+    }
+
     /// Map a region using the provided runtime execution reference and flags.
     pub fn map(
         &mut self,

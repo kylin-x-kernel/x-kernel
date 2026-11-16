@@ -273,3 +273,26 @@ retires its holds while destination holds independently retain the same pages.
 Folio/content-token release has no TLB-completion dependency. Existing finish
 advances retirement; global synchronous return guarantees remain a separate
 TODO, with no new retry, pending-state or recovery engine introduced here.
+
+## IO Mapping Invalidation Ordering
+
+Kernel IO-window updates (`iomap_device` / `iounmap`) defer the remote TLB
+invalidation until after `kernel_layout()` and `DEVICE_REGISTRY` are released.
+A CPU that needs either IRQ-disabled lock spins with interrupts disabled and
+cannot acknowledge a shootdown, so completing the invalidation under those
+locks would stall the initiator until its bounded give-up. Ranges containing a
+managed runtime fall back to the in-place path, whose completion runs under the
+lock by design.
+
+A deferred completion can still fail: both callers log the error and keep the
+success result, because the PTE update and the VMA/registry change are already
+published and cannot be rolled back into a coherent state. A failure therefore
+leaves a stale remote translation for a device window after `iounmap`, or hides
+the new mapping from a remote CPU after `iomap_device`.
+`DeferredKernelTlbFlush::complete()` first retries a scoped or partial shootdown
+as a full-TLB invalidation, so reaching this state requires the IPI path itself
+to be broken; the in-place path previously dropped the same failure inside
+`PageTableMut::Drop`. The blast radius is bounded by the driver contract that
+device access is quiesced before `iounmap`, and the logged error is the only
+observable signal. This residual risk is accepted: the callers have no failure
+channel that can undo a published mapping.
