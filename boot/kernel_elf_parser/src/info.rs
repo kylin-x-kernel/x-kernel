@@ -5,10 +5,11 @@
 //! ELF information parsed from the ELF file
 
 use alloc::vec::Vec;
-use core::{mem::size_of, ops::Range};
+use core::{mem::size_of, ops::Range, ptr};
 
 use xmas_elf::{
-    header::Class,
+    P32, P64,
+    header::{Class, HeaderPt1, HeaderPt2_},
     program::{ProgramHeader32, ProgramHeader64},
 };
 
@@ -16,7 +17,19 @@ use crate::auxv::{AuxEntry, AuxType};
 
 pub struct ElfHeadersBuilder<'a>(ElfHeaders<'a>);
 impl<'a> ElfHeadersBuilder<'a> {
+    /// Parses the ELF file header at the start of `input`.
+    ///
+    /// The parsed header borrows `input` in place, so the start of `input`
+    /// must be aligned for the class-specific header part: 4 bytes for
+    /// ELF32 and 8 bytes for ELF64. A misaligned buffer is reported as an
+    /// error rather than parsed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `input` is shorter than the ELF header, lacks the
+    /// ELF magic, has an unsupported class, or is not aligned as required.
     pub fn new(input: &'a [u8]) -> Result<Self, &'static str> {
+        check_header_alignment(input)?;
         Ok(Self(ElfHeaders {
             header: xmas_elf::header::parse_header(input)?,
             ph: Vec::new(),
@@ -56,6 +69,8 @@ impl<'a> ElfHeadersBuilder<'a> {
     /// Builds the parsed ELF headers from the complete program-header table.
     ///
     /// `ph` must contain exactly the byte range returned by [`Self::ph_range`].
+    /// It may start at any byte offset: entries are copied out by value, so an
+    /// `e_phoff` that is not a multiple of the entry alignment is accepted.
     ///
     /// # Errors
     ///
@@ -79,27 +94,82 @@ impl<'a> ElfHeadersBuilder<'a> {
             return Err("Incomplete program-header table");
         }
 
-        self.0.ph = ph
-            .chunks_exact(entry_size)
-            .map(|chunk| match self.0.header.pt1.class() {
-                Class::ThirtyTwo => {
-                    let ph: &ProgramHeader32 = zero::read(chunk);
-                    ProgramHeader64 {
-                        type_: ph.type_,
-                        offset: ph.offset as _,
-                        virtual_addr: ph.virtual_addr as _,
-                        physical_addr: ph.physical_addr as _,
-                        file_size: ph.file_size as _,
-                        mem_size: ph.mem_size as _,
-                        flags: ph.flags,
-                        align: ph.align as _,
-                    }
-                }
-                Class::SixtyFour => *zero::read(chunk),
-                Class::None | Class::Other(_) => unreachable!(),
-            })
-            .collect();
+        self.0.ph = match self.0.header.pt1.class() {
+            Class::ThirtyTwo => ph
+                .chunks_exact(entry_size)
+                .map(|entry| read_program_header32(entry).map(widen_program_header))
+                .collect::<Result<_, _>>()?,
+            Class::SixtyFour => ph
+                .chunks_exact(entry_size)
+                .map(read_program_header64)
+                .collect::<Result<_, _>>()?,
+            Class::None | Class::Other(_) => return Err("Invalid ELF class"),
+        };
         Ok(self.0)
+    }
+}
+
+/// Byte offset of `EI_CLASS` in the ELF identification.
+const EI_CLASS: usize = 4;
+const ELFCLASS32: u8 = 1;
+const ELFCLASS64: u8 = 2;
+
+/// Rejects a header buffer that `xmas_elf::header::parse_header` would borrow
+/// at a misaligned address.
+///
+/// `parse_header` returns `&HeaderPt2_` into `input` through `zero::read`,
+/// which asserts alignment instead of returning an error. Inputs that are too
+/// short or carry an unknown class are left to `parse_header` to reject.
+fn check_header_alignment(input: &[u8]) -> Result<(), &'static str> {
+    let Some(pt2) = input.get(size_of::<HeaderPt1>()..) else {
+        return Ok(());
+    };
+    let is_aligned = match input.get(EI_CLASS).copied() {
+        Some(ELFCLASS32) => pt2.as_ptr().cast::<HeaderPt2_<P32>>().is_aligned(),
+        Some(ELFCLASS64) => pt2.as_ptr().cast::<HeaderPt2_<P64>>().is_aligned(),
+        _ => true,
+    };
+    if is_aligned {
+        Ok(())
+    } else {
+        Err("ELF header buffer is misaligned")
+    }
+}
+
+/// Copies one ELF32 program-header entry that may start at any byte offset.
+fn read_program_header32(entry: &[u8]) -> Result<ProgramHeader32, &'static str> {
+    let entry: &[u8; size_of::<ProgramHeader32>()] = entry
+        .try_into()
+        .map_err(|_| "Truncated program-header entry")?;
+    // SAFETY: `entry` is exactly `size_of::<ProgramHeader32>()` readable,
+    // initialized bytes. `xmas_elf` implements `zero::Pod` for this `repr(C)`
+    // type of integer fields, so every byte pattern is a valid value, and
+    // `read_unaligned` places no alignment requirement on the source.
+    Ok(unsafe { ptr::read_unaligned(entry.as_ptr().cast::<ProgramHeader32>()) })
+}
+
+/// Copies one ELF64 program-header entry that may start at any byte offset.
+fn read_program_header64(entry: &[u8]) -> Result<ProgramHeader64, &'static str> {
+    let entry: &[u8; size_of::<ProgramHeader64>()] = entry
+        .try_into()
+        .map_err(|_| "Truncated program-header entry")?;
+    // SAFETY: `entry` is exactly `size_of::<ProgramHeader64>()` readable,
+    // initialized bytes. `xmas_elf` implements `zero::Pod` for this `repr(C)`
+    // type of integer fields, so every byte pattern is a valid value, and
+    // `read_unaligned` places no alignment requirement on the source.
+    Ok(unsafe { ptr::read_unaligned(entry.as_ptr().cast::<ProgramHeader64>()) })
+}
+
+fn widen_program_header(ph: ProgramHeader32) -> ProgramHeader64 {
+    ProgramHeader64 {
+        type_: ph.type_,
+        offset: ph.offset.into(),
+        virtual_addr: ph.virtual_addr.into(),
+        physical_addr: ph.physical_addr.into(),
+        file_size: ph.file_size.into(),
+        mem_size: ph.mem_size.into(),
+        flags: ph.flags,
+        align: ph.align.into(),
     }
 }
 

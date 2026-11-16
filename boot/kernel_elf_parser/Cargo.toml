@@ -13,7 +13,6 @@ categories = ["no-std"]
 
 [dependencies]
 xmas-elf.workspace = true
-zero = "0.1.3"
 zerocopy = { version = "0.8.26", features = ["derive"] }
 
 [lints]
