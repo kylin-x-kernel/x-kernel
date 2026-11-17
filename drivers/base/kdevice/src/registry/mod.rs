@@ -564,7 +564,8 @@ pub fn reset_device_registry_for_tests() {
     NEXT_BUS_ID.store(0, Ordering::Relaxed);
     NEXT_DRIVER_ID.store(0, Ordering::Relaxed);
     NEXT_DESC_ID.store(0, Ordering::Relaxed);
-    NEXT_DEVICE_ID.store(0, Ordering::Relaxed);
+    // Keep synthetic test DeviceIds away from boot devices (notably stdout 0).
+    NEXT_DEVICE_ID.store(0x8000_0000, Ordering::Relaxed);
 }
 
 /// Atomically reset the registry and set up a platform bus type with one bus
@@ -592,7 +593,8 @@ pub fn reset_and_setup_platform_bus_for_tests(
     NEXT_BUS_ID.store(0, Ordering::Relaxed);
     NEXT_DRIVER_ID.store(0, Ordering::Relaxed);
     NEXT_DESC_ID.store(0, Ordering::Relaxed);
-    NEXT_DEVICE_ID.store(0, Ordering::Relaxed);
+    // Keep synthetic test DeviceIds away from boot devices (notably stdout 0).
+    NEXT_DEVICE_ID.store(0x8000_0000, Ordering::Relaxed);
 
     // Set up bus type + bus instance while still holding the lock.
     let bus_type = Arc::new(BusTypeObject::new(Arc::new(PlatformBusTypeMatcher::new())));

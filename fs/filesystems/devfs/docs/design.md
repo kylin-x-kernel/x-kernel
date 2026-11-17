@@ -162,7 +162,7 @@ kclass input/display activation
                │ DeviceNodeEvent
                ▼
        devfs DeviceProjection
-       ├── DeviceId -> DeviceNodeRecord
+       ├── DeviceNodeKey -> DeviceNodeRecord
        ├── /dev/input/eventN -> EventDev
        ├── /dev/dri/cardN -> DrmMinor(Primary)
        └── /dev/dri/renderD{128+N} -> DrmMinor(Render)

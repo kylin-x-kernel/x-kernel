@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::boxed::Box;
 use unittest::{assert_eq, assert_ne, def_test};
 
 use super::*;
@@ -136,13 +137,30 @@ fn symlink_targets_are_relative_to_the_link_parent() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
+)]
 fn platform_devices_expose_a_modalias_uevent() {
     // An input node, not a DRM one: class indices are allocated per kind, and a
     // DRM node here would take `card0`, making the DRM test's node `card1` and
     // failing its `card0-Virtual-1` assertion depending on run order. The
     // platform-uevent projection is the same for every kind.
-    let node = kdevice::register_device_node(
+    let device = Arc::new(kdevice::DeviceObject::new_bound_for_test(
         kdevice::DeviceId::new(9003),
+        kdevice::DeviceKind::Input,
+    ));
+    let binding = device.binding_ref().expect("fixture binding");
+    let publication = kdevice::PublicationId::allocate().expect("publication id");
+    let node = kdevice::register_device_node_for_publication(
+        device.id(),
+        publication,
+        &binding,
         kdevice::DeviceNodeClass::Input(kdevice::InputDeviceNodeMetadata::new(
             String::from("test-input"),
             String::from("test"),
@@ -167,7 +185,7 @@ fn platform_devices_expose_a_modalias_uevent() {
     .expect("an MMIO device node must register");
     let projected = Arc::new(ProjectedDevice::new(node.clone()));
     let mut nodes = BTreeMap::new();
-    nodes.insert(node.core_id(), projected);
+    nodes.insert(node.key(), projected);
     let tree = build_tree(&nodes, &[]);
 
     // libdrm's `drmParseOFBusInfo` and `drmParseOFDeviceInfo` read
@@ -189,13 +207,38 @@ fn platform_devices_expose_a_modalias_uevent() {
     );
 
     // Release the node so a later test's `build_tree` does not see it.
-    kdevice::unregister_device_node(node.core_id()).expect("test node unregisters");
+    assert_eq!(
+        kdevice::unregister_device_node_for_publication(
+            device.id(),
+            publication,
+            &binding,
+            Box::new(|| {}),
+        ),
+        kdevice::NodeRemoval::Removed
+    );
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
+)]
 fn drm_nodes_project_a_render_minor() {
-    let node = kdevice::register_device_node(
+    let device = Arc::new(kdevice::DeviceObject::new_bound_for_test(
         kdevice::DeviceId::new(9002),
+        kdevice::DeviceKind::Display,
+    ));
+    let binding = device.binding_ref().expect("fixture binding");
+    let publication = kdevice::PublicationId::allocate().expect("publication id");
+    let node = kdevice::register_device_node_for_publication(
+        device.id(),
+        publication,
+        &binding,
         kdevice::DeviceNodeClass::Drm(drm_metadata()),
         String::from("display"),
         String::from("test"),
@@ -206,7 +249,7 @@ fn drm_nodes_project_a_render_minor() {
     let minor = kdevice::DRM_RENDER_MINOR_BASE + node.index();
     let projected = Arc::new(ProjectedDevice::new(node.clone()));
     let mut nodes = BTreeMap::new();
-    nodes.insert(node.core_id(), projected);
+    nodes.insert(node.key(), projected);
     let tree = build_tree(&nodes, &[]);
 
     let render = format!("devices/platform/static9002/drm/renderD{minor}");
@@ -255,7 +298,15 @@ fn drm_nodes_project_a_render_minor() {
         "the edid attribute is the raw descriptor"
     );
 
-    kdevice::unregister_device_node(node.core_id()).expect("legacy node unregisters");
+    assert_eq!(
+        kdevice::unregister_device_node_for_publication(
+            device.id(),
+            publication,
+            &binding,
+            Box::new(|| {}),
+        ),
+        kdevice::NodeRemoval::Removed
+    );
 }
 
 /// `kobject_action_type` takes the first space-separated token after dropping

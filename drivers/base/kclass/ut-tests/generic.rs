@@ -8,17 +8,16 @@
 //! retirement claim open and observe exactly what publication and a duplicate
 //! event see while the reservation exists.
 
-use alloc::{string::String, sync::Arc};
+use alloc::sync::Arc;
 
-use driver_base::{DeviceKind, DriverError};
-use kdevice::{BindingRef, DeviceId, DeviceObject};
+use driver_base::DeviceKind;
+use kdevice::{DeviceId, DeviceObject};
 use unittest::{assert, assert_eq, def_test};
 
-use super::*;
+use crate::{Event, EventType, RevocationOutcome};
 
 struct Fixture {
     parent: Arc<DeviceObject>,
-    binding: BindingRef,
 }
 
 fn fixture(id: u64) -> Fixture {
@@ -26,174 +25,8 @@ fn fixture(id: u64) -> Fixture {
         DeviceId::new(id),
         DeviceKind::Char,
     ));
-    let binding = parent.binding_ref().expect("bound fixture has a binding");
-    Fixture { parent, binding }
-}
-
-fn class_device(fixture: &Fixture, runtime: &'static str) -> ClassDevice<&'static str> {
-    ClassDevice::try_new_with_binding(
-        fixture.parent.clone(),
-        fixture.binding.clone(),
-        runtime,
-        String::from("test-class"),
-        DeviceKind::Char,
-        None,
-        ClassDeviceMetadata::empty(),
-    )
-    .expect("a bound fixture admits a class device")
-}
-
-/// A fixture whose captured binding is already terminal (`Removed`).
-fn retired(id: u64) -> (Fixture, ClassDevice<&'static str>) {
-    let fixture = fixture(id);
-    let device = class_device(&fixture, "retired");
-    fixture.parent.force_removed_for_test();
-    core::assert!(fixture.binding.is_terminal());
-    (fixture, device)
-}
-
-#[def_test(serial)]
-fn test_class_retirement_placeholder_blocks_publish_until_unpublish() {
-    const ID: u64 = 0xB1_1001;
-    let (old, entry) = retired(ID);
-    let replacement = fixture(ID);
-    let mut registry = ClassRegistry::<&'static str>::new();
-    registry.publish(entry).expect("terminal A publishes first");
-
-    let claim = registry
-        .claim_retirement(DeviceId::new(ID), core::slice::from_ref(&old.binding))
-        .expect("the terminal entry can be claimed");
-    let ClaimOutcome::Claimed { removed, .. } = &claim else {
-        panic!("expected a claimed retirement, got a non-claim outcome");
-    };
-    assert_eq!(removed.len(), 1, "the claim owns exactly entry A");
-    assert!(registry.entries_for_tests(DeviceId::new(ID)).is_empty());
-
-    // The reservation is visible to publication even though A already left
-    // the entry list.
-    assert_eq!(
-        registry.publish(class_device(&replacement, "replacement")),
-        Err(DriverError::ResourceBusy)
-    );
-    assert!(registry.entries_for_tests(DeviceId::new(ID)).is_empty());
-
-    registry.finish_retirement(&claim);
-    registry
-        .publish(class_device(&replacement, "replacement"))
-        .expect("the released reservation admits B");
-    assert_eq!(registry.entries_for_tests(DeviceId::new(ID)).len(), 1);
-}
-
-#[def_test(serial)]
-fn test_class_retirement_single_executor() {
-    const ID: u64 = 0xB1_1002;
-    let (old, entry) = retired(ID);
-    let mut registry = ClassRegistry::<&'static str>::new();
-    registry.publish(entry).expect("terminal A publishes first");
-
-    let claim = registry
-        .claim_retirement(DeviceId::new(ID), core::slice::from_ref(&old.binding))
-        .expect("the terminal entry can be claimed");
-    assert!(matches!(&claim, ClaimOutcome::Claimed { .. }));
-
-    // A duplicate Removed/BindingRetired delivery and a publisher both observe
-    // the reservation rather than claiming a second time.
-    assert!(matches!(
-        registry
-            .claim_retirement(DeviceId::new(ID), core::slice::from_ref(&old.binding))
-            .expect("a retrying claim is not an error"),
-        ClaimOutcome::Retiring
-    ));
-    assert_eq!(
-        registry.publish(class_device(&fixture(ID), "replacement")),
-        Err(DriverError::ResourceBusy)
-    );
-
-    // Finishing an outcome that never owned the reservation is a no-op.
-    let other = ClaimOutcome::<&'static str>::Nothing;
-    registry.finish_retirement(&other);
-    assert_eq!(registry.entries_for_tests(DeviceId::new(ID)).len(), 0);
-
-    registry.finish_retirement(&claim);
-    registry
-        .publish(class_device(&fixture(ID), "replacement"))
-        .expect("single executor released the reservation exactly once");
-}
-
-#[def_test(serial)]
-fn test_retirement_token_overflow_leaves_registry_untouched() {
-    const ID: u64 = 0xB1_1003;
-    let (old, entry) = retired(ID);
-    let other = fixture(0xB1_1004);
-    let mut registry = ClassRegistry::<&'static str>::new();
-    registry.publish(entry).expect("terminal A publishes first");
-    registry.set_next_retirement_token_for_tests(u64::MAX);
-
-    assert!(matches!(
-        registry.claim_retirement(DeviceId::new(ID), core::slice::from_ref(&old.binding)),
-        Err(DriverError::BadState)
-    ));
-
-    // No entry was removed and no reservation was installed: A is still the
-    // only entry for its ID and an unrelated ID can still publish.
-    assert_eq!(registry.entries_for_tests(DeviceId::new(ID)).len(), 1);
-    assert!(matches!(
-        registry.terminal_entries_for_retirement(DeviceId::new(ID)),
-        Ok(ref entries) if entries.len() == 1
-    ));
-    registry
-        .publish(class_device(&other, "unrelated"))
-        .expect("an overflow must not strand an unrelated publication");
-}
-
-#[def_test(serial)]
-fn test_live_duplicate_class_publish_rejected() {
-    const ID: u64 = 0xB1_1005;
-    let live = fixture(ID);
-    let mut registry = ClassRegistry::<&'static str>::new();
-    registry
-        .publish(class_device(&live, "live"))
-        .expect("live A publishes");
-
-    assert_eq!(
-        registry.publish(class_device(&fixture(ID), "duplicate")),
-        Err(DriverError::AlreadyExists)
-    );
-    assert!(
-        matches!(
-            registry.terminal_entries_for_retirement(DeviceId::new(ID)),
-            Err(DriverError::AlreadyExists)
-        ),
-        "a live entry blocks predecessor eviction"
-    );
-    assert_eq!(registry.entries_for_tests(DeviceId::new(ID)).len(), 1);
-}
-
-#[def_test(serial)]
-fn test_claim_only_matches_the_captured_binding() {
-    const ID: u64 = 0xB1_1006;
-    let (old, entry) = retired(ID);
-    let unrelated = fixture(ID);
-    let mut registry = ClassRegistry::<&'static str>::new();
-    registry.publish(entry).expect("terminal A publishes");
-
-    assert!(matches!(
-        registry
-            .claim_retirement(DeviceId::new(ID), core::slice::from_ref(&unrelated.binding))
-            .expect("a non-matching claim is not an error"),
-        ClaimOutcome::Nothing
-    ));
-    assert_eq!(
-        registry.entries_for_tests(DeviceId::new(ID)).len(),
-        1,
-        "a stale owner cannot retire another instance's entry"
-    );
-    assert!(matches!(
-        registry
-            .claim_retirement(DeviceId::new(ID), core::slice::from_ref(&old.binding))
-            .expect("the captured binding can still claim its entry"),
-        ClaimOutcome::Claimed { .. }
-    ));
+    let _binding = parent.binding_ref().expect("bound fixture has a binding");
+    Fixture { parent }
 }
 
 /// A minimal char runtime for the production publication/retirement path.
@@ -222,14 +55,7 @@ impl crate::CharDevice for TestCharRuntime {
     }
 }
 
-/// The production path (`remove_class_device_for_tests` -> eviction ->
-/// `retire_char_binding` -> `unpublish_class`) must refuse a same-ID
-/// replacement while the retirement reservation is live, and admit it only
-/// after every removed entry has been unpublished.
-///
-/// Both observations are taken from inside the pause hooks. The hooks run
-/// outside the registry lock, so the reentrant `publish_char_for_test` call exercises
-/// the real publication path rather than the registry primitives directly.
+/// Two publications of the same device and binding are independent.
 #[cfg(feature = "char")]
 #[def_test(serial)]
 #[expect(
@@ -239,121 +65,53 @@ impl crate::CharDevice for TestCharRuntime {
 #[allow(
     unknown_lints,
     std_box_in_kernel_tests,
-    reason = "CG-049-no-std-box-in-kernel-tests: kclass::CharDeviceImpl is the production \
-              Box<dyn CharDevice + Send + Sync> publication contract"
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
 )]
-fn test_production_retirement_orders_unpublish_before_replacement() {
-    use alloc::boxed::Box;
-    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+fn test_two_same_device_publications_revoke_exact_one() {
+    const ID: u64 = 0xB1_2001;
+    let fixture = fixture(ID);
+    fixture.parent.force_active_for_test();
+    let first = crate::publish_char_for_test(
+        fixture.parent.clone(),
+        alloc::boxed::Box::new(TestCharRuntime),
+    )
+    .expect("first publication succeeds");
+    let second = crate::publish_char_for_test(
+        fixture.parent.clone(),
+        alloc::boxed::Box::new(TestCharRuntime),
+    )
+    .expect("second publication succeeds");
 
-    const ID: u64 = 0xB1_1007;
-    let id = DeviceId::new(ID);
-    let old = fixture(ID);
-    crate::publish_char_for_test(old.parent.clone(), Box::new(TestCharRuntime))
-        .expect("an active fixture publishes a char class");
-    old.parent.force_removed_for_test();
-    assert!(old.binding.is_terminal());
-
-    let claimed = Arc::new(AtomicUsize::new(0));
-    let unpublished = Arc::new(AtomicUsize::new(0));
-    let busy_when_claimed = Arc::new(AtomicBool::new(false));
-    let busy_when_unpublished = Arc::new(AtomicBool::new(false));
-    let entry_gone_when_unpublished = Arc::new(AtomicBool::new(false));
-    {
-        let claimed = claimed.clone();
-        let unpublished = unpublished.clone();
-        let busy_when_claimed = busy_when_claimed.clone();
-        let busy_when_unpublished = busy_when_unpublished.clone();
-        let entry_gone_when_unpublished = entry_gone_when_unpublished.clone();
-        crate::test_hooks::install_pause_hook(Arc::new(move |point| match point {
-            crate::test_hooks::ClassPause::RetirementClaimed { id: paused_id }
-                if paused_id == id =>
-            {
-                claimed.fetch_add(1, Ordering::SeqCst);
-                let replacement = fixture(ID);
-                busy_when_claimed.store(
-                    matches!(
-                        crate::publish_char_for_test(replacement.parent.clone(), Box::new(TestCharRuntime)),
-                        Err(DriverError::ResourceBusy)
-                    ),
-                    Ordering::SeqCst,
-                );
-            }
-            crate::test_hooks::ClassPause::RetirementUnpublished { id: paused_id }
-                if paused_id == id =>
-            {
-                unpublished.fetch_add(1, Ordering::SeqCst);
-                let replacement = fixture(ID);
-                busy_when_unpublished.store(
-                    matches!(
-                        crate::publish_char_for_test(replacement.parent.clone(), Box::new(TestCharRuntime)),
-                        Err(DriverError::ResourceBusy)
-                    ),
-                    Ordering::SeqCst,
-                );
-                entry_gone_when_unpublished.store(
-                    crate::char_class_registry()
-                        .lock()
-                        .entries_for_tests(id)
-                        .is_empty(),
-                    Ordering::SeqCst,
-                );
-            }
-            _ => {}
-        }));
-    }
-
-    crate::remove_class_device_for_tests(id);
-    crate::test_hooks::clear_pause_hook();
+    crate::notify_char_available(fixture.parent.id());
+    assert_ne!(first.publication_id(), second.publication_id());
+    let first_handle = first.device();
+    let second_handle = second.device();
+    assert!(first_handle.is_available());
+    assert!(second_handle.is_available());
+    assert_eq!(crate::char_publications_for_device(fixture.parent.id()).len(), 2);
 
     assert_eq!(
-        claimed.load(Ordering::SeqCst),
-        1,
-        "the production path claims exactly one retirement"
+        first.revoke().expect("first revoke completes"),
+        RevocationOutcome::Completed
+    );
+    assert!(!first.is_available());
+    assert!(!first_handle.is_available());
+    assert!(second.is_available());
+    assert!(second_handle.is_available());
+    assert!(crate::find_char_publication(first.publication_id()).is_none());
+    assert!(crate::find_char_publication(second.publication_id()).is_some());
+    assert_eq!(
+        crate::char_publications_for_device(fixture.parent.id()).len(),
+        1
     );
     assert_eq!(
-        unpublished.load(Ordering::SeqCst),
-        1,
-        "the unpublish loop runs exactly once"
+        first.revoke().expect("repeat revoke is idempotent"),
+        RevocationOutcome::AlreadyRevoked
     );
-    assert!(
-        busy_when_claimed.load(Ordering::SeqCst),
-        "the reservation blocks a same-ID replacement before unpublish"
-    );
-    assert!(
-        busy_when_unpublished.load(Ordering::SeqCst),
-        "the reservation still blocks a replacement after unpublish"
-    );
-    assert!(
-        entry_gone_when_unpublished.load(Ordering::SeqCst),
-        "the removed entry has left the registry before the reservation is released"
-    );
-    assert!(
-        crate::char_class_registry()
-            .lock()
-            .entries_for_tests(id)
-            .is_empty()
-    );
-
-    let replacement = fixture(ID);
-    let replacement_class =
-        crate::publish_char_for_test(replacement.parent.clone(), Box::new(TestCharRuntime))
-            .expect("the released reservation admits the replacement");
-    assert_eq!(replacement_class.id(), id);
-    let entries = crate::char_class_registry().lock().entries_for_tests(id);
-    assert_eq!(entries.len(), 1, "only the replacement remains published");
-    assert!(
-        entries[0].binding_ref().same_binding(&replacement.binding),
-        "the surviving entry belongs to the replacement binding"
-    );
-    // Retire the replacement through the same production path so the cleanup
-    // leaves no live entry behind.
-    replacement.parent.force_removed_for_test();
-    crate::remove_class_device_for_tests(id);
 }
 
-/// A class entry must stay unpublished until its device node has finished
-/// removal, and a same-ID replacement must stay blocked in that window.
+/// A revoke request during the callback-commit window closes availability
+/// before activation resumes, while the activation executor owns cleanup.
 #[cfg(feature = "char")]
 #[def_test(serial)]
 #[expect(
@@ -363,123 +121,457 @@ fn test_production_retirement_orders_unpublish_before_replacement() {
 #[allow(
     unknown_lints,
     std_box_in_kernel_tests,
-    reason = "CG-049-no-std-box-in-kernel-tests: kclass::CharDeviceImpl is the production \
-              Box<dyn CharDevice + Send + Sync> publication contract"
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
 )]
-fn test_class_unpublish_waits_for_node_removal() {
-    use alloc::boxed::Box;
-    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+fn test_revoke_during_activation_closes_availability() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
-    const ID: u64 = 0xB1_1008;
-    let id = DeviceId::new(ID);
-    let old = fixture(ID);
-    let class = crate::publish_char_for_test(old.parent.clone(), Box::new(TestCharRuntime))
-        .expect("A publishes a class entry");
-    kdevice::register_device_node_for_binding(
-        id,
-        class.binding_ref(),
-        kdevice::DeviceNodeClass::Drm(kdevice::DrmDeviceNodeMetadata::new(
-            String::from("Virtual-1"),
-            String::from("connected"),
-            String::from("On"),
-            String::from("1280x800\n"),
-            alloc::vec::Vec::new(),
-        )),
-        String::from("ordered-node"),
-        String::from("ordered-node-driver"),
-        kdevice::DeviceLocation::PlatformStatic { id: 8 },
-        None,
+    const ID: u64 = 0xB1_2002;
+    let fixture = fixture(ID);
+    let publication = crate::publish_char_for_test(
+        fixture.parent.clone(),
+        alloc::boxed::Box::new(TestCharRuntime),
     )
-    .expect("A's device node registers");
-    old.parent.force_removed_for_test();
-    assert!(old.binding.is_terminal());
-
-    let claimed = Arc::new(AtomicUsize::new(0));
-    let unpublished = Arc::new(AtomicUsize::new(0));
-    let claimed_at_node = Arc::new(AtomicUsize::new(0));
-    let unpublished_at_node = Arc::new(AtomicUsize::new(0));
-    let replacement_blocked = Arc::new(AtomicBool::new(false));
-
+    .expect("publication starts in Published");
+    fixture.parent.force_active_for_test();
+    let handle = publication.device();
+    let publication = Arc::new(publication);
+    let deferred = Arc::new(AtomicUsize::new(0));
+    let invisible = Arc::new(AtomicUsize::new(0));
     {
-        let claimed = claimed.clone();
-        let unpublished = unpublished.clone();
-        crate::test_hooks::install_pause_hook(Arc::new(move |point| match point {
-            crate::test_hooks::ClassPause::RetirementClaimed { id: paused } if paused == id => {
-                claimed.fetch_add(1, Ordering::SeqCst);
+        let publication = publication.clone();
+        let deferred = deferred.clone();
+        let invisible = invisible.clone();
+        let handle = handle.clone();
+        let id = fixture.parent.id();
+        crate::test_hooks::install_pause_hook(Arc::new(move |point| {
+            if let crate::test_hooks::ClassPause::BeforeCallbackCommit {
+                id: paused,
+                publication: paused_publication,
+            } = point
+                && paused == id
+            {
+                core::assert_eq!(
+                    publication.revoke().expect("request is accepted"),
+                    RevocationOutcome::Deferred
+                );
+                deferred.fetch_add(1, Ordering::SeqCst);
+                if !handle.is_available()
+                    && crate::find_char_publication(paused_publication).is_none()
+                {
+                    invisible.fetch_add(1, Ordering::SeqCst);
+                }
             }
-            crate::test_hooks::ClassPause::RetirementUnpublished { id: paused } if paused == id => {
-                unpublished.fetch_add(1, Ordering::SeqCst);
-            }
-            _ => {}
         }));
     }
+
+    crate::notify_char_available(fixture.parent.id());
+    crate::test_hooks::clear_pause_hook();
+
+    assert_eq!(deferred.load(Ordering::SeqCst), 1);
+    assert_eq!(invisible.load(Ordering::SeqCst), 1);
+    assert!(!handle.is_available());
+    assert!(crate::find_char_publication(handle.publication_id()).is_none());
+    assert_eq!(
+        publication.revoke().expect("already completed"),
+        RevocationOutcome::AlreadyRevoked
+    );
+}
+
+/// A second revoke while removed callbacks are pending must observe Deferred,
+/// never AlreadyRevoked before unpublish/callback completion.
+#[cfg(feature = "char")]
+#[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
+)]
+fn test_second_revoke_is_deferred_until_removed_callbacks_finish() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    const ID: u64 = 0xB1_2003;
+    let fixture = fixture(ID);
+    let publication = crate::publish_char_for_test(
+        fixture.parent.clone(),
+        alloc::boxed::Box::new(TestCharRuntime),
+    )
+    .expect("publication");
+    fixture.parent.force_active_for_test();
+    crate::notify_char_available(fixture.parent.id());
+    let publication = Arc::new(publication);
+    let deferred = Arc::new(AtomicUsize::new(0));
     {
-        let claimed = claimed.clone();
-        let unpublished = unpublished.clone();
-        let claimed_at_node = claimed_at_node.clone();
-        let unpublished_at_node = unpublished_at_node.clone();
-        let replacement_blocked = replacement_blocked.clone();
-        kdevice::test_hooks::install_pause_hook(Arc::new(move |point| {
-            if let kdevice::test_hooks::BindingPause::NodeRemoving { device_id } = point
-                && device_id == id
+        let publication = publication.clone();
+        let deferred = deferred.clone();
+        crate::test_hooks::install_pause_hook(Arc::new(move |point| {
+            if let crate::test_hooks::ClassPause::BeforeRemovedCallback { .. } = point {
+                core::assert_eq!(
+                    publication.revoke().expect("second revoke accepted"),
+                    RevocationOutcome::Deferred
+                );
+                deferred.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    }
+    assert_eq!(
+        publication.revoke().expect("first revoke completes"),
+        RevocationOutcome::Completed
+    );
+    crate::test_hooks::clear_pause_hook();
+    assert_eq!(deferred.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        publication.revoke().expect("completed"),
+        RevocationOutcome::AlreadyRevoked
+    );
+}
+
+/// A forced node-owner failure must enter retryable RevokeFailed, not a fake
+/// Deferred, and a later revoke may complete.
+#[cfg(feature = "char")]
+#[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
+)]
+fn test_node_owner_error_enters_revoke_failed() {
+    const ID: u64 = 0xB1_2004;
+    let fixture = fixture(ID);
+    let publication = crate::publish_char_for_test(
+        fixture.parent.clone(),
+        alloc::boxed::Box::new(TestCharRuntime),
+    )
+    .expect("publication");
+    fixture.parent.force_active_for_test();
+    crate::notify_char_available(fixture.parent.id());
+    let publication_id = publication.publication_id();
+    crate::test_hooks::force_node_not_owner();
+    assert!(publication.revoke().is_err());
+    assert!(!publication.is_available());
+    assert!(crate::find_char_publication(publication_id).is_none());
+    assert_eq!(
+        publication.revoke().expect("retry completes"),
+        RevocationOutcome::Completed
+    );
+}
+
+/// Deferred revocation hides the target from public device-level enumeration
+/// immediately while leaving an earlier sibling publication visible.
+#[cfg(feature = "char")]
+#[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
+)]
+fn test_deferred_public_enumeration_hides_only_target() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const ID: u64 = 0xB1_2005;
+    let fixture = fixture(ID);
+    let sibling = crate::publish_char_for_test(
+        fixture.parent.clone(),
+        alloc::boxed::Box::new(TestCharRuntime),
+    )
+    .expect("sibling publication");
+    let target = crate::publish_char_for_test(
+        fixture.parent.clone(),
+        alloc::boxed::Box::new(TestCharRuntime),
+    )
+    .expect("target publication");
+    fixture.parent.force_active_for_test();
+    let sibling_id = sibling.publication_id();
+    let target_id = target.publication_id();
+    let target = Arc::new(target);
+    let deferred = Arc::new(AtomicUsize::new(0));
+    let target_hidden = Arc::new(AtomicBool::new(false));
+    let sibling_visible = Arc::new(AtomicBool::new(false));
+    {
+        let target = target.clone();
+        let deferred = deferred.clone();
+        let target_hidden = target_hidden.clone();
+        let sibling_visible = sibling_visible.clone();
+        let id = fixture.parent.id();
+        crate::test_hooks::install_pause_hook(Arc::new(move |point| {
+            if let crate::test_hooks::ClassPause::BeforeCallbackCommit {
+                id: paused,
+                publication,
+            } = point
+                && paused == id
+                && publication == target_id
             {
-                claimed_at_node.store(claimed.load(Ordering::SeqCst), Ordering::SeqCst);
-                unpublished_at_node.store(unpublished.load(Ordering::SeqCst), Ordering::SeqCst);
-                let replacement = fixture(ID);
-                let class = ClassDevice::<crate::CharDeviceImpl>::try_new_with_binding(
-                    replacement.parent.clone(),
-                    replacement.binding.clone(),
-                    Box::new(TestCharRuntime),
-                    String::from("replacement"),
-                    DeviceKind::Char,
-                    None,
-                    ClassDeviceMetadata::empty(),
-                )
-                .expect("the replacement class handle builds");
-                replacement_blocked.store(
-                    matches!(
-                        crate::char_class_registry().lock().publish(class),
-                        Err(DriverError::AlreadyExists)
-                    ),
+                core::assert_eq!(
+                    target.revoke().expect("target revoke accepted"),
+                    RevocationOutcome::Deferred
+                );
+                deferred.fetch_add(1, Ordering::SeqCst);
+                let visible = crate::char_publications_for_device(id);
+                target_hidden.store(
+                    !visible
+                        .iter()
+                        .any(|device| device.publication_id() == target_id),
+                    Ordering::SeqCst,
+                );
+                sibling_visible.store(
+                    visible
+                        .iter()
+                        .any(|device| device.publication_id() == sibling_id),
                     Ordering::SeqCst,
                 );
             }
         }));
     }
 
-    crate::remove_class_device_for_tests(id);
+    crate::notify_char_available(fixture.parent.id());
     crate::test_hooks::clear_pause_hook();
-    kdevice::test_hooks::clear_pause_hook();
+
+    assert_eq!(deferred.load(Ordering::SeqCst), 1);
+    assert!(target_hidden.load(Ordering::SeqCst));
+    assert!(sibling_visible.load(Ordering::SeqCst));
+    assert!(sibling.is_available());
+    assert!(!target.is_available());
+    assert!(crate::find_char_publication(target_id).is_none());
+    assert!(crate::find_char_publication(sibling_id).is_some());
+}
+
+/// Two real input publications under one binding produce two real nodes; only
+/// the revoked publication's node disappears.
+#[cfg(feature = "input")]
+#[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
+)]
+fn test_two_input_publications_have_independent_real_nodes() {
+    use alloc::boxed::Box;
+    use driver_base::{DriverError, DriverResult};
+    use crate::InputDeviceId;
+
+    struct TestInput;
+    impl driver_base::Device for TestInput {
+        fn name(&self) -> &str {
+            "input-test"
+        }
+
+        fn device_kind(&self) -> DeviceKind {
+            DeviceKind::Input
+        }
+    }
+    impl crate::InputDevice for TestInput {
+        fn device_id(&self) -> InputDeviceId {
+            InputDeviceId::UNKNOWN
+        }
+
+        fn physical_location(&self) -> &str {
+            "test"
+        }
+
+        fn unique_id(&self) -> &str {
+            "input-test"
+        }
+
+        fn get_event_bits(&self, _ty: EventType, _out: &mut [u8]) -> DriverResult<bool> {
+            Ok(false)
+        }
+
+        fn read_event(&self) -> DriverResult<Event> {
+            Err(DriverError::WouldBlock)
+        }
+    }
+
+    const ID: u64 = 0xB1_2006;
+    let fixture = fixture(ID);
+    fixture.parent.force_active_for_test();
+    let first = kdevice::ProbeContext::with_test_context(fixture.parent.clone(), |ctx| {
+        crate::publish_input(ctx, Box::new(TestInput))
+    })
+    .expect("probe context")
+    .expect("first input publication");
+    let second = kdevice::ProbeContext::with_test_context(fixture.parent.clone(), |ctx| {
+        crate::publish_input(ctx, Box::new(TestInput))
+    })
+    .expect("probe context")
+    .expect("second input publication");
+
+    let first_id = first.publication_id();
+    let second_id = second.publication_id();
+    let first_node = kdevice::device_nodes_snapshot()
+        .into_iter()
+        .find(|node| node.publication_id() == first_id)
+        .expect("first real node");
+    let second_node = kdevice::device_nodes_snapshot()
+        .into_iter()
+        .find(|node| node.publication_id() == second_id)
+        .expect("second real node");
+    assert_ne!(first_node.device_number(), second_node.device_number());
 
     assert_eq!(
-        claimed_at_node.load(Ordering::SeqCst),
-        0,
-        "A must not be claimed before its node has finished removal"
-    );
-    assert_eq!(
-        unpublished_at_node.load(Ordering::SeqCst),
-        0,
-        "A must not be unpublished before its node has finished removal"
+        first.revoke().expect("first revoke"),
+        RevocationOutcome::Completed
     );
     assert!(
-        replacement_blocked.load(Ordering::SeqCst),
-        "B's same-ID publication must be blocked while A's node is being removed"
+        kdevice::device_nodes_snapshot()
+            .iter()
+            .all(|node| node.publication_id() != first_id)
     );
+    assert!(
+        kdevice::device_nodes_snapshot()
+            .iter()
+            .any(|node| node.publication_id() == second_id)
+    );
+    assert!(second.is_available());
     assert_eq!(
-        claimed.load(Ordering::SeqCst),
-        1,
-        "the production path claims A exactly once"
+        second.revoke().expect("second revoke"),
+        RevocationOutcome::Completed
     );
-    assert_eq!(
-        unpublished.load(Ordering::SeqCst),
-        1,
-        "A is unpublished exactly once after node removal"
-    );
+}
 
-    let replacement = fixture(ID);
-    let replacement_class = crate::publish_char_for_test(replacement.parent.clone(), Box::new(TestCharRuntime))
-        .expect("B publishes after A's node removal and unpublish");
-    assert_eq!(replacement_class.id(), id);
-    replacement.parent.force_removed_for_test();
-    crate::remove_class_device_for_tests(id);
+/// Revoke at the after-commit/pre-first-callback seam: the committed callback
+/// still runs, but with an already-unavailable handle; cleanup follows.
+#[cfg(feature = "char")]
+#[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
+)]
+fn test_after_callback_commit_revoke_finishes_with_unavailable_handle() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const ID: u64 = 0xB1_2007;
+    let fixture = fixture(ID);
+    let publication = crate::publish_char_for_test(
+        fixture.parent.clone(),
+        alloc::boxed::Box::new(TestCharRuntime),
+    )
+    .expect("publication");
+    fixture.parent.force_active_for_test();
+    let target_id = publication.publication_id();
+    let publication = Arc::new(publication);
+    let deferred = Arc::new(AtomicUsize::new(0));
+    let callbacks = Arc::new(AtomicUsize::new(0));
+    let callback_saw_available = Arc::new(AtomicBool::new(true));
+    {
+        let publication = publication.clone();
+        let deferred = deferred.clone();
+        crate::test_hooks::install_pause_hook(Arc::new(move |point| {
+            if let crate::test_hooks::ClassPause::AfterCallbackCommit {
+                publication: paused, ..
+            } = point
+                && paused == target_id
+            {
+                core::assert_eq!(
+                    publication.revoke().expect("revoke accepted"),
+                    RevocationOutcome::Deferred
+                );
+                deferred.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    }
+    {
+        let callbacks = callbacks.clone();
+        let callback_saw_available = callback_saw_available.clone();
+        crate::subscribe_char_available(Arc::new(move |device| {
+            if device.publication_id() == target_id {
+                callbacks.fetch_add(1, Ordering::SeqCst);
+                callback_saw_available.store(device.is_available(), Ordering::SeqCst);
+            }
+        }));
+    }
+
+    crate::notify_char_available(fixture.parent.id());
+    crate::test_hooks::clear_pause_hook();
+
+    assert_eq!(deferred.load(Ordering::SeqCst), 1);
+    assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+    assert!(!callback_saw_available.load(Ordering::SeqCst));
+    assert!(crate::find_char_publication(target_id).is_none());
+    assert_eq!(
+        publication.revoke().expect("already completed"),
+        RevocationOutcome::AlreadyRevoked
+    );
+}
+
+/// Revoke before Available finalization must not re-open availability; the
+/// activation executor performs cleanup and the state never returns to Available.
+#[cfg(feature = "char")]
+#[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
+)]
+fn test_before_available_finalize_revoke_cleans_up() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    const ID: u64 = 0xB1_2008;
+    let fixture = fixture(ID);
+    let publication = crate::publish_char_for_test(
+        fixture.parent.clone(),
+        alloc::boxed::Box::new(TestCharRuntime),
+    )
+    .expect("publication");
+    fixture.parent.force_active_for_test();
+    let target_id = publication.publication_id();
+    let publication = Arc::new(publication);
+    let deferred = Arc::new(AtomicUsize::new(0));
+    {
+        let publication = publication.clone();
+        let deferred = deferred.clone();
+        crate::test_hooks::install_pause_hook(Arc::new(move |point| {
+            if let crate::test_hooks::ClassPause::BeforeAvailableFinalize {
+                publication: paused, ..
+            } = point
+                && paused == target_id
+            {
+                core::assert_eq!(
+                    publication.revoke().expect("revoke accepted"),
+                    RevocationOutcome::Deferred
+                );
+                deferred.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    }
+
+    crate::notify_char_available(fixture.parent.id());
+    crate::test_hooks::clear_pause_hook();
+
+    assert_eq!(deferred.load(Ordering::SeqCst), 1);
+    assert!(crate::find_char_publication(target_id).is_none());
+    assert!(!publication.is_available());
+    assert_eq!(
+        publication.revoke().expect("already completed"),
+        RevocationOutcome::AlreadyRevoked
+    );
 }

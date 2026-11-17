@@ -14,16 +14,16 @@ use alloc::{sync::Arc, vec::Vec};
 
 use driver_base::DriverResult;
 use kclass::{
-    CharDeviceImpl, ClassDevice, char_devices, find_char_device, publish_char,
-    subscribe_char_available,
+    CharDeviceImpl, ClassDevice, char_devices, publish_char, subscribe_char_available,
+    subscribe_char_removed,
 };
-use kdevice::{DeviceId, subscribe_device_removed};
+use kdevice::PublicationId;
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
 struct ConsoleSubsystem {
     devices: Vec<ClassDevice<CharDeviceImpl>>,
-    stdout: Option<DeviceId>,
+    stdout: Option<PublicationId>,
 }
 
 impl ConsoleSubsystem {
@@ -35,33 +35,38 @@ impl ConsoleSubsystem {
     }
 
     fn add(&mut self, handle: ClassDevice<CharDeviceImpl>) {
-        let id = handle.id();
-        if self.devices.iter().any(|current| current.id() == id) {
+        let publication = handle.publication_id();
+        if self
+            .devices
+            .iter()
+            .any(|current| current.publication_id() == publication)
+        {
             return;
         }
         log::debug!(
-            "console subsystem: added {:?} (driver={})",
-            id,
+            "console subsystem: added {:?}/{} (driver={})",
+            handle.id(),
+            publication.raw(),
             handle.driver_name()
         );
         self.devices.push(handle);
     }
 
-    fn remove(&mut self, id: DeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
-        if self.stdout == Some(id) {
+    fn remove(&mut self, publication: PublicationId) -> Option<ClassDevice<CharDeviceImpl>> {
+        if self.stdout == Some(publication) {
             self.stdout = None;
         }
         self.devices
             .iter()
-            .position(|device| device.id() == id)
+            .position(|device| device.publication_id() == publication)
             .map(|pos| self.devices.swap_remove(pos))
     }
 
     fn stdout_handle(&self) -> Option<ClassDevice<CharDeviceImpl>> {
-        let id = self.stdout?;
+        let publication = self.stdout?;
         self.devices
             .iter()
-            .find(|device| device.id() == id)
+            .find(|device| device.publication_id() == publication)
             .cloned()
     }
 }
@@ -90,7 +95,7 @@ fn is_runtime_console(handle: &ClassDevice<CharDeviceImpl>) -> bool {
 fn add_console_device(handle: ClassDevice<CharDeviceImpl>) {
     let is_console = is_runtime_console(&handle);
     let mut subsystem = console_subsystem().lock();
-    if !is_console && subsystem.stdout != Some(handle.id()) {
+    if !is_console && subsystem.stdout != Some(handle.publication_id()) {
         return;
     }
     subsystem.add(handle);
@@ -102,8 +107,8 @@ fn ensure_console_bridge() {
             add_console_device(handle);
         }
         subscribe_char_available(Arc::new(add_console_device));
-        subscribe_device_removed(Arc::new(|id| {
-            let _ = unregister_console_device(id);
+        subscribe_char_removed(Arc::new(|_, publication| {
+            let _ = unregister_console_device(publication);
         }));
     });
 }
@@ -121,17 +126,15 @@ pub fn register_stdout_console(
     runtime: CharDeviceImpl,
 ) -> DriverResult<()> {
     ensure_console_bridge();
-    let id = ctx.device().id();
-    publish_char(ctx, runtime)?;
-    console_subsystem().lock().stdout = Some(id);
-    // This runs inside the driver's `probe_device`, so the device is usually
-    // not active yet and `find_char_device()` (which filters on availability)
-    // cannot see it. Adopt immediately when already active; otherwise remember
-    // the id and adopt when the device activates.
-    if let Some(handle) = find_char_device(id) {
-        console_subsystem().lock().add(handle);
-        return Ok(());
-    }
+    let publication = publish_char(ctx, runtime)?;
+    let publication_id = publication.publication_id();
+    console_subsystem().lock().stdout = Some(publication_id);
+    // Probe is usually not active yet; if it is, adopt immediately. Activation
+    // otherwise reaches the char available callback and matches publication_id.
+    // Keep the adopted stdout handle even before its class activation; the
+    // publication identity is already fixed and stdout_console() separately
+    // checks the captured binding.
+    console_subsystem().lock().add(publication.device());
     Ok(())
 }
 
@@ -140,22 +143,54 @@ pub fn register_stdout_console(
 /// Task context. Returns none until the device is published and active. The
 /// handle retains ownership, not availability: callers must check availability
 /// before later I/O. This does not provide synchronization for hot-unplug.
+fn stdout_handle_is_available(handle: &ClassDevice<CharDeviceImpl>) -> bool {
+    handle.is_available()
+}
+
 pub fn stdout_console() -> Option<ClassDevice<CharDeviceImpl>> {
-    let handle = console_subsystem().lock().stdout_handle()?;
-    handle.is_available().then_some(handle)
+    let handle = console_subsystem().lock().stdout_handle();
+    let Some(handle) = handle else {
+        #[cfg(unittest)]
+        log_stdout_missing();
+        return None;
+    };
+    #[cfg(unittest)]
+    log::warn!(
+        "stdout probe: publication={} state={} binding={:?} available={}",
+        handle.publication_id().raw(),
+        handle.publication_state_name(),
+        handle.binding_ref().state(),
+        handle.is_available(),
+    );
+    stdout_handle_is_available(&handle).then_some(handle)
+}
+
+#[cfg(unittest)]
+fn log_stdout_missing() {
+    let subsystem = console_subsystem().lock();
+    log::warn!(
+        "stdout probe: slot publication={:?} local_handles={}",
+        subsystem.stdout.map(|publication| publication.raw()),
+        subsystem.devices.len(),
+    );
 }
 
 /// Identity of the adopted boot stdout.
 ///
 /// Task context. Available after publication, including before activation;
-/// cleared on removal. This identifies the port, not its I/O availability.
-pub fn stdout_console_id() -> Option<DeviceId> {
+/// cleared on removal. This identifies the adopted console publication, not
+/// the port's I/O availability.
+pub fn stdout_console_id() -> Option<PublicationId> {
     console_subsystem().lock().stdout
 }
 
-/// Remove a runtime console from the console subsystem.
-pub fn unregister_console_device(id: DeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
-    console_subsystem().lock().remove(id)
+/// Remove a runtime console publication from the console subsystem.
+pub fn unregister_console_device(
+    publication: PublicationId,
+) -> Option<ClassDevice<CharDeviceImpl>> {
+    #[cfg(unittest)]
+    log::warn!("stdout remove: publication={}", publication.raw());
+    console_subsystem().lock().remove(publication)
 }
 
 unittest::path_mod_test!(runtime_unittest, "../ut-tests/runtime_unittest.rs");

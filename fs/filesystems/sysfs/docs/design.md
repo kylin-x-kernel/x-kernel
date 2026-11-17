@@ -150,7 +150,7 @@ unavailable. The `Removing` callback takes the projected device's access gate
 exclusively, which waits for in-flight attribute reads or uevent writes. The
 coordinator then publishes remove while the path still exists, and `Removed`
 finally deletes the projection. A removing node remains reserved in `kdevice`,
-so a replacement with the same core ID cannot interleave with this sequence.
+so a replacement with the same `DeviceNodeKey` cannot interleave with this sequence; distinct publications of one DeviceId are separate projections.
 
 Each add or remove rebuilds the generated path tree once. A structural diff
 identifies the highest changed paths and invalidates only those cached dentries.

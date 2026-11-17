@@ -126,7 +126,7 @@ console is permanent; dynamic switching and UART hot-unplug are not implemented.
 
 ## Stdout Runtime Identity
 
-`register_stdout_console` records the adopted early stdout device ID in the
+`register_stdout_console` records the adopted early stdout publication ID in the
 existing console subsystem. The character-availability bridge recognizes this
 ID even before activation. Auxiliary serial devices remain ordinary character
 devices. Removal clears the stdout association as well as the console view.

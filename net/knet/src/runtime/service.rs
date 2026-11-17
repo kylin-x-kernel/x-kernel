@@ -1243,13 +1243,31 @@ impl Service {
     ///
     /// Callers must hold [`crate::control::network_config_lock`] so device
     /// removal cannot interleave with other control-plane mutations.
-    pub(crate) fn remove_device_by_model_id(
+    #[cfg(unittest)]
+    pub(crate) fn remove_device_by_model_id_for_test(
         &self,
         id: kdevice::DeviceId,
     ) -> Option<Vec<NetworkEvent>> {
         let mut router = self.router.lock();
         let effective_mtu = router.devices.effective_mtu();
         let removed = router.remove_device_by_model_id(id)?;
+        self.sync_ingress_device_names(&router);
+        if router.devices.effective_mtu() != effective_mtu {
+            let mut iface = self.iface.lock();
+            self.rebuild_interface(&mut router, &mut iface);
+        }
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        Some(removed)
+    }
+
+    pub(crate) fn remove_device_by_publication(
+        &self,
+        publication: kdevice::PublicationId,
+    ) -> Option<Vec<NetworkEvent>> {
+        let mut router = self.router.lock();
+        let effective_mtu = router.devices.effective_mtu();
+        let removed = router.remove_device_by_publication(publication)?;
         self.sync_ingress_device_names(&router);
         if router.devices.effective_mtu() != effective_mtu {
             let mut iface = self.iface.lock();

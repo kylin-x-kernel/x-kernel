@@ -102,7 +102,7 @@ pub use bus::{
     PciBusTypeMatcher, PlatformBusTypeMatcher,
 };
 pub use device::{
-    BindingRef,
+    BindingRef, PublicationId,
     desc::{
         DeviceDesc, DeviceDescId, DeviceDescSpec, DeviceId, DeviceIdentity, DeviceLocation,
         DeviceNumber, DeviceRecord, DeviceState, DiscoveryOrigin, IntxRouteStatus, PciIdentity,
@@ -116,11 +116,11 @@ pub use device::{
 };
 pub use device_node::{
     DRM_RENDER_MINOR_BASE, DeferredNodeRetirement, DeviceNode, DeviceNodeCallback, DeviceNodeClass,
-    DeviceNodeEvent, DeviceNodeKind, DeviceNodeLifecycleCallback, DeviceNodeLifecycleEvent,
-    DrmDeviceNodeMetadata, InputDeviceNodeId, InputDeviceNodeMetadata, NodeRemoval,
-    device_nodes_snapshot, install_device_node_lifecycle_publisher, register_device_node,
-    register_device_node_for_binding, subscribe_device_nodes, unregister_device_node,
-    unregister_device_node_for_binding,
+    DeviceNodeEvent, DeviceNodeKey, DeviceNodeKind, DeviceNodeLifecycleCallback,
+    DeviceNodeLifecycleEvent, DrmDeviceNodeMetadata, InputDeviceNodeId, InputDeviceNodeMetadata,
+    NodeRemoval, device_nodes_snapshot, install_device_node_lifecycle_publisher,
+    register_device_node_for_publication, subscribe_device_nodes,
+    unregister_device_node_for_publication,
 };
 pub use driver::{
     BoxedDriver, CompatibleAliasMatcher, DeviceDriver, DeviceMatcher, DriverId, DriverInfo,

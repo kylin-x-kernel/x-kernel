@@ -10,6 +10,7 @@ use driver_base::{DriverError, DriverResult};
 use driver_os_api::{IrqEvent, IrqResource};
 use kclass::prelude::DisplayDevice;
 use kdevice::ProbeContext;
+use kspin::SpinNoPreempt;
 use virtio::{GpuHost, Transport, VirtIoGpuDev};
 
 use super::glue::VirtIoHalImpl;
@@ -42,14 +43,18 @@ pub(super) fn activate<T: Transport + Send + 'static>(
     let irq = irq.ok_or(DriverError::InvalidInput)?;
     let gpu =
         VirtIoGpuDev::<VirtIoHalImpl, _, _>::prepare(transport, Host(ktask::WaitQueue::new()))?;
-    let id = ctx.device().id();
+    let publication = Arc::new(SpinNoPreempt::new(None));
     let work_gpu = gpu.clone();
+    let work_publication = publication.clone();
     let work = kworkng::WorkHandle::new(move || {
-        if kclass::find_display_device(id).is_some()
+        let Some(publication) = *work_publication.lock() else {
+            return;
+        };
+        if kclass::find_display_publication(publication).is_some()
             && work_gpu.refresh_info().is_some()
             && let Some(node) = kdevice::device_nodes_snapshot()
                 .into_iter()
-                .find(|n| n.core_id() == id)
+                .find(|n| n.publication_id() == publication)
         {
             kdevice_uevent::publish_drm_hotplug(&node);
         }
@@ -81,7 +86,8 @@ pub(super) fn activate<T: Transport + Send + 'static>(
     ctx.add_cleanup(move || closing.close())?;
     gpu.start()?;
     log::info!("virtio-gpu: display discovery complete on IRQ {virq}");
-    kclass::publish_display(ctx, Box::new(gpu))?;
+    let display = kclass::publish_display(ctx, Box::new(gpu))?;
+    *publication.lock() = Some(display.publication_id());
     // A config interrupt may have arrived before the class was visible.
     let _ = work.queue_default(None);
     Ok(())

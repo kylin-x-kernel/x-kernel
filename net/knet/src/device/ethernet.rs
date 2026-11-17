@@ -1140,6 +1140,10 @@ impl NetDeviceOps for EthernetDevice {
         Some(self.inner.id())
     }
 
+    fn publication_id(&self) -> Option<kdevice::PublicationId> {
+        Some(self.inner.publication_id())
+    }
+
     fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> KResult<RxPoll> {
         if !self.is_link_up() {
             return Ok(RxPoll::Empty);

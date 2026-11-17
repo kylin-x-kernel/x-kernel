@@ -2,31 +2,76 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Deterministic class-retirement pause points used by unit tests.
+//! Deterministic publication activation/revocation pause points used by unit tests.
 //!
 //! A callback may block: every pause point runs outside the class registry
 //! spinlock and outside the device-node registry lock.
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use kdevice::DeviceId;
+use kdevice::{DeviceId, PublicationId};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
-/// A point where a test can pause the class-retirement path.
+/// A point where a test can pause publication activation/revocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClassPause {
-    /// A caller claimed the same-ID retirement reservation and is about to
-    /// unpublish the removed class entries.
-    RetirementClaimed { id: DeviceId },
-    /// Every removed entry has run `unpublish_class`; the same-ID reservation
-    /// is still installed until `finish_retirement`.
-    RetirementUnpublished { id: DeviceId },
+    /// An activation executor claimed one publication.
+    ActivationClaimed {
+        id: DeviceId,
+        publication: PublicationId,
+    },
+    /// Before a publication's node is registered.
+    BeforeNodeRegistration {
+        id: DeviceId,
+        publication: PublicationId,
+    },
+    /// Activating is about to commit available callbacks (Notifying).
+    BeforeCallbackCommit {
+        id: DeviceId,
+        publication: PublicationId,
+    },
+    /// Callbacks are committed, before the first callback runs.
+    AfterCallbackCommit {
+        id: DeviceId,
+        publication: PublicationId,
+    },
+    /// Callbacks finished, before Notifying becomes Available.
+    BeforeAvailableFinalize {
+        id: DeviceId,
+        publication: PublicationId,
+    },
+    /// Before the class backend unpublishes one runtime.
+    BeforeUnpublish {
+        id: DeviceId,
+        publication: PublicationId,
+    },
+    /// Before removed subscribers run.
+    BeforeRemovedCallback {
+        id: DeviceId,
+        publication: PublicationId,
+    },
+    /// Before the terminal registry removal exposes Revoked.
+    BeforeFinalRevoked {
+        id: DeviceId,
+        publication: PublicationId,
+    },
 }
 
 type PauseCallback = Arc<dyn Fn(ClassPause) + Send + Sync>;
 
 static PAUSE: LazyInit<SpinNoPreempt<Option<PauseCallback>>> = LazyInit::new();
+static FORCE_NODE_NOT_OWNER: AtomicBool = AtomicBool::new(false);
+
+/// Force the next revocation execute step to report `NodeRemoval::NotOwner`.
+pub fn force_node_not_owner() {
+    FORCE_NODE_NOT_OWNER.store(true, Ordering::SeqCst);
+}
+
+pub(crate) fn take_forced_node_not_owner() -> bool {
+    FORCE_NODE_NOT_OWNER.swap(false, Ordering::SeqCst)
+}
 
 fn pause_slot() -> &'static SpinNoPreempt<Option<PauseCallback>> {
     PAUSE.call_once(|| SpinNoPreempt::new(None));

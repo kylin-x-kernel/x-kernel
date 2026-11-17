@@ -165,6 +165,7 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
     }
 
     let (_bus_type, bus) = kdevice::reset_and_setup_platform_bus_for_tests("virtio-mmio-chain-bus");
+    kclass::reinstall_event_bridge_for_tests();
 
     // Register the candidate that must be rejected before the one that owns
     // the device, so the round really probes a wrong candidate first.
@@ -222,7 +223,6 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
     let dma_before = super::virtio_mmio_support::DmaSnapshot::capture();
 
     let outcome = probe_device_desc(desc.id()).unwrap();
-    let vsock_after = kclass::vsock_devices();
     let hwrng_after = kclass::hwrng_devices();
     // Hand the published device to the guard before the first assertion.
     let records = kdevice::device_records_snapshot();
@@ -307,6 +307,7 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
     assert_eq!(status_at_open.as_slice(), &[INITIAL_STATUS]);
     assert_eq!(handle.status(), INITIAL_STATUS);
 
+    let vsock_after = kclass::vsock_devices();
     assert_eq!(vsock_after.len(), vsock_before + 1);
     // The rejected RNG candidate published no class device.
     assert_eq!(hwrng_after.len(), hwrng_before);

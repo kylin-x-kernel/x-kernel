@@ -9,7 +9,7 @@ use alloc::{collections::BTreeMap, string::ToString, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use kclass::{ClassDevice, prelude::*};
-use kdevice::{Device, DeviceId, DeviceKind};
+use kdevice::{Device, DeviceKind, PublicationId};
 use kerrno::{KError, KResult, k_bail};
 #[cfg(feature = "vsock_tipc_bridge")]
 use klazy::Lazy;
@@ -857,9 +857,12 @@ pub(crate) fn register_vsock_dev(raw: ClassDevice<VsockDeviceImpl>) -> KResult<(
     Ok(())
 }
 
-pub(crate) fn unregister_vsock_dev(id: DeviceId) -> bool {
+pub(crate) fn unregister_vsock_dev(publication: PublicationId) -> bool {
     let mut guard = VSOCK_DEV.lock();
-    if guard.as_ref().is_none_or(|dev| dev.id() != id) {
+    if guard
+        .as_ref()
+        .is_none_or(|dev| dev.publication_id() != publication)
+    {
         return false;
     }
     *guard = None;

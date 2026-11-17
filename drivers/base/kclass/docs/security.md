@@ -4,7 +4,7 @@
 
 This analysis covers the entire crate: `src/lib.rs` (macro-generated
 class registries, delegation impls, event bridge, prelude), `src/generic.rs`
-(`ClassDevice<T>`, `ClassRegistry<T>`, retirement claims) and the
+(`ClassPublication<T>`, `ClassDevice<T>`, publication state/registry) and the
 `cfg(unittest)` `src/retirement_hooks.rs` pause seam. No modules are excluded; the
 crate contains no unsafe code and every registry is reachable from the
 documented publish/query/subscribe API.
@@ -58,6 +58,33 @@ documented publish/query/subscribe API.
   identity remains readable from the snapshot, while `is_available()` turns
   false; the handle never grants hardware access by itself and is never
   re-admitted to a replacement binding.
+- `ClassPublication<T>` is a non-Clone revocation credential. `ClassDevice<T>`
+  is the cloneable consumer handle and has no revoke method. A stale
+  credential can only address its own `PublicationId`; it cannot delete a
+  newer publication of the same device/binding. Dropping the credential does
+  not revoke and must not be treated as a cleanup signal.
+
+## Publication revocation and availability
+
+- A revoke request under the class-registry lock closes availability
+  immediately. During `Activating`/`Notifying` it stores
+  `revoke_requested` (Release) and returns `Deferred`; `is_available()`,
+  `find_*_publication()` and enumeration read it with Acquire and hide the
+  publication. Cleanup may lag; availability does not.
+- `Revoked` is exposed only after node silence, backend `unpublish_class` and
+  removed callbacks complete. A concurrent second revoke observes `Revoking`
+  and gets `Deferred`, never a premature `AlreadyRevoked`.
+- A node `NotOwner`/unrecoverable failure enters `RevokeFailed`; the
+  publication is hidden and never resurrects. A later exact revoke or binding
+  retirement must CAS `RevokeFailed -> Revoking` to retry. `RevokeFailed` must
+  not be reported as `Deferred`.
+- Node removal, unpublish, callbacks and last-`Arc` drop run outside the
+  class-registry spinlock. Activation never holds that lock while invoking a
+  subscriber, so subscriber reentrant revoke returns `Deferred` rather than
+  deadlocking.
+- A committed available callback may finish after a revoke request, but the
+  handle it received is already unavailable; callback code must not use it to
+  reopen availability.
 
 ## External Boundaries / Attack Surface
 
@@ -91,10 +118,10 @@ The threat analysis should focus on:
   removal;
 - whether duplicate publishes are rejected and class-specific publish
   steps are rolled back correctly;
-- whether a stale binding can retire a replacement binding's class entry or
-  node, and whether a same-ID publish can slip into the retirement gap;
-- whether a deferred node callback can double-retire an entry or release
-  someone else's reservation.
+- whether a stale binding/publication can retire a replacement or sibling
+  class entry/node;
+- whether a deferred node callback can double-unpublish or remove a newer
+  publication.
 
 ## Unsafe Code Inventory
 
@@ -109,7 +136,7 @@ by a `PageRef` RAII allocation that lives for the kernel lifetime).
 
 ## Memory-Safety Invariants
 
-1. **ClassDevice Arc lifetime**: `ClassDevice` holds
+1. **ClassDevice Arc lifetime**: `ClassDevice`/`ClassPublication` hold
    `Arc<ClassDeviceInner<T>>`; `ClassDeviceInner` holds
    `Arc<DeviceObject>` and the creating binding's `BindingRef`. As long as
    any `ClassDevice` clone exists, the `DeviceObject` allocation and the
@@ -140,10 +167,10 @@ by a `PageRef` RAII allocation that lives for the kernel lifetime).
 5. **No reentrancy in event dispatch**: `notify_class_available` releases
    the registry lock before invoking callbacks, so a callback touching
    the same registry cannot deadlock.
-6. **Publish identity uniqueness**: a second publish of the same
-   `DeviceId` returns `AlreadyExists`; replacement must be expressed as a
-   new publish after `Removed` and after the old entry's retirement
-   reservation is released (`ResourceBusy` otherwise).
+6. **Publication identity uniqueness**: the registry rejects a duplicate
+   `PublicationId`, but permits multiple publications for the same stable
+   `DeviceId` and binding. A stale credential can only address its own
+   `PublicationId`; it cannot evict a sibling or replacement.
 7. **device_kind validation**: `publish_<class>()` verifies the runtime's
    `device_kind` against the registry type before constructing the
    `ClassDevice`; a mismatch returns `InvalidInput` without publishing.
@@ -155,39 +182,38 @@ by a `PageRef` RAII allocation that lives for the kernel lifetime).
    registration is logged, but class availability callbacks still run. The
    typed runtime remains usable even when a Linux-compatible projection cannot
    be allocated.
-10. **Retirement is binding-exact**: `claim_retirement` matches id **and**
-    `BindingRef::same_binding`, and only terminal (`Removed`) bindings.
-    A stale `Removed`/`BindingRetired` event for an old instance cannot
-    evict a replacement binding's entry.
-11. **Retirement ownership is exclusive and single-use**: the reservation is
-    installed in the same critical section that removes the entries; only the
-    executor holding the `Claimed` outcome unpublishes. `finish_retirement`
-    removes only the reservation with the matching private token, so a
-    delayed finisher cannot clear a later claim.
-12. **Deferred node retirement re-validates**: a deferred node completion
-    callback re-enters `retire_*_binding` with the same `BindingRef`; it
-    succeeds only if that exact binding is still terminal and still owns an
-    entry. A repeated callback finds no matching entry (`Nothing`) and is a
-    no-op.
-13. **Token allocation never wraps**: the monotonic `u64` allocator uses
-    `checked_add`; exhaustion returns `BadState` before any entry is removed
-    and never reuses a token. The token is a private cleanup credential, not
-    binding identity, and is not exposed through `DeviceId` or `BindingRef`.
-14. **Node ownership is checked**: `unregister_device_node_for_binding`
-    returns `NotOwner` for a node registered by another binding instance;
-    kclass logs it and returns `BadState` instead of revoking a foreign node.
-    Test cleanup never force-clears a deferred entry whose completion
-    callback is still registered.
+10. **Revocation is publication-exact**: `ClassPublication::revoke` and
+    binding-retirement scans use `PublicationId` plus the captured
+    `BindingRef`. Retiring an old publication cannot evict a newer or sibling
+    publication of the same device.
+11. **Availability closes at request time**: a revoke request under the
+    registry lock sets `revoke_requested` (Release); `is_available()`, public
+    `find_*_publication` and device-level enumeration read it with Acquire and
+    hide the publication immediately. `Deferred` means cleanup is pending, not
+    that the publication remains usable.
+12. **Deferred node completion resumes the exact executor**: a deferred node
+    callback calls `finish_revoke` for the same `PublicationId`; a stale
+    callback finds no entry and is a no-op. A node `NotOwner` or unrecoverable
+    failure enters `RevokeFailed`, never silently unpublishes another owner's
+    runtime.
+13. **Revoked is completion, not request**: the registry entry is removed and
+    `Revoked` store happens only after node silence, backend unpublish and
+    removed callbacks. A concurrent second revoke observes `Revoking` and gets
+    `Deferred`, never premature `AlreadyRevoked`.
+14. **No wait under the source/class lock**: activation/revocation callbacks,
+    unpublish and last-`Arc` drop run outside the registry spinlock. Entropy
+    source removal takes the source out under its mutex and only then stops the
+    worker, so a blocked worker cannot deadlock the selector.
 
 ## Thread Safety
 
 | Type | Send condition | Sync condition |
 |------|-----------|-----------|
 | `ClassDevice<T>` | `Arc<ClassDeviceInner<T>>` is `Send` when `T: Send + Sync` | `Arc` provides shared access |
-| `ClassDeviceInner<T>` | `Arc<DeviceObject>` + `BindingRef` + `T: Send` + metadata `Send` | `Arc<DeviceObject>` + `BindingRef` + `T: Sync` |
-| `ClassRegistry<T>` | `Vec<ClassDevice<T>>` + `Vec<Callback>` + retirement reservations are `Send` (`DeviceId`, `u64` token) | interior mutability via `SpinNoPreempt`; the claim/finish pair bounds the unlocked unpublish gap |
-| `ClaimOutcome<T>` | `Vec<ClassDevice<T>>` is `Send` | not shared; consumed by the claiming executor, token compared under the lock |
-| `test_hooks::ClassPause` | `cfg(unittest)` only | paused claim runs outside the registry lock |
+| `ClassDeviceInner<T>` | `Arc<DeviceObject>` + `BindingRef` + `PublicationId` + atomics + `T: Send` | `Arc<DeviceObject>` + `BindingRef` + `T: Sync` |
+| `ClassRegistry<T>` | `Vec<ClassDevice<T>>` + callback vectors are `Send` when `T` is | interior mutability via `SpinNoPreempt`; exact `PublicationId` bounds the unlocked cleanup |
+| `ClassDeviceInner<T>` | `Arc<DeviceObject>` + `BindingRef` + `PublicationId` + atomics + `T: Send` | shared state is atomic or registry-locked |
+| `test_hooks::ClassPause` | `cfg(unittest)` only | pause points run outside registry/node locks |
 | `ClassAvailabilityCallback<T>` | `Arc<dyn Fn(...) + Send + Sync>` is `Send + Sync` | `Arc` provides shared access |
 | `ACTIVATION_BRIDGE` | `LazyInit<()>` is a zero-sized type | `LazyInit` makes initialization thread-safe |
 
@@ -196,7 +222,7 @@ by a `PageRef` RAII allocation that lives for the kernel lifetime).
 | ID | Threat | Impact | Trigger | Existing control |
 |------|----------|----------|----------|----------|
 | T-02 | Event bridge fires before `kdevice` is initialized | High | `ensure_event_bridge` called before `kdevice::init_device_registry` | kdriver runs `init_device_registry` before any `publish_*`; the `ACTIVATION_BRIDGE` lazy init fires at first publish |
-| T-03 | Publish race loses or duplicates a device | Medium | Concurrent publish of the same device | `SpinNoPreempt` serializes; a second publish of the same id returns `AlreadyExists`; a same-ID publish during retirement returns `ResourceBusy` |
+| T-03 | Publish race loses or duplicates a device | Medium | Concurrent publish of the same device/binding | `SpinNoPreempt` serializes by `PublicationId`; same device siblings are allowed and independently revocable |
 | T-04 | A subscriber callback panics, skipping later subscribers | Medium | One callback panics inside the notification `for` loop | Callbacks run outside `catch_unwind`; currently no unwind protection — subscriber quality is relied upon |
 | T-05 | `with()` on a removed `ClassDevice` reaches freed runtime | Medium | Runtime trait object dropped before `ClassDeviceInner` | All `ClassDeviceInner` fields (including runtime) drop together; `Arc` counting delays drop until all references are gone |
 | T-06 | device_kind validation bypassed at publish | Medium | Driver misuses a publish function (e.g. `publish_block` for a net device) | Explicit `device_kind != $kind` check returns `InvalidInput` without publishing |
@@ -206,10 +232,9 @@ by a `PageRef` RAII allocation that lives for the kernel lifetime).
 | T-10 | Node allocation failure suppresses unrelated class consumers | Medium — kernel subsystems could miss an otherwise usable device | The class index pool is exhausted | The failure is logged and ordinary class availability callbacks continue |
 | T-11 | A retained class handle prevents device removal | Medium — device cannot be unbound while any subsystem holds a clone | A subsystem caches `ClassDevice` indefinitely | `BindingRef` retains the runtime but does not increment usage; availability reads the captured lifecycle, so removal can commit and later reports `false` |
 | T-12 | A stale removal retires a replacement binding's entry | Medium — a fast rebind loses its class view | Old `Removed`/`BindingRetired` event or stale callback processed after the new entry is published | Claims match `same_binding` and require a terminal binding; the ID alone never selects an entry |
-| T-13 | Deferred node completion double-retires or unpublishes twice | Medium — use-after-unpublish or duplicated teardown | Node finishes removal after the synchronous path already claimed | Only a `Claimed` outcome unpublishes; a repeated callback finds no matching entry (`Nothing`) and is a no-op; the token is consumed by `finish_retirement` |
-| T-14 | Retirement token wraps or is reused | Medium — a delayed finisher clears a later reservation | Long-running system exhausts `u64` | `checked_add` returns `BadState` before removing entries; tokens are never reused |
-| T-15 | Same-ID publish slips into the retirement gap | Medium — replacement becomes visible before the old runtime is unpublished | Probe succeeds while unpublish runs outside the lock | A same-ID reservation installed in the claim's critical section makes `publish` return `ResourceBusy` until `finish_retirement` |
-| T-16 | Foreign node is revoked by a stale binding | Medium — new binding loses `/dev` projection | ID matches but node owner is another binding | `unregister_device_node_for_binding` returns `NotOwner`; kclass logs and fails with `BadState` |
+| T-13 | Deferred node completion double-revokes a publication | Duplicated teardown | Node finishes after another executor | Completion removes only the exact `PublicationId`; a stale callback finds no entry and is a no-op |
+| T-14 | Sibling publication is deleted by a stale credential | Medium — capability loss | DeviceId matches, PublicationId differs | Exact lookup by `PublicationId`; sibling stays available |
+| T-15 | Node owner is foreign | Medium — wrong `/dev` projection is removed | Key matches but binding differs | `NotOwner` enters retryable `RevokeFailed`; no foreign node is touched |
 
 Impact levels:
 
@@ -229,8 +254,8 @@ Impact levels:
 | F-07 | Duplicate publish | Driver bypasses the normal remove/add lifecycle | publish returns `AlreadyExists` | New runtime not visible | 4 | Class-specific publish is rolled back; the resident object is kept |
 | F-08 | Missing input metadata | Non-input class does not override `class_metadata` | `physical_location()` / `unique_id()` return empty strings | Input device identity incomplete | 4 | `ClassRuntimeMetadata` default returns `empty()`; the input class overrides explicitly |
 | F-09 | Device-node allocation fails | The fixed class index range is exhausted | No `/dev` or `/sys` projection is created for the runtime | Linux-compatible discovery is unavailable for that device | 3 | kdevice returns an error; kclass logs it and still notifies typed class consumers |
-| F-10 | Deferred node removal never completes | Node implementation loses or drops the registered callback | Terminal entry and same-ID reservation stay in place | Rebinding the same ID keeps returning `ResourceBusy`; no wrong entry is published | 2 | Node revocation is required before the claim; the callback is registered before returning `ResourceBusy`; failure is logged |
-| F-11 | Retirement token exhausted | `next_retirement_token == u64::MAX` | `claim_retirement` returns `BadState` before removing anything | Registry unchanged; one retirement sequence cannot start | 3 | `checked_add`; no wrap, no reuse; surfaced as `BadState` |
+| F-10 | Deferred node removal never completes | Node implementation loses/drops callback | Publication stays `Revoking` | No wrong publication is published; second revoke returns Deferred | 2 | Callback is registered before `Deferred`; failure is logged |
+| F-11 | Revocation executor fails on foreign node | `NodeRemoval::NotOwner` | `RevokeFailed` | Publication hidden; retry possible | 3 | No unpublish/remove on failure; state transitions to retryable `RevokeFailed` |
 | F-12 | Foreign node owner during removal | A stale binding tries to revoke a node owned by the new binding | `NotOwner` | The new binding keeps its projection; the stale entry is not retired by this call | 3 | kclass logs `NotOwner` and returns `BadState`; it never falls back to ID-only revocation |
 | F-13 | Class unpublish panics after a claim | Driver `unpublish_class` implementation panics | Reservation is not finished | Same-ID publication stays blocked | 3 | No unwind protection; class unpublish implementations must not panic; the panic itself is the primary fault |
 
@@ -245,20 +270,18 @@ Severity levels:
 
 - Publish validation failures return `DriverError` (`BadState`,
   `InvalidInput`, `AlreadyExists`, `ResourceBusy`); nothing panics.
-- devices, find, and subscribe are infallible. Publish reports duplicate
-  identity and in-flight same-ID retirement explicitly.
-- Removal of a single entry is a sequence rather than one operation: node
-  revocation → claim → unpublish outside the lock → finish. A `ResourceBusy`
-  during eviction with a registered deferred completion is the normal
-  node-in-flight outcome; the node finishing path owns the eventual
-  unpublish. Any other eviction error is logged and leaves the entry for a
-  later retry rather than force-clearing it.
+- devices, publication lookup and subscribe are infallible. Publish reports a
+  duplicate `PublicationId`; multiple `DeviceId` siblings are valid.
+- Removal of one publication is a sequence: exact node revocation → unpublish
+  outside the lock → removed callbacks → terminal entry removal. `Deferred`
+  means the node/activation executor owns the rest; `NotOwner` enters
+  retryable `RevokeFailed`; no error force-clears a sibling.
 - Device-node allocation failures are isolated from the typed class registry;
   the runtime remains available to direct class consumers.
 - A subscriber callback panic currently has no unwind protection;
   subscriber implementation quality is relied upon. A panic in
-  `unpublish_class` after a claim leaves the same-ID reservation installed;
-  this is a fail-closed outcome, not a silent wrong-binding publication.
+  `unpublish_class` after a claim may leave the publication in `Revoking`;
+  this is a fail-closed outcome, not a silent sibling deletion.
 - `ClassDevice`'s `driver_name()` / `driver_id()` read the captured
   `BindingRef` snapshot and cannot fail after construction; an unbound or
   terminal parent is rejected at construction with `BadState` instead.
@@ -267,10 +290,9 @@ Severity levels:
   `Removing`; only a successful removal commit is terminal for the captured
   binding, and a later rebind is a different instance that the old handle
   never follows.
-- Test cleanup (`remove_class_device_for_tests`) runs the production
-  retirement path and may drop leftover entries, but it preserves deferred
-  entries whose completion callback is still registered and must only run
-  after every task that could hold a claim has been joined.
+- Test cleanup (`remove_class_device_for_tests`) requests exact revocation
+  for every entry and must only run after tasks that could hold an activation
+  or completion are joined.
 - kclass contains no `unsafe` blocks, so class adapter logic cannot cause
   UB; the historical framebuffer raw-pointer path moved to `fbdevice`'s
   fbdev emulation.
@@ -308,14 +330,13 @@ registries and `ClassDevice` objects.
 - Device-node templates currently cover only input event devices and DRM
   primary nodes. Other classes remain discoverable through kclass without a
   Linux-compatible node projection.
-- A same-ID retirement reservation blocks publication until the class runtime
-  has been unpublished. If a driver's `unpublish_class` blocks indefinitely,
-  the ID stays unpublished-by-design rather than being replaced early.
-- A deferred node removal keeps its entry and reservation until the node
-  completion callback runs; kclass does not time it out.
-- The retirement token is `u64` and is not persisted; after `u64::MAX`
-  retirements the class can no longer start a new retirement sequence and
-  returns `BadState`.
+- A revoke request closes availability immediately; cleanup may remain
+  `Revoking` or `RevokeFailed` until the node/backend completes or a retry is
+  made. kclass does not time out a deferred node.
+- `RevokeFailed` has no automatic retry loop; a later exact revoke or binding
+  retirement must retry it.
+- `PublicationId` is monotonic `u64`; at `u64::MAX` new publication returns
+  `ResourceBusy` and no id is reused.
 
 ## Audit Checklist
 

@@ -295,7 +295,7 @@ fn two_block_activations_close_independently() {
 }
 
 #[def_test(serial)]
-fn block_publish_failure_closes_only_the_new_activation() {
+fn disk_alloc_failure_closes_only_the_new_activation() {
     let (device_a, hardware_a) = block_test_disk(0, false);
     let (device_b, hardware_b) = block_test_disk(1, false);
     let parent = bound_parent_with_id(u64::MAX - 122);
@@ -307,11 +307,12 @@ fn block_publish_failure_closes_only_the_new_activation() {
     .unwrap()
     .unwrap();
 
+    fail_next_disk_alloc();
     let failed = kdevice::ProbeContext::with_test_context(parent, |ctx| {
         activate_device(ctx, device_b, resource(IRQ), &PROVIDER)
     })
     .unwrap();
-    assert!(matches!(failed, Err(DriverError::AlreadyExists)));
+    assert!(matches!(failed, Err(DriverError::NoMemory)));
     assert!(!hardware_b.lock().is_queue_live());
     assert!(hardware_a.lock().is_queue_live());
     assert_eq!(ACTIONS.lock().len(), 1, "only the first activation remains");

@@ -530,17 +530,31 @@ impl Router {
         self.devices.register(device)
     }
 
-    /// Removes a device and returns the notifications describing the state it
-    /// owned.  Address, route, and neighbor removals precede the link removal
-    /// so a subscriber can still resolve the interface while processing them.
+    /// Test-only compatibility lookup for legacy DeviceId-based fixtures.
+    #[cfg(unittest)]
     pub(crate) fn remove_device_by_model_id(
         &mut self,
         id: kdevice::DeviceId,
     ) -> Option<Vec<NetworkEvent>> {
+        let publication = self
+            .devices
+            .iter()
+            .find(|device| device.device_id() == Some(id))
+            .and_then(|device| device.publication_id())?;
+        self.remove_device_by_publication(publication)
+    }
+
+    /// Removes a device and returns the notifications describing the state it
+    /// owned.  Address, route, and neighbor removals precede the link removal
+    /// so a subscriber can still resolve the interface while processing them.
+    pub(crate) fn remove_device_by_publication(
+        &mut self,
+        publication: kdevice::PublicationId,
+    ) -> Option<Vec<NetworkEvent>> {
         let pos = self
             .devices
             .iter()
-            .position(|device| device.device_id() == Some(id))?;
+            .position(|device| device.publication_id() == Some(publication))?;
         let dev = self.devices.id_at(pos);
         let mut link = self.devices.get_by_id(dev)?.link_snapshot(dev.ifindex());
         let neighbors = self.devices.get_by_id(dev)?.neighbor_snapshots(dev);

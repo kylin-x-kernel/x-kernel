@@ -32,7 +32,7 @@ use alloc::collections::BTreeMap;
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use kdevice::{DeviceEvent, DeviceEventKind, DeviceId, ProbeContext};
+use kdevice::{DeviceEvent, DeviceEventKind, DeviceId, ProbeContext, PublicationId};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
@@ -43,8 +43,11 @@ mod generic;
 pub mod test_hooks;
 
 /// Re-export generic class-device primitives that are part of the public API.
-pub use self::generic::{ClassAvailabilityCallback, ClassDevice};
-use self::generic::{ClassDeviceMetadata, ClassRegistry};
+pub use self::generic::{
+    ClassAvailabilityCallback, ClassDevice, ClassPublication, ClassRemovalCallback,
+    RevocationOutcome,
+};
+use self::generic::{ClassDeviceMetadata, ClassRegistry, RevocationStart};
 
 static ACTIVATION_BRIDGE: LazyInit<()> = LazyInit::new();
 
@@ -103,9 +106,14 @@ macro_rules! class_registry {
         $registry_fn:ident,
         $publish_fn:ident,
         $devices_fn:ident,
-        $find_fn:ident,
+        $find_publication_fn:ident,
+        $publications_for_device_fn:ident,
         $subscribe_fn:ident,
+        $subscribe_removed_fn:ident,
         $notify_fn:ident,
+        $activate_fn:ident,
+        $execute_fn:ident,
+        $finish_fn:ident,
         $remove_fn:ident,
         $evict_fn:ident,
         $retire_fn:ident,
@@ -127,7 +135,10 @@ macro_rules! class_registry {
         /// context's binding, so a later replacement binding never inherits
         /// this handle's identity.
         #[cfg(feature = $feature)]
-        pub fn $publish_fn(ctx: &ProbeContext<'_>, runtime: $ty) -> DriverResult<ClassDevice<$ty>> {
+        pub fn $publish_fn(
+            ctx: &ProbeContext<'_>,
+            runtime: $ty,
+        ) -> DriverResult<ClassPublication<$ty>> {
             let parent = ctx.device().clone();
             let binding = ctx.binding().clone();
             let name = runtime.name().into();
@@ -143,33 +154,38 @@ macro_rules! class_registry {
                 return Err(DriverError::InvalidInput);
             }
             let metadata = runtime.class_metadata();
-            let device = ClassDevice::try_new_with_binding(
-                parent, binding, runtime, name, $kind, irq, metadata,
+            let publication_id = PublicationId::allocate()?;
+            let device = ClassDevice::try_new_for_publication(
+                parent,
+                binding,
+                publication_id,
+                runtime,
+                name,
+                $kind,
+                irq,
+                metadata,
             )?;
             let id = device.id();
 
-            // Reject an in-flight retirement or a live same-ID entry before
-            // touching class resources. Terminal entries are then evicted in
-            // the fixed order node -> unpublish -> registry removal.
-            let _ = $registry_fn().lock().terminal_entries_for_retirement(id)?;
-            $evict_fn(id)?;
-
+            // The class backend must roll back its own partial registration;
+            // the registry never receives a half-published runtime.
             device.with(ClassRuntimeMetadata::publish_class)?;
-            let is_active = device.is_available();
+            let publication = ClassPublication::new(device.clone());
             if let Err(error) = $registry_fn().lock().publish(device.clone()) {
                 device.with(ClassRuntimeMetadata::unpublish_class);
                 return Err(error);
             }
             log::debug!(
-                "device class '{}': published {:?} (driver={})",
+                "device class '{}': published {:?}/{} (driver={})",
                 $kind.as_str(),
                 id,
+                publication_id.raw(),
                 device.driver_name(),
             );
-            if is_active {
-                notify_class_available($kind, id);
+            if device.binding_ref().is_active() {
+                $notify_fn(id);
             }
-            Ok(device)
+            Ok(publication)
         }
 
         /// Return every currently available runtime capability for this class.
@@ -178,106 +194,183 @@ macro_rules! class_registry {
             $registry_fn().lock().devices()
         }
 
-        /// Find one currently available runtime capability by device ID.
-        #[cfg(feature = $feature)]
-        pub fn $find_fn(id: DeviceId) -> Option<ClassDevice<$ty>> {
-            $registry_fn().lock().find(id)
-        }
-
         /// Subscribe to future runtime capabilities for this class.
         #[cfg(feature = $feature)]
         pub fn $subscribe_fn(callback: ClassAvailabilityCallback<$ty>) {
             $registry_fn().lock().subscribe_available(callback);
         }
 
-        /// Claim the terminal class entry for `binding` and unpublish it
-        /// outside the registry lock.
-        ///
-        /// This is the single retirement path used by synchronous eviction and
-        /// by deferred node completion. Only the executor that receives
-        /// `Claimed` unpublishes; the reservation blocks same-ID publication
-        /// until `finish_retirement` clears it.
+        /// Find one publication by its exact identity.
         #[cfg(feature = $feature)]
-        fn $retire_fn(id: DeviceId, binding: kdevice::BindingRef) -> DriverResult<()> {
-            let claim = $registry_fn()
-                .lock()
-                .claim_retirement(id, core::slice::from_ref(&binding))?;
-            if matches!(&claim, crate::generic::ClaimOutcome::Claimed { .. }) {
-                #[cfg(unittest)]
-                crate::test_hooks::pause(crate::test_hooks::ClassPause::RetirementClaimed { id });
-                for device in claim.removed() {
-                    device.with(ClassRuntimeMetadata::unpublish_class);
-                }
-                #[cfg(unittest)]
-                crate::test_hooks::pause(crate::test_hooks::ClassPause::RetirementUnpublished {
-                    id,
-                });
-                $registry_fn().lock().finish_retirement(&claim);
-                Ok(())
-            } else if matches!(&claim, crate::generic::ClaimOutcome::Retiring) {
-                Err(DriverError::ResourceBusy)
-            } else {
-                Ok(())
-            }
+        pub fn $find_publication_fn(publication: PublicationId) -> Option<ClassDevice<$ty>> {
+            $registry_fn().lock().find_publication(publication)
         }
 
-        /// Retire every terminal entry for `id`, preserving the visible order
-        /// node revocation -> unpublish -> reservation release.
+        /// Enumerate currently available publications for a parent device.
         #[cfg(feature = $feature)]
-        fn $evict_fn(id: DeviceId) -> DriverResult<()> {
-            let terminals = $registry_fn().lock().terminal_entries_for_retirement(id)?;
-            if terminals.is_empty() {
-                return Ok(());
-            }
-            for device in terminals {
-                let binding = device.binding_ref().clone();
-                let on_deferred = {
-                    let binding = binding.clone();
-                    Box::new(move || {
-                        if let Err(error) = $retire_fn(id, binding) {
-                            log::error!(
-                                "device class '{}': deferred retirement of {:?} failed: {}",
-                                $kind.as_str(),
-                                id,
-                                error,
-                            );
-                        }
-                    })
-                };
-                match kdevice::unregister_device_node_for_binding(id, &binding, on_deferred) {
-                    kdevice::NodeRemoval::Removed | kdevice::NodeRemoval::NotFound => {}
-                    kdevice::NodeRemoval::Deferred | kdevice::NodeRemoval::DeferredExisting => {
-                        return Err(DriverError::ResourceBusy);
-                    }
-                    kdevice::NodeRemoval::NotOwner => {
+        pub fn $publications_for_device_fn(id: DeviceId) -> Vec<ClassDevice<$ty>> {
+            $registry_fn().lock().available_publications_for_device(id)
+        }
+
+        /// Subscribe to exact publication removal notifications.
+        #[cfg(feature = $feature)]
+        pub fn $subscribe_removed_fn(callback: ClassRemovalCallback) {
+            $registry_fn().lock().subscribe_removed(callback);
+        }
+
+        /// Execute one exact publication revocation after the registry granted
+        /// the executor role.
+        #[cfg(feature = $feature)]
+        fn $execute_fn(device: ClassDevice<$ty>) -> DriverResult<RevocationOutcome> {
+            let id = device.id();
+            let publication = device.publication_id();
+            let removal = if device
+                .with(ClassRuntimeMetadata::device_node_class)
+                .is_some()
+            {
+                let finish_device = device.clone();
+                let on_deferred = Box::new(move || {
+                    if let Err(error) = $finish_fn(finish_device) {
                         log::error!(
-                            "device class '{}': device node for {:?} belongs to another binding",
+                            "device class '{}': deferred publication {} cleanup failed: {}",
                             $kind.as_str(),
-                            id,
+                            publication.raw(),
+                            error,
                         );
-                        return Err(DriverError::BadState);
                     }
+                });
+                kdevice::unregister_device_node_for_publication(
+                    id,
+                    publication,
+                    device.binding_ref(),
+                    on_deferred,
+                )
+            } else {
+                kdevice::NodeRemoval::NotFound
+            };
+            #[cfg(unittest)]
+            let removal = if crate::test_hooks::take_forced_node_not_owner() {
+                kdevice::NodeRemoval::NotOwner
+            } else {
+                removal
+            };
+            match removal {
+                kdevice::NodeRemoval::Removed | kdevice::NodeRemoval::NotFound => {
+                    $finish_fn(device)
                 }
-                // Retire each entry as soon as its node is gone, so a later
-                // deferred entry cannot strand the earlier terminal entries.
-                $retire_fn(id, binding)?;
+                kdevice::NodeRemoval::Deferred | kdevice::NodeRemoval::DeferredExisting => {
+                    Ok(RevocationOutcome::Deferred)
+                }
+                kdevice::NodeRemoval::NotOwner => {
+                    $registry_fn().lock().mark_revoke_failed(publication);
+                    Err(DriverError::BadState)
+                }
             }
-            Ok(())
         }
 
+        /// Complete unpublish, removed callbacks and the terminal state for an
+        /// executor that already owns the publication.
         #[cfg(feature = $feature)]
-        fn $notify_fn(id: DeviceId) {
-            let (device, callbacks) = {
-                let registry = $registry_fn().lock();
-                let Some(device) = registry.find(id) else {
-                    return;
-                };
-                (device, registry.availability_callbacks())
+        fn $finish_fn(device: ClassDevice<$ty>) -> DriverResult<RevocationOutcome> {
+            let id = device.id();
+            let publication = device.publication_id();
+            #[cfg(unittest)]
+            crate::test_hooks::pause(crate::test_hooks::ClassPause::BeforeUnpublish {
+                id,
+                publication,
+            });
+            device.with(ClassRuntimeMetadata::unpublish_class);
+            #[cfg(unittest)]
+            crate::test_hooks::pause(crate::test_hooks::ClassPause::BeforeRemovedCallback {
+                id,
+                publication,
+            });
+            let callbacks = $registry_fn().lock().removed_callbacks();
+            for callback in callbacks {
+                callback(id, publication);
+            }
+            #[cfg(unittest)]
+            crate::test_hooks::pause(crate::test_hooks::ClassPause::BeforeFinalRevoked {
+                id,
+                publication,
+            });
+            let removed = {
+                let mut registry = $registry_fn().lock();
+                let removed = registry.remove_publication(publication);
+                if removed.is_some() {
+                    device.finish_revoked();
+                }
+                removed
             };
+            if removed.is_none() {
+                return Ok(RevocationOutcome::AlreadyRevoked);
+            }
+            Ok(RevocationOutcome::Completed)
+        }
 
+        /// Request exact publication revocation.
+        #[cfg(feature = $feature)]
+        fn $retire_fn(publication: PublicationId) -> DriverResult<RevocationOutcome> {
+            let start = $registry_fn().lock().request_revoke(publication);
+            match start {
+                RevocationStart::Execute(device) => $execute_fn(device),
+                RevocationStart::Deferred => Ok(RevocationOutcome::Deferred),
+                RevocationStart::AlreadyRevoked => Ok(RevocationOutcome::AlreadyRevoked),
+                RevocationStart::Failed => Err(DriverError::BadState),
+            }
+        }
+
+        /// Activate one publication. The registry lock is only used for state
+        /// handoff; node work, callbacks and unpublish run outside it.
+        #[cfg(feature = $feature)]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "TODO(cg): split activation handoff into claim, node/notify, and finalize \
+                      helpers"
+        )]
+        fn $activate_fn(device: ClassDevice<$ty>) {
+            let claimed = {
+                let _registry = $registry_fn().lock();
+                device.begin_activation()
+            };
+            if !claimed {
+                return;
+            }
+            #[cfg(unittest)]
+            crate::test_hooks::pause(crate::test_hooks::ClassPause::ActivationClaimed {
+                id: device.id(),
+                publication: device.publication_id(),
+            });
+            if device.revoke_requested() {
+                let revoke = {
+                    let _registry = $registry_fn().lock();
+                    device.take_activation_revoke()
+                };
+                if revoke {
+                    let _ = $execute_fn(device);
+                }
+                return;
+            }
+
+            #[cfg(unittest)]
+            crate::test_hooks::pause(crate::test_hooks::ClassPause::BeforeNodeRegistration {
+                id: device.id(),
+                publication: device.publication_id(),
+            });
+            if device.revoke_requested() {
+                let revoke = {
+                    let _registry = $registry_fn().lock();
+                    device.take_activation_revoke()
+                };
+                if revoke {
+                    let _ = $execute_fn(device);
+                }
+                return;
+            }
             if let Some(node_class) = device.with(ClassRuntimeMetadata::device_node_class)
-                && let Err(error) = kdevice::register_device_node_for_binding(
-                    id,
+                && let Err(error) = kdevice::register_device_node_for_publication(
+                    device.id(),
+                    device.publication_id(),
                     device.binding_ref(),
                     node_class,
                     String::from(device.name()),
@@ -290,83 +383,124 @@ macro_rules! class_registry {
                 )
             {
                 log::warn!(
-                    "device class '{}': failed to assign a device node for {:?}: {}",
+                    "device class '{}': failed to assign publication node {}: {}",
                     $kind.as_str(),
-                    id,
+                    device.publication_id().raw(),
                     error,
                 );
             }
 
+            if device.revoke_requested() {
+                let revoke = {
+                    let _registry = $registry_fn().lock();
+                    device.take_activation_revoke()
+                };
+                if revoke {
+                    let _ = $execute_fn(device);
+                }
+                return;
+            }
+            #[cfg(unittest)]
+            crate::test_hooks::pause(crate::test_hooks::ClassPause::BeforeCallbackCommit {
+                id: device.id(),
+                publication: device.publication_id(),
+            });
+            let committed = {
+                let _registry = $registry_fn().lock();
+                device.commit_notification()
+            };
+            if !committed {
+                let revoke = {
+                    let _registry = $registry_fn().lock();
+                    device.take_activation_revoke()
+                };
+                if revoke {
+                    let _ = $execute_fn(device);
+                }
+                return;
+            }
+            #[cfg(unittest)]
+            crate::test_hooks::pause(crate::test_hooks::ClassPause::AfterCallbackCommit {
+                id: device.id(),
+                publication: device.publication_id(),
+            });
+            let callbacks = $registry_fn().lock().available_callbacks();
             for callback in callbacks {
                 callback(device.clone());
             }
+            #[cfg(unittest)]
+            crate::test_hooks::pause(crate::test_hooks::ClassPause::BeforeAvailableFinalize {
+                id: device.id(),
+                publication: device.publication_id(),
+            });
+            let finished = {
+                let _registry = $registry_fn().lock();
+                device.finish_notification()
+            };
+            if !finished {
+                let revoke = {
+                    let _registry = $registry_fn().lock();
+                    device.take_activation_revoke()
+                };
+                if revoke {
+                    let _ = $execute_fn(device);
+                }
+            }
+        }
+
+        /// Notify every publication for one parent that its binding activated.
+        #[cfg(feature = $feature)]
+        fn $notify_fn(id: DeviceId) {
+            let devices = $registry_fn().lock().all_publications_for_device(id);
+            for device in devices {
+                // The Activated event may be dispatched before the binding
+                // helper's is_active() observation is visible; terminal old
+                // bindings are the entries that must never activate.
+                if !device.binding_ref().is_terminal() {
+                    $activate_fn(device);
+                }
+            }
+        }
+
+        /// Retire every publication whose captured binding is terminal.
+        #[cfg(feature = $feature)]
+        fn $evict_fn(id: DeviceId) -> DriverResult<()> {
+            let devices = $registry_fn().lock().all_publications_for_device(id);
+            for device in devices {
+                if !device.binding_ref().is_terminal() {
+                    continue;
+                }
+                if let Err(error) = $retire_fn(device.publication_id()) {
+                    log::error!(
+                        "device class '{}': retirement of publication {} failed: {}",
+                        $kind.as_str(),
+                        device.publication_id().raw(),
+                        error,
+                    );
+                }
+            }
+            Ok(())
         }
 
         #[cfg(feature = $feature)]
         fn $remove_fn(id: DeviceId) {
             if let Err(error) = $evict_fn(id) {
-                // `ResourceBusy` with a registered deferred completion is the
-                // normal node-in-flight outcome; the node finishing path owns
-                // the eventual unpublish. Only unexpected eviction failures
-                // deserve operator-visible warning.
-                if matches!(&error, DriverError::ResourceBusy) {
-                    log::debug!(
-                        "device class '{}': retirement of {:?} deferred: {}",
-                        $kind.as_str(),
-                        id,
-                        error,
-                    );
-                } else {
-                    log::warn!(
-                        "device class '{}': retired device {:?} not fully cleaned: {}",
-                        $kind.as_str(),
-                        id,
-                        error,
-                    );
-                }
+                log::warn!(
+                    "device class '{}': retired device {:?} not fully cleaned: {}",
+                    $kind.as_str(),
+                    id,
+                    error,
+                );
             }
         }
 
-        /// Test cleanup: run the production retirement path, then drop any
-        /// leftover entries for `id`.
-        ///
-        /// The caller must have joined every task that could still hold a
-        /// retirement claim. Deferred node completions keep their entries (and
-        /// their registered callback); this helper does not force-clear them.
+        /// Test cleanup: attempt exact revocation for every remaining entry.
         #[cfg(all(feature = $feature, unittest))]
         fn $remove_any_fn(id: DeviceId) {
             $remove_fn(id);
-            let entries = $registry_fn().lock().entries_for_tests(id);
-            let mut deferred: Vec<kdevice::BindingRef> = Vec::new();
-            for device in &entries {
-                let binding = device.binding_ref().clone();
-                let on_deferred = {
-                    let binding = binding.clone();
-                    Box::new(move || {
-                        if let Err(error) = $retire_fn(id, binding) {
-                            log::error!(
-                                "device class '{}': deferred test retirement of {:?} failed: {}",
-                                $kind.as_str(),
-                                id,
-                                error,
-                            );
-                        }
-                    })
-                };
-                match kdevice::unregister_device_node_for_binding(id, &binding, on_deferred) {
-                    kdevice::NodeRemoval::Removed | kdevice::NodeRemoval::NotFound => {}
-                    kdevice::NodeRemoval::Deferred | kdevice::NodeRemoval::DeferredExisting => {
-                        deferred.push(binding);
-                    }
-                    kdevice::NodeRemoval::NotOwner => log::error!(
-                        "device class '{}': test cleanup found a foreign node owner for {:?}",
-                        $kind.as_str(),
-                        id,
-                    ),
-                }
-            }
-            for device in $registry_fn().lock().remove_any_for_tests(id, &deferred) {
-                device.with(ClassRuntimeMetadata::unpublish_class);
+            let entries = $registry_fn().lock().all_publications_for_device(id);
+            for device in entries {
+                let _ = $retire_fn(device.publication_id());
             }
         }
     };
@@ -382,15 +516,33 @@ macro_rules! class_registries {
             $registry_fn:ident,
             $publish_fn:ident,
             $devices_fn:ident,
-            $find_fn:ident,
+            $find_publication_fn:ident,
+            $publications_for_device_fn:ident,
             $subscribe_fn:ident,
+            $subscribe_removed_fn:ident,
             $notify_fn:ident,
+            $activate_fn:ident,
+            $execute_fn:ident,
+            $finish_fn:ident,
             $remove_fn:ident,
             $evict_fn:ident,
             $retire_fn:ident,
             $remove_any_fn:ident
         );+ $(;)?
     ) => {
+        pub(crate) fn revoke_publication(
+            kind: DeviceKind,
+            publication: PublicationId,
+        ) -> DriverResult<RevocationOutcome> {
+            match kind {
+                $(
+                    #[cfg(feature = $feature)]
+                    $kind => $retire_fn(publication),
+                )+
+                _ => Err(DriverError::BadState),
+            }
+        }
+
         fn notify_class_available(kind: DeviceKind, id: DeviceId) {
             match kind {
                 $(
@@ -432,9 +584,14 @@ macro_rules! class_registries {
                 $registry_fn,
                 $publish_fn,
                 $devices_fn,
-                $find_fn,
+                $find_publication_fn,
+                $publications_for_device_fn,
                 $subscribe_fn,
+                $subscribe_removed_fn,
                 $notify_fn,
+                $activate_fn,
+                $execute_fn,
+                $finish_fn,
                 $remove_fn,
                 $evict_fn,
                 $retire_fn,
@@ -866,13 +1023,19 @@ class_registries! {
     net_class_registry,
     publish_net,
     net_devices,
-    find_net_device,
+    find_net_publication,
+    net_publications_for_device,
     subscribe_net_available,
+    subscribe_net_removed,
     notify_net_available,
+    activate_net_publication,
+    execute_net_revoke,
+    finish_net_revoke,
     remove_net_device,
     evict_net_terminal,
     retire_net_binding,
     remove_net_class_any;
+
     "block",
     BlockDeviceImpl,
     DeviceKind::Block,
@@ -880,13 +1043,19 @@ class_registries! {
     block_class_registry,
     publish_block,
     block_devices,
-    find_block_device,
+    find_block_publication,
+    block_publications_for_device,
     subscribe_block_available,
+    subscribe_block_removed,
     notify_block_available,
+    activate_block_publication,
+    execute_block_revoke,
+    finish_block_revoke,
     remove_block_device,
     evict_block_terminal,
     retire_block_binding,
     remove_block_class_any;
+
     "char",
     CharDeviceImpl,
     DeviceKind::Char,
@@ -894,13 +1063,19 @@ class_registries! {
     char_class_registry,
     publish_char,
     char_devices,
-    find_char_device,
+    find_char_publication,
+    char_publications_for_device,
     subscribe_char_available,
+    subscribe_char_removed,
     notify_char_available,
+    activate_char_publication,
+    execute_char_revoke,
+    finish_char_revoke,
     remove_char_device,
     evict_char_terminal,
     retire_char_binding,
     remove_char_class_any;
+
     "hwrng",
     HwrngDeviceImpl,
     DeviceKind::Hwrng,
@@ -908,13 +1083,19 @@ class_registries! {
     hwrng_class_registry,
     publish_hwrng,
     hwrng_devices,
-    find_hwrng_device,
+    find_hwrng_publication,
+    hwrng_publications_for_device,
     subscribe_hwrng_available,
+    subscribe_hwrng_removed,
     notify_hwrng_available,
+    activate_hwrng_publication,
+    execute_hwrng_revoke,
+    finish_hwrng_revoke,
     remove_hwrng_device,
     evict_hwrng_terminal,
     retire_hwrng_binding,
     remove_hwrng_class_any;
+
     "display",
     DisplayDeviceImpl,
     DeviceKind::Display,
@@ -922,13 +1103,19 @@ class_registries! {
     display_class_registry,
     publish_display,
     display_devices,
-    find_display_device,
+    find_display_publication,
+    display_publications_for_device,
     subscribe_display_available,
+    subscribe_display_removed,
     notify_display_available,
+    activate_display_publication,
+    execute_display_revoke,
+    finish_display_revoke,
     remove_display_device,
     evict_display_terminal,
     retire_display_binding,
     remove_display_class_any;
+
     "input",
     InputDeviceImpl,
     DeviceKind::Input,
@@ -936,13 +1123,19 @@ class_registries! {
     input_class_registry,
     publish_input,
     input_devices,
-    find_input_device,
+    find_input_publication,
+    input_publications_for_device,
     subscribe_input_available,
+    subscribe_input_removed,
     notify_input_available,
+    activate_input_publication,
+    execute_input_revoke,
+    finish_input_revoke,
     remove_input_device,
     evict_input_terminal,
     retire_input_binding,
     remove_input_class_any;
+
     "vsock",
     VsockDeviceImpl,
     DeviceKind::Vsock,
@@ -950,13 +1143,19 @@ class_registries! {
     vsock_class_registry,
     publish_vsock,
     vsock_devices,
-    find_vsock_device,
+    find_vsock_publication,
+    vsock_publications_for_device,
     subscribe_vsock_available,
+    subscribe_vsock_removed,
     notify_vsock_available,
+    activate_vsock_publication,
+    execute_vsock_revoke,
+    finish_vsock_revoke,
     remove_vsock_device,
     evict_vsock_terminal,
     retire_vsock_binding,
     remove_vsock_class_any;
+
     "virtio-9p",
     Virtio9pDeviceImpl,
     DeviceKind::Fs9p,
@@ -964,13 +1163,19 @@ class_registries! {
     virtio_9p_class_registry,
     publish_virtio_9p,
     virtio_9p_devices,
-    find_virtio_9p_device,
+    find_virtio_9p_publication,
+    virtio_9p_publications_for_device,
     subscribe_virtio_9p_available,
+    subscribe_virtio_9p_removed,
     notify_virtio_9p_available,
+    activate_virtio_9p_publication,
+    execute_virtio_9p_revoke,
+    finish_virtio_9p_revoke,
     remove_virtio_9p_device,
     evict_virtio_9p_terminal,
     retire_virtio_9p_binding,
     remove_virtio_9p_class_any;
+
 }
 
 /// Shared class prelude for runtime publishers and consumers.
@@ -1000,6 +1205,44 @@ pub mod prelude {
     };
 }
 
+/// Test-only activation trigger for a bound VSOCK fixture.
+#[cfg(all(unittest, feature = "vsock"))]
+pub fn activate_vsock_for_test(id: DeviceId) {
+    notify_vsock_available(id);
+}
+
+/// Test-only activation trigger for a bound HWRNG fixture.
+#[cfg(all(unittest, feature = "hwrng"))]
+pub fn activate_hwrng_for_test(id: DeviceId) {
+    notify_hwrng_available(id);
+}
+
+/// Test-only scoped input publication helper.
+#[cfg(all(unittest, feature = "input"))]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: InputDeviceImpl is the production Box trait \
+              object"
+)]
+pub fn publish_input_for_test(
+    parent: Arc<kdevice::DeviceObject>,
+    runtime: InputDeviceImpl,
+) -> DriverResult<ClassPublication<InputDeviceImpl>> {
+    ProbeContext::with_test_context(parent, |ctx| publish_input(ctx, runtime))
+        .unwrap_or(Err(DriverError::BadState))
+}
+
+/// Test-only activation trigger for a bound input fixture.
+#[cfg(all(unittest, feature = "input"))]
+pub fn activate_input_for_test(id: DeviceId) {
+    notify_input_available(id);
+}
+
 /// Test-only scoped publication helper. Production drivers use
 /// [`publish_char`] with a `ProbeContext`.
 #[cfg(all(unittest, feature = "char"))]
@@ -1016,7 +1259,7 @@ pub mod prelude {
 pub fn publish_char_for_test(
     parent: Arc<kdevice::DeviceObject>,
     runtime: CharDeviceImpl,
-) -> DriverResult<ClassDevice<CharDeviceImpl>> {
+) -> DriverResult<ClassPublication<CharDeviceImpl>> {
     ProbeContext::with_test_context(parent, |ctx| publish_char(ctx, runtime))
         .unwrap_or(Err(DriverError::BadState))
 }

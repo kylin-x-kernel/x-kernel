@@ -35,7 +35,7 @@ VirtIO input IRQ -> InputEventNotifier -> InputEndpoint.poller (WorkHandle)
                           independent devfs open-file queues
 ```
 
-`INPUT_ENDPOINTS` holds at most one `InputEndpoint` per driver-core device id.
+`INPUT_ENDPOINTS` holds at most one `InputEndpoint` per `PublicationId` (device publication).
 `init_input` subscribes to removal and availability, then visits the existing
 class snapshot. `input_endpoint` also creates an endpoint on demand because
 device-node publication can precede the class availability callback. The same

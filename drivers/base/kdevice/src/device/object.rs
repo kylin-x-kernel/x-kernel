@@ -121,6 +121,17 @@ impl DeviceObject {
     /// running the whole probe/remove path. Does nothing when removal is
     /// already in progress or a `DeviceUse` is outstanding.
     #[cfg(unittest)]
+    pub fn force_active_for_test(&self) {
+        let Some(kind) = self.device_kind() else {
+            return;
+        };
+        let slot = self.slot.lock();
+        if let Some(runtime) = slot.current.as_ref() {
+            runtime.activate(kind);
+        }
+    }
+
+    #[cfg(unittest)]
     pub fn force_removed_for_test(&self) {
         if self.begin_removing() {
             self.mark_removed();

@@ -43,6 +43,11 @@ Rust's type system and ownership model:
   `DeviceUse` guards retain the exact instance they were created from, so they
   cannot follow the object into a later binding. `DeviceRegistry` owns the
   global indexes; binding transitions are atomic through `AtomicU8` + CAS;
+- **Publication identity**: kdevice owns the opaque, globally unique
+  `PublicationId` space because node ownership must be keyed without a kclass
+  dependency. It owns no publication state or revocation permission; kclass
+  owns those. `DeviceNodeKey(DeviceId, PublicationId)` lets one stable device
+  and one binding own multiple same-class nodes independently.
 - **Event-driven**: lifecycle events (Published/Matched/Bound/Activated/
   Removed and the instance-scoped BindingRetired) are delivered to observers
   such as `kclass` through bucketed subscribers.
@@ -63,6 +68,7 @@ drivers/base/kdevice/
     │                             #   PciBusTypeMatcher, PlatformBusTypeMatcher
     ├── device/
     │   ├── mod.rs                # device submodule root
+    │   ├── publication.rs        # opaque PublicationId identity allocator
     │   ├── binding.rs            # private BindingRuntime (lifecycle, usage,
     │   │                         #   metadata, devres) + public BindingRef
     │   ├── desc.rs               # DeviceDesc, DeviceId, DeviceLocation,
@@ -71,8 +77,8 @@ drivers/base/kdevice/
     │   │                         #   registration/binding slot), DeviceUse guard
     │   ├── handles.rs            # BusHandle, DeviceCore, DriverCore
     │   └── resource.rs           # resource type re-exports
-    ├── device_node.rs            # DeviceNode identity, class allocators,
-    │                             # snapshots and lifecycle subscribers
+    ├── device_node.rs            # DeviceNodeKey(DeviceId, PublicationId), class
+    │                             # allocators, snapshots and lifecycle subscribers
     ├── driver/
     │   └── mod.rs                # DriverId, DriverInfo, DriverObject,
     │                             #   DeviceDriver trait, DeviceMatcher impls,
@@ -273,7 +279,7 @@ hardware usable and does not delay or re-run the explicit cleanup batch.
 
 ## Device-node identity lifecycle
 
-`kclass` calls `register_device_node` from the `Activated` event path for
+`kclass` calls `register_device_node_for_publication` from the `Activated` event path for
 runtime classes that require Linux character nodes. The caller supplies the
 driver-core id, class-specific metadata, runtime name, driver name, and bus
 location. `kdevice` assigns the lowest free class index and derives both the
@@ -328,8 +334,9 @@ rejected instead of backfilling synthetic add events.
 ### Binding-owned nodes and deferred retirement
 
 A class entry captures a `BindingRef`, so a node must be removable only by the
-binding that created it. `register_device_node_for_binding` records
-`(core_id, BindingRef)`; `unregister_device_node_for_binding` returns one of:
+binding that created it. `register_device_node_for_publication` records
+`(core_id, PublicationId, BindingRef)`; `unregister_device_node_for_publication`
+takes `(DeviceNodeKey, BindingRef)` and returns one of:
 
 - `Removed` — the node was this binding's and its removal callbacks ran;
 - `NotFound` — no node is registered for that id;
@@ -340,16 +347,15 @@ binding that created it. `register_device_node_for_binding` records
   callback was not stored and is dropped after the registry lock is released;
 - `NotOwner` — the node belongs to another binding; nothing is touched.
 
-Callbacks that are not registered by `begin_remove_for_binding` are kept
+Callbacks that are not registered by `begin_remove_for_publication` are kept
 outside the registry guard by the public wrapper and dropped only after the
 guard is released. Their captured resources can therefore take locks or query
 the node registry in `Drop` without running under a registry spinlock.
 
-The legacy `register_device_node`/`unregister_device_node` pair remains for
-callers that have no binding handle. A node created by the legacy path has no
-owner, so the legacy unregister removes it; a node owned by a binding is
-rejected with `ResourceBusy`/`BadState` rather than silently stolen. This is
-an explicit compatibility boundary, not a second lifecycle.
+The old ownerless `register_device_node`/`unregister_device_node` and
+binding-only `*_for_binding` entry points are retired. All production node
+registration and removal is publication-scoped; test-only compatibility code
+was removed as well.
 
 `DeferredNodeRetirement` carries the owner check through the deferred path:
 when the finishing task runs the callback it calls back into the

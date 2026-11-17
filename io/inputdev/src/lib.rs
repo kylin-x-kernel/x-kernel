@@ -19,9 +19,9 @@ use kalloc_types::KBox;
 use kclass::{
     ABS_CNT, ABS_MT_FIRST, ABS_MT_LAST, ABS_MT_SLOT, ClassDevice, Event, EventType, InputDevice,
     InputDeviceImpl, InputEventNotifier, input_devices as class_input_devices,
-    subscribe_input_available,
+    subscribe_input_available, subscribe_input_removed,
 };
-use kdevice::{DeviceId, subscribe_device_removed};
+use kdevice::PublicationId;
 use ksync::Mutex;
 use ktime_types::{MonotonicInstant, SystemTime};
 use kworkng::{SubmitError, WorkHandle};
@@ -416,7 +416,7 @@ static INPUT_ENDPOINTS: LazyInit<Mutex<Vec<Arc<InputEndpoint>>>> = LazyInit::new
 pub fn init_input() {
     info!("Initialize input subsystem...");
     INPUT_ENDPOINTS.init_once(Mutex::new(Vec::new()));
-    subscribe_device_removed(Arc::new(remove_input_device));
+    subscribe_input_removed(Arc::new(|_, publication| remove_input_device(publication)));
     subscribe_input_available(Arc::new(register_input_device));
     for device in class_input_devices() {
         register_input_device(device);
@@ -430,12 +430,12 @@ fn register_input_device(device: ClassDevice<InputDeviceImpl>) {
     }
 }
 
-fn remove_input_device(id: DeviceId) {
+fn remove_input_device(publication: PublicationId) {
     let endpoint = {
         let mut endpoints = INPUT_ENDPOINTS.lock();
         endpoints
             .iter()
-            .position(|endpoint| endpoint.device.id() == id)
+            .position(|endpoint| endpoint.device.publication_id() == publication)
             .map(|index| endpoints.swap_remove(index))
     };
     if let Some(endpoint) = endpoint {
@@ -468,7 +468,7 @@ pub fn input_endpoint(
     let mut endpoints = INPUT_ENDPOINTS.lock();
     if let Some(endpoint) = endpoints
         .iter()
-        .find(|endpoint| endpoint.device.id() == device.id())
+        .find(|endpoint| endpoint.device.publication_id() == device.publication_id())
     {
         return Ok(endpoint.clone());
     }

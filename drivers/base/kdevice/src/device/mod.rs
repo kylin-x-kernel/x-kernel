@@ -14,4 +14,6 @@ pub mod handles;
 /// Device-owned cleanup through explicit capability providers.
 pub mod managed;
 pub mod object;
+mod publication;
+pub use publication::PublicationId;
 pub mod resource;

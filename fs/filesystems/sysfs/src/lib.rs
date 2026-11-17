@@ -205,7 +205,7 @@ impl TreeEntry {
 }
 
 struct DeviceProjection {
-    nodes: BTreeMap<kdevice::DeviceId, Arc<ProjectedDevice>>,
+    nodes: BTreeMap<kdevice::DeviceNodeKey, Arc<ProjectedDevice>>,
     characters: Vec<kvfs::CharacterDeviceRegistration>,
     systems: Vec<SystemDeviceState>,
     tree: BTreeMap<String, TreeEntry>,
@@ -405,7 +405,7 @@ pub fn init_device_projection() {
         for node in nodes {
             projection
                 .nodes
-                .entry(node.core_id())
+                .entry(node.key())
                 .or_insert_with(|| Arc::new(ProjectedDevice::new(node)));
         }
         projection.characters = kvfs::subscribe_character_devices(Arc::new(handle_character_event));
@@ -431,12 +431,12 @@ fn handle_device_event(event: DeviceNodeEvent) {
             let mut projection = device_projection().lock();
             let is_same_publication = projection
                 .nodes
-                .get(&node.core_id())
+                .get(&node.key())
                 .is_some_and(|projected| projected.node == node);
             if !is_same_publication {
                 projection
                     .nodes
-                    .insert(node.core_id(), Arc::new(ProjectedDevice::new(node)));
+                    .insert(node.key(), Arc::new(ProjectedDevice::new(node)));
             }
             let changed = projection.rebuild_tree();
             drop(projection);
@@ -446,7 +446,7 @@ fn handle_device_event(event: DeviceNodeEvent) {
             let projected = device_projection()
                 .lock()
                 .nodes
-                .get(&node.core_id())
+                .get(&node.key())
                 .filter(|projected| projected.node == node)
                 .cloned();
             if let Some(projected) = projected {
@@ -463,10 +463,10 @@ fn handle_device_event(event: DeviceNodeEvent) {
             // replacement projection.
             if projection
                 .nodes
-                .get(&node.core_id())
+                .get(&node.key())
                 .is_some_and(|projected| projected.node == node)
             {
-                projection.nodes.remove(&node.core_id());
+                projection.nodes.remove(&node.key());
                 let changed = projection.rebuild_tree();
                 drop(projection);
                 invalidate_changed_paths(&changed);
@@ -1124,7 +1124,7 @@ fn add_system_entries(tree: &mut BTreeMap<String, TreeEntry>, systems: &[SystemD
 
 #[cfg(unittest)]
 fn build_tree(
-    nodes: &BTreeMap<kdevice::DeviceId, Arc<ProjectedDevice>>,
+    nodes: &BTreeMap<kdevice::DeviceNodeKey, Arc<ProjectedDevice>>,
     characters: &[kvfs::CharacterDeviceRegistration],
 ) -> BTreeMap<String, TreeEntry> {
     build_tree_with_systems(nodes, characters, &[])
@@ -1136,7 +1136,7 @@ fn build_tree(
               attributes in one ordered pass so directory ownership stays single-pass"
 )]
 fn build_tree_with_systems(
-    nodes: &BTreeMap<kdevice::DeviceId, Arc<ProjectedDevice>>,
+    nodes: &BTreeMap<kdevice::DeviceNodeKey, Arc<ProjectedDevice>>,
     characters: &[kvfs::CharacterDeviceRegistration],
     systems: &[SystemDeviceState],
 ) -> BTreeMap<String, TreeEntry> {

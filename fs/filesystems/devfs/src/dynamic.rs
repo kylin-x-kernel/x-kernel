@@ -7,11 +7,12 @@
 use alloc::{borrow::Cow, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
 use kalloc_types::KBox;
-use kclass::find_display_device;
+use kclass::find_display_publication;
 #[cfg(feature = "input")]
-use kclass::find_input_device;
+use kclass::find_input_publication;
 use kdevice::{
-    DeviceId as CoreDeviceId, DeviceNode, DeviceNodeEvent, DeviceNodeKind, subscribe_device_nodes,
+    DeviceNode, DeviceNodeEvent, DeviceNodeKey, DeviceNodeKind, PublicationId,
+    subscribe_device_nodes,
 };
 use klazy::Once;
 use ksync::Mutex;
@@ -45,7 +46,7 @@ struct DeviceNodeRecord {
 
 struct DeviceProjection {
     fs: Arc<SimpleFs>,
-    records: BTreeMap<CoreDeviceId, DeviceNodeRecord>,
+    records: BTreeMap<DeviceNodeKey, DeviceNodeRecord>,
 }
 
 impl DeviceProjection {
@@ -75,15 +76,15 @@ fn projection() -> &'static Mutex<DeviceProjection> {
 fn input_file(
     fs: Arc<SimpleFs>,
     number: DeviceId,
-    id: CoreDeviceId,
+    publication: PublicationId,
 ) -> VfsResult<Option<(Arc<DeviceFile>, DeviceRemovalCallback)>> {
-    let Some(device) = find_input_device(id) else {
+    let Some(device) = find_input_publication(publication) else {
         return Ok(None);
     };
     let endpoint = match inputdev::input_endpoint(device.clone()) {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            warn!("devtmpfs: input endpoint for {id:?} failed: {error:?}");
+            warn!("devtmpfs: input endpoint for {publication:?} failed: {error:?}");
             return Ok(None);
         }
     };
@@ -106,7 +107,7 @@ fn display_files(
     render: Option<DeviceId>,
     node: DeviceNode,
 ) -> VfsResult<Option<NodeFiles>> {
-    let Some(device) = find_display_device(node.core_id()) else {
+    let Some(device) = find_display_publication(node.publication_id()) else {
         return Ok(None);
     };
     let card = drmdevice::DrmDevice::new(device);
@@ -154,7 +155,7 @@ fn display_files(
 }
 
 fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
-    if projection.records.contains_key(&node.core_id()) {
+    if projection.records.contains_key(&node.key()) {
         return;
     }
     let number = node.device_number();
@@ -164,7 +165,7 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
         .map(|number| DeviceId::new(number.major(), number.minor()));
     let file = match node.kind() {
         #[cfg(feature = "input")]
-        DeviceNodeKind::Input => input_file(projection.fs.clone(), number, node.core_id())
+        DeviceNodeKind::Input => input_file(projection.fs.clone(), number, node.publication_id())
             .map(|file| file.map(|(file, on_remove)| (file, None, on_remove))),
         #[cfg(not(feature = "input"))]
         DeviceNodeKind::Input => Ok(None),
@@ -188,7 +189,7 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
         return;
     };
     projection.records.insert(
-        node.core_id(),
+        node.key(),
         DeviceNodeRecord {
             node,
             file,
@@ -201,7 +202,7 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
 fn remove_device(node: &DeviceNode) {
     let record = {
         let mut projection = projection().lock();
-        let Some(record) = projection.records.get(&node.core_id()) else {
+        let Some(record) = projection.records.get(&node.key()) else {
             return;
         };
         if record.node != *node {
@@ -214,7 +215,7 @@ fn remove_device(node: &DeviceNode) {
         )]
         projection
             .records
-            .remove(&node.core_id())
+            .remove(&node.key())
             .expect("checked device projection must remain present")
     };
     (record.on_remove)();

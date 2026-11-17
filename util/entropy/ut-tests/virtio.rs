@@ -6,6 +6,7 @@ use ktask::WaitQueue;
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
+use kclass::RevocationOutcome;
 
 #[def_test]
 fn test_is_virtio_rng_name_matching() {
@@ -16,7 +17,7 @@ fn test_is_virtio_rng_name_matching() {
     assert!(!is_virtio_rng("virtio-blk", "virtio-blk"));
 }
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use hwrng::{Device, DeviceKind, DriverError, DriverResult};
 use kdevice::{BusTypeId, DeviceDesc, DeviceDriver, MatchResult};
@@ -51,7 +52,7 @@ impl Hardware {
 }
 impl Device for Hardware {
     fn name(&self) -> &str {
-        "virtio-rng-test"
+        "virtio-rng"
     }
 
     fn device_kind(&self) -> DeviceKind {
@@ -154,7 +155,7 @@ fn collector_retries_without_new_demand_and_stops_only_on_device_failure() {
         })
         .expect("the adopted device still has a binding")
         .unwrap();
-        let source = VirtioEntropySource::new(class).unwrap();
+        let source = VirtioEntropySource::new(class.device()).unwrap();
         assert_eq!(hardware.reads.load(Ordering::Acquire), 0);
         source.request();
         hardware.wait_reads(1);
@@ -199,4 +200,169 @@ fn collector_retries_without_new_demand_and_stops_only_on_device_failure() {
         source.work.shutdown().unwrap();
         kdevice::remove_device_managed(parent.id()).unwrap();
     }
+}
+
+#[def_test(serial)]
+fn selected_source_is_publication_scoped_and_survives_stale_removal() {
+    kdevice::register_bus_type(Arc::new(kdevice::BusTypeObject::new(Arc::new(Bus))));
+    let bus = kdevice::register_bus_instance(BUS, "entropy-collector-test");
+    let driver = kdevice::register_driver_object(kdevice::BoxedDriver::new_adoptable(Driver));
+    let parent = kdevice::adopt_active_device(kdevice::ActiveDeviceAdoption {
+        bus_id: bus.id(),
+        parent: None,
+        location: kdevice::DeviceLocation::PlatformStatic { id: 0xE1 },
+        origin: kdevice::DiscoveryOrigin::PlatformStatic,
+        identity: kdevice::DeviceIdentity::Platform(kdevice::PlatformIdentity {
+            alias: Some("collector-test"),
+            firmware_id: None,
+        }),
+        transport: None,
+        resources: kdevice::ResourceSet::new(),
+        dma: None,
+        driver: driver.clone(),
+    })
+    .unwrap();
+    let hardware = Arc::new(Hardware {
+        state: Arc::new(SpinNoIrq::new(HardwareState::default())),
+        reads: AtomicUsize::new(0),
+        ready: WaitQueue::new(),
+        entered: WaitQueue::new(),
+    });
+    let first = kdevice::test_hooks::with_binding_lock(parent.id(), || {
+        kdevice::ProbeContext::with_test_context(parent.clone(), |ctx| {
+            kclass::publish_hwrng(ctx, hardware.clone())
+        })
+        .expect("probe context")
+    })
+    .expect("binding")
+    .unwrap();
+    let second = kdevice::test_hooks::with_binding_lock(parent.id(), || {
+        kdevice::ProbeContext::with_test_context(parent.clone(), |ctx| {
+            kclass::publish_hwrng(ctx, hardware.clone())
+        })
+        .expect("probe context")
+    })
+    .expect("binding")
+    .unwrap();
+    kclass::activate_hwrng_for_test(parent.id());
+    *SELECTED_SOURCE.lock() = None;
+    note_device(first.device());
+    assert!(
+        SELECTED_SOURCE
+            .lock()
+            .as_ref()
+            .is_some_and(|source| source.publication_id() == first.publication_id())
+    );
+    assert_eq!(
+        first.revoke().expect("first revoke completes"),
+        RevocationOutcome::Completed
+    );
+    note_device(second.device());
+    let second_source = SELECTED_SOURCE
+        .lock()
+        .as_ref()
+        .cloned()
+        .expect("second source selected");
+    assert_eq!(second_source.publication_id(), second.publication_id());
+
+    remove_source(first.publication_id());
+    assert!(
+        SELECTED_SOURCE
+            .lock()
+            .as_ref()
+            .is_some_and(|source| source.publication_id() == second.publication_id())
+    );
+    assert!(second_source.collector.device.is_available());
+
+    assert!(second_source.collector.device.is_available());
+    remove_source(second.publication_id());
+    assert!(SELECTED_SOURCE.lock().is_none());
+    assert!(second_source.collector.is_failed());
+    assert!(second_source.collector.device.is_available());
+
+    assert_eq!(
+        second.revoke().expect("publication revoke completes"),
+        RevocationOutcome::Completed
+    );
+    assert!(!second_source.collector.device.is_available());
+
+    kdevice::remove_device_managed(parent.id()).unwrap();
+}
+
+/// A failed read pauses at the retry boundary; revoking there prevents the
+/// next read deterministically.
+#[def_test(serial)]
+fn retry_wait_rechecks_revocation_before_next_read() {
+    kdevice::register_bus_type(Arc::new(kdevice::BusTypeObject::new(Arc::new(Bus))));
+    let bus = kdevice::register_bus_instance(BUS, "entropy-collector-test");
+    let driver = kdevice::register_driver_object(kdevice::BoxedDriver::new_adoptable(Driver));
+    let parent = kdevice::adopt_active_device(kdevice::ActiveDeviceAdoption {
+        bus_id: bus.id(),
+        parent: None,
+        location: kdevice::DeviceLocation::PlatformStatic { id: 0xE2 },
+        origin: kdevice::DiscoveryOrigin::PlatformStatic,
+        identity: kdevice::DeviceIdentity::Platform(kdevice::PlatformIdentity {
+            alias: Some("collector-test"),
+            firmware_id: None,
+        }),
+        transport: None,
+        resources: kdevice::ResourceSet::new(),
+        dma: None,
+        driver: driver.clone(),
+    })
+    .unwrap();
+    let hardware = Arc::new(Hardware {
+        state: Arc::new(SpinNoIrq::new(HardwareState::default())),
+        reads: AtomicUsize::new(0),
+        ready: WaitQueue::new(),
+        entered: WaitQueue::new(),
+    });
+    let publication = Arc::new(
+        kdevice::test_hooks::with_binding_lock(parent.id(), || {
+            kdevice::ProbeContext::with_test_context(parent.clone(), |ctx| {
+                kclass::publish_hwrng(ctx, hardware.clone())
+            })
+            .expect("probe context")
+        })
+        .expect("binding")
+        .unwrap(),
+    );
+    let retry_paused = Arc::new(AtomicBool::new(false));
+    let release_retry = Arc::new(AtomicBool::new(false));
+    {
+        let retry_paused = retry_paused.clone();
+        let release_retry = release_retry.clone();
+        *RETRY_PAUSE.lock() = Some(Arc::new(move || {
+            retry_paused.store(true, Ordering::SeqCst);
+            while !release_retry.load(Ordering::SeqCst) {
+                ktask::yield_now();
+            }
+        }));
+    }
+    let source = VirtioEntropySource::new(publication.device()).unwrap();
+    source.request();
+    hardware.wait_reads(1);
+    hardware.fail(DriverError::WouldBlock);
+    let mut paused = false;
+    for _ in 0..100_000 {
+        if retry_paused.load(Ordering::SeqCst) {
+            paused = true;
+            break;
+        }
+        ktask::yield_now();
+    }
+    let revoke_result = paused.then(|| publication.revoke());
+    release_retry.store(true, Ordering::SeqCst);
+    hardware.complete();
+    let flush_result = source.work.flush();
+    *RETRY_PAUSE.lock() = None;
+    assert!(paused, "worker never reached the retry pause");
+    assert_eq!(
+        revoke_result.expect("retry pause was reached").expect("revoke completes"),
+        RevocationOutcome::Completed
+    );
+    flush_result.unwrap();
+    assert_eq!(hardware.reads.load(Ordering::Acquire), 1);
+    assert!(!publication.is_available());
+    kdevice::remove_device_managed(parent.id()).unwrap();
 }

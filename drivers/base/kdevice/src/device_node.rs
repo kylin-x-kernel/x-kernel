@@ -18,7 +18,7 @@ use driver_base::{DriverError, DriverResult};
 use kspin::{SpinNoPreempt, SpinNoPreemptGuard};
 use lazyinit::LazyInit;
 
-use crate::{BindingRef, DeviceId, DeviceLocation, DeviceNumber, PciIdentity};
+use crate::{BindingRef, DeviceId, DeviceLocation, DeviceNumber, PciIdentity, PublicationId};
 
 const INPUT_MAJOR: u32 = 13;
 const INPUT_EVENT_MINOR_BASE: u32 = 64;
@@ -345,10 +345,37 @@ impl DeviceNodeLifecycle {
     }
 }
 
+/// Exact owner key of one device-node assignment.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DeviceNodeKey {
+    device: DeviceId,
+    publication: PublicationId,
+}
+
+impl DeviceNodeKey {
+    /// Creates a publication-scoped node key.
+    pub const fn new(device: DeviceId, publication: PublicationId) -> Self {
+        Self {
+            device,
+            publication,
+        }
+    }
+
+    /// Parent device identity.
+    pub const fn device(self) -> DeviceId {
+        self.device
+    }
+
+    /// Publication identity.
+    pub const fn publication(self) -> PublicationId {
+        self.publication
+    }
+}
+
 /// Stable device-node identity assigned by the device core.
 #[derive(Clone, Debug)]
 pub struct DeviceNode {
-    core_id: DeviceId,
+    key: DeviceNodeKey,
     kind: DeviceNodeKind,
     index: u32,
     device_number: DeviceNumber,
@@ -371,9 +398,19 @@ impl PartialEq for DeviceNode {
 impl Eq for DeviceNode {}
 
 impl DeviceNode {
+    /// Exact publication key of this node.
+    pub const fn key(&self) -> DeviceNodeKey {
+        self.key
+    }
+
     /// Driver-core identity for the backing device.
     pub const fn core_id(&self) -> DeviceId {
-        self.core_id
+        self.key.device
+    }
+
+    /// Publication identity of this node.
+    pub const fn publication_id(&self) -> PublicationId {
+        self.key.publication
     }
 
     /// PCI identity of the parent device, when it lives on a PCI bus.
@@ -526,12 +563,12 @@ pub enum NodeRemoval {
 }
 
 struct DeviceNodeRegistry {
-    nodes: BTreeMap<DeviceId, DeviceNode>,
-    /// Binding that owns each live node. Nodes registered through the legacy
+    nodes: BTreeMap<DeviceNodeKey, DeviceNode>,
+    /// Binding that owns each live node. All production nodes are publication-scoped.
     /// ownerless API have no entry.
-    bindings: BTreeMap<DeviceId, BindingRef>,
+    bindings: BTreeMap<DeviceNodeKey, BindingRef>,
     /// Cleanup callbacks waiting for a busy node instance to finish.
-    deferred_retirements: BTreeMap<DeviceId, DeferredNodeRetirement>,
+    deferred_retirements: BTreeMap<DeviceNodeKey, DeferredNodeRetirement>,
     input_indices: BTreeSet<u32>,
     drm_indices: BTreeSet<u32>,
     subscribers: Vec<DeviceNodeCallback>,
@@ -580,7 +617,7 @@ impl DeviceNodeRegistry {
     )]
     fn register(
         &mut self,
-        core_id: DeviceId,
+        key: DeviceNodeKey,
         owner: Option<&BindingRef>,
         class: DeviceNodeClass,
         name: String,
@@ -593,14 +630,14 @@ impl DeviceNodeRegistry {
         Option<DeviceNodeLifecycleCallback>,
         bool,
     )> {
-        if let Some(node) = self.nodes.get(&core_id) {
+        if let Some(node) = self.nodes.get(&key) {
             let same_owner = match owner {
                 Some(owner) => self
                     .bindings
-                    .get(&core_id)
+                    .get(&key)
                     .is_some_and(|current| current.same_binding(owner)),
-                // The legacy ownerless API may only reuse an ownerless node.
-                None => !self.bindings.contains_key(&core_id),
+                // Test-only ownerless registry entries may only reuse an ownerless node.
+                None => !self.bindings.contains_key(&key),
             };
             return if same_owner && node.is_available() {
                 Ok((node.clone(), Vec::new(), None, false))
@@ -612,11 +649,11 @@ impl DeviceNodeRegistry {
         }
         // A stale owner entry without a node cannot happen when every removal
         // path clears it; drop it rather than letting it block a fresh node.
-        self.bindings.remove(&core_id);
+        self.bindings.remove(&key);
         let kind = class.kind();
         let index = self.allocate_index(kind)?;
         let node = DeviceNode {
-            core_id,
+            key,
             kind,
             index,
             device_number: kind.device_number(index),
@@ -635,9 +672,9 @@ impl DeviceNodeRegistry {
             },
             lifecycle: Arc::new(DeviceNodeLifecycle::new()),
         };
-        self.nodes.insert(core_id, node.clone());
+        self.nodes.insert(key, node.clone());
         if let Some(owner) = owner {
-            self.bindings.insert(core_id, owner.clone());
+            self.bindings.insert(key, owner.clone());
         }
         Ok((
             node,
@@ -657,7 +694,7 @@ impl DeviceNodeRegistry {
     /// let a newly discovered device take the same index while consumers still
     /// observe the old removal.
     fn finish_publish(&mut self, node: &DeviceNode) -> Option<NodeDispatch> {
-        if self.nodes.get(&node.core_id()) != Some(node) {
+        if self.nodes.get(&node.key()) != Some(node) {
             return None;
         }
         if !node.lifecycle.finish_publishing() {
@@ -670,28 +707,29 @@ impl DeviceNodeRegistry {
         ))
     }
 
-    /// Start removal for a binding-owned node.
-    ///
-    /// `Ok(Some(...))` means the caller must dispatch the removal outside the
-    /// lock; `Ok(None)` means the callback was registered on a busy node.
-    fn begin_remove_for_binding(
+    /// Start removal for a publication-owned node.
+    fn begin_remove_for_publication(
         &mut self,
-        core_id: DeviceId,
+        key: DeviceNodeKey,
         owner: &BindingRef,
+        publication: PublicationId,
         on_deferred: &mut Option<DeferredNodeRetirement>,
     ) -> Result<Option<NodeDispatch>, NodeRemoval> {
-        let Some(node) = self.nodes.get(&core_id) else {
+        if key.publication() != publication {
+            return Err(NodeRemoval::NotOwner);
+        }
+        let Some(node) = self.nodes.get(&key) else {
             return Err(NodeRemoval::NotFound);
         };
         if !self
             .bindings
-            .get(&core_id)
+            .get(&key)
             .is_some_and(|current| current.same_binding(owner))
         {
             return Err(NodeRemoval::NotOwner);
         }
         if !node.lifecycle.request_removal() {
-            if self.deferred_retirements.contains_key(&core_id) {
+            if self.deferred_retirements.contains_key(&key) {
                 return Err(NodeRemoval::DeferredExisting);
             }
             #[expect(
@@ -701,32 +739,8 @@ impl DeviceNodeRegistry {
             )]
             let callback = on_deferred
                 .take()
-                .expect("begin_remove_for_binding requires a deferred callback");
-            self.deferred_retirements.insert(core_id, callback);
-            return Ok(None);
-        }
-        Ok(Some((
-            node.clone(),
-            self.subscribers.clone(),
-            self.lifecycle_publisher.clone(),
-        )))
-    }
-
-    /// Start removal for a legacy ownerless node.
-    ///
-    /// `Err(NodeRemoval::NotOwner)` means a binding owns the node and the
-    /// legacy API must not touch it.
-    fn begin_remove_ownerless(
-        &mut self,
-        core_id: DeviceId,
-    ) -> Result<Option<NodeDispatch>, NodeRemoval> {
-        if self.bindings.contains_key(&core_id) {
-            return Err(NodeRemoval::NotOwner);
-        }
-        let Some(node) = self.nodes.get(&core_id) else {
-            return Ok(None);
-        };
-        if !node.lifecycle.request_removal() {
+                .expect("begin_remove_for_publication requires a deferred callback");
+            self.deferred_retirements.insert(key, callback);
             return Ok(None);
         }
         Ok(Some((
@@ -756,25 +770,25 @@ impl DeviceNodeRegistry {
         node: &DeviceNode,
         expected_owner: Option<&BindingRef>,
     ) -> Option<DeferredNodeRetirement> {
-        let core_id = node.core_id();
-        if self.nodes.get(&core_id) != Some(node) {
+        let key = node.key();
+        if self.nodes.get(&key) != Some(node) {
             return None;
         }
         let owner_matches = match expected_owner {
             Some(expected) => self
                 .bindings
-                .get(&core_id)
+                .get(&key)
                 .is_some_and(|current| current.same_binding(expected)),
-            None => !self.bindings.contains_key(&core_id),
+            None => !self.bindings.contains_key(&key),
         };
         if !owner_matches {
             return None;
         }
         node.finish_removing();
-        self.nodes.remove(&core_id);
+        self.nodes.remove(&key);
         self.free_index(node.kind(), node.index());
-        self.bindings.remove(&core_id);
-        self.deferred_retirements.remove(&core_id)
+        self.bindings.remove(&key);
+        self.deferred_retirements.remove(&key)
     }
 
     fn install_lifecycle_publisher(
@@ -846,51 +860,19 @@ fn dispatch_node_removal(
     }
 }
 
-/// Assign and publish a Linux-compatible node identity for a runtime device.
+/// Assign and publish a node identity for one publication.
 ///
-/// Re-registering the same available device id returns its existing
-/// assignment. Node callbacks run synchronously after the registry lock is
-/// released.
-///
-/// # Errors
-///
-/// Returns [`DriverError::ResourceBusy`] when the class-specific index range
-/// is exhausted or the same device id is still completing removal.
-pub fn register_device_node(
+/// A node already owned by the same binding and publication is returned
+/// idempotently. A node owned by another owner, or one still publishing or
+/// removing, yields `ResourceBusy`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CG-024-lint-exceptions: clippy::too_many_arguments: public wrapper mirrors \
+              validated device-node fields"
+)]
+pub fn register_device_node_for_publication(
     core_id: DeviceId,
-    class: DeviceNodeClass,
-    name: String,
-    driver_name: String,
-    location: DeviceLocation,
-    pci: Option<PciIdentity>,
-) -> DriverResult<DeviceNode> {
-    let (node, subscribers, publisher, is_new) =
-        device_node_registry().register(core_id, None, class, name, driver_name, location, pci)?;
-    if !is_new {
-        return Ok(node);
-    }
-    dispatch_node_added(&node, subscribers, publisher);
-    let pending_removal = device_node_registry().finish_publish(&node);
-    if let Some((removed, subscribers, publisher)) = pending_removal {
-        // The node stays registered in `Removing` with its index reserved
-        // until the removal notification has run.
-        dispatch_node_removal(&removed, subscribers, publisher);
-        let deferred = device_node_registry().finish_remove(&removed, None);
-        if let Some(deferred) = deferred {
-            deferred();
-        }
-    }
-    Ok(node)
-}
-
-/// Assign and publish a node identity owned by one binding instance.
-///
-/// A node already owned by the same binding and still available is returned
-/// idempotently. A node owned by any other binding, or one still publishing or
-/// removing, always yields [`DriverError::ResourceBusy`]: a new binding may
-/// never take over an old binding's node instance.
-pub fn register_device_node_for_binding(
-    core_id: DeviceId,
+    publication: PublicationId,
     binding: &BindingRef,
     class: DeviceNodeClass,
     name: String,
@@ -898,8 +880,9 @@ pub fn register_device_node_for_binding(
     location: DeviceLocation,
     pci: Option<PciIdentity>,
 ) -> DriverResult<DeviceNode> {
+    let key = DeviceNodeKey::new(core_id, publication);
     let (node, subscribers, publisher, is_new) = device_node_registry().register(
-        core_id,
+        key,
         Some(binding),
         class,
         name,
@@ -913,8 +896,6 @@ pub fn register_device_node_for_binding(
     dispatch_node_added(&node, subscribers, publisher);
     let pending_removal = device_node_registry().finish_publish(&node);
     if let Some((removed, subscribers, publisher)) = pending_removal {
-        // The node stays registered in `Removing` with its index reserved
-        // until the removal notification has run.
         dispatch_node_removal(&removed, subscribers, publisher);
         let deferred = device_node_registry().finish_remove(&removed, Some(binding));
         if let Some(deferred) = deferred {
@@ -924,62 +905,19 @@ pub fn register_device_node_for_binding(
     Ok(node)
 }
 
-/// Remove a legacy ownerless device-node assignment and notify consumers.
-///
-/// The node first becomes unavailable, then projection consumers quiesce
-/// operations, the host publisher emits remove, and projection consumers
-/// delete their entries. If removal races the initial add callbacks, this call
-/// records a pending removal; the thread publishing add completes the ordered
-/// removal sequence.
-///
-/// # Errors
-///
-/// Returns [`DriverError::BadState`] if the node is owned by a binding; the
-/// legacy ID-only API must not remove another binding's node.
-pub fn unregister_device_node(core_id: DeviceId) -> DriverResult<()> {
-    let start = {
-        let mut registry = device_node_registry();
-        registry.begin_remove_ownerless(core_id)
-    };
-    let Some((node, subscribers, publisher)) = (match start {
-        Ok(removal) => removal,
-        Err(_) => return Err(DriverError::BadState),
-    }) else {
-        return Ok(());
-    };
-    dispatch_node_removal(&node, subscribers, publisher);
-    let deferred = device_node_registry().finish_remove(&node, None);
-    if let Some(deferred) = deferred {
-        deferred();
-    }
-    Ok(())
-}
-
-/// Remove a node owned by `binding`, deferring completion if the node is busy.
-///
-/// The owner check, the state transition and deferred-callback registration all
-/// happen in one registry critical section. On [`NodeRemoval::Deferred`] the
-/// provided callback was registered and runs exactly once when that node
-/// instance finishes; the caller must not also run it. On
-/// [`NodeRemoval::DeferredExisting`] another request already owns completion;
-/// the callback supplied by this call is not registered and is dropped after
-/// the registry lock is released. Duplicate retirement requests are merged
-/// first-wins, so callers must treat the callback as an idempotent completion
-/// notification rather than an additional executor.
-pub fn unregister_device_node_for_binding(
+/// Remove the node owned by the exact binding and publication.
+pub fn unregister_device_node_for_publication(
     core_id: DeviceId,
+    publication: PublicationId,
     binding: &BindingRef,
     on_deferred: DeferredNodeRetirement,
 ) -> NodeRemoval {
-    // Keep the callback outside the registry guard. Any path that does not
-    // register it returns it here, so captured resources are dropped after the
-    // spinlock is released.
+    let key = DeviceNodeKey::new(core_id, publication);
     let mut unused_callback = Some(on_deferred);
     let start = {
         let mut registry = device_node_registry();
-        registry.begin_remove_for_binding(core_id, binding, &mut unused_callback)
+        registry.begin_remove_for_publication(key, binding, publication, &mut unused_callback)
     };
-
     let result = match start {
         Ok(Some((node, subscribers, publisher))) => {
             dispatch_node_removal(&node, subscribers, publisher);

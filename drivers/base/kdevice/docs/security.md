@@ -49,6 +49,11 @@ below.
   (subscriber contract).
 - `kdevice` trusts `kclass` to register device nodes only for active runtime
   capabilities and to provide bounded, driver-derived class metadata.
+- `PublicationId` is only an identity, never a capability or revocation
+  permission. Device-node cleanup is authorized by the exact
+  `DeviceNodeKey(DeviceId, PublicationId)` plus the captured `BindingRef`; a
+  stale cleanup cannot match a newer owner. The `PublicationId` allocator is
+  monotonic and fails closed at `u64::MAX`.
 - `kdevice` trusts the firmware backends behind `FwNodeOps<'static>` to keep
   their storage alive for the kernel lifetime and to answer only for handles
   they issued. In fallible queries an unknown handle must surface as

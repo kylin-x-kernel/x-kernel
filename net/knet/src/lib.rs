@@ -47,9 +47,10 @@ pub use control::{
 };
 use kalloc_types::KBox;
 #[cfg(feature = "vsock")]
-use kclass::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
-use kclass::{NetDevice, net_devices};
-use kdevice::subscribe_device_removed;
+use kclass::{
+    ClassDevice, VsockDeviceImpl, subscribe_vsock_available, subscribe_vsock_removed, vsock_devices,
+};
+use kclass::{NetDevice, net_devices, subscribe_net_removed};
 #[cfg(feature = "vsock")]
 use kerrno::KError;
 use kerrno::KResult;
@@ -145,7 +146,7 @@ pub fn init_network() -> KResult<()> {
         .expect("loopback IPv4 address must fit the interface");
 
     if let Some((handle, storage)) = ethernet_storage {
-        let device_id = handle.id();
+        let publication = handle.publication_id();
         info!("  use NIC 0: {:?}", handle.name());
 
         let eth0_address = wire::MacAddress(handle.mac().0);
@@ -187,7 +188,7 @@ pub fn init_network() -> KResult<()> {
         info!("eth0:");
         info!("  mac:  {}", eth0_address);
         info!("  ip:   {}", eth0_ip);
-        subscribe_network_unregister(device_id);
+        subscribe_network_unregister(publication);
     } else {
         warn!("  No network device found!");
     }
@@ -207,13 +208,13 @@ pub fn init_network() -> KResult<()> {
     Ok(())
 }
 
-fn subscribe_network_unregister(id: kdevice::DeviceId) {
-    subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id != id {
+fn subscribe_network_unregister(publication: kdevice::PublicationId) {
+    subscribe_net_removed(Arc::new(move |_, removed| {
+        if removed != publication {
             return;
         }
-        if unregister_netdev(id) {
-            warn!("network: detached removed device {:?}", id);
+        if unregister_netdev(publication) {
+            warn!("network: detached removed publication {:?}", publication);
         }
     }));
 }
@@ -222,12 +223,25 @@ fn subscribe_network_unregister(id: kdevice::DeviceId) {
 ///
 /// Takes [`control::network_config_lock`] so teardown is serialized with
 /// control-plane mutations.
-pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
+#[cfg(unittest)]
+pub(crate) fn unregister_netdev_for_test(id: kdevice::DeviceId) -> bool {
     if !SERVICE.is_inited() {
         return false;
     }
     let _network_config_guard = control::network_config_lock();
-    let Some(removed) = SERVICE.remove_device_by_model_id(id) else {
+    let Some(removed) = SERVICE.remove_device_by_model_id_for_test(id) else {
+        return false;
+    };
+    crate::netlink::publish_network_events(removed);
+    true
+}
+
+pub(crate) fn unregister_netdev(publication: kdevice::PublicationId) -> bool {
+    if !SERVICE.is_inited() {
+        return false;
+    }
+    let _network_config_guard = control::network_config_lock();
+    let Some(removed) = SERVICE.remove_device_by_publication(publication) else {
         return false;
     };
     // Publish before releasing the configuration lock so teardown events stay
@@ -259,7 +273,7 @@ pub fn start_vsock_bridge() {
 fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
     use crate::vsock::connection_manager::{register_vsock_dev, unregister_vsock_dev};
 
-    let id = handle.id();
+    let publication = handle.publication_id();
     info!(
         "  use vsock 0: {:?} (driver={}, {:?})",
         handle.name(),
@@ -276,9 +290,9 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
     if let Err(e) = crate::vsock::bridge::init() {
         warn!("Failed to initialize vsock-TIPC bridge: {:?}", e);
     }
-    subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id == id && unregister_vsock_dev(id) {
-            warn!("vsock: detached removed device {:?}", id);
+    subscribe_vsock_removed(Arc::new(move |_, removed| {
+        if removed == publication && unregister_vsock_dev(publication) {
+            warn!("vsock: detached removed publication {:?}", publication);
         }
     }));
 }

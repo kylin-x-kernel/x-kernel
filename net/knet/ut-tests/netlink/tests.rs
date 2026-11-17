@@ -85,6 +85,7 @@ fn assert_socket_unbound(socket: &NetlinkSocket) {
 struct TestDevice {
     link: LinkSnapshot,
     device_id: Option<kdevice::DeviceId>,
+    publication_id: Option<kdevice::PublicationId>,
     neighbors: Vec<(crate::ip::IpAddress, NeighborState)>,
 }
 
@@ -93,12 +94,15 @@ impl TestDevice {
         Self {
             link,
             device_id: None,
+            publication_id: None,
             neighbors: Vec::new(),
         }
     }
 
     fn with_device_id(mut self, device_id: kdevice::DeviceId) -> Self {
         self.device_id = Some(device_id);
+        self.publication_id =
+            Some(kdevice::PublicationId::allocate().expect("test publication id"));
         self
     }
 }
@@ -137,6 +141,10 @@ impl NetDevice for TestDevice {
 
     fn device_id(&self) -> Option<kdevice::DeviceId> {
         self.device_id
+    }
+
+    fn publication_id(&self) -> Option<kdevice::PublicationId> {
+        self.publication_id
     }
 
     fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> kerrno::KResult<RxPoll> {
@@ -833,7 +841,7 @@ fn test_device_removal_refreshes_views() {
     )
     .unwrap();
 
-    assert!(crate::unregister_netdev(kdevice::DeviceId::new(2)));
+    assert!(crate::unregister_netdev_for_test(kdevice::DeviceId::new(2)));
     assert_eq!(service.rebuild_count_for_tests(), rebuild_count + 1);
     assert_eq!(service.link_snapshots().len(), 1);
     assert_eq!(
@@ -5501,7 +5509,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
     }
 
     // Removing eth0 preserves eth1's interface ID and address.
-    assert!(crate::unregister_netdev(kdevice::DeviceId::new(2)));
+    assert!(crate::unregister_netdev_for_test(kdevice::DeviceId::new(2)));
     assert_eq!(
         crate::interface_ipv4_addr("eth1"),
         Ok(core::net::Ipv4Addr::new(10, 0, 0, 2))
@@ -8697,7 +8705,7 @@ fn test_device_unregister_publishes_teardown_events() {
         }))
         .unwrap();
 
-    assert!(crate::unregister_netdev(kdevice::DeviceId::new(2)));
+    assert!(crate::unregister_netdev_for_test(kdevice::DeviceId::new(2)));
 
     let mut saw_down_link = false;
     let mut saw_address = false;

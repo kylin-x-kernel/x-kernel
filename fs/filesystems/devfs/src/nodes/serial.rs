@@ -132,7 +132,7 @@ pub(crate) fn serial_devices(fs: Arc<SimpleFs>) -> DirMapping {
         }
         // The stdout UART is already exposed via `/dev/console`; skip it so
         // the same hardware is not published twice.
-        if Some(device.id()) == stdout_id {
+        if Some(device.publication_id()) == stdout_id {
             continue;
         }
         let dev = DeviceFile::new_character(

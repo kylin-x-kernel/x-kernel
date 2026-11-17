@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::boxed::Box;
 use unittest::{assert_eq, def_test};
 
 use super::*;
@@ -31,9 +32,26 @@ fn actions_accept_only_the_linux_kobject_set() {
 }
 
 #[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the production CharDeviceImpl/DeferredNodeRetirement API requires a standard Box owner"
+)]
 fn drm_render_node_has_its_own_uevent_projection() {
-    let node = kdevice::register_device_node(
+    let device = Arc::new(kdevice::DeviceObject::new_bound_for_test(
         kdevice::DeviceId::new(9001),
+        kdevice::DeviceKind::Display,
+    ));
+    let binding = device.binding_ref().expect("fixture binding");
+    let publication = kdevice::PublicationId::allocate().expect("publication id");
+    let node = kdevice::register_device_node_for_publication(
+        device.id(),
+        publication,
+        &binding,
         kdevice::DeviceNodeClass::Drm(kdevice::DrmDeviceNodeMetadata::new(
             String::from("Virtual-1"),
             String::from("connected"),
@@ -73,5 +91,13 @@ fn drm_render_node_has_its_own_uevent_projection() {
         .into_bytes()
     );
 
-    kdevice::unregister_device_node(node.core_id()).expect("legacy node unregisters");
+    assert_eq!(
+        kdevice::unregister_device_node_for_publication(
+            device.id(),
+            publication,
+            &binding,
+            Box::new(|| {}),
+        ),
+        kdevice::NodeRemoval::Removed
+    );
 }

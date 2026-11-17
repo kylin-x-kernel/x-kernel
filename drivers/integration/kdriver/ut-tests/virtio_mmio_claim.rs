@@ -19,6 +19,7 @@ use kdevice::{
     PlatformIdentity, ProbeOutcome, ProbeStats, ResourceDesc, ResourceSet, device_desc_add,
     probe_device_desc, register_driver_object, remove_device_managed,
 };
+use kspin::static_lock;
 use unittest::{assert, assert_eq, def_test};
 
 use super::{make_virtio_driver, virtio_mmio_support};
@@ -26,6 +27,13 @@ use crate::driver_registry::virtio::ids::{VIRTIO_MMIO_COMPATIBLE, virtio_type};
 
 const CLAIM_BASE: usize = 0x5a00_0000;
 const CLAIM_SIZE: usize = 0x200;
+
+// Both public scenarios install the same MMIO base and reset shared HAL
+// counters. Serialize them explicitly instead of relying on the harness
+// scheduling of `serial` tests across worker groups.
+static_lock! {
+    static CLAIM_TEST_LOCK: kspin::SpinNoPreempt<()> = kspin::SpinNoPreempt::new(());
+}
 
 /// Removes the published device and clears the fixture table on every exit.
 struct Cleanup {
@@ -91,6 +99,7 @@ fn mmio_desc(bus_id: kdevice::BusId) -> kdevice::DeviceDesc {
 
 #[def_test(serial)]
 fn live_transport_keeps_the_range_claimed_until_removal() -> unittest::TestResult {
+    let _guard = CLAIM_TEST_LOCK.lock();
     run_live_transport_claim_scenario()
 }
 
@@ -103,6 +112,7 @@ pub(super) fn run_live_transport_claim_scenario() -> unittest::TestResult {
     use super::virtio_mmio_support::{Event, INITIAL_STATUS};
 
     let (_bus_type, bus) = kdevice::reset_and_setup_platform_bus_for_tests("virtio-mmio-claim-bus");
+    kclass::reinstall_event_bridge_for_tests();
     let driver = register_driver_object(make_virtio_driver(
         "virtio-vsock-mmio-claim",
         DeviceKind::Vsock,
@@ -344,6 +354,8 @@ pub(super) fn run_live_transport_claim_scenario() -> unittest::TestResult {
 #[cfg(feature = "virtio-rng")]
 #[def_test(serial)]
 fn scenarios_release_their_ranges_in_both_orders() -> unittest::TestResult {
+    let _guard = CLAIM_TEST_LOCK.lock();
+    kclass::reinstall_event_bridge_for_tests();
     use super::virtio_mmio_match_unittest::run_wrong_candidate_scenario;
 
     for _ in 0..2 {

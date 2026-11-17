@@ -197,6 +197,11 @@ pub(crate) trait NetDevice: Send + Sync {
         None
     }
 
+    /// Exact class publication identity for driver-backed devices.
+    fn publication_id(&self) -> Option<kdevice::PublicationId> {
+        None
+    }
+
     /// Polls one budgeted device receive work item.
     ///
     /// Ethernet consumes at most one driver frame per call, returning after
