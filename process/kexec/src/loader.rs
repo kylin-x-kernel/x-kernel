@@ -691,6 +691,7 @@ fn initial_aux_vector(
         AuxEntry::new(AuxType::PHENT, image.program_header_entry_size()),
         AuxEntry::new(AuxType::PHNUM, image.program_header_count()),
         AuxEntry::new(AuxType::PAGESZ, PAGE_SIZE_4K),
+        AuxEntry::new(AuxType::CLKTCK, posix_types::USER_HZ as usize),
         AuxEntry::new(AuxType::ENTRY, image.entry(executable_bias)?),
         // Linux publishes the CPU capability word here, and user runtimes read
         // it instead of probing control registers: glibc's IFUNC resolvers and

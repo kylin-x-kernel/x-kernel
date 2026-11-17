@@ -268,3 +268,8 @@ adding a scheduler dependency or a global handshake to the loader.
 File-private BSS page prefixes are capped at the actual executable size,
 including when the BSS offset lies beyond EOF within the same page. The
 remaining bytes are zero-filled rather than copied from the file cache.
+
+The initial auxiliary vector includes `AT_CLKTCK = posix_types::USER_HZ`, the
+same fixed userspace tick rate used by `times(2)`. It is independent of scheduler
+frequency, matching Linux `fs/binfmt_elf.c`'s `CLOCKS_PER_SEC` entry. Dynamic
+libc obtains its profiling period from this ABI value.

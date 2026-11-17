@@ -2493,6 +2493,7 @@ dependencies = [
  "memaddr",
  "memspace",
  "ouroboros",
+ "posix-types",
  "tee_task_iface",
  "unittest",
  "xmas-elf",

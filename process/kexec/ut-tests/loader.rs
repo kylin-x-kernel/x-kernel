@@ -173,6 +173,11 @@ fn prepared_image_survives_cache_clear_and_rejections_preserve_installed_mm() {
         vec!["app".into(), "owned-argument".into()],
     );
     let prepared = super::prepare_user_app_request(request).expect("prepare fixture");
+    let has_clock_ticks = prepared.auxv_bytes().chunks_exact(16).any(|entry| {
+        usize::from_ne_bytes(entry[..8].try_into().unwrap()) == AuxType::CLKTCK as usize
+            && usize::from_ne_bytes(entry[8..].try_into().unwrap()) == posix_types::USER_HZ as usize
+    });
+    assert!(has_clock_ticks, "exec must expose the times(2) USER_HZ ABI rate");
     assert!(!prepared.stack_data.is_empty());
     assert!(prepared.stack_data.len() <= kaddr_layout::USER_STACK_SIZE);
     assert_eq!(

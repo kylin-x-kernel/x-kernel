@@ -24,6 +24,7 @@ klogger.workspace = true
 ksignal.workspace = true
 ksync.workspace = true
 kprocess.workspace = true
+posix-types.workspace = true
 kvfs.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
