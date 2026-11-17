@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use crate::{MappingPages, PageIndex};
 
 /// One disagreement between a resident folio's bits and the derived indexes.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum IndexMismatch {
     /// The dirty bit and the dirty index mark disagree.
     Dirty {

@@ -180,6 +180,23 @@ pub struct Thread {
     robust_list_head: AtomicUsize,
     signal: Arc<ThreadSignalManager>,
     time: CpuTimeStatistics,
+    /// Coalesces periodic CPU-timer work requests until this task returns to
+    /// userspace.
+    ///
+    /// Publication relationship covered by every ordering on this bit:
+    /// producer is the local timer tick ([`Thread::request_cpu_timer_work`]),
+    /// whose `Release` store publishes the relaxed CPU-time settlements the
+    /// same tick just performed ([`CpuTimeStatistics`]) and the armed-gate
+    /// value it read. Observers are the user-return probe
+    /// ([`Thread::has_pending_cpu_timer_work`], `Acquire` load) and the
+    /// consumer in the return tail ([`Thread::take_cpu_timer_work`], `AcqRel`
+    /// swap). Their `Acquire` side pairs with the tick's `Release`, so a poll
+    /// runs on samples at least as recent as the tick that requested it. The
+    /// swap is a single `AcqRel` RMW: it consumes exactly one coalesced
+    /// request even when a tick on the way to another return re-arms the bit
+    /// concurrently, and its `Release` side orders that re-request after the
+    /// consumption instead of letting it be lost to a stale `false`.
+    cpu_timer_work_pending: AtomicBool,
     nice: AtomicI32,
     scheduler: Mutex<SchedulerState>,
     is_exiting: AtomicBool,
@@ -280,6 +297,7 @@ impl Thread {
                 clear_child_tid: AtomicUsize::new(0),
                 robust_list_head: AtomicUsize::new(0),
                 time: CpuTimeStatistics::new(),
+                cpu_timer_work_pending: AtomicBool::new(false),
                 nice: AtomicI32::new(NiceValue::default().as_i32()),
                 scheduler: Mutex::new(SchedulerState::default()),
                 is_exiting: AtomicBool::new(false),
@@ -751,12 +769,6 @@ impl Thread {
         self.time.sample(khal::time::monotonic_time())
     }
 
-    /// Returns the sum of user and kernel CPU time consumed by this thread.
-    pub fn cpu_time(&self) -> TimeSpan {
-        let (utime, stime) = self.sample_cpu_time();
-        utime.saturating_add(stime)
-    }
-
     /// Publishes the CPU-accounting mode at a user/kernel boundary.
     ///
     /// This is one relaxed store: the elapsed interval is settled later at a
@@ -791,12 +803,37 @@ impl Thread {
         self.time.finalize(khal::time::monotonic_time());
     }
 
-    /// Returns whether this thread's process has an armed CPU timer.
+    /// Requests a CPU-timer poll for this task at its next user return.
     ///
-    /// Lets the user-return fast path decide whether timer polling is needed
-    /// without reaching into the process runtime.
-    pub fn has_armed_cpu_timers(&self) -> bool {
-        self.process().cpu_timers_armed()
+    /// Called from interrupt context by the periodic tick. Requests are
+    /// coalesced: the `Release` store publishes this tick's CPU-time
+    /// settlements, and repeated ticks before a return add no work. Gated by
+    /// the process armed flag, so a task group with no CPU timers never sets
+    /// the bit. See [`Thread::cpu_timer_work_pending`] for the ordering
+    /// contract.
+    pub(crate) fn request_cpu_timer_work(&self) {
+        if self.process().cpu_timers_armed() {
+            self.cpu_timer_work_pending.store(true, Ordering::Release);
+        }
+    }
+
+    /// Returns whether a periodic tick requested CPU-timer work for this task.
+    ///
+    /// Lock-free probe for the user-return fast path; the `Acquire` load pairs
+    /// with the tick's `Release` store. A `true` answer may be consumed only
+    /// by [`Thread::take_cpu_timer_work`].
+    pub fn has_pending_cpu_timer_work(&self) -> bool {
+        self.cpu_timer_work_pending.load(Ordering::Acquire)
+    }
+
+    /// Consumes one coalesced CPU-timer work request.
+    ///
+    /// Returns `true` at most once per tick request; the `AcqRel` swap both
+    /// observes the requesting tick's settlements and orders a concurrent
+    /// re-request after this consumption. See
+    /// [`Thread::cpu_timer_work_pending`] for the full ordering contract.
+    pub(crate) fn take_cpu_timer_work(&self) -> bool {
+        self.cpu_timer_work_pending.swap(false, Ordering::AcqRel)
     }
 
     /// Temporarily swaps the blocked-signal mask while executing `f`.

@@ -345,8 +345,8 @@ fn pit_calibration_accepts_only_a_tight_interval() {
         Ok(observation(120_000_000, 121_000_000)),
     ];
     let mut samples = ScriptedSamples::new(&sequence);
-    let (frequency, is_degraded) = calibrate_samples(nominal, |timeout, start_gap| {
-        samples.sample(timeout, start_gap)
+    let (frequency, is_degraded) = calibrate_samples(nominal, |timeout_tsc_ticks, start_gap| {
+        samples.sample(timeout_tsc_ticks, start_gap)
     })
     .expect("a tight sample");
     assert!(!is_degraded);
@@ -361,8 +361,8 @@ fn pit_calibration_reports_a_bounded_degraded_result() {
     // Every sample is 20% wide: not trustworthy, but still a bounded bound.
     let sequence = [Ok(observation(100_000_000, 120_000_000)); PIT_CALIBRATION_SAMPLES];
     let mut samples = ScriptedSamples::new(&sequence);
-    let (frequency, is_degraded) = calibrate_samples(nominal, |timeout, start_gap| {
-        samples.sample(timeout, start_gap)
+    let (frequency, is_degraded) = calibrate_samples(nominal, |timeout_tsc_ticks, start_gap| {
+        samples.sample(timeout_tsc_ticks, start_gap)
     })
     .expect("degraded result");
     assert!(is_degraded);
@@ -378,8 +378,8 @@ fn pit_calibration_fails_instead_of_trusting_a_wide_guess() {
     let sequence = [Ok(observation(50_000_000, 150_000_000)); PIT_CALIBRATION_SAMPLES];
     let mut samples = ScriptedSamples::new(&sequence);
     assert_eq!(
-        calibrate_samples(nominal, |timeout, start_gap| samples
-            .sample(timeout, start_gap)),
+        calibrate_samples(nominal, |timeout_tsc_ticks, start_gap| samples
+            .sample(timeout_tsc_ticks, start_gap)),
         None
     );
     assert_eq!(samples.calls, PIT_CALIBRATION_SAMPLES);
@@ -391,8 +391,8 @@ fn pit_calibration_stops_after_repeated_timeouts() {
     let sequence = [Err(SampleRejection::TimedOut); PIT_CALIBRATION_SAMPLES];
     let mut samples = ScriptedSamples::new(&sequence);
     assert_eq!(
-        calibrate_samples(nominal, |timeout, start_gap| samples
-            .sample(timeout, start_gap)),
+        calibrate_samples(nominal, |timeout_tsc_ticks, start_gap| samples
+            .sample(timeout_tsc_ticks, start_gap)),
         None
     );
     // The early abort must stop after the timeout budget, not spend the whole
@@ -411,8 +411,8 @@ fn pit_calibration_retries_after_transient_rejections() {
         Ok(observation(120_000_000, 121_000_000)),
     ];
     let mut samples = ScriptedSamples::new(&sequence);
-    let (frequency, is_degraded) = calibrate_samples(nominal, |timeout, start_gap| {
-        samples.sample(timeout, start_gap)
+    let (frequency, is_degraded) = calibrate_samples(nominal, |timeout_tsc_ticks, start_gap| {
+        samples.sample(timeout_tsc_ticks, start_gap)
     })
     .expect("a tight sample after transient rejections");
     assert!(!is_degraded);

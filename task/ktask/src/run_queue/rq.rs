@@ -33,7 +33,10 @@ use super::stats::{sched_stat_cpu, sched_stat_inc};
 use super::{CurrentRunQueueRef, KRunQueueRef, PREV_TASK, RunQueue, WakeEnqueue};
 use crate::{
     KtaskRef, Scheduler, TaskInner,
-    api::{current, program_sched_deadline, program_sched_deadline_for, rearm_local_timer},
+    api::{
+        current, program_sched_deadline, program_sched_deadline_for, rearm_local_timer,
+        refresh_periodic_tick,
+    },
     task::{CurrentTask, TaskState},
     tracing_hooks::{fire_context_switch, fire_task_wakeup},
 };
@@ -940,6 +943,7 @@ impl RunQueue {
             // `refresh_sched_deadline`), so the class view is taken
             // unconditionally.
             let next_rel = rq.with_sched(|s| s.next_event_ns());
+            refresh_periodic_tick(!next.is_idle(), now);
             // Immediate requests must arm pending on the *incoming* task: at
             // this point `current()` is still the outgoing task.
             program_sched_deadline_for(Some(next), now, next_rel);

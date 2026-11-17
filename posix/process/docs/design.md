@@ -134,6 +134,8 @@ by that poll or by preemption causes one more signal scan only if the first
 drain did not install a handler; it never loops on the interrupt flag. If a
 handler is already installed, it runs first and the new signal remains pending
 with its interrupt notification intact for a later return, including sigreturn.
+CPU-timer polling runs only when a periodic tick requested work for this thread;
+an armed timer alone no longer forces a process-wide scan on each syscall.
 Delivery inside a long-running handler is not promised by this return path.
 A peer that keeps posting signals must not pin the thread in
 the kernel: the first handler ends the drain so userspace runs it, and

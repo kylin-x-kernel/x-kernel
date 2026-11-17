@@ -81,8 +81,8 @@ the right clock domain, overrun counts, notification generations) and the
 availability of the alarm task. The syscall layer is trusted to convert
 user ABI timespecs into validated `TimeSpan` values and to validate
 `clockid_t`, `timerid_t`, and notification settings before calling this
-crate. The crate trusts that caller-supplied process CPU times belong to
-the same process as the manager.
+crate. The crate trusts that caller-supplied raw user/system totals and
+scheduler runtime belong to the same process as the manager.
 
 ## External boundaries
 

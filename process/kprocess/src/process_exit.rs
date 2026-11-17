@@ -19,8 +19,9 @@ use crate::{
 /// the reservation rejects all later task publication into this process. Repeated
 /// exit calls for an already removed task return `false`.
 ///
-/// `task` must be the exiting published task so TID directory unpublish can
-/// identity-check against the live publication slot before retiring it. Its
+/// `task` must be the exiting current task, or a detached non-running task,
+/// so its committed runtime cannot continue changing after the group handoff.
+/// TID directory unpublish identity-checks its live publication slot. Its
 /// global TID publication is retired before this function returns, while the
 /// process identity remains available until later process completion and reap.
 /// The caller that receives `true` performs explicit process cleanup stages and

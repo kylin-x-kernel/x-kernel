@@ -9,6 +9,7 @@ use fs_context::{FsStruct, init_fs};
 use kcred::Cred;
 use ksync::Mutex;
 use ktask::current;
+use ktime_types::TimeSpan;
 
 use super::{AsThread, CurrentThread, Thread};
 use crate::{LiveAddressSpace, Pid, Process, Tid};
@@ -136,6 +137,31 @@ pub fn with_current_user_thread<R>(f: impl FnOnce(&Thread) -> R) -> R {
     let task = current();
     let thread = task.try_as_thread().expect("kernel task");
     f(thread)
+}
+
+/// Samples the calling thread's CPU clock from the scheduler runtime ledger.
+///
+/// This is the scheduler view Linux reports as `CPUCLOCK_SCHED`: time picked
+/// to run, not the user/system split settled for interval timers and rusage.
+/// Reading advances the clock; the running interval is charged before the
+/// value returns, as Linux refreshes `current` in `task_sched_runtime()`.
+/// The sampler takes no thread handle because only the owning run queue may
+/// advance a ledger: another task contributes its committed runtime through
+/// `KtaskRef::sum_exec_runtime_ns()`, which is what
+/// [`Process::process_cpu_time`](crate::Process::process_cpu_time) collects.
+///
+/// Execution context: requires only the current kernel task's shared
+/// execution path (any initialized task, user thread or kernel task; no
+/// process or thread-group state is read). Allowed from task and interrupt
+/// context once the scheduler is up. Never sleeps; it takes the local
+/// run-queue lock with IRQs and preemption masked, so the caller must not
+/// already hold that lock or a guard that implies it.
+///
+/// # Panics
+///
+/// Panics if the current task or its run queue has not been initialized.
+pub fn current_thread_cpu_clock() -> TimeSpan {
+    TimeSpan::from_nanos(ktask::refresh_current_execution_runtime_ns())
 }
 
 /// Current-task descriptor access, applying the process's live descriptor limit.

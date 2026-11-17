@@ -61,15 +61,15 @@ pub struct Process {
     /// Signal delivered to the parent's `wait` when this process's parent dies
     /// first (`prctl(PR_SET_PDEATHSIG)`).
     pdeath_signal: AtomicU32,
-    /// Fast-path gate for per-trap CPU-timer polling.
+    /// Fast-path gate for periodic CPU-timer checks.
     ///
     /// True while any CPU-time-driven timer (ITIMER_VIRTUAL, ITIMER_PROF,
     /// process-CPU POSIX timer) may be armed. Arm paths and each real poll
     /// re-derive it, so expiry clears it without an explicit disarm.
     ///
     /// Read without the timer-manager lock, like Linux `timers_active`: a
-    /// concurrent arm may be delayed by one trap, never lost. Living on
-    /// `Process` lets the return path skip the runtime weak upgrade.
+    /// concurrent arm may be delayed until the next tick. Living on `Process`
+    /// lets the IRQ path skip the runtime weak upgrade.
     cpu_timers_armed: AtomicBool,
 
     /// Whether this thread group is a child subreaper (`PR_SET_CHILD_SUBREAPER`).
@@ -264,11 +264,11 @@ impl Process {
         self.child_subreaper.store(enabled, Ordering::Relaxed)
     }
 
-    /// Returns whether per-trap CPU-timer polling must run for this process.
+    /// Returns whether a periodic tick must request CPU-timer work.
     ///
     /// Returns:
     /// - `true`: at least one CPU-time-driven timer may be armed, so the
-    ///   return path polls the timer manager.
+    ///   interrupted thread requests a timer-manager poll on user return.
     /// - `false`: no CPU-time timer can produce a delivery, so the poll is
     ///   skipped.
     ///

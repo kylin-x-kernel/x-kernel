@@ -187,9 +187,9 @@ impl ThreadPublicationBinding {
         self.task_slot.publish(KtaskRef::downgrade(task));
     }
 
-    fn retire(&self) {
+    fn retire(&self, process: &Process, domain: &process_domain::ProcessDomainWriteGuard<'_>) {
         self.task_slot.retire();
-        self.member_slot.retire();
+        process.retire_thread_slot_locked(domain, &self.member_slot);
     }
 }
 
@@ -618,7 +618,7 @@ impl ProcessPublication {
             if rollback.process_effect.inserted() && !rollback.process.is_exited_locked(&domain) {
                 rollback.process.clear_published_identity_locked(&domain);
             }
-            rollback.thread_binding.retire();
+            rollback.thread_binding.retire(&rollback.process, &domain);
             if rollback.process_effect.inserted() && !rollback.process.is_exited_locked(&domain) {
                 rollback.process.discard_unpublished_locked(&domain);
             }

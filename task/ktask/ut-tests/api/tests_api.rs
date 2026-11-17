@@ -3,8 +3,9 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use kalloc_types::KBox;
 use kirq::{
     context::local_bh_disable,
     softirq::{
@@ -15,9 +16,10 @@ use kirq::{
 use unittest::{assert, assert_eq, def_test};
 
 use super::{
-    MIN_SCHED_TIMER_NS, can_sleep_current_context_for_tests, current, sched_stats_text,
-    schedule_deadline_request, select_local_timer_deadline, wait_for_poll_event_until,
-    with_wake_sync,
+    MIN_SCHED_TIMER_NS, NEXT_PERIODIC_TICK_NS, NEXT_SCHED_DEADLINE_NS, PERIODIC_TICK_NS,
+    can_sleep_current_context_for_tests, consume_periodic_tick, current, refresh_periodic_tick,
+    rearm_local_timer, sched_stats_text, schedule_deadline_request, select_local_timer_deadline,
+    wait_for_poll_event_until, with_wake_sync,
 };
 
 static SOFTIRQ_SLEEPABLE_OBSERVED: AtomicBool = AtomicBool::new(true);
@@ -75,6 +77,222 @@ fn immediate_schedule_request_sets_pending_without_rearming_hrtick() {
         (Some(100 + MIN_SCHED_TIMER_NS), false)
     );
     assert_eq!(schedule_deadline_request(100, None), (None, false));
+}
+
+#[def_test(serial)]
+fn periodic_tick_survives_switches_and_stops_during_idle() {
+    let observed = {
+        let _guard = kspin::NoPreemptIrqSave::new();
+        let saved = NEXT_PERIODIC_TICK_NS.load_current();
+        NEXT_PERIODIC_TICK_NS.store_current(0);
+        refresh_periodic_tick(true, PERIODIC_TICK_NS / 2);
+        let first = NEXT_PERIODIC_TICK_NS.load_current();
+        refresh_periodic_tick(true, first - 1);
+        let after_switch = NEXT_PERIODIC_TICK_NS.load_current();
+        let early = consume_periodic_tick(first - 1);
+        let due = consume_periodic_tick(first);
+        let after_due = NEXT_PERIODIC_TICK_NS.load_current();
+        let late = consume_periodic_tick(PERIODIC_TICK_NS * 4 + 1);
+        let after_late = NEXT_PERIODIC_TICK_NS.load_current();
+        let repeated = consume_periodic_tick(PERIODIC_TICK_NS * 4 + 1);
+        refresh_periodic_tick(false, PERIODIC_TICK_NS * 5);
+        let stopped = NEXT_PERIODIC_TICK_NS.load_current();
+        refresh_periodic_tick(true, PERIODIC_TICK_NS * 5 + 1);
+        let restarted = NEXT_PERIODIC_TICK_NS.load_current();
+        NEXT_PERIODIC_TICK_NS.store_current(saved);
+        (
+            first,
+            after_switch,
+            early,
+            due,
+            after_due,
+            late,
+            after_late,
+            repeated,
+            stopped,
+            restarted,
+        )
+    };
+    assert_eq!(observed.0, PERIODIC_TICK_NS);
+    assert_eq!(observed.1, observed.0);
+    assert!(!observed.2);
+    assert!(observed.3);
+    assert_eq!(observed.4, PERIODIC_TICK_NS * 2);
+    assert!(observed.5);
+    assert_eq!(observed.6, PERIODIC_TICK_NS * 5);
+    assert!(!observed.7);
+    assert_eq!(observed.8, 0);
+    assert_eq!(observed.9, PERIODIC_TICK_NS * 6);
+}
+
+#[def_test(serial)]
+fn real_timer_irqs_preserve_the_periodic_deadline() {
+    struct RuntimeProbe {
+        ticks: Arc<AtomicUsize>,
+        periodic_ticks: Arc<AtomicUsize>,
+        invalid_context: Arc<AtomicBool>,
+    }
+
+    impl crate::UserTaskRuntime for RuntimeProbe {
+        fn on_cpu_time_tick(&self, _now_ns: u64) {
+            if karch::local_irq_enabled() || !kirq::context::is_in_hardirq() {
+                self.invalid_context.store(true, Ordering::Relaxed);
+            }
+            self.ticks.fetch_add(1, Ordering::Release);
+        }
+
+        fn on_periodic_tick(&self) {
+            self.periodic_ticks.fetch_add(1, Ordering::Release);
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let periodic_ticks = Arc::new(AtomicUsize::new(0));
+    let invalid_context = Arc::new(AtomicBool::new(false));
+    let checked_early_irq = Arc::new(AtomicBool::new(false));
+    let early_irq_was_valid = Arc::new(AtomicBool::new(false));
+    let periodic_advanced = Arc::new(AtomicBool::new(false));
+    let shared_deadline_consumed = Arc::new(AtomicBool::new(false));
+    let runtime_ns = Arc::new(AtomicU64::new(0));
+    let worker_ticks = ticks.clone();
+    let worker_periodic_ticks = periodic_ticks.clone();
+    let worker_checked = checked_early_irq.clone();
+    let worker_valid = early_irq_was_valid.clone();
+    let worker_advanced = periodic_advanced.clone();
+    let worker_shared = shared_deadline_consumed.clone();
+    let worker_runtime = runtime_ns.clone();
+    let task = crate::prepare_task(crate::TaskInner::new_user(
+        crate::PreparedTaskEntry::new(move || {
+            let delivered = Arc::new(AtomicBool::new(false));
+            let fired_ns = Arc::new(AtomicU64::new(0));
+            let observed_ticks = Arc::new(AtomicUsize::new(0));
+            let observed_periodic_ticks = Arc::new(AtomicUsize::new(0));
+            let observed_deadline = Arc::new(AtomicU64::new(0));
+            let handler_delivered = delivered.clone();
+            let handler_fired_ns = fired_ns.clone();
+            let handler_ticks = worker_ticks.clone();
+            let handler_observed_ticks = observed_ticks.clone();
+            let handler_periodic_ticks = worker_periodic_ticks.clone();
+            let handler_observed_periodic_ticks = observed_periodic_ticks.clone();
+            let handler_observed_deadline = observed_deadline.clone();
+            let timer = crate::Timer::new(move |_: crate::TimerControl<'_>, _: crate::Expiration| {
+                handler_fired_ns.store(khal::time::monotonic_time_nanos(), Ordering::Relaxed);
+                handler_observed_ticks.store(handler_ticks.load(Ordering::Acquire), Ordering::Relaxed);
+                handler_observed_periodic_ticks.store(handler_periodic_ticks.load(Ordering::Acquire), Ordering::Relaxed);
+                handler_observed_deadline.store(NEXT_PERIODIC_TICK_NS.load_current(), Ordering::Relaxed);
+                handler_delivered.store(true, Ordering::Release);
+            });
+            let _pin = kspin::NoPreempt::new();
+            let limit_ns = khal::time::monotonic_time_nanos().saturating_add(3_000_000_000);
+            while worker_periodic_ticks.load(Ordering::Acquire) == 0
+                && khal::time::monotonic_time_nanos() < limit_ns
+            {
+                core::hint::spin_loop();
+            }
+
+            let mut original_deadline_ns = 0;
+            while khal::time::monotonic_time_nanos() < limit_ns {
+                let (before, before_periodic, deadline_ns, started) = {
+                    let _guard = kspin::NoPreemptIrqSave::new();
+                    let now_ns = khal::time::monotonic_time_nanos();
+                    let deadline_ns = NEXT_PERIODIC_TICK_NS.load_current();
+                    let before = worker_ticks.load(Ordering::Acquire);
+                    let before_periodic = worker_periodic_ticks.load(Ordering::Acquire);
+                    let remaining_ns = deadline_ns.saturating_sub(now_ns);
+                    if remaining_ns < PERIODIC_TICK_NS / 3 {
+                        (before, before_periodic, deadline_ns, false)
+                    } else {
+                        delivered.store(false, Ordering::Relaxed);
+                        let at_ns = now_ns + remaining_ns / 4;
+                        let at = ktime_types::MonotonicInstant::from_span_since_origin(
+                            ktime_types::TimeSpan::from_nanos(at_ns),
+                        );
+                        // SAFETY: this initialized CPU remains pinned. The owned
+                        // handler is bounded, IRQ-safe and stays live through cancel.
+                        let started = unsafe { timer.start(at) }.is_ok();
+                        (before, before_periodic, deadline_ns, started)
+                    }
+                };
+                if !started {
+                    while worker_ticks.load(Ordering::Acquire) == before
+                        && khal::time::monotonic_time_nanos() < limit_ns
+                    {
+                        core::hint::spin_loop();
+                    }
+                    continue;
+                }
+                while !delivered.load(Ordering::Acquire)
+                    && khal::time::monotonic_time_nanos() < limit_ns
+                {
+                    core::hint::spin_loop();
+                }
+                if delivered.load(Ordering::Acquire)
+                    && fired_ns.load(Ordering::Relaxed) < deadline_ns
+                {
+                    worker_valid.store(
+                        observed_ticks.load(Ordering::Relaxed) > before
+                            && observed_periodic_ticks.load(Ordering::Relaxed) == before_periodic
+                            && observed_deadline.load(Ordering::Relaxed) == deadline_ns,
+                        Ordering::Relaxed,
+                    );
+                    original_deadline_ns = deadline_ns;
+                    worker_checked.store(true, Ordering::Release);
+                    break;
+                }
+            }
+            let armed_shared_deadline = {
+                let _guard = kspin::NoPreemptIrqSave::new();
+                if original_deadline_ns != 0
+                    && NEXT_PERIODIC_TICK_NS.load_current() == original_deadline_ns
+                    && khal::time::monotonic_time_nanos() < original_deadline_ns
+                {
+                    NEXT_SCHED_DEADLINE_NS.store_current(original_deadline_ns);
+                    rearm_local_timer();
+                    true
+                } else {
+                    false
+                }
+            };
+            while NEXT_PERIODIC_TICK_NS.load_current() <= original_deadline_ns
+                && khal::time::monotonic_time_nanos() < limit_ns
+            {
+                core::hint::spin_loop();
+            }
+            worker_advanced.store(
+                original_deadline_ns != 0 && NEXT_PERIODIC_TICK_NS.load_current() > original_deadline_ns,
+                Ordering::Release,
+            );
+            worker_shared.store(
+                armed_shared_deadline && NEXT_SCHED_DEADLINE_NS.load_current() != original_deadline_ns,
+                Ordering::Release,
+            );
+            worker_runtime.store(current().sum_exec_runtime_ns(), Ordering::Release);
+            timer.cancel_sync();
+        })
+        .expect("test entry preparation"),
+        "periodic-tick-probe".into(),
+        kidentity::allocate_root_pid_handle().expect("test task identity"),
+        KBox::new(RuntimeProbe {
+            ticks: ticks.clone(),
+            periodic_ticks: periodic_ticks.clone(),
+            invalid_context: invalid_context.clone(),
+        })
+        .expect("test runtime allocation"),
+    ));
+    crate::activate_task(&task);
+    assert_eq!(task.join(), 0);
+    assert!(ticks.load(Ordering::Acquire) >= 3);
+    assert!(periodic_ticks.load(Ordering::Acquire) >= 2);
+    assert!(!invalid_context.load(Ordering::Relaxed));
+    assert!(checked_early_irq.load(Ordering::Acquire));
+    assert!(early_irq_was_valid.load(Ordering::Relaxed));
+    assert!(periodic_advanced.load(Ordering::Acquire));
+    assert!(shared_deadline_consumed.load(Ordering::Acquire));
+    assert!(runtime_ns.load(Ordering::Acquire) > 0);
 }
 
 #[def_test(serial)]

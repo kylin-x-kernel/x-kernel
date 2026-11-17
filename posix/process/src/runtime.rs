@@ -229,7 +229,7 @@ pub(crate) fn run_user_thread_loop(
 /// Returns whether the user-return tail has work beyond a plain re-entry.
 ///
 /// Packs the independent lock-free projections into one probe: a deliverable
-/// signal, an interrupted task, an armed CPU timer, a pending reschedule, a
+/// signal, an interrupted task, pending CPU-timer work, a pending reschedule, a
 /// signal-return restart decision, and a syscall restart errno. A `false`
 /// result lets the loop skip signal scanning, timer polling, the scheduling
 /// checkpoint and restart handling. Deferred RCU cleanup is not skipped: the
@@ -242,7 +242,7 @@ fn syscall_return_has_work(
     runtime_action != UserThreadRuntimeAction::Continue
         || thr.signal_manager().may_have_signal()
         || current().is_interrupted()
-        || thr.has_armed_cpu_timers()
+        || thr.has_pending_cpu_timer_work()
         || ktask::needs_resched()
         || uctx.syscall_restart_error().is_some()
 }

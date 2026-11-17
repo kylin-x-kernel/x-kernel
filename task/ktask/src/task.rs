@@ -130,11 +130,14 @@ pub trait UserTaskRuntime: Send + Sync + Any {
     fn on_enter(&self) {}
     /// Called on the outgoing task before saving its context.
     fn on_leave(&self) {}
-    /// Samples this task's CPU time from the local timer IRQ.
+    /// Samples this task's CPU time on a local timer interrupt.
     ///
-    /// Runs in interrupt context for the interrupted task; implementations must
-    /// be lock-free and non-blocking.
+    /// Runs in interrupt context for the interrupted task, with IRQs masked;
+    /// implementations must be lock-free and non-blocking.
     fn on_cpu_time_tick(&self, _now_ns: u64) {}
+    /// Requests bounded owner work for a due periodic tick.
+    /// Runs in interrupt context with IRQs masked and must not block or allocate.
+    fn on_periodic_tick(&self) {}
     /// Marks that the current CPU may retain TLB state for this task's user
     /// address space.
     fn set_user_mm_resident_cpu(&self, _cpu_id: LogicalCpuId) {}

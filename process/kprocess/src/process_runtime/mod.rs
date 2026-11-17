@@ -558,15 +558,15 @@ impl ksignal::TimerSignalOrigin for ProcessRuntime {
             .timer_manager()
             .lock()
             .posix_timer_record_needs_cpu_times(timer_id, record);
-        let (process_utime, process_stime) = if needs_cpu_times {
-            self.process.process_cpu_times()
+        let process_sched_runtime = if needs_cpu_times {
+            self.process.process_cpu_time()
         } else {
-            (ktime_types::TimeSpan::ZERO, ktime_types::TimeSpan::ZERO)
+            ktime_types::TimeSpan::ZERO
         };
         let delivery = {
             let mut manager = self.timer_manager().lock();
             let delivery =
-                manager.progress_posix_timer_record(timer_id, record, process_utime, process_stime);
+                manager.progress_posix_timer_record(timer_id, record, process_sched_runtime);
             self.process
                 .set_cpu_timers_armed(manager.any_cpu_timer_armed());
             delivery
@@ -581,14 +581,14 @@ impl ksignal::TimerSignalOrigin for ProcessRuntime {
             .timer_manager()
             .lock()
             .posix_timer_dequeue_needs_cpu_times(timer_id, signal_seq);
-        let (process_utime, process_stime) = if needs_cpu_times {
-            self.process.process_cpu_times()
+        let process_sched_runtime = if needs_cpu_times {
+            self.process.process_cpu_time()
         } else {
-            (ktime_types::TimeSpan::ZERO, ktime_types::TimeSpan::ZERO)
+            ktime_types::TimeSpan::ZERO
         };
         let mut manager = self.timer_manager().lock();
         let should_deliver =
-            manager.on_timer_signal_dequeued(timer_id, signal_seq, process_utime, process_stime);
+            manager.on_timer_signal_dequeued(timer_id, signal_seq, process_sched_runtime);
         self.process
             .set_cpu_timers_armed(manager.any_cpu_timer_armed());
         if should_deliver {

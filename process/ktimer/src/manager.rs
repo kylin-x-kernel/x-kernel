@@ -147,7 +147,7 @@ impl ProcessTimerManager {
             }
 
             // Wall-clock timers read their own clock internally; CPU time args are unused.
-            let expirations = timer.update(TimeSpan::ZERO, TimeSpan::ZERO);
+            let expirations = timer.update(TimeSpan::ZERO);
             // A consumed queue entry is only a hint. If the wall clock moved
             // back before update, renew its scheduling without duplicating a
             // still-queued ticket. The ticket also deduplicates repeated polls.
@@ -167,6 +167,7 @@ impl ProcessTimerManager {
         &mut self,
         process_utime: TimeSpan,
         process_stime: TimeSpan,
+        process_sched_runtime: TimeSpan,
     ) -> Vec<TimerDelivery> {
         let mut deliveries = Vec::new();
 
@@ -192,7 +193,7 @@ impl ProcessTimerManager {
                 continue;
             }
 
-            let expirations = timer.update(process_utime, process_stime);
+            let expirations = timer.update(process_sched_runtime);
             if let Some(delivery) = timer.collect_delivery(*timer_id, expirations) {
                 deliveries.push(delivery);
             }
@@ -203,7 +204,7 @@ impl ProcessTimerManager {
 
     /// Returns whether any CPU-time-driven timer is currently armed.
     ///
-    /// Used as the fast-path gate for per-trap CPU-timer polling: false means
+    /// Used as the fast-path gate for periodic CPU-timer work: false means
     /// `poll_cpu_timers` cannot produce a delivery, so callers can skip the
     /// process-wide CPU-time sampling entirely. Wall-clock timers
     /// (ITIMER_REAL, monotonic POSIX clocks) never arm this gate.
@@ -261,8 +262,7 @@ impl ProcessTimerManager {
 
     /// Returns the current `(interval, remaining)` state of a POSIX timer.
     ///
-    /// `process_utime`/`process_stime` must be the owner process's current
-    /// CPU-time totals (needed by `CLOCK_PROCESS_CPUTIME_ID` timers).
+    /// `process_sched_runtime` is the owner process's scheduler CPU clock.
     ///
     /// # Errors
     ///
@@ -270,12 +270,11 @@ impl ProcessTimerManager {
     pub fn get_posix_timer(
         &self,
         timer_id: i32,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
+        process_sched_runtime: TimeSpan,
     ) -> KResult<(TimeSpan, TimeSpan)> {
         self.posix_timers
             .get(&timer_id)
-            .map(|timer| timer.snapshot(process_utime, process_stime))
+            .map(|timer| timer.snapshot(process_sched_runtime))
             .ok_or(KError::InvalidInput)
     }
 
@@ -309,8 +308,7 @@ impl ProcessTimerManager {
         absolute: bool,
         interval: TimeSpan,
         value: TimeSpan,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
+        process_sched_runtime: TimeSpan,
     ) -> KResult<PosixTimerUpdate> {
         let signal_seq = self.next_posix_signal_seq.ok_or(KError::InvalidInput)?;
         let owner_pid = self.owner_pid;
@@ -318,7 +316,7 @@ impl ProcessTimerManager {
             .posix_timers
             .get_mut(&timer_id)
             .ok_or(KError::InvalidInput)?
-            .settime(absolute, interval, value, process_utime, process_stime)?;
+            .settime(absolute, interval, value, process_sched_runtime)?;
 
         self.next_posix_signal_seq = signal_seq.checked_add(1);
         #[expect(
@@ -335,7 +333,7 @@ impl ProcessTimerManager {
         timer.arm_deadline(owner_pid);
         // The timer may have already expired; update() advances the deadline
         // if so, requiring a second arm to register the new deadline.
-        let expirations = timer.update(process_utime, process_stime);
+        let expirations = timer.update(process_sched_runtime);
         let delivery = timer.collect_delivery(timer_id, expirations);
         timer.arm_deadline(owner_pid);
         Ok(PosixTimerUpdate {
@@ -414,14 +412,13 @@ impl ProcessTimerManager {
         &mut self,
         timer_id: i32,
         record: &ksignal::PreparedTimerRecord,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
+        process_sched_runtime: TimeSpan,
     ) -> Option<TimerDelivery> {
         let timer = self.posix_timers.get_mut(&timer_id)?;
         if !timer.owns_record(record) {
             return None;
         }
-        let expirations = timer.update(process_utime, process_stime);
+        let expirations = timer.update(process_sched_runtime);
         if timer.needs_alarm_task() {
             timer.arm_deadline(self.owner_pid);
         }
@@ -482,9 +479,8 @@ impl ProcessTimerManager {
     /// then clears the pending-signal state (freezing `last_overrun`); a stale
     /// sequence reports `false` so the signal is dropped.
     ///
-    /// `process_utime`/`process_stime` must be the owner process's current
-    /// CPU-time totals; wall-clock-consuming timers read their clock
-    /// internally.
+    /// `process_sched_runtime` is the owner process's scheduler CPU clock;
+    /// wall-clock-consuming timers read their clock internally.
     ///
     /// # Returns
     ///
@@ -494,15 +490,14 @@ impl ProcessTimerManager {
         &mut self,
         timer_id: i32,
         signal_seq: u64,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
+        process_sched_runtime: TimeSpan,
     ) -> bool {
         let owner_pid = self.owner_pid;
         if let Some(timer) = self.posix_timers.get_mut(&timer_id) {
             if timer.signal_seq() != signal_seq {
                 return false;
             }
-            if timer.catch_up_queued_overrun(process_utime, process_stime) {
+            if timer.catch_up_queued_overrun(process_sched_runtime) {
                 // The catch-up advanced the interval schedule, so the alarm
                 // entry must follow the new deadline.
                 timer.arm_deadline(owner_pid);

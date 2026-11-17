@@ -258,13 +258,19 @@ nonrecursive, non-unwinding callback contract; tests use owning `Timer` handles.
 guard. Its programmer only merges deadlines and writes hardware, never callbacks
 or scheduler locks. These are the new unsafe production call sites.
 
+The periodic deadline is CPU-local and changes only with local IRQs and
+preemption excluded. A busy-to-busy switch retains it; an idle switch clears
+it. A delayed IRQ advances the phase once, without a loop of callbacks. It
+shares the existing arbitration and suspend gate; it does not own a timer
+node. The existing accounting hook continues to run on every timer IRQ.
+
 | Threat | Asset / trigger / impact | Response |
 | --- | --- | --- |
 | Stale hardware write | Deadline integrity; concurrent remote advance overwritten by an old snapshot delays delivery | Mitigate: hold the prepared CPU lock through hardware write; notify actual destination after every accepted start. Platform must preserve publish-before-IPI ordering. |
 | Lock inversion | Availability; notification or callback re-enters a held timer lock and deadlocks | Mitigate: callback outside locks, sender releases registration locks before notification; the programmer runs under the prepared CPU lock and takes no runqueue lock. |
 | Wrong-context delivery | Memory safety and scheduling; an IPI or recursive service invokes a timer callback | Mitigate: IPI endpoint only reprograms; timer IRQ owns dispatch, with IRQs disabled. Real-IRQ and notification-only tests check this separation. |
 | Premature boot service | Per-CPU state; notification drain touches an uninitialized scheduler or timer service | Mitigate: retain existing runtime enablement after scheduler and local timer state initialization; static set construction alone is not readiness. |
-| Lost independent deadline | Availability; empty/deferred prepared queue suppresses scheduler deadlines | Mitigate: merge both sources under the local IRQ guard; prepared backoff does not defer other sources. |
+| Lost independent deadline | Availability; empty/deferred prepared queue suppresses scheduler or periodic deadlines | Mitigate: merge all sources under the local IRQ guard; prepared backoff does not defer other sources. |
 
 `tests_timer_irq.rs` adds bounded real-IRQ/IPI validation infrastructure. Its
 owning handles drain callbacks before destruction. These tests do not establish
@@ -749,7 +755,7 @@ Known limits:
    `next_event_ns` does not rewrite it.
 3. SMP must enable `ipi`: a remote wake's `kick` sets `need_resched`
    through IPI. `interrupt()` of a running task (signal delivery) uses the
-   same IPI; otherwise a NOHZ lone runner never leaves user mode.
+   same IPI; signal progress must not depend on a later periodic tick.
    `smp && !ipi` is a compile-time reject. IPI callbacks must not lock or
    reprogram dest's scheduler.
 4. `on_timer_fire` defers hardware rearm across a wake batch and then

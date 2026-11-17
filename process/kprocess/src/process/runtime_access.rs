@@ -726,12 +726,12 @@ impl Process {
     /// Returns `KError::NoSuchProcess` when runtime is gone and forwards the
     /// matching `ktimer::ProcessTimerManager::get_posix_timer` error contract.
     pub fn get_posix_timer(&self, timer_id: i32) -> KResult<(TimeSpan, TimeSpan)> {
-        let (process_utime, process_stime) = self.process_cpu_times();
+        let process_sched_runtime = self.process_cpu_time();
         self.runtime().and_then(|runtime| {
             runtime
                 .timer_manager()
                 .lock()
-                .get_posix_timer(timer_id, process_utime, process_stime)
+                .get_posix_timer(timer_id, process_sched_runtime)
         })
     }
 
@@ -748,16 +748,9 @@ impl Process {
         interval: TimeSpan,
         value: TimeSpan,
     ) -> KResult<((TimeSpan, TimeSpan), Option<TimerDelivery>)> {
-        let (process_utime, process_stime) = self.process_cpu_times();
+        let process_sched_runtime = self.process_cpu_time();
         self.with_timer_manager_mut(|manager| {
-            manager.set_posix_timer(
-                timer_id,
-                absolute,
-                interval,
-                value,
-                process_utime,
-                process_stime,
-            )
+            manager.set_posix_timer(timer_id, absolute, interval, value, process_sched_runtime)
         })
         .map(|update| update.finish())
     }
@@ -838,22 +831,18 @@ impl Process {
 
     /// Polls CPU-driven timers while runtime remains attached.
     ///
-    /// The user-return entry point [`crate::poll_cpu_timers_for`] gates the
-    /// poll on [`Process::cpu_timers_armed`]: it reads the gate on the
-    /// borrowed process without upgrading the weak runtime handle, so a
-    /// timer-free process never reaches this method. This method re-reads the
-    /// same gate purely to skip the process-wide CPU-time sample
-    /// ([`Self::process_cpu_times`], the dominant fixed cost) when a
-    /// concurrent disarm flips the gate between the two reads. The gate is
-    /// re-derived from the timer manager after every real poll so one-shot
-    /// expiry and interval exhaustion clear it without an explicit disarm call.
+    /// The periodic tick requests coalesced user-return work only while the
+    /// process may have an armed CPU timer. Recheck that gate here so a
+    /// concurrent disarm can avoid sampling. The timer manager re-derives it
+    /// after each poll, including one-shot expiry.
     pub(crate) fn poll_cpu_timers(&self) -> KResult<Vec<TimerDelivery>> {
         if !self.cpu_timers_armed() {
             return Ok(Vec::new());
         }
         let (process_utime, process_stime) = self.process_cpu_times();
+        let process_sched_runtime = self.process_cpu_time();
         self.with_timer_manager_mut(|manager| {
-            Ok(manager.poll_cpu_timers(process_utime, process_stime))
+            Ok(manager.poll_cpu_timers(process_utime, process_stime, process_sched_runtime))
         })
     }
 
@@ -1042,11 +1031,5 @@ impl Process {
                     stime.saturating_add(thread_stime),
                 )
             })
-    }
-
-    /// Returns the total sampled CPU time.
-    pub fn process_cpu_time(&self) -> TimeSpan {
-        let (utime, stime) = self.process_cpu_times();
-        utime.saturating_add(stime)
     }
 }

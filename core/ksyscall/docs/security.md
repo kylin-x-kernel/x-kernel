@@ -411,9 +411,11 @@ the syscall wait layer.
 
 ### Signed clock-ID validation
 
-Queries, wall-clock setting, clock sleeps and timerfd creation share the signed
-`time::clock_id::parse_clock_id` boundary. Unsupported negative/dynamic and unknown positive
-IDs return InvalidInput before user-memory access. Recognizing an enum does not
+Queries, wall-clock setting, clock sleeps and timerfd creation share signed
+clock-ID parsing. Queries and POSIX timer creation resolve encoded process
+scheduler clocks only for the current process (queries also accept the
+calling thread ID); they cannot use that encoding to access another process.
+Unsupported IDs return InvalidInput before user-memory access. Recognizing an enum does not
 grant support for every syscall: the existing setter, sleep and timerfd subsets
 and their error ordering remain enforced. The timerfd backend accepts only
 `TimerFdClock`, so invalid integer IDs cannot silently select REALTIME.

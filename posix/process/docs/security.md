@@ -60,6 +60,9 @@ user-supplied exception interpretations.
 Internal syscall restart codes are resolved according to handler installation,
 not merely signal consumption. Default continue actions cannot suppress this
 resolution, and signal return must not restart an already restored context.
+CPU-timer work is requested by a periodic IRQ and consumed on user return.
+An armed timer alone does not force a group scan after each syscall; a task
+that never returns to userspace can still defer its own timer delivery.
 
 `exit_robust_list` reads the registered userspace head and linked nodes through
 `UserConstPtr::read_vm`; `RobustListHead` and `RobustList` implement `UserRead`

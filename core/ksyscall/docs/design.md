@@ -743,9 +743,12 @@ in BOOTTIME; absolute waits do not write remaining time.
 
 ### Typed clock-ID boundary
 
-`time/clock_id.rs` parses signed ABI clock IDs into the shared `ktime_types::ClockId` once for queries,
-wall-clock setting, clock sleeps and timerfd creation. Unsupported values,
-including negative FD-encoded clocks, remain rejected. Each operation restricts
+`time/clock_id.rs` parses signed ABI clock IDs into the shared `ktime_types::ClockId` for queries,
+wall-clock setting, clock sleeps and timerfd creation. Queries and POSIX timer
+creation also decode the Linux process scheduler CPU clock for the current
+process; queries accept the calling thread's ID as a process-clock alias.
+Other-process CPU clocks, other encoded CPU clock kinds and FD-encoded clocks
+remain unsupported. Each operation restricts
 the parsed enum to its existing supported set; MONOTONIC_RAW sleep still returns
 OperationNotSupported. Raw signed values remain available for diagnostics only.
 Timerfd creation maps the accepted enum to the backend's `TimerFdClock`, which

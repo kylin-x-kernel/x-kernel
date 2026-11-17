@@ -253,10 +253,19 @@ matching hardware activation; read-only observations must not prepare a root.
 Per-thread CPU accounting is lock-free: the trap boundary publishes only the
 current mode, and settlement at tick, switch or sample serializes through a
 compare-exchange on the interval origin before updating relaxed accumulator
-atomics. The timer IRQ may settle the interrupted task's counters, so the state
-must never require a sleeping or IRQ-unsafe lock. Aggregate counters are relaxed
+atomics. A timer IRQ may settle the interrupted task's counters, so the state
+must never require a sleeping or IRQ-unsafe lock. A remote sampler
+can advance the origin before its accumulator write while exit finalizes and
+transfers the thread; this remains a correctness gap. Aggregate counters are relaxed
 atomics. Their snapshots are not transactionally tied to every
 directory/resource field.
+The scheduler CPU clock uses the membership lock for its exited/live handoff;
+a sequence check retries if membership changes between allocation-free batches,
+and task references acquired under that lock are released after unlocking. It
+does not repair the separate raw user/system accounting race above.
+Periodic IRQs only set a coalescing per-thread CPU-timer work bit. The
+user-return path clears it before sampling and dispatches outside the IRQ;
+a tick racing with the clear leaves a fresh request for the next return.
 `ExecMetadata` atomically replaces its pair, while separate getters can straddle
 updates. Typed timer dequeue receipts validate timer sequence through ktimer;
 ordinary userspace SI_TIMER fields do not select that completion path. The

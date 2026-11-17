@@ -100,6 +100,10 @@ impl UserTaskRuntime for Thread {
         ));
     }
 
+    fn on_periodic_tick(&self) {
+        self.request_cpu_timer_work();
+    }
+
     fn set_user_mm_resident_cpu(&self, cpu_id: LogicalCpuId) {
         self.set_process_mm_resident_cpu(cpu_id);
     }

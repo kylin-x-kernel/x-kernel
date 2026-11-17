@@ -3,7 +3,10 @@
 // See LICENSES for license details.
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
-use core::sync::atomic::Ordering;
+use core::{
+    ops::Bound::{Excluded, Unbounded},
+    sync::atomic::Ordering,
+};
 
 use kcred::Cred;
 use kerrno::{KError, KResult};
@@ -23,6 +26,10 @@ use crate::{AsThread, Tid, process_domain, publication::process_publication};
 pub(super) struct ThreadMembership {
     members: BTreeMap<TaskIdentityToken, Arc<ThreadMemberSlot>>,
     is_last_thread_exit_reserved: bool,
+    exited_sched_runtime_ns: u64,
+    // Like Linux stats_lock, detects a live-to-exited handoff during a scan.
+    // Wrapping is safe unless one scan spans 2^64 membership updates.
+    sched_snapshot_seq: u64,
 }
 
 impl ThreadMembership {
@@ -40,13 +47,43 @@ impl ThreadMembership {
         let did_exit = self
             .members
             .get(&task.as_thread().identity_token())
-            .is_some_and(|slot| slot.exit_task(task, leader_cred));
+            .is_some_and(|slot| slot.begin_exit(task, leader_cred));
+        if did_exit {
+            self.sched_snapshot_seq = self.sched_snapshot_seq.wrapping_add(1);
+        }
+        let is_last = did_exit && self.has_no_published_tasks();
+        if did_exit && !is_last {
+            self.finish_exit(task);
+        }
         self.prune_stale();
-        did_exit
+        is_last
+    }
+
+    fn finish_exit(&mut self, task: &KtaskRef) {
+        if self
+            .members
+            .get(&task.as_thread().identity_token())
+            .is_some_and(|slot| slot.finish_exit(task))
+        {
+            self.sched_snapshot_seq = self.sched_snapshot_seq.wrapping_add(1);
+            self.exited_sched_runtime_ns = self
+                .exited_sched_runtime_ns
+                .saturating_add(task.sum_exec_runtime_ns());
+        }
+    }
+
+    fn finish_last_exit(&mut self) -> Option<KtaskRef> {
+        if let Some(task) = self.members.values().find_map(|slot| slot.exiting_task()) {
+            self.finish_exit(&task);
+            self.prune_stale();
+            Some(task)
+        } else {
+            None
+        }
     }
 
     fn has_no_published_tasks(&self) -> bool {
-        self.members.values().all(|slot| slot.snapshot().is_none())
+        self.members.values().all(|slot| !slot.is_published())
     }
 
     fn unreleased_count(&self) -> usize {
@@ -111,7 +148,7 @@ impl ThreadMembership {
     }
 
     fn prune_stale(&mut self) {
-        self.members.retain(|_, slot| slot.is_unreleased());
+        self.members.retain(|_, slot| slot.is_retained());
     }
 }
 
@@ -125,6 +162,9 @@ pub(super) struct ThreadGroupExitState {
 enum ThreadMemberState {
     Vacant,
     Published(WeakKtaskRef),
+    // The last thread is no longer a lookup target but still runs process
+    // cleanup; its scheduler runtime remains part of the group until publication.
+    Exiting(WeakKtaskRef, Option<Arc<Cred>>),
     // A leader exits before its parent consumes the process identity. Keep
     // membership without retaining a task/runtime or allowing TID lookup, but
     // retain the leader's objective credentials: Linux keeps the zombie leader
@@ -152,16 +192,34 @@ impl ThreadMemberSlot {
         *self.state.lock() = ThreadMemberState::Vacant;
     }
 
-    fn exit_task(&self, task: &KtaskRef, leader_cred: Option<Arc<Cred>>) -> bool {
+    fn begin_exit(&self, task: &KtaskRef, leader_cred: Option<Arc<Cred>>) -> bool {
         let mut state = self.state.lock();
         let published = match &*state {
             ThreadMemberState::Published(published) => published,
-            ThreadMemberState::Vacant | ThreadMemberState::ExitedLeader(_) => return false,
+            ThreadMemberState::Vacant
+            | ThreadMemberState::Exiting(..)
+            | ThreadMemberState::ExitedLeader(_) => return false,
         };
         // Do not retire a replacement task that reused this numeric TID.
         if !WeakKtaskRef::ptr_eq(published, &KtaskRef::downgrade(task)) {
             return false;
         }
+        *state = ThreadMemberState::Exiting(KtaskRef::downgrade(task), leader_cred);
+        true
+    }
+
+    fn finish_exit(&self, task: &KtaskRef) -> bool {
+        let mut state = self.state.lock();
+        let ThreadMemberState::Exiting(exiting, _) = &*state else {
+            return false;
+        };
+        if !WeakKtaskRef::ptr_eq(exiting, &KtaskRef::downgrade(task)) {
+            return false;
+        }
+        let ThreadMemberState::Exiting(_, leader_cred) = &mut *state else {
+            return false;
+        };
+        let leader_cred = leader_cred.take();
         *state = match leader_cred {
             Some(cred) => ThreadMemberState::ExitedLeader(cred),
             None => ThreadMemberState::Vacant,
@@ -173,8 +231,21 @@ impl ThreadMemberSlot {
         match &*self.state.lock() {
             ThreadMemberState::Vacant => false,
             ThreadMemberState::Published(task) => task.strong_count() != 0,
+            ThreadMemberState::Exiting(_, leader_cred) => leader_cred.is_some(),
             ThreadMemberState::ExitedLeader(_) => true,
         }
+    }
+
+    fn is_retained(&self) -> bool {
+        match &*self.state.lock() {
+            ThreadMemberState::Vacant => false,
+            ThreadMemberState::Published(task) => task.strong_count() != 0,
+            ThreadMemberState::Exiting(..) | ThreadMemberState::ExitedLeader(_) => true,
+        }
+    }
+
+    fn is_published(&self) -> bool {
+        matches!(&*self.state.lock(), ThreadMemberState::Published(task) if task.strong_count() != 0)
     }
 
     fn is_exited_leader(&self) -> bool {
@@ -183,7 +254,10 @@ impl ThreadMemberSlot {
 
     fn exited_leader_cred(&self) -> Option<Arc<Cred>> {
         match &*self.state.lock() {
-            ThreadMemberState::ExitedLeader(cred) => Some(cred.clone()),
+            ThreadMemberState::ExitedLeader(cred) | ThreadMemberState::Exiting(_, Some(cred)) => {
+                Some(cred.clone())
+            }
+            ThreadMemberState::Exiting(_, None) => None,
             ThreadMemberState::Vacant | ThreadMemberState::Published(_) => None,
         }
     }
@@ -191,7 +265,25 @@ impl ThreadMemberSlot {
     pub(super) fn snapshot(&self) -> Option<KtaskRef> {
         match &*self.state.lock() {
             ThreadMemberState::Published(task) => task.upgrade(),
+            ThreadMemberState::Vacant
+            | ThreadMemberState::Exiting(..)
+            | ThreadMemberState::ExitedLeader(_) => None,
+        }
+    }
+
+    fn accounted_task(&self) -> Option<KtaskRef> {
+        match &*self.state.lock() {
+            ThreadMemberState::Published(task) | ThreadMemberState::Exiting(task, _) => {
+                task.upgrade()
+            }
             ThreadMemberState::Vacant | ThreadMemberState::ExitedLeader(_) => None,
+        }
+    }
+
+    fn exiting_task(&self) -> Option<KtaskRef> {
+        match &*self.state.lock() {
+            ThreadMemberState::Exiting(task, _) => task.upgrade(),
+            _ => None,
         }
     }
 }
@@ -247,7 +339,85 @@ impl Process {
         }
         let slot = membership.reserve_slot(token);
         slot.publish(task);
+        membership.sched_snapshot_seq = membership.sched_snapshot_seq.wrapping_add(1);
         Ok(slot)
+    }
+
+    pub(crate) fn retire_thread_slot_locked(
+        &self,
+        _domain: &process_domain::ProcessDomainWriteGuard<'_>,
+        slot: &ThreadMemberSlot,
+    ) {
+        let mut membership = self.thread_membership.lock();
+        slot.retire();
+        membership.sched_snapshot_seq = membership.sched_snapshot_seq.wrapping_add(1);
+    }
+
+    fn refresh_current_sched_runtime(&self) {
+        if ktask::current_may_uninit().is_some_and(|current| {
+            current
+                .try_as_thread()
+                .is_some_and(|thread| core::ptr::eq(thread.process().as_ref(), self))
+        }) {
+            ktask::refresh_current_execution_runtime_ns();
+        }
+    }
+
+    /// Returns the scheduler runtime of all current and exited group members.
+    ///
+    /// The current task is refreshed locally; other running tasks contribute
+    /// their most recently committed scheduler value. Membership changes cause
+    /// a retry, preserving the live-to-exited handoff across bounded batches.
+    /// Call in task context without a run-queue or membership lock.
+    pub fn process_cpu_time(&self) -> ktime_types::TimeSpan {
+        const BATCH_SIZE: usize = 4;
+        self.refresh_current_sched_runtime();
+        'snapshot: loop {
+            let mut sequence = None;
+            let mut cursor = None;
+            let mut total = 0u64;
+            loop {
+                // Keep upgraded task owners until after the IRQ-safe lock is
+                // released, including an owner that races the final release.
+                let mut retained: [Option<KtaskRef>; BATCH_SIZE] = core::array::from_fn(|_| None);
+                let membership = self.thread_membership.lock();
+                match sequence {
+                    Some(expected) if expected != membership.sched_snapshot_seq => {
+                        drop(membership);
+                        continue 'snapshot;
+                    }
+                    None => {
+                        sequence = Some(membership.sched_snapshot_seq);
+                        total = membership.exited_sched_runtime_ns;
+                    }
+                    Some(_) => {}
+                }
+                let start = cursor.map_or(Unbounded, Excluded);
+                let mut members = membership.members.range((start, Unbounded));
+                for entry in &mut retained {
+                    let Some((&token, slot)) = members.next() else {
+                        break;
+                    };
+                    cursor = Some(token);
+                    if let Some(task) = slot.accounted_task() {
+                        total = total.saturating_add(task.sum_exec_runtime_ns());
+                        *entry = Some(task);
+                    }
+                }
+                let has_more = members.next().is_some();
+                drop(membership);
+                drop(retained);
+                if !has_more {
+                    return ktime_types::TimeSpan::from_nanos(total);
+                }
+            }
+        }
+    }
+
+    pub(super) fn finish_exiting_thread_runtime(&self) {
+        self.refresh_current_sched_runtime();
+        let exiting = self.thread_membership.lock().finish_last_exit();
+        drop(exiting);
     }
 
     /// Removes a task from the live view of this [`Process`], retires its global
@@ -294,6 +464,9 @@ impl Process {
         // before entering the IRQ-safe membership table. The slot still decides
         // whether this task currently owns the leader identity before storing it.
         let leader_cred = (tid == self.pid()).then(|| task.as_thread().real_cred());
+        if ktask::current_may_uninit().is_some_and(|current| current.ptr_eq(task)) {
+            ktask::refresh_current_execution_runtime_ns();
+        }
 
         let is_last = {
             let mut thread_membership = self.thread_membership.lock();
@@ -303,8 +476,7 @@ impl Process {
             // Signal eligibility ends with live membership, not with the last
             // external reference to the exiting task or a later sibling exec.
             task.as_thread().signal_manager().exit();
-            let did_exit = thread_membership.exit_task(task, leader_cred);
-            let is_last = did_exit && thread_membership.has_no_published_tasks();
+            let is_last = thread_membership.exit_task(task, leader_cred);
             if is_last {
                 thread_membership.is_last_thread_exit_reserved = true;
             }

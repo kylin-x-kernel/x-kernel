@@ -186,16 +186,14 @@ impl PosixTimerClock {
         }
     }
 
-    fn now(self, process_utime: TimeSpan, process_stime: TimeSpan) -> TimerInstant {
+    fn now(self, process_sched_runtime: TimeSpan) -> TimerInstant {
         match self {
             Self::Realtime => TimerInstant::Realtime(ktime::realtime()),
             Self::Monotonic => TimerInstant::Monotonic(khal::time::monotonic_time()),
             Self::Boottime => TimerInstant::Boottime(ktime::boottime()),
-            Self::ProcessCpu => {
-                TimerInstant::ProcessCpu(ProcessCpuInstant::from_span_since_origin(
-                    process_utime.saturating_add(process_stime),
-                ))
-            }
+            Self::ProcessCpu => TimerInstant::ProcessCpu(
+                ProcessCpuInstant::from_span_since_origin(process_sched_runtime),
+            ),
         }
     }
 
@@ -300,13 +298,9 @@ impl PosixTimer {
         }
     }
 
-    pub(crate) fn snapshot(
-        &self,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
-    ) -> (TimeSpan, TimeSpan) {
+    pub(crate) fn snapshot(&self, process_sched_runtime: TimeSpan) -> (TimeSpan, TimeSpan) {
         self.spec
-            .snapshot(self.armed_clock.now(process_utime, process_stime))
+            .snapshot(self.armed_clock.now(process_sched_runtime))
     }
 
     pub(crate) fn settime(
@@ -314,15 +308,14 @@ impl PosixTimer {
         absolute: bool,
         interval: TimeSpan,
         value: TimeSpan,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
+        process_sched_runtime: TimeSpan,
     ) -> KResult<(TimeSpan, TimeSpan)> {
         let armed_clock = if !absolute && self.clock == PosixTimerClock::Realtime {
             PosixTimerClock::Monotonic
         } else {
             self.clock
         };
-        let now = armed_clock.now(process_utime, process_stime);
+        let now = armed_clock.now(process_sched_runtime);
         let deadline = if value.is_zero() {
             None
         } else {
@@ -335,7 +328,7 @@ impl PosixTimer {
                 .ok_or(KError::InvalidInput)?,
             )
         };
-        let old = self.snapshot(process_utime, process_stime);
+        let old = self.snapshot(process_sched_runtime);
         // Snapshot in the old domain before replacing the armed clock.
         self.spec.replace(interval, deadline);
         self.armed_clock = armed_clock;
@@ -346,9 +339,9 @@ impl PosixTimer {
         Ok(old)
     }
 
-    pub(crate) fn update(&mut self, process_utime: TimeSpan, process_stime: TimeSpan) -> usize {
+    pub(crate) fn update(&mut self, process_sched_runtime: TimeSpan) -> usize {
         self.spec
-            .update(self.armed_clock.now(process_utime, process_stime))
+            .update(self.armed_clock.now(process_sched_runtime))
     }
 
     pub(crate) fn needs_alarm_task(&self) -> bool {
@@ -422,15 +415,11 @@ impl PosixTimer {
     /// `true` when the interval schedule advanced, i.e. the caller must re-arm
     /// the alarm for the new deadline: a redundant re-arm re-enqueues an
     /// identical entry in the global alarm heap, which is not de-duplicated.
-    pub(crate) fn catch_up_queued_overrun(
-        &mut self,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
-    ) -> bool {
+    pub(crate) fn catch_up_queued_overrun(&mut self, process_sched_runtime: TimeSpan) -> bool {
         if !self.pending_signal {
             return false;
         }
-        let expirations = self.update(process_utime, process_stime);
+        let expirations = self.update(process_sched_runtime);
         if expirations == 0 {
             return false;
         }

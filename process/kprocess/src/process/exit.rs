@@ -361,6 +361,7 @@ impl Process {
         publication: ProcessExitPublication,
         prepare_sigchld: impl Fn(&Arc<Process>) -> Option<(T, bool)>,
     ) -> ProcessExitTransition<T> {
+        self.finish_exiting_thread_runtime();
         loop {
             let snapshot = self.exit_parent_snapshot();
             let prepared = self.prepare_child_exit_signal_for_snapshot(&snapshot, &prepare_sigchld);

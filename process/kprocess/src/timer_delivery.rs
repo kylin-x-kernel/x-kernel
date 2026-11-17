@@ -81,15 +81,14 @@ pub(crate) fn poll_timer(pid: Pid) {
 
 /// Polls CPU-driven timers for the given user thread's process.
 ///
-/// Part of the user-return path; a timer-free process pays only one lock-free
-/// gate read.
+/// A periodic tick requests this work; multiple ticks coalesce until user return.
 ///
 /// # Panics
 ///
 /// Panics if the process timer runtime is gone, which a live `&Thread` rules
 /// out: the thread holds the runtime's strong `Arc`.
 pub fn poll_cpu_timers_for(thread: &Thread) {
-    if !thread.process().cpu_timers_armed() {
+    if !thread.take_cpu_timer_work() || !thread.process().cpu_timers_armed() {
         return;
     }
     let process = thread.process().clone();

@@ -52,10 +52,9 @@ fn rearmed_one_shot_waits_for_old_record_without_overwriting_payload() {
             TimeSpan::ZERO,
             TimeSpan::from_nanos(1),
             TimeSpan::ZERO,
-            TimeSpan::ZERO,
         )
         .unwrap();
-    let expired = timer.update(TimeSpan::from_nanos(1), TimeSpan::ZERO);
+    let expired = timer.update(TimeSpan::from_nanos(1));
     let TimerDelivery::Process(TimerSignal::Posix {
         notification: old, ..
     }) = timer.collect_delivery(1, expired).unwrap()
@@ -69,11 +68,10 @@ fn rearmed_one_shot_waits_for_old_record_without_overwriting_payload() {
             TimeSpan::ZERO,
             TimeSpan::from_nanos(1),
             TimeSpan::from_nanos(1),
-            TimeSpan::ZERO,
         )
         .unwrap();
     timer.set_signal_seq(2);
-    let expired = timer.update(TimeSpan::from_nanos(2), TimeSpan::ZERO);
+    let expired = timer.update(TimeSpan::from_nanos(2));
     assert!(timer.collect_delivery(1, expired).is_none());
     assert!(!timer.is_armed());
     assert_eq!(timer.deferred_expirations, 1);
@@ -182,7 +180,6 @@ fn relative_realtime_overflow_preserves_timer_state() {
             TimeSpan::from_secs(2),
             TimeSpan::from_secs(10),
             TimeSpan::ZERO,
-            TimeSpan::ZERO,
         )
         .unwrap();
     let deadline = timer.spec.deadline();
@@ -193,7 +190,6 @@ fn relative_realtime_overflow_preserves_timer_state() {
             TimeSpan::ZERO,
             TimeSpan::MAX,
             TimeSpan::ZERO,
-            TimeSpan::ZERO,
         ),
         Err(KError::InvalidInput)
     );
@@ -201,7 +197,7 @@ fn relative_realtime_overflow_preserves_timer_state() {
     assert_eq!(
         timer
             .spec
-            .snapshot(timer.armed_clock.now(TimeSpan::ZERO, TimeSpan::ZERO))
+            .snapshot(timer.armed_clock.now(TimeSpan::ZERO))
             .0,
         TimeSpan::from_secs(2)
     );
@@ -229,13 +225,12 @@ fn whole_counter_width_expirations_saturate_instead_of_wrapping() {
             TimeSpan::from_nanos(1),
             TimeSpan::from_nanos(1),
             TimeSpan::ZERO,
-            TimeSpan::ZERO,
         )
         .unwrap();
     // The deadline is one nanosecond past the CPU-time origin, so a `2^32`
     // nanosecond total leaves `2^32 - 1` overdue nanoseconds and `2^32`
     // skipped periods at a one-nanosecond interval.
-    let expirations = timer.update(TimeSpan::from_nanos(1u64 << 32), TimeSpan::ZERO);
+    let expirations = timer.update(TimeSpan::from_nanos(1u64 << 32));
     assert_eq!(expirations, 1usize << 32);
 
     let delivery = timer
@@ -263,7 +258,6 @@ fn realtime_rearming_snapshots_the_previous_clock_domain() {
             TimeSpan::from_secs(2),
             TimeSpan::from_secs(60),
             TimeSpan::ZERO,
-            TimeSpan::ZERO,
         )
         .unwrap();
     assert!(matches!(
@@ -280,7 +274,6 @@ fn realtime_rearming_snapshots_the_previous_clock_domain() {
             TimeSpan::ZERO,
             absolute,
             TimeSpan::ZERO,
-            TimeSpan::ZERO,
         )
         .unwrap();
     assert_eq!(old.0, TimeSpan::from_secs(2));
@@ -294,7 +287,6 @@ fn realtime_rearming_snapshots_the_previous_clock_domain() {
             false,
             TimeSpan::ZERO,
             TimeSpan::from_secs(60),
-            TimeSpan::ZERO,
             TimeSpan::ZERO,
         )
         .unwrap();
@@ -318,7 +310,6 @@ fn boottime_alarm_preserves_original_deadline() {
             false,
             TimeSpan::ZERO,
             TimeSpan::from_secs(60),
-            TimeSpan::ZERO,
             TimeSpan::ZERO,
         )
         .unwrap();
