@@ -140,3 +140,10 @@ payloads, or user credentials.
 - Add path-resolution tests when introducing a deeper canonical layout.
 - Keep all new driver-provided uevent values behind the shared uevent
   formatter's control-character sanitization.
+
+## System view attributes
+
+`cpuN/{online,present,possible}`, `memoryN/{phys_index,state,online}`, and the
+global CPU/memory masks are all `0444`. The projection is read-only by design:
+there is no online write path, no hotplug state machine, and no userspace input
+that can change device presence or online state in this layer.

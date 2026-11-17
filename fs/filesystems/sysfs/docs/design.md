@@ -116,7 +116,13 @@ For an input device the canonical object is:
 DRM uses `/sys/devices/<physical>/drm/cardN` with `dev`, `device`, `subsystem`,
 and `uevent`. Class and character-number entries are relative links to these
 canonical objects. `relative_symlink` computes links from source and target
-components, so link depth follows the actual paths.
+components, so link depth follows the actual paths. Each connector also gets a
+`class/drm/cardN-<connector>` link to its own directory, which carries `status`,
+`dpms`, `modes`, `enabled`, and raw `edid`; linking the connector to the card
+would hide those attributes. The class tree therefore contains `class/drm/cardN`
+for the card, `class/drm/cardN-<connector>` for each connector, and
+`class/drm/renderD<minor>` for the render minor; `dev/char/<major>:<minor>` links
+point back to the canonical device directories.
 
 Every device directory also carries its own `uevent`. PCI devices report the
 `PCI_*` identity Linux publishes; platform devices (MMIO, firmware node, static)
@@ -211,3 +217,16 @@ reaches into the display driver itself: a device that stops reporting a
 connector stops has its entry removed with the node, and a card that has no
 connector metadata gets no connector entry.
 
+## System device projection
+
+`/sys/devices/system/{cpu,memory}` is synthesized from `kdevice`'s system
+device registry. Directories exist only for present devices. All attributes are
+read-only: `cpuN/{online,present,possible}`, `memoryN/{phys_index,state,online}`,
+global `cpu/{online,possible}`, `memory/{online,possible}`, and
+`memory/block_size_bytes`. CPU sets use cpulist formatting and memory sets use
+Linux's hex block bitmap. This layer is a snapshot projection; state-changing
+hotplug is deliberately outside it.
+
+System devices have no major/minor number and no `/dev` node. Attributes are a
+separate `TreeEntry::SystemAttribute` variant carrying the device ID, kind and
+permission, because ordinary attributes are hard-wired read-only.

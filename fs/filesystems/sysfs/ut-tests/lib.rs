@@ -220,35 +220,32 @@ fn drm_nodes_project_a_render_minor() {
 
     assert!(tree.contains_key(&format!("dev/char/226:{}", node.index())));
 
-    // The connector is a class entry named after the card (`card0-Virtual-1`)
-    // and its attributes are the connector's state.
+    let card = node.index();
+    let connector = format!("class/drm/card{card}-Virtual-1");
+    let connector_dir = format!("devices/platform/static9002/drm/card{card}-Virtual-1");
+    // The connector is a class entry named after the card and connector.
     assert!(
-        tree.contains_key("class/drm/card0-Virtual-1"),
+        tree.contains_key(&connector),
         "the connector class entry must exist"
     );
-    // The class entry has to resolve to the connector's own directory: linking
-    // it to the card would make every attribute unreadable through the link,
-    // which is exactly what `cat /sys/class/drm/card0-Virtual-1/status` does.
-    let Some(TreeEntry::Symlink(target)) = tree.get("class/drm/card0-Virtual-1") else {
+    // The class entry has to resolve to the connector's own directory.
+    let Some(TreeEntry::Symlink(target)) = tree.get(&connector) else {
         panic!("the connector class entry must be a symlink");
     };
     assert_eq!(
-        target, "../../devices/platform/static9002/drm/card0-Virtual-1",
+        target,
+        &format!("../../{connector_dir}"),
         "the class entry must point at the connector directory"
     );
     for attribute in ["status", "dpms", "modes", "edid", "enabled"] {
         assert!(
-            tree.contains_key(&format!(
-                "devices/platform/static9002/drm/card0-Virtual-1/{attribute}"
-            )),
+            tree.contains_key(&format!("{connector_dir}/{attribute}")),
             "{attribute} must be projected"
         );
     }
     // `edid` is binary: the bytes must come back exactly as the device reported
     // them. A text attribute (`status`) is newline-terminated; `edid` is not.
-    let Some(TreeEntry::Attribute(_, edid)) =
-        tree.get("devices/platform/static9002/drm/card0-Virtual-1/edid")
-    else {
+    let Some(TreeEntry::Attribute(_, edid)) = tree.get(&format!("{connector_dir}/edid")) else {
         panic!("edid must be an attribute");
     };
     let expected = drm_metadata().edid().to_vec();
@@ -303,4 +300,97 @@ fn tty0_projects_the_active_console_alias() {
         tree.contains_key("class/tty/tty0"),
         "logind opens the alias through /sys/class"
     );
+}
+
+#[def_test]
+fn system_projection_follows_present_devices_and_permissions() {
+    let cpu0 = SystemDeviceState {
+        id: SystemDeviceId::new(SystemClass::Cpu, 0),
+        is_present: true,
+        is_online: true,
+        is_going_offline: false,
+        physical_start_bytes: 0,
+        size_bytes: 0,
+    };
+    let cpu1 = SystemDeviceState {
+        id: SystemDeviceId::new(SystemClass::Cpu, 1),
+        is_present: true,
+        is_online: false,
+        is_going_offline: false,
+        physical_start_bytes: 0,
+        size_bytes: 0,
+    };
+    let memory3 = SystemDeviceState {
+        id: SystemDeviceId::new(SystemClass::Memory, 3),
+        is_present: true,
+        is_online: true,
+        is_going_offline: false,
+        physical_start_bytes: 3 * 128 * 1024 * 1024,
+        size_bytes: 128 * 1024 * 1024,
+    };
+    let mut projection = DeviceProjection::new();
+    projection.systems = alloc::vec![cpu0, cpu1, memory3];
+    projection.rebuild_tree();
+    let tree = &projection.tree;
+
+    for path in [
+        "devices/system/cpu",
+        "devices/system/memory",
+        "devices/system/cpu/cpu0/online",
+        "devices/system/cpu/cpu1/online",
+        "devices/system/cpu/cpu1/present",
+        "devices/system/cpu/cpu1/possible",
+        "devices/system/memory/memory3/phys_index",
+        "devices/system/memory/memory3/state",
+        "devices/system/memory/memory3/online",
+        "devices/system/memory/block_size_bytes",
+    ] {
+        assert!(tree.contains_key(path), "missing {path}");
+    }
+    let permission = |path: &str| match &tree[path] {
+        TreeEntry::SystemAttribute { permission, .. } => permission.bits(),
+        _ => panic!("{path} is not a system attribute"),
+    };
+    // The system view is read-only; state changes belong to the follow-up
+    // hotplug change, not this projection.
+    assert_eq!(permission("devices/system/cpu/cpu0/online"), 0o444);
+    assert_eq!(permission("devices/system/cpu/cpu1/online"), 0o444);
+    assert_eq!(permission("devices/system/cpu/cpu1/present"), 0o444);
+    assert_eq!(permission("devices/system/memory/memory3/state"), 0o444);
+    assert_eq!(permission("devices/system/memory/memory3/online"), 0o444);
+    assert_eq!(permission("devices/system/memory/block_size_bytes"), 0o444);
+
+    projection.systems = alloc::vec![cpu0];
+    projection.rebuild_tree();
+    assert!(!projection.tree.contains_key("devices/system/cpu/cpu1/online"));
+    assert!(!projection.tree.contains_key("devices/system/memory/memory3/online"));
+}
+
+
+#[def_test]
+fn system_projection_rebuild_refreshes_the_snapshot() {
+    let cpu0 = SystemDeviceState {
+        id: SystemDeviceId::new(SystemClass::Cpu, 0),
+        is_present: true,
+        is_online: true,
+        is_going_offline: false,
+        physical_start_bytes: 0,
+        size_bytes: 0,
+    };
+    let cpu1 = SystemDeviceState {
+        id: SystemDeviceId::new(SystemClass::Cpu, 1),
+        is_present: true,
+        is_online: false,
+        is_going_offline: false,
+        physical_start_bytes: 0,
+        size_bytes: 0,
+    };
+    let mut projection = DeviceProjection::new();
+    projection.systems = alloc::vec![cpu0, cpu1];
+    projection.rebuild_tree();
+    assert!(projection.tree.contains_key("devices/system/cpu/cpu1/online"));
+
+    projection.systems = alloc::vec![cpu0];
+    projection.rebuild_tree();
+    assert!(!projection.tree.contains_key("devices/system/cpu/cpu1/online"));
 }

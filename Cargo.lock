@@ -2334,6 +2334,7 @@ dependencies = [
  "driver-os-api",
  "driver_base",
  "fwnode",
+ "kerrno",
  "kmutex",
  "kspin",
  "lazyinit",
@@ -5616,8 +5617,11 @@ name = "sysfs"
 version = "0.3.0-dev"
 dependencies = [
  "kalloc-types",
+ "kcpu_id_map",
  "kdevice",
  "kdevice-uevent",
+ "kerrno",
+ "khal",
  "klazy",
  "ksync",
  "kvfs",

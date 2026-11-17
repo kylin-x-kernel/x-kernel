@@ -12,6 +12,9 @@ documentation.workspace = true
 [dependencies]
 kalloc-types.workspace = true
 kdevice.workspace = true
+kerrno.workspace = true
+kcpu_id_map.workspace = true
+khal.workspace = true
 kdevice_uevent.workspace = true
 ksync.workspace = true
 kvfs.workspace = true

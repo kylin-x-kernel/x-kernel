@@ -94,6 +94,7 @@ mod device_node;
 pub mod driver;
 mod lifecycle;
 mod registry;
+pub mod system;
 pub mod topology;
 
 pub use bus::{
@@ -147,4 +148,12 @@ pub use registry::{
 };
 #[cfg(unittest)]
 pub use registry::{reset_and_setup_platform_bus_for_tests, reset_device_registry_for_tests};
+#[cfg(unittest)]
+pub use system::reset_system_devices_for_tests;
+pub use system::{
+    SystemClass, SystemDeviceControl, SystemDeviceDescriptor, SystemDeviceEvent,
+    SystemDeviceEventCallback, SystemDeviceEventKind, SystemDeviceId, SystemDeviceState,
+    install_system_device, present_system_devices, remove_system_device, set_system_device_online,
+    subscribe_system_device_events, system_device_snapshot, system_device_state,
+};
 pub use topology::{BusView, DeviceCoreView, DeviceTopology, DriverCoreView, device_topology};
