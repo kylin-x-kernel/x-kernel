@@ -261,7 +261,7 @@ pub fn checkpoint() -> Result<(), FreezeError> {
     // Only the freezer release path can wake Frozen. Ordinary notifications
     // keep their own wake latches, without executing this stack while held.
     request.has_entered.store(true, Ordering::Release);
-    let woke = kspin::SpinNoIrq::new(false);
+    let woke = crate::park::ParkLatch::new();
     while !request.round.is_released.load(Ordering::Acquire) {
         crate::park::park_task_unless(
             &woke,

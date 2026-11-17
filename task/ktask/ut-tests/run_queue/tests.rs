@@ -69,7 +69,7 @@ mod tests_switch_handoff {
 mod tests_blocked_resched {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use kspin::{NoPreemptIrqSave, SpinNoIrq};
+    use kspin::NoPreemptIrqSave;
     use unittest::{assert_eq, def_test};
 
     use super::super::{current_run_queue, select_wake_run_queue};
@@ -95,11 +95,11 @@ mod tests_blocked_resched {
                 STRONG_OK.store(1, Ordering::Release);
             }
 
-            let woke = SpinNoIrq::new(false);
+            let woke = crate::park::ParkLatch::new();
             {
                 let mut rq = current_run_queue::<NoPreemptIrqSave>();
                 STARTED.store(1, Ordering::Release);
-                rq.blocked_resched(woke.lock(), crate::TaskState::Blocked, || false);
+                rq.blocked_resched(&woke, crate::TaskState::Blocked, || false);
             }
             drop(keep_alive);
             RESUMED.store(1, Ordering::Release);

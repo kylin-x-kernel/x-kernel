@@ -523,13 +523,14 @@ run queue lock  ->  bandwidth registry (TRACKED, MEMBERS)  ->  task state atomic
   while it waits for a run queue is not.
 - **The rollover path allocates only when a window actually closes**, so the
   common accounting path stays allocation-free.
-- **Wake latches never force a nested registry lock.** A park latch
-  (`SpinNoIrq<bool>`) is held across `blocked_resched` and its guard contributes
-  one no-preempt count, so the accounting that runs inside `blocked_resched`
-  keeps the registry locks in the blocking-but-leaf order described above: it
-  waits for one registry lock at a time and releases it before taking the other
-  or before touching task state
-  ([CG-050](../../../docs/code-guidelines/CG-050-scheduler-lock-order.md)).
+- **Wake latches are never locks.** `park::ParkLatch` is a lock-free
+  `AtomicBool` (`record` / `take`). A parker consumes it before publishing
+  `Blocked`, publishes the state, then consumes it once more: a waker that
+  sampled a stale `Running` state and gave up still left its wake recorded, so
+  the second consume turns it into a self-unblock instead of a lost wake.
+  Holding a spinlock-shaped latch across `blocked_resched` made the parker wait
+  for locks held by wakers that needed that latch (#IKVT98), so the latch must
+  not contribute a preempt count and must not be held across the switch.
 - A CPU that spins here with IRQs disabled cannot be observed by the soft
   lockup watchdog (its timer interrupt is masked) and the hard lockup backend is
   currently aarch64-only, so x86_64 hangs silently. Capture such a hang with an

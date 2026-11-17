@@ -157,6 +157,7 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
     let early_irq_was_valid = Arc::new(AtomicBool::new(false));
     let periodic_advanced = Arc::new(AtomicBool::new(false));
     let shared_deadline_consumed = Arc::new(AtomicBool::new(false));
+    let shared_deadline_armed = Arc::new(AtomicBool::new(false));
     let runtime_ns = Arc::new(AtomicU64::new(0));
     let worker_ticks = ticks.clone();
     let worker_periodic_ticks = periodic_ticks.clone();
@@ -164,6 +165,7 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
     let worker_valid = early_irq_was_valid.clone();
     let worker_advanced = periodic_advanced.clone();
     let worker_shared = shared_deadline_consumed.clone();
+    let shared_armed = shared_deadline_armed.clone();
     let worker_runtime = runtime_ns.clone();
     let task = crate::prepare_task(crate::TaskInner::new_user(
         crate::PreparedTaskEntry::new(move || {
@@ -214,6 +216,19 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
                         // SAFETY: this initialized CPU remains pinned. The owned
                         // handler is bounded, IRQ-safe and stays live through cancel.
                         let started = unsafe { timer.start(at) }.is_ok();
+                        if started {
+                            // Arm the shared scheduler deadline for this same
+                            // periodic tick while still IRQ-off. Observing the
+                            // tick and arming it in two separate critical
+                            // sections would race with the tick itself: an IRQ
+                            // in between advances NEXT_PERIODIC_TICK_NS and the
+                            // test would then assert the property it never
+                            // exercised. Precondition and property stay separate:
+                            // `shared_armed` below proves the arm happened.
+                            NEXT_SCHED_DEADLINE_NS.store_current(deadline_ns);
+                            rearm_local_timer();
+                            shared_armed.store(true, Ordering::Release);
+                        }
                         (before, before_periodic, deadline_ns, started)
                     }
                 };
@@ -244,19 +259,6 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
                     break;
                 }
             }
-            let armed_shared_deadline = {
-                let _guard = kspin::NoPreemptIrqSave::new();
-                if original_deadline_ns != 0
-                    && NEXT_PERIODIC_TICK_NS.load_current() == original_deadline_ns
-                    && khal::time::monotonic_time_nanos() < original_deadline_ns
-                {
-                    NEXT_SCHED_DEADLINE_NS.store_current(original_deadline_ns);
-                    rearm_local_timer();
-                    true
-                } else {
-                    false
-                }
-            };
             while NEXT_PERIODIC_TICK_NS.load_current() <= original_deadline_ns
                 && khal::time::monotonic_time_nanos() < limit_ns
             {
@@ -267,7 +269,8 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
                 Ordering::Release,
             );
             worker_shared.store(
-                armed_shared_deadline && NEXT_SCHED_DEADLINE_NS.load_current() != original_deadline_ns,
+                shared_armed.load(Ordering::Acquire)
+                    && NEXT_SCHED_DEADLINE_NS.load_current() != original_deadline_ns,
                 Ordering::Release,
             );
             worker_runtime.store(current().sum_exec_runtime_ns(), Ordering::Release);
@@ -291,6 +294,9 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
     assert!(checked_early_irq.load(Ordering::Acquire));
     assert!(early_irq_was_valid.load(Ordering::Relaxed));
     assert!(periodic_advanced.load(Ordering::Acquire));
+    // The property below is only meaningful when the shared deadline was
+    // actually armed for a periodic tick; keep the two failures distinguishable.
+    assert!(shared_deadline_armed.load(Ordering::Acquire));
     assert!(shared_deadline_consumed.load(Ordering::Acquire));
     assert!(runtime_ns.load(Ordering::Acquire) > 0);
 }

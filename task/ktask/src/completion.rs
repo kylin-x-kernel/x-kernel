@@ -9,14 +9,14 @@ use core::marker::PhantomData;
 
 use kcompletion::{Completion, SyncWake, WaitQueue};
 use kerrno::{KError, KResult};
-use kspin::{NoPreemptIrqSave, SpinNoIrq};
+use kspin::NoPreemptIrqSave;
 
 use crate::{KtaskRef, TaskState, current, select_wake_run_queue};
 
 struct CompletionWake {
     task: KtaskRef,
     /// Shared latch: every waker/notifier clone observes the same wake hint.
-    woke: Arc<SpinNoIrq<bool>>,
+    woke: Arc<crate::park::ParkLatch>,
 }
 
 // SAFETY: notify borrows only this live, lock-protected latch and strong task
@@ -24,7 +24,7 @@ struct CompletionWake {
 // source, or unwinds. The latch is released before IRQ-safe scheduler wakeup.
 unsafe impl SyncWake for CompletionWake {
     fn notify(&self) {
-        *self.woke.lock() = true;
+        self.woke.record();
         select_wake_run_queue::<NoPreemptIrqSave>(&self.task).unblock_task(self.task.clone(), true);
     }
 }
@@ -151,7 +151,7 @@ impl CompletionWait {
         Ok(Self {
             wake: CompletionWake {
                 task: curr.clone(),
-                woke: Arc::new(SpinNoIrq::new(false)),
+                woke: Arc::new(crate::park::ParkLatch::new()),
             },
             _task_bound: PhantomData,
         })

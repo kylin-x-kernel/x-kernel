@@ -4,6 +4,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use kspin::SpinNoIrq;
+
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
@@ -17,7 +19,7 @@ fn prepared_wait_consumes_early_wake_and_reuses_waker() {
     for _ in 0..3 {
         first.wake_by_ref();
         wait.park();
-        assert!(!*wait.kwaker.woke.lock());
+        assert!(!wait.kwaker.woke.take());
     }
     drop(wait);
     // Escaped notifications must not borrow the retired parking handle.
