@@ -204,3 +204,28 @@ pub fn sys_openat2(
 pub fn sys_open(path: UserConstPtr<c_char>, flags: i32, mode: __kernel_mode_t) -> KResult<isize> {
     sys_openat(AT_FDCWD as _, path, flags, mode)
 }
+
+/// Creates a file and opens it for writing, truncating any existing content.
+///
+/// Equivalent to `open(path, O_CREAT | O_WRONLY | O_TRUNC, mode)`, matching
+/// Linux `SYSCALL_DEFINE2(creat, ...)` (`fs/open.c`).
+///
+/// - `path`: null-terminated pathname in user memory, absolute or relative to
+///   the caller's current working directory.
+/// - `mode`: creation permission bits; the process umask is applied and only
+///   the low permission bits are honored.
+///
+/// Returns: the new file descriptor, opened write-only.
+///
+/// Errors: as `open` with `O_CREAT | O_WRONLY | O_TRUNC`; `BadAddress` for a
+/// null `path`, `NotFound` for a missing parent directory; other errors
+/// propagate unchanged.
+///
+/// Locking: may sleep (pathname lookup and fd allocation); must not be called
+/// from IRQ context or while holding a spinlock.
+#[cfg(target_arch = "x86_64")]
+pub fn sys_creat(path: UserConstPtr<c_char>, mode: __kernel_mode_t) -> KResult<isize> {
+    sys_open(path, (O_CREAT | O_WRONLY | O_TRUNC) as i32, mode)
+}
+
+unittest::path_mod_test!(#[cfg(target_arch = "x86_64")] mod open_tests, "../ut-tests/open.rs");
